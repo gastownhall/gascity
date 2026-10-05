@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packman"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -286,6 +287,14 @@ func TestMain(m *testing.M) {
 	}
 	if err := os.Setenv("GC_HOME", gcHome); err != nil {
 		panic(err)
+	}
+	// The shared GC_HOME has no registries.toml, which means the public
+	// default registry; an add without --version would fetch that catalog
+	// over the network into the shared home, where it changes what later
+	// tests resolve (registry pack names). Command tests that exercise
+	// registry defaults configure their own GC_HOME and restore this seam.
+	resolveImportRegistryRelease = func(string, string) (packman.RegistryRelease, bool, error, error) {
+		return packman.RegistryRelease{}, false, nil, nil
 	}
 	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
 		panic(err)

@@ -199,15 +199,15 @@ jobs:
           RBE_FORK_TIER: ${{ steps.fork-status.outputs.tier }}
         run: bash tools/rbe/fork-credential.sh cert
 
-      # One .bazelrc.local for both remote modes. With an executor (secrets):
-      # build:remote-exec (endpoint, instance, mTLS) plus the shared lines.
-      # Without one (forks, no secrets; rbe=cache dispatches): the same
-      # shared lines plus build --config=fork-cache, so fork actions hash
-      # like trusted ones (the explicit test PATH is the key input; .bazelrc's
-      # bare --test_env=PATH would forward the runner's) and hit what trusted
-      # CI executed; lookups go to the anonymous read-only cache and misses
-      # run here. rbe=off writes nothing. scripts/bazel_fork_cache_test.go
-      # runs this script in both modes and compares the output.
+      # One .bazelrc.local for both remote modes, carrying endpoints and
+      # credentials only: every key-affecting flag is committed in .bazelrc,
+      # so trusted, fork and developer runs hash actions alike. With an
+      # executor (secrets, or an rbe-fork certificate): build:remote-exec
+      # (endpoint, instance, mTLS). Without one (forks, no secrets; rbe=cache
+      # dispatches): build --config=fork-cache, so lookups go to the anonymous
+      # read-only cache and misses run here. rbe=off writes nothing.
+      # scripts/bazel_fork_cache_test.go and bazel_key_parity_test.go run this
+      # script in every mode and check the output.
       - name: Configure remote execution or the read-only fork cache
         if: env.BAZEL_REMOTE_EXECUTOR != '' || env.BAZEL_FORK_CACHE == 'true'
         env:
@@ -235,15 +235,9 @@ jobs:
                 fi
               fi
             fi
-            echo 'build --remote_download_minimal'
-            echo 'test --test_env=PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin'
-            # 2vcpu runners default --jobs to 2, serializing even REMOTE actions.
-            # Execution happens on the farm; the client can keep many in flight.
-            echo 'build --jobs=64'
             if [ -n "$RBE_FORK_CERT_FILE" ]; then
-              # rbe-fork: the same key-affecting lines as trusted runs, the
-              # mint's endpoint, instance (oss-fork, or oss for allowlisted
-              # authors) and short-lived certificate.
+              # rbe-fork: the mint's endpoint, instance (oss-fork, or oss for
+              # allowlisted authors) and short-lived certificate.
               echo "build:remote-exec --remote_executor=$RBE_FORK_ENDPOINT"
               echo "build:remote-exec --remote_instance_name=$RBE_FORK_INSTANCE"
               echo "build:remote-exec --tls_client_certificate=$RBE_FORK_CERT_FILE"
@@ -265,10 +259,10 @@ jobs:
             fi
           } > .bazelrc.local
 
-      # Fork-cache tests run locally with the PATH above, so give them the Go
-      # the remote workers have at /usr/local/go.
-      - name: Provide /usr/local/go for locally run tests (fork cache)
-        if: env.BAZEL_REMOTE_EXECUTOR == '' && env.BAZEL_FORK_CACHE == 'true' && steps.fork-cert.outputs.cert == ''
+      # Locally run tests (fork cache, rbe=off) see .bazelrc's pinned test
+      # PATH, so give them the Go the remote workers have at /usr/local/go.
+      - name: Provide /usr/local/go for locally run tests
+        if: env.BAZEL_REMOTE_EXECUTOR == '' && steps.fork-cert.outputs.cert == ''
         run: |
           if [ ! -e /usr/local/go ]; then
             sudo ln -s "$(go env GOROOT)" /usr/local/go

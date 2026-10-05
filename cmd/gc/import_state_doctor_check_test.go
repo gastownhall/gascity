@@ -768,8 +768,8 @@ version = "`+dummyOldPin+`"
 
 	check := newImportStateDoctorCheck(cityDir)
 	result := check.Run(&doctor.CheckContext{CityPath: cityDir})
-	if result.Status != doctor.StatusError {
-		t.Fatalf("status = %v, want error for superseded core pin; result=%#v", result.Status, result)
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning (served from the built-in packs) for superseded core pin; result=%#v", result.Status, result)
 	}
 	if !strings.Contains(strings.Join(result.Details, "\n"), "superseded-canonical-pin") {
 		t.Fatalf("details = %v, want superseded-canonical-pin entry", result.Details)
@@ -813,8 +813,8 @@ version = "`+oldContentHashPin+`"
 	}
 
 	result := newImportStateDoctorCheck(cityDir).Run(&doctor.CheckContext{CityPath: cityDir})
-	if result.Status != doctor.StatusError {
-		t.Fatalf("status = %v, want error for superseded content-hash pin; result=%#v", result.Status, result)
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning (served from the built-in packs) for superseded content-hash pin; result=%#v", result.Status, result)
 	}
 	if !strings.Contains(strings.Join(result.Details, "\n"), oldContentHashPin) ||
 		!strings.Contains(strings.Join(result.Details, "\n"), "superseded-canonical-pin") {
@@ -848,8 +848,8 @@ fetched = "2026-06-11T17:08:05Z"
 
 	check := newImportStateDoctorCheck(cityDir)
 	result := check.Run(&doctor.CheckContext{CityPath: cityDir})
-	if result.Status != doctor.StatusError {
-		t.Fatalf("status = %v, want error for lock-only superseded pin; result=%#v", result.Status, result)
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning (served from the built-in packs) for lock-only superseded pin; result=%#v", result.Status, result)
 	}
 	if !strings.Contains(strings.Join(result.Details, "\n"), oldContentHashCommit) ||
 		!strings.Contains(strings.Join(result.Details, "\n"), "superseded-canonical-pin") {
@@ -972,8 +972,8 @@ schema = 2
 
 	check := newImportStateDoctorCheck(cityDir)
 	result := check.Run(&doctor.CheckContext{CityPath: cityDir})
-	if result.Status != doctor.StatusError {
-		t.Fatalf("status = %v, want error for superseded city-root pin; result=%#v", result.Status, result)
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning (served from the built-in packs) for superseded city-root pin; result=%#v", result.Status, result)
 	}
 	if !strings.Contains(strings.Join(result.Details, "\n"), "superseded-canonical-pin") {
 		t.Fatalf("details = %v, want superseded-canonical-pin entry", result.Details)

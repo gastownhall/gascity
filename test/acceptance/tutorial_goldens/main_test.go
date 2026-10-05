@@ -91,7 +91,10 @@ func tutorialTmuxTmpDir(runtimeDir string) string {
 // `bd` commands run with the real HOME, and bd must never resolve the
 // operator's ~/.beads (or a user-level dolt.shared-server: true) through it.
 func newTutorialBaseEnv(gcBinary, home, runtimeDir, bdPath string) *helpers.Env {
+	// The wrapped provider binaries delegate to the operator's authenticated
+	// CLIs, which resolve their state through the host HOME.
 	env := helpers.NewEnv(gcBinary, home, runtimeDir).
+		WithHostHome().
 		Without("GC_SESSION").
 		Without("GC_BEADS").
 		Without("GC_DOLT").
@@ -177,13 +180,6 @@ func newTutorialEnv(t *testing.T) *tutorialEnv {
 	}
 	if err := helpers.WriteSupervisorConfig(home); err != nil {
 		t.Fatalf("writing supervisor config: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(home, ".dolt"), 0o755); err != nil {
-		t.Fatalf("creating dolt dir: %v", err)
-	}
-	doltCfg := `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
-	if err := os.WriteFile(filepath.Join(home, ".dolt", "config_global.json"), []byte(doltCfg), 0o644); err != nil {
-		t.Fatalf("writing dolt config: %v", err)
 	}
 	if err := stageClaudeAuth(home); err != nil {
 		t.Fatalf("staging Claude auth: %v", err)

@@ -4460,6 +4460,126 @@ func TestEnsureSupervisorRunningRejectsHomeOverride(t *testing.T) {
 	}
 }
 
+// requireHomeOverrideGuard skips unless the platform HOME guard applies here.
+func requireHomeOverrideGuard(t *testing.T) {
+	t.Helper()
+	if goruntime.GOOS != "linux" && goruntime.GOOS != "darwin" {
+		t.Skip("platform supervisor home override guard only applies on linux/darwin")
+	}
+	lookup, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil || strings.TrimSpace(lookup.HomeDir) == "" {
+		t.Skip("user lookup home unavailable")
+	}
+}
+
+// An isolated run (a test harness giving gc a throwaway HOME beside its own
+// GC_HOME) opts in with GC_SUPERVISOR_ISOLATED_HOME=1. ensureSupervisorRunning
+// must then bare-start the supervisor rather than refuse, and must never write
+// a platform service unit under the throwaway HOME.
+func TestEnsureSupervisorRunningIsolatedHomeSkipsPlatformInstall(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv(supervisorIsolatedHomeEnv, "1")
+
+	oldAlive := supervisorAliveHook
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+	supervisorAliveHook = func() int { return 4242 }
+
+	var stdout, stderr bytes.Buffer
+	if code := ensureSupervisorRunning(&stdout, &stderr); code != 0 {
+		t.Fatalf("ensureSupervisorRunning code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "HOME override") {
+		t.Fatalf("stderr = %q, want no HOME override refusal under %s=1", stderr.String(), supervisorIsolatedHomeEnv)
+	}
+	for _, dir := range []string{
+		filepath.Join(home, ".config", "systemd"),
+		filepath.Join(home, "Library", "LaunchAgents"),
+	} {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("platform service dir %q exists under the isolated HOME (err=%v); an isolated run must not install a platform unit", dir, err)
+		}
+	}
+}
+
+// The opt-in admits a bare start only; it never lets gc install a platform
+// unit, which the service manager would run under the real HOME.
+func TestDoSupervisorInstallRejectsHomeOverrideEvenWhenIsolated(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(supervisorIsolatedHomeEnv, "1")
+
+	var stdout, stderr bytes.Buffer
+	if code := doSupervisorInstall(&stdout, &stderr); code != 1 {
+		t.Fatalf("doSupervisorInstall code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "Keep HOME unchanged and use GC_HOME for isolated runs") {
+		t.Fatalf("stderr = %q, want HOME override guidance", stderr.String())
+	}
+}
+
+// The opt-in requires an explicit GC_HOME: without one, supervisor state would
+// land in the throwaway HOME's default ~/.gc with nothing tying the run to an
+// isolated installation.
+func TestDoSupervisorStartIsolatedHomeRequiresGCHome(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", "")
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv(supervisorIsolatedHomeEnv, "1")
+
+	var stdout, stderr bytes.Buffer
+	if code := doSupervisorStart(&stdout, &stderr); code != 1 {
+		t.Fatalf("doSupervisorStart code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "Keep HOME unchanged and use GC_HOME for isolated runs") {
+		t.Fatalf("stderr = %q, want HOME override guidance", stderr.String())
+	}
+}
+
+// The opt-in admits a bare start beside a GC_HOME of the run's own: the
+// HOME override no longer blocks `gc supervisor start`.
+func TestBareSupervisorHomeOverrideErrorAdmitsIsolatedGCHome(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv(supervisorIsolatedHomeEnv, "1")
+
+	if msg, blocked := bareSupervisorHomeOverrideError(); blocked {
+		t.Fatalf("bareSupervisorHomeOverrideError() blocked = true (%q), want an isolated run admitted", msg)
+	}
+}
+
+// GC_HOME naming the operator's default ~/.gc is not isolation: under the
+// throwaway HOME, gc would resolve its lock and socket under that ~/.gc rather
+// than $XDG_RUNTIME_DIR/gc, miss the operator's running supervisor, and start
+// a second one over the same cities.toml registry.
+func TestBareSupervisorHomeOverrideErrorRejectsHostDefaultGCHome(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	lookup, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GC_HOME", filepath.Join(lookup.HomeDir, ".gc"))
+	t.Setenv(supervisorIsolatedHomeEnv, "1")
+
+	if supervisorIsolatedHome() {
+		t.Fatal("supervisorIsolatedHome() = true with GC_HOME at the operator's default ~/.gc, want false")
+	}
+	msg, blocked := bareSupervisorHomeOverrideError()
+	if !blocked {
+		t.Fatal("bareSupervisorHomeOverrideError() blocked = false with GC_HOME at the operator's default ~/.gc, want true")
+	}
+	if !strings.Contains(msg, "Keep HOME unchanged and use GC_HOME for isolated runs") {
+		t.Fatalf("msg = %q, want HOME override guidance", msg)
+	}
+}
+
 func TestWaitForSupervisorReadyUsesHookedTimeout(t *testing.T) {
 	oldAlive := supervisorAliveHook
 	oldTimeout := supervisorReadyTimeout
