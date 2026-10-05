@@ -75,6 +75,7 @@ go_test(
         "gastown_shutdown_test.go",
         "gastown_sling_test.go",
         "gastown_witness_test.go",
+        "gc_live_contract_store_conflict_test.go",
         "gc_live_contract_test.go",
         "graph_dispatch_harness_test.go",
         "graph_dispatch_test.go",

@@ -247,11 +247,49 @@ func TestCmdGCRealBDTestsUseTestOwnedDoltContext(t *testing.T) {
 
 // pinTestOwnedBDHome delegates to the shared gascity test helper (ga-zq8iwb)
 // that deterministically retries a TempDir removal so it never races a
-// lingering real-bd/eventkit writer. It keeps its original name so this
-// package's existing call sites need no changes.
+// lingering real-bd/eventkit writer, and runs every bd subprocess in bd's test
+// mode so that writer is never launched at all (ga-1f81md). Test mode is safe
+// here because every caller's workspace is an embedded one; a fixture bound to
+// a Dolt server must not use this helper (see beadstest.EnvBeadsTestMode). It
+// keeps its original name so this package's existing call sites need no
+// changes.
 func pinTestOwnedBDHome(t *testing.T) string {
 	t.Helper()
+	t.Setenv(beadstest.EnvBeadsTestMode, "1")
 	return beadstest.TestOwnedHome(t)
+}
+
+// TestPinTestOwnedBDHomeRunsBDSubprocessesInTestMode pins the half of the
+// real-bd fixture teardown contract that retrying the TempDir removal cannot
+// provide. Without bd's test mode every bd invocation launches a detached
+// `bd send-metrics` child that outlives the bd that spawned it, and under load
+// the test process too, and keeps writing $HOME/.beads/eventsData while
+// t.TempDir's single-shot RemoveAll runs. The cleanup then fails with
+// "directory not empty" (ga-1f81md). Test mode never launches that child, so
+// there is no writer left to wait for. Both ways these fixtures spawn bd must
+// see it: the direct calls (runExternal) and the production scale_check shell,
+// which makes most of the bd calls.
+func TestPinTestOwnedBDHomeRunsBDSubprocessesInTestMode(t *testing.T) {
+	// Start from a state that is not test mode whatever the ambient environment
+	// holds, so the assertions below pass only if the helper sets it. t.Setenv
+	// restores the original; os.Unsetenv would grow the untagged cmd/gc
+	// environment census.
+	t.Setenv(beadstest.EnvBeadsTestMode, "")
+	pinTestOwnedBDHome(t)
+
+	probe := `printf %s "${` + beadstest.EnvBeadsTestMode + `-unset}"`
+	dir := t.TempDir()
+
+	if got := string(runExternalOutput(t, dir, "sh", "-c", probe)); got != "1" {
+		t.Errorf("runExternal subprocess sees %s=%q, want %q", beadstest.EnvBeadsTestMode, got, "1")
+	}
+	got, err := shellScaleCheck(probe, dir, nil)
+	if err != nil {
+		t.Fatalf("shellScaleCheck: %v", err)
+	}
+	if got != "1" {
+		t.Errorf("scale_check shell sees %s=%q, want %q", beadstest.EnvBeadsTestMode, got, "1")
+	}
 }
 
 func TestEvaluatePoolNewDemandDoesNotApplyMinOrMax(t *testing.T) {

@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 737
-baseline_files = 216
+baseline_calls = 738
+baseline_files = 217
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -51,8 +51,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 497
-baseline_files = 145
+baseline_calls = 498
+baseline_files = 146
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -465,8 +465,8 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 475
-baseline_files = 137
+baseline_calls = 476
+baseline_files = 138
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-cp3hwi"

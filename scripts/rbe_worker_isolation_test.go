@@ -62,7 +62,8 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 				t.Errorf("checkout must set persist-credentials: false, got %v", step.With["persist-credentials"])
 			}
 		}
-		if strings.Contains(step.Run, rbeWorkerScript) {
+		// The worker-env measure step runs the script too, without a worker.
+		if strings.Contains(step.Run, rbeWorkerScript) && step.Env["WORKER_MODE"] != "measure" {
 			worker = true
 			// Default on; the repository variable RBE_ACTION_ISOLATION=0 is the
 			// rollback without a code change.
@@ -288,7 +289,9 @@ func TestRBEWorkerScriptSlotEgressRuleOrder(t *testing.T) {
 // origin/main's jq program before O1 (4d0e45d9eb^) rendered with the same
 // arguments; regenerate it only for an intended worker config change. One
 // since: REMOTE_CAS instance "oss", not "" (rbe-west FU2 confines the worker
-// certificate to "oss"-only listeners).
+// certificate to "oss"-only listeners); and both goldens advertise the
+// worker-env platform property (rbe_worker_env_test.go), here
+// rbeWorkerEnvSample.
 //
 // The same program renders the fork tier (WORKER_TIER=fork, rbe-fork-pool.yml),
 // always with isolation on: CAS instance oss-fork on :8444, no action cache
@@ -311,6 +314,7 @@ func TestRBEWorkerJSONIsolationOffMatchesPreO1(t *testing.T) {
 			"--arg", "name", "pool-worker-1",
 			"--argjson", "slots", "8",
 			"--arg", "tier", tier,
+			"--arg", "worker_env", rbeWorkerEnvSample,
 		}
 		args = append(args, extra...)
 		args = append(args, "--argjson", "isolation", isolation, prog)
@@ -350,6 +354,9 @@ func TestRBEWorkerJSONIsolationOffMatchesPreO1(t *testing.T) {
 		if got, want := decode(out), decode(golden); !reflect.DeepEqual(got, want) {
 			t.Errorf("tier %s: worker.json differs from %s:\ngot:\n%s\nwant:\n%s", c.tier, c.golden, out, golden)
 		}
+		if err := checkWorkerJSONAdvertises(out, rbeWorkerEnvSample); err != nil {
+			t.Errorf("tier %s: %v", c.tier, err)
+		}
 		if c.tier == "fork" {
 			for _, err := range checkForkWorkerJSON(out, c.host) {
 				t.Errorf("tier fork: %v", err)
@@ -369,7 +376,8 @@ func TestRBEWorkerJSONIsolationOffMatchesPreO1(t *testing.T) {
 	// golden one (above).
 	t.Run("WireZstd", func(t *testing.T) {
 		const readDefault = `ZSTD_READ_URL=${RBE_WIRE_ZSTD_READ_URL:-grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}}`
-		if !strings.Contains(readFile(t, root, rbeWorkerScript), "\n"+readDefault+"\n") {
+		// Indented: measure mode (no farm host) skips it.
+		if !regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(readDefault) + `$`).MatchString(readFile(t, root, rbeWorkerScript)) {
 			t.Errorf("%s: want %s (REMOTE_READ defaults to the worker's own endpoint)", rbeWorkerScript, readDefault)
 		}
 		type store struct {
@@ -738,7 +746,7 @@ func TestRBEWorkerIsolationCanary(t *testing.T) {
 		cmd := exec.CommandContext(ctx, "bash", "-c", prog)
 		cmd.Env = []string{
 			"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"), "HOME=" + home, "RUNNER_TEMP=" + temp, "ROOT=" + nlRoot, "NL_BIN_DIR=" + bin,
-			"RBE_WEST_HOST=rbe-west.example.invalid", "WORKER_NAME=pool-worker-1",
+			"RBE_WEST_HOST=rbe-west.example.invalid", "WORKER_NAME=pool-worker-1", "WORKER_ENV=" + rbeWorkerEnvSample,
 			"MODE=" + mode, "SLOTS=" + strconv.Itoa(slots), "GITHUB_STEP_SUMMARY=" + filepath.Join(home, "summary.md"),
 		}
 		if runID != "" {
