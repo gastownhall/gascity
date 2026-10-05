@@ -29,9 +29,10 @@ import (
 // the identity verdicts, the partial causes, the awake set, classification
 // with its Keep conversions, and floors), and P3-5a2 steps 4-8 and 14
 // (demand, pool desired, realization, named planning, dependency floors
-// and bindings). Unwired: P3-5b adds the ledger housekeeping, the bucket,
-// start ranks, grants and create admission (steps 15-17); P3-7 gathers the
-// inputs, publishes the snapshot and enqueues its diff.
+// and bindings). P3-5b adds steps 15-17 (allocator_grants.go): the ledger
+// housekeeping, the bucket, start ranks, grants, create admission and the
+// diff. Unwired: P3-7 gathers the inputs, applies the ledger ops and
+// publishes the snapshot.
 
 // errDecideNoClock refuses a pass without its one clock: a zero Now would
 // read every lease as expired and every fact as stale.
@@ -85,8 +86,15 @@ type allocInputs struct {
 	// (AM-N8); a work record live at Now refuses its bead's worktree
 	// evidence while its fingerprint matches (#34).
 	Backoff map[string]backoffRecord
-	// Prev is the last published snapshot, for sticky bindings.
+	// Prev is the last published snapshot, for sticky bindings and the diff.
 	Prev *selectionSnapshot
+	// Bucket, FairSeed and EntrySeq are allocator state, carried from the
+	// last pass's decision: the token bucket, the fair-share rotation seed
+	// (C4.8) and the sequence ledger entry IDs and create tokens are minted
+	// from, unique within the epoch.
+	Bucket   bucketState
+	FairSeed uint64
+	EntrySeq uint64
 }
 
 // demandView is the demand collectors' output for one pass (P3 spec §4.3),
@@ -123,6 +131,9 @@ type endpointView struct {
 	// HoldsPendingCreate keeps never-started pending creates on the
 	// endpoint (endpointCapacityGuard.HoldsPendingCreate).
 	HoldsPendingCreate bool
+	// Refusals are the endpoint's refusals this episode by row ID: probe
+	// rotation puts the most refused last (endpointCapacityGuard).
+	Refusals map[string]int
 }
 
 // allocDecision is one pass's output.
@@ -142,6 +153,23 @@ type allocDecision struct {
 	ReadyRouted     []beads.Bead
 	ReadyRoutedRefs []string
 	Trace           []allocTraceRecord
+
+	// LedgerOps are the pass's ledger moves in order (clears, releases,
+	// reserves), Creates the admitted plans for the create executor, and
+	// Reservations the planning reservations of every create entry still
+	// uncleared, by entry ID: allocator state, fed back as
+	// allocInputs.Reservations. Bucket holds the grant debits and no
+	// release refund: P3-7 credits a refund only on a confirmed Release.
+	LedgerOps    []ledgerOp
+	Creates      []createPlan
+	Reservations []planReservation
+	Bucket       bucketState
+	FairSeed     uint64
+	EntrySeq     uint64
+	// Enqueue is the session keys whose entry changed against Prev (C2.10);
+	// NextWake when the allocator must pass again, 0 for the patrol backstop.
+	Enqueue  []rowKey
+	NextWake time.Duration
 }
 
 // decidePass is one decide's working state.
@@ -215,7 +243,9 @@ func decideAllocation(in allocInputs) (allocDecision, error) {
 	if !in.CitySuspended {
 		p.plan()
 	}
-	return p.finish(), nil
+	d := p.finish()
+	p.admit(&d)
+	return d, nil
 }
 
 func newDecidePass(in allocInputs) *decidePass {
@@ -408,6 +438,7 @@ func (p *decidePass) selectDecidable() {
 		}
 		p.decidable = append(p.decidable, info)
 	}
+	p.decidable = p.withGrantSupply(p.decidable)
 }
 
 // partials is step 3: the global and leg causes, each with legacy's effect.
@@ -549,6 +580,31 @@ func (p *decidePass) awake() map[string]AwakeDecision {
 		}
 	}
 	return decisions
+}
+
+// withGrantSupply projects each row an issued or committed grant stands for
+// as creating: supply is the census's active and creating rows plus those
+// grants (POOL-070, C5.13), so a start whose PreWake the census does not
+// show yet keeps its scaled slot and is not planned again as a create.
+func (p *decidePass) withGrantSupply(infos []session.Info) []session.Info {
+	var out []session.Info
+	for _, e := range p.in.Ledger {
+		if e.Kind != kindGrant || (e.State != ledgerIssued && e.State != ledgerCommitted) {
+			continue
+		}
+		for i, info := range infos {
+			if p.byID[info.ID] == e.Key && info.MetadataState != string(session.StateActive) {
+				if out == nil {
+					out = slices.Clone(infos)
+				}
+				out[i].MetadataState = string(session.StateCreating)
+			}
+		}
+	}
+	if out == nil {
+		return infos
+	}
+	return out
 }
 
 // configSleepSuppressed is stage 6b (SESS-585/586/652, AM3): legacy's
