@@ -169,10 +169,13 @@ func TestSplitStorageMigratedFormulaCompletes(t *testing.T) {
 	t.Run("FreshMigration", func(t *testing.T) {
 		c := newSplitE2ECity(t, bdPath, doltPath, false, "")
 		root := c.runFirstHalf()
+		edge := c.addWorkEdgeInto(root)
 		c.authorSplit()
-		c.migrate()
+		c.assertEdgeAtRiskBeforeClear(c.migrate(), edge)
 		c.finishAndAssert(root)
+		c.assertEdgeLost(edge)
 		c.rollbackAndRestoreFromBackup(root)
+		c.assertEdgeRestored(edge)
 	})
 
 	t.Run("MigratedByV150RC1", func(t *testing.T) {
@@ -514,8 +517,9 @@ func (c *splitE2ECity) authorSplit() {
 	c.city.AppendToConfig(splitStorageTOML)
 }
 
-// migrate runs the cutover with whichever binary currently owns the city.
-func (c *splitE2ECity) migrate() {
+// migrate runs the cutover with whichever binary currently owns the city and
+// returns its output.
+func (c *splitE2ECity) migrate() string {
 	c.t.Helper()
 	bin, err := helpers.ResolveGCPath(c.city.Env)
 	if err != nil {
@@ -526,6 +530,7 @@ func (c *splitE2ECity) migrate() {
 		c.t.Fatalf("%s storage migrate --from-work --fleet-stopped: %v\n%s", bin, err, out)
 	}
 	c.t.Logf("%s storage migrate:\n%s", bin, out)
+	return out
 }
 
 // expectBootRefusalNamingRepair starts the rc1-migrated city with this build
@@ -1061,4 +1066,129 @@ func (c *splitE2ECity) show(id string) splitShownBead {
 		c.t.Fatalf("decode gc bd show %s --json: %v\n%s", id, err, out)
 	}
 	return one
+}
+
+// splitCrossEdge is an edge from a work bead into an infrastructure bead the
+// migration moves out of the work store.
+type splitCrossEdge struct {
+	work, target, kind string
+}
+
+// String is the spelling the migration, `gc storage status` and the event all
+// use for an edge: "issue -[type]-> depends_on".
+func (e splitCrossEdge) String() string {
+	return fmt.Sprintf("%s -[%s]-> %s", e.work, e.kind, e.target)
+}
+
+// addWorkEdgeInto creates a work bead on the stopped, pre-cutover city with a
+// tracks edge into target (the still-open workflow root): the shape of a work
+// convoy tracking a run.
+func (c *splitE2ECity) addWorkEdgeInto(target string) splitCrossEdge {
+	c.t.Helper()
+	out, err := c.city.GCStdout("bd", "create", "--json", "--type", "task", "split-e2e work bead tracking the run")
+	if err != nil {
+		c.t.Fatalf("gc bd create: %v\n%s", err, out)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	payload := strings.TrimSpace(out)
+	if i := strings.Index(payload, "{"); i >= 0 {
+		payload = payload[i:]
+	}
+	if err := json.Unmarshal([]byte(payload), &created); err != nil || created.ID == "" {
+		c.t.Fatalf("decode gc bd create --json: %v\n%s", err, out)
+	}
+	edge := splitCrossEdge{work: created.ID, target: target, kind: "tracks"}
+	if out, err := c.city.GC("bd", "dep", "add", edge.work, edge.target, "--type", edge.kind); err != nil {
+		c.t.Fatalf("gc bd dep add %s: %v\n%s", edge, err, out)
+	}
+	if !c.show(edge.work).hasDep(edge.target, edge.kind) {
+		c.t.Fatalf("work bead %s does not carry the edge %s it was just given", edge.work, edge)
+	}
+	return edge
+}
+
+// assertEdgeAtRiskBeforeClear requires the migration to name the edge under
+// AT RISK before it reports removing any row.
+func (c *splitE2ECity) assertEdgeAtRiskBeforeClear(out string, edge splitCrossEdge) {
+	c.t.Helper()
+	risk := strings.Index(out, "cross-store edges AT RISK")
+	if risk < 0 {
+		c.t.Fatalf("gc storage migrate did not announce the cross-store edges AT RISK:\n%s", out)
+	}
+	at := strings.Index(out[risk:], edge.String())
+	if at < 0 {
+		c.t.Fatalf("gc storage migrate's AT RISK list does not name %s:\n%s", edge, out)
+	}
+	if cleared := strings.Index(out, "cop(ies) cleared"); cleared >= 0 && cleared < risk+at {
+		c.t.Errorf("gc storage migrate named %s AT RISK only after reporting the clear:\n%s", edge, out)
+	}
+}
+
+// assertEdgeLost pins what a bd/Dolt work store does with the edge once its
+// target is cleared: drops it, and says so in `gc storage status` and in the
+// storage.binding.converged event.
+func (c *splitE2ECity) assertEdgeLost(edge splitCrossEdge) {
+	c.t.Helper()
+	if c.show(edge.work).hasDep(edge.target, edge.kind) {
+		c.t.Errorf("work bead %s still carries %s after its target was cleared; this test pins the bd/Dolt work store dropping it", edge.work, edge)
+	}
+	status, err := c.city.GC("storage", "status")
+	if err != nil {
+		c.t.Fatalf("gc storage status: %v\n%s", err, status)
+	}
+	lost := strings.Index(status, "lost cross-store edges:")
+	if lost < 0 || !strings.Contains(status[lost:], edge.String()) {
+		c.t.Errorf("gc storage status does not list %s under lost cross-store edges:\n%s", edge, status)
+	}
+	found := false
+	for _, e := range c.convergedEvents() {
+		for _, l := range e.LostCrossEdges {
+			if strings.HasPrefix(l, edge.String()) {
+				found = true
+			}
+		}
+	}
+	if !found {
+		c.t.Errorf("no storage.binding.converged event carries %s in lost_cross_edges: %+v", edge, c.convergedEvents())
+	}
+}
+
+// assertEdgeRestored requires the runbook recipe's dep-add loop to have put
+// the edge back.
+func (c *splitE2ECity) assertEdgeRestored(edge splitCrossEdge) {
+	c.t.Helper()
+	got := c.show(edge.work)
+	if !got.hasDep(edge.target, edge.kind) {
+		c.t.Errorf("the runbook restore did not put back %s: gc bd show %s gives deps %+v", edge, edge.work, got.Dependencies)
+	}
+}
+
+// splitConvergedEvent is the part of a storage.binding.converged event the
+// cross-edge assertions read.
+type splitConvergedEvent struct {
+	Seq            int64    `json:"seq"`
+	LostCrossEdges []string `json:"lost_cross_edges"`
+}
+
+func (c *splitE2ECity) convergedEvents() []splitConvergedEvent {
+	data, err := os.ReadFile(c.path(".gc", "events.jsonl"))
+	if err != nil {
+		return nil
+	}
+	var out []splitConvergedEvent
+	for _, line := range strings.Split(string(data), "\n") {
+		var e struct {
+			Seq     int64               `json:"seq"`
+			Type    string              `json:"type"`
+			Payload splitConvergedEvent `json:"payload"`
+		}
+		if json.Unmarshal([]byte(line), &e) != nil || e.Type != "storage.binding.converged" {
+			continue
+		}
+		e.Payload.Seq = e.Seq
+		out = append(out, e.Payload)
+	}
+	return out
 }
