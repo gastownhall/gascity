@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -774,7 +775,12 @@ func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput)
 	if err := s.gateWorkRecordClose(ctx, id, store, current, submitted); err != nil {
 		return nil, err
 	}
-	if reason != "" {
+	// On a bead that is not closed, a recorded close_reason is left over from
+	// an earlier close (reopen does not clear the metadata), so this close
+	// replaces it with its own reason, or with none.
+	priorReason := current.Metadata["close_reason"]
+	stampReason := reason != "" || (current.Status != "closed" && strings.TrimSpace(priorReason) != "")
+	if stampReason {
 		if err := store.SetMetadata(id, "close_reason", reason); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
@@ -783,6 +789,13 @@ func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput)
 		}
 	}
 	if err := store.Close(id); err != nil {
+		if stampReason && !errors.Is(err, beads.ErrNotFound) {
+			// The bead stays open, so it must not keep the reason stamped
+			// for a close that did not happen.
+			if restoreErr := store.SetMetadata(id, "close_reason", priorReason); restoreErr != nil {
+				err = errors.Join(err, fmt.Errorf("restoring close_reason after failed close: %w", restoreErr))
+			}
+		}
 		if errors.Is(err, beads.ErrNotFound) {
 			return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 		}

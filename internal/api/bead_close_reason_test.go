@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -213,5 +214,81 @@ func TestBeadFromGenCarriesCloseReason(t *testing.T) {
 	got := beadFromGen(genclient.Bead{Id: "gc-1", Title: "done", Status: "closed", IssueType: "task", CloseReason: &reason})
 	if got.CloseReason != apiCloseReason {
 		t.Fatalf("CloseReason = %q, want %q", got.CloseReason, apiCloseReason)
+	}
+}
+
+func postBeadAction(t *testing.T, h http.Handler, state State, id, action string, body io.Reader) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/bead/"+id+"/"+action), body))
+	return rec
+}
+
+// A reason recorded by an earlier close must not resurface when a reopened
+// bead is closed again without one.
+func TestBeadCloseRouteWithoutReasonAfterReopenDropsTheOldReason(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	bead, err := store.Create(beads.Bead{Title: "close, reopen, close"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	h := newTestCityHandler(t, state)
+
+	if rec := postBeadAction(t, h, state, bead.ID, "close", bytes.NewBufferString(`{"reason":"duplicate of gc-0"}`)); rec.Code != http.StatusOK {
+		t.Fatalf("first close = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := postBeadAction(t, h, state, bead.ID, "reopen", nil); rec.Code != http.StatusOK {
+		t.Fatalf("reopen = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := postBeadAction(t, h, state, bead.ID, "close", nil); rec.Code != http.StatusOK {
+		t.Fatalf("second close = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "closed" || got.CloseReason != "" {
+		t.Fatalf("after close without a reason: status=%q CloseReason=%q, want closed with no reason", got.Status, got.CloseReason)
+	}
+	if reason, present := getBeadJSON(t, h, state, bead.ID)["close_reason"]; present {
+		t.Fatalf("GET close_reason = %#v, want it omitted", reason)
+	}
+}
+
+// failingCloseStore refuses every Close, standing in for a store whose close
+// write fails after the handler stamped the reason.
+type failingCloseStore struct {
+	beads.Store
+}
+
+func (failingCloseStore) Close(string) error { return errors.New("close refused") }
+
+// A close that fails must not leave the still-open bead carrying the reason
+// the handler stamped for it.
+func TestBeadCloseRouteFailedCloseDoesNotLeaveAReason(t *testing.T) {
+	state := newFakeState(t)
+	mem := beads.NewMemStore()
+	state.stores["myrig"] = failingCloseStore{Store: mem}
+	bead, err := mem.Create(beads.Bead{Title: "close fails"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	h := newTestCityHandler(t, state)
+
+	rec := postBeadAction(t, h, state, bead.ID, "close", bytes.NewBufferString(`{"reason":"`+apiCloseReason+`"}`))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("POST close = %d, want 500: %s", rec.Code, rec.Body.String())
+	}
+	got, err := mem.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("status = closed, want the failed close to leave it open")
+	}
+	if reason := got.Metadata["close_reason"]; reason != "" {
+		t.Fatalf("metadata.close_reason = %q on a bead whose close failed, want it empty", reason)
 	}
 }
