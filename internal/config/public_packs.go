@@ -48,7 +48,7 @@ const (
 	// trees; bump the pin (and append the old value to
 	// SupersededBundledPackImportVersions) when cutting a release whose
 	// bundled core/bd/dolt content changed.
-	BundledPackImportVersion = "sha:e38ce9cc55d15fa351199c042f0d07aba1a347af"
+	BundledPackImportVersion = "sha:3dcfe0969e26aac651c5c65c0a5d73f2d8cc16c5"
 )
 
 // SupersededBundledPackImportVersions lists previous canonical pins for the
