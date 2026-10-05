@@ -628,6 +628,9 @@ func TestProxiedIdleTimeoutCheck(t *testing.T) {
 			if got.Status != StatusOK && got.FixHint == "" {
 				t.Error("a warning with no fix hint")
 			}
+			if strings.Contains(got.Message, "do not carry") && !strings.Contains(got.FixHint, `proxied_idle_timeout = "0"`) {
+				t.Errorf("drift hint %q does not say how to keep the scopes and silence it", got.FixHint)
+			}
 			if check.CanFix() {
 				t.Error("the check offers to fix a file bd owns")
 			}

@@ -443,7 +443,7 @@ func (c *ProxiedIdleTimeoutCheck) Run(_ *CheckContext) *CheckResult {
 	switch {
 	case len(drift) > 0:
 		r.Message = fmt.Sprintf("%d gc-owned proxied scope(s) do not carry the configured idle timeout", len(drift))
-		r.FixHint = "bd cannot yet change an initialized scope's idle timeout, and gc will not edit the sidecar, which is bd's file: the configured value applies to scopes gc creates (gc init, gc rig add, gc beads city migrate-proxied) and takes effect on existing scopes once bd supports `bd dolt set idle-timeout`"
+		r.FixHint = "bd cannot yet change an initialized scope's idle timeout, and gc will not edit the sidecar, which is bd's file: the configured value applies to scopes gc creates (gc init, gc rig add, gc beads city migrate-proxied) and takes effect on existing scopes once bd supports `bd dolt set idle-timeout`. To keep these scopes as they are and silence this, set the value they carry, e.g. `[beads] proxied_idle_timeout = \"0\"` for scopes that never idle"
 	case len(unreadable) > 0:
 		r.Message = fmt.Sprintf("could not compare the idle timeout of %d gc-owned proxied scope(s)", len(unreadable))
 		r.FixHint = "inspect <scope>/.beads/proxied_server_client_info.json and the city's idle-timeout config"
