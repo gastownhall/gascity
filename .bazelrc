@@ -6,6 +6,11 @@ common --color=no
 # build --remote_cache=<your-cache-endpoint>
 
 test --test_output=errors
+# G0: a retried pass never stands in for a run. Leaving the flag unset is not
+# one attempt: Bazel's default gives targets marked flaky = True three. Pin it
+# for every invocation; scripts/bazel_no_flaky_retries_test.go requires this
+# line and rejects any other value anywhere.
+test --flaky_test_attempts=1
 
 
 # Bazel sandboxes root t.TempDir() deep under the output tree, blowing past the
@@ -75,9 +80,7 @@ test:ci --test_env=PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin
 build:ci --remote_download_minimal
 # 2 vCPU runners default --jobs to 2, serializing even remote actions.
 build:ci --jobs=64
-# G0: a retried pass never stands in for a run. One attempt is already the
-# default; CI lanes pin it, and scripts/bazel_no_flaky_retries_test.go rejects
-# any other value anywhere.
+# G0: CI lanes restate the single-attempt pin above.
 test:ci --flaky_test_attempts=1
 # Lanes that are the only pre-merge run: every test executes, and a remote
 # cache eviction fails the action rather than silently re-running it.

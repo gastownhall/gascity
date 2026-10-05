@@ -89,3 +89,19 @@ func TestCheckNoFlakyRetriesFixtures(t *testing.T) {
 		}
 	}
 }
+
+// TestBazelrcPinsSingleTestAttempt requires .bazelrc to pin one attempt for
+// every test invocation, not only the :ci lanes. Leaving the flag unset is
+// not the same: Bazel's own default ("default") gives targets marked
+// flaky = True three attempts, so a local or pre-push run would retry them
+// into the action cache.
+func TestBazelrcPinsSingleTestAttempt(t *testing.T) {
+	root := repoRoot(t)
+	for _, line := range strings.Split(readFile(t, root, ".bazelrc"), "\n") {
+		code, _, _ := strings.Cut(line, "#")
+		if strings.Join(strings.Fields(code), " ") == "test --flaky_test_attempts=1" {
+			return
+		}
+	}
+	t.Fatal(".bazelrc must pin `test --flaky_test_attempts=1` for every invocation: unset, Bazel gives flaky-tagged targets three attempts")
+}
