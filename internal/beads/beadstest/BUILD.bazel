@@ -11,10 +11,12 @@ go_library(
     name = "beadstest",
     srcs = [
         "atomic_close_conformance.go",
+        "close_notification_conformance.go",
         "conditional_labels_conformance.go",
         "conditional_writer_conformance.go",
         "conformance.go",
         "conformance_skips.go",
+        "fake_bd.go",
         "fence_conformance.go",
         "metadata_cas_conformance.go",
         "pinned_id_fence_conformance.go",
