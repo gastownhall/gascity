@@ -68,8 +68,15 @@ func TestApplyTrapRunsWhenSIGINTIgnoredOnEntry(t *testing.T) {
 	// sleep, so the barrier also proves the child exists: a signal that lands
 	// while the shell is still forking it would reach only the shell, whose
 	// trap then waits for the 30s child to finish.
+	//
+	// The trailing `exit 0` keeps the child from being the last command of
+	// the -c string: bash 3.2 (macOS /bin/bash) execs that last simple
+	// command in place of the shell even with traps set, which would replace
+	// the trap-carrying adapter with the child and lose the trap. A real
+	// adapter is a script file, where that optimization does not apply.
 	adapter := `trap 'echo rolled-back > "$MARKER"; exit 1' INT TERM
-"$BASH" -c ': > "$READY"; exec sleep 30'`
+"$BASH" -c ': > "$READY"; exec sleep 30'
+exit 0`
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

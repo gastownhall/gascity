@@ -1906,24 +1906,31 @@ func LoadLedger(name string) (Ledger, error) {
 	return ParseLedger(data)
 }
 
-// Validate checks schema ownership, expiration, and exact census baselines.
-func Validate(ledger Ledger, census Census, now time.Time, mode waiverclock.Mode) (warnings []string, err error) {
-	return validateAgainstPolicy(bootstrapPolicy, ledger, census, now, mode)
+// Validate checks schema ownership and exact census baselines. It never reads
+// or takes a clock: whether a row's date is acceptable today is answered by
+// handing PolicyExpiries to internal/testpolicy/waiverclock from the one
+// never-cached date check (internal/testpolicy/waiverexpiry). Keeping the two
+// apart is what lets this check's result be cached without going stale on the
+// calendar.
+func Validate(ledger Ledger, census Census) error {
+	return validateAgainstPolicy(bootstrapPolicy, ledger, census)
 }
 
-func validateAgainstPolicy(policy, ledger Ledger, census Census, now time.Time, mode waiverclock.Mode) (warnings []string, err error) {
-	// The clock runs separately from everything below, because a passing date is
-	// the only failure here that needs nobody to change any code. Its findings
-	// join the rest rather than short-circuiting them: neither a tolerated lapse
-	// nor a fatal one should be able to hide a real regression.
-	clock := waiverclock.Check(collectExpiries(ledger), now, mode)
-	fail := func(problems ...string) ([]string, error) {
-		problems = append(problems, clock.Fatal...)
+// PolicyExpiries returns one dated expiry per bootstrap policy row, for the
+// waiver clock to judge against today. Validate forces every row of the checked
+// ledger to equal its policy row, expires included, so these are the checked
+// ledger's dates.
+func PolicyExpiries() []waiverclock.Expiry {
+	return collectExpiries(bootstrapPolicy)
+}
+
+func validateAgainstPolicy(policy, ledger Ledger, census Census) error {
+	fail := func(problems ...string) error {
 		if len(problems) == 0 {
-			return clock.Warnings, nil
+			return nil
 		}
 		sort.Strings(problems)
-		return clock.Warnings, errors.New(strings.Join(problems, "\n"))
+		return errors.New(strings.Join(problems, "\n"))
 	}
 
 	if problems := validateManifestAgainstPolicy(policy, ledger); len(problems) > 0 {
@@ -2079,10 +2086,9 @@ func validateOwnership(prefix string, row Baseline) []string {
 
 // validateOwnershipFields checks that a row declares who owns it and when it is
 // meant to be gone. It checks that the date is well formed but deliberately does
-// not check whether it has passed: that verdict depends on an enforcement mode
-// only the top-level caller knows, and it is collected once per ledger row by
-// collectExpiries rather than at each of the two or three sites that reach a row
-// during validation. See internal/testpolicy/waiverclock.
+// not check whether it has passed: that verdict depends on today, which this
+// cached check must never read. collectExpiries hands each row to the waiver
+// clock once instead. See internal/testpolicy/waiverexpiry.
 func validateOwnershipFields(prefix, owner, invariant, resourceOwner, migration, expiryText string) []string {
 	var problems []string
 	for name, value := range map[string]string{

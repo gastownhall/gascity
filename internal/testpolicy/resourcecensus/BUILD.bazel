@@ -32,11 +32,9 @@ go_test(
         "//:repo_source_tree",
     ],
     embed = [":resourcecensus"],
-    tags = ["external"],
     deps = [
         "//internal/bazeltest",
         "//internal/testenv",
-        "//internal/testpolicy/waiverclock",
     ],
 )
 

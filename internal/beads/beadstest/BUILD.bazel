@@ -41,11 +41,9 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":beadstest"],
-    tags = ["external"],
     deps = [
         "//internal/beads",
         "//internal/testenv",
-        "//internal/testpolicy/waiverclock",
     ],
 )
 

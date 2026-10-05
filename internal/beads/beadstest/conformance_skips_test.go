@@ -4,38 +4,23 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/testpolicy/waiverclock"
 )
 
-// TestLedgeredSkipsAreValidAndUnexpired is the guard that keeps every
-// conformance opt-out honest: each entry must name a bead, carry an expiry, and
-// not be parked further than maxSkipHorizon out, and the waiver clock must
-// tolerate its date. A skip that outlives its fix warns through the grace
-// window and then turns red here, forcing the defect to be fixed or the
-// escalation to be renewed.
-func TestLedgeredSkipsAreValidAndUnexpired(t *testing.T) {
-	now := time.Now()
-	mode, err := waiverclock.FromEnv()
-	if err != nil {
-		t.Fatal(err)
-	}
+// TestLedgeredSkipsAreWellFormed is the structural guard that keeps every
+// conformance opt-out honest: each entry must name its subtest, a reason, a
+// bead, and an expiry. It is deliberately date-free so its cached result cannot
+// go stale; whether each expiry is acceptable today is judged by
+// internal/testpolicy/waiverexpiry, the one never-cached date check.
+func TestLedgeredSkipsAreWellFormed(t *testing.T) {
+	seen := map[string]bool{}
 	for _, s := range ledgeredSkips {
 		if s.Subtest == "" || s.Reason == "" || s.BeadID == "" || s.Expiry.IsZero() {
 			t.Errorf("incomplete ledger entry (Subtest, Reason, BeadID, Expiry all required): %+v", s)
-			continue
 		}
-		clock := skipClock(s, now, mode)
-		for _, fatal := range clock.Fatal {
-			t.Error(fatal)
+		if seen[s.Subtest] {
+			t.Errorf("ledger entry %q is duplicated", s.Subtest)
 		}
-		for _, warning := range clock.Warnings {
-			t.Log(warning)
-		}
-		if s.Expiry.After(now.Add(maxSkipHorizon)) {
-			t.Errorf("ledger skip %q expiry %s is more than 90 days out; opt-outs must be short-lived",
-				s.Subtest, s.Expiry.Format("2006-01-02"))
-		}
+		seen[s.Subtest] = true
 	}
 }
 
@@ -54,45 +39,47 @@ func TestUnledgeredSubtestHasNoSkip(t *testing.T) {
 	}
 }
 
-// TestSkipClockGraceWarnsBeforeItFails proves a skip's expiry goes through the
-// fleet waiver clock: quiet while far off, a warning from WarnAhead before its
-// date and through the grace window after it, fatal once the grace runs out,
-// and fatal on the day after expiry only in strict mode.
-func TestSkipClockGraceWarnsBeforeItFails(t *testing.T) {
-	skip := ConformanceSkip{
-		Subtest: "Example",
+// TestRequireLedgeredSkipIsDateFree pins that a ledgered skip is honored no
+// matter its date. requireLedgeredSkip runs inside every store's conformance
+// suite (internal/beads and its consumers), so a clock read there would make
+// all of those cached results go stale on the calendar. The expiry is enforced
+// once, by internal/testpolicy/waiverexpiry.
+func TestRequireLedgeredSkipIsDateFree(t *testing.T) {
+	saved := ledgeredSkips
+	t.Cleanup(func() { ledgeredSkips = saved })
+	ledgeredSkips = []ConformanceSkip{{
+		Subtest: "LongLapsed",
 		Reason:  "example",
 		BeadID:  "ga-example",
-		Expiry:  time.Date(2026, time.December, 15, 0, 0, 0, 0, time.UTC),
+		Expiry:  time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC),
+	}}
+
+	var skipped bool
+	passed := t.Run("LongLapsed", func(t *testing.T) {
+		t.Cleanup(func() { skipped = t.Skipped() })
+		requireLedgeredSkip(t, "LongLapsed")
+	})
+	if !passed || !skipped {
+		t.Fatalf("requireLedgeredSkip on a lapsed entry: passed=%t skipped=%t, want a plain skip", passed, skipped)
 	}
-	day := func(offset int) time.Time { return skip.Expiry.AddDate(0, 0, offset).Add(12 * time.Hour) }
-	for _, tc := range []struct {
-		name         string
-		now          time.Time
-		mode         waiverclock.Mode
-		fatal, warns bool
-	}{
-		{name: "far ahead", now: day(-30), mode: waiverclock.ModeGrace},
-		{name: "inside the warning window", now: day(-3), mode: waiverclock.ModeGrace, warns: true},
-		{name: "expiry day is still valid", now: day(0), mode: waiverclock.ModeGrace, warns: true},
-		{name: "lapsed, inside grace", now: day(1), mode: waiverclock.ModeGrace, warns: true},
-		{name: "lapsed, last grace day", now: day(14), mode: waiverclock.ModeGrace, warns: true},
-		{name: "lapsed, past grace", now: day(15), mode: waiverclock.ModeGrace, fatal: true},
-		{name: "lapsed, strict", now: day(1), mode: waiverclock.ModeStrict, fatal: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			clock := skipClock(skip, tc.now, tc.mode)
-			if got := len(clock.Fatal) > 0; got != tc.fatal {
-				t.Fatalf("fatal = %v (%q), want %v", got, clock.Fatal, tc.fatal)
-			}
-			if got := len(clock.Warnings) > 0; got != tc.warns {
-				t.Fatalf("warns = %v (%q), want %v", got, clock.Warnings, tc.warns)
-			}
-			for _, msg := range append(clock.Fatal, clock.Warnings...) {
-				if !strings.Contains(msg, skip.BeadID) || !strings.Contains(msg, skip.Subtest) {
-					t.Fatalf("clock message %q does not name the skip and its owner", msg)
-				}
-			}
-		})
+}
+
+// TestSkipExpiriesHandsEverySkipToTheClock checks the data the date check
+// reads: one expiry per ledgered skip, naming the subtest and its bead, and
+// bounded by maxSkipHorizon so an opt-out cannot be parked indefinitely.
+func TestSkipExpiriesHandsEverySkipToTheClock(t *testing.T) {
+	got := SkipExpiries()
+	if len(got) != len(ledgeredSkips) {
+		t.Fatalf("SkipExpiries() = %d, want one per ledgered skip (%d)", len(got), len(ledgeredSkips))
+	}
+	for i, expiry := range got {
+		skip := ledgeredSkips[i]
+		if expiry.Owner != skip.BeadID || !expiry.Expires.Equal(skip.Expiry) || expiry.Horizon != maxSkipHorizon {
+			t.Errorf("SkipExpiries()[%d] = %+v, want owner %s, expiry %s, horizon %s",
+				i, expiry, skip.BeadID, skip.Expiry.Format("2006-01-02"), maxSkipHorizon)
+		}
+		if !strings.Contains(expiry.Label, skip.Subtest) {
+			t.Errorf("SkipExpiries()[%d].Label = %q, want the subtest %q named", i, expiry.Label, skip.Subtest)
+		}
 	}
 }

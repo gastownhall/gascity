@@ -216,7 +216,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/check-embedded-pins --skip-bundled
 
-  # The push path runs these same ledgers in grace mode, so a lapsed waiver
+  # The push path runs the same date check (internal/testpolicy/waiverexpiry)
+  # in grace mode, so a lapsed waiver
   # warns for 14 days before it blocks anyone (internal/testpolicy/waiverclock).
   # This job is what is supposed to spend those 14 days getting the owner's
   # attention. The mode lives inside the script, not in this YAML, so the

@@ -371,6 +371,7 @@ filegroup(
         "//internal/testpolicy/timingplancli:bazel_repo_srcs",
         "//internal/testpolicy/timingsummary:bazel_repo_srcs",
         "//internal/testpolicy/waiverclock:bazel_repo_srcs",
+        "//internal/testpolicy/waiverexpiry:bazel_repo_srcs",
         "//internal/testutil:bazel_repo_srcs",
         "//internal/testutil/providerledger:bazel_repo_srcs",
         "//internal/transcriptmeta:bazel_repo_srcs",

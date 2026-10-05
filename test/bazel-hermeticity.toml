@@ -28,22 +28,10 @@ reason = "dolt_config resolves the worker's hostname through DNS. The suite has 
 evidence = ["test/integration/dolt_config_test.go:48 net.LookupHost(os.Hostname())"]
 
 [[target]]
-package = "internal/testpolicy/resourcecensus"
+package = "internal/testpolicy/waiverexpiry"
 tags = ["external"]
-reason = "TestRepositoryLedgerMatchesCensusAndDocumentation validates dated waivers against time.Now(); the 88 rows expiring 2026-10-31 warn from 2026-10-17 and fail from 2026-11-15 with no code change, so a cached PASS goes stale on the calendar."
-evidence = ["internal/testpolicy/resourcecensus/census_test.go:2376"]
-
-[[target]]
-package = "internal/testutil/providerledger"
-tags = ["external"]
-reason = "TestCatalogMatchesProductionWiringAndDocumentation validates dated waivers against time.Now(); the earliest (2026-10-08) turns fatal on 2026-10-23 with no code change."
-evidence = ["internal/testutil/providerledger/ledger_test.go:1583"]
-
-[[target]]
-package = "internal/beads/beadstest"
-tags = ["external"]
-reason = "TestLedgeredSkipsAreValidAndUnexpired checks conformance-skip expiries (2026-12-15) against time.Now(). Consumers of requireLedgeredSkip (internal/beads, ...) share the dependency; see the audit's follow-up to make that path date-free."
-evidence = ["internal/beads/beadstest/conformance_skips_test.go:18"]
+reason = "TestDatedWaiversAgainstToday is the one place a dated waiver (provider ledger, resource census, beads conformance skips) is compared with time.Now(); it must re-run every day, so it is never cached. The ledgers' own structural tests stay cached and date-free."
+evidence = ["internal/testpolicy/waiverexpiry/waiverexpiry_test.go"]
 
 [[reviewed]]
 package = "cmd/gc"
