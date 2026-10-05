@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  DOLT_VERSION: "2.1.7"
+  DOLT_VERSION: "2.2.0"
   BD_VERSION: "v1.3.1"
 
 jobs:
@@ -84,7 +84,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      DOLT_VERSION: "2.1.7"
+      DOLT_VERSION: "2.2.0"
       BD_VERSION: "v1.3.1"
       GC_BEADS: sqlite
       GC_ACCEPTANCE_BEADS_PROVIDER: sqlite
@@ -187,6 +187,15 @@ jobs:
             fi
             sleep $((attempt * 10))
           done
+
+      # A new beads release (or a beads Dolt pin raise) makes deps.env stale
+      # without any PR to trigger a check. The bundled core/bd/dolt pin is
+      # checked at release time only (RC Gate): on main the bundled content
+      # moves ahead of it between releases by design.
+      - name: Verify bd and dolt pins are the latest releases
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/check-embedded-pins --skip-bundled
 
   # The push path runs these same ledgers in grace mode, so a lapsed waiver
   # warns for 14 days before it blocks anyone (internal/testpolicy/waiverclock).
