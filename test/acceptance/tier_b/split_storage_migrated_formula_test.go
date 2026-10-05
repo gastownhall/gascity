@@ -172,6 +172,7 @@ func TestSplitStorageMigratedFormulaCompletes(t *testing.T) {
 		c.authorSplit()
 		c.migrate()
 		c.finishAndAssert(root)
+		c.rollbackAndRestoreFromBackup(root)
 	})
 
 	t.Run("MigratedByV150RC1", func(t *testing.T) {
@@ -826,4 +827,238 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// splitRunbookPath is the operator runbook whose restore recipe the rollback
+// leg runs verbatim, so the documented commands are what is tested.
+const splitRunbookPath = "docs/runbooks/split-storage-classes.md"
+
+// splitRestoreSection is the runbook heading the recipe lives under.
+const splitRestoreSection = "### Restoring the work store from the backup"
+
+// splitWorkOnlyStorageTOML is the documented rollback class map: every class
+// on `work`, and no binding block.
+const splitWorkOnlyStorageTOML = `
+[storage.classes]
+work = "work"
+graph = "work"
+sessions = "work"
+messaging = "work"
+orders = "work"
+nudges = "work"
+`
+
+// rollbackAndRestoreFromBackup is the runbook's rollback after the clear, end
+// to end: revert the class map, watch the boot refuse because the work store
+// no longer holds the infrastructure state, remove the notes, run the
+// runbook's restore recipe against the backup the migration wrote, and boot.
+func (c *splitE2ECity) rollbackAndRestoreFromBackup(root string) {
+	c.t.Helper()
+	backup := c.path(".gc", "store", "infra.retained-source.jsonl")
+	rows := readSplitBackup(c.t, backup)
+
+	// (1) stop; (2) point every class back at work and drop the binding.
+	c.stop()
+	cfg := c.city.ReadFile("city.toml")
+	i := strings.Index(cfg, "\n[storage.classes]")
+	if i < 0 {
+		c.t.Fatalf("city.toml has no [storage.classes] to revert:\n%s", cfg)
+	}
+	c.city.WriteConfig(cfg[:i] + splitWorkOnlyStorageTOML)
+
+	// (3) the boot holds the reverted city: its work store has nothing.
+	out, err := c.tryStart()
+	if err == nil {
+		c.t.Fatalf("gc start served a reverted city whose infrastructure state lives only in the backup:\n%s", out)
+	}
+	for _, want := range []string{"NO infrastructure state", "Restoring the work store from the backup"} {
+		if !strings.Contains(out, want) {
+			c.t.Errorf("reverted-city boot refusal does not mention %q:\n%s", want, out)
+		}
+	}
+	c.t.Logf("gc start refused the reverted city as required:\n%s", out)
+	if stopOut, stopErr := c.city.GC("stop", c.dir); stopErr != nil {
+		c.t.Logf("gc stop after the refused boot: %v\n%s", stopErr, stopOut)
+	}
+
+	// (4) the operator's attestation: remove the notes.
+	for _, note := range []string{"storage-infra-cleared.json", "storage-served-binding.json"} {
+		if err := os.Remove(c.path(".gc", note)); err != nil {
+			c.t.Fatalf("remove .gc/%s: %v", note, err)
+		}
+	}
+
+	// (5) the runbook's recipe, as written.
+	recipe := splitRunbookRestoreRecipe(c.t, backup, filepath.Join(c.root, "restore"))
+	cmd := exec.Command("bash", "-euo", "pipefail", "-c", recipe)
+	cmd.Dir = c.dir
+	cmd.Env = c.city.Env.List()
+	recipeOut, err := cmd.CombinedOutput()
+	if err != nil {
+		c.t.Fatalf("the runbook's restore recipe failed: %v\n--- recipe ---\n%s\n--- output ---\n%s", err, recipe, recipeOut)
+	}
+	c.t.Logf("runbook restore recipe:\n%s", recipeOut)
+
+	// (6) the city boots on its work store and serves the restored rows.
+	c.start()
+	rootRow, ok := rows[root]
+	if !ok {
+		c.t.Fatalf("backup %s does not hold the workflow root %s", backup, root)
+	}
+	got := c.show(root)
+	if got.Status != rootRow.Status {
+		c.t.Errorf("restored root %s status = %q, backup holds %q", root, got.Status, rootRow.Status)
+	}
+	for k, v := range rootRow.Metadata {
+		if got.Metadata[k] != v {
+			c.t.Errorf("restored root %s metadata %s = %q, backup holds %q", root, k, got.Metadata[k], v)
+		}
+	}
+	// A restored step keeps its links: the outbound edges the backup recorded
+	// for it (graph.v2 steps reach their root through these, not a parent),
+	// and its parent when it has one.
+	stepChecked := false
+	for _, id := range sortedKeys(rows) {
+		row := rows[id]
+		if id == root || row.Metadata["gc.root_bead_id"] != root || len(row.Deps) == 0 {
+			continue
+		}
+		step := c.show(id)
+		for _, dep := range row.Deps {
+			if !step.hasDep(dep.DependsOnID, dep.Type) {
+				c.t.Errorf("restored step %s lost its edge -[%s]-> %s; show gives deps %+v", id, dep.Type, dep.DependsOnID, step.Dependencies)
+			}
+		}
+		if row.Parent != "" && step.Parent != row.Parent && !step.hasDep(row.Parent, "parent-child") {
+			c.t.Errorf("restored step %s lost its parent %s: show gives parent %q, deps %+v", id, row.Parent, step.Parent, step.Dependencies)
+		}
+		c.t.Logf("restored step %s: status %q, parent %q, deps %+v", id, step.Status, step.Parent, step.Dependencies)
+		stepChecked = true
+		break
+	}
+	if !stepChecked {
+		c.t.Errorf("backup %s holds no step of %s with recorded edges; nothing proves the restore keeps a step's links", backup, root)
+	}
+	c.t.Logf("rollback restore: %d backup row(s); root %s restored as %q with %d metadata key(s)", len(rows), root, got.Status, len(got.Metadata))
+}
+
+// splitBackupBead is the part of a backup row the rollback leg compares.
+type splitBackupBead struct {
+	ID       string            `json:"id"`
+	Status   string            `json:"status"`
+	Parent   string            `json:"parent"`
+	Metadata map[string]string `json:"metadata"`
+	// Deps is the record's outbound edges, lifted from the entry beside the
+	// bead.
+	Deps []splitBackupEdge `json:"-"`
+}
+
+// splitBackupEdge is one edge as the backup records it.
+type splitBackupEdge struct {
+	IssueID     string `json:"issue_id"`
+	DependsOnID string `json:"depends_on_id"`
+	Type        string `json:"type"`
+}
+
+func readSplitBackup(t *testing.T, path string) map[string]splitBackupBead {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read migration backup: %v", err)
+	}
+	rows := map[string]splitBackupBead{}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var rec struct {
+			Bead *splitBackupBead  `json:"bead"`
+			Deps []splitBackupEdge `json:"deps"`
+		}
+		if json.Unmarshal([]byte(line), &rec) == nil && rec.Bead != nil && rec.Bead.ID != "" {
+			rec.Bead.Deps = rec.Deps
+			rows[rec.Bead.ID] = *rec.Bead
+		}
+	}
+	if len(rows) == 0 {
+		t.Fatalf("migration backup %s holds no bead rows", path)
+	}
+	return rows
+}
+
+// splitRunbookRestoreRecipe returns the first bash block under the runbook's
+// restore heading, with the backup path filled in and its scratch files moved
+// from /tmp into scratch.
+func splitRunbookRestoreRecipe(t *testing.T, backup, scratch string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(helpers.FindModuleRoot(), splitRunbookPath))
+	if err != nil {
+		t.Fatalf("read runbook: %v", err)
+	}
+	doc := string(data)
+	i := strings.Index(doc, splitRestoreSection)
+	if i < 0 {
+		t.Fatalf("%s has no %q section", splitRunbookPath, splitRestoreSection)
+	}
+	section := doc[i:]
+	start := strings.Index(section, "```bash\n")
+	if start < 0 {
+		t.Fatalf("%s %q has no bash block", splitRunbookPath, splitRestoreSection)
+	}
+	body := section[start+len("```bash\n"):]
+	end := strings.Index(body, "\n```")
+	if end < 0 {
+		t.Fatalf("%s %q has an unterminated bash block", splitRunbookPath, splitRestoreSection)
+	}
+	recipe := body[:end]
+	const placeholder = "B=<binding root>/infra.retained-source.jsonl"
+	if !strings.Contains(recipe, placeholder) {
+		t.Fatalf("the runbook recipe no longer sets %q; update this test with it:\n%s", placeholder, recipe)
+	}
+	if err := os.MkdirAll(scratch, 0o755); err != nil {
+		t.Fatalf("create %s: %v", scratch, err)
+	}
+	recipe = strings.Replace(recipe, placeholder, "B="+strconv.Quote(backup), 1)
+	return strings.ReplaceAll(recipe, "/tmp/gc-restore", filepath.Join(scratch, "gc-restore"))
+}
+
+// splitShownBead is the part of `gc bd show --json` the rollback leg reads.
+type splitShownBead struct {
+	Status       string            `json:"status"`
+	Parent       string            `json:"parent"`
+	Metadata     map[string]string `json:"metadata"`
+	Dependencies []struct {
+		DependsOnID string `json:"depends_on_id"`
+		ID          string `json:"id"`
+		Type        string `json:"type"`
+		DepType     string `json:"dependency_type"`
+	} `json:"dependencies"`
+}
+
+func (b splitShownBead) hasDep(on, typ string) bool {
+	for _, d := range b.Dependencies {
+		if (d.DependsOnID == on || d.ID == on) && (d.Type == typ || d.DepType == typ) {
+			return true
+		}
+	}
+	return false
+}
+
+// show reads one bead through gc bd and fails the test if it is unreadable.
+func (c *splitE2ECity) show(id string) splitShownBead {
+	c.t.Helper()
+	out, err := c.city.GCStdout("bd", "show", id, "--json")
+	if err != nil {
+		c.t.Fatalf("gc bd show %s --json: %v\n%s", id, err, out)
+	}
+	payload := strings.TrimSpace(out)
+	if i := strings.IndexAny(payload, "[{"); i >= 0 {
+		payload = payload[i:]
+	}
+	var many []splitShownBead
+	if json.Unmarshal([]byte(payload), &many) == nil && len(many) > 0 {
+		return many[0]
+	}
+	var one splitShownBead
+	if err := json.Unmarshal([]byte(payload), &one); err != nil {
+		c.t.Fatalf("decode gc bd show %s --json: %v\n%s", id, err, out)
+	}
+	return one
 }
