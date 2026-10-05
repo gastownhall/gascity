@@ -30,7 +30,15 @@ version = "sha:<pinned commit>"
 offline from the binary's embedded copy; pinning a bundled source at any
 other commit makes it an ordinary remote import; `gc import install`
 fetches that exact commit from git, so editing the pin always does what it
-says.
+says. One exception: when a gc release moves the canonical `core`/`bd`/`dolt`
+pin, the pins earlier releases wrote keep being served from the embedded
+copy (they always meant "the built-in pack", not that commit's tree), so an
+upgraded city keeps loading offline, and `gc doctor` lists them as a
+warning. `gc doctor --fix` rewrites them to the current pin. Restart the
+supervisor on the new binary (`gc supervisor stop`, then
+`gc supervisor start`) before running `gc doctor --fix`: an older gc still
+running does not know the new pin and fails with "locked but not cached"
+until `gc import install` fetches it.
 
 The `bd` entry is written only for cities using the `bd` beads provider (the
 default); cities on other providers get only `core`. The `bd` pack pulls in

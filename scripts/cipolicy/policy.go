@@ -104,7 +104,10 @@ const (
 	// matching runner_policy.py, which now selects Blacksmith for every event
 	// and author. Reviewed delta: that one runs-on value, no new job, step,
 	// trigger or permission.
-	expectedCIExecutionHash     = "63317c9e54304db88ef66aa35a70b9b09a7e0a34c5002ecab567b51ccc8c3026"
+	//
+	// Bumped again for the Dolt 2.1.7 -> 2.2.0 pin (the Dolt beads v1.3.1
+	// qualifies): the job DOLT_VERSION env values only.
+	expectedCIExecutionHash     = "ee1573fb3c69cb057697f4dddbd30e100f21e8a0df1bc23b446f95dbdf90d615"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -117,8 +120,13 @@ const (
 	// -run selector gained TestFreshInit_SlingSpawnsDefaultPoolWorker and
 	// TestFreshInit_ClaudeUnrestricted, mirroring RC Gate's acceptance C shards;
 	// same job, env, secrets and runner. Then the Beads v1.3.0 -> v1.3.1-rc.2
-	// -> v1.3.1 pins: the workflow and job BD_VERSION env values only.
-	expectedNightlyExecutionHash = "183db1faaa748f8bacd7d7de970ddc40ea87a65892bc37083ca40175cc4c2ea1"
+	// -> v1.3.1 pins: the workflow and job BD_VERSION env values only. Then
+	// the Dolt 2.1.7 -> 2.2.0 pin (DOLT_VERSION env values) and one step in
+	// the bundled-pack-pins job, `scripts/check-embedded-pins --skip-bundled`
+	// with GITHUB_TOKEN, which fails when deps.env falls behind the latest
+	// beads release or the Dolt it qualifies. No new job, trigger or
+	// permission.
+	expectedNightlyExecutionHash = "6d3e09d4d392cfee12325b6cdafc0a3574cc1014b25d142a93baf70cf9441a48"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 

@@ -125,8 +125,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   728,
-			BaselineFiles:   214,
+			BaselineCalls:   733,
+			BaselineFiles:   215,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-cp3hwi",
@@ -166,8 +166,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   493,
-			BaselineFiles:   145,
+			BaselineCalls:   498,
+			BaselineFiles:   146,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-cp3hwi",
@@ -231,8 +231,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceHTTPTestServer,
-			BaselineCalls:   318,
-			BaselineFiles:   66,
+			BaselineCalls:   319,
+			BaselineFiles:   67,
 			ReportedCalls:   255,
 			ReportedFiles:   56,
 			OwnerBead:       "ga-cp3hwi",
@@ -530,6 +530,17 @@ var bootstrapPolicy = Ledger{
 			MigrationTarget: "P0.4b",
 			Expires:         "2026-10-31",
 		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestCacheZstdProbe",
+			Resources:       []Resource{ResourceHTTPTestServer},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the anonymous-cache zstd probe's behavior proof is a checked Medium HTTP test server owner",
+			ResourceOwner:   "the loopback TLS HTTP/2 servers are confined to TestCacheZstdProbe, which exists to run tools/rbe/cache-zstd-probe.sh against a stand-in rbe-cache GetCapabilities (zstd advertised or not, gRPC and HTTP errors, malformed answers, a timeout): the probe is curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
 	},
 	ReviewedHermeticBody: []ReviewedHermeticBody{
 		{
@@ -565,8 +576,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   471,
-			BaselineFiles:   137,
+			BaselineCalls:   476,
+			BaselineFiles:   138,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-cp3hwi",

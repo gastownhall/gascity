@@ -873,6 +873,9 @@ func TestRetryOnBusy(t *testing.T) {
 		if calls != 1+sqliteBusyRetryAttempts {
 			t.Fatalf("expected %d calls, got %d", 1+sqliteBusyRetryAttempts, calls)
 		}
+		if !errors.Is(err, ErrSQLiteBusyExhausted) || !errors.Is(err, busyErr) || err.Error() != busyErr.Error() {
+			t.Fatalf("exhausted busy error = %v, want ErrSQLiteBusyExhausted wrapping the driver's error with its message", err)
+		}
 	})
 
 	t.Run("backs_off_exponentially_with_bounded_jitter", func(t *testing.T) {
@@ -906,6 +909,9 @@ func TestRetryOnBusy(t *testing.T) {
 		}
 		if calls != 1 {
 			t.Fatalf("expected 1 call, got %d", calls)
+		}
+		if errors.Is(err, ErrSQLiteBusyExhausted) {
+			t.Fatalf("non-busy error %v matched ErrSQLiteBusyExhausted", err)
 		}
 	})
 }
