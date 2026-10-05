@@ -35,6 +35,9 @@ func TestAddTestenvImportSkipsNestedGitWorktrees(t *testing.T) {
 
 	cmd := exec.Command("go", "run", scriptPath)
 	cmd.Dir = fixture
+	// Pure Go: never the host's C compiler, which tools/rbe/worker-env does
+	// not measure.
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	var out, errBuf bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf
