@@ -8515,22 +8515,12 @@ func TestWorkflowDeleteSweepsTheEphemeralTierOfTheRelocatedTree(t *testing.T) {
 		t.Fatalf("seeding the workflow root in the class binding: %v", err)
 	}
 
-	creator, ok := binding.(beads.StorageCreateStore)
-	if !ok {
-		t.Fatalf("the class binding (%T) implements no StorageCreateStore, so this fixture cannot reach its ephemeral tier", binding)
-	}
-	wisp, err := creator.CreateWithStorage(beads.Bead{
+	wisp := mintEphemeralInBinding(t, binding, beads.Bead{
 		Title:    "the ephemeral step",
 		Type:     "task",
 		Status:   "open",
 		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
-	}, beads.StorageEphemeral)
-	if err != nil {
-		t.Fatalf("minting the ephemeral descendant in the class binding: %v", err)
-	}
-	if !wisp.Ephemeral {
-		t.Fatalf("minted descendant %s has Ephemeral=false; this fixture is not exercising the wisp tier the bug is about", wisp.ID)
-	}
+	})
 
 	var stdout, stderr bytes.Buffer
 	if code := cmdWorkflowDelete(root.ID, true, false, &stdout, &stderr); code != 0 {
@@ -8599,6 +8589,35 @@ func TestFindWorkflowBeadsFromRootReadsTheEphemeralTierOfTheRelocatedTree(t *tes
 		}
 	}
 	t.Fatalf("findWorkflowBeadsFromRoot missed ephemeral descendant %s; got %d beads: the descendants query must read TierMode: TierBoth through the live handle", wisp.ID, len(found))
+}
+
+// TestSourceWorkflowChildSourcesReadsTheEphemeralTierOfTheRelocatedTree pins
+// the nested-workflow leg of `gc convoy delete-source`: a child source stamped
+// with gc.source_bead_id that lives in the class binding's wisp tier (a nested
+// workflow started from a wisp step) must be followed, or the sweep stops at
+// the first level and leaves the nested workflow running.
+func TestSourceWorkflowChildSourcesReadsTheEphemeralTierOfTheRelocatedTree(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	binding := soleClassBindingStore(t, cityPath)
+
+	const sourceBeadID = "src-ephemeral-child-6129"
+	child := mintEphemeralInBinding(t, binding, beads.Bead{
+		Title:    "the ephemeral wisp step that launched a nested workflow",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.SourceBeadIDMetadataKey: sourceBeadID},
+	})
+
+	children, err := sourceWorkflowChildSources(binding, sourceBeadID, "", "", "")
+	if err != nil {
+		t.Fatalf("sourceWorkflowChildSources: %v", err)
+	}
+	for _, b := range children {
+		if b.ID == child.ID {
+			return
+		}
+	}
+	t.Fatalf("sourceWorkflowChildSources(%q) missed ephemeral child source %s; got %d beads: the child-source query must read TierMode: TierBoth through the live handle", sourceBeadID, child.ID, len(children))
 }
 
 // TestFindWorkflowBeadsDiscoversAnEphemeralRootByWorkflowID pins the

@@ -3017,11 +3017,12 @@ func sourceWorkflowChildSources(store beads.Store, sourceBeadID, sourceStoreRef,
 	if store == nil || sourceBeadID == "" {
 		return nil, nil
 	}
-	candidates, err := store.List(beads.ListQuery{
+	candidates, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 		IncludeClosed: true,
 		Metadata: map[string]string{
 			beadmeta.SourceBeadIDMetadataKey: sourceBeadID,
 		},
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err
