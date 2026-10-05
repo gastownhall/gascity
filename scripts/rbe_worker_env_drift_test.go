@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -522,6 +523,9 @@ done
 // leaves the drift report. In measure mode the same host fails (exit 3) and
 // starts nothing.
 func TestRBEWorkerRegistersOnDrift(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("blacksmith-worker.sh runs only on Linux pool hosts (sha256sum, nproc, GNU xargs)")
+	}
 	root := repoRoot(t)
 	dir := t.TempDir()
 	stubs := filepath.Join(dir, "bin")
