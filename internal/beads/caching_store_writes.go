@@ -253,8 +253,9 @@ func (c *CachingStore) Close(id string) error {
 
 	c.mu.Lock()
 	c.noteLocalMutationLocked(id)
+	announce := false
 	if refreshed {
-		c.absorbFreshLocked(id, closed, time.Now(), absorbOpts{
+		announce = c.absorbFreshLocked(id, closed, time.Now(), absorbOpts{
 			depsMode:       depsKeepCached,
 			seqMode:        seqKeep,
 			clearDirty:     true,
@@ -262,7 +263,7 @@ func (c *CachingStore) Close(id string) error {
 		})
 	} else if b, ok := c.beads[id]; ok {
 		setBeadStatus(&b, "closed")
-		c.absorbFreshLocked(id, b, time.Now(), absorbOpts{
+		announce = c.absorbFreshLocked(id, b, time.Now(), absorbOpts{
 			depsMode:       depsKeepCached,
 			seqMode:        seqKeep,
 			clearDirty:     true,
@@ -278,7 +279,9 @@ func (c *CachingStore) Close(id string) error {
 	}
 	c.mu.Unlock()
 
-	if found {
+	// A concurrent reader that installed and announced this close first owns
+	// the announcement; announcing again here would duplicate it.
+	if found && announce {
 		c.notifyChange("bead.closed", closed)
 	}
 	return nil
@@ -369,18 +372,19 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 		c.markDirtyLocked(id)
 	}
 	for _, item := range refreshed {
-		previous, hadPrevious := c.beads[item.id]
+		_, hadPrevious := c.beads[item.id]
 		opts := absorbOpts{depsMode: depsKeepCached, seqMode: seqKeep, clearDirty: true}
 		if item.bead.Status == "closed" {
 			opts.depsMode = depsDrop
-			// Announced below whenever this absorb is a transition.
+			// Announced below whenever this absorb owns the close.
 			opts.closeAnnounced = true
 		}
-		c.absorbFreshLocked(item.id, item.bead, time.Now(), opts)
+		announce := c.absorbFreshLocked(item.id, item.bead, time.Now(), opts)
 		if item.bead.Status == "closed" {
 			c.clearDependentReadyProjectionsLocked(item.id)
 		}
-		if hadPrevious && previous.Status != "closed" && item.bead.Status == "closed" {
+		// CloseAll announces only closes of rows it had cached.
+		if announce && hadPrevious {
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.closed",
 				bead:      cloneBead(item.bead),
@@ -680,21 +684,22 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 			if hadPrevious && previous.Status != fresh.Status {
 				statusChanged = true
 			}
-			c.absorbFreshLocked(item.id, fresh, now, absorbOpts{
+			announceClose := c.absorbFreshLocked(item.id, fresh, now, absorbOpts{
 				depsMode:   depsFromFields,
 				seqMode:    seqKeep,
 				clearDirty: true,
-				// Every closed row here is announced as bead.closed below.
+				// A closed row this refresh owns is announced as bead.closed
+				// below; one a concurrent reader already announced is not.
 				closeAnnounced: fresh.Status == "closed",
 			})
 			if statusChanged {
 				c.clearDependentReadyProjectionsLocked(item.id)
 			}
 			eventType := "bead.updated"
-			if fresh.Status == "closed" {
+			if announceClose {
 				eventType = "bead.closed"
 			}
-			if !hadPrevious || beadChanged(previous, fresh, false) || fresh.Status == "closed" {
+			if announceClose || !hadPrevious || beadChanged(previous, fresh, false) {
 				notifications = append(notifications, cacheNotification{
 					eventType: eventType,
 					bead:      cloneBead(fresh),
@@ -705,17 +710,19 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 		if item.closed {
 			if b, ok := c.beads[item.id]; ok {
 				setBeadStatus(&b, "closed")
-				c.absorbFreshLocked(item.id, b, now, absorbOpts{
+				announceClose := c.absorbFreshLocked(item.id, b, now, absorbOpts{
 					depsMode:       depsKeepCached,
 					seqMode:        seqKeep,
 					clearDirty:     true,
 					closeAnnounced: true,
 				})
 				c.clearDependentReadyProjectionsLocked(item.id)
-				notifications = append(notifications, cacheNotification{
-					eventType: "bead.closed",
-					bead:      cloneBead(b),
-				})
+				if announceClose {
+					notifications = append(notifications, cacheNotification{
+						eventType: "bead.closed",
+						bead:      cloneBead(b),
+					})
+				}
 			}
 			continue
 		}

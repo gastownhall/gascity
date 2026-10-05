@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 )
 
 // These tests pin gastownhall/gascity#6860: every path that moves a cached bead
@@ -275,4 +276,136 @@ func TestReopenBeforeAnnouncementDropsThePendingClose(t *testing.T) {
 	if got := rec.count("bead.closed", seed.ID, ""); got != 0 {
 		t.Fatalf("bead.closed events after reopen = %d, want 0; events=%s", got, rec)
 	}
+}
+
+// getHookStore runs onGet once, after the backing Get it wraps returns. It
+// lets a test land a concurrent reader exactly inside a write's
+// backing-write -> refresh-read -> c.mu window, without sleeps.
+type getHookStore struct {
+	Store
+	onGet func(id string)
+}
+
+func (s *getHookStore) Get(id string) (Bead, error) {
+	b, err := s.Store.Get(id)
+	if hook := s.onGet; hook != nil {
+		s.onGet = nil
+		hook(id)
+	}
+	return b, err
+}
+
+// A live list that absorbs and announces the close while Close is between its
+// backing write and its cache absorb must not leave Close to announce it again.
+func TestCloseRacingLiveListAnnouncesBeadClosedOnce(t *testing.T) {
+	t.Parallel()
+	mem := NewMemStore()
+	seed, err := mem.Create(Bead{Title: "plain task", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	backing := &getHookStore{Store: mem}
+	rec := &closeEventRecorder{}
+	cs := NewCachingStoreForTest(backing, rec.onChange(t))
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	rec.reset()
+
+	backing.onGet = func(string) {
+		if _, err := cs.List(ListQuery{Status: "open", AllowScan: true, Live: true}); err != nil {
+			t.Errorf("racing live List: %v", err)
+		}
+	}
+	if err := cs.Close(seed.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	assertClosedExactlyOnce(t, rec, seed.ID, "after Close raced a live list")
+}
+
+// A read that queued a close but has not drained it yet must not have its
+// announcement swallowed by a CloseAll that absorbs the same row: the absorb
+// that cancels the queued entry owns the announcement.
+func TestCloseAllCancellingQueuedCloseAnnouncesItOnce(t *testing.T) {
+	t.Parallel()
+	mem, cs, rec, seed := newPrimedCloseEventCache(t)
+
+	if err := mem.Close(seed.ID); err != nil {
+		t.Fatalf("external close: %v", err)
+	}
+	external, err := mem.Get(seed.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	// The racing read's absorb: it queues the close, then releases c.mu
+	// before draining.
+	cs.mu.Lock()
+	cs.absorbFreshLocked(seed.ID, external, time.Now(), absorbOpts{depsMode: depsKeepCached, seqMode: seqKeep})
+	cs.mu.Unlock()
+
+	if _, err := cs.CloseAll([]string{seed.ID}, nil); err != nil {
+		t.Fatalf("CloseAll: %v", err)
+	}
+	// The racing read's drain.
+	cs.announceUnannouncedCloses()
+	assertClosedExactlyOnce(t, rec, seed.ID, "after CloseAll canceled a queued close")
+}
+
+// The same lost-close shape for Close: it cancels the queued entry, so it
+// must announce.
+func TestCloseCancellingQueuedCloseAnnouncesItOnce(t *testing.T) {
+	t.Parallel()
+	mem, cs, rec, seed := newPrimedCloseEventCache(t)
+
+	if err := mem.Close(seed.ID); err != nil {
+		t.Fatalf("external close: %v", err)
+	}
+	external, err := mem.Get(seed.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	cs.mu.Lock()
+	cs.absorbFreshLocked(seed.ID, external, time.Now(), absorbOpts{depsMode: depsKeepCached, seqMode: seqKeep})
+	cs.mu.Unlock()
+
+	if err := cs.Close(seed.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	cs.announceUnannouncedCloses()
+	assertClosedExactlyOnce(t, rec, seed.ID, "after Close canceled a queued close")
+}
+
+// A live list that announces a transaction's close before the transaction's
+// post-commit refresh absorbs it must not leave the refresh to announce it
+// again.
+func TestTxCloseRacingLiveListAnnouncesBeadClosedOnce(t *testing.T) {
+	t.Parallel()
+	mem := NewMemStore()
+	seed, err := mem.Create(Bead{Title: "plain task", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	backing := &getHookStore{Store: mem}
+	rec := &closeEventRecorder{}
+	cs := NewCachingStoreForTest(backing, rec.onChange(t))
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	rec.reset()
+
+	if err := cs.Tx("close", func(tx Tx) error {
+		if err := tx.Close(seed.ID); err != nil {
+			return err
+		}
+		// The next backing Get is the post-commit refresh.
+		backing.onGet = func(string) {
+			if _, err := cs.List(ListQuery{Status: "open", AllowScan: true, Live: true}); err != nil {
+				t.Errorf("racing live List: %v", err)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Tx: %v", err)
+	}
+	assertClosedExactlyOnce(t, rec, seed.ID, "after a Tx close raced a live list")
 }
