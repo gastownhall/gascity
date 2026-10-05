@@ -82,13 +82,11 @@ import (
 	"fmt"
 	"maps"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -147,10 +145,10 @@ type classStoreEmission struct {
 // emit appends one row per emission to the city's journal through a single
 // recorder, which owns the cross-process sequence and locking.
 //
-// events.WithoutStartupSweep is what makes a per-mutation open safe: the sweep
-// exists to recover rotating-* files a crash stranded, it belongs to the
-// supervisor's long-lived recorder, and running it here would race that
-// recorder mid-rotation. It does not make the open free — NewFileRecorder reads
+// events.WithoutStartupSweep (via newSecondaryFileEventsRecorder) is what makes
+// a per-mutation open safe: the sweep exists to recover rotating-* files a
+// crash stranded, it belongs to the supervisor's long-lived recorder, and
+// running it here would race that recorder mid-rotation. It does not make the open free — NewFileRecorder reads
 // the log directory either way, to continue the sequence past the archives —
 // only unraced.
 func (s *emittingClassStore) emit(emissions ...classStoreEmission) {
@@ -860,11 +858,7 @@ func beadStatusIsClosed(status string) bool {
 
 // newClassStoreEmitRecorder opens the city's journal for one emission batch.
 func newClassStoreEmitRecorder(cityPath string) (*events.FileRecorder, error) {
-	return events.NewFileRecorder(
-		filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"),
-		classStoreEmitWarnWriter{},
-		events.WithoutStartupSweep(),
-	)
+	return openCityEventsLog(cityPath, classStoreEmitWarnWriter{})
 }
 
 // classStoreEmitWarnWriter funnels the recorder's own stderr diagnostics — a

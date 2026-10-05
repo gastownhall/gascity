@@ -103,8 +103,11 @@ func TestBazelTestFreshMergeSteps(t *testing.T) {
 }
 
 type freshMergeActionFile struct {
-	Inputs map[string]any `yaml:"inputs"`
-	Runs   struct {
+	Inputs map[string]struct {
+		Required bool   `yaml:"required"`
+		Default  string `yaml:"default"`
+	} `yaml:"inputs"`
+	Runs struct {
 		Using string `yaml:"using"`
 		Steps []struct {
 			If    string            `yaml:"if"`
@@ -116,19 +119,29 @@ type freshMergeActionFile struct {
 }
 
 // freshMergeActionRun returns the action's one step script after pinning
-// what the behavior test cannot see: pull_request only, bash, and env.
+// what the behavior test cannot see: pull_request only, bash, env, and no
+// required input (bazel-test.yml passes none; bazel.yml passes base-sha).
 func freshMergeActionRun(t *testing.T) string {
 	t.Helper()
 	var action freshMergeActionFile
 	if err := yaml.Unmarshal([]byte(readFile(t, repoRoot(t), freshMergeAction)), &action); err != nil {
 		t.Fatalf("parse %s: %v", freshMergeAction, err)
 	}
-	if action.Runs.Using != "composite" || len(action.Runs.Steps) != 1 || len(action.Inputs) != 0 {
-		t.Fatalf("%s: using %q, %d steps, %d inputs; want composite, one step, no inputs", freshMergeAction, action.Runs.Using, len(action.Runs.Steps), len(action.Inputs))
+	if action.Runs.Using != "composite" || len(action.Runs.Steps) != 1 {
+		t.Fatalf("%s: using %q, %d steps; want composite, one step", freshMergeAction, action.Runs.Using, len(action.Runs.Steps))
+	}
+	for name, in := range action.Inputs {
+		if in.Required || in.Default != "" {
+			t.Errorf("%s input %s: required %v, default %q; want optional with an empty default (the base branch's tip)", freshMergeAction, name, in.Required, in.Default)
+		}
+	}
+	if _, ok := action.Inputs["base-sha"]; !ok || len(action.Inputs) != 1 {
+		t.Errorf("%s inputs = %v, want base-sha only", freshMergeAction, action.Inputs)
 	}
 	step := action.Runs.Steps[0]
 	wantEnv := map[string]string{
 		"BASE_REF": "${{ github.base_ref }}",
+		"BASE_SHA": "${{ inputs.base-sha }}",
 		"HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
 	}
 	if step.If != "github.event_name == 'pull_request'" || step.Shell != "bash" || !reflect.DeepEqual(step.Env, wantEnv) {
@@ -144,8 +157,10 @@ func freshMergeActionRun(t *testing.T) string {
 // (bash --noprofile --norc -eo pipefail) in a blobless clone of a scratch
 // origin whose main moved after the event: a clean merge (deterministic, on
 // the fetched tip, with the workflow-skew warning when main changed
-// .github/), a conflict, a head that already contains the tip, and a base
-// branch that cannot be fetched (three attempts with backoff).
+// .github/), a conflict, a head that already contains the tip, a base
+// branch that cannot be fetched (three attempts with backoff), and with
+// base-sha: a merge onto that commit though main has moved past it, a
+// malformed base-sha, and one that cannot be fetched.
 func TestFreshMergeActionBehaviour(t *testing.T) {
 	script := freshMergeActionRun(t)
 	tmp := t.TempDir()
@@ -254,7 +269,7 @@ func TestFreshMergeActionBehaviour(t *testing.T) {
 		}
 		return f
 	}
-	step := func(f fixture, baseRef string) (string, error) {
+	step := func(f fixture, baseRef, baseSHA string) (string, error) {
 		t.Helper()
 		if err := os.Remove(sleepLog); err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
@@ -262,6 +277,7 @@ func TestFreshMergeActionBehaviour(t *testing.T) {
 		return run(f.work, []string{
 			"PATH=" + stubs + ":" + os.Getenv("PATH"),
 			"BASE_REF=" + baseRef,
+			"BASE_SHA=" + baseSHA,
 			"HEAD_SHA=" + f.head,
 			"GITHUB_SHA=" + f.event,
 			"GITHUB_STEP_SUMMARY=" + f.summary,
@@ -272,7 +288,7 @@ func TestFreshMergeActionBehaviour(t *testing.T) {
 		prFiles := map[string]string{"pr.txt": "pr\n"}
 		mainFiles := map[string]string{"b.txt": "2\n"}
 		f := setup("clean", prFiles, mainFiles, false)
-		out, err := step(f, "main")
+		out, err := step(f, "main", "")
 		if err != nil {
 			t.Fatalf("step failed: %v\n%s", err, out)
 		}
@@ -298,7 +314,7 @@ func TestFreshMergeActionBehaviour(t *testing.T) {
 		if again.head != f.head || again.tip != f.tip {
 			t.Fatalf("fixture is not reproducible: head %s/%s, tip %s/%s", f.head, again.head, f.tip, again.tip)
 		}
-		if out, err := step(again, "main"); err != nil {
+		if out, err := step(again, "main", ""); err != nil {
 			t.Fatalf("second run failed: %v\n%s", err, out)
 		}
 		if second := git(again.work, "rev-parse", "HEAD"); second != first {
@@ -308,7 +324,7 @@ func TestFreshMergeActionBehaviour(t *testing.T) {
 
 	t.Run("workflow changed on main", func(t *testing.T) {
 		f := setup("skew", map[string]string{"pr.txt": "pr\n"}, map[string]string{".github/workflows/w.yml": "v2\n"}, false)
-		out, err := step(f, "main")
+		out, err := step(f, "main", "")
 		if err != nil {
 			t.Fatalf("step failed: %v\n%s", err, out)
 		}
@@ -319,7 +335,7 @@ func TestFreshMergeActionBehaviour(t *testing.T) {
 
 	t.Run("conflict", func(t *testing.T) {
 		f := setup("conflict", map[string]string{"b.txt": "pr\n"}, map[string]string{"b.txt": "main\n"}, false)
-		out, err := step(f, "main")
+		out, err := step(f, "main", "")
 		if err == nil {
 			t.Fatalf("step passed on a conflict:\n%s", out)
 		}
@@ -334,7 +350,7 @@ func TestFreshMergeActionBehaviour(t *testing.T) {
 
 	t.Run("head already contains the tip", func(t *testing.T) {
 		f := setup("merged", map[string]string{"pr.txt": "pr\n"}, map[string]string{"b.txt": "2\n"}, true)
-		out, err := step(f, "main")
+		out, err := step(f, "main", "")
 		if err != nil {
 			t.Fatalf("step failed: %v\n%s", err, out)
 		}
@@ -345,7 +361,7 @@ func TestFreshMergeActionBehaviour(t *testing.T) {
 
 	t.Run("base branch cannot be fetched", func(t *testing.T) {
 		f := setup("nobase", map[string]string{"pr.txt": "pr\n"}, map[string]string{"b.txt": "2\n"}, false)
-		out, err := step(f, "gone")
+		out, err := step(f, "gone", "")
 		if err == nil {
 			t.Fatalf("step passed without a base branch:\n%s", out)
 		}
@@ -358,6 +374,56 @@ func TestFreshMergeActionBehaviour(t *testing.T) {
 		}
 		if got := git(f.work, "rev-parse", "HEAD"); got != f.event {
 			t.Errorf("HEAD moved to %s; want the event merge ref %s untouched", got, f.event)
+		}
+	})
+
+	t.Run("base-sha: onto that commit, not the moved tip", func(t *testing.T) {
+		f := setup("basesha", map[string]string{"pr.txt": "pr\n"}, map[string]string{"b.txt": "2\n"}, false)
+		// main moves again after the rbe job resolved f.tip
+		later := commit(f.origin, "main moves again", map[string]string{"b.txt": "3\n"})
+		out, err := step(f, "main", f.tip)
+		if err != nil {
+			t.Fatalf("step failed: %v\n%s", err, out)
+		}
+		if got := git(f.work, "rev-parse", "HEAD^1", "HEAD^2"); got != f.head+"\n"+f.tip {
+			t.Errorf("HEAD parents = %q, want head %s then base-sha %s (not the later tip %s)", got, f.head, f.tip, later)
+		}
+		if got := git(f.work, "show", "HEAD:b.txt"); got != "2" {
+			t.Errorf("merged b.txt = %q, want base-sha's 2", got)
+		}
+		summary := readFile(t, filepath.Dir(f.summary), filepath.Base(f.summary))
+		if !strings.Contains(summary, f.tip) || strings.Contains(summary, later) {
+			t.Errorf("step summary names the wrong base:\n%s", summary)
+		}
+	})
+
+	t.Run("base-sha malformed", func(t *testing.T) {
+		f := setup("badsha", map[string]string{"pr.txt": "pr\n"}, map[string]string{"b.txt": "2\n"}, false)
+		out, err := step(f, "main", "main")
+		if err == nil {
+			t.Fatalf("step passed with base-sha main:\n%s", out)
+		}
+		if !strings.Contains(out, "::error title=fresh-merge base-sha::base-sha is 'main', not a 40-digit commit id") {
+			t.Errorf("output lacks the base-sha error:\n%s", out)
+		}
+		if got := git(f.work, "rev-parse", "HEAD"); got != f.event {
+			t.Errorf("HEAD moved to %s; want the event merge ref %s untouched", got, f.event)
+		}
+	})
+
+	t.Run("base-sha cannot be fetched", func(t *testing.T) {
+		f := setup("nosha", map[string]string{"pr.txt": "pr\n"}, map[string]string{"b.txt": "2\n"}, false)
+		missing := strings.Repeat("ab", 20)
+		out, err := step(f, "main", missing)
+		if err == nil {
+			t.Fatalf("step passed with an unknown base-sha:\n%s", out)
+		}
+		if want := "::error title=fresh-merge cannot fetch main commit " + missing + "::git fetch of main commit " + missing + " failed 3 times"; !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+		slept, readErr := os.ReadFile(sleepLog)
+		if readErr != nil || string(slept) != "5\n10\n" {
+			t.Errorf("backoff sleeps = %q (%v), want 5 then 10", slept, readErr)
 		}
 	})
 }

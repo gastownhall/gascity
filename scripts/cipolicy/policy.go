@@ -105,12 +105,15 @@ const (
 	// and author. Reviewed delta: that one runs-on value, no new job, step,
 	// trigger or permission.
 	//
+	// Bumped again for the Dolt 2.1.7 -> 2.2.0 pin (the Dolt beads v1.3.1
+	// qualifies): the job DOLT_VERSION env values only.
+	//
 	// Bumped again (keep managed Dolt logs from failed acceptance tests):
 	// beads-topology-acceptance and beads-proxied-native-acceptance each gain
 	// a step exporting GC_TEST_FAILURE_ARTIFACT_DIR to $GITHUB_ENV and an
 	// `if: failure()` pinned upload-artifact step for that directory. No new
 	// job, trigger, permission or secret.
-	expectedCIExecutionHash     = "8752a493e4df2791357c3b2aed5786a4208d2431687c67eb169745d36fe72dd9"
+	expectedCIExecutionHash     = "f09cde554074ba570ce7d1e480ac538a2641c15539f120c3d028ee8ee63d07ac"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -124,10 +127,14 @@ const (
 	// TestFreshInit_ClaudeUnrestricted, mirroring RC Gate's acceptance C shards;
 	// same job, env, secrets and runner. Then the Beads v1.3.0 -> v1.3.1-rc.2
 	// -> v1.3.1 pins: the workflow and job BD_VERSION env values only. Then
-	// beads-proxied-perf gains the same failure-diagnostics routing step and
-	// `if: failure()` pinned upload-artifact step as the PR acceptance jobs;
-	// no new job, trigger, permission or secret.
-	expectedNightlyExecutionHash = "16950d21ee18a9fe0b4835377bcaa27aadde8331b3dc59612a322d70c7fca1a7"
+	// the Dolt 2.1.7 -> 2.2.0 pin (DOLT_VERSION env values) and one step in
+	// the bundled-pack-pins job, `scripts/check-embedded-pins --skip-bundled`
+	// with GITHUB_TOKEN, which fails when deps.env falls behind the latest
+	// beads release or the Dolt it qualifies. No new job, trigger or
+	// permission. Then beads-proxied-perf gains the same failure-diagnostics
+	// routing step and `if: failure()` pinned upload-artifact step as the PR
+	// acceptance jobs; no new job, trigger, permission or secret.
+	expectedNightlyExecutionHash = "4a92bdce7c7c323b4fb38f338808ec280939e7ffe2fca314d89c303a00a28a60"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -105,6 +106,20 @@ func gzipAndArchive(source, dest string, stderr io.Writer) error {
 			source, err)
 	}
 	return nil
+}
+
+// renameIfAbsent renames oldpath to newpath unless newpath exists, in which
+// case it fails with an error that matches fs.ErrExist. The check and the
+// rename are not atomic, but every rotation by this binary runs under the
+// sidecar lock, so only an older binary's lockless rotation can slip between
+// them.
+func renameIfAbsent(oldpath, newpath string) error {
+	if _, err := os.Lstat(newpath); err == nil {
+		return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: fs.ErrExist}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(oldpath, newpath)
 }
 
 // reapOrphanedRotatingFiles cleans up rotation-era artifacts on

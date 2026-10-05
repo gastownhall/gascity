@@ -61,8 +61,15 @@ func TestDecideIsPure(t *testing.T) {
 	if _, err := decideAllocation(allocInputs{}); err == nil {
 		t.Fatal("a pass with a zero Now must be refused")
 	}
+	checkPureFiles(t, decideFiles)
+}
+
+// checkPureFiles fails t if a file imports a banned package or references a
+// banned call: a decide's facts all come in through its inputs.
+func checkPureFiles(t *testing.T, files []string) {
+	t.Helper()
 	fset := token.NewFileSet()
-	for _, name := range decideFiles {
+	for _, name := range files {
 		f, err := parser.ParseFile(fset, name, nil, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -86,7 +93,7 @@ func TestDecideIsPure(t *testing.T) {
 			}
 			if x, ok := sel.X.(*ast.Ident); ok {
 				if call := imports[x.Name] + "." + sel.Sel.Name; decideBannedCalls[call] {
-					t.Errorf("%s: %s references %s: the clock and the filesystem come in through allocInputs", fset.Position(sel.Pos()), name, call)
+					t.Errorf("%s: %s references %s: the clock and the filesystem come in through the decide's inputs", fset.Position(sel.Pos()), name, call)
 				}
 			}
 			return true

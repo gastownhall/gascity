@@ -372,7 +372,7 @@ func (c *CachingStore) runReconciliation() {
 	if emit {
 		log.Print(logLine)
 	}
-	c.notifyChanges(res.notifications)
+	c.notifyChanges(ChangeScan, res.notifications)
 }
 
 // mergeAction is what the reconcile merge does with one id.

@@ -44,9 +44,9 @@ func closeSessionBeadIfUnassigned(
 		return false
 	}
 	if isFailedCreateSessionBead(session) {
-		return closeFailedCreateBead(sessionFrontDoor(store), session.ID, now, stderr)
+		return closeFailedCreateBead(sessionFrontDoor(store), sessionInfoFromBead(session), now, stderr)
 	}
-	return closeBead(store, session.ID, reason, now, stderr)
+	return closeBead(store, sessionInfoFromBead(session), reason, now, stderr)
 }
 
 // closeSessionInfoIfUnassigned is the session.Info form of
@@ -78,9 +78,9 @@ func closeSessionInfoIfUnassigned(
 		return false
 	}
 	if isFailedCreateSessionInfo(info) {
-		return closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, stderr)
+		return closeFailedCreateBead(sessionFrontDoor(store), info, now, stderr)
 	}
-	return closeBead(store, info.ID, reason, now, stderr)
+	return closeBead(store, info, reason, now, stderr)
 }
 
 // closeSessionBeadIfReachableStoreUnassigned closes a session bead only when
@@ -127,7 +127,7 @@ func closeSessionBeadIfReachableStoreUnassigned(
 		return false
 	}
 	if isFailedCreateSessionInfo(info) {
-		return closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, stderr)
+		return closeFailedCreateBead(sessionFrontDoor(store), info, now, stderr)
 	}
-	return closeBead(store, info.ID, reason, now, stderr)
+	return closeBead(store, info, reason, now, stderr)
 }
