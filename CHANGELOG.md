@@ -101,6 +101,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the configured value with the scope's sidecar and with the running proxy,
   and reports drift as an advisory (#6561).
 
+- **`submit`, `messages` and `interrupt_now` refuse a Claude session that is
+  waiting on a permission prompt.** `POST /v0/session/{id}/submit` and
+  `POST /v0/session/{id}/messages` used to answer 202 and deliver later, which
+  typed the text into the prompt. While `GET .../pending` reports a prompt
+  they now answer 409 `session-conflict` with a `pending_interaction:` detail
+  right away, and accept nothing. `submit` with intent `interrupt_now` is
+  refused the same way instead of interrupting, because its interrupt key
+  would dismiss the prompt. Answer the prompt with `respond`, then send again
+  (#2892).
+- **Stopping a Claude turn clears its input box.** After `POST .../stop` (and
+  `interrupt_now`) the turn is idle, gc waits up to 2 s for Claude Code to
+  put the interrupted prompt back into the input box, then deletes it with
+  Ctrl-U Ctrl-K (never Ctrl-C), so a stop can take up to 2 s longer. When a
+  client is attached to the session, or gc cannot tell, the input box is left
+  alone, since a human may be typing in it. A draft that will not clear is
+  logged; neither case fails the stop.
+
 - **Ready work in a SQLite infra ledger is ordered priority-first.** On a city
   that relocates classes to a `sqlite-beads` binding, that ledger's ready read
   returned rows oldest-first (`created_at, id`). It now returns the canonical
@@ -126,11 +143,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `respond` picks the option by its label ("Yes", "No", …) instead of a fixed
   digit, so `deny` can no longer select "Yes, and switch to auto mode"; when
   no single option matches it sends nothing and returns 409
-  `invalid_interaction`. While a prompt is pending, `submit` and `messages`
-  return 409 `session-conflict` with a `pending_interaction:` detail, `gc
-  session nudge --delivery=immediate` exits non-zero, `--delivery=wait-idle`
-  queues behind the prompt, and the runtime refuses to type into it on every
-  other delivery path (#2892).
+  `invalid_interaction`. A question that Claude wraps onto several rows (a
+  long file name) is recognized too. While a prompt is pending, `submit` and
+  `messages` return 409 (see Changed), `gc session nudge
+  --delivery=immediate` exits non-zero, `--delivery=wait-idle` queues behind
+  the prompt, and the runtime refuses to type into it on every other delivery
+  path. It looks again under the nudge lock, right before it pastes and right
+  before it presses Enter, so a prompt that appears mid-delivery is not
+  answered either (#2892).
 
 - **A message sent after stopping a Claude turn early is no longer merged
   into the stopped prompt.** When `POST .../stop` (or `interrupt_now`) lands
@@ -138,10 +158,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prompt back into its input box. gc cleared the input box with one Ctrl-U,
   which on Claude Code 2.1.288 deletes only one wrapped row, so the next
   message was pasted behind the rest of the old prompt and both went out as
-  one. gc now presses Ctrl-U until the input box reads empty (and fails the
-  delivery if it will not empty), and `stop` waits briefly for the restored
-  prompt and clears it, so a stop leaves the input box empty. A submit whose
-  input box still holds any text is no longer reported as delivered.
+  one. gc now presses Ctrl-U Ctrl-K until the input box reads empty, wherever
+  the cursor is, and fails the delivery if it will not empty; `stop` clears
+  the restored prompt too (see Changed). A submit whose input box still holds
+  any text is no longer reported as delivered.
 
 - **Work hidden by beads migration 0059 is dispatched again.** On the first
   start under a new bd version, `gc start` (and the supervisor, and
