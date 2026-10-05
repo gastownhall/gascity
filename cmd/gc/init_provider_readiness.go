@@ -541,23 +541,66 @@ var initLookPath = exec.LookPath
 
 var initRunVersionCommandContext = exec.CommandContext
 
-var initRunVersionTimeout = 2 * time.Second
+// initProbeAttemptTimeouts bounds each attempt of a local CLI probe
+// ("dolt config --get", "<binary> version"). These commands normally finish
+// in milliseconds, but on a heavily loaded host process startup alone can
+// exceed a few seconds. A probe whose attempt hits its deadline is retried
+// with the next, longer budget; a probe that exits on its own (success or
+// failure) is never retried, so real errors surface immediately. The worst
+// case for a genuinely hung binary is the sum of the budgets plus backoff.
+var initProbeAttemptTimeouts = []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second}
+
+// initProbeRetryBackoff is the pause between timed-out probe attempts.
+var initProbeRetryBackoff = 500 * time.Millisecond
+
+// errInitProbeTimedOut marks a probe that exhausted every attempt budget.
+var errInitProbeTimedOut = errors.New("probe timed out")
+
+// runInitProbeWithRetry runs attempt with each budget in
+// initProbeAttemptTimeouts until it completes before its deadline. It returns
+// the first attempt's result that did not time out, or an error wrapping
+// errInitProbeTimedOut that names the probe and every budget tried.
+func runInitProbeWithRetry(name string, attempt func(ctx context.Context) error) error {
+	budgets := initProbeAttemptTimeouts
+	for i, budget := range budgets {
+		ctx, cancel := context.WithTimeout(context.Background(), budget)
+		err := attempt(ctx)
+		timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+		cancel()
+		if !timedOut {
+			return err
+		}
+		if i < len(budgets)-1 && initProbeRetryBackoff > 0 {
+			time.Sleep(initProbeRetryBackoff)
+		}
+	}
+	return fmt.Errorf("%s %w after %d attempts (%s)", name, errInitProbeTimedOut, len(budgets), formatProbeBudgets(budgets))
+}
+
+func formatProbeBudgets(budgets []time.Duration) string {
+	parts := make([]string, len(budgets))
+	for i, b := range budgets {
+		parts[i] = b.String()
+	}
+	return strings.Join(parts, ", ")
+}
 
 var initRunDoltConfigGet = func(key string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), initRunVersionTimeout)
-	defer cancel()
-
-	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "dolt", "config", "--global", "--get", key)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return "", fmt.Errorf("dolt config probe timed out after %s", initRunVersionTimeout)
+	var value, stderrText string
+	err := runInitProbeWithRetry("dolt config", func(ctx context.Context) error {
+		var stdout, stderr bytes.Buffer
+		cmd := exec.CommandContext(ctx, "dolt", "config", "--global", "--get", key)
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		runErr := cmd.Run()
+		value = strings.TrimSpace(stdout.String())
+		stderrText = strings.TrimSpace(stderr.String())
+		return runErr
+	})
+	if errors.Is(err, errInitProbeTimedOut) {
+		return "", err
 	}
-	value := strings.TrimSpace(stdout.String())
 	if err != nil {
-		stderrText := strings.TrimSpace(stderr.String())
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && value == "" && stderrText == "" {
 			return "", errDoltConfigKeyMissing
@@ -573,13 +616,12 @@ var initRunDoltConfigGet = func(key string) (string, error) {
 // initRunVersion runs "<binary> version" and returns the first line.
 // Tests can override this.
 var initRunVersion = func(binary string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), initRunVersionTimeout)
-	defer cancel()
-
-	out, err := initRunVersionCommandContext(ctx, binary, "version").Output()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return "", fmt.Errorf("%s version probe timed out after %s", binary, initRunVersionTimeout)
-	}
+	var out []byte
+	err := runInitProbeWithRetry(binary+" version", func(ctx context.Context) error {
+		var runErr error
+		out, runErr = initRunVersionCommandContext(ctx, binary, "version").Output()
+		return runErr
+	})
 	if err != nil {
 		return "", err
 	}

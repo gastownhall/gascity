@@ -1134,8 +1134,7 @@ func TestShellQuotePathForOSWindows(t *testing.T) {
 
 func TestInitRunVersionTimesOutHungVersionCommand(t *testing.T) {
 	oldCommandContext := initRunVersionCommandContext
-	oldTimeout := initRunVersionTimeout
-	initRunVersionTimeout = 50 * time.Millisecond
+	stubInitProbeBudgets(t, []time.Duration{50 * time.Millisecond, 50 * time.Millisecond})
 	initRunVersionCommandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestHelperProcessInitRunVersionHang", "--")
 		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
@@ -1143,7 +1142,6 @@ func TestInitRunVersionTimesOutHungVersionCommand(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		initRunVersionCommandContext = oldCommandContext
-		initRunVersionTimeout = oldTimeout
 	})
 
 	start := time.Now()
@@ -1154,8 +1152,112 @@ func TestInitRunVersionTimesOutHungVersionCommand(t *testing.T) {
 	if line != "" {
 		t.Fatalf("initRunVersion line = %q, want empty on timeout", line)
 	}
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+	if !errors.Is(err, errInitProbeTimedOut) {
+		t.Fatalf("initRunVersion error = %v, want errInitProbeTimedOut", err)
+	}
+	if !strings.Contains(err.Error(), "hung-binary version probe timed out after 2 attempts") {
+		t.Fatalf("initRunVersion error = %q, want probe name and attempt count", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("initRunVersion elapsed = %v, want timeout-bound execution", elapsed)
+	}
+}
+
+func stubInitProbeBudgets(t *testing.T, budgets []time.Duration) {
+	t.Helper()
+	oldBudgets := initProbeAttemptTimeouts
+	oldBackoff := initProbeRetryBackoff
+	initProbeAttemptTimeouts = budgets
+	initProbeRetryBackoff = 0
+	t.Cleanup(func() {
+		initProbeAttemptTimeouts = oldBudgets
+		initProbeRetryBackoff = oldBackoff
+	})
+}
+
+func TestRunInitProbeWithRetryRetriesOnlyTimedOutAttempts(t *testing.T) {
+	stubInitProbeBudgets(t, []time.Duration{20 * time.Millisecond, 20 * time.Millisecond, time.Second})
+
+	attempts := 0
+	err := runInitProbeWithRetry("slow probe", func(ctx context.Context) error {
+		attempts++
+		if attempts < 3 {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("runInitProbeWithRetry error = %v, want success on third attempt", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3", attempts)
+	}
+}
+
+func TestRunInitProbeWithRetryDoesNotRetryRealFailures(t *testing.T) {
+	stubInitProbeBudgets(t, []time.Duration{time.Second, time.Second})
+
+	attempts := 0
+	realErr := errors.New("exit status 2")
+	err := runInitProbeWithRetry("broken probe", func(context.Context) error {
+		attempts++
+		return realErr
+	})
+	if !errors.Is(err, realErr) {
+		t.Fatalf("runInitProbeWithRetry error = %v, want the attempt's own error", err)
+	}
+	if errors.Is(err, errInitProbeTimedOut) {
+		t.Fatalf("runInitProbeWithRetry error = %v, must not be reported as a timeout", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (real failures are not retried)", attempts)
+	}
+}
+
+func TestInitRunDoltConfigGetRetriesSlowProbeOnLoadedHost(t *testing.T) {
+	stubInitProbeBudgets(t, []time.Duration{300 * time.Millisecond, 10 * time.Second})
+	binDir := t.TempDir()
+	marker := filepath.Join(binDir, "first-call-done")
+	doltPath := filepath.Join(binDir, "dolt")
+	script := "#!/bin/sh\n" +
+		"if [ ! -e " + shellQuotePOSIXPath(marker) + " ]; then\n" +
+		"  : > " + shellQuotePOSIXPath(marker) + "\n" +
+		"  exec sleep 30\n" +
+		"fi\n" +
+		"echo 'Test User'\n"
+	if err := os.WriteFile(doltPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	value, err := initRunDoltConfigGet("user.name")
+	if err != nil {
+		t.Fatalf("initRunDoltConfigGet error = %v, want success after retry", err)
+	}
+	if value != "Test User" {
+		t.Fatalf("value = %q, want %q", value, "Test User")
+	}
+}
+
+func TestInitRunDoltConfigGetReportsTimeoutAfterAllAttempts(t *testing.T) {
+	stubInitProbeBudgets(t, []time.Duration{100 * time.Millisecond, 100 * time.Millisecond})
+	binDir := t.TempDir()
+	doltPath := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(doltPath, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := initRunDoltConfigGet("user.name")
+	if !errors.Is(err, errInitProbeTimedOut) {
+		t.Fatalf("initRunDoltConfigGet error = %v, want errInitProbeTimedOut", err)
+	}
+	if errors.Is(err, errDoltConfigKeyMissing) {
+		t.Fatalf("initRunDoltConfigGet error = %v, timeout must not read as missing key", err)
+	}
+	if !strings.Contains(err.Error(), "dolt config probe timed out after 2 attempts (100ms, 100ms)") {
+		t.Fatalf("initRunDoltConfigGet error = %q, want attempt detail", err)
 	}
 }
 
