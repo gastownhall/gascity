@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/pendingwatch"
 
 	// Blank import: emergency's init() registers emergency.Record as the payload
 	// type for EmergencySignaled and EmergencyAcked events.
@@ -644,13 +645,13 @@ const (
 	// PendingClearedResolved: the session is still probed but no longer
 	// reports an interaction — it was answered (POST .../respond or at the
 	// terminal) or withdrawn by the session itself.
-	PendingClearedResolved = "resolved"
+	PendingClearedResolved = pendingwatch.ReasonResolved
 	// PendingClearedReplaced: the session now reports a different request_id.
 	// A session.pending for the new interaction follows immediately.
-	PendingClearedReplaced = "replaced"
+	PendingClearedReplaced = pendingwatch.ReasonReplaced
 	// PendingClearedSessionGone: the session left the probed set (closed,
 	// asleep, suspended, or otherwise no longer active).
-	PendingClearedSessionGone = "session_gone"
+	PendingClearedSessionGone = pendingwatch.ReasonSessionGone
 )
 
 // SessionPendingPayload is the typed payload for session.pending: a session

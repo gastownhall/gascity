@@ -246,12 +246,11 @@ const (
 	// SessionPendingCleared fires when that interaction goes away — answered,
 	// withdrawn, replaced by a different interaction, or the session left the
 	// set GET /v0/city/{cityName}/pending probes. Both carry the same
-	// session_id and request_id, and each fires on a transition, never once per
-	// detection poll. The API server's pending monitor emits them while at
-	// least one event stream is open for the city; see
-	// internal/api/pending_monitor.go for the detection cadence, the
-	// restart/resume contract, and why delivery is not exactly once across a
-	// restart.
+	// session_id and request_id, and each fires once per transition, never once
+	// per detection pass. The city's controller emits them whether or not any
+	// client watches the stream; see internal/pendingwatch for the detection
+	// cadence and cmd/gc/pending_interaction_lane.go for the restart
+	// contract (the announced set is rebuilt from this event log).
 	SessionPending        = "session.pending"
 	SessionPendingCleared = "session.pending_cleared"
 	ConvoyCreated         = "convoy.created"

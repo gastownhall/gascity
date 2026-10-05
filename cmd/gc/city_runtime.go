@@ -902,6 +902,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	// Pending-interaction detection (session.pending / pending_cleared) runs
+	// on its own lane with only the controller (pending_interaction_lane.go).
+	defer cr.startPendingInteractionLane(ctx)()
 	// Track pool instance liveness for death detection.
 	var prevPoolRunning map[string]bool
 	runTick := func(trigger string) {

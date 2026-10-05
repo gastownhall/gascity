@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -882,18 +881,6 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 	// background membership sync below, which reads it to resume returning
 	// cities and prunes cities that left the provider set from it.
 	position := events.NewStreamCursor(cursors)
-	// Keep each watched city's pending monitor running while this client is
-	// connected, so session.pending transitions reach the city logs. leaseMu
-	// serializes the leases between the background sync and the deferred
-	// release.
-	leases := newPendingMonitorLeases()
-	var leaseMu sync.Mutex
-	defer func() {
-		leaseMu.Lock()
-		defer leaseMu.Unlock()
-		leases.releaseAll()
-	}()
-	sm.syncPendingMonitorLeases(leases)
 	flushSSEHeaders(hctx)
 
 	keepalive := time.NewTicker(sseKeepalive)
@@ -941,11 +928,6 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 		// Record each new city's start seq so the composite SSE id carries it
 		// and a reconnect resumes the city from where this stream attached.
 		position.Attach(started)
-		leaseMu.Lock()
-		if streamCtx.Err() == nil {
-			sm.syncPendingMonitorLeases(leases)
-		}
-		leaseMu.Unlock()
 	}
 	requestSync := func() {
 		if syncing {
