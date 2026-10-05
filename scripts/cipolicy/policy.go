@@ -126,7 +126,7 @@ const (
 	// with GITHUB_TOKEN, which fails when deps.env falls behind the latest
 	// beads release or the Dolt it qualifies. No new job, trigger or
 	// permission.
-	expectedNightlyExecutionHash = "6d3e09d4d392cfee12325b6cdafc0a3574cc1014b25d142a93baf70cf9441a48"
+	expectedNightlyExecutionHash = "18c8c3d25c0a172da6e9f048ef58a43ce56862d834ee5e888f5d8961b49e5289"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 
