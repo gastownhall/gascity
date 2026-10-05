@@ -778,6 +778,38 @@ func TestBdStoreReopenUsesReopenCommand(t *testing.T) {
 	}
 }
 
+// TestBdStoreReopenClearsStaleCloseReasonFirst pins that a reopen clears the
+// metadata.close_reason Close forwards as --reason, before bd reopen runs, so a
+// later close without a reason does not report the previous close's reason.
+func TestBdStoreReopenClearsStaleCloseReasonFirst(t *testing.T) {
+	var calls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command name: %s", name)
+		}
+		call := strings.Join(args, " ")
+		calls = append(calls, call)
+		switch call {
+		case "show --json bd-abc-123":
+			return []byte(`[{"id":"bd-abc-123","title":"test","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z","close_reason":"duplicate of bd-1","metadata":{"close_reason":"duplicate of bd-1"}}]`), nil
+		case "update --json bd-abc-123 --set-metadata close_reason=":
+			return []byte(`[{"id":"bd-abc-123","status":"closed"}]`), nil
+		case "reopen --json bd-abc-123":
+			return []byte(`{"id":"bd-abc-123","status":"open"}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: bd %s", call)
+		}
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.Reopen("bd-abc-123"); err != nil {
+		t.Fatalf("Reopen() error = %v", err)
+	}
+	want := []string{"show --json bd-abc-123", "update --json bd-abc-123 --set-metadata close_reason=", "reopen --json bd-abc-123"}
+	if fmt.Sprint(calls) != fmt.Sprint(want) {
+		t.Fatalf("bd calls = %q, want %q", calls, want)
+	}
+}
+
 func TestBdStoreCloseNotFound(t *testing.T) {
 	// Generic CLI error without "not found" should NOT be ErrNotFound.
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
