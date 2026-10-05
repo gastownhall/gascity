@@ -471,7 +471,12 @@ func TestPreCommitFailsClosedWhenGoBlockStagesSpecAsSideEffectAndNpmAbsent(t *te
 	if err := os.MkdirAll(filepath.Dir(formatStagedGoPath), 0o755); err != nil {
 		t.Fatalf("create parent for %s: %v", formatStagedGoPath, err)
 	}
-	writeExecutable(t, formatStagedGoPath, "#!/usr/bin/env bash\nexit 0\n")
+	// The hook pipes the staged file list into this script under
+	// `set -o pipefail`. Like the real script, the stub must read its stdin
+	// to EOF: one that exits without reading races the hook's printf, which
+	// dies of SIGPIPE whenever the stub exits first, and bash exits 141
+	// without printing anything (the silent CI flake on loaded runners).
+	writeExecutable(t, formatStagedGoPath, "#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n")
 	runGit("add", "-A")
 	runGit("commit", "-m", "init")
 

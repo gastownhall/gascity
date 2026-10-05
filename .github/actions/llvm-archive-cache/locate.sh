@@ -15,7 +15,11 @@ repo_cache="${REPO_CACHE:?REPO_CACHE is required}"
 runner_os="${RUNNER_OS:?RUNNER_OS is required}"
 module="${MODULE_BAZEL:-MODULE.bazel}"
 
-mapfile -t shas < <(sed -n '/^llvm_dist(/,/^)/s/^ *sha256 = "\([0-9a-f]\{64\}\)",$/\1/p' "$module")
+# A read loop rather than mapfile: macOS runners run this under bash 3.2.
+shas=()
+while IFS= read -r sha; do
+	shas+=("$sha")
+done < <(sed -n '/^llvm_dist(/,/^)/s/^ *sha256 = "\([0-9a-f]\{64\}\)",$/\1/p' "$module")
 if [[ "${#shas[@]}" -ne 1 ]]; then
 	echo "llvm-archive-cache: want one sha256-pinned llvm_dist(...) in $module, found ${#shas[@]}" >&2
 	exit 1

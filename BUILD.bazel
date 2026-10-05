@@ -364,6 +364,7 @@ filegroup(
         "//internal/telemetry:bazel_repo_srcs",
         "//internal/testenv:bazel_repo_srcs",
         "//internal/testfixtures/reviewworkflows:bazel_repo_srcs",
+        "//internal/testpolicy/bazelhermetic:bazel_repo_srcs",
         "//internal/testpolicy/bepsummary:bazel_repo_srcs",
         "//internal/testpolicy/resourcecensus:bazel_repo_srcs",
         "//internal/testpolicy/timingplan:bazel_repo_srcs",
