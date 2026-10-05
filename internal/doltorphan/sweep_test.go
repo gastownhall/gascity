@@ -171,8 +171,13 @@ func TestSweep_LsofErrorFailsClosed(t *testing.T) {
 
 func writeLsofStub(t *testing.T, body string) string {
 	t.Helper()
+	return writeRawLsofStub(t, "printf 'partial\\n'\n"+body)
+}
+
+func writeRawLsofStub(t *testing.T, body string) string {
+	t.Helper()
 	command := filepath.Join(t.TempDir(), "lsof-stub")
-	if err := os.WriteFile(command, []byte("#!/bin/sh\nprintf 'partial\\n'\n"+body+"\n"), 0o755); err != nil {
+	if err := os.WriteFile(command, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile(%s): %v", command, err)
 	}
 	return command
@@ -227,12 +232,45 @@ func TestSweep_LsofKilledBySignalFailsClosed(t *testing.T) {
 	}
 }
 
-func TestSweep_LsofNonZeroExitKeepsOutput(t *testing.T) {
+func TestSweep_LsofUnexpectedExitStatusFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "orphan1", 1, old)
+	command := writeLsofStub(t, "exit 127")
+
+	result := Sweep(SweepConfig{Root: root, lsofCommand: command})
+
+	assertSweepFailedClosed(t, result, dir)
+	var exitErr *exec.ExitError
+	if !errors.As(result.Errors[0], &exitErr) || exitErr.ExitCode() != 127 {
+		t.Fatalf("Errors[0] = %v, want lsof exit status 127", result.Errors[0])
+	}
+}
+
+func TestSweep_LsofEmptyOutputFailsClosed(t *testing.T) {
+	for _, status := range []string{"0", "1"} {
+		t.Run("exit "+status, func(t *testing.T) {
+			root := t.TempDir()
+			old := time.Now().Add(-2 * time.Hour)
+			dir := mkStoreDir(t, root, "orphan1", 1, old)
+			command := writeRawLsofStub(t, "exit "+status)
+
+			result := Sweep(SweepConfig{Root: root, lsofCommand: command})
+
+			assertSweepFailedClosed(t, result, dir)
+			if !errors.Is(result.Errors[0], errLsofNoOutput) {
+				t.Fatalf("Errors[0] = %v, want errLsofNoOutput", result.Errors[0])
+			}
+		})
+	}
+}
+
+func TestSweep_LsofExitOneKeepsOutput(t *testing.T) {
 	root := t.TempDir()
 	old := time.Now().Add(-2 * time.Hour)
 	held := mkStoreDir(t, root, "held1", 1, old)
 	orphan := mkStoreDir(t, root, "orphan1", 1, old)
-	command := writeLsofStub(t, "printf 'dolt 1 u cwd DIR 0,1 0 1 "+held+"/.dolt\\n'\nexit 1")
+	command := writeRawLsofStub(t, "printf '%s\\n' 'dolt 1 u cwd DIR 0,1 0 1 "+held+"/.dolt'\nexit 1")
 
 	result := Sweep(SweepConfig{Root: root, lsofCommand: command})
 

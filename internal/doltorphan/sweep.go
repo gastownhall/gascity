@@ -202,12 +202,14 @@ func lsofHeldChildren(root string, runLsof func(ctx context.Context) ([]byte, er
 	return held, nil
 }
 
-// runLsofW runs `lsof -w` and returns its stdout. A non-zero exit status is
-// accepted because lsof exits non-zero when it cannot read some other
-// process's /proc entries while the rest of its output stays valid
-// (mirroring the shell heuristic's `2>/dev/null`). Launch failures, signal
-// termination and context expiry are fatal even when partial output is
-// present, because a truncated scan under-reports held directories.
+var errLsofNoOutput = errors.New("lsof produced no output")
+
+// runLsofW runs `lsof -w` and returns its stdout. Exit status 1 with output
+// is accepted because lsof exits 1 when it cannot read some other process's
+// /proc entries while the rest of its output stays valid (mirroring the
+// shell heuristic's `2>/dev/null`). Launch failures, any other exit status,
+// signal termination, context expiry and empty output are fatal, because a
+// truncated scan under-reports held directories.
 func runLsofW(ctx context.Context, command string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, command, "-w")
 	out, err := cmd.Output()
@@ -215,8 +217,11 @@ func runLsofW(ctx context.Context, command string) ([]byte, error) {
 		return nil, ctx.Err()
 	}
 	var exitErr *exec.ExitError
-	if err != nil && (!errors.As(err, &exitErr) || !exitErr.Exited()) {
+	if err != nil && (!errors.As(err, &exitErr) || exitErr.ExitCode() != 1) {
 		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, errors.Join(errLsofNoOutput, err)
 	}
 	return out, nil
 }
