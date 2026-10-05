@@ -19,24 +19,53 @@ release.
   priority area, open an issue and tag the roadmap owner. See
   [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Priority areas
+## Priority areas for 1.6
 
-<!-- The roadmap owner fills in 3-6 areas before this file merges, each as:
+### Session and reconciler reliability
 
-### <Area name>
-
-**Goal.** One or two sentences: the outcome, stated for users.
+**Goal.** Sessions and the work they hold converge on their own. After a
+crash, restart, or upgrade, a city returns to the correct state with no
+manual intervention, and the keyed v2 session reconciler is the only
+reconciler.
 
 **This period.**
-- Concrete deliverables, each linking its GitHub issue.
+- Reconciler v2 fully replaces the legacy tick reconciler, and the legacy
+  path is deleted
+  ([reconciler v2](engdocs/architecture/reconciler-v2.md)).
+- Session and reconciler P0/P1 bugs burn down.
 
-**Tracking issue:** #NNN
+**Tracking issue:** [#7093](https://github.com/gastownhall/gascity/issues/7093)
 
-**Out of scope for now.** What we are deliberately not doing in this area,
-so contributors don't spend effort there.
--->
+### Performance
 
-## Not planned
+**Goal.** Gas City stays fast and quiet as cities grow. Infrastructure
+bookkeeping stops loading the versioned work store, and `gc`, `bd`, and the
+reconciler get faster on their hot paths. Numeric targets follow once a
+benchmark exists.
 
-<!-- Things contributors repeatedly propose that we have decided against,
-with the reason, so nobody spends a weekend on them. -->
+**This period.**
+- Infra-class beads (order tracking, wisps, controller and session
+  bookkeeping) move to a local SQLite store; Dolt keeps the versioned work
+  beads
+  ([#3926](https://github.com/gastownhall/gascity/issues/3926)).
+- `gc` and `bd` performance improvements on hot paths.
+- Reconciler performance work.
+
+**Tracking issue:** [#7094](https://github.com/gastownhall/gascity/issues/7094)
+
+### Contributor onboarding
+
+**Goal.** A new contributor, human or agent, finds the rules for the code
+they are changing next to that code, understands its intent and invariants,
+and lands a change through the issue-first flow.
+
+**This period.**
+- Slim root `AGENTS.md`, colocated area rules, and issue-first intake
+  ([#7090](https://github.com/gastownhall/gascity/pull/7090)).
+- Per-package `AGENTS.md` files for the busiest packages: `cmd/gc`,
+  `internal/beads`, and `internal/dispatch`, each naming its guard tests.
+- Package docs for boundary-critical packages, and a codebase map generated
+  from them.
+- A curated set of `status/help-wanted` starter issues.
+
+**Tracking issue:** [#7095](https://github.com/gastownhall/gascity/issues/7095)
