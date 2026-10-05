@@ -127,6 +127,7 @@ go_test(
         "maintenance_test.go",
         "migration_guide_overlay_test.go",
         "namepool_test.go",
+        "native_transport_test.go",
         "options_test.go",
         "order_discovery_test.go",
         "pack_agent_defaults_test.go",
