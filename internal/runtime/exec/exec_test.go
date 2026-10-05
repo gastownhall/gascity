@@ -1545,12 +1545,19 @@ func TestProvider_StartCancellationTerminatesForegroundChild(t *testing.T) {
 	dir := t.TempDir()
 	readyFile := filepath.Join(dir, "ready")
 	terminateFile := filepath.Join(dir, "terminated")
+	// The foreground child writes the readiness marker itself, then execs
+	// sleep. A marker written by the adapter shell before forking sleep
+	// leaves a window where the forked child still runs the shell's TERM
+	// handler: a SIGTERM landing there is swallowed by the child, which then
+	// execs a 30s sleep, and the shell defers its trap until that foreground
+	// command completes, so WaitDelay kills it first. The exec'd child starts
+	// with default TERM disposition, so once the marker exists the SIGTERM
+	// always ends the child and runs the trap.
 	script := writeScript(t, dir, fmt.Sprintf(`
 case "$1" in
   start)
     trap 'printf "%%s\n" terminated > "%s"; exit 0' TERM
-    : > "%s"
-    sleep 30
+    sh -c ': > "$1"; exec sleep 30' sh "%s"
     ;;
   *) exit 2 ;;
 esac

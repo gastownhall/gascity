@@ -91,7 +91,7 @@ two steps:
 | Step | Signal | Sent to | What the script should do |
 |------|--------|---------|---------------------------|
 | 1 | `SIGTERM` | the whole process group (the script and any foreground child) | Roll back anything this invocation created, then exit |
-| 2 | `SIGKILL` | the script, after a grace period (2 seconds by default) | Nothing; it cannot be caught |
+| 2 | `SIGKILL` | the script, after a 2-second grace period | Nothing; it cannot be caught |
 
 A canceled call is reported as canceled whatever the script's exit code, so a
 `TERM` handler may exit with any status, including 2.
