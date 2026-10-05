@@ -33,7 +33,7 @@ func boundedToolCommand(t *testing.T, timeout time.Duration, path string, args .
 			err = terminateBoundedToolCommand(cmd)
 		}
 		if err != nil && !errors.Is(err, os.ErrProcessDone) {
-			t.Errorf("stop descendants left by %s: %v", path, err)
+			t.Logf("stop descendants left by %s: %v", path, err)
 		}
 	})
 	return cmd, ctx

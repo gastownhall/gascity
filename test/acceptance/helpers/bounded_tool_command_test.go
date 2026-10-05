@@ -67,6 +67,24 @@ func TestBoundedToolCommandCleanupStopsDescendantsOfAnExitedLeader(t *testing.T)
 	requireDescendantsGone(t, cmd, held, "test cleanup after its leader exited")
 }
 
+func TestBoundedToolCommandCleanupToleratesAZombieInItsGroup(t *testing.T) {
+	held, holder := descendantPipe(t)
+	t.Run("zombie outlives the leader", func(t *testing.T) {
+		joiner, _ := boundedToolCommand(t, time.Minute, descendantLeavingStub(t, "#!/bin/sh\nexit 0\n"))
+		leader, _ := boundedToolCommand(t, time.Minute, descendantLeavingStub(t, "#!/bin/sh\nexec sleep 300\n"))
+		if err := leader.Start(); err != nil {
+			t.Fatal(err)
+		}
+		joiner.SysProcAttr.Pgid = leader.Process.Pid
+		joiner.ExtraFiles = []*os.File{holder}
+		if err := joiner.Start(); err != nil {
+			t.Fatal(err)
+		}
+		closeHolder(t, holder)
+		requireDescendantsGone(t, joiner, held, "the joiner exited")
+	})
+}
+
 func descendantLeavingStub(t *testing.T, script string) string {
 	t.Helper()
 	stub := filepath.Join(t.TempDir(), "bd")
