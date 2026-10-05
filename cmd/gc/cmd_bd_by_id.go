@@ -164,25 +164,31 @@ package main
 // store census. That is once per process, memoized with every other one-shot
 // command's routing, but it is not free, so it is paid only by an invocation
 // that could concern a class-owned bead: a served by-ID form, an argv that
-// addresses a reserved-prefix id, or a MUTATION with unambiguous positional
-// ids. An ordinary work READ or SELECTOR never enters; a mutation addressing
-// ids enters exactly once per process.
+// addresses a reserved-prefix id, or a MUTATION or by-ID READ with unambiguous
+// positional ids. A SELECTOR never enters; an argv addressing ids enters
+// exactly once per process. A city that relocates nothing pays none of it:
+// the front door short-circuits on the config before any registry is built.
 //
-// The mutation arm is the widening, and the id shape is why it cannot be
+// The subject arms are the widening, and the id shape is why they cannot be
 // narrower. A class store mints from its binding workspace's own prefix and
 // `gc storage migrate` preserves ids, so "gc-123" says nothing about which
 // store holds the row — only a probe does, and skipping it is what sent every
 // unserved mutation of a class resident to the ledger that cannot hold it.
-// Reads and selectors stay outside because they address no subject whose
-// residence could decide anything: a selector QUOTES ids, and a read that this
-// surface serves is already inside. An ambiguous scan stays outside too, for
-// the plainest reason — it yields no ids to probe.
+// Reads are in the same arm for the same reason (#6015): `show <id>` is served
+// and enters, but `show --long <id>` and `show <id> <id>` address the same
+// subject in a spelling the served parser rejects, and while they skipped the
+// funnel they fell through to the work store — which answers a migrated bead
+// from the copy the migration left behind. Selectors stay outside because they
+// address no subject whose residence could decide anything: a selector QUOTES
+// ids. An ambiguous scan stays outside too, for the plainest reason — it
+// yields no ids to probe.
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"sort"
 	"strconv"
@@ -856,7 +862,7 @@ func (d bdByIDClassDoor) readFailure(id string, err error) error {
 // firstResident returns the first id the class binding actually holds, or ""
 // when it holds none of them.
 //
-// It is bounded by construction: the ids come from one mutation argv, which is
+// It is bounded by construction: the ids come from one by-ID argv, which is
 // a handful of tokens, and the probe stops at the first hit. Residence — not
 // the reserved-prefix rule — is the only thing that can decide ownership for
 // these, so a failure to READ is a failure to decide and surfaces as one
@@ -890,6 +896,66 @@ func bdByIDMutationSubjects(bdArgs []string) []string {
 	return ids
 }
 
+// bdByIDDepTreeValueFlags and bdByIDDepTreeBoolFlags are `dep tree`'s flag
+// manifest for the read scanner. bdflags carries none for it, so this is the
+// set the served parser (parseBdByIDDepTreeArgs) implements; any other flag
+// scans as ambiguous and leaves the argv on its existing path.
+var (
+	bdByIDDepTreeValueFlags = map[string]bool{"--direction": true, "--max-depth": true, "-d": true}
+	bdByIDDepTreeBoolFlags  = map[string]bool{"--reverse": true}
+)
+
+// bdByIDShowIDFlags names the show flag whose value is the addressed bead
+// itself (`bd show --id <id>`, for ids that look like flags).
+var bdByIDShowIDFlags = map[string]bool{"--id": true}
+
+// bdByIDReadSubjects returns the bead ids a by-ID READ argv ADDRESSES, or nil
+// when the argv is not such a read or cannot be scanned into ids.
+//
+// The verbs are the reads parseBdByIDOp serves — show, dep list, dep tree — so
+// every UNSERVED spelling of one of them (`show --long <id>`, `show <id> <id>`)
+// reaches the residence probe instead of the work store. The scan is the one
+// bdMutationWriteIDs trusts and fails closed the same way: a flag outside the
+// verb's manifest might consume the next token, so the scan yields nothing
+// rather than probing a value as a subject.
+//
+// SELECTORS stay out by construction: list, query and search QUOTE ids rather
+// than address them, and bd_relocated_classes.go refuses those on its own
+// terms.
+func bdByIDReadSubjects(bdArgs []string) []string {
+	sub, rest, resolved := bdByIDSubcommand(bdArgs)
+	var valueFlags, boolFlags, idValueFlags map[string]bool
+	switch {
+	case resolved && sub == "show":
+		valueFlags, boolFlags, idValueFlags = bdflags.ValueFlags(sub), bdflags.BoolFlags(sub), bdByIDShowIDFlags
+	case resolved && sub == "dep list":
+		valueFlags, boolFlags = bdflags.ValueFlags(sub), bdflags.BoolFlags(sub)
+	case !resolved && bdByIDIsDepTree(bdArgs, rest):
+		rest = rest[1:]
+		valueFlags, boolFlags = bdflags.GlobalValueFlags(), bdflags.GlobalBoolFlags()
+		maps.Copy(valueFlags, bdByIDDepTreeValueFlags)
+		maps.Copy(boolFlags, bdByIDDepTreeBoolFlags)
+	default:
+		return nil
+	}
+	ids, ambiguous := bdScanPositionalIDs(rest, valueFlags, boolFlags, idValueFlags)
+	if ambiguous {
+		return nil
+	}
+	return ids
+}
+
+// bdByIDIsDepTree reports whether an argv bdByIDSubcommand could not resolve
+// is `dep tree`: its verb is the unknown word "dep" and the word after it is
+// "tree". after is bdByIDSubcommand's remainder, which starts just past "dep".
+func bdByIDIsDepTree(bdArgs, after []string) bool {
+	if len(after) == 0 || after[0] != "tree" {
+		return false
+	}
+	verbAt := len(bdArgs) - len(after) - 1
+	return verbAt >= 0 && bdArgs[verbAt] == "dep"
+}
+
 // bdIDIsClassReserved reports whether id carries a reserved class id prefix.
 // Those namespaces belong to the relocated class stores — whether the store's
 // own sequence minted the id or a subsystem inside it did — so a binding that
@@ -920,16 +986,22 @@ func bdIDIsClassReserved(id string) bool {
 func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr io.Writer) (int, bool) {
 	op, served := parseBdByIDOp(bdArgs)
 	classIDs := bdArgsAddressedClassIDs(bdArgs)
-	mutationIDs := bdByIDMutationSubjects(bdArgs)
-	if !served && len(classIDs) == 0 && len(mutationIDs) == 0 {
+	subjectIDs := bdByIDMutationSubjects(bdArgs)
+	if len(subjectIDs) == 0 {
+		subjectIDs = bdByIDReadSubjects(bdArgs)
+	}
+	if !served && len(classIDs) == 0 && len(subjectIDs) == 0 {
 		// Nothing here can concern a class-owned bead, so the binding is not
 		// opened and the funnel is not entered.
 		//
 		// This is also the cost gate. Entering the funnel resolves a plan and
 		// opens a database, and the born-split arm re-proves its invariant with
-		// a full work-store census; a read or selector that addresses no
-		// subject must not pay that, and neither must a mutation whose argv
+		// a full work-store census; a selector, which addresses no subject,
+		// must not pay that, and neither must a mutation or read whose argv
 		// cannot be scanned into ids at all — there would be nothing to probe.
+		// An unserved by-ID read adds no population beyond its served form:
+		// `show <id>` already enters, so `show --long <id>` entering too costs
+		// only the spellings whose answers were wrong.
 		return 0, false
 	}
 	door, routed, err := openBdByIDClassFrontDoor(cityPath)
@@ -941,7 +1013,7 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		return 0, false
 	}
 	if !served {
-		return refuseUnservedClassMutation(door, bdArgs, classIDs, mutationIDs, stderr)
+		return refuseUnservedClassTarget(door, bdArgs, classIDs, subjectIDs, stderr)
 	}
 	return serveBdByIDResolved(door, op, bdArgs, rigName, classDoorRepoDirs(cityPath), stdout, stderr)
 }
@@ -956,21 +1028,29 @@ func classDoorRepoDirs(cityPath string) workRecordRepoDirs {
 	return workRecordRepoDirs{cityPath: cityPath, legacy: cityPath, rigs: cityRigsLoader(cityPath)}
 }
 
-// refuseUnservedClassMutation answers a by-ID invocation that addresses a bead
+// refuseUnservedClassTarget answers a by-ID invocation that addresses a bead
 // the class binding HOLDS in a spelling this surface does not serve. Returning
 // (0, false) means none of the subjects PROBED is resident there — bd is still
 // their truth and the caller's passthrough answers byte-identically, including
 // doBd's own exact-ID collision guard, which this arm must not displace.
 //
 // The candidates are EVERY reserved-prefix id the argv addresses
-// (bdArgsAddressedClassIDs) plus whatever bdMutationWriteIDs could reduce to
-// subjects. Probing every addressed id, not just the first, is what makes a
-// multi-subject `dep add`/`dep remove` order-independent: an argv whose first
-// reserved id is a clean miss and whose LATER id is class-resident is refused on
-// the later id rather than falling through on the first miss. The one spelling
-// still outside this net is the all-work-prefix argv, which carries no reserved
-// id and is no write-mutation verb, so it never opens this door to be probed at
-// all; ga-zvetw tracks that remaining end.
+// (bdArgsAddressedClassIDs) plus whatever the mutation or by-ID read scanner
+// (bdByIDMutationSubjects, bdByIDReadSubjects) could reduce to subjects.
+// Probing every addressed id, not just the first, is what makes a
+// multi-subject `dep add`/`dep remove` — or `show <id> <id>` — order-independent:
+// an argv whose first id is a clean miss and whose LATER id is class-resident is
+// refused on the later id rather than falling through on the first miss.
+//
+// A READ is refused rather than served partially because a partial answer is
+// the failure being prevented: `show <work-id> <class-id>` answered by bd prints
+// the class leg from the copy the migration left in the work store. Each id read
+// on its own, in a served spelling, is answered from its owner.
+//
+// What stays outside this net (ga-zvetw) is an all-work-prefix argv the
+// scanners cannot reduce to subjects — a verb that is neither a write mutation
+// nor a by-ID read, or one carrying a flag outside its manifest (an ambiguous
+// scan) — which never opens this door to be probed at all.
 //
 // Ownership is decided by RESIDENCE for every subject, including one carrying a
 // reserved prefix. The prefix decides which ids are asked about — an argv naming
@@ -979,10 +1059,10 @@ func classDoorRepoDirs(cityPath string) workRecordRepoDirs {
 // binding is the namespace's authority, not its only lawful holder, so refusing
 // on the prefix alone strands every write to a rig configured with a prefix
 // inside the namespace.
-func refuseUnservedClassMutation(door bdByIDClassDoor, bdArgs, classIDs, mutationIDs []string, stderr io.Writer) (int, bool) {
-	candidates := make([]string, 0, len(classIDs)+len(mutationIDs))
+func refuseUnservedClassTarget(door bdByIDClassDoor, bdArgs, classIDs, subjectIDs []string, stderr io.Writer) (int, bool) {
+	candidates := make([]string, 0, len(classIDs)+len(subjectIDs))
 	candidates = append(candidates, classIDs...)
-	candidates = append(candidates, mutationIDs...)
+	candidates = append(candidates, subjectIDs...)
 	resident, err := door.firstResident(candidates)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1195,7 +1275,7 @@ func bdByIDRefusedVerb(bdArgs []string) string {
 // ADDRESSES, in argv order, for any bd subcommand, and is what keeps an unserved
 // spelling from reaching the work ledger. Returning all addressed ids — not just
 // the first — is what makes a multi-subject verb's protection independent of the
-// order the subjects were typed (see refuseUnservedClassMutation).
+// order the subjects were typed (see refuseUnservedClassTarget).
 //
 // It exists because the served parsers are deliberately strict: they reject
 // every flag they do not implement, and a rejection used to mean the command
