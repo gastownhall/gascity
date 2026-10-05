@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-05
+
 ### Upgrading Notes
 
 - **Upgrade Beads (`bd`) to v1.3.1.** v1.5.0 pins and is tested against bd
@@ -348,8 +350,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`gc bd show --watch` works on proxied cities.** bd v1.3.0 refuses watch
   mode under the default proxied beads transport, so `gc bd show <id> --watch`
   (also `view` and `--current`) now polls the bead every 2 seconds and redraws
-  it when it changes. Plain `bd show --watch` still refuses there until beads
-  fixes it upstream; use `gc bd show --watch` (#6681).
+  it when it changes. With the pinned bd v1.3.1, plain `bd show --watch` works
+  on proxied cities too (#6681).
 
 - **The tutorials match the `gc` pack binding.** Tutorial 01 and the
   quickstart now show `[imports.gc]`, as `gc init` writes it (#6676).
