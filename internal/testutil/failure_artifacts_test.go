@@ -151,7 +151,9 @@ func TestCopyBoundedFileKeepsHeadAndTail(t *testing.T) {
 	}
 	dst := filepath.Join(dir, "copy.log")
 
-	copyBoundedFile(src, dst)
+	if err := copyBoundedFile(src, dst); err != nil {
+		t.Fatal(err)
+	}
 
 	got, err := os.ReadFile(dst)
 	if err != nil {
@@ -173,7 +175,9 @@ func TestCopyBoundedFileCopiesSmallFilesVerbatim(t *testing.T) {
 	writeTestFile(t, src, "short log\n")
 	dst := filepath.Join(dir, "copy.log")
 
-	copyBoundedFile(src, dst)
+	if err := copyBoundedFile(src, dst); err != nil {
+		t.Fatal(err)
+	}
 
 	got, err := os.ReadFile(dst)
 	if err != nil {
@@ -181,5 +185,81 @@ func TestCopyBoundedFileCopiesSmallFilesVerbatim(t *testing.T) {
 	}
 	if string(got) != "short log\n" {
 		t.Fatalf("copy = %q", got)
+	}
+}
+
+func TestCopyBoundedFileCapBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		size    int
+		wantLen int
+	}{
+		{size: maxFailureArtifactBytes, wantLen: maxFailureArtifactBytes},
+		{size: maxFailureArtifactBytes + 1, wantLen: maxFailureArtifactBytes + len(truncatedArtifactMarker)},
+	} {
+		dir := t.TempDir()
+		src := filepath.Join(dir, "server.log")
+		content := bytes.Repeat([]byte("x"), tc.size)
+		content[0], content[len(content)-1] = 'H', 'T'
+		if err := os.WriteFile(src, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		dst := filepath.Join(dir, "copy.log")
+
+		if err := copyBoundedFile(src, dst); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := os.ReadFile(dst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != tc.wantLen || got[0] != 'H' || got[len(got)-1] != 'T' {
+			t.Fatalf("size %d: copy is %d bytes (first %q last %q), want %d", tc.size, len(got), got[0], got[len(got)-1], tc.wantLen)
+		}
+	}
+}
+
+func TestCopyBoundedFileReportsUnwritableDestination(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "dolt.log")
+	writeTestFile(t, src, "short log\n")
+
+	if err := copyBoundedFile(src, filepath.Join(dir, "missing", "copy.log")); err == nil {
+		t.Fatal("copyBoundedFile into a missing directory returned nil")
+	}
+}
+
+func TestSaveDiagnosticsReportsUnusableArtifactDir(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	writeTestFile(t, blocker, "")
+	t.Setenv(FailureArtifactDirEnv, blocker)
+
+	if err := saveDiagnostics("TestX", managedDoltTree(t)); err == nil {
+		t.Fatal("saveDiagnostics into a path under a regular file returned nil")
+	}
+}
+
+func TestSaveDiagnosticsReportsRemovedSourceDir(t *testing.T) {
+	t.Setenv(FailureArtifactDirEnv, t.TempDir())
+	gone := filepath.Join(t.TempDir(), "gc-acceptance-gone")
+
+	if err := saveDiagnostics("TestX", gone); err == nil {
+		t.Fatal("saveDiagnostics of a removed dir returned nil")
+	}
+}
+
+func TestSaveDiagnosticsUnsetArtifactDirReturnsNil(t *testing.T) {
+	t.Setenv(FailureArtifactDirEnv, "")
+
+	if err := saveDiagnostics("TestX", filepath.Join(t.TempDir(), "missing")); err != nil {
+		t.Fatalf("saveDiagnostics with no artifact dir = %v, want nil", err)
+	}
+}
+
+func TestSaveDiagnosticsHealthyTreeReturnsNil(t *testing.T) {
+	t.Setenv(FailureArtifactDirEnv, t.TempDir())
+
+	if err := saveDiagnostics("TestX", managedDoltTree(t)); err != nil {
+		t.Fatalf("saveDiagnostics = %v", err)
 	}
 }
