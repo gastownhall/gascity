@@ -499,13 +499,16 @@ type absorbOpts struct {
 // absorbFreshLocked installs a fresh row for id per opts. It is the only code
 // that installs a cached row alongside clearing the row's tombstone/staleness
 // state. now is the caller's clock read for the whole pass; it is consulted
-// only by seqClearGuarded. Caller must hold c.mu in write mode.
-func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, opts absorbOpts) {
+// only by seqClearGuarded. It reports whether a caller passing
+// opts.closeAnnounced owns the bead.closed announcement for this absorb (see
+// trackCloseTransitionLocked); callers that do not announce ignore it. Caller
+// must hold c.mu in write mode.
+func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, opts absorbOpts) (announceClose bool) {
 	c.advanceObservationLocked()
 	previous, hadPrevious := c.beads[id]
 	bead = c.absorbReadyProjectionLocked(id, bead, opts)
 	c.beads[id] = cloneBead(bead)
-	c.trackCloseTransitionLocked(id, previous, hadPrevious, bead, opts.closeAnnounced)
+	announceClose = c.trackCloseTransitionLocked(id, previous, hadPrevious, bead, opts.closeAnnounced)
 	switch opts.depsMode {
 	case depsExplicit:
 		c.deps[id] = cloneDeps(opts.deps)
@@ -533,29 +536,40 @@ func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, op
 	case seqClearBeadSeqOnly:
 		delete(c.beadSeq, id)
 	}
+	return announceClose
 }
 
 // trackCloseTransitionLocked keeps unannouncedCloses in step with the row just
 // installed for id. A row that is not closed cancels any queued close (a
 // reopen before the drain must not announce a stale close). A not-closed to
-// closed transition is queued unless the caller announces it itself. Caller
-// must hold c.mu in write mode.
-func (c *CachingStore) trackCloseTransitionLocked(id string, previous Bead, hadPrevious bool, installed Bead, announced bool) {
+// closed transition is queued unless the caller announces it itself.
+//
+// For a caller that announces (announced=true) installing a closed row, the
+// result reports whether that caller owns the bead.closed: it does when this
+// absorb is the not-closed to closed transition (or there was no cached row
+// to compare), or when it canceled a close another absorb queued but had not
+// drained yet. When a concurrent reader already installed and announced the
+// close, the caller does not own it, so the close is announced exactly once.
+// Caller must hold c.mu in write mode.
+func (c *CachingStore) trackCloseTransitionLocked(id string, previous Bead, hadPrevious bool, installed Bead, announced bool) bool {
 	if installed.Status != "closed" || announced {
-		if _, queued := c.unannouncedCloses[id]; queued {
+		_, queued := c.unannouncedCloses[id]
+		if queued {
 			delete(c.unannouncedCloses, id)
 			c.hasUnannouncedCloses.Store(len(c.unannouncedCloses) > 0)
 		}
-		return
+		return announced && installed.Status == "closed" &&
+			(queued || !hadPrevious || previous.Status != "closed")
 	}
 	if !hadPrevious || previous.Status == "closed" {
-		return
+		return false
 	}
 	if c.unannouncedCloses == nil {
 		c.unannouncedCloses = make(map[string]Bead)
 	}
 	c.unannouncedCloses[id] = cloneBead(installed)
 	c.hasUnannouncedCloses.Store(true)
+	return false
 }
 
 // takeUnannouncedClosesLocked drains the queued closes in id order. Caller
