@@ -10,6 +10,7 @@ go_test(
         "beads_health_test.go",
         "beads_migrate_proxied_test.go",
         "beads_proxied_default_test.go",
+        "beads_proxied_idle_timeout_test.go",
         "beads_proxied_native_safety_test.go",
         "beads_proxied_native_test.go",
         "beads_proxied_shared_server_test.go",
@@ -64,6 +65,7 @@ go_test(
     deps = [
         "//internal/beads",
         "//internal/beads/contract",
+        "//internal/beads/proxyendpoint",
         "//internal/builtinpacks",
         "//internal/citylayout",
         "//internal/config",
