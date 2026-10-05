@@ -8608,7 +8608,7 @@ func TestSourceWorkflowChildSourcesReadsTheEphemeralTierOfTheRelocatedTree(t *te
 		Metadata: map[string]string{beadmeta.SourceBeadIDMetadataKey: sourceBeadID},
 	})
 
-	children, err := sourceWorkflowChildSources(binding, sourceBeadID, "", "", "")
+	children, err := sourceWorkflowChildSources(binding, sourceBeadID, "", "")
 	if err != nil {
 		t.Fatalf("sourceWorkflowChildSources: %v", err)
 	}
