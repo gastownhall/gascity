@@ -1554,8 +1554,17 @@ type SlingResult struct {
 	ConvoyID       string
 	// Batch is set only when the bead was a convoy whose open children were
 	// routed one by one.
-	Batch    *SlingBatchSummary
+	Batch *SlingBatchSummary
+	// Children is the per-child outcome of a convoy sling, set with Batch.
+	Children []SlingChildOutcome
 	Warnings []string
+}
+
+// Partial reports whether the server routed some convoy children and failed
+// others (status "partial"). The sling changed state; Children says which
+// children still need attention.
+func (r SlingResult) Partial() bool {
+	return r.Status == SlingStatusPartial
 }
 
 // Sling routes work to a target agent or pool over the control plane
@@ -1616,7 +1625,7 @@ func (c *Client) Sling(req SlingRequest) (SlingResult, error) {
 	}
 	r := resp.JSON200
 	out := SlingResult{
-		Status:         r.Status,
+		Status:         string(r.Status),
 		Target:         r.Target,
 		Formula:        derefStr(r.Formula),
 		Bead:           derefStr(r.Bead),
@@ -1635,6 +1644,20 @@ func (c *Client) Sling(req SlingRequest) (SlingResult, error) {
 			Failed:        int(b.Failed),
 			Skipped:       int(b.Skipped),
 			Idempotent:    int(b.Idempotent),
+		}
+	}
+	if r.Children != nil {
+		out.Children = make([]SlingChildOutcome, 0, len(*r.Children))
+		for _, c := range *r.Children {
+			out.Children = append(out.Children, SlingChildOutcome{
+				BeadID:     c.BeadId,
+				Outcome:    string(c.Outcome),
+				Status:     derefStr(c.Status),
+				Reason:     derefStr(c.Reason),
+				Formula:    derefStr(c.Formula),
+				WorkflowID: derefStr(c.WorkflowId),
+				MoleculeID: derefStr(c.MoleculeId),
+			})
 		}
 	}
 	if r.Warnings != nil {

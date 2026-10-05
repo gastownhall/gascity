@@ -347,6 +347,7 @@ go_test(
         "handler_sessions_test.go",
         "handler_sling_cli_parity_test.go",
         "handler_sling_graph_binding_test.go",
+        "handler_sling_partial_test.go",
         "handler_sling_test.go",
         "handler_status_bench_test.go",
         "handler_status_count_test.go",

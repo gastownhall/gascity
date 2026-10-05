@@ -510,6 +510,45 @@ func (e SessionTranscriptRawResponseFormat) Valid() bool {
 	}
 }
 
+// Defines values for SlingChildOutcomeOutcome.
+const (
+	Failed  SlingChildOutcomeOutcome = "failed"
+	Routed  SlingChildOutcomeOutcome = "routed"
+	Skipped SlingChildOutcomeOutcome = "skipped"
+)
+
+// Valid indicates whether the value is a known member of the SlingChildOutcomeOutcome enum.
+func (e SlingChildOutcomeOutcome) Valid() bool {
+	switch e {
+	case Failed:
+		return true
+	case Routed:
+		return true
+	case Skipped:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SlingResponseStatus.
+const (
+	Partial SlingResponseStatus = "partial"
+	Slung   SlingResponseStatus = "slung"
+)
+
+// Valid indicates whether the value is a known member of the SlingResponseStatus enum.
+func (e SlingResponseStatus) Valid() bool {
+	switch e {
+	case Partial:
+		return true
+	case Slung:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for StatusConditionalWriteStoreVerdictLatch.
 const (
 	StatusConditionalWriteStoreVerdictLatchIncapable StatusConditionalWriteStoreVerdictLatch = "incapable"
@@ -4975,6 +5014,33 @@ type SlingBatchSummary struct {
 	Total int64 `json:"total"`
 }
 
+// SlingChildOutcome defines model for SlingChildOutcome.
+type SlingChildOutcome struct {
+	// BeadId Child bead ID.
+	BeadId string `json:"bead_id"`
+
+	// Formula Formula attached to the child, when one was.
+	Formula *string `json:"formula,omitempty"`
+
+	// MoleculeId Root of the formula wisp attached to the child, when a non-graph formula was attached.
+	MoleculeId *string `json:"molecule_id,omitempty"`
+
+	// Outcome routed: this sling routed the child (or attached a formula to it). failed: routing it failed; see reason. skipped: already routed to the target, or not open (see status).
+	Outcome SlingChildOutcomeOutcome `json:"outcome"`
+
+	// Reason Why routing the child failed. Present only for outcome failed.
+	Reason *string `json:"reason,omitempty"`
+
+	// Status The child's bead status when it was skipped because it was not open.
+	Status *string `json:"status,omitempty"`
+
+	// WorkflowId Graph workflow launched for the child, when one was.
+	WorkflowId *string `json:"workflow_id,omitempty"`
+}
+
+// SlingChildOutcomeOutcome routed: this sling routed the child (or attached a formula to it). failed: routing it failed; see reason. skipped: already routed to the target, or not open (see status).
+type SlingChildOutcomeOutcome string
+
 // SlingInputBody defines model for SlingInputBody.
 type SlingInputBody struct {
 	// AttachedBeadId Bead or convoy ID to attach formula to, in place of bead (gc sling --on).
@@ -5029,6 +5095,9 @@ type SlingResponse struct {
 	Batch          *SlingBatchSummary `json:"batch,omitempty"`
 	Bead           *string            `json:"bead,omitempty"`
 
+	// Children One entry per child of the expanded convoy, in the order gc sling reports them: routed, failed (with the reason) or skipped. Present whenever batch is.
+	Children *[]SlingChildOutcome `json:"children,omitempty"`
+
 	// ConvoyId Auto-convoy tracking the routed bead, when one was created or reused. Matches gc sling --json convoy_id.
 	ConvoyId *string `json:"convoy_id,omitempty"`
 
@@ -5038,14 +5107,19 @@ type SlingResponse struct {
 	Mode         *string `json:"mode,omitempty"`
 
 	// MoleculeId Root of the formula wisp attached to the bead, when a non-graph (v1) formula was attached. Matches gc sling --json molecule_id.
-	MoleculeId *string   `json:"molecule_id,omitempty"`
-	RootBeadId *string   `json:"root_bead_id,omitempty"`
-	Run        *RunRef   `json:"run,omitempty"`
-	Status     string    `json:"status"`
-	Target     string    `json:"target"`
-	Warnings   *[]string `json:"warnings,omitempty"`
-	WorkflowId *string   `json:"workflow_id,omitempty"`
+	MoleculeId *string `json:"molecule_id,omitempty"`
+	RootBeadId *string `json:"root_bead_id,omitempty"`
+	Run        *RunRef `json:"run,omitempty"`
+
+	// Status slung: the sling completed. partial: a convoy sling routed some children and failed others; the request changed state, so do not retry it as a whole. children names each child's outcome, and batch.failed counts the failures.
+	Status     SlingResponseStatus `json:"status"`
+	Target     string              `json:"target"`
+	Warnings   *[]string           `json:"warnings,omitempty"`
+	WorkflowId *string             `json:"workflow_id,omitempty"`
 }
+
+// SlingResponseStatus slung: the sling completed. partial: a convoy sling routed some children and failed others; the request changed state, so do not retry it as a whole. children names each child's outcome, and batch.failed counts the failures.
+type SlingResponseStatus string
 
 // Status defines model for Status.
 type Status struct {
