@@ -81,7 +81,13 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 		return nil
 	}
 	startSeq := c.currentMutationSeq()
+	if updateCloses(opts) {
+		c.beginCloseIntent(id)
+	}
 	if err := c.backing.Update(id, opts); err != nil {
+		if updateCloses(opts) {
+			c.endCloseIntent(id)
+		}
 		return err
 	}
 	c.absorbUpdate(id, opts, startSeq)
@@ -100,7 +106,13 @@ func (c *CachingStore) UpdateIfAssignment(id, expectedStatus, expectedAssignee s
 		return false, ErrConditionalWriteUnsupported
 	}
 	startSeq := c.currentMutationSeq()
+	if updateCloses(opts) {
+		c.beginCloseIntent(id)
+	}
 	updated, err := updater.UpdateIfAssignment(id, expectedStatus, expectedAssignee, opts)
+	if (err != nil || !updated) && updateCloses(opts) {
+		c.endCloseIntent(id)
+	}
 	switch {
 	case err != nil:
 		return false, err
@@ -117,6 +129,11 @@ func (c *CachingStore) UpdateIfAssignment(id, expectedStatus, expectedAssignee s
 func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq uint64) {
 	fresh, err := c.backing.Get(id)
 	c.mu.Lock()
+	if updateCloses(opts) {
+		// Every branch below claims (or declines) the close under this
+		// lock, so the intent can end here.
+		c.endCloseIntentLocked(id)
+	}
 	raced := c.racedWriteLocked(id, startSeq)
 	if errors.Is(err, ErrNotFound) {
 		closed, notifyClosed := c.patchedCachedRowLocked(id, func(b *Bead) { setBeadStatus(b, "closed") })
@@ -395,7 +412,9 @@ func (c *CachingStore) Close(id string) error {
 		return nil
 	}
 	startSeq := c.currentMutationSeq()
+	c.beginCloseIntent(id)
 	if err := c.backing.Close(id); err != nil {
+		c.endCloseIntent(id)
 		return err
 	}
 
@@ -416,6 +435,8 @@ func (c *CachingStore) Close(id string) error {
 	}
 
 	c.mu.Lock()
+	// The claim below runs under this same lock.
+	c.endCloseIntentLocked(id)
 	// A fenced close installs nothing but still notifies the closed row, as
 	// an unfenced one does: the close committed either way.
 	raced := c.racedWriteLocked(id, startSeq)
