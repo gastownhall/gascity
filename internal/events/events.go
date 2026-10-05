@@ -429,6 +429,14 @@ const (
 	// emission is wired in stage 3 — nothing emits it yet.
 	BeadsConditionalWritesDegraded = "beads.conditional_writes.degraded"
 
+	// BeadsBlockedRecomputed fires when gc start runs bd's full is_blocked
+	// recompute over one bd-backed scope as a one-shot upgrade step: the
+	// first start under a bd version the scope has not been repaired with.
+	// beads migration 0059 over-sets is_blocked on stores upgraded from
+	// bd <= 1.3.0 (gastownhall/beads#7037), hiding ready work from `bd ready`
+	// and from gc's ready projection; the payload counts the rows corrected.
+	BeadsBlockedRecomputed = "beads.blocked.recomputed"
+
 	// Storage-class binding outcomes. Emitted once per controller boot by the
 	// storage gate, and once per run by `gc storage migrate`, for a city whose
 	// [storage.classes] relocate the infrastructure classes to a binding.
@@ -511,7 +519,7 @@ var KnownEventTypes = []string{
 	StoreDiskWarn, StoreDiskCritical,
 	BackendCredentialResolved,
 	EmergencySignaled, EmergencyAcked,
-	BeadsConditionalWritesDegraded,
+	BeadsConditionalWritesDegraded, BeadsBlockedRecomputed,
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured,

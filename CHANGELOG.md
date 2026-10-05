@@ -16,6 +16,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not on Homebrew: download `bd` from the
   [v1.3.2-rc.1 release assets](https://github.com/gastownhall/beads/releases/tag/v1.3.2-rc.1)
   or run `go install github.com/steveyegge/beads/cmd/bd@v1.3.2-rc.1`.
+- **The first `gc start` after a bd upgrade runs `bd recompute-blocked` once
+  per scope.** beads migration 0059 wrongly marks some beads blocked (beads#7037).
+  It hits any store that crossed 0059: one upgraded from bd v1.2.x or older,
+  or one that ever ran bd v1.3.0 or v1.3.1. Those beads drop out of
+  `bd ready` and gc stops dispatching them. gc repairs the city and each rig
+  it owns, logs `recomputed is_blocked for <scope> under bd <version>: N rows
+  corrected`, and emits `beads.blocked.recomputed` (a fresh city records one
+  0-row event per scope). `gc rig add` repairs the rig it adds the same way.
+  It does not touch external Dolt servers, complete storage bindings or non-bd
+  providers: run `bd recompute-blocked` in those scopes yourself. Scopes are
+  repaired four at a time before agents start: a city with three rigs and
+  5,000 beads per scope took about 1.5s. A failed repair only warns, and gc
+  retries it on the next start. If you upgrade bd while the supervisor is
+  running, the repair waits for the next `gc start`.
+
+### Fixed
+
+- **Work hidden by beads migration 0059 is dispatched again.** On the first
+  start under a new bd version, `gc start` (and the supervisor, and
+  `gc rig add` for the rig it adds) runs `bd recompute-blocked` once over each
+  gc-owned, Dolt-backed bd scope and
+  records the bd version in the scope's own bd config
+  (`custom.gascity.blocked_repair_bd_version`), so later starts skip it. This
+  clears the `is_blocked` flags migration 0059 set across relates-to,
+  discovered-from and other non-blocking edges on any store that crossed it
+  (beads#7037).
 
 ## [1.5.0] - 2026-10-05
 
