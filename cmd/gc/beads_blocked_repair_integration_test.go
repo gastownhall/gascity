@@ -27,16 +27,15 @@ type blockedRepairFixture struct {
 }
 
 // requireBlockedRepairTools returns the bd under test: GC_TEST_BD_BIN when set
-// (to pin a specific release), else bd on PATH. dolt stands in for the faulty
-// migration, so it is required too.
+// (to pin a specific release), else the installed bd. This package's TestMain
+// puts a testscript `bd` shim first on PATH, so a plain PATH lookup finds the
+// fake; findPreferredBinary skips it. dolt stands in for the faulty migration,
+// so it is required too.
 func requireBlockedRepairTools(t *testing.T) string {
 	t.Helper()
-	bd := strings.TrimSpace(os.Getenv("GC_TEST_BD_BIN"))
-	if bd == "" {
-		var err error
-		if bd, err = exec.LookPath("bd"); err != nil {
-			t.Skip("bd not found (set GC_TEST_BD_BIN or put bd on PATH)")
-		}
+	bd, err := findPreferredBinary("bd", strings.TrimSpace(os.Getenv("GC_TEST_BD_BIN")))
+	if err != nil {
+		t.Skip("bd not found (set GC_TEST_BD_BIN or install bd)")
 	}
 	if _, err := exec.LookPath("dolt"); err != nil {
 		t.Skip("dolt not found")
