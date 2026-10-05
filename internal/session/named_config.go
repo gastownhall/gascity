@@ -134,8 +134,8 @@ func IsDemandOnlySingletonSession(cfg *config.City, agentCfg *config.Agent, info
 	if template == "" {
 		return false
 	}
-	return PoolSlotFromName(strings.TrimSpace(AgentNameInfo(info)), template) > 0 ||
-		PoolSlotFromName(strings.TrimSpace(info.SessionNameMetadata), template) > 0
+	return poolSlotFromName(strings.TrimSpace(agentNameInfo(info)), template) > 0 ||
+		poolSlotFromName(strings.TrimSpace(info.SessionNameMetadata), template) > 0
 }
 
 // DemandOnlySingletonWakeRefused reports whether an explicit wake of info
@@ -158,9 +158,9 @@ func isManualSessionInfo(info Info) bool {
 	return strings.TrimSpace(info.SessionOrigin) == "manual" || info.ManualSessionMetadata == "true"
 }
 
-// AgentNameInfo returns the session's agent name: the agent_name metadata,
+// agentNameInfo returns the session's agent name: the agent_name metadata,
 // else the value of its "agent:" label.
-func AgentNameInfo(info Info) string {
+func agentNameInfo(info Info) string {
 	if info.AgentName != "" {
 		return info.AgentName
 	}
@@ -172,10 +172,10 @@ func AgentNameInfo(info Info) string {
 	return ""
 }
 
-// PoolSlotFromName returns the pool slot encoded in a pool member name of
+// poolSlotFromName returns the pool slot encoded in a pool member name of
 // template ("<template>-<n>", or the legacy "<template>-gc-<n>"), or 0 when
 // name is not such a member.
-func PoolSlotFromName(name, template string) int {
+func poolSlotFromName(name, template string) int {
 	if !strings.HasPrefix(name, template+"-") {
 		return 0
 	}
