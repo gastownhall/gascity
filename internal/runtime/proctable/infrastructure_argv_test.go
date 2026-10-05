@@ -19,6 +19,10 @@ func TestIsCityInfrastructureArgv(t *testing.T) {
 	}{
 		{name: "scope watchdog", argv: []string{"/usr/local/bin/gc", ManagedDoltScopeWatchdogVerb, "/city/.beads/dolt-config.yaml", "/city/dolt.log", "/city"}, want: true},
 		{name: "bd proxy child", argv: []string{"/opt/beads/bd-1.3.0", BDProxyChildVerb, "--root", "/city/.beads/proxy"}, want: true},
+		{name: "tmux server or client", argv: []string{"tmux", "-L", "gc-city", "new-session", "-d"}, want: true},
+		{name: "tmux by path", argv: []string{"/opt/homebrew/bin/tmux", "-L", "gc-city", "attach"}, want: true},
+		{name: "tmux retitled", argv: []string{"tmux: server", "(/tmp/tmux-501/gc-city)"}, want: true},
+		{name: "tmux-named wrapper stays an agent", argv: []string{"tmux-agent", "--resume"}, want: false},
 		{name: "agent runtime", argv: []string{"claude", "--resume"}, want: false},
 		{name: "dolt server", argv: []string{"dolt", "sql-server", "--config", "/city/.beads/dolt-config.yaml"}, want: false},
 		{name: "verb only as a later argument", argv: []string{"sh", "-c", ManagedDoltScopeWatchdogVerb}, want: false},
@@ -59,13 +63,14 @@ func TestIsCityInfrastructureRootReadsInjectedProcfs(t *testing.T) {
 	write(100, "gc", ManagedDoltScopeWatchdogVerb, "cfg", "log", "/city")
 	write(101, "bd", BDProxyChildVerb, "--root", "/city/.beads/proxy")
 	write(102, "claude")
+	write(104, "/usr/bin/tmux", "-L", "gc-city", "new-session", "-d")
 
 	// Without an injected root the fence never reads the host's live /proc.
 	if IsCityInfrastructureRoot(100) {
 		t.Fatal("IsCityInfrastructureRoot read the live /proc under go test")
 	}
 	t.Cleanup(SetScanRootForTesting(root))
-	for pid, want := range map[int]bool{100: true, 101: true, 102: false, 103: false, 0: false} {
+	for pid, want := range map[int]bool{100: true, 101: true, 102: false, 103: false, 104: true, 0: false} {
 		if got := IsCityInfrastructureRoot(pid); got != want {
 			t.Errorf("IsCityInfrastructureRoot(%d) = %v, want %v", pid, got, want)
 		}
