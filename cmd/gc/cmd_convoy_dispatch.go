@@ -3439,12 +3439,16 @@ func findWorkflowBeads(store beads.Store, workflowID string) ([]beads.Bead, erro
 		return nil, fmt.Errorf("getting workflow root %s: %w", workflowID, err)
 	}
 	// Query on gc.workflow_id only; the predicate is applied in-memory via
-	// addRoot so we pick up graph.v2-only roots alongside legacy roots.
-	roots, err := store.List(beads.ListQuery{
+	// addRoot so we pick up graph.v2-only roots alongside legacy roots. The
+	// read spans both tiers: a root minted in a relocated binding's wisp tier
+	// is still the workflow's root.
+	reader := beads.HandlesFor(store).Live
+	roots, err := reader.List(beads.ListQuery{
 		Metadata: map[string]string{
 			beadmeta.WorkflowIDMetadataKey: workflowID,
 		},
 		IncludeClosed: true,
+		TierMode:      beads.FederatedReadTier,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing roots of workflow %s: %w", workflowID, err)
@@ -3452,7 +3456,6 @@ func findWorkflowBeads(store beads.Store, workflowID string) ([]beads.Bead, erro
 	for _, root := range roots {
 		addRoot(root)
 	}
-	reader := beads.HandlesFor(store).Live
 	for _, rootID := range rootIDs {
 		all, err := reader.List(beads.ListQuery{
 			Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
@@ -3473,9 +3476,10 @@ func findWorkflowBeadsFromRoot(store beads.Store, root beads.Bead) ([]beads.Bead
 	if store == nil || root.ID == "" {
 		return nil, nil
 	}
-	descendants, err := store.List(beads.ListQuery{
+	descendants, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
 		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing descendants of workflow %s: %w", root.ID, err)
