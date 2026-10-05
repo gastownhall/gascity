@@ -56,12 +56,11 @@ type allocInputs struct {
 	SuspendedRigPaths map[string]bool
 	Census            *sessionCensus
 	Demand            demandView
-	// ScaleCheck is the scale_check lane's latest result (I5), trusted for
-	// ScaleCheckMaxAge.
-	ScaleCheck       *scaleCheckResult
-	ScaleCheckMaxAge time.Duration
-	Obs              *ObservationSnapshot
-	ObsMaxAge        time.Duration
+	// ScaleCheck is the external-reads lane's scale_check result at Now
+	// (externalReadsRecording.scaleCheck), nil when missing or stale (I5).
+	ScaleCheck *scaleCheckResult
+	Obs        *ObservationSnapshot
+	ObsMaxAge  time.Duration
 	// Endpoints is each config-only endpoint key's breaker reading.
 	Endpoints map[endpointKey]endpointView
 	// ProviderHealth is I7 at Now; nil reads as no registry (fail open).

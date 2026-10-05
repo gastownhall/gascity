@@ -18,12 +18,12 @@ import (
 // every census leg, read in memory each pass. It is index-only: an exact leg
 // (the SQLite binding, whose cache is semantically exact) is read from its
 // CachingStore through the session front door, and every other leg (bd,
-// native Dolt, Postgres) from the backstop lane's last recording of legacy's
-// own live read. A pass never reads a non-exact leg's store.
+// native Dolt, Postgres) from the external-reads lane's last recording of
+// legacy's own live read. A pass never reads a non-exact leg's store.
 //
 // A leg whose read fails is served whole from its last good rows until they
-// expire: cacheLagBound after an exact leg's read, the recording's published
-// Expires for a non-exact leg. Past that the leg is stale (its rows Keep). A
+// expire: cacheLagBound after an exact leg's read, the source freshness after
+// a non-exact leg's read ended. Past that the leg is stale (its rows Keep). A
 // stale leg, or one with nothing to serve but a partial read's rows, leaves
 // the census incomplete (no fresh create anywhere, POOL-047). A hard failure
 // of the sessions leg with nothing to serve fails the pass: an error is not an
@@ -44,8 +44,8 @@ const (
 	// legMissing: the read failed and there is no last good to serve. The
 	// census is incomplete; the leg holds no rows, or only a partial read's.
 	legMissing censusLegState = iota
-	// legRead: read this pass (an exact leg) or recorded by the backstop lane
-	// and not yet expired (a non-exact leg).
+	// legRead: read this pass (an exact leg) or recorded by the external-reads
+	// lane and not yet expired (a non-exact leg).
 	legRead
 	// legLastGood: this pass's read failed; the leg is served whole from its
 	// last good rows, which have not expired.
@@ -107,10 +107,10 @@ type censusRow struct {
 	UnknownState bool
 }
 
-// censusRecording is the backstop lane's last recording of one non-exact
-// session census leg (backstopRecording.sessionLeg): the session front
-// door's live ListAll of the leg, when the lane's reads started and ended,
-// the recording's published expiry, and the error the read returned. Rows are
+// censusRecording is the external-reads lane's last read of one lane-fed
+// session census leg (externalReadsRecording.sessionLeg): the session front
+// door's live ListAll of the leg, when that read started and ended, its
+// expiry (its end plus the source freshness), and the error it returned. Rows are
 // what legacy's census keeps: all of a clean read, what a partial read
 // returned, nothing of a hard failure.
 type censusRecording struct {
@@ -122,14 +122,14 @@ type censusRecording struct {
 }
 
 // censusLegFeed is the census's seam to P3-2's demand reads, which own leg
-// classification and the backstop lane. Both functions are required.
+// classification and the external-reads lane. Both functions are required.
 type censusLegFeed struct {
 	// exact reports whether store's cache is semantically exact (its backing
 	// declares beads.CachedReadExact).
 	exact func(store beads.Store) bool
-	// recorded returns the backstop lane's last recording of a non-exact leg,
-	// keyed by store, or false when the lane has none. It must not read the
-	// store.
+	// recorded returns the external-reads lane's last recording of a
+	// non-exact leg, keyed by store, or false when the lane has none. It must
+	// not read the store.
 	recorded func(store beads.Store) (censusRecording, bool)
 }
 

@@ -80,7 +80,7 @@ func (p *decidePass) demand() {
 				count = p.in.ScaleCheck.Counts[template]
 			}
 			collected.CustomCounts[template] = count
-			if p.in.ScaleCheck.partial(template, p.in.Now, p.in.ScaleCheckMaxAge) {
+			if p.in.ScaleCheck.partial(template) {
 				collected.CustomPartials = markScaleCheckPartialTemplate(collected.CustomPartials, template)
 			}
 		}
