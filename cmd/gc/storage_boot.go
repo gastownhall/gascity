@@ -432,6 +432,20 @@ func revertHoldingNote(shape storageSplitShape, cityPath string) (infraMigration
 	if shape != storageSplitNone {
 		return infraMigrationReport{}, false
 	}
+	// A cleared work store holds no infrastructure state at all, so a revert
+	// there would start the city empty. It is held first, because its remedy —
+	// restoring the backup — is the one that does not lose the pre-cutover rows.
+	if note, present, err := readInfraClearedNote(cityPath); present {
+		if err != nil {
+			note = infraClearedNote{Backup: "(the note is unreadable: " + err.Error() + ")"}
+		}
+		return infraMigrationReport{
+			Outcome:        infraMigrationGenesisBlocked,
+			Cleared:        &note,
+			ServedNotePath: infraClearedNotePath(cityPath),
+			Target:         infraBindingTarget{Binding: config.StorageWorkBinding},
+		}, true
+	}
 	blocked, held := servedBindingNoteHold(cityPath, config.StorageWorkBinding, "", "")
 	if !held {
 		return infraMigrationReport{}, false
@@ -701,6 +715,7 @@ var storageBindingEventTypes = map[infraMigrationOutcome]string{
 	infraMigrationStranded:         events.StorageBindingUnconverged,
 	infraMigrationBornSplitBlocked: events.StorageBindingUnconverged,
 	infraMigrationGenesisBlocked:   events.StorageBindingUnconverged,
+	infraMigrationRetained:         events.StorageBindingUnconverged,
 	infraMigrationUncheckable:      events.StorageBindingUncheckable,
 }
 
@@ -718,11 +733,12 @@ func recordStorageBindingOutcome(rec events.Recorder, report infraMigrationRepor
 		return
 	}
 	raw, err := json.Marshal(storebinding.StorageBindingOutcomePayload{
-		Binding:     report.Target.Binding,
-		Database:    report.Target.Database,
-		Outcome:     report.Outcome.String(),
-		Invariant:   invariant,
-		ProvenBeads: report.ProvenBeads,
+		Binding:        report.Target.Binding,
+		Database:       report.Target.Database,
+		Outcome:        report.Outcome.String(),
+		Invariant:      invariant,
+		ProvenBeads:    report.ProvenBeads,
+		LostCrossEdges: report.LostCrossEdges,
 	})
 	if err != nil {
 		return

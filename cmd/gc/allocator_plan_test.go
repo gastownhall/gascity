@@ -153,7 +153,7 @@ func TestAllocator_PartialTemplate_KeepSetNeverShrinks(t *testing.T) {
 	run := func(partial bool) allocDecision {
 		f := newAllocFixture(t, cfg).sessions(rows...).alive("s-gc-1", InventoryAttrs{})
 		f.in.Demand.CustomCheckTemplates = []string{"worker"}
-		f.in.ScaleCheck = &scaleCheckResult{Counts: map[string]int{"worker": 0}, At: allocNow}
+		f.in.ScaleCheck = &scaleCheckResult{Counts: map[string]int{"worker": 0}}
 		if partial {
 			f.in.ScaleCheck.Partial = map[string]bool{"worker": true}
 		}
@@ -180,7 +180,7 @@ func TestAllocator_PartialTemplate_BlocksFreshCreateNotReuse(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 4)}}
 	f := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "active")).alive("s-gc-1", InventoryAttrs{})
 	f.in.Demand.CustomCheckTemplates = []string{"worker"}
-	f.in.ScaleCheck = &scaleCheckResult{Counts: map[string]int{"worker": 3}, Partial: map[string]bool{"worker": true}, At: allocNow}
+	f.in.ScaleCheck = &scaleCheckResult{Counts: map[string]int{"worker": 3}, Partial: map[string]bool{"worker": true}}
 	d := f.decide()
 	if !entryOf(t, d, "gc-1").InDesired {
 		t.Fatal("the live row must still be reused under a partial read")

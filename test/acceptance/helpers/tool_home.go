@@ -59,6 +59,11 @@ func ToolCommand(t *testing.T, bin string, args ...string) *exec.Cmd {
 	}
 	cmd := exec.Command(bin, args...) //nolint:gosec // resolved test binary
 	cmd.Env = toolhome.Environ(os.Environ(), home)
+	// bd walks up from its working directory looking for a .beads. The test
+	// process's cwd is its package directory, which on a developer box sits
+	// under the real home, so an inherited cwd reads ~/.beads/config.yaml
+	// whatever HOME says. A caller that needs a workspace sets Dir itself.
+	cmd.Dir = home
 	return cmd
 }
 

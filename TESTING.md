@@ -90,7 +90,7 @@ endpoints, credentials, timeouts, download and parallelism policy.
 | tier | how | executes | writes the shared cache |
 |---|---|---|---|
 | contributor (default) | `--config=fork-cache` | locally, on cache misses | never |
-| maintainer (opt-in, allowlisted) | `--config=remote-exec` + a client certificate | rbe-west, `oss` instance | only rbe-west's own workers |
+| maintainer (opt-in, allowlisted; not live yet) | `--config=remote-exec` + a client certificate | rbe-west, `oss` instance | only rbe-west's own workers |
 | CI (`bazel-test.yml`) | `--config=remote-exec` + CI secrets | rbe-west, `oss` instance | only rbe-west's own workers |
 
 - **Contributor.** `fork-cache` reads rbe-west's anonymous, read-only cache
@@ -98,10 +98,16 @@ endpoints, credentials, timeouts, download and parallelism policy.
   for the same inputs is a hit, misses run on your machine, and nothing is
   ever uploaded. If the endpoint is closed or slow, Bazel falls back to local
   execution. No credential, no remote compute.
-- **Maintainer.** Remote execution is opt-in and needs an mTLS client
-  certificate for rbe-west; without one nothing tries to execute remotely.
-  Generate the key locally (it never leaves your machine) and send only the
-  CSR to the rbe-west operators (infra `nativelink-cas/west`); there is no
+- **Maintainer.** *Not live yet; rbe-west will announce go-live.* Until
+  then nothing below works, and pre-push uses the contributor tier. Remote
+  execution is opt-in and needs an mTLS client certificate for rbe-west's
+  maintainer endpoint; without one nothing tries to execute remotely. Use
+  it for gastownhall OSS repositories only (gascity, beads): everything it
+  runs lands in the `oss` action cache, which anyone can read anonymously
+  by digest, and the Blacksmith-donated pool serves OSS work only. Never
+  point it at a private repository. Generate the key locally (it never
+  leaves your machine) and send only the CSR to an rbe-west operator
+  (infra `nativelink-cas/west`, README "rbe-maint"); there is no
   self-service path in this repo (the `rbe-fork` mint used by
   `tools/rbe/fork-credential.sh` certifies only in-progress PR runs):
 
@@ -110,35 +116,51 @@ endpoints, credentials, timeouts, download and parallelism policy.
   # PKCS#8 EC key: Bazel's Netty TLS refuses a SEC1 "EC PRIVATE KEY".
   openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out ~/.config/rbe/rbe-maint.key
   chmod 600 ~/.config/rbe/rbe-maint.key
-  # Exactly these two RDNs: CN = your GitHub login, O = gascity-maintainers.
+  head -1 ~/.config/rbe/rbe-maint.key   # -----BEGIN PRIVATE KEY----- (PKCS#8)
+  # Exactly these two RDNs: CN = your GitHub login, spelled exactly as on
+  # your GitHub profile (case included); O = gascity-maintainers.
   openssl req -new -key ~/.config/rbe/rbe-maint.key \
     -subj "/CN=<your-github-login>/O=gascity-maintainers" -out rbe-maint.csr
   ```
 
-  A CSR is public, so send it to a rbe-west operator over any channel. Your
-  GitHub login must be on the allowlist that the fork mint uses for
-  read/write PR runs. You get back `rbe-maint.crt`: client-auth only, valid
-  for 90 days, and its fingerprint is pinned on the farm. An operator revokes
-  it by removing that pin, effective immediately. To renew, send a new CSR
-  (preferably for a new key) before it expires. Maintainer certificates use
-  their own CA and a dedicated endpoint that reaches only the `oss`
-  instance. Results are still written only by the workers.
-
-  With the certificate and the endpoint the operators return, add to
+  A CSR is public, so send it to an rbe-west operator over any channel.
+  Your GitHub account must be on `.github/rbe-fork-allowlist.txt` (its
+  numeric id, with the login as the comment), the allowlist the fork mint
+  uses for read/write PR runs, and the certificate's CN must be that login
+  in its exact spelling. You get back `rbe-maint.crt` (save it as
+  `~/.config/rbe/rbe-maint.crt`): client-auth only, valid for 90 days,
+  pinned on the farm by its fingerprint. It works only on the maintainer
+  endpoint, only for instance `oss`, and it never writes the cache:
+  results are written by rbe-west's workers alone. Then add to
   `.bazelrc.local` (absolute paths; nothing else belongs there):
 
   ```
-  build:remote-exec --remote_executor=grpcs://<maintainer endpoint>
+  build:remote-exec --remote_executor=grpcs://rbe-maint.ops.gascity.com:8445
   build:remote-exec --remote_instance_name=oss
   build:remote-exec --tls_client_certificate=/home/<you>/.config/rbe/rbe-maint.crt
   build:remote-exec --tls_client_key=/home/<you>/.config/rbe/rbe-maint.key
   ```
 
+  The endpoint serves a public Let's Encrypt certificate, so no
+  `--tls_certificate` line. **Never set `--remote_cache_compression`** for
+  it, in `.bazelrc.local` or any other rc: the maintainer endpoint does not
+  advertise zstd, and Bazel refuses a remote that doesn't. Do not add
+  `--remote_execution_priority` either. `--remote_cache` defaults to the
+  executor, and the other transport flags come from `.bazelrc`'s
+  `build:remote-exec`.
+
+  An operator can revoke a certificate at any time: its new requests then
+  fail with `UNAUTHENTICATED`. It is also revoked within the hour once your
+  account leaves the allowlist. To renew, send a new CSR (preferably for a
+  new key) before day 90. You may hold at most two live certificates, so
+  you can switch without a gap; a revoked certificate's key is never
+  certified again. If your key leaks, tell an operator.
+
   Allowlisted maintainers working on this OSS project run on the
-  Blacksmith-donated OSS pool (`--remote_instance_name=oss`; OSS code only).
-  Their actions land in the `oss` action cache that CI and contributors
-  read, so a pre-push result is a PR and main hit. The operators authorize
-  each certificate for the OSS scheduler when they issue it.
+  Blacksmith-donated OSS pool (`--remote_instance_name=oss`). Their actions
+  land in the `oss` action cache that CI and contributors read, so a
+  pre-push result is a PR and main hit. Pre-push executes remotely only on
+  main's current `worker-env` pin (see **Pre-push** below).
 - **CI.** `bazel-test.yml` is the trusted writer: its actions execute on
   rbe-west's `oss` workers, which alone write the `oss` action cache that
   contributors and fork PRs read. Fork PRs get the read-only cache, or
@@ -150,8 +172,8 @@ endpoints, credentials, timeouts, download and parallelism policy.
 
 | `GC_PREPUSH_SUITE` | runs |
 |---|---|
-| `auto` | `bazel test //... --config=remote-exec` when any rc file Bazel reads names a remote executor; `bazel test //... --config=fork-cache` otherwise; `make test-fast-parallel` when bazel is not installed, or for `fork-cache` when the pinned test `PATH` has no `go` |
-| `rbe` | `bazel test //... --config=remote-exec`; fails when no rc file names an executor |
+| `auto` | `bazel test //... --config=remote-exec` when any rc file Bazel reads names a remote executor and the checkout's `worker-env` pin is current; `bazel test //... --config=fork-cache` otherwise; `make test-fast-parallel` when bazel is not installed, or for `fork-cache` when the pinned test `PATH` has no `go` |
+| `rbe` | `bazel test //... --config=remote-exec`; fails when no rc file names an executor or the `worker-env` pin is not current |
 | `cache` | `bazel test //... --config=fork-cache` |
 | `go` | `make test-fast-parallel` (plain `go test`, the pre-Bazel suite) |
 
@@ -175,6 +197,28 @@ executed tests use the pinned test `PATH`, so Go must be at `/usr/local/go`
 `make test-fast-parallel` instead of the cache mode); overriding
 `--test_env=PATH` in `.bazelrc.local` works but gives your machine its own
 action keys, so nothing CI ran is a hit.
+
+**Stale `worker-env` pin.** Every remote action requests
+`//platforms:rbe_worker`'s `worker-env` pin, and rbe-west's workers
+advertise only the pin on main ("Re-pinning the RBE worker host" below).
+A branch that predates a re-pin, or that moves the pin itself, would queue
+every remote action forever while the pool scaler starts Blacksmith VMs
+that cannot take them. So before executing remotely, `push-suite.sh`
+fetches main (bounded to 30s, no prompts) from the remote whose URL is
+`github.com/gastownhall/gascity` (`origin`, then `upstream`, then any other;
+`origin` if none is; `GC_PREPUSH_MAIN_REMOTE` names it explicitly), so a
+fork's stale main never stands in for gascity's. Offline it uses that
+remote's last fetched `main`. It compares the checkout's pin with main's
+(`tools/rbe/worker-env-drift pin`). When that remote is on GitHub and `gh`
+is installed, it also runs `worker-env-drift preflight` (bounded to 20s,
+best effort: a failed lookup only warns) to
+find an open `rbe-worker-env-drift` issue for main's pin, which means no
+live worker serves even main. On a pin that differs from main's, no
+readable main, or an open drift issue, `auto` prints why and runs the
+non-remote mode instead (`fork-cache`, or `make test-fast-parallel` by the
+rules above), and `rbe` fails the push. Rebase onto main to execute
+remotely again; a change that moves the pin runs its remote suite in CI
+after it merges, as `bazel-test.yml`'s own preflight does.
 
 ### Re-pinning the RBE worker host
 
@@ -721,9 +765,9 @@ all-source audit while staying outside untagged and Small debt.
 <!-- BEGIN CHECKED TEST RESOURCE LEDGER -->
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
-| Audit baseline | all tracked test source | fixed_sleep: 490 calls / 179 files (historical regex census: 447 / 157) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
-| Audit baseline | all tracked test source | listener_helper: 59 calls / 23 files | ga-cp3hwi | all-source listener-helper call/file totals cannot drift without an explicit checked policy update; ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption | P0.4c-listener-helper | 2026-10-31 |
-| Audit baseline | all tracked test source | subprocess: 738 calls / 217 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
+| Audit baseline | all tracked test source | fixed_sleep: 492 calls / 180 files (historical regex census: 447 / 157) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
+| Audit baseline | all tracked test source | listener_helper: 60 calls / 24 files | ga-cp3hwi | all-source listener-helper call/file totals cannot drift without an explicit checked policy update; ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption | P0.4c-listener-helper | 2026-10-31 |
+| Audit baseline | all tracked test source | subprocess: 744 calls / 218 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary: subprocess | ga-p9iuv.30 | the provider-owned script boundary proof is a checked Medium subprocess owner; the test executes the copied provider script only with a test-owned BD executable and verifies its lifecycle delegation without a host service | GC6011 | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses: slow_process_gate, subprocess | ga-p9iuv.30 | the provider-owned BD lifecycle proof is a checked Medium process owner; the test runs the pinned real bd direct and proxied lifecycles under deadlines, records only provider-published identities, and stops its own scope before asserting those children are absent | GC6011 | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdReadyScopeLifecycleReadsItsPersistedTopology: subprocess | ga-p9iuv.30 | the ready-scope topology boundary proof is a checked Medium subprocess owner; the test executes the shipped provider script once per init shape with a test-owned BD executable and a scope built from files alone, so no Dolt, no bd and no host service are involved | GC6011 | 2026-10-31 |

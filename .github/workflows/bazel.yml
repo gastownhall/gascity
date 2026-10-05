@@ -16,7 +16,10 @@
 #     transport and result policy only (scripts/bazel_key_parity_test.go), so
 #     these lanes, bazel-test.yml and pre-push hash actions alike and the
 #     second run of a commit is mostly cache hits;
-#   - no lane passes --config=sole-run (per lane from G0 on);
+#   - lanes reuse cached test results (the farm action cache is writable
+#     only by trusted runs, so a cached PASS for hermetic, identical inputs
+#     is valid); push to main fresh re-execution to sample flakiness is a
+#     follow-up, not part of this change;
 #   - the rbe job's lane list (event and mode) decides which lanes start;
 #   - integration runs on pushes and dispatches only, evidence-only, until G3;
 #   - pull_request runs in mode cache (fork and Dependabot PRs while
