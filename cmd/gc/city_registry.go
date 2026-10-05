@@ -373,7 +373,7 @@ type transientCityEventProvider struct {
 }
 
 func (p transientCityEventProvider) Record(e events.Event) {
-	recorder, err := events.NewFileRecorder(p.path, io.Discard)
+	recorder, err := newSecondaryFileEventsRecorder(p.path, io.Discard)
 	if err != nil {
 		return
 	}
@@ -390,16 +390,7 @@ func (p transientCityEventProvider) LatestSeq() (uint64, error) {
 }
 
 func (p transientCityEventProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
-	recorder, err := events.NewFileRecorder(p.path, io.Discard)
-	if err != nil {
-		return nil, err
-	}
-	watcher, err := recorder.Watch(ctx, afterSeq)
-	recorder.Close() //nolint:errcheck // watcher only needs the path
-	if err != nil {
-		return nil, err
-	}
-	return watcher, nil
+	return events.NewReadOnlyFileProvider(p.path, io.Discard).Watch(ctx, afterSeq)
 }
 
 func (transientCityEventProvider) Close() error {

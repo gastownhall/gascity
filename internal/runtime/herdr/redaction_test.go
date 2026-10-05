@@ -479,6 +479,11 @@ func TestSetupCommandFailureOmitsCredentials(t *testing.T) {
 // Scrubbing only the session env leaves that one in a durable error.
 func TestSetupCommandFailureOmitsInheritedCredentials(t *testing.T) {
 	t.Setenv("SOME_INHERITED_TOKEN", sentinel)
+	// The control below asserts the scrubber leaves HOME legible. Give HOME a
+	// value unique to this test: bazel's remote test runner points HOME at
+	// TEST_TMPDIR, where sibling path-bearing env values can shadow it through
+	// the longest-first secret replacement and make the control ambient.
+	t.Setenv("HOME", t.TempDir())
 	p := &Provider{}
 
 	err := p.runSetupCommand(context.Background(),

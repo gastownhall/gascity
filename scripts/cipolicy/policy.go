@@ -62,19 +62,25 @@ const (
 	// its job cap moves 90 -> 110 minutes (release step budget 95). Reviewed
 	// delta: one test step and the cap, no new job, trigger or permission.
 	//
-	// Bumped for the Beads v1.3.0 -> v1.3.1-rc.2 -> v1.3.1 -> v1.3.2-rc.1 pins:
-	// every job's BD_VERSION env value moves to the new tag. Reviewed delta:
-	// that value only.
-	expectedCIExecutionHash     = "44dff48590e05c44af119caecd7d20345429216d8e668357d0b8d2cb1c08aafa"
+	// Bumped for the Beads v1.3.0 -> v1.3.1-rc.2 -> v1.3.1 pins: every job's
+	// BD_VERSION env value moves to the new tag. Reviewed delta: that value only.
+	// Then the Dolt 2.1.7 -> 2.2.0 pin (#7070): job DOLT_VERSION env values only.
+	// Then [release-only, temporary] Beads v1.3.1 -> v1.3.2-rc.1 for 1.5.1
+	// validation: BD_VERSION env values only.
+	expectedCIExecutionHash     = "ed5dea9a545c5fbc2e8c25ea848f74b448f1e54b5d81aa9097003e39863f9674"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (v1.5.0 Tier C
 	// first-run drain) the tier-c job's -run selector gained
 	// TestFreshInit_SlingSpawnsDefaultPoolWorker and
 	// TestFreshInit_ClaudeUnrestricted, mirroring RC Gate's acceptance C shards;
 	// same job, env, secrets and runner.
-	// Bumped for the Beads v1.3.0 -> v1.3.1-rc.2 -> v1.3.1 -> v1.3.2-rc.1 pins:
-	// the workflow and job BD_VERSION env values only.
-	expectedNightlyExecutionHash = "ed0552dba2f4aed28d38eb7ef24c103848958400f34efe9db80da0aaef1fb9a2"
+	// Bumped for the Beads v1.3.0 -> v1.3.1-rc.2 -> v1.3.1 pins: the workflow
+	// and job BD_VERSION env values only. Then (#7070) the Dolt 2.1.7 -> 2.2.0
+	// pin (DOLT_VERSION env values) and one bundled-pack-pins step,
+	// `scripts/check-embedded-pins --skip-bundled`. No new job, trigger or
+	// permission. Then [release-only, temporary] Beads v1.3.1 -> v1.3.2-rc.1:
+	// BD_VERSION env values only.
+	expectedNightlyExecutionHash = "198422eabd20e027d1009e5c2cf2da0f6342c3f40d8be0e73a670d3f392768aa"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 
