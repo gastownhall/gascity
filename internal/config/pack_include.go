@@ -184,13 +184,14 @@ func resolveLockedRemoteImport(source, cityRoot string, nonBlocking bool) (strin
 // BundledSourcePinnedVersion returns the canonical pinned version for a
 // bundled builtin source: packs addressed through the public gascity-packs
 // repository keep their public registry pin; gascity.git sources use the
-// bundled gascity.git pin. The canonical pin is the only commit the
-// running binary pre-seeds from its embedded content — any other commit
-// on a bundled source is an ordinary remote import.
+// bundled gascity.git pin. A nested bundled subpack (gascity/roles) shares
+// its parent's pin. The canonical pin is the only commit the running binary
+// pre-seeds from its embedded content — any other commit on a bundled source
+// is an ordinary remote import.
 func BundledSourcePinnedVersion(source string) string {
 	name, repository, ok := builtinpacks.SourceLayout(source)
 	if ok && repository == builtinpacks.PublicRepository {
-		switch name {
+		switch builtinpacks.PinnedWith(name) {
 		case "gastown":
 			return PublicGastownPackVersion
 		case "gascity":
@@ -215,7 +216,10 @@ func SupersededBundledPinTarget(source, version string) (string, bool) {
 	var current string
 	switch repository {
 	case builtinpacks.PublicRepository:
-		switch name {
+		// A nested subpack (gascity/roles) was always written at its parent's
+		// pin, so it moves with its parent: re-pinning one without the other
+		// would split one release across two commits.
+		switch builtinpacks.PinnedWith(name) {
 		case "gastown":
 			superseded, current = SupersededPublicGastownPackVersions, PublicGastownPackVersion
 		case "gascity":

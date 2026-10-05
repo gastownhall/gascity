@@ -65,7 +65,7 @@ func (s *SQLiteStore) ApplyGraphPlanWithStorage(ctx context.Context, plan *Graph
 			defaultPriority := 2
 			priority = &defaultPriority
 		}
-		b := s.normalizeCreate(Bead{
+		b, err := s.normalizeCreate(Bead{
 			Title:       node.Title,
 			Description: node.Description,
 			Type:        node.Type,
@@ -78,6 +78,9 @@ func (s *SQLiteStore) ApplyGraphPlanWithStorage(ctx context.Context, plan *Graph
 			Ephemeral:   ephemeral,
 			NoHistory:   noHistory,
 		})
+		if err != nil {
+			return nil, fmt.Errorf("sqlite graph apply: %w", err)
+		}
 		result.IDs[key] = b.ID
 		staged[i] = b
 	}
