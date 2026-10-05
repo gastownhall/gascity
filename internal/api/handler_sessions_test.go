@@ -41,6 +41,13 @@ func newSessionFakeState(t *testing.T) *fakeState {
 
 const testEventTimeout = 5 * time.Second
 
+// streamHeaderCommitTimeout bounds how long the stopped-stream tests wait for
+// committed status headers. The server normally flushes them within a few
+// milliseconds, but client and server share one test process, and full-suite
+// load has stalled that process for 2.4 s and 4.8 s (ga-kaca7z). The bound
+// only has to catch headers that never arrive.
+const streamHeaderCommitTimeout = 15 * time.Second
+
 func sameCanonicalTestPath(got, want string) bool {
 	canonicalGot, gotErr := filepath.EvalSymlinks(got)
 	canonicalWant, wantErr := filepath.EvalSymlinks(want)
@@ -6830,7 +6837,7 @@ func TestHandleSessionStreamStoppedSessionCommitsStatusHeaders(t *testing.T) {
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), streamHeaderCommitTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+cityURL(fs, "/session/")+info.ID+"/stream", nil)
 	if err != nil {
