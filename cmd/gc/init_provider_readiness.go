@@ -541,23 +541,84 @@ var initLookPath = exec.LookPath
 
 var initRunVersionCommandContext = exec.CommandContext
 
-var initRunVersionTimeout = 2 * time.Second
+// initProbeAttemptTimeouts bounds each attempt of a local CLI probe
+// ("dolt config --get", "<binary> version"). These commands normally finish
+// in milliseconds, but on a heavily loaded host process startup alone can
+// exceed a few seconds. A probe whose attempt hits its deadline is retried
+// with the next, longer budget; a probe that exits on its own (success or
+// failure) is never retried, so real errors surface immediately.
+var initProbeAttemptTimeouts = []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second}
 
-var initRunDoltConfigGet = func(key string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), initRunVersionTimeout)
-	defer cancel()
+// initProbeRetryBackoff is the pause between timed-out probe attempts.
+var initProbeRetryBackoff = 500 * time.Millisecond
 
-	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "dolt", "config", "--global", "--get", key)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return "", fmt.Errorf("dolt config probe timed out after %s", initRunVersionTimeout)
+// initDoltIdentityProbeTotal caps the time all Dolt identity probes of one
+// preflight (user.name and user.email) may take together, so a hung dolt
+// stops startup with an error instead of stalling it for minutes.
+var initDoltIdentityProbeTotal = 60 * time.Second
+
+// initProbeWaitDelay bounds how long a probe waits for its output pipes
+// after the process is killed, in case a grandchild still holds them.
+const initProbeWaitDelay = time.Second
+
+// initProbeNotice receives the one-line notice printed before each retry
+// of a slow probe. Overridable for tests.
+var initProbeNotice io.Writer = os.Stderr
+
+// errInitProbeTimedOut marks a probe that exhausted its attempt budgets or
+// the caller's overall deadline.
+var errInitProbeTimedOut = errors.New("probe timed out")
+
+// runInitProbeWithRetry runs attempt with each budget in
+// initProbeAttemptTimeouts, bounded by parent's deadline, until an attempt
+// completes before its own deadline. Each retry prints a one-line notice to
+// initProbeNotice. It returns the first attempt's result that did not time
+// out, or an error wrapping errInitProbeTimedOut naming the probe and the
+// time spent.
+func runInitProbeWithRetry(parent context.Context, name string, attempt func(ctx context.Context) error) error {
+	start := time.Now()
+	budgets := initProbeAttemptTimeouts
+	for i, budget := range budgets {
+		if parent.Err() != nil {
+			break
+		}
+		if i > 0 {
+			fmt.Fprintf(initProbeNotice, "%s probe slow, retrying (attempt %d, %s)\n", name, i+1, budget) //nolint:errcheck // best-effort notice
+		}
+		ctx, cancel := context.WithTimeout(parent, budget)
+		err := attempt(ctx)
+		timedOut := ctx.Err() != nil
+		cancel()
+		if !timedOut {
+			return err
+		}
+		if i < len(budgets)-1 && initProbeRetryBackoff > 0 {
+			select {
+			case <-parent.Done():
+			case <-time.After(initProbeRetryBackoff):
+			}
+		}
 	}
-	value := strings.TrimSpace(stdout.String())
+	return fmt.Errorf("%s %w after %s", name, errInitProbeTimedOut, time.Since(start).Round(time.Millisecond))
+}
+
+var initRunDoltConfigGet = func(ctx context.Context, key string) (string, error) {
+	var value, stderrText string
+	err := runInitProbeWithRetry(ctx, "dolt identity", func(ctx context.Context) error {
+		var stdout, stderr bytes.Buffer
+		cmd := exec.CommandContext(ctx, "dolt", "config", "--global", "--get", key)
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		cmd.WaitDelay = initProbeWaitDelay
+		runErr := cmd.Run()
+		value = strings.TrimSpace(stdout.String())
+		stderrText = strings.TrimSpace(stderr.String())
+		return runErr
+	})
+	if errors.Is(err, errInitProbeTimedOut) {
+		return "", err
+	}
 	if err != nil {
-		stderrText := strings.TrimSpace(stderr.String())
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && value == "" && stderrText == "" {
 			return "", errDoltConfigKeyMissing
@@ -573,13 +634,14 @@ var initRunDoltConfigGet = func(key string) (string, error) {
 // initRunVersion runs "<binary> version" and returns the first line.
 // Tests can override this.
 var initRunVersion = func(binary string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), initRunVersionTimeout)
-	defer cancel()
-
-	out, err := initRunVersionCommandContext(ctx, binary, "version").Output()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return "", fmt.Errorf("%s version probe timed out after %s", binary, initRunVersionTimeout)
-	}
+	var out []byte
+	err := runInitProbeWithRetry(context.Background(), binary+" version", func(ctx context.Context) error {
+		cmd := initRunVersionCommandContext(ctx, binary, "version")
+		cmd.WaitDelay = initProbeWaitDelay
+		var runErr error
+		out, runErr = cmd.Output()
+		return runErr
+	})
 	if err != nil {
 		return "", err
 	}
@@ -723,8 +785,10 @@ func checkDoltAuthorIdentity(cityPath string) doltAuthorIdentityStatus {
 		return doltAuthorIdentityStatus{}
 	}
 	var status doltAuthorIdentityStatus
+	ctx, cancel := context.WithTimeout(context.Background(), initDoltIdentityProbeTotal)
+	defer cancel()
 	for _, key := range []string{"user.name", "user.email"} {
-		value, err := initRunDoltConfigGet(key)
+		value, err := initRunDoltConfigGet(ctx, key)
 		value = strings.TrimSpace(value)
 		if errors.Is(err, errDoltConfigKeyMissing) && value == "" {
 			status.missingKeys = append(status.missingKeys, key)
