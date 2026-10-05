@@ -314,7 +314,7 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
-      DOLT_VERSION: "2.1.7"
+      DOLT_VERSION: "2.2.0"
       BD_VERSION: "v1.3.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -343,7 +343,7 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
-      DOLT_VERSION: "2.1.7"
+      DOLT_VERSION: "2.2.0"
       BD_VERSION: "v1.3.1"
     strategy:
       fail-fast: false
@@ -525,7 +525,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     timeout-minutes: 105
     env:
-      DOLT_VERSION: "2.1.7"
+      DOLT_VERSION: "2.2.0"
       GC_REQUIRE_ACCEPTANCE_TOOLING: "1"
       # Tier A skips the matrix to stay a smoke tier. This is the job that runs
       # it, so this is the job that opts in.
@@ -649,7 +649,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     timeout-minutes: 60
     env:
-      DOLT_VERSION: "2.1.7"
+      DOLT_VERSION: "2.2.0"
       GC_REQUIRE_ACCEPTANCE_TOOLING: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -867,7 +867,7 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     env:
-      DOLT_VERSION: "2.1.7"
+      DOLT_VERSION: "2.2.0"
       BD_VERSION: "v1.3.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -1045,7 +1045,7 @@ jobs:
             timeout_minutes: 15
             command: ./scripts/test-integration-shard rest-smoke-2-of-2
     env:
-      DOLT_VERSION: "2.1.7"
+      DOLT_VERSION: "2.2.0"
       BD_VERSION: "v1.3.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -1072,7 +1072,7 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     env:
-      DOLT_VERSION: "2.1.7"
+      DOLT_VERSION: "2.2.0"
       BD_VERSION: "v1.3.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
