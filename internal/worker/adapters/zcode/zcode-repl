@@ -742,8 +742,11 @@ run_turn() {
 
 report_stderr() {
     [[ -s "$turn_err" ]] || return 0
+    # Read only the excerpt (-n 300). Folding the newlines of the whole file
+    # instead is quadratic in bash: a 1 MiB stderr took 14 s in a UTF-8
+    # locale, with the TERM trap deferred until it finished.
     local err=
-    IFS= read -r -d '' err <"$turn_err"
+    IFS= read -r -d '' -n 300 err <"$turn_err"
     err="${err//$'\n'/ }"
     printf 'zcode-repl stderr: %s\n' "${err:0:300}"
 }
@@ -775,12 +778,17 @@ while :; do
     # returns. A signal that lands after bash last checked for traps, but
     # before read() blocks, leaves its trap pending until input arrives, and
     # for an idle pane that is never: TERM would not end the session (seen in
-    # TestInterruptedTurnClosesTheMirrorEntry under load). A one-byte read
-    # that times out has consumed nothing, so waking every IDLE_WAKE_SECS loses
-    # no input and lets bash run any pending trap.
+    # TestInterruptedTurnClosesTheMirrorEntry under load). Waking every
+    # IDLE_WAKE_SECS lets bash run any pending trap.
+    #
+    # A timed-out one-byte read can still hand back a byte: bash 5.2 checks the
+    # timer again after storing the byte it read, so a byte that lands as the
+    # timer expires returns with the timeout status and the byte in the
+    # variable. That byte is input, not a timeout.
     while :; do
         IFS= read -r -n 1 -t "$IDLE_WAKE_SECS" line
         read_rc=$?
+        if (( read_rc > 128 && ! interrupted )) && [[ -n "$line" ]]; then read_rc=0; fi
         if (( read_rc > 128 && ! interrupted )); then continue; fi
         break
     done

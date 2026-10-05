@@ -78,6 +78,10 @@ if os.environ.get("STUB_BAD_JSON"):
 rc = int(os.environ.get("STUB_RC", "0"))
 if rc:
     sys.stderr.write("stub failure\n")
+    # STUB_STDERR_LINES pads the failure with that many more stderr lines.
+    pad = int(os.environ.get("STUB_STDERR_LINES", "0"))
+    if pad:
+        sys.stderr.write(("x" * 63 + "\n") * pad)
     sys.exit(rc)
 
 # Fail only when resuming, to exercise the stale-sid recovery path.
@@ -873,6 +877,68 @@ func TestFailingTurnPrintsErrorAndMarker(t *testing.T) {
 	}
 	if !strings.HasSuffix(strings.TrimRight(out, "\n"), "zcode-repl ready") {
 		t.Fatalf("a recoverable failure must end ready:\n%s", out)
+	}
+}
+
+// report_stderr reads only its 300-character excerpt. Folding the newlines of
+// the whole stderr first is quadratic in bash: a 16 MiB stderr held the
+// adapter inside that one expansion for well over a minute, with no ready
+// marker and its TERM trap deferred until the expansion finished.
+func TestALargeTurnStderrIsExcerptedPromptly(t *testing.T) {
+	t.Parallel()
+
+	const padLines = 262144 // 64-byte lines: 16 MiB of stderr
+	h := newHarness(t, map[string]string{"STUB_RC": "3", "STUB_STDERR_LINES": fmt.Sprint(padLines)})
+	s := h.start()
+	s.send("one")
+	s.waitForTurns(1)
+	out, code := s.closeAndWait()
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0:\n%s", code, out)
+	}
+
+	raw := "stub failure\n" + strings.Repeat(strings.Repeat("x", 63)+"\n", 5)
+	want := "zcode-repl stderr: " + strings.ReplaceAll(raw[:300], "\n", " ") + "\n"
+	if !strings.Contains(out, want) {
+		t.Fatalf("stderr excerpt is not the first 300 characters, newlines folded; want %q in:\n%s", want, out)
+	}
+}
+
+// bash 5.2 checks a read's -t timer again after storing the byte it read, so a
+// byte that lands as the idle wait's timer expires comes back with status 142
+// and the byte in the variable. The race is microseconds wide, so a BASH_ENV
+// shim makes every idle-wait byte arrive that way: the adapter must keep it.
+func TestAnIdleWaitTimeoutThatHandsBackAByteKeepsIt(t *testing.T) {
+	t.Parallel()
+
+	shim := filepath.Join(t.TempDir(), "late-timer.bash")
+	// The idle wait is the one timed read into "line". IFS is empty inside
+	// the call, so test each argument rather than a joined "$*".
+	const lateTimer = `read() {
+    local arg timed=0
+    for arg in "$@"; do [[ "$arg" == -t ]] && timed=1; done
+    if (( timed )) && [[ "${!#}" == line ]]; then
+        builtin read -r -n 1 line
+        local rc=$?
+        if (( rc == 0 )) && [[ -n "$line" ]]; then return 142; fi
+        return "$rc"
+    fi
+    builtin read "$@"
+}
+`
+	if err := os.WriteFile(shim, []byte(lateTimer), 0o644); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	h := newHarness(t, map[string]string{"BASH_ENV": shim})
+	s := h.start()
+	s.send("hello world")
+	s.waitForTurns(1)
+	if _, code := s.closeAndWait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if got := h.prompts(); !equalStrings(got, []string{"hello world"}) {
+		t.Fatalf("prompts = %q, want [\"hello world\"]", got)
 	}
 }
 
