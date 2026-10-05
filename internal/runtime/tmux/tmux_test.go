@@ -3722,11 +3722,11 @@ func TestSelfCloseExcludedInPaneCallerSurvivesCleanup(t *testing.T) {
 // grepconf.sh) and zsh-newuser-install's clear probe ("clear") when HOME has no
 // zsh dotfiles. How long that lasts depends on host load, $SHELL and $HOME, so
 // an assertion about pane_current_command taken a fixed delay after NewSession
-// races it (ga-kmwwcx). `exec sh` runs no startup files, and once the pane
-// reports "sh" it stays "sh".
+// races it (ga-kmwwcx). A non-login `sh` with $ENV unset runs no startup
+// files, and once the pane reports "sh" it stays "sh".
 func newPlainShellSession(t *testing.T, tm *Tmux, name string) {
 	t.Helper()
-	if err := tm.NewSessionWithCommand(name, "", "exec sh"); err != nil {
+	if err := tm.NewSessionWithCommand(name, "", "exec env -u ENV sh"); err != nil {
 		t.Fatalf("NewSessionWithCommand(%q): %v", name, err)
 	}
 	waitForPaneCommand(t, tm, name, "sh", 10*time.Second)

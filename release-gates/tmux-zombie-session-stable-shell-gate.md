@@ -7,7 +7,7 @@ Deploy bead `ga-3945eg`; review bead `ga-peo49r` (PASS); reviewed source `39b9ce
 | # | Result | Evidence |
 |---|---|---|
 | 1 | PASS | `ga-peo49r` records reviewer PASS for the exact source SHA. No carryover is used. |
-| 2 | PASS | The changed integration test now starts a plain shell, waits for `pane_current_command=sh`, and verifies that `EnsureSessionFresh` changes the pane PID. The fixed-sleep ledger is reduced together from 489 to 488 in code, TOML, and `TESTING.md`. The ledger test and all five tmux-manifest tests passed in the full suite; the changed test passed under a slow zsh HOME 3/3. |
+| 2 | PASS | The changed integration test now starts a plain shell, waits for `pane_current_command=sh`, and verifies that `EnsureSessionFresh` changes the pane PID. The fixed-sleep ledger is reduced together from 494 to 493 calls (181 files) in code, TOML, and `TESTING.md`. The ledger test and all five tmux-manifest tests passed in the full suite; the changed test passed under a slow zsh HOME 3/3. |
 | 3 | PASS | The full 40-job suite, fast policy and drift lanes, and triggered CI-path supplement passed. The changed test ran and passed; no diff-owned test skipped. See below. |
 | 4 | PASS | Review `ga-peo49r` reports no unresolved HIGH finding. |
 | 5 | PASS | Role worktree and merge scratch were clean before the gate record was written. Recheck the isolated branch after committing the record. |
@@ -31,3 +31,7 @@ Deploy bead `ga-3945eg`; review bead `ga-peo49r` (PASS); reviewed source `39b9ce
 - `failure_attribution: n/a`; `waiver_ref: none` (Gas City has no waiver path).
 
 Raw full-suite logs: `/var/tmp/gate-ga-3945eg-suite-logs/`. Frozen merge scratch: `/var/tmp/gc-merge-validate.ga-3945eg.Bf9AGD`.
+
+## Maintainer rebase note
+
+Rebased onto `origin/main` `850201d51b2982d257d9a5fca650d71f393715d7` (earlier rebase base `fb076128589bb54dbd5eef402a58bd6c7ddee767`). The contributor's ledger-only green commit became empty against main's recounted ledger and was dropped; the ledger was recounted on the rebased tree instead of carried forward. Post-rebase all-scope `fixed_sleep` audit baseline: 493 calls / 181 files (main recorded 494 / 181), set in `census.go`, `test/test-resources.toml`, and `TESTING.md`. Untagged `fixed_sleep` debt rows are unchanged (the tmux test is integration-tagged). The plain-shell fixture also clears an inherited `$ENV` so interactive `sh` reads no startup file.
