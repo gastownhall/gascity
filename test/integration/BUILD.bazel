@@ -141,6 +141,7 @@ go_test(
         "//internal/runtime",
         "//internal/runtime/exec",
         "//internal/runtime/runtimetest",
+        "//internal/supervisor",
         "//internal/testenv",
         "//internal/testfixtures/reviewworkflows",
         "//internal/testutil",
