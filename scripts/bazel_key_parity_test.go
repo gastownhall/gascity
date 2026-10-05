@@ -142,7 +142,10 @@ func checkBazelKeyParity(bazelrc string) []error {
 }
 
 // checkBazelRCLocalLines checks lines destined for .bazelrc.local: only
-// build:remote-exec transport flags and the fork-cache selection.
+// build:remote-exec and build:fork-cache transport flags and the fork-cache
+// selection. bazel-test.yml's probe-gated `build:fork-cache
+// --remote_cache_compression` (zstd while rbe-cache advertises it) is such a
+// transport flag: compression changes the bytes on the wire, never a digest.
 func checkBazelRCLocalLines(lines []string) []error {
 	var errs []error
 	for _, line := range lines {
@@ -154,8 +157,8 @@ func checkBazelRCLocalLines(lines []string) []error {
 			errs = append(errs, errors.New(".bazelrc.local line "+strconv.Quote(line)+" sets nothing"))
 		}
 		for _, o := range opts {
-			if o.command != "build" || o.config != "remote-exec" || !bazelTransportFlag(o.flag) {
-				errs = append(errs, errors.New(".bazelrc.local line "+strconv.Quote(line)+" is not a build:remote-exec transport flag; everything else is shared and belongs in .bazelrc"))
+			if o.command != "build" || (o.config != "remote-exec" && o.config != "fork-cache") || !bazelTransportFlag(o.flag) {
+				errs = append(errs, errors.New(".bazelrc.local line "+strconv.Quote(line)+" is not a build:remote-exec or build:fork-cache transport flag; everything else is shared and belongs in .bazelrc"))
 			}
 		}
 	}
@@ -213,6 +216,7 @@ func TestBazelKeyParity(t *testing.T) {
 		"executor":  {"build:remote-exec --remote_executor=" + ep, "build:remote-exec --remote_instance_name=oss"},
 		"mtls":      {"build:remote-exec --tls_client_certificate=/x.crt", "build:remote-exec --tls_client_key=/x.key", "build:remote-exec --tls_certificate_authority=/x.pem"},
 		"fork":      {bazelForkCacheLine},
+		"fork zstd": {bazelForkCacheLine, bazelCacheZstdLine},
 		"conns":     {"build:remote-exec --remote_max_connections=8"},
 		"no lines":  nil,
 		"two flags": {"build:remote-exec --remote_executor=" + ep + " --remote_instance_name=oss"},
@@ -226,6 +230,8 @@ func TestBazelKeyParity(t *testing.T) {
 		"plain build":    {"build --remote_download_minimal"},
 		"plain jobs":     {"build --jobs=64"},
 		"define":         {"build:remote-exec --define=gotags=x"},
+		"fork define":    {"build:fork-cache --define=gotags=x"},
+		"fork test env":  {"test:fork-cache --test_env=PATH=" + bazelPinnedTestPath},
 		"platform":       {"build:remote-exec --extra_execution_platforms=//:rbe"},
 		"exec props":     {"build:remote-exec --remote_default_exec_properties=a=b"},
 		"other config":   {"build:trusted --remote_executor=" + ep},
@@ -240,8 +246,9 @@ func TestBazelKeyParity(t *testing.T) {
 }
 
 // TestBazelCIRCLocalCarriesOnlyTransport runs bazel-test.yml's rc step in
-// every mode: whatever it writes must be transport-only, so trusted,
-// rbe-fork and fork-cache runs (and developers) hash actions alike.
+// every mode, with rbe-cache advertising zstd and without: whatever it
+// writes must be transport-only, so trusted, rbe-fork and fork-cache runs
+// (and developers) hash actions alike.
 func TestBazelCIRCLocalCarriesOnlyTransport(t *testing.T) {
 	steps := bazelTestWorkflowSteps(t, repoRoot(t))
 	var script string
@@ -263,8 +270,15 @@ func TestBazelCIRCLocalCarriesOnlyTransport(t *testing.T) {
 			"RBE_FORK_CERT_FILE": "/runner/fork.crt", "RBE_FORK_KEY_FILE": "/runner/fork.key",
 		},
 	} {
-		for _, err := range checkBazelRCLocalLines(runBazelRCConfigStep(t, script, env)) {
-			t.Errorf("%s: %v", name, err)
+		for _, probe := range []string{"", "zstd"} {
+			env["BAZEL_TEST_PROBE"] = probe
+			lines := runBazelRCConfigStep(t, script, env)
+			for _, err := range checkBazelRCLocalLines(lines) {
+				t.Errorf("%s (probe %q): %v", name, probe, err)
+			}
+			if name == "fork" && probe == "zstd" && !slices.Contains(lines, bazelCacheZstdLine) {
+				t.Errorf("fork with rbe-cache advertising zstd wrote no %q, so this test no longer classifies it:\n%s", bazelCacheZstdLine, strings.Join(lines, "\n"))
+			}
 		}
 	}
 }
