@@ -12,6 +12,7 @@ import (
 	"testing"
 	"testing/synctest"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -352,11 +353,11 @@ func TestRouterAssignedWorkStatusChangeEnqueuesAssignee(t *testing.T) {
 		t.Fatal("closed work still in the assignee index")
 	}
 
-	// Unassigned work wakes only the allocator.
+	// Unassigned, unrouted work wakes nothing (C9; TestRouterAllocatorWakePolicy).
 	r.OnBeadEvent(beadEvent(t, events.BeadCreated, routerWorkBead("w-2", "open", "")), false, false)
 	ids, allocs, _ = rec.take()
 	wantStrings(t, "keys for unassigned work", ids, nil)
-	wantStrings(t, "allocator wakes for unassigned work", allocs, []string{routeReasonEvent})
+	wantStrings(t, "allocator wakes for unassigned work", allocs, nil)
 }
 
 // Kills: a session key enqueued for an allocator key (API-001, API-011).
@@ -1117,4 +1118,142 @@ func TestRouterIndexConsistentUnderConcurrentEventsAndRebuilds(t *testing.T) {
 			}
 		}
 	})
+}
+
+func routedWorkBead(id, status, assignee, route string) beads.Bead {
+	b := routerWorkBead(id, status, assignee)
+	if route != "" {
+		b.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: route}
+	}
+	return b
+}
+
+// Kills each clause of the allocator wake policy (CONTRACT §1.1, C9) dropped
+// or widened. On any leg, replays included, the allocator wakes for a close
+// or delete, a session row (relics too) and work whose current or previously
+// indexed version carries gc.routed_to or an assignee; any other work event
+// wakes nothing and is counted. "Before" comes from an earlier event, a
+// rebuild, or a partial rebuild that keeps it.
+func TestRouterAllocatorWakePolicy(t *testing.T) {
+	work := func(route, assignee string) beads.Bead { return routedWorkBead("w-1", "open", assignee, route) }
+	seedEvent := func(b beads.Bead) func(*testing.T, *reconcileRouter) {
+		return func(t *testing.T, r *reconcileRouter) {
+			r.OnBeadEvent(beadEvent(t, events.BeadUpdated, b), false, false)
+		}
+	}
+	seedRebuild := func(failLeg bool) func(*testing.T, *reconcileRouter) {
+		return func(t *testing.T, r *reconcileRouter) {
+			census := routerCensus{sessions: memSessionCensus(beads.NewMemStore()), legs: memLegs(beads.NewMemStoreFrom(0, []beads.Bead{work("pool", "")}, nil))}
+			mustRebuild(t, r, census)
+			if failLeg {
+				census.legs = memLegs(failingListStore{beads.NewMemStore()})
+				if _, _, legErr := r.rebuild(census); legErr == nil {
+					t.Fatal("rebuild over a failing leg reported no error")
+				}
+			}
+		}
+	}
+	session := routerSessionBead("s-a", map[string]string{"session_name": "worker-a"})
+	cases := []struct {
+		name      string
+		seed      func(*testing.T, *reconcileRouter)
+		eventType string
+		b         beads.Bead
+		snapshot  bool
+		sessions  bool // applied to the sessions store
+		want      bool
+	}{
+		{name: "work with neither", eventType: events.BeadUpdated, b: work("", "")},
+		{name: "work with neither, replayed", eventType: events.BeadUpdated, b: work("", ""), snapshot: true},
+		{name: "work with neither after a closed route", seed: seedEvent(routedWorkBead("w-1", "closed", "", "pool")), eventType: events.BeadUpdated, b: work("", "")},
+		{name: "routed work", eventType: events.BeadCreated, b: work("pool", ""), want: true},
+		{name: "routed work, replayed", eventType: events.BeadUpdated, b: work("pool", ""), snapshot: true, want: true},
+		{name: "assigned work", eventType: events.BeadUpdated, b: work("", "worker-a"), want: true},
+		{name: "assigned blocked work", eventType: events.BeadUpdated, b: routedWorkBead("w-1", "blocked", "worker-a", ""), want: true},
+		{name: "route removed", seed: seedEvent(work("pool", "")), eventType: events.BeadUpdated, b: work("", ""), want: true},
+		{name: "route removed after a rebuild", seed: seedRebuild(false), eventType: events.BeadUpdated, b: work("", ""), want: true},
+		{name: "route removed after a partial rebuild", seed: seedRebuild(true), eventType: events.BeadUpdated, b: work("", ""), want: true},
+		{name: "assignee removed", seed: seedEvent(work("", "worker-a")), eventType: events.BeadUpdated, b: work("", ""), want: true},
+		{name: "close of work with neither", eventType: events.BeadClosed, b: routedWorkBead("w-1", "closed", "", ""), want: true},
+		{name: "delete of work with neither", eventType: events.BeadDeleted, b: work("", ""), snapshot: true, want: true},
+		{name: "session row, replayed", eventType: events.BeadUpdated, b: session, snapshot: true, sessions: true, want: true},
+		{name: "relic session row, replayed", eventType: events.BeadUpdated, b: session, snapshot: true, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, rec := newTestRouter()
+			if tc.seed != nil {
+				tc.seed(t, r)
+			}
+			rec.take()
+			suppressed := r.stats().WakesSuppressed
+			r.OnBeadEvent(beadEvent(t, tc.eventType, tc.b), tc.snapshot, tc.sessions)
+			_, allocs, _ := rec.take()
+			if got := len(allocs) > 0; got != tc.want {
+				t.Fatalf("allocator woken = %v (%q), want %v", got, allocs, tc.want)
+			}
+			if got, want := r.stats().WakesSuppressed-suppressed, map[bool]uint64{false: 1}[tc.want]; got != want {
+				t.Fatalf("wakes suppressed = %d, want %d", got, want)
+			}
+		})
+	}
+}
+
+// Kills the routed set growing without bound, or a full set suppressing
+// wakes it can no longer vouch for. Past routerMaxRouted every work event
+// wakes the allocator; a complete rebuild that fits clears the overflow.
+func TestRouterRoutedSetIsBounded(t *testing.T) {
+	r, rec := newTestRouter()
+	for i := 0; i < routerMaxRouted; i++ {
+		r.idx.routed[fmt.Sprintf("w-fill-%d", i)] = struct{}{}
+	}
+	r.OnBeadEvent(beadEvent(t, events.BeadCreated, routedWorkBead("w-1", "open", "", "pool")), false, false)
+	if len(r.idx.routed) != routerMaxRouted || !r.idx.routedFull {
+		t.Fatalf("routed set = %d entries, full %v; want %d, full", len(r.idx.routed), r.idx.routedFull, routerMaxRouted)
+	}
+	rec.take()
+	unrouted := beadEvent(t, events.BeadUpdated, routerWorkBead("w-2", "open", ""))
+	r.OnBeadEvent(unrouted, false, false)
+	if _, allocs, _ := rec.take(); len(allocs) != 1 {
+		t.Fatalf("allocator wakes with a full routed set = %q, want one", allocs)
+	}
+
+	mustRebuild(t, r, routerCensus{sessions: memSessionCensus(beads.NewMemStore()), legs: memLegs(beads.NewMemStore())})
+	r.OnBeadEvent(unrouted, false, false)
+	if _, allocs, _ := rec.take(); len(allocs) != 0 || r.idx.routedFull {
+		t.Fatalf("after a fitting rebuild: allocator wakes %q, full %v; want none", allocs, r.idx.routedFull)
+	}
+}
+
+// BenchmarkRouterWakePolicy routes an hour of maintainer-city bead events
+// (51k, P3 §6.4): mostly unrouted work churn and session-row replays, some
+// routed and assigned work. cpu-fraction is one core's busy share at that rate.
+func BenchmarkRouterWakePolicy(b *testing.B) {
+	r := newReconcileRouter(routerTestLeg, routerSink{
+		addSession: func(rowKey, routeReason) {}, wakeAllocator: func(routeReason) {}, requestResync: func(string) {},
+	}, nil)
+	var evts []events.Event
+	for i := 0; i < 1000; i++ {
+		var bead beads.Bead
+		switch id := fmt.Sprintf("b-%d", i%200); i % 10 {
+		case 0, 1, 2:
+			bead = routerSessionBead("s-"+id, map[string]string{"session_name": "worker-" + id})
+		case 3:
+			bead = routedWorkBead(id, "open", "", "pool")
+		case 4:
+			bead = routedWorkBead(id, "in_progress", "worker-"+id, "pool")
+		default:
+			bead = routerWorkBead("u-"+id, "open", "")
+		}
+		payload, err := beads.EncodeBeadEventPayload(bead)
+		if err != nil {
+			b.Fatal(err)
+		}
+		evts = append(evts, events.Event{Type: events.BeadUpdated, Subject: bead.ID, Payload: payload})
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		r.OnBeadEvent(evts[i%len(evts)], i%2 == 0, true)
+	}
+	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)*51000/3.6e12, "cpu-fraction")
 }

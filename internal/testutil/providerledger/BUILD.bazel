@@ -33,7 +33,6 @@ go_test(
     deps = [
         "//internal/bazeltest",
         "//internal/testenv",
-        "//internal/testpolicy/waiverclock",
     ],
 )
 

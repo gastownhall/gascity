@@ -10,6 +10,7 @@ go_test(
         "bazel_fork_cache_test.go",
         "bazel_fresh_merge_test.go",
         "bazel_hermetic_cc_test.go",
+        "bazel_hermetic_tags_test.go",
         "bazel_key_parity_test.go",
         "bazel_multilane_test.go",
         "bazel_no_flaky_retries_test.go",

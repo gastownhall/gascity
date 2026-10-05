@@ -9382,6 +9382,170 @@ func TestWorkflowDeleteSweepsTheRelocatedTreeAndTheRetainedCopy(t *testing.T) {
 	}
 }
 
+// TestWorkflowDeleteSweepsTheEphemeralTierOfTheRelocatedTree is the #6129
+// regression: findWorkflowBeads' descendants query left ListQuery.TierMode at
+// its zero value, TierIssues, which filters out Ephemeral rows. On a split
+// city the sweep still finds the root through the class binding, but every
+// wisp-tier step under it — the shape orchestration steps actually run in —
+// was silently dropped from the member set. `gc workflow delete` closed the
+// root and reported success while the ephemeral steps stayed open, rootless,
+// still carrying gc.root_bead_id pointing at a workflow that is gone.
+func TestWorkflowDeleteSweepsTheEphemeralTierOfTheRelocatedTree(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	prevCityFlag := cityFlag
+	cityFlag = ""
+	t.Cleanup(func() { cityFlag = prevCityFlag })
+
+	binding := soleClassBindingStore(t, cityPath)
+	root, err := binding.Create(beads.Bead{
+		Title:  "the workflow root",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey: beadmeta.KindWorkflow,
+		},
+	})
+	if err != nil {
+		t.Fatalf("seeding the workflow root in the class binding: %v", err)
+	}
+
+	wisp := mintEphemeralInBinding(t, binding, beads.Bead{
+		Title:    "the ephemeral step",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowDelete(root.ID, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc workflow delete exited %d: %s%s", code, stdout.String(), stderr.String())
+	}
+
+	closedWisp, err := binding.Get(wisp.ID)
+	if err != nil {
+		t.Fatalf("reading the ephemeral descendant back from the binding: %v", err)
+	}
+	if closedWisp.Status != "closed" {
+		t.Errorf("the ephemeral descendant %s is %q after the sweep, want closed: the descendants query must read TierMode: TierBoth so a relocated binding's wisp-tier steps are not silently dropped from the workflow's member set", wisp.ID, closedWisp.Status)
+	}
+}
+
+// mintEphemeralInBinding creates b in the class binding's wisp tier and fails
+// the test if the binding cannot reach that tier.
+func mintEphemeralInBinding(t *testing.T, binding beads.Store, b beads.Bead) beads.Bead {
+	t.Helper()
+	creator, ok := binding.(beads.StorageCreateStore)
+	if !ok {
+		t.Fatalf("the class binding (%T) implements no StorageCreateStore, so this fixture cannot reach its ephemeral tier", binding)
+	}
+	minted, err := creator.CreateWithStorage(b, beads.StorageEphemeral)
+	if err != nil {
+		t.Fatalf("minting an ephemeral bead in the class binding: %v", err)
+	}
+	if !minted.Ephemeral {
+		t.Fatalf("minted bead %s has Ephemeral=false; this fixture is not exercising the wisp tier", minted.ID)
+	}
+	return minted
+}
+
+// TestFindWorkflowBeadsFromRootReadsTheEphemeralTierOfTheRelocatedTree is the
+// delete-source sibling of the #6129 regression: findWorkflowBeadsFromRoot's
+// descendants query left ListQuery.TierMode at TierIssues, so on a split city
+// the wisp-tier steps under a source workflow root in the class binding were
+// dropped from the set `gc convoy delete-source` closes.
+func TestFindWorkflowBeadsFromRootReadsTheEphemeralTierOfTheRelocatedTree(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	binding := soleClassBindingStore(t, cityPath)
+
+	root, err := binding.Create(beads.Bead{
+		Title:    "the source workflow root",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+	})
+	if err != nil {
+		t.Fatalf("seeding the workflow root in the class binding: %v", err)
+	}
+	wisp := mintEphemeralInBinding(t, binding, beads.Bead{
+		Title:    "the ephemeral step",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+
+	found, err := findWorkflowBeadsFromRoot(binding, root)
+	if err != nil {
+		t.Fatalf("findWorkflowBeadsFromRoot: %v", err)
+	}
+	for _, b := range found {
+		if b.ID == wisp.ID {
+			return
+		}
+	}
+	t.Fatalf("findWorkflowBeadsFromRoot missed ephemeral descendant %s; got %d beads: the descendants query must read TierMode: TierBoth through the live handle", wisp.ID, len(found))
+}
+
+// TestSourceWorkflowChildSourcesReadsTheEphemeralTierOfTheRelocatedTree pins
+// the nested-workflow leg of `gc convoy delete-source`: a child source stamped
+// with gc.source_bead_id that lives in the class binding's wisp tier (a nested
+// workflow started from a wisp step) must be followed, or the sweep stops at
+// the first level and leaves the nested workflow running.
+func TestSourceWorkflowChildSourcesReadsTheEphemeralTierOfTheRelocatedTree(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	binding := soleClassBindingStore(t, cityPath)
+
+	const sourceBeadID = "src-ephemeral-child-6129"
+	child := mintEphemeralInBinding(t, binding, beads.Bead{
+		Title:    "the ephemeral wisp step that launched a nested workflow",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.SourceBeadIDMetadataKey: sourceBeadID},
+	})
+
+	children, err := sourceWorkflowChildSources(binding, sourceBeadID, "", "", "")
+	if err != nil {
+		t.Fatalf("sourceWorkflowChildSources: %v", err)
+	}
+	for _, b := range children {
+		if b.ID == child.ID {
+			return
+		}
+	}
+	t.Fatalf("sourceWorkflowChildSources(%q) missed ephemeral child source %s; got %d beads: the child-source query must read TierMode: TierBoth through the live handle", sourceBeadID, child.ID, len(children))
+}
+
+// TestFindWorkflowBeadsDiscoversAnEphemeralRootByWorkflowID pins the
+// root-discovery leg of findWorkflowBeads: a workflow root addressed by its
+// logical gc.workflow_id that lives in the class binding's wisp tier must be
+// found, or `gc workflow delete <workflow-id>` reports nothing to delete while
+// the root and its steps stay open.
+func TestFindWorkflowBeadsDiscoversAnEphemeralRootByWorkflowID(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	binding := soleClassBindingStore(t, cityPath)
+
+	const workflowID = "wf-ephemeral-root-6129"
+	root := mintEphemeralInBinding(t, binding, beads.Bead{
+		Title:  "the ephemeral workflow root",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
+			beadmeta.WorkflowIDMetadataKey: workflowID,
+		},
+	})
+
+	found, err := findWorkflowBeads(binding, workflowID)
+	if err != nil {
+		t.Fatalf("findWorkflowBeads: %v", err)
+	}
+	for _, b := range found {
+		if b.ID == root.ID {
+			return
+		}
+	}
+	t.Fatalf("findWorkflowBeads(%q) missed ephemeral root %s; got %d beads: the root-discovery query must read TierMode: beads.FederatedReadTier", workflowID, root.ID, len(found))
+}
+
 // TestWorkflowDeleteRefusesToSweepPastABindingThatStandsRefused pins the arm
 // that separates a sweep from a read.
 //

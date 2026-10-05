@@ -23,7 +23,7 @@
 #     rbe-west's mint does not yet serve bazel.yml) run no lanes:
 #     bazel-test.yml covers them; rbe=cache dispatches still run them;
 #   - a fork run mints at most 2 rbe-fork certificates, one per lane:
-#     unit and acceptance in fork-rw, unit alone in fork-ro;
+#     unit and acceptance, in fork-ro and fork-rw alike;
 #   - coverage uploads lcov as an artifact; bazel-test.yml keeps the Codecov
 #     upload (flag bazel-unit) so the flag is not reported twice;
 #   - bep-summary reports cached vs executed test targets per lane from the
@@ -150,15 +150,10 @@ jobs:
           elif [ "$EVENT" = pull_request ] && [ "$MODE" = cache ]; then
             echo "No lanes: pull_request runs in mode cache wait for rbe-west's mint to serve bazel.yml; bazel-test.yml covers this PR." >> "$GITHUB_STEP_SUMMARY"
           else
-            lanes=$unit
-            # The fork pool (mode fork-ro, instance oss-fork) runs every
-            # action with loopback only, and `gc init` clones gascity-packs
-            # from github.com (ga-73eoo).
-            if [ "$MODE" = fork-ro ]; then
-              echo "No acceptance lane: the fork pool has no network and \`gc init\` clones from github.com (ga-73eoo)." >> "$GITHUB_STEP_SUMMARY"
-            else
-              lanes+=",$acceptance"
-            fi
+            # Acceptance runs on the fork pool too (mode fork-ro, instance
+            # oss-fork, loopback only): `gc init` no longer clones
+            # gascity-packs (#7005).
+            lanes="$unit,$acceptance"
             # Pushes and dispatches only until G3 (evidence-only on pull
             # requests would only spend the pool).
             case "$EVENT" in push|workflow_dispatch) lanes+=",$integration" ;; esac
