@@ -294,6 +294,7 @@ go_test(
         "fake_state_test.go",
         "genclient_roundtrip_test.go",
         "global_stream_dynamic_test.go",
+        "global_stream_membership_test.go",
         "global_stream_precheck_test.go",
         "global_stream_sync_test.go",
         "grant_e2e_test.go",
