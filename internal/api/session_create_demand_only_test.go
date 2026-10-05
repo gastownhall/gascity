@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -117,4 +118,89 @@ func TestHandleSessionCreateRefusesDemandOnlySingletonAgent(t *testing.T) {
 	}
 	assertDemandOnlyRefusalMessage(t, problem.Detail)
 	assertNoSessionBeads(t, fs)
+}
+
+// createDemandOnlyPoolSession seeds the controller-owned pool session of the
+// demand-only singleton myrig/worker, asleep.
+func createDemandOnlyPoolSession(t *testing.T, fs *fakeState) string {
+	t.Helper()
+	fs.cfg.Agents[0].MinActiveSessions = intPtr(0)
+	fs.cfg.NamedSessions = nil // the shared fixture backs myrig/worker with a named session
+	b := createTestSessionBead(t, fs.cityBeadStore, map[string]string{
+		"template":       "myrig/worker",
+		"session_origin": "ephemeral",
+		"pool_managed":   "true",
+		"state":          "asleep",
+		"session_name":   "myrig--worker",
+	}, "worker pool session")
+	return b.ID
+}
+
+func assertNoWakeRecorded(t *testing.T, fs *fakeState, id string) {
+	t.Helper()
+	got, err := fs.cityBeadStore.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	if got.Metadata["wake_request"] != "" {
+		t.Fatalf("wake_request = %q after a refused wake, want none recorded", got.Metadata["wake_request"])
+	}
+}
+
+// #6858: `gc session wake` reports that a demand-only singleton's pool session
+// will not start; the API wake must refuse it the same way the create does,
+// with a dedicated code clients can tell apart from a malformed request.
+func TestHumaHandleSessionWakeRefusesDemandOnlySingletonSession(t *testing.T) {
+	fs := newSessionFakeState(t)
+	id := createDemandOnlyPoolSession(t, fs)
+	srv := New(fs)
+
+	_, err := srv.humaHandleSessionWake(context.Background(), &SessionIDInput{ID: id})
+	if err == nil {
+		t.Fatal("humaHandleSessionWake() = nil error; want a refusal for a demand-only singleton session")
+	}
+	var problem *apierr.ErrorModel
+	if !errors.As(err, &problem) {
+		t.Fatalf("humaHandleSessionWake() error = %T %v, want *apierr.ErrorModel", err, err)
+	}
+	if problem.Status != http.StatusBadRequest || problem.Code != apierr.DemandOnlySingleton.Code {
+		t.Fatalf("problem = status %d code %q, want status %d code %q", problem.Status, problem.Code, http.StatusBadRequest, apierr.DemandOnlySingleton.Code)
+	}
+	assertDemandOnlyRefusalMessage(t, problem.Detail)
+	assertNoWakeRecorded(t, fs, id)
+}
+
+// The create refusal carries the same dedicated code.
+func TestHumaHandleSessionCreateDemandOnlyRefusalCode(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents[0].MinActiveSessions = intPtr(0)
+	fs.cfg.NamedSessions = nil
+	srv := New(&commandableWaiterState{fakeState: fs})
+
+	_, err := srv.humaHandleSessionCreate(context.Background(), &SessionCreateInput{
+		Body: sessionCreateBody{Kind: "agent", Name: "myrig/worker"},
+	})
+	var problem *apierr.ErrorModel
+	if !errors.As(err, &problem) || problem.Code != apierr.DemandOnlySingleton.Code {
+		t.Fatalf("humaHandleSessionCreate() error = %v, want code %q", err, apierr.DemandOnlySingleton.Code)
+	}
+}
+
+// The compatibility REST wake route refuses the same shape.
+func TestHandleSessionWakeRefusesDemandOnlySingletonSession(t *testing.T) {
+	fs := newSessionFakeState(t)
+	id := createDemandOnlyPoolSession(t, fs)
+	srv := New(fs)
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, newPostRequest("/v0/session/"+id+"/wake", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	var problem problemDetails
+	if err := json.NewDecoder(rec.Body).Decode(&problem); err != nil {
+		t.Fatalf("decode problem body: %v", err)
+	}
+	assertDemandOnlyRefusalMessage(t, problem.Detail)
+	assertNoWakeRecorded(t, fs, id)
 }
