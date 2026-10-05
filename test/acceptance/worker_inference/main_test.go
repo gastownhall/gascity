@@ -76,16 +76,10 @@ func TestMain(m *testing.M) {
 		panic("worker-inference: " + err.Error())
 	}
 
-	doltCfgDir := filepath.Join(gcHome, ".dolt")
-	if err := os.MkdirAll(doltCfgDir, 0o755); err != nil {
-		panic("worker-inference: " + err.Error())
-	}
-	doltCfg := `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
-	if err := os.WriteFile(filepath.Join(doltCfgDir, "config_global.json"), []byte(doltCfg), 0o644); err != nil {
-		panic("worker-inference: " + err.Error())
-	}
-
+	// NewEnv seeds the dolt identity (metrics off) under gcHome/.dolt. The
+	// live providers authenticate through the operator's home.
 	liveEnv = helpers.NewEnv(gcBinary, gcHome, runtimeDir).
+		WithHostHome().
 		Without("GC_SESSION").
 		Without("GC_BEADS").
 		Without("GC_DOLT").

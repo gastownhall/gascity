@@ -196,6 +196,7 @@ func syncLock(cityRoot string, imports map[string]config.Import, mode InstallMod
 		chosen:         make(map[string]LockedPack),
 		refreshed:      make(map[string]bool),
 		validated:      make(map[string]bool),
+		releases:       make(map[string]RegistryRelease),
 	}
 
 	constraints, reachable, err := mergeDirectConstraints(imports)
@@ -220,6 +221,9 @@ func syncLock(cityRoot string, imports map[string]config.Import, mode InstallMod
 			return nil, err
 		}
 		if !dirty && !chosenChanged && sameStringMap(constraints, nextConstraints) && sameSet(reachable, nextReachable) {
+			if err := state.verifyRegistryReleases(nextReachable); err != nil {
+				return nil, err
+			}
 			return state.buildLock(nextReachable), nil
 		}
 		constraints = nextConstraints
@@ -240,6 +244,12 @@ type syncState struct {
 	chosen         map[string]LockedPack
 	refreshed      map[string]bool
 	validated      map[string]bool
+	// releases records the registry release each source was resolved to in
+	// this sync; its content hash is verified before the lock is returned.
+	releases map[string]RegistryRelease
+	// registriesRefreshed records that this upgrade already refreshed the
+	// registry catalogs once.
+	registriesRefreshed bool
 }
 
 // checkPolicy runs the untrusted-source policy for source once per sync. It is
@@ -310,22 +320,89 @@ func (s *syncState) resolveSource(source, constraint string) (bool, error) {
 	case InstallUpgrade:
 		// Always refresh below unless this sync already resolved the source.
 	case InstallResolveIfNeeded:
-		if !forceUpgrade && hasExisting && matchesExisting(existing, constraint) {
+		if !forceUpgrade && hasExisting && matchesExisting(existing, constraint) && lockedEntryAnswersConstraint(source, existing, constraint) {
 			return s.storeChosen(source, existing, false), nil
 		}
 	default:
 		return false, fmt.Errorf("unknown install mode %d", s.mode)
 	}
 
-	resolved, err := ResolveVersion(s.cityRoot, source, constraint)
+	resolved, err := s.resolveVersion(source, constraint, forceUpgrade || s.mode == InstallUpgrade)
 	if err != nil {
 		return false, err
 	}
-	return s.storeChosen(source, LockedPack{
-		Version: resolved.Version,
-		Commit:  resolved.Commit,
-		Fetched: time.Now().UTC(),
-	}, true), nil
+	return s.storeChosen(source, resolved, true), nil
+}
+
+// resolveVersion answers constraint for source. A source a configured pack
+// registry publishes resolves against that registry's release entries — never
+// git tags, which for a multi-pack repository belong to no pack — and the
+// release is remembered so its content hash is verified before the lock is
+// returned. Any other source resolves against git tags.
+func (s *syncState) resolveVersion(source, constraint string, forceUpgrade bool) (LockedPack, error) {
+	// An upgrade sees releases published since the registry caches were
+	// written: the first registry question of an upgrade refreshes them.
+	fetch := RegistryRefreshMissing
+	if forceUpgrade && !s.registriesRefreshed {
+		fetch = RegistryRefreshAll
+	}
+	release, ok, unavailable, err := resolveRegistryRelease(source, constraint, fetch)
+	if fetch == RegistryRefreshAll {
+		s.registriesRefreshed = true
+	}
+	if err != nil {
+		return LockedPack{}, fmt.Errorf("source %q: %w", source, err)
+	}
+	if ok {
+		s.releases[source] = release
+		return LockedPack{Version: release.Version, Commit: release.Commit, Fetched: time.Now().UTC()}, nil
+	}
+	delete(s.releases, source)
+	resolved, err := ResolveVersion(s.cityRoot, source, constraint)
+	if err != nil {
+		if unavailable != nil {
+			return LockedPack{}, fmt.Errorf("%w (pack registries were not all readable, so a registry release for this source may have been missed: %w)", err, unavailable)
+		}
+		return LockedPack{}, err
+	}
+	return LockedPack{Version: resolved.Version, Commit: resolved.Commit, Fetched: time.Now().UTC()}, nil
+}
+
+// lockedEntryAnswersConstraint reports whether an existing lock entry may be
+// reused for a version constraint. For a registry-published source the entry
+// must be one of the registry's releases: an entry an older gc resolved from a
+// repository tag (for example gascity-packs v0.4.0, which is no pack's
+// release) is re-resolved instead of silently kept. Sha pins and sources no
+// cached registry publishes are taken as locked.
+func lockedEntryAnswersConstraint(source string, locked LockedPack, constraint string) bool {
+	if strings.HasPrefix(constraint, "sha:") {
+		return true
+	}
+	isRelease, published := isRegistryRelease(source, locked)
+	return !published || isRelease
+}
+
+// verifyRegistryReleases checks the fetched content of every source this sync
+// resolved from a registry release against the release's content hash, so a
+// mismatch fails the sync before any caller writes the manifest or the lock.
+func (s *syncState) verifyRegistryReleases(reachable map[string]struct{}) error {
+	sources := make([]string, 0, len(s.releases))
+	for source := range s.releases {
+		if _, ok := reachable[source]; ok && s.chosen[source].Commit == s.releases[source].Commit {
+			sources = append(sources, source)
+		}
+	}
+	sort.Strings(sources)
+	for _, source := range sources {
+		release := s.releases[source]
+		if _, err := EnsureRepoInCache(s.cityRoot, source, release.Commit); err != nil {
+			return err
+		}
+		if err := verifyRegistryReleaseContent(source, release); err != nil {
+			return fmt.Errorf("source %q: %w", source, err)
+		}
+	}
+	return nil
 }
 
 func (s *syncState) discoverReachableClosure(imports map[string]config.Import) (map[string]string, map[string]struct{}, bool, error) {

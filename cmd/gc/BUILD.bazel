@@ -951,6 +951,7 @@ go_test(
         "cmd_import_credential_test.go",
         "cmd_import_hint_test.go",
         "cmd_import_prune_test.go",
+        "cmd_import_registry_version_test.go",
         "cmd_import_status_test.go",
         "cmd_import_test.go",
         "cmd_import_userinfo_test.go",
