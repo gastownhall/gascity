@@ -113,7 +113,13 @@ const (
 	// a step exporting GC_TEST_FAILURE_ARTIFACT_DIR to $GITHUB_ENV and an
 	// `if: failure()` pinned upload-artifact step for that directory. No new
 	// job, trigger, permission or secret.
-	expectedCIExecutionHash     = "f09cde554074ba570ce7d1e480ac538a2641c15539f120c3d028ee8ee63d07ac"
+	//
+	// Bumped again (beads#7037): the topology job's shared-server step -run
+	// also selects TestBlockedRepairOnProxiedCityAndRig, the proxied city+rig
+	// proof of gc start's is_blocked repair (about 4 minutes, inside that
+	// step's 15m -timeout). Reviewed delta: one -run alternative, no new job,
+	// step, trigger or permission.
+	expectedCIExecutionHash     = "5ce8f7a7966b71d98581b13c44907a05d7a3152c895b2efdd782594d18dc470f"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
