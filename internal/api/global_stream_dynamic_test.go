@@ -398,7 +398,8 @@ func TestSupervisorGlobalEventStreamDetachesCityStoppedMidStream(t *testing.T) {
 
 	alpha.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "alpha-1"})
 	frame, data := stream.nextTaggedEvent(t)
-	assertTaggedEvent(t, frame, data, "alpha", "alpha-1", "alpha:1,beta:0")
+	// The departed city is pruned from the composite id.
+	assertTaggedEvent(t, frame, data, "alpha", "alpha-1", "alpha:1")
 }
 
 // A resolver without a change notifier still has new cities picked up by the

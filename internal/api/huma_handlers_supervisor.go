@@ -7,12 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -875,10 +875,24 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 		return
 	}
 	defer mw.Close() //nolint:errcheck
+	// The city set can empty and refill while the client stays connected:
+	// keep the stream open (heartbeats keep flowing) when every city detaches.
+	mw.StayOpen()
+	// position is the composite SSE id's source of truth. It is shared with the
+	// background membership sync below, which reads it to resume returning
+	// cities and prunes cities that left the provider set from it.
+	position := events.NewStreamCursor(cursors)
 	// Keep each watched city's pending monitor running while this client is
-	// connected, so session.pending transitions reach the city logs.
+	// connected, so session.pending transitions reach the city logs. leaseMu
+	// serializes the leases between the background sync and the deferred
+	// release.
 	leases := newPendingMonitorLeases()
-	defer leases.releaseAll()
+	var leaseMu sync.Mutex
+	defer func() {
+		leaseMu.Lock()
+		defer leaseMu.Unlock()
+		leases.releaseAll()
+	}()
 	sm.syncPendingMonitorLeases(leases)
 	flushSSEHeaders(hctx)
 
@@ -888,17 +902,32 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 	// The city set is not fixed at connect time (#6861): attach cities that
 	// start after the client connected and detach cities that go away,
 	// whenever the resolver signals a change and on a slow periodic resync.
+	//
+	// A sync reads the city registry and opens city watchers, either of which
+	// can block on a slow or hung city provider. It therefore runs in a
+	// background goroutine, at most one at a time per stream, while the select
+	// loop keeps delivering events from the cities already attached and
+	// sending heartbeats. A change signal or resync tick that arrives while a
+	// sync is in flight is coalesced into one follow-up sync.
 	resync := time.NewTicker(sm.eventStreamResyncInterval())
 	defer resync.Stop()
 	replayNewCitiesFromZero := cursor == "0"
-	syncCities := func() {
-		known := maps.Clone(cursors)
-		started, err := mw.Sync(sm.globalEventProviders(), func(city string, p events.Provider) (uint64, error) {
+	streamCtx := hctx.Context()
+	syncDone := make(chan struct{}, 1)
+	syncing, syncPending := false, false
+	runSync := func() {
+		defer func() { syncDone <- struct{}{} }()
+		providers := sm.globalEventProviders()
+		// Prune departing cities before their watchers are detached, so no
+		// frame sent after a detach still names a city that left.
+		position.Retain(providers)
+		started, err := mw.Sync(providers, func(city string, p events.Provider) (uint64, error) {
 			// A city the client already has a position for (from its resume
-			// cursor, or from before it stopped) resumes there without a gap.
-			// Otherwise it starts from "now", like a head-start connection,
-			// unless the client asked for replay from zero.
-			if seq, ok := known[city]; ok {
+			// cursor, from what this stream delivered, or from before it left
+			// the city set) resumes there without a gap. Otherwise it starts
+			// from "now", like a head-start connection, unless the client
+			// asked for replay from zero.
+			if seq, ok := position.Resume(city); ok {
 				return seq, nil
 			}
 			if replayNewCitiesFromZero {
@@ -906,17 +935,25 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 			}
 			return p.LatestSeq()
 		})
-		if err != nil {
+		if err != nil && streamCtx.Err() == nil {
 			log.Printf("api: supervisor events-stream: syncing city watchers: %v", err)
 		}
-		sm.syncPendingMonitorLeases(leases)
 		// Record each new city's start seq so the composite SSE id carries it
 		// and a reconnect resumes the city from where this stream attached.
-		for city, seq := range started {
-			if _, ok := cursors[city]; !ok {
-				cursors[city] = seq
-			}
+		position.Attach(started)
+		leaseMu.Lock()
+		if streamCtx.Err() == nil {
+			sm.syncPendingMonitorLeases(leases)
 		}
+		leaseMu.Unlock()
+	}
+	requestSync := func() {
+		if syncing {
+			syncPending = true
+			return
+		}
+		syncing = true
+		go runSync()
 	}
 
 	ch := readEventsAhead(hctx.Context(), mw.Next)
@@ -927,9 +964,15 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 			return
 		case <-changes:
 			changes = sm.cityChanges()
-			syncCities()
+			requestSync()
 		case <-resync.C:
-			syncCities()
+			requestSync()
+		case <-syncDone:
+			syncing = false
+			if syncPending {
+				syncPending = false
+				requestSync()
+			}
 		case r, ok := <-ch:
 			if !ok {
 				return
@@ -938,7 +981,12 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 				log.Printf("api: supervisor events-stream: multiplex Next failed: %v", r.err)
 				return
 			}
-			cursors[r.event.City] = r.event.Seq
+			if !position.Advance(r.event.City, r.event.Seq) {
+				// A city that left and came back resumed from its last
+				// delivered seq; drop what its earlier watcher already
+				// delivered.
+				continue
+			}
 			var wfp *workflowEventProjection
 			if cs := sm.resolver.CityState(r.event.City); cs != nil {
 				wfp = projectWorkflowEventWithSlack(cs, r.event.Event, len(ch))
@@ -953,7 +1001,7 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 					r.event.Type, r.event.Seq, r.event.City, decodeErr)
 				continue
 			}
-			if err := send(StringIDMessage{ID: events.FormatCursor(cursors), Data: envelope}); err != nil {
+			if err := send(StringIDMessage{ID: position.Format(), Data: envelope}); err != nil {
 				// Client disconnected or encoding failed — draining
 				// further events off the multiplexer wastes work and
 				// masks the disconnect. Exit; the per-city stream
