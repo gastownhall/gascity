@@ -531,14 +531,20 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 			return err
 		}
 	}
-	if r.store == nil {
+	// The core names the store that holds the bead when it is not the work
+	// store (a --formula wisp root lives in the graph binding, #6054).
+	store := req.Store
+	if store == nil {
+		store = r.store
+	}
+	if store == nil {
 		return fmt.Errorf("built-in sling routing requires a store")
 	}
 	routedTo := req.Target
 	if cfg != nil {
 		routedTo = agentutil.NormalizePoolRouteTarget(cfg, req.Target)
 	}
-	if err := r.store.SetMetadata(req.BeadID, beadmeta.RoutedToMetadataKey, routedTo); err != nil {
+	if err := store.SetMetadata(req.BeadID, beadmeta.RoutedToMetadataKey, routedTo); err != nil {
 		if req.Force && errors.Is(err, beads.ErrNotFound) {
 			return nil
 		}

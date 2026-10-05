@@ -1530,6 +1530,7 @@ go_test(
         "skill_skip_log_test.go",
         "skill_supervisor_test.go",
         "sling_dashboard_link_test.go",
+        "sling_formula_split_route_test.go",
         "sling_nudge_backlog_test.go",
         "sling_nudge_budget_test.go",
         "sling_nudge_pool_instance_test.go",
