@@ -118,7 +118,7 @@ func fixtureFS() fstest.MapFS {
 		"leaky/leaky_test.go":            {Data: []byte(nonHermeticTest)},
 		"tidy/tidy_test.go":              {Data: []byte(hermeticTest)},
 		"dated/dated.go":                 {Data: []byte(datedLedgerSource)},
-		"dated/dated_test.go":            {Data: []byte("package dated\n")},
+		"dated/dated_test.go":            {Data: []byte(datedLedgerSource)},
 		"leaky/testdata/ignored_test.go": {Data: []byte(nonHermeticTest)},
 		"bazel-out/x/ignored_test.go":    {Data: []byte(nonHermeticTest)},
 	}
@@ -134,7 +134,7 @@ func TestScanFlagsDeliberatelyNonHermeticTest(t *testing.T) {
 		got = append(got, f.String())
 	}
 	want := []string{
-		`dated/dated.go:3: wall-clock: imports waiverclock: dated waivers expire with the calendar`,
+		`dated/dated_test.go:3: wall-clock: imports waiverclock: dated waivers expire with the calendar`,
 		`leaky/leaky_test.go:14: external-url: http.Get("https://api.github.com/repos/gastownhall/gascity/releases/latest") reaches api.github.com`,
 		`leaky/leaky_test.go:22: dns: net.LookupHost`,
 		`leaky/leaky_test.go:28: external-url: net.Dial("registry.npmjs.org:443") reaches registry.npmjs.org`,

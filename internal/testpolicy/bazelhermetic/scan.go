@@ -86,8 +86,10 @@ func skipDir(name string, entry fs.DirEntry) error {
 }
 
 // Scan walks sourceFS and returns every finding, sorted by file and line.
-// Call-level signals come from *_test.go files only; package code is checked
-// for waiverclock imports alone.
+// Only *_test.go files are scanned. A test file importing waiverclock is a
+// finding; package code importing it is not: it may only build
+// waiverclock.Expiry values, and a clock read in package code decides its
+// consumers' tests, which a signal on the importing package cannot name.
 func Scan(sourceFS fs.FS) ([]Finding, error) {
 	var findings []Finding
 	fset := token.NewFileSet()
@@ -98,22 +100,12 @@ func Scan(sourceFS fs.FS) ([]Finding, error) {
 		if entry.IsDir() {
 			return skipDir(name, entry)
 		}
-		if !strings.HasSuffix(name, ".go") {
+		if !strings.HasSuffix(name, "_test.go") {
 			return nil
 		}
 		src, err := fs.ReadFile(sourceFS, name)
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", name, err)
-		}
-		if !strings.HasSuffix(name, "_test.go") {
-			// Package code contributes only its dated-waiver imports: the
-			// clock it reads decides the package's test outcomes.
-			file, err := parser.ParseFile(fset, name, src, parser.ImportsOnly)
-			if err != nil {
-				return fmt.Errorf("parsing %s: %w", name, err)
-			}
-			findings = append(findings, datedWaiverImports(fset, name, file)...)
-			return nil
 		}
 		file, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
 		if err != nil {
@@ -136,7 +128,7 @@ func Scan(sourceFS fs.FS) ([]Finding, error) {
 }
 
 // WaiverClockImport is the package every dated test-policy ledger asks for
-// "today" (TESTING.md "Waiver expiry clocks"). Importing it makes a
+// "today" (TESTING.md "Waiver expiry clocks"). A test importing it makes its
 // package's test outcome a function of the calendar date.
 const WaiverClockImport = "github.com/gastownhall/gascity/internal/testpolicy/waiverclock"
 

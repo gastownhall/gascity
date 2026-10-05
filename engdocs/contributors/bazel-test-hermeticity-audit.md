@@ -240,12 +240,14 @@ the opt-out.**
     `date.Before(time.Now())`, ...);
   - writes to fixed `/tmp` paths.
 
-  It also flags any package that imports `internal/testpolicy/waiverclock`,
-  since dated waivers make the outcome date-dependent.
-- **Assessment:** fast and precise. It produces 15 findings on the whole
+  It also flags any test file that imports
+  `internal/testpolicy/waiverclock`, since dated waivers make the outcome
+  date-dependent. Package code importing it is not flagged: it may only build
+  `waiverclock.Expiry` values.
+- **Assessment:** fast and precise. It produces 12 findings on the whole
   repository. A first, coarser wall-clock rule produced 30, mostly
-  fixed-clock false positives, and was narrowed. All 15 are covered by the
-  ledger: 11 by `[[target]]` entries and 4 by `[[reviewed]]` entries. It cannot see indirect
+  fixed-clock false positives, and was narrowed. All 12 are covered by the
+  ledger: 8 by `[[target]]` entries and 4 by `[[reviewed]]` entries. It cannot see indirect
   or non-literal paths, which is why it pairs with (a) or (d).
 
 **(c) Read-only or empty `HOME` and a minimal `PATH`.**
