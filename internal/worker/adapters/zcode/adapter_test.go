@@ -959,6 +959,92 @@ func TestAnIdleWaitTimeoutThatHandsBackAByteKeepsIt(t *testing.T) {
 	}
 }
 
+// TestABash32IdleWaitTimeoutIsNotEndOfInput pins the idle wait against the
+// shape bash 3.2 (/bin/bash on stock macOS) gives a timed-out read: status 1,
+// the same as end of input, with the variable left unassigned. The shim
+// replays that shape on a real timeout, so the test runs on any bash, and
+// announces each one; taking it for end of input ends the session after one
+// idle IDLE_WAKE_SECS, before the second announcement.
+func TestABash32IdleWaitTimeoutIsNotEndOfInput(t *testing.T) {
+	t.Parallel()
+
+	shim := filepath.Join(t.TempDir(), "bash32-timeout.bash")
+	const bash32Timeout = `read() {
+    local arg timed=0
+    for arg in "$@"; do [[ "$arg" == -t ]] && timed=1; done
+    if (( timed )) && [[ "${!#}" == line ]]; then
+        builtin read "$@"
+        local rc=$?
+        # A timeout in either shape: bash >= 4's, or 3.2's own when this runs
+        # under 3.2.
+        if [[ -z "${line-}" ]] && { (( rc > 128 )) || { (( rc == 1 )) && [[ -z "${line+set}" ]]; }; }; then
+            shim_idle_wakes=$(( ${shim_idle_wakes:-0} + 1 ))
+            printf 'shim idle wake %s\n' "$shim_idle_wakes"
+            unset line
+            return 1
+        fi
+        return "$rc"
+    fi
+    builtin read "$@"
+}
+`
+	if err := os.WriteFile(shim, []byte(bash32Timeout), 0o644); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	h := newHarness(t, map[string]string{"BASH_ENV": shim})
+	s := h.start()
+	// Two emulated timeouts in a row: the first did not end the session.
+	s.waitForOutput("shim idle wake 2", 20*time.Second)
+	if !s.alive() {
+		t.Fatalf("adapter took an idle read timeout for end of input and exited:\n%s", s.output())
+	}
+	s.send("after idle")
+	s.waitForTurns(1)
+	if _, code := s.closeAndWait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if got := h.prompts(); !equalStrings(got, []string{"after idle"}) {
+		t.Fatalf("prompts = %q, want [\"after idle\"]", got)
+	}
+}
+
+// TestAnIdleWaitReadErrorEndsTheSession proves a read that fails outright is
+// end of input, not an idle timeout. A failed read returns status 1 with the
+// variable unassigned on every bash — the same shape bash 3.2 gives a timeout
+// — but it fails at once, without waiting out the timer, so the adapter must
+// exit rather than retry it in a hot loop. The shim fails the idle wait the
+// way bash 3.2 fails a read from a bad descriptor.
+func TestAnIdleWaitReadErrorEndsTheSession(t *testing.T) {
+	t.Parallel()
+
+	shim := filepath.Join(t.TempDir(), "read-error.bash")
+	const readError = `read() {
+    local arg timed=0
+    for arg in "$@"; do [[ "$arg" == -t ]] && timed=1; done
+    if (( timed )) && [[ "${!#}" == line ]]; then
+        echo "read: read error: 0: Input/output error" >&2
+        return 1
+    fi
+    builtin read "$@"
+}
+`
+	if err := os.WriteFile(shim, []byte(readError), 0o644); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	h := newHarness(t, map[string]string{"BASH_ENV": shim})
+	s := h.start()
+	// wait fails the test if the adapter is still retrying after
+	// adapterWaitBudget.
+	if _, code := s.wait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if got := h.prompts(); len(got) != 0 {
+		t.Fatalf("prompts = %q, want none", got)
+	}
+}
+
 func TestUnparsableResponseIsReported(t *testing.T) {
 	t.Parallel()
 
