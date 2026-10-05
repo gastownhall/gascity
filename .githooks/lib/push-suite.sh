@@ -8,17 +8,20 @@
 #
 #   contributor  --config=fork-cache: rbe-west's anonymous read-only cache;
 #                misses run on this machine and nothing is uploaded.
-#   maintainer   --config=remote-exec: .bazelrc.local carries a remote
-#                executor and the maintainer's mTLS client certificate.
+#   maintainer   --config=remote-exec: some rc file names a remote executor
+#                and the maintainer's mTLS client certificate, either
+#                .bazelrc.local's build:remote-exec lines or a machine rc
+#                (agent hosts set `build --remote_executor=...` in ~/.bazelrc).
 #   CI           the trusted writer (bazel-test.yml); never this script.
 #
 # GC_PREPUSH_SUITE picks the mode (default auto):
-#   auto   remote-exec when bazel is installed and .bazelrc.local sets
-#          `build:remote-exec --remote_executor=...`; fork-cache when bazel is
-#          installed without one and .bazelrc's pinned test PATH has `go`;
-#          make test-fast-parallel otherwise.
-#   rbe    --config=remote-exec.
-#   cache  --config=fork-cache.
+#   auto   remote-exec when bazel is installed and its effective options name
+#          a remote executor; fork-cache when bazel is installed without one
+#          and .bazelrc's pinned test PATH has `go`; make test-fast-parallel
+#          otherwise.
+#   rbe    --config=remote-exec; fails when no rc names an executor (the suite
+#          would otherwise compile and run on this machine at --jobs=64).
+#   cache  --config=fork-cache (it resets any rc's executor).
 #   go     make test-fast-parallel (plain go test, the pre-Bazel suite).
 set -euo pipefail
 
@@ -26,12 +29,53 @@ repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
 mode="${GC_PREPUSH_SUITE:-auto}"
+executor=""
 
-# A maintainer's credential: a non-comment build:remote-exec line naming a
-# non-empty --remote_executor in the gitignored .bazelrc.local.
-remote_executor_configured() {
-  [ -f .bazelrc.local ] &&
-    grep -Eq '^[[:space:]]*build:remote-exec[[:space:]](.*[[:space:]])?--remote_executor(=|[[:space:]]+)[^[:space:]]' .bazelrc.local
+# The remote executor some rc file names for this workspace, empty for none:
+# the last non-empty --remote_executor among the rc options Bazel reads
+# (system, workspace with .bazelrc.local, home) and the remote-exec config's
+# definitions, from `bazel info --announce_rc --config=remote-exec`. Bazel's
+# own reading of every rc, not a grep of one file, so an agent host's
+# ~/.bazelrc executor counts. Other configs' definitions are skipped:
+# fork-cache's --remote_executor= reset never applies to the remote-exec run.
+# (Bazel lists config expansions after all rc sections although it applies
+# them in place, so the listing gives no reliable "last value wins".) `info`
+# inherits build options, contacts no remote and starts (or reuses) the
+# server the suite then runs in. Fails, printing Bazel's error, when Bazel
+# cannot read its options.
+effective_remote_executor() {
+  local announced
+  if ! announced="$(bazel info --announce_rc --config=remote-exec release 2>&1 >/dev/null)"; then
+    printf '%s\n' "$announced" >&2
+    return 1
+  fi
+  printf '%s\n' "$announced" | awk '
+    /^INFO: (Reading rc options|Options provided by the client)/ { section = 1; next }
+    /^[^[:space:]]/ { section = 0 }
+    !section && !/^INFO: Found applicable config definition [^ ]*:remote-exec / { next }
+    {
+      for (i = 1; i <= NF; i++) {
+        value = ""
+        if ($i ~ /^--remote_executor=/) {
+          value = substr($i, length("--remote_executor=") + 1)
+        } else if ($i == "--remote_executor" && i < NF) {
+          value = $(i + 1)
+        }
+        if (value != "") {
+          executor = value
+        }
+      }
+    }
+    END { print executor }'
+}
+
+# Sets $executor, or fails the push: an unreadable option set is no evidence
+# for either mode.
+probe_executor() {
+  if ! executor="$(effective_remote_executor)"; then
+    echo "pre-push: bazel info could not read this workspace's options (above); fix the rc, or set GC_PREPUSH_SUITE=go|rbe|cache" >&2
+    exit 2
+  fi
 }
 
 have_bazel() {
@@ -62,17 +106,29 @@ auto)
     echo "pre-push: bazel is not installed; running make test-fast-parallel." >&2
     echo "pre-push: install bazelisk to reuse CI's cached test results (TESTING.md \"Bazel cache tiers\")." >&2
     mode=go
-  elif remote_executor_configured; then
-    mode=rbe
-  elif ! pinned_path_has_go; then
-    echo "pre-push: no go on .bazelrc's pinned test PATH ($(pinned_test_path)); running make test-fast-parallel." >&2
-    echo "pre-push: link your GOROOT to /usr/local/go to run the bazel suite (TESTING.md \"Bazel cache tiers\")." >&2
-    mode=go
   else
-    mode=cache
+    probe_executor
+    if [ -n "$executor" ]; then
+      mode=rbe
+    elif ! pinned_path_has_go; then
+      echo "pre-push: no go on .bazelrc's pinned test PATH ($(pinned_test_path)); running make test-fast-parallel." >&2
+      echo "pre-push: link your GOROOT to /usr/local/go to run the bazel suite (TESTING.md \"Bazel cache tiers\")." >&2
+      mode=go
+    else
+      mode=cache
+    fi
   fi
   ;;
-go | rbe | cache) ;;
+go | cache) ;;
+rbe)
+  if have_bazel; then
+    probe_executor
+    if [ -z "$executor" ]; then
+      echo "pre-push: GC_PREPUSH_SUITE=rbe but no rc file names a --remote_executor; configure one (TESTING.md \"Bazel cache tiers\") or use GC_PREPUSH_SUITE=cache|go" >&2
+      exit 2
+    fi
+  fi
+  ;;
 *)
   echo "pre-push: GC_PREPUSH_SUITE=$mode is not one of auto, rbe, cache, go" >&2
   exit 2
@@ -94,5 +150,5 @@ fi
 
 # .bazelrc roots every test's tmpdir at /tmp/bt and nothing else creates it.
 mkdir -p /tmp/bt
-echo "pre-push: bazel test //... --config=$config (GC_PREPUSH_SUITE=go runs plain go test instead)" >&2
+echo "pre-push: bazel test //... --config=$config${executor:+ on $executor} (GC_PREPUSH_SUITE=go runs plain go test instead)" >&2
 exec bazel test //... "--config=$config" --keep_going

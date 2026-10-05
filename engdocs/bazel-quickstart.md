@@ -53,7 +53,10 @@ flags (`--test_env`, `--action_env`, `--define`, platforms, ...) to
 Maintainers can opt in to remote execution with an rbe-west client
 certificate; see TESTING.md "Bazel cache tiers" for how to obtain one and
 the `.bazelrc.local` lines, then use `--config=remote-exec`. The pre-push
-hook picks the right mode automatically.
+hook picks the right mode automatically: remote execution when any rc file
+(`.bazelrc.local`, `~/.bazelrc`, `/etc/bazel.bazelrc`) names a remote
+executor, as agent hosts' `~/.bazelrc` does, and the read-only cache
+otherwise.
 
 ### 3. Verify
 

@@ -119,15 +119,26 @@ endpoints, credentials, timeouts, download and parallelism policy.
 
 | `GC_PREPUSH_SUITE` | runs |
 |---|---|
-| `auto` | `bazel test //... --config=remote-exec` when `.bazelrc.local` has a `build:remote-exec --remote_executor=` line; `bazel test //... --config=fork-cache` otherwise; `make test-fast-parallel` when bazel is not installed, or for `fork-cache` when the pinned test `PATH` has no `go` |
-| `rbe` | `bazel test //... --config=remote-exec` |
+| `auto` | `bazel test //... --config=remote-exec` when any rc file Bazel reads names a remote executor; `bazel test //... --config=fork-cache` otherwise; `make test-fast-parallel` when bazel is not installed, or for `fork-cache` when the pinned test `PATH` has no `go` |
+| `rbe` | `bazel test //... --config=remote-exec`; fails when no rc file names an executor |
 | `cache` | `bazel test //... --config=fork-cache` |
 | `go` | `make test-fast-parallel` (plain `go test`, the pre-Bazel suite) |
 
-An explicit `rbe`/`cache` without bazel installed, or an unknown value, fails
-the push. `auto` looks only at `.bazelrc.local`; if your executor lines live in
-another rc file (`~/.bazelrc`), set `GC_PREPUSH_SUITE=rbe`; `fork-cache` resets
-`--remote_executor`, so the cache mode never executes remotely. Locally
+`auto` asks Bazel which options its rc files set (`bazel info --announce_rc
+--config=remote-exec`, which contacts no remote): a non-empty
+`--remote_executor` in the system rc, the workspace rc with `.bazelrc.local`
+(a maintainer's `build:remote-exec` lines), or `~/.bazelrc` selects
+`remote-exec`. Agent hosts whose `~/.bazelrc` sets `build
+--remote_executor=...` with the operator certificate therefore push with
+remote execution: compiles and tests run on rbe-west, and the host only
+analyzes, which keeps `go test` fan-out off shared machines.
+`--config=remote-exec` adds transport only on top of such an rc (minimal
+downloads, `--jobs=64`, a long timeout, no uploads of local results), so
+actions hash like CI's. An explicit `rbe`/`cache` without bazel installed,
+`rbe` with no executor in any rc (the suite would build and run locally at
+`--jobs=64`), an option set Bazel cannot read, or an unknown value fails the
+push. `fork-cache` resets `--remote_executor`, so the cache mode never
+executes remotely. Locally
 executed tests use the pinned test `PATH`, so Go must be at `/usr/local/go`
 (`sudo ln -s "$(go env GOROOT)" /usr/local/go`; without it `auto` runs
 `make test-fast-parallel` instead of the cache mode); overriding

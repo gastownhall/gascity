@@ -59,7 +59,7 @@ build:remote-exec --jobs=64
 # committed. bazel-test.yml selects it for runs without an executor (fork PRs,
 # rbe=cache dispatches) by writing `build --config=fork-cache` to
 # .bazelrc.local; .githooks/lib/push-suite.sh passes --config=fork-cache when
-# no maintainer credential is configured (scripts/bazel_fork_cache_test.go).
+# no rc file names a remote executor (scripts/bazel_fork_cache_test.go).
 # It carries transport flags only, so these actions hash like trusted CI's
 # and hit what trusted CI executed.
 build:fork-cache --remote_cache=grpcs://rbe-cache.ops.gascity.com:8443
