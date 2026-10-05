@@ -47,14 +47,57 @@ func PackSourceIdentity(source string) string {
 // mirroring `gc pack registry show`. A missing registries.toml means the
 // default public registry, as everywhere else.
 func LookupPacksBySource(ctx context.Context, home, source string) (PackLookup, error) {
+	return lookupPacksBySource(home, source, func(reg Registry) (Catalog, error) {
+		return readCatalogRefreshingMissing(ctx, home, reg)
+	})
+}
+
+// LookupRefreshedPacksBySource is LookupPacksBySource after refreshing every
+// configured registry, so a lookup sees releases published since the cache
+// was written. A registry whose refresh fails falls back to its cached
+// catalog; it is reported unavailable only when no cache exists either.
+func LookupRefreshedPacksBySource(ctx context.Context, home, source string) (PackLookup, error) {
+	return lookupPacksBySource(home, source, func(reg Registry) (Catalog, error) {
+		catalog, refreshErr := RefreshRegistry(ctx, home, reg, FetchOptions{})
+		if refreshErr == nil {
+			return catalog, nil
+		}
+		cached, _, err := ReadCachedRegistryCatalog(home, reg)
+		if err != nil {
+			return Catalog{}, fmt.Errorf("refresh failed (%w) and no usable cache: %w", refreshErr, err)
+		}
+		return cached, nil
+	})
+}
+
+// LookupCachedPacksBySource is LookupPacksBySource without any fetch: a
+// registry with no cached catalog is reported unavailable. It suits hot paths
+// that must not turn into network operations.
+func LookupCachedPacksBySource(home, source string) (PackLookup, error) {
+	return lookupPacksBySource(home, source, func(reg Registry) (Catalog, error) {
+		catalog, _, err := ReadCachedRegistryCatalog(home, reg)
+		return catalog, err
+	})
+}
+
+func lookupPacksBySource(home, source string, read func(Registry) (Catalog, error)) (PackLookup, error) {
 	cfg, err := LoadConfig(home)
 	if err != nil {
 		return PackLookup{}, err
 	}
 	want := PackSourceIdentity(source)
+	// A remote catalog may not publish a local source (ValidateCatalog), so a
+	// local source is looked up only in local registries: no fetch can answer
+	// it.
+	localSource := isLocalPackSource(strings.TrimSpace(source))
 	var lookup PackLookup
 	for _, reg := range cfg.Registries {
-		catalog, err := readCatalogRefreshingMissing(ctx, home, reg)
+		if localSource {
+			if normalized, err := NormalizeSource(reg.Source); err == nil && normalized.Remote {
+				continue
+			}
+		}
+		catalog, err := read(reg)
 		if err != nil {
 			lookup.Unavailable = append(lookup.Unavailable, fmt.Errorf("registry %s: %w", reg.Name, err))
 			continue

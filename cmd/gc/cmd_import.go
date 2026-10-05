@@ -20,7 +20,6 @@ import (
 	"github.com/gastownhall/gascity/internal/gitcred"
 	"github.com/gastownhall/gascity/internal/importsvc"
 	"github.com/gastownhall/gascity/internal/packman"
-	"github.com/gastownhall/gascity/internal/packregistry"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/spf13/cobra"
 )
@@ -35,13 +34,9 @@ var (
 	resolveImportVersion    = packman.ResolveVersion
 	defaultImportConstraint = packman.DefaultConstraint
 	resolveImportHeadCommit = defaultImportHeadCommit
-
-	// lookupImportRegistryPacks and verifyImportRegistryRelease are the
-	// registry-release seams of `gc import add --version <semver>`; nil uses
-	// importsvc's defaults (the Gas City home's registries and the shared
-	// repo cache). Command tests stub them.
-	lookupImportRegistryPacks   func(source string) (packregistry.PackLookup, error)
-	verifyImportRegistryRelease func(source, commit, hash string) error
+	// resolveImportRegistryRelease answers the default constraint of a
+	// `gc import add` without --version for a registry-published source.
+	resolveImportRegistryRelease = packman.ResolveRegistryRelease
 
 	// validateComposedConfigAfterInstall loads the composed city config after
 	// install, so `gc import install` fails on the same load errors gc
@@ -164,10 +159,10 @@ entry using source plus optional version. Supported sources are:
   with the pack subpath and locked to the current commit
 - remote git repositories: cloned and locked; --version accepts a semver
   constraint or sha:<commit>
-- packs published in a configured pack registry: a semver --version resolves
-  against the registry's release entries (not git tags), is written as the
-  release's sha:<commit> pin, and the fetched content must match the
-  release's content hash
+- packs published in a configured pack registry: a semver --version (or no
+  --version) resolves against the registry's release entries, not git tags;
+  the constraint is kept, the lock records the release version and commit,
+  and the fetched content must match the release's content hash
 - remote GitHub repository subpaths: use dereferenceable tree URLs such as
   https://github.com/org/repo/tree/main/packs/foo
 
@@ -657,8 +652,7 @@ func importSvcDeps() importsvc.Deps {
 		DefaultConstraint: defaultImportConstraint,
 		ResolveHeadCommit: resolveImportHeadCommit,
 
-		LookupRegistryPacks:   lookupImportRegistryPacks,
-		VerifyRegistryRelease: verifyImportRegistryRelease,
+		ResolveRegistryRelease: resolveImportRegistryRelease,
 	}
 }
 
@@ -671,7 +665,7 @@ func doImportAdd(fs fsys.FS, cityPath, source, nameOverride, versionFlag string,
 		return 1
 	}
 	if res.RegistryRelease != "" {
-		fmt.Fprintf(stdout, "Resolved registry release %s to %s (content hash verified)\n", res.RegistryRelease, res.Version) //nolint:errcheck
+		fmt.Fprintf(stdout, "Locked to registry release %s\n", res.RegistryRelease) //nolint:errcheck
 	}
 	fmt.Fprintf(stdout, "Added import %q from %s\n", res.Name, res.Source) //nolint:errcheck
 	return 0

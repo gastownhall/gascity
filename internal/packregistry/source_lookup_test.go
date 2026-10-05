@@ -96,3 +96,19 @@ func TestLookupPacksBySourceRecordsUnavailableRegistry(t *testing.T) {
 		t.Fatalf("Unavailable = %v, want the unreadable registry named", lookup.Unavailable)
 	}
 }
+
+// A remote catalog may not publish a local source, so looking one up never
+// touches a remote registry (and never fetches it).
+func TestLookupPacksBySourceSkipsRemoteRegistriesForLocalSources(t *testing.T) {
+	home := t.TempDir()
+	if err := SaveConfig(home, Config{Registries: []Registry{{Name: "remote", Source: "https://registry.invalid/registry.toml"}}}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	lookup, err := LookupPacksBySource(context.Background(), home, "file:///tmp/packs.git//demo")
+	if err != nil {
+		t.Fatalf("LookupPacksBySource: %v", err)
+	}
+	if len(lookup.Matches) != 0 || len(lookup.Unavailable) != 0 {
+		t.Fatalf("lookup = %+v, want the remote registry skipped entirely", lookup)
+	}
+}

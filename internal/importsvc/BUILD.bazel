@@ -5,7 +5,6 @@ go_library(
     srcs = [
         "importsvc.go",
         "manifest.go",
-        "registry_release.go",
         "source.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/importsvc",
@@ -13,14 +12,11 @@ go_library(
     deps = [
         "//internal/config",
         "//internal/fsys",
-        "//internal/gchome",
         "//internal/git",
         "//internal/gitcred",
         "//internal/packman",
-        "//internal/packregistry",
         "//internal/pathutil",
         "//internal/pricing",
-        "//internal/remotesource",
         "@com_github_burntsushi_toml//:toml",
     ],
 )
@@ -34,7 +30,6 @@ go_test(
         "source_userinfo_test.go",
         "testenv_import_test.go",
     ],
-    data = glob(["testdata/**"]),
     embed = [":importsvc"],
     deps = [
         "//internal/config",
