@@ -1009,6 +1009,10 @@ export const zOrderSkippedPayload = z.object({
 });
 
 export const zOrderSuppressedPayload = z.object({
+    blocker_age_ms: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    blocker_id: z.string().optional(),
+    blocker_kind: z.string().optional(),
+    blocker_title: z.string().optional(),
     consecutive: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     first_suppressed: z.string(),
     order_name: z.string(),
