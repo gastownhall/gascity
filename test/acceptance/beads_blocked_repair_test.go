@@ -150,6 +150,9 @@ func overBlockScope(t *testing.T, run *helpers.TopologyRun, rig string) []string
 var blockedRepairFinishedLine = regexp.MustCompile(`blocked-flag repair finished for (\d+) of (\d+) scope\(s\) in (\S+)`)
 
 func TestBlockedRepairOnProxiedCityAndRig(t *testing.T) {
+	// Three proxied city restarts (about 4 minutes) do not fit the Tier A smoke
+	// budget; the Beads / topology acceptance job opts in and runs it by name.
+	helpers.RequireTopologyMatrix(t)
 	bdPath, doltPath := helpers.RequireTopologyTooling(t)
 	helpers.RequireBDAtLeast(t, bdPath, "v1.1.0", "bd recompute-blocked")
 	var topo helpers.BeadsTopology
