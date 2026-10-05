@@ -121,13 +121,23 @@ drift_markdown() {
 	EOF
 }
 
+# sha256_stdin prints the hex SHA-256 of stdin. macOS ships shasum, not
+# sha256sum, and the drift tests run on macOS CI.
+sha256_stdin() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum | cut -d' ' -f1
+	else
+		shasum -a 256 | cut -d' ' -f1
+	fi
+}
+
 cmd_pin() { pin_of "${1:-$BUILD}"; }
 
 cmd_check() {
 	local measured=${1:?usage: worker-env-drift check MEASURED}
 	local pin got dir
 	pin=$(pin_of "$BUILD")
-	got=sha256:$(sha256sum <"$measured" | cut -d' ' -f1)
+	got=sha256:$(sha256_stdin <"$measured")
 	if cmp -s "$PINNED" "$measured"; then
 		echo "worker-env: this host is the pinned one ($pin)"
 		return 0
