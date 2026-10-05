@@ -2919,12 +2919,17 @@ func TestConfirmCrossCitySupervisorImpactPromptEmptyDefaultsToNo(t *testing.T) {
 	}
 }
 
-func TestConfirmCrossCitySupervisorImpactNonTerminalStdinProceedsSilently(t *testing.T) {
-	// CI, scripts, pipes, `< /dev/null` all give a non-terminal stdin.
-	// In those contexts the guard cannot meaningfully prompt; it must
-	// warn (audit trail) and proceed, not abort. Aborting would break
-	// every scripted `gc init` / `gc register` invocation, including
-	// the acceptance test suite. See PR #2638 CI failure.
+func TestConfirmCrossCitySupervisorImpactNonTerminalStdinRefuses(t *testing.T) {
+	// CI, scripts, pipes, `< /dev/null`, and AGENT SHELLS all give a
+	// non-terminal stdin. This guard used to warn-and-proceed there, and
+	// that is exactly how a throwaway test-city `gc init` reinstalled the
+	// service file and cycled a production supervisor mid-deploy
+	// (2026-09-09): the context that cannot answer the prompt is the one
+	// that must not consent silently. It now fails CLOSED — scripted
+	// callers that mean it pass --yes (the acceptance suites run under a
+	// fresh GC_HOME with no other registered cities, so the guard never
+	// fires there), and the supervisor's own create-city API path uses a
+	// commandName that does not gate on impact.
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
 
@@ -2944,17 +2949,51 @@ func TestConfirmCrossCitySupervisorImpactNonTerminalStdinProceedsSilently(t *tes
 	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
 
 	var stderr bytes.Buffer
-	if !confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
-		t.Errorf("non-terminal stdin should proceed silently; stderr=%q", stderr.String())
+	if confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
+		t.Errorf("non-terminal stdin must REFUSE without --yes; stderr=%q", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "other-city") {
-		t.Errorf("warning should still be printed for audit; stderr=%q", stderr.String())
+		t.Errorf("warning should still name the impacted cities; stderr=%q", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "stdin is not a terminal") {
-		t.Errorf("non-tty notice should be printed; stderr=%q", stderr.String())
+	if !strings.Contains(stderr.String(), "Refusing") {
+		t.Errorf("refusal notice should be printed; stderr=%q", stderr.String())
 	}
 	if strings.Contains(stderr.String(), "Continue?") {
 		t.Errorf("prompt MUST NOT be emitted on non-tty path; stderr=%q", stderr.String())
+	}
+}
+
+// --yes still consents on a non-terminal stdin: the refusal above is about
+// SILENT consent, not about blocking scripted callers who state it.
+func TestConfirmCrossCitySupervisorImpactNonTerminalWithYesProceeds(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "new-city")
+	otherPath := filepath.Join(t.TempDir(), "other-city")
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(otherPath, "other-city"); err != nil {
+		t.Fatalf("seed register other: %v", err)
+	}
+
+	oldAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 1234 }
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+
+	oldTerm := confirmCrossCitySupervisorImpactStdinIsTerminal
+	confirmCrossCitySupervisorImpactStdinIsTerminal = func() bool { return false }
+	t.Cleanup(func() { confirmCrossCitySupervisorImpactStdinIsTerminal = oldTerm })
+
+	oldYes := assumeYesForSupervisorCycle
+	assumeYesForSupervisorCycle = true
+	t.Cleanup(func() { assumeYesForSupervisorCycle = oldYes })
+
+	var stderr bytes.Buffer
+	if !confirmCrossCitySupervisorImpact(cityPath, true, &stderr) {
+		t.Errorf("--yes must consent on a non-terminal stdin; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Continuing (--yes)") {
+		t.Errorf("--yes audit line should be printed; stderr=%q", stderr.String())
 	}
 }
 

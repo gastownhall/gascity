@@ -324,8 +324,18 @@ func confirmCrossCitySupervisorImpact(cityPath string, promptOnImpact bool, stde
 		return true
 	}
 	if !confirmCrossCitySupervisorImpactStdinIsTerminal() {
-		fmt.Fprintln(stderr, "Continuing (stdin is not a terminal; pass --yes to silence this notice in scripted contexts).") //nolint:errcheck // best-effort stderr
-		return true
+		// Fail CLOSED here. This branch used to warn-and-proceed "in scripted
+		// contexts", but the commands that gate on impact (gc init,
+		// gc register) mutate shared infrastructure — they reinstall the
+		// supervisor service file and cycle the supervisor that manages every
+		// other registered city. A script or agent shell is exactly the
+		// context that cannot answer the prompt, and proceeding silently is
+		// how a throwaway test-city init restarted a production supervisor
+		// mid-deploy (2026-09-09). Scripted callers state their consent with
+		// --yes; the supervisor's own create-city API does not gate (its
+		// commandName never prompts on impact).
+		fmt.Fprintln(stderr, "Refusing: stdin is not a terminal and this operation would reconcile a supervisor managing other cities. Pass --yes to consent in scripted contexts, or use --no-start (init) to skip supervisor registration entirely.") //nolint:errcheck // best-effort stderr
+		return false
 	}
 	fmt.Fprint(stderr, "Continue? [y/N]: ") //nolint:errcheck // best-effort stderr
 	br := bufio.NewReader(confirmCrossCitySupervisorImpactStdin)
