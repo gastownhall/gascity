@@ -40,7 +40,7 @@ func TestSlingFormulaRoutesTheWispRootThroughTheStoreThatMintedIt(t *testing.T) 
 	router := &storeStampingRouter{fallback: work}
 	deps.Router = router
 
-	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
 	result, err := DoSling(SlingOpts{
 		Target:        a,
 		BeadOrFormula: "code-review",
@@ -68,8 +68,8 @@ func TestSlingFormulaRoutesTheWispRootThroughTheStoreThatMintedIt(t *testing.T) 
 	if got := router.routed[0]; got.BeadID != root.ID || got.Store != graph {
 		t.Errorf("route request = {BeadID:%q Store:%T(%p)}, want {BeadID:%q Store: the graph store %p}", got.BeadID, got.Store, got.Store, root.ID, graph)
 	}
-	if got := root.Metadata[beadmeta.RoutedToMetadataKey]; got != "mayor" {
-		t.Errorf("graph-resident root gc.routed_to = %q, want mayor", got)
+	if got := root.Metadata[beadmeta.RoutedToMetadataKey]; got != "worker" {
+		t.Errorf("graph-resident root gc.routed_to = %q, want worker", got)
 	}
 	if got := root.Metadata[beadmeta.MergeStrategyMetadataKey]; got != "mr" {
 		t.Errorf("graph-resident root %s = %q, want mr", beadmeta.MergeStrategyMetadataKey, got)
@@ -85,7 +85,7 @@ func TestSlingFormulaRouteStoreIsTheWorkStoreOnASingleStoreCity(t *testing.T) {
 	router := &storeStampingRouter{fallback: deps.Store}
 	deps.Router = router
 
-	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
 	result, err := DoSling(SlingOpts{Target: a, BeadOrFormula: "code-review", IsFormula: true}, deps, nil)
 	if err != nil {
 		t.Fatalf("DoSling --formula: %v", err)
@@ -97,7 +97,7 @@ func TestSlingFormulaRouteStoreIsTheWorkStoreOnASingleStoreCity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(%s): %v", result.BeadID, err)
 	}
-	if got := root.Metadata[beadmeta.RoutedToMetadataKey]; got != "mayor" {
-		t.Errorf("gc.routed_to = %q, want mayor", got)
+	if got := root.Metadata[beadmeta.RoutedToMetadataKey]; got != "worker" {
+		t.Errorf("gc.routed_to = %q, want worker", got)
 	}
 }
