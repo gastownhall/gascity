@@ -83,14 +83,27 @@ metadata edit — so the order fires once, exactly on the transition that
 unblocks dependents. For each closed bead it resolves dependents via:
 
 ```
-gc bd dep list <blocker> --direction=up --type=blocks --json
+gc bd dep list <blocker> --direction=up --json
 ```
 
-and nudges the `assignee` of every dependent whose status is `open` or
-`deferred`:
+and considers every dependent linked by a `blocks` or `conditional-blocks`
+dependency whose status is `open`, `in_progress` or `deferred` and that has
+an `assignee`. Before nudging, it lists the
+dependent's own dependencies:
 
 ```
-gc session nudge <assignee> "blocker <blocker> closed — your dependent <dep> may be unblocked"
+gc bd dep list <dep> --direction=down --json
+```
+
+and keeps those of type `blocks` and `conditional-blocks`. Each counts as
+satisfied when it is closed and its `gc.work_outcome` is not `blocked`.
+`waits-for` is not judged: bd gates it on the children of its target, not on
+the target itself, so the target's status does not tell whether the
+dependent is ready. If any of them, the closed blocker included, is unsatisfied, it nudges no one
+yet. Once every one is satisfied, it nudges the assignee:
+
+```
+gc session nudge <assignee> "blocker <blocker> closed — your dependent <dep> has no open blockers now"
 ```
 
 **Cross-rig.** A `prefix -> rig` lookup built from `gc rig list` scopes the
@@ -98,11 +111,18 @@ dependency lookup and the nudge to the rig that owns each bead, so cross-rig
 blocker chains within a city resolve correctly. Cross-city cascade is out of
 scope.
 
-**Idempotence.** A `(blocker, dependent)` pair is nudged at most once.
+**Idempotence.** Each close of a blocker is judged once per dependent: it is
+recorded under the blocker's `closed_at`, and later runs over the same close
+skip it. A nudge records the close of every blocker of that dependent, so a
+dependent whose blockers close together is nudged once, and a close that had
+to wait leaves the last blocker's close to carry the nudge. A blocker that is
+reopened and closes again has a new `closed_at`, so that close is judged
+afresh and nudges if it leaves the dependent ready, whether or not the
+dependent was nudged before.
 
 **Dedup state.**
 `$GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json` — a JSON object
-mapping `"<blocker>|<dependent>"` to an ISO timestamp, city- and pack-scoped.
+mapping `"<blocker>|<dependent>@<blocker closed_at>"` to an ISO timestamp, city- and pack-scoped.
 Entries older than the retention window are pruned on each run.
 
 **Configuration** (all optional):
