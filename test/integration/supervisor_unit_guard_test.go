@@ -74,20 +74,28 @@ func leakedPlatformSupervisorUnits(realHome, gcHome string) []string {
 // only ever touches a unit this run leaked.
 func removeLeakedPlatformSupervisorUnit(gcHome string, leaked []string) {
 	suffix := expectedSupervisorServiceSuffix(gcHome)
+	var stop, reload []string
 	switch runtime.GOOS {
 	case "linux":
-		unit := "gascity-supervisor-" + suffix + ".service"
-		_ = exec.Command("systemctl", "--user", "disable", "--now", unit).Run()
+		stop = []string{"systemctl", "--user", "disable", "--now", "gascity-supervisor-" + suffix + ".service"}
+		reload = []string{"systemctl", "--user", "daemon-reload"}
 	case "darwin":
-		target := fmt.Sprintf("gui/%d/com.gascity.supervisor.%s", os.Getuid(), suffix)
-		_ = exec.Command("launchctl", "bootout", target).Run()
+		stop = []string{"launchctl", "bootout", fmt.Sprintf("gui/%d/com.gascity.supervisor.%s", os.Getuid(), suffix)}
 	}
+	runServiceManager(stop)
 	for _, path := range leaked {
 		_ = os.Remove(path)
 	}
-	if runtime.GOOS == "linux" {
-		_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
+	runServiceManager(reload)
+}
+
+// runServiceManager runs argv best-effort; the leak is already reported, and
+// a missing service manager leaves nothing to stop.
+func runServiceManager(argv []string) {
+	if len(argv) == 0 {
+		return
 	}
+	_ = exec.Command(argv[0], argv[1:]...).Run()
 }
 
 // platformUnitLeakReport checks gcHome for a leaked platform unit, removes
