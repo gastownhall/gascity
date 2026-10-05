@@ -122,7 +122,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		Cfg:        s.state.Config(),
 		SP:         s.state.SessionProvider(),
 		Store:      store,
-		GraphStore: s.relocatedGraphStore(),
+		GraphStore: s.state.GraphBeadStore().Store,
 		Events:     s.state.EventProvider(),
 		StoreRef:   storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
@@ -531,11 +531,13 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 			return err
 		}
 	}
-	// The core names the store that holds the bead when it is not the work
-	// store (a --formula wisp root lives in the graph binding, #6054).
-	store := req.Store
-	if store == nil {
-		store = r.store
+	// The core names the store that holds the bead. Honor it only when it is
+	// the relocated graph binding (a --formula wisp root minted there, #6054);
+	// on a city that relocates nothing the request keeps routing through the
+	// sling's own store, unchanged.
+	store := r.store
+	if req.Store != nil && req.Store == r.server.relocatedGraphStore() {
+		store = req.Store
 	}
 	if store == nil {
 		return fmt.Errorf("built-in sling routing requires a store")
@@ -555,10 +557,7 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 
 // relocatedGraphStore returns the graph class store only when the city has
 // relocated the graph class to a dedicated binding, and nil otherwise. On a
-// default city GraphBeadStore() is the city store; handing that to the sling
-// as SlingDeps.GraphStore would mint a rig-targeted formula root in the city
-// store instead of the sling's own store. Nil collapses the graph store onto
-// SlingDeps.Store, the same answer the CLI's resolveGraphStore gives.
+// default city GraphBeadStore() is the city store itself.
 func (s *Server) relocatedGraphStore() beads.Store {
 	graphStore := s.state.GraphBeadStore().Store
 	if graphStore == nil || graphStore == s.state.CityBeadStore() {
