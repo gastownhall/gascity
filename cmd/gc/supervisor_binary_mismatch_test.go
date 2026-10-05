@@ -2,11 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
-	"fmt"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,7 +28,7 @@ type supervisorBinaryFixture struct {
 	localExe      string
 	localVersion  string
 	localBuildID  string
-	healthStatus  int
+	healthErr     error
 }
 
 // writeFakeGCBinary creates a distinct regular file standing in for a gc
@@ -51,19 +49,9 @@ func writeFakeGCBinary(t *testing.T, name string) string {
 func stubSupervisorBinary(t *testing.T, f supervisorBinaryFixture) {
 	t.Helper()
 	t.Setenv(supervisorSystemdUnitEnv, "")
-	status := f.healthStatus
-	if status == 0 {
-		status = http.StatusOK
-	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
-		_, _ = fmt.Fprintf(w, `{"status":"ok","version":%q,"build_id":%q,"uptime_sec":5,"cities_total":1,"cities_running":1}`, f.supervisorVersion, f.supervisorBuildID)
-	}))
-	t.Cleanup(srv.Close)
-
 	oldAlive := supervisorAliveHook
 	oldBaseURL := supervisorAPIBaseURLHook
+	oldHealth := supervisorHealthStatusHook
 	oldReadExe := readSupervisorExePathHook
 	oldService := supervisorServiceBinaryHook
 	oldLocalExe := localGCExecutableHook
@@ -74,6 +62,7 @@ func stubSupervisorBinary(t *testing.T, f supervisorBinaryFixture) {
 	t.Cleanup(func() {
 		supervisorAliveHook = oldAlive
 		supervisorAPIBaseURLHook = oldBaseURL
+		supervisorHealthStatusHook = oldHealth
 		readSupervisorExePathHook = oldReadExe
 		supervisorServiceBinaryHook = oldService
 		localGCExecutableHook = oldLocalExe
@@ -84,7 +73,13 @@ func stubSupervisorBinary(t *testing.T, f supervisorBinaryFixture) {
 	})
 
 	supervisorAliveHook = func() int { return 4242 }
-	supervisorAPIBaseURLHook = func() (string, error) { return srv.URL, nil }
+	supervisorAPIBaseURLHook = func() (string, error) { return "http://127.0.0.1:0", nil }
+	supervisorHealthStatusHook = func(context.Context, string) (SupervisorStatus, error) {
+		if f.healthErr != nil {
+			return SupervisorStatus{}, f.healthErr
+		}
+		return SupervisorStatus{Version: f.supervisorVersion, BuildID: f.supervisorBuildID, UptimeSec: 5}, nil
+	}
 	readSupervisorExePathHook = func(int) (string, error) {
 		if f.procExe == "" {
 			return "", errors.New("no /proc on this platform")
@@ -129,7 +124,7 @@ func TestDetectSupervisorBinaryMismatchNoSupervisor(t *testing.T) {
 
 func TestDetectSupervisorBinaryMismatchUnreachableHealthIsSilent(t *testing.T) {
 	f := macOSHomebrewSupervisorFixture(t)
-	f.healthStatus = http.StatusInternalServerError
+	f.healthErr = errors.New("supervisor /health returned 500")
 	stubSupervisorBinary(t, f)
 
 	if _, mismatched := detectSupervisorBinaryMismatch(); mismatched {

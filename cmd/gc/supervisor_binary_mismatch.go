@@ -24,6 +24,12 @@ const allowSupervisorMismatchFlag = "allow-supervisor-mismatch"
 // supervisor must never stall the calling command for long.
 var supervisorBinaryProbeTimeout = 2 * time.Second
 
+// supervisorHealthStatusHook fetches the supervisor's /health identity.
+// Overridable for tests.
+var supervisorHealthStatusHook = func(ctx context.Context, baseURL string) (SupervisorStatus, error) {
+	return newHTTPSupervisorClient(baseURL).Status(ctx)
+}
+
 // localGCExecutableHook returns the path of the invoking gc binary.
 // Overridable for tests.
 var localGCExecutableHook = os.Executable
@@ -103,7 +109,7 @@ func detectSupervisorBinaryMismatch() (supervisorBinaryMismatch, bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), supervisorBinaryProbeTimeout)
 	defer cancel()
-	status, err := newHTTPSupervisorClient(baseURL).Status(ctx)
+	status, err := supervisorHealthStatusHook(ctx, baseURL)
 	if err != nil {
 		return supervisorBinaryMismatch{}, false
 	}
