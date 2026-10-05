@@ -186,7 +186,7 @@ func Catalog() []Entry {
 			"acp", "exact:acp", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBacked"),
-				time.Date(2026, time.October, 8, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.November, 17, 0, 0, 0, 0, time.UTC),
 				"TestACPDefaultDirConformance (internal/runtime/acp/conformance_test.go) calls "+
 					"NewSeamBacked directly through runtimetest.RunProviderTests with no dir injection, reusing "+
 					"the fakeacp fixture; verified clean on Linux (single run, -count=3 repeated, -race, and two "+
@@ -195,7 +195,8 @@ func Catalog() []Entry {
 					"setup-gascity-macos's go-version default is stale against go.mod's `go 1.26.6` requirement, "+
 					"failing mac-quality and skipping every downstream job including the packages-core shard "+
 					"this test would run in) currently blocks that evidence. Promote to proved once ga-csh74h "+
-					"is fixed and a clean Darwin run of TestACPDefaultDirConformance is recorded.",
+					"is fixed and a clean Darwin run of TestACPDefaultDirConformance is recorded."+
+					" Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation; the underlying test gap must be fixed separately.",
 			),
 			provedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBackedWithDir"),
@@ -235,8 +236,9 @@ func Catalog() []Entry {
 			"hybrid", "exact:hybrid", nil,
 			waivedRuntime(
 				repoSymbol("cmd/gc", "newHybridProvider"),
-				time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC),
-				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract",
+				time.Date(2026, time.November, 22, 0, 0, 0, 0, time.UTC),
+				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract."+
+					" Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation; the underlying test gap must be fixed separately.",
 			),
 		),
 		builtin(
