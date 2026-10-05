@@ -139,6 +139,18 @@ type fakeClaudePane struct {
 	// "Try \"write a test for <filepath>\"" at startup.
 	placeholder string
 
+	// prompt is a full pane capture of a permission prompt. The pane shows
+	// it from the promptOnCapture'th capture-pane (1-based) on, or right
+	// after the first literal text when promptAfterPaste is set, the way a
+	// tool call of the running turn can raise one at any moment.
+	prompt           string
+	promptOnCapture  int
+	promptAfterPaste bool
+	promptShown      bool
+	// promptKeys is every key (literal text included) that reached the
+	// prompt instead of the input box.
+	promptKeys []string
+
 	captures    int
 	keys        []string // every non-literal send-keys key, in order
 	submitted   []string // every message Enter sent
@@ -327,6 +339,12 @@ func (f *fakeClaudePane) execute(args []string) (string, error) {
 		if f.attachOnCapture > 0 && f.captures >= f.attachOnCapture {
 			f.attached = true
 		}
+		if f.prompt != "" && f.promptOnCapture > 0 && f.captures >= f.promptOnCapture {
+			f.promptShown = true
+		}
+		if f.promptShown {
+			return strings.TrimSpace(f.prompt), nil
+		}
 		if f.restoreDraft != "" && f.captures >= f.restoreOnCapture {
 			f.draft, f.restoreDraft = f.restoreDraft, ""
 			f.cursor = draftEnd
@@ -357,7 +375,14 @@ func (f *fakeClaudePane) sendKeys(args []string) {
 			keys = append(keys, args[i])
 		}
 	}
+	if f.promptShown {
+		f.promptKeys = append(f.promptKeys, keys...)
+		return
+	}
 	if literal {
+		if f.prompt != "" && f.promptAfterPaste {
+			defer func() { f.promptShown = true }()
+		}
 		text := strings.Join(keys, " ")
 		c := f.cur()
 		f.draft = f.draft[:c] + text + f.draft[c:]
@@ -443,7 +468,9 @@ func TestFakeClaudePaneMatchesRealCursorCaptures(t *testing.T) {
 		pane.ctrlK()
 		got := pane.render()
 		got = got[len(pane.header)+1 : len(got)-2]
-		if !slices.EqualFunc(got, want, func(a, b string) bool { return strings.Join(strings.Fields(a), " ") == strings.Join(strings.Fields(b), " ") }) {
+		if !slices.EqualFunc(got, want, func(a, b string) bool {
+			return strings.Join(strings.Fields(a), " ") == strings.Join(strings.Fields(b), " ")
+		}) {
 			t.Fatalf("after %d Ctrl-U+Ctrl-K the input box reads\n%s\nwant the real capture\n%s", i+1, strings.Join(got, "\n"), strings.Join(want, "\n"))
 		}
 	}

@@ -2413,6 +2413,10 @@ func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bo
 			sleep(submitReEnterBackoff)
 		}
 		if err := sendSubmit(); err != nil {
+			if errors.Is(err, runtime.ErrPendingInteraction) {
+				// Never re-send into a permission prompt.
+				return false, err
+			}
 			lastErr = err
 			continue
 		}
@@ -2691,6 +2695,11 @@ func (t *Tmux) sendNudgeSubmitSequence(target string, keys []string) error {
 // If multiple goroutines try to nudge the same session concurrently, they will
 // queue up and execute one at a time. This prevents garbled input when
 // SessionStart hooks and nudges arrive simultaneously.
+//
+// It never types into a pending permission prompt: under the lock it checks
+// the pane before the first key, again immediately before the paste, and
+// again immediately before every submit key, and returns an error wrapping
+// runtime.ErrPendingInteraction when a prompt is showing (#2892).
 func (t *Tmux) NudgeSession(session, message string) error {
 	return t.nudgeSession(
 		session,
@@ -2698,7 +2707,23 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		t.sendKeysLiteralWithRetry,
 		func(target string) bool { return t.shouldSendEscapeBeforeEnter(target) },
 		func(target string) []string { return t.nudgeSubmitKeySequence(target) },
+		t.pendingPromptRecheck(session),
 	)
+}
+
+// pendingPromptRecheck returns NudgeSession's under-the-lock look for a
+// permission prompt. Only a prompt on screen stops the nudge: a capture that
+// fails here does not, because NudgeNow's first check already refused a pane it
+// could not read, and the survey and dialog steps of the nudge are best-effort
+// on a failed capture too.
+func (t *Tmux) pendingPromptRecheck(session string) func(target string) error {
+	return func(target string) error {
+		err := t.checkNoApprovalPromptIn(session, target)
+		if errors.Is(err, runtime.ErrPendingInteraction) {
+			return err
+		}
+		return nil
+	}
 }
 
 // nudgeStartupSession sends the initial startup prompt. Copilot startup
@@ -2712,14 +2737,19 @@ func (t *Tmux) nudgeStartupSession(session, message string) error {
 		},
 		func(target string) bool { return t.shouldSendEscapeBeforeEnter(target) },
 		func(target string) []string { return t.nudgeSubmitKeySequence(target) },
+		nil,
 	)
 }
 
+// noPendingPrompt, when set, is checked under the nudge lock before the first
+// key, immediately before the paste, and immediately before every submit key;
+// its error aborts the nudge with no further keys sent.
 func (t *Tmux) nudgeSession(
 	session, message string,
 	sendText func(string, string, time.Duration) error,
 	shouldSendEscape func(string) bool,
 	submitKeySequence func(string) []string,
+	noPendingPrompt func(target string) error,
 ) error {
 	// Serialize nudges to this session to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
@@ -2759,6 +2789,18 @@ func (t *Tmux) nudgeSession(
 	// render/input loop so the paste is actually consumed. The post-send wake
 	// below remains for the submit Enter.
 	t.WakePaneIfDetached(session)
+
+	// A permission prompt may have appeared since the caller last looked
+	// (the lock wait alone can take seconds): nothing may be typed into it.
+	checkPrompt := func() error {
+		if noPendingPrompt == nil {
+			return nil
+		}
+		return noPendingPrompt(target)
+	}
+	if err := checkPrompt(); err != nil {
+		return err
+	}
 
 	// 0. Dismiss any blocking mid-session dialog first. The token-ceiling
 	// resume selector, the periodic feedback prompt, and the provider
@@ -2803,7 +2845,12 @@ func (t *Tmux) nudgeSession(
 		return fmt.Errorf("dismissing feedback survey before nudge: %w", err)
 	}
 
-	// 2. Send text in literal mode with retry on transient errors
+	// 2. Send text in literal mode with retry on transient errors, after a
+	// last look for a permission prompt: the clear and the survey check above
+	// take time, and a paste into a prompt is read as menu input.
+	if err := checkPrompt(); err != nil {
+		return err
+	}
 	if err := sendText(target, message, t.cfg.NudgeReadyTimeout); err != nil {
 		return err
 	}
@@ -2849,10 +2896,33 @@ func (t *Tmux) nudgeSession(
 	// only for single-key (plain Enter) sequences, which is what every family
 	// without a table entry has. Adding a multi-key entry for a family that is
 	// not submit-verify eligible would need that gap closed first.
-	sendSubmit := func() error { return t.sendNudgeSubmitSequence(target, submitKeys) }
+	//
+	// Every submit is preceded by a look for a permission prompt: Enter on
+	// one picks its highlighted option. A prompt that appears after the paste
+	// leaves the message in the input box, unsent; the caller gets
+	// runtime.ErrPendingInteraction. One that appears only before a re-send
+	// stops the re-sends, and the submit is reported unconfirmed.
+	submitsSent := 0
+	sendSubmit := func() error {
+		if err := checkPrompt(); err != nil {
+			return err
+		}
+		submitsSent++
+		return t.sendNudgeSubmitSequence(target, submitKeys)
+	}
+	promptRefused := func(err error) error {
+		if submitsSent == 0 {
+			return err
+		}
+		return fmt.Errorf("%w: session %q: not re-sent: %v", ErrNudgeSubmitUnconfirmed, session, err)
+	}
 	wake := func() { t.WakePaneIfDetached(session) }
 	if t.submitVerifyEligible(target) {
 		confirmed, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
+		if errors.Is(err, runtime.ErrPendingInteraction) {
+			delivered = submitsSent > 0
+			return promptRefused(err)
+		}
 		if err != nil {
 			return fmt.Errorf("failed to send submit sequence: %w", err)
 		}
@@ -2916,6 +2986,9 @@ func (t *Tmux) nudgeSession(
 			time.Sleep(submitReEnterBackoff)
 		}
 		if err := sendSubmit(); err != nil {
+			if errors.Is(err, runtime.ErrPendingInteraction) {
+				return promptRefused(err)
+			}
 			lastErr = err
 			continue
 		}

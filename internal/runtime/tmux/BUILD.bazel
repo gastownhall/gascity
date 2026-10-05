@@ -74,6 +74,7 @@ go_test(
         "main_test.go",
         "nudge_dismiss_besteffort_test.go",
         "nudge_poke_hidden_test.go",
+        "nudge_prompt_guard_test.go",
         "nudge_submit_confirm_test.go",
         "nudge_submit_key_sequence_test.go",
         "runtime_inventory_test.go",

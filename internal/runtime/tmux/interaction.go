@@ -610,7 +610,13 @@ func approvalOptionLabels(approval *parsedApproval) []string {
 // picks that option — so delivery paths call this before sending any text.
 // Capture failures are returned as-is for the caller to classify.
 func (t *Tmux) checkNoApprovalPrompt(name string) error {
-	paneText, err := t.CapturePane(name, 40)
+	return t.checkNoApprovalPromptIn(name, name)
+}
+
+// checkNoApprovalPromptIn is checkNoApprovalPrompt for session name's agent
+// pane target (a pane id in a multi-pane session).
+func (t *Tmux) checkNoApprovalPromptIn(name, target string) error {
+	paneText, err := t.CapturePane(target, 40)
 	if err != nil {
 		return err
 	}
