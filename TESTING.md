@@ -204,11 +204,14 @@ advertise only the pin on main ("Re-pinning the RBE worker host" below).
 A branch that predates a re-pin, or that moves the pin itself, would queue
 every remote action forever while the pool scaler starts Blacksmith VMs
 that cannot take them. So before executing remotely, `push-suite.sh`
-fetches main from `origin` (`GC_PREPUSH_MAIN_REMOTE` names another remote;
-offline it uses the last fetched `origin/main`) and compares the
-checkout's pin with main's (`tools/rbe/worker-env-drift pin`). When `origin`
-is on GitHub and `gh` is installed, it also runs `worker-env-drift
-preflight` (bounded to 20s, best effort: a failed lookup only warns) to
+fetches main (bounded to 30s, no prompts) from the remote whose URL is
+`github.com/gastownhall/gascity` (`origin`, then `upstream`, then any other;
+`origin` if none is; `GC_PREPUSH_MAIN_REMOTE` names it explicitly), so a
+fork's stale main never stands in for gascity's. Offline it uses that
+remote's last fetched `main`. It compares the checkout's pin with main's
+(`tools/rbe/worker-env-drift pin`). When that remote is on GitHub and `gh`
+is installed, it also runs `worker-env-drift preflight` (bounded to 20s,
+best effort: a failed lookup only warns) to
 find an open `rbe-worker-env-drift` issue for main's pin, which means no
 live worker serves even main. On a pin that differs from main's, no
 readable main, or an open drift issue, `auto` prints why and runs the

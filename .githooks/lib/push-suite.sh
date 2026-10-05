@@ -82,13 +82,27 @@ probe_executor() {
   fi
 }
 
-# run_bounded SECONDS CMD...: CMD, killed after SECONDS where timeout(1)
-# exists (stock macOS has none; there CMD runs unbounded).
+# run_bounded SECONDS CMD...: CMD in its own process group, which is killed
+# after SECONDS (exit 124). timeout(1), else Homebrew's gtimeout, else perl
+# (stock macOS has neither timeout); unbounded only without all three.
 run_bounded() {
   local seconds=$1
   shift
   if command -v timeout >/dev/null 2>&1; then
     timeout "$seconds" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$seconds" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e '
+      my $seconds = shift;
+      my $pid = fork;
+      defined $pid or die "fork: $!\n";
+      if (!$pid) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV; exit 127 }
+      $SIG{ALRM} = sub { kill "TERM", -$pid; kill "CONT", -$pid; exit 124 };
+      alarm $seconds;
+      waitpid $pid, 0;
+      exit($? & 127 ? 128 + ($? & 127) : $? >> 8);
+    ' "$seconds" "$@"
   else
     "$@"
   fi
@@ -99,6 +113,7 @@ run_bounded() {
 github_repo() {
   local url
   url="$(git config --get "remote.$1.url")" || return 1
+  url="${url%/}"
   url="${url%.git}"
   case "$url" in
   https://github.com/*/* | git@github.com:*/* | ssh://git@github.com/*/*)
@@ -108,6 +123,25 @@ github_repo() {
   esac
 }
 
+# The remote carrying gascity's main, whose pin rbe-west's workers serve:
+# $GC_PREPUSH_MAIN_REMOTE, else the first of origin, upstream and the other
+# remotes whose URL is github.com/gastownhall/gascity, else origin. A fork's
+# origin carries the fork's main, whose pin can be as stale as the branch's.
+main_remote() {
+  local candidate
+  if [ -n "${GC_PREPUSH_MAIN_REMOTE:-}" ]; then
+    printf '%s\n' "$GC_PREPUSH_MAIN_REMOTE"
+    return 0
+  fi
+  for candidate in origin upstream $(git remote); do
+    if [ "$(github_repo "$candidate" | tr '[:upper:]' '[:lower:]')" = gastownhall/gascity ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  echo origin
+}
+
 # Why remote execution must not run, on stdout; nothing when the worker-env
 # pin is current. Every remote action sends //platforms:rbe_worker's
 # worker-env pin, and rbe-west's oss schedulers match it exactly against what
@@ -115,12 +149,13 @@ github_repo() {
 # tiers"). Any other pin, from a branch that predates a re-pin or moves the
 # pin, queues every action forever while the pool scaler starts VMs that
 # cannot take them; so does main's own pin while it has an open drift issue.
-# Main is a fresh fetch of $GC_PREPUSH_MAIN_REMOTE (default origin), or its
-# last fetched ref when offline; the drift issue lookup (gh, through
-# tools/rbe/worker-env-drift preflight) is best effort and time-bounded.
+# Main is a fresh fetch of main_remote's main, or its last fetched ref when
+# offline; the drift issue lookup (gh, through tools/rbe/worker-env-drift
+# preflight) is best effort and time-bounded.
 worker_env_refusal() {
-  local main_remote="${GC_PREPUSH_MAIN_REMOTE:-origin}" drift=tools/rbe/worker-env-drift
+  local main_remote drift=tools/rbe/worker-env-drift
   local ref pin base repo out issue status=0
+  main_remote="$(main_remote)"
   ref="refs/remotes/$main_remote/main"
   if ! run_bounded 30 env GIT_TERMINAL_PROMPT=0 git fetch --no-tags --quiet "$main_remote" "+refs/heads/main:$ref" >/dev/null 2>&1; then
     echo "pre-push: could not fetch $main_remote's main; comparing against the last fetched $main_remote/main" >&2
@@ -144,7 +179,9 @@ worker_env_refusal() {
   if ! command -v gh >/dev/null 2>&1 || ! repo="$(github_repo "$main_remote")"; then
     return 0
   fi
-  out="$(GITHUB_REPOSITORY="$repo" WORKER_ENV_REMOTE=true GITHUB_OUTPUT='' GITHUB_STEP_SUMMARY='' \
+  # /dev/null, not empty: with no summary file, preflight's `echo | summary`
+  # can die of SIGPIPE (exit 141) instead of reporting the issue (exit 1).
+  out="$(GITHUB_REPOSITORY="$repo" WORKER_ENV_REMOTE=true GITHUB_OUTPUT=/dev/null GITHUB_STEP_SUMMARY=/dev/null \
     run_bounded 20 "$drift" preflight platforms/BUILD.bazel /dev/null 2>&1)" || status=$?
   issue="$(printf '%s\n' "$out" | sed -n 's/^::error title=rbe worker-env drift::\(https:[^ :]*\):.*/\1/p')"
   if [ "$status" -eq 1 ] && [ -n "$issue" ]; then

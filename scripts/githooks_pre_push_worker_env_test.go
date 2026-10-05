@@ -35,6 +35,7 @@ type prePushWorkerEnv struct {
 	upstream string // scratch clone that commits and pushes origin's main
 	bare     string // origin itself
 	ghLog    string
+	ghSinks  string // preflight's GITHUB_OUTPUT and GITHUB_STEP_SUMMARY, per gh call
 	issues   string
 }
 
@@ -69,10 +70,47 @@ func (f *prePushFixture) withWorkerEnv(t *testing.T) *prePushWorkerEnv {
 	f.git(t, "remote", "add", "origin", prePushOriginURL)
 	f.git(t, "config", "url."+w.bare+".insteadOf", prePushOriginURL)
 
-	writeExecutable(t, filepath.Join(f.binDir, "gh"), ghStub)
+	// The stub also records the summary and output sinks preflight runs with.
+	writeExecutable(t, filepath.Join(f.binDir, "gh"), strings.Replace(ghStub, "#!/bin/sh\n",
+		"#!/bin/sh\nprintf '%s %s\\n' \"$GITHUB_OUTPUT\" \"$GITHUB_STEP_SUMMARY\" >>\"$GH_SINKS\"\n", 1))
+	w.ghSinks = filepath.Join(dir, "gh-sinks.log")
 	w.setIssues(t)
-	f.env = append(f.env, "GH_LOG="+w.ghLog, "GH_ISSUES="+w.issues)
+	f.env = append(f.env, "GH_LOG="+w.ghLog, "GH_ISSUES="+w.issues, "GH_SINKS="+w.ghSinks)
 	return w
+}
+
+// forkOrigin makes origin a contributor's fork, whose main still pins
+// prePushPinMain, and upstream the gastownhall remote.
+func (f *prePushFixture) forkOrigin(t *testing.T, w *prePushWorkerEnv) {
+	t.Helper()
+	const forkURL = "https://github.com/contributor/gascity.git"
+	fork := filepath.Join(t.TempDir(), "fork.git")
+	f.gitIn(t, "", "clone", "-q", "--bare", w.bare, fork)
+	f.git(t, "remote", "rename", "origin", "upstream")
+	f.git(t, "remote", "add", "origin", forkURL)
+	f.git(t, "config", "url."+fork+".insteadOf", forkURL)
+}
+
+// withoutTimeout leaves the hook a PATH with no timeout(1) or gtimeout, as on
+// stock macOS: run_bounded falls back to perl.
+func (f *prePushFixture) withoutTimeout(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	for _, sys := range []string{"/bin", "/usr/bin"} {
+		entries, err := os.ReadDir(sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if e.Name() == "timeout" || e.Name() == "gtimeout" {
+				continue
+			}
+			if err := os.Symlink(filepath.Join(sys, e.Name()), filepath.Join(dir, e.Name())); err != nil && !os.IsExist(err) {
+				t.Fatal(err)
+			}
+		}
+	}
+	f.env = append(f.env, "PATH="+f.binDir+":"+dir)
 }
 
 func (f *prePushFixture) gitIn(t *testing.T, dir string, args ...string) {
@@ -237,6 +275,33 @@ func TestPrePushSuiteWorkerEnvGuard(t *testing.T) {
 			wantBazel: prePushBazelCacheArgs,
 			wantOut:   []string{"upstream/main", prePushPinOther},
 		},
+		{
+			name: "fork origin as stale as the branch defers to gastownhall's main",
+			setup: func(t *testing.T, f *prePushFixture, w *prePushWorkerEnv) {
+				f.forkOrigin(t, w)
+				f.setMainPin(t, w, prePushPinOther)
+			},
+			wantBazel: prePushBazelCacheArgs,
+			wantOut:   []string{"upstream/main", prePushPinOther},
+		},
+		{
+			name: "fork origin asks gastownhall about drift issues",
+			setup: func(t *testing.T, f *prePushFixture, w *prePushWorkerEnv) {
+				f.forkOrigin(t, w)
+				w.setIssues(t, driftTitle(prePushPinMain), issueURL)
+			},
+			wantBazel: prePushBazelCacheArgs, wantGH: true,
+			wantOut: []string{issueURL},
+		},
+		{
+			name: "without timeout(1) an open drift issue still refuses",
+			setup: func(t *testing.T, f *prePushFixture, w *prePushWorkerEnv) {
+				f.withoutTimeout(t)
+				w.setIssues(t, driftTitle(prePushPinMain), issueURL)
+			},
+			wantBazel: prePushBazelCacheArgs, wantGH: true,
+			wantOut: []string{issueURL},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newPrePushFixture(t)
@@ -268,6 +333,13 @@ func TestPrePushSuiteWorkerEnvGuard(t *testing.T) {
 			}
 			if tc.wantGH && !strings.Contains(ghLog, "issue list -R "+prePushOriginRepo+" --label "+rbeWorkerEnvLabel) {
 				t.Errorf("gh did not list %s's drift issues: %q", prePushOriginRepo, ghLog)
+			}
+			// With no summary file, preflight's `echo | summary` races the
+			// reader's exit and can die of SIGPIPE instead of reporting.
+			for _, sinks := range strings.Split(strings.TrimSpace(f.read(t, w.ghSinks)), "\n") {
+				if tc.wantGH && sinks != "/dev/null /dev/null" {
+					t.Errorf("preflight ran with GITHUB_OUTPUT GITHUB_STEP_SUMMARY = %q, want /dev/null sinks", sinks)
+				}
 			}
 		})
 	}
