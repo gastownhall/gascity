@@ -1613,6 +1613,64 @@ func TestCheckNoMoleculeChildrenRejectsLiveWorkflowWithoutForce(t *testing.T) {
 	}
 }
 
+// TestDoSlingRefusesWorkflowRootAsSourceBead guards the other side of the
+// live-workflow conflict above. That guard asks whether the source bead
+// already HAS a workflow; a workflow root has none of its own, so it passes,
+// and the target's default_sling_formula wraps a second workflow around the
+// first one's root. A root is workflow topology, not a unit of work: the
+// sling must refuse and leave no second workflow behind.
+func TestDoSlingRefusesWorkflowRootAsSourceBead(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("code-review")}
+
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:  "workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey:  beadmeta.FormulaContractGraphV2,
+			beadmeta.WorkflowExpandedMetadataKey: "true",
+			beadmeta.RoutedToMetadataKey:         "mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(root): %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:    "step",
+		Type:     "task",
+		Status:   "in_progress",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	}); err != nil {
+		t.Fatalf("store.Create(step): %v", err)
+	}
+	before, err := store.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("list beads: %v", err)
+	}
+
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = store
+	_, err = DoSling(testOpts(a, root.ID), deps, store)
+	if err == nil {
+		t.Fatal("DoSling error = nil, want refusal: the source bead is a workflow root")
+	}
+
+	after, listErr := store.List(beads.ListQuery{AllowScan: true})
+	if listErr != nil {
+		t.Fatalf("list beads: %v", listErr)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("stored beads = %d, want %d: a second workflow was materialized around root %s", len(after), len(before), root.ID)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner calls = %#v, want none", runner.calls)
+	}
+}
+
 func TestDoSlingValidatesRequiredDeps(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	opts := testOpts(a, "BL-42")
