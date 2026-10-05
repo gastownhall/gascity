@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -886,6 +887,57 @@ func supervisorSameBinary(a, b string) bool {
 		return os.SameFile(infoA, infoB)
 	}
 	return false
+}
+
+// supervisorInstallBinaryGuardResult classifies the gc binary an existing
+// service file references relative to the binary running the install.
+type supervisorInstallBinaryGuardResult int
+
+const (
+	// supervisorInstallBinaryAllowed: no binary recorded, or the same binary.
+	supervisorInstallBinaryAllowed supervisorInstallBinaryGuardResult = iota
+	// supervisorInstallBinaryDifferent: a different gc binary that still
+	// exists on disk; overwriting it requires --force.
+	supervisorInstallBinaryDifferent
+	// supervisorInstallBinaryMissing: a gc binary that no longer exists
+	// (uninstalled, unlinked, or upgraded away). The service manager can no
+	// longer start it, so the file is replaceable without --force.
+	supervisorInstallBinaryMissing
+)
+
+// supervisorInstallBinaryGuard classifies existingBinary, the gc path an
+// installed service file launches, against currentBinary. A dangling symlink
+// counts as missing because the service manager cannot exec it either.
+func supervisorInstallBinaryGuard(existingBinary, currentBinary string) supervisorInstallBinaryGuardResult {
+	if existingBinary == "" || supervisorSameBinary(existingBinary, currentBinary) {
+		return supervisorInstallBinaryAllowed
+	}
+	if _, err := os.Stat(existingBinary); errors.Is(err, fs.ErrNotExist) {
+		return supervisorInstallBinaryMissing
+	}
+	return supervisorInstallBinaryDifferent
+}
+
+// checkSupervisorInstallBinaryGuard applies supervisorInstallBinaryGuard for
+// a non-forced install of the service file at path (kind is "plist" or
+// "unit"). It reports false after explaining the refusal on stderr, and
+// notes on stdout when a file pointing at a removed binary is being replaced.
+func checkSupervisorInstallBinaryGuard(kind, path, existingBinary, currentBinary string, stdout, stderr io.Writer) bool {
+	switch supervisorInstallBinaryGuard(existingBinary, currentBinary) {
+	case supervisorInstallBinaryDifferent:
+		fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+			"gc supervisor install: existing %s %q references binary %q but the current gc binary resolves to %q; "+
+				"refusing to overwrite a %s installed from a different binary. "+
+				"Install gc to a stable location first (e.g. 'make install'), then rerun 'gc supervisor install'. "+
+				"To override, pass --force.\n",
+			kind, path, existingBinary, currentBinary, kind)
+		return false
+	case supervisorInstallBinaryMissing:
+		fmt.Fprintf(stdout, //nolint:errcheck // best-effort stdout
+			"gc supervisor install: existing %s %q references binary %q, which no longer exists; replacing it with %q.\n",
+			kind, path, existingBinary, currentBinary)
+	}
+	return true
 }
 
 func waitForSupervisorPID() int {
@@ -2025,16 +2077,9 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc supervisor install: reading existing plist: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if hadCurrent && !supervisorInstallForce {
-		if existingBinary := supervisorLaunchdPlistGCPath(string(existing)); existingBinary != "" && !supervisorSameBinary(existingBinary, data.GCPath) {
-			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
-				"gc supervisor install: existing plist %q references binary %q but the current gc binary resolves to %q; "+
-					"refusing to overwrite a plist installed from a different binary. "+
-					"Install gc to a stable location first (e.g. 'make install'), then rerun 'gc supervisor install'. "+
-					"To override, pass --force.\n",
-				path, existingBinary, data.GCPath)
-			return 1
-		}
+	if hadCurrent && !supervisorInstallForce &&
+		!checkSupervisorInstallBinaryGuard("plist", path, supervisorLaunchdPlistGCPath(string(existing)), data.GCPath, stdout, stderr) {
+		return 1
 	}
 	if contentUnchanged && supervisorAliveHook() != 0 {
 		fmt.Fprintf(stdout, "Installed launchd service: %s\n", path) //nolint:errcheck // best-effort stdout
@@ -2168,16 +2213,9 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc supervisor install: reading existing unit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if hadCurrent && !supervisorInstallForce {
-		if existingBinary := supervisorSystemdExecStartBinary(string(existing)); existingBinary != "" && !supervisorSameBinary(existingBinary, data.GCPath) {
-			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
-				"gc supervisor install: existing unit %q references binary %q but the current gc binary resolves to %q; "+
-					"refusing to overwrite a unit installed from a different binary. "+
-					"Install gc to a stable location first (e.g. 'make install'), then rerun 'gc supervisor install'. "+
-					"To override, pass --force.\n",
-				path, existingBinary, data.GCPath)
-			return 1
-		}
+	if hadCurrent && !supervisorInstallForce &&
+		!checkSupervisorInstallBinaryGuard("unit", path, supervisorSystemdExecStartBinary(string(existing)), data.GCPath, stdout, stderr) {
+		return 1
 	}
 
 	// Bail out before we touch the unit file when there is no per-user
