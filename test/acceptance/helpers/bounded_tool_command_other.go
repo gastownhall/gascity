@@ -15,7 +15,3 @@ func terminateBoundedToolCommand(cmd *exec.Cmd) error {
 	}
 	return cmd.Process.Kill()
 }
-
-func cleanupBoundedToolCommand(cmd *exec.Cmd) error {
-	return terminateBoundedToolCommand(cmd)
-}

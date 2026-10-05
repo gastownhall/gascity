@@ -19,23 +19,20 @@ func boundedToolCommand(t *testing.T, timeout time.Duration, path string, args .
 	cmd.Cancel = func() error { return terminateBoundedToolCommand(cmd) }
 	cmd.WaitDelay = time.Second
 	t.Cleanup(func() {
+		defer cancel()
 		if cmd.Process == nil {
-			cancel()
 			return
 		}
+		var err error
 		if cmd.ProcessState == nil {
-			cleanupResult := make(chan error, 1)
-			go func() { cleanupResult <- cleanupBoundedToolCommand(cmd) }()
+			stopped := make(chan error, 1)
+			go func() { stopped <- terminateBoundedToolCommand(cmd) }()
 			_ = cmd.Wait()
-			err := <-cleanupResult
-			cancel()
-			if err != nil && !errors.Is(err, os.ErrProcessDone) {
-				t.Errorf("stop descendants left by %s: %v", path, err)
-			}
-			return
+			err = <-stopped
+		} else {
+			err = terminateBoundedToolCommand(cmd)
 		}
-		cancel()
-		if err := cleanupBoundedToolCommand(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		if err != nil && !errors.Is(err, os.ErrProcessDone) {
 			t.Errorf("stop descendants left by %s: %v", path, err)
 		}
 	})

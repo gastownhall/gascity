@@ -22,7 +22,3 @@ func terminateBoundedToolCommand(cmd *exec.Cmd) error {
 	}
 	return processgroup.TerminateCommand(cmd, cmd.Process.Pid, boundedToolTerminationGrace, processgroup.Options{})
 }
-
-func cleanupBoundedToolCommand(cmd *exec.Cmd) error {
-	return terminateBoundedToolCommand(cmd)
-}

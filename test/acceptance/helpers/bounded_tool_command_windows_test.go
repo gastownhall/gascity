@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func TestCleanupBoundedToolCommandAfterWaitReportsProcessDone(t *testing.T) {
+func TestTerminateBoundedToolCommandAfterWaitReportsProcessDone(t *testing.T) {
 	shell, err := exec.LookPath("cmd")
 	if err != nil {
 		t.Fatalf("find cmd.exe: %v", err)
@@ -19,7 +19,7 @@ func TestCleanupBoundedToolCommandAfterWaitReportsProcessDone(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("cmd.exe failed: %v\n%s", err, out)
 	}
-	if err := cleanupBoundedToolCommand(cmd); !errors.Is(err, os.ErrProcessDone) {
-		t.Fatalf("cleanup after Wait = %v, want os.ErrProcessDone", err)
+	if err := terminateBoundedToolCommand(cmd); !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("terminate after Wait = %v, want os.ErrProcessDone", err)
 	}
 }
