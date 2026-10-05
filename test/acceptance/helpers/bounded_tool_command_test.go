@@ -67,6 +67,21 @@ func TestBoundedToolCommandCleanupStopsDescendantsOfAnExitedLeader(t *testing.T)
 	requireDescendantsGone(t, cmd, held, "test cleanup after its leader exited")
 }
 
+func TestToolCommandCleanupStopsDescendantsOfAnExitedLeader(t *testing.T) {
+	held, holder := descendantPipe(t)
+	var cmd *exec.Cmd
+	t.Run("probe leaves a child behind", func(t *testing.T) {
+		cmd = ToolCommand(t, descendantLeavingStub(t, exitingLeaderScript))
+		cmd.ExtraFiles = []*os.File{holder}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("stub probe failed: %v\n%s", err, out)
+		}
+		readDescendantReady(t, held)
+	})
+	closeHolder(t, holder)
+	requireDescendantsGone(t, cmd, held, "test cleanup of a tool probe")
+}
+
 func TestBoundedToolCommandCleanupToleratesAZombieInItsGroup(t *testing.T) {
 	held, holder := descendantPipe(t)
 	t.Run("zombie outlives the leader", func(t *testing.T) {

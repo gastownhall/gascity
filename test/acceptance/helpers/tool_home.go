@@ -48,16 +48,16 @@ func (e *Env) ToolList() []string {
 	return toolhome.Environ(list, e.toolHome, toolhome.Explicit(list)...)
 }
 
-// ToolCommand is exec.Command for a bd or dolt the suite runs outside any Env
-// (a version or capability probe): the test process's environment, re-homed
-// under a fresh per-test directory.
+// ToolCommand is a bounded exec.Command for a bd or dolt the suite runs outside
+// any Env (a version or capability probe): the test process's environment,
+// re-homed under a fresh per-test directory.
 func ToolCommand(t *testing.T, bin string, args ...string) *exec.Cmd {
 	t.Helper()
 	home := filepath.Join(TempDir(t), "tool-home")
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatalf("create tool home: %v", err)
 	}
-	cmd := exec.Command(bin, args...) //nolint:gosec // resolved test binary
+	cmd, _ := boundedToolCommand(t, acceptanceToolCommandTimeout, bin, args...)
 	cmd.Env = toolhome.Environ(os.Environ(), home)
 	// bd walks up from its working directory looking for a .beads. The test
 	// process's cwd is its package directory, which on a developer box sits
