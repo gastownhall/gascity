@@ -520,6 +520,7 @@ var runSupervisorFunc = runSupervisor
 
 func doSupervisorRun(stdout, stderr io.Writer) int {
 	defaultSupervisorBeadsActor()
+	loadSupervisorKeychainEnv(stderr)
 	return runSupervisorFunc(stdout, stderr)
 }
 
@@ -1358,6 +1359,7 @@ var supervisorServiceEnvKeys = map[string]bool{
 	"T3_HOME":                                  true,
 	"T3_WS_URL":                                true,
 	"T3CODE_HOME":                              true,
+	supervisorKeychainEnvVar:                   true,
 	"HOME":                                     true,
 	"LANG":                                     true,
 	"LC_ALL":                                   true,
@@ -1451,6 +1453,11 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 	// fixed value after every inherited, explicit, secrets-file, and launchctl
 	// tier so none can re-enable product metrics in the service process.
 	env[execenv.UsageMetricsDisableEnv] = execenv.UsageMetricsDisableValue
+	// Keychain-sourced keys are loaded by `gc supervisor run` at startup;
+	// persisting a value from any tier above would put the secret on disk.
+	for key := range supervisorKeychainSourcedKeys() {
+		delete(env, key)
+	}
 
 	keys := make([]string, 0, len(env))
 	for key := range env {
