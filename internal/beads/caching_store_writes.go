@@ -270,8 +270,11 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 //
 // Like every other writer, Claim installs nothing when a local write or Delete
 // on id landed after the claim began (racedWriteLocked): that write's row, or
-// its tombstone, stands. The claim committed either way, so its row is still
-// notified and returned.
+// its tombstone, stands. The claim committed either way, so it is still
+// notified and returned, as the claim's own acquisition row rather than the
+// refresh, which may already show that newer write. Outside a local race the
+// returned row is the refreshed one, which can likewise include a remote write
+// that landed after the claim.
 func (c *CachingStore) Claim(id, assignee string) (Bead, bool, error) {
 	claimer, ok := c.backing.(interface {
 		Claim(id, assignee string) (Bead, bool, error)
@@ -302,7 +305,7 @@ func (c *CachingStore) Claim(id, assignee string) (Bead, bool, error) {
 			}
 		})
 	}
-	if !found {
+	if !found || raced {
 		row = claimed
 	}
 	if !raced {

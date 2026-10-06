@@ -339,7 +339,9 @@ func TestCachingStoreClaimWarmCacheRefreshFailureCarriesClaimedRevision(t *testi
 // local Delete or write of the claimed row that lands after the claim began
 // stands. Claim installs neither its refreshed row nor its fallback over it,
 // so a deleted row is not resurrected and a newer write is not overwritten
-// with an older read, and it still notifies the claim it committed.
+// with an older read, and it still notifies and returns the claim it
+// committed: the acquisition row, not a refresh that already shows the newer
+// write.
 func TestCachingStoreClaimRacedWriteInstallsNothing(t *testing.T) {
 	t.Parallel()
 
@@ -353,11 +355,16 @@ func TestCachingStoreClaimRacedWriteInstallsNothing(t *testing.T) {
 			t.Errorf("racing SetMetadata: %v", err)
 		}
 	}
+	closeRow := func(t *testing.T, cache *CachingStore, id string) {
+		if err := cache.Close(id); err != nil {
+			t.Errorf("racing Close: %v", err)
+		}
+	}
 	for _, tc := range []struct {
 		name string
 		// duringRefresh fires the racer inside Claim's refresh, after it read
 		// the row; otherwise the racer fires before that read, so the refresh
-		// misses the row.
+		// misses a deleted row and reads a closed one.
 		duringRefresh bool
 		racer         func(t *testing.T, cache *CachingStore, id string)
 		deletes       bool
@@ -365,6 +372,7 @@ func TestCachingStoreClaimRacedWriteInstallsNothing(t *testing.T) {
 		{name: "delete_before_refresh", racer: deleteRow, deletes: true},
 		{name: "delete_during_refresh", duringRefresh: true, racer: deleteRow, deletes: true},
 		{name: "write_during_refresh", duringRefresh: true, racer: writeRow},
+		{name: "close_before_refresh", racer: closeRow},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -417,11 +425,18 @@ func TestCachingStoreClaimRacedWriteInstallsNothing(t *testing.T) {
 			mu.Lock()
 			after, afterRows := events[raced:], rows[raced:]
 			mu.Unlock()
-			if len(after) != 1 || after[0] != "bead.updated" || afterRows[0].ID != work.ID || afterRows[0].Assignee != "worker-1" {
+			if len(after) != 1 || after[0] != "bead.updated" || afterRows[0].ID != work.ID || afterRows[0].Assignee != "worker-1" || afterRows[0].Status != "in_progress" {
 				t.Fatalf("events after the racer = %v (%+v), want exactly one bead.updated carrying the claim", after, afterRows)
 			}
 
 			if !tc.deletes {
+				current, err := backing.Store.Get(work.ID)
+				if err != nil {
+					t.Fatalf("backing Get(%s): %v", work.ID, err)
+				}
+				if claimed.Revision == 0 || claimed.Revision >= current.Revision {
+					t.Fatalf("Claim returned revision %d, want the claim's own, below the racing write's %d", claimed.Revision, current.Revision)
+				}
 				assertSettledCensusAgrees(t, cache, backing.Store, work.ID)
 				return
 			}
