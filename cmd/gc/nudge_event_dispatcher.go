@@ -356,7 +356,7 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 		return
 	}
 	if sessionFilter == "" {
-		targets, err := pendingNudgeTargets(d.cityPath, cfg, sessionBeads)
+		targets, err := pendingNudgeTargets(d.cityPath, cfg, sessionBeads, duePendingNudgeAgents)
 		if err != nil {
 			fmt.Fprintf(d.stderr, "%s: nudge event dispatch sweep: %v\n", d.logPrefix, err) //nolint:errcheck
 			return
@@ -404,7 +404,7 @@ func (d *nudgeEventDispatcher) handQueueToPollers() {
 		fmt.Fprintf(d.stderr, "%s: nudge poller handoff: loading session beads: %v\n", d.logPrefix, err) //nolint:errcheck
 		return
 	}
-	targets, err := pendingNudgeTargets(d.cityPath, cfg, sessionBeads)
+	targets, err := pendingNudgeTargets(d.cityPath, cfg, sessionBeads, outstandingNudgeAgents)
 	if err != nil {
 		fmt.Fprintf(d.stderr, "%s: nudge poller handoff: %v\n", d.logPrefix, err) //nolint:errcheck
 		return

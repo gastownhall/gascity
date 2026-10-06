@@ -384,10 +384,7 @@ func TestNudgeEventDispatcherFullPassArmsOnlyOneBoundedRetry(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		d.kickAll()
-		seen.nextSet(t, []string{"", info.SessionName}, fmt.Sprintf("sweep %d and its fan-out", i))
-		if filter := seen.next(t, "the fan-out's single bounded retry"); filter != info.SessionName {
-			t.Fatalf("sweep %d retried %q, want %q", i, filter, info.SessionName)
-		}
+		seen.nextSet(t, []string{"", info.SessionName, info.SessionName}, fmt.Sprintf("sweep %d, its fan-out and the fan-out's single bounded retry", i))
 		seen.assertQuiet(t, quiet, fmt.Sprintf("sweep %d must not restart the retry chain", i))
 	}
 
@@ -402,6 +399,7 @@ func TestNudgeEventDispatcherFullPassArmsOnlyOneBoundedRetry(t *testing.T) {
 func TestNudgeEventDispatcherSweepRetriesAnAgentThatJustWentIdle(t *testing.T) {
 	fake := newNudgeEventedFake()
 	dir, d, info, seen := newNudgeDispatcherFixture(t, fake)
+	d.quiescence = 2 * time.Second
 
 	fake.setStamp(info.SessionName, time.Now())
 	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "wait satisfied: proceed", time.Now().Add(-time.Minute))); err != nil {
@@ -1439,6 +1437,24 @@ func TestCityRuntimeReloadConfigTracedActivatesNudgeWakeListener(t *testing.T) {
 }
 
 func TestCityRuntimeReloadHandsQueuedNudgesToPollersWhenEventsStop(t *testing.T) {
+	due := func() queuedNudge {
+		return newQueuedNudge("worker", "wait satisfied: proceed", time.Now().Add(-time.Minute))
+	}
+	retrying := func() queuedNudge {
+		item := newQueuedNudge("worker", "wait satisfied: proceed", time.Now().Add(-time.Minute))
+		item.DeliverAfter = time.Now().Add(time.Hour).UTC()
+		item.Attempts = 1
+		return item
+	}
+	for name, item := range map[string]func() queuedNudge{"due": due, "deferred retry": retrying} {
+		t.Run(name, func(t *testing.T) {
+			assertReloadHandsQueuedNudgeToPoller(t, item)
+		})
+	}
+}
+
+func assertReloadHandsQueuedNudgeToPoller(t *testing.T, newItem func() queuedNudge) {
+	t.Helper()
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
@@ -1510,16 +1526,19 @@ func TestCityRuntimeReloadHandsQueuedNudgesToPollersWhenEventsStop(t *testing.T)
 	}
 	t.Cleanup(func() { startNudgePoller = prev })
 
-	if err := enqueueQueuedNudge(cityPath, newQueuedNudge("worker", "wait satisfied: proceed", time.Now().Add(-time.Minute))); err != nil {
+	if err := enqueueQueuedNudge(cityPath, newItem()); err != nil {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 	sp.endStreams()
-	deadline := time.Now().Add(5 * time.Second)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	timeout := time.After(5 * time.Second)
 	for cr.sessionEvents.streaming() {
-		if time.Now().After(deadline) {
+		select {
+		case <-timeout:
 			t.Fatal("the session-event pump did not notice the ended stream")
+		case <-tick.C:
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 
 	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[daemon]\nshutdown_timeout = \"1s\"\n"), 0o644); err != nil {

@@ -159,7 +159,22 @@ func duePendingNudgeAgents(state nudgequeue.State, now time.Time) map[string]boo
 	return agents
 }
 
-func pendingNudgeTargets(cityPath string, cfg *config.City, sessionBeads *sessionBeadSnapshot) ([]nudgeTarget, error) {
+func outstandingNudgeAgents(state nudgequeue.State, _ time.Time) map[string]bool {
+	agents := make(map[string]bool, len(state.Pending)+len(state.InFlight))
+	for _, item := range state.Pending {
+		if item.Agent != "" {
+			agents[item.Agent] = true
+		}
+	}
+	for _, item := range state.InFlight {
+		if item.Agent != "" {
+			agents[item.Agent] = true
+		}
+	}
+	return agents
+}
+
+func pendingNudgeTargets(cityPath string, cfg *config.City, sessionBeads *sessionBeadSnapshot, selectAgents func(nudgequeue.State, time.Time) map[string]bool) ([]nudgeTarget, error) {
 	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return nil, nil
 	}
@@ -171,7 +186,7 @@ func pendingNudgeTargets(cityPath string, cfg *config.City, sessionBeads *sessio
 	if err != nil {
 		return nil, fmt.Errorf("loading nudge queue: %w", err)
 	}
-	pendingAgents := duePendingNudgeAgents(state, now)
+	pendingAgents := selectAgents(state, now)
 	if len(pendingAgents) == 0 {
 		return nil, nil
 	}
