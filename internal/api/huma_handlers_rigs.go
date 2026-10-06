@@ -588,7 +588,7 @@ func (s *Server) humaHandleRigRestart(name string) (*RigActionResponse, error) {
 		if workdirutil.ConfiguredRigName(s.state.CityPath(), a, cfg.Rigs) != name {
 			continue
 		}
-		expanded := expandAgent(a, cityName, cfg.Workspace.SessionTemplate, sp)
+		expanded := expandAgent(a, cityName, cfg.Workspace.SessionTemplate, sp, cfg.NamedSessions)
 		for _, ea := range expanded {
 			sessionName := agentSessionName(cityName, ea.qualifiedName, cfg.Workspace.SessionTemplate)
 			if err := sp.Stop(sessionName); err != nil {

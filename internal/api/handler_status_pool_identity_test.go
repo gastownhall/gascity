@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -147,6 +148,38 @@ func TestStatusKeepsUnlimitedPoolAgentVisible(t *testing.T) {
 	row := agentRow(t, body, "beads/witness")
 	if !row.Running {
 		t.Fatalf("beads/witness running = false, want true: session %q is live (row=%+v)", "beads--witness", row)
+	}
+}
+
+// TestStatusCountsOwnNamedSessionOnce covers the same agent once it is also a
+// configured named session. The agent expansion now lists that identity
+// itself, so the session-bead leg must not add a second row for it, and the
+// row must be there even before the named session has ever started.
+func TestStatusCountsOwnNamedSessionOnce(t *testing.T) {
+	for _, running := range []bool{true, false} {
+		t.Run(fmt.Sprintf("running=%v", running), func(t *testing.T) {
+			st, sessions := poolIdentityState(t, config.Agent{
+				Name: "witness", Dir: "beads", Provider: "test-agent",
+			})
+			st.cfg.NamedSessions = []config.NamedSession{{Template: "witness", Dir: "beads", Mode: "always"}}
+			if running {
+				if _, err := sessions.Create(poolSessionBead("beads/witness", "beads--witness")); err != nil {
+					t.Fatalf("create session bead: %v", err)
+				}
+				if err := st.sp.Start(context.Background(), "beads--witness", runtime.Config{}); err != nil {
+					t.Fatalf("start runtime session: %v", err)
+				}
+			}
+
+			body := New(st).buildStatusBody(context.Background(), false)
+
+			if body.Agents.Total != 1 {
+				t.Fatalf("Agents.Total = %d, want 1 (rows=%+v)", body.Agents.Total, body.AgentDetails)
+			}
+			if row := agentRow(t, body, "beads/witness"); row.Running != running {
+				t.Fatalf("beads/witness running = %v, want %v (row=%+v)", row.Running, running, row)
+			}
+		})
 	}
 }
 
