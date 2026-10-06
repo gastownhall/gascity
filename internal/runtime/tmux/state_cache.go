@@ -51,6 +51,27 @@ const (
 	processSnapshotBackoffMax  = 2 * time.Minute
 )
 
+// Bounds for the hold the cache keeps on refreshes after one fails (#7170).
+//
+// A failed refresh leaves fetchedAt alone, so once the TTL lapses every reader
+// that does not overlap another one spawns tmux again: with the server unable
+// to answer, one spawn per reader per poll for as long as the outage lasts, on
+// a box that is usually already starved. After a failure the cache instead
+// holds TTL-expiry refreshes for a window that doubles with each consecutive
+// failure, from refreshBackoffBase up to the lower of refreshBackoffMax and
+// half of staleTTL, so no hold spans more than half the window a last-known-
+// good snapshot is trusted for, whatever staleTTL is configured to. The base is
+// fixed, not a multiple of the TTL: GC_TMUX_CACHE_TTL changes when the first
+// refresh fails, not how fast failures back off.
+//
+// The hold changes how often tmux is asked, never what an observation means:
+// held readers get the observation the failure left behind, which
+// classifyCacheObservation reads exactly as it read the failing read's.
+const (
+	refreshBackoffBase = 2 * time.Second
+	refreshBackoffMax  = 15 * time.Second
+)
+
 // StateFetcher abstracts tmux subprocess calls for testability.
 type StateFetcher interface {
 	// FetchState returns a runtime-state snapshot for live sessions.
@@ -108,6 +129,8 @@ type runtimeStateSnapshot struct {
 // StateCache caches tmux runtime state to avoid spawning N subprocess calls per
 // status check or reconciler pass. Concurrent callers are coalesced via
 // singleflight so at most one tmux/process snapshot refresh runs at a time.
+// After a refresh fails, further TTL-expiry refreshes are held off for a window
+// that grows with each consecutive failure (see refreshBackoff).
 type StateCache struct {
 	mu sync.RWMutex
 	// state is the published snapshot. It is copy-on-write: readers copy it
@@ -138,6 +161,9 @@ type StateCache struct {
 	staleTTL         time.Duration
 	sf               singleflight.Group
 	fetcher          StateFetcher
+	// backoff holds TTL-expiry refreshes after a failed one. Guarded by mu; it
+	// has no lock of its own.
+	backoff refreshBackoff
 	// now is the cache clock. Nil selects time.Now; tests inject a fake.
 	now func() time.Time
 }
@@ -255,6 +281,13 @@ func (c *StateCache) observeRefreshing() (cacheObservation, bool) {
 		return obs, true
 	}
 
+	// A failed refresh holds off the next one: answer from the observation the
+	// cache already has rather than spawn tmux again. It is the observation the
+	// failing read returned, so it classifies exactly as that read's did.
+	if c.refreshHeld() {
+		return c.observation(), false
+	}
+
 	// Stale, empty, or dirty — trigger refresh.
 	// When dirty, forget any in-flight singleflight so we get a fresh fetch
 	// instead of coalescing with a pre-invalidation call.
@@ -265,6 +298,14 @@ func (c *StateCache) observeRefreshing() (cacheObservation, bool) {
 
 	// Read the (potentially updated) cache.
 	return c.observation(), false
+}
+
+// refreshHeld reports whether a failed refresh is holding off the next fetch,
+// counting the read it answers.
+func (c *StateCache) refreshHeld() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.backoff.held(c.clock(), c.generation)
 }
 
 func (c *StateCache) observation() cacheObservation {
@@ -372,6 +413,7 @@ func (c *StateCache) refresh() {
 
 		c.mu.RLock()
 		startGeneration := c.generation
+		began := c.backoff.epoch
 		c.mu.RUnlock()
 
 		start := c.clock()
@@ -379,7 +421,6 @@ func (c *StateCache) refresh() {
 		elapsed := c.clock().Sub(start)
 
 		if err != nil {
-			log.Printf("tmux state cache: refresh failed in %v: %v", elapsed, err)
 			c.mu.Lock()
 			c.lastError = err
 			// Two distinct failure regimes, keyed on whether the cache was ever
@@ -408,11 +449,27 @@ func (c *StateCache) refresh() {
 				// the server up) landed mid-fetch, as a successful refresh does.
 				c.dirty = c.generation != startGeneration
 			}
+			// Hold the next refresh off, so a box tmux cannot answer on is not
+			// asked again on every poll. Logged once per hold, outside the lock:
+			// a failure that overlaps or predates the one that opened the hold
+			// belongs to the same outage and adds no line.
+			window, suppressed, opened := c.backoff.failed(began, startGeneration, c.clock(), min(refreshBackoffMax, c.staleTTL/2))
 			c.mu.Unlock()
+			if opened {
+				log.Printf("tmux state cache: refresh failed in %v: %v (holding refreshes for %v; %d reads suppressed since the last attempt)", elapsed, err, window, suppressed)
+			}
 			return nil, err
 		}
 
 		verbose := os.Getenv("GC_LOG_TMUX_CACHE") == "true"
+		// Deferred before the lock so the recovery line is written after the lock
+		// is released, as the failure line is.
+		var recovered, suppressed int
+		defer func() {
+			if recovered > 0 {
+				log.Printf("tmux state cache: refresh recovered after %d failed attempts (%d reads suppressed since the last attempt)", recovered, suppressed)
+			}
+		}()
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if startGeneration < c.publishedGeneration {
@@ -453,6 +510,8 @@ func (c *StateCache) refresh() {
 				delete(c.evictedAt, name)
 			}
 		}
+		// The server answered: the next outage starts over at the shortest hold.
+		recovered, suppressed = c.backoff.succeeded()
 		return nil, nil
 	})
 }
@@ -478,6 +537,75 @@ func withoutEvictedSince(sessions map[string]sessionRuntimeState, evictedAt map[
 		delete(filtered, name)
 	}
 	return filtered
+}
+
+// refreshBackoff holds TTL-expiry refreshes after one fails: every consecutive
+// failure doubles the hold from refreshBackoffBase to a cap, and the first
+// success ends the streak. Its zero value holds nothing. The StateCache that
+// owns it guards every field with its own mu.
+//
+// A hold stops the cache spawning tmux, never what it answers. Readers get the
+// observation the failure left behind, with lastError set and fetchedAt
+// untouched, so the staleTTL cliff falls at the same instant it always did.
+type refreshBackoff struct {
+	// failures counts consecutive failed refreshes; zero means no hold.
+	failures int
+	// until is when the current hold ends.
+	until time.Time
+	// generation is the newest StateCache.generation the hold has accounted
+	// for: the newest a failed fetch started under, or one a permit was given
+	// for. An Invalidate or EvictSession beyond it is news no failed fetch saw.
+	generation uint64
+	// epoch advances each time a hold is opened or cleared. A fetch that began
+	// in an earlier epoch overlapped the failure that opened the hold, or
+	// predates a success, so its failure is not a further failure.
+	epoch uint64
+	// suppressed counts reads answered from the cache since the last attempt.
+	suppressed int
+}
+
+// held reports whether a read at now is answered without fetching, and counts
+// it. generation is the cache's current generation: a change newer than the
+// hold has accounted for permits this read, and only this one, to fetch.
+func (b *refreshBackoff) held(now time.Time, generation uint64) bool {
+	if b.failures == 0 || !now.Before(b.until) {
+		return false
+	}
+	if generation != b.generation {
+		b.generation = generation
+		return false
+	}
+	b.suppressed++
+	return true
+}
+
+// failed records a failed refresh by a fetch that began in epoch began, with
+// the cache at startGeneration, and opens the next hold from now. The hold
+// doubles from refreshBackoffBase, up to limit. opened is false when the
+// failure belongs to an outage already counted: window and suppressed are
+// then zero and nothing changes beyond the generation the failed fetch saw.
+// Otherwise suppressed is how many reads the previous hold answered.
+func (b *refreshBackoff) failed(began, startGeneration uint64, now time.Time, limit time.Duration) (window time.Duration, suppressed int, opened bool) {
+	b.generation = max(b.generation, startGeneration)
+	if began != b.epoch {
+		return 0, 0, false
+	}
+	b.failures++
+	window = min(refreshBackoffBase<<min(b.failures-1, 8), limit)
+	b.until = now.Add(window)
+	b.epoch++
+	suppressed, b.suppressed = b.suppressed, 0
+	return window, suppressed, true
+}
+
+// succeeded ends the streak and returns how many refreshes had failed in a row
+// and how many reads the last hold answered. A fetch still in flight began in
+// an earlier epoch, so it cannot reopen a hold once it fails.
+func (b *refreshBackoff) succeeded() (failures, suppressed int) {
+	failures, suppressed = b.failures, b.suppressed
+	b.failures, b.suppressed = 0, 0
+	b.epoch++
+	return failures, suppressed
 }
 
 // tmuxFetcher implements StateFetcher using a real Tmux instance.
