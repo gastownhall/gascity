@@ -59,6 +59,19 @@ func RunConditionalLabelsConformance(t *testing.T, name string, open func(t *tes
 		}
 	})
 
+	// The order every guarded store applies, and CachingStore's install
+	// predicate (updateReflected) assumes: removals after additions.
+	t.Run(name+"/label_added_and_removed_ends_absent", func(t *testing.T) {
+		s, w, created := conformanceLabelsFixture(t, open)
+		if err := w.UpdateIfMatch(created.ID, created.Revision, beads.UpdateOpts{
+			Labels:       []string{"both", "keep"},
+			RemoveLabels: []string{"both", "keep"},
+		}); err != nil {
+			t.Fatalf("UpdateIfMatch: %v", err)
+		}
+		conformanceWantLabels(t, conformanceLabelsGet(t, s, created.ID), []string{"remove"}, []string{"both", "keep"})
+	})
+
 	t.Run(name+"/label_only_write_moves_revision", func(t *testing.T) {
 		s, w, created := conformanceLabelsFixture(t, open)
 		for _, step := range []struct {
