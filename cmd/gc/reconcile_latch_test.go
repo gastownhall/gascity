@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // v2RefusalCases is one config per deferred feature, each hitting exactly one
@@ -92,7 +93,8 @@ func TestV2LatchRefusesEachDeferredFeature(t *testing.T) {
 // never blocks the cutover: agent idle_timeout, sleep_after_idle,
 // min_active_sessions, wake_mode and a default scale_check. Also in scope,
 // though §6.0 found no city using it: session = "acp". Disabled spellings
-// ("0", empty) and in-scope runtimes are admitted too. Kills over-refusal.
+// ("0", empty) and the allowlisted runtimes are admitted too. Kills
+// over-refusal.
 func TestV2LatchAdmitsInScopeFeatures(t *testing.T) {
 	one := 1
 	cfg := v2City(func(c *config.City) {
@@ -103,7 +105,7 @@ func TestV2LatchAdmitsInScopeFeatures(t *testing.T) {
 		c.Session.ProgressStallTimeout = "0"
 		c.ChatSessions.IdleTimeout = "0"
 	})
-	for _, provider := range []string{"", "tmux", "acp", "subprocess", "undeclared-falls-back-to-tmux"} {
+	for _, provider := range []string{"", "tmux", "acp", "subprocess", "fake", "fail"} {
 		cfg.Session.Provider = provider
 		if got := v2LatchRefusals(cfg); len(got) != 0 {
 			t.Errorf("provider %q: v2LatchRefusals = %+v, want none", provider, got)
@@ -111,6 +113,44 @@ func TestV2LatchAdmitsInScopeFeatures(t *testing.T) {
 		if mode, err := latchReconcilerMode(cfg, overrideEnv("1")); err != nil || mode != reconcilerV2 {
 			t.Errorf("provider %q: latch = %v, %v; want v2, nil", provider, mode, err)
 		}
+	}
+}
+
+// TestV2LatchRuntimeAllowlist pins the runtime allowlist's two edges. A name
+// nothing registers reaches the registry's tmux fallback, so it is admitted as
+// tmux. A runtime some registry resolves but the allowlist does not know, such
+// as a future builtin or prefix, is refused by default with a generic message.
+// Kills an allowlist that fails open on new runtimes, and one that refuses the
+// tmux fallback.
+func TestV2LatchRuntimeAllowlist(t *testing.T) {
+	cfg := v2City(func(c *config.City) { c.Session.Provider = "undeclared-name" })
+	if runtimeRegistry.Resolves("undeclared-name") {
+		t.Fatal("the builtin registry resolves undeclared-name; pick another name")
+	}
+	if got := v2LatchRefusals(cfg); len(got) != 0 {
+		t.Errorf("undeclared provider (tmux fallback): v2LatchRefusals = %+v, want none", got)
+	}
+	future := runtimeRegistry.Clone()
+	nop := func(string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return runtime.NewFake(), nil
+	}
+	if err := future.Register("nomad", nop); err != nil {
+		t.Fatal(err)
+	}
+	if err := future.RegisterPrefix("fly:", nop); err != nil {
+		t.Fatal(err)
+	}
+	for _, provider := range []string{"nomad", "fly:app"} {
+		cfg.Session.Provider = provider
+		r, ok := v2SessionRuntimeRefusal(cfg, future)
+		want := `[session] provider = "` + provider + `" (unsupported session runtime) is not available under v2`
+		if !ok || r.String() != want {
+			t.Errorf("future provider %q: refusal = %q, %v; want %q", provider, r, ok, want)
+		}
+	}
+	cfg.Session.Provider = "tmux"
+	if _, ok := v2SessionRuntimeRefusal(cfg, future); ok {
+		t.Error("tmux refused by a registry that resolves it, want admitted")
 	}
 }
 

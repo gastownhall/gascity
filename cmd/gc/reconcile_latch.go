@@ -5,11 +5,12 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime/registry"
 )
 
-// latchRefusal is one configured feature v2 does not support yet. While any
-// refusal applies, the latch refuses v2 rather than run the city without the
-// feature; ParityPR is the parity slice that lifts it (IMPLEMENTATION-PLAN §6).
+// latchRefusal is one configured feature v2 does not support yet, so the latch
+// refuses v2 rather than run without it. ParityPR is the slice that lifts it
+// (IMPLEMENTATION-PLAN §6), or "" for a runtime no slice covers yet.
 type latchRefusal struct {
 	Feature  string // what v2 would silently drop
 	Config   string // the composed-config setting that enables it
@@ -18,24 +19,22 @@ type latchRefusal struct {
 
 // String renders the refusal as it appears in the latch error and in doctor.
 func (r latchRefusal) String() string {
-	return fmt.Sprintf("%s (%s) is not available under v2 until %s", r.Config, r.Feature, r.ParityPR)
+	s := fmt.Sprintf("%s (%s) is not available under v2", r.Config, r.Feature)
+	if r.ParityPR != "" {
+		s += " until " + r.ParityPR
+	}
+	return s
 }
 
-// v2SessionRuntimeParity maps the [session] provider names whose runtime v2
-// does not support yet to the parity slice for each. hybrid routes sessions
-// to tmux or k8s, so it waits on the k8s backend. The exec: and ssh: prefixes
-// and pack-declared runtimes (exec proxies) are matched in
-// v2SessionRuntimeRefusal.
-var v2SessionRuntimeParity = map[string]string{
-	"k8s":      "PAR-K8S",
-	"hybrid":   "PAR-K8S",
-	"herdr":    "PAR-HERDR",
-	"t3bridge": "PAR-T3",
+// v2SessionRuntimesAdmitted is the allowlist of [session] provider names v2
+// runs on (fake and fail are test doubles); any other registered name refuses.
+var v2SessionRuntimesAdmitted = map[string]bool{
+	"": true, "tmux": true, "acp": true, "subprocess": true, "fake": true, "fail": true,
 }
 
 // v2LatchRefusals lists every refusal the composed config hits, in a fixed
-// order. It is pure: it reads only cfg, never a store or the environment, so
-// the latch and the doctor dry run see the same list.
+// order. It reads only cfg and the immutable builtin runtime registry, never a
+// store or the environment, so the latch and the doctor dry run agree.
 func v2LatchRefusals(cfg *config.City) []latchRefusal {
 	var out []latchRefusal
 	if cfg.Daemon.SessionCircuitBreaker {
@@ -75,42 +74,43 @@ func v2LatchRefusals(cfg *config.City) []latchRefusal {
 	if cfg.ChatSessions.IdleTimeoutDuration() > 0 {
 		out = append(out, latchRefusal{"chat auto-suspend", "[chat_sessions] idle_timeout", "PAR-CHAT"})
 	}
-	if r, ok := v2SessionRuntimeRefusal(cfg); ok {
+	reg, err := runtimeRegistryForCity(cfg)
+	if err != nil { // a pack runtime collision; config load already rejects it
+		reg = runtimeRegistry
+	}
+	if r, ok := v2SessionRuntimeRefusal(cfg, reg); ok {
 		out = append(out, r)
 	}
 	return out
 }
 
-// v2SessionRuntimeRefusal refuses a [session] provider whose runtime v2 does
-// not support yet, spelled as the runtime registry resolves it
-// (buildRuntimeRegistry, runtimeRegistryForCity). The exec: script
-// gc-session-t3 is the legacy t3bridge spelling.
-func v2SessionRuntimeRefusal(cfg *config.City) (latchRefusal, bool) {
+// v2SessionRuntimeRefusal refuses a [session] provider outside the allowlist
+// that reg resolves. A name reg does not resolve reaches the tmux fallback and
+// is admitted as tmux. exec:…/gc-session-t3 is the legacy t3bridge spelling.
+func v2SessionRuntimeRefusal(cfg *config.City, reg *registry.Registry) (latchRefusal, bool) {
 	name := strings.TrimSpace(cfg.Session.Provider)
-	backend, parityPR := name, v2SessionRuntimeParity[name]
+	if v2SessionRuntimesAdmitted[name] || !reg.Resolves(name) {
+		return latchRefusal{}, false
+	}
+	feature, parityPR := "the "+name+" session runtime", ""
+	pack, packRuntime := cfg.Runtimes[name]
 	switch {
-	case parityPR != "":
+	case name == "k8s" || name == "hybrid": // hybrid's remote leg is k8s
+		parityPR = "PAR-K8S"
+	case name == "herdr":
+		parityPR = "PAR-HERDR"
+	case name == "t3bridge":
+		parityPR = "PAR-T3"
 	case strings.HasPrefix(name, "exec:") && isLegacyT3BridgeExecScript(strings.TrimPrefix(name, "exec:")):
-		backend, parityPR = "t3bridge", "PAR-T3"
+		feature, parityPR = "the t3bridge session runtime", "PAR-T3"
 	case strings.HasPrefix(name, "exec:"):
-		backend, parityPR = "exec", "PAR-EXEC"
+		feature, parityPR = "the exec session runtime", "PAR-EXEC"
 	case strings.HasPrefix(name, "ssh:"):
-		backend, parityPR = "ssh", "PAR-SSH"
+		feature, parityPR = "the ssh session runtime", "PAR-SSH"
+	case packRuntime:
+		feature, parityPR = "the pack "+pack.PackName+" exec session runtime", "PAR-EXEC"
 	default:
-		rt, declared := cfg.Runtimes[name]
-		if !declared {
-			return latchRefusal{}, false
-		}
-		backend, parityPR = "pack "+rt.PackName+" exec", "PAR-EXEC" // a pack-declared runtime is an exec proxy
+		feature = "unsupported session runtime"
 	}
-	return latchRefusal{"the " + backend + " session runtime", fmt.Sprintf("[session] provider = %q", name), parityPR}, true
-}
-
-// v2LatchRefusalMessage joins refusals into one clause for the latch error.
-func v2LatchRefusalMessage(refusals []latchRefusal) string {
-	parts := make([]string, len(refusals))
-	for i, r := range refusals {
-		parts[i] = r.String()
-	}
-	return strings.Join(parts, "; ")
+	return latchRefusal{feature, fmt.Sprintf("[session] provider = %q", name), parityPR}, true
 }

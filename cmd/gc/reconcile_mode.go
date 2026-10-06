@@ -61,7 +61,11 @@ func latchReconcilerMode(cfg *config.City, lookupEnv func(string) (string, bool)
 		return reconcilerLegacy, nil
 	}
 	if refusals := v2LatchRefusals(cfg); len(refusals) > 0 {
-		return reconcilerLegacy, fmt.Errorf(`[daemon] session_reconciler = %q is refused: %s; remove those settings or run legacy`, raw, v2LatchRefusalMessage(refusals))
+		parts := make([]string, len(refusals))
+		for i, r := range refusals {
+			parts[i] = r.String()
+		}
+		return reconcilerLegacy, fmt.Errorf(`[daemon] session_reconciler = %q is refused: %s; remove those settings or run legacy`, raw, strings.Join(parts, "; "))
 	}
 	return reconcilerV2, nil
 }
