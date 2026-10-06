@@ -126,7 +126,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if err != nil {
 		return World{}, fmt.Errorf("gather: census legs: %w", err)
 	}
-	if w.Census, err = readSessionCensus(now, cfg, legs); err != nil {
+	if w.Census, err = readSessionCensus(now, legs); err != nil {
 		return World{}, fmt.Errorf("gather: %w", err)
 	}
 	rows := w.Census.Canonical()
@@ -236,7 +236,7 @@ func (e gatherEnv) externalReadsEnv() (externalReadsEnv, error) {
 	if err != nil {
 		return externalReadsEnv{}, err
 	}
-	census, err := readSessionCensus(time.Now(), env.Cfg, legs)
+	census, err := readSessionCensus(time.Now(), legs)
 	if err != nil {
 		return externalReadsEnv{}, err
 	}

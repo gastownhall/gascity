@@ -70,6 +70,27 @@ func (p createPlan) identity() createIdentity {
 	return createIdentity{Template: p.Template, QualifiedInstance: p.QualifiedInstance, Slot: p.Slot}
 }
 
+// createIdentity is the identity a create plan materializes. Create
+// backoff records key on it (AM-N8): a row key does not exist until the
+// create lands.
+type createIdentity struct {
+	Template          string
+	QualifiedInstance string
+	// Slot is the plan's pool slot. It is not part of the key; agentIn reads
+	// it to re-derive the identity from config.
+	Slot int
+	// Named marks a configured named session's create: QualifiedInstance is
+	// its identity, and Template its backing template.
+	Named bool
+}
+
+func (c createIdentity) key() string {
+	if c.Named {
+		return "named:" + c.QualifiedInstance
+	}
+	return c.Template + "/" + c.QualifiedInstance
+}
+
 // agentIn returns the agent cfg configures for c: c's template has one, and
 // it derives c's instance and pool slot from c's slot, as the planner does
 // (poolDesiredRequestIdentity). Legacy creates with the plan's slot, so the
@@ -261,10 +282,6 @@ const (
 	createStageFenceRead = "fence-read" // a pool create's locked failure that proves no name taken
 	createStagePanic     = "panic"      // a panic before the write
 	createStageResolve   = "resolve"    // a named create's read-only template resolution
-	// createStageWrite: an ambiguous write the census proved never landed
-	// (C5.4(3)); recorded by the allocator's grants, and it stalls like
-	// fence-read. C1b deletes it with them (S1-8).
-	createStageWrite = "write"
 )
 
 // createProgress is how far one effect got: the stage a no-write failure

@@ -104,8 +104,8 @@ func checkPureFiles(t *testing.T, files []string) {
 	}
 }
 
-// decideFiles are the P3-5a and P3-5b files, and A2's realization index.
-var decideFiles = []string{"allocator_decide.go", "allocator_plan.go", "allocator_snapshot.go", "allocator_grants.go", "allocator_index.go"}
+// decideFiles are the decide's files and A2's realization index.
+var decideFiles = []string{"allocator_decide.go", "allocator_plan.go", "allocator_snapshot.go", "allocator_index.go"}
 
 // purityInputs is a city that exercises every step: pool reuse and plans,
 // named sessions (several planned at once, so plan order is tested), an

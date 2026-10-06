@@ -305,11 +305,10 @@ func TestTemplateMemoImmutableUnderConcurrentReaders(t *testing.T) {
 }
 
 // Kills a lease input creeping back (SC A5): no type of this package that
-// gather projects carries a lease. The census's own StartLease field is
-// C1b's to delete.
-func TestGatherProjectsNoStartLease(t *testing.T) {
+// gather projects carries a lease, the census included.
+func TestGatherProjectsNoLease(t *testing.T) {
 	world := reflect.TypeFor[World]()
-	seen := map[reflect.Type]bool{reflect.TypeFor[*sessionCensus](): true}
+	seen := map[reflect.Type]bool{}
 	var walk func(path string, typ reflect.Type)
 	walk = func(path string, typ reflect.Type) {
 		for typ.Kind() == reflect.Pointer || typ.Kind() == reflect.Slice || typ.Kind() == reflect.Map {

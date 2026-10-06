@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -34,8 +33,8 @@ import (
 // by bead ID with the sessions binding first; a later copy of the same ID is a
 // duplicate (C2.11).
 //
-// Unwired in this slice: P3-7 reads it once per allocator pass, P3-5a decides
-// over it, and the ledger (P3-4) clears entries against its unfolded rows.
+// Unwired in this slice: the planner reads it once per pass, the decide
+// plans over it, and admission counts bring-up rows from its projection.
 
 // censusLeg is one leg's read in one census.
 type censusLeg struct {
@@ -51,15 +50,10 @@ type censusRow struct {
 	// the same bead ID (C2.11); empty on the canonical row.
 	DuplicateOf string
 
-	// The fields below are named after ledgerRow (P3-4), which reads them.
 	Incarnation   int64 // the row's generation; 0 when unparseable
 	InstanceToken string
-	// StartLease is START-043's start-in-flight lease: the row holds its
-	// pending-create claim or is creating, and last_woke_at is within
-	// startupTimeout + 2s + 5s (pendingCreateStartInFlightInfo).
-	StartLease bool
-	// PendingCreate is a never-started pending create (no last_woke_at)
-	// within its lease (POOL-028, poolSessionWithinPendingCreateLease).
+	// PendingCreate: the row holds pending_create_claim. Admission counts it
+	// in flight; no lease window applies (v5 P4, SC A5).
 	PendingCreate bool
 	// UnknownState is a state main does not know, other than drain-ack
 	// stop-pending (F9, SESS-044). The row still occupies its slot.
@@ -81,16 +75,11 @@ type sessionCensus struct {
 // readSessionCensus takes one census over legs, which
 // sessionCensusStoreCandidates resolved with the sessions leg first. It
 // errors when there are no legs, or when the sessions leg failed hard.
-func readSessionCensus(now time.Time, cfg *config.City, legs []classStoreCandidate) (*sessionCensus, error) {
+func readSessionCensus(now time.Time, legs []classStoreCandidate) (*sessionCensus, error) {
 	if len(legs) == 0 {
 		return nil, errors.New("session census: no legs")
 	}
 	c := &sessionCensus{At: now, Rows: make(map[rowKey]censusRow)}
-	var startupTimeout time.Duration
-	if cfg != nil {
-		startupTimeout = cfg.Session.StartupTimeoutDuration()
-	}
-	clk := &clock.Fake{Time: now}
 	canonicalLeg := make(map[string]string)
 	for i, source := range legs {
 		infos, err := sessionFrontDoor(source.store).ListAll(session.ListAllOptions{TierMode: beads.FederatedReadTier})
@@ -116,8 +105,7 @@ func readSessionCensus(now time.Time, cfg *config.City, legs []classStoreCandida
 			} else {
 				// One effect, one row: only the canonical copy counts in flight.
 				canonicalLeg[id] = source.ref
-				row.StartLease = pendingCreateStartInFlightInfo(info, clk, startupTimeout)
-				row.PendingCreate = strings.TrimSpace(info.LastWokeAt) == "" && poolSessionWithinPendingCreateLease(info, cfg, now)
+				row.PendingCreate = info.PendingCreateClaim
 				c.canonical = append(c.canonical, k)
 			}
 			c.Rows[k] = row
@@ -174,26 +162,28 @@ func (c *sessionCensus) RowsNamed(name string) []rowKey {
 	return c.byName[strings.TrimSpace(name)]
 }
 
-// Ledger is the census as the intent ledger reads it (P3-4): every row on
-// every leg with its config-only endpoint (endpointKeyForAgent), and the legs
-// read without error. ReadStarted stays zero; C1b deletes it with the ledger.
-func (c *sessionCensus) Ledger(cfg *config.City) ledgerCensus {
-	rows := make(map[rowKey]ledgerRow, len(c.Rows))
-	for k, row := range c.Rows {
+// bringUpRow is one census row as admission counts bring-up rows (v5 P4).
+type bringUpRow struct {
+	Key           rowKey
+	Token         string      // the row's instance token
+	Endpoint      endpointKey // config-only key (endpointKeyForAgent)
+	PendingCreate bool        // canonical copy only, so one row counts once
+}
+
+// BringUp is the census bring-up projection: every row on every leg, in key
+// order, with its token, its config-only endpoint and its pending-create
+// claim. It has no lease and no read start (S1-8).
+func (c *sessionCensus) BringUp(cfg *config.City) []bringUpRow {
+	keys := make([]rowKey, 0, len(c.Rows))
+	for k := range c.Rows {
+		keys = append(keys, k)
+	}
+	sortRowKeys(keys)
+	out := make([]bringUpRow, 0, len(keys))
+	for _, k := range keys {
+		row := c.Rows[k]
 		agent := findAgentByTemplate(cfg, normalizedSessionTemplateInfo(row.Info, cfg))
-		rows[k] = ledgerRow{
-			Incarnation:   row.Incarnation,
-			InstanceToken: row.InstanceToken,
-			Endpoint:      endpointKeyForAgent(cfg, agent, row.Info),
-			StartLease:    row.StartLease,
-			PendingCreate: row.PendingCreate,
-		}
+		out = append(out, bringUpRow{Key: k, Token: row.InstanceToken, Endpoint: endpointKeyForAgent(cfg, agent, row.Info), PendingCreate: row.PendingCreate})
 	}
-	legs := make(map[string]bool, len(c.Legs))
-	for _, l := range c.Legs {
-		if l.Err == nil {
-			legs[l.Ref] = true
-		}
-	}
-	return ledgerCensus{Rows: rows, Legs: legs}
+	return out
 }

@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/config"
 )
 
 // The v2 pass benchmarks (architecture §1.8; gate G1 is A3's). Run with
@@ -48,11 +47,10 @@ func BenchmarkV2CensusRead(b *testing.B) {
 				b.Fatal(err)
 			}
 			legs := []classStoreCandidate{{ref: benchSessionsLeg, store: cache}}
-			cfg := &config.City{}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				c, err := readSessionCensus(censusNow, cfg, legs)
+				c, err := readSessionCensus(censusNow, legs)
 				if err != nil {
 					b.Fatal(err)
 				}

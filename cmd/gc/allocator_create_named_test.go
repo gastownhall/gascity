@@ -1128,40 +1128,6 @@ func TestReadOnlyResolveMatchesResolveTemplateMetadata(t *testing.T) {
 	})
 }
 
-// Kills: a retarget of an entry that is not an issued create, or one that
-// loses the row on its commit (AM-N2).
-func TestLedgerRetargetMarksIssuedCreatesOnly(t *testing.T) {
-	l := newIntentLedger(func() time.Time { return namedEffectNow })
-	create := ledgerEntry{ID: "c1", Kind: kindCreate, Key: rowKey{Leg: "sessions"}, Marker: ledgerMarker{InstanceToken: "tok"}}
-	grant := ledgerEntry{ID: "g1", Kind: kindGrant, Key: rowKey{Leg: "sessions", ID: "gc-1"}}
-	if !l.Reserve(create) || !l.Reserve(grant) {
-		t.Fatal("reserve refused")
-	}
-	if l.Retarget("c1", "gc-9") {
-		t.Fatal("retargeted a reserved create")
-	}
-	if _, ok := l.IssueCreate("c1"); !ok || !l.Issue("g1", grant.Key) {
-		t.Fatal("issue refused")
-	}
-	if l.Retarget("g1", "gc-9") || l.Retarget("c1", "") || l.Retarget("missing", "gc-9") {
-		t.Fatal("retargeted a grant, an empty row or a missing entry")
-	}
-	if !l.Retarget("c1", "gc-9") {
-		t.Fatal("issued create not retargeted")
-	}
-	e, _ := ledgerEntryOf(l, "c1")
-	if e.Key != (rowKey{Leg: "sessions", ID: "gc-9"}) || e.Marker != (ledgerMarker{RowID: "gc-9", InstanceToken: "tok"}) {
-		t.Fatalf("retargeted entry = %+v", e)
-	}
-	l.Commit("c1", ledgerMarker{RowID: "gc-9", InstanceToken: "tok"})
-	if l.Retarget("c1", "gc-8") {
-		t.Fatal("retargeted a committed create")
-	}
-	if e, _ = ledgerEntryOf(l, "c1"); e.Key.ID != "gc-9" {
-		t.Fatalf("commit dropped the reopened row: %+v", e)
-	}
-}
-
 // namedLockFiles lists the city identifier lock files a run created.
 func namedLockFiles(t *testing.T, cityPath string) []string {
 	t.Helper()

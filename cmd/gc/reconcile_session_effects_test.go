@@ -102,15 +102,12 @@ func TestEffectExecutorEnqueuesKeyUrgentAndAllocator(t *testing.T) {
 	})
 }
 
-// Kills: an issued ledger entry stuck forever behind a hung effect: the
-// deadline must settle it (failed) and free the key.
+// Kills: an effect stuck forever behind a hung provider call: the deadline
+// must settle it (failed) and free the key.
 func TestEffectExecutorDeadlineSettlesIssuedEntry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		ledger := newIntentLedger(time.Now)
+		settled := make(chan error, 2)
 		k := rowKey{Leg: routerTestLeg, ID: "a"}
-		if !ledger.Reserve(ledgerEntry{ID: "g1", Kind: kindGrant, Key: k, ReservedAt: time.Now()}) || !ledger.Issue("g1", k) {
-			t.Fatal("reserve and issue")
-		}
 		x := newEffectExecutor(func(rowKey, error) {}, io.Discard)
 		hang := make(chan struct{})
 		defer close(hang)
@@ -118,13 +115,7 @@ func TestEffectExecutorDeadlineSettlesIssuedEntry(t *testing.T) {
 			Kind:     effectStart,
 			Deadline: time.Now().Add(time.Minute),
 			Run:      func(context.Context) error { <-hang; return nil }, // ignores its context
-			Settle: func(err error) {
-				if err == nil {
-					ledger.Commit("g1", ledgerMarker{})
-				} else {
-					ledger.Fail("g1", false, ledgerMarker{})
-				}
-			},
+			Settle:   func(err error) { settled <- err },
 		}
 		if err := x.submit(k, e); err != nil {
 			t.Fatal(err)
@@ -133,8 +124,8 @@ func TestEffectExecutorDeadlineSettlesIssuedEntry(t *testing.T) {
 			t.Fatalf("second effect for the key: %v, want busy", err)
 		}
 		advance(time.Minute)
-		if view := ledger.View(); len(view) != 1 || view[0].State != ledgerFailed {
-			t.Fatalf("ledger %+v at the deadline, want g1 failed", view)
+		if len(settled) != 1 || <-settled == nil {
+			t.Fatal("at the deadline: want exactly one failed settlement")
 		}
 		if _, busy := x.inFlight(k); busy {
 			t.Fatal("the key is still in flight after its deadline")
