@@ -61,6 +61,9 @@ readonly MAX_CONSECUTIVE_FAILURES=5
 readonly DRAIN_TIMEOUT=1
 # How often an idle adapter wakes from its input wait so a pending trap runs.
 readonly IDLE_WAKE_SECS=1
+# The status bash >= 4 gives a timed-out read: 128 + SIGALRM (14 on Linux and
+# macOS alike). The idle wait maps bash 3.2's timeout onto it.
+readonly READ_TIMEOUT_RC=142
 # Every read below passes -n, which is what keeps bash on its unbuffered,
 # byte-at-a-time reader for a tty and a pipe alike. Without it bash reads a line
 # through a 128-byte static buffer (zreadc) and pushes the remainder back with
@@ -369,6 +372,9 @@ start_heartbeat() {
     [[ -t 1 ]] || return 0
     (
         nap=""
+        # Local to this subshell on purpose: the main loop's idle wait keeps
+        # its own SECONDS.
+        # shellcheck disable=SC2030
         SECONDS=0
         trap 'kill "$nap" 2>/dev/null; exit 0' TERM
         while kill -0 "$turn_pid" 2>/dev/null; do
@@ -770,9 +776,6 @@ printf '%s\n' "$MARKER"
 
 while :; do
     interrupted=0
-    # Cleared before every read: bash 3.2 returns from a signal-interrupted
-    # read without touching the variable, so a stale value would be re-run.
-    line=
     # Wait for the first byte on a timer, then read the rest of the line
     # blocking. bash runs a trap only between commands or when a blocking read
     # returns. A signal that lands after bash last checked for traps, but
@@ -785,9 +788,33 @@ while :; do
     # timer again after storing the byte it read, so a byte that lands as the
     # timer expires returns with the timeout status and the byte in the
     # variable. That byte is input, not a timeout.
+    #
+    # bash 3.2 (still /bin/bash on stock macOS) reports a timeout as a plain
+    # failure, rc=1 — the same status as end of input, where bash >= 4 returns
+    # 128+SIGALRM. What still tells them apart is the variable: 3.2 abandons a
+    # timed-out read before assigning it, while end of input assigns it the
+    # (empty) input. So the variable starts each read unset, and rc=1 with it
+    # still unset is mapped to the >128 timeout status the rest of the loop
+    # expects; taking that rc=1 for end of input ends the session the first
+    # time the pane sits idle for IDLE_WAKE_SECS. A read error also returns
+    # rc=1 with the variable unset, on every bash; it fails at once rather than
+    # after the timer, so the elapsed time keeps it an error (end of input)
+    # instead of a timeout the loop would retry forever. Unsetting also keeps a
+    # stale value from being re-run: 3.2 returns from a signal-interrupted read
+    # without touching the variable either.
+    #
+    # The heartbeat resets SECONDS only in its own subshell; this shell's clock
+    # is untouched.
+    # shellcheck disable=SC2031
     while :; do
+        unset line
+        read_started=$SECONDS
         IFS= read -r -n 1 -t "$IDLE_WAKE_SECS" line
         read_rc=$?
+        if (( read_rc == 1 && SECONDS - read_started >= IDLE_WAKE_SECS )) && [[ -z "${line+set}" ]]; then
+            read_rc=$READ_TIMEOUT_RC
+        fi
+        line="${line-}"
         if (( read_rc > 128 && ! interrupted )) && [[ -n "$line" ]]; then read_rc=0; fi
         if (( read_rc > 128 && ! interrupted )); then continue; fi
         break
@@ -838,16 +865,36 @@ while :; do
     # once that byte is in hand the burst is known to be continuing, so the
     # rest of its line comes from a blocking read that cannot end early. A
     # prompt is therefore only ever run on whole lines.
+    #
+    # The one-byte read can still hand back a byte with its timeout status, as
+    # the idle wait's can: bash 5.2 checks the timer again after taking a byte,
+    # so a byte that lands as the timer expires returns 142 with the byte in
+    # the variable. That byte is the next line of the burst, not a timeout. The
+    # newline is checked the same way, after the read loop that consumed it, so
+    # -d '' makes the newline an ordinary byte the variable carries: a blank
+    # interior line taken at the deadline is then a "\n" in hand, not an empty
+    # variable indistinguishable from a timeout that took nothing. NUL becomes
+    # the delimiter in its place; no shell variable can hold one, so it is
+    # dropped.
+    #
+    # bash 3.2 abandons a timed-out read before assigning it and reports rc=1,
+    # the same status as end of input and a read error. All three end the
+    # burst, so rc=1 needs no telling apart here. A byte 3.2 took off the fd as
+    # its timer fired is gone before the script regains control; no script can
+    # recover it.
     while :; do
         peek=
-        IFS= read -r -n 1 -t "$DRAIN_TIMEOUT" peek
+        IFS= read -r -n 1 -d '' -t "$DRAIN_TIMEOUT" peek
         peek_rc=$?
-        # Non-zero is the idle window closing or end of input; either way the
-        # burst is over, and no byte was taken off the fd to lose.
+        if (( peek_rc > 128 )) && [[ -n "$peek" ]]; then peek_rc=0; fi
+        # Otherwise non-zero is the idle window closing or end of input; either
+        # way the burst is over, and no byte was taken off the fd to lose.
         if (( peek_rc != 0 )); then break; fi
-        if [[ -z "$peek" ]]; then
-            # The byte was the newline itself: a blank interior line, which is
-            # part of the prompt — paragraph breaks matter.
+        # A NUL byte: dropped.
+        if [[ -z "$peek" ]]; then continue; fi
+        if [[ "$peek" == $'\n' ]]; then
+            # A blank interior line, which is part of the prompt — paragraph
+            # breaks matter.
             line+=$'\n'
             continue
         fi

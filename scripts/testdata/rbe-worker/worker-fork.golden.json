@@ -70,6 +70,11 @@
             "values": [
               "x86_64"
             ]
+          },
+          "worker-env": {
+            "values": [
+              "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+            ]
           }
         },
         "entrypoint": "/usr/local/libexec/rbe-action/entry",
@@ -77,7 +82,10 @@
         "max_action_timeout": 1260,
         "additional_environment": {
           "RBE_X_TIMEOUT_MS": "timeout_millis",
-          "RBE_X_SIDE_CHANNEL": "side_channel_file"
+          "RBE_X_SIDE_CHANNEL": "side_channel_file",
+          "RBE_X_NETWORK": {
+            "property": "network"
+          }
         }
       }
     }

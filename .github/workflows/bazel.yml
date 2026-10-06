@@ -16,7 +16,10 @@
 #     transport and result policy only (scripts/bazel_key_parity_test.go), so
 #     these lanes, bazel-test.yml and pre-push hash actions alike and the
 #     second run of a commit is mostly cache hits;
-#   - no lane passes --config=sole-run (per lane from G0 on);
+#   - lanes reuse cached test results (the farm action cache is writable
+#     only by trusted runs, so a cached PASS for hermetic, identical inputs
+#     is valid); push to main fresh re-execution to sample flakiness is a
+#     follow-up, not part of this change;
 #   - the rbe job's lane list (event and mode) decides which lanes start;
 #   - integration runs on pushes and dispatches only, evidence-only, until G3;
 #   - pull_request runs in mode cache (fork and Dependabot PRs while
@@ -222,6 +225,7 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
+      issues: read # worker-env drift issues (tools/rbe/worker-env-drift)
     strategy:
       fail-fast: false
       # Entries {lane, cmd, evidence-only?} from the rbe job's Lanes step.
@@ -236,6 +240,30 @@ jobs:
       - uses: ./.github/actions/fresh-merge
         with:
           base-sha: ${{ needs.rbe.outputs.base-sha }}
+
+      # worker-env (tools/rbe/worker-env-drift), as in bazel-test.yml:
+      # rbe-west's schedulers match the worker-env pin exactly, and pool
+      # workers serve the default branch's pin only. A change that moves the
+      # pin can't run remotely before it merges: the bazel run is skipped
+      # (pin-moved) and the unit lane measures this Blacksmith host against
+      # the new manifest instead, as it does for any change to the worker
+      # host (measure). A remote run on a pin with an open drift issue fails
+      # here rather than queueing for an hour (and before setup-bazel mints
+      # an rbe-fork certificate).
+      - name: worker-env preflight
+        id: worker-env
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          MODE: ${{ needs.rbe.outputs.mode }}
+        run: |
+          # Remote exactly when setup-bazel enables remote execution.
+          case "$MODE" in remote|fork-ro|fork-rw) export WORKER_ENV_REMOTE=true ;; esac
+          git fetch --no-tags --filter=blob:none origin "refs/heads/$DEFAULT_BRANCH"
+          git show FETCH_HEAD:platforms/BUILD.bazel >"$RUNNER_TEMP/worker-env-base.bazel" 2>/dev/null ||
+            : >"$RUNNER_TEMP/worker-env-base.bazel"
+          git diff --name-only FETCH_HEAD HEAD >"$RUNNER_TEMP/worker-env-changed"
+          tools/rbe/worker-env-drift preflight "$RUNNER_TEMP/worker-env-base.bazel" "$RUNNER_TEMP/worker-env-changed"
 
       # Local modes run tests here with .bazelrc's pinned test PATH, so give
       # them the Go the remote workers have at /usr/local/go.
@@ -255,6 +283,7 @@ jobs:
 
       - name: Set up Bazel
         id: bazel
+        if: steps.worker-env.outputs.pin-moved != 'true'
         uses: ./.github/actions/setup-bazel
         env:
           BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
@@ -281,6 +310,7 @@ jobs:
       # after the command (CMD's first word), never in a startup position.
       - name: bazel ${{ matrix.cmd }}
         id: test
+        if: steps.worker-env.outputs.pin-moved != 'true'
         env:
           CMD: ${{ matrix.cmd }}
           MODE: ${{ needs.rbe.outputs.mode }}
@@ -394,6 +424,17 @@ jobs:
           path: ${{ runner.temp }}/bazel-ci-cache
           key: bazel-repo-v3-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}
 
+      # Last, after every bazel run, and in one lane: provisioning installs
+      # the worker toolset, Go and dolt on this runner, which must not change
+      # what the client's own actions see. The PR's own blacksmith-worker.sh
+      # and manifest, on the Blacksmith image the pool runs: a manifest no
+      # worker would measure can't merge.
+      - name: Measure this Blacksmith host against the worker-env manifest
+        if: always() && matrix.lane == 'unit' && steps.worker-env.outputs.measure == 'true'
+        env:
+          WORKER_MODE: measure
+        run: tools/rbe/blacksmith-worker.sh
+
   # Cross-phase test skipping, measured: one report over every lane's BEP file
   # (scripts/bazel-bep-summary.go, internal/testpolicy/bepsummary), one phase
   # per lane: cached (local / remote / disk) vs executed (remote / local)
@@ -464,12 +505,28 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
+      issues: read # worker-env drift issues (tools/rbe/worker-env-drift)
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+      # Remote only: fail on an open drift issue for the default branch's
+      # pin rather than queue (the lane job's preflight).
+      - name: worker-env preflight
+        id: worker-env
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          WORKER_ENV_REMOTE: "true"
+        run: |
+          git fetch --no-tags --depth=1 origin "refs/heads/$DEFAULT_BRANCH"
+          git show FETCH_HEAD:platforms/BUILD.bazel >"$RUNNER_TEMP/worker-env-base.bazel" 2>/dev/null ||
+            : >"$RUNNER_TEMP/worker-env-base.bazel"
+          git diff --name-only FETCH_HEAD HEAD >"$RUNNER_TEMP/worker-env-changed"
+          tools/rbe/worker-env-drift preflight "$RUNNER_TEMP/worker-env-base.bazel" "$RUNNER_TEMP/worker-env-changed"
       - name: Set up Bazel
         id: bazel
+        if: steps.worker-env.outputs.pin-moved != 'true'
         uses: ./.github/actions/setup-bazel
         env:
           BAZEL_REMOTE_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR }}
@@ -481,6 +538,7 @@ jobs:
       - name: Create Bazel test tmpdir
         run: mkdir -p /tmp/bt
       - name: bazel coverage //... (lcov)
+        if: steps.worker-env.outputs.pin-moved != 'true'
         run: |
           bazel coverage --config=ci //... --combined_report=lcov \
             --keep_going --test_timeout=600

@@ -45,6 +45,13 @@ test --test_env=GC_TEST_REPO_ROOT
 # their GOROOT there (`sudo ln -s "$(go env GOROOT)" /usr/local/go`).
 test --test_env=PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin
 
+# The pinned remote-worker host in every action key: //platforms:rbe_worker's
+# worker-env exec property is the sha256 of its manifest, and rbe-west's
+# schedulers run an action only on a worker that measured that host
+# (platforms/BUILD.bazel, scripts/rbe_worker_env_test.go). Key-affecting, so
+# unconditional: local, fork-cache and remote runs hash alike.
+build --extra_execution_platforms=//platforms:rbe_worker
+
 # Remote execution on the NativeLink farm (CI, and maintainers who opt in with
 # a client certificate: TESTING.md "Bazel cache tiers"). The executor endpoint
 # and credentials are environment-specific and deliberately NOT hardcoded here
@@ -93,6 +100,13 @@ build:fork-cache --jobs=64
 build:fork-cache --remote_timeout=15
 build:fork-cache --remote_retries=2
 build:fork-cache --experimental_circuit_breaker_strategy=failure
+# A BEP file (bazel-test.yml's --build_event_json_file) would upload the local
+# files it references (test logs, the profile) to give them bytestream:// URIs.
+# rbe-cache refuses every write, each refusal counts against that breaker, and
+# once it opens every cache call is refused too, minimal-download fetches
+# included: "Lost inputs no longer available remotely". BEP files keep file://.
+build:fork-cache --nobuild_event_json_file_path_conversion
+build:fork-cache --nobuild_event_binary_file_path_conversion
 # The farm admits 16 connections per source IP, and Blacksmith runners share
 # egress IPs, so several concurrent fork jobs split that budget.
 build:fork-cache --remote_max_connections=4
@@ -107,10 +121,8 @@ build:fork-cache --remote_max_connections=4
 # G0: a retried pass never stands in for a run (CI lanes restate the
 # single-attempt pin above).
 test:ci --flaky_test_attempts=1
-# Lanes that are the only pre-merge run: every test executes, and a remote
-# cache eviction fails the action rather than silently re-running it.
-test:sole-run --nocache_test_results
-test:sole-run --experimental_remote_cache_eviction_retries=0
+# A remote cache eviction fails the action rather than silently re-running it.
+test:ci --experimental_remote_cache_eviction_retries=0
 
 # The tagged suites, as bazel-test.yml runs them (byte-identical values:
 # --define and --test_timeout are key inputs). --test_timeout stays at or

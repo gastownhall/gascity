@@ -139,7 +139,7 @@ func assertV2BootRefuses(t *testing.T, want string, rows ...beads.Bead) {
 	if ctx.Err() != nil {
 		t.Fatal("bootV2 retried the refusal until the deadline")
 	}
-	if got := stderr.String(); !strings.Contains(got, want) || !strings.Contains(got, "run gc doctor --check v2-session-migration --fix") {
+	if got := stderr.String(); !strings.Contains(got, want) || !strings.Contains(got, "run gc doctor --check v2-session-migration to list them") {
 		t.Errorf("stderr = %q, want %q and the doctor command", got, want)
 	}
 	liveRead := false

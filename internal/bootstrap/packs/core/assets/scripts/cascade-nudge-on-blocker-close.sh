@@ -71,6 +71,7 @@ RIGS_JSON="$(gc rig list --json 2>/dev/null || true)"
 set_rig_args() {
     RIG_ARG1=""
     RIG_ARG2=""
+    RIG_SUSPENDED=""
     [ -n "$RIGS_JSON" ] || return 0
     _prefix="${1%%-*}"
     [ -n "$_prefix" ] && [ "$_prefix" != "$1" ] || return 0
@@ -84,6 +85,12 @@ set_rig_args() {
     if [ -n "$_rig" ]; then
         RIG_ARG1="--rig"
         RIG_ARG2="$_rig"
+    fi
+    # A suspended rig is left cold: any bd read restarts its retired proxy.
+    # RIG_SUSPENDED tells the caller to leave the bead until the rig resumes.
+    if [ -n "$_rig" ] && printf '%s' "$RIGS_JSON" \
+        | jq -e --arg r "$_rig" '(.rigs // [])[] | select(.name == $r and .suspended == true)' >/dev/null 2>&1; then
+        RIG_SUSPENDED=1
     fi
 }
 
@@ -106,6 +113,7 @@ while IFS= read -r blocker; do
     [ -n "$blocker" ] || continue
 
     set_rig_args "$blocker"
+    [ -z "$RIG_SUSPENDED" ] || continue
     DEPS="$(gc bd dep list "$blocker" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
             --direction=up --type=blocks --json 2>/dev/null)" || continue
     if [ -z "$DEPS" ] || [ "$DEPS" = "[]" ]; then continue; fi
@@ -126,6 +134,7 @@ while IFS= read -r blocker; do
             continue
         fi
         set_rig_args "$dep_id"
+        [ -z "$RIG_SUSPENDED" ] || continue
         msg="blocker $blocker closed — your dependent $dep_id may be unblocked"
         if gc session nudge ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} "$assignee" "$msg" >/dev/null 2>&1; then
             STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"

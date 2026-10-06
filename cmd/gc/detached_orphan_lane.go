@@ -487,6 +487,10 @@ func (cr *CityRuntime) sweepDetachedHandoffOrphansDelta() detachedOrphanReport {
 
 // runDetachedOrphanBackstop executes one authoritative pass and reports it.
 func (cr *CityRuntime) runDetachedOrphanBackstop(reason string) detachedOrphanReport {
+	if cr.beadsQuiescent.Load() {
+		// Suspended with nothing running: no store is read until resume.
+		return detachedOrphanReport{lane: "backstop", reason: reason}
+	}
 	lane := cr.detachedOrphanLaneOf()
 	if !lane.beginBackstop() {
 		// Another pass is already reading the same state. On a large city the

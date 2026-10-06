@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
@@ -638,7 +639,33 @@ func makeCityLookLegacyManaged(t *testing.T, env *helpers.Env, bdPath, cityRoot 
 	}
 }
 
-func assertProxiedScope(t *testing.T, scopeRoot, label string) {
+// expectedSidecarIdleTimeout is the sidecar idle_timeout gc's init writes in
+// env: the GC_BEADS_PROXIED_IDLE_TIMEOUT override when set (-1 for never),
+// otherwise the default.
+func expectedSidecarIdleTimeout(t *testing.T, env *helpers.Env) int {
+	t.Helper()
+	raw := env.Get(config.ProxiedIdleTimeoutEnv)
+	if raw == "" {
+		return helpers.DefaultSidecarIdleTimeout()
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		t.Fatalf("%s=%q: %v", config.ProxiedIdleTimeoutEnv, raw, err)
+	}
+	if d <= 0 {
+		return -1
+	}
+	return int(d)
+}
+
+// proxiedNeverIdleEnv pins every scope a city initializes in env to bd's
+// never-idle. The proxied-native lane admits a long-lived open only on a
+// never-idle proxy, so the lane's tests need one regardless of gc's default.
+func proxiedNeverIdleEnv(env *helpers.Env) *helpers.Env {
+	return env.With(config.ProxiedIdleTimeoutEnv, "0")
+}
+
+func assertProxiedScope(t *testing.T, env *helpers.Env, scopeRoot, label string) {
 	t.Helper()
 	var metadata proxiedBeadsMetadata
 	readJSONFile(t, filepath.Join(scopeRoot, ".beads", "metadata.json"), &metadata)
@@ -651,8 +678,8 @@ func assertProxiedScope(t *testing.T, scopeRoot, label string) {
 
 	var sidecar proxiedSidecar
 	readJSONFile(t, filepath.Join(scopeRoot, ".beads", "proxied_server_client_info.json"), &sidecar)
-	if sidecar.IdleTimeout != -1 {
-		t.Errorf("%s idle_timeout = %d, want -1 (bd's IdleTimeoutNever)", label, sidecar.IdleTimeout)
+	if want := expectedSidecarIdleTimeout(t, env); sidecar.IdleTimeout != want {
+		t.Errorf("%s idle_timeout = %d, want %d (the idle timeout gc resolves for this environment)", label, sidecar.IdleTimeout, want)
 	}
 
 	root := filepath.Join(scopeRoot, ".beads", "dolt")
@@ -713,7 +740,7 @@ func TestBeadsProxiedDefault(t *testing.T) {
 	t.Run("init-default", func(t *testing.T) {
 		city.Init("claude")
 
-		assertProxiedScope(t, cityRoot, "city")
+		assertProxiedScope(t, env, cityRoot, "city")
 
 		var journal scopeOwnershipDoc
 		readJSONFile(t, filepath.Join(cityRoot, ".gc", "scope-ownership.json"), &journal)
@@ -808,7 +835,7 @@ func TestBeadsProxiedDefault(t *testing.T) {
 
 	t.Run("rig-inherits", func(t *testing.T) {
 		city.RigAdd(rigDir, "")
-		assertProxiedScope(t, rigDir, "rig")
+		assertProxiedScope(t, env, rigDir, "rig")
 
 		var journal scopeOwnershipDoc
 		readJSONFile(t, filepath.Join(cityRoot, ".gc", "scope-ownership.json"), &journal)
@@ -899,8 +926,8 @@ func TestBeadsProxiedDefault(t *testing.T) {
 
 	t.Run("restart", func(t *testing.T) {
 		city.StartWithSupervisor()
-		assertProxiedScope(t, cityRoot, "restarted city")
-		assertProxiedScope(t, rigDir, "restarted rig")
+		assertProxiedScope(t, env, cityRoot, "restarted city")
+		assertProxiedScope(t, env, rigDir, "restarted rig")
 
 		// The store has to be the same one, not a fresh empty proxy: the bead
 		// created before the stop must still be there.
@@ -1000,7 +1027,7 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		if addErr != nil {
 			t.Fatalf("gc rig add --adopt on a bd-initialised proxied workspace: %v\n%s", addErr, owned)
 		}
-		assertProxiedScope(t, adopted, "adopted rig")
+		assertProxiedScope(t, proxiedNeverIdleEnv(env.Clone()), adopted, "adopted rig")
 
 		// The clone shape: metadata says proxied-server, but bd's store is
 		// gitignored and never came along. gc must refuse rather than let bd
@@ -1314,6 +1341,7 @@ func describeEndpointAccount(payload beadsStorePayloadDoc) string {
 func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 	t.Helper()
 	env, bdCalls := proxiedEnvRecordingBD(t, bdPath, doltPath)
+	env = proxiedNeverIdleEnv(env)
 	lane := proxiedNativeLaneEnv(env)
 
 	// Its own city, its own recording shim, and NO supervisor.
@@ -1341,7 +1369,7 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 	city.InitNoStart("claude")
 
 	t.Run("precondition-gc-initialised", func(t *testing.T) {
-		assertProxiedScope(t, cityRoot, "the fork-gate city")
+		assertProxiedScope(t, env, cityRoot, "the fork-gate city")
 		assertGCInitialisedProxiedPrecondition(t, env, cityRoot, "the fork-gate city")
 		// Quiescence, proved rather than assumed: with no command running,
 		// nothing may fork bd. This is the assumption every count below rests

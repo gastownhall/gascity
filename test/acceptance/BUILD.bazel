@@ -7,12 +7,15 @@ go_test(
     srcs = [
         "agent_env_test.go",
         "agent_suspend_test.go",
+        "beads_blocked_repair_test.go",
         "beads_health_test.go",
         "beads_migrate_proxied_test.go",
         "beads_proxied_default_test.go",
+        "beads_proxied_idle_timeout_test.go",
         "beads_proxied_native_safety_test.go",
         "beads_proxied_native_test.go",
         "beads_proxied_shared_server_test.go",
+        "beads_proxied_suspension_quiescence_test.go",
         "beads_topology_matrix_test.go",
         "cli_basics_test.go",
         "config_pack_test.go",
@@ -64,6 +67,7 @@ go_test(
     deps = [
         "//internal/beads",
         "//internal/beads/contract",
+        "//internal/beads/proxyendpoint",
         "//internal/builtinpacks",
         "//internal/citylayout",
         "//internal/config",

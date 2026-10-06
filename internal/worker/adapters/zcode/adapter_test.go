@@ -959,6 +959,196 @@ func TestAnIdleWaitTimeoutThatHandsBackAByteKeepsIt(t *testing.T) {
 	}
 }
 
+// TestABash32IdleWaitTimeoutIsNotEndOfInput pins the idle wait against the
+// shape bash 3.2 (/bin/bash on stock macOS) gives a timed-out read: status 1,
+// the same as end of input, with the variable left unassigned. The shim
+// replays that shape on a real timeout, so the test runs on any bash, and
+// announces each one; taking it for end of input ends the session after one
+// idle IDLE_WAKE_SECS, before the second announcement.
+func TestABash32IdleWaitTimeoutIsNotEndOfInput(t *testing.T) {
+	t.Parallel()
+
+	shim := filepath.Join(t.TempDir(), "bash32-timeout.bash")
+	const bash32Timeout = `read() {
+    local arg timed=0
+    for arg in "$@"; do [[ "$arg" == -t ]] && timed=1; done
+    if (( timed )) && [[ "${!#}" == line ]]; then
+        builtin read "$@"
+        local rc=$?
+        # A timeout in either shape: bash >= 4's, or 3.2's own when this runs
+        # under 3.2.
+        if [[ -z "${line-}" ]] && { (( rc > 128 )) || { (( rc == 1 )) && [[ -z "${line+set}" ]]; }; }; then
+            shim_idle_wakes=$(( ${shim_idle_wakes:-0} + 1 ))
+            printf 'shim idle wake %s\n' "$shim_idle_wakes"
+            unset line
+            return 1
+        fi
+        return "$rc"
+    fi
+    builtin read "$@"
+}
+`
+	if err := os.WriteFile(shim, []byte(bash32Timeout), 0o644); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	h := newHarness(t, map[string]string{"BASH_ENV": shim})
+	s := h.start()
+	// Two emulated timeouts in a row: the first did not end the session.
+	s.waitForOutput("shim idle wake 2", 20*time.Second)
+	if !s.alive() {
+		t.Fatalf("adapter took an idle read timeout for end of input and exited:\n%s", s.output())
+	}
+	s.send("after idle")
+	s.waitForTurns(1)
+	if _, code := s.closeAndWait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if got := h.prompts(); !equalStrings(got, []string{"after idle"}) {
+		t.Fatalf("prompts = %q, want [\"after idle\"]", got)
+	}
+}
+
+// TestAnIdleWaitReadErrorEndsTheSession proves a read that fails outright is
+// end of input, not an idle timeout. A failed read returns status 1 with the
+// variable unassigned on every bash — the same shape bash 3.2 gives a timeout
+// — but it fails at once, without waiting out the timer, so the adapter must
+// exit rather than retry it in a hot loop. The shim fails the idle wait the
+// way bash 3.2 fails a read from a bad descriptor.
+func TestAnIdleWaitReadErrorEndsTheSession(t *testing.T) {
+	t.Parallel()
+
+	shim := filepath.Join(t.TempDir(), "read-error.bash")
+	const readError = `read() {
+    local arg timed=0
+    for arg in "$@"; do [[ "$arg" == -t ]] && timed=1; done
+    if (( timed )) && [[ "${!#}" == line ]]; then
+        echo "read: read error: 0: Input/output error" >&2
+        return 1
+    fi
+    builtin read "$@"
+}
+`
+	if err := os.WriteFile(shim, []byte(readError), 0o644); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	h := newHarness(t, map[string]string{"BASH_ENV": shim})
+	s := h.start()
+	// wait fails the test if the adapter is still retrying after
+	// adapterWaitBudget.
+	if _, code := s.wait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if got := h.prompts(); len(got) != 0 {
+		t.Fatalf("prompts = %q, want none", got)
+	}
+}
+
+// The drain's one-byte peek has the same bash 5.2 race as the idle wait: a
+// byte that lands as the drain timer expires comes back with status 142 and
+// the byte in the variable. The newline is no exception — bash checks the
+// timer once more after the loop that consumed it, so a blank interior line
+// landing at the deadline is consumed with status 142 too. Dropping either
+// splits one prompt into two, one of them missing a byte. The shim makes every
+// peek return that way: it reads with the caller's own arguments minus the
+// timer, and reports any read that consumed input as having timed out, which
+// is what bash 5.2 does when the timer expires right after the byte arrives.
+func TestADrainPeekTimeoutThatHandsBackAByteKeepsIt(t *testing.T) {
+	t.Parallel()
+
+	const lateTimer = `read() {
+    local arg timed=0 skip=0
+    local -a untimed=()
+    for arg in "$@"; do
+        if (( skip )); then skip=0; continue; fi
+        if [[ "$arg" == -t ]]; then timed=1; skip=1; continue; fi
+        untimed+=("$arg")
+    done
+    if (( timed )) && [[ "${!#}" == peek ]]; then
+        builtin read "${untimed[@]}"
+        local rc=$?
+        if (( rc == 0 )); then return 142; fi
+        return "$rc"
+    fi
+    builtin read "$@"
+}
+`
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "next line's first byte", body: "line one\nline two\nline three"},
+		{name: "blank interior line", body: "paragraph one\n\nparagraph two"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			shim := filepath.Join(t.TempDir(), "late-drain-timer.bash")
+			if err := os.WriteFile(shim, []byte(lateTimer), 0o644); err != nil {
+				t.Fatalf("write shim: %v", err)
+			}
+			h := newHarness(t, map[string]string{"BASH_ENV": shim})
+			if _, code := h.run(tc.body + "\n"); code != 0 {
+				t.Fatalf("exit code = %d, want 0", code)
+			}
+			if got := h.prompts(); !equalStrings(got, []string{tc.body}) {
+				t.Fatalf("prompts = %q, want [%q]", got, tc.body)
+			}
+		})
+	}
+}
+
+// TestABash32DrainPeekTimeoutEndsOnlyTheBurst pins the drain against the shape
+// bash 3.2 (/bin/bash on stock macOS) gives a timed-out read: status 1, the
+// same as end of input and a read error. All three mean the burst is over, and
+// none of them may cost the prompt in hand or the session. The shim replays
+// that shape on a real timeout, so the test runs on any bash, and announces
+// it. A byte 3.2 takes off the fd as its timer fires is gone before the script
+// regains control, so there is no byte to recover on that shell.
+func TestABash32DrainPeekTimeoutEndsOnlyTheBurst(t *testing.T) {
+	t.Parallel()
+
+	shim := filepath.Join(t.TempDir(), "bash32-drain-timeout.bash")
+	const bash32Timeout = `read() {
+    local arg timed=0
+    for arg in "$@"; do [[ "$arg" == -t ]] && timed=1; done
+    if (( timed )) && [[ "${!#}" == peek ]]; then
+        builtin read "$@"
+        local rc=$?
+        # A timeout in either shape: bash >= 4's, or 3.2's own when this runs
+        # under 3.2.
+        if [[ -z "${peek-}" ]] && (( rc > 128 || rc == 1 )); then
+            printf 'shim drain timeout\n'
+            return 1
+        fi
+        return "$rc"
+    fi
+    builtin read "$@"
+}
+`
+	if err := os.WriteFile(shim, []byte(bash32Timeout), 0o644); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	h := newHarness(t, map[string]string{"BASH_ENV": shim})
+	s := h.start()
+	s.send("first burst\nstill first")
+	s.waitForTurns(1)
+	if !strings.Contains(s.output(), "shim drain timeout") {
+		t.Fatalf("the drain never timed out through the shim:\n%s", s.output())
+	}
+	s.send("second burst")
+	s.waitForTurns(2)
+	if _, code := s.closeAndWait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	want := []string{"first burst\nstill first", "second burst"}
+	if got := h.prompts(); !equalStrings(got, want) {
+		t.Fatalf("prompts = %q, want %q", got, want)
+	}
+}
+
 func TestUnparsableResponseIsReported(t *testing.T) {
 	t.Parallel()
 

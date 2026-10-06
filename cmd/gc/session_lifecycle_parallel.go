@@ -3032,6 +3032,13 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 			if releaseBeadScopedPoolRuntime(info, result.provider, stderr) {
 				rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
 			}
+		} else {
+			// The preserved row keeps its claim and identity, not this
+			// attempt's in-flight lease: the attempt is over, and a lease left
+			// behind holds the retry as start_in_flight until
+			// startup_timeout+7s has passed (ga-vohht8). The startup-health
+			// episode recorded above still bounds a crash loop.
+			clearPendingStartInFlightLease(info.ID, sessFront, stderr)
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 		return

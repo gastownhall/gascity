@@ -8,6 +8,7 @@ go_test(
         "idle_bead_stability_test.go",
         "lifecycle_b_test.go",
         "pool_workquery_test.go",
+        "split_storage_migrated_formula_test.go",
         "testenv_import_test.go",
     ],
     data = [

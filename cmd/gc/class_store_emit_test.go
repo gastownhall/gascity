@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -1283,4 +1286,207 @@ func TestControllerRoutesFromOpenStorageRoutesCarryNoEmitTarget(t *testing.T) {
 	if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 0 {
 		t.Fatalf("the controller's class routes appended %d bead event(s), want 0: %s", len(got), eventSummary(got))
 	}
+}
+
+// fencedMigratedOneShotCLICity is migratedOneShotCLICity with the city's
+// beads.conditional_writes set to mode, so the binding engine the funnel opens
+// carries a stamp a fenced write can resolve by.
+func fencedMigratedOneShotCLICity(t *testing.T, mode string) (cityPath string, cfg *config.City) {
+	t.Helper()
+	cityPath, _ = migratedOneShotCLICity(t)
+	toml := filepath.Join(cityPath, "city.toml")
+	body, err := os.ReadFile(toml)
+	if err != nil {
+		t.Fatalf("reading city.toml: %v", err)
+	}
+	body = append(body, fmt.Sprintf("\n[beads]\nconditional_writes = %q\n", mode)...)
+	if err := os.WriteFile(toml, body, 0o644); err != nil {
+		t.Fatalf("writing city.toml: %v", err)
+	}
+	resetCLIStorageRoutes(t)
+	if cfg, err = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard); err != nil {
+		t.Fatalf("reloading the split city config: %v", err)
+	}
+	return cityPath, cfg
+}
+
+// beadEventCount counts the city journal's rows of eventType for id.
+func beadEventCount(t *testing.T, cityPath, eventType, id string) int {
+	t.Helper()
+	n := 0
+	for _, evt := range beadEvents(readCityJournal(t, cityPath)) {
+		if evt.Subject == id && evt.Type == eventType {
+			n++
+		}
+	}
+	return n
+}
+
+// PRODUCTION SEAM: a one-shot command's fenced writes on a split city resolve
+// the conditional writer by the binding engine's stamp and write through the
+// EMITTING wrapper. The wrapper carries no stamp of its own, so before it named
+// the engine as its mode source every row here resolved unset→legacy and the
+// write landed unconditionally; had it named the engine as a resolve target
+// instead, the write would have been fenced and event-dark. Entered through the
+// real funnel, so only resolveCLIStorageRoutes can put the wrapper there.
+func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing.T) {
+	t.Run("gc session kill fence", func(t *testing.T) {
+		cityPath, cfg := fencedMigratedOneShotCLICity(t, "auto")
+		captureCLIStorageStderr(t)
+		sessions := cliSessionStore(beads.NewMemStore(), cfg, cityPath)
+
+		writer, _, err := beads.ResolveConditionalWriter(sessions)
+		if _, emitting := writer.(*emittingClassStore); err != nil || !emitting {
+			t.Fatalf("ResolveConditionalWriter(session store) = (%T, %v), want the emitting class store", writer, err)
+		}
+		row, err := sessions.Create(beads.Bead{Title: "worker", Type: "session", Status: "open"})
+		if err != nil {
+			t.Fatalf("creating the session row: %v", err)
+		}
+		if _, err := writeSessionKillFence(sessions, row.ID, time.Now().UTC()); err != nil {
+			t.Fatalf("writing the kill fence: %v", err)
+		}
+		if got := beadEventCount(t, cityPath, events.BeadUpdated, row.ID); got != 1 {
+			t.Fatalf("the kill fence appended %d bead.updated row(s) for %s, want exactly 1", got, row.ID)
+		}
+
+		// A write that lands between the fence's read and its write must lose
+		// the revision and be re-decided, never overwritten blind.
+		leaf := writer.(*emittingClassStore).Store
+		decisions := 0
+		err = applySessionKillFencePatch(sessions, row.ID, func(beads.Bead) (map[string]string, bool) {
+			decisions++
+			if decisions == 1 {
+				if err := leaf.SetMetadata(row.ID, "racer", "won"); err != nil {
+					t.Fatalf("interleaving a write: %v", err)
+				}
+			}
+			return map[string]string{"state_reason": ""}, true
+		})
+		if err != nil || decisions != 2 {
+			t.Fatalf("fence over a raced row = (%v, %d decision(s)), want nil after 2: the first write must lose its revision", err, decisions)
+		}
+	})
+
+	t.Run("control dispatcher graph store", func(t *testing.T) {
+		cityPath, cfg := fencedMigratedOneShotCLICity(t, "require")
+		captureCLIStorageStderr(t)
+		graph := scopeGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
+
+		writer, _, err := beads.ResolveConditionalWriter(graph)
+		if _, emitting := writer.(*emittingClassStore); err != nil || !emitting {
+			t.Fatalf("ResolveConditionalWriter(graph store) = (%T, %v), want the emitting class store", writer, err)
+		}
+		control, err := graph.Create(beads.Bead{
+			Title:    "check",
+			Type:     "task",
+			Status:   "open",
+			Metadata: map[string]string{beadmeta.ControlEpochMetadataKey: "1"},
+		})
+		if err != nil {
+			t.Fatalf("creating the control bead: %v", err)
+		}
+		// The control epoch and the drain reservation are both a value-CAS on
+		// the writer this resolve returns.
+		if swapped, err := writer.CompareAndSetMetadataKey(control.ID, beadmeta.ControlEpochMetadataKey, "1", "2"); err != nil || !swapped {
+			t.Fatalf("advancing the control epoch = (%v, %v), want a swap", swapped, err)
+		}
+		if swapped, err := writer.CompareAndSetMetadataKey(control.ID, beadmeta.ControlEpochMetadataKey, "1", "3"); err != nil || swapped {
+			t.Fatalf("a stale epoch advance = (%v, %v), want a refused compare", swapped, err)
+		}
+		if got := beadEventCount(t, cityPath, events.BeadUpdated, control.ID); got != 1 {
+			t.Fatalf("one swap and one refused compare appended %d bead.updated row(s), want exactly 1", got)
+		}
+
+		// The capability-only lookups already stop at the wrapper, which
+		// forwards their methods with emission; pinned so they stay there.
+		if w, ok := beads.ConditionalWriterForTarget(graph); !ok || w != writer {
+			t.Errorf("ConditionalWriterForTarget = (%T, %v), want the emitting class store", w, ok)
+		}
+		if w, ok := beads.MetadataCASWriterFor(graph); !ok || w != beads.MetadataCASWriter(writer.(*emittingClassStore)) {
+			t.Errorf("MetadataCASWriterFor = (%T, %v), want the emitting class store", w, ok)
+		}
+		if c, ok := beads.AtomicConditionalCloserFor(graph); !ok || c != beads.AtomicConditionalCloser(writer.(*emittingClassStore)) {
+			t.Errorf("AtomicConditionalCloserFor = (%T, %v), want the emitting class store", c, ok)
+		}
+		_, leafGuarded := beads.AssignmentGuardedUpdaterFor(writer.(*emittingClassStore).Store)
+		if _, guarded := beads.AssignmentGuardedUpdaterFor(graph); guarded != leafGuarded {
+			t.Errorf("AssignmentGuardedUpdaterFor = %v over the wrapper, %v over the engine; the wrapper must not change it", guarded, leafGuarded)
+		}
+	})
+
+	t.Run("fenced molecule attach through the dispatcher's graph store", func(t *testing.T) {
+		cityPath, cfg := fencedMigratedOneShotCLICity(t, "auto")
+		captureCLIStorageStderr(t)
+		graph := scopeGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
+
+		root, err := graph.Create(beads.Bead{Title: "workflow", Type: "task", Status: "open", Metadata: map[string]string{
+			beadmeta.KindMetadataKey: "workflow", "gc.formula_contract": "graph.v2",
+		}})
+		if err != nil {
+			t.Fatalf("creating the workflow root: %v", err)
+		}
+		control, err := graph.Create(beads.Bead{Title: "control", Type: "task", Status: "open", ParentID: root.ID, Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID, beadmeta.ControlEpochMetadataKey: "1",
+		}})
+		if err != nil {
+			t.Fatalf("creating the control bead: %v", err)
+		}
+		recipe := &formula.Recipe{
+			Name: "attempt",
+			Steps: []formula.RecipeStep{
+				{ID: "attempt", Title: "attempt", Type: "task", IsRoot: true, Metadata: map[string]string{
+					beadmeta.KindMetadataKey: "workflow", "gc.formula_contract": "graph.v2",
+				}},
+				{ID: "attempt.run", Title: "run", Type: "task", Assignee: "worker"},
+			},
+			Deps: []formula.RecipeDep{{StepID: "attempt.run", DependsOnID: "attempt", Type: "parent-child"}},
+		}
+		result, err := molecule.Attach(context.Background(), graph, recipe, control.ID, molecule.AttachOptions{
+			IdempotencyKey: control.ID + ":attempt:2",
+			ExpectedEpoch:  1,
+		})
+		if err != nil || result.Duplicate {
+			t.Fatalf("fenced attach = (%+v, %v), want a fresh sub-DAG", result, err)
+		}
+
+		attempt := beadByID(t, graph, result.RootID)
+		if marker := attempt.Metadata[beadmeta.AttachFencePendingMetadataKey]; marker != "" {
+			t.Errorf("sub-DAG root %s still carries %s=%q, want the fence settled", attempt.ID, beadmeta.AttachFencePendingMetadataKey, marker)
+		}
+		step := beadByID(t, graph, result.IDMapping["attempt.run"])
+		if step.Assignee != "worker" || step.Metadata[beadmeta.DeferredAssigneeMetadataKey] != "" {
+			t.Errorf("step %s = assignee %q deferred %q, want the candidate activated onto worker",
+				step.ID, step.Assignee, step.Metadata[beadmeta.DeferredAssigneeMetadataKey])
+		}
+		if epoch := beadByID(t, graph, control.ID).Metadata[beadmeta.ControlEpochMetadataKey]; epoch != "2" {
+			t.Errorf("control epoch = %q, want the fence to advance it to 2", epoch)
+		}
+		// The fenced path creates the candidate deferred and activates it after
+		// the fence; the legacy path creates it live and never updates it.
+		for _, id := range []string{control.ID, attempt.ID, step.ID} {
+			if got := beadEventCount(t, cityPath, events.BeadUpdated, id); got == 0 {
+				t.Errorf("no bead.updated row for %s: the fenced attach's epoch advance and activation must reach the journal", id)
+			}
+		}
+	})
+
+	t.Run("the controller's routes resolve the bare engine", func(t *testing.T) {
+		cityPath, cfg := fencedMigratedOneShotCLICity(t, "auto")
+		captureCLIStorageStderr(t)
+		plan, err := resolveCityStoragePlan(cityPath, cfg)
+		if err != nil {
+			t.Fatalf("resolving the storage plan: %v", err)
+		}
+		routes, err := openStorageRoutes(plan, mustResolveInfraTarget(t, cityPath, cfg), cfg, cityPath, nil)
+		if err != nil {
+			t.Fatalf("opening the controller's storage routes: %v", err)
+		}
+		defer routes.close() //nolint:errcheck // the test asserts on the routes, not on the close
+
+		writer, _, err := beads.ResolveConditionalWriter(resolveGraphStore(routes, beads.NewMemStore(), cfg, cityPath, nil))
+		if _, engine := writer.(*beads.SQLiteStore); err != nil || !engine {
+			t.Fatalf("ResolveConditionalWriter(controller graph store) = (%T, %v), want the stamped engine itself", writer, err)
+		}
+	})
 }

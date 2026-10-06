@@ -101,13 +101,25 @@ var orderRescanInterval = time.Minute
 // across runController and controllerLoop. A machine-wide supervisor can
 // instantiate multiple CityRuntimes — one per registered city.
 type CityRuntime struct {
-	cityPath     string
-	cityName     string
-	configName   string
-	tomlPath     string
-	watchTargets []config.WatchTarget
-	configRev    string
-	configDirty  *atomic.Bool
+	// beadsQuiescent is true while the city is suspended and no session runs:
+	// the controller then touches no bead store (beads_quiescence.go).
+	beadsQuiescent atomic.Bool
+	// retiredScopes are the suspended scopes whose bd-owned proxy and Dolt
+	// this controller already stopped; a scope leaves the set when it resumes.
+	retiredScopes suspendedScopeRetirements
+	// lastSuspension is the suspension state the previous tick saw, so the
+	// next one can tell which scopes resumed (repairResumedScopes).
+	lastSuspension *beadsScopeSuspension
+	// drainedLastTick records, per suspended scope root, whether its sessions
+	// were already drained on the previous tick (retireSuspendedScopes).
+	drainedLastTick map[string]bool
+	cityPath        string
+	cityName        string
+	configName      string
+	tomlPath        string
+	watchTargets    []config.WatchTarget
+	configRev       string
+	configDirty     *atomic.Bool
 	// configDebounce is the config watcher's coalesce window; zero selects
 	// defaultConfigDebounce.
 	configDebounce time.Duration
@@ -1299,6 +1311,7 @@ var legacyTickPhases = []tickPhase{
 	{name: "refresh_desired_state", session: true, run: (*CityRuntime).tickRefreshDesiredState},
 	{name: "apply_soft_reload_acceptance", session: true, run: (*CityRuntime).tickApplySoftReloadAcceptance},
 	{name: "bead_reconcile_tick", session: true, maintenance: beadReconcileMaintenancePhases, run: (*CityRuntime).tickBeadReconcile},
+	{name: "retire_suspended_rig_scopes", run: (*CityRuntime).tickRetireSuspendedRigScopes},
 	{name: "reconcile_execution_completions", run: (*CityRuntime).tickReconcileExecutionCompletions},
 	{name: "wisp_gc", run: (*CityRuntime).tickWispGC},
 	{name: "workspace_service_tick", run: (*CityRuntime).tickWorkspaceService},
@@ -1390,6 +1403,15 @@ func (cr *CityRuntime) tick(
 		cr.sendReloadReply(p.manualReload.doneCh, reply)
 		cr.clearActiveReloadIf(p.manualReload)
 	}()
+	if !hasActive && cr.enterBeadsQuiescenceIfDue(ctx) {
+		// Suspended with nothing running: no bead-store phase runs until the
+		// city resumes. Workspace services are not suspended with the city,
+		// so their supervision still ticks. A pending config change stays
+		// dirty and is applied on the first tick after resume.
+		cr.tickWorkspaceService(p)
+		p.completed = true
+		return
+	}
 	if !cr.runTickPhases(p, cr.tickPhases()) {
 		return
 	}
@@ -1607,6 +1629,10 @@ func (cr *CityRuntime) tickReapStaleSessionBeads(p *tickPass) bool {
 	return false
 }
 
+// tickReapClosedBeadWorktreesFn is the tick's call into the closed-bead
+// worktree reaper, a seam so tests can pin which rig stores it is handed.
+var tickReapClosedBeadWorktreesFn = reapClosedBeadWorktrees
+
 func (cr *CityRuntime) tickReapClosedBeadWorktrees(p *tickPass) bool {
 	reapEnabled := cr.cfg.Daemon.AutoReapClosedBeadWorktreesEnabled()
 	reapDryRun := cr.cfg.Daemon.AutoReapClosedBeadWorktreesDryRunEnabled()
@@ -1616,7 +1642,7 @@ func (cr *CityRuntime) tickReapClosedBeadWorktrees(p *tickPass) bool {
 		// addition to the authoritative /proc cwd scan. Real removal supersedes
 		// dry-run when both flags are set.
 		liveSessionDirs := liveSessionWorktreeDirs(p.sessionBeads)
-		report := reapClosedBeadWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), liveSessionDirs, !reapEnabled, cr.rec, cr.reapSkips, cr.stderr)
+		report := tickReapClosedBeadWorktreesFn(cr.cityPath, cr.cfg, withoutSuspendedRigs(cr.cityPath, cr.cfg, cr.rigBeadStores()), liveSessionDirs, !reapEnabled, cr.rec, cr.reapSkips, cr.stderr)
 		p.recordPhase(TraceSiteControllerTickPhase, "reap_closed_bead_worktrees", phaseStart, map[string]any{
 			"reaped":    len(report.Reaped),
 			"protected": len(report.Protected),
@@ -1626,7 +1652,7 @@ func (cr *CityRuntime) tickReapClosedBeadWorktrees(p *tickPass) bool {
 		// when real reaping is enabled — never under dry-run.
 		if reapEnabled {
 			phaseStart = time.Now()
-			agentHomesReset := cleanupClosedBeadAgentHomeWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), cr.stderr)
+			agentHomesReset := cleanupClosedBeadAgentHomeWorktrees(cr.cityPath, cr.cfg, withoutSuspendedRigs(cr.cityPath, cr.cfg, cr.rigBeadStores()), cr.stderr)
 			p.recordPhase(TraceSiteControllerTickPhase, "cleanup_agent_home_worktrees", phaseStart, map[string]any{"reset": agentHomesReset})
 		}
 	}
@@ -2583,13 +2609,15 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// command into the provider at construction time, so a changed (or
 	// added/removed) declaration behind an unchanged selection name also
 	// requires a rebuild — otherwise session ops keep forking the old
-	// executable until a controller restart.
+	// executable until a controller restart. So does a flip in whether the
+	// city needs the ACP auto composition.
 	newProviderName := nextCfg.Session.Provider
 	pendingProviderName := *lastProviderName
 	if v := os.Getenv("GC_SESSION"); v != "" {
 		newProviderName = v
 	}
-	if newProviderName != *lastProviderName || packRuntimeDeclarationChanged(cr.cfg, nextCfg, newProviderName) {
+	compositionChanged := sessionTransportCompositionChanged(cr.cfg, nextCfg, newProviderName)
+	if newProviderName != *lastProviderName || packRuntimeDeclarationChanged(cr.cfg, nextCfg, newProviderName) || compositionChanged {
 		// Build through the transport resolver, not the bare registry, so a city
 		// that routes some sessions to ACP keeps its auto composition.
 		newSp, spErr := resolveSessionTransportProvider(sessionProviderContextForCity(nextCfg, cr.cityPath, newProviderName), cr.loadSessionBeadSnapshot())
@@ -2695,6 +2723,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 		providerSwapSummary = fmt.Sprintf("%s → %s", displayProviderName(*lastProviderName), displayProviderName(pendingProviderName))
 		if pendingProviderName == *lastProviderName {
 			providerSwapSummary = fmt.Sprintf("%s runtime declaration changed", displayProviderName(pendingProviderName))
+			if compositionChanged {
+				providerSwapSummary = fmt.Sprintf("%s ACP composition changed", displayProviderName(pendingProviderName))
+			}
 		}
 		if len(running) > 0 {
 			fmt.Fprintf(cr.stdout, "Provider changed (%s), stopping %d agent(s)...\n", //nolint:errcheck

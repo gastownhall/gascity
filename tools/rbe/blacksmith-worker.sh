@@ -35,6 +35,10 @@
 #                                       (needs GH_TOKEN with actions:read)
 #                       pool: serve the shared OSS queue; retire after POOL_IDLE_MINUTES
 #                             with nothing in flight, or at POOL_MAX_MINUTES
+#                       measure: provision and measure this host, check it against
+#                             the pin (tools/rbe/worker-env-drift check) and exit;
+#                             no certificate, no worker (the canary, and the
+#                             bazel job for changes to the worker host)
 #   CACHE_DIR           optional (Blacksmith sticky disk): keeps the worker's local
 #                       CAS warm across runs. Another VM wrote it, so every blob is
 #                       re-hashed against its name before NativeLink loads it
@@ -74,12 +78,13 @@
 #                       failed phase=<phase> or skipped.
 set -euo pipefail
 
-: "${RBE_WORKER_TLS_CERT:?}" "${RBE_WORKER_TLS_KEY:?}" "${RBE_WEST_HOST:?}" "${WORKER_NAME:?}"
 WORKER_MODE=${WORKER_MODE:-run}
+[ "$WORKER_MODE" = measure ] || : "${RBE_WORKER_TLS_CERT:?}" "${RBE_WORKER_TLS_KEY:?}" "${RBE_WEST_HOST:?}" "${WORKER_NAME:?}"
 case "$WORKER_MODE" in
 run) : "${BAZEL_JOB_NAME:?}" ;;
 pool) POOL_IDLE_MINUTES=${POOL_IDLE_MINUTES:-15} POOL_MAX_MINUTES=${POOL_MAX_MINUTES:-300} ;;
-*) echo "WORKER_MODE must be run or pool" >&2; exit 2 ;;
+measure) ;;
+*) echo "WORKER_MODE must be run, pool or measure" >&2; exit 2 ;;
 esac
 ACTION_ISOLATION=${RBE_ACTION_ISOLATION:-1}
 case "$ACTION_ISOLATION" in
@@ -102,13 +107,16 @@ fork)
 *) echo "WORKER_TIER must be oss or fork" >&2; exit 2 ;;
 esac
 RBE_WEST_PORT=${RBE_WEST_PORT:-443}
-ZSTD_READ_URL=${RBE_WIRE_ZSTD_READ_URL:-grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}}
-[[ $ZSTD_READ_URL =~ ^grpcs://[A-Za-z0-9.-]+:[0-9]{1,5}$ ]] || { echo "RBE_WIRE_ZSTD_READ_URL must be grpcs://host:port" >&2; exit 2; }
-# The worker's own endpoint answers compressed reads with InvalidArgument (no
-# identity fallback): zstd needs the dedicated zread host.
-if [ "$wire_zstd" = true ] && [ "$ZSTD_READ_URL" = "grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}" ]; then
-	echo "RBE_WIRE_ZSTD=1 needs RBE_WIRE_ZSTD_READ_URL (fork pool: RBE_FORK_WIRE_ZSTD_READ_URL) set to the zread host, not grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}" >&2
-	exit 2
+# measure has no farm host (RBE_WEST_HOST) and never reaches NativeLink.
+if [ "$WORKER_MODE" != measure ]; then
+	ZSTD_READ_URL=${RBE_WIRE_ZSTD_READ_URL:-grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}}
+	[[ $ZSTD_READ_URL =~ ^grpcs://[A-Za-z0-9.-]+:[0-9]{1,5}$ ]] || { echo "RBE_WIRE_ZSTD_READ_URL must be grpcs://host:port" >&2; exit 2; }
+	# The worker's own endpoint answers compressed reads with InvalidArgument (no
+	# identity fallback): zstd needs the dedicated zread host.
+	if [ "$wire_zstd" = true ] && [ "$ZSTD_READ_URL" = "grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}" ]; then
+		echo "RBE_WIRE_ZSTD=1 needs RBE_WIRE_ZSTD_READ_URL (fork pool: RBE_FORK_WIRE_ZSTD_READ_URL) set to the zread host, not grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}" >&2
+		exit 2
+	fi
 fi
 NL_VERSION=1.7.1
 NL_SHA256=a3d7abc2598e976d022fcdabe88a2f8fae46a3ae64f1868698002ca968dd88e9
@@ -119,15 +127,22 @@ ROOT="$RUNNER_TEMP/nl-worker"
 NL_BIN_DIR="$RUNNER_TEMP/nl-bin"
 
 # Host toolset: test actions exec tools via the client PATH
-# (/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin), and cgo actions compile
-# against host headers. lld: Bazel's auto-configured C toolchain on a client
-# that has lld links with -fuse-ld=lld, so those cgo link actions fail here
-# ("collect2: fatal error: cannot find 'ld'") without it.
-# Keep in sync with infra nativelink-cas/scripts/elastic.sh.
+# (/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin). C/C++ and cgo actions
+# compile and link with the hermetic LLVM toolchain and Ubuntu 24.04 sysroot
+# registered in MODULE.bazel, never the host's gcc, lld or headers (the
+# isolation phase's gcc only builds the action launcher), but the host still
+# runs that toolchain and the binaries it links:
+# - libstdc++6, libgcc-s1, zlib1g: loaded by clang, lld and the llvm-* tools;
+# - libxml2 (and its liblzma5): loaded by lld;
+# - libicu74, libstdc++6, libgcc-s1: loaded by every Bazel-built Go binary
+#   that links Dolt's go-icu-regex (most tests), as are glibc's (base below);
+# - xz-utils: unpacks the toolchain's .tar.xz archive.
+WORKER_TOOLSET=(make jq sqlite3 tmux lsof cmake git libstdc++6 libgcc-s1 zlib1g
+	libxml2 liblzma5 xz-utils libicu74 zlib1g-dev libsqlite3-dev libbz2-dev
+	liblzma-dev libffi-dev libexpat1-dev libxml2-dev libreadline-dev
+	libncurses-dev python3-dev)
 sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq \
-	make jq sqlite3 tmux lsof cmake git lld libicu-dev zlib1g-dev libsqlite3-dev \
-	libbz2-dev liblzma-dev libffi-dev libexpat1-dev libxml2-dev libreadline-dev \
-	libncurses-dev python3-dev >/dev/null
+	"${WORKER_TOOLSET[@]}" >/dev/null
 if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go${GO_VERSION} "; then
 	sum=$(curl -fsSL "https://go.dev/dl/?mode=json&include=all" |
 		jq -r --arg f "go${GO_VERSION}.linux-amd64.tar.gz" '.[].files[] | select(.filename==$f) | .sha256')
@@ -141,6 +156,29 @@ if ! dolt version 2>/dev/null | grep -q "$DOLT_VERSION"; then
 	tar -C "$RUNNER_TEMP" -xzf "$RUNNER_TEMP/dolt.tgz"
 	sudo cp -f "$RUNNER_TEMP/dolt-linux-amd64/bin/dolt" /usr/local/bin/dolt
 fi
+
+# The worker-env platform property (tools/rbe/worker-env): the sha256 of this
+# host's environment manifest. rbe-west's schedulers match it exactly against
+# the worker-env CI's actions request (//platforms:rbe_worker: the sha256 of
+# the committed tools/rbe/worker-env.txt), so an action runs only on the host
+# its key names and its cached result is never one another host produced.
+tools/rbe/worker-env "${WORKER_TOOLSET[@]}" >"$RUNNER_TEMP/worker-env.txt"
+WORKER_ENV=sha256:$(sha256sum <"$RUNNER_TEMP/worker-env.txt" | cut -d' ' -f1)
+echo "worker-env: $WORKER_ENV"
+# A worker on any other host (a new Blacksmith image, a package, Go or dolt
+# change) can serve no gascity action. It registers anyway, advertising what
+# it measured: the pools are shared, and actions that send no worker-env
+# (beads') still run on it. The check prints the diff and the manifest and pin
+# to commit (log and step summary) and leaves them in
+# $RUNNER_TEMP/worker-env-drift. The pool workflows measure in a step of their
+# own first (WORKER_MODE=measure) and turn that into the pin's drift issue,
+# which also caps the farm's pools while it is open. measure: drift is the
+# result, so it fails.
+if ! tools/rbe/worker-env-drift check "$RUNNER_TEMP/worker-env.txt"; then
+	[ "$WORKER_MODE" != measure ] || exit 3
+	echo "worker-env: registering anyway with worker-env=$WORKER_ENV (actions without worker-env only)"
+fi
+[ "$WORKER_MODE" != measure ] || exit 0
 curl -fsSL -o "$RUNNER_TEMP/nl.tgz" "https://github.com/TraceMachina/nativelink/releases/download/v${NL_VERSION}/nativelink-${NL_VERSION}-x86_64-unknown-linux-musl.tar.gz"
 echo "${NL_SHA256}  $RUNNER_TEMP/nl.tgz" | sha256sum -c -
 mkdir -p "$NL_BIN_DIR" && tar -C "$NL_BIN_DIR" -xzf "$RUNNER_TEMP/nl.tgz" nativelink
@@ -276,7 +314,7 @@ isolation_undo() {
 render() {
 	# zstd, read, casmax and work are read as $ARGS.named with today's values as
 	# defaults, so worker.json is byte-identical to before unless they change.
-	jq -n --arg host "grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT:-443}" --arg root "$ROOT" --arg store "$STORE" --arg name "$WORKER_NAME" --argjson slots "$slots" --arg tier "${WORKER_TIER:-oss}" --argjson zstd "${wire_zstd:-false}" --arg read "${ZSTD_READ_URL:-grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT:-443}}" --argjson casmax "${CAS_MAX_BYTES:-150000000000}" --arg work "${WORK:-$ROOT/work}" --argjson isolation "$isolation" '
+	jq -n --arg host "grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT:-443}" --arg root "$ROOT" --arg store "$STORE" --arg name "$WORKER_NAME" --argjson slots "$slots" --arg tier "${WORKER_TIER:-oss}" --arg worker_env "$WORKER_ENV" --argjson zstd "${wire_zstd:-false}" --arg read "${ZSTD_READ_URL:-grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT:-443}}" --argjson casmax "${CAS_MAX_BYTES:-150000000000}" --arg work "${WORK:-$ROOT/work}" --argjson isolation "$isolation" '
   { cert_file: ($root + "/pki/worker.pem"), key_file: ($root + "/pki/worker.key"),
     ca_file: "/etc/ssl/certs/ca-certificates.crt" } as $tls |
   (if $tier == "fork" then "oss-fork" else "oss" end) as $cas_instance |
@@ -317,7 +355,8 @@ render() {
       platform_properties: {
         OSFamily: { values: ["linux"] },
         "container-image": { values: [""] },
-        ISA: { values: ["x86_64"] }
+        ISA: { values: ["x86_64"] },
+        "worker-env": { values: [$worker_env] }
       } } + $isolation) } ],
     servers: []
   }' >"$ROOT/worker.json"
@@ -334,7 +373,10 @@ isolate() {
 		case "$d" in "$MASK_ROOT"/*) ;; *) fail "$d must be under $MASK_ROOT (MASK_ROOT, hidden from actions)" ;; esac
 	done
 	phase packages
-	sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq \
+	# --no-upgrade: this host already advertised worker-env, so add what is
+	# missing but move no installed package (libc6-dev would pull libc6, and
+	# util-linux and procps are measured).
+	sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq --no-upgrade \
 		gcc libc6-dev nftables file util-linux procps >/dev/null
 	phase users
 	# The nft rules cover uids 59000-59063 whatever owns them: anything already
@@ -486,8 +528,13 @@ if [ "$ACTION_ISOLATION" = 1 ]; then
 	# The nft rules cover uids 59000-59063.
 	[ "$slots" -le 64 ] || slots=64
 	SLOT_UID0=59000
+	# RBE_X_NETWORK: the action's `network` platform property ("" without
+	# one; infra README "Per-action network"). off: the launcher gives it
+	# loopback only, as NETNS=1 does for every fork action; on or none: this
+	# tier's default. The fork tier ignores it.
 	isolation='{ "entrypoint": "/usr/local/libexec/rbe-action/entry", "timeout_handled_externally": true, "max_action_timeout": 1260,
-		"additional_environment": { "RBE_X_TIMEOUT_MS": "timeout_millis", "RBE_X_SIDE_CHANNEL": "side_channel_file" } }'
+		"additional_environment": { "RBE_X_TIMEOUT_MS": "timeout_millis", "RBE_X_SIDE_CHANNEL": "side_channel_file",
+			"RBE_X_NETWORK": { "property": "network" } } }'
 	if [ "$canary" = selected ]; then
 		# A subshell: set -e works there (it would not in a condition), and a
 		# failure ends it, not the worker. The phase file says where.

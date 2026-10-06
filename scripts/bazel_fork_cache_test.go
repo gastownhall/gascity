@@ -635,6 +635,10 @@ func checkBazelForkCacheConfig(bazelrc string) []error {
 		"remote_upload_local_results":                         false,
 		"remote_local_fallback":                               true,
 		"incompatible_remote_local_fallback_for_remote_cache": true,
+		// A BEP file with path conversion uploads the files it references;
+		// each refusal counts against the circuit breaker checked below.
+		"build_event_json_file_path_conversion":   false,
+		"build_event_binary_file_path_conversion": false,
 	} {
 		if got, set := forkCacheBoolFinal(opts, name); !set || got != want {
 			form := "--" + name
@@ -696,6 +700,8 @@ func TestBazelForkCacheConfig(t *testing.T) {
 		"build:fork-cache --incompatible_remote_local_fallback_for_remote_cache\n" +
 		"build:fork-cache --remote_timeout=15 --remote_retries=2\n" +
 		"build:fork-cache --experimental_circuit_breaker_strategy=failure\n" +
+		"build:fork-cache --nobuild_event_json_file_path_conversion\n" +
+		"build:fork-cache --nobuild_event_binary_file_path_conversion\n" +
 		"build:fork-cache --remote_max_connections=4\n" +
 		"build:remote-exec --remote_timeout=3600\n" +
 		"try-import %workspace%/.bazelrc.local\n"
@@ -713,6 +719,9 @@ func TestBazelForkCacheConfig(t *testing.T) {
 		"no cache fallback":   drop("build:fork-cache --incompatible_remote_local_fallback_for_remote_cache"),
 		"fallback off":        good + "build:fork-cache --noremote_local_fallback\n",
 		"no breaker":          drop("build:fork-cache --experimental_circuit_breaker_strategy=failure"),
+		"BEP json uploads":    drop("build:fork-cache --nobuild_event_json_file_path_conversion"),
+		"BEP binary uploads":  drop("build:fork-cache --nobuild_event_binary_file_path_conversion"),
+		"BEP json again":      good + "build:fork-cache --build_event_json_file_path_conversion\n",
 		"no timeout":          strings.Replace(good, "--remote_timeout=15 ", "", 1),
 		"slow timeout":        good + "build:fork-cache --remote_timeout=60\n",
 		"no connection cap":   drop("build:fork-cache --remote_max_connections=4"),

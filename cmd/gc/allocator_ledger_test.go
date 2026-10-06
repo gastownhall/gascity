@@ -369,7 +369,7 @@ func TestLedgerNoWriteFailuresClearImmediately(t *testing.T) {
 func committedCreate(t *testing.T, l *intentLedger, id string, ambiguous bool, m ledgerMarker) ledgerEntry {
 	t.Helper()
 	l.Reserve(ledgerCreate(id, "tok-"+id))
-	if _, _, ok := l.IssueCreate(id); !ok {
+	if _, ok := l.IssueCreate(id); !ok {
 		t.Fatalf("issue %s lost", id)
 	}
 	if !l.CommitCreate(id, ambiguous, m) {
@@ -448,41 +448,6 @@ func TestLedgerAmbiguousCreateResolvedByReadStartedAfterSettle(t *testing.T) {
 	})
 }
 
-// Kills (C2 rule 1's input): a read start published for a leg whose rows
-// prove nothing (missing, stale, or an exact leg's cache, which installs
-// nothing for a failed write), or a last-good leg stamped with this pass's
-// time instead of its own read's.
-func TestCensusLedgerReadStartsOnlyForCompleteNonExactLegs(t *testing.T) {
-	t0 := time.Unix(1_000, 0)
-	c := &sessionCensus{Legs: []censusLeg{
-		{Ref: "read", State: legRead, StartedAt: t0},
-		{Ref: "last-good", State: legLastGood, StartedAt: t0.Add(-time.Minute)},
-		{Ref: "exact", Exact: true, State: legRead},
-		{Ref: "stale", State: legStale, StartedAt: t0},
-		{Ref: "missing", State: legMissing},
-	}}
-	got := c.Ledger(&config.City{}).ReadStarted
-	want := map[string]time.Time{"read": t0, "last-good": t0.Add(-time.Minute)}
-	if len(got) != len(want) || !got["read"].Equal(want["read"]) || !got["last-good"].Equal(want["last-good"]) {
-		t.Fatalf("ReadStarted = %v, want %v", got, want)
-	}
-
-	start, end := t0, t0.Add(3*time.Second)
-	rec := censusRecording{StartedAt: start, At: end, Expires: end.Add(time.Minute)}
-	r := newCensusReader(censusLegFeed{
-		exact:    func(beads.Store) bool { return false },
-		recorded: func(beads.Store) (censusRecording, bool) { return rec, true },
-	})
-	leg, _ := r.readLeg(end, classStoreCandidate{ref: "sessions"})
-	if !leg.StartedAt.Equal(start) {
-		t.Fatalf("read leg StartedAt = %v, want the recording's %v", leg.StartedAt, start)
-	}
-	rec = censusRecording{Err: errors.New("down")}
-	if leg, _ = r.readLeg(end.Add(time.Second), classStoreCandidate{ref: "sessions"}); leg.State != legLastGood || !leg.StartedAt.Equal(start) {
-		t.Fatalf("last-good leg = %+v, want StartedAt %v from its own read", leg, start)
-	}
-}
-
 // Kills (C5.4(5), R24): a landed entry whose marker never appears counting
 // forever, or clearing before the bound; the bound measured from reserve
 // instead of the settle.
@@ -512,7 +477,7 @@ func TestLedgerHardBoundClearsAsUnwritten(t *testing.T) {
 
 // Kills (C2 rule 2): a grant whose row closed (a rolled-back start) holding
 // its in-flight slot until the hard bound; or one clearing on an absence
-// from a leg whose read is stale or missing, which proves nothing.
+// from a leg whose read failed or was partial, which proves nothing.
 func TestLedgerGrantClearsWhenRowGoneFromCompleteLeg(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		l := newIntentLedger(time.Now)
@@ -524,13 +489,13 @@ func TestLedgerGrantClearsWhenRowGoneFromCompleteLeg(t *testing.T) {
 		l.Commit("committed", ledgerMarker{Incarnation: 5})
 		l.Fail("failed-after-prewake", true, ledgerMarker{Incarnation: 5})
 		for _, tt := range []struct {
-			state censusLegState
-			want  ledgerClear
-		}{{legRead, clearWritten}, {legLastGood, clearWritten}, {legStale, clearKeep}, {legMissing, clearKeep}} {
-			c := (&sessionCensus{Legs: []censusLeg{{Ref: "sessions", Exact: true, State: tt.state}}}).Ledger(&config.City{})
+			err  error
+			want ledgerClear
+		}{{nil, clearWritten}, {&beads.PartialResultError{Op: "list", Err: errors.New("down")}, clearKeep}, {errors.New("down"), clearKeep}} {
+			c := (&sessionCensus{Legs: []censusLeg{{Ref: "sessions", Err: tt.err}}}).Ledger(&config.City{})
 			for _, e := range l.View() {
 				if got := e.clearVerdict(c, time.Now()); got != tt.want {
-					t.Errorf("%s, row gone from a %s leg: clearVerdict = %d, want %d", e.ID, tt.state, got, tt.want)
+					t.Errorf("%s, row gone from a leg read with err %v: clearVerdict = %d, want %d", e.ID, tt.err, got, tt.want)
 				}
 			}
 		}
@@ -542,7 +507,7 @@ func TestLedgerGrantClearsWhenRowGoneFromCompleteLeg(t *testing.T) {
 func TestLedgerCreateMovesRefuseOtherKindsAndStates(t *testing.T) {
 	l := newIntentLedger(time.Now)
 	l.Reserve(ledgerGrant("g", ledgerRowA))
-	if _, _, ok := l.IssueCreate("g"); ok {
+	if _, ok := l.IssueCreate("g"); ok {
 		t.Fatal("IssueCreate issued a grant")
 	}
 	l.Issue("g", ledgerRowA)

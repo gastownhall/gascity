@@ -646,6 +646,10 @@ func TestNativeDoltliteBeadsTargetRunsTaggedSuite(t *testing.T) {
 
 	cmd := exec.Command("make", "-n", "test-native-doltlite-beads")
 	cmd.Dir = repoRoot
+	// The Makefile's Linux CGO fallback probes the host's cc and ICU headers
+	// at parse time and prints a line when it fires; off, the dry run is the
+	// recipe alone on any host.
+	cmd.Env = append(os.Environ(), "SYS_USR_CGO_FALLBACK=0")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("make -n test-native-doltlite-beads failed: %v\n%s", err, out)

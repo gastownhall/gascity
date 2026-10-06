@@ -101,6 +101,111 @@ func TestReloadProviderSwapKeepsAutoComposition(t *testing.T) {
 	}
 }
 
+// A reload that flips whether the city needs the ACP auto composition
+// rebuilds the provider under the unchanged selection name, as a cold start
+// with the new config would; any other reload keeps it.
+// Kills: a rebuild condition that ignores the composition (the first and
+// last ACP agent wait for a controller restart), a composition check that
+// misses agents selecting session = "acp" on a non-ACP provider, a swap on
+// every reload, and a swap for an acp base, which never composes.
+func TestReloadRebuildsProviderWhenACPCompositionChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		provider  string
+		oldACP    bool
+		newACP    bool
+		wantSwap  bool
+		wantAuto  bool
+		wantEvent string
+	}{
+		{name: "first ACP agent added", provider: "fake", newACP: true, wantSwap: true, wantAuto: true, wantEvent: "fake ACP composition changed"},
+		{name: "last ACP agent removed", provider: "fake", oldACP: true, wantSwap: true, wantEvent: "fake ACP composition changed"},
+		{name: "ACP agent kept", provider: "fake", oldACP: true, newACP: true},
+		{name: "no ACP agent either side", provider: "fake"},
+		{name: "acp base never composes", provider: "acp", newACP: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			tomlPath := filepath.Join(cityPath, "city.toml")
+			writeConfig := func(acp bool) {
+				if acp {
+					writeACPAgentCityConfig(t, tomlPath, tc.provider)
+				} else {
+					writeCityRuntimeConfig(t, tomlPath, tc.provider)
+				}
+			}
+			writeConfig(tc.oldACP)
+			cfg, err := config.Load(osFS{}, tomlPath)
+			if err != nil {
+				t.Fatalf("load config: %v", err)
+			}
+			rebuilt := runtime.NewFake()
+			stubSessionProviderBuilds(t, map[string]runtime.Provider{tc.provider: rebuilt})
+
+			sp := runtime.NewFake()
+			rec := events.NewFake()
+			cr := newTestCityRuntime(t, CityRuntimeParams{
+				CityPath: cityPath,
+				CityName: "test-city",
+				TomlPath: tomlPath,
+				Cfg:      cfg,
+				SP:       sp,
+				BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+					return DesiredStateResult{State: map[string]TemplateParams{}}
+				},
+				Dops:   newDrainOps(sp),
+				Rec:    rec,
+				Stdout: io.Discard,
+				Stderr: io.Discard,
+			})
+			cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+			cs.cityBeadStore = beads.NewMemStore()
+			cr.setControllerState(cs)
+			cr.sessionDrains = newDrainTracker()
+
+			writeConfig(tc.newACP)
+			lastProviderName := tc.provider
+			cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+
+			if lastProviderName != tc.provider {
+				t.Fatalf("lastProviderName = %q, want %q", lastProviderName, tc.provider)
+			}
+			var swaps []string
+			for _, e := range rec.Events {
+				if e.Type == events.ProviderSwapped {
+					swaps = append(swaps, e.Message)
+				}
+			}
+			if !tc.wantSwap {
+				if cr.sp != sp || len(swaps) != 0 {
+					t.Fatalf("session provider = %T (swapped events %q), want the original provider kept", cr.sp, swaps)
+				}
+				return
+			}
+			if len(swaps) != 1 || swaps[0] != tc.wantEvent {
+				t.Fatalf("provider swapped events = %q, want [%q]", swaps, tc.wantEvent)
+			}
+			autoSP, isAuto := cr.sp.(*sessionauto.Provider)
+			if isAuto != tc.wantAuto {
+				t.Fatalf("session provider after the reload = %T, want auto composition %v", cr.sp, tc.wantAuto)
+			}
+			if !tc.wantAuto {
+				if cr.sp != rebuilt {
+					t.Fatalf("session provider after the reload = %p, want the bare provider rebuilt for %q (%p)", cr.sp, tc.provider, rebuilt)
+				}
+				return
+			}
+			if got := autoSP.RouteFor("worker").Provider; got != rebuilt {
+				t.Fatalf("default route after the reload = %p, want the provider rebuilt for %q (%p)", got, tc.provider, rebuilt)
+			}
+			acpSession := agent.SessionNameFor("test-city", "reviewer", "")
+			if err := autoSP.Attach(acpSession); err == nil || !strings.Contains(err.Error(), "ACP transport") {
+				t.Fatalf("Attach(%q) after the reload = %v, want the ACP transport refusal (routed to acp)", acpSession, err)
+			}
+		})
+	}
+}
+
 func writeACPAgentCityConfig(t *testing.T, tomlPath, provider string) {
 	t.Helper()
 	clearInheritedBeadsEnv(t)

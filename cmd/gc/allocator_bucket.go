@@ -49,15 +49,6 @@ func (b bucketState) refill(now time.Time, capacity int, interval time.Duration)
 	return b.capped(capacity)
 }
 
-// debit takes cost tokens, or reports that the bucket holds too few.
-func (b bucketState) debit(cost int) (bucketState, bool) {
-	if b.Tokens < cost {
-		return b, false
-	}
-	b.Tokens -= cost
-	return b, true
-}
-
 // refund returns n tokens: a grant released before any key issued it, the
 // only refund (C5.7).
 func (b bucketState) refund(n, capacity int) bucketState {

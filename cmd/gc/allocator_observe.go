@@ -80,17 +80,6 @@ func (l rowLiveness) startCandidate() bool {
 	return l == livenessAbsent || l == livenessAbsentUnconfirmed || l == livenessDead
 }
 
-// occupiesName reports whether the row's own reading holds its runtime name:
-// unknown counts as taken, dead does not. It is not POOL-052's singleton check
-// (C7.3): dead covers a corpse, which legacy's IsRunning reads as not running,
-// and a zombie (process dead, pane alive), which IsRunning reads as running,
-// and a planned name may be held by a runtime no census row owns. P3-5a reads
-// that check from the cache by the planned name (P3 spec, obligations from
-// P3-3).
-func (l rowLiveness) occupiesName() bool {
-	return l == livenessAlive || l == livenessOccupied || l == livenessUnknown
-}
-
 // Reasons a row reads uncertain or unknown.
 const (
 	observeReasonNoPass       = "no-fresh-complete-pass"

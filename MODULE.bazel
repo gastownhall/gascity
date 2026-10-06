@@ -98,6 +98,9 @@ llvm_dist(
         "lib/clang/22/lib/x86_64-unknown-linux-gnu/clang_rt.crtbegin.o",
         "lib/clang/22/lib/x86_64-unknown-linux-gnu/clang_rt.crtend.o",
         "lib/clang/22/lib/x86_64-unknown-linux-gnu/libclang_rt.builtins.a",
+        # `bazel coverage` links cgo binaries with -fprofile-instr-generate,
+        # which pulls in compiler-rt's profile runtime (~170KB).
+        "lib/clang/22/lib/x86_64-unknown-linux-gnu/libclang_rt.profile.a",
     ],
     sha256 = "df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384",
     strip_prefix = "LLVM-22.1.8-Linux-X64",

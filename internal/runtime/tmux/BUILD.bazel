@@ -64,6 +64,7 @@ go_test(
         "escape_skip_test.go",
         "exact_target_test.go",
         "executor_test.go",
+        "fresh_only_test.go",
         "holder_token_test.go",
         "interaction_test.go",
         "kimi_process_test.go",

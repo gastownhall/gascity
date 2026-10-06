@@ -922,6 +922,13 @@ type Config struct {
 	// separately so the tmux adapter's file-expansion path can
 	// reconstruct the command correctly for long prompts.
 	PromptFlag string
+
+	// FreshOnly makes Start create a fresh runtime or fail: a name the
+	// provider already holds, live or dead, returns ErrSessionExists, and
+	// Start never recycles, kills or reuses the runtime holding it. The v2
+	// start effect sets it (CONTRACT v5 S1, I24); legacy never does.
+	// Excluded from every fingerprint.
+	FreshOnly bool
 }
 
 // OverlayProviderNames returns the effective provider overlay slots to stage for
