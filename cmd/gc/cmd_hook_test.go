@@ -3072,6 +3072,51 @@ func TestDoHookClaimSkipsReadyAssignmentThatResolvesToAWisp(t *testing.T) {
 	}
 }
 
+// TestDoHookClaimSkipsReadyAssignmentWhoseBindingCannotClaim pins that the
+// ready tier skips a routed claim refused with beads.ErrClaimUnsupported — the
+// pre-write capability veto a forwarding wrapper returns for a claim-less
+// engine behind it — instead of failing the whole hook invocation.
+func TestDoHookClaimSkipsReadyAssignmentWhoseBindingCannotClaim(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[{"id":"hw-nocas","status":"open","assignee":"worker-alias","metadata":{"gc.routed_to":"worker"}}]`, nil
+	}
+	claimCalls := 0
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+			claimCalls++
+			return beads.Bead{}, false, fmt.Errorf("claiming bead %q: %w", beadID, beads.ErrClaimUnsupported)
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-canonical",
+		IdentityCandidates: []string{"worker-canonical", "worker-alias"},
+		RouteTargets:       []string{"worker"},
+		DrainAck:           true,
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(ready assignment on a claim-less binding) = %d, want 0 (skip, not terminal); stderr=%s", code, stderr.String())
+	}
+	if claimCalls != 1 {
+		t.Fatalf("claim calls = %d, want 1", claimCalls)
+	}
+	if !strings.Contains(stderr.String(), "skipping ready assignment hw-nocas") {
+		t.Fatalf("expected stderr to record the skipped claim; got %q", stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "drain" || result.Reason != "claims_errored" {
+		t.Fatalf("claim result = %+v, want drain/claims_errored", result)
+	}
+}
+
 func TestDoHookClaimDrainsClaimsErroredWhenEveryCandidateErrors(t *testing.T) {
 	// When a store reports ready work but EVERY eligible candidate's claim
 	// mutation errors — the can-read-but-can't-write window of store contention

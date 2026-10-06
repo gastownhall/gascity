@@ -281,6 +281,60 @@ func TestCachingStoreClaimColdCacheMarksRowDirtyWhenRefreshFails(t *testing.T) {
 	}
 }
 
+// TestCachingStoreClaimWarmCacheRefreshFailureCarriesClaimedRevision pins that
+// when the post-claim refresh fails on a cached row, the merged row Claim
+// returns carries the claimed row's revision, not the pre-claim one, so a
+// caller chaining a conditional write on it does not miss its own CAS.
+func TestCachingStoreClaimWarmCacheRefreshFailureCarriesClaimedRevision(t *testing.T) {
+	t.Parallel()
+
+	backing := &claimCapableBackingStore{Store: NewMemStore()}
+	work, err := backing.Create(Bead{
+		Title:    "claimable work",
+		Labels:   []string{"urgent"},
+		Metadata: map[string]string{"phase": "queued"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	// The claimed row carries metadata the cached row does not yet hold, so
+	// only the refresh-failure merge's Metadata copy can surface it.
+	if err := backing.SetMetadata(work.ID, "phase", "claimed"); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+
+	backing.failGetAfterClaim = true
+	claimed, ok, err := cache.Claim(work.ID, "worker-1")
+	if err != nil || !ok {
+		t.Fatalf("Claim = (%v, %v, %v), want (bead, true, nil)", claimed, ok, err)
+	}
+	backing.failGetAfterClaim = false
+	current, err := backing.Get(work.ID)
+	if err != nil {
+		t.Fatalf("backing Get: %v", err)
+	}
+	if claimed.Revision != current.Revision {
+		t.Fatalf("claimed revision = %d, want the post-claim revision %d", claimed.Revision, current.Revision)
+	}
+	if len(claimed.Labels) != 1 {
+		t.Fatalf("claimed labels = %v, want the cached label kept", claimed.Labels)
+	}
+	if got := claimed.Metadata["phase"]; got != "claimed" {
+		t.Fatalf("claimed metadata phase = %q, want the claimed row's value %q", got, "claimed")
+	}
+	claimed.Metadata["phase"] = "mutated-by-caller"
+	cache.mu.RLock()
+	cachedPhase := cache.beads[work.ID].Metadata["phase"]
+	cache.mu.RUnlock()
+	if cachedPhase != "claimed" {
+		t.Fatalf("cached metadata phase = %q after mutating the returned row, want %q (returned map must not alias the cache)", cachedPhase, "claimed")
+	}
+}
+
 // TestCachingStoreClaimRacedWriteInstallsNothing pins Claim's write fence: a
 // local Delete or write of the claimed row that lands after the claim began
 // stands. Claim installs neither its refreshed row nor its fallback over it,

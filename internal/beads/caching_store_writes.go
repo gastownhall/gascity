@@ -259,12 +259,14 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 // records and comments stripped (see NativeDoltStore.Claim). Installing it
 // would replace the cached row wholesale and drop those fields, so Claim
 // refreshes the full row from the backing store's Get and installs that. When
-// the refresh fails, only what a claim changes (status, assignee and the
-// update time) is merged onto the cached row, which is marked dirty; with no
-// cached row, the bare row is installed as a dirty placeholder, because this
-// process has not confirmed its labels, dependencies or comments. Every branch
-// keeps the cached dependency edges (depsKeepCached): a claim never changes
-// them.
+// the refresh fails, only what a claim changes is merged onto the cached row,
+// which is marked dirty: status, assignee and the update time, plus the
+// revision and metadata the claimed row carries, so a caller chaining a
+// conditional write on the returned row does not present the pre-claim
+// revision. With no cached row, the bare row is installed as a dirty
+// placeholder, because this process has not confirmed its labels, dependencies
+// or comments. Every branch keeps the cached dependency edges
+// (depsKeepCached): a claim never changes them.
 //
 // Like every other writer, Claim installs nothing when a local write or Delete
 // on id landed after the claim began (racedWriteLocked): that write's row, or
@@ -292,6 +294,12 @@ func (c *CachingStore) Claim(id, assignee string) (Bead, bool, error) {
 			setBeadStatus(b, claimed.Status)
 			b.Assignee = claimed.Assignee
 			b.UpdatedAt = claimed.UpdatedAt
+			if claimed.Revision != 0 {
+				b.Revision = claimed.Revision
+			}
+			if claimed.Metadata != nil {
+				b.Metadata = maps.Clone(claimed.Metadata)
+			}
 		})
 	}
 	if !found {
