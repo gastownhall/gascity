@@ -315,7 +315,11 @@ if ((!quick)); then
 	# loopback (nothing listens on port 9: refused if lo is up) and an
 	# outside address (TEST-NET-1: no reply whatever the filter does, so only
 	# "unreachable", no route at all, passes as loopback only).
-	net_probe='echo "I $(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d " " | sort | paste -sd, -)"
+	# A kernel with the ipip/sit/gre/vti/ip6tnl drivers built in adds its
+	# fallback devices (sit0, tunl0, gre0, ...) to every new namespace: always
+	# down, no routes, so they are left out here and "unreachable" below is
+	# the proof that nothing leaves the namespace.
+	net_probe='echo "I $(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d " " | grep -vxE "sit0|tunl0|gre0|gretap0|erspan0|ip_vti0|ip6_vti0|ip6tnl0|ip6gre0" | sort | paste -sd, -)"
 for t in 127.0.0.1:9 192.0.2.1:9; do
 	e=$(timeout 3 bash -c "exec 3<>/dev/tcp/${t%:*}/${t##*:}" 2>&1) && e=connected
 	case $e in *"Connection refused"*) e=refused ;; *"Network is unreachable"*) e=unreachable ;; *) e=other ;; esac
