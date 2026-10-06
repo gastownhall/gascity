@@ -269,6 +269,9 @@ func reusablePoolSessionInfos(bp *agentBuildParams, cfgAgent *config.Agent, temp
 	if bp == nil || bp.sessionBeads == nil {
 		return nil
 	}
+	if bp.realizeMemo != nil {
+		return bp.realizeMemo.reusablePoolSessionInfos(bp, cfgAgent, template, used)
+	}
 	candidates := []session.Info{}
 	for _, info := range bp.sessionBeads.OpenInfos() {
 		if reusablePoolSessionInfo(bp, cfgAgent, template, info, used) {

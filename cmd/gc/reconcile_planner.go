@@ -62,17 +62,19 @@ type settlement struct {
 // (reconcile_inflight.go), or a test's fake.
 type plannerInflight interface {
 	settle(settlement)
+	view() inflightView
 }
 
-// bootState is the boot gate (architecture §1.6): no destructive intent until
-// the cache is primed, the first inventory pass is complete and the first
-// external-reads recording exists. C2b2 gathers it.
+// bootState is the boot gate (CONTRACT v5 P2): no destructive intent until
+// the cache is primed, every backend of the latest inventory pass is primed
+// and, when a demand leg is lane-fed, the first external-reads recording
+// exists. gather computes it each pass; admit applies it.
 type bootState struct {
 	CachePrimed, InventoryComplete, RecordingSeen bool
 }
 
 // planner runs passes on one goroutine. Only that goroutine touches inflight,
-// backoff, bucket, boot, last and rowTrace; other goroutines reach the
+// backoff, bucket, boot, last, rowTrace and memo; other goroutines reach the
 // planner through markDirty, the settlement queue, the start pause and stop.
 type planner struct {
 	clock       plannerClock
@@ -88,6 +90,7 @@ type planner struct {
 	boot     bootState
 	last     passRecord
 	rowTrace map[rowKey]string // each row's last traced (reason, outcome)
+	memo     gatherMemo
 
 	dirty       chan struct{} // capacity 1: marks fold until the loop reads one
 	settlements settlementQueue
@@ -190,13 +193,19 @@ func (p *planner) runPass(now time.Time) (res passResult) {
 		p.last = passRecord{Start: now, Duration: p.clock.Now().Sub(now), Panicked: r != nil, Result: res}
 		p.metrics.recordPass(now, p.last.Duration, r != nil, res.Counts)
 	}()
+	p.drainSettlements(now)
+	return p.pass(now)
+}
+
+// drainSettlements applies the settlements posted so far to the in-flight
+// map, stamping a zero At with now.
+func (p *planner) drainSettlements(now time.Time) {
 	for _, s := range p.settlements.drain() {
 		if s.At.IsZero() {
 			s.At = now
 		}
 		p.inflight.settle(s)
 	}
-	return p.pass(now)
 }
 
 func (p *planner) stopping() bool {

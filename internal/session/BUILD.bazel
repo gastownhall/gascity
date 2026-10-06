@@ -135,6 +135,7 @@ go_test(
         "store_patch_fence_test.go",
         "store_resolve_test.go",
         "store_rollback_pending_create_test.go",
+        "store_row_fence_test.go",
         "store_start_commit_fence_test.go",
         "store_start_fence_test.go",
         "store_test.go",
@@ -159,7 +160,7 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
-        "//:repo_source_tree",
+        "//cmd/gc:bazel_go_srcs",
         "//cmd/gc:cmd_session.go",
         "//cmd/gc:doctor_session_model.go",
         "//cmd/gc:session_beads.go",
@@ -208,6 +209,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

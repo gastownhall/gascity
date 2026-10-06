@@ -62,7 +62,9 @@ permissions:
 jobs:
   bazel:
     name: bazel test (side-by-side)
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    # 4 vCPU: the client analyzes //... and the acceptance target (~1900
+    # packages) here, which took ~2 m per invocation on 2 vCPU.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 90
     permissions:
       contents: read
@@ -373,25 +375,6 @@ jobs:
             !${{ runner.temp }}/bazel-outputs/cache/repos/v1/content_addressable
           key: ${{ steps.bazel-cache.outputs.cache-primary-key }}
 
-      # Evidence-only: the integration suite's agent-flow tests are sensitive
-      # to ambient agent-template resolution (they fail under plain `go test`
-      # on developer machines with real GC state; go-test CI passes on
-      # pristine runners). Until template lookup precedence is fixed
-      # product-side, this step reports without gating. Never on a failed
-      # fresh merge: the checkout is then a half-merged PR head.
-      - name: "bazel test //test/integration (evidence-only)"
-        if: always() && steps.fresh-merge.outcome != 'failure' && steps.worker-env.outputs.pin-moved != 'true'
-        env:
-          RBE_FORK_CERT: ${{ steps.fork-cert.outputs.cert }}
-        run: |
-          ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs)
-          if [ -n "$BAZEL_REMOTE_EXECUTOR" ] || [ -n "$RBE_FORK_CERT" ]; then RCEXEC=(--config=remote-exec); else RCEXEC=(); fi
-          mkdir -p /tmp/bazel-bep
-          bazel "${ARGS[@]}" test //test/integration:integration_test \
-            --build_event_json_file=/tmp/bazel-bep/integration.json \
-            "${RCEXEC[@]}" --test_output=errors --keep_going \
-            --define=gotags=integration --test_timeout=1100 || true
-
       - name: Critical-path report + budget (the optimization loop metric)
         if: always()
         run: python3 tools/bazel/critpath.py /tmp/bazel-profile.json --tier T2 --budget 150 || true
@@ -415,8 +398,7 @@ jobs:
           go run ./scripts/bazel-bep-summary.go --context "$context" --allow-missing \
             --json-out /tmp/bazel-bep/summary.json \
             unit=/tmp/bazel-bep/unit.json \
-            acceptance=/tmp/bazel-bep/acceptance.json \
-            integration=/tmp/bazel-bep/integration.json >> "$GITHUB_STEP_SUMMARY"
+            acceptance=/tmp/bazel-bep/acceptance.json >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload bazel test cache report
         if: always()

@@ -45,7 +45,7 @@ const (
 	// no fork-cache. RBE_FORK_CERT must then be the fork-cert step's output.
 	bazelRCExecForkGuard = `if [ -n "$BAZEL_REMOTE_EXECUTOR" ] || [ -n "$RBE_FORK_CERT" ]; then`
 	bazelRCForkCertEnv   = "${{ steps.fork-cert.outputs.cert }}"
-	bazelRCExecSteps     = 3
+	bazelRCExecSteps     = 2
 	// zstd cache transfers: only the anonymous fork cache (rbe-cache :8443)
 	// can advertise a compressor, so only fork-cache may ask for one, and
 	// only while cache-zstd-probe.sh finds it advertised (a probe, not a
@@ -535,7 +535,7 @@ func TestBazelForkCacheRCExecGuards(t *testing.T) {
 
 	block := "if [ -n \"$BAZEL_REMOTE_EXECUTOR\" ]; then\n  RCEXEC=(--config=remote-exec)\nelse\n  RCEXEC=()\nfi\nbazel test //... \"${RCEXEC[@]}\"\n"
 	inline := "if [ -n \"$BAZEL_REMOTE_EXECUTOR\" ]; then RCEXEC=(--config=remote-exec); else RCEXEC=(); fi\n"
-	good := []bazelTestWorkflowStep{{Name: "a", Run: block}, {Name: "b", Run: inline}, {Name: "c", Run: inline}, {Name: "d", Run: "echo hi\n"}}
+	good := []bazelTestWorkflowStep{{Name: "a", Run: block}, {Name: "b", Run: inline}, {Name: "d", Run: "echo hi\n"}}
 	if errs := checkBazelRCExecGuards(good); len(errs) != 0 {
 		t.Errorf("good fixture: %v", errs)
 	}
@@ -549,10 +549,10 @@ func TestBazelForkCacheRCExecGuards(t *testing.T) {
 		t.Errorf("good rbe-fork fixture: %v", errs)
 	}
 	for name, steps := range map[string][]bazelTestWorkflowStep{
-		"fork guard, no env":         {goodFork[0], {Name: "b", Run: forkInline}, good[2], good[3]},
-		"fork guard, other env":      {goodFork[0], {Name: "b", Run: forkInline, Env: map[string]string{"RBE_FORK_CERT": "${{ secrets.RBE_TLS_CERT }}"}}, good[2], good[3]},
-		"fork guard, other variable": {goodFork[0], {Name: "b", Run: strings.Replace(forkInline, "$RBE_FORK_CERT", "$RBE_FORK_KEY", 1), Env: forkEnv}, good[2], good[3]},
-		"fork guard alone":           {goodFork[0], {Name: "b", Run: strings.Replace(inline, "$BAZEL_REMOTE_EXECUTOR", "$RBE_FORK_CERT", 1), Env: forkEnv}, good[2], good[3]},
+		"fork guard, no env":         {goodFork[0], {Name: "b", Run: forkInline}, good[2]},
+		"fork guard, other env":      {goodFork[0], {Name: "b", Run: forkInline, Env: map[string]string{"RBE_FORK_CERT": "${{ secrets.RBE_TLS_CERT }}"}}, good[2]},
+		"fork guard, other variable": {goodFork[0], {Name: "b", Run: strings.Replace(forkInline, "$RBE_FORK_CERT", "$RBE_FORK_KEY", 1), Env: forkEnv}, good[2]},
+		"fork guard alone":           {goodFork[0], {Name: "b", Run: strings.Replace(inline, "$BAZEL_REMOTE_EXECUTOR", "$RBE_FORK_CERT", 1), Env: forkEnv}, good[2]},
 	} {
 		if len(checkBazelRCExecGuards(steps)) == 0 {
 			t.Errorf("%s: expected an error", name)
@@ -567,10 +567,10 @@ func TestBazelForkCacheRCExecGuards(t *testing.T) {
 		"file guard":    with(1, "if [ -f .bazelrc.local ]; then RCEXEC=(--config=remote-exec); else RCEXEC=(); fi\n"),
 		"unguarded":     with(1, "RCEXEC=(--config=remote-exec)\n"),
 		"other guard":   with(0, strings.Replace(block, "$BAZEL_REMOTE_EXECUTOR", "$RBE_TLS_CERT", 1)),
-		"literal flag":  with(3, "bazel test //... --config=remote-exec\n"),
-		"missing step":  good[:2],
+		"literal flag":  with(2, "bazel test //... --config=remote-exec\n"),
+		"missing step":  good[:1],
 		"extra step":    append(append([]bazelTestWorkflowStep(nil), good...), bazelTestWorkflowStep{Name: "e", Run: inline}),
-		"negated guard": with(2, strings.Replace(inline, "-n", "-z", 1)),
+		"negated guard": with(1, strings.Replace(inline, "-n", "-z", 1)),
 		"commented out": with(0, "# "+block),
 	} {
 		if len(checkBazelRCExecGuards(steps)) == 0 {

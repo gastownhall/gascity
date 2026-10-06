@@ -378,8 +378,8 @@ func TestSetupBazelRCCarriesOnlyTransport(t *testing.T) {
 }
 
 // bazelSuiteConfigs select a tagged suite, keyed apart on purpose (--define,
-// --test_timeout); pre-push never runs them, and bazel-test.yml passes the
-// same flags (bazel_multilane_test.go).
+// --test_timeout); pre-push never runs them, and bazel-test.yml passes
+// acceptance's flags (bazel_multilane_test.go).
 var bazelSuiteConfigs = map[string]bool{"acceptance": true, "integration": true}
 
 // TestBazelMultiLaneLanesHashLikePrePush: bazel.yml's unit lane runs what

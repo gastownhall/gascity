@@ -5,6 +5,7 @@ go_test(
     srcs = [
         "acceptance_failure_diagnostics_test.go",
         "acceptance_run_selection_test.go",
+        "acceptance_shards_test.go",
         "add_testenv_import_test.go",
         "bazel_bep_summary_workflow_test.go",
         "bazel_fork_cache_test.go",
@@ -15,6 +16,7 @@ go_test(
         "bazel_multilane_test.go",
         "bazel_no_flaky_retries_test.go",
         "bazel_output_cache_test.go",
+        "bazel_repo_tree_test.go",
         "bazel_test_tmp_bt_test.go",
         "bd_version_pin_test.go",
         "build_provenance_test.go",
@@ -86,6 +88,7 @@ go_test(
         "//platforms:BUILD.bazel",
         "//scripts/testdata/test-go-test-shard/env_required:pkg_files",
         "//scripts/testdata/test-go-test-shard/no_extra_env:pkg_files",
+        "//test/acceptance:BUILD.bazel",
         "//test/integration:BUILD.bazel",
     ],
     shard_count = 6,
@@ -103,6 +106,11 @@ go_test(
     ],
 )
 
+exports_files(
+    ["routed-test-rows.manifest"],
+    visibility = ["//visibility:public"],
+)
+
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(
@@ -111,6 +119,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

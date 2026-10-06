@@ -16,6 +16,7 @@ go_library(
         "allocator_demand_reads.go",
         "allocator_grants.go",
         "allocator_health.go",
+        "allocator_index.go",
         "allocator_ledger.go",
         "allocator_observe.go",
         "allocator_plan.go",
@@ -368,6 +369,7 @@ go_library(
         "ready_federation.go",
         "reconcile_barrier.go",
         "reconcile_enqueue.go",
+        "reconcile_gather.go",
         "reconcile_gather_demand.go",
         "reconcile_inflight.go",
         "reconcile_latch.go",
@@ -749,6 +751,7 @@ go_test(
         "allocator_demand_reads_test.go",
         "allocator_grants_test.go",
         "allocator_health_test.go",
+        "allocator_index_test.go",
         "allocator_ledger_test.go",
         "allocator_observe_test.go",
         "allocator_plan_test.go",
@@ -1391,6 +1394,7 @@ go_test(
         "reconcile_barrier_test.go",
         "reconcile_enqueue_test.go",
         "reconcile_gather_demand_test.go",
+        "reconcile_gather_test.go",
         "reconcile_inflight_test.go",
         "reconcile_latch_test.go",
         "reconcile_mode_test.go",
@@ -1667,11 +1671,23 @@ go_test(
         "*.go",
     ]) + [
         "//:go.mod",
-        "//:repo_source_tree",
+        "//:go_work_files",
+        "//:repo_go_srcs",
+        "//:schemas/hook/result.schema.json",
+        "//:schemas/wait/inspect/result.schema.json",
+        "//:schemas/wait/list/result.schema.json",
+        "//:schemas/wisps-composite-index/common.sh",
+        "//docs:reference/cli.md",
         "//examples/bd:pack_files",
         "//examples/bd/dolt:pack_files",
         "//examples/gastown:pack_files",
+        "//examples/hyperscale:pack_files",
         "//examples/lifecycle:pack_files",
+        "//examples/swarm:pack_files",
+        "//internal/beads/contract:bdconfig_fixtures",
+        "//internal/bootstrap/packs/core:pack_files",
+        "//internal/hooks:config_files",
+        "//scripts:routed-test-rows.manifest",
     ],
     embed = [":gc_lib"],
     shard_count = 12,
@@ -1828,7 +1844,11 @@ exports_files(
 )
 
 exports_files(
-    ["runtime_registry.go"],
+    [
+        "metrics_census_gen.go",
+        "providers.go",
+        "runtime_registry.go",
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -1846,6 +1866,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

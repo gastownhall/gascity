@@ -1,4 +1,4 @@
-package beads_test
+package bdboundary
 
 import (
 	"bufio"
@@ -21,7 +21,7 @@ func repoRoot() string {
 		return root
 	}
 	_, filename, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(filename), "..", "..")
+	return filepath.Join(filepath.Dir(filename), "..", "..", "..")
 }
 
 // bdExecAllowedDirs lists directories where bd calls are allowed.

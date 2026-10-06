@@ -16,7 +16,9 @@ import (
 
 // The allocator's session census (I2, P3 spec §4.2): every open session row on
 // every census leg, read in memory each pass through the leg's CachingStore,
-// as legacy's census reads it (collectOpenSessionInfos with live=false).
+// as legacy's census reads it (collectOpenSessionInfos with live=false), but
+// at beads.FederatedReadTier on every leg, so a relocated sessions binding
+// serves its wisp-tier rows too (CONTRACT v5 AL1).
 //
 // A hard read error on the sessions leg fails the pass: an error is not an
 // empty city. A partial read keeps the rows it returned and makes the pass
@@ -91,7 +93,7 @@ func readSessionCensus(now time.Time, cfg *config.City, legs []classStoreCandida
 	clk := &clock.Fake{Time: now}
 	canonicalLeg := make(map[string]string)
 	for i, source := range legs {
-		infos, err := sessionFrontDoor(source.store).ListAll(session.ListAllOptions{})
+		infos, err := sessionFrontDoor(source.store).ListAll(session.ListAllOptions{TierMode: beads.FederatedReadTier})
 		if i == 0 && err != nil && !beads.IsPartialResult(err) {
 			return nil, fmt.Errorf("session census sessions leg %q: %w", source.ref, err)
 		}

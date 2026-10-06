@@ -16,6 +16,7 @@ go_library(
         "server_socket_probe_linux.go",
         "server_socket_probe_other.go",
         "session_env_file.go",
+        "session_object.go",
         "state_cache.go",
         "theme.go",
         "tmux.go",
@@ -69,6 +70,7 @@ go_test(
         "interaction_test.go",
         "kimi_process_test.go",
         "lifecycle_test.go",
+        "liveness_present_test.go",
         "main_test.go",
         "nudge_dismiss_besteffort_test.go",
         "nudge_poke_hidden_test.go",
@@ -101,6 +103,8 @@ go_test(
     deps = [
         "//internal/citylayout",
         "//internal/runtime",
+        "//internal/runtime/acp",
+        "//internal/runtime/auto",
         "//internal/runtime/proctable",
         "//internal/shellquote",
         "//internal/testenv",
@@ -117,6 +121,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

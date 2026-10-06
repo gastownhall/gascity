@@ -5,4 +5,5 @@ exports_files([
     "dolt_go_serial.patch",
     "beads_migrations.patch",
     "flatbuffers_v23_importpath.patch",
+    "protoc_gen_validate_build.patch",
 ])

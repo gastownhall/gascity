@@ -10,14 +10,49 @@ import (
 // Liveness reports both provider-runtime presence and configured agent-process
 // presence for a session target.
 type Liveness struct {
+	// Running reports that a pane (or box) of the session is alive.
 	Running bool
-	Alive   bool
+	// Alive reports that the configured agent process is alive.
+	Alive bool
+	// Corpse reports that the name is listed but no pane of it is alive: a
+	// remain-on-exit corpse. Running and Alive are then false. Only tmux keeps
+	// corpses.
+	Corpse bool
+	// ObjectID is the provider's id for the exact session object observed
+	// (tmux #{session_id}, for example "$3"), so a kill can target that object
+	// and not a session re-created under the name. It is unique only within
+	// one server's lifetime: a restarted tmux server numbers from "$0" again.
+	// Empty when the name is not listed or the provider has no such id; an
+	// empty id is refused by every [SessionObjectKiller].
+	ObjectID string
+	// PanePID is the pid of the session's only live pane (tmux #{pane_pid}),
+	// the condition of a zombie kill. Set only by a fresh read
+	// ([FreshLivenessObserver]) of a session with exactly one live pane.
+	PanePID string
+}
+
+// Present reports that the name is listed, a corpse included (v5 O1). It is
+// derived, so every provider that reports Running reports Present.
+func (l Liveness) Present() bool {
+	return l.Running || l.Corpse
 }
 
 // LivenessObserver is implemented by providers that can observe runtime and
 // agent-process liveness in one provider-native pass.
 type LivenessObserver interface {
 	ObserveLiveness(name string, processNames []string) Liveness
+}
+
+// ServerDeathConfirmer is the optional provider capability that reports a
+// confirmed-dead runtime server: its socket is missing, or refuses on a stable
+// inode, and no listener is bound to its path, so no session of it can exist
+// and an empty listing is complete (v5 O1, F3). Only tmux implements it.
+//
+// Ask it only right after a ListRunning that failed for a missing server, and
+// use the verdict only for that pass: a server can start at any moment, so a
+// verdict carried across passes would read a live fleet as gone.
+type ServerDeathConfirmer interface {
+	ServerConfirmedDead() bool
 }
 
 // LivenessObserverWithError is the optional provider capability for liveness
@@ -75,6 +110,7 @@ func hasProcessNameHints(processNames []string) bool {
 func normalizeLiveness(obs Liveness) Liveness {
 	if obs.Alive && !obs.Running {
 		obs.Running = true
+		obs.Corpse = false
 	}
 	return obs
 }
@@ -131,6 +167,24 @@ type BoundedLivenessObserver = LivenessObserverWithError
 // ObservationComplete with a nil error, exactly matching today's behavior —
 // additive only, no existing Provider call site changes.
 func ObserveLivenessBounded(ctx context.Context, sp Provider, name string, processNames []string, timeout time.Duration) (Liveness, ObservationStatus, error) {
+	return observeBounded(ctx, timeout, func() (Liveness, error) {
+		return ObserveLivenessWithError(sp, name, processNames)
+	})
+}
+
+// ObserveLivenessBoundedSince is [ObserveLivenessBounded] over
+// [ObserveLivenessSince]: a fresh read whose deadline answers incomplete. A
+// tmux fresh read can join a fetch and refresh twice before it answers, which
+// may outlast an effect's fence timeout.
+func ObserveLivenessBoundedSince(ctx context.Context, sp Provider, name string, processNames []string, since time.Time, timeout time.Duration) (Liveness, ObservationStatus, error) {
+	return observeBounded(ctx, timeout, func() (Liveness, error) {
+		return ObserveLivenessSince(sp, name, processNames, since)
+	})
+}
+
+// observeBounded races observe against timeout, as ObserveLivenessBounded
+// documents.
+func observeBounded(ctx context.Context, timeout time.Duration, observe func() (Liveness, error)) (Liveness, ObservationStatus, error) {
 	if err := ctx.Err(); err != nil {
 		return Liveness{}, ObservationIncomplete, err
 	}
@@ -144,7 +198,7 @@ func ObserveLivenessBounded(ctx context.Context, sp Provider, name string, proce
 	}
 	results := make(chan observation, 1)
 	go func() {
-		liveness, err := ObserveLivenessWithError(sp, name, processNames)
+		liveness, err := observe()
 		results <- observation{liveness: liveness, err: err}
 	}()
 

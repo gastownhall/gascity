@@ -77,6 +77,11 @@ type sessionRuntimeState struct {
 	// — the same value the per-session `list-windows -t <s>` read returns. Zero
 	// means the snapshot carries no activity for the session.
 	Activity int64
+	// ID is the session object's #{session_id} (for example "$3"). A session
+	// re-created under the same name gets a new one, but ids are unique only
+	// within one server's lifetime: a restarted server numbers from "$0" again.
+	// Empty when tmux reported no well-formed id.
+	ID string
 }
 
 type processRuntimeState struct {
@@ -116,6 +121,9 @@ type StateCache struct {
 	// place. Writers replace a map wholesale under mu instead.
 	state     runtimeStateSnapshot
 	fetchedAt time.Time
+	// startedAt is when the fetch that produced state began, on the cache
+	// clock, so a fresh read can tell whether state postdates an effect.
+	startedAt time.Time
 	lastError error
 	dirty     bool // set by Invalidate(); cleared by a refresh no invalidation superseded
 	// generation advances on every Invalidate and EvictSession, so a refresh
@@ -147,6 +155,7 @@ type StateCache struct {
 type cacheObservation struct {
 	state     runtimeStateSnapshot
 	fetchedAt time.Time
+	startedAt time.Time
 	// lastErr is the error of the most recent refresh attempt; nil after a
 	// success.
 	lastErr error
@@ -273,6 +282,7 @@ func (c *StateCache) observation() cacheObservation {
 	return cacheObservation{
 		state:            c.state,
 		fetchedAt:        c.fetchedAt,
+		startedAt:        c.startedAt,
 		lastErr:          c.lastError,
 		dirty:            c.dirty,
 		primedByNoServer: c.primedByNoServer,
@@ -327,6 +337,25 @@ func classifyCacheObservation(obs cacheObservation, name string, now time.Time, 
 		return cacheAnswerAbsent
 	}
 	return cacheAnswerUnknown
+}
+
+// observeSince returns the published snapshot once a successful fetch that
+// started at or after since has produced it, refreshing when the published one
+// is older. It refreshes at most twice: a fetch already in flight before since
+// is joined rather than restarted, so the second refresh is the one that starts
+// after since. It never invalidates the cache. ok is false when no such fetch
+// succeeded; obs.lastErr then says why.
+func (c *StateCache) observeSince(since time.Time) (obs cacheObservation, ok bool) {
+	for attempt := 0; ; attempt++ {
+		obs = c.observation()
+		if obs.lastErr == nil && obs.primed() && !obs.startedAt.Before(since) {
+			return obs, true
+		}
+		if attempt == 2 {
+			return obs, false
+		}
+		c.refresh()
+	}
 }
 
 // Invalidate marks the cache as dirty, forcing the next IsRunning call
@@ -444,6 +473,7 @@ func (c *StateCache) refresh() {
 
 		c.state = state
 		c.fetchedAt = c.clock()
+		c.startedAt = start
 		c.lastError = nil
 		c.primedByNoServer = false
 		c.dirty = superseded
@@ -545,7 +575,7 @@ func (g *processSnapshotGate) succeeded() bool {
 // still contribute no liveness — they represent exited processes, not
 // running ones.
 func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, error) {
-	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}\t#{session_attached}\t#{window_activity}")
+	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}\t#{session_attached}\t#{window_activity}\t#{session_id}")
 	if err != nil {
 		if errors.Is(err, ErrNoCurrentTarget) {
 			// The server ANSWERED and holds zero sessions. gc configures
@@ -589,7 +619,7 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 	}
 
 	for _, line := range strings.Split(out, "\n") {
-		parts := strings.SplitN(line, "\t", 6)
+		parts := strings.SplitN(line, "\t", 7)
 		if len(parts) < 2 || parts[0] == "" {
 			continue
 		}
@@ -615,6 +645,9 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 			if activity, convErr := strconv.ParseInt(strings.TrimSpace(parts[5]), 10, 64); convErr == nil && activity > session.Activity {
 				session.Activity = activity
 			}
+		}
+		if len(parts) > 6 && validSessionObjectID(strings.TrimSpace(parts[6])) {
+			session.ID = strings.TrimSpace(parts[6])
 		}
 		if parts[1] == "1" {
 			// A dead pane contributes no liveness: Running stays as-is so a
