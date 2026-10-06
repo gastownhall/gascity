@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,6 +99,31 @@ func TestBoundedToolCommandCleanupToleratesAZombieInItsGroup(t *testing.T) {
 		closeHolder(t, holder)
 		requireDescendantsGone(t, joiner, held, "the joiner exited")
 	})
+}
+
+func TestProxiedServerProbeTellsAHungBdFromAnUnsupportedOne(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		script   string
+		wantFail string
+		wantSkip string
+	}{
+		{name: "hung", script: "#!/bin/sh\nexec sleep 300\n", wantFail: "exceeded"},
+		{name: "unsupported", script: "#!/bin/sh\necho usage\n", wantSkip: "no proxied-server support"},
+		{name: "supported", script: "#!/bin/sh\necho --proxied-server\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(EnvRequireTooling, "")
+			var rec recordingSkipOrFailer
+			requireProxiedServerSupport(t, &rec, descendantLeavingStub(t, tc.script), boundedToolTestDeadline)
+			if !strings.Contains(rec.fatal, tc.wantFail) || (tc.wantFail == "") != (rec.fatal == "") {
+				t.Fatalf("failure = %q, want one containing %q", rec.fatal, tc.wantFail)
+			}
+			if !strings.Contains(rec.skipped, tc.wantSkip) || (tc.wantSkip == "") != (rec.skipped == "") {
+				t.Fatalf("skip = %q, want one containing %q", rec.skipped, tc.wantSkip)
+			}
+		})
+	}
 }
 
 func descendantLeavingStub(t *testing.T, script string) string {

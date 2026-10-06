@@ -648,15 +648,25 @@ func RequireTopologyTooling(t *testing.T) (bdPath, doltPath string) {
 	if bdPath == "" {
 		MissingTooling(t, "bd is not available; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0")
 	}
-	out, err := ToolCommand(t, bdPath, "init", "--help").CombinedOutput()
-	if err != nil || !strings.Contains(string(out), "--proxied-server") {
-		MissingTooling(t, "bd at %s has no proxied-server support; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0", bdPath)
-	}
-	doltPath, err = exec.LookPath("dolt")
+	requireProxiedServerSupport(t, t, bdPath, acceptanceToolCommandTimeout)
+	doltPath, err := exec.LookPath("dolt")
 	if err != nil {
 		MissingTooling(t, "dolt is not installed")
 	}
 	return bdPath, doltPath
+}
+
+func requireProxiedServerSupport(t *testing.T, report skipOrFailer, bdPath string, timeout time.Duration) {
+	t.Helper()
+	cmd, ctx := toolCommand(t, timeout, bdPath, "init", "--help")
+	out, err := cmd.CombinedOutput()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		report.Fatalf("bd at %s: init --help exceeded %s:\n%s", bdPath, timeout, out)
+		return
+	}
+	if err != nil || !strings.Contains(string(out), "--proxied-server") {
+		skipOrFail(report, EnvRequireTooling, fmt.Sprintf("bd at %s has no proxied-server support; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0", bdPath))
+	}
 }
 
 var bdVersionPattern = regexp.MustCompile(`bd version (\d+\.\d+\.\d+[0-9A-Za-z.+-]*)`)
