@@ -242,6 +242,64 @@ func (s *Store) UpdateMetadataFenced(id string, attempts int, decide func(Info, 
 	return false, nil
 }
 
+// RowPatch is one fenced row write: a metadata patch, a title (nil leaves it)
+// and label deltas. Labels travel as deltas, never as a whole set.
+type RowPatch struct {
+	Metadata     MetadataPatch
+	Title        *string
+	AddLabels    []string
+	RemoveLabels []string
+}
+
+func (p RowPatch) empty() bool {
+	return len(p.Metadata) == 0 && p.Title == nil && len(p.AddLabels) == 0 && len(p.RemoveLabels) == 0
+}
+
+// UpdateRowFenced writes metadata, title and labels decided from a fresh read
+// of the row in one UpdateIfMatch at that read's revision. A lost CAS re-reads
+// and runs decide again, up to attempts times, after which nothing is written.
+// decide returning false or an empty patch writes nothing. Unlike
+// UpdateMetadataFenced it never writes blind: without a conditional writer it
+// returns beads.ErrConditionalWriteUnsupported, and a store that cannot guard
+// labels returns its *beads.ConditionalUpdateFieldUnsupportedError; either
+// way nothing is written. A success means the deltas applied, not that the
+// label set equals the read set plus the deltas (a legacy label-only write on
+// native Dolt does not move the revision). It reports whether it wrote.
+func (s *Store) UpdateRowFenced(id string, attempts int, decide func(Info) (RowPatch, bool)) (bool, error) {
+	writer, _, err := beads.ResolveConditionalWriter(s.store)
+	if err != nil {
+		return false, fmt.Errorf("updating session %q: %w", id, err)
+	}
+	if writer == nil {
+		return false, fmt.Errorf("updating session %q: %w", id, beads.ErrConditionalWriteUnsupported)
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
+		bead, err := s.validatedBead(id)
+		if err != nil {
+			return false, err
+		}
+		patch, ok := decide(infoFromPersistedBead(bead))
+		if !ok || patch.empty() {
+			return false, nil
+		}
+		err = writer.UpdateIfMatch(id, bead.Revision, beads.UpdateOpts{
+			Metadata:     map[string]string(patch.Metadata),
+			Title:        patch.Title,
+			Labels:       patch.AddLabels,
+			RemoveLabels: patch.RemoveLabels,
+		})
+		switch {
+		case err == nil:
+			return true, nil
+		case beads.IsPreconditionFailed(err):
+			continue
+		default:
+			return false, fmt.Errorf("updating session %q: %w", id, err)
+		}
+	}
+	return false, nil
+}
+
 // sameLifecycleFacts reports whether a and b agree on every persisted fact the
 // lifecycle projection reads (LifecycleInputFromInfo). Comparing the projected
 // inputs rather than a hand-picked key list keeps this check in step with the
