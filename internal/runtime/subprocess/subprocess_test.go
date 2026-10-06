@@ -1350,3 +1350,24 @@ func TestSubprocessStartFailureCleansSidecar(t *testing.T) {
 		t.Errorf("socket name artifact after failed Start: %v, want not exist", err)
 	}
 }
+
+// LL6, I24: subprocess is already fresh-only. A held name returns
+// ErrSessionExists with FreshOnly set, and the holder is neither replaced nor
+// stopped. Kills a recycle of a held name inside Start.
+func TestAcpSubprocessAlreadyFreshOnly(t *testing.T) {
+	p := NewProviderWithDir(shortTempDir(t))
+	p.ops.start = func(*exec.Cmd) error {
+		t.Fatal("Start spawned a process for a held name")
+		return nil
+	}
+	holder := &sessionConn{done: make(chan struct{})}
+	p.procs["held"] = holder
+
+	err := p.Start(context.Background(), "held", runtime.Config{Command: "true", FreshOnly: true})
+	if !errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("Start = %v, want runtime.ErrSessionExists", err)
+	}
+	if p.procs["held"] != holder || !holder.alive() {
+		t.Fatal("Start replaced or stopped the runtime holding the name")
+	}
+}
