@@ -433,6 +433,16 @@ case "${GC_FAKE_DF_MODE:-}" in
     printf 'tmpfs\t104857600\t103809024\t1048576\t99%%\t/\n'
     exit 0
     ;;
+  df_critical_spaced_names)
+    printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+    printf 'server:/volume name 104857600 103809024 1048576 99%% /mnt/dolt data\n'
+    exit 0
+    ;;
+  df_ambiguous)
+    printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+    printf 'tmpfs 104857600 84457472 20971520 - /\n'
+    exit 0
+    ;;
   df_overcommitted)
     printf 'Filesystem\t1024-blocks\tUsed\tAvailable\tCapacity\tMounted on\n'
     printf '/dev/sda1\t104857600\t104980480\t-122880\t101%%\t/\n'
@@ -6439,6 +6449,9 @@ func TestCompactScriptDiskPreflightHoldsSharedHistoryPendingGCWithoutSelection(t
 			if strings.Contains(string(logData), "DOLT_GC('--full')") || strings.Contains(string(logData), "DOLT_RESET") {
 				t.Fatalf("unselected shared-history pending GC must not run full GC or flatten:\n%s", logData)
 			}
+			if !strings.Contains(string(logData), "db=beads query=CALL DOLT_GC()") {
+				t.Fatalf("held shared-history database must still get its working-set GC:\n%s", logData)
+			}
 			if _, err := os.Stat(marker); err != nil {
 				t.Fatalf("pending-GC marker must survive a held run: %v", err)
 			}
@@ -6472,6 +6485,36 @@ func TestCompactScriptDiskPreflightAllowsSelectedSharedHistoryPendingGCRecovery(
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("successful shared-history pending-GC recovery did not clear marker: %v", err)
+	}
+}
+
+func TestCompactScriptDiskPreflightParsesSpacedFilesystemNames(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_FAKE_DF_MODE=df_critical_spaced_names", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("critical disk with spaced filesystem names should skip safely: %v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "disk CRITICAL: free_bytes=1073741824 ") {
+		t.Fatalf("spaced filesystem name was not parsed as critical disk:\n%s", out)
+	}
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(logData), "DOLT_RESET") || strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("spaced filesystem name must not bypass the disk guard:\n%s", logData)
+	}
+}
+
+func TestCompactScriptDiskPreflightAmbiguousOutputExitsOne(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_FAKE_DF_MODE=df_ambiguous")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("df output without a capacity column should exit 1: got err=%v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "disk pre-flight probe failed") {
+		t.Fatalf("expected disk pre-flight failure output:\n%s", out)
 	}
 }
 
