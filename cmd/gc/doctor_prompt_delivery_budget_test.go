@@ -167,6 +167,12 @@ func TestPromptDeliveryBudgetCheck_OversizedRaw_UnsupportedRuntime(t *testing.T)
 	if !strings.Contains(details, "effective_mode=hard-fail") {
 		t.Errorf("details missing effective_mode=hard-fail: %v", res.Details)
 	}
+	rawBytes := len(body) + startupPromptOverhead(agent.Name)
+	wantBudget := fmt.Sprintf("prompt %d raw bytes / %d argv-encoded bytes (limits: %d raw / %d argv-encoded)",
+		rawBytes, rawBytes+2, maxPromptSuffixRawBytes, maxPromptSuffixQuotedBytes)
+	if !strings.Contains(details, wantBudget) {
+		t.Errorf("hard-fail details missing byte counts and limits %q: %v", wantBudget, res.Details)
+	}
 }
 
 func TestPromptDeliveryBudgetCheck_OversizedQuoted_UnsupportedRuntime(t *testing.T) {
@@ -196,6 +202,12 @@ func TestPromptDeliveryBudgetCheck_OversizedQuoted_UnsupportedRuntime(t *testing
 	}
 	if !strings.Contains(details, "effective_mode=hard-fail") {
 		t.Errorf("details missing effective_mode=hard-fail: %v", res.Details)
+	}
+	overhead := startupPromptOverhead(agent.Name)
+	wantBudget := fmt.Sprintf("prompt %d raw bytes / %d argv-encoded bytes (limits: %d raw / %d argv-encoded)",
+		len(body)+overhead, 4*len(body)+2+overhead, maxPromptSuffixRawBytes, maxPromptSuffixQuotedBytes)
+	if !strings.Contains(details, wantBudget) {
+		t.Errorf("hard-fail details missing byte counts and limits %q: %v", wantBudget, res.Details)
 	}
 }
 
@@ -411,6 +423,34 @@ func TestPromptDeliveryBudgetCheck_MultipleAgents_WorstCaseWins(t *testing.T) {
 	}
 	if strings.Contains(details, okAgent.Name) {
 		t.Errorf("details unexpectedly mention the OK agent %q, which contributed nothing: %v", okAgent.Name, res.Details)
+	}
+}
+
+func TestPromptDeliveryBudgetCheck_HardFailFindingsSortedByAgentName(t *testing.T) {
+	clearPromptDeliveryBudgetEnv(t)
+	cityPath := t.TempDir()
+	tmpl := writePromptFile(t, cityPath, "prompts/all-oversized.md", strings.Repeat("a", 100000))
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Agents: []config.Agent{
+			promptFixtureAgent("zeta", tmpl, "subprocess", "arg"),
+			promptFixtureAgent("middle", tmpl, "subprocess", "arg"),
+			promptFixtureAgent("alpha", tmpl, "subprocess", "arg"),
+		},
+	}
+
+	res := runPromptDeliveryBudgetCheck(t, cfg, cityPath)
+	if res.Status != doctor.StatusError {
+		t.Fatalf("three oversized prompts: status = %v, want StatusError; details=%v", res.Status, res.Details)
+	}
+	wantOrder := []string{"alpha", "middle", "zeta"}
+	if len(res.Details) != len(wantOrder) {
+		t.Fatalf("findings = %d, want %d; details=%v", len(res.Details), len(wantOrder), res.Details)
+	}
+	for i, name := range wantOrder {
+		if !strings.HasPrefix(res.Details[i], name+": hard-fail:") {
+			t.Errorf("finding %d = %q, want hard-fail for %q", i, res.Details[i], name)
+		}
 	}
 }
 
