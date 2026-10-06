@@ -82,7 +82,10 @@
         "max_action_timeout": 1260,
         "additional_environment": {
           "RBE_X_TIMEOUT_MS": "timeout_millis",
-          "RBE_X_SIDE_CHANNEL": "side_channel_file"
+          "RBE_X_SIDE_CHANNEL": "side_channel_file",
+          "RBE_X_NETWORK": {
+            "property": "network"
+          }
         }
       }
     }
