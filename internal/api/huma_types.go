@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 )
 
@@ -244,6 +245,10 @@ func mutationError(err error) error {
 	case errors.Is(err, configedit.ErrPackDerived):
 		return huma.Error409Conflict(msg)
 	case errors.Is(err, configedit.ErrValidation):
+		return huma.Error400BadRequest(msg)
+	case errors.Is(err, config.ErrPatchTargetNotFound):
+		// A patch named a target absent from the merged config; the edit was
+		// rolled back, so this is the client's error.
 		return huma.Error400BadRequest(msg)
 	default:
 		return huma.Error500InternalServerError(msg)

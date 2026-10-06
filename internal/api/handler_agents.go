@@ -282,6 +282,29 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 	return config.Agent{}, false
 }
 
+// agentConfigIdentity maps an agent identity the read paths accept to the
+// identity its durable config lives under. A rig-qualified identity that only
+// resolves through a generic scope="rig" template ("myrig/rigbot" served by
+// template "rigbot", see agentutil.ResolveQualifiedRigScopedTemplate) has no
+// config of its own, so edits address the template, as the CLI does; instance
+// reports that the identity was such a per-rig instance.
+func agentConfigIdentity(cfg *config.City, name string) (identity string, instance bool) {
+	if cfg == nil {
+		return name, false
+	}
+	for i := range cfg.Agents {
+		if config.AgentMatchesIdentity(&cfg.Agents[i], name) {
+			return name, false
+		}
+	}
+	template, ok := agentutil.ResolveQualifiedRigScopedTemplate(cfg, name)
+	if !ok {
+		return name, false
+	}
+	template.Dir = ""
+	return template.QualifiedName(), true
+}
+
 // findActiveBeadForAssignees returns the ID of the first in_progress bead
 // assigned to the given identities using the cached active snapshot. If rig is
 // non-empty, only that rig's store is searched; otherwise all stores are

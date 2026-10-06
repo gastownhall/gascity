@@ -1,6 +1,14 @@
 package config
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrPatchTargetNotFound reports a [patches] entry whose target is absent from
+// the merged config. Callers match it with errors.Is to tell a patch that names
+// a missing target (a client error) from other load failures.
+var ErrPatchTargetNotFound = errors.New("not found in merged config")
 
 // Patches holds all patch blocks from composition. Patches target existing
 // resources by identity key and modify specific fields. They are applied
@@ -375,7 +383,7 @@ func applyNamedSessionPatch(cfg *City, patch *NamedSessionPatch) error {
 		return err
 	}
 	if len(matches) == 0 {
-		return fmt.Errorf("named_session %q not found in merged config", target)
+		return fmt.Errorf("named_session %q %w", target, ErrPatchTargetNotFound)
 	}
 	if len(matches) > 1 {
 		return fmt.Errorf("named_session patch target %q is ambiguous; set name to the named_session identity", target)
@@ -479,7 +487,7 @@ func applyAgentPatch(cfg *City, patch *AgentPatch) error {
 			}
 		}
 		if !matched {
-			return fmt.Errorf("agent %q not found in merged config", qualifiedNameFromPatch("*", patch.Name))
+			return fmt.Errorf("agent %q %w", qualifiedNameFromPatch("*", patch.Name), ErrPatchTargetNotFound)
 		}
 		return nil
 	}
@@ -502,7 +510,7 @@ func applyAgentPatch(cfg *City, patch *AgentPatch) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("agent %q not found in merged config", target)
+	return fmt.Errorf("agent %q %w", target, ErrPatchTargetNotFound)
 }
 
 func applyAgentPatchFields(a *Agent, p *AgentPatch) {
@@ -752,7 +760,7 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("rig %q not found in merged config", patch.Name)
+	return fmt.Errorf("rig %q %w", patch.Name, ErrPatchTargetNotFound)
 }
 
 // applyGitHubPRMonitorPatch finds a GitHub PR monitor by name and applies
@@ -804,7 +812,7 @@ func applyGitHubPRMonitorPatch(cfg *City, patch *GitHubPRMonitorPatch) error {
 		}
 		return nil
 	}
-	return fmt.Errorf("github pr monitor %q not found in merged config", patch.Name)
+	return fmt.Errorf("github pr monitor %q %w", patch.Name, ErrPatchTargetNotFound)
 }
 
 // applyProviderPatch modifies a provider. If Replace is true, replaces the
@@ -814,11 +822,11 @@ func applyProviderPatch(cfg *City, patch *ProviderPatch) error {
 		return fmt.Errorf("provider patch: name is required")
 	}
 	if cfg.Providers == nil {
-		return fmt.Errorf("provider %q not found in merged config", patch.Name)
+		return fmt.Errorf("provider %q %w", patch.Name, ErrPatchTargetNotFound)
 	}
 	spec, ok := cfg.Providers[patch.Name]
 	if !ok {
-		return fmt.Errorf("provider %q not found in merged config", patch.Name)
+		return fmt.Errorf("provider %q %w", patch.Name, ErrPatchTargetNotFound)
 	}
 	if patch.Replace {
 		// Full replacement — build a new spec from patch fields only.
