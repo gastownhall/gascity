@@ -299,7 +299,7 @@ func TestRBEWorkerEnvDriftAwait(t *testing.T) {
 	}
 }
 
-// TestRBEWorkerEnvDriftPreflight: bazel-test learns whether the change moves
+// TestRBEWorkerEnvDriftPreflight: bazel.yml learns whether the change moves
 // the pin off the default branch's (no worker serves it before merge),
 // whether to measure the host, and fails a remote run on a pin with an open
 // drift issue instead of queueing it.
@@ -758,7 +758,7 @@ type ghStep struct {
 	With            map[string]any    `yaml:"with"`
 	Env             map[string]string `yaml:"env"`
 	Run             string            `yaml:"run"`
-	ContinueOnError bool              `yaml:"continue-on-error"`
+	ContinueOnError string            `yaml:"continue-on-error"` // a string: may be an expression
 }
 
 func parseWorkflow(t *testing.T, path string) ghWorkflow {
@@ -818,7 +818,7 @@ func checkDriftReportJob(t *testing.T, path string, job ghJob, needs string) {
 		t.Errorf("%s report job concurrency %v, want group %s without cancel-in-progress", path, job.Concurrency, rbeWorkerEnvReportGrp)
 	}
 	_, dl := findStep(job, uses("actions/download-artifact"))
-	if dl == nil || dl.With["name"] != rbeWorkerEnvDriftName || !dl.ContinueOnError {
+	if dl == nil || dl.With["name"] != rbeWorkerEnvDriftName || dl.ContinueOnError != "true" {
 		t.Errorf("%s report job: download of %s missing or not continue-on-error: %+v", path, rbeWorkerEnvDriftName, dl)
 	}
 	_, rep := findStep(job, runs(rbeWorkerEnvDrift+" report "))
@@ -872,7 +872,7 @@ func TestRBEPoolWorkflowsReportDriftWhileServing(t *testing.T) {
 				t.Errorf("worker permissions %v: the worker VM gets no token beyond contents: read", worker.Permissions)
 			}
 			measureAt, measure := findStep(worker, isMeasureStep)
-			if measure == nil || measure.ID != "worker-env" || !measure.ContinueOnError || len(measure.Env) != 1 {
+			if measure == nil || measure.ID != "worker-env" || measure.ContinueOnError != "true" || len(measure.Env) != 1 {
 				t.Fatalf("worker job: no continue-on-error measure step (id worker-env, WORKER_MODE=measure alone): %+v", measure)
 			}
 			upAt := checkDriftUpload(t, path, worker, measureAt, "steps.worker-env.outcome == 'failure'")
@@ -882,8 +882,8 @@ func TestRBEPoolWorkflowsReportDriftWhileServing(t *testing.T) {
 			if serveAt < upAt {
 				t.Errorf("the pool worker step (%d) must come after the drift upload (%d)", serveAt, upAt)
 			}
-			if serve := worker.Steps[serveAt]; serve.If != "" || serve.ContinueOnError {
-				t.Errorf("the pool worker step runs if %q, continue-on-error %v; it must run whatever the measurement said", serve.If, serve.ContinueOnError)
+			if serve := worker.Steps[serveAt]; serve.If != "" || serve.ContinueOnError == "true" {
+				t.Errorf("the pool worker step runs if %q, continue-on-error %q; it must run whatever the measurement said", serve.If, serve.ContinueOnError)
 			}
 			upload := worker.Steps[upAt].Name
 
@@ -955,64 +955,8 @@ func TestRBEWorkerEnvCanaryWorkflow(t *testing.T) {
 	}
 }
 
-// TestBazelTestWorkerEnvPreflight: the required bazel job asks the preflight
-// before any remote bazel run, skips the remote suite when the change moves
-// the pin, and measures its own Blacksmith host after every bazel run when
-// the change touches the worker host (the toolset install would re-key the
-// client's own actions if it came first).
-func TestBazelTestWorkerEnvPreflight(t *testing.T) {
-	wf := parseWorkflow(t, bazelTestWorkflow)
-	job := wf.Jobs["bazel"]
-	if job.Permissions["issues"] != "read" {
-		t.Errorf("bazel job permissions %v, want issues: read (drift issues)", job.Permissions)
-	}
-	certAt, _ := findStep(job, func(s ghStep) bool { return s.ID == "fork-cert" })
-	preAt, pre := findStep(job, func(s ghStep) bool { return s.ID == "worker-env" })
-	if pre == nil || preAt < certAt {
-		t.Fatalf("bazel job: no worker-env preflight step after fork-cert")
-	}
-	if !strings.Contains(pre.Run, rbeWorkerEnvDrift+` preflight "$RUNNER_TEMP/worker-env-base.bazel" "$RUNNER_TEMP/worker-env-changed"`) {
-		t.Errorf("preflight step does not run %s preflight:\n%s", rbeWorkerEnvDrift, pre.Run)
-	}
-	for k, v := range map[string]string{
-		"GH_TOKEN":       "${{ github.token }}",
-		"DEFAULT_BRANCH": "${{ github.event.repository.default_branch }}",
-		"RBE_FORK_CERT":  bazelRCForkCertEnv,
-	} {
-		if pre.Env[k] != v {
-			t.Errorf("preflight env %s = %q, want %q", k, pre.Env[k], v)
-		}
-	}
-	// Remote exactly when the bazel steps add --config=remote-exec.
-	if !strings.Contains(pre.Run, `if [ -n "$BAZEL_REMOTE_EXECUTOR" ] || [ -n "$RBE_FORK_CERT" ]; then export WORKER_ENV_REMOTE=true; fi`) {
-		t.Errorf("preflight step does not set WORKER_ENV_REMOTE as the remote-exec guard does:\n%s", pre.Run)
-	}
-	const skip = "steps.worker-env.outputs.pin-moved != 'true'"
-	lastBazel := -1
-	for i, s := range job.Steps {
-		if !regexp.MustCompile(`(?m)^\s*bazel "\$\{ARGS\[@\]\}" (test|coverage)`).MatchString(s.Run) {
-			continue
-		}
-		lastBazel = i
-		if i < preAt {
-			t.Errorf("step %q runs bazel before the worker-env preflight", s.Name)
-		}
-		if !strings.Contains(s.If, skip) && !strings.Contains(s.If, "github.ref == 'refs/heads/main'") {
-			t.Errorf("step %q if %q: a moved pin must skip it (%s)", s.Name, s.If, skip)
-		}
-	}
-	measAt, meas := findStep(job, runs(rbeWorkerScript))
-	if meas == nil || meas.If != "always() && steps.worker-env.outputs.measure == 'true'" ||
-		len(meas.Env) != 1 || meas.Env["WORKER_MODE"] != "measure" {
-		t.Fatalf("bazel job: no host measurement step (if measure, WORKER_MODE=measure): %+v", meas)
-	}
-	if measAt < lastBazel {
-		t.Errorf("the host measurement (step %d) runs before a bazel run (step %d): its toolset install would re-key the client's actions", measAt, lastBazel)
-	}
-}
-
 // TestBazelMultiLaneWorkerEnvPreflight: bazel.yml's remote jobs ask the
-// worker-env preflight as bazel-test.yml's bazel job does. The lane job asks
+// worker-env preflight before any remote bazel run. The lane job asks
 // before setup-bazel (no rbe-fork certificate for a run that would only
 // queue), counts as remote in exactly the modes setup-bazel attaches a
 // remote executor, skips Bazel when the change moves the pin, and its unit

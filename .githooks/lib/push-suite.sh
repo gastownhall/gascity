@@ -12,7 +12,7 @@
 #                and the maintainer's mTLS client certificate, either
 #                .bazelrc.local's build:remote-exec lines or a machine rc
 #                (agent hosts set `build --remote_executor=...` in ~/.bazelrc).
-#   CI           the trusted writer (bazel-test.yml); never this script.
+#   CI           the trusted writer (bazel.yml); never this script.
 #
 # GC_PREPUSH_SUITE picks the mode (default auto):
 #   auto   remote-exec when bazel is installed and its effective options name

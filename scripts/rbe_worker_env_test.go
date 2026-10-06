@@ -370,7 +370,7 @@ func platformFlag(flag string) bool {
 
 // TestBazelExecutesOnWorkerPlatform: .bazelrc selects //platforms:rbe_worker
 // unconditionally (a key-affecting flag under remote-exec or fork-cache, or
-// in a CI-written .bazelrc.local, would key those runs apart) and nothing
+// in a CI-written rc, would key those runs apart) and nothing
 // else touches platforms or exec properties, and the PATH CI's tests run
 // with is the one worker-env measures.
 func TestBazelExecutesOnWorkerPlatform(t *testing.T) {
@@ -396,36 +396,6 @@ func TestBazelExecutesOnWorkerPlatform(t *testing.T) {
 		t.Errorf(".bazelrc platform flags %q, want %q alone", platforms, want)
 	}
 
-	var config *bazelTestWorkflowStep
-	steps := bazelTestWorkflowSteps(t, root)
-	for i := range steps {
-		if steps[i].Name == bazelRCConfigStep {
-			config = &steps[i]
-		}
-	}
-	if config == nil {
-		t.Fatalf("%s has no %q step", bazelTestWorkflow, bazelRCConfigStep)
-	}
-	pem := "eA=="
-	for name, env := range map[string]map[string]string{
-		"trusted": {
-			"BAZEL_REMOTE_EXECUTOR": "grpcs://executor.invalid:443", "BAZEL_FORK_CACHE": "true",
-			"RBE_INSTANCE": "oss", "RBE_TLS_CERT": pem, "RBE_TLS_KEY": pem,
-		},
-		"fork": {"BAZEL_REMOTE_EXECUTOR": "", "BAZEL_FORK_CACHE": "true"},
-	} {
-		for _, line := range runBazelRCConfigStep(t, config.Run, env) {
-			for _, flag := range strings.Fields(line) {
-				if platformFlag(flag) {
-					t.Errorf("%s .bazelrc.local sets %q; platform flags are key-affecting and belong in .bazelrc", name, line)
-				}
-			}
-			// A CI-written test PATH (today's bazel-test.yml) wins over .bazelrc's.
-			if v, ok := strings.CutPrefix(line, "test --test_env=PATH="); ok && name == "trusted" {
-				testPath = v
-			}
-		}
-	}
 	// bazel.yml's lanes: setup-bazel's generated rc stays off platforms too
 	// (.bazelrc's build:ci lines are checked above with every other config).
 	for _, line := range strings.Split(readFile(t, root, ".github/actions/setup-bazel/write-bazelrc.sh"), "\n") {
