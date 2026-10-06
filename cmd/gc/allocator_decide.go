@@ -214,6 +214,10 @@ type decidePass struct {
 	plans    []allocPlan
 	trace    []allocTraceRecord
 	alerts   []string
+
+	// index is the realization index (allocator_index.go); nil realizes
+	// over the pass's own params, the index's oracle.
+	index *passIndex
 }
 
 // selection is a row the pass placed InDesired.
@@ -261,6 +265,7 @@ func newDecidePass(in allocInputs) *decidePass {
 		},
 		none:     make(map[rowKey]string),
 		byID:     make(map[string]rowKey),
+		index:    newPassIndex(),
 		standIns: make(map[string]string),
 		desired:  make(map[string]TemplateParams),
 		selected: make(map[rowKey]*selection),
@@ -321,7 +326,7 @@ func (p *decidePass) classifyRows() {
 			Key:      k,
 			Basis:    rowBasis{Incarnation: row.Incarnation, InstanceToken: row.InstanceToken},
 			Template: template,
-			Endpoint: endpointKeyForAgent(p.cfg, findAgentByTemplate(p.cfg, template), row.Info),
+			Endpoint: endpointKeyForAgent(p.cfg, p.agentByTemplate(template), row.Info),
 		}
 		o, observed := p.obs[k]
 		if observed {
@@ -641,7 +646,7 @@ func (p *decidePass) floors() {
 		byTemplate[template] = append(byTemplate[template], k)
 	}
 	for template, keys := range byTemplate {
-		agent := findAgentByTemplate(p.cfg, template)
+		agent := p.agentByTemplate(template)
 		if agent == nil {
 			continue
 		}
@@ -716,7 +721,7 @@ func (p *decidePass) retains(template string, info session.Info) bool {
 // agentSuspended reports a configured template whose agent or rig is
 // suspended: its undesired rows drain as suspended, not orphaned.
 func (p *decidePass) agentSuspended(template string) bool {
-	agent := findAgentByTemplate(p.cfg, template)
+	agent := p.agentByTemplate(template)
 	return agent != nil && (agent.Suspended || agentInSuspendedRig(p.in.CityPath, agent, p.cfg.Rigs, p.in.SuspendedRigPaths))
 }
 

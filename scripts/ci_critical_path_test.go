@@ -969,9 +969,7 @@ func TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns(t *testin
 		changed   bool
 	}{
 		{run: "make lint-affected", condition: changedCondition, changed: true},
-		{run: "make fmt-check-changed", condition: changedCondition, changed: true},
 		{run: "make lint", condition: fullCondition},
-		{run: "make fmt-check", condition: fullCondition},
 		{run: "make vet", condition: fullCondition},
 	} {
 		if got := runCounts[tc.run]; got != 1 {

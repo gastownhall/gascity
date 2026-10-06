@@ -1,4 +1,5 @@
 GOLANGCI_LINT_VERSION := 2.12.0
+OASDIFF_VERSION := 1.33.0
 BUILDX_VERSION := 0.21.2
 
 # Detect OS and arch for binary download.
@@ -7,6 +8,7 @@ GOARCH := $(shell go env GOARCH)
 
 BIN_DIR := $(shell go env GOPATH)/bin
 GOLANGCI_LINT := $(BIN_DIR)/golangci-lint
+OASDIFF := $(BIN_DIR)/oasdiff
 
 BINARY     := gc
 BUILD_DIR  := bin
@@ -103,7 +105,7 @@ endif
 endif
 endif
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-hooks check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-full lint-new lint-changed lint-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-beads-topology-matrix test-bd-cli-contract test-bd-cli-contract-home-isolation test-bd-conditional-release-contract test-acceptance-b test-acceptance-split-storage test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-hooks check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-full lint-new lint-changed lint-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-beads-topology-matrix test-bd-cli-contract test-bd-cli-contract-home-isolation test-bd-conditional-release-contract test-acceptance-b test-acceptance-split-storage test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx install-oasdiff openapi-breaking-check setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
 .PHONY: check-release-dist-ignore
 
 ## build: compile gc binary with version metadata
@@ -919,8 +921,8 @@ test-cover-cmdgc-shard:
 cover: test-cover
 	go tool cover -func=coverage.txt
 
-## install-tools: install pinned golangci-lint + oapi-codegen
-install-tools: $(GOLANGCI_LINT) install-oapi-codegen
+## install-tools: install pinned golangci-lint + oapi-codegen + oasdiff
+install-tools: $(GOLANGCI_LINT) install-oapi-codegen install-oasdiff
 
 $(GOLANGCI_LINT):
 	@echo "Installing golangci-lint v$(GOLANGCI_LINT_VERSION)..."
@@ -948,6 +950,23 @@ install-oapi-codegen:
 		echo "Installing oapi-codegen..." >&2; \
 		go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0; \
 	fi
+
+## install-oasdiff: install the pinned oasdiff used by openapi-breaking-check.
+## Reinstalls when the binary on disk is a different version.
+.PHONY: install-oasdiff
+install-oasdiff:
+	@if ! go version -m $(OASDIFF) 2>/dev/null | grep -Eq '^[[:space:]]+mod[[:space:]]+github.com/oasdiff/oasdiff[[:space:]]+v$(OASDIFF_VERSION)([[:space:]]|$$)'; then \
+		echo "Installing oasdiff v$(OASDIFF_VERSION)..." >&2; \
+		GOBIN=$(BIN_DIR) go install github.com/oasdiff/oasdiff@v$(OASDIFF_VERSION); \
+	fi
+
+## openapi-breaking-check: fail when internal/api/openapi.json breaks clients of
+## the base spec (OPENAPI_BREAKING_BASE, default merge-base with origin/main).
+## Waive intentional breaks in internal/api/openapi-breaking.toml.
+.PHONY: openapi-breaking-check
+openapi-breaking-check: install-oasdiff
+	GC_REQUIRE_OASDIFF=1 OASDIFF=$(OASDIFF) go test -count=1 ./cmd/openapi-breaking
+	OASDIFF=$(OASDIFF) go run ./cmd/openapi-breaking
 
 ## install-buildx: install docker buildx plugin
 install-buildx:
@@ -1106,7 +1125,8 @@ dashboard-ci: dashboard-check
 		exit 1; \
 	fi
 
-## spec-ci: regenerate the OpenAPI spec + generated Go client, fail on drift.
+## spec-ci: regenerate the OpenAPI spec + generated Go client, fail on drift,
+## then run the OpenAPI breaking-change gate (openapi-breaking-check).
 ## Used by CI to enforce that internal/api/openapi.json, docs/reference/schema JSON
 ## artifacts, compatibility .txt mirrors, and internal/api/genclient/client_gen.go
 ## are all in lock-step with Huma.
@@ -1118,6 +1138,7 @@ spec-ci: install-oapi-codegen
 		git --no-pager diff --stat -- internal/api/openapi.json docs/reference/schema/openapi.json docs/reference/schema/openapi.txt docs/reference/schema/events.json docs/reference/schema/events.txt internal/api/genclient/client_gen.go; \
 		exit 1; \
 	fi
+	@$(MAKE) --no-print-directory openapi-breaking-check
 
 ## docker-base: build base image with system dependencies (~2.5 min, rebuild rarely)
 docker-base: check-docker

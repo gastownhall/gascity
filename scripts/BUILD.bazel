@@ -1,10 +1,81 @@
 load("@rules_go//go:def.bzl", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+exports_files([
+    "check-generated-in-sync.sh",
+    "check-go-format.sh",
+])
+
+# The repo's shell guards (formerly preflight-static steps), each with
+# exactly the inputs it reads.
+
+sh_test(
+    name = "check_gomod_replace_test",
+    srcs = ["check-gomod-replace.sh"],
+    args = ["$(rootpath //:go.mod)"],
+    data = ["//:go.mod"],
+)
+
+# Scans every non-test Go file (the guard skips _test.go, testdata/ and
+# vendor/ itself).
+sh_test(
+    name = "check_core_boundary_test",
+    srcs = ["check-core-boundary.sh"],
+    args = ["--declared-tree"],
+    data = [
+        "//:go.mod",
+        "//:repo_go_srcs",
+    ],
+)
+
+# Check #3 (pkg/eventexport imports nothing from internal/) reads the Bazel
+# dependency graph instead of `go list -deps`.
+genquery(
+    name = "eventexport_deps",
+    expression = "deps(//pkg/eventexport)",
+    scope = ["//pkg/eventexport"],
+)
+
+sh_test(
+    name = "check_eventexport_isolation_test",
+    srcs = ["check-eventexport-isolation.sh"],
+    args = [
+        "--deps-file",
+        "$(rootpath :eventexport_deps)",
+    ],
+    data = [
+        ":eventexport_deps",
+        "//cmd/gc:event_export.go",
+        "//internal/eventfeed:bazel_repo_srcs",
+        "//internal/supervisor:config.go",
+        "//pkg/eventexport:bazel_repo_srcs",
+    ],
+)
+
+# Measures the hermetic //cmd/gc. That link is cgo (Dolt's ICU regex), so
+# it is larger than the CGO_ENABLED=0 release-shaped build the script's
+# default cap is measured against: 207,034,352 bytes at 9fdc52d82c versus
+# 180,287,491 for the release shape. The cap keeps the same ~5.4% headroom.
+sh_test(
+    name = "check_native_dependency_surface_test",
+    srcs = ["check-native-dependency-surface.sh"],
+    args = [
+        "--gc-binary",
+        "$(rootpath //cmd/gc)",
+    ],
+    data = [
+        "//:go.sum",
+        "//cmd/gc",
+    ],
+    env = {"GC_NATIVE_DEP_MAX_BINARY_BYTES": "218000000"},
+)
 
 go_test(
     name = "scripts_test",
     srcs = [
         "acceptance_failure_diagnostics_test.go",
         "acceptance_run_selection_test.go",
+        "acceptance_shards_test.go",
         "add_testenv_import_test.go",
         "bazel_bep_summary_workflow_test.go",
         "bazel_fork_cache_test.go",
@@ -15,6 +86,7 @@ go_test(
         "bazel_multilane_test.go",
         "bazel_no_flaky_retries_test.go",
         "bazel_output_cache_test.go",
+        "bazel_repo_tree_test.go",
         "bazel_test_tmp_bt_test.go",
         "bd_version_pin_test.go",
         "build_provenance_test.go",
@@ -75,6 +147,7 @@ go_test(
         ["**"],
         exclude = ["BUILD.bazel"],
     ) + [
+        "BUILD.bazel",
         "//:.bazelrc",
         "//:.bazelversion",
         "//:MODULE.bazel",
@@ -86,6 +159,7 @@ go_test(
         "//platforms:BUILD.bazel",
         "//scripts/testdata/test-go-test-shard/env_required:pkg_files",
         "//scripts/testdata/test-go-test-shard/no_extra_env:pkg_files",
+        "//test/acceptance:BUILD.bazel",
         "//test/integration:BUILD.bazel",
     ],
     shard_count = 6,
@@ -103,6 +177,11 @@ go_test(
     ],
 )
 
+exports_files(
+    ["routed-test-rows.manifest"],
+    visibility = ["//visibility:public"],
+)
+
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(
@@ -111,6 +190,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

@@ -120,11 +120,35 @@ in CI secrets. The repo's `.bazelrc` has no executor hardcoded.
 After adding a package, a file, or changing imports:
 
 ```bash
-make bazel-sync     # regenerates BUILD files + the repo source tree
+make bazel-sync     # regenerates BUILD files + the repo file trees
 git add -A && git commit -m "build: sync"   # the CI gate checks this
 ```
 
 The CI gate `BUILD files are in sync` fails if you forget.
+
+## Declaring the repo files a test reads
+
+A test that reads repository files (a guard that scans source, a pack
+fixture, a published schema) must list them in its `go_test` `data`,
+together with `//:go.mod`, which is how `internal/bazeltest` finds the
+root. Declare the narrowest set that covers the reads: every declared
+file is part of the test's cache key, so a wider set re-runs the test on
+unrelated edits.
+
+| the test reads | declare |
+|---|---|
+| a few specific files | the file labels (`exports_files` them if needed) |
+| one package's files | `//pkg:bazel_repo_srcs`, `:bazel_go_srcs` or `:bazel_go_test_srcs` |
+| an example or pack tree | `//examples/<name>:pack_files`, `//examples:all_examples`, `//internal/bootstrap/packs/core:pack_files` |
+| every non-test `.go` file | `//:repo_go_srcs` |
+| every `_test.go` file | `//:repo_go_test_srcs` |
+| docs, workflows and source together | `//:repo_source_tree` |
+
+`make bazel-sync` (`tools/bazel/repo_tree.py`) generates the per-package
+filegroups and the root aggregates. Keep whole-repo guards in small
+dedicated targets (for example `//internal/beads/bdboundary`), not in a
+package's main test target: a guard that reads every `.go` file re-runs on
+every Go edit, and it takes its whole target with it.
 
 ## Troubleshooting
 

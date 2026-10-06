@@ -450,8 +450,7 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
-        "//:repo_source_tree",
-        "//docs:all_files",
+        "//docs:reference_schema",
         "//internal/worker:operation_events.go",
     ],
     embed = [":api"],
@@ -527,7 +526,12 @@ go_test(
     ],
 )
 
-exports_files(["handler_sessions.go"])
+exports_files([
+    "handler_sessions.go",
+    # Committed spec, compared against cmd/genspec output by
+    # //cmd/genspec:genspec_in_sync_test.
+    "openapi.json",
+])
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
@@ -537,6 +541,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

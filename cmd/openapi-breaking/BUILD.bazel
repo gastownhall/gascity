@@ -1,0 +1,68 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "openapi-breaking_lib",
+    srcs = [
+        "gate.go",
+        "main.go",
+        "policy.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/cmd/openapi-breaking",
+    visibility = ["//visibility:private"],
+    deps = ["@com_github_burntsushi_toml//:toml"],
+)
+
+go_binary(
+    name = "openapi-breaking",
+    embed = [":openapi-breaking_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "openapi-breaking_test",
+    srcs = [
+        "gate_test.go",
+        "oasdiff_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(["testdata/**"]) + [
+        "//:go.mod",
+        "//internal/api:bazel_repo_srcs",
+    ],
+    embed = [":openapi-breaking_lib"],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

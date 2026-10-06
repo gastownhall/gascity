@@ -28,7 +28,7 @@ var (
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
 	_ runtime.LivenessInvalidator           = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
-	_ runtime.FreshLivenessObserver         = (*Provider)(nil)
+	_ runtime.IncarnationLivenessObserver   = (*Provider)(nil)
 	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 	_ runtime.AttachmentObserverWithError   = (*Provider)(nil)

@@ -36,15 +36,14 @@ func TestMakeTestCIPolicyRunsStaticScopeContracts(t *testing.T) {
 }
 
 // TestMakeTestCIPolicyRunsVersionPinContracts keeps the bd and Dolt pin
-// contracts on the PR-time critical path.
+// contracts in the local `make test-ci-policy` sweep. (CI runs them, with the
+// rest of ./scripts, as //scripts:scripts_test in the required Bazel lane.)
 //
 // They assert that deps.env, go.mod, the workflow env blocks, the Dockerfiles
-// and the integration suite's own literal all name the same versions. The only
-// other CI jobs that sweep ./scripts — preflight-unit-cover-noncmdgc and
-// preflight-unit-cover-cmdgc — are `if: github.event_name == 'push'`, so
-// without this line a pin bump that misses one anchor goes green on the PR and
-// fails after merge. That is exactly how the integration suite sat on
-// v1.3.0-rc.2 while main pinned v1.3.0 (tracker ga-rnwg5u).
+// and the integration suite's own literal all name the same versions; a pin
+// bump that misses one anchor otherwise only fails in the push-only
+// integration shard, after merge. That is exactly how the integration suite
+// sat on v1.3.0-rc.2 while main pinned v1.3.0 (tracker ga-rnwg5u).
 //
 // It is a separate recipe line rather than more alternatives on the
 // static-scope one so that command stays byte-identical to what
