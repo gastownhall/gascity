@@ -1,0 +1,299 @@
+#!/usr/bin/env python3
+"""Export one city's production record for the reconciler v2 replay, read-only.
+
+Writes JSONL into a new output directory, for the window [--since, --until):
+
+  events.jsonl            mdash events for the city
+  controller_trace.jsonl  mdash controller_trace: cycle_result and decision
+                          records and the session_snapshot.load site
+  session_rows.jsonl      session rows. With --city-dir (maintainer-city) a
+                          copy of the graph store's session rows, opened
+                          read-only (mode=ro); without it (bd cities) the mdash
+                          bead_snapshots session rows in the window, plus each
+                          bead's last snapshot before it as the baseline
+  manifest.json           the arguments, sources and row counts
+
+mdash ClickHouse is 127.0.0.1:18124 (never :8123, which is another product).
+Queries run with readonly=1 and server-side parameters. The password is read
+from --password-file, sent as a header and never printed. The script refuses
+an output path inside a city directory and writes nothing outside --out.
+
+    scripts/v2-replay-export --city maintainer-city \\
+        --city-dir /data/projects/maintainer-city \\
+        --since 2026-10-05T00:00:00Z --until 2026-10-06T00:00:00Z \\
+        --password-file ~/.config/mdash/clickhouse.password --out /tmp/replay-mc
+    scripts/v2-replay-export --self-test   # fixtures only, no network
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import contextlib
+import datetime
+import io
+import json
+import os
+from pathlib import Path
+import socket
+import sqlite3
+import sys
+import tempfile
+import tomllib
+import urllib.parse
+import urllib.request
+
+CLICKHOUSE_URL = "http://127.0.0.1:18124/"
+CLICKHOUSE_USER = "mdash"
+CITIES_TOML = Path("~/.gc/cities.toml").expanduser()
+WINDOW = "city = {city:String} AND ts >= {since:DateTime64(6, 'UTC')} AND ts < {until:DateTime64(6, 'UTC')}"
+SESSION_WINDOW = WINDOW + " AND issue_type = 'session'"
+QUERIES = {
+    "events.jsonl": f"SELECT * EXCEPT ingested_at FROM events FINAL WHERE {WINDOW} ORDER BY seq",
+    "controller_trace.jsonl": (
+        f"SELECT * FROM controller_trace FINAL WHERE {WINDOW}"
+        " AND (record_type IN ('cycle_result', 'decision') OR site_code = 'session_snapshot.load') ORDER BY seq"
+    ),
+}
+BEAD_SNAPSHOTS = (
+    "SELECT * FROM ("
+    " SELECT * FROM bead_snapshots FINAL WHERE city = {city:String} AND issue_type = 'session'"
+    " AND ts < {since:DateTime64(6, 'UTC')} ORDER BY bead_id, seq DESC LIMIT 1 BY bead_id"
+    f" UNION ALL SELECT * FROM bead_snapshots FINAL WHERE {SESSION_WINDOW}"
+    ") ORDER BY bead_id, seq"
+)
+# Mirrors SQLiteStore.sqliteBeadProjection: bead_json plus the out-of-band
+# revision and claim fence. {revision} is "b.revision" or "0" (pre-revision).
+SQLITE_SESSIONS = (
+    "SELECT b.id, {revision}, COALESCE((SELECT value FROM kv k"
+    " WHERE k.key = 'gascity.claim-fence.v1/' || b.id), '0'), b.bead_json"
+    " FROM beads b WHERE b.issue_type = 'session' ORDER BY b.id"
+)
+
+
+class Refused(Exception):
+    """A rule this script keeps (read-only, output placement) would be broken."""
+
+
+def utc(text: str) -> str:
+    parsed = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise argparse.ArgumentTypeError(f"{text!r}: give a UTC offset (Z)")
+    return parsed.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--self-test", action="store_true", help="run against fixtures, no network")
+    parser.add_argument("--city", help="city name as mdash records it")
+    parser.add_argument("--city-dir", type=Path, help="city root; session rows come from its SQLite graph store")
+    parser.add_argument("--since", type=utc, help="window start, ISO 8601 with offset")
+    parser.add_argument("--until", type=utc, help="window end (exclusive)")
+    parser.add_argument("--password-file", type=Path, help="mdash ClickHouse password file")
+    parser.add_argument("--out", type=Path, help="output directory; must not exist or be empty")
+    parser.add_argument("--cities-toml", type=Path, default=CITIES_TOML, help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    if not args.self_test:
+        missing = [f"--{k.replace('_', '-')}" for k in ("city", "since", "until", "password_file", "out")
+                   if getattr(args, k) is None]
+        if missing:
+            parser.error("missing " + ", ".join(missing))
+        if args.since >= args.until:
+            parser.error("--since must be before --until")
+    return args
+
+
+def city_dirs(args: argparse.Namespace) -> list[Path]:
+    dirs = [args.city_dir] if args.city_dir else []
+    if args.cities_toml.is_file():
+        with args.cities_toml.open("rb") as f:
+            dirs += [Path(c["path"]) for c in tomllib.load(f).get("cities", []) if c.get("path")]
+    return [d.expanduser().resolve() for d in dirs]
+
+
+def prepare_out(args: argparse.Namespace) -> Path:
+    out = args.out.expanduser().resolve()
+    for d in city_dirs(args):
+        if out == d or d in out.parents:
+            raise Refused(f"output {out} is inside city directory {d}")
+    for d in (out, *out.parents):
+        if (d / "city.toml").exists():
+            raise Refused(f"output {out} is inside city directory {d} (city.toml)")
+    if out.exists() and (not out.is_dir() or any(out.iterdir())):
+        raise Refused(f"output {out} exists and is not an empty directory")
+    if not out.parent.is_dir():
+        raise Refused(f"output parent {out.parent} does not exist")
+    out.mkdir(exist_ok=True)
+    return out
+
+
+def out_path(out: Path, name: str) -> Path:
+    path = (out / name).resolve()
+    if path.parent != out:
+        raise Refused(f"{name} resolves outside the output directory")
+    return path
+
+
+def write_jsonl(out: Path, name: str, rows) -> int:
+    count = 0
+    with out_path(out, name).open("x", encoding="utf-8") as f:
+        for row in rows:
+            f.write(row if isinstance(row, str) else json.dumps(row, sort_keys=True) + "\n")
+            count += 1
+    return count
+
+
+def clickhouse(sql: str, params: dict[str, str], password: str, opener=urllib.request.urlopen):
+    """Streams JSONEachRow lines. Credentials travel in headers, never the URL.
+    POST: a GET is implicitly readonly and ClickHouse rejects an explicit readonly=1 on it."""
+    query = {"readonly": "1", "database": "mdash"}
+    query.update({f"param_{k}": v for k, v in params.items()})
+    req = urllib.request.Request(
+        CLICKHOUSE_URL + "?" + urllib.parse.urlencode(query), data=(sql + " FORMAT JSONEachRow").encode(),
+        headers={"X-ClickHouse-User": CLICKHOUSE_USER, "X-ClickHouse-Key": password}, method="POST")
+    with opener(req, timeout=600) as resp:
+        for line in io.TextIOWrapper(resp, encoding="utf-8"):
+            if line.strip():
+                yield line if line.endswith("\n") else line + "\n"
+
+
+def sqlite_sessions(city_dir: Path):
+    db = city_dir.expanduser().resolve() / ".gc" / "store" / "graph" / "beads.sqlite"
+    if not db.is_file():
+        raise Refused(f"no graph store at {db}")
+    conn = sqlite3.connect(f"file:{urllib.parse.quote(str(db))}?mode=ro", uri=True)
+    try:
+        conn.execute("PRAGMA query_only = ON")
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(beads)")}
+        revision = "b.revision" if "revision" in columns else "0"
+        for bead_id, rev, fence, raw in conn.execute(SQLITE_SESSIONS.format(revision=revision)):
+            yield {"id": bead_id, "revision": rev, "claim_fence": int(fence), "bead": json.loads(raw)}
+    finally:
+        conn.close()
+
+
+def export(args: argparse.Namespace, opener=urllib.request.urlopen) -> int:
+    out = prepare_out(args)
+    password = args.password_file.expanduser().read_text(encoding="utf-8").strip()
+    params = {"city": args.city, "since": args.since, "until": args.until}
+    counts = {}
+    for name, sql in QUERIES.items():
+        counts[name] = write_jsonl(out, name, clickhouse(sql, params, password, opener))
+    if args.city_dir:
+        source, rows = "sqlite (mode=ro), current rows", sqlite_sessions(args.city_dir)
+    else:
+        source, rows = "mdash bead_snapshots, baseline + window", clickhouse(BEAD_SNAPSHOTS, params, password, opener)
+    counts["session_rows.jsonl"] = write_jsonl(out, "session_rows.jsonl", rows)
+    manifest = {"city": args.city, "since": args.since, "until": args.until, "session_rows_source": source,
+                "rows": counts, "exported_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    with out_path(out, "manifest.json").open("x", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, sort_keys=True)
+    print(f"wrote {out}: " + ", ".join(f"{k}={v}" for k, v in counts.items()))
+    return 0
+
+
+def tree(root: Path) -> dict[str, bytes]:
+    # Skips the WAL index (-shm), where every WAL reader (mode=ro, `sqlite3
+    # -readonly`) takes its read lock. Database and -wal bytes are compared.
+    return {str(p): p.read_bytes() if p.is_file() else b"<dir>" for p in sorted(root.rglob("*"))
+            if not p.name.endswith("-shm")}
+
+
+def self_test() -> int:
+    secret = "s3cret-" + base64.b16encode(os.urandom(6)).decode()
+    calls = []
+
+    def fake_clickhouse(req, timeout):
+        url = urllib.parse.urlsplit(req.full_url)
+        query = dict(urllib.parse.parse_qsl(url.query))
+        assert url.netloc == "127.0.0.1:18124" and secret not in req.full_url, req.full_url
+        assert req.get_header("X-clickhouse-key") == secret and query["readonly"] == "1"
+        assert query["param_city"] == "fixture-city", query
+        query["query"] = req.data.decode()
+        calls.append(query["query"])
+        if "FROM controller_trace" in query["query"]:
+            assert query["query"].count(" OR ") == 1 and query["query"].endswith(
+                " AND (record_type IN ('cycle_result', 'decision') OR site_code = 'session_snapshot.load')"
+                " ORDER BY seq FORMAT JSONEachRow"), query["query"]
+            return io.BytesIO(b'{"seq":1,"record_type":"cycle_result"}\n{"seq":2,"record_type":"decision"}\n')
+        if "FROM bead_snapshots" in query["query"]:
+            return io.BytesIO(b'{"bead_id":"s-1","seq":1}\n')
+        return io.BytesIO(b'{"seq":7,"type":"session.woke"}\n')
+
+    def no_network(*_args, **_kw):
+        raise AssertionError("self-test must not touch the network")
+
+    connect, socket.socket.connect = socket.socket.connect, no_network
+    try:
+        with tempfile.TemporaryDirectory(prefix="v2-replay-export-") as tmp:
+            run_self_test(Path(tmp), secret, calls, fake_clickhouse)
+    finally:
+        socket.socket.connect = connect
+    print("self-test: ok")
+    return 0
+
+
+def run_self_test(root: Path, secret: str, calls: list[str], fake_clickhouse) -> None:
+    # city has a city.toml; listed is only in cities.toml. Each refusal rule is exercised alone.
+    city, listed = root / "fixture-city", root / "listed-city"
+    listed.mkdir()
+    (city / ".gc" / "store" / "graph").mkdir(parents=True)
+    (city / "city.toml").write_text("[workspace]\n")
+    db = sqlite3.connect(city / ".gc" / "store" / "graph" / "beads.sqlite")
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    db.execute("CREATE TABLE beads (id TEXT PRIMARY KEY, issue_type TEXT, bead_json TEXT, revision INTEGER)")
+    db.execute("INSERT INTO beads VALUES ('s-1','session','{\"id\":\"s-1\",\"status\":\"open\"}',4),"
+               "('w-1','task','{\"id\":\"w-1\"}',1)")
+    db.execute("INSERT INTO kv VALUES ('gascity.claim-fence.v1/s-1','9')")
+    db.commit()  # left open: the -wal and -shm stay, as on a live store
+    (root / "cities.toml").write_text(f'[[cities]]\npath = "{listed}"\nname = "listed-city"\n')
+    pw = root / "pw"
+    pw.write_text(secret + "\n")
+    base = ["--city", "fixture-city", "--since", "2026-10-05T00:00:00Z", "--until", "2026-10-06T00:00:00Z",
+            "--password-file", str(pw), "--cities-toml", str(root / "cities.toml")]
+    before = tree(root)
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        export(parse_args(base + ["--city-dir", str(city), "--out", str(root / "mc")]), fake_clickhouse)
+        export(parse_args(base + ["--out", str(root / "bd")]), fake_clickhouse)
+        for inside in (city / ".gc" / "replay", listed / "out"):
+            try:
+                export(parse_args(base + ["--out", str(inside)]), fake_clickhouse)
+                raise AssertionError(f"accepted output inside the city: {inside}")
+            except Refused:
+                pass
+        try:
+            out_path(root / "mc", "../escape.jsonl")
+            raise AssertionError("out_path allowed an escape")
+        except Refused:
+            pass
+    after = tree(root)
+    db.close()
+    outside = sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p)
+                     and not any(p == str(root / o) or p.startswith(str(root / o) + os.sep) for o in ("mc", "bd")))
+    assert not outside, f"wrote outside the output directory: {outside}"
+    rows = [json.loads(line) for line in (root / "mc" / "session_rows.jsonl").read_text().splitlines()]
+    assert rows == [{"id": "s-1", "revision": 4, "claim_fence": 9, "bead": {"id": "s-1", "status": "open"}}], rows
+    assert len((root / "mc" / "controller_trace.jsonl").read_text().splitlines()) == 2
+    assert {"city", "since", "until", "rows"} <= json.loads((root / "mc" / "manifest.json").read_text()).keys()
+    assert (root / "bd" / "session_rows.jsonl").read_text() == '{"bead_id":"s-1","seq":1}\n'
+    assert sum("FROM bead_snapshots" in c for c in calls) == 1 and len(calls) == 5, calls
+    for path, data in after.items():
+        assert secret.encode() not in data or path == str(pw), f"password leaked into {path}"
+    assert secret not in stdout.getvalue() + stderr.getvalue(), "password printed"
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    if args.self_test:
+        return self_test()
+    try:
+        return export(args)
+    except Refused as err:
+        print(f"v2-replay-export: refused: {err}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
