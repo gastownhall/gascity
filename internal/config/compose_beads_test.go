@@ -275,3 +275,63 @@ func TestBeadsModesRejectedOnBothLoadPaths(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadWithIncludesPreservesAllowSchemaBehindMigrateAcrossBeadsFragment is
+// the load-bearing regression for the schema-behind opt-in: an included
+// fragment that defines an unrelated [beads] key must NOT reset the root's
+// explicit allow_schema_behind_migrate, or the city's opt-in is silently off
+// and the behind-schema FAIL tells the operator to set a field they already
+// set.
+func TestLoadWithIncludesPreservesAllowSchemaBehindMigrateAcrossBeadsFragment(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[beads]
+allow_schema_behind_migrate = true
+`)
+	fs.Files["/city/fragment.toml"] = []byte(`
+[beads]
+conditional_writes = "auto"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if !cfg.Beads.AllowSchemaBehindMigrateEnabled() {
+		t.Fatalf("AllowSchemaBehindMigrateEnabled = false, want the root opt-in to survive a [beads] fragment")
+	}
+	if got := cfg.Beads.NormalizedConditionalWrites(); got != "auto" {
+		t.Fatalf("NormalizedConditionalWrites = %q, want the fragment's auto", got)
+	}
+}
+
+// TestLoadWithIncludesFragmentOverridesAllowSchemaBehindMigrate is the
+// companion: a fragment that DOES set allow_schema_behind_migrate must win
+// (LWW), so the preservation branch can't drift into "base value always wins."
+func TestLoadWithIncludesFragmentOverridesAllowSchemaBehindMigrate(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[beads]
+allow_schema_behind_migrate = true
+`)
+	fs.Files["/city/fragment.toml"] = []byte(`
+[beads]
+allow_schema_behind_migrate = false
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.Beads.AllowSchemaBehindMigrateEnabled() {
+		t.Fatalf("AllowSchemaBehindMigrateEnabled = true, want the fragment's false to win")
+	}
+}

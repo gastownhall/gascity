@@ -1141,12 +1141,14 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		// Preserve rollout-gate and kill-switch fields the fragment did not
 		// itself set: a fragment defining any [beads] key would otherwise
 		// reset the whole struct and silently downgrade an explicit
-		// conditional_writes / guarded_release opt-in, or turn an explicit
-		// native_transport = "off" back into the "auto" default (mirror of
-		// the daemon.formula_v2 preservation below). Capture before the
-		// overwrite; a fragment that DOES set the field still wins.
+		// conditional_writes / guarded_release / allow_schema_behind_migrate
+		// opt-in, or turn an explicit native_transport = "off" back into the
+		// "auto" default (mirror of the daemon.formula_v2 preservation below).
+		// Capture before the overwrite; a fragment that DOES set the field
+		// still wins.
 		conditionalWrites := base.Beads.ConditionalWrites
 		guardedRelease := base.Beads.GuardedRelease
+		allowSchemaBehindMigrate := base.Beads.AllowSchemaBehindMigrate
 		proxiedIdleTimeout := base.Beads.ProxiedIdleTimeout
 		nativeTransport := base.Beads.NativeTransport
 		base.Beads = fragment.Beads
@@ -1155,6 +1157,9 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		}
 		if !fragMeta.IsDefined("beads", "guarded_release") {
 			base.Beads.GuardedRelease = guardedRelease
+		}
+		if !fragMeta.IsDefined("beads", "allow_schema_behind_migrate") {
+			base.Beads.AllowSchemaBehindMigrate = allowSchemaBehindMigrate
 		}
 		if !fragMeta.IsDefined("beads", "proxied_idle_timeout") {
 			base.Beads.ProxiedIdleTimeout = proxiedIdleTimeout

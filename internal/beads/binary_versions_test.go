@@ -19,6 +19,8 @@ func TestParseBDVersion(t *testing.T) {
 		{name: "v prefix", in: "bd version v1.2.0", want: "1.2.0"},
 		{name: "trailing newline", in: "bd version 1.0.4\n", want: "1.0.4"},
 		{name: "multiline takes first", in: "bd version 1.0.4\nschema 7", want: "1.0.4"},
+		{name: "warning line first", in: "warning: BD_OTEL_* environment variables are deprecated\nbd version 1.1.0 (abc1234)\n", want: "1.1.0"},
+		{name: "digit-led log line first", in: "2026/10/06 12:00:00 notice\nbd version 1.3.1\n", want: "1.3.1"},
 		{name: "bare token", in: "1.0.4", want: "1.0.4"},
 		{name: "empty", in: "", wantErr: true},
 		{name: "prefix only", in: "bd version ", wantErr: true},
@@ -66,11 +68,9 @@ func TestProbeVersionsAgainstHostBinaries(t *testing.T) {
 	}
 }
 
-// TestProbeBDVersionRespectsPreferredBin is the G4 (native-program) fix: a
-// city's pinned BD_BIN must be the binary whose version is reported, not
-// whichever "bd" happens to resolve first on the caller's PATH. This matters
-// for cherry, whose cities pin a bd-enterprise fork distinct from any "bd" a
-// shell's PATH might otherwise resolve.
+// TestProbeBDVersionRespectsPreferredBin pins that a city's pinned BD_BIN is
+// the binary whose version is reported, not whichever "bd" happens to resolve
+// first on the caller's PATH.
 func TestProbeBDVersionRespectsPreferredBin(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake binary script uses a POSIX shebang")
@@ -92,11 +92,24 @@ func TestProbeBDVersionRespectsPreferredBin(t *testing.T) {
 }
 
 // TestProbeBDVersionEmptyPreferredBinFallsBackToPATH pins that an empty
-// preferredBin preserves the pre-G4 behavior exactly: resolve "bd" on PATH.
+// preferredBin probes the "bd" PATH resolves, and that a warning that bd
+// prints ahead of its version line does not hide the version.
 func TestProbeBDVersionEmptyPreferredBinFallsBackToPATH(t *testing.T) {
-	_, pathErr := ProbeBDVersion("")
-	_, emptyErr := probeBinaryVersion("bd", "")
-	if (pathErr == nil) != (emptyErr == nil) {
-		t.Fatalf("ProbeBDVersion(\"\") error presence = %v, probeBinaryVersion(\"bd\", \"\") error presence = %v; want the same PATH resolution", pathErr, emptyErr)
+	if runtime.GOOS == "windows" {
+		t.Skip("fake binary script uses a POSIX shebang")
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\necho 'warning: BD_OTEL_* environment variables are deprecated' >&2\necho 'bd version 9.8.7 (fakepath)'\n"
+	if err := os.WriteFile(filepath.Join(dir, "bd"), []byte(script), 0o755); err != nil { //nolint:gosec // test fixture, deliberately executable
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", dir)
+
+	got, err := ProbeBDVersion("")
+	if err != nil {
+		t.Fatalf("ProbeBDVersion(\"\") error = %v", err)
+	}
+	if got != "9.8.7" {
+		t.Errorf("ProbeBDVersion(\"\") = %q, want %q (the version of the bd on PATH)", got, "9.8.7")
 	}
 }

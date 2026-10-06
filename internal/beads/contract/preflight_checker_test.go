@@ -323,6 +323,38 @@ func TestPreflightWarnsWhenDatabaseIdentityUnavailable(t *testing.T) {
 	assertCheckState(t, result, PreflightCheckIdentityMatch, PreflightCheckWarn)
 }
 
+// TestPreflightWarnsWhenScopeHasNoAuthoritativeSchemaCursors pins the
+// version_compat verdict for a scope whose cursor reader has no authoritative
+// database to read (it reports no cursors and no error, as it does for a scope
+// with no canonical dolt target) and that does not defer to native open: WARN
+// "could not be confirmed", degrading the scope — neither a PASS that would
+// skip the schema gate nor a FAIL that would block on a signal never read.
+func TestPreflightWarnsWhenScopeHasNoAuthoritativeSchemaCursors(t *testing.T) {
+	scope := "/city"
+	checker := testPreflightChecker(preflightMetadataJSON(`{
+		"backend": "dolt",
+		"dolt_mode": "server",
+		"dolt_database": "gascity",
+		"project_id": "gc-local"
+	}`), PreflightBDContext{Backend: "dolt", DoltMode: "server"}, "gc-local")
+	checker.DatabaseSchemaCursors = func(string) (PreflightSchemaCursors, bool, error) {
+		return PreflightSchemaCursors{}, false, nil
+	}
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	assertPreflightVerdict(t, result, PreflightVerdictDegraded, false)
+	assertCheckState(t, result, PreflightCheckVersionCompat, PreflightCheckWarn)
+	for _, check := range result.Checks {
+		if check.ID == PreflightCheckVersionCompat && check.Summary != "database schema could not be confirmed" {
+			t.Fatalf("version_compat summary = %q, want %q", check.Summary, "database schema could not be confirmed")
+		}
+	}
+}
+
 // TestPreflightDefersIdentityToNativeOpenForExternalEndpoint covers hosted
 // beads-gateway endpoints: the direct project_id and schema-cursor SQL probes
 // (managedDoltOpenDatabase) connect as root over plaintext and cannot
@@ -346,12 +378,12 @@ func TestPreflightDefersIdentityToNativeOpenForExternalEndpoint(t *testing.T) {
 	checker.DatabaseProjectID = func(string) (string, bool, error) {
 		return "", false, errors.New("dial hosted gateway: access denied")
 	}
-	// ...the schema cursor probe dials the same way and fails the same way
-	// (MED regression, G4 re-review): the direct SQL schema-cursor reader is
-	// just as unable to authenticate a hosted gateway as the identity probe
-	// is, so a fake that leaves it healthy (as the shared test helper's
-	// default does) could never have caught a preflight that forgot to defer
-	// checkSchemaCompat the same way it defers checkIdentityMatch.
+	// ...the schema cursor probe dials the same way and fails the same way:
+	// the direct SQL schema-cursor reader is just as unable to authenticate a
+	// hosted gateway as the identity probe is, so a fake that leaves it
+	// healthy (as the shared test helper's default does) could never have
+	// caught a preflight that forgot to defer checkSchemaCompat the same way
+	// it defers checkIdentityMatch.
 	checker.DatabaseSchemaCursors = func(string) (PreflightSchemaCursors, bool, error) {
 		return PreflightSchemaCursors{}, false, errors.New("dial hosted gateway: access denied")
 	}
@@ -511,9 +543,9 @@ func assertPreflightReadOnly(t *testing.T, fs *fsys.Fake) {
 // TestCheckVersionCompatSourceBuild verifies that a source (local-path/replace)
 // build of the linked beads library — which reports "(devel)" as its module
 // version — does not take the native store offline. checkBDVersionHint is
-// informational only (G4, gastownhall/gascity native-program): a bd/library
-// semver difference is evidence the two strings differ, never that the
-// database is unopenable (that is checkSchemaCompat's job).
+// informational only: a bd/library semver difference is evidence the two
+// strings differ, never that the database is unopenable (that is
+// checkSchemaCompat's job).
 func TestCheckVersionCompatSourceBuild(t *testing.T) {
 	validCtx := func(bdVersion string) PreflightBDContext {
 		return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: bdVersion}
@@ -598,8 +630,8 @@ func TestCheckVersionCompatSummariesAreStableWhereItAlreadyPassed(t *testing.T) 
 }
 
 // TestCheckSchemaCompatSummariesAreStable pins the wording of
-// checkSchemaCompat's own outcomes, the eligibility-deciding half split out
-// of the old combined checkVersionCompat (G4, native-program).
+// checkSchemaCompat's own outcomes, the eligibility-deciding version_compat
+// check.
 func TestCheckSchemaCompatSummariesAreStable(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -691,16 +723,11 @@ func TestPreflightEligibleOnReplacedBeadsModuleWithReadableBDContext(t *testing.
 // strings disagree, but whose schema IS compatible (the database's real,
 // SQL-read schema cursor is within what the linked library can open), native
 // storage stays fully ELIGIBLE — a semver mismatch is informational only
-// (PreflightCheckBDVersionHint WARN) and since G4 (native-program, HIGH2) it
-// never degrades the verdict on its own. This is the fix for cherry's
-// bd-enterprise d3ab pin, which reports bd version "1.1.0" against a gc
-// linked to beads v1.3.1: the version strings will never match, but the
-// schema (66, at the linked library's ceiling) is fine. Before G4 this scope
-// BLOCKED (comparing bd's JSON envelope version against the library's schema
-// ceiling) and silently dropped to per-call BdStore; immediately after the
-// HIGH1 fix alone it would have DEGRADED (opt-in) on the semver WARN; the
-// correct end state, with HIGH2 applied, is that eligibility is decided by
-// the schema result alone and semver skew never blocks or degrades it.
+// (PreflightCheckBDVersionHint WARN) and never degrades the verdict on its
+// own. A bd reporting "1.1.0" against a gc linked to beads v1.3.1 has
+// version strings that will never match, but its schema (66, at the linked
+// library's ceiling) is fine: eligibility is decided by the schema result
+// alone, and semver skew never blocks or degrades it.
 func TestPreflightEligibleOnSemverSkewWithCompatibleSchema(t *testing.T) {
 	scope := "/city/rigs/gascity"
 	fs := fsys.NewFake()
@@ -747,11 +774,11 @@ func TestPreflightEligibleOnSemverSkewWithCompatibleSchema(t *testing.T) {
 // pins one beads release, but the `gascity` formula's unversioned
 // `depends_on "beads"` installs whatever is current, which drifts ahead over
 // time (gastownhall/gascity#5164). A differing major version, or an older bd,
-// is not assumed compatible by this widening — but since G4 (native-program)
-// it still only WARNs rather than FAILs, and that WARN is purely
-// informational (checkBDVersionHint never fails, and its WARN never
-// degrades the verdict — see preflightVerdictForChecks); the real
-// eligibility gate is checkSchemaCompat's direct SQL read.
+// is not assumed compatible by this widening — but it still only WARNs
+// rather than FAILs, and that WARN is purely informational
+// (checkBDVersionHint never fails, and its WARN never degrades the verdict —
+// see preflightVerdictForChecks); the real eligibility gate is
+// checkSchemaCompat's direct SQL read.
 func TestCheckVersionCompatSemverCompatibleNewerBD(t *testing.T) {
 	validCtx := func(bdVersion string) PreflightBDContext {
 		return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: bdVersion}
@@ -796,9 +823,9 @@ func TestCheckVersionCompatSemverCompatibleNewerBD(t *testing.T) {
 // exact degradation #5164 was fixed to prevent.
 //
 // The widening stays narrow, and the negative cases below are the point: a
-// different release's prerelease, and an RC against its own final release, no
-// longer FAIL (since G4 a semver difference alone never does) but still do
-// not qualify for THIS widening's PASS — they fall through to the general
+// different release's prerelease, and an RC against its own final release, do
+// not FAIL (a semver difference alone never does) but still do not qualify
+// for THIS widening's PASS — they fall through to the general
 // schema-compatible WARN.
 func TestCheckVersionCompatSamePrereleaseSeries(t *testing.T) {
 	validCtx := func(bdVersion string) PreflightBDContext {
@@ -871,7 +898,7 @@ func TestPreflightEligibleOnSemverCompatibleNewerBD(t *testing.T) {
 	}
 }
 
-// TestCheckSchemaCompatGate is the G4 (native-program) table test for the
+// TestCheckSchemaCompatGate is the table test for the
 // authoritative schema-compatibility signal: checkSchemaCompat's verdict on
 // the database schema cursors read directly over SQL
 // (internal/beads/proxyendpoint.ReadCursorReportOverConn in production),
@@ -925,11 +952,11 @@ func TestCheckSchemaCompatGate(t *testing.T) {
 	}
 }
 
-// TestCheckSchemaCompatNeverReadsBDContextEnvelopeSchemaVersion is the G4
-// (native-program, HIGH1) regression for the original bug: `bd context
-// --json`'s top-level "schema_version" field is bd's JSON envelope format
-// version (cmd/bd/output.go's JSONSchemaVersion constant, currently stamped
-// at 1 on every response), never the database's migration cursor. This test
+// TestCheckSchemaCompatNeverReadsBDContextEnvelopeSchemaVersion guards the
+// schema signal's source: `bd context --json`'s top-level "schema_version"
+// field is bd's JSON envelope format version (cmd/bd/output.go's
+// JSONSchemaVersion constant, currently stamped at 1 on every response),
+// never the database's migration cursor. This test
 // parses a real bd-context-shaped envelope and proves checkSchemaCompat's
 // verdict is driven only by DatabaseSchemaCursors: even though the
 // envelope's schema_version (1) is wildly different from the database's
@@ -971,24 +998,23 @@ func TestCheckSchemaCompatNeverReadsBDContextEnvelopeSchemaVersion(t *testing.T)
 }
 
 // TestPreflightBlocksOnSchemaBehindWithoutOptIn is the Check()-level
-// end-to-end shape of the G4 MED3 fix: a cherry-style city whose database
-// schema (65) is behind what the linked beads library can open (66).
-// Opening it would let the linked library migrate the city's database
-// forward, which requires an explicit opt-in (beads.allow_schema_behind_migrate /
-// BD_ALLOW_REMOTE_MIGRATE) — without it, this BLOCKS and stays on BdStore,
-// even though bd's own semver string ("1.1.0") differs from the linked
-// library's ("1.3.1") in exactly the way
-// TestPreflightEligibleOnSemverSkewWithCompatibleSchema shows is, on its
-// own, never blocking: eligibility here is decided by the schema result,
-// not semver.
+// end-to-end shape of the schema-behind gate: a city whose database schema
+// (65) is behind what the linked beads library can open (66). Opening it
+// would let the linked library migrate the database forward, which requires
+// an explicit opt-in (beads.allow_schema_behind_migrate) — without it, this
+// BLOCKS and stays on BdStore, naming both remedies, even though bd's own
+// semver string ("1.1.0") differs from the linked library's ("1.3.1") in
+// exactly the way TestPreflightEligibleOnSemverSkewWithCompatibleSchema
+// shows is, on its own, never blocking: eligibility here is decided by the
+// schema result, not semver.
 func TestPreflightBlocksOnSchemaBehindWithoutOptIn(t *testing.T) {
-	scope := "/city/rigs/cherry"
+	scope := "/city/rigs/legacy"
 	fs := fsys.NewFake()
 	fs.Dirs[filepath.Join(scope, ".beads")] = true
 	fs.Files[filepath.Join(scope, ".beads", "metadata.json")] = []byte(`{
 		"backend": "dolt",
 		"dolt_mode": "server",
-		"dolt_database": "cherry",
+		"dolt_database": "legacy",
 		"project_id": "gc-local"
 	}`)
 	checker := PreflightChecker{
@@ -1021,21 +1047,25 @@ func TestPreflightBlocksOnSchemaBehindWithoutOptIn(t *testing.T) {
 	if !strings.Contains(result.FallbackReason, wantOptInSubstring) {
 		t.Errorf("FallbackReason = %q, want it to name the opt-in %s", result.FallbackReason, wantOptInSubstring)
 	}
+	const wantMigrateSubstring = "`bd migrate schema`"
+	if !strings.Contains(result.FallbackReason, wantMigrateSubstring) {
+		t.Errorf("FallbackReason = %q, want it to name the migration remedy %s", result.FallbackReason, wantMigrateSubstring)
+	}
 }
 
-// TestPreflightEligibleOnSchemaBehindWithOptIn is the same cherry-style city
-// with the opt-in set: the schema gate PASSes (opening will migrate the
-// database forward, which the operator has explicitly allowed), and the
-// scope is fully ELIGIBLE — the semver difference remains a non-degrading,
+// TestPreflightEligibleOnSchemaBehindWithOptIn is the same city with the
+// opt-in set: the schema gate PASSes (opening will migrate the database
+// forward, which the operator has explicitly allowed), and the scope is
+// fully ELIGIBLE — the semver difference remains a non-degrading,
 // informational WARN.
 func TestPreflightEligibleOnSchemaBehindWithOptIn(t *testing.T) {
-	scope := "/city/rigs/cherry"
+	scope := "/city/rigs/legacy"
 	fs := fsys.NewFake()
 	fs.Dirs[filepath.Join(scope, ".beads")] = true
 	fs.Files[filepath.Join(scope, ".beads", "metadata.json")] = []byte(`{
 		"backend": "dolt",
 		"dolt_mode": "server",
-		"dolt_database": "cherry",
+		"dolt_database": "legacy",
 		"project_id": "gc-local"
 	}`)
 	checker := PreflightChecker{

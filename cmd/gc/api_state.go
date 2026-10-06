@@ -557,7 +557,7 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 		ScopeRoot:                   scopeRoot,
 		CityPath:                    cs.cityPath,
 		Provider:                    provider,
-		PreflightChecker:            newBeadsPreflightChecker(cs.cityPath, provider),
+		PreflightChecker:            newBeadsPreflightChecker(cs.cityPath, provider, cfg),
 		ConditionalWrites:           cs.rolloutFlags.BeadsConditionalWrites(),
 		NativeTransport:             cs.nativeTransport,
 		OnConditionalWritesDegraded: conditionalWritesDegradedRecorder(cs.eventProv, cs.rolloutFlags, "rig/"+rigName),

@@ -18,14 +18,11 @@ import (
 
 // PreflightBDContext is the bd-reported backend state for a beads scope.
 //
-// This deliberately carries no schema version field. `bd context --json`'s
-// top-level "schema_version" is bd's JSON envelope format version
-// (cmd/bd/output.go's JSONSchemaVersion constant, currently 1), unconditionally
-// stamped onto every JSON response — it is not, and has never been, the
-// database's migration cursor. A gc that read it as the database schema
-// compared the envelope version (1) against the linked library's schema
-// ceiling (dozens) and FAILed every single city. The database's real schema
-// is read directly over SQL; see PreflightSchemaCursors and
+// It carries no schema version. `bd context --json`'s top-level
+// "schema_version" is bd's JSON envelope format version (cmd/bd/output.go's
+// JSONSchemaVersion constant, currently 1), stamped onto every JSON response;
+// it is not the database's migration cursor. The database's schema is read
+// directly over SQL; see PreflightSchemaCursors and
 // PreflightChecker.DatabaseSchemaCursors.
 type PreflightBDContext struct {
 	Backend   string
@@ -36,10 +33,13 @@ type PreflightBDContext struct {
 // PreflightSchemaCursors is the beads database's own migration counters, read
 // directly over SQL (internal/beads/proxyendpoint.ReadCursorReportOverConn) —
 // the authoritative schema signal. Main is the ordinary-lane migration
-// cursor; Ignored is the ignored-lane cursor, meaningful only when
-// IgnoredChecked is true (the ignored lane was actually probed; a city whose
-// ignored lane has never been touched reports IgnoredChecked=false and the
-// ignored cursor is not gated).
+// cursor; Ignored is the ignored-lane cursor, gated only when IgnoredChecked
+// is true. IgnoredChecked=false means the reader could not evaluate the
+// ignored lane (an unwired or stub reader), so the ignored cursor is not
+// gated. The production reader evaluates the lane on every successful read,
+// including a lane that has never been touched: such a database reports
+// Ignored=0 with IgnoredChecked=true and is gated as behind, because opening
+// it would let the linked library apply the pending ignored-lane migrations.
 type PreflightSchemaCursors struct {
 	Main           int
 	Ignored        int
@@ -62,10 +62,11 @@ type PreflightChecker struct {
 	// func or a (_, false, _) / error result WARNs rather than failing, since it
 	// means the signal could not be read, not that the database disagrees.
 	DatabaseSchemaCursors func(scope string) (PreflightSchemaCursors, bool, error)
-	// AllowSchemaBehindMigrate reports whether the scope has explicitly opted in
-	// to letting the linked beads library migrate its database forward when its
-	// schema is behind the library's ceiling. The opt-in is expressed through
-	// the city's beads.allow_schema_behind_migrate config field (resolved via
+	// AllowSchemaBehindMigrate reports whether the city owning the scope has
+	// explicitly opted in to letting the linked beads library migrate the
+	// scope's database forward when its schema is behind the library's
+	// ceiling. The opt-in is expressed through the city's
+	// beads.allow_schema_behind_migrate config field (resolved via
 	// internal/rollout), with GC_BEADS_ALLOW_SCHEMA_BEHIND_MIGRATE as a
 	// break-glass env override; this package stays rollout-agnostic and simply
 	// receives the already-resolved bool through this func. Nil defaults to no
@@ -373,17 +374,9 @@ func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMet
 
 // checkSchemaCompat validates that the beads database's own migration cursors
 // — read directly over SQL (DatabaseSchemaCursors), never from bd context's
-// JSON envelope — are ones the linked beads library can actually open. This
-// is the eligibility gate for native-store activation: its verdict (not
-// checkBDVersionHint's) decides PASS/FAIL.
-//
-// IMPORTANT: `bd context --json`'s top-level "schema_version" field is bd's
-// JSON envelope format version (cmd/bd/output.go's JSONSchemaVersion, 1 for
-// every response bd has ever emitted), NOT the database's migration cursor.
-// Reading it as the database schema compares a constant that is always 1
-// against the linked library's schema ceiling (dozens), which FAILs every
-// city unconditionally. PreflightBDContext carries no such field for exactly
-// this reason; see its doc comment.
+// JSON envelope (see PreflightBDContext) — are ones the linked beads library
+// can actually open. This is the eligibility gate for native-store
+// activation: its verdict (not checkBDVersionHint's) decides PASS/FAIL.
 //
 // beads' own rule (internal/storage/schema/schema.go, vendored at
 // github.com/steveyegge/beads@v1.3.1):
@@ -494,7 +487,7 @@ func (c PreflightChecker) schemaLaneFailure(lane string, current, ceiling int, a
 			details), true
 	case current < ceiling && !allowBehind:
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail,
-			fmt.Sprintf("database %s-lane schema is version %d, behind the linked beads library's schema %d; opening would let the linked library migrate this city's database, which requires an explicit opt-in (beads.allow_schema_behind_migrate = true in city.toml, or GC_BEADS_ALLOW_SCHEMA_BEHIND_MIGRATE=1 as a break-glass override, plus BD_ALLOW_REMOTE_MIGRATE)", lane, current, ceiling),
+			fmt.Sprintf("database %s-lane schema is version %d, behind the linked beads library's schema %d; opening would let the linked library migrate this database, so it needs an explicit opt-in (beads.allow_schema_behind_migrate = true in city.toml, or GC_BEADS_ALLOW_SCHEMA_BEHIND_MIGRATE=1 as a break-glass override) or a migration first (`bd migrate schema` from a bd at the linked library's schema)", lane, current, ceiling),
 			details), true
 	default:
 		return PreflightCheckResult{}, false
@@ -505,13 +498,9 @@ func (c PreflightChecker) schemaLaneFailure(lane string, current, ceiling int, a
 // linked beads library's semver string. This is informational only: it
 // never FAILs and its WARN never degrades the verdict (see
 // preflightVerdictForChecks), because a bd distribution can legitimately
-// report a version far from the linked library's release train (e.g. the
-// bd-enterprise fork cherry's compat cities pin, which reports "1.1.0"
-// against a gc built against beads v1.3.1) while still speaking a schema the
-// linked library opens without incident — checkSchemaCompat is what actually
-// knows that. Gating eligibility on semver equality made every such city
-// FAIL and silently drop to per-call BdStore even though native storage
-// would have worked.
+// report a version far from the linked library's release train while still
+// speaking a schema the linked library opens without incident —
+// checkSchemaCompat is what actually knows that.
 //
 // As a side effect this also surfaces when the city's pinned bd CLI reports
 // a ceiling below the linked library's: that shows up as an ordinary semver
@@ -547,8 +536,7 @@ func (c PreflightChecker) checkBDVersionHint(ctx PreflightBDContext, err error) 
 			return NewPreflightCheckResult(PreflightCheckBDVersionHint, PreflightCheckPass, "bd and the linked beads library are prereleases of the same release", details)
 		}
 		// A bd/library semver difference is informational only — see the
-		// function doc for why semver is not the compatibility signal (cherry's
-		// bd-enterprise "1.1.0" pin against a v1.3.1-linked gc).
+		// function doc for why semver is not the compatibility signal.
 		return NewPreflightCheckResult(PreflightCheckBDVersionHint, PreflightCheckWarn, "bd version differs from the linked beads library version", details)
 	}
 	return NewPreflightCheckResult(PreflightCheckBDVersionHint, PreflightCheckPass, "bd and linked beads library versions match", details)

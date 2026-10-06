@@ -94,12 +94,10 @@ func TestStatusBodyOmitsEmptyComponentVersions(t *testing.T) {
 	}
 }
 
-// TestCityPinnedBDBin is the G4 (native-program) table test for resolving a
-// city's workspace.env BD_BIN pin for the status probe — the fix for
-// ProbeBDVersion reporting whichever "bd" happens to be first on the
-// supervisor process's PATH instead of the binary the city is actually pinned
-// to (the same class of blind spot G4 closed in the native-store preflight's
-// version_compat check).
+// TestCityPinnedBDBin is the table test for resolving a city's workspace.env
+// BD_BIN pin for the status probe, so ProbeBDVersion reports the binary the
+// city is actually pinned to rather than whichever "bd" happens to be first
+// on the supervisor process's PATH.
 func TestCityPinnedBDBin(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake binary script uses a POSIX shebang")

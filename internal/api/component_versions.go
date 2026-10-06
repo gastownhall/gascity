@@ -45,12 +45,11 @@ func (s *Server) resolveComponentVersions() componentVersions {
 	return s.componentVersionsValue
 }
 
-// cityPinnedBDBin returns the city's pinned bd executable, resolved the same
-// way cmd/gc's workspacePinnedBdBinaryOptional (cmd/gc/bd_env.go) resolves it
-// for real subprocess work, so the status surface reports the version of the
-// bd actually driving this city rather than whichever "bd" happens to be
-// first on the supervisor process's PATH — the same class of bug G4 fixed in
-// the native-store preflight's version_compat check.
+// cityPinnedBDBin returns the city's pinned bd executable, read from the same
+// sources in the same order that cmd/gc's workspacePinnedBdBinaryOptional
+// (cmd/gc/bd_env.go) uses for real subprocess work, so the status surface
+// reports the version of the bd actually driving this city rather than
+// whichever "bd" happens to be first on the supervisor process's PATH.
 //
 // internal/api cannot import cmd/gc (package main), so this mirrors the
 // algorithm rather than calling it: expand workspace.env (so a city.toml
@@ -60,6 +59,12 @@ func (s *Server) resolveComponentVersions() componentVersions {
 // A pin that is SET but invalid (relative, or not an executable found by
 // LookPath) is a misconfiguration, not silence: it is logged as a warning
 // and the probe falls through to the next source rather than disappearing.
+//
+// That fall-through deliberately diverges from cmd/gc on one input, an
+// invalid workspace.env BD_BIN: cmd/gc returns a configuration error for it
+// and runs no other bd in its place, while a status probe reports what it can
+// rather than fail. For such a city the version reported here belongs to a bd
+// the city is not running, and the logged warning is what flags it.
 //
 // Returns "" (meaning "resolve bd on PATH") when cfg is nil or no source
 // resolves.

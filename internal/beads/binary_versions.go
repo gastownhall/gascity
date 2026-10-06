@@ -75,16 +75,22 @@ func probeBinaryVersion(name, preferredBin string) (string, error) {
 }
 
 // parseBDVersion extracts the semantic version token from `bd version` output
-// (e.g. "bd version 1.0.4 (ce242a879)" -> "1.0.4"). Mirrors doltversion.Parse's
-// leniency: the "bd version " prefix, a leading "v", and any trailing
-// build/commit descriptor are stripped.
+// (e.g. "bd version 1.0.4 (ce242a879)" -> "1.0.4"). The token is read from the
+// first line that starts with "bd version ", so a warning bd prints ahead of
+// it does not hide the version; output without such a line is read from its
+// first line. Mirrors doltversion.Parse's leniency: the "bd version " prefix,
+// a leading "v", and any trailing build/commit descriptor are stripped.
 func parseBDVersion(out string) (string, error) {
-	line := strings.TrimSpace(out)
-	if i := strings.IndexByte(line, '\n'); i >= 0 {
-		line = line[:i]
-	}
-	line = strings.TrimSpace(line)
 	const prefix = "bd version "
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	line := strings.TrimSpace(lines[0])
+	for _, candidate := range lines {
+		candidate = strings.TrimSpace(candidate)
+		if strings.HasPrefix(strings.ToLower(candidate), prefix) {
+			line = candidate
+			break
+		}
+	}
 	if strings.HasPrefix(strings.ToLower(line), prefix) {
 		line = line[len(prefix):]
 	}

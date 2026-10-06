@@ -1764,7 +1764,7 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 		ScopeRoot:         scopeRoot,
 		CityPath:          runtimeCityPath,
 		Provider:          provider,
-		PreflightChecker:  newBeadsPreflightChecker(runtimeCityPath, provider),
+		PreflightChecker:  newBeadsPreflightChecker(runtimeCityPath, provider, cfg),
 		Logger:            slog.Default(),
 		ConditionalWrites: mode,
 		NativeTransport:   nativeTransport,
@@ -1811,6 +1811,12 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 			// the port per command — then re-open against the live server via the
 			// direct native path (which bypasses the factory preflight/identity
 			// gate, so an absent scope project_id cannot block the reconnect).
+			// This reopen passes a nil config, so the fresh env re-reads the
+			// city's current beads.allow_schema_behind_migrate decision rather
+			// than keeping the one in force at open, and the reconnect does not
+			// re-run the preflight's version_compat gate. The controller's
+			// rig-store reopen (api_state.go) instead reuses the config it
+			// opened with.
 			reopen := func(ctx context.Context) (beads.NativeStorage, error) {
 				var freshEnv map[string]string
 				var rerr error

@@ -1894,19 +1894,41 @@ func nativeDoltOpenEnvForScope(cityPath string, cfg *config.City, scopeRoot stri
 	return nativeDoltOpenEnvForScopeContext(context.Background(), cityPath, cfg, scopeRoot)
 }
 
+// nativeDoltOpenEnvForScopeContext builds the env a direct native open of
+// scopeRoot projects for the linked beads library. Besides the scope's
+// runtime env it carries the city's beads.allow_schema_behind_migrate decision
+// as beads.BDAllowRemoteMigrateEnvKey: the opt-in belongs to the city whichever
+// scope opens, including a rig outside the city's directory tree, and the open
+// env is the only way the decision reaches the library. The native-store
+// preflight reads the same decision (cityAllowSchemaBehindMigrate).
 func nativeDoltOpenEnvForScopeContext(ctx context.Context, cityPath string, cfg *config.City, scopeRoot string) (map[string]string, error) {
 	scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
+	var env map[string]string
+	var err error
 	if samePath(scopeRoot, cityPath) {
-		return bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, true)
-	}
-	if cfg == nil {
-		loaded, err := loadCityConfig(cityPath, io.Discard)
-		if err != nil {
-			return nil, err
+		env, err = bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, true)
+	} else {
+		if cfg == nil {
+			loaded, loadErr := loadCityConfig(cityPath, io.Discard)
+			if loadErr != nil {
+				return nil, loadErr
+			}
+			cfg = loaded
 		}
-		cfg = loaded
+		env, err = bdRuntimeEnvForRigWithErrorRecoveryContext(ctx, cityPath, cfg, scopeRoot, true)
 	}
-	return bdRuntimeEnvForRigWithErrorRecoveryContext(ctx, cityPath, cfg, scopeRoot, true)
+	if err != nil {
+		return env, err
+	}
+	// The env builders above return a caller-owned map (the proxied-scope
+	// cache stores and hands out clones), so setting or deleting the key
+	// here never touches a shared cache entry.
+	if cityAllowSchemaBehindMigrate(cityPath, cfg) {
+		env[beads.BDAllowRemoteMigrateEnvKey] = "1"
+	} else {
+		delete(env, beads.BDAllowRemoteMigrateEnvKey)
+	}
+	return env, nil
 }
 
 // nativeDoltOneShotOpenEnvForScope is nativeDoltOpenEnvForScope for a

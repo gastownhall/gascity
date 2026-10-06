@@ -4,19 +4,26 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/rollout"
 )
 
-func newBeadsPreflightChecker(cityPath, provider string) contract.PreflightChecker {
+// newBeadsPreflightChecker builds the native-store preflight for a scope of
+// the city at cityPath. cfg is that city's config when the caller has it in
+// hand, or nil to have the opt-in read city.toml when it is needed.
+func newBeadsPreflightChecker(cityPath, provider string, cfg *config.City) contract.PreflightChecker {
 	return contract.PreflightChecker{
 		FS:                         fsys.OSFS{},
 		Provider:                   provider,
@@ -24,7 +31,7 @@ func newBeadsPreflightChecker(cityPath, provider string) contract.PreflightCheck
 		DatabaseProjectID:          preflightDatabaseProjectIDReader(cityPath),
 		DeferIdentityToNativeOpen:  preflightIdentityDeferredReader(cityPath),
 		DatabaseSchemaCursors:      preflightDatabaseSchemaCursorsReader(cityPath),
-		AllowSchemaBehindMigrate:   preflightAllowSchemaBehindMigrateReader(cityPath),
+		AllowSchemaBehindMigrate:   preflightAllowSchemaBehindMigrateReader(cityPath, cfg),
 		SchemaLatestIgnoredVersion: beads.SchemaCursorIgnored,
 	}
 }
@@ -109,8 +116,8 @@ func preflightDatabaseSchemaCursorsReader(cityPath string) func(scope string) (c
 
 // preflightSchemaCursorsFromReport maps a raw proxyendpoint.CursorReport onto
 // the schema gate's own contract.PreflightSchemaCursors. It is factored out of
-// preflightDatabaseSchemaCursorsReader so the CLAMPED ignored-lane value (M9,
-// G4 re-review) is unit-testable without a database: Ignored must be
+// preflightDatabaseSchemaCursorsReader so the CLAMPED ignored-lane value is
+// unit-testable without a database: Ignored must be
 // report.Reality.EffectiveIgnored(report.Cursors.Ignored), the number the
 // linked library's migrationSource.atLatest actually asks about, never the
 // raw on-disk report.Cursors.Ignored the clamp exists to stop comparing (see
@@ -123,66 +130,85 @@ func preflightSchemaCursorsFromReport(report proxyendpoint.CursorReport) contrac
 	}
 }
 
-// preflightAllowSchemaBehindMigrateReader reports whether the scope has
-// opted in to letting the linked beads library migrate its database forward
-// when its schema is behind the library's ceiling (the
-// beads.allow_schema_behind_migrate rollout gate). It is a thin per-city
-// adapter over cityAllowSchemaBehindMigrate, the ONE resolver this decision
-// has: see that function's doc comment for why the preflight gate and the
-// native-open path must never carry two copies of it.
-func preflightAllowSchemaBehindMigrateReader(cityPath string) func(scope string) bool {
+// preflightAllowSchemaBehindMigrateReader reports the city's
+// beads.allow_schema_behind_migrate decision for every scope the preflight
+// asks about; see cityAllowSchemaBehindMigrate.
+func preflightAllowSchemaBehindMigrateReader(cityPath string, cfg *config.City) func(scope string) bool {
 	return func(string) bool {
-		return cityAllowSchemaBehindMigrate(cityPath)
+		return cityAllowSchemaBehindMigrate(cityPath, cfg)
 	}
 }
 
-// cityAllowSchemaBehindMigrate is the single resolver for the
-// beads.allow_schema_behind_migrate rollout gate (internal/rollout), read
-// through the city's own config plus its registered break-glass env override
-// GC_BEADS_ALLOW_SCHEMA_BEHIND_MIGRATE. The env lookup checks the ambient
-// process environment first, then the city's own workspace.env — the same
-// source order and expansion workspacePinnedBdBinaryOptional (cmd/gc/bd_env.go)
-// uses for BD_BIN, so a city.toml pin resolves consistently across gc's
-// environment-sourced config. This composed lookup is passed to
-// rollout.Resolve only as this call site's own ResolveOptions.LookupEnv; it
-// does not change how any other rollout gate resolves.
+// cityAllowSchemaBehindMigrate resolves the beads.allow_schema_behind_migrate
+// rollout gate (internal/rollout) for the city at cityPath: the city's config
+// plus the registered break-glass override GC_BEADS_ALLOW_SCHEMA_BEHIND_MIGRATE,
+// looked up in the ambient process environment first and then in the city's
+// expanded workspace.env. The ambient value wins because the variable is a
+// break-glass override: the operator's live environment outranks what the
+// city has checked in.
 //
-// It is called from two places that must never disagree: the native-store
-// preflight schema gate (via preflightAllowSchemaBehindMigrateReader, through
-// contract.PreflightChecker.AllowSchemaBehindMigrate) and, wired onto
-// beads.AllowSchemaBehindMigrateForScope in this file's init(), the direct
-// native-open path's own BD_ALLOW_REMOTE_MIGRATE withhold
-// (internal/beads/native_dolt_store.go). A preflight that declared a behind
-// schema eligible on this opt-in, whose open then failed to honor the exact
-// same opt-in, would hand bd's own RemoteMigrateGateError an eligibility
-// preflight never warned about — so there is exactly one function that reads
-// this decision, not a preflight copy and an open-path copy that can drift.
-func cityAllowSchemaBehindMigrate(cityPath string) bool {
-	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	if err != nil {
-		return false
+// The opt-in belongs to the city, not to a store scope: a rig's scope root may
+// sit outside the city's directory tree, so the decision is keyed by cityPath
+// alone. The native-store preflight (preflightAllowSchemaBehindMigrateReader)
+// and the native open env (nativeDoltOpenEnvForScopeContext, which hands the
+// decision to the linked library as beads.BDAllowRemoteMigrateEnvKey) both
+// decide through this function, so a behind schema the preflight passes on the
+// opt-in is one the open lets the library migrate.
+//
+// cfg is the city's config when the caller has it in hand. When it is nil the
+// gate is read from city.toml without the side effects of a full config load;
+// only a city with no city.toml has no config opt-in. Any other config that
+// cannot be read or resolved — including a city.toml whose include, fragment
+// or imported pack is missing — leaves the opt-in off and is reported once per
+// city and error.
+func cityAllowSchemaBehindMigrate(cityPath string, cfg *config.City) bool {
+	if cfg == nil {
+		cityTOML := filepath.Join(cityPath, "city.toml")
+		if _, err := os.Stat(cityTOML); errors.Is(err, os.ErrNotExist) {
+			cfg = &config.City{}
+		} else {
+			loaded, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, cityTOML, skipRevisionSnapshot)
+			if err != nil {
+				warnAllowSchemaBehindMigrateUnresolved(cityPath, err)
+				return false
+			}
+			cfg = loaded
+		}
 	}
+	workspaceEnv := expandEnvMap(cfg.Workspace.Env)
 	lookup := func(key string) (string, bool) {
 		if v, ok := os.LookupEnv(key); ok {
 			return v, true
 		}
-		env := expandEnvMap(cfg.Workspace.Env)
-		v, ok := env[key]
+		v, ok := workspaceEnv[key]
 		return v, ok
 	}
 	flags, err := rollout.Resolve(cfg, rollout.ResolveOptions{LookupEnv: lookup})
 	if err != nil {
+		warnAllowSchemaBehindMigrateUnresolved(cityPath, err)
 		return false
 	}
 	return flags.AllowSchemaBehindMigrate()
 }
 
-// init wires beads.AllowSchemaBehindMigrateForScope to cityAllowSchemaBehindMigrate
-// exactly once, before any goroutine can race it, so the direct native-open
-// path shares the preflight gate's resolver rather than its own ambient-only
-// default (see cityAllowSchemaBehindMigrate's doc comment).
-func init() {
-	beads.AllowSchemaBehindMigrateForScope = cityAllowSchemaBehindMigrate
+// allowSchemaBehindMigrateWarnOut receives the unresolved-opt-in warning.
+// Tests swap it to capture the line.
+var allowSchemaBehindMigrateWarnOut io.Writer = os.Stderr
+
+// allowSchemaBehindMigrateWarned dedupes the warning per city and error: the
+// opt-in is resolved on every preflight and native open, and the operator
+// needs the line once, not once per open.
+var allowSchemaBehindMigrateWarned sync.Map
+
+// warnAllowSchemaBehindMigrateUnresolved reports, once per process, city and
+// error, that the city's beads.allow_schema_behind_migrate opt-in could not be
+// resolved and is treated as off.
+func warnAllowSchemaBehindMigrateUnresolved(cityPath string, err error) {
+	key := cityPath + "\x00" + err.Error()
+	if _, loaded := allowSchemaBehindMigrateWarned.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	fmt.Fprintf(allowSchemaBehindMigrateWarnOut, "gc: warning: resolving %s for %s: %v; treating the opt-in as off\n", rollout.KeyBeadsAllowSchemaBehindMigrate, cityPath, err) //nolint:errcheck // best-effort stderr
 }
 
 // preflightIdentityDeferredReader reports whether a scope resolves to an

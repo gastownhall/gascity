@@ -50,6 +50,7 @@ go_test(
     embed = [":rollout"],
     deps = [
         "//internal/config",
+        "//internal/fsys",
         "//internal/testenv",
     ],
 )
