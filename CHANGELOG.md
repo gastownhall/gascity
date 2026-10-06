@@ -74,11 +74,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not load.** It used to open the store with default settings, which would
   ignore a `native_transport = "off"` in the file it failed to read. Fix the
   reported error to proceed; setting `GC_BEADS_FORCE_FALLBACK=1` does not
-  bypass it. A directory with no `city.toml` is unaffected, and a running
-  controller keeps the value it read at boot. The `file` provider and `exec:`
-  providers other than the bundled `gc-beads-bd` script are unaffected too,
-  unless gc has to read the provider from a `city.toml` that cannot be parsed:
-  it then falls back to `bd`, and the command fails (#7036).
+  bypass it. A directory with no `city.toml` is unaffected. A running
+  controller keeps the stores it holds open on the value it read at boot, but
+  the stores it opens for a single tick fail the same way. The `file` provider
+  and `exec:` providers other than the bundled `gc-beads-bd` script are
+  unaffected too, unless gc has to read the provider from a `city.toml` that
+  cannot be parsed: it then falls back to `bd`, and the command fails (#7036).
 
 - **An out-of-enum `[beads] conditional_writes`, `guarded_release` or
   `native_transport` value fails config load.** These keys are now checked on
@@ -107,8 +108,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every store of the city on the bd subprocess, which a city needs while it
   still depends on `.beads/hooks` scripts. A `[beads]` fragment that
   `city.toml` includes keeps the city's value unless the fragment sets
-  `native_transport` itself. A running city picks up a change at its next
-  restart. `GC_BEADS_FORCE_FALLBACK=1` still works as a deprecated alias for
+  `native_transport` itself. A running controller keeps the stores it holds
+  open on the value it read at boot until it restarts; `gc` commands, and the
+  stores it opens for a single tick, read the current value.
+  `GC_BEADS_FORCE_FALLBACK=1` still works as a deprecated alias for
   `"off"`; it overrides every city in the process and logs a deprecation
   warning once (#7036).
 

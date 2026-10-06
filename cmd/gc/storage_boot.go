@@ -815,8 +815,9 @@ func openStorageRoutes(plan *storebinding.StoragePlan, target infraBindingTarget
 		return nil, fmt.Errorf("storage routing: binding %q is served by provider %q, which does not open a bead engine, so the classes assigned to it cannot be served; %s",
 			target.Binding, planned.ProviderID, contract.BackendNotOpenedGuarantee)
 	}
-	// The boot gate refuses this before it records an outcome; this check
-	// covers every other caller, the read-only census among them.
+	// The boot gate refuses this before it records an outcome, and the
+	// read-only census before it opens with a nil cfg; this check covers
+	// every other caller.
 	if err := nativeTransportBindingRefusal(target.Binding, planned.ProviderID, cfg); err != nil {
 		return nil, fmt.Errorf("storage routing: %w", err)
 	}

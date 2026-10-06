@@ -1459,7 +1459,9 @@ type BeadsConfig struct {
 	// or "auto" (default: native when preflight-eligible, today's behavior).
 	// Empty defaults to "auto". Any other value (including "require", which
 	// belongs to conditional_writes/guarded_release, not this switch) fails
-	// config load. Boot-latched: a change applies at the next restart.
+	// config load. A running city keeps the stores it holds open on the value
+	// it read at boot until it restarts; every other open, by a gc command or
+	// for a single tick, reads the current value.
 	// GC_BEADS_FORCE_FALLBACK remains a deprecated process-wide alias for
 	// "off" that overrides every city's value for one release.
 	NativeTransport string `toml:"native_transport,omitempty" jsonschema:"default=auto,enum=auto,enum=off"`

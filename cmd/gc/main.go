@@ -1844,6 +1844,12 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 // GC_BEADS_FORCE_FALLBACK alias overrides the city's value but does not excuse
 // the error: excusing it would let a command that works under the alias start
 // failing once the alias is removed.
+//
+// The cost is availability, and it is deliberate: a pack include can set
+// native_transport itself, so while one does not load, every nil-cfg open of
+// the city's bd-contract store fails here, gc order's and the controller's
+// per-tick sweep and standalone opens among them. gc hook adds no new stop: it
+// loads the city config itself and exits on the same error before any open.
 func loadCityConfigForStoreOpen(cityPath, provider string, nativeOverride *beads.NativeTransportMode) (*config.City, error) {
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err == nil || nativeOverride != nil || !beads.ProviderConsultsNativeTransport(provider) {
@@ -1961,12 +1967,6 @@ func openOneShotBdStoreAtWithConfig(storePath, cityPath string, cfg *config.City
 }
 
 func openBdStoreAtScoped(storePath, cityPath string, cfg *config.City, oneShotConfig bool, nativeTransport beads.NativeTransportMode) (beads.Store, error) {
-	// The GC_NATIVE_DOLTLITE_BEADS read optimization serves GET and LIST by
-	// direct SQL against the doltlite index file, bypassing the bd subprocess.
-	// "off", per city or through the deprecated process-wide
-	// GC_BEADS_FORCE_FALLBACK alias, promises every read goes through bd, so
-	// it gets the plain BdStore.
-	skipDoltliteOptimization := nativeTransport == beads.NativeTransportOff || beads.ForceNativeFallbackActive()
 	if filepath.Clean(storePath) == filepath.Clean(cityPath) {
 		var store *beads.BdStore
 		if oneShotConfig {
@@ -1974,12 +1974,7 @@ func openBdStoreAtScoped(storePath, cityPath string, cfg *config.City, oneShotCo
 		} else {
 			store = bdStoreForCity(storePath, cityPath)
 		}
-		if !skipDoltliteOptimization {
-			if optimized, ok := openOptimizedDoltliteStore(storePath, store); ok {
-				return optimized, nil
-			}
-		}
-		return store, nil
+		return withDoltliteReadOptimization(storePath, store, nativeTransport), nil
 	}
 	if cfg == nil {
 		loaded, err := loadCityConfig(cityPath, io.Discard)
@@ -1989,10 +1984,28 @@ func openBdStoreAtScoped(storePath, cityPath string, cfg *config.City, oneShotCo
 		cfg = loaded
 	}
 	store := bdStoreForRig(storePath, cityPath, cfg)
-	if !skipDoltliteOptimization {
-		if optimized, ok := openOptimizedDoltliteStore(storePath, store); ok {
-			return optimized, nil
-		}
+	return withDoltliteReadOptimization(storePath, store, nativeTransport), nil
+}
+
+// openDoltliteReadOptimization is openOptimizedDoltliteStore, held in a
+// variable so a test in the default build, where the optimization does not
+// exist, can see whether a bd store open consults it. Production never
+// reassigns it.
+var openDoltliteReadOptimization = openOptimizedDoltliteStore
+
+// withDoltliteReadOptimization returns store, or the GC_NATIVE_DOLTLITE_BEADS
+// read optimization over it when that optimization is built in and enabled.
+// The optimization serves GET and LIST by direct SQL against the doltlite
+// index file, bypassing the bd subprocess. "off", per city or through the
+// deprecated process-wide GC_BEADS_FORCE_FALLBACK alias, promises every read
+// goes through bd, so it gets the plain BdStore and the optimization is never
+// consulted.
+func withDoltliteReadOptimization(storePath string, store *beads.BdStore, nativeTransport beads.NativeTransportMode) beads.Store {
+	if nativeTransport == beads.NativeTransportOff || beads.ForceNativeFallbackActive() {
+		return store
 	}
-	return store, nil
+	if optimized, ok := openDoltliteReadOptimization(storePath, store); ok {
+		return optimized
+	}
+	return store
 }

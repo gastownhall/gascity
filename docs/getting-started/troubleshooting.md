@@ -299,7 +299,9 @@ the subprocess-backed store by turning native transport off in `city.toml`:
 native_transport = "off"
 ```
 
-A running city picks up the change at its next restart. This setting replaces
+Restart a running city after the change: the stores it holds open keep the
+value it read at boot. `gc` commands, and the stores the city opens for a
+single tick, read the current `city.toml` every time. This setting replaces
 the `GC_BEADS_FORCE_FALLBACK=1` environment variable, which still works but is
 deprecated and applies to every city the process serves. With either one,
 `gc start` refuses a `[storage]` binding served by `beads-workspace`, because
