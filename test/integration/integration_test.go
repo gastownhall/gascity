@@ -1395,15 +1395,32 @@ func filterEnv(env []string, name string) []string {
 	return result
 }
 
+// integrationEnv is the env of the suite's shared GC_HOME, testGCHome; TestMain
+// checks that one for a leaked platform supervisor unit after m.Run.
 func integrationEnv() []string {
-	return integrationEnvFor(testGCHome, testRuntimeDir, false)
+	return buildIntegrationEnv(testGCHome, testRuntimeDir, false)
 }
 
+// integrationEnvDolt is integrationEnv with gc's managed Dolt enabled.
 func integrationEnvDolt() []string {
-	return integrationEnvFor(testGCHome, testRuntimeDir, true)
+	return buildIntegrationEnv(testGCHome, testRuntimeDir, true)
 }
 
-func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
+// integrationEnvFor is the env that runs gc against a test's own GC_HOME. It
+// registers the platform-unit leak guard for gcHome on t, so call it before
+// starting any supervisor: the guard's cleanup then runs after their stops
+// (t.Cleanup is LIFO).
+func integrationEnvFor(t *testing.T, gcHome, runtimeDir string, useDolt bool) []string {
+	t.Helper()
+	registerPlatformUnitLeakGuard(t, gcHome)
+	return buildIntegrationEnv(gcHome, runtimeDir, useDolt)
+}
+
+// buildIntegrationEnv builds the env that runs gc against gcHome. Only
+// integrationEnv, integrationEnvDolt and integrationEnvFor call it, so every
+// GC_HOME the suite hands gc has a leak guard
+// (TestEveryIntegrationEnvHasALeakGuard).
+func buildIntegrationEnv(gcHome, runtimeDir string, useDolt bool) []string {
 	env := filterEnv(os.Environ(), "GC_BEADS")
 	env = filterEnv(env, "BEADS_DIR")
 	env = filterEnv(env, "GC_BEADS_SCOPE_ROOT")
@@ -1593,7 +1610,6 @@ func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
 	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
 		t.Fatalf("creating isolated runtime dir: %v", err)
 	}
-	registerPlatformUnitLeakGuard(t, gcHome)
 	port, err := reserveLoopbackPort()
 	if err != nil {
 		t.Fatalf("reserving isolated supervisor port: %v", err)
@@ -1605,7 +1621,7 @@ func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
 	if err := seedDoltIdentityForRoot(gcHome); err != nil {
 		t.Fatalf("writing isolated dolt config: %v", err)
 	}
-	env := integrationEnvFor(gcHome, runtimeDir, useDolt)
+	env := integrationEnvFor(t, gcHome, runtimeDir, useDolt)
 	return gcHome, runtimeDir, env
 }
 

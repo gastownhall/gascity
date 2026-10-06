@@ -49,7 +49,7 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	writeSupervisorConfig(t, gcHome, port)
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
-	env := append(integrationEnvFor(gcHome, runtimeDir, true), "GC_SESSION=subprocess")
+	env := append(integrationEnvFor(t, gcHome, runtimeDir, true), "GC_SESSION=subprocess")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

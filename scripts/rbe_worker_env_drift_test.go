@@ -5,10 +5,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -48,7 +51,8 @@ const (
 // answers commits with $GH_COMMITS, contents?ref=SHA with $GH_FILES/SHA and
 // a run attempt's jobs with $GH_JOBS through the --jq, issue view with
 // $GH_VIEW. Every call is logged to $GH_LOG, one per line. GH_FAIL=1 fails
-// every call.
+// every call. Like gh, it exits with its writer's status: a writer killed by
+// SIGPIPE fails the call.
 const ghStub = `#!/bin/sh
 printf '%s\n' "$*" >>"$GH_LOG"
 [ "${GH_FAIL:-}" != 1 ] || { echo "gh: HTTP 502" >&2; exit 1; }
@@ -64,9 +68,9 @@ case "$1 $2" in
 api*)
 	for a; do
 		case "$a" in
-		*commits\?*) cat "$GH_COMMITS" ;;
-		*contents/*ref=*) cat "$GH_FILES/${a##*ref=}" ;;
-		*/jobs\?*) jq -r "$jq" "$GH_JOBS" ;;
+		*commits\?*) exec cat "$GH_COMMITS" ;;
+		*contents/*ref=*) exec cat "$GH_FILES/${a##*ref=}" ;;
+		*/jobs\?*) exec jq -r "$jq" "$GH_JOBS" ;;
 		esac
 	done
 	;;
@@ -602,6 +606,110 @@ func TestRBEWorkerRegistersOnDrift(t *testing.T) {
 	}
 	if _, err := os.Stat(capture); !os.IsNotExist(err) {
 		t.Errorf("measure mode started NativeLink (%v)", err)
+	}
+}
+
+// pipeOverflow is more than any pipe buffer holds (64 KiB on Linux, 16-64
+// KiB on macOS): a writer of this much into a reader that stops early is
+// killed by SIGPIPE every time, never only when the race goes that way.
+const pipeOverflow = 1 << 20
+
+// defaultSIGPIPE gives the scripts this test runs the default SIGPIPE, as
+// on GitHub runners, even when the test inherited it ignored (some agent
+// sandboxes do): a signal ignored at exec stays ignored, and an ignored
+// SIGPIPE turns the kill into an EPIPE that some writers (jq) shrug off.
+// A handled signal is reset to its default at exec.
+func defaultSIGPIPE(t *testing.T) {
+	t.Helper()
+	signal.Notify(make(chan os.Signal, 1), syscall.SIGPIPE)
+	t.Cleanup(func() { signal.Reset(syscall.SIGPIPE) })
+}
+
+// TestRBEWorkerEnvDriftSummaryDrainsStdin: summary always reads its input,
+// with or without a step summary file. A summary that returned unread let
+// `echo ... | summary` die of SIGPIPE under pipefail, so preflight exited 141
+// instead of 1, now and then (the hook passes /dev/null to keep it away).
+func TestRBEWorkerEnvDriftSummaryDrainsStdin(t *testing.T) {
+	defaultSIGPIPE(t)
+	root := repoRoot(t)
+	for _, tc := range []struct {
+		name string
+		env  []string
+	}{
+		{name: "unset"},
+		{name: "empty", env: []string{"GITHUB_STEP_SUMMARY="}},
+		{name: "file", env: []string{"GITHUB_STEP_SUMMARY=" + filepath.Join(t.TempDir(), "summary.md")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := `. "$1" && head -c ` + strconv.Itoa(pipeOverflow) + ` /dev/zero | summary`
+			// bash -c SCRIPT $0 $1: SCRIPT sources $1, the script under test.
+			stdout, stderr, err := runRBEScript(t.TempDir(), append([]string{"PATH=/usr/bin:/bin"}, tc.env...),
+				"-c", script, "bash", filepath.Join(root, rbeWorkerEnvDrift))
+			if err != nil {
+				t.Fatalf("writer | summary: exit %d (%v), want 0 (141 is SIGPIPE: summary left its input unread)\n%s%s", exitCode(err), err, stdout, stderr)
+			}
+			for _, kv := range tc.env {
+				if path, ok := strings.CutPrefix(kv, "GITHUB_STEP_SUMMARY="); ok && path != "" {
+					if fi, err := os.Stat(path); err != nil || fi.Size() != pipeOverflow {
+						t.Errorf("step summary %s: %v, want %d bytes", path, err, pipeOverflow)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestRBEWorkerEnvDriftReadsWholePipes: no pipe in worker-env-drift ends in a
+// reader that stops early (grep -q, head -n 1). Under pipefail the writer's
+// SIGPIPE fails the pipeline, so a found match reads as no match: preflight
+// let a remote run on a drifted pin queue, report re-commented a known
+// measurement, and await missed a finished upload.
+func TestRBEWorkerEnvDriftReadsWholePipes(t *testing.T) {
+	const job, step = "rbe pool worker (X)", "Upload the worker-env drift"
+	defaultSIGPIPE(t)
+	e := newDriftEnv(t, "a\n")
+
+	// A pin with many open issues of its title: their list overflows the pipe.
+	var issues []string
+	for i := 0; i < 10000; i++ {
+		issues = append(issues, driftTitle(e.pin), "https://x/issues/"+strconv.Itoa(7+i))
+	}
+	e.setIssues(issues...)
+	base := filepath.Join(e.dir, "base.bazel")
+	changed := filepath.Join(e.dir, "changed")
+	writeDriftFile(t, base, buildWithPin(e.pin))
+	writeDriftFile(t, changed, "x\n")
+	e.extra = []string{"WORKER_ENV_REMOTE=true"}
+	out, err := e.run("preflight", base, changed)
+	if code := exitCode(err); code != 1 || !strings.Contains(out, "::error title=rbe worker-env drift::https://x/issues/7:") {
+		t.Errorf("preflight on a pin with many drift issues: exit %d, want 1 naming the first issue\n%s", code, out)
+	}
+	e.setIssues()
+
+	// A run attempt whose jobs overflow the pipe, the worker's listed first.
+	jobs := filepath.Join(e.dir, "jobs.json")
+	entry := `{"name":"` + job + `","status":"in_progress","steps":[{"name":"` + step + `","status":"completed","conclusion":"success"}]}`
+	writeDriftFile(t, jobs, `{"jobs":[`+strings.TrimSuffix(strings.Repeat(entry+",", pipeOverflow/len(entry)+1), ",")+`]}`)
+	e.extra = []string{"GH_JOBS=" + jobs, "WORKER_ENV_AWAIT_SECONDS=0"}
+	_ = os.Remove(e.output)
+	if out, err := e.run("await", job, step); err != nil || strings.TrimSpace(e.read(e.output)) != "drift=true" {
+		t.Errorf("await with the upload done: %v, output %q, want drift=true\n%s", err, e.read(e.output), out)
+	}
+
+	// report: the issue already holds this measurement, at the top of a
+	// thread that overflows the pipe.
+	commits := filepath.Join(e.dir, "commits")
+	files := filepath.Join(e.dir, "files")
+	view := filepath.Join(e.dir, "view")
+	writeDriftFile(t, commits, "c0\n")
+	writeDriftFile(t, filepath.Join(files, "c0"), buildWithPin(e.pin))
+	e.extra = []string{"GH_COMMITS=" + commits, "GH_FILES=" + files, "GH_VIEW=" + view, "DEFAULT_BRANCH=main"}
+	dir, got := e.driftDir("new\n")
+	writeDriftFile(t, view, "worker-env="+got+"\n"+strings.Repeat("later comment\n", pipeOverflow/len("later comment\n")+1))
+	e.setIssues(driftTitle(e.pin), "https://x/issues/9")
+	_ = os.Remove(e.ghLog)
+	if out, err := e.run("report", dir); err != nil || strings.Contains(e.read(e.ghLog), "issue comment") {
+		t.Errorf("report of a known measurement: %v, gh calls:\n%s\n%s", err, e.read(e.ghLog), out)
 	}
 }
 
