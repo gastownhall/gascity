@@ -569,11 +569,12 @@ func TestDrainAckStrictConfig(t *testing.T) {
 
 // TestHookDrainAckToleranceCallSites pins which hook drains tolerate a v2
 // refusal: stale-session, missing-registration and drain-pending complete the
-// drain without drain_acknowledged and exit 0; the suspension drain still
-// fails, and no drain tolerates another failure. The drain-pending hint names
-// --operator only under v2. Kills: an untolerant call site, a tolerated
-// refusal reported as acknowledged, the tolerant wrapper swallowing every
-// failure, and the --operator hint leaking into legacy.
+// drain without drain_acknowledged and exit 0; the suspension and no-work
+// drains still fail, and no drain tolerates another failure. The drain-pending
+// hint names --operator only under v2. Kills: an untolerant call site, a
+// tolerant suspension or no-work site, a tolerated refusal reported as
+// acknowledged, the tolerant wrapper swallowing every failure, and the
+// --operator hint leaking into legacy.
 func TestHookDrainAckToleranceCallSites(t *testing.T) {
 	if drainAckRefused == 0 || drainAckRefused == 1 {
 		t.Fatalf("drainAckRefused = %d must differ from success (0) and failure (1), or the hook tolerates failures", drainAckRefused)
@@ -592,6 +593,11 @@ func TestHookDrainAckToleranceCallSites(t *testing.T) {
 			return writeHookClaimDrainPending(hookClaimLabel, "gc-7", hookClaimOptions{DrainAck: true, JSON: true, StrictDrainAck: strict}, hookClaimOps{DrainAck: ack}, stdout, stderr)
 		}
 	}
+	// claimsErrored reaches the same writeHookClaimDrain call as an idle store
+	// without the post-drain divergence read.
+	noWork := func(ack hookDrainAckFunc, stdout, stderr io.Writer) int {
+		return writeHookClaimNoWork(hookClaimOptions{DrainAck: true, JSON: true}, hookClaimOps{DrainAck: ack}, true, "", stdout, stderr)
+	}
 	suspended := func(ack hookDrainAckFunc, stdout, stderr io.Writer) int {
 		return writeHookClaimSuspensionDrain(hookClaimReasonRigSuspended, hookCommandOptions{DrainAck: true, JSON: true, DrainAckFn: ack}, stdout, stderr)
 	}
@@ -605,6 +611,7 @@ func TestHookDrainAckToleranceCallSites(t *testing.T) {
 		{name: "missing registration, refused", drain: missing, ack: refused},
 		{name: "drain pending (v2), refused", drain: pending(true), ack: refused},
 		{name: "suspension, refused", drain: suspended, ack: refused, wantCode: 1},
+		{name: "no work, refused", drain: noWork, ack: refused, wantCode: 1},
 		{name: "stale session, failed", drain: stale, ack: failed, wantCode: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
