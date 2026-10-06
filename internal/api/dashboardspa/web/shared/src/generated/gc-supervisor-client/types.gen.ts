@@ -741,7 +741,7 @@ export type ConversationTranscriptRecord = {
     ExplicitTarget: string;
     ID: string;
     Kind: TranscriptMessageKind;
-    Metadata: {
+    Metadata?: {
         [key: string]: string;
     };
     Provenance: TranscriptProvenance;
@@ -833,7 +833,7 @@ export type DeliveryContextRecord = {
     ID: string;
     LastMessageID: string;
     LastPublishedAt: string;
-    Metadata: {
+    Metadata?: {
         [key: string]: string;
     };
     SchemaVersion: number;
@@ -1460,12 +1460,12 @@ export type InboundEventPayload = {
 };
 
 export type InboundResult = {
-    Binding: SessionBindingRecord;
-    GroupRoute: GroupRouteDecision;
+    Binding?: SessionBindingRecord;
+    GroupRoute?: GroupRouteDecision;
     Message: ExternalInboundMessage;
     TargetAgentName: string;
     TargetSessionID: string;
-    TranscriptEntry: ConversationTranscriptRecord;
+    TranscriptEntry?: ConversationTranscriptRecord;
 };
 
 export type ListBodyAgentPatch = {
@@ -2211,9 +2211,9 @@ export type OutboundEventPayload = {
 };
 
 export type OutboundResult = {
-    DeliveryContext: DeliveryContextRecord;
+    DeliveryContext?: DeliveryContextRecord;
     Receipt: PublishReceipt;
-    TranscriptEntry: ConversationTranscriptRecord;
+    TranscriptEntry?: ConversationTranscriptRecord;
 };
 
 export type OutputTurn = {
@@ -2630,7 +2630,7 @@ export type PublishReceipt = {
     Delivered: boolean;
     FailureKind: string;
     MessageID: string;
-    Metadata: {
+    Metadata?: {
         [key: string]: string;
     };
     RetryAfter: number;

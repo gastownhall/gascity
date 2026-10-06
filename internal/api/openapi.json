@@ -2183,8 +2183,7 @@
           "ReplyToMessageID",
           "Attachments",
           "SourceSessionID",
-          "CreatedAt",
-          "Metadata"
+          "CreatedAt"
         ],
         "type": "object"
       },
@@ -2367,8 +2366,7 @@
           "BindingGeneration",
           "LastPublishedAt",
           "LastMessageID",
-          "SourceSessionID",
-          "Metadata"
+          "SourceSessionID"
         ],
         "type": "object"
       },
@@ -4038,9 +4036,6 @@
         },
         "required": [
           "Message",
-          "Binding",
-          "GroupRoute",
-          "TranscriptEntry",
           "TargetSessionID",
           "TargetAgentName"
         ],
@@ -5617,9 +5612,7 @@
           }
         },
         "required": [
-          "Receipt",
-          "DeliveryContext",
-          "TranscriptEntry"
+          "Receipt"
         ],
         "type": "object"
       },
@@ -6597,8 +6590,7 @@
           "Conversation",
           "Delivered",
           "FailureKind",
-          "RetryAfter",
-          "Metadata"
+          "RetryAfter"
         ],
         "type": "object"
       },

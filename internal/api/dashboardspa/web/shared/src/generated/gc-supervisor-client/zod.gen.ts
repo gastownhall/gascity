@@ -395,7 +395,7 @@ export const zDeliveryContextRecord = z.object({
     ID: z.string(),
     LastMessageID: z.string(),
     LastPublishedAt: z.iso.datetime(),
-    Metadata: z.record(z.string(), z.string()),
+    Metadata: z.record(z.string(), z.string()).optional(),
     SchemaVersion: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     SessionID: z.string(),
     SourceSessionID: z.string()
@@ -1346,7 +1346,7 @@ export const zPublishReceipt = z.object({
     Delivered: z.boolean(),
     FailureKind: z.string(),
     MessageID: z.string(),
-    Metadata: z.record(z.string(), z.string()),
+    Metadata: z.record(z.string(), z.string()).optional(),
     RetryAfter: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
@@ -3195,7 +3195,7 @@ export const zConversationTranscriptRecord = z.object({
     ExplicitTarget: z.string(),
     ID: z.string(),
     Kind: zTranscriptMessageKind,
-    Metadata: z.record(z.string(), z.string()),
+    Metadata: z.record(z.string(), z.string()).optional(),
     Provenance: zTranscriptProvenance,
     ProviderMessageID: z.string(),
     ReplyToMessageID: z.string(),
@@ -3206,12 +3206,12 @@ export const zConversationTranscriptRecord = z.object({
 });
 
 export const zInboundResult = z.object({
-    Binding: zSessionBindingRecord,
-    GroupRoute: zGroupRouteDecision,
+    Binding: zSessionBindingRecord.optional(),
+    GroupRoute: zGroupRouteDecision.optional(),
     Message: zExternalInboundMessage,
     TargetAgentName: z.string(),
     TargetSessionID: z.string(),
-    TranscriptEntry: zConversationTranscriptRecord
+    TranscriptEntry: zConversationTranscriptRecord.optional()
 });
 
 export const zListBodyConversationTranscriptRecord = z.object({
@@ -3223,9 +3223,9 @@ export const zListBodyConversationTranscriptRecord = z.object({
 });
 
 export const zOutboundResult = z.object({
-    DeliveryContext: zDeliveryContextRecord,
+    DeliveryContext: zDeliveryContextRecord.optional(),
     Receipt: zPublishReceipt,
-    TranscriptEntry: zConversationTranscriptRecord
+    TranscriptEntry: zConversationTranscriptRecord.optional()
 });
 
 export const zUnboundEventPayload = z.object({
