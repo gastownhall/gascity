@@ -112,7 +112,8 @@ func bazelRCFlagValue(rc, prefix string) string {
 // their actions hash alike. The test PATH and every other key input are
 // committed unconditionally in .bazelrc, and --config=ci carries no key input
 // (bazel_key_parity_test.go checks both); this test pins the rest: the
-// tagged-suite configs carry bazel-test.yml's flags, and the remote modes
+// tagged-suite configs carry the suites' flags (acceptance's as bazel-test.yml
+// passes them), and the remote modes
 // both workflows select give 2 vCPU clients minimal downloads and 64 actions
 // in flight.
 func TestBazelCIConfigMatchesBazelTestRC(t *testing.T) {
@@ -131,14 +132,19 @@ func TestBazelCIConfigMatchesBazelTestRC(t *testing.T) {
 		}
 	}
 
-	for _, c := range []struct{ config, legacyFlags string }{
-		{"acceptance", "--define=gotags=acceptance_a --test_timeout=1100"},
-		{"integration", "--define=gotags=integration --test_timeout=1100"},
+	// inLegacy: bazel-test.yml runs the suite too (integration runs only in
+	// bazel.yml's evidence-only lane, never in the required job).
+	for _, c := range []struct {
+		config, flags string
+		inLegacy      bool
+	}{
+		{"acceptance", "--define=gotags=acceptance_a --test_timeout=1100", true},
+		{"integration", "--define=gotags=integration --test_timeout=1100", false},
 	} {
-		if !strings.Contains(legacy, c.legacyFlags) {
-			t.Errorf("%s no longer passes %q", bazelTestWorkflow, c.legacyFlags)
+		if c.inLegacy && !strings.Contains(legacy, c.flags) {
+			t.Errorf("%s no longer passes %q", bazelTestWorkflow, c.flags)
 		}
-		for _, f := range strings.Fields(c.legacyFlags) {
+		for _, f := range strings.Fields(c.flags) {
 			if !strings.Contains(rc, "\ntest:"+c.config+" "+f+"\n") {
 				t.Errorf(".bazelrc lacks test:%s %s", c.config, f)
 			}
@@ -554,73 +560,76 @@ func multiLaneGateEvaluate(t *testing.T, wf multiLaneWorkflow) string {
 	return ""
 }
 
-// multiLaneGatePasses runs the gate's Evaluate script with job results and
-// the rbe job's lane list.
-func multiLaneGatePasses(t *testing.T, script, laneList, rbe, lanes, sync string) bool {
+// multiLaneGatePasses runs the gate's Evaluate script for an event and mode
+// with job results and the rbe job's lane list.
+func multiLaneGatePasses(t *testing.T, script, event, mode, laneList, rbe, lanes, sync string) bool {
 	t.Helper()
 	_, err := runWorkflowStepScript(t, t.TempDir(), script, map[string]string{
-		"EVENT": "pull_request", "MODE": "remote",
+		"EVENT": event, "MODE": mode,
 		"LANE_LIST": laneList, "RBE": rbe, "LANES": lanes, "SYNC": sync,
 	})
 	return err == nil
 }
 
 // TestBazelMultiLaneGate runs the gate: rbe and sync-check must succeed;
-// the lanes must succeed, or be skipped exactly where the lane list is empty.
+// the lanes must succeed, or be skipped exactly where the lane list is empty
+// and the run is not a pull request (a zero-lane PR tested nothing).
 func TestBazelMultiLaneGate(t *testing.T) {
 	wf := readMultiLaneWorkflow(t)
 	script := multiLaneGateEvaluate(t, wf)
 	someLanes := `[{"lane":"unit","cmd":"test --config=ci --keep_going //..."}]`
 	for _, c := range []struct {
-		laneList, rbe, lanes, sync string
-		pass                       bool
+		event, mode, laneList, rbe, lanes, sync string
+		pass                                    bool
 	}{
-		{someLanes, "success", "success", "success", true},
-		{someLanes, "success", "failure", "success", false},
-		{someLanes, "success", "cancelled", "success", false}, //nolint:misspell // GitHub Actions job result value
-		{someLanes, "success", "skipped", "success", false},
-		{someLanes, "success", "success", "failure", false},
-		{someLanes, "failure", "success", "success", false},
-		{"[]", "success", "skipped", "success", true},
-		{"[]", "success", "success", "success", false},
-		{"[]", "success", "skipped", "failure", false},
-		{"", "failure", "skipped", "success", false},
-		{"", "success", "skipped", "success", false},
+		{"pull_request", "remote", someLanes, "success", "success", "success", true},
+		{"pull_request", "remote", someLanes, "success", "failure", "success", false},
+		{"pull_request", "remote", someLanes, "success", "cancelled", "success", false}, //nolint:misspell // GitHub Actions job result value
+		{"pull_request", "remote", someLanes, "success", "skipped", "success", false},
+		{"pull_request", "remote", someLanes, "success", "success", "failure", false},
+		{"pull_request", "remote", someLanes, "failure", "success", "success", false},
+		{"pull_request", "cache", "[]", "success", "skipped", "success", false},
+		{"pull_request", "skip", "[]", "success", "skipped", "success", false},
+		{"push", "skip", "[]", "success", "skipped", "success", true},
+		{"workflow_dispatch", "skip", "[]", "success", "skipped", "success", true},
+		{"push", "skip", "[]", "success", "success", "success", false},
+		{"push", "skip", "[]", "success", "skipped", "failure", false},
+		{"pull_request", "remote", "", "failure", "skipped", "success", false},
+		{"pull_request", "remote", "", "success", "skipped", "success", false},
 	} {
-		if got := multiLaneGatePasses(t, script, c.laneList, c.rbe, c.lanes, c.sync); got != c.pass {
-			t.Errorf("gate with lane list %q, rbe %s, lanes %s, sync %s: pass %v, want %v", c.laneList, c.rbe, c.lanes, c.sync, got, c.pass)
+		if got := multiLaneGatePasses(t, script, c.event, c.mode, c.laneList, c.rbe, c.lanes, c.sync); got != c.pass {
+			t.Errorf("gate (event %s, mode %s) with lane list %q, rbe %s, lanes %s, sync %s: pass %v, want %v",
+				c.event, c.mode, c.laneList, c.rbe, c.lanes, c.sync, got, c.pass)
 		}
 	}
 }
 
-// TestBazelMultiLaneGateUnderRequiredNameRunsLanes: the cutover hazard. The
-// gate passes when no lane ran (an empty lane list: mode skip, or a
-// pull_request run in mode cache, i.e. fork and Dependabot PRs). Under a
-// required check's name that merges untested PRs, so the cutover that
-// renames the gate must first make a cache-mode PR run lanes or fail.
-func TestBazelMultiLaneGateUnderRequiredNameRunsLanes(t *testing.T) {
+// TestBazelMultiLaneGateFailsZeroLanePullRequests: the cutover hazard. A
+// pull_request run whose lane list is empty (mode cache: a fork or
+// Dependabot PR rbe-west's mint did not serve; mode skip: rbe-west off)
+// tested nothing, so the gate must fail it rather than pass a PR no lane
+// ran for, whatever name the gate carries. Pushes and dispatches in mode
+// skip gate no merge and may pass.
+func TestBazelMultiLaneGateFailsZeroLanePullRequests(t *testing.T) {
 	wf := readMultiLaneWorkflow(t)
 	script := multiLaneGateEvaluate(t, wf)
 	lanesStep := multiLaneRBEStep(t, wf, "lanes")
-	var zeroLanes []string
 	for _, event := range multiLaneEvents {
 		for _, mode := range multiLaneModes {
 			raw, err := multiLaneLanes(t, lanesStep.Run, event, mode)
 			if err != nil {
 				t.Fatalf("Lanes step (event %s, mode %s) failed: %v\n%s", event, mode, err, raw)
 			}
-			if raw == "[]" && multiLaneGatePasses(t, script, raw, "success", "skipped", "success") {
-				zeroLanes = append(zeroLanes, event+"/"+mode)
+			if raw != "[]" {
+				continue
 			}
-		}
-	}
-	if len(zeroLanes) == 0 {
-		return
-	}
-	name := strings.TrimSpace(wf.Jobs["gate"].Name)
-	for _, required := range gascityRequiredChecks {
-		if strings.EqualFold(name, required) {
-			t.Errorf("gate %q is a required check but passes with no lane run for %v: make a cache-mode PR run lanes (rbe-west's mint serves bazel.yml) or fail before the cutover", name, zeroLanes)
+			passes := multiLaneGatePasses(t, script, event, mode, raw, "success", "skipped", "success")
+			if event == "pull_request" && passes {
+				t.Errorf("gate passes a pull_request run in mode %s with no lane run; zero lanes must fail a PR", mode)
+			}
+			if event != "pull_request" && !passes {
+				t.Errorf("gate fails a %s run in mode %s with no lane run; only pull requests must test something", event, mode)
+			}
 		}
 	}
 }

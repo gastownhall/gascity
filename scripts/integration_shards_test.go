@@ -165,8 +165,8 @@ func integrationTestOrder(t *testing.T, root string, srcs []string) []string {
 
 // integrationLaneTags is the tag set the integration lane's shard guard
 // evaluates //go:build lines against: the "integration" gazelle:build_tags
-// directive plus the lane's canonical linux/amd64 platform (bazel-test.yml
-// and scripts/test-integration-shard both run it there).
+// directive plus the lane's canonical linux/amd64 platform (bazel.yml's
+// integration lane and scripts/test-integration-shard both run it there).
 var integrationLaneTags = map[string]bool{"integration": true, "linux": true, "amd64": true}
 
 // knownGOOS and knownGOARCH list every GOOS/GOARCH recognized by the Go

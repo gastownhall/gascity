@@ -23,8 +23,9 @@
 #   - the rbe job's lane list (event and mode) decides which lanes start;
 #   - integration runs on pushes and dispatches only, evidence-only, until G3;
 #   - pull_request runs in mode cache (fork and Dependabot PRs while
-#     rbe-west's mint does not yet serve bazel.yml) run no lanes:
-#     bazel-test.yml covers them; rbe=cache dispatches still run them;
+#     rbe-west's mint does not yet serve bazel.yml) run no lanes and fail
+#     the gate (a PR no lane ran for tested nothing); bazel-test.yml covers
+#     them meanwhile; rbe=cache dispatches still run them;
 #   - a fork run mints at most 2 rbe-fork certificates, one per lane:
 #     unit and acceptance, in fork-ro and fork-rw alike;
 #   - coverage uploads lcov as an artifact; bazel-test.yml keeps the Codecov
@@ -151,7 +152,7 @@ jobs:
           if [ "$MODE" = skip ]; then
             echo "No lanes: rbe-west is off (vars.RBE_WEST_WORKERS)." >> "$GITHUB_STEP_SUMMARY"
           elif [ "$EVENT" = pull_request ] && [ "$MODE" = cache ]; then
-            echo "No lanes: pull_request runs in mode cache wait for rbe-west's mint to serve bazel.yml; bazel-test.yml covers this PR." >> "$GITHUB_STEP_SUMMARY"
+            echo "No lanes: pull_request runs in mode cache wait for rbe-west's mint to serve bazel.yml; the gate fails this run (bazel-test.yml covers this PR)." >> "$GITHUB_STEP_SUMMARY"
           else
             # Acceptance runs on the fork pool too (mode fork-ro, instance
             # oss-fork, loopback only): `gc init` no longer clones
@@ -598,12 +599,11 @@ jobs:
   # (side-by-side)" and bazel-test.yml is deleted; branch protection and the
   # ruleset need no edit.
   #
-  # Cutover hazard: this gate passes with zero lanes (an empty lane list:
-  # mode skip, or a pull_request run in mode cache). Under a required name
-  # that would merge fork and Dependabot PRs nothing tested. The cutover
-  # must first make a cache-mode PR run lanes (rbe-west's mint serves
-  # bazel.yml) or fail here; TestBazelMultiLaneGateUnderRequiredNameRunsLanes
-  # fails while both hold.
+  # Zero lanes: a pull_request run with an empty lane list (mode cache: a
+  # fork or Dependabot PR rbe-west's mint did not serve; mode skip: rbe-west
+  # off) tested nothing and fails here, so no name this gate carries can
+  # merge an untested PR. Pushes and dispatches in mode skip gate no merge
+  # and pass (TestBazelMultiLaneGateFailsZeroLanePullRequests).
   gate:
     name: bazel lanes (preview)
     needs: [rbe, lane, sync-check]
@@ -626,6 +626,11 @@ jobs:
           [ "$RBE" = success ] || exit 1
           [ "$SYNC" = success ] || exit 1
           if [ "$LANE_LIST" = '[]' ]; then
+            # A pull request no lane ran for tested nothing: never pass it.
+            if [ "$EVENT" = pull_request ]; then
+              echo "::error title=bazel ran no lanes::mode $MODE started no lane for this pull request; nothing was tested"
+              exit 1
+            fi
             [ "$LANES" = skipped ]
             exit $?
           fi

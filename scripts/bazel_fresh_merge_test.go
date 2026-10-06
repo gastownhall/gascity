@@ -21,13 +21,9 @@ import (
 // the base branch's current tip.
 
 const (
-	freshMergeAction   = ".github/actions/fresh-merge/action.yml"
-	freshMergeUses     = "./.github/actions/fresh-merge"
-	freshMergeStepName = "Merge the PR head onto the base branch's current tip"
-	bazelEvidenceStep  = "bazel test //test/integration (evidence-only)"
-	// Never on a failed fresh merge (a half-merged tree), nor on a moved
-	// worker-env pin (TestBazelTestWorkerEnvPreflight).
-	bazelEvidenceStepIf  = "always() && steps.fresh-merge.outcome != 'failure' && steps.worker-env.outputs.pin-moved != 'true'"
+	freshMergeAction     = ".github/actions/fresh-merge/action.yml"
+	freshMergeUses       = "./.github/actions/fresh-merge"
+	freshMergeStepName   = "Merge the PR head onto the base branch's current tip"
 	bazelTestConcurrency = "${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}"
 )
 
@@ -90,17 +86,24 @@ func TestBazelTestFreshMergeSteps(t *testing.T) {
 			t.Errorf("%s has %d checkouts, want 1", name, checkouts)
 		}
 	}
-	found := false
-	for _, step := range wf.Jobs["bazel"].Steps {
-		if step.Name == bazelEvidenceStep {
-			found = true
-			if step.If != bazelEvidenceStepIf {
-				t.Errorf("%q if = %q, want %q", bazelEvidenceStep, step.If, bazelEvidenceStepIf)
+}
+
+// TestBazelTestRequiredJobRunsNoEvidenceOnlySuite: the bazel job is the
+// required check "bazel test (side-by-side)", so every bazel invocation in it
+// gates. A `bazel test ... || true` costs the required job its wall time and
+// can never fail it; evidence-only suites (integration until G3) run in
+// bazel.yml's integration lane on pushes and dispatches instead.
+func TestBazelTestRequiredJobRunsNoEvidenceOnlySuite(t *testing.T) {
+	for _, step := range bazelTestWorkflowSteps(t, repoRoot(t)) {
+		joined := strings.ReplaceAll(step.Run, "\\\n", " ")
+		for _, inv := range bazelTestInvocation.FindAllString(joined, -1) {
+			if strings.HasSuffix(strings.TrimSpace(inv), "|| true") {
+				t.Errorf("step %q runs a bazel test that can never fail the required job:\n%s", step.Name, strings.TrimSpace(inv))
+			}
+			if strings.Contains(inv, "//test/integration") {
+				t.Errorf("step %q runs //test/integration in the required job; it is evidence-only and belongs to bazel.yml's integration lane", step.Name)
 			}
 		}
-	}
-	if !found {
-		t.Errorf("bazel job has no %q step", bazelEvidenceStep)
 	}
 }
 

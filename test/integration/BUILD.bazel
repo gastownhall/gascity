@@ -166,7 +166,8 @@ exports_files(
     visibility = ["//scripts:__pkg__"],
 )
 
-# The integration lane builds with --define=gotags=integration (bazel-test.yml).
+# The integration lane builds with --define=gotags=integration (.bazelrc
+# test:integration, bazel.yml's integration lane).
 config_setting(
     name = "gotags_integration",
     define_values = {"gotags": "integration"},
