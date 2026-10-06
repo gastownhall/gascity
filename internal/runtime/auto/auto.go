@@ -293,10 +293,7 @@ func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.L
 	if isACP {
 		other = p.defaultSP
 	}
-	if obs := runtime.ObserveLiveness(other, name, processNames); obs.Running || !primary.Corpse {
-		return obs
-	}
-	return primary
+	return runtime.ObserveLiveness(other, name, processNames)
 }
 
 // ObserveLivenessWithError preserves routed-backend observation failures. A

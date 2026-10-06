@@ -115,6 +115,27 @@ func TestKillCorpseObjectRealTmuxRefusesLivePane(t *testing.T) {
 	}
 }
 
+// #{pane_dead} reads only the active pane: a dead active pane beside a live
+// one must refuse, so the live pane is never killed with the session.
+func TestKillCorpseObjectRealTmuxRefusesDeadActivePaneBesideLivePane(t *testing.T) {
+	p := newObjectServer(t)
+	startObjectSession(t, p, "split", "sleep 300")
+	if _, err := p.tm.run("set-option", "-w", "-t", paneTarget("split"), "remain-on-exit", "on"); err != nil {
+		t.Fatalf("remain-on-exit: %v", err)
+	}
+	if _, err := p.tm.run("split-window", "-t", paneTarget("split"), "true"); err != nil {
+		t.Fatalf("split-window: %v", err)
+	}
+	waitObjectCondition(t, "the active pane to die", func() bool { return objectFormat(t, p, "split", "#{pane_dead} #{window_panes}") == "1 2" })
+	id := objectFormat(t, p, "split", "#{session_id}")
+	if res, err := p.KillCorpseObject("split", id); err != nil || res != runtime.SessionObjectLive {
+		t.Fatalf("KillCorpseObject(dead active pane beside a live one) = %v, %v; want refused live", res, err)
+	}
+	if !hasObjectSession(t, p, "split") {
+		t.Fatal("a session with a live pane was killed")
+	}
+}
+
 // The name now held by another object (here: the observed object renamed)
 // refuses, so the kill never follows a name.
 func TestKillCorpseObjectRealTmuxRefusesNameMismatch(t *testing.T) {

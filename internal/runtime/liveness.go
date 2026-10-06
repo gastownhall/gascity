@@ -167,6 +167,24 @@ type BoundedLivenessObserver = LivenessObserverWithError
 // ObservationComplete with a nil error, exactly matching today's behavior —
 // additive only, no existing Provider call site changes.
 func ObserveLivenessBounded(ctx context.Context, sp Provider, name string, processNames []string, timeout time.Duration) (Liveness, ObservationStatus, error) {
+	return observeBounded(ctx, timeout, func() (Liveness, error) {
+		return ObserveLivenessWithError(sp, name, processNames)
+	})
+}
+
+// ObserveLivenessBoundedSince is [ObserveLivenessBounded] over
+// [ObserveLivenessSince]: a fresh read whose deadline answers incomplete. A
+// tmux fresh read can join a fetch and refresh twice before it answers, which
+// may outlast an effect's fence timeout.
+func ObserveLivenessBoundedSince(ctx context.Context, sp Provider, name string, processNames []string, since time.Time, timeout time.Duration) (Liveness, ObservationStatus, error) {
+	return observeBounded(ctx, timeout, func() (Liveness, error) {
+		return ObserveLivenessSince(sp, name, processNames, since)
+	})
+}
+
+// observeBounded races observe against timeout, as ObserveLivenessBounded
+// documents.
+func observeBounded(ctx context.Context, timeout time.Duration, observe func() (Liveness, error)) (Liveness, ObservationStatus, error) {
 	if err := ctx.Err(); err != nil {
 		return Liveness{}, ObservationIncomplete, err
 	}
@@ -180,7 +198,7 @@ func ObserveLivenessBounded(ctx context.Context, sp Provider, name string, proce
 	}
 	results := make(chan observation, 1)
 	go func() {
-		liveness, err := ObserveLivenessWithError(sp, name, processNames)
+		liveness, err := observe()
 		results <- observation{liveness: liveness, err: err}
 	}()
 

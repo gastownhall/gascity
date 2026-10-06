@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -70,5 +71,35 @@ func TestObserveLivenessSinceUsesCapabilityAndNormalizes(t *testing.T) {
 	}
 	if got, err := ObserveLivenessSince(plain, "worker", nil, since); err != nil || !got.Running {
 		t.Fatalf("ObserveLivenessSince fallback = (%+v, %v), want running", got, err)
+	}
+}
+
+type blockingFreshLivenessStub struct {
+	*Fake
+	release <-chan struct{}
+}
+
+func (s blockingFreshLivenessStub) ObserveLivenessSince(string, []string, time.Time) (Liveness, error) {
+	<-s.release
+	return Liveness{Running: true, Alive: true}, nil
+}
+
+// A fresh read that outlasts its bound answers incomplete, and an answered
+// one passes since through. Kills: the bounded fresh read unbounded, or
+// reading the cached (not fresh) observation.
+func TestObserveLivenessBoundedSinceDeadlineIsUnknown(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	blocked := blockingFreshLivenessStub{Fake: NewFake(), release: release}
+	got, status, err := ObserveLivenessBoundedSince(context.Background(), blocked, "worker", nil, time.Now(), 20*time.Millisecond)
+	if status != ObservationIncomplete || got != (Liveness{}) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ObserveLivenessBoundedSince past its bound = (%+v, %v, %v), want incomplete and DeadlineExceeded", got, status, err)
+	}
+
+	since := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	stub := &freshLivenessStub{Fake: NewFake(), obs: Liveness{Corpse: true, ObjectID: "$1"}}
+	got, status, err = ObserveLivenessBoundedSince(context.Background(), stub, "worker", nil, since, time.Minute)
+	if status != ObservationComplete || err != nil || got != stub.obs || !stub.since.Equal(since) {
+		t.Fatalf("ObserveLivenessBoundedSince = (%+v, %v, %v), since %v; want the fresh corpse", got, status, err, stub.since)
 	}
 }
