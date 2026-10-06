@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,6 +43,8 @@ type fakeAdoptionProvider struct {
 	tokens map[string]string
 	// tokenErr fails every GC_INSTANCE_TOKEN read.
 	tokenErr error
+	// sessionIDs is each session's GC_SESSION_ID before any stamp.
+	sessionIDs map[string]string
 	// stamps records SetMeta writes by name, then key; setMetaErr fails them.
 	stamps     map[string]map[string]string
 	setMetaErr error
@@ -148,10 +151,13 @@ func (f *fakeAdoptionProvider) ProcessAlive(name string, processNames []string) 
 func (f *fakeAdoptionProvider) IsAttached(string) bool { return false }
 
 func (f *fakeAdoptionProvider) GetMeta(name, key string) (string, error) {
-	if key != "GC_INSTANCE_TOKEN" {
-		return "", nil
+	switch key {
+	case "GC_INSTANCE_TOKEN":
+		return f.tokens[name], f.tokenErr
+	case "GC_SESSION_ID":
+		return f.sessionIDs[name], nil
 	}
-	return f.tokens[name], f.tokenErr
+	return "", nil
 }
 
 func (f *fakeAdoptionProvider) SetMeta(name, key, value string) error {
@@ -348,6 +354,68 @@ func TestAdoptionStampsSessionIDAndToken(t *testing.T) {
 			}
 			if stamps["GC_SESSION_ID"] != row.ID || result.Unstamped != 0 {
 				t.Fatalf("runtime GC_SESSION_ID = %q (unstamped %d), want row %s", stamps["GC_SESSION_ID"], result.Unstamped, row.ID)
+			}
+		})
+	}
+}
+
+// Kills: re-stamping a runtime that already names a session (LL5, as the
+// coordinator ruled on #7223). A runtime adopted while it still carries a
+// closed row's GC_SESSION_ID keeps that ID, so the closed-bead reaper stops
+// it exactly as before LL5; the new row holds the runtime's token, own or
+// minted, which v5 O2 reads as Current whatever the session ID.
+func TestAdoptionKeepsAnotherRowsSessionID(t *testing.T) {
+	for _, tc := range []struct{ name, token string }{
+		{name: "own token", token: "440f67722bf9e7382ad684e057191659"},
+		{name: "no token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const name = "test-city-worker"
+			store := beads.NewMemStore()
+			closed, err := store.Create(beads.Bead{
+				Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{"session_name": name, "agent_name": "worker", "state": "active"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(closed.ID); err != nil {
+				t.Fatal(err)
+			}
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			if err := sp.SetMeta(name, "GC_SESSION_ID", closed.ID); err != nil {
+				t.Fatal(err)
+			}
+			if tc.token != "" {
+				if err := sp.SetMeta(name, "GC_INSTANCE_TOKEN", tc.token); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			var stderr bytes.Buffer
+			result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, false)
+			if !passed || result.Adopted != 1 || result.Unstamped != 0 {
+				t.Fatalf("barrier passed=%v result=%+v, want one clean adoption; stderr: %s", passed, result, stderr.String())
+			}
+			rows, _ := store.ListByLabel(sessionBeadLabel, 0)
+			if len(rows) != 1 {
+				t.Fatalf("open rows = %d, want the adopted row", len(rows))
+			}
+			if got, _ := sp.GetMeta(name, "GC_SESSION_ID"); got != closed.ID {
+				t.Fatalf("runtime GC_SESSION_ID = %q, want the closed row's %s kept", got, closed.ID)
+			}
+			live, err := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
+			if verdict := classifyRuntimeInstanceToken(live, err, rows[0].Metadata["instance_token"]); live == "" || verdict != runtimeTokenMatch {
+				t.Fatalf("runtime token %q vs row %q: verdict %d, want a non-empty match (Current by token)", live, rows[0].Metadata["instance_token"], verdict)
+			}
+			if tc.token != "" && live != tc.token {
+				t.Fatalf("runtime token = %q, want its own %q kept", live, tc.token)
+			}
+			if n := reapRuntimesBoundToClosedBeads(store, newSessionBeadSnapshot(rows), nil, sp, nil, t.TempDir(), io.Discard); n != 1 || sp.IsRunning(name) {
+				t.Fatalf("reaped %d, running %v; want the closed-bound runtime reaped as before LL5", n, sp.IsRunning(name))
 			}
 		})
 	}

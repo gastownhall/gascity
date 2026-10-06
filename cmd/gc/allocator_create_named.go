@@ -89,10 +89,10 @@ func (x *createEffects) createNamed(pass *createPass, p createPlan, prog *create
 // identity (LL5, v5 O2). The row records the runtime's own GC_INSTANCE_TOKEN
 // by a CAS at the revision it reads, never blind; a runtime with no token
 // gets a minted one, on the row and then on the runtime. GC_SESSION_ID is
-// stamped only once the row holds the runtime's token: a lost CAS leaves the
-// runtime with no session ID and a token that is not the row's, which the
-// comparator reads as Unknown. A failure is logged and does not fail the
-// create.
+// stamped, on a runtime that carries none, only once the row holds the
+// runtime's token: a lost CAS leaves the runtime with no session ID and a
+// token that is not the row's, which the comparator reads as Unknown. A
+// failure is logged and does not fail the create.
 func (x *createEffects) adoptLiveIdentity(pass *createPass, p createPlan, rowID string) {
 	if pass.sp == nil {
 		return

@@ -316,10 +316,12 @@ func runAdoptionBarrier(
 }
 
 // stampAdoptedRuntime writes an adopted runtime's identity to the runtime
-// (LL5, v5 O2): mintedToken when the adoption minted one, then GC_SESSION_ID.
-// The session ID is stamped even when the token is not, so the runtime reads
-// as the row's own with no token, which the comparator holds as Unknown. The
-// caller only reports the error: the row exists either way.
+// (LL5, v5 O2): mintedToken when the adoption minted one, then GC_SESSION_ID
+// when the runtime carries none. A runtime that already names a session keeps
+// it: the row holds the runtime's token, which reads Current whatever the
+// session ID, and a runtime still naming a closed row stays visible to
+// reapRuntimesBoundToClosedBeads exactly as before. The caller only reports
+// the error: the row exists either way.
 func stampAdoptedRuntime(sp runtime.Provider, name, sessionID, mintedToken string) error {
 	var errs []error
 	if mintedToken != "" {
@@ -327,8 +329,13 @@ func stampAdoptedRuntime(sp runtime.Provider, name, sessionID, mintedToken strin
 			errs = append(errs, fmt.Errorf("stamping GC_INSTANCE_TOKEN: %w", err))
 		}
 	}
-	if err := sp.SetMeta(name, "GC_SESSION_ID", sessionID); err != nil {
-		errs = append(errs, fmt.Errorf("stamping GC_SESSION_ID: %w", err))
+	switch current, err := sp.GetMeta(name, "GC_SESSION_ID"); {
+	case err != nil:
+		errs = append(errs, fmt.Errorf("reading GC_SESSION_ID: %w", err))
+	case strings.TrimSpace(current) == "":
+		if err := sp.SetMeta(name, "GC_SESSION_ID", sessionID); err != nil {
+			errs = append(errs, fmt.Errorf("stamping GC_SESSION_ID: %w", err))
+		}
 	}
 	return errors.Join(errs...)
 }
