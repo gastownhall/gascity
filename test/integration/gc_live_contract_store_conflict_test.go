@@ -5,8 +5,14 @@ package integration
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	openapivalidator "github.com/pb33f/libopenapi-validator"
+	validationerrors "github.com/pb33f/libopenapi-validator/errors"
 )
 
 // liveStoreConflictBody is the declared, retryable 503 the supervisor answered
@@ -24,6 +30,8 @@ func TestLiveContractStoreConflictIsOnlyTheDeclaredRetryable503(t *testing.T) {
 		{"observed wake store_conflict", http.StatusServiceUnavailable, liveStoreConflictBody, true},
 		{"store_conflict detail on a 500", http.StatusInternalServerError, liveStoreConflictBody, false},
 		{"other 503 cause", http.StatusServiceUnavailable, `{"status":503,"code":"service-unavailable","detail":"no bead store configured"}`, false},
+		{"store_conflict detail with wrong code", http.StatusServiceUnavailable, `{"status":503,"code":"service-unavailable","detail":"store_conflict: lookalike"}`, false},
+		{"store_conflict detail without code", http.StatusServiceUnavailable, `{"status":503,"detail":"store_conflict: lookalike"}`, false},
 		{"store-unavailable without store_conflict", http.StatusServiceUnavailable, `{"status":503,"code":"store-unavailable","detail":"store unreachable"}`, false},
 		{"session conflict", http.StatusConflict, `{"status":409,"code":"session-conflict","detail":"store_conflict: lookalike"}`, false},
 		{"non-JSON 503", http.StatusServiceUnavailable, "store_conflict", false},
@@ -34,6 +42,64 @@ func TestLiveContractStoreConflictIsOnlyTheDeclaredRetryable503(t *testing.T) {
 				t.Fatalf("liveContractStoreConflict(%d, %s) = %v, want %v", tc.status, tc.body, got, tc.want)
 			}
 		})
+	}
+}
+
+type countingLiveContractValidator struct {
+	openapivalidator.Validator
+	responseCalls int
+}
+
+func (v *countingLiveContractValidator) ValidateHttpResponse(req *http.Request, resp *http.Response) (bool, []*validationerrors.ValidationError) {
+	v.responseCalls++
+	return v.Validator.ValidateHttpResponse(req, resp)
+}
+
+func TestLiveContractDoValidatesIntermediateStoreConflict(t *testing.T) {
+	spec, err := os.ReadFile(filepath.Join("..", "..", "internal", "api", "openapi.json"))
+	if err != nil {
+		t.Fatalf("read OpenAPI spec: %v", err)
+	}
+	v := &countingLiveContractValidator{Validator: liveContractValidator(t, spec)}
+	srv, calls := storeConflictThenOKServer(t, 1, http.StatusOK, `{"status":"ok","id":"session-a"}`)
+
+	_, resp, _ := liveContractDo(t, srv.URL, v, http.MethodPost, "/v0/city/c/session/session-a/wake", nil, nil, func(status int) bool {
+		return status == http.StatusOK
+	})
+	if resp.StatusCode != http.StatusOK || calls.Load() != 2 {
+		t.Fatalf("final response = %d after %d requests, want 200 after two requests", resp.StatusCode, calls.Load())
+	}
+	if v.responseCalls != 1 {
+		t.Fatalf("intermediate response validation calls = %d, want 1", v.responseCalls)
+	}
+}
+
+func TestLiveContractDoStopsReissuingAfterStoreConflictBudget(t *testing.T) {
+	previousBudget := liveContractStoreConflictBudget
+	liveContractStoreConflictBudget = 50 * time.Millisecond
+	t.Cleanup(func() { liveContractStoreConflictBudget = previousBudget })
+
+	const maxConflictReplies = 10000
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) > maxConflictReplies {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(liveStoreConflictBody))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, resp, raw := liveContractDo(t, srv.URL, nil, http.MethodPost, "/v0/city/c/session/session-a/wake", nil, nil, func(int) bool {
+		return false
+	})
+	if resp.StatusCode != http.StatusServiceUnavailable || string(raw) != liveStoreConflictBody {
+		t.Fatalf("final response = %d %s, want the declared 503", resp.StatusCode, raw)
+	}
+	if got := calls.Load(); got < 1 || got > maxConflictReplies {
+		t.Fatalf("requests before budget expiry = %d, want 1..%d", got, maxConflictReplies)
 	}
 }
 
