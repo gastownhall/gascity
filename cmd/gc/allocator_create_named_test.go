@@ -835,11 +835,29 @@ func namedTreeSnapshot(t *testing.T, dir string) []string {
 // Kills: the S2 side effects (a settings projection, a work-dir mkdir, a
 // skill snapshot written or removed, a RepairEmptyType write on another row)
 // and any provider probe, including SyncRuntimeAlias on an adopt (P3-6b
-// T11). The agent works in a worktree dir and has a skill on a stage-2
+// T11), other than LL5's identity stamp (adoptStampProvider). The agent works in a worktree dir and has a skill on a stage-2
 // session provider, so legacy's resolution would create the dir, or rewrite
 // the snapshot its earlier resolution left there. (City skills feed the
 // snapshot only through the catalogs read-only resolution does not load;
 // the agent-local skill reaches the snapshot step without them.)
+// adoptStampProvider is probePanicProvider answering only LL5's identity
+// stamp on an AdoptLive: the token read and the two identity writes.
+type adoptStampProvider struct{ probePanicProvider }
+
+func (adoptStampProvider) GetMeta(name, key string) (string, error) {
+	if key != "GC_INSTANCE_TOKEN" {
+		panic("create effect read " + key + " from runtime " + name)
+	}
+	return "", nil
+}
+
+func (adoptStampProvider) SetMeta(name, key, _ string) error {
+	if key != "GC_INSTANCE_TOKEN" && key != "GC_SESSION_ID" {
+		panic("create effect wrote " + key + " to runtime " + name)
+	}
+	return nil
+}
+
 func TestCreateEffect_NamedNeverProbesNorWritesFiles(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -880,7 +898,7 @@ func TestCreateEffect_NamedNeverProbesNorWritesFiles(t *testing.T) {
 			h.reserve(t, "c1")
 			plan := namedPlan(t, cfg, "c1", "mayor")
 			plan.Named.AdoptLive = true
-			h.runAll(t, &createPass{cfg: cfg, sp: probePanicProvider{}, store: namedGuardedStore{Store: mem, target: target}}, plan)
+			h.runAll(t, &createPass{cfg: cfg, sp: adoptStampProvider{}, store: namedGuardedStore{Store: mem, target: target}}, plan)
 
 			e := h.entry(t)
 			if !e.Landed {
@@ -1665,5 +1683,111 @@ func TestReadOnlyResolveMatchesLegacyCreateMetadataRichCity(t *testing.T) {
 				t.Fatalf("legacyFirst=%v %s: read-only metadata differs:\nread-only: %v\nlegacy:    %v", legacyFirst, id, got, want)
 			}
 		}
+	}
+}
+
+// adoptLiveRun runs mayor's AdoptLive create over a fake runtime alive under
+// the session name and carrying runtimeToken ("" for none). It returns the
+// row the effect left, a reader of the runtime's metadata and the effect's
+// stderr.
+func adoptLiveRun(t *testing.T, store beads.Store, runtimeToken string) (beads.Bead, func(key string) string, string) {
+	t.Helper()
+	cfg := mayorCity()
+	var stderr strings.Builder
+	h := newNamedHarness(t, t.TempDir(), func(host *createEffectHost) { host.stderr = &stderr })
+	h.reserve(t, "c1")
+	plan := namedPlan(t, cfg, "c1", "mayor")
+	plan.Named.AdoptLive = true
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), plan.Named.SessionName, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if runtimeToken != "" {
+		if err := fake.SetMeta(plan.Named.SessionName, "GC_INSTANCE_TOKEN", runtimeToken); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.runAll(t, &createPass{cfg: cfg, store: store, sp: transportFake{fake}}, plan)
+	if s := h.entry(t); !s.Landed || s.Stage != "" {
+		t.Fatalf("settlement = %+v, want landed: a stamp never fails the create", s)
+	}
+	rows, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("open rows = %v (%v), want the one named row", rows, err)
+	}
+	meta := func(key string) string {
+		v, err := fake.GetMeta(plan.Named.SessionName, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	return rows[0], meta, stderr.String()
+}
+
+// fencedMemStore is a MemStore that resolves a conditional writer.
+func fencedMemStore(t *testing.T) *beads.MemStore {
+	t.Helper()
+	mem := beads.NewMemStore()
+	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	return mem
+}
+
+// Kills: a row token the runtime never carries (v5 O2, LL5). An AdoptLive
+// create or reopen records the runtime's own token on the row by CAS and
+// stamps the row's ID on the runtime; with no conditional writer it never
+// writes blind, and the runtime gets no session ID either.
+func TestNamedAdoptLiveRecordsRuntimeToken(t *testing.T) {
+	const rt = "rt-own-token"
+	t.Run("create", func(t *testing.T) {
+		row, meta, _ := adoptLiveRun(t, fencedMemStore(t), rt)
+		if got := row.Metadata["instance_token"]; got != rt {
+			t.Fatalf("row instance_token = %q, want the runtime's %q", got, rt)
+		}
+		if got := meta("GC_SESSION_ID"); got != row.ID {
+			t.Fatalf("runtime GC_SESSION_ID = %q, want row %s", got, row.ID)
+		}
+		if got := meta("GC_INSTANCE_TOKEN"); got != rt {
+			t.Fatalf("runtime token = %q, want its own %q kept", got, rt)
+		}
+	})
+	t.Run("reopen", func(t *testing.T) {
+		store := fencedMemStore(t)
+		closed := seedClosedNamedRow(t, store, mayorCity(), nil)
+		row, meta, _ := adoptLiveRun(t, store, rt)
+		if row.ID != closed.ID || row.Metadata["instance_token"] != rt {
+			t.Fatalf("row = %s token %q, want reopened %s with the runtime's %q", row.ID, row.Metadata["instance_token"], closed.ID, rt)
+		}
+		if got := meta("GC_SESSION_ID"); got != closed.ID {
+			t.Fatalf("runtime GC_SESSION_ID = %q, want row %s", got, closed.ID)
+		}
+	})
+	t.Run("no conditional writer", func(t *testing.T) {
+		row, meta, stderr := adoptLiveRun(t, beads.NewMemStore(), rt)
+		if got := row.Metadata["instance_token"]; got == rt || got == "" {
+			t.Fatalf("row instance_token = %q, want the create's own token, unwritten", got)
+		}
+		if got := meta("GC_SESSION_ID"); got != "" {
+			t.Fatalf("runtime GC_SESSION_ID = %q, want none while the row lacks its token", got)
+		}
+		if !strings.Contains(stderr, "identity not stamped") {
+			t.Fatalf("stderr = %q, want the stamp failure logged", stderr)
+		}
+	})
+}
+
+// Kills: minting over a runtime's token, and leaving a tokenless runtime
+// tokenless (v5 O2, LL5). A runtime with no token gets one minted on the row
+// and the runtime, the same value.
+func TestNamedAdoptLiveMintsOnlyWithoutToken(t *testing.T) {
+	row, meta, _ := adoptLiveRun(t, fencedMemStore(t), "")
+	token := row.Metadata["instance_token"]
+	if token == "" || meta("GC_INSTANCE_TOKEN") != token {
+		t.Fatalf("row token %q, runtime token %q, want one minted token on both", token, meta("GC_INSTANCE_TOKEN"))
+	}
+	if got := meta("GC_SESSION_ID"); got != row.ID {
+		t.Fatalf("runtime GC_SESSION_ID = %q, want row %s", got, row.ID)
 	}
 }

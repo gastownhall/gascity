@@ -122,7 +122,8 @@ func createPlanOf(entryID, template string, p poolSessionCreatePlan) createPlan 
 // closed store refuses before it writes (createWriteRefused).
 type createPass struct {
 	cfg *config.City
-	// sp answers transport capability checks only; no effect probes it.
+	// sp answers transport capability checks; no effect probes it, except
+	// that a named AdoptLive stamps the adopted runtime's identity (LL5).
 	sp                runtime.Provider
 	store             beads.Store
 	rigStores         map[string]beads.Store

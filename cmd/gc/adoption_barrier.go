@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -20,6 +21,7 @@ type adoptionResult struct {
 	Adopted        int
 	AlreadyHadBead int
 	Skipped        int // sessions that failed bead creation
+	Unstamped      int // adopted sessions whose runtime identity stamp failed
 	Total          int // total running sessions
 	// Details records per-session info for dry-run display.
 	Details []adoptionDetail
@@ -228,7 +230,17 @@ func runAdoptionBarrier(
 		// stopping this runtime (ga-lfr06j). An empty result is the
 		// existing "cannot verify identity" signal and fails that fence
 		// open, matching sessions adopted with no known token at all.
-		liveInstanceToken, _ := sp.GetMeta(sessionName, "GC_INSTANCE_TOKEN")
+		//
+		// A runtime that answers with no token gets one minted for the row
+		// and, once the row exists, stamped on the runtime (LL5, v5 O2), so
+		// the adopted runtime is never half-identified. An unreadable token
+		// mints nothing: it may be a live token this cannot see.
+		liveInstanceToken, tokenErr := sp.GetMeta(sessionName, "GC_INSTANCE_TOKEN")
+		mintedToken := ""
+		if tokenErr == nil && strings.TrimSpace(liveInstanceToken) == "" {
+			mintedToken = sessionpkg.NewInstanceToken()
+			liveInstanceToken = mintedToken
+		}
 
 		// Build bead metadata. Config/live hashes are left empty —
 		// syncSessionBeads populates them from built agent objects.
@@ -250,9 +262,11 @@ func runAdoptionBarrier(
 		}
 
 		alreadyHadBead := false
+		rowID := ""
 		createSessionBead := func() error {
 			meta["synced_at"] = clk.Now().UTC().Format("2006-01-02T15:04:05Z07:00")
-			_, err := sessFront.CreateSession(sessionpkg.CreateSpec{
+			var err error
+			rowID, err = sessFront.CreateSession(sessionpkg.CreateSpec{
 				Title:     detail.AgentName,
 				AgentName: detail.AgentName,
 				Metadata:  meta,
@@ -286,11 +300,37 @@ func runAdoptionBarrier(
 		}
 		result.Adopted++
 		result.Details = append(result.Details, detail)
+		stampErr := tokenErr
+		if stampErr == nil {
+			stampErr = stampAdoptedRuntime(sp, sessionName, rowID, mintedToken)
+		}
+		if stampErr != nil {
+			fmt.Fprintf(stderr, "adoption barrier: %s adopted as %s, identity not stamped: %v\n", sessionName, rowID, stampErr) //nolint:errcheck
+			result.Unstamped++
+		}
 	}
 
 	// Step 4: Barrier gate — all running sessions must have beads.
 	passed := result.Skipped == 0 && !partialList
 	return result, passed
+}
+
+// stampAdoptedRuntime writes an adopted runtime's identity to the runtime
+// (LL5, v5 O2): mintedToken when the adoption minted one, then GC_SESSION_ID.
+// The session ID is stamped even when the token is not, so the runtime reads
+// as the row's own with no token, which the comparator holds as Unknown. The
+// caller only reports the error: the row exists either way.
+func stampAdoptedRuntime(sp runtime.Provider, name, sessionID, mintedToken string) error {
+	var errs []error
+	if mintedToken != "" {
+		if err := sp.SetMeta(name, "GC_INSTANCE_TOKEN", mintedToken); err != nil {
+			errs = append(errs, fmt.Errorf("stamping GC_INSTANCE_TOKEN: %w", err))
+		}
+	}
+	if err := sp.SetMeta(name, "GC_SESSION_ID", sessionID); err != nil {
+		errs = append(errs, fmt.Errorf("stamping GC_SESSION_ID: %w", err))
+	}
+	return errors.Join(errs...)
 }
 
 func openSessionBeadExists(sessFront *sessionpkg.Store, sessionName string) (bool, error) {
