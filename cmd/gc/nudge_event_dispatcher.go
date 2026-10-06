@@ -17,10 +17,12 @@ import (
 const (
 	nudgeEventRetryEpsilon = 250 * time.Millisecond
 	nudgeEventRetryBudget  = 3
+	nudgeSweepRetryBudget  = 1
 )
 
 type nudgeEventDispatcher struct {
 	parent    context.Context
+	cancel    context.CancelFunc
 	cityPath  string
 	stderr    io.Writer
 	logPrefix string
@@ -57,8 +59,10 @@ type nudgeEventKick struct {
 }
 
 func newNudgeEventDispatcher(parent context.Context, cityPath string, stderr io.Writer, logPrefix string, stores func(cfg *config.City) (beads.NudgesStore, beads.Store)) *nudgeEventDispatcher {
+	ctx, cancel := context.WithCancel(parent)
 	d := &nudgeEventDispatcher{
-		parent:       parent,
+		parent:       ctx,
+		cancel:       cancel,
 		cityPath:     cityPath,
 		stderr:       stderr,
 		logPrefix:    logPrefix,
@@ -71,8 +75,14 @@ func newNudgeEventDispatcher(parent context.Context, cityPath string, stderr io.
 
 		passSlots: make(chan struct{}, nudgeEventPassConcurrency),
 	}
-	go d.worker(parent)
+	go d.worker(ctx)
 	return d
+}
+
+func (d *nudgeEventDispatcher) stop() {
+	if d.cancel != nil {
+		d.cancel()
+	}
 }
 
 func (d *nudgeEventDispatcher) update(sp runtime.Provider, cfg *config.City) {
@@ -346,16 +356,16 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 		return
 	}
 	if sessionFilter == "" {
-		names, err := pendingNudgeSessionNames(d.cityPath, cfg, sessionBeads)
+		targets, err := pendingNudgeTargets(d.cityPath, cfg, sessionBeads)
 		if err != nil {
 			fmt.Fprintf(d.stderr, "%s: nudge event dispatch sweep: %v\n", d.logPrefix, err) //nolint:errcheck
 			return
 		}
-		for _, name := range names {
+		for _, target := range targets {
 			if d.parent.Err() != nil {
 				return
 			}
-			d.spawnPass(name, 0)
+			d.spawnPass(target.sessionName, nudgeSweepRetryBudget)
 		}
 		return
 	}
@@ -374,6 +384,33 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 	}
 	if _, err := deliverPendingQueuedNudges(d.cityPath, cfg, sessStore, sp, sessionBeads, sessionFilter, d.stderr, deliver); err != nil {
 		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: %v\n", d.logPrefix, err) //nolint:errcheck
+	}
+}
+
+func (d *nudgeEventDispatcher) handQueueToPollers() {
+	d.mu.Lock()
+	cfg := d.cfg
+	sp := d.sp
+	d.mu.Unlock()
+	if cfg == nil || sp == nil || d.stores == nil || nudgeDispatcherIsSupervisor(cfg) {
+		return
+	}
+	_, sessStore := d.stores(cfg)
+	if sessStore == nil {
+		return
+	}
+	sessionBeads, err := loadSessionBeadSnapshot(sessStore)
+	if err != nil {
+		fmt.Fprintf(d.stderr, "%s: nudge poller handoff: loading session beads: %v\n", d.logPrefix, err) //nolint:errcheck
+		return
+	}
+	targets, err := pendingNudgeTargets(d.cityPath, cfg, sessionBeads)
+	if err != nil {
+		fmt.Fprintf(d.stderr, "%s: nudge poller handoff: %v\n", d.logPrefix, err) //nolint:errcheck
+		return
+	}
+	for _, target := range targets {
+		maybeStartNudgePoller(target, sp)
 	}
 }
 

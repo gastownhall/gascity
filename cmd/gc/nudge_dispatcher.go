@@ -159,7 +159,7 @@ func duePendingNudgeAgents(state nudgequeue.State, now time.Time) map[string]boo
 	return agents
 }
 
-func pendingNudgeSessionNames(cityPath string, cfg *config.City, sessionBeads *sessionBeadSnapshot) ([]string, error) {
+func pendingNudgeTargets(cityPath string, cfg *config.City, sessionBeads *sessionBeadSnapshot) ([]nudgeTarget, error) {
 	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return nil, nil
 	}
@@ -175,7 +175,7 @@ func pendingNudgeSessionNames(cityPath string, cfg *config.City, sessionBeads *s
 	if len(pendingAgents) == 0 {
 		return nil, nil
 	}
-	names := make([]string, 0, len(pendingAgents))
+	targets := make([]nudgeTarget, 0, len(pendingAgents))
 	seen := make(map[string]bool, len(pendingAgents))
 	for _, info := range sessionBeads.OpenInfos() {
 		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
@@ -185,12 +185,12 @@ func pendingNudgeSessionNames(cityPath string, cfg *config.City, sessionBeads *s
 		for _, key := range target.queueKeys() {
 			if pendingAgents[key] {
 				seen[target.sessionName] = true
-				names = append(names, target.sessionName)
+				targets = append(targets, target)
 				break
 			}
 		}
 	}
-	return names, nil
+	return targets, nil
 }
 
 func deliverPendingQueuedNudges(cityPath string, cfg *config.City, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, sessionFilter string, debugOut io.Writer, deliver func(nudgeTarget, worker.LiveObservation) (bool, error)) (int, error) {

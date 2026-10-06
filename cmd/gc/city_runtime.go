@@ -2818,11 +2818,15 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if providerChanged && cr.sessionEvents != nil {
 		cr.sessionEvents.restart(nextSp)
 	}
+	nudgeEventsWereActive := cr.nudgeEvents != nil && cr.nudgeEvents.active()
 	if cr.nudgeEvents != nil {
 		cr.nudgeEvents.update(nextSp, nextCfg)
 		cr.nudgeEvents.setEventCapable(cr.sessionEvents != nil && cr.sessionEvents.streaming())
 	}
 	cr.ensureNudgeWakeListener(ctx)
+	if nudgeEventsWereActive && !cr.nudgeEvents.active() {
+		cr.nudgeEvents.handQueueToPollers()
+	}
 
 	if cr.svc != nil {
 		if err := cr.svc.Reload(); err != nil {
@@ -4858,6 +4862,7 @@ func (cr *CityRuntime) awaitNudgeEventsDown() {
 	if cr.nudgeEvents == nil {
 		return
 	}
+	cr.nudgeEvents.stop()
 	timer := time.NewTimer(nudgeEventDeliveryDrainGrace + 2*time.Second)
 	defer timer.Stop()
 	select {

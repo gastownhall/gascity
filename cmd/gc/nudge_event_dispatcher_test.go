@@ -8,7 +8,10 @@ import (
 	"go/token"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -118,16 +121,25 @@ func (f *nudgeEventedFake) SubscribeSessionEvents(ctx context.Context) (<-chan r
 	go func() {
 		<-ctx.Done()
 		f.mu.Lock()
+		defer f.mu.Unlock()
 		for i, sub := range f.subs {
 			if sub == ch {
 				f.subs = append(f.subs[:i], f.subs[i+1:]...)
-				break
+				close(ch)
+				return
 			}
 		}
-		f.mu.Unlock()
-		close(ch)
 	}()
 	return ch, nil
+}
+
+func (f *nudgeEventedFake) endStreams() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, sub := range f.subs {
+		close(sub)
+	}
+	f.subs = nil
 }
 
 func (f *nudgeEventedFake) emit(ev runtime.SessionEvent) {
@@ -195,6 +207,20 @@ func (p *passes) nextN(t *testing.T, n int, what string) {
 	t.Helper()
 	for i := 0; i < n; i++ {
 		p.next(t, fmt.Sprintf("%s (pass %d of %d)", what, i+1, n))
+	}
+}
+
+func (p *passes) nextSet(t *testing.T, want []string, what string) {
+	t.Helper()
+	got := make([]string, 0, len(want))
+	for i := range want {
+		got = append(got, p.next(t, fmt.Sprintf("%s (pass %d of %d)", what, i+1, len(want))))
+	}
+	sort.Strings(got)
+	sorted := append([]string(nil), want...)
+	sort.Strings(sorted)
+	if !reflect.DeepEqual(got, sorted) {
+		t.Fatalf("%s: pass filters = %q, want %q in any order", what, got, sorted)
 	}
 }
 
@@ -342,7 +368,7 @@ func TestNudgeEventDispatcherBusyAgentStopsAfterOneRetry(t *testing.T) {
 	}
 }
 
-func TestNudgeEventDispatcherFullPassDoesNotRefillTheRetryBudget(t *testing.T) {
+func TestNudgeEventDispatcherFullPassArmsOnlyOneBoundedRetry(t *testing.T) {
 	fake := newNudgeEventedFake()
 	dir, d, info, seen := newNudgeDispatcherFixture(t, fake)
 
@@ -358,11 +384,9 @@ func TestNudgeEventDispatcherFullPassDoesNotRefillTheRetryBudget(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		d.kickAll()
-		if filter := seen.next(t, "the enumerating sweep"); filter != "" {
-			t.Fatalf("sweep %d ran with filter %q, want the enumerating pass", i, filter)
-		}
-		if filter := seen.next(t, "the sweep's fan-out"); filter != info.SessionName {
-			t.Fatalf("sweep %d fanned out to %q, want %q", i, filter, info.SessionName)
+		seen.nextSet(t, []string{"", info.SessionName}, fmt.Sprintf("sweep %d and its fan-out", i))
+		if filter := seen.next(t, "the fan-out's single bounded retry"); filter != info.SessionName {
+			t.Fatalf("sweep %d retried %q, want %q", i, filter, info.SessionName)
 		}
 		seen.assertQuiet(t, quiet, fmt.Sprintf("sweep %d must not restart the retry chain", i))
 	}
@@ -372,6 +396,30 @@ func TestNudgeEventDispatcherFullPassDoesNotRefillTheRetryBudget(t *testing.T) {
 	}
 	if state := queueStateSnapshot(t, dir); len(state.Pending) != 1 {
 		t.Fatalf("pending = %d, want 1 (the item stays queued for a busy agent); state=%+v", len(state.Pending), state)
+	}
+}
+
+func TestNudgeEventDispatcherSweepRetriesAnAgentThatJustWentIdle(t *testing.T) {
+	fake := newNudgeEventedFake()
+	dir, d, info, seen := newNudgeDispatcherFixture(t, fake)
+
+	fake.setStamp(info.SessionName, time.Now())
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "wait satisfied: proceed", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	d.kickAll()
+	seen.nextSet(t, []string{"", info.SessionName}, "the sweep and its fan-out")
+	if n := countFakeCalls(fake, "Nudge"); n != 0 {
+		t.Fatalf("Nudge calls = %d before quiescence elapsed, want 0", n)
+	}
+
+	if filter := seen.next(t, "the fan-out's retry once quiescence elapses"); filter != info.SessionName {
+		t.Fatalf("retry ran with filter %q, want %q", filter, info.SessionName)
+	}
+	state := queueStateSnapshot(t, dir)
+	if len(state.Pending) != 0 || len(state.InFlight) != 0 || countFakeCalls(fake, "Nudge") != 1 {
+		t.Fatalf("queued nudge not delivered by the sweep's retry; state=%+v calls=%v", state, fake.SnapshotCalls())
 	}
 }
 
@@ -962,6 +1010,27 @@ func TestAwaitNudgeEventsDownWaitsThenGivesUp(t *testing.T) {
 	}
 }
 
+func TestAwaitNudgeEventsDownStopsALiveDispatcher(t *testing.T) {
+	cr := &CityRuntime{stderr: testWriter(t), logPrefix: "test"}
+	cr.nudgeEvents = newNudgeEventDispatcher(context.Background(), t.TempDir(), testWriter(t), "test", nil)
+
+	returned := make(chan struct{})
+	go func() {
+		cr.awaitNudgeEventsDown()
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(nudgeEventDeliveryDrainGrace):
+		t.Fatal("awaitNudgeEventsDown waited out its grace on a dispatcher whose parent context is still live: shutdown must stop it, not only wait")
+	}
+	select {
+	case <-cr.nudgeEvents.workerDone:
+	default:
+		t.Fatal("dispatcher worker still running after awaitNudgeEventsDown returned")
+	}
+}
+
 func TestProviderRetiresNudgePollers(t *testing.T) {
 	target := nudgeTarget{sessionName: "gc-worker"}
 	if providerRetiresNudgePollers(target, nil) {
@@ -1366,6 +1435,106 @@ func TestCityRuntimeReloadConfigTracedActivatesNudgeWakeListener(t *testing.T) {
 	}
 	if cr.nudgeWakeListener == nil {
 		t.Fatal("reloadConfigTraced did not start the wake listener after the provider became event-capable")
+	}
+}
+
+func TestCityRuntimeReloadHandsQueuedNudgesToPollersWhenEventsStop(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	t.Setenv("GC_BEADS", "file")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := newNudgeEventedFake()
+	mgr := newSessionManagerWithConfig(cityPath, openNudgeBeadStore(cityPath), sp, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: cityPath, Provider: "codex", Hints: runtime.Config{WorkDir: cityPath}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: cityPath}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: testWriter(t),
+	})
+	cr.sessionDrains = newDrainTracker()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cr.nudgeWakeCh = make(chan struct{}, 1)
+	cr.nudgeEvents = newNudgeEventDispatcher(ctx, cityPath, cr.stderr, cr.logPrefix, testNudgeDispatchStores(cityPath))
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-cr.nudgeEvents.workerDone:
+		case <-time.After(3 * time.Second):
+			t.Log("dispatcher worker did not stop within 3s")
+		}
+	})
+	cr.nudgeEvents.update(cr.sp, cr.cfg)
+	cr.sessionEvents = newSessionEventPump(ctx, newLegacyWake(make(chan struct{}, 1), nil), cr.stderr, cr.logPrefix)
+	cr.sessionEvents.observe = cr.nudgeEvents.handleEvent
+	if !cr.sessionEvents.restart(cr.sp) {
+		t.Fatal("precondition: the session-event pump must subscribe to the event-capable provider")
+	}
+	lastProviderName := "fake"
+	if reply := cr.reloadConfigTraced(ctx, &lastProviderName, cityPath, nil, reloadSourceManual); reply.Outcome == reloadOutcomeFailed {
+		t.Fatalf("reloadConfigTraced failed: %s", reply.Error)
+	}
+	if !cr.nudgeEvents.active() || cr.nudgeWakeListener == nil {
+		t.Fatal("precondition: the dispatcher and its wake listener must be live while the stream runs")
+	}
+
+	var mu sync.Mutex
+	var started []string
+	prev := startNudgePoller
+	startNudgePoller = func(_, _, sessionName string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		started = append(started, sessionName)
+		return nil
+	}
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	if err := enqueueQueuedNudge(cityPath, newQueuedNudge("worker", "wait satisfied: proceed", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	sp.endStreams()
+	deadline := time.Now().Add(5 * time.Second)
+	for cr.sessionEvents.streaming() {
+		if time.Now().After(deadline) {
+			t.Fatal("the session-event pump did not notice the ended stream")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[daemon]\nshutdown_timeout = \"1s\"\n"), 0o644); err != nil {
+		t.Fatalf("rewrite config: %v", err)
+	}
+	if reply := cr.reloadConfigTraced(ctx, &lastProviderName, cityPath, nil, reloadSourceManual); reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reloadConfigTraced outcome = %q (%s), want applied", reply.Outcome, reply.Error)
+	}
+	if cr.nudgeEvents.active() || cr.nudgeWakeListener != nil {
+		t.Fatal("precondition: the reload must retire the dispatcher and its wake listener once the stream ended")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !reflect.DeepEqual(started, []string{info.SessionName}) {
+		t.Fatalf("pollers started = %q, want [%q]: the queued nudge is stranded with no poller and no dispatcher", started, info.SessionName)
 	}
 }
 
