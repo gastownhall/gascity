@@ -1472,6 +1472,7 @@ go_test(
         "session_lifecycle_parallel_test.go",
         "session_lifecycle_payload_test.go",
         "session_lifecycle_phases_test.go",
+        "session_lifecycle_post_start_bound_test.go",
         "session_lifecycle_start_boundary_test.go",
         "session_lifecycle_start_deadline_test.go",
         "session_lifecycle_worker_boundary_test.go",
