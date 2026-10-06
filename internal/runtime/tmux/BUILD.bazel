@@ -69,6 +69,7 @@ go_test(
         "interaction_test.go",
         "kimi_process_test.go",
         "lifecycle_test.go",
+        "liveness_present_test.go",
         "main_test.go",
         "nudge_dismiss_besteffort_test.go",
         "nudge_poke_hidden_test.go",

@@ -77,6 +77,9 @@ type sessionRuntimeState struct {
 	// — the same value the per-session `list-windows -t <s>` read returns. Zero
 	// means the snapshot carries no activity for the session.
 	Activity int64
+	// ID is the session object's #{session_id} (for example "$3"), which a
+	// re-created session under the same name does not reuse.
+	ID string
 }
 
 type processRuntimeState struct {
@@ -177,9 +180,15 @@ func NewStateCache(fetcher StateFetcher, ttl time.Duration) *StateCache {
 // If the cache is stale, a refresh is triggered (coalesced via singleflight).
 // On refresh failure, the last-known-good cache is preserved up to staleTTL.
 func (c *StateCache) IsRunning(name string) bool {
-	state := c.currentState()
-	session, ok := state.Sessions[name]
+	session, ok := c.session(name)
 	return ok && session.Running
+}
+
+// session returns the cached row for name, corpses included, behind the same
+// refresh trigger and staleTTL cliff as IsRunning.
+func (c *StateCache) session(name string) (sessionRuntimeState, bool) {
+	session, ok := c.currentState().Sessions[name]
+	return session, ok
 }
 
 // ProcessAlive reports whether the named session has a process matching one of
@@ -545,7 +554,7 @@ func (g *processSnapshotGate) succeeded() bool {
 // still contribute no liveness — they represent exited processes, not
 // running ones.
 func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, error) {
-	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}\t#{session_attached}\t#{window_activity}")
+	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}\t#{session_attached}\t#{window_activity}\t#{session_id}")
 	if err != nil {
 		if errors.Is(err, ErrNoCurrentTarget) {
 			// The server ANSWERED and holds zero sessions. gc configures
@@ -589,7 +598,7 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 	}
 
 	for _, line := range strings.Split(out, "\n") {
-		parts := strings.SplitN(line, "\t", 6)
+		parts := strings.SplitN(line, "\t", 7)
 		if len(parts) < 2 || parts[0] == "" {
 			continue
 		}
@@ -615,6 +624,9 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 			if activity, convErr := strconv.ParseInt(strings.TrimSpace(parts[5]), 10, 64); convErr == nil && activity > session.Activity {
 				session.Activity = activity
 			}
+		}
+		if len(parts) > 6 {
+			session.ID = strings.TrimSpace(parts[6])
 		}
 		if parts[1] == "1" {
 			// A dead pane contributes no liveness: Running stays as-is so a

@@ -59,6 +59,7 @@ go_test(
         "fingerprint_test.go",
         "import_boundary_test.go",
         "import_trust_test.go",
+        "liveness_present_test.go",
         "liveness_test.go",
         "privatedir_test.go",
         "probe_test.go",

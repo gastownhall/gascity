@@ -10,14 +10,39 @@ import (
 // Liveness reports both provider-runtime presence and configured agent-process
 // presence for a session target.
 type Liveness struct {
+	// Running reports that a pane (or box) of the session is alive.
 	Running bool
-	Alive   bool
+	// Alive reports that the configured agent process is alive.
+	Alive bool
+	// Corpse reports that the name is listed but no pane of it is alive: a
+	// remain-on-exit corpse. Running and Alive are then false. Only tmux keeps
+	// corpses.
+	Corpse bool
+	// ObjectID is the provider's id for the exact session object observed
+	// (tmux #{session_id}, for example "$3"), so a kill can target that object
+	// and not whatever later holds the name. Empty when the name is not
+	// listed or the provider has no such id.
+	ObjectID string
+}
+
+// Present reports that the name is listed, a corpse included (v5 O1). It is
+// derived, so every provider that reports Running reports Present.
+func (l Liveness) Present() bool {
+	return l.Running || l.Corpse
 }
 
 // LivenessObserver is implemented by providers that can observe runtime and
 // agent-process liveness in one provider-native pass.
 type LivenessObserver interface {
 	ObserveLiveness(name string, processNames []string) Liveness
+}
+
+// ServerDeathConfirmer is the optional provider capability that reports a
+// confirmed-dead runtime server: its socket is missing, or refuses on a stable
+// inode, so no session of it can exist and an empty listing is complete
+// (v5 O1, F3). Only tmux implements it.
+type ServerDeathConfirmer interface {
+	ServerConfirmedDead() bool
 }
 
 // LivenessObserverWithError is the optional provider capability for liveness
