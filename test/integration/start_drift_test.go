@@ -9,14 +9,14 @@ package integration
 // real systemctl --user invocation, the real SIGTERM + spawn cycle,
 // and the real /health round-trip after restart.
 //
-// Each test isolates GC_HOME / XDG_RUNTIME_DIR so a failing run on a
-// developer box does not corrupt the real supervisor; supervisors
-// started here listen on a per-test reserved loopback port.
+// Each test isolates GC_HOME / HOME / XDG_RUNTIME_DIR so a failing run on
+// a developer box does not corrupt the real supervisor, and gc never
+// installs a platform supervisor unit (GC_SUPERVISOR_ISOLATED_HOME; see
+// isolateGCHomeEnv). Supervisors started here listen on a per-test
+// reserved loopback port.
 
 import (
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,7 +26,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -36,6 +35,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
 const (
@@ -1203,20 +1203,10 @@ func secondaryUID(t *testing.T) uint32 {
 
 // expectedSupervisorSystemdUnit returns the systemd unit name the gc
 // binary will derive for a supervisor running under the supplied
-// GC_HOME. It mirrors supervisorSystemdServiceName() +
-// supervisorServiceSuffix() in cmd/gc/cmd_supervisor_lifecycle.go so
-// the test installs the unit at the name the binary's
-// `systemctl --user is-active` probe will look for.
-//
-// Algorithm: normalize gcHome (symlink-resolve + abs), sanitize its
-// basename to [a-z0-9-], hash the normalized path with sha1[:8], and
-// concatenate as `gascity-supervisor-<base>-<hash>.service`. Empty
-// basename falls back to `isolated-<hash>` per the binary.
-//
-// The two algorithms must stay in lockstep — when the binary changes
-// its naming, this helper must change with it or
-// TestStartDrift_SystemdManaged_RestartsToNewBuildID will revert to
-// the 'direct' branch silently.
+// GC_HOME: supervisorSystemdServiceName() in
+// cmd/gc/cmd_supervisor_lifecycle.go, built on the shared
+// supervisor.ServiceSuffix, so the test installs the unit at the name the
+// binary's `systemctl --user is-active` probe will look for.
 func expectedSupervisorSystemdUnit(gcHome string) string {
 	suffix := expectedSupervisorServiceSuffix(gcHome)
 	if suffix == "" {
@@ -1225,34 +1215,11 @@ func expectedSupervisorSystemdUnit(gcHome string) string {
 	return "gascity-supervisor-" + suffix + ".service"
 }
 
-// expectedSupervisorServiceSuffix replicates supervisorServiceSuffix()
-// from cmd/gc/cmd_supervisor_lifecycle.go. Returns "" for the
-// non-isolated (empty / default-home) case — the test never hits that
-// branch because newIsolatedEnvRoot always sets an isolated GC_HOME,
-// but the empty arm is preserved so the helper stays a faithful
-// mirror of the production function.
+// expectedSupervisorServiceSuffix is gc's own supervisorServiceSuffix() for
+// gcHome: both normalize the path and call supervisor.ServiceSuffix, so the
+// unit names here cannot drift from the binary's.
 func expectedSupervisorServiceSuffix(gcHome string) string {
-	gcHome = pathutil.NormalizePathForCompare(strings.TrimSpace(gcHome))
-	if gcHome == "" {
-		return ""
-	}
-	base := sanitizeSupervisorServiceName(filepath.Base(gcHome))
-	sum := sha1.Sum([]byte(gcHome))
-	hash := hex.EncodeToString(sum[:])[:8]
-	if base == "" {
-		return "isolated-" + hash
-	}
-	return base + "-" + hash
-}
-
-// sanitizeSupervisorServiceName mirrors sanitizeServiceName() from
-// cmd/gc/cmd_supervisor_lifecycle.go: lowercase, collapse non-alnum
-// runs to '-', trim leading/trailing '-'.
-func sanitizeSupervisorServiceName(name string) string {
-	name = strings.ToLower(name)
-	re := regexp.MustCompile(`[^a-z0-9]+`)
-	name = re.ReplaceAllString(name, "-")
-	return strings.Trim(name, "-")
+	return supervisor.ServiceSuffix(pathutil.NormalizePathForCompare(strings.TrimSpace(gcHome)))
 }
 
 // systemdUserUnitDir returns the runtime unit directory of the user
@@ -1300,6 +1267,8 @@ Restart=no
 StandardOutput=append:%s/supervisor.log
 StandardError=append:%s/supervisor.log
 Environment=GC_HOME=%s
+Environment=HOME=%s
+Environment=%s=1
 Environment=XDG_RUNTIME_DIR=%s
 Environment=GC_DOLT=skip
 Environment=GC_BEADS=file
@@ -1307,7 +1276,7 @@ Environment=GC_SESSION=fake
 
 [Install]
 WantedBy=default.target
-`, binaryPath, gcHome, gcHome, gcHome, runtimeDir)
+`, binaryPath, gcHome, gcHome, gcHome, integrationIsolatedHome(gcHome), supervisorIsolatedHomeEnv, runtimeDir)
 	path := filepath.Join(dir, unitName)
 	if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
 		t.Fatalf("writing systemd unit: %v", err)

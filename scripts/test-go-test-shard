@@ -36,15 +36,15 @@ source "$repo_root/scripts/lib/harness-reap.sh"
 # This shard owns its product run's process tree. Without these traps a
 # terminated runner leaves the test binary running under init, which is how
 # kit-k72d ended up paying ~1 core for 5h34m (gas-px0). The signal traps tear
-# the group down and then re-raise, so the runner's own exit status still
-# reports the signal to its caller.
+# down the run and its watchdog, then re-raise, so the runner's own exit
+# status still reports the signal to its caller.
 gc_shard_on_signal() {
   local sig="$1"
-  gc_harness_terminate_group "${gc_harness_supervised_pgid:-}"
+  gc_harness_terminate_supervised
   trap - "$sig"
   kill -"$sig" $$
 }
-trap 'gc_harness_terminate_group "${gc_harness_supervised_pgid:-}"' EXIT
+trap 'gc_harness_terminate_supervised' EXIT
 trap 'gc_shard_on_signal INT' INT
 trap 'gc_shard_on_signal TERM' TERM
 trap 'gc_shard_on_signal HUP' HUP

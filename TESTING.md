@@ -105,34 +105,55 @@ endpoints, credentials, timeouts, download and parallelism policy.
   it for gastownhall OSS repositories only (gascity, beads): everything it
   runs lands in the `oss` action cache, which anyone can read anonymously
   by digest, and the Blacksmith-donated pool serves OSS work only. Never
-  point it at a private repository. Generate the key locally (it never
-  leaves your machine) and send only the CSR to an rbe-west operator
-  (infra `nativelink-cas/west`, README "rbe-maint"); there is no
-  self-service path in this repo (the `rbe-fork` mint used by
-  `tools/rbe/fork-credential.sh` certifies only in-progress PR runs):
+  point it at a private repository. There is no self-service path in this
+  repo (the `rbe-fork` mint used by `tools/rbe/fork-credential.sh`
+  certifies only in-progress PR runs): an rbe-west operator signs your
+  certificate (infra `nativelink-cas/west`, README "rbe-maint").
 
-  ```bash
-  install -d -m 0700 ~/.config/rbe
-  # PKCS#8 EC key: Bazel's Netty TLS refuses a SEC1 "EC PRIVATE KEY".
-  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out ~/.config/rbe/rbe-maint.key
-  chmod 600 ~/.config/rbe/rbe-maint.key
-  head -1 ~/.config/rbe/rbe-maint.key   # -----BEGIN PRIVATE KEY----- (PKCS#8)
-  # Exactly these two RDNs: CN = your GitHub login, spelled exactly as on
-  # your GitHub profile (case included); O = gascity-maintainers.
-  openssl req -new -key ~/.config/rbe/rbe-maint.key \
-    -subj "/CN=<your-github-login>/O=gascity-maintainers" -out rbe-maint.csr
-  ```
-
-  A CSR is public, so send it to an rbe-west operator over any channel.
   Your GitHub account must be on `.github/rbe-fork-allowlist.txt` (its
   numeric id, with the login as the comment), the allowlist the fork mint
-  uses for read/write PR runs, and the certificate's CN must be that login
-  in its exact spelling. You get back `rbe-maint.crt` (save it as
-  `~/.config/rbe/rbe-maint.crt`): client-auth only, valid for 90 days,
-  pinned on the farm by its fingerprint. It works only on the maintainer
-  endpoint, only for instance `oss`, and it never writes the cache:
-  results are written by rbe-west's workers alone. Then add to
-  `.bazelrc.local` (absolute paths; nothing else belongs there):
+  uses for read/write PR runs. Because a CSR can name any login, rbe-west
+  signs one only with proof from the account it names: an SSH signature,
+  made with a key on your GitHub account, over your login, a hash of the
+  CSR's public key and today's date (UTC). Use any SSH key listed at `https://github.com/<login>.keys`
+  (or one of your account's SSH signing keys); a hardware key or ssh-agent
+  works too (`-f` takes the public key file then). Generate the TLS key
+  locally (it never leaves your machine):
+
+  ```bash
+  L=<your-github-login>   # exactly as on your GitHub profile, case included
+  S=~/.ssh/id_ed25519     # a key whose public half is on github.com/$L.keys
+  install -d -m 0700 ~/.config/rbe && cd ~/.config/rbe
+  # PKCS#8 EC key: Bazel's Netty TLS refuses a SEC1 "EC PRIVATE KEY".
+  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out rbe-maint.key
+  chmod 600 rbe-maint.key
+  head -1 rbe-maint.key   # -----BEGIN PRIVATE KEY----- (PKCS#8)
+  # Exactly these two RDNs: CN = your login, O = gascity-maintainers.
+  openssl req -new -key rbe-maint.key -subj "/CN=$L/O=gascity-maintainers" -out rbe-maint.csr
+  # The proof: sign "login + sha256 of the CSR's public key + today (UTC)" with your GitHub SSH key.
+  spki=$(openssl req -in rbe-maint.csr -noout -pubkey | openssl pkey -pubin -outform DER | openssl dgst -sha256 | awk '{print $NF}')
+  date=$(date -u +%F)
+  printf 'rbe-maint-csr v2\ncn=%s\nspki-sha256=%s\ndate=%s\n' "$L" "$spki" "$date" >rbe-maint.csr.msg
+  ssh-keygen -Y sign -n rbe-maint-csr -f "$S" rbe-maint.csr.msg   # writes rbe-maint.csr.msg.sig
+  ```
+
+  Send `rbe-maint.csr` and `rbe-maint.csr.msg.sig` to an rbe-west operator.
+  Both are public, and the operator trusts the signature, not the channel:
+  rbe-west checks it against the keys GitHub publishes for your login and
+  refuses the CSR if it does not verify (the refusal shows the exact text
+  the signature must cover). The signature is dated, so it is accepted
+  only within 3 days of the date it names: if the operator signs later,
+  run the last three commands again (same key and CSR) and send the new
+  `.sig`. An undated signature from an earlier version of these commands
+  (`rbe-maint-csr v1`) is refused. Never send `rbe-maint.key`. The commands
+  work with OpenSSH 8.1 or later and with macOS's LibreSSL `openssl`.
+
+  You get back `rbe-maint.crt` (save it as `~/.config/rbe/rbe-maint.crt`):
+  client-auth only, valid for 90 days, pinned on the farm by its
+  fingerprint. It works only on the maintainer endpoint, only for instance
+  `oss`, and it never writes the cache: results are written by rbe-west's
+  workers alone. Then add to `.bazelrc.local` (absolute paths; nothing else
+  belongs there):
 
   ```
   build:remote-exec --remote_executor=grpcs://rbe-maint.ops.gascity.com:8445
@@ -150,11 +171,15 @@ endpoints, credentials, timeouts, download and parallelism policy.
   `build:remote-exec`.
 
   An operator can revoke a certificate at any time: its new requests then
-  fail with `UNAUTHENTICATED`. It is also revoked within the hour once your
-  account leaves the allowlist. To renew, send a new CSR (preferably for a
-  new key) before day 90. You may hold at most two live certificates, so
-  you can switch without a gap; a revoked certificate's key is never
-  certified again. If your key leaks, tell an operator.
+  fail with `UNAUTHENTICATED`. Revoking a certificate revokes its key:
+  every certificate on that key stops working, and the key is never
+  certified again. It is also revoked within the hour once your account
+  leaves the allowlist. To renew, make a new key, CSR and signature (the
+  same commands) before day 90. You may hold at most two live
+  certificates, so you can switch without a gap; the same key is
+  re-certified only in the last 14 days of its certificate, with a fresh
+  signature. Once a certificate has expired, its key is never certified
+  again: make a new key. If your key leaks, tell an operator.
 
   Allowlisted maintainers working on this OSS project run on the
   Blacksmith-donated OSS pool (`--remote_instance_name=oss`). Their actions
@@ -767,7 +792,7 @@ all-source audit while staying outside untagged and Small debt.
 | --- | --- | --- | --- | --- | --- | --- |
 | Audit baseline | all tracked test source | fixed_sleep: 492 calls / 180 files (historical regex census: 447 / 157) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
 | Audit baseline | all tracked test source | listener_helper: 60 calls / 24 files | ga-cp3hwi | all-source listener-helper call/file totals cannot drift without an explicit checked policy update; ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption | P0.4c-listener-helper | 2026-10-31 |
-| Audit baseline | all tracked test source | subprocess: 744 calls / 218 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
+| Audit baseline | all tracked test source | subprocess: 745 calls / 219 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary: subprocess | ga-p9iuv.30 | the provider-owned script boundary proof is a checked Medium subprocess owner; the test executes the copied provider script only with a test-owned BD executable and verifies its lifecycle delegation without a host service | GC6011 | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses: slow_process_gate, subprocess | ga-p9iuv.30 | the provider-owned BD lifecycle proof is a checked Medium process owner; the test runs the pinned real bd direct and proxied lifecycles under deadlines, records only provider-published identities, and stops its own scope before asserting those children are absent | GC6011 | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdReadyScopeLifecycleReadsItsPersistedTopology: subprocess | ga-p9iuv.30 | the ready-scope topology boundary proof is a checked Medium subprocess owner; the test executes the shipped provider script once per init shape with a test-owned BD executable and a scope built from files alone, so no Dolt, no bd and no host service are involved | GC6011 | 2026-10-31 |

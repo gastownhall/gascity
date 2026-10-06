@@ -9,6 +9,7 @@ go_library(
         "publications.go",
         "registry.go",
         "restartcause.go",
+        "servicename.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/supervisor",
     visibility = ["//:__subpackages__"],
@@ -39,6 +40,7 @@ go_test(
         "publications_test.go",
         "registry_test.go",
         "restartcause_test.go",
+        "servicename_test.go",
         "testenv_import_test.go",
     ],
     data = glob(
