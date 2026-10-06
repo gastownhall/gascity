@@ -111,7 +111,6 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 	// Engine-only (see above). CloseStore is also lifecycle: the storage
 	// routes stop the cache and close the engine once (storageRoutes.close).
 	"CloseStore":           nil,
-	"Claim":                nil,
 	"CreateWithForeignID":  nil,
 	"DepAddWithMetadata":   nil,
 	"HasResidentOutside":   nil,

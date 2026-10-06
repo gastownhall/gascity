@@ -25,7 +25,8 @@ import (
 //     then immediately executes the work in the same process — it has no turn to
 //     outlive, which is why the hook fences do not apply to it.
 //
-// One entry is not a pull path and is here for a different reason:
+// Two entries are not pull paths and are here for a different reason: both
+// FORWARD a claim rather than originate one.
 //
 //   - class_store_emit.go FORWARDS a claim; it cannot originate one. It is the
 //     relocated class store's emission wrapper, and it holds no id, no assignee
@@ -35,6 +36,13 @@ import (
 //     cannot claim" on every split city. The invariant this guard protects —
 //     the controller never assigns — is untouched: nothing here decides to
 //     claim, and the callers that do are still exactly the four above.
+//   - bead_policy_store.go FORWARDS a claim for the same reason, one layer
+//     further down the composition. beadPolicyStore.Claim is a pure type-
+//     assertion pass-through to the wrapped store, exactly like its existing
+//     ReleaseIfCurrent — it holds no id, no assignee and no policy of its own,
+//     and without it the whole CachingStore -> beadPolicyStore -> NativeDoltStore
+//     chain would degrade the S5b-4 claim capability to "unsupported" for
+//     every caller behind the policy layer, worker pull paths included.
 //
 // Adding a file here is a design decision about pull semantics; make it
 // deliberately.
@@ -44,6 +52,7 @@ var claimCASAllowedFiles = map[string]bool{
 	"cmd_bd_by_id.go":      true,
 	"cmd_agent_script.go":  true,
 	"class_store_emit.go":  true,
+	"bead_policy_store.go": true,
 }
 
 // claimCASMarkers are the two shapes a claim compare-and-swap takes in this

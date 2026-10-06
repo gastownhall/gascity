@@ -1847,6 +1847,154 @@ func nativeReleaseRefused(err error) bool {
 		errors.Is(err, issueops.ErrNotFound)
 }
 
+// Claim atomically claims a bead for assignee through issueops.Claimer
+// (S5b-4). It routes through the role rather than a hand-composed
+// read-check-write for the same reason ReleaseIfCurrent does: the role is the
+// required, wire-served member of the Storage contract, and its CAS plus
+// retry-on-commit-conflict are the role's own promise rather than something
+// this front door has to rebuild.
+//
+// The (Bead, bool, error) idiom matches SQLiteStore.Claim and BdStore.Claim: a
+// conflict — someone else holds the bead, or its status is not claimable — is
+// reported as ok=false with a nil error, never as an error value, because a
+// losing claim attempt is an expected, non-exceptional outcome every caller
+// of this capability already treats as a value (claim_class_route.go,
+// class_store_emit.go). issueops.ErrAlreadyClaimed and issueops.ErrNotClaimable
+// (and the *issueops.ClaimConflictError that wraps either one over the wire,
+// per claim.go's httpClaimer) are both folded into that false verdict by
+// nativeClaimConflict.
+//
+// A MISSING BEAD IS ErrNotFound, NOT A CONFLICT — this is the one place Claim
+// deliberately parts ways with ReleaseIfCurrent, which folds a not-found row
+// into its own false-verdict idiom because "nobody holds it" is the same fact
+// release already reports for an unclaimed row. A claim has no equivalent
+// benign reading of "the bead does not exist": it is a caller error every
+// other Store.Claim implementation already surfaces as an error (see
+// SQLiteStore.Claim, BdStore.Claim), so this front door does too, via the
+// ordinary nativeStoreError not-found translation every other role accessor
+// in this file uses.
+//
+// A WISP ID GETS A NAMED REFUSAL, ErrWispNotClaimable, NOT A BARE ErrNotFound
+// (S5b-7-fixup item 8). issueops.Claimer's contract (issueops/claimer.go)
+// refuses a wisp id before the pre-image read — "the wisp plane is not
+// claimable through this role" — and reports that refusal as the identical
+// ErrNotFound sentinel it uses for an id that does not exist anywhere. The
+// two are NOT the same fact for a caller: "this id is a wisp, no front door
+// serving this role can ever claim it" calls for a different response (log
+// it once and move on) than "this id does not exist" (a caller bug or a
+// stale reference worth surfacing loudly). Collapsing them left every caller
+// of this front door unable to tell the two apart — exactly the ambiguity
+// the review flagged.
+//
+// Distinguishing them needs a second read, because the claimer's own
+// ErrNotFound carries nothing to tell them apart by itself: when the
+// claimer's error resolves to issueops.ErrNotFound,
+// nativeClaimWispDisambiguationFindsRow asks the reader role for id, through
+// the reader role, which — unlike the claimer — DOES resolve the wisp table
+// (issueops.Reader.Get's own doc comment: "A miss — for both the issue and
+// the wisp table — is ErrNotFound"). If Get finds the row, the only backend
+// state that explains both outcomes together is a wisp (an ordinary issue
+// would have let the claimer find it too), so this front door reports
+// ErrWispNotClaimable instead. If Get also misses, or itself errors, the
+// original ErrNotFound is returned unchanged — a transient failure on this
+// disambiguating read must never manufacture a wisp refusal that was never
+// actually decided, so it degrades to the pre-fix behavior rather than
+// guessing.
+//
+// THE DISAMBIGUATING READ GOES THROUGH THE storage HANDLE AND ctx CLAIM
+// ALREADY HOLDS, NEVER THROUGH s.Get (review fix, G1+G2 Opus pass). Claim
+// still holds s.mu.RLock here (acquireStorage above, released only on
+// return via the deferred release()). s.Get funnels through withReadRetry,
+// which re-takes s.mu via acquireStorageGen and, on a transient read error,
+// reconnects via s.mu.Lock() — both of which are a second, nested lock
+// request from the SAME goroutine that already holds the outer RLock.
+// Go's sync.RWMutex is not reentrant and gives a blocked Lock() writer
+// priority over new readers, so either shape self-deadlocks the goroutine
+// permanently: a pending writer (a reconnect swap or CloseStore racing in
+// from elsewhere) blocks the nested RLock forever behind itself, and a
+// transient failure on the disambiguating read alone reaches
+// reconnect's s.mu.Lock() while this same goroutine's outer RLock is still
+// held, which can never be granted. Reading directly off the storage and ctx
+// Claim already has avoids taking s.mu a second time at all, so neither shape
+// can occur; a transient error here is reported as "no row found" (see the
+// paragraph above), which is the documented pre-fix degradation, not a new
+// retry/reconnect path.
+func (s *NativeDoltStore) Claim(id, assignee string) (Bead, bool, error) {
+	if err := s.readOnlyGuard(); err != nil {
+		return Bead{}, false, err
+	}
+	assignee = strings.TrimSpace(assignee)
+	if assignee == "" {
+		return Bead{}, false, fmt.Errorf("claiming bead %q: empty assignee", id)
+	}
+	storage, release, err := s.acquireStorage()
+	if err != nil {
+		return Bead{}, false, err
+	}
+	defer release()
+	ctx, cancel := nativeDoltOperationContext(context.TODO())
+	defer cancel()
+	claimer, err := storage.IssueClaimer()
+	if err != nil {
+		return Bead{}, false, nativeStoreError(id, err)
+	}
+	result, err := claimer.Claim(ctx, issueops.ClaimRequest{Actor: assignee, IssueID: id})
+	if err != nil {
+		if nativeClaimConflict(err) {
+			return Bead{}, false, nil
+		}
+		if errors.Is(err, issueops.ErrNotFound) {
+			if nativeClaimWispDisambiguationFindsRow(ctx, storage, id) {
+				return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, ErrWispNotClaimable)
+			}
+		}
+		return Bead{}, false, nativeStoreError(id, err)
+	}
+	if result.Issue == nil {
+		return Bead{}, false, fmt.Errorf("claiming bead %q: claim role returned no issue", id)
+	}
+	bead, err := beadFromNativeIssue(result.Issue)
+	if err != nil {
+		return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, err)
+	}
+	return bead, true, nil
+}
+
+// nativeClaimWispDisambiguationFindsRow asks the reader role for id using the
+// storage handle and ctx Claim already holds, and reports whether it found a
+// row. It deliberately does NOT go through s.Get/s.withReadRetry: see the
+// "THE DISAMBIGUATING READ" paragraph on Claim's doc comment above for why a
+// second, nested acquisition of s.mu from the same goroutine self-deadlocks.
+// Any failure here (including one that would ordinarily reconnect and retry)
+// is reported as "no row found," which is the documented, deliberate
+// degrade-to-pre-fix behavior, not a best-effort guess.
+func nativeClaimWispDisambiguationFindsRow(ctx context.Context, storage beadslib.Storage, id string) bool {
+	reader, err := storage.IssueReader()
+	if err != nil {
+		return false
+	}
+	details, err := reader.Get(ctx, issueops.GetRequest{ID: id})
+	return err == nil && details != nil
+}
+
+// ErrWispNotClaimable names the refusal Claim reports for an id that exists
+// only in the wisp plane: see the WISP ID note on Claim above for why this is
+// distinguished from a bare ErrNotFound (S5b-7-fixup item 8).
+var ErrWispNotClaimable = errors.New("wisp not claimable through this role")
+
+// nativeClaimConflict reports the refusals that mean "this claim was not won"
+// — a different actor already holds the bead, or its status is not eligible
+// to be claimed from. Both issueops.ErrAlreadyClaimed and
+// issueops.ErrNotClaimable match through errors.Is whether err is the bare
+// sentinel or a *issueops.ClaimConflictError wrapping it (ClaimConflictError
+// unwraps to its Err field), which is exactly how the httpstore client
+// reconstructs a 409 (claim.go's httpClaimer.Claim / claimer.go's Unwrap).
+// Neither is issueops.ErrNotFound: see the not-found note on Claim above.
+func nativeClaimConflict(err error) bool {
+	return errors.Is(err, issueops.ErrAlreadyClaimed) ||
+		errors.Is(err, issueops.ErrNotClaimable)
+}
+
 // Close sets a bead's status to closed through the upstream issue-operations
 // facade. The close reason is still read from the bead's own metadata, which is
 // where Gas City stamps it before closing.

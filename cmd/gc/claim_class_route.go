@@ -303,6 +303,32 @@ func hookClaimBindingRefusedTheClaim(err error) bool {
 	return errors.Is(err, storebinding.ErrBeadsAdapterCapability)
 }
 
+// hookClaimBeadIsAWisp reports whether a routed claim failed because the
+// relocated binding resolved id to a wisp row rather than to a claimable
+// issue.
+//
+// A wisp is not an ownership conflict and not evidence of an outstanding
+// mutation: beads.NativeDoltStore.Claim returns beads.ErrWispNotClaimable (see
+// its doc comment) only for an id the claimer's own contract refused before any
+// write was attempted, which is the same "refused before any write, so nothing
+// is outstanding" shape hookClaimBindingRefusedTheClaim already carries for a
+// capability-less binding. The class route turning this capability on for a
+// native-store binding (claim_class_route.go's newHookClaimClassRoute
+// capability probe) is what makes this reachable at all in production: a
+// SQLite- or bd-backed binding never produces this sentinel, so this predicate
+// was unexercised before a native store could serve as the relocated class
+// binding.
+//
+// Without this, the ready tier's claimFirstReadyHookAssignment treated the
+// wrapped sentinel as an unresolved operational failure and returned
+// hookClaimResult{terminal: true}, failing the whole hook invocation over one
+// routed id that no front door will ever be able to claim — the one outcome
+// ErrWispNotClaimable's own doc comment says should instead be "log it once and
+// move on."
+func hookClaimBeadIsAWisp(err error) bool {
+	return errors.Is(err, beads.ErrWispNotClaimable)
+}
+
 // hookClaimClassRouteForCity resolves the claim-time class front door for a
 // city, or (nil, nil) when the city relocates no coordination class.
 //
