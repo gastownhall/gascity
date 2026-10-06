@@ -7049,6 +7049,8 @@ func TestReconcileSessionBeads_OrphanDrainLiveAssignedWorkStaysOpen(t *testing.T
 	_ = env.sp.Start(context.Background(), "orphan", runtime.Config{})
 	session := env.createSessionBead("orphan", "orphan")
 	env.markSessionActive(&session)
+	// Past the INC-003 wake grace, so the live assigned work is what keeps it.
+	env.setSessionMetadata(&session, map[string]string{"last_woke_at": env.clk.Now().Add(-wakeUndesiredGrace - time.Minute).UTC().Format(time.RFC3339)})
 
 	if _, err := env.store.Create(beads.Bead{
 		Title:    "claimed work",
