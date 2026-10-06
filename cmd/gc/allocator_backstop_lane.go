@@ -57,9 +57,11 @@ import (
 // legacy keeps them in its tick, so the two never both run. P3-9 and P4.1d
 // add their steps here.
 //
-// While the city is suspended a pass neither reads nor writes, as legacy's
-// demand pass returns before any of it (POOL-001); the last recording stays
-// published and ages out.
+// The lane always reads, suspended city or not (CONTRACT v5 R4), so a
+// suspended city's drains keep their work reads. Only its steps keep
+// legacy's suspension gate: while the city is suspended a pass starts none,
+// as legacy's demand pass returns before its repairs (POOL-001). The lane
+// serves only v2.
 //
 // The lane is paced at the patrol interval and woken by key-less socket and
 // API pokes (a CLI writer such as gc sling pokes key-less), a supervisor
@@ -356,8 +358,8 @@ func (l *externalReadsLane) recording() *externalReadsRecording { return l.rec.L
 
 // start runs the lane until ctx ends and returns a channel closed when it
 // has. The first pass runs at once: until a recording exists every lane-fed
-// leg reads partial. A pass that declines (held, suspended city, no env,
-// shutdown) does not pace the next wake. start may run again once the
+// leg reads partial. A pass that declines (held, no env, shutdown) does not
+// pace the next wake. start may run again once the
 // channel closed.
 func (l *externalReadsLane) start(ctx context.Context) <-chan struct{} {
 	l.wake()
@@ -385,8 +387,9 @@ func (l *externalReadsLane) join(ctx context.Context) error {
 }
 
 // pass publishes the reads that ended after the last publish, reads the
-// sources, publishes, then starts the steps that are due. It reports whether
-// it ran.
+// sources, publishes, then starts the steps that are due unless the city is
+// suspended (POOL-001; like legacy, an unreadable suspension file reads as
+// the zero state). It reports whether it ran.
 func (l *externalReadsLane) pass(ctx context.Context) bool {
 	if l.gate != nil {
 		if !l.gate.enter() {
@@ -406,7 +409,10 @@ func (l *externalReadsLane) pass(ctx context.Context) bool {
 	if ctx.Err() != nil {
 		return false
 	}
-	l.startSteps(ctx, env, l.publish(published))
+	rec := l.publish(published)
+	if !effectiveCitySuspended(env.Cfg, loadSuspensionStateBestEffort(env.CityPath)) {
+		l.startSteps(ctx, env, rec)
+	}
 	return true
 }
 
@@ -431,10 +437,7 @@ func (l *externalReadsLane) lateEnded() bool {
 }
 
 // passEnv returns the environment a pass runs against, and false when the
-// pass must not run: shutdown has begun, the env cannot be built, or the city
-// is suspended (legacy's demand pass returns before any read or repair,
-// POOL-001). Like legacy, an unreadable suspension file reads as the zero
-// state.
+// pass must not run: shutdown has begun, or the env cannot be built.
 func (l *externalReadsLane) passEnv(ctx context.Context) (externalReadsEnv, bool) {
 	if ctx.Err() != nil {
 		return externalReadsEnv{}, false
@@ -442,9 +445,6 @@ func (l *externalReadsLane) passEnv(ctx context.Context) (externalReadsEnv, bool
 	env, err := l.env()
 	if err != nil {
 		fmt.Fprintf(l.stderr, "external reads: %v\n", err) //nolint:errcheck
-		return externalReadsEnv{}, false
-	}
-	if effectiveCitySuspended(env.Cfg, loadSuspensionStateBestEffort(env.CityPath)) {
 		return externalReadsEnv{}, false
 	}
 	return env, true
