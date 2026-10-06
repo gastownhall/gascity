@@ -250,9 +250,10 @@ func TestWorkAssignmentReleaseWorkBead_RunTargetFallbackSkippedWhenRouted(t *tes
 }
 
 // TestWorkAssignmentReassignWorkBead_ByteIdentical asserts reassign emits only
-// Update{Assignee:&new}, byte-identical to the raw retire-reassign op. The bead
-// is seeded live because the reassign is conditional on the snapshot: an
-// unseeded fixture verifies as stale and emits no write at all.
+// Assignee=&new, the fields of the raw retire-reassign op, delivered as a
+// write fenced on the snapshot. The bead is seeded live because the reassign
+// is conditional on the snapshot: an unseeded fixture verifies as stale and
+// emits no write at all.
 func TestWorkAssignmentReassignWorkBead_ByteIdentical(t *testing.T) {
 	rec := newRecordingWriteWorkStore()
 	item := beads.Bead{ID: "w-1", Status: "in_progress", Assignee: "retired-session"}
@@ -271,6 +272,9 @@ func TestWorkAssignmentReassignWorkBead_ByteIdentical(t *testing.T) {
 	}
 	if got.opts.Status != nil || got.opts.Metadata != nil {
 		t.Fatalf("reassign must not touch Status/Metadata, got %#v", got.opts)
+	}
+	if !got.fenced {
+		t.Fatalf("reassign = %#v, want a write fenced on the snapshot (UpdateIfMatch), not a blind Update", got)
 	}
 }
 
