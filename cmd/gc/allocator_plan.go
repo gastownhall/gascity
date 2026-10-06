@@ -311,8 +311,9 @@ func (p *decidePass) reserve(r planReservation) {
 // A reused row is selected with its config ref and its binding candidate; a
 // fresh plan must pass the plan-time gates.
 func (p *decidePass) realizePools() {
+	p.indexRealization()
 	for _, state := range p.poolStates {
-		cfgAgent := findAgentByTemplate(p.cfg, state.Template)
+		cfgAgent := p.agentByTemplate(state.Template)
 		if cfgAgent == nil {
 			p.refuse(state.Template, "", rowKey{}, "no-agent")
 			continue
@@ -325,6 +326,7 @@ func (p *decidePass) realizePools() {
 			p.refuse(qualifiedName, "", rowKey{}, gateTransport)
 			continue
 		}
+		bp := p.realizeParams(cfgAgent, state.Requests)
 		used := make(map[string]bool)
 		usedSlots := make(map[int]bool)
 		for _, request := range state.Requests {
@@ -343,20 +345,21 @@ func (p *decidePass) realizePools() {
 				}
 				prefer = &candidate
 			}
-			p.realizeRequest(cfgAgent, qualifiedName, prefer, request, used, usedSlots)
+			p.realizeRequest(bp, cfgAgent, qualifiedName, prefer, request, used, usedSlots)
 		}
 		for _, request := range state.Requests {
 			if request.SessionBeadID == "" {
-				p.realizeRequest(cfgAgent, qualifiedName, nil, request, used, usedSlots)
+				p.realizeRequest(bp, cfgAgent, qualifiedName, nil, request, used, usedSlots)
 			}
 		}
 	}
 }
 
-// realizeRequest selects or plans one request. A refusal stalls the request,
-// as legacy's does (build_desired_state.go:5180).
-func (p *decidePass) realizeRequest(cfgAgent *config.Agent, qualifiedName string, prefer *session.Info, request SessionRequest, used map[string]bool, usedSlots map[int]bool) {
-	info, slot, plan, err := selectOrPlanPoolSessionBead(p.bp, cfgAgent, qualifiedName, prefer, request, p.in.Now, used, usedSlots)
+// realizeRequest selects or plans one request over bp, the agent's
+// realization params. A refusal stalls the request, as legacy's does
+// (build_desired_state.go:5180).
+func (p *decidePass) realizeRequest(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, prefer *session.Info, request SessionRequest, used map[string]bool, usedSlots map[int]bool) {
+	info, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, request, p.in.Now, used, usedSlots)
 	switch {
 	case err != nil:
 		p.refuse(qualifiedName, "", rowKey{}, planErrorCause(err))
