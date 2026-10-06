@@ -40,9 +40,10 @@ func contractAgentsFamily(t *testing.T, h *contractHarness) {
 	created, err := c.CreateAgentWithResponse(ctx, city, &genclient.CreateAgentParams{XGCRequest: contractCSRF},
 		genclient.CreateAgentJSONRequestBody{Name: "helper", Provider: "claude"})
 	expectStatus(t, "create agent", created, err, http.StatusCreated)
-	// Read-after-write through the item read. (The list read is served from
-	// a response cache keyed by the event index, which config mutations do
-	// not advance — see the PR's bug list.)
+	// Read-after-write through the item read. A new pool template has no
+	// sessions yet, so it has no entry in the list read; the list cache's
+	// config-swap invalidation is owned by
+	// internal/api TestHandleAgentListCacheMissesAfterConfigSwap.
 	helper, err := c.GetV0CityByCityNameAgentByBaseWithResponse(ctx, city, "helper")
 	expectStatus(t, "get created agent", helper, err, http.StatusOK)
 	dup, err := c.CreateAgentWithResponse(ctx, city, &genclient.CreateAgentParams{XGCRequest: contractCSRF},

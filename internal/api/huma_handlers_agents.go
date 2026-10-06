@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,7 +42,9 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	if !wantPeek {
 		// Cache key derived from input struct tags — adding a new query
 		// param to AgentListInput automatically participates in the key.
-		cacheKey = cacheKeyFor("agents", input)
+		// The list projects the config, whose swaps do not advance the
+		// event index, so the key also carries the config generation.
+		cacheKey = cacheKeyFor("agents", input) + "#cfg=" + strconv.FormatUint(s.configGeneration(cfg), 10)
 		if body, ok := cachedResponseAs[ListBody[agentResponse]](s, cacheKey, index); ok {
 			return &ListOutput[agentResponse]{
 				Index: index,
