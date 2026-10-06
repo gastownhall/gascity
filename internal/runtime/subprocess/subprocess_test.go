@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -1256,5 +1257,96 @@ func TestListRunningViaSocket(t *testing.T) {
 	}
 	if len(all) != 3 {
 		t.Errorf("ListRunning('') = %v, want 3 results", all)
+	}
+}
+
+// noProcessStart stands in for (*exec.Cmd).Start without spawning: it binds a
+// pid above every OS pid_max (Linux 2^22, macOS 99999), so the failure paths'
+// Kill and Wait reach no process.
+func noProcessStart(cmd *exec.Cmd) error {
+	proc, err := os.FindProcess(1 << 30)
+	if err != nil {
+		return err
+	}
+	cmd.Process = proc
+	return nil
+}
+
+// fakeListener is a control socket that accepts nothing until closed.
+type fakeListener struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newFakeListener() *fakeListener { return &fakeListener{closed: make(chan struct{})} }
+
+func (l *fakeListener) Accept() (net.Conn, error) {
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *fakeListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *fakeListener) Addr() net.Addr { return &net.UnixAddr{Net: "unix"} }
+
+var identityEnv = map[string]string{
+	"GC_SESSION_ID":     "bead-123",
+	"GC_INSTANCE_TOKEN": "token-456",
+}
+
+// v5 O2 (X3): Ownerless on subprocess requires the identity write to precede
+// liveness. A reader in another process looks at the sidecar the instant the
+// socket is bound; it must already carry both identity keys.
+func TestSubprocessSidecarSeededBeforeSocket(t *testing.T) {
+	p := newTestProvider(t)
+	reader := NewProviderWithDir(p.dir)
+	seen := map[string]string{}
+	p.ops.start = noProcessStart
+	p.ops.listen = func(_, _ string) (net.Listener, error) {
+		for key := range identityEnv {
+			seen[key], _ = reader.GetMeta("seeded", key)
+		}
+		return newFakeListener(), nil
+	}
+
+	if err := p.Start(context.Background(), "seeded", runtime.Config{Command: "sleep 300", Env: identityEnv}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	for key, want := range identityEnv {
+		if seen[key] != want {
+			t.Errorf("sidecar %s at socket bind = %q, want %q", key, seen[key], want)
+		}
+	}
+}
+
+func TestSubprocessStartFailureCleansSidecar(t *testing.T) {
+	p := newTestProvider(t)
+	workDir := t.TempDir()
+	p.ops.start = noProcessStart
+	p.ops.listen = func(_, _ string) (net.Listener, error) {
+		return nil, errors.New("bind refused")
+	}
+
+	err := p.Start(context.Background(), "unbound", runtime.Config{Command: "sleep 300", WorkDir: workDir, Env: identityEnv})
+	if err == nil || !strings.Contains(err.Error(), "creating control socket") {
+		t.Fatalf("Start error = %v, want control socket failure", err)
+	}
+	for key := range identityEnv {
+		if got, _ := p.GetMeta("unbound", key); got != "" {
+			t.Errorf("sidecar %s after failed Start = %q, want removed", key, got)
+		}
+	}
+	if _, ok := p.workDirs["unbound"]; ok {
+		t.Error("workDir still tracked after failed Start")
+	}
+	if _, ok := p.procs["unbound"]; ok {
+		t.Error("session still tracked after failed Start")
+	}
+	namePath := filepath.Join(p.socketDir(), p.sockKey("unbound")+".name")
+	if _, err := os.Lstat(namePath); !os.IsNotExist(err) {
+		t.Errorf("socket name artifact after failed Start: %v, want not exist", err)
 	}
 }
