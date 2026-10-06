@@ -125,7 +125,7 @@ func TestLatchReconcilerModeRefusesUnknownAndInadmissibleV2(t *testing.T) {
 // doctor, rather than silently running without the protection. Legacy keeps
 // the breaker, and v2 without it is admitted.
 func TestLatchRefusesV2WithIdentityBreaker(t *testing.T) {
-	const want = `[daemon] session_reconciler = "v2" with session_circuit_breaker = true: the identity circuit breaker is not available under v2; remove session_circuit_breaker or run legacy`
+	const want = `[daemon] session_reconciler = "v2" is refused: [daemon] session_circuit_breaker = true (the identity circuit breaker) is not available under v2 until PAR-BRK; remove those settings or run legacy`
 	cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: "v2", SessionCircuitBreaker: true}}
 	if _, err := latchReconcilerMode(cfg, overrideEnv("1")); err == nil || err.Error() != want {
 		t.Fatalf("latch(v2, breaker) err = %v, want %q", err, want)
