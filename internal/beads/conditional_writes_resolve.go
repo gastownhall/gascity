@@ -212,17 +212,19 @@ type ConditionalWritesModeSourcer interface {
 
 // conditionalWritesModeSource returns the store whose stamp, liveness, prober
 // and degrade latch govern resolution of store: the declared mode source,
-// followed through its own resolve targets, or store itself.
-func conditionalWritesModeSource(store Store) Store {
+// followed through its own resolve targets, or store itself. sourced reports
+// a declared source; callers gate on it rather than comparing the two stores,
+// because a store passed by value need not be comparable and == on it panics.
+func conditionalWritesModeSource(store Store) (src Store, sourced bool) {
 	sourcer, ok := store.(ConditionalWritesModeSourcer)
 	if !ok {
-		return store
+		return store, false
 	}
 	source := sourcer.ConditionalWritesModeSource()
 	if source == nil || source == store {
-		return store
+		return store, false
 	}
-	return followConditionalWritesResolveTarget(source)
+	return followConditionalWritesResolveTarget(source), true
 }
 
 // conditionalWritesMaxResolveDepth bounds resolve-target following so a
@@ -305,10 +307,10 @@ func IsConditionalWritesRequired(err error) bool {
 // forwards its conditional verbs to the source, so the source's capability is
 // the wrapper's.
 func ResolveConditionalWriter(store Store) (ConditionalWriter, *BeadsDiagnostic, error) {
-	src := store
+	src, sourced := store, false
 	if store != nil {
 		store = followConditionalWritesResolveTarget(store)
-		src = conditionalWritesModeSource(store)
+		src, sourced = conditionalWritesModeSource(store)
 	}
 	mode := gate.ModeUnset
 	carrier, hasCarrier := src.(conditionalWritesModeCarrier)
@@ -325,7 +327,7 @@ func ResolveConditionalWriter(store Store) (ConditionalWriter, *BeadsDiagnostic,
 	}
 
 	writer, hasWriter := ConditionalWriterFor(store)
-	if hasWriter && src != store {
+	if hasWriter && sourced {
 		_, hasWriter = ConditionalWriterFor(src)
 	}
 	pred := func(context.Context) (bool, string) {

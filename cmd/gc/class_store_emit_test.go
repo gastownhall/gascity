@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -1409,6 +1412,62 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 		_, leafGuarded := beads.AssignmentGuardedUpdaterFor(writer.(*emittingClassStore).Store)
 		if _, guarded := beads.AssignmentGuardedUpdaterFor(graph); guarded != leafGuarded {
 			t.Errorf("AssignmentGuardedUpdaterFor = %v over the wrapper, %v over the engine; the wrapper must not change it", guarded, leafGuarded)
+		}
+	})
+
+	t.Run("fenced molecule attach through the dispatcher's graph store", func(t *testing.T) {
+		cityPath, cfg := fencedMigratedOneShotCLICity(t, "auto")
+		captureCLIStorageStderr(t)
+		graph := scopeGraphStore(cityPath, cityPath, cfg, beads.NewMemStore())
+
+		root, err := graph.Create(beads.Bead{Title: "workflow", Type: "task", Status: "open", Metadata: map[string]string{
+			beadmeta.KindMetadataKey: "workflow", "gc.formula_contract": "graph.v2",
+		}})
+		if err != nil {
+			t.Fatalf("creating the workflow root: %v", err)
+		}
+		control, err := graph.Create(beads.Bead{Title: "control", Type: "task", Status: "open", ParentID: root.ID, Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID, beadmeta.ControlEpochMetadataKey: "1",
+		}})
+		if err != nil {
+			t.Fatalf("creating the control bead: %v", err)
+		}
+		recipe := &formula.Recipe{
+			Name: "attempt",
+			Steps: []formula.RecipeStep{
+				{ID: "attempt", Title: "attempt", Type: "task", IsRoot: true, Metadata: map[string]string{
+					beadmeta.KindMetadataKey: "workflow", "gc.formula_contract": "graph.v2",
+				}},
+				{ID: "attempt.run", Title: "run", Type: "task", Assignee: "worker"},
+			},
+			Deps: []formula.RecipeDep{{StepID: "attempt.run", DependsOnID: "attempt", Type: "parent-child"}},
+		}
+		result, err := molecule.Attach(context.Background(), graph, recipe, control.ID, molecule.AttachOptions{
+			IdempotencyKey: control.ID + ":attempt:2",
+			ExpectedEpoch:  1,
+		})
+		if err != nil || result.Duplicate {
+			t.Fatalf("fenced attach = (%+v, %v), want a fresh sub-DAG", result, err)
+		}
+
+		attempt := beadByID(t, graph, result.RootID)
+		if marker := attempt.Metadata[beadmeta.AttachFencePendingMetadataKey]; marker != "" {
+			t.Errorf("sub-DAG root %s still carries %s=%q, want the fence settled", attempt.ID, beadmeta.AttachFencePendingMetadataKey, marker)
+		}
+		step := beadByID(t, graph, result.IDMapping["attempt.run"])
+		if step.Assignee != "worker" || step.Metadata[beadmeta.DeferredAssigneeMetadataKey] != "" {
+			t.Errorf("step %s = assignee %q deferred %q, want the candidate activated onto worker",
+				step.ID, step.Assignee, step.Metadata[beadmeta.DeferredAssigneeMetadataKey])
+		}
+		if epoch := beadByID(t, graph, control.ID).Metadata[beadmeta.ControlEpochMetadataKey]; epoch != "2" {
+			t.Errorf("control epoch = %q, want the fence to advance it to 2", epoch)
+		}
+		// The fenced path creates the candidate deferred and activates it after
+		// the fence; the legacy path creates it live and never updates it.
+		for _, id := range []string{control.ID, attempt.ID, step.ID} {
+			if got := beadEventCount(t, cityPath, events.BeadUpdated, id); got == 0 {
+				t.Errorf("no bead.updated row for %s: the fenced attach's epoch advance and activation must reach the journal", id)
+			}
 		}
 	})
 

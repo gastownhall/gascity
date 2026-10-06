@@ -694,3 +694,25 @@ func TestResolveConditionalWriterReadsTheModeSourceAndReturnsTheWrapper(t *testi
 		}
 	})
 }
+
+// uncomparableValueStore is a store passed BY VALUE whose dynamic type cannot
+// be compared with ==: the slice field makes any interface comparison against
+// it panic at run time.
+type uncomparableValueStore struct {
+	*MemStore
+	calls []string
+}
+
+// TestResolveConditionalWriterNeverComparesAnUndeclaredStore pins that the
+// mode-source branch is gated on the declaration, not on an interface
+// comparison: a store that declares no source must resolve on every
+// auto/require call without comparing itself to anything.
+func TestResolveConditionalWriterNeverComparesAnUndeclaredStore(t *testing.T) {
+	mem := NewMemStore()
+	mem.stampConditionalWritesMode(gate.Auto, false)
+	store := uncomparableValueStore{MemStore: mem, calls: []string{"seed"}}
+	writer, diag, err := ResolveConditionalWriter(store)
+	if err != nil || diag != nil || writer == nil {
+		t.Fatalf("ResolveConditionalWriter(value store) = (%T, %v, %v), want its writer", writer, diag, err)
+	}
+}
