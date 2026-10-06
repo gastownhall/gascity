@@ -19,6 +19,22 @@ const (
 	integrationHeavyTests = "test/integration/heavy_tests.txt"
 )
 
+// shardedGoTest names a sharded go_test whose long tests a guard keeps in
+// separate shards: the BUILD file and rule, the package directory, the tag
+// set its srcs build under, and the manifest of its long tests.
+type shardedGoTest struct {
+	build, rule, dir, heavyTests string
+	tags                         map[string]bool
+}
+
+var integrationSuite = shardedGoTest{
+	build:      integrationBuild,
+	rule:       "integration_test",
+	dir:        "test/integration",
+	heavyTests: integrationHeavyTests,
+	tags:       integrationLaneTags,
+}
+
 // TestIntegrationShardsKeepHeavyTestsApart guards the integration lane's
 // per-shard time budget. rules_go assigns the tests of a sharded go_test
 // round-robin in source order (testsInShard in its generated test main: test i
@@ -27,11 +43,19 @@ const (
 // test/integration/heavy_tests.txt in one shard is how the 4-shard target
 // reached the 1100 s --test_timeout on main (run 37137993899).
 func TestIntegrationShardsKeepHeavyTestsApart(t *testing.T) {
+	checkHeavyTestsApart(t, integrationSuite)
+}
+
+// checkHeavyTestsApart fails when suite's shard_count puts two of its listed
+// long tests in one shard, and prints the shard counts that would not.
+func checkHeavyTestsApart(t *testing.T, suite shardedGoTest) {
+	t.Helper()
 	root := repoRoot(t)
-	build := readFile(t, root, integrationBuild)
-	shards := integrationShardCount(t, build)
-	order := integrationTestOrder(t, root, integrationSrcs(t, build))
-	heavy := integrationHeavyTestNames(t, readFile(t, root, integrationHeavyTests))
+	build := readFile(t, root, suite.build)
+	rule := goTestRule(t, build, suite.build, suite.rule)
+	shards := goTestShardCount(t, rule, suite.build)
+	order := goTestOrder(t, root, suite.dir, goTestSrcs(t, rule, suite.build, suite.rule), suite.tags)
+	heavy := heavyTestNames(t, readFile(t, root, suite.heavyTests))
 
 	index := make(map[string]int, len(order))
 	for i, name := range order {
@@ -39,16 +63,16 @@ func TestIntegrationShardsKeepHeavyTestsApart(t *testing.T) {
 	}
 	for _, name := range heavy {
 		if _, ok := index[name]; !ok {
-			t.Errorf("%s lists %s, which is not a test in %s; remove or rename it", integrationHeavyTests, name, integrationBuild)
+			t.Errorf("%s lists %s, which is not a test in %s; remove or rename it", suite.heavyTests, name, suite.build)
 		}
 	}
 	if len(heavy) > shards {
 		t.Fatalf("%d heavy tests cannot be separated by shard_count = %d in %s; values that keep them apart: %v",
-			len(heavy), shards, integrationBuild, separatingShardCounts(order, heavy, len(heavy), len(heavy)+16))
+			len(heavy), shards, suite.build, separatingShardCounts(order, heavy, len(heavy), len(heavy)+16))
 	}
 	if clash := heavyShardClashes(order, heavy, shards); len(clash) > 0 {
 		t.Errorf("shard_count = %d in %s puts long tests together: %s.\nshard_count values that keep them apart: %v",
-			shards, integrationBuild, strings.Join(clash, "; "), separatingShardCounts(order, heavy, len(heavy), shards+16))
+			shards, suite.build, strings.Join(clash, "; "), separatingShardCounts(order, heavy, len(heavy), shards+16))
 	}
 }
 
@@ -83,69 +107,67 @@ func separatingShardCounts(order, heavy []string, from, to int) []int {
 	return ok
 }
 
-// integrationTarget returns the go_test(name = "integration_test") rule text.
-func integrationTarget(t *testing.T, build string) string {
+// goTestRule returns the go_test(name = rule) text in build (read from path).
+func goTestRule(t *testing.T, build, path, rule string) string {
 	t.Helper()
-	start := strings.Index(build, "go_test(\n    name = \"integration_test\",")
+	start := strings.Index(build, "go_test(\n    name = \""+rule+"\",")
 	if start < 0 {
-		t.Fatalf("%s: no go_test named integration_test", integrationBuild)
+		t.Fatalf("%s: no go_test named %s", path, rule)
 	}
 	rest := build[start:]
 	end := strings.Index(rest, "\n)\n")
 	if end < 0 {
-		t.Fatalf("%s: unterminated integration_test rule", integrationBuild)
+		t.Fatalf("%s: unterminated %s rule", path, rule)
 	}
 	return rest[:end]
 }
 
-func integrationShardCount(t *testing.T, build string) int {
+func goTestShardCount(t *testing.T, rule, path string) int {
 	t.Helper()
-	m := regexp.MustCompile(`(?m)^\s*shard_count = (\d+),`).FindStringSubmatch(integrationTarget(t, build))
+	m := regexp.MustCompile(`(?m)^\s*shard_count = (\d+),`).FindStringSubmatch(rule)
 	if m == nil {
 		return 1
 	}
 	n, err := strconv.Atoi(m[1])
 	if err != nil || n < 1 {
-		t.Fatalf("%s: bad shard_count %q", integrationBuild, m[1])
+		t.Fatalf("%s: bad shard_count %q", path, m[1])
 	}
 	return n
 }
 
-func integrationSrcs(t *testing.T, build string) []string {
+func goTestSrcs(t *testing.T, rule, path, name string) []string {
 	t.Helper()
-	rule := integrationTarget(t, build)
 	start := strings.Index(rule, "srcs = [")
 	if start < 0 {
-		t.Fatalf("%s: integration_test has no srcs list", integrationBuild)
+		t.Fatalf("%s: %s has no srcs list", path, name)
 	}
 	body, _, ok := strings.Cut(rule[start+len("srcs = ["):], "]")
 	if !ok {
-		t.Fatalf("%s: integration_test srcs list is not closed", integrationBuild)
+		t.Fatalf("%s: %s srcs list is not closed", path, name)
 	}
 	var srcs []string
 	for _, m := range regexp.MustCompile(`"([^"]+\.go)"`).FindAllStringSubmatch(body, -1) {
 		srcs = append(srcs, m[1])
 	}
 	if len(srcs) == 0 {
-		t.Fatalf("%s: integration_test srcs is empty", integrationBuild)
+		t.Fatalf("%s: %s srcs is empty", path, name)
 	}
 	return srcs
 }
 
-// integrationTestOrder lists the top-level tests the way rules_go's test main
-// does: srcs in order, declarations in file order, TestMain excluded. Only
-// srcs that actually build for the integration lane's target — `go test
-// -tags integration` on linux/amd64 — contribute tests: a file excluded by
-// its own //go:build line or by a GOOS/GOARCH filename suffix never reaches
-// rules_go's shard assignment, so counting its tests here would misplace
-// every test after it.
-func integrationTestOrder(t *testing.T, root string, srcs []string) []string {
+// goTestOrder lists the top-level tests the way rules_go's test main does:
+// srcs in order, declarations in file order, TestMain excluded. Only srcs
+// that actually build for the lane's target (tags on linux/amd64) contribute
+// tests: a file excluded by its own //go:build line or by a GOOS/GOARCH
+// filename suffix never reaches rules_go's shard assignment, so counting its
+// tests here would misplace every test after it.
+func goTestOrder(t *testing.T, root, dir string, srcs []string, tags map[string]bool) []string {
 	t.Helper()
 	var order []string
 	fset := token.NewFileSet()
 	for _, src := range srcs {
-		path := filepath.Join(root, "test", "integration", src)
-		if !integrationFileAppliesOnLinuxAMD64(t, path) {
+		path := filepath.Join(root, filepath.FromSlash(dir), src)
+		if !fileAppliesOnLinuxAMD64(t, path, tags) {
 			continue
 		}
 		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
@@ -195,6 +217,14 @@ var (
 // any) evaluates true against integrationLaneTags.
 func integrationFileAppliesOnLinuxAMD64(t *testing.T, path string) bool {
 	t.Helper()
+	return fileAppliesOnLinuxAMD64(t, path, integrationLaneTags)
+}
+
+// fileAppliesOnLinuxAMD64 reports whether path builds on linux/amd64 with
+// tags set: no GOOS/GOARCH filename suffix for another platform, and its
+// //go:build line (if any) true against tags.
+func fileAppliesOnLinuxAMD64(t *testing.T, path string, tags map[string]bool) bool {
+	t.Helper()
 	if !goodOSArchFilename(filepath.Base(path)) {
 		return false
 	}
@@ -209,7 +239,7 @@ func integrationFileAppliesOnLinuxAMD64(t *testing.T, path string) bool {
 	if expr == nil {
 		return true
 	}
-	return expr.Eval(func(tag string) bool { return integrationLaneTags[tag] })
+	return expr.Eval(func(tag string) bool { return tags[tag] })
 }
 
 // leadingGoBuildConstraint returns the //go:build expression in data's
@@ -258,7 +288,7 @@ func goodOSArchFilename(src string) bool {
 // TestIntegrationFileAppliesOnLinuxAMD64 pins the shard guard's build-tag and
 // filename-suffix filtering: a file the integration lane's own
 // linux/amd64+integration build would exclude must not contribute tests to
-// integrationTestOrder, or the guard would misplace every test that follows
+// goTestOrder, or the guard would misplace every test that follows
 // it in rules_go's round-robin shard assignment.
 func TestIntegrationFileAppliesOnLinuxAMD64(t *testing.T) {
 	dir := t.TempDir()
@@ -327,7 +357,7 @@ func TestIntegrationFileAppliesOnLinuxAMD64(t *testing.T) {
 	}
 }
 
-func integrationHeavyTestNames(t *testing.T, manifest string) []string {
+func heavyTestNames(t *testing.T, manifest string) []string {
 	t.Helper()
 	var names []string
 	for _, line := range strings.Split(manifest, "\n") {

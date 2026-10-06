@@ -221,7 +221,9 @@ jobs:
     if: needs.rbe.outputs.lanes != '[]'
     # Remote modes: the runner is only a Bazel client. Local modes (cache,
     # local: rbe-fork closed or a dispatch) execute here, so they get 4 vCPU.
-    runs-on: ${{ (needs.rbe.outputs.mode == 'cache' || needs.rbe.outputs.mode == 'local') && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}
+    # Acceptance gets 4 vCPU in every mode: its client-side analysis (~1900
+    # packages) took ~2 m of the lane on 2 vCPU.
+    runs-on: ${{ (needs.rbe.outputs.mode == 'cache' || needs.rbe.outputs.mode == 'local' || matrix.lane == 'acceptance') && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}
     timeout-minutes: 90
     permissions:
       contents: read

@@ -5,6 +5,7 @@ go_test(
     srcs = [
         "acceptance_failure_diagnostics_test.go",
         "acceptance_run_selection_test.go",
+        "acceptance_shards_test.go",
         "add_testenv_import_test.go",
         "bazel_bep_summary_workflow_test.go",
         "bazel_fork_cache_test.go",
@@ -86,6 +87,7 @@ go_test(
         "//platforms:BUILD.bazel",
         "//scripts/testdata/test-go-test-shard/env_required:pkg_files",
         "//scripts/testdata/test-go-test-shard/no_extra_env:pkg_files",
+        "//test/acceptance:BUILD.bazel",
         "//test/integration:BUILD.bazel",
     ],
     shard_count = 6,

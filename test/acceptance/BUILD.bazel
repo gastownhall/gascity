@@ -63,7 +63,10 @@ go_test(
         "@bd_bin_v1_3_1//:bd",
         "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
     ],
-    shard_count = 2,
+    # rules_go assigns tests round-robin in source order; the lane is as slow
+    # as its slowest shard. scripts/acceptance_shards_test.go keeps the tests
+    # in heavy_tests.txt in separate shards.
+    shard_count = 10,
     deps = [
         "//internal/beads",
         "//internal/beads/contract",
@@ -88,6 +91,13 @@ go_test(
         "@com_github_go_sql_driver_mysql//:mysql",
         "@net_pgregory_rapid//:rapid",
     ],
+)
+
+# The shard placement guard (scripts/acceptance_shards_test.go) reads this
+# file's srcs and shard_count.
+exports_files(
+    ["BUILD.bazel"],
+    visibility = ["//scripts:__pkg__"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

@@ -480,8 +480,10 @@ func TestBazelMultiLaneWorkflowShape(t *testing.T) {
 	if lane.Strategy.FailFast == nil || *lane.Strategy.FailFast {
 		t.Errorf("lane strategy: want fail-fast: false")
 	}
-	if want := "${{ (needs.rbe.outputs.mode == 'cache' || needs.rbe.outputs.mode == 'local') && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}"; lane.RunsOn != want {
-		t.Errorf("lane runs-on = %q, want %q (2 vCPU clients in remote modes)", lane.RunsOn, want)
+	// Remote modes run a 2 vCPU client, except acceptance: its client-side
+	// analysis (~1900 packages) took ~2 m of its lane on 2 vCPU.
+	if want := "${{ (needs.rbe.outputs.mode == 'cache' || needs.rbe.outputs.mode == 'local' || matrix.lane == 'acceptance') && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}"; lane.RunsOn != want {
+		t.Errorf("lane runs-on = %q, want %q (2 vCPU clients in remote modes, 4 vCPU for acceptance)", lane.RunsOn, want)
 	}
 
 	// Every checkout is full blobless history, then fresh-merge onto the rbe
