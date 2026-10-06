@@ -324,6 +324,15 @@ func (f *stampFake) SetMeta(name, key, value string) error {
 
 func (*stampFake) SupportsTransport(string) bool { return true }
 
+// tmuxStampFake is a stampFake whose metadata is a session environment, as
+// tmux's is: it is a runtime.EnvironmentBatchProvider. A plain stampFake is
+// a sidecar provider.
+type tmuxStampFake struct{ *stampFake }
+
+func (tmuxStampFake) GetAllEnvironment(string) (map[string]string, error) {
+	return nil, errors.New("tmuxStampFake: GetAllEnvironment is a marker only")
+}
+
 // meta reads key straight from the fake, past any injected failure.
 func (f *stampFake) meta(t *testing.T, name, key string) string {
 	t.Helper()
@@ -352,28 +361,34 @@ func adoptOne(t *testing.T, store beads.Store, sp runtime.Provider, dryRun bool)
 
 // Kills: a half-identified adopted runtime (v5 O2, LL5). Boot adoption stamps
 // the new row's ID and generation-1 epoch on the runtime; it keeps a
-// runtime's own token and mints one, on the row and the runtime with
-// BEADS_HOLDER_TOKEN beside it, only when the runtime has none. A token it
-// cannot read mints nothing and stamps nothing.
+// runtime's own token and mints one, on the row and the runtime, only when
+// the runtime has none, with BEADS_HOLDER_TOKEN beside it on tmux only. A
+// token it cannot read mints nothing and stamps nothing.
 func TestAdoptionStampsSessionIDAndToken(t *testing.T) {
 	const live = "440f67722bf9e7382ad684e057191659"
 	for _, tc := range []struct {
 		name, token string
 		tokenErr    error
+		sidecar     bool
 	}{
 		{name: "own token", token: live},
 		{name: "no token"},
+		{name: "no token on a sidecar provider", sidecar: true},
 		{name: "unreadable token", tokenErr: errors.New("server busy")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sp := newStampFake(t, adoptedName)
+			var provider runtime.Provider = tmuxStampFake{sp}
+			if tc.sidecar {
+				provider = sp
+			}
 			if tc.token != "" {
 				if err := sp.Fake.SetMeta(adoptedName, "GC_INSTANCE_TOKEN", tc.token); err != nil {
 					t.Fatal(err)
 				}
 			}
 			sp.getErr["GC_INSTANCE_TOKEN"] = tc.tokenErr
-			rows, stderr := adoptOne(t, beads.NewMemStore(), sp, false)
+			rows, stderr := adoptOne(t, beads.NewMemStore(), provider, false)
 			if len(rows) != 1 {
 				t.Fatalf("rows = %d, want 1", len(rows))
 			}
@@ -389,7 +404,9 @@ func TestAdoptionStampsSessionIDAndToken(t *testing.T) {
 			switch {
 			case tc.token != "" && (token != live || rtToken != live || holder != ""):
 				t.Fatalf("row token %q, runtime token %q, holder %q; want the runtime's own token kept, nothing minted", token, rtToken, holder)
-			case tc.token == "" && (token == "" || rtToken != token || holder != token):
+			case tc.token == "" && tc.sidecar && (token == "" || rtToken != token || holder != ""):
+				t.Fatalf("row token %q, runtime token %q, holder %q; want one minted token on row and runtime, no holder on a sidecar", token, rtToken, holder)
+			case tc.token == "" && !tc.sidecar && (token == "" || rtToken != token || holder != token):
 				t.Fatalf("row token %q, runtime token %q, holder %q; want one minted token on all three", token, rtToken, holder)
 			}
 			if sid != row.ID || epoch != "1" || stderr != "" {
@@ -450,9 +467,9 @@ func TestAdoptionKeepsAnotherRowsSessionID(t *testing.T) {
 }
 
 // Kills: a stamp failure failing the barrier or the row, a session ID
-// stamped without its epoch or over an unreadable ID, a token stamp failure
-// skipping the ID (the runtime would read Ownerless rather than Unknown), and
-// a minted token written over one that appeared after the first read (LL5).
+// stamped without its epoch, over an unreadable ID or after a failed token
+// write (see TestAdoptionStampedEpochKeepsStaleIncarnationForeign), and a
+// minted token written over one that appeared after the first read (LL5).
 // Each keeps the row, passes the barrier and logs.
 func TestAdoptionStampFailuresKeepRow(t *testing.T) {
 	boom := errors.New("tmux gone")
@@ -462,7 +479,7 @@ func TestAdoptionStampFailuresKeepRow(t *testing.T) {
 		wantID    bool
 		wantToken string // "" none, "row" the row's token, else that value
 	}{
-		{name: "token stamp fails", set: func(f *stampFake) { f.setErr["GC_INSTANCE_TOKEN"] = boom }, wantID: true},
+		{name: "token stamp fails", set: func(f *stampFake) { f.setErr["GC_INSTANCE_TOKEN"] = boom }},
 		{name: "epoch stamp fails", set: func(f *stampFake) { f.setErr["GC_RUNTIME_EPOCH"] = boom }, wantToken: "row"},
 		{name: "ID stamp fails", set: func(f *stampFake) { f.setErr["GC_SESSION_ID"] = boom }, wantToken: "row"},
 		{name: "ID unreadable", set: func(f *stampFake) { f.getErr["GC_SESSION_ID"] = boom }, wantToken: "row"},
@@ -519,6 +536,11 @@ func TestAdoptionStampedEpochKeepsStaleIncarnationForeign(t *testing.T) {
 		}},
 		{name: "epoch stamp fails", run: func(t *testing.T, sp *stampFake, store beads.Store) string {
 			sp.setErr["GC_RUNTIME_EPOCH"] = errors.New("tmux gone")
+			rows, _ := adoptOne(t, store, sp, false)
+			return rows[0].ID
+		}},
+		{name: "minted token stamp fails", run: func(t *testing.T, sp *stampFake, store beads.Store) string {
+			sp.setErr["GC_INSTANCE_TOKEN"] = errors.New("tmux gone")
 			rows, _ := adoptOne(t, store, sp, false)
 			return rows[0].ID
 		}},

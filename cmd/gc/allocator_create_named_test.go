@@ -1708,7 +1708,7 @@ func TestReadOnlyResolveMatchesLegacyCreateMetadataRichCity(t *testing.T) {
 }
 
 // adoptLiveRun runs mayor's AdoptLive create on store over a stampFake alive
-// under the session name, after prep sets it up. It returns the open row,
+// under the session name (as tmux), after prep sets it up. It returns the open row,
 // the fake, the effect's stderr and the token the create wrote. A stamp
 // never fails the create.
 func adoptLiveRun(t *testing.T, store beads.Store, prep func(sp *stampFake, name string)) (beads.Bead, *stampFake, string, string) {
@@ -1723,7 +1723,7 @@ func adoptLiveRun(t *testing.T, store beads.Store, prep func(sp *stampFake, name
 	if prep != nil {
 		prep(sp, plan.Named.SessionName)
 	}
-	h.runAll(t, &createPass{cfg: cfg, store: store, sp: sp}, plan)
+	h.runAll(t, &createPass{cfg: cfg, store: store, sp: tmuxStampFake{sp}}, plan)
 	if s := h.entry(t); !s.Landed || s.Stage != "" || s.Err != nil {
 		t.Fatalf("settlement = %+v, want landed: a stamp never fails the create", s)
 	}

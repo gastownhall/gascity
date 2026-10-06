@@ -315,15 +315,17 @@ func runAdoptionBarrier(
 
 // stampAdoptedRuntime writes an adopted runtime's identity to the runtime
 // (LL5, v5 O2), outside any identifier lock. A minted token is written only
-// while a fresh read still finds none, with BEADS_HOLDER_TOKEN beside it when
-// that is absent (the two travel together, tmux/adapter.go). A runtime with
-// no GC_SESSION_ID then gets sessionID, and first its GC_RUNTIME_EPOCH, so
-// legacy's pending-create attribution reads a stale stamped incarnation as
-// another generation, never as its own; the ID is stamped even when the token
-// stamp fails, which the comparator holds as Unknown. A runtime that already
-// names a session keeps it: the row holds the runtime's token, which reads
-// Current whatever the session ID, and a runtime still naming a closed row
-// stays visible to reapRuntimesBoundToClosedBeads exactly as before. The
+// while a fresh read still finds none; on a tmux leaf BEADS_HOLDER_TOKEN goes
+// beside it when absent, as tmux starts keep the two aligned. A failed token
+// write stamps nothing more: a runtime with the row's ID and no token reads
+// as ours to legacy's pending-create attribution after a restart, which
+// consults the epoch only on a token mismatch. A runtime with no
+// GC_SESSION_ID then gets its GC_RUNTIME_EPOCH and sessionID, the ID only
+// once the epoch landed, so that attribution reads a stale stamped
+// incarnation as another generation, never as its own. A runtime that
+// already names a session keeps it: the row holds the runtime's token, which
+// reads Current whatever the session ID, and a runtime still naming a closed
+// row stays visible to reapRuntimesBoundToClosedBeads exactly as before. The
 // caller only reports the error: the row exists either way.
 func stampAdoptedRuntime(sp runtime.Provider, name, sessionID, generation, mintedToken string) error {
 	var errs []error
@@ -335,9 +337,12 @@ func stampAdoptedRuntime(sp runtime.Provider, name, sessionID, generation, minte
 			return errors.New("the runtime gained a GC_INSTANCE_TOKEN after it was read")
 		}
 		if err := sp.SetMeta(name, "GC_INSTANCE_TOKEN", mintedToken); err != nil {
-			errs = append(errs, fmt.Errorf("stamping GC_INSTANCE_TOKEN: %w", err))
-		} else if err := stampIfAbsent(sp, name, "BEADS_HOLDER_TOKEN", mintedToken); err != nil {
-			errs = append(errs, err)
+			return fmt.Errorf("stamping GC_INSTANCE_TOKEN: %w", err)
+		}
+		if leaf, _, _ := runtime.ResolveBackend(sp, name); isSessionEnvLeaf(leaf) {
+			if err := stampIfAbsent(sp, name, "BEADS_HOLDER_TOKEN", mintedToken); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 	switch current, err := sp.GetMeta(name, "GC_SESSION_ID"); {
@@ -351,6 +356,14 @@ func stampAdoptedRuntime(sp runtime.Provider, name, sessionID, generation, minte
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// isSessionEnvLeaf reports whether leaf keeps its metadata in a session
+// environment that new processes inherit (tmux, the one
+// EnvironmentBatchProvider), rather than in a sidecar only gc reads.
+func isSessionEnvLeaf(leaf runtime.Provider) bool {
+	_, ok := leaf.(runtime.EnvironmentBatchProvider)
+	return ok
 }
 
 // stampIfAbsent writes key on the runtime when a read finds it unset.
