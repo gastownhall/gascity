@@ -24,7 +24,7 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
-        "//docs:all_files",
+        "//docs:reference/specs/identity-separator-contract-v1.md",
     ],
     embed = [":agent"],
     deps = [

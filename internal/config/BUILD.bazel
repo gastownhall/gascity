@@ -195,7 +195,7 @@ go_test(
     ) + [
         "//:engdocs_packv2_design",
         "//:go.mod",
-        "//docs:all_files",
+        "//docs:guides_and_tutorials",
         "//examples/storage:pack_files",
     ],
     embed = [":config"],

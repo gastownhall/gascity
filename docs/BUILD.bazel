@@ -15,6 +15,21 @@ filegroup(
     ),
 )
 
+# Narrower slices for tests that read only part of the docs tree, so an
+# unrelated docs edit leaves them cached.
+filegroup(
+    name = "reference_schema",
+    srcs = glob(["reference/schema/**"]),
+)
+
+filegroup(
+    name = "guides_and_tutorials",
+    srcs = glob([
+        "guides/**",
+        "tutorials/**",
+    ]),
+)
+
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(

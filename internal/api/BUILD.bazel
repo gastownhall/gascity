@@ -450,7 +450,7 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
-        "//docs:all_files",
+        "//docs:reference_schema",
         "//internal/worker:operation_events.go",
     ],
     embed = [":api"],
