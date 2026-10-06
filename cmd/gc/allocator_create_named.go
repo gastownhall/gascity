@@ -27,8 +27,9 @@ import (
 //   - inside the lock it reads the sessions store live once (the identity's
 //     rows, alias and session-name availability) and writes once: a reopen
 //     conditional on the revision it read (AM-N4), or a create;
-//   - a reopen retargets its ledger entry to the row before the write
-//     (AM-N2) and keeps the row's instance_token and generation;
+//   - a reopen reports the row it retargets in its settlement (AM-N2), whose
+//     marker is then that row, and keeps the row's instance_token and
+//     generation;
 //   - the row's state comes from the plan, decided from the observation cache
 //     (AM-N6): the effect never probes the provider and writes no file.
 
@@ -51,7 +52,7 @@ type namedCreatePlan struct {
 var templateResolveMu sync.Mutex
 
 // createNamed is a named plan's effect, from the spec check to the write.
-func (x *createEffects) createNamed(pass *createPass, p createPlan, token string, prog *createProgress) (session.Info, error) {
+func (x *createEffects) createNamed(pass *createPass, p createPlan, prog *createProgress) (session.Info, error) {
 	plan, cfg := p.Named, pass.cfg
 	prog.stage = createStageStalePlan
 	spec, ok := findNamedSessionSpec(cfg, x.host.cityName, plan.Identity)
@@ -73,7 +74,7 @@ func (x *createEffects) createNamed(pass *createPass, p createPlan, token string
 	err = x.host.withLocks(x.host.cityPath, []string{plan.Identity, plan.SessionName}, func() error {
 		prog.stage = createStageFence
 		var err error
-		info, err = x.writeNamed(pass, p, tp, token, prog)
+		info, err = x.writeNamed(pass, p, tp, prog)
 		return err
 	})
 	return info, err
@@ -98,7 +99,7 @@ func (x *createEffects) resolveNamed(cfg *config.City, spec namedSessionSpec, pl
 }
 
 // writeNamed is the locked step: the fenced live read, then one write.
-func (x *createEffects) writeNamed(pass *createPass, p createPlan, tp TemplateParams, token string, prog *createProgress) (session.Info, error) {
+func (x *createEffects) writeNamed(pass *createPass, p createPlan, tp TemplateParams, prog *createProgress) (session.Info, error) {
 	plan, cfg, store := p.Named, pass.cfg, pass.store
 	now := x.host.now().UTC()
 	live := liveFenceStore{Store: store, live: beads.HandlesFor(store).Live}
@@ -107,7 +108,7 @@ func (x *createEffects) writeNamed(pass *createPass, p createPlan, tp TemplatePa
 		return session.Info{}, err
 	}
 	if closed, ok := session.ClosedNamedSessionBeadIn(rows, plan.SessionName); ok {
-		return x.reopenNamed(store, live, cfg, p, closed, now, prog)
+		return reopenNamed(store, live, cfg, p, closed, now, prog)
 	}
 	if err := session.EnsureAliasAvailableWithConfigForOwner(live, cfg, plan.Identity, "", plan.Identity); err != nil {
 		return session.Info{}, fmt.Errorf("alias %q for %s unavailable: %w", plan.Identity, plan.Identity, err)
@@ -120,7 +121,7 @@ func (x *createEffects) writeNamed(pass *createPass, p createPlan, tp TemplatePa
 		state = string(session.StateActive)
 	}
 	liveHash := runtime.LiveFingerprint(templateParamsToConfig(tp))
-	meta := syncCreateMetadata(tp, plan.SessionName, plan.Identity, liveHash, state, token, 0, now)
+	meta := syncCreateMetadata(tp, plan.SessionName, plan.Identity, liveHash, state, p.Token, 0, now)
 	meta["alias"] = plan.Identity
 	prog.writing = true
 	info, err := sessionFrontDoor(store).CreateSessionInfo(session.CreateSpec{Title: plan.Identity, AgentName: plan.Identity, Metadata: meta})
@@ -133,18 +134,15 @@ func (x *createEffects) writeNamed(pass *createPass, p createPlan, tp TemplatePa
 // reopenNamed reopens closed, the identity's closed canonical row, with
 // legacy's reopen batch in one write: conditional on the revision the
 // fenced read saw where the store resolves a conditional writer, else
-// legacy's transaction (last writer wins, design §4a N3). The entry names
-// the row before anything is checked or written;
-// settle reads a refused write (a lost fence, a writer that cannot fence)
-// as no write.
-func (x *createEffects) reopenNamed(store beads.Store, live beads.Store, cfg *config.City, p createPlan, closed beads.Bead, now time.Time, prog *createProgress) (session.Info, error) {
+// legacy's transaction (last writer wins, design §4a N3). The settlement
+// names the row whatever the outcome; settle reads a refused write (a lost
+// fence, a writer that cannot fence) as no write.
+func reopenNamed(store beads.Store, live beads.Store, cfg *config.City, p createPlan, closed beads.Bead, now time.Time, prog *createProgress) (session.Info, error) {
 	plan := p.Named
+	prog.retarget = closed.ID
 	writer, _, err := beads.ResolveConditionalWriter(store)
 	if err != nil {
 		return session.Info{}, fmt.Errorf("reopening configured named session %q: %w", plan.Identity, err)
-	}
-	if !x.host.ledger.Retarget(p.EntryID, closed.ID) {
-		return session.Info{}, fmt.Errorf("reopening configured named session %q: create entry %s is no longer issued", plan.Identity, p.EntryID)
 	}
 	state := "stopped"
 	if plan.AdoptLive {

@@ -43,16 +43,21 @@ type passRecord struct {
 	Result   passResult
 }
 
-// settlement is an effect's report that it finished. C4a adds the outcome
-// the in-flight map needs.
+// settlement is an effect's one report that it finished (C1.15, C5.6): the
+// in-flight entry it settles, by key, its outcome and the marker the census
+// will show. A non-empty marker field replaces the entry's. C4a adds the
+// cause, backoff key and event.
 type settlement struct {
-	Key  rowKey
-	Kind string
-	Err  error
+	Key      string // the entry's key (inflightEntry.Key)
+	Outcome  inflightState
+	Marker   inflightMarker
+	WroteRow bool
+	At       time.Time
+	Err      error
 }
 
-// plannerInflight is the in-flight map the planner owns. It stands in for
-// C1a's type until C1a lands.
+// plannerInflight is the in-flight map the planner owns: *inflightMap
+// (reconcile_inflight.go), or a test's fake.
 type plannerInflight interface {
 	settle(settlement)
 }

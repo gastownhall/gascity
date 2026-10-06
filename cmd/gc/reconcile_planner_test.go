@@ -395,7 +395,7 @@ func TestPlannerPassPanicRecovered(t *testing.T) {
 		}
 		return passResult{}
 	})
-	h.p.settlements.post(settlement{Key: rowKey{Leg: "s", ID: "a"}})
+	h.p.settlements.post(settlement{Key: "row:s/a"})
 	h.start(t)
 	h.expectPass(t, plannerT0)
 
@@ -442,7 +442,7 @@ func TestPlannerSettlementQueueNeverBlocks(t *testing.T) {
 	posted := make(chan struct{})
 	go func() {
 		for i := 0; i < n; i++ {
-			h.p.settlements.post(settlement{Key: rowKey{Leg: "s", ID: string(rune('a' + i%26))}, Kind: "start", Err: errors.New("x")})
+			h.p.settlements.post(settlement{Key: string(rune('a' + i%26)), Outcome: inflightFailed, Err: errors.New("x")})
 		}
 		close(posted)
 	}()
@@ -459,8 +459,8 @@ func TestPlannerSettlementQueueNeverBlocks(t *testing.T) {
 		t.Fatalf("settled %d, want %d", got, n)
 	}
 	for i, s := range h.inflight.settled {
-		if want := string(rune('a' + i%26)); s.Key.ID != want {
-			t.Fatalf("settlement %d is %q, want %q: order lost", i, s.Key.ID, want)
+		if want := string(rune('a' + i%26)); s.Key != want {
+			t.Fatalf("settlement %d is %q, want %q: order lost", i, s.Key, want)
 		}
 	}
 	if got := h.p.settlements.drain(); len(got) != 0 {
@@ -555,7 +555,7 @@ func TestPlannerSingleOwnerRace(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < each; i++ {
-				h.p.settlements.post(settlement{Kind: "start"})
+				h.p.settlements.post(settlement{Outcome: inflightLanded})
 				h.p.markDirty("poke")
 				if i%50 == 0 {
 					h.p.pauseStarts()

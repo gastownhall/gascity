@@ -171,7 +171,7 @@ func (c *sessionCensus) RowsNamed(name string) []rowKey {
 
 // Ledger is the census as the intent ledger reads it (P3-4): every row on
 // every leg with its config-only endpoint (endpointKeyForAgent), and the legs
-// read without error. ReadStarted stays zero (C1a removes it).
+// read without error. ReadStarted stays zero; C1b deletes it with the ledger.
 func (c *sessionCensus) Ledger(cfg *config.City) ledgerCensus {
 	rows := make(map[rowKey]ledgerRow, len(c.Rows))
 	for k, row := range c.Rows {
