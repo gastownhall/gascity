@@ -525,11 +525,10 @@ func (s *namedHookStore) Update(id string, opts beads.UpdateOpts) error {
 	return s.Store.Update(id, opts)
 }
 
-// Kills: a reopen's entry carrying only its token (P3-6b T5, S5, AM-N2),
-// which the reopened row never shows. The settlement names the row it
-// retargeted, so a census row without the token clears the entry by its row
-// ID, and a census without the row keeps it.
-func TestCreateEffect_NamedReopenSettlesRetargetAndClearsByRowID(t *testing.T) {
+// Kills: a reopen's settlement that loses the row it reopened (P3-6b T5,
+// AM-N2), and a reopen held in flight after it settled: the row keeps its own
+// token, which no census would show for the plan's (CONTRACT v5 P5).
+func TestCreateEffect_NamedReopenSettlesRetargetAndClears(t *testing.T) {
 	cfg := mayorCity()
 	store := beads.NewMemStore()
 	closed := seedClosedNamedRow(t, store, cfg, nil)
@@ -541,20 +540,16 @@ func TestCreateEffect_NamedReopenSettlesRetargetAndClearsByRowID(t *testing.T) {
 	if !e.Landed || e.RetargetRowID != closed.ID || e.Token != token {
 		t.Fatalf("settlement = %+v, want landed and retargeted to %s", e, closed.ID)
 	}
-	m := settledCreateEntry(t, e)
-	if got := m.clearVisible(inflightCensus{Legs: map[string]bool{"sessions": true}}, namedEffectNow); len(got) != 0 {
-		t.Fatalf("a reopen cleared before the census showed its row open: %+v", got)
-	}
-	census := inflightCensus{Rows: map[rowKey]inflightRow{{Leg: "sessions", ID: closed.ID}: {Generation: 4, InstanceToken: "tok-old"}}}
-	if got := m.clearVisible(census, namedEffectNow); len(got) != 1 || got[0].HardBound {
-		t.Fatalf("clears with the reopened row = %+v, want one by marker", got)
+	if m := settledCreateEntry(t, e); len(m.view().Entries) != 0 {
+		t.Fatalf("in-flight entries after a landed reopen = %+v, want none", m.view().Entries)
 	}
 }
 
-// Kills: an ambiguous reopen resolved by its plan's token, which it never
-// writes, instead of its row ID (AM-N2); one cleared while the row is still
-// closed before the hard bound; or one refused before it resolves.
-func TestCreateEffect_NamedAmbiguousReopenResolvesByRowID(t *testing.T) {
+// Kills: an ambiguous reopen held until the hard bound (and its alert) by the
+// plan's token, which it never writes (AM-N2), or refused. Its row exists
+// whether or not the reopen landed, so a later create of the identity reads
+// it live under the flock; the entry clears at settlement.
+func TestCreateEffect_NamedAmbiguousReopenClearsAtSettlement(t *testing.T) {
 	cfg := mayorCity()
 	mem := beads.NewMemStore()
 	closed := seedClosedNamedRow(t, mem, cfg, nil)
@@ -567,14 +562,8 @@ func TestCreateEffect_NamedAmbiguousReopenResolvesByRowID(t *testing.T) {
 		t.Fatalf("settlement = %+v, want an ambiguous reopen of %s", e, closed.ID)
 	}
 	h.assertNoRefusal(t)
-	m := settledCreateEntry(t, e)
-	stillClosed := inflightCensus{Legs: map[string]bool{"sessions": true}}
-	if got := m.clearVisible(stillClosed, e.At.Add(inflightHardBound-time.Second)); len(got) != 0 {
-		t.Fatalf("row still closed before the hard bound: clears %+v, want none", got)
-	}
-	open := inflightCensus{Rows: map[rowKey]inflightRow{{Leg: "sessions", ID: closed.ID}: {InstanceToken: "tok-old"}}}
-	if got := m.clearVisible(open, e.At.Add(time.Second)); len(got) != 1 || got[0].HardBound {
-		t.Fatalf("row open: clears %+v, want one by marker", got)
+	if m := settledCreateEntry(t, e); len(m.view().Entries) != 0 {
+		t.Fatalf("in-flight entries after an ambiguous reopen = %+v, want none", m.view().Entries)
 	}
 }
 

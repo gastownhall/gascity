@@ -160,19 +160,16 @@ func (h *createHarness) refusesWork(t *testing.T, spec worktree.Spec) bool {
 	return w != nil && w.Refused && w.BeadID == spec.BeadID && w.Fingerprint == specFingerprint(spec)
 }
 
-// assertFailedNoWrite checks C5.4(2) for create entry c1: a create that
-// wrote nothing clears from the in-flight map at its settlement.
+// assertFailedNoWrite checks entry c1 settled a failure without a row, which
+// clears from the in-flight map at its settlement.
 func assertFailedNoWrite(t *testing.T, h *createHarness) {
 	t.Helper()
 	s := h.entry(t)
 	if s.Landed || s.Ambiguous || s.Err == nil {
 		t.Fatalf("settlement %+v, want a failure without a row", s)
 	}
-	m := newInflightMap()
-	m.add(inflightEntry{Kind: inflightCreate, Key: createBackoffKey(s.Identity), Leg: "sessions", Marker: inflightMarker{InstanceToken: s.Token}})
-	m.settle(s.settlement())
-	if got := m.view().Entries; len(got) != 0 {
-		t.Fatalf("in-flight entries after the settlement = %+v, want none", got)
+	if m := settledCreateEntry(t, s); len(m.view().Entries) != 0 {
+		t.Fatalf("in-flight entries after the settlement = %+v, want none", m.view().Entries)
 	}
 }
 
@@ -181,13 +178,10 @@ func assertFailedNoWrite(t *testing.T, h *createHarness) {
 func settledCreateEntry(t *testing.T, s createSettlement) *inflightMap {
 	t.Helper()
 	m := newInflightMap()
-	if !m.add(inflightEntry{Kind: inflightCreate, Key: createBackoffKey(s.Identity), Leg: "sessions", Marker: inflightMarker{InstanceToken: s.Token}}) {
+	if !m.add(inflightEntry{Kind: inflightCreate, Token: s.Token, Identity: s.Identity, Leg: "sessions"}) {
 		t.Fatal("add refused")
 	}
 	m.settle(s.settlement())
-	if got := m.view().Entries; len(got) != 1 {
-		t.Fatalf("in-flight entries after settling %+v = %+v, want the create held until its marker", s, got)
-	}
 	return m
 }
 
@@ -571,11 +565,11 @@ func (failingCreateStore) Create(beads.Bead) (beads.Bead, error) {
 	return beads.Bead{}, errors.New("connection reset during create")
 }
 
-// Kills: clearing an unproven create (C5.4, C5.15). A landed create settles
-// with its row and the plan's token; a failure before the write settles with
-// no row; an error from the write itself is ambiguous and settles with the
-// token as its marker, so its entry clears only by that marker or the hard
-// bound (C5.4(3) is struck).
+// Kills: clearing an unproven create (CONTRACT v5 P5). A landed create
+// settles with its row and the plan's token and clears at once; a failure
+// before the write settles with no row; an error from the write itself is
+// ambiguous, so its entry clears only when a census row carries its token,
+// or at the hard bound.
 func TestCreateEffect_CommitsMarkerOrFailsNoWrite_AmbiguousLeavesMarker(t *testing.T) {
 	cfg := workerCity(2)
 
@@ -602,13 +596,8 @@ func TestCreateEffect_CommitsMarkerOrFailsNoWrite_AmbiguousLeavesMarker(t *testi
 		if got := raw.Metadata["pending_create_started_at"]; got != "2026-10-03T11:00:00Z" {
 			t.Fatalf("pending_create_started_at = %q, want the effect's clock in UTC", got)
 		}
-		m := settledCreateEntry(t, e)
-		if got := m.clearVisible(inflightCensus{Legs: map[string]bool{"sessions": true}}, e.At); len(got) != 0 {
-			t.Fatalf("a landed create cleared before the census showed its row: %+v", got)
-		}
-		census := inflightCensus{Rows: map[rowKey]inflightRow{{Leg: "sessions", ID: rows[0].ID}: {InstanceToken: token}}}
-		if got := m.clearVisible(census, e.At); len(got) != 1 || got[0].HardBound {
-			t.Fatalf("clears with the row = %+v, want one by marker", got)
+		if m := settledCreateEntry(t, e); len(m.view().Entries) != 0 {
+			t.Fatalf("in-flight entries after a landed create = %+v, want none: the census shows its row", m.view().Entries)
 		}
 	})
 
@@ -635,11 +624,10 @@ func TestCreateEffect_CommitsMarkerOrFailsNoWrite_AmbiguousLeavesMarker(t *testi
 			t.Fatalf("settlement = %+v, want ambiguous with only the token as its marker", e)
 		}
 		m := settledCreateEntry(t, e)
-		if got := m.clearVisible(inflightCensus{Legs: map[string]bool{"sessions": true}}, e.At.Add(time.Second)); len(got) != 0 {
+		if got := m.clearVisible(inflightCensus{}, e.At.Add(time.Second)); len(got) != 0 || len(m.view().Entries) != 1 {
 			t.Fatalf("an ambiguous create cleared by a later read without its token: %+v", got)
 		}
-		census := inflightCensus{Rows: map[rowKey]inflightRow{{Leg: "sessions", ID: "gc-late"}: {InstanceToken: token}}}
-		if got := m.clearVisible(census, e.At); len(got) != 1 || got[0].HardBound {
+		if got := m.clearVisible(inflightCensus{Tokens: map[string]bool{token: true}}, e.At); len(got) != 1 || got[0].HardBound {
 			t.Fatalf("clears with the token's row = %+v, want one by marker", got)
 		}
 		h.assertNoRefusal(t)
@@ -1778,7 +1766,9 @@ func TestCreateEffectUsesPlanToken(t *testing.T) {
 	tokenless := beads.NewMemStore()
 	bare := newCreateHarness(t, nil)
 	bare.runAll(t, &createPass{cfg: cfg, store: tokenless}, workerPlan(cfg, "c1", 1))
-	assertFailedNoWrite(t, bare)
+	if s := bare.entry(t); s.Landed || s.Ambiguous || s.Err == nil {
+		t.Fatalf("settlement %+v, want a failure without a row", s)
+	}
 	if rows := sessionRows(t, tokenless); len(rows) != 0 {
 		t.Fatalf("rows = %+v, want none for a plan without a token", rows)
 	}

@@ -27,9 +27,8 @@ import (
 //   - inside the lock it reads the sessions store live once (the identity's
 //     rows, alias and session-name availability) and writes once: a reopen
 //     conditional on the revision it read (AM-N4), or a create;
-//   - a reopen reports the row it retargets in its settlement (AM-N2), whose
-//     marker is then that row, and keeps the row's instance_token and
-//     generation;
+//   - a reopen reports the row it retargets in its settlement (AM-N2) and
+//     keeps the row's instance_token and generation;
 //   - the row's state comes from the plan, decided from the observation cache
 //     (AM-N6): the effect never probes the provider and writes no file.
 

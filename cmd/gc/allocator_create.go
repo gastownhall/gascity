@@ -23,8 +23,8 @@ import (
 // and mints the plan's instance token at submit; an effect runs legacy's
 // fenced create from an effect-local view
 // (createPoolSessionBeadWithGuardedAliasUsingLock) and posts one settlement
-// with the marker the census will show (C5.4(1)). The settlement is its only
-// output: it mutates no planner state (C1.11). Effects write only the new row
+// (CONTRACT v5 P1, P5, C1). The settlement is its only output: it mutates no
+// planner state. Effects write only the new row
 // and never probe a provider: the pass decided singleton occupancy from the
 // observation cache (C7.3).
 //
@@ -38,9 +38,9 @@ const createEffectParallelism = poolRealizeParallelism
 
 // createPlan is one fresh pool or dependency-floor row, or one configured
 // named session (Named), the allocator admitted under the create entry
-// EntryID. The planner mints Token at submit and records it as the entry's
-// marker, so the row's token and the marker cannot diverge (S-8); ConfigRev
-// is the revision the plan was decided under.
+// EntryID. The planner mints Token at submit and records it in the entry, so
+// the row's token and the entry's cannot diverge (S-8); ConfigRev is the
+// revision the plan was decided under.
 type createPlan struct {
 	EntryID           string
 	Token             string
@@ -133,8 +133,8 @@ type createEffectHost struct {
 	cityPath string
 	cityName string
 	lookPath config.LookPathFunc
-	// settle posts an effect's settlement to the planner (C1.15), which
-	// applies it to its in-flight map and refusal table (C5.12). It is
+	// settle posts an effect's settlement to the planner's queue, which
+	// applies it to its in-flight map and backoff table (P1). It is
 	// required, and it must not block.
 	settle func(createSettlement)
 	// withLocks takes the city identifier locks; nil means
@@ -277,10 +277,9 @@ type createProgress struct {
 }
 
 // run is one create effect. Every return, panic included, settles it once
-// (C5.6, C1.7). A panic before the row write wrote nothing; from the write
-// on, the row may exist, so it settles as ambiguous. A plan without its
-// token refuses before anything: a minted token would leave the entry's
-// marker unmatched.
+// (P3, P6). A panic before the row write wrote nothing; from the write on,
+// the row may exist, so it settles as ambiguous. A plan without its token
+// refuses before anything: a minted token would never match the entry's.
 func (x *createEffects) run(job createJob) {
 	p := job.plan
 	var (
@@ -376,9 +375,9 @@ func (x *createEffects) view(pass *createPass, token string) poolCreateView {
 	}
 }
 
-// createSettlement is one create effect's settlement (C1.15). The planner
-// applies it to its in-flight map (createSettlement.settlement), then to its
-// refusal table (C5.12): a landed create resets Identity's record; a
+// createSettlement is one create effect's settlement. The planner applies it
+// to its in-flight map (createSettlement.settlement), then to its backoff
+// table (P1): a landed create resets Identity's record; a
 // non-empty Stage refuses Identity with cause Stage under ConfigRev (AM-N8);
 // Work refuses or resets the work item's record (C6.5(a)).
 type createSettlement struct {
@@ -396,7 +395,7 @@ type createSettlement struct {
 	Stage string
 	RowID string
 	// Landed: the row was written. Ambiguous: the write call failed after it
-	// may have landed, so the row may exist (C5.4(1), C5.15).
+	// may have landed, so the row may exist (P5).
 	Landed    bool
 	Ambiguous bool
 	// RetargetRowID is the closed row a named create reopens (AM-N2).
@@ -416,8 +415,8 @@ type workVerdict struct {
 
 // settle builds the effect's settlement and posts it. A create commits with
 // its row ID and token. An error from the write itself is ambiguous, since
-// the row may exist: it settles with the token (and the row ID, when known)
-// as its marker. A row write the store refused (createWriteRefused), and any
+// the row may exist: it settles with the token (and the row ID, when known).
+// A row write the store refused (createWriteRefused), and any
 // other error, wrote nothing. A panic in the sink or the log is recovered, so
 // the worker lives on.
 func (x *createEffects) settle(p createPlan, prog createProgress, info session.Info, err error) {
