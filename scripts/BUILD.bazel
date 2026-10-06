@@ -15,6 +15,7 @@ go_test(
         "bazel_multilane_test.go",
         "bazel_no_flaky_retries_test.go",
         "bazel_output_cache_test.go",
+        "bazel_repo_tree_test.go",
         "bazel_test_tmp_bt_test.go",
         "bd_version_pin_test.go",
         "build_provenance_test.go",
@@ -103,6 +104,11 @@ go_test(
     ],
 )
 
+exports_files(
+    ["routed-test-rows.manifest"],
+    visibility = ["//visibility:public"],
+)
+
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(
@@ -111,6 +117,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

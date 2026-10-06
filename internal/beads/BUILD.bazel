@@ -59,7 +59,6 @@ go_test(
         "bead_database_dirs_internal_test.go",
         "beads_test.go",
         "binary_versions_test.go",
-        "boundary_test.go",
         "cached_read_exact_test.go",
         "caching_store_batch_test.go",
         "caching_store_binding_test.go",
@@ -188,7 +187,6 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
-        "//:repo_source_tree",
         "@com_github_steveyegge_beads//internal/storage/issueops:drift_srcs",
         "@com_github_steveyegge_beads//internal/storage/schema:drift_srcs",
         "@com_github_steveyegge_beads//internal/storage/schema:migrations",
@@ -196,7 +194,6 @@ go_test(
     ],
     embed = [":beads"],
     deps = [
-        "//internal/bazeltest",
         "//internal/beadmeta",
         "//internal/beads/beadstest",
         "//internal/beads/contract",
@@ -220,6 +217,7 @@ go_test(
             "@io_opentelemetry_go_otel_sdk_log//:log",
         ],
         "@rules_go//go/platform:android": [
+            "//internal/bazeltest",
             "//internal/processgroup/processgrouptest",
             "@io_opentelemetry_go_otel//attribute",
             "@io_opentelemetry_go_otel_log//global",
@@ -262,6 +260,7 @@ go_test(
             "@io_opentelemetry_go_otel_sdk_log//:log",
         ],
         "@rules_go//go/platform:linux": [
+            "//internal/bazeltest",
             "//internal/processgroup/processgrouptest",
             "@io_opentelemetry_go_otel//attribute",
             "@io_opentelemetry_go_otel_log//global",
@@ -315,6 +314,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

@@ -302,7 +302,7 @@ func TestOnlyTheSessionAndTheNamedHelperMarkARealityChecked(t *testing.T) {
 func TestServedProbeForTestIsNeverCalledInProduction(t *testing.T) {
 	// Bazel compiles with runfiles-relative paths, so runtime.Caller
 	// arithmetic lands on "." rather than the module root; the runfiles tree
-	// (//:go.mod + //:repo_source_tree in this test's data) is the module there.
+	// (//:go.mod + //:repo_go_srcs in this test's data) is the module there.
 	root := bazeltest.OverrideRoot()
 	if root == "" {
 		_, self, _, ok := runtime.Caller(0)
