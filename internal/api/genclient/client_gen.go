@@ -5015,6 +5015,9 @@ type StatusBody struct {
 	SessionCountsDetail *StatusSessionCountsDetail `json:"session_counts_detail,omitempty"`
 	StoreHealth         *StatusStoreHealth         `json:"store_health,omitempty"`
 
+	// StoresNotRead True when the city is suspended: the body was built without reading any bead store (a read would restart its retired bd proxy), so work, mail, session-count and store-health figures are absent.
+	StoresNotRead *bool `json:"stores_not_read,omitempty"`
+
 	// Suspended Whether the city is suspended.
 	Suspended bool `json:"suspended"`
 
@@ -5199,11 +5202,12 @@ type StatusWorkCounts struct {
 
 // StorageBindingOutcomePayload defines model for StorageBindingOutcomePayload.
 type StorageBindingOutcomePayload struct {
-	Binding     string `json:"binding"`
-	Database    string `json:"database"`
-	Invariant   string `json:"invariant"`
-	Outcome     string `json:"outcome"`
-	ProvenBeads int64  `json:"proven_beads"`
+	Binding        string    `json:"binding"`
+	Database       string    `json:"database"`
+	Invariant      string    `json:"invariant"`
+	LostCrossEdges *[]string `json:"lost_cross_edges,omitempty"`
+	Outcome        string    `json:"outcome"`
+	ProvenBeads    int64     `json:"proven_beads"`
 }
 
 // StoreDiskCriticalPayload defines model for StoreDiskCriticalPayload.

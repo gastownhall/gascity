@@ -150,12 +150,11 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 // newIsolatedToolEnv-derived env this file's tests build does not leak the
 // ambient HOME into the bd/dolt subprocesses it drives.
 //
-// newIsolatedToolEnv pins env's own HOME to the REAL passwd-db home (via
-// pinRealHomeEnv/integrationEnvFor) because gc-start/gc-supervisor-start
-// consumers need it. Pure bd/dolt-exec callers like this file's
+// newIsolatedToolEnv sets env's own HOME explicitly (via isolateGCHomeEnv/
+// integrationEnvFor). Pure bd/dolt-exec callers like this file's
 // runBDInitCompat and its direct exec.Command(bdBinary, ...) calls inherit
-// that real-home pin unchanged — t.Setenv("HOME", ...) cannot reach it, so
-// this test substitutes a controlled stand-in for "whatever the real
+// that HOME unchanged — t.Setenv("HOME", ...) cannot reach it, so this test
+// substitutes a controlled stand-in for "whatever the real
 // invoking user's home happens to contain" instead, matching
 // TestBdStoreMailWispInsertIsolatesHOMEFromSharedServerConfig's technique.
 func TestDoltConfigWiringIsolatesHOMEFromSharedServerConfig(t *testing.T) {

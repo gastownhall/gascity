@@ -22,10 +22,11 @@ max_modules="${GC_NATIVE_DEP_MAX_MODULES:-737}"
 # Re-baseline with fresh measurement + growth-rate evidence, not an
 # arbitrary bump, when this next fails.
 #
-# Re-baselined 2026-10-05 (gc 1.5.1 suspension quiescence, #7115, which was
-# the first PR over the cap): origin/main 6e4eec02b2 measured 179,875,091
-# bytes with this build, and #7115 180,002,151 (+127KB). Growth since 2026-08-29
-# was 7.78MB over 37 days, ~210KB/day, so 190,000,000 gives ~48 days.
+# Re-baselined 2026-10-05 (lane split151, #7074). Same build command:
+# origin/main bf395c1fe4 measured 179,875,091 bytes and the split-storage
+# clear adds ~156KB (180,031,776). Growth since the 2026-08-29 measurement
+# is 7.78MB over 37 days, ~210KB/day, so 190,000,000 gives ~48 days of
+# headroom from main's measurement.
 max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-190000000}"
 max_aws_modules="${GC_NATIVE_DEP_MAX_AWS_MODULES:-25}"
 max_azure_modules="${GC_NATIVE_DEP_MAX_AZURE_MODULES:-9}"

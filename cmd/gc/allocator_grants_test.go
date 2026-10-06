@@ -905,7 +905,7 @@ func TestHousekeep_HardBoundAlertsAndTraces(t *testing.T) {
 // scaled slot to a create; and an active row projected as creating.
 func TestAllocator_IssuedGrantCountsAsAwakeSupply(t *testing.T) {
 	scaled := func(f *allocFixture) {
-		f.in.ScaleCheck = &scaleCheckResult{Counts: map[string]int{"worker": 1}, At: allocNow}
+		f.in.ScaleCheck = &scaleCheckResult{Counts: map[string]int{"worker": 1}}
 		f.in.Demand.CustomCheckTemplates = []string{"worker"}
 	}
 	for _, st := range []ledgerState{ledgerIssued, ledgerCommitted} {

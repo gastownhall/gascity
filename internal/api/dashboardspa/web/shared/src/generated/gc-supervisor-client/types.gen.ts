@@ -4859,6 +4859,10 @@ export type StatusBody = {
      */
     store_health?: StatusStoreHealth;
     /**
+     * True when the city is suspended: the body was built without reading any bead store (a read would restart its retired bd proxy), so work, mail, session-count and store-health figures are absent.
+     */
+    stores_not_read?: boolean;
+    /**
      * Whether the city is suspended.
      */
     suspended: boolean;
@@ -5078,6 +5082,7 @@ export type StorageBindingOutcomePayload = {
     binding: string;
     database: string;
     invariant: string;
+    lost_cross_edges?: Array<string> | null;
     outcome: string;
     proven_beads: number;
 };

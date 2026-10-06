@@ -413,8 +413,8 @@ func TestV2DemandReadsNonExactLegServesRecording(t *testing.T) {
 	backing.armed.Store(true)
 	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 	open := routedDemandBead("gc-open")
-	rec := &backstopRecording{Seq: 1, At: now, Expires: now.Add(time.Minute), Legs: map[beads.Store]legRecording{
-		demandLabelKey(cache): {RawOpen: []beads.Bead{open}, ReadyAll: []beads.Bead{open}},
+	rec := &externalReadsRecording{Seq: 1, FreshFor: time.Minute, Sources: map[sourceKey]sourceResult{
+		keyOf(sourceDemand, cache): {EndedAt: now, sourcePayload: sourcePayload{Leg: legRecording{RawOpen: []beads.Bead{open}, ReadyAll: []beads.Bead{open}}}},
 	}}
 	reads := newV2DemandReads(now, rec, newDemandLastGood())
 
@@ -438,7 +438,7 @@ func TestV2DemandReadsNonExactLegServesRecording(t *testing.T) {
 
 	// The recorded live Ready failed: the leg's templates read partial with
 	// no demand, never topped up from the cache's folded rows.
-	rec.Legs[demandLabelKey(cache)] = legRecording{RawOpen: []beads.Bead{open}, ReadyAllErr: errDemandBackingDown}
+	rec.Sources[keyOf(sourceDemand, cache)] = sourceResult{EndedAt: now, sourcePayload: sourcePayload{Leg: legRecording{RawOpen: []beads.Bead{open}, ReadyAllErr: errDemandBackingDown}}}
 	reads = newV2DemandReads(now, rec, newDemandLastGood())
 	targets := []defaultScaleCheckTarget{{template: "worker", storeKey: "city", store: cache}}
 	counts, _, partials, _ := defaultScaleCheckCountsAndDemand(cfg, targets, newReadyDemandCacheWithReads(reads))
@@ -454,20 +454,20 @@ func TestV2DemandReadsMissingOrStaleRecordingIsPartial(t *testing.T) {
 	cache, _ := newDemandCache(t, false, routedDemandBead("gc-r1"))
 	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 	const maxAge = 30 * time.Second
-	recordedAt := func(at time.Time) *backstopRecording {
+	recordedAt := func(at time.Time) *externalReadsRecording {
 		r1 := routedDemandBead("gc-r1")
-		return &backstopRecording{Seq: 1, At: at, Expires: at.Add(maxAge), Legs: map[beads.Store]legRecording{
-			demandLabelKey(cache): {RawOpen: []beads.Bead{r1}, ReadyAll: []beads.Bead{r1}},
+		return &externalReadsRecording{Seq: 1, FreshFor: maxAge, Sources: map[sourceKey]sourceResult{
+			keyOf(sourceDemand, cache): {EndedAt: at, sourcePayload: sourcePayload{Leg: legRecording{RawOpen: []beads.Bead{r1}, ReadyAll: []beads.Bead{r1}}}},
 		}}
 	}
 	for _, tc := range []struct {
 		name    string
-		rec     *backstopRecording
+		rec     *externalReadsRecording
 		partial bool
 	}{
 		{name: "fresh recording", rec: recordedAt(now.Add(-maxAge))},
 		{name: "no recording", rec: nil, partial: true},
-		{name: "leg not recorded", rec: &backstopRecording{Seq: 1, At: now, Expires: now.Add(maxAge), Legs: map[beads.Store]legRecording{}}, partial: true},
+		{name: "leg not recorded", rec: &externalReadsRecording{Seq: 1, FreshFor: maxAge, Sources: map[sourceKey]sourceResult{}}, partial: true},
 		{name: "stale recording", rec: recordedAt(now.Add(-maxAge - time.Nanosecond)), partial: true},
 	} {
 		reads := newV2DemandReads(now, tc.rec, newDemandLastGood())
@@ -677,21 +677,21 @@ func TestClosedNamedIndexLegacyIsDirectCallV2ServesRecording(t *testing.T) {
 	backing.ops = nil
 
 	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
-	rec := &backstopRecording{At: now, Expires: now.Add(time.Minute), ClosedNamed: map[beads.Store]closedNamedRecording{backing: {Index: direct}}}
+	rec := &externalReadsRecording{FreshFor: time.Minute, Sources: map[sourceKey]sourceResult{keyOf(sourceClosedNamed, backing): {EndedAt: now, sourcePayload: sourcePayload{ClosedNamed: direct}}}}
 	// A partial read keeps the rows it got and its error, as legacy's does.
 	partial := &beads.PartialResultError{Op: "closed index", Err: errors.New("one leg down")}
-	partialRec := &backstopRecording{At: now, Expires: now.Add(time.Minute), ClosedNamed: map[beads.Store]closedNamedRecording{backing: {Index: direct, Err: partial}}}
+	partialRec := &externalReadsRecording{FreshFor: time.Minute, Sources: map[sourceKey]sourceResult{keyOf(sourceClosedNamed, backing): {EndedAt: now, sourcePayload: sourcePayload{ClosedNamed: direct}, Err: partial}}}
 	for _, tc := range []struct {
 		name    string
 		now     time.Time
-		rec     *backstopRecording
+		rec     *externalReadsRecording
 		wantErr error
 		found   bool
 	}{
 		{"fresh", now.Add(time.Minute), rec, nil, true},
 		{"recorded partial read", now, partialRec, partial, true},
 		{"no recording", now, nil, errDemandRecordingMissing, false},
-		{"store not recorded", now, &backstopRecording{At: now, Expires: now.Add(time.Minute)}, errDemandRecordingMissing, false},
+		{"store not recorded", now, &externalReadsRecording{FreshFor: time.Minute}, errDemandRecordingMissing, false},
 		{"expired", now.Add(time.Minute + time.Nanosecond), rec, errDemandRecordingStale, false},
 	} {
 		idx, err := newV2DemandReads(tc.now, tc.rec, nil).ClosedNamedIndex(backing)

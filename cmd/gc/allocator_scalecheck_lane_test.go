@@ -16,13 +16,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // scriptedScaleChecks answers scale_check commands from a table and records
@@ -49,12 +46,6 @@ func (s *scriptedScaleChecks) run(command, _ string, env map[string]string) (str
 	return out, nil
 }
 
-func (s *scriptedScaleChecks) set(command, out string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.out[command] = out
-}
-
 func scaleCheckCity() *config.City {
 	zero := 0
 	return &config.City{
@@ -72,66 +63,58 @@ func scaleCheckCity() *config.City {
 	}
 }
 
-// recoveringSafeTick is the host's safeTick for tests: it recovers a panic
-// and records each pass's trigger.
-type recoveringSafeTick struct {
-	mu       sync.Mutex
-	triggers []string
-	panics   int
-}
-
-func (s *recoveringSafeTick) run(fn func(), trigger string) (panicked bool) {
-	s.mu.Lock()
-	s.triggers = append(s.triggers, trigger)
-	s.mu.Unlock()
-	defer func() {
-		if recover() != nil {
-			s.mu.Lock()
-			s.panics++
-			s.mu.Unlock()
-			panicked = true
-		}
-	}()
-	fn()
-	return false
-}
-
-func newTestScaleCheckLane(cfg *config.City, checks *scriptedScaleChecks, changed *atomic.Int64) *scaleCheckLane {
-	env := &reconcileEnv{Gen: 1, Cfg: cfg}
-	safe := &recoveringSafeTick{}
-	l := newScaleCheckLane("city", "", func() *reconcileEnv { return env }, fsys.NewFake(), func() { changed.Add(1) }, safe.run, io.Discard)
-	l.runner = checks.run
-	l.queryEnv = func(_ string, _ *config.City, agent *config.Agent) (map[string]string, error) {
+// newScaleCheckSourceLane returns a lane whose only source is the
+// scale_check one (no city store, so no leg), running checks with a scripted
+// runner and a probe env that fails for the noenv pool.
+func newScaleCheckSourceLane(cfg *config.City, checks *scriptedScaleChecks) (*externalReadsLane, *atomic.Int64) {
+	lane, wakes := newTestBackstopLane(externalReadsEnv{CityName: "city", Cfg: cfg})
+	lane.runner = checks.run
+	lane.queryEnv = func(_ string, _ *config.City, agent *config.Agent) (map[string]string, error) {
 		if agent.Name == "noenv" {
 			return nil, errors.New("bd env: no port file")
 		}
 		return map[string]string{"GC_PROBE": agent.Name}, nil
 	}
-	return l
+	return lane, wakes
+}
+
+// scaleCheckSource returns rec's scale_check source.
+func scaleCheckSource(rec *externalReadsRecording) (sourceResult, bool) {
+	for key, s := range rec.Sources {
+		if key.kind == sourceScaleCheck {
+			return s, true
+		}
+	}
+	return sourceResult{}, false
 }
 
 // Kills: a silent zero (#38). A failing check and a pool whose probe env
 // cannot be built are both partial, not a trusted count of zero; only custom
 // scale_check pools that are enabled run; a named session's backing pool runs
-// without a probe env, as legacy's does. A missing or stale result is partial
-// for every template.
-func TestScaleCheckLaneErrorAndEnvFailureMarkPartial(t *testing.T) {
+// without a probe env, as legacy's does. A missing, stale or timed-out result
+// is partial for every template, and the result is stamped when its run
+// ended.
+func TestExternalReadsScaleCheckSourcePartialOnErrorAndEnvFailure(t *testing.T) {
 	checks := &scriptedScaleChecks{out: map[string]string{"check-ok": "3", "check-named": "1"}}
-	var changed atomic.Int64
-	l := newTestScaleCheckLane(scaleCheckCity(), checks, &changed)
-	maxAge := 20 * time.Second
+	lane, wakes := newScaleCheckSourceLane(scaleCheckCity(), checks)
+	maxAge := 3 * backstopTestInterval
 
-	if !l.latest().partial("ok", censusNow, maxAge) {
+	if !lane.recording().scaleCheck(censusNow).partial("ok") {
 		t.Fatal("before the first pass: ok trusted, want partial")
 	}
-	l.pass()
-	r := l.latest()
+	if !at(lane, censusNow).pass(context.Background()) {
+		t.Fatal("pass declined")
+	}
+	r := lane.recording().scaleCheck(censusNow)
+	if src, _ := scaleCheckSource(lane.recording()); !src.EndedAt.Equal(censusNow) {
+		t.Fatalf("result ended at %v, want the run's end %v", src.EndedAt, censusNow)
+	}
 	if want := map[string]int{"ok": 3, "fails": 0, "noenv": 0, "named": 1}; !maps.Equal(r.Counts, want) {
 		t.Fatalf("counts = %v, want %v", r.Counts, want)
 	}
 	var partial []string
 	for _, template := range []string{"ok", "fails", "noenv", "named", "default"} {
-		if r.partial(template, r.At, maxAge) {
+		if r.partial(template) {
 			partial = append(partial, template)
 		}
 	}
@@ -148,240 +131,39 @@ func TestScaleCheckLaneErrorAndEnvFailureMarkPartial(t *testing.T) {
 	if env := checks.envs["check-ok"]; env["GC_PROBE"] != "ok" {
 		t.Fatalf("pool ran with env %v, want its probe env", env)
 	}
-	if !r.partial("ok", r.At.Add(maxAge+time.Second), maxAge) {
+	if !lane.recording().scaleCheck(censusNow.Add(maxAge + time.Nanosecond)).partial("ok") {
 		t.Fatal("stale result: ok trusted, want partial")
 	}
-	if changed.Load() != 1 {
-		t.Fatalf("allocator woken %d times after the first pass, want 1", changed.Load())
+	if wakes.Load() != 1 {
+		t.Fatalf("allocator woken %d times after the first pass, want 1", wakes.Load())
+	}
+	timedOut := &externalReadsRecording{FreshFor: maxAge, Sources: map[sourceKey]sourceResult{{kind: sourceScaleCheck}: {EndedAt: censusNow, Err: errSourceTimeout}}}
+	if !timedOut.scaleCheck(censusNow).partial("ok") {
+		t.Fatal("timed-out run: ok trusted, want partial")
 	}
 }
 
-// Kills: a lane that runs only on wakes or on its own free-running grid, a
-// first result one patrol late, and an allocator woken by passes that changed
-// nothing. The lane runs at start, then one patrol after each pass, joins a
-// wake to the duty cycle, and wakes the allocator only when counts or partial
-// templates change.
-func TestScaleCheckLaneRunsEveryPatrolAndWakesAllocatorOnChangeOnly(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		checks := &scriptedScaleChecks{out: map[string]string{"check-ok": "3", "check-fails": "0", "check-noenv": "0", "check-named": "1"}}
-		var changed atomic.Int64
-		l := newTestScaleCheckLane(scaleCheckCity(), checks, &changed)
-		ctx, cancel := context.WithCancel(context.Background())
-		done := l.start(ctx)
-		t.Cleanup(func() {
-			cancel()
-			<-done
-		})
-		want := func(passes, wakes int64, when string) {
-			t.Helper()
-			synctest.Wait()
-			if l.passes.Load() != passes || changed.Load() != wakes {
-				t.Fatalf("%s: passes=%d allocator wakes=%d, want %d and %d", when, l.passes.Load(), changed.Load(), passes, wakes)
-			}
-		}
-
-		want(1, 1, "at start")
-		<-time.After(9 * time.Second)
-		want(1, 1, "before the first patrol")
-		<-time.After(time.Second)
-		want(2, 1, "one patrol later, unchanged")
-
-		checks.set("check-ok", "5")
-		<-time.After(10 * time.Second)
-		want(3, 2, "two patrols later, changed")
-
-		// A wake right after a pass waits out the minimum gap, then runs.
-		l.wake()
-		want(3, 2, "wake inside the minimum gap")
-		<-time.After(scaleCheckMinGap)
-		want(4, 2, "wake after the minimum gap")
-		<-time.After(10 * time.Second)
-		want(5, 2, "the backstop restarts from the woken pass")
-	})
-}
-
-// writeLaneSuspension writes the lane's runtime suspension file, or removes it
-// when data is empty.
-func writeLaneSuspension(l *scaleCheckLane, data string) {
-	fs := l.suspension.memo.fs.(*fsys.Fake)
-	path := citylayout.SuspensionStateFile(l.cityPath)
-	if data == "" {
-		delete(fs.Files, path)
-		return
-	}
-	fs.Files[path] = []byte(data)
-}
-
-// Kills: a lane that runs scale_checks, or publishes, while the city is
-// suspended (legacy: TestBuildDesiredState_ProductionDemandSkipsAllScaleChecksWhenCitySuspended),
-// for each source of city suspension, and a lane that stays dark after the
-// city resumes.
-func TestScaleCheckLaneSkipsPassesWhileCitySuspended(t *testing.T) {
-	for _, tc := range []struct {
-		name            string
-		suspend, resume func(t *testing.T, l *scaleCheckLane, cfg *config.City)
-	}{{
-		name:    "workspace suspended",
-		suspend: func(_ *testing.T, _ *scaleCheckLane, cfg *config.City) { cfg.Workspace.Suspended = true },
-		resume:  func(_ *testing.T, _ *scaleCheckLane, cfg *config.City) { cfg.Workspace.Suspended = false },
-	}, {
-		name: "suspension file",
-		suspend: func(_ *testing.T, l *scaleCheckLane, _ *config.City) {
-			writeLaneSuspension(l, `{"city":{"suspended":true}}`)
-		},
-		resume: func(_ *testing.T, l *scaleCheckLane, _ *config.City) { writeLaneSuspension(l, "") },
-	}, {
-		name:    "GC_SUSPENDED=1",
-		suspend: func(t *testing.T, _ *scaleCheckLane, _ *config.City) { t.Setenv("GC_SUSPENDED", "1") },
-		resume:  func(t *testing.T, _ *scaleCheckLane, _ *config.City) { t.Setenv("GC_SUSPENDED", "") },
-	}} {
-		t.Run(tc.name, func(t *testing.T) {
-			checks := &scriptedScaleChecks{out: map[string]string{"check-ok": "3", "check-named": "1"}}
-			var changed atomic.Int64
-			cfg := scaleCheckCity()
-			l := newTestScaleCheckLane(cfg, checks, &changed)
-			tc.suspend(t, l, cfg)
-			for i := 0; i < 2; i++ {
-				if l.pass() {
-					t.Fatalf("pass %d while suspended reported it ran", i)
-				}
-			}
-			if checks.runs != 0 || l.latest() != nil || l.passes.Load() != 0 || changed.Load() != 0 {
-				t.Fatalf("while suspended: runs=%d latest=%v passes=%d wakes=%d, want nothing", checks.runs, l.latest(), l.passes.Load(), changed.Load())
-			}
-			tc.resume(t, l, cfg)
-			if !l.pass() {
-				t.Fatal("pass after resume reported it did not run")
-			}
-			if checks.runs != 3 || l.latest() == nil || l.latest().Counts["ok"] != 3 || changed.Load() != 1 {
-				t.Fatalf("after resume: runs=%d latest=%v wakes=%d, want 3 checks published", checks.runs, l.latest(), changed.Load())
-			}
-		})
-	}
-}
-
-// Kills: suspended rigs read from anything but the pass's suspension state. A
-// rig the suspension file suspends skips its pools, and runs them again once
-// the file resumes it.
-func TestScaleCheckLaneReadsSuspendedRigsFromSuspensionState(t *testing.T) {
+// Kills: suspended rigs read from anything but the pass's suspension state
+// (the env's suspended rig paths). A suspended rig skips its pools, and runs
+// them again once resumed.
+func TestExternalReadsScaleCheckSourceSkipsSuspendedRigs(t *testing.T) {
 	checks := &scriptedScaleChecks{out: map[string]string{"check-rigged": "2"}}
-	var changed atomic.Int64
-	cfg := &config.City{
-		Rigs:   []config.Rig{{Name: "r1", Path: "/rigs/r1"}},
-		Agents: []config.Agent{{Name: "rigged", Dir: "r1", ScaleCheck: "check-rigged"}},
+	env := externalReadsEnv{
+		CityName: "city",
+		Cfg: &config.City{
+			Rigs:   []config.Rig{{Name: "r1", Path: "/rigs/r1"}},
+			Agents: []config.Agent{{Name: "rigged", Dir: "r1", ScaleCheck: "check-rigged"}},
+		},
+		SuspendedRigPaths: map[string]bool{"/rigs/r1": true},
 	}
-	l := newTestScaleCheckLane(cfg, checks, &changed)
-	writeLaneSuspension(l, `{"city":{},"rigs":{"r1":{"suspended":true}}}`)
-	l.pass()
-	if checks.runs != 0 || len(l.latest().Counts) != 0 {
-		t.Fatalf("suspended rig: runs=%d counts=%v, want its pool skipped", checks.runs, l.latest().Counts)
+	noProbeEnv := func(string, *config.City, *config.Agent) (map[string]string, error) { return nil, nil }
+	if r := runCustomScaleChecks(env, checks.run, noProbeEnv, io.Discard); checks.runs != 0 || len(r.Counts) != 0 {
+		t.Fatalf("suspended rig: runs=%d counts=%v, want its pool skipped", checks.runs, r.Counts)
 	}
-	writeLaneSuspension(l, "")
-	l.pass()
-	if checks.runs != 1 || l.latest().Counts["r1/rigged"] != 2 {
-		t.Fatalf("resumed rig: runs=%d counts=%v, want r1/rigged=2", checks.runs, l.latest().Counts)
+	env.SuspendedRigPaths = nil
+	if r := runCustomScaleChecks(env, checks.run, noProbeEnv, io.Discard); checks.runs != 1 || r.Counts["r1/rigged"] != 2 {
+		t.Fatalf("resumed rig: runs=%d counts=%v, want r1/rigged=2", checks.runs, r.Counts)
 	}
-}
-
-// Kills: a skipped pass counted toward the duty cycle. A lane that starts
-// suspended and is woken on resume runs at once, not a minimum gap later.
-func TestScaleCheckLaneSkippedPassDoesNotPaceTheNextWake(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		checks := &scriptedScaleChecks{out: map[string]string{"check-ok": "3"}}
-		var changed atomic.Int64
-		l := newTestScaleCheckLane(scaleCheckCity(), checks, &changed)
-		writeLaneSuspension(l, `{"city":{"suspended":true}}`)
-		ctx, cancel := context.WithCancel(context.Background())
-		done := l.start(ctx)
-		t.Cleanup(func() {
-			cancel()
-			<-done
-		})
-		synctest.Wait()
-		if checks.runs != 0 || l.passes.Load() != 0 {
-			t.Fatalf("suspended at start: runs=%d passes=%d, want none", checks.runs, l.passes.Load())
-		}
-		writeLaneSuspension(l, "")
-		l.wake()
-		synctest.Wait()
-		if l.passes.Load() != 1 {
-			t.Fatalf("wake on resume: passes=%d, want 1 at once", l.passes.Load())
-		}
-	})
-}
-
-// Kills: a lane that wakes the allocator only on count changes. A pool whose
-// check starts failing keeps its count (0 either way) but turns partial, which
-// the allocator must see.
-func TestScaleCheckLaneWakesAllocatorOnPartialChangeAlone(t *testing.T) {
-	checks := &scriptedScaleChecks{out: map[string]string{"check-ok": "3", "check-fails": "0", "check-named": "1"}}
-	var changed atomic.Int64
-	l := newTestScaleCheckLane(scaleCheckCity(), checks, &changed)
-	l.pass()
-	before := l.latest()
-	checks.mu.Lock()
-	delete(checks.out, "check-fails")
-	checks.mu.Unlock()
-	l.pass()
-	after := l.latest()
-	if !maps.Equal(before.Counts, after.Counts) || maps.Equal(before.Partial, after.Partial) {
-		t.Fatalf("fixture: counts %v -> %v, partial %v -> %v, want equal counts and new partials", before.Counts, after.Counts, before.Partial, after.Partial)
-	}
-	if changed.Load() != 2 {
-		t.Fatalf("allocator woken %d times, want 2 (first pass, then the partial change)", changed.Load())
-	}
-}
-
-// Kills: a lane pass that runs outside safeTick, so a panic kills the lane
-// (MAINT-020), and a panicking pass left out of the duty cycle, so wakes
-// could rerun it back to back. Each pass runs under safeTick with the lane's
-// trigger; after a panicking pass a wake waits out the minimum gap, and the
-// lane keeps its cadence.
-func TestScaleCheckLaneRunsEachPassUnderSafeTick(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		checks := &scriptedScaleChecks{out: map[string]string{"check-ok": "3"}}
-		var changed atomic.Int64
-		l := newTestScaleCheckLane(scaleCheckCity(), checks, &changed)
-		safe := &recoveringSafeTick{}
-		l.safeTick = safe.run
-		var envCalls atomic.Int64
-		build := l.queryEnv
-		l.queryEnv = func(cityPath string, cfg *config.City, agent *config.Agent) (map[string]string, error) {
-			if envCalls.Add(1) == 1 {
-				panic("probe env exploded")
-			}
-			return build(cityPath, cfg, agent)
-		}
-		ctx, cancel := context.WithCancel(context.Background())
-		done := l.start(ctx)
-		t.Cleanup(func() {
-			cancel()
-			<-done
-		})
-		triggers := func() int {
-			safe.mu.Lock()
-			defer safe.mu.Unlock()
-			return len(safe.triggers)
-		}
-		synctest.Wait()
-		l.wake()
-		synctest.Wait()
-		if n := triggers(); n != 1 {
-			t.Fatalf("wake right after the panicking pass: %d passes, want 1 (paced)", n)
-		}
-		<-time.After(scaleCheckMinGap)
-		synctest.Wait()
-		<-time.After(10 * time.Second)
-		synctest.Wait()
-		safe.mu.Lock()
-		defer safe.mu.Unlock()
-		if len(safe.triggers) != 3 || slices.ContainsFunc(safe.triggers, func(s string) bool { return s != scaleCheckSafeTickTrigger }) || safe.panics != 1 {
-			t.Fatalf("safeTick triggers=%v panics=%d, want three %q passes and one recovered panic", safe.triggers, safe.panics, scaleCheckSafeTickTrigger)
-		}
-		if l.passes.Load() != 2 {
-			t.Fatalf("published passes = %d, want 2 (the woken pass and the backstop)", l.passes.Load())
-		}
-	})
 }
 
 // scaleCheckProbeEnv is a probe-env builder that fails for the agents in fail.
