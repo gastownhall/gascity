@@ -2882,8 +2882,8 @@ func closeFailedCreateBead(sessFront *session.Store, expected session.Info, now 
 	// kill` fence is left to the kill (#6749), and a row whose lifecycle facts
 	// or incarnation no longer match expected (a wake or a new incarnation that
 	// landed after the caller's decision) is left to that writer. Every other
-	// store keeps the single Tx with the metadata ordered first, and does not
-	// compare the row with expected: there the claim/marker clears still land
+	// store makes the same checks on one read, then keeps the single Tx with
+	// the metadata ordered first: there the claim/marker clears still land
 	// even if the Close then fails, because a stale claim on a still-open bead
 	// would ping-pong the reconciler
 	// (TestCloseBeadClearsPendingCreateClaimEvenWhenCloseFails). A failure
@@ -3894,10 +3894,10 @@ func closeBeadPreservingAssignees(store beads.Store, expected session.Info, reas
 	// leaves the release cascade to that closer. If the row it reads carries a
 	// fresh `gc session kill` fence (#6749), the kill owns the row: the close
 	// writes nothing and reports false, and the next tick decides again. Every
-	// other store keeps the single Tx with the metadata ordered first. There
-	// the metadata may land while the Close fails; the helper then reports
-	// failure and the reconciler re-runs the close next tick, so no bead is
-	// durably left half-closed.
+	// other store makes the same checks on one read, then keeps the single Tx
+	// with the metadata ordered first. There the metadata may land while the
+	// Close fails; the helper then reports failure and the reconciler re-runs
+	// the close next tick, so no bead is durably left half-closed.
 	closed, err := sessionFrontDoor(store).CloseWithTerminalPatch(expected, session.ClosePatch(now, reason), "gc: close session "+id, now)
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, err) //nolint:errcheck

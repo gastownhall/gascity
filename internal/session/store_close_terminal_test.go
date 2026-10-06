@@ -338,3 +338,116 @@ func TestCloseWithTerminalPatchClosesPastAStaleKillFence(t *testing.T) {
 		t.Fatalf("CloseWithTerminalPatch = (%v, %v), want (true, nil) past the kill grace", closed, err)
 	}
 }
+
+// fallbackTxStore stands in for a store without the atomic close (BdStore, the
+// exec store, a legacy SQLite layout): embedding only beads.Store hides any
+// capability the backing has. It counts Tx calls, so a test can tell whether
+// the fallback's write ran.
+type fallbackTxStore struct {
+	beads.Store
+	txCalls int
+}
+
+func (s *fallbackTxStore) Tx(commitMsg string, fn func(beads.Tx) error) error {
+	s.txCalls++
+	return s.Store.Tx(commitMsg, fn)
+}
+
+// TestCloseWithTerminalPatchFallbackChecksTheRowFirst is the regression for
+// the fallback arm closing over a row that moved after the caller's decision
+// (mc-zndi7.65). The fallback ran its Tx with no read, so a wake, a new
+// incarnation or a `gc session kill` fence that landed between the decision
+// and the close was closed over, and an already-closed row was rewritten. It
+// must now read the row first and write nothing in each of those cases, as the
+// atomic arm does. An unchanged row still closes through the one Tx.
+func TestCloseWithTerminalPatchFallbackChecksTheRowFirst(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// change runs on the backing after the decision, before the close.
+		change     func(store beads.Store, id string) error
+		wantClosed bool
+		wantErr    error
+	}{
+		{name: "unchanged row", wantClosed: true},
+		{name: "unrelated write", change: func(store beads.Store, id string) error {
+			return store.SetMetadata(id, unrelatedKey, "2026-09-28T01:02:03Z")
+		}, wantClosed: true},
+		{name: "wake", change: func(store beads.Store, id string) error {
+			return store.SetMetadata(id, "state", string(StateAwake))
+		}, wantErr: ErrSessionCloseSuperseded},
+		{name: "wake request", change: func(store beads.Store, id string) error {
+			return store.SetMetadata(id, "wake_request", "api")
+		}, wantErr: ErrSessionCloseSuperseded},
+		{name: "new generation", change: func(store beads.Store, id string) error {
+			return store.SetMetadata(id, "generation", "3")
+		}, wantErr: ErrSessionCloseSuperseded},
+		{name: "new instance token", change: func(store beads.Store, id string) error {
+			return store.SetMetadata(id, "instance_token", "token-3")
+		}, wantErr: ErrSessionCloseSuperseded},
+		{name: "kill fence", change: func(store beads.Store, id string) error {
+			return store.SetMetadataBatch(id, map[string]string(KillPendingPatch(closeTestNow)))
+		}, wantErr: ErrSessionKillPending},
+		{name: "already closed", change: func(store beads.Store, id string) error {
+			if err := store.SetMetadataBatch(id, ClosePatch(closeTestNow, "orphaned")); err != nil {
+				return err
+			}
+			return store.Close(id)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backing := beads.NewMemStore()
+			created, err := backing.Create(sessionBeadFixture("s-fallback", "open", map[string]string{
+				"state":          string(StateAsleep),
+				"generation":     "2",
+				"instance_token": "token-2",
+			}))
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			decided := decidedOn(t, backing, created.ID)
+			if tc.change != nil {
+				if err := tc.change(backing, created.ID); err != nil {
+					t.Fatalf("change: %v", err)
+				}
+			}
+			before, err := backing.Get(created.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			fallback := &fallbackTxStore{Store: backing}
+			front := NewStore(beads.SessionStore{Store: fallback})
+			if _, ok := beads.AtomicConditionalCloserFor(beads.SessionStore{Store: fallback}); ok {
+				t.Fatal("fallbackTxStore advertises the atomic close; the test would not reach the fallback")
+			}
+
+			closed, err := front.CloseWithTerminalPatch(decided, failedCreateTerminalPatch(), "gc: close session "+created.ID, closeTestNow.Add(time.Second))
+			if closed != tc.wantClosed || !errors.Is(err, tc.wantErr) || (tc.wantErr == nil && err != nil) {
+				t.Fatalf("CloseWithTerminalPatch = (%v, %v), want (%v, %v)", closed, err, tc.wantClosed, tc.wantErr)
+			}
+			got, err := backing.Get(created.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if !tc.wantClosed {
+				if fallback.txCalls != 0 {
+					t.Fatalf("tx calls = %d, want 0 (refused on the read, nothing written)", fallback.txCalls)
+				}
+				if !reflect.DeepEqual(before.Metadata, got.Metadata) || before.Status != got.Status {
+					t.Fatalf("row rewritten: before %s %v, after %s %v", before.Status, before.Metadata, got.Status, got.Metadata)
+				}
+				return
+			}
+			if fallback.txCalls != 1 {
+				t.Fatalf("tx calls = %d, want 1 (the controller's single Tx)", fallback.txCalls)
+			}
+			if got.Status != "closed" {
+				t.Fatalf("status = %q, want closed", got.Status)
+			}
+			for key, want := range failedCreateTerminalPatch() {
+				if got.Metadata[key] != want {
+					t.Errorf("metadata[%q] = %q, want %q", key, got.Metadata[key], want)
+				}
+			}
+		})
+	}
+}
