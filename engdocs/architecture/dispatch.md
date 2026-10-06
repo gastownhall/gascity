@@ -228,21 +228,24 @@ also match.
   via `appendRigHookStores` (`hook_cross_store.go`), which adds one store
   per non-suspended rig.
 - **Reconciler (spawn side)**: a city-scoped agent's custom `scale_check`
-  fans out via `cityScopedFanOutProbes` + `evaluatePoolFanOutSum`
+  fans out via `customScaleCheckFanOutProbes` + `evaluatePoolFanOutSum`
   (`pool_scale_check_fanout.go`), summing per-store counts instead of
   picking a winner — `scale_check` is a count, so federating it
   winner-takes-all would under-report demand from every store but the
-  largest (see `ga-itb5co`).
+  largest (see `ga-itb5co`). The allocator's external-reads lane runs the
+  same fan-out for the count it publishes (`customScaleCheckWork`), so that
+  count and the demand pass's agree.
 
 Both call sites resolve their suspended-rig exclusion through the same
 `buildSuspendedRigPathsForCity` helper (`build_desired_state.go`) — the
 worker path calls it directly inside `appendRigHookStores`, and the
 reconciler path computes it once per desired-state pass and threads it into
-`cityScopedFanOutProbes` at each custom-`scale_check` call site. Sharing one
-helper is what makes the store sets match by construction rather than by
-convention: a rig suspension becomes invisible to a city-scoped agent's
-`scale_check` demand the same tick it becomes invisible to that agent's
-`work_query` claims, and vice versa.
+`customScaleCheckFanOutProbes`, the one predicate that both pool shapes in
+`buildDemandTargets` and the allocator lane's `customScaleCheckWork` build
+their probes through. Sharing one helper is what makes the store sets match
+by construction rather than by convention: a rig suspension becomes
+invisible to a city-scoped agent's `scale_check` demand the same tick it
+becomes invisible to that agent's `work_query` claims, and vice versa.
 
 Diverging the two store sets — for example, filtering suspended rigs on
 one side but not the other — reintroduces the same class of bug the
