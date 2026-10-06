@@ -2803,6 +2803,7 @@ export type RigCreateSucceededPayload = {
 };
 
 export type RigPatch = {
+    BeadsProxiedIdleTimeout: string | null;
     DefaultBranch: string | null;
     DefaultMergeStrategy: string | null;
     FormulaVars: {

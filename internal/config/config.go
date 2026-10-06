@@ -667,6 +667,11 @@ type Rig struct {
 	// explicit --var override. Takes precedence over formula-level defaults
 	// but loses to --var flags.
 	FormulaVars map[string]string `toml:"formula_vars,omitempty"`
+	// BeadsProxiedIdleTimeout overrides [beads] proxied_idle_timeout for this
+	// rig's bd-owned proxied scope. Go duration; "0" means never. Ignored, with
+	// a warning, for a rig that shares the city's proxy root: one proxy serves
+	// every scope on that root and carries the city's value.
+	BeadsProxiedIdleTimeout *string `toml:"beads_proxied_idle_timeout,omitempty"`
 }
 
 // AgentOverride modifies a pack-stamped agent for a specific rig.
@@ -1438,6 +1443,15 @@ type BeadsConfig struct {
 	// "require" (guarded release or a typed refusal). Empty defaults to "off".
 	// Any other value fails config load.
 	GuardedRelease string `toml:"guarded_release,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
+	// ProxiedIdleTimeout is how long a bd-owned proxied scope's proxy and Dolt
+	// child stay up with no connections before bd retires them; the next bd
+	// command restarts them. Go duration; "0" means never. A finite value
+	// must be at least 1m. Empty uses the default. It applies to scopes gc
+	// initializes (gc init, gc rig add, gc beads city migrate-proxied); bd
+	// cannot change an existing scope's value, and gc doctor reports drift.
+	// Overridden per rig by beads_proxied_idle_timeout and by the
+	// GC_BEADS_PROXIED_IDLE_TIMEOUT environment variable.
+	ProxiedIdleTimeout string `toml:"proxied_idle_timeout,omitempty"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.

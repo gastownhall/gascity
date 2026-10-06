@@ -1397,6 +1397,9 @@ func runProviderOwnedScopeInit(cityPath, dir, prefix, script string) (bool, erro
 	if err != nil {
 		return false, err
 	}
+	if env, err = withProxiedInitIdleTimeout(env, cityPath, dir, "exec:"+script); err != nil {
+		return false, err
+	}
 	if entry.Intent.Target == "local" {
 		// A fresh local provider scope owns its listener. Do not pass legacy
 		// GC managed-server coordinates, auto-start policy, or runtime paths to
@@ -1831,6 +1834,9 @@ func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, exe
 			if err != nil {
 				return err
 			}
+			if baseEnv, err = withProxiedInitIdleTimeout(baseEnv, cityPath, dir, provider); err != nil {
+				return err
+			}
 			env := overlayEnvEntries(baseEnv, map[string]string{
 				"BEADS_DIR":                 filepath.Join(dir, ".beads"),
 				"BEADS_DOLT_PROXIED_SERVER": "1",
@@ -1863,6 +1869,9 @@ func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, exe
 		if execProviderUsesCanonicalBdScopeFiles(provider) && !execProviderNeedsScopedDoltInit(provider) {
 			baseEnv, err := providerLifecycleProcessEnvForScopeInitWithError(cityPath, dir, provider)
 			if err != nil {
+				return err
+			}
+			if baseEnv, err = withProxiedInitIdleTimeout(baseEnv, cityPath, dir, provider); err != nil {
 				return err
 			}
 			overrides := map[string]string{
@@ -2025,12 +2034,16 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 		// new proxy in ~/.beads/shared-server and persist that choice into the
 		// scope's config.yaml. See applyProxiedSharedServerOptOut.
 		applyProxiedSharedServerOptOut(env)
-		// Idle-never is not an optimization, it is D3: without it bd retires
-		// the proxy and its Dolt child after 30s quiet and every later command
-		// pays a cold start. It also has to be passed for bd to write the
-		// client-info sidecar at all, which is what the lifecycle then reads
-		// to find the proxy root.
-		args = append(args[:1], "--proxied-server", "--proxied-server-idle-timeout", "0", "-p", prefix, "--skip-hooks")
+		// The idle timeout is always passed explicitly: left out, bd retires
+		// the proxy and its Dolt child after its own 30s default, and it is
+		// also what makes bd write the client-info sidecar the lifecycle reads
+		// to find the proxy root. The value is the configured one
+		// ([beads] proxied_idle_timeout, the rig override, or the env).
+		idle, err := resolveScopeProxiedIdleTimeout(cityPath, dir, os.Stderr)
+		if err != nil {
+			return err
+		}
+		args = append(args[:1], "--proxied-server", "--proxied-server-idle-timeout", idle.BdFlagValue(), "-p", prefix, "--skip-hooks")
 	} else {
 		args = append(args[:1], "--server", "-p", prefix, "--skip-hooks")
 	}
@@ -3491,6 +3504,22 @@ func providerLifecycleProcessEnvForScopeInitWithError(cityPath, scopeRoot, provi
 		env = providerLifecycleIndependentScopeInitEnv(cityPath, scopeRoot, env)
 	}
 	return env, nil
+}
+
+// withProxiedInitIdleTimeout adds the idle timeout gc resolved for scopeRoot
+// to the env of a provider `init` op; the script's proxied init arms refuse to
+// run without it rather than fall back to an idle policy nobody configured.
+// Only init carries it: start, health, recover and stop never resolve the
+// value, so a bad one cannot fail them and they read no config for it.
+func withProxiedInitIdleTimeout(env []string, cityPath, scopeRoot, provider string) ([]string, error) {
+	if !providerUsesBdStoreContract(provider) {
+		return env, nil
+	}
+	idle, err := resolveScopeProxiedIdleTimeout(cityPath, scopeRoot, os.Stderr)
+	if err != nil {
+		return nil, err
+	}
+	return overlayEnvEntries(env, map[string]string{config.ProxiedIdleTimeoutEnv: idle.BdFlagValue()}), nil
 }
 
 func providerLifecycleIndependentScopeInitEnv(cityPath, scopeRoot string, env []string) []string {

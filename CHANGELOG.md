@@ -43,6 +43,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value also refuses controller start. Remove the key before rolling back to an
   older gc, which rejects it under strict mode.
 
+### Added
+
+- **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
+  proxy and Dolt child stay up with no connections.** bd retires the pair
+  after that much quiet and the next bd command restarts it. The value is a Go
+  duration; `"0"` means never, and a finite value must be at least `1m`. A rig
+  can override it with `beads_proxied_idle_timeout`, except a rig that shares
+  the city's proxy root, which always uses the city's value. The
+  `GC_BEADS_PROXIED_IDLE_TIMEOUT` environment variable overrides both, for
+  tests. gc applies the value where bd lets it: `gc init`, `gc rig add` and
+  `gc beads city migrate-proxied`. bd has no way yet to change the value of a
+  scope that already exists (#6561).
+
 ### Changed
 
 - **Ready work in a SQLite infra ledger is ordered priority-first.** On a city
