@@ -517,23 +517,24 @@ func cacheUnknownError(name string, lastErr error) error {
 }
 
 // snapshotLiveness answers for name from one published snapshot: absent; a
-// corpse, with its session object id; or a running session with its id.
+// corpse, with its session object id and creation time; or a running session
+// with both.
 func (p *Provider) snapshotLiveness(state runtimeStateSnapshot, name string, processNames []string) runtime.Liveness {
 	session, ok := state.Sessions[name]
 	if !ok {
 		return runtime.Liveness{}
 	}
 	if !session.Running {
-		return runtime.Liveness{Corpse: true, ObjectID: session.ID}
+		return runtime.Liveness{Corpse: true, ObjectID: session.ID, ObjectCreated: session.Created}
 	}
 	processNames = nonEmptyProcessNames(processNames)
 	if len(processNames) == 0 {
 		processNames = p.sessionProcessNames(name)
 	}
 	if len(processNames) == 0 {
-		return runtime.Liveness{Running: true, Alive: true, ObjectID: session.ID}
+		return runtime.Liveness{Running: true, Alive: true, ObjectID: session.ID, ObjectCreated: session.Created}
 	}
-	return runtime.Liveness{Running: true, Alive: state.processAlive(name, processNames), ObjectID: session.ID}
+	return runtime.Liveness{Running: true, Alive: state.processAlive(name, processNames), ObjectID: session.ID, ObjectCreated: session.Created}
 }
 
 // livenessOutcome is how one ObserveLivenessWithError call answered, for the

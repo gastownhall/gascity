@@ -27,21 +27,25 @@ func newListPanesProvider(lines ...string) (*Provider, *fakeExecutor) {
 }
 
 // I23, v5 O1: the census and every fresh read agree on a corpse. A
-// remain-on-exit pane reads present with its session object id; Running and
-// Alive stay false. The bool path is legacy's, unchanged.
-// Kills: a corpse read as gone; #{session_id} dropped from the list-panes
-// format or parsed from the wrong field; a malformed id accepted; the bool
-// path reporting the new fields.
+// remain-on-exit pane reads present with its session object id and creation
+// time; Running and Alive stay false. A row without the creation time (the
+// format before it) still parses. The bool path is legacy's, unchanged.
+// Kills: a corpse read as gone; #{session_id} or #{session_created} dropped
+// from the list-panes format or parsed from the wrong field; a malformed id
+// or creation time accepted; an old row rejected; the bool path reporting
+// the new fields.
 func TestFreshReadCorpseIsPresent(t *testing.T) {
 	p, fe := newListPanesProvider(
-		"corpse\t1\tbash\t201\t0\t1000\t$7",
-		"live\t0\tclaude\t101\t1\t2000\t$3",
-		"odd\t1\tbash\t301\t0\t3000\t7",
+		"corpse\t1\tbash\t201\t0\t1000\t$7\t900",
+		"live\t0\tclaude\t101\t1\t2000\t$3\t800",
+		"odd\t1\tbash\t301\t0\t3000\t7\t9x",
+		"old\t1\tbash\t401\t0\t4000\t$9",
 	)
 	for name, want := range map[string]struct{ fresh, since, legacy runtime.Liveness }{
-		"corpse":  {runtime.Liveness{Corpse: true, ObjectID: "$7"}, runtime.Liveness{Corpse: true, ObjectID: "$7"}, runtime.Liveness{}},
-		"live":    {runtime.Liveness{Running: true, Alive: true, ObjectID: "$3"}, runtime.Liveness{Running: true, Alive: true, ObjectID: "$3", PanePID: "101"}, runtime.Liveness{Running: true, Alive: true}},
+		"corpse":  {runtime.Liveness{Corpse: true, ObjectID: "$7", ObjectCreated: "900"}, runtime.Liveness{Corpse: true, ObjectID: "$7", ObjectCreated: "900"}, runtime.Liveness{}},
+		"live":    {runtime.Liveness{Running: true, Alive: true, ObjectID: "$3", ObjectCreated: "800"}, runtime.Liveness{Running: true, Alive: true, ObjectID: "$3", ObjectCreated: "800", PanePID: "101"}, runtime.Liveness{Running: true, Alive: true}},
 		"odd":     {runtime.Liveness{Corpse: true}, runtime.Liveness{Corpse: true}, runtime.Liveness{}},
+		"old":     {runtime.Liveness{Corpse: true, ObjectID: "$9"}, runtime.Liveness{Corpse: true, ObjectID: "$9"}, runtime.Liveness{}},
 		"missing": {},
 	} {
 		if got, err := p.ObserveLivenessWithError(name, []string{"claude"}); err != nil || got != want.fresh {
@@ -57,9 +61,10 @@ func TestFreshReadCorpseIsPresent(t *testing.T) {
 			t.Errorf("%s: Present() = %v", name, want.fresh.Present())
 		}
 	}
-	// The extra field is the last one, and the activity before it still parses.
-	if len(fe.calls) != 1 || !strings.HasSuffix(fe.calls[0][len(fe.calls[0])-1], "#{window_activity}\t#{session_id}") {
-		t.Fatalf("tmux calls = %q, want one list-panes ending in #{session_id}", fe.calls)
+	// The extra fields are the last ones, and the activity before them still
+	// parses.
+	if len(fe.calls) != 1 || !strings.HasSuffix(fe.calls[0][len(fe.calls[0])-1], "#{window_activity}\t#{session_id}\t#{session_created}") {
+		t.Fatalf("tmux calls = %q, want one list-panes ending in #{session_id}\\t#{session_created}", fe.calls)
 	}
 	if at, ok := p.cache.SessionActivity("live"); !ok || !at.Equal(time.Unix(2000, 0)) {
 		t.Fatalf("SessionActivity(live) = %v, %v; want 2000", at, ok)
@@ -132,11 +137,11 @@ func TestObserveLivenessSinceRefreshesOnlyOlderSnapshots(t *testing.T) {
 	requireLivenessUnknown(t, got, err, ErrNoServer)
 }
 
-// killProvider is a primed Provider holding a corpse "corpse" ($7) whose
-// executor then answers every kill with out and err.
+// killProvider is a primed Provider holding a corpse "corpse" ($7, created
+// at 900) whose executor then answers every kill with out and err.
 func killProvider(t *testing.T) (*Provider, *fakeExecutor) {
 	t.Helper()
-	p, fe := newListPanesProvider("corpse\t1\tbash\t201\t0\t1000\t$7")
+	p, fe := newListPanesProvider("corpse\t1\tbash\t201\t0\t1000\t$7\t900")
 	if _, err := p.ObserveLivenessWithError("corpse", nil); err != nil || !p.cache.observation().primed() {
 		t.Fatalf("priming the cache: %v", err)
 	}
@@ -145,18 +150,20 @@ func killProvider(t *testing.T) (*Provider, *fakeExecutor) {
 }
 
 // v5 F2: the re-check and the kill are one tmux command that targets the
-// observed id verbatim, and each outcome maps to its typed result.
+// observed id verbatim, pinned to its creation time, and each outcome maps to
+// its typed result.
 // Kills: '$'+id; an unquoted id (tmux expands $N); a kill without the
-// re-check; a refusal or a stale id read as killed; a kill not evicted.
+// re-check or without the creation time in either condition; a refusal or a
+// stale or reused id read as killed or as refused live; a kill not evicted.
 func TestKillSessionObjectOneCommandAndOutcomes(t *testing.T) {
 	p, fe := killProvider(t)
-	if got, err := p.KillCorpseObject("corpse", "$7"); err != nil || got != runtime.SessionObjectKilled {
+	if got, err := p.KillCorpseObject("corpse", "$7", "900"); err != nil || got != runtime.SessionObjectKilled {
 		t.Fatalf("KillCorpseObject = %v, %v; want killed", got, err)
 	}
 	want := []string{
 		"-u", "-L", "x", "if-shell", "-F", "-t", "$7",
-		"#{&&:#{==:#{session_name},corpse},#{&&:#{==:#{session_windows},1},#{&&:#{==:#{window_panes},1},#{pane_dead}}}}",
-		"kill-session -t '$7'", "display-message -t '$7' -p 'refused #{session_name}'",
+		"#{&&:#{==:#{session_created},900},#{&&:#{==:#{session_name},corpse},#{&&:#{==:#{session_windows},1},#{&&:#{==:#{window_panes},1},#{pane_dead}}}}}",
+		"kill-session -t '$7'", "display-message -t '$7' -p 'refused #{session_created} #{session_name}'",
 	}
 	if len(fe.calls) != 1 || strings.Join(fe.calls[0], "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("tmux calls = %q, want %q", fe.calls, want)
@@ -164,8 +171,8 @@ func TestKillSessionObjectOneCommandAndOutcomes(t *testing.T) {
 	if _, listed := p.cache.observation().state.Sessions["corpse"]; listed {
 		t.Fatal("killed session still in the cache")
 	}
-	if _, err := p.KillZombieObject("corpse", "$7", "201"); err != nil || !strings.Contains(fe.calls[1][7], "#{!=:#{pane_dead},1},#{==:#{pane_pid},201}") {
-		t.Fatalf("zombie condition = %q, %v; want a live pane with pid 201", fe.calls[1][7], err)
+	if _, err := p.KillZombieObject("corpse", "$7", "900", "201"); err != nil || !strings.HasPrefix(fe.calls[1][7], "#{&&:#{==:#{session_created},900},") || !strings.Contains(fe.calls[1][7], "#{!=:#{pane_dead},1},#{==:#{pane_pid},201}") {
+		t.Fatalf("zombie condition = %q, %v; want created 900 and a live pane with pid 201", fe.calls[1][7], err)
 	}
 
 	for _, tc := range []struct {
@@ -175,17 +182,18 @@ func TestKillSessionObjectOneCommandAndOutcomes(t *testing.T) {
 		corpse runtime.SessionObjectKillResult
 		zombie runtime.SessionObjectKillResult
 	}{
-		{"refused, same name", "refused corpse", nil, runtime.SessionObjectLive, runtime.SessionObjectChanged},
-		{"refused, renamed", "refused other", nil, runtime.SessionObjectRenamed, runtime.SessionObjectRenamed},
-		{"stale id, tmux 3.4", "refused ", nil, runtime.SessionObjectGone, runtime.SessionObjectGone},
+		{"refused, same name", "refused 900 corpse", nil, runtime.SessionObjectLive, runtime.SessionObjectChanged},
+		{"refused, renamed", "refused 900 other", nil, runtime.SessionObjectRenamed, runtime.SessionObjectRenamed},
+		{"reused id, same name", "refused 901 corpse", nil, runtime.SessionObjectGone, runtime.SessionObjectGone},
+		{"stale id, tmux 3.4", "refused  ", nil, runtime.SessionObjectGone, runtime.SessionObjectGone},
 		{"stale id, target error", "", ErrSessionNotFound, runtime.SessionObjectGone, runtime.SessionObjectGone},
 		{"no server", "", ErrNoServer, runtime.SessionObjectNotKilled, runtime.SessionObjectNotKilled},
 		{"unexpected output", "huh", nil, runtime.SessionObjectNotKilled, runtime.SessionObjectNotKilled},
 	} {
 		p, fe := killProvider(t)
 		fe.out, fe.err = tc.out, tc.err
-		corpse, corpseErr := p.KillCorpseObject("corpse", "$7")
-		zombie, zombieErr := p.KillZombieObject("corpse", "$7", "201")
+		corpse, corpseErr := p.KillCorpseObject("corpse", "$7", "900")
+		zombie, zombieErr := p.KillZombieObject("corpse", "$7", "900", "201")
 		if corpse != tc.corpse || zombie != tc.zombie || (corpseErr != nil) != (tc.corpse == runtime.SessionObjectNotKilled) || (zombieErr != nil) != (tc.zombie == runtime.SessionObjectNotKilled) {
 			t.Errorf("%s: corpse = %v, %v; zombie = %v, %v; want %v, %v", tc.desc, corpse, corpseErr, zombie, zombieErr, tc.corpse, tc.zombie)
 		}
@@ -196,29 +204,34 @@ func TestKillSessionObjectOneCommandAndOutcomes(t *testing.T) {
 }
 
 // Every value embedded in the command is validated first; nothing reaches
-// tmux otherwise. Kills: an empty id or '$'-less id sent; a format- or
-// command-breaking name, id or pid sent.
+// tmux otherwise. Kills: an empty id or creation time sent, or a '$'-less id;
+// a format- or command-breaking name, id, creation time or pid sent.
 func TestKillSessionObjectRefusesMalformedInput(t *testing.T) {
 	p, fe := killProvider(t)
-	for _, tc := range []struct{ name, id string }{
-		{"corpse", ""},
-		{"corpse", "7"},
-		{"corpse", "$"},
-		{"corpse", "$7 "},
-		{"corpse", "$7;kill-server"},
-		{"", "$7"},
-		{"a,b", "$7"},
-		{"a}b", "$7"},
+	for _, tc := range []struct{ name, id, created string }{
+		{"corpse", "", "900"},
+		{"corpse", "7", "900"},
+		{"corpse", "$", "900"},
+		{"corpse", "$7 ", "900"},
+		{"corpse", "$7;kill-server", "900"},
+		{"", "$7", "900"},
+		{"a,b", "$7", "900"},
+		{"a}b", "$7", "900"},
+		{"corpse", "$7", ""},
+		{"corpse", "$7", "9 0"},
+		{"corpse", "$7", "-900"},
+		{"corpse", "$7", "1},#{1"},
+		{"corpse", "$7", "#{session_created}"},
 	} {
-		if got, err := p.KillCorpseObject(tc.name, tc.id); got != runtime.SessionObjectNotKilled || !errors.Is(err, runtime.ErrInvalidSessionObject) {
-			t.Errorf("KillCorpseObject(%q, %q) = %v, %v; want ErrInvalidSessionObject", tc.name, tc.id, got, err)
+		if got, err := p.KillCorpseObject(tc.name, tc.id, tc.created); got != runtime.SessionObjectNotKilled || !errors.Is(err, runtime.ErrInvalidSessionObject) {
+			t.Errorf("KillCorpseObject(%q, %q, %q) = %v, %v; want ErrInvalidSessionObject", tc.name, tc.id, tc.created, got, err)
 		}
-		if got, err := p.KillZombieObject(tc.name, tc.id, "201"); got != runtime.SessionObjectNotKilled || !errors.Is(err, runtime.ErrInvalidSessionObject) {
-			t.Errorf("KillZombieObject(%q, %q) = %v, %v; want ErrInvalidSessionObject", tc.name, tc.id, got, err)
+		if got, err := p.KillZombieObject(tc.name, tc.id, tc.created, "201"); got != runtime.SessionObjectNotKilled || !errors.Is(err, runtime.ErrInvalidSessionObject) {
+			t.Errorf("KillZombieObject(%q, %q, %q) = %v, %v; want ErrInvalidSessionObject", tc.name, tc.id, tc.created, got, err)
 		}
 	}
 	for _, pid := range []string{"", "1,2", "#{pane_pid}"} {
-		if got, err := p.KillZombieObject("corpse", "$7", pid); got != runtime.SessionObjectNotKilled || !errors.Is(err, runtime.ErrInvalidSessionObject) {
+		if got, err := p.KillZombieObject("corpse", "$7", "900", pid); got != runtime.SessionObjectNotKilled || !errors.Is(err, runtime.ErrInvalidSessionObject) {
 			t.Errorf("KillZombieObject pid %q = %v, %v; want ErrInvalidSessionObject", pid, got, err)
 		}
 	}
@@ -232,9 +245,9 @@ func TestKillSessionObjectRefusesMalformedInput(t *testing.T) {
 // are those the fall-through answered, as before.
 // Kills: auto returning the acp fall-through over a corpse; no forwarding.
 func TestAutoKeepsTmuxCorpseAndForwardsKills(t *testing.T) {
-	p, fe := newListPanesProvider("corpse\t1\tbash\t201\t0\t1000\t$7")
+	p, fe := newListPanesProvider("corpse\t1\tbash\t201\t0\t1000\t$7\t900")
 	sp := auto.New(&seamBackedProvider{Provider: p}, acp.NewProviderWithDir(t.TempDir(), acp.Config{}))
-	want := runtime.Liveness{Corpse: true, ObjectID: "$7"}
+	want := runtime.Liveness{Corpse: true, ObjectID: "$7", ObjectCreated: "900"}
 	if got, err := runtime.ObserveLivenessWithError(sp, "corpse", nil); err != nil || got != want {
 		t.Errorf("auto ObserveLivenessWithError = (%+v, %v), want (%+v, nil)", got, err, want)
 	}
@@ -242,8 +255,12 @@ func TestAutoKeepsTmuxCorpseAndForwardsKills(t *testing.T) {
 		t.Errorf("auto ObserveLivenessSince = (%+v, %v), want (%+v, nil)", got, err, want)
 	}
 	fe.calls, fe.out = nil, ""
-	if _, err := sp.KillCorpseObject("corpse", "$7"); err != nil || len(fe.calls) != 1 || fe.calls[0][3] != "if-shell" {
+	if _, err := sp.KillCorpseObject("corpse", "$7", "900"); err != nil || len(fe.calls) != 1 || fe.calls[0][3] != "if-shell" || !strings.Contains(fe.calls[0][7], "#{session_created},900}") {
 		t.Fatalf("auto KillCorpseObject reached tmux with %q, %v", fe.calls, err)
+	}
+	fe.calls = nil
+	if _, err := sp.KillZombieObject("corpse", "$7", "900", "201"); err != nil || len(fe.calls) != 1 || !strings.Contains(fe.calls[0][7], "#{session_created},900}") || !strings.Contains(fe.calls[0][7], "#{pane_pid},201}") {
+		t.Fatalf("auto KillZombieObject reached tmux with %q, %v", fe.calls, err)
 	}
 }
 

@@ -340,21 +340,21 @@ func (p *Provider) observeFallingThrough(name string, observe func(runtime.Provi
 
 // KillCorpseObject forwards to the backend that kills session objects by id
 // (tmux), preferring the routed one.
-func (p *Provider) KillCorpseObject(name, objectID string) (runtime.SessionObjectKillResult, error) {
+func (p *Provider) KillCorpseObject(name, objectID, created string) (runtime.SessionObjectKillResult, error) {
 	killer, err := p.sessionObjectKiller(name)
 	if err != nil {
 		return runtime.SessionObjectNotKilled, err
 	}
-	return killer.KillCorpseObject(name, objectID)
+	return killer.KillCorpseObject(name, objectID, created)
 }
 
 // KillZombieObject forwards like KillCorpseObject.
-func (p *Provider) KillZombieObject(name, objectID, panePID string) (runtime.SessionObjectKillResult, error) {
+func (p *Provider) KillZombieObject(name, objectID, created, panePID string) (runtime.SessionObjectKillResult, error) {
 	killer, err := p.sessionObjectKiller(name)
 	if err != nil {
 		return runtime.SessionObjectNotKilled, err
 	}
-	return killer.KillZombieObject(name, objectID, panePID)
+	return killer.KillZombieObject(name, objectID, created, panePID)
 }
 
 func (p *Provider) sessionObjectKiller(name string) (runtime.SessionObjectKiller, error) {

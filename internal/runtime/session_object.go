@@ -10,8 +10,9 @@ import (
 // object by id.
 var ErrSessionObjectKillUnsupported = errors.New("runtime does not implement exact session-object kills")
 
-// ErrInvalidSessionObject reports a kill request whose name, object id or
-// pane pid is malformed or empty. Nothing is sent to the runtime.
+// ErrInvalidSessionObject reports a kill request whose name, object id,
+// creation time or pane pid is malformed or empty. Nothing is sent to the
+// runtime.
 var ErrInvalidSessionObject = errors.New("invalid session object")
 
 // SessionObjectKillResult is how an exact session-object kill ended.
@@ -23,8 +24,9 @@ const (
 	SessionObjectNotKilled SessionObjectKillResult = iota
 	// SessionObjectKilled means the object passed the re-check and was killed.
 	SessionObjectKilled
-	// SessionObjectGone means the id names no session, because the object was
-	// already removed or the id is stale after a server restart.
+	// SessionObjectGone means the observed object no longer exists: the id
+	// names no session, or names one created at another time (a restarted
+	// server reused the id).
 	SessionObjectGone
 	// SessionObjectRenamed means the id names a session under another name.
 	SessionObjectRenamed
@@ -37,16 +39,18 @@ const (
 )
 
 // SessionObjectKiller kills the exact session object a fresh read observed
-// (Liveness.ObjectID), for v5 F2's two identity-waived exceptions. The
-// re-check and the kill run as one runtime-side command, so a session
-// re-created under the name between the read and the kill is refused.
+// (Liveness.ObjectID and Liveness.ObjectCreated), for v5 F2's two
+// identity-waived exceptions. The re-check and the kill run as one
+// runtime-side command, so a session re-created under the name between the
+// read and the kill is refused.
 type SessionObjectKiller interface {
-	// KillCorpseObject kills objectID only while it is named name and has one
-	// window with one pane, which is dead.
-	KillCorpseObject(name, objectID string) (SessionObjectKillResult, error)
-	// KillZombieObject kills objectID only while it is named name and has one
-	// window with one live pane whose pid is panePID (Liveness.PanePID).
-	KillZombieObject(name, objectID, panePID string) (SessionObjectKillResult, error)
+	// KillCorpseObject kills objectID only while it was created at created,
+	// is named name and has one window with one pane, which is dead.
+	KillCorpseObject(name, objectID, created string) (SessionObjectKillResult, error)
+	// KillZombieObject kills objectID only while it was created at created,
+	// is named name and has one window with one live pane whose pid is
+	// panePID (Liveness.PanePID).
+	KillZombieObject(name, objectID, created, panePID string) (SessionObjectKillResult, error)
 }
 
 // FreshLivenessObserver is the optional capability for a liveness read that

@@ -16,7 +16,7 @@ import (
 
 var (
 	sessionObjectIDRe = regexp.MustCompile(`^\$[0-9]+$`)
-	panePIDRe         = regexp.MustCompile(`^[0-9]+$`)
+	decimalRe         = regexp.MustCompile(`^[0-9]+$`)
 )
 
 // validSessionObjectID reports whether id is a tmux #{session_id} ("$3").
@@ -102,63 +102,68 @@ func (p *Provider) ObserveLivenessSince(name string, processNames []string, sinc
 		return runtime.Liveness{}, cacheUnknownError(name, obs.lastErr)
 	}
 	live := p.snapshotLiveness(obs.state, name, processNames)
-	if session := obs.state.Sessions[name]; live.Running && len(session.Panes) == 1 && panePIDRe.MatchString(session.Panes[0].PID) {
+	if session := obs.state.Sessions[name]; live.Running && len(session.Panes) == 1 && decimalRe.MatchString(session.Panes[0].PID) {
 		live.PanePID = session.Panes[0].PID
 	}
 	return live, nil
 }
 
 // KillCorpseObject implements [runtime.SessionObjectKiller]: it kills
-// objectID only while that session is named name and has one window with one
-// pane, and that pane is dead, checked by tmux in the same command as the
-// kill. #{pane_dead} reads only the active pane, so a second pane, which may
-// be live, refuses.
-func (p *Provider) KillCorpseObject(name, objectID string) (runtime.SessionObjectKillResult, error) {
-	if err := validateSessionObject(name, objectID); err != nil {
+// objectID only while that session was created at created, is named name and
+// has one window with one pane, and that pane is dead, checked by tmux in the
+// same command as the kill. #{pane_dead} reads only the active pane, so a
+// second pane, which may be live, refuses.
+func (p *Provider) KillCorpseObject(name, objectID, created string) (runtime.SessionObjectKillResult, error) {
+	if err := validateSessionObject(name, objectID, created); err != nil {
 		return runtime.SessionObjectNotKilled, err
 	}
-	cond := fmt.Sprintf("#{&&:#{==:#{session_name},%s},#{&&:#{==:#{session_windows},1},#{&&:#{==:#{window_panes},1},#{pane_dead}}}}", name)
-	return p.killSessionObject(name, objectID, cond, runtime.SessionObjectLive)
+	cond := fmt.Sprintf("#{&&:#{==:#{session_created},%s},#{&&:#{==:#{session_name},%s},#{&&:#{==:#{session_windows},1},#{&&:#{==:#{window_panes},1},#{pane_dead}}}}}", created, name)
+	return p.killSessionObject(name, objectID, created, cond, runtime.SessionObjectLive)
 }
 
 // KillZombieObject implements [runtime.SessionObjectKiller]: it kills
-// objectID only while that session is named name and has one window with one
-// live pane whose pid is panePID, checked by tmux in the same command as the
-// kill.
-func (p *Provider) KillZombieObject(name, objectID, panePID string) (runtime.SessionObjectKillResult, error) {
-	if err := validateSessionObject(name, objectID); err != nil {
+// objectID only while that session was created at created, is named name and
+// has one window with one live pane whose pid is panePID, checked by tmux in
+// the same command as the kill.
+func (p *Provider) KillZombieObject(name, objectID, created, panePID string) (runtime.SessionObjectKillResult, error) {
+	if err := validateSessionObject(name, objectID, created); err != nil {
 		return runtime.SessionObjectNotKilled, err
 	}
-	if !panePIDRe.MatchString(panePID) {
+	if !decimalRe.MatchString(panePID) {
 		return runtime.SessionObjectNotKilled, fmt.Errorf("%w: pane pid %q must be decimal", runtime.ErrInvalidSessionObject, panePID)
 	}
-	cond := fmt.Sprintf("#{&&:#{==:#{session_name},%s},#{&&:#{==:#{session_windows},1},#{&&:#{==:#{window_panes},1},#{&&:#{!=:#{pane_dead},1},#{==:#{pane_pid},%s}}}}}", name, panePID)
-	return p.killSessionObject(name, objectID, cond, runtime.SessionObjectChanged)
+	cond := fmt.Sprintf("#{&&:#{==:#{session_created},%s},#{&&:#{==:#{session_name},%s},#{&&:#{==:#{session_windows},1},#{&&:#{==:#{window_panes},1},#{&&:#{!=:#{pane_dead},1},#{==:#{pane_pid},%s}}}}}}", created, name, panePID)
+	return p.killSessionObject(name, objectID, created, cond, runtime.SessionObjectChanged)
 }
 
 // validateSessionObject keeps the values embedded in the tmux command to the
-// session-name charset and a "$N" id (and, for a zombie, a decimal pid), so
-// none can change the command or the format it runs.
-func validateSessionObject(name, objectID string) error {
+// session-name charset, a "$N" id and a decimal creation time (and, for a
+// zombie, a decimal pid), so none can change the command or the format it
+// runs.
+func validateSessionObject(name, objectID, created string) error {
 	if err := validateSessionName(name); err != nil {
 		return fmt.Errorf("%w: %w", runtime.ErrInvalidSessionObject, err)
 	}
 	if !validSessionObjectID(objectID) {
 		return fmt.Errorf("%w: session object id %q must match %s", runtime.ErrInvalidSessionObject, objectID, sessionObjectIDRe)
 	}
+	if !decimalRe.MatchString(created) {
+		return fmt.Errorf("%w: session creation time %q must be decimal", runtime.ErrInvalidSessionObject, created)
+	}
 	return nil
 }
 
 // killSessionObject runs `if-shell -F -t <id> <cond> 'kill-session -t <id>'
 // <report>` as one tmux command. The kill branch prints nothing; the refusal
-// branch prints the session's name, so a refusal reads as a rename or as
-// refused. tmux 3.4 evaluates an id that names no session in an empty
-// context: the condition, which requires a non-empty name, is false, and the
-// report prints no name, which reads as gone (an older tmux that fails the
-// target instead reads the same). The id is used verbatim and single-quoted,
-// so tmux does not expand "$N" as a variable.
-func (p *Provider) killSessionObject(name, objectID, cond string, refused runtime.SessionObjectKillResult) (runtime.SessionObjectKillResult, error) {
-	report := fmt.Sprintf("display-message -t '%s' -p 'refused #{session_name}'", objectID)
+// branch prints the session's creation time and name, so a refusal reads as
+// gone (another object holds the id), a rename, or refused. tmux 3.4
+// evaluates an id that names no session in an empty context: the condition,
+// which requires a non-empty name, is false, and the report prints neither,
+// which reads as gone (an older tmux that fails the target instead reads the
+// same). The id is used verbatim and single-quoted, so tmux does not expand
+// "$N" as a variable.
+func (p *Provider) killSessionObject(name, objectID, created, cond string, refused runtime.SessionObjectKillResult) (runtime.SessionObjectKillResult, error) {
+	report := fmt.Sprintf("display-message -t '%s' -p 'refused #{session_created} #{session_name}'", objectID)
 	out, err := p.tm.run("if-shell", "-F", "-t", objectID, cond, fmt.Sprintf("kill-session -t '%s'", objectID), report)
 	switch {
 	case errors.Is(err, ErrSessionNotFound):
@@ -167,15 +172,17 @@ func (p *Provider) killSessionObject(name, objectID, cond string, refused runtim
 		return runtime.SessionObjectNotKilled, fmt.Errorf("killing tmux session object %s (%s): %w", objectID, name, err)
 	}
 	out = strings.TrimSpace(out)
-	switch {
-	case out == "":
+	if out == "" {
 		p.cache.EvictSession(name)
 		return runtime.SessionObjectKilled, nil
-	case out == "refused":
-		return runtime.SessionObjectGone, nil
-	case out == "refused "+name:
-		return refused, nil
-	case strings.HasPrefix(out, "refused "):
+	}
+	if fields := strings.SplitN(out, " ", 3); fields[0] == "refused" {
+		switch {
+		case len(fields) < 2 || fields[1] != created:
+			return runtime.SessionObjectGone, nil
+		case len(fields) == 3 && fields[2] == name:
+			return refused, nil
+		}
 		return runtime.SessionObjectRenamed, nil
 	}
 	return runtime.SessionObjectNotKilled, fmt.Errorf("killing tmux session object %s (%s): unexpected output %q", objectID, name, out)

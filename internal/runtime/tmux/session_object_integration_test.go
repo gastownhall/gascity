@@ -46,9 +46,16 @@ func objectFormat(t *testing.T, p *Provider, name, format string) string {
 	return strings.TrimSpace(out)
 }
 
+// objectOf returns a session's object id and creation time.
+func objectOf(t *testing.T, p *Provider, name string) (id, created string) {
+	t.Helper()
+	id, created, _ = strings.Cut(objectFormat(t, p, name, "#{session_id} #{session_created}"), " ")
+	return id, created
+}
+
 // makeCorpse turns a running session into a remain-on-exit corpse and
-// returns its session object id.
-func makeCorpse(t *testing.T, p *Provider, name string) string {
+// returns its session object id and creation time.
+func makeCorpse(t *testing.T, p *Provider, name string) (id, created string) {
 	t.Helper()
 	startObjectSession(t, p, name, "sleep 300")
 	if err := p.tm.SetRemainOnExit(paneTarget(name), true); err != nil {
@@ -58,7 +65,7 @@ func makeCorpse(t *testing.T, p *Provider, name string) string {
 		t.Fatalf("respawn-pane: %v", err)
 	}
 	waitObjectCondition(t, name+" to become a corpse", func() bool { return objectFormat(t, p, name, "#{pane_dead}") == "1" })
-	return objectFormat(t, p, name, "#{session_id}")
+	return objectOf(t, p, name)
 }
 
 // waitObjectCondition polls ready until it holds, failing after 5s.
@@ -86,16 +93,16 @@ func hasObjectSession(t *testing.T, p *Provider, name string) bool {
 	return has
 }
 
-// A fresh read reports the corpse with the id tmux shows, and the corpse kill
-// removes exactly it.
+// A fresh read reports the corpse with the id and creation time tmux shows,
+// and the corpse kill removes exactly it.
 func TestKillCorpseObjectRealTmuxKillsCorpse(t *testing.T) {
 	p := newObjectServer(t)
-	id := makeCorpse(t, p, "corpse")
+	id, created := makeCorpse(t, p, "corpse")
 	got, err := p.ObserveLivenessSince("corpse", nil, time.Now())
-	if err != nil || got != (runtime.Liveness{Corpse: true, ObjectID: id}) {
-		t.Fatalf("ObserveLivenessSince = (%+v, %v), want corpse %s", got, err, id)
+	if err != nil || got != (runtime.Liveness{Corpse: true, ObjectID: id, ObjectCreated: created}) {
+		t.Fatalf("ObserveLivenessSince = (%+v, %v), want corpse %s created %s", got, err, id, created)
 	}
-	if res, err := p.KillCorpseObject("corpse", id); err != nil || res != runtime.SessionObjectKilled {
+	if res, err := p.KillCorpseObject("corpse", id, created); err != nil || res != runtime.SessionObjectKilled {
 		t.Fatalf("KillCorpseObject = %v, %v; want killed", res, err)
 	}
 	if hasObjectSession(t, p, "corpse") || !hasObjectSession(t, p, "keep") {
@@ -106,8 +113,8 @@ func TestKillCorpseObjectRealTmuxKillsCorpse(t *testing.T) {
 func TestKillCorpseObjectRealTmuxRefusesLivePane(t *testing.T) {
 	p := newObjectServer(t)
 	startObjectSession(t, p, "live", "sleep 300")
-	id := objectFormat(t, p, "live", "#{session_id}")
-	if res, err := p.KillCorpseObject("live", id); err != nil || res != runtime.SessionObjectLive {
+	id, created := objectOf(t, p, "live")
+	if res, err := p.KillCorpseObject("live", id, created); err != nil || res != runtime.SessionObjectLive {
 		t.Fatalf("KillCorpseObject(live) = %v, %v; want refused live", res, err)
 	}
 	if !hasObjectSession(t, p, "live") {
@@ -127,8 +134,8 @@ func TestKillCorpseObjectRealTmuxRefusesDeadActivePaneBesideLivePane(t *testing.
 		t.Fatalf("split-window: %v", err)
 	}
 	waitObjectCondition(t, "the active pane to die", func() bool { return objectFormat(t, p, "split", "#{pane_dead} #{window_panes}") == "1 2" })
-	id := objectFormat(t, p, "split", "#{session_id}")
-	if res, err := p.KillCorpseObject("split", id); err != nil || res != runtime.SessionObjectLive {
+	id, created := objectOf(t, p, "split")
+	if res, err := p.KillCorpseObject("split", id, created); err != nil || res != runtime.SessionObjectLive {
 		t.Fatalf("KillCorpseObject(dead active pane beside a live one) = %v, %v; want refused live", res, err)
 	}
 	if !hasObjectSession(t, p, "split") {
@@ -140,11 +147,11 @@ func TestKillCorpseObjectRealTmuxRefusesDeadActivePaneBesideLivePane(t *testing.
 // refuses, so the kill never follows a name.
 func TestKillCorpseObjectRealTmuxRefusesNameMismatch(t *testing.T) {
 	p := newObjectServer(t)
-	id := makeCorpse(t, p, "corpse")
+	id, created := makeCorpse(t, p, "corpse")
 	if err := p.tm.RenameSession("corpse", "renamed"); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
-	if res, err := p.KillCorpseObject("corpse", id); err != nil || res != runtime.SessionObjectRenamed {
+	if res, err := p.KillCorpseObject("corpse", id, created); err != nil || res != runtime.SessionObjectRenamed {
 		t.Fatalf("KillCorpseObject after rename = %v, %v; want renamed", res, err)
 	}
 	if !hasObjectSession(t, p, "renamed") {
@@ -157,7 +164,7 @@ func TestKillCorpseObjectRealTmuxRefusesNameMismatch(t *testing.T) {
 func TestKillCorpseObjectRealTmuxRefusesStaleIDAfterRestart(t *testing.T) {
 	p := newObjectServer(t)
 	startObjectSession(t, p, "filler", "sleep 300")
-	staleID := makeCorpse(t, p, "corpse")
+	staleID, staleCreated := makeCorpse(t, p, "corpse")
 	if staleID == "$0" {
 		t.Fatalf("corpse id = %s, want one a fresh server does not reuse first", staleID)
 	}
@@ -165,11 +172,11 @@ func TestKillCorpseObjectRealTmuxRefusesStaleIDAfterRestart(t *testing.T) {
 		t.Fatalf("kill-server: %v", err)
 	}
 	waitObjectCondition(t, "the server to exit", p.tm.serverConfirmedDead)
-	newID := makeCorpse(t, p, "corpse")
+	newID, _ := makeCorpse(t, p, "corpse")
 	if newID == staleID {
 		t.Fatalf("restarted server reused id %s", newID)
 	}
-	if res, err := p.KillCorpseObject("corpse", staleID); err != nil || res != runtime.SessionObjectGone {
+	if res, err := p.KillCorpseObject("corpse", staleID, staleCreated); err != nil || res != runtime.SessionObjectGone {
 		t.Fatalf("KillCorpseObject(stale %s) = %v, %v; want gone", staleID, res, err)
 	}
 	if !hasObjectSession(t, p, "corpse") {
@@ -177,17 +184,52 @@ func TestKillCorpseObjectRealTmuxRefusesStaleIDAfterRestart(t *testing.T) {
 	}
 }
 
-func TestKillSessionObjectRealTmuxRefusesEmptyID(t *testing.T) {
+// A restarted server can hand the observed id to a new corpse with the same
+// name, which passes every check but the creation time: the kill must refuse
+// it as gone, and still kill it by its own creation time.
+func TestKillCorpseObjectRealTmuxRefusesReusedIDAfterRestart(t *testing.T) {
 	p := newObjectServer(t)
-	makeCorpse(t, p, "corpse")
-	if res, err := p.KillCorpseObject("corpse", ""); res != runtime.SessionObjectNotKilled || !errors.Is(err, runtime.ErrInvalidSessionObject) {
-		t.Fatalf("KillCorpseObject empty id = %v, %v; want ErrInvalidSessionObject", res, err)
+	staleID, staleCreated := makeCorpse(t, p, "corpse")
+	createdAt, err := strconv.ParseInt(staleCreated, 10, 64)
+	if err != nil {
+		t.Fatalf("corpse #{session_created} = %q: %v", staleCreated, err)
 	}
-	if res, err := p.KillZombieObject("corpse", "", "1"); res != runtime.SessionObjectNotKilled || !errors.Is(err, runtime.ErrInvalidSessionObject) {
-		t.Fatalf("KillZombieObject empty id = %v, %v; want ErrInvalidSessionObject", res, err)
+	if err := p.tm.KillServer(); err != nil {
+		t.Fatalf("kill-server: %v", err)
+	}
+	waitObjectCondition(t, "the server to exit", p.tm.serverConfirmedDead)
+	// #{session_created} has one-second resolution: start the new server after
+	// the observed second, so the re-created corpse differs only there.
+	waitObjectCondition(t, "the clock to pass the corpse's creation second", func() bool { return time.Now().Unix() > createdAt })
+	startObjectSession(t, p, "keep", "sleep 300")
+	newID, newCreated := makeCorpse(t, p, "corpse")
+	if newID != staleID || newCreated == staleCreated {
+		t.Fatalf("re-created corpse = %s created %s, want id %s reused with a creation time after %s", newID, newCreated, staleID, staleCreated)
+	}
+	if res, err := p.KillCorpseObject("corpse", staleID, staleCreated); err != nil || res != runtime.SessionObjectGone {
+		t.Fatalf("KillCorpseObject(reused %s, created %s) = %v, %v; want gone", staleID, staleCreated, res, err)
 	}
 	if !hasObjectSession(t, p, "corpse") {
-		t.Fatal("an empty id killed something")
+		t.Fatal("a reused id killed the corpse a restarted server re-created under the name")
+	}
+	if res, err := p.KillCorpseObject("corpse", newID, newCreated); err != nil || res != runtime.SessionObjectKilled {
+		t.Fatalf("KillCorpseObject(%s, created %s) = %v, %v; want killed", newID, newCreated, res, err)
+	}
+}
+
+func TestKillSessionObjectRealTmuxRefusesEmptyID(t *testing.T) {
+	p := newObjectServer(t)
+	id, created := makeCorpse(t, p, "corpse")
+	for _, tc := range []struct{ id, created string }{{"", created}, {id, ""}} {
+		if res, err := p.KillCorpseObject("corpse", tc.id, tc.created); res != runtime.SessionObjectNotKilled || !errors.Is(err, runtime.ErrInvalidSessionObject) {
+			t.Fatalf("KillCorpseObject(%q, %q) = %v, %v; want ErrInvalidSessionObject", tc.id, tc.created, res, err)
+		}
+		if res, err := p.KillZombieObject("corpse", tc.id, tc.created, "1"); res != runtime.SessionObjectNotKilled || !errors.Is(err, runtime.ErrInvalidSessionObject) {
+			t.Fatalf("KillZombieObject(%q, %q) = %v, %v; want ErrInvalidSessionObject", tc.id, tc.created, res, err)
+		}
+	}
+	if !hasObjectSession(t, p, "corpse") {
+		t.Fatal("an empty id or creation time killed something")
 	}
 }
 
@@ -196,20 +238,20 @@ func TestKillSessionObjectRealTmuxRefusesEmptyID(t *testing.T) {
 func TestKillZombieObjectRealTmuxPanePID(t *testing.T) {
 	p := newObjectServer(t)
 	startObjectSession(t, p, "zombie", "sleep 300")
-	id := objectFormat(t, p, "zombie", "#{session_id}")
+	id, created := objectOf(t, p, "zombie")
 	pid := objectFormat(t, p, "zombie", "#{pane_pid}")
 	got, err := p.ObserveLivenessSince("zombie", nil, time.Now())
-	if err != nil || got.ObjectID != id || got.PanePID != pid {
-		t.Fatalf("ObserveLivenessSince = (%+v, %v), want id %s pid %s", got, err, id, pid)
+	if err != nil || got.ObjectID != id || got.ObjectCreated != created || got.PanePID != pid {
+		t.Fatalf("ObserveLivenessSince = (%+v, %v), want id %s created %s pid %s", got, err, id, created, pid)
 	}
 	n, _ := strconv.Atoi(pid)
-	if res, err := p.KillZombieObject("zombie", id, strconv.Itoa(n+1)); err != nil || res != runtime.SessionObjectChanged {
+	if res, err := p.KillZombieObject("zombie", id, created, strconv.Itoa(n+1)); err != nil || res != runtime.SessionObjectChanged {
 		t.Fatalf("KillZombieObject wrong pid = %v, %v; want changed", res, err)
 	}
 	if !hasObjectSession(t, p, "zombie") {
 		t.Fatal("a pid mismatch killed the session")
 	}
-	if res, err := p.KillZombieObject("zombie", id, pid); err != nil || res != runtime.SessionObjectKilled {
+	if res, err := p.KillZombieObject("zombie", id, created, pid); err != nil || res != runtime.SessionObjectKilled {
 		t.Fatalf("KillZombieObject observed pid = %v, %v; want killed", res, err)
 	}
 }

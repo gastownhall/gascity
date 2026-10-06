@@ -25,6 +25,12 @@ type Liveness struct {
 	// Empty when the name is not listed or the provider has no such id; an
 	// empty id is refused by every [SessionObjectKiller].
 	ObjectID string
+	// ObjectCreated is the observed object's creation time (tmux
+	// #{session_created}, decimal unix seconds), which pins ObjectID across a
+	// server restart that reuses the id. Empty when ObjectID is, or when the
+	// provider did not report it; an empty value is refused by every
+	// [SessionObjectKiller].
+	ObjectCreated string
 	// PanePID is the pid of the session's only live pane (tmux #{pane_pid}),
 	// the condition of a zombie kill. Set only by a fresh read
 	// ([FreshLivenessObserver]) of a session with exactly one live pane.

@@ -82,6 +82,10 @@ type sessionRuntimeState struct {
 	// within one server's lifetime: a restarted server numbers from "$0" again.
 	// Empty when tmux reported no well-formed id.
 	ID string
+	// Created is the session object's #{session_created} (decimal unix
+	// seconds), which tells a reused ID apart. Empty when tmux reported no
+	// decimal value or the row predates the field.
+	Created string
 }
 
 type processRuntimeState struct {
@@ -575,7 +579,7 @@ func (g *processSnapshotGate) succeeded() bool {
 // still contribute no liveness — they represent exited processes, not
 // running ones.
 func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, error) {
-	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}\t#{session_attached}\t#{window_activity}\t#{session_id}")
+	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}\t#{session_attached}\t#{window_activity}\t#{session_id}\t#{session_created}")
 	if err != nil {
 		if errors.Is(err, ErrNoCurrentTarget) {
 			// The server ANSWERED and holds zero sessions. gc configures
@@ -619,7 +623,7 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 	}
 
 	for _, line := range strings.Split(out, "\n") {
-		parts := strings.SplitN(line, "\t", 7)
+		parts := strings.SplitN(line, "\t", 8)
 		if len(parts) < 2 || parts[0] == "" {
 			continue
 		}
@@ -648,6 +652,9 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 		}
 		if len(parts) > 6 && validSessionObjectID(strings.TrimSpace(parts[6])) {
 			session.ID = strings.TrimSpace(parts[6])
+		}
+		if len(parts) > 7 && decimalRe.MatchString(strings.TrimSpace(parts[7])) {
+			session.Created = strings.TrimSpace(parts[7])
 		}
 		if parts[1] == "1" {
 			// A dead pane contributes no liveness: Running stays as-is so a
