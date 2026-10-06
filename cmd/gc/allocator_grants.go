@@ -360,7 +360,7 @@ func (a *admission) creates() {
 			i, demands = len(demands), append(demands, poolplan.Demand{Template: ap.Template})
 		}
 		demands[i].FreshCreates++
-		demands[i].HasFloor = demands[i].HasFloor || ap.Request.FloorGuarantee || ap.Kind == createDependency
+		demands[i].HasFloor = demands[i].HasFloor || ap.Request.FloorGuarantee
 	}
 	budget := poolplan.NewCreateBudget(left)
 	budget.ConfigureFairShare(demands, p.in.FairSeed)
@@ -492,7 +492,7 @@ func entryDigest(e *selectionEntry) string {
 		grant = e.Start.Grant
 	}
 	if e.Binding != nil {
-		binding = e.Binding.ID
+		binding = "bind:" + e.Binding.WorkBeadID
 	}
 	return fmt.Sprintf("%v|%s|%s|%s|%v|%s|%v|%v", e.Desired, e.Reason, grant, binding, e.Floor, e.DrainReason, e.Normalize, e.Identity)
 }

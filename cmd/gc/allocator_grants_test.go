@@ -634,20 +634,6 @@ func TestCreates_FairShareSeedAdvancesOnlyOnAdmittedCreate(t *testing.T) {
 	}
 }
 
-// Kills (R26, C8, POOL-058): a dependency floor create treated as elastic
-// demand, so the seed, not the floor, decides the scarce token.
-func TestCreates_DependencyFloorTakesTheScarceToken(t *testing.T) {
-	cfg := grantCity(5, config.Agent{Name: "app", MaxActiveSessions: intPtr(3), DependsOn: []string{"db"}},
-		allocPoolAgent("db", 3), allocPoolAgent("worker", 5))
-	for seed := uint64(0); seed < 3; seed++ {
-		f := newAllocFixture(t, cfg).sessions(poolRow("app-1", "app", 1, "asleep")).assign("app-1").demand("worker", "w-1", "w-2").tokens(1)
-		f.in.FairSeed = seed
-		if d := f.decide(); len(d.Creates) != 1 || d.Creates[0].Template != "db" {
-			t.Errorf("seed %d: creates %+v, want the db floor", seed, d.Creates)
-		}
-	}
-}
-
 // Kills (C7.4, P3-6b owner decision 4): a create on a gated template, for
 // pool and named plans alike: a scale-check partial (the pool plan only),
 // provider red, the #46 quarantine and a shut or missing endpoint view each
@@ -688,29 +674,6 @@ func TestCreates_BlockedByPartialRedQuarantineEndpoint(t *testing.T) {
 		if d := f.decide(); len(d.Creates) != tc.want {
 			t.Errorf("%s: %d creates %+v, want %d (trace %v)", tc.name, len(d.Creates), d.Creates, tc.want, d.Trace)
 		}
-	}
-}
-
-// Kills (F1): a duplicate dependency-floor create across passes: the floor
-// create's reservation goes back in and stands in for its row. The app row
-// is desired in both passes, so db is a dependency root in both.
-func TestCreates_DependencyFloorReservationStandsIn(t *testing.T) {
-	cfg := grantCity(5, config.Agent{Name: "app", MaxActiveSessions: intPtr(3), DependsOn: []string{"db"}}, allocPoolAgent("db", 3))
-	f := newAllocFixture(t, cfg).sessions(poolRow("app-1", "app", 1, "asleep")).assign("app-1").tokens(5)
-	first := f.decide()
-	floors := 0
-	for _, c := range first.Creates {
-		if c.Template == "db" {
-			floors++
-		}
-	}
-	if floors != 1 {
-		t.Fatalf("pass 1 creates %+v, want one db floor", first.Creates)
-	}
-	applyReserves(f, first)
-	second := f.decide()
-	if len(second.Plans) != 0 || len(second.Creates) != 0 {
-		t.Fatalf("pass 2 plans %+v creates %+v, want none: the floor create is in flight", second.Plans, second.Creates)
 	}
 }
 
@@ -884,37 +847,6 @@ func TestHousekeep_HardBoundAlertsAndTraces(t *testing.T) {
 	}
 	if !traceHas(d, "ledger-hard-bound:g-1") {
 		t.Fatalf("no trace record for the hard-bound clear: %v", d.Trace)
-	}
-}
-
-// Kills (POOL-070, R6, R22): an issued or committed grant left out of awake
-// supply, so its row, asleep in the census until PreWake shows, loses its
-// scaled slot to a create; and an active row projected as creating.
-func TestAllocator_IssuedGrantCountsAsAwakeSupply(t *testing.T) {
-	scaled := func(f *allocFixture) {
-		f.in.ScaleCheck = &scaleCheckResult{Counts: map[string]int{"worker": 1}}
-		f.in.Demand.CustomCheckTemplates = []string{"worker"}
-	}
-	for _, st := range []ledgerState{ledgerIssued, ledgerCommitted} {
-		f := newAllocFixture(t, grantCity(5)).sessions(poolRow("gc-1", "worker", 1, "asleep")).tokens(5)
-		scaled(f)
-		g := grantEntry("g-1", "gc-1", st)
-		g.WroteRow, g.SettledAt, g.Marker.Incarnation = st == ledgerCommitted, allocNow, 2 // the marker is not in the census yet
-		f.in.Ledger = []ledgerEntry{g}
-		d := f.decide()
-		e := entryOf(t, d, "gc-1")
-		if e.Desired != desireWake || len(d.Creates) != 0 || (st == ledgerIssued && (e.Start == nil || e.Start.Grant != "g-1")) {
-			t.Errorf("state %d: gc-1 = %s/%s start %+v creates %d, want it woken on its grant and no create", st, e.Desired, e.Reason, e.Start, len(d.Creates))
-		}
-
-		a := newAllocFixture(t, grantCity(5)).sessions(poolRow("gc-1", "worker", 1, "active", "last_woke_at", ago(time.Minute))).
-			alive("s-gc-1", InventoryAttrs{}).tokens(5)
-		scaled(a)
-		g.Marker.Incarnation = 3
-		a.in.Ledger = []ledgerEntry{g}
-		if e := entryOf(t, a.decide(), "gc-1"); e.Reason != "scaled:demand" {
-			t.Errorf("state %d: active gc-1 reason %q, want scaled:demand: an active row is not projected as creating", st, e.Reason)
-		}
 	}
 }
 

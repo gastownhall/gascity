@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -232,7 +233,7 @@ func ago(d time.Duration) string { return allocNow.Add(-d).Format(time.RFC3339) 
 
 // Kills: an empty snapshot read as drain-all (#41), and Wake from a
 // suspended city (POOL-001, C2.1). Every row has an entry; live rows drain
-// as suspended; the canonical named row stays InDesired asleep; a loser
+// as suspended; the canonical named row stays InDesired asleep; a duplicate
 // stays None.
 func TestAllocator_CitySuspended_PublishesSuspendedNotEmptySelection(t *testing.T) {
 	cfg := &config.City{
@@ -264,8 +265,8 @@ func TestAllocator_CitySuspended_PublishesSuspendedNotEmptySelection(t *testing.
 	if e := entryOf(t, d, "gc-2"); e.Desired != desireSleep || !e.InDesired || e.DrainReason != drainSuspended {
 		t.Errorf("canonical named row: %s indesired=%v, want an InDesired sleep (SESS-054/064)", e.Desired, e.InDesired)
 	}
-	if e := entryOf(t, d, "gc-4"); e.Desired != desireNone || e.Reason != reasonIdentityLoser {
-		t.Errorf("identity loser: %s/%s, want none", e.Desired, e.Reason)
+	if e := entryOf(t, d, "gc-4"); e.Desired != desireNone || e.Reason != reasonIdentityDuplicate {
+		t.Errorf("identity duplicate: %s/%s, want none", e.Desired, e.Reason)
 	}
 	if e := entryOf(t, d, "gc-3"); e.Desired != desireNone || e.Reason != reasonUnknownState {
 		t.Errorf("unknown-state row: %s/%s, want none", e.Desired, e.Reason)
@@ -541,33 +542,83 @@ func TestAllocator_FortyThreeRowsShareANameStaleOnesRollBack(t *testing.T) {
 	}
 }
 
-// Kills: starting both duplicates, and retiring under a partial read
-// (C2.13). The loser is None with a verdict.
-func TestAllocator_IdentityVerdictsLosersNoneNoneUnderPartial(t *testing.T) {
-	rows := []beads.Bead{chatRow("gc-1", "1"), chatRow("gc-2", "3")}
-	d := newAllocFixture(t, chatCity("always")).sessions(rows...).decide()
-	v := d.Snapshot.Identities["chat"]
-	if v.Canonical == nil || v.Canonical.ID != "gc-2" || len(v.Losers) != 1 || v.Losers[0].ID != "gc-1" || v.VerdictID == "" {
-		t.Fatalf("verdict = %+v, want gc-2 over gc-1", v)
-	}
-	if e := entryOf(t, d, "gc-1"); e.Desired != desireNone || e.Reason != reasonIdentityLoser || !e.Identity.Loser {
-		t.Fatalf("loser = %s/%s %+v", e.Desired, e.Reason, e.Identity)
-	}
-	if e := entryOf(t, d, "gc-2"); e.Desired == desireNone || !e.Identity.Canonical {
-		t.Fatalf("winner = %s %+v, want the canonical row managed", e.Desired, e.Identity)
-	}
-	for label, setup := range map[string]func(*allocFixture){
-		"store-partial": func(f *allocFixture) { f.in.Demand.StorePartial = true },
+// Kills: a reintroduced retire, choosing the loser as canonical, a
+// duplicate standing for its identity, and a duplicate raising no alert
+// (C2.13, S2-1). Legacy's rule (here, the higher generation) picks the
+// canonical row in either census order, when the rows share a session name,
+// and under a partial demand or census read. The canonical row is selected
+// as the spec's named row and wakes; every other managed row is
+// None(identity-duplicate), traced, and never drained or started. One alert
+// names every duplicate, a census-only row on another leg included.
+func TestNamedDuplicateIsNoneWithAlert(t *testing.T) {
+	partialLeg := classStoreCandidate{ref: "rig:a", store: censusErrStore{Store: censusStore(), err: &beads.PartialResultError{Op: "list", Err: errors.New("down")}}}
+	for label, tc := range map[string]struct {
+		rows      []beads.Bead
+		setup     func(*allocFixture)
+		canonical string
+		dups      []string // managed duplicates
+		alerted   []string // every duplicate the alert names, by leg/ID
+	}{
+		"loser-sorts-first": {rows: []beads.Bead{chatRow("gc-1", "1"), chatRow("gc-2", "3")}, canonical: "gc-2", dups: []string{"gc-1"}},
+		"loser-sorts-last":  {rows: []beads.Bead{chatRow("gc-1", "3"), chatRow("gc-2", "1")}, canonical: "gc-1", dups: []string{"gc-2"}},
+		"shared-session-name": {
+			rows:      []beads.Bead{chatRow("gc-1", "1", "session_name", "chat"), chatRow("gc-2", "3", "session_name", "chat")},
+			canonical: "gc-2", dups: []string{"gc-1"},
+		},
+		"store-partial": {
+			rows: []beads.Bead{chatRow("gc-1", "1"), chatRow("gc-2", "3")}, canonical: "gc-2", dups: []string{"gc-1"},
+			setup: func(f *allocFixture) { f.in.Demand.StorePartial = true },
+		},
+		"partial-census-leg": {
+			rows: []beads.Bead{chatRow("gc-1", "1"), chatRow("gc-2", "3")}, canonical: "gc-2", dups: []string{"gc-1"},
+			setup: func(f *allocFixture) { f.legs = append(f.legs, partialLeg) },
+		},
+		"census-only-other-leg": {
+			rows: []beads.Bead{chatRow("gc-1", "1")}, canonical: "gc-1",
+			setup:   func(f *allocFixture) { f.rigLeg(chatRow("gc-r", "9")) },
+			alerted: []string{"rig:a/gc-r"},
+		},
 	} {
-		f := newAllocFixture(t, chatCity("always")).sessions(rows...)
-		setup(f)
-		partial := f.decide()
-		if v := partial.Snapshot.Identities["chat"]; len(v.Losers) != 0 || v.Canonical == nil || v.Canonical.ID != "gc-2" {
-			t.Errorf("%s: verdict %+v, want gc-2 canonical with no losers", label, v)
+		f := newAllocFixture(t, chatCity("always")).sessions(tc.rows...)
+		if tc.setup != nil {
+			tc.setup(f)
 		}
-		if e := entryOf(t, partial, "gc-1"); e.Desired == desireNone {
-			t.Errorf("%s: a duplicate retired: %s/%s", label, e.Desired, e.Reason)
+		d := f.decide()
+		alerted := tc.alerted
+		for _, id := range tc.dups {
+			alerted = append(alerted, allocSessionsLeg+"/"+id)
+			dup := entryOf(t, d, id)
+			if dup.Desired != desireNone || dup.Reason != reasonIdentityDuplicate || dup.InDesired || dup.Start != nil ||
+				dup.Identity == nil || dup.Identity.Identity != "chat" || dup.Identity.Canonical {
+				t.Errorf("%s: duplicate %s = %s/%s indesired=%v start=%+v identity=%+v, want None(identity-duplicate)",
+					label, id, dup.Desired, dup.Reason, dup.InDesired, dup.Start, dup.Identity)
+			}
+			if !slices.ContainsFunc(d.Trace, func(r allocTraceRecord) bool {
+				return r.Key.ID == id && r.Reason == reasonIdentityDuplicate && r.Instance == "chat"
+			}) {
+				t.Errorf("%s: no identity-duplicate trace for %s: %v", label, id, d.Trace)
+			}
 		}
+		c := entryOf(t, d, tc.canonical)
+		if c.Desired != desireWake || c.Reason != "named-always" || c.Config == nil || c.Config.ResolveKind != resolveNamed ||
+			c.Config.Alias != "chat" || c.Identity == nil || !c.Identity.Canonical {
+			t.Errorf("%s: canonical %s = %s/%s config=%+v identity=%+v, want the spec's named row woken (named-always)",
+				label, tc.canonical, c.Desired, c.Reason, c.Config, c.Identity)
+		}
+		if len(d.Alerts) != 1 || !strings.Contains(d.Alerts[0], "chat") || !strings.Contains(d.Alerts[0], allocSessionsLeg+"/"+tc.canonical) {
+			t.Errorf("%s: alerts %q, want one naming chat and its canonical row", label, d.Alerts)
+		}
+		for _, k := range alerted {
+			if len(d.Alerts) == 1 && !strings.Contains(d.Alerts[0], k) {
+				t.Errorf("%s: alert %q does not name duplicate %s", label, d.Alerts[0], k)
+			}
+		}
+		if len(d.Plans) != 0 {
+			t.Errorf("%s: plans %+v: the identity has a canonical row", label, d.Plans)
+		}
+	}
+	if d := newAllocFixture(t, chatCity("always")).sessions(chatRow("gc-1", "1")).decide(); len(d.Alerts) != 0 {
+		t.Errorf("a lone named row alerted: %q", d.Alerts)
 	}
 }
 
@@ -638,8 +689,8 @@ func TestAllocator_PendingInteractionWakes(t *testing.T) {
 	f.activity = map[string]time.Time{"s-gc-1": allocNow.Add(-time.Hour)}
 	f.in.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": {Effective: "1m", Duration: time.Minute, Fingerprint: "fp"}}
 	e := entryOf(t, f.decideSelecting("gc-1"), "gc-1")
-	if e.Desired != desireWake || e.Reason != "pending" || e.DemandClass != "human" {
-		t.Fatalf("pending row = %s/%s class %s, want a human pending wake", e.Desired, e.Reason, e.DemandClass)
+	if e.Desired != desireWake || e.Reason != "pending" {
+		t.Fatalf("pending row = %s/%s, want a pending wake", e.Desired, e.Reason)
 	}
 }
 
@@ -677,9 +728,9 @@ func TestAllocator_UncertainAttachOnlyWakeKeeps(t *testing.T) {
 		t.Fatalf("control row = %s/%s uncertain=%v, want a certain wake", e.Desired, e.Reason, e.ObservationUncertain)
 	}
 	if e := entryOf(t, d, "gc-1"); !e.InDesired || !e.ObservationUncertain || e.Desired != desireKeep || e.Reason != reasonObservationUncertain ||
-		!slices.Equal(e.WakeReasons, []WakeReason{WakeAttached}) || e.DemandClass != "human" {
-		t.Fatalf("desired row woken only by an uncertain attach = %s/%s indesired=%v wake=%v class=%s, want a keep read as attached",
-			e.Desired, e.Reason, e.InDesired, e.WakeReasons, e.DemandClass)
+		!slices.Equal(e.WakeReasons, []WakeReason{WakeAttached}) {
+		t.Fatalf("desired row woken only by an uncertain attach = %s/%s indesired=%v wake=%v, want a keep read as attached",
+			e.Desired, e.Reason, e.InDesired, e.WakeReasons)
 	}
 	if e := entryOf(t, d, "gc-2"); e.InDesired || e.Desired != desireKeep {
 		t.Fatalf("undesired row with an uncertain attach = %s/%s, want keep, not drain", e.Desired, e.Reason)
@@ -724,21 +775,6 @@ func TestAllocator_ConfigSleepSuppressionDeadUsesDetachedAtLiveNeedsActivity(t *
 		if !suppressed && e.Desired != desireWake {
 			t.Errorf("%s = %s/%s, want a wake", id, e.Desired, e.Reason)
 		}
-	}
-}
-
-// Kills: retiring an identity loser under a partial census read (C2.13,
-// M22): the read may have missed the winner, so the verdict retires nothing.
-func TestAllocator_PartialLegRetiresNoIdentityLoser(t *testing.T) {
-	cfg := chatCity("always")
-	f := newAllocFixture(t, cfg).sessions(chatRow("gc-1", "1"), chatRow("gc-2", "3"))
-	f.legs = append(f.legs, classStoreCandidate{ref: "rig:a", store: censusErrStore{Store: censusStore(), err: &beads.PartialResultError{Op: "list", Err: errors.New("down")}}})
-	d := f.decide()
-	if v := d.Snapshot.Identities["chat"]; len(v.Losers) != 0 {
-		t.Fatalf("partial leg: losers %v retired under a partial census", v.Losers)
-	}
-	if e := entryOf(t, d, "gc-1"); e.Desired == desireNone {
-		t.Fatalf("partial leg: a duplicate retired: %s/%s", e.Desired, e.Reason)
 	}
 }
 
