@@ -142,6 +142,13 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 
 // LoadWithIncludesOptions loads a city.toml with the supplied load options.
 func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraIncludes ...string) (*City, *Provenance, error) {
+	// Convention trees are hashed before the load reads them so an edit that
+	// lands mid-load cannot be stamped with a revision newer than the
+	// content loaded (see conventionRevisionInputs).
+	var conventionInputs *conventionRevisionInputs
+	if !opts.SkipRevisionSnapshot {
+		conventionInputs = captureConventionRevisionInputs(fs, filepath.Dir(path))
+	}
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading config %q: %w", path, err)
@@ -862,7 +869,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// via SkipRevisionSnapshot; Revision falls back to reading from disk, so
 	// the value is the same either way.
 	if !opts.SkipRevisionSnapshot {
-		prov.captureRevisionSnapshot(fs, root, cityRoot)
+		prov.captureRevisionSnapshot(fs, root, cityRoot, conventionInputs)
 	}
 
 	return root, prov, nil

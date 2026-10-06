@@ -25,7 +25,6 @@ func contractRigsFamily(t *testing.T, h *contractHarness) {
 		t.Fatalf("rig path = %q, want %q", rig.Path, h.rigPath)
 	}
 
-	h.settleConfig(t)
 	patched, err := c.PatchV0CityByCityNameRigByNameWithResponse(ctx, city, contractRig,
 		&genclient.PatchV0CityByCityNameRigByNameParams{XGCRequest: contractCSRF},
 		genclient.PatchV0CityByCityNameRigByNameJSONRequestBody{Suspended: ptr(true)})
@@ -33,7 +32,6 @@ func contractRigsFamily(t *testing.T, h *contractHarness) {
 	if !h.getRig(t, contractRig).Suspended {
 		t.Fatal("rig not suspended after patch")
 	}
-	h.settleConfig(t)
 	resumed, err := c.PostV0CityByCityNameRigByNameByActionWithResponse(ctx, city, contractRig, genclient.Resume,
 		&genclient.PostV0CityByCityNameRigByNameByActionParams{XGCRequest: contractCSRF})
 	expectStatus(t, "resume rig", resumed, err, http.StatusOK)
@@ -45,7 +43,6 @@ func contractRigsFamily(t *testing.T, h *contractHarness) {
 	// API-created rigs must live under the city root.
 	betaPath := filepath.Join(h.cityPath, "rigs", "beta")
 	writeContractFile(t, filepath.Join(betaPath, "README.md"), "beta\n")
-	h.settleConfig(t)
 	created, err := c.CreateRigWithResponse(ctx, city, &genclient.CreateRigParams{XGCRequest: contractCSRF},
 		genclient.CreateRigJSONRequestBody{Name: "beta", Path: ptr(betaPath), Prefix: ptr("bt")})
 	expectStatus(t, "create rig (path)", created, err, http.StatusCreated)
@@ -55,7 +52,6 @@ func contractRigsFamily(t *testing.T, h *contractHarness) {
 	if got := h.getRig(t, "beta"); got.Path != betaPath {
 		t.Fatalf("created rig path = %q, want %q", got.Path, betaPath)
 	}
-	h.settleConfig(t)
 	deleted, err := c.DeleteV0CityByCityNameRigByNameWithResponse(ctx, city, "beta",
 		&genclient.DeleteV0CityByCityNameRigByNameParams{XGCRequest: contractCSRF})
 	expectStatus(t, "delete rig", deleted, err, http.StatusOK)
@@ -63,7 +59,6 @@ func contractRigsFamily(t *testing.T, h *contractHarness) {
 	expectStatus(t, "get deleted rig", gone, err, http.StatusNotFound)
 
 	// Rig patches (overlay layer): the patch must take effect on the rig.
-	h.settleConfig(t)
 	put, err := c.PutV0CityByCityNamePatchesRigsWithResponse(ctx, city,
 		&genclient.PutV0CityByCityNamePatchesRigsParams{XGCRequest: contractCSRF},
 		genclient.PutV0CityByCityNamePatchesRigsJSONRequestBody{Name: ptr(contractRig), DefaultBranch: ptr("trunk")})
@@ -78,7 +73,6 @@ func contractRigsFamily(t *testing.T, h *contractHarness) {
 	// reads back as 404. Accept both until the read path is fixed.
 	one, err := c.GetV0CityByCityNamePatchesRigByNameWithResponse(ctx, city, contractRig)
 	expectStatus(t, "get rig patch", one, err, http.StatusOK, http.StatusNotFound)
-	h.settleConfig(t)
 	unpatched, err := c.DeleteV0CityByCityNamePatchesRigByNameWithResponse(ctx, city, contractRig,
 		&genclient.DeleteV0CityByCityNamePatchesRigByNameParams{XGCRequest: contractCSRF})
 	expectStatus(t, "delete rig patch", unpatched, err, http.StatusOK)

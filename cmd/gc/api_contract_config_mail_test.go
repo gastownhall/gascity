@@ -88,12 +88,10 @@ func contractConfigFamily(t *testing.T, h *contractHarness) {
 	claude, err := c.GetV0CityByCityNameProviderByNameWithResponse(ctx, city, "claude")
 	expectStatus(t, "get provider", claude, err, http.StatusOK)
 
-	h.settleConfig(t)
 	created, err := c.CreateProviderWithResponse(ctx, city, &genclient.CreateProviderParams{XGCRequest: contractCSRF},
 		genclient.CreateProviderJSONRequestBody{Name: "contract-cli", Command: ptr("true"), DisplayName: ptr("Contract CLI")})
 	expectStatus(t, "create provider", created, err, http.StatusCreated)
 	h.expectProviderDisplayName(t, "contract-cli", "Contract CLI")
-	h.settleConfig(t)
 	updated, err := c.PatchV0CityByCityNameProviderByNameWithResponse(ctx, city, "contract-cli",
 		&genclient.PatchV0CityByCityNameProviderByNameParams{XGCRequest: contractCSRF},
 		genclient.PatchV0CityByCityNameProviderByNameJSONRequestBody{DisplayName: ptr("Contract CLI 2")})
@@ -101,7 +99,6 @@ func contractConfigFamily(t *testing.T, h *contractHarness) {
 	h.expectProviderDisplayName(t, "contract-cli", "Contract CLI 2")
 
 	// Provider patches overlay the provider.
-	h.settleConfig(t)
 	pput, err := c.PutV0CityByCityNamePatchesProvidersWithResponse(ctx, city,
 		&genclient.PutV0CityByCityNamePatchesProvidersParams{XGCRequest: contractCSRF},
 		genclient.PutV0CityByCityNamePatchesProvidersJSONRequestBody{Name: ptr("contract-cli"), PromptMode: ptr("none")})
@@ -112,12 +109,10 @@ func contractConfigFamily(t *testing.T, h *contractHarness) {
 	// which clears [patches] after applying them.
 	pget, err := c.GetV0CityByCityNamePatchesProviderByNameWithResponse(ctx, city, "contract-cli")
 	expectKnownBug(t, "get provider patch", pget, err, http.StatusNotFound, http.StatusOK)
-	h.settleConfig(t)
 	pdel, err := c.DeleteV0CityByCityNamePatchesProviderByNameWithResponse(ctx, city, "contract-cli",
 		&genclient.DeleteV0CityByCityNamePatchesProviderByNameParams{XGCRequest: contractCSRF})
 	expectStatus(t, "delete provider patch", pdel, err, http.StatusOK)
 
-	h.settleConfig(t)
 	removed, err := c.DeleteV0CityByCityNameProviderByNameWithResponse(ctx, city, "contract-cli",
 		&genclient.DeleteV0CityByCityNameProviderByNameParams{XGCRequest: contractCSRF})
 	expectStatus(t, "delete provider", removed, err, http.StatusOK)
@@ -126,7 +121,6 @@ func contractConfigFamily(t *testing.T, h *contractHarness) {
 
 	// Agent patches overlay the agent: suspension through a patch must show
 	// on the agent read.
-	h.settleConfig(t)
 	aput, err := c.PutV0CityByCityNamePatchesAgentsWithResponse(ctx, city,
 		&genclient.PutV0CityByCityNamePatchesAgentsParams{XGCRequest: contractCSRF},
 		genclient.PutV0CityByCityNamePatchesAgentsJSONRequestBody{Name: ptr(contractAgent), Env: &map[string]string{"CONTRACT": "1"}})
@@ -135,12 +129,10 @@ func contractConfigFamily(t *testing.T, h *contractHarness) {
 	expectStatus(t, "list agent patches", alist, err, http.StatusOK)
 	aget, err := c.GetV0CityByCityNamePatchesAgentByBaseWithResponse(ctx, city, contractAgent)
 	expectKnownBug(t, "get agent patch", aget, err, http.StatusNotFound, http.StatusOK)
-	h.settleConfig(t)
 	adel, err := c.DeleteV0CityByCityNamePatchesAgentByBaseWithResponse(ctx, city, contractAgent,
 		&genclient.DeleteV0CityByCityNamePatchesAgentByBaseParams{XGCRequest: contractCSRF})
 	expectStatus(t, "delete agent patch", adel, err, http.StatusOK)
 
-	h.settleConfig(t)
 	qput, err := c.PutV0CityByCityNamePatchesAgentsWithResponse(ctx, city,
 		&genclient.PutV0CityByCityNamePatchesAgentsParams{XGCRequest: contractCSRF},
 		genclient.PutV0CityByCityNamePatchesAgentsJSONRequestBody{Dir: ptr(contractRig), Name: ptr(contractRigAgent), Env: &map[string]string{"CONTRACT": "1"}})
@@ -150,7 +142,6 @@ func contractConfigFamily(t *testing.T, h *contractHarness) {
 	expectKnownBug(t, "put qualified agent patch", qput, err, http.StatusInternalServerError, http.StatusOK)
 	qget, err := c.GetV0CityByCityNamePatchesAgentByDirByBaseWithResponse(ctx, city, contractRig, contractRigAgent)
 	expectKnownBug(t, "get qualified agent patch", qget, err, http.StatusNotFound, http.StatusOK)
-	h.settleConfig(t)
 	qdel, err := c.DeleteV0CityByCityNamePatchesAgentByDirByBaseWithResponse(ctx, city, contractRig, contractRigAgent,
 		&genclient.DeleteV0CityByCityNamePatchesAgentByDirByBaseParams{XGCRequest: contractCSRF})
 	expectKnownBug(t, "delete qualified agent patch", qdel, err, http.StatusNotFound, http.StatusOK)
@@ -175,12 +166,10 @@ func contractConfigFamily(t *testing.T, h *contractHarness) {
 	expectStatus(t, "get unknown wait", nowait, err, http.StatusNotFound)
 
 	// City suspend/resume through PATCH, checked on the city read.
-	h.settleConfig(t)
 	suspended, err := c.PatchV0CityByCityNameWithResponse(ctx, city, &genclient.PatchV0CityByCityNameParams{XGCRequest: contractCSRF},
 		genclient.PatchV0CityByCityNameJSONRequestBody{Suspended: ptr(true)})
 	expectStatus(t, "suspend city", suspended, err, http.StatusOK)
 	h.expectCitySuspended(t, true)
-	h.settleConfig(t)
 	resumed, err := c.PatchV0CityByCityNameWithResponse(ctx, city, &genclient.PatchV0CityByCityNameParams{XGCRequest: contractCSRF},
 		genclient.PatchV0CityByCityNameJSONRequestBody{Suspended: ptr(false)})
 	expectStatus(t, "resume city", resumed, err, http.StatusOK)

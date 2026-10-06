@@ -197,7 +197,6 @@ func contractAsyncRigCreate(t *testing.T, h *contractHarness) {
 		return nil, fmt.Errorf("contract resolver: unexpected host %q", host)
 	}
 
-	h.settleConfig(t)
 	requestID := "contract-rig-gamma"
 	resp, err := h.client.CreateRigWithResponse(h.ctx, contractCityName, &genclient.CreateRigParams{XGCRequest: contractCSRF},
 		genclient.CreateRigJSONRequestBody{Name: "gamma", GitUrl: ptr(contractCloneURL), Prefix: ptr("gm"), DefaultBranch: ptr("main"), RequestId: ptr(requestID)})

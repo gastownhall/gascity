@@ -30,7 +30,6 @@ func contractAgentsFamily(t *testing.T, h *contractHarness) {
 
 	// A provider missing from the city's provider catalog is a client error:
 	// 400, with city.toml left untouched (the agent must not appear).
-	h.settleConfig(t)
 	badProvider, err := c.CreateAgentWithResponse(ctx, city, &genclient.CreateAgentParams{XGCRequest: contractCSRF},
 		genclient.CreateAgentJSONRequestBody{Name: "orphan", Provider: "no-such-provider"})
 	expectStatus(t, "create agent with unknown provider", badProvider, err, http.StatusBadRequest)
@@ -38,7 +37,6 @@ func contractAgentsFamily(t *testing.T, h *contractHarness) {
 	expectStatus(t, "get rejected agent", orphan, err, http.StatusNotFound)
 
 	// City-scoped CRUD.
-	h.settleConfig(t)
 	created, err := c.CreateAgentWithResponse(ctx, city, &genclient.CreateAgentParams{XGCRequest: contractCSRF},
 		genclient.CreateAgentJSONRequestBody{Name: "helper", Provider: "claude"})
 	expectStatus(t, "create agent", created, err, http.StatusCreated)
@@ -50,19 +48,16 @@ func contractAgentsFamily(t *testing.T, h *contractHarness) {
 	dup, err := c.CreateAgentWithResponse(ctx, city, &genclient.CreateAgentParams{XGCRequest: contractCSRF},
 		genclient.CreateAgentJSONRequestBody{Name: "helper", Provider: "claude"})
 	expectStatus(t, "create duplicate agent", dup, err, http.StatusConflict)
-	h.settleConfig(t)
 	patched, err := c.PatchV0CityByCityNameAgentByBaseWithResponse(ctx, city, "helper",
 		&genclient.PatchV0CityByCityNameAgentByBaseParams{XGCRequest: contractCSRF},
 		genclient.PatchV0CityByCityNameAgentByBaseJSONRequestBody{Suspended: ptr(true)})
 	expectStatus(t, "patch agent", patched, err, http.StatusOK)
 	h.expectAgentSuspended(t, "helper", true)
-	h.settleConfig(t)
 	resumed, err := c.PostV0CityByCityNameAgentByBaseByActionWithResponse(ctx, city, "helper",
 		genclient.PostV0CityByCityNameAgentByBaseByActionParamsActionResume,
 		&genclient.PostV0CityByCityNameAgentByBaseByActionParams{XGCRequest: contractCSRF})
 	expectStatus(t, "resume agent", resumed, err, http.StatusOK)
 	h.expectAgentSuspended(t, "helper", false)
-	h.settleConfig(t)
 	deleted, err := c.DeleteV0CityByCityNameAgentByBaseWithResponse(ctx, city, "helper",
 		&genclient.DeleteV0CityByCityNameAgentByBaseParams{XGCRequest: contractCSRF})
 	expectStatus(t, "delete agent", deleted, err, http.StatusOK)

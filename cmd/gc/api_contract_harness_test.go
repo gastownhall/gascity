@@ -393,25 +393,6 @@ func (h *contractHarness) readAfterWrite(t *testing.T, what string, check func()
 	h.backoff(t, what+" to become visible", func() (bool, string) { return check() })
 }
 
-// settleConfig waits until the controller runtime has published the on-disk
-// config revision. Config mutations in the suite
-// call it first: a runtime reload whose parse straddles a later API edit can
-// publish (stale content, new revision) and then never reload again (see the
-// PR's bug list), so back-to-back config edits must not overlap a reload.
-// The controller exposes no config-published notification to wait on, so
-// this re-reads on a bounded backoff.
-func (h *contractHarness) settleConfig(t *testing.T) {
-	t.Helper()
-	h.backoff(t, "controller config to settle", func() (bool, string) {
-		_, diskRev, err := h.cs.loadCurrentConfigSnapshot()
-		if err != nil {
-			return false, err.Error()
-		}
-		_, _, published := h.cr.serviceEnvSnapshot()
-		return published == diskRev, fmt.Sprintf("disk=%s published=%s", shortRev(diskRev), shortRev(published))
-	})
-}
-
 // backoff re-evaluates check on a bounded exponential backoff until it
 // passes or contractWait expires, failing with the last observed state.
 func (h *contractHarness) backoff(t *testing.T, what string, check func() (bool, string)) {

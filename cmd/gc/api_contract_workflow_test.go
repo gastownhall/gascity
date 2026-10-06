@@ -27,7 +27,6 @@ func contractFormulasFamily(t *testing.T, h *contractHarness) {
 	c, ctx, city := h.client, h.ctx, contractCityName
 	kind, ref := cityScope()
 
-	h.settleConfig(t)
 	put, err := c.PutV0CityByCityNameFormulasByNameWithBodyWithResponse(ctx, city, contractFormula,
 		&genclient.PutV0CityByCityNameFormulasByNameParams{XGCRequest: contractCSRF},
 		"application/octet-stream", strings.NewReader(contractFormulaTOML))
@@ -94,7 +93,6 @@ func contractFormulasFamily(t *testing.T, h *contractHarness) {
 	h.expectBeadStatus(t, runID, "closed")
 
 	// A city-local formula can be deleted; reads then 404.
-	h.settleConfig(t)
 	scratch, err := c.PutV0CityByCityNameFormulasByNameWithBodyWithResponse(ctx, city, "contract-scratch",
 		&genclient.PutV0CityByCityNameFormulasByNameParams{XGCRequest: contractCSRF},
 		"application/octet-stream", strings.NewReader("formula = \"contract-scratch\"\n"))
@@ -223,11 +221,9 @@ func contractOrdersFamily(t *testing.T, h *contractHarness) {
 	expectStatus(t, "orders feed", feed, err, http.StatusOK)
 	got, err := c.GetV0CityByCityNameOrderByNameWithResponse(ctx, city, contractOrder)
 	expectStatus(t, "get order", got, err, http.StatusOK)
-	h.settleConfig(t)
 	disabled, err := c.PostV0CityByCityNameOrderByNameDisableWithResponse(ctx, city, contractOrder,
 		&genclient.PostV0CityByCityNameOrderByNameDisableParams{XGCRequest: contractCSRF})
 	expectStatus(t, "disable order", disabled, err, http.StatusOK)
-	h.settleConfig(t)
 	enabled, err := c.PostV0CityByCityNameOrderByNameEnableWithResponse(ctx, city, contractOrder,
 		&genclient.PostV0CityByCityNameOrderByNameEnableParams{XGCRequest: contractCSRF})
 	expectStatus(t, "enable order", enabled, err, http.StatusOK)
