@@ -162,6 +162,89 @@ func TestReconcileSessionBeads_INC003_SuspendedReasonAlsoDeferred(t *testing.T) 
 	}
 }
 
+// inc003SuspendEnv builds a live, active, undesired session bead woken a minute
+// ago whose agent is configured, then applies an operator suspend at scope
+// ("none", "city", "rig" or "agent"). With configured=false the agent has no
+// named session and the drain reason is "orphaned"; with configured=true it
+// has one and the reason is "suspended". The rig scope puts the agent in rig
+// "myrig".
+func inc003SuspendEnv(t *testing.T, configured bool, scope string) (*reconcilerTestEnv, beads.Bead, string) {
+	t.Helper()
+	env := newReconcilerTestEnv()
+	agentCfg := config.Agent{Name: "orphan"}
+	if configured {
+		agentCfg.Name = "worker"
+	}
+	env.cfg = &config.City{}
+	switch scope {
+	case "none":
+	case "city":
+		env.cfg.Workspace.SuspendedOnStart = true
+	case "rig":
+		agentCfg.Dir = "myrig"
+		env.cfg.Rigs = []config.Rig{{Name: "myrig", Suspended: true}}
+	case "agent":
+		agentCfg.Suspended = true
+	default:
+		t.Fatalf("unknown suspend scope %q", scope)
+	}
+	env.cfg.Agents = []config.Agent{agentCfg}
+	identity := agentCfg.QualifiedName()
+	name := identity
+	if configured {
+		env.cfg.NamedSessions = []config.NamedSession{{Template: agentCfg.Name, Dir: agentCfg.Dir}}
+		name = config.NamedSessionRuntimeName("", env.cfg.Workspace, identity)
+	}
+	if err := env.sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	session := env.createSessionBead(name, identity)
+	env.setSessionMetadata(&session, map[string]string{"state": "active", "last_woke_at": wokeAgo(time.Minute)(env.clk.Now())})
+	return env, session, name
+}
+
+// An operator suspend (city, rig or agent) is explicit intent, not a lagging
+// desired-state view, so it gets no grace: both undesired reasons drain on the
+// first tick although the row was woken a minute ago (suspension is
+// quiescence, #7115). With no suspend the same configured rows keep the grace.
+func TestReconcileSessionBeads_INC003_OperatorSuspendDrainsWithoutGrace(t *testing.T) {
+	for _, scope := range []string{"none", "city", "rig", "agent"} {
+		for _, tc := range []struct {
+			configured bool
+			reason     string
+		}{
+			{false, "orphaned"},
+			{true, "suspended"},
+		} {
+			t.Run(scope+"/"+tc.reason, func(t *testing.T) {
+				env, session, name := inc003SuspendEnv(t, tc.configured, scope)
+				trace := newPoolDesiredStateTestTrace(name)
+
+				env.reconcileINC003Traced(trace, session)
+
+				ds := env.dt.get(session.ID)
+				if scope == "none" {
+					if ds != nil {
+						t.Fatalf("drain began inside the grace with no suspend: reason=%q", ds.reason)
+					}
+					if got := inc003GraceRecord(t, trace, name).Fields["drain_reason"]; got != tc.reason {
+						t.Errorf("trace drain_reason = %#v, want %q", got, tc.reason)
+					}
+					return
+				}
+				if ds == nil || ds.reason != tc.reason {
+					t.Fatalf("drain = %+v, want a %s drain on the first tick under a %s suspend", ds, tc.reason, scope)
+				}
+				for _, r := range trace.records {
+					if r.ReasonCode == TraceReasonUndesiredWakeGrace {
+						t.Fatalf("grace traced under a %s suspend: %+v", scope, r)
+					}
+				}
+			})
+		}
+	}
+}
+
 // Clock skew must never pin a row. A last_woke_at modestly ahead of now (the
 // wake can be stamped by another process) is inside the grace, but one
 // wakeUndesiredGrace or more ahead gets no grace and drains as before.

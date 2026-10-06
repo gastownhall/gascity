@@ -1307,7 +1307,9 @@ const pendingCreateNeverStartedTimeout = 10 * time.Minute
 // is read off a desired-state view that lags a wake, so a seat woken seconds ago
 // can read as wanted by nobody; draining it opened a ~34 kills/minute storm.
 // The check is level-triggered, so a genuinely undesired seat drains on the
-// first tick after the grace.
+// first tick after the grace. A row whose agent is suspended (city, rig or
+// agent) gets no grace: an operator suspend is explicit intent, not a lagging
+// view, and suspension is quiescence (#7115).
 const wakeUndesiredGrace = 5 * time.Minute
 
 // wakeGracePreservesUndesiredRow reports whether an undesired live row was woken
@@ -2508,10 +2510,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 					}
 					// INC-003: defer the drain begin while the row was woken within
-					// wakeUndesiredGrace. A drain already tracked is left to run
+					// wakeUndesiredGrace, unless an operator suspended its agent
+					// (city, rig or agent). A drain already tracked is left to run
 					// (beginSessionDrainInfo would no-op), so no grace is logged
 					// or traced for it.
-					if dt.get(id) == nil && wakeGracePreservesUndesiredRow(infoPostHeal, clk.Now()) {
+					if dt.get(id) == nil && wakeGracePreservesUndesiredRow(infoPostHeal, clk.Now()) &&
+						!isAgentEffectivelySuspendedWith(cfg, cityPath, sessionAgentConfigInfo(cfg, infoPostHeal), suspState) {
 						if trace != nil {
 							template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
 							if template == "" {
