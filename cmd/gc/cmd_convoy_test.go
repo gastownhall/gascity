@@ -340,6 +340,53 @@ func TestConvoyListAcrossStores(t *testing.T) {
 	}
 }
 
+// TestConvoyListCrossRigTracksResolveLiveStatus pins sc-uhhvkd: list progress
+// must resolve a tracked member living in another rig's store from that
+// store's authoritative current status, not the unresolved "unknown"
+// placeholder convoycore reports for a class the caller never named.
+func TestConvoyListCrossRigTracksResolveLiveStatus(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	rigStore.IDPrefix = "rig"
+
+	convoy, _ := cityStore.Create(beads.Bead{Title: "batch", Type: "convoy"})
+	item, _ := rigStore.Create(beads.Bead{Title: "rig task"})
+	requireNoError(t, cityStore.DepAdd(convoy.ID, item.ID, "tracks"))
+	requireNoError(t, rigStore.Close(item.ID))
+
+	fanout := []convoyStoreView{{store: cityStore}, {store: rigStore}}
+
+	var stdout, stderr bytes.Buffer
+	code := doConvoyListAcrossStores(fanout, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyListAcrossStores --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var result convoyListResultJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if len(result.Convoys) != 1 {
+		t.Fatalf("convoys = %+v, want exactly one", result.Convoys)
+	}
+	progress := result.Convoys[0].Progress
+	if progress.Closed != 1 || progress.Total != 1 {
+		t.Fatalf("progress = %+v, want the cross-rig tracked child resolved and reported as closed (1/1)", progress)
+	}
+
+	// The plain-text path resolves the same way: the closed cross-rig child's
+	// progress must render "1/1 closed", not the "0/1" an unresolved
+	// placeholder would produce.
+	stdout.Reset()
+	stderr.Reset()
+	code = doConvoyListAcrossStores(fanout, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyListAcrossStores = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "1/1 closed") {
+		t.Fatalf("stdout = %q, want 1/1 closed progress for the resolved cross-rig child", stdout.String())
+	}
+}
+
 func TestConvoyListJSON(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{
@@ -558,6 +605,66 @@ func TestConvoyStatusJSONReportsDanglingTracks(t *testing.T) {
 	}
 	if result.Progress.Closed != 1 || result.Progress.Total != 2 || result.Progress.DanglingTracks != 1 {
 		t.Fatalf("progress = %+v, want 1/2 with 1 dangling track", result.Progress)
+	}
+}
+
+// TestConvoyStatusCrossRigTracksResolveLiveStatus pins sc-uhhvkd: a tracked
+// member living in a rig store other than the convoy's own must resolve to
+// its live authoritative status, not the unresolved "unknown" placeholder
+// convoycore reports for a class the caller never named.
+func TestConvoyStatusCrossRigTracksResolveLiveStatus(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	rigStore.IDPrefix = "rig"
+
+	convoy, _ := cityStore.Create(beads.Bead{Title: "batch", Type: "convoy"})
+	item, _ := rigStore.Create(beads.Bead{Title: "rig task"})
+	requireNoError(t, cityStore.DepAdd(convoy.ID, item.ID, "tracks"))
+	requireNoError(t, rigStore.Close(item.ID))
+
+	var stdout, stderr bytes.Buffer
+	code := doConvoyStatusWithJSON(cityStore, []string{convoy.ID}, true, &stdout, &stderr, rigStore)
+	if code != 0 {
+		t.Fatalf("doConvoyStatusWithJSON --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var result convoyStatusResultJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if len(result.Children) != 1 || result.Children[0].ID != item.ID || result.Children[0].Status != "closed" {
+		t.Fatalf("children = %+v, want the cross-rig tracked child %s rendered with its live closed status", result.Children, item.ID)
+	}
+	if result.Children[0].DanglingTrack {
+		t.Fatalf("children = %+v, cross-rig child resolved as an unresolved placeholder instead of its live status", result.Children)
+	}
+	if result.Progress.Closed != 1 || result.Progress.Total != 1 {
+		t.Fatalf("progress = %+v, want 1/1 closed", result.Progress)
+	}
+}
+
+// TestConvoyStatusDedupesLegacyParentAndTracksEdgeToSameChild pins sc-uhhvkd:
+// a child that is both a legacy ParentID child of the convoy AND explicitly
+// tracked via a `tracks` dependency edge renders exactly once, never twice.
+func TestConvoyStatusDedupesLegacyParentAndTracksEdgeToSameChild(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"})         // gc-1
+	_, _ = store.Create(beads.Bead{Title: "dual-linked", ParentID: "gc-1"}) // gc-2
+	requireNoError(t, store.DepAdd("gc-1", "gc-2", "tracks"))
+
+	var stdout, stderr bytes.Buffer
+	code := doConvoyStatusWithJSON(store, []string{"gc-1"}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyStatusWithJSON --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var result convoyStatusResultJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if len(result.Children) != 1 {
+		t.Fatalf("children = %+v, want the dual-linked child rendered exactly once", result.Children)
+	}
+	if result.Progress.Total != 1 {
+		t.Fatalf("progress.total = %d, want 1", result.Progress.Total)
 	}
 }
 
@@ -1150,6 +1257,49 @@ func TestConvoyCheckAcrossStores(t *testing.T) {
 	}
 }
 
+// TestConvoyCheckCrossRigTrackedChildMustCloseToAutoClose pins sc-uhhvkd:
+// check must resolve a tracked member living in another rig's store from
+// that store's authoritative current status, and refuse to close the convoy
+// until that unique authoritative child is terminal too.
+func TestConvoyCheckCrossRigTrackedChildMustCloseToAutoClose(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	rigStore.IDPrefix = "rig"
+
+	convoy, _ := cityStore.Create(beads.Bead{Title: "batch", Type: "convoy"})
+	item, _ := rigStore.Create(beads.Bead{Title: "rig task"})
+	requireNoError(t, cityStore.DepAdd(convoy.ID, item.ID, "tracks"))
+
+	fanout := []convoyStoreView{{store: cityStore}, {store: rigStore}}
+
+	var stdout, stderr bytes.Buffer
+	code := doConvoyCheckAcrossStores(fanout, events.Discard, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyCheckAcrossStores = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "0 convoy(s) auto-closed") {
+		t.Fatalf("stdout = %q, want the convoy to stay open while its cross-rig tracked child is open", stdout.String())
+	}
+	if got, _ := cityStore.Get(convoy.ID); got.Status == "closed" {
+		t.Fatal("convoy auto-closed with an open cross-rig tracked child")
+	}
+
+	requireNoError(t, rigStore.Close(item.ID))
+
+	stdout.Reset()
+	stderr.Reset()
+	code = doConvoyCheckAcrossStores(fanout, events.Discard, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyCheckAcrossStores = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "1 convoy(s) auto-closed") {
+		t.Fatalf("stdout = %q, want the convoy auto-closed once its cross-rig tracked child closed", stdout.String())
+	}
+	if got, _ := cityStore.Get(convoy.ID); got.Status != "closed" {
+		t.Fatalf("convoy status = %q, want closed", got.Status)
+	}
+}
+
 // --- gc convoy stranded ---
 
 func TestConvoyStranded(t *testing.T) {
@@ -1261,6 +1411,39 @@ func TestConvoyStrandedAcrossStores(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestConvoyStrandedOmitsBlockedAndDeferred pins sc-uhhvkd: blocked and
+// deferred children are nonterminal but not ready work, so stranded must
+// omit them even though they carry no assignee. Only the genuinely ready
+// unassigned child is reported.
+func TestConvoyStrandedOmitsBlockedAndDeferred(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"}) // gc-1
+
+	_, _ = store.Create(beads.Bead{Title: "blocked task", ParentID: "gc-1"}) // gc-2
+	blocked := "blocked"
+	requireNoError(t, store.Update("gc-2", beads.UpdateOpts{Status: &blocked}))
+
+	_, _ = store.Create(beads.Bead{Title: "deferred task", ParentID: "gc-1", IndefinitelyDeferred: true}) // gc-3
+
+	_, _ = store.Create(beads.Bead{Title: "genuinely stranded", ParentID: "gc-1"}) // gc-4
+
+	var stdout, stderr bytes.Buffer
+	code := doConvoyStranded(store, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyStranded = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	got := stdout.String()
+	if strings.Contains(got, "blocked task") {
+		t.Errorf("stdout = %q, blocked child must not render as stranded ready work", got)
+	}
+	if strings.Contains(got, "deferred task") {
+		t.Errorf("stdout = %q, deferred child must not render as stranded ready work", got)
+	}
+	if !strings.Contains(got, "genuinely stranded") {
+		t.Errorf("stdout = %q, want the genuinely ready unassigned child listed", got)
 	}
 }
 

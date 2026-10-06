@@ -307,10 +307,9 @@ func listActiveWorkflowProjectionBeads(store beads.Store) ([]beads.Bead, error) 
 	// One Live, status-scoped read per active status, unioned by ID.
 	//
 	// The old raw scan could not gate status at all (gc-4zb): mapBdStatus folds
-	// bd's blocked/deferred/review/testing into Gas City's three statuses, so a
-	// scanned blocked root arrives with Status "open" and is indistinguishable
-	// from ready work. Filtering the snapshot on b.Status keeps every one of
-	// them for the same reason. Only the backing store filters on the raw
+	// bd's deferred/review/testing into "open" and keeps blocked in the open SET,
+	// so a scanned parked root still reads as open work. Filtering the snapshot on
+	// b.Status keeps every one of them for the same reason. Only the backing store filters on the raw
 	// status, by passing --status to bd, and only a Live query reaches it — a
 	// cached read matches on the collapsed status.
 	//

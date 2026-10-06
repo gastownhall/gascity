@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"text/tabwriter"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -1067,8 +1068,20 @@ func doConvoyList(store beads.Store, stdout, stderr io.Writer) int {
 	return doConvoyListAcrossStores([]convoyStoreView{{store: store}}, false, stdout, stderr)
 }
 
-func listConvoyChildren(store beads.Store, convoyID string, includeClosed bool) ([]beads.Bead, error) {
-	return convoycore.Members(store, convoyID, includeClosed)
+func listConvoyChildren(store beads.Store, convoyID string, includeClosed bool, workStores ...beads.Store) ([]beads.Bead, error) {
+	return convoycore.Members(store, convoyID, includeClosed, workStores...)
+}
+
+// convoyStoreHandles extracts the raw store handles from a fan-out, for
+// passing as convoycore's Work-class tail: a tracked member can live in any
+// store the fan-out opened, not just the convoy's own, and Members/MembersIn
+// only resolves a class it is named against.
+func convoyStoreHandles(stores []convoyStoreView) []beads.Store {
+	handles := make([]beads.Store, 0, len(stores))
+	for _, v := range stores {
+		handles = append(handles, v.store)
+	}
+	return handles
 }
 
 func doConvoyListAcrossStores(stores []convoyStoreView, jsonOut bool, stdout, stderr io.Writer) int {
@@ -1077,9 +1090,10 @@ func doConvoyListAcrossStores(stores []convoyStoreView, jsonOut bool, stdout, st
 		fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	workStores := convoyStoreHandles(stores)
 
 	if jsonOut {
-		return writeConvoyListJSON(convoys, stdout, stderr)
+		return writeConvoyListJSON(convoys, workStores, stdout, stderr)
 	}
 
 	if len(convoys) == 0 {
@@ -1090,7 +1104,7 @@ func doConvoyListAcrossStores(stores []convoyStoreView, jsonOut bool, stdout, st
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tTITLE\tPROGRESS") //nolint:errcheck // best-effort stdout
 	for _, c := range convoys {
-		children, err := listConvoyChildren(c.store, c.bead.ID, true)
+		children, err := listConvoyChildren(c.store, c.bead.ID, true, workStores...)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc convoy list: children of %s: %v\n", c.bead.ID, err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1102,10 +1116,10 @@ func doConvoyListAcrossStores(stores []convoyStoreView, jsonOut bool, stdout, st
 	return 0
 }
 
-func writeConvoyListJSON(convoys []convoyWithStore, stdout, stderr io.Writer) int {
+func writeConvoyListJSON(convoys []convoyWithStore, workStores []beads.Store, stdout, stderr io.Writer) int {
 	items := make([]convoySummaryJSON, 0, len(convoys))
 	for _, c := range convoys {
-		children, err := listConvoyChildren(c.store, c.bead.ID, true)
+		children, err := listConvoyChildren(c.store, c.bead.ID, true, workStores...)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc convoy list: children of %s: %v\n", c.bead.ID, err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1268,12 +1282,36 @@ func renderConvoyStatusFromAPI(cr api.CachedRead[api.ConvoyStatusView], jsonOut 
 }
 
 // doConvoyStatusFallback is the direct-bd path for "gc convoy status".
+//
+// It resolves the owning store through resolveConvoyStore exactly as the
+// mutation commands do, but records every directory that resolution opens so
+// a cross-rig tracked member's Get is answered by the SAME handle the owner
+// scan already opened for that directory. Opening a directory a second time
+// would hand convoycore two distinct candidates for one physical store, and
+// it would refuse a same-store member as a duplicate residence.
 func doConvoyStatusFallback(cityPath, convoyID string, jsonOut bool, stdout, stderr io.Writer) int {
-	store, code := openConvoyStoreByIDAt(convoyID, cityPath, stderr, "gc convoy status")
-	if store == nil {
-		return code
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy status: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
-	return doConvoyStatusWithJSON(store, []string{convoyID}, jsonOut, stdout, stderr)
+	emitLoadCityConfigWarnings(stderr, prov)
+
+	var opened []beads.Store
+	store, err := resolveConvoyStore(convoyID, cfg, cityPath, func(storeDir string) (beads.Store, error) {
+		s, err := openStoreAtForCity(storeDir, cityPath)
+		if err != nil {
+			return nil, err
+		}
+		opened = append(opened, s)
+		return s, nil
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy status: %v\n", err)              //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return doConvoyStatusWithJSON(store, []string{convoyID}, jsonOut, stdout, stderr, append(opened, store)...)
 }
 
 // doConvoyStatus shows detailed status of a convoy and its children.
@@ -1281,7 +1319,12 @@ func doConvoyStatus(store beads.Store, args []string, stdout, stderr io.Writer) 
 	return doConvoyStatusWithJSON(store, args, false, stdout, stderr)
 }
 
-func doConvoyStatusWithJSON(store beads.Store, args []string, jsonOut bool, stdout, stderr io.Writer) int {
+// doConvoyStatusWithJSON resolves and renders one convoy's status. workStores
+// names the additional Work-class stores (typically every rig's) a tracked
+// member can live in; a store not named here still renders its member as an
+// unresolved placeholder rather than a live cross-rig status (convoycore's
+// partial-result rule).
+func doConvoyStatusWithJSON(store beads.Store, args []string, jsonOut bool, stdout, stderr io.Writer, workStores ...beads.Store) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc convoy status: missing convoy ID") //nolint:errcheck // best-effort stderr
 		return 1
@@ -1298,7 +1341,7 @@ func doConvoyStatusWithJSON(store beads.Store, args []string, jsonOut bool, stdo
 		return 1
 	}
 
-	children, err := listConvoyChildren(store, id, true)
+	children, err := listConvoyChildren(store, id, true, workStores...)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc convoy status: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1768,11 +1811,12 @@ func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, rec events.Recorder
 	}
 
 	closed := 0
+	workStores := convoyStoreHandles(stores)
 	for _, item := range convoys {
 		if hasLabel(item.bead.Labels, "owned") {
 			continue
 		}
-		children, err := listConvoyChildren(item.store, item.bead.ID, true)
+		children, err := listConvoyChildren(item.store, item.bead.ID, true, workStores...)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc convoy check: children of %s: %v\n", item.bead.ID, err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1895,8 +1939,10 @@ func doConvoyStrandedAcrossStoresJSON(stores []convoyStoreView, jsonOut bool, st
 	}
 	var items []strandedItem
 
+	now := time.Now()
+	workStores := convoyStoreHandles(stores)
 	for _, item := range convoys {
-		children, err := listConvoyChildren(item.store, item.bead.ID, false)
+		children, err := listConvoyChildren(item.store, item.bead.ID, false, workStores...)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc convoy stranded: children of %s: %v\n", item.bead.ID, err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1905,7 +1951,13 @@ func doConvoyStrandedAcrossStoresJSON(stores []convoyStoreView, jsonOut bool, st
 			if convoycore.IsUnresolvedTrackedItem(ch) {
 				continue
 			}
-			if !convoycore.IsTerminalStatus(ch.Status) && ch.Assignee == "" {
+			// blocked and deferred are nonterminal but not ready work: a
+			// dependency-blocked or deferred child has no worker for a reason
+			// other than nobody has picked it up yet, so it is not stranded.
+			if convoycore.IsTerminalStatus(ch.Status) || ch.Status == "blocked" || beads.IsDeferred(ch, now) {
+				continue
+			}
+			if ch.Assignee == "" {
 				items = append(items, strandedItem{convoyID: item.bead.ID, issue: ch})
 			}
 		}

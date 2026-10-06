@@ -44,6 +44,18 @@ type convoyCheckResponse struct {
 	Complete bool   `json:"complete" doc:"True when all child beads are closed and total > 0."`
 }
 
+// beadStoreValues flattens a rig-name-keyed store map into the handle slice
+// convoycore's Work-class fan-out takes. Map iteration order does not matter
+// here: MemberClasses.candidates dedups repeats and probes every named class,
+// so the caller-visible result does not depend on this slice's order.
+func beadStoreValues(stores map[string]beads.Store) []beads.Store {
+	values := make([]beads.Store, 0, len(stores))
+	for _, store := range stores {
+		values = append(values, store)
+	}
+	return values
+}
+
 // workflowDeleteResponse is the response for DELETE /v0/workflow/{workflow_id}.
 // Partial/PartialErrors fire when the teardown swept beads but one or
 // more operations (list, close, dep-remove, delete) failed mid-way;
@@ -160,6 +172,7 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 	}
 
 	stores := s.state.BeadStores()
+	workStores := beadStoreValues(stores)
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
 		b, err := store.Get(id)
@@ -173,7 +186,10 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 			return nil, apierr.ConvoyNotFound.Msg("bead " + id + " is not a convoy")
 		}
 
-		children, err := convoycore.Members(store, id, true)
+		// A tracked member can live in any rig's store, not just the one
+		// that owns this convoy, so every open store is named here as a
+		// Work-class handle rather than only the convoy's own.
+		children, err := convoycore.Members(store, id, true, workStores...)
 		if err != nil {
 			return nil, apierr.Internal.Msg(err.Error())
 		}
@@ -406,6 +422,7 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 	}
 
 	stores := s.state.BeadStores()
+	workStores := beadStoreValues(stores)
 
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
@@ -420,7 +437,10 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 			return nil, apierr.InvalidRequest.Msg("bead " + id + " is not a convoy")
 		}
 
-		children, err := convoycore.Members(store, id, true)
+		// A tracked member can live in any rig's store, not just the one
+		// that owns this convoy, so every open store is named here as a
+		// Work-class handle rather than only the convoy's own.
+		children, err := convoycore.Members(store, id, true, workStores...)
 		if err != nil {
 			return nil, apierr.Internal.Msg(err.Error())
 		}
