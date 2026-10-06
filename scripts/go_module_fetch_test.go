@@ -42,11 +42,12 @@ var goModDownloadExemptWorkflows = map[string]string{
 	"bazel-test.yml": "Bazel fetches modules via go_deps",
 	// Installs gocyclo with `go install pkg@version`; never builds this module.
 	"complexity.yml": "go install of a pinned tool only",
-	// Publishing jobs build release artifacts; they do not consume the
-	// Actions cache, so a cached module can never reach a published binary.
-	"release.yml":         "release artifacts never consume the Actions cache",
-	"rc-release.yml":      "release artifacts never consume the Actions cache",
-	"gc-edge-publish.yml": "release artifacts never consume the Actions cache",
+	// Publishing jobs are not migrated: they keep actions/setup-go's own
+	// cache (its default), which restores GOMODCACHE from setup-go-* entries,
+	// so they never read the go-mod-download cache this action writes.
+	"release.yml":         "publishing job keeps setup-go's own cache; not migrated",
+	"rc-release.yml":      "publishing job keeps setup-go's own cache; not migrated",
+	"gc-edge-publish.yml": "publishing job keeps setup-go's own cache; not migrated",
 }
 
 type goFetchWorkflow struct {
