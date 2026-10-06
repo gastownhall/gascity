@@ -42,7 +42,9 @@ func TestGeneratedClientInSync(t *testing.T) {
 			break
 		}
 	}
-	args = append(args, "-oapi-codegen", oapiCodegen)
+	if oapiCodegen != "" {
+		args = append(args, "-oapi-codegen", oapiCodegen)
+	}
 	cmd := exec.Command(genClient, args...)
 	cmd.Dir = repoRoot
 	var out, errBuf bytes.Buffer
@@ -108,27 +110,25 @@ func sameStepDependencies(got, want *[]string) bool {
 	return slices.Equal(*got, *want)
 }
 
-// oapiCodegenBinary returns the oapi-codegen the drift check runs. Under
-// bazel it is the hermetic //MODULE.bazel-pinned build named by
-// GC_OAPI_CODEGEN (a runfiles path); under plain `go test` it is the one on
-// PATH (`make install-oapi-codegen`). A missing tool fails the test: a
-// skipped drift check would let the committed client rot unnoticed.
+// oapiCodegenBinary returns the oapi-codegen the drift check runs, or ""
+// to let cmd/gen-client pick (PATH, else `go run` of its pinned version).
+// Under bazel it is the hermetic MODULE.bazel-pinned build named by
+// GC_OAPI_CODEGEN (a runfiles path); a missing build fails the test, as does
+// any gen-client failure, so the drift check never silently skips.
 func oapiCodegenBinary(t *testing.T) string {
 	t.Helper()
-	if rel := os.Getenv("GC_OAPI_CODEGEN"); rel != "" {
-		for _, rf := range runfilesRoots() {
-			bin := filepath.Join(rf, filepath.FromSlash(rel))
-			if _, err := os.Stat(bin); err == nil {
-				return bin
-			}
+	rel := os.Getenv("GC_OAPI_CODEGEN")
+	if rel == "" {
+		return ""
+	}
+	for _, rf := range runfilesRoots() {
+		bin := filepath.Join(rf, filepath.FromSlash(rel))
+		if _, err := os.Stat(bin); err == nil {
+			return bin
 		}
-		t.Fatalf("GC_OAPI_CODEGEN=%q not found under runfiles %v", rel, runfilesRoots())
 	}
-	bin, err := exec.LookPath("oapi-codegen")
-	if err != nil {
-		t.Fatalf("oapi-codegen not on PATH (run `make install-oapi-codegen`, or `bazel test //internal/api/genclient:genclient_test` for the pinned build): %v", err)
-	}
-	return bin
+	t.Fatalf("GC_OAPI_CODEGEN=%q not found under runfiles %v", rel, runfilesRoots())
+	return ""
 }
 
 // runfilesRoots lists the bazel runfiles directories in lookup order.

@@ -1,9 +1,32 @@
 package main
 
 import (
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestOapiCodegenCommandPrefersExplicitThenPathThenPinnedGoRun(t *testing.T) {
+	onPath := func(string) (string, error) { return "/usr/bin/oapi-codegen", nil }
+	missing := func(string) (string, error) { return "", errors.New("not found") }
+	for _, tc := range []struct {
+		name     string
+		explicit string
+		lookPath func(string) (string, error)
+		want     []string
+	}{
+		{name: "explicit", explicit: "/bazel/oapi-codegen", lookPath: onPath, want: []string{"/bazel/oapi-codegen"}},
+		{name: "path", lookPath: onPath, want: []string{"/usr/bin/oapi-codegen"}},
+		{name: "pinned go run", lookPath: missing, want: []string{"go", "run", "github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := oapiCodegenCommand(tc.explicit, tc.lookPath); !slices.Equal(got, tc.want) {
+				t.Fatalf("oapiCodegenCommand = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestCanonicalizeGeneratedHeaderDropsToolBuildIdentity(t *testing.T) {
 	for _, tc := range []struct {
