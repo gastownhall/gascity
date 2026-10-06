@@ -1,4 +1,74 @@
 load("@rules_go//go:def.bzl", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+exports_files([
+    "check-generated-in-sync.sh",
+    "check-go-format.sh",
+])
+
+# The repo's shell guards (formerly preflight-static steps), each with
+# exactly the inputs it reads.
+
+sh_test(
+    name = "check_gomod_replace_test",
+    srcs = ["check-gomod-replace.sh"],
+    args = ["$(rootpath //:go.mod)"],
+    data = ["//:go.mod"],
+)
+
+# Scans every non-test Go file (the guard skips _test.go, testdata/ and
+# vendor/ itself).
+sh_test(
+    name = "check_core_boundary_test",
+    srcs = ["check-core-boundary.sh"],
+    args = ["--declared-tree"],
+    data = [
+        "//:go.mod",
+        "//:repo_go_srcs",
+    ],
+)
+
+# Check #3 (pkg/eventexport imports nothing from internal/) reads the Bazel
+# dependency graph instead of `go list -deps`.
+genquery(
+    name = "eventexport_deps",
+    expression = "deps(//pkg/eventexport)",
+    scope = ["//pkg/eventexport"],
+)
+
+sh_test(
+    name = "check_eventexport_isolation_test",
+    srcs = ["check-eventexport-isolation.sh"],
+    args = [
+        "--deps-file",
+        "$(rootpath :eventexport_deps)",
+    ],
+    data = [
+        ":eventexport_deps",
+        "//cmd/gc:event_export.go",
+        "//internal/eventfeed:bazel_repo_srcs",
+        "//internal/supervisor:config.go",
+        "//pkg/eventexport:bazel_repo_srcs",
+    ],
+)
+
+# Measures the hermetic //cmd/gc. That link is cgo (Dolt's ICU regex), so
+# it is larger than the CGO_ENABLED=0 release-shaped build the script's
+# default cap is measured against: 207,034,352 bytes at 9fdc52d82c versus
+# 180,287,491 for the release shape. The cap keeps the same ~5.4% headroom.
+sh_test(
+    name = "check_native_dependency_surface_test",
+    srcs = ["check-native-dependency-surface.sh"],
+    args = [
+        "--gc-binary",
+        "$(rootpath //cmd/gc)",
+    ],
+    data = [
+        "//:go.sum",
+        "//cmd/gc",
+    ],
+    env = {"GC_NATIVE_DEP_MAX_BINARY_BYTES": "218000000"},
+)
 
 go_test(
     name = "scripts_test",
@@ -77,6 +147,7 @@ go_test(
         ["**"],
         exclude = ["BUILD.bazel"],
     ) + [
+        "BUILD.bazel",
         "//:.bazelrc",
         "//:.bazelversion",
         "//:MODULE.bazel",

@@ -12,6 +12,12 @@ bazel_dep(name = "toolchains_llvm", version = "1.11.0")
 # Loaded by @llvm_dist_linux_x86_64's BUILD file (toolchains_llvm's template).
 bazel_dep(name = "rules_cc", version = "0.2.17")
 
+# sh_test / py_test for the repo's shell guards and CI-policy unit tests
+# (Bazel 9 has no native shell or Python rules). Same versions the rest of
+# the module graph already resolves.
+bazel_dep(name = "rules_shell", version = "0.6.1")
+bazel_dep(name = "rules_python", version = "1.7.0")
+
 # Hermetic C/C++ toolchain. rules_go builds the Go stdlib and every cgo
 # package (Dolt's go-icu-regex, gozstd, gopsutil, ...) with the registered C
 # toolchain, and every Go compile depends on the stdlib, so a host-detected
@@ -207,7 +213,101 @@ go_deps.module_override(
     patches = ["//third_party/patches:protoc_gen_validate_build.patch"],
     path = "github.com/envoyproxy/protoc-gen-validate",
 )
-use_repo(go_deps, "com_github_burntsushi_toml", "com_github_cenkalti_backoff_v4", "com_github_danielgtaylor_huma_v2", "com_github_fsnotify_fsnotify", "com_github_gastownhall_gascity_packs", "com_github_go_jose_go_jose_v4", "com_github_go_sql_driver_mysql", "com_github_golang_jwt_jwt_v5", "com_github_google_shlex", "com_github_google_uuid", "com_github_gorilla_websocket", "com_github_invopop_jsonschema", "com_github_masterminds_semver_v3", "com_github_oapi_codegen_runtime", "com_github_pb33f_libopenapi", "com_github_pb33f_libopenapi_validator", "com_github_rogpeppe_go_internal", "com_github_santhosh_tekuri_jsonschema_v6", "com_github_shirou_gopsutil_v4", "com_github_spf13_cobra", "com_github_spf13_pflag", "com_github_steveyegge_beads", "com_github_stretchr_testify", "in_gopkg_yaml_v3", "io_k8s_api", "io_k8s_apimachinery", "io_k8s_client_go", "io_opentelemetry_go_otel", "io_opentelemetry_go_otel_exporters_otlp_otlplog_otlploghttp", "io_opentelemetry_go_otel_exporters_otlp_otlpmetric_otlpmetrichttp", "io_opentelemetry_go_otel_log", "io_opentelemetry_go_otel_metric", "io_opentelemetry_go_otel_sdk", "io_opentelemetry_go_otel_sdk_log", "io_opentelemetry_go_otel_sdk_metric", "net_pgregory_rapid", "org_golang_x_mod", "org_golang_x_sync", "org_golang_x_sys", "org_golang_x_term", "org_modernc_sqlite")
+
+# oapi-codegen generates internal/api/genclient/client_gen.go. It is a
+# build tool, not a gc dependency, so it stays out of go.mod (a `tool`
+# directive would pull its module graph into gc's and trip
+# scripts/check-native-dependency-surface.sh). Pinned to the version
+# `make install-oapi-codegen` installs; only the modules its go.mod needs
+# that gc's go.mod does not already provide are declared here, and those
+# shared with gc resolve to gc's versions. //internal/api/genclient's drift
+# test runs the resulting binary hermetically.
+go_deps.module(
+    path = "github.com/oapi-codegen/oapi-codegen/v2",
+    sum = "h1:4i+F2cvwBFZeplxCssNdLy3MhNzUD87mI3HnayHZkAU=",
+    version = "v2.6.0",
+)
+
+# oapi-codegen v2.6.0's requirements absent from gc's go.mod.
+go_deps.module(
+    indirect = True,
+    path = "github.com/getkin/kin-openapi",
+    sum = "h1:pJdmNohVIJ97r4AUFtEXRXwESr8b0bD721u/Tz6k8PQ=",
+    version = "v0.133.0",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/speakeasy-api/openapi-overlay",
+    sum = "h1:VOdQ03eGKeiHnpb1boZCGm7x8Haj6gST0P3SGTX95GU=",
+    version = "v0.10.2",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/dprotaso/go-yit",
+    sum = "h1:PRxIJD8XjimM5aTknUK9w6DHLDox2r2M3DI4i2pnd3w=",
+    version = "v0.0.0-20220510233725-9ba8df137936",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/mohae/deepcopy",
+    sum = "h1:RWengNIwukTxcDr9M+97sNutRR1RKhG96O6jWumTTnw=",
+    version = "v0.0.0-20170929034955-c48cc78d4826",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/oasdiff/yaml",
+    sum = "h1:G7ERwszslrBzRxj//JalHPu/3yz+De2J+4aLtSRlHiY=",
+    version = "v0.0.0-20250309154309-f31be36b4037",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/oasdiff/yaml3",
+    sum = "h1:bQx3WeLcUWy+RletIKwUIt4x3t8n2SxavmoclizMb8c=",
+    version = "v0.0.0-20250309153720-d2182401db90",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/perimeterx/marshmallow",
+    sum = "h1:a2LALqQ1BlHM8PZblsDdidgv1mWi1DgC2UmX50IvK2s=",
+    version = "v1.1.5",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/speakeasy-api/jsonpath",
+    sum = "h1:IhtFOV9EbXplhyRqsVhHoBmmYjblIRh5D1/g8DHMXJ8=",
+    version = "v0.6.0",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/vmware-labs/yaml-jsonpath",
+    sum = "h1:/5QKeCBGdsInyDCyVNLbXyilb61MXGi9NP674f9Hobk=",
+    version = "v0.3.2",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/woodsbury/decimal128",
+    sum = "h1:8pffMNWIlC0O5vbyHWFZAt5yWvWcrHA+3ovIIjVWss0=",
+    version = "v1.3.0",
+)
+
+# The Go formatters `make fmt-check` runs through golangci-lint (gofumpt and
+# goimports), as standalone binaries for //:go_format_test. gofumpt is pinned
+# to the version golangci-lint (GOLANGCI_LINT_VERSION in the Makefile)
+# bundles; goimports comes from the golang.org/x/tools gc's go.mod already
+# pins. go-cmp is the one gofumpt requirement gc's go.mod lacks.
+go_deps.module(
+    path = "mvdan.cc/gofumpt",
+    sum = "h1:zsEMWL8SVKGHNztrx6uZrXdp7AX8r421Vvp23sz7ik4=",
+    version = "v0.9.2",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/google/go-cmp",
+    sum = "h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=",
+    version = "v0.7.0",
+)
+
+use_repo(go_deps, "cc_mvdan_gofumpt", "com_github_burntsushi_toml", "com_github_cenkalti_backoff_v4", "com_github_danielgtaylor_huma_v2", "com_github_fsnotify_fsnotify", "com_github_gastownhall_gascity_packs", "com_github_go_jose_go_jose_v4", "com_github_go_sql_driver_mysql", "com_github_golang_jwt_jwt_v5", "com_github_google_shlex", "com_github_google_uuid", "com_github_gorilla_websocket", "com_github_invopop_jsonschema", "com_github_masterminds_semver_v3", "com_github_oapi_codegen_oapi_codegen_v2", "com_github_oapi_codegen_runtime", "com_github_pb33f_libopenapi", "com_github_pb33f_libopenapi_validator", "com_github_rogpeppe_go_internal", "com_github_santhosh_tekuri_jsonschema_v6", "com_github_shirou_gopsutil_v4", "com_github_spf13_cobra", "com_github_spf13_pflag", "com_github_steveyegge_beads", "com_github_stretchr_testify", "in_gopkg_yaml_v3", "io_k8s_api", "io_k8s_apimachinery", "io_k8s_client_go", "io_opentelemetry_go_otel", "io_opentelemetry_go_otel_exporters_otlp_otlplog_otlploghttp", "io_opentelemetry_go_otel_exporters_otlp_otlpmetric_otlpmetrichttp", "io_opentelemetry_go_otel_log", "io_opentelemetry_go_otel_metric", "io_opentelemetry_go_otel_sdk", "io_opentelemetry_go_otel_sdk_log", "io_opentelemetry_go_otel_sdk_metric", "net_pgregory_rapid", "org_golang_x_mod", "org_golang_x_sync", "org_golang_x_sys", "org_golang_x_term", "org_golang_x_tools", "org_modernc_sqlite")
 
 # Pinned prebuilt test-only binaries for hermetic integration/acceptance tests.
 # Same artifacts the go-test CI installs via .github/scripts/install-bd-archive.sh

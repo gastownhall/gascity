@@ -430,6 +430,22 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      # //cmd/genschema:genschema_in_sync_test leaves the exact regeneration
+      # patch in its test.outputs when the reference docs are stale; the Docs
+      # Autofix workflow (docs-autofix.yml) applies this artifact to the PR.
+      - name: Collect generated-docs freshness patch
+        if: failure() && steps.test.outcome == 'failure' && matrix.lane == 'unit'
+        run: |
+          patch=bazel-testlogs/cmd/genschema/genschema_in_sync_test/test.outputs/generated-docs-freshness.patch
+          if [ -s "$patch" ]; then cp -f "$patch" generated-docs-freshness.patch; fi
+      - name: Upload generated-docs freshness patch
+        if: failure() && steps.test.outcome == 'failure' && matrix.lane == 'unit' && hashFiles('generated-docs-freshness.patch') != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: generated-docs-freshness-patch
+          path: generated-docs-freshness.patch
+          retention-days: 7
+
       # The LLVM archive (~1.9 GB) has a runner cache entry of its own, keyed
       # on its sha256 (.github/actions/llvm-archive-cache), saved under the
       # same conditions as the runner cache below; it is then deleted from the

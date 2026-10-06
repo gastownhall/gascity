@@ -1,5 +1,7 @@
 load("@gazelle//:def.bzl", "gazelle")
 load("@rules_go//go:def.bzl", "go_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 # gazelle:prefix github.com/gastownhall/gascity
 
@@ -13,6 +15,46 @@ exports_files([
     "go.mod",
     "go.sum",
 ])
+
+# gofumpt + goimports over every Go file, the formatters `make fmt-check`
+# runs through golangci-lint, pinned in MODULE.bazel.
+sh_test(
+    name = "go_format_test",
+    srcs = ["//scripts:check-go-format.sh"],
+    args = [
+        "$(rootpath @cc_mvdan_gofumpt//:gofumpt)",
+        "$(rootpath @org_golang_x_tools//cmd/goimports)",
+    ],
+    data = [
+        "go.mod",
+        ":repo_go_srcs",
+        ":repo_go_test_srcs",
+        "@cc_mvdan_gofumpt//:gofumpt",
+        "@org_golang_x_tools//cmd/goimports",
+    ],
+)
+
+# Unit tests of the CI runner-selection and suite-coverage helpers the
+# workflows run (formerly `make test-ci-policy`'s Python half).
+py_test(
+    name = "ci_runner_policy_test",
+    srcs = [
+        ".github/workflows/scripts/runner_policy.py",
+        ".github/workflows/scripts/test_runner_policy.py",
+    ],
+    imports = [".github/workflows/scripts"],
+    main = ".github/workflows/scripts/test_runner_policy.py",
+)
+
+py_test(
+    name = "ci_suite_coverage_test",
+    srcs = [
+        ".github/workflows/scripts/ci_suite_coverage.py",
+        ".github/workflows/scripts/test_ci_suite_coverage.py",
+    ],
+    imports = [".github/workflows/scripts"],
+    main = ".github/workflows/scripts/test_ci_suite_coverage.py",
+)
 
 go_library(
     name = "gascity",

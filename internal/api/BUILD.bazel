@@ -526,7 +526,12 @@ go_test(
     ],
 )
 
-exports_files(["handler_sessions.go"])
+exports_files([
+    "handler_sessions.go",
+    # Committed spec, compared against cmd/genspec output by
+    # //cmd/genspec:genspec_in_sync_test.
+    "openapi.json",
+])
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 

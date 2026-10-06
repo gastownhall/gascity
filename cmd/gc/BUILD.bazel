@@ -1854,6 +1854,13 @@ exports_files(
     visibility = ["//visibility:public"],
 )
 
+# Part of the OSS event-export surface //scripts:check_eventexport_isolation_test
+# scans.
+exports_files(
+    ["event_export.go"],
+    visibility = ["//scripts:__pkg__"],
+)
+
 filegroup(
     name = "testdata_formulas",
     srcs = glob(["testdata/formulas/**"]),

@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"sort"
 	"strings"
 
@@ -13,11 +12,6 @@ import (
 )
 
 const (
-	setupGoAction = "actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c"
-	// goModDownloadAction warms the module cache with a retried
-	// `go mod download`; every Go-building job runs it right after setup-go.
-	goModDownloadAction = "./.github/actions/go-mod-download"
-
 	// These are SHA-256 digests of the display-free JSON projections below.
 	// Whole-workflow execution hashes deliberately pin shell text instead of
 	// approximating shell semantics: any execution change requires explicit
@@ -151,7 +145,18 @@ const (
 	// commit before `make spec-ci`, which now also runs the oasdiff gate; the
 	// spec-ci step is renamed to say so. Reviewed delta: one env var, one
 	// step, one step name; no new job, trigger or permission.
-	expectedCIExecutionHash     = "4b5ef3e8938cfd4faefdd1d06cd08342e2282a38477eeda741438c88e5fa2e13"
+	//
+	// Bumped again (ga-96smfk.8, checks moved to Bazel): preflight-static
+	// drops the CI-policy, go.mod replace, native dependency surface,
+	// event-export isolation, open-core boundary, format and docs steps, and
+	// preflight-generated drops its GC_REQUIRE_OAPI_CODEGEN env, the spec-ci
+	// and generated-docs drift steps and the patch upload. Each now runs as a
+	// Bazel test in the required bazel.yml unit lane; the OpenAPI
+	// breaking-change gate (needs the git base commit) stays as its own
+	// `make openapi-breaking-check` step. Reviewed delta: removed steps, one
+	// removed env and one renamed step command; no new job, trigger or
+	// permission.
+	expectedCIExecutionHash     = "a8330d6e8e86cab9b2712ce03cba55544a3284b3c29cc8a61adbd786efb0015d"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -349,9 +354,6 @@ func validate(ci, nightly, action map[string]any) error {
 	if err := validateChangesJob(ci); err != nil {
 		return err
 	}
-	if err := validatePolicyWiring(ci); err != nil {
-		return err
-	}
 	if err := validatePRProviderOwnership(ci); err != nil {
 		return err
 	}
@@ -434,32 +436,6 @@ func validateChangesJob(workflow map[string]any) error {
 		}
 	}
 
-	return nil
-}
-
-func validatePolicyWiring(workflow map[string]any) error {
-	staticJob, err := workflowJob(workflow, "preflight-static")
-	if err != nil {
-		return err
-	}
-	steps, err := mappingSlice(staticJob["steps"], "preflight-static steps")
-	if err != nil {
-		return err
-	}
-	setupIndex := findStep(steps, "uses", setupGoAction)
-	downloadIndex := findStep(steps, "uses", goModDownloadAction)
-	policyIndex := findStep(steps, "run", "make test-ci-policy")
-	firstGuardIndex := findStep(steps, "run", "make check-gomod-replace")
-	if setupIndex < 0 || downloadIndex != setupIndex+1 || policyIndex != downloadIndex+1 ||
-		firstGuardIndex <= policyIndex {
-		return fmt.Errorf(
-			"preflight-static must run the focused CI policy immediately after setup-go and the Go module download, and before other guards",
-		)
-	}
-	want := map[string]any{"run": "make test-ci-policy"}
-	if got := projectStep(steps[policyIndex]); !reflect.DeepEqual(got, want) {
-		return fmt.Errorf("preflight-static CI policy step must be unconditional and blocking")
-	}
 	return nil
 }
 
@@ -764,20 +740,6 @@ func copyValue(value any) any {
 	default:
 		return value
 	}
-}
-
-func findStep(steps []map[string]any, field, value string) int {
-	found := -1
-	for index, step := range steps {
-		if step[field] != value {
-			continue
-		}
-		if found >= 0 {
-			return -1
-		}
-		found = index
-	}
-	return found
 }
 
 type providerSelectorMatch struct {
