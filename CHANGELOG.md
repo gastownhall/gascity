@@ -45,6 +45,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code. A remote `gc sling` older than 1.5.1 does not check `status`: it
   exits 0, and its `--json` output reports `success: true`. Upgrade remote
   `gc` clients alongside the server.
+- **Supervisor API status codes and payload shapes changed for several
+  edits and reads.** API clients that branch on the old codes or on `null`
+  fields need updating:
+  - Edits to a rig-qualified agent served by a generic `scope = "rig"`
+    template (`PATCH`, `suspend`, `resume` on `/agent/{rig}/{name}`) now
+    apply to the template and return 200 instead of 404; `DELETE` on such an
+    agent returns 409 (delete the template instead).
+  - A config edit whose `[patches]` entry names a target missing from the
+    merged config returns 400 instead of 500.
+  - Closed sessions report `state: "closed"` instead of an empty state.
+  - Unset optional fields are omitted instead of sent as `null`: the map and
+    struct fields of agent, rig and provider patches (`Env`,
+    `OptionDefaults`, `Pool`, `ContextAdvisory`, `FormulaVars`), and the
+    absent records and `Metadata` of external-messaging inbound/outbound
+    results. The OpenAPI spec no longer lists them as required.
 
 ### Fixed
 
@@ -81,6 +96,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assignee string.
 - `gc session pin` and `gc session wake` report a demand-only singleton's pool
   session honestly instead of succeeding (#6858).
+- An API config edit is no longer lost when it lands while the controller is
+  reloading config: a load hashes the city's convention trees before reading
+  them, and a runtime reload can no longer publish an older config over a
+  concurrent API mutation (ga-opn27h; backport of #7084).
+- `GET /v0/city/{city}/patches/...` returns the patches declared in
+  `city.toml` instead of 404/empty after they were applied (ga-8hk1fe).
+- Edits to a rig-qualified agent served by a generic rig-scoped template reach
+  that template instead of answering 404 (ga-l24lrx).
+- `GET /v0/city/{city}/agents` reflects a config change right away instead of
+  serving a cached list keyed only on session state (ga-79peco).
 
 ## [1.5.0] - 2026-10-05
 
