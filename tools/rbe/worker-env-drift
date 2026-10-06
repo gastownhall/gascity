@@ -67,7 +67,15 @@ LABEL=rbe-worker-env-drift
 # worker measures.
 HOST_PATHS='^(tools/rbe/(worker-env|worker-env\.txt|blacksmith-worker\.sh)|platforms/BUILD\.bazel)$'
 
-summary() { [ -z "${GITHUB_STEP_SUMMARY:-}" ] || cat >>"$GITHUB_STEP_SUMMARY"; }
+# Every reader of a pipe here reads all of it: under pipefail, a reader that
+# stops early (an early return, grep -q, head) can kill its writer with
+# SIGPIPE and fail the pipeline, now and then or, for a long input, always.
+# summary reads its input even without a step summary to append it to.
+summary() {
+	if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then cat >>"$GITHUB_STEP_SUMMARY"; else cat >/dev/null; fi
+}
+# matches GREP_ARGS...: whether a line of stdin matches; grep -q that reads it all.
+matches() { [ "$(grep -c "$@")" -gt 0 ]; }
 output() { [ -z "${GITHUB_OUTPUT:-}" ] || echo "$1" >>"$GITHUB_OUTPUT"; }
 title() { echo "rbe worker-env drift: $1"; }
 run_url() { echo "${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-}"; }
@@ -86,7 +94,7 @@ pin_of() {
 # open_issue PIN: the URL of PIN's open drift issue, empty if none.
 open_issue() {
 	gh issue list -R "${GITHUB_REPOSITORY:?}" --label "$LABEL" --state open --limit 100 \
-		--json title,url --jq ".[] | select(.title == \"$(title "$1")\") | .url" | head -n 1
+		--json title,url --jq "first(.[] | select(.title == \"$(title "$1")\") | .url) // empty"
 }
 
 # drift_markdown DIR: the drift report, for the step summary and the issue.
@@ -162,7 +170,7 @@ cmd_await() {
 	local url="repos/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}/attempts/${GITHUB_RUN_ATTEMPT:-1}/jobs?per_page=100"
 	while :; do
 		# "<job status> <step status> <step conclusion>", "-" for what isn't there yet.
-		state=$(gh api "$url" --jq ".jobs[] | select(.name == \"$job\") | [.status, ((.steps // []) | map(select(.name == \"$step\")) | first | (.status // \"-\"), (.conclusion // \"-\"))] | map(. // \"-\") | join(\" \")" 2>/dev/null | head -n 1) || state=
+		state=$(gh api "$url" --jq "first(.jobs[] | select(.name == \"$job\") | [.status, ((.steps // []) | map(select(.name == \"$step\")) | first | (.status // \"-\"), (.conclusion // \"-\"))] | map(. // \"-\") | join(\" \")) // empty" 2>/dev/null) || state=
 		read -r job_status step_status conclusion <<<"${state:-- - -}"
 		if [ "$step_status" = completed ]; then
 			if [ "$conclusion" = success ]; then output drift=true; else output drift=false; fi
@@ -229,7 +237,7 @@ cmd_report() {
 	fi
 	pin=$(cat "$dir/pinned-pin")
 	got=$(cat "$dir/measured-pin")
-	if previous_pins | grep -qxF "$got"; then
+	if previous_pins | matches -xF -- "$got"; then
 		echo "::warning title=rbe worker-env stale host::this host measures $got, a previous pin of ${DEFAULT_BRANCH:-main}: a stale image after a re-pin, or Blacksmith rolled the image back. No drift issue. If every host is stale, revert the re-pin."
 		return 0
 	fi
@@ -240,7 +248,7 @@ cmd_report() {
 	issue=$(open_issue "$pin")
 	if [ -z "$issue" ]; then
 		gh issue create -R "$GITHUB_REPOSITORY" --title "$(title "$pin")" --label "$LABEL" --body-file "$body"
-	elif gh issue view "$issue" -R "$GITHUB_REPOSITORY" --json body,comments --jq '.body, .comments[].body' | grep -qF "$got"; then
+	elif gh issue view "$issue" -R "$GITHUB_REPOSITORY" --json body,comments --jq '.body, .comments[].body' | matches -F -- "$got"; then
 		echo "worker-env: $issue already has $got"
 	else
 		gh issue comment "$issue" -R "$GITHUB_REPOSITORY" --body-file "$body"
@@ -260,6 +268,9 @@ cmd_resolve() {
 			fi
 		done
 }
+
+# Sourced (the tests call the helpers directly): define, don't dispatch.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 sub=${1:-}
 [ $# -eq 0 ] || shift
