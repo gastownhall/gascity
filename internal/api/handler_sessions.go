@@ -95,10 +95,16 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 		provider, displayName = resolveProviderInfo(info.Provider, cfg)
 	}
 	rig, _ := config.ParseQualifiedName(info.Template)
+	state := string(info.State)
+	if info.Closed {
+		// session.Info blanks State on a closed bead and carries closure in
+		// Closed; the wire reports it as the closed lifecycle state.
+		state = string(session.BaseStateClosed)
+	}
 	r := sessionResponse{
 		ID:          info.ID,
 		Template:    info.Template,
-		State:       string(info.State),
+		State:       state,
 		Title:       info.Title,
 		Alias:       info.Alias,
 		Provider:    provider,
