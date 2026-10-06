@@ -56,23 +56,25 @@ changes, also smoke the built app with
 
 ## Development Workflow
 
-Every pull request links a documented issue, maintainers included. GitHub
-Issues is the public tracker, and the issue is where the context lives: why
-the change is needed, what it affects, and how we will know it works. The
-issue does not need maintainer approval before you open the pull request;
-file it first or alongside.
+GitHub Issues is the public tracker. Use an issue when it adds context
+reviewers need: a user-visible bug, a behavior or design change worth
+discussing first, or work that spans several pull requests. The issue holds
+why the change is needed, what it affects, and how we will know it works, and
+it does not need maintainer approval before you open the pull request. Small,
+self-explanatory changes (typos, flaky tests, refactors, CI or docs tweaks)
+can go straight to a pull request whose description explains the why.
 
-1. Find or file an issue. Use the issue forms: they ask for the motivation,
-   impact, risk, and verification plan (or, for a bug, the reproduction and
-   impact), which is most of what review needs. Changes that add SDK surface
-   should explain how they pass the
+1. If the change warrants an issue, find or file one. The issue forms ask for
+   the motivation, impact, risk, and verification plan (or, for a bug, the
+   reproduction and impact), which is most of what review needs. Changes that
+   add SDK surface should explain how they pass the
    [Primitive Test](engdocs/contributors/primitive-test.md).
 2. Create a branch from `main` (see [Branch Naming](#branch-naming)) and make
    the change.
 3. Run `make check`, and `make check-docs` if you touched docs, navigation,
    or cross-links.
-4. Open a pull request whose description says `Closes #<issue>` and shows
-   evidence that the change works end to end.
+4. Open a pull request that explains the change, shows evidence that it works
+   end to end, and says `Closes #<issue>` when there is one.
 
 Using an AI agent is fine; you are accountable for what it produces. Agents
 working in this repo read [AGENTS.md](AGENTS.md), which carries the same
@@ -283,7 +285,8 @@ Run this after changing build/packaging scripts or upgrading the Go toolchain.
 - Keep the first line under 72 characters
 - Explain *why* in the body; reviewers and `git blame` readers see the commit,
   not the PR thread
-- Reference the issue (`Closes #123`) in the pull request description
+- Reference the issue (`Closes #123`) in the pull request description when
+  there is one
 
 ## Issue Triage Labels
 
