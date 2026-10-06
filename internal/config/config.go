@@ -1443,6 +1443,18 @@ type BeadsConfig struct {
 	// "require" (guarded release or a typed refusal). Empty defaults to "off".
 	// Any other value fails config load.
 	GuardedRelease string `toml:"guarded_release,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
+	// AllowSchemaBehindMigrate opts this city in to letting the linked beads
+	// library migrate its database forward when the database's own schema
+	// cursor trails the library's ceiling. Without it, the native-store
+	// preflight schema check FAILs a behind schema (stays on BdStore) instead
+	// of risking a native open that would migrate a possibly-shared database;
+	// the direct native-open path withholds BD_ALLOW_REMOTE_MIGRATE from the
+	// linked library the same way. Default: false (nil). A break-glass
+	// GC_BEADS_ALLOW_SCHEMA_BEHIND_MIGRATE env override is registered in
+	// internal/rollout (beads.allow_schema_behind_migrate); read the effective
+	// value through internal/rollout.Flags.AllowSchemaBehindMigrate, never
+	// this field directly.
+	AllowSchemaBehindMigrate *bool `toml:"allow_schema_behind_migrate,omitempty" jsonschema:"default=false"`
 	// ProxiedIdleTimeout is how long a bd-owned proxied scope's proxy and Dolt
 	// child stay up with no connections before bd retires them; the next bd
 	// command restarts them. Go duration; "0" means never. A finite value
@@ -1552,6 +1564,15 @@ func (b BeadsConfig) NormalizedNativeTransport() string {
 		return "auto"
 	}
 	return raw
+}
+
+// AllowSchemaBehindMigrateEnabled reports the configured value, defaulting to
+// false (no opt-in) when unset. This is the raw config-only view; callers
+// deciding whether to actually let a behind schema migrate must read the
+// resolved internal/rollout gate (beads.allow_schema_behind_migrate), which
+// also applies the registered env override — never this accessor directly.
+func (b BeadsConfig) AllowSchemaBehindMigrateEnabled() bool {
+	return b.AllowSchemaBehindMigrate != nil && *b.AllowSchemaBehindMigrate
 }
 
 // UsesBD105CLISemantics reports whether bd-backed code may rely on bd 1.0.5

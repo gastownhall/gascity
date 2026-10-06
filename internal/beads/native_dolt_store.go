@@ -114,13 +114,13 @@ func processEnvSnapshotExcludingNativeDoltOpen() []string {
 	return ProcessEnvSnapshotExcludingNativeDoltOpen()
 }
 
-func withNativeDoltOpenEnv(env map[string]string) (func(), error) {
-	return withNativeDoltOpenEnvAndCredentialCommand(env, "")
+func withNativeDoltOpenEnv(scopeRoot string, env map[string]string) (func(), error) {
+	return withNativeDoltOpenEnvAndCredentialCommand(scopeRoot, env, "")
 }
 
-func withNativeDoltOpenEnvAndCredentialCommand(env map[string]string, credentialCommand string) (func(), error) {
+func withNativeDoltOpenEnvAndCredentialCommand(scopeRoot string, env map[string]string, credentialCommand string) (func(), error) {
 	nativeDoltOpenEnvMu.Lock()
-	restore, err := withNativeDoltOpenEnvAndCredentialCommandLocked(env, credentialCommand)
+	restore, err := withNativeDoltOpenEnvAndCredentialCommandLocked(scopeRoot, env, credentialCommand)
 	if err != nil {
 		nativeDoltOpenEnvMu.Unlock()
 		return nil, err
@@ -135,8 +135,79 @@ func withNativeDoltOpenEnvAndCredentialCommand(env map[string]string, credential
 // open environment while nativeDoltOpenEnvMu is already held. The lock-aware
 // form is used by hermetic opens, which must withhold the whole BEADS_ namespace
 // and project the selected keys as one indivisible environment transition.
-func withNativeDoltOpenEnvAndCredentialCommandLocked(env map[string]string, credentialCommand string) (func(), error) {
-	return withProjectedOpenEnvLocked(nativeDoltOpenEnvKeys, env, credentialCommand)
+// scopeRoot identifies the city whose opt-in withWithheldBDRemoteMigrateLocked
+// must honor — see AllowSchemaBehindMigrateForScope.
+func withNativeDoltOpenEnvAndCredentialCommandLocked(scopeRoot string, env map[string]string, credentialCommand string) (func(), error) {
+	restoreScoped, err := withProjectedOpenEnvLocked(nativeDoltOpenEnvKeys, env, credentialCommand)
+	if err != nil {
+		return nil, err
+	}
+	restoreBD, err := withWithheldBDRemoteMigrateLocked(scopeRoot)
+	if err != nil {
+		restoreScoped()
+		return nil, err
+	}
+	return func() {
+		restoreBD()
+		restoreScoped()
+	}, nil
+}
+
+// bdAllowRemoteMigrateEnvKey is the beads library's own opt-in for letting a
+// writable open migrate a shared/remote database forward
+// (internal/storage/schema/remote_migrate_gate.go, cited in
+// contract.PreflightChecker's checkSchemaCompat doc comment). The direct
+// native-open path must not let this leak in from the gc process's ambient
+// environment: it is withheld on every open unless the scope has opted in via
+// AllowSchemaBehindMigrateForScope, the same opt-in the preflight schema gate
+// requires before it will PASS a behind schema at all.
+// The proxied lane (native_dolt_proxied_open.go) already withholds this key
+// unconditionally via its own BD_ prefix withhold, independently of this
+// function.
+const bdAllowRemoteMigrateEnvKey = "BD_ALLOW_REMOTE_MIGRATE"
+
+// AllowSchemaBehindMigrateForScope decides, for the city at scopeRoot, whether
+// the direct native-open path may let BD_ALLOW_REMOTE_MIGRATE reach the linked
+// library (see bdAllowRemoteMigrateEnvKey's doc comment). This package has no
+// config or rollout access of its own (internal/beads must stay free of the
+// internal/rollout → internal/config → internal/orders → internal/beads
+// import cycle), so the default here is the safe floor: always false, i.e.
+// always withhold the opt-in, matching the beads.allow_schema_behind_migrate
+// gate's own builtin default.
+//
+// gc's composition root (cmd/gc's cityAllowSchemaBehindMigrate, wired in an
+// init()) overrides this with the SAME resolver function the native-store
+// preflight schema gate calls (contract.PreflightChecker.AllowSchemaBehindMigrate),
+// both backed by the one internal/rollout-resolved beads.allow_schema_behind_migrate
+// gate, so this package has no copy of that decision to drift out of step
+// with preflight's: a city preflight declared eligible on an opt-in behind
+// schema must open with that opt-in honored, and a city preflight refused it
+// must never see it leak in here either. The function is stateless per call
+// (it takes scopeRoot fresh every time) so it is safe to share across
+// concurrently served cities in one process; only the function VALUE is
+// swapped, once, at startup.
+var AllowSchemaBehindMigrateForScope = func(string) bool {
+	return false
+}
+
+func withWithheldBDRemoteMigrateLocked(scopeRoot string) (func(), error) {
+	previous, hadPrevious := os.LookupEnv(bdAllowRemoteMigrateEnvKey)
+	var err error
+	if AllowSchemaBehindMigrateForScope(scopeRoot) {
+		err = os.Setenv(bdAllowRemoteMigrateEnvKey, "1")
+	} else {
+		err = os.Unsetenv(bdAllowRemoteMigrateEnvKey)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("projecting native Dolt open env %s: %w", bdAllowRemoteMigrateEnvKey, err)
+	}
+	return func() {
+		if hadPrevious {
+			_ = os.Setenv(bdAllowRemoteMigrateEnvKey, previous)
+		} else {
+			_ = os.Unsetenv(bdAllowRemoteMigrateEnvKey)
+		}
+	}, nil
 }
 
 // withProjectedOpenEnvLocked is the projection itself, parameterised by the key
@@ -288,7 +359,7 @@ func openNativeStorageWithoutAmbientEnvWithCredentialCommand(ctx context.Context
 	}
 	defer restoreNamespace()
 
-	restoreEnv, err := withNativeDoltOpenEnvAndCredentialCommandLocked(nil, credentialCommand)
+	restoreEnv, err := withNativeDoltOpenEnvAndCredentialCommandLocked(scopeRoot, nil, credentialCommand)
 	if err != nil {
 		return nil, "", err
 	}
@@ -650,7 +721,7 @@ func openNativeStorage(ctx context.Context, scopeRoot string, env map[string]str
 }
 
 func openNativeStorageWithCredentialCommand(ctx context.Context, scopeRoot string, env map[string]string, credentialCommand string, readPrefix bool) (beadslib.Storage, string, error) {
-	restoreEnv, err := withNativeDoltOpenEnvAndCredentialCommand(env, credentialCommand)
+	restoreEnv, err := withNativeDoltOpenEnvAndCredentialCommand(scopeRoot, env, credentialCommand)
 	if err != nil {
 		return nil, "", err
 	}

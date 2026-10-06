@@ -133,6 +133,7 @@ go_test(
         "native_dolt_events_journal_test.go",
         "native_dolt_proxied_open_test.go",
         "native_dolt_readonly_test.go",
+        "native_dolt_store_allow_schema_behind_migrate_test.go",
         "native_dolt_store_close_retry_test.go",
         "native_dolt_store_conditional_retry_test.go",
         "native_dolt_store_conformance_test.go",

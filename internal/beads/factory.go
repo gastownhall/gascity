@@ -730,7 +730,12 @@ func warnNativeForceFallbackDeprecatedOnce(logger *slog.Logger) {
 
 func logNativeUnavailable(logger *slog.Logger, scope, gateName, reason string) {
 	if logger == nil {
-		return
+		// A rig-store caller that omits StoreOpenOptions.Logger (e.g.
+		// buildStores's shared legacy file store open) must not make a
+		// BdStore fallback invisible. slog.Default() is read here, at call
+		// time, rather than cached in a package var, so it reflects whatever
+		// default main has installed by the time this fires.
+		logger = slog.Default()
 	}
 	args := []any{
 		slog.String("gate", gateName),

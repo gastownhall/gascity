@@ -1,6 +1,11 @@
 package beads
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+)
 
 func TestParseBDVersion(t *testing.T) {
 	tests := []struct {
@@ -46,7 +51,7 @@ func TestProbeVersionsAgainstHostBinaries(t *testing.T) {
 		name  string
 		probe func() (string, error)
 	}{
-		{"bd", ProbeBDVersion},
+		{"bd", func() (string, error) { return ProbeBDVersion("") }},
 		{"dolt", ProbeDoltVersion},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -58,5 +63,40 @@ func TestProbeVersionsAgainstHostBinaries(t *testing.T) {
 				t.Errorf("%s version = %q, want a digit-led version string", tc.name, v)
 			}
 		})
+	}
+}
+
+// TestProbeBDVersionRespectsPreferredBin is the G4 (native-program) fix: a
+// city's pinned BD_BIN must be the binary whose version is reported, not
+// whichever "bd" happens to resolve first on the caller's PATH. This matters
+// for cherry, whose cities pin a bd-enterprise fork distinct from any "bd" a
+// shell's PATH might otherwise resolve.
+func TestProbeBDVersionRespectsPreferredBin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake binary script uses a POSIX shebang")
+	}
+	dir := t.TempDir()
+	fakeBD := filepath.Join(dir, "fake-bd")
+	script := "#!/bin/sh\necho 'bd version 9.9.9 (fakepin)'\n"
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil { //nolint:gosec // test fixture, deliberately executable
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	got, err := ProbeBDVersion(fakeBD)
+	if err != nil {
+		t.Fatalf("ProbeBDVersion(%q) error = %v", fakeBD, err)
+	}
+	if got != "9.9.9" {
+		t.Errorf("ProbeBDVersion(%q) = %q, want %q (the pinned binary's version, not PATH's bd)", fakeBD, got, "9.9.9")
+	}
+}
+
+// TestProbeBDVersionEmptyPreferredBinFallsBackToPATH pins that an empty
+// preferredBin preserves the pre-G4 behavior exactly: resolve "bd" on PATH.
+func TestProbeBDVersionEmptyPreferredBinFallsBackToPATH(t *testing.T) {
+	_, pathErr := ProbeBDVersion("")
+	_, emptyErr := probeBinaryVersion("bd", "")
+	if (pathErr == nil) != (emptyErr == nil) {
+		t.Fatalf("ProbeBDVersion(\"\") error presence = %v, probeBinaryVersion(\"bd\", \"\") error presence = %v; want the same PATH resolution", pathErr, emptyErr)
 	}
 }

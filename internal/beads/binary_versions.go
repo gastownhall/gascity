@@ -18,8 +18,13 @@ const binaryVersionProbeTimeout = 5 * time.Second
 // bd CLI reports (e.g. "1.0.4"). bd subprocess execution is confined to this
 // package by architectural rule (see boundary_test.go), so version probing
 // for operator-facing surfaces lives here rather than in the API layer.
-func ProbeBDVersion() (string, error) {
-	out, err := probeBinaryVersion("bd")
+//
+// preferredBin, when non-empty, is resolved instead of the bare "bd" name on
+// PATH — a city's pinned BD_BIN (city.toml workspace.env), so the reported
+// version is the binary that actually drives the city's bd work, not
+// whichever "bd" happens to be first on the caller's PATH.
+func ProbeBDVersion(preferredBin string) (string, error) {
+	out, err := probeBinaryVersion("bd", preferredBin)
 	if err != nil {
 		return "", err
 	}
@@ -28,9 +33,10 @@ func ProbeBDVersion() (string, error) {
 
 // ProbeDoltVersion runs `dolt version` and returns the parsed version the dolt
 // engine reports (e.g. "2.0.7"). Dolt is the store engine bd drives, so its
-// version probe is colocated with bd's.
+// version probe is colocated with bd's. Dolt has no per-city pin equivalent to
+// BD_BIN, so it is always resolved on PATH.
 func ProbeDoltVersion() (string, error) {
-	out, err := probeBinaryVersion("dolt")
+	out, err := probeBinaryVersion("dolt", "")
 	if err != nil {
 		return "", err
 	}
@@ -41,11 +47,18 @@ func ProbeDoltVersion() (string, error) {
 	return info.Raw, nil
 }
 
-// probeBinaryVersion locates name on PATH — the same resolution used when the
-// binary is driven for real work — and runs `<name> version` under a bounded
-// timeout, returning combined output.
-func probeBinaryVersion(name string) (string, error) {
-	path, err := exec.LookPath(name)
+// probeBinaryVersion locates the binary to probe and runs `<name> version`
+// under a bounded timeout, returning combined output. preferredBin, when
+// non-empty, is resolved (via exec.LookPath, so a relative path still
+// resolves and permission/existence are checked the same way) instead of
+// name on PATH — the same resolution used when the binary is driven for real
+// work.
+func probeBinaryVersion(name, preferredBin string) (string, error) {
+	lookup := name
+	if preferredBin != "" {
+		lookup = preferredBin
+	}
+	path, err := exec.LookPath(lookup)
 	if err != nil {
 		return "", fmt.Errorf("locate %s: %w", name, err)
 	}

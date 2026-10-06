@@ -2207,7 +2207,7 @@ func TestOpenNativeDoltStoreAtPersistsLocalStringsAcrossReopen(t *testing.T) {
 
 func TestProcessEnvSnapshotWaitsForNativeDoltOpenEnvRestore(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example.com")
-	restoreEnv, err := withNativeDoltOpenEnv(map[string]string{
+	restoreEnv, err := withNativeDoltOpenEnv("/city/snapshot-wait-scope", map[string]string{
 		"BEADS_DOLT_SERVER_HOST": "scoped.example.com",
 	})
 	if err != nil {
@@ -2335,7 +2335,7 @@ func TestOrdinaryNativeOpenWaitsForWholeBeadsNamespaceRestore(t *testing.T) {
 // "1", never the concurrent scope's transient value.
 func TestAmbientNativeDoltOpenEnvWaitsForNativeDoltOpenEnvRestore(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_TLS", "1")
-	restoreEnv, err := withNativeDoltOpenEnv(map[string]string{
+	restoreEnv, err := withNativeDoltOpenEnv("/city/ambient-wait-scope", map[string]string{
 		"BEADS_DOLT_SERVER_HOST": "scoped.example.com",
 	})
 	if err != nil {
@@ -2370,7 +2370,7 @@ func TestAmbientNativeDoltOpenEnvWaitsForNativeDoltOpenEnvRestore(t *testing.T) 
 
 func TestBdStorePurgeWaitsForNativeDoltOpenEnvRestore(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example.com")
-	restoreEnv, err := withNativeDoltOpenEnv(map[string]string{
+	restoreEnv, err := withNativeDoltOpenEnv("/city/purge-wait-scope", map[string]string{
 		"BEADS_DOLT_SERVER_HOST": "scoped.example.com",
 	})
 	if err != nil {
@@ -3435,7 +3435,7 @@ func TestOpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommandProjectsOnly
 // names, so passing an "empty environment" to it withholds nothing else.
 func TestScopedNativeDoltOpenEnvIgnoresKeysOutsideItsList(t *testing.T) {
 	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "/poison/credential-command")
-	restore, err := withNativeDoltOpenEnv(map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": ""})
+	restore, err := withNativeDoltOpenEnv("/city/scoped-ignores-outside-keys", map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": ""})
 	if err != nil {
 		t.Fatalf("withNativeDoltOpenEnv: %v", err)
 	}

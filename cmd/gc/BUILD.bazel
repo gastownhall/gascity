@@ -804,6 +804,7 @@ go_test(
         "beads_doltlite_binding_test.go",
         "beads_endpoint_provider_owned_test.go",
         "beads_native_compat_integration_test.go",
+        "beads_preflight_checker_test.go",
         "beads_provider_custom_types_env_test.go",
         "beads_provider_custom_types_test.go",
         "beads_provider_dirty_tables_test.go",

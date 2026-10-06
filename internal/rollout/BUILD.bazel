@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "capability.go",
         "doc.go",
+        "flag_beads_allow_schema_behind_migrate.go",
         "flag_beads_conditional_writes.go",
         "flag_beads_guarded_release.go",
         "flag_daemon_formula_v2.go",
