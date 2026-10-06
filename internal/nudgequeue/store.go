@@ -106,7 +106,7 @@ func decodeNudgeItem(b beads.Bead) NudgeShadow {
 	s := NudgeShadow{
 		BeadID:         b.ID,
 		CreatedAt:      b.CreatedAt,
-		Open:           b.Status == "open",
+		Open:           beads.IsOpenStatus(b.Status),
 		ID:             b.Metadata["nudge_id"],
 		State:          b.Metadata["state"],
 		TerminalReason: b.Metadata["terminal_reason"],

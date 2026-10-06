@@ -526,8 +526,8 @@ func TestSweepDetachedHandoffOrphansAcrossStores_RigOrphanCityStoredSession(t *t
 	}
 }
 
-// A candidate that is blocked in the backing store (bd blocked/review/testing,
-// which mapBdStatus collapses to "open" on every decoded read) must NOT be
+// A candidate that is blocked in the backing store (bd blocked, which stays in
+// the open SET, or review/testing, which still collapse to "open") must NOT be
 // re-stamped. The cached candidate List returns it as ready; only a Live query
 // reaches bd's raw-status filter and correctly omits it. This is the gc-4zb
 // class the sibling restoreCarriedWorkRoutes already guards — the MemStore-only
@@ -538,8 +538,8 @@ func TestSweepDetachedHandoffOrphansAcrossStores_RigOrphanCityStoredSession(t *t
 // passes with Live (collapsedBlockedStatusStore serves nil to a Live query).
 func TestSweepDetachedHandoffOrphans_SkipsBlockedCollapsedCandidate(t *testing.T) {
 	const sessionName = "gastown__polecat-th-blk"
-	// Backing store: the candidate is blocked in bd but decodes as "open"
-	// (mapBdStatus), carrying the full detached-orphan signature with an
+	// Backing store: the candidate is parked in bd but still reads as open work,
+	// carrying the full detached-orphan signature with an
 	// already-consumed (empty) gc.routed_to.
 	live := beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "EB-blk", Title: "finalize", Type: "task", Status: "open", Metadata: map[string]string{

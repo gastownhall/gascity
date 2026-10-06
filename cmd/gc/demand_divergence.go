@@ -114,7 +114,7 @@ func classifyDemandTrigger(triggerID, dir string, opts hookClaimOptions, ops hoo
 	// template: open, unassigned, route-matching, and not excluded by the shared
 	// serving rules. Anything else — a row that moved on, a sibling claim — is
 	// correct pull.
-	if status != "open" || !demandRowServable(bead) || !hookClaimMatchesRoute(bead, opts.RouteTargets) {
+	if !beads.IsOpenStatus(status) || !demandRowServable(bead) || !hookClaimMatchesRoute(bead, opts.RouteTargets) {
 		return status, events.DemandClaimBenign
 	}
 	switch classifyDemandRowClaimability(bead, ops.nowOrWallClock()) {

@@ -677,10 +677,11 @@ func (l *routeRecoveryLane) backstopPassOnPlane(plan storeref.ResolvedPlan, reas
 // Every guard it carried is preserved and separately pinned:
 //
 //   - Live on the open List is what makes Status:"open" mean open (gc-4zb).
-//     mapBdStatus folds bd's blocked/deferred/review/testing into "open", so a
-//     blocked bead is indistinguishable from ready work in every beads.Bead this
-//     code can read; only the backing store's raw --status=open filter excludes
-//     it, and only a Live query reaches that filter.
+//     mapBdStatus folds bd's deferred/review/testing into "open", and blocked
+//     survives as its own status but stays in the open SET (IsOpenStatus), so a
+//     parked bead still reads as open work in every beads.Bead this code can
+//     read; only the backing store's raw --status=open filter excludes it, and
+//     only a Live query reaches that filter.
 //   - The re-verify reads through the store's authoritative, cache-bypassing
 //     handle, because a plain read can return a cached bead that predates a
 //     cross-process claim (ga-bgu). A claim flips the bead to in_progress and
@@ -706,7 +707,7 @@ func (l *routeRecoveryLane) backstopLeg(leg planeLeg) routeRecoveryReport {
 	}
 	var ids []string
 	for _, b := range items {
-		if !leg.binding && b.Status == "open" && strings.TrimSpace(b.Assignee) == "" &&
+		if !leg.binding && beads.IsOpenStatus(b.Status) && strings.TrimSpace(b.Assignee) == "" &&
 			strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" {
 			// Already routed, on a leg the tick's demand read refuses: nothing
 			// will ever spawn a seat for it. See routeRecoveryReport.offPlaneRouted.
@@ -715,7 +716,7 @@ func (l *routeRecoveryLane) backstopLeg(leg planeLeg) routeRecoveryReport {
 		// Belt-and-braces with the Status:"open" query so the guarantee holds
 		// regardless of store-level filtering semantics: an assigned bead is
 		// already claimed and needs no route.
-		if carriedPoolRoute(b) == "" || b.Status != "open" || strings.TrimSpace(b.Assignee) != "" {
+		if carriedPoolRoute(b) == "" || !beads.IsOpenStatus(b.Status) || strings.TrimSpace(b.Assignee) != "" {
 			continue
 		}
 		ids = append(ids, b.ID)
@@ -794,7 +795,7 @@ func liveOpenCandidates(store beads.Store, ids []string) ([]beads.Bead, int, err
 			}
 			return nil, 1, err
 		}
-		if bead.Status != "open" {
+		if !beads.IsOpenStatus(bead.Status) {
 			return nil, 1, nil
 		}
 		return []beads.Bead{bead}, 1, nil
@@ -825,7 +826,7 @@ type routeRestoreOutcome struct {
 // ga-bgu).
 func (l *routeRecoveryLane) restoreRoute(store beads.Store, live beads.Bead, backstop bool) routeRestoreOutcome {
 	route := carriedPoolRoute(live)
-	if route == "" || live.Status != "open" || strings.TrimSpace(live.Assignee) != "" {
+	if route == "" || !beads.IsOpenStatus(live.Status) || strings.TrimSpace(live.Assignee) != "" {
 		if backstop {
 			marked, err := l.noteRecheckFailure(store, live.ID)
 			if marked {

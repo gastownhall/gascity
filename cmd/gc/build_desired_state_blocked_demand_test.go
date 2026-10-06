@@ -15,9 +15,9 @@ import (
 // TestCollectOpenUnassignedRoutedWorkExcludesBlocked covers gc-ft31x, the
 // build_desired_state.go sibling of gc-4zb/#4395: the controller-demand read at
 // collectOpenUnassignedRoutedWork must not count a blocked-but-routed bead as
-// spawn capacity. mapBdStatus folds bd's blocked/deferred/review/testing into
-// Gas City's "open", so a blocked routed bead decodes with Status "open" and a
-// cached (non-Live) List hands it back; only a Live read reaches bd's raw
+// spawn capacity. blocked stays a member of the open SET (beads.IsOpenStatus),
+// and deferred/review/testing still collapse to "open", so a cached (non-Live)
+// Status:"open" List hands a parked routed bead back; only a Live read reaches bd's raw
 // --status=open filter and drops it. Before the fix the cached read counted the
 // blocked bead as controller-dispatcher demand; after it, only genuinely-open
 // routed work is demand.
@@ -199,8 +199,8 @@ func TestBuildDesiredStateStartsColdControlDispatcherFromHealthyStoreDuringOther
 }
 
 // blockedDemandStore models the production controller-demand List reads for a
-// bead that is blocked in the backing store. mapBdStatus collapses it to Status
-// "open", so a non-Live Status:"open" read returns it (openCollapsed); a Live
+// bead that is blocked in the backing store. A blocked bead is in the open SET,
+// so a non-Live Status:"open" read returns it (openCollapsed); a Live
 // Status:"open" read reaches bd's raw filter and excludes it (openLive). Status
 // is honored so the in-progress demand read stays empty and every other read
 // delegates to the embedded store (Ready/Get/DepList/writes).
@@ -243,8 +243,8 @@ func TestCollectAssignedWorkBeadsExcludesBlockedFromDemandButReaperStillSeesIt(t
 		t.Fatalf("create blocker: %v", err)
 	}
 	// A blocked graph.v2 root orphaned by a dead session: an assigned molecule
-	// root (demand candidate) that is also routed (reaper candidate), decoded as
-	// Status "open" by mapBdStatus. The blocking dep keeps it out of the Ready
+	// root (demand candidate) that is also routed (reaper candidate), which a
+	// cached open read returns. The blocking dep keeps it out of the Ready
 	// path so the ONLY demand route is the molecule pass under test.
 	orphan, err := live.Create(beads.Bead{
 		Title:    "orphaned blocked workflow root",
