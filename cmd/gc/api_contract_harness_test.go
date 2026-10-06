@@ -307,19 +307,6 @@ func expectStatus[R contractResponse](t *testing.T, what string, resp R, err err
 	return resp
 }
 
-// expectKnownBug pins a documented API bug: it passes while the operation
-// still answers bugStatus (logging it, so the bug stays visible in test
-// output) and passes once the operation answers one of the fixed statuses.
-// Anything else fails. Remove the call's bugStatus when the bug is fixed.
-func expectKnownBug[R contractResponse](t *testing.T, what string, resp R, err error, bugStatus int, fixed ...int) {
-	t.Helper()
-	if err == nil && resp.StatusCode() == bugStatus {
-		t.Logf("KNOWN BUG still present: %s answered %d: %s", what, bugStatus, contractBody(resp))
-		return
-	}
-	expectStatus(t, what, resp, err, fixed...)
-}
-
 // contractBody extracts the raw Body field generated responses carry.
 func contractBody(resp any) string {
 	v := reflect.ValueOf(resp)

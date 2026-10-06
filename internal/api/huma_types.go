@@ -251,6 +251,10 @@ func mutationError(err error) error {
 		return huma.Error409Conflict(msg)
 	case errors.Is(err, configedit.ErrValidation):
 		return huma.Error400BadRequest(msg)
+	case errors.Is(err, config.ErrPatchTargetNotFound):
+		// A patch named a target absent from the merged config; the edit was
+		// rolled back, so this is the client's error.
+		return huma.Error400BadRequest(msg)
 	case errors.As(err, &providerCatalogErr):
 		// The edit referenced a provider the city's catalog does not define;
 		// the config was rolled back, so this is the client's error.

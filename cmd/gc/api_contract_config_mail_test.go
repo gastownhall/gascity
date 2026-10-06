@@ -148,15 +148,15 @@ func contractConfigFamily(t *testing.T, h *contractHarness) {
 	qput, err := c.PutV0CityByCityNamePatchesAgentsWithResponse(ctx, city,
 		&genclient.PutV0CityByCityNamePatchesAgentsParams{XGCRequest: contractCSRF},
 		genclient.PutV0CityByCityNamePatchesAgentsJSONRequestBody{Dir: ptr(contractRig), Name: ptr(contractRigAgent), Env: &map[string]string{"CONTRACT": "1"}})
-	// KNOWN BUG (filed in the PR): a patch for a rig-scoped convention agent
-	// is rejected at reload ("not found in merged config") and surfaces as a
-	// 500; the config is rolled back, so the reads below see no patch.
-	expectKnownBug(t, "put qualified agent patch", qput, err, http.StatusInternalServerError, http.StatusOK)
+	// alpha/rigbot is an instance of a generic rig-scoped template, not an
+	// agent in the merged config: the patch names a missing target, so it is
+	// rolled back and rejected as a client error, and no patch reads back.
+	expectStatus(t, "put qualified agent patch", qput, err, http.StatusBadRequest)
 	qget, err := c.GetV0CityByCityNamePatchesAgentByDirByBaseWithResponse(ctx, city, contractRig, contractRigAgent)
-	expectKnownBug(t, "get qualified agent patch", qget, err, http.StatusNotFound, http.StatusOK)
+	expectStatus(t, "get qualified agent patch", qget, err, http.StatusNotFound)
 	qdel, err := c.DeleteV0CityByCityNamePatchesAgentByDirByBaseWithResponse(ctx, city, contractRig, contractRigAgent,
 		&genclient.DeleteV0CityByCityNamePatchesAgentByDirByBaseParams{XGCRequest: contractCSRF})
-	expectKnownBug(t, "delete qualified agent patch", qdel, err, http.StatusNotFound, http.StatusOK)
+	expectStatus(t, "delete qualified agent patch", qdel, err, http.StatusNotFound)
 
 	packs, err := c.GetV0CityByCityNamePacksWithResponse(ctx, city)
 	expectStatus(t, "list packs", packs, err, http.StatusOK)

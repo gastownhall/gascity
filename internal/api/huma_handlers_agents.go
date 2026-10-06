@@ -438,6 +438,7 @@ func (s *Server) updateAgentByName(name, provider, scope string, suspended *bool
 	if !ok {
 		return nil, errMutationsNotSupported
 	}
+	name, _ = agentConfigIdentity(s.state.Config(), name)
 	patch := AgentUpdate{Provider: provider, Scope: scope, Suspended: suspended}
 	if err := sm.UpdateAgent(name, patch); err != nil {
 		return nil, mutationError(err)
@@ -463,6 +464,9 @@ func (s *Server) deleteAgentByName(name string) (*OKResponse, error) {
 	sm, ok := s.state.(StateMutator)
 	if !ok {
 		return nil, errMutationsNotSupported
+	}
+	if template, instance := agentConfigIdentity(s.state.Config(), name); instance {
+		return nil, huma.Error409Conflict("agent " + name + " is a per-rig instance of the rig-scoped template " + template + ", which serves every rig; delete the template instead")
 	}
 	if err := sm.DeleteAgent(name); err != nil {
 		return nil, mutationError(err)
@@ -493,6 +497,7 @@ func (s *Server) agentActionByName(name, action string) (*OKResponse, error) {
 	if _, ok := findAgent(cfg, name); !ok {
 		return nil, apierr.AgentNotFound.Msg("agent " + name + " not found")
 	}
+	name, _ = agentConfigIdentity(cfg, name)
 	var err error
 	switch action {
 	case "suspend":
