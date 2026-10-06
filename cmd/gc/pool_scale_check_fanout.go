@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,7 +27,7 @@ type poolStoreProbe struct {
 // cityScopedFanOutProbes builds the probe list for a city-scoped agent's
 // custom scale_check fan-out: the agent's own (city) probe plus one probe
 // per non-suspended rig, mirroring activeStores' suspended-rig filter in
-// buildDesiredStateWithSessionBeads. The city probe keeps ownEnv unchanged.
+// buildDemandTargets. The city probe keeps ownEnv unchanged.
 // Each rig probe is bound to its own store through a per-rig view of the
 // agent -- the same view appendOneRigHookStore gives the claim side, so a
 // scale_check leg and a work_query leg for one rig share one store binding.
@@ -49,6 +50,22 @@ func cityScopedFanOutProbes(cityPath string, cfg *config.City, a *config.Agent, 
 		probes = append(probes, poolStoreProbe{ref: rig.Name, dir: resolveAgentDirPath(cityPath, rig.Path), env: env, err: err})
 	}
 	return probes
+}
+
+// customScaleCheckFanOutProbes returns the fan-out probes for agent a's custom
+// scale_check, or nil when the check runs once against ownDir: a rig-scoped
+// agent (rigName non-empty) and an agent with no custom scale_check keep the
+// single-store path. The demand pass (both pool shapes in buildDemandTargets)
+// and the allocator lane's customScaleCheckWork both build their pools through
+// this one predicate, so the count the lane publishes cannot drift from the one
+// the demand pass sums (POOL-005). ownEnv is the env the pool's own city probe
+// runs with: the probe env for a generic pool, nil for one backing a named
+// session.
+func customScaleCheckFanOutProbes(cityPath string, cfg *config.City, a *config.Agent, rigName, ownDir string, ownEnv map[string]string, suspendedRigPaths map[string]bool) []poolStoreProbe {
+	if rigName != "" || strings.TrimSpace(a.ScaleCheck) == "" {
+		return nil
+	}
+	return cityScopedFanOutProbes(cityPath, cfg, a, ownDir, ownEnv, suspendedRigPaths)
 }
 
 // evaluatePoolFanOutSum runs sp.Check via runner against every probe

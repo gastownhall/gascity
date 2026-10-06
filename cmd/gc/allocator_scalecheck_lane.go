@@ -17,7 +17,9 @@ import (
 // It runs the same work legacy's demand pass runs (evaluatePendingPools under
 // the probe_concurrency semaphore) over the same pools: non-suspended,
 // generic-ephemeral agents with a custom scale_check outside suspended rigs,
-// and none while the city is suspended (the lane skips the pass).
+// and none while the city is suspended (the lane skips the pass). A
+// city-scoped pool's count sums every active store, as the demand pass does
+// (customScaleCheckFanOutProbes).
 // One difference is deliberate (BEHAVIORS #38): a pool whose probe env cannot
 // be built is marked partial rather than silently skipped, so its count reads
 // as untrusted (retain, block create) instead of zero.
@@ -57,7 +59,8 @@ func runCustomScaleChecks(env externalReadsEnv, runner ScaleCheckRunner, queryEn
 // customScaleCheckWork builds the pools whose custom scale_check legacy's
 // demand pass runs with a store, and names the pools whose probe env could
 // not be built. A pool backing a named session runs with no probe env, as in
-// legacy.
+// legacy, and a city-scoped pool carries the probes that fan its check out
+// across the active stores.
 func customScaleCheckWork(
 	cityName, cityPath string,
 	cfg *config.City,
@@ -70,7 +73,8 @@ func customScaleCheckWork(
 		if agent.Suspended || !agent.SupportsGenericEphemeralSessions() || strings.TrimSpace(agent.ScaleCheck) == "" {
 			continue
 		}
-		if rig := configuredRigName(cityPath, agent, cfg.Rigs); rig != "" && suspendedRigPaths[filepath.Clean(rigRootForName(rig, cfg.Rigs))] {
+		rig := configuredRigName(cityPath, agent, cfg.Rigs)
+		if rig != "" && suspendedRigPaths[filepath.Clean(rigRootForName(rig, cfg.Rigs))] {
 			continue
 		}
 		sp := scaleParamsForTopology(agent, config.QueryTopology{Beads: cfg.Beads})
@@ -85,6 +89,7 @@ func customScaleCheckWork(
 			}
 			w.env = env
 		}
+		w.probes = customScaleCheckFanOutProbes(cityPath, cfg, agent, rig, w.poolDir, w.env, suspendedRigPaths)
 		work = append(work, w)
 	}
 	return work, envFailed
