@@ -41,15 +41,14 @@ func newAllocFixture(t *testing.T, cfg *config.City) *allocFixture {
 		t:     t,
 		attrs: make(map[string]InventoryAttrs),
 		in: allocInputs{
-			Now:              allocNow,
-			Epoch:            "e1",
-			SelGen:           1,
-			Cfg:              cfg,
-			ConfigRev:        "rev-1",
-			CityPath:         "/city",
-			CityName:         "city",
-			ObsMaxAge:        observeMaxAge,
-			ScaleCheckMaxAge: time.Minute,
+			Now:       allocNow,
+			Epoch:     "e1",
+			SelGen:    1,
+			Cfg:       cfg,
+			ConfigRev: "rev-1",
+			CityPath:  "/city",
+			CityName:  "city",
+			ObsMaxAge: observeMaxAge,
 		},
 	}
 }

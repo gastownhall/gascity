@@ -1103,7 +1103,51 @@ func buildDemandTargets(
 		store beads.Store
 		ref   string
 	}
-	activeStores := []activeStore{{store: store, ref: "city"}}
+	// cityLegs is every store a city-scope route's default probe reads past the
+	// leading handle: on a split, the work ledger AND the binding in
+	// Plan(RoutedWork) order — the legs `gc ready` serves a seat from (#6019).
+	// nil on a city that relocates nothing, which keeps its one leading target
+	// and gains no read. All of them count under the "city" key, the scope a
+	// class binding already normalizes onto.
+	//
+	// An unplannable topology (a refused city) still reads the leading handle,
+	// but the plan error rides on every city target: the count is not
+	// authoritative, so each such template is reported partial (retain, don't
+	// drain) and the error reaches the demand pass's error list instead of
+	// being dropped here.
+	var cityLegs []classStoreCandidate
+	var cityLegsErr error
+	if store != nil {
+		legs, err := routedWorkCityDemandLegs(cityPath, cfg, store, rigStores, suspendedRigPaths)
+		if err != nil {
+			cityLegsErr = fmt.Errorf("default scale_check: resolving routed-work city legs: %w", err)
+		} else {
+			cityLegs = legs
+		}
+	}
+	cityTargets := func(template string) []defaultScaleCheckTarget {
+		if len(cityLegs) == 0 {
+			return []defaultScaleCheckTarget{{template: template, store: store, storeKey: "city", err: cityLegsErr}}
+		}
+		out := make([]defaultScaleCheckTarget, 0, len(cityLegs))
+		for _, leg := range cityLegs {
+			out = append(out, defaultScaleCheckTarget{template: template, store: leg.store, storeKey: "city"})
+		}
+		return out
+	}
+	// ownTargets expands a pool's own target onto the city legs when it is the
+	// city-scope default; a rig target and a store-scoped control dispatcher's
+	// target (ownScaleCheckTarget) stay the one store they name.
+	ownTargets := func(own defaultScaleCheckTarget, storeScopedControlDispatcher bool) []defaultScaleCheckTarget {
+		if storeScopedControlDispatcher || own.storeKey != "city" || own.store != store || own.err != nil {
+			return []defaultScaleCheckTarget{own}
+		}
+		return cityTargets(own.template)
+	}
+	var activeStores []activeStore
+	for _, target := range cityTargets("") {
+		activeStores = append(activeStores, activeStore{store: target.store, ref: target.storeKey})
+	}
 	for _, rig := range cfg.Rigs {
 		if suspendedRigPaths[filepath.Clean(rig.Path)] {
 			continue
@@ -1206,11 +1250,12 @@ func buildDemandTargets(
 				// singleton (namedWorkReady covers only direct Assignee beads, not
 				// gc.routed_to). Leave defaultNamedScaleTargets unchanged for both modes
 				// (partial-query retention).
+				own := ownTargets(ownTarget, storeScopedControlDispatcher)
 				if namedSessionMode != "always" {
-					defaultScaleTargets = append(defaultScaleTargets, ownTarget)
+					defaultScaleTargets = append(defaultScaleTargets, own...)
 					namedOnDemandTemplates[template] = true
 				}
-				defaultNamedScaleTargets = append(defaultNamedScaleTargets, ownTarget)
+				defaultNamedScaleTargets = append(defaultNamedScaleTargets, own...)
 				// Cross-store demand for named-backing pools (vp-cl4): mirror the
 				// generic-pool guard (vp-s37 / #3078 below). A rig pool that backs
 				// a named session and has no custom scale_check must also probe
@@ -1225,11 +1270,11 @@ func buildDemandTargets(
 				// city-aliased, not city-scoped. The named-session target list
 				// mirrors these probes only for partial-query retention bookkeeping.
 				if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
-					cityTarget := defaultScaleCheckTarget{template: template, store: store, storeKey: "city"}
+					city := cityTargets(template)
 					if namedSessionMode != "always" {
-						defaultScaleTargets = append(defaultScaleTargets, cityTarget)
+						defaultScaleTargets = append(defaultScaleTargets, city...)
 					}
-					defaultNamedScaleTargets = append(defaultNamedScaleTargets, cityTarget)
+					defaultNamedScaleTargets = append(defaultNamedScaleTargets, city...)
 				}
 				continue
 			}
@@ -1276,7 +1321,7 @@ func buildDemandTargets(
 		poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
 		if store != nil && !hasCustomScaleCheck {
 			ownTarget := ownScaleCheckTarget(cityPath, cfg, &cfg.Agents[i], store, rigStores, controlBinding, storeScopedControlDispatcher)
-			defaultScaleTargets = append(defaultScaleTargets, ownTarget)
+			defaultScaleTargets = append(defaultScaleTargets, ownTargets(ownTarget, storeScopedControlDispatcher)...)
 			// Cross-store demand (FR-S0.1 / vp-s37): a rig pool's routed demand
 			// may live in the city store (vp-kvp cross-store delivery), which
 			// the own-rig probe above cannot see. Add a city-store probe so the
@@ -1329,7 +1374,7 @@ func buildDemandTargets(
 			// claim a route from the city store. Keep their cold-wake probe on the
 			// owning store instead of applying generic cross-store pool delivery.
 			if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
-				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: store, storeKey: "city"})
+				defaultScaleTargets = append(defaultScaleTargets, cityTargets(template)...)
 			}
 			continue
 		}
@@ -2127,8 +2172,23 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		store     beads.Store
 		storeKey  string
 		templates map[string]struct{}
+		// byTemplate is the group's ready rows bucketed by the template each one
+		// is servable to, in the store's own order.
+		byTemplate map[string][]beads.Bead
 	}
-	groups := make(map[string]*scaleStoreGroup)
+	// A group is one (key, store) pair: on a split city the work ledger and the
+	// binding both count under "city", and they are two stores to read, not one.
+	type scaleStoreGroupKey struct {
+		key   string
+		store beads.Store
+	}
+	groups := make(map[scaleStoreGroupKey]*scaleStoreGroup)
+	var groupOrder []*scaleStoreGroup
+	// templateGroups is each template's groups in the order its targets name
+	// them — the leg order — so the per-template dedup below is first-leg-wins,
+	// as on the claim side, rather than map-iteration order.
+	templateGroups := make(map[string][]*scaleStoreGroup)
+	var templateOrder []string
 	var errs []error
 	var partialTemplates map[string]bool
 	for _, target := range targets {
@@ -2152,15 +2212,26 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		if key == "" {
 			key = fmt.Sprintf("%p", target.store)
 		}
-		group := groups[key]
+		gk := scaleStoreGroupKey{key: key, store: target.store}
+		group := groups[gk]
 		if group == nil {
 			group = &scaleStoreGroup{store: target.store, storeKey: key, templates: make(map[string]struct{})}
-			groups[key] = group
+			groups[gk] = group
+			groupOrder = append(groupOrder, group)
 		}
-		group.templates[template] = struct{}{}
+		if _, seen := group.templates[template]; !seen {
+			group.templates[template] = struct{}{}
+			if _, known := templateGroups[template]; !known {
+				templateOrder = append(templateOrder, template)
+			}
+			templateGroups[template] = append(templateGroups[template], group)
+		}
 	}
 
-	// countedBeads dedups counted bead IDs per template ACROSS store groups.
+	// The counting pass dedups bead IDs per template ACROSS store groups,
+	// first group in the template's leg order wins. On a split city the work
+	// ledger and the binding are both city legs, and a migrated row co-resident
+	// in both resolves to the ledger's copy — as it does for `gc ready`.
 	// Bead IDs are unique within a deployment, so a legitimate cross-store
 	// union never collides — but when a rig store aliases the city store as a
 	// distinct Store object (pointer inequality passes: a legacy unscoped
@@ -2169,8 +2240,8 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 	// and "city" groups and would double the template's demand. With the city
 	// probe no longer cold-gated, that double-count would be a persistent
 	// warm condition rather than a one-tick wake overshoot, so dedup by ID.
-	countedBeads := make(map[string]map[string]struct{})
-	for key, group := range groups {
+	for _, group := range groupOrder {
+		key := group.storeKey
 		// Ready()/CachedReady() iteration surfaces actionable work
 		// matched against gc.routed_to/gc.run_target. Formula orders that
 		// should wake pools must create an actionable root, such as a
@@ -2193,58 +2264,64 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			if !servable {
 				continue
 			}
-			seen := countedBeads[template]
-			if seen == nil {
-				seen = make(map[string]struct{})
-				countedBeads[template] = seen
+			if group.byTemplate == nil {
+				group.byTemplate = make(map[string][]beads.Bead)
 			}
-			if _, dup := seen[b.ID]; dup {
-				continue
-			}
-			seen[b.ID] = struct{}{}
-			counts[template]++
-			entry := demand[template]
-			entry.Count++
-			entry.WorkBeadIDs = append(entry.WorkBeadIDs, b.ID)
-			if entry.Titles == nil {
-				entry.Titles = make(map[string]string)
-			}
-			entry.Titles[b.ID] = b.Title
-			if pack := strings.TrimSpace(b.Metadata[beadmeta.PackMetadataKey]); pack != "" {
-				if entry.Packs == nil {
-					entry.Packs = make(map[string]string)
+			group.byTemplate[template] = append(group.byTemplate[template], b)
+		}
+	}
+	for _, template := range templateOrder {
+		seen := make(map[string]struct{})
+		for _, group := range templateGroups[template] {
+			for _, b := range group.byTemplate[template] {
+				if _, dup := seen[b.ID]; dup {
+					continue
 				}
-				entry.Packs[b.ID] = pack
-			}
-			if workspace := strings.TrimSpace(b.Metadata[beadmeta.PackWorkspaceMetadataKey]); workspace != "" {
-				if entry.Workspaces == nil {
-					entry.Workspaces = make(map[string]string)
+				seen[b.ID] = struct{}{}
+				counts[template]++
+				entry := demand[template]
+				entry.Count++
+				entry.WorkBeadIDs = append(entry.WorkBeadIDs, b.ID)
+				if entry.Titles == nil {
+					entry.Titles = make(map[string]string)
 				}
-				entry.Workspaces[b.ID] = workspace
-			}
-			if entry.StoreRefs == nil {
-				entry.StoreRefs = make(map[string]string)
-			}
-			entry.StoreRefs[b.ID] = group.storeKey
-			spec, specErr := worktreeSpecForBead(b, group.storeKey)
-			if specErr != nil {
-				if entry.WorktreeErrors == nil {
-					entry.WorktreeErrors = make(map[string]string)
+				entry.Titles[b.ID] = b.Title
+				if pack := strings.TrimSpace(b.Metadata[beadmeta.PackMetadataKey]); pack != "" {
+					if entry.Packs == nil {
+						entry.Packs = make(map[string]string)
+					}
+					entry.Packs[b.ID] = pack
 				}
-				entry.WorktreeErrors[b.ID] = specErr.Error()
-			} else if spec != nil {
-				if entry.WorktreeSpecs == nil {
-					entry.WorktreeSpecs = make(map[string]*worktree.Spec)
+				if workspace := strings.TrimSpace(b.Metadata[beadmeta.PackWorkspaceMetadataKey]); workspace != "" {
+					if entry.Workspaces == nil {
+						entry.Workspaces = make(map[string]string)
+					}
+					entry.Workspaces[b.ID] = workspace
 				}
-				entry.WorktreeSpecs[b.ID] = spec
-			}
-			if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
-				if entry.ParentSIDs == nil {
-					entry.ParentSIDs = make(map[string]string)
+				if entry.StoreRefs == nil {
+					entry.StoreRefs = make(map[string]string)
 				}
-				entry.ParentSIDs[b.ID] = parentSID
+				entry.StoreRefs[b.ID] = group.storeKey
+				spec, specErr := worktreeSpecForBead(b, group.storeKey)
+				if specErr != nil {
+					if entry.WorktreeErrors == nil {
+						entry.WorktreeErrors = make(map[string]string)
+					}
+					entry.WorktreeErrors[b.ID] = specErr.Error()
+				} else if spec != nil {
+					if entry.WorktreeSpecs == nil {
+						entry.WorktreeSpecs = make(map[string]*worktree.Spec)
+					}
+					entry.WorktreeSpecs[b.ID] = spec
+				}
+				if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
+					if entry.ParentSIDs == nil {
+						entry.ParentSIDs = make(map[string]string)
+					}
+					entry.ParentSIDs[b.ID] = parentSID
+				}
+				demand[template] = entry
 			}
-			demand[template] = entry
 		}
 	}
 	return counts, demand, partialTemplates, errs
@@ -2440,9 +2517,18 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 
 	type scaleStoreGroup struct {
 		store     beads.Store
+		storeKey  string
 		templates map[string]struct{}
 	}
-	groups := make(map[string]*scaleStoreGroup)
+	// Grouped by (key, store), as in defaultScaleCheckCountsAndDemand: a split
+	// city's work ledger and binding both probe under "city", and a failed read
+	// of either must mark the templates partial.
+	type scaleStoreGroupKey struct {
+		key   string
+		store beads.Store
+	}
+	groups := make(map[scaleStoreGroupKey]*scaleStoreGroup)
+	var groupOrder []*scaleStoreGroup
 	var errs []error
 	var partialTemplates map[string]bool
 	for _, target := range targets {
@@ -2465,10 +2551,12 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 		if key == "" {
 			key = fmt.Sprintf("%p", target.store)
 		}
-		group := groups[key]
+		gk := scaleStoreGroupKey{key: key, store: target.store}
+		group := groups[gk]
 		if group == nil {
-			group = &scaleStoreGroup{store: target.store, templates: make(map[string]struct{})}
-			groups[key] = group
+			group = &scaleStoreGroup{store: target.store, storeKey: key, templates: make(map[string]struct{})}
+			groups[gk] = group
+			groupOrder = append(groupOrder, group)
 		}
 		group.templates[template] = struct{}{}
 	}
@@ -2478,7 +2566,8 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 	// This probe remains only to mark named-session backing templates partial
 	// when a default demand query is inconclusive, so existing named-session
 	// beads are retained instead of swept on a store/query failure.
-	for key, group := range groups {
+	for _, group := range groupOrder {
+		key := group.storeKey
 		_, err := cache.controllerDemandReady(group.store, cache.storeLabel(group.store, key))
 		if err != nil {
 			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), err))

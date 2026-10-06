@@ -3,8 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -1448,10 +1446,7 @@ func stableSupervisorBinaryGopath(homeDir string) string {
 }
 
 func sanitizeServiceName(name string) string {
-	name = strings.ToLower(name)
-	re := regexp.MustCompile(`[^a-z0-9]+`)
-	name = re.ReplaceAllString(name, "-")
-	return strings.Trim(name, "-")
+	return supervisor.SanitizeServiceName(name)
 }
 
 var supervisorServiceEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -1656,14 +1651,7 @@ func supervisorServiceSuffix() string {
 	if !supervisor.UsesIsolatedGCHomeOverride() {
 		return ""
 	}
-	gcHome := isolatedSupervisorHome()
-	base := sanitizeServiceName(filepath.Base(gcHome))
-	sum := sha1.Sum([]byte(gcHome))
-	hash := hex.EncodeToString(sum[:])[:8]
-	if base == "" {
-		return "isolated-" + hash
-	}
-	return base + "-" + hash
+	return supervisor.ServiceSuffix(isolatedSupervisorHome())
 }
 
 func supervisorLaunchdLabel() string {

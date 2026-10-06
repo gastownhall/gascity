@@ -104,8 +104,9 @@ func TestMain(m *testing.M) {
 
 	// Every env this suite builds starts from os.Environ(); drop the shell's
 	// XDG base directories and BEADS_*/BD_* first so only explicit values reach
-	// bd, and pin bd's shared-server mode off. gc keeps the real HOME (see
-	// pinRealHomeEnv); bd is re-homed by the wrapper around realBDBinary below.
+	// bd, and pin bd's shared-server mode off. gc gets a HOME under its GC_HOME
+	// (see isolateGCHomeEnv); bd is re-homed by the wrapper around realBDBinary
+	// below.
 	if err := toolhome.ScrubProcessEnv(); err != nil {
 		panic("integration: scrubbing host bd env: " + err.Error())
 	}
@@ -248,9 +249,8 @@ func TestMain(m *testing.M) {
 	}
 	// Every real bd this suite runs — directly, through the file-store shim, or
 	// forked by gc — goes through this wrapper, which re-homes bd under the run's
-	// temp dir: gc runs with the real HOME, and bd must never resolve the
-	// operator's ~/.beads (a user-level dolt.shared-server: true starts the
-	// host-wide shared Dolt server).
+	// temp dir: bd must never resolve the operator's ~/.beads (a user-level
+	// dolt.shared-server: true starts the host-wide shared Dolt server).
 	wrappedRealBD := filepath.Join(tmpDir, "bd-real", "bd")
 	if err := toolhome.WriteWrapper(wrappedRealBD, filepath.Join(tmpDir, "bd-tool-home"), realBDBinary); err != nil {
 		panic("integration: wrapping real bd: " + err.Error())
@@ -346,6 +346,12 @@ func TestMain(m *testing.M) {
 	// cities have actually shut down, avoiding a race with process-table
 	// cleanup below.
 	stopIntegrationSupervisorWithTimeout(integrationSupervisorStopTimeout)
+	if report := platformUnitLeakReport(testGCHome); report != "" {
+		fmt.Fprintln(os.Stderr, "integration: "+report)
+		if code == 0 {
+			code = 1
+		}
+	}
 
 	// Post-sweep: clean up any sessions that survived individual test cleanup.
 	if !subprocess {
@@ -1050,9 +1056,9 @@ func standaloneBDEnvForDir(dir string) []string {
 			env = append(env, key+"="+value)
 		}
 	}
-	// integrationEnv pins HOME to the real passwd-db home for gc start/supervisor
-	// start subprocesses. This helper only execs the bd binary, so re-isolate HOME
-	// back to the caller-owned dir instead of leaking the real home through.
+	// integrationEnv gives gc a HOME under its GC_HOME. This helper only execs
+	// the bd binary, so scope HOME to the caller-owned dir like the rest of its
+	// isolation root.
 	env = replaceEnv(env, "HOME", dir)
 	// Keep DOLT_ROOT_PATH from integrationEnv so standalone bd commands use
 	// the suite's seeded Dolt identity instead of an unseeded per-workspace root.
@@ -1468,7 +1474,7 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	// (resolveAutoStart priority bug), so the env var is the only
 	// reliable kill-switch. Mirrors bdRuntimeEnv in cmd/gc/bd_env.go.
 	env = append(env, "BEADS_DOLT_AUTO_START=0")
-	env = pinRealHomeEnv(env)
+	env = isolateGCHomeEnv(env, gcHome)
 	// Seed a global gitconfig under the isolated GC_HOME and point children at
 	// it. The Makefile's TEST_ENV does this via scripts/test-gitconfig-path
 	// (user.name, user.email, beads.role=maintainer); under bazel the ambient
@@ -1495,24 +1501,36 @@ func ensureIntegrationGitConfig(gcHome string) string {
 	return path
 }
 
-// pinRealHomeEnv pins HOME to the real passwd-db home for the current uid.
-// Test runners (sandboxes, CI containers) commonly run with HOME pointed at
-// something other than the invoking user's real home; left unchanged, that
-// ambient HOME propagates into the gc subprocess these tests exec and trips
-// platformSupervisorHomeOverrideError (cmd/gc/cmd_supervisor_lifecycle.go),
-// which blocks non-delegated `gc start`/`gc supervisor start` when HOME
-// differs from the real home. GC_HOME (set separately, above) remains the
-// isolated per-test root; only the OS-level HOME is pinned. Mirrors
-// cmd/gc/cmd_supervisor_test.go's pinRealHome, reimplemented here because
-// that helper is test-only in a different package. Fails open (leaves env
-// untouched) if the lookup errors or returns an empty home dir, matching
-// platformSupervisorHomeOverrideError's own tolerance.
-func pinRealHomeEnv(env []string) []string {
-	lu, err := user.LookupId(strconv.Itoa(os.Getuid()))
-	if err != nil || strings.TrimSpace(lu.HomeDir) == "" {
-		return env
+// supervisorIsolatedHomeEnv is gc's opt-in (cmd/gc supervisorIsolatedHomeEnv)
+// for bare-starting its supervisor under a HOME that is not the passwd home.
+// test/acceptance/helpers/env.go sets the same variable.
+const supervisorIsolatedHomeEnv = "GC_SUPERVISOR_ISOLATED_HOME"
+
+// integrationIsolatedHome is the HOME integrationEnvFor gives gc for gcHome.
+func integrationIsolatedHome(gcHome string) string {
+	return filepath.Join(gcHome, "home")
+}
+
+// isolateGCHomeEnv gives gc a private, writable HOME under gcHome and opts it
+// into a bare-started supervisor (GC_SUPERVISOR_ISOLATED_HOME=1).
+//
+// With the operator's HOME, every `gc init`/`gc start` that found no running
+// supervisor took the platform path in ensureSupervisorRunning
+// (cmd/gc/cmd_supervisor_lifecycle.go): it wrote and enabled a
+// Restart=always gascity-supervisor-<gc-home>-<hash>.service under
+// ~/.local/share/systemd/user that outlived the run, crash-looped against the
+// deleted test binary, or kept a supervisor recreating GC_HOME inside a
+// deleted temp dir. The same HOME also exposed the operator's ~/.beads to gc
+// in-process. Under the opt-in, gc bare-forks its supervisor as it does on a
+// host without systemd and never installs a unit; the explicit GC_HOME set by
+// integrationEnvFor is what makes the opt-in valid.
+func isolateGCHomeEnv(env []string, gcHome string) []string {
+	home := integrationIsolatedHome(gcHome)
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		panic("integration: creating isolated HOME: " + err.Error())
 	}
-	return replaceEnv(env, "HOME", lu.HomeDir)
+	env = replaceEnv(env, "HOME", home)
+	return replaceEnv(env, supervisorIsolatedHomeEnv, "1")
 }
 
 func prependPath(paths ...string) string {
@@ -1575,6 +1593,7 @@ func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
 	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
 		t.Fatalf("creating isolated runtime dir: %v", err)
 	}
+	registerPlatformUnitLeakGuard(t, gcHome)
 	port, err := reserveLoopbackPort()
 	if err != nil {
 		t.Fatalf("reserving isolated supervisor port: %v", err)
@@ -2020,7 +2039,7 @@ func reserveLoopbackPort() (int, error) {
 	return addr.Port, nil
 }
 
-func TestIntegrationEnvForPinsRealHome(t *testing.T) {
+func TestIntegrationEnvForIsolatesHome(t *testing.T) {
 	oldGCHome, oldRuntimeDir := testGCHome, testRuntimeDir
 	oldGCBinary, oldBDBinary, oldRealBDBinary := gcBinary, bdBinary, realBDBinary
 	oldToolBinDir, oldDoltBinary := integrationToolBinDir, doltBinary
@@ -2077,15 +2096,21 @@ func TestIntegrationEnvForPinsRealHome(t *testing.T) {
 	t.Setenv("GC_RIG_ROOT", "/host/rig")
 	t.Setenv("GC_TEMPLATE", "host/template")
 	t.Setenv("GC_SESSION_NAME", "host-session")
+	t.Setenv(supervisorIsolatedHomeEnv, "0")
 	env := integrationEnv()
 	got := parseEnvList(env)
 
-	lu, err := user.LookupId(strconv.Itoa(os.Getuid()))
-	if err != nil || strings.TrimSpace(lu.HomeDir) == "" {
-		t.Skip("no passwd entry for uid; pinRealHomeEnv fails open")
+	if want := integrationIsolatedHome(testGCHome); got["HOME"] != want {
+		t.Fatalf("HOME = %q, want isolated %q (neither ambient HOME=/host/home nor the passwd home may reach gc)", got["HOME"], want)
 	}
-	if got["HOME"] != lu.HomeDir {
-		t.Fatalf("HOME = %q, want real passwd-db home %q (ambient HOME=/host/home must not leak through)", got["HOME"], lu.HomeDir)
+	if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && got["HOME"] == lu.HomeDir {
+		t.Fatalf("HOME = %q is the passwd-db home; gc start would install a platform supervisor unit there", got["HOME"])
+	}
+	if info, err := os.Stat(got["HOME"]); err != nil || !info.IsDir() {
+		t.Fatalf("isolated HOME %q is not a directory: %v", got["HOME"], err)
+	}
+	if got[supervisorIsolatedHomeEnv] != "1" {
+		t.Fatalf("%s = %q, want 1 so gc bare-starts its supervisor instead of installing a platform unit", supervisorIsolatedHomeEnv, got[supervisorIsolatedHomeEnv])
 	}
 	if got["GC_HOME"] != testGCHome {
 		t.Fatalf("GC_HOME = %q, want %q", got["GC_HOME"], testGCHome)
@@ -2272,12 +2297,11 @@ func TestStandaloneBDEnvForDirIsolatesHome(t *testing.T) {
 	env := standaloneBDEnvForDir(dir)
 	got := parseEnvList(env)
 
-	// pinRealHomeEnv fails open when the uid has no passwd entry, so the
-	// real-home comparison is only meaningful when the lookup succeeds. The
-	// dir-scoped assertion below holds either way.
+	// The real-home comparison is only meaningful when the passwd lookup
+	// succeeds. The dir-scoped assertion below holds either way.
 	if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && strings.TrimSpace(lu.HomeDir) != "" {
 		if got["HOME"] == lu.HomeDir {
-			t.Fatalf("HOME = %q, leaked the real passwd-db home; standalone bd only execs the bd binary (never gc start/supervisor start), so it must not inherit the real-HOME pin meant for gc-start consumers", got["HOME"])
+			t.Fatalf("HOME = %q, leaked the real passwd-db home; standalone bd only execs the bd binary (never gc start/supervisor start), so it must not see the real home", got["HOME"])
 		}
 	}
 	if got["HOME"] != dir {

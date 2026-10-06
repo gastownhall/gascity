@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -334,5 +335,65 @@ func TestGcBeadsBdProxiedInitDiesWithoutIdleTimeout(t *testing.T) {
 				t.Fatalf("bd init ran anyway: %s", data)
 			}
 		})
+	}
+}
+
+// The exec-provider init path hands the script the resolved idle timeout.
+func TestInitBeadsForDirProxiedCarriesResolvedIdleTimeout(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv(config.ProxiedIdleTimeoutEnv, "")
+	cityDir := t.TempDir()
+	provider := filepath.Join(cityDir, "custom", "gc-beads-bd")
+	if err := os.MkdirAll(filepath.Dir(provider), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityConfig := "[workspace]\nname=\"demo\"\n[beads]\nprovider=" + strconv.Quote("exec:"+provider) + "\nproxied_idle_timeout = \"45m\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfig), 0o644); err != nil { //nolint:gosec // fixture
+		t.Fatal(err)
+	}
+	writeScopeBeadsMetadata(t, cityDir, `{"backend":"dolt","dolt_mode":"proxied-server"}`)
+	stop := errors.New("stop")
+	var gotEnv []string
+	execute := func(_ string, env []string, _ ...string) error {
+		gotEnv = append([]string(nil), env...)
+		return stop
+	}
+	if err := initBeadsForDirWithExecutor(cityDir, cityDir, "gc", "hq", execute); !errors.Is(err, stop) {
+		t.Fatalf("initBeadsForDirWithExecutor() = %v, want %v", err, stop)
+	}
+	if got := runtimeEnvEntriesToMap(gotEnv)[config.ProxiedIdleTimeoutEnv]; got != "45m0s" {
+		t.Fatalf("%s = %q, want 45m0s", config.ProxiedIdleTimeoutEnv, got)
+	}
+}
+
+// The provider-owned front door (gc init, gc rig add) hands the script's init
+// op the resolved idle timeout.
+func TestProviderOwnedScopeInitCarriesResolvedIdleTimeout(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv(config.ProxiedIdleTimeoutEnv, "")
+	city := t.TempDir()
+	rig := filepath.Join(city, "rigs", "r1")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(city, "idle.log")
+	script := filepath.Join(city, "gc-beads-bd.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n[ \"$1\" = init ] && printf '%s\\n' \"$GC_BEADS_PROXIED_IDLE_TIMEOUT\" >> "+strconv.Quote(logPath)+"\nexit 0\n"), 0o755); err != nil { //nolint:gosec // fixture must be executable
+		t.Fatal(err)
+	}
+	toml := "[workspace]\nname=\"demo\"\n[beads]\nprovider = " + strconv.Quote("exec:"+script) + "\nproxied_idle_timeout = \"45m\"\n[[rigs]]\nname = \"r1\"\npath = \"rigs/r1\"\n"
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(toml), 0o644); err != nil { //nolint:gosec // fixture
+		t.Fatal(err)
+	}
+	if err := persistProviderScopeOwnership(city, rig, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = runProviderOwnedScopeInit(city, rig, "r1", script)
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("the init op did not run: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "45m0s" {
+		t.Fatalf("init op saw %s=%q, want 45m0s", config.ProxiedIdleTimeoutEnv, got)
 	}
 }
