@@ -266,11 +266,88 @@ func TestIsolatedEnvRootsKeepGCOffTheRealHome(t *testing.T) {
 	}
 }
 
+// envBuilderUse is a reference to buildIntegrationEnv: where it is and the
+// declaration holding it.
+type envBuilderUse struct {
+	pos     token.Pos
+	owner   string
+	allowed bool
+}
+
+// envBuilders are the functions allowed to reference buildIntegrationEnv.
+var envBuilders = map[string]bool{"integrationEnv": true, "integrationEnvDolt": true, "integrationEnvFor": true}
+
+// buildIntegrationEnvUses lists every reference to buildIntegrationEnv in
+// file: in function bodies, and at package scope, where a var could alias it
+// past the check. Only a plain function among envBuilders is allowed one.
+func buildIntegrationEnvUses(file *ast.File) []envBuilderUse {
+	var uses []envBuilderUse
+	for _, decl := range file.Decls {
+		owner, allowed, node := "package scope", false, ast.Node(decl)
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			if fn.Body == nil {
+				continue
+			}
+			owner, node = fn.Name.Name, fn.Body
+			allowed = fn.Recv == nil && envBuilders[owner]
+			if fn.Recv != nil {
+				owner = "method " + owner
+			}
+		}
+		ast.Inspect(node, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && id.Name == "buildIntegrationEnv" {
+				uses = append(uses, envBuilderUse{pos: id.Pos(), owner: owner, allowed: allowed})
+			}
+			return true
+		})
+	}
+	return uses
+}
+
+// buildIntegrationEnvUses sees a reference wherever it hides: aliased at
+// package scope, taken as a value, or in a method sharing a builder's name.
+func TestBuildIntegrationEnvUsesSeesEveryReference(t *testing.T) {
+	const src = `package integration
+
+var aliased = buildIntegrationEnv
+
+func buildIntegrationEnv(gcHome, runtimeDir string, useDolt bool) []string { return nil }
+
+func integrationEnv() []string { return buildIntegrationEnv("", "", false) }
+
+func helper() []string {
+	f := buildIntegrationEnv
+	return f("", "", false)
+}
+
+type builder struct{}
+
+func (builder) integrationEnvFor() []string { return buildIntegrationEnv("", "", false) }
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "src.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, use := range buildIntegrationEnvUses(file) {
+		got = append(got, fmt.Sprintf("%d %s %t", fset.Position(use.pos).Line, use.owner, use.allowed))
+	}
+	want := []string{
+		"3 package scope false",
+		"7 integrationEnv true",
+		"10 helper false",
+		"16 method integrationEnvFor false",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("buildIntegrationEnvUses = %q, want %q", got, want)
+	}
+}
+
 // TestEveryIntegrationEnvHasALeakGuard: only the env builders use
 // buildIntegrationEnv. A test that built gc's env from it directly would skip
 // integrationEnvFor's leak guard and could leak a unit unnoticed.
 func TestEveryIntegrationEnvHasALeakGuard(t *testing.T) {
-	allowed := map[string]bool{"integrationEnv": true, "integrationEnvDolt": true, "integrationEnvFor": true}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
@@ -285,21 +362,12 @@ func TestEveryIntegrationEnvHasALeakGuard(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, decl := range file.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
+		for _, use := range buildIntegrationEnvUses(file) {
+			uses++
+			if !use.allowed {
+				t.Errorf("%s: %s uses buildIntegrationEnv; call integrationEnvFor(t, ...) so the platform-unit leak guard covers its GC_HOME",
+					fset.Position(use.pos), use.owner)
 			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				if id, ok := n.(*ast.Ident); ok && id.Name == "buildIntegrationEnv" {
-					uses++
-					if !allowed[fn.Name.Name] {
-						t.Errorf("%s: %s uses buildIntegrationEnv; call integrationEnvFor(t, ...) so the platform-unit leak guard covers its GC_HOME",
-							fset.Position(id.Pos()), fn.Name.Name)
-					}
-				}
-				return true
-			})
 		}
 	}
 	if uses == 0 {
