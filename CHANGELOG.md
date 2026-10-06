@@ -115,6 +115,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A new scope directory over an existing current-era managed Dolt database
+  initializes instead of being refused as a legacy Dolt server workspace.**
+  `gc-beads-bd init` now stamps bd's version witness on a store that already
+  existed only when its `schema_migrations` table proves it current-era (an
+  adopted pre-1.0 store is still refused, #5294), never forces a reinit when
+  a schema probe does not answer, and resets a bootstrap that was interrupted
+  between a migration's DDL and its commit, only while it holds the
+  database's init lock exclusively. Behavior change: with bd 1.0.5 or later,
+  init on an already-initialized scope now runs `bd migrate schema`, and fails
+  with bd's message when that fails for any reason other than bd's
+  remote-migrate refusal (which is reported as a warning). An older bd has no
+  `bd migrate schema`, so init skips the step with a warning and bd applies
+  any pending migrations on its next write. With bd 1.3.0 or later the step is
+  also bd's consent to promote the schema of a database on a shared server
+  (gastownhall/beads#5920), which can lock out an older bd that uses the same
+  database; init writes what the step reports to its standard error, which gc
+  shows only when init fails. Init's migration steps also wait up to
+  `GC_DOLT_INIT_LOCK_TIMEOUT_MS` for a concurrent initializer's reset or
+  forced reinit to finish, and fail closed if it does not. That lock lives in
+  a per-user `gc-beads-bd-init-locks-<uid>` directory under `$TMPDIR` or
+  `/tmp` unless `GC_DOLT_INIT_LOCK_DIR` names another; where `flock` is
+  installed, init fails naming the lock file when it cannot create it.
+  Without `flock`, init refuses to reset an interrupted bootstrap and says
+  how to install it (#5926).
+
 - **Work hidden by beads migration 0059 is dispatched again.** On the first
   start under a new bd version, `gc start` (and the supervisor, and
   `gc rig add` for the rig it adds) runs `bd recompute-blocked` once over each

@@ -43,15 +43,26 @@
 #       give up. The cap only bounds a wait whose cursor reads keep
 #       failing outright.
 #   GC_DOLT_INIT_LOCK_DIR — directory holding op_init's cross-process,
-#       per-database advisory locks that serialize a forced reinit's
-#       revalidate-then-force sequence (default: $TMPDIR or /tmp). Not
-#       under GC_CITY_PATH on purpose: two cities/worktrees that share one
-#       managed Dolt server can target the same dolt_database from
-#       different city paths, so the lock must resolve to the same file
-#       for both regardless of which city each process was invoked from.
+#       per-database advisory locks. Every op_init step that runs bd
+#       migrations (bd init, bd migrate schema) holds its database's lock
+#       shared, and every step that discards state (a forced reinit's
+#       revalidate-then-force sequence, the interrupted-bootstrap reset)
+#       holds it exclusive, so a destructive step never lands on another
+#       initializer's in-flight migration (default:
+#       gc-beads-bd-init-locks-<uid> under $TMPDIR or /tmp, one directory
+#       per OS user, because a lock directory or file another user or a
+#       sudo run created is not writable by this one; initializers running
+#       as different OS users share a lock only when this names one
+#       directory they can all write to). Where flock is installed, init
+#       must be able to create its lock file here, and fails naming the
+#       file when it cannot. Not under GC_CITY_PATH on purpose: two
+#       cities/worktrees that share one managed Dolt server can target the
+#       same dolt_database from different city paths, so the lock must
+#       resolve to the same file for both regardless of which city each
+#       process was invoked from.
 #   GC_DOLT_INIT_LOCK_TIMEOUT_MS — wait budget for that lock before op_init
 #       gives up on a concurrent initializer and fails closed instead of
-#       forcing unprotected, in milliseconds (default: 60000).
+#       proceeding unprotected, in milliseconds (default: 60000).
 
 set -e
 
@@ -67,8 +78,10 @@ CONCURRENT_START_READY_TIMEOUT_MS="${GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS:-
 LOCK_RELEASE_TIMEOUT_MS="${GC_DOLT_LOCK_RELEASE_TIMEOUT_MS:-60000}"
 # Deliberately NOT derived from GC_CITY_PATH — see op_init's use of this for
 # why (two cities/worktrees sharing one managed Dolt server must resolve to
-# the same lock file despite having different city paths).
-INIT_LOCK_DIR="${GC_DOLT_INIT_LOCK_DIR:-${TMPDIR:-/tmp}/gc-beads-bd-init-locks}"
+# the same lock file despite having different city paths). The per-user
+# default is resolved by acquire_init_lock, so invocations that never take
+# the lock never run id(1).
+INIT_LOCK_DIR="${GC_DOLT_INIT_LOCK_DIR:-}"
 INIT_LOCK_TIMEOUT_MS="${GC_DOLT_INIT_LOCK_TIMEOUT_MS:-60000}"
 BEADS_BACKEND="${GC_BEADS_BACKEND:-${BEADS_BACKEND:-dolt}}"
 
@@ -1033,6 +1046,62 @@ server_sql_scalar() {
     printf '%s\n' "$out" | grep -E '^\| ' | grep -vE '^\| *[A-Za-z_(*)]+ *\|$' | tail -1 | sed -E 's/^\| *//; s/ *\|$//'
 }
 
+# acquire_init_lock takes op_init's cross-process advisory lock for database
+# $1 (see GC_DOLT_INIT_LOCK_DIR above) on FD 8, in mode $2: "shared" for a
+# step that runs bd migrations, "exclusive" for a step that discards state
+# (the interrupted-bootstrap reset, a forced reinit). Migrations never queue
+# behind one another, as they never did before the lock existed, but a
+# destructive step waits until no migration is in flight and keeps new ones
+# out until it is done, so it never lands on another process's half-applied
+# migration step. Held until release_init_lock or process exit. The lock
+# belongs to the open file, not to this process, so every bd command run
+# while it is held closes FD 8 (`8>&-`): a bd that kept a copy, or anything
+# that bd started, would hold the lock for as long as it ran. A hold at
+# least as strong as the one asked for is kept as is, which lets the heal
+# carry its exclusive hold through the migration step that follows it; a
+# shared hold asked to become exclusive is dropped and re-taken, so callers
+# re-check what they guard once this returns. Callers check FLOCK_AVAILABLE
+# first. A process only ever locks one database (op_init pins a single
+# $dolt_database): a held lock is matched by mode alone, whatever database
+# it was taken for.
+INIT_LOCK_HELD=""
+acquire_init_lock() {
+    local db="$1" mode="$2" mode_flag open_err
+    case "$INIT_LOCK_HELD:$mode" in
+        exclusive:*|shared:shared) return 0 ;;
+    esac
+    case "$mode" in
+        shared) mode_flag=-s ;;
+        exclusive) mode_flag=-x ;;
+        *) die "acquire_init_lock: unknown lock mode '$mode'" ;;
+    esac
+    [ -n "$INIT_LOCK_DIR" ] || INIT_LOCK_DIR="${TMPDIR:-/tmp}/gc-beads-bd-init-locks-$(id -u)"
+    local init_lock_file="$INIT_LOCK_DIR/$db.lock"
+    case "$INIT_LOCK_TIMEOUT_MS" in
+        ''|*[!0-9]*) INIT_LOCK_TIMEOUT_MS=60000 ;;
+    esac
+    local init_lock_timeout_s=$((INIT_LOCK_TIMEOUT_MS / 1000))
+    # A failed redirection on exec, a special builtin, exits a POSIX shell
+    # outright, even inside an `if`, leaving only the shell's bare error. So
+    # the open is tried first on `true`, a regular builtin whose failed
+    # redirection is an ordinary error, in the append mode FD 8 then uses.
+    if ! open_err=$({ mkdir -p "$INIT_LOCK_DIR" && true >>"$init_lock_file"; } 2>&1); then
+        die "could not open init lock for database '$db' ($init_lock_file): $open_err; set GC_DOLT_INIT_LOCK_DIR to a directory this user can write to."
+    fi
+    exec 8>>"$init_lock_file"
+    if ! flock "$mode_flag" -w "$init_lock_timeout_s" 8; then
+        die "could not acquire init lock for database '$db' ($init_lock_file) within ${init_lock_timeout_s}s; a concurrent initializer may be stuck. inspect the store with 'bd dolt status' before retrying, or raise GC_DOLT_INIT_LOCK_TIMEOUT_MS."
+    fi
+    INIT_LOCK_HELD="$mode"
+}
+
+# release_init_lock drops the lock acquire_init_lock took, if any.
+release_init_lock() {
+    [ -n "$INIT_LOCK_HELD" ] || return 0
+    exec 8>&-
+    INIT_LOCK_HELD=""
+}
+
 # bd_bootstrap_interrupted reports whether the pinned database looks like a
 # bootstrap that died between a migration's DDL and its per-step commit:
 # uncommitted table changes in the working set and no user data at all
@@ -1047,9 +1116,12 @@ server_sql_scalar() {
 # pre-existing dirty tables: comments, issues", and the previous readiness
 # probe (config table present) even reported the half-migrated database as
 # ready. The zero-issues check is the whole safety argument: a database with
-# user rows is never reset here, whatever its working set holds.
+# user rows is never reset here, whatever its working set holds. Every probe
+# answers three ways, and only a definite answer can license the reset: a
+# probe that fails for any reason other than the one it is asking about
+# leaves the database's contents unknown, and unknown never resets.
 bd_bootstrap_interrupted() {
-    local db="$1" dirty issues
+    local db="$1" dirty status_tables issues issues_probe
     valid_sql_name "$db" || return 1
     dirty=$(server_sql_scalar "USE \`$db\`; SELECT COUNT(*) FROM dolt_status" | tr -dc '0-9')
     [ -n "$dirty" ] && [ "$dirty" -gt 0 ] || return 1
@@ -1059,23 +1131,44 @@ bd_bootstrap_interrupted() {
     # bootstrap remnant. A dirty config or metadata table disqualifies the
     # reset: this script's own runtime-config writes are committed
     # (record_bd_runtime_config), so on a genuinely interrupted bootstrap
-    # neither table is dirty.
-    if server_sql "USE \`$db\`; SELECT table_name FROM dolt_status" 2>/dev/null | grep -qE '^\| *(config|metadata) *\|'; then
+    # neither table is dirty. An unreadable table list cannot show that
+    # either, so it disqualifies the reset too.
+    status_tables=$(server_sql "USE \`$db\`; SELECT table_name FROM dolt_status" 2>/dev/null) || return 1
+    if printf '%s\n' "$status_tables" | grep -qE '^\| *(config|metadata) *\|'; then
         return 1
     fi
-    if server_sql "USE \`$db\`; SELECT 1 FROM issues LIMIT 1" >/dev/null 2>&1; then
+    # Only dolt's explicit "table not found" licenses treating issues as
+    # absent; any other failure of this probe says nothing about its rows.
+    if issues_probe=$(server_sql "USE \`$db\`; SELECT 1 FROM issues LIMIT 1" 2>&1); then
         issues=$(server_sql_scalar "USE \`$db\`; SELECT COUNT(*) FROM issues" | tr -dc '0-9')
         [ "${issues:-1}" = "0" ] || return 1
+    else
+        case "$issues_probe" in
+            *"table not found: issues"*) ;;
+            *) return 1 ;;
+        esac
     fi
     return 0
 }
 
 # heal_interrupted_bootstrap discards the working set of a database that
-# bd_bootstrap_interrupted matched, so the following bd open can re-run the
-# interrupted migration step instead of refusing. Prints what it did: this
-# is a destructive step, gated on the database holding no issues.
+# bd_bootstrap_interrupted matches, so the following bd open can re-run the
+# interrupted migration step instead of refusing. That signature is also
+# exactly what a CONCURRENT initializer looks like between one migration
+# step's DDL and its commit, so the reset only ever happens under the
+# exclusive init lock, after re-checking once it is held (every migration
+# that was in flight has committed, or its process has died, by the time the
+# lock is granted), and the lock stays held through the migration step that
+# follows, which releases it. Prints what it did: this is a destructive step,
+# gated on the database holding no issues.
 heal_interrupted_bootstrap() {
     local db="$1"
+    bd_bootstrap_interrupted "$db" || return 0
+    if [ "$FLOCK_AVAILABLE" != true ]; then
+        die "database '$db' looks like an interrupted bd bootstrap, but flock is required to safely reset it (data-safety): the same signature is what a concurrent initializer looks like mid-migration, and without flock that initializer cannot be excluded. Install: brew install flock (macOS) or apt install util-linux (Linux)"
+    fi
+    acquire_init_lock "$db" exclusive
+    bd_bootstrap_interrupted "$db" || return 0
     echo "warning: database '$db' holds an interrupted bd bootstrap (uncommitted schema changes, no issues); discarding its working set and re-running migrations" >&2
     server_sql "USE \`$db\`; CALL DOLT_RESET('--hard')" >/dev/null 2>&1 \
         || die "failed to reset the interrupted bootstrap working set of database '$db'"
@@ -1084,25 +1177,63 @@ heal_interrupted_bootstrap() {
 # finish_bd_schema_migrations completes a schema that is clean but behind
 # (the state a healed bootstrap is in, and the state the old readiness probe
 # accepted as ready): bd's store open applies pending migrations, and
-# `bd migrate schema` is the idempotent entry point for exactly that.
+# `bd migrate schema` is the idempotent entry point for exactly that. The
+# migration runs under the shared init lock: while a step is in flight this
+# database looks like an interrupted bootstrap, and only the lock keeps a
+# concurrent initializer's heal from resetting it. Without flock no heal can
+# run at all, so there is nothing to exclude.
+#
+# `bd migrate schema` arrived in bd 1.0.5. An older bd's `migrate` has no
+# subcommands: it would take `schema` as an ignored argument and run the bare
+# metadata and repo-id migration, which this path must not run. That bd
+# applies pending migrations when it next opens the store for a write, so the
+# step is skipped on a bd that reports an older version. Every other bd runs
+# it, one whose version cannot be read included: every bd old enough to lack
+# the step reports a version this reads. A skipped step still drops the hold
+# a heal left.
+#
+# From bd 1.3.0 the verb is also bd's consent to promote the schema of a
+# database on a shared server (gastownhall/beads#5920), which can lock out
+# an older bd that uses the same database, so what bd reports the step did
+# goes to stderr instead of being dropped.
 finish_bd_schema_migrations() {
-    local dir="$1" db="$2" out
-    if ! out=$(run_bd_pinned "$dir" migrate schema --quiet 2>&1); then
+    local dir="$1" db="$2" out bd_version
+    bd_version=$(bd_version_number 8>&-)
+    case "$bd_version" in
+        0.* | v0.* | 1.0.[0-4] | v1.0.[0-4] | 1.0.[0-4][-+]* | v1.0.[0-4][-+]*)
+            echo "warning: bd ${bd_version} predates 'bd migrate schema' (bd 1.0.5); any pending schema migrations for '$db' are left to bd's next write" >&2
+            release_init_lock
+            return 0
+            ;;
+    esac
+    if [ "$FLOCK_AVAILABLE" = true ]; then
+        acquire_init_lock "$db" shared
+    fi
+    if ! out=$(run_bd_pinned "$dir" migrate schema --quiet 8>&- 2>&1); then
         # A remote-backed scope refuses unattended migration by design (bd's
         # remote-migrate gate, #4259): that is an operator decision, not a
         # broken bootstrap, and this ready path ran no bd command at all
         # before the heal existed. Report it and carry on; the scope stays
-        # usable at its current schema and bd says what to do next.
+        # usable at its current schema and bd says what to do next. Match the
+        # gate's own messages (RemoteMigrateGateError), not any failure that
+        # happens to mention a remote and a migration: the auto-apply refusal,
+        # and the "refusing to migrate" one for a remote that is already
+        # migrated or whose schema has forked.
         case "$out" in
-            *remote*migrat*|*"remote-migrate"*|*"designated migrator"*)
+            *"refusing to auto-apply "*" to a remote-backed database"*|*"refusing to migrate a remote-backed database"*)
                 echo "warning: pending bd schema migrations for '$db' were not applied (remote-backed scope; see bd's message below)" >&2
                 printf '%s\n' "$out" >&2
+                release_init_lock
                 return 0
                 ;;
         esac
         printf '%s\n' "$out" >&2
         die "failed to complete bd schema migrations for database '$db'"
     fi
+    if [ -n "$out" ]; then
+        printf '%s\n' "$out" >&2
+    fi
+    release_init_lock
 }
 
 # bd_runtime_schema_ready is the read-only view: true only when the schema is
@@ -1937,7 +2068,7 @@ graceful_stop_owned_pid() {
 # Overwritten on each server start. Without read/write timeouts, CLOSE_WAIT connections
 # accumulate and the server enters unrecoverable read-only mode.
 write_config_yaml() {
-    local archive_level auto_gc_enabled auto_gc_sysvar gc_bin raw_wait_timeout wait_timeout_value wait_timeout_line max_connections read_timeout_millis write_timeout_millis
+    local archive_level auto_gc_enabled auto_gc_sysvar gc_bin raw_wait_timeout wait_timeout_line max_connections read_timeout_millis write_timeout_millis
     # Surface the resolved managed-server bind. Since the default flipped from
     # 0.0.0.0 to loopback, an operator who relied on the old wildcard bind would
     # otherwise see a bare connection-refused; this line names the bind host and
@@ -1997,44 +2128,25 @@ write_config_yaml() {
             --write-timeout-millis "$write_timeout_millis" || die "failed to write managed dolt config via gc helper $gc_bin"
         return 0
     fi
-    # ADR-0064 AC1. wait_timeout is INERT in go-mysql-server: declared-only,
-    # with zero consumers outside its own declaration across all six cached
-    # versions, so nothing reaps a connection on its basis. read_timeout_millis
-    # is the sole reaper. This mirrors the annotation the gc helper emits in
-    # writeManagedDoltConfigFile — BOTH generators must carry it, or a reader of
-    # a gc-less config still sees a bare `wait_timeout: "30"` and re-derives the
-    # refuted "the dead sockets are already reaped, so raising read_timeout_millis
-    # is safe" argument that ADR-0064 retired on source evidence.
-    wait_timeout_value="30"
+    wait_timeout_line='  wait_timeout: "30"'
     raw_wait_timeout=${GC_DOLT_WAIT_TIMEOUT:-}
     case "$raw_wait_timeout" in
         '' ) ;;
         -*)
             case "${raw_wait_timeout#-}" in
                 ''|*[!0-9]* ) ;;
-                * ) wait_timeout_value="" ;;
+                * ) wait_timeout_line="" ;;
             esac
             ;;
         *[!0-9]* ) ;;
         * )
             if [ "$raw_wait_timeout" -gt 0 ] 2>/dev/null; then
-                wait_timeout_value="$raw_wait_timeout"
+                wait_timeout_line="  wait_timeout: \"$raw_wait_timeout\""
             else
-                wait_timeout_value=""
+                wait_timeout_line=""
             fi
             ;;
     esac
-    # The annotation is emitted with the key and only with it: when the override
-    # disables wait_timeout the generated file must contain no occurrence of the
-    # string at all.
-    if [ -n "$wait_timeout_value" ]; then
-        wait_timeout_line="  # INERT — declared-only in go-mysql-server; NOT a connection reaper.
-  # read_timeout_millis is the sole reaper. Do not cite this key as
-  # defense-in-depth for raising it on a swarm-facing server (ADR-0064).
-  wait_timeout: \"$wait_timeout_value\""
-    else
-        wait_timeout_line=""
-    fi
     local tmp
     tmp=$(mktemp "$CONFIG_FILE.tmp.XXXXXX")
     cat > "$tmp" <<YAML
@@ -3072,13 +3184,6 @@ op_start() {
             die "refusing to start dolt sql-server: a prior instance still holds the data dir exclusive lock (check $LOG_FILE)"
 
         # Write managed config.yaml with timeouts and GC settings.
-        # ADR-0064 AC3 (vp-o52ia): this gc-less shell fallback start cannot
-        # run the delivery window — the window is armed in the Go lifecycle
-        # (startManagedDoltProcessWithConfig). A start that skips the window
-        # is the defect D2 exists to prevent, so the skip must be loud, not
-        # silent (the vp-cblo shape).
-        echo "gc-beads-bd: MANAGED DOLT DELIVERY WINDOW SKIPPED: gc binary unavailable (shell fallback start) — no delivery window this start" >&2
-
         write_config_yaml
 
         local log_offset=0
@@ -3281,6 +3386,15 @@ bd_version_output() {
     printf '%s\n' "$raw"
 }
 
+# bd_version_number prints the version bd_version_output reports, as bd prints
+# it (`1.3.1`), and nothing when there is none to read. [0-9v]: bd's own
+# writeLocalVersion and classifyVersionWitness accept a v-prefixed value
+# (release tooling can stamp `v1.2.2`), so a digit-only pattern would read a
+# real version as none.
+bd_version_number() {
+    bd_version_output | sed -n 's/^bd version \([0-9v][^ ]*\).*/\1/p'
+}
+
 # bd >= 1.2 refuses to open a server-mode workspace that has a .beads/dolt root
 # but no .beads/.local_version witness: it classifies that shape as a pre-1.0
 # "legacy Dolt server workspace" and demands an explicit cross-era migration.
@@ -3328,17 +3442,15 @@ ensure_current_era_version_witness() {
             # an adopted store whose database carries no config table lands
             # here looking brand new. Stamping it would bypass bd's cross-era
             # migration guard on exactly the workspace that needs it. Only the
-            # disk, sampled BEFORE the CREATE, answers whether this invocation
-            # created the store, so defer to that (upstream #5294's insight).
-            # Fail closed: an unset flag means no create was observed, and a
-            # missing witness only re-arms bd's guard, while a wrongly-written
-            # one disarms it.
-            # Refuse when the backing store already existed when this
-            # invocation STARTED: that is the adoption case, and stamping it
-            # would disarm bd's guard on exactly the workspace that needs it.
-            # A store this invocation created, or none at all (metadata-only
-            # re-seed), is a legitimate stamp.
-            if [ "${GC_STORE_PREEXISTED:-false}" = true ] \
+            # disk, sampled when this invocation STARTED (op_init, before the
+            # CREATE), answers whether this invocation created the store, so
+            # defer to that (upstream #5294's insight): refuse when the backing
+            # store already existed, which is the adoption case. A store this
+            # invocation created, or none at all (metadata-only re-seed), is a
+            # legitimate stamp. Fail closed: an unsampled flag counts as
+            # pre-existing, because a missing witness only re-arms bd's guard,
+            # while a wrongly-written one disarms it.
+            if [ "${GC_STORE_PREEXISTED:-true}" = true ] \
                 && [ "${GC_DATABASE_CREATED_BY_ENSURE:-false}" != true ]; then
                 return 0
             fi
@@ -3351,12 +3463,8 @@ ensure_current_era_version_witness() {
         *) return 0 ;;
     esac
 
-    # [0-9v]: bd's own writeLocalVersion and classifyVersionWitness accept a
-    # v-prefixed value (release tooling can stamp `v1.2.2`), so a digit-only
-    # pattern would yield empty and silently skip the stamp -- leaving the
-    # opaque "legacy Dolt server workspace" failure with nothing explaining it.
-    local version
-    version=$(bd_version_output | sed -n 's/^bd version \([0-9v][^ ]*\).*/\1/p')
+    local version tmp
+    version=$(bd_version_number 8>&-)
     case "$version" in
         "")
             echo "warning: could not parse a version from 'bd version'; not stamping ${witness}. If bd init now fails with 'legacy Dolt server workspace detected', that is why." >&2
@@ -3370,7 +3478,12 @@ ensure_current_era_version_witness() {
             ;;
     esac
 
-    if ! ( umask 077 && printf '%s\n' "$version" > "$witness" ) 2>/dev/null; then
+    # Write to a temp file and rename it into place: a witness cut short by a
+    # crash would otherwise be kept forever by the never-overwrite rule above.
+    tmp="$witness.tmp.$$"
+    if ! ( umask 077 && printf '%s\n' "$version" > "$tmp" ) 2>/dev/null \
+        || ! mv -f "$tmp" "$witness" 2>/dev/null; then
+        rm -f "$tmp"
         echo "warning: could not write ${witness}; if bd init fails with 'legacy Dolt server workspace detected', an unwritable .beads is why." >&2
     fi
     return 0
@@ -3385,7 +3498,7 @@ ensure_current_era_version_witness() {
 dump_bd_init_forensics() {
     local db="$1"
     echo "bd init forensics for database '$db':" >&2
-    echo "  bd: $(bd_version_output | head -1)" >&2
+    echo "  bd: $(bd_version_output 8>&- | head -1)" >&2
     echo "  dolt: $(dolt version 2>/dev/null | head -1)" >&2
     echo "  git identity: name=$(git config --global user.name >/dev/null 2>&1 && echo set || echo unset) email=$(git config --global user.email >/dev/null 2>&1 && echo set || echo unset)" >&2
     echo "  dolt identity: name=$(dolt config --global --get user.name >/dev/null 2>&1 && echo set || echo unset) email=$(dolt config --global --get user.email >/dev/null 2>&1 && echo set || echo unset)" >&2
@@ -3676,17 +3789,6 @@ op_init() {
         fi
     fi
 
-    # Sample disk provenance ONCE, here, before anything in this invocation can
-    # create a backing store. This is the only honest answer to "did the store
-    # already exist when we started": ensure_database_registered's own flag is
-    # not it, because that function early-returns when the database is already
-    # catalogued (leaving the flag false) and can also run after bd has put the
-    # store on disk itself. Consulted by ensure_current_era_version_witness.
-    GC_STORE_PREEXISTED=false
-    if [ -n "${dolt_database:-}" ] && managed_backing_store_exists "$dolt_database"; then
-        GC_STORE_PREEXISTED=true
-    fi
-
     # Validate prefix before SQL interpolation (upstream 38f7b380).
     if ! valid_sql_name "$prefix"; then
         die "invalid beads prefix: $prefix (must be alphanumeric, hyphens, underscores)"
@@ -3735,6 +3837,19 @@ op_init() {
     fi
     if is_reserved_dolt_database_name "$dolt_database" && [ "$allow_reserved_existing" != true ]; then
         die "reserved dolt database name: $dolt_database (used internally by gc)"
+    fi
+
+    # Sample disk provenance ONCE, here: the database name is now fully
+    # resolved (an omitted argument has fallen back to metadata or the prefix
+    # above), and nothing in this invocation has created a backing store yet.
+    # This is the only honest answer to "did the store already exist when we
+    # started": ensure_database_registered's own flag is not it, because that
+    # function early-returns when the database is already catalogued (leaving
+    # the flag false) and can also run after bd has put the store on disk
+    # itself. Consulted by ensure_current_era_version_witness.
+    GC_STORE_PREEXISTED=false
+    if managed_backing_store_exists "$dolt_database"; then
+        GC_STORE_PREEXISTED=true
     fi
 
     local custom_types
@@ -3883,9 +3998,7 @@ op_init() {
                 fi
             fi
             if [ "$schema_ready" = true ]; then
-                if bd_bootstrap_interrupted "$dolt_database"; then
-                    heal_interrupted_bootstrap "$dolt_database"
-                fi
+                heal_interrupted_bootstrap "$dolt_database"
                 # Witness before the first bd command (see the fresh-scope
                 # path below): a scope whose metadata was written by hand or
                 # by an older gc may have none.
@@ -3913,9 +4026,7 @@ op_init() {
                 exit 0
             fi
             echo "warning: database '$dolt_database' missing bd schema; re-initializing" >&2
-            if bd_bootstrap_interrupted "$dolt_database"; then
-                heal_interrupted_bootstrap "$dolt_database"
-            fi
+            heal_interrupted_bootstrap "$dolt_database"
             bd_init_force="--force"
         else
             echo "warning: database '$dolt_database' not registered; re-initializing" >&2
@@ -3940,11 +4051,6 @@ op_init() {
         die "failed to register Dolt database '$dolt_database' on running server (CREATE DATABASE failed); see warnings above. cannot proceed with bd init."
     fi
 
-    # Gas City creates its managed server root at .beads/dolt before bd init.
-    # For a database proven to have been created above by this invocation,
-    # record the current bd version before bd's legacy-workspace guard runs.
-    # Pre-existing databases deliberately receive no marker here.
-
     ensure_current_era_scope_metadata "$dir" "$prefix" "$dolt_database"
     # A scope with no metadata.json is not proof of a fresh database. The
     # database can already hold an interrupted bootstrap from an earlier init
@@ -3957,9 +4063,7 @@ op_init() {
     # ADOPT a present schema (finish its migrations, normalize, identity) or
     # FORCE-seed a missing one. Only a database with no bd schema reaches
     # bd init at all.
-    if bd_bootstrap_interrupted "$dolt_database"; then
-        heal_interrupted_bootstrap "$dolt_database"
-    fi
+    heal_interrupted_bootstrap "$dolt_database"
     if [ "$GC_SCOPE_METADATA_PRESEEDED" = "1" ] && [ -z "$bd_init_force" ]; then
         if probe_schema_state_or_die "$dolt_database"; then
             # Witness BEFORE the first bd command: bd's server-branch guard
@@ -4003,16 +4107,7 @@ op_init() {
         if [ "$FLOCK_AVAILABLE" != true ]; then
             die "flock is required to safely force-reinitialize database '$dolt_database' (data-safety): without it, two concurrent initializers cannot be serialized and could both force a destructive reinit (gastownhall/beads#4566). Install: brew install flock (macOS) or apt install util-linux (Linux)"
         fi
-        local init_lock_file="$INIT_LOCK_DIR/$dolt_database.lock"
-        case "$INIT_LOCK_TIMEOUT_MS" in
-            ''|*[!0-9]*) INIT_LOCK_TIMEOUT_MS=60000 ;;
-        esac
-        local init_lock_timeout_s=$((INIT_LOCK_TIMEOUT_MS / 1000))
-        mkdir -p "$INIT_LOCK_DIR"
-        exec 8>"$init_lock_file"
-        if ! flock -w "$init_lock_timeout_s" 8; then
-            die "could not acquire init lock for database '$dolt_database' ($init_lock_file) within ${init_lock_timeout_s}s; a concurrent initializer may be stuck. inspect the store with 'bd dolt status' before retrying, or raise GC_DOLT_INIT_LOCK_TIMEOUT_MS."
-        fi
+        acquire_init_lock "$dolt_database" exclusive
 
         local reinit_still_empty=0
         bd_runtime_store_holds_bd_tables "$dolt_database" || reinit_still_empty=$?
@@ -4048,6 +4143,12 @@ op_init() {
     # visible issue prefix, while `--database` tells bd which existing Dolt
     # database to initialize. Without `--database`, bd can seed beads_<prefix>
     # and leave the pinned database schema-less.
+    # A plain bd init runs migrations too, so it takes the shared init lock
+    # like every other migration step (a no-op when the force path above
+    # already holds it exclusively).
+    if [ "$FLOCK_AVAILABLE" = true ]; then
+        acquire_init_lock "$dolt_database" shared
+    fi
     ensure_current_era_version_witness "$dir" "$dolt_database"
     if [ "$bd_init_over_verified_empty" = true ]; then
         run_bd_init_pinned_over_verified_empty "$dir" "$prefix" "$dolt_database" "$host"
@@ -4055,16 +4156,13 @@ op_init() {
         run_bd_init_pinned "$dir" "$prefix" "$dolt_database" "$host" "${bd_init_force:+true}"
     fi
 
-    # Release the init lock (acquired above only when bd_init_force was
-    # set) promptly rather than holding it through the post-init
-    # verification below: once run_bd_init_pinned has returned, the
+    # Release the init lock promptly rather than holding it through the
+    # post-init verification below: once run_bd_init_pinned has returned, the
     # database's schema is now genuinely present, so whichever process is
     # next in line for this lock will see that in its own revalidation and
     # correctly refuse to force again — it does not also need to wait out
     # this process's own settle/verification below.
-    if [ -n "$bd_init_force" ]; then
-        exec 8>&-
-    fi
+    release_init_lock
 
     # Re-register post-init: if bd init didn't catalog-register the DB
     # (server-mode quirk), do it now. After a successful bd init this is a
