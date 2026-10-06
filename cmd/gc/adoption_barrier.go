@@ -21,7 +21,6 @@ type adoptionResult struct {
 	Adopted        int
 	AlreadyHadBead int
 	Skipped        int // sessions that failed bead creation
-	Unstamped      int // adopted sessions whose runtime identity stamp failed
 	Total          int // total running sessions
 	// Details records per-session info for dry-run display.
 	Details []adoptionDetail
@@ -302,11 +301,10 @@ func runAdoptionBarrier(
 		result.Details = append(result.Details, detail)
 		stampErr := tokenErr
 		if stampErr == nil {
-			stampErr = stampAdoptedRuntime(sp, sessionName, rowID, mintedToken)
+			stampErr = stampAdoptedRuntime(sp, sessionName, rowID, strconv.Itoa(sessionpkg.DefaultGeneration), mintedToken)
 		}
 		if stampErr != nil {
 			fmt.Fprintf(stderr, "adoption barrier: %s adopted as %s, identity not stamped: %v\n", sessionName, rowID, stampErr) //nolint:errcheck
-			result.Unstamped++
 		}
 	}
 
@@ -316,28 +314,58 @@ func runAdoptionBarrier(
 }
 
 // stampAdoptedRuntime writes an adopted runtime's identity to the runtime
-// (LL5, v5 O2): mintedToken when the adoption minted one, then GC_SESSION_ID
-// when the runtime carries none. A runtime that already names a session keeps
-// it: the row holds the runtime's token, which reads Current whatever the
-// session ID, and a runtime still naming a closed row stays visible to
-// reapRuntimesBoundToClosedBeads exactly as before. The caller only reports
-// the error: the row exists either way.
-func stampAdoptedRuntime(sp runtime.Provider, name, sessionID, mintedToken string) error {
+// (LL5, v5 O2), outside any identifier lock. A minted token is written only
+// while a fresh read still finds none, with BEADS_HOLDER_TOKEN beside it when
+// that is absent (the two travel together, tmux/adapter.go). A runtime with
+// no GC_SESSION_ID then gets sessionID, and first its GC_RUNTIME_EPOCH, so
+// legacy's pending-create attribution reads a stale stamped incarnation as
+// another generation, never as its own; the ID is stamped even when the token
+// stamp fails, which the comparator holds as Unknown. A runtime that already
+// names a session keeps it: the row holds the runtime's token, which reads
+// Current whatever the session ID, and a runtime still naming a closed row
+// stays visible to reapRuntimesBoundToClosedBeads exactly as before. The
+// caller only reports the error: the row exists either way.
+func stampAdoptedRuntime(sp runtime.Provider, name, sessionID, generation, mintedToken string) error {
 	var errs []error
 	if mintedToken != "" {
+		switch current, err := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); {
+		case err != nil:
+			return fmt.Errorf("re-reading GC_INSTANCE_TOKEN: %w", err)
+		case strings.TrimSpace(current) != "":
+			return errors.New("the runtime gained a GC_INSTANCE_TOKEN after it was read")
+		}
 		if err := sp.SetMeta(name, "GC_INSTANCE_TOKEN", mintedToken); err != nil {
 			errs = append(errs, fmt.Errorf("stamping GC_INSTANCE_TOKEN: %w", err))
+		} else if err := stampIfAbsent(sp, name, "BEADS_HOLDER_TOKEN", mintedToken); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	switch current, err := sp.GetMeta(name, "GC_SESSION_ID"); {
 	case err != nil:
 		errs = append(errs, fmt.Errorf("reading GC_SESSION_ID: %w", err))
 	case strings.TrimSpace(current) == "":
-		if err := sp.SetMeta(name, "GC_SESSION_ID", sessionID); err != nil {
+		if err := sp.SetMeta(name, "GC_RUNTIME_EPOCH", generation); err != nil {
+			errs = append(errs, fmt.Errorf("stamping GC_RUNTIME_EPOCH: %w", err))
+		} else if err := sp.SetMeta(name, "GC_SESSION_ID", sessionID); err != nil {
 			errs = append(errs, fmt.Errorf("stamping GC_SESSION_ID: %w", err))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// stampIfAbsent writes key on the runtime when a read finds it unset.
+func stampIfAbsent(sp runtime.Provider, name, key, value string) error {
+	current, err := sp.GetMeta(name, key)
+	switch {
+	case err != nil:
+		return fmt.Errorf("reading %s: %w", key, err)
+	case strings.TrimSpace(current) != "":
+		return nil
+	}
+	if err := sp.SetMeta(name, key, value); err != nil {
+		return fmt.Errorf("stamping %s: %w", key, err)
+	}
+	return nil
 }
 
 func openSessionBeadExists(sessFront *sessionpkg.Store, sessionName string) (bool, error) {

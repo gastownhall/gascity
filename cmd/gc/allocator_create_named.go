@@ -32,8 +32,8 @@ import (
 //     keeps the row's instance_token and generation;
 //   - the row's state comes from the plan, decided from the observation cache
 //     (AM-N6): the effect never probes the provider and writes no file, except
-//     that an AdoptLive write then gives the row and the runtime one identity
-//     (adoptLiveIdentity, LL5).
+//     that once an AdoptLive write lands and the locks are released, it gives
+//     the row and the runtime one identity (adoptLiveIdentity, LL5).
 
 // namedCreatePlan is one configured named session to materialize (POOL-042,
 // P3-6b §3.1).
@@ -77,65 +77,101 @@ func (x *createEffects) createNamed(pass *createPass, p createPlan, prog *create
 		prog.stage = createStageFence
 		var err error
 		info, err = x.writeNamed(pass, p, tp, prog)
-		if err == nil && plan.AdoptLive {
-			x.adoptLiveIdentity(pass, p, info.ID)
-		}
 		return err
 	})
+	if err == nil && plan.AdoptLive {
+		x.adoptLiveIdentity(pass, p, info)
+	}
 	return info, err
 }
 
 // adoptLiveIdentity gives an AdoptLive row and the runtime it adopted one
-// identity (LL5, v5 O2). The row records the runtime's own GC_INSTANCE_TOKEN
-// by a CAS at the revision it reads, never blind; a runtime with no token
-// gets a minted one, on the row and then on the runtime. GC_SESSION_ID is
-// stamped, on a runtime that carries none, only once the row holds the
-// runtime's token: a lost CAS leaves the runtime with no session ID and a
-// token that is not the row's, which the comparator reads as Unknown. A
-// failure is logged and does not fail the create.
-func (x *createEffects) adoptLiveIdentity(pass *createPass, p createPlan, rowID string) {
+// identity (LL5, v5 O2), after the identifier locks are released. A runtime
+// that names another session is left alone, and so is the row: its token
+// belongs to that session. Otherwise the row records the runtime's own
+// GC_INSTANCE_TOKEN by CAS (recordRowToken), a runtime with no token getting
+// a minted one, and only then is the runtime stamped (stampAdoptedRuntime)
+// with the epoch the row holds: a lost CAS leaves the runtime with no session
+// ID and a token that is not the row's, which the comparator reads as
+// Unknown. A failure or a panic is logged and leaves the landed create
+// landed.
+func (x *createEffects) adoptLiveIdentity(pass *createPass, p createPlan, written session.Info) {
+	defer func() {
+		if r := recover(); r != nil {
+			x.logf("allocator: named session %q adopted as %s, identity stamp panicked: %v\n", p.Named.Identity, written.ID, r)
+		}
+	}()
 	if pass.sp == nil {
 		return
 	}
-	name := p.Named.SessionName
-	token, err := pass.sp.GetMeta(name, "GC_INSTANCE_TOKEN")
-	token, minted := strings.TrimSpace(token), ""
-	if err == nil && token == "" {
-		minted = session.NewInstanceToken()
-		token = minted
-	}
-	if err == nil {
-		err = recordRowToken(pass.store, rowID, token)
-	}
-	if err == nil {
-		err = stampAdoptedRuntime(pass.sp, name, rowID, minted)
-	}
-	if err != nil {
-		x.logf("allocator: named session %q adopted as %s, identity not stamped: %v\n", p.Named.Identity, rowID, err)
+	if err := adoptLiveStamp(pass.sp, pass.store, p.Named.SessionName, written); err != nil {
+		x.logf("allocator: named session %q adopted as %s, identity not stamped: %v\n", p.Named.Identity, written.ID, err)
 	}
 }
 
-// recordRowToken writes token as rowID's instance_token, conditional on the
-// revision a live read sees.
-func recordRowToken(store beads.Store, rowID, token string) error {
+func adoptLiveStamp(sp runtime.Provider, store beads.Store, name string, written session.Info) error {
+	sid, err := sp.GetMeta(name, "GC_SESSION_ID")
+	if err != nil {
+		return fmt.Errorf("reading GC_SESSION_ID: %w", err)
+	}
+	if sid = strings.TrimSpace(sid); sid != "" && sid != written.ID {
+		return fmt.Errorf("the runtime names session %s", sid)
+	}
+	token, err := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
+	if err != nil {
+		return fmt.Errorf("reading GC_INSTANCE_TOKEN: %w", err)
+	}
+	token, minted := strings.TrimSpace(token), ""
+	if token == "" {
+		minted = session.NewInstanceToken()
+		token = minted
+	}
+	generation, err := recordRowToken(store, written, token)
+	if err != nil {
+		return err
+	}
+	return stampAdoptedRuntime(sp, name, written.ID, generation, minted)
+}
+
+// rowTokenAttempts bounds recordRowToken's CAS retries.
+const rowTokenAttempts = 3
+
+// recordRowToken writes token as the written row's instance_token by CAS at
+// the revision a live read sees, retrying a lost CAS while the premise holds:
+// the row is open, at the generation the create wrote, and carries the token
+// the create wrote. It never writes blind. It returns the row's generation.
+func recordRowToken(store beads.Store, written session.Info, token string) (string, error) {
 	writer, _, err := beads.ResolveConditionalWriter(store)
 	switch {
 	case err != nil:
-		return fmt.Errorf("recording instance_token: %w", err)
+		return "", fmt.Errorf("recording instance_token: %w", err)
 	case writer == nil:
-		return errors.New("recording instance_token: the store has no conditional writer")
+		return "", errors.New("recording instance_token: the store has no conditional writer")
 	}
-	row, err := beads.HandlesFor(store).Live.Get(rowID)
-	if err != nil {
-		return fmt.Errorf("recording instance_token: %w", err)
+	live := beads.HandlesFor(store).Live
+	for attempt := 1; ; attempt++ {
+		row, err := live.Get(written.ID)
+		if err != nil {
+			return "", fmt.Errorf("recording instance_token: %w", err)
+		}
+		generation, current := row.Metadata["generation"], row.Metadata["instance_token"]
+		switch {
+		case row.Status == "closed" || generation != written.Generation:
+			return "", errors.New("recording instance_token: the row moved on after the create")
+		case current == token:
+			return generation, nil
+		case current != written.InstanceToken:
+			return "", errors.New("recording instance_token: the row holds a token the create did not write")
+		}
+		err = writer.UpdateIfMatch(written.ID, row.Revision, beads.UpdateOpts{Metadata: map[string]string{"instance_token": token}})
+		var lost *beads.PreconditionFailedError
+		switch {
+		case err == nil:
+			return generation, nil
+		case !errors.As(err, &lost) || attempt == rowTokenAttempts:
+			return "", fmt.Errorf("recording instance_token: %w", err)
+		}
 	}
-	if row.Metadata["instance_token"] == token {
-		return nil
-	}
-	if err := writer.UpdateIfMatch(rowID, row.Revision, beads.UpdateOpts{Metadata: map[string]string{"instance_token": token}}); err != nil {
-		return fmt.Errorf("recording instance_token: %w", err)
-	}
-	return nil
 }
 
 // resolveNamed resolves the plan's template read-only, as legacy's desired
@@ -225,7 +261,7 @@ func reopenNamed(store beads.Store, live beads.Store, cfg *config.City, p create
 	var written reopenWriteError
 	switch {
 	case err == nil:
-		return session.Info{ID: reopened.ID}, nil
+		return session.Info{ID: reopened.ID, InstanceToken: reopened.Metadata["instance_token"], Generation: reopened.Metadata["generation"]}, nil
 	case !errors.As(err, &written):
 		return session.Info{}, err
 	}
