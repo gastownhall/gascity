@@ -20,9 +20,15 @@ type Liveness struct {
 	Corpse bool
 	// ObjectID is the provider's id for the exact session object observed
 	// (tmux #{session_id}, for example "$3"), so a kill can target that object
-	// and not whatever later holds the name. Empty when the name is not
-	// listed or the provider has no such id.
+	// and not a session re-created under the name. It is unique only within
+	// one server's lifetime: a restarted tmux server numbers from "$0" again.
+	// Empty when the name is not listed or the provider has no such id; an
+	// empty id is refused by every [SessionObjectKiller].
 	ObjectID string
+	// PanePID is the pid of the session's only live pane (tmux #{pane_pid}),
+	// the condition of a zombie kill. Set only by a fresh read
+	// ([FreshLivenessObserver]) of a session with exactly one live pane.
+	PanePID string
 }
 
 // Present reports that the name is listed, a corpse included (v5 O1). It is
@@ -39,8 +45,12 @@ type LivenessObserver interface {
 
 // ServerDeathConfirmer is the optional provider capability that reports a
 // confirmed-dead runtime server: its socket is missing, or refuses on a stable
-// inode, so no session of it can exist and an empty listing is complete
-// (v5 O1, F3). Only tmux implements it.
+// inode, and no listener is bound to its path, so no session of it can exist
+// and an empty listing is complete (v5 O1, F3). Only tmux implements it.
+//
+// Ask it only right after a ListRunning that failed for a missing server, and
+// use the verdict only for that pass: a server can start at any moment, so a
+// verdict carried across passes would read a live fleet as gone.
 type ServerDeathConfirmer interface {
 	ServerConfirmedDead() bool
 }
@@ -100,6 +110,7 @@ func hasProcessNameHints(processNames []string) bool {
 func normalizeLiveness(obs Liveness) Liveness {
 	if obs.Alive && !obs.Running {
 		obs.Running = true
+		obs.Corpse = false
 	}
 	return obs
 }

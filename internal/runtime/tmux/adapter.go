@@ -41,6 +41,9 @@ type Provider struct {
 	livenessServerDead atomic.Bool
 	// logf logs liveness episodes. Nil selects log.Printf.
 	logf func(format string, args ...any)
+	// unixListening reports whether a listener is bound to a unix socket
+	// path, for ServerConfirmedDead. Nil selects unixPathListening.
+	unixListening func(path string) (bool, error)
 }
 
 var instanceTokenReader = rand.Reader
@@ -61,6 +64,8 @@ var (
 	_ runtime.AttachmentObserverWithError   = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 	_ runtime.ServerDeathConfirmer          = (*Provider)(nil)
+	_ runtime.SessionObjectKiller           = (*Provider)(nil)
+	_ runtime.FreshLivenessObserver         = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -454,35 +459,22 @@ func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.L
 	if strings.TrimSpace(name) == "" {
 		return runtime.Liveness{}
 	}
-	session, listed := p.cache.session(name)
-	running := listed && session.Running
+	running := p.cache.IsRunning(name)
 	processNames = nonEmptyProcessNames(processNames)
 	if len(processNames) == 0 {
 		processNames = p.sessionProcessNames(name)
 	}
 	if len(processNames) == 0 {
-		return withSessionObject(runtime.Liveness{Running: running, Alive: running}, session, listed)
+		return runtime.Liveness{Running: running, Alive: running}
 	}
 	alive := p.cache.ProcessAlive(name, processNames)
 	if alive && !running {
 		running = true
 	}
-	return withSessionObject(runtime.Liveness{
+	return runtime.Liveness{
 		Running: running,
 		Alive:   alive,
-	}, session, listed)
-}
-
-// withSessionObject adds what the snapshot row for a listed name says about
-// its session object to obs: the corpse bit, when no pane is running, and
-// #{session_id}. Running and Alive are left as computed, so legacy readers of
-// them see no change.
-func withSessionObject(obs runtime.Liveness, session sessionRuntimeState, listed bool) runtime.Liveness {
-	if listed {
-		obs.Corpse = !obs.Running
-		obs.ObjectID = session.ID
 	}
-	return obs
 }
 
 // ObserveLivenessWithError reports pane and agent-process presence like
@@ -501,41 +493,47 @@ func (p *Provider) ObserveLivenessWithError(name string, processNames []string) 
 		p.noteLivenessEpisode(livenessOutcomeServerDead, nil)
 		return runtime.Liveness{}, nil
 	case cacheAnswerUnknown:
-		// The message omits the refresh error's text: tmux's "no tmux server
-		// running" and exec's "executable file not found" both match
-		// runtime.IsSessionGone, which would read "unknown" as "gone".
-		errs := []error{runtime.ErrRuntimeUnavailable}
-		if obs.lastErr != nil {
-			errs = append(errs, obs.lastErr)
-		}
-		err := &quietCauseError{
-			msg:  fmt.Sprintf("observing tmux session %q: state cache cannot vouch for it: %v", name, runtime.ErrRuntimeUnavailable),
-			errs: errs,
-		}
 		p.noteLivenessEpisode(livenessOutcomeUnknown, obs.lastErr)
-		return runtime.Liveness{}, err
+		return runtime.Liveness{}, cacheUnknownError(name, obs.lastErr)
 	}
 	p.noteLivenessEpisode(livenessOutcomeAnswered, nil)
-	session, ok := obs.state.Sessions[name]
-	if !ok || !session.Running {
-		return withSessionObject(runtime.Liveness{}, session, ok), nil
+	return p.snapshotLiveness(obs.state, name, processNames), nil
+}
+
+// cacheUnknownError is the "unknown" answer for name: an error wrapping
+// [runtime.ErrRuntimeUnavailable] and the refresh error.
+func cacheUnknownError(name string, lastErr error) error {
+	// The message omits the refresh error's text: tmux's "no tmux server
+	// running" and exec's "executable file not found" both match
+	// runtime.IsSessionGone, which would read "unknown" as "gone".
+	errs := []error{runtime.ErrRuntimeUnavailable}
+	if lastErr != nil {
+		errs = append(errs, lastErr)
+	}
+	return &quietCauseError{
+		msg:  fmt.Sprintf("observing tmux session %q: state cache cannot vouch for it: %v", name, runtime.ErrRuntimeUnavailable),
+		errs: errs,
+	}
+}
+
+// snapshotLiveness answers for name from one published snapshot: absent; a
+// corpse, with its session object id; or a running session with its id.
+func (p *Provider) snapshotLiveness(state runtimeStateSnapshot, name string, processNames []string) runtime.Liveness {
+	session, ok := state.Sessions[name]
+	if !ok {
+		return runtime.Liveness{}
+	}
+	if !session.Running {
+		return runtime.Liveness{Corpse: true, ObjectID: session.ID}
 	}
 	processNames = nonEmptyProcessNames(processNames)
 	if len(processNames) == 0 {
 		processNames = p.sessionProcessNames(name)
 	}
 	if len(processNames) == 0 {
-		return withSessionObject(runtime.Liveness{Running: true, Alive: true}, session, ok), nil
+		return runtime.Liveness{Running: true, Alive: true, ObjectID: session.ID}
 	}
-	return withSessionObject(runtime.Liveness{Running: true, Alive: obs.state.processAlive(name, processNames)}, session, ok), nil
-}
-
-// ServerConfirmedDead reports whether this provider's tmux server socket is
-// missing, or refuses connections on a stable inode, so that no session of the
-// server can exist. It implements [runtime.ServerDeathConfirmer]; ListRunning
-// is unchanged and still reports a dead server as a partial listing.
-func (p *Provider) ServerConfirmedDead() bool {
-	return p.tm.serverConfirmedDead()
+	return runtime.Liveness{Running: true, Alive: state.processAlive(name, processNames), ObjectID: session.ID}
 }
 
 // livenessOutcome is how one ObserveLivenessWithError call answered, for the

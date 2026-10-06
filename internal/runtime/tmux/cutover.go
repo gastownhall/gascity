@@ -44,9 +44,11 @@ var (
 	// The error-bearing liveness observation is promoted from the embedded raw
 	// provider; IsRunning and ProcessAlive (bool) route through the seams.
 	_ runtime.LivenessObserverWithError = (*seamBackedProvider)(nil)
-	// The confirmed-dead server check is promoted from the embedded raw
-	// provider.
-	_ runtime.ServerDeathConfirmer = (*seamBackedProvider)(nil)
+	// The confirmed-dead server check, the fresh read and the exact-object
+	// kills are promoted from the embedded raw provider.
+	_ runtime.ServerDeathConfirmer  = (*seamBackedProvider)(nil)
+	_ runtime.FreshLivenessObserver = (*seamBackedProvider)(nil)
+	_ runtime.SessionObjectKiller   = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBackedWithConfig constructs a tmux provider served through the seams.

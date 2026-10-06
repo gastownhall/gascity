@@ -38,6 +38,8 @@ var (
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
+	_ runtime.FreshLivenessObserver         = (*Provider)(nil)
+	_ runtime.SessionObjectKiller           = (*Provider)(nil)
 	_ runtime.AttachmentObserverWithError   = (*Provider)(nil)
 	_ runtime.SessionEventProvider          = (*Provider)(nil)
 	_ runtime.BackendListingProvider        = (*Provider)(nil)
@@ -291,7 +293,10 @@ func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.L
 	if isACP {
 		other = p.defaultSP
 	}
-	return runtime.ObserveLiveness(other, name, processNames)
+	if obs := runtime.ObserveLiveness(other, name, processNames); obs.Running || !primary.Corpse {
+		return obs
+	}
+	return primary
 }
 
 // ObserveLivenessWithError preserves routed-backend observation failures. A
@@ -299,7 +304,26 @@ func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.L
 // recovery matches IsRunning and ObserveLiveness without collapsing an
 // unavailable primary into absence.
 func (p *Provider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
-	primary, err := runtime.ObserveLivenessWithError(p.route(name), name, processNames)
+	return p.observeFallingThrough(name, func(sp runtime.Provider) (runtime.Liveness, error) {
+		return runtime.ObserveLivenessWithError(sp, name, processNames)
+	})
+}
+
+// ObserveLivenessSince is ObserveLivenessWithError over reads taken at or
+// after since ([runtime.ObserveLivenessSince] on each backend).
+func (p *Provider) ObserveLivenessSince(name string, processNames []string, since time.Time) (runtime.Liveness, error) {
+	return p.observeFallingThrough(name, func(sp runtime.Provider) (runtime.Liveness, error) {
+		return runtime.ObserveLivenessSince(sp, name, processNames, since)
+	})
+}
+
+// observeFallingThrough reads the routed backend and, on a confirmed
+// not-running answer, the other one. A corpse on the routed backend (tmux)
+// is kept when the other backend also answers not-running without error, so
+// the fall-through never hides it; Running, Alive and the error are those
+// the other backend answered, as before.
+func (p *Provider) observeFallingThrough(name string, observe func(runtime.Provider) (runtime.Liveness, error)) (runtime.Liveness, error) {
+	primary, err := observe(p.route(name))
 	if err != nil || primary.Running {
 		return primary, err
 	}
@@ -310,7 +334,39 @@ func (p *Provider) ObserveLivenessWithError(name string, processNames []string) 
 	if isACP {
 		other = p.defaultSP
 	}
-	return runtime.ObserveLivenessWithError(other, name, processNames)
+	obs, err := observe(other)
+	if err == nil && !obs.Running && primary.Corpse {
+		return primary, nil
+	}
+	return obs, err
+}
+
+// KillCorpseObject forwards to the backend that kills session objects by id
+// (tmux), preferring the routed one.
+func (p *Provider) KillCorpseObject(name, objectID string) (runtime.SessionObjectKillResult, error) {
+	killer, err := p.sessionObjectKiller(name)
+	if err != nil {
+		return runtime.SessionObjectNotKilled, err
+	}
+	return killer.KillCorpseObject(name, objectID)
+}
+
+// KillZombieObject forwards like KillCorpseObject.
+func (p *Provider) KillZombieObject(name, objectID, panePID string) (runtime.SessionObjectKillResult, error) {
+	killer, err := p.sessionObjectKiller(name)
+	if err != nil {
+		return runtime.SessionObjectNotKilled, err
+	}
+	return killer.KillZombieObject(name, objectID, panePID)
+}
+
+func (p *Provider) sessionObjectKiller(name string) (runtime.SessionObjectKiller, error) {
+	for _, sp := range []runtime.Provider{p.route(name), p.defaultSP, p.acpSP} {
+		if killer, ok := sp.(runtime.SessionObjectKiller); ok {
+			return killer, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: session %q", runtime.ErrSessionObjectKillUnsupported, name)
 }
 
 // Nudge delegates to the routed backend.

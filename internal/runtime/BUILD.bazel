@@ -27,6 +27,7 @@ go_library(
         "seam_adapter.go",
         "session_events.go",
         "session_events_merge.go",
+        "session_object.go",
         "setupcommand.go",
         "staging.go",
         "startup_hints.go",

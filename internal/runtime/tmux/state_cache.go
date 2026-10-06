@@ -77,8 +77,10 @@ type sessionRuntimeState struct {
 	// — the same value the per-session `list-windows -t <s>` read returns. Zero
 	// means the snapshot carries no activity for the session.
 	Activity int64
-	// ID is the session object's #{session_id} (for example "$3"), which a
-	// re-created session under the same name does not reuse.
+	// ID is the session object's #{session_id} (for example "$3"). A session
+	// re-created under the same name gets a new one, but ids are unique only
+	// within one server's lifetime: a restarted server numbers from "$0" again.
+	// Empty when tmux reported no well-formed id.
 	ID string
 }
 
@@ -119,6 +121,9 @@ type StateCache struct {
 	// place. Writers replace a map wholesale under mu instead.
 	state     runtimeStateSnapshot
 	fetchedAt time.Time
+	// startedAt is when the fetch that produced state began, on the cache
+	// clock, so a fresh read can tell whether state postdates an effect.
+	startedAt time.Time
 	lastError error
 	dirty     bool // set by Invalidate(); cleared by a refresh no invalidation superseded
 	// generation advances on every Invalidate and EvictSession, so a refresh
@@ -150,6 +155,7 @@ type StateCache struct {
 type cacheObservation struct {
 	state     runtimeStateSnapshot
 	fetchedAt time.Time
+	startedAt time.Time
 	// lastErr is the error of the most recent refresh attempt; nil after a
 	// success.
 	lastErr error
@@ -180,15 +186,9 @@ func NewStateCache(fetcher StateFetcher, ttl time.Duration) *StateCache {
 // If the cache is stale, a refresh is triggered (coalesced via singleflight).
 // On refresh failure, the last-known-good cache is preserved up to staleTTL.
 func (c *StateCache) IsRunning(name string) bool {
-	session, ok := c.session(name)
+	state := c.currentState()
+	session, ok := state.Sessions[name]
 	return ok && session.Running
-}
-
-// session returns the cached row for name, corpses included, behind the same
-// refresh trigger and staleTTL cliff as IsRunning.
-func (c *StateCache) session(name string) (sessionRuntimeState, bool) {
-	session, ok := c.currentState().Sessions[name]
-	return session, ok
 }
 
 // ProcessAlive reports whether the named session has a process matching one of
@@ -282,6 +282,7 @@ func (c *StateCache) observation() cacheObservation {
 	return cacheObservation{
 		state:            c.state,
 		fetchedAt:        c.fetchedAt,
+		startedAt:        c.startedAt,
 		lastErr:          c.lastError,
 		dirty:            c.dirty,
 		primedByNoServer: c.primedByNoServer,
@@ -336,6 +337,25 @@ func classifyCacheObservation(obs cacheObservation, name string, now time.Time, 
 		return cacheAnswerAbsent
 	}
 	return cacheAnswerUnknown
+}
+
+// observeSince returns the published snapshot once a successful fetch that
+// started at or after since has produced it, refreshing when the published one
+// is older. It refreshes at most twice: a fetch already in flight before since
+// is joined rather than restarted, so the second refresh is the one that starts
+// after since. It never invalidates the cache. ok is false when no such fetch
+// succeeded; obs.lastErr then says why.
+func (c *StateCache) observeSince(since time.Time) (obs cacheObservation, ok bool) {
+	for attempt := 0; ; attempt++ {
+		obs = c.observation()
+		if obs.lastErr == nil && obs.primed() && !obs.startedAt.Before(since) {
+			return obs, true
+		}
+		if attempt == 2 {
+			return obs, false
+		}
+		c.refresh()
+	}
 }
 
 // Invalidate marks the cache as dirty, forcing the next IsRunning call
@@ -453,6 +473,7 @@ func (c *StateCache) refresh() {
 
 		c.state = state
 		c.fetchedAt = c.clock()
+		c.startedAt = start
 		c.lastError = nil
 		c.primedByNoServer = false
 		c.dirty = superseded
@@ -625,7 +646,7 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 				session.Activity = activity
 			}
 		}
-		if len(parts) > 6 {
+		if len(parts) > 6 && validSessionObjectID(strings.TrimSpace(parts[6])) {
 			session.ID = strings.TrimSpace(parts[6])
 		}
 		if parts[1] == "1" {

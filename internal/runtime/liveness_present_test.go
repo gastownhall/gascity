@@ -42,3 +42,33 @@ func TestLivenessPresentImpliedByRunning(t *testing.T) {
 		}
 	}
 }
+
+type freshLivenessStub struct {
+	*Fake
+	obs   Liveness
+	since time.Time
+}
+
+func (s *freshLivenessStub) ObserveLivenessSince(_ string, _ []string, since time.Time) (Liveness, error) {
+	s.since = since
+	return s.obs, nil
+}
+
+// A fresh read prefers the capability and passes since through; without it,
+// it answers from the error-bearing read. A promoted Running clears Corpse.
+// Kills: the capability ignored or since dropped; a corpse that is running.
+func TestObserveLivenessSinceUsesCapabilityAndNormalizes(t *testing.T) {
+	since := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	stub := &freshLivenessStub{Fake: NewFake(), obs: Liveness{Alive: true, Corpse: true, ObjectID: "$1"}}
+	got, err := ObserveLivenessSince(stub, "worker", nil, since)
+	if err != nil || got != (Liveness{Running: true, Alive: true, ObjectID: "$1"}) || !stub.since.Equal(since) {
+		t.Fatalf("ObserveLivenessSince = (%+v, %v), since %v; want normalized running and since passed", got, err, stub.since)
+	}
+	plain := NewFake()
+	if err := plain.Start(context.Background(), "worker", Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got, err := ObserveLivenessSince(plain, "worker", nil, since); err != nil || !got.Running {
+		t.Fatalf("ObserveLivenessSince fallback = (%+v, %v), want running", got, err)
+	}
+}
