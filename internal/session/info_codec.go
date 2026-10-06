@@ -112,11 +112,9 @@ var infoKeyCodec = []infoKeySpec{
 	{CanonicalInstanceNameMetadata, func(i *Info, v string) { i.CanonicalInstanceNameMetadata = v }},
 	{CanonicalPoolSlotMetadata, func(i *Info, v string) { i.CanonicalPoolSlotMetadata = v }},
 
-	// Priming-marker mirrors (verbatim). The S19 Stage 3 shadow harness snapshots
-	// these compared keys off Info at tick start/end (the reconciler loop carries
-	// no raw beads), so each priming key is a projected Info field. Write-only in
-	// Stage 2: stamped by CommitStartedPatch / cleared at the started_config_hash
-	// clear sites, read by no decision path yet.
+	// Priming-marker mirrors (verbatim). Write-only in Stage 2: stamped by
+	// CommitStartedPatch / cleared at the started_config_hash clear sites, read
+	// by no decision path yet.
 	{PrimedAtMetadataKey, func(i *Info, v string) { i.PrimedAtMetadata = v }},
 	{PrimingAttemptedAtMetadataKey, func(i *Info, v string) { i.PrimingAttemptedAtMetadata = v }},
 	{PromptHashMetadataKey, func(i *Info, v string) { i.PromptHashMetadata = v }},
@@ -151,6 +149,7 @@ var infoKeyCodec = []infoKeySpec{
 	}},
 	{"continuity_eligible", func(i *Info, v string) { i.ContinuityEligible = v }},
 	{"last_woke_at", func(i *Info, v string) { i.LastWokeAt = v }},
+	{"slept_at", func(i *Info, v string) { i.SleptAt = v }},
 	{"awake_started_at", func(i *Info, v string) { i.AwakeStartedAt = v }},
 	{"usage_compute_emitted_at", func(i *Info, v string) { i.UsageComputeEmittedAt = v }},
 	{"state_reason", func(i *Info, v string) { i.StateReason = v }},
@@ -166,7 +165,10 @@ var infoKeyCodec = []infoKeySpec{
 	{"held_until", func(i *Info, v string) { i.HeldUntil = v }},
 	{"wait_hold", func(i *Info, v string) { i.WaitHold = v }},
 	{"churn_count", func(i *Info, v string) { i.ChurnCount = v }},
+	{"idle_respawn_attempts", func(i *Info, v string) { i.IdleRespawnAttempts = v }},
+	{"idle_respawn_bead_id", func(i *Info, v string) { i.IdleRespawnBeadID = v }},
 	{"wake_mode", func(i *Info, v string) { i.WakeMode = v }},
+	{"drain_at", func(i *Info, v string) { i.DrainAt = v }},
 	{"sleep_intent", func(i *Info, v string) { i.SleepIntent = v }},
 	{"instance_token", func(i *Info, v string) { i.InstanceToken = v }},
 	{"detached_at", func(i *Info, v string) { i.DetachedAt = v }},

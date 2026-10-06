@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"sort"
@@ -164,7 +165,7 @@ func primeGuardedPoolCrossStoreCensus(
 	rigStores map[string]beads.Store,
 ) {
 	t.Helper()
-	infos, err := collectAllOpenSessionInfos(bp.cityPath, bp.city, bp.beadStore, rigStores, nil)
+	infos, err := collectAllOpenSessionInfos(bp.cityPath, bp.city, bp.beadStore, rigStores, nil, nil)
 	if err != nil {
 		t.Fatalf("initial complete session census: %v", err)
 	}
@@ -192,7 +193,7 @@ func assertExactRuntimeNameSerializesPoolCreates(
 	secondResult := make(chan result, 1)
 	create := func(spec guardedPoolCreateSpec, out chan<- result) {
 		info, err := createPoolSessionBeadWithGuardedAliasUsingLock(
-			bp,
+			poolCreateViewOf(bp),
 			spec.agent,
 			spec.template,
 			spec.qualifiedInstance,
@@ -245,8 +246,10 @@ func assertExactRuntimeNameSerializesPoolCreates(
 	if first.err != nil {
 		t.Fatalf("first create: %v", first.err)
 	}
-	if got := first.info.SessionNameMetadata; got != runtimeName {
-		t.Fatalf("first session_name = %q, want %q", got, runtimeName)
+	// runtimeName is the identity lease the creators serialize on; an
+	// unaliased pool persists the bead-scoped runtime name instead.
+	if got := first.info.SessionNameMetadata; got != runtimeName && got != PoolSessionName(first.info.Template, first.info.ID) {
+		t.Fatalf("first session_name = %q, want %q or its bead-scoped form", got, runtimeName)
 	}
 	if !errors.Is(second.err, errPoolSessionNameUnavailable) {
 		t.Fatalf("second create error = %v, want errPoolSessionNameUnavailable", second.err)
@@ -418,8 +421,8 @@ func TestCreatePoolSessionBeadWithGuardedAlias_ProvenAliasCollisionDefersAlias(t
 	if created.Alias != "" {
 		t.Fatalf("created alias = %q, want deferred/empty while rig/furiosa is held", created.Alias)
 	}
-	if created.SessionNameMetadata != expectedRuntimeName {
-		t.Fatalf("created session_name = %q, want exact free runtime name %q", created.SessionNameMetadata, expectedRuntimeName)
+	if want := PoolSessionName(cfg.Agents[0].QualifiedName(), created.ID); created.SessionNameMetadata != want {
+		t.Fatalf("created session_name = %q, want bead-scoped runtime name %q", created.SessionNameMetadata, want)
 	}
 
 	rows, err := loadSessionBeads(store)
@@ -471,8 +474,9 @@ func TestCreatePoolSessionBeadWithGuardedAlias_ForeignAliasCollisionDefersAlias(
 	if created.ID == "" || created.Alias != "" {
 		t.Fatalf("created session = %#v, want one alias-deferred primary row", created)
 	}
-	if created.SessionNameMetadata != expectedRuntimeName {
-		t.Fatalf("created session_name = %q, want %q", created.SessionNameMetadata, expectedRuntimeName)
+	_ = expectedRuntimeName // identity lease only; the persisted name is bead-scoped
+	if want := PoolSessionName(cfg.Agents[0].QualifiedName(), created.ID); created.SessionNameMetadata != want {
+		t.Fatalf("created session_name = %q, want %q", created.SessionNameMetadata, want)
 	}
 	if got := bp.sessionBeads.OpenInfos(); len(got) != 1 || got[0].ID != created.ID {
 		t.Fatalf("primary writeback = %#v, want exactly created row %s", got, created.ID)
@@ -516,7 +520,7 @@ func TestCreatePoolSessionBeadWithGuardedAlias_LateForeignExactNameHolderBlocksC
 		return fn()
 	}
 	created, err := createPoolSessionBeadWithGuardedAliasUsingLock(
-		bp,
+		poolCreateViewOf(bp),
 		&cfg.Agents[0],
 		cfg.Agents[0].QualifiedName(),
 		qualifiedInstance,
@@ -541,12 +545,21 @@ func TestCreatePoolSessionBeadWithGuardedAlias_LiveRecensusBypassesStaleForeignC
 	rigPath := t.TempDir()
 	primaryBacking := beads.NewMemStore()
 	primary := beads.NewCachingStoreForTest(primaryBacking, nil)
-	if err := primary.PrimeActive(); err != nil {
+	// Both caches are fully primed (cacheLive) rather than active-only. A
+	// partial prime answers no broad non-closed list query from cache at all,
+	// so the ordinary census below would fall back to the backing store and
+	// observe the external write immediately, collapsing the staleness window
+	// this test exists to reproduce. A fully primed cache serves that census
+	// from its own snapshot, which is the production shape: complete as of the
+	// prime and still blind to a later write committed by another process.
+	// Note the two unrelated senses of "live" here: this is the cache STATE,
+	// whereas the lock-time recensus bypass below is session.ListAllOptions.Live.
+	if err := primary.Prime(context.Background()); err != nil {
 		t.Fatalf("prime primary cache: %v", err)
 	}
 	foreignBacking := beads.NewMemStore()
 	foreign := beads.NewCachingStoreForTest(foreignBacking, nil)
-	if err := foreign.PrimeActive(); err != nil {
+	if err := foreign.Prime(context.Background()); err != nil {
 		t.Fatalf("prime foreign cache: %v", err)
 	}
 	maxSessions := 2
@@ -571,7 +584,7 @@ func TestCreatePoolSessionBeadWithGuardedAlias_LiveRecensusBypassesStaleForeignC
 	// The ordinary controller census deliberately stays cache-served. It misses
 	// the external write until reconciliation, reproducing the production race
 	// that made a non-Live lock-time read insufficient.
-	stale, err := collectAllOpenSessionInfos(cityPath, cfg, primary, rigStores, nil)
+	stale, err := collectAllOpenSessionInfos(cityPath, cfg, primary, rigStores, nil, nil)
 	if err != nil {
 		t.Fatalf("ordinary cached session census: %v", err)
 	}
@@ -694,8 +707,8 @@ func TestCreatePoolSessionBeadWithIdentifiers_UsesForeignAvailabilitySnapshotAnd
 	if err != nil {
 		t.Fatalf("create after foreign holder closes: %v", err)
 	}
-	if info.SessionNameMetadata != identifiers.sessionName {
-		t.Fatalf("replacement session_name = %q, want stable %q", info.SessionNameMetadata, identifiers.sessionName)
+	if want := PoolSessionName("worker", info.ID); info.SessionNameMetadata != want {
+		t.Fatalf("replacement session_name = %q, want bead-scoped %q", info.SessionNameMetadata, want)
 	}
 	if got := writebackSnapshot.OpenInfos(); len(got) != 1 || got[0].ID != info.ID {
 		t.Fatalf("primary writeback = %#v, want newly created session %s", got, info.ID)

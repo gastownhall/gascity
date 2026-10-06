@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -149,6 +151,14 @@ func TestWakeReasonsNonInteractiveImmediateUsesHardWakeReasons(t *testing.T) {
 	if len(reasons) != 1 || reasons[0] != WakePending {
 		t.Fatalf("expected [WakePending], got %v", reasons)
 	}
+
+	// Wake reasons are display: a probe that cannot answer shows no pending.
+	sp = runtime.NewFake()
+	sp.PendingErrors["worker"] = errors.New("capturing pane: fork failed")
+	reasons = wakeReasonsForBead(session, cfg, sp, nil, nil, nil, &clock.Fake{Time: now})
+	if len(reasons) != 0 {
+		t.Fatalf("expected no reasons on an unknown pending answer, got %v", reasons)
+	}
 }
 
 func TestWakeReasons_DependencyOnlyFloorDoesNotGetWakeConfig(t *testing.T) {
@@ -205,7 +215,9 @@ func TestReconcileDetachedAtUsesRoutedSleepCapability(t *testing.T) {
 		t.Fatalf("policy capability = %q, want %q", policy.Capability, runtime.SessionSleepCapabilityFull)
 	}
 
-	reconcileDetachedAtInfo(sessiontest.SeedBead(t, session), store, policy, true, provider, &clock.Fake{Time: now})
+	if _, err := reconcileDetachedAtInfo(sessiontest.SeedBead(t, session), store, policy, true, provider, &clock.Fake{Time: now}); err != nil {
+		t.Fatalf("reconcileDetachedAtInfo: %v", err)
+	}
 
 	got, err := store.Get(session.ID)
 	if err != nil {
@@ -612,6 +624,36 @@ func TestReconcileSessionBeads_IdleLatchedSessionDoesNotWake(t *testing.T) {
 
 	if got := env.reconcile([]beads.Bead{session}); got != 0 {
 		t.Fatalf("planned wakes = %d, want 0", got)
+	}
+	if starts := startedSessionNames(env.sp); len(starts) != 0 {
+		t.Fatalf("unexpected starts: %v", starts)
+	}
+}
+
+// A dead target has no prompt: a pending probe that cannot answer (here the
+// tmux server is gone) must not lift config suppression and wake an
+// idle-latched session. On main a dead target always read "not pending".
+func TestReconcileSessionBeads_PendingUnknownDoesNotWakeIdleLatchedSession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		SessionSleep: config.SessionSleepConfig{
+			InteractiveResume: "60s",
+		},
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	env.addDesired("worker", "worker", false)
+	session := env.createSessionBead("worker", "worker")
+	policy := resolveSessionSleepPolicyInfo(sessiontest.SeedBead(t, session), env.cfg, env.sp)
+	env.setSessionMetadata(&session, map[string]string{
+		"sleep_reason":             "idle",
+		"sleep_policy_fingerprint": policy.Fingerprint,
+		"slept_at":                 env.clk.Time.Add(-2 * time.Minute).UTC().Format(time.RFC3339),
+		"wake_request":             "explicit",
+	})
+	env.sp.PendingErrors["worker"] = errors.New("capturing pane: no tmux server running")
+
+	if woken := env.reconcile([]beads.Bead{session}); woken != 0 {
+		t.Fatalf("woken = %d, want 0; stderr=%s", woken, env.stderr.String())
 	}
 	if starts := startedSessionNames(env.sp); len(starts) != 0 {
 		t.Fatalf("unexpected starts: %v", starts)
@@ -1224,7 +1266,7 @@ func TestSelectIdleProbeTargets_RotatesAcrossTicks(t *testing.T) {
 	dt := newDrainTracker()
 	infoByID := infoByIDForTargets(wakeTargets)
 
-	first := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByID)
+	first := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByID, time.Now())
 	if len(first) != 3 {
 		t.Fatalf("first selection = %d targets, want 3", len(first))
 	}
@@ -1232,7 +1274,7 @@ func TestSelectIdleProbeTargets_RotatesAcrossTicks(t *testing.T) {
 		t.Fatalf("first selection unexpectedly included fourth target: %v", first)
 	}
 
-	second := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByID)
+	second := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByID, time.Now())
 	if !second["four"] {
 		t.Fatalf("second selection should rotate in fourth target, got %v", second)
 	}
@@ -1253,7 +1295,7 @@ func TestSelectIdleProbeTargets_SkipsExplicitSleepIntent(t *testing.T) {
 		"wait-hold": {Policy: policy, ConfigSuppressed: true},
 	}
 
-	targets := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByIDForTargets(wakeTargets))
+	targets := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByIDForTargets(wakeTargets), time.Now())
 	if len(targets) != 0 {
 		t.Fatalf("selectIdleProbeTargets returned %v, want no probe targets", targets)
 	}
@@ -1327,4 +1369,115 @@ func waitForIdleProbeReady(t *testing.T, dt *drainTracker, beadID string) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("idle probe for %s not ready within 10s", beadID)
+}
+
+// A runtime with no interactions (acp answers ErrInteractionUnsupported) is
+// "not pending", never "unknown": unknown would keep every ACP session awake.
+func TestPendingProbeUnsupportedIsNo(t *testing.T) {
+	err := fmt.Errorf("acp: %w", runtime.ErrInteractionUnsupported)
+	if got := classifyPendingInteraction(false, err); got != pendingInteractionNo {
+		t.Fatalf("classifyPendingInteraction(unsupported) = %v, want pendingInteractionNo", got)
+	}
+	sp := runtime.NewFake()
+	sp.PendingErrors["worker"] = err
+	if got, probeErr := pendingInteractionProbe(sp, "worker"); got != pendingInteractionNo || probeErr != nil {
+		t.Fatalf("pendingInteractionProbe = (%v, %v), want (pendingInteractionNo, nil)", got, probeErr)
+	}
+	if pendingInteractionReady(sp, "worker") {
+		t.Fatal("pendingInteractionReady = true for an unsupported runtime, want false")
+	}
+}
+
+// A failed pending probe could not tell, so it is "unknown", and the
+// fail-closed gate reads it as pending. The message carries "not found" text
+// on purpose: only the typed sentinel means gone.
+func TestPendingProbeErrorIsUnknown(t *testing.T) {
+	err := errors.New("capture-pane timed out: pane not found in time")
+	if got := classifyPendingInteraction(false, err); got != pendingInteractionUnknown {
+		t.Fatalf("classifyPendingInteraction(probe error) = %v, want pendingInteractionUnknown", got)
+	}
+	sp := runtime.NewFake()
+	sp.PendingErrors["worker"] = err
+	got, probeErr := pendingInteractionProbe(sp, "worker")
+	if got != pendingInteractionUnknown {
+		t.Fatalf("pendingInteractionProbe = %v, want pendingInteractionUnknown", got)
+	}
+	if !errors.Is(probeErr, runtime.ErrRuntimeUnavailable) || !errors.Is(probeErr, err) {
+		t.Fatalf("pendingInteractionProbe error = %v, want it to wrap ErrRuntimeUnavailable and the probe error", probeErr)
+	}
+	// The message is quiet: neither the cause's "not found" text (which
+	// IsSessionGone would read as gone) nor the liveness sentinel's text.
+	if msg := probeErr.Error(); runtime.IsSessionGone(errors.New(msg)) || strings.Contains(msg, "liveness observation failed") {
+		t.Fatalf("pendingInteractionProbe error message = %q, want neither gone-matching text nor the liveness sentinel's text", msg)
+	}
+	if !pendingInteractionReady(sp, "worker") {
+		t.Fatal("pendingInteractionReady = false on a probe error, want true (fail closed)")
+	}
+}
+
+// A deferral on a probe that could not answer says pending_unknown, not
+// pending, so it is not passed off as a real prompt. The action is unchanged.
+func TestPendingHoldTimerDecisionRelabelsUnknown(t *testing.T) {
+	pendingDefer := sessionpkg.DecideIdleTimeout(sessionpkg.TimerFacts{Triggered: true, Pending: sessionpkg.PendingYes})
+	busyDefer := sessionpkg.DecideIdleTimeout(sessionpkg.TimerFacts{
+		Triggered: true, Pending: sessionpkg.PendingNo, AssignedWork: sessionpkg.AssignedWorkHas,
+	})
+	cases := []struct {
+		name       string
+		dec        sessionpkg.TimerDecision
+		hold       pendingInteractionAnswer
+		wantReason string
+	}{
+		{name: "yes", dec: pendingDefer, hold: pendingInteractionYes, wantReason: "pending"},
+		{name: "unknown", dec: pendingDefer, hold: pendingInteractionUnknown, wantReason: "pending_unknown"},
+		{name: "unknown_but_busy", dec: busyDefer, hold: pendingInteractionNo, wantReason: "assigned_work"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pendingHoldTimerDecision(tc.dec, tc.hold)
+			if got.TraceReason != tc.wantReason {
+				t.Fatalf("TraceReason = %q, want %q", got.TraceReason, tc.wantReason)
+			}
+			if got.Action != tc.dec.Action || got.CancelDrain != tc.dec.CancelDrain || got.SkipWakePass != tc.dec.SkipWakePass || got.TraceOutcome != tc.dec.TraceOutcome {
+				t.Fatalf("pendingHoldTimerDecision changed more than the reason: %+v -> %+v", tc.dec, got)
+			}
+		})
+	}
+	if got := pendingHoldTraceReason(pendingInteractionUnknown); got != TraceReasonPendingUnknown {
+		t.Fatalf("pendingHoldTraceReason(unknown) = %q, want pending_unknown", got)
+	}
+	if got := pendingHoldTraceReason(pendingInteractionYes); got != TraceReasonPending {
+		t.Fatalf("pendingHoldTraceReason(yes) = %q, want pending", got)
+	}
+}
+
+// Named-session active use names an unanswerable probe pending_unknown.
+func TestNamedSessionActiveUsePendingUnknownReason(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.PendingErrors["worker"] = errors.New("capturing pane: fork failed")
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	reason, active, err := namedSessionActiveUseReasonInfo(sessionpkg.Info{ID: "s-1"}, sp, "worker", clk)
+	if err != nil || !active || reason != "pending_unknown" {
+		t.Fatalf("namedSessionActiveUseReasonInfo = (%q, %v, %v), want (pending_unknown, true, nil)", reason, active, err)
+	}
+}
+
+// A stopped runtime has no prompt: not-found is "not pending", not "unknown",
+// so an asleep session is neither kept nor woken by it.
+func TestPendingProbeSessionNotFoundIsNo(t *testing.T) {
+	err := fmt.Errorf("capture-pane: %w", runtime.ErrSessionNotFound)
+	if got := classifyPendingInteraction(false, err); got != pendingInteractionNo {
+		t.Fatalf("classifyPendingInteraction(not found) = %v, want pendingInteractionNo", got)
+	}
+	sp := runtime.NewFake()
+	sp.PendingErrors["worker"] = err
+	if got, probeErr := pendingInteractionProbe(sp, "worker"); got != pendingInteractionNo || probeErr != nil {
+		t.Fatalf("pendingInteractionProbe = (%v, %v), want (pendingInteractionNo, nil)", got, probeErr)
+	}
+	if pendingInteractionReady(sp, "worker") {
+		t.Fatal("pendingInteractionReady = true for a vanished session, want false")
+	}
 }

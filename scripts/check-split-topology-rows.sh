@@ -148,7 +148,7 @@ while IFS= read -r suite; do
         echo "ROW-GUARD: $suite_rel:$lineno direct newSplitEnv bypasses the fan-out helpers (pins one topology): ${body#	}"
         violations=$((violations + 1))
     done <<< "$(code_hits "$suite" "$direct_env_re")"
-done < <(grep -rlE "$invariant_re" "$scan_dir" --include='*_test.go' | sort)
+done < <(grep -RlE "$invariant_re" "$scan_dir" --include='*_test.go' | sort)
 
 # Rule C: the guard must be policing something.
 if (( suite_files == 0 )); then

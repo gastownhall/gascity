@@ -435,6 +435,62 @@ func TestClassRoutedClaimNeverEscalatesACommittedWorkClaim(t *testing.T) {
 	}
 }
 
+// TestClassRoutedRestampSplitsOnResidency pins the discriminator
+// restampHookAdoption keys its fail-open/fail-closed decision on. A re-stamp of
+// a bead the binding was PROVED to hold is declined as errRestampGraphResident
+// without touching the work seam — there is no transfer primitive there and no
+// close-path actor fence that would need one — while any other id is the work
+// store's and delegates unchanged. Getting this split wrong in either direction
+// is a #5716 loop: fail-open on a work-store bead hands over an unclosable
+// bead, and fail-closed on a resident one refuses adoption of a bead whose close
+// would have succeeded untouched.
+func TestClassRoutedRestampSplitsOnResidency(t *testing.T) {
+	class := newClaimRouteClassStore(t)
+	mintClaimRouteBead(t, class, "gcg-c00", nil)
+	route := newClaimRouteFor(t, class)
+
+	type restampCall struct{ beadID, from, to string }
+	var baseCalls []restampCall
+	ops := classRoutedHookClaimOps(hookClaimOps{
+		Claim: notFoundClaim(t, "gcg-c00"),
+		RestampAdopted: func(_ context.Context, _ string, _ []string, beadID, from, to string) (bool, error) {
+			baseCalls = append(baseCalls, restampCall{beadID, from, to})
+			return true, nil
+		},
+	}, route)
+
+	// Residency is a memo of a PROVED answer, so the claim that escalated is what
+	// records it — the same order a real adoption re-stamp runs in.
+	if _, ok, err := ops.Claim(context.Background(), "/work", nil, "gcg-c00", "worker-1"); err != nil || !ok {
+		t.Fatalf("routed claim of gcg-c00 = (ok=%v err=%v), want the escalation that memoizes residency", ok, err)
+	}
+
+	moved, err := ops.RestampAdopted(context.Background(), "/work", nil, "gcg-c00", "legacy-1", "worker-1")
+	if moved {
+		t.Fatal("re-stamp of a binding-resident bead reported moved=true; the graph store has no transfer primitive to move it with")
+	}
+	if !errors.Is(err, errRestampGraphResident) {
+		t.Fatalf("re-stamp of a binding-resident bead = %v, want errRestampGraphResident so the caller can tell it apart from the work store's identical unsupported error", err)
+	}
+	if !errors.Is(err, beads.ErrConditionalTransferUnsupported) {
+		t.Fatalf("re-stamp of a binding-resident bead = %v, want it to still satisfy beads.ErrConditionalTransferUnsupported", err)
+	}
+	if len(baseCalls) != 0 {
+		t.Fatalf("resident re-stamp reached the work seam %d time(s) (%+v); the work store does not hold this bead", len(baseCalls), baseCalls)
+	}
+
+	// Any id the binding was not proved to hold is the work store's, forwarded
+	// verbatim.
+	moved, err = ops.RestampAdopted(context.Background(), "/work", nil, "ga-c01", "legacy-2", "worker-1")
+	if err != nil || !moved {
+		t.Fatalf("re-stamp of a non-resident bead = (moved=%v err=%v), want the work seam's own answer", moved, err)
+	}
+	want := []restampCall{{"ga-c01", "legacy-2", "worker-1"}}
+	if len(baseCalls) != 1 || baseCalls[0] != want[0] {
+		t.Fatalf("work seam saw %+v, want exactly %+v", baseCalls, want)
+	}
+}
+
 // TestHookClaimClassRouteRefusesABindingThatCannotClaim pins the capability
 // check at the door, the shape storebinding.NewBeadsNudgeQueue already uses: a
 // leaf without the two-argument CAS claim cannot serve a claim-time route, and
@@ -519,4 +575,110 @@ func newClaimRouteFor(t *testing.T, class beads.Store) *hookClaimClassRoute {
 		t.Fatalf("newHookClaimClassRoute: %v", err)
 	}
 	return route
+}
+
+// claimCapableCountedStore is a counted binding that forwards the CAS.
+//
+// countingClassStore embeds the beads.Store INTERFACE, so it advertises no
+// two-argument Claim and newHookClaimClassRoute refuses it outright. That
+// refusal is correct and must stay — a route that cannot perform the one write
+// it exists for is worse than no route — so the capability is restored here, by
+// the fixture that wants it, rather than by widening the counter for every
+// caller.
+//
+// Get is NOT overridden: it promotes off the embedded counter, which is what
+// keeps the read count the only observable these rows assert on.
+type claimCapableCountedStore struct {
+	*countingClassStore
+	claims beads.Store
+}
+
+func (s claimCapableCountedStore) Claim(id, assignee string) (beads.Bead, bool, error) {
+	claimer, ok := s.claims.(interface {
+		Claim(id, assignee string) (beads.Bead, bool, error)
+	})
+	if !ok {
+		return beads.Bead{}, false, fmt.Errorf("the counted binding's leaf %T has no compare-and-swap claim", s.claims)
+	}
+	return claimer.Claim(id, assignee)
+}
+
+// installClaimCapableCountedBinding is installCountedClassBinding for the claim
+// route: the same counter and the same restated census verdict, wrapped so the
+// route's construction gate admits it.
+func installClaimCapableCountedBinding(t *testing.T, cityPath string, relicFree bool) *countingClassStore {
+	t.Helper()
+	return installCountedClassBindingWrapped(t, cityPath, relicFree, func(c *countingClassStore) beads.Store {
+		return claimCapableCountedStore{countingClassStore: c, claims: c.Store}
+	})
+}
+
+// claimRouteForCountedCity resolves the route the two retirement rows below
+// assert on, and fails the row rather than returning a nil one.
+func claimRouteForCountedCity(t *testing.T, cityPath string) *hookClaimClassRoute {
+	t.Helper()
+	route, err := hookClaimClassRouteForCity(cityPath)
+	if err != nil {
+		t.Fatalf("resolving the claim-time class route: %v", err)
+	}
+	if route == nil {
+		t.Fatal("a city serving its classes from a relocated binding resolved no claim route")
+	}
+	return route
+}
+
+// TestClaimRouteHoldsSkipsTheProbeOnACensusCleanBinding is the claim path's half
+// of the retirement the boot census is taken for.
+//
+// holds() is the residence probe, reached on every work-scope claim that comes
+// back not-found, and it read the binding unconditionally. The by-id door stopped
+// doing that when it moved onto storeref (ga-qdt5y.18) and this seam kept its own
+// hand-rolled version of the same judgement, so a converged relic-free city still
+// paid a binding read per escalated bead here while
+// TestBdByIDDoorSkipsTheProbeOnACensusCleanBinding reported the saving taken.
+//
+// Asserted on the read COUNT for the same reason as that row: the answer is
+// false either way, and the work that does not happen is the whole point.
+func TestClaimRouteHoldsSkipsTheProbeOnACensusCleanBinding(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	counter := installClaimCapableCountedBinding(t, cityPath, true)
+	route := claimRouteForCountedCity(t, cityPath)
+
+	held, err := route.holds("gc-abc123")
+	if err != nil {
+		t.Fatalf("holds on a work-shaped id: %v", err)
+	}
+	if held {
+		t.Error("the binding claims to hold a work-shaped id it never minted; the escalation would claim through the wrong ledger")
+	}
+	if counter.gets != 0 {
+		t.Errorf("the claim route read the class binding %d time(s) for a work-shaped id on a census-clean binding; the retirement the census was taken for is not being taken", counter.gets)
+	}
+}
+
+// TestClaimRouteHoldsKeepsTheAuthorityLegOnACensusCleanBinding is the
+// must-be-silent counterpart, and it is what stops the row above from being
+// satisfied by a holds() that stopped reading altogether.
+//
+// A clean census retires the RESIDENCE probe — the leg that exists only because
+// a migration preserved work-shaped ids. It never retires the authority leg: the
+// binding is the sole minter of its namespaces, so for an id inside one it is the
+// only store that can answer, and "no relics" says nothing about whether it holds
+// this particular bead.
+func TestClaimRouteHoldsKeepsTheAuthorityLegOnACensusCleanBinding(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	minted := mustCreateClassBead(t, classStore, beads.Bead{Title: "a step the clean binding holds"})
+	counter := installClaimCapableCountedBinding(t, cityPath, true)
+	route := claimRouteForCountedCity(t, cityPath)
+
+	resident, err := route.holds(minted.ID)
+	if err != nil {
+		t.Fatalf("holds on an id only the binding can mint: %v", err)
+	}
+	if !resident {
+		t.Fatal("the binding was reported not to hold a bead it minted; the claim would escalate past the only store that can answer")
+	}
+	if counter.gets != 1 {
+		t.Errorf("the claim route read the class binding %d time(s) for an id only that binding can mint, want exactly 1: zero means a clean census retired the authority leg, which nothing may do, and more than one means the probe is being repeated", counter.gets)
+	}
 }

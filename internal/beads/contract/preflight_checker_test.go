@@ -38,7 +38,9 @@ func TestPreflightBlocksNativeOnABackendGCDoesNotImplement(t *testing.T) {
 	assertPreflightVerdict(t, result, PreflightVerdictBlocked, false)
 	assertCheckOrder(t, result)
 	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckFail)
-	assertCheckState(t, result, PreflightCheckBDContextAgreement, PreflightCheckPass)
+	// bd context is not consulted once metadata_backend has blocked: the
+	// bd-context checks report that, as a WARN, instead of a cross-check.
+	assertCheckState(t, result, PreflightCheckBDContextAgreement, PreflightCheckWarn)
 	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckFail)
 	for _, id := range []PreflightCheckID{PreflightCheckMetadataBackend, PreflightCheckContractShape} {
 		if summary := findPreflightCheck(t, result, id).Summary; !strings.Contains(summary, `"postgres"`) {
@@ -673,6 +675,50 @@ func TestCheckVersionCompatSemverCompatibleNewerBD(t *testing.T) {
 		{"older major — still fails", "2.0.0", validCtx("1.9.9"), PreflightCheckFail},
 		{"v-prefixed newer patch — pass", "v1.1.0", validCtx("v1.1.2"), PreflightCheckPass},
 		{"non-semver bd version — falls back to exact match, fails", "1.1.0", validCtx("not-a-version"), PreflightCheckFail},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := PreflightChecker{BeadsLibraryVersion: tt.libVersion}
+			got := c.checkVersionCompat(tt.ctx, nil)
+			if got.State != tt.want {
+				t.Fatalf("state = %q, want %q (summary: %q)", got.State, tt.want, got.Summary)
+			}
+		})
+	}
+}
+
+// TestCheckVersionCompatSamePrereleaseSeries pins the second widening, added
+// during the beads v1.3.0-rc.2 pin bump. gascity's own anchors are not split --
+// go.mod and deps.env BD_VERSION are both rc.2 -- so this does not gate the
+// shipped pairing. It gates the general case: an OLDER bd against a NEWER
+// library, which newerSemverCompatibleBD refuses by design.
+//
+// For the pair this was written for that refusal is wrong: rc.1 and rc.2 embed
+// a byte-identical internal/storage/schema (LatestVersion() == 66 on both), so
+// there is no skew to catch -- a checked property of that pair, not a law of
+// RC series (see samePrereleaseSeries). Where such a pairing does occur, the
+// check would FAIL, the verdict would go BLOCKED, and every scope would
+// silently fall off the native Dolt store onto the fork-per-op BdStore -- the
+// exact degradation #5164 was fixed to prevent.
+//
+// The widening stays narrow, and the negative cases below are the point: a
+// different release's prerelease, and an RC against its own final release, must
+// still fail.
+func TestCheckVersionCompatSamePrereleaseSeries(t *testing.T) {
+	validCtx := func(bdVersion string) PreflightBDContext {
+		return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: bdVersion, SchemaVersion: 66}
+	}
+	tests := []struct {
+		name       string
+		libVersion string
+		ctx        PreflightBDContext
+		want       PreflightCheckState
+	}{
+		{"older RC against newer RC of the same release — pass", "v1.3.0-rc.2", validCtx("1.3.0-rc.1"), PreflightCheckPass},
+		{"newer RC against older RC of the same release — pass", "v1.3.0-rc.1", validCtx("1.3.0-rc.2"), PreflightCheckPass},
+		{"RC against the final release it precedes — still fails", "v1.3.0", validCtx("1.3.0-rc.1"), PreflightCheckFail},
+		{"prereleases of different releases — still fails", "v1.4.0-rc.1", validCtx("1.3.0-rc.1"), PreflightCheckFail},
+		{"prereleases across majors — still fails", "v2.0.0-rc.1", validCtx("1.3.0-rc.1"), PreflightCheckFail},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

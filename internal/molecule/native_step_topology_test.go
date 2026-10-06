@@ -9,6 +9,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -130,7 +131,11 @@ func TestCompiledReviewQuorumCollapsesRetryMachineryIntoNativeSteps(t *testing.T
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
-	searchDir := filepath.Join(cwd, "..", "bootstrap", "packs", "core", "formulas")
+	searchBase := bazeltest.OverrideRoot()
+	if searchBase == "" {
+		searchBase = filepath.Clean(filepath.Join(cwd, "..", ".."))
+	}
+	searchDir := filepath.Join(searchBase, "internal", "bootstrap", "packs", "core", "formulas")
 	// Fed to both calls below, like sling.go threads a single opts.Vars.
 	vars := map[string]string{
 		"subject":           "PR-123",

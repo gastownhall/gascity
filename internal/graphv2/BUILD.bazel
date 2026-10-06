@@ -1,0 +1,44 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "graphv2",
+    srcs = ["invocation.go"],
+    importpath = "github.com/gastownhall/gascity/internal/graphv2",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+        "//internal/convoy",
+        "//internal/formula",
+        "//internal/molecule",
+    ],
+)
+
+go_test(
+    name = "graphv2_test",
+    srcs = [
+        "invocation_cleanup_test.go",
+        "invocation_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":graphv2"],
+    deps = [
+        "//internal/beads",
+        "//internal/convoy",
+        "//internal/coordclass",
+        "//internal/formulatest",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

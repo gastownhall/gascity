@@ -168,6 +168,39 @@ Gastown's themed name pools ("Toast", "Furiosa") are cosmetic and can
 be added later via the `theme` field in PoolConfig. For now, numeric
 suffixes are simple, predictable, and debuggable.
 
+### Graph workflow continuity
+
+Graph steps routed to a pool remain unassigned until a concrete session
+claims them. Continuation is always formula-declared: Go propagates a group
+the authored recipe already carries and never manufactures one. The
+`IndependentSteps` mark, derived from the agent's `lifecycle`, is what lets
+the routing layer tell a formula-declared group (which must never be lost
+silently) apart from the router's own transient drain bookkeeping (#6360).
+
+- The default long-lived lifecycle propagates a formula-declared
+  `gc.continuation_group` and pins `gc.session_affinity=require` alongside it.
+  Claiming one executable step pre-assigns its workflow siblings to the same
+  persistent session, preserving its worktree and conversation context.
+- `lifecycle = "one_shot"` marks each step an independent claim, because no
+  runtime survives to carry session affinity into the next step. A one-shot
+  pool step that declares no continuation group therefore stays metadata-only
+  and unassigned, so any fresh session may claim the next ready step.
+- A step that *does* declare a group keeps it. Where honoring a step would
+  mean losing a formula-declared group instead, `ApplyGraphRouteBinding`
+  returns an error naming the step and the group rather than clearing it --
+  dropping a formula's drain contract silently is a routing decision Go is
+  not entitled to make. The `drain:`-prefixed value the router itself stamps
+  is the one group it may clear and replace.
+
+A formula routed to a one-shot pool must therefore persist every input a
+later step needs in the work artifact or bead graph rather than relying on a
+surviving process or conversation, and must not declare a continuation group
+whose session it does not expect to exist.
+
+This applies only to pool-flavored agents (`SupportsInstanceExpansion()`). A
+one-shot agent with `max_active_sessions = 1` and no `min_active_sessions` or
+`scale_check` is a named-session agent, not a pool, and is unaffected.
+
 ## Upscaling
 
 The simple case. The reconciler evaluates `check`, computes

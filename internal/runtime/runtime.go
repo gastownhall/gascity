@@ -36,6 +36,40 @@ var ErrInteractionUnsupported = errors.New("session interaction is unsupported")
 // process, but it exited before startup completed successfully.
 var ErrSessionDiedDuringStartup = errors.New("session died during startup")
 
+// ExitCodeTempFail is sysexits.h EX_TEMPFAIL. A launched agent command that
+// exits with it before startup completes declares a retryable, endpoint-wide
+// refusal rather than a session-specific crash. It is the same convention gate
+// commands use to report an infrastructure outcome (convergence.GateInfraExitCode).
+const ExitCodeTempFail = 75
+
+// CapacitySourceExitStatus is the [CapacityError.Source] of a refusal observed
+// as the launched command's exit status.
+const CapacitySourceExitStatus = "exit_status"
+
+// ErrProviderCapacity reports that a start was refused because a shared
+// serving endpoint is at capacity or temporarily unavailable. It is retryable
+// and not specific to the session that attempted the start.
+var ErrProviderCapacity = errors.New("provider endpoint at capacity")
+
+// CapacityError is returned by providers that observed a capacity refusal at a
+// process boundary. It matches both [ErrProviderCapacity] and its cause under
+// errors.Is, and its message is exactly the cause's, so logs, pane excerpts,
+// and existing string consumers are unchanged.
+type CapacityError struct {
+	ExitCode int    // the observed exit status
+	Source   string // how the refusal was observed, e.g. CapacitySourceExitStatus
+	Err      error  // the provider's own error, e.g. one wrapping ErrSessionDiedDuringStartup
+}
+
+// Error returns the cause's message unchanged.
+func (e *CapacityError) Error() string { return e.Err.Error() }
+
+// Unwrap exposes both the capacity sentinel and the provider's cause.
+func (e *CapacityError) Unwrap() []error { return []error{ErrProviderCapacity, e.Err} }
+
+// IsProviderCapacity reports whether err carries a typed capacity refusal.
+func IsProviderCapacity(err error) bool { return errors.Is(err, ErrProviderCapacity) }
+
 // ErrSessionNotFound reports that an operation targeted a session the
 // runtime does not know about. Benign for Stop() — the session was
 // already gone — but fatal for Attach/Send. Providers wrap their own
@@ -72,6 +106,35 @@ var ErrRuntimeUnavailable = errors.New("runtime unavailable: liveness observatio
 // own [RelaunchProvider.Relaunch] when the routed/wrapped backend does not
 // support relaunch; the reconciler treats it as "fall back to full Stop+Start".
 var ErrRelaunchUnsupported = errors.New("runtime does not support warm-box relaunch")
+
+// ErrStopRefused reports that the provider deliberately left the session
+// running (policy, not failure). The runtime is still live; callers must not
+// record a stop. Its message, and the message of every error wrapping it, must
+// not match [IsSessionGone], or a refusal would read as an idempotent stop.
+var ErrStopRefused = errors.New("runtime refused to stop the session")
+
+// ErrStopUnsupported reports that the runtime has no stop operation (exec
+// `stop` answered exit 2). It wraps [ErrStopRefused].
+var ErrStopUnsupported = fmt.Errorf("%w: stop not implemented", ErrStopRefused)
+
+// ErrMetaUnsupported reports that the runtime has no session metadata store
+// (exec get-meta/set-meta answered exit 2). A token read that returns it is
+// "absent by construction", never "unverifiable".
+var ErrMetaUnsupported = errors.New("runtime does not implement session metadata")
+
+// ErrListUnsupported reports that the runtime cannot enumerate sessions (exec
+// list-running answered exit 2). It is never a complete empty list.
+var ErrListUnsupported = errors.New("runtime does not implement session listing")
+
+// MetaValue folds [ErrMetaUnsupported] into "unset", for readers whose legacy
+// behavior treated an unimplemented meta op as an empty value. Every other
+// error is returned unchanged.
+func MetaValue(v string, err error) (string, error) {
+	if errors.Is(err, ErrMetaUnsupported) {
+		return "", nil
+	}
+	return v, err
+}
 
 // IsSessionGone reports whether err represents a "the session is not
 // there" condition — either ErrSessionNotFound or the legacy provider
@@ -229,6 +292,46 @@ type Provider interface {
 	Capabilities() ProviderCapabilities
 }
 
+// AttachmentObserverWithError is the optional capability for an attachment
+// probe that separates "no client is attached" from "could not tell".
+type AttachmentObserverWithError interface {
+	IsAttachedWithError(name string) (bool, error)
+}
+
+// IsAttachedWithError reports whether a human terminal is attached to name.
+// A provider without the capability answers through IsAttached with a nil
+// error, so existing providers are unchanged. With the capability:
+//
+//	(true, nil)  one or more clients attached
+//	(false, nil) confirmed: no client
+//	(false, err) err wraps ErrSessionNotFound: the session does not exist
+//	(false, err) err wraps ErrRuntimeUnavailable: the probe could not answer
+//
+// Callers gating a destructive action MUST treat any error other than
+// ErrSessionNotFound as attached; [AttachProbeHolds] states that rule.
+// A nil provider or blank name answers (false, nil) without a probe.
+func IsAttachedWithError(sp Provider, name string) (bool, error) {
+	if sp == nil || strings.TrimSpace(name) == "" {
+		return false, nil
+	}
+	if observer, ok := sp.(AttachmentObserverWithError); ok {
+		return observer.IsAttachedWithError(name)
+	}
+	return sp.IsAttached(name), nil
+}
+
+// AttachProbeHolds reports whether an [IsAttachedWithError] answer must hold a
+// destructive action: a client is attached, or the probe failed with any error
+// other than ErrSessionNotFound. Only a vanished session counts as not
+// attached. It classifies with errors.Is, never IsSessionGone: that message
+// matching reads text such as "not found" in an unavailable probe as gone.
+func AttachProbeHolds(attached bool, err error) bool {
+	if err != nil {
+		return !errors.Is(err, ErrSessionNotFound)
+	}
+	return attached
+}
+
 // PendingInteraction describes a blocking interaction raised by a session.
 // This is an optional capability exposed by providers that support
 // structured approvals, questions, or other turn-blocking prompts.
@@ -263,6 +366,27 @@ type InteractionProvider interface {
 // rely on timeout-bounded completion for cleanup.
 type IdleWaitProvider interface {
 	WaitForIdle(ctx context.Context, name string, timeout time.Duration) error
+}
+
+// IdleSnapshotProvider is an optional extension for runtimes that can report,
+// in a single non-blocking observation, whether a session is at an idle
+// interactive boundary right now (a ready prompt with no active-processing
+// indicator).
+//
+// It is the point-in-time sibling of [IdleWaitProvider]: WaitForIdle blocks
+// until idle (or timeout), whereas SnapshotIdle takes one look and returns.
+// The idle-timeout reconciler uses it to measure the duration of true
+// idleness for interactive TUIs whose coarse activity clock (last pane
+// output) cannot distinguish an idle-but-repainting TUI from a working one —
+// a TUI that continuously repaints its status line keeps the activity clock
+// perpetually fresh even while genuinely idle.
+//
+// idle reports whether the session currently looks idle. A non-nil err means
+// the observation could not be made (the caller must not treat the session as
+// idle on error); a session that has gone away is reported as an error, not as
+// idle.
+type IdleSnapshotProvider interface {
+	SnapshotIdle(name string) (idle bool, err error)
 }
 
 // ExecProvider is an optional extension for runtimes that expose the RPP
@@ -320,6 +444,40 @@ type SessionRosterProvider interface {
 type SessionRosterEntry struct {
 	Attached     bool
 	LastActivity time.Time
+}
+
+// InventoryProvider is an optional extension that reads per-session
+// runtime attributes for the whole fleet in one call, for callers that would
+// otherwise probe every listed session separately.
+//
+// Like [SessionRosterProvider], it is an attributes source, not a listing:
+// the entry names are a subset of the same instant's ListRunning("") result,
+// and a name absent from the inventory is not thereby proven absent.
+type InventoryProvider interface {
+	RuntimeInventory(ctx context.Context) (map[string]InventoryEntry, error)
+}
+
+// InventoryEntry holds the batch-readable attributes of one session,
+// as returned by [InventoryProvider.RuntimeInventory]. A false Known
+// flag means the attribute could not be read; its value is then meaningless.
+type InventoryEntry struct {
+	// Incarnation identifies this runtime instance of the session. A new
+	// runtime under the same name, or a respawn of the session's first pane,
+	// gets a different value. Empty when the provider cannot report one.
+	//
+	// On tmux it can also change without a restart: swap-pane,
+	// split-window -b, rotate-window, or killing pane 0.0 moves a different
+	// process into the first slot. That is harmless; a changed id only costs
+	// one attribution re-read.
+	Incarnation string
+	// DeadKnown and AllPanesDead report whether every process slot of the
+	// session has exited (a corpse kept visible, for example by tmux
+	// remain-on-exit).
+	DeadKnown, AllPanesDead bool
+	// AttachedKnown and Attached report whether any client is attached. On
+	// tmux the count includes gc's own hidden attach client, so a session gc
+	// is briefly attached to reads attached.
+	AttachedKnown, Attached bool
 }
 
 // EnvironmentBatchProvider is an optional extension exposing a single-exec
@@ -401,6 +559,51 @@ type LiveRuntime struct {
 	// PID is the OS process ID for local providers, or a provider-specific
 	// process identifier for remote infrastructure.
 	PID int
+	// PPID is the parent process ID, or 0 when the provider cannot report one.
+	//
+	// A value <= 1 means the process has been REPARENTED to init. That is the
+	// difference between a runtime a provider still owns and a detached process
+	// that merely inherited GC_SESSION_ID from the agent's environment: a live
+	// pane's root process still has the provider's server as its parent, while a
+	// backgrounded daemon (the managed-Dolt scope watchdog, a detached
+	// supervisor) leads its own process group and reparents to init. Both carry
+	// the same GC_SESSION_ID and City, so a consumer that terminates on those two
+	// fields alone will signal the daemon's whole process group. Callers that
+	// KILL must discriminate on this.
+	PPID int
+	// ParentIsProviderInfrastructure is true when the scan POSITIVELY identified
+	// PPID as tmux infrastructure — a process whose command name is tmux's (the
+	// bare executable, or a "tmux: server" / "tmux: client" proctitle) — rather
+	// than merely failing to recognize it as a subreaper.
+	//
+	// Read that scope literally, because the name promises more than the test
+	// delivers: it is a command-name match on the parent, so it accepts ANY
+	// tmux process on this host. It is not socket-scoped to one provider
+	// instance, and it does not separate a server from a client. A caller that
+	// needs true provider-scoped attribution — this provider's own server, on
+	// this provider's socket — must add that check itself.
+	//
+	// It is the positive form of the PPID test above, and it exists because the
+	// negative form cannot be made reliable: recognizing a reparent destination
+	// means knowing which pid is the child subreaper, and under a
+	// user@UID.service that is the `systemd --user` manager, which a caller can
+	// only DETECT (see pidutil.DetectUserSubreaperPID) by walking its OWN
+	// ancestry. When the caller's ancestry and the target's diverge — a
+	// controller (re)started from an ssh shell or a system unit while the tmux
+	// server descends from the user manager — detection returns nothing and an
+	// orphan's large live ppid reads as a live owning parent.
+	//
+	// This field does not have that failure mode: it is false unless the scan
+	// read the parent and matched it, so an unreadable parent, an unreported
+	// PPID, and an unrecognized parent all refuse. A caller that KILLS should
+	// require it; a caller that only reports should not, because a runtime whose
+	// parent is not recognizable to the scan is still a live runtime.
+	ParentIsProviderInfrastructure bool
+	// Name is the process's command basename ("" when unreadable). Advisory: the
+	// agent process is often a DESCENDANT of the runtime root rather than the
+	// root itself (a pane's foreground can be a wrapper), so an empty or
+	// non-matching Name is not evidence that a root is unrelated.
+	Name string
 	// ProviderName is the session name as known to the provider. Empty means
 	// the runtime is not visible in the provider's artifact registry.
 	ProviderName string
@@ -602,6 +805,20 @@ type Config struct {
 	// Env is additional environment variables set in the session.
 	Env map[string]string
 
+	// OperatorEnv carries the effective operator-authored environment values
+	// captured from config — [workspace].env, [providers.*].env, [[agent]].env,
+	// and [[rigs.patches]].env — before passthrough, generated, or
+	// resolved-credential values are merged into Env. It is the dedicated
+	// Launch-tier identity surface decided by Option A' (ga-3a42sp): distinct
+	// from Env (the fully merged process environment, allow-list-filtered in
+	// the fingerprint) and from FingerprintExtra (opaque non-behavioral extra
+	// data) — widening either would misclassify config-authored env as
+	// Provision-tier. Hashed into the LAUNCH half of the fingerprint, so a
+	// change relaunches the agent in the existing warm box rather than
+	// triggering a reprovision. Nil and empty are equivalent (no keys set
+	// contributes nothing to the hash).
+	OperatorEnv map[string]string
+
 	// MCPServers is the effective ACP session/new MCP server list for this
 	// session. Non-ACP providers ignore it.
 	MCPServers []MCPServerConfig
@@ -705,6 +922,13 @@ type Config struct {
 	// separately so the tmux adapter's file-expansion path can
 	// reconstruct the command correctly for long prompts.
 	PromptFlag string
+
+	// FreshOnly makes Start create a fresh runtime or fail: a name the
+	// provider already holds, live or dead, returns ErrSessionExists, and
+	// Start never recycles, kills or reuses the runtime holding it. The v2
+	// start effect sets it (CONTRACT v5 S1, I24); legacy never does.
+	// Excluded from every fingerprint.
+	FreshOnly bool
 }
 
 // OverlayProviderNames returns the effective provider overlay slots to stage for

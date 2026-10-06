@@ -208,3 +208,19 @@ func containsString(xs []string, want string) bool {
 	}
 	return false
 }
+
+// ListRunning is not complete here: a snapshot that decodes without a threads
+// array (a 200 JSON error body, a moved shape, or null) lists as zero sessions
+// with no error. An error-free listing is therefore no proof of absence, and
+// the provider must stay unattested until the snapshot read rejects that shape.
+// Kills: a listing attestation declared while ListRunning still reads an
+// unrecognized snapshot as an empty fleet.
+func TestListRunningIsNotAttested(t *testing.T) {
+	raw := &Provider{watchers: map[string]context.CancelFunc{}, recentStarts: map[string]time.Time{}}
+	var sp runtime.Provider = &seamBackedProvider{Provider: runtime.NewProviderFromSeams(raw.Seams()), raw: raw}
+	for _, p := range []any{raw, sp} {
+		if _, ok := p.(runtime.ListingAttestation); ok {
+			t.Errorf("%T declares runtime.ListingAttestation", p)
+		}
+	}
+}

@@ -431,7 +431,7 @@ func cmdGCDir(t *testing.T) string {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	return filepath.Dir(file)
+	return gcCallerDir(file)
 }
 
 func repoRoot(t *testing.T) string {

@@ -135,7 +135,11 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 		return ensurePendingAttemptConverges(store, bead, attempt, strategy, opts)
 	}
 
-	attemptNum, _ := strconv.Atoi(attempt.Metadata[beadmeta.AttemptMetadataKey])
+	// A retry attempt counts in gc.retry_attempt; a ralph iteration root never
+	// carries that key, so it falls back to gc.attempt, which there IS the
+	// iteration. RetryAttemptNumber encodes both, plus the legacy fallback for
+	// retry attempts minted before the key existed.
+	attemptNum := beadmeta.RetryAttemptNumber(attempt.Metadata)
 	eval, err := strategy.evaluate(store, bead, attempt, attemptNum, opts)
 	if err != nil {
 		return ControlResult{}, err
@@ -330,8 +334,8 @@ func syncControlEpochToAttempt(store beads.Store, control, attempt beads.Bead) e
 	if err != nil || current < 1 {
 		return nil
 	}
-	attemptNum, err := strconv.Atoi(strings.TrimSpace(attempt.Metadata[beadmeta.AttemptMetadataKey]))
-	if err != nil || attemptNum <= current {
+	attemptNum := beadmeta.RetryAttemptNumber(attempt.Metadata)
+	if attemptNum <= current {
 		return nil
 	}
 	writer, _, resolveErr := beads.ResolveConditionalWriter(store)
@@ -409,6 +413,14 @@ func clearControllerSpawnErrorMetadata(metadata map[string]string) {
 	// later life (re-mint, reopen) and quarantine itself on its first refusal.
 	metadata[beadmeta.ControllerRetryFirstSeenMetadataKey] = ""
 	metadata[beadmeta.ControllerRetryCountMetadataKey] = ""
+	// The pending budget rides along for the same reason, plus one of its own:
+	// gc.control_pending_stalled is a one-shot latch, so a bead that carried it
+	// into a later life would never escalate a second, genuinely never-healing
+	// pending wait.
+	metadata[beadmeta.ControlPendingReasonMetadataKey] = ""
+	metadata[beadmeta.ControlPendingCountMetadataKey] = ""
+	metadata[beadmeta.ControlPendingFirstSeenMetadataKey] = ""
+	metadata[beadmeta.ControlPendingStalledMetadataKey] = ""
 }
 
 func isPartialAttemptAttachError(err error) bool {
@@ -704,7 +716,8 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		if target == "" {
 			target = executionRoute
 		} else {
-			target = qualifyAttemptTargetWithSourceRoute(target, executionRoute, routeCfg)
+			stepRigContext := strings.TrimSpace(recipe.Steps[i].Metadata[beadmeta.ExecutionRigContextMetadataKey])
+			target = qualifyAttemptTargetWithSourceRoute(target, executionRoute, stepRigContext, routeCfg)
 		}
 		if isAttemptControlKind(recipe.Steps[i].Metadata[beadmeta.KindMetadataKey]) {
 			if err := applyAttemptControlStepRoute(&recipe.Steps[i], target, routeCfg, store); err != nil {
@@ -800,18 +813,24 @@ func failedAttemptAttachRootID(store beads.Store, control beads.Bead, attemptNum
 	return matches[0].ID, nil
 }
 
-func qualifyAttemptTargetWithSourceRoute(target, sourceRoute string, cfg *config.City) string {
+func qualifyAttemptTargetWithSourceRoute(target, sourceRoute, rigContext string, cfg *config.City) string {
 	target = strings.TrimSpace(target)
 	if target == "" || strings.Contains(target, "/") || cfg == nil {
 		return target
 	}
 	sourceRoute = strings.TrimSpace(sourceRoute)
-	slash := strings.IndexByte(sourceRoute, '/')
-	if slash <= 0 {
-		return target
+	if slash := strings.IndexByte(sourceRoute, '/'); slash > 0 {
+		if candidate := qualifyBareTargetWithRigPrefix(target, sourceRoute[:slash], cfg); candidate != "" {
+			return candidate
+		}
 	}
-	candidate := sourceRoute[:slash] + "/" + target
-	if config.FindAgent(cfg, candidate) != nil || config.FindNamedSession(cfg, candidate) != nil {
+	// The source route carried no rig qualifier of its own (for example a
+	// nested/runtime-minted retry control, which never gets
+	// gc.execution_routed_to stamped — only compile-time graphroute
+	// decoration does). Fall back to the step's own execution rig context,
+	// which is always backfilled onto attempt-spawned steps, so a
+	// rig-scoped bare target does not lose its rig qualifier on retry.
+	if candidate := qualifyBareTargetWithRigPrefix(target, rigContext, cfg); candidate != "" {
 		return candidate
 	}
 	return target
@@ -857,6 +876,11 @@ func applyRalphBodyChildControls(childMeta map[string]string, step, child *formu
 		return
 	}
 	childMeta[beadmeta.AttemptMetadataKey] = formula.RalphBodyChildAttempt(child, attemptNum)
+	if retryAttempt := formula.RalphBodyChildRetryAttempt(child); retryAttempt != "" {
+		childMeta[beadmeta.RetryAttemptMetadataKey] = retryAttempt
+	} else {
+		delete(childMeta, beadmeta.RetryAttemptMetadataKey)
+	}
 	// Same S38 rewrite namespaceRalphBodySteps applies at compile time, extended
 	// to the shape it missed. A frozen ralph body arrives already retry-expanded,
 	// so a nested control's attempt root carries gc.control_for as the BARE child
@@ -871,6 +895,21 @@ func applyRalphBodyChildControls(childMeta map[string]string, step, child *formu
 	if cf := strings.TrimSpace(child.Metadata[beadmeta.ControlForMetadataKey]); cf != "" {
 		childMeta[beadmeta.ControlForMetadataKey] = attemptPrefix + "." + cf
 	}
+}
+
+// qualifyBareTargetWithRigPrefix returns rigPrefix+"/"+target when that
+// qualified identity resolves to a configured agent or named session, or ""
+// when rigPrefix is empty or the candidate does not resolve.
+func qualifyBareTargetWithRigPrefix(target, rigPrefix string, cfg *config.City) string {
+	rigPrefix = strings.TrimSpace(rigPrefix)
+	if rigPrefix == "" {
+		return ""
+	}
+	candidate := rigPrefix + "/" + target
+	if config.FindAgent(cfg, candidate) != nil || config.FindNamedSession(cfg, candidate) != nil {
+		return candidate
+	}
+	return ""
 }
 
 // buildAttemptRecipe constructs a minimal formula.Recipe for one attempt
@@ -910,7 +949,6 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		rootMeta[k] = v
 	}
 	rootMeta[beadmeta.KindMetadataKey] = rootKind
-	rootMeta[beadmeta.AttemptMetadataKey] = strconv.Itoa(attemptNum)
 	rootMeta[beadmeta.StepIDMetadataKey] = stepID
 	rootMeta[beadmeta.StepRefMetadataKey] = attemptPrefix
 	// gc.control_for is the durable lineage pointer back to the control bead.
@@ -920,7 +958,25 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 	// (buildNestedControlSeed) — both are covered by findLatestAttempt's
 	// identity set.
 	rootMeta[beadmeta.ControlForMetadataKey] = control.ID
+	// gc.logical_bead_id mirrors gc.control_for so isRetryAttemptSubject (v1
+	// pattern check via runtime.go) recognizes this attempt root as
+	// retry-managed. Without it, a deliverable attempt that bare-closes with
+	// no flat gc.outcome (its result is carried by the logical retry/iteration
+	// evaluation, not the attempt itself) is misclassified as an
+	// abort_scope-triggering failure by beadOutcomeFailed instead of being
+	// exempted as a retry attempt. See gc-yydp6f.
+	rootMeta[beadmeta.LogicalBeadIDMetadataKey] = control.ID
 	setIterationMetadata(rootMeta, iteration)
+	// Counters are written after gc.iteration so StampRetryAttempt can see it.
+	// A ralph iteration root counts iterations in gc.attempt and has no retry
+	// counter; a retry attempt root counts in gc.retry_attempt and keeps the
+	// enclosing iteration (if any) in gc.attempt.
+	if step.Ralph != nil {
+		rootMeta[beadmeta.AttemptMetadataKey] = strconv.Itoa(attemptNum)
+		delete(rootMeta, beadmeta.RetryAttemptMetadataKey)
+	} else {
+		beadmeta.StampRetryAttempt(rootMeta, attemptNum)
+	}
 	if step.OnComplete != nil {
 		rootMeta[beadmeta.OutputJSONRequiredMetadataKey] = "true"
 	}
@@ -1296,10 +1352,20 @@ func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.
 		}
 		step.Labels = removeAttemptPoolLabels(step.Labels)
 		if binding.metadataOnly {
+			if binding.independentSteps {
+				// A one-shot runtime exits after one bounded invocation. Clear the
+				// pinned affinity pair the frozen step spec carried forward — it
+				// names a session that already exited, and a stale group
+				// re-vacuums this re-attempt onto an unrelated claiming session.
+				for _, key := range beadmeta.SessionAffinityMetadataKeys {
+					delete(step.Metadata, key)
+				}
+			}
 			step.Assignee = ""
 			return
 		}
-		step.Assignee = binding.sessionName
+		// Config-agent work is routed by alias; a concrete session binds on claim.
+		step.Assignee = ""
 		return
 	}
 
@@ -1390,10 +1456,10 @@ func latestAttemptCandidateIsControlInfrastructure(kind string) bool {
 }
 
 type attemptRouteBinding struct {
-	qualifiedName   string
-	metadataOnly    bool
-	sessionName     string
-	directSessionID string
+	qualifiedName    string
+	metadataOnly     bool
+	independentSteps bool
+	directSessionID  string
 }
 
 func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Store) (attemptRouteBinding, bool) {
@@ -1421,9 +1487,16 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 			binding := attemptRouteBinding{qualifiedName: agentCfg.QualifiedName()}
 			if isAttemptMultiSessionTarget(agentCfg.QualifiedName(), cfg) {
 				binding.metadataOnly = true
+				// A one-shot runtime exits after a single bounded invocation, so
+				// no session survives between attempts to carry continuation.
+				// The compile-time analog is graphroute.ApplyGraphRouteBinding's
+				// pool branch, which clears the same pinned pair — but keys it on
+				// whether the authored recipe declared a continuation group. The
+				// retry path has no authored binding to read, so it keys on the
+				// target agent's lifecycle instead.
+				binding.independentSteps = agentCfg.Lifecycle == config.AgentLifecycleOneShot
 				return binding, true
 			}
-			binding.sessionName = config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, agentCfg.QualifiedName())
 			return binding, true
 		}
 	}
@@ -1725,7 +1798,7 @@ func latestAttemptFromCandidates(control beads.Bead, candidates []beads.Bead) be
 		if cf == "" {
 			continue
 		}
-		attemptNum, _ := strconv.Atoi(b.Metadata[beadmeta.AttemptMetadataKey])
+		attemptNum := beadmeta.RetryAttemptNumber(b.Metadata)
 		switch {
 		case precise[cf]:
 			if attemptNum > preciseAttempt {
@@ -1880,7 +1953,7 @@ func latestAttemptFromCandidatesLegacyRefSurgery(control beads.Bead, candidates 
 			continue
 		}
 
-		attemptNum, _ := strconv.Atoi(b.Metadata[beadmeta.AttemptMetadataKey])
+		attemptNum := beadmeta.RetryAttemptNumber(b.Metadata)
 		if attemptNum > latestAttempt {
 			latestAttempt = attemptNum
 			latest = b

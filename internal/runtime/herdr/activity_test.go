@@ -1,8 +1,11 @@
 package herdr
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // activityTestProvider wires a Provider at the fake server's socket with the
@@ -56,6 +59,28 @@ func waitActivity(t *testing.T, p *Provider, name string, timeout time.Duration,
 			t.Fatalf("GetLastActivity(%q) never satisfied condition; last value %v", name, got)
 		}
 		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// assertWorkingContinuouslyActive is the working leg of the activity contract,
+// run once name has been reported working: wait for a poll to observe the
+// transition, then require successive reads to keep advancing. preTransition is
+// the stamp name held before the report, and the wait requires the read to move
+// past it. Recency alone cannot tell the two apart: a just-seeded idle stamp is
+// only microseconds old, and accepting it let both reads return that one frozen
+// stamp whenever the next poll landed after the 30ms window (ga-8nndgz).
+// TestActivityLive and its hermetic reproduction share this leg so the two
+// cannot drift apart.
+func assertWorkingContinuouslyActive(t *testing.T, p *Provider, name string, preTransition time.Time) {
+	t.Helper()
+	waitActivity(t, p, name, 5*time.Second, func(got time.Time) bool {
+		return got.After(preTransition) && time.Since(got) < 100*time.Millisecond
+	})
+	w1 := lastActivity(t, p, name)
+	time.Sleep(30 * time.Millisecond)
+	w2 := lastActivity(t, p, name)
+	if !w2.After(w1) {
+		t.Fatalf("working must read continuously active: %v then %v (pre-transition stamp %v)", w1, w2, preTransition)
 	}
 }
 
@@ -116,6 +141,28 @@ func TestActivityWorkingIsContinuouslyActive(t *testing.T) {
 	if age := time.Since(second); age > time.Second {
 		t.Fatalf("working session activity age %v; want ~now", age)
 	}
+}
+
+// TestActivityWorkingLegWaitsForObservedTransition reproduces TestActivityLive's
+// working-leg flake deterministically (ga-8nndgz). The working report lands
+// right after the idle seed, but no poll observes it until well past the leg's
+// 30ms continuity window, as the live tracker does on a loaded host (measured
+// up to ~100ms against herdr 0.8.0). A readiness wait that accepts any recent
+// stamp returns the just-seeded idle stamp itself, and both continuity reads
+// then compare that one frozen value.
+func TestActivityWorkingLegWaitsForObservedTransition(t *testing.T) {
+	f, sock := newFakeHerdrServer(t)
+	f.setAgents(agentInfo{Name: "a", PaneID: "%1", AgentStatus: "idle", Revision: 1})
+	p := activityTestProvider(t, sock)
+	// Hold every poll at least 200ms past the seed: the fallback ticker's first
+	// tick, and the debounced poll the subscription's opening resync triggers.
+	// activityTestProvider restores both knobs.
+	activityPollInterval = 200 * time.Millisecond
+	activityEventDebounce = 200 * time.Millisecond
+
+	seeded := lastActivity(t, p, "a")
+	f.setAgents(agentInfo{Name: "a", PaneID: "%1", AgentStatus: "working", Revision: 1})
+	assertWorkingContinuouslyActive(t, p, "a", seeded)
 }
 
 // When a session leaves working, the stamp freezes at the observed transition
@@ -274,4 +321,48 @@ func shrinkActivityKnobs(t *testing.T) {
 	t.Cleanup(func() { activityPollInterval, activityEventDebounce = pi, ed })
 	activityPollInterval = 25 * time.Millisecond
 	activityEventDebounce = 5 * time.Millisecond
+}
+
+// TestActivityReconcileLoopPollsOnAnyEventKind pins the protection that the
+// event-translation boundary depends on and cannot itself assert. The tracker
+// reads arrival only: it never inspects SessionEvent.Kind, so a provider
+// boundary that filters events by kind silently demotes this acceleration to
+// the fallback ticker, with nothing failing and nothing logging. The fallback
+// here is set far out of reach, so a poll within the deadline can only have
+// come from the event.
+//
+// agent_state_changed is listed because it is the kind a non-idle herdr state
+// translates to, and a boundary that dropped those states instead of
+// translating them is exactly the regression this test exists to catch.
+func TestActivityReconcileLoopPollsOnAnyEventKind(t *testing.T) {
+	for _, kind := range []runtime.SessionEventKind{
+		runtime.SessionEventAgentStateChanged,
+		runtime.SessionEventAgentIdle,
+		runtime.SessionEventAgentDetected,
+		runtime.SessionEventResync,
+		runtime.SessionEventKind("a-kind-no-provider-emits-yet"),
+	} {
+		t.Run(string(kind), func(t *testing.T) {
+			prevInterval, prevDebounce := activityPollInterval, activityEventDebounce
+			t.Cleanup(func() {
+				activityPollInterval, activityEventDebounce = prevInterval, prevDebounce
+			})
+			activityPollInterval = time.Hour // the ticker must not be the cause
+			activityEventDebounce = time.Millisecond
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			events := make(chan runtime.SessionEvent, 1)
+			polled := make(chan struct{}, 4)
+			a := &activityTracker{}
+			go a.reconcileLoop(ctx, events, func() { polled <- struct{}{} })
+
+			events <- runtime.SessionEvent{Kind: kind, Session: "beta"}
+			select {
+			case <-polled:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("kind %q did not accelerate a poll; the tracker must treat any event as a hint", kind)
+			}
+		})
+	}
 }

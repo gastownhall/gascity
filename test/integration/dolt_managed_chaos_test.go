@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 const (
@@ -1199,10 +1201,6 @@ func waitForManagedDoltPIDExit(pid int, timeout time.Duration) error {
 }
 
 func TestOccupyManagedDoltPortUsesChildProcess(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
-
 	port, err := reserveLoopbackPort()
 	if err != nil {
 		t.Fatalf("reserveLoopbackPort: %v", err)
@@ -1213,21 +1211,38 @@ func TestOccupyManagedDoltPortUsesChildProcess(t *testing.T) {
 	}
 	defer func() { _ = release() }()
 
-	out, err := exec.Command("lsof", "-i", ":"+strconv.Itoa(port), "-sTCP:LISTEN", "-t").Output()
+	holderPID := managedDoltChaosPortHolderPID(t, port)
+	if holderPID == 0 {
+		t.Fatalf("port %d has no visible holder", port)
+	}
+	if holderPID == os.Getpid() {
+		t.Fatalf("occupyManagedDoltPort(%d) bound inside integration.test pid %d", port, holderPID)
+	}
+}
+
+// managedDoltChaosPortHolderPID returns the PID listening on port, from /proc
+// on Linux and lsof elsewhere.
+func managedDoltChaosPortHolderPID(t *testing.T, port int) int {
+	t.Helper()
+	if pid, checked := pidutil.ListenerPID(port); checked {
+		return pid
+	}
+	if _, err := exec.LookPath("lsof"); err != nil {
+		t.Skip("needs /proc or lsof to identify port holders")
+	}
+	out, err := exec.Command("lsof", "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-t").Output()
 	if err != nil {
 		t.Fatalf("lsof port %d: %v", port, err)
 	}
 	fields := strings.Fields(string(out))
 	if len(fields) == 0 {
-		t.Fatalf("lsof port %d returned no holder", port)
+		return 0
 	}
 	holderPID, err := strconv.Atoi(fields[0])
 	if err != nil {
 		t.Fatalf("parse holder pid %q: %v", fields[0], err)
 	}
-	if holderPID == os.Getpid() {
-		t.Fatalf("occupyManagedDoltPort(%d) bound inside integration.test pid %d", port, holderPID)
-	}
+	return holderPID
 }
 
 func managedDoltChaosCreatedIDFromLists(before, after map[string]string, title string) (string, error) {

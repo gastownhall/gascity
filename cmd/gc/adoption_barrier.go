@@ -220,6 +220,16 @@ func runAdoptionBarrier(
 				sessionName, slot)
 		}
 
+		// Capture the runtime's own live GC_INSTANCE_TOKEN rather than
+		// minting a new one. The adopted process was already launched with
+		// whatever token it has (or none); fabricating a different value
+		// here can never retroactively match it, which permanently fences
+		// the drain-ack token check (session_reconciler.go) from ever
+		// stopping this runtime (ga-lfr06j). An empty result is the
+		// existing "cannot verify identity" signal and fails that fence
+		// open, matching sessions adopted with no known token at all.
+		liveInstanceToken, _ := sp.GetMeta(sessionName, "GC_INSTANCE_TOKEN")
+
 		// Build bead metadata. Config/live hashes are left empty —
 		// syncSessionBeads populates them from built agent objects.
 		meta := desiredSessionIdentity(sessionIdentityInputs{
@@ -228,7 +238,7 @@ func runAdoptionBarrier(
 			State:             "active",
 			Generation:        sessionpkg.DefaultGeneration,
 			ContinuationEpoch: sessionpkg.DefaultContinuationEpoch,
-			InstanceToken:     sessionpkg.NewInstanceToken(),
+			InstanceToken:     liveInstanceToken,
 			PoolSlot:          resolvedSlot,
 			ConfigResolved:    isConfigAgent,
 		})
@@ -242,7 +252,7 @@ func runAdoptionBarrier(
 		alreadyHadBead := false
 		createSessionBead := func() error {
 			meta["synced_at"] = clk.Now().UTC().Format("2006-01-02T15:04:05Z07:00")
-			beadID, err := sessFront.CreateSession(sessionpkg.CreateSpec{
+			_, err := sessFront.CreateSession(sessionpkg.CreateSpec{
 				Title:     detail.AgentName,
 				AgentName: detail.AgentName,
 				Metadata:  meta,
@@ -250,10 +260,6 @@ func runAdoptionBarrier(
 			if err != nil {
 				return fmt.Errorf("creating session bead for %q: %w", sessionName, err)
 			}
-			// S19 Stage 3 shadow: record the legacy canonical-identity stamp built
-			// by desiredSessionIdentity for this adopted bead (no-op unless the
-			// shadow harness is enabled).
-			recordLegacyCompareWrites(beadID, "adoptionBarrier.create", meta)
 			return nil
 		}
 		createErr := sessionpkg.WithCitySessionIdentifierLocks(cityPath, []string{sessionName, detail.AgentName}, func() error {

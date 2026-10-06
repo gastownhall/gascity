@@ -856,6 +856,43 @@ func (l *routeRecoveryLane) restoreRoute(store beads.Store, live beads.Bead, bac
 		return out
 	}
 
+	// The write is a key-level compare-and-set against the empty route the live
+	// read saw, so a route another writer stamped after that read — a graph
+	// activation's qualified route, a router, another pass — is never replaced
+	// with this one. A blind metadata write cannot see that it changed.
+	if writer, ok := beads.MetadataCASWriterFor(store); ok {
+		swapped, err := writer.CompareAndSetMetadataKey(live.ID, beadmeta.RoutedToMetadataKey, "", route)
+		switch {
+		case errors.Is(err, beads.ErrConditionalWriteUnsupported):
+			// The store cannot compare-and-set after all (conditional writes
+			// off at the instance): fall back to the legacy write below.
+		case err != nil:
+			return routeRestoreOutcome{writes: 1, err: fmt.Errorf("bead %s: restoring gc.routed_to=%q: %w", live.ID, route, err)}
+		case !swapped:
+			// Another writer set gc.routed_to after the live read. Its route
+			// stands: a lost race is a no-op, not an error, and not a restore
+			// the flap bound should count.
+			l.mu.Lock()
+			if l.restores[live.ID] > 0 {
+				l.restores[live.ID]--
+			}
+			l.mu.Unlock()
+			return routeRestoreOutcome{writes: 1}
+		default:
+			if !isRouteRecoveryQuarantined(live) {
+				return routeRestoreOutcome{restored: true, writes: 1}
+			}
+			// The re-check passes now, so the quarantine verdict is stale.
+			if err := store.SetMetadataBatch(live.ID, map[string]string{
+				beadmeta.RouteQuarantineMetadataKey:       "",
+				beadmeta.RouteQuarantineReasonMetadataKey: "",
+			}); err != nil {
+				return routeRestoreOutcome{restored: true, writes: 2, err: fmt.Errorf("bead %s: clearing route-recovery quarantine: %w", live.ID, err)}
+			}
+			return routeRestoreOutcome{restored: true, writes: 2}
+		}
+	}
+
 	writes := map[string]string{beadmeta.RoutedToMetadataKey: route}
 	if isRouteRecoveryQuarantined(live) {
 		// The re-check passes now, so the quarantine verdict is stale. Clearing

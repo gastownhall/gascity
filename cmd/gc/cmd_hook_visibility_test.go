@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -24,14 +25,17 @@ func TestHookRouteIdentitiesEqual(t *testing.T) {
 		{"different rigs", "rig-a/planner", "rig-b/planner", false},
 		{"different agents, same rig", "gascity/builder", "gascity/reviewer", false},
 		{"empty vs non-empty", "", "gascity/builder", false},
-		{"case insensitive", "Gascity/Builder", "gascity/builder", true},
-		{"case insensitive, dash-encoded", "Gascity--Builder", "gascity/builder", true},
 		// A legacy bound-template spelling ("dir/binding.name") is deliberately
 		// NOT collapsed onto its unbound form here - that migration is owned by
 		// canonicalizeLegacyBoundUnassignedRoutedWork, which rewrites the
 		// persisted route explicitly rather than treating the two spellings as
 		// always-already-equal at compare time.
 		{"legacy bound-template spelling is not collapsed", "gascity/gastown.builder", "gascity/builder", false},
+		// config accepts "builder" and "Builder" as two separate agents
+		// (ValidateAgents keys on a case-sensitive {dir, binding, name}), so
+		// treating them as equal here is a cross-agent work-visibility bug
+		// (ga-lmy6yj), not a convenience.
+		{"case-differing spellings are DISTINCT agents", "gascity/Builder", "gascity/builder", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -60,6 +64,46 @@ func TestHookClaimMatchesRouteToleratesSessionNameEncoding(t *testing.T) {
 	}
 	if hookClaimMatchesRoute(candidate, []string{"gascity--reviewer"}) {
 		t.Fatal("a genuinely different agent must not match")
+	}
+}
+
+// TestHookClaimMatchesRouteWorkflowRunTargetFallback pins issue #5900: a
+// graph.v2 workflow root's gc.run_target fallback exists so a genuinely
+// root-only (#2763-shape) molecule is claimable as its own unit of work, but
+// the same fallback must not resurrect a fully-expanded root whose real
+// children have all closed and is only waiting on workflow-finalize.
+// gc.workflow_expanded distinguishes the two shapes.
+func TestHookClaimMatchesRouteWorkflowRunTargetFallback(t *testing.T) {
+	rootOnly := beads.Bead{
+		ID:     "wf-root-only",
+		Status: "open",
+		Metadata: beads.StringMap{
+			beadmeta.KindMetadataKey:      beadmeta.KindWorkflow,
+			beadmeta.RunTargetMetadataKey: "gascity/builder",
+		},
+	}
+	if !hookClaimMatchesRoute(rootOnly, []string{"gascity/builder"}) {
+		t.Fatal("a never-expanded (#2763-shape) workflow root must still fall back to gc.run_target")
+	}
+
+	expanded := beads.Bead{
+		ID:     "wf-root-expanded",
+		Status: "open",
+		Metadata: beads.StringMap{
+			beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
+			beadmeta.RunTargetMetadataKey:        "gascity/builder",
+			beadmeta.WorkflowExpandedMetadataKey: "true",
+		},
+	}
+	if hookClaimMatchesRoute(expanded, []string{"gascity/builder"}) {
+		t.Fatal("a fully-expanded workflow root (gc.workflow_expanded=true) must not fall back to gc.run_target; it is only claimable via gc.routed_to")
+	}
+
+	if got := hookClaimRoute(expanded); got != "" {
+		t.Fatalf("hookClaimRoute(expanded workflow root) = %q, want empty (never claimable/visible via run_target fallback)", got)
+	}
+	if got := hookClaimRoute(rootOnly); got != "gascity/builder" {
+		t.Fatalf("hookClaimRoute(root-only workflow root) = %q, want %q", got, "gascity/builder")
 	}
 }
 

@@ -14,12 +14,42 @@ runtime-selection setting that picks tmux, k8s, ssh, or exec.
 Install the `herdr` binary and make sure it is on `PATH`:
 
 ```bash
-herdr --version   # the provider is verified against herdr 0.7.1+
+herdr --version   # 0.7.1 is the recorded live validation; read the version note below
 ```
 
 The backend is registered as a builtin runtime name (`herdr`) — no pack or
 `[runtimes.*]` declaration is needed. If the binary is missing, sessions
 selected onto herdr fail to start; install it before flipping the selector.
+
+**Pin a herdr version in any shared environment**, and check herdr's own release
+list rather than trusting a version named here. The adapter talks to herdr's CLI,
+and minor herdr releases have changed that surface twice: 0.7.4 and 0.7.5 altered
+commands the original adapter depended on, and 0.8.0 renamed the code herdr
+returns for a pane with no named agent. That second one cost a fallback:
+when the agent-prompt call fails on a pane with no registered agent, the adapter
+pastes the text instead, and under the renamed code it stopped recognising that
+case, so the original failure was returned to the caller and the paste never
+happened. Nudge delivery surfaced an error rather than going quiet, but nothing
+in the build or the default test suite went red, so the regression had to be
+noticed in the field.
+
+The adapter reads 0.8's spelling now. One gap is known and tracked: 0.8.0 made
+herdr's agent registry detection-based, so the live journey that drives herdr's
+session-event stream waives itself when the installed herdr reports 0.8 or later
+rather than asserting against a registry it no longer matches
+([#5808](https://github.com/gastownhall/gascity/issues/5808)). That waiver reads
+the version, not the registry: a herdr whose version cannot be read or parsed
+runs the journey, and on 0.8 its registry assertions then fail. The other
+real-herdr journeys (provider lifecycle, pane binding, activity, and the runtime
+conformance suite) do run on 0.8; the kind-launch journey needs an installed
+`claude` binary as well and skips without one. 0.7.1 remains the version the
+recorded end-to-end validation ran against.
+
+That is the reason to pin. The tests that drive a real herdr binary are opt-in
+(`make test-herdr-live`); the default suite runs against a fake, so a change on
+herdr's side cannot fail the build. After a herdr upgrade, run
+`make test-herdr-live` and then put a session through a full work cycle before
+trusting it.
 
 ## Enabling herdr
 
@@ -122,6 +152,18 @@ path:
   `provider` value, plus any agent `session` overrides).
 - Once agents are on herdr, their workspaces and tabs are visible through
   herdr's own UI (`herdr` lists the per-rig/town workspaces and per-agent tabs).
+
+## What is not wired yet
+
+**The controller does not consume herdr's session-event stream.** herdr pushes
+session events and the provider implements the stream
+(`runtime.SessionEventProvider`), but the only consumer today is the provider's
+own activity reporting. The reconciler discovers session state on its periodic
+pass, so a session that goes away is noticed on the next pass rather than when the
+event arrives. That costs latency rather than correctness, because each pass reads
+live state rather than trusting an event. The delay is bounded by the reconcile
+interval only while the controller keeps up: ticks run one at a time, so a busy
+controller stretches it. That is the thing to watch during a pilot.
 
 ## Layout
 

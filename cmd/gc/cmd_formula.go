@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/spf13/cobra"
 )
@@ -511,6 +512,34 @@ func formulaSearchPathsForList(cfg *config.City) []string {
 	return all
 }
 
+// orderFormulaSearchPaths returns the formula search paths for dispatching
+// an order: the order's own scope (SearchPaths(a.Rig), which already
+// embeds the city layers beneath any rig-specific ones), plus the order's
+// own discovery layer appended last
+// (highest priority) so a same-named formula co-located with the order
+// still wins on a collision. a.FormulaLayer records where the ORDER FILE
+// was found (for name-collision precedence when the same order name
+// appears in multiple layers) — it is not the set of layers the order's
+// FORMULA may live in. Order dispatch used to conflate the two, searching
+// only a.FormulaLayer, so an order authored in one layer (e.g. the city's
+// own orders/) could never dispatch a formula shipped by a different
+// layer (e.g. an imported pack) even though gc formula list/show resolved
+// it fine (#4378).
+func orderFormulaSearchPaths(cfg *config.City, a orders.Order) []string {
+	var searchPaths []string
+	if cfg != nil {
+		// Clone: SearchPaths hands back the stored slice, and
+		// ComputeFormulaLayers grows those slices with append, so
+		// appending in place could write through spare capacity into
+		// cfg.FormulaLayers.
+		searchPaths = slices.Clone(cfg.FormulaLayers.SearchPaths(a.Rig))
+	}
+	if a.FormulaLayer != "" {
+		searchPaths = append(searchPaths, a.FormulaLayer)
+	}
+	return searchPaths
+}
+
 // printGraphV2Deprecations surfaces deprecated graph.v2 constructs (the legacy
 // issue alias, #2941) found while preparing an invocation.
 func printGraphV2Deprecations(stderr io.Writer, deprecations []string) {
@@ -983,6 +1012,14 @@ store, copy them into the binding with
 			// store that has never held it.
 			rootStore := store
 			if isGraphFormula {
+				// This arm writes molecule.Cook's sequence out rather than
+				// calling molecule.CookChoosingStore, and it needs all three
+				// capabilities that function's doc comment names as absent: the
+				// idempotency key is derived from the compiled recipe
+				// (stampFormulaCookGraphV2Root), the graph lock must stay held
+				// past the instantiate for the --meta stamp below, and the recipe
+				// is decorated through the store that will own it.
+				//
 				// Stamp the run root with its store/scope identity before
 				// instantiating, exactly as the --attach branch does via
 				// decorateFormulaCookGraphV2Recipe. Without it a standalone-cooked
@@ -1028,18 +1065,12 @@ store, copy them into the binding with
 				// compiler ran is what keeps such a wisp out of the work ledger,
 				// where it would read as a stranded infrastructure bead and stop
 				// boot. A v1 POURED molecule classifies as work and stays exactly
-				// where it always was. This is molecule.Cook's body, inlined only
-				// so the store can be chosen from the compiled recipe.
+				// where it always was.
 				opts := molecule.Options{Title: title, Vars: cookVars}
-				recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), args[0], scope.searchPaths, cookVars)
-				if err != nil {
-					return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("compiling formula %q: %w", args[0], err))
-				}
-				if err := molecule.ValidateRecipeRuntimeVars(recipe, opts); err != nil {
-					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
-				}
-				rootStore = moleculeClassStore(recipe, store, graphStore)
-				result, err = molecule.Instantiate(cmd.Context(), rootStore, recipe, opts)
+				var err error
+				result, rootStore, err = molecule.CookChoosingStore(cmd.Context(), args[0], scope.searchPaths, opts, func(recipe *formula.Recipe) beads.Store {
+					return moleculeClassStore(recipe, store, graphStore)
+				})
 				if err != nil {
 					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 				}

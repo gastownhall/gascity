@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 func TestPreCommitFormatterPreservesFileMode(t *testing.T) {
@@ -208,8 +210,18 @@ func TestPrePushUsesCanonicalMachineAwareConcurrency(t *testing.T) {
 	if strings.Contains(content, `LOCAL_TEST_JOBS="${LOCAL_TEST_JOBS:-3}"`) {
 		t.Fatal("pre-push hook must not replace the canonical machine-aware default with a fixed three-job cap")
 	}
-	if !strings.Contains(content, "exec make test-fast-parallel") {
-		t.Fatal("pre-push hook must continue delegating the unchanged fast-suite inventory to make test-fast-parallel")
+	if !strings.Contains(content, `exec "$repo_root/.githooks/lib/push-suite.sh"`) {
+		t.Fatal("pre-push hook must delegate the push-time suite to .githooks/lib/push-suite.sh")
+	}
+	suite, err := os.ReadFile(filepath.Join(repoRoot, ".githooks", "lib", "push-suite.sh"))
+	if err != nil {
+		t.Fatalf("read push-suite.sh: %v", err)
+	}
+	if strings.Contains(string(suite), "LOCAL_TEST_JOBS") {
+		t.Fatal("push-suite.sh must not shadow the canonical machine-aware job count")
+	}
+	if !strings.Contains(string(suite), "exec make test-fast-parallel") {
+		t.Fatal("push-suite.sh's go fallback must continue delegating the unchanged fast-suite inventory to make test-fast-parallel")
 	}
 	for _, path := range []string{"Makefile", filepath.Join("scripts", "test-local-parallel")} {
 		content, err := os.ReadFile(filepath.Join(repoRoot, path))
@@ -294,6 +306,19 @@ func TestPreCommitReachesDashboardBlockWhenOnlySpecFileStaged(t *testing.T) {
 	clientPath := filepath.Join(tmpRepo, "internal", "api", "dashboardspa", "web", "shared", "src", "generated", "gc-supervisor-client")
 	distPath := filepath.Join(tmpRepo, "internal", "api", "dashboardspa", "dist", "placeholder")
 
+	// The hook resolves its beads chain relative to `git rev-parse
+	// --show-toplevel`, which is this temp repo — install the real forwarder
+	// there rather than re-implementing it.
+	chain, err := os.ReadFile(filepath.Join(repoRoot, ".githooks", "lib", "beads-chain.sh"))
+	if err != nil {
+		t.Fatalf("read beads-chain.sh: %v", err)
+	}
+	chainPath := filepath.Join(tmpRepo, ".githooks", "lib", "beads-chain.sh")
+	if err := os.MkdirAll(filepath.Dir(chainPath), 0o755); err != nil {
+		t.Fatalf("mkdir .githooks/lib: %v", err)
+	}
+	writeExecutable(t, chainPath, string(chain))
+
 	runGit("init")
 	writeTestFile(t, specPath, "{}\n")
 	writeTestFile(t, clientPath, "placeholder\n")
@@ -317,6 +342,11 @@ exit 0
 	// block at all (the reviewer's criterion-2 gap), not the real
 	// dashboard-check/dashboard-smoke targets, which need the full repo.
 	writeExecutable(t, filepath.Join(binDir, "make"), `#!/usr/bin/env bash
+exit 0
+`)
+	// Stub bd so the chained beads pre-commit hook is a no-op here; this test
+	// is about the repo hook's own control flow.
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/usr/bin/env bash
 exit 0
 `)
 
@@ -361,6 +391,9 @@ func TestPreCommitFailsClosedWhenSpecStagedButNpmAbsent(t *testing.T) {
 	}
 
 	specPath := filepath.Join(tmpRepo, "internal", "api", "openapi.json")
+
+	// pre-commit resolves beads-chain relative to this temp repo's toplevel.
+	installBeadsChainForTempRepo(t, repoRoot, tmpRepo)
 
 	runGit("init")
 	writeTestFile(t, specPath, "{}\n")
@@ -427,6 +460,9 @@ func TestPreCommitFailsClosedWhenGoBlockStagesSpecAsSideEffectAndNpmAbsent(t *te
 		filepath.Join(tmpRepo, "docs", "reference", "cli.md"),
 	}
 
+	// pre-commit resolves beads-chain relative to this temp repo's toplevel.
+	installBeadsChainForTempRepo(t, repoRoot, tmpRepo)
+
 	runGit("init")
 	writeTestFile(t, goFilePath, "package main\n\nfunc main() {}\n")
 	for _, p := range generatedPaths {
@@ -435,7 +471,12 @@ func TestPreCommitFailsClosedWhenGoBlockStagesSpecAsSideEffectAndNpmAbsent(t *te
 	if err := os.MkdirAll(filepath.Dir(formatStagedGoPath), 0o755); err != nil {
 		t.Fatalf("create parent for %s: %v", formatStagedGoPath, err)
 	}
-	writeExecutable(t, formatStagedGoPath, "#!/usr/bin/env bash\nexit 0\n")
+	// The hook pipes the staged file list into this script under
+	// `set -o pipefail`. Like the real script, the stub must read its stdin
+	// to EOF: one that exits without reading races the hook's printf, which
+	// dies of SIGPIPE whenever the stub exits first, and bash exits 141
+	// without printing anything (the silent CI flake on loaded runners).
+	writeExecutable(t, formatStagedGoPath, "#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n")
 	runGit("add", "-A")
 	runGit("commit", "-m", "init")
 
@@ -506,6 +547,9 @@ func TestPreCommitWarnsOnlyWhenNpmAbsentAndSpecNotStaged(t *testing.T) {
 
 	docPath := filepath.Join(tmpRepo, "README.md")
 
+	// pre-commit resolves beads-chain relative to this temp repo's toplevel.
+	installBeadsChainForTempRepo(t, repoRoot, tmpRepo)
+
 	runGit("init")
 	writeTestFile(t, docPath, "hello\n")
 	runGit("add", "-A")
@@ -542,10 +586,17 @@ func TestPreCommitWarnsOnlyWhenNpmAbsentAndSpecNotStaged(t *testing.T) {
 // unreachable regardless of what's installed on the test host -- falling
 // back to the ambient PATH would make these tests flaky on any machine
 // that actually has npm installed.
+//
+// A no-op `bd` stub is always installed so the beads-chain pre-commit
+// forwarder does not fail closed when the ambient PATH has no `bd` (or has
+// a real one that would try to talk to a database).
 func restrictedPathWithoutNpm(t *testing.T, stubs map[string]string) string {
 	t.Helper()
 	binDir := t.TempDir()
-	for _, name := range []string{"bash", "git", "xargs"} {
+	// sh+env are required for beads-chain.sh's `#!/usr/bin/env sh` shebang
+	// under a restricted PATH (env is absolute in the shebang, but then looks
+	// up `sh` on PATH). timeout is optional; without it the chain still runs.
+	for _, name := range []string{"bash", "sh", "env", "git", "xargs"} {
 		realPath, err := exec.LookPath(name)
 		if err != nil {
 			t.Fatalf("resolve real %s on test host PATH: %v", name, err)
@@ -554,10 +605,33 @@ func restrictedPathWithoutNpm(t *testing.T, stubs map[string]string) string {
 			t.Fatalf("symlink %s: %v", name, err)
 		}
 	}
+	if stubs == nil {
+		stubs = map[string]string{}
+	}
+	if _, ok := stubs["bd"]; !ok {
+		stubs["bd"] = "#!/usr/bin/env bash\nexit 0\n"
+	}
 	for name, script := range stubs {
 		writeExecutable(t, filepath.Join(binDir, name), script)
 	}
 	return binDir
+}
+
+// installBeadsChainForTempRepo copies the real beads-chain forwarder into a
+// fixture repo. The real pre-commit hook resolves the chain via
+// `git rev-parse --show-toplevel`, which is the temp repo, so the fixture
+// must ship the lib dependency rather than re-implementing it.
+func installBeadsChainForTempRepo(t *testing.T, repoRoot, tmpRepo string) {
+	t.Helper()
+	chain, err := os.ReadFile(filepath.Join(repoRoot, ".githooks", "lib", "beads-chain.sh"))
+	if err != nil {
+		t.Fatalf("read beads-chain.sh: %v", err)
+	}
+	chainPath := filepath.Join(tmpRepo, ".githooks", "lib", "beads-chain.sh")
+	if err := os.MkdirAll(filepath.Dir(chainPath), 0o755); err != nil {
+		t.Fatalf("mkdir .githooks/lib: %v", err)
+	}
+	writeExecutable(t, chainPath, string(chain))
 }
 
 func TestNativeDoltliteBeadsTargetRunsTaggedSuite(t *testing.T) {
@@ -572,6 +646,10 @@ func TestNativeDoltliteBeadsTargetRunsTaggedSuite(t *testing.T) {
 
 	cmd := exec.Command("make", "-n", "test-native-doltlite-beads")
 	cmd.Dir = repoRoot
+	// The Makefile's Linux CGO fallback probes the host's cc and ICU headers
+	// at parse time and prints a line when it fires; off, the dry run is the
+	// recipe alone on any host.
+	cmd.Env = append(os.Environ(), "SYS_USR_CGO_FALLBACK=0")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("make -n test-native-doltlite-beads failed: %v\n%s", err, out)
@@ -622,6 +700,9 @@ func TestLocalParallelAllowlistIncludesObservableEnv(t *testing.T) {
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)

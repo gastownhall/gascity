@@ -56,7 +56,7 @@ func TestFrontDoorStoreFreeFilesStayStoreFree(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	dir := filepath.Dir(currentFile)
+	dir := gcCallerDir(currentFile)
 	for _, name := range frontDoorStoreFreeFiles {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
@@ -120,7 +120,7 @@ func TestSnapshotInfoOnlyFilesStayOnInfoAccessors(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	dir := filepath.Dir(currentFile)
+	dir := gcCallerDir(currentFile)
 	for _, name := range snapshotInfoOnlyFiles {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
@@ -209,7 +209,7 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	dir := filepath.Dir(currentFile)
+	dir := gcCallerDir(currentFile)
 	for _, name := range metadataInfoOnlyFiles {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
@@ -404,6 +404,11 @@ var sessionRelocationRoutedFiles = []string{
 	// class and degrade to a silent no-op — a green result that reads as "no
 	// stranded work" when the check simply looked in the wrong store.
 	"doctor_pool_idle_routed_work_check.go",
+	// The startup-health-episodes doctor check enumerates session-class episode
+	// beads. Unrouted, it reports "no active startup-health episodes" under a
+	// relocated sessions class — a green result that reads as "no stuck
+	// sessions" when the check simply looked in the wrong store.
+	"doctor_startup_health.go",
 }
 
 // sessionRelocationForbidden are the UNROUTED session-front-door constructions a
@@ -434,7 +439,7 @@ func TestSessionRelocationRootsRouteThroughSessionClassStore(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	dir := filepath.Dir(currentFile)
+	dir := gcCallerDir(currentFile)
 	for _, name := range sessionRelocationRoutedFiles {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
@@ -472,7 +477,7 @@ func TestGraphRelocationRootsRouteThroughGraphClassStore(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	dir := filepath.Dir(currentFile)
+	dir := gcCallerDir(currentFile)
 	for _, name := range graphRelocationRoutedFiles {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)

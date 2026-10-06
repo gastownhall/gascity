@@ -470,3 +470,52 @@ func TestClaudePermissionModeMapsToAcceptedCLIValues(t *testing.T) {
 		t.Errorf("full-auto FlagArgs = %v, want [--permission-mode dontAsk]", fullAuto.FlagArgs)
 	}
 }
+
+// #5415: codex CLI >= 0.128 deprecated --full-auto, and >= 0.147.0 removes it
+// entirely (codex exec --full-auto now errors instead of running). auto-edit
+// must use the modern replacement: --sandbox workspace-write plus
+// --ask-for-approval never. (--full-auto was an alias for
+// `-a on-failure --sandbox workspace-write`; gc pins `never` rather than
+// `on-failure` because an escalation prompt in an unattended slung pane
+// blocks forever.)
+func TestCodexAutoEditMapsToUnremovedCLIFlags(t *testing.T) {
+	providers := BuiltinProviders()
+	codex, ok := providers["codex"]
+	if !ok {
+		t.Fatal("BuiltinProviders() missing codex")
+	}
+
+	const want = "--sandbox workspace-write --ask-for-approval never"
+	if got := codex.PermissionModes["auto-edit"]; got != want {
+		t.Errorf("PermissionModes[auto-edit] = %q, want %q", got, want)
+	}
+
+	var permOpt BuiltinProviderOption
+	for _, option := range codex.OptionsSchema {
+		if option.Key == "permission_mode" {
+			permOpt = option
+			break
+		}
+	}
+	if permOpt.Key == "" {
+		t.Fatal("codex provider missing permission_mode option")
+	}
+	byValue := make(map[string]BuiltinOptionChoice, len(permOpt.Choices))
+	for _, c := range permOpt.Choices {
+		byValue[c.Value] = c
+	}
+	autoEdit, ok := byValue["auto-edit"]
+	if !ok {
+		t.Fatal("codex permission_mode choices missing auto-edit")
+	}
+	wantArgs := []string{"--sandbox", "workspace-write", "--ask-for-approval", "never"}
+	if len(autoEdit.FlagArgs) != len(wantArgs) {
+		t.Fatalf("auto-edit FlagArgs = %v, want %v", autoEdit.FlagArgs, wantArgs)
+	}
+	for i, arg := range wantArgs {
+		if autoEdit.FlagArgs[i] != arg {
+			t.Errorf("auto-edit FlagArgs = %v, want %v", autoEdit.FlagArgs, wantArgs)
+			break
+		}
+	}
+}

@@ -29,6 +29,11 @@ From the city root, start detail tracing on the exact normalized template:
 gc trace start --template repo/polecat --for 20m
 ```
 
+Arm the template even when you only suspect a pool is sitting correctly idle:
+the `pool_desired.compute` / `no_demand` / `skipped` decision — the positive
+evidence that the reconciler reached that template and found nothing to do — is
+detail-tier, so it reaches the persisted trace only once the template is armed.
+
 If you want live visibility while reproducing:
 
 ```bash

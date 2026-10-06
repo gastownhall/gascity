@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -436,5 +437,266 @@ func TestFindPiSessionFileFailsClosedOnAmbiguousCWD(t *testing.T) {
 	}
 	if got := FindPiSessionFileByID([]string{root}, workDir, "first"); got != firstPath {
 		t.Fatalf("FindPiSessionFileByID(first) = %q, want %q", got, firstPath)
+	}
+}
+
+func writePiSessionHeaderFile(t *testing.T, path, workDir string) {
+	t.Helper()
+	writePiHeaderFile(t, path, "session", "sess-1", workDir)
+}
+
+// writePiHeaderFile writes a single pi header line of the given record type.
+// "session" and "message" have the same byte length, so a caller can rewrite one
+// as the other without changing the file's stat signature.
+func writePiHeaderFile(t *testing.T, path, recordType, id, workDir string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(piHeaderLine(recordType, id, workDir)+"\n"), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func piHeaderLine(recordType, id, workDir string) string {
+	return `{"type":"` + recordType + `","version":3,"id":"` + id + `","cwd":"` + filepath.ToSlash(workDir) + `"}`
+}
+
+// rewritePiFilePreservingSignature runs write against path and then asserts the
+// file's size is unchanged and restores its original mtime, so the (size, mtime)
+// stat signature the header cache keys on is identical to the pre-write one.
+func rewritePiFilePreservingSignature(t *testing.T, path string, write func()) {
+	t.Helper()
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	write()
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat rewritten %s: %v", path, err)
+	}
+	if after.Size() != before.Size() {
+		t.Fatalf("rewrite changed size %d -> %d; test needs an identical signature", before.Size(), after.Size())
+	}
+	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatalf("chtimes %s: %v", path, err)
+	}
+}
+
+func TestFindPiSessionFileByIDSkipsRereadWhenStatSignatureUnchanged(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project-aa")
+	otherDir := filepath.Join(filepath.Dir(workDir), "project-bb")
+	path := filepath.Join(root, "session.jsonl")
+	writePiSessionHeaderFile(t, path, workDir)
+
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != path {
+		t.Fatalf("FindPiSessionFileByID() = %q, want %q", got, path)
+	}
+
+	// Rewrite the header to a different cwd of the same byte length and restore
+	// the original mtime, so the (size, mtime) stat signature is unchanged. The
+	// candidate scan must serve the cached header without re-reading the file.
+	rewritePiFilePreservingSignature(t, path, func() {
+		writePiSessionHeaderFile(t, path, otherDir)
+	})
+
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != path {
+		t.Fatalf("FindPiSessionFileByID() after same-signature rewrite = %q, want cached %q", got, path)
+	}
+}
+
+func TestFindPiSessionFileByIDInvalidatesCacheOnChangedSignature(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	movedDir := workDir + "-moved"
+	path := filepath.Join(root, "session.jsonl")
+	writePiSessionHeaderFile(t, path, workDir)
+
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != path {
+		t.Fatalf("FindPiSessionFileByID() = %q, want %q", got, path)
+	}
+
+	writePiSessionHeaderFile(t, path, movedDir)
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != "" {
+		t.Fatalf("FindPiSessionFileByID(old cwd) = %q, want empty after header rewrite", got)
+	}
+	if got := FindPiSessionFileByID([]string{root}, movedDir, "sess-1"); got != path {
+		t.Fatalf("FindPiSessionFileByID(new cwd) = %q, want %q", got, path)
+	}
+}
+
+func TestStorePiHeaderCacheEntryResetsOnlyForNewKeyAtCapacity(t *testing.T) {
+	cacheLen := func() int {
+		piHeaderCacheMu.Lock()
+		defer piHeaderCacheMu.Unlock()
+		return len(piHeaderCache)
+	}
+	piHeaderCacheMu.Lock()
+	saved := piHeaderCache
+	piHeaderCache = make(map[string]piHeaderCacheEntry)
+	piHeaderCacheMu.Unlock()
+	t.Cleanup(func() {
+		piHeaderCacheMu.Lock()
+		piHeaderCache = saved
+		piHeaderCacheMu.Unlock()
+	})
+
+	const maxEntries = 4
+	for i := 0; i < maxEntries; i++ {
+		storePiHeaderCacheEntry(fmt.Sprintf("/pi/s%d.jsonl", i), piHeaderCacheEntry{size: int64(i)}, maxEntries)
+	}
+	if got := cacheLen(); got != maxEntries {
+		t.Fatalf("cache length after filling to capacity = %d, want %d", got, maxEntries)
+	}
+
+	// A signature refresh of a key already present cannot grow the map, so it
+	// must not discard the working set.
+	storePiHeaderCacheEntry("/pi/s0.jsonl", piHeaderCacheEntry{size: 99}, maxEntries)
+	if got := cacheLen(); got != maxEntries {
+		t.Fatalf("cache length after refreshing a cached key = %d, want %d", got, maxEntries)
+	}
+
+	// A new key at capacity still resets: the bound is an anti-leak cap, not an
+	// eviction policy.
+	storePiHeaderCacheEntry("/pi/new.jsonl", piHeaderCacheEntry{size: 1}, maxEntries)
+	if got := cacheLen(); got != 1 {
+		t.Fatalf("cache length after inserting a new key at capacity = %d, want 1", got)
+	}
+}
+
+func TestFindPiSessionFileByIDRetriesAfterUnreadableFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod-000 unreadable file is not enforced for root")
+	}
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	path := filepath.Join(root, "session.jsonl")
+	writePiSessionHeaderFile(t, path, workDir)
+
+	// Seal the transcript so os.Open fails with EACCES. That is an I/O failure,
+	// not a file that genuinely carries no session header.
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod 000: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != "" {
+		t.Fatalf("FindPiSessionFileByID() while unreadable = %q, want empty", got)
+	}
+
+	// Restoring the mode leaves size and mtime untouched, so the stat signature
+	// is unchanged: only a cache that refused to store the failed read can see
+	// the transcript again. Caching it would strand an idle transcript
+	// indefinitely, because nothing appends to it to change the signature.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("chmod 644: %v", err)
+	}
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != path {
+		t.Fatalf("FindPiSessionFileByID() after the read recovered = %q, want %q", got, path)
+	}
+}
+
+func TestFindPiSessionFileByIDRetriesAfterScanError(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	path := filepath.Join(root, "session.jsonl")
+
+	// A first line past the scanner's 1 MB limit surfaces as bufio.ErrTooLong:
+	// a read failure that Scan reports the same way as an empty file.
+	const total = 1024*1024 + 1024
+	if err := os.WriteFile(path, append(bytes.Repeat([]byte("x"), total-1), '\n'), 0o644); err != nil {
+		t.Fatalf("write oversized first line: %v", err)
+	}
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != "" {
+		t.Fatalf("FindPiSessionFileByID() with an oversized first line = %q, want empty", got)
+	}
+
+	// Put a real header on line 1 and pad line 2 to the identical byte count, so
+	// the stat signature cannot change and only a re-read can find the header.
+	rewritePiFilePreservingSignature(t, path, func() {
+		header := piHeaderLine("session", "sess-1", workDir) + "\n"
+		body := append([]byte(header), bytes.Repeat([]byte("x"), total-len(header)-1)...)
+		if err := os.WriteFile(path, append(body, '\n'), 0o644); err != nil {
+			t.Fatalf("write header with padding: %v", err)
+		}
+	})
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != path {
+		t.Fatalf("FindPiSessionFileByID() after the scan error cleared = %q, want %q", got, path)
+	}
+}
+
+func TestFindPiSessionFileByIDCachesNonSessionFirstLine(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	path := filepath.Join(root, "notes.jsonl")
+	writePiHeaderFile(t, path, "message", "sess-1", workDir)
+
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != "" {
+		t.Fatalf("FindPiSessionFileByID() for a non-session first line = %q, want empty", got)
+	}
+
+	// "message" and "session" are the same byte length, so this rewrite keeps the
+	// stat signature. An absence derived from content — not from a failed read —
+	// is exactly what the signature tracks, so it must stay cached: that is the
+	// negative-caching win on non-pi .jsonl files.
+	rewritePiFilePreservingSignature(t, path, func() {
+		writePiHeaderFile(t, path, "session", "sess-1", workDir)
+	})
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != "" {
+		t.Fatalf("FindPiSessionFileByID() after a same-signature rewrite = %q, want the cached empty result", got)
+	}
+}
+
+func TestFindPiSessionFileStrictStaysAmbiguousAfterTransientReadFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod-000 unreadable file is not enforced for root")
+	}
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	firstPath := filepath.Join(root, "first.jsonl")
+	secondPath := filepath.Join(root, "second.jsonl")
+	writePiHeaderFile(t, firstPath, "session", "first", workDir)
+	writePiHeaderFile(t, secondPath, "session", "second", workDir)
+
+	if err := os.Chmod(secondPath, 0o000); err != nil {
+		t.Fatalf("chmod 000: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(secondPath, 0o644) })
+
+	// While the second transcript cannot be read it is not a candidate, so the
+	// guard sees one. That was true before the cache existed too.
+	got, err := FindPiSessionFileStrict([]string{root}, workDir)
+	if err != nil || got != firstPath {
+		t.Fatalf("FindPiSessionFileStrict() while unreadable = (%q, %v), want (%q, nil)", got, err, firstPath)
+	}
+
+	// chmod leaves size and mtime alone. Caching the failed read would keep the
+	// second transcript invisible, flipping the same-workdir guard from
+	// fail-closed to a confident wrong answer that callers then mutate.
+	if err := os.Chmod(secondPath, 0o644); err != nil {
+		t.Fatalf("chmod 644: %v", err)
+	}
+	if _, err := FindPiSessionFileStrict([]string{root}, workDir); !errors.Is(err, ErrAmbiguousPiSessionFile) {
+		t.Fatalf("FindPiSessionFileStrict() after the read recovered = %v, want ErrAmbiguousPiSessionFile", err)
+	}
+}
+
+func TestFindPiSessionFileByIDDropsDeletedFileDespiteCache(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	path := filepath.Join(root, "session.jsonl")
+	writePiSessionHeaderFile(t, path, workDir)
+
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != path {
+		t.Fatalf("FindPiSessionFileByID() = %q, want %q", got, path)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if got := FindPiSessionFileByID([]string{root}, workDir, "sess-1"); got != "" {
+		t.Fatalf("FindPiSessionFileByID() after delete = %q, want empty", got)
 	}
 }

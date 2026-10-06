@@ -18,6 +18,11 @@ const sqliteGraphEdgeMetadataKVPrefix = "gascity.graph-edge-metadata.v1/"
 var (
 	_ GraphApplyStore        = (*SQLiteStore)(nil)
 	_ StorageGraphApplyStore = (*SQLiteStore)(nil)
+	// The two halves of the edge-payload contract. Reading without writing is
+	// what let the infra-class copy detect a payload it could not carry;
+	// asserting both here keeps a refactor from removing the half that closed it.
+	_ DepMetadataReader = (*SQLiteStore)(nil)
+	_ DepMetadataWriter = (*SQLiteStore)(nil)
 )
 
 // ApplyGraphPlan atomically instantiates an entire bead graph (nodes + edges) in
@@ -60,7 +65,7 @@ func (s *SQLiteStore) ApplyGraphPlanWithStorage(ctx context.Context, plan *Graph
 			defaultPriority := 2
 			priority = &defaultPriority
 		}
-		b := s.normalizeCreate(Bead{
+		b, err := s.normalizeCreate(Bead{
 			Title:       node.Title,
 			Description: node.Description,
 			Type:        node.Type,
@@ -73,6 +78,9 @@ func (s *SQLiteStore) ApplyGraphPlanWithStorage(ctx context.Context, plan *Graph
 			Ephemeral:   ephemeral,
 			NoHistory:   noHistory,
 		})
+		if err != nil {
+			return nil, fmt.Errorf("sqlite graph apply: %w", err)
+		}
 		result.IDs[key] = b.ID
 		staged[i] = b
 	}
@@ -253,6 +261,14 @@ func (s *SQLiteStore) DepMetadata(issueID, dependsOnID string) (string, bool, er
 			return "", false, nil
 		}
 		return "", false, fmt.Errorf("reading Graph dependency metadata %s -> %s: %w", issueID, dependsOnID, err)
+	}
+	// Gate on the same predicate NativeDoltStore.DepMetadata uses. setGraphEdgeMetadataTx
+	// declines only the empty STRING, so a non-carrying-but-nonempty payload ("{}"/"[]"/
+	// "null") is persisted verbatim; reporting that as carried would disagree with the
+	// native reader on the (payload, carried) pair the cross-engine migration witness
+	// hashes, turning a byte-identical edge into a spurious "payload lost" verdict.
+	if !DepMetadataCarries(metadata) {
+		return "", false, nil
 	}
 	return metadata, true, nil
 }

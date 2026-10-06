@@ -5,6 +5,25 @@
 > *contract*; this defines how we *test and gate* it across versions).
 > **Decision owner:** integration-branch maintainers.
 
+> **Pin state superseded — 2026-09-10.** Every concrete version below (`BD_VERSION=v1.0.4`,
+> the v1.0.5-is-a-Draft question, `BD_CURRENT_VERSION=v1.1.0-rc.1`) describes 2026-06-24
+> and is kept as the design record, not as an operative anchor. The live values are
+> always `deps.env`, enforced by `scripts/bd_version_pin_test.go`. As of the
+> v1.3.0-rc.2 bump: `BD_PREV_VERSION=v1.0.4` (unchanged floor),
+> `BD_VERSION=v1.3.0-rc.2`, `BD_CURRENT_VERSION=v1.3.0-rc.2`.
+>
+> The axis this design gates is `BD_PREV_VERSION` against `BD_CURRENT_VERSION` —
+> v1.0.4 against v1.3.0-rc.2 — and it is as wide as it has ever been.
+> `BD_VERSION` is the installable default, not a matrix cell, so it neither
+> widens nor narrows that axis; it only has to sit at or above the floor.
+> Here it sits on the current cell's own tag: `BD_CURRENT_REF` is the commit
+> `v1.3.0-rc.2` is tagged at, so the installed tarball and the source-built cell
+> reach the same upstream commit by two routes, and gc links the same beads it
+> shells out to.
+>
+> The **mechanism** this doc specifies is unchanged and was followed by both
+> bumps: the corpus re-vendor rides in the same PR as the pin move.
+
 ## Summary
 
 `bd` (beads) and `gc` (Gas City) drift out of sync because gascity drives the
