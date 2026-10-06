@@ -199,6 +199,32 @@ type ConditionalWritesResolveTargeter interface {
 	ConditionalWritesResolveTarget() Store
 }
 
+// ConditionalWritesModeSourcer is implemented by store wrappers outside this
+// package that perform conditional writes themselves (so the resolved writer
+// must stay the wrapper, which adds behavior such as event emission) but carry
+// no stamp. ResolveConditionalWriter reads the mode, liveness, capability probe
+// and degrade latch from the declared source and returns the wrapper as the
+// writer. Like a resolve target, a source can only point at a store, never
+// supply a mode; a nil source, or the wrapper itself, declares nothing.
+type ConditionalWritesModeSourcer interface {
+	ConditionalWritesModeSource() Store
+}
+
+// conditionalWritesModeSource returns the store whose stamp, liveness, prober
+// and degrade latch govern resolution of store: the declared mode source,
+// followed through its own resolve targets, or store itself.
+func conditionalWritesModeSource(store Store) Store {
+	sourcer, ok := store.(ConditionalWritesModeSourcer)
+	if !ok {
+		return store
+	}
+	source := sourcer.ConditionalWritesModeSource()
+	if source == nil || source == store {
+		return store
+	}
+	return followConditionalWritesResolveTarget(source)
+}
+
 // conditionalWritesMaxResolveDepth bounds resolve-target following so a
 // self-referential wrapper degrades to legacy instead of looping.
 const conditionalWritesMaxResolveDepth = 8
@@ -269,33 +295,44 @@ func IsConditionalWritesRequired(err error) bool {
 //
 // The seam never GUESSES at unwrapping: a wrapper participates only by
 // declaring its resolution target via ConditionalWritesResolveTargeter (the
-// typed class wrappers and the cmd/gc policy wrapper do). A wrapper that
-// declares nothing resolves as unset→legacy, exactly like any other
-// carrier-less store.
+// typed class wrappers and the cmd/gc policy wrapper do), or its mode source
+// via ConditionalWritesModeSourcer (the one-shot CLI's emitting class store
+// does). A wrapper that declares neither resolves as unset→legacy, exactly
+// like any other carrier-less store.
+//
+// A mode-sourced wrapper is capable only when it and its source both
+// implement ConditionalWriter and the source's prober agrees: the wrapper
+// forwards its conditional verbs to the source, so the source's capability is
+// the wrapper's.
 func ResolveConditionalWriter(store Store) (ConditionalWriter, *BeadsDiagnostic, error) {
+	src := store
 	if store != nil {
 		store = followConditionalWritesResolveTarget(store)
+		src = conditionalWritesModeSource(store)
 	}
 	mode := gate.ModeUnset
-	carrier, hasCarrier := store.(conditionalWritesModeCarrier)
+	carrier, hasCarrier := src.(conditionalWritesModeCarrier)
 	if hasCarrier {
 		mode, _ = carrier.conditionalWritesMode()
 	}
 	if mode == gate.ModeUnset || mode == gate.Off {
 		return nil, nil, nil
 	}
-	if liveness, ok := store.(conditionalWritesLiveness); ok {
+	if liveness, ok := src.(conditionalWritesLiveness); ok {
 		if err := liveness.conditionalWritesStoreOpen(); err != nil {
 			return nil, nil, err
 		}
 	}
 
 	writer, hasWriter := ConditionalWriterFor(store)
+	if hasWriter && src != store {
+		_, hasWriter = ConditionalWriterFor(src)
+	}
 	pred := func(context.Context) (bool, string) {
 		if !hasWriter {
 			return false, "store does not implement conditional writes"
 		}
-		if prober, ok := store.(conditionalWriteCapabilityProber); ok {
+		if prober, ok := src.(conditionalWriteCapabilityProber); ok {
 			return prober.probeConditionalWriteCapability()
 		}
 		return true, "store implements conditional writes"
@@ -308,11 +345,11 @@ func ResolveConditionalWriter(store Store) (ConditionalWriter, *BeadsDiagnostic,
 			// Unreachable by construction (the predicate reports incapable
 			// when hasWriter is false), but stay mode-correct if it ever
 			// happens: require still fails closed, auto degrades loudly.
-			return refuseOrDegrade(store, mode, "store did not yield a conditional writer")
+			return refuseOrDegrade(src, mode, "store did not yield a conditional writer")
 		}
 		return writer, nil, nil
 	case gate.DegradeLoud:
-		w, diag, degradeErr := refuseOrDegrade(store, mode, reason)
+		w, diag, degradeErr := refuseOrDegrade(src, mode, reason)
 		if hasCarrier {
 			// Auto-degrade is the state most likely to persist unnoticed;
 			// the factory-injected callback pushes it onto the event bus,
@@ -326,7 +363,7 @@ func ResolveConditionalWriter(store Store) (ConditionalWriter, *BeadsDiagnostic,
 		}
 		return w, diag, degradeErr
 	case gate.RefuseClosed:
-		return refuseOrDegrade(store, mode, reason)
+		return refuseOrDegrade(src, mode, reason)
 	default: // gate.UseLegacy — unreachable: off/unset short-circuit above.
 		return nil, nil, nil
 	}
