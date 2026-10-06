@@ -3,8 +3,8 @@
 # isolation"). Root; installed at /usr/local/libexec/rbe-action/selftest.
 #   selftest [--quick]   --quick: configuration and one probe action (about a
 #                        second; nativelink-worker's ExecStartPre); without it
-#                        also the timeout path, a killed launcher and
-#                        NativeLink's worker config.
+#                        also the timeout path, a killed launcher, per-action
+#                        network (RBE_X_NETWORK) and NativeLink's worker config.
 # Runs real actions through the real entrypoint as the worker user, in a
 # throwaway action directory under WORK_ROOT. Prints ok/FAIL lines and
 # "failures: N"; exit 1 on any failure.
@@ -69,8 +69,8 @@ if ((!quick)); then
 	check "entrypoint is $LIB/entry" test "$(jq -r '.workers[0].local.entrypoint' "$j")" = "$LIB/entry"
 	check "timeout_handled_externally, max_action_timeout = BACKSTOP_S" \
 		test "$(jq -r '.workers[0].local | "\(.timeout_handled_externally) \(.max_action_timeout // .max_action_timeout_s)"' "$j")" = "true $BACKSTOP_S"
-	check "additional_environment: RBE_X_TIMEOUT_MS, RBE_X_SIDE_CHANNEL" \
-		test "$(jq -c '.workers[0].local.additional_environment' "$j")" = '{"RBE_X_TIMEOUT_MS":"timeout_millis","RBE_X_SIDE_CHANNEL":"side_channel_file"}'
+	check "additional_environment: RBE_X_TIMEOUT_MS, RBE_X_SIDE_CHANNEL, RBE_X_NETWORK (property network)" \
+		test "$(jq -c '.workers[0].local.additional_environment' "$j")" = '{"RBE_X_TIMEOUT_MS":"timeout_millis","RBE_X_SIDE_CHANNEL":"side_channel_file","RBE_X_NETWORK":{"property":"network"}}'
 	check "no use_namespaces, use_mount_namespace, directory_cache" \
 		test "$(jq -c '.workers[0].local | [has("use_namespaces"), has("use_mount_namespace"), has("directory_cache")]' "$j")" = '[false,false,false]'
 fi
@@ -217,7 +217,7 @@ host_before=$(host_mounts 2>&1)
 # two of five canaries timed out mid-probe at 60 s).
 probe_started=$SECONDS
 out=$(cd "$d/work" && setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --init-groups -- \
-	env -i PATH=/usr/bin:/bin 'PROBE=a=b c' RBE_X_TIMEOUT_MS=300000 "$LIB/entry" /bin/bash -c "$probe" 2>&1)
+	env -i PATH=/usr/bin:/bin 'PROBE=a=b c' RBE_X_TIMEOUT_MS=300000 RBE_X_NETWORK= "$LIB/entry" /bin/bash -c "$probe" 2>&1)
 rc=$?
 echo "# probe action: exit $rc after $((SECONDS - probe_started)) s"
 if [[ $rc == 124 ]]; then bad "probe action timed out (300 s): later checks have no result"; fi
@@ -308,6 +308,44 @@ if ((!quick)); then
 	"$LIB/sweep" >/dev/null 2>&1
 	check "rbe-action-sweep removed $op1 and the orphan marker" test ! -e "$d1" -a ! -e "$RUN/orphans/$op1"
 	rm -rf --one-file-system "$d1" "$d2"
+	check "no slot process left" no_slot_procs
+
+	echo "# per-action network: RBE_X_NETWORK=off is loopback only, on keeps this worker's network (NETNS=1: loopback only whatever it says), anything else is refused"
+	# The action's interfaces (its network namespace's /proc/net/dev), then
+	# loopback (nothing listens on port 9: refused if lo is up) and an
+	# outside address (TEST-NET-1: no reply whatever the filter does, so only
+	# "unreachable", no route at all, passes as loopback only).
+	net_probe='echo "I $(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d " " | sort | paste -sd, -)"
+for t in 127.0.0.1:9 192.0.2.1:9; do
+	e=$(timeout 3 bash -c "exec 3<>/dev/tcp/${t%:*}/${t##*:}" 2>&1) && e=connected
+	case $e in *"Connection refused"*) e=refused ;; *"Network is unreachable"*) e=unreachable ;; *) e=other ;; esac
+	echo "D $t $e"
+done'
+	net_action() { # RBE_X_NETWORK value: the probe's output and "exit <status>"
+		local op d out rc
+		op=selftest-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+		d=$WORK_ROOT/$op
+		install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0755 "$d" "$d/work"
+		out=$(run_as_worker "$d/work" RBE_X_TIMEOUT_MS=60000 "RBE_X_NETWORK=$1" "$LIB/entry" /bin/bash -c "$net_probe" 2>&1)
+		rc=$?
+		rm -rf --one-file-system "$d"
+		printf '%s\nexit %s\n' "$out" "$rc"
+	}
+	loopback_only=$'I lo\nD 127.0.0.1:9 refused\nD 192.0.2.1:9 unreachable\nexit 0'
+	out=$(net_action off)
+	check "off: loopback only" test "$out" = "$loopback_only"
+	out=$(net_action on)
+	if ((NETNS)); then
+		check "on, NETNS=1: still loopback only" test "$out" = "$loopback_only"
+	else
+		check "on: this worker's network (interfaces besides lo)" grep -qE '^I (.*,.*|[^l].*)$' <<<"$out"
+	fi
+	out=$(net_action Off)
+	if ((NETNS)); then
+		check "Off (malformed), NETNS=1: loopback only" test "$out" = "$loopback_only"
+	else
+		check "Off (malformed): refused, never run (exit 125)" test "$(grep -c '^[ID] ' <<<"$out"):$(tail -n 1 <<<"$out")" = "0:exit 125"
+	fi
 	check "no slot process left" no_slot_procs
 fi
 echo "failures: $fails"

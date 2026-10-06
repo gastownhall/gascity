@@ -528,8 +528,13 @@ if [ "$ACTION_ISOLATION" = 1 ]; then
 	# The nft rules cover uids 59000-59063.
 	[ "$slots" -le 64 ] || slots=64
 	SLOT_UID0=59000
+	# RBE_X_NETWORK: the action's `network` platform property ("" without
+	# one; infra README "Per-action network"). off: the launcher gives it
+	# loopback only, as NETNS=1 does for every fork action; on or none: this
+	# tier's default. The fork tier ignores it.
 	isolation='{ "entrypoint": "/usr/local/libexec/rbe-action/entry", "timeout_handled_externally": true, "max_action_timeout": 1260,
-		"additional_environment": { "RBE_X_TIMEOUT_MS": "timeout_millis", "RBE_X_SIDE_CHANNEL": "side_channel_file" } }'
+		"additional_environment": { "RBE_X_TIMEOUT_MS": "timeout_millis", "RBE_X_SIDE_CHANNEL": "side_channel_file",
+			"RBE_X_NETWORK": { "property": "network" } } }'
 	if [ "$canary" = selected ]; then
 		# A subshell: set -e works there (it would not in a condition), and a
 		# failure ends it, not the worker. The phase file says where.
