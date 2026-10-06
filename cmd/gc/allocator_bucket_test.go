@@ -11,24 +11,16 @@ import (
 // Kills: refill per pass instead of per patrol interval (per-event passes
 // multiplying the start rate); a bucket that overfills, refills on a clock
 // step back, freezes after one until the clock regains the old mark, or drops
-// its fractional credit; a debit that goes negative; a refund past capacity;
-// a capacity cut on reload left unapplied.
-func TestBucketRefillContinuousCappedDebitRefund(t *testing.T) {
+// its fractional credit; a refund past capacity; a capacity cut on reload
+// left unapplied.
+func TestBucketRefillContinuousCappedRefund(t *testing.T) {
 	const capacity, interval = 5, 15 * time.Second // one token per 3s
 	t0 := time.Unix(1_000, 0)
 	b := bucketState{}.refill(t0, capacity, interval)
 	if b.Tokens != capacity {
 		t.Fatalf("first refill: %d tokens, want a full bucket", b.Tokens)
 	}
-	var ok bool
-	for i := 0; i < capacity; i++ {
-		if b, ok = b.debit(1); !ok {
-			t.Fatalf("debit %d refused with %d tokens", i, b.Tokens)
-		}
-	}
-	if _, ok = b.debit(1); ok || b.Tokens != 0 {
-		t.Fatalf("debit from empty: ok=%v tokens=%d", ok, b.Tokens)
-	}
+	b.Tokens = 0 // every token granted
 
 	// 300 passes 10ms apart (3s) accrue exactly one token, like one pass.
 	many := b
@@ -88,7 +80,7 @@ func TestBucketRefillGuardsNonPositiveIntervalAndCapacity(t *testing.T) {
 		if b.Tokens != 5 {
 			t.Fatalf("interval %v: first refill %d tokens, want a full bucket", interval, b.Tokens)
 		}
-		b, _ = b.debit(5)
+		b.Tokens = 0
 		for i := 1; i <= 3; i++ {
 			if b = b.refill(t0.Add(time.Duration(i)*time.Hour), 5, interval); b.Tokens != 0 {
 				t.Fatalf("interval %v, pass %d: refilled to %d tokens, want none", interval, i, b.Tokens)
@@ -141,8 +133,8 @@ func TestBucketTokenConservation(t *testing.T) {
 						e, cost = ledgerGrant(id, rowKey{"sessions", "row-" + id}), 1
 						rows[e.Key] = ledgerRow{Incarnation: 1}
 					}
-					var ok bool
-					if b, ok = b.debit(cost); ok && l.Reserve(e) {
+					if b.Tokens >= cost && l.Reserve(e) {
+						b.Tokens -= cost
 						kinds[id] = e.Kind
 						ids = append(ids, id)
 					}
@@ -296,7 +288,7 @@ func runInFlightModel(t *testing.T, seed uint64, steps int) {
 				t.Fatalf("seed %d step %d %s: %s in flight but unrepresented (entry %+v present=%v)", seed, step, phase, id, e, ok)
 			}
 		}
-		if got := cityInFlight(view, c, nil); got != len(represented) {
+		if got, _ := cityInFlight(view, c, nil); got != len(represented) {
 			t.Fatalf("seed %d step %d %s: cityInFlight %d, represented %d: %v\nview %+v\ncache %+v", seed, step, phase, got, len(represented), represented, view, cache)
 		}
 	}
@@ -542,7 +534,7 @@ func TestEndpointGateZeroValueAdmitsNothing(t *testing.T) {
 		t.Fatal("an uncaptured gate admitted a start")
 	}
 	c := ledgerCensusOf(map[rowKey]ledgerRow{{"sessions", "gc-p"}: {Endpoint: "provider:missing", PendingCreate: true}})
-	if got := cityInFlight(nil, c, gates); got != 1 {
+	if got, _ := cityInFlight(nil, c, gates); got != 1 {
 		t.Fatalf("pending row behind an uncaptured gate: in flight %d, want 1", got)
 	}
 }
@@ -577,7 +569,7 @@ func TestCityInFlightCountsOncePerEffect(t *testing.T) {
 		grant("g-idle", rowKey{"sessions", "gc-idle"}, ledgerFailed, false), // failed without writing: represents nothing
 	}
 	// g-a, g-b, gc-c's lease, gc-new (create + grant + row), pending (entry + row), gc-lease.
-	if got := cityInFlight(view, ledgerCensusOf(rows), nil); got != 6 {
+	if got, _ := cityInFlight(view, ledgerCensusOf(rows), nil); got != 6 {
 		t.Fatalf("cityInFlight = %d, want 6", got)
 	}
 }
@@ -596,7 +588,7 @@ func TestCityInFlightCountsCreatesWithoutRowsAndLeasesBehindShutEndpoints(t *tes
 		name string
 		e    ledgerEntry
 	}{{"reserved create (N32)", reserved}, {"committed create, no census row (N33)", committed}} {
-		if got := cityInFlight([]ledgerEntry{tt.e}, empty, nil); got != 1 {
+		if got, _ := cityInFlight([]ledgerEntry{tt.e}, empty, nil); got != 1 {
 			t.Errorf("%s: in flight %d, want 1", tt.name, got)
 		}
 		if tt.e.clearVerdict(empty, time.Unix(1_000, 0)) != clearKeep {
@@ -605,14 +597,15 @@ func TestCityInFlightCountsCreatesWithoutRowsAndLeasesBehindShutEndpoints(t *tes
 	}
 	shut := map[endpointKey]endpointGate{"provider:a": gateShut}
 	c := ledgerCensusOf(map[rowKey]ledgerRow{{"sessions", "gc-run"}: {Endpoint: "provider:a", StartLease: true}})
-	if got := cityInFlight(nil, c, shut); got != 1 {
+	if got, _ := cityInFlight(nil, c, shut); got != 1 {
 		t.Fatalf("start lease behind a shut endpoint (N36): in flight %d, want 1", got)
 	}
 }
 
 // Kills (F5, R-park): rows parked behind a shut endpoint filling the city
-// cap and starving a healthy endpoint; parked rows not counted once their
-// endpoint can admit again.
+// cap and starving a healthy endpoint; a half-open endpoint's backlog filling
+// the cap for the probe window (they count as one, the probe, P3-5b); parked
+// rows not counted once their endpoint closes.
 func TestCityInFlightParkedPendingCountsOnlyWhileEndpointEligible(t *testing.T) {
 	const capacity = 50
 	rows := make(map[rowKey]ledgerRow)
@@ -624,17 +617,17 @@ func TestCityInFlightParkedPendingCountsOnlyWhileEndpointEligible(t *testing.T) 
 	b := bucketState{Tokens: capacity}
 
 	shut := map[endpointKey]endpointGate{"provider:a": gateShut}
-	inFlight := cityInFlight(nil, c, shut)
+	inFlight, _ := cityInFlight(nil, c, shut)
 	if inFlight != 1 {
 		t.Fatalf("A shut: in flight %d, want 1 (B's lease only)", inFlight)
 	}
 	if !admitStart(b, inFlight, capacity, gateClosed, endpointOutstanding(nil)["provider:b"]) {
 		t.Fatal("B starved behind A's parked rows")
 	}
-	for _, gate := range []endpointGate{gateProbe, gateClosed} {
+	for gate, want := range map[endpointGate]int{gateProbe: 2, gateClosed: capacity + 1} {
 		gates := map[endpointKey]endpointGate{"provider:a": gate}
-		if got := cityInFlight(nil, c, gates); got != capacity+1 {
-			t.Fatalf("A gate %d: in flight %d, want %d", gate, got, capacity+1)
+		if got, _ := cityInFlight(nil, c, gates); got != want {
+			t.Fatalf("A gate %d: in flight %d, want %d", gate, got, want)
 		}
 	}
 }

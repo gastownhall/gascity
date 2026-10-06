@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "bazeltest",
@@ -21,4 +21,14 @@ filegroup(
         exclude = ["BUILD.bazel"],
     ),
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "bazeltest_test",
+    srcs = [
+        "bazeltest_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":bazeltest"],
+    deps = ["//internal/testenv"],
 )

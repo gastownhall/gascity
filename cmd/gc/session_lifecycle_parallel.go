@@ -3032,6 +3032,13 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 			if releaseBeadScopedPoolRuntime(info, result.provider, stderr) {
 				rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
 			}
+		} else {
+			// The preserved row keeps its claim and identity, not this
+			// attempt's in-flight lease: the attempt is over, and a lease left
+			// behind holds the retry as start_in_flight until
+			// startup_timeout+7s has passed (ga-vohht8). The startup-health
+			// episode recorded above still bounds a crash loop.
+			clearPendingStartInFlightLease(info.ID, sessFront, stderr)
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 		return
@@ -3767,6 +3774,13 @@ func executePlannedStartsTraced(
 	// early return (context cancellation, panic) resolves them so an
 	// abandoned admission cannot wedge its endpoint's probe.
 	var admitted []*capacityTicket
+	// probed holds the endpoints whose probe this pass handed to a start. The
+	// rest of the pass defers them: an async probe can resolve while the pass
+	// is still admitting, and a herd let in then is cut short by its first
+	// refusal, which can leave one healthy session refused alone after the
+	// probe's success, the poison valve's signature. The herd waits for the
+	// next pass.
+	probed := make(map[endpointKey]bool)
 	defer func() {
 		for _, ticket := range admitted {
 			abandonCapacityTicket(ticket, rec, stderr)
@@ -3867,7 +3881,13 @@ func executePlannedStartsTraced(
 				// breaker's restart accounting and before PreWake, so a
 				// deferred start writes nothing and spends no wake budget.
 				endpoint := resolvedEndpointKey(candidate.tp, candidate.info)
-				ticket, admit := capacityGuard.Admit(endpoint, candidate.info.ID, candidate.logicalTemplate(cfg))
+				var ticket *capacityTicket
+				admit := false
+				if probed[endpoint] {
+					capacityGuard.noteDeferredAdmit(endpoint)
+				} else {
+					ticket, admit = capacityGuard.Admit(endpoint, candidate.info.ID, candidate.logicalTemplate(cfg))
+				}
 				if !admit {
 					if release != nil {
 						release()
@@ -3957,6 +3977,9 @@ func executePlannedStartsTraced(
 					continue
 				}
 				item.capacityTicket = ticket
+				if ticket != nil && ticket.probe {
+					probed[endpoint] = true
+				}
 				if startOpts.async {
 					asyncPrepared = append(asyncPrepared, asyncPreparedStart{item: *item, release: release, done: done})
 				} else {

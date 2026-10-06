@@ -1361,6 +1361,13 @@ type BeadsDiagnostic struct {
 // BindingStatus Lifecycle state of a session binding.
 type BindingStatus string
 
+// BlockedRecomputedPayload defines model for BlockedRecomputedPayload.
+type BlockedRecomputedPayload struct {
+	BdVersion     string `json:"bd_version"`
+	RowsCorrected int64  `json:"rows_corrected"`
+	Scope         string `json:"scope"`
+}
+
 // BoundEventPayload defines model for BoundEventPayload.
 type BoundEventPayload struct {
 	AgentName      *string `json:"agent_name,omitempty"`
@@ -3386,14 +3393,15 @@ type RigCreateSucceededPayload struct {
 
 // RigPatch defines model for RigPatch.
 type RigPatch struct {
-	DefaultBranch        *string           `json:"DefaultBranch"`
-	DefaultMergeStrategy *string           `json:"DefaultMergeStrategy"`
-	FormulaVars          map[string]string `json:"FormulaVars"`
-	Name                 string            `json:"Name"`
-	Path                 *string           `json:"Path"`
-	Prefix               *string           `json:"Prefix"`
-	Suspended            *bool             `json:"Suspended"`
-	SuspendedOnStart     *bool             `json:"SuspendedOnStart"`
+	BeadsProxiedIdleTimeout *string           `json:"BeadsProxiedIdleTimeout"`
+	DefaultBranch           *string           `json:"DefaultBranch"`
+	DefaultMergeStrategy    *string           `json:"DefaultMergeStrategy"`
+	FormulaVars             map[string]string `json:"FormulaVars"`
+	Name                    string            `json:"Name"`
+	Path                    *string           `json:"Path"`
+	Prefix                  *string           `json:"Prefix"`
+	Suspended               *bool             `json:"Suspended"`
+	SuspendedOnStart        *bool             `json:"SuspendedOnStart"`
 }
 
 // RigPatchSetInputBody defines model for RigPatchSetInputBody.
@@ -5130,6 +5138,9 @@ type StatusBody struct {
 	SessionCountsDetail *StatusSessionCountsDetail `json:"session_counts_detail,omitempty"`
 	StoreHealth         *StatusStoreHealth         `json:"store_health,omitempty"`
 
+	// StoresNotRead True when the city is suspended: the body was built without reading any bead store (a read would restart its retired bd proxy), so work, mail, session-count and store-health figures are absent.
+	StoresNotRead *bool `json:"stores_not_read,omitempty"`
+
 	// Suspended Whether the city is suspended.
 	Suspended bool `json:"suspended"`
 
@@ -5307,15 +5318,19 @@ type StatusWorkCounts struct {
 
 	// Ready Number of ready work items.
 	Ready int64 `json:"ready"`
+
+	// SuspendedRigsExcluded Number of suspended rigs left out of these counts: a suspended rig's store is not read.
+	SuspendedRigsExcluded *int64 `json:"suspended_rigs_excluded,omitempty"`
 }
 
 // StorageBindingOutcomePayload defines model for StorageBindingOutcomePayload.
 type StorageBindingOutcomePayload struct {
-	Binding     string `json:"binding"`
-	Database    string `json:"database"`
-	Invariant   string `json:"invariant"`
-	Outcome     string `json:"outcome"`
-	ProvenBeads int64  `json:"proven_beads"`
+	Binding        string    `json:"binding"`
+	Database       string    `json:"database"`
+	Invariant      string    `json:"invariant"`
+	LostCrossEdges *[]string `json:"lost_cross_edges,omitempty"`
+	Outcome        string    `json:"outcome"`
+	ProvenBeads    int64     `json:"proven_beads"`
 }
 
 // StoreDiskCriticalPayload defines model for StoreDiskCriticalPayload.
@@ -5685,6 +5700,22 @@ type TypedEventStreamEnvelopeBeadWorktreeReaped struct {
 	Ts               time.Time                 `json:"ts"`
 	Type             string                    `json:"type"`
 	Workflow         *WorkflowEventProjection  `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeBeadsBlockedRecomputed defines model for TypedEventStreamEnvelopeBeadsBlockedRecomputed.
+type TypedEventStreamEnvelopeBeadsBlockedRecomputed struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BlockedRecomputedPayload `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeBeadsConditionalWritesDegraded defines model for TypedEventStreamEnvelopeBeadsConditionalWritesDegraded.
@@ -7364,6 +7395,23 @@ type TypedTaggedEventStreamEnvelopeBeadWorktreeReaped struct {
 	Ts               time.Time                 `json:"ts"`
 	Type             string                    `json:"type"`
 	Workflow         *WorkflowEventProjection  `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed defines model for TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed.
+type TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BlockedRecomputedPayload `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded defines model for TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded.
@@ -10771,6 +10819,32 @@ func (t *EventPayload) MergeBeadWorktreeReapedPayload(v BeadWorktreeReapedPayloa
 	return err
 }
 
+// AsBlockedRecomputedPayload returns the union data inside the EventPayload as a BlockedRecomputedPayload
+func (t EventPayload) AsBlockedRecomputedPayload() (BlockedRecomputedPayload, error) {
+	var body BlockedRecomputedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromBlockedRecomputedPayload overwrites any union data inside the EventPayload as the provided BlockedRecomputedPayload
+func (t *EventPayload) FromBlockedRecomputedPayload(v BlockedRecomputedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeBlockedRecomputedPayload performs a merge with any union data inside the EventPayload, using the provided BlockedRecomputedPayload
+func (t *EventPayload) MergeBlockedRecomputedPayload(v BlockedRecomputedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsBoundEventPayload returns the union data inside the EventPayload as a BoundEventPayload
 func (t EventPayload) AsBoundEventPayload() (BoundEventPayload, error) {
 	var body BoundEventPayload
@@ -14078,6 +14152,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadWorktreeReap
 	return err
 }
 
+// AsTypedEventStreamEnvelopeBeadsBlockedRecomputed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadsBlockedRecomputed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadsBlockedRecomputed() (TypedEventStreamEnvelopeBeadsBlockedRecomputed, error) {
+	var body TypedEventStreamEnvelopeBeadsBlockedRecomputed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBeadsBlockedRecomputed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBeadsBlockedRecomputed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadsBlockedRecomputed(v TypedEventStreamEnvelopeBeadsBlockedRecomputed) error {
+	v.Type = "beads.blocked.recomputed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBeadsBlockedRecomputed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadsBlockedRecomputed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadsBlockedRecomputed(v TypedEventStreamEnvelopeBeadsBlockedRecomputed) error {
+	v.Type = "beads.blocked.recomputed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeBeadsConditionalWritesDegraded returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadsConditionalWritesDegraded
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadsConditionalWritesDegraded() (TypedEventStreamEnvelopeBeadsConditionalWritesDegraded, error) {
 	var body TypedEventStreamEnvelopeBeadsConditionalWritesDegraded
@@ -16746,6 +16848,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeBeadWorktreeReapSkipped()
 	case "bead.worktree.reaped":
 		return t.AsTypedEventStreamEnvelopeBeadWorktreeReaped()
+	case "beads.blocked.recomputed":
+		return t.AsTypedEventStreamEnvelopeBeadsBlockedRecomputed()
 	case "beads.conditional_writes.degraded":
 		return t.AsTypedEventStreamEnvelopeBeadsConditionalWritesDegraded()
 	case "city.created":
@@ -17217,6 +17321,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadW
 // MergeTypedTaggedEventStreamEnvelopeBeadWorktreeReaped performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadWorktreeReaped
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadWorktreeReaped(v TypedTaggedEventStreamEnvelopeBeadWorktreeReaped) error {
 	v.Type = "bead.worktree.reaped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed() (TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed, error) {
+	var body TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed(v TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed) error {
+	v.Type = "beads.blocked.recomputed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed(v TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed) error {
+	v.Type = "beads.blocked.recomputed"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -19895,6 +20027,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped()
 	case "bead.worktree.reaped":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadWorktreeReaped()
+	case "beads.blocked.recomputed":
+		return t.AsTypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed()
 	case "beads.conditional_writes.degraded":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded()
 	case "city.created":

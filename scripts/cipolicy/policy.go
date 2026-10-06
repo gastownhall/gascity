@@ -14,6 +14,9 @@ import (
 
 const (
 	setupGoAction = "actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c"
+	// goModDownloadAction warms the module cache with a retried
+	// `go mod download`; every Go-building job runs it right after setup-go.
+	goModDownloadAction = "./.github/actions/go-mod-download"
 
 	// These are SHA-256 digests of the display-free JSON projections below.
 	// Whole-workflow execution hashes deliberately pin shell text instead of
@@ -104,7 +107,44 @@ const (
 	// matching runner_policy.py, which now selects Blacksmith for every event
 	// and author. Reviewed delta: that one runs-on value, no new job, step,
 	// trigger or permission.
-	expectedCIExecutionHash     = "63317c9e54304db88ef66aa35a70b9b09a7e0a34c5002ecab567b51ccc8c3026"
+	//
+	// Bumped again for the Dolt 2.1.7 -> 2.2.0 pin (the Dolt beads v1.3.1
+	// qualifies): the job DOLT_VERSION env values only.
+	//
+	// Bumped again (keep managed Dolt logs from failed acceptance tests):
+	// beads-topology-acceptance and beads-proxied-native-acceptance each gain
+	// a step exporting GC_TEST_FAILURE_ARTIFACT_DIR to $GITHUB_ENV and an
+	// `if: failure()` pinned upload-artifact step for that directory. No new
+	// job, trigger, permission or secret.
+	//
+	// Bumped again (beads#7037): the topology job's shared-server step -run
+	// also selects TestBlockedRepairOnProxiedCityAndRig, the proxied city+rig
+	// proof of gc start's is_blocked repair (about 4 minutes, inside that
+	// step's 15m -timeout). Reviewed delta: one -run alternative, no new job,
+	// step, trigger or permission.
+	//
+	// Bumped again (Go module fetch resilience): every job that calls
+	// actions/setup-go directly sets its `cache: false` and gains one step
+	// right after it, `uses: ./.github/actions/go-mod-download` (restore the
+	// go.sum-keyed module download cache, run a retried `go mod download`,
+	// save on push/schedule only), so build and test steps never fetch from
+	// proxy.golang.org; and the shared changes filter gains that action's
+	// directory and its retry script. Reviewed delta: one setup-go input and
+	// one local-action step per setup-go job, two filter paths. No new job,
+	// trigger, permission or secret. Then the shared changes filter gains
+	// .github/scripts/go-mod-verify-cache.sh, the action's go.sum
+	// verification step. Reviewed delta: one filter path.
+	//
+	// Bumped again (gc 1.5.1 proxied idle timeout): the proxied-native job's
+	// test step also selects TestProxiedIdleTimeoutReapAndTransparentRestart,
+	// sets GC_ACCEPTANCE_TOPOLOGY_MATRIX=1 for that step (the row is gated off
+	// Tier A by that switch), and the step is renamed to say so. No new job,
+	// trigger or permission.
+	//
+	// Bumped again (gc 1.5.1 suspension quiescence): the same step also
+	// selects TestProxiedSuspensionIsQuiescence (~8 minutes, inside the step's
+	// 45m -timeout) and its name says so. No new job, trigger or permission.
+	expectedCIExecutionHash     = "bc49242821ebcecfe16df27169265323a40d6dcfdf659aae29fe6d009f9e819f"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -117,9 +157,25 @@ const (
 	// -run selector gained TestFreshInit_SlingSpawnsDefaultPoolWorker and
 	// TestFreshInit_ClaudeUnrestricted, mirroring RC Gate's acceptance C shards;
 	// same job, env, secrets and runner. Then the Beads v1.3.0 -> v1.3.1-rc.2
-	// -> v1.3.1 pins: the workflow and job BD_VERSION env values only.
-	expectedNightlyExecutionHash = "183db1faaa748f8bacd7d7de970ddc40ea87a65892bc37083ca40175cc4c2ea1"
-	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
+	// -> v1.3.1 pins: the workflow and job BD_VERSION env values only. Then
+	// the Dolt 2.1.7 -> 2.2.0 pin (DOLT_VERSION env values) and one step in
+	// the bundled-pack-pins job, `scripts/check-embedded-pins --skip-bundled`
+	// with GITHUB_TOKEN, which fails when deps.env falls behind the latest
+	// beads release or the Dolt it qualifies. No new job, trigger or
+	// permission. Then beads-proxied-perf gains the same failure-diagnostics
+	// routing step and `if: failure()` pinned upload-artifact step as the PR
+	// acceptance jobs; no new job, trigger, permission or secret. Then the
+	// tier B job fetches tag v1.5.0-rc1 (shallow, one ref) and requires the
+	// split-storage rc1 upgrade scenario to run rather than skip; no new job,
+	// trigger, permission or secret. Then (Go module fetch resilience)
+	// bundled-pack-pins and waiver-clock each set setup-go `cache: false` and
+	// gain one step right after it, `uses: ./.github/actions/go-mod-download`;
+	// no new job, trigger, permission or secret.
+	expectedNightlyExecutionHash = "8c3b93d8471bb9f6b121f6a4713367b25fc10183c9a89a716dcd6785ef21c8d9"
+	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
+	// `cache: false` and one step right after it,
+	// `uses: ./.github/actions/go-mod-download`.
+	expectedSetupActionHash = "910f005f48c629c9bf76c69a007b60c4132a76859183e59c0fe99d642bf6141f"
 )
 
 var requiredFilterPaths = map[string][]string{
@@ -226,6 +282,9 @@ var requiredFilterPaths = map[string][]string{
 		"Makefile",
 		".github/workflows/**",
 		".github/actions/setup-gascity-ubuntu/**",
+		".github/actions/go-mod-download/**",
+		".github/scripts/go-mod-download-retry.sh",
+		".github/scripts/go-mod-verify-cache.sh",
 		".github/scripts/install-dolt-archive.sh",
 		".github/scripts/install-bd-archive.sh",
 		".github/scripts/install-claude-native.sh",
@@ -381,11 +440,13 @@ func validatePolicyWiring(workflow map[string]any) error {
 		return err
 	}
 	setupIndex := findStep(steps, "uses", setupGoAction)
+	downloadIndex := findStep(steps, "uses", goModDownloadAction)
 	policyIndex := findStep(steps, "run", "make test-ci-policy")
 	firstGuardIndex := findStep(steps, "run", "make check-gomod-replace")
-	if setupIndex < 0 || policyIndex != setupIndex+1 || firstGuardIndex <= policyIndex {
+	if setupIndex < 0 || downloadIndex != setupIndex+1 || policyIndex != downloadIndex+1 ||
+		firstGuardIndex <= policyIndex {
 		return fmt.Errorf(
-			"preflight-static must run the focused CI policy immediately after setup-go and before other guards",
+			"preflight-static must run the focused CI policy immediately after setup-go and the Go module download, and before other guards",
 		)
 	}
 	want := map[string]any{"run": "make test-ci-policy"}

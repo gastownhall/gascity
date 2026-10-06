@@ -299,6 +299,7 @@ BeadsConfig holds bead store settings.
 | `bd_compatibility` | string |  |  | BDCompatibility selects the bd CLI semantics Gas City may rely on. Empty defaults to "bd-1.0.4", which keeps claimable work history-backed and avoids bd ready/list flags that are unavailable or incomplete in bd 1.0.4. Enum: `bd-1.0.4`, `bd-1.0.5` |
 | `conditional_writes` | string |  |  | ConditionalWrites selects the bead-write discipline: "off" (legacy, byte-identical), "auto" (compare-and-swap where the store is capable, loud degrade otherwise), or "require" (CAS or a typed refusal). Empty defaults to "off". Any other value fails config load. Enum: `off`, `auto`, `require` |
 | `guarded_release` | string |  |  | GuardedRelease selects the ownership-release discipline for work beads: "off" (legacy, owner-blind bd update/unclaim), "auto" (fence-guarded release verbs where the bd binary is capable, loud degrade otherwise), or "require" (guarded release or a typed refusal). Empty defaults to "off". Any other value fails config load. Enum: `off`, `auto`, `require` |
+| `proxied_idle_timeout` | string |  | `30m` | ProxiedIdleTimeout is how long a bd-owned proxied scope's proxy and Dolt child stay up with no connections before bd retires them; the next bd command restarts them. Go duration; "0" means never. A finite value must be at least 1m. Empty uses the default, 30m. It applies to scopes gc initializes (gc init, gc rig add, gc beads city migrate-proxied); bd cannot change an existing scope's value, and gc doctor reports drift. Overridden per rig by beads_proxied_idle_timeout and by the GC_BEADS_PROXIED_IDLE_TIMEOUT environment variable. |
 | `policies` | map[string]BeadPolicyConfig |  |  | Policies defines per-bead-use storage and garbage-collection defaults. Policy names are interpreted by higher-level systems; unknown names are preserved so packs can stage future policy classes without breaking load. |
 
 ## ChatSessionsConfig
@@ -770,6 +771,7 @@ Rig defines an external project registered in the city.
 | `dolt_host` | string |  |  | DoltHost overrides the city-level Dolt host for this rig's beads. Use when the rig's database lives on a different Dolt server (e.g., shared from another city). |
 | `dolt_port` | string |  |  | DoltPort overrides the city-level Dolt port for this rig's beads. When set, controller commands (scale_check, work_query) prefix their shell invocations with BEADS_DOLT_SERVER_PORT=&lt;port&gt; so bd connects to the correct server instead of the city-level default. |
 | `formula_vars` | map[string]string |  |  | FormulaVars provides rig-scoped defaults for formula vars. Keys match var names declared in formula `[vars.&lt;name&gt;]` blocks. Values are used when a formula runs in this rig and the caller did not pass an explicit --var override. Takes precedence over formula-level defaults but loses to --var flags. |
+| `beads_proxied_idle_timeout` | string |  |  | BeadsProxiedIdleTimeout overrides [beads] proxied_idle_timeout for this rig's bd-owned proxied scope. Go duration; "0" means never. Ignored, with a warning, for a rig that shares the city's proxy root: one proxy serves every scope on that root and carries the city's value. |
 
 ## RigPatch
 
@@ -785,6 +787,7 @@ RigPatch modifies an existing rig identified by Name.
 | `suspended` | boolean |  |  | Suspended is the deprecated, pre-runtime-state suspension override. Parsed for backwards compatibility; `gc doctor` surfaces it as a warning and recommends the rename to SuspendedOnStart. No behavioral code path reads it. |
 | `suspended_on_start` | boolean |  |  | SuspendedOnStart overrides the rig's desired suspension state at city start. Mirrors Rig.SuspendedOnStart. |
 | `formula_vars` | map[string]string |  |  | FormulaVars adds or overrides rig-scoped formula var defaults. Additive merge: patch keys win over existing rig keys, unspecified keys are preserved. |
+| `beads_proxied_idle_timeout` | string |  |  | BeadsProxiedIdleTimeout overrides the rig's beads_proxied_idle_timeout. |
 
 ## Service
 

@@ -108,40 +108,26 @@ func bazelRCFlagValue(rc, prefix string) string {
 	return m[len(m)-1][1]
 }
 
-// --config=ci must give tests the same PATH bazel-test.yml's runs do (the
-// key input), and the tagged-suite configs bazel-test.yml's flags, or the two
-// workflows stop sharing remote cache entries. Either source may hold a
-// value: today bazel-test.yml writes its lines to .bazelrc.local; once
-// gascity #6993 lands they are committed (an unconditional pinned test PATH,
-// build:remote-exec transport flags, which setup-bazel's --config=remote-exec
-// picks up), and --config=ci's copies become redundant but must still agree.
+// bazel.yml's lanes and bazel-test.yml share remote cache entries only if
+// their actions hash alike. The test PATH and every other key input are
+// committed unconditionally in .bazelrc, and --config=ci carries no key input
+// (bazel_key_parity_test.go checks both); this test pins the rest: the
+// tagged-suite configs carry bazel-test.yml's flags, and the remote modes
+// both workflows select give 2 vCPU clients minimal downloads and 64 actions
+// in flight.
 func TestBazelCIConfigMatchesBazelTestRC(t *testing.T) {
 	root := repoRoot(t)
 	rc := readFile(t, root, ".bazelrc")
 	legacy := readFile(t, root, bazelTestWorkflow)
 
-	legacyPath := ""
-	if m := regexp.MustCompile(`echo 'test --test_env=PATH=([^']+)'`).FindStringSubmatch(legacy); m != nil {
-		legacyPath = m[1]
-	} else {
-		legacyPath = bazelRCFlagValue(rc, "test --test_env=PATH")
+	if bazelRCFlagValue(rc, "test --test_env=PATH") == "" {
+		t.Errorf(".bazelrc pins no unconditional test PATH (test --test_env=PATH=...)")
 	}
-	if legacyPath == "" {
-		t.Fatalf("neither %s's .bazelrc.local lines nor .bazelrc pin a test PATH (test --test_env=PATH=...)", bazelTestWorkflow)
-	}
-	ciPath := bazelRCFlagValue(rc, "test:ci --test_env=PATH")
-	if ciPath == "" {
-		ciPath = bazelRCFlagValue(rc, "test --test_env=PATH")
-	}
-	if ciPath != legacyPath {
-		t.Errorf("--config=ci tests see PATH %q, bazel-test.yml's %q; the PATH is a key input, keep them equal", ciPath, legacyPath)
-	}
-
-	// 2 vCPU clients: minimal downloads and 64 actions in flight, from
-	// --config=ci or from the remote-exec config setup-bazel enables.
-	for _, flag := range []string{"--remote_download_minimal", "--jobs=64"} {
-		if !strings.Contains(rc, "\nbuild:ci "+flag+"\n") && !strings.Contains(rc, "\nbuild:remote-exec "+flag+"\n") {
-			t.Errorf(".bazelrc sets %s in neither build:ci nor build:remote-exec", flag)
+	for _, config := range []string{"remote-exec", "fork-cache"} {
+		for _, flag := range []string{"--remote_download_minimal", "--jobs=64"} {
+			if !strings.Contains(rc, "\nbuild:"+config+" "+flag+"\n") {
+				t.Errorf(".bazelrc lacks build:%s %s", config, flag)
+			}
 		}
 	}
 
@@ -160,12 +146,14 @@ func TestBazelCIConfigMatchesBazelTestRC(t *testing.T) {
 	}
 	for _, line := range []string{
 		"test:ci --flaky_test_attempts=1",
-		"test:sole-run --nocache_test_results",
-		"test:sole-run --experimental_remote_cache_eviction_retries=0",
+		"test:ci --experimental_remote_cache_eviction_retries=0",
 	} {
 		if !strings.Contains(rc, "\n"+line+"\n") {
 			t.Errorf(".bazelrc lacks %q", line)
 		}
+	}
+	if strings.Contains(rc, "--nocache_test_results") {
+		t.Errorf(".bazelrc forces test re-execution with --nocache_test_results; lanes should reuse cached results")
 	}
 }
 
@@ -214,8 +202,8 @@ var gascityRequiredChecks = []string{
 	"BUILD files in sync",
 }
 
-// Each lane's exact bazel command. Every lane passes --config=ci; no lane
-// passes --config=sole-run before G0.
+// Each lane's exact bazel command. Every lane passes --config=ci and reuses
+// cached test results; there is no --config=sole-run.
 var multiLaneCommands = map[string]string{
 	"unit":        "test --config=ci --keep_going //...",
 	"acceptance":  "test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test",
@@ -279,11 +267,13 @@ func TestBazelMultiLaneWorkflowTriggersAndPermissions(t *testing.T) {
 		t.Errorf("top-level permissions = %v, want %v", wf.Permissions, readOnly)
 	}
 	wantJobs := map[string]map[string]string{
-		"rbe":        {"contents": "read", "actions": "write"}, // dispatches rbe-worker-pool.yml
-		"lane":       readOnly,
-		"coverage":   readOnly,
-		"sync-check": readOnly,
-		"gate":       nil, // the top-level contents: read
+		"rbe": {"contents": "read", "actions": "write"}, // dispatches rbe-worker-pool.yml
+		// The worker-env preflight lists drift issues (tools/rbe/worker-env-drift).
+		"lane":        {"contents": "read", "issues": "read"},
+		"coverage":    {"contents": "read", "issues": "read"},
+		"sync-check":  readOnly,
+		"bep-summary": readOnly, // downloads this run's artifacts with the job token
+		"gate":        nil,      // the top-level contents: read
 	}
 	if len(wf.Jobs) != len(wantJobs) {
 		t.Errorf("%s has %d jobs, want %d (%v)", bazelMultiLaneWorkflow, len(wf.Jobs), len(wantJobs), wantJobs)
@@ -362,10 +352,9 @@ func wantMultiLanes(event, mode string) []string {
 		// rbe-west off; a cache-mode PR until rbe-west's mint serves bazel.yml.
 		return []string{}
 	}
-	lanes := []string{"unit"}
-	if mode != "fork-ro" { // the fork pool has no network (ga-73eoo)
-		lanes = append(lanes, "acceptance")
-	}
+	// Acceptance runs in every mode, the fork pool's (fork-ro: no network)
+	// included: gc init no longer clones gascity-packs (#7005).
+	lanes := []string{"unit", "acceptance"}
 	if event == "push" || event == "workflow_dispatch" { // until G3
 		lanes = append(lanes, "integration")
 	}

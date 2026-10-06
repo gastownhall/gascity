@@ -3,8 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -26,6 +24,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/searchpath"
@@ -561,7 +560,7 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	if delegated {
 		return delegatedSupervisorStart(delegation, stdout, stderr, jsonOut)
 	}
-	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
+	if msg, blocked := bareSupervisorHomeOverrideError(); blocked {
 		fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -831,8 +830,16 @@ func ensureSupervisorRunning(stdout, stderr io.Writer) int {
 		return 1
 	}
 	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
-		fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
-		return 1
+		if !supervisorIsolatedHome() {
+			fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		// An isolated run gets a bare supervisor: a platform unit would
+		// run under the real HOME, not the one this run isolates.
+		if supervisorAliveHook() != 0 {
+			return 0
+		}
+		return doSupervisorStart(stdout, stderr)
 	}
 	// Always regenerate the service file so upgrades pick up template
 	// changes (e.g. PATH captured from the user's shell).
@@ -867,6 +874,44 @@ func platformSupervisorHomeOverrideError() (string, bool) {
 		return "", false
 	}
 	return fmt.Sprintf("HOME override %q differs from the user home %q; platform supervisor requires the real HOME. Keep HOME unchanged and use GC_HOME for isolated runs", envHome, lookup.HomeDir), true
+}
+
+// supervisorIsolatedHomeEnv marks a run whose HOME is a deliberate throwaway
+// (a test harness that must not read the operator's home) beside an explicit
+// GC_HOME. Such a run may bare-start a supervisor under the overridden HOME;
+// it still never installs a platform service unit.
+const supervisorIsolatedHomeEnv = "GC_SUPERVISOR_ISOLATED_HOME"
+
+// supervisorIsolatedHome reports whether this run opted into a bare
+// supervisor under an overridden HOME: GC_SUPERVISOR_ISOLATED_HOME=1 with an
+// explicit GC_HOME holding the supervisor's state. A GC_HOME naming the
+// operator's default ~/.gc does not qualify: under the overridden HOME gc
+// would put its lock and socket there instead of $XDG_RUNTIME_DIR/gc, miss the
+// operator's running supervisor, and start a second one over the same
+// registry.
+func supervisorIsolatedHome() bool {
+	if os.Getenv(supervisorIsolatedHomeEnv) != "1" {
+		return false
+	}
+	gcHome := strings.TrimSpace(os.Getenv("GC_HOME"))
+	if gcHome == "" {
+		return false
+	}
+	lookup, err := osuser.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil || strings.TrimSpace(lookup.HomeDir) == "" {
+		return false
+	}
+	return pathutil.NormalizePathForCompare(gcHome) != pathutil.NormalizePathForCompare(filepath.Join(lookup.HomeDir, ".gc"))
+}
+
+// bareSupervisorHomeOverrideError is platformSupervisorHomeOverrideError for a
+// bare (non-platform) supervisor start, which an isolated run may perform.
+func bareSupervisorHomeOverrideError() (string, bool) {
+	msg, blocked := platformSupervisorHomeOverrideError()
+	if blocked && supervisorIsolatedHome() {
+		return "", false
+	}
+	return msg, blocked
 }
 
 // supervisorSystemdExecStartBinary returns the gc binary path embedded in the
@@ -1401,10 +1446,7 @@ func stableSupervisorBinaryGopath(homeDir string) string {
 }
 
 func sanitizeServiceName(name string) string {
-	name = strings.ToLower(name)
-	re := regexp.MustCompile(`[^a-z0-9]+`)
-	name = re.ReplaceAllString(name, "-")
-	return strings.Trim(name, "-")
+	return supervisor.SanitizeServiceName(name)
 }
 
 var supervisorServiceEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -1609,14 +1651,7 @@ func supervisorServiceSuffix() string {
 	if !supervisor.UsesIsolatedGCHomeOverride() {
 		return ""
 	}
-	gcHome := isolatedSupervisorHome()
-	base := sanitizeServiceName(filepath.Base(gcHome))
-	sum := sha1.Sum([]byte(gcHome))
-	hash := hex.EncodeToString(sum[:])[:8]
-	if base == "" {
-		return "isolated-" + hash
-	}
-	return base + "-" + hash
+	return supervisor.ServiceSuffix(isolatedSupervisorHome())
 }
 
 func supervisorLaunchdLabel() string {

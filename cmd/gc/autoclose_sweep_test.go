@@ -602,3 +602,39 @@ func TestAutocloseSweepSettle(t *testing.T) {
 		t.Fatalf("due = %v, want [gc-1]", got)
 	}
 }
+
+// A due close in a suspended rig is not read: the read would restart the rig's
+// retired proxy. It is confirmed once the rig resumes. A quiescent city runs
+// no pass at all.
+func TestAutocloseSweepLeavesASuspendedRigCold(t *testing.T) {
+	cs, backing, cached, _, convoy, member := convoySweepFixture(t)
+	cs.runAutocloseSweepPass(sweepTestClock(0))
+	if err := backing.Close(member.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cached.List(beads.ListQuery{Live: true, Status: "open"}); err != nil {
+		t.Fatal(err)
+	}
+	cached.ReconcileNowForTest()
+	cached.ReconcileNowForTest()
+	cs.runAutocloseSweepPass(sweepTestClock(1))
+
+	cs.setSuspendedRigs(map[string]bool{"r": true})
+	if got := cs.runAutocloseSweepPass(sweepTestClock(2)); got.Ran != 0 {
+		t.Fatalf("ran autoclose %d time(s) in a suspended rig", got.Ran)
+	}
+	if got := statusOf(t, backing, convoy.ID); got != "open" {
+		t.Fatalf("convoy %s while its rig is suspended, want open", got)
+	}
+	quiescent := new(atomic.Bool)
+	quiescent.Store(true)
+	cs.beadsQuiescent = quiescent
+	cs.setSuspendedRigs(nil)
+	if got := cs.runAutocloseSweepPass(sweepTestClock(3)); got != (autocloseSweepResult{}) {
+		t.Fatalf("a quiescent city ran a sweep pass: %+v", got)
+	}
+	quiescent.Store(false)
+	if got := cs.runAutocloseSweepPass(sweepTestClock(4)); got.Ran != 1 {
+		t.Fatalf("after resume the sweep ran autoclose %d time(s), want 1", got.Ran)
+	}
+}

@@ -254,6 +254,11 @@ type autocloseSweepResult struct {
 // an open or gone row is dropped, and an unreadable one, or one whose
 // autoclose did not finish, is retried next pass.
 func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepResult {
+	if cs.beadsQuiescent != nil && cs.beadsQuiescent.Load() {
+		// The city is suspended with nothing running: its stores are not
+		// touched until it resumes.
+		return autocloseSweepResult{}
+	}
 	sweep := cs.autocloseSweepOf()
 	keep := map[*beads.CachingStore]struct{}{}
 	for _, cache := range cs.sweepCaches() {
@@ -276,8 +281,16 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 		cs.mu.RLock()
 		stores := cs.beadEventStoresLocked(id)
 		storeRef := cs.autocloseStoreRefLocked(id)
+		suspendedStore := cs.anySuspendedRigStoreLocked(stores)
 		cs.mu.RUnlock()
 		if len(stores) == 0 {
+			continue
+		}
+		if suspendedStore {
+			// A suspended rig's store is not read: a read restarts its
+			// retired proxy. The close is confirmed after the rig resumes.
+			res.Retried++
+			sweep.deferID(id, now.Add(autocloseSweepInterval))
 			continue
 		}
 		store, live, err := liveReadOwner(stores, id)
@@ -305,6 +318,22 @@ func (cs *controllerState) runAutocloseSweepPass(now time.Time) autocloseSweepRe
 		log.Printf("autoclose-sweep: ran=%d refuted=%d retried=%d dropped=%d", res.Ran, res.Refuted, res.Retried, dropped)
 	}
 	return res
+}
+
+// anySuspendedRigStoreLocked reports whether any of stores is the store of a
+// rig the city runtime last saw suspended. cs.mu must be held.
+func (cs *controllerState) anySuspendedRigStoreLocked(stores []beads.Store) bool {
+	for name, rigStore := range cs.beadStores {
+		if !cs.rigSuspended(name) {
+			continue
+		}
+		for _, store := range stores {
+			if store == rigStore {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // sweepCaches returns the distinct CachingStores the bead event watcher feeds.

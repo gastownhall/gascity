@@ -15,19 +15,17 @@ import (
 )
 
 // The allocator's session census (I2, P3 spec §4.2): every open session row on
-// every census leg, read in memory each pass. It is index-only: an exact leg
-// (the SQLite binding, whose cache is semantically exact) is read from its
-// CachingStore through the session front door, and every other leg (bd,
-// native Dolt, Postgres) from the backstop lane's last recording of legacy's
-// own live read. A pass never reads a non-exact leg's store.
+// every census leg, read in memory each pass through the leg's CachingStore,
+// as legacy's census reads it (collectOpenSessionInfos with live=false).
 //
-// A leg whose read fails is served whole from its last good rows until they
-// expire: cacheLagBound after an exact leg's read, the recording's published
-// Expires for a non-exact leg. Past that the leg is stale (its rows Keep). A
-// stale leg, or one with nothing to serve but a partial read's rows, leaves
-// the census incomplete (no fresh create anywhere, POOL-047). A hard failure
-// of the sessions leg with nothing to serve fails the pass: an error is not an
-// empty city.
+// A hard read error on the sessions leg fails the pass: an error is not an
+// empty city. A partial read keeps the rows it returned and makes the pass
+// partial (causeStoreQueryPartial), so nothing shrinks. Every other leg keeps
+// the rows it returned: none on a hard error. No create rests on this read
+// alone: a pool create's locked live re-census reads every leg and fails
+// closed on any partial one; a named create's locked read covers the sessions
+// store only, which fails closed on a partial read, since named rows live only
+// there (C11 refuses duplicates elsewhere at boot).
 //
 // Rows are keyed by (leg, bead ID), never by session name, so rows that share
 // a name get one entry each (F8). The fold keeps legacy's first-leg-wins rule
@@ -37,52 +35,11 @@ import (
 // Unwired in this slice: P3-7 reads it once per allocator pass, P3-5a decides
 // over it, and the ledger (P3-4) clears entries against its unfolded rows.
 
-// censusLegState is how one leg's rows reached this pass.
-type censusLegState uint8
-
-const (
-	// legMissing: the read failed and there is no last good to serve. The
-	// census is incomplete; the leg holds no rows, or only a partial read's.
-	legMissing censusLegState = iota
-	// legRead: read this pass (an exact leg) or recorded by the backstop lane
-	// and not yet expired (a non-exact leg).
-	legRead
-	// legLastGood: this pass's read failed; the leg is served whole from its
-	// last good rows, which have not expired.
-	legLastGood
-	// legStale: served from expired rows. The leg is partial and the census
-	// incomplete.
-	legStale
-)
-
-func (s censusLegState) String() string {
-	switch s {
-	case legRead:
-		return "read"
-	case legLastGood:
-		return "last-good"
-	case legStale:
-		return "stale"
-	default:
-		return "missing"
-	}
-}
-
-// censusLeg is one leg's status in one census.
+// censusLeg is one leg's read in one census.
 type censusLeg struct {
-	Ref    string // rowKey.Leg
-	Exact  bool
-	State  censusLegState
-	ReadAt time.Time // when the served rows were read; zero when missing
-	// StartedAt is when the live read behind a non-exact leg's served rows
-	// started; zero on an exact leg and when missing.
-	StartedAt time.Time
-	Err       error // this pass's read error, if any
+	Ref string // rowKey.Leg
+	Err error  // the read's error, if any
 }
-
-// complete reports whether the leg's rows are a whole read that has not
-// expired, so a row missing from it proves the row closed.
-func (l censusLeg) complete() bool { return l.State == legRead || l.State == legLastGood }
 
 // censusRow is one open session row on one leg.
 type censusRow struct {
@@ -107,32 +64,6 @@ type censusRow struct {
 	UnknownState bool
 }
 
-// censusRecording is the backstop lane's last recording of one non-exact
-// session census leg (backstopRecording.sessionLeg): the session front
-// door's live ListAll of the leg, when the lane's reads started and ended,
-// the recording's published expiry, and the error the read returned. Rows are
-// what legacy's census keeps: all of a clean read, what a partial read
-// returned, nothing of a hard failure.
-type censusRecording struct {
-	Rows      []session.Info
-	StartedAt time.Time
-	At        time.Time
-	Expires   time.Time
-	Err       error
-}
-
-// censusLegFeed is the census's seam to P3-2's demand reads, which own leg
-// classification and the backstop lane. Both functions are required.
-type censusLegFeed struct {
-	// exact reports whether store's cache is semantically exact (its backing
-	// declares beads.CachedReadExact).
-	exact func(store beads.Store) bool
-	// recorded returns the backstop lane's last recording of a non-exact leg,
-	// keyed by store, or false when the lane has none. It must not read the
-	// store.
-	recorded func(store beads.Store) (censusRecording, bool)
-}
-
 // sessionCensus is one pass's census. It is immutable once read.
 type sessionCensus struct {
 	At   time.Time
@@ -143,34 +74,12 @@ type sessionCensus struct {
 
 	canonical []rowKey            // first-leg-wins rows, in leg order then bead ID
 	byName    map[string][]rowKey // canonical rows by runtime session name
-	// leases holds every lease-holding copy on every leg by encoded identity,
-	// in leg order then bead ID.
-	leases map[string][]rowKey
 }
 
-// censusLegRows is one leg's last good read and when it expires.
-type censusLegRows struct {
-	infos     []session.Info
-	startedAt time.Time
-	at        time.Time
-	expires   time.Time
-}
-
-// censusReader reads the census pass after pass. It keeps each leg's last
-// good rows, so it is owned by one goroutine (the allocator lane).
-type censusReader struct {
-	feed     censusLegFeed
-	lastGood map[string]censusLegRows
-}
-
-func newCensusReader(feed censusLegFeed) *censusReader {
-	return &censusReader{feed: feed, lastGood: make(map[string]censusLegRows)}
-}
-
-// read takes one census over legs, which sessionCensusStoreCandidates
-// resolved with the sessions leg first. It errors when there are no legs, or
-// when the sessions leg failed hard with nothing to serve.
-func (r *censusReader) read(now time.Time, cfg *config.City, legs []classStoreCandidate) (*sessionCensus, error) {
+// readSessionCensus takes one census over legs, which
+// sessionCensusStoreCandidates resolved with the sessions leg first. It
+// errors when there are no legs, or when the sessions leg failed hard.
+func readSessionCensus(now time.Time, cfg *config.City, legs []classStoreCandidate) (*sessionCensus, error) {
 	if len(legs) == 0 {
 		return nil, errors.New("session census: no legs")
 	}
@@ -182,17 +91,17 @@ func (r *censusReader) read(now time.Time, cfg *config.City, legs []classStoreCa
 	clk := &clock.Fake{Time: now}
 	canonicalLeg := make(map[string]string)
 	for i, source := range legs {
-		leg, infos := r.readLeg(now, source)
-		if i == 0 && leg.State == legMissing && !beads.IsPartialResult(leg.Err) {
-			return nil, fmt.Errorf("session census sessions leg %q: %w", leg.Ref, leg.Err)
+		infos, err := sessionFrontDoor(source.store).ListAll(session.ListAllOptions{})
+		if i == 0 && err != nil && !beads.IsPartialResult(err) {
+			return nil, fmt.Errorf("session census sessions leg %q: %w", source.ref, err)
 		}
-		c.Legs = append(c.Legs, leg)
+		c.Legs = append(c.Legs, censusLeg{Ref: source.ref, Err: err})
 		for _, info := range infos {
 			id := strings.TrimSpace(info.ID)
 			if id == "" {
 				continue
 			}
-			k := rowKey{Leg: leg.Ref, ID: id}
+			k := rowKey{Leg: source.ref, ID: id}
 			row := censusRow{
 				Key:           k,
 				Info:          info,
@@ -204,7 +113,7 @@ func (r *censusReader) read(now time.Time, cfg *config.City, legs []classStoreCa
 				row.DuplicateOf = first
 			} else {
 				// One effect, one row: only the canonical copy counts in flight.
-				canonicalLeg[id] = leg.Ref
+				canonicalLeg[id] = source.ref
 				row.StartLease = pendingCreateStartInFlightInfo(info, clk, startupTimeout)
 				row.PendingCreate = strings.TrimSpace(info.LastWokeAt) == "" && poolSessionWithinPendingCreateLease(info, cfg, now)
 				c.canonical = append(c.canonical, k)
@@ -216,87 +125,23 @@ func (r *censusReader) read(now time.Time, cfg *config.City, legs []classStoreCa
 	return c, nil
 }
 
-// readLeg reads one leg and applies the last-good rule.
-func (r *censusReader) readLeg(now time.Time, source classStoreCandidate) (censusLeg, []session.Info) {
-	leg := censusLeg{Ref: source.ref, Exact: r.feed.exact(source.store)}
-	var infos []session.Info
-	var startedAt, at, expires time.Time
-	if leg.Exact {
-		infos, leg.Err = sessionFrontDoor(source.store).ListAll(session.ListAllOptions{})
-		at, expires = now, now.Add(cacheLagBound)
-	} else {
-		rec, ok := r.feed.recorded(source.store)
-		switch {
-		case !ok:
-			leg.Err = errors.New("no backstop recording")
-		default:
-			leg.Err = rec.Err
-			infos = rec.Rows
-			startedAt, at, expires = rec.StartedAt, rec.At, rec.Expires
-		}
-	}
-	if leg.Err == nil {
-		r.lastGood[leg.Ref] = censusLegRows{infos: infos, startedAt: startedAt, at: at, expires: expires}
-		leg.State, leg.ReadAt, leg.StartedAt = legRead, at, startedAt
-	} else if good, ok := r.lastGood[leg.Ref]; ok {
-		infos, expires = good.infos, good.expires
-		leg.State, leg.ReadAt, leg.StartedAt = legLastGood, good.at, good.startedAt
-	} else {
-		// A partial read's rows still occupy their slots and names (legacy's
-		// fold keeps them); the leg stays incomplete.
-		if !beads.IsPartialResult(leg.Err) {
-			infos = nil
-		}
-		return leg, infos
-	}
-	if now.After(expires) {
-		leg.State = legStale
-	}
-	return leg, infos
-}
-
 // index orders the canonical rows and builds the per-pass lookups.
 func (c *sessionCensus) index() {
 	order := make(map[string]int, len(c.Legs))
 	for i, l := range c.Legs {
 		order[l.Ref] = i
 	}
-	byLegThenID := func(keys []rowKey) {
-		sort.Slice(keys, func(i, j int) bool {
-			a, b := keys[i], keys[j]
-			if order[a.Leg] != order[b.Leg] {
-				return order[a.Leg] < order[b.Leg]
-			}
-			return a.ID < b.ID
-		})
-	}
-	byLegThenID(c.canonical)
+	sort.Slice(c.canonical, func(i, j int) bool {
+		a, b := c.canonical[i], c.canonical[j]
+		if order[a.Leg] != order[b.Leg] {
+			return order[a.Leg] < order[b.Leg]
+		}
+		return a.ID < b.ID
+	})
 	c.byName = make(map[string][]rowKey)
 	for _, k := range c.canonical {
 		if name := strings.TrimSpace(c.Rows[k].Info.SessionName); name != "" {
 			c.byName[name] = append(c.byName[name], k)
-		}
-	}
-	// The identity lease is checked against every copy on every leg, as the
-	// create effect checks it under its locks (freshPoolAvailabilityInfos):
-	// a copy whose identity fields differ from the canonical row's still
-	// holds its spelling. Copies with the same fields are one holder.
-	all := make([]rowKey, 0, len(c.Rows))
-	for k := range c.Rows {
-		all = append(all, k)
-	}
-	byLegThenID(all)
-	c.leases = make(map[string][]rowKey)
-	seen := make(map[[4]string]bool, len(all))
-	for _, k := range all {
-		info := c.Rows[k].Info
-		copyKey := [4]string{k.ID, strings.TrimSpace(info.SessionNameMetadata), strings.TrimSpace(info.Alias), strings.TrimSpace(info.AgentName)}
-		if seen[copyKey] {
-			continue
-		}
-		seen[copyKey] = true
-		if lease, ok := poolIdentityLeaseOf(info); ok {
-			c.leases[lease] = append(c.leases[lease], k)
 		}
 	}
 }
@@ -311,43 +156,15 @@ func (c *sessionCensus) Canonical() []censusRow {
 	return out
 }
 
-// CompleteLegs names the legs whose rows are a whole read that has not
-// expired (ledgerCensus.Legs): only there does a missing row prove a close.
-func (c *sessionCensus) CompleteLegs() map[string]bool {
-	out := make(map[string]bool, len(c.Legs))
+// Partial reports whether some leg's read was partial: its rows are what the
+// read returned, so the pass retains (causeStoreQueryPartial).
+func (c *sessionCensus) Partial() bool {
 	for _, l := range c.Legs {
-		if l.complete() {
-			out[l.Ref] = true
-		}
-	}
-	return out
-}
-
-// Incomplete reports whether some leg has no unexpired whole read to serve
-// (missing or stale): no fresh create may be planned anywhere from that
-// view (POOL-047), as legacy blocks every create on a partial census (owner
-// decision 2026-10-03 at P3-3 review).
-func (c *sessionCensus) Incomplete() bool {
-	for _, l := range c.Legs {
-		if !l.complete() {
+		if beads.IsPartialResult(l.Err) {
 			return true
 		}
 	}
 	return false
-}
-
-// StaleLegs names the legs served past their expiry: their rows Keep.
-func (c *sessionCensus) StaleLegs() map[string]bool {
-	var out map[string]bool
-	for _, l := range c.Legs {
-		if l.State == legStale {
-			if out == nil {
-				out = make(map[string]bool)
-			}
-			out[l.Ref] = true
-		}
-	}
-	return out
 }
 
 // RowsNamed returns the canonical rows whose runtime session name is name.
@@ -355,52 +172,9 @@ func (c *sessionCensus) RowsNamed(name string) []rowKey {
 	return c.byName[strings.TrimSpace(name)]
 }
 
-// IdentityLeaseHolder returns an open row copy, on any leg, that holds
-// template's pool identity agentName (ensurePoolIdentityNotHeldByOpenRow's
-// snapshot leg): a fresh create for that identity is doomed, so the planner
-// plans none, and spends no token or fenced re-census on it (F8). The create
-// effect re-checks live under the identifier locks. agentName is the identity
-// after template defaulting, and only bead-scoped identities hold a lease
-// (P3-5a obligations).
-func (c *sessionCensus) IdentityLeaseHolder(cfg *config.City, template, agentName string) (rowKey, bool) {
-	agentName = strings.TrimSpace(agentName)
-	if agentName == "" {
-		return rowKey{}, false
-	}
-	for _, k := range c.leases[poolIdentitySessionName(agentName, template)] {
-		if poolIdentityLeaseTemplateMatches(c.Rows[k].Info, cfg, template) {
-			return k, true
-		}
-	}
-	return rowKey{}, false
-}
-
-// UnknownStates counts canonical rows in states main does not know, by
-// template, so the scale of the enterprise-state migration (OQ-4) is visible
-// before the cutover.
-func (c *sessionCensus) UnknownStates(cfg *config.City) map[string]int {
-	var out map[string]int
-	for _, k := range c.canonical {
-		row := c.Rows[k]
-		if !row.UnknownState {
-			continue
-		}
-		template := normalizedSessionTemplateInfo(row.Info, cfg)
-		if template == "" {
-			template = row.Info.Template
-		}
-		if out == nil {
-			out = make(map[string]int)
-		}
-		out[template]++
-	}
-	return out
-}
-
 // Ledger is the census as the intent ledger reads it (P3-4): every row on
-// every leg with its config-only endpoint (endpointKeyForAgent), the legs
-// whose read is complete, and when each complete non-exact leg's read
-// started (C5.4(3)).
+// every leg with its config-only endpoint (endpointKeyForAgent), and the legs
+// read without error. ReadStarted stays zero; C1b deletes it with the ledger.
 func (c *sessionCensus) Ledger(cfg *config.City) ledgerCensus {
 	rows := make(map[rowKey]ledgerRow, len(c.Rows))
 	for k, row := range c.Rows {
@@ -413,11 +187,11 @@ func (c *sessionCensus) Ledger(cfg *config.City) ledgerCensus {
 			PendingCreate: row.PendingCreate,
 		}
 	}
-	started := make(map[string]time.Time)
+	legs := make(map[string]bool, len(c.Legs))
 	for _, l := range c.Legs {
-		if l.complete() && !l.Exact {
-			started[l.Ref] = l.StartedAt
+		if l.Err == nil {
+			legs[l.Ref] = true
 		}
 	}
-	return ledgerCensus{Rows: rows, Legs: c.CompleteLegs(), ReadStarted: started}
+	return ledgerCensus{Rows: rows, Legs: legs}
 }

@@ -904,3 +904,24 @@ func TestAutoBackends_NamesBackendsWithoutListing(t *testing.T) {
 		}
 	}
 }
+
+// LL6: auto routes Start unchanged, so FreshOnly reaches whichever backend
+// hosts the name. Kills a router that drops or rebuilds the Config.
+func TestAutoStartPassesFreshOnlyThrough(t *testing.T) {
+	def, acp := runtime.NewFake(), runtime.NewFake()
+	p := New(def, acp)
+	p.RouteACP("acpsess")
+
+	for _, tc := range []struct {
+		name    string
+		backend *runtime.Fake
+	}{{"plain", def}, {"acpsess", acp}} {
+		if err := p.Start(context.Background(), tc.name, runtime.Config{Command: "c", FreshOnly: true}); err != nil {
+			t.Fatalf("Start(%s): %v", tc.name, err)
+		}
+		calls := tc.backend.Calls
+		if len(calls) == 0 || calls[len(calls)-1].Method != "Start" || !calls[len(calls)-1].Config.FreshOnly {
+			t.Errorf("Start(%s) did not reach its backend with FreshOnly: %+v", tc.name, calls)
+		}
+	}
+}

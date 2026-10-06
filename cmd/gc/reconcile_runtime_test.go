@@ -694,6 +694,39 @@ func TestV2BootCensusErrorRetriesAndDoesNotDeclareReady(t *testing.T) {
 	})
 }
 
+// Kills: a failed boot preflight read taken as clean, or as a refusal. Like a
+// failed sessions census, it is not an empty city: boot runs no pass and
+// retries with backoff, and refuses only what a read shows.
+func TestV2BootPreflightReadErrorRetries(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newV2HarnessWithRows(t, "s-a")
+		var reads atomic.Int32
+		h.rt.host.bootCensus = func() (v2SessionMigration, error) {
+			if reads.Add(1) == 1 {
+				return v2SessionMigration{}, errors.New("store down")
+			}
+			return v2SessionMigration{UnknownStates: map[string]int{"archived": 1}}, nil
+		}
+		done := h.bootAsync()
+		synctest.Wait()
+		if ok, _ := ready(done); ok || reads.Load() != 1 || h.censusReads() != 0 {
+			t.Fatalf("after a failed preflight read: ready=%v preflight reads=%d census reads=%d, want not ready, 1, 0", ok, reads.Load(), h.censusReads())
+		}
+		advance(time.Second)
+		select {
+		case err := <-done:
+			if err == nil || !strings.Contains(err.Error(), `1 open row(s) in a state main does not know ("archived"=1)`) {
+				t.Fatalf("boot err = %v, want the refusal", err)
+			}
+		default:
+			t.Fatal("boot did not refuse after the retry read")
+		}
+		if h.censusReads() != 0 || len(h.rec.keys()) != 0 {
+			t.Fatalf("census reads=%d reconciles=%q, want none before a refusal", h.censusReads(), h.rec.keys())
+		}
+	})
+}
+
 // Kills: boot hanging on an empty city.
 func TestV2BootWithZeroRowsCompletesImmediately(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {

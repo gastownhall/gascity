@@ -104,6 +104,9 @@ type v2Host struct {
 	sessionsStore func() beads.Store
 	observations  func() *ObservationCache
 	rec           events.Recorder
+	// bootCensus is boot's live census of every session leg for C11's
+	// refusal. Optional: a host without it skips the check.
+	bootCensus func() (v2SessionMigration, error)
 }
 
 // reconcileEnv is immutable once published: a reload publishes a new one at
@@ -332,9 +335,9 @@ func (rt *v2Runtime) signalResync() {
 // starts a second set of goroutines (MAINT-005).
 //
 //  1. Publish env Gen 1.
-//  2. Run the first resync pass synchronously, covering every key it adds. A
-//     failed sessions census is retried with backoff: an error is not an
-//     empty city.
+//  2. Refuse enterprise-era session rows (C4.5 item 1b, C11), then run the
+//     first resync pass synchronously, covering every key it adds. A failed
+//     census is retried with backoff: an error is not an empty city.
 //  3. Install the inventory pass hook, then start the workers and lanes. The
 //     boot pass's allocator wake is buffered, so the lane's first pass runs
 //     at once.
@@ -382,9 +385,9 @@ func (rt *v2Runtime) boot(ctx context.Context, patrol func()) error {
 	return nil
 }
 
-// bootPass runs the boot resync pass once, retrying a failed sessions census
-// with backoff, and returns its coverage. patrol runs on every tick while it
-// waits to retry.
+// bootPass runs the boot resync pass once, after the C11 refusal check,
+// retrying a failed census with backoff, and returns its coverage. patrol runs
+// on every tick while it waits to retry.
 func (rt *v2Runtime) bootPass(ctx context.Context, tick <-chan time.Time, patrol func()) (*workqueue.Coverage[rowKey], error) {
 	cov := rt.bootCov.Load()
 	for failures := 0; cov == nil; {
@@ -395,8 +398,18 @@ func (rt *v2Runtime) bootPass(ctx context.Context, tick <-chan time.Time, patrol
 		default:
 		}
 		rt.resyncFull.Store(false)
+		var m v2SessionMigration
 		var err error
-		if cov, err = rt.resyncPass(v2ReasonBoot); err == nil {
+		if rt.host.bootCensus != nil {
+			m, err = rt.host.bootCensus()
+		}
+		if err == nil {
+			if refusal := m.refusal(); refusal != nil {
+				return nil, refusal
+			}
+			cov, err = rt.resyncPass(v2ReasonBoot)
+		}
+		if err == nil {
 			break
 		}
 		failures++

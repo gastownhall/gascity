@@ -795,18 +795,30 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 		return nil, false, false
 	}
 
-	// valueFlags is the complete set of flags that consume the next argument as
-	// their value for this subcommand, in both long and short form.
-	// Sourced from `bd <sub> --help` (bd 1.3.1, 2026-09-29).
-	valueFlags := bdSubcmdValueFlags(sub)
+	// The flag sets are the complete value-consuming and boolean (no-value)
+	// flags for this subcommand, in both long and short form, sourced from
+	// `bd <sub> --help` (bd 1.3.1, 2026-09-29). Unknown flags not in either set
+	// make the scan ambiguous.
+	ids, ambiguous = bdScanPositionalIDs(args[1:], bdSubcmdValueFlags(sub), bdSubcmdBoolFlags(sub), nil)
+	if ambiguous {
+		return nil, true, true
+	}
+	return ids, true, false
+}
 
-	// boolFlags is the complete set of boolean (no-value) flags. Unknown flags
-	// not in either set trigger ambiguous=true.
-	boolFlags := bdSubcmdBoolFlags(sub)
-
+// bdScanPositionalIDs is the fail-closed argv scan behind bdMutationWriteIDs
+// and bdByIDReadSubjects: it returns the positional tokens of rest — the argv
+// AFTER the subcommand — as the bead ids the invocation addresses.
+//
+// valueFlags and boolFlags are the subcommand's complete flag manifest. A flag
+// in neither set might consume the next token, which would then be read as a
+// bead id, so the scan stops and reports ambiguous instead of guessing.
+// idValueFlags names the value flags whose value is itself an addressed id
+// (`show --id <id>`); nil means no flag value is ever a subject.
+func bdScanPositionalIDs(rest []string, valueFlags, boolFlags, idValueFlags map[string]bool) (ids []string, ambiguous bool) {
 	positional := false // true after "--"
-	for i := 1; i < len(args); i++ {
-		arg := args[i]
+	for i := 0; i < len(rest); i++ {
+		arg := rest[i]
 		if positional {
 			if arg != "" {
 				ids = append(ids, arg)
@@ -826,7 +838,10 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 		}
 		// Flag token.
 		// --flag=value form: value is embedded, no next-arg consumed.
-		if strings.Contains(arg, "=") {
+		if name, value, inline := strings.Cut(arg, "="); inline {
+			if idValueFlags[name] && value != "" {
+				ids = append(ids, value)
+			}
 			continue
 		}
 		// Strip leading dashes to get the flag name for lookup.
@@ -836,8 +851,12 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 		shortForm := "-" + flagName // only meaningful when flagName is 1 char
 
 		if valueFlags[longForm] || (len(flagName) == 1 && valueFlags[shortForm]) {
-			// Known value-consuming flag: skip its value argument.
+			// Known value-consuming flag: skip its value argument, unless the
+			// value is itself an addressed id.
 			i++
+			if idValueFlags[arg] && i < len(rest) && rest[i] != "" {
+				ids = append(ids, rest[i])
+			}
 			continue
 		}
 		if boolFlags[longForm] || (len(flagName) == 1 && boolFlags[shortForm]) {
@@ -846,9 +865,9 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 		}
 		// Unknown flag. It might consume a value argument that looks like a
 		// bead ID. Fail-closed: report ambiguity so the caller can reject.
-		return nil, true, true
+		return nil, true
 	}
-	return ids, true, false
+	return ids, false
 }
 
 // bdSubcmdValueFlags returns the set of value-consuming flag names (in

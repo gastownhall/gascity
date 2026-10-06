@@ -114,6 +114,70 @@ func awaitAllocatorReason(t *testing.T, rec *v2Recorder, kind string) {
 	}, "an allocator pass for "+kind)
 }
 
+// assertV2BootRefuses adds rows to a v2 phase fixture, whose own row is
+// clean, and boots it through the city runtime's host. Boot must refuse at
+// once, with want and the doctor command in the error, after a live read of
+// the sessions leg (C4.5 item 1b), and before anything runs: no key is
+// reconciled, no allocator pass runs, nothing is written, and the fixture's
+// running session is not stopped.
+func assertV2BootRefuses(t *testing.T, want string, rows ...beads.Bead) {
+	t.Helper()
+	cr, store := newPhaseFixtureRuntime(t, false, true)
+	stderr := &lockedBuffer{}
+	cr.stderr = stderr
+	rt, rec := attachTestV2(t, cr)
+	for _, row := range rows {
+		if _, err := store.Store.Create(row); err != nil {
+			t.Fatalf("Create(%s): %v", row.ID, err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if cr.bootV2(ctx, nil) {
+		t.Fatal("bootV2 reached ready over enterprise-era rows")
+	}
+	if ctx.Err() != nil {
+		t.Fatal("bootV2 retried the refusal until the deadline")
+	}
+	if got := stderr.String(); !strings.Contains(got, want) || !strings.Contains(got, "run gc doctor --check v2-session-migration to list them") {
+		t.Errorf("stderr = %q, want %q and the doctor command", got, want)
+	}
+	liveRead := false
+	for _, op := range store.recorded() {
+		liveRead = liveRead || (strings.HasPrefix(op, "List ") && strings.Contains(op, "live=true"))
+		if !strings.HasPrefix(op, "List") && !strings.HasPrefix(op, "Get") {
+			t.Errorf("store op %q during a refused boot", op)
+		}
+	}
+	if !liveRead {
+		t.Errorf("store ops = %q, want a live census read", store.recorded())
+	}
+	if rt.ready.Load() || len(rec.keys()) != 0 || len(rec.allocatorPasses()) != 0 {
+		t.Errorf("ready=%v reconciled=%q allocator passes=%d: a refused boot ran its controllers", rt.ready.Load(), rec.keys(), len(rec.allocatorPasses()))
+	}
+	if !cr.sp.IsRunning("worker") {
+		t.Error("a refused boot stopped the running session")
+	}
+}
+
+// Kills: the C11 boot preflight dropped, retried like a failed read, read
+// from the cache, or left unwired from the city's host; and a drain-ack
+// stop-pending row refused.
+func TestV2BootRefusesUnknownStateRows(t *testing.T) {
+	assertV2BootRefuses(t, `enterprise-era session rows: 2 open row(s) in a state main does not know ("archived"=1 "draining"=1)`,
+		sessionRow("gc-a", "template", "worker", "state", "archived", "session_name", "a"),
+		sessionRow("gc-b", "template", "worker", "state", "draining", "session_name", "b"),
+		sessionRow("gc-c", "template", "worker", "state", "draining", "state_reason", session.DrainAckStopPendingReason, "session_name", "c"))
+}
+
+// Kills: shared slot-scoped names (P3 spec F8) left to the decide instead of
+// refused at boot.
+func TestV2BootRefusesSharedSlotNames(t *testing.T) {
+	assertV2BootRefuses(t, "0 open row(s) in a state main does not know, 1 pool-slot session name(s) shared by open rows, 0 configured named",
+		poolRow("gc-a", "worker", 2, "creating", "session_name", "worker-2-pool"),
+		poolRow("gc-b", "worker", 2, "creating", "session_name", "worker-2-pool"))
+}
+
 // Kills: the legacy startup block (corpse cleanup, stale reap, desired state,
 // sync, the boot beadReconcileTick) still run under v2, or the v2 boot left
 // out of the startup step; or the boot env published without the boot
@@ -1415,6 +1479,7 @@ func TestCityRuntimeDriftJudgesWithTheWiringsEnv(t *testing.T) {
 // are pinned: a trace consumer reads them by name.
 var v2QueueRecordFields = []string{
 	"adds", "allocator_duty", "allocator_failures", "allocator_last_pass_ms", "allocator_passes", "allocator_wakes",
+	"allocator_wakes_suppressed",
 	"bead_event_latency_p50_ms", "bead_event_latency_p99_ms", "boot", "boot_ms",
 	"deferred", "depth_hot", "depth_resync", "dirty", "dropped_adds", "fs_gate", "holds", "keys",
 	"latency_p50_ms", "latency_p99_ms", "legacy_session_entries", "longest_in_flight_ms",

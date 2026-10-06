@@ -172,6 +172,7 @@ const (
 	TraceReasonDrainTimeout           TraceReasonCode = "drain_timeout"
 	TraceReasonStoreQueryPartial      TraceReasonCode = "store_query_partial"
 	TraceReasonNoWakeReason           TraceReasonCode = "no_wake_reason"
+	TraceReasonUndesiredWakeGrace     TraceReasonCode = "undesired_wake_grace"
 	TraceReasonFSPressure             TraceReasonCode = "fs_pressure"
 	TraceReasonResetStalled           TraceReasonCode = "reset_stalled"
 

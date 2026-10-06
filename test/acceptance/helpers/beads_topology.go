@@ -14,7 +14,37 @@ import (
 	"time"
 
 	"golang.org/x/mod/semver"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
+
+// DefaultSidecarIdleTimeout is the idle_timeout bd persists in a sidecar gc
+// initialized at the default proxied idle timeout: -1 (bd's never) when the
+// default is never, the window in nanoseconds otherwise.
+func DefaultSidecarIdleTimeout() int {
+	if config.DefaultProxiedIdleTimeout <= 0 {
+		return -1
+	}
+	return int(config.DefaultProxiedIdleTimeout)
+}
+
+// NativeLaneExpectation is the beads-store payload with
+// GC_BEADS_PROXIED_NATIVE on, for a proxied scope gc initialized at the
+// default idle timeout. Doctor's open is short-lived, so the store that serves
+// its reads is the native one (design 5.3) whatever the idle policy, pinned to
+// a generation established from argv AND the birth token; only a long-lived
+// open (the controller's) is refused on a finite policy. The idle policy the
+// payload reports follows the default.
+func NativeLaneExpectation() *BeadsStoreExpectation {
+	idle := "never"
+	if config.DefaultProxiedIdleTimeout > 0 {
+		idle = "finite"
+	}
+	return &BeadsStoreExpectation{
+		Store: "NativeDoltStore", RequireProxiedAccount: true, RequireNoVerdict: true,
+		Evidence: "argv+birth", IdlePolicyPrefix: idle,
+	}
+}
 
 // The init topology matrix.
 //
@@ -68,7 +98,8 @@ type ScopeShape struct {
 	// the proxied default.
 	ForbiddenDoltMode string
 	// Sidecar requires .beads/proxied_server_client_info.json, and IdleTimeout
-	// the value in it. GC-owned proxies are pinned resident (-1).
+	// the value in it: what gc's init writes at the default config
+	// (DefaultSidecarIdleTimeout).
 	Sidecar     bool
 	IdleTimeout int
 	// ExternalUpstreamSidecar requires the sidecar to name the external
@@ -358,15 +389,11 @@ func BeadsTopologies() []BeadsTopology {
 	proxiedProviderStore := BeadsStoreExpectation{
 		Store: "BdStore", PreflightGate: "proxied_provider", RefuseProxiedAccount: true,
 	}
-	// And with the flag on: the store that serves the reads is the native one
-	// (design 5.3), pinned to a generation established from argv AND the birth
-	// token, on a proxy gc's own init pins resident.
-	proxiedNativeStore := &BeadsStoreExpectation{
-		Store: "NativeDoltStore", RequireProxiedAccount: true, RequireNoVerdict: true,
-		Evidence: "argv+birth", IdlePolicyPrefix: "never",
-	}
+	// And with the flag on: what the native lane does with a scope gc
+	// initialized at the default idle timeout (NativeLaneExpectation).
+	proxiedNativeStore := NativeLaneExpectation()
 	proxiedLocalScope := ScopeShape{
-		DoltMode: "proxied-server", Sidecar: true, IdleTimeout: -1,
+		DoltMode: "proxied-server", Sidecar: true, IdleTimeout: DefaultSidecarIdleTimeout(),
 		Journaled: true, Proxies: 1, Servers: 1, Owner: OwnerProvider,
 	}
 	directLocalScope := ScopeShape{
@@ -472,12 +499,12 @@ func BeadsTopologies() []BeadsTopology {
 			Doc:      "a local bd proxy fronting the external server: the proxy is ours, the data is not",
 			Upstream: true,
 			City: ScopeShape{
-				DoltMode: "proxied-server", Sidecar: true, IdleTimeout: -1,
+				DoltMode: "proxied-server", Sidecar: true, IdleTimeout: DefaultSidecarIdleTimeout(),
 				ExternalUpstreamSidecar: true,
 				Journaled:               true, Proxies: 1, Servers: 0, Owner: OwnerProvider,
 			},
 			Rig: ScopeShape{
-				DoltMode: "proxied-server", Sidecar: true, IdleTimeout: -1,
+				DoltMode: "proxied-server", Sidecar: true, IdleTimeout: DefaultSidecarIdleTimeout(),
 				ExternalUpstreamSidecar: true,
 				Journaled:               true, Proxies: 1, Servers: 0, Owner: OwnerProvider,
 			},

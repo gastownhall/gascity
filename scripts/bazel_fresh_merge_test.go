@@ -21,11 +21,13 @@ import (
 // the base branch's current tip.
 
 const (
-	freshMergeAction     = ".github/actions/fresh-merge/action.yml"
-	freshMergeUses       = "./.github/actions/fresh-merge"
-	freshMergeStepName   = "Merge the PR head onto the base branch's current tip"
-	bazelEvidenceStep    = "bazel test //test/integration (evidence-only)"
-	bazelEvidenceStepIf  = "always() && steps.fresh-merge.outcome != 'failure'"
+	freshMergeAction   = ".github/actions/fresh-merge/action.yml"
+	freshMergeUses     = "./.github/actions/fresh-merge"
+	freshMergeStepName = "Merge the PR head onto the base branch's current tip"
+	bazelEvidenceStep  = "bazel test //test/integration (evidence-only)"
+	// Never on a failed fresh merge (a half-merged tree), nor on a moved
+	// worker-env pin (TestBazelTestWorkerEnvPreflight).
+	bazelEvidenceStepIf  = "always() && steps.fresh-merge.outcome != 'failure' && steps.worker-env.outputs.pin-moved != 'true'"
 	bazelTestConcurrency = "${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}"
 )
 

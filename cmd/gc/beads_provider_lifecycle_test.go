@@ -4484,6 +4484,7 @@ func TestGcBeadsBdProxiedExternalTranslatesExactRCFlags(t *testing.T) {
 		"BD_BIN="+bdPath,
 		"GC_BEADS_PROXY_EXTERNAL_HOST=db.example",
 		"GC_BEADS_PROXY_EXTERNAL_PORT=4406",
+		"GC_BEADS_PROXIED_IDLE_TIMEOUT=0",
 		"GC_DOLT=",
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -12819,6 +12820,7 @@ func TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary(t *testing.T) {
 				"BD_BIN="+bdPath,
 				"GC_BEADS_PROVIDER_OWNED=1",
 				"GC_BEADS_TRANSPORT="+tt.transport,
+				"GC_BEADS_PROXIED_IDLE_TIMEOUT=0",
 				"GC_BEADS_TARGET="+tt.target,
 			)
 			if out, err := cmd.CombinedOutput(); err != nil {
@@ -12878,6 +12880,7 @@ func TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary(t *testing.T) {
 				"GC_BEADS_PROVIDER_OWNED=1",
 				"GC_BEADS_TRANSPORT="+tt.transport,
 				"GC_BEADS_TARGET="+tt.target,
+				"GC_BEADS_PROXIED_IDLE_TIMEOUT=0",
 				"GC_BEADS_PROXY_EXTERNAL_HOST=upstream.example.invalid",
 				"GC_BEADS_PROXY_EXTERNAL_PORT=3306",
 				"GC_DOLT_HOST=upstream.example.invalid",
@@ -13041,7 +13044,7 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 	}
 	runLifecycleCommand := func(ctx context.Context, dir, home, transport, op string) error {
 		cmd := exec.CommandContext(ctx, script, op)
-		cmd.Env = sanitizedBaseEnv("HOME="+home, "GC_CITY_PATH="+dir, "BEADS_DIR="+filepath.Join(dir, ".beads"), "BD_BIN="+bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT="+transport, "GC_BEADS_TARGET=local")
+		cmd.Env = sanitizedBaseEnv("HOME="+home, "GC_CITY_PATH="+dir, "BEADS_DIR="+filepath.Join(dir, ".beads"), "BD_BIN="+bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT="+transport, "GC_BEADS_TARGET=local", "GC_BEADS_PROXIED_IDLE_TIMEOUT=0")
 		_, err := cmd.CombinedOutput()
 		return err
 	}
@@ -13064,7 +13067,7 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 			run := func(ctx context.Context, args ...string) []byte {
 				t.Helper()
 				cmd := exec.CommandContext(ctx, script, args...)
-				cmd.Env = sanitizedBaseEnv("HOME="+home, "GC_CITY_PATH="+dir, "BEADS_DIR="+filepath.Join(dir, ".beads"), "BD_BIN="+bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT="+transport, "GC_BEADS_TARGET=local")
+				cmd.Env = sanitizedBaseEnv("HOME="+home, "GC_CITY_PATH="+dir, "BEADS_DIR="+filepath.Join(dir, ".beads"), "BD_BIN="+bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT="+transport, "GC_BEADS_TARGET=local", "GC_BEADS_PROXIED_IDLE_TIMEOUT=0")
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("gc-beads-bd %v: %v\n%s", args, err, out)
 				} else {

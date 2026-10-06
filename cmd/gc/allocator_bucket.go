@@ -49,15 +49,6 @@ func (b bucketState) refill(now time.Time, capacity int, interval time.Duration)
 	return b.capped(capacity)
 }
 
-// debit takes cost tokens, or reports that the bucket holds too few.
-func (b bucketState) debit(cost int) (bucketState, bool) {
-	if b.Tokens < cost {
-		return b, false
-	}
-	b.Tokens -= cost
-	return b, true
-}
-
 // refund returns n tokens: a grant released before any key issued it, the
 // only refund (C5.7).
 func (b bucketState) refund(n, capacity int) bucketState {
@@ -144,13 +135,20 @@ func ledgerCounts(e ledgerEntry) bool {
 // row an entry already stands for, by key or by create token, is not counted
 // again. Pending rows parked behind a shut endpoint hold no start slot (F5):
 // they wait for their endpoint, and starving every other endpoint behind
-// them would turn one broker outage into a city outage. A pending row whose
-// endpoint has no gate in gates counts, erring toward fewer starts. A start
-// lease counts whatever its endpoint's gate: that start is already running.
-func cityInFlight(view []ledgerEntry, c ledgerCensus, gates map[endpointKey]endpointGate) int {
+// them would turn one broker outage into a city outage. Behind a probe gate
+// they count as one, the probe, so an endpoint going half-open after an
+// outage does not fill the city cap with its whole backlog (F5 probe window,
+// P3-5b). A pending row whose endpoint has no gate in gates counts, erring
+// toward fewer starts. A start lease counts whatever its endpoint's gate:
+// that start is already running.
+//
+// parked holds the pending rows it counted. A grant for one continues the
+// effect already counted, so it takes no further slot (C5.13). Behind a
+// probe gate every parked row shares the one slot, so each is in parked.
+func cityInFlight(view []ledgerEntry, c ledgerCensus, gates map[endpointKey]endpointGate) (n int, parked map[rowKey]bool) {
 	keys := make(map[rowKey]bool)
 	tokens := make(map[string]bool)
-	n := 0
+	parked = make(map[rowKey]bool)
 	for _, e := range view {
 		if !ledgerCounts(e) {
 			continue
@@ -166,15 +164,24 @@ func cityInFlight(view []ledgerEntry, c ledgerCensus, gates map[endpointKey]endp
 		}
 		n++
 	}
+	probed := make(map[endpointKey]bool)
 	for k, r := range c.Rows {
 		if keys[k] || (r.InstanceToken != "" && tokens[r.InstanceToken]) {
 			continue
 		}
-		if g, ok := gates[r.Endpoint]; r.StartLease || (r.PendingCreate && (!ok || g != gateShut)) {
+		switch g, ok := gates[r.Endpoint]; {
+		case r.StartLease:
+			n++
+		case !r.PendingCreate || (ok && g == gateShut):
+		case ok && g == gateProbe && probed[r.Endpoint]:
+			parked[k] = true
+		default:
+			probed[r.Endpoint] = true
+			parked[k] = true
 			n++
 		}
 	}
-	return n
+	return n, parked
 }
 
 // endpointOutstanding counts, per endpoint, the reserved or issued grants and

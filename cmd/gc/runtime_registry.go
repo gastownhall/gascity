@@ -174,6 +174,32 @@ func packRuntimeDeclarationChanged(oldCfg, newCfg *config.City, name string) boo
 	return oldOK && (oldRT.Command != newRT.Command || oldRT.Protocol != newRT.Protocol)
 }
 
+// sessionTransportCompositionChanged reports whether a reload flips whether
+// the session provider backing a selection name needs the ACP auto
+// composition. resolveSessionTransportProvider decides the composition at
+// construction time, so a reload that adds the first ACP agent or provider
+// target (or removes the last) must rebuild the provider, as a cold start
+// with the new config would. An acp base never composes.
+func sessionTransportCompositionChanged(oldCfg, newCfg *config.City, name string) bool {
+	if oldCfg == nil || newCfg == nil || name == "acp" {
+		return false
+	}
+	return configWantsACPComposition(oldCfg) != configWantsACPComposition(newCfg)
+}
+
+// configWantsACPComposition is the config half of the needsACPWrapper
+// decision in resolveSessionTransportProvider: an agent that creates sessions
+// on the acp transport, or a provider whose sessions do. The other half, open
+// ACP session beads, is not what a reload changes.
+func configWantsACPComposition(cfg *config.City) bool {
+	for _, a := range cfg.Agents {
+		if agentSessionCreateTransport(cfg, a) == "acp" {
+			return true
+		}
+	}
+	return hasACPProviderTargets(cfg)
+}
+
 // acpProviderConfig maps the [session.acp] city settings onto the ACP
 // provider's resolved configuration.
 func acpProviderConfig(a config.ACPSessionConfig) sessionacp.Config {

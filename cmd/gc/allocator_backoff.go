@@ -115,8 +115,8 @@ func (t *backoffTable) Succeed(k string) {
 // stays bounded: a create record reserved under a ConfigRev other than
 // configRev (config is fixed per revision, so this also drops an identity
 // config no longer holds), a work record for a bead not in demand, and a row
-// record whose row c shows closed (gone from a leg c holds complete). Bead
-// IDs hold no "/", so a row key splits at its last one.
+// record whose row c no longer holds. Bead IDs hold no "/", so a row key
+// splits at its last one.
 func (t *backoffTable) Prune(configRev string, c ledgerCensus, demand map[string]bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -125,9 +125,8 @@ func (t *backoffTable) Prune(configRev string, c ledgerCensus, demand map[string
 		switch kind, rest, _ := strings.Cut(k, ":"); kind {
 		case "row":
 			i := strings.LastIndex(rest, "/")
-			leg := rest[:max(i, 0)]
-			_, open := c.Rows[rowKey{Leg: leg, ID: rest[i+1:]}]
-			drop = !open && c.Legs[leg]
+			_, open := c.Rows[rowKey{Leg: rest[:max(i, 0)], ID: rest[i+1:]}]
+			drop = !open
 		case "work":
 			drop = !demand[rest]
 		default: // create and named

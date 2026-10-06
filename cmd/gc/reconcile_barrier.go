@@ -79,20 +79,23 @@ func (rt *v2Runtime) stuckSince(t time.Time) bool {
 // laneGate holds a paced lane's passes. A pass that finds a hold active is
 // skipped (and reports so to startGatedPacedLane, so it does not count toward
 // the lane's pacing), and the release that ends the last hold wakes the lane
-// to run it. waitIdle reports when no pass is running.
+// to run it. waitIdle reports when no pass, and no work a pass spawned, is
+// running.
 type laneGate struct {
 	signal func() // wakes the lane
 
 	mu      sync.Mutex
 	holds   map[string]struct{}
 	running bool
-	started time.Time     // when the running pass entered
+	started time.Time            // when the running pass entered
+	spawned map[uint64]time.Time // running spawned work, by when it started
+	lastID  uint64
 	skipped bool          // a pass was skipped under the current holds
-	changed chan struct{} // closed and replaced when a pass ends
+	changed chan struct{} // closed and replaced when a pass or spawned work ends
 }
 
 func newLaneGate(signal func()) *laneGate {
-	return &laneGate{signal: signal, holds: make(map[string]struct{}), changed: make(chan struct{})}
+	return &laneGate{signal: signal, holds: make(map[string]struct{}), spawned: make(map[uint64]time.Time), changed: make(chan struct{})}
 }
 
 func (g *laneGate) hold(name string) {
@@ -128,17 +131,47 @@ func (g *laneGate) enter() bool {
 	return true
 }
 
-// runningSince reports whether a pass that entered before t is running.
+// spawn counts work a running pass starts that outlives it (the
+// external-reads lane's steps) as running until done is called. Call it only
+// between a true enter and its exit.
+func (g *laneGate) spawn() (done func()) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.lastID++
+	id := g.lastID
+	g.spawned[id] = time.Now()
+	return func() {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		delete(g.spawned, id)
+		g.notifyLocked()
+	}
+}
+
+// runningSince reports whether a pass, or spawned work, that started before
+// t is running.
 func (g *laneGate) runningSince(t time.Time) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.running && g.started.Before(t)
+	if g.running && g.started.Before(t) {
+		return true
+	}
+	for _, started := range g.spawned {
+		if started.Before(t) {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *laneGate) exit() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.running = false
+	g.notifyLocked()
+}
+
+func (g *laneGate) notifyLocked() {
 	close(g.changed)
 	g.changed = make(chan struct{})
 }
@@ -146,7 +179,7 @@ func (g *laneGate) exit() {
 func (g *laneGate) waitIdle(ctx context.Context) error {
 	for {
 		g.mu.Lock()
-		idle, changed := !g.running, g.changed
+		idle, changed := !g.running && len(g.spawned) == 0, g.changed
 		g.mu.Unlock()
 		if idle {
 			return nil

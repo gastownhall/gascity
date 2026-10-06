@@ -463,6 +463,24 @@ func reopenClosedConfiguredNamedSessionBead(
 	}
 	var reopened beads.Bead
 	err = session.WithCitySessionIdentifierLocks(cityPath, []string{identity, sessionName}, func() error {
+		// The lookup above ran before the lock, so another writer may have
+		// reopened the row while this caller waited for it. Re-read the row
+		// live under the lock and reopen only if it is still the closed row
+		// for sessionName (mc-zndi7.42).
+		current, err := beads.HandlesFor(store).Live.Get(bead.ID)
+		if err != nil {
+			fmt.Fprintf(stderr, "session beads: re-reading closed configured named session %q: %v\n", identity, err) //nolint:errcheck
+			return nil
+		}
+		if current.Status != "closed" || strings.TrimSpace(current.Metadata["session_name"]) != strings.TrimSpace(sessionName) {
+			return nil
+		}
+		bead = current
+		writer, _, err := beads.ResolveConditionalWriter(store)
+		if err != nil {
+			fmt.Fprintf(stderr, "session beads: reopening configured named session %q: %v\n", identity, err) //nolint:errcheck
+			return nil
+		}
 		batch := reopenNamedSessionBatch(state, bead.Metadata["sleep_reason"], now)
 		for k, v := range extraMeta {
 			batch[k] = v
@@ -475,11 +493,17 @@ func reopenClosedConfiguredNamedSessionBead(
 		// "open without its reopen metadata" split cannot occur, even on a store
 		// whose Tx executes callbacks sequentially without rollback
 		// (ga-igcny0.1.1). The Tx wrapper is kept only for the labeled commit.
+		// Where the store fences, the write is conditional on the re-read's
+		// revision, as v2's reopenNamed writes; a lost fence is no reopen.
 		open := "open"
+		opts := beads.UpdateOpts{Status: &open, Metadata: batch}
 		var lockedErr error
 		reopened, lockedErr = reopenClosedConfiguredNamedSessionBeadLocked(store, cfg, identity, sessionName, bead, batch, func() error {
+			if writer != nil {
+				return writer.UpdateIfMatch(bead.ID, bead.Revision, opts)
+			}
 			return store.Tx("gc: reopen configured named session "+bead.ID, func(tx beads.Tx) error {
-				return tx.Update(bead.ID, beads.UpdateOpts{Status: &open, Metadata: batch})
+				return tx.Update(bead.ID, opts)
 			})
 		})
 		if lockedErr != nil {
@@ -2882,8 +2906,8 @@ func closeFailedCreateBead(sessFront *session.Store, expected session.Info, now 
 	// kill` fence is left to the kill (#6749), and a row whose lifecycle facts
 	// or incarnation no longer match expected (a wake or a new incarnation that
 	// landed after the caller's decision) is left to that writer. Every other
-	// store keeps the single Tx with the metadata ordered first, and does not
-	// compare the row with expected: there the claim/marker clears still land
+	// store makes the same checks on one read, then keeps the single Tx with
+	// the metadata ordered first: there the claim/marker clears still land
 	// even if the Close then fails, because a stale claim on a still-open bead
 	// would ping-pong the reconciler
 	// (TestCloseBeadClearsPendingCreateClaimEvenWhenCloseFails). A failure
@@ -3894,10 +3918,10 @@ func closeBeadPreservingAssignees(store beads.Store, expected session.Info, reas
 	// leaves the release cascade to that closer. If the row it reads carries a
 	// fresh `gc session kill` fence (#6749), the kill owns the row: the close
 	// writes nothing and reports false, and the next tick decides again. Every
-	// other store keeps the single Tx with the metadata ordered first. There
-	// the metadata may land while the Close fails; the helper then reports
-	// failure and the reconciler re-runs the close next tick, so no bead is
-	// durably left half-closed.
+	// other store makes the same checks on one read, then keeps the single Tx
+	// with the metadata ordered first. There the metadata may land while the
+	// Close fails; the helper then reports failure and the reconciler re-runs
+	// the close next tick, so no bead is durably left half-closed.
 	closed, err := sessionFrontDoor(store).CloseWithTerminalPatch(expected, session.ClosePatch(now, reason), "gc: close session "+id, now)
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, err) //nolint:errcheck

@@ -571,6 +571,17 @@ func (s *emittingClassStore) AtomicConditionalCloserHandle() (beads.AtomicCondit
 	return s, true
 }
 
+// ConditionalWritesModeSource points the conditional-writes resolver at the
+// stamped engine for the mode, liveness, capability and degrade latch, while
+// the writer it resolves stays this wrapper. A resolve TARGET would hand back
+// the bare engine as the writer, and every fenced CLI write would land
+// event-dark; declaring nothing would read the wrapper's missing stamp as
+// unset, and every fenced CLI write on a split city would fall back to the
+// unconditional legacy write.
+func (s *emittingClassStore) ConditionalWritesModeSource() beads.Store {
+	return s.Store
+}
+
 // HasResidentOutside forwards the relic census to the backing capability. It
 // exists because TestEmittingClassStoreKeepsEveryEngineCapability holds this
 // wrapper to every engine method, and a wrapper that carries the method must

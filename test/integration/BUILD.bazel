@@ -32,6 +32,10 @@ go_test(
     ) + [
         "//:repo_source_tree",
     ],
+    tags = [
+        "external",
+        "requires-network",
+    ],
     deps = [
         "//internal/testenv",
     ],
@@ -41,6 +45,7 @@ go_test(
     name = "integration_test",
     srcs = [
         "bdstore_batch_delete_test.go",
+        "bdstore_runner_isolation_test.go",
         "bdstore_test.go",
         "bead_id_helpers_test.go",
         "dolt_config_test.go",
@@ -71,6 +76,7 @@ go_test(
         "gastown_shutdown_test.go",
         "gastown_sling_test.go",
         "gastown_witness_test.go",
+        "gc_live_contract_store_conflict_test.go",
         "gc_live_contract_test.go",
         "graph_dispatch_harness_test.go",
         "graph_dispatch_test.go",
@@ -83,6 +89,7 @@ go_test(
         "session_k8s_test.go",
         "skill_lifecycle_test.go",
         "start_drift_test.go",
+        "supervisor_unit_guard_test.go",
         "testenv_import_test.go",
         "tool_home_test.go",
         "tutorial_path_test.go",
@@ -110,11 +117,15 @@ go_test(
             # go-test CI installs via install-bd-archive.sh /
             # install-dolt-archive.sh.
             "@bd_bin_v1_3_1//:bd",
-            "@dolt_bin_v2_1_7//:dolt-linux-amd64/bin/dolt",
+            "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
         ],
         "//conditions:default": [],
     }),
     shard_count = 14,
+    tags = [
+        "external",
+        "requires-network",
+    ],
     deps = [
         "//internal/bazeltest",
         "//internal/beads",
@@ -131,6 +142,7 @@ go_test(
         "//internal/runtime",
         "//internal/runtime/exec",
         "//internal/runtime/runtimetest",
+        "//internal/supervisor",
         "//internal/testenv",
         "//internal/testfixtures/reviewworkflows",
         "//internal/testutil",

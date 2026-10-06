@@ -86,6 +86,12 @@ func NewProviderWithConfig(cfg Config) *Provider {
 // and runtime readiness polling. Steps are conditional on Config fields;
 // an agent with no startup hints gets fire-and-forget.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if cfg.FreshOnly {
+		// Refuse a held name before any file is staged or pre_start runs.
+		if err := refuseHeldName(p.startOps(cfg, true), name); err != nil {
+			return err
+		}
+	}
 	var err error
 	cfg.Env, err = ensureInstanceToken(cfg.Env)
 	if err != nil {
@@ -1338,7 +1344,7 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	stderr := newCommandOutputTail(setupCommandOutputLimit)
 	c.Stdout = mon.Writer(stdout)
 	c.Stderr = mon.Writer(stderr)
-	// Cooperative cancellation (execgrace.Apply): deadline expiry interrupts
+	// Cooperative cancellation (execgrace.Apply): deadline expiry sends SIGTERM to
 	// the command's process group first so shell rollback traps — e.g.
 	// worktree-setup.sh restoring content it staged aside — run before the
 	// forced kill. Go's default context-cancel is SIGKILL, which is
@@ -1952,6 +1958,8 @@ func runPreStart(ctx context.Context, ops startOps, _ string, cfg runtime.Config
 //   - if ProcessNames are configured and the agent is dead (zombie), the
 //     zombie session is killed and recreated
 //
+// With cfg.FreshOnly there are no exceptions.
+//
 // maxInlinePromptLen is the threshold above which prompts are written to a
 // temp file and read back via $(cat ...) inside the tmux session. tmux
 // new-session passes the command through a fixed-size protocol buffer
@@ -2027,6 +2035,12 @@ func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 		return cleanupPromptFileOnError(promptFile, fmt.Errorf("creating session: %w", err))
 	}
 
+	// FreshOnly: the name was taken after Start's held-name check. Refuse it
+	// rather than recycle it, live or dead.
+	if cfg.FreshOnly {
+		return cleanupPromptFileOnError(promptFile, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name))
+	}
+
 	// Session exists but the pane is already dead (e.g. remain-on-exit corpse).
 	// Safe to recycle even when ProcessNames are unavailable.
 	if !ops.isSessionRunning(name) {
@@ -2056,6 +2070,20 @@ func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 	}
 	if err := recreateSessionAfterCleanup(ops, name, cfg.WorkDir, fullCommand, cfg.Env, promptFile); err != nil {
 		return cleanupPromptFileOnError(promptFile, fmt.Errorf("creating session after zombie cleanup: %w", err))
+	}
+	return nil
+}
+
+// refuseHeldName is the FreshOnly gate (CONTRACT v5 S1, LL6): a name tmux
+// already holds, live or dead, returns runtime.ErrSessionExists, and nothing
+// is killed. A failed probe fails closed.
+func refuseHeldName(ops startOps, name string) error {
+	held, err := ops.hasSession(name)
+	if err != nil {
+		return fmt.Errorf("checking session %q: %w", name, err)
+	}
+	if held {
+		return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
 	}
 	return nil
 }
