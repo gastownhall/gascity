@@ -2956,7 +2956,7 @@ func hookAssignContinuationWithBdStore(_ context.Context, dir string, env []stri
 }
 
 func hookRuntimeDrainAck(stderr io.Writer) error {
-	if code := cmdRuntimeDrainAck(nil, false, io.Discard, stderr); code != 0 {
+	if code := cmdRuntimeDrainAck(nil, false, false, io.Discard, stderr); code != 0 {
 		return errors.New("runtime drain-ack returned non-zero")
 	}
 	return nil

@@ -341,8 +341,9 @@ func newRuntimeUndrainCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Cancel drain on a session",
 		Long: `Cancel a pending drain signal on a session.
 
-Clears the GC_DRAIN and GC_DRAIN_ACK metadata flags, allowing the
-session to continue normal operation. Pass a session alias or ID.`,
+Clears the GC_DRAIN and GC_DRAIN_ACK metadata flags and the session
+row's drain-ack, allowing the session to continue normal operation.
+Pass a session alias or ID.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdRuntimeUndrain(args, jsonOutput, stdout, stderr) != 0 {
@@ -372,11 +373,21 @@ func cmdRuntimeUndrain(args []string, jsonOutput bool, stdout, stderr io.Writer)
 	}
 	dops := newDrainOps(sp)
 	rec := openCityRecorder(stderr)
-	return doRuntimeUndrain(dops, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
+	clearRow := func() error { return clearDrainAckRowAt(target.cityPath, target.sessionName, target.sessionID) }
+	return undrainRuntime(dops, clearRow, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
 }
 
 // doRuntimeUndrain clears the drain signal on a session.
 func doRuntimeUndrain(dops drainOps, sp runtime.Provider, rec events.Recorder,
+	targetName, sn string, jsonOutput bool, stdout, stderr io.Writer,
+) int {
+	return undrainRuntime(dops, nil, sp, rec, targetName, sn, jsonOutput, stdout, stderr)
+}
+
+// undrainRuntime clears the runtime drain keys exactly as legacy does and
+// then, when clearRow is set, the row-bound ack. A failed row clear keeps the
+// legacy clear and its event and exits non-zero.
+func undrainRuntime(dops drainOps, clearRow func() error, sp runtime.Provider, rec events.Recorder,
 	targetName, sn string, jsonOutput bool, stdout, stderr io.Writer,
 ) int {
 	running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn)
@@ -397,6 +408,12 @@ func doRuntimeUndrain(dops drainOps, sp runtime.Provider, rec events.Recorder,
 		Actor:   eventActor(),
 		Subject: targetName,
 	})
+	if clearRow != nil {
+		if err := clearRow(); err != nil {
+			fmt.Fprintf(stderr, "gc runtime undrain: clearing the row drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, runtimeActionJSON{
 			SchemaVersion: "1",
@@ -515,7 +532,7 @@ func doRuntimeDrainCheck(dops drainOps, targetName, sn string, jsonOutput bool, 
 // ---------------------------------------------------------------------------
 
 func newRuntimeDrainAckCmd(stdout, stderr io.Writer) *cobra.Command {
-	var jsonOutput bool
+	var jsonOutput, operator bool
 	cmd := &cobra.Command{
 		Use:   "drain-ack [name]",
 		Short: "Acknowledge drain — signal the controller to stop this session",
@@ -524,20 +541,35 @@ func newRuntimeDrainAckCmd(stdout, stderr io.Writer) *cobra.Command {
 Sets GC_DRAIN_ACK metadata on the session, then pokes the controller
 socket so the reconciler stops the session immediately rather than on
 its next patrol tick. Call this after the session has finished its
-current work in response to a drain signal.`,
+current work in response to a drain signal.
+
+The ack is bound to the session row's current incarnation and written
+there before held claims are released and GC_DRAIN_ACK is set. A session
+acking itself must carry a GC_INSTANCE_TOKEN that matches the row; a
+missing or stale token is refused with exit 1 and nothing is written. An
+operator acking a session from outside it passes --operator and a target,
+and the ack binds to the incarnation the command read. A store that is
+unreachable or keeps changing also exits 1 with nothing acknowledged; run
+the command again. A store without conditional writes skips the row write
+with a warning and acknowledges as before.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdRuntimeDrainAck(args, jsonOutput, stdout, stderr) != 0 {
+			if cmdRuntimeDrainAck(args, jsonOutput, operator, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON")
+	cmd.Flags().BoolVar(&operator, "operator", false, "ack another session as an operator, bound to the incarnation read (requires a target)")
 	return cmd
 }
 
-func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
+func cmdRuntimeDrainAck(args []string, jsonOutput, operator bool, stdout, stderr io.Writer) int {
+	if operator && len(args) == 0 {
+		fmt.Fprintln(stderr, "gc runtime drain-ack: --operator requires a session alias or ID") //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if len(args) > 0 {
 		target, err := resolveSessionRuntimeTarget(args[0], stderr)
 		if err != nil {
@@ -550,7 +582,10 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 			return 1
 		}
 		dops := newDrainOps(sp)
-		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
+		checkRow := func() (func() error, error) {
+			return checkDrainAckRowAt(target.cityPath, target.sessionName, target.sessionID, operator)
+		}
+		return ackRuntimeDrain(dops, checkRow, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
 	}
 
 	current, err := currentSessionRuntimeTarget()
@@ -564,8 +599,11 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 		return 1
 	}
 	dops := newDrainOps(sp)
+	checkRow := func() (func() error, error) {
+		return checkDrainAckRowAt(current.cityPath, current.sessionName, "", false)
+	}
 	// Name-only key: the env-derived GC_SESSION_ID can be stale.
-	return doRuntimeDrainAck(dops, current.cityPath, current.display, current.sessionName, "", jsonOutput, stdout, stderr)
+	return ackRuntimeDrain(dops, checkRow, current.cityPath, current.display, current.sessionName, "", jsonOutput, stdout, stderr)
 }
 
 // ---------------------------------------------------------------------------
@@ -885,6 +923,41 @@ const drainAckReleaseBudget = 15 * time.Second
 // window in which the session dies still holding exactly the claim this release
 // exists to clear.
 func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) int {
+	return ackRuntimeDrain(dops, nil, cityPath, targetName, sn, sessionID, jsonOutput, stdout, stderr)
+}
+
+// ackRuntimeDrain is doRuntimeDrainAck with the row-bound ack (CONTRACT v5
+// D5). checkRow decides against one read of the row before anything is
+// written:
+//
+//   - a refusal (token missing or mismatched, row unreadable) writes nothing:
+//     no row, no claim release, no env key; exit 1;
+//   - a match on a store with no conditional writer (legacy only: v2 refuses
+//     to boot without one) warns and runs legacy's flow unchanged; exit 0;
+//   - a match commits the row CAS first. A CAS that loses every retry, or a
+//     store that fails, writes nothing; exit 1. Once it lands, the claim
+//     release and the env ack follow in legacy's order (release first).
+//
+// A nil checkRow, or a nil commit with no error (not a city), keeps legacy's
+// flow silently.
+func ackRuntimeDrain(dops drainOps, checkRow func() (func() error, error),
+	cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer,
+) int {
+	if checkRow != nil {
+		commitRow, err := checkRow()
+		switch {
+		case errors.Is(err, errDrainAckRowUnfenced):
+			fmt.Fprintf(stderr, "gc runtime drain-ack: warning: %v\n", err) //nolint:errcheck // best-effort stderr
+		case err != nil:
+			fmt.Fprintf(stderr, "gc runtime drain-ack: refused, nothing acknowledged: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		case commitRow != nil:
+			if err := commitRow(); err != nil {
+				fmt.Fprintf(stderr, "gc runtime drain-ack: row ack not written, nothing acknowledged: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+		}
+	}
 	drainAckReleaseHeldClaims(cityPath, sn, stderr)
 	if err := dops.setDrainAck(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -910,4 +983,160 @@ func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string
 	}
 	fmt.Fprintln(stdout, "Drain acknowledged. Controller poked for immediate stop.") //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// Row-bound drain-ack keys (CONTRACT v5 D5). The CLI is their only writer;
+// legacy ignores both, so the dual write is rollback-safe.
+const (
+	drainAckIncarnationKey = "drain_ack_incarnation"
+	drainAckAtKey          = "drain_ack_at"
+)
+
+// checkDrainAckRowAt resolves the target's row in the city at cityPath and
+// decides the ack against it (checkDrainAckRow). The pane's GC_INSTANCE_TOKEN
+// is compared in process and never leaves it.
+func checkDrainAckRowAt(cityPath, sessionName, sessionID string, operator bool) (func() error, error) {
+	store, id, err := drainAckSessionRow(cityPath, sessionName, sessionID)
+	if err != nil || store == nil {
+		return nil, err
+	}
+	return checkDrainAckRow(store, id, operator, os.Getenv("GC_INSTANCE_TOKEN"), time.Now())
+}
+
+// clearDrainAckRowAt clears the row-bound ack for `gc runtime undrain`.
+func clearDrainAckRowAt(cityPath, sessionName, sessionID string) error {
+	store, id, err := drainAckSessionRow(cityPath, sessionName, sessionID)
+	if err != nil || store == nil {
+		return err
+	}
+	return clearDrainAckRow(store, id)
+}
+
+// drainAckSessionRow opens the session leg of the city at cityPath and
+// resolves the target's row. A path that is not a city has no row and yields
+// a nil store, for the reason releaseUnexecutedClaimsForSession gives. An
+// empty sessionID resolves by name: the env-derived GC_SESSION_ID can be
+// stale.
+func drainAckSessionRow(cityPath, sessionName, sessionID string) (beads.Store, string, error) {
+	if strings.TrimSpace(cityPath) == "" {
+		return nil, "", nil
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
+		return nil, "", nil
+	}
+	cfg, _ := loadCityConfig(cityPath, io.Discard)
+	store, err := openCityStoreAtWithConfig(cityPath, cfg)
+	if err != nil {
+		return nil, "", fmt.Errorf("opening the session store: %w", err)
+	}
+	if store == nil {
+		return nil, "", errors.New("opening the session store: no store")
+	}
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	if sessionID == "" {
+		if sessionID, err = resolveSessionID(sessStore, sessionName); err != nil {
+			return nil, "", fmt.Errorf("resolving session %q: %w", sessionName, err)
+		}
+	}
+	return sessStore, sessionID, nil
+}
+
+// errDrainAckRowUnfenced reports a matching ack on a store with no
+// conditional writer. Only legacy runs there (v2 refuses to boot, C0.7), so
+// the ack proceeds as legacy's alone.
+var errDrainAckRowUnfenced = errors.New("the session store has no conditional writer, so the ack is not written to the session row; the runtime ack is set as before")
+
+// checkDrainAckRow reads the row once and decides the ack before anything is
+// written; a refusal is returned as the error. The returned commit writes the
+// ack by CAS, bound to the generation this read saw, so a PreWake between this
+// read and the write makes the commit refuse instead of acking the next
+// incarnation (I-ACK-1). A match on a store with no conditional writer returns
+// errDrainAckRowUnfenced and no commit; nothing is ever written blind.
+func checkDrainAckRow(store beads.Store, sessionID string, operator bool, envToken string, now time.Time) (func() error, error) {
+	b, err := store.Get(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	patch, err := drainAckRowPatch(b, operator, envToken, "", now)
+	if err != nil {
+		return nil, err
+	}
+	writer, _, err := beads.ResolveConditionalWriter(store)
+	if err != nil {
+		return nil, err
+	}
+	if writer == nil {
+		return nil, errDrainAckRowUnfenced
+	}
+	bound := patch[drainAckIncarnationKey]
+	return func() error {
+		return casDrainAckRow(store, writer, sessionID, func(b beads.Bead) (map[string]string, error) {
+			return drainAckRowPatch(b, operator, envToken, bound, now)
+		})
+	}, nil
+}
+
+// clearDrainAckRow clears both row-ack keys by CAS. A row that carries
+// neither key, or a store with no conditional writer, is left untouched.
+func clearDrainAckRow(store beads.Store, sessionID string) error {
+	writer, _, err := beads.ResolveConditionalWriter(store)
+	if err != nil || writer == nil {
+		return err
+	}
+	return casDrainAckRow(store, writer, sessionID, func(b beads.Bead) (map[string]string, error) {
+		if b.Metadata[drainAckIncarnationKey] == "" && b.Metadata[drainAckAtKey] == "" {
+			return nil, nil
+		}
+		return map[string]string{drainAckIncarnationKey: "", drainAckAtKey: ""}, nil
+	})
+}
+
+// casDrainAckRow is the kill fence's re-read/re-decide loop
+// (applySessionKillFencePatch) without its unconditional fallback: every
+// write is an UpdateIfMatch at the revision just read.
+func casDrainAckRow(store beads.Store, writer beads.ConditionalWriter, sessionID string,
+	decide func(beads.Bead) (map[string]string, error),
+) error {
+	var lastErr error
+	for attempt := 0; attempt < sessionKillFenceAttempts; attempt++ {
+		b, err := store.Get(sessionID)
+		if err != nil {
+			return err
+		}
+		patch, err := decide(b)
+		if err != nil || len(patch) == 0 {
+			return err
+		}
+		lastErr = writer.UpdateIfMatch(sessionID, b.Revision, beads.UpdateOpts{Metadata: patch})
+		if lastErr == nil || !beads.IsPreconditionFailed(lastErr) {
+			return lastErr
+		}
+	}
+	return fmt.Errorf("conditional write kept losing to concurrent updates: %w", lastErr)
+}
+
+// drainAckRowPatch decides the row ack against one read of the row. The self
+// form proves its incarnation with the pane's token; the operator form binds
+// to the incarnation it read. The ack names the row's generation alone, so a
+// rekey, which moves only the token, does not void it. bound is the
+// generation the first read saw, or "" on that read.
+func drainAckRowPatch(b beads.Bead, operator bool, envToken, bound string, now time.Time) (map[string]string, error) {
+	envToken = strings.TrimSpace(envToken)
+	generation := strings.TrimSpace(b.Metadata["generation"])
+	switch {
+	case b.Status == "closed":
+		return nil, fmt.Errorf("session %s is closed", b.ID)
+	case !operator && envToken == "":
+		return nil, errors.New("GC_INSTANCE_TOKEN is not set, so this pane cannot prove which incarnation it is (an operator acking from outside the session passes --operator)")
+	case !operator && strings.TrimSpace(b.Metadata["instance_token"]) != envToken:
+		return nil, fmt.Errorf("GC_INSTANCE_TOKEN does not match session %s: it has been restarted since this pane started, or this is not its pane", b.ID)
+	case generation == "":
+		return nil, fmt.Errorf("session %s has no generation to bind the ack to", b.ID)
+	case bound != "" && generation != bound:
+		return nil, fmt.Errorf("session %s was restarted while the ack was being written", b.ID)
+	}
+	return map[string]string{
+		drainAckIncarnationKey: generation,
+		drainAckAtKey:          now.UTC().Format(time.RFC3339),
+	}, nil
 }
