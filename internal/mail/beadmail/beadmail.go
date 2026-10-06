@@ -874,7 +874,9 @@ func (p *Provider) CountRecipients(recipients []string) (int, int, error) {
 }
 
 // filterMessages returns open message beads assigned to the recipient.
-// When includeRead is false, messages with the "read" label are excluded.
+// When includeRead is false, read messages are excluded, using the shared
+// isMessageRead predicate: the "read" label, or mail.read metadata, with the
+// metadata taking precedence.
 func (p *Provider) filterMessages(recipient string, includeRead bool) ([]mail.Message, error) {
 	return p.filterMessagesForRecipients([]string{recipient}, includeRead)
 }
@@ -889,13 +891,6 @@ func (p *Provider) filterMessagesForRecipients(recipients []string, includeRead 
 	}
 	var msgs []mail.Message
 	for _, b := range candidates {
-		// Defense-in-depth: messageCandidatesAll already queries Type=message,
-		// but an AllowScan fallback (empty routes) can surface non-message
-		// beads (e.g. session beads) depending on store implementation. Reject
-		// them here so a session bead never reaches beadToMessage.
-		if b.Type != messageBeadType {
-			continue
-		}
 		if b.Status != "open" {
 			continue
 		}
@@ -1292,14 +1287,14 @@ func (p *Provider) messageCandidatesAll(routes []string) ([]beads.Bead, error) {
 	if err != nil {
 		return nil, fmt.Errorf("scanning message beads: %w", err)
 	}
-	if len(routes) == 0 {
-		return all, nil
-	}
 	out := make([]beads.Bead, 0, len(all))
 	for _, b := range all {
-		// matchesRecipientRoute is defense-in-depth: HQStore returns exact
-		// matches from the index; BdStore multi-route fallback may return excess.
-		if matchesRecipientRoute(routes, b.Assignee) {
+		// The Type check is defense-in-depth against a store that does not
+		// honor ListQuery.Type, so a non-message bead (e.g. a session bead)
+		// never reaches any mail caller. matchesRecipientRoute is likewise
+		// defense-in-depth: HQStore returns exact matches from the index;
+		// BdStore multi-route fallback may return excess.
+		if b.Type == messageBeadType && (len(routes) == 0 || matchesRecipientRoute(routes, b.Assignee)) {
 			out = append(out, b)
 		}
 	}

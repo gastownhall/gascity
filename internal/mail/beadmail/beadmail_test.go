@@ -860,8 +860,8 @@ func TestInboxExcludesRead(t *testing.T) {
 // typeLeakyMessageStore embeds MemStore but drops the Type filter on
 // message-candidate queries, simulating a store implementation that doesn't
 // enforce Type="message" server-side. It lets a non-message bead (e.g. a
-// session bead) leak into the candidate list so filterMessagesForRecipients'
-// own defensive Type check is what excludes it, not the query.
+// session bead) leak into the candidate list so messageCandidatesAll's own
+// defensive Type check is what excludes it, not the query.
 type typeLeakyMessageStore struct {
 	*beads.MemStore
 }
@@ -887,6 +887,7 @@ func TestInboxExcludesNonMessageBeadsFromLeakyCandidates(t *testing.T) {
 		Status:   "open",
 		Assignee: "mayor",
 		Title:    "session bead",
+		Labels:   []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
 	}); err != nil {
 		t.Fatalf("Create session bead: %v", err)
 	}
@@ -897,6 +898,30 @@ func TestInboxExcludesNonMessageBeadsFromLeakyCandidates(t *testing.T) {
 	}
 	if len(msgs) != 1 || msgs[0].Body != "real message" {
 		t.Fatalf("Inbox = %#v, want only the message bead (session bead must be excluded)", msgs)
+	}
+
+	total, unread, err := p.CountRecipients([]string{"mayor"})
+	if err != nil {
+		t.Fatalf("CountRecipients: %v", err)
+	}
+	if total != 1 || unread != 1 {
+		t.Errorf("CountRecipients = (%d, %d), want (1, 1) (session bead must not be counted)", total, unread)
+	}
+
+	candidates, err := p.ArchiveCandidates(ArchiveFilter{Recipients: []string{"mayor"}, IncludeRead: true})
+	if err != nil {
+		t.Fatalf("ArchiveCandidates: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].Body != "real message" {
+		t.Errorf("ArchiveCandidates = %#v, want only the message bead (session bead must never be archived)", candidates)
+	}
+
+	handoffs, err := p.CheckAutoHandoffs([]string{"mayor"})
+	if err != nil {
+		t.Fatalf("CheckAutoHandoffs: %v", err)
+	}
+	if len(handoffs) != 0 {
+		t.Errorf("CheckAutoHandoffs = %#v, want none (session bead must not be injected)", handoffs)
 	}
 }
 
