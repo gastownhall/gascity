@@ -262,6 +262,17 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	return code
 }
 
+var hookNudgePollerSessionProviderFn = hookNudgePollerSessionProvider
+
+func hookNudgePollerSessionProvider(spctx sessionProviderContext, stderr io.Writer) runtime.Provider {
+	sp, err := newSessionProviderFromContext(spctx, loadProviderSessionSnapshot(spctx))
+	if err != nil {
+		fmt.Fprintf(stderr, "gc prime: session provider unavailable for nudge poller (fail open): %v\n", err) //nolint:errcheck
+		return nil
+	}
+	return sp
+}
+
 // doPrimeWithHookFormatOpts is the full entry point. consumeHandoff=false makes
 // the invocation non-destructive: durable auto-handoff mail is still rendered
 // into the output, but is not archived. Preview callers (--json) pass false so
@@ -429,6 +440,8 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		runHookSideEffects()
 	}
 
+	var hookSP runtime.Provider
+	var hookSPResolved bool
 	for _, a := range resolvedAgents {
 		if isAgentEffectivelySuspendedWith(cfg, cityPath, &a, loadSuspensionStateBestEffort(cityPath)) {
 			return 0, nil
@@ -439,6 +452,11 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			if sessionName == "" {
 				sessionName = cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
 			}
+			if !hookSPResolved {
+				spctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+				hookSP = hookNudgePollerSessionProviderFn(spctx, stderr)
+				hookSPResolved = true
+			}
 			maybeStartNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath).Store, nudgeTarget{
 				cityPath:          cityPath,
 				cityName:          cityName,
@@ -448,7 +466,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				sessionID:         os.Getenv("GC_SESSION_ID"),
 				continuationEpoch: os.Getenv("GC_CONTINUATION_EPOCH"),
 				sessionName:       sessionName,
-			}))
+			}), hookSP)
 		}
 		var ctx PromptContext
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {

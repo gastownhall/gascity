@@ -2275,6 +2275,102 @@ func TestDispatchReadyWaitNudges_PropagatesPollerFailure(t *testing.T) {
 	}
 }
 
+func newWaitPollerFixture(t *testing.T) *beads.MemStore {
+	t.Helper()
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "1",
+			"provider":           "codex",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"dep_ids":          "gc-1",
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+		},
+	}); err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+	return store
+}
+
+func TestDispatchReadyWaitNudgesSuppressesPollerOnlyWhenDispatcherIsLive(t *testing.T) {
+	setWaitTestFileBeads(t)
+
+	for _, tc := range []struct {
+		name      string
+		live      bool
+		wantSpawn int
+	}{
+		{name: "live", live: true, wantSpawn: 0},
+		{name: "not live", live: false, wantSpawn: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store := newWaitPollerFixture(t)
+			stubNudgePollerDispatcherLive(t, tc.live)
+
+			spawns := 0
+			prev := startNudgePoller
+			startNudgePoller = func(_, _, _ string) error {
+				spawns++
+				return nil
+			}
+			t.Cleanup(func() { startNudgePoller = prev })
+
+			if err := dispatchReadyWaitNudges(dir, store, newNudgeEventedFake(), time.Now().UTC()); err != nil {
+				t.Fatalf("dispatchReadyWaitNudges: %v", err)
+			}
+			if spawns != tc.wantSpawn {
+				t.Fatalf("spawns = %d, want %d", spawns, tc.wantSpawn)
+			}
+		})
+	}
+}
+
+func TestDispatchReadyWaitNudgesPlainProviderAlwaysSpawns(t *testing.T) {
+	setWaitTestFileBeads(t)
+	dir := t.TempDir()
+	store := newWaitPollerFixture(t)
+	stubNudgePollerDispatcherLive(t, true)
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	spawns := 0
+	prev := startNudgePoller
+	startNudgePoller = func(_, _, _ string) error {
+		spawns++
+		return nil
+	}
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	if err := dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC()); err != nil {
+		t.Fatalf("dispatchReadyWaitNudges: %v", err)
+	}
+	if spawns != 1 {
+		t.Fatalf("spawns = %d, want 1", spawns)
+	}
+}
+
 func TestWithdrawQueuedWaitNudges_RemovesQueuedNudge(t *testing.T) {
 	setWaitTestFileBeads(t)
 	dir := t.TempDir()

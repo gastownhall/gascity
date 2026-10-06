@@ -1725,10 +1725,8 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 		fmt.Fprintf(stderr, "warning: bead routed but nudge failed: %v\n", err) //nolint:errcheck // best-effort
 		return
 	}
-	if running {
-		maybeStartNudgePoller(target)
-	} else {
-		maybeStartNudgePoller(target)
+	maybeStartNudgePoller(target, sp)
+	if !running {
 		// The asleep target session is known by ID, runtime name, or both;
 		// with neither it degrades to the allocator key.
 		if err := enqueueController(cityPath, reconcilekey.SessionRef(target.sessionID, target.sessionName)); err != nil {
