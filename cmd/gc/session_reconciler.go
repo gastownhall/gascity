@@ -32,6 +32,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -1307,10 +1308,23 @@ const pendingCreateNeverStartedTimeout = 10 * time.Minute
 // is read off a desired-state view that lags a wake, so a seat woken seconds ago
 // can read as wanted by nobody; draining it opened a ~34 kills/minute storm.
 // The check is level-triggered, so a genuinely undesired seat drains on the
-// first tick after the grace. A row whose agent is suspended (city, rig or
-// agent) gets no grace: an operator suspend is explicit intent, not a lagging
+// first tick after the grace. A row an operator suspended (city, rig, agent or
+// session) gets no grace: an operator suspend is explicit intent, not a lagging
 // view, and suspension is quiescence (#7115).
 const wakeUndesiredGrace = 5 * time.Minute
+
+// operatorSuspendCause returns the scope of the explicit operator suspend that
+// covers info ("city", "rig", "agent" or "session" for `gc session suspend`'s
+// user-hold), or "" when none does. A non-empty cause skips the INC-003 grace.
+func operatorSuspendCause(cfg *config.City, cityPath string, info sessionpkg.Info, st suspensionstate.State) string {
+	if scope, _, suspended := agentSuspensionCauseWith(cfg, cityPath, sessionAgentConfigInfo(cfg, info), st); suspended {
+		return scope
+	}
+	if strings.TrimSpace(info.SleepIntent) == "user-hold" {
+		return "session"
+	}
+	return ""
+}
 
 // wakeGracePreservesUndesiredRow reports whether an undesired live row was woken
 // within wakeUndesiredGrace of now, so its drain begin is deferred (CONTRACT v4
@@ -2510,12 +2524,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 					}
 					// INC-003: defer the drain begin while the row was woken within
-					// wakeUndesiredGrace, unless an operator suspended its agent
-					// (city, rig or agent). A drain already tracked is left to run
-					// (beginSessionDrainInfo would no-op), so no grace is logged
-					// or traced for it.
-					if dt.get(id) == nil && wakeGracePreservesUndesiredRow(infoPostHeal, clk.Now()) &&
-						!isAgentEffectivelySuspendedWith(cfg, cityPath, sessionAgentConfigInfo(cfg, infoPostHeal), suspState) {
+					// wakeUndesiredGrace, unless an operator suspended it (city,
+					// rig, agent or session); the drain trace then names the cause.
+					// A drain already tracked is left to run (beginSessionDrainInfo
+					// would no-op), so no grace is logged or traced for it.
+					inGrace := dt.get(id) == nil && wakeGracePreservesUndesiredRow(infoPostHeal, clk.Now())
+					suspendCause := ""
+					if inGrace {
+						suspendCause = operatorSuspendCause(cfg, cityPath, infoPostHeal, suspState)
+					}
+					if inGrace && suspendCause == "" {
 						if trace != nil {
 							template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
 							if template == "" {
@@ -2537,10 +2555,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							if template == "" {
 								template = infoPostHeal.Template
 							}
-							trace.RecordDecision(TraceSiteReconcilerOrphaned, TraceReasonCode(reason), TraceOutcomeDrain, template, name, traceRecordPayload{
+							payload := traceRecordPayload{
 								"store_query_partial": storeQueryPartial,
 								"provider_alive":      providerAlive,
-							})
+							}
+							if suspendCause != "" {
+								payload["suspend_cause"] = suspendCause
+							}
+							trace.RecordDecision(TraceSiteReconcilerOrphaned, TraceReasonCode(reason), TraceOutcomeDrain, template, name, payload)
 						}
 						fmt.Fprintf(stdout, "Draining session '%s': %s\n", name, reason) //nolint:errcheck
 					}

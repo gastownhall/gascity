@@ -103,6 +103,7 @@ go_test(
         "caching_store_watermark_internal_test.go",
         "caching_store_writes_internal_test.go",
         "class_store_test.go",
+        "conditional_labels_conformance_test.go",
         "conditional_writes_inspect_test.go",
         "conditional_writes_resolve_internal_test.go",
         "corpus_decoder_test.go",

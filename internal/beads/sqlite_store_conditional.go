@@ -30,6 +30,7 @@ var (
 	_ conditionalWriteCapabilityProber      = (*SQLiteStore)(nil)
 	_ conditionalWriteStateInspector        = (*SQLiteStore)(nil)
 	_ conditionalWritesLiveness             = (*SQLiteStore)(nil)
+	_ conditionalLabelsGuard                = (*SQLiteStore)(nil)
 )
 
 // probeConditionalWriteCapability reports what the fenced verbs can do on this
@@ -64,6 +65,10 @@ func (s *SQLiteStore) inspectConditionalWriteState() (probe, latch, reason strin
 // conditionalWritesStoreOpen reports ErrStoreClosed once CloseStore has run,
 // so the seam does not mistake a closed engine for an incapable one.
 func (s *SQLiteStore) conditionalWritesStoreOpen() error { return s.ensureOpen() }
+
+// conditionalLabelsGuarded reports that UpdateIfMatch rewrites labels inside
+// the fenced transaction that bumps the revision (upsertBeadTx).
+func (s *SQLiteStore) conditionalLabelsGuarded() bool { return true }
 
 // UpdateIfMatch applies opts only when the stored revision matches.
 func (s *SQLiteStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {

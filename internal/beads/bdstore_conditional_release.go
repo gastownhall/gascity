@@ -310,7 +310,7 @@ var _ AssignmentGuardedUpdater = (*BdStore)(nil)
 // first attempt may have committed, and a replay could release a same-assignee
 // reclaim that landed in between.
 func (s *BdStore) UpdateIfAssignment(id, expectedStatus, expectedAssignee string, opts UpdateOpts) (bool, error) {
-	if err := validateConditionalUpdateOpts(opts); err != nil {
+	if err := validateConditionalUpdateOpts(opts, false); err != nil {
 		return false, fmt.Errorf("bd update-if-assignment %s: %w", id, err)
 	}
 	expectedStatus = strings.TrimSpace(expectedStatus)
