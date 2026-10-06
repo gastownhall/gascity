@@ -5,7 +5,7 @@
 - Deploy bead: `ga-x0ek0e`; build bead: `ga-78tq9n`; review bead: `ga-kmnnu6` (PASS).
 - Reviewed source: `41542669ee72f9aaa084b4bd700ef7e984501b9f`. Its source branch is provenance only; the publication target is isolated `deploy/ga-x0ek0e-gate`.
 - Test snapshot: `origin/main@cb130844e27304a6d029d3fa1a99eba966f9f384` plus reviewed source, materialized as scratch merge commit `28c47957bf1fbc364a36a81bad8b5ff8847bae27` with tree `781945588edd44fc64f789c1a5c254d43bb902ea`.
-- Freshness check before publication: `origin/main@f9a9e1359a37d9b445832ffe4898b4d88a65af87`; merge-tree exit 0, tree `a70a79748d990f1331024ba01415003de546c0a0`. The commits added to main since the test snapshot do not touch `examples/gastown/`, `deps.env`, `go.mod`, or `go.sum`. PR CI will evaluate its own current merge candidate.
+- Freshness check before publication: `origin/main@0bf48101d7b722d034726b182bf1aab47024e11d`; merge-tree exit 0, tree `bfbbce09bdde99515e306407ef69a1fb96917c81`. Main's changes since the test snapshot leave the fixture source, `deps.env`, `go.mod`, and `go.sum` unchanged; they update `examples/gastown/BUILD.bazel` as part of narrowing Bazel test data. Tests ran on the frozen snapshot above. PR CI will evaluate its own current merge candidate.
 - Mode: remote; push remote: `fork`. Target source is not already on main. No rebase was needed. The ancestry guard passed when given this deploy bead and its confirmed build bead, which the reviewed source commit cites. No stacked PR.
 - Issue: [#7234](https://github.com/gastownhall/gascity/issues/7234), filed with reproduction, impact, risk, and verification plan.
 
@@ -32,3 +32,11 @@
 - `drift_lane: PASS` — `make bazel-sync` then `git diff --exit-code` on a separate fresh tree (`/var/tmp/ga-x0ek0e-bazel-drift.log`).
 - `ci_lane_run: n/a`; this diff changes no CI configuration. `failure_attribution: none`.
 - `load_threshold: 15`; `load_waited_seconds: 0`; `load_wait_timed_out: 0`; `run_start_load: 12.59`; `run_max_load: 55.57`; `run_mean_load: 32.87`; `run_readings: 59`. The run began below threshold; the later host load rose while concurrent shards ran. The load gate reported no read errors.
+
+## Publication checks
+
+- The first ordinary push failed in the default Bazel hook (`bazel test //... --config=fork-cache --keep_going`, invocation `3d15679d-72f1-41a7-be3d-b66cbebaea53`): 118 targets passed, 73 failed locally. Logs showed the tracked ICU74 loader abort (exit 127, `ga-sdon3o`) and an additional killed Git subprocess in unchanged `TestFreshMergeActionBehaviour/base_branch_cannot_be_fetched` (`ga-vkhfnj`). Sightings were appended to both trackers. This attempt published no branch; no attributed hook bypass was used.
+- The hook's documented `GC_PREPUSH_SUITE=go` mode then passed all ten fast jobs and pushed the isolated branch. The detached run completed with exit 0 at `/var/tmp/gc-heavy-gate/runs/ga-x0ek0e.push-go`. Counts from ten retained logs: **28,421 PASS, 0 FAIL, 158 SKIP**. The skips are the fast tier's process/integration exclusions and unchanged optional fixture conditions. This supplementary tier excludes the integration-tagged diff-owned test; criterion 3 uses the complete 40-job run above, where that test and the real topology tests executed and passed.
+- `TestFreshMergeActionBehaviour` passed in the Go hook (0.59s), including the previously killed subtest (0.07s). No Bazel failure was accepted as a passing result.
+- Hook logs are retained at `/var/tmp/gc-heavy-gate/runs/ga-x0ek0e.push-go/logs`. The fast target stripped the requested `LOCAL_TEST_LOG_DIR`; all ten active log files were identified through this service's cgroup and preserved through open file handles before the runner's cleanup.
+- Hook load evidence: `load_threshold: 15`; `load_waited_seconds: 1801`; `load_wait_timed_out: 1`; `run_start_load: 31.40`; `run_max_load: 30.82`; `run_mean_load: 28.43`; `run_readings: 14`; `wait_max_load: 41.33`; `read_errors: 0`. The ordinary bounded path proceeded after its wait timed out. The reported run maximum excludes the initial reading.
