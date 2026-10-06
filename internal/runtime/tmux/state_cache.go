@@ -64,6 +64,13 @@ const (
 // fixed, not a multiple of the TTL: GC_TMUX_CACHE_TTL changes when the first
 // refresh fails, not how fast failures back off.
 //
+// A hold also ends no later than fetchedAt+staleTTL, when the snapshot it
+// answers from stops being trusted and IsRunning reads every session absent.
+// The server may answer again at any moment before that, and a hold that ran
+// past the cliff would keep a healthy session reading absent until it ended.
+// A hold opened with no listed snapshot to age out (none yet, or one made from
+// a no-server answer) has no cliff and is not cut short.
+//
 // The hold changes how often tmux is asked, never what an observation means:
 // held readers get the observation the failure left behind, which
 // classifyCacheObservation reads exactly as it read the failing read's.
@@ -483,10 +490,19 @@ func (c *StateCache) refresh() {
 				c.dirty = c.generation != startGeneration
 			}
 			// Hold the next refresh off, so a box tmux cannot answer on is not
-			// asked again on every poll. Logged once per hold, outside the lock:
-			// a failure that overlaps or predates the one that opened the hold
-			// belongs to the same outage and adds no line.
-			window, suppressed, opened := c.backoff.failed(began, startGeneration, c.clock(), min(refreshBackoffMax, c.staleTTL/2))
+			// asked again on every poll, but not past the cliff where a snapshot
+			// a server listed stops being trusted (see classifyCacheObservation):
+			// the server may answer again before it, and IsRunning reads every
+			// session absent from the cliff until the hold ends. A cache with no
+			// such snapshot has no cliff, so its cliff is left at the zero time.
+			// Logged once per hold, outside the lock: a failure that overlaps or
+			// predates the one that opened the hold belongs to the same outage
+			// and adds no line.
+			var cliff time.Time
+			if !c.fetchedAt.IsZero() && !c.primedByNoServer {
+				cliff = c.fetchedAt.Add(c.staleTTL)
+			}
+			window, suppressed, opened := c.backoff.failed(began, startGeneration, c.clock(), min(refreshBackoffMax, c.staleTTL/2), cliff)
 			c.mu.Unlock()
 			if opened {
 				log.Printf("tmux state cache: refresh failed in %v: %v (holding refreshes for %v; %d reads suppressed since the last attempt)", elapsed, err, window, suppressed)
@@ -581,6 +597,9 @@ func withoutEvictedSince(sessions map[string]sessionRuntimeState, evictedAt map[
 // A hold stops the cache spawning tmux, never what it answers. Readers get the
 // observation the failure left behind, with lastError set and fetchedAt
 // untouched, so the staleTTL cliff falls at the same instant it always did.
+// Nor does a hold outlive that cliff: failed cuts one that would cross it short
+// at the cliff. A failure at or after the cliff opens an ordinary hold, whose
+// cap bounds how long a recovery goes unseen once the snapshot is stale.
 type refreshBackoff struct {
 	// failures counts consecutive failed refreshes; zero means no hold.
 	failures int
@@ -615,17 +634,24 @@ func (b *refreshBackoff) held(now time.Time, generation uint64) bool {
 
 // failed records a failed refresh by a fetch that began in epoch began, with
 // the cache at startGeneration, and opens the next hold from now. The hold
-// doubles from refreshBackoffBase, up to limit. opened is false when the
-// failure belongs to an outage already counted: window and suppressed are
-// then zero and nothing changes beyond the generation the failed fetch saw.
-// Otherwise suppressed is how many reads the previous hold answered.
-func (b *refreshBackoff) failed(began, startGeneration uint64, now time.Time, limit time.Duration) (window time.Duration, suppressed int, opened bool) {
+// doubles from refreshBackoffBase, up to limit, and ends no later than cliff,
+// the instant the snapshot it answers from stops being trusted (the zero time
+// when there is none to age out). A failure at or after cliff is not cut short,
+// so one streak has at most one shortened hold. window is the hold as opened.
+// opened is false when the failure belongs to an outage already counted: window
+// and suppressed are then zero and nothing changes beyond the generation the
+// failed fetch saw. Otherwise suppressed is how many reads the previous hold
+// answered.
+func (b *refreshBackoff) failed(began, startGeneration uint64, now time.Time, limit time.Duration, cliff time.Time) (window time.Duration, suppressed int, opened bool) {
 	b.generation = max(b.generation, startGeneration)
 	if began != b.epoch {
 		return 0, 0, false
 	}
 	b.failures++
 	window = min(refreshBackoffBase<<min(b.failures-1, 8), limit)
+	if now.Before(cliff) {
+		window = min(window, cliff.Sub(now))
+	}
 	b.until = now.Add(window)
 	b.epoch++
 	suppressed, b.suppressed = b.suppressed, 0
