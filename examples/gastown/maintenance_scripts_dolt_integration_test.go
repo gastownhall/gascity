@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -605,6 +606,9 @@ INSERT INTO issues (id, title, status, issue_type, priority, created_at, updated
 
 	port := startDoltServerForMaintenanceTest(t, doltPath, dataDir, "TZ=America/Los_Angeles")
 	waitForDoltServerForMaintenanceTest(t, doltPath, port, "citydb")
+	if off := queryDoltServerUTCOffsetHours(t, doltPath, port, "citydb"); off != -7 && off != -8 {
+		t.Fatalf("dolt sql-server ignored TZ=America/Los_Angeles; the test cannot distinguish NOW() from UTC_TIMESTAMP() (offset %d hours)", off)
+	}
 	writeCityBeadsMetadata(t, cityDir, "citydb")
 
 	binDir := t.TempDir()
@@ -644,4 +648,32 @@ exit 0
 		"past-age":   "closed",
 		"within-age": "open",
 	})
+}
+
+func queryDoltServerUTCOffsetHours(t *testing.T, doltPath string, port int, db string) int {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, doltPath,
+		"--host", "127.0.0.1",
+		"--port", fmt.Sprintf("%d", port),
+		"--user", "root",
+		"--no-tls",
+		"--use-db", db,
+		"sql", "-r", "csv", "-q", "SELECT TIMESTAMPDIFF(HOUR, UTC_TIMESTAMP(), NOW()) AS off",
+	)
+	cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD=")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("query %s UTC offset: %v\n%s", db, err, out)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 2 || strings.TrimSpace(lines[0]) != "off" {
+		t.Fatalf("unexpected UTC offset output for %s:\n%s", db, out)
+	}
+	off, err := strconv.Atoi(strings.TrimSpace(lines[1]))
+	if err != nil {
+		t.Fatalf("parse UTC offset %q: %v", lines[1], err)
+	}
+	return off
 }
