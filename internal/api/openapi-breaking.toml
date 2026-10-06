@@ -20,8 +20,9 @@
 #   reason       why breaking existing clients is acceptable
 #   pr           the PR that makes the change (URL or #N)
 #
-# Waivers that no longer match a change are reported but do not fail; prune
-# them once the change has merged.
+# Waivers that no longer match a change are reported but do not fail. Prune
+# them once the change has merged: fingerprints are stable across commits, so
+# a stale waiver would also waive a later identical change.
 
 # Generated clients (internal/api/genclient, the dashboard's TypeScript
 # client) bind to named component schemas; deleting one breaks their builds.

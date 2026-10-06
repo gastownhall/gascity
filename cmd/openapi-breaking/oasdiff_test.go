@@ -38,9 +38,15 @@ func TestGateAgainstOasdiff(t *testing.T) {
 	if err := os.WriteFile(waivedPolicy, append(policyText, []byte(validWaiver)...), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// An empty policy leaves every check at its oasdiff default level.
+	defaultLevelsPolicy := filepath.Join(t.TempDir(), "default-levels.toml")
+	if err := os.WriteFile(defaultLevelsPolicy, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	cases := []struct {
 		name         string
+		base         string // base spec fixture; empty means base.json
 		revision     string
 		policy       string
 		wantUnwaived []string // "check target" of each unwaived finding
@@ -69,12 +75,34 @@ func TestGateAgainstOasdiff(t *testing.T) {
 			policy:     waivedPolicy,
 			wantWaived: 1,
 		},
+		{
+			name:     "new event type passes under the open-union overrides",
+			base:     "event-union-base.json",
+			revision: "added-event-type.json",
+			policy:   checkedInPolicy,
+		},
+		{
+			// Control: the same growth fails without the policy, so the
+			// pass above is the two info overrides at work.
+			name:     "new event type is breaking at oasdiff default levels",
+			base:     "event-union-base.json",
+			revision: "added-event-type.json",
+			policy:   defaultLevelsPolicy,
+			wantUnwaived: []string{
+				"response-property-enum-value-added GET /v0/events/stream",
+				"response-property-one-of-added GET /v0/events/stream",
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			base := "base.json"
+			if tc.base != "" {
+				base = tc.base
+			}
 			v, err := check(context.Background(), options{
 				Oasdiff:  bin,
-				BaseFile: filepath.Join("testdata", "base.json"),
+				BaseFile: filepath.Join("testdata", base),
 				Revision: filepath.Join("testdata", tc.revision),
 				Policy:   tc.policy,
 			})

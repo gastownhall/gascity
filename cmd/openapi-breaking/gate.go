@@ -187,7 +187,7 @@ func report(w io.Writer, v verdict, policyPath string) (bool, error) {
 		fmt.Fprintf(&b, "waived  [%s] %s: %s (%s)\n", f.ID, f.target(), f.Text, f.Fingerprint)
 	}
 	for _, u := range v.Unused {
-		fmt.Fprintf(&b, "note: waiver %s (%s %s) matches no change against this base; prune it once its PR has merged\n", u.Fingerprint, u.Check, u.Target)
+		fmt.Fprintf(&b, "note: waiver %s (%s %s) matches no change against this base; prune it once its PR has merged, or it will also waive a later identical change\n", u.Fingerprint, u.Check, u.Target)
 	}
 	pass := len(v.Unwaived) == 0
 	if pass {

@@ -160,8 +160,9 @@ func TestEvaluateAppliesWaivers(t *testing.T) {
 		t.Fatal(err)
 	}
 	out.Reset()
-	if pass, err := report(&out, v, defaultPolicy); err != nil || !pass || !strings.Contains(out.String(), "matches no change") {
-		t.Fatalf("unused waiver should pass with a note:\n%s", out.String())
+	if pass, err := report(&out, v, defaultPolicy); err != nil || !pass ||
+		!strings.Contains(out.String(), "matches no change") || !strings.Contains(out.String(), "later identical change") {
+		t.Fatalf("unused waiver should pass with a prune note:\n%s", out.String())
 	}
 
 	mismatched := removal
