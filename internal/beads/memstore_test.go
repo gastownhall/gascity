@@ -47,6 +47,7 @@ func TestMemStoreConditionalWriterConformance(t *testing.T) {
 		beadstest.ConditionalWriterOptions{
 			RowBackedMutationFlavors: true,
 			RestrictedUpdateFields:   true,
+			LabelsGuarded:            true,
 			SuppliesCurrent:          true,
 			OpenDisabled: func(_ *testing.T) beads.Store {
 				s := beads.NewMemStore()
