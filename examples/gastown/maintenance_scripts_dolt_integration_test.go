@@ -379,22 +379,8 @@ func waitForDoltServerForMaintenanceTest(t *testing.T, doltPath string, port int
 
 func queryMaintenanceStatusByID(t *testing.T, doltPath string, port int, db string, table string) map[string]string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, doltPath,
-		"--host", "127.0.0.1",
-		"--port", fmt.Sprintf("%d", port),
-		"--user", "root",
-		"--no-tls",
-		"--use-db", db,
-		"sql", "-r", "csv", "-q", fmt.Sprintf("SELECT id,status FROM %s ORDER BY id", table),
-	)
-	cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD=")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("query %s.%s statuses: %v\n%s", db, table, err, out)
-	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	lines := doltServerCSVQuery(t, doltPath, port, db, fmt.Sprintf("SELECT id,status FROM %s ORDER BY id", table))
+	out := strings.Join(lines, "\n")
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "id,status" {
 		t.Fatalf("unexpected status output for %s.%s:\n%s", db, table, out)
 	}
@@ -407,6 +393,28 @@ func queryMaintenanceStatusByID(t *testing.T, doltPath string, port int, db stri
 		statuses[fields[0]] = fields[1]
 	}
 	return statuses
+}
+
+// doltServerCSVQuery runs query against db on the local dolt sql-server at
+// port and returns the trimmed CSV output split into lines.
+func doltServerCSVQuery(t *testing.T, doltPath string, port int, db, query string) []string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, doltPath,
+		"--host", "127.0.0.1",
+		"--port", fmt.Sprintf("%d", port),
+		"--user", "root",
+		"--no-tls",
+		"--use-db", db,
+		"sql", "-r", "csv", "-q", query,
+	)
+	cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD=")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("query %s (%s): %v\n%s", db, query, err, out)
+	}
+	return strings.Split(strings.TrimSpace(string(out)), "\n")
 }
 
 func requireMaintenanceStatuses(t *testing.T, got map[string]string, want map[string]string) {
@@ -652,24 +660,9 @@ exit 0
 
 func queryDoltServerUTCOffsetHours(t *testing.T, doltPath string, port int, db string) int {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, doltPath,
-		"--host", "127.0.0.1",
-		"--port", fmt.Sprintf("%d", port),
-		"--user", "root",
-		"--no-tls",
-		"--use-db", db,
-		"sql", "-r", "csv", "-q", "SELECT TIMESTAMPDIFF(HOUR, UTC_TIMESTAMP(), NOW()) AS off",
-	)
-	cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD=")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("query %s UTC offset: %v\n%s", db, err, out)
-	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	lines := doltServerCSVQuery(t, doltPath, port, db, "SELECT TIMESTAMPDIFF(HOUR, UTC_TIMESTAMP(), NOW()) AS off")
 	if len(lines) != 2 || strings.TrimSpace(lines[0]) != "off" {
-		t.Fatalf("unexpected UTC offset output for %s:\n%s", db, out)
+		t.Fatalf("unexpected UTC offset output for %s:\n%s", db, strings.Join(lines, "\n"))
 	}
 	off, err := strconv.Atoi(strings.TrimSpace(lines[1]))
 	if err != nil {
