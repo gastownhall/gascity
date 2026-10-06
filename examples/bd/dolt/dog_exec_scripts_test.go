@@ -433,6 +433,11 @@ case "${GC_FAKE_DF_MODE:-}" in
     printf 'tmpfs\t104857600\t103809024\t1048576\t99%%\t/\n'
     exit 0
     ;;
+  df_overcommitted)
+    printf 'Filesystem\t1024-blocks\tUsed\tAvailable\tCapacity\tMounted on\n'
+    printf '/dev/sda1\t104857600\t104980480\t-122880\t101%%\t/\n'
+    exit 0
+    ;;
   df_probe_failure)
     printf 'df: stat failed\n' >&2
     exit 1
@@ -6398,6 +6403,100 @@ func TestCompactScriptDiskPreflightAllowsScheduledSharedHistoryGC(t *testing.T) 
 	}
 	if strings.Contains(string(logData), "DOLT_RESET") {
 		t.Fatalf("shared-history path must not flatten under low disk:\n%s", logData)
+	}
+}
+
+func TestCompactScriptDiskPreflightHoldsSharedHistoryPendingGCWithoutSelection(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "scheduled run", args: nil},
+		{name: "multiple databases", args: []string{"--only-db", "beads", "--only-db", "zed"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+			if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+				t.Fatalf("mkdir pending-GC marker directory: %v", err)
+			}
+			if err := os.WriteFile(marker, []byte("db=beads\nreason=flatten succeeded but full GC failed\n"), 0o600); err != nil {
+				t.Fatalf("write pending-GC marker: %v", err)
+			}
+
+			out, err := fixture.runWithArgs(t, "remote_success", tt.args, "GC_FAKE_DF_MODE=df_critical")
+			if err != nil {
+				t.Fatalf("unselected shared-history pending GC should stop safely: %v\nout=%s", err, out)
+			}
+			if !strings.Contains(out, "skipping full GC under critical disk") {
+				t.Fatalf("shared-history pending GC did not report the critical-disk hold:\n%s", out)
+			}
+			logData, readErr := os.ReadFile(fixture.doltLog)
+			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+				t.Fatalf("read dolt log: %v", readErr)
+			}
+			if strings.Contains(string(logData), "DOLT_GC('--full')") || strings.Contains(string(logData), "DOLT_RESET") {
+				t.Fatalf("unselected shared-history pending GC must not run full GC or flatten:\n%s", logData)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatalf("pending-GC marker must survive a held run: %v", err)
+			}
+		})
+	}
+}
+
+func TestCompactScriptDiskPreflightAllowsSelectedSharedHistoryPendingGCRecovery(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatalf("mkdir pending-GC marker directory: %v", err)
+	}
+	if err := os.WriteFile(marker, []byte("db=beads\nreason=flatten succeeded but full GC failed\n"), 0o600); err != nil {
+		t.Fatalf("write pending-GC marker: %v", err)
+	}
+
+	out, err := fixture.runWithArgs(t, "remote_success", []string{"--only-db", "beads"}, "GC_FAKE_DF_MODE=df_critical")
+	if err != nil {
+		t.Fatalf("selected shared-history pending-GC recovery failed under low disk: %v\nout=%s", err, out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if !strings.Contains(string(logData), "DOLT_GC('--full')") {
+		t.Fatalf("selected shared-history pending-GC recovery did not run full GC:\n%s", logData)
+	}
+	if strings.Contains(string(logData), "DOLT_RESET") {
+		t.Fatalf("shared-history recovery must not flatten:\n%s", logData)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("successful shared-history pending-GC recovery did not clear marker: %v", err)
+	}
+}
+
+func TestCompactScriptDiskPreflightOvercommittedFilesystemIsCritical(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatalf("mkdir pending-GC marker directory: %v", err)
+	}
+	if err := os.WriteFile(marker, []byte("db=beads\nreason=flatten succeeded but full GC failed\n"), 0o600); err != nil {
+		t.Fatalf("write pending-GC marker: %v", err)
+	}
+
+	out, err := fixture.runWithArgs(t, "success", []string{"--only-db", "beads"}, "GC_FAKE_DF_MODE=df_overcommitted")
+	if err != nil {
+		t.Fatalf("negative available space should be critical, not a probe failure: %v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "disk CRITICAL: free_bytes=0 ") {
+		t.Fatalf("negative available space was not reported as zero free bytes:\n%s", out)
+	}
+	if !strings.Contains(out, "retrying DOLT_GC --full") {
+		t.Fatalf("pending-GC recovery did not run on an overcommitted filesystem:\n%s", out)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("successful pending-GC recovery did not clear marker: %v", err)
 	}
 }
 

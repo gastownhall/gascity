@@ -32,7 +32,7 @@ env = { GC_DOLT_COMPACT_THRESHOLD_COMMITS = "5000" }
 
 ## Disk Preflight
 
-Before compacting, `gc dolt compact` checks free space on the Dolt data volume. If free bytes fall below `GC_DOLT_COMPACT_MIN_FREE_BYTES` (default 5 GiB), a normal run is skipped and retried at the next 2-hour interval. A targeted `--only-db` retry for an existing pending-GC marker may finish that interrupted GC, but cannot start a new flatten. Set the threshold to `0` to disable the check.
+Before compacting, `gc dolt compact` checks free space on the Dolt data volume. If free bytes fall below `GC_DOLT_COMPACT_MIN_FREE_BYTES` (default 5 GiB), no history is flattened and no pending-GC marker gets its full GC; the run retries at the next 2-hour interval. Databases with remotes still get their working-set GC, and `--gc-only` and bare-GC runs skip the check. A targeted `--only-db` run for one database with a pending-GC marker may finish that interrupted GC, but cannot start a new flatten. Set the threshold to `0` to disable the check.
 
 If free-space probing fails, the compactor exits without changing a database. Fix the filesystem probe or set the threshold to `0` only when deliberately disabling this guard.
 

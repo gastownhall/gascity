@@ -2674,6 +2674,11 @@ compact_shared_history_database() {
     "$db" "$guard_remote" "$guard_remote_count"
 
   if has_compact_marker "$pending_gc_dir" "$db"; then
+    if [ "$disk_critical" = "1" ] && [ "$pending_gc_recovery_only" != "1" ]; then
+      printf 'compact: db=%s pending_gc=present — skipping full GC under critical disk; select it alone with --only-db %s to recover\n' \
+        "$db" "$db" >&2
+      return 0
+    fi
     guard_pending_remote=$(compact_marker_value "$pending_gc_dir" "$db" remote || true)
     guard_pending_from_head=$(compact_marker_value "$pending_gc_dir" "$db" compacted_from_head || true)
     # The marker is the operator's only record of the pre-flatten HEAD, and
@@ -3798,6 +3803,14 @@ disk_preflight() {
     return 1
   fi
   _dp_available_kb=$(printf '%s\n' "$_dp_df_out" | awk 'NR==2{print $4}')
+  case "${_dp_available_kb:-}" in
+    -[0-9]*)
+      case "${_dp_available_kb#-}" in
+        *[!0-9]*) ;;
+        *) _dp_available_kb=0 ;;
+      esac
+      ;;
+  esac
   case "${_dp_available_kb:-}" in
     ''|*[!0-9]*)
       printf 'compact: disk pre-flight probe failed: %s\n' "$DOLT_DATA_DIR" >&2
