@@ -6,11 +6,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -153,6 +155,16 @@ func assertWakeRecorded(t *testing.T, fs *fakeState, id string) {
 	}
 }
 
+// assertSessionEnqueued checks that a refused wake handed the session to the
+// reconciler, which owns any start the recorded wake leads to.
+func assertSessionEnqueued(t *testing.T, fs *fakeState, id string) {
+	t.Helper()
+	want := reconcilekey.Session(id).Normalize()
+	if !slices.Contains(fs.enqueuedKeys(), want) {
+		t.Fatalf("enqueued keys = %v after the refused wake, want %v", fs.enqueuedKeys(), want)
+	}
+}
+
 // #6858: `gc session wake` records the wake (clearing holds) and then reports
 // that a demand-only singleton's pool session will not start; the API wake
 // does the same, refusing with a dedicated code clients can tell apart from a
@@ -178,6 +190,7 @@ func TestHumaHandleSessionWakeRefusesDemandOnlySingletonSession(t *testing.T) {
 		t.Fatalf("refusal detail = %q, want it to say the wake was recorded", problem.Detail)
 	}
 	assertWakeRecorded(t, fs, id)
+	assertSessionEnqueued(t, fs, id)
 }
 
 // The create refusal carries the same dedicated code.
@@ -214,6 +227,7 @@ func TestHandleSessionWakeRefusesDemandOnlySingletonSession(t *testing.T) {
 	assertDemandOnlyRefusalMessage(t, problem.Detail)
 	assertCompatDemandOnlyCode(t, problem.Detail)
 	assertWakeRecorded(t, fs, id)
+	assertSessionEnqueued(t, fs, id)
 }
 
 // assertCompatDemandOnlyCode checks that a compatibility route names the same

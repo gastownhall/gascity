@@ -10,12 +10,12 @@ import (
 )
 
 // These tests pin gastownhall/gascity#6860: every path that moves a cached bead
-// from not-closed to closed must put exactly one bead.closed on the event
-// stream, whether the cache wrote the close itself, a read happened to observe a
-// close made by another process (bd close, gc bd close), or the reconcile pass
-// found it. Before the fix a status=closed Update announced bead.updated only,
-// and a close that a live list or dirty read absorbed first was later evicted by
-// the reconcile pass without any event at all.
+// from not-closed to closed must make this cache announce exactly one
+// bead.closed, whether the cache wrote the close itself, a read happened to
+// observe a close made by another process (bd close, gc bd close), or the
+// reconcile pass found it. Before the fix a status=closed Update announced
+// bead.updated only, and a close that a live list or dirty read absorbed first
+// was later evicted by the reconcile pass without any event at all.
 
 type closeEventRecorder struct {
 	mu     sync.Mutex
@@ -230,6 +230,37 @@ func TestAppliedCloseEventIsNotReannounced(t *testing.T) {
 	if got := rec.count("bead.closed", seed.ID, ""); got != 0 {
 		t.Fatalf("bead.closed events = %d, want 0: the close was already on the bus; events=%s", got, rec)
 	}
+}
+
+// The other order pins the at-least-once contract. A read that observes a
+// peer's close before the peer's own bead.closed arrives must announce it,
+// since a bd close sends no event at all, and applying the peer's event
+// afterwards must add nothing. The bus then carries the close twice, once from
+// the peer and once from this cache, so bead.closed consumers have to be
+// idempotent per bead.
+func TestPeerCloseReadBeforeItsEventIsAnnouncedOncePerCache(t *testing.T) {
+	t.Parallel()
+	mem, cs, rec, seed := newPrimedCloseEventCache(t)
+
+	if err := mem.Close(seed.ID); err != nil {
+		t.Fatalf("peer close: %v", err)
+	}
+	if _, err := cs.List(ListQuery{Status: "open", AllowScan: true, Live: true}); err != nil {
+		t.Fatalf("live List: %v", err)
+	}
+	assertClosedExactlyOnce(t, rec, seed.ID, "after a live list read the peer's close before its event")
+
+	closedRow, err := mem.Get(seed.ID)
+	if err != nil {
+		t.Fatalf("Get closed row: %v", err)
+	}
+	payload, err := EncodeBeadEventPayload(closedRow)
+	if err != nil {
+		t.Fatalf("encode payload: %v", err)
+	}
+	cs.ApplyEvent("bead.closed", payload)
+	cs.runReconciliation()
+	assertClosedExactlyOnce(t, rec, seed.ID, "after the peer's own bead.closed was applied")
 }
 
 // A cache-reconcile snapshot is another cache's own emission. That cache owns

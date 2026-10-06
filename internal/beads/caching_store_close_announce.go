@@ -8,7 +8,10 @@ import "sort"
 // not once per close: a close another process made and announced itself
 // reaches this cache either as its bead.closed, absorbed as already announced,
 // or through a read, and when the read lands first this cache announces the
-// close as well, so the bus carries two bead.closed for it.
+// close as well, so the bus carries two bead.closed for it. A read cannot tell
+// that close from a bd close, which announces nothing, so it never waits for a
+// peer's event: bead.closed delivery is at least once, and a consumer must
+// treat a repeat for a bead it already saw close as a no-op.
 
 // trackCloseTransitionLocked keeps unannouncedCloses in step with the row just
 // installed for id. A row that is not closed cancels any queued close (a

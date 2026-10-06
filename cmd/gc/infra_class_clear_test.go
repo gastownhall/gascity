@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
@@ -266,6 +267,43 @@ func TestTheClearReleasesSatisfiedCrossStoreBlocksAndKeepsTheRest(t *testing.T) 
 	}
 	if dependents != 3 {
 		t.Fatalf("the backup records %d cross-store dependents, want all 3", dependents)
+	}
+}
+
+// TestInfraBindingCopySatisfiesJudgesTheReadinessOutcome pins the clear's
+// release decision to the readiness contract: a binding copy releases its
+// cross-store dependents exactly when Ready() would treat it as satisfied. A
+// formula step that passed releases them even when its work record says
+// blocked, since dispatch has already advanced past it.
+func TestInfraBindingCopySatisfiesJudgesTheReadinessOutcome(t *testing.T) {
+	held := map[string]beads.Bead{
+		"open":    {ID: "open", Status: "open"},
+		"closed":  {ID: "closed", Status: "closed"},
+		"blocked": {ID: "blocked", Status: "closed", Metadata: beads.StringMap{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}},
+		"passed-step": {ID: "passed-step", Status: "closed", Metadata: beads.StringMap{
+			beadmeta.StepRefMetadataKey:     "mol.review",
+			beadmeta.OutcomeMetadataKey:     beadmeta.OutcomePass,
+			beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+		}},
+	}
+	for _, tc := range []struct {
+		id   string
+		want bool
+	}{
+		{id: "collected", want: true},
+		{id: "open", want: false},
+		{id: "closed", want: true},
+		{id: "blocked", want: false},
+		{id: "passed-step", want: true},
+	} {
+		if got := infraBindingCopySatisfies(held, tc.id); got != tc.want {
+			t.Errorf("infraBindingCopySatisfies(%q) = %v, want %v", tc.id, got, tc.want)
+		}
+		if b, ok := held[tc.id]; ok {
+			if ready := beads.DependencySatisfied(b.Status, beads.ReadinessWorkOutcome(b.Metadata)); ready != tc.want {
+				t.Errorf("%q: the clear releases = %v but readiness says satisfied = %v", tc.id, tc.want, ready)
+			}
+		}
 	}
 }
 
