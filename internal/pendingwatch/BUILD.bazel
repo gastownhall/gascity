@@ -13,11 +13,15 @@ go_library(
 
 go_test(
     name = "pendingwatch_test",
-    srcs = ["pendingwatch_test.go"],
+    srcs = [
+        "pendingwatch_test.go",
+        "testenv_import_test.go",
+    ],
     embed = [":pendingwatch"],
     deps = [
         "//internal/events",
         "//internal/runtime",
+        "//internal/testenv",
     ],
 )
 
