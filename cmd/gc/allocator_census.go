@@ -21,8 +21,11 @@ import (
 // A hard read error on the sessions leg fails the pass: an error is not an
 // empty city. A partial read keeps the rows it returned and makes the pass
 // partial (causeStoreQueryPartial), so nothing shrinks. Every other leg keeps
-// the rows it returned: none on a hard error. The create effect's locked live
-// re-census fails closed on any partial leg, so no plan rests on this read.
+// the rows it returned: none on a hard error. No create rests on this read
+// alone: a pool create's locked live re-census reads every leg and fails
+// closed on any partial one; a named create's locked read covers the sessions
+// store only, which fails closed on a partial read, since named rows live only
+// there (C11 refuses duplicates elsewhere at boot).
 //
 // Rows are keyed by (leg, bead ID), never by session name, so rows that share
 // a name get one entry each (F8). The fold keeps legacy's first-leg-wins rule

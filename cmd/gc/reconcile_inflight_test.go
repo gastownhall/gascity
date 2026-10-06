@@ -12,19 +12,27 @@ import (
 var inflightT0 = time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 
 var (
-	startEntry  = inflightEntry{Kind: inflightStart, Key: rowKey{Leg: "sessions", ID: "gc-1"}}
+	startEntry  = inflightEntry{Kind: "start", Key: rowKey{Leg: "sessions", ID: "gc-1"}}
 	createEntry = inflightEntry{Kind: inflightCreate, Token: "tok-1", Identity: "worker/worker-1", Leg: "sessions"}
 )
+
+// mustAdd adds e and returns its sequence number.
+func mustAdd(t *testing.T, m *inflightMap, e inflightEntry) uint64 {
+	t.Helper()
+	seq := m.add(e)
+	if seq == 0 {
+		t.Fatalf("add %+v refused", e)
+	}
+	return seq
+}
 
 // ambiguousCreate is a map holding createEntry, settled ambiguous at
 // settledAt.
 func ambiguousCreate(t *testing.T, settledAt time.Time) *inflightMap {
 	t.Helper()
 	m := newInflightMap()
-	if !m.add(createEntry) {
-		t.Fatal("add refused")
-	}
-	m.settle(settlement{Token: createEntry.Token, Ambiguous: true, At: settledAt})
+	seq := mustAdd(t, m, createEntry)
+	m.settle(settlement{Kind: inflightCreate, Seq: seq, Token: createEntry.Token, Ambiguous: true, At: settledAt})
 	return m
 }
 
@@ -66,21 +74,19 @@ func TestInflightClearsByMarker(t *testing.T) {
 // an already-running start, a refused or failed effect of any kind, and a
 // landed or failed create all clear at settlement.
 func TestInflightOnlyAmbiguousCreatesOutliveSettlement(t *testing.T) {
-	for k := inflightStart; k <= inflightZombie; k++ {
+	for _, k := range []string{"start", "write", "stop", "close", "rollback", "zombie", "kind-from-a-later-PR"} {
 		m := newInflightMap()
-		key := rowKey{Leg: "sessions", ID: fmt.Sprintf("gc-%d", k)}
-		if !m.add(inflightEntry{Kind: k, Key: key}) {
-			t.Fatalf("kind %d: add refused", k)
-		}
-		m.settle(settlement{Key: key, At: inflightT0})
+		key := rowKey{Leg: "sessions", ID: "gc-" + k}
+		seq := mustAdd(t, m, inflightEntry{Kind: k, Key: key})
+		m.settle(settlement{Kind: k, Seq: seq, Key: key, At: inflightT0})
 		if got := m.view().Entries; len(got) != 0 {
-			t.Fatalf("kind %d: entries after its settlement = %+v, want none", k, got)
+			t.Fatalf("kind %s: entries after its settlement = %+v, want none", k, got)
 		}
 	}
 	for _, ambiguous := range []bool{false, true} {
 		m := newInflightMap()
-		m.add(createEntry)
-		m.settle(settlement{Token: createEntry.Token, Ambiguous: ambiguous, At: inflightT0})
+		seq := mustAdd(t, m, createEntry)
+		m.settle(settlement{Kind: inflightCreate, Seq: seq, Token: createEntry.Token, Ambiguous: ambiguous, At: inflightT0})
 		if held := len(m.view().Entries) == 1; held != ambiguous {
 			t.Fatalf("create ambiguous=%v: held %v after settlement, want %v", ambiguous, held, ambiguous)
 		}
@@ -114,15 +120,14 @@ func TestHardBoundNeverClearsRunningEffect(t *testing.T) {
 		t.Fatalf("start deadline = %v, want 3m10s", deadline)
 	}
 	m := newInflightMap()
-	if !m.add(startEntry) || !m.add(createEntry) {
-		t.Fatal("add refused")
-	}
+	startSeq := mustAdd(t, m, startEntry)
+	mustAdd(t, m, createEntry)
 	for _, at := range []time.Duration{inflightHardBound, inflightHardBound + time.Second, deadline - time.Nanosecond, 10 * time.Minute} {
 		if got := m.clearVisible(tokens(), inflightT0.Add(at)); len(got) != 0 || len(m.view().Entries) != 2 {
 			t.Fatalf("at +%v: clears %+v, entries %+v, want both running effects held", at, got, m.view().Entries)
 		}
 	}
-	m.settle(settlement{Key: startEntry.Key, At: inflightT0.Add(deadline)})
+	m.settle(settlement{Kind: "start", Seq: startSeq, Key: startEntry.Key, At: inflightT0.Add(deadline)})
 	if got := m.view().Entries; len(got) != 1 || got[0].Kind != inflightCreate {
 		t.Fatalf("entries after the start's settlement = %+v, want only the running create", got)
 	}
@@ -175,7 +180,7 @@ func countOnce(v inflightView, pending map[rowKey]bool, c inflightCensus) int {
 		rows[k] = true
 	}
 	for _, e := range v.Entries {
-		if e.Kind == inflightStart {
+		if e.Kind == "start" {
 			rows[e.Key] = true
 		}
 	}
@@ -198,18 +203,18 @@ func TestInflightCountsEffectOnce(t *testing.T) {
 			row := rowKey{Leg: "sessions", ID: fmt.Sprintf("gc-%d", i)}
 			switch rng.Intn(3) {
 			case 0: // a start, maybe on a row that holds its pending claim
-				m.add(inflightEntry{Kind: inflightStart, Key: row})
+				m.add(inflightEntry{Kind: "start", Key: row})
 				pending[row] = rng.Intn(2) == 0
 			case 1: // a pending row with nothing running
 				pending[row] = true
 			default: // a create, running or settled, its row shown or not
 				tok := fmt.Sprintf("tok-%d", i)
-				m.add(inflightEntry{Kind: inflightCreate, Token: tok, Leg: "sessions"})
+				seq := m.add(inflightEntry{Kind: inflightCreate, Token: tok, Leg: "sessions"})
 				switch rng.Intn(3) {
 				case 0:
-					m.settle(settlement{Token: tok, Ambiguous: true, At: inflightT0})
+					m.settle(settlement{Kind: inflightCreate, Seq: seq, Token: tok, Ambiguous: true, At: inflightT0})
 				case 1:
-					m.settle(settlement{Token: tok, At: inflightT0}) // landed: its row shows
+					m.settle(settlement{Kind: inflightCreate, Seq: seq, Token: tok, At: inflightT0}) // landed: its row shows
 					pending[row], c.Tokens[tok] = true, true
 					continue
 				}
@@ -234,20 +239,97 @@ func TestInflightCountsEffectOnce(t *testing.T) {
 }
 
 // Kills a second entry for a row or token that has one (the pass proposes
-// nothing for a row in flight) and a settlement applied twice or to an
-// unknown entry (P3).
+// nothing for a row in flight), a refused kind, and a settlement that is
+// duplicate, stale (an earlier submit's) or for an unknown entry clearing
+// the row's or token's current effect (P3).
 func TestInflightAddAndSettleOnce(t *testing.T) {
 	m := newInflightMap()
-	if !m.add(createEntry) || !m.add(startEntry) || m.add(createEntry) || m.add(startEntry) ||
-		m.add(inflightEntry{Kind: inflightCreate}) || m.add(inflightEntry{Kind: inflightStop}) || m.add(inflightEntry{Key: startEntry.Key}) {
-		t.Fatal("add accepted a duplicate, an entry without its token or row, or no kind")
+	if m.add(inflightEntry{Kind: inflightCreate}) != 0 || m.add(inflightEntry{Kind: "stop"}) != 0 {
+		t.Fatal("add accepted a create without its token or a row effect without its row")
 	}
-	m.settle(settlement{Token: "tok-other", At: inflightT0})
-	m.settle(settlement{Key: rowKey{Leg: "sessions", ID: "gc-other"}, At: inflightT0})
-	m.settle(settlement{Token: createEntry.Token, Ambiguous: true, At: inflightT0})
-	m.settle(settlement{Token: createEntry.Token, At: inflightT0.Add(time.Minute)})
-	e := m.view().Entries
-	if len(e) != 2 || e[1].Token != "tok-1" || !e[1].Ambiguous || e[1].SettledAt != inflightT0 {
-		t.Fatalf("entries = %+v, want the start running and the create held by its first settlement", e)
+	createSeq := mustAdd(t, m, createEntry)
+	startSeq := mustAdd(t, m, startEntry)
+	if m.add(createEntry) != 0 || m.add(startEntry) != 0 {
+		t.Fatal("add accepted a duplicate token or row")
+	}
+	mustAdd(t, m, inflightEntry{Key: rowKey{Leg: "sessions", ID: "gc-opaque"}}) // no kind is refused
+
+	m.settle(settlement{Kind: inflightCreate, Seq: createSeq, Token: "tok-other", At: inflightT0})
+	m.settle(settlement{Kind: "start", Seq: startSeq, Key: rowKey{Leg: "sessions", ID: "gc-other"}, At: inflightT0})
+	m.settle(settlement{Kind: inflightCreate, Seq: createSeq, Token: createEntry.Token, Ambiguous: true, At: inflightT0})
+	m.settle(settlement{Kind: inflightCreate, Seq: createSeq, Token: createEntry.Token, At: inflightT0.Add(time.Minute)})
+	if e := m.creates[createEntry.Token]; !e.Ambiguous || e.SettledAt != inflightT0 {
+		t.Fatalf("create = %+v, want held by its first settlement", e)
+	}
+
+	// The start settles; the next start on the row is submitted; the first
+	// start's settlement arrives again and must not clear the second.
+	m.settle(settlement{Kind: "start", Seq: startSeq, Key: startEntry.Key, At: inflightT0})
+	next := mustAdd(t, m, startEntry)
+	m.settle(settlement{Kind: "start", Seq: startSeq, Key: startEntry.Key, At: inflightT0})
+	if e, ok := m.running[startEntry.Key]; !ok || e.Seq != next {
+		t.Fatalf("running[%v] = %+v (held %v), want the next start (seq %d) kept past a stale settlement", startEntry.Key, e, ok, next)
+	}
+	m.settle(settlement{Kind: "start", Seq: next, Key: startEntry.Key, At: inflightT0})
+	if _, ok := m.running[startEntry.Key]; ok {
+		t.Fatal("the next start's own settlement did not clear it")
+	}
+}
+
+// Kills settle dispatching on anything but the kind (must-fix 1): a row
+// effect's settlement clears its row whatever other fields it carries, a
+// token included, so the row never wedges.
+func TestInflightRowSettlementClearsWhateverItCarries(t *testing.T) {
+	for name, extra := range map[string]func(*settlement){
+		"plain":     func(*settlement) {},
+		"token":     func(s *settlement) { s.Token = "tok-row" },
+		"ambiguous": func(s *settlement) { s.Token, s.Ambiguous = "tok-row", true },
+		"error":     func(s *settlement) { s.Err = fmt.Errorf("provider: boom") },
+	} {
+		for _, k := range []string{"start", "zombie"} {
+			m := newInflightMap()
+			seq := mustAdd(t, m, inflightEntry{Kind: k, Key: startEntry.Key})
+			s := settlement{Kind: k, Seq: seq, Key: startEntry.Key, At: inflightT0}
+			extra(&s)
+			m.settle(s)
+			if got := m.view().Entries; len(got) != 0 {
+				t.Fatalf("%s %s: entries after the row's settlement = %+v, want none", name, k, got)
+			}
+		}
+	}
+}
+
+// Kills a clear of a running create (P5): only a settled ambiguous create
+// clears by its token, so a running create whose row the census already
+// shows stays until its settlement drains.
+func TestInflightRunningCreateNeverClearsByToken(t *testing.T) {
+	m := newInflightMap()
+	mustAdd(t, m, createEntry)
+	if got := m.clearVisible(tokens(createEntry.Token), inflightT0.Add(10*time.Minute)); len(got) != 0 || len(m.view().Entries) != 1 {
+		t.Fatalf("clears %+v, entries %+v, want the running create held", got, m.view().Entries)
+	}
+}
+
+// Kills an entry that outlives its effect (I8): once every effect's
+// settlement drained and every ambiguous create's token showed or its bound
+// passed, the map is empty.
+func TestInflightEmptyAtQuiescence(t *testing.T) {
+	m := newInflightMap()
+	var settles []settlement
+	for i := 0; i < 6; i++ {
+		row := rowKey{Leg: "sessions", ID: fmt.Sprintf("gc-%d", i)}
+		seq := mustAdd(t, m, inflightEntry{Kind: "start", Key: row})
+		settles = append(settles, settlement{Kind: "start", Seq: seq, Key: row, At: inflightT0})
+		tok := fmt.Sprintf("tok-%d", i)
+		seq = mustAdd(t, m, inflightEntry{Kind: inflightCreate, Token: tok})
+		settles = append(settles, settlement{Kind: inflightCreate, Seq: seq, Token: tok, Ambiguous: i%2 == 0, At: inflightT0})
+	}
+	for _, s := range settles {
+		m.settle(s)
+	}
+	m.clearVisible(tokens("tok-0"), inflightT0.Add(time.Second))
+	m.clearVisible(tokens(), inflightT0.Add(inflightHardBound))
+	if got := m.view().Entries; len(got) != 0 {
+		t.Fatalf("entries at quiescence = %+v, want none", got)
 	}
 }

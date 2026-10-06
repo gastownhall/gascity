@@ -43,14 +43,16 @@ type passRecord struct {
 	Result   passResult
 }
 
-// settlement is an effect's report that it finished. A create's names its
-// entry by Token, since the create has no row until it lands; Ambiguous says
-// its write call errored after the row may have landed (CONTRACT v5 P5). C4a
-// adds the outcome the backoff table needs.
+// settlement is an effect's report that it finished. Seq echoes the
+// in-flight entry's submit. A create's names its entry by Token, since the
+// create has no row until it lands; Ambiguous says its write call errored
+// after the row may have landed (CONTRACT v5 P5). A zero At is stamped with
+// the drain time. C4a adds the outcome the backoff table needs.
 type settlement struct {
 	Key       rowKey
 	Kind      string
 	Err       error
+	Seq       uint64
 	Token     string
 	Ambiguous bool
 	At        time.Time
@@ -189,6 +191,9 @@ func (p *planner) runPass(now time.Time) (res passResult) {
 		p.metrics.recordPass(now, p.last.Duration, r != nil, res.Counts)
 	}()
 	for _, s := range p.settlements.drain() {
+		if s.At.IsZero() {
+			s.At = now
+		}
 		p.inflight.settle(s)
 	}
 	return p.pass(now)

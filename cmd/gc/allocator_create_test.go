@@ -178,7 +178,7 @@ func assertFailedNoWrite(t *testing.T, h *createHarness) {
 func settledCreateEntry(t *testing.T, s createSettlement) *inflightMap {
 	t.Helper()
 	m := newInflightMap()
-	if !m.add(inflightEntry{Kind: inflightCreate, Token: s.Token, Identity: s.Identity, Leg: "sessions"}) {
+	if s.Seq = m.add(inflightEntry{Kind: inflightCreate, Token: s.Token, Identity: s.Identity, Leg: "sessions"}); s.Seq == 0 {
 		t.Fatal("add refused")
 	}
 	m.settle(s.settlement())
@@ -585,6 +585,9 @@ func TestCreateEffect_CommitsMarkerOrFailsNoWrite_AmbiguousLeavesMarker(t *testi
 		rows := sessionRows(t, store)
 		if len(rows) != 1 || !e.Landed || e.Ambiguous || e.RowID != rows[0].ID || e.Token != token {
 			t.Fatalf("settlement = %+v rows = %+v, want landed with the row and the plan's token", e, rows)
+		}
+		if !e.At.Equal(startedAt) {
+			t.Fatalf("settlement At = %v, want the effect's clock %v", e.At, startedAt)
 		}
 		if rows[0].InstanceToken != token {
 			t.Fatalf("row token = %q, want the plan's %q", rows[0].InstanceToken, token)
@@ -1862,6 +1865,7 @@ func TestCreateEffectFenceFailsClosedOnPartialLeg(t *testing.T) {
 	plan := namedPlan(t, cfg, "c1", "mayor")
 	h.runAll(t, &createPass{cfg: cfg, store: partialLegStore{Store: mem}}, plan)
 	assertFailedNoWrite(t, h)
+	h.assertRefused(t, plan, createStageFence)
 	if all, err := mem.List(beads.ListQuery{AllowScan: true, IncludeClosed: true}); err != nil || len(all) != 0 {
 		t.Fatalf("rows = %+v (%v), want none past a partial sessions leg", all, err)
 	}

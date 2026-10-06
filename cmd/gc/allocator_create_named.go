@@ -97,7 +97,10 @@ func (x *createEffects) resolveNamed(cfg *config.City, spec namedSessionSpec, pl
 	return tp, nil
 }
 
-// writeNamed is the locked step: the fenced live read, then one write.
+// writeNamed is the locked step: the fenced live read, then one write. The
+// read covers the sessions store alone, by invariant: configured named rows
+// live only in the sessions store, and C11 refuses duplicates on other legs
+// at boot. A partial or failed read of it fails the create closed.
 func (x *createEffects) writeNamed(pass *createPass, p createPlan, tp TemplateParams, prog *createProgress) (session.Info, error) {
 	plan, cfg, store := p.Named, pass.cfg, pass.store
 	now := x.host.now().UTC()

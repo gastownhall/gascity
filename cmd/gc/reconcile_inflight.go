@@ -22,30 +22,35 @@ import (
 // effect never reaches it: its executor deadline settles it first (P3).
 const inflightHardBound = 3 * time.Minute
 
-type inflightKind uint8
-
-const (
-	inflightCreate inflightKind = iota + 1
-	inflightStart
-	inflightWrite
-	inflightProbeEffect
-	inflightStop
-	inflightClose
-	inflightRollback
-	inflightZombie
-)
+// inflightCreate is the kind of a create's entry and settlement. Every other
+// kind is opaque to the map: it names a row effect, and C1b's per-kind table
+// gives it meaning.
+const inflightCreate = "create"
 
 // inflightEntry is one running effect, or one ambiguous create.
 type inflightEntry struct {
-	Kind inflightKind
+	Kind string
+	// Seq is the submit's sequence number, which add assigns and the effect's
+	// settlement echoes, so a duplicate or stale settlement never clears the
+	// row's next effect.
+	Seq uint64
 	// Key is the row a non-create effect acts on.
 	Key rowKey
-	// Token, Identity and Leg are a create's: the instance token the planner
-	// minted at submit, its identity (createIdentity.key), and the sessions
-	// leg, for the hard bound's alert.
-	Token    string
-	Identity string
-	Leg      string
+	// Endpoint is the effect's endpoint, for admission's gates and counts.
+	Endpoint endpointKey
+	// The fields below are a create's. Token is the instance token the planner
+	// minted at submit; Identity is createIdentity.key; Leg is the sessions leg,
+	// for the hard bound's alert. Template, QualifiedInstance, Slot,
+	// WorkBeadID and SessionName are its planning stand-in (C1b's
+	// inFlightStandIns).
+	Token             string
+	Identity          string
+	Leg               string
+	Template          string
+	QualifiedInstance string
+	Slot              int
+	WorkBeadID        string
+	SessionName       string
 	// Ambiguous marks a settled create whose row may exist; SettledAt is when.
 	Ambiguous bool
 	SettledAt time.Time
@@ -66,6 +71,7 @@ type clearRecord struct {
 }
 
 type inflightMap struct {
+	seq     uint64
 	running map[rowKey]inflightEntry
 	creates map[string]inflightEntry // running and ambiguous creates, by token
 }
@@ -76,37 +82,43 @@ func newInflightMap() *inflightMap {
 	return &inflightMap{running: make(map[rowKey]inflightEntry), creates: make(map[string]inflightEntry)}
 }
 
-// add records e at submit. It refuses a create without its token, any other
-// kind without its row, and a token or row that already has an entry.
-func (m *inflightMap) add(e inflightEntry) bool {
-	switch {
-	case e.Kind == inflightCreate:
-		if e.Token == "" || m.creates[e.Token].Kind != 0 {
-			return false
+// add records e at submit and returns its sequence number, which the
+// effect's settlement must carry; 0 means refused. It tells creates from row
+// effects by kind and refuses no kind: only a create without its token, a row
+// effect without its row, and a token or row that already has an entry.
+func (m *inflightMap) add(e inflightEntry) uint64 {
+	if e.Kind == inflightCreate {
+		if _, held := m.creates[e.Token]; e.Token == "" || held {
+			return 0
 		}
-		m.creates[e.Token] = e
-	case e.Kind > inflightCreate && e.Kind <= inflightZombie:
-		if e.Key.ID == "" || m.running[e.Key].Kind != 0 {
-			return false
-		}
-		m.running[e.Key] = e
-	default:
-		return false
+	} else if _, held := m.running[e.Key]; e.Key.ID == "" || held {
+		return 0
 	}
-	return true
+	m.seq++
+	e.Seq = m.seq
+	if e.Kind == inflightCreate {
+		m.creates[e.Token] = e
+	} else {
+		m.running[e.Key] = e
+	}
+	return e.Seq
 }
 
-// settle clears s's running entry, except that an ambiguous create stays
-// until its token shows in the census or the hard bound passes. A settlement
-// for no running entry is ignored: every effect settles once (P3).
+// settle applies s to the running entry it names by kind (a create by its
+// token, any other effect by its row) and sequence number. The entry clears,
+// except that an ambiguous create stays until its token shows in the census
+// or the hard bound passes. A settlement for no running entry, or for an
+// earlier submit, is ignored: every effect settles once (P3).
 func (m *inflightMap) settle(s settlement) {
-	if s.Token == "" {
-		delete(m.running, s.Key)
+	if s.Kind != inflightCreate {
+		if e, ok := m.running[s.Key]; ok && e.Seq == s.Seq {
+			delete(m.running, s.Key)
+		}
 		return
 	}
 	e, ok := m.creates[s.Token]
 	switch {
-	case !ok || e.Ambiguous:
+	case !ok || e.Seq != s.Seq || e.Ambiguous:
 	case s.Ambiguous:
 		e.Ambiguous, e.SettledAt = true, s.At
 		m.creates[s.Token] = e
@@ -170,10 +182,12 @@ func (v inflightView) uncensusedCreates(c inflightCensus) int {
 }
 
 // settlement is the create effect's report as the in-flight map applies it.
-// Only a create whose write may have landed is ambiguous; a named reopen
+// Only a create whose write may have landed is ambiguous. A named reopen
 // keeps the row's own token, which the census could never show, and its row
 // exists whether or not the reopen landed, so it clears at settlement like a
-// landed create.
+// landed create. That relies on the CachingStore's dirty-row refresh: the
+// next census and the next create's live read under the identity flock see
+// the reopened row, so no second create or reopen follows.
 func (s createSettlement) settlement() settlement {
-	return settlement{Kind: "create", Token: s.Token, Ambiguous: s.Ambiguous && s.RetargetRowID == "", At: s.At, Err: s.Err}
+	return settlement{Kind: inflightCreate, Seq: s.Seq, Token: s.Token, Ambiguous: s.Ambiguous && s.RetargetRowID == "", At: s.At, Err: s.Err}
 }

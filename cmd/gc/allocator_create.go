@@ -39,10 +39,12 @@ const createEffectParallelism = poolRealizeParallelism
 // createPlan is one fresh pool or dependency-floor row, or one configured
 // named session (Named), the allocator admitted under the create entry
 // EntryID. The planner mints Token at submit and records it in the entry, so
-// the row's token and the entry's cannot diverge (S-8); ConfigRev is the
-// revision the plan was decided under.
+// the row's token and the entry's cannot diverge (S-8); Seq is the entry's
+// submit, which the settlement echoes; ConfigRev is the revision the plan was
+// decided under.
 type createPlan struct {
 	EntryID           string
+	Seq               uint64
 	Token             string
 	ConfigRev         string
 	Template          string
@@ -135,7 +137,8 @@ type createEffectHost struct {
 	lookPath config.LookPathFunc
 	// settle posts an effect's settlement to the planner's queue, which
 	// applies it to its in-flight map and backoff table (P1). It is
-	// required, and it must not block.
+	// required, it must not block, and it must be safe for concurrent use:
+	// effects call it from their own goroutines.
 	settle func(createSettlement)
 	// withLocks takes the city identifier locks; nil means
 	// session.WithCitySessionIdentifierLocks.
@@ -382,6 +385,7 @@ func (x *createEffects) view(pass *createPass, token string) poolCreateView {
 // Work refuses or resets the work item's record (C6.5(a)).
 type createSettlement struct {
 	EntryID   string
+	Seq       uint64
 	Identity  string // createIdentity.key
 	Token     string
 	ConfigRev string
@@ -426,7 +430,7 @@ func (x *createEffects) settle(p createPlan, prog createProgress, info session.I
 		}
 	}()
 	s := createSettlement{
-		EntryID: p.EntryID, Identity: p.identity().key(), Token: p.Token, ConfigRev: p.ConfigRev,
+		EntryID: p.EntryID, Seq: p.Seq, Identity: p.identity().key(), Token: p.Token, ConfigRev: p.ConfigRev,
 		RetargetRowID: prog.retarget, Work: prog.work, Err: err, At: x.host.now(),
 	}
 	var written poolCreateWriteError
