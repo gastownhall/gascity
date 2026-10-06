@@ -663,7 +663,7 @@ func TestExternalReadsSlowSourceDoesNotDelayOthers(t *testing.T) {
 			if got := hung.lists.Load(); got != lists {
 				t.Fatalf("%s: %d live reads of the hung leg, want %d", when, got, lists)
 			}
-			if rows, err := newV2DemandReads(time.Now(), rec, nil).RawOpen(hung); !errors.Is(err, errSourceTimeout) || len(rows) != 0 {
+			if rows, err := newV2DemandReads(time.Now(), rec).RawOpen(hung); !errors.Is(err, errSourceTimeout) || len(rows) != 0 {
 				t.Fatalf("%s: v2 RawOpen of the hung leg = %d rows, %v; want errSourceTimeout and no rows", when, len(rows), err)
 			}
 		}
@@ -737,7 +737,7 @@ func TestExternalReadsSteadyStateAtBdLatencies(t *testing.T) {
 				for end := start.Add(10 * time.Minute); time.Now().Before(end); {
 					<-time.After(time.Second)
 					rec := lane.recording()
-					_, derr := newV2DemandReads(time.Now(), rec, nil).RawOpen(store)
+					_, derr := newV2DemandReads(time.Now(), rec).RawOpen(store)
 					sl, ok := rec.sessionLeg(store)
 					served := derr == nil && ok && sl.Err == nil
 					if warmUp == 0 {
@@ -785,12 +785,12 @@ func TestExternalReadsMissServesPreviousResultUntilStale(t *testing.T) {
 		}
 		for time.Now().Before(t0.Add(3 * backstopTestInterval)) {
 			advanceBackstop(time.Second)
-			if _, err := newV2DemandReads(time.Now(), lane.recording(), nil).RawOpen(store); err != nil {
+			if _, err := newV2DemandReads(time.Now(), lane.recording()).RawOpen(store); err != nil {
 				t.Fatalf("held over at %v: %v, want the previous result served", time.Since(t0), err)
 			}
 		}
 		advanceBackstop(time.Nanosecond)
-		if _, err := newV2DemandReads(time.Now(), lane.recording(), nil).RawOpen(store); !errors.Is(err, errDemandRecordingStale) {
+		if _, err := newV2DemandReads(time.Now(), lane.recording()).RawOpen(store); !errors.Is(err, errDemandRecordingStale) {
 			t.Fatalf("past 3 patrols from the result's end: %v, want stale", err)
 		}
 		before := wakes.Load()
@@ -873,10 +873,10 @@ func TestExternalReadsSourceFreshForThreePatrols(t *testing.T) {
 	at(lane, t0).pass(context.Background())
 	rec := lane.recording()
 	bound := t0.Add(3 * backstopTestInterval)
-	if _, err := newV2DemandReads(bound, rec, nil).RawOpen(cache); err != nil {
+	if _, err := newV2DemandReads(bound, rec).RawOpen(cache); err != nil {
 		t.Errorf("RawOpen at 3 patrols: %v, want served", err)
 	}
-	if _, err := newV2DemandReads(bound.Add(time.Nanosecond), rec, nil).RawOpen(cache); !errors.Is(err, errDemandRecordingStale) {
+	if _, err := newV2DemandReads(bound.Add(time.Nanosecond), rec).RawOpen(cache); !errors.Is(err, errDemandRecordingStale) {
 		t.Errorf("RawOpen past 3 patrols: err = %v, want the stale source", err)
 	}
 	if leg, ok := rec.sessionLeg(cache); !ok || !leg.At.Equal(t0) || !leg.StartedAt.Equal(t0) || !leg.Expires.Equal(bound) {
@@ -1245,7 +1245,7 @@ func TestBackstopLaneRecordsAndServesThroughPolicyFrontDoor(t *testing.T) {
 			t.Errorf("%s: session leg not found", name)
 		}
 	}
-	reads := newV2DemandReads(now, rec, newDemandLastGood())
+	reads := newV2DemandReads(now, rec)
 	if rows, err := reads.RawOpen(front); err != nil || !slices.Contains(ids(rows), "gc-r1") {
 		t.Errorf("v2 RawOpen through the front door = %v, %v; want the recorded gc-r1", ids(rows), err)
 	}
@@ -1266,7 +1266,7 @@ func TestBackstopLaneClosedNamedIndexThroughPolicyFrontDoor(t *testing.T) {
 	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 	at(lane, now).pass(context.Background())
 	for name, store := range map[string]beads.Store{"front door": front, "cache": cache} {
-		idx, err := newV2DemandReads(now, lane.recording(), nil).ClosedNamedIndex(store)
+		idx, err := newV2DemandReads(now, lane.recording()).ClosedNamedIndex(store)
 		if _, found := idx.Find("mayor"); err != nil || !found {
 			t.Errorf("%s: v2 closed index found mayor=%t err=%v, want the recorded index", name, found, err)
 		}
@@ -1400,7 +1400,7 @@ func TestBackstopLaneRecordsClosedNamedIndexOnEveryLeg(t *testing.T) {
 
 		legacy := readyAssignedWorkAssignees(cfg, cache, nil, nil, nil, "", nil)
 		backing.armed.Store(true)
-		v2 := readyAssignedWorkAssignees(cfg, cache, nil, nil, nil, "", newV2DemandReads(now, rec, nil))
+		v2 := readyAssignedWorkAssignees(cfg, cache, nil, nil, nil, "", newV2DemandReads(now, rec))
 		if runtime := config.NamedSessionRuntimeName(config.EffectiveCityName(cfg, ""), cfg.Workspace, "mayor"); !slices.Equal(v2, legacy) || !slices.Contains(v2, runtime) {
 			t.Errorf("exact=%t: v2 assignees %v, legacy %v; want equal, with the closed phantom's %q", exact, v2, legacy, runtime)
 		}
@@ -1572,7 +1572,6 @@ func TestBackstopLaneConcurrentWithAllocatorPasses(t *testing.T) {
 		return externalReadsEnv{CityPath: cityPath, Cfg: cfg, CityStore: front, RigStores: rigs, SuspendedRigPaths: suspended, ProbeStores: []beads.Store{probe, rigFixture}, Sessions: sessions}, nil
 	}, func() { wakes.Add(1) }, func(fn func(), _ string) bool { fn(); return false }, gapEvents, io.Discard)
 	ctx := context.Background()
-	lastGood := newDemandLastGood()
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		for range rounds {
@@ -1594,7 +1593,7 @@ func TestBackstopLaneConcurrentWithAllocatorPasses(t *testing.T) {
 		wg.Go(func() {
 			for range rounds {
 				rec := lane.recording()
-				reads := newV2DemandReads(time.Now(), rec, lastGood)
+				reads := newV2DemandReads(time.Now(), rec)
 				_ = runDemandCollectors(cfg, front, func() *readyDemandCache { return newReadyDemandCacheWithReads(reads) }, reads)
 				rows, _, refs, _ := collectOpenUnassignedRoutedWork(cityPath, cfg, front, rigs, suspended, io.Discard, nil, reads)
 				projected, _ := projectControlDispatcherRoutes(cfg, rows, refs)
