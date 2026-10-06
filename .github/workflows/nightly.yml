@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  DOLT_VERSION: "2.1.7"
+  DOLT_VERSION: "2.2.0"
   BD_VERSION: "v1.3.1"
 
 jobs:
@@ -26,9 +26,15 @@ jobs:
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
 
+      - name: Fetch the v1.5.0-rc1 tag for the split-storage upgrade scenario
+        # TestSplitStorageMigratedFormulaCompletes builds gc from this tag; the
+        # checkout above is shallow and tagless.
+        run: git fetch --no-tags --depth=1 origin +refs/tags/v1.5.0-rc1:refs/tags/v1.5.0-rc1
+
       - name: Tier B lifecycle tests
         env:
           ACCEPTANCE_B_TIMEOUT: 20m
+          GC_REQUIRE_ACCEPTANCE_SPLIT_RC1_GC: "1"
           EXTRA_TEST_ENV: >-
             GC_IDLE_BEAD_STABILITY_WARMUP=10s
             GC_IDLE_BEAD_STABILITY_SAMPLES=36
@@ -84,7 +90,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      DOLT_VERSION: "2.1.7"
+      DOLT_VERSION: "2.2.0"
       BD_VERSION: "v1.3.1"
       GC_BEADS: sqlite
       GC_ACCEPTANCE_BEADS_PROVIDER: sqlite
@@ -147,6 +153,11 @@ jobs:
           go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
           echo "GC_ACCEPTANCE_BD_BIN=${HOME}/.local/bin/bd" >> "$GITHUB_ENV"
           echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+      # A failing test copies its managed Dolt server logs and the supervisor
+      # log out of its temp dir before t.Cleanup removes it
+      # (internal/testutil.SaveFailureDiagnostics); the upload below keeps them.
+      - name: Route acceptance failure diagnostics
+        run: echo "GC_TEST_FAILURE_ARTIFACT_DIR=${RUNNER_TEMP}/failure-artifacts" >> "$GITHUB_ENV"
       - name: Verify bd supports proxied-server
         run: |
           set -euo pipefail
@@ -161,6 +172,14 @@ jobs:
           set -euo pipefail
           go test -tags acceptance_a -timeout 45m -count=1 -v \
             -run 'TestBeadsProxiedDefault$' ./test/acceptance/
+      - name: Upload acceptance failure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: failure-diagnostics-beads-proxied-perf-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/failure-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
 
   # Catches registry-side drift: a new gastown release published to
   # gascity-packs makes the local pins stale without any PR to trigger
@@ -175,6 +194,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
 
       - name: Verify bundled gastown pins match the registry
         run: |
@@ -188,7 +209,17 @@ jobs:
             sleep $((attempt * 10))
           done
 
-  # The push path runs these same ledgers in grace mode, so a lapsed waiver
+      # A new beads release (or a beads Dolt pin raise) makes deps.env stale
+      # without any PR to trigger a check. The bundled core/bd/dolt pin is
+      # checked at release time only (RC Gate): on main the bundled content
+      # moves ahead of it between releases by design.
+      - name: Verify bd and dolt pins are the latest releases
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/check-embedded-pins --skip-bundled
+
+  # The push path runs the same date check (internal/testpolicy/waiverexpiry)
+  # in grace mode, so a lapsed waiver
   # warns for 14 days before it blocks anyone (internal/testpolicy/waiverclock).
   # This job is what is supposed to spend those 14 days getting the owner's
   # attention. The mode lives inside the script, not in this YAML, so the
@@ -203,6 +234,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
 
       - name: Audit dated waivers in strict mode
         run: scripts/waiver-clock-audit

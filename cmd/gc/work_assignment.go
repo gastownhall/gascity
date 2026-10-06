@@ -296,9 +296,10 @@ const (
 	fencedReleaseRefused
 )
 
-// releaseAssignmentFenced writes opts, a release decided from the snapshot wb,
-// as ONE write that lands only while the bead still has wb's status and
-// assignee. Any read may be stale, so the fence is at the write:
+// releaseAssignmentFenced writes opts, a release (or ReassignWorkBead's
+// reassign) decided from the snapshot wb, as ONE write that lands only while
+// the bead still has wb's status and assignee. Any read may be stale, so the
+// fence is at the write:
 //
 //  1. Where the store has a guarded update (beads.AssignmentGuardedUpdaterFor:
 //     BdStore with `bd update --if-status --if-assignee`), the backend checks
@@ -393,10 +394,9 @@ func releaseWorkAssignmentIfCurrent(store beads.Store, item beads.Bead) (release
 }
 
 // liveWorkAssignmentAssigneeMatches reports whether a WORK bead still carries the
-// (status, assignee) pair a caller's earlier snapshot recorded. It is the single
-// implementation of the pre-write staleness check for both the work path here and
-// the pool path in pool_session_name.go, because the subtleties below are easy to
-// get wrong once and impossible to keep in sync twice.
+// (status, assignee) pair a caller's earlier snapshot recorded. The pool path in
+// pool_session_name.go uses it as its pre-write staleness check; the work path
+// here fences its writes instead (releaseAssignmentFenced).
 //
 // It uses a LIVE list query, not Get, and that choice is load-bearing:
 // CachingStore.Get serves a clone straight from the in-memory cache for a bead
@@ -438,32 +438,40 @@ func liveWorkAssignmentAssigneeMatches(store beads.Store, id, expectedStatus, ex
 	return false, nil
 }
 
-// ReassignWorkBead re-homes one WORK bead onto a new session identity, emitting
-// the exact Update{Assignee:&new} the raw reassign op in
-// reassignWorkAssignedToRetiredSessionBead emitted. It deliberately touches
-// neither Status nor Metadata.
+// ReassignWorkBead re-homes one WORK bead onto a new session identity, writing
+// the same fields as the raw reassign op in
+// reassignWorkAssignedToRetiredSessionBead, Assignee=&new. It deliberately
+// touches neither Status nor Metadata.
 //
-// The write is CONDITIONAL on item still being assigned to the session the
+// The write is CONDITIONAL on item still having the status and assignee the
 // caller's snapshot saw. Both callers walk an OpenAssignedTo list taken earlier
 // in the tick (session_beads.go), so this carries the same lost-update hazard as
 // the release path (dr-huhn): a fresh worker can claim the bead between the list
 // and the write, and an unconditional reassign then stamps the retired session's
-// successor over that live claim. There is no conditional-reassign verb to reach
-// for — ReleaseIfCurrent only clears — so the guard is the live re-read.
+// successor over that live claim. So the reassign is ONE write fenced on the
+// snapshot (releaseAssignmentFenced), with its outcomes read as ReleaseWorkBead's
+// tier 2 reads them: a bead that moved on is skipped with no error, and a write
+// the store could not fence, or a fence lost to a write that may not have
+// touched the assignment, leaves the bead with the retired identity and returns
+// an error. The callers log it, and the next pass retries.
 func (w workAssignment) ReassignWorkBead(item beads.Bead, newSessionID string) error {
 	store := w.unwrapped()
 	if store == nil {
 		return nil
 	}
-	stillCurrent, err := liveWorkAssignmentAssigneeMatches(store, item.ID, item.Status, item.Assignee)
+	outcome, err := releaseAssignmentFenced(store, item, beads.UpdateOpts{Assignee: &newSessionID})
 	if err != nil {
-		return err
+		return fmt.Errorf("reassigning %q: %w", item.ID, err)
 	}
-	if !stillCurrent {
+	switch outcome {
+	case fencedReleaseChanged:
 		log.Printf("ReassignWorkBead: skipping reassign for %s: assignment changed between snapshot and reassign write", item.ID)
-		return nil
+	case fencedReleaseLost:
+		return fmt.Errorf("reassigning %q: the bead changed after the re-read; it stays with the retired session until the next pass", item.ID)
+	case fencedReleaseRefused:
+		return fmt.Errorf("reassigning %q: the store cannot reassign it conditionally: %w", item.ID, beads.ErrConditionalWriteUnsupported)
 	}
-	return store.Update(item.ID, beads.UpdateOpts{Assignee: &newSessionID})
+	return nil
 }
 
 // ClearDetachedProbe clears the detached-probe metadata contract on a WORK bead,

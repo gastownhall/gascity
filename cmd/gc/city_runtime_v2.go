@@ -95,6 +95,10 @@ func (cr *CityRuntime) newV2Host() v2Host {
 			return cr.inventoryLane.cache
 		},
 		rec: cr.rec,
+		bootCensus: func() (v2SessionMigration, error) {
+			rigs := cr.rigBeadStores() // residency:allow — the census frame; collectOpenSessionInfos plans the legs (storeref.Plan)
+			return readV2SessionMigration(cr.cityPath, cr.cityName, cr.serviceConfigSnapshot(), cr.v2SessionsStore(), rigs)
+		},
 	}
 }
 

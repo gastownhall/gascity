@@ -169,7 +169,7 @@ func TestProxiedNativeSafety(t *testing.T) {
 	// withholds the whole BD_ namespace around the library open, so these are
 	// actively UNSET for its duration, and the rows below are what makes that a
 	// measurement instead of a comment.
-	env = env.With("BD_ALLOW_REMOTE_MIGRATE", "1").With("BD_IGNORE_SCHEMA_SKEW", "1")
+	env = proxiedNeverIdleEnv(env.With("BD_ALLOW_REMOTE_MIGRATE", "1").With("BD_IGNORE_SCHEMA_SKEW", "1"))
 	lane := proxiedNativeLaneEnv(env)
 
 	city := helpers.NewCity(t, env)
@@ -181,7 +181,7 @@ func TestProxiedNativeSafety(t *testing.T) {
 		}
 	})
 	city.InitNoStart("claude")
-	assertProxiedScope(t, cityRoot, "the safety city")
+	assertProxiedScope(t, env, cityRoot, "the safety city")
 	// The lifecycle fixture's two readers (tryAccount, heal) are reused here
 	// rather than reimplemented: they already know that a disturbed scope may
 	// report no beads-store result at all, which every row below depends on.

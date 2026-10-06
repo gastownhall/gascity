@@ -70,6 +70,15 @@ const (
 // the controller loop takes Lock when updating cfg/sp/stores.
 type controllerState struct {
 	mu sync.RWMutex
+	// beadsQuiescent is set by the city runtime while the city is suspended
+	// and has no running sessions: every cache this state owns then skips its
+	// periodic reconcile, so nothing touches a store whose pair was retired.
+	beadsQuiescent *atomic.Bool
+	// suspendedRigs is the set of rigs the city runtime last saw suspended,
+	// published every tick. A suspended rig's cache skips its periodic
+	// reconcile from the next tick on, with no reload: any bd read restarts
+	// the rig's retired proxy.
+	suspendedRigs atomic.Pointer[map[string]bool]
 	// onDeathGate is the city runtime's on_death start interlock, set when
 	// its inventory lane starts; nil holds nothing.
 	onDeathGate atomic.Pointer[onDeathGate]
@@ -254,7 +263,8 @@ func newControllerStateWithRoutes(
 	}
 	// A split city's binding gets the CachingStore its work ledger has, before
 	// the class-routed services below are built over it (class_store_cache.go).
-	routes = routes.withControllerCache(ctx, ep)
+	beadsQuiescent := new(atomic.Bool)
+	routes = routes.withControllerCache(ctx, ep, reconcileGateFor(beadsQuiescent))
 	// Latch the rollout-gate snapshot ONCE from the boot config. A resolve error
 	// (nil cfg or an out-of-enum config value) is warn-and-continue: the zero
 	// Flags is degraded-safe (legacy paths), and this constructor returns no
@@ -264,6 +274,7 @@ func newControllerStateWithRoutes(
 		fmt.Fprintf(os.Stderr, "api: rollout gates: %v (using zero Flags; legacy paths)\n", rolloutErr)
 	}
 	cs := &controllerState{
+		beadsQuiescent:      beadsQuiescent,
 		cfg:                 cfg,
 		sp:                  sp,
 		cacheCtx:            ctx,
@@ -287,6 +298,7 @@ func newControllerStateWithRoutes(
 	for _, n := range cs.rolloutFlags.Notices() {
 		cs.rolloutWarnf("api: rollout: %s\n", n.Message)
 	}
+	cs.setSuspendedRigs(buildEffectiveSuspendedRigNames(cfg, loadSuspensionStateBestEffort(cityPath)))
 	cs.beadStores = cs.buildStores(cfg)
 	// Capture the initial raw config snapshot so provenance reads before the
 	// first reload still use the gate's basis. nil is tolerated: RawConfig
@@ -297,7 +309,7 @@ func newControllerStateWithRoutes(
 		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
 	} else {
 		store := opened.Store
-		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true)
+		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true, cs.reconcileGate())
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
 		cs.cityMailProv = newCityMailProvider(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
 		cs.extmsgSvc = newCityExtMsgServices(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
@@ -308,13 +320,13 @@ func newControllerStateWithRoutes(
 }
 
 // wrapWithCachingStore wraps store in an in-memory read cache. When
-// backgroundRefresh is true the cache fully primes and runs a continuous
-// reconcile loop (the steady-state cost: one bd subprocess per cycle per scope).
-// When false the cache only pre-primes active beads synchronously — enough for
-// on-demand reads — and skips both the async full prime and the reconcile loop.
-// Suspended rigs pass false: they spawn no agents, so nothing writes locally and
-// a continuously refreshed cache buys nothing; reconciling every suspended rig
-// every cycle is what pegs the supervisor (gastownhall/gascity #1978 follow-up).
+// backgroundRefresh is true the cache pre-primes active beads, fully primes
+// and runs a continuous reconcile loop (the steady-state cost: one bd
+// subprocess per cycle per scope). When false it does none of that: reads go
+// to bd on demand. Suspended rigs pass false: they spawn no agents, so nothing
+// writes locally, and gc must not touch a suspended scope at all — any bd read
+// restarts its retired proxy and Dolt (gastownhall/gascity #1978 follow-up,
+// #6561).
 func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider, backgroundRefresh bool, opts ...beads.CachingStoreOption) beads.Store {
 	baseStore, policyStore, policyWrapped := unwrapBeadPolicyStore(store)
 	if baseStore == nil {
@@ -331,9 +343,13 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	// Pre-prime active beads synchronously (~1-2s, indexed queries).
 	// Loads open + in_progress beads — enough for the startup path
 	// (adoption, session snapshot, desired state) so the city can
-	// reach "ready" without waiting for the full prime.
-	if err := cs.PrimeActive(); err != nil {
-		log.Printf("caching-store: pre-prime failed: %v", err)
+	// reach "ready" without waiting for the full prime. A suspended rig
+	// (no background refresh) is not primed at all: it is left cold, and
+	// any read it does get goes to bd on demand.
+	if backgroundRefresh {
+		if err := cs.PrimeActive(); err != nil {
+			log.Printf("caching-store: pre-prime failed: %v", err)
+		}
 	}
 	// No cancellable ctx, or caller opted out of background refresh (suspended
 	// rig): serve from the synchronous pre-prime only, no async prime/reconcile.
@@ -421,13 +437,13 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 			// Legacy file mode aliases every rig to the same backing store, so
 			// the cache handle must be shared too for immediate cross-rig reads.
 			if sharedLegacyCachedStore == nil {
-				sharedLegacyCachedStore = wrapWithCachingStore(cs.cacheCtx, sharedLegacyFileStore, cs.eventProv, true)
+				sharedLegacyCachedStore = wrapWithCachingStore(cs.cacheCtx, sharedLegacyFileStore, cs.eventProv, true, cs.reconcileGate())
 			}
 			stores[rig.Name] = sharedLegacyCachedStore
 			continue
 		}
 		store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix(), cfg)
-		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig))
+		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig), cs.rigReconcileGate(rig.Name))
 	}
 	return stores
 }
@@ -445,6 +461,54 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 // the skip at all.
 func rigStoreBackgroundRefresh(suspState suspensionstate.State, rig config.Rig) bool {
 	return !suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart())
+}
+
+// reconcileGate is the CachingStoreOption every cache this state owns carries:
+// it pauses the cache's periodic reconcile while the city is quiescent.
+func (cs *controllerState) reconcileGate() beads.CachingStoreOption {
+	return reconcileGateFor(cs.beadsQuiescent)
+}
+
+// reconcileGateFor pauses a cache's periodic reconcile while quiescent is set.
+func reconcileGateFor(quiescent *atomic.Bool) beads.CachingStoreOption {
+	return beads.WithReconcileGate(func() bool { return quiescent == nil || !quiescent.Load() })
+}
+
+// rigReconcileGate is reconcileGate for one rig's cache: it also pauses while
+// that rig is suspended (suspendedRigs).
+func (cs *controllerState) rigReconcileGate(rigName string) beads.CachingStoreOption {
+	return beads.WithReconcileGate(func() bool {
+		if cs.beadsQuiescent != nil && cs.beadsQuiescent.Load() {
+			return false
+		}
+		return !cs.rigSuspended(rigName)
+	})
+}
+
+// rigSuspended reports whether the city runtime last saw rigName suspended.
+func (cs *controllerState) rigSuspended(rigName string) bool {
+	if cs == nil {
+		return false
+	}
+	rigs := cs.suspendedRigs.Load()
+	return rigs != nil && (*rigs)[rigName]
+}
+
+// setSuspendedRigs publishes the rigs the city runtime sees suspended.
+func (cs *controllerState) setSuspendedRigs(rigs map[string]bool) {
+	if cs == nil {
+		return
+	}
+	cs.suspendedRigs.Store(&rigs)
+}
+
+// setBeadsQuiescent records whether the city is quiescent (suspended, with no
+// running sessions). See beadsQuiescent.
+func (cs *controllerState) setBeadsQuiescent(quiescent bool) {
+	if cs == nil || cs.beadsQuiescent == nil {
+		return
+	}
+	cs.beadsQuiescent.Store(quiescent)
 }
 
 // openRigStore creates a bead store for a rig path using the given provider.
@@ -714,8 +778,14 @@ func (cs *controllerState) completionReconcileInputs(plane storePlane) (events.P
 		resolveGraphStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv),
 		cs.cityBeadStore,
 	}
+	// A suspended rig is not swept: it runs nothing, and a bd read restarts
+	// its retired proxy and Dolt.
+	suspendedRigs := buildEffectiveSuspendedRigNames(cs.cfg, loadSuspensionStateBestEffort(cs.cityPath))
 	rigStores := make(map[string]beads.Store, len(cs.beadStores))
 	for name, store := range cs.beadStores {
+		if suspendedRigs[name] {
+			continue
+		}
 		rigStores[name] = store
 	}
 	cs.mu.RUnlock()
@@ -1112,7 +1182,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	var cityMailProv mail.Provider
 	var extSvc *extmsg.Services
 	if cityStore != nil {
-		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv, true)
+		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv, true, cs.reconcileGate())
 		cityMailProv = newCityMailProvider(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
 		extSvc = newCityExtMsgServices(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
 	}

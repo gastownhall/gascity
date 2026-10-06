@@ -81,16 +81,25 @@ func (c *CachingStore) reconcileLoop(ctx context.Context, stagger time.Duration)
 		case <-timer.C:
 		}
 
-		if c.nextReconcileDelay(time.Now()) == 0 && c.reconciling.CompareAndSwap(false, true) {
-			c.runReconciliation()
-			c.reconciling.Store(false)
-		}
+		c.reconcileIfDue(time.Now())
 
 		next := c.nextReconcileDelay(time.Now())
 		if next <= 0 || next > cacheReconcilePollInterval {
 			next = cacheReconcilePollInterval
 		}
 		timer.Reset(next)
+	}
+}
+
+// reconcileIfDue runs one reconcile when one is due, none is in flight, and
+// the reconcile gate (WithReconcileGate), if any, allows it.
+func (c *CachingStore) reconcileIfDue(now time.Time) {
+	if c.reconcileGate != nil && !c.reconcileGate() {
+		return
+	}
+	if c.nextReconcileDelay(now) == 0 && c.reconciling.CompareAndSwap(false, true) {
+		c.runReconciliation()
+		c.reconciling.Store(false)
 	}
 }
 

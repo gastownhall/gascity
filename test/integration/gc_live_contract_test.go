@@ -48,7 +48,7 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	writeSupervisorConfig(t, gcHome, port)
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
-	env := append(integrationEnvFor(gcHome, runtimeDir, true), "GC_SESSION=subprocess")
+	env := append(integrationEnvFor(t, gcHome, runtimeDir, true), "GC_SESSION=subprocess")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -1025,22 +1025,7 @@ func liveContractRequest(t *testing.T, baseURL string, v *apicontract.Spec, meth
 
 func liveContractRequestWithHeaders(t *testing.T, baseURL string, v *apicontract.Spec, method, path string, body any, wantStatus int, headers map[string]string) []byte {
 	t.Helper()
-	req, err := liveContractHTTPRequest(baseURL, method, path, body)
-	if err != nil {
-		t.Fatalf("%s %s build request: %v", method, path, err)
-	}
-	for name, value := range headers {
-		req.Header.Set(name, value)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("%s %s read response: %v", method, path, err)
-	}
+	req, resp, raw := liveContractDo(t, baseURL, v, method, path, body, headers, func(status int) bool { return status == wantStatus })
 	if resp.StatusCode != wantStatus {
 		t.Fatalf("%s %s status = %d, want %d; body: %s", method, path, resp.StatusCode, wantStatus, string(raw))
 	}
@@ -1050,21 +1035,71 @@ func liveContractRequestWithHeaders(t *testing.T, baseURL string, v *apicontract
 	return raw
 }
 
+// liveContractStoreConflictBudget bounds how long one request keeps being
+// re-issued while the API answers with a declared store_conflict 503.
+const liveContractStoreConflictBudget = 30 * time.Second
+
+// liveContractDo sends one request and returns the response the caller should
+// judge. A declared store_conflict 503 that wanted does not accept is
+// re-issued until liveContractStoreConflictBudget runs out: the supervisor's
+// controller (reconciler, usage sweep) writes the same session rows this test
+// mutates, and under host load a write can lose every one of the store's
+// bounded retries to it. The API reports that as a retryable 503 rather than
+// a failure (#5457), so a real client re-issues the request, and so does this
+// one. The server has already backed off between its own store attempts, so
+// the re-issue does not wait. Each re-issued 503 must still match the OpenAPI
+// document.
+func liveContractDo(t *testing.T, baseURL string, v *apicontract.Spec, method, path string, body any, headers map[string]string, wanted func(int) bool) (*http.Request, *http.Response, []byte) {
+	t.Helper()
+	deadline := time.Now().Add(liveContractStoreConflictBudget)
+	for {
+		req, err := liveContractHTTPRequest(baseURL, method, path, body)
+		if err != nil {
+			t.Fatalf("%s %s build request: %v", method, path, err)
+		}
+		for name, value := range headers {
+			req.Header.Set(name, value)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		raw, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			t.Fatalf("%s %s read response: %v", method, path, err)
+		}
+		if wanted(resp.StatusCode) || !liveContractStoreConflict(resp.StatusCode, raw) || time.Now().After(deadline) {
+			return req, resp, raw
+		}
+		if v != nil {
+			validateLiveContractResponse(t, v, req, resp, raw)
+		}
+		t.Logf("%s %s: re-issuing after declared store_conflict 503; body: %s", method, path, string(raw))
+	}
+}
+
+// liveContractStoreConflict reports whether a response is the API's declared,
+// retryable store_conflict 503: a store write that lost a serialization race
+// on every bounded retry and never committed. Any other response, including a
+// 503 for another cause, is final.
+func liveContractStoreConflict(status int, raw []byte) bool {
+	if status != http.StatusServiceUnavailable {
+		return false
+	}
+	var problem struct {
+		Code   string `json:"code"`
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal(raw, &problem); err != nil {
+		return false
+	}
+	return problem.Code == "store-unavailable" && strings.HasPrefix(problem.Detail, "store_conflict: ")
+}
+
 func liveContractRequestOneOf(t *testing.T, baseURL string, v *apicontract.Spec, method, path string, body any, wantStatuses []int) []byte {
 	t.Helper()
-	req, err := liveContractHTTPRequest(baseURL, method, path, body)
-	if err != nil {
-		t.Fatalf("%s %s build request: %v", method, path, err)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("%s %s read response: %v", method, path, err)
-	}
+	req, resp, raw := liveContractDo(t, baseURL, v, method, path, body, nil, func(status int) bool { return intListContains(wantStatuses, status) })
 	if !intListContains(wantStatuses, resp.StatusCode) {
 		t.Fatalf("%s %s status = %d, want one of %v; body: %s", method, path, resp.StatusCode, wantStatuses, string(raw))
 	}

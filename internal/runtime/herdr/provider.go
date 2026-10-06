@@ -506,7 +506,7 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 	var out bytes.Buffer
 	w := mon.Writer(&out)
 	c.Stdout, c.Stderr = w, w
-	// Cooperative cancellation (execgrace.Apply): deadline expiry interrupts
+	// Cooperative cancellation (execgrace.Apply): deadline expiry sends SIGTERM to
 	// the command's process group first so shell rollback traps run before
 	// the forced kill; the grace doubles as the pipe-closing WaitDelay
 	// (mirrors tmux's runSetupCommand).

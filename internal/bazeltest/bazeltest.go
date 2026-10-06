@@ -32,12 +32,17 @@ func IsBazel() bool {
 // a rules_go test binary. The generated test main reads them at every start,
 // so a child that inherits them is not a plain helper process: it applies the
 // parent's shard filter (TEST_TOTAL_SHARDS, TEST_SHARD_INDEX) and may run no
-// test at all, and under `bazel coverage` it writes the parent's coverage
-// profile (COVERAGE_OUTPUT_FILE, COVERAGE_DIR).
+// test at all, its --test_filter (TESTBRIDGE_TEST_ONLY) overrides the child's
+// own -test.run and re-runs the parent test instead of the helper, it
+// overwrites the parent's test.xml report (XML_OUTPUT_FILE), and under
+// `bazel coverage` it writes the parent's coverage profile
+// (COVERAGE_OUTPUT_FILE, COVERAGE_DIR).
 var testRunnerEnv = map[string]bool{
 	"TEST_TOTAL_SHARDS":      true,
 	"TEST_SHARD_INDEX":       true,
 	"TEST_SHARD_STATUS_FILE": true,
+	"TESTBRIDGE_TEST_ONLY":   true,
+	"XML_OUTPUT_FILE":        true,
 	"COVERAGE_OUTPUT_FILE":   true,
 	"COVERAGE_DIR":           true,
 }

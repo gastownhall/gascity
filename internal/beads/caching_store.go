@@ -34,6 +34,9 @@ type CachingStore struct {
 	// cache applies, in place of idPrefix (WithEventIDPrefixes).
 	eventPrefixes []string
 	epoch         uint64 // names this instance in every CacheRevision it issues
+	// reconcileGate, when set, is asked before each periodic reconcile; a
+	// false answer skips that cycle (WithReconcileGate).
+	reconcileGate func() bool
 
 	mu           sync.RWMutex
 	beads        map[string]Bead
@@ -472,6 +475,18 @@ func WithEventIDPrefixes(prefixes ...string) CachingStoreOption {
 	}
 }
 
+// WithReconcileGate makes the periodic reconcile loop ask allowed before each
+// cycle and skip the cycle when it answers false. The loop keeps running, so
+// the cache resumes reconciling as soon as allowed answers true again. A
+// caller whose backing store must not be touched for a while (its scope is
+// quiescent) uses this to stop the loop's full scans without rebuilding the
+// cache.
+func WithReconcileGate(allowed func() bool) CachingStoreOption {
+	return func(c *CachingStore) {
+		c.reconcileGate = allowed
+	}
+}
+
 // NewCachingStoreForTest wraps any Store for testing without production prefix
 // validation. It keeps the legacy 3-param onChange (tests do not exercise the
 // typed correlation fields); adaptLegacyOnChange bridges it to production form.
@@ -506,6 +521,12 @@ func (c *CachingStore) ReconcileNowForTest() {
 		c.runReconciliation()
 		c.reconciling.Store(false)
 	}
+}
+
+// ReconcileIfDueForTest runs one periodic reconcile-loop step now: the cycle
+// runs only if one is due and the reconcile gate (WithReconcileGate) allows it.
+func (c *CachingStore) ReconcileIfDueForTest() {
+	c.reconcileIfDue(time.Now())
 }
 
 // SetPrimeRetryDelayForTest overrides the inter-attempt backoff Prime

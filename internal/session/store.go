@@ -696,38 +696,44 @@ func (s *Store) closeAtomically(closer beads.AtomicConditionalCloser, bead beads
 // Stores without the capability (BdStore, the exec store, plain MemStore, a
 // legacy SQLite layout, or conditional writes disabled), and a store that
 // refuses the capability at call time with beads.ErrConditionalWriteUnsupported,
-// keep the controller's historical write unchanged: one
-// store.Tx(commitMsg) of SetMetadataBatch(patch) then Close, with no pre-read.
-// On BdStore that Tx is staged so `bd close` carries patch's close_reason; on
-// the exec store and MemStore it runs as sequential writes. The metadata is
-// ordered first, so if the Close then fails the clears have still landed and
-// the caller retries the close. That arm keeps the residual closed-but-awake
-// race documented on Close, and it reports true on success without checking
-// whether the row was already closed, kill-fenced, or still carries expected's
-// facts. The caller owns those checks.
+// keep the controller's historical write: one store.Tx(commitMsg) of
+// SetMetadataBatch(patch) then Close, after the same checks on the row this
+// call read. An already-closed row reports false, a kill-fenced row returns
+// ErrSessionKillPending, and a row that no longer carries expected's facts
+// returns ErrSessionCloseSuperseded, each with nothing written. On BdStore
+// that Tx is staged so `bd close` carries patch's close_reason; on the exec
+// store and MemStore it runs as sequential writes. The metadata is ordered
+// first, so if the Close then fails the clears have still landed and the
+// caller retries the close. That arm keeps the residual race documented on
+// Close: a writer that lands after the read, or between the Tx's two writes,
+// is still closed over, because nothing fences the write on that read.
 func (s *Store) CloseWithTerminalPatch(expected Info, patch MetadataPatch, commitMsg string, now time.Time) (bool, error) {
 	id := expected.ID
+	bead, err := s.validatedBead(id)
+	if err != nil {
+		return false, err
+	}
+	if bead.Status == "closed" {
+		return false, nil
+	}
+	guard := func(open beads.Bead) error {
+		row := infoFromPersistedBead(open)
+		if IsKillPendingInfo(row, now) {
+			return fmt.Errorf("closing session %q: %w", id, ErrSessionKillPending)
+		}
+		if !closePremiseHolds(expected, row) {
+			return fmt.Errorf("closing session %q: %w", id, ErrSessionCloseSuperseded)
+		}
+		return nil
+	}
 	if closer, ok := beads.AtomicConditionalCloserFor(s.store); ok {
-		bead, err := s.validatedBead(id)
-		if err != nil {
-			return false, err
-		}
-		if bead.Status == "closed" {
-			return false, nil
-		}
-		closed, err := s.closeAtomically(closer, bead, patch, func(open beads.Bead) error {
-			row := infoFromPersistedBead(open)
-			if IsKillPendingInfo(row, now) {
-				return fmt.Errorf("closing session %q: %w", id, ErrSessionKillPending)
-			}
-			if !closePremiseHolds(expected, row) {
-				return fmt.Errorf("closing session %q: %w", id, ErrSessionCloseSuperseded)
-			}
-			return nil
-		})
+		closed, err := s.closeAtomically(closer, bead, patch, guard)
 		if !beads.IsConditionalWriteUnsupported(err) {
 			return closed, err
 		}
+	}
+	if err := guard(bead); err != nil {
+		return false, err
 	}
 	if err := s.store.Tx(commitMsg, func(tx beads.Tx) error {
 		if err := tx.SetMetadataBatch(id, map[string]string(patch)); err != nil {

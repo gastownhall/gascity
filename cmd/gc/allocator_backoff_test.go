@@ -146,9 +146,10 @@ func TestBackoffKeysAreIndependent(t *testing.T) {
 }
 
 // Kills: memory growing with every key ever refused; or a prune that drops
-// a record still in force: an open row's, a row's on a leg the census did
-// not hold, an in-demand bead's, or a create record under the current
-// ConfigRev. A leg name holding "/" still prunes by its own leg.
+// a record still in force: an open row's, an in-demand bead's, or a create
+// record under the current ConfigRev. A row the census does not hold is
+// dropped whatever its leg's read, and a leg name holding "/" still prunes
+// by its own leg.
 func TestBackoffPruneBoundsTheTable(t *testing.T) {
 	now := time.Unix(1_000, 0)
 	b := newBackoffTable()
@@ -156,8 +157,8 @@ func TestBackoffPruneBoundsTheTable(t *testing.T) {
 	closed := rowKey{Leg: "sessions", ID: "gc-closed"}
 	unread := rowKey{Leg: "rig", ID: "gc-r"}
 	slashed := rowKey{Leg: "rigs/a", ID: "gc-s"}
-	keep := []string{rowBackoffKey(open), rowBackoffKey(unread), workBackoffKey("w-demand"), createBackoffKey("worker/worker-1")}
-	drop := []string{rowBackoffKey(closed), rowBackoffKey(slashed), workBackoffKey("w-gone"), createBackoffKey("worker/worker-2")}
+	keep := []string{rowBackoffKey(open), workBackoffKey("w-demand"), createBackoffKey("worker/worker-1")}
+	drop := []string{rowBackoffKey(closed), rowBackoffKey(unread), rowBackoffKey(slashed), workBackoffKey("w-gone"), createBackoffKey("worker/worker-2")}
 	for _, k := range []string{rowBackoffKey(open), rowBackoffKey(closed), rowBackoffKey(unread), rowBackoffKey(slashed), workBackoffKey("w-demand"), workBackoffKey("w-gone")} {
 		b.Refuse(k, now, time.Time{}, "c", "")
 	}

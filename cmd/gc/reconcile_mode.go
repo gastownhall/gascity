@@ -46,7 +46,8 @@ var reconcilerModeLookupEnv = os.LookupEnv
 // latchReconcilerMode resolves the boot mode. Unknown values and an
 // inadmissible v2 are errors: the city does not start. v2 is admissible when
 // this build carries its controllers, or when lookupEnv reports the developer
-// override (a nil lookupEnv has none). An alias latches legacy silently; its
+// override (a nil lookupEnv has none), and the composed config enables no
+// feature v2 defers (v2LatchRefusals). An alias latches legacy silently; its
 // load warning already tells the operator.
 func latchReconcilerMode(cfg *config.City, lookupEnv func(string) (string, bool)) (reconcilerMode, error) {
 	raw := cfg.Daemon.SessionReconciler
@@ -56,10 +57,17 @@ func latchReconcilerMode(cfg *config.City, lookupEnv func(string) (string, bool)
 		return reconcilerLegacy, fmt.Errorf(`[daemon] session_reconciler = %q is not a known value; remove the key to run the legacy reconciler`, raw)
 	case mode == config.SessionReconcilerV2 && !v2ControllersInBuild && !v2SkeletonOverride(lookupEnv):
 		return reconcilerLegacy, fmt.Errorf(`[daemon] session_reconciler = %q is not available in this build: the v2 session reconciler has no session controllers yet; remove the key to run the legacy reconciler`, raw)
-	case mode == config.SessionReconcilerV2:
-		return reconcilerV2, nil
+	case mode != config.SessionReconcilerV2:
+		return reconcilerLegacy, nil
 	}
-	return reconcilerLegacy, nil
+	if refusals := v2LatchRefusals(cfg); len(refusals) > 0 {
+		parts := make([]string, len(refusals))
+		for i, r := range refusals {
+			parts[i] = r.String()
+		}
+		return reconcilerLegacy, fmt.Errorf(`[daemon] session_reconciler = %q is refused: %s; remove those settings or run legacy`, raw, strings.Join(parts, "; "))
+	}
+	return reconcilerV2, nil
 }
 
 func v2SkeletonOverride(lookupEnv func(string) (string, bool)) bool {
@@ -136,7 +144,8 @@ func (*sessionReconcilerDoctorCheck) Fix(_ *doctor.CheckContext) error { return 
 // refuses (unknown, or v2 while inadmissible), a warning for an alias or an
 // admissible v2, OK for legacy or unset. Admissibility comes from the latch
 // itself, the developer override included, so doctor and controller start never
-// disagree.
+// disagree. Under every mode it also lists, as Details, the v2 refusals the
+// config would hit: a dry run of the switch that never changes the status.
 func (c *sessionReconcilerDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name()}
 	raw := c.cfg.Daemon.SessionReconciler
@@ -158,6 +167,9 @@ func (c *sessionReconcilerDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Check
 	default:
 		r.Status = doctor.StatusOK
 		r.Message = "session reconciler: legacy"
+	}
+	for _, refusal := range v2LatchRefusals(c.cfg) {
+		r.Details = append(r.Details, "v2 would refuse: "+refusal.String())
 	}
 	return r
 }

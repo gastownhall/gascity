@@ -116,6 +116,24 @@ func TestLegacyWakeOnBeadEventPokesOnlyForNonSnapshot(t *testing.T) {
 	}
 }
 
+// Kills the router's wake policy leaking into legacy. A live event for
+// unrouted, unassigned work, which v2 keeps from the allocator, still pokes
+// the legacy tick; its replay still does not.
+func TestRouterLegacyWakeUnchanged(t *testing.T) {
+	pokeCh := make(chan struct{}, 1)
+	w := newLegacyWake(pokeCh, nil)
+	evt := beadEvent(t, events.BeadUpdated, routerWorkBead("w-1", "open", ""))
+
+	w.OnBeadEvent(evt, false, false)
+	if !drainSignal(pokeCh) {
+		t.Fatal("legacy: a work event the v2 policy suppresses did not poke the reconciler")
+	}
+	w.OnBeadEvent(evt, true, false)
+	if drainSignal(pokeCh) {
+		t.Fatal("legacy: a replay poked the reconciler")
+	}
+}
+
 // TestControllerWiringWakesItsOwnSignals pins what both entry points rely on:
 // the wake newControllerWiring builds, once installed on the API state,
 // signals exactly the wiring's channels, which the runtime's run loop selects

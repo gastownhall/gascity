@@ -42,6 +42,7 @@ order-outcome-healthy
 codex-hooks-drift
 rig-pack-coverage
 pack-runtimes
+prompt-delivery-budget
 mcp-config
 mcp-shared-target
 builtin-pack-imports
@@ -71,6 +72,7 @@ route-recovery-quarantine
 hold-label-routed-to
 pool-idle-routed-work
 v2-demand-migrations
+v2-session-migration
 work-option-metadata-migration
 backlog-depth
 order-tracking-retention

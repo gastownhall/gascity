@@ -45,8 +45,7 @@ func observeRows(t *testing.T, named map[string]string) *sessionCensus {
 	for id, name := range named {
 		rows = append(rows, censusSession(id, map[string]string{"session_name": name, "state": "active"}))
 	}
-	feed := &fakeCensusFeed{}
-	return readCensus(t, newCensusReader(feed.feed()), censusNow, &config.City{}, censusLegs("class:sessions", censusStore(rows...)))
+	return readCensus(t, censusNow, &config.City{}, censusLegs("class:sessions", censusStore(rows...)))
 }
 
 func observed(t *testing.T, snap *ObservationSnapshot, c *sessionCensus, now time.Time, id string) rowObservation {
@@ -180,24 +179,23 @@ func TestObserveDeadPaneIsAStartCandidateNotUncertain(t *testing.T) {
 	}
 }
 
-// Kills: a dead row that is not a start candidate, that counts as alive for
-// dependencies, or that holds a singleton's name; and an unknown row that a
-// singleton create may take.
+// Kills: a dead row that is not a start candidate, or that counts as alive
+// for dependencies; and an unknown row read as a start candidate.
 func TestObserveLivenessPredicates(t *testing.T) {
 	cases := []struct {
-		l                          rowLiveness
-		alive, start, occupiesName bool
+		l            rowLiveness
+		alive, start bool
 	}{
-		{livenessUnknown, false, false, true},
-		{livenessAlive, true, false, true},
-		{livenessOccupied, false, false, true},
-		{livenessAbsent, false, true, false},
-		{livenessAbsentUnconfirmed, false, true, false},
-		{livenessDead, false, true, false},
+		{livenessUnknown, false, false},
+		{livenessAlive, true, false},
+		{livenessOccupied, false, false},
+		{livenessAbsent, false, true},
+		{livenessAbsentUnconfirmed, false, true},
+		{livenessDead, false, true},
 	}
 	for _, tc := range cases {
-		if tc.l.alive() != tc.alive || tc.l.startCandidate() != tc.start || tc.l.occupiesName() != tc.occupiesName {
-			t.Errorf("%v: alive=%v start=%v occupiesName=%v, want %v %v %v", tc.l, tc.l.alive(), tc.l.startCandidate(), tc.l.occupiesName(), tc.alive, tc.start, tc.occupiesName)
+		if tc.l.alive() != tc.alive || tc.l.startCandidate() != tc.start {
+			t.Errorf("%v: alive=%v start=%v, want %v %v", tc.l, tc.l.alive(), tc.l.startCandidate(), tc.alive, tc.start)
 		}
 	}
 }
@@ -286,8 +284,7 @@ func TestObserveDuplicateCopyIsNotASharer(t *testing.T) {
 	row := func() beads.Bead {
 		return censusSession("gc-1", map[string]string{"session_name": "s1", "state": "active"})
 	}
-	feed := &fakeCensusFeed{}
-	c := readCensus(t, newCensusReader(feed.feed()), censusNow, &config.City{},
+	c := readCensus(t, censusNow, &config.City{},
 		censusLegs("class:sessions", censusStore(row()), "city:mc", censusStore(row())))
 	if len(c.Rows) != 2 || len(c.RowsNamed("s1")) != 1 {
 		t.Fatalf("fixture: %d rows, %d named s1, want 2 rows of which one canonical", len(c.Rows), len(c.RowsNamed("s1")))
