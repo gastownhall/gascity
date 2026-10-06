@@ -149,28 +149,10 @@ func doRegistryWhoami(ctx context.Context, opts registryLoginOptions, stdout, st
 	}
 	ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
-	// Secrets resolve at execution time, never as flag defaults, so help
-	// output cannot render credential values from the environment.
-	token := strings.TrimSpace(registryFirstNonEmpty(opts.Token, os.Getenv("GC_REGISTRY_TOKEN")))
-	if token == "" {
-		token, err = readRegistryConfiguredToken(baseURL)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc pack registry whoami: %v\n", err) //nolint:errcheck
-			return 1
-		}
-	}
-	var providerSource registryCredentialSource
-	if token == "" {
-		providerSource, err = newRegistryGasworksCredentialSource(baseURL)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc pack registry whoami: configuring credential provider: %v\n", err) //nolint:errcheck
-			return 1
-		}
-		token, err = providerSource(ctx, false)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc pack registry whoami: minting credential: %v; run `gasworks login` or `gc pack registry login`\n", err) //nolint:errcheck
-			return 1
-		}
+	token, providerSource, err := registryResolveReadCredential(ctx, baseURL, opts.Token)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc pack registry whoami: %v\n", err) //nolint:errcheck
+		return 1
 	}
 	client := registryPublishHTTPClient
 	if providerSource != nil {
@@ -183,6 +165,39 @@ func doRegistryWhoami(ctx context.Context, opts registryLoginOptions, stdout, st
 	}
 	fmt.Fprintf(stdout, "@%s (%s)\n", user.Handle, user.ID) //nolint:errcheck
 	return 0
+}
+
+// registryResolveReadCredential resolves the bearer credential for read-only
+// registry commands (whoami, requests). Precedence mirrors publish: an explicit
+// or environment token, then a stored native Registry token, then the Gasworks
+// credential-provider fallback for the canonical hosted Registry. When the
+// provider fallback is used it returns a non-nil providerSource so the caller
+// can wrap its HTTP client with registryHTTPClientWithCredentialRefresh to
+// refresh the credential once on a 401. Returned errors are already
+// contextualized; callers prefix them with the command name.
+func registryResolveReadCredential(ctx context.Context, baseURL, explicitToken string) (string, registryCredentialSource, error) {
+	// Secrets resolve at execution time, never as flag defaults, so help
+	// output cannot render credential values from the environment.
+	token := strings.TrimSpace(registryFirstNonEmpty(explicitToken, os.Getenv("GC_REGISTRY_TOKEN")))
+	if token == "" {
+		stored, err := readRegistryConfiguredToken(baseURL)
+		if err != nil {
+			return "", nil, err
+		}
+		token = stored
+	}
+	if token != "" {
+		return token, nil, nil
+	}
+	providerSource, err := newRegistryGasworksCredentialSource(baseURL)
+	if err != nil {
+		return "", nil, fmt.Errorf("configuring credential provider: %w", err)
+	}
+	token, err = providerSource(ctx, false)
+	if err != nil {
+		return "", nil, fmt.Errorf("minting credential: %w; run `gasworks login` or `gc pack registry login`", err)
+	}
+	return token, providerSource, nil
 }
 
 // registryCLIConfigPath resolves the hosted-registry auth config file path.

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
@@ -117,6 +118,18 @@ func (f *failFormulaReadFS) ReadFile(name string) ([]byte, error) {
 type failFormulaWriteFS struct {
 	fsys.OSFS
 	formulaPath string
+}
+
+type failCityConfigRenameFS struct {
+	fsys.OSFS
+	cityToml string
+}
+
+func (f *failCityConfigRenameFS) Rename(oldpath, newpath string) error {
+	if canonicalTestPath(newpath) == canonicalTestPath(f.cityToml) {
+		return fmt.Errorf("injected city config write failure")
+	}
+	return f.OSFS.Rename(oldpath, newpath)
 }
 
 func (f *failFormulaWriteFS) Rename(oldpath, newpath string) error {
@@ -369,7 +382,9 @@ func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationRigs(t *testing.T
 	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.markConfigMutationPending("current-rev")
 
-	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
+	if cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev") {
+		t.Fatal("stale runtime update reported acceptance")
+	}
 
 	if got := cs.Config(); got != current {
 		t.Fatalf("Config() = %+v, want pending mutation config with rig alpha", got)
@@ -378,7 +393,9 @@ func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationRigs(t *testing.T
 		t.Fatal("pending mutation marker cleared by stale runtime update")
 	}
 
-	cs.updateFromRuntime(current, runtime.NewFake(), "current-rev")
+	if !cs.updateFromRuntime(current, runtime.NewFake(), "current-rev") {
+		t.Fatal("matching runtime update reported rejection")
+	}
 
 	if cs.configMutationPending.Load() {
 		t.Fatal("pending mutation marker not cleared after matching runtime update")
@@ -410,7 +427,9 @@ func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationAgents(t *testing
 	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.markConfigMutationPending("current-rev")
 
-	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
+	if cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev") {
+		t.Fatal("stale runtime update reported acceptance")
+	}
 
 	if got := cs.Config(); got != current {
 		t.Fatalf("Config() = %+v, want pending mutation config with helper agent", got)
@@ -477,7 +496,13 @@ func TestControllerStateCreatedAgentVisibleAfterStaleRuntimeInterleaving(t *test
 		t.Fatalf("stale runtime update did not hide alpha/helper; agents = %+v", got.Agents)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	// hangBudget, not a short fixed deadline: nothing in this test asserts how
+	// long WaitForAgentVisibility takes, only that it eventually returns nil
+	// once the fresh runtime update lands below. The 100ms window right after
+	// this IS a negative assertion ("must not resolve before the fresh update
+	// lands") and must not be migrated -- see cmd/gc/hangbudget_test.go's
+	// carve-out doc comment.
+	ctx, cancel := context.WithTimeout(context.Background(), hangBudget)
 	defer cancel()
 	waitErr := make(chan error, 1)
 	go func() {
@@ -765,7 +790,7 @@ func TestControllerStateRuntimeUpdateRebuildsStoresWhenBackendMetadataChanges(t 
 		t.Fatal("precondition: matching metadata should allow store reuse")
 	}
 
-	writeBackendMetadata(t, cityDir, `{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`)
+	writeBackendMetadata(t, cityDir, `{"database":"beads","backend":"postgres","storage_endpoint":"postgres://bd@db.example.test:5432","storage_database":"beads_pg"}`)
 	nextProvider := runtime.NewFake()
 	cs.updateFromRuntime(current, nextProvider, "")
 
@@ -837,7 +862,9 @@ provider = "bash"
 	originalProvider := runtime.NewFake()
 	cs := newControllerState(context.Background(), current, originalProvider, events.NewFake(), "city1", cityDir)
 
-	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
+	if cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev") {
+		t.Fatal("stale runtime update reported acceptance")
+	}
 
 	if got := cs.Config(); got != current {
 		t.Fatalf("Config() = %+v, want current config with worker agent", got)
@@ -2047,6 +2074,181 @@ func TestControllerStateAppliesCacheReconcileBeadEventsToStores(t *testing.T) {
 	}
 }
 
+func TestControllerStateEmitsCompletedFromAuthoritativeGraphStepClose(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{ID: "gcg-run", Metadata: map[string]string{
+		"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := store.Create(beads.Bead{ID: "gcg-retry-attempt", Metadata: map[string]string{
+		"gc.root_bead_id": root.ID, "gc.step_id": "build", "gc.session_id": "gcs-session", "gc.native_step_dependencies.v1": `["prepare"]`,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	step, err = store.Get(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := events.NewFake()
+	cs := &controllerState{cityBeadStore: store, eventProv: rec}
+	cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: "bd-close", Subject: step.ID, Payload: payload})
+	var completed []events.Event
+	for _, event := range rec.Events {
+		if event.Type == events.ExecutionStepCompleted {
+			completed = append(completed, event)
+		}
+	}
+	if len(completed) != 1 || completed[0].Subject != step.ID || completed[0].RunID != root.ID || completed[0].SessionID != "gcs-session" || completed[0].StepID != "build" {
+		t.Fatalf("completed lifecycle events = %#v", completed)
+	}
+}
+
+// listCountingEventProvider counts the full-history reads a boot path performs.
+//
+// [events.Provider.List] is the expensive call in a completions reconcile: it
+// gunzips and scans every retained archive, and no seq filter avoids that. So
+// "did the boot path run a completions reconcile" is answerable by counting
+// List, and the answer does not depend on whether the corpus happened to hold a
+// repairable gap.
+type listCountingEventProvider struct {
+	*events.Fake
+	lists atomic.Int64
+}
+
+func (p *listCountingEventProvider) List(filter events.Filter) ([]events.Event, error) {
+	p.lists.Add(1)
+	return p.Fake.List(filter)
+}
+
+// TestControllerStateBeadEventWatcherLeavesCompletionRepairToStartupSweep pins
+// the boot-path contract: starting the watcher subscribes, and does nothing
+// else.
+//
+// The watcher used to run a WHOLE-CORPUS completions reconcile inline before
+// tailing, on the theory that the repair had to land before the tail began. It
+// did not: the tail's type switch consumes only bead.created/updated/closed/
+// deleted and the reconcile emits only execution.step_completed, so producer
+// and consumer are disjoint and no ordering edge exists between them. On
+// maintainer-city that inline pass was the dominant term in an ~18 min
+// uninstrumented boot gap, paid once per city, serially (ga-1e78j).
+//
+// The crash-window gap it repaired — a durable bead.closed whose best-effort
+// execution.step_completed never landed — is owned by the startup completions
+// sweep instead; see TestCompletionsStartupSweepRepairsCrashWindowGap for the
+// other half of this pair.
+func TestControllerStateBeadEventWatcherLeavesCompletionRepairToStartupSweep(t *testing.T) {
+	backing := beads.NewMemStore()
+	root, err := backing.Create(beads.Bead{ID: "gcg-run", Metadata: map[string]string{
+		"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := backing.Create(beads.Bead{ID: "gcg-retry-attempt", Metadata: map[string]string{
+		"gc.root_bead_id": root.ID, "gc.step_id": "build", "gc.session_id": "gcs-session",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.Close(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	step, err = backing.Get(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(step)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The close is already in the authoritative journal when this controller
+	// starts. Its watcher cursor begins at that journal head, reproducing a
+	// process crash after bead.closed but before step_completed was recorded.
+	ep := &listCountingEventProvider{Fake: events.NewFake()}
+	ep.Record(events.Event{Type: events.BeadClosed, Actor: "bd-close", Subject: step.ID, Payload: payload})
+	prevCityStore := newControllerStateOpenCityStore
+	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: backing}, nil
+	}
+	t.Cleanup(func() { newControllerStateOpenCityStore = prevCityStore })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := newControllerState(ctx, &config.City{Workspace: config.Workspace{Name: "test-city"}}, runtime.NewFake(), ep, "test-city", t.TempDir())
+	baseline := ep.lists.Load()
+	cs.startBeadEventWatcher(ctx)
+
+	if reads := ep.lists.Load() - baseline; reads != 0 {
+		t.Fatalf("startBeadEventWatcher performed %d full-history journal read(s), want 0: the boot path must not run a whole-corpus completions reconcile", reads)
+	}
+	got, listErr := ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(got) != 0 {
+		t.Fatalf("completed events emitted at watcher start = %#v, want none: the startup sweep owns this repair", got)
+	}
+}
+
+func TestControllerStateReconcileExecutionCompletionsScansConfiguredRigStores(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	root, err := rigStore.Create(beads.Bead{ID: "gcg-run", Metadata: map[string]string{
+		"gc.kind": "workflow", "gc.formula_contract": "graph.v2",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := rigStore.Create(beads.Bead{ID: "gcg-build-attempt", Metadata: map[string]string{
+		"gc.root_bead_id": root.ID, "gc.step_id": "build", "gc.session_id": "gcs-session",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rigStore.Close(step.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	ep := events.NewFake()
+	cs := &controllerState{
+		cfg:           &config.City{Rigs: []config.Rig{{Name: "gascity"}}},
+		cityBeadStore: cityStore,
+		beadStores:    map[string]beads.Store{"gascity": rigStore},
+		eventProv:     ep,
+	}
+	cs.reconcileExecutionCompletions()
+
+	completed, err := ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed) != 1 {
+		t.Fatalf("completed events after rig reconciliation = %#v, want one", completed)
+	}
+	if got := completed[0]; got.RunID != root.ID || got.SessionID != "gcs-session" || got.StepID != "build" {
+		t.Fatalf("reconciled completed event = %#v", got)
+	}
+
+	cs.reconcileExecutionCompletions()
+	completed, err = ep.List(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed) != 1 {
+		t.Fatalf("completed events after repeated rig reconciliation = %#v, want exact-fact no-op", completed)
+	}
+}
+
 func TestWrapWithCachingStoreCachesNonBdStore(t *testing.T) {
 	backing := beads.NewMemStore()
 	created, err := backing.Create(beads.Bead{Title: "non-bd backing"})
@@ -2290,11 +2492,11 @@ func TestControllerStateBeadEventsRespectStorePrefixes(t *testing.T) {
 		}
 	}
 
-	payload, err := json.Marshal(beads.Bead{
-		ID:     "mc-source",
-		Title:  "city source",
-		Status: "open",
-	})
+	// Both backings hold each row, so an event applied to the wrong cache
+	// would install it there.
+	cityBead := beads.Bead{ID: "mc-source", Title: "city source", Status: "open"}
+	createInBackings(t, cityBead, cityBacking, rigBacking)
+	payload, err := json.Marshal(cityBead)
 	if err != nil {
 		t.Fatalf("marshal city bead: %v", err)
 	}
@@ -2326,11 +2528,9 @@ func TestControllerStateBeadEventsRespectStorePrefixes(t *testing.T) {
 		t.Fatalf("rig cache items = %+v, want no city bead", rigItems)
 	}
 
-	payload, err = json.Marshal(beads.Bead{
-		ID:     "ga-rig",
-		Title:  "rig work",
-		Status: "open",
-	})
+	rigBead := beads.Bead{ID: "ga-rig", Title: "rig work", Status: "open"}
+	createInBackings(t, rigBead, cityBacking, rigBacking)
+	payload, err = json.Marshal(rigBead)
 	if err != nil {
 		t.Fatalf("marshal rig bead: %v", err)
 	}
@@ -2369,16 +2569,15 @@ func TestControllerStateBeadEventsUseScopePrefixWhenConfiguredPrefixDrifts(t *te
 	}
 	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: "rigs/repo", Prefix: "ga"}}}
 	bdStore := bdStoreForRig(rigDir, cityDir, cfg, cfg.Rigs[0].EffectivePrefix())
-	rigCache := beads.NewCachingStoreForTestWithPrefix(beads.NewMemStore(), bdStore.IDPrefix(), nil)
+	rigBacking := beads.NewMemStore()
+	rigCache := beads.NewCachingStoreForTestWithPrefix(rigBacking, bdStore.IDPrefix(), nil)
 	if err := rigCache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime rig cache: %v", err)
 	}
 
-	payload, err := json.Marshal(beads.Bead{
-		ID:     "repo-owned",
-		Title:  "rig-owned work",
-		Status: "open",
-	})
+	rigBead := beads.Bead{ID: "repo-owned", Title: "rig-owned work", Status: "open"}
+	createInBackings(t, rigBead, rigBacking)
+	payload, err := json.Marshal(rigBead)
 	if err != nil {
 		t.Fatalf("marshal rig bead: %v", err)
 	}
@@ -2481,6 +2680,9 @@ func TestControllerStateAppliesBeadEventsOnlyToOwningCache(t *testing.T) {
 		cityBeadStore: cityStore,
 		beadStores:    map[string]beads.Store{"rig1": rigStore},
 	}
+	// Both backings hold the row, so an event applied to the wrong cache
+	// would install it there.
+	createInBackings(t, beads.Bead{ID: "rw-1", Title: "rig bead", Type: "task"}, cityBacking, rigBacking)
 
 	cs.applyBeadEventToStores(events.Event{
 		Type:    events.BeadCreated,
@@ -2488,19 +2690,19 @@ func TestControllerStateAppliesBeadEventsOnlyToOwningCache(t *testing.T) {
 		Payload: json.RawMessage(`{"id":"rw-1","title":"rig bead","status":"open","issue_type":"task","created_at":"2026-04-26T21:37:46Z"}`),
 	})
 
-	if _, err := cityStore.Get("rw-1"); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("city cache Get(rw-1) error = %v, want ErrNotFound", err)
+	if got := cachedTitles(t, cityStore); len(got) != 0 {
+		t.Fatalf("city cache holds %v, want nothing", got)
 	}
-	if got, err := rigStore.Get("rw-1"); err != nil {
-		t.Fatalf("rig cache Get(rw-1): %v", err)
-	} else if got.Title != "rig bead" {
-		t.Fatalf("rig cache title = %q, want rig bead", got.Title)
+	if got := cachedTitles(t, rigStore); got["rw-1"] != "rig bead" || len(got) != 1 {
+		t.Fatalf("rig cache holds %v, want rw-1 titled rig bead", got)
 	}
 }
 
 func TestControllerStateAppliesHyphenatedPrefixEventsOnlyToOwningCache(t *testing.T) {
-	cityStore := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
-	rigStore := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	cityBacking := beads.NewMemStore()
+	rigBacking := beads.NewMemStore()
+	cityStore := beads.NewCachingStoreForTest(cityBacking, nil)
+	rigStore := beads.NewCachingStoreForTest(rigBacking, nil)
 	if err := cityStore.Prime(context.Background()); err != nil {
 		t.Fatalf("city Prime: %v", err)
 	}
@@ -2517,6 +2719,9 @@ func TestControllerStateAppliesHyphenatedPrefixEventsOnlyToOwningCache(t *testin
 		cityBeadStore: cityStore,
 		beadStores:    map[string]beads.Store{"rig1": rigStore},
 	}
+	// Both backings hold the row, so an event applied to the wrong cache
+	// would install it there.
+	createInBackings(t, beads.Bead{ID: "mc-mogbzvrs-hiv.1", Title: "rig bead", Type: "task"}, cityBacking, rigBacking)
 
 	cs.applyBeadEventToStores(events.Event{
 		Type:    events.BeadCreated,
@@ -2524,14 +2729,40 @@ func TestControllerStateAppliesHyphenatedPrefixEventsOnlyToOwningCache(t *testin
 		Payload: json.RawMessage(`{"id":"mc-mogbzvrs-hiv.1","title":"rig bead","status":"open","issue_type":"task","created_at":"2026-04-26T21:37:46Z"}`),
 	})
 
-	if _, err := cityStore.Get("mc-mogbzvrs-hiv.1"); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("city cache Get(hyphenated rig bead) error = %v, want ErrNotFound", err)
+	if got := cachedTitles(t, cityStore); len(got) != 0 {
+		t.Fatalf("city cache holds %v, want nothing", got)
 	}
-	if got, err := rigStore.Get("mc-mogbzvrs-hiv.1"); err != nil {
-		t.Fatalf("rig cache Get(hyphenated rig bead): %v", err)
-	} else if got.Title != "rig bead" {
-		t.Fatalf("rig cache title = %q, want rig bead", got.Title)
+	if got := cachedTitles(t, rigStore); got["mc-mogbzvrs-hiv.1"] != "rig bead" || len(got) != 1 {
+		t.Fatalf("rig cache holds %v, want mc-mogbzvrs-hiv.1 titled rig bead", got)
 	}
+}
+
+// createInBackings lands b in each backing behind its cache's back, as an
+// external bd write does, so only a bead event brings the row into a cache:
+// an uncached event installs only the cache's backing read of the row.
+func createInBackings(t *testing.T, b beads.Bead, backings ...*beads.MemStore) {
+	t.Helper()
+	for _, backing := range backings {
+		backing.HonorExplicitIDs = true
+		if _, err := backing.Create(b); err != nil {
+			t.Fatalf("backing Create(%s): %v", b.ID, err)
+		}
+	}
+}
+
+// cachedTitles returns the title of every row a live cache holds, by id.
+// CachedList reads only the cache, never the backing.
+func cachedTitles(t *testing.T, cache *beads.CachingStore) map[string]string {
+	t.Helper()
+	rows, ok := cache.CachedList(beads.ListQuery{AllowScan: true})
+	if !ok {
+		t.Fatal("CachedList: the cache cannot serve the query")
+	}
+	titles := make(map[string]string, len(rows))
+	for _, row := range rows {
+		titles[row.ID] = row.Title
+	}
+	return titles
 }
 
 func TestControllerStateBuildStoresFileStoresUseLockFiles(t *testing.T) {
@@ -3518,11 +3749,7 @@ func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing
 		close(returned)
 	}()
 
-	select {
-	case <-ep.latestCalled:
-	case <-time.After(5 * time.Second):
-		t.Fatal("event watcher did not establish an initial cursor")
-	}
+	awaitClose(t, ep.latestCalled, "event watcher establishing an initial cursor")
 	select {
 	case <-returned:
 		t.Fatal("newControllerState returned before the initial event cursor was established")
@@ -3533,11 +3760,7 @@ func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing
 	}
 
 	close(ep.allowLatest)
-	select {
-	case <-returned:
-	case <-time.After(5 * time.Second):
-		t.Fatal("newControllerState did not return after the initial event cursor was established")
-	}
+	awaitClose(t, returned, "newControllerState returning after the initial event cursor was established")
 }
 
 func TestControllerStateBeadEventWatcherReplaysEventsAfterCachePrime(t *testing.T) {
@@ -3790,6 +4013,54 @@ func newControllerStateMutationHarness(t *testing.T) (*controllerState, string) 
 		pokeCh:      make(chan struct{}, 1),
 		configDirty: &atomic.Bool{},
 	}, tomlPath
+}
+
+func TestControllerStateDeleteRigDetachesProviderOwnershipBeforeConfigWrite(t *testing.T) {
+	cs, tomlPath := newControllerStateMutationHarness(t)
+	cfg, err := config.Load(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolveRigPaths(cs.cityPath, cfg.Rigs)
+	rigPath := cfg.Rigs[0].Path
+	if err := persistProviderScopeOwnership(cs.cityPath, rigPath, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := markProviderScopeOwnershipReady(cs.cityPath, rigPath); err != nil {
+		t.Fatal(err)
+	}
+
+	cs.editor = configedit.NewEditor(&failCityConfigRenameFS{cityToml: tomlPath}, tomlPath)
+	if err := cs.DeleteRig("rig1"); err == nil || !strings.Contains(err.Error(), "injected city config write failure") {
+		t.Fatalf("DeleteRig write failure = %v, want injected city config failure", err)
+	}
+	stillConfigured, err := config.Load(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolveRigPaths(cs.cityPath, stillConfigured.Rigs)
+	if err := validateProviderScopeOwnership(cs.cityPath, stillConfigured); err != nil {
+		t.Fatalf("detached ownership should remain valid while the failed write leaves rig configured: %v", err)
+	}
+	key, _, owned, err := providerScopeOwnershipRecord(cs.cityPath, rigPath)
+	if err != nil || !owned || key != "path:"+normalizePathForCompare(rigPath) {
+		t.Fatalf("ownership after failed delete = (%q, %t, %v), want detached path record", key, owned, err)
+	}
+
+	cs.editor = configedit.NewEditor(fsys.OSFS{}, tomlPath)
+	if err := cs.DeleteRig("rig1"); err != nil {
+		t.Fatalf("DeleteRig retry: %v", err)
+	}
+	removed, err := config.Load(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed.Rigs) != 0 {
+		t.Fatalf("rigs after retry = %+v, want none", removed.Rigs)
+	}
+	if err := validateProviderScopeOwnership(cs.cityPath, removed); err != nil {
+		t.Fatalf("ownership after successful delete: %v", err)
+	}
 }
 
 // TestBuildStores_ExecProviderSetsPerRigEnv is a regression test for #391:
@@ -4435,5 +4706,153 @@ func TestApplyBeadEventToStoresTriggersConvoyAutoclose(t *testing.T) {
 	}
 	if got.Status != "closed" {
 		t.Errorf("convoy status = %q after all children closed, want %q", got.Status, "closed")
+	}
+}
+
+// TestBeadEventStoresResolveRelocatedClassPrefixes pins that a bead.closed for a
+// bead in the binding reaches the binding. The assertion is the molecule root's
+// status rather than the resolved store: pinning the reap is what says the hook
+// still does its job on a migrated city.
+func TestBeadEventStoresResolveRelocatedClassPrefixes(t *testing.T) {
+	prev := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(fn func()) { fn() } // synchronous in tests
+	t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
+
+	// Distinct prefixes are the point: they make the owning store resolvable by
+	// id, and keep a wrong-store read a miss rather than a collision.
+	binding := &beads.MemStore{IDPrefix: "gcg"}
+	work := beads.NewMemStore()
+
+	root, err := binding.Create(beads.Bead{Title: "Formula: mol-relocated", Type: "molecule"})
+	if err != nil {
+		t.Fatalf("Create molecule root in the binding: %v", err)
+	}
+	step, err := binding.Create(beads.Bead{
+		Title:    "Step 1: implement",
+		Type:     "step",
+		ParentID: root.ID,
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+	if err != nil {
+		t.Fatalf("Create step in the binding: %v", err)
+	}
+	if err := binding.Close(step.ID); err != nil {
+		t.Fatalf("Close step: %v", err)
+	}
+
+	payload, err := json.Marshal(beads.Bead{ID: step.ID, Title: step.Title, Type: "step", Status: "closed"})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	cs := &controllerState{
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs:      []config.Rig{{Name: "alpha", Path: "/tmp/alpha", Prefix: "ra"}},
+		},
+		cityBeadStore: work,
+		beadStores:    map[string]beads.Store{"alpha": beads.NewMemStore()},
+		storageRoutes: splitRoutes(binding),
+		pokeCh:        make(chan struct{}, 1),
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadClosed,
+		Actor:   "agent",
+		Subject: step.ID,
+		Payload: payload,
+	})
+
+	got, err := binding.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get molecule root: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Errorf("molecule root %s status = %q after its only step closed, want %q; the close event never resolved to the binding, so autoclose read the bead out of a work store that does not hold it and returned", root.ID, got.Status, "closed")
+	}
+}
+
+// TestBeadEventStoresIgnoreReservedPrefixesWithoutARelocation is the control:
+// on a city that relocates nothing, a reserved-prefix id must not be claimed.
+func TestBeadEventStoresIgnoreReservedPrefixesWithoutARelocation(t *testing.T) {
+	cs := &controllerState{
+		cfg:           &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		cityBeadStore: beads.NewMemStore(),
+		beadStores:    map[string]beads.Store{},
+		storageRoutes: nil, // no [storage] section
+	}
+	if store, known := cs.beadEventConfiguredStoreLocked("gcg-1"); known {
+		t.Errorf("a city that relocates nothing claimed to own %q (store=%v); the reserved-prefix arm must be gated on an actual relocation", "gcg-1", store)
+	}
+}
+
+func TestControllerStateUpdateRigPathDetachesProviderOwnershipBeforeConfigWrite(t *testing.T) {
+	cs, tomlPath := newControllerStateMutationHarness(t)
+	cfg, err := config.Load(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolveRigPaths(cs.cityPath, cfg.Rigs)
+	oldPath := cfg.Rigs[0].Path
+	if err := persistProviderScopeOwnership(cs.cityPath, oldPath, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := markProviderScopeOwnershipReady(cs.cityPath, oldPath); err != nil {
+		t.Fatal(err)
+	}
+	newPath := filepath.Join(cs.cityPath, "relocated")
+
+	cs.editor = configedit.NewEditor(&failCityConfigRenameFS{cityToml: tomlPath}, tomlPath)
+	if err := cs.UpdateRig("rig1", api.RigUpdate{Path: newPath}); err == nil || !strings.Contains(err.Error(), "injected city config write failure") {
+		t.Fatalf("UpdateRig write failure = %v, want injected city config failure", err)
+	}
+	stillConfigured, err := config.Load(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolveRigPaths(cs.cityPath, stillConfigured.Rigs)
+	if err := validateProviderScopeOwnership(cs.cityPath, stillConfigured); err != nil {
+		t.Fatalf("detached ownership should remain valid while failed update keeps old path: %v", err)
+	}
+	key, _, owned, err := providerScopeOwnershipRecord(cs.cityPath, oldPath)
+	if err != nil || !owned || key != "path:"+normalizePathForCompare(oldPath) {
+		t.Fatalf("ownership after failed update = (%q, %t, %v), want detached old path", key, owned, err)
+	}
+
+	cs.editor = configedit.NewEditor(fsys.OSFS{}, tomlPath)
+	if err := cs.UpdateRig("rig1", api.RigUpdate{Path: newPath}); err != nil {
+		t.Fatalf("UpdateRig retry: %v", err)
+	}
+	updated, err := loadCityConfig(cs.cityPath, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolveRigPaths(cs.cityPath, updated.Rigs)
+	if len(updated.Rigs) != 1 || !samePath(updated.Rigs[0].Path, newPath) {
+		t.Fatalf("rig after path update = %+v, want %q", updated.Rigs, newPath)
+	}
+	if err := validateProviderScopeOwnership(cs.cityPath, updated); err != nil {
+		t.Fatalf("ownership after path update: %v", err)
+	}
+
+	// A non-path patch must keep the configured rig label. Reset the harness so
+	// this assertion does not depend on the detached-record behavior above.
+	cs2, toml2 := newControllerStateMutationHarness(t)
+	cfg2, err := config.Load(fsys.OSFS{}, toml2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolveRigPaths(cs2.cityPath, cfg2.Rigs)
+	if err := persistProviderScopeOwnership(cs2.cityPath, cfg2.Rigs[0].Path, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := markProviderScopeOwnershipReady(cs2.cityPath, cfg2.Rigs[0].Path); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs2.UpdateRig("rig1", api.RigUpdate{Prefix: "renamed"}); err != nil {
+		t.Fatal(err)
+	}
+	if key, _, owned, err := providerScopeOwnershipRecord(cs2.cityPath, cfg2.Rigs[0].Path); err != nil || !owned || key != "rig:rig1" {
+		t.Fatalf("ownership after prefix-only update = (%q, %t, %v), want attached rig label", key, owned, err)
 	}
 }

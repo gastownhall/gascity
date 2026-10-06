@@ -344,6 +344,98 @@ func TestRigPackCoverageCheck_MalformedPackToml(t *testing.T) {
 	}
 }
 
+// TestRigPackCoverageCheck_SameNameLocalReplacementCovers is the
+// regression for #3907: a rig-local pack replacement that shares the
+// city pack's [pack].name and declares the identical rig-scoped always
+// named_session is a deliberate override (a different polecat namepool,
+// local prompt/formula changes, etc.), not a coverage gap. rigHasPackDir
+// used to compare only exact absolute pack directory paths, so a rig
+// importing packs/gastown-dh instead of the city's remote gastown pack
+// always read as uncovered even though it declares the same required
+// session under the same pack name.
+func TestRigPackCoverageCheck_SameNameLocalReplacementCovers(t *testing.T) {
+	dir := t.TempDir()
+	cityPackDir := filepath.Join(dir, "packs", "gastown")
+	writeTestPack(t, cityPackDir, `
+[pack]
+name = "gastown"
+schema = 2
+
+[[named_session]]
+template = "witness"
+scope = "rig"
+mode = "always"
+`)
+	writeTestAgent(t, cityPackDir, "witness")
+
+	localReplacementDir := filepath.Join(dir, "packs", "gastown-dh")
+	writeTestPack(t, localReplacementDir, `
+[pack]
+name = "gastown"
+schema = 2
+
+[[named_session]]
+template = "witness"
+scope = "rig"
+mode = "always"
+`)
+	writeTestAgent(t, localReplacementDir, "witness")
+
+	cfg := &config.City{
+		PackDirs: []string{cityPackDir},
+		Rigs:     []config.Rig{{Name: "superlzy-dash"}},
+		RigPackDirs: map[string][]string{
+			"superlzy-dash": {localReplacementDir},
+		},
+	}
+	c := NewRigPackCoverageCheck(cfg, dir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK (same-name local replacement declares the required session); msg = %s; details = %v", r.Status, r.Message, r.Details)
+	}
+}
+
+// TestRigPackCoverageCheck_DifferentNameLocalPackStillUncovered guards
+// the #3907 fix's scope: a rig importing an unrelated local pack (a
+// different [pack].name) must still be reported as a genuine coverage
+// gap — the fix only recognizes a same-named replacement, not any local
+// pack at all.
+func TestRigPackCoverageCheck_DifferentNameLocalPackStillUncovered(t *testing.T) {
+	dir := t.TempDir()
+	cityPackDir := filepath.Join(dir, "packs", "gastown")
+	writeTestPack(t, cityPackDir, `
+[pack]
+name = "gastown"
+schema = 2
+
+[[named_session]]
+template = "witness"
+scope = "rig"
+mode = "always"
+`)
+	writeTestAgent(t, cityPackDir, "witness")
+
+	unrelatedDir := filepath.Join(dir, "packs", "other")
+	writeTestPack(t, unrelatedDir, `
+[pack]
+name = "other"
+schema = 2
+`)
+
+	cfg := &config.City{
+		PackDirs: []string{cityPackDir},
+		Rigs:     []config.Rig{{Name: "myproject"}},
+		RigPackDirs: map[string][]string{
+			"myproject": {unrelatedDir},
+		},
+	}
+	c := NewRigPackCoverageCheck(cfg, dir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Errorf("status = %d, want Warning (unrelated local pack does not cover gastown's witness session); msg = %s", r.Status, r.Message)
+	}
+}
+
 func writeTestPack(t *testing.T, packDir, content string) {
 	t.Helper()
 	if err := os.MkdirAll(packDir, 0o755); err != nil {

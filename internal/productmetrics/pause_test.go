@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
+	"math"
 	"os"
 	"reflect"
 	"strings"
@@ -60,6 +61,31 @@ func TestCanonicalPauseMessageMatchesRestrictedRFC8785Vector(t *testing.T) {
 	}
 	if want := pauseCanonicalOracle(testPauseRelease, testPauseEpoch, testPauseKeyID); !bytes.Equal(message, want) {
 		t.Fatalf("canonical message mismatch\n got: %q\nwant: %q", message, want)
+	}
+}
+
+// TestCanonicalPauseMessageCapacityMatchesPlainSumForNormalInputs pins the
+// non-overflow path to the same result a plain `prefixLen + encodedLen`
+// addition would produce, so the overflow guard below can't silently change
+// the allocated capacity for real-world inputs.
+func TestCanonicalPauseMessageCapacityMatchesPlainSumForNormalInputs(t *testing.T) {
+	prefixLen, encodedLen := len(pauseDomainPrefix), 128
+	got, err := canonicalPauseMessageCapacity(prefixLen, encodedLen)
+	if err != nil {
+		t.Fatalf("canonicalPauseMessageCapacity: %v", err)
+	}
+	if want := prefixLen + encodedLen; got != want {
+		t.Fatalf("canonicalPauseMessageCapacity = %d, want %d", got, want)
+	}
+}
+
+// TestCanonicalPauseMessageCapacityRejectsOverflow exercises the allocation
+// guard directly with a math.MaxInt-sized operand instead of an actual
+// oversized []byte, so the overflow path is provable without allocating
+// gigabytes of memory in a test.
+func TestCanonicalPauseMessageCapacityRejectsOverflow(t *testing.T) {
+	if _, err := canonicalPauseMessageCapacity(len(pauseDomainPrefix), math.MaxInt); err == nil {
+		t.Fatal("canonicalPauseMessageCapacity: want overflow error for math.MaxInt encoded length, got nil")
 	}
 }
 
@@ -150,18 +176,30 @@ func TestVerifySignedPauseRejectsHostileEnvelopes(t *testing.T) {
 	}
 }
 
-func TestPauseKeyCatalogFailsClosedAndProductionSetIsEmpty(t *testing.T) {
+func TestPauseKeyCatalogFailsClosedAndProductionSetHasOneApprovedKey(t *testing.T) {
 	publicKey, privateKey := deterministicPauseKey()
 	valid := []byte(signedPauseEnvelope(testPauseRelease, testPauseEpoch, testPauseKeyID, privateKey))
 	expectation := pauseExpectation{releaseVersion: testPauseRelease, metricsEpoch: testPauseEpoch}
 
-	productionCount := 0
-	productionPausePublicKeyCatalog(func(pausePublicKeyEntry) { productionCount++ })
-	if productionCount != 0 {
-		t.Fatalf("Stage 1a production pause-key catalog has %d entries, want zero", productionCount)
+	productionEntries := 0
+	productionPausePublicKeyCatalog(func(entry pausePublicKeyEntry) {
+		productionEntries++
+		if !validPauseKeyID(entry.id) {
+			t.Errorf("production pause key has invalid ID %q", entry.id)
+		}
+		if len(entry.key) != ed25519.PublicKeySize {
+			t.Errorf("production pause key %q has %d-byte key, want %d", entry.id, len(entry.key), ed25519.PublicKeySize)
+		}
+	})
+	if productionEntries != 1 {
+		t.Fatalf("production pause-key catalog has %d entries, want exactly one", productionEntries)
 	}
+	if _, err := indexPausePublicKeyCatalog(productionPausePublicKeyCatalog); err != nil {
+		t.Fatalf("production pause-key catalog failed to index: %v", err)
+	}
+	// A pause signed by any key other than the seated production key is rejected.
 	if _, err := verifySignedPause(valid, expectation, productionPausePublicKeyCatalog); err == nil {
-		t.Fatal("endpoint-empty production key catalog verified a signed pause")
+		t.Fatal("production key catalog verified a pause signed by an unapproved key")
 	}
 
 	for name, catalog := range map[string]pausePublicKeyCatalog{

@@ -137,6 +137,42 @@ describe('useCachedData', () => {
     expect(getCached<string>(cacheKey)).toBeUndefined();
   });
 
+  it('aborts the obsolete fetch signal when the cache key changes', () => {
+    const signals: AbortSignal[] = [];
+    const fetcher = (signal: AbortSignal) => {
+      signals.push(signal);
+      return new Promise<string>(() => {});
+    };
+
+    const { rerender } = renderHook(
+      ({ cacheKey }: { cacheKey: string }) => useCachedData(cacheKey, fetcher),
+      { initialProps: { cacheKey: 'first' } },
+    );
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.aborted).toBe(false);
+
+    rerender({ cacheKey: 'second' });
+
+    expect(signals).toHaveLength(2);
+    expect(signals[0]?.aborted).toBe(true);
+    expect(signals[1]?.aborted).toBe(false);
+  });
+
+  it('aborts the active fetch signal on unmount', () => {
+    let signal: AbortSignal | undefined;
+    const { unmount } = renderHook(() =>
+      useCachedData('unmounted-signal', (nextSignal: AbortSignal) => {
+        signal = nextSignal;
+        return new Promise<string>(() => {});
+      }),
+    );
+
+    expect(signal?.aborted).toBe(false);
+    unmount();
+    expect(signal?.aborted).toBe(true);
+  });
+
   it('exposes the cache fetch timestamp once data lands', async () => {
     const value = deferred<string>();
     const cacheKey = 'fetched-at-key';

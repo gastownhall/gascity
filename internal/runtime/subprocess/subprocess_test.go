@@ -86,6 +86,10 @@ func requirePrivateFallbackRejected(t *testing.T, p *Provider, name string) {
 			t.Errorf("%s error = %v, want private socket directory validation", check.name, err)
 		}
 	}
+	// A directory that fails validation cannot tell, so liveness is unknown.
+	if _, err := p.ObserveLivenessWithError(name, nil); !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, errPrivateSocketDirValidation) {
+		t.Errorf("ObserveLivenessWithError error = %v, want ErrRuntimeUnavailable wrapping private socket directory validation", err)
+	}
 }
 
 func TestStartCreatesProcess(t *testing.T) {
@@ -335,7 +339,8 @@ func TestLegacySocketRemainsVisibleWhenPrivateFallbackIsMissing(t *testing.T) {
 	if startCalls != 0 {
 		t.Fatalf("process start calls = %d, want 0", startCalls)
 	}
-	for _, want := range []string{"ping", "ping", "interrupt", "stop", "ping"} {
+	// Liveness probes only connect, so the owner sees just the two commands.
+	for _, want := range []string{"interrupt", "stop"} {
 		select {
 		case got := <-gotCommand:
 			if got != want {
@@ -685,6 +690,49 @@ func TestEnvPassedToProcess(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatal("timed out waiting for env marker file")
+}
+
+func TestEmptyEnvOverrideIsAbsentFromProcess(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "env.txt")
+	t.Setenv("BEADS_DB", "ambient-database")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example")
+
+	p := newTestProvider(t)
+	err := p.Start(context.Background(), "env-withhold", runtime.Config{
+		Command: "env | sort > " + marker,
+		Env: map[string]string{
+			"BEADS_DB":               "",
+			"BEADS_DOLT_SERVER_HOST": "",
+			"BEADS_DIR":              "/selected/.beads",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop("env-withhold") //nolint:errcheck
+	p.mu.Lock()
+	conn := p.procs["env-withhold"]
+	p.mu.Unlock()
+	if conn == nil {
+		t.Fatal("environment child was not tracked")
+	}
+	select {
+	case <-conn.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for environment child process")
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if strings.Contains(got, "BEADS_DB=") || strings.Contains(got, "BEADS_DOLT_SERVER_HOST=") {
+		t.Fatalf("withheld variables reached child: %q", got)
+	}
+	if !strings.Contains(got, "BEADS_DIR=/selected/.beads\n") {
+		t.Fatalf("explicit environment did not reach child: %q", got)
+	}
 }
 
 func TestWorkDirSet(t *testing.T) {

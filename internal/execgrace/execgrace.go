@@ -1,0 +1,285 @@
+// Package execgrace provides cooperative cancellation and optional
+// activity-aware timeouts for [os/exec.Cmd].
+//
+// It generalizes two patterns that already exist piecemeal in the codebase:
+//
+//   - Graceful cancellation ([Apply]): the command runs in its own process
+//     group and context cancellation sends that group SIGTERM first, so shell
+//     rollback traps (and any foreground child blocking them) get a chance to
+//     run before cancellation escalates to a forced kill. Without this, Go's
+//     default [os/exec.CommandContext] cancel is Process.Kill — SIGKILL — which
+//     is untrappable: a setup script killed mid-flight can never restore state
+//     it staged aside (the worktree-setup data-loss class).
+//
+//     The cooperative signal is SIGTERM, not SIGINT. SIGINT is the keyboard
+//     interrupt and shells treat it specially: a non-interactive shell
+//     started as a background job inherits SIGINT ignored and cannot trap it
+//     at all, and bash can stop acting on signals entirely when SIGINT lands
+//     during a command substitution. SIGTERM has neither hazard, and it is
+//     the signal docker stop and Kubernetes use for the same TERM-then-KILL
+//     contract.
+//
+//   - Activity-aware deadlines ([Monitor]): a fixed wall-clock timeout cannot
+//     distinguish a hung command from a slow-but-healthy one. A Monitor cancels
+//     its context only after the command has produced no output for a
+//     configurable idle window, with an independent absolute ceiling as the
+//     runaway backstop (a command that streams output forever must still die).
+//     Both dimensions are opt-in: a zero idle and zero ceiling yield a Monitor
+//     that passes the parent context and writers through untouched, so call
+//     sites keep their existing fixed-deadline behavior unless they ask for
+//     more.
+package execgrace
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// ErrIdle is the cancellation cause when a [Monitor]'s idle window elapses
+// with no output from the command. Retrieve it with [context.Cause].
+var ErrIdle = errors.New("command produced no output within the idle timeout")
+
+// ErrCeiling is the cancellation cause when a [Monitor]'s absolute ceiling
+// elapses regardless of output. Retrieve it with [context.Cause].
+var ErrCeiling = errors.New("command exceeded the maximum runtime ceiling")
+
+// CancelOutcome classifies how a delivered cancellation actually reached the
+// command, distinguishing the clean group signal from the fallback paths.
+type CancelOutcome uint8
+
+const (
+	// CancelNotDelivered is the zero value: cancellation was never invoked,
+	// or the target was already gone by the time it fired.
+	CancelNotDelivered CancelOutcome = iota
+
+	// CancelGroupSignaled means the process group was sent SIGTERM
+	// successfully. The command (and any foreground child) received the
+	// signal; whether it then exits cooperatively or is later force-killed
+	// by os/exec's own WaitDelay escalation happens outside Apply, and does
+	// not change this outcome.
+	CancelGroupSignaled
+
+	// CancelLeaderSignaledOnly means the process group could not be
+	// resolved, so only the process leader was sent SIGTERM directly.
+	CancelLeaderSignaledOnly
+
+	// CancelForceKilled means the SIGTERM itself could not be delivered
+	// (group and leader signaling both failed) and Apply fell back to
+	// killing the process directly rather than leaving it to run out the
+	// WaitDelay clock.
+	CancelForceKilled
+)
+
+// String renders o for diagnostics and test failure messages.
+func (o CancelOutcome) String() string {
+	switch o {
+	case CancelNotDelivered:
+		return "CancelNotDelivered"
+	case CancelGroupSignaled:
+		return "CancelGroupSignaled"
+	case CancelLeaderSignaledOnly:
+		return "CancelLeaderSignaledOnly"
+	case CancelForceKilled:
+		return "CancelForceKilled"
+	default:
+		return fmt.Sprintf("CancelOutcome(%d)", uint8(o))
+	}
+}
+
+// CancelResult reports whether and how [Apply]'s cooperative cancellation was
+// delivered to a command. The zero value correctly reports an undelivered
+// cancellation; callers only ever receive one from Apply.
+type CancelResult struct {
+	delivered atomic.Bool
+	outcome   atomic.Uint32
+}
+
+// Delivered reports whether a cancellation action of any kind was delivered
+// to the command. Callers that need cancellation to win over the command's
+// own exit status (see [internal/runtime/exec]) check this.
+func (r *CancelResult) Delivered() bool { return r.delivered.Load() }
+
+// Outcome reports which cancellation path was taken. It is only meaningful
+// once Delivered reports true.
+func (r *CancelResult) Outcome() CancelOutcome { return CancelOutcome(r.outcome.Load()) }
+
+func (r *CancelResult) record(outcome CancelOutcome) {
+	r.outcome.Store(uint32(outcome))
+	r.delivered.Store(true)
+}
+
+// Apply configures cmd for cooperative cancellation and returns a
+// [CancelResult] that records whether, and how, a cancellation action was
+// delivered.
+//
+// It places the command in its own process group (POSIX; no-op on Windows),
+// replaces the default context-cancel behavior (SIGKILL) with
+// [TerminateThenKill], and raises cmd.WaitDelay to grace when grace is larger
+// than the current value. WaitDelay bounds how long Wait allows the
+// terminated process — its rollback traps included — and any grandchildren
+// holding the I/O pipes before Go forcibly terminates them, so grace is
+// effectively the trap budget. A zero grace leaves WaitDelay untouched.
+//
+// The returned result serves callers that need cancellation to win over the
+// command's own exit status (see [internal/runtime/exec]); callers that only
+// need the graceful signal ordering may ignore it.
+func Apply(cmd *exec.Cmd, grace time.Duration) *CancelResult {
+	setProcessGroup(cmd)
+	result := new(CancelResult)
+	cmd.Cancel = TerminateThenKill(cmd, result)
+	if grace > cmd.WaitDelay {
+		cmd.WaitDelay = grace
+	}
+	return result
+}
+
+// TerminateThenKill builds an [os/exec.Cmd.Cancel] that first sends SIGTERM
+// to the command's process group so a cooperative command — and any
+// foreground child blocking its rollback trap — can roll back before
+// cancellation becomes a forced kill, recording in result whether and how
+// cancellation was delivered so the caller can let it win over the command's
+// own exit status. Platforms without process groups or a catchable
+// termination signal (such as Windows) fall back to Kill.
+func TerminateThenKill(cmd *exec.Cmd, result *CancelResult) func() error {
+	return func() error {
+		outcome, err := terminateProcessGroup(cmd)
+		if err == nil {
+			result.record(outcome)
+			return nil
+		}
+		if errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+		killErr := cmd.Process.Kill()
+		if killErr == nil {
+			result.record(CancelForceKilled)
+		}
+		return killErr
+	}
+}
+
+// Monitor derives a context that is canceled when a command stops making
+// observable progress (no output for idle) or exhausts an absolute runtime
+// ceiling. Wrap the command's stdout/stderr with [Monitor.Writer] so output
+// feeds the idle clock.
+//
+// A Monitor with neither dimension enabled is inert: Context returns the
+// parent unchanged and Writer returns writers unchanged, preserving the call
+// site's existing behavior with zero overhead.
+type Monitor struct {
+	ctx    context.Context
+	cancel context.CancelCauseFunc
+
+	idle time.Duration
+	last atomic.Int64 // UnixNano of the most recent output (or start)
+
+	mu        sync.Mutex
+	idleTimer *time.Timer
+	ceilTimer *time.Timer
+	stopped   bool
+}
+
+// NewMonitor returns a Monitor over parent. idle > 0 enables the
+// no-output-for-idle cancellation (cause [ErrIdle]); ceiling > 0 enables the
+// absolute wall-clock cancellation (cause [ErrCeiling]). Either may be zero to
+// disable that dimension; when both are zero the Monitor is inert and
+// [Monitor.Context] returns parent itself.
+//
+// Callers must arrange for [Monitor.Stop] to run once the command finishes
+// (typically via defer) to release the Monitor's timers.
+func NewMonitor(parent context.Context, idle, ceiling time.Duration) *Monitor {
+	m := &Monitor{idle: idle}
+	if idle <= 0 && ceiling <= 0 {
+		m.ctx = parent
+		return m
+	}
+	m.ctx, m.cancel = context.WithCancelCause(parent)
+	m.last.Store(time.Now().UnixNano())
+	if idle > 0 {
+		m.idleTimer = time.AfterFunc(idle, m.checkIdle)
+	}
+	if ceiling > 0 {
+		m.ceilTimer = time.AfterFunc(ceiling, func() { m.cancel(ErrCeiling) })
+	}
+	return m
+}
+
+// Context returns the monitored context. Pass it to
+// [os/exec.CommandContext]. For an inert Monitor this is the parent context
+// itself.
+func (m *Monitor) Context() context.Context { return m.ctx }
+
+// Enabled reports whether the Monitor is actively enforcing at least one
+// dimension. Call sites that need a fixed fallback deadline when monitoring
+// is disabled can branch on this.
+func (m *Monitor) Enabled() bool { return m.cancel != nil }
+
+// Writer wraps inner so each write refreshes the idle clock. For an inert
+// Monitor (or one without the idle dimension) it returns inner unchanged.
+// The returned writer is safe for the concurrent use os/exec makes of
+// separate stdout/stderr pipes: the clock is a single atomic store and all
+// forwarding is delegated to inner.
+func (m *Monitor) Writer(inner io.Writer) io.Writer {
+	if m.cancel == nil || m.idle <= 0 {
+		return inner
+	}
+	return &activityWriter{m: m, inner: inner}
+}
+
+// Stop releases the Monitor's timers. It does not cancel the derived context
+// on its own; a context already canceled (by either dimension or the parent)
+// stays canceled with its recorded cause. Safe to call multiple times.
+func (m *Monitor) Stop() {
+	if m.cancel == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.stopped {
+		return
+	}
+	m.stopped = true
+	if m.idleTimer != nil {
+		m.idleTimer.Stop()
+	}
+	if m.ceilTimer != nil {
+		m.ceilTimer.Stop()
+	}
+	// Release the cause-context's resources; a prior cancellation (with its
+	// cause) wins because CancelCauseFunc is first-cause-sticky.
+	m.cancel(context.Canceled)
+}
+
+// checkIdle fires when the idle window may have elapsed. Output since the
+// timer was armed re-arms it for the remainder; true silence cancels with
+// [ErrIdle].
+func (m *Monitor) checkIdle() {
+	since := time.Since(time.Unix(0, m.last.Load()))
+	if since >= m.idle {
+		m.cancel(ErrIdle)
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.stopped {
+		return
+	}
+	m.idleTimer.Reset(m.idle - since)
+}
+
+type activityWriter struct {
+	m     *Monitor
+	inner io.Writer
+}
+
+func (w *activityWriter) Write(p []byte) (int, error) {
+	w.m.last.Store(time.Now().UnixNano())
+	return w.inner.Write(p)
+}

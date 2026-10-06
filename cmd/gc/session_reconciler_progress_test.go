@@ -352,6 +352,183 @@ func TestReconcileSessionBeads_ProgressStallDoesNotRecycleExemptOrSafeSessions(t
 	}
 }
 
+func TestReconcileSessionBeads_ClaimHolderStallRecyclesConfirmedHolder(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+	env.cfg.Session.ProgressStallTimeout = ""
+	env.cfg.Session.ClaimHolderStallTimeout = "20m"
+
+	work, err := env.store.Create(beads.Bead{Title: "claimed work", Type: "task", Assignee: sessionName})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+
+	env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
+
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q still running; stale claim-holder should be recycled", sessionName)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want true", got.Metadata["continuation_reset_pending"])
+	}
+	if !strings.Contains(env.stderr.String(), "claim-holder-stalled") {
+		t.Fatalf("stderr = %q, want claim-holder-stalled diagnostic", env.stderr.String())
+	}
+}
+
+func TestReconcileSessionBeads_ClaimHolderStallFailsSafeWhenClaimIsUnknown(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+	env.cfg.Session.ProgressStallTimeout = ""
+	env.cfg.Session.ClaimHolderStallTimeout = "20m"
+	env.store = &assignedWorkListErrorStore{Store: env.store, err: errors.New("assigned work query failed")}
+
+	env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q was recycled although claim ownership was unreadable", sessionName)
+	}
+	if strings.Contains(env.stderr.String(), "claim-holder-stalled") {
+		t.Fatalf("stderr = %q, want no claim-holder stall diagnostic", env.stderr.String())
+	}
+	if !strings.Contains(env.stderr.String(), "checking assigned work before progress-stall recycle") {
+		t.Fatalf("stderr = %q, want claim-read failure diagnostic", env.stderr.String())
+	}
+}
+
+func TestReconcileSessionBeads_ClaimHolderStallDoesNotRestartIntoRedProvider(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+	env.cfg.Session.ProgressStallTimeout = ""
+	env.cfg.Session.ClaimHolderStallTimeout = "20m"
+
+	work, err := env.store.Create(beads.Bead{Title: "claimed work", Type: "task", Assignee: sessionName})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+	cityPath := t.TempDir()
+	writeHealthCache(t, cityPath, "zai", "unhealthy", nowSecs())
+
+	env.reconcileAtPath(cityPath, []beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q was restarted into a known-unhealthy provider", sessionName)
+	}
+	if strings.Contains(env.stderr.String(), "claim-holder-stalled") {
+		t.Fatalf("stderr = %q, want no claim-holder stall diagnostic", env.stderr.String())
+	}
+}
+
+func TestReconcileSessionBeads_ClaimHolderStallKeepsPoolClaimForFreshWorker(t *testing.T) {
+	env := newRestartRequestTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Session: config.SessionConfig{
+			ClaimHolderStallTimeout: "20m",
+			StartupTimeout:          "60s",
+		},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MinActiveSessions: restartRequestTestIntPtr(1),
+			MaxActiveSessions: restartRequestTestIntPtr(1),
+		}},
+	}
+	const sessionName = "worker-1"
+	env.desiredState[sessionName] = TemplateParams{
+		Command: "true", SessionName: sessionName, TemplateName: "worker",
+		ResolvedProvider: &config.ResolvedProvider{Name: "zai", SessionIDFlag: "--session-id"},
+	}
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		"pool_slot":           "1",
+		"state":               "active",
+		"session_key":         "original-key",
+		"started_config_hash": "hash-before-restart",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	env.sp.SetActivity(sessionName, env.clk.Now().Add(-time.Hour))
+
+	work, err := env.store.Create(beads.Bead{Title: "claimed pool work", Type: "task", Assignee: session.ID})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+
+	// First pass performs the fresh-restart handoff. The worker is its pool's
+	// minimum-floor member, proving that the idle-floor exemption cannot hide a
+	// real claim. The handoff must leave the claim attached to the canonical
+	// pool-session bead rather than silently reopen it.
+	env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("pool session %q still running after claim-holder restart request", sessionName)
+	}
+	gotWork, err := env.store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get(work): %v", err)
+	}
+	if gotWork.Status != "in_progress" || gotWork.Assignee != session.ID {
+		t.Fatalf("work after stop = status=%q assignee=%q, want in_progress assigned to session %q", gotWork.Status, gotWork.Assignee, session.ID)
+	}
+
+	// The next reconciliation wakes the same pool-session bead. This is the
+	// re-adoption guarantee: a fresh process resumes responsibility for the
+	// existing claim instead of creating a replacement that cannot see it.
+	restarted, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	env.reconcileAtPath(t.TempDir(), []beads.Bead{restarted})
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("pool session %q was not re-woken to re-adopt its claim; stderr=%s", sessionName, env.stderr.String())
+	}
+	gotWork, err = env.store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get(work) after wake: %v", err)
+	}
+	if gotWork.Status != "in_progress" || gotWork.Assignee != session.ID {
+		t.Fatalf("work after fresh pool wake = status=%q assignee=%q, want unchanged claim on %q", gotWork.Status, gotWork.Assignee, session.ID)
+	}
+}
+
+func TestReconcileSessionBeads_ClaimHolderStallUsesItsOwnThreshold(t *testing.T) {
+	env, session, sessionName := newProgressStallTestEnv(t)
+	env.cfg.Session.ProgressStallTimeout = "30m"
+	env.cfg.Session.ClaimHolderStallTimeout = "45m"
+	env.sp.SetActivity(sessionName, env.clk.Now().Add(-35*time.Minute))
+
+	work, err := env.store.Create(beads.Bead{Title: "claimed work", Type: "task", Assignee: sessionName})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+	env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q recycled before its claim-holder threshold", sessionName)
+	}
+}
+
 // TestReconcileSessionBeads_ProgressStallExemptsMinFloorIdleWorker drives the
 // reconciler's pool-counting branch (not just the extracted predicate): a stale,
 // claimless, healthy session whose pool is at its configured floor

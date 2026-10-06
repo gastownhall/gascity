@@ -24,8 +24,8 @@ func TestDefaultRecoveryHooksSurfaceFailures(t *testing.T) {
 		name   string
 		script string
 	}{
-		{"on_death", (&Agent{Name: "worker"}).EffectiveOnDeathForBeads(BeadsConfig{})},
-		{"on_boot", (&Agent{Name: "worker"}).EffectiveOnBootForBeads(BeadsConfig{})},
+		{"on_death", (&Agent{Name: "worker"}).EffectiveOnDeathFor(QueryTopology{})},
+		{"on_boot", (&Agent{Name: "worker"}).EffectiveOnBootFor(QueryTopology{})},
 	} {
 		if !strings.Contains(tc.script, RecoveryHookMarker) {
 			t.Errorf("%s hook does not emit the %q recovery marker:\n%s", tc.name, RecoveryHookMarker, tc.script)

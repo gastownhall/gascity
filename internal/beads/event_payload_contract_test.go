@@ -33,10 +33,10 @@ func TestNotifyChangePayloadDecodesViaSharedDecoder(t *testing.T) {
 	}
 
 	var got json.RawMessage
-	cs := NewCachingStore(NewMemStore(), func(_, _, _, _, _ string, payload json.RawMessage) {
+	cs := NewCachingStore(NewMemStore(), func(_ ChangeSource, _, _, _, _, _ string, _ *[]string, payload json.RawMessage) {
 		got = payload
 	})
-	cs.notifyChange("bead.created", seed)
+	cs.notifyChange(ChangeLocal, "bead.created", seed)
 
 	if len(got) == 0 {
 		t.Fatal("notifyChange emitted an empty payload")

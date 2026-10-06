@@ -783,3 +783,223 @@ func TestReconcileSessionBeads_RestartRequestAllowsExplicitResetForPinnedNamedSe
 		t.Fatalf("continuation_reset_pending = %q, want true until next start", got.Metadata["continuation_reset_pending"])
 	}
 }
+
+// TestDoHandoff_PinnedAlwaysSessionPersistsResetAndReconcilerStopsSession
+// covers Fix 1 end-to-end: doHandoffWithOutcome on a pinned always-mode
+// session with a working persistRestart must land continuation_reset_pending
+// on the session bead, and that persisted state must be exactly what lets the
+// reconciler's explicit-reset escape hatch actually stop the pinned session
+// on its next pass (mirrors
+// TestReconcileSessionBeads_RestartRequestAllowsExplicitResetForPinnedNamedSession,
+// but drives the persisted state through the CLI instead of setting it
+// directly).
+func TestDoHandoff_PinnedAlwaysSessionPersistsResetAndReconcilerStopsSession(t *testing.T) {
+	env := newRestartRequestTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "mayor", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "mayor", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "mayor")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "mayor",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "mayor",
+		namedSessionModeMetadata:     "always",
+		"state":                      "active",
+		"pin_awake":                  "true",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	dops := newDrainOps(env.sp)
+	persistCalled := false
+	persistRestart := func() error {
+		persistCalled = true
+		// Stands in for Manager.RequestFreshRestart (out of scope here):
+		// what doHandoffWithOutcome actually depends on is that a working
+		// persistRestart lands continuation_reset_pending on the bead.
+		return env.store.SetMetadata(session.ID, "continuation_reset_pending", "true")
+	}
+
+	var stdout, stderr bytes.Buffer
+	outcome := doHandoffWithOutcome(env.store, env.store, env.rec, dops, persistRestart,
+		sessionName, sessionName, []string{"HANDOFF: context full"}, &stdout, &stderr)
+	if outcome.code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", outcome.code, stderr.String())
+	}
+	if !outcome.restartRequested {
+		t.Fatal("restartRequested = false, want true for pinned always-mode session with working persistRestart")
+	}
+	if !persistCalled {
+		t.Fatal("persistRestart was not called for pinned always-mode session")
+	}
+	if !strings.Contains(stdout.String(), "requesting restart") {
+		t.Errorf("stdout = %q, want restart-requested confirmation", stdout.String())
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want true after successful pinned handoff", got.Metadata["continuation_reset_pending"])
+	}
+
+	// The reconciler is the end-to-end oracle: with continuation_reset_pending
+	// now landed, its explicit-reset escape hatch must actually stop the
+	// pinned session on the next reconcile pass.
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{got}, map[string]int{"mayor": 1}, dops)
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("pinned session %q still running after reconcile; persisted restart should have let the reconciler stop it", sessionName)
+	}
+}
+
+// TestReconcileSessionBeads_RestartRequestSetsAsleepOnlyWhenLiveRuntimeKilled
+// pins ga-2fpf9z's second fix site: the restart-requested handoff in
+// session_reconciler.go must add state=asleep to the SAME patch as the kill
+// — but only on the branch that actually killed a live runtime. When the
+// runtime was already dead going in, the deliberate same-tick fall-through
+// (see the "Yield this tick" / #2345 comment, and
+// TestReconcileSessionBeads_RestartRequestNamedAlwaysWakesSameTick) must stay
+// byte-for-byte unchanged: this fix must never write "asleep" on that branch.
+func TestReconcileSessionBeads_RestartRequestSetsAsleepOnlyWhenLiveRuntimeKilled(t *testing.T) {
+	t.Run("live runtime killed", func(t *testing.T) {
+		env := newRestartRequestTestEnv()
+		env.cfg = &config.City{
+			Workspace:     config.Workspace{Name: "test-city"},
+			Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+			NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+		}
+		sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+		env.desiredState[sessionName] = TemplateParams{
+			Command:      "true",
+			SessionName:  sessionName,
+			TemplateName: "worker",
+			ResolvedProvider: &config.ResolvedProvider{
+				SessionIDFlag: "--session-id",
+			},
+		}
+
+		session := env.createSessionBead(sessionName)
+		env.setSessionMetadata(&session, map[string]string{
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "worker",
+			namedSessionModeMetadata:     "on_demand",
+			"state":                      "active",
+			"restart_requested":          "true",
+			"session_key":                "original-key",
+			"started_config_hash":        "hash-before-restart",
+		})
+		if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+			t.Fatalf("start session: %v", err)
+		}
+		if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+			t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+		}
+
+		// A single tick: runtimeRunning is true here, so the kill fires and
+		// the tick yields (continue) before any wake decision runs. The
+		// state left behind is therefore exactly what the restart-requested
+		// patch wrote — nothing downstream has had a chance to touch it.
+		env.reconcile([]beads.Bead{session})
+
+		if env.sp.IsRunning(sessionName) {
+			t.Fatalf("session %q still running after restart-requested kill", sessionName)
+		}
+		got, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("store.Get(%s): %v", session.ID, err)
+		}
+		if got.Metadata["state"] != "asleep" {
+			t.Fatalf("state = %q, want asleep — the handoff killed a live runtime and must not leave gc believing the session is still awake", got.Metadata["state"])
+		}
+		if got.Metadata["session_key"] == "" || got.Metadata["session_key"] == "original-key" {
+			t.Fatalf("session_key = %q, want rotated key", got.Metadata["session_key"])
+		}
+
+		// Next tick: the recorded asleep state plus the reset-pending desire
+		// must wake the on_demand session with no further trigger.
+		env.reconcile([]beads.Bead{got})
+
+		if !env.sp.IsRunning(sessionName) {
+			t.Fatalf("session %q did not wake on the next tick after the restart-requested kill", sessionName)
+		}
+		woke, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("store.Get(%s) after wake: %v", session.ID, err)
+		}
+		if woke.Metadata["last_woke_at"] == "" {
+			t.Fatal("last_woke_at after wake = empty, want a timestamp from a real wake commit")
+		}
+	})
+
+	t.Run("already dead: fall-through unaffected", func(t *testing.T) {
+		env := newRestartRequestTestEnv()
+		env.cfg = &config.City{
+			Workspace:     config.Workspace{Name: "test-city"},
+			Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+			NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+		}
+		sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+		env.desiredState[sessionName] = TemplateParams{
+			Command:      "true",
+			SessionName:  sessionName,
+			TemplateName: "worker",
+			ResolvedProvider: &config.ResolvedProvider{
+				SessionIDFlag: "--session-id",
+			},
+		}
+
+		session := env.createSessionBead(sessionName)
+		env.setSessionMetadata(&session, map[string]string{
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "worker",
+			namedSessionModeMetadata:     "always",
+			"restart_requested":          "true",
+			"session_key":                "original-key",
+			"started_config_hash":        "hash-before-restart",
+		})
+
+		// Runtime is NOT started: the already-dead fall-through (mirrors
+		// TestReconcileSessionBeads_RestartRequestNamedAlwaysWakesSameTick).
+		if env.sp.IsRunning(sessionName) {
+			t.Fatal("test fixture wrong: session should not be running")
+		}
+
+		env.reconcile([]beads.Bead{session})
+
+		// Same-tick wake still fires — unchanged from before this fix.
+		if !env.sp.IsRunning(sessionName) {
+			t.Fatalf("session %q did not wake on the same reconciler tick; the already-dead fall-through must stay unchanged", sessionName)
+		}
+		got, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("store.Get(%s): %v", session.ID, err)
+		}
+		// The fix only ever adds "state" to the batch when runtimeRunning was
+		// true at entry. Here it was false, so the restart-requested block
+		// itself must never have written "asleep" — whatever state the
+		// same-tick wake produced belongs to the (unchanged) wake decision,
+		// not to this fix.
+		if got.Metadata["state"] == "asleep" {
+			t.Fatalf("state = %q, want NOT asleep — runtime was already dead, the restart-requested block must not have touched state on this branch", got.Metadata["state"])
+		}
+		if got.Metadata["last_woke_at"] == "" {
+			t.Fatal("last_woke_at empty, want same-tick wake commit")
+		}
+	})
+}

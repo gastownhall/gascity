@@ -1,0 +1,2 @@
+{"type":"assistant","uuid":"a1c0ffee-0000-4000-8000-000000000001","timestamp":"2026-08-02T09:00:40.121Z","message":{"content":[{"type":"tool_use","id":"toolu_queue_only","name":"Agent","input":{"description":"Audit the nudge path","prompt":"Inspect nudge delivery"}}]}}
+{"type":"queue-operation","operation":"enqueue","content":"<task-notification><task-id>queueonly</task-id><status>completed</status></task-notification>"}

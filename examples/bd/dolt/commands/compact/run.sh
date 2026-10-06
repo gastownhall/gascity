@@ -14,9 +14,13 @@
 # Running as an exec order gives us direct SQL access via the dolt CLI.
 #
 # Algorithm (flatten mode):
+#   0. Version a dirty dolt_ignore in its own commit, so the flatten's -Am
+#      cannot first-commit it (gc's read-only health probe registers its probe
+#      table there and leaves the row uncommitted).
 #   1. Pre-flight: record row counts and value hashes for all user tables and
 #      require HEAD to remain stable across a bounded retry loop.
-#   2. Soft-reset to the root commit; all data stays staged.
+#   2. Soft-reset to the history-provenance watermark (the gc-compact-base
+#      tag; see "History protection" below); all data stays staged.
 #   3. Commit everything as a single "compaction: flatten history" commit.
 #   4. Re-check post-flatten row counts, table value hashes, and database
 #      value hash. Row-count increases are treated as concurrent-writer
@@ -32,21 +36,50 @@
 #      otherwise looks identical to the ambiguous gain+drift corruption signal.
 #      Quarantining that false positive blocks all future GC of the db and
 #      starves DOLT_GC until host memory is exhausted. So, mirroring the remote-
-#      push path's HEAD-stability defer, gain+drift and row-count-decrease
-#      cases are downgraded from a blocking quarantine to a skip-and-retry-
-#      next-run ONLY when a concurrent writer is proven. A writer is proven
-#      (and distinguished from the flatten's OWN commit) when either HEAD
-#      captured immediately before the mutating reset differs from the stable
-#      pre-flight HEAD (a writer landed in the preflight->reset window, before
-#      the flatten committed), or HEAD captured after verify moved past the
-#      flatten's own commit (a writer landed during/after verify). All other
-#      failures — and gain+drift or row-decrease with a stable HEAD — still
-#      quarantine. Probe failure leaves the race unproven and quarantines.
+#      push path's HEAD-stability defer, gain+drift, row-count-decrease, and
+#      same-count value-hash-drift cases are downgraded from a blocking
+#      quarantine to a skip-and-retry-next-run ONLY when a concurrent writer is
+#      proven. A writer is proven (and distinguished from the flatten's OWN
+#      commit) when either HEAD captured immediately before the mutating reset
+#      differs from the stable pre-flight HEAD (a writer landed in the
+#      preflight->reset window, before the flatten committed), or HEAD captured
+#      after verify moved past the flatten's own commit (a writer landed
+#      during/after verify). All other failures — and any of those signatures
+#      with a stable HEAD — still quarantine. Probe failure leaves the race
+#      unproven and quarantines.
+#   4b. Committed-root drift gate. When per-table verification passed but the
+#      whole-database hash still drifted, DOLT_DIFF_STAT names the tables that
+#      differ across the flatten. Drift is benign only when every named table
+#      is either already verified or a table the -Am first-committed whose
+#      content diff is added-only; anything else quarantines.
 #   5. Run CALL DOLT_GC('--full') to reclaim chunks orphaned by the flatten.
 #
 # Remote push failures are recorded in compact-pending-push markers and do not
 # fail local compaction. Later runs retry those markers before threshold skips,
 # and unverified remote heads must become ancestry-verifiable before push.
+# A database marked .no-sync (same marker the sync and pull commands honor) has
+# no remote phase at all: it is never fetched or pushed, never gets a
+# pending-push marker, and an existing one is cleared so it cannot block flatten.
+#
+# History protection (#5958). The compactor only rewrites history it can show
+# this city grew:
+#   * Shared-history guard: a database with ANY configured Dolt remote may share
+#     its history with other clones (a team remote, bd's refs/dolt/data, a
+#     federated city), so it is never flattened or force-pushed. It gets a bare
+#     working-set CALL DOLT_GC() instead. .no-sync and --skip-fetch do not
+#     bypass this; GC_DOLT_COMPACT_ALLOW_FEDERATED=1 does (announced windows
+#     only). A pending-GC retry still runs its local DOLT_GC --full but drops the
+#     deferred push; a pending-push marker is held for operator review.
+#   * Provenance watermark: the Dolt tag gc-compact-base, stamped the first time
+#     the compactor sees a database (never under --dry-run). It goes on the root
+#     commit when root's child is a "compaction: flatten history" commit (a
+#     database this compactor already manages) or when the operator created
+#     <data_dir>/<db>/.compact-full-history; otherwise on HEAD, so adopted or
+#     pre-existing history is frozen. The flatten soft-resets to the tag, and
+#     the threshold counts commits since the tag. A tag that is not an ancestor
+#     of HEAD (rollback/restore to before the watermark) refuses the flatten
+#     until an operator re-stamps or deletes it.
+#
 # Surgical mode (preserve recent N commits via interactive rebase) is
 # intentionally not implemented; flatten is sufficient for bloat recovery
 # and avoids the rebase-vs-concurrent-write hazards.
@@ -60,7 +93,16 @@
 #   GC_DOLT_USER                          (default: root)
 #   GC_DOLT_PASSWORD                      (optional)
 #   GC_DOLT_COMPACT_THRESHOLD_COMMITS
-#     (default: 2000) — skip databases with fewer commits than this.
+#     (default: 2000) — skip databases with fewer commits than this since
+#                     the gc-compact-base watermark.
+#   GC_DOLT_COMPACT_ALLOW_FEDERATED       (optional) — truthy (1, true, yes)
+#                                         lifts the shared-history guard:
+#                                         databases with configured remotes
+#                                         are flattened and the rewritten
+#                                         branch is FORCE-PUSHED to the
+#                                         remote. Use only during a
+#                                         compaction window announced to
+#                                         every clone of that history.
 #   GC_DOLT_COMPACT_CALL_TIMEOUT_SECS
 #     (default: 1800) — wall-clock bound for each SQL CALL.
 #   GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS
@@ -74,6 +116,15 @@
 #   GC_DOLT_COMPACT_PENDING_PUSH_MAX_AGE_SECS
 #     (default: 172800) — maximum age for automatic pending remote-push retry.
 #                       Older markers require manual review before push.
+#   GC_DOLT_COMPACT_RENOTIFY_BACKSTOP_SECS
+#     (default: 86400) — once a quarantine, pending-push, or pending-gc
+#                       marker has mailed an alert for an unchanged reason,
+#                       suppress repeat mail until this many seconds have
+#                       elapsed since the last notification, then send
+#                       exactly one more. Set to 0 to restore
+#                       notify-once-per-reason-forever (the marker never
+#                       re-mails on its own once a given reason has been
+#                       reported, even if left unresolved indefinitely).
 #   GC_DOLT_COMPACT_REMOTE               (optional) — remote to fetch/push.
 #                                         Defaults to origin when present;
 #                                         ambiguous multi-remote stores fail.
@@ -292,11 +343,13 @@ threshold_commits="${GC_DOLT_COMPACT_THRESHOLD_COMMITS:-2000}"
 call_timeout="${GC_DOLT_COMPACT_CALL_TIMEOUT_SECS:-1800}"
 push_timeout="${GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS:-120}"
 pending_push_max_age_secs="${GC_DOLT_COMPACT_PENDING_PUSH_MAX_AGE_SECS:-172800}"
+compact_renotify_backstop_secs="${GC_DOLT_COMPACT_RENOTIFY_BACKSTOP_SECS:-86400}"
 compact_remote="${GC_DOLT_COMPACT_REMOTE:-}"
 dry_run="${GC_DOLT_COMPACT_DRY_RUN:-}"
 only_dbs="${GC_DOLT_COMPACT_ONLY_DBS:-}"
 bare_gc_input="${GC_DOLT_COMPACT_BARE_GC:-}"
 skip_fetch_input="${GC_DOLT_COMPACT_SKIP_FETCH:-}"
+allow_federated_input="${GC_DOLT_COMPACT_ALLOW_FEDERATED:-}"
 skip_fetch_dbs="${GC_DOLT_COMPACT_SKIP_FETCH_DBS:-}"
 compact_alert_to="${GC_DOLT_COMPACT_ALERT_TO:-mayor}"
 case "$bare_gc_input" in
@@ -323,6 +376,20 @@ case "$skip_fetch_input" in
   *)
     printf 'compact: invalid GC_DOLT_COMPACT_SKIP_FETCH=%s (must be 1/true/yes or 0/false/no)\n' \
       "$skip_fetch_input" >&2
+    exit 2
+    ;;
+esac
+
+case "$allow_federated_input" in
+  ''|0|false|FALSE|no|NO)
+    allow_federated=0
+    ;;
+  1|true|TRUE|yes|YES)
+    allow_federated=1
+    ;;
+  *)
+    printf 'compact: invalid GC_DOLT_COMPACT_ALLOW_FEDERATED=%s (must be 1/true/yes or 0/false/no)\n' \
+      "$allow_federated_input" >&2
     exit 2
     ;;
 esac
@@ -372,6 +439,14 @@ case "$pending_push_max_age_secs" in
     ;;
 esac
 
+case "$compact_renotify_backstop_secs" in
+  ''|*[!0-9]*)
+    printf 'compact: invalid GC_DOLT_COMPACT_RENOTIFY_BACKSTOP_SECS=%s (must be a non-negative integer)\n' \
+      "$compact_renotify_backstop_secs" >&2
+    exit 2
+    ;;
+esac
+
 case "$compact_remote" in
   ''|[A-Za-z0-9_.-]*)
     case "$compact_remote" in
@@ -417,7 +492,9 @@ lock_pid_path="$lock_dir/pid"
 lock_cmd_path="$lock_dir/cmd"
 pending_gc_dir="$PACK_STATE_DIR/compact-pending-gc"
 pending_push_dir="$PACK_STATE_DIR/compact-pending-push"
+pending_push_backup_dir="$PACK_STATE_DIR/compact-pending-push-backup"
 quarantine_dir="$PACK_STATE_DIR/compact-quarantine"
+notify_state_root="$PACK_STATE_DIR/compact-notify-state"
 
 # DB discovery uses rig metadata.json files first (authoritative), with a
 # filesystem-scan fallback when gc itself is unavailable.
@@ -690,18 +767,34 @@ commit_count() {
     "SELECT COUNT(*) FROM (SELECT 1 FROM dolt_log LIMIT 200000) AS t"
 }
 
-# root_commit — earliest commit hash on the current branch.
+# root_commit — the parentless commit reachable from the current branch. Chosen
+# by ancestry, never by commit date: dates are author-supplied and can be
+# skewed (#5958), so the date-earliest commit need not be the root. With
+# several parentless ancestors (unrelated histories merged in), the
+# date-earliest of them is returned, but resolve_compact_base (root_count)
+# never stamps the watermark at root in that case — it stamps HEAD.
 root_commit() {
   db="$1"
   query_single_cell "$db" "root commit probe failed" \
-    "SELECT commit_hash FROM dolt_log ORDER BY date ASC LIMIT 1"
+    "SELECT l.commit_hash FROM dolt_log l JOIN dolt_commit_ancestors a ON a.commit_hash = l.commit_hash WHERE a.parent_hash IS NULL ORDER BY l.date ASC LIMIT 1"
 }
 
-# head_commit — current branch HEAD hash before flattening.
+# root_count — number of parentless commits reachable from the current branch.
+# More than one means unrelated histories were merged in; resolve_compact_base
+# then stamps the watermark at HEAD rather than trusting any single root.
+root_count() {
+  db="$1"
+  query_single_cell "$db" "root count probe failed" \
+    "SELECT COUNT(*) FROM dolt_log l JOIN dolt_commit_ancestors a ON a.commit_hash = l.commit_hash WHERE a.parent_hash IS NULL"
+}
+
+# head_commit — the current branch HEAD. Resolved by ref, never by commit date:
+# a future-dated commit (clock skew) would otherwise masquerade as HEAD and
+# misplace the gc-compact-base watermark and the HEAD-stability checks (#5958).
 head_commit() {
   db="$1"
   query_single_cell "$db" "HEAD commit probe failed" \
-    "SELECT commit_hash FROM dolt_log ORDER BY date DESC LIMIT 1"
+    "SELECT HASHOF('HEAD')"
 }
 
 # user_tables — emit one user-table name per line (excludes dolt_*
@@ -725,10 +818,12 @@ user_tables() {
 # committed_tables — emit one table name per line for the tables present in
 # the committed root at <at_head>. Tables visible in information_schema but
 # absent from the committed root (dolt_ignore'd working-set-only tables such
-# as bd's wisp tier, or not-yet-committed new tables) cannot be staged or
-# touched by the flatten's soft-reset+commit, and churn freely under
-# concurrent writers — so flatten integrity verification must be scoped to
-# this set, not to all user tables.
+# as bd's wisp tier, or not-yet-committed new tables) churn freely under
+# concurrent writers, and the dolt_ignore'd ones cannot be staged by the
+# flatten's -Am at all — so flatten integrity verification must be scoped to
+# this set, not to all user tables. A non-ignored table absent from the
+# committed root IS first-committed by the -Am; it stays out of the per-table
+# checks, and db_root_drift_within_verified_tables accounts for it instead.
 committed_tables() {
   db="$1"
   at_head="$2"
@@ -762,6 +857,59 @@ dolt_ignore_patterns() {
   fi
   awk 'NR>=4 && /^\|/ {gsub(/^\| | \|$/, ""); gsub(/ /, ""); if ($0 != "") print}' "$out_tmp"
   rm -f "$out_tmp" "$err_tmp"
+}
+
+# version_dirty_dolt_ignore — commit a dirty dolt_ignore before the flatten.
+# gc's read-only health probe registers its probe table in dolt_ignore, which
+# leaves an uncommitted dolt_ignore row on every database it touches. The
+# flatten's -Am commits a dirty dolt_ignore like any other tracked table, so
+# the committed root drifts on a table no per-table check covers and the run
+# hard-quarantines (the daa 2026-08-04 incident class, one table removed).
+# Versioning it in its own commit first keeps the flatten's diff confined to
+# tables the verification set knows about. Always returns 0: this is an
+# optimization pass and must never block the flatten. Callers must run it
+# before capturing the pre-flight HEAD, since the commit moves HEAD.
+version_dirty_dolt_ignore() {
+  db="$1"
+  ignore_dirty=$(query_single_cell "$db" "dolt_ignore status probe failed" \
+    "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'dolt_ignore'" || true)
+  # A failed or non-numeric probe fails safe but not free: dolt_ignore is
+  # outside user_tables, so one left dirty for the -Am to first-commit lands in
+  # the drift proof's "outside verified set" branch — quarantine, not defer.
+  case "$ignore_dirty" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  [ "$ignore_dirty" -gt 0 ] || return 0
+  ignore_err_tmp=$(mktemp)
+  ignore_rc=0
+  dolt_query "$db" "CALL DOLT_ADD('dolt_ignore')" >/dev/null 2>"$ignore_err_tmp" || ignore_rc=$?
+  if [ "$ignore_rc" -ne 0 ]; then
+    printf 'compact: db=%s WARN: staging dirty dolt_ignore failed rc=%s — flattening anyway\n' \
+      "$db" "$ignore_rc" >&2
+    emit_error_file "$db" "$ignore_err_tmp"
+    rm -f "$ignore_err_tmp"
+    return 0
+  fi
+  rm -f "$ignore_err_tmp"
+  # DOLT_COMMIT fails with "nothing to commit" when the add staged nothing, so
+  # confirm the staged row before issuing the targeted commit.
+  ignore_staged=$(query_single_cell "$db" "dolt_ignore staged status probe failed" \
+    "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'dolt_ignore' AND staged = 1" || true)
+  [ "$ignore_staged" = "1" ] || return 0
+  ignore_err_tmp=$(mktemp)
+  ignore_rc=0
+  dolt_query "$db" "CALL DOLT_COMMIT('-m', 'compaction: version dolt_ignore')" \
+    >/dev/null 2>"$ignore_err_tmp" || ignore_rc=$?
+  if [ "$ignore_rc" -ne 0 ]; then
+    printf 'compact: db=%s WARN: committing dirty dolt_ignore failed rc=%s — flattening anyway\n' \
+      "$db" "$ignore_rc" >&2
+    emit_error_file "$db" "$ignore_err_tmp"
+    rm -f "$ignore_err_tmp"
+    return 0
+  fi
+  rm -f "$ignore_err_tmp"
+  printf 'compact: db=%s versioned dirty dolt_ignore before flatten\n' "$db"
+  return 0
 }
 
 # row_count — COUNT(*) for one table. Returns "" on error.
@@ -809,6 +957,28 @@ single_remote_name() {
     "SELECT name FROM dolt_remotes ORDER BY name LIMIT 1"
 }
 
+# list_remotes emits one "name<TAB>url" line per configured remote, sorted by
+# name. The only current consumer is backup_remotes' scheme filter.
+list_remotes() {
+  db="$1"
+  out_tmp=$(mktemp)
+  err_tmp=$(mktemp)
+  if ! dolt_query "$db" "SELECT name, url FROM dolt_remotes ORDER BY name" > "$out_tmp" 2>"$err_tmp"; then
+    printf 'compact: db=%s remote listing probe failed\n' "$db" >&2
+    emit_error_file "$db" "$err_tmp"
+    rm -f "$out_tmp" "$err_tmp"
+    return 1
+  fi
+  awk 'NR>2 && /^\|/ {
+    line=$0
+    gsub(/^\| */, "", line)
+    gsub(/ *\|$/, "", line)
+    n=split(line, parts, /[ \t]*\|[ \t]*/)
+    if (n>=2) print parts[1] "\t" parts[2]
+  }' "$out_tmp"
+  rm -f "$out_tmp" "$err_tmp"
+}
+
 select_remote() {
   db="$1"
 
@@ -849,6 +1019,31 @@ select_remote() {
   printf 'compact: db=%s multiple remotes found without origin; set GC_DOLT_COMPACT_REMOTE — fail\n' \
     "$db" >&2
   return 1
+}
+
+# backup_remotes emits the name of every configured remote that is a local
+# file:// path other than the authoritative remote — the set that
+# reconcile_backup_remotes fetches and pushes alongside the authoritative
+# push. Never matches by literal remote name; a remote qualifies purely by
+# scheme and by not being the authoritative pick.
+backup_remotes() {
+  db="$1"
+  authoritative="$2"
+  remotes_tmp=$(mktemp)
+  if ! list_remotes "$db" > "$remotes_tmp"; then
+    rm -f "$remotes_tmp"
+    return 1
+  fi
+  while read -r name url; do
+    [ -n "$name" ] || continue
+    [ "$name" = "$authoritative" ] && continue
+    case "$url" in
+      file://*)
+        printf '%s\n' "$name"
+        ;;
+    esac
+  done < "$remotes_tmp"
+  rm -f "$remotes_tmp"
 }
 
 fetch_remote() {
@@ -915,10 +1110,13 @@ push_remote_refspec() {
 # tables present in the committed root at <at_head>. Two categories are excluded:
 #
 # 1. Tables absent from the committed root (dolt_ignore'd working-set-only tables,
-#    not-yet-committed new tables): the flatten's soft-reset+commit cannot stage or
-#    touch them, their concurrent churn is indistinguishable from the gain+drift
-#    corruption signal, and the Option A DOLT_DIFF preservation probe structurally
-#    fails on a table that exists in no commit — a guaranteed false quarantine.
+#    not-yet-committed new tables): their concurrent churn is indistinguishable
+#    from the gain+drift corruption signal, and the Option A DOLT_DIFF
+#    preservation probe structurally fails on a table that exists in no commit —
+#    a guaranteed false quarantine. The flatten cannot stage a dolt_ignore'd
+#    table at all; a non-ignored one it DOES first-commit, which is why the
+#    committed-root drift proof re-admits this category with an added-only
+#    content diff (db_root_drift_within_verified_tables).
 #
 # 2. Tables present in the committed root that are dolt_ignore'd (#3541): a
 #    force-healed store (dolt#11131) can inline a dolt_ignore'd table into HEAD
@@ -937,6 +1135,12 @@ preflight_counts() {
   tables_tmp=$(mktemp)
   : > "$out"
   preflight_excluded_tables=""
+  # Reset unconditionally, not inside the dolt_ignore branch below: compaction
+  # walks every database in one shell process, so a database with no
+  # dolt_ignore patterns would otherwise inherit the previous database's list.
+  # db_root_drift_within_verified_tables reads this to admit drift, so a stale
+  # value would admit it for the wrong database.
+  preflight_dolt_ignored_tables=""
   if ! user_tables "$db" > "$tables_tmp"; then
     rm -f "$tables_tmp"
     return 1
@@ -952,7 +1156,6 @@ preflight_counts() {
   dolt_ignore_patterns "$db" > "$ignored_patterns_tmp" || true
   if [ -s "$ignored_patterns_tmp" ]; then
     filtered_committed_tmp=$(mktemp)
-    preflight_dolt_ignored_tables=""
     while IFS= read -r ct; do
       [ -n "$ct" ] || continue
       ct_matched=0
@@ -1037,6 +1240,7 @@ verify_counts() {
   verify_counts_saw_row_decrease=0
   verify_counts_saw_decrease_hash_drift=0
   verify_counts_saw_same_count_hash_drift=0
+  verify_counts_same_count_drift_tables=""
   verify_counts_saw_table_list_change=0
   verify_counts_saw_probe_failure=0
   verify_counts_failure_reason=""
@@ -1135,6 +1339,7 @@ verify_counts() {
         printf 'compact: db=%s table=%s value hash changed after flatten without row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
           "$db" "$t" "$expected_hash" "$actual_hash" >&2
         verify_counts_saw_same_count_hash_drift=1
+        verify_counts_same_count_drift_tables="$verify_counts_same_count_drift_tables $t"
         if [ "$fail" -ne 1 ]; then
           fail=1
           verify_counts_failure_reason="post-flatten table value hash changed without row-count increase"
@@ -1192,23 +1397,26 @@ verify_counts() {
   return "$fail"
 }
 
-# db_root_drift_within_verified_tables — prove a committed-root drift benign.
-# Reached only after per-table verification has PASSED: every verified table's
-# working-set value matches the pre-flight snapshot. The flatten's -Am commits
-# the working set by design, so standing uncommitted changes on a tracked
-# table (e.g. a writer's cursor cell) move the committed root across the
-# flatten with no HEAD movement — indistinguishable from corruption by the
-# aggregate hash alone. DOLT_DIFF_STAT between the pre-flight head and the
-# flatten head names exactly which tables differ; if every one is in the
-# verified set, their current values are already proven equal to the
-# pre-flight snapshot and the drift is absorbed working-set state. Any table
-# outside the verified set (system tables such as dolt_schemas), an empty
-# diff, or a probe failure fails closed.
-db_root_drift_within_verified_tables() {
+# diff_stat_preserved_tables — emit one table name per line for every table
+# DOLT_DIFF_STAT(<from>, <to>) reports as drifted whose content is PROVEN
+# preserved: rows_deleted=0 AND rows_modified=0 for that table between the
+# two heads, meaning any change is pure row addition, never a mutation or
+# removal of an existing row. This is the proof
+# db_root_drift_within_verified_tables() requires of its preflight_file
+# argument when called from the quarantine auto-clear path, where there is
+# no live verify_counts state to reuse (the quarantine marker was written by
+# a prior cycle). Table PRESENCE at <to> — e.g. via committed_tables()'s bare
+# SHOW TABLES AS OF listing — is not sufficient: a same-row-count UPDATE
+# leaves a table present with its committed content silently changed, the
+# exact signature of the live production corruption this guards against
+# (table `issues`, 19012 rows before and after, hash changed). A table name
+# DOLT_DIFF_STAT reports that fails valid_table_name, or any per-table probe
+# failure, fails the whole proof closed (no output, non-zero exit) instead
+# of silently skipping that table.
+diff_stat_preserved_tables() {
   db="$1"
   from="$2"
   to="$3"
-  preflight_file="$4"
   [ -n "$from" ] && [ -n "$to" ] || return 1
   stat_tmp=$(mktemp)
   if ! dolt_query "$db" \
@@ -1220,12 +1428,144 @@ db_root_drift_within_verified_tables() {
   drift_tables=$(awk 'NR>=4 && /^\|/ {gsub(/^\| | \|$/, ""); gsub(/ /, ""); if ($0 != "") print}' "$stat_tmp")
   rm -f "$stat_tmp"
   [ -n "$drift_tables" ] || return 1
-  for drift_t in $drift_tables; do
-    if ! awk -v t="$drift_t" '$1 == t {found=1} END {exit !found}' "$preflight_file"; then
+  for stat_t in $drift_tables; do
+    if ! valid_table_name "$stat_t"; then
       return 1
     fi
+    deleted=$(query_single_cell "$db" "diff stat rows_deleted probe failed for table=$stat_t" \
+      "SELECT rows_deleted FROM DOLT_DIFF_STAT('$from', '$to', '$stat_t')") || return 1
+    case "$deleted" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    modified=$(query_single_cell "$db" "diff stat rows_modified probe failed for table=$stat_t" \
+      "SELECT rows_modified FROM DOLT_DIFF_STAT('$from', '$to', '$stat_t')") || return 1
+    case "$modified" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    if [ "$deleted" -eq 0 ] && [ "$modified" -eq 0 ]; then
+      printf '%s\n' "$stat_t"
+    fi
   done
-  db_root_drift_proven_tables="$drift_tables"
+}
+
+# db_root_drift_within_verified_tables — prove a committed-root drift benign.
+# Reached only after per-table verification has PASSED: every verified table's
+# working-set value matches the pre-flight snapshot. The flatten's -Am commits
+# the working set by design, so standing uncommitted changes on a tracked
+# table (e.g. a writer's cursor cell) move the committed root across the
+# flatten with no HEAD movement — indistinguishable from corruption by the
+# aggregate hash alone. DOLT_DIFF_STAT between the pre-flight head and the
+# flatten head names exactly which tables differ; each one must be proven
+# benign in one of two ways:
+#
+# 1. Verified: present in the pre-flight file, so its current value is already
+#    proven equal to the pre-flight snapshot and the drift is absorbed
+#    working-set state.
+# 2. Preflight-excluded (preflight_excluded_tables), which holds both of the
+#    categories preflight_counts drops: a table absent from the committed root
+#    at the pre-flight head, which the -Am first-commits when it is not
+#    dolt_ignore'd (gc's own __gc_read_only_probe is exactly this shape); and a
+#    dolt_ignore'd table a force-healed store inlined into the committed root
+#    (#3541, dolt#11131). For both the load-bearing preservation proof is the
+#    added-only content diff: nothing committed at <from> was deleted or
+#    rewritten, so a first commit only introduced rows, and an
+#    already-committed table keeps every row it held at <from> intact at <to>.
+#
+#    One shape inside category 2 cannot satisfy that proof, and must not be
+#    asked to: a dolt_ignore'd table that a force-healed store inlined into the
+#    committed root. -Am cannot stage a dolt_ignore'd table, so the flatten's
+#    DOLT_RESET('--soft', root) un-tracks it and the flatten commit DROPS it.
+#    The diff is a deletion by construction, on every flatten of an affected
+#    database, for as long as the table stays inlined -- so it never self-heals
+#    and deferring starves GC exactly as a quarantine does. It is admitted on
+#    preflight's own positive identification (preflight_dolt_ignored_tables)
+#    rather than on a content diff. The rows are not lost: they remain in the
+#    working set, which DOLT_GC keeps reachable, and that is already the steady
+#    state for every database whose ignored tables were never force-inlined.
+#    What the flatten drops is the table's presence in the committed root --
+#    which is the same thing a flatten does to all history by design.
+#
+# Any other table (system tables such as dolt_schemas), a first-committed
+# table whose diff is not added-only or whose diff probe fails, an empty
+# DOLT_DIFF_STAT, or a DIFF_STAT probe failure fails closed. Exports the full
+# drift-table list in db_root_drift_stat_tables for the quarantine marker.
+db_root_drift_within_verified_tables() {
+  db="$1"
+  from="$2"
+  to="$3"
+  preflight_file="$4"
+  db_root_drift_proven_tables=""
+  db_root_drift_first_committed_tables=""
+  db_root_drift_dropped_ignored_tables=""
+  db_root_drift_stat_tables=""
+  [ -n "$from" ] && [ -n "$to" ] || return 1
+  stat_tmp=$(mktemp)
+  stat_err_tmp=$(mktemp)
+  if ! dolt_query "$db" \
+    "SELECT table_name FROM DOLT_DIFF_STAT('$from', '$to')" \
+    > "$stat_tmp" 2>"$stat_err_tmp"; then
+    printf 'compact: db=%s committed-root drift probe (DOLT_DIFF_STAT %s..%s) failed\n' \
+      "$db" "$from" "$to" >&2
+    emit_error_file "$db" "$stat_err_tmp"
+    rm -f "$stat_tmp" "$stat_err_tmp"
+    return 1
+  fi
+  rm -f "$stat_err_tmp"
+  drift_tables=$(awk 'NR>=4 && /^\|/ {gsub(/^\| | \|$/, ""); gsub(/ /, ""); if ($0 != "") print}' "$stat_tmp")
+  rm -f "$stat_tmp"
+  if [ -z "$drift_tables" ]; then
+    printf 'compact: db=%s committed-root drift probe returned empty DOLT_DIFF_STAT(%s..%s) — quarantine\n' \
+      "$db" "$from" "$to" >&2
+    return 1
+  fi
+  drift_verified_tables=""
+  drift_first_committed_tables=""
+  drift_dropped_ignored_tables=""
+  drift_unproven_tables=""
+  for drift_t in $drift_tables; do
+    db_root_drift_stat_tables="$db_root_drift_stat_tables $drift_t"
+    if ! valid_table_name "$drift_t"; then
+      drift_unproven_tables="$drift_unproven_tables $drift_t (invalid name)"
+      continue
+    fi
+    if awk -v t="$drift_t" '$1 == t {found=1} END {exit !found}' "$preflight_file"; then
+      drift_verified_tables="$drift_verified_tables $drift_t"
+      continue
+    fi
+    case " $preflight_excluded_tables " in
+      *" $drift_t "*)
+        case " $preflight_dolt_ignored_tables " in
+          *" $drift_t "*)
+            # Category 2, drop direction. -Am cannot stage a dolt_ignore'd
+            # table, so the flatten's DOLT_RESET('--soft') un-tracks it and the
+            # flatten commit DROPS it. The diff is a deletion by construction,
+            # so diff_is_additive_only can never admit it -- see the comment on
+            # this function for why that is not evidence of corruption.
+            drift_dropped_ignored_tables="$drift_dropped_ignored_tables $drift_t"
+            ;;
+          *)
+            if diff_is_additive_only "$db" "$from" "$to" "$drift_t"; then
+              drift_first_committed_tables="$drift_first_committed_tables $drift_t"
+            else
+              drift_unproven_tables="$drift_unproven_tables $drift_t (first-commit diff not added-only or diff probe failed)"
+            fi
+            ;;
+        esac
+        ;;
+      *)
+        drift_unproven_tables="$drift_unproven_tables $drift_t (outside verified set)"
+        ;;
+    esac
+  done
+  db_root_drift_stat_tables=${db_root_drift_stat_tables# }
+  if [ -n "$drift_unproven_tables" ]; then
+    printf 'compact: db=%s committed-root drift includes unproven table(s):%s — quarantine\n' \
+      "$db" "$drift_unproven_tables" >&2
+    return 1
+  fi
+  db_root_drift_proven_tables=${drift_verified_tables# }
+  db_root_drift_first_committed_tables=${drift_first_committed_tables# }
+  db_root_drift_dropped_ignored_tables=${drift_dropped_ignored_tables# }
   return 0
 }
 
@@ -1234,6 +1574,16 @@ oldgen_has_files() {
   oldgen_dir="$DOLT_DATA_DIR/$db/.dolt/noms/oldgen"
   [ -d "$oldgen_dir" ] || return 1
   [ -n "$(find "$oldgen_dir" -mindepth 1 -print -quit 2>/dev/null)" ]
+}
+
+# no_sync_database reports whether the operator excluded this database from all
+# remote sync with a .no-sync marker — the same contract the sync and pull
+# commands honor (commands/sync/run.sh, commands/pull/run.sh). Such a database
+# has no push step, so compaction treats it exactly like a database with no
+# remotes: flatten and GC locally, never fetch or push, never defer a push.
+no_sync_database() {
+  db="$1"
+  [ -f "$DOLT_DATA_DIR/$db/.no-sync" ]
 }
 
 compact_marker_path() {
@@ -1246,6 +1596,33 @@ has_compact_marker() {
   dir="$1"
   db="$2"
   [ -f "$(compact_marker_path "$dir" "$db")" ]
+}
+
+# compact_notify_state_dir MARKER_DIR
+#   Notification cadence is operational state, not quarantine evidence. Keep
+#   it under a parallel tree keyed by marker kind so alert bookkeeping never
+#   rewrites the marker an operator must preserve for recovery.
+compact_notify_state_dir() {
+  _ns_marker_dir="$1"
+  _ns_marker_kind=$(basename "$_ns_marker_dir")
+  printf '%s/%s\n' "$notify_state_root" "$_ns_marker_kind"
+}
+
+# compact_notify_state_value MARKER_DIR DB KEY
+#   Read the dedicated sidecar when present. Fall back to legacy bookkeeping
+#   embedded in the marker so an upgrade does not immediately re-page every
+#   already-deduplicated quarantine.
+compact_notify_state_value() {
+  _ns_marker_dir="$1"
+  _ns_db="$2"
+  _ns_key="$3"
+  _ns_state_dir=$(compact_notify_state_dir "$_ns_marker_dir")
+  _ns_state_path=$(compact_marker_path "$_ns_state_dir" "$_ns_db")
+  if [ -f "$_ns_state_path" ]; then
+    compact_marker_value "$_ns_state_dir" "$_ns_db" "$_ns_key"
+    return
+  fi
+  compact_marker_value "$_ns_marker_dir" "$_ns_db" "$_ns_key"
 }
 
 write_compact_marker() {
@@ -1302,12 +1679,21 @@ write_compact_marker() {
     return 1
   fi
   if [ "$dir" = "$quarantine_dir" ]; then
-    send_compact_quarantine_alert "$db" "compact-quarantine" "$marker_path" "$reason" "$created_at" || true
+    emit_compact_quarantine_event "$db" "compact-quarantine" "$marker_path" "$reason" "$created_at"
+    if marker_should_notify "$quarantine_dir" "$db" "$reason" "$compact_renotify_backstop_secs"; then
+      if mail_compact_quarantine_alert "$db" "compact-quarantine" "$marker_path" "$reason" "$created_at"; then
+        record_marker_notify_state "$quarantine_dir" "$db" "$reason" 1
+      else
+        record_marker_notify_state "$quarantine_dir" "$db" "$reason" 0 "$quarantine_notify_error"
+      fi
+    else
+      record_marker_notify_state "$quarantine_dir" "$db" "$reason" 0
+    fi
   fi
   return 0
 }
 
-send_compact_quarantine_alert() {
+emit_compact_quarantine_event() {
   _ca_db="$1"
   _ca_type="$2"
   _ca_path="$3"
@@ -1315,7 +1701,198 @@ send_compact_quarantine_alert() {
   _ca_created_at="${5:-<unknown>}"
   _ca_msg="db=$_ca_db type=$_ca_type marker=$_ca_path reason=$_ca_reason created_at=$_ca_created_at recipient=$compact_alert_to"
   gc event emit dolt.compact.quarantine --actor controller --message "$_ca_msg" || true
-  gc mail send "$compact_alert_to" --from controller -s "dolt compact quarantine: $_ca_db $_ca_type" -m "$_ca_msg" || true
+}
+
+# quarantine_notify_error holds why the last alert did not land, for the
+# marker. Empty means delivered; callers reset it before each attempt.
+quarantine_notify_error=""
+
+# mail_compact_quarantine_alert DB TYPE MARKER REASON [CREATED_AT]
+#   Send the quarantine alert; return 0 on delivery, 1 on a failed send with
+#   the reason recorded in quarantine_notify_error. CONTRACT: call this ONLY as
+#   a condition (e.g. `if mail_compact_quarantine_alert ...`), never as a bare
+#   statement. The internal _ca_err=$(gc mail send ...) capture runs under
+#   `set -eu`, so a bare-statement call would abort the whole compaction run on
+#   a failed send -- the exact silent mid-cycle failure this alert exists to
+#   prevent.
+mail_compact_quarantine_alert() {
+  _ca_db="$1"
+  _ca_type="$2"
+  _ca_path="$3"
+  _ca_reason="$4"
+  _ca_created_at="${5:-<unknown>}"
+  _ca_msg="db=$_ca_db type=$_ca_type marker=$_ca_path reason=$_ca_reason created_at=$_ca_created_at recipient=$compact_alert_to"
+  quarantine_notify_error=""
+  exec 4>&1
+  _ca_err=$(gc mail send "$compact_alert_to" --from controller -s "dolt compact quarantine: $_ca_db $_ca_type" -m "$_ca_msg" 2>&1 1>&4)
+  _ca_status=$?
+  exec 4>&-
+  if [ "$_ca_status" -eq 0 ]; then
+    return 0
+  fi
+  # A quarantine nobody is told about is a quarantine nobody clears, so an
+  # undelivered alert has to be as loud as the quarantine itself.
+  quarantine_notify_error=$(printf '%s' "$_ca_err" | tr '\n' ' ' | cut -c1-200)
+  printf 'compact: db=%s quarantine alert did not reach recipient %s: %s\n' \
+    "$_ca_db" "$compact_alert_to" "${quarantine_notify_error:-<no error output>}" >&2
+  return 1
+}
+
+# marker_should_notify DIR DB REASON BACKSTOP_SECS
+#   Fail-open dedup+backstop check: EMIT (return 0) unless DIR/DB's notify
+#   sidecar already matches REASON and the marker instance exactly AND fewer
+#   than BACKSTOP_SECS have elapsed since last_notified_ts. A missing/
+#   unreadable marker or sidecar, a marker never notified before, a changed
+#   reason or marker instance, or a missing/unparseable last_notified_ts all
+#   emit — this must never wrongly suppress a real alert. BACKSTOP_SECS<=0
+#   disables the backstop re-notify
+#   (dedup holds forever once a reason has been notified, matching the
+#   original notify-once-per-distinct-state contract). Shared by quarantine,
+#   pending-push, and pending-gc markers — their sidecars carry the same
+#   seen_count/notify_count/last_notified_ts/last_notified_reason shape.
+#   Mirrors the notify-once-per-distinct-state marker shape in
+#   gc-management's packs/maintainer-pr-review/scripts/hold-notice-lib.sh,
+#   extended with a time backstop so an unresolved condition cannot go
+#   silent forever.
+marker_should_notify() {
+  _mn_dir="$1"
+  _mn_db="$2"
+  _mn_reason="$3"
+  _mn_backstop_secs="$4"
+
+  _mn_marker=$(compact_marker_path "$_mn_dir" "$_mn_db")
+  [ -f "$_mn_marker" ] && [ -r "$_mn_marker" ] || return 0
+
+  _mn_prev_reason=$(compact_notify_state_value "$_mn_dir" "$_mn_db" last_notified_reason || true)
+  [ -n "$_mn_prev_reason" ] || return 0
+  [ "$_mn_prev_reason" = "$_mn_reason" ] || return 0
+
+  _mn_created_at=$(compact_marker_value "$_mn_dir" "$_mn_db" created_at || true)
+  _mn_prev_created_at=$(compact_notify_state_value "$_mn_dir" "$_mn_db" last_notified_created_at || true)
+  if [ -n "$_mn_prev_created_at" ] && [ "$_mn_prev_created_at" != "$_mn_created_at" ]; then
+    return 0
+  fi
+
+  [ "$_mn_backstop_secs" -gt 0 ] 2>/dev/null || return 1
+
+  _mn_last_ts=$(compact_notify_state_value "$_mn_dir" "$_mn_db" last_notified_ts || true)
+  _mn_last_epoch=$(parse_compact_timestamp "$_mn_last_ts" || true)
+  [ -n "$_mn_last_epoch" ] || return 0
+
+  _mn_now_epoch=$(date -u +%s)
+  _mn_age=$(( _mn_now_epoch - _mn_last_epoch ))
+  [ "$_mn_age" -lt 0 ] && _mn_age=0
+  [ "$_mn_age" -ge "$_mn_backstop_secs" ] && return 0
+  return 1
+}
+
+# record_marker_notify_state DIR DB REASON EMITTED
+#   Writes notify-bookkeeping fields (seen_count, notify_count,
+#   last_notified_ts, last_notified_reason, last_notified_created_at,
+#   last_notify_error) to a dedicated sidecar. DB's evidence marker in DIR is
+#   never rewritten. EMITTED=1 bumps notify_count, stamps the notified state,
+#   and clears last_notify_error; EMITTED=0 bumps seen_count and records ERROR,
+#   so a marker stuck at notify_count=0 says why instead of leaving the
+#   operator to guess. A missing marker or write failure is a silent no-op —
+#   bookkeeping must never block or fail compaction.
+record_marker_notify_state() {
+  _mn_dir="$1"
+  _mn_db="$2"
+  _mn_reason="$3"
+  _mn_emitted="$4"
+  _mn_error="${5:-}"
+
+  _mn_marker=$(compact_marker_path "$_mn_dir" "$_mn_db")
+  [ -f "$_mn_marker" ] && [ -r "$_mn_marker" ] || return 0
+  _mn_state_dir=$(compact_notify_state_dir "$_mn_dir")
+  _mn_state=$(compact_marker_path "$_mn_state_dir" "$_mn_db")
+  if [ -f "$_mn_state" ] && [ ! -r "$_mn_state" ]; then
+    return 0
+  fi
+
+  _mn_seen_count=$(compact_notify_state_value "$_mn_dir" "$_mn_db" seen_count || true)
+  case "$_mn_seen_count" in ''|*[!0-9]*) _mn_seen_count=0 ;; esac
+  _mn_seen_count=$((_mn_seen_count + 1))
+
+  _mn_notify_count=$(compact_notify_state_value "$_mn_dir" "$_mn_db" notify_count || true)
+  case "$_mn_notify_count" in ''|*[!0-9]*) _mn_notify_count=0 ;; esac
+  _mn_last_ts=$(compact_notify_state_value "$_mn_dir" "$_mn_db" last_notified_ts || true)
+  _mn_last_reason=$(compact_notify_state_value "$_mn_dir" "$_mn_db" last_notified_reason || true)
+  _mn_last_created_at=$(compact_notify_state_value "$_mn_dir" "$_mn_db" last_notified_created_at || true)
+  _mn_current_created_at=$(compact_marker_value "$_mn_dir" "$_mn_db" created_at || true)
+  _mn_last_error="$_mn_error"
+  if [ "$_mn_emitted" = "1" ]; then
+    _mn_notify_count=$((_mn_notify_count + 1))
+    _mn_last_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    _mn_last_reason="$_mn_reason"
+    _mn_last_created_at="$_mn_current_created_at"
+    _mn_last_error=""
+  elif [ -z "$_mn_last_created_at" ] && [ -n "$_mn_last_reason" ]; then
+    # Migrate legacy in-marker cadence state to the sidecar without paging or
+    # touching the evidence marker. Pin it to the marker instance that carried
+    # the legacy fields so a later replacement with the same reason still
+    # alerts immediately.
+    _mn_last_created_at="$_mn_current_created_at"
+  fi
+
+  _mn_old_umask=$(umask)
+  umask 077
+  if ! mkdir -p "$_mn_state_dir"; then
+    umask "$_mn_old_umask"
+    return 0
+  fi
+  _mn_tmp=$(mktemp "$_mn_state_dir/$_mn_db.tmp.XXXXXX") || {
+    umask "$_mn_old_umask"
+    return 0
+  }
+  umask "$_mn_old_umask"
+  if ! {
+    printf 'db=%s\n' "$_mn_db"
+    printf 'marker_kind=%s\n' "$(basename "$_mn_dir")"
+    printf 'seen_count=%s\n' "$_mn_seen_count"
+    printf 'notify_count=%s\n' "$_mn_notify_count"
+    printf 'last_notified_ts=%s\n' "$_mn_last_ts"
+    printf 'last_notified_reason=%s\n' "$_mn_last_reason"
+    printf 'last_notified_created_at=%s\n' "$_mn_last_created_at"
+    printf 'last_notify_error=%s\n' "$_mn_last_error"
+  } > "$_mn_tmp" 2>/dev/null; then
+    rm -f "$_mn_tmp"
+    return 0
+  fi
+  if ! grep -q '^db=' "$_mn_tmp" 2>/dev/null; then
+    rm -f "$_mn_tmp"
+    return 0
+  fi
+  mv -f "$_mn_tmp" "$_mn_state" || rm -f "$_mn_tmp"
+  return 0
+}
+
+# report_existing_quarantine DB
+#   Diagnostic + alert path for a compact/bare-gc invocation that hit an
+#   already-quarantined database. The event still fires every cycle; the
+#   mail is gated by marker_should_notify so a stable quarantine reason
+#   pages on discovery and then again only after the renotify backstop
+#   elapses, instead of once ever or on every single cycle.
+report_existing_quarantine() {
+  db="$1"
+  # One run reports many dbs; a prior db's send failure is not this db's.
+  quarantine_notify_error=""
+  quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
+  quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
+  quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
+  print_existing_quarantine_marker "$db" "$quarantine_marker" "$quarantine_reason" "$quarantine_created_at"
+
+  emit_compact_quarantine_event "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}"
+
+  quarantine_alert_emitted=0
+  if marker_should_notify "$quarantine_dir" "$db" "${quarantine_reason:-<unknown>}" "$compact_renotify_backstop_secs"; then
+    quarantine_seen_count=$(compact_notify_state_value "$quarantine_dir" "$db" seen_count || true)
+    case "$quarantine_seen_count" in ''|*[!0-9]*) quarantine_seen_count=0 ;; esac
+    if mail_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>} seen=$((quarantine_seen_count + 1))" "${quarantine_created_at:-<unknown>}"; then
+      quarantine_alert_emitted=1
+    fi
+  fi
+  record_marker_notify_state "$quarantine_dir" "$db" "${quarantine_reason:-<unknown>}" "$quarantine_alert_emitted" "$quarantine_notify_error"
 }
 
 ensure_compact_marker_writable() {
@@ -1370,7 +1947,7 @@ write_pending_push_marker() {
   local_branch="${7:-main}"
   remote_branch="${8:-$local_branch}"
 
-  write_compact_marker "$pending_push_dir" "$db" "$reason" \
+  write_compact_marker "${push_marker_dir:-$pending_push_dir}" "${push_marker_key:-$db}" "$reason" \
     "remote=$remote" \
     "expected_remote_head=$expected_remote_head" \
     "expected_remote_head_verified=$expected_remote_head_verified" \
@@ -1453,20 +2030,36 @@ write_quarantine_marker() {
     "$@"
 }
 
-compact_marker_created_at_epoch() {
-  dir="$1"
-  db="$2"
-  created_at=$(compact_marker_value "$dir" "$db" created_at || true)
-  [ -n "$created_at" ] || return 1
-  case "$created_at" in
+# parse_compact_timestamp TIMESTAMP
+#   Parses a UTC "%Y-%m-%dT%H:%M:%SZ" marker timestamp field to epoch
+#   seconds, trying GNU date then BSD date. Empty or non-timestamp-charset
+#   input fails without invoking date.
+parse_compact_timestamp() {
+  _pt_ts="$1"
+  [ -n "$_pt_ts" ] || return 1
+  case "$_pt_ts" in
     *[!0-9TZ:.-]*)
       return 1
       ;;
   esac
-  date -u -d "$created_at" +%s 2>/dev/null ||
-    date -ju -f "%Y-%m-%dT%H:%M:%SZ" "$created_at" +%s 2>/dev/null
+  date -u -d "$_pt_ts" +%s 2>/dev/null ||
+    date -ju -f "%Y-%m-%dT%H:%M:%SZ" "$_pt_ts" +%s 2>/dev/null
 }
 
+compact_marker_created_at_epoch() {
+  dir="$1"
+  db="$2"
+  created_at=$(compact_marker_value "$dir" "$db" created_at || true)
+  parse_compact_timestamp "$created_at"
+}
+
+# ensure_remote_push_retry_fresh DIR DB MARKER_LABEL
+#   Gates an automatic remote-push retry on marker age: markers older than
+#   pending_push_max_age_secs fail the retry and alert. The alert event
+#   fires every cycle; the alert mail is gated by marker_should_notify so
+#   an unresolved stale marker pages on first detection and then again only
+#   after the renotify backstop elapses, instead of on every single cycle
+#   (previously: unconditional mail on every invocation past max-age).
 ensure_remote_push_retry_fresh() {
   dir="$1"
   db="$2"
@@ -1486,7 +2079,22 @@ ensure_remote_push_retry_fresh() {
   if [ "$age_secs" -gt "$pending_push_max_age_secs" ]; then
     printf 'compact: db=%s %s marker is stale age=%ss max_age=%ss — manual review required before remote push retry\n' \
       "$db" "$marker_label" "$age_secs" "$pending_push_max_age_secs" >&2
-    send_compact_quarantine_alert "$db" "$(basename "$dir")" "$(compact_marker_path "$dir" "$db")" "$marker_label marker is stale" "$(compact_marker_value "$dir" "$db" created_at || true)" || true
+    stale_reason="$marker_label marker is stale"
+    stale_marker_path=$(compact_marker_path "$dir" "$db")
+    stale_marker_type=$(basename "$dir")
+    stale_created_at=$(compact_marker_value "$dir" "$db" created_at || true)
+    emit_compact_quarantine_event "$db" "$stale_marker_type" "$stale_marker_path" "$stale_reason" "$stale_created_at"
+    if marker_should_notify "$dir" "$db" "$stale_reason" "$compact_renotify_backstop_secs"; then
+      stale_seen_count=$(compact_notify_state_value "$dir" "$db" seen_count || true)
+      case "$stale_seen_count" in ''|*[!0-9]*) stale_seen_count=0 ;; esac
+      if mail_compact_quarantine_alert "$db" "$stale_marker_type" "$stale_marker_path" "$stale_reason age=${age_secs}s seen=$((stale_seen_count + 1))" "$stale_created_at"; then
+        record_marker_notify_state "$dir" "$db" "$stale_reason" 1
+      else
+        record_marker_notify_state "$dir" "$db" "$stale_reason" 0
+      fi
+    else
+      record_marker_notify_state "$dir" "$db" "$stale_reason" 0
+    fi
     return 1
   fi
   return 0
@@ -1599,6 +2207,8 @@ push_remote_after_compaction() {
   compacted_from_head="${6:-}"
   local_branch="${7:-main}"
   remote_branch="${8:-$local_branch}"
+  push_marker_dir="${9:-$pending_push_dir}"
+  push_marker_key="${10:-$db}"
   [ -n "$remote" ] || return 0
   valid_branch_name "$local_branch" || {
     printf 'compact: db=%s invalid local branch=%s before remote push\n' "$db" "$local_branch" >&2
@@ -1736,8 +2346,41 @@ push_remote_after_compaction() {
     return 0
   fi
   rm -f "$push_err_tmp"
-  clear_compact_marker "$pending_push_dir" "$db"
+  clear_compact_marker "${push_marker_dir:-$pending_push_dir}" "${push_marker_key:-$db}"
   printf 'compact: db=%s remote=%s pushed compacted %s\n' "$db" "$remote" "$remote_branch"
+  return 0
+}
+
+# reconcile_backup_remotes pushes the compacted database to every file://
+# backup remote (backup_remotes), reusing push_remote_after_compaction's
+# fetch/verify/push protocol unchanged for each. Each backup remote gets its
+# own compact-pending-push-backup marker, namespaced by "$db.$name" so a
+# failure on one backup remote never collides with the authoritative push's
+# marker or another backup remote's marker. Always returns success: a backup
+# remote is a redundancy measure, never a condition the authoritative push
+# depends on.
+reconcile_backup_remotes() {
+  db="$1"
+  authoritative="$2"
+  compacted_from_head="$3"
+  local_branch="${4:-main}"
+  remote_branch="${5:-$local_branch}"
+
+  backup_tmp=$(mktemp)
+  if ! backup_remotes "$db" "$authoritative" > "$backup_tmp"; then
+    rm -f "$backup_tmp"
+    return 0
+  fi
+  while read -r name; do
+    [ -n "$name" ] || continue
+    if ! valid_remote_name "$name"; then
+      printf 'compact: db=%s backup remote name=%s invalid — skipping\n' "$db" "$name" >&2
+      continue
+    fi
+    push_remote_after_compaction "$db" "$name" "" 0 "initial" "$compacted_from_head" "$local_branch" "$remote_branch" \
+      "$pending_push_backup_dir" "$db.$name" || true
+  done < "$backup_tmp"
+  rm -f "$backup_tmp"
   return 0
 }
 
@@ -1837,6 +2480,237 @@ defer_writer_race_after_flatten() {
   return 0
 }
 
+# --- History protection (#5958) ---------------------------------------------
+#
+# The compactor may only squash history this city grew. The boundary is the
+# Dolt tag gc-compact-base, stored IN the database: it survives runtime-state
+# wipes, travels with dolt backups, and keeps the protected history reachable
+# through DOLT_GC --full. Branch pushes never carry it.
+compact_base_tag="gc-compact-base"
+compact_flatten_message="compaction: flatten history"
+
+# compact_base_tag_hash prints the commit gc-compact-base points at, or an
+# empty line when the tag does not exist yet.
+compact_base_tag_hash() {
+  db="$1"
+  query_single_cell "$db" "$compact_base_tag tag probe failed" \
+    "SELECT tag_hash FROM dolt_tags WHERE tag_name = '$compact_base_tag'"
+}
+
+# history_is_compactor_owned prints a non-zero count when root's child on the
+# current branch is a compactor flatten commit — the fingerprint of a database
+# this compactor has already flattened from root.
+history_is_compactor_owned() {
+  db="$1"
+  owned_root="$2"
+  query_single_cell "$db" "flatten provenance probe failed" \
+    "SELECT COUNT(*) FROM dolt_log l JOIN dolt_commit_ancestors a ON a.commit_hash = l.commit_hash WHERE a.parent_hash = '$owned_root' AND l.message = '$compact_flatten_message'"
+}
+
+# commits_since_base counts commits reachable from HEAD but not from base
+# (bounded like commit_count).
+commits_since_base() {
+  db="$1"
+  since_base="$2"
+  query_single_cell "$db" "commits-since-$compact_base_tag probe failed" \
+    "SELECT COUNT(*) FROM (SELECT 1 FROM DOLT_LOG('$since_base..HEAD') LIMIT 200000) AS t"
+}
+
+compact_full_history_marker() {
+  printf '%s/%s/.compact-full-history\n' "$DOLT_DATA_DIR" "$1"
+}
+
+# resolve_compact_base DB ROOT
+#   Sets compact_base to the commit the flatten may soft-reset to. Stamps the
+#   watermark on first sight (a dry run only reports what it would stamp).
+#   Refuses (returns 1) when the existing watermark is not an ancestor of HEAD.
+resolve_compact_base() {
+  db="$1"
+  base_root="$2"
+  compact_base=""
+  base_tag=$(compact_base_tag_hash "$db") || return 1
+  if [ -n "$base_tag" ]; then
+    case "$base_tag" in
+      *[!A-Za-z0-9]*)
+        printf 'compact: db=%s %s probe returned invalid hash=%s — refusing flatten\n' \
+          "$db" "$compact_base_tag" "$base_tag" >&2
+        return 1
+        ;;
+    esac
+    base_in_log=$(commit_exists_in_local_log "$db" "$base_tag") || return 1
+    if [ "$base_in_log" != "1" ]; then
+      base_head=$(head_commit "$db" || true)
+      base_delete_sql="CALL DOLT_TAG('-d', '$compact_base_tag')"
+      printf 'compact: db=%s REFUSING flatten: %s=%s is not an ancestor of HEAD=%s — the history was rolled back or restored to before the watermark, or the tag was moved; nothing was changed. Operator action: run %s in database %s and the next run re-stamps the tag by the first-sight rule — at HEAD, protecting the current history as-is, unless the child of root is a compactor flatten commit or %s exists, in which case at root (touch that marker first only if this history was grown entirely by this city) (see docs/troubleshooting/dolt-bloat-recovery.md "History protection")\n' \
+        "$db" "$compact_base_tag" "$base_tag" "${base_head:-<unknown>}" "$base_delete_sql" "$db" "$(compact_full_history_marker "$db")" >&2
+      return 1
+    fi
+    compact_base="$base_tag"
+    return 0
+  fi
+
+  base_roots=$(root_count "$db") || return 1
+  case "$base_roots" in
+    ''|*[!0-9]*)
+      printf 'compact: db=%s root count probe returned invalid value=%s — fail\n' \
+        "$db" "$base_roots" >&2
+      return 1
+      ;;
+  esac
+  base_owned=0
+  if [ "$base_roots" -le 1 ]; then
+    base_owned=$(history_is_compactor_owned "$db" "$base_root") || return 1
+  fi
+  case "$base_owned" in
+    ''|*[!0-9]*)
+      printf 'compact: db=%s flatten provenance probe returned invalid value=%s — fail\n' \
+        "$db" "$base_owned" >&2
+      return 1
+      ;;
+  esac
+  if [ "$base_roots" -gt 1 ]; then
+    if ! compact_base=$(head_commit "$db"); then
+      return 1
+    fi
+    if [ -z "$compact_base" ]; then
+      printf 'compact: db=%s HEAD commit probe returned empty value — fail\n' "$db" >&2
+      return 1
+    fi
+    base_why="$base_roots parentless commits reachable from HEAD (unrelated histories merged) — no single root is trusted, so the whole current history is protected; only later commits will be flattened"
+  elif [ "$base_owned" -gt 0 ]; then
+    compact_base="$base_root"
+    base_why="history already flattened by this compactor"
+  elif [ -f "$(compact_full_history_marker "$db")" ]; then
+    compact_base="$base_root"
+    base_why="operator opt-in $(compact_full_history_marker "$db")"
+  else
+    if ! compact_base=$(head_commit "$db"); then
+      return 1
+    fi
+    if [ -z "$compact_base" ]; then
+      printf 'compact: db=%s HEAD commit probe returned empty value — fail\n' "$db" >&2
+      return 1
+    fi
+    base_why="history not grown by this compactor (adopted, imported, or pre-existing) is protected; only later commits will be flattened"
+  fi
+  if [ -n "$dry_run" ]; then
+    printf 'compact: db=%s would set %s=%s: %s — dry-run\n' \
+      "$db" "$compact_base_tag" "$compact_base" "$base_why"
+    return 0
+  fi
+  tag_err_tmp=$(mktemp)
+  if ! dolt_query "$db" "CALL DOLT_TAG('-m', 'gc dolt compact provenance watermark: flatten never rewrites history at or before this commit', '$compact_base_tag', '$compact_base')" >/dev/null 2>"$tag_err_tmp"; then
+    printf 'compact: db=%s failed to set %s=%s — refusing flatten\n' \
+      "$db" "$compact_base_tag" "$compact_base" >&2
+    emit_error_file "$db" "$tag_err_tmp"
+    rm -f "$tag_err_tmp"
+    return 1
+  fi
+  rm -f "$tag_err_tmp"
+  printf 'compact: db=%s set %s=%s: %s\n' \
+    "$db" "$compact_base_tag" "$compact_base" "$base_why"
+  return 0
+}
+
+# run_bare_gc runs a working-set CALL DOLT_GC(): it reclaims journal and
+# working-set garbage without touching history.
+run_bare_gc() {
+  db="$1"
+  start=$(date +%s)
+  gc_rc=0
+  gc_err_tmp=$(mktemp)
+  dolt_query "$db" "CALL DOLT_GC()" >/dev/null 2>"$gc_err_tmp" || gc_rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  if [ "$gc_rc" -ne 0 ]; then
+    printf 'compact: db=%s bare-gc failed rc=%s duration=%ss\n' \
+      "$db" "$gc_rc" "$elapsed" >&2
+    emit_error_file "$db" "$gc_err_tmp"
+    rm -f "$gc_err_tmp"
+    return 1
+  fi
+  rm -f "$gc_err_tmp"
+
+  printf 'compact: db=%s bare-gc duration=%ss — ok\n' "$db" "$elapsed"
+  return 0
+}
+
+# report_held_pending_push DB REMOTE
+#   Raise a pending-push marker held by the shared-history guard through the
+#   compactor alert path (event every run; mail gated by marker_should_notify
+#   and the renotify backstop). Bookkeeping lives in the notify-state sidecar,
+#   so the held marker itself is never rewritten.
+report_held_pending_push() {
+  held_db="$1"
+  held_remote="$2"
+  held_marker=$(compact_marker_path "$pending_push_dir" "$held_db")
+  held_created_at=$(compact_marker_value "$pending_push_dir" "$held_db" created_at || true)
+  held_reason="pending push to remote=$held_remote held by shared-history guard; reconcile manually or push during an announced window with GC_DOLT_COMPACT_ALLOW_FEDERATED=1"
+  emit_compact_quarantine_event "$held_db" "compact-pending-push-held" "$held_marker" "$held_reason" "${held_created_at:-<unknown>}"
+  if marker_should_notify "$pending_push_dir" "$held_db" "$held_reason" "$compact_renotify_backstop_secs"; then
+    quarantine_notify_error=""
+    if mail_compact_quarantine_alert "$held_db" "compact-pending-push-held" "$held_marker" "$held_reason" "${held_created_at:-<unknown>}"; then
+      record_marker_notify_state "$pending_push_dir" "$held_db" "$held_reason" 1
+    else
+      record_marker_notify_state "$pending_push_dir" "$held_db" "$held_reason" 0 "$quarantine_notify_error"
+    fi
+  else
+    record_marker_notify_state "$pending_push_dir" "$held_db" "$held_reason" 0
+  fi
+  return 0
+}
+
+# compact_shared_history_database handles a database the shared-history guard
+# protects: never flatten, never push. A pending-GC marker (an earlier run
+# already flattened locally) still gets its local DOLT_GC --full, with the
+# deferred push dropped rather than re-recorded; a pending-push marker is held
+# for operator review; everything else gets a bare working-set GC.
+compact_shared_history_database() {
+  db="$1"
+  guard_remote_count="$2"
+  guard_remote="$3"
+  printf 'compact: db=%s remote=%s remotes=%s — history may be shared with other clones; skipping flatten and remote push (set GC_DOLT_COMPACT_ALLOW_FEDERATED=1 only during a compaction window announced to every clone)\n' \
+    "$db" "$guard_remote" "$guard_remote_count"
+
+  if has_compact_marker "$pending_gc_dir" "$db"; then
+    guard_pending_remote=$(compact_marker_value "$pending_gc_dir" "$db" remote || true)
+    guard_pending_from_head=$(compact_marker_value "$pending_gc_dir" "$db" compacted_from_head || true)
+    # The marker is the operator's only record of the pre-flatten HEAD, and
+    # DOLT_GC --full below makes that commit unreachable; log it first.
+    printf 'compact: db=%s pending_gc marker=%s compacted_from_head=%s remote=%s — pre-flatten HEAD recorded before full GC\n' \
+      "$db" "$(compact_marker_path "$pending_gc_dir" "$db")" "${guard_pending_from_head:-<unknown>}" "${guard_pending_remote:-<none>}" >&2
+    if [ -n "$dry_run" ]; then
+      printf 'compact: db=%s pending_gc=present — dry-run (would retry DOLT_GC --full locally; deferred push dropped by shared-history guard)\n' "$db"
+      return 0
+    fi
+    printf 'compact: db=%s pending_gc=present — retrying DOLT_GC --full locally; deferred push dropped by shared-history guard\n' "$db"
+    start=$(date +%s)
+    if ! run_full_gc "$db" "pending-GC retry" "pending-GC retry" "$start"; then
+      return 1
+    fi
+    clear_compact_marker "$pending_gc_dir" "$db"
+    if [ -n "$guard_pending_remote" ]; then
+      printf 'compact: db=%s an earlier run flattened this database locally but never pushed it; remote=%s still holds the full shared history, so gc dolt sync will report diverged until an operator reconciles (see docs/troubleshooting/dolt-bloat-recovery.md "Databases with remotes")\n' \
+        "$db" "$guard_pending_remote" >&2
+    fi
+    return 0
+  fi
+
+  if has_compact_marker "$pending_push_dir" "$db"; then
+    guard_pending_remote=$(compact_marker_value "$pending_push_dir" "$db" remote || true)
+    printf 'compact: db=%s pending_push=present remote=%s — NOT force-pushing: the shared-history guard holds %s for operator review. Reconcile the flattened local history manually, or re-run with GC_DOLT_COMPACT_ALLOW_FEDERATED=1 during an announced window to force-push it (see docs/troubleshooting/dolt-bloat-recovery.md "Databases with remotes")\n' \
+      "$db" "${guard_pending_remote:-<unknown>}" "$(compact_marker_path "$pending_push_dir" "$db")" >&2
+    if [ -z "$dry_run" ]; then
+      report_held_pending_push "$db" "${guard_pending_remote:-<unknown>}"
+    fi
+  fi
+
+  if [ -n "$dry_run" ]; then
+    printf 'compact: db=%s — dry-run (would bare GC)\n' "$db"
+    return 0
+  fi
+  run_bare_gc "$db"
+}
+
 flatten_database() {
   db="$1"
   verify_counts_saw_gain=0
@@ -1845,6 +2719,7 @@ flatten_database() {
   verify_counts_saw_row_decrease=0
   verify_counts_saw_decrease_hash_drift=0
   verify_counts_saw_same_count_hash_drift=0
+  verify_counts_same_count_drift_tables=""
   verify_counts_saw_table_list_change=0
   verify_counts_saw_probe_failure=0
   verify_counts_failure_reason=""
@@ -1853,9 +2728,11 @@ flatten_database() {
   head_before_reset=""
   flatten_head=""
   post_verify_head=""
+  final_verify_head=""
   preflight_hash=""
   postflight_hash=""
   writer_race_detected=0
+  preflight_excluded_tables=""
 
   if [ -n "$only_dbs" ]; then
     case ",$only_dbs," in
@@ -1871,9 +2748,57 @@ flatten_database() {
     quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
     quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
     quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
-    print_existing_quarantine_marker "$db" "$quarantine_marker" "$quarantine_reason" "$quarantine_created_at"
-    send_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
-    return 1
+    case "${quarantine_reason:-}" in
+      "post-flatten table value hash changed without row-count increase"|"post-flatten value hash changed without row-count increase"|"post-flatten table value hash changed with row-count increase"|"post-flatten value hash changed with row-count increase")
+        autoclear_preflight_head=$(compact_marker_value "$quarantine_dir" "$db" flatten_preflight_head || true)
+        autoclear_preserved_tables_tmp=$(mktemp)
+        if autoclear_current_head=$(head_commit "$db") && [ -n "$autoclear_current_head" ] && \
+           diff_stat_preserved_tables "$db" "$autoclear_preflight_head" "$autoclear_current_head" > "$autoclear_preserved_tables_tmp" && \
+           db_root_drift_within_verified_tables "$db" "$autoclear_preflight_head" "$autoclear_current_head" "$autoclear_preserved_tables_tmp"; then
+          rm -f "$autoclear_preserved_tables_tmp"
+          printf 'compact: db=%s integrity quarantine marker auto-cleared — drift confined to content-preserved table(s) [%s] via DOLT_DIFF_STAT(%s..%s), reason=%s created_at=%s\n' \
+            "$db" "${db_root_drift_proven_tables:-}" "${autoclear_preflight_head:-<empty>}" "$autoclear_current_head" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
+          emit_compact_quarantine_event "$db" "compact-quarantine-autoclear" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}"
+          mail_compact_quarantine_alert "$db" "compact-quarantine-autoclear" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
+          rm -f "$quarantine_marker"
+        else
+          rm -f "$autoclear_preserved_tables_tmp"
+          printf 'compact: db=%s cannot auto-clear integrity quarantine marker — preservation proof did not confirm drift is confined to content-preserved, verified tables (reason=%s)\n' \
+            "$db" "${quarantine_reason:-<unknown>}" >&2
+          report_existing_quarantine "$db"
+          return 1
+        fi
+        ;;
+      *)
+        report_existing_quarantine "$db"
+        return 1
+        ;;
+    esac
+  fi
+
+  # Shared-history guard (#5958; remote guard adapted from #6052). Any
+  # configured remote means other clones may share this history, and a flatten
+  # would have to be force-pushed over it. Checked independently of remote
+  # selection, .no-sync, --skip-fetch, and --dry-run, and before the deferred
+  # GC/push markers so an earlier run's push is never replayed without opt-in.
+  if [ "$allow_federated" != "1" ]; then
+    guard_remote_count=$(remote_count "$db") || return 1
+    case "$guard_remote_count" in
+      ''|*[!0-9]*)
+        printf 'compact: db=%s remote count probe returned invalid value=%s — refusing flatten\n' \
+          "$db" "$guard_remote_count" >&2
+        return 1
+        ;;
+    esac
+    if [ "$guard_remote_count" -gt 0 ]; then
+      guard_remote=$(single_remote_name "$db") || return 1
+      if [ -z "$guard_remote" ]; then
+        printf 'compact: db=%s remote probe returned empty name — refusing flatten\n' "$db" >&2
+        return 1
+      fi
+      compact_shared_history_database "$db" "$guard_remote_count" "$guard_remote"
+      return $?
+    fi
   fi
 
   if has_compact_marker "$pending_gc_dir" "$db"; then
@@ -1882,6 +2807,11 @@ flatten_database() {
       return 0
     fi
     pending_remote=$(compact_marker_value "$pending_gc_dir" "$db" remote || true)
+    if [ -n "$pending_remote" ] && no_sync_database "$db"; then
+      # Marker predates the .no-sync marker: retry the GC, drop the push.
+      printf 'compact: db=%s pending_gc remote=%s dropped — remote sync disabled (.no-sync)\n' "$db" "$pending_remote"
+      pending_remote=""
+    fi
     pending_expected_remote_head=$(compact_marker_value "$pending_gc_dir" "$db" expected_remote_head || true)
     pending_expected_remote_head_verified=$(compact_marker_value "$pending_gc_dir" "$db" expected_remote_head_verified || true)
     pending_compacted_from_head=$(compact_marker_value "$pending_gc_dir" "$db" compacted_from_head || true)
@@ -1945,6 +2875,18 @@ flatten_database() {
       return "$push_rc"
     fi
     return 1
+  fi
+
+  if has_compact_marker "$pending_push_dir" "$db" && no_sync_database "$db"; then
+    # The marker records a push this database must never make. Keeping it would
+    # block flatten forever: the retry branch below returns before the flatten
+    # path, and past the max-age window it hard-fails as stale on every run.
+    if [ -n "$dry_run" ]; then
+      printf 'compact: db=%s pending_push=present but remote sync disabled (.no-sync) — dry-run (would clear deferred push)\n' "$db"
+      return 0
+    fi
+    printf 'compact: db=%s pending_push=present but remote sync disabled (.no-sync) — clearing deferred push\n' "$db"
+    clear_compact_marker "$pending_push_dir" "$db"
   fi
 
   if has_compact_marker "$pending_push_dir" "$db"; then
@@ -2033,23 +2975,54 @@ flatten_database() {
       ;;
   esac
 
-  if [ "$count" -lt "$threshold_commits" ]; then
-    if oldgen_has_files "$db"; then
-      printf 'compact: db=%s commits=%s below_threshold=%s oldgen_archives=present pending_gc=absent — skip (run "gc dolt compact --gc-only" to reclaim if these archives are orphaned)\n' \
-        "$db" "$count" "$threshold_commits"
-      return 0
-    fi
-    printf 'compact: db=%s commits=%s below_threshold=%s — skip\n' \
-      "$db" "$count" "$threshold_commits"
-    return 0
-  fi
-
   if ! root=$(root_commit "$db"); then
     return 1
   fi
   if [ -z "$root" ]; then
     printf 'compact: db=%s root commit probe returned empty value — fail\n' "$db" >&2
     return 1
+  fi
+
+  # Provenance watermark: stamped on first sight at any commit count, so the
+  # threshold below only ever counts history this city grew after the stamp.
+  resolve_compact_base "$db" "$root" || return 1
+  flatten_base="$compact_base"
+  if [ "$flatten_base" = "$root" ]; then
+    compactable_count="$count"
+    base_detail=""
+    flatten_target_detail=" root=$root"
+  else
+    if ! compactable_count=$(commits_since_base "$db" "$flatten_base"); then
+      return 1
+    fi
+    case "$compactable_count" in
+      ''|*[!0-9]*)
+        printf 'compact: db=%s commits-since-%s probe returned invalid value=%s\n' \
+          "$db" "$compact_base_tag" "$compactable_count" >&2
+        return 1
+        ;;
+    esac
+    base_detail=" commits_since_base=$compactable_count base=$flatten_base"
+    flatten_target_detail="$base_detail"
+  fi
+
+  if [ "$compactable_count" -lt "$threshold_commits" ]; then
+    if oldgen_has_files "$db"; then
+      printf 'compact: db=%s commits=%s%s below_threshold=%s oldgen_archives=present pending_gc=absent — skip (run "gc dolt compact --gc-only" to reclaim if these archives are orphaned)\n' \
+        "$db" "$count" "$base_detail" "$threshold_commits"
+      return 0
+    fi
+    printf 'compact: db=%s commits=%s%s below_threshold=%s — skip\n' \
+      "$db" "$count" "$base_detail" "$threshold_commits"
+    return 0
+  fi
+
+  # Runs before the HEAD probe below because it may commit, and every commit
+  # hash this run relies on must be captured after it. Skipped under dry-run,
+  # which mutates nothing. The watermark above is an ancestor of anything this
+  # commits, so it stays valid.
+  if [ -z "$dry_run" ]; then
+    version_dirty_dolt_ignore "$db"
   fi
 
   if ! head=$(head_commit "$db"); then
@@ -2062,8 +3035,8 @@ flatten_database() {
   compacted_from_head="$head"
 
   if [ -n "$dry_run" ]; then
-    printf 'compact: db=%s commits=%s root=%s — dry-run (would flatten)\n' \
-      "$db" "$count" "$root"
+    printf 'compact: db=%s commits=%s%s — dry-run (would flatten)\n' \
+      "$db" "$count" "$flatten_target_detail"
     return 0
   fi
 
@@ -2072,7 +3045,9 @@ flatten_database() {
   remote_branch="main"
   expected_remote_head=""
   expected_remote_head_verified=0
-  if probed_remote=$(select_remote "$db"); then
+  if no_sync_database "$db"; then
+    printf 'compact: db=%s remote sync disabled (.no-sync) — compacting locally only\n' "$db"
+  elif probed_remote=$(select_remote "$db"); then
     remote="$probed_remote"
   else
     printf 'compact: db=%s remote selection failed — fail\n' "$db" >&2
@@ -2217,8 +3192,8 @@ flatten_database() {
   fi
 
   table_count=$(wc -l < "$preflight_tmp")
-  printf 'compact: db=%s commits=%s root=%s tables=%s — flattening...\n' \
-    "$db" "$count" "$root" "$table_count"
+  printf 'compact: db=%s commits=%s%s tables=%s — flattening...\n' \
+    "$db" "$count" "$flatten_target_detail" "$table_count"
 
   start=$(date +%s)
 
@@ -2232,14 +3207,15 @@ flatten_database() {
   # "unproven" and therefore falls back to the safe quarantine behavior.
   head_before_reset=$(head_commit "$db" || true)
 
-  # Soft-reset to root + commit-everything is the flatten transaction.
-  # Both run in a single dolt sql invocation so the session keeps the
-  # USE selection across the two CALLs.
+  # Soft-reset to the watermark + commit-everything is the flatten
+  # transaction. Both run in a single dolt sql invocation so the session keeps
+  # the USE selection across the two CALLs. History at or before the watermark
+  # is never rewritten.
   reset_rc=0
   reset_err_tmp=$(mktemp)
   dolt_query "$db" "
-    CALL DOLT_RESET('--soft', '$root');
-    CALL DOLT_COMMIT('-Am', 'compaction: flatten history');
+    CALL DOLT_RESET('--soft', '$flatten_base');
+    CALL DOLT_COMMIT('-Am', '$compact_flatten_message');
   " >/dev/null 2>"$reset_err_tmp" || reset_rc=$?
 
   if [ "$reset_rc" -ne 0 ]; then
@@ -2248,7 +3224,7 @@ flatten_database() {
     emit_error_file "$db" "$reset_err_tmp"
     rm -f "$preflight_tmp"
     rm -f "$reset_err_tmp"
-    restore_head_after_flatten_failure "$db" "$head" "$root" || true
+    restore_head_after_flatten_failure "$db" "$head" "$flatten_base" || true
     return 1
   fi
   rm -f "$reset_err_tmp"
@@ -2300,10 +3276,15 @@ flatten_database() {
   if [ "$verify_counts_rc" -ne 0 ]; then
     integrity_reason="${verify_counts_failure_reason:-post-flatten integrity check failed}"
     integrity_guidance="${verify_counts_failure_guidance:-post-flatten integrity check failed; investigate before re-running}"
-    # Downgrade quarantine -> defer ONLY for the ambiguous gain+drift case when
-    # a concurrent writer is proven. Every other integrity failure (row-count
-    # decrease, same-count hash drift, table-list drift, probe failure) and the
-    # gain+drift case with a stable HEAD still quarantine below unchanged.
+    # Downgrade quarantine -> defer for specific integrity-failure categories
+    # where a concurrent writer is proven, rather than assuming corruption.
+    # Three categories get their own proof-gated defer path below: gain+drift
+    # (HEAD-proven writer race, or an absorbed-writer race proven
+    # additive-only via diff), row-count decrease (HEAD-proven concurrent
+    # DELETE), and same-count hash drift (HEAD-proven writer race proven
+    # additive-only via diff — a concurrent UPDATE). Table-list drift, probe
+    # failure, or any case whose specific proof fails still quarantine below
+    # unchanged.
     if [ "$writer_race_detected" = "1" ] && \
        [ "${verify_counts_saw_gain:-0}" = "1" ] && \
        [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] && \
@@ -2371,9 +3352,39 @@ flatten_database() {
       rm -f "$preflight_tmp"
       return 0
     fi
+    # Downgrade quarantine -> defer for concurrent-writer UPDATE. A concurrent
+    # UPDATE during the flatten window changes row values without changing row
+    # counts, which verify_counts cannot distinguish from corruption by count
+    # alone. Prove it directly the same way the absorbed-writer gain+drift case
+    # does: diff the pre-flight snapshot HEAD against the flatten commit for
+    # each drifted table. Purely additive (no removed/modified rows) proves
+    # the flatten itself never touched the table, so the drift is the
+    # concurrent writer's; defer exactly as the other proven-writer-race paths
+    # above do. Any removed/modified row, a diff-probe failure, or an
+    # unproven HEAD movement fails closed and falls through to quarantine.
+    if [ "$writer_race_detected" = "1" ] && \
+       [ "${verify_counts_saw_same_count_hash_drift:-0}" = "1" ] && \
+       [ "${verify_counts_saw_gain:-0}" != "1" ] && \
+       [ "${verify_counts_saw_gain_hash_drift:-0}" != "1" ] && \
+       [ "${verify_counts_saw_row_decrease:-0}" != "1" ] && \
+       [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
+       [ "${verify_counts_saw_probe_failure:-0}" != "1" ] && \
+       gain_drift_is_additive_only "$db" "$head" "$flatten_head" "$verify_counts_same_count_drift_tables"; then
+      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — same-count table value hash drift proven additive-only via DOLT_DIFF(%s..%s) for tables [%s] is concurrent-writer UPDATE, not corruption; deferring, will retry next run\n' \
+        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" "$head" "$flatten_head" "${verify_counts_same_count_drift_tables# }" >&2
+      if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
+        "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
+        "$compacted_from_head" "$local_branch" "$remote_branch"; then
+        rm -f "$preflight_tmp"
+        return 1
+      fi
+      rm -f "$preflight_tmp"
+      return 0
+    fi
     if [ "$writer_race_detected" = "1" ] && \
        { [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] || \
-         [ "${verify_counts_saw_row_decrease:-0}" = "1" ]; }; then
+         [ "${verify_counts_saw_row_decrease:-0}" = "1" ] || \
+         [ "${verify_counts_saw_same_count_hash_drift:-0}" = "1" ]; }; then
       printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s), but additional integrity failure category prevents defer; quarantine unchanged\n' \
         "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
     fi
@@ -2487,14 +3498,16 @@ flatten_database() {
       return 1
     else
       # Per-table verification passed, no row gain, no HEAD movement — the
-      # remaining benign explanation is standing uncommitted working-set
+      # remaining benign explanations are standing uncommitted working-set
       # state on a tracked table that the flatten's -Am committed (observed
-      # on a production hq: one dirty cursor cell in `config`). Prove it by
-      # confining the root diff to the verified table set; defer exactly as
-      # the proven writer-race paths do. Anything else stays quarantined.
+      # on a production hq: one dirty cursor cell in `config`) and tables the
+      # -Am first-committed because they were never in the committed root
+      # (gc's __gc_read_only_probe; daa 2026-08-04). Prove each drifted table
+      # belongs to one of those categories; defer exactly as the proven
+      # writer-race paths do. Anything else stays quarantined.
       if db_root_drift_within_verified_tables "$db" "$head" "$flatten_head" "$preflight_tmp"; then
-        printf 'compact: db=%s committed-root drift confined to verified table(s) [%s] via DOLT_DIFF_STAT(%s..%s) with per-table verification passed — absorbed working-set state committed by the flatten, not corruption; deferring, will retry next run\n' \
-          "$db" "${db_root_drift_proven_tables:-}" "$head" "$flatten_head" >&2
+        printf 'compact: db=%s committed-root drift confined to verified table(s) [%s], first-committed unversioned table(s) [%s] and dropped dolt_ignore'"'"'d table(s) [%s] via DOLT_DIFF_STAT(%s..%s) with per-table verification passed — absorbed working-set state committed by the flatten, not corruption; deferring, will retry next run\n' \
+          "$db" "${db_root_drift_proven_tables:-}" "${db_root_drift_first_committed_tables:-}" "${db_root_drift_dropped_ignored_tables:-}" "$head" "$flatten_head" >&2
         if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
           "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
           "$compacted_from_head" "$local_branch" "$remote_branch"; then
@@ -2507,7 +3520,8 @@ flatten_database() {
       printf 'compact: db=%s value hash changed without row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
         "$db" "$preflight_hash" "$postflight_hash" >&2
       write_quarantine_marker "$db" "post-flatten value hash changed without row-count increase" \
-        "database_value_hash_drift=before=$preflight_hash,after=$postflight_hash,category=same_row_count_db_hash_drift" || {
+        "database_value_hash_drift=before=$preflight_hash,after=$postflight_hash,category=same_row_count_db_hash_drift" \
+        "db_root_drift_stat_tables=${db_root_drift_stat_tables:-unavailable}" || {
         preserve_head_after_integrity_failure "$db" "$flatten_head" || true
         rm -f "$preflight_tmp"
         return 1
@@ -2521,6 +3535,31 @@ flatten_database() {
     printf 'compact: db=%s row-count increase passed value-hash verification — full GC allowed\n' \
       "$db"
   fi
+
+  # Treat HEAD movement after the database-hash probes as a final signal that
+  # this is not a quiet compaction window. Deferring here avoids starting an
+  # expensive full GC while a writer is already known to be active. This probe
+  # is intentionally not described as quiescence: a writer can still commit
+  # after it. Concurrent-GC correctness comes from Dolt's online-GC safepoint
+  # controller; this check only detects the residual window we can observe and
+  # leaves reclamation for a quieter retry.
+  # A failed HEAD probe (empty result) is treated as quiet and allows GC: this
+  # fence is an optimization, not a safety boundary, and the pending-GC retry
+  # path is unfenced regardless.
+  final_verify_head=$(head_commit "$db" || true)
+  if [ -n "$flatten_head" ] && [ -n "$final_verify_head" ] && [ "$final_verify_head" != "$flatten_head" ]; then
+    printf 'compact: db=%s writer race detected during flatten verification (snapshot_HEAD=%s flatten_HEAD=%s final_verify_HEAD=%s) — deferring full GC until the next quiet run\n' \
+      "$db" "$head" "$flatten_head" "$final_verify_head" >&2
+    if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
+      "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
+      "$compacted_from_head" "$local_branch" "$remote_branch"; then
+      rm -f "$preflight_tmp"
+      return 1
+    fi
+    rm -f "$preflight_tmp"
+    return 0
+  fi
+
   rm -f "$preflight_tmp"
 
   after_count=$(commit_count "$db" || true)
@@ -2532,8 +3571,12 @@ flatten_database() {
   if run_full_gc "$db" "flatten ok commits=$count->${after_count:-?} but" \
     "commits=$count->${after_count:-?}" "$start"; then
     clear_compact_marker "$pending_gc_dir" "$db"
-    push_remote_after_compaction "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "initial" "$compacted_from_head" "$local_branch" "$remote_branch"
-    return $?
+    primary_push_rc=0
+    push_remote_after_compaction "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "initial" "$compacted_from_head" "$local_branch" "$remote_branch" || primary_push_rc=$?
+    if [ -n "$remote" ]; then
+      reconcile_backup_remotes "$db" "$remote" "$compacted_from_head" "$local_branch" "$remote_branch" || true
+    fi
+    return "$primary_push_rc"
   fi
   write_compact_marker "$pending_gc_dir" "$db" "flatten succeeded but full GC failed" \
     "remote=$remote" "expected_remote_head=$expected_remote_head" \
@@ -2558,11 +3601,7 @@ bare_gc_database() {
   fi
 
   if has_compact_marker "$quarantine_dir" "$db"; then
-    quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
-    quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
-    quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
-    print_existing_quarantine_marker "$db" "$quarantine_marker" "$quarantine_reason" "$quarantine_created_at"
-    send_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
+    report_existing_quarantine "$db"
     return 1
   fi
 
@@ -2571,22 +3610,7 @@ bare_gc_database() {
     return 0
   fi
 
-  start=$(date +%s)
-  gc_rc=0
-  gc_err_tmp=$(mktemp)
-  dolt_query "$db" "CALL DOLT_GC()" >/dev/null 2>"$gc_err_tmp" || gc_rc=$?
-  elapsed=$(( $(date +%s) - start ))
-  if [ "$gc_rc" -ne 0 ]; then
-    printf 'compact: db=%s bare-gc failed rc=%s duration=%ss\n' \
-      "$db" "$gc_rc" "$elapsed" >&2
-    emit_error_file "$db" "$gc_err_tmp"
-    rm -f "$gc_err_tmp"
-    return 1
-  fi
-  rm -f "$gc_err_tmp"
-
-  printf 'compact: db=%s bare-gc duration=%ss — ok\n' "$db" "$elapsed"
-  return 0
+  run_bare_gc "$db"
 }
 
 # gc_only_database — reclaim orphaned chunks on one database via a full
@@ -2615,10 +3639,9 @@ gc_only_database() {
   fi
 
   if has_compact_marker "$quarantine_dir" "$db"; then
-    quarantine_marker=$(compact_marker_path "$quarantine_dir" "$db")
-    quarantine_reason=$(compact_marker_value "$quarantine_dir" "$db" reason || true)
-    quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
-    print_existing_quarantine_marker "$db" "$quarantine_marker" "$quarantine_reason" "$quarantine_created_at"
+    # Same operator-visible state as a scheduled refusal, so it reports the
+    # same way: stdout alone leaves the quarantine off the bus entirely.
+    report_existing_quarantine "$db"
     return 1
   fi
 

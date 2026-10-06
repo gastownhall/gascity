@@ -1,0 +1,39 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "buildimage",
+    srcs = [
+        "context.go",
+        "docker.go",
+        "dockerfile.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/buildimage",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/citylayout"],
+)
+
+go_test(
+    name = "buildimage_test",
+    srcs = [
+        "context_test.go",
+        "dockerfile_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":buildimage"],
+    deps = [
+        "//internal/citylayout",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

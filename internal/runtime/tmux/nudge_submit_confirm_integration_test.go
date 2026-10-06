@@ -3,6 +3,7 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -125,5 +126,43 @@ func TestNudgeSessionReEntersUntilSubmittedForClaude(t *testing.T) {
 	}
 	if !strings.Contains(out, "esc to interrupt") {
 		t.Fatalf("never reached submitted/busy state after re-send:\n%s", out)
+	}
+}
+
+// TestNudgeSessionReturnsUnconfirmedErrorWhenNeverBusyForClaude is the
+// regression test for ra-3x46cy finding 1: pre-fix, NudgeSession discarded
+// the confirmed bool from submitEnterAndConfirm and reported nil ("clean
+// delivery") even when the agent's busy indicator was never observed within
+// budget — the exact condition that let a drafted-but-unsubmitted nudge go
+// undetected for 15+ minutes. NudgeSession must now surface
+// ErrNudgeSubmitUnconfirmed instead, so a retry-capable caller (the queue
+// dispatcher) does not ack the item.
+func TestNudgeSessionReturnsUnconfirmedErrorWhenNeverBusyForClaude(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	tm := testTmux()
+	dir := t.TempDir()
+	fake := buildBusyOnEnterBinary(t, dir, "fakeclaude-neverbusy")
+	sessionName := fmt.Sprintf("gt-test-nudge-unconfirmed-%d", time.Now().UnixNano()%100000)
+
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, dir, fake, map[string]string{
+		"GC_PROVIDER": "claude",
+		// Far beyond submitEnterMaxSends * submitConfirmPollsPerSend: busy is
+		// never observed within the confirm budget.
+		"GC_TEST_BUSY_AFTER": "100",
+	}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+	time.Sleep(300 * time.Millisecond)
+
+	err := tm.NudgeSession(sessionName, "hello-unconfirmed")
+	if err == nil {
+		t.Fatal("NudgeSession err = nil, want ErrNudgeSubmitUnconfirmed (an unconfirmed submit must not report clean delivery)")
+	}
+	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		t.Fatalf("err = %v, want errors.Is(err, ErrNudgeSubmitUnconfirmed)", err)
 	}
 }

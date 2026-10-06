@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -161,11 +162,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// handles both: schema overrides map to CLI flags, initial_message
 	// is appended to the prompt on first start only.
 	extraMeta := sessionTemplateOverridesMetadata(body.Options, body.Message)
-	if extraMeta == nil {
-		extraMeta = make(map[string]string)
-	}
-	extraMeta["agent_name"] = createCtx.Identity
-	extraMeta["session_origin"] = "ephemeral"
+	extraMeta = agentSessionCreateMetadata(extraMeta, createCtx.Identity)
 	if transport == "acp" {
 		extraMeta, err = session.WithStoredMCPMetadata(extraMeta, createCtx.Identity, mcpServers)
 		if err != nil {
@@ -179,7 +176,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// starts the agent process on the next tick. This avoids blocking the
 	// HTTP response for 10-30s while the agent boots in tmux, and lets real-world apps
 	// show the session in the sidebar immediately via optimistic UI.
-	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), alias, createCtx.ExplicitName, template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
+	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), alias, createCtx.ExplicitName, template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
@@ -225,7 +222,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// Do NOT overwrite it here — the old code clobbered initial_message by
 	// writing only the options portion.
 	s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
-	s.state.Poke() // wake reconciler to start the agent
+	s.state.Enqueue(reconcilekey.Session(info.ID)) // wake reconciler to start the agent
 
 	// Auto-generate a title from the user's message if no explicit title was provided.
 	titleProvider := s.resolveTitleProvider()
@@ -366,7 +363,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		}
 	}
 
-	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
+	resolvedCfg, err := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
@@ -396,7 +393,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	// Persist kind, option metadata, and project_id on the bead.
 	s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
 	if body.Async {
-		s.state.Poke()
+		s.state.Enqueue(reconcilekey.Session(info.ID))
 	}
 
 	// Auto-generate a title from the user's message if no explicit title was provided.

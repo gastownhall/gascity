@@ -50,7 +50,24 @@ describe('buildBeadGraph — forward / inverse edges', () => {
 
   it('computes the inverse blocks[] edge (in-set only)', () => {
     const graph = buildBeadGraph([bead('A', 'open'), bead('B', 'open', { needs: ['A'] })]);
-    expect(graph.nodes.get('A')?.blocks.map((x) => x.id)).toEqual(['B']);
+    expect(graph.nodes.get('A')?.blocks.map((x) => x.bead.id)).toEqual(['B']);
+  });
+
+  it('preserves the forward edge kind on the inverse blocks[] edge (gascity#4365)', () => {
+    // A tracks B (a non-blocking relation): forward edge on A has kind
+    // 'tracks'. The inverse edge on B must carry that same kind, not
+    // collapse to an untyped blocker — a reciprocal blocks+tracks fixture,
+    // matching what #4365 flagged as missing coverage.
+    const graph = buildBeadGraph([
+      bead('B', 'open'),
+      bead('A', 'open', {
+        dependencies: [{ depends_on_id: 'B', issue_id: 'A', type: 'tracks' }],
+      }),
+    ]);
+    const b = graph.nodes.get('B');
+    expect(b?.blocks).toHaveLength(1);
+    expect(b?.blocks[0]?.bead.id).toBe('A');
+    expect(b?.blocks[0]?.kind).toBe('tracks');
   });
 
   it('marks a dependency that points outside the fetched set as unresolved', () => {

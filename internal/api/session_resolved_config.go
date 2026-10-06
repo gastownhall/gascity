@@ -10,7 +10,9 @@ import (
 )
 
 func resolvedSessionConfigForProvider(
-	cityPath, alias, explicitName, template, title, transport string,
+	cityPath string,
+	workspaceEnv map[string]string,
+	alias, explicitName, template, title, transport string,
 	metadata map[string]string,
 	resolved *config.ResolvedProvider,
 	command, workDir string,
@@ -36,7 +38,7 @@ func resolvedSessionConfigForProvider(
 	if transport == "acp" {
 		resolvedCommand = resolved.ACPCommandString()
 	}
-	sessionEnv := cityAnchoredSessionEnv(cityPath, resolved.Env)
+	sessionEnv := cityAnchoredSessionEnv(cityPath, workspaceEnv, resolved.Env)
 	return worker.NormalizeResolvedSessionConfig(worker.ResolvedSessionConfig{
 		Alias:        alias,
 		ExplicitName: explicitName,

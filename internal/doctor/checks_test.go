@@ -11,6 +11,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -19,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 type partialListDoctorProvider struct {
@@ -42,6 +46,37 @@ func setupCity(t *testing.T, tomlContent string) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+// holdControllerLock creates cityDir/.gc/controller.lock and takes an
+// exclusive flock on it, simulating a live controller for IsControllerRunning.
+// flock conflicts are per open-file-description, so IsControllerRunning's own
+// probe-open in this same process still observes the lock as held — exactly
+// how a separate controller process would. The lock is released via
+// t.Cleanup, so callers just call this and rely on it for the rest of the
+// test.
+func holdControllerLock(t *testing.T, cityDir string) {
+	t.Helper()
+	gcDir := filepath.Join(cityDir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatalf("mkdir .gc: %v", err)
+	}
+	path := filepath.Join(gcDir, "controller.lock")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("write lock file: %v", err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("open lock file: %v", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		t.Fatalf("flock: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	})
 }
 
 // clearInheritedBeadsEnv scrubs GC_BEADS_SCOPE_ROOT (and related beads/dolt
@@ -879,6 +914,110 @@ func TestZombieSessionsCheck_Fix(t *testing.T) {
 	}
 }
 
+// TestZombieSessionsCheck_FixSkipsWhenControllerRunning is required by
+// ga-bq9vdi (GH#5742): ZombieSessionsCheck.Fix() kills sessions via the raw
+// runtime.Provider with neither fence engdocs/design/session-store-fences.md
+// requires for session-owned writers. The controller's own health patrol
+// already owns zombie remediation while it runs, so Fix() must re-check
+// doctor.IsControllerRunning and refuse — a documented error, not a crash or
+// a silent no-op that leaves --fix looking like it succeeded.
+func TestZombieSessionsCheck_FixSkipsWhenControllerRunning(t *testing.T) {
+	cityDir := t.TempDir()
+	holdControllerLock(t, cityDir)
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "mayor", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	sp.Zombies["mayor"] = true
+
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "mayor", ProcessNames: []string{"claude"}}},
+	}
+	c := NewZombieSessionsCheck(cfg, "test", "", sp)
+	err := c.Fix(&CheckContext{CityPath: cityDir})
+	if err == nil {
+		t.Fatal("Fix() error = nil, want refusal while controller is running")
+	}
+	if !strings.Contains(err.Error(), "controller is running") {
+		t.Errorf("Fix() error = %q, want it to explain the controller-running refusal", err.Error())
+	}
+	// The controller's own reconciler owns remediation while it runs — the
+	// zombie session must be left untouched, not raced.
+	if !sp.IsRunning("mayor") {
+		t.Error("zombie session was stopped despite controller running")
+	}
+	if n := sp.CountCalls("Stop", "mayor"); n != 0 {
+		t.Errorf("Stop called %d times, want 0 while controller is running", n)
+	}
+}
+
+// TestZombieSessionsCheck_FixDoesNotRaceControllerReconciliation is the
+// concurrency proof required by ga-bq9vdi (GH#5742) Scope item 3: a fake
+// controller reconciler tick (forensic capture, then stop-and-restart the
+// zombie) runs concurrently with doctor's own Fix() call against the same
+// session. With the controller-running guard in place, Fix() must defer
+// entirely — no double-stop, no interference with the reconciler's forensic
+// capture, and a final state that converges on whatever the reconciler did.
+func TestZombieSessionsCheck_FixDoesNotRaceControllerReconciliation(t *testing.T) {
+	cityDir := t.TempDir()
+	holdControllerLock(t, cityDir)
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "mayor", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	sp.Zombies["mayor"] = true
+
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "mayor", ProcessNames: []string{"claude"}}},
+	}
+	c := NewZombieSessionsCheck(cfg, "test", "", sp)
+
+	var forensicsCaptured int32
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Simulates the controller's own health-patrol reconciler tick, which
+	// owns zombie remediation while the controller is running: capture
+	// forensic state, stop the zombie, then restart it.
+	go func() {
+		defer wg.Done()
+		atomic.AddInt32(&forensicsCaptured, 1)
+		if err := sp.Stop("mayor"); err != nil {
+			t.Errorf("reconciler stop: %v", err)
+			return
+		}
+		if err := sp.Start(context.Background(), "mayor", runtime.Config{}); err != nil {
+			t.Errorf("reconciler restart: %v", err)
+		}
+	}()
+
+	// Concurrently, doctor's own --fix runs against the same session. With
+	// the controller live it must defer to the reconciler rather than issue
+	// a second, uncoordinated Stop.
+	var fixErr error
+	go func() {
+		defer wg.Done()
+		fixErr = c.Fix(&CheckContext{CityPath: cityDir})
+	}()
+
+	wg.Wait()
+
+	if fixErr == nil {
+		t.Fatal("Fix() error = nil, want refusal while controller is running")
+	}
+	if got := atomic.LoadInt32(&forensicsCaptured); got != 1 {
+		t.Fatalf("forensic capture ran %d times, want exactly 1 (owned solely by the reconciler)", got)
+	}
+	if n := sp.CountCalls("Stop", "mayor"); n != 1 {
+		t.Errorf("Stop(%q) called %d times, want exactly 1 (no double-stop)", "mayor", n)
+	}
+	if !sp.IsRunning("mayor") {
+		t.Error("session not running after reconciler restart — final state did not converge")
+	}
+}
+
 func TestZombieSessionsCheck_SkipsNoProcessNames(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "mayor", runtime.Config{}); err != nil {
@@ -954,6 +1093,43 @@ func TestOrphanSessionsCheck_Fix(t *testing.T) {
 	}
 	if !sp.IsRunning("mayor") {
 		t.Error("legitimate session was killed by fix")
+	}
+}
+
+// TestOrphanSessionsCheck_FixSkipsWhenControllerRunning is required by
+// ga-bq9vdi (GH#5742): OrphanSessionsCheck.Fix() kills sessions via the raw
+// runtime.Provider, racing the controller's own health patrol while it's
+// running. Fix() must re-check doctor.IsControllerRunning and refuse — a
+// documented error, not a crash or a silent no-op that leaves --fix looking
+// like it succeeded.
+func TestOrphanSessionsCheck_FixSkipsWhenControllerRunning(t *testing.T) {
+	cityDir := t.TempDir()
+	holdControllerLock(t, cityDir)
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "mayor", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Start(context.Background(), "stale-worker", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "mayor"}},
+	}
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	err := c.Fix(&CheckContext{CityPath: cityDir})
+	if err == nil {
+		t.Fatal("Fix() error = nil, want refusal while controller is running")
+	}
+	if !strings.Contains(err.Error(), "controller is running") {
+		t.Errorf("Fix() error = %q, want it to explain the controller-running refusal", err.Error())
+	}
+	if !sp.IsRunning("stale-worker") {
+		t.Error("orphan session was stopped despite controller running")
+	}
+	if n := sp.CountCalls("Stop", "stale-worker"); n != 0 {
+		t.Errorf("Stop called %d times, want 0 while controller is running", n)
 	}
 }
 
@@ -1167,6 +1343,74 @@ func TestBDSplitStoreCheck_EmbeddedActiveWarnsWhenServerStoreHasRepos(t *testing
 		if !strings.Contains(r.Message, want) {
 			t.Fatalf("message = %q, want %q", r.Message, want)
 		}
+	}
+}
+
+// TestBDSplitStoreCheck_WarnsWhenOnlyTheUnreadStoreExists covers the shape gc's
+// own storage-mode change produces, and the one the change's announcement
+// steers an operator here for.
+//
+// Canonicalizing an embedded workspace to server mode re-points the ledger
+// before any .beads/dolt exists, so the both-directories test answers "no
+// legacy split store detected" for exactly the scope that has one. A diagnostic
+// an operator is told to run and which reports OK on the state they were just
+// warned about converts a real warning into a false all-clear.
+func TestBDSplitStoreCheck_WarnsWhenOnlyTheUnreadStoreExists(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"jc"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeDoltRepoMarker(t, filepath.Join(beadsDir, "embeddeddolt", "jc"))
+
+	r := NewBDSplitStoreCheck(dir).Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	for _, want := range []string{"unread bead database", ".beads/embeddeddolt", "1 Dolt repo"} {
+		if !strings.Contains(r.Message, want) {
+			t.Fatalf("message = %q, want %q", r.Message, want)
+		}
+	}
+	if !strings.Contains(r.FixHint, "keep both directories until reconciled") {
+		t.Fatalf("fix hint = %q, want the recovery the storage-mode announcement mirrors", r.FixHint)
+	}
+}
+
+// TestBDSplitStoreCheck_OneStoreScopesStayOK is the false-positive budget for
+// the check above. Every scope here has exactly one ledger, which is what a gc
+// -created city looks like, and a warning on any of them would train operators
+// to ignore the one that matters.
+func TestBDSplitStoreCheck_OneStoreScopesStayOK(t *testing.T) {
+	for name, build := range map[string]func(t *testing.T, beadsDir string){
+		"server metadata, server database only": func(t *testing.T, beadsDir string) {
+			writeDoltRepoMarker(t, filepath.Join(beadsDir, "dolt", "jc"))
+		},
+		"the unread directory holds no repository": func(t *testing.T, beadsDir string) {
+			writeDoltRepoMarker(t, filepath.Join(beadsDir, "dolt", "jc"))
+			if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt", "jc"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"nothing on disk at all": func(_ *testing.T, _ string) {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			beadsDir := filepath.Join(dir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"jc"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			build(t, beadsDir)
+			if r := NewBDSplitStoreCheck(dir).Run(&CheckContext{}); r.Status != StatusOK {
+				t.Fatalf("status = %d (%q), want OK on a scope with one ledger", r.Status, r.Message)
+			}
+		})
 	}
 }
 
@@ -1499,6 +1743,19 @@ func (s *spyPingStore) Ping() error {
 
 // --- DoltServerCheck ---
 
+// listenLoopbackPort opens a loopback listener for the duration of the test and
+// returns its port. Doctor's verdict on a Dolt endpoint is a dial, so a fixture
+// that wants to be believed needs something actually accepting connections.
+func listenLoopbackPort(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	return strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+}
+
 func TestDoltServerCheck_ManagedCityUsesRuntimeState(t *testing.T) {
 	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
 	fs := fsys.OSFS{}
@@ -1509,12 +1766,7 @@ func TestDoltServerCheck_ManagedCityUsesRuntimeState(t *testing.T) {
 	})
 	writeDoctorCanonicalMetadata(t, fs, dir, "hq")
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	port := listenLoopbackPort(t)
 	writeDoctorRuntimeState(t, fs, dir, port)
 
 	c := NewDoltServerCheck(dir, false)
@@ -1524,6 +1776,123 @@ func TestDoltServerCheck_ManagedCityUsesRuntimeState(t *testing.T) {
 	}
 	if !strings.Contains(r.Message, "127.0.0.1:"+port) {
 		t.Fatalf("message = %q, want runtime port %s", r.Message, port)
+	}
+}
+
+// socketCityDir returns a city root short enough that a Unix socket created
+// inside it stays under the platform sun_path limit. t.TempDir() is not: on
+// macOS it lands under /var/folders/<...>/T/<TestName><digits>/001, which spends
+// well past the 104-byte limit before the socket name is even appended, and
+// net.Listen then fails with "bind: invalid argument".
+func socketCityDir(t *testing.T) string {
+	t.Helper()
+	return testutil.ShortTempDir(t, "gc-doctor-")
+}
+
+func TestDoltServerCheck_ProxiedSidecarUnixReachable(t *testing.T) {
+	dir := socketCityDir(t)
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: "proxied-server"})
+	// metadata.json is the mode authority, so the fixture has to say proxied
+	// there — matching TestDoltServerCheck_ProxiedSidecarTCPReachable. The old
+	// writeDoctorCanonicalMetadata pinned dolt_mode "server" and only passed
+	// while config.yaml could shadow it.
+	writeDoctorProxiedMetadata(t, dir, "hq")
+	sock := filepath.Join(dir, "dolt.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close(); _ = os.Remove(sock) })
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "proxied_server_client_info.json"), []byte(fmt.Sprintf(`{"external":{"socket":%q}}`, sock)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := NewDoltServerCheck(dir, false).Run(&CheckContext{})
+	if r.Status != StatusOK || !strings.Contains(r.Message, sock) {
+		t.Fatalf("status=%d msg=%q, want reachable Unix endpoint %s", r.Status, r.Message, sock)
+	}
+}
+
+func TestDoltServerCheck_ProxiedSidecarTCPReachable(t *testing.T) {
+	dir := t.TempDir()
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: "proxied-server"})
+	writeDoctorProxiedMetadata(t, dir, "hq")
+	port := listenLoopbackPort(t)
+	addr := net.JoinHostPort("127.0.0.1", port)
+	writeDoctorSidecar(t, dir, fmt.Sprintf(`{"external":{"host":"127.0.0.1","port":%s}}`, port))
+	r := NewDoltServerCheck(dir, false).Run(&CheckContext{})
+	if r.Status != StatusOK || !strings.Contains(r.Message, addr) {
+		t.Fatalf("status=%d msg=%q, want reachable TCP endpoint %s", r.Status, r.Message, addr)
+	}
+}
+
+func TestRigDoltServerCheck_ProxiedSidecarTCPReachable(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "demo")
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, cityDir, contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: "proxied-server"})
+	writeDoctorProxiedMetadata(t, cityDir, "hq")
+	writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{IssuePrefix: "de", EndpointOrigin: contract.EndpointOriginExplicit, DoltMode: "proxied-server", DoltHost: "127.0.0.1", DoltPort: "1"})
+	writeDoctorProxiedMetadata(t, rigDir, "de")
+	port := listenLoopbackPort(t)
+	addr := net.JoinHostPort("127.0.0.1", port)
+	writeDoctorSidecar(t, rigDir, fmt.Sprintf(`{"external":{"host":"127.0.0.1","port":%s}}`, port))
+	r := NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false).Run(&CheckContext{})
+	if r.Status != StatusOK || !strings.Contains(r.Message, addr) {
+		t.Fatalf("status=%d msg=%q, want reachable rig TCP endpoint %s", r.Status, r.Message, addr)
+	}
+}
+
+func TestRigDoltServerCheck_InheritedProxiedSidecarTCPReachable(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "demo")
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, cityDir, contract.ConfigState{
+		EndpointOrigin: contract.EndpointOriginCityCanonical,
+		DoltHost:       "city-db.example",
+		DoltPort:       "3307",
+	})
+	writeDoctorCanonicalMetadata(t, fs, cityDir, "hq")
+	writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{
+		IssuePrefix:    "de",
+		EndpointOrigin: contract.EndpointOriginInheritedCity,
+		DoltMode:       "proxied-server",
+		DoltHost:       "city-db.example",
+		DoltPort:       "3307",
+	})
+	writeDoctorProxiedMetadata(t, rigDir, "de")
+	port := listenLoopbackPort(t)
+	addr := net.JoinHostPort("127.0.0.1", port)
+	writeDoctorSidecar(t, rigDir, fmt.Sprintf(`{"external":{"host":"127.0.0.1","port":%s}}`, port))
+
+	r := NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false).Run(&CheckContext{})
+	if r.Status != StatusOK || !strings.Contains(r.Message, addr) {
+		t.Fatalf("status=%d msg=%q, want inherited external TCP endpoint %s", r.Status, r.Message, addr)
+	}
+}
+
+func TestRigDoltServerCheck_ProxiedSidecarUnixReachable(t *testing.T) {
+	cityDir := socketCityDir(t)
+	rigDir := filepath.Join(cityDir, "demo")
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, cityDir, contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: "proxied-server"})
+	writeDoctorProxiedMetadata(t, cityDir, "hq")
+	writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{IssuePrefix: "de", EndpointOrigin: contract.EndpointOriginExplicit, DoltMode: "proxied-server", DoltHost: "127.0.0.1", DoltPort: "1"})
+	writeDoctorProxiedMetadata(t, rigDir, "de")
+	socket := filepath.Join(rigDir, "dolt.sock")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close(); _ = os.Remove(socket) })
+	writeDoctorSidecar(t, rigDir, fmt.Sprintf(`{"external":{"socket":%q}}`, socket))
+	r := NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false).Run(&CheckContext{})
+	if r.Status != StatusOK || !strings.Contains(r.Message, socket) {
+		t.Fatalf("status=%d msg=%q, want reachable rig Unix endpoint %s", r.Status, r.Message, socket)
 	}
 }
 
@@ -1570,12 +1939,7 @@ func TestDoltServerCheck_ManagedCityRejectsInvalidRuntimeStateEvenWhenPortReacha
 	})
 	writeDoctorCanonicalMetadata(t, fs, dir, "hq")
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	port := listenLoopbackPort(t)
 	runtimeDir := filepath.Join(dir, ".gc", "runtime", "packs", "dolt")
 	if err := fs.MkdirAll(runtimeDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -1824,6 +2188,29 @@ func TestRigDoltServerCheck_ExplicitRigReachable(t *testing.T) {
 	}
 	if !strings.Contains(r.Message, "127.0.0.1:"+port) {
 		t.Fatalf("message = %q, want reachable explicit rig target", r.Message)
+	}
+}
+
+func TestRigDoltServerCheck_ExplicitRigUnixSocketReachable(t *testing.T) {
+	cityDir := socketCityDir(t)
+	rigDir := filepath.Join(cityDir, "demo")
+	socket := filepath.Join(rigDir, "dolt.socket")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close(); _ = os.Remove(socket) })
+	fs := fsys.OSFS{}
+	writeDoctorCanonicalConfig(t, fs, cityDir, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
+	writeDoctorCanonicalMetadata(t, fs, cityDir, "hq")
+	writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{IssuePrefix: "de", EndpointOrigin: contract.EndpointOriginExplicit, EndpointStatus: contract.EndpointStatusVerified, DoltSocket: socket})
+	writeDoctorCanonicalMetadata(t, fs, rigDir, "de")
+	r := NewRigDoltServerCheck(cityDir, config.Rig{Name: "demo", Path: rigDir}, false).Run(&CheckContext{})
+	if r.Status != StatusOK || !strings.Contains(r.Message, socket) {
+		t.Fatalf("status=%d msg=%q, want reachable unix socket", r.Status, r.Message)
 	}
 }
 
@@ -2130,6 +2517,27 @@ func writeDoctorCanonicalMetadata(t *testing.T, fs fsys.FS, dir, db string) {
 	}
 }
 
+func writeDoctorProxiedMetadata(t *testing.T, dir, db string) {
+	t.Helper()
+	fs := fsys.OSFS{}
+	if _, err := contract.EnsureCanonicalMetadata(fs, filepath.Join(dir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "proxied-server",
+		DoltDatabase: db,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeDoctorSidecar(t *testing.T, dir, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "proxied_server_client_info.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+//nolint:unparam // helper keeps FS explicit in tests
 func writeDoctorRuntimeState(t *testing.T, fs fsys.FS, dir, port string) {
 	t.Helper()
 	runtimeDir := filepath.Join(dir, ".gc", "runtime", "packs", "dolt")
@@ -2482,6 +2890,7 @@ func setupManagedDoltCity(t *testing.T) string {
 	t.Helper()
 	t.Setenv("GC_DOLT_DATA_DIR", "")
 	t.Setenv("GC_DOLT_CONFIG_FILE", "")
+	t.Setenv("GC_DOLT_LOG_FILE", "")
 	const db = "hq"
 	dir := t.TempDir()
 	fs := fsys.OSFS{}
@@ -2497,12 +2906,7 @@ func setupManagedDoltCity(t *testing.T) string {
 
 	// Provide a reachable runtime state so ResolveDoltConnectionTarget
 	// returns a valid target.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	port := listenLoopbackPort(t)
 	writeDoctorRuntimeState(t, fs, dir, port)
 	return dir
 }
@@ -3184,7 +3588,7 @@ func writeDoctorManagedDoltConfig(t *testing.T, cityPath string, overrides map[s
 			"max_connections":                256,
 			"back_log":                       50,
 			"max_connections_timeout_millis": 5000,
-			"read_timeout_millis":            15000,
+			"read_timeout_millis":            120000,
 			"write_timeout_millis":           300000,
 		},
 		"data_dir": filepath.Join(cityPath, ".beads", "dolt"),
@@ -3378,6 +3782,40 @@ max_connections = 1024
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("status = %d, want OK for city-configured listener overrides; msg = %s", r.Status, r.Message)
+	}
+}
+
+// TestDoltConfigCheck_AcceptsCityConfiguredWaitTimeout is the regression for the
+// false drift this check used to report. It resolved the expected wait_timeout
+// from the doctor process's own GC_DOLT_WAIT_TIMEOUT, so a city that configures
+// the value looked drifted whenever doctor ran from a shell that does not export
+// it — and the remediation hint then advised the stop/restart that would have
+// really introduced drift. The env is deliberately left UNSET here: that is the
+// operator-shell case.
+func TestDoltConfigCheck_AcceptsCityConfiguredWaitTimeout(t *testing.T) {
+	dir := setupManagedDoltCity(t)
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "bd"
+
+[dolt]
+wait_timeout_seconds = 120
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("Load city.toml: %v", err)
+	}
+	writeDoctorManagedDoltConfig(t, dir, map[string]any{
+		"system_variables.wait_timeout": "120",
+	})
+	c := NewDoltConfigCheckForConfig(dir, false, cfg, nil)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK for city-configured wait_timeout; msg = %s", r.Status, r.Message)
 	}
 }
 

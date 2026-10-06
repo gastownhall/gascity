@@ -177,19 +177,29 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if err == nil && len(existing) > 0 {
 		pod := &existing[0]
 		if pod.Status.Phase == corev1.PodRunning {
-			// Check if tmux is alive — stale pod detection.
-			_, tmuxErr := p.ops.execInPod(ctx, pod.Name, "agent",
-				[]string{"tmux", "has-session", "-t", tmuxSession}, nil)
-			if tmuxErr == nil {
+			// Stale-pod detection: is the session's tmux server alive?
+			alive, definitive, probeErr := p.probeTmuxLiveness(ctx, pod)
+			if alive {
 				return fmt.Errorf("%w: session %q (pod: %s)", runtime.ErrSessionExists, name, pod.Name)
 			}
-			// tmux dead — but if the pod is young, workspace init may still
-			// be blocking the tmux server from starting. Don't delete pods
-			// that are still within the startup window.
+			// tmux not answering — but if the pod is young, workspace init may
+			// still be blocking the tmux server from starting. Don't delete
+			// pods that are still within the startup window.
 			if time.Since(pod.CreationTimestamp.Time) < startupGracePeriod {
 				return fmt.Errorf("%w: session %q (pod: %s)", runtime.ErrSessionInitializing, name, pod.Name)
 			}
-			// Stale pod — tmux dead and past grace period, recreate.
+			if !definitive {
+				// Past the grace period the next statement deletes this pod.
+				// Only a probe that actually ran inside the container may
+				// authorize that: an apiserver or kubelet transport failure
+				// says nothing about tmux, and treating it as a negative
+				// destroys a live agent's box and the work in it. Report the
+				// established "I could not tell" signal so the caller defers
+				// instead of recreating.
+				return fmt.Errorf("%w: tmux liveness probe for session %q (pod: %s) could not answer: %w",
+					runtime.ErrRuntimeUnavailable, name, pod.Name, probeErr)
+			}
+			// Stale pod — tmux definitively dead and past grace period, recreate.
 		}
 		// Clean up existing pod.
 		_ = p.ops.deletePod(ctx, pod.Name, 5)
@@ -533,13 +543,16 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 // Uses -l (literal mode) so tmux key names in the message text are not
 // interpreted as keystrokes. Content blocks are flattened to text.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	_ = p.carrier().Nudge(context.Background(), name, content) // best-effort
-	return nil
+	return p.carrier().Nudge(context.Background(), name, content)
 }
 
-// SendKeys sends bare keystrokes to the tmux session.
+// SendKeys sends bare keystrokes to the tmux session. Best-effort on a
+// missing session (contract: no-op), but a genuine transport failure to a
+// live pod is propagated (#4389).
 func (p *Provider) SendKeys(name string, keys ...string) error {
-	_ = p.carrier().SendKeys(context.Background(), name, keys...) // best-effort
+	if err := p.carrier().SendKeys(context.Background(), name, keys...); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
+		return err
+	}
 	return nil
 }
 
@@ -626,6 +639,13 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	return names, nil
 }
 
+// ListRunningComplete implements [runtime.ListingAttestation]: the apiserver's
+// Running-pod list either errors or lists every Running gc-agent pod. The
+// listing is complete but not city-scoped: the selector is app=gc-agent in the
+// shared namespace, so a same-named session of another city in that namespace
+// is listed too and can mask this city's session dying.
+func (p *Provider) ListRunningComplete() bool { return true }
+
 // GetLastActivity returns the time of the last I/O in the tmux session.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	ctx := context.Background()
@@ -686,6 +706,72 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 
 // --- Internal helpers ---
 
+// livenessProbeAttempts is how many times probeTmuxLiveness will ask before
+// reporting that it could not tell. The exec path through the apiserver and
+// kubelet flakes independently of the pod, and a single blip is not evidence
+// about tmux; two unanswered attempts in a row are at least a pattern.
+const livenessProbeAttempts = 2
+
+// probeTmuxLiveness asks whether the session's tmux server is alive inside pod.
+//
+// It returns three-valued, not two: alive, and whether the answer is
+// definitive. A definitive answer means something actually established the
+// fact — either the pod's own status says the agent container is not running,
+// or `tmux has-session` ran inside it and exited. An indefinite answer means
+// the exec never got there (SPDY dial failure, apiserver error, stream timeout,
+// canceled context), which says nothing at all about tmux.
+//
+// Collapsing those two into "not alive" is how a transport flake becomes a
+// deleted pod. Callers that act destructively on a negative must require
+// definitive; callers that only defer may ignore it.
+func (p *Provider) probeTmuxLiveness(ctx context.Context, pod *corev1.Pod) (alive, definitive bool, err error) {
+	// The pod's status is a second, independent channel, and it settles the
+	// case the exec cannot: a pod whose phase is Running but whose agent
+	// container is not (crash loop, OOM, terminated) answers every exec with an
+	// apiserver-level error that is indistinguishable from a flake. Reading
+	// that as "I could not tell" would leave a genuinely broken pod in place
+	// forever. The container not running IS a definitive tmux negative, and it
+	// comes from the list we already did rather than from the connection that
+	// is in doubt.
+	if running, known := agentContainerRunning(pod); known && !running {
+		return false, true, fmt.Errorf("agent container in pod %s is not running", pod.Name)
+	}
+	podName := pod.Name
+	for attempt := 0; attempt < livenessProbeAttempts; attempt++ {
+		_, err = p.ops.execInPod(ctx, podName, "agent",
+			[]string{"tmux", "has-session", "-t", tmuxSession}, nil)
+		if err == nil {
+			return true, true, nil
+		}
+		var exitErr execerr.ExitError
+		if errors.As(err, &exitErr) && exitErr.Exited() {
+			// The command ran in the container and reported no session. That
+			// is a real tmux negative — the same discrimination Provider.Exec
+			// already draws between an exit status and a transport failure.
+			return false, true, err
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return false, false, err
+}
+
+// agentContainerRunning reports whether the pod's agent container is running,
+// and whether the pod status said anything about it at all. A status that has
+// not been populated yet is not evidence either way.
+func agentContainerRunning(pod *corev1.Pod) (running, known bool) {
+	if pod == nil {
+		return false, false
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == "agent" {
+			return cs.State.Running != nil, true
+		}
+	}
+	return false, false
+}
+
 // findRunningPod finds a running pod by session label.
 // carrier returns the tmux carrier that drives this provider's sessions over
 // the pod exec connection ([Provider.Exec]). The in-box tmux session is always
@@ -718,6 +804,11 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 	return []byte(out), 0, nil
 }
 
+// findRunningPod resolves the running pod for name. A missing pod (scaled
+// down, evicted, never provisioned) is reported as [runtime.ErrSessionNotFound]
+// so callers can distinguish "session is gone" from a genuine transport
+// failure reaching a pod that does exist — the same distinction Relaunch
+// already draws at its own call site.
 func (p *Provider) findRunningPod(ctx context.Context, name string) (string, error) {
 	label := SanitizeLabel(name)
 	pods, err := p.ops.listPods(ctx, "gc-session="+label, "status.phase=Running")
@@ -725,7 +816,7 @@ func (p *Provider) findRunningPod(ctx context.Context, name string) (string, err
 		return "", err
 	}
 	if len(pods) == 0 {
-		return "", fmt.Errorf("no running pod for session %q", name)
+		return "", fmt.Errorf("%w: no running pod for session %q", runtime.ErrSessionNotFound, name)
 	}
 	return pods[0].Name, nil
 }
@@ -831,7 +922,7 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity string) er
 	// start a local Dolt server. Pod sessions consume the projected GC_DOLT_*
 	// connection target through env; they do not rewrite canonical .beads files.
 	_, err := ops.execInPod(ctx, podName, "agent",
-		[]string{"env", "GC_DOLT=skip", "gc", "init", "--from", "/tmp/city-src", "/workspace"}, nil)
+		[]string{"env", "GC_DOLT=skip", "gc", "init", "--from", "/tmp/city-src", "/workspace", "--no-start", "--skip-provider-readiness"}, nil)
 	if err != nil {
 		return err
 	}

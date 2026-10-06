@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -89,7 +90,7 @@ func TestEffectiveStateCompletePrecedenceMatrix(t *testing.T) {
 		"DNT":                     {state: &enabled, env: map[string]string{envDoNotTrack: "1"}, want: StateEnvironmentDisabled, reason: ReasonDoNotTrack},
 		"GC disable":              {state: &enabled, env: map[string]string{envDisableUsageMetrics: "yes"}, want: StateEnvironmentDisabled, reason: ReasonGCDisable},
 		"DNT precedes GC disable": {state: &enabled, env: map[string]string{envDoNotTrack: "yes", envDisableUsageMetrics: "yes"}, want: StateEnvironmentDisabled, reason: ReasonDoNotTrack},
-		"development build":       {state: &enabled, mutate: func(d *serviceDependencies) { d.release.official = false }, env: map[string]string{envDoNotTrack: "1"}, want: StateFailClosed, reason: ReasonDevelopmentBuild},
+		"unofficial build":        {state: &enabled, mutate: func(d *serviceDependencies) { d.release.official = false }, env: map[string]string{envDoNotTrack: "1"}, want: StateFailClosed, reason: ReasonUnofficialBuild},
 		"unsupported platform":    {state: &enabled, mutate: func(d *serviceDependencies) { d.release.platformSupported = false }, want: StateFailClosed, reason: ReasonUnsupportedPlatform},
 		"empty endpoint":          {state: &enabled, mutate: func(d *serviceDependencies) { d.release.endpointConfigured = false }, want: StateFailClosed, reason: ReasonEndpointMissing},
 		"default-off rollout":     {state: &enabled, mutate: func(d *serviceDependencies) { d.release.rollout = RolloutDefaultOff }, want: StateFailClosed, reason: ReasonRolloutDisabled},
@@ -185,7 +186,16 @@ func TestStatusIsByteForByteReadOnlyAcrossAbsentCorruptAndUnsafeStates(t *testin
 }
 
 func TestOpenProductionAndPreparationAreLazyAndNonCreating(t *testing.T) {
+	trustedTempRoot := "/tmp"
+	if runtime.GOOS == "darwin" {
+		trustedTempRoot = "/private/tmp"
+	}
+	t.Setenv("GOTMPDIR", trustedTempRoot)
+	t.Setenv("TMPDIR", trustedTempRoot)
 	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o700); err != nil {
+		t.Fatalf("Chmod private parent: %v", err)
+	}
 	homePath := filepath.Join(parent, "not-created")
 	t.Setenv("GC_HOME", homePath)
 	service, err := OpenProduction(ProductionOptions{Home: gchome.ResolveReadOnly(), Release: CurrentReleaseIdentity()})
@@ -201,8 +211,11 @@ func TestOpenProductionAndPreparationAreLazyAndNonCreating(t *testing.T) {
 		t.Fatalf("read-only preparation created home: %v", err)
 	}
 	status := service.Status(context.Background())
-	if status.State != StateFailClosed || status.Reason != ReasonDevelopmentBuild {
-		t.Fatalf("development Status = (%q, %q), want fail-closed development", status.State, status.Reason)
+	// The compiled build passes the build-kind, endpoint, rollout, notice, and
+	// home-stability gates. A read-only, never-created trusted GC_HOME remains
+	// pending notice without creating anything on disk.
+	if status.State != StatePendingNotice || status.Reason != ReasonPreferenceUnset {
+		t.Fatalf("development Status = (%q, %q), want pending-notice preference-unset", status.State, status.Reason)
 	}
 }
 
@@ -728,7 +741,9 @@ func TestCurrentEndpointEmptyProductionServiceCanPersistAbsentAndCorruptOptOutWi
 				t.Fatalf("beginDisable: %v", err)
 			}
 			state := readStateFixture(t, home)
-			if state.Preference != preferenceDisabled || state.RequiredNoticeVersion != 0 || state.AcceptedNoticeVersion != 0 || state.InstallationID != "" || state.SpoolGeneration != "" || state.CleanupKind != cleanupDisable {
+			// Opt-out now stamps the compiled notice floor: a real production notice
+			// (productionNoticeVersion) is wired even while the endpoint is empty.
+			if state.Preference != preferenceDisabled || state.RequiredNoticeVersion != productionNoticeVersion || state.AcceptedNoticeVersion != 0 || state.InstallationID != "" || state.SpoolGeneration != "" || state.CleanupKind != cleanupDisable {
 				t.Fatalf("endpoint-empty disabled state = %#v", state)
 			}
 			if token.stateGeneration != state.StateGeneration || token.cleanupEpoch != state.CleanupEpoch {

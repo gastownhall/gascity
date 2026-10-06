@@ -351,9 +351,9 @@ func TestProcessRalphCheckHardSubjectFailureTerminatesWithoutRetry(t *testing.T)
 	}
 
 	rootID := run1.Metadata["gc.root_bead_id"]
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
-		t.Fatalf("listByWorkflowRoot: %v", err)
+		t.Fatalf("beads.DirectMembers: %v", err)
 	}
 	for _, bead := range all {
 		if bead.Metadata["gc.attempt"] == "2" {
@@ -395,9 +395,9 @@ func TestProcessRalphCheckSoftSubjectFailureStillRetries(t *testing.T) {
 	}
 
 	rootID := run1.Metadata["gc.root_bead_id"]
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
-		t.Fatalf("listByWorkflowRoot: %v", err)
+		t.Fatalf("beads.DirectMembers: %v", err)
 	}
 	sawAttempt2 := false
 	for _, bead := range all {

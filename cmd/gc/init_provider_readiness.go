@@ -31,6 +31,7 @@ type initFinalizeOptions struct {
 	showProgress          bool
 	commandName           string
 	noStart               bool
+	hostedDolt            hostedDoltInitOptions
 }
 
 type initProviderTarget struct {
@@ -41,6 +42,23 @@ type initProviderTarget struct {
 
 func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOptions) int {
 	EnsureBuiltinRuntimeAssets(cityPath, os.Stderr) //nolint:errcheck // best-effort; needed before dependency and provider checks
+	// Record the selected provider owner before any dependency or readiness
+	// work. Either path can fail after the scaffold exists; a later gc start
+	// must therefore see the same pending topology rather than seed a legacy
+	// managed store.
+	if err := persistFreshProviderOwnership(cityPath, opts.hostedDolt); err != nil {
+		fmt.Fprintf(stderr, "%s: recording provider-owned beads scope: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	// Check the running supervisor before the slow dependency and readiness
+	// work: a supervisor from a different gc installation would run this
+	// city with the wrong binary.
+	if !opts.noStart {
+		if proceed, _ := checkSupervisorBinaryBeforeRegister(opts.commandName, stderr, true); !proceed {
+			fmt.Fprintf(stderr, "%s: city created at %s but not registered; after fixing the supervisor, run 'gc start' there\n", opts.commandName, cityPath) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 
 	// Check hard binary dependencies before handing off to the supervisor.
 	// Without this, missing deps (tmux, git, dolt, bd) cause the supervisor
@@ -97,6 +115,10 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: loading config for prefix resolution: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := opts.hostedDolt.registerSelectorEndpointForInit(cityPath); err != nil {
+		fmt.Fprintf(stderr, "%s: configuring selector endpoint: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !opts.skipProviderReadiness && hasRemoteImports {
@@ -344,7 +366,9 @@ func seedDeferredManagedBeadsBeforeProviderReadiness(cityPath string, cfg *confi
 	if !workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
 		return nil
 	}
-	if scopeUsesManagedBdStoreContract(cityPath, cityPath) {
+	if owned, err := scopeProviderOwned(cityPath, cityPath); err != nil {
+		return err
+	} else if !owned && scopeUsesManagedBdStoreContract(cityPath, cityPath) {
 		if err := seedDeferredManagedBeadsErr(cityPath, cityPath, config.EffectiveHQPrefix(cfg), ""); err != nil {
 			return err
 		}
@@ -353,8 +377,14 @@ func seedDeferredManagedBeadsBeforeProviderReadiness(cityPath string, cfg *confi
 		if strings.TrimSpace(rig.Path) == "" || !rigUsesManagedBdStoreContract(cityPath, rig) {
 			continue
 		}
-		if err := seedDeferredManagedBeadsErr(cityPath, rig.Path, rig.EffectivePrefix(), ""); err != nil {
-			return fmt.Errorf("rig %q: %w", rig.Name, err)
+		owned, err := scopeProviderOwned(cityPath, rig.Path)
+		if err != nil {
+			return fmt.Errorf("rig %q ownership: %w", rig.Name, err)
+		}
+		if !owned {
+			if err := seedDeferredManagedBeadsErr(cityPath, rig.Path, rig.EffectivePrefix(), ""); err != nil {
+				return fmt.Errorf("rig %q: %w", rig.Name, err)
+			}
 		}
 	}
 	return nil
@@ -431,6 +461,15 @@ func providerStatusFixHint(probeName, status string) string {
 			return "use Gemini CLI personal OAuth; API-key and ADC modes are not supported here"
 		case api.ProbeStatusProbeError:
 			return "check ~/.gemini/settings.json and oauth_creds.json"
+		}
+	case "pi":
+		switch status {
+		case api.ProbeStatusNeedsAuth:
+			return "authenticate pi so it writes ~/.pi/agent/auth.json"
+		case api.ProbeStatusNotInstalled:
+			return "install the pi coding agent"
+		case api.ProbeStatusProbeError:
+			return "check ~/.pi/agent/auth.json and the local pi installation"
 		}
 	}
 	return ""
@@ -511,23 +550,84 @@ var initLookPath = exec.LookPath
 
 var initRunVersionCommandContext = exec.CommandContext
 
-var initRunVersionTimeout = 2 * time.Second
+// initProbeAttemptTimeouts bounds each attempt of a local CLI probe
+// ("dolt config --get", "<binary> version"). These commands normally finish
+// in milliseconds, but on a heavily loaded host process startup alone can
+// exceed a few seconds. A probe whose attempt hits its deadline is retried
+// with the next, longer budget; a probe that exits on its own (success or
+// failure) is never retried, so real errors surface immediately.
+var initProbeAttemptTimeouts = []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second}
 
-var initRunDoltConfigGet = func(key string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), initRunVersionTimeout)
-	defer cancel()
+// initProbeRetryBackoff is the pause between timed-out probe attempts.
+var initProbeRetryBackoff = 500 * time.Millisecond
 
-	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "dolt", "config", "--global", "--get", key)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return "", fmt.Errorf("dolt config probe timed out after %s", initRunVersionTimeout)
+// initDoltIdentityProbeTotal caps the time all Dolt identity probes of one
+// preflight (user.name and user.email) may take together, so a hung dolt
+// stops startup with an error instead of stalling it for minutes.
+var initDoltIdentityProbeTotal = 60 * time.Second
+
+// initProbeWaitDelay bounds how long a probe waits for its output pipes
+// after the process is killed, in case a grandchild still holds them.
+const initProbeWaitDelay = time.Second
+
+// initProbeNotice receives the one-line notice printed before each retry
+// of a slow probe. Overridable for tests.
+var initProbeNotice io.Writer = os.Stderr
+
+// errInitProbeTimedOut marks a probe that exhausted its attempt budgets or
+// the caller's overall deadline.
+var errInitProbeTimedOut = errors.New("probe timed out")
+
+// runInitProbeWithRetry runs attempt with each budget in
+// initProbeAttemptTimeouts, bounded by parent's deadline, until an attempt
+// completes before its own deadline. Each retry prints a one-line notice to
+// initProbeNotice. It returns the first attempt's result that did not time
+// out, or an error wrapping errInitProbeTimedOut naming the probe and the
+// time spent.
+func runInitProbeWithRetry(parent context.Context, name string, attempt func(ctx context.Context) error) error {
+	start := time.Now()
+	budgets := initProbeAttemptTimeouts
+	for i, budget := range budgets {
+		if parent.Err() != nil {
+			break
+		}
+		if i > 0 {
+			fmt.Fprintf(initProbeNotice, "%s probe slow, retrying (attempt %d, %s)\n", name, i+1, budget) //nolint:errcheck // best-effort notice
+		}
+		ctx, cancel := context.WithTimeout(parent, budget)
+		err := attempt(ctx)
+		timedOut := ctx.Err() != nil
+		cancel()
+		if !timedOut {
+			return err
+		}
+		if i < len(budgets)-1 && initProbeRetryBackoff > 0 {
+			select {
+			case <-parent.Done():
+			case <-time.After(initProbeRetryBackoff):
+			}
+		}
 	}
-	value := strings.TrimSpace(stdout.String())
+	return fmt.Errorf("%s %w after %s", name, errInitProbeTimedOut, time.Since(start).Round(time.Millisecond))
+}
+
+var initRunDoltConfigGet = func(ctx context.Context, key string) (string, error) {
+	var value, stderrText string
+	err := runInitProbeWithRetry(ctx, "dolt identity", func(ctx context.Context) error {
+		var stdout, stderr bytes.Buffer
+		cmd := exec.CommandContext(ctx, "dolt", "config", "--global", "--get", key)
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		cmd.WaitDelay = initProbeWaitDelay
+		runErr := cmd.Run()
+		value = strings.TrimSpace(stdout.String())
+		stderrText = strings.TrimSpace(stderr.String())
+		return runErr
+	})
+	if errors.Is(err, errInitProbeTimedOut) {
+		return "", err
+	}
 	if err != nil {
-		stderrText := strings.TrimSpace(stderr.String())
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && value == "" && stderrText == "" {
 			return "", errDoltConfigKeyMissing
@@ -543,13 +643,14 @@ var initRunDoltConfigGet = func(key string) (string, error) {
 // initRunVersion runs "<binary> version" and returns the first line.
 // Tests can override this.
 var initRunVersion = func(binary string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), initRunVersionTimeout)
-	defer cancel()
-
-	out, err := initRunVersionCommandContext(ctx, binary, "version").Output()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return "", fmt.Errorf("%s version probe timed out after %s", binary, initRunVersionTimeout)
-	}
+	var out []byte
+	err := runInitProbeWithRetry(context.Background(), binary+" version", func(ctx context.Context) error {
+		cmd := initRunVersionCommandContext(ctx, binary, "version")
+		cmd.WaitDelay = initProbeWaitDelay
+		var runErr error
+		out, runErr = cmd.Output()
+		return runErr
+	})
 	if err != nil {
 		return "", err
 	}
@@ -561,6 +662,10 @@ var initRunVersion = func(binary string) (string, error) {
 const (
 	doltMinVersion = doltversion.ManagedMin // sql-server features used by gc-beads-bd
 	bdMinVersion   = "1.0.4"                // BdStore shell-out interface, including bd create --id
+	// Fresh provider-owned scopes use bd's persisted ownership and transport
+	// contract, introduced with the 1.3 release candidate. Existing ready
+	// stores retain the established compatibility floor.
+	bdFreshProviderMinVersion = "1.3.0"
 )
 
 // checkHardDependencies verifies that all required binaries are available
@@ -578,6 +683,13 @@ func checkHardDependencies(cityPath string) []missingDep {
 	}
 
 	needsBd := initNeedsBdTooling(cityPath)
+	bdRequiredVersion := bdMinVersion
+	if pending, err := providerScopeOwnershipHasInitializingEntry(cityPath); err != nil || pending {
+		// A corrupt journal must not silently lower the dependency floor to
+		// legacy compatibility. Normal ownership admission will surface the
+		// journal error before lifecycle work begins.
+		bdRequiredVersion = bdFreshProviderMinVersion
+	}
 
 	deps := []dep{
 		{
@@ -601,7 +713,7 @@ func checkHardDependencies(cityPath string) []missingDep {
 		{
 			name:        "bd",
 			installHint: "https://github.com/gastownhall/beads/releases",
-			minVersion:  bdMinVersion,
+			minVersion:  bdRequiredVersion,
 			condition:   func() bool { return needsBd },
 		},
 		{
@@ -682,8 +794,10 @@ func checkDoltAuthorIdentity(cityPath string) doltAuthorIdentityStatus {
 		return doltAuthorIdentityStatus{}
 	}
 	var status doltAuthorIdentityStatus
+	ctx, cancel := context.WithTimeout(context.Background(), initDoltIdentityProbeTotal)
+	defer cancel()
 	for _, key := range []string{"user.name", "user.email"} {
-		value, err := initRunDoltConfigGet(key)
+		value, err := initRunDoltConfigGet(ctx, key)
 		value = strings.TrimSpace(value)
 		if errors.Is(err, errDoltConfigKeyMissing) && value == "" {
 			status.missingKeys = append(status.missingKeys, key)
@@ -728,11 +842,11 @@ func initNeedsLocalDoltIdentity(cityPath string) bool {
 }
 
 func initScopeNeedsLocalDoltIdentity(cityPath, scopeRoot string, cfg *config.City) bool {
-	_, usesPostgres, err := postgresMetadataForScope(cityPath, scopeRoot)
+	bound, err := scopeStoreIsExternallyBound(cityPath, scopeRoot)
 	if err != nil {
 		return true
 	}
-	if usesPostgres {
+	if bound {
 		return false
 	}
 	return !initScopeUsesExternalDolt(cityPath, scopeRoot, cfg)

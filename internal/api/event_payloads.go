@@ -9,16 +9,16 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 
-	// Blank import: pgauth's init() registers PostgresCredentialResolvedPayload
-	// in the events registry. The api package never references pgauth's types
-	// directly (the payload bytes flow through events.Event.Payload as JSON),
-	// so the import exists solely to fire the registration before the registry-
-	// coverage tests run.
-	_ "github.com/gastownhall/gascity/internal/pgauth"
-
 	// Blank import: emergency's init() registers emergency.Record as the payload
 	// type for EmergencySignaled and EmergencyAcked events.
 	_ "github.com/gastownhall/gascity/internal/emergency"
+
+	// Blank import: storebinding's init() registers one payload for the four
+	// storage.binding.* outcomes. The api package never names the type — the
+	// payload travels as JSON through events.Event.Payload — so the import
+	// exists solely to fire the registration before the registry-coverage
+	// tests run.
+	_ "github.com/gastownhall/gascity/internal/storebinding"
 )
 
 // API-layer event payload types. Every API emitter takes one of these
@@ -536,6 +536,41 @@ func SessionStrandedPayloadJSON(sessionID, sessionName, template string, workBea
 	return b
 }
 
+// SessionPoolSlotRetiredAtDrainDeadlinePayload carries the machine-readable
+// context for a session.pool_slot_retired_at_drain_deadline event: a
+// pool-managed seat that entered drain, never finalized its drain-ack, and was
+// force-retired once the drain outlived the retire deadline.
+//
+// DrainAt and DrainAgeSeconds are the load-bearing fields. The bound retires
+// the symptom, not the cause, so the age distribution across emissions is how
+// operators tell "a handful of seats occasionally miss an ack" from "the
+// drain-ack path is failing wholesale and this bound is absorbing it".
+type SessionPoolSlotRetiredAtDrainDeadlinePayload struct {
+	SessionID       string `json:"session_id" doc:"Canonical session bead ID for the retired pool seat."`
+	SessionName     string `json:"session_name,omitempty" doc:"Runtime session name the seat held. This is the name the pool could not route around until the retirement freed it."`
+	Template        string `json:"template,omitempty" doc:"Pool template name when known at the emission site."`
+	DrainAt         string `json:"drain_at,omitempty" doc:"RFC3339 instant the seat entered drain (the drain_at metadata). Empty only if the marker was unreadable, in which case no retirement occurs."`
+	DrainAgeSeconds int64  `json:"drain_age_seconds" doc:"Whole seconds the seat spent in drain before the deadline retired it. Always at least the retire deadline."`
+}
+
+// IsEventPayload marks SessionPoolSlotRetiredAtDrainDeadlinePayload as an
+// events.Payload variant.
+func (SessionPoolSlotRetiredAtDrainDeadlinePayload) IsEventPayload() {}
+
+// SessionPoolSlotRetiredAtDrainDeadlinePayloadJSON builds the JSON wire form
+// for attachment to an events.Event.Payload field. SessionName, Template, and
+// DrainAt are emitted only when non-empty.
+func SessionPoolSlotRetiredAtDrainDeadlinePayloadJSON(sessionID, sessionName, template, drainAt string, drainAge time.Duration) json.RawMessage {
+	b, _ := json.Marshal(SessionPoolSlotRetiredAtDrainDeadlinePayload{
+		SessionID:       sessionID,
+		SessionName:     sessionName,
+		Template:        template,
+		DrainAt:         drainAt,
+		DrainAgeSeconds: int64(drainAge / time.Second),
+	})
+	return b
+}
+
 // BeadDeadAssigneeReopenedPayload is the typed payload for
 // bead.dead_assignee_reopened events. Emitted when the reconciler reopens a
 // routed work bead whose assignee no longer maps to any open session bead —
@@ -599,6 +634,34 @@ func SessionUnknownStatePayloadJSON(sessionID, sessionName, state string, firstS
 	return b
 }
 
+// SessionWakeRefusedPayload is the typed payload for session.wake_refused: a
+// durable explicit wake request refused before the session reached a live
+// runtime (held, quarantined, or asleep past its idle-sleep window).
+type SessionWakeRefusedPayload struct {
+	SessionID   string `json:"session_id" doc:"Session bead ID."`
+	SessionName string `json:"session_name,omitempty" doc:"Session display name, if known."`
+	Template    string `json:"template,omitempty" doc:"Resolved session template."`
+	Reason      string `json:"reason" doc:"Refusal reason: held, quarantined, or idle-sleep."`
+	WakeRequest string `json:"wake_request" doc:"The wake_request metadata value that triggered this check (explicit)."`
+	Attempts    int    `json:"attempts" doc:"wake_attempts recorded after this refusal."`
+}
+
+// IsEventPayload marks SessionWakeRefusedPayload as an events.Payload variant.
+func (SessionWakeRefusedPayload) IsEventPayload() {}
+
+// SessionWakeRefusedPayloadJSON builds the session.wake_refused payload.
+func SessionWakeRefusedPayloadJSON(sessionID, sessionName, template, reason, wakeRequest string, attempts int) json.RawMessage {
+	b, _ := json.Marshal(SessionWakeRefusedPayload{
+		SessionID:   sessionID,
+		SessionName: sessionName,
+		Template:    template,
+		Reason:      reason,
+		WakeRequest: wakeRequest,
+		Attempts:    attempts,
+	})
+	return b
+}
+
 func init() {
 	// mail.* — all seven types share one payload shape.
 	events.RegisterPayload(events.MailSent, MailEventPayload{})
@@ -633,10 +696,14 @@ func init() {
 	events.RegisterPayload(events.SessionSuspended, events.NoPayload{})
 	events.RegisterPayload(events.SessionUpdated, events.NoPayload{})
 	events.RegisterPayload(events.SessionDrainAckedWithAssignedWork, SessionDrainAckedWithAssignedWorkPayload{})
+	events.RegisterPayload(events.SessionDrainStopEscalated, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionStranded, SessionStrandedPayload{})
+	events.RegisterPayload(events.SessionPoolSlotRetiredAtDrainDeadline, SessionPoolSlotRetiredAtDrainDeadlinePayload{})
 	events.RegisterPayload(events.SessionUnknownState, SessionUnknownStatePayload{})
+	events.RegisterPayload(events.SessionWakeRefused, SessionWakeRefusedPayload{})
 	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})
 	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
+	events.RegisterPayload(events.SessionDrainFenceUnavailable, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionColdStartTimeout, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyClosed, events.NoPayload{})

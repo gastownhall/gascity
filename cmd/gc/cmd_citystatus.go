@@ -86,8 +86,16 @@ type StatusRigJSON struct {
 
 // StatusSummaryJSON is the agent count summary in JSON output.
 type StatusSummaryJSON struct {
-	TotalAgents       int          `json:"total_agents"`
-	RunningAgents     int          `json:"running_agents"`
+	TotalAgents   int `json:"total_agents"`
+	RunningAgents int `json:"running_agents"`
+	// UnknownAgents is how many of TotalAgents the runtime probe never
+	// answered for. It is zero unless the status is partial. RunningAgents
+	// stays a count of agents observed running, so during partial status
+	// TotalAgents-RunningAgents is not a count of stopped agents and
+	// UnknownAgents is the part of that difference nothing was learned
+	// about. Without it a consumer reads running_agents=0 out of a probe
+	// that reached nobody and cannot tell it from a genuinely idle city.
+	UnknownAgents     int          `json:"unknown_agents,omitempty"`
 	ActiveSessions    int          `json:"active_sessions,omitempty"`
 	SuspendedSessions int          `json:"suspended_sessions,omitempty"`
 	StoreHealth       *StoreHealth `json:"store_health,omitempty"`
@@ -96,14 +104,19 @@ type StatusSummaryJSON struct {
 // StoreHealth is the JSON shape of the Dolt bead store health block
 // surfaced by gc status. See ADR 0002 / bead ga-d5y design D9.
 type StoreHealth struct {
-	Path         string  `json:"path"`
-	SizeBytes    int64   `json:"size_bytes"`
-	LiveRows     int     `json:"live_rows"`
-	RatioMB      float64 `json:"ratio_mb_per_row"`
-	Warning      bool    `json:"warning"`
-	ThresholdMB  float64 `json:"threshold_mb_per_row"`
-	LastGCAt     string  `json:"last_gc_at,omitempty"`
-	LastGCStatus string  `json:"last_gc_status,omitempty"`
+	Path      string `json:"path"`
+	SizeBytes int64  `json:"size_bytes"`
+	LiveRows  int    `json:"live_rows"`
+	// LiveRowsUnknown is true when the row count failed or timed out.
+	// LiveRows, RatioMB, and Warning carry no meaning in that case — a
+	// consumer MUST check this field before trusting a "0" LiveRows or a
+	// "false" Warning as a real measurement.
+	LiveRowsUnknown bool    `json:"live_rows_unknown,omitempty"`
+	RatioMB         float64 `json:"ratio_mb_per_row"`
+	Warning         bool    `json:"warning"`
+	ThresholdMB     float64 `json:"threshold_mb_per_row"`
+	LastGCAt        string  `json:"last_gc_at,omitempty"`
+	LastGCStatus    string  `json:"last_gc_status,omitempty"`
 }
 
 var (
@@ -160,6 +173,8 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 
+	warnSupervisorBinaryMismatch("gc status", stderr)
+
 	configStderr := stderr
 	if jsonOutput {
 		configStderr = io.Discard
@@ -173,11 +188,46 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 
+	// The local snapshot opens the bead/Dolt store. Keep it behind the API
+	// fallback: the supervisor serves a cached status view, so touching the
+	// contended local store first defeats the bounded control-plane route and
+	// can leave gc status with no output until an external timeout kills it.
+	localFallback := func() int {
+		return cmdCityStatusLocalFallback(cfg, cityPath, jsonOutput, stdout, stderr)
+	}
+	c, reason := cityStatusAPIClient(cityPath)
+	if c == nil {
+		logRoute(stderr, "status", "fallback", reason)
+		return localFallback()
+	}
+
+	// API rendering only needs the runtime provider for drain-state display;
+	// a nil session snapshot deliberately avoids a bead-store read here. ACP
+	// route registration then uses deterministic session names, so ACP agents
+	// with custom runtime session names may not show "(draining)" in
+	// API-rendered text.
+	sp, err := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, nil)
+	if err != nil {
+		message := fmt.Sprintf("gc status: %v", err)
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "session_provider_failed", message, 1)
+		}
+		fmt.Fprintln(stderr, message) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	dops := newDrainOps(sp)
+	return routeCityStatus(cityPath, dops, c, reason, jsonOutput, stdout, stderr, localFallback)
+}
+
+// cmdCityStatusLocalFallback builds the direct-store status view only when no
+// supervisor API response is available. Its provider receives the loaded
+// session snapshot because ACP transport routing depends on that local state.
+func cmdCityStatusLocalFallback(cfg *config.City, cityPath string, jsonOutput bool, stdout, stderr io.Writer) int {
 	storeStderr := stderr
 	if jsonOutput {
 		storeStderr = io.Discard
 	}
-	store, _, code := openCityStatusStore(cityPath, storeStderr)
+	store, diagnostic, code := openCityStatusStore(cityPath, storeStderr)
 	if code != 0 {
 		if jsonOutput {
 			return writeJSONError(stdout, stderr, "store_open_failed", "gc status: opening bead store failed", code)
@@ -195,33 +245,39 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 	dops := newDrainOps(sp)
-	c, reason := cityStatusAPIClient(cityPath)
-	return routeCityStatus(cityPath, cfg, sp, dops, c, reason, jsonOutput, stdout, stderr)
+	if jsonOutput {
+		return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
+	}
+	return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
 }
 
 // cityStatusAPIClient returns (client, "") when the API path is available,
 // or (nil, reason) when the caller should fall back. Indirected through a
 // var so tests inject a client pointed at httptest.Server or force a
 // specific fallback reason without spinning up a real controller.
-var cityStatusAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	return nil, apiClientFallbackReason(cityPath)
-}
+//
+// Uses the shared supervisorFallthroughAPIClient helper (gascity ga-tp7,
+// ra-r9hm6v) rather than plain apiClient: a supervisor-managed city with no
+// standalone [api] port in city.toml — the common case — otherwise falls
+// straight to nil here even though the supervisor is reachable, and
+// `gc status`'s local fallback re-opens the full local bead/dolt store and
+// rescans event archives to rebuild store health, which measured ~9.5s of
+// CPU on a 26-agent/1.2GB city versus ~0.35s for the supervisor's cached
+// response. Status has a local fallback (unlike maintenance), so this
+// change only affects the ROUTE picked, not the correctness of either path.
+var cityStatusAPIClient = supervisorFallthroughAPIClient
 
 // routeCityStatus dispatches `gc status` to the supervisor API when a
 // controller is up; otherwise falls back to the local snapshot builder.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeCityStatus(
 	cityPath string,
-	cfg *config.City,
-	sp runtime.Provider,
 	dops drainOps,
 	c *api.Client,
 	nilReason string,
 	jsonOutput bool,
 	stdout, stderr io.Writer,
+	fallback func() int,
 ) int {
 	var cr api.CachedRead[api.StatusView]
 	return routeRead(c, "status", nilReason, stderr,
@@ -231,17 +287,7 @@ func routeCityStatus(
 			return err
 		},
 		func() int { return renderCityStatusFromAPI(cityPath, cr, dops, jsonOutput, stdout) },
-		func() int {
-			store, diagnostic, code := openCityStatusStore(cityPath, stderr)
-			if code != 0 {
-				return code
-			}
-			statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
-			if jsonOutput {
-				return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
-			}
-			return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
-		},
+		fallback,
 	)
 }
 
@@ -321,14 +367,22 @@ func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapsho
 	}
 	if v.StoreHealth != nil {
 		snapshot.Summary.StoreHealth = &StoreHealth{
-			Path:         v.StoreHealth.Path,
-			SizeBytes:    v.StoreHealth.SizeBytes,
-			LiveRows:     v.StoreHealth.LiveRows,
-			RatioMB:      v.StoreHealth.RatioMB,
-			Warning:      v.StoreHealth.Warning,
-			ThresholdMB:  v.StoreHealth.ThresholdMB,
-			LastGCAt:     v.StoreHealth.LastGCAt,
-			LastGCStatus: v.StoreHealth.LastGCStatus,
+			Path:      v.StoreHealth.Path,
+			SizeBytes: v.StoreHealth.SizeBytes,
+			LiveRows:  v.StoreHealth.LiveRows,
+			// Inverted from the view's positive flag, never inferred from
+			// LiveRows == 0: that would report a genuinely empty store as
+			// unmeasured and reintroduce the conflation the flag removes.
+			// Before the view carried RowsMeasured this field had no source
+			// here at all, so it zero-filled to false and told the renderer
+			// every API-path count was real — including the ones that were
+			// never taken.
+			LiveRowsUnknown: !v.StoreHealth.RowsMeasured,
+			RatioMB:         v.StoreHealth.RatioMB,
+			Warning:         v.StoreHealth.Warning,
+			ThresholdMB:     v.StoreHealth.ThresholdMB,
+			LastGCAt:        v.StoreHealth.LastGCAt,
+			LastGCStatus:    v.StoreHealth.LastGCStatus,
 		}
 	}
 	return snapshot
@@ -621,11 +675,11 @@ func doCityStatusJSONWithDiagnosticAndSnapshot(
 
 func controllerStatusForCity(cityPath string) ControllerJSON {
 	_, registered, err := registeredCityEntry(cityPath)
-	supervisorWasAlive := false
+	observedSupervisorPID := 0
 	if err == nil && registered {
 		ctrl := ControllerJSON{Mode: "supervisor"}
 		if pid := supervisorAliveHook(); pid != 0 {
-			supervisorWasAlive = true
+			observedSupervisorPID = pid
 			ctrl.PID = pid
 			if running, status, known := supervisorCityRunningHook(cityPath); known {
 				ctrl.Running = running
@@ -638,13 +692,19 @@ func controllerStatusForCity(cityPath string) ControllerJSON {
 			}
 		}
 	}
-	if supervisorWasAlive {
-		if pid := controllerAliveWithin(cityPath, controllerStatusStandaloneFallbackTimeout); pid != 0 {
-			return ControllerJSON{Running: true, PID: pid, Mode: "supervisor"}
+	if observedSupervisorPID != 0 {
+		if identity := controllerIdentityWithin(cityPath, controllerStatusStandaloneFallbackTimeout); identity.PID != 0 {
+			mode := identity.HostingMode
+			if !mode.known() && identity.PID == observedSupervisorPID {
+				// PID equality ties this legacy numeric-only controller response
+				// to the supervisor observed immediately before the retry.
+				mode = controllerHostingSupervisor
+			}
+			return ControllerJSON{Running: true, PID: identity.PID, Mode: string(mode)}
 		}
 	}
-	if pid := controllerAlive(cityPath); pid != 0 {
-		return ControllerJSON{Running: true, PID: pid, Mode: "standalone"}
+	if identity := probeControllerIdentity(cityPath); identity.PID != 0 {
+		return ControllerJSON{Running: true, PID: identity.PID, Mode: string(identity.HostingMode)}
 	}
 	if err == nil && registered {
 		return ControllerJSON{Mode: "supervisor"}
@@ -652,17 +712,17 @@ func controllerStatusForCity(cityPath string) ControllerJSON {
 	return ControllerJSON{}
 }
 
-func controllerAliveWithin(cityPath string, timeout time.Duration) int {
+func controllerIdentityWithin(cityPath string, timeout time.Duration) controllerIdentityReply {
 	if timeout <= 0 {
-		return controllerAlive(cityPath)
+		return probeControllerIdentity(cityPath)
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		if pid := controllerAlive(cityPath); pid != 0 {
-			return pid
+		if identity := probeControllerIdentity(cityPath); identity.PID != 0 {
+			return identity
 		}
 		if time.Now().After(deadline) {
-			return 0
+			return controllerIdentityReply{}
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
@@ -704,6 +764,9 @@ func controllerStatusLine(ctrl ControllerJSON) string {
 			return fmt.Sprintf("standalone-managed (PID %d)", ctrl.PID)
 		}
 	}
+	if ctrl.Running {
+		return fmt.Sprintf("controller running (PID %d, hosting mode unknown)", ctrl.PID)
+	}
 	return "stopped"
 }
 
@@ -742,6 +805,16 @@ func controllerStatusGuidance(ctrl ControllerJSON, cityPath string) []string {
 			return append(lines, "Next: gc supervisor logs to see the init failure")
 		}
 		return append(lines, "Next: gc supervisor logs to inspect startup progress")
+	}
+	if ctrl.Running {
+		authority := "Authority: controller hosting mode unknown"
+		if ctrl.PID != 0 {
+			authority = fmt.Sprintf("Authority: controller PID %d; hosting mode unknown", ctrl.PID)
+		}
+		return []string{
+			authority,
+			"Next: upgrade or restart the running controller to restore authoritative hosting information",
+		}
 	}
 	return nil
 }

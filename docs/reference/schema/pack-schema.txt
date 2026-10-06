@@ -23,7 +23,7 @@
         },
         "tmux_alias": {
           "type": "string",
-          "description": "TmuxAlias overrides the tmux session_name for pool and factory-created\nmanual sessions of this agent. When unset, sessions fall back to the\nuniversal derivation (\"s-\u003cbeadID\u003e\" for ad-hoc sessions,\n\"\u003cbasename\u003e-\u003cbeadID\u003e\" for pool sessions). When set, it is expanded as a\nGo text/template using the same PathContext fields as work_dir /\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName),\nsanitized for tmux, and validated as an explicit session name. For pool\nsessions, a live-name collision appends the bead ID as a deterministic\nsuffix. For manual `gc session new` sessions, tmux_alias becomes the\nexplicit session_name and takes precedence over --alias, which remains the\ncommand/mail alias; duplicate explicit names fail closed. Configured named\nsessions keep their named-session runtime name instead of using\ntmux_alias. When no --alias is supplied, work_dir templates that use\n{{.Agent}} see the resolved tmux_alias as the concrete session identity."
+          "description": "TmuxAlias overrides the tmux session_name for pool and factory-created\nmanual sessions of this agent. When unset, sessions fall back to the\nuniversal derivation (\"s-\u003cbeadID\u003e\" for ad-hoc sessions,\n\"\u003cbasename\u003e-\u003cbeadID\u003e\" for pool sessions). When set, it is expanded as a\nGo text/template using the same PathContext fields as work_dir /\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,\nDefaultBranch), sanitized for tmux, and validated as an explicit session name. For pool\nsessions, a live-name collision appends the bead ID as a deterministic\nsuffix. For manual `gc session new` sessions, tmux_alias becomes the\nexplicit session_name and takes precedence over --alias, which remains the\ncommand/mail alias; duplicate explicit names fail closed. Configured named\nsessions keep their named-session runtime name instead of using\ntmux_alias. When no --alias is supplied, work_dir templates that use\n{{.Agent}} see the resolved tmux_alias as the concrete session identity."
         },
         "scope": {
           "type": "string",
@@ -50,7 +50,7 @@
         },
         "nudge": {
           "type": "string",
-          "description": "Nudge is text typed into the agent's tmux session after startup.\nUsed for CLI agents that don't accept command-line prompts."
+          "description": "Nudge is text typed into the agent's session after startup.\nUsed for CLI agents that don't accept command-line prompts. For a known\npool session whose trigger remains unclaimed after the 90-second recovery\ngrace period, an empty or whitespace-only Nudge does not opt out: it sends\n\"Run gc hook --claim --drain-ack --json now; if it returns work, execute\nit immediately.\" This fallback applies only to the initial stalled-claim\nrecovery; continuation-claim recovery remains configured-only. Unknown\ntemplates receive no fallback."
         },
         "session": {
           "type": "string",
@@ -62,6 +62,10 @@
         "provider": {
           "type": "string",
           "description": "Provider names the provider preset to use for this agent."
+        },
+        "context_advisory": {
+          "$ref": "#/$defs/ContextAdvisory",
+          "description": "ContextAdvisory overrides context-pressure guidance for this agent."
         },
         "upstream": {
           "type": "string",
@@ -143,7 +147,7 @@
         },
         "scale_check": {
           "type": "string",
-          "description": "ScaleCheck is a shell command template whose output reports new\nunassigned session demand. In bead-backed reconciliation this is\nadditive: assigned work is resumed separately, and ScaleCheck reports\nonly how many new generic sessions to start, still bounded by all cap\nlevels. Legacy no-store evaluation continues to treat the output as\nthe desired session count. If it contains Go template placeholders, gc\nexpands them using the same PathContext fields as work_dir and\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)\nbefore running the command."
+          "description": "ScaleCheck is a shell command template whose output reports new\nunassigned session demand. In bead-backed reconciliation this is\nadditive: assigned work is resumed separately, and ScaleCheck reports\nonly how many new generic sessions to start, still bounded by all cap\nlevels. Legacy no-store evaluation continues to treat the output as\nthe desired session count. If it contains Go template placeholders, gc\nexpands them using the same PathContext fields as work_dir and\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,\nDefaultBranch) before running the command."
         },
         "drain_timeout": {
           "type": "string",
@@ -152,11 +156,11 @@
         },
         "on_boot": {
           "type": "string",
-          "description": "OnBoot is a shell command template run once at controller startup for\nthis agent. If it contains Go template placeholders, gc expands them\nusing the same PathContext fields as work_dir and session_setup\n(Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running\nthe command."
+          "description": "OnBoot is a shell command template run once at controller startup for\nthis agent. If it contains Go template placeholders, gc expands them\nusing the same PathContext fields as work_dir and session_setup\n(Agent, AgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch)\nbefore running the command."
         },
         "on_death": {
           "type": "string",
-          "description": "OnDeath is a shell command template run when a session dies unexpectedly.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName) before running the command."
+          "description": "OnDeath is a shell command template run when a session dies unexpectedly.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName, DefaultBranch) before running the\ncommand."
         },
         "namepool": {
           "type": "string",
@@ -164,11 +168,11 @@
         },
         "work_query": {
           "type": "string",
-          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName) before probe, hook, and\nprompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems."
+          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before\nprobe, hook, and prompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems."
         },
         "sling_query": {
           "type": "string",
-          "description": "SlingQuery is the command template to route a bead to this session config.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName) before replacing {} with the bead\nID. Used by gc sling to make a bead visible to the target's work_query.\nThe placeholder {} is replaced with the bead ID at runtime.\nDefault for all agents:\n\"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nRouting is metadata-based; sling stamps the target template and the\nreconciler/scale_check paths decide when sessions are created.\nCustom sling_query and work_query can be overridden independently."
+          "description": "SlingQuery is the command template to route a bead to this session config.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName, DefaultBranch) before replacing {}\nwith the bead ID. Used by gc sling to make a bead visible to the target's work_query.\nThe placeholder {} is replaced with the bead ID at runtime.\nDefault for all agents:\n\"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nRouting is metadata-based; sling stamps the target template and the\nreconciler/scale_check paths decide when sessions are created.\nCustom sling_query and work_query can be overridden independently."
         },
         "idle_timeout": {
           "type": "string",
@@ -182,9 +186,17 @@
           "type": "string",
           "description": "MaxSessionAgeJitter bounds random jitter added to MaxSessionAge on a\nper-session basis so a fleet of identically-configured agents doesn't\nsynchronize restarts. Duration string (e.g., \"15m\"). Empty or 0\ndisables jitter (every session restarts at exactly MaxSessionAge).\nIgnored when MaxSessionAge is unset."
         },
+        "assigned_work_defer_limit": {
+          "type": "integer",
+          "description": "AssignedWorkDeferLimit bounds how many consecutive reconciler ticks the\nidle-timeout ladder may defer on the same assigned-work bead\n(DecideIdleTimeout's AssignedWorkHas rung) before the reconciler\noverrides the defer and forces a stop via DecideAssignedWorkExhausted.\nNil means use the built-in default. Without this backstop a session\nanchored to a bead that never clears assigned-work (e.g. a bead stuck\nopen due to an upstream status-mapping bug) would defer indefinitely,\nreproducing the unbounded wake/idle-kill treadmill ga-3ox7rk fixed at\nthe single-tick level. The counter resets whenever the anchor bead\nchanges or the session is not idle-kill-eligible; see\nsessionHasAwakeAssignedWorkForReachableStore's caller in\nsession_reconciler.go."
+        },
         "sleep_after_idle": {
           "type": "string",
           "description": "SleepAfterIdle overrides idle sleep policy for this agent. Accepts a\nduration string (e.g., \"30s\") or \"off\"."
+        },
+        "auto_reclaim_stale_claims": {
+          "type": "boolean",
+          "description": "AutoReclaimStaleClaims opts this agent into gc hook --claim attempting\na scoped stale-lease reclaim (via `bd reclaim --id`) when a\nroute-matched candidate's only claim blocker is an existing assignee.\nOff by default; staleness is decided entirely by bd's own lease TTL."
         },
         "install_agent_hooks": {
           "items": {
@@ -216,7 +228,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "SessionSetup is a list of shell commands run after session creation.\nEach command is a template string supporting placeholders:\n{{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}},\n{{.CityRoot}}, {{.CityName}}, {{.WorkDir}}.\nCommands run in gc's process (not inside the agent session) via sh -c.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
+          "description": "SessionSetup is a list of shell commands run after session creation.\nEach command is a template string supporting placeholders:\n{{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}},\n{{.CityRoot}}, {{.CityName}}, {{.WorkDir}}, {{.DefaultBranch}}.\n{{.DefaultBranch}} is the rig's configured default_branch (empty for\ncity-scoped agents and rigs that record none); it is never probed from\ngit, so scripts should keep their own origin/HEAD fallback.\nCommands run in gc's process (not inside the agent session) via sh -c.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
         },
         "session_setup_script": {
           "type": "string",
@@ -296,6 +308,10 @@
     },
     "AgentDefaults": {
       "properties": {
+        "context_advisory": {
+          "$ref": "#/$defs/ContextAdvisory",
+          "description": "ContextAdvisory is the city-wide default context-pressure guidance."
+        },
         "provider": {
           "type": "string",
           "description": "Provider is the default provider name for agents that do not set their\nown provider. It also counts as a configured provider for implicit agent\ninjection."
@@ -364,7 +380,11 @@
       "properties": {
         "dir": {
           "type": "string",
-          "description": "Dir is the targeting key (required with Name). Identifies the agent's\nworking directory scope. Empty for city-scoped agents."
+          "description": "Dir is the legacy targeting key for rig identity. Empty means\ncity-scoped. New configs should set Rig instead; Dir remains the\ncanonical resolved identity that both keys feed into."
+        },
+        "rig": {
+          "type": "string",
+          "description": "Rig is new targeting key for rig identity (replaces Dir).\n\"*\" matches all rigs + city. Empty means city-scoped unless Dir is set."
         },
         "name": {
           "type": "string",
@@ -423,6 +443,10 @@
           "type": "string",
           "description": "Provider overrides the provider name."
         },
+        "context_advisory": {
+          "$ref": "#/$defs/ContextAdvisory",
+          "description": "ContextAdvisory overrides context-pressure guidance for this agent."
+        },
         "upstream": {
           "type": "string",
           "description": "Upstream overrides the model-serving endpoint selection (Phase C)."
@@ -461,9 +485,17 @@
           "type": "string",
           "description": "MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., \"15m\")."
         },
+        "assigned_work_defer_limit": {
+          "type": "integer",
+          "description": "AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that\nfield for semantics)."
+        },
         "sleep_after_idle": {
           "type": "string",
           "description": "SleepAfterIdle overrides idle sleep policy for this agent. Accepts a\nduration string or \"off\"."
+        },
+        "auto_reclaim_stale_claims": {
+          "type": "boolean",
+          "description": "AutoReclaimStaleClaims overrides Agent.AutoReclaimStaleClaims (see that\nfield for semantics)."
         },
         "install_agent_hooks": {
           "items": {
@@ -637,10 +669,44 @@
       "additionalProperties": false,
       "type": "object",
       "required": [
-        "dir",
         "name"
       ],
-      "description": "AgentPatch modifies an existing agent identified by (Dir, Name)."
+      "description": "AgentPatch modifies existing agents identified by rig scope and Name."
+    },
+    "ContextAdvisory": {
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "window_tokens": {
+          "type": "integer"
+        },
+        "tiers": {
+          "items": {
+            "$ref": "#/$defs/ContextAdvisoryTier"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ContextAdvisory configures context-pressure guidance."
+    },
+    "ContextAdvisoryTier": {
+      "properties": {
+        "threshold": {
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ContextAdvisoryTier is one threshold and message in a context-pressure advisory."
     },
     "Import": {
       "properties": {
@@ -1017,6 +1083,13 @@
         "protocol": {
           "type": "integer",
           "description": "Protocol is the RPP version the executable speaks. Version 0 is\nthe only version today; the declaration exists so future protocol\nbumps fail at composition instead of at session start."
+        },
+        "prompt_delivery": {
+          "type": "string",
+          "enum": [
+            "nudge-fallback"
+          ],
+          "description": "PromptDelivery opts this runtime into a non-default oversized-prompt\ndelivery strategy (cmd/gc promptDeliverySupportFor). Unset (the zero\nvalue) keeps today's behavior: an oversized prompt hard-fails for any\nruntime this package cannot positively classify. The only other\naccepted value is \"nudge-fallback\", asserting the runtime has a\nworking post-start Nudge path an oversized prompt can reroute\nthrough. This is a pack-composition-time assertion, not something gc\nverifies against the runtime executable — see\ndocs/reference/specs/pack-spec.md sec 1.2.8."
         }
       },
       "additionalProperties": false,
@@ -1083,6 +1156,13 @@
           },
           "type": "array",
           "description": "Choices are the allowed values; selecting one injects its FlagArgs into the\nagent command line (how the Model axis renders to a harness CLI flag)."
+        },
+        "flag_template": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "FlagTemplate makes this option OPEN: a value that is not one of Choices\nis still honored by substituting it for OptionValuePlaceholder in this\ntemplate. Options with no template are CLOSED — an undeclared value\ncannot be turned into flags at all.\n\nModel ids are an open, fast-moving set: every provider ships new ones\nbetween gc releases. Modeling them as a closed enum meant a pin the\ncatalog had not caught up to produced no FlagArgs and the launch path\nsilently omitted the flag, unpinning the agent onto whatever the CLI\ndefaulted to (ra-jbbv0 for claude-opus-5, ga-fyh for grok-4.6).\nChoices stay as the curated suggestion list for pickers; the template\nis what guarantees an explicit pin is never discarded.\n\njson:\"-\" for the same reason as OptionChoice.FlagArgs: CLI flag shapes\nare server-side only and must not reach the public API DTO."
         },
         "omit": {
           "type": "boolean",

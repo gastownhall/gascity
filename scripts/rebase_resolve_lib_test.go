@@ -4,8 +4,23 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"testing"
 )
+
+func TestRebaseResolveLibUsesBash3Syntax(t *testing.T) {
+	root := repoRoot(t)
+	path := filepath.Join(root, "scripts", "rebase-resolve-lib.sh")
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read rebase-resolve-lib.sh: %v", err)
+	}
+
+	bash4LowercaseExpansion := regexp.MustCompile(`\$\{[^}\n]*,,[^}\n]*\}`)
+	if match := bash4LowercaseExpansion.Find(contents); match != nil {
+		t.Fatalf("rebase-resolve-lib.sh must run under macOS Bash 3; found Bash 4 lowercase expansion %q", match)
+	}
+}
 
 // TestRebaseResolveLib runs the shell self-test for
 // scripts/rebase-resolve-lib.sh, the deployer's bounded self-rebase

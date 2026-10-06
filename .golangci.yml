@@ -1,5 +1,14 @@
 version: "2"
 
+run:
+  # Every golangci-lint on a host locks $TMPDIR/golangci-lint.lock and, by
+  # default, gives up after 5s ("parallel golangci-lint is running"). Deploy
+  # gates, maintainer-review gate checks and pre-commit hooks lint concurrently
+  # on shared hosts, so the later run failed before analysis. The lock guards no
+  # shared state: the result cache is safe for concurrent multi-process use.
+  allow-parallel-runners: true
+  modules-download-mode: readonly
+
 severity:
   default: error
 

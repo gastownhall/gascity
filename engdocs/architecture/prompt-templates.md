@@ -181,6 +181,44 @@ append_fragments = ["safety"]
 | `RoutedPoolQuery` | Unassigned routed pool-work command | `bd ready --metadata-field gc.routed_to=... --unassigned` |
 | `SlingQuery` | Work routing command | `gc sling ...` |
 
+### Claim Identity Convention
+
+The `AssignedInProgressQuery` (Tier 1) and `RoutedPoolQuery` (Tier 3) rows
+above are rendered once, at session start, from Go `text/template`
+variables. But the *literal* prompt text written into `prompts/*.md.tmpl`
+files also references two OS environment variables directly — `$GC_TEMPLATE`
+and `$GC_ALIAS` — which the agent's own shell commands expand at run time,
+not at template-render time. These are a separate injection mechanism from
+the table above, and the two env vars are not interchangeable:
+
+- `$GC_TEMPLATE` is the qualified template identity, shared by *every* live
+  session of that template (the named-session holder and every pool slot
+  alike).
+- `$GC_ALIAS` is the current session's own concrete identity — the bare
+  qualified name for a named holder or canonical singleton slot, or the
+  suffixed `-N` identity (e.g. `rig/builder-1`) for a pool slot.
+
+Convention for which one to use in a prompt template's startup section:
+
+| Line | Token | Why |
+|---|---|---|
+| Tier 1 (crash-recovery query) | `${GC_ALIAS:-$GC_TEMPLATE}` | Ownership read — must resolve to *this session's own* prior claim, not a sibling's. |
+| Claim (`bd update <id> --claim --assignee=...`) | `${GC_ALIAS:-$GC_TEMPLATE}` | Ownership write — must stamp *this session's* concrete identity. |
+| Tier 2 (pre-assigned ready-work query) | bare `$GC_TEMPLATE` | Shared role discovery — pre-assigned work is deliberately assigned to the bare template. |
+| Tier 3 (routed-pool queue query) | bare `$GC_TEMPLATE` | Shared queue key — `gc.routed_to` is a role-level routing target, not a per-session claim. |
+
+Getting this wrong is not cosmetic: a template that is both a
+`[[named_session]]` and a multi-slot pool has more than one live identity
+sharing a single template string. If Tier 1 or the claim line uses the bare
+template, two sessions can independently "recover" or adopt the same
+in-progress bead and both complete it — duplicate commits, duplicate PRs,
+duplicate closes. See `engdocs/design/session-model-unification.md` (Runtime
+Environment) for where `GC_ALIAS`/`GC_TEMPLATE` are defined, and the
+`ga-i1d0tr` architecture decision for the full incident writeup. The
+`${GC_ALIAS:-$GC_TEMPLATE}` fallback form degrades safely to today's
+behavior for sessions where `GC_ALIAS` is unset (pure singleton/named
+templates, where the two values are identical anyway).
+
 ### Template Functions
 
 | Function | Usage | Returns |

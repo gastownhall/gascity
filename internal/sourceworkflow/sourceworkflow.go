@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // ConflictError is returned when a graph workflow launch is blocked by one
@@ -100,6 +101,70 @@ func NormalizeSourceStoreRef(sourceStoreRef string) string {
 	return strings.TrimSpace(sourceStoreRef)
 }
 
+// CanonicalSourceStoreRef returns the comparison form of a store ref inside
+// the city named cityName.
+//
+// A bare "city:" names this city's store. Callers that build the ref from
+// city.toml alone stamp and select that form when the city has no
+// [workspace] name, while gc renders the same store as "city:<name>" from the
+// effective city name (the city directory's basename when unnamed). Both
+// spellings mean the same store, so the bare form canonicalizes to
+// "city:<cityName>", falling back to "city:city" the same way gc renders an
+// unnamed city store. A ref naming another city keeps its name and stays
+// distinct. The name part of city and rig refs is trimmed, matching how the
+// store-ref resolver reads it. A bare "rig:" has no store to name and stays
+// as it is; other schemes are only whitespace-normalized.
+func CanonicalSourceStoreRef(sourceStoreRef, cityName string) string {
+	ref := NormalizeSourceStoreRef(sourceStoreRef)
+	scheme, name, ok := strings.Cut(ref, ":")
+	if !ok {
+		return ref
+	}
+	name = strings.TrimSpace(name)
+	switch scheme {
+	case "city":
+		if name == "" {
+			name = strings.TrimSpace(cityName)
+		}
+		if name == "" {
+			name = "city"
+		}
+		return "city:" + name
+	case "rig":
+		return "rig:" + name
+	default:
+		return ref
+	}
+}
+
+// SameSourceStoreRef reports whether two store refs name the same store inside
+// the city named cityName. See CanonicalSourceStoreRef. An empty ref names no
+// store and never matches.
+func SameSourceStoreRef(a, b, cityName string) bool {
+	canonical := CanonicalSourceStoreRef(a, cityName)
+	return canonical != "" && canonical == CanonicalSourceStoreRef(b, cityName)
+}
+
+// GraphStoreRefPrefix tags a city's relocated graph binding in a store ref, the
+// way "city" and "rig" tag a scope root. It is not a scope kind — graph roots
+// carry scope metadata of their own — only a store-identity tag, so a singleton
+// scan that consults both the binding and the city work store never conflates
+// them. internal/api mints and round-trips the same spelling for the workflow
+// snapshot scan (workflowGraphStoreRefPrefix), and this is that constant: one
+// spelling, or the store_ref a conflict reports cannot be parsed back.
+const GraphStoreRefPrefix = "graph"
+
+// GraphStoreRef returns the source-workflow store ref for a city's relocated
+// graph binding. An unnamed city falls back to "graph:city" so the ref is never
+// the bare prefix, which would parse as a scope-less sentinel.
+func GraphStoreRef(cityName string) string {
+	cityName = strings.TrimSpace(cityName)
+	if cityName == "" {
+		cityName = "city"
+	}
+	return GraphStoreRefPrefix + ":" + cityName
+}
+
 // LockScopeForStoreRef returns the filesystem scope used for source-workflow
 // locks for a source bead's resident store ref.
 func LockScopeForStoreRef(cityPath, defaultStorePath, storeRef string, rigPath func(string) (string, bool)) string {
@@ -144,6 +209,23 @@ func LockScopeForStoreRef(cityPath, defaultStorePath, storeRef string, rigPath f
 // roots without SourceStoreRefMetadataKey are treated as belonging to the
 // store they physically live in (rootStoreRef).
 func WorkflowMatchesSource(root beads.Bead, sourceBeadID, sourceStoreRef, rootStoreRef string) bool {
+	return workflowMatchesSource(root, sourceBeadID, sourceStoreRef, rootStoreRef, exactStoreRefs)
+}
+
+// WorkflowMatchesSourceInCity is WorkflowMatchesSource with store refs
+// compared by SameSourceStoreRef inside the city named cityName, so a bare
+// "city:" on either side matches "city:<cityName>".
+func WorkflowMatchesSourceInCity(root beads.Bead, sourceBeadID, sourceStoreRef, rootStoreRef, cityName string) bool {
+	return workflowMatchesSource(root, sourceBeadID, sourceStoreRef, rootStoreRef, cityStoreRefs(cityName))
+}
+
+func exactStoreRefs(a, b string) bool { return a == b }
+
+func cityStoreRefs(cityName string) func(a, b string) bool {
+	return func(a, b string) bool { return SameSourceStoreRef(a, b, cityName) }
+}
+
+func workflowMatchesSource(root beads.Bead, sourceBeadID, sourceStoreRef, rootStoreRef string, sameStoreRef func(a, b string) bool) bool {
 	sourceBeadID = NormalizeSourceBeadID(sourceBeadID)
 	if sourceBeadID == "" {
 		return false
@@ -157,13 +239,13 @@ func WorkflowMatchesSource(root beads.Bead, sourceBeadID, sourceStoreRef, rootSt
 	}
 	rootSourceStoreRef := NormalizeSourceStoreRef(root.Metadata[SourceStoreRefMetadataKey])
 	if rootSourceStoreRef != "" {
-		return rootSourceStoreRef == sourceStoreRef
+		return sameStoreRef(rootSourceStoreRef, sourceStoreRef)
 	}
 	rootStoreRef = NormalizeSourceStoreRef(rootStoreRef)
 	if rootStoreRef == "" {
 		return false
 	}
-	return rootStoreRef == sourceStoreRef
+	return sameStoreRef(rootStoreRef, sourceStoreRef)
 }
 
 // ListLiveRoots returns the live (not-closed) workflow roots in store that
@@ -171,6 +253,17 @@ func WorkflowMatchesSource(root beads.Bead, sourceBeadID, sourceStoreRef, rootSt
 // indexes on gc.source_bead_id and filters via IsWorkflowRoot so both
 // legacy gc.kind=workflow roots and graph.v2-only roots are visible.
 func ListLiveRoots(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef string) ([]beads.Bead, error) {
+	return listLiveRoots(store, sourceBeadID, sourceStoreRef, rootStoreRef, exactStoreRefs)
+}
+
+// ListLiveRootsInCity is ListLiveRoots with store refs compared by
+// SameSourceStoreRef inside the city named cityName (see
+// WorkflowMatchesSourceInCity).
+func ListLiveRootsInCity(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef, cityName string) ([]beads.Bead, error) {
+	return listLiveRoots(store, sourceBeadID, sourceStoreRef, rootStoreRef, cityStoreRefs(cityName))
+}
+
+func listLiveRoots(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef string, sameStoreRef func(a, b string) bool) ([]beads.Bead, error) {
 	sourceBeadID = NormalizeSourceBeadID(sourceBeadID)
 	if store == nil || sourceBeadID == "" {
 		return nil, nil
@@ -187,7 +280,7 @@ func ListLiveRoots(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef
 		if !IsWorkflowRoot(root) {
 			return true
 		}
-		return !WorkflowMatchesSource(root, sourceBeadID, sourceStoreRef, rootStoreRef)
+		return !workflowMatchesSource(root, sourceBeadID, sourceStoreRef, rootStoreRef, sameStoreRef)
 	})
 	slices.SortFunc(roots, func(a, b beads.Bead) int {
 		return strings.Compare(a.ID, b.ID)
@@ -350,11 +443,25 @@ func canonicalScopeRef(scopeRef string) string {
 	if scopeRef == "" {
 		return ""
 	}
-	scopeRef = filepath.Clean(scopeRef)
-	if resolved, err := filepath.EvalSymlinks(scopeRef); err == nil && strings.TrimSpace(resolved) != "" {
-		return resolved
+	if isStoreScopeSentinel(scopeRef) {
+		return scopeRef
 	}
-	return scopeRef
+	return pathutil.NormalizePathForCompare(scopeRef)
+}
+
+// isStoreScopeSentinel reports whether ref is a logical store reference such
+// as "rig:alpha" or "city:main" rather than a filesystem path.
+// LockScopeForStoreRef falls through to the literal ref when a rig name cannot
+// be resolved to a path; absolutizing that sentinel would make the derived
+// lock key and lock filename depend on the caller's working directory and
+// silently weaken mutual exclusion. A single-character scheme (a Windows drive
+// letter) is a path, not a sentinel.
+func isStoreScopeSentinel(ref string) bool {
+	i := strings.IndexByte(ref, ':')
+	if i < 2 {
+		return false
+	}
+	return !strings.ContainsAny(ref[:i], `/\`)
 }
 
 // ListWorkflowBeads returns the root and all descendant beads tagged with
@@ -418,7 +525,20 @@ func CloseWorkflowSubtree(store beads.Store, rootID string) (int, error) {
 // signal that completes the wind-down rather than losing the intent. Returns
 // the count of newly closed beads.
 func CloseWorkflowSubtreeAs(store beads.Store, rootID, outcome, reason string, rootExtra map[string]string) (int, error) {
-	ordered, err := orderedOpenWorkflowSubtree(store, rootID)
+	return CloseWorkflowSubtreeAsExcept(store, rootID, outcome, reason, rootExtra, nil)
+}
+
+// CloseWorkflowSubtreeAsExcept is CloseWorkflowSubtreeAs with an exclusion
+// predicate: any member for which exclude reports true is left untouched, even
+// when it is otherwise open. A nil predicate closes the whole subtree, matching
+// CloseWorkflowSubtreeAs.
+//
+// The exclusion exists for members that stay executable after the workflow
+// reaches a terminal state — the teardown tail, which by contract runs after
+// the root settles or is canceled (see molecule.TeardownTailExclusion). Callers
+// own the policy; this function only skips.
+func CloseWorkflowSubtreeAsExcept(store beads.Store, rootID, outcome, reason string, rootExtra map[string]string, exclude func(beads.Bead) bool) (int, error) {
+	ordered, err := orderedOpenWorkflowSubtree(store, rootID, exclude)
 	if err != nil {
 		return 0, err
 	}
@@ -505,8 +625,9 @@ func closeRootWithMarker(store beads.Store, rootID string, rootMeta map[string]s
 // rootID (root included) ordered deepest-descendant-first and then blocker-first
 // via closeorder.Order, so a strict store accepts the close batch and the root
 // sorts last. Closed beads are excluded so an already-terminal member keeps its
-// recorded outcome.
-func orderedOpenWorkflowSubtree(store beads.Store, rootID string) ([]string, error) {
+// recorded outcome. A non-nil exclude also drops any member it reports true
+// for, even though it is open.
+func orderedOpenWorkflowSubtree(store beads.Store, rootID string, exclude func(beads.Bead) bool) ([]string, error) {
 	matched, err := ListWorkflowBeads(store, rootID)
 	if err != nil {
 		return nil, err
@@ -553,6 +674,9 @@ func orderedOpenWorkflowSubtree(store beads.Store, rootID string) ([]string, err
 	ids := make([]string, 0, len(matched))
 	for _, bead := range matched {
 		if bead.ID == "" || bead.Status == "closed" {
+			continue
+		}
+		if exclude != nil && exclude(bead) {
 			continue
 		}
 		ids = append(ids, bead.ID)
@@ -776,12 +900,5 @@ func canonicalCityPath(cityPath string) (string, error) {
 	if cleaned == "" || cleaned == "." {
 		return "", fmt.Errorf("source workflow lock requires city path")
 	}
-	abs, err := filepath.Abs(cleaned)
-	if err != nil {
-		return "", fmt.Errorf("canonicalize city path: %w", err)
-	}
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil && strings.TrimSpace(resolved) != "" {
-		return resolved, nil
-	}
-	return abs, nil
+	return pathutil.NormalizePathForCompare(cleaned), nil
 }

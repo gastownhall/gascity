@@ -48,6 +48,7 @@ type Provider struct {
 
 type providerOps struct {
 	start func(*exec.Cmd) error
+	dial  func(network, addr string, timeout time.Duration) (net.Conn, error)
 }
 
 const (
@@ -66,23 +67,38 @@ type sessionConn struct {
 
 // Compile-time check.
 var (
-	errPrivateSocketDirValidation                             = errors.New("private socket directory validation failed")
-	_                             runtime.Provider            = (*Provider)(nil)
-	_                             runtime.ProcessTableScanner = (*Provider)(nil)
+	errPrivateSocketDirValidation                                   = errors.New("private socket directory validation failed")
+	_                             runtime.Provider                  = (*Provider)(nil)
+	_                             runtime.ProcessTableScanner       = (*Provider)(nil)
+	_                             runtime.LivenessObserverWithError = (*Provider)(nil)
+	_                             runtime.ListingAttestation        = (*Provider)(nil)
 )
 
 // NewProvider returns a subprocess [Provider] that stores socket files in
 // a default temporary directory. Suitable for production use.
 func NewProvider() *Provider {
-	dir := filepath.Join(os.TempDir(), "gc-subprocess")
-	_ = os.MkdirAll(dir, 0o755)
+	dir := defaultProviderDir()
+	_ = runtime.EnsurePrivateDir(dir)
 	return newProvider(dir)
+}
+
+// defaultProviderDir is the city-less state directory: one per user, because
+// the path is otherwise identical for everyone on the host and [os.MkdirAll]
+// succeeds on a directory someone else created first. The euid does not make
+// the directory private by itself — [Provider.SetMeta] verifies ownership
+// before writing — but it keeps two legitimate users off one path so that
+// verification means "someone squatted" rather than "you logged in second".
+func defaultProviderDir() string {
+	return filepath.Join(os.TempDir(), fmt.Sprintf("gc-subprocess-%d", os.Geteuid()))
 }
 
 // NewProviderWithDir returns a subprocess [Provider] that stores socket files
 // in the given directory. Useful for tests that need isolated state.
 func NewProviderWithDir(dir string) *Provider {
-	_ = os.MkdirAll(dir, 0o755)
+	// Best-effort here and verified at the write path: a constructor cannot
+	// report a squatted directory, and failing silently at construction would
+	// hand back a Provider that writes anyway.
+	_ = runtime.EnsurePrivateDir(dir)
 	return newProvider(dir)
 }
 
@@ -93,6 +109,7 @@ func newProvider(dir string) *Provider {
 		workDirs: make(map[string]string),
 		ops: providerOps{
 			start: (*exec.Cmd).Start,
+			dial:  net.DialTimeout,
 		},
 	}
 }
@@ -155,7 +172,9 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	cmd.Stdout = nullFile
 	cmd.Stderr = nullFile
 
-	// Build environment: inherit parent env + apply overrides.
+	// Build environment: inherit parent env + apply overrides. An empty override
+	// spells withholding, matching the tmux adapter: remove the inherited entry
+	// instead of passing KEY=, so namespace isolation remains real to children.
 	env := os.Environ()
 	if len(cfg.Env) > 0 {
 		keys := make([]string, 0, len(cfg.Env))
@@ -164,6 +183,10 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
+			env = envWithoutKey(env, k)
+			if cfg.Env[k] == "" {
+				continue
+			}
 			env = append(env, k+"="+cfg.Env[k])
 		}
 	}
@@ -217,6 +240,17 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	return nil
 }
 
+func envWithoutKey(env []string, key string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
 // Stop terminates the named session. Returns nil if it doesn't exist
 // (idempotent). Sends SIGTERM first, then SIGKILL after a grace period.
 func (p *Provider) Stop(name string) error {
@@ -262,17 +296,27 @@ func (p *Provider) Interrupt(name string) error {
 
 // IsRunning reports whether the named session has a live process.
 func (p *Provider) IsRunning(name string) bool {
+	obs, _ := p.ObserveLivenessWithError(name, nil)
+	return obs.Running
+}
+
+// ObserveLivenessWithError implements [runtime.LivenessObserverWithError]. An
+// in-process session answers from its process; any other answers from its
+// control socket (see probeSessionSocket), so a probe that cannot tell returns
+// an error wrapping [runtime.ErrRuntimeUnavailable] instead of absence.
+// Process names are ignored, as in ProcessAlive.
+func (p *Provider) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
 	euid := os.Geteuid()
 	p.mu.Lock()
 	sc, ok := p.procs[name]
 	p.mu.Unlock()
 
 	if ok {
-		return sc.alive()
+		alive := sc.alive()
+		return runtime.Liveness{Running: alive, Alive: alive}, nil
 	}
-
-	// Fall back to socket liveness check.
-	return p.socketAliveAt(name, euid)
+	present, err := p.probeSessionSocket(name, euid)
+	return runtime.Liveness{Running: present, Alive: present}, err
 }
 
 // IsAttached always returns false — subprocess has no terminal concept.
@@ -366,8 +410,20 @@ func (p *Provider) Peek(_ string, _ int) (string, error) {
 }
 
 // SetMeta stores a key-value pair for the named session in a sidecar file.
+//
+// The sidecar is owner-only. Even after [Provider.persistStartMetadata] filters
+// the session environment it still holds the incarnation fence token, and a
+// fence that can be read or forged is how a stale process talks its way past
+// drain. Ownership is verified on every write rather than trusted from
+// construction, and the mode is set explicitly rather than left to
+// [os.WriteFile]'s perm argument, which is consulted only at create — a host
+// upgrading from an older binary keeps its 0644 files otherwise, which is
+// exactly the host that already has credentials on disk.
 func (p *Provider) SetMeta(name, key, value string) error {
-	return os.WriteFile(p.metaPath(name, key), []byte(value), 0o644)
+	if err := runtime.EnsurePrivateDir(p.dir); err != nil {
+		return err
+	}
+	return runtime.WritePrivateFile(p.metaPath(name, key), []byte(value))
 }
 
 // GetMeta retrieves a metadata value from a sidecar file.
@@ -392,9 +448,18 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	return err
 }
 
+// persistStartMetadata seeds the session's sidecar from its environment so that
+// GetMeta answers the identity and fence reads the reconciler makes while the
+// session is still starting.
+//
+// It seeds the classified half of the environment, not all of it: the sidecar
+// is a durable file store that outlives the session, so writing every variable
+// leaves the agent's API keys on disk with no reader that ever wants them back.
+// [runtime.SplitEnvForMetaSeed] keeps the keys a GetMeta consumer reads.
 func (p *Provider) persistStartMetadata(name string, env map[string]string) error {
+	seed, _ := runtime.SplitEnvForMetaSeed(env)
 	p.clearSessionMeta(name)
-	for key, value := range env {
+	for key, value := range seed {
 		if err := p.SetMeta(name, key, value); err != nil {
 			p.clearSessionMeta(name)
 			return err
@@ -434,7 +499,9 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 }
 
 // ListRunning returns the names of all running sessions whose names
-// match the given prefix, discovered via socket files.
+// match the given prefix, discovered via socket files. A socket that cannot be
+// classified (see probeSessionSocket) leaves its name out, so the names come
+// back with a [runtime.PartialListError] rather than as a complete list.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	euid := os.Geteuid()
 	dirs := []string{p.dir}
@@ -442,7 +509,10 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		dirs = append(dirs, fallback)
 	}
 	seen := make(map[string]bool)
-	var names []string
+	var (
+		names    []string
+		failures []error
+	)
 	for _, dir := range dirs {
 		if err := p.validateSocketDir(dir, euid); err != nil {
 			if os.IsNotExist(err) {
@@ -466,14 +536,30 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 			if !strings.HasPrefix(sn, prefix) || seen[sn] {
 				continue
 			}
-			if p.socketAliveAt(sn, euid) {
+			present, err := p.probeSessionSocket(sn, euid)
+			if errors.Is(err, errPrivateSocketDirValidation) {
+				return nil, err
+			}
+			if err != nil {
+				failures = append(failures, err)
+				continue
+			}
+			if present {
 				seen[sn] = true
 				names = append(names, sn)
 			}
 		}
 	}
+	if len(failures) > 0 {
+		return names, &runtime.PartialListError{Err: errors.Join(failures...)}
+	}
 	return names, nil
 }
+
+// ListRunningComplete implements [runtime.ListingAttestation]: a socket that
+// cannot be classified makes ListRunning partial, so an error-free result
+// lists every running session.
+func (p *Provider) ListRunningComplete() bool { return true }
 
 func (p *Provider) metaPath(name, key string) string {
 	return filepath.Join(p.dir, metaFilePrefix(name)+".meta."+metaFileKey(key))
@@ -693,13 +779,62 @@ func handleSessionConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}) {
 	}
 }
 
-// socketAlive checks if a session is alive by pinging its control socket.
+// socketAlive reports whether the session's control socket accepts a
+// connection. A socket that cannot be classified reads as not alive.
 func (p *Provider) socketAlive(name string) bool {
 	return p.socketAliveAt(name, os.Geteuid())
 }
 
 func (p *Provider) socketAliveAt(name string, euid int) bool {
-	return p.sendSocketCommandAt(name, "ping", 500*time.Millisecond, euid) == nil
+	present, _ := p.probeSessionSocket(name, euid)
+	return present
+}
+
+// socketProbeTimeout bounds one control-socket dial in probeSessionSocket.
+const socketProbeTimeout = 500 * time.Millisecond
+
+// probeSessionSocket classifies the named session's control socket, trying the
+// hashed path and then the legacy name-based one. It is the one answer behind
+// IsRunning, ObserveLivenessWithError and ListRunning:
+//   - (true, nil): a path accepted the connection. The owner closes its
+//     listener when the process exits, so the session is running even when it
+//     is too busy to answer a ping.
+//   - (false, nil): every path is missing, refuses connections, or is too long
+//     to bind (see [runtime.ClassifyControlSocketDial] for what refused means
+//     off Linux).
+//   - (false, err): the private socket directory failed validation, or no
+//     path connected and one failed another way (a dial timeout, EACCES); err
+//     wraps [runtime.ErrRuntimeUnavailable].
+func (p *Provider) probeSessionSocket(name string, euid int) (bool, error) {
+	socketDir := p.socketDirForEUID(euid)
+	paths := make([]string, 0, 2)
+	switch err := p.validateSocketDir(socketDir, euid); {
+	case err == nil:
+		paths = append(paths, filepath.Join(socketDir, p.sockKey(name)+".sock"))
+	case !os.IsNotExist(err):
+		return false, fmt.Errorf("%w: %w: %w", runtime.ErrRuntimeUnavailable, errPrivateSocketDirValidation, err)
+	}
+	paths = append(paths, p.legacySockPath(name))
+	var unknown error
+	for _, sp := range paths {
+		if runtime.UnixSocketPathTooLong(sp) {
+			continue
+		}
+		conn, err := p.ops.dial("unix", sp, socketProbeTimeout)
+		switch runtime.ClassifyControlSocketDial(err) {
+		case runtime.ControlSocketPresent:
+			_ = conn.Close()
+			return true, nil
+		case runtime.ControlSocketUnknown:
+			if unknown == nil {
+				unknown = err
+			}
+		}
+	}
+	if unknown != nil {
+		return false, fmt.Errorf("%w: subprocess control socket for %q: %w", runtime.ErrRuntimeUnavailable, name, unknown)
+	}
+	return false, nil
 }
 
 // sendSocketCommand connects to the session's control socket, sends a
@@ -731,7 +866,7 @@ func (p *Provider) sendSocketCommandAt(name, command string, timeout time.Durati
 	paths = append(paths, legacyPath)
 	for _, sp := range paths {
 		err := func(sockPath string) error {
-			conn, err := net.DialTimeout("unix", sockPath, timeout)
+			conn, err := p.ops.dial("unix", sockPath, timeout)
 			if err != nil {
 				return err
 			}
@@ -788,9 +923,7 @@ func (p *Provider) stopBySocketAt(name string, euid int) error {
 }
 
 func isUnavailableSocketError(err error) bool {
-	return errors.Is(err, os.ErrNotExist) ||
-		errors.Is(err, syscall.ENOENT) ||
-		errors.Is(err, syscall.ECONNREFUSED)
+	return err != nil && runtime.ClassifyControlSocketDial(err) == runtime.ControlSocketAbsent
 }
 
 // --- In-memory process helpers ---

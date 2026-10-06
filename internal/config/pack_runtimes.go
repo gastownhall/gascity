@@ -24,12 +24,26 @@ type DiscoveredRuntime struct {
 	// PackName and PackDir identify the declaring pack.
 	PackName string
 	PackDir  string
+	// PromptDelivery is the pack-declared oversized-prompt delivery
+	// strategy: "" (unset/default) or "nudge-fallback". See
+	// PackRuntimeEntry.PromptDelivery for the trust model.
+	PromptDelivery string
 }
 
 // supportedRuntimeProtocol is the highest RPP version this binary can
 // host. Mirrors runtime.ProtocolVersion0; kept as a local constant so the
 // config layer does not grow an import edge on internal/runtime.
 const supportedRuntimeProtocol = 0
+
+// PromptDeliveryNudgeFallback is the only non-default value
+// PackRuntimeEntry.PromptDelivery / DiscoveredRuntime.PromptDelivery
+// accepts. It asserts the declaring runtime has a working post-start Nudge
+// path that an oversized prompt can reroute through — consulted by cmd/gc's
+// promptDeliverySupportFor, and trusted as-is at that point (not
+// re-verified on every launch). Pack authors can self-verify the claim
+// ahead of production with `gc runtime check`, which smoke-tests it by
+// invoking the runtime's nudge op (FR5, ga-s5y62b.2).
+const PromptDeliveryNudgeFallback = "nudge-fallback"
 
 // packLocalRuntimes validates and resolves a pack's own [runtimes.<name>]
 // declarations. Pack-relative commands resolve against packDir; invalid
@@ -60,12 +74,18 @@ func packLocalRuntimes(tc *PackConfig, packDir string) ([]DiscoveredRuntime, err
 			return nil, fmt.Errorf("pack %q runtime %q: protocol %d not supported (this gc speaks RPP version %d)",
 				tc.Pack.Name, name, entry.Protocol, supportedRuntimeProtocol)
 		}
+		promptDelivery := strings.TrimSpace(entry.PromptDelivery)
+		if promptDelivery != "" && promptDelivery != PromptDeliveryNudgeFallback {
+			return nil, fmt.Errorf("pack %q runtime %q: prompt_delivery %q not supported (must be unset or %q)",
+				tc.Pack.Name, name, entry.PromptDelivery, PromptDeliveryNudgeFallback)
+		}
 		out = append(out, DiscoveredRuntime{
-			Name:     name,
-			Command:  resolveRuntimeCommand(command, packDir),
-			Protocol: entry.Protocol,
-			PackName: tc.Pack.Name,
-			PackDir:  packDir,
+			Name:           name,
+			Command:        resolveRuntimeCommand(command, packDir),
+			Protocol:       entry.Protocol,
+			PackName:       tc.Pack.Name,
+			PackDir:        packDir,
+			PromptDelivery: promptDelivery,
 		})
 	}
 	return out, nil
@@ -120,7 +140,8 @@ func mergeCityRuntimes(cfg *City, runtimes []DiscoveredRuntime) error {
 func sameRuntimeDeclaration(a, b DiscoveredRuntime) bool {
 	return samePackDir(a.PackDir, b.PackDir) &&
 		a.Command == b.Command &&
-		a.Protocol == b.Protocol
+		a.Protocol == b.Protocol &&
+		a.PromptDelivery == b.PromptDelivery
 }
 
 // samePackDir reports whether two pack directories resolve to the same absolute

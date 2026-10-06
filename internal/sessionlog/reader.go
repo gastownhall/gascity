@@ -179,6 +179,8 @@ func ReadProviderFile(provider, path string, tailCompactions int) (*Session, err
 		sess, err = ReadMimoCodeFile(path, tailCompactions)
 	case "opencode":
 		sess, err = ReadOpenCodeFile(path, tailCompactions)
+	case "zcode":
+		sess, err = ReadZCodeFile(path, tailCompactions)
 	case "pi":
 		sess, err = ReadPiFile(path, tailCompactions)
 	case "antigravity":
@@ -259,6 +261,8 @@ func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, 
 		sess, err = ReadMimoCodeFile(path, tailCompactions)
 	case "opencode":
 		sess, err = ReadOpenCodeFile(path, tailCompactions)
+	case "zcode":
+		sess, err = ReadZCodeFile(path, tailCompactions)
 	case "pi":
 		sess, err = ReadPiFile(path, tailCompactions)
 	case "antigravity":
@@ -402,6 +406,15 @@ func ReadProviderFileRawNewer(provider, path string, tailCompactions int, afterM
 func parseFile(path string) ([]*Entry, error) {
 	entries, _, err := parseFileDetailed(path)
 	return entries, err
+}
+
+// ReadFileRecords reads every JSONL record from a transcript in file order,
+// before any active-branch selection. BuildDag drops entries without a uuid,
+// so records such as queue-operation task notifications never reach a caller
+// that reads a session. Callers that must observe those records — rather than
+// render a conversation — need this instead of a Read* helper.
+func ReadFileRecords(path string) ([]*Entry, error) {
+	return parseFile(path)
 }
 
 // parseFileDetailed reads all JSONL lines from a file into entries and
@@ -572,6 +585,8 @@ func FindSessionFileForProvider(searchPaths []string, provider, workDir string) 
 		return FindMimoCodeSessionFile(searchPaths, workDir)
 	case "opencode":
 		return FindOpenCodeSessionFile(searchPaths, workDir)
+	case "zcode":
+		return FindZCodeSessionFile(searchPaths, workDir)
 	case "pi":
 		return FindPiSessionFile(searchPaths, workDir)
 	case "antigravity":
@@ -611,6 +626,8 @@ func FindProviderFallbackSessionFile(searchPaths []string, provider, workDir str
 		return FindMimoCodeSessionFile(searchPaths, workDir)
 	case "opencode":
 		return FindOpenCodeSessionFile(searchPaths, workDir)
+	case "zcode":
+		return FindZCodeSessionFile(searchPaths, workDir)
 	case "pi":
 		return FindPiSessionFile(searchPaths, workDir)
 	case "antigravity":
@@ -783,23 +800,49 @@ func FindCodexSessionFile(searchPaths []string, workDir string) string {
 // "" and telemetry silently records nothing, consistent with the bounded
 // best-effort contract.
 func FindCodexSessionFileNear(searchPaths []string, workDir string, anchor time.Time, window time.Duration) string {
+	path, _ := FindCodexSessionFileNearScan(searchPaths, workDir, anchor, window)
+	return path
+}
+
+// FindCodexSessionFileNearScan is FindCodexSessionFileNear with a clean-scan
+// signal. scanClean is false when ANY os.ReadDir or cwd-probe open during the scan
+// failed with a non-ENOENT IO fault (EMFILE/ESTALE/EACCES and similar), so a
+// caller that must decide whether its result is definitive can tell a genuine
+// zero/ambiguous match (scanClean true — retrying cannot change it) from a
+// transient scan fault (scanClean false — a later, unclouded scan may surface a
+// rollout the fault hid). An ambiguity refusal (>1 visible match) returns
+// scanClean true regardless of unrelated IO noise: more matches cannot make it
+// less ambiguous. A single visible match returns scanClean = !dirty — a
+// concurrent fault could have hidden a second same-cwd, in-window rollout, so a
+// lone hit is definitive only when the scan was clean; the keyless sweep uses
+// this to retry rather than settle on a non-definitive singleton. Bad inputs
+// (empty workDir, zero anchor, non-positive window) return ("", true) — a clean
+// no-op, not a fault. FindCodexSessionFileNear is the string-only wrapper; it
+// discards scanClean and returns the same path (matches[0] for one hit, "" for
+// zero/ambiguous), so its callers are byte-identical to before.
+func FindCodexSessionFileNearScan(searchPaths []string, workDir string, anchor time.Time, window time.Duration) (string, bool) {
 	if workDir == "" || anchor.IsZero() || window <= 0 {
-		return ""
+		return "", true
 	}
 	start := anchor.Add(-time.Minute)
 	end := anchor.Add(window)
 	var matches []string
 	seen := make(map[string]bool)
+	dirty := false
 	for _, root := range mergeCodexSearchPaths(searchPaths) {
-		collectCodexRolloutsNear(root, workDir, start, end, true, seen, &matches)
+		collectCodexRolloutsNear(root, workDir, start, end, true, seen, &matches, &dirty)
 		if len(matches) > 1 {
-			return ""
+			return "", true // ambiguous: a definitive refusal, independent of scan noise
 		}
 	}
-	if len(matches) != 1 {
-		return ""
+	if len(matches) == 1 {
+		// One visible match, but a dirty scan may have hidden a second same-cwd,
+		// in-window rollout, so the lone hit is definitive only when the scan was
+		// clean. The string-only wrapper discards this bool and still returns
+		// matches[0], keeping prompt-op behavior unchanged.
+		return matches[0], !dirty
 	}
-	return matches[0]
+	return "", !dirty
 }
 
 // appendCodexRolloutMatch appends path to matches unless its physical
@@ -842,39 +885,73 @@ func appendCodexRolloutMatch(path string, seen map[string]bool, matches *[]strin
 // midnight, and startOfLocalDay in zones whose DST transition falls AT
 // midnight (e.g. America/Santiago) can land on 23:00 of the previous day and
 // skip the final calendar day; ENOENT readdirs are free.
-func collectCodexRolloutsNear(root, workDir string, start, end time.Time, followExtraRoots bool, seen map[string]bool, matches *[]string) {
+func collectCodexRolloutsNear(root, workDir string, start, end time.Time, followExtraRoots bool, seen map[string]bool, matches *[]string, dirty *bool) {
 	tolStart := start.Add(-time.Hour)
 	tolEnd := end.Add(time.Hour)
 	firstDay := startOfLocalDay(start.In(time.Local)).AddDate(0, 0, -1)
 	lastDay := startOfLocalDay(end.In(time.Local)).AddDate(0, 0, 1)
 	for day := firstDay; !day.After(lastDay); day = day.AddDate(0, 0, 1) {
 		dayDir := filepath.Join(root, day.Format("2006"), day.Format("01"), day.Format("02"))
-		entries, err := os.ReadDir(dayDir)
-		if err != nil {
+		if scanCodexRolloutDay(dayDir, workDir, tolStart, tolEnd, seen, matches, dirty) {
+			return // ambiguity reached: further scanning cannot change the refusal
+		}
+	}
+	if followExtraRoots {
+		collectCodexRolloutsInExtraRoots(root, workDir, start, end, seen, matches, dirty)
+	}
+}
+
+// scanCodexRolloutDay appends any in-window, cwd-matching rollouts in one codex
+// day directory to matches (deduplicated by physical identity via
+// appendCodexRolloutMatch), flagging *dirty on a non-ENOENT readdir fault or a
+// cwd-probe open fault. A missing day dir is the normal case and stays clean. It
+// returns true once the ambiguity threshold (>1 match) is reached so the caller
+// stops scanning.
+func scanCodexRolloutDay(dayDir, workDir string, tolStart, tolEnd time.Time, seen map[string]bool, matches *[]string, dirty *bool) bool {
+	entries, err := os.ReadDir(dayDir)
+	if err != nil {
+		// A missing day dir is the normal case (most days in the window hold no
+		// sessions) and stays clean; a non-ENOENT readdir fault (EMFILE/ESTALE)
+		// is a transient/dirty scan the caller must not mistake for a zero match.
+		if !os.IsNotExist(err) {
+			*dirty = true
+		}
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() {
 			continue
 		}
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			ts, ok := codexRolloutFilenameTime(e.Name())
-			if !ok || ts.Before(tolStart) || ts.After(tolEnd) {
-				continue
-			}
-			path := filepath.Join(dayDir, e.Name())
-			if codexSessionCWDMatches(path, workDir) {
-				appendCodexRolloutMatch(path, seen, matches)
-				if len(*matches) > 1 {
-					return
-				}
+		ts, ok := codexRolloutFilenameTime(e.Name())
+		if !ok || ts.Before(tolStart) || ts.After(tolEnd) {
+			continue
+		}
+		path := filepath.Join(dayDir, e.Name())
+		match, clean := codexSessionCWDMatchesScan(path, workDir)
+		if !clean {
+			*dirty = true
+		}
+		if match {
+			appendCodexRolloutMatch(path, seen, matches)
+			if len(*matches) > 1 {
+				return true
 			}
 		}
 	}
-	if !followExtraRoots {
-		return
-	}
+	return false
+}
+
+// collectCodexRolloutsInExtraRoots recurses one level into a codex root's
+// symlinked non-date entries (aimux-managed accounts), threading the shared
+// seen/matches/dirty scan state. Year-named (2000-2099) directories are skipped:
+// those are the date tree the caller already walked. A non-ENOENT readdir fault
+// on the root flags *dirty.
+func collectCodexRolloutsInExtraRoots(root, workDir string, start, end time.Time, seen map[string]bool, matches *[]string, dirty *bool) {
 	rootEntries, err := os.ReadDir(root)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			*dirty = true
+		}
 		return
 	}
 	for _, e := range rootEntries {
@@ -887,7 +964,7 @@ func collectCodexRolloutsNear(root, workDir string, start, end time.Time, follow
 		}
 		// os.ReadDir follows the symlink on its own; non-directory or
 		// dangling links simply fail every ReadDir in the recursion.
-		collectCodexRolloutsNear(filepath.Join(root, name), workDir, start, end, false, seen, matches)
+		collectCodexRolloutsNear(filepath.Join(root, name), workDir, start, end, false, seen, matches, dirty)
 		if len(*matches) > 1 {
 			return
 		}
@@ -1268,16 +1345,27 @@ func codexSessionCWD(path string) string {
 }
 
 func codexSessionCandidate(path string) (CodexSessionCandidate, bool) {
+	candidate, ok, _ := codexSessionCandidateScan(path)
+	return candidate, ok
+}
+
+// codexSessionCandidateScan is codexSessionCandidate with a clean-scan signal.
+// clean is false ONLY when opening path failed with a non-ENOENT IO fault
+// (EMFILE/ESTALE/EACCES and similar transient/resource errors), so a caller
+// scanning many candidates can tell a transient probe failure apart from a file
+// that is genuinely not a codex rollout (empty, malformed, or non-session_meta —
+// all clean) or a file that vanished between readdir and open (ENOENT — clean).
+func codexSessionCandidateScan(path string) (candidate CodexSessionCandidate, ok bool, clean bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return CodexSessionCandidate{}, false
+		return CodexSessionCandidate{}, false, os.IsNotExist(err)
 	}
 	defer f.Close() //nolint:errcheck // read-only
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	if !scanner.Scan() {
-		return CodexSessionCandidate{}, false
+		return CodexSessionCandidate{}, false, true
 	}
 	var meta struct {
 		Type      string `json:"type"`
@@ -1288,10 +1376,10 @@ func codexSessionCandidate(path string) (CodexSessionCandidate, bool) {
 		} `json:"payload"`
 	}
 	if err := json.Unmarshal(scanner.Bytes(), &meta); err != nil {
-		return CodexSessionCandidate{}, false
+		return CodexSessionCandidate{}, false, true
 	}
 	if meta.Type != "session_meta" {
-		return CodexSessionCandidate{}, false
+		return CodexSessionCandidate{}, false, true
 	}
 	info, _ := os.Stat(path)
 	var modTime time.Time
@@ -1307,7 +1395,7 @@ func codexSessionCandidate(path string) (CodexSessionCandidate, bool) {
 		WorkDir:   meta.Payload.CWD,
 		StartedAt: startedAt,
 		ModTime:   modTime,
-	}, true
+	}, true, true
 }
 
 func parseCodexSessionTime(raw string) time.Time {
@@ -1325,11 +1413,24 @@ func parseCodexSessionTime(raw string) time.Time {
 }
 
 func codexSessionCWDMatches(path, workDir string) bool {
-	cwd := codexSessionCWD(path)
-	if cwd == "" || workDir == "" {
-		return false
+	match, _ := codexSessionCWDMatchesScan(path, workDir)
+	return match
+}
+
+// codexSessionCWDMatchesScan is codexSessionCWDMatches with a clean-scan signal:
+// clean is false only when the cwd probe's file open failed with a non-ENOENT IO
+// fault (see codexSessionCandidateScan), so a scanner can distinguish a transient
+// probe failure from a genuine cwd mismatch.
+func codexSessionCWDMatchesScan(path, workDir string) (match bool, clean bool) {
+	candidate, ok, clean := codexSessionCandidateScan(path)
+	if !ok {
+		return false, clean
 	}
-	return pathutil.SamePath(cwd, workDir)
+	cwd := candidate.WorkDir
+	if cwd == "" || workDir == "" {
+		return false, clean
+	}
+	return pathutil.SamePath(cwd, workDir), clean
 }
 
 // listDirsReverse returns directory names sorted in reverse lexicographic
@@ -1380,13 +1481,18 @@ func DefaultGeminiSearchPaths() []string {
 }
 
 // DefaultKimiSearchPaths returns the default search paths for Kimi Code
-// session files (~/.kimi/sessions).
+// session files: legacy ~/.kimi/sessions, native ~/.kimi-code/sessions, and
+// $KIMI_CODE_HOME/sessions when that variable is set to a non-blank value.
 func DefaultKimiSearchPaths() []string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil
 	}
-	return []string{filepath.Join(home, ".kimi", "sessions")}
+	roots := []string{filepath.Join(home, ".kimi", "sessions"), filepath.Join(home, ".kimi-code", "sessions")}
+	if codeHome := strings.TrimSpace(os.Getenv("KIMI_CODE_HOME")); codeHome != "" {
+		roots = append(roots, filepath.Join(codeHome, "sessions"))
+	}
+	return roots
 }
 
 // DefaultAntigravitySearchPaths returns the default search paths for Antigravity JSONL
@@ -1445,6 +1551,40 @@ func mergePaths(defaults, extras []string) []string {
 	return result
 }
 
+// WholeFileJSONFamily reports whether a provider family stores each session as
+// one whole-file JSON document (an OpenCode-shaped `{info, messages}` export or
+// a mirror of one) rather than as append-only JSONL.
+//
+// The tail-chunk malformed heuristic is meaningless for these families: a tail
+// chunk of a pretty-printed JSON document always "starts mid line", so the flag
+// fires on every healthy file. Suppressing it is behavior-neutral — the flag is
+// documented as a heuristic that full-file parser diagnostics override, and
+// these families' readers set no tail diagnostics of their own, so nothing
+// downstream loses a signal it previously acted on.
+func WholeFileJSONFamily(provider string) bool {
+	switch ProviderFamily(provider) {
+	case "opencode", "mimocode", "zcode":
+		return true
+	default:
+		return false
+	}
+}
+
+// DerivesActivityFromHistory reports whether tail activity for a family must be
+// derived from normalized history rather than read from a trailing record.
+//
+// Deliberately narrower than WholeFileJSONFamily. The derivation is only sound
+// where the mirror is known to record a user message at turn START and close it
+// out when the turn ends — an invariant this repo owns for zcode, because it
+// owns the writer (internal/worker/adapters/zcode). OpenCode and MiMo Code
+// share the file SHAPE but their exports are written by upstream plugins on
+// their own schedule, so the same inference is not established for them and
+// enabling it would silently change their production activity reporting.
+// Extending this set is a per-family exercise, not a shape check.
+func DerivesActivityFromHistory(provider string) bool {
+	return ProviderFamily(provider) == "zcode"
+}
+
 // ProviderFamily returns the canonical transcript provider family for provider.
 func ProviderFamily(provider string) string {
 	p := strings.ToLower(strings.TrimSpace(provider))
@@ -1471,6 +1611,8 @@ func ProviderFamily(provider string) string {
 		return "mimocode"
 	case strings.Contains(p, "opencode") || providerComponent(p, "groq") || providerComponent(p, "cerebras"):
 		return "opencode"
+	case strings.Contains(p, "zcode"):
+		return "zcode"
 	case strings.Contains(p, "antigravity"):
 		return "antigravity"
 	case p == "pi" || strings.HasPrefix(p, "pi/") || strings.HasSuffix(p, "/pi") || strings.HasSuffix(p, "-pi") || strings.Contains(p, "-pi/") ||

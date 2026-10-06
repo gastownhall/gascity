@@ -16,6 +16,8 @@ interface UseCachedDataResult<T> {
   cheapRefresh: () => Promise<void>;
 }
 
+type CachedDataFetcher<T> = (signal: AbortSignal) => Promise<T>;
+
 export interface UseCachedDataOptions<T> {
   /**
    * When provided, explicit refresh() calls route through this fetcher
@@ -24,7 +26,7 @@ export interface UseCachedDataOptions<T> {
    * the same source has a cheap GET and a TTL-bypassing POST: pass
    * the GET as `fetcher` and the POST as `refreshFetcher`.
    */
-  refreshFetcher?: () => Promise<T>;
+  refreshFetcher?: CachedDataFetcher<T>;
   /**
    * When provided, `cheapRefresh()` routes through this fetcher instead of the
    * primary refresh path. Use for a cheaper variant of the same source that
@@ -32,7 +34,7 @@ export interface UseCachedDataOptions<T> {
    * refresh stays on `refreshFetcher`. Falls back to `refreshFetcher` (or the
    * primary `fetcher`) when undefined, so existing callers are unaffected.
    */
-  sseRefreshFetcher?: () => Promise<T>;
+  sseRefreshFetcher?: CachedDataFetcher<T>;
   onError?: (error: unknown) => void;
 }
 
@@ -45,11 +47,12 @@ export interface UseCachedDataOptions<T> {
  * `key` changes (e.g. params shift) reseed from cache for the new
  * key and refetch. `fetcher` is captured in a ref so callers don't
  * need to memoize it to avoid refetch loops — refetches only fire
- * on key change or explicit refresh().
+ * on key change or explicit refresh(). The fetcher receives a signal
+ * that aborts when its run is superseded or the hook unmounts.
  */
 export function useCachedData<T>(
   key: string,
-  fetcher: () => Promise<T>,
+  fetcher: CachedDataFetcher<T>,
   options?: UseCachedDataOptions<T>,
 ): UseCachedDataResult<T> {
   const fetcherRef = useRef(fetcher);
@@ -63,6 +66,7 @@ export function useCachedData<T>(
   const currentKeyRef = useRef(key);
   currentKeyRef.current = key;
   const runIdRef = useRef(0);
+  const activeControllerRef = useRef<AbortController | null>(null);
 
   const [data, setData] = useState<T | undefined>(() => getCached<T>(key));
   const [loading, setLoading] = useState<boolean>(() => getCached<T>(key) === undefined);
@@ -70,14 +74,17 @@ export function useCachedData<T>(
   const [fetchedAt, setFetchedAt] = useState<string | undefined>(() => getCachedFetchedAt(key));
 
   const runFetcher = useCallback(
-    async (fetch: () => Promise<T>) => {
+    async (fetch: CachedDataFetcher<T>) => {
       const runId = runIdRef.current + 1;
       runIdRef.current = runId;
+      activeControllerRef.current?.abort();
+      const controller = new AbortController();
+      activeControllerRef.current = controller;
       const cacheKey = key;
       setLoading(true);
       setError(null);
       try {
-        const fresh = await fetch();
+        const fresh = await fetch(controller.signal);
         const isLatestRun = runIdRef.current === runId;
         const isActiveKey = currentKeyRef.current === cacheKey;
         if (isLatestRun && isActiveKey) {
@@ -109,6 +116,9 @@ export function useCachedData<T>(
           onErrorRef.current?.(err);
         }
       } finally {
+        if (activeControllerRef.current === controller) {
+          activeControllerRef.current = null;
+        }
         if (runIdRef.current === runId) setLoading(false);
       }
     },
@@ -137,6 +147,8 @@ export function useCachedData<T>(
     void runFetcher(fetcherRef.current);
     return () => {
       runIdRef.current += 1;
+      activeControllerRef.current?.abort();
+      activeControllerRef.current = null;
     };
   }, [key, runFetcher]);
 

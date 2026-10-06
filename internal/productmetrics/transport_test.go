@@ -385,8 +385,12 @@ func TestProductionUploadTransportIsClosedAndHardened(t *testing.T) {
 	t.Setenv("SSL_CERT_FILE", "/definitely/not/a/custom/ca.pem")
 	t.Setenv("SSL_CERT_DIR", "/definitely/not/a/custom/ca-directory")
 
-	if got, err := newProductionUploadTransport(CurrentReleaseIdentity()); err == nil || got != nil {
-		t.Fatalf("endpoint-empty development identity constructed uploader %#v with error %v", got, err)
+	got, err := newProductionUploadTransport(CurrentReleaseIdentity())
+	if err != nil || got == nil {
+		t.Fatalf("activated release identity failed to construct uploader: %#v, %v", got, err)
+	}
+	if !got.productionPolicy || got.endpoint != nil || got.client != nil || got.pauseKeys != nil {
+		t.Fatalf("production uploader is not a closed production-policy transport: %#v", got)
 	}
 
 	for name, endpoint := range map[string]string{
@@ -491,8 +495,8 @@ func TestProductionUploadCustomCAEnvironmentPredicate(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), "custom CA environment") {
 					t.Fatalf("production request dependencies with custom CA = %v, want custom-CA rejection", err)
 				}
-			} else if err == nil || strings.Contains(err.Error(), "custom CA environment") {
-				t.Fatalf("endpoint-empty production request dependencies = %v, want non-CA fail-closed error", err)
+			} else if err != nil {
+				t.Fatalf("activated production request dependencies without custom CA = %v, want success", err)
 			}
 		})
 	}
@@ -615,8 +619,8 @@ func TestProductionUploadPolicyRejectsTampering(t *testing.T) {
 			}
 		})
 	}
-	if err := (&uploadTransport{productionPolicy: true}).validate(); err == nil {
-		t.Fatal("endpoint-empty Stage 1a artifact constructed production request dependencies")
+	if err := (&uploadTransport{productionPolicy: true}).validate(); err != nil {
+		t.Fatalf("activated production-policy artifact failed to construct request dependencies: %v", err)
 	}
 }
 

@@ -76,12 +76,23 @@ const (
 	deltaD4RecencyKept            // quiescent absorb recencyKeep: NEW keeps cached deps
 	deltaD5RecentAbsorb           // quiescent absorb, recent, no recencyKeep: NEW keeps fences
 	deltaD1RecentOrphan           // quiescent orphan with recent localAt: NEW keeps everything
+	deltaWriteFenced              // only a local write revision > startSeq fences id: NEW keeps everything
 )
+
+// writeFencedOnly reports whether id is fenced by its local write revision
+// alone. The frozen branches predate writeSeq, so they absorb, evict or wipe
+// such an id while the collapsed seam leaves it untouched.
+func writeFencedOnly(st storeState, in snapshotInputs, id string) bool {
+	return st.writeSeq[id] > in.startSeq && st.deletedSeq[id] <= in.startSeq && st.beadSeq[id] <= in.startSeq
+}
 
 // classifyDelta derives the delta for id from the INPUT (st, in) and the
 // post-preserve fresh view. It is written from the §2 matrix and shares no
 // code with reconcileMergeDecision or mergeSnapshotLocked.
 func classifyDelta(st storeState, in snapshotInputs, postPreserveFresh map[string]Bead, refEnd mergeEndState, id string) deltaKind {
+	if writeFencedOnly(st, in, id) {
+		return deltaWriteFenced
+	}
 	if in.quiescent(st) {
 		freshBead, f := in.freshByID[id]
 		_ = freshBead
@@ -170,6 +181,9 @@ func expectedNewView(st storeState, _ snapshotInputs, refEnd mergeEndState, id s
 	case deltaD1RecentOrphan:
 		// NEW keeps every input orphan entry; B wiped them.
 		return viewOfState(st, id)
+	case deltaWriteFenced:
+		// NEW skips the id in every cell, exactly as for a beadSeq fence.
+		return viewOfState(st, id)
 	default:
 		return base
 	}
@@ -218,7 +232,84 @@ func buildExpectedNewEnd(st storeState, in snapshotInputs, postPreserveFresh map
 	// deliberately introduces so a recency-keep can no longer serve stale cached
 	// deps under depsComplete=true.
 	exp.depsComplete = expectedNextDepsComplete(st, in, postPreserveFresh)
+	exp.readyLost = expectedReadyLost(st, exp.beads)
+	exp.writeSeq = expectedWriteSeq(st)
+	exp.writeAtIDs = keySet(exp.writeSeq)
+	exp.deletedSeq = expectedDeletedSeq(st, in, exp)
+	exp.retainedIDs = expectedRetainedIDs(in, exp)
 	return exp
+}
+
+// expectedWriteSeq re-derives the write-revision map from the input. The merge
+// never mints, rewrites or drops a write revision: an evicted or collected
+// row's revision is retained, and only a retention older than
+// recentWriteVerifyWindow is pruned, which no seeded state carries. The frozen
+// branches predate writeSeq, so the reference end state cannot supply it.
+func expectedWriteSeq(st storeState) map[string]uint64 {
+	out := map[string]uint64{}
+	for id, seq := range st.writeSeq {
+		out[id] = seq
+	}
+	return out
+}
+
+// expectedDeletedSeq re-derives the tombstones from the input: like a write
+// revision, a tombstone is retained when its id has no row, and only an
+// absorbed row sheds it. A tombstone past the snapshot fences its id, so the
+// id keeps any row it had. The frozen branches collect stale tombstones, so
+// the reference end state cannot supply them.
+func expectedDeletedSeq(st storeState, in snapshotInputs, exp mergeEndState) map[string]uint64 {
+	out := map[string]uint64{}
+	for id, seq := range st.deletedSeq {
+		if _, held := exp.beads[id]; !held || seq > in.startSeq {
+			out[id] = seq
+		}
+	}
+	return out
+}
+
+// expectedRetainedIDs is every id the sweep visits that carries a write
+// fence at the end: no row on either side, and a write revision or tombstone.
+func expectedRetainedIDs(in snapshotInputs, exp mergeEndState) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, fences := range []map[string]uint64{exp.writeSeq, exp.deletedSeq} {
+		for id := range fences {
+			_, held := exp.beads[id]
+			_, fresh := in.freshByID[id]
+			if !held && !fresh {
+				out[id] = struct{}{}
+			}
+		}
+	}
+	return out
+}
+
+// expectedReadyLost re-derives the rows whose projected verdict the merge
+// dropped (ga-cfhgr), from the input state and the independently built end
+// beads map alone — never from the seam.
+//
+// A row lost its verdict exactly when this cache HELD one and the merge's end
+// state no longer has one. That covers absorbed rows whose fresh payload
+// carried no verdict and whose cached verdict the preserve pass refused to
+// keep; it excludes rows the merge kept verbatim (a recency-keep or fence-skip
+// retains the cached verdict, so nothing was lost) and rows the merge evicted
+// (no row, no readiness question). Rows that never had a verdict keep answering
+// from the dependency-derived predicate, which is all the cache ever had for
+// them.
+//
+// Whether a lost verdict actually costs the row its readiness answer is a
+// read-time question (readyProjectionUnknownLocked), deliberately not a merge
+// one: making the mark depend on which rows were resident mid-merge would make
+// it depend on map-iteration order.
+func expectedReadyLost(st storeState, endBeads map[string]Bead) map[string]struct{} {
+	lost := map[string]struct{}{}
+	for id, end := range endBeads {
+		cached, existed := st.beads[id]
+		if existed && cached.IsBlocked != nil && end.IsBlocked == nil {
+			lost[id] = struct{}{}
+		}
+	}
+	return lost
 }
 
 // expectedNextDepsComplete independently reproduces the seam's nextDepsComplete
@@ -237,7 +328,7 @@ func expectedNextDepsComplete(st storeState, in snapshotInputs, postPreserveFres
 		}
 		cachedDeps, hasCachedDeps := st.deps[id]
 		switch {
-		case st.deletedSeq[id] > in.startSeq || st.beadSeq[id] > in.startSeq:
+		case st.deletedSeq[id] > in.startSeq || st.beadSeq[id] > in.startSeq || st.writeSeq[id] > in.startSeq:
 			if !hasCachedDeps {
 				complete = false
 			}
@@ -382,12 +473,10 @@ func beadsIdentical(a, b Bead) bool {
 
 func assertNewEndInvariants(t *testing.T, name string, end mergeEndState, in snapshotInputs) {
 	t.Helper()
-	// INV1 (no leaks): every orphan id (no bead) carrying any fence/deps entry
-	// must have a live protector — a fence > startSeq or a recent localAt.
+	// INV1 (no leaks): every orphan id (no bead) carrying a non-write
+	// fence/deps entry must have a live protector — a fence > startSeq or a
+	// recent localAt — and every one carrying a write fence a retention stamp.
 	orphanIDs := map[string]struct{}{}
-	for id := range end.deletedSeq {
-		orphanIDs[id] = struct{}{}
-	}
 	for id := range end.dirty {
 		orphanIDs[id] = struct{}{}
 	}
@@ -406,10 +495,20 @@ func assertNewEndInvariants(t *testing.T, name string, end mergeEndState, in sna
 		}
 		protected := end.deletedSeq[id] > in.startSeq ||
 			end.beadSeq[id] > in.startSeq ||
+			end.writeSeq[id] > in.startSeq ||
 			recentLocalMutation(end.localBeadAt[id], in.now)
 		if !protected {
 			t.Fatalf("%s: INV1 leak — orphan %q retained a fence/deps entry with no protector (deletedSeq=%d beadSeq=%d localAt=%v startSeq=%d)",
 				name, id, end.deletedSeq[id], end.beadSeq[id], end.localBeadAt[id], in.startSeq)
+		}
+	}
+	for _, fences := range []map[string]uint64{end.writeSeq, end.deletedSeq} {
+		for id := range fences {
+			_, hasBead := end.beads[id]
+			_, fresh := in.freshByID[id]
+			if _, retained := end.retainedIDs[id]; !hasBead && !fresh && !retained {
+				t.Fatalf("%s: INV1 leak — orphan %q kept a write fence with no retention stamp", name, id)
+			}
 		}
 	}
 	// INV2 (V1): deletedSeq present ⇒ beads absent.
@@ -482,20 +581,59 @@ func assertDifferential(t *testing.T, name string, st storeState, in snapshotInp
 		}
 	}
 
-	// Notifications and counters must be EXACTLY equal (no delta by analysis).
-	assertNotificationsEqual(t, name, ref.notifications, newRes.notifications)
+	// Notifications and counters must be EXACTLY equal, except that the
+	// reference's work on write-fenced ids (which NEW skips) is discounted.
+	refNotifications, adjust := discountWriteFenced(st, in, ref)
+	assertNotificationsEqual(t, name, refNotifications, newRes.notifications)
 
 	// Six-map + depsComplete: build the full expected NEW end-state from the
 	// reference and assert exact equality (scalars/counters copied ⇒ asserted
 	// equal; maps transformed per the independent case-oracle).
 	postPreserve := computePostPreserveFresh(st, in)
 	exp := buildExpectedNewEnd(st, in, postPreserve, ref.end)
+	exp.statsAdds -= adjust.adds
+	exp.statsUpdates -= adjust.updates
+	exp.statsRemoves -= adjust.removes
 	if !endStatesEqual(exp, newRes.end) {
 		t.Fatalf("%s: end-state divergence\n%s", name, diffEndStates(exp, newRes.end))
 	}
 
 	// Spec-independent invariants on the NEW end-state alone.
 	assertNewEndInvariants(t, name, newRes.end, in)
+}
+
+// counterAdjust is the reference's counter work on ids NEW skips.
+type counterAdjust struct{ adds, updates, removes int64 }
+
+// discountWriteFenced drops the reference's notifications for write-fenced ids
+// and counts the add/update/remove work it did on them, derived from the input
+// and the reference result alone.
+func discountWriteFenced(st storeState, in snapshotInputs, ref mergeImplResult) ([]cacheNotification, counterAdjust) {
+	var adjust counterAdjust
+	kept := make([]cacheNotification, 0, len(ref.notifications))
+	for _, n := range ref.notifications {
+		if !writeFencedOnly(st, in, n.bead.ID) {
+			kept = append(kept, n)
+			continue
+		}
+		switch n.eventType {
+		case "bead.created":
+			adjust.adds++
+		case "bead.updated":
+			adjust.updates++
+		}
+	}
+	for id := range st.beads {
+		if !writeFencedOnly(st, in, id) {
+			continue
+		}
+		_, inFresh := in.freshByID[id]
+		_, kept := ref.end.beads[id]
+		if !inFresh && !kept {
+			adjust.removes++
+		}
+	}
+	return kept, adjust
 }
 
 func assertSelfDeterministic(t *testing.T, name string, a, b mergeImplResult) {

@@ -173,6 +173,13 @@ type ListOutput[T any] struct {
 
 // IndexOutput is a generic output type for single-resource endpoints
 // that include the X-GC-Index header. CacheAgeS mirrors ListOutput.
+//
+// One handler widens that meaning: /status may serve a stale-while-revalidate
+// body (ra-4u2eqc, handler_status.go), in which case CacheAgeS reports the
+// GREATER of the CachingStore snapshot age and the age of the cached response
+// entry itself. Reporting only the snapshot age there would let a recently
+// lagging reconciler under-report true staleness and suppress the banner
+// `gc status` renders above cacheAgeBannerThresholdSeconds.
 type IndexOutput[T any] struct {
 	Index     uint64  `header:"X-GC-Index" doc:"Latest event sequence number."`
 	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
@@ -210,6 +217,10 @@ type StatusWorkCounts struct {
 	InProgress int `json:"in_progress" doc:"Number of in-progress work items."`
 	Ready      int `json:"ready" doc:"Number of ready work items."`
 	Open       int `json:"open" doc:"Number of open work items."`
+	// SuspendedRigsExcluded counts the rigs these counts leave out: a
+	// suspended rig's store is not read, because a read restarts its retired
+	// bd proxy.
+	SuspendedRigsExcluded int `json:"suspended_rigs_excluded,omitempty" doc:"Number of suspended rigs left out of these counts: a suspended rig's store is not read."`
 }
 
 // StatusMailCounts holds mail counts for the status endpoint.

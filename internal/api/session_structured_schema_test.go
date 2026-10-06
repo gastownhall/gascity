@@ -32,6 +32,25 @@ func TestSessionTranscriptRuntimeContainerDoesNotCustomizeJSON(t *testing.T) {
 	if strings.Contains(string(raw), `"structured_messages"`) {
 		t.Fatalf("raw response = %s, want structured_messages omitted", raw)
 	}
+
+	rawWithMessages, err := json.Marshal(sessionTranscriptGetResponse{
+		Format:   "raw",
+		Messages: rawMessagesField(nil),
+	})
+	if err != nil {
+		t.Fatalf("marshal raw response with messages field: %v", err)
+	}
+	if !strings.Contains(string(rawWithMessages), `"messages":[]`) {
+		t.Fatalf("raw response = %s, want required empty messages array", rawWithMessages)
+	}
+
+	structuredNoMessages, err := json.Marshal(sessionTranscriptGetResponse{Format: "structured"})
+	if err != nil {
+		t.Fatalf("marshal structured response without messages field: %v", err)
+	}
+	if strings.Contains(string(structuredNoMessages), `"messages"`) {
+		t.Fatalf("structured response = %s, want messages omitted", structuredNoMessages)
+	}
 }
 
 func TestLiveStructuredTranscriptSchemaPublishesNamedDiscriminatedUnions(t *testing.T) {

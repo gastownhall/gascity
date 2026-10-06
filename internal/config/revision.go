@@ -53,14 +53,14 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 	rigs := cfg.Rigs
 	for _, r := range rigs {
 		for _, ref := range r.Includes {
-			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, false)
 			writeRevisionDirHash(h, prov, "pack:"+r.Name+":"+ref, fs, topoDir)
 		}
 	}
 
 	// Hash city-level pack directory contents.
 	for _, ref := range cfg.Workspace.LegacyIncludes() {
-		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, false)
 		writeRevisionDirHash(h, prov, "city-pack:"+ref, fs, topoDir)
 	}
 
@@ -124,17 +124,17 @@ func (p *Provenance) captureRevisionSnapshot(fs fsys.FS, cfg *City, cityRoot str
 		fileKnown:    make(map[string]bool),
 	}
 	recordDir := func(label, dir string) {
-		snap.dirHashes[label] = PackContentHashRecursive(fs, dir)
+		snap.dirHashes[label] = packContentHashRecursive(fs, dir, false)
 	}
 
 	for _, r := range cfg.Rigs {
 		for _, ref := range r.Includes {
-			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+			topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, false)
 			recordDir("pack:"+r.Name+":"+ref, topoDir)
 		}
 	}
 	for _, ref := range cfg.Workspace.LegacyIncludes() {
-		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, false)
 		recordDir("city-pack:"+ref, topoDir)
 	}
 	if tracksPackV2Imports(cfg) {
@@ -189,7 +189,7 @@ func (p *Provenance) recordMissingSourceContents(fs fsys.FS) {
 func writeRevisionDirHash(h hash.Hash, prov *Provenance, label string, fs fsys.FS, dir string) {
 	topoHash, ok := revisionSnapshotDirHash(prov, label)
 	if !ok {
-		topoHash = PackContentHashRecursive(fs, dir)
+		topoHash = packContentHashRecursive(fs, dir, false)
 	}
 	writeRevisionBytes(h, label, []byte(topoHash))
 }
@@ -321,7 +321,7 @@ func revisionPackDir(ref, declDir, cityRoot string) (string, bool) {
 	if strings.TrimSpace(ref) == "" {
 		return "", false
 	}
-	dir, err := resolvePackRef(ref, declDir, cityRoot)
+	dir, err := resolvePackRef(ref, declDir, cityRoot, false)
 	if err != nil || strings.TrimSpace(dir) == "" {
 		return "", false
 	}

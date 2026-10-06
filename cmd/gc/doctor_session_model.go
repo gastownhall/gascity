@@ -35,7 +35,7 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		r.Message = fmt.Sprintf("session model diagnostics skipped: %v", err)
 		return r
 	}
-	all, err := loadSessionModelDoctorBeads(store)
+	all, err := loadSessionModelDoctorBeads(store, cliSessionStore(store, c.cfg, c.cityPath))
 	if err != nil {
 		r.Status = doctor.StatusWarning
 		r.Message = fmt.Sprintf("session model diagnostics skipped: %v", err)
@@ -124,7 +124,14 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 	return r
 }
 
-func loadSessionModelDoctorBeads(store beads.Store) ([]beads.Bead, error) {
+// loadSessionModelDoctorBeads reads the two halves of the session-ownership
+// diagnostic from two coordination classes: the session union comes from
+// sessStore (session class) and the open/in-progress work legs from workStore
+// (work class). They are the same store until a [beads.classes.sessions]
+// relocation splits them, at which point reading both from the work store made
+// the session union come back empty and the check report "session ownership is
+// consistent" on a city whose session model was broken.
+func loadSessionModelDoctorBeads(workStore, sessStore beads.Store) ([]beads.Bead, error) {
 	type listStep struct {
 		name  string
 		query beads.ListQuery
@@ -153,7 +160,7 @@ func loadSessionModelDoctorBeads(store beads.Store) ([]beads.Bead, error) {
 		{Type: session.BeadType, IncludeClosed: true, Sort: beads.SortCreatedAsc},
 		{Label: session.LabelSession, IncludeClosed: true, Sort: beads.SortCreatedAsc},
 	} {
-		items, err := store.List(q)
+		items, err := sessStore.List(q)
 		if err != nil {
 			return nil, fmt.Errorf("session beads: %w", err)
 		}
@@ -170,7 +177,7 @@ func loadSessionModelDoctorBeads(store beads.Store) ([]beads.Bead, error) {
 		return sessionUnion[i].CreatedAt.Before(sessionUnion[j].CreatedAt)
 	})
 	for _, step := range steps {
-		items, err := store.List(step.query)
+		items, err := workStore.List(step.query)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", step.name, err)
 		}

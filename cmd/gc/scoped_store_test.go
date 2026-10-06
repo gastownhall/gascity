@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,155 @@ func noopBdRunner() beads.CommandRunner {
 	return func(string, string, ...string) ([]byte, error) {
 		return nil, nil
 	}
+}
+
+// TestScopedBdStoreForCityResolvesWorkspacePinnedBdBinary is the controller-path
+// regression for an authoritative external beads binding. The long-lived
+// city store replaces its bd command with the workspace-pinned executable,
+// but the short-lived, context-bound store used by controller reads must make
+// the same selection. BD_BIN alone is not a contract of the bd CLI: unless
+// the runner resolves it, exec still finds the ambient `bd` on PATH.
+//
+// The unconfigured subtest protects the opposite boundary: ordinary cities
+// continue to invoke the ambient command named exactly "bd".
+func TestScopedBdStoreForCityResolvesWorkspacePinnedBdBinary(t *testing.T) {
+	makeCity := func(t *testing.T, workspacePath string) string {
+		t.Helper()
+		cityDir := t.TempDir()
+		cityTOML := "[workspace]\nname = \"demo\"\n"
+		if workspacePath != "" {
+			cityTOML += "[workspace.env]\nPATH = " + strconv.Quote(workspacePath) + "\n"
+		}
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(scopeMetadataJSONPath(cityDir), []byte(`{"backend":"postgres","storage_endpoint":"opaque-remote","storage_database":"work","dolt_mode":"server"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return cityDir
+	}
+
+	t.Run("workspace-pinned", func(t *testing.T) {
+		pinnedDir := t.TempDir()
+		writeExecutable(t, filepath.Join(pinnedDir, "bd"), "#!/bin/sh\nprintf '[]\\n'\n")
+
+		ambientDir := t.TempDir()
+		writeExecutable(t, filepath.Join(ambientDir, "bd"), "#!/bin/sh\necho ambient-bd-was-used >&2\nexit 23\n")
+		t.Setenv("PATH", ambientDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		store, err := scopedBdStoreForCity(context.Background(), makeCity(t, pinnedDir))
+		if err != nil {
+			t.Fatalf("scopedBdStoreForCity: %v", err)
+		}
+		if _, err := store.List(beads.ListQuery{AllowScan: true}); err != nil {
+			t.Fatalf("List used ambient bd instead of workspace-pinned bd: %v", err)
+		}
+	})
+
+	t.Run("unconfigured", func(t *testing.T) {
+		ambientDir := t.TempDir()
+		writeExecutable(t, filepath.Join(ambientDir, "bd"), "#!/bin/sh\nprintf '[]\\n'\n")
+		t.Setenv("PATH", ambientDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		store, err := scopedBdStoreForCity(context.Background(), makeCity(t, ""))
+		if err != nil {
+			t.Fatalf("scopedBdStoreForCity: %v", err)
+		}
+		if _, err := store.List(beads.ListQuery{AllowScan: true}); err != nil {
+			t.Fatalf("List with default bd command: %v", err)
+		}
+	})
+}
+
+func TestRequireBdBinaryForCityAcceptsAbsoluteBDBinForCompleteBinding(t *testing.T) {
+	pinnedDir := t.TempDir()
+	writeExecutable(t, filepath.Join(pinnedDir, "bd"), "#!/bin/sh\nexit 0\n")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = "+strconv.Quote(pinnedDir)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scopeMetadataJSONPath(cityDir), []byte(`{"backend":"postgres","storage_endpoint":"opaque-remote","storage_database":"work","dolt_mode":"server"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	noBdDir := t.TempDir()
+	t.Setenv("PATH", noBdDir)
+
+	if err := requireBdBinaryForCity(cityDir); err != nil {
+		t.Fatalf("workspace-pinned bd preflight: %v", err)
+	}
+}
+
+func TestRequireBdBinaryForCityAcceptsWorkspacePinForManagedCity(t *testing.T) {
+	pinnedDir := t.TempDir()
+	writeExecutable(t, filepath.Join(pinnedDir, "bd"), "#!/bin/sh\nexit 0\n")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = "+strconv.Quote(pinnedDir)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+
+	if err := requireBdBinaryForCity(cityDir); err != nil {
+		t.Fatalf("managed-city workspace-pinned bd preflight: %v", err)
+	}
+}
+
+// TestRequireBdBinaryForCityErrorText pins the three messages the preflight
+// produces. They are the whole reason errBdNotOnPath is a sentinel rather
+// than a formatted string: an ambient miss gets the remediation hint, while
+// a pin or binding fault the operator can actually act on is returned
+// verbatim instead of being flattened into "bd not found in PATH".
+func TestRequireBdBinaryForCityErrorText(t *testing.T) {
+	newCity := func(t *testing.T, cityTOML, metadata string) string {
+		t.Helper()
+		cityDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if metadata != "" {
+			if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(scopeMetadataJSONPath(cityDir), []byte(metadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Setenv("PATH", t.TempDir())
+		return cityDir
+	}
+
+	t.Run("ambient miss keeps the remediation hint", func(t *testing.T) {
+		cityDir := newCity(t, "[workspace]\nname = \"demo\"\n", "")
+		err := requireBdBinaryForCity(cityDir)
+		if err == nil || err.Error() != "bd not found in PATH (install beads or set GC_BEADS=file)" {
+			t.Fatalf("requireBdBinaryForCity() = %v, want the ambient-miss message with its remediation", err)
+		}
+	})
+
+	t.Run("unresolvable pin is returned verbatim", func(t *testing.T) {
+		pinDir := t.TempDir() // configured, but holds no bd
+		cityTOML := "[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = " + strconv.Quote(pinDir) + "\n"
+		cityDir := newCity(t, cityTOML, `{"backend":"postgres","storage_endpoint":"opaque-remote","storage_database":"work"}`)
+		err := requireBdBinaryForCity(cityDir)
+		if err == nil || err.Error() != "workspace.env PATH is configured but contains no executable bd at an absolute path" {
+			t.Fatalf("requireBdBinaryForCity() = %v, want the unresolvable-pin message verbatim", err)
+		}
+	})
+
+	t.Run("partial binding is returned verbatim", func(t *testing.T) {
+		cityDir := newCity(t, "[workspace]\nname = \"demo\"\n", `{"backend":"postgres","storage_endpoint":"opaque-remote"}`)
+		err := requireBdBinaryForCity(cityDir)
+		if err == nil || !strings.Contains(err.Error(), "partial beads storage binding") {
+			t.Fatalf("requireBdBinaryForCity() = %v, want the partial-binding message verbatim", err)
+		}
+	})
 }
 
 func TestBdStoreBackingFindsDirectBdStore(t *testing.T) {
@@ -265,5 +416,159 @@ func waitForNonEmptyFileContent(t *testing.T, path string, timeout time.Duration
 			t.Fatalf("timed out waiting for %s to be written", path)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// fakeProxiedStore stands in for *beads.ProxiedStore, which cannot be built
+// outside internal/beads: its constructor demands an admitted beads.Pin, and
+// Pin's fields are unexported precisely so the proxied opener cannot be reached
+// without a gate pass. That fence is why the unwrap seam is an INTERFACE — a
+// caller that type-asserted the concrete store would have no way to test its own
+// branch without a live proxy, a real Dolt server and a passing admission.
+type fakeProxiedStore struct {
+	beads.MemStore
+	demoted bool
+	bdLeaf  beads.Store
+	verdict *beads.ProxiedVerdictError
+	report  beads.ProxiedOpenReport
+}
+
+func (s *fakeProxiedStore) Demoted() bool                       { return s.demoted }
+func (s *fakeProxiedStore) Verdict() *beads.ProxiedVerdictError { return s.verdict }
+func (s *fakeProxiedStore) BdLeaf() beads.Store                 { return s.bdLeaf }
+func (s *fakeProxiedStore) Report() beads.ProxiedOpenReport     { return s.report }
+
+// TestScopedStoreLikeReturnsNilForNativeProxiedStore is the zero-fork half of
+// P2-13, and it is the half that makes `gc status` cost nothing on a proxied
+// city.
+//
+// While the split store's native leaf serves, its reads are library calls over
+// bd's proxy: there is no subprocess to bind a deadline to, and handing back a bd
+// clone here would make loadStatusSessionSnapshot rebuild a store that forks once
+// per read — silently turning the lane's headline property (0 forks, down from 2)
+// back into two forks, with every test still green.
+func TestScopedStoreLikeReturnsNilForNativeProxiedStore(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	native := &fakeProxiedStore{demoted: false, bdLeaf: beads.NewBdStore(cityDir, noopBdRunner())}
+
+	scoped, err := scopedStoreLike(context.Background(), cityDir, &config.City{}, native)
+	if err != nil {
+		t.Fatalf("scopedStoreLike: %v", err)
+	}
+	if scoped != nil {
+		t.Fatalf("scopedStoreLike() = %T, want nil while the native leaf serves: the session reads must stay on the wrapper", scoped)
+	}
+	if got, ok := bdStoreBacking(native); ok {
+		t.Fatalf("bdStoreBacking() = (%p, true), want ok=false for a store that is not forking", got)
+	}
+	// And the same answer through the wrappers a real caller holds.
+	wrapped := wrapStoreWithBeadPolicies(beads.NewCachingStoreForTest(native, nil), &config.City{})
+	if got, ok := bdStoreBacking(wrapped); ok {
+		t.Fatalf("bdStoreBacking(policy(cache(native proxied))) = (%p, true), want ok=false", got)
+	}
+}
+
+// TestScopedStoreLikeClonesCtxBoundBdStoreForDemotedProxiedStore is the other
+// half: after a stand-down the wrapper's reads ARE bd forks, and gc status runs
+// them under a 3s deadline (statusSessionSnapshotTimeout). A clone that is not
+// bound to that deadline abandons a live bd child instead of killing it, which is
+// the leak ga-cdmx6x exists to prevent — so a demoted wrapper must unwrap to its
+// bd leaf.
+func TestScopedStoreLikeClonesCtxBoundBdStoreForDemotedProxiedStore(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	leaf := beads.NewBdStore(cityDir, noopBdRunner())
+	demoted := &fakeProxiedStore{
+		demoted: true,
+		bdLeaf:  leaf,
+		verdict: beads.NewProxiedVerdictError(beads.ProxiedVerdictDatabaseGone, "the database went away", nil),
+	}
+
+	backing, ok := bdStoreBacking(demoted)
+	if !ok || backing != leaf {
+		t.Fatalf("bdStoreBacking(demoted) = (%p, %v), want the bd leaf %p", backing, ok, leaf)
+	}
+
+	scoped, err := scopedStoreLike(context.Background(), cityDir, &config.City{}, demoted)
+	if err != nil {
+		t.Fatalf("scopedStoreLike: %v", err)
+	}
+	clone, isBd := scoped.(*beads.BdStore)
+	if !isBd {
+		t.Fatalf("scopedStoreLike() = %T, want a *beads.BdStore clone", scoped)
+	}
+	if clone == leaf {
+		t.Fatal("scopedStoreLike handed back the wrapper's own leaf; that store's runner is fixed to context.Background()")
+	}
+	if got := clone.Dir(); got != cityDir {
+		t.Fatalf("clone Dir() = %q, want the city scope %q", got, cityDir)
+	}
+
+	// The clone carries the REQUEST's context: a canceled one refuses instead of
+	// building a store whose child outlives the command.
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := scopedStoreLike(canceled, cityDir, &config.City{}, demoted); !errors.Is(err, context.Canceled) {
+		t.Fatalf("scopedStoreLike(canceled ctx) error = %v, want context.Canceled", err)
+	}
+
+	// And through the wrappers a real caller holds.
+	wrapped := wrapStoreWithBeadPolicies(beads.NewCachingStoreForTest(demoted, nil), &config.City{})
+	if backing, ok := bdStoreBacking(wrapped); !ok || backing != leaf {
+		t.Fatalf("bdStoreBacking(policy(cache(demoted))) = (%p, %v), want the bd leaf %p", backing, ok, leaf)
+	}
+}
+
+// TestBeadPolicyStoreCarriesTheProxiedStoreView pins the seam itself. The policy
+// layer is the outermost store every caller holds and it embeds the beads.Store
+// interface, so without this forward internal/doctor cannot ask a handle whether
+// it has stood down — which is how `gc doctor` came to report a demoted city as
+// native.
+func TestBeadPolicyStoreCarriesTheProxiedStoreView(t *testing.T) {
+	view := &fakeProxiedStore{demoted: true, bdLeaf: beads.NewMemStore()}
+	wrapped := wrapStoreWithBeadPolicies(view, &config.City{})
+
+	carried, ok := beads.ProxiedStoreFrom(wrapped)
+	if !ok {
+		t.Fatal("the policy wrapper hides the proxied store; doctor would report the account at open forever")
+	}
+	if !carried.Demoted() {
+		t.Fatal("the carried view disagrees with the store underneath it")
+	}
+	if _, ok := beads.ProxiedStoreFrom(wrapStoreWithBeadPolicies(beads.NewMemStore(), &config.City{})); ok {
+		t.Fatal("a policy-wrapped MemStore answered as a proxied store")
+	}
+}
+
+// TestBdStoreBackingGuardsATypedNilProxiedView is council A-F10.
+//
+// The interface arm read `if v == nil || !v.Demoted()`. `v == nil` is false for
+// an interface holding a nil *beads.ProxiedStore — the interface has a type —
+// and (*ProxiedStore).Demoted takes s.mu.RLock() on the nil receiver and
+// panics. The two neighboring arms (*beads.BdStore, *beads.CachingStore) both
+// guard their typed nils explicitly, so this was an inconsistency rather than a
+// deliberate choice, and bdStoreBacking is reached from gc status's snapshot
+// path where a panic is the whole command.
+func TestBdStoreBackingGuardsATypedNilProxiedView(t *testing.T) {
+	var typedNil *beads.ProxiedStore
+	// Through beads.Store, which is what bdStoreBacking takes; the type switch
+	// inside it is what reaches the ProxiedStoreView arm.
+	var store beads.Store = typedNil
+	// Asserted through reflect rather than `store == nil`: the comparison is
+	// the very thing this test is about, and staticcheck rejects it (SA4023)
+	// precisely because it can see that an interface with a type is never nil.
+	// That is the bug, stated by the linter.
+	if value := reflect.ValueOf(store); value.Kind() != reflect.Pointer || !value.IsNil() {
+		t.Fatal("the fixture did not build a typed nil; this test would prove nothing")
+	}
+	if _, ok := store.(beads.ProxiedStoreView); !ok {
+		t.Fatal("a *beads.ProxiedStore no longer satisfies ProxiedStoreView, so this test does not " +
+			"reach the arm it is about")
+	}
+
+	got, ok := bdStoreBacking(store)
+	if ok || got != nil {
+		t.Fatalf("bdStoreBacking(typed nil) = (%v, %v), want (nil, false)", got, ok)
 	}
 }

@@ -1,0 +1,349 @@
+package beads
+
+import (
+	"errors"
+	"fmt"
+	"os/exec"
+	"strings"
+)
+
+// This file consumes bd's native conditional-release verb, which is what the
+// ReleaseIfCurrent SEAM was waiting for.
+//
+// The release is a compare-and-swap: clear an in-progress assignment only while
+// the bead still carries the expected assignee. It used to be assembled as raw
+// SQL — `UPDATE issues SET status='open', assignee='' WHERE id=… AND
+// status='in_progress' AND assignee=…` — and the verdict was read out of
+// rows_affected. That had three costs: the statement had to be built by
+// concatenating hand-escaped MySQL string literals, `bd sql` is rejected outright
+// in embedded mode (so the path needed a second implementation shelling directly
+// to `dolt sql`), and a CAS that matches zero rows is indistinguishable from one
+// that could not run.
+//
+// bd now expresses the same two preconditions natively:
+//
+//	bd update <id> --if-assignee <expected> --if-status in_progress \
+//	               --status open --assignee ""
+//
+// and — unlike every other bd failure, which is exit 1 with a message — reports
+// a failed precondition as its own exit status, 13, having written nothing. The
+// CAS verdict is therefore a NUMBER, not a parse of bd's prose. That is the
+// whole reason to prefer this verb: the load-bearing branch stops depending on
+// message text.
+//
+// The raw-SQL path stays as the fallback, selected by a per-store latch the
+// first time bd rejects the flag as unknown. What reaches it is the
+// contract-tested minimum: deps.env BD_PREV_VERSION (1.0.4) predates
+// beads#5008, so a store opened against that bd latches and stays there.
+//
+// The installable default does not reach it. deps.env BD_VERSION is
+// v1.3.1, cut from beads main past beads#5008, so on a stock install the
+// VERB is the live path and the fallback serves the floor alone. The verb is
+// also exercised against the source-built deps.env BD_CURRENT_REF bd
+// (make test-bd-conditional-release-contract) — now where the contract is
+// homed by choice, not the only cell that can run it.
+
+// bdCASPreconditionExitCode is bd's dedicated exit status for a rejected
+// --if-assignee / --if-status precondition: nothing was written, and the verdict
+// is "the precondition no longer held", not "the command failed". Every other bd
+// failure, including an unresolvable id, is exit 1.
+const bdCASPreconditionExitCode = 13
+
+// conditionalReleaseUnsupported reports whether this store has already seen bd
+// reject the conditional-release flags. The latch is one-way: a bd that lacks
+// the flags cannot grow them inside one process lifetime, and re-probing on
+// every release would pay a failed subprocess per call.
+func (s *BdStore) conditionalReleaseUnsupported() bool {
+	s.condReleaseMu.Lock()
+	defer s.condReleaseMu.Unlock()
+	return s.condReleaseLatchedUnsupported
+}
+
+// latchConditionalReleaseUnsupported records that bd does not understand the
+// conditional-release flags, sending every later release straight to the SQL
+// fallback.
+func (s *BdStore) latchConditionalReleaseUnsupported() {
+	s.condReleaseMu.Lock()
+	defer s.condReleaseMu.Unlock()
+	s.condReleaseLatchedUnsupported = true
+}
+
+// releaseIfCurrentViaBdVerb performs the conditional release through bd's native
+// verb, after checking that id names exactly the bead bd resolves
+// (releaseIDCollision).
+//
+// handled=false means this bd does not support the verb and the caller must take
+// the raw-SQL fallback; it is the ONLY value that causes a fallback, so a real
+// backend failure can never be mistaken for an old bd.
+func (s *BdStore) releaseIfCurrentViaBdVerb(id, expectedAssignee string) (released, handled bool, err error) {
+	if collision := s.releaseIDCollision(id); collision != nil {
+		return false, true, collision
+	}
+	// --assignee "" is how bd clears an assignment; the paired --status open
+	// completes the same swap the SQL statement performed, and both --if-* flags
+	// carry the preconditions bd now evaluates server-side.
+	out, runErr := s.runBDTransientWriteOutput(
+		"update", id,
+		"--if-assignee", expectedAssignee,
+		"--if-status", "in_progress",
+		"--status", "open",
+		"--assignee", "",
+	)
+	if runErr == nil {
+		return true, true, nil
+	}
+	if bdExitCode(runErr) == bdCASPreconditionExitCode {
+		// The precondition no longer held. bd wrote nothing, and the caller must
+		// read this as an authoritative "someone else holds it", not an error.
+		return false, true, nil
+	}
+	detail := strings.TrimSpace(string(out)) + " " + runErr.Error()
+	if isBdUnknownFlagError(detail, "--if-assignee") || isBdUnknownFlagError(detail, "--if-status") {
+		return false, false, nil
+	}
+	if isBdIssueNotFound(runErr) {
+		// A bead this store cannot resolve can hold no assignment, which is the
+		// same verdict the SQL statement reached by matching zero rows. Kept so
+		// the observable contract does not change with the backend verb.
+		return false, true, nil
+	}
+	return false, true, runErr
+}
+
+// releaseIDCollision reports bd having resolved id to a DIFFERENT bead.
+//
+// The statement this verb replaced was `WHERE id = <literal>` — exact by
+// construction. bd's resolver is not: with no exact hit it falls back to
+// prefix/substring matching, so `bd update tst-d6 --if-assignee worker-1 …`
+// mutates tst-d6e and reports success. The CAS preconditions are no defense,
+// because bd evaluates them against the bead it resolved rather than the one the
+// caller named, and a worker usually holds several beads, so a sibling satisfies
+// them. That is the incident shape gcy-g4o records ("gcy-dv7" → "gcy-wisp-dv78"),
+// and gascity is systematically exposed to it because formula steps run as
+// <prefix>-wisp-<suffix> wisps.
+//
+// Get already enforces the exact match and reports ErrIDCollision, so the guard
+// costs one read. Only a confirmed collision blocks the release: a plain
+// ErrNotFound falls through (the bead may be invisible to the read seam, and the
+// verb reaches the same "not held" verdict anyway), and a failed read falls
+// through rather than converting a broken read into a refused write — the
+// fail-open tradeoff cmd_bd.go's pre-flight guard documents.
+//
+// Only the verb path needs this; the raw-SQL fallback still matches id
+// literally.
+func (s *BdStore) releaseIDCollision(id string) error {
+	if _, err := s.Get(id); errors.Is(err, ErrIDCollision) {
+		return fmt.Errorf("refusing to release %q: %w", id, err)
+	}
+	return nil
+}
+
+// bdIssueNotFoundPhrases are bd's wordings for "that id resolves to no issue".
+// Measured against bd: `bd update tst-nosuchbead --status open` exits 1 with
+// `Error resolving tst-nosuchbead: no issue found matching "tst-nosuchbead"`,
+// and its --json envelope carries the plural form.
+var bdIssueNotFoundPhrases = []string{
+	"no issue found",
+	"no issues found",
+	"issue not found",
+}
+
+// isBdIssueNotFound reports whether err is bd refusing to resolve the bead id.
+//
+// It deliberately does not use the package-wide isBdNotFound, whose bare
+// "not found" substring is unanchored and matched against the whole runner
+// error. Everywhere else that helper produces an ERROR (ErrNotFound); here the
+// verdict is a CAS ANSWER — "nobody holds it, do not retry" — so a bd that fell
+// off PATH (`exec: "bd": executable file not found in $PATH`), a renamed
+// database (`database "fe" not found on Dolt server …`) or a gateway's
+// `404 page not found` would each be answered as a clean refusal instead of
+// surfacing as the infrastructure failure it is. The replaced SQL path reported
+// every one of those as an error, and a CAS verdict invented out of a dead
+// backend is the exact failure this conversion exists to remove.
+//
+// The gate is numeric first: bd exits 1 for an unresolvable id (13 is reserved
+// for a rejected precondition), so a spawn failure — which carries no process
+// exit status at all — can never reach this verdict.
+func isBdIssueNotFound(err error) bool {
+	if err == nil || bdExitCode(err) != 1 {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	for _, phrase := range bdIssueNotFoundPhrases {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// exitCoder is the process-status surface bdExitCode reads. *exec.ExitError —
+// what the runner actually wraps — satisfies it through its embedded
+// *os.ProcessState. Matching the method instead of the concrete type lets the
+// CAS classifier be driven from a unit test without spawning a process, which
+// the untagged test-resource ledger forbids (TESTING.md: "untagged subprocess
+// call/file totals cannot grow"). The assertion below is the link back to
+// reality: if bd's runner error ever stops carrying its exit status this way,
+// this file stops compiling.
+type exitCoder interface{ ExitCode() int }
+
+var _ exitCoder = (*exec.ExitError)(nil)
+
+// bdExitCode returns the process exit status carried by err, or -1 when err is
+// not a process failure. The runner wraps the *exec.ExitError with %w
+// (classifyBDExecResult), so the status survives to here.
+func bdExitCode(err error) int {
+	var coder exitCoder
+	if errors.As(err, &coder) {
+		return coder.ExitCode()
+	}
+	return -1
+}
+
+// isBdUnknownFlagError matches the usage error bd's flag parser emits for a flag
+// this build does not have.
+//
+// It is ANCHORED to the flag name immediately following the parser's marker. A
+// cobra usage echo lists every flag in its help block on ANY flag error, so a
+// floating "contains --if-assignee" check would latch a CAPABLE bd the moment
+// gascity passed some unrelated bad flag — the exact silent degrade the latch
+// exists to avoid. isBdUnknownIfRevisionFlag applies the same rule to the
+// revision-CAS probe.
+func isBdUnknownFlagError(msg, flag string) bool {
+	flag = strings.ToLower(strings.TrimLeft(flag, "-"))
+	if flag == "" {
+		return false
+	}
+	lower := strings.ToLower(msg)
+	for _, anchor := range []string{
+		"unknown flag: --" + flag,
+		"unknown flag: -" + flag,
+		"unknown flag '--" + flag + "'",
+		"flag provided but not defined: -" + flag,
+		"flag provided but not defined: --" + flag,
+	} {
+		if strings.Contains(lower, anchor) {
+			return true
+		}
+	}
+	return false
+}
+
+// ErrConditionalTransferUnsupported reports that this bd does not understand the
+// --if-assignee / --if-status preconditions, so an assignee transfer cannot be
+// made conditional. Callers must not fall back to an unconditional write.
+var ErrConditionalTransferUnsupported = errors.New("bd does not support conditional assignee transfer")
+
+// TransferIfCurrent moves an in_progress bead from one exact assignee spelling
+// to another, only while the bead still carries fromAssignee:
+//
+//	bd update <id> --if-assignee <from> --if-status in_progress --assignee <to>
+//
+// It reports true when the bead now carries toAssignee. A rejected precondition
+// (bd exit 13) or an unresolvable id reports false with no error: someone else
+// holds the bead, or it is no longer in progress. A transfer that already landed
+// (a retried write whose first attempt committed) is recognized by a readback
+// and reported as true.
+//
+// bd skips its reassignment-steal fence under --if-assignee, because the CAS
+// names the holder explicitly; that is what lets a session rewrite its own
+// legacy spelling without --force.
+func (s *BdStore) TransferIfCurrent(id, fromAssignee, toAssignee string) (bool, error) {
+	fromAssignee = strings.TrimSpace(fromAssignee)
+	toAssignee = strings.TrimSpace(toAssignee)
+	if fromAssignee == "" || toAssignee == "" {
+		return false, fmt.Errorf("bd transfer-if-current %s: from and to assignees are required", id)
+	}
+	if fromAssignee == toAssignee {
+		return true, nil
+	}
+	if err := s.guardRelocatedClassIDs("transfer-if-current "+id, id); err != nil {
+		return false, err
+	}
+	if collision := s.releaseIDCollision(id); collision != nil {
+		return false, collision
+	}
+	out, runErr := s.runBDTransientWriteOutput(
+		"update", id,
+		"--if-assignee", fromAssignee,
+		"--if-status", "in_progress",
+		"--assignee", toAssignee,
+	)
+	if runErr == nil {
+		return true, nil
+	}
+	if bdExitCode(runErr) == bdCASPreconditionExitCode {
+		// Either another claimant holds it, or a retried attempt already
+		// committed this very transfer. Only the readback can tell them apart.
+		if current, err := s.Get(id); err == nil && strings.TrimSpace(current.Assignee) == toAssignee {
+			return true, nil
+		}
+		return false, nil
+	}
+	detail := strings.TrimSpace(string(out)) + " " + runErr.Error()
+	if isBdUnknownFlagError(detail, "--if-assignee") || isBdUnknownFlagError(detail, "--if-status") {
+		return false, ErrConditionalTransferUnsupported
+	}
+	if isBdIssueNotFound(runErr) {
+		return false, nil
+	}
+	return false, fmt.Errorf("bd transfer-if-current: %w", runErr)
+}
+
+var _ AssignmentGuardedUpdater = (*BdStore)(nil)
+
+// UpdateIfAssignment applies opts only while the bead still has expectedStatus
+// and expectedAssignee, checked by bd inside the same write:
+//
+//	bd update <id> <opts…> --if-status <status> --if-assignee <assignee>
+//
+// It is the BdStore answer to an assignment change that must be fenced on the
+// facts it was decided from when bd has no --if-revision. An empty
+// expectedAssignee requires the bead to be unassigned, and bd reads a NULL
+// assignee as empty. A rejected guard (bd exit 13) or an unresolvable id
+// reports false with nothing written: another actor won, and the caller's next
+// pass decides again. A bd without the guard flags returns
+// ErrConditionalWriteUnsupported and latches the store, as ReleaseIfCurrent's
+// verb does, so the caller can refuse rather than write blind.
+//
+// An ambiguous failure is never replayed (runBDTransientReleaseOutput): the
+// first attempt may have committed, and a replay could release a same-assignee
+// reclaim that landed in between.
+func (s *BdStore) UpdateIfAssignment(id, expectedStatus, expectedAssignee string, opts UpdateOpts) (bool, error) {
+	if err := validateConditionalUpdateOpts(opts); err != nil {
+		return false, fmt.Errorf("bd update-if-assignment %s: %w", id, err)
+	}
+	expectedStatus = strings.TrimSpace(expectedStatus)
+	if expectedStatus == "" {
+		return false, fmt.Errorf("bd update-if-assignment %s: an expected status is required", id)
+	}
+	if err := s.guardRelocatedClassIDs("update-if-assignment "+id, id); err != nil {
+		return false, err
+	}
+	if s.conditionalReleaseUnsupported() {
+		return false, ErrConditionalWriteUnsupported
+	}
+	if collision := s.releaseIDCollision(id); collision != nil {
+		return false, collision
+	}
+	args := append(bdUpdateArgs(id, opts),
+		"--if-status", expectedStatus,
+		"--if-assignee", strings.TrimSpace(expectedAssignee),
+	)
+	out, runErr := s.runBDTransientReleaseOutput(args...)
+	if runErr == nil {
+		return true, nil
+	}
+	if bdExitCode(runErr) == bdCASPreconditionExitCode {
+		return false, nil
+	}
+	detail := strings.TrimSpace(string(out)) + " " + runErr.Error()
+	if isBdUnknownFlagError(detail, "--if-assignee") || isBdUnknownFlagError(detail, "--if-status") {
+		s.latchConditionalReleaseUnsupported()
+		return false, ErrConditionalWriteUnsupported
+	}
+	if isBdIssueNotFound(runErr) {
+		return false, nil
+	}
+	return false, fmt.Errorf("bd update-if-assignment %s: %w", id, runErr)
+}

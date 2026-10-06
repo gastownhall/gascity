@@ -104,6 +104,7 @@ func (c *DurationRangeCheck) collectRanges() []durationRange {
 		durationRange{"[session]", "nudge_lock_timeout", c.cfg.Session.NudgeLockTimeout, minTimeout, maxTimeout},
 		durationRange{"[session]", "startup_timeout", c.cfg.Session.StartupTimeout, minTimeout, maxTimeout},
 		durationRange{"[session]", "progress_stall_timeout", c.cfg.Session.ProgressStallTimeout, config.ProgressStallTimeoutMinimum, maxWindow},
+		durationRange{"[session]", "claim_holder_stall_timeout", c.cfg.Session.ClaimHolderStallTimeout, config.ProgressStallTimeoutMinimum, maxWindow},
 	)
 
 	// Daemon config.
@@ -133,7 +134,8 @@ func (c *DurationRangeCheck) collectRanges() []durationRange {
 }
 
 func durationRangeNonPositiveDisables(dr durationRange) bool {
-	return dr.context == "[session]" && dr.field == "progress_stall_timeout"
+	return dr.context == "[session]" &&
+		(dr.field == "progress_stall_timeout" || dr.field == "claim_holder_stall_timeout")
 }
 
 // CanFix returns false — unreasonable durations must be corrected by the user.

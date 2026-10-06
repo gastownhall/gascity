@@ -124,10 +124,11 @@ func TestFindBareBDCommands(t *testing.T) {
 func TestCoreMaintenanceExecAssets(t *testing.T) {
 	required := []string{
 		"assets/scripts/_bd_trace.sh",
-		"assets/scripts/dolt-target.sh",
 		"assets/scripts/escalate.sh",
 		"assets/scripts/jsonl-export.sh",
+		"assets/scripts/order_outcome.sh",
 		"assets/scripts/reaper.sh",
+		"assets/scripts/scope_bd.sh",
 		"orders/jsonl-export.toml",
 		"orders/reaper.toml",
 	}
@@ -142,6 +143,9 @@ func TestCoreMaintenanceExecAssets(t *testing.T) {
 		"formulas/mol-dog-reaper.toml",
 		"orders/mol-dog-jsonl.toml",
 		"orders/mol-dog-reaper.toml",
+		// Retired with the move to bd verbs: the maintenance orders no
+		// longer resolve a Dolt port of their own.
+		"assets/scripts/dolt-target.sh",
 	}
 	for _, path := range retired {
 		if _, err := fs.Stat(PackFS, path); err == nil {
@@ -213,6 +217,24 @@ func TestCoreMaintenanceOrdersCarryLegacySkipAliases(t *testing.T) {
 		}
 		if len(parsed.Order.SkipAliases) != 1 || parsed.Order.SkipAliases[0] != tt.want {
 			t.Fatalf("%s skip_aliases = %#v, want [%q]", tt.path, parsed.Order.SkipAliases, tt.want)
+		}
+	}
+}
+
+// TestClaimProtocolFragmentIsEmbedded pins the go:embed inclusion of
+// template-fragments/. The fragment render tests in cmd/gc read the on-disk
+// source tree, but production cities hydrate the core pack from PackFS —
+// dropping all:template-fragments from the embed directive would ship
+// pool-worker prompts whose {{ template "claim-protocol" . }} degrades to an
+// unexpanded literal while every repo test stayed green.
+func TestClaimProtocolFragmentIsEmbedded(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "template-fragments/claim-protocol.template.md")
+	if err != nil {
+		t.Fatalf("core PackFS is missing template-fragments/claim-protocol.template.md: %v", err)
+	}
+	for _, want := range []string{`{{ define "claim-protocol" -}}`, "gc hook --claim --drain-ack --json"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("embedded claim-protocol fragment missing %q", want)
 		}
 	}
 }

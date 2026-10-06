@@ -270,6 +270,51 @@ func (s *Store) CloseRuns(ctx context.Context, ids []string, reason string) (int
 	return closed, lastErr
 }
 
+// CloseRunsSwept closes tracking runs with the stale-sweep audit metadata.
+func (s *Store) CloseRunsSwept(ctx context.Context, ids []string, reason, sweptBy string) (int, error) {
+	ids = uniqueNonEmptyIDs(ids)
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s.store.Store == nil {
+		return 0, fmt.Errorf("order-tracking close: nil store")
+	}
+	metadata := map[string]string{"close_reason": reason, "order_tracking_sweep": reason}
+	if sweptBy != "" {
+		metadata["order_tracking_sweep_by"] = sweptBy
+	}
+	closed := 0
+	var lastErr error
+	for attempt := 1; attempt <= closeVerifyAttempts; attempt++ {
+		n, err := s.store.CloseAll(ids, metadata)
+		closed += n
+		if closed > len(ids) {
+			closed = len(ids)
+		}
+		if err == nil {
+			openIDs, openErr := s.openIDs(ids)
+			if openErr == nil && len(openIDs) == 0 {
+				return closed, nil
+			}
+			if openErr != nil {
+				err = openErr
+			} else {
+				err = fmt.Errorf("still open: %s", strings.Join(openIDs, ", "))
+			}
+		}
+		lastErr = fmt.Errorf("closing swept order-tracking beads %s: %w", strings.Join(ids, ", "), err)
+		if attempt < closeVerifyAttempts {
+			if waitErr := s.waitCloseRetry(ctx); waitErr != nil {
+				return closed, errors.Join(lastErr, waitErr)
+			}
+		}
+	}
+	return closed, lastErr
+}
+
 func (s *Store) waitCloseRetry(ctx context.Context) error {
 	timer := time.NewTimer(closeVerifyRetryDelay)
 	defer timer.Stop()
@@ -352,7 +397,10 @@ func (s *Store) LastRun(name string) (time.Time, error) {
 	label := labelOrderRunPrefix + name
 	var latest time.Time
 	for _, store := range s.mixedLegStores() {
-		results, err := store.List(beads.ListQuery{
+		// Live: over a CachingStore a hard backing failure of this closed-history
+		// read comes back as a partial result holding only the cached open rows,
+		// which would read as surviving rows and shorten the cooldown.
+		results, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 			Label:         label,
 			Limit:         1,
 			IncludeClosed: true,
@@ -387,7 +435,9 @@ func (s *Store) Cursor(name string) EventCursor {
 	label := labelOrderRunPrefix + name
 	var latest uint64
 	for _, store := range s.mixedLegStores() {
-		results, err := store.List(beads.ListQuery{
+		// Live, for LastRun's reason: a cached partial answer would regress the
+		// cursor to the open rows' seqs and replay consumed events.
+		results, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 			Label:         label,
 			Limit:         10,
 			IncludeClosed: true,

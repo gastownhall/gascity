@@ -129,7 +129,7 @@ func TestDecideDriftAction(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			sv := SupervisorStatus{BuildID: tc.supervisorID}
-			got := decideDriftAction(tc.localBuildID, sv, nil, tc.flags)
+			got := decideDriftAction(gcBinaryIdentity{BuildID: tc.localBuildID}, sv, nil, tc.flags)
 			if got.ProceedNormally != tc.wantProceed {
 				t.Errorf("ProceedNormally = %v, want %v", got.ProceedNormally, tc.wantProceed)
 			}
@@ -225,6 +225,13 @@ func TestPrintSupervisorIdentity_EmptyBuildID(t *testing.T) {
 	}
 }
 
+func TestPIDGoneReturnsFalseForCurrentProcess(t *testing.T) {
+	pid := os.Getpid()
+	if pidGone(pid) {
+		t.Fatalf("pidGone(%d) = true for current live process", pid)
+	}
+}
+
 // driftCheckEnv stands up the shared seams runStartDriftCheck needs:
 // an httptest server serving /health with the chosen build_id, a
 // GC_HOME pointed at a temp dir, and stubbed supervisorAliveHook /
@@ -263,7 +270,15 @@ func driftCheckEnv(t *testing.T, supervisorBuildID string) (cityPath string, res
 	supervisorAliveHook = os.Getpid
 	supervisorAPIBaseURLHook = func() (string, error) { return srv.URL, nil }
 	supervisorSystemctlActive = func(string) bool { return false }
-	readSupervisorExePathHook = func(int) (string, error) { return "/tmp/gc-test-supervisor", nil }
+	// The fake supervisor runs this very executable, i.e. an in-place
+	// upgrade: the drift restart can bring it onto the local build. A
+	// supervisor from a different gc installation is refused before the
+	// drift check (supervisor_binary_mismatch_test.go).
+	supervisorExe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	readSupervisorExePathHook = func(int) (string, error) { return supervisorExe, nil }
 	restartHelpersHook = func() restartHelpers {
 		return restartHelpers{
 			Systemctl: func(...string) error { return nil },
@@ -532,5 +547,58 @@ func TestPrintDriftReport(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("drift report missing %q\nfull output:\n%s", want, out)
 		}
+	}
+}
+
+// TestSpawnDetachedSupervisorScrubsSessionIdentity pins the sibling of #6316:
+// a `gc start` drift respawn run from an agent shell forks a Setpgid
+// supervisor that outlives it and reparents to init. Carrying the agent's
+// GC_SESSION_ID would make that supervisor the session's orphan-sweep target
+// once the session closes. The child here is /bin/sh, not the test binary, so
+// the snapshot is the environment exactly as spawnDetachedSupervisor built it.
+func TestSpawnDetachedSupervisorScrubsSessionIdentity(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("requires /bin/sh")
+	}
+	t.Setenv("GC_HOME", t.TempDir())
+	snapshot := filepath.Join(t.TempDir(), "supervisor.env")
+	t.Setenv("GC_TEST_SUPERVISOR_ENV_SNAPSHOT", snapshot)
+	t.Setenv("GC_TEST_SUPERVISOR_ENV_CONTROL", "kept")
+	for _, key := range managedDoltSessionScopedEnvKeys {
+		t.Setenv(key, "stamped")
+	}
+
+	if err := spawnDetachedSupervisor("/bin/sh", "-c", `env > "$GC_TEST_SUPERVISOR_ENV_SNAPSHOT.tmp" && mv "$GC_TEST_SUPERVISOR_ENV_SNAPSHOT.tmp" "$GC_TEST_SUPERVISOR_ENV_SNAPSHOT"`); err != nil {
+		t.Fatalf("spawnDetachedSupervisor: %v", err)
+	}
+	var data []byte
+	deadline := time.After(10 * time.Second)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		var err error
+		data, err = os.ReadFile(snapshot)
+		if err == nil {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("supervisor child did not write its environment: %v", err)
+		case <-tick.C:
+		}
+	}
+	env := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if key, value, ok := strings.Cut(line, "="); ok {
+			env[key] = value
+		}
+	}
+	for _, key := range managedDoltSessionScopedEnvKeys {
+		if value, ok := env[key]; ok {
+			t.Errorf("detached supervisor inherited %s=%q from the spawning session", key, value)
+		}
+	}
+	if env["GC_TEST_SUPERVISOR_ENV_CONTROL"] != "kept" {
+		t.Errorf("detached supervisor lost unrelated env; GC_TEST_SUPERVISOR_ENV_CONTROL=%q", env["GC_TEST_SUPERVISOR_ENV_CONTROL"])
 	}
 }

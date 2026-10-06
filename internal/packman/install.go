@@ -1,7 +1,9 @@
 package packman
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -56,8 +58,8 @@ func ReadCachedPackImports(source, commit string) (map[string]config.Import, err
 	}
 	var imports map[string]config.Import
 	if err := config.WithRepoCacheReadLock(root, func() error {
-		if config.IsBundledSourceAtCanonicalPin(source, commit) {
-			if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
+		if repository, known := builtinpacks.RepositoryForSource(source); known && config.IsBundledSourceAtCanonicalPin(source, commit) {
+			if err := builtinpacks.ValidateSyntheticRepo(cachePath, repository, commit); err != nil {
 				gitInfo, gitErr := os.Stat(filepath.Join(cachePath, ".git"))
 				if gitutil.MissingCheckoutMarker(gitInfo, gitErr) {
 					return fmt.Errorf("synthetic cache is invalid: %w", err)
@@ -138,11 +140,19 @@ func EnsureBundledPacksCurrent(cityRoot string) error {
 		if pack.Commit == "" {
 			continue
 		}
+		if !config.IsBundledSourceAtCanonicalPin(source, pack.Commit) {
+			// Pinned off the canonical commit: this is an ordinary remote
+			// import that gc import install owns fetching. The running
+			// binary never serves embedded content for it, so there is no
+			// synthetic cache to repair here.
+			continue
+		}
 		cachePath, err := RepoCachePath(source, pack.Commit)
 		if err != nil {
 			return err
 		}
-		if builtinpacks.ValidateSyntheticRepoFast(cachePath, pack.Commit) == nil {
+		repository, known := builtinpacks.RepositoryForSource(source)
+		if known && builtinpacks.ValidateSyntheticRepoFast(cachePath, repository, pack.Commit) == nil {
 			continue
 		}
 		if _, err := EnsureRepoInCache(cityRoot, source, pack.Commit); err != nil {
@@ -186,13 +196,18 @@ func syncLock(cityRoot string, imports map[string]config.Import, mode InstallMod
 		chosen:         make(map[string]LockedPack),
 		refreshed:      make(map[string]bool),
 		validated:      make(map[string]bool),
+		releases:       make(map[string]RegistryRelease),
 	}
 
 	constraints, reachable, err := mergeDirectConstraints(imports)
 	if err != nil {
 		return nil, err
 	}
-	if len(reachable) == 0 {
+	// A direct import list with no remote entries (len(reachable) == 0) can
+	// still transitively reach remote sources through a local path-source
+	// pack's own imports — discoverReachableClosure walks those regardless
+	// of directness, so only an empty import list can skip the loop.
+	if len(imports) == 0 {
 		return &Lockfile{Schema: LockfileSchema, Packs: make(map[string]LockedPack)}, nil
 	}
 
@@ -206,6 +221,9 @@ func syncLock(cityRoot string, imports map[string]config.Import, mode InstallMod
 			return nil, err
 		}
 		if !dirty && !chosenChanged && sameStringMap(constraints, nextConstraints) && sameSet(reachable, nextReachable) {
+			if err := state.verifyRegistryReleases(nextReachable); err != nil {
+				return nil, err
+			}
 			return state.buildLock(nextReachable), nil
 		}
 		constraints = nextConstraints
@@ -226,6 +244,12 @@ type syncState struct {
 	chosen         map[string]LockedPack
 	refreshed      map[string]bool
 	validated      map[string]bool
+	// releases records the registry release each source was resolved to in
+	// this sync; its content hash is verified before the lock is returned.
+	releases map[string]RegistryRelease
+	// registriesRefreshed records that this upgrade already refreshed the
+	// registry catalogs once.
+	registriesRefreshed bool
 }
 
 // checkPolicy runs the untrusted-source policy for source once per sync. It is
@@ -296,22 +320,89 @@ func (s *syncState) resolveSource(source, constraint string) (bool, error) {
 	case InstallUpgrade:
 		// Always refresh below unless this sync already resolved the source.
 	case InstallResolveIfNeeded:
-		if !forceUpgrade && hasExisting && matchesExisting(existing, constraint) {
+		if !forceUpgrade && hasExisting && matchesExisting(existing, constraint) && lockedEntryAnswersConstraint(source, existing, constraint) {
 			return s.storeChosen(source, existing, false), nil
 		}
 	default:
 		return false, fmt.Errorf("unknown install mode %d", s.mode)
 	}
 
-	resolved, err := ResolveVersion(s.cityRoot, source, constraint)
+	resolved, err := s.resolveVersion(source, constraint, forceUpgrade || s.mode == InstallUpgrade)
 	if err != nil {
 		return false, err
 	}
-	return s.storeChosen(source, LockedPack{
-		Version: resolved.Version,
-		Commit:  resolved.Commit,
-		Fetched: time.Now().UTC(),
-	}, true), nil
+	return s.storeChosen(source, resolved, true), nil
+}
+
+// resolveVersion answers constraint for source. A source a configured pack
+// registry publishes resolves against that registry's release entries — never
+// git tags, which for a multi-pack repository belong to no pack — and the
+// release is remembered so its content hash is verified before the lock is
+// returned. Any other source resolves against git tags.
+func (s *syncState) resolveVersion(source, constraint string, forceUpgrade bool) (LockedPack, error) {
+	// An upgrade sees releases published since the registry caches were
+	// written: the first registry question of an upgrade refreshes them.
+	fetch := RegistryRefreshMissing
+	if forceUpgrade && !s.registriesRefreshed {
+		fetch = RegistryRefreshAll
+	}
+	release, ok, unavailable, err := resolveRegistryRelease(source, constraint, fetch)
+	if fetch == RegistryRefreshAll {
+		s.registriesRefreshed = true
+	}
+	if err != nil {
+		return LockedPack{}, fmt.Errorf("source %q: %w", source, err)
+	}
+	if ok {
+		s.releases[source] = release
+		return LockedPack{Version: release.Version, Commit: release.Commit, Fetched: time.Now().UTC()}, nil
+	}
+	delete(s.releases, source)
+	resolved, err := ResolveVersion(s.cityRoot, source, constraint)
+	if err != nil {
+		if unavailable != nil {
+			return LockedPack{}, fmt.Errorf("%w (pack registries were not all readable, so a registry release for this source may have been missed: %w)", err, unavailable)
+		}
+		return LockedPack{}, err
+	}
+	return LockedPack{Version: resolved.Version, Commit: resolved.Commit, Fetched: time.Now().UTC()}, nil
+}
+
+// lockedEntryAnswersConstraint reports whether an existing lock entry may be
+// reused for a version constraint. For a registry-published source the entry
+// must be one of the registry's releases: an entry an older gc resolved from a
+// repository tag (for example gascity-packs v0.4.0, which is no pack's
+// release) is re-resolved instead of silently kept. Sha pins and sources no
+// cached registry publishes are taken as locked.
+func lockedEntryAnswersConstraint(source string, locked LockedPack, constraint string) bool {
+	if strings.HasPrefix(constraint, "sha:") {
+		return true
+	}
+	isRelease, published := isRegistryRelease(source, locked)
+	return !published || isRelease
+}
+
+// verifyRegistryReleases checks the fetched content of every source this sync
+// resolved from a registry release against the release's content hash, so a
+// mismatch fails the sync before any caller writes the manifest or the lock.
+func (s *syncState) verifyRegistryReleases(reachable map[string]struct{}) error {
+	sources := make([]string, 0, len(s.releases))
+	for source := range s.releases {
+		if _, ok := reachable[source]; ok && s.chosen[source].Commit == s.releases[source].Commit {
+			sources = append(sources, source)
+		}
+	}
+	sort.Strings(sources)
+	for _, source := range sources {
+		release := s.releases[source]
+		if _, err := EnsureRepoInCache(s.cityRoot, source, release.Commit); err != nil {
+			return err
+		}
+		if err := verifyRegistryReleaseContent(source, release); err != nil {
+			return fmt.Errorf("source %q: %w", source, err)
+		}
+	}
+	return nil
 }
 
 func (s *syncState) discoverReachableClosure(imports map[string]config.Import) (map[string]string, map[string]struct{}, bool, error) {
@@ -326,16 +417,49 @@ func (s *syncState) discoverReachableClosure(imports map[string]config.Import) (
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if err := s.walkImport(name, imports[name], constraints, reachable, seen, &dirty); err != nil {
+		if err := s.walkImport(name, imports[name], constraints, reachable, seen, &dirty, s.cityRoot); err != nil {
 			return nil, nil, false, fmt.Errorf("import %q: %w", name, err)
 		}
 	}
 	return constraints, reachable, dirty, nil
 }
 
-func (s *syncState) walkImport(_ string, imp config.Import, constraints map[string]string, reachable map[string]struct{}, seen map[string]bool, dirty *bool) error {
+// walkImport walks one import into the reachable closure. declDir is the
+// directory a relative local-path source is resolved against: the city root
+// for top-level imports, and the declaring pack's own directory for nested
+// imports, so a local pack's relative local imports resolve against that
+// pack's location rather than the process working directory.
+func (s *syncState) walkImport(_ string, imp config.Import, constraints map[string]string, reachable map[string]struct{}, seen map[string]bool, dirty *bool, declDir string) error {
 	if !isRemoteSource(imp.Source) {
-		return nil
+		// A local path-source pack is never locked or fetched from cache,
+		// but its own declared imports still need to reach the closure —
+		// read its pack.toml straight off disk instead of from a resolved
+		// git commit cache. A relative source resolves against declDir, not
+		// the process working directory.
+		if !imp.ImportIsTransitive() {
+			return nil
+		}
+		srcDir := imp.Source
+		if !filepath.IsAbs(srcDir) {
+			srcDir = filepath.Join(declDir, srcDir)
+		}
+		if seen[srcDir] {
+			return nil
+		}
+		seen[srcDir] = true
+		nested, err := readPackImports(srcDir)
+		if err != nil {
+			// A local path source that isn't materialized on disk yet (a
+			// doctor-fix in-flight rewrite, a synthetic/placeholder import,
+			// or a not-yet-created pack directory) has no transitive
+			// imports to discover -- not a hard error. Only a pack.toml
+			// that exists but fails to parse is a genuine problem.
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return fmt.Errorf("local pack %q: %w", imp.Source, err)
+		}
+		return s.walkNestedImports(nested, constraints, reachable, seen, dirty, srcDir)
 	}
 
 	mergedConstraint, err := mergeConstraints(constraints[imp.Source], imp.Version)
@@ -353,7 +477,8 @@ func (s *syncState) walkImport(_ string, imp config.Import, constraints map[stri
 		return nil
 	}
 
-	if _, err := s.cachedPackPath(imp.Source, chosen.Commit); err != nil {
+	cachePath, err := s.cachedPackPath(imp.Source, chosen.Commit)
+	if err != nil {
 		return err
 	}
 	if !imp.ImportIsTransitive() {
@@ -368,13 +493,19 @@ func (s *syncState) walkImport(_ string, imp config.Import, constraints map[stri
 	if err != nil {
 		return err
 	}
+	// A remote pack's nested relative local import (if any) resolves under
+	// the cached checkout, not the city root.
+	return s.walkNestedImports(nested, constraints, reachable, seen, dirty, cachePath)
+}
+
+func (s *syncState) walkNestedImports(nested map[string]config.Import, constraints map[string]string, reachable map[string]struct{}, seen map[string]bool, dirty *bool, declDir string) error {
 	names := make([]string, 0, len(nested))
 	for name := range nested {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if err := s.walkImport(name, nested[name], constraints, reachable, seen, dirty); err != nil {
+		if err := s.walkImport(name, nested[name], constraints, reachable, seen, dirty, declDir); err != nil {
 			return fmt.Errorf("nested import %q: %w", name, err)
 		}
 	}

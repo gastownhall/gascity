@@ -7,6 +7,9 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"golang.org/x/mod/module"
+	"golang.org/x/mod/semver"
+
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -41,6 +44,11 @@ type PreflightChecker struct {
 	// BeadsLibraryVersion is the linked github.com/steveyegge/beads module
 	// version. Empty means infer it from build info.
 	BeadsLibraryVersion string
+	// BeadsLibraryReplaced reports whether a go.mod replace directive supplied
+	// the linked beads library, in which case its version identifies the
+	// replacement rather than a beads release. Set together with
+	// BeadsLibraryVersion; leaving both zero infers them from build info.
+	BeadsLibraryReplaced bool
 }
 
 // Check runs the beads backend preflight for scope and returns typed diagnostics.
@@ -49,16 +57,58 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 	if err != nil {
 		return PreflightResult{}, err
 	}
-	bdCtx, bdCtxErr := c.readBDContext(scope)
+	providerCheck := c.checkProvider()
+	metadataCheck := c.checkMetadataBackend(metadata)
 
-	checks := []PreflightCheckResult{
-		c.checkProvider(),
-		c.checkMetadataBackend(metadata),
-		c.checkBDContextAgreement(metadata, bdCtx, bdCtxErr),
-		c.checkDoltModeSafe(metadata, bdCtx, bdCtxErr),
-		c.checkIdentityMatch(scope, metadata),
-		c.checkVersionCompat(bdCtx, bdCtxErr),
-		c.checkContractShape(metadata),
+	// `bd context` is a subprocess per scope (~0.3-0.4 s, plus the git probes
+	// bd runs to resolve the repo). Its answer can only matter when the
+	// checks that precede it pass: once provider_contract or metadata_backend
+	// FAILs, the verdict is BLOCKED, and because those checks come FIRST in
+	// the order, they are also the gate and fallback reason whatever bd
+	// context would have said. So bd context is not consulted for a scope
+	// that is already blocked (e.g. a non-dolt backend, which is every scope
+	// of a postgres city). Nothing is cached: every Check re-reads metadata,
+	// so a long-lived controller sees an operator's config change on the next
+	// open exactly as before.
+	//
+	// Scope limit on that win: only the bd context subprocess is removed.
+	// identity_match still runs on the blocked branch, and whether its
+	// production reader dials is decided by the scope's .beads/config.yaml,
+	// not by the metadata backend that blocked the scope
+	// (cmd/gc.canonicalScopeDoltTarget -> ResolveScopeConfigState). A scope
+	// carrying no endpoint keys is legacy-minimal and bails before dialing,
+	// so for it the removed subprocess is the whole cost change; one that
+	// still carries gc.endpoint_origin plus dolt.host/dolt.port -- the
+	// residue a dolt-to-postgres migration leaves behind -- resolves
+	// authoritative and can still spend up to 5 s pinging an endpoint that is
+	// gone. That probe is pre-existing and unchanged here, but it bounds the
+	// figures above to the clean-config case.
+	var (
+		checks   []PreflightCheckResult
+		bdCtxErr error
+	)
+	if blocker, blocked := firstFailedCheck(providerCheck, metadataCheck); blocked {
+		checks = []PreflightCheckResult{
+			providerCheck,
+			metadataCheck,
+			bdContextNotConsultedCheck(PreflightCheckBDContextAgreement, blocker),
+			bdContextNotConsultedCheck(PreflightCheckDoltModeSafe, blocker),
+			c.checkIdentityMatch(scope, metadata),
+			bdContextNotConsultedCheck(PreflightCheckVersionCompat, blocker),
+			c.checkContractShape(metadata),
+		}
+	} else {
+		var bdCtx PreflightBDContext
+		bdCtx, bdCtxErr = c.readBDContext(scope)
+		checks = []PreflightCheckResult{
+			providerCheck,
+			metadataCheck,
+			c.checkBDContextAgreement(metadata, bdCtx, bdCtxErr),
+			c.checkDoltModeSafe(metadata, bdCtx, bdCtxErr),
+			c.checkIdentityMatch(scope, metadata),
+			c.checkVersionCompat(bdCtx, bdCtxErr),
+			c.checkContractShape(metadata),
+		}
 	}
 	verdict := preflightVerdictForChecks(checks)
 	// A DEGRADED verdict caused solely by an unreachable bd context (e.g. a
@@ -86,6 +136,26 @@ func (c PreflightChecker) Check(scope string) (PreflightResult, error) {
 		result.FallbackReason = preflightFallbackReason(checks)
 	}
 	return NewPreflightResult(result), nil
+}
+
+// firstFailedCheck returns the first FAILed check among checks.
+func firstFailedCheck(checks ...PreflightCheckResult) (PreflightCheckResult, bool) {
+	for _, check := range checks {
+		if check.State == PreflightCheckFail {
+			return check, true
+		}
+	}
+	return PreflightCheckResult{}, false
+}
+
+// bdContextNotConsultedCheck reports a bd-context-derived check that was not
+// evaluated because blocker already FAILed ahead of it. It WARNs rather than
+// PASSes: nothing was verified, and a WARN can neither move the gate nor the
+// fallback reason off the earlier FAIL, nor add a repair step.
+func bdContextNotConsultedCheck(id PreflightCheckID, blocker PreflightCheckResult) PreflightCheckResult {
+	return NewPreflightCheckResult(id, PreflightCheckWarn,
+		fmt.Sprintf("bd context not consulted; native store is already blocked by %s", blocker.ID),
+		PreflightDetails{MetadataBackend: blocker.Details.MetadataBackend, Provider: blocker.Details.Provider})
 }
 
 func (c PreflightChecker) readMetadata(scope string) (preflightMetadata, error) {
@@ -133,27 +203,14 @@ func ProviderUsesBDContract(provider string) bool {
 }
 
 func (c PreflightChecker) checkMetadataBackend(metadata preflightMetadata) PreflightCheckResult {
-	hasDSN := metadata.hasPostgresDSN()
-	hasSplit := metadata.hasPostgresSplitFields()
-	details := PreflightDetails{
-		MetadataBackend:     metadata.Backend,
-		HasPostgresDSN:      boolPtr(hasDSN),
-		HasSplitFields:      boolPtr(hasSplit),
-		PostgresDSNRedacted: metadata.PostgresDSN,
-		PostgresPassword:    metadata.PostgresPassword,
-	}
+	details := PreflightDetails{MetadataBackend: metadata.Backend}
 	switch metadata.Backend {
 	case "dolt":
 		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckPass, "Metadata backend is dolt", details)
-	case "postgres":
-		if hasDSN && !hasSplit {
-			return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckWarn, "Metadata backend is postgres (postgres_dsn form)", details)
-		}
-		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckFail, "Metadata backend is postgres; native store supports dolt only", details)
 	case "":
 		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckFail, "Metadata backend is missing", details)
 	default:
-		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckFail, fmt.Sprintf("Metadata backend %q is unsupported", metadata.Backend), details)
+		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckFail, fmt.Sprintf("Metadata backend %q is unsupported; the native store serves dolt only", metadata.Backend), details)
 	}
 }
 
@@ -205,6 +262,8 @@ func (c PreflightChecker) checkDoltModeSafe(metadata preflightMetadata, ctx Pref
 	switch ctx.DoltMode {
 	case "server":
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "bd context reports dolt server mode", details)
+	case "proxied-server":
+		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "bd context reports proxied Dolt server mode", details)
 	case "embedded":
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckFail, "dolt_mode=embedded; native store requires Dolt server mode (bd context must report dolt_mode=server) — falling back to per-call bd. See troubleshooting.", details)
 	default:
@@ -247,10 +306,8 @@ func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMet
 }
 
 func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) PreflightCheckResult {
-	libraryVersion := strings.TrimPrefix(strings.TrimSpace(c.BeadsLibraryVersion), "v")
-	if libraryVersion == "" {
-		libraryVersion = strings.TrimPrefix(beadsModuleVersion(), "v")
-	}
+	library := c.linkedBeadsLibrary()
+	libraryVersion := strings.TrimPrefix(library.Version, "v")
 	details := PreflightDetails{
 		BDVersion:           ctx.BDVersion,
 		BeadsLibraryVersion: libraryVersion,
@@ -268,52 +325,93 @@ func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) 
 	if ctx.BDVersion == "" {
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckWarn, "bd/beads version compatibility could not be confirmed", details)
 	}
-	if libraryVersion == "" || libraryVersion == "(devel)" {
-		// A local-path/replace (source) build of the linked beads library
-		// reports no module version ("(devel)") even though gc and bd are
-		// built from the same source. The schema version is validated above
-		// and is the real compatibility signal, so an unconfirmable library
-		// version must not take the native store offline — only a *confirmed*
-		// mismatch (below) should.
-		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd/beads schema compatible; linked library version unconfirmed (source build)", details)
+	if reason := library.unconfirmableReason(); reason != "" {
+		// The compare below only means something when both sides name the same
+		// released beads artifact. When the linked library does not — a source
+		// build, a replaced module, or a pseudo-version naming an untagged
+		// commit — the two strings can never be equal, and answering "mismatch"
+		// reports a verdict the check never had the evidence to reach. The
+		// schema version is validated above and is the real compatibility
+		// signal, so an unconfirmable library version must not take the native
+		// store offline; only a *confirmed* mismatch (below) should.
+		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd/beads schema compatible; linked library version unconfirmed ("+reason+")", details)
 	}
 	if strings.TrimPrefix(ctx.BDVersion, "v") != libraryVersion {
+		if newerSemverCompatibleBD(ctx.BDVersion, libraryVersion) {
+			return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd version is a newer semver-compatible release of the linked beads library version", details)
+		}
+		if samePrereleaseSeries(ctx.BDVersion, libraryVersion) {
+			return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd and the linked beads library are prereleases of the same release", details)
+		}
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd version differs from linked beads library version", details)
 	}
 	return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd and linked beads library versions match", details)
 }
 
+// newerSemverCompatibleBD reports whether bdVersion is a semver-compatible
+// upgrade of libraryVersion: the same major version, and not older. Per
+// semver, only a major bump breaks compatibility, so a newer bd release
+// within the linked library's major version — the common case when an
+// unversioned Homebrew dependency drifts ahead of gc's pinned go.mod release
+// (gastownhall/gascity#5164) — is safe to treat as compatible rather than a
+// hard version mismatch. Returns false (falling back to the exact-match
+// behavior already applied above) whenever either version does not parse as
+// valid semver, so this only ever widens what passes, never what fails.
+func newerSemverCompatibleBD(bdVersion, libraryVersion string) bool {
+	bdCanonical := "v" + strings.TrimPrefix(strings.TrimSpace(bdVersion), "v")
+	libCanonical := "v" + strings.TrimPrefix(strings.TrimSpace(libraryVersion), "v")
+	if !semver.IsValid(bdCanonical) || !semver.IsValid(libCanonical) {
+		return false
+	}
+	if semver.Major(bdCanonical) != semver.Major(libCanonical) {
+		return false
+	}
+	return semver.Compare(bdCanonical, libCanonical) >= 0
+}
+
+// samePrereleaseSeries reports whether both versions are prereleases of the same
+// MAJOR.MINOR.PATCH release — v1.3.0-rc.1 and v1.3.0-rc.2, in either order.
+//
+// newerSemverCompatibleBD deliberately refuses an OLDER bd, because an older bd
+// may not understand a newer library's schema. For the pairing this widening
+// was written for, that risk was checked rather than assumed: v1.3.0-rc.1 and
+// v1.3.0-rc.2 embed a byte-identical internal/storage/schema, both computing
+// LatestVersion() == 66, so neither can carry schema skew against the other.
+// That is a verified property of THAT pair, not a law of RC series: nothing
+// stops an rc.N from being cut precisely to land a schema change, and this
+// predicate compares version strings only, never schema versions. A future
+// same-series pin move must re-prove the schema premise for its own pair.
+//
+// gascity's own pins do not currently produce that pairing (BD_VERSION and
+// BD_CURRENT_VERSION are both v1.3.0-rc.2), so this widening is not load-bearing
+// for the current bump. It is kept so that an operator running a bd from
+// elsewhere in a series whose schema identity has been checked is not refused
+// a native store for a skew that pair does not carry.
+//
+// Kept deliberately narrow: BOTH sides must be prereleases and the release they
+// are candidates for must be identical, so every cross-release skew, and an RC
+// paired with its own final release, still fails. semver.Compare's prerelease
+// ordering is intentionally not consulted: ordering rc.1 before rc.2 says
+// nothing about which of them embeds which schema, so it is no substitute
+// for the by-hand check recorded above.
+func samePrereleaseSeries(bdVersion, libraryVersion string) bool {
+	bd := "v" + strings.TrimPrefix(strings.TrimSpace(bdVersion), "v")
+	lib := "v" + strings.TrimPrefix(strings.TrimSpace(libraryVersion), "v")
+	if !semver.IsValid(bd) || !semver.IsValid(lib) {
+		return false
+	}
+	bdPre, libPre := semver.Prerelease(bd), semver.Prerelease(lib)
+	if bdPre == "" || libPre == "" {
+		return false
+	}
+	return strings.TrimSuffix(semver.Canonical(bd), bdPre) == strings.TrimSuffix(semver.Canonical(lib), libPre)
+}
+
 func (c PreflightChecker) checkContractShape(metadata preflightMetadata) PreflightCheckResult {
-	hasDSN := metadata.hasPostgresDSN()
-	hasSplit := metadata.hasPostgresSplitFields()
-	details := PreflightDetails{
-		MetadataBackend:     metadata.Backend,
-		HasPostgresDSN:      boolPtr(hasDSN),
-		HasSplitFields:      boolPtr(hasSplit),
-		PostgresDSNRedacted: metadata.PostgresDSN,
-		PostgresPassword:    metadata.PostgresPassword,
-		PostgresHost:        metadata.PostgresHost,
-		PostgresPort:        metadata.PostgresPort,
-		PostgresUser:        metadata.PostgresUser,
-		PostgresDatabase:    metadata.PostgresDatabase,
-	}
-	if hasDSN && hasSplit {
-		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "postgres_dsn and split postgres fields are both present", details)
-	}
+	details := PreflightDetails{MetadataBackend: metadata.Backend}
 	switch metadata.Backend {
 	case "dolt":
-		if hasDSN || hasSplit {
-			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "dolt metadata contains postgres fields", details)
-		}
 		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses dolt shape", details)
-	case "postgres":
-		if hasDSN {
-			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckWarn, "postgres_dsn present; Gas City expects split fields", details)
-		}
-		if metadata.hasCompletePostgresSplitFields() {
-			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses split postgres shape", details)
-		}
-		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "postgres metadata split fields are incomplete", details)
 	case "":
 		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "metadata backend is missing", details)
 	default:
@@ -335,59 +433,92 @@ func preflightFallbackReason(checks []PreflightCheckResult) string {
 	return ""
 }
 
-func beadsModuleVersion() string {
+// beadsModulePath is the module path of the beads library gc links.
+const beadsModulePath = "github.com/steveyegge/beads"
+
+// linkedBeadsLibrary resolves the beads library this binary links, preferring
+// the configured override so tests need not depend on their own build info.
+func (c PreflightChecker) linkedBeadsLibrary() beadsLibrary {
+	if version := strings.TrimSpace(c.BeadsLibraryVersion); version != "" || c.BeadsLibraryReplaced {
+		return beadsLibrary{Version: version, Replaced: c.BeadsLibraryReplaced}
+	}
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
+		return beadsLibrary{}
+	}
+	return linkedBeadsLibraryFrom(info)
+}
+
+// beadsLibrary describes the beads library a binary actually links.
+type beadsLibrary struct {
+	// Version is the module version recorded in build info, empty when unknown.
+	Version string
+	// Replaced reports whether a go.mod replace directive supplied the code.
+	// A replacement's version numbers belong to the replacement, not to beads,
+	// so they say nothing about which bd release the library agrees with.
+	Replaced bool
+}
+
+// unconfirmableReason names why the library version cannot be compared to a bd
+// release version, or returns "" when the comparison is meaningful.
+func (b beadsLibrary) unconfirmableReason() string {
+	version := strings.TrimPrefix(strings.TrimSpace(b.Version), "v")
+	switch {
+	case version == "" || version == "(devel)":
+		// A source build reports "(devel)" (or nothing) even though gc and bd
+		// are built from the same tree.
+		return "source build"
+	case b.Replaced:
+		return "replaced module"
+	case !comparableReleaseVersion(version):
+		// A pseudo-version names an untagged commit, not a release. gc pins
+		// beads at one whenever it tracks beads ahead of its last tag.
+		return "pseudo-version"
+	default:
 		return ""
 	}
-	for _, dep := range info.Deps {
-		if dep.Path == "github.com/steveyegge/beads" {
-			if dep.Replace != nil && dep.Replace.Version != "" {
-				return dep.Replace.Version
-			}
-			return dep.Version
-		}
+}
+
+// comparableReleaseVersion reports whether version names a released beads
+// artifact, and can therefore be compared with the version bd reports for
+// itself. Pseudo-versions and non-semver strings cannot.
+func comparableReleaseVersion(version string) bool {
+	canonical := "v" + strings.TrimPrefix(strings.TrimSpace(version), "v")
+	return semver.IsValid(canonical) && !module.IsPseudoVersion(canonical)
+}
+
+// linkedBeadsLibraryFrom extracts the linked beads library from build info.
+func linkedBeadsLibraryFrom(info *debug.BuildInfo) beadsLibrary {
+	if info == nil {
+		return beadsLibrary{}
 	}
-	return ""
+	for _, dep := range info.Deps {
+		if dep == nil || dep.Path != beadsModulePath {
+			continue
+		}
+		if dep.Replace != nil {
+			// Report the replacement's own version — including the empty one a
+			// local-path replace records — never the require line it displaced.
+			return beadsLibrary{Version: dep.Replace.Version, Replaced: true}
+		}
+		return beadsLibrary{Version: dep.Version}
+	}
+	return beadsLibrary{}
 }
 
 type preflightMetadata struct {
-	Backend          string `json:"backend"`
-	DoltMode         string `json:"dolt_mode"`
-	DoltDatabase     string `json:"dolt_database"`
-	PostgresDSN      string `json:"postgres_dsn"`
-	PostgresPassword string `json:"postgres_password"`
-	PostgresHost     string `json:"postgres_host"`
-	PostgresPort     string `json:"postgres_port"`
-	PostgresUser     string `json:"postgres_user"`
-	PostgresDatabase string `json:"postgres_database"`
-	ProjectID        string `json:"project_id"`
+	Backend      string `json:"backend"`
+	DoltMode     string `json:"dolt_mode"`
+	DoltDatabase string `json:"dolt_database"`
+	ProjectID    string `json:"project_id"`
 }
 
 func (m preflightMetadata) trimmed() preflightMetadata {
 	m.Backend = strings.TrimSpace(m.Backend)
 	m.DoltMode = strings.TrimSpace(m.DoltMode)
 	m.DoltDatabase = strings.TrimSpace(m.DoltDatabase)
-	m.PostgresDSN = strings.TrimSpace(m.PostgresDSN)
-	m.PostgresPassword = strings.TrimSpace(m.PostgresPassword)
-	m.PostgresHost = strings.TrimSpace(m.PostgresHost)
-	m.PostgresPort = strings.TrimSpace(m.PostgresPort)
-	m.PostgresUser = strings.TrimSpace(m.PostgresUser)
-	m.PostgresDatabase = strings.TrimSpace(m.PostgresDatabase)
 	m.ProjectID = strings.TrimSpace(m.ProjectID)
 	return m
-}
-
-func (m preflightMetadata) hasPostgresDSN() bool {
-	return m.PostgresDSN != ""
-}
-
-func (m preflightMetadata) hasPostgresSplitFields() bool {
-	return m.PostgresHost != "" || m.PostgresPort != "" || m.PostgresUser != "" || m.PostgresDatabase != ""
-}
-
-func (m preflightMetadata) hasCompletePostgresSplitFields() bool {
-	return m.PostgresHost != "" && m.PostgresPort != "" && m.PostgresUser != "" && m.PostgresDatabase != ""
 }
 
 func preflightVerdictForChecks(checks []PreflightCheckResult) PreflightVerdict {
@@ -453,7 +584,7 @@ func preflightRepairSteps(checks []PreflightCheckResult) []PreflightRepairStep {
 					CheckID:  check.ID,
 					Priority: PreflightRepairRecommended,
 					Command:  "bd bootstrap",
-					Note:     "Re-anchor metadata to the active beads backend, or continue using BdStore for postgres scopes.",
+					Note:     "Re-anchor metadata to the active beads backend, or continue using BdStore for a scope the native store cannot serve.",
 				})
 			}
 		case PreflightCheckBDContextAgreement:
@@ -504,8 +635,4 @@ func preflightRepairSteps(checks []PreflightCheckResult) []PreflightRepairStep {
 		}
 	}
 	return steps
-}
-
-func boolPtr(value bool) *bool {
-	return &value
 }

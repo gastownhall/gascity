@@ -34,7 +34,13 @@
         "ready_assignment",
         "no_work",
         "claims_errored",
-        "stale_session"
+        "stale_session",
+        "non_turn_context",
+        "drain_pending",
+        "missing_session_registration",
+        "city_suspended",
+        "agent_suspended",
+        "rig_suspended"
       ]
     },
     "bead_id": {
@@ -98,7 +104,13 @@
             "enum": [
               "no_work",
               "claims_errored",
-              "stale_session"
+              "stale_session",
+              "non_turn_context",
+              "drain_pending",
+              "missing_session_registration",
+              "city_suspended",
+              "agent_suspended",
+              "rig_suspended"
             ]
           }
         }

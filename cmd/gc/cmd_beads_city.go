@@ -39,11 +39,19 @@ func newBeadsCityCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Manage the canonical city endpoint topology for bd-backed beads stores.
 
 Use use-managed to make the city GC-managed again. Use use-external to pin the
-city to an external Dolt endpoint and rewrite inherited rig mirrors.`,
+city to an external Dolt endpoint and rewrite inherited rig mirrors. Use
+migrate-proxied to move a legacy GC-managed city onto bd's proxied-server
+topology.
+
+use-managed and use-external manage gc-owned endpoint topology only. They refuse
+a city whose store the beads provider owns — one journaled in
+.gc/scope-ownership.json, one transferred by the ownership handoff, or one bd's
+metadata binds to the proxied-server path — because that endpoint lives in bd's
+own files and is bd's to change.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc beads city: missing subcommand (use-managed, use-external)") //nolint:errcheck
+				fmt.Fprintln(stderr, "gc beads city: missing subcommand (use-managed, use-external, migrate-proxied)") //nolint:errcheck
 			} else {
 				fmt.Fprintf(stderr, "gc beads city: unknown subcommand %q\n", args[0]) //nolint:errcheck
 			}
@@ -53,6 +61,7 @@ city to an external Dolt endpoint and rewrite inherited rig mirrors.`,
 	cmd.AddCommand(
 		newBeadsCityUseManagedCmd(stdout, stderr),
 		newBeadsCityUseExternalCmd(stdout, stderr),
+		newBeadsCityMigrateProxiedCmd(stdout, stderr),
 	)
 	return cmd
 }
@@ -125,6 +134,12 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 		fmt.Fprintf(stderr, "%s: only supported for bd-backed beads providers\n", name) //nolint:errcheck
 		return 1
 	}
+	// Before --dry-run, too: a plan for a change the command will never make is
+	// worse than no plan.
+	if err := refuseProviderOwnedEndpointScope(cityPath, cityPath); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", name, err) //nolint:errcheck
+		return 1
+	}
 
 	rawCfg, err := loadCityConfigForEditFS(fs, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
@@ -153,7 +168,12 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 	}
 
 	if opts.DryRun {
-		printCityEndpointDryRun(stdout, currentState, targetState, plans)
+		compatEdits, err := cityEndpointCompatEdits(cityPath, &tomlCfg, targetState, plans)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", name, err) //nolint:errcheck
+			return 1
+		}
+		printCityEndpointDryRun(stdout, currentState, targetState, plans, len(compatEdits) > 0)
 		return 0
 	}
 
@@ -200,7 +220,7 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 		fmt.Fprintf(stderr, "%s: snapshot canonical files: %v\n", name, err) //nolint:errcheck
 		return 1
 	}
-	if err := ensureCanonicalScopeMetadataIfPresent(fs, cityPath); err != nil {
+	if err := requireCanonicalizedScopeMetadata(fs, cityPath, cityPath); err != nil {
 		writeCityEndpointRollbackError(fs, stderr, snapshots, name, "canonicalizing metadata", err)
 		return 1
 	}
@@ -212,7 +232,20 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 		if !plan.Update {
 			continue
 		}
-		if err := ensureCanonicalScopeMetadataIfPresent(fs, plan.Rig.Path); err != nil {
+		// A bd-owned rig does not inherit the city's endpoint: bd resolves its
+		// store from its own binding. Sweeping it along would write gc endpoint
+		// keys into a config.yaml bd owns, so the sweep skips it and says so
+		// rather than refusing the whole city.
+		owned, err := scopeProviderOwned(cityPath, plan.Rig.Path)
+		if err != nil {
+			writeCityEndpointRollbackError(fs, stderr, snapshots, name, "classifying inherited rig ownership", err)
+			return 1
+		}
+		if owned {
+			fmt.Fprintf(stderr, "%s: skipping rig %q: %v\n", name, plan.Rig.Name, providerOwnedEndpointScopeError(plan.Rig.Path)) //nolint:errcheck
+			continue
+		}
+		if err := canonicalizeScopeMetadataIfPresent(fs, cityPath, plan.Rig.Path); err != nil {
 			writeCityEndpointRollbackError(fs, stderr, snapshots, name, "canonicalizing inherited rig metadata", err)
 			return 1
 		}
@@ -221,7 +254,7 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 			return 1
 		}
 	}
-	if err := syncCityEndpointCompatConfig(fs, cityPath, filepath.Join(cityPath, "city.toml"), &tomlCfg, targetState, plans); err != nil {
+	if err := syncCityEndpointCompatConfig(fs, cityPath, filepath.Join(cityPath, "city.toml"), &tomlCfg, targetState, plans, stderr); err != nil {
 		writeCityEndpointRollbackError(fs, stderr, snapshots, name, "writing legacy city.toml endpoint config", err)
 		return 1
 	}
@@ -235,7 +268,7 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 			writeCityEndpointRollbackError(fs, stderr, snapshots, name, "stopping managed local provider", err)
 			return 1
 		}
-		if err := clearManagedDoltRuntimeStateUnlessPostgres(cityPath); err != nil {
+		if err := clearManagedDoltRuntimeStateUnlessBound(cityPath); err != nil {
 			writeCityEndpointRollbackError(fs, stderr, snapshots, name, "clearing managed runtime state", err)
 			return 1
 		}
@@ -265,7 +298,7 @@ func validateExplicitExternalHost(host string) error {
 func validateCityEndpointOptions(opts cityEndpointOptions) error {
 	if !opts.External {
 		if strings.TrimSpace(opts.Host) != "" || strings.TrimSpace(opts.Port) != "" || strings.TrimSpace(opts.User) != "" {
-			return fmt.Errorf("use-managed does not accept --host, --port, or --user")
+			return fmt.Errorf("%s does not accept --host, --port, or --user", cityEndpointCommandName(opts))
 		}
 		if opts.AdoptUnverified {
 			return fmt.Errorf("--adopt-unverified is only valid with use-external")
@@ -297,6 +330,7 @@ func requestedCityEndpointState(cfg *config.City, currentState contract.ConfigSt
 			IssuePrefix:    prefix,
 			EndpointOrigin: contract.EndpointOriginManagedCity,
 			EndpointStatus: contract.EndpointStatusVerified,
+			DoltMode:       "server",
 		}
 	}
 	user := strings.TrimSpace(opts.User)
@@ -409,25 +443,34 @@ func snapshotCityManagedPortFiles(fs fsys.FS, cityPath string, plans []cityRigEn
 	return snapshots, nil
 }
 
-func syncCityEndpointCompatConfig(fs fsys.FS, cityPath, tomlPath string, cfg *config.City, targetState contract.ConfigState, plans []cityRigEndpointPlan) error {
-	changed := false
+// cityEndpointCompatEdits applies the endpoint change to the raw city config
+// and returns the matching per-key city.toml edits. An empty result means the
+// file already agrees with the target and no write is needed.
+func cityEndpointCompatEdits(cityPath string, cfg *config.City, targetState contract.ConfigState, plans []cityRigEndpointPlan) ([]config.CityEndpointKeyEdit, error) {
+	var edits []config.CityEndpointKeyEdit
 	if targetState.EndpointOrigin == contract.EndpointOriginCityCanonical {
 		host := strings.TrimSpace(targetState.DoltHost)
 		port, err := strconv.Atoi(strings.TrimSpace(targetState.DoltPort))
 		if err != nil {
-			return fmt.Errorf("invalid canonical city endpoint port %q: %w", targetState.DoltPort, err)
+			return nil, fmt.Errorf("invalid canonical city endpoint port %q: %w", targetState.DoltPort, err)
 		}
 		if cfg.Dolt.Host != host {
 			cfg.Dolt.Host = host
-			changed = true
+			edits = append(edits, config.CityEndpointKeyEdit{Key: "host", Value: strconv.Quote(host)})
 		}
 		if cfg.Dolt.Port != port {
 			cfg.Dolt.Port = port
-			changed = true
+			edits = append(edits, config.CityEndpointKeyEdit{Key: "port", Value: strconv.Itoa(port)})
 		}
-	} else if cfg.Dolt.Host != "" || cfg.Dolt.Port != 0 {
-		cfg.Dolt = config.DoltConfig{}
-		changed = true
+	} else {
+		if cfg.Dolt.Host != "" {
+			cfg.Dolt.Host = ""
+			edits = append(edits, config.CityEndpointKeyEdit{Key: "host"})
+		}
+		if cfg.Dolt.Port != 0 {
+			cfg.Dolt.Port = 0
+			edits = append(edits, config.CityEndpointKeyEdit{Key: "port"})
+		}
 	}
 
 	for i := range cfg.Rigs {
@@ -443,18 +486,42 @@ func syncCityEndpointCompatConfig(fs fsys.FS, cityPath, tomlPath string, cfg *co
 			port := strings.TrimSpace(plan.Target.DoltPort)
 			if cfg.Rigs[i].DoltHost != host {
 				cfg.Rigs[i].DoltHost = host
-				changed = true
+				edits = append(edits, rigEndpointCompatEdit(cfg.Rigs[i].Name, "dolt_host", host))
 			}
 			if cfg.Rigs[i].DoltPort != port {
 				cfg.Rigs[i].DoltPort = port
-				changed = true
+				edits = append(edits, rigEndpointCompatEdit(cfg.Rigs[i].Name, "dolt_port", port))
 			}
 			break
 		}
 	}
-	if !changed {
+	return edits, nil
+}
+
+func rigEndpointCompatEdit(rigName, key, value string) config.CityEndpointKeyEdit {
+	edit := config.CityEndpointKeyEdit{RigName: rigName, Key: key}
+	if value != "" {
+		edit.Value = strconv.Quote(value)
+	}
+	return edit
+}
+
+func syncCityEndpointCompatConfig(fs fsys.FS, cityPath, tomlPath string, cfg *config.City, targetState contract.ConfigState, plans []cityRigEndpointPlan, stderr io.Writer) error {
+	edits, err := cityEndpointCompatEdits(cityPath, cfg, targetState, plans)
+	if err != nil {
+		return err
+	}
+	if len(edits) == 0 {
 		return nil
 	}
+	ok, err := config.ApplyCityEndpointKeyEditsInPlace(fs, tomlPath, edits)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
+	fmt.Fprintf(stderr, "warning: %s uses a layout the endpoint editor cannot update in place; rewriting the whole file, comments may be lost\n", tomlPath) //nolint:errcheck
 	return writeCityConfigForEditFS(fs, tomlPath, cfg)
 }
 
@@ -500,10 +567,13 @@ func syncCityManagedPortArtifacts(fs fsys.FS, cityPath string, cityState contrac
 	return nil
 }
 
-func printCityEndpointDryRun(stdout io.Writer, current, target contract.ConfigState, plans []cityRigEndpointPlan) {
+func printCityEndpointDryRun(stdout io.Writer, current, target contract.ConfigState, plans []cityRigEndpointPlan, compatChanged bool) {
 	fmt.Fprintln(stdout, "WOULD UPDATE: city endpoint")                                                            //nolint:errcheck
 	fmt.Fprintf(stdout, "  city: %s -> %s\n", describeRigEndpointState(current), describeRigEndpointState(target)) //nolint:errcheck
 	fmt.Fprintf(stdout, "  file: %s\n", filepath.Join(".beads", "config.yaml"))                                    //nolint:errcheck
+	if compatChanged {
+		fmt.Fprintln(stdout, "  file: city.toml") //nolint:errcheck
+	}
 	for _, plan := range plans {
 		if !plan.Update {
 			continue

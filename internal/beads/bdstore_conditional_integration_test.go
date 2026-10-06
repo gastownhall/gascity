@@ -3,6 +3,8 @@
 package beads_test
 
 import (
+	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -10,12 +12,13 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/test/toolhome"
 )
 
 // TestBdStoreConditionalWriterConformance is the S2-T12 integration row: the
 // ConditionalWriter conformance suite over a REAL bd binary. It is the
-// authoritative guard for the provisional conditional-write machine codes
-// ("precondition-failed" / "conditional-write-unsupported") and the
+// authoritative guard for the canonical conditional-write machine codes
+// ("precondition_failed" / "conditional_write_unsupported") and the
 // "revision" wire key, all assumed ahead of beads#4682 landing — a rename in
 // the shipped bd fails here loudly instead of drifting silently
 // (bdstore_conditional.go's classifier note points at this row).
@@ -83,6 +86,8 @@ func TestBdStoreConditionalWriterConformance(t *testing.T) {
 				return store
 			},
 			beadstest.ConditionalWriterOptions{
+				RowBackedMutationFlavors: true,
+				RestrictedUpdateFields:   true,
 				// bd's precondition body carries current_revision (#4682);
 				// asserting Current here is part of the wire-key guard.
 				SuppliesCurrent: true,
@@ -111,7 +116,7 @@ func TestBdStoreConditionalWriterConformance(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
-		runner := newConditionalIntegrationRunner(dir)
+		runner := newConditionalIntegrationRunner(t, dir)
 		out, runErr := runner(dir, "bd", "update", created.ID,
 			"--if-revision", "1", "--gc-integration-bogus-flag", "--json")
 		if runErr == nil {
@@ -128,6 +133,45 @@ func TestBdStoreConditionalWriterConformance(t *testing.T) {
 	})
 }
 
+// TestNewConditionalIntegrationRunnerIsolatesHOMEFromSharedServerConfig pins
+// a synthetic HOME whose .beads/config.yaml declares dolt.shared-server:
+// true — the shape ga-1037rg named as the gate host's ambient config — and
+// proves the conditional-integration scaffold still round-trips a bead
+// against the scope's own embedded database. Before HOME was added to
+// newConditionalIntegrationRunner's env overlay, bd inherited this polluted
+// ambient HOME unfiltered and misrouted to the shared Dolt server instead of
+// the scope directory, so this test fails on the pre-fix runner and passes
+// once HOME is pinned per scope (ga-wapfnm).
+func TestNewConditionalIntegrationRunnerIsolatesHOMEFromSharedServerConfig(t *testing.T) {
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skipf("bd not on PATH: %v", err)
+	}
+
+	pollutedHome := t.TempDir()
+	beadsDir := filepath.Join(pollutedHome, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("creating polluted HOME .beads dir: %v", err)
+	}
+	cfg := "no-db: true\ndolt:\n    shared-server: true\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("writing polluted HOME config.yaml: %v", err)
+	}
+	t.Setenv("HOME", pollutedHome)
+
+	store, _ := newConditionalIntegrationBdStore(t)
+	created, err := store.Create(beads.Bead{Title: "home-isolation probe"})
+	if err != nil {
+		t.Fatalf("Create against real bd under a shared-server HOME: %v", err)
+	}
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) against real bd under a shared-server HOME: %v", created.ID, err)
+	}
+	if got.Title != "home-isolation probe" {
+		t.Fatalf("roundtrip title = %q", got.Title)
+	}
+}
+
 // newConditionalIntegrationBdStore stands up a REAL bd scope in a fresh
 // TempDir — git init + `bd init` in embedded (serverless) mode — and returns
 // the production BdStore over it plus the scope root. Environment is pinned
@@ -136,7 +180,7 @@ func TestBdStoreConditionalWriterConformance(t *testing.T) {
 // mirroring the libstore env-pinning precedent.
 func newConditionalIntegrationBdStore(t *testing.T) (*beads.BdStore, string) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := beadstest.GuardedTempDir(t)
 	git := exec.Command("git", "init", "--quiet", dir)
 	// GIT_DIR/GIT_WORK_TREE from the invoking shell would redirect init away
 	// from the TempDir; strip them for this one call (setting them to the
@@ -153,7 +197,7 @@ func newConditionalIntegrationBdStore(t *testing.T) (*beads.BdStore, string) {
 	if out, err := git.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	runner := newConditionalIntegrationRunner(dir)
+	runner := newConditionalIntegrationRunner(t, dir)
 	if out, err := runner(dir, "bd", "init", "-p", "tst", "--skip-hooks", "--skip-agents"); err != nil {
 		t.Fatalf("bd init: %v\n%s", err, out)
 	}
@@ -167,11 +211,25 @@ func newConditionalIntegrationBdStore(t *testing.T) (*beads.BdStore, string) {
 // this row write a tst database into a live server or leave a dolt sql-server
 // running in the TempDir. (CI's packages shard runs under env -i and is safe
 // either way; this guards local runs.)
-func newConditionalIntegrationRunner(scopeDir string) beads.CommandRunner {
-	return beads.ExecCommandRunnerWithEnv(map[string]string{
-		"BEADS_DIR":              filepath.Join(scopeDir, ".beads"),
-		"BEADS_DOLT_AUTO_START":  "0",
-		"BEADS_DOLT_SERVER_HOST": "",
-		"BEADS_DOLT_SERVER_PORT": "",
-	})
+//
+// bd also runs re-homed (toolhome.Environ): it resolves user-level config and
+// state from HOME, and a developer's `dolt.shared-server: true` there would
+// route this row into their host-wide shared Dolt server.
+func newConditionalIntegrationRunner(t *testing.T, scopeDir string) beads.CommandRunner {
+	t.Helper()
+	home := filepath.Join(filepath.Dir(scopeDir), "tool-home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatalf("create bd tool home: %v", err)
+	}
+	env := map[string]string{}
+	for _, kv := range toolhome.Environ(os.Environ(), home) {
+		k, v, _ := strings.Cut(kv, "=")
+		env[k] = v
+	}
+	env["BEADS_DIR"] = filepath.Join(scopeDir, ".beads")
+	env["BEADS_DOLT_AUTO_START"] = "0"
+	// toolhome.Environ drops every BEADS_* name, so BdSubprocessEnv re-applies the
+	// test-mode default that keeps bd's detached metrics flusher from racing the
+	// TempDir removal (ga-aik16g).
+	return beads.ExecCommandRunnerWithExactEnvContext(context.Background(), beadstest.BdSubprocessEnv(env))
 }

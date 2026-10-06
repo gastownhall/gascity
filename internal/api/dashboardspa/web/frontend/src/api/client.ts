@@ -9,9 +9,6 @@ import type {
   SupervisorStatusReport,
   ApiError,
   DashboardRuntimeConfig,
-  RunDiffRequest,
-  RunDiffResponse,
-  RunScopeKind,
   RunSummary,
   FormulaRunDetail,
 } from 'gas-city-dashboard-shared';
@@ -233,9 +230,60 @@ const decodeRuntimeConfig = objectDecoder<DashboardRuntimeConfig>('config', (rec
   requireStringArrayOrNullField(record, url, 'config', 'enabledModules');
   requireNullableStringField(record, url, 'config', 'defaultView');
 });
+const healthMetricUnavailableReasons = new Set([
+  'sample_failed',
+  'invalid_sample',
+  'value_overflow',
+]);
+
+function requireHealthMetricField(
+  record: JsonRecord,
+  url: string,
+  label: string,
+  field: string,
+  validateValue: (value: unknown, url: string, label: string) => void,
+): void {
+  const metric = requireRecord(record[field], url, `${label}.${field}`);
+  requireStringField(metric, url, `${label}.${field}`, 'status');
+  if (metric.status === 'available') {
+    validateValue(metric.value, url, `${label}.${field}.value`);
+    return;
+  }
+  if (metric.status !== 'unavailable') {
+    failDecode(url, `${label}.${field}.status must be available or unavailable`);
+  }
+  requireStringField(metric, url, `${label}.${field}`, 'reason');
+  if (!healthMetricUnavailableReasons.has(metric.reason as string)) {
+    failDecode(url, `${label}.${field}.reason is not recognized`);
+  }
+}
+
+function requireNumberValue(value: unknown, url: string, label: string): void {
+  if (typeof value !== 'number') failDecode(url, `${label} must be a number`);
+}
+
 const decodeSystemHealth = objectDecoder<SystemHealth>('system health', (record, url) => {
-  requireObjectField(record, url, 'system health', 'admin');
-  requireObjectField(record, url, 'system health', 'host');
+  const admin = requireRecord(record.admin, url, 'system health.admin');
+  const host = requireRecord(record.host, url, 'system health.host');
+  requireNumberField(admin, url, 'system health.admin', 'pid');
+  requireNumberField(admin, url, 'system health.admin', 'uptime_sec');
+  requireNumberField(admin, url, 'system health.admin', 'heap_used_bytes');
+  requireStringField(admin, url, 'system health.admin', 'node_version');
+  requireHealthMetricField(admin, url, 'system health.admin', 'rss', requireNumberValue);
+
+  requireNumberField(host, url, 'system health.host', 'cpu_count');
+  requireHealthMetricField(host, url, 'system health.host', 'uptime', requireNumberValue);
+  requireHealthMetricField(host, url, 'system health.host', 'load', (value, metricURL, label) => {
+    const load = requireRecord(value, metricURL, label);
+    requireNumberField(load, metricURL, label, 'load_avg_1');
+    requireNumberField(load, metricURL, label, 'load_avg_5');
+    requireNumberField(load, metricURL, label, 'load_avg_15');
+  });
+  requireHealthMetricField(host, url, 'system health.host', 'memory', (value, metricURL, label) => {
+    const memory = requireRecord(value, metricURL, label);
+    requireNumberField(memory, metricURL, label, 'total_mem_bytes');
+    requireNumberField(memory, metricURL, label, 'free_mem_bytes');
+  });
 });
 function requireLocalToolVersionField(
   record: JsonRecord,
@@ -294,20 +342,11 @@ const decodeSupervisorStatus = objectDecoder<SupervisorStatusReport>(
     }
   },
 );
-const decodeRunDiff = objectDecoder<RunDiffResponse>('run diff', (record, url) => {
-  requireStringField(record, url, 'run diff', 'kind');
-  requireObjectField(record, url, 'run diff', 'rootPath');
-  requireObjectField(record, url, 'run diff', 'comparison');
-  requireArrayField(record, url, 'run diff', 'status');
-  requireArrayField(record, url, 'run diff', 'changedFiles');
-  requireStringField(record, url, 'run diff', 'patch');
-  requireBooleanField(record, url, 'run diff', 'truncated');
-});
 // The run summary/detail DTOs are produced by the Go run projection
 // (internal/runproj), which is golden-gated byte-for-byte against these exact
 // shapes. Validate the structural arrays/objects the renderers iterate at the
-// edge (matching decodeRunDiff's depth) so a wire-shape regression fails here
-// rather than mis-rendering deep in a lane or diagram component.
+// edge so a wire-shape regression fails here rather than mis-rendering deep in a
+// lane or diagram component.
 const decodeRunSummary = objectDecoder<RunSummary>('run summary', (record, url) => {
   // Validate every field a renderer dereferences: RunMap reads the counts,
   // the lane arrays, and totalActive/totalHistorical. The DTO is golden-gated
@@ -395,19 +434,6 @@ export const api = {
   supervisorStatus(): Promise<SupervisorStatusReport> {
     return request('GET', cityPath('/supervisor-status'), decodeSupervisorStatus);
   },
-  runDiff(
-    runId: string,
-    body: RunDiffRequest,
-    params?: { scopeKind?: RunScopeKind; scopeRef?: string },
-  ): Promise<RunDiffResponse> {
-    const qs = runQuery(params);
-    return request(
-      'POST',
-      cityPath(`/runs/${encodeURIComponent(runId)}/diff${qs}`),
-      decodeRunDiff,
-      body,
-    );
-  },
   // The run view reads its summary and per-run detail from the BFF run
   // projection (internal/api/dashboardbff/runtailer.go), a sub-second warm
   // fold of the city event log that already layers session health/census.
@@ -420,7 +446,11 @@ export const api = {
   // failure), an unknown run with 404, and a still-warming projection with
   // 503 — surfaced to callers as ApiClientError (status + reason).
   runDetail(runId: string): Promise<FormulaRunDetail> {
-    return request('GET', cityPath(`/runs/${encodeURIComponent(runId)}/detail`), decodeFormulaRunDetail);
+    return request(
+      'GET',
+      cityPath(`/runs/${encodeURIComponent(runId)}/detail`),
+      decodeFormulaRunDetail,
+    );
   },
   // The per-run SSE detail stream (BFF plane). It pushes the whole
   // FormulaRunDetail as a snapshot frame on connect and again whenever the
@@ -431,13 +461,3 @@ export const api = {
     return cityPath(`/runs/${encodeURIComponent(runId)}/detail/stream`);
   },
 };
-
-function runQuery(params?: { scopeKind?: RunScopeKind; scopeRef?: string }): string {
-  const search = new URLSearchParams();
-  if (params?.scopeKind && params.scopeRef) {
-    search.set('scope_kind', params.scopeKind);
-    search.set('scope_ref', params.scopeRef);
-  }
-  const qs = search.toString();
-  return qs.length > 0 ? `?${qs}` : '';
-}

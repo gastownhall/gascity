@@ -17,8 +17,11 @@ make diagrams-excalidraw
 go run ./cmd/genschema     # writes docs/reference/{cli.md,config.md,schema/*}
 
 # 4. API / dashboard: required when you touch internal/api/, the OpenAPI spec,
-#    docs/reference/schema/openapi.*, or the dashboard.
-make dashboard-check
+#    docs/reference/schema/openapi.*, or the dashboard. dashboard-check alone
+#    typechecks/builds/tests against whatever client is already on disk — it
+#    does not regenerate it, so it misses a client that's drifted from the
+#    spec. dashboard-ci adds that regen + fail-on-drift check.
+make dashboard-ci
 
 # 5. Live preview while editing.
 make docs-dev              # or: ./mint.sh dev   -> http://localhost:3000

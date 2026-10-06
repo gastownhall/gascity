@@ -605,7 +605,7 @@ Provider classes in current code:
 | `k8s` | yes | no | no | timed-only sleep |
 | `exec` | script-dependent | no | no | timed-only when activity exists, otherwise disabled |
 | `subprocess` | no useful activity | no | no | disabled |
-| `acp` | no | currently unsupported | no | disabled until ACP reports usable activity |
+| `acp` | yes (`session/update`, durably stamped) | currently unsupported | no | timed-only sleep |
 | `auto` / `hybrid` | routed | routed | routed | decide per session, not globally |
 
 Composite providers must route `Pending(name)` the same way they already

@@ -1,0 +1,118 @@
+{
+  "info": {
+    "id": "sess_zcode_phase1",
+    "directory": "/tmp/gascity/phase1/zcode"
+  },
+  "messages": [
+    {
+      "info": {
+        "id": "sess_zcode_phase1-msg_user_1",
+        "sessionID": "sess_zcode_phase1",
+        "role": "user",
+        "parentID": "",
+        "time": {
+          "created": 1770000000000
+        }
+      },
+      "parts": [
+        {
+          "id": "part_sess_zcode_phase1-msg_user_1",
+          "type": "text",
+          "text": "Summarize the ZCode worker transcript contract."
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "sess_zcode_phase1-msg_assistant_2",
+        "sessionID": "sess_zcode_phase1",
+        "role": "assistant",
+        "parentID": "sess_zcode_phase1-msg_user_1",
+        "time": {
+          "created": 1770000000000
+        },
+        "usage": {
+          "source": "provider",
+          "modelRequestCount": 1,
+          "inputTokens": 11721,
+          "outputTokens": 12,
+          "totalTokens": 11733,
+          "cacheReadTokens": 2368,
+          "cacheWriteTokens": 0,
+          "reasoningTokens": 0,
+          "webFetchRequests": 0,
+          "webSearchRequests": 0
+        },
+        "projection": {
+          "status": "idle",
+          "turnCount": 1,
+          "totalTokenCount": 11733,
+          "contextUsed": 11733,
+          "contextWindow": 1000000
+        }
+      },
+      "parts": [
+        {
+          "id": "part_sess_zcode_phase1-msg_assistant_2",
+          "type": "text",
+          "text": "ZCode phase 1 validates the tmux CLI transcript contract."
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "sess_zcode_phase1-msg_user_3",
+        "sessionID": "sess_zcode_phase1",
+        "role": "user",
+        "parentID": "sess_zcode_phase1-msg_assistant_2",
+        "time": {
+          "created": 1770000001000
+        }
+      },
+      "parts": [
+        {
+          "id": "part_sess_zcode_phase1-msg_user_3",
+          "type": "text",
+          "text": "Repeat the exact ZCode phase-1 summary from earlier before answering."
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "sess_zcode_phase1-msg_assistant_4",
+        "sessionID": "sess_zcode_phase1",
+        "role": "assistant",
+        "parentID": "sess_zcode_phase1-msg_user_3",
+        "time": {
+          "created": 1770000001000
+        },
+        "usage": {
+          "source": "provider",
+          "modelRequestCount": 1,
+          "inputTokens": 11721,
+          "outputTokens": 12,
+          "totalTokens": 11733,
+          "cacheReadTokens": 2368,
+          "cacheWriteTokens": 0,
+          "reasoningTokens": 0,
+          "webFetchRequests": 0,
+          "webSearchRequests": 0
+        },
+        "projection": {
+          "status": "idle",
+          "turnCount": 1,
+          "totalTokenCount": 11733,
+          "contextUsed": 11733,
+          "contextWindow": 1000000
+        }
+      },
+      "parts": [
+        {
+          "id": "part_sess_zcode_phase1-msg_assistant_4",
+          "type": "text",
+          "text": "ZCode phase 1 validates the tmux CLI transcript contract."
+        }
+      ]
+    }
+  ]
+}

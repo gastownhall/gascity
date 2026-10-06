@@ -356,7 +356,7 @@ type ConversationGroupRecord struct {
 // SessionID is the volatile session bead ID this participant currently resolves
 // to. SessionName is the stable identity the participant was registered under;
 // it survives session respawn and lets ResolveInbound/ResolveOutbound re-point
-// at the current live bead via resolveLiveSessionID.
+// at the current live bead via resolveLiveSession.
 type ConversationGroupParticipant struct {
 	ID          string
 	GroupID     string

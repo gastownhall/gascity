@@ -10,121 +10,147 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 528
-baseline_files = 161
+baseline_calls = 748
+baseline_files = 220
 reported_calls = 495
 reported_files = 135
-owner_bead = "ga-80po0c.2"
+owner_bead = "ga-cp3hwi"
 invariant = "tracked test source totals remain visible as audit evidence"
-resource_owner = "ga-80po0c.2 owns this point-in-time source census"
+resource_owner = "ga-cp3hwi owns this point-in-time source census"
 migration_target = "P0.4a"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 429
-baseline_files = 158
+baseline_calls = 497
+baseline_files = 183
 reported_calls = 447
 reported_files = 157
-owner_bead = "ga-80po0c.2"
+owner_bead = "ga-cp3hwi"
 invariant = "tracked test source totals remain visible as audit evidence"
-resource_owner = "ga-80po0c.2 owns this point-in-time source census"
+resource_owner = "ga-cp3hwi owns this point-in-time source census"
 migration_target = "P0.4a"
-expires = "2026-10-01"
+expires = "2026-10-31"
+
+[[audit_baseline]]
+scope = "all"
+resource = "listener_helper"
+baseline_calls = 60
+baseline_files = 24
+reported_calls = 60
+reported_files = 24
+owner_bead = "ga-cp3hwi"
+invariant = "all-source listener-helper call/file totals cannot drift without an explicit checked policy update"
+resource_owner = "ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption"
+migration_target = "P0.4c-listener-helper"
+expires = "2026-10-31"
 
 # Debt rows ratchet source call sites only. They are not test-size entries and
 # do not exempt or reclassify any test.
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 393
-baseline_files = 111
+baseline_calls = 501
+baseline_files = 147
 reported_calls = 380
 reported_files = 98
-owner_bead = "ga-80po0c.2"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged subprocess call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each process-owning test removes or replaces its source call site"
 migration_target = "D1/D2/D5/D6/E6"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 290
-baseline_files = 113
+baseline_calls = 319
+baseline_files = 122
 reported_calls = 295
 reported_files = 114
-owner_bead = "ga-80po0c.2"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each owning test replaces elapsed wall time with its lifecycle signal"
 migration_target = "W1-W5"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4340
-baseline_files = 204
+baseline_calls = 122
+baseline_files = 14
 reported_calls = 3960
 reported_files = 184
-owner_bead = "ga-80po0c.2.3"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "cmd/gc callers restore or eliminate every recognized process-environment mutation"
 migration_target = "D5/D6/E6"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "cwd"
-baseline_calls = 285
-baseline_files = 43
+baseline_calls = 176
+baseline_files = 17
 reported_calls = 98
 reported_files = 13
-owner_bead = "ga-80po0c.2.3"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "cmd/gc callers restore or eliminate every recognized cwd mutation"
 migration_target = "D5/D6"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 68
-baseline_files = 24
+baseline_calls = 61
+baseline_files = 25
 reported_calls = 78
 reported_files = 27
-owner_bead = "ga-80po0c.2.3"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline"
 resource_owner = "the helper definition and every marked caller retain an explicit process-suite migration owner"
 migration_target = "D5/D6/E6"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 317
-baseline_files = 66
+baseline_calls = 319
+baseline_files = 67
 reported_calls = 255
 reported_files = 56
-owner_bead = "ga-80po0c.2.2"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each owning test closes its loopback server and removes duplicate server-backed coverage"
 migration_target = "P0.4c"
-expires = "2026-10-01"
+expires = "2026-10-31"
+
+[[debt]]
+scope = "untagged"
+resource = "listener_helper"
+baseline_calls = 39
+baseline_files = 13
+reported_calls = 39
+reported_files = 13
+owner_bead = "ga-cp3hwi"
+invariant = "untagged listener-helper call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership"
+migration_target = "P0.4c-listener-helper"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 92
-baseline_files = 34
+baseline_calls = 97
+baseline_files = 37
 reported_calls = 92
 reported_files = 34
-owner_bead = "ga-80po0c.2.2"
-invariant = "untagged net.Listen call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "each owning test closes its listener and removes duplicate listener-backed coverage"
-migration_target = "P0.4c"
-expires = "2026-10-01"
+owner_bead = "ga-cp3hwi"
+invariant = "untagged stream-listener call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test closes its stream listener and removes duplicate listener-backed coverage"
+migration_target = "P0.4c-listener"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "untagged"
@@ -133,24 +159,24 @@ baseline_calls = 1
 baseline_files = 1
 reported_calls = 1
 reported_files = 1
-owner_bead = "ga-80po0c.2.2"
-invariant = "untagged net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline"
+owner_bead = "ga-cp3hwi"
+invariant = "untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each owning test closes its configured listener and removes duplicate listener-backed coverage"
-migration_target = "P0.4c"
-expires = "2026-10-01"
+migration_target = "P0.4c-listener"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "untagged"
-resource = "net_listen_unixgram"
+resource = "net_listen_packet"
 baseline_calls = 3
 baseline_files = 2
 reported_calls = 3
 reported_files = 2
-owner_bead = "ga-80po0c.2.2"
-invariant = "untagged net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "each owning test closes its Unix datagram listener and removes duplicate listener-backed coverage"
-migration_target = "P0.4c"
-expires = "2026-10-01"
+owner_bead = "ga-cp3hwi"
+invariant = "untagged packet-listener call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test closes its packet listener and removes duplicate listener-backed coverage"
+migration_target = "P0.4c-listener"
+expires = "2026-10-31"
 
 [[debt]]
 scope = "untagged"
@@ -159,11 +185,24 @@ baseline_calls = 1
 baseline_files = 1
 reported_calls = 1
 reported_files = 1
-owner_bead = "ga-80po0c.2.2"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "each owning test closes its listening file descriptor and removes duplicate listener-backed coverage"
 migration_target = "P0.4c"
-expires = "2026-10-01"
+expires = "2026-10-31"
+
+[[debt]]
+scope = "untagged"
+resource = "tmux"
+baseline_calls = 9
+baseline_files = 4
+reported_calls = 7
+reported_files = 3
+owner_bead = "ga-cp3hwi"
+invariant = "untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "each owning test confines tmux processes and sockets to its isolated namespace and cleanup"
+migration_target = "P0.4c-tmux"
+expires = "2026-10-31"
 
 # Exact Medium owners are keyed by source directory, package clause, and
 # top-level Go test identity. Only matching resources lexically inside that
@@ -174,44 +213,242 @@ package_dir = "internal/api"
 package_name = "api"
 owner = "TestEveryEmittedErrorCodeIsRegistered"
 resources = ["subprocess"]
-owner_bead = "ga-80po0c.2.1"
+owner_bead = "ga-cp3hwi"
 invariant = "internal/api tracked-source error URN guard is a checked Medium owner"
 resource_owner = "only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt"
 migration_target = "P0.4b"
-expires = "2026-10-01"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "internal/workrecord"
+package_name = "workrecord"
+owner = "TestCommitReachableOnBranch"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the ADR-0009 commit-reachability oracle is a checked Medium subprocess owner"
+resource_owner = "the git processes are confined to TestCommitReachableOnBranch, which exists to ask a real repository whether a commit is an ancestor of a branch: CommitReachableOnBranch is that git invocation, so a fake oracle would only prove itself"
+migration_target = "P0.4b"
+expires = "2026-10-31"
 
 [[medium]]
 package_dir = "cmd/gc"
 package_name = "main"
 owner = "TestMain"
-resources = ["environment"]
-owner_bead = "ga-80po0c.2.1"
-invariant = "cmd/gc TestMain is the checked package-level Medium owner"
-resource_owner = "only environment calls lexically inside TestMain leave Small debt"
+resources = ["environment", "tmux"]
+owner_bead = "ga-cp3hwi"
+invariant = "cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup"
+resource_owner = "only declared environment and tmux calls lexically inside TestMain leave Small debt"
+migration_target = "P0.4b/P0.4c-tmux"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestPassthroughEnvWithholdsControllerTokenFromChildProcess"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the controller-token withholding proof is a checked Medium subprocess owner"
+resource_owner = "the one /bin/sh subprocess is confined to TestPassthroughEnvWithholdsControllerTokenFromChildProcess, which exists to read a credential back out of a real child process: the session env is an overlay, so only a real child can prove GC_CONTROLLER_TOKEN is absent rather than merely missing from a map"
 migration_target = "P0.4b"
-expires = "2026-10-01"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary"
+resources = ["subprocess"]
+owner_bead = "ga-p9iuv.30"
+invariant = "the provider-owned script boundary proof is a checked Medium subprocess owner"
+resource_owner = "the test executes the copied provider script only with a test-owned BD executable and verifies its lifecycle delegation without a host service"
+migration_target = "GC6011"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestGcBeadsBdReadyScopeLifecycleReadsItsPersistedTopology"
+resources = ["subprocess"]
+owner_bead = "ga-p9iuv.30"
+invariant = "the ready-scope topology boundary proof is a checked Medium subprocess owner"
+resource_owner = "the test executes the shipped provider script once per init shape with a test-owned BD executable and a scope built from files alone, so no Dolt, no bd and no host service are involved"
+migration_target = "GC6011"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses"
+resources = ["slow_process_gate", "subprocess"]
+owner_bead = "ga-p9iuv.30"
+invariant = "the provider-owned BD lifecycle proof is a checked Medium process owner"
+resource_owner = "the test runs the pinned real bd direct and proxied lifecycles under deadlines, records only provider-published identities, and stops its own scope before asserting those children are absent"
+migration_target = "GC6011"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "internal/runtime/herdr"
+package_name = "herdr"
+owner = "TestServerAliveRejectsStaleSocket"
+resources = ["net_listen"]
+owner_bead = "ga-cp3hwi"
+invariant = "herdr stale-socket liveness regression is a checked Medium stream-listener owner"
+resource_owner = "the Unix stream listener is confined to TestServerAliveRejectsStaleSocket and closed before liveness detection"
+migration_target = "P0.4c-listener"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "internal/runtime/herdr"
+package_name = "herdr"
+owner = "TestServerAliveDetectsLiveServer"
+resources = ["net_listen"]
+owner_bead = "ga-cp3hwi"
+invariant = "herdr live-server liveness regression is a checked Medium stream-listener owner"
+resource_owner = "the Unix stream listener is confined to TestServerAliveDetectsLiveServer and closed by test cleanup"
+migration_target = "P0.4c-listener"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "internal/runtime/tmux"
+package_name = "tmux"
+owner = "TestMain"
+resources = ["environment", "tmux"]
+owner_bead = "ga-cp3hwi"
+invariant = "runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup"
+resource_owner = "only declared environment and tmux calls lexically inside TestMain leave Small debt"
+migration_target = "P0.4c-tmux"
+expires = "2026-10-31"
 
 [[medium]]
 package_dir = "scripts"
 package_name = "scripts_test"
 owner = "TestDockerSessionProtocol"
 resources = ["subprocess"]
-owner_bead = "ga-80po0c.23.1"
+owner_bead = "ga-cp3hwi"
 invariant = "Docker session adapter protocol proof is a checked Medium owner"
 resource_owner = "the one adapter subprocess is confined to TestDockerSessionProtocol and Docker itself is a strict PATH-injected fake"
 migration_target = "W6"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[medium]]
 package_dir = "scripts"
 package_name = "scripts_test"
 owner = "TestProviderOverridesAndSuiteContractsCrossMakeIsolation"
 resources = ["subprocess"]
-owner_bead = "ga-80po0c.2.1"
+owner_bead = "ga-cp3hwi"
 invariant = "Make/provider and suite-contract proof is a checked Medium owner"
 resource_owner = "the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation"
 migration_target = "P0.1"
-expires = "2026-10-01"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "internal/doctor"
+package_name = "doctor"
+owner = "TestCustomTypesCheck_TableDrift"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "doctor custom-types config-CSV-vs-table drift detect+heal proof is a checked Medium owner"
+resource_owner = "the bd and dolt subprocesses are confined to TestCustomTypesCheck_TableDrift, which manufactures and heals real table drift against a throwaway store"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "internal/doctor"
+package_name = "doctor"
+owner = "TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "doctor custom-types test-owned-HOME dolt-isolation regression proof is a checked Medium owner"
+resource_owner = "the bd subprocess is confined to TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext, which proves bd routes to an embedded, test-owned dolt store rather than a machine-level shared server"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "internal/doctor"
+package_name = "doctor"
+owner = "TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "doctor custom-types configured-store targeting regression proof is a checked Medium owner"
+resource_owner = "the bd subprocess is confined to TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint, which runs two disposable loopback Dolt servers and proves ambient endpoint variables cannot redirect detection or repair"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestAddTestenvImportSkipsNestedGitWorktrees"
+resources = ["subprocess"]
+owner_bead = "ga-t00ejy"
+invariant = "the nested-git-worktree walk-skip regression proof is a checked Medium subprocess owner"
+resource_owner = "the one go run subprocess is confined to TestAddTestenvImportSkipsNestedGitWorktrees, which exists to exercise add-testenv-import.go end to end: the script is package main, so only a real subprocess run can prove its directory walk skips linked git worktrees"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestGoModDownloadRetryScriptRetriesTransientFailures"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the CI go mod download retry proof is a checked Medium subprocess owner"
+resource_owner = "the one bash subprocess per case is confined to TestGoModDownloadRetryScriptRetriesTransientFailures, which exists to run .github/scripts/go-mod-download-retry.sh against a PATH-injected fake go: the retry loop and GOPROXY selection are shell, so only a real shell run can prove a transient proxy error is retried and a persistent one fails"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestGoModVerifyCacheDetectsTamperedModules"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the CI Go module cache verification proof is a checked Medium subprocess owner"
+resource_owner = "the go and bash subprocesses are confined to TestGoModVerifyCacheDetectsTamperedModules, which exists to run .github/scripts/go-mod-download-retry.sh and .github/scripts/go-mod-verify-cache.sh with the real go command against a file:// module proxy and an isolated module cache, then tamper with the cached zip: the claim under test is the go command's own trust of a cached .ziphash, so only the real go command can prove the verify step catches what it accepts"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestRBEWorkerJSONIsolationOffMatchesPreO1"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the OSS worker rollback-config and fork-tier worker-config proof is a checked Medium subprocess owner"
+resource_owner = "the one jq subprocess is confined to TestRBEWorkerJSONIsolationOffMatchesPreO1, which exists to render tools/rbe/blacksmith-worker.sh's own jq program for the OSS tier with isolation off, compared with the pre-O1 worker.json, and for the fork tier, compared with its golden: the program is jq, so only jq can prove the rollback renders the same config and the fork tier caches nothing"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestRBEWorkerScrubCAS"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the sticky-disk CAS scrub proof is a checked Medium subprocess owner"
+resource_owner = "the one bash subprocess is confined to TestRBEWorkerScrubCAS, which exists to run tools/rbe/blacksmith-worker.sh's own scrub_cas function on a scratch store of odd names (quotes, spaces, a newline, a backslash) and bad blobs: the function is GNU find, xargs and sha256sum plumbing, so only bash can prove it deletes every bad file without aborting the worker"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestFreshMergeActionBehaviour"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the fresh-merge composite action's behavior proof is a checked Medium subprocess owner"
+resource_owner = "the git and bash subprocesses are confined to TestFreshMergeActionBehaviour, which exists to run .github/actions/fresh-merge's own bash script against a scratch git origin (clean merge, workflow skew, conflict, head already containing the tip, unfetchable base): the script is git plumbing, so only real git can prove what it merges and when it fails"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestCacheZstdProbe"
+resources = ["http_test_server"]
+owner_bead = "ga-cp3hwi"
+invariant = "the anonymous-cache zstd probe's behavior proof is a checked Medium HTTP test server owner"
+resource_owner = "the loopback TLS HTTP/2 servers are confined to TestCacheZstdProbe, which exists to run tools/rbe/cache-zstd-probe.sh against a stand-in rbe-cache GetCapabilities (zstd advertised or not, gRPC and HTTP errors, malformed answers, a timeout): the probe is curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd"
+migration_target = "P0.4b"
+expires = "2026-10-31"
 
 # A reviewed-hermetic-body row is narrower than a Small test declaration. It
 # proves that the exact untagged test body and statically reachable
@@ -250,93 +487,106 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 390
-baseline_files = 109
+baseline_calls = 476
+baseline_files = 138
 reported_calls = 394
 reported_files = 105
-owner_bead = "ga-80po0c.2.1"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners remove or replace each process call site"
 migration_target = "D1/D2/D5/D6/E6"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 290
-baseline_files = 113
+baseline_calls = 319
+baseline_files = 122
 reported_calls = 287
 reported_files = 113
-owner_bead = "ga-80po0c.2.1"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners replace elapsed wall time with lifecycle signals"
 migration_target = "W1-W5"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 4334
-baseline_files = 204
+baseline_calls = 117
+baseline_files = 14
 reported_calls = 4348
 reported_files = 200
-owner_bead = "ga-80po0c.2.1"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners restore or eliminate every process-environment mutation"
 migration_target = "D5/D6/E6"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "cwd"
-baseline_calls = 285
-baseline_files = 43
+baseline_calls = 176
+baseline_files = 17
 reported_calls = 284
 reported_files = 43
-owner_bead = "ga-80po0c.2.1"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners restore or eliminate every cwd mutation"
 migration_target = "D5/D6"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 68
-baseline_files = 24
+baseline_calls = 60
+baseline_files = 25
 reported_calls = 75
 reported_files = 25
-owner_bead = "ga-80po0c.2.1"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline"
 resource_owner = "each non-Medium marked caller retains an explicit process-suite migration owner"
 migration_target = "D5/D6/E6"
-expires = "2026-10-01"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 317
+baseline_calls = 318
 baseline_files = 66
 reported_calls = 300
 reported_files = 66
-owner_bead = "ga-80po0c.2.2"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener"
 migration_target = "P0.4c"
-expires = "2026-10-01"
+expires = "2026-10-31"
+
+[[small_debt]]
+scope = "untagged"
+resource = "listener_helper"
+baseline_calls = 39
+baseline_files = 13
+reported_calls = 39
+reported_files = 13
+owner_bead = "ga-cp3hwi"
+invariant = "untagged Small listener-helper call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners replace helper-backed listeners or declare exact isolated ownership"
+migration_target = "P0.4c-listener-helper"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 92
-baseline_files = 34
+baseline_calls = 95
+baseline_files = 36
 reported_calls = 92
 reported_files = 34
-owner_bead = "ga-80po0c.2.2"
-invariant = "untagged Small net.Listen call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "non-Medium lexical owners move listener-backed tests to exact Medium ownership or replace the listener"
-migration_target = "P0.4c"
-expires = "2026-10-01"
+owner_bead = "ga-cp3hwi"
+invariant = "untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener"
+migration_target = "P0.4c-listener"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "untagged"
@@ -345,24 +595,24 @@ baseline_calls = 1
 baseline_files = 1
 reported_calls = 1
 reported_files = 1
-owner_bead = "ga-80po0c.2.2"
-invariant = "untagged Small net.ListenConfig.Listen call/file totals cannot grow; reductions must lower this baseline"
+owner_bead = "ga-cp3hwi"
+invariant = "untagged Small net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener"
-migration_target = "P0.4c"
-expires = "2026-10-01"
+migration_target = "P0.4c-listener"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "untagged"
-resource = "net_listen_unixgram"
+resource = "net_listen_packet"
 baseline_calls = 3
 baseline_files = 2
 reported_calls = 3
 reported_files = 2
-owner_bead = "ga-80po0c.2.2"
-invariant = "untagged Small net.ListenUnixgram call/file totals cannot grow; reductions must lower this baseline"
-resource_owner = "non-Medium lexical owners move Unix datagram listener-backed tests to exact Medium ownership or replace the listener"
-migration_target = "P0.4c"
-expires = "2026-10-01"
+owner_bead = "ga-cp3hwi"
+invariant = "untagged Small packet-listener call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners move packet-listener tests to exact Medium ownership or replace the listener"
+migration_target = "P0.4c-listener"
+expires = "2026-10-31"
 
 [[small_debt]]
 scope = "untagged"
@@ -371,8 +621,21 @@ baseline_calls = 1
 baseline_files = 1
 reported_calls = 1
 reported_files = 1
-owner_bead = "ga-80po0c.2.2"
+owner_bead = "ga-cp3hwi"
 invariant = "untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline"
 resource_owner = "non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener"
 migration_target = "P0.4c"
-expires = "2026-10-01"
+expires = "2026-10-31"
+
+[[small_debt]]
+scope = "untagged"
+resource = "tmux"
+baseline_calls = 3
+baseline_files = 2
+reported_calls = 1
+reported_files = 1
+owner_bead = "ga-cp3hwi"
+invariant = "untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline"
+resource_owner = "non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership"
+migration_target = "P0.4c-tmux"
+expires = "2026-10-31"

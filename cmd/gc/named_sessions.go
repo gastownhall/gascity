@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -28,6 +30,76 @@ func findNamedSessionSpec(cfg *config.City, cityName, identity string) (namedSes
 
 func namedSessionBackingTemplate(spec namedSessionSpec) string {
 	return session.NamedSessionBackingTemplate(spec)
+}
+
+// applyNamedTemplateOverrides stamps a configured named session's identity
+// on the template resolved for its backing agent: legacy's desired state and
+// the allocator's named create share it.
+func applyNamedTemplateOverrides(tp *TemplateParams, spec namedSessionSpec, identity, boundStepID string) {
+	tp.Alias = identity
+	tp.TemplateName = namedSessionBackingTemplate(spec)
+	tp.InstanceName = identity
+	tp.ConfiguredNamedIdentity = identity
+	tp.ConfiguredNamedMode = spec.Mode
+	tp.BoundStepID = boundStepID
+	if tp.Env == nil {
+		tp.Env = make(map[string]string)
+	}
+	tp.Env["GC_TEMPLATE"] = namedSessionBackingTemplate(spec)
+	tp.Env["GC_ALIAS"] = identity
+	tp.Env["GC_AGENT"] = identity
+	tp.Env["GC_SESSION_ORIGIN"] = "named"
+}
+
+// namedSessionAssigneeMatchesSpec reports whether assignee names spec's session.
+// Work routed to a named session is claimed under the session's runtime name
+// (config.NamedSessionRuntimeName: "/" -> "--", "." -> "__"), not under its
+// qualified identity, so both forms have to count. spec.SessionName is already
+// an accepted alias for the identity in the resolver
+// (session.ResolveNamedSessionSpecForConfigTarget); matching only the qualified
+// form here left on-demand named sessions asleep on their own assigned work
+// (ga-e70d2).
+func namedSessionAssigneeMatchesSpec(spec namedSessionSpec, identity, assignee string) bool {
+	if assignee == "" {
+		return false
+	}
+	return assignee == identity || assignee == strings.TrimSpace(spec.SessionName)
+}
+
+// findNamedSessionSpecForAssignee resolves the configured named session that a
+// bead's assignee refers to, accepting every form a real claim can carry.
+//
+// findNamedSessionSpec alone is not enough: it matches the qualified identity
+// (and the V2 bare leaf), but a named session claims work under its tmux-safe
+// runtime name — "seth.seth" claims as "seth__seth". Callers that resolved
+// assignees with the identity-only lookup were therefore inert for the one form
+// that actually appears on claimed beads (ga-e70d2).
+//
+// The fallback deliberately reuses namedSessionAssigneeMatchesSpec rather than
+// session.ResolveNamedSessionSpecForConfigTarget. That resolver also accepts
+// bare template names because it resolves USER input (`gc session wake seth`);
+// an assignee is not user input, and widening claim resolution that far would
+// preserve routes for names no session ever claimed under. Config load rejects
+// identity/session-name collisions city-wide (config.validateNamedSessions), so
+// at most one spec can match.
+func findNamedSessionSpecForAssignee(cfg *config.City, cityName, assignee string) (namedSessionSpec, bool) {
+	if cfg == nil || strings.TrimSpace(assignee) == "" {
+		return namedSessionSpec{}, false
+	}
+	if spec, ok := findNamedSessionSpec(cfg, cityName, assignee); ok {
+		return spec, true
+	}
+	for i := range cfg.NamedSessions {
+		identity := cfg.NamedSessions[i].QualifiedName()
+		spec, ok := findNamedSessionSpec(cfg, cityName, identity)
+		if !ok {
+			continue
+		}
+		if namedSessionAssigneeMatchesSpec(spec, identity, assignee) {
+			return spec, true
+		}
+	}
+	return namedSessionSpec{}, false
 }
 
 func resolveNamedSessionSpecForConfigTarget(cfg *config.City, cityName, target, rigContext string) (namedSessionSpec, bool, error) {
@@ -97,6 +169,14 @@ func namedSessionMode(b beads.Bead) string {
 // (Info.ConfiguredNamedMode), identical to the bead form.
 func namedSessionModeInfo(i session.Info) string {
 	return session.NamedSessionModeInfo(i)
+}
+
+// recyclableDeadConfiguredNamePhantomInfo reports the configured identity a
+// process-dead session is squatting, when it is not that identity's canonical
+// owner and is therefore safe to close and recycle. Used by the reconciler's
+// Info-based close-orphan path.
+func recyclableDeadConfiguredNamePhantomInfo(i session.Info, cfg *config.City, cityName string) (string, bool) {
+	return session.RecyclableDeadConfiguredNamePhantomInfo(i, cfg, cityName)
 }
 
 func namedSessionContinuityEligible(b beads.Bead) bool {

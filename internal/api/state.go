@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -159,6 +160,34 @@ type State interface {
 	// store is available.
 	GraphBeadStore() beads.GraphStore
 
+	// OrdersBeadStore returns the store backing orders-class beads — the
+	// order-tracking / order-run records that gate repeat order firing. At the
+	// default backend this is the same store as CityBeadStore; when
+	// [beads.classes.orders] is relocated it is the per-class store, which is
+	// where the controller now creates every tracking bead. Without this
+	// accessor the API layer is structurally unable to route orders: the order
+	// feed and the check/history reads would scan the work store and report a
+	// split city's orders as never having run. The strongly-typed
+	// beads.OrdersStore return makes the orders class statically visible at the
+	// call site; its embedded .Store is nil when no store is available.
+	OrdersBeadStore() beads.OrdersStore
+
+	// ClassBindingHasLegacyResidents reports whether store — one of the
+	// per-class stores above — still holds a bead, open or closed, under an id
+	// outside the namespaces its classes declare: a row `gc storage migrate`
+	// carried across under its original work-shaped id, reachable only by
+	// probing the binding.
+	//
+	// The API never opens a binding and cannot take that census itself, so the
+	// verdict crosses this surface from the boot that did. It exists because
+	// both planes plan by-id reads against the same bindings, and a plane that
+	// kept probing after the other retired would resolve one id to two stores.
+	//
+	// TRUE is the answer for every store this State cannot speak for —
+	// unknown included. An unread binding has said nothing about its residents,
+	// and "nothing" is not the claim that retires a probe.
+	ClassBindingHasLegacyResidents(store beads.Store) bool
+
 	// Orders returns the current active set of scanned orders.
 	// Returns nil if orders are not configured.
 	Orders() []orders.Order
@@ -168,11 +197,15 @@ type State interface {
 	// Returns nil if orders are not configured.
 	OrdersAll() []orders.Order
 
-	// Poke signals the controller to trigger an immediate reconciler tick.
-	// Used after sling assigns work so WakeWork wakes the target without
-	// waiting for the next patrol interval. Best-effort: no-op if poke
-	// is not available (e.g., in tests).
-	Poke()
+	// Enqueue asks the controller to reconcile the given keys promptly
+	// instead of waiting for the next patrol interval. Callers pass the most
+	// specific key they know (a session they just created or changed, the
+	// control dispatcher after a workflow launch); a call with no keys means
+	// the city-wide allocator. Under the legacy reconciler every key maps to
+	// the existing poke (control-dispatch keys to the control-dispatcher
+	// signal), so one call is at most one tick. Best-effort and non-blocking:
+	// a no-op when the controller signal is unavailable (e.g., in tests).
+	Enqueue(keys ...reconcilekey.Key)
 
 	// ServiceRegistry returns the workspace service registry, or nil when
 	// workspace services are not enabled for this city.
@@ -241,6 +274,19 @@ type ProviderUpdate struct {
 // /v0/config/explain endpoint to distinguish inline vs pack-derived agents.
 type RawConfigProvider interface {
 	RawConfig() *config.City
+}
+
+// OnDeathHookGate is an optional State capability. A controller that runs
+// on_death hooks off its tick holds a session name while that name's hook is
+// queued or running, and its reconciler defers the name's start until the
+// hook has run (the hook releases work the dead incarnation held; a restart
+// racing it could resume that work only to have it released). A handler that
+// would start a runtime directly checks the gate and leaves the start to the
+// reconciler instead. Optional for the same reason as WebhookDispatchProvider.
+type OnDeathHookGate interface {
+	// OnDeathHookPending reports whether sessionName's on_death hook is
+	// queued or running.
+	OnDeathHookPending(sessionName string) bool
 }
 
 // WebhookDispatchProvider is optionally implemented by State to expose the live
@@ -408,16 +454,19 @@ type FormulaMutator interface {
 	DeleteFormula(name string) error
 }
 
-// ConfigWriteSerializer is an optional State extension that runs fn under the
-// per-city config write lock. Pack import add/remove mutate city config files
-// (pack.toml, packs.lock, and sometimes city.toml) outside the
+// ConfigWriteSerializer is an optional State extension that runs fn as one
+// per-city config transaction. Pack import add/remove mutate several city
+// config files (pack.toml, packs.lock, and sometimes city.toml) outside the
 // configedit.Editor callback shape, so running them through this seam
 // serializes them against the agent/rig/provider/formula mutations that take
 // the same Editor lock — otherwise two concurrent net/http goroutines could
 // interleave load→mutate→write and lose an update or desync manifest and
-// lockfile. Like StateMutator it is type-asserted by handlers; a State that
-// does not implement it runs the mutation without extra serialization.
+// lockfile. The controller implementation also keeps its runtime config
+// reload from reading the files while fn is mid-write, restores them when fn
+// fails, and publishes the finished generation. Like StateMutator it is
+// type-asserted by handlers; a State that does not implement it runs the
+// mutation without extra serialization.
 type ConfigWriteSerializer interface {
-	// SerializeConfigWrite runs fn while holding the per-city config write lock.
+	// SerializeConfigWrite runs fn as one per-city config transaction.
 	SerializeConfigWrite(fn func() error) error
 }

@@ -18,6 +18,24 @@ import (
 	"github.com/oapi-codegen/runtime"
 )
 
+// Defines values for BeadGraphResponseMembership.
+const (
+	DirectRootIdParentClosure              BeadGraphResponseMembership = "direct-root-id+parent-closure"
+	DirectRootIdParentClosureConvoyMembers BeadGraphResponseMembership = "direct-root-id+parent-closure+convoy-members"
+)
+
+// Valid indicates whether the value is a known member of the BeadGraphResponseMembership enum.
+func (e BeadGraphResponseMembership) Valid() bool {
+	switch e {
+	case DirectRootIdParentClosure:
+		return true
+	case DirectRootIdParentClosureConvoyMembers:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for BindingStatus.
 const (
 	BindingStatusActive BindingStatus = "active"
@@ -946,7 +964,10 @@ type AgentOutputResponse struct {
 type AgentPatch struct {
 	AppendFragments         *[]string         `json:"AppendFragments"`
 	Args                    *[]string         `json:"Args"`
+	AssignedWorkDeferLimit  *int64            `json:"AssignedWorkDeferLimit"`
 	Attach                  *bool             `json:"Attach"`
+	AutoReclaimStaleClaims  *bool             `json:"AutoReclaimStaleClaims"`
+	ContextAdvisory         ContextAdvisory   `json:"ContextAdvisory"`
 	DefaultSlingFormula     *string           `json:"DefaultSlingFormula"`
 	DependsOn               *[]string         `json:"DependsOn"`
 	Dir                     string            `json:"Dir"`
@@ -977,6 +998,7 @@ type AgentPatch struct {
 	PromptTemplate          *string           `json:"PromptTemplate"`
 	Provider                *string           `json:"Provider"`
 	ResumeCommand           *string           `json:"ResumeCommand"`
+	Rig                     string            `json:"Rig"`
 	ScaleCheck              *string           `json:"ScaleCheck"`
 	Scope                   *string           `json:"Scope"`
 	Session                 *string           `json:"Session"`
@@ -998,7 +1020,7 @@ type AgentPatch struct {
 
 // AgentPatchSetInputBody defines model for AgentPatchSetInputBody.
 type AgentPatchSetInputBody struct {
-	// Dir Agent directory scope.
+	// Dir Agent directory scope (legacy targeting key; prefer rig).
 	Dir *string `json:"dir,omitempty"`
 
 	// Env Override environment variables.
@@ -1009,6 +1031,9 @@ type AgentPatchSetInputBody struct {
 
 	// Provider Override the agent's provider.
 	Provider *string `json:"provider,omitempty"`
+
+	// Rig Rig targeting key. "*" matches the agent name across all rigs and city. Mutually exclusive with dir.
+	Rig *string `json:"rig,omitempty"`
 
 	// Scope Override agent scope.
 	Scope *string `json:"scope,omitempty"`
@@ -1121,6 +1146,17 @@ type AsyncAcceptedResponse struct {
 	RequestId string `json:"request_id"`
 }
 
+// BackendCredentialResolvedPayload defines model for BackendCredentialResolvedPayload.
+type BackendCredentialResolvedPayload struct {
+	Backend   string `json:"backend"`
+	Host      string `json:"host"`
+	Port      string `json:"port"`
+	ScopeKind string `json:"scope_kind"`
+	ScopeName string `json:"scope_name"`
+	Source    string `json:"source"`
+	User      string `json:"user"`
+}
+
 // Bead defines model for Bead.
 type Bead struct {
 	Assignee     *string            `json:"assignee,omitempty"`
@@ -1156,6 +1192,13 @@ type BeadClaimRejectedPayload struct {
 	AttemptedClaimant string `json:"attempted_claimant"`
 	BeadId            string `json:"bead_id"`
 	ExistingClaimant  string `json:"existing_claimant"`
+}
+
+// BeadClaimReleasedPayload defines model for BeadClaimReleasedPayload.
+type BeadClaimReleasedPayload struct {
+	Assignee string `json:"assignee"`
+	BeadId   string `json:"bead_id"`
+	Reason   string `json:"reason"`
 }
 
 // BeadCreateInputBody defines model for BeadCreateInputBody.
@@ -1217,8 +1260,14 @@ type BeadEventPayload struct {
 type BeadGraphResponse struct {
 	Beads *[]Bead                `json:"beads"`
 	Deps  *[]WorkflowDepResponse `json:"deps"`
-	Root  Bead                   `json:"root"`
+
+	// Membership Rule that decided which beads are in Beads: the root, everything carrying gc.root_bead_id == root, plus the root's convoy members when the root is a convoy, and then the transitive parent-child closure taken over all of those — a convoy member brings its own subtree. Both storage tiers are in scope, so a wisp molecule (whose beads are all ephemeral) returns its members rather than reading as empty. Never dependency reachability, which drops dependency-isolated members such as gc.kind=spec sidecars.
+	Membership BeadGraphResponseMembership `json:"membership"`
+	Root       Bead                        `json:"root"`
 }
+
+// BeadGraphResponseMembership Rule that decided which beads are in Beads: the root, everything carrying gc.root_bead_id == root, plus the root's convoy members when the root is a convoy, and then the transitive parent-child closure taken over all of those — a convoy member brings its own subtree. Both storage tiers are in scope, so a wisp molecule (whose beads are all ephemeral) returns its members rather than reading as empty. Never dependency reachability, which drops dependency-isolated members such as gc.kind=spec sidecars.
+type BeadGraphResponseMembership string
 
 // BeadUpdateBody defines model for BeadUpdateBody.
 type BeadUpdateBody struct {
@@ -1271,14 +1320,22 @@ type BeadWorktreeReapedPayload struct {
 
 // BeadsDiagnostic defines model for BeadsDiagnostic.
 type BeadsDiagnostic struct {
-	BeadsStore          string  `json:"beads_store"`
-	NativeStoreEligible bool    `json:"native_store_eligible"`
-	PreflightGate       *string `json:"preflight_gate,omitempty"`
-	PreflightReason     *string `json:"preflight_reason,omitempty"`
+	BeadsStore          string             `json:"beads_store"`
+	NativeStoreEligible bool               `json:"native_store_eligible"`
+	PreflightGate       *string            `json:"preflight_gate,omitempty"`
+	PreflightReason     *string            `json:"preflight_reason,omitempty"`
+	Proxied             *ProxiedDiagnostic `json:"proxied,omitempty"`
 }
 
 // BindingStatus Lifecycle state of a session binding.
 type BindingStatus string
+
+// BlockedRecomputedPayload defines model for BlockedRecomputedPayload.
+type BlockedRecomputedPayload struct {
+	BdVersion     string `json:"bd_version"`
+	RowsCorrected int64  `json:"rows_corrected"`
+	Scope         string `json:"scope"`
+}
 
 // BoundEventPayload defines model for BoundEventPayload.
 type BoundEventPayload struct {
@@ -1448,6 +1505,52 @@ type ConfigValidateOutputBody struct {
 	Warnings *[]string `json:"warnings"`
 }
 
+// ContextAdvisory defines model for ContextAdvisory.
+type ContextAdvisory struct {
+	Enabled      *bool                  `json:"Enabled"`
+	Tiers        *[]ContextAdvisoryTier `json:"Tiers"`
+	WindowTokens *int64                 `json:"WindowTokens"`
+}
+
+// ContextAdvisoryTier defines model for ContextAdvisoryTier.
+type ContextAdvisoryTier struct {
+	Enabled   *bool   `json:"Enabled"`
+	Message   *string `json:"Message"`
+	Threshold *int64  `json:"Threshold"`
+}
+
+// ControlDispatcherScopeGapPayload defines model for ControlDispatcherScopeGapPayload.
+type ControlDispatcherScopeGapPayload struct {
+	RigContext      *string `json:"rig_context,omitempty"`
+	SampleBeadId    *string `json:"sample_bead_id,omitempty"`
+	ScopeLabel      string  `json:"scope_label"`
+	StoreRef        *string `json:"store_ref,omitempty"`
+	SuppressedCount int64   `json:"suppressed_count"`
+}
+
+// ControlRootSettleFailedPayload defines model for ControlRootSettleFailedPayload.
+type ControlRootSettleFailedPayload struct {
+	Error           string  `json:"error"`
+	ErrorClass      string  `json:"error_class"`
+	FinalizerBeadId string  `json:"finalizer_bead_id"`
+	FollowUpBeadId  *string `json:"follow_up_bead_id,omitempty"`
+	RootBeadId      string  `json:"root_bead_id"`
+	StorePath       *string `json:"store_path,omitempty"`
+}
+
+// ControlStalledPayload defines model for ControlStalledPayload.
+type ControlStalledPayload struct {
+	Attempts   int64   `json:"attempts"`
+	BeadId     string  `json:"bead_id"`
+	Error      string  `json:"error"`
+	ErrorClass string  `json:"error_class"`
+	FirstSeen  string  `json:"first_seen"`
+	Kind       *string `json:"kind,omitempty"`
+	OrderName  *string `json:"order_name,omitempty"`
+	RootBeadId *string `json:"root_bead_id,omitempty"`
+	StorePath  *string `json:"store_path,omitempty"`
+}
+
 // ConversationGroupParticipant defines model for ConversationGroupParticipant.
 type ConversationGroupParticipant struct {
 	GroupID     string            `json:"GroupID"`
@@ -1563,6 +1666,12 @@ type ConvoyProgress struct {
 type ConvoyRemoveInputBody struct {
 	// Items Bead IDs to remove.
 	Items *[]string `json:"items,omitempty"`
+}
+
+// Cursors defines model for Cursors.
+type Cursors struct {
+	Ignored int64 `json:"ignored"`
+	Main    int64 `json:"main"`
 }
 
 // DeliveryContextRecord defines model for DeliveryContextRecord.
@@ -1691,17 +1800,33 @@ type EventRotateResponse struct {
 
 // EventStreamEnvelope defines model for EventStreamEnvelope.
 type EventStreamEnvelope struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   *EventPayload            `json:"payload,omitempty"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          *EventPayload            `json:"payload,omitempty"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// ExecutionClaimWindowExpiredPayload defines model for ExecutionClaimWindowExpiredPayload.
+type ExecutionClaimWindowExpiredPayload struct {
+	BeadId          string `json:"bead_id"`
+	InvocationAgeMs int64  `json:"invocation_age_ms"`
+	ParentAlive     bool   `json:"parent_alive"`
+}
+
+// ExecutionStepStalledPayload defines model for ExecutionStepStalledPayload.
+type ExecutionStepStalledPayload struct {
+	Attempts   int64   `json:"attempts"`
+	BeadId     string  `json:"bead_id"`
+	RootBeadId *string `json:"root_bead_id,omitempty"`
+	SessionId  string  `json:"session_id"`
 }
 
 // ExtMsgAdapterRegisterInputBody defines model for ExtMsgAdapterRegisterInputBody.
@@ -2078,6 +2203,13 @@ type HealthOutputBody struct {
 type HeartbeatEvent struct {
 	// Timestamp ISO 8601 timestamp when the heartbeat was sent.
 	Timestamp string `json:"timestamp"`
+}
+
+// HookClaimReclaimedStalePayload defines model for HookClaimReclaimedStalePayload.
+type HookClaimReclaimedStalePayload struct {
+	BeadId        string `json:"bead_id"`
+	NewAssignee   string `json:"new_assignee"`
+	PreviousOwner string `json:"previous_owner"`
 }
 
 // InboundEventPayload defines model for InboundEventPayload.
@@ -2674,6 +2806,28 @@ type OrderRunOutputBody struct {
 	TrackingId *string `json:"tracking_id,omitempty"`
 }
 
+// OrderSkippedPayload defines model for OrderSkippedPayload.
+type OrderSkippedPayload struct {
+	OrderName string               `json:"order_name"`
+	Outcome   string               `json:"outcome"`
+	Reason    string               `json:"reason"`
+	Scopes    *[]OrderSkippedScope `json:"scopes"`
+}
+
+// OrderSkippedScope defines model for OrderSkippedScope.
+type OrderSkippedScope struct {
+	Reason string `json:"reason"`
+	Scope  string `json:"scope"`
+}
+
+// OrderSuppressedPayload defines model for OrderSuppressedPayload.
+type OrderSuppressedPayload struct {
+	Consecutive     int64  `json:"consecutive"`
+	FirstSuppressed string `json:"first_suppressed"`
+	OrderName       string `json:"order_name"`
+	SuppressedForMs int64  `json:"suppressed_for_ms"`
+}
+
 // OrdersFeedBody defines model for OrdersFeedBody.
 type OrdersFeedBody struct {
 	Items         *[]MonitorFeedItemResponse `json:"items"`
@@ -2814,16 +2968,6 @@ type PoolOverride struct {
 	Min          *int64  `json:"Min"`
 	OnBoot       *string `json:"OnBoot"`
 	OnDeath      *string `json:"OnDeath"`
-}
-
-// PostgresCredentialResolvedPayload defines model for PostgresCredentialResolvedPayload.
-type PostgresCredentialResolvedPayload struct {
-	Host      string `json:"host"`
-	Port      string `json:"port"`
-	ScopeKind string `json:"scope_kind"`
-	ScopeName string `json:"scope_name"`
-	Source    string `json:"source"`
-	User      string `json:"user"`
 }
 
 // ProjectIdentityStampedPayload defines model for ProjectIdentityStampedPayload.
@@ -3055,6 +3199,24 @@ type ProviderUpdateInputBody struct {
 	ReadyDelayMs *int64 `json:"ready_delay_ms,omitempty"`
 }
 
+// ProxiedDiagnostic defines model for ProxiedDiagnostic.
+type ProxiedDiagnostic struct {
+	Cursors    Cursors              `json:"cursors"`
+	Demoted    *bool                `json:"demoted,omitempty"`
+	Detail     *string              `json:"detail,omitempty"`
+	Endpoint   ProxiedEndpointStamp `json:"endpoint"`
+	Evidence   *string              `json:"evidence,omitempty"`
+	IdlePolicy *string              `json:"idle_policy,omitempty"`
+	Verdict    *string              `json:"verdict,omitempty"`
+}
+
+// ProxiedEndpointStamp defines model for ProxiedEndpointStamp.
+type ProxiedEndpointStamp struct {
+	Generation *string `json:"generation,omitempty"`
+	Pid        *int64  `json:"pid,omitempty"`
+	Port       *int64  `json:"port,omitempty"`
+}
+
 // PublishReceipt defines model for PublishReceipt.
 type PublishReceipt struct {
 	Conversation ConversationRef   `json:"Conversation"`
@@ -3191,13 +3353,15 @@ type RigCreateSucceededPayload struct {
 
 // RigPatch defines model for RigPatch.
 type RigPatch struct {
-	DefaultBranch    *string           `json:"DefaultBranch"`
-	FormulaVars      map[string]string `json:"FormulaVars"`
-	Name             string            `json:"Name"`
-	Path             *string           `json:"Path"`
-	Prefix           *string           `json:"Prefix"`
-	Suspended        *bool             `json:"Suspended"`
-	SuspendedOnStart *bool             `json:"SuspendedOnStart"`
+	BeadsProxiedIdleTimeout *string           `json:"BeadsProxiedIdleTimeout"`
+	DefaultBranch           *string           `json:"DefaultBranch"`
+	DefaultMergeStrategy    *string           `json:"DefaultMergeStrategy"`
+	FormulaVars             map[string]string `json:"FormulaVars"`
+	Name                    string            `json:"Name"`
+	Path                    *string           `json:"Path"`
+	Prefix                  *string           `json:"Prefix"`
+	Suspended               *bool             `json:"Suspended"`
+	SuspendedOnStart        *bool             `json:"SuspendedOnStart"`
 }
 
 // RigPatchSetInputBody defines model for RigPatchSetInputBody.
@@ -3511,6 +3675,16 @@ type SessionCreateSucceededPayload struct {
 	Session   SessionResponse `json:"session"`
 }
 
+// SessionDemandClaimDivergencePayload defines model for SessionDemandClaimDivergencePayload.
+type SessionDemandClaimDivergencePayload struct {
+	Classification       string  `json:"classification"`
+	DrainReason          string  `json:"drain_reason"`
+	SessionId            string  `json:"session_id"`
+	Template             string  `json:"template"`
+	TriggerBeadId        *string `json:"trigger_bead_id,omitempty"`
+	TriggerStatusAtDrain *string `json:"trigger_status_at_drain,omitempty"`
+}
+
 // SessionDrainAckedWithAssignedWorkPayload defines model for SessionDrainAckedWithAssignedWorkPayload.
 type SessionDrainAckedWithAssignedWorkPayload struct {
 	// BeadId ID of the work bead still holding this session as its assignee.
@@ -3588,6 +3762,24 @@ type SessionPendingResponse struct {
 type SessionPermissionModeBody struct {
 	// PermissionMode Provider schema value for the permission_mode option.
 	PermissionMode string `json:"permission_mode"`
+}
+
+// SessionPoolSlotRetiredAtDrainDeadlinePayload defines model for SessionPoolSlotRetiredAtDrainDeadlinePayload.
+type SessionPoolSlotRetiredAtDrainDeadlinePayload struct {
+	// DrainAgeSeconds Whole seconds the seat spent in drain before the deadline retired it. Always at least the retire deadline.
+	DrainAgeSeconds int64 `json:"drain_age_seconds"`
+
+	// DrainAt RFC3339 instant the seat entered drain (the drain_at metadata). Empty only if the marker was unreadable, in which case no retirement occurs.
+	DrainAt *string `json:"drain_at,omitempty"`
+
+	// SessionId Canonical session bead ID for the retired pool seat.
+	SessionId string `json:"session_id"`
+
+	// SessionName Runtime session name the seat held. This is the name the pool could not route around until the retirement freed it.
+	SessionName *string `json:"session_name,omitempty"`
+
+	// Template Pool template name when known at the emission site.
+	Template *string `json:"template,omitempty"`
 }
 
 // SessionRawMessageFrame Provider-native transcript frame. Gas City forwards the exact JSON the provider wrote to its session log, so the shape is provider-specific and can be any JSON value. The producing provider is identified by the Provider field on the enclosing envelope; consumers dispatch per-provider frame parsing keyed by that identifier.
@@ -4625,6 +4817,27 @@ type SessionUnknownStatePayload struct {
 	State string `json:"state"`
 }
 
+// SessionWakeRefusedPayload defines model for SessionWakeRefusedPayload.
+type SessionWakeRefusedPayload struct {
+	// Attempts wake_attempts recorded after this refusal.
+	Attempts int64 `json:"attempts"`
+
+	// Reason Refusal reason: held, quarantined, or idle-sleep.
+	Reason string `json:"reason"`
+
+	// SessionId Session bead ID.
+	SessionId string `json:"session_id"`
+
+	// SessionName Session display name, if known.
+	SessionName *string `json:"session_name,omitempty"`
+
+	// Template Resolved session template.
+	Template *string `json:"template,omitempty"`
+
+	// WakeRequest The wake_request metadata value that triggered this check (explicit).
+	WakeRequest string `json:"wake_request"`
+}
+
 // SlingInputBody defines model for SlingInputBody.
 type SlingInputBody struct {
 	// AttachedBeadId Bead ID to attach a formula to.
@@ -4802,6 +5015,9 @@ type StatusBody struct {
 	SessionCountsDetail *StatusSessionCountsDetail `json:"session_counts_detail,omitempty"`
 	StoreHealth         *StatusStoreHealth         `json:"store_health,omitempty"`
 
+	// StoresNotRead True when the city is suspended: the body was built without reading any bead store (a read would restart its retired bd proxy), so work, mail, session-count and store-health figures are absent.
+	StoresNotRead *bool `json:"stores_not_read,omitempty"`
+
 	// Suspended Whether the city is suspended.
 	Suspended bool `json:"suspended"`
 
@@ -4947,14 +5163,17 @@ type StatusStoreHealth struct {
 	// LastGcStatus Status of last maintenance run ('success' or 'failed').
 	LastGcStatus *string `json:"last_gc_status,omitempty"`
 
-	// LiveRows Retained bead row count used as the denominator, including open and closed beads.
+	// LiveRows Retained bead row count used as the denominator, including open and closed beads. Meaningless unless rows_measured is true.
 	LiveRows int64 `json:"live_rows"`
 
 	// Path On-disk path of the Dolt store.
 	Path string `json:"path"`
 
-	// RatioMbPerRow Derived megabytes per retained row, including open and closed beads.
+	// RatioMbPerRow Derived megabytes per retained row, including open and closed beads. Zero and meaningless unless rows_measured is true.
 	RatioMbPerRow float64 `json:"ratio_mb_per_row"`
+
+	// RowsMeasured True when live_rows is a real count. False means the count failed, timed out, or was never taken, and both live_rows and ratio_mb_per_row are meaningless.
+	RowsMeasured bool `json:"rows_measured"`
 
 	// SizeBytes Total bytes of the store directory.
 	SizeBytes int64 `json:"size_bytes"`
@@ -4962,7 +5181,7 @@ type StatusStoreHealth struct {
 	// ThresholdMbPerRow Ratio threshold; a ratio above this trips warning.
 	ThresholdMbPerRow float64 `json:"threshold_mb_per_row"`
 
-	// Warning True when maintenance is overdue.
+	// Warning True when maintenance is overdue. Meaningless unless rows_measured is true.
 	Warning bool `json:"warning"`
 }
 
@@ -4976,6 +5195,19 @@ type StatusWorkCounts struct {
 
 	// Ready Number of ready work items.
 	Ready int64 `json:"ready"`
+
+	// SuspendedRigsExcluded Number of suspended rigs left out of these counts: a suspended rig's store is not read.
+	SuspendedRigsExcluded *int64 `json:"suspended_rigs_excluded,omitempty"`
+}
+
+// StorageBindingOutcomePayload defines model for StorageBindingOutcomePayload.
+type StorageBindingOutcomePayload struct {
+	Binding        string    `json:"binding"`
+	Database       string    `json:"database"`
+	Invariant      string    `json:"invariant"`
+	LostCrossEdges *[]string `json:"lost_cross_edges,omitempty"`
+	Outcome        string    `json:"outcome"`
+	ProvenBeads    int64     `json:"proven_beads"`
 }
 
 // StoreDiskCriticalPayload defines model for StoreDiskCriticalPayload.
@@ -5161,18 +5393,19 @@ type SupervisorStartup struct {
 
 // TaggedEventStreamEnvelope defines model for TaggedEventStreamEnvelope.
 type TaggedEventStreamEnvelope struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   *EventPayload            `json:"payload,omitempty"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          *EventPayload            `json:"payload,omitempty"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TranscriptMessageKind Direction of a transcript entry.
@@ -5186,1174 +5419,1652 @@ type TypedEventStreamEnvelope struct {
 	union json.RawMessage
 }
 
+// TypedEventStreamEnvelopeBackendCredentialResolved defines model for TypedEventStreamEnvelopeBackendCredentialResolved.
+type TypedEventStreamEnvelopeBackendCredentialResolved struct {
+	Actor            string                           `json:"actor"`
+	DependsOnStepIds *[]string                        `json:"depends_on_step_ids,omitempty"`
+	Message          *string                          `json:"message,omitempty"`
+	Payload          BackendCredentialResolvedPayload `json:"payload"`
+	RunId            *string                          `json:"run_id,omitempty"`
+	Seq              int64                            `json:"seq"`
+	SessionId        *string                          `json:"session_id,omitempty"`
+	StepId           *string                          `json:"step_id,omitempty"`
+	Subject          *string                          `json:"subject,omitempty"`
+	Ts               time.Time                        `json:"ts"`
+	Type             string                           `json:"type"`
+	Workflow         *WorkflowEventProjection         `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeBeadClaimRejected defines model for TypedEventStreamEnvelopeBeadClaimRejected.
 type TypedEventStreamEnvelopeBeadClaimRejected struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   BeadClaimRejectedPayload `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BeadClaimRejectedPayload `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeBeadClaimReleased defines model for TypedEventStreamEnvelopeBeadClaimReleased.
+type TypedEventStreamEnvelopeBeadClaimReleased struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BeadClaimReleasedPayload `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeBeadClosed defines model for TypedEventStreamEnvelopeBeadClosed.
 type TypedEventStreamEnvelopeBeadClosed struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   BeadEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BeadEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeBeadCreated defines model for TypedEventStreamEnvelopeBeadCreated.
 type TypedEventStreamEnvelopeBeadCreated struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   BeadEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BeadEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeBeadDeadAssigneeReopened defines model for TypedEventStreamEnvelopeBeadDeadAssigneeReopened.
 type TypedEventStreamEnvelopeBeadDeadAssigneeReopened struct {
-	Actor     string                          `json:"actor"`
-	Message   *string                         `json:"message,omitempty"`
-	Payload   BeadDeadAssigneeReopenedPayload `json:"payload"`
-	RunId     *string                         `json:"run_id,omitempty"`
-	Seq       int64                           `json:"seq"`
-	SessionId *string                         `json:"session_id,omitempty"`
-	StepId    *string                         `json:"step_id,omitempty"`
-	Subject   *string                         `json:"subject,omitempty"`
-	Ts        time.Time                       `json:"ts"`
-	Type      string                          `json:"type"`
-	Workflow  *WorkflowEventProjection        `json:"workflow,omitempty"`
+	Actor            string                          `json:"actor"`
+	DependsOnStepIds *[]string                       `json:"depends_on_step_ids,omitempty"`
+	Message          *string                         `json:"message,omitempty"`
+	Payload          BeadDeadAssigneeReopenedPayload `json:"payload"`
+	RunId            *string                         `json:"run_id,omitempty"`
+	Seq              int64                           `json:"seq"`
+	SessionId        *string                         `json:"session_id,omitempty"`
+	StepId           *string                         `json:"step_id,omitempty"`
+	Subject          *string                         `json:"subject,omitempty"`
+	Ts               time.Time                       `json:"ts"`
+	Type             string                          `json:"type"`
+	Workflow         *WorkflowEventProjection        `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeBeadDeleted defines model for TypedEventStreamEnvelopeBeadDeleted.
 type TypedEventStreamEnvelopeBeadDeleted struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   BeadEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BeadEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeBeadUpdated defines model for TypedEventStreamEnvelopeBeadUpdated.
 type TypedEventStreamEnvelopeBeadUpdated struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   BeadEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BeadEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeBeadWorktreeReapSkipped defines model for TypedEventStreamEnvelopeBeadWorktreeReapSkipped.
 type TypedEventStreamEnvelopeBeadWorktreeReapSkipped struct {
-	Actor     string                         `json:"actor"`
-	Message   *string                        `json:"message,omitempty"`
-	Payload   BeadWorktreeReapSkippedPayload `json:"payload"`
-	RunId     *string                        `json:"run_id,omitempty"`
-	Seq       int64                          `json:"seq"`
-	SessionId *string                        `json:"session_id,omitempty"`
-	StepId    *string                        `json:"step_id,omitempty"`
-	Subject   *string                        `json:"subject,omitempty"`
-	Ts        time.Time                      `json:"ts"`
-	Type      string                         `json:"type"`
-	Workflow  *WorkflowEventProjection       `json:"workflow,omitempty"`
+	Actor            string                         `json:"actor"`
+	DependsOnStepIds *[]string                      `json:"depends_on_step_ids,omitempty"`
+	Message          *string                        `json:"message,omitempty"`
+	Payload          BeadWorktreeReapSkippedPayload `json:"payload"`
+	RunId            *string                        `json:"run_id,omitempty"`
+	Seq              int64                          `json:"seq"`
+	SessionId        *string                        `json:"session_id,omitempty"`
+	StepId           *string                        `json:"step_id,omitempty"`
+	Subject          *string                        `json:"subject,omitempty"`
+	Ts               time.Time                      `json:"ts"`
+	Type             string                         `json:"type"`
+	Workflow         *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeBeadWorktreeReaped defines model for TypedEventStreamEnvelopeBeadWorktreeReaped.
 type TypedEventStreamEnvelopeBeadWorktreeReaped struct {
-	Actor     string                    `json:"actor"`
-	Message   *string                   `json:"message,omitempty"`
-	Payload   BeadWorktreeReapedPayload `json:"payload"`
-	RunId     *string                   `json:"run_id,omitempty"`
-	Seq       int64                     `json:"seq"`
-	SessionId *string                   `json:"session_id,omitempty"`
-	StepId    *string                   `json:"step_id,omitempty"`
-	Subject   *string                   `json:"subject,omitempty"`
-	Ts        time.Time                 `json:"ts"`
-	Type      string                    `json:"type"`
-	Workflow  *WorkflowEventProjection  `json:"workflow,omitempty"`
+	Actor            string                    `json:"actor"`
+	DependsOnStepIds *[]string                 `json:"depends_on_step_ids,omitempty"`
+	Message          *string                   `json:"message,omitempty"`
+	Payload          BeadWorktreeReapedPayload `json:"payload"`
+	RunId            *string                   `json:"run_id,omitempty"`
+	Seq              int64                     `json:"seq"`
+	SessionId        *string                   `json:"session_id,omitempty"`
+	StepId           *string                   `json:"step_id,omitempty"`
+	Subject          *string                   `json:"subject,omitempty"`
+	Ts               time.Time                 `json:"ts"`
+	Type             string                    `json:"type"`
+	Workflow         *WorkflowEventProjection  `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeBeadsBlockedRecomputed defines model for TypedEventStreamEnvelopeBeadsBlockedRecomputed.
+type TypedEventStreamEnvelopeBeadsBlockedRecomputed struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BlockedRecomputedPayload `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeBeadsConditionalWritesDegraded defines model for TypedEventStreamEnvelopeBeadsConditionalWritesDegraded.
 type TypedEventStreamEnvelopeBeadsConditionalWritesDegraded struct {
-	Actor     string                           `json:"actor"`
-	Message   *string                          `json:"message,omitempty"`
-	Payload   ConditionalWritesDegradedPayload `json:"payload"`
-	RunId     *string                          `json:"run_id,omitempty"`
-	Seq       int64                            `json:"seq"`
-	SessionId *string                          `json:"session_id,omitempty"`
-	StepId    *string                          `json:"step_id,omitempty"`
-	Subject   *string                          `json:"subject,omitempty"`
-	Ts        time.Time                        `json:"ts"`
-	Type      string                           `json:"type"`
-	Workflow  *WorkflowEventProjection         `json:"workflow,omitempty"`
+	Actor            string                           `json:"actor"`
+	DependsOnStepIds *[]string                        `json:"depends_on_step_ids,omitempty"`
+	Message          *string                          `json:"message,omitempty"`
+	Payload          ConditionalWritesDegradedPayload `json:"payload"`
+	RunId            *string                          `json:"run_id,omitempty"`
+	Seq              int64                            `json:"seq"`
+	SessionId        *string                          `json:"session_id,omitempty"`
+	StepId           *string                          `json:"step_id,omitempty"`
+	Subject          *string                          `json:"subject,omitempty"`
+	Ts               time.Time                        `json:"ts"`
+	Type             string                           `json:"type"`
+	Workflow         *WorkflowEventProjection         `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeCityCreated defines model for TypedEventStreamEnvelopeCityCreated.
 type TypedEventStreamEnvelopeCityCreated struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   CityLifecyclePayload     `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          CityLifecyclePayload     `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeCityResumed defines model for TypedEventStreamEnvelopeCityResumed.
 type TypedEventStreamEnvelopeCityResumed struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeCitySuspended defines model for TypedEventStreamEnvelopeCitySuspended.
 type TypedEventStreamEnvelopeCitySuspended struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeCityUnregisterRequested defines model for TypedEventStreamEnvelopeCityUnregisterRequested.
 type TypedEventStreamEnvelopeCityUnregisterRequested struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   CityLifecyclePayload     `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          CityLifecyclePayload     `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeControlDispatcherScopeGap defines model for TypedEventStreamEnvelopeControlDispatcherScopeGap.
+type TypedEventStreamEnvelopeControlDispatcherScopeGap struct {
+	Actor            string                           `json:"actor"`
+	DependsOnStepIds *[]string                        `json:"depends_on_step_ids,omitempty"`
+	Message          *string                          `json:"message,omitempty"`
+	Payload          ControlDispatcherScopeGapPayload `json:"payload"`
+	RunId            *string                          `json:"run_id,omitempty"`
+	Seq              int64                            `json:"seq"`
+	SessionId        *string                          `json:"session_id,omitempty"`
+	StepId           *string                          `json:"step_id,omitempty"`
+	Subject          *string                          `json:"subject,omitempty"`
+	Ts               time.Time                        `json:"ts"`
+	Type             string                           `json:"type"`
+	Workflow         *WorkflowEventProjection         `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeControlRootSettleFailed defines model for TypedEventStreamEnvelopeControlRootSettleFailed.
+type TypedEventStreamEnvelopeControlRootSettleFailed struct {
+	Actor            string                         `json:"actor"`
+	DependsOnStepIds *[]string                      `json:"depends_on_step_ids,omitempty"`
+	Message          *string                        `json:"message,omitempty"`
+	Payload          ControlRootSettleFailedPayload `json:"payload"`
+	RunId            *string                        `json:"run_id,omitempty"`
+	Seq              int64                          `json:"seq"`
+	SessionId        *string                        `json:"session_id,omitempty"`
+	StepId           *string                        `json:"step_id,omitempty"`
+	Subject          *string                        `json:"subject,omitempty"`
+	Ts               time.Time                      `json:"ts"`
+	Type             string                         `json:"type"`
+	Workflow         *WorkflowEventProjection       `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeControlStalled defines model for TypedEventStreamEnvelopeControlStalled.
+type TypedEventStreamEnvelopeControlStalled struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          ControlStalledPayload    `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeControllerStarted defines model for TypedEventStreamEnvelopeControllerStarted.
 type TypedEventStreamEnvelopeControllerStarted struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeControllerStopped defines model for TypedEventStreamEnvelopeControllerStopped.
 type TypedEventStreamEnvelopeControllerStopped struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeConvoyClosed defines model for TypedEventStreamEnvelopeConvoyClosed.
 type TypedEventStreamEnvelopeConvoyClosed struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeConvoyCreated defines model for TypedEventStreamEnvelopeConvoyCreated.
 type TypedEventStreamEnvelopeConvoyCreated struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeCustom defines model for TypedEventStreamEnvelopeCustom.
 type TypedEventStreamEnvelopeCustom struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   interface{}              `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          interface{}              `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeEmergencyAcked defines model for TypedEventStreamEnvelopeEmergencyAcked.
 type TypedEventStreamEnvelopeEmergencyAcked struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   Record                   `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          Record                   `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeEmergencySignaled defines model for TypedEventStreamEnvelopeEmergencySignaled.
 type TypedEventStreamEnvelopeEmergencySignaled struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   Record                   `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          Record                   `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeEventsRotated defines model for TypedEventStreamEnvelopeEventsRotated.
 type TypedEventStreamEnvelopeEventsRotated struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   RotatedPayload           `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          RotatedPayload           `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeExecutionClaimWindowExpired defines model for TypedEventStreamEnvelopeExecutionClaimWindowExpired.
+type TypedEventStreamEnvelopeExecutionClaimWindowExpired struct {
+	Actor            string                             `json:"actor"`
+	DependsOnStepIds *[]string                          `json:"depends_on_step_ids,omitempty"`
+	Message          *string                            `json:"message,omitempty"`
+	Payload          ExecutionClaimWindowExpiredPayload `json:"payload"`
+	RunId            *string                            `json:"run_id,omitempty"`
+	Seq              int64                              `json:"seq"`
+	SessionId        *string                            `json:"session_id,omitempty"`
+	StepId           *string                            `json:"step_id,omitempty"`
+	Subject          *string                            `json:"subject,omitempty"`
+	Ts               time.Time                          `json:"ts"`
+	Type             string                             `json:"type"`
+	Workflow         *WorkflowEventProjection           `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeExecutionRunAnchored defines model for TypedEventStreamEnvelopeExecutionRunAnchored.
+type TypedEventStreamEnvelopeExecutionRunAnchored struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeExecutionStepCompleted defines model for TypedEventStreamEnvelopeExecutionStepCompleted.
+type TypedEventStreamEnvelopeExecutionStepCompleted struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeExecutionStepDefined defines model for TypedEventStreamEnvelopeExecutionStepDefined.
+type TypedEventStreamEnvelopeExecutionStepDefined struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeExecutionStepStalled defines model for TypedEventStreamEnvelopeExecutionStepStalled.
+type TypedEventStreamEnvelopeExecutionStepStalled struct {
+	Actor            string                      `json:"actor"`
+	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
+	Message          *string                     `json:"message,omitempty"`
+	Payload          ExecutionStepStalledPayload `json:"payload"`
+	RunId            *string                     `json:"run_id,omitempty"`
+	Seq              int64                       `json:"seq"`
+	SessionId        *string                     `json:"session_id,omitempty"`
+	StepId           *string                     `json:"step_id,omitempty"`
+	Subject          *string                     `json:"subject,omitempty"`
+	Ts               time.Time                   `json:"ts"`
+	Type             string                      `json:"type"`
+	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeExecutionStepStarted defines model for TypedEventStreamEnvelopeExecutionStepStarted.
+type TypedEventStreamEnvelopeExecutionStepStarted struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeExecutionWorkAssociated defines model for TypedEventStreamEnvelopeExecutionWorkAssociated.
+type TypedEventStreamEnvelopeExecutionWorkAssociated struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeExtmsgAdapterAdded defines model for TypedEventStreamEnvelopeExtmsgAdapterAdded.
 type TypedEventStreamEnvelopeExtmsgAdapterAdded struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   AdapterEventPayload      `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          AdapterEventPayload      `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeExtmsgAdapterRemoved defines model for TypedEventStreamEnvelopeExtmsgAdapterRemoved.
 type TypedEventStreamEnvelopeExtmsgAdapterRemoved struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   AdapterEventPayload      `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          AdapterEventPayload      `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeExtmsgBound defines model for TypedEventStreamEnvelopeExtmsgBound.
 type TypedEventStreamEnvelopeExtmsgBound struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   BoundEventPayload        `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BoundEventPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeExtmsgGroupCreated defines model for TypedEventStreamEnvelopeExtmsgGroupCreated.
 type TypedEventStreamEnvelopeExtmsgGroupCreated struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   GroupCreatedEventPayload `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          GroupCreatedEventPayload `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeExtmsgInbound defines model for TypedEventStreamEnvelopeExtmsgInbound.
 type TypedEventStreamEnvelopeExtmsgInbound struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   InboundEventPayload      `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          InboundEventPayload      `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeExtmsgOutbound defines model for TypedEventStreamEnvelopeExtmsgOutbound.
 type TypedEventStreamEnvelopeExtmsgOutbound struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   OutboundEventPayload     `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          OutboundEventPayload     `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch defines model for TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch.
 type TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch struct {
-	Actor     string                         `json:"actor"`
-	Message   *string                        `json:"message,omitempty"`
-	Payload   OutboundChannelMismatchPayload `json:"payload"`
-	RunId     *string                        `json:"run_id,omitempty"`
-	Seq       int64                          `json:"seq"`
-	SessionId *string                        `json:"session_id,omitempty"`
-	StepId    *string                        `json:"step_id,omitempty"`
-	Subject   *string                        `json:"subject,omitempty"`
-	Ts        time.Time                      `json:"ts"`
-	Type      string                         `json:"type"`
-	Workflow  *WorkflowEventProjection       `json:"workflow,omitempty"`
+	Actor            string                         `json:"actor"`
+	DependsOnStepIds *[]string                      `json:"depends_on_step_ids,omitempty"`
+	Message          *string                        `json:"message,omitempty"`
+	Payload          OutboundChannelMismatchPayload `json:"payload"`
+	RunId            *string                        `json:"run_id,omitempty"`
+	Seq              int64                          `json:"seq"`
+	SessionId        *string                        `json:"session_id,omitempty"`
+	StepId           *string                        `json:"step_id,omitempty"`
+	Subject          *string                        `json:"subject,omitempty"`
+	Ts               time.Time                      `json:"ts"`
+	Type             string                         `json:"type"`
+	Workflow         *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeExtmsgUnbound defines model for TypedEventStreamEnvelopeExtmsgUnbound.
 type TypedEventStreamEnvelopeExtmsgUnbound struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   UnboundEventPayload      `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          UnboundEventPayload      `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeGcStoreDiskCritical defines model for TypedEventStreamEnvelopeGcStoreDiskCritical.
 type TypedEventStreamEnvelopeGcStoreDiskCritical struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   StoreDiskCriticalPayload `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          StoreDiskCriticalPayload `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeGcStoreDiskWarn defines model for TypedEventStreamEnvelopeGcStoreDiskWarn.
 type TypedEventStreamEnvelopeGcStoreDiskWarn struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   StoreDiskWarnPayload     `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          StoreDiskWarnPayload     `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeGcStoreMaintenanceDone defines model for TypedEventStreamEnvelopeGcStoreMaintenanceDone.
 type TypedEventStreamEnvelopeGcStoreMaintenanceDone struct {
-	Actor     string                      `json:"actor"`
-	Message   *string                     `json:"message,omitempty"`
-	Payload   StoreMaintenanceDonePayload `json:"payload"`
-	RunId     *string                     `json:"run_id,omitempty"`
-	Seq       int64                       `json:"seq"`
-	SessionId *string                     `json:"session_id,omitempty"`
-	StepId    *string                     `json:"step_id,omitempty"`
-	Subject   *string                     `json:"subject,omitempty"`
-	Ts        time.Time                   `json:"ts"`
-	Type      string                      `json:"type"`
-	Workflow  *WorkflowEventProjection    `json:"workflow,omitempty"`
+	Actor            string                      `json:"actor"`
+	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
+	Message          *string                     `json:"message,omitempty"`
+	Payload          StoreMaintenanceDonePayload `json:"payload"`
+	RunId            *string                     `json:"run_id,omitempty"`
+	Seq              int64                       `json:"seq"`
+	SessionId        *string                     `json:"session_id,omitempty"`
+	StepId           *string                     `json:"step_id,omitempty"`
+	Subject          *string                     `json:"subject,omitempty"`
+	Ts               time.Time                   `json:"ts"`
+	Type             string                      `json:"type"`
+	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeGcStoreMaintenanceFailed defines model for TypedEventStreamEnvelopeGcStoreMaintenanceFailed.
 type TypedEventStreamEnvelopeGcStoreMaintenanceFailed struct {
-	Actor     string                        `json:"actor"`
-	Message   *string                       `json:"message,omitempty"`
-	Payload   StoreMaintenanceFailedPayload `json:"payload"`
-	RunId     *string                       `json:"run_id,omitempty"`
-	Seq       int64                         `json:"seq"`
-	SessionId *string                       `json:"session_id,omitempty"`
-	StepId    *string                       `json:"step_id,omitempty"`
-	Subject   *string                       `json:"subject,omitempty"`
-	Ts        time.Time                     `json:"ts"`
-	Type      string                        `json:"type"`
-	Workflow  *WorkflowEventProjection      `json:"workflow,omitempty"`
+	Actor            string                        `json:"actor"`
+	DependsOnStepIds *[]string                     `json:"depends_on_step_ids,omitempty"`
+	Message          *string                       `json:"message,omitempty"`
+	Payload          StoreMaintenanceFailedPayload `json:"payload"`
+	RunId            *string                       `json:"run_id,omitempty"`
+	Seq              int64                         `json:"seq"`
+	SessionId        *string                       `json:"session_id,omitempty"`
+	StepId           *string                       `json:"step_id,omitempty"`
+	Subject          *string                       `json:"subject,omitempty"`
+	Ts               time.Time                     `json:"ts"`
+	Type             string                        `json:"type"`
+	Workflow         *WorkflowEventProjection      `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeHookClaimReclaimedStale defines model for TypedEventStreamEnvelopeHookClaimReclaimedStale.
+type TypedEventStreamEnvelopeHookClaimReclaimedStale struct {
+	Actor            string                         `json:"actor"`
+	DependsOnStepIds *[]string                      `json:"depends_on_step_ids,omitempty"`
+	Message          *string                        `json:"message,omitempty"`
+	Payload          HookClaimReclaimedStalePayload `json:"payload"`
+	RunId            *string                        `json:"run_id,omitempty"`
+	Seq              int64                          `json:"seq"`
+	SessionId        *string                        `json:"session_id,omitempty"`
+	StepId           *string                        `json:"step_id,omitempty"`
+	Subject          *string                        `json:"subject,omitempty"`
+	Ts               time.Time                      `json:"ts"`
+	Type             string                         `json:"type"`
+	Workflow         *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeMailArchived defines model for TypedEventStreamEnvelopeMailArchived.
 type TypedEventStreamEnvelopeMailArchived struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   MailEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          MailEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeMailDeleted defines model for TypedEventStreamEnvelopeMailDeleted.
 type TypedEventStreamEnvelopeMailDeleted struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   MailEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          MailEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeMailMarkedRead defines model for TypedEventStreamEnvelopeMailMarkedRead.
 type TypedEventStreamEnvelopeMailMarkedRead struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   MailEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          MailEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeMailMarkedUnread defines model for TypedEventStreamEnvelopeMailMarkedUnread.
 type TypedEventStreamEnvelopeMailMarkedUnread struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   MailEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          MailEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeMailRead defines model for TypedEventStreamEnvelopeMailRead.
 type TypedEventStreamEnvelopeMailRead struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   MailEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          MailEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeMailReplied defines model for TypedEventStreamEnvelopeMailReplied.
 type TypedEventStreamEnvelopeMailReplied struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   MailEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          MailEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeMailSent defines model for TypedEventStreamEnvelopeMailSent.
 type TypedEventStreamEnvelopeMailSent struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   MailEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          MailEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeMoleculeResolved defines model for TypedEventStreamEnvelopeMoleculeResolved.
 type TypedEventStreamEnvelopeMoleculeResolved struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   MoleculeResolvedPayload  `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          MoleculeResolvedPayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeOrderCompleted defines model for TypedEventStreamEnvelopeOrderCompleted.
 type TypedEventStreamEnvelopeOrderCompleted struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeOrderFailed defines model for TypedEventStreamEnvelopeOrderFailed.
 type TypedEventStreamEnvelopeOrderFailed struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeOrderFired defines model for TypedEventStreamEnvelopeOrderFired.
 type TypedEventStreamEnvelopeOrderFired struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
-// TypedEventStreamEnvelopePgCredentialResolved defines model for TypedEventStreamEnvelopePgCredentialResolved.
-type TypedEventStreamEnvelopePgCredentialResolved struct {
-	Actor     string                            `json:"actor"`
-	Message   *string                           `json:"message,omitempty"`
-	Payload   PostgresCredentialResolvedPayload `json:"payload"`
-	RunId     *string                           `json:"run_id,omitempty"`
-	Seq       int64                             `json:"seq"`
-	SessionId *string                           `json:"session_id,omitempty"`
-	StepId    *string                           `json:"step_id,omitempty"`
-	Subject   *string                           `json:"subject,omitempty"`
-	Ts        time.Time                         `json:"ts"`
-	Type      string                            `json:"type"`
-	Workflow  *WorkflowEventProjection          `json:"workflow,omitempty"`
+// TypedEventStreamEnvelopeOrderSkipped defines model for TypedEventStreamEnvelopeOrderSkipped.
+type TypedEventStreamEnvelopeOrderSkipped struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          OrderSkippedPayload      `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeOrderSuppressed defines model for TypedEventStreamEnvelopeOrderSuppressed.
+type TypedEventStreamEnvelopeOrderSuppressed struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          OrderSuppressedPayload   `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeProjectIdentityStamped defines model for TypedEventStreamEnvelopeProjectIdentityStamped.
 type TypedEventStreamEnvelopeProjectIdentityStamped struct {
-	Actor     string                        `json:"actor"`
-	Message   *string                       `json:"message,omitempty"`
-	Payload   ProjectIdentityStampedPayload `json:"payload"`
-	RunId     *string                       `json:"run_id,omitempty"`
-	Seq       int64                         `json:"seq"`
-	SessionId *string                       `json:"session_id,omitempty"`
-	StepId    *string                       `json:"step_id,omitempty"`
-	Subject   *string                       `json:"subject,omitempty"`
-	Ts        time.Time                     `json:"ts"`
-	Type      string                        `json:"type"`
-	Workflow  *WorkflowEventProjection      `json:"workflow,omitempty"`
+	Actor            string                        `json:"actor"`
+	DependsOnStepIds *[]string                     `json:"depends_on_step_ids,omitempty"`
+	Message          *string                       `json:"message,omitempty"`
+	Payload          ProjectIdentityStampedPayload `json:"payload"`
+	RunId            *string                       `json:"run_id,omitempty"`
+	Seq              int64                         `json:"seq"`
+	SessionId        *string                       `json:"session_id,omitempty"`
+	StepId           *string                       `json:"step_id,omitempty"`
+	Subject          *string                       `json:"subject,omitempty"`
+	Ts               time.Time                     `json:"ts"`
+	Type             string                        `json:"type"`
+	Workflow         *WorkflowEventProjection      `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeProviderSwapped defines model for TypedEventStreamEnvelopeProviderSwapped.
 type TypedEventStreamEnvelopeProviderSwapped struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeRequestFailed defines model for TypedEventStreamEnvelopeRequestFailed.
 type TypedEventStreamEnvelopeRequestFailed struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   RequestFailedPayload     `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          RequestFailedPayload     `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeRequestResultCityCreate defines model for TypedEventStreamEnvelopeRequestResultCityCreate.
 type TypedEventStreamEnvelopeRequestResultCityCreate struct {
-	Actor     string                     `json:"actor"`
-	Message   *string                    `json:"message,omitempty"`
-	Payload   CityCreateSucceededPayload `json:"payload"`
-	RunId     *string                    `json:"run_id,omitempty"`
-	Seq       int64                      `json:"seq"`
-	SessionId *string                    `json:"session_id,omitempty"`
-	StepId    *string                    `json:"step_id,omitempty"`
-	Subject   *string                    `json:"subject,omitempty"`
-	Ts        time.Time                  `json:"ts"`
-	Type      string                     `json:"type"`
-	Workflow  *WorkflowEventProjection   `json:"workflow,omitempty"`
+	Actor            string                     `json:"actor"`
+	DependsOnStepIds *[]string                  `json:"depends_on_step_ids,omitempty"`
+	Message          *string                    `json:"message,omitempty"`
+	Payload          CityCreateSucceededPayload `json:"payload"`
+	RunId            *string                    `json:"run_id,omitempty"`
+	Seq              int64                      `json:"seq"`
+	SessionId        *string                    `json:"session_id,omitempty"`
+	StepId           *string                    `json:"step_id,omitempty"`
+	Subject          *string                    `json:"subject,omitempty"`
+	Ts               time.Time                  `json:"ts"`
+	Type             string                     `json:"type"`
+	Workflow         *WorkflowEventProjection   `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeRequestResultCityUnregister defines model for TypedEventStreamEnvelopeRequestResultCityUnregister.
 type TypedEventStreamEnvelopeRequestResultCityUnregister struct {
-	Actor     string                         `json:"actor"`
-	Message   *string                        `json:"message,omitempty"`
-	Payload   CityUnregisterSucceededPayload `json:"payload"`
-	RunId     *string                        `json:"run_id,omitempty"`
-	Seq       int64                          `json:"seq"`
-	SessionId *string                        `json:"session_id,omitempty"`
-	StepId    *string                        `json:"step_id,omitempty"`
-	Subject   *string                        `json:"subject,omitempty"`
-	Ts        time.Time                      `json:"ts"`
-	Type      string                         `json:"type"`
-	Workflow  *WorkflowEventProjection       `json:"workflow,omitempty"`
+	Actor            string                         `json:"actor"`
+	DependsOnStepIds *[]string                      `json:"depends_on_step_ids,omitempty"`
+	Message          *string                        `json:"message,omitempty"`
+	Payload          CityUnregisterSucceededPayload `json:"payload"`
+	RunId            *string                        `json:"run_id,omitempty"`
+	Seq              int64                          `json:"seq"`
+	SessionId        *string                        `json:"session_id,omitempty"`
+	StepId           *string                        `json:"step_id,omitempty"`
+	Subject          *string                        `json:"subject,omitempty"`
+	Ts               time.Time                      `json:"ts"`
+	Type             string                         `json:"type"`
+	Workflow         *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeRequestResultRigCreate defines model for TypedEventStreamEnvelopeRequestResultRigCreate.
 type TypedEventStreamEnvelopeRequestResultRigCreate struct {
-	Actor     string                    `json:"actor"`
-	Message   *string                   `json:"message,omitempty"`
-	Payload   RigCreateSucceededPayload `json:"payload"`
-	RunId     *string                   `json:"run_id,omitempty"`
-	Seq       int64                     `json:"seq"`
-	SessionId *string                   `json:"session_id,omitempty"`
-	StepId    *string                   `json:"step_id,omitempty"`
-	Subject   *string                   `json:"subject,omitempty"`
-	Ts        time.Time                 `json:"ts"`
-	Type      string                    `json:"type"`
-	Workflow  *WorkflowEventProjection  `json:"workflow,omitempty"`
+	Actor            string                    `json:"actor"`
+	DependsOnStepIds *[]string                 `json:"depends_on_step_ids,omitempty"`
+	Message          *string                   `json:"message,omitempty"`
+	Payload          RigCreateSucceededPayload `json:"payload"`
+	RunId            *string                   `json:"run_id,omitempty"`
+	Seq              int64                     `json:"seq"`
+	SessionId        *string                   `json:"session_id,omitempty"`
+	StepId           *string                   `json:"step_id,omitempty"`
+	Subject          *string                   `json:"subject,omitempty"`
+	Ts               time.Time                 `json:"ts"`
+	Type             string                    `json:"type"`
+	Workflow         *WorkflowEventProjection  `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeRequestResultSessionCreate defines model for TypedEventStreamEnvelopeRequestResultSessionCreate.
 type TypedEventStreamEnvelopeRequestResultSessionCreate struct {
-	Actor     string                        `json:"actor"`
-	Message   *string                       `json:"message,omitempty"`
-	Payload   SessionCreateSucceededPayload `json:"payload"`
-	RunId     *string                       `json:"run_id,omitempty"`
-	Seq       int64                         `json:"seq"`
-	SessionId *string                       `json:"session_id,omitempty"`
-	StepId    *string                       `json:"step_id,omitempty"`
-	Subject   *string                       `json:"subject,omitempty"`
-	Ts        time.Time                     `json:"ts"`
-	Type      string                        `json:"type"`
-	Workflow  *WorkflowEventProjection      `json:"workflow,omitempty"`
+	Actor            string                        `json:"actor"`
+	DependsOnStepIds *[]string                     `json:"depends_on_step_ids,omitempty"`
+	Message          *string                       `json:"message,omitempty"`
+	Payload          SessionCreateSucceededPayload `json:"payload"`
+	RunId            *string                       `json:"run_id,omitempty"`
+	Seq              int64                         `json:"seq"`
+	SessionId        *string                       `json:"session_id,omitempty"`
+	StepId           *string                       `json:"step_id,omitempty"`
+	Subject          *string                       `json:"subject,omitempty"`
+	Ts               time.Time                     `json:"ts"`
+	Type             string                        `json:"type"`
+	Workflow         *WorkflowEventProjection      `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeRequestResultSessionMessage defines model for TypedEventStreamEnvelopeRequestResultSessionMessage.
 type TypedEventStreamEnvelopeRequestResultSessionMessage struct {
-	Actor     string                         `json:"actor"`
-	Message   *string                        `json:"message,omitempty"`
-	Payload   SessionMessageSucceededPayload `json:"payload"`
-	RunId     *string                        `json:"run_id,omitempty"`
-	Seq       int64                          `json:"seq"`
-	SessionId *string                        `json:"session_id,omitempty"`
-	StepId    *string                        `json:"step_id,omitempty"`
-	Subject   *string                        `json:"subject,omitempty"`
-	Ts        time.Time                      `json:"ts"`
-	Type      string                         `json:"type"`
-	Workflow  *WorkflowEventProjection       `json:"workflow,omitempty"`
+	Actor            string                         `json:"actor"`
+	DependsOnStepIds *[]string                      `json:"depends_on_step_ids,omitempty"`
+	Message          *string                        `json:"message,omitempty"`
+	Payload          SessionMessageSucceededPayload `json:"payload"`
+	RunId            *string                        `json:"run_id,omitempty"`
+	Seq              int64                          `json:"seq"`
+	SessionId        *string                        `json:"session_id,omitempty"`
+	StepId           *string                        `json:"step_id,omitempty"`
+	Subject          *string                        `json:"subject,omitempty"`
+	Ts               time.Time                      `json:"ts"`
+	Type             string                         `json:"type"`
+	Workflow         *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeRequestResultSessionSubmit defines model for TypedEventStreamEnvelopeRequestResultSessionSubmit.
 type TypedEventStreamEnvelopeRequestResultSessionSubmit struct {
-	Actor     string                        `json:"actor"`
-	Message   *string                       `json:"message,omitempty"`
-	Payload   SessionSubmitSucceededPayload `json:"payload"`
-	RunId     *string                       `json:"run_id,omitempty"`
-	Seq       int64                         `json:"seq"`
-	SessionId *string                       `json:"session_id,omitempty"`
-	StepId    *string                       `json:"step_id,omitempty"`
-	Subject   *string                       `json:"subject,omitempty"`
-	Ts        time.Time                     `json:"ts"`
-	Type      string                        `json:"type"`
-	Workflow  *WorkflowEventProjection      `json:"workflow,omitempty"`
+	Actor            string                        `json:"actor"`
+	DependsOnStepIds *[]string                     `json:"depends_on_step_ids,omitempty"`
+	Message          *string                       `json:"message,omitempty"`
+	Payload          SessionSubmitSucceededPayload `json:"payload"`
+	RunId            *string                       `json:"run_id,omitempty"`
+	Seq              int64                         `json:"seq"`
+	SessionId        *string                       `json:"session_id,omitempty"`
+	StepId           *string                       `json:"step_id,omitempty"`
+	Subject          *string                       `json:"subject,omitempty"`
+	Ts               time.Time                     `json:"ts"`
+	Type             string                        `json:"type"`
+	Workflow         *WorkflowEventProjection      `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeRigProvisionProgress defines model for TypedEventStreamEnvelopeRigProvisionProgress.
 type TypedEventStreamEnvelopeRigProvisionProgress struct {
-	Actor     string                      `json:"actor"`
-	Message   *string                     `json:"message,omitempty"`
-	Payload   RigProvisionProgressPayload `json:"payload"`
-	RunId     *string                     `json:"run_id,omitempty"`
-	Seq       int64                       `json:"seq"`
-	SessionId *string                     `json:"session_id,omitempty"`
-	StepId    *string                     `json:"step_id,omitempty"`
-	Subject   *string                     `json:"subject,omitempty"`
-	Ts        time.Time                   `json:"ts"`
-	Type      string                      `json:"type"`
-	Workflow  *WorkflowEventProjection    `json:"workflow,omitempty"`
+	Actor            string                      `json:"actor"`
+	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
+	Message          *string                     `json:"message,omitempty"`
+	Payload          RigProvisionProgressPayload `json:"payload"`
+	RunId            *string                     `json:"run_id,omitempty"`
+	Seq              int64                       `json:"seq"`
+	SessionId        *string                     `json:"session_id,omitempty"`
+	StepId           *string                     `json:"step_id,omitempty"`
+	Subject          *string                     `json:"subject,omitempty"`
+	Ts               time.Time                   `json:"ts"`
+	Type             string                      `json:"type"`
+	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionColdStartTimeout defines model for TypedEventStreamEnvelopeSessionColdStartTimeout.
 type TypedEventStreamEnvelopeSessionColdStartTimeout struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionCrashed defines model for TypedEventStreamEnvelopeSessionCrashed.
 type TypedEventStreamEnvelopeSessionCrashed struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   SessionLifecyclePayload  `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionDemandClaimDivergence defines model for TypedEventStreamEnvelopeSessionDemandClaimDivergence.
+type TypedEventStreamEnvelopeSessionDemandClaimDivergence struct {
+	Actor            string                              `json:"actor"`
+	DependsOnStepIds *[]string                           `json:"depends_on_step_ids,omitempty"`
+	Message          *string                             `json:"message,omitempty"`
+	Payload          SessionDemandClaimDivergencePayload `json:"payload"`
+	RunId            *string                             `json:"run_id,omitempty"`
+	Seq              int64                               `json:"seq"`
+	SessionId        *string                             `json:"session_id,omitempty"`
+	StepId           *string                             `json:"step_id,omitempty"`
+	Subject          *string                             `json:"subject,omitempty"`
+	Ts               time.Time                           `json:"ts"`
+	Type             string                              `json:"type"`
+	Workflow         *WorkflowEventProjection            `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork defines model for TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork.
 type TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork struct {
-	Actor     string                                   `json:"actor"`
-	Message   *string                                  `json:"message,omitempty"`
-	Payload   SessionDrainAckedWithAssignedWorkPayload `json:"payload"`
-	RunId     *string                                  `json:"run_id,omitempty"`
-	Seq       int64                                    `json:"seq"`
-	SessionId *string                                  `json:"session_id,omitempty"`
-	StepId    *string                                  `json:"step_id,omitempty"`
-	Subject   *string                                  `json:"subject,omitempty"`
-	Ts        time.Time                                `json:"ts"`
-	Type      string                                   `json:"type"`
-	Workflow  *WorkflowEventProjection                 `json:"workflow,omitempty"`
+	Actor            string                                   `json:"actor"`
+	DependsOnStepIds *[]string                                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                                  `json:"message,omitempty"`
+	Payload          SessionDrainAckedWithAssignedWorkPayload `json:"payload"`
+	RunId            *string                                  `json:"run_id,omitempty"`
+	Seq              int64                                    `json:"seq"`
+	SessionId        *string                                  `json:"session_id,omitempty"`
+	StepId           *string                                  `json:"step_id,omitempty"`
+	Subject          *string                                  `json:"subject,omitempty"`
+	Ts               time.Time                                `json:"ts"`
+	Type             string                                   `json:"type"`
+	Workflow         *WorkflowEventProjection                 `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionDrainFenceUnavailable defines model for TypedEventStreamEnvelopeSessionDrainFenceUnavailable.
+type TypedEventStreamEnvelopeSessionDrainFenceUnavailable struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionDrainStopEscalated defines model for TypedEventStreamEnvelopeSessionDrainStopEscalated.
+type TypedEventStreamEnvelopeSessionDrainStopEscalated struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionDraining defines model for TypedEventStreamEnvelopeSessionDraining.
 type TypedEventStreamEnvelopeSessionDraining struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionIdleKilled defines model for TypedEventStreamEnvelopeSessionIdleKilled.
 type TypedEventStreamEnvelopeSessionIdleKilled struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionMaxAgeKilled defines model for TypedEventStreamEnvelopeSessionMaxAgeKilled.
 type TypedEventStreamEnvelopeSessionMaxAgeKilled struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline defines model for TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline.
+type TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline struct {
+	Actor            string                                       `json:"actor"`
+	DependsOnStepIds *[]string                                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                                      `json:"message,omitempty"`
+	Payload          SessionPoolSlotRetiredAtDrainDeadlinePayload `json:"payload"`
+	RunId            *string                                      `json:"run_id,omitempty"`
+	Seq              int64                                        `json:"seq"`
+	SessionId        *string                                      `json:"session_id,omitempty"`
+	StepId           *string                                      `json:"step_id,omitempty"`
+	Subject          *string                                      `json:"subject,omitempty"`
+	Ts               time.Time                                    `json:"ts"`
+	Type             string                                       `json:"type"`
+	Workflow         *WorkflowEventProjection                     `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionQuarantined defines model for TypedEventStreamEnvelopeSessionQuarantined.
 type TypedEventStreamEnvelopeSessionQuarantined struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionResetStalled defines model for TypedEventStreamEnvelopeSessionResetStalled.
 type TypedEventStreamEnvelopeSessionResetStalled struct {
-	Actor     string                     `json:"actor"`
-	Message   *string                    `json:"message,omitempty"`
-	Payload   SessionResetStalledPayload `json:"payload"`
-	RunId     *string                    `json:"run_id,omitempty"`
-	Seq       int64                      `json:"seq"`
-	SessionId *string                    `json:"session_id,omitempty"`
-	StepId    *string                    `json:"step_id,omitempty"`
-	Subject   *string                    `json:"subject,omitempty"`
-	Ts        time.Time                  `json:"ts"`
-	Type      string                     `json:"type"`
-	Workflow  *WorkflowEventProjection   `json:"workflow,omitempty"`
+	Actor            string                     `json:"actor"`
+	DependsOnStepIds *[]string                  `json:"depends_on_step_ids,omitempty"`
+	Message          *string                    `json:"message,omitempty"`
+	Payload          SessionResetStalledPayload `json:"payload"`
+	RunId            *string                    `json:"run_id,omitempty"`
+	Seq              int64                      `json:"seq"`
+	SessionId        *string                    `json:"session_id,omitempty"`
+	StepId           *string                    `json:"step_id,omitempty"`
+	Subject          *string                    `json:"subject,omitempty"`
+	Ts               time.Time                  `json:"ts"`
+	Type             string                     `json:"type"`
+	Workflow         *WorkflowEventProjection   `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionStopped defines model for TypedEventStreamEnvelopeSessionStopped.
 type TypedEventStreamEnvelopeSessionStopped struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   SessionLifecyclePayload  `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionStranded defines model for TypedEventStreamEnvelopeSessionStranded.
 type TypedEventStreamEnvelopeSessionStranded struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   SessionStrandedPayload   `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionStrandedPayload   `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionSuspended defines model for TypedEventStreamEnvelopeSessionSuspended.
 type TypedEventStreamEnvelopeSessionSuspended struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionUndrained defines model for TypedEventStreamEnvelopeSessionUndrained.
 type TypedEventStreamEnvelopeSessionUndrained struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionUnknownState defines model for TypedEventStreamEnvelopeSessionUnknownState.
 type TypedEventStreamEnvelopeSessionUnknownState struct {
-	Actor     string                     `json:"actor"`
-	Message   *string                    `json:"message,omitempty"`
-	Payload   SessionUnknownStatePayload `json:"payload"`
-	RunId     *string                    `json:"run_id,omitempty"`
-	Seq       int64                      `json:"seq"`
-	SessionId *string                    `json:"session_id,omitempty"`
-	StepId    *string                    `json:"step_id,omitempty"`
-	Subject   *string                    `json:"subject,omitempty"`
-	Ts        time.Time                  `json:"ts"`
-	Type      string                     `json:"type"`
-	Workflow  *WorkflowEventProjection   `json:"workflow,omitempty"`
+	Actor            string                     `json:"actor"`
+	DependsOnStepIds *[]string                  `json:"depends_on_step_ids,omitempty"`
+	Message          *string                    `json:"message,omitempty"`
+	Payload          SessionUnknownStatePayload `json:"payload"`
+	RunId            *string                    `json:"run_id,omitempty"`
+	Seq              int64                      `json:"seq"`
+	SessionId        *string                    `json:"session_id,omitempty"`
+	StepId           *string                    `json:"step_id,omitempty"`
+	Subject          *string                    `json:"subject,omitempty"`
+	Ts               time.Time                  `json:"ts"`
+	Type             string                     `json:"type"`
+	Workflow         *WorkflowEventProjection   `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionUpdated defines model for TypedEventStreamEnvelopeSessionUpdated.
 type TypedEventStreamEnvelopeSessionUpdated struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionWakeRefused defines model for TypedEventStreamEnvelopeSessionWakeRefused.
+type TypedEventStreamEnvelopeSessionWakeRefused struct {
+	Actor            string                    `json:"actor"`
+	DependsOnStepIds *[]string                 `json:"depends_on_step_ids,omitempty"`
+	Message          *string                   `json:"message,omitempty"`
+	Payload          SessionWakeRefusedPayload `json:"payload"`
+	RunId            *string                   `json:"run_id,omitempty"`
+	Seq              int64                     `json:"seq"`
+	SessionId        *string                   `json:"session_id,omitempty"`
+	StepId           *string                   `json:"step_id,omitempty"`
+	Subject          *string                   `json:"subject,omitempty"`
+	Ts               time.Time                 `json:"ts"`
+	Type             string                    `json:"type"`
+	Workflow         *WorkflowEventProjection  `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionWoke defines model for TypedEventStreamEnvelopeSessionWoke.
 type TypedEventStreamEnvelopeSessionWoke struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSessionWorkQueryFailed defines model for TypedEventStreamEnvelopeSessionWorkQueryFailed.
 type TypedEventStreamEnvelopeSessionWorkQueryFailed struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   SessionLifecyclePayload  `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeStorageBindingConverged defines model for TypedEventStreamEnvelopeStorageBindingConverged.
+type TypedEventStreamEnvelopeStorageBindingConverged struct {
+	Actor            string                       `json:"actor"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          StorageBindingOutcomePayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeStorageBindingGenesis defines model for TypedEventStreamEnvelopeStorageBindingGenesis.
+type TypedEventStreamEnvelopeStorageBindingGenesis struct {
+	Actor            string                       `json:"actor"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          StorageBindingOutcomePayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeStorageBindingNotConfigured defines model for TypedEventStreamEnvelopeStorageBindingNotConfigured.
+type TypedEventStreamEnvelopeStorageBindingNotConfigured struct {
+	Actor            string                       `json:"actor"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          StorageBindingOutcomePayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeStorageBindingUncheckable defines model for TypedEventStreamEnvelopeStorageBindingUncheckable.
+type TypedEventStreamEnvelopeStorageBindingUncheckable struct {
+	Actor            string                       `json:"actor"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          StorageBindingOutcomePayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeStorageBindingUnconverged defines model for TypedEventStreamEnvelopeStorageBindingUnconverged.
+type TypedEventStreamEnvelopeStorageBindingUnconverged struct {
+	Actor            string                       `json:"actor"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          StorageBindingOutcomePayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick defines model for TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick.
 type TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick struct {
-	Actor     string                                 `json:"actor"`
-	Message   *string                                `json:"message,omitempty"`
-	Payload   SupervisorFSPressureSkippedTickPayload `json:"payload"`
-	RunId     *string                                `json:"run_id,omitempty"`
-	Seq       int64                                  `json:"seq"`
-	SessionId *string                                `json:"session_id,omitempty"`
-	StepId    *string                                `json:"step_id,omitempty"`
-	Subject   *string                                `json:"subject,omitempty"`
-	Ts        time.Time                              `json:"ts"`
-	Type      string                                 `json:"type"`
-	Workflow  *WorkflowEventProjection               `json:"workflow,omitempty"`
+	Actor            string                                 `json:"actor"`
+	DependsOnStepIds *[]string                              `json:"depends_on_step_ids,omitempty"`
+	Message          *string                                `json:"message,omitempty"`
+	Payload          SupervisorFSPressureSkippedTickPayload `json:"payload"`
+	RunId            *string                                `json:"run_id,omitempty"`
+	Seq              int64                                  `json:"seq"`
+	SessionId        *string                                `json:"session_id,omitempty"`
+	StepId           *string                                `json:"step_id,omitempty"`
+	Subject          *string                                `json:"subject,omitempty"`
+	Ts               time.Time                              `json:"ts"`
+	Type             string                                 `json:"type"`
+	Workflow         *WorkflowEventProjection               `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSupervisorRequest defines model for TypedEventStreamEnvelopeSupervisorRequest.
 type TypedEventStreamEnvelopeSupervisorRequest struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   SupervisorRequestPayload `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SupervisorRequestPayload `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSupervisorShutdownRequested defines model for TypedEventStreamEnvelopeSupervisorShutdownRequested.
 type TypedEventStreamEnvelopeSupervisorShutdownRequested struct {
-	Actor     string                    `json:"actor"`
-	Message   *string                   `json:"message,omitempty"`
-	Payload   SupervisorShutdownPayload `json:"payload"`
-	RunId     *string                   `json:"run_id,omitempty"`
-	Seq       int64                     `json:"seq"`
-	SessionId *string                   `json:"session_id,omitempty"`
-	StepId    *string                   `json:"step_id,omitempty"`
-	Subject   *string                   `json:"subject,omitempty"`
-	Ts        time.Time                 `json:"ts"`
-	Type      string                    `json:"type"`
-	Workflow  *WorkflowEventProjection  `json:"workflow,omitempty"`
+	Actor            string                    `json:"actor"`
+	DependsOnStepIds *[]string                 `json:"depends_on_step_ids,omitempty"`
+	Message          *string                   `json:"message,omitempty"`
+	Payload          SupervisorShutdownPayload `json:"payload"`
+	RunId            *string                   `json:"run_id,omitempty"`
+	Seq              int64                     `json:"seq"`
+	SessionId        *string                   `json:"session_id,omitempty"`
+	StepId           *string                   `json:"step_id,omitempty"`
+	Subject          *string                   `json:"subject,omitempty"`
+	Ts               time.Time                 `json:"ts"`
+	Type             string                    `json:"type"`
+	Workflow         *WorkflowEventProjection  `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSupervisorStarted defines model for TypedEventStreamEnvelopeSupervisorStarted.
 type TypedEventStreamEnvelopeSupervisorStarted struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   SupervisorStartedPayload `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SupervisorStartedPayload `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeWebhookReceived defines model for TypedEventStreamEnvelopeWebhookReceived.
 type TypedEventStreamEnvelopeWebhookReceived struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   WebhookReceivedPayload   `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WebhookReceivedPayload   `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeWebhookRejected defines model for TypedEventStreamEnvelopeWebhookRejected.
 type TypedEventStreamEnvelopeWebhookRejected struct {
-	Actor     string                   `json:"actor"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   WebhookRejectedPayload   `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WebhookRejectedPayload   `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeWorkerOperation defines model for TypedEventStreamEnvelopeWorkerOperation.
 type TypedEventStreamEnvelopeWorkerOperation struct {
-	Actor     string                      `json:"actor"`
-	Message   *string                     `json:"message,omitempty"`
-	Payload   WorkerOperationEventPayload `json:"payload"`
-	RunId     *string                     `json:"run_id,omitempty"`
-	Seq       int64                       `json:"seq"`
-	SessionId *string                     `json:"session_id,omitempty"`
-	StepId    *string                     `json:"step_id,omitempty"`
-	Subject   *string                     `json:"subject,omitempty"`
-	Ts        time.Time                   `json:"ts"`
-	Type      string                      `json:"type"`
-	Workflow  *WorkflowEventProjection    `json:"workflow,omitempty"`
+	Actor            string                      `json:"actor"`
+	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
+	Message          *string                     `json:"message,omitempty"`
+	Payload          WorkerOperationEventPayload `json:"payload"`
+	RunId            *string                     `json:"run_id,omitempty"`
+	Seq              int64                       `json:"seq"`
+	SessionId        *string                     `json:"session_id,omitempty"`
+	StepId           *string                     `json:"step_id,omitempty"`
+	Subject          *string                     `json:"subject,omitempty"`
+	Ts               time.Time                   `json:"ts"`
+	Type             string                      `json:"type"`
+	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelope Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.
@@ -6361,1252 +7072,1755 @@ type TypedTaggedEventStreamEnvelope struct {
 	union json.RawMessage
 }
 
+// TypedTaggedEventStreamEnvelopeBackendCredentialResolved defines model for TypedTaggedEventStreamEnvelopeBackendCredentialResolved.
+type TypedTaggedEventStreamEnvelopeBackendCredentialResolved struct {
+	Actor            string                           `json:"actor"`
+	City             string                           `json:"city"`
+	DependsOnStepIds *[]string                        `json:"depends_on_step_ids,omitempty"`
+	Message          *string                          `json:"message,omitempty"`
+	Payload          BackendCredentialResolvedPayload `json:"payload"`
+	RunId            *string                          `json:"run_id,omitempty"`
+	Seq              int64                            `json:"seq"`
+	SessionId        *string                          `json:"session_id,omitempty"`
+	StepId           *string                          `json:"step_id,omitempty"`
+	Subject          *string                          `json:"subject,omitempty"`
+	Ts               time.Time                        `json:"ts"`
+	Type             string                           `json:"type"`
+	Workflow         *WorkflowEventProjection         `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeBeadClaimRejected defines model for TypedTaggedEventStreamEnvelopeBeadClaimRejected.
 type TypedTaggedEventStreamEnvelopeBeadClaimRejected struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   BeadClaimRejectedPayload `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BeadClaimRejectedPayload `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeBeadClaimReleased defines model for TypedTaggedEventStreamEnvelopeBeadClaimReleased.
+type TypedTaggedEventStreamEnvelopeBeadClaimReleased struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BeadClaimReleasedPayload `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeBeadClosed defines model for TypedTaggedEventStreamEnvelopeBeadClosed.
 type TypedTaggedEventStreamEnvelopeBeadClosed struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   BeadEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BeadEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeBeadCreated defines model for TypedTaggedEventStreamEnvelopeBeadCreated.
 type TypedTaggedEventStreamEnvelopeBeadCreated struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   BeadEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BeadEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened defines model for TypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened.
 type TypedTaggedEventStreamEnvelopeBeadDeadAssigneeReopened struct {
-	Actor     string                          `json:"actor"`
-	City      string                          `json:"city"`
-	Message   *string                         `json:"message,omitempty"`
-	Payload   BeadDeadAssigneeReopenedPayload `json:"payload"`
-	RunId     *string                         `json:"run_id,omitempty"`
-	Seq       int64                           `json:"seq"`
-	SessionId *string                         `json:"session_id,omitempty"`
-	StepId    *string                         `json:"step_id,omitempty"`
-	Subject   *string                         `json:"subject,omitempty"`
-	Ts        time.Time                       `json:"ts"`
-	Type      string                          `json:"type"`
-	Workflow  *WorkflowEventProjection        `json:"workflow,omitempty"`
+	Actor            string                          `json:"actor"`
+	City             string                          `json:"city"`
+	DependsOnStepIds *[]string                       `json:"depends_on_step_ids,omitempty"`
+	Message          *string                         `json:"message,omitempty"`
+	Payload          BeadDeadAssigneeReopenedPayload `json:"payload"`
+	RunId            *string                         `json:"run_id,omitempty"`
+	Seq              int64                           `json:"seq"`
+	SessionId        *string                         `json:"session_id,omitempty"`
+	StepId           *string                         `json:"step_id,omitempty"`
+	Subject          *string                         `json:"subject,omitempty"`
+	Ts               time.Time                       `json:"ts"`
+	Type             string                          `json:"type"`
+	Workflow         *WorkflowEventProjection        `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeBeadDeleted defines model for TypedTaggedEventStreamEnvelopeBeadDeleted.
 type TypedTaggedEventStreamEnvelopeBeadDeleted struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   BeadEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BeadEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeBeadUpdated defines model for TypedTaggedEventStreamEnvelopeBeadUpdated.
 type TypedTaggedEventStreamEnvelopeBeadUpdated struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   BeadEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BeadEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped defines model for TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped.
 type TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped struct {
-	Actor     string                         `json:"actor"`
-	City      string                         `json:"city"`
-	Message   *string                        `json:"message,omitempty"`
-	Payload   BeadWorktreeReapSkippedPayload `json:"payload"`
-	RunId     *string                        `json:"run_id,omitempty"`
-	Seq       int64                          `json:"seq"`
-	SessionId *string                        `json:"session_id,omitempty"`
-	StepId    *string                        `json:"step_id,omitempty"`
-	Subject   *string                        `json:"subject,omitempty"`
-	Ts        time.Time                      `json:"ts"`
-	Type      string                         `json:"type"`
-	Workflow  *WorkflowEventProjection       `json:"workflow,omitempty"`
+	Actor            string                         `json:"actor"`
+	City             string                         `json:"city"`
+	DependsOnStepIds *[]string                      `json:"depends_on_step_ids,omitempty"`
+	Message          *string                        `json:"message,omitempty"`
+	Payload          BeadWorktreeReapSkippedPayload `json:"payload"`
+	RunId            *string                        `json:"run_id,omitempty"`
+	Seq              int64                          `json:"seq"`
+	SessionId        *string                        `json:"session_id,omitempty"`
+	StepId           *string                        `json:"step_id,omitempty"`
+	Subject          *string                        `json:"subject,omitempty"`
+	Ts               time.Time                      `json:"ts"`
+	Type             string                         `json:"type"`
+	Workflow         *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeBeadWorktreeReaped defines model for TypedTaggedEventStreamEnvelopeBeadWorktreeReaped.
 type TypedTaggedEventStreamEnvelopeBeadWorktreeReaped struct {
-	Actor     string                    `json:"actor"`
-	City      string                    `json:"city"`
-	Message   *string                   `json:"message,omitempty"`
-	Payload   BeadWorktreeReapedPayload `json:"payload"`
-	RunId     *string                   `json:"run_id,omitempty"`
-	Seq       int64                     `json:"seq"`
-	SessionId *string                   `json:"session_id,omitempty"`
-	StepId    *string                   `json:"step_id,omitempty"`
-	Subject   *string                   `json:"subject,omitempty"`
-	Ts        time.Time                 `json:"ts"`
-	Type      string                    `json:"type"`
-	Workflow  *WorkflowEventProjection  `json:"workflow,omitempty"`
+	Actor            string                    `json:"actor"`
+	City             string                    `json:"city"`
+	DependsOnStepIds *[]string                 `json:"depends_on_step_ids,omitempty"`
+	Message          *string                   `json:"message,omitempty"`
+	Payload          BeadWorktreeReapedPayload `json:"payload"`
+	RunId            *string                   `json:"run_id,omitempty"`
+	Seq              int64                     `json:"seq"`
+	SessionId        *string                   `json:"session_id,omitempty"`
+	StepId           *string                   `json:"step_id,omitempty"`
+	Subject          *string                   `json:"subject,omitempty"`
+	Ts               time.Time                 `json:"ts"`
+	Type             string                    `json:"type"`
+	Workflow         *WorkflowEventProjection  `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed defines model for TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed.
+type TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BlockedRecomputedPayload `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded defines model for TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded.
 type TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded struct {
-	Actor     string                           `json:"actor"`
-	City      string                           `json:"city"`
-	Message   *string                          `json:"message,omitempty"`
-	Payload   ConditionalWritesDegradedPayload `json:"payload"`
-	RunId     *string                          `json:"run_id,omitempty"`
-	Seq       int64                            `json:"seq"`
-	SessionId *string                          `json:"session_id,omitempty"`
-	StepId    *string                          `json:"step_id,omitempty"`
-	Subject   *string                          `json:"subject,omitempty"`
-	Ts        time.Time                        `json:"ts"`
-	Type      string                           `json:"type"`
-	Workflow  *WorkflowEventProjection         `json:"workflow,omitempty"`
+	Actor            string                           `json:"actor"`
+	City             string                           `json:"city"`
+	DependsOnStepIds *[]string                        `json:"depends_on_step_ids,omitempty"`
+	Message          *string                          `json:"message,omitempty"`
+	Payload          ConditionalWritesDegradedPayload `json:"payload"`
+	RunId            *string                          `json:"run_id,omitempty"`
+	Seq              int64                            `json:"seq"`
+	SessionId        *string                          `json:"session_id,omitempty"`
+	StepId           *string                          `json:"step_id,omitempty"`
+	Subject          *string                          `json:"subject,omitempty"`
+	Ts               time.Time                        `json:"ts"`
+	Type             string                           `json:"type"`
+	Workflow         *WorkflowEventProjection         `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeCityCreated defines model for TypedTaggedEventStreamEnvelopeCityCreated.
 type TypedTaggedEventStreamEnvelopeCityCreated struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   CityLifecyclePayload     `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          CityLifecyclePayload     `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeCityResumed defines model for TypedTaggedEventStreamEnvelopeCityResumed.
 type TypedTaggedEventStreamEnvelopeCityResumed struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeCitySuspended defines model for TypedTaggedEventStreamEnvelopeCitySuspended.
 type TypedTaggedEventStreamEnvelopeCitySuspended struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeCityUnregisterRequested defines model for TypedTaggedEventStreamEnvelopeCityUnregisterRequested.
 type TypedTaggedEventStreamEnvelopeCityUnregisterRequested struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   CityLifecyclePayload     `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          CityLifecyclePayload     `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap defines model for TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap.
+type TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap struct {
+	Actor            string                           `json:"actor"`
+	City             string                           `json:"city"`
+	DependsOnStepIds *[]string                        `json:"depends_on_step_ids,omitempty"`
+	Message          *string                          `json:"message,omitempty"`
+	Payload          ControlDispatcherScopeGapPayload `json:"payload"`
+	RunId            *string                          `json:"run_id,omitempty"`
+	Seq              int64                            `json:"seq"`
+	SessionId        *string                          `json:"session_id,omitempty"`
+	StepId           *string                          `json:"step_id,omitempty"`
+	Subject          *string                          `json:"subject,omitempty"`
+	Ts               time.Time                        `json:"ts"`
+	Type             string                           `json:"type"`
+	Workflow         *WorkflowEventProjection         `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeControlRootSettleFailed defines model for TypedTaggedEventStreamEnvelopeControlRootSettleFailed.
+type TypedTaggedEventStreamEnvelopeControlRootSettleFailed struct {
+	Actor            string                         `json:"actor"`
+	City             string                         `json:"city"`
+	DependsOnStepIds *[]string                      `json:"depends_on_step_ids,omitempty"`
+	Message          *string                        `json:"message,omitempty"`
+	Payload          ControlRootSettleFailedPayload `json:"payload"`
+	RunId            *string                        `json:"run_id,omitempty"`
+	Seq              int64                          `json:"seq"`
+	SessionId        *string                        `json:"session_id,omitempty"`
+	StepId           *string                        `json:"step_id,omitempty"`
+	Subject          *string                        `json:"subject,omitempty"`
+	Ts               time.Time                      `json:"ts"`
+	Type             string                         `json:"type"`
+	Workflow         *WorkflowEventProjection       `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeControlStalled defines model for TypedTaggedEventStreamEnvelopeControlStalled.
+type TypedTaggedEventStreamEnvelopeControlStalled struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          ControlStalledPayload    `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeControllerStarted defines model for TypedTaggedEventStreamEnvelopeControllerStarted.
 type TypedTaggedEventStreamEnvelopeControllerStarted struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeControllerStopped defines model for TypedTaggedEventStreamEnvelopeControllerStopped.
 type TypedTaggedEventStreamEnvelopeControllerStopped struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeConvoyClosed defines model for TypedTaggedEventStreamEnvelopeConvoyClosed.
 type TypedTaggedEventStreamEnvelopeConvoyClosed struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeConvoyCreated defines model for TypedTaggedEventStreamEnvelopeConvoyCreated.
 type TypedTaggedEventStreamEnvelopeConvoyCreated struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeCustom defines model for TypedTaggedEventStreamEnvelopeCustom.
 type TypedTaggedEventStreamEnvelopeCustom struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   interface{}              `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          interface{}              `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeEmergencyAcked defines model for TypedTaggedEventStreamEnvelopeEmergencyAcked.
 type TypedTaggedEventStreamEnvelopeEmergencyAcked struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   Record                   `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          Record                   `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeEmergencySignaled defines model for TypedTaggedEventStreamEnvelopeEmergencySignaled.
 type TypedTaggedEventStreamEnvelopeEmergencySignaled struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   Record                   `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          Record                   `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeEventsRotated defines model for TypedTaggedEventStreamEnvelopeEventsRotated.
 type TypedTaggedEventStreamEnvelopeEventsRotated struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   RotatedPayload           `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          RotatedPayload           `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired defines model for TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired.
+type TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired struct {
+	Actor            string                             `json:"actor"`
+	City             string                             `json:"city"`
+	DependsOnStepIds *[]string                          `json:"depends_on_step_ids,omitempty"`
+	Message          *string                            `json:"message,omitempty"`
+	Payload          ExecutionClaimWindowExpiredPayload `json:"payload"`
+	RunId            *string                            `json:"run_id,omitempty"`
+	Seq              int64                              `json:"seq"`
+	SessionId        *string                            `json:"session_id,omitempty"`
+	StepId           *string                            `json:"step_id,omitempty"`
+	Subject          *string                            `json:"subject,omitempty"`
+	Ts               time.Time                          `json:"ts"`
+	Type             string                             `json:"type"`
+	Workflow         *WorkflowEventProjection           `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExecutionRunAnchored defines model for TypedTaggedEventStreamEnvelopeExecutionRunAnchored.
+type TypedTaggedEventStreamEnvelopeExecutionRunAnchored struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExecutionStepCompleted defines model for TypedTaggedEventStreamEnvelopeExecutionStepCompleted.
+type TypedTaggedEventStreamEnvelopeExecutionStepCompleted struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExecutionStepDefined defines model for TypedTaggedEventStreamEnvelopeExecutionStepDefined.
+type TypedTaggedEventStreamEnvelopeExecutionStepDefined struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExecutionStepStalled defines model for TypedTaggedEventStreamEnvelopeExecutionStepStalled.
+type TypedTaggedEventStreamEnvelopeExecutionStepStalled struct {
+	Actor            string                      `json:"actor"`
+	City             string                      `json:"city"`
+	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
+	Message          *string                     `json:"message,omitempty"`
+	Payload          ExecutionStepStalledPayload `json:"payload"`
+	RunId            *string                     `json:"run_id,omitempty"`
+	Seq              int64                       `json:"seq"`
+	SessionId        *string                     `json:"session_id,omitempty"`
+	StepId           *string                     `json:"step_id,omitempty"`
+	Subject          *string                     `json:"subject,omitempty"`
+	Ts               time.Time                   `json:"ts"`
+	Type             string                      `json:"type"`
+	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExecutionStepStarted defines model for TypedTaggedEventStreamEnvelopeExecutionStepStarted.
+type TypedTaggedEventStreamEnvelopeExecutionStepStarted struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExecutionWorkAssociated defines model for TypedTaggedEventStreamEnvelopeExecutionWorkAssociated.
+type TypedTaggedEventStreamEnvelopeExecutionWorkAssociated struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded defines model for TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded.
 type TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   AdapterEventPayload      `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          AdapterEventPayload      `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved defines model for TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved.
 type TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   AdapterEventPayload      `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          AdapterEventPayload      `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeExtmsgBound defines model for TypedTaggedEventStreamEnvelopeExtmsgBound.
 type TypedTaggedEventStreamEnvelopeExtmsgBound struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   BoundEventPayload        `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          BoundEventPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeExtmsgGroupCreated defines model for TypedTaggedEventStreamEnvelopeExtmsgGroupCreated.
 type TypedTaggedEventStreamEnvelopeExtmsgGroupCreated struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   GroupCreatedEventPayload `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          GroupCreatedEventPayload `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeExtmsgInbound defines model for TypedTaggedEventStreamEnvelopeExtmsgInbound.
 type TypedTaggedEventStreamEnvelopeExtmsgInbound struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   InboundEventPayload      `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          InboundEventPayload      `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeExtmsgOutbound defines model for TypedTaggedEventStreamEnvelopeExtmsgOutbound.
 type TypedTaggedEventStreamEnvelopeExtmsgOutbound struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   OutboundEventPayload     `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          OutboundEventPayload     `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch defines model for TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch.
 type TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch struct {
-	Actor     string                         `json:"actor"`
-	City      string                         `json:"city"`
-	Message   *string                        `json:"message,omitempty"`
-	Payload   OutboundChannelMismatchPayload `json:"payload"`
-	RunId     *string                        `json:"run_id,omitempty"`
-	Seq       int64                          `json:"seq"`
-	SessionId *string                        `json:"session_id,omitempty"`
-	StepId    *string                        `json:"step_id,omitempty"`
-	Subject   *string                        `json:"subject,omitempty"`
-	Ts        time.Time                      `json:"ts"`
-	Type      string                         `json:"type"`
-	Workflow  *WorkflowEventProjection       `json:"workflow,omitempty"`
+	Actor            string                         `json:"actor"`
+	City             string                         `json:"city"`
+	DependsOnStepIds *[]string                      `json:"depends_on_step_ids,omitempty"`
+	Message          *string                        `json:"message,omitempty"`
+	Payload          OutboundChannelMismatchPayload `json:"payload"`
+	RunId            *string                        `json:"run_id,omitempty"`
+	Seq              int64                          `json:"seq"`
+	SessionId        *string                        `json:"session_id,omitempty"`
+	StepId           *string                        `json:"step_id,omitempty"`
+	Subject          *string                        `json:"subject,omitempty"`
+	Ts               time.Time                      `json:"ts"`
+	Type             string                         `json:"type"`
+	Workflow         *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeExtmsgUnbound defines model for TypedTaggedEventStreamEnvelopeExtmsgUnbound.
 type TypedTaggedEventStreamEnvelopeExtmsgUnbound struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   UnboundEventPayload      `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          UnboundEventPayload      `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeGcStoreDiskCritical defines model for TypedTaggedEventStreamEnvelopeGcStoreDiskCritical.
 type TypedTaggedEventStreamEnvelopeGcStoreDiskCritical struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   StoreDiskCriticalPayload `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          StoreDiskCriticalPayload `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeGcStoreDiskWarn defines model for TypedTaggedEventStreamEnvelopeGcStoreDiskWarn.
 type TypedTaggedEventStreamEnvelopeGcStoreDiskWarn struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   StoreDiskWarnPayload     `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          StoreDiskWarnPayload     `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone defines model for TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone.
 type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone struct {
-	Actor     string                      `json:"actor"`
-	City      string                      `json:"city"`
-	Message   *string                     `json:"message,omitempty"`
-	Payload   StoreMaintenanceDonePayload `json:"payload"`
-	RunId     *string                     `json:"run_id,omitempty"`
-	Seq       int64                       `json:"seq"`
-	SessionId *string                     `json:"session_id,omitempty"`
-	StepId    *string                     `json:"step_id,omitempty"`
-	Subject   *string                     `json:"subject,omitempty"`
-	Ts        time.Time                   `json:"ts"`
-	Type      string                      `json:"type"`
-	Workflow  *WorkflowEventProjection    `json:"workflow,omitempty"`
+	Actor            string                      `json:"actor"`
+	City             string                      `json:"city"`
+	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
+	Message          *string                     `json:"message,omitempty"`
+	Payload          StoreMaintenanceDonePayload `json:"payload"`
+	RunId            *string                     `json:"run_id,omitempty"`
+	Seq              int64                       `json:"seq"`
+	SessionId        *string                     `json:"session_id,omitempty"`
+	StepId           *string                     `json:"step_id,omitempty"`
+	Subject          *string                     `json:"subject,omitempty"`
+	Ts               time.Time                   `json:"ts"`
+	Type             string                      `json:"type"`
+	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed defines model for TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed.
 type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed struct {
-	Actor     string                        `json:"actor"`
-	City      string                        `json:"city"`
-	Message   *string                       `json:"message,omitempty"`
-	Payload   StoreMaintenanceFailedPayload `json:"payload"`
-	RunId     *string                       `json:"run_id,omitempty"`
-	Seq       int64                         `json:"seq"`
-	SessionId *string                       `json:"session_id,omitempty"`
-	StepId    *string                       `json:"step_id,omitempty"`
-	Subject   *string                       `json:"subject,omitempty"`
-	Ts        time.Time                     `json:"ts"`
-	Type      string                        `json:"type"`
-	Workflow  *WorkflowEventProjection      `json:"workflow,omitempty"`
+	Actor            string                        `json:"actor"`
+	City             string                        `json:"city"`
+	DependsOnStepIds *[]string                     `json:"depends_on_step_ids,omitempty"`
+	Message          *string                       `json:"message,omitempty"`
+	Payload          StoreMaintenanceFailedPayload `json:"payload"`
+	RunId            *string                       `json:"run_id,omitempty"`
+	Seq              int64                         `json:"seq"`
+	SessionId        *string                       `json:"session_id,omitempty"`
+	StepId           *string                       `json:"step_id,omitempty"`
+	Subject          *string                       `json:"subject,omitempty"`
+	Ts               time.Time                     `json:"ts"`
+	Type             string                        `json:"type"`
+	Workflow         *WorkflowEventProjection      `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale defines model for TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale.
+type TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale struct {
+	Actor            string                         `json:"actor"`
+	City             string                         `json:"city"`
+	DependsOnStepIds *[]string                      `json:"depends_on_step_ids,omitempty"`
+	Message          *string                        `json:"message,omitempty"`
+	Payload          HookClaimReclaimedStalePayload `json:"payload"`
+	RunId            *string                        `json:"run_id,omitempty"`
+	Seq              int64                          `json:"seq"`
+	SessionId        *string                        `json:"session_id,omitempty"`
+	StepId           *string                        `json:"step_id,omitempty"`
+	Subject          *string                        `json:"subject,omitempty"`
+	Ts               time.Time                      `json:"ts"`
+	Type             string                         `json:"type"`
+	Workflow         *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeMailArchived defines model for TypedTaggedEventStreamEnvelopeMailArchived.
 type TypedTaggedEventStreamEnvelopeMailArchived struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   MailEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          MailEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeMailDeleted defines model for TypedTaggedEventStreamEnvelopeMailDeleted.
 type TypedTaggedEventStreamEnvelopeMailDeleted struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   MailEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          MailEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeMailMarkedRead defines model for TypedTaggedEventStreamEnvelopeMailMarkedRead.
 type TypedTaggedEventStreamEnvelopeMailMarkedRead struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   MailEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          MailEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeMailMarkedUnread defines model for TypedTaggedEventStreamEnvelopeMailMarkedUnread.
 type TypedTaggedEventStreamEnvelopeMailMarkedUnread struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   MailEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          MailEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeMailRead defines model for TypedTaggedEventStreamEnvelopeMailRead.
 type TypedTaggedEventStreamEnvelopeMailRead struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   MailEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          MailEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeMailReplied defines model for TypedTaggedEventStreamEnvelopeMailReplied.
 type TypedTaggedEventStreamEnvelopeMailReplied struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   MailEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          MailEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeMailSent defines model for TypedTaggedEventStreamEnvelopeMailSent.
 type TypedTaggedEventStreamEnvelopeMailSent struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   MailEventPayload         `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          MailEventPayload         `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeMoleculeResolved defines model for TypedTaggedEventStreamEnvelopeMoleculeResolved.
 type TypedTaggedEventStreamEnvelopeMoleculeResolved struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   MoleculeResolvedPayload  `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          MoleculeResolvedPayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeOrderCompleted defines model for TypedTaggedEventStreamEnvelopeOrderCompleted.
 type TypedTaggedEventStreamEnvelopeOrderCompleted struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeOrderFailed defines model for TypedTaggedEventStreamEnvelopeOrderFailed.
 type TypedTaggedEventStreamEnvelopeOrderFailed struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeOrderFired defines model for TypedTaggedEventStreamEnvelopeOrderFired.
 type TypedTaggedEventStreamEnvelopeOrderFired struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
-// TypedTaggedEventStreamEnvelopePgCredentialResolved defines model for TypedTaggedEventStreamEnvelopePgCredentialResolved.
-type TypedTaggedEventStreamEnvelopePgCredentialResolved struct {
-	Actor     string                            `json:"actor"`
-	City      string                            `json:"city"`
-	Message   *string                           `json:"message,omitempty"`
-	Payload   PostgresCredentialResolvedPayload `json:"payload"`
-	RunId     *string                           `json:"run_id,omitempty"`
-	Seq       int64                             `json:"seq"`
-	SessionId *string                           `json:"session_id,omitempty"`
-	StepId    *string                           `json:"step_id,omitempty"`
-	Subject   *string                           `json:"subject,omitempty"`
-	Ts        time.Time                         `json:"ts"`
-	Type      string                            `json:"type"`
-	Workflow  *WorkflowEventProjection          `json:"workflow,omitempty"`
+// TypedTaggedEventStreamEnvelopeOrderSkipped defines model for TypedTaggedEventStreamEnvelopeOrderSkipped.
+type TypedTaggedEventStreamEnvelopeOrderSkipped struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          OrderSkippedPayload      `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeOrderSuppressed defines model for TypedTaggedEventStreamEnvelopeOrderSuppressed.
+type TypedTaggedEventStreamEnvelopeOrderSuppressed struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          OrderSuppressedPayload   `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeProjectIdentityStamped defines model for TypedTaggedEventStreamEnvelopeProjectIdentityStamped.
 type TypedTaggedEventStreamEnvelopeProjectIdentityStamped struct {
-	Actor     string                        `json:"actor"`
-	City      string                        `json:"city"`
-	Message   *string                       `json:"message,omitempty"`
-	Payload   ProjectIdentityStampedPayload `json:"payload"`
-	RunId     *string                       `json:"run_id,omitempty"`
-	Seq       int64                         `json:"seq"`
-	SessionId *string                       `json:"session_id,omitempty"`
-	StepId    *string                       `json:"step_id,omitempty"`
-	Subject   *string                       `json:"subject,omitempty"`
-	Ts        time.Time                     `json:"ts"`
-	Type      string                        `json:"type"`
-	Workflow  *WorkflowEventProjection      `json:"workflow,omitempty"`
+	Actor            string                        `json:"actor"`
+	City             string                        `json:"city"`
+	DependsOnStepIds *[]string                     `json:"depends_on_step_ids,omitempty"`
+	Message          *string                       `json:"message,omitempty"`
+	Payload          ProjectIdentityStampedPayload `json:"payload"`
+	RunId            *string                       `json:"run_id,omitempty"`
+	Seq              int64                         `json:"seq"`
+	SessionId        *string                       `json:"session_id,omitempty"`
+	StepId           *string                       `json:"step_id,omitempty"`
+	Subject          *string                       `json:"subject,omitempty"`
+	Ts               time.Time                     `json:"ts"`
+	Type             string                        `json:"type"`
+	Workflow         *WorkflowEventProjection      `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeProviderSwapped defines model for TypedTaggedEventStreamEnvelopeProviderSwapped.
 type TypedTaggedEventStreamEnvelopeProviderSwapped struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeRequestFailed defines model for TypedTaggedEventStreamEnvelopeRequestFailed.
 type TypedTaggedEventStreamEnvelopeRequestFailed struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   RequestFailedPayload     `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          RequestFailedPayload     `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeRequestResultCityCreate defines model for TypedTaggedEventStreamEnvelopeRequestResultCityCreate.
 type TypedTaggedEventStreamEnvelopeRequestResultCityCreate struct {
-	Actor     string                     `json:"actor"`
-	City      string                     `json:"city"`
-	Message   *string                    `json:"message,omitempty"`
-	Payload   CityCreateSucceededPayload `json:"payload"`
-	RunId     *string                    `json:"run_id,omitempty"`
-	Seq       int64                      `json:"seq"`
-	SessionId *string                    `json:"session_id,omitempty"`
-	StepId    *string                    `json:"step_id,omitempty"`
-	Subject   *string                    `json:"subject,omitempty"`
-	Ts        time.Time                  `json:"ts"`
-	Type      string                     `json:"type"`
-	Workflow  *WorkflowEventProjection   `json:"workflow,omitempty"`
+	Actor            string                     `json:"actor"`
+	City             string                     `json:"city"`
+	DependsOnStepIds *[]string                  `json:"depends_on_step_ids,omitempty"`
+	Message          *string                    `json:"message,omitempty"`
+	Payload          CityCreateSucceededPayload `json:"payload"`
+	RunId            *string                    `json:"run_id,omitempty"`
+	Seq              int64                      `json:"seq"`
+	SessionId        *string                    `json:"session_id,omitempty"`
+	StepId           *string                    `json:"step_id,omitempty"`
+	Subject          *string                    `json:"subject,omitempty"`
+	Ts               time.Time                  `json:"ts"`
+	Type             string                     `json:"type"`
+	Workflow         *WorkflowEventProjection   `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeRequestResultCityUnregister defines model for TypedTaggedEventStreamEnvelopeRequestResultCityUnregister.
 type TypedTaggedEventStreamEnvelopeRequestResultCityUnregister struct {
-	Actor     string                         `json:"actor"`
-	City      string                         `json:"city"`
-	Message   *string                        `json:"message,omitempty"`
-	Payload   CityUnregisterSucceededPayload `json:"payload"`
-	RunId     *string                        `json:"run_id,omitempty"`
-	Seq       int64                          `json:"seq"`
-	SessionId *string                        `json:"session_id,omitempty"`
-	StepId    *string                        `json:"step_id,omitempty"`
-	Subject   *string                        `json:"subject,omitempty"`
-	Ts        time.Time                      `json:"ts"`
-	Type      string                         `json:"type"`
-	Workflow  *WorkflowEventProjection       `json:"workflow,omitempty"`
+	Actor            string                         `json:"actor"`
+	City             string                         `json:"city"`
+	DependsOnStepIds *[]string                      `json:"depends_on_step_ids,omitempty"`
+	Message          *string                        `json:"message,omitempty"`
+	Payload          CityUnregisterSucceededPayload `json:"payload"`
+	RunId            *string                        `json:"run_id,omitempty"`
+	Seq              int64                          `json:"seq"`
+	SessionId        *string                        `json:"session_id,omitempty"`
+	StepId           *string                        `json:"step_id,omitempty"`
+	Subject          *string                        `json:"subject,omitempty"`
+	Ts               time.Time                      `json:"ts"`
+	Type             string                         `json:"type"`
+	Workflow         *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeRequestResultRigCreate defines model for TypedTaggedEventStreamEnvelopeRequestResultRigCreate.
 type TypedTaggedEventStreamEnvelopeRequestResultRigCreate struct {
-	Actor     string                    `json:"actor"`
-	City      string                    `json:"city"`
-	Message   *string                   `json:"message,omitempty"`
-	Payload   RigCreateSucceededPayload `json:"payload"`
-	RunId     *string                   `json:"run_id,omitempty"`
-	Seq       int64                     `json:"seq"`
-	SessionId *string                   `json:"session_id,omitempty"`
-	StepId    *string                   `json:"step_id,omitempty"`
-	Subject   *string                   `json:"subject,omitempty"`
-	Ts        time.Time                 `json:"ts"`
-	Type      string                    `json:"type"`
-	Workflow  *WorkflowEventProjection  `json:"workflow,omitempty"`
+	Actor            string                    `json:"actor"`
+	City             string                    `json:"city"`
+	DependsOnStepIds *[]string                 `json:"depends_on_step_ids,omitempty"`
+	Message          *string                   `json:"message,omitempty"`
+	Payload          RigCreateSucceededPayload `json:"payload"`
+	RunId            *string                   `json:"run_id,omitempty"`
+	Seq              int64                     `json:"seq"`
+	SessionId        *string                   `json:"session_id,omitempty"`
+	StepId           *string                   `json:"step_id,omitempty"`
+	Subject          *string                   `json:"subject,omitempty"`
+	Ts               time.Time                 `json:"ts"`
+	Type             string                    `json:"type"`
+	Workflow         *WorkflowEventProjection  `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeRequestResultSessionCreate defines model for TypedTaggedEventStreamEnvelopeRequestResultSessionCreate.
 type TypedTaggedEventStreamEnvelopeRequestResultSessionCreate struct {
-	Actor     string                        `json:"actor"`
-	City      string                        `json:"city"`
-	Message   *string                       `json:"message,omitempty"`
-	Payload   SessionCreateSucceededPayload `json:"payload"`
-	RunId     *string                       `json:"run_id,omitempty"`
-	Seq       int64                         `json:"seq"`
-	SessionId *string                       `json:"session_id,omitempty"`
-	StepId    *string                       `json:"step_id,omitempty"`
-	Subject   *string                       `json:"subject,omitempty"`
-	Ts        time.Time                     `json:"ts"`
-	Type      string                        `json:"type"`
-	Workflow  *WorkflowEventProjection      `json:"workflow,omitempty"`
+	Actor            string                        `json:"actor"`
+	City             string                        `json:"city"`
+	DependsOnStepIds *[]string                     `json:"depends_on_step_ids,omitempty"`
+	Message          *string                       `json:"message,omitempty"`
+	Payload          SessionCreateSucceededPayload `json:"payload"`
+	RunId            *string                       `json:"run_id,omitempty"`
+	Seq              int64                         `json:"seq"`
+	SessionId        *string                       `json:"session_id,omitempty"`
+	StepId           *string                       `json:"step_id,omitempty"`
+	Subject          *string                       `json:"subject,omitempty"`
+	Ts               time.Time                     `json:"ts"`
+	Type             string                        `json:"type"`
+	Workflow         *WorkflowEventProjection      `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeRequestResultSessionMessage defines model for TypedTaggedEventStreamEnvelopeRequestResultSessionMessage.
 type TypedTaggedEventStreamEnvelopeRequestResultSessionMessage struct {
-	Actor     string                         `json:"actor"`
-	City      string                         `json:"city"`
-	Message   *string                        `json:"message,omitempty"`
-	Payload   SessionMessageSucceededPayload `json:"payload"`
-	RunId     *string                        `json:"run_id,omitempty"`
-	Seq       int64                          `json:"seq"`
-	SessionId *string                        `json:"session_id,omitempty"`
-	StepId    *string                        `json:"step_id,omitempty"`
-	Subject   *string                        `json:"subject,omitempty"`
-	Ts        time.Time                      `json:"ts"`
-	Type      string                         `json:"type"`
-	Workflow  *WorkflowEventProjection       `json:"workflow,omitempty"`
+	Actor            string                         `json:"actor"`
+	City             string                         `json:"city"`
+	DependsOnStepIds *[]string                      `json:"depends_on_step_ids,omitempty"`
+	Message          *string                        `json:"message,omitempty"`
+	Payload          SessionMessageSucceededPayload `json:"payload"`
+	RunId            *string                        `json:"run_id,omitempty"`
+	Seq              int64                          `json:"seq"`
+	SessionId        *string                        `json:"session_id,omitempty"`
+	StepId           *string                        `json:"step_id,omitempty"`
+	Subject          *string                        `json:"subject,omitempty"`
+	Ts               time.Time                      `json:"ts"`
+	Type             string                         `json:"type"`
+	Workflow         *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit defines model for TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit.
 type TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit struct {
-	Actor     string                        `json:"actor"`
-	City      string                        `json:"city"`
-	Message   *string                       `json:"message,omitempty"`
-	Payload   SessionSubmitSucceededPayload `json:"payload"`
-	RunId     *string                       `json:"run_id,omitempty"`
-	Seq       int64                         `json:"seq"`
-	SessionId *string                       `json:"session_id,omitempty"`
-	StepId    *string                       `json:"step_id,omitempty"`
-	Subject   *string                       `json:"subject,omitempty"`
-	Ts        time.Time                     `json:"ts"`
-	Type      string                        `json:"type"`
-	Workflow  *WorkflowEventProjection      `json:"workflow,omitempty"`
+	Actor            string                        `json:"actor"`
+	City             string                        `json:"city"`
+	DependsOnStepIds *[]string                     `json:"depends_on_step_ids,omitempty"`
+	Message          *string                       `json:"message,omitempty"`
+	Payload          SessionSubmitSucceededPayload `json:"payload"`
+	RunId            *string                       `json:"run_id,omitempty"`
+	Seq              int64                         `json:"seq"`
+	SessionId        *string                       `json:"session_id,omitempty"`
+	StepId           *string                       `json:"step_id,omitempty"`
+	Subject          *string                       `json:"subject,omitempty"`
+	Ts               time.Time                     `json:"ts"`
+	Type             string                        `json:"type"`
+	Workflow         *WorkflowEventProjection      `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeRigProvisionProgress defines model for TypedTaggedEventStreamEnvelopeRigProvisionProgress.
 type TypedTaggedEventStreamEnvelopeRigProvisionProgress struct {
-	Actor     string                      `json:"actor"`
-	City      string                      `json:"city"`
-	Message   *string                     `json:"message,omitempty"`
-	Payload   RigProvisionProgressPayload `json:"payload"`
-	RunId     *string                     `json:"run_id,omitempty"`
-	Seq       int64                       `json:"seq"`
-	SessionId *string                     `json:"session_id,omitempty"`
-	StepId    *string                     `json:"step_id,omitempty"`
-	Subject   *string                     `json:"subject,omitempty"`
-	Ts        time.Time                   `json:"ts"`
-	Type      string                      `json:"type"`
-	Workflow  *WorkflowEventProjection    `json:"workflow,omitempty"`
+	Actor            string                      `json:"actor"`
+	City             string                      `json:"city"`
+	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
+	Message          *string                     `json:"message,omitempty"`
+	Payload          RigProvisionProgressPayload `json:"payload"`
+	RunId            *string                     `json:"run_id,omitempty"`
+	Seq              int64                       `json:"seq"`
+	SessionId        *string                     `json:"session_id,omitempty"`
+	StepId           *string                     `json:"step_id,omitempty"`
+	Subject          *string                     `json:"subject,omitempty"`
+	Ts               time.Time                   `json:"ts"`
+	Type             string                      `json:"type"`
+	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionColdStartTimeout defines model for TypedTaggedEventStreamEnvelopeSessionColdStartTimeout.
 type TypedTaggedEventStreamEnvelopeSessionColdStartTimeout struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionCrashed defines model for TypedTaggedEventStreamEnvelopeSessionCrashed.
 type TypedTaggedEventStreamEnvelopeSessionCrashed struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   SessionLifecyclePayload  `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence defines model for TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence.
+type TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence struct {
+	Actor            string                              `json:"actor"`
+	City             string                              `json:"city"`
+	DependsOnStepIds *[]string                           `json:"depends_on_step_ids,omitempty"`
+	Message          *string                             `json:"message,omitempty"`
+	Payload          SessionDemandClaimDivergencePayload `json:"payload"`
+	RunId            *string                             `json:"run_id,omitempty"`
+	Seq              int64                               `json:"seq"`
+	SessionId        *string                             `json:"session_id,omitempty"`
+	StepId           *string                             `json:"step_id,omitempty"`
+	Subject          *string                             `json:"subject,omitempty"`
+	Ts               time.Time                           `json:"ts"`
+	Type             string                              `json:"type"`
+	Workflow         *WorkflowEventProjection            `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork defines model for TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork.
 type TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork struct {
-	Actor     string                                   `json:"actor"`
-	City      string                                   `json:"city"`
-	Message   *string                                  `json:"message,omitempty"`
-	Payload   SessionDrainAckedWithAssignedWorkPayload `json:"payload"`
-	RunId     *string                                  `json:"run_id,omitempty"`
-	Seq       int64                                    `json:"seq"`
-	SessionId *string                                  `json:"session_id,omitempty"`
-	StepId    *string                                  `json:"step_id,omitempty"`
-	Subject   *string                                  `json:"subject,omitempty"`
-	Ts        time.Time                                `json:"ts"`
-	Type      string                                   `json:"type"`
-	Workflow  *WorkflowEventProjection                 `json:"workflow,omitempty"`
+	Actor            string                                   `json:"actor"`
+	City             string                                   `json:"city"`
+	DependsOnStepIds *[]string                                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                                  `json:"message,omitempty"`
+	Payload          SessionDrainAckedWithAssignedWorkPayload `json:"payload"`
+	RunId            *string                                  `json:"run_id,omitempty"`
+	Seq              int64                                    `json:"seq"`
+	SessionId        *string                                  `json:"session_id,omitempty"`
+	StepId           *string                                  `json:"step_id,omitempty"`
+	Subject          *string                                  `json:"subject,omitempty"`
+	Ts               time.Time                                `json:"ts"`
+	Type             string                                   `json:"type"`
+	Workflow         *WorkflowEventProjection                 `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable defines model for TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable.
+type TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated defines model for TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated.
+type TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionDraining defines model for TypedTaggedEventStreamEnvelopeSessionDraining.
 type TypedTaggedEventStreamEnvelopeSessionDraining struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionIdleKilled defines model for TypedTaggedEventStreamEnvelopeSessionIdleKilled.
 type TypedTaggedEventStreamEnvelopeSessionIdleKilled struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled defines model for TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled.
 type TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline defines model for TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline.
+type TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline struct {
+	Actor            string                                       `json:"actor"`
+	City             string                                       `json:"city"`
+	DependsOnStepIds *[]string                                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                                      `json:"message,omitempty"`
+	Payload          SessionPoolSlotRetiredAtDrainDeadlinePayload `json:"payload"`
+	RunId            *string                                      `json:"run_id,omitempty"`
+	Seq              int64                                        `json:"seq"`
+	SessionId        *string                                      `json:"session_id,omitempty"`
+	StepId           *string                                      `json:"step_id,omitempty"`
+	Subject          *string                                      `json:"subject,omitempty"`
+	Ts               time.Time                                    `json:"ts"`
+	Type             string                                       `json:"type"`
+	Workflow         *WorkflowEventProjection                     `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionQuarantined defines model for TypedTaggedEventStreamEnvelopeSessionQuarantined.
 type TypedTaggedEventStreamEnvelopeSessionQuarantined struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionResetStalled defines model for TypedTaggedEventStreamEnvelopeSessionResetStalled.
 type TypedTaggedEventStreamEnvelopeSessionResetStalled struct {
-	Actor     string                     `json:"actor"`
-	City      string                     `json:"city"`
-	Message   *string                    `json:"message,omitempty"`
-	Payload   SessionResetStalledPayload `json:"payload"`
-	RunId     *string                    `json:"run_id,omitempty"`
-	Seq       int64                      `json:"seq"`
-	SessionId *string                    `json:"session_id,omitempty"`
-	StepId    *string                    `json:"step_id,omitempty"`
-	Subject   *string                    `json:"subject,omitempty"`
-	Ts        time.Time                  `json:"ts"`
-	Type      string                     `json:"type"`
-	Workflow  *WorkflowEventProjection   `json:"workflow,omitempty"`
+	Actor            string                     `json:"actor"`
+	City             string                     `json:"city"`
+	DependsOnStepIds *[]string                  `json:"depends_on_step_ids,omitempty"`
+	Message          *string                    `json:"message,omitempty"`
+	Payload          SessionResetStalledPayload `json:"payload"`
+	RunId            *string                    `json:"run_id,omitempty"`
+	Seq              int64                      `json:"seq"`
+	SessionId        *string                    `json:"session_id,omitempty"`
+	StepId           *string                    `json:"step_id,omitempty"`
+	Subject          *string                    `json:"subject,omitempty"`
+	Ts               time.Time                  `json:"ts"`
+	Type             string                     `json:"type"`
+	Workflow         *WorkflowEventProjection   `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionStopped defines model for TypedTaggedEventStreamEnvelopeSessionStopped.
 type TypedTaggedEventStreamEnvelopeSessionStopped struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   SessionLifecyclePayload  `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionStranded defines model for TypedTaggedEventStreamEnvelopeSessionStranded.
 type TypedTaggedEventStreamEnvelopeSessionStranded struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   SessionStrandedPayload   `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionStrandedPayload   `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionSuspended defines model for TypedTaggedEventStreamEnvelopeSessionSuspended.
 type TypedTaggedEventStreamEnvelopeSessionSuspended struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionUndrained defines model for TypedTaggedEventStreamEnvelopeSessionUndrained.
 type TypedTaggedEventStreamEnvelopeSessionUndrained struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionUnknownState defines model for TypedTaggedEventStreamEnvelopeSessionUnknownState.
 type TypedTaggedEventStreamEnvelopeSessionUnknownState struct {
-	Actor     string                     `json:"actor"`
-	City      string                     `json:"city"`
-	Message   *string                    `json:"message,omitempty"`
-	Payload   SessionUnknownStatePayload `json:"payload"`
-	RunId     *string                    `json:"run_id,omitempty"`
-	Seq       int64                      `json:"seq"`
-	SessionId *string                    `json:"session_id,omitempty"`
-	StepId    *string                    `json:"step_id,omitempty"`
-	Subject   *string                    `json:"subject,omitempty"`
-	Ts        time.Time                  `json:"ts"`
-	Type      string                     `json:"type"`
-	Workflow  *WorkflowEventProjection   `json:"workflow,omitempty"`
+	Actor            string                     `json:"actor"`
+	City             string                     `json:"city"`
+	DependsOnStepIds *[]string                  `json:"depends_on_step_ids,omitempty"`
+	Message          *string                    `json:"message,omitempty"`
+	Payload          SessionUnknownStatePayload `json:"payload"`
+	RunId            *string                    `json:"run_id,omitempty"`
+	Seq              int64                      `json:"seq"`
+	SessionId        *string                    `json:"session_id,omitempty"`
+	StepId           *string                    `json:"step_id,omitempty"`
+	Subject          *string                    `json:"subject,omitempty"`
+	Ts               time.Time                  `json:"ts"`
+	Type             string                     `json:"type"`
+	Workflow         *WorkflowEventProjection   `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionUpdated defines model for TypedTaggedEventStreamEnvelopeSessionUpdated.
 type TypedTaggedEventStreamEnvelopeSessionUpdated struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionWakeRefused defines model for TypedTaggedEventStreamEnvelopeSessionWakeRefused.
+type TypedTaggedEventStreamEnvelopeSessionWakeRefused struct {
+	Actor            string                    `json:"actor"`
+	City             string                    `json:"city"`
+	DependsOnStepIds *[]string                 `json:"depends_on_step_ids,omitempty"`
+	Message          *string                   `json:"message,omitempty"`
+	Payload          SessionWakeRefusedPayload `json:"payload"`
+	RunId            *string                   `json:"run_id,omitempty"`
+	Seq              int64                     `json:"seq"`
+	SessionId        *string                   `json:"session_id,omitempty"`
+	StepId           *string                   `json:"step_id,omitempty"`
+	Subject          *string                   `json:"subject,omitempty"`
+	Ts               time.Time                 `json:"ts"`
+	Type             string                    `json:"type"`
+	Workflow         *WorkflowEventProjection  `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionWoke defines model for TypedTaggedEventStreamEnvelopeSessionWoke.
 type TypedTaggedEventStreamEnvelopeSessionWoke struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   NoPayload                `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed defines model for TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed.
 type TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   SessionLifecyclePayload  `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeStorageBindingConverged defines model for TypedTaggedEventStreamEnvelopeStorageBindingConverged.
+type TypedTaggedEventStreamEnvelopeStorageBindingConverged struct {
+	Actor            string                       `json:"actor"`
+	City             string                       `json:"city"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          StorageBindingOutcomePayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeStorageBindingGenesis defines model for TypedTaggedEventStreamEnvelopeStorageBindingGenesis.
+type TypedTaggedEventStreamEnvelopeStorageBindingGenesis struct {
+	Actor            string                       `json:"actor"`
+	City             string                       `json:"city"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          StorageBindingOutcomePayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured defines model for TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured.
+type TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured struct {
+	Actor            string                       `json:"actor"`
+	City             string                       `json:"city"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          StorageBindingOutcomePayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeStorageBindingUncheckable defines model for TypedTaggedEventStreamEnvelopeStorageBindingUncheckable.
+type TypedTaggedEventStreamEnvelopeStorageBindingUncheckable struct {
+	Actor            string                       `json:"actor"`
+	City             string                       `json:"city"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          StorageBindingOutcomePayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeStorageBindingUnconverged defines model for TypedTaggedEventStreamEnvelopeStorageBindingUnconverged.
+type TypedTaggedEventStreamEnvelopeStorageBindingUnconverged struct {
+	Actor            string                       `json:"actor"`
+	City             string                       `json:"city"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          StorageBindingOutcomePayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick defines model for TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick.
 type TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick struct {
-	Actor     string                                 `json:"actor"`
-	City      string                                 `json:"city"`
-	Message   *string                                `json:"message,omitempty"`
-	Payload   SupervisorFSPressureSkippedTickPayload `json:"payload"`
-	RunId     *string                                `json:"run_id,omitempty"`
-	Seq       int64                                  `json:"seq"`
-	SessionId *string                                `json:"session_id,omitempty"`
-	StepId    *string                                `json:"step_id,omitempty"`
-	Subject   *string                                `json:"subject,omitempty"`
-	Ts        time.Time                              `json:"ts"`
-	Type      string                                 `json:"type"`
-	Workflow  *WorkflowEventProjection               `json:"workflow,omitempty"`
+	Actor            string                                 `json:"actor"`
+	City             string                                 `json:"city"`
+	DependsOnStepIds *[]string                              `json:"depends_on_step_ids,omitempty"`
+	Message          *string                                `json:"message,omitempty"`
+	Payload          SupervisorFSPressureSkippedTickPayload `json:"payload"`
+	RunId            *string                                `json:"run_id,omitempty"`
+	Seq              int64                                  `json:"seq"`
+	SessionId        *string                                `json:"session_id,omitempty"`
+	StepId           *string                                `json:"step_id,omitempty"`
+	Subject          *string                                `json:"subject,omitempty"`
+	Ts               time.Time                              `json:"ts"`
+	Type             string                                 `json:"type"`
+	Workflow         *WorkflowEventProjection               `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSupervisorRequest defines model for TypedTaggedEventStreamEnvelopeSupervisorRequest.
 type TypedTaggedEventStreamEnvelopeSupervisorRequest struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   SupervisorRequestPayload `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SupervisorRequestPayload `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested defines model for TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested.
 type TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested struct {
-	Actor     string                    `json:"actor"`
-	City      string                    `json:"city"`
-	Message   *string                   `json:"message,omitempty"`
-	Payload   SupervisorShutdownPayload `json:"payload"`
-	RunId     *string                   `json:"run_id,omitempty"`
-	Seq       int64                     `json:"seq"`
-	SessionId *string                   `json:"session_id,omitempty"`
-	StepId    *string                   `json:"step_id,omitempty"`
-	Subject   *string                   `json:"subject,omitempty"`
-	Ts        time.Time                 `json:"ts"`
-	Type      string                    `json:"type"`
-	Workflow  *WorkflowEventProjection  `json:"workflow,omitempty"`
+	Actor            string                    `json:"actor"`
+	City             string                    `json:"city"`
+	DependsOnStepIds *[]string                 `json:"depends_on_step_ids,omitempty"`
+	Message          *string                   `json:"message,omitempty"`
+	Payload          SupervisorShutdownPayload `json:"payload"`
+	RunId            *string                   `json:"run_id,omitempty"`
+	Seq              int64                     `json:"seq"`
+	SessionId        *string                   `json:"session_id,omitempty"`
+	StepId           *string                   `json:"step_id,omitempty"`
+	Subject          *string                   `json:"subject,omitempty"`
+	Ts               time.Time                 `json:"ts"`
+	Type             string                    `json:"type"`
+	Workflow         *WorkflowEventProjection  `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSupervisorStarted defines model for TypedTaggedEventStreamEnvelopeSupervisorStarted.
 type TypedTaggedEventStreamEnvelopeSupervisorStarted struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   SupervisorStartedPayload `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SupervisorStartedPayload `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeWebhookReceived defines model for TypedTaggedEventStreamEnvelopeWebhookReceived.
 type TypedTaggedEventStreamEnvelopeWebhookReceived struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   WebhookReceivedPayload   `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WebhookReceivedPayload   `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeWebhookRejected defines model for TypedTaggedEventStreamEnvelopeWebhookRejected.
 type TypedTaggedEventStreamEnvelopeWebhookRejected struct {
-	Actor     string                   `json:"actor"`
-	City      string                   `json:"city"`
-	Message   *string                  `json:"message,omitempty"`
-	Payload   WebhookRejectedPayload   `json:"payload"`
-	RunId     *string                  `json:"run_id,omitempty"`
-	Seq       int64                    `json:"seq"`
-	SessionId *string                  `json:"session_id,omitempty"`
-	StepId    *string                  `json:"step_id,omitempty"`
-	Subject   *string                  `json:"subject,omitempty"`
-	Ts        time.Time                `json:"ts"`
-	Type      string                   `json:"type"`
-	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WebhookRejectedPayload   `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeWorkerOperation defines model for TypedTaggedEventStreamEnvelopeWorkerOperation.
 type TypedTaggedEventStreamEnvelopeWorkerOperation struct {
-	Actor     string                      `json:"actor"`
-	City      string                      `json:"city"`
-	Message   *string                     `json:"message,omitempty"`
-	Payload   WorkerOperationEventPayload `json:"payload"`
-	RunId     *string                     `json:"run_id,omitempty"`
-	Seq       int64                       `json:"seq"`
-	SessionId *string                     `json:"session_id,omitempty"`
-	StepId    *string                     `json:"step_id,omitempty"`
-	Subject   *string                     `json:"subject,omitempty"`
-	Ts        time.Time                   `json:"ts"`
-	Type      string                      `json:"type"`
-	Workflow  *WorkflowEventProjection    `json:"workflow,omitempty"`
+	Actor            string                      `json:"actor"`
+	City             string                      `json:"city"`
+	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
+	Message          *string                     `json:"message,omitempty"`
+	Payload          WorkerOperationEventPayload `json:"payload"`
+	RunId            *string                     `json:"run_id,omitempty"`
+	Seq              int64                       `json:"seq"`
+	SessionId        *string                     `json:"session_id,omitempty"`
+	StepId           *string                     `json:"step_id,omitempty"`
+	Subject          *string                     `json:"subject,omitempty"`
+	Ts               time.Time                   `json:"ts"`
+	Type             string                      `json:"type"`
+	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
 // UnboundEventPayload defines model for UnboundEventPayload.
@@ -7618,7 +8832,8 @@ type UnboundEventPayload struct {
 // UsageBody defines model for UsageBody.
 type UsageBody struct {
 	// Available True when this city is configured to record local usage estimates.
-	Available bool `json:"available"`
+	Available bool         `json:"available"`
+	Last24h   *UsageTotals `json:"last_24h,omitempty"`
 
 	// ObservedFrom RFC3339 timestamp of the oldest fact included in this bounded read.
 	ObservedFrom *string `json:"observed_from,omitempty"`
@@ -8818,6 +10033,9 @@ type GetV0CityByCityNameSessionByIdParams struct {
 
 	// PeekLines Number of lines to include in the last output preview when peek=true. Defaults to 5.
 	PeekLines *int64 `form:"peek_lines,omitempty" json:"peek_lines,omitempty"`
+
+	// ExactId Resolve {id} as an exact session bead id only: a single point read that also finds closed sessions and answers 404 when no bead has that id. Skips the alias, runtime session_name, configured-name and closed-session name lookups. For callers holding a durable id.
+	ExactId *bool `form:"exact_id,omitempty" json:"exact_id,omitempty"`
 }
 
 // PatchV0CityByCityNameSessionByIdParams defines parameters for PatchV0CityByCityNameSessionById.
@@ -8845,6 +10063,9 @@ type PostV0CityByCityNameSessionByIdKillParams struct {
 type SendSessionMessageParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // PostV0CityByCityNameSessionByIdPermissionModeParams defines parameters for PostV0CityByCityNameSessionByIdPermissionMode.
@@ -8859,10 +10080,19 @@ type PostV0CityByCityNameSessionByIdRenameParams struct {
 	XGCRequest string `json:"X-GC-Request"`
 }
 
+// PostV0CityByCityNameSessionByIdResetParams defines parameters for PostV0CityByCityNameSessionByIdReset.
+type PostV0CityByCityNameSessionByIdResetParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // RespondSessionParams defines parameters for RespondSession.
 type RespondSessionParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // PostV0CityByCityNameSessionByIdStopParams defines parameters for PostV0CityByCityNameSessionByIdStop.
@@ -8893,6 +10123,9 @@ type StreamSessionParamsFormat string
 type SubmitSessionParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // PostV0CityByCityNameSessionByIdSuspendParams defines parameters for PostV0CityByCityNameSessionByIdSuspend.
@@ -9212,6 +10445,32 @@ func (t *EventPayload) MergeAdapterEventPayload(v AdapterEventPayload) error {
 	return err
 }
 
+// AsBackendCredentialResolvedPayload returns the union data inside the EventPayload as a BackendCredentialResolvedPayload
+func (t EventPayload) AsBackendCredentialResolvedPayload() (BackendCredentialResolvedPayload, error) {
+	var body BackendCredentialResolvedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromBackendCredentialResolvedPayload overwrites any union data inside the EventPayload as the provided BackendCredentialResolvedPayload
+func (t *EventPayload) FromBackendCredentialResolvedPayload(v BackendCredentialResolvedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeBackendCredentialResolvedPayload performs a merge with any union data inside the EventPayload, using the provided BackendCredentialResolvedPayload
+func (t *EventPayload) MergeBackendCredentialResolvedPayload(v BackendCredentialResolvedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsBeadClaimRejectedPayload returns the union data inside the EventPayload as a BeadClaimRejectedPayload
 func (t EventPayload) AsBeadClaimRejectedPayload() (BeadClaimRejectedPayload, error) {
 	var body BeadClaimRejectedPayload
@@ -9228,6 +10487,32 @@ func (t *EventPayload) FromBeadClaimRejectedPayload(v BeadClaimRejectedPayload) 
 
 // MergeBeadClaimRejectedPayload performs a merge with any union data inside the EventPayload, using the provided BeadClaimRejectedPayload
 func (t *EventPayload) MergeBeadClaimRejectedPayload(v BeadClaimRejectedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsBeadClaimReleasedPayload returns the union data inside the EventPayload as a BeadClaimReleasedPayload
+func (t EventPayload) AsBeadClaimReleasedPayload() (BeadClaimReleasedPayload, error) {
+	var body BeadClaimReleasedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromBeadClaimReleasedPayload overwrites any union data inside the EventPayload as the provided BeadClaimReleasedPayload
+func (t *EventPayload) FromBeadClaimReleasedPayload(v BeadClaimReleasedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeBeadClaimReleasedPayload performs a merge with any union data inside the EventPayload, using the provided BeadClaimReleasedPayload
+func (t *EventPayload) MergeBeadClaimReleasedPayload(v BeadClaimReleasedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -9332,6 +10617,32 @@ func (t *EventPayload) FromBeadWorktreeReapedPayload(v BeadWorktreeReapedPayload
 
 // MergeBeadWorktreeReapedPayload performs a merge with any union data inside the EventPayload, using the provided BeadWorktreeReapedPayload
 func (t *EventPayload) MergeBeadWorktreeReapedPayload(v BeadWorktreeReapedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsBlockedRecomputedPayload returns the union data inside the EventPayload as a BlockedRecomputedPayload
+func (t EventPayload) AsBlockedRecomputedPayload() (BlockedRecomputedPayload, error) {
+	var body BlockedRecomputedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromBlockedRecomputedPayload overwrites any union data inside the EventPayload as the provided BlockedRecomputedPayload
+func (t *EventPayload) FromBlockedRecomputedPayload(v BlockedRecomputedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeBlockedRecomputedPayload performs a merge with any union data inside the EventPayload, using the provided BlockedRecomputedPayload
+func (t *EventPayload) MergeBlockedRecomputedPayload(v BlockedRecomputedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -9472,6 +10783,136 @@ func (t *EventPayload) MergeConditionalWritesDegradedPayload(v ConditionalWrites
 	return err
 }
 
+// AsControlDispatcherScopeGapPayload returns the union data inside the EventPayload as a ControlDispatcherScopeGapPayload
+func (t EventPayload) AsControlDispatcherScopeGapPayload() (ControlDispatcherScopeGapPayload, error) {
+	var body ControlDispatcherScopeGapPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromControlDispatcherScopeGapPayload overwrites any union data inside the EventPayload as the provided ControlDispatcherScopeGapPayload
+func (t *EventPayload) FromControlDispatcherScopeGapPayload(v ControlDispatcherScopeGapPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeControlDispatcherScopeGapPayload performs a merge with any union data inside the EventPayload, using the provided ControlDispatcherScopeGapPayload
+func (t *EventPayload) MergeControlDispatcherScopeGapPayload(v ControlDispatcherScopeGapPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsControlRootSettleFailedPayload returns the union data inside the EventPayload as a ControlRootSettleFailedPayload
+func (t EventPayload) AsControlRootSettleFailedPayload() (ControlRootSettleFailedPayload, error) {
+	var body ControlRootSettleFailedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromControlRootSettleFailedPayload overwrites any union data inside the EventPayload as the provided ControlRootSettleFailedPayload
+func (t *EventPayload) FromControlRootSettleFailedPayload(v ControlRootSettleFailedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeControlRootSettleFailedPayload performs a merge with any union data inside the EventPayload, using the provided ControlRootSettleFailedPayload
+func (t *EventPayload) MergeControlRootSettleFailedPayload(v ControlRootSettleFailedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsControlStalledPayload returns the union data inside the EventPayload as a ControlStalledPayload
+func (t EventPayload) AsControlStalledPayload() (ControlStalledPayload, error) {
+	var body ControlStalledPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromControlStalledPayload overwrites any union data inside the EventPayload as the provided ControlStalledPayload
+func (t *EventPayload) FromControlStalledPayload(v ControlStalledPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeControlStalledPayload performs a merge with any union data inside the EventPayload, using the provided ControlStalledPayload
+func (t *EventPayload) MergeControlStalledPayload(v ControlStalledPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsExecutionClaimWindowExpiredPayload returns the union data inside the EventPayload as a ExecutionClaimWindowExpiredPayload
+func (t EventPayload) AsExecutionClaimWindowExpiredPayload() (ExecutionClaimWindowExpiredPayload, error) {
+	var body ExecutionClaimWindowExpiredPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromExecutionClaimWindowExpiredPayload overwrites any union data inside the EventPayload as the provided ExecutionClaimWindowExpiredPayload
+func (t *EventPayload) FromExecutionClaimWindowExpiredPayload(v ExecutionClaimWindowExpiredPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeExecutionClaimWindowExpiredPayload performs a merge with any union data inside the EventPayload, using the provided ExecutionClaimWindowExpiredPayload
+func (t *EventPayload) MergeExecutionClaimWindowExpiredPayload(v ExecutionClaimWindowExpiredPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsExecutionStepStalledPayload returns the union data inside the EventPayload as a ExecutionStepStalledPayload
+func (t EventPayload) AsExecutionStepStalledPayload() (ExecutionStepStalledPayload, error) {
+	var body ExecutionStepStalledPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromExecutionStepStalledPayload overwrites any union data inside the EventPayload as the provided ExecutionStepStalledPayload
+func (t *EventPayload) FromExecutionStepStalledPayload(v ExecutionStepStalledPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeExecutionStepStalledPayload performs a merge with any union data inside the EventPayload, using the provided ExecutionStepStalledPayload
+func (t *EventPayload) MergeExecutionStepStalledPayload(v ExecutionStepStalledPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsGroupCreatedEventPayload returns the union data inside the EventPayload as a GroupCreatedEventPayload
 func (t EventPayload) AsGroupCreatedEventPayload() (GroupCreatedEventPayload, error) {
 	var body GroupCreatedEventPayload
@@ -9488,6 +10929,32 @@ func (t *EventPayload) FromGroupCreatedEventPayload(v GroupCreatedEventPayload) 
 
 // MergeGroupCreatedEventPayload performs a merge with any union data inside the EventPayload, using the provided GroupCreatedEventPayload
 func (t *EventPayload) MergeGroupCreatedEventPayload(v GroupCreatedEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsHookClaimReclaimedStalePayload returns the union data inside the EventPayload as a HookClaimReclaimedStalePayload
+func (t EventPayload) AsHookClaimReclaimedStalePayload() (HookClaimReclaimedStalePayload, error) {
+	var body HookClaimReclaimedStalePayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromHookClaimReclaimedStalePayload overwrites any union data inside the EventPayload as the provided HookClaimReclaimedStalePayload
+func (t *EventPayload) FromHookClaimReclaimedStalePayload(v HookClaimReclaimedStalePayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeHookClaimReclaimedStalePayload performs a merge with any union data inside the EventPayload, using the provided HookClaimReclaimedStalePayload
+func (t *EventPayload) MergeHookClaimReclaimedStalePayload(v HookClaimReclaimedStalePayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -9602,6 +11069,58 @@ func (t *EventPayload) MergeNoPayload(v NoPayload) error {
 	return err
 }
 
+// AsOrderSkippedPayload returns the union data inside the EventPayload as a OrderSkippedPayload
+func (t EventPayload) AsOrderSkippedPayload() (OrderSkippedPayload, error) {
+	var body OrderSkippedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromOrderSkippedPayload overwrites any union data inside the EventPayload as the provided OrderSkippedPayload
+func (t *EventPayload) FromOrderSkippedPayload(v OrderSkippedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeOrderSkippedPayload performs a merge with any union data inside the EventPayload, using the provided OrderSkippedPayload
+func (t *EventPayload) MergeOrderSkippedPayload(v OrderSkippedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsOrderSuppressedPayload returns the union data inside the EventPayload as a OrderSuppressedPayload
+func (t EventPayload) AsOrderSuppressedPayload() (OrderSuppressedPayload, error) {
+	var body OrderSuppressedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromOrderSuppressedPayload overwrites any union data inside the EventPayload as the provided OrderSuppressedPayload
+func (t *EventPayload) FromOrderSuppressedPayload(v OrderSuppressedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeOrderSuppressedPayload performs a merge with any union data inside the EventPayload, using the provided OrderSuppressedPayload
+func (t *EventPayload) MergeOrderSuppressedPayload(v OrderSuppressedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsOutboundChannelMismatchPayload returns the union data inside the EventPayload as a OutboundChannelMismatchPayload
 func (t EventPayload) AsOutboundChannelMismatchPayload() (OutboundChannelMismatchPayload, error) {
 	var body OutboundChannelMismatchPayload
@@ -9644,32 +11163,6 @@ func (t *EventPayload) FromOutboundEventPayload(v OutboundEventPayload) error {
 
 // MergeOutboundEventPayload performs a merge with any union data inside the EventPayload, using the provided OutboundEventPayload
 func (t *EventPayload) MergeOutboundEventPayload(v OutboundEventPayload) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsPostgresCredentialResolvedPayload returns the union data inside the EventPayload as a PostgresCredentialResolvedPayload
-func (t EventPayload) AsPostgresCredentialResolvedPayload() (PostgresCredentialResolvedPayload, error) {
-	var body PostgresCredentialResolvedPayload
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromPostgresCredentialResolvedPayload overwrites any union data inside the EventPayload as the provided PostgresCredentialResolvedPayload
-func (t *EventPayload) FromPostgresCredentialResolvedPayload(v PostgresCredentialResolvedPayload) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergePostgresCredentialResolvedPayload performs a merge with any union data inside the EventPayload, using the provided PostgresCredentialResolvedPayload
-func (t *EventPayload) MergePostgresCredentialResolvedPayload(v PostgresCredentialResolvedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -9862,6 +11355,32 @@ func (t *EventPayload) MergeSessionCreateSucceededPayload(v SessionCreateSucceed
 	return err
 }
 
+// AsSessionDemandClaimDivergencePayload returns the union data inside the EventPayload as a SessionDemandClaimDivergencePayload
+func (t EventPayload) AsSessionDemandClaimDivergencePayload() (SessionDemandClaimDivergencePayload, error) {
+	var body SessionDemandClaimDivergencePayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionDemandClaimDivergencePayload overwrites any union data inside the EventPayload as the provided SessionDemandClaimDivergencePayload
+func (t *EventPayload) FromSessionDemandClaimDivergencePayload(v SessionDemandClaimDivergencePayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionDemandClaimDivergencePayload performs a merge with any union data inside the EventPayload, using the provided SessionDemandClaimDivergencePayload
+func (t *EventPayload) MergeSessionDemandClaimDivergencePayload(v SessionDemandClaimDivergencePayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsSessionDrainAckedWithAssignedWorkPayload returns the union data inside the EventPayload as a SessionDrainAckedWithAssignedWorkPayload
 func (t EventPayload) AsSessionDrainAckedWithAssignedWorkPayload() (SessionDrainAckedWithAssignedWorkPayload, error) {
 	var body SessionDrainAckedWithAssignedWorkPayload
@@ -9930,6 +11449,32 @@ func (t *EventPayload) FromSessionMessageSucceededPayload(v SessionMessageSuccee
 
 // MergeSessionMessageSucceededPayload performs a merge with any union data inside the EventPayload, using the provided SessionMessageSucceededPayload
 func (t *EventPayload) MergeSessionMessageSucceededPayload(v SessionMessageSucceededPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionPoolSlotRetiredAtDrainDeadlinePayload returns the union data inside the EventPayload as a SessionPoolSlotRetiredAtDrainDeadlinePayload
+func (t EventPayload) AsSessionPoolSlotRetiredAtDrainDeadlinePayload() (SessionPoolSlotRetiredAtDrainDeadlinePayload, error) {
+	var body SessionPoolSlotRetiredAtDrainDeadlinePayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionPoolSlotRetiredAtDrainDeadlinePayload overwrites any union data inside the EventPayload as the provided SessionPoolSlotRetiredAtDrainDeadlinePayload
+func (t *EventPayload) FromSessionPoolSlotRetiredAtDrainDeadlinePayload(v SessionPoolSlotRetiredAtDrainDeadlinePayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionPoolSlotRetiredAtDrainDeadlinePayload performs a merge with any union data inside the EventPayload, using the provided SessionPoolSlotRetiredAtDrainDeadlinePayload
+func (t *EventPayload) MergeSessionPoolSlotRetiredAtDrainDeadlinePayload(v SessionPoolSlotRetiredAtDrainDeadlinePayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -10034,6 +11579,58 @@ func (t *EventPayload) FromSessionUnknownStatePayload(v SessionUnknownStatePaylo
 
 // MergeSessionUnknownStatePayload performs a merge with any union data inside the EventPayload, using the provided SessionUnknownStatePayload
 func (t *EventPayload) MergeSessionUnknownStatePayload(v SessionUnknownStatePayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionWakeRefusedPayload returns the union data inside the EventPayload as a SessionWakeRefusedPayload
+func (t EventPayload) AsSessionWakeRefusedPayload() (SessionWakeRefusedPayload, error) {
+	var body SessionWakeRefusedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionWakeRefusedPayload overwrites any union data inside the EventPayload as the provided SessionWakeRefusedPayload
+func (t *EventPayload) FromSessionWakeRefusedPayload(v SessionWakeRefusedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionWakeRefusedPayload performs a merge with any union data inside the EventPayload, using the provided SessionWakeRefusedPayload
+func (t *EventPayload) MergeSessionWakeRefusedPayload(v SessionWakeRefusedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsStorageBindingOutcomePayload returns the union data inside the EventPayload as a StorageBindingOutcomePayload
+func (t EventPayload) AsStorageBindingOutcomePayload() (StorageBindingOutcomePayload, error) {
+	var body StorageBindingOutcomePayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromStorageBindingOutcomePayload overwrites any union data inside the EventPayload as the provided StorageBindingOutcomePayload
+func (t *EventPayload) FromStorageBindingOutcomePayload(v StorageBindingOutcomePayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeStorageBindingOutcomePayload performs a merge with any union data inside the EventPayload, using the provided StorageBindingOutcomePayload
+func (t *EventPayload) MergeStorageBindingOutcomePayload(v StorageBindingOutcomePayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -12031,6 +13628,34 @@ func (t *SessionTranscriptGetResponse) UnmarshalJSON(b []byte) error {
 	return err
 }
 
+// AsTypedEventStreamEnvelopeBackendCredentialResolved returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBackendCredentialResolved
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBackendCredentialResolved() (TypedEventStreamEnvelopeBackendCredentialResolved, error) {
+	var body TypedEventStreamEnvelopeBackendCredentialResolved
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBackendCredentialResolved overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBackendCredentialResolved
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBackendCredentialResolved(v TypedEventStreamEnvelopeBackendCredentialResolved) error {
+	v.Type = "backend.credential_resolved"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBackendCredentialResolved performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBackendCredentialResolved
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBackendCredentialResolved(v TypedEventStreamEnvelopeBackendCredentialResolved) error {
+	v.Type = "backend.credential_resolved"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeBeadClaimRejected returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadClaimRejected
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadClaimRejected() (TypedEventStreamEnvelopeBeadClaimRejected, error) {
 	var body TypedEventStreamEnvelopeBeadClaimRejected
@@ -12049,6 +13674,34 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadClaimRejected
 // MergeTypedEventStreamEnvelopeBeadClaimRejected performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadClaimRejected
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadClaimRejected(v TypedEventStreamEnvelopeBeadClaimRejected) error {
 	v.Type = "bead.claim_rejected"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeBeadClaimReleased returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadClaimReleased
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadClaimReleased() (TypedEventStreamEnvelopeBeadClaimReleased, error) {
+	var body TypedEventStreamEnvelopeBeadClaimReleased
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBeadClaimReleased overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBeadClaimReleased
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadClaimReleased(v TypedEventStreamEnvelopeBeadClaimReleased) error {
+	v.Type = "bead.claim_released"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBeadClaimReleased performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadClaimReleased
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadClaimReleased(v TypedEventStreamEnvelopeBeadClaimReleased) error {
+	v.Type = "bead.claim_released"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -12255,6 +13908,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadWorktreeReap
 	return err
 }
 
+// AsTypedEventStreamEnvelopeBeadsBlockedRecomputed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadsBlockedRecomputed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadsBlockedRecomputed() (TypedEventStreamEnvelopeBeadsBlockedRecomputed, error) {
+	var body TypedEventStreamEnvelopeBeadsBlockedRecomputed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBeadsBlockedRecomputed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBeadsBlockedRecomputed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadsBlockedRecomputed(v TypedEventStreamEnvelopeBeadsBlockedRecomputed) error {
+	v.Type = "beads.blocked.recomputed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBeadsBlockedRecomputed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadsBlockedRecomputed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadsBlockedRecomputed(v TypedEventStreamEnvelopeBeadsBlockedRecomputed) error {
+	v.Type = "beads.blocked.recomputed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeBeadsConditionalWritesDegraded returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadsConditionalWritesDegraded
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadsConditionalWritesDegraded() (TypedEventStreamEnvelopeBeadsConditionalWritesDegraded, error) {
 	var body TypedEventStreamEnvelopeBeadsConditionalWritesDegraded
@@ -12385,6 +14066,90 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeCityUnregisterReq
 // MergeTypedEventStreamEnvelopeCityUnregisterRequested performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeCityUnregisterRequested
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeCityUnregisterRequested(v TypedEventStreamEnvelopeCityUnregisterRequested) error {
 	v.Type = "city.unregister_requested"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeControlDispatcherScopeGap returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeControlDispatcherScopeGap
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeControlDispatcherScopeGap() (TypedEventStreamEnvelopeControlDispatcherScopeGap, error) {
+	var body TypedEventStreamEnvelopeControlDispatcherScopeGap
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeControlDispatcherScopeGap overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeControlDispatcherScopeGap
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeControlDispatcherScopeGap(v TypedEventStreamEnvelopeControlDispatcherScopeGap) error {
+	v.Type = "control.dispatcher_scope_gap"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeControlDispatcherScopeGap performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeControlDispatcherScopeGap
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeControlDispatcherScopeGap(v TypedEventStreamEnvelopeControlDispatcherScopeGap) error {
+	v.Type = "control.dispatcher_scope_gap"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeControlRootSettleFailed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeControlRootSettleFailed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeControlRootSettleFailed() (TypedEventStreamEnvelopeControlRootSettleFailed, error) {
+	var body TypedEventStreamEnvelopeControlRootSettleFailed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeControlRootSettleFailed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeControlRootSettleFailed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeControlRootSettleFailed(v TypedEventStreamEnvelopeControlRootSettleFailed) error {
+	v.Type = "control.root_settle_failed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeControlRootSettleFailed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeControlRootSettleFailed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeControlRootSettleFailed(v TypedEventStreamEnvelopeControlRootSettleFailed) error {
+	v.Type = "control.root_settle_failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeControlStalled returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeControlStalled
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeControlStalled() (TypedEventStreamEnvelopeControlStalled, error) {
+	var body TypedEventStreamEnvelopeControlStalled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeControlStalled overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeControlStalled
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeControlStalled(v TypedEventStreamEnvelopeControlStalled) error {
+	v.Type = "control.stalled"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeControlStalled performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeControlStalled
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeControlStalled(v TypedEventStreamEnvelopeControlStalled) error {
+	v.Type = "control.stalled"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -12581,6 +14346,202 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeEventsRotated(v T
 // MergeTypedEventStreamEnvelopeEventsRotated performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeEventsRotated
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeEventsRotated(v TypedEventStreamEnvelopeEventsRotated) error {
 	v.Type = "events.rotated"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeExecutionClaimWindowExpired returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExecutionClaimWindowExpired
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExecutionClaimWindowExpired() (TypedEventStreamEnvelopeExecutionClaimWindowExpired, error) {
+	var body TypedEventStreamEnvelopeExecutionClaimWindowExpired
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExecutionClaimWindowExpired overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExecutionClaimWindowExpired
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExecutionClaimWindowExpired(v TypedEventStreamEnvelopeExecutionClaimWindowExpired) error {
+	v.Type = "execution.claim_window_expired"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExecutionClaimWindowExpired performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExecutionClaimWindowExpired
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExecutionClaimWindowExpired(v TypedEventStreamEnvelopeExecutionClaimWindowExpired) error {
+	v.Type = "execution.claim_window_expired"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeExecutionRunAnchored returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExecutionRunAnchored
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExecutionRunAnchored() (TypedEventStreamEnvelopeExecutionRunAnchored, error) {
+	var body TypedEventStreamEnvelopeExecutionRunAnchored
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExecutionRunAnchored overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExecutionRunAnchored
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExecutionRunAnchored(v TypedEventStreamEnvelopeExecutionRunAnchored) error {
+	v.Type = "execution.run_anchored"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExecutionRunAnchored performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExecutionRunAnchored
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExecutionRunAnchored(v TypedEventStreamEnvelopeExecutionRunAnchored) error {
+	v.Type = "execution.run_anchored"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeExecutionStepCompleted returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExecutionStepCompleted
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExecutionStepCompleted() (TypedEventStreamEnvelopeExecutionStepCompleted, error) {
+	var body TypedEventStreamEnvelopeExecutionStepCompleted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExecutionStepCompleted overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExecutionStepCompleted
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExecutionStepCompleted(v TypedEventStreamEnvelopeExecutionStepCompleted) error {
+	v.Type = "execution.step_completed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExecutionStepCompleted performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExecutionStepCompleted
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExecutionStepCompleted(v TypedEventStreamEnvelopeExecutionStepCompleted) error {
+	v.Type = "execution.step_completed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeExecutionStepDefined returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExecutionStepDefined
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExecutionStepDefined() (TypedEventStreamEnvelopeExecutionStepDefined, error) {
+	var body TypedEventStreamEnvelopeExecutionStepDefined
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExecutionStepDefined overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExecutionStepDefined
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExecutionStepDefined(v TypedEventStreamEnvelopeExecutionStepDefined) error {
+	v.Type = "execution.step_defined"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExecutionStepDefined performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExecutionStepDefined
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExecutionStepDefined(v TypedEventStreamEnvelopeExecutionStepDefined) error {
+	v.Type = "execution.step_defined"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeExecutionStepStalled returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExecutionStepStalled
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExecutionStepStalled() (TypedEventStreamEnvelopeExecutionStepStalled, error) {
+	var body TypedEventStreamEnvelopeExecutionStepStalled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExecutionStepStalled overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExecutionStepStalled
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExecutionStepStalled(v TypedEventStreamEnvelopeExecutionStepStalled) error {
+	v.Type = "execution.step_stalled"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExecutionStepStalled performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExecutionStepStalled
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExecutionStepStalled(v TypedEventStreamEnvelopeExecutionStepStalled) error {
+	v.Type = "execution.step_stalled"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeExecutionStepStarted returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExecutionStepStarted
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExecutionStepStarted() (TypedEventStreamEnvelopeExecutionStepStarted, error) {
+	var body TypedEventStreamEnvelopeExecutionStepStarted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExecutionStepStarted overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExecutionStepStarted
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExecutionStepStarted(v TypedEventStreamEnvelopeExecutionStepStarted) error {
+	v.Type = "execution.step_started"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExecutionStepStarted performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExecutionStepStarted
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExecutionStepStarted(v TypedEventStreamEnvelopeExecutionStepStarted) error {
+	v.Type = "execution.step_started"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeExecutionWorkAssociated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExecutionWorkAssociated
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExecutionWorkAssociated() (TypedEventStreamEnvelopeExecutionWorkAssociated, error) {
+	var body TypedEventStreamEnvelopeExecutionWorkAssociated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExecutionWorkAssociated overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExecutionWorkAssociated
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExecutionWorkAssociated(v TypedEventStreamEnvelopeExecutionWorkAssociated) error {
+	v.Type = "execution.work_associated"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExecutionWorkAssociated performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExecutionWorkAssociated
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExecutionWorkAssociated(v TypedEventStreamEnvelopeExecutionWorkAssociated) error {
+	v.Type = "execution.work_associated"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -12927,6 +14888,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeGcStoreMaintenan
 	return err
 }
 
+// AsTypedEventStreamEnvelopeHookClaimReclaimedStale returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeHookClaimReclaimedStale
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeHookClaimReclaimedStale() (TypedEventStreamEnvelopeHookClaimReclaimedStale, error) {
+	var body TypedEventStreamEnvelopeHookClaimReclaimedStale
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeHookClaimReclaimedStale overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeHookClaimReclaimedStale
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeHookClaimReclaimedStale(v TypedEventStreamEnvelopeHookClaimReclaimedStale) error {
+	v.Type = "hook.claim.reclaimed_stale"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeHookClaimReclaimedStale performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeHookClaimReclaimedStale
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeHookClaimReclaimedStale(v TypedEventStreamEnvelopeHookClaimReclaimedStale) error {
+	v.Type = "hook.claim.reclaimed_stale"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeMailArchived returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeMailArchived
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeMailArchived() (TypedEventStreamEnvelopeMailArchived, error) {
 	var body TypedEventStreamEnvelopeMailArchived
@@ -13235,24 +15224,52 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeOrderFired(v Typ
 	return err
 }
 
-// AsTypedEventStreamEnvelopePgCredentialResolved returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopePgCredentialResolved
-func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopePgCredentialResolved() (TypedEventStreamEnvelopePgCredentialResolved, error) {
-	var body TypedEventStreamEnvelopePgCredentialResolved
+// AsTypedEventStreamEnvelopeOrderSkipped returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeOrderSkipped
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeOrderSkipped() (TypedEventStreamEnvelopeOrderSkipped, error) {
+	var body TypedEventStreamEnvelopeOrderSkipped
 	err := json.Unmarshal(t.union, &body)
 	return body, err
 }
 
-// FromTypedEventStreamEnvelopePgCredentialResolved overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopePgCredentialResolved
-func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopePgCredentialResolved(v TypedEventStreamEnvelopePgCredentialResolved) error {
-	v.Type = "pg.credential_resolved"
+// FromTypedEventStreamEnvelopeOrderSkipped overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeOrderSkipped
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeOrderSkipped(v TypedEventStreamEnvelopeOrderSkipped) error {
+	v.Type = "order.skipped"
 	b, err := json.Marshal(v)
 	t.union = b
 	return err
 }
 
-// MergeTypedEventStreamEnvelopePgCredentialResolved performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopePgCredentialResolved
-func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopePgCredentialResolved(v TypedEventStreamEnvelopePgCredentialResolved) error {
-	v.Type = "pg.credential_resolved"
+// MergeTypedEventStreamEnvelopeOrderSkipped performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeOrderSkipped
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeOrderSkipped(v TypedEventStreamEnvelopeOrderSkipped) error {
+	v.Type = "order.skipped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeOrderSuppressed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeOrderSuppressed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeOrderSuppressed() (TypedEventStreamEnvelopeOrderSuppressed, error) {
+	var body TypedEventStreamEnvelopeOrderSuppressed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeOrderSuppressed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeOrderSuppressed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeOrderSuppressed(v TypedEventStreamEnvelopeOrderSuppressed) error {
+	v.Type = "order.suppressed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeOrderSuppressed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeOrderSuppressed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeOrderSuppressed(v TypedEventStreamEnvelopeOrderSuppressed) error {
+	v.Type = "order.suppressed"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -13599,6 +15616,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionCrashed(v
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionDemandClaimDivergence returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionDemandClaimDivergence
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionDemandClaimDivergence() (TypedEventStreamEnvelopeSessionDemandClaimDivergence, error) {
+	var body TypedEventStreamEnvelopeSessionDemandClaimDivergence
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionDemandClaimDivergence overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionDemandClaimDivergence
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionDemandClaimDivergence(v TypedEventStreamEnvelopeSessionDemandClaimDivergence) error {
+	v.Type = "session.demand_claim_divergence"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionDemandClaimDivergence performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionDemandClaimDivergence
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionDemandClaimDivergence(v TypedEventStreamEnvelopeSessionDemandClaimDivergence) error {
+	v.Type = "session.demand_claim_divergence"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork() (TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork, error) {
 	var body TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork
@@ -13617,6 +15662,62 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionDrainAcked
 // MergeTypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork(v TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) error {
 	v.Type = "session.drain_acked_with_assigned_work"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionDrainFenceUnavailable returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionDrainFenceUnavailable
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionDrainFenceUnavailable() (TypedEventStreamEnvelopeSessionDrainFenceUnavailable, error) {
+	var body TypedEventStreamEnvelopeSessionDrainFenceUnavailable
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionDrainFenceUnavailable overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionDrainFenceUnavailable
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionDrainFenceUnavailable(v TypedEventStreamEnvelopeSessionDrainFenceUnavailable) error {
+	v.Type = "session.drain_fence_unavailable"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionDrainFenceUnavailable performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionDrainFenceUnavailable
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionDrainFenceUnavailable(v TypedEventStreamEnvelopeSessionDrainFenceUnavailable) error {
+	v.Type = "session.drain_fence_unavailable"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionDrainStopEscalated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionDrainStopEscalated
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionDrainStopEscalated() (TypedEventStreamEnvelopeSessionDrainStopEscalated, error) {
+	var body TypedEventStreamEnvelopeSessionDrainStopEscalated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionDrainStopEscalated overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionDrainStopEscalated
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionDrainStopEscalated(v TypedEventStreamEnvelopeSessionDrainStopEscalated) error {
+	v.Type = "session.drain_stop_escalated"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionDrainStopEscalated performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionDrainStopEscalated
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionDrainStopEscalated(v TypedEventStreamEnvelopeSessionDrainStopEscalated) error {
+	v.Type = "session.drain_stop_escalated"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -13701,6 +15802,34 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionMaxAgeKill
 // MergeTypedEventStreamEnvelopeSessionMaxAgeKilled performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionMaxAgeKilled
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionMaxAgeKilled(v TypedEventStreamEnvelopeSessionMaxAgeKilled) error {
 	v.Type = "session.max_age_killed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline() (TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline, error) {
+	var body TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline(v TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) error {
+	v.Type = "session.pool_slot_retired_at_drain_deadline"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline(v TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) error {
+	v.Type = "session.pool_slot_retired_at_drain_deadline"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -13935,6 +16064,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionUpdated(v
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionWakeRefused returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionWakeRefused
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionWakeRefused() (TypedEventStreamEnvelopeSessionWakeRefused, error) {
+	var body TypedEventStreamEnvelopeSessionWakeRefused
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionWakeRefused overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionWakeRefused
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionWakeRefused(v TypedEventStreamEnvelopeSessionWakeRefused) error {
+	v.Type = "session.wake_refused"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionWakeRefused performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionWakeRefused
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionWakeRefused(v TypedEventStreamEnvelopeSessionWakeRefused) error {
+	v.Type = "session.wake_refused"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionWoke returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionWoke
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionWoke() (TypedEventStreamEnvelopeSessionWoke, error) {
 	var body TypedEventStreamEnvelopeSessionWoke
@@ -13981,6 +16138,146 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionWorkQueryF
 // MergeTypedEventStreamEnvelopeSessionWorkQueryFailed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionWorkQueryFailed
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionWorkQueryFailed(v TypedEventStreamEnvelopeSessionWorkQueryFailed) error {
 	v.Type = "session.work_query_failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeStorageBindingConverged returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeStorageBindingConverged
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeStorageBindingConverged() (TypedEventStreamEnvelopeStorageBindingConverged, error) {
+	var body TypedEventStreamEnvelopeStorageBindingConverged
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeStorageBindingConverged overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeStorageBindingConverged
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeStorageBindingConverged(v TypedEventStreamEnvelopeStorageBindingConverged) error {
+	v.Type = "storage.binding.converged"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeStorageBindingConverged performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeStorageBindingConverged
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeStorageBindingConverged(v TypedEventStreamEnvelopeStorageBindingConverged) error {
+	v.Type = "storage.binding.converged"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeStorageBindingGenesis returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeStorageBindingGenesis
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeStorageBindingGenesis() (TypedEventStreamEnvelopeStorageBindingGenesis, error) {
+	var body TypedEventStreamEnvelopeStorageBindingGenesis
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeStorageBindingGenesis overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeStorageBindingGenesis
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeStorageBindingGenesis(v TypedEventStreamEnvelopeStorageBindingGenesis) error {
+	v.Type = "storage.binding.genesis"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeStorageBindingGenesis performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeStorageBindingGenesis
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeStorageBindingGenesis(v TypedEventStreamEnvelopeStorageBindingGenesis) error {
+	v.Type = "storage.binding.genesis"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeStorageBindingNotConfigured returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeStorageBindingNotConfigured
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeStorageBindingNotConfigured() (TypedEventStreamEnvelopeStorageBindingNotConfigured, error) {
+	var body TypedEventStreamEnvelopeStorageBindingNotConfigured
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeStorageBindingNotConfigured overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeStorageBindingNotConfigured
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeStorageBindingNotConfigured(v TypedEventStreamEnvelopeStorageBindingNotConfigured) error {
+	v.Type = "storage.binding.not_configured"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeStorageBindingNotConfigured performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeStorageBindingNotConfigured
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeStorageBindingNotConfigured(v TypedEventStreamEnvelopeStorageBindingNotConfigured) error {
+	v.Type = "storage.binding.not_configured"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeStorageBindingUncheckable returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeStorageBindingUncheckable
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeStorageBindingUncheckable() (TypedEventStreamEnvelopeStorageBindingUncheckable, error) {
+	var body TypedEventStreamEnvelopeStorageBindingUncheckable
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeStorageBindingUncheckable overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeStorageBindingUncheckable
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeStorageBindingUncheckable(v TypedEventStreamEnvelopeStorageBindingUncheckable) error {
+	v.Type = "storage.binding.uncheckable"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeStorageBindingUncheckable performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeStorageBindingUncheckable
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeStorageBindingUncheckable(v TypedEventStreamEnvelopeStorageBindingUncheckable) error {
+	v.Type = "storage.binding.uncheckable"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeStorageBindingUnconverged returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeStorageBindingUnconverged
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeStorageBindingUnconverged() (TypedEventStreamEnvelopeStorageBindingUnconverged, error) {
+	var body TypedEventStreamEnvelopeStorageBindingUnconverged
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeStorageBindingUnconverged overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeStorageBindingUnconverged
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeStorageBindingUnconverged(v TypedEventStreamEnvelopeStorageBindingUnconverged) error {
+	v.Type = "storage.binding.unconverged"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeStorageBindingUnconverged performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeStorageBindingUnconverged
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeStorageBindingUnconverged(v TypedEventStreamEnvelopeStorageBindingUnconverged) error {
+	v.Type = "storage.binding.unconverged"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -14231,8 +16528,12 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 	switch discriminator {
 	case "TypedEventStreamEnvelopeCustom":
 		return t.AsTypedEventStreamEnvelopeCustom()
+	case "backend.credential_resolved":
+		return t.AsTypedEventStreamEnvelopeBackendCredentialResolved()
 	case "bead.claim_rejected":
 		return t.AsTypedEventStreamEnvelopeBeadClaimRejected()
+	case "bead.claim_released":
+		return t.AsTypedEventStreamEnvelopeBeadClaimReleased()
 	case "bead.closed":
 		return t.AsTypedEventStreamEnvelopeBeadClosed()
 	case "bead.created":
@@ -14247,6 +16548,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeBeadWorktreeReapSkipped()
 	case "bead.worktree.reaped":
 		return t.AsTypedEventStreamEnvelopeBeadWorktreeReaped()
+	case "beads.blocked.recomputed":
+		return t.AsTypedEventStreamEnvelopeBeadsBlockedRecomputed()
 	case "beads.conditional_writes.degraded":
 		return t.AsTypedEventStreamEnvelopeBeadsConditionalWritesDegraded()
 	case "city.created":
@@ -14257,6 +16560,12 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeCitySuspended()
 	case "city.unregister_requested":
 		return t.AsTypedEventStreamEnvelopeCityUnregisterRequested()
+	case "control.dispatcher_scope_gap":
+		return t.AsTypedEventStreamEnvelopeControlDispatcherScopeGap()
+	case "control.root_settle_failed":
+		return t.AsTypedEventStreamEnvelopeControlRootSettleFailed()
+	case "control.stalled":
+		return t.AsTypedEventStreamEnvelopeControlStalled()
 	case "controller.started":
 		return t.AsTypedEventStreamEnvelopeControllerStarted()
 	case "controller.stopped":
@@ -14271,6 +16580,20 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeEmergencySignaled()
 	case "events.rotated":
 		return t.AsTypedEventStreamEnvelopeEventsRotated()
+	case "execution.claim_window_expired":
+		return t.AsTypedEventStreamEnvelopeExecutionClaimWindowExpired()
+	case "execution.run_anchored":
+		return t.AsTypedEventStreamEnvelopeExecutionRunAnchored()
+	case "execution.step_completed":
+		return t.AsTypedEventStreamEnvelopeExecutionStepCompleted()
+	case "execution.step_defined":
+		return t.AsTypedEventStreamEnvelopeExecutionStepDefined()
+	case "execution.step_stalled":
+		return t.AsTypedEventStreamEnvelopeExecutionStepStalled()
+	case "execution.step_started":
+		return t.AsTypedEventStreamEnvelopeExecutionStepStarted()
+	case "execution.work_associated":
+		return t.AsTypedEventStreamEnvelopeExecutionWorkAssociated()
 	case "extmsg.adapter_added":
 		return t.AsTypedEventStreamEnvelopeExtmsgAdapterAdded()
 	case "extmsg.adapter_removed":
@@ -14295,6 +16618,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeGcStoreMaintenanceDone()
 	case "gc.store.maintenance.failed":
 		return t.AsTypedEventStreamEnvelopeGcStoreMaintenanceFailed()
+	case "hook.claim.reclaimed_stale":
+		return t.AsTypedEventStreamEnvelopeHookClaimReclaimedStale()
 	case "mail.archived":
 		return t.AsTypedEventStreamEnvelopeMailArchived()
 	case "mail.deleted":
@@ -14317,8 +16642,10 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeOrderFailed()
 	case "order.fired":
 		return t.AsTypedEventStreamEnvelopeOrderFired()
-	case "pg.credential_resolved":
-		return t.AsTypedEventStreamEnvelopePgCredentialResolved()
+	case "order.skipped":
+		return t.AsTypedEventStreamEnvelopeOrderSkipped()
+	case "order.suppressed":
+		return t.AsTypedEventStreamEnvelopeOrderSuppressed()
 	case "project.identity.stamped":
 		return t.AsTypedEventStreamEnvelopeProjectIdentityStamped()
 	case "provider.swapped":
@@ -14343,14 +16670,22 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.crashed":
 		return t.AsTypedEventStreamEnvelopeSessionCrashed()
+	case "session.demand_claim_divergence":
+		return t.AsTypedEventStreamEnvelopeSessionDemandClaimDivergence()
 	case "session.drain_acked_with_assigned_work":
 		return t.AsTypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork()
+	case "session.drain_fence_unavailable":
+		return t.AsTypedEventStreamEnvelopeSessionDrainFenceUnavailable()
+	case "session.drain_stop_escalated":
+		return t.AsTypedEventStreamEnvelopeSessionDrainStopEscalated()
 	case "session.draining":
 		return t.AsTypedEventStreamEnvelopeSessionDraining()
 	case "session.idle_killed":
 		return t.AsTypedEventStreamEnvelopeSessionIdleKilled()
 	case "session.max_age_killed":
 		return t.AsTypedEventStreamEnvelopeSessionMaxAgeKilled()
+	case "session.pool_slot_retired_at_drain_deadline":
+		return t.AsTypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline()
 	case "session.quarantined":
 		return t.AsTypedEventStreamEnvelopeSessionQuarantined()
 	case "session.reset_stalled":
@@ -14367,10 +16702,22 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionUnknownState()
 	case "session.updated":
 		return t.AsTypedEventStreamEnvelopeSessionUpdated()
+	case "session.wake_refused":
+		return t.AsTypedEventStreamEnvelopeSessionWakeRefused()
 	case "session.woke":
 		return t.AsTypedEventStreamEnvelopeSessionWoke()
 	case "session.work_query_failed":
 		return t.AsTypedEventStreamEnvelopeSessionWorkQueryFailed()
+	case "storage.binding.converged":
+		return t.AsTypedEventStreamEnvelopeStorageBindingConverged()
+	case "storage.binding.genesis":
+		return t.AsTypedEventStreamEnvelopeStorageBindingGenesis()
+	case "storage.binding.not_configured":
+		return t.AsTypedEventStreamEnvelopeStorageBindingNotConfigured()
+	case "storage.binding.uncheckable":
+		return t.AsTypedEventStreamEnvelopeStorageBindingUncheckable()
+	case "storage.binding.unconverged":
+		return t.AsTypedEventStreamEnvelopeStorageBindingUnconverged()
 	case "supervisor.fs_pressure.skipped_tick":
 		return t.AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
 	case "supervisor.request":
@@ -14400,6 +16747,34 @@ func (t *TypedEventStreamEnvelope) UnmarshalJSON(b []byte) error {
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeBackendCredentialResolved returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBackendCredentialResolved
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBackendCredentialResolved() (TypedTaggedEventStreamEnvelopeBackendCredentialResolved, error) {
+	var body TypedTaggedEventStreamEnvelopeBackendCredentialResolved
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBackendCredentialResolved overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBackendCredentialResolved
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBackendCredentialResolved(v TypedTaggedEventStreamEnvelopeBackendCredentialResolved) error {
+	v.Type = "backend.credential_resolved"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBackendCredentialResolved performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBackendCredentialResolved
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBackendCredentialResolved(v TypedTaggedEventStreamEnvelopeBackendCredentialResolved) error {
+	v.Type = "backend.credential_resolved"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeBeadClaimRejected returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadClaimRejected
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadClaimRejected() (TypedTaggedEventStreamEnvelopeBeadClaimRejected, error) {
 	var body TypedTaggedEventStreamEnvelopeBeadClaimRejected
@@ -14418,6 +16793,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadC
 // MergeTypedTaggedEventStreamEnvelopeBeadClaimRejected performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadClaimRejected
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadClaimRejected(v TypedTaggedEventStreamEnvelopeBeadClaimRejected) error {
 	v.Type = "bead.claim_rejected"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeBeadClaimReleased returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadClaimReleased
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadClaimReleased() (TypedTaggedEventStreamEnvelopeBeadClaimReleased, error) {
+	var body TypedTaggedEventStreamEnvelopeBeadClaimReleased
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBeadClaimReleased overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBeadClaimReleased
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadClaimReleased(v TypedTaggedEventStreamEnvelopeBeadClaimReleased) error {
+	v.Type = "bead.claim_released"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBeadClaimReleased performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadClaimReleased
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadClaimReleased(v TypedTaggedEventStreamEnvelopeBeadClaimReleased) error {
+	v.Type = "bead.claim_released"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -14624,6 +17027,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBead
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed() (TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed, error) {
+	var body TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed(v TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed) error {
+	v.Type = "beads.blocked.recomputed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed(v TypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed) error {
+	v.Type = "beads.blocked.recomputed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded() (TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded, error) {
 	var body TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded
@@ -14754,6 +17185,90 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeCityU
 // MergeTypedTaggedEventStreamEnvelopeCityUnregisterRequested performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeCityUnregisterRequested
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeCityUnregisterRequested(v TypedTaggedEventStreamEnvelopeCityUnregisterRequested) error {
 	v.Type = "city.unregister_requested"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeControlDispatcherScopeGap returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeControlDispatcherScopeGap() (TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap, error) {
+	var body TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeControlDispatcherScopeGap overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeControlDispatcherScopeGap(v TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap) error {
+	v.Type = "control.dispatcher_scope_gap"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeControlDispatcherScopeGap performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeControlDispatcherScopeGap(v TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap) error {
+	v.Type = "control.dispatcher_scope_gap"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeControlRootSettleFailed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeControlRootSettleFailed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeControlRootSettleFailed() (TypedTaggedEventStreamEnvelopeControlRootSettleFailed, error) {
+	var body TypedTaggedEventStreamEnvelopeControlRootSettleFailed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeControlRootSettleFailed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeControlRootSettleFailed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeControlRootSettleFailed(v TypedTaggedEventStreamEnvelopeControlRootSettleFailed) error {
+	v.Type = "control.root_settle_failed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeControlRootSettleFailed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeControlRootSettleFailed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeControlRootSettleFailed(v TypedTaggedEventStreamEnvelopeControlRootSettleFailed) error {
+	v.Type = "control.root_settle_failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeControlStalled returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeControlStalled
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeControlStalled() (TypedTaggedEventStreamEnvelopeControlStalled, error) {
+	var body TypedTaggedEventStreamEnvelopeControlStalled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeControlStalled overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeControlStalled
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeControlStalled(v TypedTaggedEventStreamEnvelopeControlStalled) error {
+	v.Type = "control.stalled"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeControlStalled performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeControlStalled
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeControlStalled(v TypedTaggedEventStreamEnvelopeControlStalled) error {
+	v.Type = "control.stalled"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -14950,6 +17465,202 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeEvent
 // MergeTypedTaggedEventStreamEnvelopeEventsRotated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeEventsRotated
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeEventsRotated(v TypedTaggedEventStreamEnvelopeEventsRotated) error {
 	v.Type = "events.rotated"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired() (TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired, error) {
+	var body TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired(v TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired) error {
+	v.Type = "execution.claim_window_expired"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired(v TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired) error {
+	v.Type = "execution.claim_window_expired"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExecutionRunAnchored returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExecutionRunAnchored
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExecutionRunAnchored() (TypedTaggedEventStreamEnvelopeExecutionRunAnchored, error) {
+	var body TypedTaggedEventStreamEnvelopeExecutionRunAnchored
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExecutionRunAnchored overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExecutionRunAnchored
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExecutionRunAnchored(v TypedTaggedEventStreamEnvelopeExecutionRunAnchored) error {
+	v.Type = "execution.run_anchored"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExecutionRunAnchored performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExecutionRunAnchored
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExecutionRunAnchored(v TypedTaggedEventStreamEnvelopeExecutionRunAnchored) error {
+	v.Type = "execution.run_anchored"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExecutionStepCompleted returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExecutionStepCompleted
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExecutionStepCompleted() (TypedTaggedEventStreamEnvelopeExecutionStepCompleted, error) {
+	var body TypedTaggedEventStreamEnvelopeExecutionStepCompleted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExecutionStepCompleted overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExecutionStepCompleted
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExecutionStepCompleted(v TypedTaggedEventStreamEnvelopeExecutionStepCompleted) error {
+	v.Type = "execution.step_completed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExecutionStepCompleted performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExecutionStepCompleted
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExecutionStepCompleted(v TypedTaggedEventStreamEnvelopeExecutionStepCompleted) error {
+	v.Type = "execution.step_completed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExecutionStepDefined returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExecutionStepDefined
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExecutionStepDefined() (TypedTaggedEventStreamEnvelopeExecutionStepDefined, error) {
+	var body TypedTaggedEventStreamEnvelopeExecutionStepDefined
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExecutionStepDefined overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExecutionStepDefined
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExecutionStepDefined(v TypedTaggedEventStreamEnvelopeExecutionStepDefined) error {
+	v.Type = "execution.step_defined"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExecutionStepDefined performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExecutionStepDefined
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExecutionStepDefined(v TypedTaggedEventStreamEnvelopeExecutionStepDefined) error {
+	v.Type = "execution.step_defined"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExecutionStepStalled returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExecutionStepStalled
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExecutionStepStalled() (TypedTaggedEventStreamEnvelopeExecutionStepStalled, error) {
+	var body TypedTaggedEventStreamEnvelopeExecutionStepStalled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExecutionStepStalled overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExecutionStepStalled
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExecutionStepStalled(v TypedTaggedEventStreamEnvelopeExecutionStepStalled) error {
+	v.Type = "execution.step_stalled"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExecutionStepStalled performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExecutionStepStalled
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExecutionStepStalled(v TypedTaggedEventStreamEnvelopeExecutionStepStalled) error {
+	v.Type = "execution.step_stalled"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExecutionStepStarted returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExecutionStepStarted
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExecutionStepStarted() (TypedTaggedEventStreamEnvelopeExecutionStepStarted, error) {
+	var body TypedTaggedEventStreamEnvelopeExecutionStepStarted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExecutionStepStarted overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExecutionStepStarted
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExecutionStepStarted(v TypedTaggedEventStreamEnvelopeExecutionStepStarted) error {
+	v.Type = "execution.step_started"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExecutionStepStarted performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExecutionStepStarted
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExecutionStepStarted(v TypedTaggedEventStreamEnvelopeExecutionStepStarted) error {
+	v.Type = "execution.step_started"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExecutionWorkAssociated returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExecutionWorkAssociated
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExecutionWorkAssociated() (TypedTaggedEventStreamEnvelopeExecutionWorkAssociated, error) {
+	var body TypedTaggedEventStreamEnvelopeExecutionWorkAssociated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExecutionWorkAssociated overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExecutionWorkAssociated
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExecutionWorkAssociated(v TypedTaggedEventStreamEnvelopeExecutionWorkAssociated) error {
+	v.Type = "execution.work_associated"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExecutionWorkAssociated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExecutionWorkAssociated
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExecutionWorkAssociated(v TypedTaggedEventStreamEnvelopeExecutionWorkAssociated) error {
+	v.Type = "execution.work_associated"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -15296,6 +18007,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeGcSt
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeHookClaimReclaimedStale returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeHookClaimReclaimedStale() (TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale, error) {
+	var body TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeHookClaimReclaimedStale overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeHookClaimReclaimedStale(v TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale) error {
+	v.Type = "hook.claim.reclaimed_stale"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeHookClaimReclaimedStale performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeHookClaimReclaimedStale(v TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale) error {
+	v.Type = "hook.claim.reclaimed_stale"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeMailArchived returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeMailArchived
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeMailArchived() (TypedTaggedEventStreamEnvelopeMailArchived, error) {
 	var body TypedTaggedEventStreamEnvelopeMailArchived
@@ -15604,24 +18343,52 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeOrde
 	return err
 }
 
-// AsTypedTaggedEventStreamEnvelopePgCredentialResolved returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopePgCredentialResolved
-func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopePgCredentialResolved() (TypedTaggedEventStreamEnvelopePgCredentialResolved, error) {
-	var body TypedTaggedEventStreamEnvelopePgCredentialResolved
+// AsTypedTaggedEventStreamEnvelopeOrderSkipped returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeOrderSkipped
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeOrderSkipped() (TypedTaggedEventStreamEnvelopeOrderSkipped, error) {
+	var body TypedTaggedEventStreamEnvelopeOrderSkipped
 	err := json.Unmarshal(t.union, &body)
 	return body, err
 }
 
-// FromTypedTaggedEventStreamEnvelopePgCredentialResolved overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopePgCredentialResolved
-func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopePgCredentialResolved(v TypedTaggedEventStreamEnvelopePgCredentialResolved) error {
-	v.Type = "pg.credential_resolved"
+// FromTypedTaggedEventStreamEnvelopeOrderSkipped overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeOrderSkipped
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeOrderSkipped(v TypedTaggedEventStreamEnvelopeOrderSkipped) error {
+	v.Type = "order.skipped"
 	b, err := json.Marshal(v)
 	t.union = b
 	return err
 }
 
-// MergeTypedTaggedEventStreamEnvelopePgCredentialResolved performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopePgCredentialResolved
-func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopePgCredentialResolved(v TypedTaggedEventStreamEnvelopePgCredentialResolved) error {
-	v.Type = "pg.credential_resolved"
+// MergeTypedTaggedEventStreamEnvelopeOrderSkipped performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeOrderSkipped
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeOrderSkipped(v TypedTaggedEventStreamEnvelopeOrderSkipped) error {
+	v.Type = "order.skipped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeOrderSuppressed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeOrderSuppressed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeOrderSuppressed() (TypedTaggedEventStreamEnvelopeOrderSuppressed, error) {
+	var body TypedTaggedEventStreamEnvelopeOrderSuppressed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeOrderSuppressed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeOrderSuppressed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeOrderSuppressed(v TypedTaggedEventStreamEnvelopeOrderSuppressed) error {
+	v.Type = "order.suppressed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeOrderSuppressed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeOrderSuppressed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeOrderSuppressed(v TypedTaggedEventStreamEnvelopeOrderSuppressed) error {
+	v.Type = "order.suppressed"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -15968,6 +18735,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence() (TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence(v TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence) error {
+	v.Type = "session.demand_claim_divergence"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence(v TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence) error {
+	v.Type = "session.demand_claim_divergence"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork() (TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork
@@ -15986,6 +18781,62 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessi
 // MergeTypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork(v TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) error {
 	v.Type = "session.drain_acked_with_assigned_work"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable() (TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable(v TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable) error {
+	v.Type = "session.drain_fence_unavailable"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable(v TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable) error {
+	v.Type = "session.drain_fence_unavailable"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionDrainStopEscalated returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionDrainStopEscalated() (TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionDrainStopEscalated overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionDrainStopEscalated(v TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated) error {
+	v.Type = "session.drain_stop_escalated"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionDrainStopEscalated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionDrainStopEscalated(v TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated) error {
+	v.Type = "session.drain_stop_escalated"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -16070,6 +18921,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessi
 // MergeTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled(v TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled) error {
 	v.Type = "session.max_age_killed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline() (TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline(v TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) error {
+	v.Type = "session.pool_slot_retired_at_drain_deadline"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline(v TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) error {
+	v.Type = "session.pool_slot_retired_at_drain_deadline"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -16304,6 +19183,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionWakeRefused returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionWakeRefused
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionWakeRefused() (TypedTaggedEventStreamEnvelopeSessionWakeRefused, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionWakeRefused
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionWakeRefused overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionWakeRefused
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionWakeRefused(v TypedTaggedEventStreamEnvelopeSessionWakeRefused) error {
+	v.Type = "session.wake_refused"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionWakeRefused performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionWakeRefused
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionWakeRefused(v TypedTaggedEventStreamEnvelopeSessionWakeRefused) error {
+	v.Type = "session.wake_refused"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionWoke returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionWoke
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionWoke() (TypedTaggedEventStreamEnvelopeSessionWoke, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionWoke
@@ -16350,6 +19257,146 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessi
 // MergeTypedTaggedEventStreamEnvelopeSessionWorkQueryFailed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionWorkQueryFailed(v TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed) error {
 	v.Type = "session.work_query_failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeStorageBindingConverged returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeStorageBindingConverged
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeStorageBindingConverged() (TypedTaggedEventStreamEnvelopeStorageBindingConverged, error) {
+	var body TypedTaggedEventStreamEnvelopeStorageBindingConverged
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeStorageBindingConverged overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeStorageBindingConverged
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeStorageBindingConverged(v TypedTaggedEventStreamEnvelopeStorageBindingConverged) error {
+	v.Type = "storage.binding.converged"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeStorageBindingConverged performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeStorageBindingConverged
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeStorageBindingConverged(v TypedTaggedEventStreamEnvelopeStorageBindingConverged) error {
+	v.Type = "storage.binding.converged"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeStorageBindingGenesis returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeStorageBindingGenesis
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeStorageBindingGenesis() (TypedTaggedEventStreamEnvelopeStorageBindingGenesis, error) {
+	var body TypedTaggedEventStreamEnvelopeStorageBindingGenesis
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeStorageBindingGenesis overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeStorageBindingGenesis
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeStorageBindingGenesis(v TypedTaggedEventStreamEnvelopeStorageBindingGenesis) error {
+	v.Type = "storage.binding.genesis"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeStorageBindingGenesis performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeStorageBindingGenesis
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeStorageBindingGenesis(v TypedTaggedEventStreamEnvelopeStorageBindingGenesis) error {
+	v.Type = "storage.binding.genesis"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured() (TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured, error) {
+	var body TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured(v TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured) error {
+	v.Type = "storage.binding.not_configured"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured(v TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured) error {
+	v.Type = "storage.binding.not_configured"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeStorageBindingUncheckable returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeStorageBindingUncheckable
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeStorageBindingUncheckable() (TypedTaggedEventStreamEnvelopeStorageBindingUncheckable, error) {
+	var body TypedTaggedEventStreamEnvelopeStorageBindingUncheckable
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeStorageBindingUncheckable overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeStorageBindingUncheckable
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeStorageBindingUncheckable(v TypedTaggedEventStreamEnvelopeStorageBindingUncheckable) error {
+	v.Type = "storage.binding.uncheckable"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeStorageBindingUncheckable performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeStorageBindingUncheckable
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeStorageBindingUncheckable(v TypedTaggedEventStreamEnvelopeStorageBindingUncheckable) error {
+	v.Type = "storage.binding.uncheckable"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeStorageBindingUnconverged returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeStorageBindingUnconverged
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeStorageBindingUnconverged() (TypedTaggedEventStreamEnvelopeStorageBindingUnconverged, error) {
+	var body TypedTaggedEventStreamEnvelopeStorageBindingUnconverged
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeStorageBindingUnconverged overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeStorageBindingUnconverged
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeStorageBindingUnconverged(v TypedTaggedEventStreamEnvelopeStorageBindingUnconverged) error {
+	v.Type = "storage.binding.unconverged"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeStorageBindingUnconverged performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeStorageBindingUnconverged
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeStorageBindingUnconverged(v TypedTaggedEventStreamEnvelopeStorageBindingUnconverged) error {
+	v.Type = "storage.binding.unconverged"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -16600,8 +19647,12 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 	switch discriminator {
 	case "TypedTaggedEventStreamEnvelopeCustom":
 		return t.AsTypedTaggedEventStreamEnvelopeCustom()
+	case "backend.credential_resolved":
+		return t.AsTypedTaggedEventStreamEnvelopeBackendCredentialResolved()
 	case "bead.claim_rejected":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadClaimRejected()
+	case "bead.claim_released":
+		return t.AsTypedTaggedEventStreamEnvelopeBeadClaimReleased()
 	case "bead.closed":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadClosed()
 	case "bead.created":
@@ -16616,6 +19667,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped()
 	case "bead.worktree.reaped":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadWorktreeReaped()
+	case "beads.blocked.recomputed":
+		return t.AsTypedTaggedEventStreamEnvelopeBeadsBlockedRecomputed()
 	case "beads.conditional_writes.degraded":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded()
 	case "city.created":
@@ -16626,6 +19679,12 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeCitySuspended()
 	case "city.unregister_requested":
 		return t.AsTypedTaggedEventStreamEnvelopeCityUnregisterRequested()
+	case "control.dispatcher_scope_gap":
+		return t.AsTypedTaggedEventStreamEnvelopeControlDispatcherScopeGap()
+	case "control.root_settle_failed":
+		return t.AsTypedTaggedEventStreamEnvelopeControlRootSettleFailed()
+	case "control.stalled":
+		return t.AsTypedTaggedEventStreamEnvelopeControlStalled()
 	case "controller.started":
 		return t.AsTypedTaggedEventStreamEnvelopeControllerStarted()
 	case "controller.stopped":
@@ -16640,6 +19699,20 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeEmergencySignaled()
 	case "events.rotated":
 		return t.AsTypedTaggedEventStreamEnvelopeEventsRotated()
+	case "execution.claim_window_expired":
+		return t.AsTypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired()
+	case "execution.run_anchored":
+		return t.AsTypedTaggedEventStreamEnvelopeExecutionRunAnchored()
+	case "execution.step_completed":
+		return t.AsTypedTaggedEventStreamEnvelopeExecutionStepCompleted()
+	case "execution.step_defined":
+		return t.AsTypedTaggedEventStreamEnvelopeExecutionStepDefined()
+	case "execution.step_stalled":
+		return t.AsTypedTaggedEventStreamEnvelopeExecutionStepStalled()
+	case "execution.step_started":
+		return t.AsTypedTaggedEventStreamEnvelopeExecutionStepStarted()
+	case "execution.work_associated":
+		return t.AsTypedTaggedEventStreamEnvelopeExecutionWorkAssociated()
 	case "extmsg.adapter_added":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgAdapterAdded()
 	case "extmsg.adapter_removed":
@@ -16664,6 +19737,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone()
 	case "gc.store.maintenance.failed":
 		return t.AsTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed()
+	case "hook.claim.reclaimed_stale":
+		return t.AsTypedTaggedEventStreamEnvelopeHookClaimReclaimedStale()
 	case "mail.archived":
 		return t.AsTypedTaggedEventStreamEnvelopeMailArchived()
 	case "mail.deleted":
@@ -16686,8 +19761,10 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeOrderFailed()
 	case "order.fired":
 		return t.AsTypedTaggedEventStreamEnvelopeOrderFired()
-	case "pg.credential_resolved":
-		return t.AsTypedTaggedEventStreamEnvelopePgCredentialResolved()
+	case "order.skipped":
+		return t.AsTypedTaggedEventStreamEnvelopeOrderSkipped()
+	case "order.suppressed":
+		return t.AsTypedTaggedEventStreamEnvelopeOrderSuppressed()
 	case "project.identity.stamped":
 		return t.AsTypedTaggedEventStreamEnvelopeProjectIdentityStamped()
 	case "provider.swapped":
@@ -16712,14 +19789,22 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.crashed":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionCrashed()
+	case "session.demand_claim_divergence":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence()
 	case "session.drain_acked_with_assigned_work":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork()
+	case "session.drain_fence_unavailable":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable()
+	case "session.drain_stop_escalated":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionDrainStopEscalated()
 	case "session.draining":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionDraining()
 	case "session.idle_killed":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionIdleKilled()
 	case "session.max_age_killed":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled()
+	case "session.pool_slot_retired_at_drain_deadline":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline()
 	case "session.quarantined":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionQuarantined()
 	case "session.reset_stalled":
@@ -16736,10 +19821,22 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionUnknownState()
 	case "session.updated":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionUpdated()
+	case "session.wake_refused":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionWakeRefused()
 	case "session.woke":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionWoke()
 	case "session.work_query_failed":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionWorkQueryFailed()
+	case "storage.binding.converged":
+		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingConverged()
+	case "storage.binding.genesis":
+		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingGenesis()
+	case "storage.binding.not_configured":
+		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingNotConfigured()
+	case "storage.binding.uncheckable":
+		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingUncheckable()
+	case "storage.binding.unconverged":
+		return t.AsTypedTaggedEventStreamEnvelopeStorageBindingUnconverged()
 	case "supervisor.fs_pressure.skipped_tick":
 		return t.AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
 	case "supervisor.request":
@@ -17348,6 +20445,9 @@ type ClientInterface interface {
 	PostV0CityByCityNameSessionByIdRenameWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	PostV0CityByCityNameSessionByIdRename(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostV0CityByCityNameSessionByIdReset request
+	PostV0CityByCityNameSessionByIdReset(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdResetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RespondSessionWithBody request with any body
 	RespondSessionWithBody(ctx context.Context, cityName string, id string, params *RespondSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -19595,6 +22695,18 @@ func (c *Client) PostV0CityByCityNameSessionByIdRenameWithBody(ctx context.Conte
 
 func (c *Client) PostV0CityByCityNameSessionByIdRename(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPostV0CityByCityNameSessionByIdRenameRequest(c.Server, cityName, id, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameSessionByIdReset(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdResetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdResetRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -28239,6 +31351,22 @@ func NewGetV0CityByCityNameSessionByIdRequest(server string, cityName string, id
 
 		}
 
+		if params.ExactId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "exact_id", *params.ExactId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -28598,6 +31726,17 @@ func NewSendSessionMessageRequestWithBody(server string, cityName string, id str
 
 		req.Header.Set("X-GC-Request", headerParam0)
 
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
+
 	}
 
 	return req, nil
@@ -28778,6 +31917,60 @@ func NewPostV0CityByCityNameSessionByIdRenameRequestWithBody(server string, city
 	return req, nil
 }
 
+// NewPostV0CityByCityNameSessionByIdResetRequest generates requests for PostV0CityByCityNameSessionByIdReset
+func NewPostV0CityByCityNameSessionByIdResetRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdResetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/session/%s/reset", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
 // NewRespondSessionRequest calls the generic RespondSession builder with application/json body
 func NewRespondSessionRequest(server string, cityName string, id string, params *RespondSessionParams, body RespondSessionJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -28839,6 +32032,17 @@ func NewRespondSessionRequestWithBody(server string, cityName string, id string,
 		}
 
 		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
 
 	}
 
@@ -29070,6 +32274,17 @@ func NewSubmitSessionRequestWithBody(server string, cityName string, id string, 
 		}
 
 		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
 
 	}
 
@@ -30882,6 +34097,9 @@ type ClientWithResponsesInterface interface {
 	PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error)
 
 	PostV0CityByCityNameSessionByIdRenameWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error)
+
+	// PostV0CityByCityNameSessionByIdResetWithResponse request
+	PostV0CityByCityNameSessionByIdResetWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdResetParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdResetResponse, error)
 
 	// RespondSessionWithBodyWithResponse request with any body
 	RespondSessionWithBodyWithResponse(ctx context.Context, cityName string, id string, params *RespondSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error)
@@ -34838,6 +38056,35 @@ func (r PostV0CityByCityNameSessionByIdRenameResponse) StatusCode() int {
 	return 0
 }
 
+type PostV0CityByCityNameSessionByIdResetResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *OKWithIDResponseBody
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameSessionByIdResetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameSessionByIdResetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type RespondSessionResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -36988,6 +40235,15 @@ func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdRenameWithResponse(
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameSessionByIdRenameResponse(rsp)
+}
+
+// PostV0CityByCityNameSessionByIdResetWithResponse request returning *PostV0CityByCityNameSessionByIdResetResponse
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdResetWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdResetParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdResetResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdReset(ctx, cityName, id, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameSessionByIdResetResponse(rsp)
 }
 
 // RespondSessionWithBodyWithResponse request with arbitrary body returning *RespondSessionResponse
@@ -46033,6 +49289,81 @@ func ParsePostV0CityByCityNameSessionByIdRenameResponse(rsp *http.Response) (*Po
 			return nil, err
 		}
 		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0CityByCityNameSessionByIdResetResponse parses an HTTP response from a PostV0CityByCityNameSessionByIdResetWithResponse call
+func ParsePostV0CityByCityNameSessionByIdResetResponse(rsp *http.Response) (*PostV0CityByCityNameSessionByIdResetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameSessionByIdResetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OKWithIDResponseBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
 		var dest ErrorModel

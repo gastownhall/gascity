@@ -23,9 +23,11 @@ type Fake struct {
 	Symlinks map[string]string    // pre-populated symlinks (path -> target)
 	Errors   map[string]error     // path → injected error (checked first)
 	ModTimes map[string]time.Time // file path → synthetic mod time
+	CTimes   map[string]time.Time // file path → synthetic ctime (bumped on every WriteFile, independent of ModTimes)
 	Calls    []Call               // spy log
 
-	clock time.Time
+	clock  time.Time
+	cclock time.Time
 }
 
 // Call records a single method invocation on [Fake].
@@ -44,7 +46,9 @@ func NewFake() *Fake {
 		Symlinks: make(map[string]string),
 		Errors:   make(map[string]error),
 		ModTimes: make(map[string]time.Time),
+		CTimes:   make(map[string]time.Time),
 		clock:    time.Unix(0, 0).UTC(),
+		cclock:   time.Unix(0, 0).UTC(),
 	}
 }
 
@@ -57,6 +61,21 @@ func (f *Fake) nextModTime() time.Time {
 	}
 	f.clock = f.clock.Add(time.Second)
 	return f.clock
+}
+
+// nextCTime ticks a clock independent of nextModTime's, so a test can force
+// ModTimes back to an earlier value after a write (simulating mtime-preserving
+// tooling like cp -p) while CTimes keeps advancing — exactly like a real
+// kernel, where no standard syscall lets userspace set ctime.
+func (f *Fake) nextCTime() time.Time {
+	if f.CTimes == nil {
+		f.CTimes = make(map[string]time.Time)
+	}
+	if f.cclock.IsZero() {
+		f.cclock = time.Unix(0, 0).UTC()
+	}
+	f.cclock = f.cclock.Add(time.Second)
+	return f.cclock
 }
 
 type fakeEntryKind uint8
@@ -257,6 +276,7 @@ func (f *Fake) WriteFile(name string, data []byte, perm os.FileMode) error {
 		f.Modes[name] = perm.Perm()
 	}
 	f.ModTimes[name] = modTime
+	f.CTimes[name] = f.nextCTime()
 	return nil
 }
 
@@ -322,7 +342,12 @@ func (f *Fake) Stat(name string) (os.FileInfo, error) {
 				modTime = f.nextModTime()
 				f.ModTimes[target] = modTime
 			}
-			return fakeFileInfo{name: filepath.Base(name), size: int64(len(data)), mode: f.modeFor(target), id: fakeIdentity(target), hasID: true, modTime: modTime}, nil
+			cTime := f.CTimes[target]
+			if cTime.IsZero() {
+				cTime = f.nextCTime()
+				f.CTimes[target] = cTime
+			}
+			return fakeFileInfo{name: filepath.Base(name), size: int64(len(data)), mode: f.modeFor(target), id: fakeIdentity(target), hasID: true, modTime: modTime, cTime: cTime}, nil
 		}
 		return nil, &os.PathError{Op: "stat", Path: name, Err: os.ErrNotExist}
 	}
@@ -335,7 +360,12 @@ func (f *Fake) Stat(name string) (os.FileInfo, error) {
 			modTime = f.nextModTime()
 			f.ModTimes[name] = modTime
 		}
-		return fakeFileInfo{name: filepath.Base(name), size: int64(len(data)), mode: f.modeFor(name), id: fakeIdentity(name), hasID: true, modTime: modTime}, nil
+		cTime := f.CTimes[name]
+		if cTime.IsZero() {
+			cTime = f.nextCTime()
+			f.CTimes[name] = cTime
+		}
+		return fakeFileInfo{name: filepath.Base(name), size: int64(len(data)), mode: f.modeFor(name), id: fakeIdentity(name), hasID: true, modTime: modTime, cTime: cTime}, nil
 	}
 	if f.directoryExists(name) {
 		return fakeFileInfo{name: filepath.Base(name), dir: true, mode: f.modeFor(name), id: fakeIdentity(name), hasID: true}, nil
@@ -594,6 +624,7 @@ type fakeFileInfo struct {
 	hasID   bool
 	dir     bool
 	modTime time.Time
+	cTime   time.Time
 	symlink bool
 }
 
@@ -610,11 +641,21 @@ func (fi fakeFileInfo) Mode() os.FileMode {
 }
 func (fi fakeFileInfo) ModTime() time.Time { return fi.modTime }
 func (fi fakeFileInfo) IsDir() bool        { return fi.dir }
+
+// Sys returns a stat shape carrying Dev/Ino (consumed via reflection by
+// fileIdentityFromSys) plus Ctime in nanoseconds since the epoch — the fake
+// equivalent of *syscall.Stat_t's platform-specific Ctim/Ctimespec field,
+// consumed by internal/config's statCtimeNanos. Real files have no userspace
+// syscall that sets ctime; Fake mirrors that by only ever advancing it from
+// WriteFile (see nextCTime), never from a caller-supplied value.
 func (fi fakeFileInfo) Sys() any {
 	if !fi.hasID {
 		return nil
 	}
-	return struct{ Dev, Ino uint64 }{fi.id.dev, fi.id.ino}
+	return struct {
+		Dev, Ino uint64
+		Ctime    int64
+	}{fi.id.dev, fi.id.ino, fi.cTime.UnixNano()}
 }
 
 // --- fake os.DirEntry ---

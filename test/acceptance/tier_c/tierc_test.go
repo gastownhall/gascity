@@ -96,16 +96,6 @@ func TestMain(m *testing.M) {
 		panic("acceptance-c: staging provider binaries: " + err.Error())
 	}
 
-	// Configure dolt identity in the isolated home (dolt requires user.name).
-	doltCfgDir := filepath.Join(gcHome, ".dolt")
-	if err := os.MkdirAll(doltCfgDir, 0o755); err != nil {
-		panic("acceptance-c: " + err.Error())
-	}
-	doltCfg := `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
-	if err := os.WriteFile(filepath.Join(doltCfgDir, "config_global.json"), []byte(doltCfg), 0o644); err != nil {
-		panic("acceptance-c: " + err.Error())
-	}
-
 	// Force a token refresh before staging OAuth credentials. Claude Code
 	// refreshes tokens in-memory but may not persist to .credentials.json,
 	// leaving the on-disk token expired. A quick --print call forces the
@@ -130,7 +120,10 @@ func TestMain(m *testing.M) {
 		panic("acceptance-c: ensuring Claude state: " + err.Error())
 	}
 
+	// NewEnv seeds the dolt identity (metrics off) under gcHome/.dolt; the
+	// real providers authenticate through the operator's home.
 	testEnvC = helpers.NewEnv(gcBinary, gcHome, runtimeDir).
+		WithHostHome().
 		Without("GC_SESSION"). // use real tmux, not subprocess
 		Without("GC_BEADS").   // use real bd (dolt-backed) provider
 		Without("GC_DOLT").    // let gc manage dolt (don't skip it)
@@ -643,7 +636,7 @@ func bdCmd(env *helpers.Env, dir string, args ...string) (string, error) {
 	}
 	cmd := exec.Command(bdPath, args...)
 	cmd.Dir = dir
-	cmd.Env = env.List()
+	cmd.Env = env.ToolList()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

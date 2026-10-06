@@ -36,10 +36,29 @@ type testStore struct {
 	metadataBatchCalls   int
 	metadataBatchPatches []map[string]string
 	metadataBatchErr     error
+	// rows is what Get serves for an id a heal shim persisted (see persistRow).
+	// Any other id reads back as a bare bead, as before.
+	rows map[string]beads.Bead
+}
+
+// persistRow records b as the stored row Get returns, so a write that re-reads
+// the row before landing (the lifecycle-fenced status heal) sees the fixture
+// the test is healing.
+func (s *testStore) persistRow(b beads.Bead) {
+	if s.rows == nil {
+		s.rows = make(map[string]beads.Bead)
+	}
+	b.Type = sessionBeadType
+	meta := make(map[string]string, len(b.Metadata))
+	for k, v := range b.Metadata {
+		meta[k] = v
+	}
+	b.Metadata = meta
+	s.rows[b.ID] = b
 }
 
 func newTestStore() *testStore {
-	return &testStore{metadata: make(map[string]map[string]string)}
+	return &testStore{Store: beads.NewMemStore(), metadata: make(map[string]map[string]string)}
 }
 
 func (s *testStore) SetMetadata(id, key, value string) error {
@@ -73,6 +92,9 @@ func (s *testStore) Ping() error {
 }
 
 func (s *testStore) Get(id string) (beads.Bead, error) {
+	if b, ok := s.rows[id]; ok {
+		return b, nil
+	}
 	return beads.Bead{ID: id}, nil
 }
 
@@ -124,7 +146,16 @@ func healStateInfo(session *beads.Bead, alive bool, sessFront *sessionpkg.Store,
 	if session == nil {
 		return
 	}
-	batch := healStateWithRollbackInfo(seedSessionInfo(*session), alive, sessFront, clk, 0, true)
+	// The heal re-reads the stored row before writing and refuses when it no
+	// longer matches the snapshot, so a recording testStore must hold the
+	// fixture being healed.
+	if ts, ok := sessFront.Store().Store.(*testStore); ok {
+		ts.persistRow(*session)
+	}
+	batch, err := healStateWithRollbackInfo(seedSessionInfo(*session), alive, true, sessFront, clk, 0, true)
+	if err != nil {
+		panic("healStateInfo: " + err.Error())
+	}
 	if session.Metadata == nil && len(batch) > 0 {
 		session.Metadata = make(map[string]string, len(batch))
 	}
@@ -136,7 +167,7 @@ func healStateInfo(session *beads.Bead, alive bool, sessFront *sessionpkg.Store,
 // healStatePatchFromBead is the test shim for the retired raw healStatePatch /
 // healStatePatchWithRollback: it projects the bead to Info and calls the Info form.
 func healStatePatchFromBead(session beads.Bead, alive bool, clk clock.Clock, startupTimeout time.Duration) map[string]string {
-	return healStatePatchWithRollbackInfo(seedSessionInfo(session), alive, clk, startupTimeout, true)
+	return healStatePatchWithRollbackInfo(seedSessionInfo(session), alive, true, clk, startupTimeout, true)
 }
 
 // syncBeadFromStore mirrors the persisted metadata writes for session.ID back
@@ -434,7 +465,7 @@ func TestPendingCreateStartedAtNowSubstitutesCurrentTimeForZeroInput(t *testing.
 	}
 }
 
-func TestWakeReasons_DrainedSleepPoolSessionDoesNotGetWakeConfig(t *testing.T) {
+func TestWakeReasons_DrainedConfigEligibility(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 
@@ -444,19 +475,53 @@ func TestWakeReasons_DrainedSleepPoolSessionDoesNotGetWakeConfig(t *testing.T) {
 		},
 	}
 
-	session := makeBead("b1", map[string]string{
-		"template":     "worker",
-		"session_name": "test-worker-1",
-		"pool_slot":    "1",
-		"state":        "asleep",
-		"sleep_reason": "drained",
-	})
+	tests := []struct {
+		name       string
+		metadata   map[string]string
+		wantConfig bool
+	}{
+		{
+			name: "always named session",
+			metadata: map[string]string{
+				"template":                  "worker",
+				"session_name":              "always-worker",
+				"configured_named_session":  "true",
+				"configured_named_identity": "always-worker",
+				"configured_named_mode":     "always",
+			},
+			wantConfig: true,
+		},
+		{
+			name: "on demand named session",
+			metadata: map[string]string{
+				"template":                  "worker",
+				"session_name":              "demand-worker",
+				"configured_named_session":  "true",
+				"configured_named_identity": "demand-worker",
+				"configured_named_mode":     "on_demand",
+			},
+		},
+		{
+			name: "pool slot",
+			metadata: map[string]string{
+				"template":     "worker",
+				"session_name": "test-worker-1",
+				"pool_slot":    "1",
+			},
+		},
+	}
 
-	reasons := wakeReasonsForBead(session, cfg, nil, map[string]int{"worker": 3}, nil, nil, clk)
-	for _, reason := range reasons {
-		if reason == WakeConfig {
-			t.Fatalf("drained sleep session should not get WakeConfig, got %v", reasons)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.metadata["state"] = "asleep"
+			tt.metadata["sleep_reason"] = "drained"
+			session := makeBead("b1", tt.metadata)
+
+			reasons := wakeReasonsForBead(session, cfg, nil, map[string]int{"worker": 3}, nil, nil, clk)
+			if got := containsWakeReason(reasons, WakeConfig); got != tt.wantConfig {
+				t.Fatalf("WakeConfig present = %v, want %v; reasons = %v", got, tt.wantConfig, reasons)
+			}
+		})
 	}
 }
 
@@ -1099,11 +1164,10 @@ func TestComputeWorkSet_SkipsAgentsOnSuspendedRig(t *testing.T) {
 // a city scope that resolves to an authoritative postgres backend with
 // no resolvable password makes controllerQueryRuntimeEnv return an error.
 func TestComputeWorkSet_NilStderrToleratesProbeEnvError(t *testing.T) {
-	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	cityPath := t.TempDir()
-	writePGScopeFixture(t, cityPath, "")
+	writeUnregisteredBackendMetadata(t, cityPath)
 	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
 gc.endpoint_origin: managed_city
 gc.endpoint_status: verified
@@ -1409,6 +1473,93 @@ func TestCheckStability_SubprocessProviderSkipsCrashCounting(t *testing.T) {
 	}
 	if got := session.Metadata["last_woke_at"]; got == "" {
 		t.Fatal("last_woke_at should be preserved when no crash is recorded")
+	}
+}
+
+// TestRecordWakeFailure_KeepsResumableConversation pins that a wake failure no
+// longer discards a conversation that is provably still on disk. Any single
+// wake failure reaches recordWakeFailure — a transient spawn flake included —
+// and the conversation reset is permanent, so it must require evidence that the
+// conversation is actually unresumable. Attempt accrual is unaffected.
+func TestRecordWakeFailure_KeepsResumableConversation(t *testing.T) {
+	prevProbe := staleResumeKeyProbe
+	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	store := newTestStore()
+	session := makeBead("b1", map[string]string{
+		"wake_attempts":       "1",
+		"session_key":         "live-key",
+		"started_config_hash": "hash-1",
+		"provider":            "claude",
+		"work_dir":            "/work",
+	})
+
+	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	syncBeadFromStore(&session, store)
+
+	if got := session.Metadata["session_key"]; got != "live-key" {
+		t.Errorf("session_key = %q, want it preserved — the transcript is still there", got)
+	}
+	if got := session.Metadata["started_config_hash"]; got != "hash-1" {
+		t.Errorf("started_config_hash = %q, want hash-1 preserved", got)
+	}
+	if got := session.Metadata["wake_attempts"]; got != "2" {
+		t.Errorf("wake_attempts = %q, want 2 (accrual must be unchanged)", got)
+	}
+}
+
+// TestRecordWakeFailure_ClearsUnresumableConversation is the other half: an
+// absent transcript keeps the existing unconditional reset.
+func TestRecordWakeFailure_ClearsUnresumableConversation(t *testing.T) {
+	prevProbe := staleResumeKeyProbe
+	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	store := newTestStore()
+	session := makeBead("b1", map[string]string{
+		"wake_attempts":       "1",
+		"session_key":         "dead-key",
+		"started_config_hash": "hash-1",
+		"provider":            "claude",
+		"work_dir":            "/work",
+	})
+
+	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	syncBeadFromStore(&session, store)
+
+	if got := session.Metadata["session_key"]; got != "" {
+		t.Errorf("session_key = %q, want cleared when the transcript is gone", got)
+	}
+	if got := session.Metadata["started_config_hash"]; got != "" {
+		t.Errorf("started_config_hash = %q, want cleared", got)
+	}
+}
+
+// TestRecordWakeFailure_ClearsWhenProviderUnprobeable pins that a provider we
+// cannot inspect keeps the legacy unconditional reset rather than silently
+// gaining the new keep-the-conversation behavior.
+func TestRecordWakeFailure_ClearsWhenProviderUnprobeable(t *testing.T) {
+	prevProbe := staleResumeKeyProbe
+	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, false }
+	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	store := newTestStore()
+	session := makeBead("b1", map[string]string{
+		"wake_attempts": "1",
+		"session_key":   "codex-key",
+		"provider":      "codex",
+		"work_dir":      "/work",
+	})
+
+	recordWakeFailure(seedSessionInfo(session), sessionFrontDoor(store), clk, sessionAgentMetricIdentity(session, nil))
+	syncBeadFromStore(&session, store)
+
+	if got := session.Metadata["session_key"]; got != "" {
+		t.Errorf("session_key = %q, want cleared for an unprobeable provider", got)
 	}
 }
 
@@ -1793,6 +1944,40 @@ func TestHealState_NeverStartedPendingCreateMigratesToStartPendingUntilRollbackL
 	}
 }
 
+// gcf-ru0 regression: once a bead has migrated to state=start-pending (see
+// TestHealState_NeverStartedPendingCreateMigratesToStartPendingUntilRollbackLeaseExpires),
+// the rollback gate in healStatePatchWithRollbackInfo only fired for
+// info.MetadataState == "creating" — never for "start-pending", even though
+// pendingCreateLeaseExpiredForRollbackInfo itself already understands
+// start-pending via pendingCreateRollbackState. A never-started pending-create
+// lease that aged past pendingCreateNeverStartedTimeout (10m) while sitting in
+// start-pending was therefore never rolled back: projectRuntimeProjection's
+// BaseStateStartPending branch has no staleness check of its own and just
+// keeps re-projecting start-pending forever, so the bead wedged indefinitely
+// with no self-heal.
+func TestHealState_StartPendingNeverStartedRollsBackToAsleep(t *testing.T) {
+	store := newTestStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 18, 20, 0, 0, 0, time.UTC)}
+
+	// Past pendingCreateNeverStartedTimeout (10m) with no last_woke_at ever
+	// recorded — this create attempt never even reached a provider Start call.
+	startedAt := clk.Now().Add(-(pendingCreateNeverStartedTimeout + time.Minute))
+	session := makeBead("b1", map[string]string{
+		"state":                     string(sessionpkg.StateStartPending),
+		"pending_create_claim":      "true",
+		"pending_create_started_at": pendingCreateStartedAtNow(startedAt),
+	})
+	session.CreatedAt = startedAt
+
+	healStateInfo(&session, false, sessionFrontDoor(store), clk)
+	if got := session.Metadata["state"]; got != "asleep" {
+		t.Fatalf("state = %q, want asleep (expired start-pending lease must roll back)", got)
+	}
+	if got := session.Metadata["pending_create_claim"]; got != "" {
+		t.Fatalf("pending_create_claim = %q, want empty after rollback", got)
+	}
+}
+
 func TestHealState_PreservesFreshCreatingWithoutPendingClaim(t *testing.T) {
 	store := newTestStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 29, 4, 0, 0, 0, time.UTC)}
@@ -1924,6 +2109,67 @@ func TestHealStatePatchWithRollbackHonorsConfiguredStartupTimeout(t *testing.T) 
 	}
 	if got["pending_create_started_at"] != "" {
 		t.Fatalf("pending_create_started_at clear = %q, want empty after configured lease expiry", got["pending_create_started_at"])
+	}
+}
+
+func TestHealStatePatchWithRollbackUsesOneConfiguredLeaseDecisionAcrossTicks(t *testing.T) {
+	startedAt := time.Date(2026, 5, 19, 9, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: startedAt.Add(90 * time.Second)}
+	startupTimeout := 5 * time.Minute
+	session := makeBead("b1", map[string]string{
+		"state":                     "creating",
+		"pending_create_claim":      "true",
+		"pending_create_started_at": startedAt.Format(time.RFC3339),
+		"last_woke_at":              startedAt.Format(time.RFC3339),
+		"session_key":               "in-flight-key",
+		"started_config_hash":       "in-flight-hash",
+	})
+	session.CreatedAt = startedAt
+
+	applyPatch := func(patch map[string]string) {
+		for key, value := range patch {
+			session.Metadata[key] = value
+		}
+	}
+
+	for _, elapsed := range []time.Duration{90 * time.Second, 306 * time.Second} {
+		clk.Time = startedAt.Add(elapsed)
+		patch := healStatePatchFromBead(session, false, clk, startupTimeout)
+		applyPatch(patch)
+		if len(patch) != 0 {
+			t.Fatalf("heal at %s = %#v, want no mutation before the configured lease expires", elapsed, patch)
+		}
+		if got := session.Metadata["state"]; got != "creating" {
+			t.Fatalf("state at %s = %q, want creating", elapsed, got)
+		}
+		if pendingCreateLeaseExpiredForRollbackInfo(seedSessionInfo(session), clk, startupTimeout) {
+			t.Fatalf("lease reported expired at %s, before the 307s rollback boundary", elapsed)
+		}
+	}
+
+	clk.Time = startedAt.Add(308 * time.Second)
+	if !pendingCreateLeaseExpiredForRollbackInfo(seedSessionInfo(session), clk, startupTimeout) {
+		t.Fatal("lease remained active after the 307s rollback boundary")
+	}
+	patch := healStatePatchFromBead(session, false, clk, startupTimeout)
+	applyPatch(patch)
+	for key, want := range map[string]string{
+		"state":                      "asleep",
+		"sleep_reason":               string(sessionpkg.SleepReasonRuntimeMissing),
+		"pending_create_claim":       "",
+		"pending_create_started_at":  "",
+		"session_key":                "",
+		"started_config_hash":        "",
+		"continuation_reset_pending": "true",
+	} {
+		if got := session.Metadata[key]; got != want {
+			t.Fatalf("rollback %s = %q, want %q; patch=%#v", key, got, want, patch)
+		}
+	}
+
+	clk.Time = clk.Time.Add(time.Second)
+	if got := healStatePatchFromBead(session, false, clk, startupTimeout); len(got) != 0 {
+		t.Fatalf("second post-expiry heal = %#v, want exactly one rollback mutation", got)
 	}
 }
 
@@ -2517,6 +2763,27 @@ func TestFindAgentByTemplate(t *testing.T) {
 	if a := findAgentByTemplate(legacyCfg, "gascity-packs/gc.implementation-worker"); a == nil || a.QualifiedName() != "gascity-packs/implementation-worker" {
 		t.Fatalf("expected persisted bound template to resolve to current unbound agent, got %#v", a)
 	}
+	importedBindingCfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "refinery", Dir: "gascity", BindingName: "gastown"},
+			{Name: "mayor", BindingName: "gastown"},
+		},
+	}
+	if a := findAgentByTemplate(importedBindingCfg, "gascity/refinery"); a == nil || a.QualifiedName() != "gascity/gastown.refinery" {
+		t.Fatalf("expected persisted unbound rig template to resolve to current imported binding agent, got %#v", a)
+	}
+	if a := findAgentByTemplate(importedBindingCfg, "mayor"); a == nil || a.QualifiedName() != "gastown.mayor" {
+		t.Fatalf("expected persisted unbound HQ template to resolve to current imported binding agent, got %#v", a)
+	}
+	ambiguousImportedBindingCfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "rig", BindingName: "alpha"},
+			{Name: "worker", Dir: "rig", BindingName: "bravo"},
+		},
+	}
+	if a := findAgentByTemplate(ambiguousImportedBindingCfg, "rig/worker"); a != nil {
+		t.Fatalf("expected ambiguous imported binding fallback to be refused, got %#v", a)
+	}
 	boundCfg := &config.City{
 		Agents: []config.Agent{
 			{Name: "worker", Dir: "rig"},
@@ -2554,6 +2821,31 @@ func TestAgentTemplateIdentitiesEquivalent(t *testing.T) {
 		t.Error("equivalence should be symmetric")
 	}
 
+	boundOnly := &config.City{
+		Agents: []config.Agent{{Name: "worker", Dir: "rig", BindingName: "gc"}},
+	}
+	if !agentTemplateIdentitiesEquivalent(boundOnly, "rig/worker", "rig/gc.worker") {
+		t.Error("legacy unbound identity should be equivalent to the imported binding agent")
+	}
+	if !agentTemplateIdentitiesEquivalent(boundOnly, "rig/gc.worker", "rig/worker") {
+		t.Error("imported binding equivalence should be symmetric")
+	}
+	hqBoundOnly := &config.City{
+		Agents: []config.Agent{{Name: "worker", BindingName: "gc"}},
+	}
+	if !agentTemplateIdentitiesEquivalent(hqBoundOnly, "worker", "gc.worker") {
+		t.Error("legacy unbound HQ identity should be equivalent to the imported binding agent")
+	}
+	ambiguousBoundOnly := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "rig", BindingName: "alpha"},
+			{Name: "worker", Dir: "rig", BindingName: "bravo"},
+		},
+	}
+	if agentTemplateIdentitiesEquivalent(ambiguousBoundOnly, "rig/worker", "rig/alpha.worker") {
+		t.Error("ambiguous legacy unbound identity must not normalize to one imported binding arbitrarily")
+	}
+
 	bothPresent := &config.City{
 		Agents: []config.Agent{
 			{Name: "worker", Dir: "rig"},
@@ -2572,6 +2864,35 @@ func TestAgentTemplateIdentitiesEquivalent(t *testing.T) {
 	}
 	if !agentTemplateIdentitiesEquivalent(nil, "rig/worker", "rig/worker") {
 		t.Error("identical strings are equivalent even without config")
+	}
+}
+
+// TestLegacyUnboundSessionBeadResolvesForPoolClassification pins the widened
+// resolver's nearest downstream consumers. A pool session bead persisted under
+// the legacy unbound identity now resolves to the imported binding agent, so
+// pool eligibility and excess must be computed against the canonical template
+// rather than treated as unknown.
+func TestLegacyUnboundSessionBeadResolvesForPoolClassification(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "refinery", Dir: "gascity", BindingName: "gastown", MaxActiveSessions: intPtr(1)},
+	}}
+	const canonical = "gascity/gastown.refinery"
+	sess := beads.Bead{
+		ID: "sess-legacy", Type: sessionBeadType, Status: "open",
+		Metadata: map[string]string{
+			"template": "gascity/refinery", "session_name": "refinery-gc-1", "state": "active",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}
+	// With demand, the legacy-identity bead is config-eligible under the
+	// canonical template.
+	if agent, ok := sessionWithinDesiredConfig(sess, cfg, map[string]int{canonical: 1}); !ok {
+		t.Errorf("legacy unbound session bead should be config-eligible under the imported binding agent (agent=%#v)", agent)
+	}
+	// With zero demand it is now classifiable as excess, where it previously
+	// resolved to no agent and was never excess.
+	if !isPoolExcess(sess, cfg, map[string]int{canonical: 0}) {
+		t.Error("legacy unbound pool session bead should be excess when canonical demand is zero")
 	}
 }
 
@@ -3086,5 +3407,122 @@ func TestComputeWorkSet_RigScopedWorkQueryExpandsRigTemplate(t *testing.T) {
 	}
 	if got := seenCommands[betaDir]; !strings.Contains(got, "gc.routed_to=beta/worker") {
 		t.Errorf("beta probe command = %q, want expanded gc.routed_to=beta/worker", got)
+	}
+}
+
+// staleHealSuspendPatch is what `gc session suspend` writes on a managed city.
+var staleHealSuspendPatch = map[string]string{
+	"held_until":   "2099-01-01T00:00:00Z",
+	"sleep_intent": "user-hold",
+	"state":        "suspended",
+}
+
+// TestHealStateWithRollbackInfoDoesNotRevertAConcurrentSuspend is the
+// regression for the stale status heal (INC-024). The heal is decided from the
+// tick snapshot. When `gc session suspend` lands after that snapshot was read,
+// the heal used to write state=awake unconditionally over state=suspended,
+// leaving the row awake+user-hold+held. It must now write nothing and report
+// no batch, so the caller folds nothing.
+func TestHealStateWithRollbackInfoDoesNotRevertAConcurrentSuspend(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)}
+	store := beads.NewMemStore()
+	created, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker",
+			"state":        "active",
+			"last_woke_at": clk.Now().UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessFront := sessionFrontDoor(store)
+	snapshot, err := sessFront.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if want := healStatePatchWithRollbackInfo(snapshot, true, true, clk, 0, true); want["state"] != "awake" {
+		t.Fatalf("test premise: heal from the snapshot = %v, want state=awake", want)
+	}
+
+	if err := store.SetMetadataBatch(created.ID, staleHealSuspendPatch); err != nil {
+		t.Fatalf("suspend write: %v", err)
+	}
+
+	batch, err := healStateWithRollbackInfo(snapshot, true, true, sessFront, clk, 0, true)
+	if err != nil {
+		t.Fatalf("healStateWithRollbackInfo: %v", err)
+	}
+	if batch != nil {
+		t.Fatalf("heal batch = %v, want nil: the row changed after the snapshot", batch)
+	}
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	for key, want := range staleHealSuspendPatch {
+		if got.Metadata[key] != want {
+			t.Fatalf("%s = %q after the stale heal, want the suspend's %q", key, got.Metadata[key], want)
+		}
+	}
+
+	// Control: the same heal from a snapshot that matches the row still lands.
+	fresh, err := sessFront.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if err := store.SetMetadata(created.ID, "state", "active"); err != nil {
+		t.Fatalf("reset state: %v", err)
+	}
+	fresh = fresh.ApplyPatch(map[string]string{"state": "active"})
+	batch, err = healStateWithRollbackInfo(fresh, true, true, sessFront, clk, 0, true)
+	if err != nil || batch["state"] != "awake" {
+		t.Fatalf("heal from a current snapshot = (%v, %v), want state=awake applied", batch, err)
+	}
+	if got, _ := store.Get(created.ID); got.Metadata["state"] != "awake" {
+		t.Fatalf("state = %q, want the current-snapshot heal persisted", got.Metadata["state"])
+	}
+}
+
+// TestReconcileSessionBeads_StaleSnapshotHealKeepsConcurrentSuspend drives the
+// same race through a whole tick: the reconciler is handed a session snapshot
+// read before `gc session suspend` wrote the row. The tick's status heal must
+// not revert the suspend it never saw.
+func TestReconcileSessionBeads_StaleSnapshotHealKeepsConcurrentSuspend(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	stale := session
+	stale.Metadata = make(map[string]string, len(session.Metadata))
+	for k, v := range session.Metadata {
+		stale.Metadata[k] = v
+	}
+
+	if err := env.store.SetMetadataBatch(session.ID, staleHealSuspendPatch); err != nil {
+		t.Fatalf("suspend write: %v", err)
+	}
+
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{stale}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		newFakeIdleTracker(), env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	for key, want := range staleHealSuspendPatch {
+		if got.Metadata[key] != want {
+			t.Fatalf("%s = %q after a tick over the pre-suspend snapshot, want the suspend's %q\nstderr:\n%s", key, got.Metadata[key], want, env.stderr.String())
+		}
 	}
 }

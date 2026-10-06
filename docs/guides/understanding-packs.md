@@ -103,12 +103,18 @@ registry name:
 For a GitHub-hosted pack, use a browser-dereferenceable tree URL:
 
 ```toml
-[imports.gascity]
+[imports.gc]
 # clone gastownhall/gascity-packs, use the gascity/ dir on the main branch as the pack root
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 ```
 
 The same URL also opens the pack directory in a browser.
+
+The Gas City pack expects the binding `gc`: its skills surface as `gc.<skill>`
+(for example `gc.mayor`) and its commands as `gc gc <command>`. Cities created
+by gc v1.4.x bound it as `[imports.gascity]`; `gc doctor --fix` renames that
+key to `gc` (see the `gascity-pack-binding` check in
+[Troubleshooting](/getting-started/troubleshooting)).
 
 ## City Imports And Rig Imports
 
@@ -116,7 +122,7 @@ A city-level import belongs to the city pack and appears at the top level of
 the city pack's `pack.toml`:
 
 ```toml
-[imports.gascity]
+[imports.gc]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "^0.1"
 ```
@@ -125,7 +131,7 @@ If that pack defines a city-scoped agent named `planner`, the loader stamps it
 with the import binding, and the runtime agent is named:
 
 ```text
-gascity.planner
+gc.planner
 ```
 
 A rig-level import appears under the `[[rigs]]` table that needs it:
@@ -135,7 +141,7 @@ A rig-level import appears under the `[[rigs]]` table that needs it:
 name = "checkout-service"
 path = "../checkout-service"
 
-[rigs.imports.gascity]
+[rigs.imports.gc]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "^0.1"
 ```
@@ -144,7 +150,7 @@ If that same pack defines a rig-scoped agent named `planner`, the runtime agent
 is stamped with the rig name as well as the binding:
 
 ```text
-checkout-service/gascity.planner
+checkout-service/gc.planner
 ```
 
 The rig `name` becomes the identity prefix. The rig `path` is the filesystem
@@ -177,7 +183,7 @@ pack.
 ## Names
 
 Because the import binding qualifies every imported agent name (as
-`gascity.planner` above), you address imported agents by that qualified name —
+`gc.planner` above), you address imported agents by that qualified name —
 not bare `planner` — in patches, targets, and commands, and the imported pack's
 own name never overrides the binding.
 
@@ -332,8 +338,11 @@ $ gc import credential add github.com/gascity --ssh-key-file ~/.ssh/packbot_ed25
 The `match` argument is a bare host or `host/path-prefix` (longest-prefix wins,
 so same-host different-org credentials coexist). Exactly one pointer flag is
 required. By default the rule is written to `<city>/.gc/credentials.toml`
-(0600); `--global` writes `$GC_HOME/credentials.toml` instead. List and remove
-registered rules with:
+(0600); `--global` writes `$GC_HOME/credentials.toml` instead. gc refuses to
+load a `credentials.toml` that is world-accessible or group-writable: the modes
+it accepts are 0600/0400, plus the root-owned own-group 0440 that a Kubernetes
+Secret volume mounted with `fsGroup` produces. List and remove registered rules
+with:
 
 ```text
 $ gc import credential list
@@ -372,14 +381,14 @@ during load. An import can express the selected revision three ways:
 
 ```toml
 # no constraint — installer and lockfile choose the revision
-[imports.gascity]
+[imports.gc]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 
 # semver constraint — any compatible release is acceptable
 version = "^0.1"
 
 # exact SHA pin — this revision must be used
-version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
+version = "sha:3b3b89f2011e06d84459aa7bea1552382f13930a"
 ```
 
 The authored import expresses the source and optional constraint; the lockfile

@@ -1,0 +1,54 @@
+# Defense-in-depth companion to ci.yml's per-commit concurrency group (the
+# primary fix for main-push CI runs getting cancelled while queued). This
+# covers cancellation causes that fix doesn't reach: a manual cancel, a
+# GitHub incident, or a future regression that reintroduces a group
+# collision. Without this, a cancelled-while-queued run leaves its commit
+# with no CI check at all -- which looks identical to "everything passed" to
+# anyone glancing at the commit or PR checks list.
+#
+# SECURITY MODEL: workflow_run-triggered workflows always execute the
+# workflow file version committed on the default branch, never the head
+# branch of whatever push indirectly triggered them. That is what makes
+# checks: write safe to grant here even though the trigger is reachable via
+# arbitrary pushes. Do not convert this to pull_request_target or broaden it
+# beyond workflow_run on ci.yml -- that would reopen a fork-privilege-
+# escalation path this design deliberately avoids. Full rationale (AF-2
+# sequence diagram, security controls table) is in ga-mvmjxh's notes.
+
+name: CI Verdict Watchdog
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  checks: write
+  actions: read
+
+jobs:
+  flag-cancelled-while-queued:
+    name: Flag CI run cancelled while queued
+    if: >
+      github.event.workflow_run.conclusion == 'cancelled' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post neutral check-run for the cancelled run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/check-runs" \
+            -f name="CI verdict: none (run cancelled)" \
+            -f head_sha="${HEAD_SHA}" \
+            -f status="completed" \
+            -f conclusion="neutral" \
+            -f completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -f details_url="${RUN_URL}" \
+            -f output[title]="CI produced no verdict (run cancelled)" \
+            -f output[summary]="This commit's CI run was cancelled (a manual cancel, a GitHub incident, or a concurrency-group collision), most often while still queued. Some jobs may have executed, or none. Either way this commit has no CI verdict. This check exists so a cancelled run shows up as an explicit non-verdict instead of silence that could be mistaken for a pass. See the run: ${RUN_URL}"

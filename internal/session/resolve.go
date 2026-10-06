@@ -152,10 +152,16 @@ func listSessionBeadsByMetadata(store beads.Store, key, value string, allowClose
 	if key == "" || value == "" {
 		return nil, nil
 	}
-	raw, err := store.List(beads.ListQuery{
+	query := beads.ListQuery{
 		Metadata:      map[string]string{key: value},
 		IncludeClosed: allowClosed,
-	})
+	}
+	if !allowClosed {
+		// Session bead status is open/closed; richer lifecycle states live in
+		// metadata. Treat any other raw status as invalid for live resolution.
+		query.Status = "open"
+	}
+	raw, err := store.List(query)
 	if err != nil {
 		return nil, err
 	}

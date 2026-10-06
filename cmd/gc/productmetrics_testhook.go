@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/gchome"
 	"github.com/gastownhall/gascity/internal/productmetrics"
@@ -65,6 +66,9 @@ func openProductMetricsTesthookService() (*productmetrics.Service, error) {
 	if !roots.AppendCertsFromPEM(certificatePEM) {
 		return nil, errors.New("product metrics testhook CA file has no certificate")
 	}
+	// Keep the tagged process contract independent of scheduler time spent
+	// inside RecordOnce's production 50 ms best-effort decision window.
+	now := time.Now()
 	return productmetrics.OpenTesthook(productmetrics.TesthookOptions{
 		Home:           gchome.ResolveReadOnly(),
 		ReleaseVersion: taggedProductMetricsReleaseVersion,
@@ -72,6 +76,7 @@ func openProductMetricsTesthookService() (*productmetrics.Service, error) {
 		NoticeVersion:  1,
 		NoticeText:     []byte("Gas City product metrics test-only notice."),
 		Endpoint:       endpoint,
+		Now:            func() time.Time { return now },
 		Client: &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			RootCAs:    roots,

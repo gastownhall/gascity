@@ -111,7 +111,7 @@ func TestDockerSessionProtocol(t *testing.T) {
 		fixture.writeState(t, "prompt-output", ">\n"+strings.Repeat("\n", 20))
 
 		config := dockerProtocolStartConfig(t, fixture.workDir, "> ")
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
 		defer cancel()
 		started := time.Now()
 		out, err := run(ctx, fixture, adapter, []string{"start", fixture.containerName}, config)
@@ -153,7 +153,7 @@ func TestDockerSessionProtocol(t *testing.T) {
 				fixture.writeState(t, "prompt-output", tt.output+"\n")
 
 				config := dockerProtocolStartConfig(t, fixture.workDir, tt.prefix)
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
 				defer cancel()
 				out, err := run(ctx, fixture, adapter, []string{"start", fixture.containerName}, config)
 				if err != nil {

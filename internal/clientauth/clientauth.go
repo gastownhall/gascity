@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -86,7 +85,7 @@ type CredentialSource struct {
 	now    func() time.Time
 	runner runFunc
 
-	mu        sync.Mutex
+	gate      chan struct{}
 	token     string
 	expiresAt time.Time
 }
@@ -106,6 +105,8 @@ func NewCredentialSource(command, serverURL, city string, interactive bool) (*Cr
 	if interactive {
 		timeout = interactiveCredentialHelperTimeout
 	}
+	gate := make(chan struct{}, 1)
+	gate <- struct{}{}
 	return &CredentialSource{
 		command:       command,
 		serverURL:     serverURL,
@@ -114,6 +115,7 @@ func NewCredentialSource(command, serverURL, city string, interactive bool) (*Cr
 		helperTimeout: timeout,
 		now:           time.Now,
 		runner:        runCredentialCommand,
+		gate:          gate,
 	}, nil
 }
 
@@ -121,30 +123,67 @@ func NewCredentialSource(command, serverURL, city string, interactive bool) (*Cr
 // otherwise mints a fresh one. Call it before every request and every SSE
 // (re)connect.
 func (s *CredentialSource) Token() (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.lock()
+	defer s.unlock()
 	if s.token != "" && s.now().Add(expirySkew).Before(s.expiresAt) {
 		return s.token, nil
 	}
-	return s.mintLocked()
+	return s.mintLocked(context.Background())
 }
 
 // Refresh mints a fresh token regardless of cache state. Use it to re-invoke the
 // credential command after a 401 (the server rejected the presented token).
 func (s *CredentialSource) Refresh() (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.mintLocked()
+	s.lock()
+	defer s.unlock()
+	return s.mintLocked(context.Background())
 }
 
-func (s *CredentialSource) mintLocked() (string, error) {
+// RefreshContext mints a fresh token regardless of cache state and bounds the
+// credential command by ctx as well as the source's helper timeout.
+func (s *CredentialSource) RefreshContext(ctx context.Context) (string, error) {
+	if ctx == nil {
+		return "", errors.New("clientauth: credential context is nil")
+	}
+	if err := s.lockContext(ctx); err != nil {
+		return "", err
+	}
+	defer s.unlock()
+	return s.mintLocked(ctx)
+}
+
+func (s *CredentialSource) lock() {
+	<-s.gate
+}
+
+func (s *CredentialSource) lockContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.gate:
+		if err := ctx.Err(); err != nil {
+			s.unlock()
+			return err
+		}
+		return nil
+	}
+}
+
+func (s *CredentialSource) unlock() {
+	s.gate <- struct{}{}
+}
+
+func (s *CredentialSource) mintLocked(ctx context.Context) (string, error) {
 	info := ExecInfo{
 		Version: Version,
 		Spec:    ExecSpec{ServerURL: s.serverURL, City: s.city, Interactive: s.interactive},
 	}
 	// Bound the exec so a hung helper is canceled instead of blocking the caller
 	// (and every remote request behind this lock) indefinitely.
-	ctx, cancel := context.WithTimeout(context.Background(), s.helperTimeout)
+	ctx, cancel := context.WithTimeout(ctx, s.helperTimeout)
 	defer cancel()
 	res, err := s.runner(ctx, s.command, info)
 	if err != nil {

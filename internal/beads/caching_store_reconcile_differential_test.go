@@ -52,6 +52,7 @@ type storeState struct {
 	beadSeq      map[string]uint64
 	localBeadAt  map[string]time.Time
 	deletedSeq   map[string]uint64
+	writeSeq     map[string]uint64
 	mutationSeq  uint64
 	backingIsBd  bool
 }
@@ -82,11 +83,26 @@ type mergeEndState struct {
 	beadSeq      map[string]uint64
 	localBeadAt  map[string]time.Time
 	deletedSeq   map[string]uint64
-	state        cacheState
-	lastFreshAt  time.Time
-	mutationSeq  uint64
-	primeErr     string
-	syncFailures int
+	writeSeq     map[string]uint64
+	// writeAtIDs is the key set of writeAt, which must drop exactly when
+	// writeSeq does; its stamps are wall-clock values the merge never reads.
+	writeAtIDs map[string]struct{}
+	// readyLost is the set of rows whose is_blocked verdict the merge dropped
+	// without preserving, so readiness declines for them unless their own edges
+	// can reproduce it (ga-cfhgr).
+	readyLost map[string]struct{}
+	// retainedIDs is the key set of retainedAt: the orphan ids whose write
+	// fences the sweep retains. Its stamps are the pass clock.
+	retainedIDs map[string]struct{}
+	// fenceFloor rises only when a retention older than the window is
+	// pruned; no seeded state carries one, so it must stay put.
+	fenceFloor     uint64
+	state          cacheState
+	lastFreshAt    time.Time
+	mutationSeq    uint64
+	primeErr       string
+	syncFailures   int
+	circuitTripped bool
 	// stats fields the seam writes.
 	statsAdds            int64
 	statsRemoves         int64
@@ -168,6 +184,7 @@ func cloneStoreState(st storeState) storeState {
 		beadSeq:      cloneU64Map(st.beadSeq),
 		localBeadAt:  cloneTimeMap(st.localBeadAt),
 		deletedSeq:   cloneU64Map(st.deletedSeq),
+		writeSeq:     cloneU64Map(st.writeSeq),
 		mutationSeq:  st.mutationSeq,
 		backingIsBd:  st.backingIsBd,
 	}
@@ -214,6 +231,11 @@ func (b *countingBacking) List(q ListQuery) ([]Bead, error) {
 // type assertion (no call), so a stray call would panic — a louder failure
 // than a count mismatch. The store starts cacheLive (promoteLiveLocked
 // overwrites it regardless).
+//
+// circuitTripped starts true — the one pre-merge value the seam must clear.
+// Seeding the zero value instead would make the end-state comparison of that
+// field vacuous (false on every implementation, every case), so a branch that
+// stopped re-arming the breaker would slip through the differential.
 func newMergeHarnessStore(st storeState) (*CachingStore, *countingBacking) {
 	var counter *countingBacking
 	var backing Store
@@ -233,8 +255,12 @@ func newMergeHarnessStore(st storeState) (*CachingStore, *countingBacking) {
 		beadSeq:      cloneU64Map(st.beadSeq),
 		localBeadAt:  cloneTimeMap(st.localBeadAt),
 		deletedSeq:   cloneU64Map(st.deletedSeq),
+		writeSeq:     cloneU64Map(st.writeSeq),
+		writeAt:      writeAtFor(st.writeSeq),
 		mutationSeq:  st.mutationSeq,
 		state:        cacheLive,
+
+		circuitTripped: true,
 	}
 	ensureMaps(c)
 	return c, counter
@@ -261,6 +287,17 @@ func ensureMaps(c *CachingStore) {
 	if c.deletedSeq == nil {
 		c.deletedSeq = make(map[string]uint64)
 	}
+	if c.writeSeq == nil {
+		c.writeSeq = make(map[string]uint64)
+	}
+	if c.writeAt == nil {
+		c.writeAt = make(map[string]time.Time)
+	}
+	// The generated states never seed ready-projection marks, so every mark in
+	// a captured end state was produced by the merge under test — which is what
+	// lets buildExpectedNewEnd derive the expected set from the end beads map
+	// alone.
+	c.readyProjectionLost = make(map[string]struct{})
 }
 
 func captureEndState(c *CachingStore) mergeEndState {
@@ -276,11 +313,17 @@ func captureEndState(c *CachingStore) mergeEndState {
 		beadSeq:              cloneU64Map(c.beadSeq),
 		localBeadAt:          cloneTimeMap(c.localBeadAt),
 		deletedSeq:           cloneU64Map(c.deletedSeq),
+		writeSeq:             cloneU64Map(c.writeSeq),
+		writeAtIDs:           keySet(c.writeAt),
+		readyLost:            cloneDirty(c.readyProjectionLost),
+		retainedIDs:          keySet(c.retainedAt),
+		fenceFloor:           c.fenceFloor,
 		state:                c.state,
 		lastFreshAt:          c.lastFreshAt,
 		mutationSeq:          c.mutationSeq,
 		primeErr:             primeErr,
 		syncFailures:         c.syncFailures,
+		circuitTripped:       c.circuitTripped,
 		statsAdds:            c.stats.Adds,
 		statsRemoves:         c.stats.Removes,
 		statsUpdates:         c.stats.Updates,
@@ -306,7 +349,7 @@ type mergeImplResult struct {
 func runNewMerge(st storeState, in snapshotInputs) mergeImplResult {
 	c, counter := newMergeHarnessStore(st)
 	c.mu.Lock()
-	res := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, in.depMap, in.useFreshDeps, in.startSeq, in.now)
+	res := c.mergeSnapshotLocked(in.freshByID, in.confirmedClosed, nil, in.depMap, in.useFreshDeps, false, in.startSeq, in.now)
 	c.mu.Unlock()
 	return mergeImplResult{end: captureEndState(c), notifications: res.notifications, backingCalls: counterCalls(counter)}
 }
@@ -549,6 +592,24 @@ func legacyBranchBMerge(
 // nil and empty maps/slices as unequal, which is what depsComplete-degradation
 // and entry-presence semantics require). time.Time values are exact copies of
 // injected inputs across all runs, so DeepEqual compares them soundly.
+// writeAtFor seeds a write stamp for every write revision, as
+// noteLocalMutationLocked always sets the two together.
+func writeAtFor(writeSeq map[string]uint64) map[string]time.Time {
+	out := make(map[string]time.Time, len(writeSeq))
+	for id := range writeSeq {
+		out[id] = time.Unix(1, 0)
+	}
+	return out
+}
+
+func keySet[V any](m map[string]V) map[string]struct{} {
+	out := make(map[string]struct{}, len(m))
+	for id := range m {
+		out[id] = struct{}{}
+	}
+	return out
+}
+
 func endStatesEqual(a, b mergeEndState) bool {
 	return reflect.DeepEqual(a, b)
 }

@@ -71,6 +71,7 @@ func newRigAddCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOutput bool
 	var gitURLFlag string
 	var requestIDFlag string
+	var allowEphemeralFlag bool
 	cmd := &cobra.Command{
 		Use:   "add <path>",
 		Short: "Register a project as a rig",
@@ -83,12 +84,22 @@ to apply a pack source that defines the rig's agent configuration;
 repeat the flag to compose multiple packs for one rig. The flag is
 compatibility sugar: gc rig add writes canonical rig imports.
 
+--include takes a pack source (local path or remote URL) or a pack name: a
+bundled pack ("gastown"), or a registry pack resolved from the cached
+registry catalogs, including a scoped community name ("owner/pack"). A "./"
+prefix or a "packs/<name>" token is never read as a registry name (a
+bundled pack still canonicalizes, so "./gastown" resolves to the bundled
+source), and an existing directory always wins over a registry pack of the
+same name.
+
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
 Use --default-branch to set the rig's mainline branch explicitly. By default,
-gc rig add probes the repo's origin/HEAD (and falls back to the currently
-checked-out branch) and stores the result in city.toml so polecats and the
-refinery target the right branch without manual metadata patching.
+gc rig add probes the repo's remote HEADs — origin first, then any other
+configured remote — and falls back to the currently checked-out branch, then
+stores the result in city.toml so polecats and the refinery target the right
+branch without manual metadata patching. The banner reports which remote
+answered, or says the branch was inferred when no remote HEAD is set.
 Use --start-suspended to add the rig in a suspended state (dormant-by-default).
 The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
@@ -103,6 +114,7 @@ check remains informational.`,
   gc rig add /path/to/master-repo --default-branch master
   gc rig add ./my-project --include gastown
   gc rig add ./my-project --include packs/planner --include packs/architect
+  gc rig add ./my-project --include acme/planner
   gc rig add ./my-project --include gastown --start-suspended
   gc rig add /path/to/existing --adopt`,
 		Args: cobra.ArbitraryArgs,
@@ -123,6 +135,23 @@ check remains informational.`,
 				return errExit
 			}
 			if isRemote {
+				// --allow-ephemeral has no remote surface: ProvisionRequest
+				// carries it, but the remote add never populates it, so honoring
+				// it silently would be a lie — the server would refuse anyway
+				// while telling the user to pass the flag they just passed.
+				// Refuse loudly instead, symmetric with the --git-url and
+				// --request-id guards on the local path below.
+				if allowEphemeralFlag {
+					msg := "gc rig add: --allow-ephemeral applies only to a local city; a rig provisioned on a remote city must live somewhere that survives a controller replacement"
+					if jsonOutput {
+						if writeJSONError(stdout, stderr, "unsupported_remote", msg, 1) != 0 {
+							return errExit
+						}
+						return nil
+					}
+					fmt.Fprintln(stderr, msg) //nolint:errcheck // best-effort stderr
+					return errExit
+				}
 				if cmdRigAddRemote(remoteC, target, args, gitURLFlag, requestIDFlag, nameFlag, prefixFlag, defaultBranchFlag, includes, startSuspended, adoptFlag, jsonOutput, stdout, stderr) != 0 {
 					return errExit
 				}
@@ -172,27 +201,28 @@ check remains informational.`,
 					fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 					return errExit
 				}
-				rig, code := doRigAddWithResult(fsys.OSFS{}, cityPath, rigPath, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, io.Discard, stderr)
+				rig, code := doRigAddWithResult(fsys.OSFS{}, cityPath, rigPath, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, io.Discard, stderr, withAllowEphemeralPath(allowEphemeralFlag))
 				if code != 0 {
 					return errExit
 				}
 				return writeManagementActionJSON(stdout, rigAddJSONSummary(rigPath, rig))
 			}
-			if cmdRigAdd(args, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, stdout, stderr) != 0 {
+			if cmdRigAdd(args, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, stdout, stderr, withAllowEphemeralPath(allowEphemeralFlag)) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
-	cmd.Flags().StringArrayVar(&includes, "include", nil, "pack source for rig agents (repeatable; writes canonical rig imports)")
+	cmd.Flags().StringArrayVar(&includes, "include", nil, "pack source or pack name for rig agents (repeatable; writes canonical rig imports)")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "rig name (default: directory basename, or git URL basename for --git-url)")
 	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix (default: derived from name)")
-	cmd.Flags().StringVar(&defaultBranchFlag, "default-branch", "", "mainline branch (default: auto-detect from origin/HEAD or current branch)")
+	cmd.Flags().StringVar(&defaultBranchFlag, "default-branch", "", "mainline branch (default: auto-detect from a remote HEAD — origin preferred — or the current branch)")
 	cmd.Flags().BoolVar(&startSuspended, "start-suspended", false, "add rig in suspended state (dormant-by-default)")
 	cmd.Flags().BoolVar(&adoptFlag, "adopt", false, "adopt existing .beads/ directory (skip init)")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
 	cmd.Flags().StringVar(&gitURLFlag, "git-url", "", "git URL to clone into a new rig on a REMOTE city (server-side provisioning)")
 	cmd.Flags().StringVar(&requestIDFlag, "request-id", "", "idempotency key for a remote --git-url add; reuse it to resume/retry a provision")
+	cmd.Flags().BoolVar(&allowEphemeralFlag, "allow-ephemeral", false, "register the rig even though its path is on a filesystem that does not survive a restart")
 	return cmd
 }
 
@@ -219,7 +249,7 @@ its beads database is initialized.`,
 }
 
 // cmdRigAdd registers an external project directory as a rig in the city.
-func cmdRigAdd(args []string, includes []string, nameOverride, prefixOverride, defaultBranchOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) int {
+func cmdRigAdd(args []string, includes []string, nameOverride, prefixOverride, defaultBranchOverride string, startSuspended, adopt bool, stdout, stderr io.Writer, opts ...rigAddOption) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc rig add: missing path") //nolint:errcheck // best-effort stderr
 		return 1
@@ -236,7 +266,7 @@ func cmdRigAdd(args []string, includes []string, nameOverride, prefixOverride, d
 		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return doRigAdd(fsys.OSFS{}, cityPath, rigPath, includes, nameOverride, prefixOverride, defaultBranchOverride, startSuspended, adopt, stdout, stderr)
+	return doRigAdd(fsys.OSFS{}, cityPath, rigPath, includes, nameOverride, prefixOverride, defaultBranchOverride, startSuspended, adopt, stdout, stderr, opts...)
 }
 
 func resolveRigAddPath(cityPath, rigArg string) (string, error) {
@@ -261,12 +291,13 @@ func resolveRigAddPath(cityPath, rigArg string) (string, error) {
 // city.toml is written last — if any earlier step fails, config is unchanged.
 // This prevents partial-state bugs where city.toml lists a rig but the rig's
 // infrastructure (beads, routes) was never created.
-func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverride, prefixOverride, defaultBranchOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) int {
-	_, code := doRigAddWithResult(fs, cityPath, rigPath, includes, nameOverride, prefixOverride, defaultBranchOverride, startSuspended, adopt, stdout, stderr)
+func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverride, prefixOverride, defaultBranchOverride string, startSuspended, adopt bool, stdout, stderr io.Writer, opts ...rigAddOption) int {
+	_, code := doRigAddWithResult(fs, cityPath, rigPath, includes, nameOverride, prefixOverride, defaultBranchOverride, startSuspended, adopt, stdout, stderr, opts...)
 	return code
 }
 
-func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverride, prefixOverride, defaultBranchOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) (config.Rig, int) {
+func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverride, prefixOverride, defaultBranchOverride string, startSuspended, adopt bool, stdout, stderr io.Writer, opts ...rigAddOption) (config.Rig, int) {
+	addOpts := newRigAddOptions(opts...)
 	// Preflight the rig path before loading config so an invalid rig path is
 	// reported ahead of a config-load failure (Provision re-checks it as
 	// step 2). This preserves the original error ordering.
@@ -303,7 +334,8 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		WriteRoutes: func(cp string, c *config.City) error {
 			return writeAllRigRoutes(collectRigRoutes(cp, c))
 		},
-		ProbeBranch: func(p string) string { return git.New(p).ProbeDefaultBranch() },
+		ProbeBranch:         func(p string) (string, string) { return git.New(p).ProbeDefaultBranchFrom() },
+		ResolveRegistryPack: cachedRegistryPackSource,
 		NormalizeScopes: func(cp string, c *config.City) error {
 			return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
 		},
@@ -360,18 +392,29 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		},
 	}
 
-	r, _, err := rig.Provision(deps, rig.ProvisionRequest{
-		Name:           name,
-		Path:           rigPath,
-		Prefix:         prefixOverride,
-		DefaultBranch:  defaultBranchOverride,
-		Includes:       includes,
-		StartSuspended: startSuspended,
-		Adopt:          adopt,
+	r, provisioned, err := rig.Provision(deps, rig.ProvisionRequest{
+		Name:               name,
+		Path:               rigPath,
+		Prefix:             prefixOverride,
+		DefaultBranch:      defaultBranchOverride,
+		Includes:           includes,
+		StartSuspended:     startSuspended,
+		Adopt:              adopt,
+		AllowEphemeralPath: addOpts.allowEphemeralPath,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return config.Rig{}, 1
+	}
+	if reloaded, loadErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); loadErr != nil {
+		fmt.Fprintf(stderr, "gc rig add: reload provider ownership after rig add: %v\n", loadErr) //nolint:errcheck // best-effort stderr
+		return config.Rig{}, 1
+	} else if ownershipErr := ensureFreshRigProviderOwnership(cityPath, reloaded); ownershipErr != nil {
+		fmt.Fprintf(stderr, "gc rig add: attach provider ownership after rig add: %v\n", ownershipErr) //nolint:errcheck // best-effort stderr
+		return config.Rig{}, 1
+	} else if !provisioned.Deferred {
+		// An adopted store may predate migration 0059's fix (beads#7037).
+		rigAddRepairBlockedFlags(cityPath, reloaded, r.Name, stderr)
 	}
 	return r, 0
 }
@@ -976,6 +1019,11 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "gc rig suspend: writing state: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	for _, r := range cfg.Rigs {
+		if r.Name == rigName {
+			retireSuspendedScopesWithoutController(cityPath, []string{resolveStoreScopeRoot(cityPath, r.Path)}, false, stderr)
+		}
+	}
 
 	fmt.Fprintf(stdout, "Suspended rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
 	return 0
@@ -1173,7 +1221,7 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 	// [[patches.agent]] and [[orders.overrides]]; the rest fail the same way on
 	// rig removal, so sweep them all.
 	cfg.Patches.Agents = slices.DeleteFunc(cfg.Patches.Agents,
-		func(p config.AgentPatch) bool { return p.Dir == rigName })
+		func(p config.AgentPatch) bool { return p.Dir == rigName || p.Rig == rigName })
 	cfg.Patches.NamedSessions = slices.DeleteFunc(cfg.Patches.NamedSessions,
 		func(p config.NamedSessionPatch) bool { return p.Dir == rigName })
 	cfg.Patches.Rigs = slices.DeleteFunc(cfg.Patches.Rigs,
@@ -1195,6 +1243,13 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 	cfg.Orders.Overrides = slices.DeleteFunc(cfg.Orders.Overrides,
 		func(o config.OrderOverride) bool { return o.Rig == rigName })
 
+	// Detach before changing city.toml. If its write fails, the configured rig
+	// still resolves through the durable path record and retrying removal can
+	// finish the config mutation without a dead ownership record.
+	if err := removeProviderScopeOwnershipRecord(cityPath, "rig:"+rigName); err != nil {
+		fmt.Fprintf(stderr, "gc rig remove: retiring provider scope ownership: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	// Write updated config.
 	if err := config.WriteCityAndRigSiteBindingsForEditRemovingRigs(fsys.OSFS{}, tomlPath, cfg, rigName); err != nil {
 		fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr

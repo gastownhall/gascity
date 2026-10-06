@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"reflect"
@@ -17,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -114,11 +116,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	}
 	command := launchCommand.Command
 	extraMeta := sessionTemplateOverridesMetadata(body.Options, body.Message)
-	if extraMeta == nil {
-		extraMeta = make(map[string]string)
-	}
-	extraMeta["agent_name"] = workDirQualifiedName
-	extraMeta["session_origin"] = "manual"
+	extraMeta = agentSessionCreateMetadata(extraMeta, workDirQualifiedName)
 	mcpServers, err := s.sessionMCPServers(template, resolved.Name, workDirQualifiedName, workDir, transport, kind, nil)
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
@@ -145,6 +143,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		}
 		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(
 			s.state.CityPath(),
+			configuredWorkspaceSessionEnv(s.state.Config()),
 			alias,
 			explicitName,
 			template,
@@ -197,7 +196,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 			return
 		}
 		if waitForCommandable {
-			s.state.Poke()
+			s.state.Enqueue(reconcilekey.Session(info.ID))
 			waitCtx, cancel := context.WithTimeout(context.Background(), sessionCreateCommandableTimeout)
 			info, createErr = waiter.WaitForSessionCommandable(waitCtx, info.ID)
 			cancel()
@@ -212,7 +211,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		s.emitSessionCreateSucceeded(reqID, resp)
 		s.persistSessionMeta(store, info.ID, body.ProjectID, nil)
 		if !waitForCommandable {
-			s.state.Poke()
+			s.state.Enqueue(reconcilekey.Session(info.ID))
 		}
 
 		titleProvider := s.resolveTitleProvider()
@@ -324,7 +323,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 	}
 	go func() {
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionCreate)
-		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(s.state.CityPath(), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
+		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 		if cfgErr != nil {
 			s.emitSessionCreateFailed(reqID, "create_failed", cfgErr.Error())
 			return
@@ -391,7 +390,7 @@ type sessionTranscriptGetResponse struct {
 	ResetReason        string                      `json:"reset_reason,omitempty" doc:"Structured reset reason when operation is reset."`
 	History            *SessionStructuredHistory   `json:"history,omitempty" doc:"Normalized worker-history envelope when format is structured."`
 	Turns              []outputTurn                `json:"turns,omitempty" doc:"Populated for conversation/text formats."`
-	Messages           []SessionRawMessageFrame    `json:"messages,omitempty" doc:"Populated for raw format; provider-native frames emitted verbatim as the provider wrote them."`
+	Messages           *[]SessionRawMessageFrame   `json:"messages,omitempty" doc:"Populated for raw format; provider-native frames emitted verbatim as the provider wrote them."`
 	StructuredMessages *[]SessionStructuredMessage `json:"structured_messages,omitempty" doc:"Populated for structured format; provider-normalized structured messages."`
 	Pagination         *sessionlog.PaginationInfo  `json:"pagination,omitempty"`
 }
@@ -438,11 +437,30 @@ func structuredMessagesField(messages []SessionStructuredMessage) *[]SessionStru
 	return &messages
 }
 
+func nonNilRawMessages(messages []SessionRawMessageFrame) []SessionRawMessageFrame {
+	if messages == nil {
+		return []SessionRawMessageFrame{}
+	}
+	return messages
+}
+
+func rawMessagesField(messages []SessionRawMessageFrame) *[]SessionRawMessageFrame {
+	messages = nonNilRawMessages(messages)
+	return &messages
+}
+
 func structuredTranscriptMessages(response sessionTranscriptGetResponse) []SessionStructuredMessage {
 	if response.StructuredMessages == nil {
 		return nil
 	}
 	return *response.StructuredMessages
+}
+
+func rawTranscriptMessages(response sessionTranscriptGetResponse) []SessionRawMessageFrame {
+	if response.Messages == nil {
+		return nil
+	}
+	return *response.Messages
 }
 
 // Schema publishes session transcript responses as a discriminated union over
@@ -503,7 +521,8 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 
 	// Huma has already validated:
 	//  - `additionalProperties: false` → unknown fields (e.g. "template") are 422
-	//  - `minLength:"1"` on Title → non-empty when provided
+	//  - `minLength:"1"` on Title → non-empty when provided (a whitespace-only
+	//    title passes that and is refused by the session manager → 400)
 	// The handler only needs to enforce "at least one field" and the
 	// alias-controller-managed rule below.
 	titlePtr := input.Body.Title
@@ -636,7 +655,7 @@ func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissio
 	if _, err := mgr.UpdateTemplateOverrides(id, map[string]string{sessionPermissionModeOptionKey: mode}); err != nil {
 		return nil, humaSessionManagerError(err)
 	}
-	s.state.Poke()
+	s.state.Enqueue(reconcilekey.Session(id))
 
 	info, presponse, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
@@ -658,24 +677,51 @@ func providerHasOption(schema []config.ProviderOption, key string) bool {
 	return false
 }
 
+// sessionActionIdempotencyPath scopes an Idempotency-Key to one session
+// action on one target. The target comes from the URL, not the body, so it
+// must be part of the scope or the same key + body against two sessions would
+// collide. PathEscape keeps a crafted target from forging the "/<action>"
+// boundary. The scope is the target as addressed: the same key sent once by
+// alias and once by bead ID is two independent requests.
+func sessionActionIdempotencyPath(target, action string) string {
+	return "/v0/session/" + url.PathEscape(target) + "/" + action
+}
+
 // --- Session Submit ---
 
 // humaHandleSessionSubmit is the Huma-typed handler for POST /v0/session/{id}/submit.
 
 func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubmitInput) (*SessionSubmitOutput, error) {
+	// Idempotency: accept (and deliver) at most once per Idempotency-Key. A
+	// replay returns the original 202 body — same request_id and event_cursor —
+	// without starting a second delivery. The target is folded into the scope
+	// because it lives in the URL, not the body.
+	accepted, err := withIdempotency(s.idem, sessionActionIdempotencyPath(input.ID, "submit"), input.IdempotencyKey, input.Body,
+		func() (asyncAcceptedBody, error) {
+			return s.acceptSessionSubmit(ctx, input)
+		})
+	if err != nil {
+		return nil, err
+	}
+	return &SessionSubmitOutput{Body: accepted}, nil
+}
+
+// acceptSessionSubmit validates the submit target, starts the asynchronous
+// delivery, and returns the 202 body.
+func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitInput) (asyncAcceptedBody, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
-		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
+		return asyncAcceptedBody{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	if err := s.sessionTargetDeliverable(ctx, store.Store, input.ID); err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
-			return nil, apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", input.ID))
+			return asyncAcceptedBody{}, apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", input.ID))
 		}
 		// Ambiguous bare names and configured-name/live-bead conflicts are
 		// deterministic client addressing errors: map them through the resolve
 		// helper so they surface as 409 (matching /stop, /respond, and the
 		// synchronous message twin) instead of a 500 from humaStoreError.
-		return nil, humaResolveError(err)
+		return asyncAcceptedBody{}, humaResolveError(err)
 	}
 
 	intent := input.Body.Intent
@@ -685,11 +731,11 @@ func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubm
 
 	reqID, reqIDErr := newRequestID()
 	if reqIDErr != nil {
-		return nil, apierr.Internal.Msg(reqIDErr.Error())
+		return asyncAcceptedBody{}, apierr.Internal.Msg(reqIDErr.Error())
 	}
 	eventCursor, cursorErr := s.currentCityEventCursor()
 	if cursorErr != nil {
-		return nil, apierr.Internal.Msg(cursorErr.Error())
+		return asyncAcceptedBody{}, apierr.Internal.Msg(cursorErr.Error())
 	}
 	message := input.Body.Message
 	sessionTarget := input.ID
@@ -708,11 +754,7 @@ func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubm
 		}
 	}()
 
-	out := &SessionSubmitOutput{}
-	out.Body.Status = "accepted"
-	out.Body.RequestID = reqID
-	out.Body.EventCursor = eventCursor
-	return out, nil
+	return asyncAcceptedBody{Status: "accepted", RequestID: reqID, EventCursor: eventCursor}, nil
 }
 
 // --- Session Messages ---
@@ -720,28 +762,43 @@ func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubm
 // humaHandleSessionMessage is the Huma-typed handler for POST /v0/session/{id}/messages.
 
 func (s *Server) humaHandleSessionMessage(ctx context.Context, input *SessionMessageInput) (*SessionMessageOutput, error) {
+	// Idempotency: accept (and deliver) at most once per Idempotency-Key; see
+	// humaHandleSessionSubmit.
+	accepted, err := withIdempotency(s.idem, sessionActionIdempotencyPath(input.ID, "messages"), input.IdempotencyKey, input.Body,
+		func() (asyncAcceptedBody, error) {
+			return s.acceptSessionMessage(ctx, input)
+		})
+	if err != nil {
+		return nil, err
+	}
+	return &SessionMessageOutput{Body: accepted}, nil
+}
+
+// acceptSessionMessage validates the message target, starts the asynchronous
+// delivery, and returns the 202 body.
+func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessageInput) (asyncAcceptedBody, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
-		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
+		return asyncAcceptedBody{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	if err := s.sessionTargetDeliverable(ctx, store.Store, input.ID); err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
-			return nil, apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", input.ID))
+			return asyncAcceptedBody{}, apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", input.ID))
 		}
 		// Ambiguous bare names and configured-name/live-bead conflicts are
 		// deterministic client addressing errors: map them through the resolve
 		// helper so they surface as 409 (matching /stop, /respond, and the
 		// synchronous message twin) instead of a 500 from humaStoreError.
-		return nil, humaResolveError(err)
+		return asyncAcceptedBody{}, humaResolveError(err)
 	}
 
 	reqID, reqIDErr := newRequestID()
 	if reqIDErr != nil {
-		return nil, apierr.Internal.Msg(reqIDErr.Error())
+		return asyncAcceptedBody{}, apierr.Internal.Msg(reqIDErr.Error())
 	}
 	eventCursor, cursorErr := s.currentCityEventCursor()
 	if cursorErr != nil {
-		return nil, apierr.Internal.Msg(cursorErr.Error())
+		return asyncAcceptedBody{}, apierr.Internal.Msg(cursorErr.Error())
 	}
 	message := input.Body.Message
 	sessionTarget := input.ID
@@ -819,11 +876,7 @@ func (s *Server) humaHandleSessionMessage(ctx context.Context, input *SessionMes
 		}
 	}()
 
-	out := &SessionMessageOutput{}
-	out.Body.Status = "accepted"
-	out.Body.RequestID = reqID
-	out.Body.EventCursor = eventCursor
-	return out, nil
+	return asyncAcceptedBody{Status: "accepted", RequestID: reqID, EventCursor: eventCursor}, nil
 }
 
 // --- Session Stop ---
@@ -882,11 +935,13 @@ func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionIDInput)
 	return out, nil
 }
 
-// --- Session Respond ---
+// --- Session Reset ---
 
-// humaHandleSessionRespond is the Huma-typed handler for POST /v0/session/{id}/respond.
-
-func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespondInput) (*SessionRespondOutput, error) {
+// humaHandleSessionReset is the Huma-typed handler for POST /v0/session/{id}/reset.
+// It records a fresh-restart request through the worker boundary (the same
+// path as `gc session reset`) and enqueues the session's reconcile key, which
+// restarts the session on the next continuation epoch.
+func (s *Server) humaHandleSessionReset(ctx context.Context, input *SessionIDInput) (*OKWithIDResponse, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -897,15 +952,56 @@ func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespo
 		return nil, humaResolveError(err)
 	}
 
-	// Huma validates Body.Action (minLength:1); no handler guard needed.
-	mgr := s.sessionManager(store.Store)
-	if err := mgr.Respond(id, runtime.InteractionResponse{
-		RequestID: input.Body.RequestID,
-		Action:    input.Body.Action,
-		Text:      input.Body.Text,
-		Metadata:  input.Body.Metadata,
-	}); err != nil {
+	handle, err := s.workerHandleForSession(store.Store, id)
+	if err != nil {
 		return nil, humaSessionManagerError(err)
+	}
+	if err := handle.Reset(ctx); err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	s.state.Enqueue(reconcilekey.Session(id))
+
+	out := &OKWithIDResponse{}
+	out.Body.Status = "ok"
+	out.Body.ID = id
+	return out, nil
+}
+
+// --- Session Respond ---
+
+// humaHandleSessionRespond is the Huma-typed handler for POST /v0/session/{id}/respond.
+
+func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespondInput) (*SessionRespondOutput, error) {
+	// Idempotency: deliver the interaction response at most once per
+	// Idempotency-Key. The cached value is the resolved session ID, so a replay
+	// rebuilds the identical body without a second Respond (which would fail
+	// with no_pending once the first one cleared the interaction).
+	id, err := withIdempotency(s.idem, sessionActionIdempotencyPath(input.ID, "respond"), input.IdempotencyKey, input.Body,
+		func() (string, error) {
+			store := s.state.SessionsBeadStore()
+			if store.Store == nil {
+				return "", apierr.ServiceUnavailable.Msg("no bead store configured")
+			}
+
+			id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
+			if err != nil {
+				return "", humaResolveError(err)
+			}
+
+			// Huma validates Body.Action (minLength:1); no handler guard needed.
+			mgr := s.sessionManager(store.Store)
+			if err := mgr.Respond(id, runtime.InteractionResponse{
+				RequestID: input.Body.RequestID,
+				Action:    input.Body.Action,
+				Text:      input.Body.Text,
+				Metadata:  input.Body.Metadata,
+			}); err != nil {
+				return "", humaSessionManagerError(err)
+			}
+			return id, nil
+		})
+	if err != nil {
+		return nil, err
 	}
 
 	out := &SessionRespondOutput{}
@@ -1028,6 +1124,16 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
 	}
+	// The wake is recorded (wake_request=explicit). While the name's on_death
+	// hook is queued or running, the reconciler owns the start, as it does
+	// for gc session wake: its start path waits for the hook.
+	if gate, ok := s.state.(OnDeathHookGate); ok && sessionName != "" && gate.OnDeathHookPending(sessionName) {
+		s.state.Enqueue(reconcilekey.Session(id))
+		out := &OKWithIDResponse{}
+		out.Body.Status = "ok"
+		out.Body.ID = id
+		return out, nil
+	}
 	handle, err := s.workerHandleForSession(store.Store, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
@@ -1059,7 +1165,8 @@ func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRename
 		return nil, humaResolveError(err)
 	}
 
-	// Huma validates Body.Title (minLength:1); no handler guard needed.
+	// Huma validates Body.Title (minLength:1); a whitespace-only title passes
+	// that and is refused by the session manager (ErrInvalidSessionTitle → 400).
 	// Validate through the session front door (mirrors humaHandleSessionPatch):
 	// nothing downstream reads the raw bead — rename operates by id. Present-but-
 	// non-session → the existing "not a session" 400; absent → beads.ErrNotFound

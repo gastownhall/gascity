@@ -6,7 +6,102 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
+
+func TestBulkDeleteSafe(t *testing.T) {
+	now := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	maxAge := 24 * time.Hour
+
+	t.Run("all scopes fresh → safe", func(t *testing.T) {
+		scope1 := t.TempDir()
+		scope2 := t.TempDir()
+		writeBackupStateForFreshness(t, scope1, now.Add(-1*time.Hour).Format(time.RFC3339))
+		writeBackupStateForFreshness(t, scope2, now.Add(-2*time.Hour).Format(time.RFC3339))
+		cfg := &config.City{Rigs: []config.Rig{
+			{Path: scope1},
+			{Path: scope2},
+		}}
+		safe, reason := BulkDeleteSafe(scope1, cfg, maxAge, now)
+		if !safe {
+			t.Fatalf("all fresh: want safe=true, got safe=false, reason=%q", reason)
+		}
+		if reason != "" {
+			t.Fatalf("all fresh: want empty reason, got %q", reason)
+		}
+	})
+
+	t.Run("one stale scope → unsafe, reason contains scope label", func(t *testing.T) {
+		fresh := t.TempDir()
+		stale := t.TempDir()
+		writeBackupStateForFreshness(t, fresh, now.Add(-1*time.Hour).Format(time.RFC3339))
+		writeBackupStateForFreshness(t, stale, now.Add(-48*time.Hour).Format(time.RFC3339))
+		cfg := &config.City{Rigs: []config.Rig{
+			{Path: fresh},
+			{Path: stale},
+		}}
+		safe, reason := BulkDeleteSafe(fresh, cfg, maxAge, now)
+		if safe {
+			t.Fatalf("stale scope: want safe=false, got safe=true")
+		}
+		if !strings.Contains(reason, stale) {
+			t.Fatalf("stale scope: reason should name the stale scope %q, got %q", stale, reason)
+		}
+	})
+
+	t.Run("no backup_state.json in any scope → safe (unconfigured is not this check's job)", func(t *testing.T) {
+		scope1 := t.TempDir()
+		scope2 := t.TempDir()
+		cfg := &config.City{Rigs: []config.Rig{
+			{Path: scope1},
+			{Path: scope2},
+		}}
+		safe, reason := BulkDeleteSafe(scope1, cfg, maxAge, now)
+		if !safe {
+			t.Fatalf("no backup config: want safe=true, got safe=false, reason=%q", reason)
+		}
+		if reason != "" {
+			t.Fatalf("no backup config: want empty reason, got %q", reason)
+		}
+	})
+
+	t.Run("migrated scope with a never-synced dolt backup → unsafe", func(t *testing.T) {
+		scope := t.TempDir()
+		writeDoltBackupRegistration(t, scope) // no dolt-backup-state.json
+		cfg := &config.City{Rigs: []config.Rig{{Path: scope}}}
+		safe, reason := BulkDeleteSafe(scope, cfg, maxAge, now)
+		if safe {
+			t.Fatalf("never-synced dolt backup: want safe=false, got safe=true")
+		}
+		if !strings.Contains(reason, "never synced") {
+			t.Fatalf("reason should say the backup never synced, got %q", reason)
+		}
+	})
+
+	// With no config in hand the gate must discover scopes from disk. Narrowing
+	// to the city root would leave the rig unscanned and return safe=true —
+	// failing this gate OPEN on a destructive operation.
+	t.Run("nil config still scans rigs discovered on disk", func(t *testing.T) {
+		city := t.TempDir()
+		rig := filepath.Join(city, "rigs", "alpha")
+		if err := os.MkdirAll(filepath.Join(rig, ".beads"), 0o755); err != nil {
+			t.Fatalf("mkdir rig .beads: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"), []byte(`{}`), 0o644); err != nil {
+			t.Fatalf("write metadata.json: %v", err)
+		}
+		writeBackupStateForFreshness(t, rig, now.Add(-48*time.Hour).Format(time.RFC3339))
+
+		safe, reason := BulkDeleteSafe(city, nil, maxAge, now)
+		if safe {
+			t.Fatalf("nil config with a stale rig: want safe=false, got safe=true")
+		}
+		if !strings.Contains(reason, "ago") {
+			t.Fatalf("reason should describe the stale age, got %q", reason)
+		}
+	})
+}
 
 func writeBackupStateForFreshness(t *testing.T, scopeRoot, timestamp string) {
 	t.Helper()
@@ -17,6 +112,33 @@ func writeBackupStateForFreshness(t *testing.T, scopeRoot, timestamp string) {
 	body := `{"last_dolt_commit":"abc123","timestamp":"` + timestamp + `"}`
 	if err := os.WriteFile(filepath.Join(dir, "backup_state.json"), []byte(body), 0o644); err != nil {
 		t.Fatalf("write backup_state.json: %v", err)
+	}
+}
+
+// writeDoltBackupRegistration marks a scope as migrated to a Dolt backup
+// destination, which is what makes the Dolt state file authoritative for it.
+func writeDoltBackupRegistration(t *testing.T, scopeRoot string) {
+	t.Helper()
+	dir := filepath.Join(scopeRoot, ".beads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	body := `{"backup_url":"file:///tmp/backup-dest","backup_name":"default"}`
+	if err := os.WriteFile(filepath.Join(dir, "dolt-backup.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write dolt-backup.json: %v", err)
+	}
+}
+
+// writeDoltBackupState stamps the file a successful Dolt backup sync writes.
+func writeDoltBackupState(t *testing.T, scopeRoot, lastSync string) {
+	t.Helper()
+	dir := filepath.Join(scopeRoot, ".beads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	body := `{"last_sync":"` + lastSync + `","duration":"25ms"}`
+	if err := os.WriteFile(filepath.Join(dir, "dolt-backup-state.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write dolt-backup-state.json: %v", err)
 	}
 }
 
@@ -89,6 +211,68 @@ func TestBdBackupFreshnessCheck(t *testing.T) {
 		r := NewBdBackupFreshnessCheckForScopeRoots("", []string{fresh, stale}, maxAge, clock).Run(nil)
 		if r.Status != StatusWarning {
 			t.Fatalf("mixed: want StatusWarning, got %v (%s)", r.Status, r.Message)
+		}
+	})
+
+	// A scope that has migrated to a Dolt backup destination must be judged on
+	// the Dolt state file. Reading the legacy backup_state.json there produces a
+	// warning no operator can clear, because a successful sync never writes it.
+	t.Run("migrated scope is judged on the dolt backup state, not the frozen legacy file", func(t *testing.T) {
+		scope := t.TempDir()
+		// Legacy file frozen at migration time — a week stale, and stays that way.
+		writeBackupStateForFreshness(t, scope, now.Add(-168*time.Hour).Format(time.RFC3339Nano))
+		writeDoltBackupRegistration(t, scope)
+		writeDoltBackupState(t, scope, now.Add(-1*time.Minute).Format(time.RFC3339Nano))
+
+		r := NewBdBackupFreshnessCheckForScopeRoots("", []string{scope}, maxAge, clock).Run(nil)
+		if r.Status != StatusOK {
+			t.Fatalf("fresh dolt backup alongside frozen legacy state: want StatusOK, got %v (%s)", r.Status, r.Message)
+		}
+	})
+
+	// The falsifiable case: the check must still fire on a genuinely stale Dolt
+	// backup. A check that only ever passes is worse than the false positive it
+	// replaced, so this failing case is what makes the OK above meaningful.
+	t.Run("stale dolt backup still warns", func(t *testing.T) {
+		scope := t.TempDir()
+		writeDoltBackupRegistration(t, scope)
+		writeDoltBackupState(t, scope, now.Add(-72*time.Hour).Format(time.RFC3339Nano))
+
+		r := NewBdBackupFreshnessCheckForScopeRoots("", []string{scope}, maxAge, clock).Run(nil)
+		if r.Status != StatusWarning {
+			t.Fatalf("stale dolt backup: want StatusWarning, got %v (%s)", r.Status, r.Message)
+		}
+		if !strings.Contains(r.Message, "dolt backup") {
+			t.Fatalf("finding must name the store it describes, got %q", r.Message)
+		}
+	})
+
+	// A registered destination that has never completed a sync is a real gap,
+	// not a scope to skip — the absent state file is the only evidence of it.
+	t.Run("registered dolt backup that never synced warns", func(t *testing.T) {
+		scope := t.TempDir()
+		writeDoltBackupRegistration(t, scope) // no dolt-backup-state.json
+
+		r := NewBdBackupFreshnessCheckForScopeRoots("", []string{scope}, maxAge, clock).Run(nil)
+		if r.Status != StatusWarning {
+			t.Fatalf("never-synced dolt backup: want StatusWarning, got %v (%s)", r.Status, r.Message)
+		}
+		if !strings.Contains(r.Message, "never synced") {
+			t.Fatalf("message should say the backup never synced, got %q", r.Message)
+		}
+	})
+
+	// Unmigrated scopes must keep their existing behavior.
+	t.Run("unmigrated scope still reads the legacy file", func(t *testing.T) {
+		scope := t.TempDir()
+		writeBackupStateForFreshness(t, scope, now.Add(-72*time.Hour).Format(time.RFC3339Nano))
+
+		r := NewBdBackupFreshnessCheckForScopeRoots("", []string{scope}, maxAge, clock).Run(nil)
+		if r.Status != StatusWarning {
+			t.Fatalf("stale legacy backup: want StatusWarning, got %v (%s)", r.Status, r.Message)
+		}
+		if !strings.Contains(r.Message, "embedded-store backup") {
+			t.Fatalf("finding must name the store it describes, got %q", r.Message)
 		}
 	})
 

@@ -68,11 +68,21 @@ func WaitForFileSize(t *testing.T, path string) int64 {
 }
 
 // AssertFileSizeStable fails if path keeps growing during stableFor.
+//
+// stableFor must be a comfortable multiple of the writer's cadence. Too small a
+// multiple fails silently rather than loudly: a live writer descheduled for one
+// window looks exactly like a dead one, so the assertion passes and quietly
+// stops guarding whatever it was pointed at.
+//
+// The give-up deadline is derived from stableFor rather than fixed, because a
+// fixed one silently caps the usable window — with a 3s deadline, asking for 3s
+// of stability makes the pass check race the deadline check and a genuinely
+// dead writer fails.
 func AssertFileSizeStable(t *testing.T, path string, initialSize int64, stableFor time.Duration) {
 	t.Helper()
 	lastSize := initialSize
 	stableSince := time.Now()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(stableFor + 3*time.Second)
 	for {
 		time.Sleep(50 * time.Millisecond)
 		info, err := os.Stat(path)

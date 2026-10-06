@@ -1,0 +1,51 @@
+# Exact-store metadata CAS user contract.
+
+env GC_SESSION=fake
+env GC_BEADS=file
+env GC_DOLT=skip
+
+cd $WORK/city
+
+# Missing and explicit-empty values are distinct at the CLI boundary.
+! exec gc beads metadata-cas gc-1 --store-ref=city:city --key=review_sha --next=new
+stderr '--expected is required'
+
+# A win, its replay, and an ordinary conflict all exit zero with one JSON result.
+exec gc beads metadata-cas gc-1 --store-ref=city:city --key=review_sha --expected= --next=new --json
+stdout '^\{"schema_version":"1","ok":true,"bead_id":"gc-1","store_ref":"city:city","key":"review_sha","outcome":"swapped"\}$'
+
+# The legacy spelling remains compatible.
+exec gc beads metadata-cas gc-1 --store-ref=city:city --key=review_sha --expected= --next=new --format=json
+stdout '"outcome":"already_next"'
+
+exec gc beads metadata-cas gc-1 --store-ref=city:city --key=review_sha --expected= --next=other --json
+stdout '"outcome":"conflict"'
+
+# Canonical JSON cannot be combined with an explicit text format.
+! exec gc beads metadata-cas gc-1 --store-ref=city:city --key=review_sha --expected=new --next=other --json --format=text
+stdout '"ok":false'
+stderr '--json cannot be combined with --format=text'
+
+# Unsafe identifiers and non-canonical scopes fail before opening a store.
+! exec gc beads metadata-cas ../gc-1 --store-ref=city:city --key=review_sha --expected= --next=new
+stderr 'invalid bead id'
+
+! exec gc beads metadata-cas gc-1 --store-ref=city --key=review_sha --expected= --next=new
+stderr 'invalid --store-ref'
+
+exec gc beads metadata-cas --help
+stdout '--store-ref'
+stdout '--expected'
+stdout '--next'
+stdout '--json'
+
+-- city/city.toml --
+[workspace]
+name = "city"
+
+[beads]
+provider = "file"
+-- city/.gc/file-beads-layout --
+scope-local-v1
+-- city/.gc/beads.json --
+{"seq":1,"beads":[{"id":"gc-1","title":"semantic review receipt","status":"open","issue_type":"task"}],"revisions":{"gc-1":1},"revisions_sealed":true}

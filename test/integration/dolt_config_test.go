@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"os/exec"
@@ -70,14 +71,16 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
 
+	env = runBDInitCompat(t, env, wsDir, "dc", port, "")
+
 	// Use the port we started the server on — NOT a port from a local
 	// state file. This proves the "config port → env → bd" path works.
+	// Built from the HOME-isolated env runBDInitCompat returns so these
+	// direct bd invocations stay protected too (see isolateBdHomeEnv).
 	bdEnv := append(append([]string(nil), env...),
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT="+port,
 	)
-
-	runBDInitCompat(t, env, wsDir, "dc", port)
 
 	bdCreate := exec.Command(bdBinary, "create", "config-wired-bead", "--json",
 		"--description=Integration test for issue 011", "-t", "task", "-p", "3")
@@ -117,9 +120,16 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
 
-	// Init with same prefix and server — simulates a second machine's
-	// agent sharing the same bead store.
-	runBDInitCompat(t, env, wsDir2, "dc", port)
+	// Init with same prefix and server, naming the database workspace 1
+	// created — simulates a second machine's agent sharing the same bead
+	// store. --database is the documented way to join a database another
+	// tool already created, and the same invocation gascity's own rig init
+	// uses (initDefaultRigBdStore in cmd/gc/beads_provider_lifecycle.go).
+	// Without it bd mints a fresh project ID for this workspace and then
+	// refuses to open the existing database (PROJECT IDENTITY MISMATCH) —
+	// its guard against silently adopting a foreign project's data, not a
+	// cross-workspace sharing failure.
+	env = runBDInitCompat(t, env, wsDir2, "dc", port, doltDatabaseName(t, wsDir))
 
 	bdList2 := exec.Command(bdBinary, "list", "--json")
 	bdList2.Dir = wsDir2
@@ -136,24 +146,128 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 	t.Logf("SUCCESS: all phases passed — hostname reachable, config port wired, cross-workspace sharing works")
 }
 
+// TestDoltConfigWiringIsolatesHOMEFromSharedServerConfig proves the
+// newIsolatedToolEnv-derived env this file's tests build does not leak the
+// ambient HOME into the bd/dolt subprocesses it drives.
+//
+// newIsolatedToolEnv sets env's own HOME explicitly (via isolateGCHomeEnv/
+// integrationEnvFor). Pure bd/dolt-exec callers like this file's
+// runBDInitCompat and its direct exec.Command(bdBinary, ...) calls inherit
+// that HOME unchanged — t.Setenv("HOME", ...) cannot reach it, so this test
+// substitutes a controlled stand-in for "whatever the real
+// invoking user's home happens to contain" instead, matching
+// TestBdStoreMailWispInsertIsolatesHOMEFromSharedServerConfig's technique.
+func TestDoltConfigWiringIsolatesHOMEFromSharedServerConfig(t *testing.T) {
+	requireDoltIntegration(t)
+	env := newIsolatedToolEnv(t, true)
+
+	pollutedHome := t.TempDir()
+	beadsDir := filepath.Join(pollutedHome, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("creating polluted HOME .beads dir: %v", err)
+	}
+	cfg := "no-db: true\ndolt:\n    shared-server: true\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("writing polluted HOME config.yaml: %v", err)
+	}
+	env = replaceEnv(env, "HOME", pollutedHome)
+
+	doltDataDir := filepath.Join(t.TempDir(), "dolt-data")
+	port := startDoltServerOnAllInterfaces(t, env, doltDataDir)
+
+	wsDir := filepath.Join(t.TempDir(), "test-workspace")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitInit := exec.Command("git", "init", "--quiet")
+	gitInit.Dir = wsDir
+	if out, err := gitInit.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+
+	env = runBDInitCompat(t, env, wsDir, "hi", port, "")
+
+	bdCreate := exec.Command(bdBinary, "create", "home-isolation probe", "--json",
+		"--description=Integration test for HOME isolation", "-t", "task", "-p", "3")
+	bdCreate.Dir = wsDir
+	bdCreate.Env = env
+	out, err := bdCreate.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bd create under a shared-server HOME: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "home-isolation probe") {
+		t.Fatalf("bd create output missing bead title:\n%s", out)
+	}
+
+	bdList := exec.Command(bdBinary, "list", "--json")
+	bdList.Dir = wsDir
+	bdList.Env = env
+	listOut, err := bdList.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bd list under a shared-server HOME: %v\n%s", err, listOut)
+	}
+	if !strings.Contains(string(listOut), "home-isolation probe") {
+		t.Fatalf("bd list output missing created bead:\n%s", listOut)
+	}
+}
+
 // runBDInitCompat initializes beads against a shared server, compatible
-// with bd v0.60.0 (which lacks --skip-agents).
-func runBDInitCompat(t *testing.T, env []string, dir, prefix, port string) {
+// with bd v0.60.0 (which lacks --skip-agents). A non-empty database joins
+// that existing server database instead of letting bd derive a new one
+// from prefix; leave it empty to create the database.
+//
+// Returns env with HOME isolated (see isolateBdHomeEnv) — callers that build
+// further exec.Command invocations from env after this call (this file's
+// direct `bd create`/`bd list` probes) must capture and reuse the returned
+// value, not their pre-call env, or those later invocations stay exposed to
+// the same shared-server misroute this function itself guards against.
+func runBDInitCompat(t *testing.T, env []string, dir, prefix, port, database string) []string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	env = isolateBdHomeEnv(env)
+	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bdBinary, "init", "--server",
+	args := []string{
+		"init", "--server",
 		"--server-host", "127.0.0.1", "--server-port", port,
-		"-p", prefix, "--skip-hooks")
+		"-p", prefix, "--skip-hooks",
+	}
+	if database != "" {
+		args = append(args, "--database", database)
+	}
+	cmd := exec.CommandContext(ctx, bdBinary, args...)
 	cmd.Dir = dir
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
-		t.Fatalf("bd init timed out: %s", out)
+		t.Fatalf("bd init timed out after %s: %s", bdInitTimeout, out)
 	}
 	if err != nil {
 		t.Fatalf("bd init: exit status %v: %s", err, out)
 	}
+	return env
+}
+
+// doltDatabaseName returns the server-side Dolt database name bd recorded
+// for an already-initialized workspace. Reading it back (rather than
+// assuming bd's prefix-to-database derivation) keeps the sharing assertion
+// honest if that derivation ever changes.
+func doltDatabaseName(t *testing.T, wsDir string) string {
+	t.Helper()
+	path := filepath.Join(wsDir, ".beads", "metadata.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading beads metadata: %v", err)
+	}
+	var meta struct {
+		DoltDatabase string `json:"dolt_database"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatalf("parsing %s: %v", path, err)
+	}
+	if meta.DoltDatabase == "" {
+		t.Fatalf("%s records no dolt_database — cannot join it from a second workspace:\n%s", path, raw)
+	}
+	return meta.DoltDatabase
 }
 
 // startDoltServerOnAllInterfaces starts a Dolt server bound to 0.0.0.0
@@ -196,7 +310,7 @@ func startDoltServerOnAllInterfaces(t *testing.T, env []string, dataDir string) 
 	go func() { waitCh <- cmd.Wait() }()
 
 	// Wait for server to be ready.
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(doltServerReadyTimeout)
 	addr := net.JoinHostPort("127.0.0.1", port)
 	for {
 		conn, dialErr := net.DialTimeout("tcp", addr, 200*time.Millisecond)
@@ -214,7 +328,7 @@ func startDoltServerOnAllInterfaces(t *testing.T, env []string, dataDir string) 
 			<-waitCh
 			_ = logFile.Close()
 			logBytes, _ := os.ReadFile(logPath)
-			t.Fatalf("dolt sql-server did not become ready on %s within 15s:\n%s", addr, logBytes)
+			t.Fatalf("dolt sql-server did not become ready on %s within %s:\n%s", addr, doltServerReadyTimeout, logBytes)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

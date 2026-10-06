@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestBindingServiceBindEnforcesOwnershipAndConflict(t *testing.T) {
@@ -2277,13 +2278,13 @@ func TestGroupServiceRemoveParticipantRetriesTranscriptCleanup(t *testing.T) {
 	}
 }
 
-// overrideResolveLiveSessionID substitutes resolveLiveSessionID for the
+// overrideResolveLiveSession substitutes resolveLiveSession for the
 // duration of the test, restoring the original in t.Cleanup (Theme 18).
-func overrideResolveLiveSessionID(t *testing.T, fn func(beads.Store, string) (string, error)) {
+func overrideResolveLiveSession(t *testing.T, fn func(session.AddressDirectory, string) (session.Info, error)) {
 	t.Helper()
-	prev := resolveLiveSessionID
-	resolveLiveSessionID = fn
-	t.Cleanup(func() { resolveLiveSessionID = prev })
+	prev := resolveLiveSession
+	resolveLiveSession = fn
+	t.Cleanup(func() { resolveLiveSession = prev })
 }
 
 // overrideReassignmentTranscript substitutes the transcript syncer used by
@@ -2364,11 +2365,15 @@ func TestGroupServiceResolveInboundFollowsRespawnedSession(t *testing.T) {
 	if err := store.Close(sessAID); err != nil {
 		t.Fatalf("close session A bead: %v", err)
 	}
-	overrideResolveLiveSessionID(t, func(_ beads.Store, name string) (string, error) {
+	overrideResolveLiveSession(t, func(_ session.AddressDirectory, name string) (session.Info, error) {
 		if name == "pl-alpha" {
-			return sessBID, nil
+			return session.Info{
+				ID:                  sessBID,
+				Type:                session.BeadType,
+				SessionNameMetadata: name,
+			}, nil
 		}
-		return "", errors.New("not found")
+		return session.Info{}, session.ErrSessionNotFound
 	})
 
 	decision, err := svc.ResolveInbound(context.Background(), ExternalInboundMessage{Conversation: ref})
@@ -2407,11 +2412,15 @@ func TestGroupServiceResolveOutboundFollowsRespawnedSession(t *testing.T) {
 	if err := store.Close(sessAID); err != nil {
 		t.Fatalf("close session A bead: %v", err)
 	}
-	overrideResolveLiveSessionID(t, func(_ beads.Store, name string) (string, error) {
+	overrideResolveLiveSession(t, func(_ session.AddressDirectory, name string) (session.Info, error) {
 		if name == "pl-alpha" {
-			return sessBID, nil
+			return session.Info{
+				ID:                  sessBID,
+				Type:                session.BeadType,
+				SessionNameMetadata: name,
+			}, nil
 		}
-		return "", errors.New("not found")
+		return session.Info{}, session.ErrSessionNotFound
 	})
 
 	// Session B should now be authorized to publish (participant overlay matched it).
@@ -2930,9 +2939,10 @@ func TestGroupServiceResolveInboundDeadSessionNameReturnsStaleID(t *testing.T) {
 		t.Fatalf("UpsertParticipant: %v", err)
 	}
 
-	// Simulate session gone: resolver returns error for any name.
-	overrideResolveLiveSessionID(t, func(_ beads.Store, _ string) (string, error) {
-		return "", errors.New("session not found")
+	// Simulate a definitive session miss: routing retains the stored ID for
+	// compatibility, while indeterminate directory errors propagate.
+	overrideResolveLiveSession(t, func(_ session.AddressDirectory, _ string) (session.Info, error) {
+		return session.Info{}, session.ErrSessionNotFound
 	})
 
 	// Overlay returns "" → routing falls back to stored (stale) session ID; no panic.

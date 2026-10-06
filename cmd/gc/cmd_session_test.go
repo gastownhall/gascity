@@ -20,7 +20,9 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -89,6 +91,29 @@ func TestFormatDuration(t *testing.T) {
 		got := formatDuration(tt.d)
 		if got != tt.want {
 			t.Errorf("formatDuration(%v) = %q, want %q", tt.d, got, tt.want)
+		}
+	}
+}
+
+func TestSessionKillHelpDistinguishesProviderConversationContinuity(t *testing.T) {
+	long := newSessionKillCmd(io.Discard, io.Discard).Long
+	for _, want := range []string{
+		"Gas City bead continuity",
+		"provider resume",
+		"provider conversation continuity is not guaranteed",
+		"lifecycle state to asleep",
+	} {
+		if !strings.Contains(long, want) {
+			t.Fatalf("session kill help missing %q:\n%s", want, long)
+		}
+	}
+	for _, unwanted := range []string{
+		"without losing its conversation history",
+		"remains marked as active",
+		"without changing its bead state",
+	} {
+		if strings.Contains(long, unwanted) {
+			t.Fatalf("session kill help still carries stale claim %q:\n%s", unwanted, long)
 		}
 	}
 }
@@ -860,7 +885,7 @@ func TestBuildAttachmentCache_UsesSessionInfoForActiveSessions(t *testing.T) {
 	sleepingRunningCalls := 0
 	for _, call := range sp.Calls {
 		switch call.Method {
-		case "IsAttached":
+		case "IsAttached", "IsAttachedWithError":
 			switch call.Name {
 			case "active":
 				activeCalls++
@@ -2426,14 +2451,15 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 			t.Fatalf("timed out waiting for controller pokes, got %v", gotCommands)
 		}
 	}
-	wantCommands := []string{"ping\n", "poke\n", "poke\n"}
+	b := onlySessionBead(t, cityDir)
+	// The probe poke is key-less; the post-create enqueue carries the new
+	// session's key.
+	wantCommands := []string{"ping\n", "poke\n", keyedPokeCommand(reconcilekey.Session(b.ID)) + "\n"}
 	for i, want := range wantCommands {
 		if gotCommands[i] != want {
 			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)
 		}
 	}
-
-	b := onlySessionBead(t, cityDir)
 	if got := b.Metadata["alias"]; got != "mayor" {
 		t.Fatalf("alias = %q, want mayor", got)
 	}
@@ -2525,8 +2551,41 @@ func TestCmdSessionNew_IgnoresUnmanagedSupervisorSocket(t *testing.T) {
 	}
 }
 
+// namedSessionTestWorkspace is the workspace_name this fixture writes to
+// .gc/site.toml. gc derives the tmux socket from the workspace name, so any
+// test using this fixture that reaches the real tmux adapter drives a real
+// server on "tmux -L test-city".
+const namedSessionTestWorkspace = "test-city"
+
+// killNamedSessionTmuxServer tears down the real tmux server this fixture's
+// workspace name binds to.
+//
+// Registering it as a t.Cleanup is what keeps the server from outliving the
+// test. TestMain points TMUX_TMPDIR at a process-wide socket root
+// (tmuxtest.ConfigureProcessEnv, cmd/gc/main_test.go) that is removed only
+// after m.Run() returns, so this cleanup can always reach the server by
+// socket name no matter when it runs. What leaked before was servers
+// surviving until that end-of-package removal unlinked their sockets: at
+// that point no client can find them to kill by name, and they just sit
+// there.
+//
+// The "test-city" server is shared by every caller of this fixture, so the
+// teardown is only safe while none of them call t.Parallel(): a parallel
+// caller's cleanup would kill a server another test is still using.
+//
+// Kill failures are ignored: most tests never start a server, so "no server"
+// is the common case, not an error.
+func killNamedSessionTmuxServer(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		tm := tmux.NewTmuxWithConfig(tmux.Config{SocketName: namedSessionTestWorkspace})
+		_ = tm.TeardownServer()
+	})
+}
+
 func writeNamedSessionCityTOML(t *testing.T, dir string) {
 	t.Helper()
+	killNamedSessionTmuxServer(t)
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
@@ -2547,8 +2606,8 @@ provider = "file"
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
 	writeBuiltinImportsFixture(t, dir, "core")
-	if err := os.WriteFile(filepath.Join(dir, ".gc", "site.toml"), []byte(`workspace_name = "test-city"
-`), 0o644); err != nil {
+	siteTOML := fmt.Sprintf("workspace_name = %q\n", namedSessionTestWorkspace)
+	if err := os.WriteFile(filepath.Join(dir, ".gc", "site.toml"), []byte(siteTOML), 0o644); err != nil {
 		t.Fatalf("WriteFile(.gc/site.toml): %v", err)
 	}
 	writeCatalogFile(t, dir, "agents/mayor/agent.toml", "provider = \"codex\"\nstart_command = \"echo\"\n")
@@ -3153,7 +3212,7 @@ func runSessionListProviderFailureHelper(t *testing.T, scenario, markerPath, std
 	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
 		return nil, errors.New("injected provider failure")
 	}
-	args := []string{"session", "list"}
+	args := []string{"--city", ".", "session", "list"}
 	if scenario == "json" {
 		args = append(args, "--json")
 	} else if scenario != "text" {

@@ -26,3 +26,25 @@ func TestProgressStallTimeoutDuration(t *testing.T) {
 		})
 	}
 }
+
+func TestClaimHolderStallTimeoutDuration(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{"unset disables (zero)", "", 0},
+		{"valid duration", "20m", 20 * time.Minute},
+		{"too small clamps to safety floor", "30s", ProgressStallTimeoutMinimum},
+		{"unparseable disables (zero)", "not-a-duration", 0},
+		{"negative disables (zero)", "-5m", 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &SessionConfig{ClaimHolderStallTimeout: tc.value}
+			if got := s.ClaimHolderStallTimeoutDuration(); got != tc.want {
+				t.Errorf("ClaimHolderStallTimeoutDuration(%q) = %v, want %v", tc.value, got, tc.want)
+			}
+		})
+	}
+}

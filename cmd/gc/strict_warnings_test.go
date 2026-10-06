@@ -1,6 +1,50 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
+)
+
+// TestAlwaysFreshWakeModeWarningIsNonFatalAndEmitted proves the always+fresh
+// advisory behaves like a warning on both downstream re-classifiers of config
+// warnings: strict mode — on by default for `gc start` — keeps it NON-FATAL,
+// and the agent warning-emit path SURFACES it. The bundled gastown pack trips
+// this warning, so without the config.IsAlwaysFreshWakeModeWarning wiring
+// `gc start --foreground` / `--controller` / `--dry-run` exits 1 on the shipped
+// example city, and `gc agent` drops the advisory silently.
+//
+// The warning text is derived from config.ValidateNamedSessions rather than
+// hardcoded so this test cannot pass against a string the validator no longer
+// emits.
+func TestAlwaysFreshWakeModeWarningIsNonFatalAndEmitted(t *testing.T) {
+	warnings, err := config.ValidateNamedSessions(&config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "watchdog", WakeMode: "fresh"}},
+		NamedSessions: []config.NamedSession{{
+			Template: "watchdog",
+			Mode:     "always",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("config.ValidateNamedSessions: %v", err)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want exactly the always+fresh advisory", warnings)
+	}
+	w := warnings[0]
+	if !config.IsAlwaysFreshWakeModeWarning(w) {
+		t.Fatalf("always+fresh warning not recognized by its own classifier: %q", w)
+	}
+
+	fatal, nonFatal := splitStrictConfigWarnings([]string{w})
+	if len(fatal) != 0 || len(nonFatal) != 1 {
+		t.Errorf("strict split: fatal=%v nonFatal=%v, want the always+fresh warning non-fatal", fatal, nonFatal)
+	}
+	if !shouldEmitLoadCityConfigWarning(w) {
+		t.Error("an always+fresh warning must be emitted to the operator, not swallowed")
+	}
+}
 
 func TestSplitStrictConfigWarnings_SiteBindingWarningsAreNonFatal(t *testing.T) {
 	fatal, nonFatal := splitStrictConfigWarnings([]string{
@@ -62,6 +106,36 @@ func TestSplitStrictConfigWarnings_IdleSleepMaskingWarningIsNonFatal(t *testing.
 	}
 	if len(nonFatal) != 1 {
 		t.Fatalf("nonFatal = %v, want idle sleep masking warning", nonFatal)
+	}
+}
+
+// TestSplitStrictConfigWarnings_NonPersistentRigPathIsNonFatal is the funnel
+// half of the boot audit's warn-only contract: a warning the config package
+// classifies non-fatal must actually land in the non-fatal bucket here, because
+// this is the split `gc start` turns into exit 1.
+//
+// The other half — that the audit's real message satisfies that classifier —
+// is pinned in the config package by
+// TestNonPersistentRigPathWarningIsExemptFromStrictMode, which derives the text
+// from the producer. Together they cover production text -> non-fatal.
+func TestSplitStrictConfigWarnings_NonPersistentRigPathIsNonFatal(t *testing.T) {
+	durability := `rig "adopt" is bound to /tmp/adopt, which is on tmpfs and does not survive a restart of ` +
+		"this machine or container: the rig content is lost on the next restart. Move it under the city " +
+		"directory (/city) and re-register it with `gc rig add`"
+	if !config.IsNonFatalSiteBindingWarning(durability) {
+		t.Fatalf("sample durability warning is not recognized by its own classifier: %q", durability)
+	}
+
+	fatal, nonFatal := splitStrictConfigWarnings([]string{
+		durability,
+		`city agent "mayor" shadows agent of the same name from import "gs"`,
+	})
+
+	if len(fatal) != 1 || fatal[0] != `city agent "mayor" shadows agent of the same name from import "gs"` {
+		t.Fatalf("fatal = %v, want only the shadow warning", fatal)
+	}
+	if len(nonFatal) != 1 {
+		t.Fatalf("nonFatal = %v, want the durability advisory to stay a warning", nonFatal)
 	}
 }
 

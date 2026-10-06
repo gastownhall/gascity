@@ -25,6 +25,7 @@ city | rig) ;;
 esac
 
 STATE_ROOT="$GC_STORE_ROOT"
+DEPS_FILE="$STATE_ROOT/.deps.json"
 
 # normalize_bead_output applies metadata reconstruction to a bead JSON object.
 # Extracts meta:<key>=<value> labels into a .metadata map and removes them
@@ -158,11 +159,22 @@ update)
 	input=$(cat)
 	current=$(cat "$bead_file")
 
-	# Apply description if present (non-null).
-	has_desc=$(echo "$input" | jq 'has("description") and .description != null')
-	if [ "$has_desc" = "true" ]; then
-		new_desc=$(echo "$input" | jq -r '.description')
-		current=$(echo "$current" | jq --arg d "$new_desc" '.description = $d')
+	# Apply the scalar string fields the update request may carry. Omitted
+	# fields are left unchanged.
+	for field in title status type description; do
+		has_field=$(echo "$input" | jq --arg f "$field" 'has($f) and .[$f] != null')
+		if [ "$has_field" = "true" ]; then
+			new_value=$(echo "$input" | jq -r --arg f "$field" '.[$f]')
+			current=$(echo "$current" | jq --arg f "$field" --arg v "$new_value" '.[$f] = $v')
+		fi
+	done
+
+	# Apply priority if present (non-null). Numeric, so it is not part of the
+	# string loop above.
+	has_priority=$(echo "$input" | jq 'has("priority") and .priority != null')
+	if [ "$has_priority" = "true" ]; then
+		new_priority=$(echo "$input" | jq '.priority')
+		current=$(echo "$current" | jq --argjson p "$new_priority" '.priority = $p')
 	fi
 
 	# Apply parent_id if present (non-null).
@@ -195,6 +207,12 @@ update)
 		current=$(echo "$current" | jq --argjson nl "$new_labels" '.labels = (.labels + $nl | unique)')
 	fi
 
+	# Remove labels if present.
+	drop_labels=$(echo "$input" | jq -c '.remove_labels // []')
+	if [ "$drop_labels" != "[]" ]; then
+		current=$(echo "$current" | jq --argjson dl "$drop_labels" '.labels = [.labels[] | select(. as $l | $dl | index($l) | not)]')
+	fi
+
 	echo "$current" >"$bead_file"
 	;;
 
@@ -222,8 +240,17 @@ ready)
 		echo "[]"
 		exit 0
 	}
+	deps="[]"
+	[ -f "$DEPS_FILE" ] && deps=$(cat "$DEPS_FILE")
 	# shellcheck disable=SC2086
-	jq -s "[.[] | select(.status == \"open\") | $JQ_NORMALIZE_BEAD]" $bead_files
+	jq -s --argjson deps "$deps" "
+	  [.[] | $JQ_NORMALIZE_BEAD] as \$beads
+	  | (\$beads | map({key: .id, value: {status: .status, work_outcome: (.metadata[\"gc.work_outcome\"] // \"\")}}) | from_entries) as \$byid
+	  | [\$beads[] | select(.status == \"open\") | . as \$b | select(
+	      [\$deps[] | select(.issue_id == \$b.id and (.type == \"blocks\" or .type == \"waits-for\" or .type == \"conditional-blocks\"))]
+	      | all(\$byid[.depends_on_id].status == \"closed\" and \$byid[.depends_on_id].work_outcome != \"blocked\")
+	    )]
+	" $bead_files
 	;;
 
 children)
@@ -271,6 +298,42 @@ set-metadata)
 	jq --arg ml "$meta_label" --arg mp "$meta_prefix" '
       .labels = ([.labels // [] | .[] | select(startswith($mp) | not)] + [$ml])
     ' "$bead_file" >"$bead_file.tmp" && mv "$bead_file.tmp" "$bead_file"
+	;;
+
+dep-add)
+	issue_id="$1"
+	depends_on_id="$2"
+	dep_type="$3"
+	current="[]"
+	[ -f "$DEPS_FILE" ] && current=$(cat "$DEPS_FILE")
+	updated=$(echo "$current" | jq -c \
+		--arg i "$issue_id" --arg d "$depends_on_id" --arg t "$dep_type" \
+		'[.[] | select(.issue_id != $i or .depends_on_id != $d)] + [{issue_id: $i, depends_on_id: $d, type: $t}]')
+	echo "$updated" >"$DEPS_FILE.tmp" && mv "$DEPS_FILE.tmp" "$DEPS_FILE"
+	;;
+
+dep-remove)
+	issue_id="$1"
+	depends_on_id="$2"
+	if [ -f "$DEPS_FILE" ]; then
+		updated=$(jq -c --arg i "$issue_id" --arg d "$depends_on_id" \
+			'[.[] | select(.issue_id != $i or .depends_on_id != $d)]' "$DEPS_FILE")
+		echo "$updated" >"$DEPS_FILE.tmp" && mv "$DEPS_FILE.tmp" "$DEPS_FILE"
+	fi
+	;;
+
+dep-list)
+	id="$1"
+	direction="${2:-down}"
+	if [ ! -f "$DEPS_FILE" ]; then
+		echo "[]"
+		exit 0
+	fi
+	if [ "$direction" = "up" ]; then
+		jq -c --arg id "$id" '[.[] | select(.depends_on_id == $id)]' "$DEPS_FILE"
+	else
+		jq -c --arg id "$id" '[.[] | select(.issue_id == $id)]' "$DEPS_FILE"
+	fi
 	;;
 
 mol-cook)

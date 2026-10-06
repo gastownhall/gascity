@@ -115,6 +115,66 @@ func TestDoContextListJSON(t *testing.T) {
 	}
 }
 
+func TestContextAddProviderFlagsPersistAndProjectJSON(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	var stdout, stderr bytes.Buffer
+	cmd := newContextAddCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{
+		"prod",
+		"--url", "https://city.example",
+		"--credential-audience", "gascity-control",
+		"--credential-required-scopes", `["gascity:read","gascity:write"]`,
+		"--credential-org", "org-acme",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("context add error = %v, stderr=%q", err, stderr.String())
+	}
+	file, err := clientcontext.Load(DefaultPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	context, ok := file.Lookup("prod")
+	if !ok {
+		t.Fatal("saved context not found")
+	}
+	if context.CredentialAudience != "gascity-control" || context.CredentialOrg != "org-acme" ||
+		len(context.CredentialRequiredScopes) != 2 {
+		t.Fatalf("saved provider tuple = %+v", context)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := doContextList(true, &stdout, &stderr); code != 0 {
+		t.Fatalf("context list code = %d, stderr=%q", code, stderr.String())
+	}
+	var record contextJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.CredentialAudience != "gascity-control" || record.CredentialOrg != "org-acme" ||
+		len(record.CredentialRequiredScopes) != 2 {
+		t.Fatalf("JSON provider tuple = %+v", record)
+	}
+}
+
+func TestContextAddRejectsMalformedProviderScopesJSON(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	var stdout, stderr bytes.Buffer
+	cmd := newContextAddCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{
+		"prod",
+		"--url", "https://city.example",
+		"--credential-audience", "gascity-control",
+		"--credential-required-scopes", `not-json`,
+	})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("context add accepted malformed scopes JSON")
+	}
+	if !strings.Contains(stderr.String(), "JSON array") {
+		t.Fatalf("stderr = %q, want JSON array error", stderr.String())
+	}
+}
+
 func TestDoContextCurrentRemoteViaContextFlag(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	var out, errb bytes.Buffer

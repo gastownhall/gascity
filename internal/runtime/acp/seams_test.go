@@ -63,13 +63,14 @@ func TestSeamsAcpLifecycle(t *testing.T) {
 	}
 }
 
-// TestSeamsAcpTransportAndCaps pins the bespoke "acp" transport identity and the
-// (empty) capability mapping.
+// TestSeamsAcpTransportAndCaps pins the bespoke "acp" transport identity and
+// the capability mapping: acp reports activity (session/update notifications,
+// durably stamped) but never attachment (headless, no terminal).
 func TestSeamsAcpTransportAndCaps(t *testing.T) {
 	rt, tp := newTestProvider(t).Seams()
 
-	if caps := rt.Capabilities(); caps.ReportActivity {
-		t.Fatalf("PlaceCapabilities = %+v; want ReportActivity false (acp declares none)", caps)
+	if caps := rt.Capabilities(); !caps.ReportActivity {
+		t.Fatalf("PlaceCapabilities = %+v; want ReportActivity true (acp stamps session/update activity)", caps)
 	}
 	if tp.Capabilities().ReportAttachment {
 		t.Fatal("TransportCapabilities.ReportAttachment should be false for acp")
@@ -110,5 +111,24 @@ func TestSeamsAcpOpenAbsent(t *testing.T) {
 	rt, _ := newTestProvider(t).Seams()
 	if pl, ok, err := rt.Open(context.Background(), "ghost"); pl != nil || ok || err != nil {
 		t.Fatalf("Open(absent) = %v, %v, %v; want nil, false, nil", pl, ok, err)
+	}
+}
+
+// ListRunning is complete: a socket that cannot be classified makes the
+// listing partial instead of dropping the name, so an error-free listing is
+// proof of absence.
+// Kills: the attestation missing from the provider, so absence stays
+// unattested for acp and subprocess cities.
+func TestListRunningIsAttested(t *testing.T) {
+	if !runtime.ListRunningAttested(&Provider{}) {
+		t.Error("*Provider does not attest ListRunning")
+	}
+}
+
+// Kills: the attestation lost behind the seam adapter, which production
+// constructs.
+func TestCutoverForwardsListingAttestation(t *testing.T) {
+	if sp := seamBack(&Provider{}); !runtime.ListRunningAttested(sp) {
+		t.Errorf("%T does not forward the listing attestation", sp)
 	}
 }

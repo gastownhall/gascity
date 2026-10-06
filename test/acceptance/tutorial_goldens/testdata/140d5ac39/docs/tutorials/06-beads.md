@@ -19,14 +19,14 @@ A bead is a unit of work with an ID, a title, a status, and a type. We use the `
 ```shell
 ~/my-city
 $ bd list
-○ mc-194 ● P2 pancakes
-├── ○ mc-194.3 ● P2 Combine wet and dry
-├── ○ mc-194.4 ● P2 Cook the pancakes
-└── ○ mc-194.5 ● P2 Serve
-○ mc-a4l ● P2 Refactor auth module
-○ mc-d4g ● P2 Sprint 42
-○ mc-io4 ● P2 mayor
-○ mc-xp7 ● P2 Update API docs
+○ mc-194 P2 pancakes
+├── ○ mc-194.3 P2 Combine wet and dry
+├── ○ mc-194.4 P2 Cook the pancakes
+└── ○ mc-194.5 P2 Serve
+○ mc-a4l P2 Refactor auth module
+○ mc-d4g P2 Sprint 42
+○ mc-io4 P2 mayor
+○ mc-xp7 P2 Update API docs
 
 Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred
 ```
@@ -101,8 +101,8 @@ $ bd close mc-ykp
 ✓ Closed mc-ykp — Fix the login bug: Closed
 
 $ bd list --status open --flat
-○ mc-a4l [● P2] [feature] - Refactor auth module
-○ mc-xp7 [● P2] [task]    - Update API docs
+○ mc-a4l [P2] [feature] - Refactor auth module
+○ mc-xp7 [P2] [task]    - Update API docs
 ```
 
 Note that the flag is `--status` (`--state` is a different command for state dimensions).
@@ -114,8 +114,8 @@ The bead store is effectively the execution state of the entire system. Every se
 ```shell
 ~/my-city
 $ bd list --status in_progress --flat
-◐ mc-io4 [● P2] [session] - mayor
-◐ mc-a4l [● P2] [feature] - Refactor auth module
+◐ mc-io4 [P2] [session] - mayor
+◐ mc-a4l [P2] [feature] - Refactor auth module
 ```
 
 This is what makes Gas City crash-safe. Work isn't held in memory or tracked by a running process — it's persisted in the store. If an agent dies, its beads stay open. When the agent restarts, its hooks discover the same work and pick up where it left off. If the whole city stops and restarts, the bead store is the ground truth for what was happening and what still needs to happen.
@@ -135,7 +135,7 @@ $ bd label add mc-a4l frontend
 ✓ Added label 'frontend' to mc-a4l
 
 $ bd list --label priority:high --flat
-○ mc-a4l [● P2] [feature] - Refactor auth module
+○ mc-a4l [P2] [feature] - Refactor auth module
 ```
 
 `bd label add` takes a single label per call — apply multiples one at a time.
@@ -327,11 +327,11 @@ You don't usually work with beads directly. The higher-level commands — `gc se
 ```shell
 ~/my-city
 $ bd list --status open --type task --flat
-○ mc-xp7 [● P2] [task] - Update API docs
-○ mc-2wx.1 [● P2] [task] - Mix dry ingredients (parent: mc-2wx, blocks: mc-2wx.3)
+○ mc-xp7 [P2] [task] - Update API docs
+○ mc-2wx.1 [P2] [task] - Mix dry ingredients (parent: mc-2wx, blocks: mc-2wx.3)
 
 $ bd show mc-a4l
-○ mc-a4l · Refactor auth module   [● P2 · OPEN]
+○ mc-a4l · Refactor auth module   [P2 · OPEN]
 Owner: dbox · Type: feature
 Created: 2026-04-08 · Updated: 2026-04-08
 
@@ -342,10 +342,10 @@ METADATA
   reviewer: sky
 
 PARENT
-  ↑ ○ mc-d4g: Sprint 42 ● P2
+  ↑ ○ mc-d4g: Sprint 42 P2
 
 BLOCKS
-  ← ○ mc-xp7: Update API docs ● P2
+  ← ○ mc-xp7: Update API docs P2
 
 $ bd close mc-a4l
 ✓ Closed mc-a4l — Refactor auth module: Closed

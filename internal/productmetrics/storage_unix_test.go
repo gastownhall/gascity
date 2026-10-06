@@ -19,10 +19,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/gchome"
 	"github.com/gastownhall/gascity/internal/testutil"
 	"golang.org/x/sys/unix"
 )
+
+func TestValidateAncestorDirectoryAcceptsNamespaceOverflowOnlyAtRoot(t *testing.T) {
+	metadata := storageMetadata{
+		uid:   namespaceOverflowUID,
+		mode:  unix.S_IFDIR | 0o755,
+		nlink: 1,
+	}
+	if err := validateAncestorDirectory(metadata, "/", 1000); err != nil {
+		t.Fatalf("overflow-owned filesystem root rejected: %v", err)
+	}
+	if err := validateAncestorDirectory(metadata, "/tmp", 1000); err == nil {
+		t.Fatal("overflow-owned descendant accepted")
+	}
+}
 
 func inspectStorageTestHome(t *testing.T, createRoot bool) gchome.ProductUsageHome {
 	t.Helper()
@@ -3678,6 +3693,39 @@ func TestStorageAdvisoryLockUsesStableInodeAndHonorsContext(t *testing.T) {
 	}
 }
 
+func TestStorageTryUploaderLockDistinguishesFreeAndContended(t *testing.T) {
+	inspection := inspectStorageTestHome(t, true)
+	firstRoot, err := openStorageRootMutable(inspection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = firstRoot.Close() }()
+	secondRoot, err := openStorageRootMutable(inspection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = secondRoot.Close() }()
+
+	first, acquired, err := firstRoot.tryAcquireUploaderLock()
+	if err != nil || !acquired {
+		t.Fatalf("first tryAcquireUploaderLock = (%v, %v), want acquired", acquired, err)
+	}
+	second, acquired, err := secondRoot.tryAcquireUploaderLock()
+	if err != nil || acquired || second != nil {
+		t.Fatalf("contended tryAcquireUploaderLock = (%v, %v, %v), want no lock and no error", second, acquired, err)
+	}
+	if err := first.Release(); err != nil {
+		t.Fatal(err)
+	}
+	second, acquired, err = secondRoot.tryAcquireUploaderLock()
+	if err != nil || !acquired {
+		t.Fatalf("tryAcquireUploaderLock after release = (%v, %v), want acquired", acquired, err)
+	}
+	if err := second.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestStorageCloseRacesOperationsWithTypedClosedResult(t *testing.T) {
 	inspection := inspectStorageTestHome(t, true)
 	seed, err := openStorageRootMutable(inspection)
@@ -3797,6 +3845,10 @@ func TestStorageAdvisoryLockRejectsHardlinkAndSymlink(t *testing.T) {
 func TestStorageAdvisoryLockIsReleasedWhenProcessDies(t *testing.T) {
 	inspection := inspectStorageTestHome(t, true)
 	cmd := exec.Command(os.Args[0], "-test.run=^TestStorageLockHolderHelper$", "--", "--productmetrics-lock-holder", inspection.Home().Path())
+	// Re-exec'd helpers must not inherit bazel's shard filter: the go test
+	// runner would assign the helper to a different shard and exit "PASS"
+	// without running it (#6638).
+	cmd.Env = shardFreeEnv()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -3823,7 +3875,7 @@ func TestStorageAdvisoryLockIsReleasedWhenProcessDies(t *testing.T) {
 		if err != nil {
 			t.Fatalf("lock helper: %v", err)
 		}
-	case <-time.After(testutil.ExecRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("timed out waiting for lock helper")
 	}
 	root, err := openStorageRootMutable(inspection)
@@ -3925,4 +3977,12 @@ func TestParseStorageLockHolderArgsRequiresExactSuffix(t *testing.T) {
 			}
 		})
 	}
+}
+
+// shardFreeEnv returns the current environment without the bazel test-runner
+// state the parent owns (shard filter, coverage output, test filter), for
+// re-exec'd helper binaries that select work via -test.run instead of shard
+// assignment.
+func shardFreeEnv() []string {
+	return bazeltest.HelperProcessEnv(os.Environ())
 }

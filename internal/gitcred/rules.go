@@ -3,6 +3,7 @@ package gitcred
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -34,7 +35,8 @@ const credentialsFileName = "credentials.toml"
 // fallback.
 const commandLayerOrigin = "$" + EnvCredentialCommand
 
-// ErrInsecurePermissions reports a credentials file readable by group or other.
+// ErrInsecurePermissions reports a credentials file whose mode exposes it
+// beyond its owner. secureMode is the exact predicate.
 var ErrInsecurePermissions = errors.New("credentials file is group/world accessible")
 
 // Rule is one [[credential]] entry. Exactly one pointer field (Helper,
@@ -86,8 +88,10 @@ type credentialsFile struct {
 //  3. $GC_HOME/credentials.toml — gchome.Default().
 //  4. $GC_GIT_CREDENTIAL_COMMAND — recorded as a rule-less fallback layer.
 //
-// Every file present must be 0600/0400 (no group/other bits; the check is
-// skipped on Windows) or Load returns ErrInsecurePermissions wrapping the path.
+// Every file present must be owner-only — 0600/0400, or the root-owned
+// own-group 0440 a Kubernetes Secret volume mount produces (see secureMode);
+// the check is skipped on Windows. Otherwise Load returns
+// ErrInsecurePermissions wrapping the path.
 // Missing files are not errors. A literal "token"/"password" key, or a rule
 // with zero or more than one pointer field, is a hard parse error.
 func Load(cityRoot string) (*Rules, error) {
@@ -187,7 +191,7 @@ func loadFileLayer(path string) (*layer, error) {
 		}
 		return nil, fmt.Errorf("reading credentials file %q: %w", path, err)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+	if runtime.GOOS != "windows" && !fileModeSecure(info) {
 		return nil, fmt.Errorf("%w: %s", ErrInsecurePermissions, path)
 	}
 	data, err := os.ReadFile(path)
@@ -211,6 +215,49 @@ func loadFileLayer(path string) (*layer, error) {
 		lyr.rules = append(lyr.rules, LoadedRule{Rule: rule, Origin: abs})
 	}
 	return lyr, nil
+}
+
+// unknownID stands in for an owner we could not read. It is (uid_t)-1, which no
+// file is ever owned by, so an unreadable owner fails the group-read exemption
+// in secureMode closed.
+const unknownID = ^uint32(0)
+
+// fileModeSecure reports whether a credentials file's mode is safe to load.
+// Ownership comes from the platform statOwner; when the FileInfo carries none,
+// the file is treated as foreign-owned.
+func fileModeSecure(info fs.FileInfo) bool {
+	uid, gid, ok := statOwner(info)
+	if !ok {
+		uid, gid = unknownID, unknownID
+	}
+	return secureMode(info.Mode().Perm(), uid, gid, uint32(os.Getegid()))
+}
+
+// secureMode is the permission gate for a credentials file. Owner bits are
+// unrestricted; every world bit and every group write/exec bit is rejected.
+//
+// Group READ is accepted only for the exact shape kubelet produces for a Secret
+// volume mounted with fsGroup: owned by root — Secret volume files always are,
+// there is no fsUser — group-owned by our own effective gid, group bits exactly
+// r--. That exemption is what lets the reader consume the Secret mount directly.
+// The alternative is copying the Secret into an emptyDir at init, which freezes
+// the credentials for the pod's whole lifetime: kubelet can atomically rotate a
+// Secret volume, but it cannot rotate a copy.
+//
+// The exemption grants an attacker nothing: reading the file already requires
+// membership in our own primary group, and the rules file holds no secrets —
+// only match patterns, usernames, and token_file paths. The tokens themselves
+// live in the files those paths name (resolve.go). A user-owned 0640 file is
+// still rejected, because your own files are never root-owned: off-cluster
+// behavior is identical to the strict 0o077 check this replaced.
+func secureMode(perm fs.FileMode, uid, gid, egid uint32) bool {
+	if perm&0o007 != 0 || perm&0o030 != 0 {
+		return false
+	}
+	if perm&0o040 != 0 {
+		return uid == 0 && gid == egid
+	}
+	return true
 }
 
 // ruleFromRaw converts a decoded [[credential]] table into a validated Rule. It

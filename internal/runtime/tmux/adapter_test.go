@@ -21,37 +21,26 @@ import (
 // Compile-time check.
 var _ runtime.Provider = (*Provider)(nil)
 
-func TestTmuxConformance(t *testing.T) {
-	if !hasTmux() {
-		t.Skip("tmux not installed")
-	}
-
+// tmuxConformanceConfig builds the isolated-socket configuration used by
+// TestTmuxConformance. The conformance fixture is a generic long-running
+// command, not an agent TUI with an observable idle prompt, so it keeps a
+// short real Nudge timeout to cover the wait/fallback branch without
+// consuming the production 30-second budget.
+func tmuxConformanceConfig() Config {
 	cfg := DefaultConfig()
 	cfg.SocketName = testSocketName
-	// The conformance fixture is a generic long-running command, not an agent
-	// TUI with an observable idle prompt. Keep a short real timeout so the
-	// Provider.Nudge wait/fallback branch stays covered without consuming the
-	// production 30-second budget.
 	cfg.NudgeIdleTimeout = 250 * time.Millisecond
-	// Exercise the production construction path so one real tmux suite covers
-	// both the Provider contract and the seam-backed cut-over.
-	p := NewSeamBackedWithConfig(cfg)
+	return cfg
+}
+
+func TestTmuxConformance(t *testing.T) {
 	var counter int64
 
-	runtimetest.RunProviderTestsWithOptions(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
-		id := atomic.AddInt64(&counter, 1)
-		name := fmt.Sprintf("gc-test-conform-%d", id)
-		return p, runtime.Config{
+	runtimetest.RunProviderTests(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
+		return NewSeamBackedWithConfig(tmuxConformanceConfig()), runtime.Config{
 			Command: "sleep 300",
 			WorkDir: t.TempDir(),
-		}, name
-	}, runtimetest.Options{
-		SkipStartError: func(err error) (string, bool) {
-			if errors.Is(err, ErrServerDegraded) {
-				return fmt.Sprintf("tmux test socket degraded before Start could run: %v", err), true
-			}
-			return "", false
-		},
+		}, fmt.Sprintf("gc-test-conform-%d", atomic.AddInt64(&counter, 1))
 	})
 }
 
@@ -379,4 +368,125 @@ func TestProvider_StartCanceledCleansUpSession(t *testing.T) {
 	}
 	_ = p.Stop(name)
 	t.Fatal("session should be cleaned up after canceled start")
+}
+
+// TestProvider_RelaunchWithholdsControllerTokenFromRespawnedPane is the respawn
+// twin of the create-path pane-child test, and it covers the failure class that
+// test structurally cannot see: a pane is started more than once, and only the
+// FIRST start goes through NewSessionWithCommandAndEnv. Relaunch reaches the
+// agent via respawn-pane, which takes no env argument, so the create path's
+// `env -u` command prefix does not apply to it — the respawned agent inherits
+// the tmux server's global environment, which still holds the controller's real
+// token.
+//
+// Relaunch is deliberately driven WITHOUT Env here, matching the documented
+// contract that env is provision-half and not re-passed: the withholding has to
+// survive in the session environment on its own.
+func TestProvider_RelaunchWithholdsControllerTokenFromRespawnedPane(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	const (
+		tokenVar = "GC_CONTROLLER_TOKEN"
+		token    = "super-secret-controller-token"
+	)
+	t.Setenv(tokenVar, token)
+
+	// A socket unique to this test, so the tmux server it starts forks from THIS
+	// process and its global environment carries the token — that server env is
+	// the thing respawn-pane hands to the new process.
+	cfg := DefaultConfig()
+	cfg.SocketName = privateSocketName("rp")
+	p := NewProviderWithConfig(cfg)
+	name := "gc-test-relaunch-token-pin"
+	_ = p.Stop(name)
+	defer func() { _ = p.Stop(name) }()
+
+	workDir := t.TempDir()
+	marker := filepath.Join(workDir, "marker")
+	agentCmd := func(tag string) string {
+		return fmt.Sprintf(`sh -c 'printf %%s "%s=[${%s-ABSENT}]" > %s; sleep 300'`, tag, tokenVar, marker)
+	}
+
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: agentCmd("created"),
+		WorkDir: workDir,
+		Env:     map[string]string{tokenVar: ""},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitForMarker(t, marker, "created=[ABSENT]")
+
+	if err := p.Relaunch(context.Background(), name, runtime.Config{
+		Command: agentCmd("respawned"),
+		WorkDir: workDir,
+	}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	waitForMarker(t, marker, "respawned=[ABSENT]")
+
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("reading marker: %v", err)
+	}
+	if strings.Contains(string(got), token) {
+		t.Fatalf("respawned pane received the controller token: %s", got)
+	}
+}
+
+// The warm-box upgrade path. A box provisioned by a gc whose create path built
+// only the one-shot `env -u` prefix carries no session-env marker, and a warm
+// box is explicitly long-lived — without re-assertion at relaunch it would hand
+// the respawned agent the real token for the rest of its life. The session here
+// is created the old way on purpose: prefix, no marker.
+func TestProvider_RelaunchRepinsControllerTokenInPreexistingWarmBox(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	const (
+		tokenVar = "GC_CONTROLLER_TOKEN"
+		token    = "super-secret-controller-token"
+	)
+	t.Setenv(tokenVar, token)
+
+	cfg := DefaultConfig()
+	cfg.SocketName = privateSocketName("rr")
+	p := NewProviderWithConfig(cfg)
+	name := "gc-test-relaunch-token-repin"
+	_ = p.Stop(name)
+	defer func() { _ = p.Stop(name) }()
+
+	workDir := t.TempDir()
+	marker := filepath.Join(workDir, "marker")
+	agentCmd := func(tag string) string {
+		return fmt.Sprintf(`sh -c 'printf %%s "%s=[${%s-ABSENT}]" > %s; sleep 300'`, tag, tokenVar, marker)
+	}
+
+	// Provision the way the pre-fix create path did: the withholding exists only
+	// as a command prefix, never in the session environment.
+	if err := p.Tmux().NewSessionWithCommand(name, workDir, "env -u "+tokenVar+" "+agentCmd("created")); err != nil {
+		t.Fatalf("NewSessionWithCommand: %v", err)
+	}
+	waitForMarker(t, marker, "created=[ABSENT]")
+	if _, err := p.Tmux().GetEnvironment(name, tokenVar); err == nil {
+		t.Fatal("session env already carries a marker; this fixture must model a pre-fix warm box")
+	}
+
+	// Relaunch carries the pin in cfg.Env, as the reconciler does.
+	if err := p.Relaunch(context.Background(), name, runtime.Config{
+		Command: agentCmd("respawned"),
+		WorkDir: workDir,
+		Env:     map[string]string{tokenVar: ""},
+	}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	waitForMarker(t, marker, "respawned=[ABSENT]")
+
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("reading marker: %v", err)
+	}
+	if strings.Contains(string(got), token) {
+		t.Fatalf("respawned pane in a pre-fix warm box received the controller token: %s", got)
+	}
 }

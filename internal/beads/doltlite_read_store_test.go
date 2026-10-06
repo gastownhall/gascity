@@ -476,6 +476,124 @@ func TestDoltliteReadStoreBeforeFiltersRespectCutoff(t *testing.T) {
 	}
 }
 
+// TestDoltliteReadStoreBeforeFiltersToleratesRawTimeBind pins the production
+// write path the cutoff test above deliberately avoids (see its own doc
+// comment and ga-p7ipsu): a writer that binds a raw time.Time instead of
+// pre-formatting with doltliteSQLiteTime. modernc.org/sqlite serializes a
+// bound time.Time via time.Time.String() (e.g.
+// "2026-06-01 07:00:00 +0000 UTC"), which SQLite's julianday() cannot parse.
+// julianday(x) is NULL for such text, and `NULL < julianday(?)` is NULL (not
+// true) in SQL, so the CreatedBefore/UpdatedBefore WHERE predicates silently
+// dropped the row from the result set entirely — before the tolerant Go-side
+// filterDoltliteBeforeTimes/parseTimeString ever got a chance to see it. See
+// ga-n4oyad (proof) and ga-vvgr9n (this fix).
+func TestDoltliteReadStoreBeforeFiltersToleratesRawTimeBind(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+
+	cutoff := time.Date(2026, 6, 1, 8, 0, 0, 0, time.UTC)
+	for _, issue := range []struct {
+		id        string
+		createdAt time.Time
+		updatedAt time.Time
+	}{
+		{id: "gc-raw-time-before", createdAt: cutoff.Add(-time.Hour), updatedAt: cutoff.Add(-30 * time.Minute)},
+		{id: "gc-raw-time-after", createdAt: cutoff.Add(time.Hour), updatedAt: cutoff.Add(30 * time.Minute)},
+	} {
+		// Bind time.Time values directly (no doltliteSQLiteTime pre-format) so
+		// the driver's own Valuer formats them, exactly as a raw production
+		// writer would.
+		if _, err := writer.Exec(`INSERT INTO issues (
+			id, title, status, issue_type, priority, created_at, updated_at,
+			assignee, description, design, acceptance_criteria, notes, metadata
+		) VALUES (?, ?, 'open', 'task', 2, ?, ?, 'rig/raw-time', '', '', '', '', '{}')`,
+			issue.id, issue.id, issue.createdAt, issue.updatedAt); err != nil {
+			t.Fatalf("insert raw-bound timestamp issue %s: %v", issue.id, err)
+		}
+	}
+
+	createdRows, err := store.List(ListQuery{
+		Assignee:      "rig/raw-time",
+		CreatedBefore: cutoff,
+		Sort:          SortCreatedAsc,
+		SkipLabels:    true,
+	})
+	if err != nil {
+		t.Fatalf("List CreatedBefore: %v", err)
+	}
+	if got := testBeadIDs(createdRows); !slices.Equal(got, []string{"gc-raw-time-before"}) {
+		t.Fatalf("CreatedBefore ids = %v, want [gc-raw-time-before]; rows=%#v", got, createdRows)
+	}
+
+	updatedRows, err := store.List(ListQuery{
+		Assignee:      "rig/raw-time",
+		UpdatedBefore: cutoff,
+		Sort:          SortCreatedAsc,
+		SkipLabels:    true,
+	})
+	if err != nil {
+		t.Fatalf("List UpdatedBefore: %v", err)
+	}
+	if got := testBeadIDs(updatedRows); !slices.Equal(got, []string{"gc-raw-time-before"}) {
+		t.Fatalf("UpdatedBefore ids = %v, want [gc-raw-time-before]; rows=%#v", got, updatedRows)
+	}
+}
+
+// TestDoltliteReadStoreBeforeFilterLimitDoesNotPreemptGoSideFilter pins the
+// bounded-read side of the same fix. Once the WHERE clause admits
+// NULL-julianday rows so filterDoltliteBeforeTimes can re-validate them
+// Go-side, a single-table-set read with both CreatedBefore and a Limit set
+// composes a real SQL ORDER BY ... LIMIT with that widened WHERE in one
+// statement (queryIssueTable) — the same LIMIT-before-Go-filter hazard
+// already solved for SeekAfter in queryIssuesOrderedInTables. A row whose
+// on-disk created_at is unparseable by both julianday() and parseTimeString
+// sorts on its raw (garbage) text in SQL but is treated as the zero time
+// (oldest possible) by the Go-side filter/sort — the two disagree on where it
+// belongs, so a SQL LIMIT taken before the Go re-sort can return the wrong
+// bounded prefix even though the unbounded read is correct. Widening the
+// WHERE clause without also skipping the SQL LIMIT for before-filtered reads
+// would regress exactly this case (see the #3208/#3449 SeekAfter precedent
+// this mirrors).
+func TestDoltliteReadStoreBeforeFilterLimitDoesNotPreemptGoSideFilter(t *testing.T) {
+	base := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	cutoff := base.Add(10 * time.Second)
+
+	// gc-bf-garbage's created_at parses under neither julianday() nor
+	// parseTimeString: SQL sorts it by its raw ("not-a-timestamp") text, which
+	// lexically outranks every "2026-..." row in DESC order and underranks
+	// them all in ASC order — the opposite of where the Go-side zero-time
+	// (oldest-possible) treatment places it in both directions.
+	wisps := []testDoltliteIssue{
+		{ID: "gc-bf-real1", Title: "real1", CreatedAt: base.Add(1 * time.Second), Labels: []string{"bf"}, NoHistory: true},
+		{ID: "gc-bf-real2", Title: "real2", CreatedAt: base.Add(2 * time.Second), Labels: []string{"bf"}, NoHistory: true},
+		{ID: "gc-bf-real3", Title: "real3", CreatedAt: base.Add(3 * time.Second), Labels: []string{"bf"}, NoHistory: true},
+		{ID: "gc-bf-garbage", Title: "garbage", RawCreatedAt: "not-a-timestamp", Labels: []string{"bf"}, NoHistory: true},
+	}
+	store := newDoltliteStoreWithRows(t, nil, wisps)
+
+	for _, sort := range []SortOrder{SortCreatedDesc, SortCreatedAsc} {
+		unbounded, err := store.List(ListQuery{Label: "bf", Sort: sort, TierMode: TierWisps, CreatedBefore: cutoff})
+		if err != nil {
+			t.Fatalf("List unbounded (sort=%v): %v", sort, err)
+		}
+		if len(unbounded) != 4 {
+			t.Fatalf("unbounded len = %d, want 4 (ids %v)", len(unbounded), testBeadIDs(unbounded))
+		}
+		for k := 1; k <= 4; k++ {
+			bounded, err := store.List(ListQuery{Label: "bf", Sort: sort, TierMode: TierWisps, CreatedBefore: cutoff, Limit: k})
+			if err != nil {
+				t.Fatalf("List(sort=%v limit=%d): %v", sort, k, err)
+			}
+			got, want := testBeadIDs(bounded), testBeadIDs(unbounded[:k])
+			if !slices.Equal(got, want) {
+				t.Fatalf("bounded prefix (sort=%v limit=%d) = %v, want unbounded prefix %v", sort, k, got, want)
+			}
+		}
+	}
+}
+
 func TestDoltliteReadStoreCachesInvalidateOnWorkingSetWrites(t *testing.T) {
 	store, closeStore := newTestDoltliteReadStore(t)
 	defer closeStore()
@@ -2093,5 +2211,51 @@ func TestDoltliteReindexStoreRejectsNonDoltlite(t *testing.T) {
 	}
 	if err := ReindexDoltliteStore(dir); err == nil {
 		t.Fatal("ReindexDoltliteStore accepted a non-doltlite store, want error")
+	}
+}
+
+// TestDoltliteDependencySnapshotCompletenessIsGuarded pins the verdict
+// dependencySnapshotForCache hands the cache. It was previously unguarded:
+// flipping its completeness bool to false left the whole suite green while
+// silently costing every DoltLite scope its cached dependency and readiness
+// reads — every DepList("…","down") would delegate to the backing store again,
+// which for this fixture is a bd runner that must never be called.
+//
+// The bool is a claim about the SNAPSHOT: DepListBatch reads both dependency
+// tables in one pass, so the map it returns is the whole down-edge set for the
+// ids asked about. The assertions below are that claim, not its restatement —
+// the cache latches depsComplete from it, and the cached edges must equal the
+// store's own.
+func TestDoltliteDependencySnapshotCompletenessIsGuarded(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+
+	deps, complete, err := store.dependencySnapshotForCache([]string{"gc-child"})
+	if err != nil {
+		t.Fatalf("dependencySnapshotForCache: %v", err)
+	}
+	if !complete {
+		t.Fatal("DoltLite reported an incomplete dependency snapshot; DepListBatch reads every down edge of the ids it is given")
+	}
+	if len(deps["gc-child"]) != 1 || deps["gc-child"][0].DependsOnID != "gc-parent" {
+		t.Fatalf("snapshot deps = %#v, want gc-child -> gc-parent", deps["gc-child"])
+	}
+
+	cache := NewCachingStoreForTest(store, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	cache.mu.RLock()
+	depsComplete := cache.depsComplete
+	cache.mu.RUnlock()
+	if !depsComplete {
+		t.Fatal("cache depsComplete = false over a DoltLite snapshot that carries every down edge: cached dep and readiness reads would delegate for the life of the process")
+	}
+	cached, err := cache.DepList("gc-child", "down")
+	if err != nil {
+		t.Fatalf("cached DepList: %v", err)
+	}
+	if len(cached) != 1 || cached[0].DependsOnID != "gc-parent" {
+		t.Fatalf("cached DepList = %#v, want the snapshot's gc-child -> gc-parent", cached)
 	}
 }

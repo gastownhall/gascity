@@ -193,6 +193,23 @@ func TestHasAndNames(t *testing.T) {
 	}
 }
 
+func TestResolvesExcludesFallback(t *testing.T) {
+	r := New()
+	f, _ := fakeFactory(t)
+	if err := r.Register("k8s", f); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := r.RegisterPrefix("exec:", f); err != nil {
+		t.Fatalf("RegisterPrefix: %v", err)
+	}
+	r.SetFallback(f)
+	for name, want := range map[string]bool{"k8s": true, "exec:/bin/x": true, "definitely-unregistered": false, "": false} {
+		if got := r.Resolves(name); got != want {
+			t.Errorf("Resolves(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
 func TestCloneIsIndependentOfOriginal(t *testing.T) {
 	r := New()
 	exact, _ := fakeFactory(t)

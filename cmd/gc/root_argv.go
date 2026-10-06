@@ -21,15 +21,22 @@ func rootCommandOptionsForArgs(args []string) rootCommandOptions {
 	}
 }
 
-// rootCommandSkipsPackDiscovery identifies built-in helper surfaces that must
-// stay independent of pack config loading. The Beads provider calls the Dolt
-// helpers while a controller reload is itself refreshing and composing packs;
-// rediscovering pack commands there contends on the same cache and can turn a
-// small scope initialization into a minutes-long reload. These commands are
-// native-only and can never resolve to a pack binding.
+// rootCommandSkipsPackDiscovery identifies built-in commands that cannot
+// resolve to a pack binding. Pack discovery only adds city-config and pack
+// loading work; each command still performs its normal scope and config
+// resolution when it runs.
+//
+// hook, nudge, mail, and prime are the managed provider-hook surface: every
+// session start runs `gc prime --hook`, and every agent turn runs `gc hook run
+// -- nudge drain --inject` and `gc hook run -- mail check --inject`, where
+// `hook run` re-execs gc for its child. Discovery would otherwise load the city
+// config and pack tree once per gc process before the built-in command even
+// starts. Packs mount only as root-level bindings and a binding that names a
+// core command is skipped (addDiscoveredCommandsToRoot), so no pack can
+// contribute to any of these trees.
 func rootCommandSkipsPackDiscovery(command string) bool {
 	switch command {
-	case "metrics", "git-credential", "dolt-state", "dolt-config", "bd-store-bridge":
+	case "metrics", "bd", "git-credential", "dolt-state", "dolt-config", "bd-store-bridge", "hook", "nudge", "mail", "prime":
 		return true
 	default:
 		return false

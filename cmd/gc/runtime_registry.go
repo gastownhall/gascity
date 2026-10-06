@@ -56,11 +56,7 @@ func buildRuntimeRegistry() *registry.Registry {
 		return sessionsubprocess.NewSeamBacked(), nil
 	}))
 	must(r.Register("acp", func(_ string, sc config.SessionConfig, _, cityPath string) (runtime.Provider, error) {
-		cfg := sessionacp.Config{
-			HandshakeTimeout:  sc.ACP.HandshakeTimeoutDuration(),
-			NudgeBusyTimeout:  sc.ACP.NudgeBusyTimeoutDuration(),
-			OutputBufferLines: sc.ACP.OutputBufferLinesOrDefault(),
-		}
+		cfg := acpProviderConfig(sc.ACP)
 		if cityPath != "" {
 			return sessionacp.NewSeamBackedWithDir(providerStateDir("acp", cityPath), cfg), nil
 		}
@@ -86,7 +82,7 @@ func buildRuntimeRegistry() *registry.Registry {
 		if session == "" {
 			session = "default"
 		}
-		return sessionherdr.New(session, providerStateDir("herdr", cityPath), cityPath, sc.SetupTimeoutDuration()), nil
+		return sessionherdr.New(session, providerStateDir("herdr", cityPath), cityPath, sc.SetupTimeoutDuration(), sc.SetupMaxTimeoutDuration()), nil
 	}))
 	must(r.Register("hybrid", func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		return newHybridProvider(sc, cityName, cityPath)
@@ -176,4 +172,41 @@ func packRuntimeDeclarationChanged(oldCfg, newCfg *config.City, name string) boo
 		return true
 	}
 	return oldOK && (oldRT.Command != newRT.Command || oldRT.Protocol != newRT.Protocol)
+}
+
+// sessionTransportCompositionChanged reports whether a reload flips whether
+// the session provider backing a selection name needs the ACP auto
+// composition. resolveSessionTransportProvider decides the composition at
+// construction time, so a reload that adds the first ACP agent or provider
+// target (or removes the last) must rebuild the provider, as a cold start
+// with the new config would. An acp base never composes.
+func sessionTransportCompositionChanged(oldCfg, newCfg *config.City, name string) bool {
+	if oldCfg == nil || newCfg == nil || name == "acp" {
+		return false
+	}
+	return configWantsACPComposition(oldCfg) != configWantsACPComposition(newCfg)
+}
+
+// configWantsACPComposition is the config half of the needsACPWrapper
+// decision in resolveSessionTransportProvider: an agent that creates sessions
+// on the acp transport, or a provider whose sessions do. The other half, open
+// ACP session beads, is not what a reload changes.
+func configWantsACPComposition(cfg *config.City) bool {
+	for _, a := range cfg.Agents {
+		if agentSessionCreateTransport(cfg, a) == "acp" {
+			return true
+		}
+	}
+	return hasACPProviderTargets(cfg)
+}
+
+// acpProviderConfig maps the [session.acp] city settings onto the ACP
+// provider's resolved configuration.
+func acpProviderConfig(a config.ACPSessionConfig) sessionacp.Config {
+	return sessionacp.Config{
+		HandshakeTimeout:  a.HandshakeTimeoutDuration(),
+		NudgeBusyTimeout:  a.NudgeBusyTimeoutDuration(),
+		OutputBufferLines: a.OutputBufferLinesOrDefault(),
+		StopGrace:         a.StopGraceDuration(),
+	}
 }

@@ -174,7 +174,7 @@ func TestReconcileTickFoldFrontDoor(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	path := filepath.Join(filepath.Dir(currentFile), "session_reconciler.go")
+	path := filepath.Join(gcCallerDir(currentFile), "session_reconciler.go")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile(%q): %v", path, err)

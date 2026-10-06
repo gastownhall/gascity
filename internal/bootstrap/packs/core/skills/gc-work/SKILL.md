@@ -40,15 +40,24 @@ gc bd list --rig <rigname>                # List beads in a specific rig
 gc bd ready                               # List beads available for claiming
 gc bd ready --label role:worker           # Filter by label
 gc bd show <id>                           # Show bead details
+gc ready                                  # Same frontier, federated over every store the city uses
 ```
+
+On a city that serves a coordination class from its own `[storage]` binding,
+`gc bd ready` (and `gc bd list --ready`) is refused with exit 1: it reads one
+ledger and the city's ready set spans more than one. Use `gc ready` there. It
+takes `--assignee`, `--unassigned`, `--metadata-field`, `--exclude-type`,
+`--exclude-label`, `--sort`, `--limit`, `--include-ephemeral`, `--status` and
+`--json` — not the label, parent, type or priority selectors `gc bd ready`
+forwards.
 
 ## Claiming and updating
 
 ```
-gc bd update <id> --claim                 # Claim a bead (sets assignee + in_progress)
+gc bd update <id> --claim                 # Claim a bead (sets assignee + in_progress) — races in a multi-agent city; prefer `gc hook --claim` there
 gc bd update <id> --status in_progress    # Update status
-gc bd update <id> --label <key>=<value>   # Add/update labels
-gc bd update <id> --note "progress..."    # Add a note
+gc bd update <id> --add-label <key>=<value>  # Add/update labels
+gc bd update <id> --append-notes "progress..."  # Append a note (does not replace existing notes)
 ```
 
 ## Closing work
@@ -61,6 +70,6 @@ gc bd close <id> --reason "done"          # Close with reason
 ## Hooks
 
 ```
-gc hook show <agent>                   # Show what's on an agent's hook
-gc agent claim <agent> <id>            # Put a bead on an agent's hook
+gc hook [agent]                        # Show routed work for an agent (defaults to $GC_AGENT)
+gc hook --claim                        # Atomically claim one routed work item onto this agent's hook
 ```

@@ -848,6 +848,133 @@ func TestRunStepsEndpoint(t *testing.T) {
 	}
 }
 
+// TestRunStepsClampsCompletedRun proves the typed /steps endpoint honors run
+// terminality: a completed run whose steps lost their close events must report each
+// lingering step terminal (completed / skipped), never eternally active.
+func TestRunStepsClampsCompletedRun(t *testing.T) {
+	root := runRootBead("runc", "mol-adopt-pr-v2", "closed")
+	root.Metadata["gc.outcome"] = "pass"
+	s := newRunServer(t,
+		beadCreatedEvent(1, root),
+		beadCreatedEvent(2, runChildBead("runc.step1", "runc", "closed", map[string]string{"gc.outcome": "pass"})),
+		beadCreatedEvent(3, runChildBead("runc.step2", "runc", "in_progress", nil)), // lost close event
+		beadCreatedEvent(4, runChildBead("runc.step3", "runc", "open", nil)),        // never started
+	)
+	out, err := s.humaHandleRunSteps(context.Background(), &RunStepsInput{
+		CityScope: CityScope{CityName: "test-city"},
+		RunID:     "runc",
+	})
+	if err != nil {
+		t.Fatalf("humaHandleRunSteps error: %v", err)
+	}
+	byID := map[string]RunStep{}
+	for _, st := range out.Body.Steps {
+		byID[st.ID] = st
+	}
+	if byID["runc.step1"].Status != RunStepStatusCompleted {
+		t.Errorf("step1 = %q, want completed", byID["runc.step1"].Status)
+	}
+	if byID["runc.step2"].Status != RunStepStatusCompleted {
+		t.Errorf("lost-close step2 = %q, want completed (run is completed)", byID["runc.step2"].Status)
+	}
+	if byID["runc.step3"].Status != RunStepStatusSkipped {
+		t.Errorf("never-started step3 = %q, want skipped (never started under a completed run)", byID["runc.step3"].Status)
+	}
+}
+
+// TestRunStepsClampsFailedRunToCanceled proves the failure family: a failed run
+// cancels its lingering active steps (rather than completing them) and skips its
+// never-started ones, while a recorded step outcome is preserved.
+func TestRunStepsClampsFailedRunToCanceled(t *testing.T) {
+	root := runRootBead("runx", "mol-adopt-pr-v2", "closed")
+	root.Metadata["gc.outcome"] = "fail"
+	s := newRunServer(t,
+		beadCreatedEvent(1, root),
+		beadCreatedEvent(2, runChildBead("runx.step1", "runx", "in_progress", nil)),                                // lost close
+		beadCreatedEvent(3, runChildBead("runx.step2", "runx", "open", nil)),                                       // never started
+		beadCreatedEvent(4, runChildBead("runx.step3", "runx", "closed", map[string]string{"gc.outcome": "fail"})), // real failure
+	)
+	out, err := s.humaHandleRunSteps(context.Background(), &RunStepsInput{
+		CityScope: CityScope{CityName: "test-city"},
+		RunID:     "runx",
+	})
+	if err != nil {
+		t.Fatalf("humaHandleRunSteps error: %v", err)
+	}
+	byID := map[string]RunStep{}
+	for _, st := range out.Body.Steps {
+		byID[st.ID] = st
+	}
+	if byID["runx.step1"].Status != RunStepStatusCanceled {
+		t.Errorf("lost-close step1 = %q, want canceled (run failed)", byID["runx.step1"].Status)
+	}
+	if byID["runx.step2"].Status != RunStepStatusSkipped {
+		t.Errorf("never-started step2 = %q, want skipped", byID["runx.step2"].Status)
+	}
+	if byID["runx.step3"].Status != RunStepStatusFailed {
+		t.Errorf("recorded-failure step3 = %q, want failed (real outcome preserved)", byID["runx.step3"].Status)
+	}
+}
+
+// runChildBeadWithNeeds is runChildBead plus a Needs list, scoped to root
+// "sps-1p12" and status "open" (the only fixture that needs step-order data
+// today — ordering is independent of step status). Kept separate from
+// runChildBead (used by many status-focused tests) so adding Needs support
+// here can't perturb their fixtures.
+func runChildBeadWithNeeds(id string, needs ...string) beads.Bead {
+	b := runChildBead(id, "sps-1p12", "open", nil)
+	b.Needs = needs
+	return b
+}
+
+// TestRunStepsEndpointReturnsTopologicalOrder is the end-to-end regression
+// guard for gascity#4699: GET /runs/{id}/steps returned steps in arbitrary
+// fold order, not the pipeline's actual dependency order. This reproduces
+// the issue's own 9-step repro (declared prep -> author-en -> translate-ro
+// -> feature-pr -> review -> gate-merge-feature -> archive-materialize ->
+// merge-archive -> land) with bead-creation (and therefore fold) order
+// scrambled relative to declaration order, matching what the issue observed
+// on a real graph.v2 run.
+func TestRunStepsEndpointReturnsTopologicalOrder(t *testing.T) {
+	root := runRootBead("sps-1p12", "sps-baseline", "open")
+	s := newRunServer(t,
+		beadCreatedEvent(1, root),
+		beadCreatedEvent(2, runChildBeadWithNeeds("sps-1p12.merge-archive", "sps-1p12.archive-materialize")),
+		beadCreatedEvent(3, runChildBeadWithNeeds("sps-1p12.author-en", "sps-1p12.prep")),
+		beadCreatedEvent(4, runChildBeadWithNeeds("sps-1p12.translate-ro", "sps-1p12.author-en")),
+		beadCreatedEvent(5, runChildBeadWithNeeds("sps-1p12.gate-merge-feature", "sps-1p12.review")),
+		beadCreatedEvent(6, runChildBeadWithNeeds("sps-1p12.archive-materialize", "sps-1p12.gate-merge-feature")),
+		beadCreatedEvent(7, runChildBeadWithNeeds("sps-1p12.feature-pr", "sps-1p12.translate-ro")),
+		beadCreatedEvent(8, runChildBeadWithNeeds("sps-1p12.land", "sps-1p12.merge-archive")),
+		beadCreatedEvent(9, runChildBeadWithNeeds("sps-1p12.review", "sps-1p12.feature-pr")),
+		beadCreatedEvent(10, runChildBeadWithNeeds("sps-1p12.prep")),
+	)
+	out, err := s.humaHandleRunSteps(context.Background(), &RunStepsInput{
+		CityScope: CityScope{CityName: "test-city"},
+		RunID:     "sps-1p12",
+	})
+	if err != nil {
+		t.Fatalf("humaHandleRunSteps error: %v", err)
+	}
+	got := make([]string, len(out.Body.Steps))
+	for i, st := range out.Body.Steps {
+		got[i] = st.ID
+	}
+	want := []string{
+		"sps-1p12.prep", "sps-1p12.author-en", "sps-1p12.translate-ro", "sps-1p12.feature-pr",
+		"sps-1p12.review", "sps-1p12.gate-merge-feature", "sps-1p12.archive-materialize",
+		"sps-1p12.merge-archive", "sps-1p12.land",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("steps = %v, want %v (length mismatch)", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("steps = %v, want %v (diverges at index %d)", got, want, i)
+		}
+	}
+}
+
 // TestRunGetBeyondHistoricalCap guards the false-404 defect: with more completed
 // runs than the projection's historical lane cap, every run must still resolve by
 // id (the single-run path bypasses the list cap via BuildRunLane).

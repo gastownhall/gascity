@@ -455,6 +455,9 @@ func TestManagedDoltExistingStatePortReturnsPublishedPortBeforeListenerReady(t *
 	}
 }
 
+// TestAssessExistingManagedDoltIgnoresStateWhenLifecycleNotOwned pins that a
+// city whose store gc does not serve reports no managed Dolt to reuse, even
+// with a live-looking runtime state file beside it.
 func TestAssessExistingManagedDoltIgnoresStateWhenLifecycleNotOwned(t *testing.T) {
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
@@ -467,9 +470,7 @@ func TestAssessExistingManagedDoltIgnoresStateWhenLifecycleNotOwned(t *testing.T
 	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeOpaqueBindingScopeFixture(t, cityPath)
 	if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
 		t.Fatalf("write pid file: %v", err)
 	}
@@ -488,10 +489,10 @@ func TestAssessExistingManagedDoltIgnoresStateWhenLifecycleNotOwned(t *testing.T
 		t.Fatalf("assessExistingManagedDolt: %v", err)
 	}
 	if report.StatePort != 0 {
-		t.Fatalf("StatePort = %d, want 0 for postgres-backed city", report.StatePort)
+		t.Fatalf("StatePort = %d, want 0 for a city gc does not serve", report.StatePort)
 	}
 	if report.Reusable {
-		t.Fatal("Reusable = true, want false for postgres-backed city")
+		t.Fatal("Reusable = true, want false for a city gc does not serve")
 	}
 }
 
@@ -1046,9 +1047,7 @@ while True:
 }
 
 func TestDoltStateInspectManagedCmdReportsPortHolderOwnership(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1085,9 +1084,7 @@ func TestDoltStateInspectManagedCmdReportsPortHolderOwnership(t *testing.T) {
 }
 
 func TestDoltStateProbeManagedCmdReportsRunningOwnedHolder(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1136,9 +1133,7 @@ func TestDoltStateProbeManagedCmdReportsRunningOwnedHolder(t *testing.T) {
 }
 
 func TestDoltStateProbeManagedCmdReportsImposterHolder(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	port := reserveRandomTCPPort(t)
 	listener := startTCPListenerProcess(t, port)
@@ -1171,9 +1166,7 @@ func TestDoltStateProbeManagedCmdReportsImposterHolder(t *testing.T) {
 }
 
 func TestDoltStateProbeManagedCmdReportsDeletedOwnedHolder(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1227,9 +1220,7 @@ func TestDoltStateProbeManagedCmdReportsDeletedOwnedHolder(t *testing.T) {
 }
 
 func TestDoltStateExistingManagedCmdRejectsForeignListenerBackedOnlyByStateDataDir(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1275,9 +1266,7 @@ func TestDoltStateExistingManagedCmdRejectsForeignListenerBackedOnlyByStateDataD
 }
 
 func TestDoltStateExistingManagedCmdReportsReusableOwnedServer(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1343,9 +1332,7 @@ esac
 }
 
 func TestDoltStateExistingManagedCmdFallsBackToPublishedRuntimeState(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1412,9 +1399,7 @@ esac
 }
 
 func TestDoltStateExistingManagedCmdReportsDeletedInodes(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1476,9 +1461,7 @@ esac
 }
 
 func TestDoltStatePreflightCleanCmdRemovesSocketsButPreservesDoltInternals(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1543,9 +1526,7 @@ func TestDoltStatePreflightCleanCmdRemovesSocketsButPreservesDoltInternals(t *te
 
 func TestDoltStatePreflightCleanCmdPreservesLiveArtifacts(t *testing.T) {
 	skipSlowCmdGCTest(t, "spawns managed dolt holder processes; run make test-cmd-gc-process for full coverage")
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -2598,9 +2579,7 @@ func TestDoltStateStopManagedCmdCleansStaleStateWhenNoPID(t *testing.T) {
 }
 
 func TestDoltStateStopManagedCmdDoesNotKillImposterPortHolder(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
@@ -2770,6 +2749,9 @@ esac
 	if got["healthy"] != "true" {
 		t.Fatalf("healthy = %q, want true", got["healthy"])
 	}
+	if got["restarted"] != "true" {
+		t.Fatalf("restarted = %q, want true", got["restarted"])
+	}
 	state, err := readDoltRuntimeStateFile(layout.StateFile)
 	if err != nil {
 		t.Fatalf("readDoltRuntimeStateFile: %v", err)
@@ -2795,130 +2777,6 @@ esac
 	}
 	if managedStopPIDAlive(original.Process.Pid) {
 		t.Fatalf("original pid %d still alive after recovery", original.Process.Pid)
-	}
-}
-
-func TestDoltStateRecoverManagedCmdNoUserDatabaseHealthSucceeds(t *testing.T) {
-	skipSlowCmdGCTest(t, "spawns managed dolt recovery processes; run make test-cmd-gc-process for full coverage")
-	cityPath := t.TempDir()
-	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
-	if err != nil {
-		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
-		t.Fatalf("MkdirAll(runtime dir): %v", err)
-	}
-	if err := os.MkdirAll(layout.DataDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(data dir): %v", err)
-	}
-
-	port := reserveRandomTCPPort(t)
-	original := startTCPListenerProcessInDir(t, port, layout.DataDir)
-	defer func() {
-		_ = original.Process.Kill()
-		_ = original.Wait()
-	}()
-	if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(original.Process.Pid)+"\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(pid): %v", err)
-	}
-	if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
-		Running:   true,
-		PID:       original.Process.Pid,
-		Port:      port,
-		DataDir:   layout.DataDir,
-		StartedAt: time.Now().UTC().Format(time.RFC3339),
-	}); err != nil {
-		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
-	}
-
-	binDir := t.TempDir()
-	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
-	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
-set -eu
-printf '%s\n' "$*" >> "$INVOCATION_FILE"
-case "$*" in
-  "sql-server --config "*)
-    config_file=$3
-    port=$(awk '/port:/ {print $2; exit}' "$config_file")
-    data_dir=$(awk '/data_dir:/ {print $2; exit}' "$config_file" | tr -d '"')
-    exec python3 - "$port" "$data_dir" <<'INNERPY'
-import os
-import signal
-import socket
-import sys
-import time
-
-port = int(sys.argv[1])
-data_dir = sys.argv[2]
-if data_dir:
-    os.chdir(data_dir)
-sock = socket.socket()
-sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-sock.bind(("127.0.0.1", port))
-sock.listen(5)
-def _stop(*_args):
-    raise SystemExit(0)
-signal.signal(signal.SIGTERM, _stop)
-signal.signal(signal.SIGINT, _stop)
-while True:
-    time.sleep(1)
-INNERPY
-    ;;
-  *"SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST"*)
-    printf 'cnt\n0\n'
-    ;;
-  *"SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"*)
-    exit 0
-    ;;
-  *"sql -r csv -q SHOW DATABASES"*)
-    printf 'Database\ninformation_schema\nmysql\ndolt\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
-    exit 0
-    ;;
-  *"CREATE TABLE IF NOT EXISTS"*)
-    echo "unexpected write probe without a user database" >&2
-    exit 2
-    ;;
-  *)
-    echo "unexpected command: $*" >&2
-    exit 2
-    ;;
-esac
-`)
-	t.Setenv("INVOCATION_FILE", invocationFile)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Cleanup(func() {
-		if state, err := readDoltRuntimeStateFile(layout.StateFile); err == nil && state.PID > 0 {
-			_ = terminateManagedDoltPID("", state.PID)
-		}
-	})
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"dolt-state", "recover-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--user", "root", "--timeout-ms", "5000"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("run() = %d, stdout = %s stderr = %s", code, stdout.String(), stderr.String())
-	}
-	got := parseDoltStateOutput(t, stdout.String())
-	if got["diagnosed_read_only"] != "false" {
-		t.Fatalf("diagnosed_read_only = %q, want false", got["diagnosed_read_only"])
-	}
-	if got["had_pid"] != "true" {
-		t.Fatalf("had_pid = %q, want true", got["had_pid"])
-	}
-	if got["ready"] != "true" {
-		t.Fatalf("ready = %q, want true", got["ready"])
-	}
-	if got["healthy"] != "true" {
-		t.Fatalf("healthy = %q, want true", got["healthy"])
-	}
-	if got["restarted"] != "true" {
-		t.Fatalf("restarted = %q, want true", got["restarted"])
-	}
-	invocation, err := os.ReadFile(invocationFile)
-	if err != nil {
-		t.Fatalf("ReadFile(invocation): %v", err)
-	}
-	if strings.Contains(string(invocation), "CREATE TABLE IF NOT EXISTS") {
-		t.Fatalf("recover-managed ran write probe without user database:\n%s", invocation)
 	}
 }
 
@@ -3134,166 +2992,111 @@ esac
 	}
 }
 
-func TestDoltStateRecoverManagedCmdFailsWhenPostStartHealthFails(t *testing.T) {
-	skipSlowCmdGCTest(t, "spawns managed dolt recovery processes; run make test-cmd-gc-process for full coverage")
-	cityPath := t.TempDir()
-	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
-	if err != nil {
-		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
-		t.Fatalf("MkdirAll(runtime dir): %v", err)
-	}
-	if err := os.MkdirAll(layout.DataDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(data dir): %v", err)
-	}
-
-	port := reserveRandomTCPPort(t)
-	original := startTCPListenerProcessInDir(t, port, layout.DataDir)
-	defer func() {
-		_ = original.Process.Kill()
-		_ = original.Wait()
-	}()
-	if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(original.Process.Pid)+"\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(pid): %v", err)
-	}
-	if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
-		Running:   true,
-		PID:       original.Process.Pid,
-		Port:      port,
-		DataDir:   layout.DataDir,
-		StartedAt: time.Now().UTC().Format(time.RFC3339),
-	}); err != nil {
-		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
-	}
-
-	binDir := t.TempDir()
-	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
-	activeBranchCount := filepath.Join(t.TempDir(), "active-branch-count")
-	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
-set -eu
-printf '%s\n' "$*" >> "$INVOCATION_FILE"
-case "$*" in
-  "sql-server --config "*)
-    config_file=$3
-    port=$(awk '/port:/ {print $2; exit}' "$config_file")
-    data_dir=$(awk '/data_dir:/ {print $2; exit}' "$config_file" | tr -d '"')
-    exec python3 - "$port" "$data_dir" <<'INNERPY'
-import os
-import signal
-import socket
-import sys
-import time
-
-port = int(sys.argv[1])
-data_dir = sys.argv[2]
-if data_dir:
-    os.chdir(data_dir)
-sock = socket.socket()
-sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-sock.bind(("127.0.0.1", port))
-sock.listen(5)
-def _stop(*_args):
-    raise SystemExit(0)
-signal.signal(signal.SIGTERM, _stop)
-signal.signal(signal.SIGINT, _stop)
-while True:
-    time.sleep(1)
-INNERPY
-    ;;
-  *"SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST"*)
-    printf 'cnt\n1\n'
-    ;;
-  *"SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"*)
-    count=0
-    if [ -f "$ACTIVE_BRANCH_COUNT" ]; then
-      count=$(cat "$ACTIVE_BRANCH_COUNT")
-    fi
-    count=$((count + 1))
-    printf '%s\n' "$count" > "$ACTIVE_BRANCH_COUNT"
-    if [ "$count" -eq 1 ]; then
-      echo "pre-recovery probe failed" >&2
-      exit 1
-    fi
-    if [ "$count" -le 3 ]; then
-      exit 0
-    fi
-    echo "final health probe failed" >&2
-    exit 1
-    ;;
-  *"sql -r csv -q SHOW DATABASES"*)
-    printf 'Database\ngascity\n'
-    exit 0
-    ;;
-  *"CREATE TABLE IF NOT EXISTS"*"__gc_read_only_probe"*)
-    exit 0
-    ;;
-  *)
-    echo "unexpected command: $*" >&2
-    exit 2
-    ;;
-esac
-`)
-	t.Setenv("INVOCATION_FILE", invocationFile)
-	t.Setenv("ACTIVE_BRANCH_COUNT", activeBranchCount)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Cleanup(func() {
-		if state, err := readDoltRuntimeStateFile(layout.StateFile); err == nil && state.PID > 0 {
-			_ = terminateManagedDoltPID("", state.PID)
-		}
-	})
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"dolt-state", "recover-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--user", "root", "--timeout-ms", "5000"}, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("run() = %d, want 1; stdout = %s stderr = %s", code, stdout.String(), stderr.String())
-	}
-	got := parseDoltStateOutput(t, stdout.String())
-	if got["had_pid"] != "true" {
-		t.Fatalf("had_pid = %q, want true", got["had_pid"])
-	}
-	if got["ready"] != "true" {
-		t.Fatalf("ready = %q, want true", got["ready"])
-	}
-	if got["healthy"] != "false" {
-		t.Fatalf("healthy = %q, want false", got["healthy"])
-	}
-	if !strings.Contains(stderr.String(), "recover-managed") {
-		t.Fatalf("stderr = %q, want recover-managed failure", stderr.String())
-	}
-	failedPID, err := strconv.Atoi(got["pid"])
-	if err != nil {
-		t.Fatalf("parse pid %q: %v", got["pid"], err)
-	}
-	if failedPID <= 0 {
-		t.Fatalf("pid = %q, want replacement pid", got["pid"])
-	}
-	if managedStopPIDAlive(failedPID) {
-		t.Fatalf("replacement pid %d still alive after failed recovery", failedPID)
-	}
-	state, err := readDoltRuntimeStateFile(layout.StateFile)
-	if err != nil {
-		t.Fatalf("readDoltRuntimeStateFile(after failure): %v", err)
-	}
-	if state.Running {
-		t.Fatalf("state.Running = true after failed recovery: %+v", state)
-	}
-	if state.PID != 0 {
-		t.Fatalf("state.PID = %d, want 0 after failed recovery", state.PID)
-	}
-	if _, err := os.Stat(layout.PIDFile); !os.IsNotExist(err) {
-		t.Fatalf("pid file still present after failed recovery: err=%v", err)
-	}
-	if _, err := os.Stat(managedDoltStatePath(cityPath)); !os.IsNotExist(err) {
-		t.Fatalf("published managed state still present after failed recovery: err=%v", err)
-	}
-}
-
 func writeFakeDoltSQLBinary(t *testing.T, binDir, invocationFile, body string) {
 	t.Helper()
 	script := strings.ReplaceAll(body, "$INVOCATION_FILE", invocationFile)
 	path := filepath.Join(binDir, "dolt")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile(fake dolt): %v", err)
+	}
+}
+
+// TestDoltStateCityScopedLifecycleCommandsRefuseProviderOwnership ensures
+// every legacy city-scoped helper used by the managed-Dolt script refuses
+// before it can inspect, probe, stop, clean, start, or recover a bd-owned
+// scope. Generic SQL-only helpers deliberately have no --city and remain out
+// of this boundary.
+func TestDoltStateCityScopedLifecycleCommandsRefuseProviderOwnership(t *testing.T) {
+	commands := []struct {
+		name string
+		args func(city string) []string
+	}{
+		{name: "inspect", args: func(city string) []string {
+			return []string{"dolt-state", "inspect-managed", "--city", city, "--port", "3307"}
+		}},
+		{name: "probe", args: func(city string) []string {
+			return []string{"dolt-state", "probe-managed", "--city", city, "--host", "127.0.0.1", "--port", "3307"}
+		}},
+		{name: "existing", args: func(city string) []string {
+			return []string{"dolt-state", "existing-managed", "--city", city, "--host", "127.0.0.1", "--port", "3307"}
+		}},
+		{name: "wait", args: func(city string) []string {
+			return []string{"dolt-state", "wait-ready", "--city", city, "--host", "127.0.0.1", "--port", "3307", "--pid", "1"}
+		}},
+		{name: "stop", args: func(city string) []string {
+			return []string{"dolt-state", "stop-managed", "--city", city, "--port", "3307"}
+		}},
+		{name: "start", args: func(city string) []string {
+			return []string{"dolt-state", "start-managed", "--city", city, "--host", "127.0.0.1", "--port", "3307"}
+		}},
+		{name: "recover", args: func(city string) []string {
+			return []string{"dolt-state", "recover-managed", "--city", city, "--host", "127.0.0.1", "--port", "3307"}
+		}},
+		{name: "preflight", args: func(city string) []string { return []string{"dolt-state", "preflight-clean", "--city", city} }},
+	}
+	states := []struct {
+		name  string
+		setup func(t *testing.T, city string)
+	}{
+		{
+			name: "initializing",
+			setup: func(t *testing.T, city string) {
+				t.Helper()
+				if err := persistProviderScopeOwnership(city, city, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "ready",
+			setup: func(t *testing.T, city string) {
+				t.Helper()
+				if err := persistProviderScopeOwnership(city, city, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+					t.Fatal(err)
+				}
+				if err := markProviderScopeOwnershipReady(city, city); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "corrupt",
+			setup: func(t *testing.T, city string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Join(city, ".gc"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(providerScopeOwnershipPath(city), []byte("not json"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, state := range states {
+		for _, command := range commands {
+			t.Run(state.name+"/"+command.name, func(t *testing.T) {
+				city := t.TempDir()
+				state.setup(t, city)
+				var stdout, stderr bytes.Buffer
+				if code := run(command.args(city), &stdout, &stderr); code == 0 {
+					t.Fatalf("%s unexpectedly succeeded for provider-owned city", command.name)
+				}
+				if !strings.Contains(stderr.String(), "provider scope ownership") {
+					t.Fatalf("%s stderr = %q, want provider ownership refusal", command.name, stderr.String())
+				}
+			})
+		}
+	}
+}
+
+// skipWithoutProcessInspection skips tests that need to identify port holders
+// and open files. Linux answers both from /proc; other hosts need lsof.
+func skipWithoutProcessInspection(t *testing.T) {
+	t.Helper()
+	if _, err := os.Stat("/proc/net/tcp"); err == nil {
+		return
+	}
+	if _, err := exec.LookPath("lsof"); err != nil {
+		t.Skip("needs /proc or lsof to identify port holders")
 	}
 }

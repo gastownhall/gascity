@@ -1,0 +1,54 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "hooks",
+    srcs = [
+        "hooks.go",
+        "preserve.go",
+    ],
+    embedsrcs = [
+        "config/README.md",
+        "config/claude.json",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/hooks",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/bootstrap/packs/core",
+        "//internal/citylayout",
+        "//internal/fsys",
+        "//internal/overlay",
+        "//internal/shellquote",
+    ],
+)
+
+go_test(
+    name = "hooks_test",
+    srcs = [
+        "hooks_family_test.go",
+        "hooks_test.go",
+        "overlay_provider_hook_path_shape_test.go",
+        "preserve_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":hooks"],
+    deps = [
+        "//internal/bootstrap/packs/core",
+        "//internal/config",
+        "//internal/fsys",
+        "//internal/overlay",
+        "//internal/shellquote",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

@@ -40,15 +40,20 @@ type BindingReapStats struct {
 //     name — when the stored bead ID is no longer a live session.
 //
 // Bindings whose live target already matches the stored ID are left untouched.
-// Error tolerance: lookup errors inside bindingLiveTarget (transient store
-// reads) cause the individual binding to be skipped. Decode errors, Unbind
-// failures, and ReassignSessionBindings failures abort the sweep and are
-// returned to the caller (the reconciler wiring logs them).
+// Directory lookup errors, decode errors, Unbind failures, and
+// ReassignSessionBindings failures abort the sweep and are returned to the
+// caller so the reconciler logs the failed tick and retries.
 //
 // The sweep is idempotent and safe to run on every reconciler tick; it must run
 // after session beads have been synced for the tick so a respawned session's
 // replacement bead is already visible.
 func ReapStaleBindings(ctx context.Context, store beads.Store, now time.Time) (BindingReapStats, error) {
+	return ReapStaleBindingsWithSessionDirectory(ctx, store, session.NewStore(beads.SessionStore{Store: store}), now)
+}
+
+// ReapStaleBindingsWithSessionDirectory reconciles Messaging binding records
+// using the independently selected typed Sessions address/liveness directory.
+func ReapStaleBindingsWithSessionDirectory(ctx context.Context, store beads.Store, sessions session.AddressDirectory, now time.Time) (BindingReapStats, error) {
 	var stats BindingReapStats
 	if err := checkContext(ctx); err != nil {
 		return stats, err
@@ -56,11 +61,17 @@ func ReapStaleBindings(ctx context.Context, store beads.Store, now time.Time) (B
 	if store == nil {
 		return stats, nil
 	}
+	if nilAddressDirectory(sessions) {
+		return stats, errors.New("reaping stale bindings requires sessions directory")
+	}
 	items, err := store.List(beads.ListQuery{Label: labelBindingBase})
 	if err != nil {
 		return stats, fmt.Errorf("list active bindings: %w", err)
 	}
-	svc := NewServices(store)
+	svc, err := NewServicesWithSessionDirectory(store, sessions)
+	if err != nil {
+		return stats, err
+	}
 	caller := Caller{Kind: CallerController, ID: "binding-reaper"}
 	now = zeroNow(now)
 	// reassigned tracks stale session IDs already processed so we don't call
@@ -80,14 +91,17 @@ func ReapStaleBindings(ctx context.Context, store beads.Store, now time.Time) (B
 		}
 		stats.Scanned++
 
-		liveID, dead := bindingLiveTarget(store, record)
+		liveID, dead, err := bindingLiveTarget(sessions, record)
+		if err != nil {
+			return stats, newSafeOperationError("resolve stale binding live session", err)
+		}
 		switch {
 		case dead:
 			if _, err := svc.Bindings.Unbind(ctx, caller, UnbindInput{
 				Conversation: &record.Conversation,
 				Now:          now,
 			}); err != nil {
-				return stats, fmt.Errorf("clear dead binding %s: %w", record.ID, err)
+				return stats, newSafeOperationError("clear stale session binding", err)
 			}
 			stats.Cleared++
 		case liveID != "" && liveID != record.SessionID:
@@ -95,7 +109,7 @@ func ReapStaleBindings(ctx context.Context, store beads.Store, now time.Time) (B
 				break
 			}
 			if err := ReassignSessionBindings(ctx, store, record.SessionID, liveID, now); err != nil {
-				return stats, fmt.Errorf("reassign session %s to live bead %s: %w", record.SessionID, liveID, err)
+				return stats, newSafeOperationError("reassign stale session bindings", err)
 			}
 			reassigned[record.SessionID] = struct{}{}
 			stats.Reassigned++
@@ -138,20 +152,31 @@ type ParticipantReapStats struct {
 // residue of a handover that committed the session_id swap and then failed
 // mid-migration — has that pending handover finished so its stranded
 // transcript membership is migrated to the live bead. Participants with no
-// recorded name, or whose name no longer resolves to a live session, are left
-// untouched: RemoveParticipant and CloseSessionBindings own participant
-// teardown, and a genuine respawn always re-resolves to a live bead.
+// recorded name, or whose name definitively no longer resolves to a live
+// session, are left untouched: RemoveParticipant and CloseSessionBindings own
+// participant teardown, and a genuine respawn always re-resolves to a live
+// bead. Indeterminate directory failures abort the sweep so the reconciler
+// reports the failure and retries on its next tick.
 //
 // The sweep is idempotent and safe to run on every reconciler tick; it must run
 // after session beads have been synced for the tick so a respawned session's
 // replacement bead is already visible.
 func ReapStaleParticipants(ctx context.Context, store beads.Store) (ParticipantReapStats, error) {
+	return ReapStaleParticipantsWithSessionDirectory(ctx, store, session.NewStore(beads.SessionStore{Store: store}))
+}
+
+// ReapStaleParticipantsWithSessionDirectory heals Messaging participants from
+// the independently selected typed Sessions address/liveness directory.
+func ReapStaleParticipantsWithSessionDirectory(ctx context.Context, store beads.Store, sessions session.AddressDirectory) (ParticipantReapStats, error) {
 	var stats ParticipantReapStats
 	if err := checkContext(ctx); err != nil {
 		return stats, err
 	}
 	if store == nil {
 		return stats, nil
+	}
+	if nilAddressDirectory(sessions) {
+		return stats, errors.New("reaping stale participants requires sessions directory")
 	}
 	items, err := store.List(beads.ListQuery{Label: labelGroupParticipantBase})
 	if err != nil {
@@ -178,9 +203,16 @@ func ReapStaleParticipants(ctx context.Context, store beads.Store) (ParticipantR
 		if name == "" || oldID == "" {
 			continue
 		}
-		liveID, err := resolveLiveSessionID(store, name)
-		if err != nil || liveID == "" {
+		live, err := resolveLiveSession(sessions, name)
+		switch {
+		case errors.Is(err, session.ErrSessionNotFound):
 			continue
+		case err != nil:
+			return stats, newSafeOperationError("resolve stale participant live session", err)
+		}
+		liveID, err := resolvedLiveSessionID(live)
+		if err != nil {
+			return stats, newSafeOperationError("resolve stale participant live session", err)
 		}
 		if liveID != oldID {
 			// session_id still names a retired bead: re-point the participant at
@@ -191,7 +223,7 @@ func ReapStaleParticipants(ctx context.Context, store beads.Store) (ParticipantR
 				continue
 			}
 			if err := ReassignSessionParticipants(ctx, store, oldID, liveID); err != nil {
-				return stats, fmt.Errorf("reassign participants for retired session %s to live bead %s: %w", oldID, liveID, err)
+				return stats, newSafeOperationError("reassign stale session participants", err)
 			}
 			reassigned[oldID] = struct{}{}
 			stats.Reassigned++
@@ -213,7 +245,7 @@ func ReapStaleParticipants(ctx context.Context, store beads.Store) (ParticipantR
 				continue
 			}
 			if err := ReassignSessionParticipants(ctx, store, pendingOldID, oldID); err != nil {
-				return stats, fmt.Errorf("finish pending participant cleanup from retired session %s to live bead %s: %w", pendingOldID, oldID, err)
+				return stats, newSafeOperationError("finish pending stale session participant cleanup", err)
 			}
 			reassigned[pendingOldID] = struct{}{}
 			stats.Reassigned++
@@ -225,19 +257,20 @@ func ReapStaleParticipants(ctx context.Context, store beads.Store) (ParticipantR
 // bindingLiveTarget resolves the current live session bead a binding should
 // point at. It returns (liveID, false) when a live target exists, ("", true)
 // when the binding's session is definitively gone (so the binding should be
-// cleared), and ("", false) when the state is indeterminate and the binding
-// should be left untouched (e.g. a transient store error or an ambiguous name).
-func bindingLiveTarget(store beads.Store, record SessionBindingRecord) (liveID string, dead bool) {
+// cleared). Indeterminate directory failures are returned so the reconciler
+// reports the failed sweep and retries on its next tick.
+func bindingLiveTarget(sessions session.AddressDirectory, record SessionBindingRecord) (liveID string, dead bool, err error) {
 	name := record.SessionName
 	if name != "" {
-		id, err := resolveLiveSessionID(store, name)
+		info, err := resolveLiveSession(sessions, name)
 		switch {
 		case errors.Is(err, session.ErrSessionNotFound):
-			return "", true
+			return "", true, nil
 		case err != nil:
-			return "", false
+			return "", false, err
 		default:
-			return id, false
+			liveID, err := resolvedLiveSessionID(info)
+			return liveID, false, err
 		}
 	}
 	// Legacy binding with no recorded name: it can only ever point at the bead
@@ -249,17 +282,17 @@ func bindingLiveTarget(store beads.Store, record SessionBindingRecord) (liveID s
 	// session is retired — no active migration is needed.
 	stored := record.SessionID
 	if stored == "" {
-		return "", false
+		return "", false, nil
 	}
-	bead, err := store.Get(stored)
-	if errors.Is(err, beads.ErrNotFound) {
-		return "", true
+	info, err := sessions.ResolveAddress(stored, true)
+	if errors.Is(err, session.ErrSessionNotFound) {
+		return "", true, nil
 	}
 	if err != nil {
-		return "", false
+		return "", false, err
 	}
-	if bead.Status == "closed" || !session.IsSessionBeadOrRepairable(bead) {
-		return "", true
+	if info.Closed || !session.IsSessionBeadOrRepairableInfo(info) {
+		return "", true, nil
 	}
-	return stored, false
+	return stored, false, nil
 }

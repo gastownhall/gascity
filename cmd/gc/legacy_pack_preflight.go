@@ -74,8 +74,9 @@ func lockedBundledCanonicalImports(cityPath string) ([]lockedBundledImport, erro
 // install". A cache that already validates is skipped lock-free; only on
 // validation failure does the preflight take the write-locked
 // packman.EnsureRepoInCache repair path, which revalidates under the lock
-// (a concurrent repair between the two checks is therefore benign).
-func ensureBundledLockedRemoteImportsCached(cityPath string) error {
+// (a concurrent repair between the two checks is therefore benign). The
+// verifier scopes that validation to the calling readiness pass.
+func ensureBundledLockedRemoteImportsCached(cityPath string, verifier *syntheticCacheVerifier) error {
 	imports, err := lockedBundledCanonicalImports(cityPath)
 	if err != nil {
 		return err
@@ -85,7 +86,11 @@ func ensureBundledLockedRemoteImportsCached(cityPath string) error {
 		if err != nil {
 			return fmt.Errorf("resolving cache path for bundled import %q from packs.lock: %w", imp.source, err)
 		}
-		if builtinpacks.ValidateSyntheticRepo(cachePath, imp.commit) == nil {
+		repository, known := builtinpacks.RepositoryForSource(imp.source)
+		if !known {
+			return fmt.Errorf("resolving bundled repository for locked import %q", imp.source)
+		}
+		if verifier.Valid(cachePath, repository, imp.commit) {
 			continue
 		}
 		if _, err := packman.EnsureRepoInCache(cityPath, imp.source, imp.commit); err != nil {
@@ -104,7 +109,8 @@ func ensureBundledLockedRemoteImportsCached(cityPath string) error {
 // locked-but-missing synthetic cache. A lockfile that cannot be read or that
 // has a malformed entry is reported unusable so the caller falls through to
 // ensureBundledLockedRemoteImportsCached, which surfaces the underlying error.
-func lockedBundledImportsUsable(cityPath string) bool {
+// The verifier scopes that validation to the calling readiness pass.
+func lockedBundledImportsUsable(cityPath string, verifier *syntheticCacheVerifier) bool {
 	imports, err := lockedBundledCanonicalImports(cityPath)
 	if err != nil {
 		return false
@@ -114,7 +120,8 @@ func lockedBundledImportsUsable(cityPath string) bool {
 		if err != nil {
 			return false
 		}
-		if builtinpacks.ValidateSyntheticRepo(cachePath, imp.commit) != nil {
+		repository, known := builtinpacks.RepositoryForSource(imp.source)
+		if !known || !verifier.Valid(cachePath, repository, imp.commit) {
 			return false
 		}
 	}

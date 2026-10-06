@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 )
 
 // countingBackingStore wraps a Store and counts SetMetadata /
@@ -63,6 +64,25 @@ type cacheWriteNotification struct {
 type releaseRefreshFailOnceStore struct {
 	Store
 	failNextGet bool
+}
+
+type ambiguousMetadataBatchStore struct {
+	Store
+	err        error
+	commitKeys []string
+}
+
+func (s *ambiguousMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	committed := make(map[string]string, len(s.commitKeys))
+	for _, key := range s.commitKeys {
+		committed[key] = kvs[key]
+	}
+	if len(committed) > 0 {
+		if err := s.Store.SetMetadataBatch(id, committed); err != nil {
+			return err
+		}
+	}
+	return s.err
 }
 
 func (s *releaseRefreshFailOnceStore) Get(id string) (Bead, error) {
@@ -265,6 +285,80 @@ func TestCachingStoreSetMetadataBatchNotifiesBeadUpdated(t *testing.T) {
 	}
 	if updated.Metadata["review"] != "fixed" {
 		t.Fatalf("notification metadata = %#v, want review=fixed", updated.Metadata)
+	}
+}
+
+func TestCachingStoreSetMetadataBatchErrorFencesStaleRow(t *testing.T) {
+	patch := map[string]string{"state": "asleep", "reason": "healed"}
+	for _, tc := range []struct {
+		name       string
+		commitKeys []string
+		wantState  string
+		wantReason string
+	}{
+		{name: "rejected", wantState: "active", wantReason: "old"},
+		{name: "partially committed", commitKeys: []string{"state"}, wantState: "asleep", wantReason: "old"},
+		{name: "fully committed", commitKeys: []string{"state", "reason"}, wantState: "asleep", wantReason: "healed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := NewMemStore()
+			bead, err := mem.Create(Bead{
+				Title:    "worker",
+				Type:     "session",
+				Metadata: map[string]string{"state": "active", "reason": "old"},
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			writeErr := errors.New("ambiguous metadata batch")
+			backing := &ambiguousMetadataBatchStore{
+				Store:      mem,
+				err:        writeErr,
+				commitKeys: tc.commitKeys,
+			}
+			notifications := 0
+			cache := NewCachingStoreForTest(backing, func(string, string, json.RawMessage) {
+				notifications++
+			})
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+			cache.mu.RLock()
+			startSeq := cache.mutationSeq
+			cache.mu.RUnlock()
+
+			if err := cache.SetMetadataBatch(bead.ID, patch); !errors.Is(err, writeErr) {
+				t.Fatalf("SetMetadataBatch error = %v, want %v", err, writeErr)
+			}
+
+			cache.mu.RLock()
+			fence := cache.beadSeq[bead.ID]
+			_, dirty := cache.dirty[bead.ID]
+			_, local := cache.localBeadAt[bead.ID]
+			cache.mu.RUnlock()
+			if fence <= startSeq || !dirty || local {
+				t.Fatalf("ambiguity fence = seq:%d start:%d dirty:%v local:%v", fence, startSeq, dirty, local)
+			}
+			if notifications != 0 {
+				t.Fatalf("notifications = %d, want 0 for an unconfirmed write", notifications)
+			}
+			query := ListQuery{Type: "session"}
+			if _, ok := cache.CachedList(query); ok {
+				t.Fatal("CachedList served a row whose backing write outcome is unknown")
+			}
+
+			rows, err := cache.List(query)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if len(rows) != 1 || rows[0].Metadata["state"] != tc.wantState || rows[0].Metadata["reason"] != tc.wantReason {
+				t.Fatalf("List metadata = %#v, want state=%q reason=%q", rows, tc.wantState, tc.wantReason)
+			}
+			if rows, ok := cache.CachedList(query); !ok || len(rows) != 1 ||
+				rows[0].Metadata["state"] != tc.wantState || rows[0].Metadata["reason"] != tc.wantReason {
+				t.Fatalf("CachedList after reread = %#v, ok=%v", rows, ok)
+			}
+		})
 	}
 }
 
@@ -1154,6 +1248,48 @@ func TestCachingStoreReopenAdoptsFreshBackingRead(t *testing.T) {
 	if got.Revision != fresh.Revision {
 		t.Fatalf("cached revision after Reopen = %d, backing = %d; the successful refresh read must be adopted",
 			got.Revision, fresh.Revision)
+	}
+}
+
+func TestCachingStoreReopenClearsStatusBasedDeferralWhenRefreshFails(t *testing.T) {
+	t.Parallel()
+
+	backing := &releaseRefreshFailOnceStore{Store: NewMemStore()}
+	created, err := backing.Create(Bead{
+		Title:                "deferred",
+		Status:               "open",
+		IndefinitelyDeferred: true,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	// The fixture reaches the cache deferred only because MemStore.Create
+	// seeds Status directly instead of taking an explicit transition, which
+	// clears the marker. Pin that here: without it, a Create that started
+	// clearing the marker would leave this test asserting !IsDeferred against
+	// a bead that was never deferred, and it would pass vacuously.
+	primed, err := cache.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get before reopen: %v", err)
+	}
+	if !IsDeferred(primed, time.Now()) {
+		t.Fatalf("fixture is not deferred before the reopen, so the assertion below would be vacuous: %+v", primed)
+	}
+
+	backing.failNextGet = true
+	if err := cache.Reopen(created.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	reopened, err := cache.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if IsDeferred(reopened, time.Now()) {
+		t.Fatalf("failed refresh fallback retained status-based deferral: %+v", reopened)
 	}
 }
 

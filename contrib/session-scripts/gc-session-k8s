@@ -41,6 +41,12 @@ name="${2:-}"
 # Tmux session name inside each pod (constant — one session per pod).
 TMUX_SESSION="main"
 
+# Pod-side projection of the city root. This is the only directory guaranteed
+# to exist when the container starts — the "ws" emptyDir mount point for staged
+# pods, the image WORKDIR for prebaked ones — so it is what a pod manifest's
+# workingDir may safely name.
+POD_WORKSPACE_ROOT="/workspace"
+
 # --- Configuration ---
 
 NS="${GC_K8S_NAMESPACE:-gc}"
@@ -215,15 +221,6 @@ case "$op" in
     cred_copy="mkdir -p \$HOME/.claude && cp -rL /tmp/claude-secret/. \$HOME/.claude/ 2>/dev/null; "
     ws_wait="while [ ! -f /workspace/.gc-workspace-ready ]; do sleep 0.5; done; "
 
-    cmd_b64=$(printf '%s' "${command:-/bin/bash}" | base64 -w0)
-    tmux_cmd="${cred_copy}${ws_wait}${pre_cmds}CMD=\$(echo '${cmd_b64}' | base64 -d) && tmux new-session -d -s ${TMUX_SESSION} \"\$CMD\" && sleep infinity"
-
-    # Build the pod manifest as JSON using jq.
-    # All values are properly JSON-escaped by jq — no injection risk.
-    # Tell the agent which tmux session to target for metadata (drain,
-    # restart). The controller uses TMUX_SESSION ("main") when proxying
-    # set-meta/get-meta; this env var makes the agent's Go tmux provider
-    # resolve to the same session name.
     # Map controller-side work_dir to pod-side /workspace path.
     # Controller resolves agent dirs relative to its cityPath (e.g., /city),
     # but agent pods use /workspace as the city root. Rig agents need their
@@ -239,6 +236,30 @@ case "$op" in
           ;;
       esac
     fi
+
+    # The kubelet chdirs into the container's workingDir before the entrypoint
+    # runs, so the manifest can only name a directory that already exists (see
+    # $POD_WORKSPACE_ROOT). A pool or workflow worker's work_dir is a per-bead
+    # directory (<rig>/<beadID>-<slug>) that nothing has created yet, so the
+    # entrypoint creates and enters it itself.
+    #
+    # Placement matters twice over. It must come after $ws_wait, because until
+    # staging signals ready the workspace content is still being written and a
+    # shell sitting in a subdirectory of it is standing on shifting ground. And
+    # it must come before $pre_cmds, because pre_start previously ran in the
+    # work dir (the container's workingDir) and must keep doing so.
+    quoted_pod_work_dir="'$(printf '%s' "$pod_work_dir" | sed "s/'/'\\\\''/g")'"
+    enter_work_dir="mkdir -p ${quoted_pod_work_dir} && cd ${quoted_pod_work_dir} && "
+
+    cmd_b64=$(printf '%s' "${command:-/bin/bash}" | base64 -w0)
+    tmux_cmd="${cred_copy}${ws_wait}${enter_work_dir}${pre_cmds}CMD=\$(echo '${cmd_b64}' | base64 -d) && tmux new-session -d -s ${TMUX_SESSION} \"\$CMD\" && sleep infinity"
+
+    # Build the pod manifest as JSON using jq.
+    # All values are properly JSON-escaped by jq — no injection risk.
+    # Tell the agent which tmux session to target for metadata (drain,
+    # restart). The controller uses TMUX_SESSION ("main") when proxying
+    # set-meta/get-meta; this env var makes the agent's Go tmux provider
+    # resolve to the same session name.
 
     # Build env array for the pod. Remove controller-only exec providers
     # (GC_BEADS, GC_SESSION, GC_EVENTS) — agents use native bd against dolt.
@@ -329,7 +350,7 @@ case "$op" in
         --arg mem_req "$MEM_REQ" \
         --arg cpu_lim "$CPU_LIM" \
         --arg mem_lim "$MEM_LIM" \
-        --arg work_dir "$pod_work_dir" \
+        --arg pod_root "$POD_WORKSPACE_ROOT" \
         --arg sa "$SERVICE_ACCOUNT" \
         --argjson env "$env_array" \
         --arg city "$gc_city" \
@@ -363,7 +384,7 @@ case "$op" in
               name: "agent",
               image: $image,
               imagePullPolicy: "IfNotPresent",
-              workingDir: $work_dir,
+              workingDir: $pod_root,
               command: ["/bin/sh", "-c"],
               args: [$cmd],
               env: $env,
@@ -397,7 +418,7 @@ case "$op" in
         --arg mem_req "$MEM_REQ" \
         --arg cpu_lim "$CPU_LIM" \
         --arg mem_lim "$MEM_LIM" \
-        --arg work_dir "$pod_work_dir" \
+        --arg pod_root "$POD_WORKSPACE_ROOT" \
         --arg sa "$SERVICE_ACCOUNT" \
         --argjson env "$env_array" \
         --arg city "$gc_city" \
@@ -423,7 +444,7 @@ case "$op" in
               name: "agent",
               image: $image,
               imagePullPolicy: "IfNotPresent",
-              workingDir: $work_dir,
+              workingDir: $pod_root,
               command: ["/bin/sh", "-c"],
               args: [$cmd],
               env: $env,

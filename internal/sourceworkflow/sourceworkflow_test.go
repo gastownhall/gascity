@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestWithLockHonorsContextWhileWaitingForLocalLock(t *testing.T) {
@@ -161,6 +162,138 @@ func TestWorkflowMatchesSourceTreatsMissingSourceStoreRefAsLegacyMatchInOwningSt
 	}
 	if WorkflowMatchesSource(root, "BL-42", "rig:alpha", "rig:beta") {
 		t.Fatal("WorkflowMatchesSource() = true, want false for legacy root in different store")
+	}
+}
+
+func TestCanonicalSourceStoreRefNamesTheBareCityRef(t *testing.T) {
+	tests := []struct {
+		name     string
+		ref      string
+		cityName string
+		want     string
+	}{
+		{name: "bare city ref names this city", ref: "city:", cityName: "mc", want: "city:mc"},
+		{name: "bare city ref with padding", ref: "  city:  ", cityName: "mc", want: "city:mc"},
+		{name: "bare city ref without a city name", ref: "city:", cityName: "", want: "city:city"},
+		{name: "named city ref is kept", ref: "city:mc", cityName: "mc", want: "city:mc"},
+		{name: "other city ref is kept", ref: "city:other", cityName: "mc", want: "city:other"},
+		{name: "padded city name is trimmed", ref: "city: mc ", cityName: "mc", want: "city:mc"},
+		{name: "rig ref is kept", ref: "rig:alpha", cityName: "mc", want: "rig:alpha"},
+		{name: "padded rig name is trimmed", ref: "rig: alpha ", cityName: "mc", want: "rig:alpha"},
+		{name: "bare rig ref stays bare", ref: "rig:", cityName: "mc", want: "rig:"},
+		{name: "graph ref is untouched", ref: "graph:mc", cityName: "mc", want: "graph:mc"},
+		{name: "empty ref stays empty", ref: "  ", cityName: "mc", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CanonicalSourceStoreRef(tt.ref, tt.cityName); got != tt.want {
+				t.Fatalf("CanonicalSourceStoreRef(%q, %q) = %q, want %q", tt.ref, tt.cityName, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSameSourceStoreRefTreatsBareCityRefAsThisCityInBothDirections(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want bool
+	}{
+		{a: "city:", b: "city:mc", want: true},
+		{a: "city:mc", b: "city:", want: true},
+		{a: "city:", b: "city:", want: true},
+		{a: "city:", b: "city:other", want: false},
+		{a: "city:other", b: "city:", want: false},
+		{a: "city:mc", b: "rig:mc", want: false},
+		{a: "rig:alpha", b: "rig: alpha", want: true},
+		{a: "rig:alpha", b: "rig:beta", want: false},
+		{a: "", b: "", want: false},
+		{a: "city:", b: "", want: false},
+	}
+	for _, tt := range tests {
+		if got := SameSourceStoreRef(tt.a, tt.b, "mc"); got != tt.want {
+			t.Errorf("SameSourceStoreRef(%q, %q, mc) = %t, want %t", tt.a, tt.b, got, tt.want)
+		}
+	}
+}
+
+// TestWorkflowMatchesSourceInCityAcceptsBareCityRefInBothDirections pins the
+// city-aware matcher delete-source walks with. A caller that renders the city
+// ref from city.toml alone stamps (and selects with) a bare "city:" when the
+// city has no [workspace] name, while gc renders the same store as
+// "city:<name>". Either side may carry either spelling.
+func TestWorkflowMatchesSourceInCityAcceptsBareCityRefInBothDirections(t *testing.T) {
+	for _, tt := range []struct {
+		stamped, selected string
+	}{
+		{stamped: "city:", selected: "city:mc"},
+		{stamped: "city:mc", selected: "city:"},
+		{stamped: "city:", selected: "city:"},
+		{stamped: "city:mc", selected: "city:mc"},
+	} {
+		root := beads.Bead{ID: "wf-1", Metadata: map[string]string{
+			"gc.source_bead_id":       "BL-42",
+			SourceStoreRefMetadataKey: tt.stamped,
+		}}
+		if !WorkflowMatchesSourceInCity(root, "BL-42", tt.selected, "rig:alpha", "mc") {
+			t.Errorf("WorkflowMatchesSourceInCity(stamped %q, selected %q) = false, want true", tt.stamped, tt.selected)
+		}
+	}
+
+	other := beads.Bead{ID: "wf-other", Metadata: map[string]string{
+		"gc.source_bead_id":       "BL-42",
+		SourceStoreRefMetadataKey: "city:other",
+	}}
+	if WorkflowMatchesSourceInCity(other, "BL-42", "city:", "rig:alpha", "mc") {
+		t.Error("WorkflowMatchesSourceInCity(stamped city:other, selected city:) = true, want a different city to stay a miss")
+	}
+
+	legacy := beads.Bead{ID: "wf-legacy", Metadata: map[string]string{"gc.source_bead_id": "BL-42"}}
+	if !WorkflowMatchesSourceInCity(legacy, "BL-42", "city:", "city:mc", "mc") {
+		t.Error("WorkflowMatchesSourceInCity(legacy root in city:mc, selected city:) = false, want the owning-store fallback to accept the bare ref")
+	}
+	if WorkflowMatchesSourceInCity(legacy, "BL-42", "city:", "rig:alpha", "mc") {
+		t.Error("WorkflowMatchesSourceInCity(legacy root in rig:alpha, selected city:) = true, want false")
+	}
+}
+
+func TestListLiveRootsInCityAcceptsBareCityRef(t *testing.T) {
+	store := beads.NewMemStore()
+	for _, b := range []beads.Bead{
+		{ID: "wf-bare", Metadata: map[string]string{SourceStoreRefMetadataKey: "city:"}},
+		{ID: "wf-named", Metadata: map[string]string{SourceStoreRefMetadataKey: "city:mc"}},
+		{ID: "wf-other", Metadata: map[string]string{SourceStoreRefMetadataKey: "city:other"}},
+	} {
+		b.Title = b.ID
+		b.Type = "task"
+		b.Status = "in_progress"
+		b.Metadata["gc.kind"] = "workflow"
+		b.Metadata["gc.source_bead_id"] = "BL-42"
+		if _, err := store.Create(b); err != nil {
+			t.Fatalf("Create(%s): %v", b.ID, err)
+		}
+	}
+
+	for _, selected := range []string{"city:", "city:mc"} {
+		roots, err := ListLiveRootsInCity(store, "BL-42", selected, "city:mc", "mc")
+		if err != nil {
+			t.Fatalf("ListLiveRootsInCity(%q): %v", selected, err)
+		}
+		var titles []string
+		for _, root := range roots {
+			titles = append(titles, root.Title)
+		}
+		if len(titles) != 2 || titles[0] != "wf-bare" || titles[1] != "wf-named" {
+			t.Fatalf("ListLiveRootsInCity(%q) = %v, want [wf-bare wf-named]", selected, titles)
+		}
+	}
+
+	// The city-blind scanner keeps its exact comparison.
+	roots, err := ListLiveRoots(store, "BL-42", "city:", "city:mc")
+	if err != nil {
+		t.Fatalf("ListLiveRoots: %v", err)
+	}
+	if len(roots) != 1 || roots[0].Title != "wf-bare" {
+		t.Fatalf("ListLiveRoots(city:) = %#v, want only wf-bare", roots)
 	}
 }
 
@@ -952,5 +1085,117 @@ func TestSnapshotRestoreWorkflowBeadsRestoresMutableState(t *testing.T) {
 	}
 	if got := childAfter.Metadata["unrelated_metadata"]; got != "keep" {
 		t.Fatalf("child unrelated metadata = %q, want keep", got)
+	}
+}
+
+// TestCanonicalScopeRefResolvesSymlinkedParentWithMissingLeaf pins the
+// ga-iawy13.6 canonical-path-at-ingest fix: canonicalScopeRef must resolve
+// through a symlinked parent directory even when the leaf itself does not
+// exist yet. Today it attempts EvalSymlinks only on the full path and
+// falls back to the unresolved input on failure, with no walk-up.
+func TestCanonicalScopeRefResolvesSymlinkedParentWithMissingLeaf(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	aliasDir := filepath.Join(root, "alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	missing := filepath.Join(aliasDir, "missing-leaf")
+	got := canonicalScopeRef(missing)
+
+	// Canonicalize the expectation through the production normalizer rather
+	// than bare EvalSymlinks: the two pick different spellings of the macOS
+	// temp root (/var/... vs /private/var/...). The comparison stays exact,
+	// so an unresolved alias still fails.
+	resolvedAlias := testutil.CanonicalPath(aliasDir)
+	want := filepath.Join(resolvedAlias, "missing-leaf")
+	if got != want {
+		t.Errorf("canonicalScopeRef(%q) = %q, want %q (resolved through symlinked parent)", missing, got, want)
+	}
+}
+
+// TestCanonicalScopeRefReturnsAbsolutePathForUnresolvableRelativeInput pins
+// that canonicalScopeRef always yields an absolute path for reliable
+// cross-process lock-key comparison, even when EvalSymlinks cannot resolve
+// anything at all. Today a relative input that cannot be resolved is
+// returned unchanged (still relative).
+func TestCanonicalScopeRefReturnsAbsolutePathForUnresolvableRelativeInput(t *testing.T) {
+	const relative = "does-not-exist-anywhere/leaf"
+	got := canonicalScopeRef(relative)
+	if !filepath.IsAbs(got) {
+		t.Errorf("canonicalScopeRef(%q) = %q, want an absolute path", relative, got)
+	}
+}
+
+// TestCanonicalCityPathResolvesSymlinkedParentWithMissingLeaf pins the
+// ga-iawy13.6 canonical-path-at-ingest fix: canonicalCityPath must resolve
+// through a symlinked parent directory even when the leaf itself does not
+// exist yet. Today it attempts EvalSymlinks only on the absolute path and
+// falls back to the unresolved abs path on failure, with no walk-up.
+func TestCanonicalCityPathResolvesSymlinkedParentWithMissingLeaf(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	aliasDir := filepath.Join(root, "alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	missing := filepath.Join(aliasDir, "missing-leaf")
+	got, err := canonicalCityPath(missing)
+	if err != nil {
+		t.Fatalf("canonicalCityPath(%q): %v", missing, err)
+	}
+
+	// Same canonical-form alignment as canonicalScopeRef above.
+	resolvedAlias := testutil.CanonicalPath(aliasDir)
+	want := filepath.Join(resolvedAlias, "missing-leaf")
+	if got != want {
+		t.Errorf("canonicalCityPath(%q) = %q, want %q (resolved through symlinked parent)", missing, got, want)
+	}
+}
+
+// TestCanonicalScopeRefKeepsStoreSentinelStableAcrossWorkingDirs pins that a
+// logical store sentinel is not absolutized. LockScopeForStoreRef returns the
+// literal "rig:<name>" when the rig cannot be resolved to a path; if that were
+// made cwd-relative, two gc processes started from different directories would
+// derive different lock keys and lock files for the same logical scope.
+func TestCanonicalScopeRefKeepsStoreSentinelStableAcrossWorkingDirs(t *testing.T) {
+	for _, ref := range []string{"rig:alpha", "city:main"} {
+		a := func() string { t.Chdir(t.TempDir()); return canonicalScopeRef(ref) }()
+		b := func() string { t.Chdir(t.TempDir()); return canonicalScopeRef(ref) }()
+		if a != ref || b != ref {
+			t.Errorf("canonicalScopeRef(%q) = %q / %q, want %q verbatim from both dirs", ref, a, b, ref)
+		}
+	}
+}
+
+// TestGraphStoreRefIsAStoreSentinelNotAScopeKind pins the graph binding's store
+// ref. It has to survive canonicalScopeRef intact for the same reason
+// "rig:alpha" does — a ref that absolutized would derive a different lock key
+// per working directory — and it must never collapse to the bare prefix, which
+// isStoreScopeSentinel reads as a path.
+func TestGraphStoreRefIsAStoreSentinelNotAScopeKind(t *testing.T) {
+	ref := GraphStoreRef("bright-lights")
+	if ref != GraphStoreRefPrefix+":bright-lights" {
+		t.Fatalf("GraphStoreRef(bright-lights) = %q, want %q", ref, GraphStoreRefPrefix+":bright-lights")
+	}
+	if got := GraphStoreRef("  "); got != GraphStoreRefPrefix+":city" {
+		t.Errorf("GraphStoreRef(blank) = %q, want the %q fallback", got, GraphStoreRefPrefix+":city")
+	}
+	if !isStoreScopeSentinel(ref) {
+		t.Errorf("%q does not read as a store sentinel; a lock keyed on it would depend on the caller's cwd", ref)
+	}
+	if got := canonicalScopeRef(ref); got != ref {
+		t.Errorf("canonicalScopeRef(%q) = %q, want it verbatim", ref, got)
+	}
+	if NormalizeSourceStoreRef(ref) == NormalizeSourceStoreRef("city:bright-lights") {
+		t.Error("the graph leg's ref compares equal to the city store's; the two legs would be conflated")
 	}
 }

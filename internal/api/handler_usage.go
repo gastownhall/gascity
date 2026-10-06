@@ -63,14 +63,18 @@ const (
 	UsageSourceUnavailable UsageSource = "unavailable"
 )
 
-// UsageBody is the bounded city telemetry returned by GET /usage. Today and
-// recent are exact when Partial is false and lower-bound observations when it
-// is true.
+// UsageBody is the bounded city telemetry returned by GET /usage. Today,
+// last_24h, and recent are exact when Partial is false and lower-bound
+// observations when it is true. Last24H is a pointer so the contract stays
+// forward/backward compatible: a server or proxy that predates the field omits
+// it entirely rather than sending a zeroed aggregate, and consumers treat its
+// absence as "unavailable".
 type UsageBody struct {
 	Available        bool                 `json:"available" doc:"True when this city is configured to record local usage estimates."`
 	Recording        bool                 `json:"recording" doc:"True when new facts are currently being written to the local estimate log."`
 	Source           UsageSource          `json:"source" enum:"local_estimate,unavailable" doc:"Source of this usage reading."`
 	Today            UsageTotals          `json:"today" doc:"Usage since local midnight on the supervisor host."`
+	Last24H          *UsageTotals         `json:"last_24h,omitempty" doc:"Usage over the trailing 24 hours; a rolling window that survives the local-midnight reset of today. Omitted by servers or proxies that predate the field."`
 	Recent           UsageTotals          `json:"recent" doc:"Usage in the trailing recent window."`
 	RecentBySession  []UsageSessionRecent `json:"recent_by_session,omitempty" doc:"Recent model usage per session, largest token volume first."`
 	RecentWindowSecs int                  `json:"recent_window_secs" doc:"Length of the recent window in seconds."`
@@ -116,6 +120,7 @@ func usageResponse(body UsageBody, aggregateOnly bool) UsageBody {
 
 func buildUsageBody(facts []usage.Fact, report usage.RecentReadReport, now time.Time) UsageBody {
 	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	last24hFrom := now.Add(-24 * time.Hour)
 	recentFrom := now.Add(-usageRecentWindow)
 	body := UsageBody{
 		Available:        true,
@@ -144,7 +149,7 @@ func buildUsageBody(facts []usage.Fact, report usage.RecentReadReport, now time.
 		totals    usage.Totals
 	}
 	bySession := make(map[string]*sessionAccum)
-	var today, recent usage.Totals
+	var today, last24h, recent usage.Totals
 	var oldest time.Time
 	invalid := 0
 	for _, fact := range facts {
@@ -155,6 +160,14 @@ func buildUsageBody(facts []usage.Fact, report usage.RecentReadReport, now time.
 		at := time.UnixMilli(fact.At)
 		if oldest.IsZero() || at.Before(oldest) {
 			oldest = at
+		}
+		// today is usually a subset of last_24h, but not always: on a 25-hour
+		// DST fall-back civil day now-midnight can exceed 24h, so a fact just
+		// after midnight can land outside the trailing-24h window. Each window is
+		// gated independently, so both fold correctly in this single pass over the
+		// facts regardless — no second scan, no reliance on the subset property.
+		if !at.Before(last24hFrom) && !at.After(now) {
+			last24h.Add(fact)
 		}
 		if !at.Before(midnight) && !at.After(now) {
 			today.Add(fact)
@@ -186,6 +199,8 @@ func buildUsageBody(facts []usage.Fact, report usage.RecentReadReport, now time.
 		body.ObservedFrom = oldest.UTC().Format(time.RFC3339Nano)
 	}
 	body.Today = usageTotalsBody(today)
+	l24 := usageTotalsBody(last24h)
+	body.Last24H = &l24
 	body.Recent = usageTotalsBody(recent)
 	for _, acc := range bySession {
 		body.RecentBySession = append(body.RecentBySession, UsageSessionRecent{

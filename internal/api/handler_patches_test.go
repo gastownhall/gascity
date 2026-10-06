@@ -156,6 +156,76 @@ func TestHandleAgentPatchSet_Provider(t *testing.T) {
 	}
 }
 
+// TestHandleAgentPatchSet_Rig verifies PUT /patches/agents wires the new rig
+// targeting key (including the "*" wildcard) through to the stored patch, and
+// that such a patch round-trips through GET and DELETE addressed by its
+// rig-qualified identity — rather than being silently stored or looked up as a
+// city-scoped (dir="") patch. config.AgentPatch supports Rig, but the HTTP
+// input previously dropped it and the lookup keyed on Dir only, so a
+// rig-targeted patch was unreachable via the API.
+func TestHandleAgentPatchSet_Rig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rig  string
+		path string // GET/DELETE path addressing the patch by its qualified identity
+	}{
+		{name: "specific rig", rig: "rigA", path: "/patches/agent/rigA/worker"},
+		{name: "wildcard", rig: "*", path: "/patches/agent/*/worker"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeMutatorState(t)
+			h := newTestCityHandler(t, fs)
+
+			body := `{"rig":"` + tc.rig + `","name":"worker","provider":"claude-max"}`
+			req := httptest.NewRequest("PUT", cityURL(fs, "/patches/agents"), strings.NewReader(body))
+			req.Header.Set("X-GC-Request", "true")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("PUT status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+			}
+
+			if len(fs.cfg.Patches.Agents) != 1 {
+				t.Fatalf("patches.agent count = %d, want 1", len(fs.cfg.Patches.Agents))
+			}
+			stored := fs.cfg.Patches.Agents[0]
+			if stored.Rig != tc.rig {
+				t.Errorf("stored Rig = %q, want %q (PUT dropped the rig key)", stored.Rig, tc.rig)
+			}
+			if stored.Dir != "" {
+				t.Errorf("stored Dir = %q, want empty (a rig patch must not fall back to a dir scope)", stored.Dir)
+			}
+
+			// It must round-trip through GET addressed by its rig-qualified identity.
+			getReq := httptest.NewRequest("GET", cityURL(fs, tc.path), nil)
+			getW := httptest.NewRecorder()
+			h.ServeHTTP(getW, getReq)
+			if getW.Code != http.StatusOK {
+				t.Fatalf("GET status = %d, want %d; body = %s", getW.Code, http.StatusOK, getW.Body.String())
+			}
+			var patch config.AgentPatch
+			if err := json.NewDecoder(getW.Body).Decode(&patch); err != nil {
+				t.Fatalf("decode patch: %v", err)
+			}
+			if patch.Rig != tc.rig || patch.Name != "worker" {
+				t.Errorf("GET patch = {Rig:%q Name:%q}, want {Rig:%q Name:%q}", patch.Rig, patch.Name, tc.rig, "worker")
+			}
+
+			// And DELETE by the same identity must remove it.
+			delReq := httptest.NewRequest("DELETE", cityURL(fs, tc.path), nil)
+			delReq.Header.Set("X-GC-Request", "true")
+			delW := httptest.NewRecorder()
+			h.ServeHTTP(delW, delReq)
+			if delW.Code != http.StatusOK {
+				t.Fatalf("DELETE status = %d, want %d; body = %s", delW.Code, http.StatusOK, delW.Body.String())
+			}
+			if len(fs.cfg.Patches.Agents) != 0 {
+				t.Errorf("patches.agent count after delete = %d, want 0", len(fs.cfg.Patches.Agents))
+			}
+		})
+	}
+}
+
 func TestHandleAgentPatchSet_MissingName(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	h := newTestCityHandler(t, fs)
@@ -168,6 +238,39 @@ func TestHandleAgentPatchSet_MissingName(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+// TestHandleAgentPatchSet_RejectsDirPlusRig verifies PUT /patches/agents
+// rejects a body that sets both the legacy dir key and the new rig key
+// (including the "*" wildcard) with HTTP 400. The combination is
+// mutually-exclusive and would hard-fail the next config load, so the handler
+// validates at the edge before persisting — mirroring the editor SetAgentPatch
+// guard so the HTTP and CLI write paths reject the same invalid patch.
+func TestHandleAgentPatchSet_RejectsDirPlusRig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "dir and specific rig", body: `{"dir":"rigA","rig":"rigB","name":"worker"}`},
+		{name: "dir and wildcard rig", body: `{"dir":"rigA","rig":"*","name":"worker"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeMutatorState(t)
+			h := newTestCityHandler(t, fs)
+
+			req := httptest.NewRequest("PUT", cityURL(fs, "/patches/agents"), strings.NewReader(tc.body))
+			req.Header.Set("X-GC-Request", "true")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusBadRequest, w.Body.String())
+			}
+			if len(fs.cfg.Patches.Agents) != 0 {
+				t.Errorf("patches.agent count = %d, want 0 (invalid patch must not be stored)", len(fs.cfg.Patches.Agents))
+			}
+		})
 	}
 }
 

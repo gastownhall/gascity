@@ -122,6 +122,35 @@ Store health:
   Last GC:     2026-04-22T10:00:00Z (success)
 ```
 
+When the row count cannot be completed — there is no store, the scan
+errors, or it exceeds its 1 s bound — the block reports the count as
+unavailable instead:
+
+```text
+Store health:
+  Path:        /path/to/city/.beads/dolt
+  Size:        11.2 GB
+  Live rows:   unknown (count unavailable)
+  Last GC:     2026-04-22T10:00:00Z (success)
+```
+
+The `Ratio:` line is omitted entirely rather than printed as a
+misleading `0.0 MB/row`, and `gc status --json` sets
+`live_rows_unknown: true`. **That state means retry / investigate, not
+pass:** `live_rows`, `ratio_mb_per_row` and `warning` carry no meaning
+when the count is unknown, so a `0` row count or an absent warning there
+must never be read as a healthy store.
+
+`gc status` reaches that block by two paths and both carry the
+qualifier. The local path builds it directly; the supervisor-managed
+path reads `store_health` from `GET /v0/status`, where the same property
+travels as `rows_measured`. It is spelled for the measured state on
+purpose: a payload that omits the field — an older supervisor, another
+implementation — decodes to `false` and renders as unknown, so silence
+withholds the number rather than asserting a count nobody took. A client
+reading `/v0/status` directly owes the same check, and must treat
+`rows_measured: false` the way the CLI does.
+
 The `⚠ maintenance overdue` suffix appears when
 `size_bytes > 1.0 MB × live_rows`. The same data is available under
 `store_health` in `gc status --json`.

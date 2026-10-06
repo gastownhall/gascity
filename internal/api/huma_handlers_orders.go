@@ -301,7 +301,12 @@ func (s *Server) humaHandleOrderHistoryDetail(_ context.Context, input *OrderHis
 	Body orderHistoryDetailResponse
 }, error,
 ) {
-	storeInfos := workflowStores(s.state)
+	// The bead this reads is an order-tracking bead, which on a split city lives in
+	// the orders binding. workflowStores leads with the GRAPH binding, so without
+	// the orders leg this only finds one because the shape this build serves
+	// happens to serve both classes from one store — the co-residency the feed
+	// already refuses to rely on.
+	storeInfos := appendOrdersClassStoreInfo(workflowStores(s.state), s.state, workflowCityScopeRef(s.state.CityName()))
 	if input.StoreRef != "" {
 		info, ok := workflowStoreByRef(s.state, input.StoreRef)
 		if !ok {
@@ -371,10 +376,48 @@ func orderStoreInfosForState(state State, a orders.Order) ([]workflowStoreInfo, 
 		})
 	}
 
+	infos = appendOrdersClassStoreInfo(infos, state, cityName)
+
 	if len(infos) == 0 {
 		return nil, errNoOrderStores
 	}
 	return infos, nil
+}
+
+// ordersClassStoreRefPrefix distinguishes the orders binding from the scope
+// stores in a store_ref. It names the class rather than a scope because one
+// binding serves every scope, and a ref that claimed a scope would tell an
+// operator to look in the wrong database.
+const ordersClassStoreRefPrefix = "orders"
+
+// appendOrdersClassStoreInfo adds the orders-class binding to an order read's
+// store list, unless the list already reads it.
+//
+// The controller creates every order-tracking bead in this store, so a read that
+// skips it reports a split city's orders as never having run — `gc order check`
+// through the API sees no last run and calls a just-fired order due, and
+// `gc order history` returns nothing. The scope stores stay in the list because a
+// converged city holds the pre-cutover history in them.
+//
+// Skipped whenever the binding is one of the stores already present, which is
+// every city that relocates nothing: OrdersBeadStore() == CityBeadStore() there,
+// so the read stays byte-identical rather than scanning one database twice.
+func appendOrdersClassStoreInfo(infos []workflowStoreInfo, state State, cityName string) []workflowStoreInfo {
+	ordersStore := state.OrdersBeadStore().Store
+	if ordersStore == nil {
+		return infos
+	}
+	for _, info := range infos {
+		if info.store == ordersStore {
+			return infos
+		}
+	}
+	return append(infos, workflowStoreInfo{
+		ref:       ordersClassStoreRefPrefix + ":" + cityName,
+		scopeKind: beadmeta.ScopeKindCity,
+		scopeRef:  cityName,
+		store:     ordersStore,
+	})
 }
 
 // orderFrontDoorsFromWorkflowInfos wraps the order read path's store infos as
@@ -582,7 +625,7 @@ func (s *Server) humaHandleOrdersFeed(_ context.Context, input *OrdersFeedInput)
 	if err != nil {
 		return nil, apierr.Internal.Msg("workflow feed failed")
 	}
-	orderRuns, err := buildOrderRunFeedItems(s.state, scopeKind, scopeRef)
+	orderRuns, err := buildOrderRunFeedItems(s.state, scopeKind, scopeRef, limit)
 	if err != nil {
 		return nil, apierr.Internal.Msg("order feed failed")
 	}

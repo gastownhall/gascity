@@ -19,6 +19,12 @@ func isTestBinary() bool {
 	if len(os.Args) == 0 {
 		return false
 	}
+	// Bazel test binaries drop the .test suffix but export TEST_SRCDIR and
+	// name the binary <target>_test; testscript re-invocations rename it
+	// (e.g. "gc"), so require both markers to avoid scrubbing the child.
+	if os.Getenv("TEST_SRCDIR") != "" && strings.HasSuffix(filepath.Base(os.Args[0]), "_test") {
+		return true
+	}
 	return strings.HasSuffix(os.Args[0], ".test") ||
 		strings.Contains(os.Args[0], ".test")
 }
@@ -85,6 +91,10 @@ type EventsSection struct {
 type ExportConfig struct {
 	// Endpoint is the HTTP URL that receives batched, envelope-only events.
 	Endpoint string `toml:"endpoint,omitempty"`
+	// Cities optionally restricts export to exact registered city names. A nil
+	// slice preserves the all-city default; an explicitly empty slice exports no
+	// city events.
+	Cities []string `toml:"cities,omitempty"`
 	// Token, when set, is sent as an Authorization: Bearer header.
 	Token string `toml:"token,omitempty"`
 	// TokenFile, when set, is a path to a file holding the bearer token. It is

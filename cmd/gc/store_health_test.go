@@ -33,7 +33,7 @@ func TestStoreHealthSIBytes(t *testing.T) {
 }
 
 func TestStoreHealthFromInputsOmitsLastGCWhenZero(t *testing.T) {
-	h := storeHealthFromInputs("/c", 1_000_000, 1, time.Time{}, "")
+	h := storeHealthFromInputs("/c", 1_000_000, 1, true, time.Time{}, "")
 	if h.LastGCAt != "" {
 		t.Errorf("LastGCAt = %q, want empty", h.LastGCAt)
 	}
@@ -52,7 +52,7 @@ func TestStoreHealthFromInputsOmitsLastGCWhenZero(t *testing.T) {
 
 func TestStoreHealthFromInputsFormatsLastGCAsRFC3339(t *testing.T) {
 	ts := time.Date(2026, 4, 1, 3, 15, 30, 0, time.UTC)
-	h := storeHealthFromInputs("/c", 0, 0, ts, "success")
+	h := storeHealthFromInputs("/c", 0, 0, true, ts, "success")
 	if h.LastGCAt != "2026-04-01T03:15:30Z" {
 		t.Errorf("LastGCAt = %q, want 2026-04-01T03:15:30Z", h.LastGCAt)
 	}
@@ -70,7 +70,7 @@ func TestRenderStoreHealthBlockNil(t *testing.T) {
 }
 
 func TestRenderStoreHealthBlockWarning(t *testing.T) {
-	h := storeHealthFromInputs("/c", 11_200_000_000, 221, time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC), "success")
+	h := storeHealthFromInputs("/c", 11_200_000_000, 221, true, time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC), "success")
 	var buf bytes.Buffer
 	renderStoreHealthBlock(&buf, h)
 
@@ -92,7 +92,7 @@ func TestRenderStoreHealthBlockWarning(t *testing.T) {
 }
 
 func TestRenderStoreHealthBlockNoWarning(t *testing.T) {
-	h := storeHealthFromInputs("/c", 50_000_000, 221, time.Time{}, "")
+	h := storeHealthFromInputs("/c", 50_000_000, 221, true, time.Time{}, "")
 	var buf bytes.Buffer
 	renderStoreHealthBlock(&buf, h)
 
@@ -108,9 +108,47 @@ func TestRenderStoreHealthBlockNoWarning(t *testing.T) {
 	}
 }
 
+// The operator-facing surface of an unmeasured count must not read as a
+// healthy store. A large store with no usable row count previously rendered
+// "Live rows: 0 / Ratio: 0.0 MB/row" with no warning — byte-identical to a
+// genuinely empty, healthy city. It must now say the count is unavailable and
+// must not print a fabricated ratio.
+func TestRenderStoreHealthBlockUnmeasuredRowsSaysUnknownAndOmitsRatio(t *testing.T) {
+	h := storeHealthFromInputs("/c", 11_200_000_000, 0, false, time.Time{}, "")
+	var buf bytes.Buffer
+	renderStoreHealthBlock(&buf, h)
+
+	out := buf.String()
+	if !strings.Contains(out, "Live rows:   unknown") {
+		t.Errorf("output does not report the row count as unknown:\n%s", out)
+	}
+	if strings.Contains(out, "Ratio:") {
+		t.Errorf("output prints a ratio for an unmeasured row count:\n%s", out)
+	}
+	if strings.Contains(out, "⚠") || strings.Contains(out, "maintenance overdue") {
+		t.Errorf("output warns off an unmeasured row count:\n%s", out)
+	}
+}
+
+// An unmeasured count must still render the maintenance tail; the unknown
+// branch reports less, not a truncated block.
+func TestRenderStoreHealthBlockUnmeasuredRowsStillRendersLastGC(t *testing.T) {
+	h := storeHealthFromInputs("/c", 11_200_000_000, 0, false, time.Unix(1700000000, 0), "done")
+	var buf bytes.Buffer
+	renderStoreHealthBlock(&buf, h)
+
+	if out := buf.String(); !strings.Contains(out, "Last GC:") {
+		t.Errorf("output drops Last GC when the row count is unmeasured:\n%s", out)
+	}
+}
+
 func TestLiveRowCountNilStore(t *testing.T) {
-	if got := liveRowCount(nil); got != 0 {
-		t.Fatalf("liveRowCount(nil) = %d, want 0", got)
+	got, measured := liveRowCount(nil)
+	if got != 0 {
+		t.Fatalf("liveRowCount(nil) rows = %d, want 0", got)
+	}
+	if measured {
+		t.Fatalf("liveRowCount(nil) measured = true, want false — there is no store to count")
 	}
 }
 
@@ -121,8 +159,12 @@ func TestLiveRowCountCountsBeads(t *testing.T) {
 			t.Fatalf("Create: %v", err)
 		}
 	}
-	if got := liveRowCount(store); got != 3 {
+	got, measured := liveRowCount(store)
+	if got != 3 {
 		t.Fatalf("liveRowCount = %d, want 3", got)
+	}
+	if !measured {
+		t.Fatalf("measured = false, want true for a successful count")
 	}
 }
 
@@ -140,8 +182,12 @@ func TestLiveRowCountIncludesClosedBeads(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	if got := liveRowCount(store); got != 2 {
+	got, measured := liveRowCount(store)
+	if got != 2 {
 		t.Fatalf("liveRowCount = %d, want 2 including closed bead %s and open bead %s", got, closed.ID, open.ID)
+	}
+	if !measured {
+		t.Fatalf("measured = false, want true for a successful count")
 	}
 }
 

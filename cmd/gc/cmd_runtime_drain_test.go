@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -71,6 +72,36 @@ func newFakeDrainOps() *fakeDrainOps {
 		acked:            make(map[string]bool),
 		restartRequested: make(map[string]bool),
 		driftRestart:     make(map[string]bool),
+	}
+}
+
+func TestProviderDrainOpsClearRestartRequestedUsesCityTmuxSocket(t *testing.T) {
+	const socket = "bright-lights"
+	argsFile := filepath.Join(t.TempDir(), "args")
+	installFakeTmux(t, `printf '%s\n' "$@" > "$FAKE_TMUX_ARGS"`)
+	t.Setenv("FAKE_TMUX_ARGS", argsFile)
+
+	sp, err := newSessionProviderForCityByName(
+		nil,
+		"tmux",
+		config.SessionConfig{Socket: socket},
+		"city",
+		t.TempDir(),
+	)
+	if err != nil {
+		t.Fatalf("newSessionProviderForCityByName: %v", err)
+	}
+	if err := newDrainOps(sp).clearRestartRequested("worker"); err != nil {
+		t.Fatalf("clearRestartRequested: %v", err)
+	}
+
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read fake tmux args: %v", err)
+	}
+	want := "-u\n-L\n" + socket + "\nset-environment\n-t\n=worker\n-u\nGC_RESTART_REQUESTED\n"
+	if string(got) != want {
+		t.Fatalf("tmux args = %q, want %q", got, want)
 	}
 }
 
@@ -661,12 +692,12 @@ func TestDoRuntimeDrainCheckJSONNotDrainingWritesFalseResult(t *testing.T) {
 
 func TestDoRuntimeDrainAck(t *testing.T) {
 	old := drainAckPokeController
-	drainAckPokeController = func(string) error { return nil }
+	drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 	t.Cleanup(func() { drainAckPokeController = old })
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "", "worker", "worker", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -682,7 +713,7 @@ func TestDoRuntimeDrainAckError(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "", "worker", "worker", "", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -703,12 +734,12 @@ func TestJoinDrainAckMutationErrorsMissingSessionBeadIsIdempotent(t *testing.T) 
 
 func TestDoRuntimeDrainAckJSON(t *testing.T) {
 	old := drainAckPokeController
-	drainAckPokeController = func(string) error { return nil }
+	drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 	t.Cleanup(func() { drainAckPokeController = old })
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "", "worker", "worker", true, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "", "worker", "worker", "", true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -726,11 +757,13 @@ func TestDoRuntimeDrainAckJSON(t *testing.T) {
 
 func TestDoRuntimeDrainAckPokesController(t *testing.T) {
 	var gotCityPath string
+	var gotKey reconcilekey.Key
 	calls := 0
 	old := drainAckPokeController
-	drainAckPokeController = func(cityPath string) error {
+	drainAckPokeController = func(cityPath string, key reconcilekey.Key) error {
 		calls++
 		gotCityPath = cityPath
+		gotKey = key
 		return nil
 	}
 	t.Cleanup(func() { drainAckPokeController = old })
@@ -739,7 +772,7 @@ func TestDoRuntimeDrainAckPokesController(t *testing.T) {
 	// of the three adjacent string params in the new signature.
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "/city/path", "display-name", "session-name", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "/city/path", "display-name", "session-name", "gc-42", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -749,6 +782,9 @@ func TestDoRuntimeDrainAckPokesController(t *testing.T) {
 	if gotCityPath != "/city/path" {
 		t.Errorf("poke cityPath = %q, want %q", gotCityPath, "/city/path")
 	}
+	if want := reconcilekey.SessionRef("gc-42", "session-name"); gotKey != want {
+		t.Errorf("poke key = %v, want %v", gotKey, want)
+	}
 	if !dops.acked["session-name"] {
 		t.Error("drain ack flag not set")
 	}
@@ -757,7 +793,7 @@ func TestDoRuntimeDrainAckPokesController(t *testing.T) {
 func TestDoRuntimeDrainAckErrorDoesNotPoke(t *testing.T) {
 	calls := 0
 	old := drainAckPokeController
-	drainAckPokeController = func(string) error {
+	drainAckPokeController = func(string, reconcilekey.Key) error {
 		calls++
 		return nil
 	}
@@ -766,7 +802,7 @@ func TestDoRuntimeDrainAckErrorDoesNotPoke(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", "", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -777,12 +813,12 @@ func TestDoRuntimeDrainAckErrorDoesNotPoke(t *testing.T) {
 
 func TestDoRuntimeDrainAckPokeFailureWarns(t *testing.T) {
 	old := drainAckPokeController
-	drainAckPokeController = func(string) error { return errors.New("dial failed") }
+	drainAckPokeController = func(string, reconcilekey.Key) error { return errors.New("dial failed") }
 	t.Cleanup(func() { drainAckPokeController = old })
 
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", false, &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0 (poke failure is best-effort)", code)
 	}
@@ -920,6 +956,7 @@ func TestProviderDrainOpsClearDrainAttemptsAllMetadataRemovals(t *testing.T) {
 	want := []string{
 		"GC_DRAIN_ACK",
 		reconcilerDrainAckSourceKey,
+		drainAckRequesterInstanceTokenKey,
 		reconcilerDrainAckReasonKey,
 		reconcilerDrainAckGenerationKey,
 		"GC_DRAIN",
@@ -946,7 +983,14 @@ func TestProviderDrainOpsSetDrainAckAttemptsAckAfterCleanupErrors(t *testing.T) 
 	if !slices.Equal(sp.removeKeys, wantRemove) {
 		t.Fatalf("removed keys = %v, want %v", sp.removeKeys, wantRemove)
 	}
+	// The stamp lands BEFORE the source, so the source is never admissible ahead
+	// of its own binding: drainReminderAckPin admits an acknowledgement on the
+	// source alone and reads the stamp in a separate round-trip, so written the
+	// other way round it would pair this ack's fresh source with the previous
+	// occupant's stamp and mint "proven stale" about an ack microseconds old.
+	// GC_DRAIN_ACK still lands last, which is what the effect boundary gates on.
 	wantSet := []string{
+		drainAckRequesterInstanceTokenKey,
 		reconcilerDrainAckSourceKey,
 		"GC_DRAIN_ACK",
 	}
@@ -963,8 +1007,7 @@ func TestDoRuntimeRequestRestartError(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
-		time.Millisecond, time.Second, &stdout, &stderr)
+	code := doRuntimeRequestRestart(dops, nil, false, events.Discard, "worker", "worker", "", &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -973,87 +1016,34 @@ func TestDoRuntimeRequestRestartError(t *testing.T) {
 	}
 }
 
-func TestDoRuntimeRequestRestartFlagCleared(t *testing.T) {
-	dops := &drainOpsWithCountdown{fakeDrainOps: newFakeDrainOps(), remaining: 2}
-
-	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
-		10*time.Millisecond, 5*time.Second, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("code = %d, want 0 when flag cleared; stderr: %s", code, stderr.String())
-	}
-	if stderr.Len() > 0 {
-		t.Errorf("unexpected stderr: %q", stderr.String())
-	}
-	if got := stdout.String(); !strings.Contains(got, "Waiting up to 5s") {
-		t.Errorf("stdout = %q, want bounded wait banner", got)
-	}
-	if dops.restartRequested["worker"] {
-		t.Error("restart flag should be cleared by the simulated reconciler")
-	}
-}
-
-func TestDoRuntimeRequestRestartTimeout(t *testing.T) {
-	dops := newFakeDrainOps()
-
-	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
-		10*time.Millisecond, 25*time.Millisecond, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("code = %d, want 1 on timeout", code)
-	}
-	if got := stderr.String(); !strings.Contains(got, "controller did not act within") {
-		t.Errorf("stderr = %q, want timeout diagnostic", got)
-	}
-	if !strings.Contains(stderr.String(), "gc dashboard") {
-		t.Errorf("stderr = %q, want gc dashboard hint", stderr.String())
-	}
-}
-
-func TestDoRuntimeRequestRestartTimeoutReportsLastPollError(t *testing.T) {
-	dops := newFakeDrainOps()
-	dops.restartReadErr = errors.New("metadata read failed")
-
-	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(context.Background(), dops, nil, events.Discard, "worker", "worker",
-		10*time.Millisecond, 25*time.Millisecond, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("code = %d, want 1 on timeout", code)
-	}
-	if got := stderr.String(); !strings.Contains(got, "last poll error: metadata read failed") {
-		t.Errorf("stderr = %q, want last poll error", got)
-	}
-}
-
-func TestDoRuntimeRequestRestartContextCancel(t *testing.T) {
-	dops := newFakeDrainOps()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	var stdout, stderr bytes.Buffer
-
-	done := make(chan int, 1)
-	go func() {
-		done <- doRuntimeRequestRestart(ctx, dops, nil, events.Discard, "worker", "worker",
-			10*time.Millisecond, 30*time.Second, &stdout, &stderr)
-	}()
-
-	time.Sleep(30 * time.Millisecond)
-	cancel()
-
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Fatalf("code = %d, want 0 on context cancel", code)
-		}
-		// Flag must remain set so the controller can still act on its next tick.
-		if !dops.restartRequested["worker"] {
-			t.Error("restart flag should remain set after context cancel")
-		}
-		if got := stderr.String(); !strings.Contains(got, "restart request remains set") {
-			t.Errorf("stderr = %q, want pending restart warning", got)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("doRuntimeRequestRestart did not exit on context cancel")
+// TestDoRuntimeRequestRestart_PinnedRequiresPersistRestart covers Fix 1 for
+// the gc runtime request-restart path: a pinned session (pin_awake ==
+// "true") is kill-protected by the reconciler unless an explicit controller
+// reset is persisted, so persistRestart is mandatory rather than best-effort
+// when pinned is true. Mirrors TestDoHandoff_PinnedAlwaysSessionRequiresPersistRestart.
+func TestDoRuntimeRequestRestart_PinnedRequiresPersistRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		persistRestart func() error
+	}{
+		{name: "nil persistRestart"},
+		{name: "persistRestart error", persistRestart: func() error { return errors.New("worker boundary unavailable") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dops := newFakeDrainOps()
+			rec := events.NewFake()
+			var stdout, stderr bytes.Buffer
+			code := doRuntimeRequestRestart(dops, tc.persistRestart, true, rec, "mayor", "mayor", "", &stdout, &stderr)
+			if code != 1 {
+				t.Fatalf("code = %d, want 1; stderr: %s", code, stderr.String())
+			}
+			if got := stdout.String(); strings.Contains(got, "Restart requested") {
+				t.Errorf("stdout = %q, must not promise a restart when persistRestart is unavailable for a pinned session", got)
+			}
+			if len(rec.Events) != 0 {
+				t.Fatalf("got %d events, want 0 (must not record SessionDraining without a real restart request); events=%v", len(rec.Events), rec.Events)
+			}
+		})
 	}
 }
 
@@ -1119,58 +1109,6 @@ func TestRequestRestartAcceptsNoArgs(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "not in session context") {
 		t.Errorf("stderr = %q, want 'not in session context' error", stderr.String())
-	}
-}
-
-// TestDoRuntimeRequestRestartProceedsAndPendsOnCancel pins the restart-request
-// helper flow that every session — including named on-demand sessions — now
-// takes. PR #3994 removed the early "restart skipped for named session" gate
-// from cmdRuntimeRequestRestart, so doRuntimeRequestRestart is always reached:
-// it sets the restart flag, persists it through the worker boundary, and on a
-// context cancel exits 0 while leaving the request pending (never reporting a
-// skipped restart). The on-demand session's reconciler-side restart handling is
-// covered by session_reconciler_restart_request_test.go; this test exercises
-// the generic helper, not a configured named on-demand session fixture.
-func TestDoRuntimeRequestRestartProceedsAndPendsOnCancel(t *testing.T) {
-	dops := newFakeDrainOps()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var persistCalled bool
-	persistRestart := func() error { //nolint:unparam // test double must satisfy doRuntimeRequestRestart's func() error param; the spy never fails.
-		persistCalled = true
-		return nil
-	}
-
-	var stdout, stderr bytes.Buffer
-	done := make(chan int, 1)
-	go func() {
-		done <- doRuntimeRequestRestart(ctx, dops, persistRestart, events.Discard, "mayor", "mayor",
-			10*time.Millisecond, 30*time.Second, &stdout, &stderr)
-	}()
-
-	time.Sleep(30 * time.Millisecond)
-	cancel()
-
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Fatalf("code = %d, want 0 on context cancel; stderr: %s", code, stderr.String())
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("doRuntimeRequestRestart did not exit on context cancel")
-	}
-	if !persistCalled {
-		t.Fatal("persistRestart was not called")
-	}
-	if !dops.restartRequested["mayor"] {
-		t.Fatal("restart request was not left set for named on-demand session")
-	}
-	if strings.Contains(stdout.String(), "Restart skipped for named session") {
-		t.Fatalf("stdout = %q, must not report a skipped restart", stdout.String())
-	}
-	if got := stderr.String(); !strings.Contains(got, "restart request remains set") {
-		t.Fatalf("stderr = %q, want pending restart warning", got)
 	}
 }
 
@@ -1344,8 +1282,16 @@ func TestDrainAckNoArgsErrorMessage(t *testing.T) {
 
 func TestDrainAckNoArgsFallsBackToCityPathEnv(t *testing.T) {
 	old := drainAckPokeController
-	drainAckPokeController = func(string) error { return nil }
+	drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
 	t.Cleanup(func() { drainAckPokeController = old })
+
+	// drain-ack now reads the city store to release any in_progress claim the
+	// session is still holding, so this bare temp city needs the same store
+	// guards its siblings in this file use — otherwise the read provisions a
+	// managed Dolt server the test never tears down.
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {

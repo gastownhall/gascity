@@ -110,6 +110,27 @@ func TestDurationRangeCheck_ProgressStallTimeoutNegativeDisables(t *testing.T) {
 	}
 }
 
+func TestDurationRangeCheck_ClaimHolderStallTimeout(t *testing.T) {
+	t.Run("too small warns", func(t *testing.T) {
+		cfg := &config.City{Session: config.SessionConfig{ClaimHolderStallTimeout: "1m"}}
+		r := NewDurationRangeCheck(cfg).Run(&CheckContext{})
+		if r.Status != StatusWarning {
+			t.Errorf("status = %d, want Warning", r.Status)
+		}
+		if !strings.Contains(strings.Join(r.Details, "\n"), "claim_holder_stall_timeout") {
+			t.Errorf("details = %v, want claim_holder_stall_timeout warning", r.Details)
+		}
+	})
+
+	t.Run("zero disables", func(t *testing.T) {
+		cfg := &config.City{Session: config.SessionConfig{ClaimHolderStallTimeout: "0s"}}
+		r := NewDurationRangeCheck(cfg).Run(&CheckContext{})
+		if r.Status != StatusOK {
+			t.Errorf("status = %d, want OK; details = %v", r.Status, r.Details)
+		}
+	})
+}
+
 func TestDurationRangeCheck_TooLarge(t *testing.T) {
 	cfg := &config.City{
 		Daemon: config.DaemonConfig{

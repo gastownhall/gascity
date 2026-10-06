@@ -2,9 +2,12 @@ package clientauth
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func fixedClock(t time.Time) func() time.Time { return func() time.Time { return t } }
@@ -209,6 +212,108 @@ func TestCredentialSource_BoundsHelperContext(t *testing.T) {
 	}
 	if tokErr == nil {
 		t.Error("Token = nil error, want the canceled-helper error")
+	}
+}
+
+func TestCredentialSource_RefreshContextPropagatesCancellation(t *testing.T) {
+	s, err := NewCredentialSource("cred-helper", "https://box:9443", "mc", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.runner = func(ctx context.Context, _ string, _ ExecInfo) (ExecResult, error) {
+		<-ctx.Done()
+		return ExecResult{}, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = s.RefreshContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RefreshContext error = %v, want context.Canceled", err)
+	}
+}
+
+func TestCredentialSource_RefreshContextCancelsWhileWaitingForMint(t *testing.T) {
+	s, err := NewCredentialSource("cred-helper", "https://box:9443", "mc", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runnerStarted := make(chan struct{})
+	release := make(chan struct{})
+	firstDone := make(chan error, 1)
+	result := ExecResult{
+		Token:               "token",
+		ExpirationTimestamp: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+	}
+	calls := 0
+	s.runner = func(context.Context, string, ExecInfo) (ExecResult, error) {
+		calls++
+		if calls == 1 {
+			close(runnerStarted)
+			<-release
+		}
+		return result, nil
+	}
+
+	released := false
+	firstFinished := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+		if !firstFinished {
+			select {
+			case err := <-firstDone:
+				if err != nil {
+					t.Errorf("first RefreshContext: %v", err)
+				}
+			case <-time.After(testutil.GoroutineRaceTimeout):
+				t.Error("first RefreshContext did not finish after release")
+			}
+		}
+	}()
+
+	go func() {
+		_, err := s.RefreshContext(context.Background())
+		firstDone <- err
+	}()
+	select {
+	case <-runnerStarted:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("first RefreshContext did not start the credential helper")
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := s.RefreshContext(ctx)
+		secondDone <- err
+	}()
+	cancel()
+
+	select {
+	case err := <-secondDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("waiting RefreshContext error = %v, want context.Canceled", err)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("RefreshContext did not honor cancellation while waiting for the mint lock")
+	}
+	if calls != 1 {
+		t.Fatalf("credential helper calls = %d, want 1 while the first mint remains blocked", calls)
+	}
+
+	close(release)
+	released = true
+	select {
+	case err := <-firstDone:
+		firstFinished = true
+		if err != nil {
+			t.Fatalf("first RefreshContext: %v", err)
+		}
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("first RefreshContext did not finish after release")
 	}
 }
 

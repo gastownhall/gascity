@@ -48,7 +48,7 @@ func TestEnsureRepoInCacheMaterializesBundledSourceWithoutGit(t *testing.T) {
 	if _, err := os.Stat(packToml); err != nil {
 		t.Fatalf("synthetic cache missing gastown pack.toml: %v", err)
 	}
-	if err := builtinpacks.ValidateSyntheticRepo(got, commit); err != nil {
+	if err := builtinpacks.ValidateSyntheticRepo(got, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("ValidateSyntheticRepo: %v", err)
 	}
 }
@@ -123,7 +123,7 @@ func TestReadCachedPackImportsAcceptsBundledSyntheticCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RepoCachePath: %v", err)
 	}
-	if err := builtinpacks.MaterializeSyntheticRepo(cachePath, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cachePath, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("MaterializeSyntheticRepo: %v", err)
 	}
 
@@ -170,7 +170,7 @@ func TestMaterializeBundledRepoInCacheLockedRejectsNonCanonicalPath(t *testing.T
 	nonCanonical := filepath.Join(t.TempDir(), "cache")
 
 	prevMaterialize := materializeSyntheticRepo
-	materializeSyntheticRepo = func(string, string) error {
+	materializeSyntheticRepo = func(string, string, string) error {
 		t.Fatal("materializeSyntheticRepo was called for non-canonical path")
 		return nil
 	}
@@ -213,7 +213,7 @@ func TestEnsureBundledCacheMaterializeFailureIncludesRecoveryCause(t *testing.T)
 	t.Cleanup(func() { runGit = prevGit })
 
 	prevMaterialize := materializeSyntheticRepo
-	materializeSyntheticRepo = func(dst, gotCommit string) error {
+	materializeSyntheticRepo = func(dst, _, gotCommit string) error {
 		if dst != cachePath {
 			t.Fatalf("materialize dst = %q, want %q", dst, cachePath)
 		}
@@ -278,7 +278,7 @@ func TestEnsureRepoInCacheClonesBundledSourceAtNonCanonicalPin(t *testing.T) {
 	t.Cleanup(func() { runNetworkGit = prevNetGit })
 
 	prevMaterialize := materializeSyntheticRepo
-	materializeSyntheticRepo = func(string, string) error {
+	materializeSyntheticRepo = func(string, string, string) error {
 		t.Fatal("materializeSyntheticRepo was called for a non-canonical pin")
 		return nil
 	}
@@ -307,11 +307,55 @@ func TestEnsureRepoInCacheClonesBundledSourceAtNonCanonicalPin(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(got, ".gc-bundled-pack-cache.toml")); !os.IsNotExist(err) {
 		t.Fatalf("synthetic marker stat err = %v, want not exist", err)
 	}
-	if err := builtinpacks.ValidateSyntheticRepo(got, commit); err == nil {
+	if err := builtinpacks.ValidateSyntheticRepo(got, builtinpacks.Repository, commit); err == nil {
 		t.Fatal("clone result validates as a synthetic cache; embedded content must not be materialized")
 	}
 	data, err := os.ReadFile(filepath.Join(got, "examples", "gastown", "packs", "gastown", "pack.toml"))
 	if err != nil || string(data) != stubPackToml {
 		t.Fatalf("pack.toml = %q, %v; want clone-stub content preserved", data, err)
+	}
+}
+
+// TestEnsureRepoInCacheNeverFetchesSupersededGascityGitPin pins the
+// "gc import install" half of the superseded-pin contract: a core import still
+// locked at a superseded gascity.git canonical pin (sha:f895c0ff47 for every
+// city created through gc v1.5.0) materializes the running binary's embedded
+// content. Cloning that commit would install June 2026 core-pack content in
+// place of the builtin the pin always stood for.
+func TestEnsureRepoInCacheNeverFetchesSupersededGascityGitPin(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	source := builtinpacks.MustSource("core")
+	pins := config.SupersededBundledPackImportVersions
+	commit := strings.TrimPrefix(pins[len(pins)-1], "sha:")
+	if commit == canonicalBundledCommit(source) {
+		t.Fatalf("superseded pin %q equals the canonical pin", commit)
+	}
+
+	prevGit := runGit
+	runGit = func(_ string, args ...string) (string, error) {
+		return "", fmt.Errorf("unexpected git call for superseded bundled pin: %v", args)
+	}
+	t.Cleanup(func() { runGit = prevGit })
+	prevNetGit := runNetworkGit
+	runNetworkGit = func(_, _, _ string, args ...string) (string, error) {
+		return "", fmt.Errorf("unexpected network git call for superseded bundled pin: %v", args)
+	}
+	t.Cleanup(func() { runNetworkGit = prevNetGit })
+
+	// Hand-written spellings of the same pin (abbreviated, uppercase) must
+	// not slip through as deliberate pins either.
+	for _, spelling := range []string{commit, commit[:10], strings.ToUpper(commit)} {
+		got, err := EnsureRepoInCache("", source, spelling)
+		if err != nil {
+			t.Fatalf("EnsureRepoInCache(%q): %v", spelling, err)
+		}
+		if err := builtinpacks.ValidateSyntheticRepo(got, builtinpacks.Repository, spelling); err != nil {
+			t.Fatalf("superseded pin %q was not served from embedded content: %v", spelling, err)
+		}
+		if _, err := os.Stat(filepath.Join(got, "internal", "bootstrap", "packs", "core", "pack.toml")); err != nil {
+			t.Fatalf("synthetic cache for %q missing core pack.toml: %v", spelling, err)
+		}
 	}
 }

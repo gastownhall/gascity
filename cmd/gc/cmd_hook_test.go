@@ -314,7 +314,7 @@ work_query = "printf '[{\"id\":\"ga-pool1\",\"status\":\"open\",\"title\":\"work
 func TestHookNoWork(t *testing.T) {
 	runner := func(string, string) (string, error) { return "", nil }
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 1 {
 		t.Errorf("doHook(no work) = %d, want 1", code)
 	}
@@ -326,7 +326,7 @@ func TestHookNoWork(t *testing.T) {
 func TestHookHasWork(t *testing.T) {
 	runner := func(string, string) (string, error) { return "hw-1  open  Fix the bug\n", nil }
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Errorf("doHook(has work) = %d, want 0", code)
 	}
@@ -370,6 +370,246 @@ func TestDoHookClaimReturnsExistingAssignment(t *testing.T) {
 	}
 	if result.RootBeadID != "root-1" || result.ContinuationGroup != "body" {
 		t.Fatalf("claim context = {%q %q}, want {root-1 body}", result.RootBeadID, result.ContinuationGroup)
+	}
+}
+
+func TestDoHookClaimPromotesReadyAssignment(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[{"id":"hw-ready","status":"open","assignee":"worker-alias","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]`, nil
+	}
+	claimCalls := 0
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimCalls++
+			if beadID != "hw-ready" || assignee != "worker-alias" {
+				t.Fatalf("claim = (%q, %q), want (hw-ready, worker-alias)", beadID, assignee)
+			}
+			return beads.Bead{
+				ID:       beadID,
+				Status:   "in_progress",
+				Assignee: assignee,
+				Metadata: map[string]string{"gc.routed_to": "worker"},
+			}, true, nil
+		},
+		ListContinuation: func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
+			return nil, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-canonical",
+		IdentityCandidates: []string{"worker-canonical", "worker-alias"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(ready assignment) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if claimCalls != 1 {
+		t.Fatalf("claim calls = %d, want 1 to promote assigned open work to in_progress", claimCalls)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.Reason != "ready_assignment" || result.BeadID != "hw-ready" || result.Assignee != "worker-alias" {
+		t.Fatalf("unexpected claim result: %+v", result)
+	}
+	if result.RootBeadID != "root-1" || result.ContinuationGroup != "body" {
+		t.Fatalf("claim context = {%q %q}, want {root-1 body}", result.RootBeadID, result.ContinuationGroup)
+	}
+}
+
+func TestDoHookClaimRejectsInvalidReadyAssignmentReadback(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		claimed beads.Bead
+		wantErr string
+	}{
+		{
+			name:    "status remains open",
+			claimed: beads.Bead{ID: "hw-ready", Status: "open", Assignee: "worker-alias"},
+			wantErr: `status="open"`,
+		},
+		{
+			name:    "assignee changes identity",
+			claimed: beads.Bead{ID: "hw-ready", Status: "in_progress", Assignee: "worker-canonical"},
+			wantErr: `assignee="worker-canonical"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := func(string, string) (string, error) {
+				return `[{"id":"hw-ready","status":"open","assignee":"worker-alias","metadata":{"gc.routed_to":"worker"}}]`, nil
+			}
+			ops := hookClaimOps{
+				Runner: runner,
+				Claim: func(_ context.Context, _ string, _ []string, _, _ string) (beads.Bead, bool, error) {
+					return tc.claimed, true, nil
+				},
+			}
+			opts := hookClaimOptions{
+				Assignee:           "worker-canonical",
+				IdentityCandidates: []string{"worker-canonical", "worker-alias"},
+				RouteTargets:       []string{"worker"},
+				JSON:               true,
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+			if code != 1 {
+				t.Fatalf("doHookClaim(invalid ready assignment readback) = %d, want 1", code)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want no successful work receipt", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), tc.wantErr) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestDoHookClaimReadyAssignmentErrorDoesNotClaimFreshWork(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[
+			{"id":"hw-ready","status":"open","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}},
+			{"id":"hw-fresh","status":"open","metadata":{"gc.routed_to":"worker"}}
+		]`, nil
+	}
+	var attempts []string
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+			attempts = append(attempts, beadID)
+			return beads.Bead{}, false, errors.New("store unavailable")
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doHookClaim(ready assignment error) = %d, want 1", code)
+	}
+	if got := strings.Join(attempts, ","); got != "hw-ready" {
+		t.Fatalf("claim attempts = %q, want only assigned bead", got)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want no successful work receipt", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "store unavailable") {
+		t.Fatalf("stderr = %q, want mutation failure", stderr.String())
+	}
+}
+
+// TestDoHookClaimReadyAssignmentLostRaceFallsThrough pins the deliberate
+// asymmetry between the two failure branches of claimFirstReadyHookAssignment.
+// A rejected claim (ok=false, err=nil) means another claimant genuinely owns
+// the bead, so ownership is resolved and this session is free to take other
+// routed work; an operational mutation failure (err != nil) leaves ownership
+// unresolved and fails closed instead — see
+// TestDoHookClaimReadyAssignmentErrorDoesNotClaimFreshWork.
+func TestDoHookClaimReadyAssignmentLostRaceFallsThrough(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return `[
+			{"id":"hw-ready","status":"open","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}},
+			{"id":"hw-fresh","status":"open","metadata":{"gc.routed_to":"worker"}}
+		]`, nil
+	}
+	var attempts []string
+	var rejected [][3]string
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			attempts = append(attempts, beadID)
+			if beadID == "hw-ready" {
+				// Lost race: bd reports the bead is already claimed by someone else.
+				return beads.Bead{ID: beadID, Status: "in_progress", Assignee: "other-worker"}, false, nil
+			}
+			return beads.Bead{
+				ID:       beadID,
+				Status:   "in_progress",
+				Assignee: assignee,
+				Metadata: map[string]string{"gc.routed_to": "worker"},
+			}, true, nil
+		},
+		EmitClaimRejected: func(beadID, existingClaimant, attemptedClaimant string) {
+			rejected = append(rejected, [3]string{beadID, existingClaimant, attemptedClaimant})
+		},
+		ListContinuation: func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
+			return nil, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(ready assignment lost race) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got, want := len(rejected), 1; got != want {
+		t.Fatalf("claim_rejected emissions = %d, want %d: %v", got, want, rejected)
+	}
+	if got, want := rejected[0], [3]string{"hw-ready", "other-worker", "worker-1"}; got != want {
+		t.Fatalf("claim_rejected args = %v, want %v", got, want)
+	}
+	if got := strings.Join(attempts, ","); got != "hw-ready,hw-fresh" {
+		t.Fatalf("claim attempts = %q, want %q", got, "hw-ready,hw-fresh")
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.Reason != "claimed" || result.BeadID != "hw-fresh" || result.Assignee != "worker-1" {
+		t.Fatalf("unexpected claim result: %+v", result)
+	}
+}
+
+func TestReadyHookAssignmentDeadlineDoesNotFallThroughToFreshWork(t *testing.T) {
+	oldTimeout := hookClaimMutationTimeout
+	hookClaimMutationTimeout = 0
+	t.Cleanup(func() { hookClaimMutationTimeout = oldTimeout })
+
+	candidates := []beads.Bead{
+		{ID: "hw-ready", Status: "open", Assignee: "worker-1"},
+		{ID: "hw-fresh", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+	ops := hookClaimOps{
+		Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+			t.Fatal("claim must not run after the assigned-work deadline is exhausted")
+			return beads.Bead{}, false, nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	result := claimFirstReadyHookAssignment(candidates, opts, ops, "/tmp/work", &stdout, &stderr)
+	if !result.terminal || result.code != 1 {
+		t.Fatalf("result = %+v, want terminal code 1", result)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want no successful work receipt", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "claim deadline exhausted") {
+		t.Fatalf("stderr = %q, want deadline diagnostic", stderr.String())
 	}
 }
 
@@ -482,7 +722,7 @@ func TestDoHookClaimEmitsRejectedOnLostClaim(t *testing.T) {
 		EmitClaimRejected: func(beadID, existing, attempted string) {
 			rejected = append(rejected, rejection{beadID, existing, attempted})
 		},
-		ResolveWorkBranch: func(string) string { return "" }, // suppress stamp noise
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" }, // suppress stamp noise
 	}
 	opts := hookClaimOptions{
 		Assignee:           "worker-1",
@@ -521,9 +761,14 @@ func TestDoHookClaimStampsWorkBranch(t *testing.T) {
 	ops := hookClaimOps{
 		Runner: runner,
 		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
-			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+			// gc.work_dir is what gc.work_branch is resolved from; the "/tmp/work"
+			// store dir this test passes to doHookClaim is deliberately not it (gc-j4sr).
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{
+				"gc.routed_to": "worker",
+				"gc.work_dir":  "/worktrees/hw-stamp",
+			}}, true, nil
 		},
-		ResolveWorkBranch: func(string) string { return "bd-hw-stamp" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "bd-hw-stamp" },
 		StampWorkMeta: func(_ context.Context, _ string, _ []string, beadID, assignee string, patch map[string]string) error {
 			stampedBead, stampedAssignee, stampedBranch = beadID, assignee, patch["gc.work_branch"]
 			return nil
@@ -547,18 +792,21 @@ func TestDoHookClaimStampsWorkBranch(t *testing.T) {
 }
 
 // TestDoHookClaimSkipsStampWhenBranchUnchanged guards the idempotent path: a
-// claim whose bead already carries the resolved branch performs no stamp write.
+// claim whose bead already carries the resolved branch AND a prior
+// gc.claimed_at performs no stamp write. gc.claimed_at must be preset here too
+// (write-once): without it, this bead's "first claim" would always add the
+// key to the patch and falsely fail the "no write" assertion.
 func TestDoHookClaimSkipsStampWhenBranchUnchanged(t *testing.T) {
 	var stampCalls int
 	runner := func(string, string) (string, error) {
-		return `[{"id":"hw-idem","status":"open","metadata":{"gc.routed_to":"worker","gc.work_branch":"bd-hw-idem"}}]`, nil
+		return `[{"id":"hw-idem","status":"open","metadata":{"gc.routed_to":"worker","gc.work_branch":"bd-hw-idem","gc.claimed_at":"2026-01-01T00:00:00Z"}}]`, nil
 	}
 	ops := hookClaimOps{
 		Runner: runner,
 		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
-			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker", "gc.work_branch": "bd-hw-idem"}}, true, nil
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker", "gc.work_branch": "bd-hw-idem", "gc.claimed_at": "2026-01-01T00:00:00Z"}}, true, nil
 		},
-		ResolveWorkBranch: func(string) string { return "bd-hw-idem" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "bd-hw-idem" },
 		StampWorkMeta: func(_ context.Context, _ string, _ []string, _, _ string, _ map[string]string) error {
 			stampCalls++
 			return nil
@@ -641,6 +889,103 @@ func TestDoHookClaimRejectsNonJSONWorkQueryOutput(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "requires JSON work_query output") {
 		t.Fatalf("stderr = %q, want JSON requirement diagnostic", stderr.String())
+	}
+}
+
+func TestDoHookClaimToleratesMalformedMetadataBead(t *testing.T) {
+	var claimedID string
+	runner := func(string, string) (string, error) {
+		// First element is undecodable — "status" is a number where beads.Bead
+		// declares a string — so it is skipped; second is plain, claimable pool
+		// work and must still be claimed.
+		//
+		// Deliberately NOT a nested-object metadata value: beads.Bead.Metadata
+		// is a StringMap that coerces those to strings during decode, so such a
+		// bead decodes fine and is claimed normally rather than skipped (the
+		// stronger outcome). The skip path this test guards is for type errors
+		// outside metadata, which that coercion does not repair.
+		return `[
+			{"id":"poison-1","status":5,"metadata":{"gc.routed_to":"worker"}},
+			{"id":"good-1","status":"open","metadata":{"gc.routed_to":"worker"}}
+		]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			claimedID = beadID
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim(malformed+good) = %d, want 0 (poison skipped, good claimed); stderr=%s", code, stderr.String())
+	}
+	if claimedID != "good-1" {
+		t.Fatalf("claimed ID = %q, want good-1 (the well-formed bead)", claimedID)
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.Action != "work" || result.Reason != "claimed" || result.BeadID != "good-1" {
+		t.Fatalf("unexpected claim result: %+v", result)
+	}
+	// The skip must be observable (logged) and name the offending bead — a
+	// silently-dropped bead would mask the upstream filer bug.
+	if !strings.Contains(stderr.String(), "poison-1") {
+		t.Fatalf("stderr = %q, want it to log the skipped malformed bead id poison-1", stderr.String())
+	}
+}
+
+func TestDecodeHookClaimBeadsSkipsUndecodableBead(t *testing.T) {
+	// Middle element is undecodable: "status" is a number where beads.Bead
+	// declares a string. The well-formed beads on either side must still
+	// decode, so one bad bead cannot halt dispatch city-wide.
+	//
+	// Deliberately NOT a non-string *metadata* value: beads.Bead.Metadata is a
+	// StringMap that coerces those to strings during decode, so such a bead
+	// decodes successfully and is never skipped — pinned by
+	// TestDecodeHookClaimBeadsToleratesNonStringMetadata and
+	// TestDecodeHookClaimBeadsOneBadBeadDoesNotPoisonBatch. The per-element
+	// split this test covers is what protects the batch from type errors
+	// OUTSIDE metadata, which that coercion does not repair.
+	output := `[
+		{"id":"ok-1","status":"open","metadata":{"gc.routed_to":"worker"}},
+		{"id":"bad-1","status":5},
+		{"id":"ok-2","status":"open"}
+	]`
+	candidates, skipped, err := decodeHookClaimBeads(output)
+	if err != nil {
+		t.Fatalf("decodeHookClaimBeads returned error %v, want nil (one malformed bead must be skipped, not fatal)", err)
+	}
+	gotIDs := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		gotIDs = append(gotIDs, c.ID)
+	}
+	if got, want := strings.Join(gotIDs, ","), "ok-1,ok-2"; got != want {
+		t.Fatalf("decoded candidate ids = %q, want %q", got, want)
+	}
+	if len(skipped) != 1 || skipped[0].ID != "bad-1" {
+		t.Fatalf("skipped = %+v, want exactly one skip naming bad-1", skipped)
+	}
+	if skipped[0].Err == nil {
+		t.Fatal("skipped[0].Err = nil, want the underlying decode error for diagnostics")
+	}
+}
+
+func TestDecodeHookClaimBeadsNonJSONStillErrors(t *testing.T) {
+	// Plain command text (not JSON at all) must remain a hard error — the
+	// per-element tolerance only relaxes decoding within a valid JSON array.
+	if _, _, err := decodeHookClaimBeads("hw-1  open  Fix the bug"); err == nil {
+		t.Fatal("decodeHookClaimBeads(text) = nil error, want a non-JSON error")
 	}
 }
 
@@ -739,8 +1084,8 @@ func TestClaimHookWorkRetriesLaterStoreWhenSelectedStoreLosesClaimRace(t *testin
 			claimDir = dir
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
 		},
-		EmitClaimRejected: func(string, string, string) {},   // suppress event side effect
-		ResolveWorkBranch: func(string) string { return "" }, // suppress stamp noise
+		EmitClaimRejected: func(string, string, string) {},              // suppress event side effect
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" }, // suppress stamp noise
 	}
 	opts := hookClaimOptions{
 		Assignee:           "worker-1",
@@ -771,7 +1116,7 @@ func TestClaimHookWorkRetriesLaterStoreWhenSelectedStoreLosesClaimRace(t *testin
 // own (primary) store loses its claim race and is dropped from the working set,
 // a later federated store that errors must stay a best-effort skip. The claim
 // must drain as "no work" rather than surface that federated store's error as a
-// fatal claim failure (the bug: firstStoreWithWork keyed "own store" on slice
+// fatal claim failure (the bug: bestStoreWithWork keyed "own store" on slice
 // position, so the federated store became index 0 after the primary was removed
 // and wedged the hook).
 func TestClaimHookWorkDrainsWhenPrimaryLosesRaceThenFederatedStoreErrors(t *testing.T) {
@@ -798,7 +1143,7 @@ func TestClaimHookWorkDrainsWhenPrimaryLosesRaceThenFederatedStoreErrors(t *test
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: "worker-2", Metadata: map[string]string{"gc.routed_to": "worker"}}, false, nil
 		},
 		EmitClaimRejected: func(string, string, string) {},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		DrainAck:          func(io.Writer) error { return nil },
 	}
 	opts := hookClaimOptions{
@@ -862,7 +1207,7 @@ func TestClaimHookWorkUsesFallbackStoreDirEnvAndOutput(t *testing.T) {
 			claimDir, claimEnv = dir, env
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
 		},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 	}
 	opts := hookClaimOptions{
 		Assignee:           "worker-1",
@@ -954,7 +1299,7 @@ func TestDoHookClaimPreassignsContinuationGroupSiblings(t *testing.T) {
 func TestHookCommandError(t *testing.T) {
 	runner := func(string, string) (string, error) { return "", fmt.Errorf("command failed") }
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 1 {
 		t.Errorf("doHook(error) = %d, want 1", code)
 	}
@@ -968,7 +1313,7 @@ func TestHookCommandErrorPrintsPartialOutput(t *testing.T) {
 		return "[]\n", fmt.Errorf("timed out after 15s with partial stdout")
 	}
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 1 {
 		t.Errorf("doHook(error with output) = %d, want 1", code)
 	}
@@ -1000,7 +1345,7 @@ func TestShellWorkQueryWithEnvTimeoutReportsPartialOutput(t *testing.T) {
 func TestHookInjectNoWork(t *testing.T) {
 	runner := func(string, string) (string, error) { return "", nil }
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", true, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", true, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Errorf("doHook(inject, no work) = %d, want 0", code)
 	}
@@ -1014,7 +1359,7 @@ func TestHookNoReadyMessagePrintsButExitsOne(t *testing.T) {
 		return "✨ No ready work found (all issues have blocking dependencies)\n", nil
 	}
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 1 {
 		t.Errorf("doHook(no-ready-message) = %d, want 1", code)
 	}
@@ -1028,7 +1373,7 @@ func TestHookInjectSuppressesNoReadyMessage(t *testing.T) {
 		return "✨ No ready work found (all issues have blocking dependencies)\n", nil
 	}
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", true, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", true, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Errorf("doHook(inject, no-ready-message) = %d, want 0", code)
 	}
@@ -1040,7 +1385,7 @@ func TestHookInjectSuppressesNoReadyMessage(t *testing.T) {
 func TestHookInjectIsNonIntrusiveWithWork(t *testing.T) {
 	runner := func(string, string) (string, error) { return "hw-1  open  Fix the bug\n", nil }
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", true, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", true, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Errorf("doHook(inject, work) = %d, want 0", code)
 	}
@@ -1056,7 +1401,7 @@ func TestHookInjectDoesNotRunWorkQuery(t *testing.T) {
 		return "hw-1  open  Fix the bug\n", nil
 	}
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", true, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", true, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Errorf("doHook(inject, work) = %d, want 0", code)
 	}
@@ -1308,7 +1653,7 @@ work_query = "printf '[{\"id\":\"hw-1\",\"title\":\"Fix the bug\"}]'"
 	}
 }
 
-func TestHookCommandClaimUsesSessionActorAndPreassignsContinuation(t *testing.T) {
+func TestHookCommandClaimUsesCanonicalActorAndPreassignsContinuation(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
@@ -1339,7 +1684,7 @@ case "$*" in
   *"list --json --status=open"*"gc.continuation_group=body"*"gc.root_bead_id=root-1"*)
     printf '[{"id":"hw-claim","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}},{"id":"hw-next","status":"open","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}},{"id":"hw-other","status":"open","metadata":{"gc.routed_to":"other","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]'
     ;;
-  *"update --json hw-next --assignee worker-1"*)
+  *"update --json hw-next --assignee session-id-1"*)
     printf '[{"id":"hw-next","status":"open","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]'
     ;;
   *"query --json ephemeral=true AND status=open --limit 0"*)
@@ -1362,7 +1707,7 @@ esac
 	t.Setenv("GC_TEMPLATE", "worker")
 	t.Setenv("GC_ALIAS", "worker-1")
 	t.Setenv("GC_SESSION_ID", "session-id-1")
-	t.Setenv("GC_SESSION_NAME", "worker-1")
+	t.Setenv("GC_SESSION_NAME", "test-city--worker-1")
 	t.Setenv("GC_SESSION_ORIGIN", "ephemeral")
 
 	var stdout, stderr bytes.Buffer
@@ -1390,16 +1735,47 @@ esac
 	}
 	logText := string(logData)
 	if !strings.Contains(logText, "actor=worker-1 args=update hw-claim --claim --json") {
-		t.Fatalf("bd claim did not use session BEADS_ACTOR=worker-1; log:\n%s", logText)
+		t.Fatalf("bd claim did not use canonical BEADS_ACTOR=worker-1; log:\n%s", logText)
 	}
 	if !strings.Contains(logText, "actor=worker-1 args=show --json hw-claim") {
-		t.Fatalf("bd canonical read did not use session BEADS_ACTOR=worker-1; log:\n%s", logText)
+		t.Fatalf("bd canonical read did not use BEADS_ACTOR=worker-1; log:\n%s", logText)
 	}
-	if !strings.Contains(logText, "args=update --json hw-next --assignee worker-1") {
-		t.Fatalf("continuation sibling was not preassigned through bd; log:\n%s", logText)
+	// The claim itself is actored and assigned as worker-1 (the alias read paths
+	// query through GC_AGENT), but the continuation pin is a session binding: the
+	// sibling must name GC_SESSION_ID so wake demand and the continuation
+	// backstop can both resolve it back to this session.
+	if !strings.Contains(logText, "args=update --json hw-next --assignee session-id-1") {
+		t.Fatalf("continuation sibling was not preassigned to the session id; log:\n%s", logText)
 	}
 	if strings.Contains(logText, "args=update hw-other --assignee") {
 		t.Fatalf("continuation preassignment crossed route target; log:\n%s", logText)
+	}
+}
+
+func TestHookSessionAgentForQueryPrefersOwnershipIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		alias       string
+		actor       string
+		agent       string
+		sessionName string
+		want        string
+	}{
+		{name: "alias", alias: "rig/worker", actor: "session-id", agent: "stale", sessionName: "rig--worker", want: "rig/worker"},
+		{name: "durable actor fallback", actor: "session-id", agent: "stale", sessionName: "s-session-id", want: "session-id"},
+		{name: "compatibility fallback", agent: "session-id", sessionName: "s-session-id", want: "session-id"},
+		{name: "runtime fallback", sessionName: "rig--worker", want: "rig--worker"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			t.Setenv("GC_ALIAS", tc.alias)
+			t.Setenv("BEADS_ACTOR", tc.actor)
+			t.Setenv("GC_AGENT", tc.agent)
+			t.Setenv("GC_SESSION_NAME", tc.sessionName)
+			if got := hookSessionAgentForQuery(); got != tc.want {
+				t.Fatalf("hookSessionAgentForQuery() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -1575,6 +1951,103 @@ esac
 	}
 }
 
+func TestCmdHookPoolDemandOriginGate(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	fakeBin := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+max_active_sessions = 3
+
+[[named_session]]
+template = "worker"
+mode = "on_demand"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$*" in
+  *"--metadata-field gc.routed_to=worker"*) printf '[{"id":"pool-work","title":"routed work"}]' ;;
+  *) printf '[]' ;;
+esac
+`, logPath)
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		origin     string
+		alias      string
+		session    string
+		wantCode   int
+		wantRouted bool
+	}{
+		// Ephemeral pool seat: the routed tier runs unconditionally (unchanged).
+		{name: "demand-created pool", origin: "ephemeral", alias: "worker-1", session: "test-city--worker-1", wantCode: 0, wantRouted: true},
+		// Manual session whose probe target (poolDemandTarget() == "worker") is NOT
+		// its own alias: the origin gate keeps it out of another queue's generic
+		// routed demand. Self-target admit does not fire ("worker" != alias).
+		{name: "manual", origin: "manual", alias: "worker-adhoc-manual", session: "worker-adhoc-manual", wantCode: 1},
+		// Named session probing its OWN claim identity (GC_ALIAS == poolDemandTarget()
+		// == "worker"): the gate admits self-routed discovery so the session can
+		// claim work routed to itself. This is the C2 fix (ga-6wkhl) and the direct
+		// analog of the live olivia specimen (origin=named, alias=olivia,
+		// routed_to=olivia); before the fix the gate exit-0'd here and the named
+		// session deadlocked on its own frontier bead.
+		{name: "named", origin: "named", alias: "worker", session: "test-city--worker", wantCode: 0, wantRouted: true},
+		// Manual session an operator deliberately aliased as the queue identity
+		// (`gc session new worker --alias worker`; a user-supplied alias forces
+		// origin=manual, sessionOriginForConfiguredNamed). Admission is keyed on
+		// claim identity, not origin: GC_ALIAS == poolDemandTarget(), so the same
+		// self-target admit fires and the routed tier runs. This row pins the
+		// widened population as intent — a future tightening scoped to
+		// origin=named would redden here instead of silently regressing.
+		{name: "manual self-target", origin: "manual", alias: "worker", session: "worker", wantCode: 0, wantRouted: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			clearInheritedCityRoutingEnv(t)
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("GC_BEADS", "exec:"+filepath.Join(fakeBin, "bd"))
+			t.Setenv("GC_CITY", cityDir)
+			t.Setenv("GC_TEMPLATE", "worker")
+			t.Setenv("GC_ALIAS", tc.alias)
+			t.Setenv("GC_SESSION_ID", "session-"+strings.ReplaceAll(tc.name, " ", "-"))
+			t.Setenv("GC_SESSION_NAME", tc.session)
+			t.Setenv("GC_SESSION_ORIGIN", tc.origin)
+			if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := cmdHook(nil, &stdout, &stderr)
+			if code != tc.wantCode {
+				t.Fatalf("cmdHook() = %d, want %d; stdout=%q stderr=%s", code, tc.wantCode, stdout.String(), stderr.String())
+			}
+			if got := strings.Contains(stdout.String(), `"pool-work"`); got != tc.wantRouted {
+				t.Fatalf("routed work visible = %v, want %v; stdout=%q", got, tc.wantRouted, stdout.String())
+			}
+			logData, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(string(logData), "--metadata-field gc.routed_to=worker"); got != tc.wantRouted {
+				t.Fatalf("routed query executed = %v, want %v; bd log:\n%s", got, tc.wantRouted, logData)
+			}
+		})
+	}
+}
+
 // TestCmdHookClaimSuffixedPoolWorkerDoesNotAdoptBareTemplateInProgressWork is
 // the ga-80pen8 end-to-end regression: "builder" is BOTH a [[named_session]]
 // holder's own identity AND a pool template shared by suffixed instances
@@ -1582,7 +2055,7 @@ esac
 // field incident. A suffixed pool worker resolves its config via the
 // GC_TEMPLATE fallback, so its resolvedAgentName is the bare template — which
 // is ALSO the named holder's identity. Before the fix, that let the worker
-// adopt the holder's in_progress bead through hookClaimExistingOrAssigned
+// adopt the holder's in_progress bead through hookClaimExistingAssignment
 // without ever going through the store.Claim CAS, so two identities worked
 // (and closed) the same bead. The worker must instead drain no_work, and the
 // claim mutation must never run for a bead it does not own.
@@ -1719,7 +2192,7 @@ mode = "on_demand"
 // worker's claim IdentityCandidates must never include the bare pool
 // template, because the bare template is also the [[named_session]] holder's
 // own identity. Including it let a suffixed worker adopt the holder's
-// in_progress bead via hookClaimExistingOrAssigned without ever reaching the
+// in_progress bead via hookClaimExistingAssignment without ever reaching the
 // store.Claim CAS.
 func TestPoolWorkerIdentityCandidatesExcludeBareTemplate(t *testing.T) {
 	const (
@@ -1765,7 +2238,7 @@ func TestPoolWorkerIdentityCandidatesExcludeBareTemplate(t *testing.T) {
 }
 
 // TestHookClaimSkipsMessageBeadsAheadOfRoutedWork guards against #4419:
-// hookClaimExistingOrAssigned matched any OPEN candidate whose Assignee
+// the ready-assignment path matched any OPEN candidate whose Assignee
 // equaled one of the session's identity strings, with no type check. A mail
 // message bead (issue_type="message") addressed to this session has exactly
 // that shape, so it was returned as "ready_assignment" work ahead of real
@@ -1824,7 +2297,7 @@ func TestHookInjectAlwaysExitsZero(t *testing.T) {
 	// Even on command failure, inject mode exits 0.
 	runner := func(string, string) (string, error) { return "", fmt.Errorf("command failed") }
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", true, runner, &stdout, &stderr)
+	code := doHook("bd ready", "", true, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Errorf("doHook(inject, error) = %d, want 0", code)
 	}
@@ -1839,7 +2312,7 @@ func TestHookPassesWorkQuery(t *testing.T) {
 		return "item-1\n", nil
 	}
 	var stdout, stderr bytes.Buffer
-	doHook("bd ready --assignee=mayor", "/tmp/work", false, runner, &stdout, &stderr)
+	doHook("bd ready --assignee=mayor", "/tmp/work", false, runner, &stdout, &stderr, hookVisibility{})
 	if receivedCmd != "bd ready --assignee=mayor" {
 		t.Errorf("runner command = %q, want %q", receivedCmd, "bd ready --assignee=mayor")
 	}
@@ -2489,7 +2962,7 @@ func TestDoHookNormalizesSingleObjectOutputToArray(t *testing.T) {
 		return `{"id":"bd-1","title":"Work"}`, nil
 	}
 
-	code := doHook("bd ready", ".", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", ".", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Fatalf("doHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -2620,7 +3093,7 @@ func TestClaimHookWorkDrainsClaimsErroredWhenEveryCandidateErrors(t *testing.T) 
 			return beads.Bead{}, false, fmt.Errorf("claiming %s: store write timeout", beadID)
 		},
 		EmitClaimRejected: func(string, string, string) {},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		DrainAck:          func(io.Writer) error { return nil },
 	}
 	opts := hookClaimOptions{

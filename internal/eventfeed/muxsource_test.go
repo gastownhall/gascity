@@ -13,6 +13,26 @@ import (
 	"github.com/gastownhall/gascity/pkg/eventexport"
 )
 
+// hangBudget bounds every pure hang-detector wait in this file (requireFloorAt,
+// requireWatchAfter, requireTaggedEvent, the MuxSource rebuild/Next context in
+// TestMuxSource_PreservesInitializedZeroFloorAcrossRebuild, and the consumer-drain
+// wait in TestMuxSource_YieldsAndPicksUpNewCity's cleanup). None of these
+// assertions depend on how long the wait took — the real checks happen after the
+// wait returns — so this is a hang detector, not a latency assertion (TESTING.md
+// "Floors, ceilings, and inputs"). Raising it does not slow a passing run, because
+// every wait here returns the instant its condition is met; it only changes how
+// long a genuinely wedged test takes to report.
+//
+// testutil.GoroutineRaceTimeout is a floor, not a target: under fleet-wide
+// concurrent CPU contention it can be exceeded by an all-in-memory test that is
+// not wedged, only slow to schedule. This package's waits are lightweight (an
+// in-process fake event log and buffered channels, no subprocess or disk I/O), so
+// no package-specific incident motivates a larger multiplier here; hangBudget uses
+// the same 6x derivation as the established precedents (cmd/gc/hangbudget_test.go
+// and internal/storebinding/sqlite's sqliteFenceHangBudget) so the fleet has one
+// consistent hang-detector ceiling rather than a different multiplier per package.
+const hangBudget = 6 * testutil.GoroutineRaceTimeout
+
 type watchSignalProvider struct {
 	*events.Fake
 	floors  chan uint64
@@ -53,7 +73,7 @@ func (p *watchSignalProvider) Watch(ctx context.Context, afterSeq uint64) (event
 
 func requireFloorAt(t *testing.T, provider *watchSignalProvider, want uint64) {
 	t.Helper()
-	timer := time.NewTimer(testutil.GoroutineRaceTimeout)
+	timer := time.NewTimer(hangBudget)
 	defer timer.Stop()
 	select {
 	case got := <-provider.floors:
@@ -61,7 +81,7 @@ func requireFloorAt(t *testing.T, provider *watchSignalProvider, want uint64) {
 			t.Fatalf("provider floored at sequence %d, want %d", got, want)
 		}
 	case <-timer.C:
-		t.Fatalf("provider was not floored within %s", testutil.GoroutineRaceTimeout)
+		t.Fatalf("provider was not floored within %s", hangBudget)
 	}
 }
 
@@ -76,7 +96,7 @@ func requireNoFloorSample(t *testing.T, provider *watchSignalProvider) {
 
 func requireWatchAfter(t *testing.T, provider *watchSignalProvider, want uint64) {
 	t.Helper()
-	timer := time.NewTimer(testutil.GoroutineRaceTimeout)
+	timer := time.NewTimer(hangBudget)
 	defer timer.Stop()
 	select {
 	case got := <-provider.watches:
@@ -84,13 +104,13 @@ func requireWatchAfter(t *testing.T, provider *watchSignalProvider, want uint64)
 			t.Fatalf("watch started after sequence %d, want %d", got, want)
 		}
 	case <-timer.C:
-		t.Fatalf("watch did not start within %s", testutil.GoroutineRaceTimeout)
+		t.Fatalf("watch did not start within %s", hangBudget)
 	}
 }
 
 func requireTaggedEvent(t *testing.T, received <-chan eventexport.TaggedEvent, city string, seq uint64) {
 	t.Helper()
-	timer := time.NewTimer(testutil.GoroutineRaceTimeout)
+	timer := time.NewTimer(hangBudget)
 	defer timer.Stop()
 	select {
 	case got := <-received:
@@ -98,7 +118,7 @@ func requireTaggedEvent(t *testing.T, received <-chan eventexport.TaggedEvent, c
 			t.Fatalf("received event %s:%d, want %s:%d", got.City, got.Seq, city, seq)
 		}
 	case <-timer.C:
-		t.Fatalf("event %s:%d not received within %s", city, seq, testutil.GoroutineRaceTimeout)
+		t.Fatalf("event %s:%d not received within %s", city, seq, hangBudget)
 	}
 }
 
@@ -116,7 +136,7 @@ func TestMuxSource_PreservesInitializedZeroFloorAcrossRebuild(t *testing.T) {
 		time.Hour,
 		nil,
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), testutil.GoroutineRaceTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), hangBudget)
 	defer cancel()
 	defer src.closeWatcher()
 
@@ -218,12 +238,12 @@ func TestMuxSource_YieldsAndPicksUpNewCity(t *testing.T) {
 	t.Cleanup(func() {
 		cancel()
 		src.closeWatcher()
-		timer := time.NewTimer(testutil.GoroutineRaceTimeout)
+		timer := time.NewTimer(hangBudget)
 		defer timer.Stop()
 		select {
 		case <-consumerDone:
 		case <-timer.C:
-			t.Errorf("MuxSource consumer did not stop within %s", testutil.GoroutineRaceTimeout)
+			t.Errorf("MuxSource consumer did not stop within %s", hangBudget)
 		}
 	})
 
@@ -314,20 +334,24 @@ func TestAdapter_NoLeakFromPayload(t *testing.T) {
 // TestToExport_ForwardsTypedRunSession proves the adapter forwards the typed
 // Event.RunID/SessionID (stamped at the record site) through to the projected
 // envelope when EmitCorrelation is on.
-func TestToExport_ForwardsTypedRunSession(t *testing.T) {
+func TestToExport_ForwardsTypedRunSessionAndNativeTopology(t *testing.T) {
+	deps := []string{"step-a"}
 	te := events.TaggedEvent{
 		Event: events.Event{
 			Seq: 1, Type: "bead.closed", Ts: time.Date(2026, 6, 21, 10, 3, 27, 0, time.UTC),
-			Actor: "cache-reconcile", Subject: "mc-1", RunID: "wf-root-abc", SessionID: "sess-9f2a",
+			Actor: "cache-reconcile", Subject: "mc-1", RunID: "wf-root-abc", SessionID: "sess-9f2a", StepID: "step-b", DependsOnStepIDs: &deps,
 		},
 		City: "c",
 	}
 	ex := toExport(te)
-	if ex.RunID != "wf-root-abc" || ex.SessionID != "sess-9f2a" {
-		t.Fatalf("toExport must forward typed run/session, got run=%q session=%q", ex.RunID, ex.SessionID)
+	if ex.RunID != "wf-root-abc" || ex.SessionID != "sess-9f2a" || ex.StepID != "step-b" || ex.DependsOnStepIDs == nil || (*ex.DependsOnStepIDs)[0] != "step-a" {
+		t.Fatalf("toExport must forward typed correlation/topology, got %+v", ex)
+	}
+	if ex.DependsOnStepIDs == &deps {
+		t.Fatal("toExport retained caller-owned topology slice")
 	}
 	env, ok := eventexport.ProjectEvent(ex, eventexport.Options{Salt: []byte("sixteen-byte-salt-xx"), ExportRef: true, EmitCorrelation: true})
-	if !ok || env.RunID != "wf-root-abc" || env.SessionID != "sess-9f2a" {
-		t.Fatalf("projected envelope must carry forwarded run/session, got %+v", env)
+	if !ok || env.RunID != "wf-root-abc" || env.SessionID != "sess-9f2a" || env.DependsOnStepIDs == nil || (*env.DependsOnStepIDs)[0] != "step-a" {
+		t.Fatalf("projected envelope must carry forwarded correlation/topology, got %+v", env)
 	}
 }

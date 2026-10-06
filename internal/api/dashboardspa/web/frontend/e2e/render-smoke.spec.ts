@@ -339,19 +339,21 @@ test.describe('dashboard render smoke over the seeded corpus', () => {
     ).toBeVisible();
   });
 
-  test('run detail diff tab renders its designed unavailable state', async ({ page }) => {
+  test('run detail run-evidence panel shows the session view with no diff tab', async ({
+    page,
+  }) => {
     await gotoCityRoute(page, CITY_BASE, `/runs/${ANCHOR_RUN_ID}`);
-    // The Diff tab is the default-active run-evidence view. Exercise it (re-select)
-    // and assert the panel. The seeded run records no work_dir, so a real seeded
-    // city cannot produce a diff — assert the DESIGNED unavailable state, not a
-    // blank panel. The tab is genuinely exercised: it is selected and its panel
-    // renders its own copy.
-    const diffTab = page.getByRole('tab', { name: 'Diff' });
-    await expect(diffTab).toHaveAttribute('aria-selected', 'true');
-    await diffTab.click();
-    const panel = page.getByRole('tabpanel');
-    await expect(panel.getByText('No diff available for this run.')).toBeVisible();
-    await expect(panel.getByText(/did not record a work_dir/)).toBeVisible();
+    // The run-diff view was retired (#4642); the run-evidence panel is now a
+    // single Session (transcript) tab. The page starts with no node selected,
+    // so assert the Session tab is the selected (only) run-evidence view, the
+    // removed Diff tab is gone, and the panel renders its DESIGNED "select a
+    // node" copy — a real designed state, not a blank pane.
+    const evidence = page.getByRole('region', { name: 'Run evidence' });
+    const sessionTab = evidence.getByRole('tab', { name: 'Session' });
+    await expect(sessionTab).toHaveAttribute('aria-selected', 'true');
+    await expect(evidence.getByRole('tab', { name: 'Diff' })).toHaveCount(0);
+    const panel = evidence.getByRole('tabpanel');
+    await expect(panel.getByText('Select a node to inspect its session.')).toBeVisible();
   });
 
   test('activity commits and deploys render their designed empty states', async ({ page }) => {

@@ -1,0 +1,30 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "doltversion",
+    srcs = ["doltversion.go"],
+    importpath = "github.com/gastownhall/gascity/internal/doltversion",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "doltversion_test",
+    srcs = [
+        "doltversion_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":doltversion"],
+    deps = ["//internal/testenv"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

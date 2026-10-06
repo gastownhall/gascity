@@ -235,6 +235,12 @@ func TestSessionNameLocksDir(t *testing.T) {
 	}
 }
 
+func TestGateSlotsDir(t *testing.T) {
+	if got := GateSlotsDir("/city"); got != "/city/.gc/gate-slots" {
+		t.Fatalf("GateSlotsDir = %q, want %q", got, "/city/.gc/gate-slots")
+	}
+}
+
 func TestPublicServiceMountPath(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -263,5 +269,41 @@ func TestPublicServiceMountPath(t *testing.T) {
 					tt.cityName, tt.serviceName, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestSessionDiagnosticsDirMatchesRuntimeDirForm binds the two forms of the
+// session-diagnostics path together. The bug this closes (dr-6siig, HIGH 1)
+// was exactly a drift between two derivations of one directory: the tmux
+// writers resolved it from a runtime dir and gc doctor resolved it from a city
+// root, the two landed a directory apart, and every diagnostic written was
+// invisible to the check that reads them. A caller holding either input must
+// arrive at the same place.
+func TestSessionDiagnosticsDirMatchesRuntimeDirForm(t *testing.T) {
+	city := t.TempDir()
+
+	fromCity := SessionDiagnosticsDir(city)
+	fromRuntimeDir := SessionDiagnosticsDirForRuntimeDir(RuntimePath(city))
+	if fromCity != fromRuntimeDir {
+		t.Fatalf("session diagnostics dir disagrees by input form:\n  from city root  = %s\n  from runtime dir= %s", fromCity, fromRuntimeDir)
+	}
+
+	// And it is under the hidden runtime root, not the nested data root: the
+	// broken reader used RuntimeDataDir (.gc/runtime), which is one level too
+	// deep and is where this check would have caught it.
+	if want := filepath.Join(city, ".gc", "sessions"); fromCity != want {
+		t.Fatalf("session diagnostics dir = %s, want %s", fromCity, want)
+	}
+	if fromCity == filepath.Join(RuntimeDataDir(city), "sessions") {
+		t.Fatal("session diagnostics dir resolved under .gc/runtime; that is the location the writers never use")
+	}
+}
+
+// TestSessionDiagnosticsDirForRuntimeDirDisabled: an unset runtime dir means
+// capture is off. Returning a bare relative "sessions" would write diagnostics
+// into whatever directory the process happens to be running in.
+func TestSessionDiagnosticsDirForRuntimeDirDisabled(t *testing.T) {
+	if got := SessionDiagnosticsDirForRuntimeDir(""); got != "" {
+		t.Fatalf("SessionDiagnosticsDirForRuntimeDir(\"\") = %q, want empty", got)
 	}
 }

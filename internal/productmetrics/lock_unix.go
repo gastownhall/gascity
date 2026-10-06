@@ -23,24 +23,39 @@ type unixAdvisoryLock struct {
 }
 
 func (directory *unixStorageDirectory) acquireLock(ctx context.Context, name string) (storageLockBackend, error) {
+	lock, _, err := directory.acquireLockInternal(ctx, name, true)
+	return lock, err
+}
+
+func (directory *unixStorageDirectory) tryAcquireLock(name string) (storageLockBackend, bool, error) {
+	return directory.acquireLockInternal(context.Background(), name, false)
+}
+
+func (directory *unixStorageDirectory) acquireLockInternal(
+	ctx context.Context,
+	name string,
+	wait bool,
+) (storageLockBackend, bool, error) {
 	if !directory.mutable {
-		return nil, errors.New("productmetrics: read-only storage cannot acquire a lock")
+		return nil, false, errors.New("productmetrics: read-only storage cannot acquire a lock")
 	}
 	if !directory.rootDirectory {
-		return nil, errors.New("productmetrics: advisory locks are available only at the storage root")
+		return nil, false, errors.New("productmetrics: advisory locks are available only at the storage root")
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("productmetrics: acquire lock %q: %w", name, err)
+	if wait {
+		if err := ctx.Err(); err != nil {
+			return nil, false, fmt.Errorf("productmetrics: acquire lock %q: %w", name, err)
+		}
 	}
 	directoryFD, err := directory.duplicateFD()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer closeUnixFD(directoryFD)
 	path := filepath.Join(directory.path, name)
 	lockFD, created, err := openStableLockFile(directoryFD, name)
 	if err != nil {
-		return nil, storagePathError("open advisory lock", path, err)
+		return nil, false, storagePathError("open advisory lock", path, err)
 	}
 	closeLock := true
 	defer func() {
@@ -50,18 +65,18 @@ func (directory *unixStorageDirectory) acquireLock(ctx context.Context, name str
 	}()
 	if created {
 		if err := unix.Fchmod(lockFD, 0o600); err != nil {
-			return nil, fmt.Errorf("productmetrics: set advisory-lock mode: %w", err)
+			return nil, false, fmt.Errorf("productmetrics: set advisory-lock mode: %w", err)
 		}
 	}
 	if _, err := validateOpenedRegularFile(directoryFD, name, lockFD, path, directory.euid, created, directory.hooks); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if created {
 		if err := syncFileFD(lockFD, directory.hooks); err != nil {
-			return nil, fmt.Errorf("productmetrics: sync new advisory lock: %w", err)
+			return nil, false, fmt.Errorf("productmetrics: sync new advisory lock: %w", err)
 		}
 		if err := syncDirectoryFD(directoryFD, directory.hooks); err != nil {
-			return nil, fmt.Errorf("productmetrics: sync advisory-lock directory: %w", err)
+			return nil, false, fmt.Errorf("productmetrics: sync advisory-lock directory: %w", err)
 		}
 	}
 
@@ -71,11 +86,13 @@ func (directory *unixStorageDirectory) acquireLock(ctx context.Context, name str
 	}
 	defer timer.Stop()
 	for {
-		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("productmetrics: acquire lock %q: %w", name, err)
+		if wait {
+			if err := ctx.Err(); err != nil {
+				return nil, false, fmt.Errorf("productmetrics: acquire lock %q: %w", name, err)
+			}
 		}
 		if err := directory.hooks.run(storageStepLock); err != nil {
-			return nil, fmt.Errorf("productmetrics: injected advisory-lock failure: %w", err)
+			return nil, false, fmt.Errorf("productmetrics: injected advisory-lock failure: %w", err)
 		}
 		err := unix.Flock(lockFD, unix.LOCK_EX|unix.LOCK_NB)
 		if err == nil {
@@ -85,22 +102,25 @@ func (directory *unixStorageDirectory) acquireLock(ctx context.Context, name str
 			}
 			if validationErr != nil {
 				_ = unix.Flock(lockFD, unix.LOCK_UN)
-				return nil, validationErr
+				return nil, false, validationErr
 			}
 			if _, validationErr := validateOpenedRegularFile(directoryFD, name, lockFD, path, directory.euid, false, directory.hooks); validationErr != nil {
 				_ = unix.Flock(lockFD, unix.LOCK_UN)
-				return nil, validationErr
+				return nil, false, validationErr
 			}
 			closeLock = false
-			return &unixAdvisoryLock{fd: lockFD}, nil
+			return &unixAdvisoryLock{fd: lockFD}, true, nil
 		}
 		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EINTR) {
-			return nil, fmt.Errorf("productmetrics: acquire advisory lock: %w", err)
+			return nil, false, fmt.Errorf("productmetrics: acquire advisory lock: %w", err)
+		}
+		if !wait {
+			return nil, false, nil
 		}
 		timer.Reset(advisoryLockRetryInterval)
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("productmetrics: acquire lock %q: %w", name, ctx.Err())
+			return nil, false, fmt.Errorf("productmetrics: acquire lock %q: %w", name, ctx.Err())
 		case <-timer.C:
 		}
 	}

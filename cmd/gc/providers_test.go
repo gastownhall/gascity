@@ -1412,7 +1412,18 @@ func TestNewSessionProviderFromContext_PackRuntimeCollisionSurfaces(t *testing.T
 }
 
 func TestErrorReturningSessionProviderFactoriesPreserveSuccessBehavior(t *testing.T) {
-	t.Setenv("GC_CITY", "")
+	// The "default" case calls newSessionProvider with no explicit city, so it
+	// falls through to ambient discovery. findCity walks up from the working
+	// directory, and a checkout nested under a real city root (every gc rig
+	// worktree) resolves that live city, wrapping the injected fake in an
+	// auto.Provider. Pin the discovery ceiling to the package directory so the
+	// walk stops before it can reach an ambient city.toml.
+	clearGCEnv(t)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Setenv("GC_CEILING_DIRECTORIES", wd)
 	t.Setenv("GC_SESSION", "fake")
 
 	base := runtime.NewFake()
@@ -1473,7 +1484,20 @@ func TestErrorReturningSessionProviderFactoriesPreserveSuccessBehavior(t *testin
 }
 
 func TestErrorReturningSessionProviderFactoriesReturnContextualErrors(t *testing.T) {
-	t.Setenv("GC_CITY", "")
+	// Same ambient-discovery exposure as the sibling above: the "default" case
+	// calls newSessionProvider with no explicit city, so findCity walks up from
+	// the working directory and a checkout nested under a real city root
+	// resolves that live city — attempting a real connection to its production
+	// store from a unit test. This test passes today only because the injected
+	// stub returns an error before the auto.Provider wrap that breaks the
+	// sibling's identity assertion, so it is one behavior change away from
+	// failing the same way. Pin the ceiling here too rather than rely on that.
+	clearGCEnv(t)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Setenv("GC_CEILING_DIRECTORIES", wd)
 	t.Setenv("GC_SESSION", "broken")
 
 	wantErr := errors.New("injected provider failure")

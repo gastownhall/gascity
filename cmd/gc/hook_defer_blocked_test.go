@@ -16,7 +16,7 @@ func TestDoHookFiltersDeferredBeads(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", ".", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", ".", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Fatalf("doHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -38,7 +38,7 @@ func TestDoHookFiltersDepBlockedBeads(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", ".", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", ".", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Fatalf("doHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -60,7 +60,7 @@ func TestDoHookFiltersIsBlockedBeads(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", ".", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", ".", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Fatalf("doHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -82,7 +82,7 @@ func TestDoHookFiltersStatusBlockedBeads(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", ".", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", ".", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Fatalf("doHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -101,7 +101,7 @@ func TestDoHookKeepsAbsentIsBlocked(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", ".", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", ".", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Fatalf("doHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -120,7 +120,7 @@ func TestDoHookKeepsPastDeferredAndClosedBlockers(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", ".", false, runner, &stdout, &stderr)
+	code := doHook("bd ready", ".", false, runner, &stdout, &stderr, hookVisibility{})
 	if code != 0 {
 		t.Fatalf("doHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}

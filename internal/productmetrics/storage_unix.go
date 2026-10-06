@@ -18,6 +18,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const namespaceOverflowUID = uint32(65534)
+
 const (
 	unixDirectoryOpenFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK
 	unixFileReadFlags      = unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK
@@ -405,7 +407,12 @@ func validateAncestorDirectory(metadata storageMetadata, path string, euid uint3
 	if metadata.nlink == 0 {
 		return fmt.Errorf("productmetrics: directory %q has zero links", path)
 	}
-	if metadata.uid != 0 && metadata.uid != euid {
+	// Linux user namespaces expose an unmapped host root as the overflow UID.
+	// Bazel's sandbox does this for the lexical filesystem root while keeping
+	// the test user mapped normally. Accept that representation only for `/`;
+	// accepting it on any descendant would trust an arbitrary unmapped owner.
+	rootOwned := metadata.uid == 0 || (path == string(filepath.Separator) && metadata.uid == namespaceOverflowUID)
+	if !rootOwned && metadata.uid != euid {
 		return fmt.Errorf("productmetrics: ancestor %q has untrusted owner UID %d", path, metadata.uid)
 	}
 	if metadata.mode&0o022 != 0 && !isRootOwnedStickyWritable(metadata) {
@@ -1584,6 +1591,7 @@ func (directory *unixStorageDirectory) writeFileAtomically(name string, data []b
 	if metadataErr != nil {
 		return result, metadataErr
 	}
+	result.record = recordIncarnation{dev: tempMetadata.dev, ino: tempMetadata.ino}
 	if marker != nil {
 		if err := marker.revalidateBound(tempMetadata); err != nil {
 			return result, err

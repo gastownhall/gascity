@@ -130,6 +130,16 @@ func captureProductMetricsDirectChildEnv(t *testing.T, invoke func() error) []st
 	t.Helper()
 	snapshot := filepath.Join(t.TempDir(), "child.env")
 	t.Setenv(productMetricsDirectChildEnvSpyPath, snapshot)
+	// The spy child is this test binary re-executed, so internal/testenv's
+	// init() scrub runs before the spy reads its environment — and
+	// UsageMetricsDisableEnv is a leak vector there (an ambient value silently
+	// flips the productmetrics projection). Declare it as passthrough so the
+	// value production code deliberately seeded is what the spy sees; without
+	// this the assertion reads an empty value and mistakes the scrub for
+	// missing seeding. Named by literal: importing internal/testenv outside
+	// the generated testenv_import_test.go is a stray import the package's own
+	// lint rejects.
+	t.Setenv("GC_TESTENV_PASSTHROUGH", execenv.UsageMetricsDisableEnv)
 	t.Setenv(execenv.UsageMetricsDisableEnv, "0")
 	t.Setenv("BD_DISABLE_METRICS", "keep-beads-setting")
 	t.Setenv("OTEL_SERVICE_NAME", "keep-otel-setting")

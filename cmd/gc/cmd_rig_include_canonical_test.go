@@ -87,6 +87,73 @@ func TestRigAddIncludeCanonicalizesBuiltinPackSource(t *testing.T) {
 	}
 }
 
+// TestRigAddIncludeFailsLoudlyForUnresolvableName is the gascity#4620
+// regression guard, and the counterpart to the canonicalization test above:
+// a --include token that names NO pack gc can resolve — not bundled, not a
+// [packs] key, no pack.toml on disk — must fail the add outright.
+//
+// Before the fix, canonicalization rewrote bundled names like "gastown" to a
+// canonical URL and let every other name degrade to the literal "./<name>",
+// which the pack loader resolves against the city root. `gc rig add`
+// reported SUCCESS while writing it, and every pack-expanding command then
+// failed for the WHOLE CITY — `gc bd`, `gc rig list` — with an error that
+// looks like a Dolt/connectivity problem, far from the command that caused
+// it. Failing at add time is the only outcome that costs the operator
+// nothing to diagnose.
+func TestRigAddIncludeFailsLoudlyForUnresolvableName(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	before, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "docbook")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// No GC_DOLT/GC_BEADS setup: the add must abort at include validation,
+	// which runs before the beads-store init. Needing neither is itself part
+	// of the contract — nothing is provisioned before the tokens are checked.
+	var stdout, stderr bytes.Buffer
+	// The exact reported invocation: one bundled name that resolves, two that
+	// do not. The resolvable one must not mask the others.
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, []string{"gastown", "koolkats", "oversight-rig"}, "", "", "", false, false, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc rig add reported success with unresolvable --include names; stdout:\n%s", stdout.String())
+	}
+
+	// Both bad tokens must be named — one round trip per bad name is the
+	// diagnosis cost this bug is about.
+	for _, want := range []string{"koolkats", "oversight-rig"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr does not name unresolvable --include %q:\n%s", want, stderr.String())
+		}
+	}
+
+	// city.toml must be byte-identical: the rig-add contract is that config
+	// is written last, so a validation failure leaves the city untouched
+	// rather than half-registered with a source that bricks pack expansion.
+	after, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("city.toml was mutated by a failed rig add:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	if strings.Contains(string(after), "./koolkats") {
+		t.Errorf("city.toml persisted the unresolvable literal source ./koolkats:\n%s", after)
+	}
+}
+
+// The acceptance side of this guard — a --include naming a real local pack
+// dir must still succeed — is covered end-to-end by TestDoRigAdd_WithPack and
+// exhaustively across every resolvable token form by
+// TestResolveIncludeSourcesAcceptsResolvableForms in internal/rig.
+
 // TestRigAddDefaultRigImportsPersistPinnedBundledVersion guards the sibling
 // path of the explicit --include pin hardening: `gc rig add` WITHOUT
 // --include composes the rig's imports from root-pack defaults (plus legacy

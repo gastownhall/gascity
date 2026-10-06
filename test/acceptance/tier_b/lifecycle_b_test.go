@@ -429,13 +429,14 @@ func TestLifecycle_PackCacheSelfHealsOnStart(t *testing.T) {
 	c := helpers.NewCity(t, testEnvB)
 	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
-	// gc init --from now completes startup registration, so stop and
-	// unregister before exercising the explicit gc start path below.
+	// gc init --from now completes startup registration. Stopping a
+	// supervisor-managed city also unregisters it, leaving the fixture ready
+	// for the explicit gc start path below.
 	if out, err := c.GC("stop", c.Dir); err != nil {
 		t.Fatalf("gc stop after init-from failed: %v\n%s", err, out)
 	}
-	if out, err := c.GC("unregister", c.Dir); err != nil {
-		t.Fatalf("gc unregister after init-from failed: %v\n%s", err, out)
+	if out, err := c.GC("supervisor", "stop", "--wait"); err != nil {
+		t.Fatalf("gc supervisor stop after init-from failed: %v\n%s", err, out)
 	}
 
 	cacheRoot := filepath.Join(testEnvB.Get("GC_HOME"), "cache", "repos")
@@ -443,9 +444,20 @@ func TestLifecycle_PackCacheSelfHealsOnStart(t *testing.T) {
 		t.Fatalf("bundled pack cache missing after init: %v", err)
 	}
 
-	// Delete the user-global cache to simulate eviction (or a fresh host).
-	if err := os.RemoveAll(cacheRoot); err != nil {
-		t.Fatal(err)
+	// Atomically move the user-global cache aside to simulate eviction (or a
+	// fresh host). A recursive delete can race a pack-cache writer that was
+	// already winding down when the supervisor stopped.
+	evictedCacheRoot := cacheRoot + ".evicted"
+	if err := os.Rename(cacheRoot, evictedCacheRoot); err != nil {
+		t.Fatalf("evicting bundled pack cache: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(evictedCacheRoot); err != nil {
+			t.Errorf("removing evicted bundled pack cache: %v", err)
+		}
+	})
+	if _, err := os.Stat(cacheRoot); !os.IsNotExist(err) {
+		t.Fatalf("bundled pack cache still present after eviction: %v", err)
 	}
 
 	// gc start registers with the supervisor; builtin readiness re-hydrates

@@ -1372,7 +1372,7 @@ name = "maintenance"
 schema = 2
 `)
 
-	names := resolvedPackNames(nil, map[string]Import{
+	names := mustResolvedPackNames(t, nil, map[string]Import{
 		"gastown": {Source: source, Version: "^1.2"},
 	}, fsys.OSFS{}, cityDir)
 

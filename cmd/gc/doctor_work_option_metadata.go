@@ -80,6 +80,14 @@ func (c *workOptionMetadataMigrationCheck) collect() (targets []workOptionMigrat
 			scopes = append(scopes, struct{ label, path string }{"rig " + rig.Name, rig.Path})
 		}
 	}
+	// The session-cleanup leg below is session class, not work class, and it
+	// WRITES. Under a [beads.classes.sessions] relocation every scope routes to
+	// the one relocated sessions store, so the leg would mint a duplicate target
+	// — and a duplicate SetMetadataBatch — once per rig; dedupe by bead id in
+	// that case only. Without a relocation each scope is a distinct store and
+	// owns its own beads, so no dedupe.
+	sessionsRelocated := cliSessionsRelocated(c.cityPath)
+	seenSessionBead := map[string]bool{}
 	for _, sc := range scopes {
 		if c.newStore == nil || strings.TrimSpace(sc.path) == "" {
 			continue
@@ -106,7 +114,8 @@ func (c *workOptionMetadataMigrationCheck) collect() (targets []workOptionMigrat
 				migrations: migrations,
 			})
 		}
-		sessions, err := loadSessionBeads(store)
+		sessStore := cliSessionStore(store, c.cfg, c.cityPath)
+		sessions, err := loadSessionBeads(sessStore)
 		if err != nil {
 			skipped = append(skipped, fmt.Sprintf("%s skipped: listing session beads: %v", sc.label, err))
 			continue
@@ -116,9 +125,15 @@ func (c *workOptionMetadataMigrationCheck) collect() (targets []workOptionMigrat
 			if cleanup == nil {
 				continue
 			}
+			if sessionsRelocated {
+				if seenSessionBead[b.ID] {
+					continue
+				}
+				seenSessionBead[b.ID] = true
+			}
 			targets = append(targets, workOptionMigrationTarget{
 				label:          sc.label,
-				store:          store,
+				store:          sessStore,
 				beadID:         b.ID,
 				sessionCleanup: cleanup,
 			})

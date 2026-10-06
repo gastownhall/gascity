@@ -132,13 +132,23 @@ function SessionTranscript({
   visible: boolean;
 }) {
   const attached = instance.session.kind === 'attached' ? instance.session : null;
-  const sessionId = attached?.link.sessionId ?? null;
+  const sessionId = attached?.link?.sessionId ?? null;
   const stream = visible && Boolean(attached?.streamable);
   const sessionState = useSessionStream(sessionId, stream);
   if (attached === null) {
     return (
       <p className="mt-5 text-body text-fg-muted italic">
         {instanceSessionUnavailableCopy(instance)}
+      </p>
+    );
+  }
+  if (sessionId === null) {
+    // An `attached` session with no link is the public floor's redacted shape:
+    // there is no session id to fetch, so render graceful copy instead of
+    // dereferencing an absent link (which previously crashed the run view).
+    return (
+      <p className="mt-5 text-body text-fg-muted italic">
+        Session transcript is unavailable for this node.
       </p>
     );
   }

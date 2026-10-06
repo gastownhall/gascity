@@ -29,6 +29,8 @@ var (
 	ErrInvalidSessionAlias = errors.New("invalid session alias")
 	// ErrSessionAliasExists reports that a live session already owns the alias.
 	ErrSessionAliasExists = errors.New("session alias already exists")
+	// ErrInvalidSessionTitle reports a blank or whitespace-only session title.
+	ErrInvalidSessionTitle = errors.New("invalid session title")
 )
 
 var (
@@ -44,6 +46,11 @@ const (
 	explicitSessionNameMaxLen = 64
 	autoSessionNamePrefix     = "s-"
 )
+
+// MaxExplicitSessionNameLen is the longest explicit session name
+// [ValidateExplicitName] accepts. Callers that derive a name from an identity
+// of unbounded length need it to shorten deterministically instead of failing.
+const MaxExplicitSessionNameLen = explicitSessionNameMaxLen
 
 type sessionIdentifierReservationLockEntry struct {
 	mu   sync.Mutex
@@ -123,6 +130,17 @@ func GenerateAdhocIdentity(base string) (string, error) {
 		base = "session"
 	}
 	return base + "-adhoc-" + compact, nil
+}
+
+// ValidateTitle refuses a blank or whitespace-only session title. Callers that
+// take a title from user input check it here so the user gets a usage error
+// rather than a storage validation error from deep inside the bead write (the
+// bead store requires a non-empty title).
+func ValidateTitle(title string) error {
+	if strings.TrimSpace(title) == "" {
+		return fmt.Errorf("%w: title cannot be empty", ErrInvalidSessionTitle)
+	}
+	return nil
 }
 
 // ValidateAlias validates a human-chosen session alias. Empty means
@@ -363,6 +381,19 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.Store, name, selfID, 
 				continue
 			}
 			if b.Status == "closed" && wasConfiguredNamedSession(b) {
+				continue
+			}
+			// A retired ephemeral pool slot must not permanently reserve the
+			// name either. The reconciler closes the slot bead without
+			// clearing session_name, and a configured named session that was
+			// materialized through the pool path lands here with neither the
+			// configured_named_session marker nor configured_named_identity,
+			// so the release above never fires for it. A dead pool slot must
+			// not poison future materialization of the identity it happened
+			// to be running as.
+			if b.Status == "closed" &&
+				strings.TrimSpace(b.Metadata["pool_managed"]) == "true" &&
+				strings.TrimSpace(b.Metadata["session_origin"]) == "ephemeral" {
 				continue
 			}
 			return fmt.Errorf("%w: %q already belongs to %s", ErrSessionNameExists, name, b.ID)
@@ -608,6 +639,35 @@ func ensureSessionAliasAvailable(store beads.Store, cfg *config.City, alias, sel
 			continue
 		}
 		if strings.TrimSpace(b.Metadata["session_name"]) == alias {
+			// A superseded, non-running (asleep) configured-named-session
+			// predecessor for the SAME identity must not block that
+			// identity's own live holder from claiming its canonical alias
+			// (#2885, Fix Candidate A). Scoped narrowly: only when (1) the
+			// claimant asserts the exact owner identity the holder was
+			// minted for, (2) the holder is asleep rather than genuinely
+			// running, and (3) the holder is recognizably a
+			// configured-named-session bead FOR THAT SAME IDENTITY. This
+			// mirrors the self-owner exception the agent_name branch below
+			// already has, and does not resurrect or steal an alias from an
+			// unrelated, live, or ambiguous session.
+			//
+			// Condition (3) is two-part on purpose.
+			// wasConfiguredNamedSession(b) establishes the holder is a
+			// configured-named-session bead at all, but it is owner-AGNOSTIC
+			// — a bead minted for a DIFFERENT configured identity that merely
+			// persisted this identity's runtime session_name would satisfy it
+			// and hand the alias over on the claimant's assertion alone.
+			// configuredNamedIdentitySignalsMatch is the owner-scoped
+			// recognizer introduced for the identical trap in
+			// name_claim_sweep.go (review #3373); it matches the recorded
+			// identity, alias, agent_name, or template/role signal against
+			// THIS identity.
+			if selfOwner != "" && selfOwner == alias &&
+				strings.TrimSpace(b.Metadata["state"]) == string(StateAsleep) &&
+				wasConfiguredNamedSession(b) &&
+				configuredNamedIdentitySignalsMatch(b, selfOwner) {
+				continue
+			}
 			return fmt.Errorf("%w: %q conflicts with session name on %s", ErrSessionAliasExists, alias, b.ID)
 		}
 		if strings.TrimSpace(b.Metadata["alias"]) == alias {

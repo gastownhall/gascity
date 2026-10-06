@@ -131,14 +131,6 @@ type PreflightDetails struct {
 	BDVersion             string                 `json:"bd_version,omitempty"`
 	BeadsLibraryVersion   string                 `json:"beads_library_version,omitempty"`
 	SchemaVersion         int                    `json:"schema_version,omitempty"`
-	HasPostgresDSN        *bool                  `json:"has_postgres_dsn,omitempty"`
-	HasSplitFields        *bool                  `json:"has_split_fields,omitempty"`
-	PostgresDSNRedacted   string                 `json:"postgres_dsn_redacted,omitempty"`
-	PostgresPassword      string                 `json:"postgres_password,omitempty"`
-	PostgresHost          string                 `json:"postgres_host,omitempty"`
-	PostgresPort          string                 `json:"postgres_port,omitempty"`
-	PostgresUser          string                 `json:"postgres_user,omitempty"`
-	PostgresDatabase      string                 `json:"postgres_database,omitempty"`
 	MetadataProjectID     string                 `json:"metadata_project_id,omitempty"`
 	DBProjectID           string                 `json:"db_project_id,omitempty"`
 	Expected              string                 `json:"expected,omitempty"`
@@ -149,8 +141,6 @@ type PreflightDetails struct {
 
 // Redacted returns a copy of details with secret-bearing fields sanitized.
 func (d PreflightDetails) Redacted() PreflightDetails {
-	d.PostgresDSNRedacted = redactPreflightDetail("postgres_dsn", d.PostgresDSNRedacted)
-	d.PostgresPassword = redactPreflightDetail("postgres_password", d.PostgresPassword)
 	d.AuthToken = redactPreflightDetail("auth_token", d.AuthToken)
 	d.APIKey = redactPreflightDetail("api_key", d.APIKey)
 	if len(d.AdditionalDiagnostics) > 0 {
@@ -191,7 +181,11 @@ func redactPreflightDetail(key, value string) string {
 		return value
 	}
 	normalized := strings.ToLower(strings.TrimSpace(key))
-	if strings.Contains(normalized, "postgres_dsn") {
+	// A DSN is a connection string with a userinfo section, whatever backend
+	// wrote it. Keyed on the shape rather than on any one backend's name, so a
+	// diagnostic added for a backend gc does not implement is redacted by the
+	// rule that already exists rather than by one somebody remembers to add.
+	if strings.Contains(normalized, "dsn") {
 		return redactPreflightDSN(value)
 	}
 	if preflightDetailKeyIsSensitive(normalized) {

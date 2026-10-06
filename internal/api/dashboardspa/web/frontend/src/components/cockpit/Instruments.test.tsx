@@ -1,7 +1,15 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { ActivityTrace, Gauge, Odometer, PipelineBar, RunRings, StatusLamps } from './Instruments';
+import {
+  ActivityTrace,
+  Gauge,
+  Odometer,
+  PipelineBar,
+  RunRings,
+  StatTile,
+  StatusLamps,
+} from './Instruments';
 
 describe('cockpit instruments', () => {
   afterEach(() => cleanup());
@@ -9,6 +17,17 @@ describe('cockpit instruments', () => {
   it('exposes the odometer reading in the accessibility tree', () => {
     render(<Odometer label="model calls today" value={42} note="$1.20 estimated" />);
     expect(screen.getByRole('status', { name: 'model calls today: 42' })).toBeTruthy();
+  });
+
+  it('announces a stat tile reading and falls back to unavailable without inventing zero', () => {
+    const { rerender } = render(<StatTile label="tokens in" value="300K" note="24h estimate" />);
+    const tile = screen.getByRole('status', { name: 'tokens in: 300K' });
+    expect(tile.textContent).toContain('300K');
+    expect(tile.textContent).toContain('24h estimate');
+
+    rerender(<StatTile label="tokens in" value={null} />);
+    const empty = screen.getByRole('status', { name: 'tokens in: unavailable' });
+    expect(empty.textContent).toContain('—');
   });
 
   it('keeps the full gauge scale inside its SVG viewport', () => {

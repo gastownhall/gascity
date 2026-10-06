@@ -279,7 +279,7 @@ func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
 				indexBySessionName[sn] = i
 			}
 		}
-		retireDuplicateConfiguredNamedSessionBeads(store, nil, sp, cfg, cityName, rawBeads, bySessionName, indexBySessionName, now, nil)
+		retireDuplicateConfiguredNamedSessionBeads("", store, nil, sp, cfg, cityName, rawBeads, bySessionName, indexBySessionName, now, nil)
 	}
 	runRows := func(store beads.Store, sp *runtime.Fake) {
 		rowBeads := loadOpen(t, store)
@@ -287,7 +287,7 @@ func TestRetireDuplicateRowsMatchesBeads(t *testing.T) {
 		for i, b := range rowBeads {
 			rows[i] = session.ReconcileSession{Info: sessiontest.SeedBead(t, b)}
 		}
-		retireDuplicateConfiguredNamedSessionRows(store, nil, sp, cfg, cityName, rows, now, nil)
+		retireDuplicateConfiguredNamedSessionRows("", store, nil, sp, cfg, cityName, rows, now, nil)
 	}
 
 	t.Run("stop-succeeds-loser-retired-and-stopped", func(t *testing.T) {

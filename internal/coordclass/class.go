@@ -47,6 +47,8 @@
 // against the exported constants where those are importable.
 package coordclass
 
+import "github.com/gastownhall/gascity/internal/beadmeta"
+
 // Class is the owning subsystem a bead belongs to — the unit of routing for the
 // coordination-store split. Each non-Work class is destined for its own typed
 // provider module, with bd as the first (identity) implementation. It is
@@ -55,16 +57,18 @@ type Class int
 
 const (
 	// ClassWork is the real backlog: tasks, epics, bugs, features,
-	// merge-requests, and user/sling convoys. Owner: the bd backlog. This is the
-	// zero value so any bead not matched by an explicit infrastructure arm
-	// defaults to work.
+	// merge-requests, and EVERY convoy — user, sling, and the synthetic ones the
+	// system mints as glue (graph.v2 input convoys, drain-unit convoys). Owner:
+	// the bd backlog. This is the zero value so any bead not matched by an
+	// explicit infrastructure arm defaults to work.
 	ClassWork Class = iota
 
 	// ClassGraph is the formula-v2 execution engine's topology and control lane:
 	// molecule/step/gate/scope/run beads, every gc.kind control bead, wisp
-	// roots, convergence beads, spec sidecars, and synthetic (graph.v2 input /
-	// drain-unit) convoys. Owner: internal/dispatch + internal/molecule +
-	// internal/formula. This is the bead explosion the split primarily targets.
+	// roots, convergence beads, and spec sidecars. Owner: internal/dispatch +
+	// internal/molecule + internal/formula. This is the bead explosion the split
+	// primarily targets. Convoys are NOT here, synthetic ones included — see
+	// ClassWork and the synthetic-convoy arm in classify.go.
 	ClassGraph
 
 	// ClassMessaging is mail (type=message) and the extmsg families (type=task
@@ -80,9 +84,10 @@ const (
 	// + the order-dispatch path.
 	ClassOrders
 
-	// ClassNudges is the durability mirror of the nudge queue (type=chore +
-	// gc:nudge). Owner: the nudge queue subsystem. The live queue is a
-	// flock-guarded file; these beads are its persistent shadow.
+	// ClassNudges is the nudge queue: the durable queue's own records
+	// (type=chore + gc:nudge-queue) and the shadow beads that mirror them
+	// (type=chore + gc:nudge). Owner: the nudge queue subsystem. The two are
+	// disjoint families over the same store, and both belong to this class.
 	ClassNudges
 )
 
@@ -92,17 +97,17 @@ const (
 func (c Class) String() string {
 	switch c {
 	case ClassWork:
-		return "work"
+		return beadmeta.ClassNameWork
 	case ClassGraph:
-		return "graph"
+		return beadmeta.ClassNameGraph
 	case ClassMessaging:
-		return "messaging"
+		return beadmeta.ClassNameMessaging
 	case ClassSessions:
-		return "sessions"
+		return beadmeta.ClassNameSessions
 	case ClassOrders:
-		return "orders"
+		return beadmeta.ClassNameOrders
 	case ClassNudges:
-		return "nudges"
+		return beadmeta.ClassNameNudges
 	default:
 		return "unknown"
 	}

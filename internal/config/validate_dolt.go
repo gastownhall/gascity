@@ -1,6 +1,8 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // ValidateDoltConfig rejects Dolt config values that would otherwise be
 // silently ignored or normalized at runtime.
@@ -21,6 +23,9 @@ func ValidateDoltConfig(cfg *City, source string) error {
 		return err
 	}
 	if err := checkNonNegative("write_timeout_millis", cfg.Dolt.WriteTimeoutMillis); err != nil {
+		return err
+	}
+	if err := checkNonNegative("wait_timeout_seconds", cfg.Dolt.WaitTimeoutSeconds); err != nil {
 		return err
 	}
 	return nil

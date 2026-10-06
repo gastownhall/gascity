@@ -1,0 +1,38 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "storehealth",
+    srcs = ["storehealth.go"],
+    importpath = "github.com/gastownhall/gascity/internal/storehealth",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads/contract",
+        "//internal/events",
+        "//internal/fsys",
+    ],
+)
+
+go_test(
+    name = "storehealth_test",
+    srcs = [
+        "storehealth_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":storehealth"],
+    deps = [
+        "//internal/events",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

@@ -2,6 +2,7 @@ package materialize
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -223,7 +224,7 @@ func TestMCPTemplateDataUsesBackingTemplateName(t *testing.T) {
 		Dir:  "rig-a",
 		Env:  map[string]string{"TOKEN": "abc"},
 	}
-	got := MCPTemplateData(&config.City{}, "/tmp/city", agent, "rig-a/worker-7", "/tmp/work")
+	got := MCPTemplateData(&config.City{}, "/tmp/city", agent, "rig-a/worker-7", "/tmp/work", config.QueryTopology{})
 	if got["AgentName"] != "rig-a/worker-7" {
 		t.Fatalf("AgentName = %q, want %q", got["AgentName"], "rig-a/worker-7")
 	}
@@ -253,7 +254,7 @@ func TestMCPTemplateDataUsesPoolNameForPoolInstances(t *testing.T) {
 		Name:     "worker-3",
 		PoolName: "worker",
 	}
-	got := MCPTemplateData(&config.City{}, "/tmp/city", agent, "worker-3", "/tmp/work")
+	got := MCPTemplateData(&config.City{}, "/tmp/city", agent, "worker-3", "/tmp/work", config.QueryTopology{})
 	if got["TemplateName"] != "worker" {
 		t.Fatalf("TemplateName = %q, want %q", got["TemplateName"], "worker")
 	}
@@ -267,7 +268,7 @@ func TestMCPTemplateDataUsesBD105WorkQuery(t *testing.T) {
 	}
 	agent := &config.Agent{Name: "worker"}
 
-	got := MCPTemplateData(cfg, "/tmp/city", agent, "worker", "/tmp/work")
+	got := MCPTemplateData(cfg, "/tmp/city", agent, "worker", "/tmp/work", config.QueryTopology{})
 	if !strings.Contains(got["WorkQuery"], "bd ready --include-ephemeral") {
 		t.Fatalf("WorkQuery = %q, want bd-1.0.5 ephemeral-ready probe", got["WorkQuery"])
 	}
@@ -277,12 +278,123 @@ func TestMCPTemplateDataPreservesBranchAlias(t *testing.T) {
 	t.Parallel()
 
 	agent := &config.Agent{Name: "worker"}
-	got := MCPTemplateData(&config.City{}, "/tmp/city", agent, "worker-1", "")
+	got := MCPTemplateData(&config.City{}, "/tmp/city", agent, "worker-1", "", config.QueryTopology{})
 	if got["Branch"] == "" {
 		t.Fatal("Branch = empty, want default branch alias")
 	}
 	if got["Branch"] != got["DefaultBranch"] {
 		t.Fatalf("Branch = %q, want %q", got["Branch"], got["DefaultBranch"])
+	}
+}
+
+// installRecordingGit puts a fake git first on PATH. Every invocation appends
+// its argv to the returned log, and `git symbolic-ref` answers with
+// refs/remotes/origin/<originHead> so a DefaultBranch probe is observable in
+// rendered output.
+func installRecordingGit(t *testing.T, originHead string) string {
+	t.Helper()
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "git-calls.log")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"$GC_TEST_GIT_LOG\"\n" +
+		"if [ \"$1\" = symbolic-ref ]; then echo refs/remotes/origin/" + originHead + "; fi\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	t.Setenv("GC_TEST_GIT_LOG", logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if got, err := exec.LookPath("git"); err != nil || got != filepath.Join(binDir, "git") {
+		t.Fatalf("git on PATH = %q (%v), want fake in %s", got, err, binDir)
+	}
+	return logPath
+}
+
+func readGitCalls(t *testing.T, logPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("read fake git log: %v", err)
+	}
+	return string(data)
+}
+
+// The default-branch probe forks git up to three times per call and its only
+// consumer is .template.toml expansion, so a catalog with no template file —
+// including one with no MCP sources at all — must not pay for it.
+func TestEffectiveMCPForSessionSkipsBranchProbeWithoutTemplateServers(t *testing.T) {
+	packDir := t.TempDir()
+	mustWriteFile(t, filepath.Join(packDir, "mcp", "plain.toml"), `
+name = "plain"
+command = "uvx"
+`)
+	mustWriteFile(t, filepath.Join(packDir, "mcp", "README.md"), "not an MCP definition")
+
+	for _, tc := range []struct {
+		name        string
+		cfg         *config.City
+		wantServers []string
+	}{
+		{name: "no sources", cfg: &config.City{}},
+		{name: "empty source dir", cfg: &config.City{PackMCPDir: filepath.Join(t.TempDir(), "mcp")}},
+		{
+			name:        "plain server only",
+			cfg:         &config.City{BootstrapImportPackDirs: []string{packDir}},
+			wantServers: []string{"plain"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gitLog := installRecordingGit(t, "trunk")
+			catalog, err := EffectiveMCPForSession(tc.cfg, t.TempDir(), &config.Agent{Name: "worker"}, "worker", t.TempDir(), config.QueryTopology{})
+			if err != nil {
+				t.Fatalf("EffectiveMCPForSession: %v", err)
+			}
+			var names []string
+			for _, server := range catalog.Servers {
+				names = append(names, server.Name)
+			}
+			if !reflect.DeepEqual(names, tc.wantServers) {
+				t.Fatalf("servers = %v, want %v", names, tc.wantServers)
+			}
+			if calls := readGitCalls(t, gitLog); calls != "" {
+				t.Fatalf("catalog without template servers probed git:\n%s", calls)
+			}
+		})
+	}
+}
+
+func TestEffectiveMCPForSessionTemplateServerStillExpandsDefaultBranch(t *testing.T) {
+	packDir := t.TempDir()
+	mustWriteFile(t, filepath.Join(packDir, "mcp", "plain.toml"), `
+name = "plain"
+command = "uvx"
+`)
+	mustWriteFile(t, filepath.Join(packDir, "mcp", "branchy.template.toml"), `
+name = "branchy"
+command = "uvx"
+args = ["--branch", "{{.DefaultBranch}}", "--alias", "{{.Branch}}", "--agent", "{{.AgentName}}"]
+`)
+	gitLog := installRecordingGit(t, "trunk")
+
+	catalog, err := EffectiveMCPForSession(&config.City{BootstrapImportPackDirs: []string{packDir}}, t.TempDir(), &config.Agent{Name: "worker"}, "worker-1", t.TempDir(), config.QueryTopology{})
+	if err != nil {
+		t.Fatalf("EffectiveMCPForSession: %v", err)
+	}
+	server, ok := catalog.ByName["branchy"]
+	if !ok {
+		t.Fatalf("missing branchy server in %#v", catalog.ByName)
+	}
+	want := []string{"--branch", "trunk", "--alias", "trunk", "--agent", "worker-1"}
+	if !reflect.DeepEqual(server.Args, want) {
+		t.Fatalf("branchy args = %v, want %v", server.Args, want)
+	}
+	if _, ok := catalog.ByName["plain"]; !ok {
+		t.Fatalf("missing plain server in %#v", catalog.ByName)
+	}
+	if calls := readGitCalls(t, gitLog); strings.Count(calls, "symbolic-ref") != 1 {
+		t.Fatalf("git calls = %q, want exactly one default-branch probe", calls)
 	}
 }
 

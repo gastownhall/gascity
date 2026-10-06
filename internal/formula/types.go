@@ -335,6 +335,18 @@ type Step struct {
 	// SourceLocation is the path within the source formula.
 	// Format: "steps[0]", "steps[2].children[1]", "advice[0].after", "loop.body[0]"
 	SourceLocation string `json:"-"` // Internal only, not serialized to JSON
+
+	// DescriptionFileResolvedPath is the absolute on-disk path
+	// resolveDescriptionFiles resolved for an oversized description_file
+	// (see descriptionFileInlineMaxBytes). Set when Description contains the
+	// generated external-prompt stub (descriptionFileReferenceDescription)
+	// referencing that path, including after {target.description} composition.
+	// Kept out-of-band so later template/{{var}} substitution can preserve only
+	// the resolved-path segment while still expanding the rest of the stub.
+	// Otherwise a placeholder that also appears literally in the resolved path
+	// (e.g. an asset shipped under a literal "{target}.md" filename) gets
+	// corrupted by the same substitution pass (gastownhall/gascity#4860).
+	DescriptionFileResolvedPath string `json:"-"` // Internal only, not serialized to JSON
 }
 
 // DrainSpec defines a graph.v2 drain control step.

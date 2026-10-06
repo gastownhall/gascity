@@ -50,7 +50,19 @@ func standaloneBuildAgentsFnWithSessionBeads(
 		sessionBeads *sessionBeadSnapshot,
 		trace *sessionReconcilerTraceCycle,
 	) DesiredStateResult {
-		return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, c, currentSP, store, rigStores, sessionBeads, trace, stderr)
+		return buildDesiredStateWithSessionBeadsAt(
+			cityName,
+			cityPath,
+			beaconTime,
+			time.Now(),
+			c,
+			currentSP,
+			store,
+			rigStores,
+			sessionBeads,
+			trace,
+			stderr,
+		)
 	}
 }
 
@@ -155,7 +167,7 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 			_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 			instance := deepCopyAgent(&a, instanceName, a.Dir)
-			cmd := instance.EffectiveOnDeathForBeads(cfg.Beads)
+			cmd := instance.EffectiveOnDeathFor(config.QueryTopology{Beads: cfg.Beads})
 			if cmd == "" {
 				continue
 			}
@@ -348,6 +360,55 @@ func buildMaxSessionAgeTracker(cfg *config.City, cityName string, sp runtime.Pro
 	return tr
 }
 
+// buildAssignedWorkDeferTracker creates an assignedWorkDeferTracker from the
+// config, registering a consecutive-defer limit override for every agent
+// that has assigned_work_defer_limit set. Unlike buildIdleTracker /
+// buildMaxSessionAgeTracker, this always returns a non-nil tracker: the
+// backstop (ga-nllza6) must stay live even when no agent configures an
+// override, falling back to defaultAssignedWorkDeferLimit for any session
+// with no direct or template registration. Mirrors buildIdleTracker's
+// registration-loop shape so the set of session names registered matches
+// what the reconciler observes.
+func buildAssignedWorkDeferTracker(cfg *config.City, cityName string, sp runtime.Provider) assignedWorkDeferTracker {
+	tr := newAssignedWorkDeferTracker()
+	st := cfg.Workspace.SessionTemplate
+	for _, a := range cfg.Agents {
+		if a.AssignedWorkDeferLimit == nil {
+			continue
+		}
+		limit := *a.AssignedWorkDeferLimit
+		named := config.FindNamedSession(cfg, a.QualifiedName())
+		namedAlways := named != nil && named.ModeOrDefault() == "always"
+		if named != nil {
+			namedSessionName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, named.QualifiedName())
+			if !namedAlways {
+				tr.setLimit(namedSessionName, limit)
+			} else {
+				tr.exemptTemplateFallbackForSession(namedSessionName)
+			}
+			if !a.SupportsInstanceExpansion() {
+				continue
+			}
+		}
+		if a.SupportsInstanceExpansion() {
+			sp0 := scaleParamsFor(&a)
+			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
+				sn := startupSessionName(cityName, qualifiedInstance, st)
+				tr.setLimit(sn, limit)
+			}
+			if a.SupportsGenericEphemeralSessions() {
+				template := lifecycleTemplateFallbackKey(a)
+				tr.setLimitForTemplate(template, limit)
+				exemptAlwaysNamedTemplateFallbacks(cfg, cityName, template, tr.exemptTemplateFallbackForSession)
+			}
+			continue
+		}
+		sn := startupSessionName(cityName, a.QualifiedName(), st)
+		tr.setLimit(sn, limit)
+	}
+	return tr
+}
+
 func lifecycleTemplateFallbackKey(a config.Agent) string {
 	return a.QualifiedName()
 }
@@ -410,6 +471,8 @@ Use "gc supervisor run" for foreground operation.`,
 		"preview what agents would start without starting them")
 	cmd.Flags().BoolVar(&noAutoRestartMode, "no-auto-restart", false,
 		"detect supervisor binary drift but do not auto-restart; exits non-zero on drift")
+	cmd.Flags().BoolVar(&allowSupervisorMismatch, allowSupervisorMismatchFlag, false,
+		"start even when the running supervisor is a different gc installation than this binary")
 	cmd.Flags().BoolVar(&startVerboseMode, "verbose", false,
 		"disable warning deduplication and print every supervisor warning")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
@@ -506,8 +569,23 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 	if jsonOut {
 		driftStdout = stderr
 	}
-	if exitCode, cont := runStartDriftCheck(cityPath, driftStdout, stderr); !cont {
-		return exitCode
+	// A supervisor running a different gc installation cannot be fixed by
+	// the drift auto-restart (it would relaunch that other binary), so it is
+	// checked first. --dry-run only previews, so it warns instead.
+	skipDriftCheck := false
+	if dryRunMode {
+		warnSupervisorBinaryMismatch("gc start", stderr)
+	} else {
+		proceed, acceptedDifferentInstall := checkSupervisorBinaryBeforeRegister("gc start", stderr, false)
+		if !proceed {
+			return 1
+		}
+		skipDriftCheck = acceptedDifferentInstall
+	}
+	if !skipDriftCheck {
+		if exitCode, cont := runStartDriftCheck(cityPath, driftStdout, stderr); !cont {
+			return exitCode
+		}
 	}
 
 	// --dry-run routes to the standalone preview path *after* the drift
@@ -566,6 +644,14 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 	return 0
 }
 
+// resolveStartDir resolves the city directory for start/restart. The
+// no-argument case deliberately keeps the plain cwd fallback rather than
+// routing through resolveImplicitCWD: start and restart cannot bootstrap
+// anything. Every caller feeds this into requireBootstrappedCity, which walks
+// up for an existing city.toml/.gc and errors before any side effect when
+// there is none, so an unattended no-path invocation in an arbitrary checkout
+// fails loudly instead of leaving state behind. The implicit-cwd guard is for
+// the entry points that create state — see resolveImplicitCWD.
 func resolveStartDir(args []string) (string, error) {
 	switch {
 	case len(args) > 0:
@@ -645,6 +731,22 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: runtime scaffold: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// A foreground start takes the controller lock before it touches the
+	// city, and in particular before it starts the bead-store provider. A
+	// start that loses the lock (to a running controller, or to gc stop,
+	// which holds it while it retires the provider) must not have restarted
+	// that provider first. The lock is held from here through the whole
+	// controller run and released when this function returns. A dry run
+	// never becomes the controller, so it previews without the lock.
+	var controllerLock *os.File
+	if controllerMode && !dryRunMode {
+		controllerLock, err = acquireControllerLock(cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		defer controllerLock.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
+	}
 	if missing := checkHardDependencies(cityPath); len(missing) > 0 {
 		fmt.Fprintf(stderr, "gc start: missing required dependencies:\n\n") //nolint:errcheck // best-effort stderr
 		for _, dep := range missing {
@@ -687,6 +789,25 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	}
 	for _, w := range prov.Warnings {
 		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+	}
+	// Refuse an inadmissible session_reconciler before any init, so a refused
+	// start (including --dry-run) starts no bead store and opens no event log.
+	// runController latches again (newControllerWiring) for the mode it runs.
+	// The two cannot disagree: both read only cfg's session_reconciler, which
+	// nothing below rewrites, and reconcilerModeLookupEnv's override, which no
+	// gc code sets.
+	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	// The one-shot reconcile below calls the legacy session reconciler
+	// directly, behind no legacySessionEntry guard, so v2 refuses it rather
+	// than run legacy session work under a v2 latch. Production never reaches
+	// it (A6, F11); --dry-run reconciles nothing.
+	if mode == reconcilerV2 && !controllerMode && !dryRunMode {
+		fmt.Fprintln(stderr, "gc start: session_reconciler = \"v2\" has no one-shot reconcile; run the controller (gc start --foreground) or remove the key") //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
@@ -732,6 +853,12 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: beads health check: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal warning — server may recover by the time agents need it.
 	}
+	// One-shot is_blocked repair after a bd upgrade (beads#7037). Best-effort:
+	// it warns and retries on the next start instead of failing this one.
+	// --dry-run only previews, so it writes nothing.
+	if !dryRunMode {
+		startRepairBlockedFlags(cityPath, cfg, stderr, "gc start")
+	}
 
 	// Warm-up doctor scan. Fail-open: startup continues regardless of check,
 	// mail, or runner failures.
@@ -739,11 +866,17 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	if absCityPath, pathErr := filepath.Abs(warmupCityPath); pathErr == nil {
 		warmupCityPath = absCityPath
 	}
+	skipRigDoltChecks := gcDoltSkip()
+	// While this start holds the controller lock no other controller runs;
+	// probing the flock would only find this start's own lock.
+	warmupControllerRunning := controllerLock == nil && doctor.IsControllerRunning(warmupCityPath)
 	warmupChecks := buildDoctorChecks(warmupCityPath, cfg, nil, buildDoctorChecksOpts{
 		Stderr:               io.Discard,
-		ControllerRunning:    doctor.IsControllerRunning(warmupCityPath),
-		SkipCityDoltCheck:    gcDoltSkip() || (!scopeUsesManagedBdStoreContract(warmupCityPath, warmupCityPath) && !workspaceNeedsCityDoltCheck(warmupCityPath, cfg)),
+		ControllerRunning:    warmupControllerRunning,
+		SkipCityDoltCheck:    skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(warmupCityPath, warmupCityPath) && !workspaceNeedsCityDoltCheck(warmupCityPath, cfg)),
 		SkipManagedDoltCheck: managedDoltOpsCheckSkip(warmupCityPath, cfg, nil),
+		SkipRigDoltChecks:    skipRigDoltChecks,
+		SkipStorePreflight:   true,
 	})
 	warmupOpts := warmup.WarmupOpts{
 		Checks: warmupChecks,
@@ -825,7 +958,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		}
 	}
 
-	sp, err := newSessionProvider()
+	sp, err := newSessionProviderForCity(cfg, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -848,8 +981,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	recorder := events.Discard
 	var eventProv events.Provider // nil when events disabled or FileRecorder fails
-	if fr, err := newFileEventsRecorder(
-		filepath.Join(cityPath, ".gc", "events.jsonl"), cfg.Events, stderr); err == nil {
+	fr, frErr := openStandaloneCityEventsRecorder(cityPath, cfg.Events, controllerLock != nil, stderr)
+	if frErr == nil {
 		recorder = fr
 		eventProv = fr
 	}
@@ -873,8 +1006,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, cityPath, sp, stderr)
 		watchTargets := config.WatchTargets(prov, cfg, cityPath)
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
-		return runController(cityPath, tomlPath, cfg, configRev, buildAgents, buildAgentsWithSessionBeads, sp,
-			newDrainOps(sp), poolSessions, poolDeathHandlers, watchTargets, recorder, eventProv, stdout, stderr)
+		return runController(cityPath, controllerLock, tomlPath, cfg, configRev, buildAgents, buildAgentsWithSessionBeads, sp,
+			newDrainOps(sp), poolSessions, poolDeathHandlers, watchTargets, defaultConfigDebounce, recorder, eventProv, stdout, stderr)
 	}
 
 	// One-shot reconciliation (default): no drain (kill is fine).
@@ -921,10 +1054,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// arm (collectAssignedWorkBeadsWithStores / cold-wake scale-check probes) — a dual
 	// role the daemon routes to the session store today too, tracked as a shared E2
 	// two-store split. Identity to oneShotStore at the single-store backend, so
-	// byte-identical today. releaseOrphanedPoolAssignmentsWhenSnapshotsComplete keeps
-	// the plain oneShotStore, matching the daemon's cityBeadStore() there (its lone
-	// liveOpenSessionAssignmentExists session read is a shared work-release-boundary
-	// follow-up).
+	// byte-identical today. releaseOrphanedPoolAssignmentsWhenSnapshotsComplete takes
+	// both: oneShotStore as the work-class owner fallback and sessStore for its lone
+	// liveOpenSessionAssignmentExists session read (ga-g3pf0).
 	sessStore := cliSessionStore(oneShotStore, cfg, cityPath)
 
 	// One-shot bead reconciliation: same code path as the daemon.
@@ -935,53 +1067,83 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		sessionBeads = nil
 		sessionQueryPartial = true
 	}
-	dsResult := buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, sessStore, rigStores, sessionBeads, nil, stderr)
+	dsResult := buildDesiredStateWithSessionBeadsAt(
+		cityName,
+		cityPath,
+		beaconTime,
+		time.Now(),
+		cfg,
+		sp,
+		sessStore,
+		rigStores,
+		sessionBeads,
+		nil,
+		stderr,
+	)
 	dsResult.SessionQueryPartial = dsResult.SessionQueryPartial || sessionQueryPartial
 	ds := dsResult.State
 	cfgNames := configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 	_, sessionBeads = syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads,
+		cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads, nil,
 	)
 
-	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores); len(released) > 0 {
+	// Same protection as the daemon tick: wake candidates computed before the
+	// release, so the one-shot path cannot reopen work this run is about to wake.
+	preWakeCandidates, preWakeCandidateRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, oneShotStore, sessionBeads.OpenInfos(), dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, beads.SessionStore{Store: sessStore}, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), nil); len(released) > 0 {
 		for _, r := range released {
 			fmt.Fprintf(stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
 		}
 		// Standalone start has no follow-up patrol tick, so after reopening
 		// orphaned pool work we must immediately rebuild demand and sync once
 		// more so replacement session beads can be materialized in this run.
-		dsResult = buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, sessStore, rigStores, sessionBeads, nil, stderr)
+		dsResult = buildDesiredStateWithSessionBeadsAt(
+			cityName,
+			cityPath,
+			beaconTime,
+			time.Now(),
+			cfg,
+			sp,
+			sessStore,
+			rigStores,
+			sessionBeads,
+			nil,
+			stderr,
+		)
 		ds = dsResult.State
 		cfgNames = configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 		_, sessionBeads = syncSessionBeadsWithSnapshotAndRigStores(
-			cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads,
+			cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads, nil,
 		)
 	}
 
 	dt := newDrainTracker()
 	openInfos := sessionBeads.OpenInfos()
-	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	poolDecisionTime := time.Now()
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		cfg,
-		PoolDesiredCounts(ComputePoolDesiredStates(
-			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts)),
+		PoolDesiredCounts(ComputePoolDesiredStatesAt(
+			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts, poolDecisionTime)),
 		sessionBeads,
-		dsResult.PoolScaleCheckPartialTemplates,
+		effectivePoolPartialRetentionTemplates(dsResult),
 	)
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
 	}
 	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
-	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	awakeAssignedWorkBeads, awakeAssignedStoreRefs, awakeAssignedStores := filterAssignedWorkBeadsForSessionWakeWithStores(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs, dsResult.AssignedWorkStores)
 	reconcileSessionBeadsAtPathWithNamedDemand(
 		sigCtx, cityPath, sessionBeads.OpenForReconcile(), sessionBeads, ds, cfgNames, cfg, sp, sessStore,
 		nil, awakeAssignedWorkBeads, rigStores, nil, dt, nil, poolDesired,
 		dsResult.NamedSessionDemand,
+		dsResult.NamedSessionRoutedDemand,
 		dsResult.snapshotQueryPartial(),
 		nil, cityName,
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,
 		stdout, stderr,
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(dsResult.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
+		withAssignedWorkStores(awakeAssignedStores),
 	)
 
 	// Post-reconcile sync: update bead state to reflect post-start reality.
@@ -990,11 +1152,23 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: loading session beads: %v\n", err) //nolint:errcheck
 		sessionBeads = nil
 	}
-	dsResult = buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, cfg, sp, sessStore, rigStores, sessionBeads, nil, stderr)
+	dsResult = buildDesiredStateWithSessionBeadsAt(
+		cityName,
+		cityPath,
+		beaconTime,
+		time.Now(),
+		cfg,
+		sp,
+		sessStore,
+		rigStores,
+		sessionBeads,
+		nil,
+		stderr,
+	)
 	ds = dsResult.State
 	cfgNames = configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 	syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, false, sessionBeads,
+		cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, false, sessionBeads, nil,
 	)
 
 	fmt.Fprintln(stdout, "City started.") //nolint:errcheck // best-effort stdout
@@ -1132,6 +1306,23 @@ func ensureClaudeSettingsArgs(fs fsys.FS, cityPath, providerName string, stderr 
 	return settingsArgs(cityPath, providerName), nil
 }
 
+// claudeSettingsArgsReadOnly is ensureClaudeSettingsArgs without the
+// projection, for a read-only resolution (AM-N3): it validates the settings
+// Install would project and returns the arg a successful projection yields,
+// which always points at <city>/.gc/settings.json.
+func claudeSettingsArgsReadOnly(fs fsys.FS, cityPath, providerName string) (string, error) {
+	if providerName != "claude" || cityPath == "" {
+		return "", nil
+	}
+	if fs == nil {
+		fs = fsys.OSFS{}
+	}
+	if err := hooks.ValidateClaudeSettings(fs, cityPath); err != nil {
+		return "", fmt.Errorf("validating Claude settings: %w", err)
+	}
+	return fmt.Sprintf("--settings %q", filepath.Join(cityPath, ".gc", "settings.json")), nil
+}
+
 func claudeSettingsSource(cityPath string) (src, rel string) {
 	candidates := []struct {
 		src string
@@ -1178,7 +1369,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hoo
 			if _, err := os.Stat(abs); err == nil {
 				copyFiles = append(copyFiles, runtime.CopyEntry{
 					Src: abs, RelDst: path.Join(relWorkDir, rel),
-					Probed: true, ContentHash: runtime.HashPathContent(abs),
+					Probed: true, ContentHash: runtime.HashHookSettingsContent(abs, rel),
 				})
 			}
 		}
@@ -1307,18 +1498,36 @@ func resolveAgentDir(cityPath, dir string) (string, error) {
 func sessionSetupContextForAgent(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) SessionSetupContext {
 	ctx := workdirutil.PathContextForQualifiedName(cityPath, cityName, qualifiedName, *a, rigs)
 	return SessionSetupContext{
-		Agent:     qualifiedName,
-		AgentBase: ctx.AgentBase,
-		Rig:       ctx.Rig,
-		RigRoot:   ctx.RigRoot,
-		CityRoot:  cityPath,
-		CityName:  cityName,
+		Agent:         qualifiedName,
+		AgentBase:     ctx.AgentBase,
+		Rig:           ctx.Rig,
+		RigRoot:       ctx.RigRoot,
+		CityRoot:      cityPath,
+		CityName:      cityName,
+		DefaultBranch: ctx.DefaultBranch,
 	}
 }
 
-func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
+// resolveConfiguredWorkDirPath resolves an agent's working directory without
+// creating it. Pure computations — metadata patch building, dry-run previews,
+// display — must use this variant so that resolving a path never mutates the
+// filesystem (gc-r9fx). Session-start paths that need the directory to exist
+// use resolveConfiguredWorkDir.
+func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
+	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, true)
+}
+
+// resolveConfiguredWorkDirPathUnvalidated is resolveConfiguredWorkDirPath
+// without the stale-ancestor worktree check, which reads the filesystem: a
+// pure path computation for a plan whose effect runs the check before it
+// writes the path.
+func resolveConfiguredWorkDirPathUnvalidated(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
+	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, false)
+}
+
+func configuredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, validate bool) (string, error) {
 	if a == nil {
-		return resolveAgentDir(cityPath, "")
+		return resolveAgentDirPath(cityPath, ""), nil
 	}
 	if strings.TrimSpace(qualifiedName) == "" {
 		qualifiedName = a.QualifiedName()
@@ -1332,10 +1541,26 @@ func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *confi
 	// so the operator sees the broken ancestor instead of a structurally
 	// orphaned spawn. workDir is already absolute (ResolveWorkDirPathStrict
 	// returns through ResolveDirPath), so no further resolution is needed.
-	if err := workdirutil.ValidateAncestorWorktreesNotStale(workDir); err != nil {
+	if validate {
+		if err := workdirutil.ValidateAncestorWorktreesNotStale(workDir); err != nil {
+			return "", err
+		}
+	}
+	return resolveAgentDirPath(cityPath, workDir), nil
+}
+
+// resolveConfiguredWorkDir resolves an agent's working directory and creates
+// it. Only session-start paths may call this; pure computations use
+// resolveConfiguredWorkDirPath.
+func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
+	dir, err := resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs)
+	if err != nil {
 		return "", err
 	}
-	return resolveAgentDir(cityPath, workDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("creating agent dir %q: %w", dir, err)
+	}
+	return dir, nil
 }
 
 // configuredRigName returns the rig associated with an agent, preferring the
@@ -1379,17 +1604,56 @@ func providerProcessPassthroughEnv() map[string]string {
 	return processenv.ProviderProcessPassthroughEnv()
 }
 
+// controllerOnlyEnvKeys is processenv.ControllerOnlyEnvKeys in set form, so the
+// GC_ sweep below can skip them by exact name. Derived rather than re-spelled:
+// two hand-written lists of the same secret names drift, and a drift here is
+// silent.
+//
+// The skip is what keeps the sweep from undoing the pin.
+// providerProcessPassthroughEnv already sets each of these to the empty string,
+// and the pin — not an omission — is what withholds them, because the map is an
+// overlay on an environment the session already inherits (see
+// processenv.ControllerOnlyEnvKeys). These keys are GC_-prefixed, so without the
+// skip the sweep would read the controller's real value out of os.Environ() and
+// write it straight back over that pin. Unlike GC_DOLT_*, which the comment
+// below names as deliberately forwarded so agents reach the same bead store as
+// the parent, nothing an agent runs may hold the controller token.
+var controllerOnlyEnvKeys = func() map[string]bool {
+	keys := make(map[string]bool, len(processenv.ControllerOnlyEnvKeys))
+	for _, key := range processenv.ControllerOnlyEnvKeys {
+		keys[key] = true
+	}
+	return keys
+}()
+
 // passthroughEnv returns environment variables from the parent process that
 // agent sessions should inherit. Agents need PATH to find tools (including gc),
 // GC_BEADS/GC_DOLT so they use the same bead store as the parent,
 // GC_DOLT_HOST/PORT/USER/PASSWORD so agents can connect to remote Dolt servers,
 // and Claude auth/home context so managed sessions can launch reliably under
-// shell and supervisor-driven flows.
+// shell and supervisor-driven flows. The GC_ sweep covers every gc-owned key
+// by name rather than an enumerated list; a non-GC_-prefixed key reaches a
+// session only via [workspace.env] (a per-city, always-on declaration) or by
+// being named in GC_SUPERVISOR_ENV — the same opt-in that
+// supervisorServiceExtraEnv uses to widen the persisted service-file env, so
+// one comma-separated list controls both "survives a supervisor restart" and
+// "reaches every agent session" instead of requiring two separate,
+// independently-maintained allowlists to agree. controllerOnlyEnvKeys is
+// checked before either path and cannot be bypassed by an opt-in; those keys
+// come back pinned to the empty string rather than absent.
 func passthroughEnv() map[string]string {
 	m := providerProcessPassthroughEnv()
+	explicitKeys := supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV"))
+	explicit := make(map[string]bool, len(explicitKeys))
+	for _, key := range explicitKeys {
+		explicit[key] = true
+	}
 	for _, entry := range os.Environ() {
 		key, val, ok := strings.Cut(entry, "=")
-		if !ok || val == "" || !strings.HasPrefix(key, "GC_") {
+		if !ok || val == "" || controllerOnlyEnvKeys[key] {
+			continue
+		}
+		if !strings.HasPrefix(key, "GC_") && !explicit[key] {
 			continue
 		}
 		m[key] = val
@@ -1397,16 +1661,18 @@ func passthroughEnv() map[string]string {
 	return m
 }
 
-// expandEnvMap returns a copy of m with os.ExpandEnv applied to each value.
-// This allows TOML-sourced env blocks to reference the controller's environment,
-// e.g. DOLTHUB_TOKEN = "$DOLTHUB_TOKEN".
+// expandEnvMap returns a copy of m with $VAR references expanded against the
+// controller's environment. This allows TOML-sourced env blocks to reference it,
+// e.g. DOLTHUB_TOKEN = "$DOLTHUB_TOKEN". The controller-only keys read as empty
+// here, so no config-authored value can copy one into a session under another
+// name.
 func expandEnvMap(m map[string]string) map[string]string {
 	if m == nil {
 		return nil
 	}
 	out := make(map[string]string, len(m))
 	for k, v := range m {
-		out[k] = os.ExpandEnv(v)
+		out[k] = processenv.ExpandSessionEnvValue(v)
 	}
 	return out
 }

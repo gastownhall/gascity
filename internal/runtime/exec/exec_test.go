@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -243,6 +244,175 @@ func TestStart(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
+	}
+}
+
+// startFailureScript fails the start op with the given stderr message after the
+// adapter has already created the box (recorded in createFile), and logs every
+// stop call to stopFile. This is the shape of the sandbox leak: the box exists
+// by the time start reports failure.
+func startFailureScript(createFile, stopFile, startStderr string) string {
+	return startExitScript(createFile, stopFile, startStderr, 1)
+}
+
+// startExitScript is startFailureScript with the start op's exit code chosen by
+// the caller.
+func startExitScript(createFile, stopFile, startStderr string, code int) string {
+	return `
+op="$1"
+name="$2"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    echo "$name" >> "` + createFile + `"
+    echo "` + startStderr + `" >&2
+    exit ` + strconv.Itoa(code) + `
+    ;;
+  stop) echo "stop $name" >> "` + stopFile + `" ;;
+  *) exit 2 ;;
+esac
+`
+}
+
+func TestStartTearsDownBoxWhenStartOpFails(t *testing.T) {
+	dir := t.TempDir()
+	createFile := filepath.Join(dir, "create.log")
+	stopFile := filepath.Join(dir, "stop.log")
+	script := writeScript(t, dir, startFailureScript(createFile, stopFile, "readiness timeout"))
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{})
+	if err == nil {
+		t.Fatal("Start succeeded, want start-op failure")
+	}
+	if !strings.Contains(err.Error(), "readiness timeout") {
+		t.Fatalf("Start error = %v, want the adapter's start failure", err)
+	}
+	if got := readLog(t, createFile); !strings.Contains(got, "test-sess") {
+		t.Fatalf("create log = %q, want the adapter to have created the box", got)
+	}
+	if got := readLog(t, stopFile); !strings.Contains(got, "stop test-sess") {
+		t.Fatalf("stop log = %q, want the box torn down after start failure", got)
+	}
+}
+
+// TestStartDoesNotTearDownWhenSessionAlreadyExists is the guard on the teardown
+// above: an "already exists" collision means a LIVE session owns that name, so
+// tearing down would destroy a healthy session's box. mockProviderScript makes
+// that observable — its stop op removes the running marker, so a teardown here
+// would leave the first session dead.
+func TestStartDoesNotTearDownWhenSessionAlreadyExists(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	script := writeScript(t, dir, mockProviderScript(stateDir))
+	p := NewProvider(script)
+
+	if err := p.Start(context.Background(), "test-sess", runtime.Config{}); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{})
+	if !errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("second Start error = %v, want ErrSessionExists", err)
+	}
+	if !p.IsRunning("test-sess") {
+		t.Fatal("colliding Start tore down the live session's box; ErrSessionExists must skip cleanup")
+	}
+}
+
+// TestStartCollisionPhrasingsSkipTeardown pins the collision vocabulary the
+// teardown guard depends on. exec is the only provider that INFERS
+// ErrSessionExists from the adapter's stderr rather than returning it
+// structurally, and real packs phrase the collision differently ("already
+// running" is the wording of a live pack whose start op refuses to double-start
+// a session). Any phrasing that is not recognized gets the live session's box
+// torn down, so under-matching here is a session-killing bug, not cosmetics.
+func TestStartCollisionPhrasingsSkipTeardown(t *testing.T) {
+	phrasings := map[string]string{
+		"exists":  `session "test-sess" already exists`,
+		"running": `session "test-sess" already running`,
+	}
+	for name, stderr := range phrasings {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			createFile := filepath.Join(dir, "create.log")
+			stopFile := filepath.Join(dir, "stop.log")
+			script := writeScript(t, dir, startFailureScript(createFile, stopFile, stderr))
+			p := NewProvider(script)
+
+			err := p.Start(context.Background(), "test-sess", runtime.Config{})
+			if !errors.Is(err, runtime.ErrSessionExists) {
+				t.Errorf("Start error = %v, want ErrSessionExists for %q", err, stderr)
+			}
+			if got := readLog(t, stopFile); got != "" {
+				t.Errorf("stop log = %q, want no teardown of a live session's box", got)
+			}
+		})
+	}
+}
+
+// TestStartTearsDownBoxWhenStartOpIsCanceled covers the production failure path:
+// the adapter creates the box and then blocks past gc's own start deadline. The
+// teardown must still run even though the caller's context is already dead.
+func TestStartTearsDownBoxWhenStartOpIsCanceled(t *testing.T) {
+	dir := t.TempDir()
+	createFile := filepath.Join(dir, "create.log")
+	stopFile := filepath.Join(dir, "stop.log")
+	script := writeScript(t, dir, `
+op="$1"
+name="$2"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    echo "$name" >> "`+createFile+`"
+    sleep `+startupWatchBlockingSleep+`
+    ;;
+  stop) echo "stop $name" >> "`+stopFile+`" ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+	p.startTimeout = 200 * time.Millisecond
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{})
+	if err == nil {
+		t.Fatal("Start succeeded, want deadline failure")
+	}
+	if got := readLog(t, createFile); !strings.Contains(got, "test-sess") {
+		t.Fatalf("create log = %q, want the adapter to have created the box", got)
+	}
+	if got := readLog(t, stopFile); !strings.Contains(got, "stop test-sess") {
+		t.Fatalf("stop log = %q, want the box torn down after a canceled start", got)
+	}
+}
+
+func TestStartReportsCleanupFailureAlongsideStartFailure(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start) cat > /dev/null; echo "readiness timeout" >&2; exit 1 ;;
+  stop)  echo "sandbox delete refused" >&2; exit 1 ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{})
+	if err == nil {
+		t.Fatal("Start succeeded, want start-op failure")
+	}
+	if !strings.Contains(err.Error(), "readiness timeout") {
+		t.Errorf("Start error = %v, want the original start failure preserved", err)
+	}
+	if !strings.Contains(err.Error(), "sandbox delete refused") {
+		t.Errorf("Start error = %v, want the cleanup failure reported too", err)
 	}
 }
 
@@ -1298,22 +1468,22 @@ func TestUnknownOperation_exit2(t *testing.T) {
 	}
 }
 
-func TestProvider_StartCancellationInterruptsCooperativeScript(t *testing.T) {
-	for _, interruptExitCode := range []int{0, 2} {
-		t.Run(fmt.Sprintf("interrupt_exit_%d", interruptExitCode), func(t *testing.T) {
+func TestProvider_StartCancellationTerminatesCooperativeScript(t *testing.T) {
+	for _, termExitCode := range []int{0, 2} {
+		t.Run(fmt.Sprintf("term_exit_%d", termExitCode), func(t *testing.T) {
 			dir := t.TempDir()
 			readyFile := filepath.Join(dir, "ready")
-			interruptFile := filepath.Join(dir, "interrupted")
+			terminateFile := filepath.Join(dir, "terminated")
 			script := writeScript(t, dir, fmt.Sprintf(`
 case "$1" in
   start)
-    trap 'printf "%%s\n" interrupted > "%s"; exit %d' INT
+    trap 'printf "%%s\n" terminated > "%s"; exit %d' TERM
     : > "%s"
     while :; do :; done
     ;;
   *) exit 2 ;;
 esac
-	`, interruptFile, interruptExitCode, readyFile))
+	`, terminateFile, termExitCode, readyFile))
 			p := NewProvider(script)
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -1352,39 +1522,46 @@ esac
 				t.Fatal("Start did not return after cancellation")
 			}
 
-			data, err := os.ReadFile(interruptFile)
+			data, err := os.ReadFile(terminateFile)
 			if err != nil {
-				t.Fatalf("read interrupt marker: %v", err)
+				t.Fatalf("read termination marker: %v", err)
 			}
-			if got := strings.TrimSpace(string(data)); got != "interrupted" {
-				t.Fatalf("interrupt marker = %q, want %q", got, "interrupted")
+			if got := strings.TrimSpace(string(data)); got != "terminated" {
+				t.Fatalf("termination marker = %q, want %q", got, "terminated")
 			}
 		})
 	}
 }
 
-// TestProvider_StartCancellationInterruptsForegroundChild proves cooperative
+// TestProvider_StartCancellationTerminatesForegroundChild proves cooperative
 // cancellation reaches a foreground child of the adapter, not just the shell
 // leader. The adapter shell blocks in a foreground `sleep` far longer than the
 // provider's WaitDelay (mimicking a `ready_delay_ms` readiness delay). A
-// process-only interrupt would be deferred by the shell until the child
+// process-only SIGTERM would be deferred by the shell until the child
 // returned, so WaitDelay would force-kill the shell before its rollback trap
 // ran and the resource the adapter created would leak. Signaling the process
 // group unblocks the child so the trap runs inside the grace window.
-func TestProvider_StartCancellationInterruptsForegroundChild(t *testing.T) {
+func TestProvider_StartCancellationTerminatesForegroundChild(t *testing.T) {
 	dir := t.TempDir()
 	readyFile := filepath.Join(dir, "ready")
-	interruptFile := filepath.Join(dir, "interrupted")
+	terminateFile := filepath.Join(dir, "terminated")
+	// The foreground child writes the readiness marker itself, then execs
+	// sleep. A marker written by the adapter shell before forking sleep
+	// leaves a window where the forked child still runs the shell's TERM
+	// handler: a SIGTERM landing there is swallowed by the child, which then
+	// execs a 30s sleep, and the shell defers its trap until that foreground
+	// command completes, so WaitDelay kills it first. The exec'd child starts
+	// with default TERM disposition, so once the marker exists the SIGTERM
+	// always ends the child and runs the trap.
 	script := writeScript(t, dir, fmt.Sprintf(`
 case "$1" in
   start)
-    trap 'printf "%%s\n" interrupted > "%s"; exit 0' INT
-    : > "%s"
-    sleep 30
+    trap 'printf "%%s\n" terminated > "%s"; exit 0' TERM
+    sh -c ': > "$1"; exec sleep 30' sh "%s"
     ;;
   *) exit 2 ;;
 esac
-	`, interruptFile, readyFile))
+	`, terminateFile, readyFile))
 	p := NewProvider(script)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1424,12 +1601,12 @@ esac
 		t.Fatal("Start did not return after cancellation; foreground child blocked the rollback trap")
 	}
 
-	data, err := os.ReadFile(interruptFile)
+	data, err := os.ReadFile(terminateFile)
 	if err != nil {
-		t.Fatalf("read interrupt marker (rollback trap never ran): %v", err)
+		t.Fatalf("read termination marker (rollback trap never ran): %v", err)
 	}
-	if got := strings.TrimSpace(string(data)); got != "interrupted" {
-		t.Fatalf("interrupt marker = %q, want %q", got, "interrupted")
+	if got := strings.TrimSpace(string(data)); got != "terminated" {
+		t.Fatalf("termination marker = %q, want %q", got, "terminated")
 	}
 }
 

@@ -61,16 +61,10 @@ type CheckContext struct {
 	// Checks that need to surface fix-time diagnostics should use this
 	// writer so captured doctor output includes the diagnostics.
 	Output io.Writer
-	// ExplainPostgresAuth, when true, opts checks that implement
-	// Renderer into emitting their per-scope resolution table after
-	// the standard summary line. Today only PostgresAuthCheck honors
-	// this flag.
-	ExplainPostgresAuth bool
 }
 
 // Renderer is implemented by checks that produce additional, optional
-// output controlled by a flag in CheckContext (e.g., the
-// --explain-postgres-auth resolution table). Renderer is opt-in: the
+// output after their standard summary line. Renderer is opt-in: the
 // doctor runner type-asserts each check and skips the call when the
 // check does not implement it.
 type Renderer interface {
@@ -94,6 +88,20 @@ type CheckResult struct {
 	Details []string
 	// FixHint is a suggestion shown when the check fails and cannot auto-fix.
 	FixHint string
+	// Payload is optional structured evidence, projected into `gc doctor
+	// --json` as the result's `payload` object and never rendered to a
+	// terminal.
+	//
+	// It exists for the consumers that have to branch on a check's findings —
+	// the acceptance matrix, a perf gate, an operator's jq — and that would
+	// otherwise be matching substrings of Message. Those two must never become
+	// separate accounts of one run: a check that sets this projects it from the
+	// same values its Message is built from.
+	//
+	// Nil for every check with nothing structured to say, which is nearly all
+	// of them. Whatever is set here is marshaled as-is, so it has to be a type
+	// whose JSON shape the check owns deliberately.
+	Payload any
 	// FixError describes why an attempted automatic remediation failed.
 	FixError string
 	// FixAttempted is true when automatic remediation ran but did not

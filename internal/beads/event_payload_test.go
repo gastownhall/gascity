@@ -2,13 +2,14 @@ package beads
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 )
 
-// TestDecodeBeadEventPayloadRawCanonical proves the canonical raw-bead shape —
-// what CachingStore.notifyChange actually marshals (json.Marshal(b)) and what
-// every .gc/events.jsonl row holds — decodes with full field fidelity.
+// TestDecodeBeadEventPayloadRawCanonical proves the canonical raw-bead shape
+// emitted by EncodeBeadEventPayload and stored in .gc/events.jsonl decodes with
+// full field fidelity.
 func TestDecodeBeadEventPayloadRawCanonical(t *testing.T) {
 	prio := 3
 	created := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
@@ -62,6 +63,130 @@ func TestDecodeBeadEventPayloadRawCanonical(t *testing.T) {
 	}
 	if len(got.Dependencies) != 1 || got.Dependencies[0].DependsOnID != "gcg-dep" {
 		t.Errorf("dependencies = %v, want one dep on gcg-dep", got.Dependencies)
+	}
+}
+
+func TestEncodeBeadEventPayloadPreservesOnlyActiveStatusBasedDeferral(t *testing.T) {
+	tests := []struct {
+		name string
+		bead Bead
+		want string
+	}{
+		{
+			name: "active status-based deferral",
+			bead: Bead{ID: "gcg-deferred", Status: "open", Type: "task", IndefinitelyDeferred: true},
+			want: "deferred",
+		},
+		{
+			name: "ordinary open bead",
+			bead: Bead{ID: "gcg-open", Status: "open", Type: "task"},
+			want: "open",
+		},
+		{
+			name: "explicit close wins over stale marker",
+			bead: Bead{ID: "gcg-closed", Status: "closed", Type: "task", IndefinitelyDeferred: true},
+			want: "closed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := EncodeBeadEventPayload(tt.bead)
+			if err != nil {
+				t.Fatalf("EncodeBeadEventPayload: %v", err)
+			}
+			var wire struct {
+				Status string `json:"status"`
+			}
+			if err := json.Unmarshal(payload, &wire); err != nil {
+				t.Fatalf("decode encoded payload: %v", err)
+			}
+			if wire.Status != tt.want {
+				t.Fatalf("wire status = %q, want %q; payload=%s", wire.Status, tt.want, payload)
+			}
+		})
+	}
+}
+
+func TestMemStoreReopenClearsStatusBasedDeferral(t *testing.T) {
+	store := NewMemStore()
+	created, err := store.Create(Bead{
+		Title:                "deferred",
+		Status:               "open",
+		IndefinitelyDeferred: true,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Reopen(created.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	reopened, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if IsDeferred(reopened, time.Now()) {
+		t.Fatalf("Reopen left bead deferred: %+v", reopened)
+	}
+}
+
+func TestDecodeBeadEventPayloadPreservesStatusBasedDeferral(t *testing.T) {
+	got, ok := DecodeBeadEventPayload([]byte(`{"id":"gcg-deferred","status":"deferred","issue_type":"task"}`))
+	if !ok {
+		t.Fatal("deferred decode returned ok=false")
+	}
+	if got.Status != "open" {
+		t.Fatalf("Status = %q, want normalized open", got.Status)
+	}
+	if !IsDeferred(got, time.Now()) {
+		t.Fatal("status-based indefinite deferral was not preserved")
+	}
+
+	past := time.Now().Add(-time.Minute).Format(time.RFC3339Nano)
+	expired, ok := DecodeBeadEventPayload([]byte(`{"id":"gcg-expired","status":"deferred","issue_type":"task","defer_until":"` + past + `"}`))
+	if !ok {
+		t.Fatal("expired deferred decode returned ok=false")
+	}
+	if expired.Status != "open" {
+		t.Fatalf("expired Status = %q, want normalized open", expired.Status)
+	}
+	if IsDeferred(expired, time.Now()) {
+		t.Fatal("expired time-bound deferral remained deferred")
+	}
+}
+
+// TestDecodeBeadEventPayloadLeavesNonDeferredStatusVerbatim pins the decoder's
+// narrow scope: only bd's "deferred" status is re-derived here. Every other raw
+// status decodes verbatim, exactly as it did before the status-based deferral
+// marker existed. Re-widening this to normalize unconditionally would put the
+// ga-3mv5d3 status-erasure collapse (blocked/hooked/pinned → open) on the event
+// path, where no read edge's compensating controls apply.
+func TestDecodeBeadEventPayloadLeavesNonDeferredStatusVerbatim(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{name: "blocked", payload: `{"id":"gcg-blocked","status":"blocked","issue_type":"task"}`, want: "blocked"},
+		{name: "hooked", payload: `{"id":"gcg-hooked","status":"hooked","issue_type":"task"}`, want: "hooked"},
+		{name: "pinned", payload: `{"id":"gcg-pinned","status":"pinned","issue_type":"task"}`, want: "pinned"},
+		{name: "absent status", payload: `{"id":"gcg-absent","issue_type":"task"}`, want: ""},
+		{name: "ordinary open", payload: `{"id":"gcg-open","status":"open","issue_type":"task"}`, want: "open"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := DecodeBeadEventPayload([]byte(tt.payload))
+			if !ok {
+				t.Fatal("decode returned ok=false")
+			}
+			if got.Status != tt.want {
+				t.Fatalf("Status = %q, want %q verbatim", got.Status, tt.want)
+			}
+			if got.IndefinitelyDeferred {
+				t.Fatalf("status %q gained the indefinite-deferral marker", tt.want)
+			}
+		})
 	}
 }
 
@@ -133,5 +258,51 @@ func TestDecodeBeadEventPayloadMisses(t *testing.T) {
 		if b, ok := DecodeBeadEventPayload(payload); ok {
 			t.Errorf("%s: ok=true bead=%+v, want (Bead{}, false)", name, b)
 		}
+	}
+}
+
+// TestBeadEventIDCanonicalizesSubjectAgainstPayload pins the identity rule for
+// bead.* events: the payload snapshot names the bead, the envelope subject is
+// only a fallback, and a subject that names a different bead is rejected so no
+// consumer applies one bead's snapshot under another bead's key.
+func TestBeadEventIDCanonicalizesSubjectAgainstPayload(t *testing.T) {
+	payload := json.RawMessage(`{"id":"ga-1","title":"work","status":"closed"}`)
+	wrapped := json.RawMessage(`{"bead":{"id":"ga-1","status":"closed"}}`)
+	for _, tc := range []struct {
+		name     string
+		subject  string
+		payload  json.RawMessage
+		wantID   string
+		mismatch bool
+	}{
+		{name: "matching subject", subject: "ga-1", payload: payload, wantID: "ga-1"},
+		{name: "subject whitespace is ignored", subject: "  ga-1\n", payload: payload, wantID: "ga-1"},
+		{name: "missing subject recovered from payload", payload: payload, wantID: "ga-1"},
+		{name: "wrapped payload shape", subject: "ga-1", payload: wrapped, wantID: "ga-1"},
+		{name: "mismatched subject rejected", subject: "ga-2", payload: payload, mismatch: true},
+		{name: "mismatched subject rejected for wrapped payload", subject: "ga-2", payload: wrapped, mismatch: true},
+		{name: "undecodable payload keeps subject", subject: "ga-1", payload: json.RawMessage(`{`), wantID: "ga-1"},
+		{name: "payload without id keeps subject", subject: "ga-1", payload: json.RawMessage(`{"status":"closed"}`), wantID: "ga-1"},
+		{name: "no payload keeps subject", subject: " ga-1 ", wantID: "ga-1"},
+		{name: "nothing names a bead", payload: json.RawMessage(`{`), wantID: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := BeadEventID(tc.subject, tc.payload)
+			if tc.mismatch {
+				if !errors.Is(err, ErrBeadEventIdentityMismatch) {
+					t.Fatalf("BeadEventID(%q) = (%q, %v), want ErrBeadEventIdentityMismatch", tc.subject, got, err)
+				}
+				if got != "" {
+					t.Fatalf("BeadEventID(%q) id = %q on mismatch, want empty", tc.subject, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("BeadEventID(%q): %v", tc.subject, err)
+			}
+			if got != tc.wantID {
+				t.Fatalf("BeadEventID(%q) = %q, want %q", tc.subject, got, tc.wantID)
+			}
+		})
 	}
 }

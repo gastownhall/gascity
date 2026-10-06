@@ -60,17 +60,17 @@ func TestReadyDemandCacheCollapsesReadyFanout(t *testing.T) {
 
 	// Assigned-work probe: one live read per assignee in the legacy path.
 	for _, assignee := range []string{"worker-a", "worker-b", "worker-c", "worker-d"} {
-		if _, err := cache.liveReady(store, beads.ReadyQuery{Assignee: assignee, Limit: 5}); err != nil {
+		if _, err := cache.liveReady(store, "", beads.ReadyQuery{Assignee: assignee, Limit: 5}); err != nil {
 			t.Fatalf("liveReady(%q): %v", assignee, err)
 		}
 	}
 	// Assigned-work no-assignee probe.
-	if _, err := cache.liveReady(store, beads.ReadyQuery{Limit: 5}); err != nil {
+	if _, err := cache.liveReady(store, "", beads.ReadyQuery{Limit: 5}); err != nil {
 		t.Fatalf("liveReady(no assignee): %v", err)
 	}
 	// Scale-check + named-session probes: full ready set, repeated per group.
 	for i := 0; i < 3; i++ {
-		if _, err := cache.controllerDemandReady(store); err != nil {
+		if _, err := cache.controllerDemandReady(store, ""); err != nil {
 			t.Fatalf("controllerDemandReady #%d: %v", i, err)
 		}
 	}
@@ -87,7 +87,7 @@ func TestReadyDemandCacheCollapsesReadyFanout(t *testing.T) {
 // MemStore and CachingStore-over-MemStore, which filter the assignee entirely
 // client-side. The wisp-bearing production stores (NativeDoltStore, BdStore)
 // apply the assignee predicate server-side on BOTH the issue and wisp legs — the
-// pinned beads@v1.1.0 readyWorkWispIssueFilter carries filter.Assignee into the
+// pinned beads@v1.3.0-rc.2 readyWorkWispIssueFilter carries filter.Assignee into the
 // wisp filter, emitting `assignee = ?` for the wisp table — so filtering an
 // unfiltered snapshot by assignee is exact for them too (see the readyDemandCache
 // doc in build_desired_state.go). That server-side path is not exercised here
@@ -124,7 +124,7 @@ func TestReadyDemandCacheLiveReadyEquivalentToDirect(t *testing.T) {
 		if err != nil {
 			t.Fatalf("oracle liveReady %+v: %v", q, err)
 		}
-		got, err := cache.liveReady(cached, q)
+		got, err := cache.liveReady(cached, "", q)
 		if err != nil {
 			t.Fatalf("cache liveReady %+v: %v", q, err)
 		}
@@ -156,7 +156,7 @@ func TestReadyDemandCacheControllerDemandEquivalentToDirect(t *testing.T) {
 		if err != nil {
 			t.Fatalf("oracle readyForControllerDemand: %v", err)
 		}
-		got, err := newReadyDemandCache().controllerDemandReady(cached)
+		got, err := newReadyDemandCache().controllerDemandReady(cached, "")
 		if err != nil {
 			t.Fatalf("cache controllerDemandReady: %v", err)
 		}
@@ -183,7 +183,7 @@ func TestReadyDemandCacheControllerDemandEquivalentToDirect(t *testing.T) {
 		if err != nil {
 			t.Fatalf("oracle readyForControllerDemand: %v", err)
 		}
-		got, err := newReadyDemandCache().controllerDemandReady(cached)
+		got, err := newReadyDemandCache().controllerDemandReady(cached, "")
 		if err != nil {
 			t.Fatalf("cache controllerDemandReady: %v", err)
 		}
@@ -205,7 +205,7 @@ func TestReadyDemandCacheControllerDemandEquivalentToDirect(t *testing.T) {
 			}
 		}
 		want, wantErr := readyForControllerDemandQuery(build(), beads.ReadyQuery{})
-		got, gotErr := newReadyDemandCache().controllerDemandReady(build())
+		got, gotErr := newReadyDemandCache().controllerDemandReady(build(), "")
 		if (wantErr == nil) != (gotErr == nil) || beads.IsPartialResult(wantErr) != beads.IsPartialResult(gotErr) {
 			t.Fatalf("controllerDemandReady err = %v, want %v", gotErr, wantErr)
 		}
@@ -250,12 +250,12 @@ func TestCollectAssignedWorkBeadsCachedMatchesUncached(t *testing.T) {
 
 	uncachedStore := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
 	uncachedSnap := seed(uncachedStore)
-	wantBeads, _, _, wantReady, wantPartial := collectAssignedWorkBeadsWithStores(&config.City{}, uncachedStore, nil, nil, uncachedSnap)
+	wantBeads, _, _, wantReady, wantPartial := collectAssignedWorkBeadsWithStores("", &config.City{}, uncachedStore, nil, nil, uncachedSnap)
 
 	cachedStore := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
 	cachedSnap := seed(cachedStore)
 	cache := newReadyDemandCache()
-	gotBeads, _, _, gotReady, gotPartial := collectAssignedWorkBeadsWithStores(&config.City{}, cachedStore, nil, nil, cachedSnap, cache)
+	gotBeads, _, _, gotReady, gotPartial := collectAssignedWorkBeadsWithStores("", &config.City{}, cachedStore, nil, nil, cachedSnap, cache)
 
 	if wantPartial != gotPartial {
 		t.Fatalf("partial mismatch: uncached=%v cached=%v", wantPartial, gotPartial)
