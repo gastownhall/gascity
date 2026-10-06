@@ -541,6 +541,36 @@ func TestRunPreparedStartCandidateLeavesOneAbandonedObservationPerSession(t *tes
 	})
 }
 
+// Two cities run sessions of the same name. One city's wedged runtime must not
+// make the other city's start defer, so the limit of one observation in flight
+// is per session per city.
+func TestObserveSessionBoundedLimitsOutstandingObservationsPerCity(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const cityA, cityB = "/cities/a", "/cities/b"
+		wedged := make(chan struct{})
+		defer close(wedged)
+		observeIn := func(city string, observe func() (int, error)) (int, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), postStartBound)
+			defer cancel()
+			return observeSessionBounded(ctx, city, "worker", observe)
+		}
+		if _, err := observeIn(cityA, func() (int, error) { <-wedged; return 1, nil }); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("wedged observation: err = %v, want it to wrap runtime.ErrRuntimeUnavailable", err)
+		}
+
+		var ranInA atomic.Int64
+		_, errA := observeIn(cityA, func() (int, error) { ranInA.Add(1); return 2, nil })
+		gotB, errB := observeIn(cityB, func() (int, error) { return 3, nil })
+
+		if got := ranInA.Load(); got != 0 || !errors.Is(errA, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("second observation of the wedged session: ran %d times, err = %v, want it declined as unavailable without running", got, errA)
+		}
+		if errB != nil || gotB != 3 {
+			t.Fatalf("same session name in another city = (%d, %v), want (3, nil): one city's wedged runtime must not defer another's", gotB, errB)
+		}
+	})
+}
+
 // The async start goroutine holds its asyncStartLimiter slot until the commit
 // finishes, so a start that waits forever on a provider call holds it forever.
 func TestEnqueuePreparedStartWaveReleasesItsSlotWhenAPostStartObservationHangs(t *testing.T) {

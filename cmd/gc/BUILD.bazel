@@ -420,6 +420,7 @@ go_library(
         "session_keys.go",
         "session_level_converge.go",
         "session_lifecycle_parallel.go",
+        "session_lifecycle_post_start_bound.go",
         "session_logs_resolve.go",
         "session_name_lookup.go",
         "session_origin.go",

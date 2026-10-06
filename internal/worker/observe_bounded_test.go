@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
+	goruntime "runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -142,6 +144,62 @@ func TestObserveBoundedAnswerJustBeforeTheBoundIsUsed(t *testing.T) {
 	})
 }
 
+// endingContext ends the instant ObserveBounded first looks at its Done
+// channel, after letting the observation finish. The answer and the end of the
+// wait are then both ready when ObserveBounded chooses between them, which a
+// real deadline can only arrange by luck.
+type endingContext struct {
+	context.Context
+	finish func()
+	ended  chan struct{}
+	once   sync.Once
+}
+
+func (c *endingContext) Done() <-chan struct{} {
+	c.once.Do(func() {
+		c.finish()
+		close(c.ended)
+	})
+	return c.ended
+}
+
+func (c *endingContext) Err() error {
+	select {
+	case <-c.ended:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+// An answer that is already in hand when the wait ends must be used. Go picks
+// at random between two ready select cases, so one call could pass by luck:
+// many calls make a dropped answer all but certain to show.
+func TestObserveBoundedAnswerReadyWhenTheContextEndsIsUsed(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		for i := 0; i < 64; i++ {
+			release := make(chan struct{})
+			ctx := &endingContext{
+				Context: context.Background(),
+				ended:   make(chan struct{}),
+				finish: func() {
+					close(release)
+					synctest.Wait() // the observation has answered and exited
+				},
+			}
+
+			got, err := ObserveBounded(ctx, fmt.Sprintf("%s/%d", t.Name(), i), func(context.Context) (int, error) {
+				<-release
+				return i, nil
+			})
+
+			if err != nil || got != i {
+				t.Fatalf("attempt %d: ObserveBounded = (%d, %v), want the answer (%d, nil) that was ready as the context ended", i, got, err, i)
+			}
+		}
+	})
+}
+
 func TestObserveBoundedAlreadyExpiredContextStartsNothing(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -152,6 +210,9 @@ func TestObserveBoundedAlreadyExpiredContextStartsNothing(t *testing.T) {
 			calls.Add(1)
 			return 1, nil
 		})
+		// An observation that was started anyway runs on its own goroutine, so
+		// let every goroutine run before counting.
+		synctest.Wait()
 
 		if got := calls.Load(); got != 0 {
 			t.Fatalf("observe ran %d times under an already-canceled context, want 0", got)
@@ -273,8 +334,9 @@ func TestObserveBoundedSequentialAnswersNeverReportOutstanding(t *testing.T) {
 	})
 }
 
-// runPreparedStartCandidate turns a panic into TraceOutcomePanicRecovered with
-// its own recover, which only sees a panic raised on its own goroutine.
+// A panic in an observation must reach the caller: runPreparedStartCandidate
+// turns a panic into TraceOutcomePanicRecovered with its own recover, which only
+// sees a panic raised on its own goroutine.
 func TestObserveBoundedForwardsObservationPanicToCaller(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		key := t.Name()
@@ -294,6 +356,29 @@ func TestObserveBoundedForwardsObservationPanicToCaller(t *testing.T) {
 		got, err := observeWithinBound(t, key, func(context.Context) (int, error) { return 3, nil })
 		if err != nil || got != 3 {
 			t.Fatalf("after the panic, ObserveBounded = (%d, %v), want the key released and a fresh observation (3, nil)", got, err)
+		}
+	})
+}
+
+// An observation that ends without returning (runtime.Goexit, which t.FailNow
+// uses) has no answer to hand back. Reading that as a zero value and no error
+// would invent an answer, so it must read as unavailable, and it must release
+// its key like any other observation that ends.
+func TestObserveBoundedObservationThatEndsWithoutReturningIsUnavailable(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		key := t.Name()
+
+		got, err := observeWithinBound(t, key, func(context.Context) (int, error) {
+			goruntime.Goexit()
+			return wedgedAnswer, nil
+		})
+
+		if got != 0 || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("ObserveBounded = (%d, %v), want (0, an error wrapping runtime.ErrRuntimeUnavailable)", got, err)
+		}
+		again, err := observeWithinBound(t, key, func(context.Context) (int, error) { return 4, nil })
+		if err != nil || again != 4 {
+			t.Fatalf("after the observation ended, ObserveBounded = (%d, %v), want the key released and a fresh observation (4, nil)", again, err)
 		}
 	})
 }
