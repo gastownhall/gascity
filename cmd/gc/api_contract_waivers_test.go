@@ -13,7 +13,4 @@ var contractWaivers = map[string]string{
 // known not to match the OpenAPI document, with the bug they track. A
 // violation on any other operation fails the suite. Delete an entry when the
 // handler (or the spec) is fixed.
-var contractKnownSpecViolations = map[string]string{
-	"post-v0-city-by-city-name-extmsg-inbound":  "extmsg inbound result serializes absent GroupRoute as null; the spec declares a non-nullable object",
-	"post-v0-city-by-city-name-extmsg-outbound": "extmsg outbound result serializes absent DeliveryContext/TranscriptEntry/Receipt.Metadata as null; the spec declares non-nullable objects",
-}
+var contractKnownSpecViolations = map[string]string{}
