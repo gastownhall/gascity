@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // Provenance identifies the branch that selected a Gas City home. It is
@@ -85,6 +86,10 @@ func resolveHome(deps homeResolverDeps, createTemporaryFallback bool) ResolvedHo
 	if userHome, err := deps.userHomeDir(); err == nil && userHome != "" {
 		return ResolvedHome{path: filepath.Join(userHome, ".gc"), provenance: ProvenanceUserHome}
 	}
+	return resolveFallback(deps, createTemporaryFallback)
+}
+
+func resolveFallback(deps homeResolverDeps, createTemporaryFallback bool) ResolvedHome {
 	if createTemporaryFallback {
 		if temporaryHome, err := deps.mkdirTemp("", "gc-home-*"); err == nil {
 			return ResolvedHome{path: temporaryHome, provenance: ProvenanceMkdirTemp}
@@ -96,10 +101,37 @@ func resolveHome(deps homeResolverDeps, createTemporaryFallback bool) ResolvedHo
 	}
 }
 
+// homeResolver owns fallback allocation for one process. Stable sources are
+// still read on every lookup so explicit configuration keeps precedence.
+type homeResolver struct {
+	deps     homeResolverDeps
+	fallback func() ResolvedHome
+}
+
+func newHomeResolver(deps homeResolverDeps) homeResolver {
+	return homeResolver{deps: deps, fallback: sync.OnceValue(func() ResolvedHome {
+		return resolveFallback(deps, true)
+	})}
+}
+
+func (resolver homeResolver) resolve(includeOverride bool) ResolvedHome {
+	deps := resolver.deps
+	if !includeOverride {
+		deps.getenv = func(string) string { return "" }
+	}
+	home := resolveHome(deps, false)
+	if home.Provenance().Stable() {
+		return home
+	}
+	return resolver.fallback()
+}
+
+var processHomeResolver = newHomeResolver(systemHomeResolverDeps())
+
 // ResolveDefault resolves the legacy default and reports which branch won.
-// Like Default, it may create a process-unique temporary fallback.
+// Like Default, it creates at most one temporary fallback per process.
 func ResolveDefault() ResolvedHome {
-	return resolveHome(systemHomeResolverDeps(), true)
+	return processHomeResolver.resolve(true)
 }
 
 // ResolveReadOnly resolves explicit and user-home paths without creating a
@@ -115,6 +147,11 @@ func ResolveReadOnly() ResolvedHome {
 func Default() string {
 	return ResolveDefault().Path()
 }
+
+// DefaultUserHome returns the user-home default without applying GC_HOME.
+// It shares Default's process-local fallback if the user home is unavailable.
+// This lets callers compare an explicit override with the built-in default.
+func DefaultUserHome() string { return processHomeResolver.resolve(false).Path() }
 
 // ProductUsageHome is a read-only trust snapshot for the product-usage root.
 // It is not an authorization capability: mutating storage must repeat the

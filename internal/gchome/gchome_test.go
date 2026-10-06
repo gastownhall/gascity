@@ -2,10 +2,13 @@ package gchome
 
 import (
 	"errors"
+	"fmt"
 	"go/build"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -296,5 +299,64 @@ func TestRegistryPathsUseHome(t *testing.T) {
 	}
 	if got, want := RegistryCacheRoot(home), filepath.Join(home, "registry-cache"); got != want {
 		t.Fatalf("RegistryCacheRoot() = %q, want %q", got, want)
+	}
+}
+
+// Repeated concurrent unresolved-home lookups must share one allocation;
+// an explicit override still wins and does not relabel the fallback as stable.
+func TestProcessFallbackIsAllocatedOnce(t *testing.T) {
+	var allocations atomic.Int32
+	override := ""
+	deps := homeResolverDeps{
+		getenv:      func(string) string { return override },
+		userHomeDir: func() (string, error) { return "", errors.New("home unavailable") },
+		mkdirTemp: func(string, string) (string, error) {
+			return fmt.Sprintf("/private/fallback-%d", allocations.Add(1)), nil
+		},
+		tempDir: func() string { return "/private" }, pid: func() int { return 42 },
+	}
+	resolver := newHomeResolver(deps)
+	var group sync.WaitGroup
+	results := make([]ResolvedHome, 64)
+	for i := range results {
+		group.Go(func() { results[i] = resolver.resolve(true) })
+	}
+	group.Wait()
+	if got := allocations.Load(); got != 1 {
+		t.Fatalf("fallback allocations = %d, want 1", got)
+	}
+	for _, result := range results {
+		if result != results[0] || result.Provenance().Stable() {
+			t.Fatalf("inconsistent or stable fallback: %+v", result)
+		}
+	}
+	override = "/operator/home"
+	if got := resolver.resolve(true); got.Path() != override || got.Provenance() != ProvenanceExplicit {
+		t.Fatalf("override lost: %+v", got)
+	}
+	if got := resolver.resolve(false); got != results[0] {
+		t.Fatalf("builtin lookup used override: %+v", got)
+	}
+	if got := allocations.Load(); got != 1 {
+		t.Fatalf("override caused %d allocations", got)
+	}
+}
+
+func TestProcessFallbackFailureIsNotRetriedPerLookup(t *testing.T) {
+	calls := 0
+	resolver := newHomeResolver(homeResolverDeps{
+		getenv:      func(string) string { return "" },
+		userHomeDir: func() (string, error) { return "", errors.New("no home") },
+		mkdirTemp:   func(string, string) (string, error) { calls++; return "", errors.New("no temp") },
+		tempDir:     func() string { return "/unwritable" }, pid: func() int { return 42 },
+	})
+	for range 3 {
+		got := resolver.resolve(true)
+		if got.Path() != "/unwritable/gc-home-42" || got.Provenance() != ProvenanceLastResort {
+			t.Fatalf("wrong fallback: %+v", got)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("failed allocation attempts = %d, want 1", calls)
 	}
 }

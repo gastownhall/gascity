@@ -11,6 +11,7 @@ go_library(
     embedsrcs = ["//internal/bootstrap/packs/core:pack_files"],
     deps = [
         "//internal/config",
+        "//internal/gchome",
         "@com_github_burntsushi_toml//:toml",
     ],
 )
@@ -35,6 +36,7 @@ go_test(
         "//internal/bazeltest",
         "//internal/config",
         "//internal/formula",
+        "//internal/gchome",
         "//internal/testenv",
     ],
 )

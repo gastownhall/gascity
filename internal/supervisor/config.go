@@ -10,6 +10,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/gchome"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
@@ -235,22 +236,7 @@ func DefaultHome() string {
 }
 
 func builtinDefaultHome() string {
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		return filepath.Join(home, ".gc")
-	}
-	// Home unresolved. Never fall back to a fixed os.TempDir()/.gc: that path
-	// is shared and world-writable, so concurrent processes clobber each
-	// other's state and unrelated city scans pick it up as a real city
-	// (#3506). Hand out a process-unique directory instead.
-	if dir, err := os.MkdirTemp("", "gc-home-*"); err == nil {
-		return dir
-	}
-	// MkdirTemp failed, so the temp directory itself is unusable. Return a
-	// process-unique path under it rather than "" (which callers would join
-	// into a CWD-relative path, silently writing state to the wrong place) or
-	// the shared os.TempDir()/.gc that #3506 is about. The caller then fails
-	// loudly when it cannot create or write this path.
-	return filepath.Join(os.TempDir(), fmt.Sprintf("gc-home-%d", os.Getpid()))
+	return gchome.DefaultUserHome()
 }
 
 // UsesIsolatedGCHomeOverride reports whether GC_HOME points away from the builtin ~/.gc default.

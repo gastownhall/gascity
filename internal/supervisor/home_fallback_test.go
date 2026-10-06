@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/gchome"
 )
 
 // TestBuiltinDefaultHomeAvoidsSharedTempFallback guards #3650 (sibling of
@@ -16,6 +18,12 @@ func TestBuiltinDefaultHomeAvoidsSharedTempFallback(t *testing.T) {
 	t.Setenv("HOME", "") // forces os.UserHomeDir() to fail on unix
 
 	got := builtinDefaultHome()
+	if next := builtinDefaultHome(); next != got {
+		t.Fatalf("fallback changed between lookups: %q -> %q", got, next)
+	}
+	if common := gchome.DefaultUserHome(); common != got {
+		t.Fatalf("caller fallback %q differs from shared fallback %q", got, common)
+	}
 
 	if shared := filepath.Join(os.TempDir(), ".gc"); got == shared {
 		t.Fatalf("builtinDefaultHome() = %q, want a process-isolated path, not the shared %q", got, shared)
