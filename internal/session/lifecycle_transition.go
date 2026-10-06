@@ -426,6 +426,15 @@ func BeginDrainPatch(now time.Time, reason string) MetadataPatch {
 	}
 }
 
+// Row-bound drain-ack keys (reconciler v2, CONTRACT D5). `gc runtime
+// drain-ack` writes them by CAS in a v2 city only: DrainAckIncarnationKey
+// holds the row's generation as the CLI read it, DrainAckAtKey the RFC 3339
+// time of the ack. v2's PreWake clears both; legacy reads neither.
+const (
+	DrainAckIncarnationKey = "drain_ack_incarnation"
+	DrainAckAtKey          = "drain_ack_at"
+)
+
 // DrainAckStopPendingReason marks a drain-acked runtime whose provider stop is
 // running asynchronously and waiting for controller finalization.
 const DrainAckStopPendingReason = "drain-ack-stop-pending"
