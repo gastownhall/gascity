@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/herdr"
@@ -62,7 +61,7 @@ func TestNudgeEventDispatcherLiveHerdr(t *testing.T) {
 	d := newNudgeEventDispatcher(ctx, cityPath, testWriter(t), "live", testNudgeDispatchStores(cityPath))
 	seen := newPasses()
 	d.observePasses(seen.record)
-	d.update(p, &config.City{}, true)
+	pump := attachNudgeEventPump(ctx, d, p, testWriter(t))
 	defer func() {
 		cancel()
 		select {
@@ -71,7 +70,7 @@ func TestNudgeEventDispatcherLiveHerdr(t *testing.T) {
 			t.Log("dispatcher worker did not stop within 5s")
 		}
 	}()
-	if !d.streaming() {
+	if !pump.streaming() || !d.active() {
 		t.Fatal("dispatcher not streaming against live herdr")
 	}
 	seen.next(t, "the subscription's leading resync pass")

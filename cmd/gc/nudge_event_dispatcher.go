@@ -2,11 +2,9 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -36,8 +34,6 @@ type nudgeEventDispatcher struct {
 	cfg                   *config.City
 	sp                    runtime.Provider
 	eventCapable          bool
-	gen                   int64
-	cancel                context.CancelFunc
 	pending               map[string]nudgeEventKick
 	lastUnattributedSweep time.Time
 	fullPassDue           bool
@@ -49,8 +45,6 @@ type nudgeEventDispatcher struct {
 	delivery sync.WaitGroup
 
 	passSlots chan struct{}
-
-	streamGen atomic.Int64
 
 	passObserver func(sessionFilter string)
 
@@ -81,50 +75,17 @@ func newNudgeEventDispatcher(parent context.Context, cityPath string, stderr io.
 	return d
 }
 
-func (d *nudgeEventDispatcher) update(sp runtime.Provider, cfg *config.City, resubscribe bool) {
+func (d *nudgeEventDispatcher) update(sp runtime.Provider, cfg *config.City) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.cfg = cfg
 	d.sp = sp
-	_, capable := sp.(runtime.SessionEventProvider)
-	d.eventCapable = capable
-	if !resubscribe {
-		return
-	}
-	if d.cancel != nil {
-		d.cancel()
-		d.cancel = nil
-	}
-	d.gen++
-	d.streamGen.Store(0)
-	sep, ok := sp.(runtime.SessionEventProvider)
-	if !ok {
-		return
-	}
-	ctx, cancel := context.WithCancel(d.parent)
-	events, err := sep.SubscribeSessionEvents(ctx)
-	if err != nil {
-		cancel()
-		if errors.Is(err, runtime.ErrNoSessionEventSource) {
-			d.eventCapable = false
-		}
-		fmt.Fprintf(d.stderr, "%s: nudge event subscribe: %v (queued delivery falls back to wake pings and patrol passes)\n", d.logPrefix, err) //nolint:errcheck
-		return
-	}
-	d.cancel = cancel
-	d.streamGen.Store(d.gen)
-	fmt.Fprintf(d.stderr, "%s: nudge event stream active: idle events deliver queued nudges\n", d.logPrefix) //nolint:errcheck
-	go d.forward(ctx, d.gen, events)
 }
 
 func (d *nudgeEventDispatcher) active() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.eventCapable
-}
-
-func (d *nudgeEventDispatcher) streaming() bool {
-	return d.streamGen.Load() != 0
 }
 
 func (d *nudgeEventDispatcher) setEventCapable(capable bool) {
@@ -177,24 +138,6 @@ func (d *nudgeEventDispatcher) kickAllUnattributed(now time.Time) {
 	d.lastUnattributedSweep = now
 	d.mu.Unlock()
 	d.kickAll()
-}
-
-func (d *nudgeEventDispatcher) forward(ctx context.Context, gen int64, events <-chan runtime.SessionEvent) {
-	for {
-		select {
-		case <-ctx.Done():
-			d.streamGen.CompareAndSwap(gen, 0)
-			return
-		case ev, ok := <-events:
-			if !ok {
-				if d.streamGen.CompareAndSwap(gen, 0) && ctx.Err() == nil {
-					fmt.Fprintf(d.stderr, "%s: nudge event stream ended; queued delivery falls back to wake pings and patrol passes\n", d.logPrefix) //nolint:errcheck
-				}
-				return
-			}
-			d.handleEvent(ev)
-		}
-	}
 }
 
 func (d *nudgeEventDispatcher) handleEvent(ev runtime.SessionEvent) {

@@ -939,7 +939,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	cr.nudgeEvents = newNudgeEventDispatcher(ctx, cr.cityPath, cr.stderr, cr.logPrefix, func(cfg *config.City) (beads.NudgesStore, beads.Store) {
 		return nudgeDispatchStores(cr.storageRoutes, cr.cityBeadStore(), cfg, cr.cityPath, cr.rec)
 	})
-	cr.nudgeEvents.update(cr.sp, cr.cfg, false)
+	cr.nudgeEvents.update(cr.sp, cr.cfg)
 
 	// Bridge the provider's push session-event stream (if it has one) into
 	// the wake: a session death pokes the reconciler within seconds instead
@@ -2819,12 +2819,8 @@ func (cr *CityRuntime) reloadConfigTraced(
 		cr.sessionEvents.restart(nextSp)
 	}
 	if cr.nudgeEvents != nil {
-		if cr.sessionEvents == nil {
-			cr.nudgeEvents.update(nextSp, nextCfg, providerChanged)
-		} else {
-			cr.nudgeEvents.update(nextSp, nextCfg, false)
-			cr.nudgeEvents.setEventCapable(cr.sessionEvents.streaming())
-		}
+		cr.nudgeEvents.update(nextSp, nextCfg)
+		cr.nudgeEvents.setEventCapable(cr.sessionEvents != nil && cr.sessionEvents.streaming())
 	}
 	cr.ensureNudgeWakeListener(ctx)
 

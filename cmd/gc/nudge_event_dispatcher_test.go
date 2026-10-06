@@ -207,6 +207,14 @@ func (p *passes) assertQuiet(t *testing.T, bound time.Duration, what string) {
 	}
 }
 
+func attachNudgeEventPump(ctx context.Context, d *nudgeEventDispatcher, sp runtime.Provider, stderr io.Writer) *sessionEventPump {
+	pump := newSessionEventPump(ctx, newLegacyWake(make(chan struct{}, 1), nil), stderr, "test")
+	pump.observe = d.handleEvent
+	d.update(sp, &config.City{})
+	d.setEventCapable(pump.restart(sp))
+	return pump
+}
+
 func newNudgeDispatcherFixture(t *testing.T, sp runtime.Provider) (string, *nudgeEventDispatcher, *session.Info, *passes) {
 	t.Helper()
 	t.Setenv("GC_BEADS", "file")
@@ -227,7 +235,7 @@ func newNudgeDispatcherFixture(t *testing.T, sp runtime.Provider) (string, *nudg
 	d.retryEpsilon = 30 * time.Millisecond
 	seen := newPasses()
 	d.observePasses(seen.record)
-	d.update(sp, &config.City{}, true)
+	attachNudgeEventPump(ctx, d, sp, testWriter(t))
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -452,7 +460,7 @@ func TestNudgeEventDispatcherIgnoresNonIdleStatuses(t *testing.T) {
 	}
 }
 
-func TestNudgeEventDispatcherActivationAndProviderSwap(t *testing.T) {
+func TestNudgeEventDispatcherActivationFollowsSessionEventPump(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -467,54 +475,28 @@ func TestNudgeEventDispatcherActivationAndProviderSwap(t *testing.T) {
 		}
 	}()
 
-	plain := runtime.NewFake()
-	d.update(plain, &config.City{}, true)
+	pump := attachNudgeEventPump(ctx, d, runtime.NewFake(), testWriter(t))
 	if d.active() {
 		t.Fatal("active() = true for a provider without an event stream")
 	}
-	if d.streaming() {
-		t.Fatal("streaming() = true for a provider without an event stream")
-	}
 
 	evented := newNudgeEventedFake()
-	d.update(evented, &config.City{}, true)
+	d.update(evented, &config.City{})
+	d.setEventCapable(pump.restart(evented))
 	if !d.active() {
-		t.Fatal("active() = false after swapping in an event-capable provider")
-	}
-	waitStreaming := func(want bool) bool {
-		tick := time.NewTicker(5 * time.Millisecond)
-		defer tick.Stop()
-		deadline := time.After(5 * time.Second)
-		for {
-			if d.streaming() == want {
-				return true
-			}
-			select {
-			case <-tick.C:
-			case <-deadline:
-				return d.streaming() == want
-			}
-		}
-	}
-	if !waitStreaming(true) {
-		t.Fatal("streaming() never became true after subscribing")
+		t.Fatal("active() = false after the pump subscribed to an event-capable provider")
 	}
 
-	d.update(plain, &config.City{}, true)
+	d.update(evented, &config.City{})
+	if !d.active() {
+		t.Fatal("cfg-only update deactivated the dispatcher")
+	}
+
+	plain := runtime.NewFake()
+	d.update(plain, &config.City{})
+	d.setEventCapable(pump.restart(plain))
 	if d.active() {
 		t.Fatal("active() = true after swapping back to a plain provider")
-	}
-	if !waitStreaming(false) {
-		t.Fatal("streaming() stayed true after the subscription was canceled")
-	}
-
-	d.update(evented, &config.City{}, true)
-	if !waitStreaming(true) {
-		t.Fatal("streaming() never recovered after re-subscribing")
-	}
-	d.update(evented, &config.City{}, false)
-	if !d.active() || !d.streaming() {
-		t.Fatal("cfg-only update deactivated the dispatcher")
 	}
 }
 
@@ -619,7 +601,7 @@ func TestNudgeEventDispatcherSweepStopsSpawningAfterParentCancel(t *testing.T) {
 	d.retryEpsilon = 30 * time.Millisecond
 	seen := newPasses()
 	d.observePasses(seen.record)
-	d.update(fake, &config.City{}, true)
+	attachNudgeEventPump(ctx, d, fake, testWriter(t))
 	workerDone := d.workerDone
 	t.Cleanup(func() {
 		cancel()
@@ -1253,13 +1235,14 @@ func TestCityRuntimeEnsureNudgeWakeListenerActivatesOnReload(t *testing.T) {
 		}
 	})
 
-	cr.nudgeEvents.update(runtime.NewFake(), cr.cfg, true)
+	cr.nudgeEvents.update(runtime.NewFake(), cr.cfg)
 	cr.ensureNudgeWakeListener(ctx)
 	if cr.nudgeWakeListener != nil {
 		t.Fatal("wake listener started for a non-event provider under legacy dispatcher mode, want none")
 	}
 
-	cr.nudgeEvents.update(newNudgeEventedFake(), cr.cfg, true)
+	cr.nudgeEvents.update(newNudgeEventedFake(), cr.cfg)
+	cr.nudgeEvents.setEventCapable(true)
 	if !cr.nudgeEvents.active() {
 		t.Fatal("precondition: dispatcher must report active() after swapping to an event-capable provider")
 	}
@@ -1291,7 +1274,8 @@ func TestCityRuntimeEnsureNudgeWakeListenerTearsDownWhenGateCloses(t *testing.T)
 		}
 	})
 
-	cr.nudgeEvents.update(newNudgeEventedFake(), cr.cfg, true)
+	cr.nudgeEvents.update(newNudgeEventedFake(), cr.cfg)
+	cr.nudgeEvents.setEventCapable(true)
 	cr.ensureNudgeWakeListener(ctx)
 	if cr.nudgeWakeListener == nil {
 		t.Fatal("precondition: wake listener did not start for an event-capable provider")
@@ -1300,7 +1284,8 @@ func TestCityRuntimeEnsureNudgeWakeListenerTearsDownWhenGateCloses(t *testing.T)
 		t.Fatal("precondition: socket must answer while the listener is up")
 	}
 
-	cr.nudgeEvents.update(runtime.NewFake(), cr.cfg, true)
+	cr.nudgeEvents.update(runtime.NewFake(), cr.cfg)
+	cr.nudgeEvents.setEventCapable(false)
 	if cr.nudgeEvents.active() {
 		t.Fatal("precondition: dispatcher must not report active() for a non-event provider")
 	}
@@ -1331,7 +1316,7 @@ func TestCityRuntimeReloadConfigTracedActivatesNudgeWakeListener(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	sp := runtime.NewFake()
+	sp := newNudgeEventedFake()
 	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "test-city",
@@ -1359,21 +1344,25 @@ func TestCityRuntimeReloadConfigTracedActivatesNudgeWakeListener(t *testing.T) {
 			t.Log("dispatcher worker did not stop within 3s")
 		}
 	})
-	cr.nudgeEvents.update(cr.sp, cr.cfg, true)
+	cr.nudgeEvents.update(cr.sp, cr.cfg)
+	cr.sessionEvents = newSessionEventPump(ctx, newLegacyWake(make(chan struct{}, 1), nil), cr.stderr, cr.logPrefix)
+	cr.sessionEvents.observe = cr.nudgeEvents.handleEvent
 
 	cr.ensureNudgeWakeListener(ctx)
 	if cr.nudgeWakeListener != nil {
-		t.Fatal("wake listener started for a non-event provider under legacy dispatcher mode, want none")
+		t.Fatal("wake listener started before the dispatcher saw an event stream under legacy dispatcher mode, want none")
 	}
 
-	cr.sp = newNudgeEventedFake()
+	if !cr.sessionEvents.restart(cr.sp) {
+		t.Fatal("precondition: the session-event pump must subscribe to the event-capable provider")
+	}
 	lastProviderName := "fake"
 	reply := cr.reloadConfigTraced(ctx, &lastProviderName, cityPath, nil, reloadSourceManual)
 	if reply.Outcome == reloadOutcomeFailed {
 		t.Fatalf("reloadConfigTraced failed: %s", reply.Error)
 	}
 	if !cr.nudgeEvents.active() {
-		t.Fatal("precondition: dispatcher must report active() after reloadConfigTraced observes the event-capable provider")
+		t.Fatal("dispatcher must report active() after reloadConfigTraced observes the streaming session-event pump")
 	}
 	if cr.nudgeWakeListener == nil {
 		t.Fatal("reloadConfigTraced did not start the wake listener after the provider became event-capable")

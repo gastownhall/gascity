@@ -1964,7 +1964,7 @@ func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provid
 	return sleeper.SleepCapability(target.sessionName) == runtime.SessionSleepCapabilityTimedOnly
 }
 
-func maybeStartNudgePoller(target nudgeTarget, providers ...runtime.Provider) {
+func maybeStartNudgePoller(target nudgeTarget, sp runtime.Provider) {
 	if target.sessionName == "" {
 		return
 	}
@@ -1981,10 +1981,6 @@ func maybeStartNudgePoller(target nudgeTarget, providers ...runtime.Provider) {
 	// load it was designed to eliminate.
 	if nudgeDispatcherIsSupervisor(target.cfg) {
 		return
-	}
-	var sp runtime.Provider
-	if len(providers) != 0 {
-		sp = providers[0]
 	}
 	if providerRetiresNudgePollers(target, sp) && nudgePollerDispatcherIsLive(target.cityPath) {
 		return
