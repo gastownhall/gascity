@@ -317,7 +317,7 @@ func evaluatePendingPools(
 		probes := pw.probes
 		go func(idx int, template, agentName string, agentIndex int, sp scaleParams, dir string, newDemand bool, probes []poolStoreProbe) {
 			defer wg.Done()
-			started := time.Now()
+			var started time.Time
 			var d int
 			var err error
 			if len(probes) > 0 {
@@ -326,6 +326,7 @@ func evaluatePendingPools(
 				// outer whole-item wait around per-probe acquires on the
 				// identical channel, which can deadlock once sem is saturated
 				// (ga-drb140 AC1).
+				started = time.Now()
 				var errs []error
 				d, errs = evaluatePoolFanOutSum(agentName, sp, probes, runner, sem, newDemand)
 				err = errors.Join(errs...)
@@ -333,6 +334,7 @@ func evaluatePendingPools(
 				sem <- struct{}{}
 				func() {
 					defer func() { <-sem }()
+					started = time.Now()
 					if newDemand {
 						d, err = evaluatePoolNewDemand(agentName, sp, dir, probeEnv, runner)
 					} else {
