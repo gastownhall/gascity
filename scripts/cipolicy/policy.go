@@ -14,6 +14,9 @@ import (
 
 const (
 	setupGoAction = "actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c"
+	// goModDownloadAction warms the module cache with a retried
+	// `go mod download`; every Go-building job runs it right after setup-go.
+	goModDownloadAction = "./.github/actions/go-mod-download"
 
 	// These are SHA-256 digests of the display-free JSON projections below.
 	// Whole-workflow execution hashes deliberately pin shell text instead of
@@ -119,7 +122,17 @@ const (
 	// proof of gc start's is_blocked repair (about 4 minutes, inside that
 	// step's 15m -timeout). Reviewed delta: one -run alternative, no new job,
 	// step, trigger or permission.
-	expectedCIExecutionHash     = "5ce8f7a7966b71d98581b13c44907a05d7a3152c895b2efdd782594d18dc470f"
+	//
+	// Bumped again (Go module fetch resilience): every job that calls
+	// actions/setup-go directly sets its `cache: false` and gains one step
+	// right after it, `uses: ./.github/actions/go-mod-download` (restore the
+	// go.sum-keyed module download cache, run a retried `go mod download`,
+	// save on push/schedule only), so build and test steps never fetch from
+	// proxy.golang.org; and the shared changes filter gains that action's
+	// directory and its retry script. Reviewed delta: one setup-go input and
+	// one local-action step per setup-go job, two filter paths. No new job,
+	// trigger, permission or secret.
+	expectedCIExecutionHash     = "3c5a72c5dc420242c1e29dc6bc766623838326bf1d69801dc915c94fcf373a4b"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -142,9 +155,15 @@ const (
 	// acceptance jobs; no new job, trigger, permission or secret. Then the
 	// tier B job fetches tag v1.5.0-rc1 (shallow, one ref) and requires the
 	// split-storage rc1 upgrade scenario to run rather than skip; no new job,
-	// trigger, permission or secret.
-	expectedNightlyExecutionHash = "ff2cf05eb0064ae1d58bd7fd2080e5cfc358c22d44e5745a7c97d637d2bec8e9"
-	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
+	// trigger, permission or secret. Then (Go module fetch resilience)
+	// bundled-pack-pins and waiver-clock each set setup-go `cache: false` and
+	// gain one step right after it, `uses: ./.github/actions/go-mod-download`;
+	// no new job, trigger, permission or secret.
+	expectedNightlyExecutionHash = "8c3b93d8471bb9f6b121f6a4713367b25fc10183c9a89a716dcd6785ef21c8d9"
+	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
+	// `cache: false` and one step right after it,
+	// `uses: ./.github/actions/go-mod-download`.
+	expectedSetupActionHash = "910f005f48c629c9bf76c69a007b60c4132a76859183e59c0fe99d642bf6141f"
 )
 
 var requiredFilterPaths = map[string][]string{
@@ -251,6 +270,8 @@ var requiredFilterPaths = map[string][]string{
 		"Makefile",
 		".github/workflows/**",
 		".github/actions/setup-gascity-ubuntu/**",
+		".github/actions/go-mod-download/**",
+		".github/scripts/go-mod-download-retry.sh",
 		".github/scripts/install-dolt-archive.sh",
 		".github/scripts/install-bd-archive.sh",
 		".github/scripts/install-claude-native.sh",
@@ -406,11 +427,13 @@ func validatePolicyWiring(workflow map[string]any) error {
 		return err
 	}
 	setupIndex := findStep(steps, "uses", setupGoAction)
+	downloadIndex := findStep(steps, "uses", goModDownloadAction)
 	policyIndex := findStep(steps, "run", "make test-ci-policy")
 	firstGuardIndex := findStep(steps, "run", "make check-gomod-replace")
-	if setupIndex < 0 || policyIndex != setupIndex+1 || firstGuardIndex <= policyIndex {
+	if setupIndex < 0 || downloadIndex != setupIndex+1 || policyIndex != downloadIndex+1 ||
+		firstGuardIndex <= policyIndex {
 		return fmt.Errorf(
-			"preflight-static must run the focused CI policy immediately after setup-go and before other guards",
+			"preflight-static must run the focused CI policy immediately after setup-go and the Go module download, and before other guards",
 		)
 	}
 	want := map[string]any{"run": "make test-ci-policy"}
