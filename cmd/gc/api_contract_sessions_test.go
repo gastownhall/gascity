@@ -179,11 +179,10 @@ func contractSessionsFamily(t *testing.T, h *contractHarness) {
 		&genclient.PostV0CityByCityNameSessionByIdCloseParams{XGCRequest: contractCSRF})
 	expectStatus(t, "close session", closed, err, http.StatusOK)
 	after, err := c.GetV0CityByCityNameSessionByIdWithResponse(ctx, city, sess.Id, nil)
-	expectStatus(t, "get closed session", after, err, http.StatusOK, http.StatusNotFound)
-	// A closed session must not read back as running. (It currently reads
-	// back with state "" — see the PR's bug list.)
-	if after.JSON200 != nil && (after.JSON200.Running || h.sp.IsRunning(sess.SessionName)) {
-		t.Fatalf("closed session still running: %s", contractBody(after))
+	expectStatus(t, "get closed session", after, err, http.StatusOK)
+	// A closed session reads back closed and not running.
+	if got := mustJSON(t, "get closed session", after.JSON200, after); got.State != "closed" || got.Running || h.sp.IsRunning(sess.SessionName) {
+		t.Fatalf("closed session reads back state=%q running=%v: %s", got.State, got.Running, contractBody(after))
 	}
 
 	missing, err := c.GetV0CityByCityNameSessionByIdWithResponse(ctx, city, "no-such-session", nil)
