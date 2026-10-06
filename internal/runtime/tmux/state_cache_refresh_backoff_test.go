@@ -21,9 +21,10 @@ import (
 // is one spawn per reader per poll for as long as the outage lasts. After a
 // failure the cache instead holds TTL-expiry refreshes for a window that
 // doubles per consecutive failure from 2s up to a cap of 15s (never more than
-// half of staleTTL), answers readers from the observation it already has, and
-// lets one fetch through when an Invalidate or EvictSession newer than the
-// failed fetch shows the observation is out of date.
+// half of staleTTL, and never past the instant the snapshot it answers from goes
+// stale), answers readers from the observation it already has, and lets one
+// fetch through when an Invalidate or EvictSession newer than the failed fetch
+// shows the observation is out of date.
 //
 // The cache clock is fake and the fetcher is a stub that records the instant of
 // every call, so each test asserts the exact schedule of tmux spawns. Nothing
@@ -41,8 +42,12 @@ const (
 // gone: tmux killed by the fetch timeout on a saturated box.
 var errBackoffFetch = errors.New("tmux list-panes: signal: killed")
 
-// suppressedRE reads the count of held reads out of a backoff log line.
-var suppressedRE = regexp.MustCompile(`(\d+) reads suppressed`)
+// suppressedRE reads the count of held reads out of a backoff log line, and
+// holdingRE the length of the hold the line reports.
+var (
+	suppressedRE = regexp.MustCompile(`(\d+) reads suppressed`)
+	holdingRE    = regexp.MustCompile(`holding refreshes for ([^;]+);`)
+)
 
 // backoffClock is the cache clock, advanced by hand. It is atomic because the
 // interleaving tests read it from reader goroutines.
@@ -155,6 +160,26 @@ func (h *backoffHarness) run(until time.Duration, readers int) {
 	}
 }
 
+// absentWindow polls like run with one reader up to the offset until and reports
+// the first and last offsets at which the fleet's first session read as not
+// running, and how many reads did. A test whose server is healthy for the whole
+// window wants none.
+func (h *backoffHarness) absentWindow(until time.Duration) (first, last time.Duration, n int) {
+	h.t.Helper()
+	for h.clock.offset() < until {
+		h.clock.advance(backoffStep)
+		if h.read() {
+			continue
+		}
+		last = h.clock.offset()
+		if n == 0 {
+			first = last
+		}
+		n++
+	}
+	return first, last, n
+}
+
 // secs builds a fetch schedule from whole-second offsets.
 func secs(offsets ...int) []time.Duration {
 	out := make([]time.Duration, len(offsets))
@@ -200,7 +225,11 @@ func waitGroup(t *testing.T, wg *sync.WaitGroup, what string) {
 
 // With every fetch failing, N readers polling for a minute spawn tmux on the
 // backed-off schedule, not N times per poll: the first failure at the 2s TTL
-// holds 2s, and each further failure doubles the hold up to the 15s cap.
+// holds 2s, and each further failure doubles the hold up to the 15s cap. The
+// fourth failure, at 16s, would hold to 31s; the snapshot goes stale at 30s, so
+// that hold ends there instead and the fetch at 30s is the first to find out
+// whether the server is back. A failure at the cliff or after it has no
+// snapshot left to protect, so the holds that follow run the full 15s.
 func TestStateCacheBackoff_FetchScheduleFollowsConsecutiveFailures(t *testing.T) {
 	h := newBackoffHarness(t)
 	h.prime()
@@ -208,7 +237,7 @@ func TestStateCacheBackoff_FetchScheduleFollowsConsecutiveFailures(t *testing.T)
 
 	h.run(62*time.Second, 5)
 
-	requireSchedule(t, h.schedule(), secs(0, 2, 4, 8, 16, 31, 46, 61))
+	requireSchedule(t, h.schedule(), secs(0, 2, 4, 8, 16, 30, 45, 60))
 }
 
 // A fetch that succeeds ends the streak: the next outage starts over at the
@@ -217,25 +246,26 @@ func TestStateCacheBackoff_SuccessRestartsTheSchedule(t *testing.T) {
 	h := newBackoffHarness(t)
 	h.prime()
 	h.fail(errBackoffFetch)
-	h.run(17*time.Second, 1) // failures at 2, 4, 8, 16: the fourth holds 15s, to 31s
+	h.run(17*time.Second, 1) // failures at 2, 4, 8, 16: the fourth holds to the 30s cliff
 
 	h.heal()
-	h.run(31*time.Second, 1) // the hold ends at 31s and that fetch succeeds
+	h.run(30*time.Second, 1) // the hold ends at 30s and that fetch succeeds
 	if !h.read() {
 		t.Fatal("IsRunning = false after the held fetch succeeded, want the fleet listed")
 	}
 	h.fail(errBackoffFetch)
 	h.run(48*time.Second, 1)
 
-	// The new outage fails first when the TTL lapses at 33s, and holds 2s, 4s, 8s
-	// again. Had the streak survived the success, the 33s failure would be the
+	// The new outage fails first when the TTL lapses at 32s, and holds 2s, 4s, 8s
+	// again. Had the streak survived the success, the 32s failure would be the
 	// fifth and hold 15s.
-	requireSchedule(t, h.schedule(), secs(0, 2, 4, 8, 16, 31, 33, 35, 39, 47))
+	requireSchedule(t, h.schedule(), secs(0, 2, 4, 8, 16, 30, 32, 34, 38, 46))
 }
 
 // The hold is a fixed schedule, not a multiple of the TTL: an operator who
 // shortens or lengthens GC_TMUX_CACHE_TTL changes when the first refresh fails,
-// not how fast failures back off.
+// not how fast failures back off. (With the short TTL the failure at 29.5s would
+// hold to 44.5s; the snapshot goes stale at 30s, so that hold ends there.)
 func TestStateCacheBackoff_HoldDoesNotScaleWithTheTTL(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -247,7 +277,7 @@ func TestStateCacheBackoff_HoldDoesNotScaleWithTheTTL(t *testing.T) {
 			name: "short ttl",
 			ttl:  500 * time.Millisecond,
 			run:  30 * time.Second,
-			want: []time.Duration{0, 500 * time.Millisecond, 2500 * time.Millisecond, 6500 * time.Millisecond, 14500 * time.Millisecond, 29500 * time.Millisecond},
+			want: []time.Duration{0, 500 * time.Millisecond, 2500 * time.Millisecond, 6500 * time.Millisecond, 14500 * time.Millisecond, 29500 * time.Millisecond, 30 * time.Second},
 		},
 		{name: "long ttl", ttl: 10 * time.Second, run: 25 * time.Second, want: secs(0, 10, 12, 16, 24)},
 	} {
@@ -266,7 +296,9 @@ func TestStateCacheBackoff_HoldDoesNotScaleWithTheTTL(t *testing.T) {
 
 // A cache that never primed backs off too, whether the failure is a missing
 // server (which primes an empty snapshot) or anything else (which primes
-// nothing): both used to spawn tmux on every read.
+// nothing): both used to spawn tmux on every read. Neither has a last-known-good
+// snapshot to go stale, so the holds run the full schedule: the 29s failure
+// holds its 15s, past the instant a primed cache's cliff would have cut it.
 func TestStateCacheBackoff_UnprimedFailuresBackOff(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -317,9 +349,10 @@ func TestStateCacheBackoff_HeldReadsAnswerFromTheCurrentObservation(t *testing.T
 }
 
 // The bool paths keep the staleTTL cliff to the instant: last-known-good at
-// exactly staleTTL, all-absent the moment it is exceeded, with the hold that
-// spans the cliff (16s to 31s) answering from the cache rather than spawning
-// tmux to find out.
+// exactly staleTTL, all-absent the moment it is exceeded, whether or not the
+// fetch the hold lets through at the cliff succeeds. The hold that would span
+// the cliff (16s to 31s) ends at it, so a fetch runs at exactly 30s and fails
+// here, leaving the snapshot as stale as it was always going to be.
 func TestStateCacheBackoff_StaleCliffInstantIsUnchanged(t *testing.T) {
 	h := newBackoffHarness(t)
 	h.prime()
@@ -348,7 +381,64 @@ func TestStateCacheBackoff_StaleCliffInstantIsUnchanged(t *testing.T) {
 	if _, ok := h.cache.SessionActivity(backoffSession); ok {
 		t.Fatal("SessionActivity ok = true past staleTTL, want the caller to fall back to a direct read")
 	}
-	requireSchedule(t, h.schedule(), secs(0, 2, 4, 8, 16))
+	requireSchedule(t, h.schedule(), secs(0, 2, 4, 8, 16, 30))
+}
+
+// A hold never outlives the staleTTL cliff of the snapshot readers are answered
+// from. Past the cliff the bool paths read every session absent, so a hold that
+// carried on beyond it would keep a healthy fleet reading absent for as long as
+// the hold lasted after the server came back: the cost of backing off, paid in
+// the one answer that must not be wrong. The server heals here at 20s, inside
+// the hold that would run from 16s to 31s; the hold ends at the 30s cliff
+// instead, and the fetch there lists the fleet before any read finds it absent.
+func TestStateCacheBackoff_HoldNeverOutlivesTheStaleCliff(t *testing.T) {
+	h := newBackoffHarness(t)
+	h.prime()
+	h.fail(errBackoffFetch)
+	h.run(20*time.Second, 1) // failures at 2, 4, 8, 16
+	h.heal()
+
+	first, last, n := h.absentWindow(60 * time.Second)
+
+	if n > 0 {
+		t.Fatalf("IsRunning = false on %d reads between %v and %v with the server healthy since 20s, want the fleet listed by the first fetch after it healed", n, first, last)
+	}
+	fetches := h.schedule()
+	requireSchedule(t, fetches[:min(len(fetches), 6)], secs(0, 2, 4, 8, 16, 30))
+}
+
+// The same when every failed fetch spends the whole fetchTimeout before it
+// fails, as tmux does on a saturated box. The hold opens when the fetch fails,
+// not when it began, so the fourth failure lands at 28s and its 15s hold would
+// run to 43s: thirteen seconds of a healthy fleet reading absent. The server
+// comes back during that fetch; the hold ends at the 30s cliff and the fetch
+// there lists the fleet.
+func TestStateCacheBackoff_HoldNeverOutlivesTheStaleCliffWhenFetchesTimeOut(t *testing.T) {
+	const healsAt = 26 * time.Second
+	h := newBackoffHarness(t)
+	h.script = func(_ context.Context, _ int) (runtimeStateSnapshot, error) {
+		h.mu.Lock()
+		failing := h.failing
+		h.mu.Unlock()
+		if failing == nil {
+			return backoffFleet(), nil
+		}
+		h.clock.advance(fetchTimeout) // tmux runs out its clock before it gives up
+		if h.clock.offset() >= healsAt {
+			h.heal() // the server answers again while this fetch is timing out
+		}
+		return runtimeStateSnapshot{}, failing
+	}
+	h.prime()
+	h.fail(errBackoffFetch)
+
+	first, last, n := h.absentWindow(60 * time.Second)
+
+	if n > 0 {
+		t.Fatalf("IsRunning = false on %d reads between %v and %v with the server healthy since the fetch that began at 25s, want the fleet listed by the first fetch after it healed", n, first, last)
+	}
+	fetches := h.schedule()
+	requireSchedule(t, fetches[:min(len(fetches), 6)], secs(0, 2, 7, 14, 25, 30))
 }
 
 // A hold is never longer than half of staleTTL, so at least two attempts fit in
@@ -387,22 +477,24 @@ func TestStateCacheBackoff_RecoveryWaitsForTheHoldNoLongerThanTheCap(t *testing.
 	h := newBackoffHarness(t)
 	h.prime()
 	h.fail(errBackoffFetch)
-	h.run(40*time.Second, 2) // failures at 2, 4, 8, 16, 31: the fifth holds to 46s
+	h.run(40*time.Second, 2) // failures at 2, 4, 8, 16, 30: the fifth holds 15s, to 45s
 
 	h.heal()
-	h.run(45900*time.Millisecond, 2)
-	requireSchedule(t, h.schedule(), secs(0, 2, 4, 8, 16, 31))
+	healedAt := h.clock.offset()
+	h.run(44900*time.Millisecond, 2)
+	requireSchedule(t, h.schedule(), secs(0, 2, 4, 8, 16, 30))
 
-	h.run(46*time.Second, 2)
-	requireSchedule(t, h.schedule(), secs(0, 2, 4, 8, 16, 31, 46))
+	h.run(45*time.Second, 2)
+	fetches := h.schedule()
+	requireSchedule(t, fetches, secs(0, 2, 4, 8, 16, 30, 45))
 	if !h.read() {
 		t.Fatal("IsRunning = false after the held fetch succeeded, want the fleet listed")
 	}
 	if obs := h.cache.observation(); obs.lastErr != nil {
 		t.Fatalf("lastErr = %v after a successful refresh, want nil", obs.lastErr)
 	}
-	if lag := 46*time.Second - 40*time.Second; lag > 15*time.Second {
-		t.Fatalf("recovery lagged the server by %v, want at most the 15s cap", lag)
+	if lag := fetches[len(fetches)-1] - healedAt; lag > refreshBackoffMax {
+		t.Fatalf("recovery lagged the server by %v, want at most the %v cap", lag, refreshBackoffMax)
 	}
 }
 
@@ -686,6 +778,61 @@ func TestStateCacheBackoff_StaleFailureAfterANewerPublishOpensNoHold(t *testing.
 	requireSchedule(t, h.schedule(), secs(0, 2, 2, 4))
 }
 
+// A success from a fetch that began before a newer fetch published carries no
+// news either: its result is older than what readers see and is discarded, so
+// the streak and the hold a newer failure opened both stand. Fetch 2 begins
+// under the first Invalidate and waits. A second Invalidate makes the next read
+// forget it, and fetch 3 publishes. Fetch 4 then fails and holds 2s. Fetch 2
+// finally returns the fleet.
+func TestStateCacheBackoff_StaleSuccessAfterANewerPublishEndsNoStreak(t *testing.T) {
+	h := newBackoffHarness(t)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	h.script = func(ctx context.Context, call int) (runtimeStateSnapshot, error) {
+		if call == 2 { // the older, slower fetch: it succeeds once released
+			entered <- struct{}{}
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return runtimeStateSnapshot{}, ctx.Err()
+			}
+			return backoffFleet(), nil
+		}
+		return h.respond()
+	}
+	h.prime()
+	h.cache.Invalidate()
+	older := make(chan struct{})
+	go func() {
+		defer close(older)
+		h.read() // dirty: starts fetch 2, which waits
+	}()
+	waitSignal(t, entered, "the older fetch to start")
+	h.cache.Invalidate() // a change fetch 2 cannot have seen
+	h.read()             // dirty: forgets that flight; fetch 3 succeeds and publishes
+	h.fail(errBackoffFetch)
+	h.clock.advance(2 * time.Second)
+	h.read() // the TTL lapsed: fetch 4 fails, and holds until 4s
+	close(release)
+	waitSignal(t, older, "the older read to return")
+
+	// Had fetch 2's success ended the streak, the reads below would be unheld and
+	// fetch again at 2s; and the failure at 4s would be the first of a new streak,
+	// holding 2s instead of 4s.
+	for range 10 {
+		h.read()
+	}
+	requireSchedule(t, h.schedule(), secs(0, 0, 0, 2))
+	h.run(3900*time.Millisecond, 1)
+	requireSchedule(t, h.schedule(), secs(0, 0, 0, 2))
+	h.run(4*time.Second, 1)
+	requireSchedule(t, h.schedule(), secs(0, 0, 0, 2, 4))
+	h.run(7900*time.Millisecond, 1)
+	requireSchedule(t, h.schedule(), secs(0, 0, 0, 2, 4))
+	h.run(8*time.Second, 1)
+	requireSchedule(t, h.schedule(), secs(0, 0, 0, 2, 4, 8))
+}
+
 // A read the hold answers without fetching must classify exactly like the read
 // whose fetch failed: backoff changes how often tmux is asked, never what a
 // given observation means. Every shape classifyCacheObservation distinguishes
@@ -793,9 +940,17 @@ func TestStateCacheBackoff_LogsOncePerHoldAndOnRecovery(t *testing.T) {
 			t.Fatalf("failure line %d = %q, want it to report %s reads suppressed", i+1, failed[i], want)
 		}
 	}
+	// Each line reports the hold it opens, and the fourth is the one the stale
+	// cliff shortens: 16s to 30s is 14s, not the 15s the schedule would give.
+	for i, want := range []string{"2s", "4s", "8s", "14s"} {
+		m := holdingRE.FindStringSubmatch(failed[i])
+		if m == nil || m[1] != want {
+			t.Fatalf("failure line %d = %q, want it to report a %s hold", i+1, failed[i], want)
+		}
+	}
 
 	h.heal()
-	h.run(40*time.Second, 2) // the hold ends at 31s and that fetch succeeds
+	h.run(40*time.Second, 2) // the hold ends at 30s and that fetch succeeds
 
 	var recovered []string
 	for _, line := range strings.Split(h.logs.String(), "\n") {
