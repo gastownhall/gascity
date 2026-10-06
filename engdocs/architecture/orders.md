@@ -12,7 +12,8 @@ Orders are Gas City's derived mechanism (Layer 2-4, part of Formulas
 intervention. Each order pairs a trigger condition (when to fire) with
 an action (a shell script or formula wisp), living as an
 `order.toml` file inside formula directories. The controller
-evaluates all non-manual triggers on every patrol tick and dispatches due
+evaluates all non-manual triggers on every pass of its orders lane (about
+once per patrol interval, off the controller tick) and dispatches due
 orders -- exec orders run shell scripts directly with no LLM
 involvement, while formula orders instantiate wisps dispatched to
 agent pools.
@@ -72,8 +73,8 @@ The order subsystem spans two packages:
 
 ```
                 ┌──────────────────────────────────────────────────┐
-                │           Controller Tick                        │
-                │           cmd/gc/controller.go                   │
+                │           Orders Lane Pass                       │
+                │           cmd/gc/orders_lane.go                  │
                 │                                                  │
                 │  ┌────────────────────────────────────────────┐  │
                 │  │  orderDispatcher.dispatch(ctx, now)    │  │
@@ -140,14 +141,79 @@ The order subsystem spans two packages:
 5. If no auto-dispatchable orders remain, the dispatcher is nil
    (nil-guard pattern -- callers check before use).
 
-**Trigger evaluation and dispatch (on each controller tick):**
+**When dispatch runs (the orders lane):**
+
+Order dispatch runs on its own lane (`cmd/gc/orders_lane.go`), off the
+controller tick: a due order never waits behind session reconciliation, and
+the tick never waits on order gates.
+
+- **Startup.** `run()` dispatches once synchronously before the cold-start
+  session reconcile (MAINT-008), then starts the lane, so orders keep
+  dispatching while that reconcile runs.
+- **Wakes and the duty cycle.** Each controller tick that gets past its
+  FS-pressure gate wakes the lane at the point where the tick used to
+  dispatch. A wake starts a pass at once if the lane has been idle, since
+  its previous pass ended, at least as long as that pass ran. Otherwise the
+  wake waits until it has, and every wake in that wait (including one that
+  lands mid-pass) joins the single pass that follows. The lane is busy at
+  most half the time while a pass fits in the patrol interval (a longer
+  pass is followed by one interval idle), never runs two passes back to
+  back, and a city with short passes keeps the tick's poke latency.
+- **Backstop timer.** One timer, reset at the end of every pass, runs a pass
+  one patrol interval after the previous pass ended if nothing else has, so
+  a wedged or slow tick does not stop dispatch. A waiting wake never waits
+  longer than the backstop. Where a pass outlasts the patrol interval (on
+  maintainer-city a pass is ~32s against a 15s interval), the backstop
+  always comes first and the lane runs one pass per interval plus pass
+  time.
+- **A pass** applies the FS-pressure gate (the tick's rule: skip while
+  pressure is high, force a pass after `maxConsecutiveFSPressureSkips`; the
+  lane counts its own skips, so the tick's forced passes do not reset
+  them). Unlike the tick's gate, which a config change bypasses, the
+  lane's gate has no config-change bypass: under sustained pressure a
+  config change waits for the lane's own forced pass, up to
+  `maxConsecutiveFSPressureSkips`+1 passes. After the gate, a pass runs
+  the managed-Dolt preflight and the periodic order rescan, installs any
+  staged dispatcher (a reload's, or the rescan's), runs the
+  tracking/nudge-mail watchdogs, and calls `dispatch()`. A panic
+  is recovered per pass (`safeTick`). Each pass is its own trace cycle
+  with trigger `orders`.
+- **Reloads never wait on a pass.** A pass holds the lane's `passMu` for the
+  live dispatcher, the retired dispatchers and the watchdog clocks. A config
+  reload stages the rebuilt dispatcher and installs it at once if the lane
+  is idle. Otherwise the next pass installs it, draining the outgoing
+  dispatcher first. A pass already in flight when the reload lands
+  finishes on the outgoing dispatcher.
+- **Generation guard.** A reload that stages a dispatcher bumps an
+  order-set generation, after it has published its config. A full reload
+  always stages; a same-revision reload stages only when its rescan finds
+  the order set changed; a superseded reload never stages. Each pass reads
+  the generation and the one config snapshot the whole pass uses (trace,
+  rescan, watchdogs) as a pair, under the lock the bump takes, so no stage
+  lands between them. The rescan stages its result only if the generation
+  is unchanged, so a rescan of pre-reload config can never overwrite the
+  reload's dispatcher.
+- **Shutdown.** `run()` cancels and joins the lane on every exit, so a
+  normal shutdown drains the dispatchers with the lane stopped. A forced
+  shutdown can overlap a pass that is still running. Then it logs
+  `orders lane still running; skipping order dispatcher drain` and skips
+  the drain rather than block on the pass or race it. Tracking beads left
+  open are closed by the orphaned-tracking sweep on the next start.
+- **Visibility.** Each tick that wakes the lane (so not a pressure-skipped
+  or canceled tick) records a `wake_orders_lane` operation whose
+  `backstop_ran`, `backstop_age_seconds` and `backstop_last_reason` fields
+  give the age and trigger of the lane's last pass that reached dispatch.
+  Passes the FS gate skips do not count, so an age that keeps growing means
+  the lane is stuck or starved by pressure.
+
+**Trigger evaluation and dispatch (on each lane pass):**
 
 1. `dispatch()` iterates all non-manual orders.
 2. `CheckTrigger()` evaluates the trigger condition against current time,
    last-run history (from bead store), and event state (from event bus).
 3. For each due order, a tracking bead is created **synchronously**
    with label `order-run:<scopedName>`. This is critical: it
-   prevents the cooldown trigger from re-firing on the next tick.
+   prevents the cooldown trigger from re-firing on the next pass.
 4. A goroutine calls `dispatchOne()` with a context timeout derived from
    `effectiveTimeout()` (per-order timeout capped by global
    `max_timeout`).
@@ -215,7 +281,7 @@ Violations indicate bugs.
 - **Tracking beads are created before dispatch goroutines**: The tracking
   bead (labeled `order-run:<scopedName>`) is created synchronously
   in the main dispatch loop. This prevents the cooldown trigger from
-  re-firing on the next controller tick while the dispatch goroutine is
+  re-firing on the next lane pass while the dispatch goroutine is
   still running.
 
 - **ScopedName provides rig isolation**: The same order name
@@ -278,9 +344,9 @@ Violations indicate bugs.
 
 | Depended on by | How |
 |---|---|
-| `cmd/gc/controller.go` | The controller loop calls `buildOrderDispatcher()` on startup and config reload, then calls `dispatch()` on each tick. |
+| `cmd/gc/city_runtime.go` | The controller builds the order dispatcher on startup and config reload and hands it to the orders lane (`cmd/gc/orders_lane.go`), which calls `dispatch()` on each lane pass. Each tick wakes the lane instead of dispatching. |
 | `cmd/gc/cmd_order.go` | CLI commands (`gc order list/show/run/check/history`) use `orders.Scan()` and `orders.CheckTrigger()` for user-facing operations. |
-| Health Patrol (`cmd/gc/`) | Order dispatch is one phase of the Health Patrol tick cycle, running after agent reconciliation and wisp GC. |
+| Health Patrol (`cmd/gc/`) | Order dispatch is not a tick phase. The tick wakes the orders lane; the lane dispatches on its own goroutine, paced by its duty cycle and a patrol-interval backstop. |
 
 ## Code Map
 
@@ -289,6 +355,7 @@ Violations indicate bugs.
 | `internal/orders/order.go` | `Order` struct, `Parse()`, `Validate()`, `IsEnabled()`, `IsExec()`, `TimeoutOrDefault()`, `ScopedName()` |
 | `internal/orders/triggers.go` | `TriggerResult`, `CheckTrigger()`, `checkCooldown()`, `checkCron()`, `checkCondition()`, `checkEvent()`, `cronFieldMatches()`, `MaxSeqFromLabels()` |
 | `internal/orders/scanner.go` | `Scan()` -- discovers orders across formula layers with priority override |
+| `cmd/gc/orders_lane.go` | The orders lane: duty-cycle wake pacing and backstop timer, `runOrdersLanePass()`, the FS-pressure gate, dispatcher staging and install, the order-set generation guard |
 | `cmd/gc/order_dispatch.go` | `orderDispatcher` interface, `memoryOrderDispatcher`, `buildOrderDispatcher()`, `dispatch()`, `dispatchOne()`, `dispatchExec()`, `dispatchWisp()`, `effectiveTimeout()`, `rigExclusiveLayers()`, `qualifyPool()`, `ExecRunner`, `shellExecRunner` |
 | `cmd/gc/cmd_order.go` | CLI commands: `gc order list`, `show`, `run`, `check`, `history`. Helper functions: `loadOrders()`, `loadAllOrders()`, `cityFormulaLayers()`, `findOrder()`, `orderLastRunFn()`, `bdCursorFunc()` |
 
@@ -383,7 +450,7 @@ boundaries.
 
 - **Condition trigger blocks the dispatch loop**: `checkCondition()` runs
   `sh -c <check>` synchronously during trigger evaluation. A slow check
-  command blocks evaluation of subsequent orders on that tick.
+  command blocks evaluation of subsequent orders on that lane pass.
 
 - **Event trigger cursor is per-run, not per-dispatch**: The cursor
   position is computed from `seq:<N>` labels on existing order-run beads via
@@ -410,7 +477,7 @@ boundaries.
   of order, trigger, wisp, formula, and other terms used in this
   document
 - [Health Patrol architecture](health-patrol.md) -- the controller
-  loop that drives order dispatch on each tick
+  loop whose ticks wake the orders lane
 - [Beads architecture](beads.md) -- the bead store used for tracking
   beads, wisp instantiation via MolCook, and label-based queries
 - [Config architecture](config.md) -- FormulaLayers resolution,

@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"strconv"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +34,10 @@ type executionBackstopFixture struct {
 	now      time.Time
 	stdout   bytes.Buffer
 	sessName string
+
+	// workStore, when set, is the store handle the assigned-work snapshot
+	// carries for each claim (and so the one revalidate reads through).
+	workStore beads.Store
 }
 
 func newExecutionBackstopFixture(t *testing.T) *executionBackstopFixture {
@@ -67,26 +71,16 @@ func newExecutionBackstopFixture(t *testing.T) *executionBackstopFixture {
 		t.Fatalf("seeding the session bead: %v", err)
 	}
 	f.session = session
-	f.work = f.claimWork(t, "claimed step")
-	if err := f.sp.Start(context.Background(), f.sessName, runtime.Config{Command: "true"}); err != nil {
-		t.Fatalf("starting the fake session: %v", err)
-	}
-	return f
-}
-
-// claimWork seeds a step bead and claims it for the seat the way the hook does,
-// so the row under test is a real in-progress assignment rather than a
-// hand-built status string.
-func (f *executionBackstopFixture) claimWork(t *testing.T, title string) beads.Bead {
-	t.Helper()
 	work, err := f.store.Create(beads.Bead{
-		Title:    title,
+		Title:    "claimed step",
 		Type:     "task",
 		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "root-1"},
 	})
 	if err != nil {
 		t.Fatalf("seeding the work bead: %v", err)
 	}
+	// Claim it the way the hook does, so the row under test is a real
+	// in-progress assignment rather than a hand-built status string.
 	inProgress := "in_progress"
 	if err := f.store.Update(work.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &f.sessName}); err != nil {
 		t.Fatalf("claiming the work bead: %v", err)
@@ -95,7 +89,11 @@ func (f *executionBackstopFixture) claimWork(t *testing.T, title string) beads.B
 	if err != nil {
 		t.Fatalf("re-reading the claimed work bead: %v", err)
 	}
-	return claimed
+	f.work = claimed
+	if err := f.sp.Start(context.Background(), f.sessName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("starting the fake session: %v", err)
+	}
+	return f
 }
 
 // tick runs one reconcile tick of the backstop at the fixture's current clock.
@@ -113,6 +111,9 @@ func (f *executionBackstopFixture) tick(t *testing.T) {
 	refs := make([]string, len(work))
 	for i := range work {
 		stores[i] = f.store
+		if f.workStore != nil {
+			stores[i] = f.workStore
+		}
 	}
 	nudgeStalledPoolExecution(f.sp, f.cfg, f.store, sessions, work, stores, refs, false, f.now, f.rec,
 		func(sessionBead beads.Bead) error {
@@ -139,37 +140,6 @@ func (f *executionBackstopFixture) sessionMeta(t *testing.T, key string) string 
 
 func (f *executionBackstopFixture) nudgeCount() int {
 	return strings.Count(f.stdout.String(), "execution-claim-nudge: nudged")
-}
-
-// echoOneReArm drives exactly one nudge -> self-echo -> re-arm cycle: the tick
-// that delivers a nudge, the seat's own echo landing a second later (the honest
-// worst case on every provider but tmux — see the convergence row below), and
-// the tick that reads that echo as renewal and spends one unit of the re-arm
-// budget. The caller asserts on the persisted budget afterwards.
-func (f *executionBackstopFixture) echoOneReArm(t *testing.T) {
-	t.Helper()
-	delivered := f.nudgeCount()
-	f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
-	f.tick(t)
-	if got := f.nudgeCount(); got != delivered+1 {
-		t.Fatalf("nudges after the delivery tick = %d, want %d; stdout=%s", got, delivered+1, f.stdout.String())
-	}
-	f.sp.SetActivity(f.sessName, f.now.Add(time.Second))
-	f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
-	f.tick(t)
-}
-
-// lastNudge returns the text of the most recent nudge the fake delivered to the
-// seat under test, or "" if none was delivered.
-func (f *executionBackstopFixture) lastNudge(t *testing.T) string {
-	t.Helper()
-	msg := ""
-	for _, call := range f.sp.SnapshotCalls() {
-		if call.Method == "Nudge" && call.Name == f.sessName {
-			msg = call.Message
-		}
-	}
-	return msg
 }
 
 // TestExecutionBackstopNudgesAnIdleClaimHolderExactlyOnce is the core row: the
@@ -341,23 +311,21 @@ func TestExecutionStepStalledStaysOffTheExportAllowlist(t *testing.T) {
 	}
 }
 
-// TestExecutionBackstopFallsBackToTheDefaultNudgeThenEscalates is the
+// TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured is the
 // production row this backstop was missing. `agent.Nudge` is optional, and in a
 // real city every workflow pool template leaves it unset — maintainer-city had
-// it on 18 of 260 agents and on none of its four pool roles — as do the named
-// seats ga-lez12 rescues. Before the fallback, the shared engine skipped empty
-// content with a bare `continue`, so the state machine parked on its observe
-// marker forever: never an attempt, never the cap, never the drain that is the
-// ONLY thing that releases the claim. A seat holding an in-progress bead still
-// satisfies poolDesired, so no replacement spawns and the whole pool starves
-// behind it. Observed: 20 of 21 live markers frozen at count=0, the oldest claim
-// held 3.5 days.
+// it on 18 of 260 agents and on none of its four pool roles. The shared engine
+// skipped empty content with a bare `continue`, so the state machine parked on
+// its observe marker forever: it never reserved an attempt, never reached the
+// attempt cap, and so never ran the drain that is the ONLY thing that releases
+// the claim. A seat holding an in-progress bead still satisfies poolDesired, so
+// no replacement spawns and the whole pool starves behind it. Observed: 20 of 21
+// live markers frozen at count=0, the oldest claim held 3.5 days.
 //
-// The fix is the default-nudge fallback the claim lane already carries: an agent
-// that is KNOWN but configures no nudge is still nudged with defaultPoolClaimNudge
-// through the bounded attempts, and only then — the seat having had its chance to
-// answer — does it escalate to the drain.
-func TestExecutionBackstopFallsBackToTheDefaultNudgeThenEscalates(t *testing.T) {
+// With nothing to deliver there is nothing to wait for — the bounded attempts
+// exist to give the agent a chance to ANSWER a nudge. The grace window still
+// applies, and then it escalates.
+func TestExecutionBackstopEscalatesWhenTheAgentHasNoNudgeConfigured(t *testing.T) {
 	f := newExecutionBackstopFixture(t)
 	f.cfg.Agents[0].Nudge = "" // the maintainer-city pool templates, verbatim
 	f.idleFor(t, 10*time.Minute)
@@ -370,71 +338,12 @@ func TestExecutionBackstopFallsBackToTheDefaultNudgeThenEscalates(t *testing.T) 
 		t.Fatalf("drain requests inside the grace window = %v, want none", f.drained)
 	}
 
-	// The bounded nudge phase delivers the DEFAULT claim nudge, not silence.
-	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
-		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
-		f.idleFor(t, 10*time.Minute)
-		f.tick(t)
-	}
-	if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
-		t.Fatalf("default-nudge deliveries = %d, want the attempt cap %d; stdout=%s", got, idleClaimNudgeMaxAttempts, f.stdout.String())
-	}
-	if msg := f.lastNudge(t); msg != defaultPoolClaimNudge {
-		t.Fatalf("delivered nudge text = %q, want the default %q", msg, defaultPoolClaimNudge)
-	}
-	if len(f.drained) != 0 {
-		t.Fatalf("drain requests before the attempts were spent = %v, want none", f.drained)
-	}
-
-	// Only after the bounded attempts are spent does it escalate to the drain.
-	for i := 0; i < 3; i++ {
-		f.now = f.now.Add(idleClaimNudgeBackoff)
-		f.idleFor(t, 10*time.Minute)
-		f.tick(t)
-	}
-	if len(f.drained) != 1 || f.drained[0] != f.sessName {
-		t.Fatalf("drain requests = %v, want exactly one for %s; stdout=%s", f.drained, f.sessName, f.stdout.String())
-	}
-	if f.sessionMeta(t, executionClaimNudgeStalledKey) == "" {
-		t.Fatal("escalation was not latched; a later tick would drain the session all over again")
-	}
-	stalled := 0
-	for _, e := range f.rec.Events {
-		if e.Type == events.ExecutionStepStalled {
-			stalled++
-		}
-	}
-	if stalled != 1 {
-		t.Fatalf("execution.step_stalled events = %d, want exactly 1", stalled)
-	}
-}
-
-// TestExecutionBackstopDrainsColdWhenNoNudgeIsResolvable pins the one case the
-// default-nudge fallback deliberately does NOT rescue: a seat whose template
-// resolves to no agent at all, so there is genuinely no nudge to send. Parking
-// on the observe marker forever would hold the seat's close gate open and starve
-// the pool, so with nothing deliverable the engine's empty-content path escalates
-// to the drain straight out of the grace window — no nudge, exactly one drain.
-func TestExecutionBackstopDrainsColdWhenNoNudgeIsResolvable(t *testing.T) {
-	f := newExecutionBackstopFixture(t)
-	// Point the seat at a template with no matching [agent], so both the
-	// configured nudge and the default fallback resolve to nothing.
-	if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{"template": "ghost-template"}); err != nil {
-		t.Fatalf("re-stamping the session template: %v", err)
-	}
-	f.idleFor(t, 10*time.Minute)
-
-	f.tick(t) // first sighting: start the grace clock, escalate nothing yet
-	if len(f.drained) != 0 {
-		t.Fatalf("drain requests inside the grace window = %v, want none", f.drained)
-	}
-
 	f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
 	f.idleFor(t, 10*time.Minute)
 	f.tick(t)
 
 	if got := f.nudgeCount(); got != 0 {
-		t.Fatalf("delivered nudges with no resolvable nudge = %d, want 0", got)
+		t.Fatalf("delivered nudges with no configured nudge = %d, want 0", got)
 	}
 	if len(f.drained) != 1 || f.drained[0] != f.sessName {
 		t.Fatalf("drain requests = %v, want exactly one for %s; stdout=%s", f.drained, f.sessName, f.stdout.String())
@@ -463,433 +372,283 @@ func TestExecutionBackstopDrainsColdWhenNoNudgeIsResolvable(t *testing.T) {
 	}
 }
 
-// asNamedSeat re-stamps the seeded session bead as a configured named
-// interactive seat — the run-operator, an olivia PM, a design reviewer — rather
-// than a pool slot: it clears pool_managed and sets the configured-named
-// markers, exactly as session_beads.go does for an isConfiguredNamed session.
-// The runtime session_name (the claim's assignee here) is unchanged, so
-// resolution still finds the claim by identity.
-func (f *executionBackstopFixture) asNamedSeat(t *testing.T) {
+// driveToEscalation spends the attempt budget on the fixture's claim and
+// confirms the escalation drained the session exactly once.
+func driveToEscalation(t *testing.T, f *executionBackstopFixture) {
 	t.Helper()
-	if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{
-		"pool_managed":              "",
-		"configured_named_session":  "true",
-		"configured_named_identity": "run-operator",
-	}); err != nil {
-		t.Fatalf("re-stamping the session bead as a named seat: %v", err)
-	}
-	current, err := f.store.Get(f.session.ID)
-	if err != nil {
-		t.Fatalf("re-reading the named-seat session bead: %v", err)
-	}
-	f.session = current
-}
-
-// TestExecutionBackstopRecoversAStalledNamedInteractiveSeat is the pilot-killer
-// row (ga-lez12). The stall that aborted every pilot run happened on an
-// interactive Claude-harness seat — the run-operator holding finalize-work, an
-// olivia PM holding canonicalize-issue — not on a pool slot. Those seats carry
-// configured_named_session, and pool_managed is explicitly cleared for them
-// (session_beads.go), so the pool-only governs scope left them with NO recovery:
-// the seat held the in-progress step, made zero progress, the step's retry
-// exhausted (on_exhausted=hard_fail), and the scope aborted (gc.on_fail=
-// abort_scope). This row proves the same bounded observe -> nudge -> backoff ->
-// drain recovery now covers a stalled named seat, converging it onto the
-// recycle -> dead-assignee reopen -> re-attempt chain instead of hard-failing.
-func TestExecutionBackstopRecoversAStalledNamedInteractiveSeat(t *testing.T) {
-	f := newExecutionBackstopFixture(t)
-	f.asNamedSeat(t)
 	f.idleFor(t, 10*time.Minute)
-
-	f.tick(t) // first sighting: start the grace clock, do not nudge yet
-	if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != f.work.ID {
-		t.Fatalf("named seat grace clock did not start: work marker = %q, want %q", got, f.work.ID)
-	}
-
-	// The bounded nudge phase re-delivers the seat's own claim nudge.
+	f.tick(t)
 	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
 		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
 		f.idleFor(t, 10*time.Minute)
 		f.tick(t)
 	}
-	if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
-		t.Fatalf("delivered nudges to a stalled named seat = %d, want the attempt cap %d; stdout=%s", got, idleClaimNudgeMaxAttempts, f.stdout.String())
+	f.now = f.now.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 1 {
+		t.Fatalf("escalation precondition: drain requests = %v, want exactly 1; stdout=%s", f.drained, f.stdout.String())
+	}
+}
+
+func (f *executionBackstopFixture) setInstanceToken(t *testing.T, token string) {
+	t.Helper()
+	if err := f.store.SetMetadata(f.session.ID, "instance_token", token); err != nil {
+		t.Fatalf("setting instance_token: %v", err)
+	}
+}
+
+func (f *executionBackstopFixture) stalledEvents() int {
+	n := 0
+	for _, e := range f.rec.Events {
+		if e.Type == events.ExecutionStepStalled {
+			n++
+		}
+	}
+	return n
+}
+
+// TestExecutionBackstopReEscalatesForANewIncarnation: the stalled latch
+// belongs to the incarnation it escalated. The latched drain stopped the
+// runtime, but the supervisor restarted before the bead closed and released
+// the claim, so boot woke the same row as a NEW incarnation still holding the
+// same claim. A latch that ignores the incarnation keeps the backstop silent
+// for the whole remaining life of that seat.
+func TestExecutionBackstopReEscalatesForANewIncarnation(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.setInstanceToken(t, "incarnation-1")
+	driveToEscalation(t, f)
+	if got := f.sessionMeta(t, executionClaimNudgeStalledTokenKey); got != "incarnation-1" {
+		t.Fatalf("latch token = %q, want the escalated incarnation", got)
 	}
 
-	// Exhaustion hands the seat to the drain that already converges.
+	f.setInstanceToken(t, "incarnation-2")
+	f.now = f.now.Add(2 * time.Minute)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+
+	if len(f.drained) != 2 {
+		t.Fatalf("drain requests after a new incarnation idles on the same claim = %v, want a second escalation", f.drained)
+	}
+	if got := f.stalledEvents(); got != 2 {
+		t.Fatalf("execution.step_stalled events = %d, want one per escalated incarnation", got)
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeStalledTokenKey); got != "incarnation-2" {
+		t.Fatalf("latch token after re-escalation = %q, want the new incarnation", got)
+	}
+
+	// The re-stamped latch holds for the new incarnation exactly as the first
+	// one did for the old.
 	for i := 0; i < 3; i++ {
 		f.now = f.now.Add(idleClaimNudgeBackoff)
 		f.idleFor(t, 10*time.Minute)
 		f.tick(t)
 	}
-	if len(f.drained) != 1 || f.drained[0] != f.sessName {
-		t.Fatalf("drain requests for a stalled named seat = %v, want exactly one for %s; stdout=%s", f.drained, f.sessName, f.stdout.String())
-	}
-	stalled := 0
-	for _, e := range f.rec.Events {
-		if e.Type == events.ExecutionStepStalled {
-			stalled++
-		}
-	}
-	if stalled != 1 {
-		t.Fatalf("execution.step_stalled events = %d, want exactly 1", stalled)
+	if len(f.drained) != 2 {
+		t.Fatalf("drain requests after further ticks on the new incarnation = %v, want still 2", f.drained)
 	}
 }
 
-// TestExecutionBackstopHoldsWhileAHumanIsAttached is the never-act-under-a-
-// human's-hands guard (ga-lez12). A named interactive seat is exactly the kind
-// of session an operator attaches to and drives by hand; the run-operator and
-// the reviewers are attended for long stretches. While a terminal is attached
-// the seat can hold an in-progress claim and report no I/O activity for many
-// minutes — a human reading, thinking, or typing slowly — yet nudging it would
-// inject keystrokes into the operator's session and draining it would rip the
-// session out from under them. The backstop must HOLD (never nudge, never drain,
-// and write no pacing state) for as long as the attach lasts, then resume its
-// ordinary cadence once the human detaches.
-func TestExecutionBackstopHoldsWhileAHumanIsAttached(t *testing.T) {
+// TestExecutionBackstopReEscalatesWhenARestartLostTheLatchedDrain: the drain
+// tracker is in-memory, so a supervisor restart between the escalation and the
+// drain landing loses the drain while the runtime (and so the incarnation)
+// survives, and boot re-adopts the row holding the same claim. The same
+// incarnation stays latched inside the retry window, so an in-flight drain is
+// never re-requested tick after tick, but a latch that outlives the window
+// with the claim still held means the drain is gone: escalate again.
+func TestExecutionBackstopReEscalatesWhenARestartLostTheLatchedDrain(t *testing.T) {
 	f := newExecutionBackstopFixture(t)
-	f.asNamedSeat(t)
-	f.sp.SetAttached(f.sessName, true) // a human is driving this seat by hand
+	f.setInstanceToken(t, "incarnation-1")
+	driveToEscalation(t, f)
+	latchedAt := f.now
 
-	// Drive well past the grace window AND the full attempt budget AND the
-	// exhaustion that would otherwise drain: an attached seat sees none of it.
-	f.idleFor(t, 10*time.Minute)
-	f.tick(t)
-	for i := 0; i < idleClaimNudgeMaxAttempts+3; i++ {
-		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+	// Same incarnation, inside the window: latched on every tick.
+	for f.now.Add(idleClaimNudgeBackoff).Before(latchedAt.Add(executionStalledLatchRetryAfter)) {
+		f.now = f.now.Add(idleClaimNudgeBackoff)
 		f.idleFor(t, 10*time.Minute)
 		f.tick(t)
 	}
-
-	if got := f.nudgeCount(); got != 0 {
-		t.Fatalf("nudges to an attached seat = %d, want 0 (never act under a human's hands); stdout=%s", got, f.stdout.String())
-	}
-	if len(f.drained) != 0 {
-		t.Fatalf("drain requests for an attached seat = %v, want none", f.drained)
-	}
-	if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != "" {
-		t.Fatalf("persisted work marker = %q, want no pacing write while attached", got)
+	if len(f.drained) != 1 {
+		t.Fatalf("drain requests inside the latch window = %v, want exactly 1", f.drained)
 	}
 
-	// The human detaches. Nothing else changed — the seat is still quiet and
-	// still holds the same claim — so the lane resumes its ordinary cadence: the
-	// attach DEFERRED the recovery, it did not cancel it. This phase is what
-	// makes the assertions above non-vacuous: "no nudge, no drain, no marker" is
-	// also exactly what a lane that never governed this seat at all looks like.
-	f.sp.SetAttached(f.sessName, false)
-	f.idleFor(t, 10*time.Minute)
-	f.tick(t) // first sighting of the now-unattended seat: start the grace clock
-	if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != f.work.ID {
-		t.Fatalf("work marker after the human detached = %q, want the grace clock started on %q", got, f.work.ID)
-	}
-
-	f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+	// The window has passed with the claim still held: the drain was lost.
+	f.now = latchedAt.Add(executionStalledLatchRetryAfter)
 	f.idleFor(t, 10*time.Minute)
 	f.tick(t)
-	if got := f.nudgeCount(); got != 1 {
-		t.Fatalf("nudges after the human detached = %d, want exactly 1 (the cadence resumes); stdout=%s", got, f.stdout.String())
+	if len(f.drained) != 2 {
+		t.Fatalf("drain requests once the latch outlived its window = %v, want a second escalation", f.drained)
+	}
+	if got := f.stalledEvents(); got != 2 {
+		t.Fatalf("execution.step_stalled events = %d, want 2", got)
+	}
+
+	// The re-written latch restarts the window.
+	f.now = f.now.Add(2 * time.Minute)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 2 {
+		t.Fatalf("drain requests right after re-latching = %v, want still 2", f.drained)
 	}
 }
 
-// TestExecutionBackstopDoesNotDrainAnIntermittentlyWorkingSeat is the
-// activity-decay row (ga-lez12). A human-paced interactive seat works in bursts:
-// it answers a nudge, runs for a bit, then pauses to read or think. Each pause
-// can exceed the grace window, so a bounded nudge->backoff->drain machine that
-// only clears its attempt count when the claim LEAVES in_progress will march a
-// legitimately-working seat to the drain on cumulative quiet alone. The fix
-// re-arms the window whenever the runtime reports fresh activity SINCE the last
-// attempt: a seat that keeps doing work between nudges is alive and must not be
-// force-drained. A genuinely dead seat shows no such activity and still drains.
-func TestExecutionBackstopDoesNotDrainAnIntermittentlyWorkingSeat(t *testing.T) {
+// TestExecutionBackstopClearsTheLatchTokenWithTheClaim: the incarnation stamp
+// is part of the latch, so it must not outlive the claim it latched.
+func TestExecutionBackstopClearsTheLatchTokenWithTheClaim(t *testing.T) {
 	f := newExecutionBackstopFixture(t)
-	f.asNamedSeat(t)
+	f.setInstanceToken(t, "incarnation-1")
+	driveToEscalation(t, f)
 
-	f.idleFor(t, 10*time.Minute)
-	f.tick(t) // first sighting: start the grace clock
-
-	// Far more cycles than the attempt cap. Each cycle the seat is quiet right
-	// now (past the grace) but showed activity since the last attempt — the
-	// signature of a seat working in bursts. Without decay the attempt count
-	// reaches the cap within maxAttempts cycles and the seat is drained.
-	for i := 0; i < idleClaimNudgeMaxAttempts+4; i++ {
-		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
-		f.sp.SetActivity(f.sessName, f.now.Add(-(idleClaimNudgeGrace + time.Second)))
-		f.tick(t)
+	closed := "closed"
+	if err := f.store.Update(f.work.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("closing the claim: %v", err)
 	}
+	f.now = f.now.Add(time.Minute)
+	f.tick(t)
 
-	if len(f.drained) != 0 {
-		t.Fatalf("drain requests for an intermittently-working seat = %v, want none (renewed activity re-arms the window); stdout=%s", f.drained, f.stdout.String())
-	}
-	stalled := 0
-	for _, e := range f.rec.Events {
-		if e.Type == events.ExecutionStepStalled {
-			stalled++
+	for _, key := range []string{executionClaimNudgeStalledKey, executionClaimNudgeStalledTokenKey} {
+		if got := f.sessionMeta(t, key); got != "" {
+			t.Fatalf("%s after the claim completed = %q, want cleared", key, got)
 		}
 	}
-	if stalled != 0 {
-		t.Fatalf("execution.step_stalled events = %d, want 0 for a working seat; stdout=%s", stalled, f.stdout.String())
+}
+
+// TestExecutionBackstopRecordsWhichGateHeld: a hold leaves a durable
+// breadcrumb naming its gate, so an operator can tell a backstop that is
+// holding from one that is broken. Writes happen on transition only, and the
+// breadcrumb clears once the backstop can act again.
+func TestExecutionBackstopRecordsWhichGateHeld(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+
+	// Recent activity: the quiet gate holds.
+	f.idleFor(t, time.Second)
+	f.tick(t)
+	first := f.sessionMeta(t, executionClaimHoldKey)
+	if !strings.HasPrefix(first, executionHoldNotQuiet+" ") {
+		t.Fatalf("hold breadcrumb for an active agent = %q, want %s", first, executionHoldNotQuiet)
+	}
+	// A standing hold is not rewritten every tick.
+	f.now = f.now.Add(time.Minute)
+	f.idleFor(t, time.Second)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimHoldKey); got != first {
+		t.Fatalf("hold breadcrumb on a repeated hold = %q, want the original %q", got, first)
+	}
+
+	// Quiet long enough: the backstop acts and the breadcrumb clears.
+	f.now = f.now.Add(time.Minute)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimHoldKey); got != "" {
+		t.Fatalf("hold breadcrumb after the backstop acted = %q, want cleared", got)
+	}
+
+	// The runtime is gone while the claim is still held.
+	if err := f.sp.Stop(f.sessName); err != nil {
+		t.Fatalf("stopping the fake session: %v", err)
+	}
+	f.now = f.now.Add(time.Minute)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, backstopHoldRuntimeNotRunning+" ") {
+		t.Fatalf("hold breadcrumb for a stopped claim holder = %q, want %s", got, backstopHoldRuntimeNotRunning)
+	}
+
+	// Once the claim is gone, a stopped runtime is not a hold at all.
+	closed := "closed"
+	if err := f.store.Update(f.work.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("closing the claim: %v", err)
+	}
+	f.now = f.now.Add(time.Minute)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimHoldKey); got != "" {
+		t.Fatalf("hold breadcrumb for a stopped session with no claim = %q, want cleared", got)
 	}
 }
 
-// TestExecutionBackstopFallsBackToTheDefaultNudgeForANamedSeatThenResumes is the
-// stall -> nudge -> resume row (ga-lez12). The named seats that stalled the
-// pilot (run-operator, olivia, the reviewers) configure NO [agent] nudge, and
-// the execution lane read the raw configured nudge with no default fallback — so
-// widening the backstop to cover named seats would have drained them COLD, never
-// delivering the one keystroke the confirmed cause says resumes them. This row
-// pins the fallback: with no configured nudge the lane still delivers the default
-// claim nudge, the seat answers and completes its claim, and it is never drained.
-func TestExecutionBackstopFallsBackToTheDefaultNudgeForANamedSeatThenResumes(t *testing.T) {
+// TestExecutionBackstopRecordsAMultiClaimHold: a session holding several
+// claims is held (the pacing state names one bead), and says so.
+func TestExecutionBackstopRecordsAMultiClaimHold(t *testing.T) {
 	f := newExecutionBackstopFixture(t)
-	f.asNamedSeat(t)
-	f.cfg.Agents[0].Nudge = "" // the real named seats configure no nudge
+	second, err := f.store.Create(beads.Bead{Title: "second claimed step", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the second work bead: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := f.store.Update(second.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &f.sessName}); err != nil {
+		t.Fatalf("claiming the second work bead: %v", err)
+	}
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldMultiClaim+" ") {
+		t.Fatalf("hold breadcrumb for a multi-claim session = %q, want %s", got, executionHoldMultiClaim)
+	}
+}
 
+// TestExecutionBackstopLeavesUnclaimedStoppedSessionsUntouched: a pool
+// session that is simply asleep with no claim is not a backstop hold, and
+// recording one would cost a session-bead write per sleep for every slot.
+func TestExecutionBackstopLeavesUnclaimedStoppedSessionsUntouched(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	closed := "closed"
+	if err := f.store.Update(f.work.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("closing the claim: %v", err)
+	}
+	if err := f.sp.Stop(f.sessName); err != nil {
+		t.Fatalf("stopping the fake session: %v", err)
+	}
+	f.tick(t)
+	if got := f.sessionMeta(t, executionClaimHoldKey); got != "" {
+		t.Fatalf("hold breadcrumb for an unclaimed asleep session = %q, want none", got)
+	}
+}
+
+// unreadableStore fails every point read, the way a store whose live handle is
+// unreachable does. Revalidation must hold on it, not clear.
+type unreadableStore struct {
+	beads.Store
+}
+
+func (unreadableStore) Get(string) (beads.Bead, error) {
+	return beads.Bead{}, errors.New("live read unavailable")
+}
+
+// TestExecutionBackstopRecordsARevalidateHoldWithoutFlapping: when the live
+// re-read before delivery cannot confirm the claim, the hold is named, and a
+// standing hold is written once rather than cleared and rewritten every tick.
+func TestExecutionBackstopRecordsARevalidateHoldWithoutFlapping(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.workStore = unreadableStore{Store: f.store}
 	f.idleFor(t, 10*time.Minute)
 	f.tick(t) // observe
-	if len(f.drained) != 0 {
-		t.Fatalf("drain requests inside the grace window = %v, want none", f.drained)
-	}
-
 	f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
 	f.idleFor(t, 10*time.Minute)
 	f.tick(t)
-
-	if got := f.nudgeCount(); got != 1 {
-		t.Fatalf("default-nudge deliveries = %d, want exactly 1 (nudge before drain); stdout=%s", got, f.stdout.String())
+	first := f.sessionMeta(t, executionClaimHoldKey)
+	if !strings.HasPrefix(first, backstopHoldRevalidate+" ") {
+		t.Fatalf("hold breadcrumb when revalidation cannot read the claim = %q, want %s", first, backstopHoldRevalidate)
 	}
-	if len(f.drained) != 0 {
-		t.Fatalf("drain requests after the first default nudge = %v, want none yet", f.drained)
-	}
-	if msg := f.lastNudge(t); msg != defaultPoolClaimNudge {
-		t.Fatalf("delivered nudge text = %q, want the default %q", msg, defaultPoolClaimNudge)
+	if got := f.nudgeCount(); got != 0 {
+		t.Fatalf("nudges under a revalidate hold = %d, want 0", got)
 	}
 
-	// The seat answers: it executes and completes the claim. The backstop clears
-	// and never drains.
-	if err := f.store.Close(f.work.ID); err != nil {
-		t.Fatalf("completing the claimed work: %v", err)
-	}
-	f.now = f.now.Add(idleClaimNudgeBackoff + time.Second)
-	f.idleFor(t, 10*time.Minute)
-	f.tick(t)
-
-	if len(f.drained) != 0 {
-		t.Fatalf("drain requests after the seat resumed and completed = %v, want none", f.drained)
-	}
-	if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != "" {
-		t.Fatalf("persisted work marker = %q, want cleared after completion", got)
-	}
-}
-
-// TestExecutionBackstopGovernsTheSeatTaxonomy pins WHICH seats this lane
-// recovers, one row per shape, because the exclusions are the part that is easy
-// to get backwards by reading the flag names alone.
-//
-// A dependency floor is the trap: it carries dependency_only AND pool_managed
-// together (ensureDependencyOnlyTemplate, build_desired_state.go, is the only
-// thing that sets the flag and always builds pool-slot identity, so
-// session_beads.go stamps both), which makes "exclude dependency_only" a
-// silent removal of pool coverage rather than a narrowing of the named arm.
-// The manual seat is the genuine exclusion: a human's own session, in either
-// the session_origin or the legacy manual_session spelling, is never an
-// orchestration slot for this backstop to recover.
-func TestExecutionBackstopGovernsTheSeatTaxonomy(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		meta map[string]string
-		want bool
-	}{
-		{"pool slot", map[string]string{"pool_managed": "true"}, true},
-		{"configured named seat", map[string]string{
-			namedSessionMetadataKey:      "true",
-			namedSessionIdentityMetadata: "run-operator",
-		}, true},
-		{"dependency floor pool slot", map[string]string{"pool_managed": "true", "dependency_only": "true"}, true},
-		{"manual seat", map[string]string{"session_origin": "manual", "pool_managed": "true"}, false},
-		{"legacy manual seat", map[string]string{"manual_session": boolMetadata(true), "pool_managed": "true"}, false},
-		{"manual seat wearing named markers", map[string]string{
-			"session_origin":             "manual",
-			namedSessionMetadataKey:      "true",
-			namedSessionIdentityMetadata: "run-operator",
-		}, false},
-		{"neither pool-managed nor named", map[string]string{"template": "worker"}, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := poolExecutionBackstop{}.governs(beads.Bead{Type: sessionBeadType, Metadata: tc.meta})
-			if got != tc.want {
-				t.Fatalf("governs(%v) = %v, want %v", tc.meta, got, tc.want)
-			}
-		})
-	}
-}
-
-// asDependencyFloorSlot re-stamps the seeded pool slot as a dependency floor —
-// a slot the desired-state builder keeps alive to satisfy someone else's
-// dependency — exactly as session_beads.go stamps one: dependency_only and
-// pool_managed together.
-func (f *executionBackstopFixture) asDependencyFloorSlot(t *testing.T) {
-	t.Helper()
-	if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{"dependency_only": "true"}); err != nil {
-		t.Fatalf("re-stamping the session bead as a dependency floor: %v", err)
-	}
-	current, err := f.store.Get(f.session.ID)
-	if err != nil {
-		t.Fatalf("re-reading the dependency-floor session bead: %v", err)
-	}
-	f.session = current
-}
-
-// TestExecutionBackstopRecoversAStalledDependencyFloorSlot is the coverage row
-// behind the taxonomy above. A dependency floor runs the same claim loop as any
-// other pool slot, so it can strand the same way — and it is the worst seat to
-// leave stranded, because the dependency gate deliberately keeps it alive: the
-// recycle roulette that eventually frees an ordinary slot may never fire for a
-// floor. This row drives the full observe -> nudge -> drain recovery on one.
-func TestExecutionBackstopRecoversAStalledDependencyFloorSlot(t *testing.T) {
-	f := newExecutionBackstopFixture(t)
-	f.asDependencyFloorSlot(t)
-
-	f.idleFor(t, 10*time.Minute)
-	f.tick(t) // first sighting: start the grace clock
-	if got := f.sessionMeta(t, executionClaimNudgeWorkKey); got != f.work.ID {
-		t.Fatalf("dependency-floor grace clock did not start: work marker = %q, want %q", got, f.work.ID)
-	}
-
-	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
-		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+	for i := 0; i < 3; i++ {
+		f.now = f.now.Add(time.Minute)
 		f.idleFor(t, 10*time.Minute)
 		f.tick(t)
-	}
-	if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
-		t.Fatalf("delivered nudges to a stalled dependency floor = %d, want the attempt cap %d; stdout=%s", got, idleClaimNudgeMaxAttempts, f.stdout.String())
-	}
-
-	f.now = f.now.Add(idleClaimNudgeBackoff)
-	f.idleFor(t, 10*time.Minute)
-	f.tick(t)
-	if len(f.drained) != 1 || f.drained[0] != f.sessName {
-		t.Fatalf("drain requests for a stalled dependency floor = %v, want exactly one for %s; stdout=%s", f.drained, f.sessName, f.stdout.String())
-	}
-}
-
-// TestExecutionBackstopConvergesWhenTheActivityClockCountsItsOwnNudge is the
-// bound on the activity decay, and the row the decay shipped without.
-//
-// The decay's evidence is the runtime's activity clock, and that clock is NOT a
-// clean signal that an agent is working: tmux records each poke and discounts it
-// (GetSessionActivity / discountPokeActivity), but it is the only provider that
-// does — on t3bridge the delivered nudge IS a thread message, so it advances
-// threadUpdatedAt past the very attempt it was reserved for. A spinner or menu
-// that repaints has the same shape. So this fixture models the honest
-// worst case: the seat emits nothing of its own, and the only activity it ever
-// reports is the echo of gc's own nudge, arriving a second after each delivery
-// and then going quiet again past the grace window.
-//
-// Unbounded, that seat re-arms on its own echo forever and is never drained —
-// and the drain is the only thing that releases the claim it is holding, which
-// is the exact non-convergence this whole file exists to prevent. The bounded
-// re-arm budget is what makes the guarantee hold on every provider: the decay
-// buys a generous leash, then stops, and the ordinary ladder finishes the job.
-func TestExecutionBackstopConvergesWhenTheActivityClockCountsItsOwnNudge(t *testing.T) {
-	f := newExecutionBackstopFixture(t)
-	f.asNamedSeat(t)
-
-	f.idleFor(t, 10*time.Minute)
-	f.tick(t) // first sighting: start the grace clock
-
-	// Enough cycles to spend the whole re-arm budget AND the attempt ladder
-	// behind it, plus slack to prove the drain is requested exactly once.
-	delivered := 0
-	for i := 0; i < 2*(maxExecutionClaimNudgeDecays+idleClaimNudgeMaxAttempts)+6; i++ {
-		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
-		f.tick(t)
-		if f.nudgeCount() > delivered {
-			delivered = f.nudgeCount()
-			// The nudge echoes back as session activity one second after
-			// delivery — later than the attempt this tick just reserved, and
-			// still older than the next tick's grace window.
-			f.sp.SetActivity(f.sessName, f.now.Add(time.Second))
+		if got := f.sessionMeta(t, executionClaimHoldKey); got != first {
+			t.Fatalf("hold breadcrumb on tick %d of a standing revalidate hold = %q, want the original %q", i, got, first)
 		}
 	}
 
-	if len(f.drained) != 1 || f.drained[0] != f.sessName {
-		t.Fatalf("drain requests for a self-echoing seat = %v, want exactly one for %s (the re-arm is bounded); stdout=%s", f.drained, f.sessName, f.stdout.String())
-	}
-	stalled := 0
-	for _, e := range f.rec.Events {
-		if e.Type == events.ExecutionStepStalled {
-			stalled++
-		}
-	}
-	if stalled != 1 {
-		t.Fatalf("execution.step_stalled events = %d, want exactly 1; stdout=%s", stalled, f.stdout.String())
-	}
-	// It converged because the BUDGET ran out, not because the seat stopped
-	// reporting activity: the counter is parked at the cap, and the seat was
-	// nudged far more than the bare attempt ladder allows.
-	if got := f.sessionMeta(t, executionClaimNudgeDecayKey); got != strconv.Itoa(maxExecutionClaimNudgeDecays) {
-		t.Fatalf("persisted re-arm count = %q, want the cap %d", got, maxExecutionClaimNudgeDecays)
-	}
-	if delivered <= idleClaimNudgeMaxAttempts {
-		t.Fatalf("delivered nudges = %d, want more than the bare attempt cap %d (the decay must really have re-armed); stdout=%s", delivered, idleClaimNudgeMaxAttempts, f.stdout.String())
-	}
-}
-
-// TestExecutionBackstopResetsTheReArmBudgetForTheNextClaim owns the other half
-// of the budget lifecycle: the bound above is what makes every seat converge,
-// and the RESET is what keeps the leash generous for a slot that outlives many
-// claims. The budget is spent per claim, so a slot that burned re-arms on one
-// step must start its next step with the whole budget again — otherwise a
-// long-lived slot's leash erodes toward zero and live-but-slow seats converge
-// after the bare attempt march, which is the behavior the bound was built to
-// avoid rather than cause.
-//
-// Both reset paths are load-bearing and this row drives each of them:
-//
-//   - a handoff, where the slot completes one claim and takes the next before
-//     any tick sees it claimless, so `observe` is what must write the fresh
-//     budget. Note the ordering: `observe` only ever sees a stale budget on
-//     THIS path. A claimless tick in between would have cleared the marker
-//     first, leaving `observe` nothing to carry forward and the reset
-//     vacuously satisfied — so the handoff is the shape that pins it.
-//   - a completion, where `clear` must wipe the budget with the rest of the
-//     marker so nothing survives on the bead.
-func TestExecutionBackstopResetsTheReArmBudgetForTheNextClaim(t *testing.T) {
-	f := newExecutionBackstopFixture(t)
+	// The live read recovers: the backstop delivers and the breadcrumb clears.
+	f.workStore = nil
+	f.now = f.now.Add(time.Minute)
 	f.idleFor(t, 10*time.Minute)
-	f.tick(t) // first sighting of claim A: start the grace clock
-
-	// Claim A spends part — not all — of its budget on its own echo.
-	const spent = 3
-	for i := 0; i < spent; i++ {
-		f.echoOneReArm(t)
-	}
-	if got := f.sessionMeta(t, executionClaimNudgeDecayKey); got != strconv.Itoa(spent) {
-		t.Fatalf("re-arms spent on claim A = %q, want %d; stdout=%s", got, spent, f.stdout.String())
-	}
-
-	// The handoff: A completes and the slot takes B in the same gap, so the next
-	// tick resolves a NEW target with A's spent budget still on the bead.
-	if err := f.store.Close(f.work.ID); err != nil {
-		t.Fatalf("completing claim A: %v", err)
-	}
-	f.work = f.claimWork(t, "the slot's next claimed step")
-	f.idleFor(t, 10*time.Minute)
-	f.tick(t) // first sighting of claim B: a fresh window AND a fresh budget
-
-	f.echoOneReArm(t)
-	if got := f.sessionMeta(t, executionClaimNudgeDecayKey); got != "1" {
-		t.Fatalf("re-arms after claim B's first = %q, want 1 — the budget is per claim, not per slot, so B must not inherit A's %d; stdout=%s", got, spent, f.stdout.String())
-	}
-
-	// The completion: nothing survives on the bead for whatever this slot
-	// claims next.
-	if err := f.store.Close(f.work.ID); err != nil {
-		t.Fatalf("completing claim B: %v", err)
-	}
-	f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
 	f.tick(t)
-	if got := f.sessionMeta(t, executionClaimNudgeDecayKey); got != "" {
-		t.Fatalf("persisted re-arm budget after the claim completed = %q, want it cleared with the rest of the marker", got)
+	if got := f.nudgeCount(); got != 1 {
+		t.Fatalf("nudges once revalidation recovers = %d, want 1; stdout=%s", got, f.stdout.String())
+	}
+	if got := f.sessionMeta(t, executionClaimHoldKey); got != "" {
+		t.Fatalf("hold breadcrumb after delivery = %q, want cleared", got)
 	}
 }

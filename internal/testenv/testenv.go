@@ -78,6 +78,12 @@ import (
 // testscript subcommand re-invocation renames the binary (e.g. to `gc`) so
 // its os.Args[0] will not have the `.test` suffix.
 func isGoTestBinary() bool {
+	// Bazel test binaries drop the .test suffix but export TEST_SRCDIR and
+	// name the binary <target>_test; testscript re-invocations rename it
+	// (e.g. "gc"), so require both markers to keep the child env intact.
+	if os.Getenv("TEST_SRCDIR") != "" && strings.HasSuffix(filepath.Base(os.Args[0]), "_test") {
+		return true
+	}
 	name := filepath.Base(os.Args[0])
 	name = strings.TrimSuffix(name, ".exe")
 	return strings.HasSuffix(name, ".test")

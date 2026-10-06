@@ -60,17 +60,17 @@ func TestReadyDemandCacheCollapsesReadyFanout(t *testing.T) {
 
 	// Assigned-work probe: one live read per assignee in the legacy path.
 	for _, assignee := range []string{"worker-a", "worker-b", "worker-c", "worker-d"} {
-		if _, err := cache.liveReady(store, beads.ReadyQuery{Assignee: assignee, Limit: 5}); err != nil {
+		if _, err := cache.liveReady(store, "", beads.ReadyQuery{Assignee: assignee, Limit: 5}); err != nil {
 			t.Fatalf("liveReady(%q): %v", assignee, err)
 		}
 	}
 	// Assigned-work no-assignee probe.
-	if _, err := cache.liveReady(store, beads.ReadyQuery{Limit: 5}); err != nil {
+	if _, err := cache.liveReady(store, "", beads.ReadyQuery{Limit: 5}); err != nil {
 		t.Fatalf("liveReady(no assignee): %v", err)
 	}
 	// Scale-check + named-session probes: full ready set, repeated per group.
 	for i := 0; i < 3; i++ {
-		if _, err := cache.controllerDemandReady(store); err != nil {
+		if _, err := cache.controllerDemandReady(store, ""); err != nil {
 			t.Fatalf("controllerDemandReady #%d: %v", i, err)
 		}
 	}
@@ -124,7 +124,7 @@ func TestReadyDemandCacheLiveReadyEquivalentToDirect(t *testing.T) {
 		if err != nil {
 			t.Fatalf("oracle liveReady %+v: %v", q, err)
 		}
-		got, err := cache.liveReady(cached, q)
+		got, err := cache.liveReady(cached, "", q)
 		if err != nil {
 			t.Fatalf("cache liveReady %+v: %v", q, err)
 		}
@@ -156,7 +156,7 @@ func TestReadyDemandCacheControllerDemandEquivalentToDirect(t *testing.T) {
 		if err != nil {
 			t.Fatalf("oracle readyForControllerDemand: %v", err)
 		}
-		got, err := newReadyDemandCache().controllerDemandReady(cached)
+		got, err := newReadyDemandCache().controllerDemandReady(cached, "")
 		if err != nil {
 			t.Fatalf("cache controllerDemandReady: %v", err)
 		}
@@ -183,7 +183,7 @@ func TestReadyDemandCacheControllerDemandEquivalentToDirect(t *testing.T) {
 		if err != nil {
 			t.Fatalf("oracle readyForControllerDemand: %v", err)
 		}
-		got, err := newReadyDemandCache().controllerDemandReady(cached)
+		got, err := newReadyDemandCache().controllerDemandReady(cached, "")
 		if err != nil {
 			t.Fatalf("cache controllerDemandReady: %v", err)
 		}
@@ -205,7 +205,7 @@ func TestReadyDemandCacheControllerDemandEquivalentToDirect(t *testing.T) {
 			}
 		}
 		want, wantErr := readyForControllerDemandQuery(build(), beads.ReadyQuery{})
-		got, gotErr := newReadyDemandCache().controllerDemandReady(build())
+		got, gotErr := newReadyDemandCache().controllerDemandReady(build(), "")
 		if (wantErr == nil) != (gotErr == nil) || beads.IsPartialResult(wantErr) != beads.IsPartialResult(gotErr) {
 			t.Fatalf("controllerDemandReady err = %v, want %v", gotErr, wantErr)
 		}

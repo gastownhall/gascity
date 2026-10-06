@@ -419,6 +419,81 @@ func TestBdStoreGetEphemeralFallbackReturnsErrNotFoundWhenMissing(t *testing.T) 
 	}
 }
 
+// A failed wisp fallback leaves absence unproven: Get must return the query's
+// real error, not ErrNotFound, so callers that act on "confirmed absent" (the
+// process-table orphan sweep kills live runtimes on it) do not act on a
+// transient read failure.
+func TestBdStoreGetEphemeralFallbackErrorIsNotErrNotFound(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json gc-wisp-live`: {
+			err: fmt.Errorf("issue gc-wisp-live not found"),
+		},
+		`bd query --json ephemeral=true AND id=gc-wisp-live --all --limit 1`: {
+			err: fmt.Errorf("exit status 1: dolt: connection refused"),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	_, err := s.Get("gc-wisp-live")
+	if err == nil {
+		t.Fatal("Get succeeded, want the wisp query error")
+	}
+	if errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("err = %v; a failed wisp fallback must not read as ErrNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("err = %v, want the underlying wisp query error", err)
+	}
+}
+
+// A wisp fallback that itself reports a bead-level miss is still a miss.
+func TestBdStoreGetEphemeralFallbackNotFoundErrorIsErrNotFound(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json gc-wisp-gone`: {
+			err: fmt.Errorf("issue gc-wisp-gone not found"),
+		},
+		`bd query --json ephemeral=true AND id=gc-wisp-gone --all --limit 1`: {
+			err: fmt.Errorf("exit status 1: no issues found"),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.Get("gc-wisp-gone"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// Infrastructure failures whose text happens to say "not found" (a missing bd
+// binary, Dolt's "database not found" mid-restart) say nothing about the bead
+// and must not map to ErrNotFound.
+func TestBdStoreGetInfraNotFoundIsNotErrNotFound(t *testing.T) {
+	for _, msg := range []string{
+		`exec: "bd": executable file not found in $PATH`,
+		"exit status 1: Error: database not found: beads",
+		"exit status 1: Error 1146: table not found: wisps",
+		"exit status 1: beads workspace not found: /city/.beads",
+		"sh: 1: bd: command not found",
+	} {
+		t.Run(msg, func(t *testing.T) {
+			runner := func(_, _ string, _ ...string) ([]byte, error) {
+				return nil, errors.New(msg)
+			}
+			s := beads.NewBdStore("/city", runner)
+			_, err := s.Get("gc-wisp-abc")
+			if err == nil {
+				t.Fatal("Get succeeded, want an error")
+			}
+			if errors.Is(err, beads.ErrNotFound) {
+				t.Fatalf("err = %v; an infrastructure failure must not read as ErrNotFound", err)
+			}
+		})
+	}
+}
+
 func TestBdStoreListUsesDecodedUpdatedAtForUpdatedBefore(t *testing.T) {
 	cutoff := time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)
 	runner := func(_, name string, args ...string) ([]byte, error) {

@@ -15,11 +15,13 @@ import (
 //
 //   - gc.iteration is the outer loop counter and advances to the NEW iteration on
 //     EVERY cloned bead — the scope/subject, the check, and every nested member.
-//   - gc.attempt is the loop counter only on the loop-level beads (scope/subject
-//     and check); a nested body member's gc.attempt follows its own local step
-//     semantics (RalphBodyChildAttempt): a retry/ralph control resets to 1, an
-//     already-materialized attempt.N bead keeps the attempt its ref carries, and a
-//     plain child inherits the iteration index.
+//   - gc.attempt also advances to the new iteration on every cloned bead: it is
+//     the iteration on the loop-level beads and on every body member, the
+//     v1.4.2 contract pack gates join on (RalphBodyChildAttempt).
+//   - gc.retry_attempt is carried only by an already-materialized attempt.N
+//     bead, which keeps the retry number its ref names so a nested retry is not
+//     born exhausted (RalphBodyChildRetryAttempt). The fixtures below predate
+//     the key, so this also pins the ref fallback for in-flight molecules.
 //
 // Before the fix both clone paths blanket-stamped gc.attempt=nextAttempt onto
 // subject/members/check and never wrote gc.iteration, so a retried iteration N+1
@@ -92,18 +94,21 @@ const clonedRalphIteration = "2"
 
 // assertClonedCounters pins the two counters a cloned bead must carry. Every
 // clone advances gc.iteration to the new outer iteration (clonedRalphIteration);
-// gc.attempt follows local step semantics and so varies per bead.
-func assertClonedCounters(t *testing.T, label string, meta map[string]string, wantAttempt string) {
+// gc.attempt is the iteration too; only gc.retry_attempt varies per bead.
+func assertClonedCounters(t *testing.T, label string, meta map[string]string, wantRetryAttempt string) {
 	t.Helper()
 	if got := meta[beadmeta.IterationMetadataKey]; got != clonedRalphIteration {
 		t.Errorf("%s: gc.iteration = %q, want %q", label, got, clonedRalphIteration)
 	}
-	if got := meta[beadmeta.AttemptMetadataKey]; got != wantAttempt {
-		t.Errorf("%s: gc.attempt = %q, want %q", label, got, wantAttempt)
+	if got := meta[beadmeta.AttemptMetadataKey]; got != clonedRalphIteration {
+		t.Errorf("%s: gc.attempt = %q, want %q (the iteration)", label, got, clonedRalphIteration)
+	}
+	if got := meta[beadmeta.RetryAttemptMetadataKey]; got != wantRetryAttempt {
+		t.Errorf("%s: gc.retry_attempt = %q, want %q", label, got, wantRetryAttempt)
 	}
 }
 
-func TestAppendRalphRetryLegacyAdvancesIterationAndResetsNestedCounters(t *testing.T) {
+func TestAppendRalphRetryLegacyAdvancesIterationAndKeepsNestedRetryCounters(t *testing.T) {
 	t.Parallel()
 
 	store := beads.NewMemStore()
@@ -158,15 +163,16 @@ func TestAppendRalphRetryLegacyAdvancesIterationAndResetsNestedCounters(t *testi
 	}
 
 	// Loop-level beads advance both counters to the new outer iteration.
-	assertClonedCounters(t, "scope/subject", cloneMeta(subject.ID), "2")
-	assertClonedCounters(t, "check", cloneMeta(check.ID), "2")
-	// Nested members advance gc.iteration but derive gc.attempt locally.
-	assertClonedCounters(t, "retry control", cloneMeta(retryControl.ID), "1")
+	assertClonedCounters(t, "scope/subject", cloneMeta(subject.ID), "")
+	assertClonedCounters(t, "check", cloneMeta(check.ID), "")
+	// Nested members carry the iteration in gc.attempt; only the attempt run
+	// has a retry counter, and it restarts at the number its ref names.
+	assertClonedCounters(t, "retry control", cloneMeta(retryControl.ID), "")
 	assertClonedCounters(t, "attempt.1 run", cloneMeta(attemptRun.ID), "1")
-	assertClonedCounters(t, "plain member", cloneMeta(plainMember.ID), "2")
+	assertClonedCounters(t, "plain member", cloneMeta(plainMember.ID), "")
 }
 
-func TestBuildRalphRetryGraphNodeAdvancesIterationAndResetsNestedCounters(t *testing.T) {
+func TestBuildRalphRetryGraphNodeAdvancesIterationAndKeepsNestedRetryCounters(t *testing.T) {
 	t.Parallel()
 
 	// buildRalphRetryGraphNode is a pure function: it maps one iteration-1 bead to
@@ -192,9 +198,9 @@ func TestBuildRalphRetryGraphNodeAdvancesIterationAndResetsNestedCounters(t *tes
 			"review-loop.iteration.1", "review-loop.iteration.2", 1, 2, attemptIDs, nil).Metadata
 	}
 
-	assertClonedCounters(t, "scope/subject", node(subject), "2")
-	assertClonedCounters(t, "check", node(check), "2")
-	assertClonedCounters(t, "retry control", node(retryControl), "1")
+	assertClonedCounters(t, "scope/subject", node(subject), "")
+	assertClonedCounters(t, "check", node(check), "")
+	assertClonedCounters(t, "retry control", node(retryControl), "")
 	assertClonedCounters(t, "attempt.1 run", node(attemptRun), "1")
-	assertClonedCounters(t, "plain member", node(plainMember), "2")
+	assertClonedCounters(t, "plain member", node(plainMember), "")
 }

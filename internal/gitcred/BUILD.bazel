@@ -1,0 +1,56 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "gitcred",
+    srcs = [
+        "autherror.go",
+        "inject.go",
+        "match.go",
+        "protocol.go",
+        "redact.go",
+        "resolve.go",
+        "rules.go",
+        "rules_unix.go",
+        "rules_windows.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/gitcred",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/gchome",
+        "//internal/remotesource",
+        "@com_github_burntsushi_toml//:toml",
+    ],
+)
+
+go_test(
+    name = "gitcred_test",
+    srcs = [
+        "autherror_test.go",
+        "inject_keepalive_drift_test.go",
+        "inject_test.go",
+        "match_test.go",
+        "protocol_test.go",
+        "redact_test.go",
+        "resolve_test.go",
+        "rules_test.go",
+        "rules_unix_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":gitcred"],
+    deps = [
+        "//internal/git",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

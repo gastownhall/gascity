@@ -56,11 +56,7 @@ func buildRuntimeRegistry() *registry.Registry {
 		return sessionsubprocess.NewSeamBacked(), nil
 	}))
 	must(r.Register("acp", func(_ string, sc config.SessionConfig, _, cityPath string) (runtime.Provider, error) {
-		cfg := sessionacp.Config{
-			HandshakeTimeout:  sc.ACP.HandshakeTimeoutDuration(),
-			NudgeBusyTimeout:  sc.ACP.NudgeBusyTimeoutDuration(),
-			OutputBufferLines: sc.ACP.OutputBufferLinesOrDefault(),
-		}
+		cfg := acpProviderConfig(sc.ACP)
 		if cityPath != "" {
 			return sessionacp.NewSeamBackedWithDir(providerStateDir("acp", cityPath), cfg), nil
 		}
@@ -176,4 +172,15 @@ func packRuntimeDeclarationChanged(oldCfg, newCfg *config.City, name string) boo
 		return true
 	}
 	return oldOK && (oldRT.Command != newRT.Command || oldRT.Protocol != newRT.Protocol)
+}
+
+// acpProviderConfig maps the [session.acp] city settings onto the ACP
+// provider's resolved configuration.
+func acpProviderConfig(a config.ACPSessionConfig) sessionacp.Config {
+	return sessionacp.Config{
+		HandshakeTimeout:  a.HandshakeTimeoutDuration(),
+		NudgeBusyTimeout:  a.NudgeBusyTimeoutDuration(),
+		OutputBufferLines: a.OutputBufferLinesOrDefault(),
+		StopGrace:         a.StopGraceDuration(),
+	}
 }

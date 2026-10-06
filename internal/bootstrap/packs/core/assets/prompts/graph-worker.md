@@ -65,8 +65,8 @@ filesystem search. If no command exists for what you need, file a bead.
 
 `gc hook --claim` handles `gc.continuation_group` for you. After it claims a
 bead with `gc.root_bead_id` and `gc.continuation_group`, it preassigns other
-open, unassigned siblings in that group to `$GC_SESSION_NAME` so they stay with
-your live context. The JSON result lists them in `continuation_assigned`.
+open, unassigned siblings in that group to your session bead ID
+(`$GC_SESSION_ID`) so they stay with your live context. The JSON result lists them in `continuation_assigned`.
 
 ## Re-checking Before Drain
 

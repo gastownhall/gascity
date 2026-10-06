@@ -19,6 +19,9 @@
 #   GC_DOLT_PORT  — dolt server port (default: ephemeral, hashed from city path)
 #   GC_DOLT_USER  — dolt user (default: root)
 #   GC_DOLT_PASSWORD — dolt password (default: empty)
+#   GC_BEADS_PROXY_EXTERNAL_HOST/PORT — adapter-only upstream endpoint for a
+#                   proxied-external bd init; never used by Gas City's direct
+#                   lifecycle manager.
 #   GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS — concurrent-start wait budget in
 #       milliseconds (default: 75000 + 2× the lock-release window = 195000 at
 #       defaults, covering the start-flock winner's worst-case stop — 30s
@@ -29,6 +32,26 @@
 #       <data_dir>/<db>/.dolt/noms/LOCK) to be released before start/stop
 #       fail closed, in milliseconds (default: 60000). gc projects
 #       [dolt].dolt_lock_release_timeout from city.toml into this variable.
+#   GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS — wall-clock cap, in milliseconds
+#       (default: 120000), on how long wait_for_bd_runtime_schema will go
+#       between observed advances of a mid-migration database's
+#       schema_migrations cursor. The wait is progress-based: every observed
+#       advance resets both the stall counter and this cap, so a live
+#       migration that keeps advancing is waited out in full. A stalled
+#       wait is ended by the stall counter, not this cap: 8 consecutive
+#       cursor reads with no change (about 4.5s at the current backoff)
+#       give up. The cap only bounds a wait whose cursor reads keep
+#       failing outright.
+#   GC_DOLT_INIT_LOCK_DIR — directory holding op_init's cross-process,
+#       per-database advisory locks that serialize a forced reinit's
+#       revalidate-then-force sequence (default: $TMPDIR or /tmp). Not
+#       under GC_CITY_PATH on purpose: two cities/worktrees that share one
+#       managed Dolt server can target the same dolt_database from
+#       different city paths, so the lock must resolve to the same file
+#       for both regardless of which city each process was invoked from.
+#   GC_DOLT_INIT_LOCK_TIMEOUT_MS — wait budget for that lock before op_init
+#       gives up on a concurrent initializer and fails closed instead of
+#       forcing unprotected, in milliseconds (default: 60000).
 
 set -e
 
@@ -42,6 +65,11 @@ DOLT_LOGLEVEL="${GC_DOLT_LOGLEVEL:-warning}"
 LSOF_TIMEOUT_SECONDS="${GC_LSOF_TIMEOUT_SECONDS:-2}"
 CONCURRENT_START_READY_TIMEOUT_MS="${GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS:-}"
 LOCK_RELEASE_TIMEOUT_MS="${GC_DOLT_LOCK_RELEASE_TIMEOUT_MS:-60000}"
+# Deliberately NOT derived from GC_CITY_PATH — see op_init's use of this for
+# why (two cities/worktrees sharing one managed Dolt server must resolve to
+# the same lock file despite having different city paths).
+INIT_LOCK_DIR="${GC_DOLT_INIT_LOCK_DIR:-${TMPDIR:-/tmp}/gc-beads-bd-init-locks}"
+INIT_LOCK_TIMEOUT_MS="${GC_DOLT_INIT_LOCK_TIMEOUT_MS:-60000}"
 BEADS_BACKEND="${GC_BEADS_BACKEND:-${BEADS_BACKEND:-dolt}}"
 
 # Probed once in the parent shell — dolt_data_lock_holder runs in $(...)
@@ -76,6 +104,49 @@ CONFIG_FILE=""
 die() {
     echo "$@" >&2
     exit 1
+}
+
+# trace_bd_argv records one bd invocation this script is about to fork, as a
+# single line appended to the file named by $GC_BD_TRACE. No-op when the
+# variable is unset, which is every ordinary run.
+#
+# It exists because this script is a blind spot in gc's own fork accounting.
+# gc records the bd calls it makes in-process, but the provider script is a
+# separate process that writes nothing, so every bd it forks — the ping behind
+# start/ensure-ready/health/probe, the init, the stop — was invisible to the
+# very measurement the proxied topology made worth taking.
+#
+# It deliberately writes the LINE format under $GC_BD_TRACE rather than the
+# JSONL under $GC_BD_TRACE_JSON. The JSONL file is where the fork-count gate
+# counts, and a test that also substitutes a recording BD_BIN shim would have
+# every fork in it twice — once from the shim and once from here. Two formats
+# under two variables keep the census and this breadcrumb trail separate.
+#
+# Best-effort in both directions: an unwritable path is ignored rather than
+# failing the operation it was only observing.
+trace_bd_argv() {
+    # The JSONL trace claims tracing when it is set, exactly as the in-process
+    # writer does (internal/beads/bdstore.go newBDExecTrace): that file is where
+    # the fork-count gate counts, and a run that also substitutes a recording
+    # BD_BIN shim would otherwise have every fork twice, once from the shim and
+    # once from here. Two formats sharing one file is the other half of the same
+    # hazard. The implementer's claim that the formats never interleave rests on
+    # this guard, so the script has to honour it too.
+    [ -z "${GC_BD_TRACE_JSON:-}" ] || return 0
+    [ -n "${GC_BD_TRACE:-}" ] || return 0
+    trace_args=$*
+    # One fork, one line. An argv can carry a newline — a bead title, a JSON
+    # payload on `bd create` — and a raw one here splits the breadcrumb into two
+    # lines, the second with no source= prefix, which any reader counts as a
+    # record it cannot attribute. The fold costs a subshell only when there is
+    # actually a newline to fold, which no gc-built argv has.
+    case $trace_args in
+    *"
+"*) trace_args=$(printf '%s' "$trace_args" | tr '\n\r' '  ') ;;
+    esac
+    printf '%s source=provider-script subcommand=%s pid=%s dir=%s args=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${1:-unknown}" "$$" "$(pwd)" "$trace_args" \
+        >>"$GC_BD_TRACE" 2>/dev/null || true
 }
 
 resolve_gc_helper_bin() {
@@ -121,6 +192,17 @@ connect_host() {
 
 trim_space() {
     printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+normalize_dolt_mode() {
+    # Keep shell mode classification aligned with Go's strings.TrimSpace and
+    # case-insensitive comparisons. YAML's unquoted inline comments are not
+    # part of the value, so discard a comment marker introduced after space.
+    local value
+    value=$(trim_space "$1")
+    value=$(printf '%s' "$value" | sed 's/[[:space:]]\+#.*$//')
+    value=$(trim_space "$value")
+    printf '%s' "$value" | tr '[:upper:]' '[:lower:]'
 }
 
 lower_dolt_database_name() {
@@ -420,13 +502,11 @@ ensure_database_registered() {
 }
 
 # seed_fresh_managed_bd_version_witness records the bd version that is about
-# to initialize a database created by this invocation. It probes the same
-# "${BD_BIN:-bd}" that run_bd_pinned runs, so the witness names the binary that
-# actually initializes the workspace rather than whichever bd happens to be on
-# PATH. bd 1.2+ uses this bounded witness to distinguish current server-mode
-# workspaces from legacy .beads/dolt layouts. Never create or replace it for a
-# pre-existing database: doing so would bypass bd's explicit cross-era
-# migration guard.
+# to initialize a database created by this invocation. bd 1.2+ uses this
+# bounded witness to distinguish current server-mode workspaces from legacy
+# .beads/dolt layouts. Use BD_BIN when supplied so the witness and the init
+# command cannot disagree about the selected provider binary. Never create or replace it for a pre-existing database:
+# doing so would bypass bd's explicit cross-era migration guard.
 seed_fresh_managed_bd_version_witness() {
     local dir="$1"
     local marker="$dir/.beads/.local_version"
@@ -434,6 +514,7 @@ seed_fresh_managed_bd_version_witness() {
 
     [ ! -e "$marker" ] || return 0
 
+    trace_bd_argv version
     if ! raw=$("${BD_BIN:-bd}" version 2>/dev/null); then
         die "failed to read bd version while initializing fresh managed Dolt workspace at $dir"
     fi
@@ -501,6 +582,106 @@ read_metadata_string_field() {
 metadata_is_doltlite() {
     local meta_file="$1"
     [ "$(read_metadata_string_field "$meta_file" backend)" = "doltlite" ] || [ "$(read_metadata_string_field "$meta_file" database)" = "doltlite" ]
+}
+
+scope_backend_is_dolt() {
+    # dolt.mode belongs to the Dolt backend namespace. Scope metadata is the
+    # strongest persisted backend signal; fall back to the process backend for
+    # fresh scopes whose metadata has not been emitted yet. Unknown backends
+    # fail closed so a stale Dolt marker cannot redirect another provider.
+    local scope="$1" metadata_backend metadata_database configured_backend
+    metadata_backend="$(read_metadata_string_field "$scope/.beads/metadata.json" backend)"
+    metadata_backend="$(normalize_dolt_mode "$metadata_backend")"
+    if [ -n "$metadata_backend" ]; then
+        [ "$metadata_backend" = "dolt" ]
+        return $?
+    fi
+    metadata_database="$(read_metadata_string_field "$scope/.beads/metadata.json" database)"
+    metadata_database="$(normalize_dolt_mode "$metadata_database")"
+    case "$metadata_database" in
+        doltlite) return 1 ;;
+        dolt) return 0 ;;
+    esac
+    configured_backend="${GC_BEADS_BACKEND:-${BEADS_BACKEND:-dolt}}"
+    configured_backend="$(normalize_dolt_mode "$configured_backend")"
+    case "$configured_backend" in
+        ""|dolt) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# beads_config_value <config.yaml> <section.field> prints a two-part dotted
+# bd config key's value in either spelling bd reads: the flat top-level
+# `section.field: v` gc writes, or the nested `section:` / `  field: v` that
+# bd >= 1.3.1 writes on `bd config set`. The flat spelling wins when both are
+# present, as it does in viper. Trailing comments and surrounding quotes are
+# stripped; an absent file or key prints nothing. Mirrors findConfigValue in
+# internal/beads/contract/files.go.
+beads_config_value() {
+    [ -f "$1" ] || return 0
+    awk -v key="$2" '
+        function clean(v) {
+            sub(/^[[:space:]]+/, "", v)
+            if (v ~ /^#/) v = ""
+            sub(/[[:space:]]+#.*$/, "", v)
+            sub(/[[:space:]]+$/, "", v)
+            if (v ~ /^".*"$/ || v ~ /^\047.*\047$/) v = substr(v, 2, length(v) - 2)
+            return v
+        }
+        BEGIN {
+            dot = index(key, ".")
+            section = substr(key, 1, dot - 1)
+            field = substr(key, dot + 1)
+        }
+        { sub(/\r$/, "") }
+        /^[[:space:]]*(#.*)?$/ { next }
+        /^[^[:space:]]/ {
+            in_section = 0
+            child_indent = -1
+            if (!flat_seen && index($0, key ":") == 1) {
+                flat_seen = 1
+                flat = clean(substr($0, length(key) + 2))
+            }
+            if (index($0, section ":") == 1 && clean(substr($0, length(section) + 2)) == "") in_section = 1
+            next
+        }
+        in_section {
+            match($0, /^[[:space:]]+/)
+            if (child_indent < 0) child_indent = RLENGTH
+            if (RLENGTH == child_indent && nested == "" && index(substr($0, RLENGTH + 1), field ":") == 1)
+                nested = clean(substr($0, RLENGTH + length(field) + 2))
+        }
+        END {
+            if (flat_seen) print flat
+            else if (nested != "") print nested
+        }
+    ' "$1"
+}
+
+scope_is_proxied() {
+    # Persisted scope markers are authoritative. Ambient proxy mode is only a
+    # fallback for an otherwise-unmarked scope and must not override an
+    # explicit direct-server binding.
+    scope_backend_is_dolt "$1" || return 1
+    local metadata_mode config_mode normalized_mode
+    metadata_mode="$(normalize_dolt_mode "$(read_metadata_string_field "$1/.beads/metadata.json" dolt_mode)")"
+    if [ -n "$metadata_mode" ]; then
+        [ "$metadata_mode" = "proxied-server" ] && return 0
+        return 1
+    fi
+    # config.yaml is a legacy compatibility input for the direct/server shapes
+    # only. bd records the proxied binding in metadata.json and writes no
+    # dolt.mode of its own, so a "proxied-server" here is drift and must not
+    # move a scope onto the proxy path.
+    if [ -f "$1/.beads/config.yaml" ]; then
+        config_mode=$(beads_config_value "$1/.beads/config.yaml" dolt.mode)
+        normalized_mode=$(normalize_dolt_mode "$config_mode")
+        if [ -n "$normalized_mode" ]; then
+            return 1
+        fi
+    fi
+    [ "${BEADS_DOLT_PROXIED_SERVER:-}" = "1" ] && return 0
+    return 1
 }
 
 write_doltlite_metadata() {
@@ -626,6 +807,16 @@ ensure_bd_runtime_issue_prefix() {
     ensure_bd_runtime_config_value "$db" "issue_prefix" "$prefix"
 }
 
+# gc_custom_types prints the bd custom bead types Gas City requires, as the CSV
+# bd's types.custom config takes. Custom bead types were extracted from beads
+# core in v0.46.0. "convergence" is required because gc's convergence handler
+# creates beads with that type; "step" is required for non-root formula step
+# beads (#1039). Must match doctor.RequiredCustomTypes.
+# GC_BEADS_CUSTOM_TYPES overrides the default SDK set.
+gc_custom_types() {
+    printf '%s\n' "${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode}"
+}
+
 valid_custom_types_value() {
     local types="$1" old_ifs typ
     [ -n "$types" ] || return 1
@@ -639,10 +830,74 @@ valid_custom_types_value() {
     return 0
 }
 
+# ensure_bd_runtime_custom_types registers GC's custom bead types with bd's
+# runtime SQL state, in raw SQL only (ga-5mym: no `bd config set` inside the
+# provider op timeout).
+#
+# bd validates a bead type against the normalized custom_types table first and
+# falls back to the config row's types.custom only when that table is empty;
+# .beads/config.yaml is invisible to the native (library) store. So:
+#
+#   - The config row is MERGED, never overwritten: every missing GC type is
+#     appended and every existing entry, operator extras included, is kept.
+#     A JSON-array row (bd config set's form) is normalized to CSV first so
+#     the append stays well-formed.
+#   - When custom_types is non-empty, the GC types are INSERT IGNOREd into it.
+#     This is what heals an upgraded store whose table an older bd populated
+#     with an older GC list: the row alone never reaches the validator then
+#     (#6495). An empty table is left alone -- bd still validates against the
+#     row, and its backfill copies the row in later. A missing table (a schema
+#     older than bd's custom_types migration) is likewise left to bd.
+#   - Against a remote Dolt server GC does not own the table, so it only
+#     warns about required types missing from it and points at `gc doctor`.
+#     The row merge still happens there, as the row write always has, but it
+#     can no longer narrow the list.
 ensure_bd_runtime_custom_types() {
     local db="$1"
     local types="$2"
-    ensure_bd_runtime_config_value "$db" "types.custom" "$types"
+    local old_ifs typ row_sql table_sql req_sql output tables_changed missing
+    [ -n "$db" ] || return 0
+    [ -n "$types" ] || return 0
+    valid_sql_name "$db" || die "invalid dolt database name: $db"
+    validate_bd_runtime_config_value "types.custom" "$types"
+
+    row_sql="USE \`$db\`; INSERT INTO config (\`key\`, value) VALUES ('types.custom', '$types') ON DUPLICATE KEY UPDATE value = value; UPDATE config SET value = REPLACE(REPLACE(REPLACE(REPLACE(value, '[', ''), ']', ''), '\"', ''), ' ', '') WHERE \`key\` = 'types.custom' AND TRIM(value) LIKE '[%';"
+    req_sql=""
+    old_ifs=$IFS
+    IFS=','
+    for typ in $types; do
+        row_sql="$row_sql UPDATE config SET value = IF(TRIM(value) = '', '$typ', CONCAT(value, ',$typ')) WHERE \`key\` = 'types.custom' AND FIND_IN_SET('$typ', REPLACE(value, ' ', '')) = 0;"
+        if [ -z "$req_sql" ]; then
+            req_sql="SELECT '$typ' AS n"
+        else
+            req_sql="$req_sql UNION ALL SELECT '$typ'"
+        fi
+    done
+    IFS=$old_ifs
+
+    server_sql_retry "$row_sql" >/dev/null || die "failed to set bd runtime types.custom for $db"
+
+    tables_changed=config
+    if is_remote; then
+        # Read-only on a server GC does not own: report, never write.
+        output=$(server_sql "USE \`$db\`; SELECT CONCAT('gc-missing-custom-types:', COALESCE(GROUP_CONCAT(n), '')) AS r FROM ($req_sql) req WHERE EXISTS (SELECT 1 FROM custom_types) AND n NOT IN (SELECT name FROM custom_types)" 2>&1) || output=""
+        missing=$(printf '%s\n' "$output" | sed -n 's/.*gc-missing-custom-types:\([A-Za-z0-9_,-]*\).*/\1/p' | head -n 1)
+        if [ -n "$missing" ]; then
+            echo "warning: bd custom_types table for $db on external Dolt server is missing required types ($missing); bd will reject beads of those types. Run \`gc doctor\` and, if custom-types fails, \`gc doctor --fix\`." >&2
+        fi
+    else
+        table_sql="USE \`$db\`; INSERT IGNORE INTO custom_types (name) SELECT n FROM ($req_sql) req WHERE EXISTS (SELECT 1 FROM custom_types)"
+        if output=$(server_sql_retry "$table_sql" 2>&1); then
+            tables_changed="config custom_types"
+        else
+            case "$output" in
+                *"table not found"*) ;;
+                *) echo "warning: failed to register required types in bd custom_types table for $db; bd may reject GC bead types until \`gc doctor --fix\` runs: $output" >&2 ;;
+            esac
+        fi
+    fi
+    # shellcheck disable=SC2086 # tables_changed is a word list of table names.
+    commit_bd_runtime_config "$db" "types.custom" $tables_changed
 }
 
 validate_bd_runtime_config_value() {
@@ -693,7 +948,8 @@ ensure_bd_runtime_config_value() {
 #     GC for that database (the same hazard the read-only probe table is
 #     registered in dolt_ignore to avoid).
 #
-# Staging is scoped to `config` alone: a blanket DOLT_ADD('.') would sweep
+# Staging is scoped to the tables GC wrote (`config`, plus `custom_types` for
+# the custom-types writer): a blanket DOLT_ADD('.') would sweep
 # whatever else happens to be dirty into GC's commit, which is the hash-drift
 # failure above rather than a fix for it.
 #
@@ -701,12 +957,27 @@ ensure_bd_runtime_config_value() {
 # the pre-existing (dirty but functional) state rather than breaking
 # provisioning -- notably on a read-only replica. It is always reported, never
 # swallowed, so the operator knows the working set needs attention.
+#
+# Extra arguments name the tables the caller wrote (default: config). The
+# custom-types writer also stages custom_types, and only when it actually wrote
+# it: DOLT_ADD of a table the schema does not have yet is an error.
 commit_bd_runtime_config() {
     local db="$1"
     local key="$2"
-    local output
+    local output tbl add_args
     [ -n "$db" ] || return 0
-    output=$(server_sql "USE \`$db\`; CALL DOLT_ADD('config'); CALL DOLT_COMMIT('-m', 'gc: record beads runtime config', '--author', 'gascity-builder <builder@gascity.local>')" 2>&1) && return 0
+    if [ "$#" -ge 2 ]; then shift 2; else set --; fi
+    [ "$#" -gt 0 ] || set -- config
+    add_args=""
+    for tbl in "$@"; do
+        valid_sql_name "$tbl" || continue
+        if [ -z "$add_args" ]; then
+            add_args="'$tbl'"
+        else
+            add_args="$add_args, '$tbl'"
+        fi
+    done
+    output=$(server_sql "USE \`$db\`; CALL DOLT_ADD($add_args); CALL DOLT_COMMIT('-m', 'gc: record beads runtime config', '--author', 'gascity-builder <builder@gascity.local>')" 2>&1) && return 0
     # An idempotent re-run has nothing to commit; that is success, not failure.
     case "$output" in
         *"nothing to commit"*|*"no changes added to commit"*|*"No changes"*) return 0 ;;
@@ -766,29 +1037,73 @@ server_reachable() {
     server_sql "SELECT 1" >/dev/null 2>&1
 }
 
+# wait_for_bd_runtime_schema waits for bd's schema to become queryable in
+# database $1, tracking real migration progress instead of a fixed attempt
+# count or total-wait ceiling: each attempt re-reads the schema_migrations
+# cursor via bd_runtime_schema_cursor, and both the stall counter and the
+# GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS deadline reset whenever the cursor has
+# moved since the previous attempt. A slow-but-live concurrent migration
+# keeps resetting both and is waited out in full, however long it
+# ultimately takes; only a gap with no observed advance -- once it reaches
+# STALL_BUDGET consecutive attempts or the settle-timeout cap, whichever
+# comes first -- ends the wait early. The prior fixed 8-attempt/~4.5s
+# budget measured short against a real 66-migration run (7.19s unloaded,
+# worse under a saturated CI host) -- exactly the window that let a racing
+# initializer's database read as "missing schema" in ga-e2z1zb. A cursor
+# read that fails outright (bd_runtime_schema_cursor returns
+# non-numeric/empty) is treated as a stalled attempt rather than progress
+# -- there is no evidence of advancement to reset the counters on.
 wait_for_bd_runtime_schema() {
     local db="$1"
-    local attempt backoff_ms
+    local backoff_ms stalls last_cursor cursor cap_ms now deadline
+    local stall_budget=8
     [ -n "$db" ] || return 1
     valid_sql_name "$db" || return 1
 
+    cap_ms="${GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS:-120000}"
+    case "$cap_ms" in
+        ''|*[!0-9]*) cap_ms=120000 ;;
+    esac
+    now=$(date +%s 2>/dev/null) || now=0
+    deadline=$((now + cap_ms / 1000))
+
     backoff_ms=100
-    for attempt in 1 2 3 4 5 6 7 8; do
+    stalls=0
+    last_cursor=""
+    while :; do
         if bd_runtime_schema_ready "$db"; then
             return 0
         fi
-        if [ "$attempt" -lt 8 ]; then
-            sleep_ms "$backoff_ms" 2>/dev/null || sleep 1
-            if [ "$backoff_ms" -lt 1000 ]; then
-                backoff_ms=$((backoff_ms * 2))
-                if [ "$backoff_ms" -gt 1000 ]; then
-                    backoff_ms=1000
-                fi
+
+        cursor=$(bd_runtime_schema_cursor "$db") || cursor=""
+        case "$cursor" in
+            ''|*[!0-9]*) cursor="" ;;
+        esac
+        if [ -n "$cursor" ] && [ "$cursor" != "$last_cursor" ]; then
+            stalls=0
+            last_cursor="$cursor"
+            now=$(date +%s 2>/dev/null) || now=0
+            deadline=$((now + cap_ms / 1000))
+        else
+            stalls=$((stalls + 1))
+            if [ "$stalls" -ge "$stall_budget" ]; then
+                return 1
+            fi
+
+            now=$(date +%s 2>/dev/null) || now=0
+            if [ "$now" -ge "$deadline" ]; then
+                return 1
+            fi
+        fi
+
+        sleep_ms "$backoff_ms" 2>/dev/null || sleep 1
+        if [ "$backoff_ms" -lt 1000 ]; then
+            backoff_ms=$((backoff_ms * 2))
+            if [ "$backoff_ms" -gt 1000 ]; then
+                backoff_ms=1000
             fi
         fi
     done
-
-    return 1
 }
 
 # bd_runtime_bd_table_count prints how many of bd's own tables exist in the
@@ -815,6 +1130,75 @@ bd_runtime_bd_table_count() {
     echo "$output" | tail -1 | tr -d '[:space:]'
 }
 
+# bd_runtime_schema_cursor prints the highest schema_migrations.version value
+# recorded in the database, or 0 if the schema_migrations table does not exist
+# yet. This is what tells a zero bd_runtime_bd_table_count apart from a
+# genuinely fresh (never-initialized) store: a concurrent initializer creates
+# schema_migrations and starts advancing its cursor before any of bd's own
+# tables (issues, comments, events, dependencies) exist, so a snapshot taken
+# in that window reads 0 tables yet is not empty. Returns 1 (printing
+# nothing) if either query fails or answers with something unparseable, so a
+# caller can tell "no migration in flight" from "could not tell" and treat
+# the latter as unknown rather than as zero.
+bd_runtime_schema_cursor() {
+    local db="$1"
+    local host exists_output exists cursor_output cursor
+    [ -n "$db" ] || return 1
+    valid_sql_name "$db" || return 1
+    host=$(connect_host)
+    exists_output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema = '$db' AND table_name = 'schema_migrations'" 2>/dev/null) || return 1
+    exists=$(echo "$exists_output" | tail -1 | tr -d '[:space:]')
+    case "$exists" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    if [ "$exists" -eq 0 ]; then
+        echo 0
+        return 0
+    fi
+    cursor_output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SELECT COALESCE(MAX(version), 0) AS cur FROM \`$db\`.schema_migrations" 2>/dev/null) || return 1
+    cursor=$(echo "$cursor_output" | tail -1 | tr -d '[:space:]')
+    case "$cursor" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    echo "$cursor"
+}
+
+# bd_runtime_schema_migration_count prints how many rows schema_migrations
+# holds, or 0 if the table does not exist yet. bd_runtime_store_holds_bd_tables
+# consults this as a third signal, after bd table count and the migration
+# cursor both read empty: a parked store -- no bd tables, no in-flight
+# migration -- can still carry real migration history left behind by a
+# migrator that has since exited, and that history must not be misread as a
+# genuinely fresh database (ga-m1qxc8). Returns 1 (printing nothing) on any
+# query failure, so a caller can treat "could not tell" as unknown rather
+# than as zero.
+bd_runtime_schema_migration_count() {
+    local db="$1"
+    local host exists_output exists count_output count
+    [ -n "$db" ] || return 1
+    valid_sql_name "$db" || return 1
+    host=$(connect_host)
+    exists_output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema = '$db' AND table_name = 'schema_migrations'" 2>/dev/null) || return 1
+    exists=$(echo "$exists_output" | tail -1 | tr -d '[:space:]')
+    case "$exists" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    if [ "$exists" -eq 0 ]; then
+        echo 0
+        return 0
+    fi
+    count_output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SELECT COUNT(*) AS cnt FROM \`$db\`.schema_migrations" 2>/dev/null) || return 1
+    count=$(echo "$count_output" | tail -1 | tr -d '[:space:]')
+    case "$count" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    echo "$count"
+}
+
 # bd_runtime_store_holds_bd_tables answers whether the database carries bd's own
 # tables, which is what decides whether `bd init --force` would create schema or
 # migrate over live rows. It has three answers and the call site needs all three:
@@ -823,21 +1207,71 @@ bd_runtime_bd_table_count() {
 #      existing working set, and beads refuses to migrate any table holding
 #      uncommitted changes (gastownhall/beads#4566), so the reinit aborts city
 #      init instead of repairing anything.
-#   1  no, the database is empty. This is the genuinely-fresh store gc pre-seeds
-#      metadata.json for, and reinitializing it is exactly right.
-#   2  could not tell, because the query did not answer.
+#   1  no, the database is genuinely empty: zero bd tables, no schema_migrations
+#      cursor in progress, AND no migration history left behind in
+#      schema_migrations by a migrator that has since exited. This is the fresh
+#      store gc pre-seeds metadata.json for, and reinitializing it is exactly
+#      right. Zero bd tables with a nonzero cursor is NOT this case -- it means
+#      a concurrent initializer has created schema_migrations and started
+#      migrating but hasn't reached bd's own tables yet, and answers 0 here too
+#      (see below), never 1. Neither is zero bd tables with a settled (zero)
+#      cursor but rows still sitting in schema_migrations -- a parked store a
+#      migrator already finished with and exited (ga-m1qxc8) -- for the same
+#      reason: real prior state, not a fresh database.
+#   2  could not tell, because a query did not answer.
 #
 # Collapsing 2 into either of the others is the mistake this exists to prevent.
 # Folding it into 0 turns an unreadable count into a refusal to initialize a
 # fresh city; folding it into 1 re-creates the destructive guess this whole
-# guard was added to stop.
+# guard was added to stop. The same reasoning extends to the cursor and
+# migration-row-count reads: either one failing on a zero table count is
+# unknown (2), not empty, because there is no way to distinguish "fresh" from
+# "settled state the probe just misread" without both answering.
 bd_runtime_store_holds_bd_tables() {
-    local count
-    count=$(bd_runtime_bd_table_count "$1") || return 2
+    local db="$1"
+    local count cursor mig_count
+    count=$(bd_runtime_bd_table_count "$db") || return 2
     case "$count" in
         ''|*[!0-9]*) return 2 ;;
     esac
-    [ "$count" -gt 0 ]
+    if [ "$count" -gt 0 ]; then
+        return 0
+    fi
+    cursor=$(bd_runtime_schema_cursor "$db") || return 2
+    case "$cursor" in
+        ''|*[!0-9]*) return 2 ;;
+    esac
+    if [ "$cursor" -gt 0 ]; then
+        return 0
+    fi
+    mig_count=$(bd_runtime_schema_migration_count "$db") || return 2
+    case "$mig_count" in
+        ''|*[!0-9]*) return 2 ;;
+    esac
+    [ "$mig_count" -gt 0 ]
+}
+
+# bd_runtime_reinit_refusal_subject disambiguates the two live states that
+# bd_runtime_store_holds_bd_tables collapses into its single "not empty"
+# return code (0): bd's own tables are present, or the table count is still
+# zero but schema_migrations shows a cursor in flight (a concurrent
+# initializer that hasn't reached bd's tables yet). Echoes "tables" or
+# "migration" so a caller can choose the refusal message that actually
+# matches what is there. Re-queries the table count at the moment of the
+# call -- whatever produced the caller's classification is stale by however
+# long has passed since.
+bd_runtime_reinit_refusal_subject() {
+    local db="$1"
+    local table_count=""
+    table_count=$(bd_runtime_bd_table_count "$db" 2>/dev/null) || table_count=""
+    case "$table_count" in
+        ''|*[!0-9]*) table_count="" ;;
+    esac
+    if [ -n "$table_count" ] && [ "$table_count" -gt 0 ]; then
+        echo "tables"
+    else
+        echo "migration"
+    fi
 }
 
 # --- Robustness Helpers ---
@@ -2635,6 +3069,7 @@ run_bd_pinned() {
         export GC_DOLT_PASSWORD="$DOLT_PASSWORD"
         export BEADS_DOLT_SERVER_USER="$DOLT_USER"
         export BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"
+        trace_bd_argv "$@"
         "${BD_BIN:-bd}" "$@"
     )
 }
@@ -2647,12 +3082,96 @@ run_bd_init_pinned() {
     local force_init="${5:-false}"
     if [ "$force_init" = "true" ]; then
         run_bd_pinned "$dir" init --force --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
-            --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
+            --server-host "$host" --server-port "$DOLT_PORT" "$dir" 8>&- || die "bd init failed for $dir"
         return 0
     fi
 
     run_bd_pinned "$dir" init --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
-        --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
+        --server-host "$host" --server-port "$DOLT_PORT" "$dir" 8>&- || die "bd init failed for $dir"
+}
+
+# run_bd_init_pinned_over_verified_empty runs a PLAIN bd init (no --force)
+# over a database op_init has just reconfirmed is genuinely empty. There is
+# nothing on a verified-empty store for --force's destructive
+# --reinit-local preflight to protect: gc's own pre-seeded metadata.json
+# stub is the only thing tripping bd's already-initialized guard, so set it
+# aside first, run a plain init, and restore the stub if that init fails so
+# the scope is never left without any metadata.json at all. Using --force
+# here instead is exactly the bug this guards against: --reinit-local runs a
+# writable, wall-clock-bounded countExistingIssues preflight (beads v1.3.0
+# cmd/bd/init.go ~994/~2702) that migrates a cursor-0 database, and on a
+# loaded host that preflight can be cut mid-migration -- bd's own #5920
+# shared-store gate then refuses the resulting partial schema on the very
+# next open (ga-k8l7y9, ga-h8haz6, gastownhall/beads#6746).
+#
+# The plain-init argv below intentionally mirrors run_bd_init_pinned's
+# non-force branch; change both together if either changes.
+run_bd_init_pinned_over_verified_empty() {
+    local dir="$1"
+    local prefix="$2"
+    local dolt_database="$3"
+    local host="$4"
+    local metadata_path="$dir/.beads/metadata.json"
+    local stub_aside="$metadata_path.gc-init-stub"
+    if [ -f "$metadata_path" ]; then
+        mv -f "$metadata_path" "$stub_aside" || die "could not set aside metadata stub for $dir before a plain bd init over a verified-empty store"
+    fi
+    if ! run_bd_pinned "$dir" init --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
+        --server-host "$host" --server-port "$DOLT_PORT" "$dir" 8>&-; then
+        if [ -f "$stub_aside" ]; then
+            mv -f "$stub_aside" "$metadata_path" || die "bd init failed for $dir, and could not restore the metadata stub set aside at $stub_aside; restore it manually before retrying"
+        fi
+        die "bd init failed for $dir"
+    fi
+    rm -f "$stub_aside"
+}
+
+# require_proxied_idle_timeout dies unless gc projected the idle timeout it
+# resolved for the scope being initialized. A proxied init without it must not
+# fall back to bd's own 30s default or to a value nobody configured.
+require_proxied_idle_timeout() {
+    [ -n "${GC_BEADS_PROXIED_IDLE_TIMEOUT:-}" ] || die "proxied init requires GC_BEADS_PROXIED_IDLE_TIMEOUT (gc projects the resolved [beads] proxied_idle_timeout)"
+}
+
+# run_bd_init_proxied initializes a local workspace through beads RC's
+# proxied-server UOW path. Gas City deliberately does not provide a Dolt
+# host/port here: the RC owns both the proxy and its local Dolt child.
+run_bd_init_proxied() {
+    local dir="$1"
+    local prefix="$2"
+    local dolt_database="$3"
+    local external_host="${GC_BEADS_PROXY_EXTERNAL_HOST:-}"
+    local external_port="${GC_BEADS_PROXY_EXTERNAL_PORT:-}"
+    (
+        cd "$dir" || exit 1
+        export BEADS_DIR="$dir/.beads"
+        export BEADS_DOLT_PROXIED_SERVER=1
+        pin_proxied_shared_server_off
+        unset BEADS_DOLT_AUTO_START
+        unset GC_DOLT GC_DOLT_HOST GC_DOLT_PORT GC_DOLT_USER GC_DOLT_PASSWORD
+        unset GC_DOLT_DATA_DIR GC_DOLT_LOG_FILE GC_DOLT_STATE_FILE GC_DOLT_PID_FILE GC_DOLT_LOCK_FILE GC_DOLT_CONFIG_FILE
+        unset BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_SOCKET BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
+        bd_bin="${BD_BIN:-bd}"
+        # The idle timeout applies to every proxied scope GC owns, not only the
+        # ones that arrive through the provider-owned front door. gc resolves
+        # it ([beads] proxied_idle_timeout, the rig override, or the env) and
+        # projects it as GC_BEADS_PROXIED_IDLE_TIMEOUT; passing it is also what
+        # makes bd write the client-info sidecar the lifecycle reads to find
+        # the proxy root.
+        require_proxied_idle_timeout
+        set -- init --quiet --proxied-server --proxied-server-idle-timeout "$GC_BEADS_PROXIED_IDLE_TIMEOUT"
+        if [ -n "$external_host" ] || [ -n "$external_port" ]; then
+            [ -n "$external_host" ] && [ -n "$external_port" ] || die "proxied-external init requires both GC_BEADS_PROXY_EXTERNAL_HOST and GC_BEADS_PROXY_EXTERNAL_PORT"
+            set -- "$@" --proxied-server-external-host "$external_host" --proxied-server-external-port "$external_port"
+        fi
+        set -- "$@" -p "$prefix"
+        if [ -n "$dolt_database" ]; then
+            set -- "$@" --database "$dolt_database"
+        fi
+        set -- "$@" --skip-hooks --skip-agents "$dir"
+        trace_bd_argv "$@"
+        "$bd_bin" "$@"
+    )
 }
 
 run_bd_doltlite() {
@@ -2665,8 +3184,9 @@ run_bd_doltlite() {
         export GC_BEADS_BACKEND="doltlite"
         unset GC_DOLT_HOST GC_DOLT_PORT GC_DOLT_USER GC_DOLT_PASSWORD GC_DOLT
         unset BEADS_DOLT_DATABASE BEADS_DOLT_PORT
-        unset BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
+        unset BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_SOCKET BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
         export BEADS_DOLT_AUTO_START=0
+        trace_bd_argv "$@"
         "${BD_BIN:-bd}" "$@"
     )
 }
@@ -2816,6 +3336,7 @@ op_init() {
     local existing_db=""
     local allow_reserved_existing=false
     local bd_init_force=""
+    local bd_init_over_verified_empty=false
     local database_created_by_gc=false
     if [ -z "$dir" ] || [ -z "$prefix" ]; then
         die "usage: gc-beads-bd init <dir> <prefix> [dolt_database]"
@@ -2878,12 +3399,42 @@ op_init() {
         die "reserved dolt database name: $dolt_database (used internally by gc)"
     fi
 
-    # Custom bead types for bd (extracted from beads core in v0.46.0).
-    # GC_BEADS_CUSTOM_TYPES overrides the default SDK set.
-    # "convergence" is required because gc's convergence handler creates
-    # beads with that type. "step" is required for non-root formula step
-    # beads (#1039). Must match doctor.RequiredCustomTypes.
-    local custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step}"
+    local custom_types
+    custom_types=$(gc_custom_types)
+
+    # Fresh managed-local scopes use direct/server mode by default. Beads
+    # metadata/config and a pending provider intent are the topology authority;
+    # existing authoritative modes remain unchanged.
+    if scope_is_proxied "$dir"; then
+        ensure_beads_dir_permissions "$dir"
+        # An explicitly opted-in proxied scope may already have config.yaml (gc writes the
+        # canonical mode before invoking this helper) but no metadata.json.
+        # `bd context` can succeed from ambient parent state in that shape, so
+        # use the RC's metadata marker as the initialization witness. Honor
+        # BD_BIN here just as run_bd_init_proxied does; tests and pinned
+        # deployments must not silently invoke an unrelated PATH binary.
+        bd_bin="${BD_BIN:-bd}"
+        # The context probe is a bd fork like any other and has to be recorded
+        # like one: a fork census with a hole in it is worse than none, because
+        # the budget it informs reads as met. The condition is split rather than
+        # traced in place because the original `[ ! -f metadata ] || ! (… bd
+        # context …)` short-circuits — a trace above it would count a fork that
+        # never happened on a scope with no metadata.json, which is the common
+        # case on a first init.
+        proxied_needs_init=true
+        if [ -f "$metadata_path" ]; then
+            trace_bd_argv context
+            if (cd "$dir" && { ! scope_pins_shared_server_off "$dir" || pin_proxied_shared_server_off; } && BEADS_DIR="$dir/.beads" BEADS_DOLT_PROXIED_SERVER=1 "$bd_bin" context >/dev/null 2>&1); then
+                proxied_needs_init=false
+            fi
+        fi
+        if [ "$proxied_needs_init" = true ]; then
+            run_bd_init_proxied "$dir" "$prefix" "$dolt_database" || die "bd proxied-server init failed for $dir"
+        fi
+        ensure_beads_dir_permissions "$dir"
+        normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
+        exit 0
+    fi
 
     # Hosted beads-gateway: when a credential command is configured, bd
     # authenticates to the gateway via that command (EIA-as-username over TLS) and
@@ -2974,7 +3525,18 @@ op_init() {
                     if wait_for_bd_runtime_schema "$dolt_database"; then
                         schema_ready=true
                     elif [ "$holds_bd_tables" -eq 0 ]; then
-                        die "database '$dolt_database' holds bd tables but its bd schema stayed unreadable across retries; refusing to force-reinitialize (data-safety). a forced reinit re-runs migrations over the existing working set, which beads rejects when a table it migrates carries uncommitted changes (gastownhall/beads#4566). inspect the store with 'bd dolt status' before retrying."
+                        # holds_bd_tables=0 covers two distinct give-up states that
+                        # share one code: bd's own tables are present, or the table
+                        # count is still zero but schema_migrations shows a cursor in
+                        # flight (a concurrent initializer that hasn't reached bd's
+                        # tables yet). Ask which one now, at give-up time -- the
+                        # earlier read that produced holds_bd_tables is stale by
+                        # however long the wait just ran.
+                        if [ "$(bd_runtime_reinit_refusal_subject "$dolt_database")" = "tables" ]; then
+                            die "database '$dolt_database' holds bd tables but its bd schema stayed unreadable across retries; refusing to force-reinitialize (data-safety). a forced reinit re-runs migrations over the existing working set, which beads rejects when a table it migrates carries uncommitted changes (gastownhall/beads#4566). inspect the store with 'bd dolt status' before retrying."
+                        else
+                            die "database '$dolt_database' has a schema_migrations cursor in progress but it never settled; refusing to force-reinitialize (data-safety). this means a concurrent initializer is still migrating '$dolt_database', or a previous migration crashed mid-way. a forced reinit cannot succeed here -- beads refuses to auto-apply pending migrations to a database with existing history -- and would only corrupt the store further. wait for the concurrent init to finish, or inspect the stalled migration with 'bd dolt status' before retrying."
+                        fi
                     else
                         # Undetermined: the table count never answered, so there is
                         # no evidence either way. Keep the pre-existing behaviour
@@ -3032,15 +3594,91 @@ op_init() {
         seed_fresh_managed_bd_version_witness "$dir"
     fi
 
+    # The classification above (whichever branch set bd_init_force) can go
+    # stale before the force actually runs: ensure_database_registered and
+    # seed_fresh_managed_bd_version_witness both do real work in the gap
+    # between that decision and here, during which a concurrent initializer
+    # can create schema_migrations and start advancing its cursor. Revalidate
+    # immediately before forcing rather than acting on a read that is now
+    # however-old -- this is the same probe the classification above used,
+    # just re-run at the moment it actually matters.
+    if [ -n "$bd_init_force" ]; then
+        # Revalidating alone is not enough when the concurrent initializer
+        # is a SEPARATE OS process (e.g. a second city/worktree pointed at
+        # this same dolt_database): two processes can each revalidate
+        # "still empty" and each proceed to force, because neither
+        # process's revalidation can observe the other's in-flight force
+        # until that force has actually landed and mutated visible state
+        # (gastownhall/beads#4566). Take a cross-process advisory lock,
+        # keyed by dolt_database (the one thing guaranteed identical
+        # between such processes — GC_CITY_PATH is not) and rooted outside
+        # any single city's directory tree, so a second process's
+        # revalidation cannot even begin until the first's force (or
+        # refusal) has completed and made its outcome visible.
+        if [ "$FLOCK_AVAILABLE" != true ]; then
+            die "flock is required to safely force-reinitialize database '$dolt_database' (data-safety): without it, two concurrent initializers cannot be serialized and could both force a destructive reinit (gastownhall/beads#4566). Install: brew install flock (macOS) or apt install util-linux (Linux)"
+        fi
+        local init_lock_file="$INIT_LOCK_DIR/$dolt_database.lock"
+        case "$INIT_LOCK_TIMEOUT_MS" in
+            ''|*[!0-9]*) INIT_LOCK_TIMEOUT_MS=60000 ;;
+        esac
+        local init_lock_timeout_s=$((INIT_LOCK_TIMEOUT_MS / 1000))
+        mkdir -p "$INIT_LOCK_DIR"
+        exec 8>"$init_lock_file"
+        if ! flock -w "$init_lock_timeout_s" 8; then
+            die "could not acquire init lock for database '$dolt_database' ($init_lock_file) within ${init_lock_timeout_s}s; a concurrent initializer may be stuck. inspect the store with 'bd dolt status' before retrying, or raise GC_DOLT_INIT_LOCK_TIMEOUT_MS."
+        fi
+
+        local reinit_still_empty=0
+        bd_runtime_store_holds_bd_tables "$dolt_database" || reinit_still_empty=$?
+        if [ "$reinit_still_empty" -eq 0 ]; then
+            if [ "$(bd_runtime_reinit_refusal_subject "$dolt_database")" = "tables" ]; then
+                die "database '$dolt_database' now holds bd tables that were not there moments ago; refusing to force-reinitialize (data-safety). a concurrent initializer completed between the freshness check and this forced reinit; forcing now would re-run migrations over its working set, which beads rejects when a table it migrates carries uncommitted changes (gastownhall/beads#4566). inspect the store with 'bd dolt status' before retrying."
+            else
+                die "database '$dolt_database' now has a schema_migrations cursor in progress that was not there moments ago; refusing to force-reinitialize (data-safety). a concurrent initializer started migrating '$dolt_database' between the freshness check and this forced reinit, and beads refuses to auto-apply pending migrations to a database with existing history. wait for the concurrent init to finish, or inspect the migration with 'bd dolt status' before retrying."
+            fi
+        elif [ "$reinit_still_empty" -eq 2 ]; then
+            echo "warning: could not confirm '$dolt_database' is still empty immediately before forcing; proceeding on the earlier classification" >&2
+        else
+            # reinit_still_empty == 1: freshly reconfirmed genuinely empty --
+            # no bd tables, no schema_migrations history at all, not merely
+            # "not yet visible". Route the fall-through init through the
+            # verified-empty helper instead of --force: see
+            # run_bd_init_pinned_over_verified_empty for why --force has
+            # nothing to protect here and what it breaks instead
+            # (ga-k8l7y9, ga-h8haz6).
+            bd_init_over_verified_empty=true
+        fi
+    fi
+
     # Run bd init in server mode through the pinned wrapper so the fallback
     # path uses the same authenticated Dolt target as the rest of init.
     # Metadata-only scopes already look initialized to bd, so schema-repair
-    # fallback must force reinit to seed the missing tables into the pinned DB.
+    # fallback must force reinit to seed the missing tables into the pinned DB
+    # -- UNLESS the revalidation above just reconfirmed the store is
+    # genuinely empty, in which case there is nothing to reinit over and a
+    # plain init through the stub-aside helper avoids --force's destructive
+    # preflight entirely (see run_bd_init_pinned_over_verified_empty).
     # Always pass the pinned server database explicitly; `-p` controls the
     # visible issue prefix, while `--database` tells bd which existing Dolt
     # database to initialize. Without `--database`, bd can seed beads_<prefix>
     # and leave the pinned database schema-less.
-    run_bd_init_pinned "$dir" "$prefix" "$dolt_database" "$host" "${bd_init_force:+true}"
+    if [ "$bd_init_over_verified_empty" = true ]; then
+        run_bd_init_pinned_over_verified_empty "$dir" "$prefix" "$dolt_database" "$host"
+    else
+        run_bd_init_pinned "$dir" "$prefix" "$dolt_database" "$host" "${bd_init_force:+true}"
+    fi
+
+    # Release the init lock (acquired above only when bd_init_force was
+    # set) promptly rather than holding it through the post-init
+    # verification below: once run_bd_init_pinned has returned, the
+    # database's schema is now genuinely present, so whichever process is
+    # next in line for this lock will see that in its own revalidation and
+    # correctly refuse to force again — it does not also need to wait out
+    # this process's own settle/verification below.
+    if [ -n "$bd_init_force" ]; then
+        exec 8>&-
+    fi
 
     # Re-register post-init: if bd init didn't catalog-register the DB
     # (server-mode quirk), do it now. After a successful bd init this is a
@@ -3072,7 +3710,8 @@ op_init() {
     # Configure custom bead types without invoking `bd config set`, which can
     # spend tens of seconds in auto-migrate on populated stores. The canonical
     # .beads/config.yaml types.custom line is now Go-owned (EnsureCanonicalConfig);
-    # here we only register the types in bd's runtime SQL config table.
+    # here we only register the types in bd's runtime SQL state (the config row
+    # and, when bd has populated it, the custom_types table).
     ensure_bd_runtime_custom_types "$dolt_database" "$custom_types"
 
     # Keep bd's runtime config in sync with GC's canonical prefix. This is
@@ -3382,6 +4021,433 @@ op_shutdown() {
     op_stop
 }
 
+# provider_owned_scope_dir resolves the scope carried by GC's provider adapter.
+# The legacy wrapper always manages the city-wide Dolt runtime; provider-owned
+# scopes instead let bd own its own server or proxied UOW lifecycle.
+provider_owned_scope_dir() {
+    [ -n "${BEADS_DIR:-}" ] || die "provider-owned beads operation requires BEADS_DIR"
+    dirname "$BEADS_DIR"
+}
+
+provider_owned_transport() {
+    local dir="$1"
+    case "${GC_BEADS_TRANSPORT:-}" in
+        direct|proxied) printf '%s\n' "$GC_BEADS_TRANSPORT" ;;
+        '')
+            if scope_is_proxied "$dir"; then
+                printf '%s\n' proxied
+            else
+                printf '%s\n' direct
+            fi
+            ;;
+        *) die "invalid provider-owned beads transport: $GC_BEADS_TRANSPORT" ;;
+    esac
+}
+
+# provider_owned_scope_is_local reads durable bd topology instead of guessing
+# from a loopback address. GC_BEADS_TARGET is present only while a pending
+# initialization is being completed; ready scopes derive ownership from the
+# binding bd wrote in the scope itself.
+provider_owned_scope_is_local() {
+    local dir="$1" config sidecar metadata
+    case "${GC_BEADS_TARGET:-}" in
+        local) return 0 ;;
+        external) return 1 ;;
+    esac
+    config="$dir/.beads/config.yaml"
+    [ -f "$config" ] || return 1
+
+    # bd persists proxied-external topology in its client-info sidecar. The
+    # endpoint must not be inferred from the loopback proxy listener.
+    if scope_is_proxied "$dir"; then
+        sidecar="$dir/.beads/proxied_server_client_info.json"
+        [ -f "$sidecar" ] && grep -Eq '"external"[[:space:]]*:' "$sidecar" && return 1
+        return 0
+    fi
+
+    # A direct scope bd initialized against someone else's server records that
+    # upstream in its own metadata. That binding is the authority here, the
+    # same way the sidecar is for a proxied one: without it a direct-external
+    # scope read as local and `gc stop` issued a lifecycle command for a Dolt
+    # nobody here started.
+    metadata="$dir/.beads/metadata.json"
+    if [ -f "$metadata" ] && grep -Eq '"dolt_server_(host|socket)"[[:space:]]*:[[:space:]]*"[^"]' "$metadata"; then
+        return 1
+    fi
+
+    # Legacy GC-managed direct scopes deliberately disable bd auto-start to
+    # prevent a competing server, but GC still owns their local lifecycle.
+    local origin
+    origin=$(beads_config_value "$config" gc.endpoint_origin)
+    if [ "$origin" = "managed_city" ]; then
+        return 0
+    fi
+    # A direct canonical endpoint is local only when bd's own persisted
+    # auto-start policy says it owns the process. This keeps transferred local
+    # loopback scopes local without treating external loopback endpoints as
+    # GC-owned.
+    if [ "$origin" = "city_canonical" ]; then
+        [ "$(beads_config_value "$config" dolt.auto-start)" = "true" ]
+        return $?
+    fi
+    if [ "$origin" = "explicit" ] ||
+        [ -n "$(beads_config_value "$config" dolt.host)" ] ||
+        [ -n "$(beads_config_value "$config" dolt.port)" ] ||
+        [ -n "$(beads_config_value "$config" dolt.socket)" ]; then
+        return 1
+    fi
+    return 0
+}
+
+# pin_proxied_shared_server_off keeps a gc-owned proxied scope out of bd's
+# user-level shared-server mode. A `dolt.shared-server: true` in
+# ~/.beads/config.yaml or ~/.config/bd/config.yaml would otherwise root the
+# scope's proxy and Dolt child in ~/.beads/shared-server -- one Dolt root for
+# every city on the host, so two cities' hq stores become one database.
+# BD_DOLT_SHARED_SERVER is bd's env binding for the config key and outranks
+# every config file; BEADS_DOLT_SHARED_SERVER is bd's separate switch, read
+# before config and only for 1/true, so an inherited value is neutralized
+# rather than trusted. Mirrors applyProxiedSharedServerOptOut in cmd/gc.
+# Applied only to scopes gc owns: a scope being initialized through gc, or one
+# whose config.yaml carries gc's pin (scope_pins_shared_server_off). A proxied
+# scope gc merely found keeps the operator's resolution, so this script's bd
+# and an agent's bd never split one store across two Dolt roots.
+pin_proxied_shared_server_off() {
+    export BEADS_DOLT_SHARED_SERVER=0
+    export BD_DOLT_SHARED_SERVER=false
+}
+
+# scope_pins_shared_server_off succeeds when the scope's .beads/config.yaml
+# sets dolt.shared-server: false -- the pin gc writes into every gc-owned
+# proxied scope (nested form), or bd's flat dotted spelling.
+scope_pins_shared_server_off() {
+    local cfg="$1/.beads/config.yaml"
+    [ -f "$cfg" ] || return 1
+    awk '
+        { sub(/\r$/, "") }
+        /^[^[:space:]#]/ { in_dolt = ($0 ~ /^dolt:[[:space:]]*(#.*)?$/) }
+        in_dolt && /^[[:space:]]+shared-server:[[:space:]]*false[[:space:]]*(#.*)?$/ { found = 1 }
+        /^dolt\.shared-server:[[:space:]]*false[[:space:]]*(#.*)?$/ { found = 1 }
+        END { exit(found ? 0 : 1) }
+    ' "$cfg"
+}
+
+run_provider_owned_bd() {
+    local dir="$1"
+    shift
+    (
+        cd "$dir" || exit 1
+        export BEADS_DIR="$dir/.beads"
+        if [ "${GC_BEADS_PROVIDER_INIT:-}" != "1" ] || [ "${GC_BEADS_TARGET:-}" = "local" ]; then
+            # A completed bd binding owns its endpoint. Do not let the legacy
+            # GC-managed projection override it. A direct external init is
+            # the one exception: bd needs its supplied endpoint to write that
+            # binding in the first place.
+            unset GC_DOLT GC_DOLT_HOST GC_DOLT_PORT GC_DOLT_USER GC_DOLT_PASSWORD
+            unset GC_DOLT_DATA_DIR GC_DOLT_LOG_FILE GC_DOLT_STATE_FILE GC_DOLT_PID_FILE GC_DOLT_LOCK_FILE GC_DOLT_CONFIG_FILE
+            unset BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_SOCKET
+            unset BEADS_DOLT_AUTO_START
+        fi
+        if [ "${GC_BEADS_TRANSPORT:-}" = "proxied" ]; then
+            export BEADS_DOLT_PROXIED_SERVER=1
+        else
+            # A direct ready binding must not inherit a proxy selector from
+            # the parent process. The binding determines its own transport.
+            unset BEADS_DOLT_PROXIED_SERVER
+        fi
+        # A scope gc is initializing as proxied is gc-owned by construction.
+        # Any other proxied scope is pinned only when its config.yaml carries
+        # gc's pin (gc-owned); a found workspace keeps its own resolution.
+        # Known corner: a found scope whose own config already says
+        # shared-server: false (e.g. a clone of a gc city) under an explicitly
+        # exported BEADS_DOLT_SHARED_SERVER=1 is neutralized here (local),
+        # while gc's runtime env and an agent's bd honour the =1 (shared).
+        # That split needs the operator to force the mode on by env.
+        if [ "${GC_BEADS_PROVIDER_INIT:-}" = "1" ] && [ "${GC_BEADS_TRANSPORT:-}" = "proxied" ]; then
+            pin_proxied_shared_server_off
+        elif { [ "${GC_BEADS_TRANSPORT:-}" = "proxied" ] || scope_is_proxied "$dir"; } && scope_pins_shared_server_off "$dir"; then
+            pin_proxied_shared_server_off
+        fi
+        trace_bd_argv "$@"
+        "${BD_BIN:-bd}" "$@"
+    )
+}
+
+op_provider_owned_init() {
+    local dir="$1" prefix="$2" database="${3:-}"
+    [ -n "$dir" ] && [ -n "$prefix" ] || die "usage: gc-beads-bd init <dir> <prefix> [dolt_database]"
+    case "${GC_BEADS_TRANSPORT:-}:${GC_BEADS_TARGET:-}" in
+        direct:local|direct:external)
+            set -- init --init-if-missing --quiet --server
+            if [ "${GC_BEADS_TARGET:-}" = "external" ]; then
+                # bd persists the endpoint it is given at init and nowhere
+                # else: --server-host/--server-port land in metadata.json as
+                # dolt_server_host/dolt_server_port, which is the whole
+                # binding. Handing bd only --external left it on its own
+                # default, starting a local sql-server beside the city and
+                # writing a binding that named no upstream — so every later
+                # command talked to that local server while the operator had
+                # asked for someone else's.
+                set -- "$@" --external
+                if [ -n "${BEADS_DOLT_SERVER_SOCKET:-}" ]; then
+                    set -- "$@" --server-socket "$BEADS_DOLT_SERVER_SOCKET"
+                else
+                    [ -n "${GC_DOLT_HOST:-}" ] && [ -n "${GC_DOLT_PORT:-}" ] || die "direct-external init requires GC_DOLT_HOST and GC_DOLT_PORT"
+                    set -- "$@" --server-host "$GC_DOLT_HOST" --server-port "$GC_DOLT_PORT"
+                fi
+            fi
+            ;;
+        proxied:local|proxied:external)
+            # Both targets own a LOCAL proxy and its Dolt child; only the data
+            # upstream differs. bd retires that pair after the idle timeout gc
+            # resolved for this scope and projected as
+            # GC_BEADS_PROXIED_IDLE_TIMEOUT; the next bd command restarts it,
+            # and the stop op retires it explicitly. "0" is bd's
+            # IdleTimeoutNever and lands in the client-info sidecar as
+            # "idle_timeout": -1; a finite value lands as nanoseconds.
+            require_proxied_idle_timeout
+            set -- init --init-if-missing --quiet --proxied-server --proxied-server-idle-timeout "$GC_BEADS_PROXIED_IDLE_TIMEOUT"
+            if [ "${GC_BEADS_TARGET:-}" = "external" ]; then
+                if [ -n "${GC_BEADS_PROXY_EXTERNAL_SOCKET:-}" ]; then
+                    set -- "$@" --proxied-server-external-socket-path "$GC_BEADS_PROXY_EXTERNAL_SOCKET"
+                else
+                    [ -n "${GC_BEADS_PROXY_EXTERNAL_HOST:-}" ] && [ -n "${GC_BEADS_PROXY_EXTERNAL_PORT:-}" ] || die "proxied-external init requires GC_BEADS_PROXY_EXTERNAL_HOST and GC_BEADS_PROXY_EXTERNAL_PORT"
+                    set -- "$@" --proxied-server-external-host "$GC_BEADS_PROXY_EXTERNAL_HOST" --proxied-server-external-port "$GC_BEADS_PROXY_EXTERNAL_PORT"
+                fi
+            fi
+            ;;
+        *) die "invalid provider-owned beads transport/target: ${GC_BEADS_TRANSPORT:-}/${GC_BEADS_TARGET:-}" ;;
+    esac
+    set -- "$@" -p "$prefix" --skip-hooks --skip-agents
+    [ -n "$database" ] && set -- "$@" --database "$database"
+    set -- "$@" "$dir"
+    # Registering gc's bead vocabulary with the new store is deliberately NOT
+    # done here. ga-5mym bans `bd config set` from this script because it runs
+    # under the provider op timeout; cmd/gc owns that step (see
+    # registerProviderOwnedScopeCustomTypes) alongside the canonical config it
+    # writes for the same scope.
+    local anchored=false status=0
+    if anchor_fresh_beads_dir "$dir"; then
+        anchored=true
+    fi
+    GC_BEADS_PROVIDER_INIT=1 run_provider_owned_bd "$dir" "$@" || status=$?
+    if [ "$status" -ne 0 ] && [ "$anchored" = true ]; then
+        release_fresh_beads_dir_anchor "$dir"
+    fi
+    return "$status"
+}
+
+# anchor_fresh_beads_dir makes BEADS_DIR authoritative for a scope bd has not
+# initialized yet. bd honors BEADS_DIR only once that directory already holds
+# a project file (metadata.json, config.yaml, dolt/, embeddeddolt/ or *.db —
+# beads internal/beads FindBeadsDir/hasBeadsProjectFiles); an empty or missing
+# .beads is skipped and bd falls back to walking up from the CWD. A scope
+# created anywhere below another bd workspace (a city inside a repo that uses
+# beads, or under a home directory with ~/.beads) then binds that ancestor:
+# `bd init --init-if-missing --database <db>` aborts with "workspace already
+# initialized as database <ancestor>", and without --database it would
+# silently reuse the ancestor's store. An empty config.yaml is the smallest
+# project file that pins resolution to this scope, and bd init never reads it
+# as "already initialized". What bd then does with it depends on the
+# transport: proxied init replaces it with bd's all-comment template, direct
+# init keeps the existing file and writes the settings it persists
+# (dolt.mode, sync.remote, ...) into it. Either way the result matches a
+# clean-directory init.
+#
+# The anchor is created exclusively (noclobber) under a 077 umask, so it can
+# never truncate a config.yaml that appeared after the checks, and it is never
+# briefly world-readable.
+#
+# Returns 0 only when it created the anchor, so a caller whose bd init fails
+# can remove it again: a leftover config.yaml reads as a persisted beads
+# identity to gc (scopeHasPersistedBeadsIdentity) and would misclassify the
+# retry.
+anchor_fresh_beads_dir() {
+    local dir="$1" beads_dir db
+    beads_dir="$dir/.beads"
+    if [ -e "$beads_dir/metadata.json" ] || [ -e "$beads_dir/config.yaml" ] ||
+        [ -d "$beads_dir/dolt" ] || [ -d "$beads_dir/embeddeddolt" ]; then
+        return 1
+    fi
+    # Mirror bd's own *.db rule: vc.db and backups do not count.
+    for db in "$beads_dir"/*.db; do
+        [ -e "$db" ] || continue
+        case "${db##*/}" in
+        vc.db | *.backup*) ;;
+        *) return 1 ;;
+        esac
+    done
+    ensure_beads_dir_permissions "$dir"
+    if ! (umask 077 && set -C && : > "$beads_dir/config.yaml") 2>/dev/null; then
+        # Lost the race to another writer: its file already anchors the scope,
+        # and it is not ours to remove.
+        [ -e "$beads_dir/config.yaml" ] && return 1
+        die "failed to create $beads_dir/config.yaml"
+    fi
+    return 0
+}
+
+# release_fresh_beads_dir_anchor removes the anchor anchor_fresh_beads_dir
+# created, but only while it is still the empty file this script wrote.
+release_fresh_beads_dir_anchor() {
+    local config="$1/.beads/config.yaml"
+    if [ -f "$config" ] && [ ! -s "$config" ] && [ ! -e "$1/.beads/metadata.json" ]; then
+        rm -f "$config"
+    fi
+}
+
+# provider_owned_retire_local_dolt retires the local Dolt lifecycle bd owns for
+# a scope. gc stop must be re-runnable, so "there was nothing to stop" is
+# success: bd's proxied path already reports that as exit 0, but the direct
+# path exits 1 with "dolt server is not running". Any other failure still
+# surfaces with bd's own diagnostics.
+provider_owned_retire_local_dolt() {
+    local dir="$1" out status
+    set +e
+    out=$(run_provider_owned_bd "$dir" dolt stop 2>&1)
+    status=$?
+    set -e
+    if [ "$status" -eq 0 ]; then
+        if [ -n "$out" ]; then
+            printf '%s\n' "$out"
+        fi
+        return 0
+    fi
+    case "$out" in
+        *"not running"*|*"no server"*) return 0 ;;
+    esac
+    printf '%s\n' "$out" >&2
+    return "$status"
+}
+
+# provider_owned_proxy_root prints the physical Dolt root a proxied scope's
+# lifecycle commands act on, or nothing when the scope has no proxied binding
+# yet. bd resolves that root from the client-info sidecar's root_path (see
+# internal/doltserver physical-root resolution: env, then sidecar, then the
+# scope's own data dir), and `bd dolt stop` shuts down whatever is serving it.
+provider_owned_proxy_root() {
+    local dir="$1" sidecar root
+    sidecar="$dir/.beads/proxied_server_client_info.json"
+    [ -f "$sidecar" ] || return 0
+    root=$(sed -n 's/.*"root_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$sidecar" | head -n 1)
+    [ -n "$root" ] || return 0
+    case "$root" in
+        /*) ;;
+        # bd resolves a relative root_path against BEADS_DIR, not the scope
+        # root (internal/configfile resolveSidecarPath -> Join(beadsDir, p)),
+        # and cmd/gc/beads_scope_ownership.go does the same. Joining to the
+        # scope root instead put the answer one directory too high, so a rig
+        # whose sidecar names the city's shared root compared unequal and its
+        # recover ran `bd dolt stop` — which bd resolves the sidecar's way,
+        # retiring the proxy and Dolt child serving hq and every rig.
+        *) root="$dir/.beads/$root" ;;
+    esac
+    # Physical resolution so two spellings of one directory compare equal: a
+    # migrated rig's root_path is the city's, reached through `..` segments.
+    (cd "$root" 2>/dev/null && pwd -P) || printf '%s\n' "$root"
+}
+
+# provider_owned_scope_shares_city_proxy_root reports whether this scope's proxy
+# root is the city's rather than its own.
+#
+# `gc beads city migrate-proxied` points every rig's Dolt data dir at the city's
+# .beads/dolt, so one proxy and one Dolt child serve hq and every rig. bd is
+# given only BEADS_DIR, and it resolves the root to stop from the sidecar, so a
+# rig-scoped `bd dolt stop` in that shape is a city-wide one.
+provider_owned_scope_shares_city_proxy_root() {
+    local dir="$1" scope_dir city_dir scope_root city_root
+    [ -n "${GC_CITY_PATH:-}" ] || return 1
+    scope_dir=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+    city_dir=$(cd "$GC_CITY_PATH" 2>/dev/null && pwd -P) || return 1
+    # The city scope owns the shared root; it is the one scope allowed to cycle it.
+    [ "$scope_dir" != "$city_dir" ] || return 1
+    scope_root=$(provider_owned_proxy_root "$dir")
+    [ -n "$scope_root" ] || return 1
+    city_root=$(provider_owned_proxy_root "$GC_CITY_PATH")
+    [ -n "$city_root" ] || return 1
+    [ "$scope_root" = "$city_root" ]
+}
+
+op_provider_owned_lifecycle() {
+    local op="$1" dir transport local_scope=false
+    dir=$(provider_owned_scope_dir)
+    # A scope with no store has nothing left to retire. This is the half-built
+    # shape an interrupted `gc rig add` leaves: the ownership journal records a
+    # still-initializing path, and `bd init` then failed, so there is a journaled
+    # root with either no directory at all or a directory with no .beads.
+    #
+    # Both are already-stopped. The missing-directory arm is here because every
+    # bd invocation below starts with `cd "$dir"`. The no-.beads arm is here
+    # because bd ignores a BEADS_DIR that does not exist and walks up from the
+    # cwd instead (FindBeadsDir): for a rig that is its own repository that ends
+    # in "no active beads workspace found", which provider_owned_retire_local_dolt
+    # does not tolerate, so `gc stop` exited 1 on every run for a scope where
+    # nothing was running; and for a rig that is a subdirectory of the city the
+    # walk-up finds the CITY's store and the stop acts on the city's proxy under
+    # the rig's name, which is worse than the wrong exit code.
+    #
+    # A starting op still refuses: initializing a store for a scope that is not
+    # there is not something to do quietly.
+    if [ ! -d "$dir" ] || [ ! -d "$dir/.beads" ]; then
+        case "$op" in
+            stop|shutdown)
+                printf 'scope %s has no beads store; nothing to retire\n' "$dir" >&2
+                return 0
+                ;;
+        esac
+    fi
+    transport=$(provider_owned_transport "$dir")
+    export GC_BEADS_TRANSPORT="$transport"
+    if provider_owned_scope_is_local "$dir"; then
+        local_scope=true
+    fi
+    case "$transport" in
+        direct)
+            case "$op" in
+                start|ensure-ready) run_provider_owned_bd "$dir" ping ;;
+                health|probe) run_provider_owned_bd "$dir" ping ;;
+                recover) [ "$local_scope" != true ] || provider_owned_retire_local_dolt "$dir"; run_provider_owned_bd "$dir" ping ;;
+                stop|shutdown) [ "$local_scope" != true ] || provider_owned_retire_local_dolt "$dir" ;;
+                *) exit 2 ;;
+            esac
+            ;;
+        proxied)
+            case "$op" in
+                # One ping is the whole readiness wait: bd's provider open
+                # already blocks for the proxy endpoint and then for the Dolt
+                # child to report ready (~45s worst case on a cold start). An
+                # outer retry loop would only stack another wait on top of it,
+                # so GC widens the op budget instead (providerOwnedOpTimeout).
+                start|ensure-ready|health|probe) run_provider_owned_bd "$dir" ping ;;
+                # A proxied external scope still owns its local proxy child.
+                # bd dolt stop retires that proxy without issuing a lifecycle
+                # command to the upstream external Dolt server.
+                #
+                # A scope whose proxy root is the CITY's does not own that pair
+                # and must not retire it. `bd dolt stop` resolves the root from
+                # the sidecar, not from BEADS_DIR, so for a migrated rig the
+                # stop takes down the one proxy and Dolt child serving hq and
+                # every other rig, under live agents, to recover one rig — and
+                # the ping that follows cold-starts it while the rig-local cause
+                # is still there, so each health pass does it again. Recovery
+                # for such a rig is a ping; cycling the shared pair belongs to
+                # the city scope, whose own recover op does exactly that.
+                recover)
+                    if provider_owned_scope_shares_city_proxy_root "$dir"; then
+                        printf 'scope %s shares the city proxy root; recovering by ping only\n' "$dir" >&2
+                    else
+                        provider_owned_retire_local_dolt "$dir"
+                    fi
+                    run_provider_owned_bd "$dir" ping
+                    ;;
+                stop|shutdown) provider_owned_retire_local_dolt "$dir" ;;
+                *) exit 2 ;;
+            esac
+            ;;
+        *) die "invalid provider-owned beads transport/target: ${GC_BEADS_TRANSPORT:-}/${GC_BEADS_TARGET:-}" ;;
+    esac
+}
+
 # --- Main ---
 
 # GC_DOLT=skip → no-op for all operations.
@@ -3397,9 +4463,38 @@ if [ -z "$GC_CITY_PATH" ]; then
     die "GC_CITY_PATH not set"
 fi
 
+# A fresh scope which GC has explicitly delegated to bd must never reach the
+# historical GC-managed Dolt lifecycle below. The adapter supplies this marker
+# for every operation; init additionally carries the ephemeral selector.
+if [ "${GC_BEADS_PROVIDER_OWNED:-}" = "1" ]; then
+    case "$op" in
+        init) op_provider_owned_init "$@" ;;
+        start|ensure-ready|health|probe|recover|stop|shutdown) op_provider_owned_lifecycle "$op" ;;
+        *) exit 2 ;;
+    esac
+    exit $?
+fi
+
 # Set derived paths.
 GC_DIR="$GC_CITY_PATH/.gc"
 BEADS_DIR_ROOT="$GC_CITY_PATH/.beads"
+
+if scope_is_proxied "$GC_CITY_PATH"; then
+    case "$op" in
+        start|ensure-ready|health|probe|recover|stop|shutdown)
+            exit 2
+            ;;
+    esac
+    # Proxied store bridge operations are handled by bd through the GC bridge;
+    # no managed listener exists from which to derive a port.
+    DOLT_PORT=0
+    DOLT_USER="${GC_DOLT_USER:-root}"
+    case "$op" in
+        init) op_init "$@"; exit $? ;;
+        create|get|update|close|reopen|list|ready|children|list-by-label|set-metadata|delete|dep-add|dep-remove|dep-list)
+            op_store_bridge "$op" "$@"; exit $? ;;
+    esac
+fi
 
 # Prefer GC-owned runtime layout derivation when the current gc binary is
 # available. Fall back to the legacy shell derivation for compatibility.

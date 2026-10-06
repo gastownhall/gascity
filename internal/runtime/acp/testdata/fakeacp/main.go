@@ -1,119 +1,38 @@
-// Command fakeacp is a minimal ACP server for integration tests.
-// It reads JSON-RPC from stdin and responds to the ACP handshake.
-// On session/prompt it echoes the text as a session/update notification
-// then sends the response. Stays alive until SIGTERM (SIGINT is ignored,
-// mirroring real ACP agents for which Interrupt is a soft prompt cancel,
-// not session teardown).
+// Command fakeacp is a scriptable reference ACP agent for integration tests.
+//
+// It speaks ACP JSON-RPC 2.0 over stdio: it answers initialize and
+// session/new, echoes each session/prompt back as "echo: <text>" in an
+// agent_message_chunk update, and answers the prompt with a stopReason. A
+// stdin reader goroutine runs alongside one goroutine per prompt, so
+// session/cancel and replies to the fake's own requests are handled while a
+// prompt is in flight.
+//
+// Scenario flags script protocol behavior (turn delays, chunked replies,
+// thoughts, tool calls, permission and filesystem requests, prompt errors,
+// cancel and SIGINT handling); see parseOptions. With --log-dir the fake
+// records what it received so tests can assert on the client's side of the
+// conversation. By default SIGINT is ignored, mirroring real ACP agents for
+// which Interrupt is a soft prompt cancel rather than session teardown, and
+// SIGTERM exits.
 package main
 
 import (
-	"bufio"
-	"encoding/json"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 )
 
-type message struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      *int64          `json:"id,omitempty"`
-	Method  string          `json:"method,omitempty"`
-	Params  json.RawMessage `json:"params,omitempty"`
-	Result  json.RawMessage `json:"result,omitempty"`
-}
-
-type promptParams struct {
-	SessionID string          `json:"sessionId"`
-	Messages  []promptMessage `json:"messages"`
-}
-
-type promptMessage struct {
-	Role    string         `json:"role"`
-	Content []contentBlock `json:"content"`
-}
-
-type contentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
-}
-
-func respond(id *int64, result any) {
-	data, _ := json.Marshal(result)
-	msg := message{JSONRPC: "2.0", ID: id, Result: data}
-	out, _ := json.Marshal(msg)
-	if _, err := fmt.Fprintln(os.Stdout, string(out)); err != nil {
-		return
-	}
-}
-
-func notify(method string, params any) {
-	data, _ := json.Marshal(params)
-	msg := message{JSONRPC: "2.0", Method: method, Params: data}
-	out, _ := json.Marshal(msg)
-	if _, err := fmt.Fprintln(os.Stdout, string(out)); err != nil {
-		return
-	}
-}
-
 func main() {
-	const sessionID = "fakeacp-session-1"
-
-	// Ignore SIGINT — ACP Interrupt is a soft prompt-cancel signal, not a
-	// teardown signal. Real agents keep running through Ctrl-C; the fake
-	// must too, otherwise the test-side SIGINT from Interrupt races with
-	// our lifecycle cleanup (see Provider.Nudge for the SDK-side fix).
-	signal.Ignore(syscall.SIGINT)
-
-	// Exit on SIGTERM.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		os.Exit(0)
-	}()
-
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
-		var msg message
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			continue
-		}
-
-		switch msg.Method {
-		case "initialize":
-			respond(msg.ID, map[string]any{
-				"serverInfo": map[string]string{"name": "fakeacp", "version": "1.0"},
-			})
-		case "initialized":
-			// Notification — no response.
-		case "session/new":
-			respond(msg.ID, map[string]string{"sessionId": sessionID})
-		case "session/prompt":
-			var params promptParams
-			if err := json.Unmarshal(msg.Params, &params); err == nil {
-				var text string
-				for _, m := range params.Messages {
-					for _, c := range m.Content {
-						text += c.Text
-					}
-				}
-				notify("session/update", map[string]any{
-					"sessionId": sessionID,
-					"update": map[string]any{
-						"sessionUpdate": "agent_message_chunk",
-						"content":       map[string]any{"type": "text", "text": "echo: " + text},
-					},
-				})
-			}
-			respond(msg.ID, map[string]any{})
-		}
+	opts, err := parseOptions(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fakeacp: %v\n", err)
+		os.Exit(2)
 	}
+	logs, err := newRecorder(opts.logDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fakeacp: %v\n", err)
+		os.Exit(2)
+	}
+	a := newAgent(opts, newWriter(os.Stdout), logs)
+	a.handleSignals()
+	a.serve(os.Stdin)
 }

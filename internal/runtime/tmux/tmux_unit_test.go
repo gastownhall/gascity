@@ -43,7 +43,7 @@ func TestCapturePaneProcessKillPlanBindsStableLivePaneToSnapshot(t *testing.T) {
 		if len(executor.calls) != 1 {
 			t.Fatalf("tmux calls = %d, want one atomic observation", len(executor.calls))
 		}
-		want := []string{"-u", "display-message", "-t", "session:^.0", "-p", "#{pane_pid}\t#{pane_dead}"}
+		want := []string{"-u", "display-message", "-t", "=session:^.0", "-p", "#{pane_pid}\t#{pane_dead}"}
 		if !slices.Equal(executor.calls[0], want) {
 			t.Fatalf("tmux args = %q, want atomic pid/dead format %q", executor.calls[0], want)
 		}

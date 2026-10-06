@@ -65,7 +65,11 @@ func setPoolTemplateRuntimeIdentityInfo(tp *TemplateParams, desiredAlias string,
 }
 
 // clearPoolTemplateRuntimeIdentity leaves a pool spawn with no public identity:
-// no alias, an explicitly BLANK GC_ALIAS, and GC_AGENT on the session name.
+// no alias, an explicitly BLANK GC_ALIAS, and a provisional GC_AGENT on the
+// session name. That GC_AGENT is not what the worker runs with: the session
+// runtime projection (session.RuntimeEnvWithSessionContext, merged last at
+// spawn) overrides GC_AGENT and BEADS_ACTOR with the session bead ID for an
+// unaliased pool session, matching the identity gc hook --claim records.
 //
 // Blanking GC_ALIAS rather than skipping the stamp is load-bearing.
 // resolveTemplate seeds GC_ALIAS with the agent's bare qualified name for every
@@ -85,6 +89,8 @@ func clearPoolTemplateRuntimeIdentity(tp *TemplateParams) {
 		tp.Env = make(map[string]string)
 	}
 	tp.Env["GC_ALIAS"] = ""
+	// Provisional only; see above. The runtime projection replaces it with
+	// the session bead ID before the worker starts.
 	if tp.SessionName != "" {
 		tp.Env["GC_AGENT"] = tp.SessionName
 	}
@@ -249,7 +255,7 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 	if isNamedSessionInfo(info) {
 		return false
 	}
-	if sessionBeadHasAssignedWorkInfo(bp.assignedWorkBeads, info) {
+	if sessionBeadHasAssignedWorkInfo(bp.assignedWorkBeads, info, reuseTemplateConfig(bp)) {
 		return false
 	}
 	if used != nil && used[info.ID] {
@@ -459,22 +465,27 @@ func queueClearPoolAliasConflictMetadataInfo(metadata map[string]string, info se
 	}
 }
 
-// normalizeNonExpandingPoolSessionInfo is the session.Info sibling of
-// normalizeNonExpandingPoolSessionBead. It computes the byte-identical singleton
-// pool-identity collapse (agent_name/alias/pool_slot metadata, title, and
-// agent:<slot> label pruning), persists the SAME bp.beadStore.Update the raw form
-// issued, and — instead of re-merging the change set into a raw bead — folds it
-// onto the returned Info: ApplyPatch of the metadata batch plus the same title and
-// label mutations. The returned Info is the authoritative post-write value; callers
-// must use it rather than re-reading the snapshot for this id this tick.
-func normalizeNonExpandingPoolSessionInfo(
-	bp *agentBuildParams,
-	cfgAgent *config.Agent,
-	info session.Info,
-) (session.Info, error) {
-	if bp == nil || bp.beadStore == nil || !cfgAgent.UsesCanonicalSingletonPoolIdentity() || isManualSessionInfoForAgent(info, cfgAgent) || isNamedSessionInfo(info) || info.ID == "" {
-		return info, nil
-	}
+// nonExpandingPoolIdentityPatch is the write that collapses a canonical
+// singleton row's phantom pool identity (a slot-shaped agent_name, alias,
+// title or agent label, or a pool_slot) onto the canonical one.
+type nonExpandingPoolIdentityPatch struct {
+	metadata         map[string]string
+	title            *string
+	addLabels        []string
+	removeLabels     []string
+	aliasNeedsUpdate bool
+}
+
+// empty reports a row whose identity is already canonical.
+func (p nonExpandingPoolIdentityPatch) empty() bool {
+	return len(p.metadata) == 0 && p.title == nil && len(p.removeLabels) == 0 && len(p.addLabels) == 0
+}
+
+// nonExpandingPoolIdentityPatchInfo computes the singleton identity collapse
+// for info without writing it. normalizeNonExpandingPoolSessionInfo applies
+// it; the v2 allocator reads it to mark a row for normalization before start
+// (POOL-046).
+func nonExpandingPoolIdentityPatchInfo(cfgAgent *config.Agent, info session.Info) nonExpandingPoolIdentityPatch {
 	canonical := cfgAgent.QualifiedName()
 	metadata := map[string]string{}
 	aliasNeedsUpdate := false
@@ -518,9 +529,31 @@ func normalizeNonExpandingPoolSessionInfo(
 	if (len(metadata) > 0 || title != nil || len(removeLabels) > 0) && !hasCanonicalAgentLabel {
 		addLabels = []string{"agent:" + canonical}
 	}
-	if len(metadata) == 0 && title == nil && len(removeLabels) == 0 && len(addLabels) == 0 {
+	return nonExpandingPoolIdentityPatch{metadata: metadata, title: title, addLabels: addLabels, removeLabels: removeLabels, aliasNeedsUpdate: aliasNeedsUpdate}
+}
+
+// normalizeNonExpandingPoolSessionInfo is the session.Info sibling of
+// normalizeNonExpandingPoolSessionBead. It computes the byte-identical singleton
+// pool-identity collapse (agent_name/alias/pool_slot metadata, title, and
+// agent:<slot> label pruning), persists the SAME bp.beadStore.Update the raw form
+// issued, and — instead of re-merging the change set into a raw bead — folds it
+// onto the returned Info: ApplyPatch of the metadata batch plus the same title and
+// label mutations. The returned Info is the authoritative post-write value; callers
+// must use it rather than re-reading the snapshot for this id this tick.
+func normalizeNonExpandingPoolSessionInfo(
+	bp *agentBuildParams,
+	cfgAgent *config.Agent,
+	info session.Info,
+) (session.Info, error) {
+	if bp == nil || bp.beadStore == nil || !cfgAgent.UsesCanonicalSingletonPoolIdentity() || isManualSessionInfoForAgent(info, cfgAgent) || isNamedSessionInfo(info) || info.ID == "" {
 		return info, nil
 	}
+	canonical := cfgAgent.QualifiedName()
+	patch := nonExpandingPoolIdentityPatchInfo(cfgAgent, info)
+	if patch.empty() {
+		return info, nil
+	}
+	metadata, title, addLabels, removeLabels := patch.metadata, patch.title, patch.addLabels, patch.removeLabels
 
 	apply := func() error {
 		return bp.beadStore.Update(info.ID, beads.UpdateOpts{
@@ -530,7 +563,7 @@ func normalizeNonExpandingPoolSessionInfo(
 			RemoveLabels: removeLabels,
 		})
 	}
-	if aliasNeedsUpdate {
+	if patch.aliasNeedsUpdate {
 		if err := session.WithCitySessionAliasLock(bp.cityPath, canonical, func() error {
 			if err := session.EnsureAliasAvailableWithConfigForOwner(bp.beadStore, bp.city, canonical, info.ID, canonical); err != nil {
 				return err
@@ -620,6 +653,12 @@ func normalizeNonExpandingPoolSessionInfoForSelection(
 	cfgAgent *config.Agent,
 	info session.Info,
 ) (session.Info, error) {
+	if bp != nil && bp.planOnly {
+		// The collapse is a write to an existing row, so plan-only selection
+		// skips it and returns the row unchanged. Normalizing before start is
+		// left to the caller (POOL-046).
+		return info, nil
+	}
 	folded, err := normalizeNonExpandingPoolSessionInfo(bp, cfgAgent, info)
 	if err == nil {
 		return folded, nil

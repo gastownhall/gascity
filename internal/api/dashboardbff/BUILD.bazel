@@ -1,0 +1,83 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "dashboardbff",
+    srcs = [
+        "builds.go",
+        "clienterrors.go",
+        "config.go",
+        "enrichment_cache.go",
+        "exec.go",
+        "git.go",
+        "health.go",
+        "links.go",
+        "plane.go",
+        "runcensus.go",
+        "rundetail_grace.go",
+        "rundetail_memo.go",
+        "rundetail_stream.go",
+        "runtailer.go",
+        "samplers.go",
+        "util.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/api/dashboardbff",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/events",
+        "//internal/runproj",
+        "@com_github_shirou_gopsutil_v4//host",
+        "@com_github_shirou_gopsutil_v4//load",
+        "@com_github_shirou_gopsutil_v4//mem",
+        "@com_github_shirou_gopsutil_v4//process",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
+
+go_test(
+    name = "dashboardbff_test",
+    srcs = [
+        "config_test.go",
+        "dashboard_endpoints_test.go",
+        "enrichment_cache_test.go",
+        "hangbudget_test.go",
+        "health_darwin_test.go",
+        "health_test.go",
+        "links_test.go",
+        "runcensus_test.go",
+        "rundetail_grace_test.go",
+        "rundetail_lazy_test.go",
+        "rundetail_memo_test.go",
+        "rundetail_retired_sessions_test.go",
+        "rundetail_session_push_test.go",
+        "rundetail_stream_test.go",
+        "rundetailtailer_test.go",
+        "runtailer_test.go",
+        "samplers_test.go",
+        "testenv_import_test.go",
+        "wire_contract_test.go",
+    ],
+    embed = [":dashboardbff"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+        "//internal/events",
+        "//internal/runproj",
+        "//internal/testenv",
+        "//internal/testutil",
+        "@com_github_shirou_gopsutil_v4//load",
+        "@com_github_shirou_gopsutil_v4//mem",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

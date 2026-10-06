@@ -246,21 +246,35 @@ func isAgentEffectivelySuspended(cfg *config.City, a *config.Agent) bool {
 // agent awake, so a suspended rig never quiesced them: it drained and re-woke
 // each tick. Keeping the two gates on the same resolver closes that gap.
 func isAgentEffectivelySuspendedWith(cfg *config.City, cityPath string, a *config.Agent, st suspensionstate.State) bool {
+	_, _, suspended := agentSuspensionCauseWith(cfg, cityPath, a, st)
+	return suspended
+}
+
+func agentSuspensionCauseWith(cfg *config.City, cityPath string, a *config.Agent, st suspensionstate.State) (scope, name string, suspended bool) {
 	if effectiveCitySuspended(cfg, st) {
-		return true
+		return "city", "", true
+	}
+	if a == nil {
+		return "", "", false
 	}
 	if a.Suspended {
-		return true
+		return "agent", a.QualifiedName(), true
+	}
+	if cfg == nil {
+		return "", "", false
 	}
 	rigName := configuredRigName(cityPath, a, cfg.Rigs)
 	if rigName == "" {
-		return false
+		return "", "", false
 	}
 	for i := range cfg.Rigs {
 		if cfg.Rigs[i].Name != rigName {
 			continue
 		}
-		return suspensionstate.EffectiveRigSuspended(st, cfg.Rigs[i].Name, cfg.Rigs[i].EffectiveSuspendedOnStart())
+		if suspensionstate.EffectiveRigSuspended(st, cfg.Rigs[i].Name, cfg.Rigs[i].EffectiveSuspendedOnStart()) {
+			return "rig", rigName, true
+		}
+		return "", "", false
 	}
-	return false
+	return "", "", false
 }

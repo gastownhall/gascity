@@ -38,6 +38,42 @@ type rigEndpointOptions struct {
 
 var verifyRigExternalEndpoint = verifyExternalDoltEndpoint
 
+// errProviderOwnedEndpointScope reports that the beads provider, not gc, owns
+// the scope an endpoint command was pointed at.
+//
+// `gc beads city use-managed`/`use-external` and `gc rig set-endpoint` manage
+// gc-owned endpoint topology: they rewrite .beads/config.yaml and canonicalize
+// .beads/metadata.json into the shape gc's managed-Dolt lifecycle expects. For a
+// scope bd owns — one gc journaled to the provider, one whose committed handoff
+// transferred it, or one bd's own metadata binds to the proxied-server path —
+// that rewrite has no owner on the other side. The canonicalizer strips
+// dolt_server_host/dolt_server_port, which for a bd-owned direct-external scope
+// is the only record of its upstream, and the gc endpoint keys it then writes
+// re-classify the workspace as a default local server. The result is a scope
+// whose journal names one owner and whose files name another, with no gc verb
+// that repairs it.
+var errProviderOwnedEndpointScope = errors.New("beads provider owns this scope's endpoint topology")
+
+// providerOwnedEndpointScopeError names the bd-side path for the scope the
+// operator pointed the command at.
+func providerOwnedEndpointScopeError(scopeRoot string) error {
+	return fmt.Errorf("%w: %s. gc manages gc-owned endpoint topology only — change this scope's upstream with bd in %s, or run `gc beads city migrate-proxied` to move a legacy gc-managed city onto bd's proxied topology", errProviderOwnedEndpointScope, scopeRoot, scopeRoot)
+}
+
+// refuseProviderOwnedEndpointScope is the shared guard for both endpoint doors.
+// A classification error refuses too: guessing who owns a live Dolt process is
+// how a scope ends up with two.
+func refuseProviderOwnedEndpointScope(cityPath, scopeRoot string) error {
+	owned, err := scopeProviderOwned(cityPath, scopeRoot)
+	if err != nil {
+		return fmt.Errorf("classify beads scope ownership for %s: %w", scopeRoot, err)
+	}
+	if owned {
+		return providerOwnedEndpointScopeError(scopeRoot)
+	}
+	return nil
+}
+
 func newRigSetEndpointCmd(stdout, stderr io.Writer) *cobra.Command {
 	var opts rigEndpointOptions
 	var jsonOutput bool
@@ -53,7 +89,9 @@ Use --self to mark the rig as running its own local Dolt server on
 command requires --force because the rig's .beads/dolt-server.port mirror
 will no longer track the managed city Dolt.
 
-This command owns the rig's canonical .beads/config.yaml topology state.`,
+This command owns the rig's canonical .beads/config.yaml topology state. It
+refuses a rig whose store the beads provider owns: that rig's endpoint lives in
+bd's own files and is bd's to change.`,
 		Example: `  gc rig set-endpoint frontend --inherit
   gc rig set-endpoint frontend --external --host db.example.com --port 3307
   gc rig set-endpoint frontend --external --host db.example.com --port 3307 --user agent --adopt-unverified
@@ -138,6 +176,12 @@ func doRigSetEndpoint(fs fsys.FS, cityPath, rigName string, opts rigEndpointOpti
 		fmt.Fprintln(stderr, "gc rig set-endpoint: only supported for bd-backed beads providers") //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Before --dry-run, too: a plan for a change the command will never make is
+	// worse than no plan.
+	if err := refuseProviderOwnedEndpointScope(cityPath, rig.Path); err != nil {
+		fmt.Fprintf(stderr, "gc rig set-endpoint: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	cityState, err := resolveOwnerCityConfigState(cityPath, cfg)
 	if err != nil {
@@ -187,7 +231,7 @@ func doRigSetEndpoint(fs fsys.FS, cityPath, rigName string, opts rigEndpointOpti
 		fmt.Fprintf(stderr, "gc rig set-endpoint: snapshot canonical files: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := requireCanonicalizedScopeMetadata(fs, rig.Path); err != nil {
+	if err := requireCanonicalizedScopeMetadata(fs, cityPath, rig.Path); err != nil {
 		writeRigEndpointRollbackError(fs, stderr, snapshots, "canonicalizing metadata", err)
 		return 1
 	}
@@ -341,6 +385,10 @@ func ensureCanonicalScopeConfig(fs fsys.FS, scopeRoot string, state contract.Con
 	if err := ensureBeadsDir(fs, beadsDir); err != nil {
 		return err
 	}
+	// Same rule as ensureCanonicalScopeConfigState: the topology belongs in
+	// metadata.json, and EnsureCanonicalConfig now drops the key when the
+	// state does not set it. See canonicalConfigDoltMode.
+	state.DoltMode = canonicalConfigDoltMode(state.DoltMode)
 	_, err := contract.EnsureCanonicalConfig(fs, filepath.Join(beadsDir, "config.yaml"), state)
 	return err
 }
@@ -377,7 +425,17 @@ func requireCanonicalScopeMetadata(fs fsys.FS, scopeRoot string) error {
 // does: this is the identical rewrite through a different door, and a warning
 // that depends on which command performed the flip is a warning an operator
 // cannot rely on.
-func requireCanonicalizedScopeMetadata(fs fsys.FS, scopeRoot string) error {
+//
+// It refuses a provider-owned scope outright. contract.EnsureCanonicalMetadata
+// deletes every deprecatedMetadataKey, dolt_server_host/dolt_server_port among
+// them, and for a bd-owned direct-external scope those two keys are the whole
+// upstream. The boot path already skips canonicalization for an owned scope
+// (see ensureCanonicalScopeMetadataForInit's caller); a guard that holds on one
+// door and not the other is not a guard.
+func requireCanonicalizedScopeMetadata(fs fsys.FS, cityPath, scopeRoot string) error {
+	if err := refuseProviderOwnedEndpointScope(cityPath, scopeRoot); err != nil {
+		return err
+	}
 	if err := requireCanonicalScopeMetadata(fs, scopeRoot); err != nil {
 		return err
 	}
@@ -387,11 +445,20 @@ func requireCanonicalizedScopeMetadata(fs fsys.FS, scopeRoot string) error {
 		return err
 	}
 	doltDatabase = strings.TrimSpace(doltDatabase)
-	announceStorageModeChange(fs, path, "server", doltDatabase)
+	doltMode := "server"
+	if existingMode, ok, modeErr := contract.ReadDoltMode(fs, path); modeErr == nil && ok && strings.TrimSpace(existingMode) != "" {
+		var raw struct {
+			Backend string `json:"backend"`
+		}
+		if data, readErr := fs.ReadFile(path); readErr == nil && json.Unmarshal(data, &raw) == nil && strings.EqualFold(strings.TrimSpace(raw.Backend), "dolt") {
+			doltMode = strings.TrimSpace(existingMode)
+		}
+	}
+	announceStorageModeChange(fs, path, doltMode, doltDatabase)
 	_, err = contract.EnsureCanonicalMetadata(fs, path, contract.MetadataState{
 		Database:     "dolt",
 		Backend:      "dolt",
-		DoltMode:     "server",
+		DoltMode:     doltMode,
 		DoltDatabase: doltDatabase,
 	})
 	return err
@@ -407,14 +474,14 @@ func requireCanonicalizedScopeMetadata(fs fsys.FS, scopeRoot string) error {
 // Absent means absent, and nothing else. A metadata.json that exists but pins no
 // dolt_database is a misconfigured store rather than an uninitialized one, and
 // still fails: the skip must not become a way to lose a real topology error.
-func canonicalizeScopeMetadataIfPresent(fs fsys.FS, scopeRoot string) error {
+func canonicalizeScopeMetadataIfPresent(fs fsys.FS, cityPath, scopeRoot string) error {
 	if _, err := fs.Stat(scopeMetadataPath(scopeRoot)); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return err
 	}
-	return requireCanonicalizedScopeMetadata(fs, scopeRoot)
+	return requireCanonicalizedScopeMetadata(fs, cityPath, scopeRoot)
 }
 
 func scopeMetadataPath(scopeRoot string) string {

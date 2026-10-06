@@ -27,6 +27,14 @@ func TestNativeDoltStoreConditionalWriterConformance(t *testing.T) {
 	)
 }
 
+// TestNativeDoltStoreAtomicCloserConformance holds the original implementer of
+// the atomic terminal close to the same shared table FileStore and SQLiteStore
+// run, so the three cannot drift apart.
+func TestNativeDoltStoreAtomicCloserConformance(t *testing.T) {
+	beadstest.RunAtomicConditionalCloserConformance(t, "NativeDoltStore",
+		func(_ *testing.T) beads.Store { return beads.NewNativeDoltStoreForConformance() })
+}
+
 // TestMemStoreMetadataCASConformance and TestFileStoreMetadataCASConformance
 // run the SAME narrow suite against the two stores whose fixtures do provide
 // isolation (both guard the whole CAS under their own lock), so the contention

@@ -594,6 +594,14 @@ type Rig struct {
 	// Captured by `gc rig add` from the rig's git config; set manually for
 	// rigs whose mainline isn't reachable via origin/HEAD.
 	DefaultBranch string `toml:"default_branch,omitempty"`
+	// DefaultMergeStrategy is the merge strategy `gc sling` stamps on a bead
+	// routed into this rig when the caller passes no --merge flag. One of
+	// "direct", "mr", or "local"; empty leaves the bead unstamped, which
+	// consumers read as their own implicit default. Set it to "mr" on rigs
+	// that deliver work through a pull request instead of a push to the
+	// target branch, so a bare `gc sling` records the shape the rig actually
+	// uses rather than one every caller has to remember to pass.
+	DefaultMergeStrategy string `toml:"default_merge_strategy,omitempty"`
 	// Suspended is the deprecated pre-runtime-state suspension flag.
 	// Parsed for backwards compatibility and treated as an alias for
 	// SuspendedOnStart by [Rig.EffectiveSuspendedOnStart], so existing
@@ -659,6 +667,11 @@ type Rig struct {
 	// explicit --var override. Takes precedence over formula-level defaults
 	// but loses to --var flags.
 	FormulaVars map[string]string `toml:"formula_vars,omitempty"`
+	// BeadsProxiedIdleTimeout overrides [beads] proxied_idle_timeout for this
+	// rig's bd-owned proxied scope. Go duration; "0" means never. Ignored, with
+	// a warning, for a rig that shares the city's proxy root: one proxy serves
+	// every scope on that root and carries the city's value.
+	BeadsProxiedIdleTimeout *string `toml:"beads_proxied_idle_timeout,omitempty"`
 }
 
 // AgentOverride modifies a pack-stamped agent for a specific rig.
@@ -1198,6 +1211,13 @@ func (r *Rig) EffectiveDefaultBranch() string {
 	return strings.TrimSpace(r.DefaultBranch)
 }
 
+// EffectiveDefaultMergeStrategy returns the rig's recorded default merge
+// strategy, or the empty string if none is set. An empty result means `gc
+// sling` leaves merge_strategy unstamped on beads routed into this rig.
+func (r *Rig) EffectiveDefaultMergeStrategy() string {
+	return strings.TrimSpace(r.DefaultMergeStrategy)
+}
+
 // EffectiveSuspendedOnStart returns the rig's committable startup
 // suspension default. The deprecated `suspended` field is honored as
 // an alias for `suspended_on_start` so legacy city.toml files keep
@@ -1423,6 +1443,15 @@ type BeadsConfig struct {
 	// "require" (guarded release or a typed refusal). Empty defaults to "off".
 	// Any other value fails config load.
 	GuardedRelease string `toml:"guarded_release,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
+	// ProxiedIdleTimeout is how long a bd-owned proxied scope's proxy and Dolt
+	// child stay up with no connections before bd retires them; the next bd
+	// command restarts them. Go duration; "0" means never. A finite value
+	// must be at least 1m. Empty uses the default. It applies to scopes gc
+	// initializes (gc init, gc rig add, gc beads city migrate-proxied); bd
+	// cannot change an existing scope's value, and gc doctor reports drift.
+	// Overridden per rig by beads_proxied_idle_timeout and by the
+	// GC_BEADS_PROXIED_IDLE_TIMEOUT environment variable.
+	ProxiedIdleTimeout string `toml:"proxied_idle_timeout,omitempty"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -1761,7 +1790,19 @@ type ACPSessionConfig struct {
 	// OutputBufferLines is the number of output lines to keep in the
 	// circular buffer for Peek. Defaults to 1000.
 	OutputBufferLines int `toml:"output_buffer_lines,omitempty" jsonschema:"default=1000"`
+	// StopGrace is how long stopping an ACP session waits after SIGTERM
+	// before escalating to SIGKILL. Raise it for agents that need longer to
+	// drain in-flight tool calls on shutdown. Duration string (e.g., "5s",
+	// "20s"). Defaults to "5s"; non-positive or unparseable values fall back
+	// to the default. gc stop bounds each session at 30s, so keep stop_grace
+	// comfortably below that.
+	StopGrace string `toml:"stop_grace,omitempty" jsonschema:"default=5s"`
 }
+
+// DefaultACPStopGrace is the ACP SIGTERM-to-SIGKILL grace used when
+// [session.acp] stop_grace is unset or invalid. It matches the grace every
+// managed-process runtime uses.
+const DefaultACPStopGrace = 5 * time.Second
 
 // HandshakeTimeoutDuration returns the handshake timeout as a time.Duration.
 // Defaults to 30s if empty or unparseable.
@@ -1773,6 +1814,15 @@ func (a *ACPSessionConfig) HandshakeTimeoutDuration() time.Duration {
 // Defaults to 60s if empty or unparseable.
 func (a *ACPSessionConfig) NudgeBusyTimeoutDuration() time.Duration {
 	return durationOr(a.NudgeBusyTimeout, 60*time.Second)
+}
+
+// StopGraceDuration returns the ACP stop grace as a time.Duration.
+// Defaults to DefaultACPStopGrace if empty, unparseable, or non-positive.
+func (a *ACPSessionConfig) StopGraceDuration() time.Duration {
+	if d := durationOr(a.StopGrace, DefaultACPStopGrace); d > 0 {
+		return d
+	}
+	return DefaultACPStopGrace
 }
 
 // OutputBufferLinesOrDefault returns the output buffer line count.
@@ -1811,8 +1861,11 @@ type MailConfig struct {
 	// Provider selects the mail backend: "fake", "fail",
 	// "exec:<script>", or "" (default: beadmail).
 	Provider string `toml:"provider,omitempty"`
-	// RetentionTTL is how long read messages are retained before purge. Empty
-	// or "0" disables read-message retention.
+	// RetentionTTL has two consumers: it is how long read messages are
+	// retained before purge, and how long a read mail bead stays open before
+	// the nudge-mail sweep closes it. Empty or "0" disables read-message
+	// purge. The sweep distinguishes the two: empty leaves it at its own
+	// 60-minute default, while "0" disables its mail-close phase.
 	RetentionTTL string `toml:"retention_ttl,omitempty"`
 }
 
@@ -2127,10 +2180,23 @@ type OrdersConfig struct {
 	// BurntSushi's omitempty does not drop a zero int, so a plain int would
 	// emit max_dispatches_per_tick = 0 into every marshaled city.toml.
 
-	// MaxDispatchesPerTick caps how many orders the supervisor dispatches
-	// per tick. Unset keeps the built-in default of 4; set to 1 to drain
-	// overdue cooldown orders one-per-tick at cold start instead of firing
-	// several concurrent goroutines at once.
+	// MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron
+	// and event triggers) the supervisor dispatches per orders-lane pass, in
+	// a rotation that resumes where the previous pass stopped. The key keeps
+	// its historical name from when order dispatch ran once per controller
+	// tick. Unset keeps the built-in default of 4; set to 1 to drain overdue
+	// cooldown orders one per pass at cold start instead of firing several
+	// concurrent goroutines at once. Condition-triggered orders are outside
+	// this budget: a passing check means work is pending right now, so they
+	// dispatch on the pass that observes it. The open-tracking and open-work
+	// gates still run for them (unless the order sets no_work_gate), but
+	// those gates are keyed per order and only hold back a redispatch of an
+	// order whose previous run is still moving, so they do not bound the pass
+	// as a whole: a pass launches at most this budget plus one dispatch per
+	// condition order whose check passed on that pass. That second term grows
+	// with how many condition orders a city defines, not with this setting,
+	// and at cold start, before any tracking bead exists, neither gate holds
+	// a simultaneously-due set back.
 	MaxDispatchesPerTick *int `toml:"max_dispatches_per_tick,omitempty"`
 	// Overrides apply per-order field overrides after scanning.
 	// Each override targets an order by name and optionally by rig.
@@ -2622,6 +2688,13 @@ type DaemonConfig struct {
 	// wake fast path triggered by enqueue, eliminating the per-session bd
 	// shellout storm.
 	NudgeDispatcher string `toml:"nudge_dispatcher,omitempty" jsonschema:"default=legacy,enum=legacy,enum=supervisor"`
+	// SessionReconciler selects the controller's session reconciler. "legacy"
+	// (default) runs the tick reconciler. "v2" is reserved for the keyed
+	// reconciler and is refused in this build: a controller configured with it
+	// does not start. The gc-enterprise values "off", "auto" and "require" are
+	// deprecated aliases for "legacy". Boot-latched: a change applies at the next
+	// controller restart. Leave it unset.
+	SessionReconciler string `toml:"session_reconciler,omitempty" jsonschema:"default=legacy,enum=legacy,enum=v2,enum=off,enum=auto,enum=require"`
 	// AutoRestartOnDrift controls whether `gc start` automatically restarts
 	// the supervisor when it detects the running supervisor's binary or
 	// pack snapshot has drifted from on-disk state. Nil (unset) defaults
@@ -2826,6 +2899,61 @@ func (d *DaemonConfig) NudgeDispatcherMode() string {
 	default:
 		return "legacy"
 	}
+}
+
+// Session reconciler modes returned by SessionReconcilerMode.
+const (
+	SessionReconcilerLegacy = "legacy"
+	SessionReconcilerV2     = "v2"
+)
+
+// SessionReconcilerMode returns the normalized mode ("legacy" or "v2"),
+// whether the spelling was a deprecated alias, and ok=false for an unknown
+// value. Parsing is case- and space-tolerant.
+func (d DaemonConfig) SessionReconcilerMode() (mode string, alias, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(d.SessionReconciler)) {
+	case "", SessionReconcilerLegacy:
+		return SessionReconcilerLegacy, false, true
+	case SessionReconcilerV2:
+		return SessionReconcilerV2, false, true
+	case "off", "auto", "require":
+		return SessionReconcilerLegacy, true, true
+	default:
+		return "", false, false
+	}
+}
+
+// sessionReconcilerAliasMarker ends the warning for a gc-enterprise alias
+// spelling of [daemon] session_reconciler. Matching it as a suffix keeps an
+// unknown value that quotes the marker from passing as an alias. Keep in sync
+// with IsSessionReconcilerAliasWarning.
+const sessionReconcilerAliasMarker = `is a deprecated gc-enterprise alias for "legacy"; remove the key, legacy is the default`
+
+// sessionReconcilerWarnings returns the load warning for one config layer's
+// [daemon] session_reconciler: a non-fatal deprecation for an alias, and a
+// plain (strict-fatal) warning for an unknown value. The controller latch, not
+// the loader, refuses to start on an unknown value or an inadmissible v2.
+func sessionReconcilerWarnings(cfg *City, source string) []string {
+	if cfg == nil {
+		return nil
+	}
+	raw := cfg.Daemon.SessionReconciler
+	_, alias, ok := cfg.Daemon.SessionReconcilerMode()
+	switch {
+	case !ok:
+		return []string{fmt.Sprintf(`%s: [daemon] session_reconciler = %q is not a known value; remove the key to run the legacy reconciler`, source, raw)}
+	case alias:
+		return []string{fmt.Sprintf("%s: [daemon] session_reconciler = %q %s", source, raw, sessionReconcilerAliasMarker)}
+	}
+	return nil
+}
+
+// IsSessionReconcilerAliasWarning reports whether a load warning is the
+// non-fatal deprecation notice for a gc-enterprise session_reconciler alias.
+// Strict mode and the agent warning path use it so a city that still carries
+// "off", "auto" or "require" keeps booting on legacy.
+func IsSessionReconcilerAliasWarning(warning string) bool {
+	return strings.HasSuffix(warning, sessionReconcilerAliasMarker)
 }
 
 // ShutdownTimeoutDuration returns the shutdown timeout as a time.Duration.
@@ -4404,6 +4532,10 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 		if branch := r.EffectiveDefaultBranch(); branch != "" && !defaultBranchCharset.MatchString(branch) {
 			return fmt.Errorf("rig %q: default_branch %q contains characters outside [A-Za-z0-9._/@+=-]; the value is interpolated into prompts, formula variables, and pre_start shell commands, so shell-active characters are refused", r.Name, branch)
 		}
+		if strategy := r.EffectiveDefaultMergeStrategy(); strategy != "" && !beadmeta.IsKnownMergeStrategy(strategy) {
+			return fmt.Errorf("rig %q: default_merge_strategy %q is not one of %s",
+				r.Name, strategy, strings.Join(beadmeta.KnownMergeStrategies, ", "))
+		}
 	}
 	return nil
 }
@@ -4677,6 +4809,13 @@ func Parse(data []byte) (*City, error) {
 	cfg := City{}
 	md, err := toml.Decode(string(data), &cfg)
 	if err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	// Parse intentionally preserves non-storage legacy authoring surfaces for
+	// the migration reader. The removed Dolt mode is topology authority, never
+	// migration input, so reject it at decode time without broadening that
+	// tolerance.
+	if err := validateDoltModeAuthoringSurface(md); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	if err := validateStorageAuthoringSurface(md); err != nil {

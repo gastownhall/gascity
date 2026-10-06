@@ -392,7 +392,7 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		},
 	}
 
-	r, _, err := rig.Provision(deps, rig.ProvisionRequest{
+	r, provisioned, err := rig.Provision(deps, rig.ProvisionRequest{
 		Name:               name,
 		Path:               rigPath,
 		Prefix:             prefixOverride,
@@ -405,6 +405,16 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return config.Rig{}, 1
+	}
+	if reloaded, loadErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); loadErr != nil {
+		fmt.Fprintf(stderr, "gc rig add: reload provider ownership after rig add: %v\n", loadErr) //nolint:errcheck // best-effort stderr
+		return config.Rig{}, 1
+	} else if ownershipErr := ensureFreshRigProviderOwnership(cityPath, reloaded); ownershipErr != nil {
+		fmt.Fprintf(stderr, "gc rig add: attach provider ownership after rig add: %v\n", ownershipErr) //nolint:errcheck // best-effort stderr
+		return config.Rig{}, 1
+	} else if !provisioned.Deferred {
+		// An adopted store may predate migration 0059's fix (beads#7037).
+		rigAddRepairBlockedFlags(cityPath, reloaded, r.Name, stderr)
 	}
 	return r, 0
 }
@@ -1228,6 +1238,13 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 	cfg.Orders.Overrides = slices.DeleteFunc(cfg.Orders.Overrides,
 		func(o config.OrderOverride) bool { return o.Rig == rigName })
 
+	// Detach before changing city.toml. If its write fails, the configured rig
+	// still resolves through the durable path record and retrying removal can
+	// finish the config mutation without a dead ownership record.
+	if err := removeProviderScopeOwnershipRecord(cityPath, "rig:"+rigName); err != nil {
+		fmt.Fprintf(stderr, "gc rig remove: retiring provider scope ownership: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	// Write updated config.
 	if err := config.WriteCityAndRigSiteBindingsForEditRemovingRigs(fsys.OSFS{}, tomlPath, cfg, rigName); err != nil {
 		fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr

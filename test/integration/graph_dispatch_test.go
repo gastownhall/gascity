@@ -325,6 +325,7 @@ func findGraphWorkflowRootForInputConvoy(cityDir, inputConvoyID string) (string,
 
 func waitForBeadClosed(t *testing.T, cityDir, beadID string, timeout time.Duration) graphBead {
 	t.Helper()
+	timeout = clampToTestDeadline(t, timeout, 90*time.Second)
 
 	var waitErr error
 	if bead, err := waitForBeadCondition(t, cityDir, beadID, timeout, func(bead graphBead) bool {
@@ -469,4 +470,28 @@ func readWorkflowReport(t *testing.T, cityDir string) string {
 		t.Fatalf("reading workflow report: %v", err)
 	}
 	return string(data)
+}
+
+// clampToTestDeadline shortens a wait so that, if it runs out, the caller
+// still has margin before the test binary's own deadline to write its
+// diagnostics. Under bazel, --test_timeout becomes -test.timeout and a remote
+// action is killed at that same instant with its log discarded, so a wait
+// sized for go test's 30m budget (reviewWorkflowTimeout is 24m) would end in a
+// bare "timed out" with nothing to debug. Outside bazel the go test deadline is
+// far enough away that nothing changes.
+func clampToTestDeadline(t *testing.T, timeout, margin time.Duration) time.Duration {
+	t.Helper()
+	deadline, ok := t.Deadline()
+	if !ok {
+		return timeout
+	}
+	remaining := time.Until(deadline) - margin
+	if remaining >= timeout {
+		return timeout
+	}
+	if remaining < time.Second {
+		remaining = time.Second
+	}
+	t.Logf("waiting %s instead of %s: the test deadline is %s away", remaining.Round(time.Second), timeout, time.Until(deadline).Round(time.Second))
+	return remaining
 }

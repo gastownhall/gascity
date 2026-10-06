@@ -22,6 +22,9 @@ type Provider struct {
 
 	mu     sync.RWMutex
 	routes map[string]bool // true = ACP
+	// seeded is set once SeedRoutes has loaded the route table from the
+	// session beads, so a session without an ACP route is known to be default.
+	seeded bool
 }
 
 var (
@@ -35,7 +38,12 @@ var (
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
+	_ runtime.AttachmentObserverWithError   = (*Provider)(nil)
 	_ runtime.SessionEventProvider          = (*Provider)(nil)
+	_ runtime.BackendListingProvider        = (*Provider)(nil)
+	_ runtime.BackendsProvider              = (*Provider)(nil)
+	_ runtime.ListingAttestation            = (*Provider)(nil)
+	_ runtime.Router                        = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -64,14 +72,42 @@ func (p *Provider) Unroute(name string) {
 	p.mu.Unlock()
 }
 
-func (p *Provider) route(name string) runtime.Provider {
+// SeedRoutes registers every name as an ACP session and marks the route
+// table seeded: the caller derived names from the complete set of session
+// beads, so any other session routes to the default backend. Routes already
+// registered are kept.
+func (p *Provider) SeedRoutes(names []string) {
+	p.mu.Lock()
+	for _, name := range names {
+		p.routes[name] = true
+	}
+	p.seeded = true
+	p.mu.Unlock()
+}
+
+// RouteFor implements [runtime.Router]. An explicit ACP route is always
+// known; the default route is known only once SeedRoutes has run.
+func (p *Provider) RouteFor(name string) runtime.Route {
 	p.mu.RLock()
 	isACP := p.routes[name]
+	seeded := p.seeded
 	p.mu.RUnlock()
 	if isACP {
-		return p.acpSP
+		return runtime.Route{Backend: p.acpBackend(), Known: true}
 	}
-	return p.defaultSP
+	return runtime.Route{Backend: p.defaultBackend(), Known: seeded}
+}
+
+func (p *Provider) defaultBackend() runtime.Backend {
+	return runtime.Backend{Label: "default", Provider: p.defaultSP}
+}
+
+func (p *Provider) acpBackend() runtime.Backend {
+	return runtime.Backend{Label: "acp", Provider: p.acpSP}
+}
+
+func (p *Provider) route(name string) runtime.Provider {
+	return p.RouteFor(name).Provider
 }
 
 // SupportsTransport reports whether this provider can route the requested
@@ -208,6 +244,13 @@ func providerDeadRuntimeSession(sp runtime.Provider, name string) (bool, error) 
 // IsAttached delegates to the routed backend.
 func (p *Provider) IsAttached(name string) bool {
 	return p.route(name).IsAttached(name)
+}
+
+// IsAttachedWithError forwards the error-bearing attachment probe to the
+// routed backend, so a probe failure is not lost behind the bool. A backend
+// without the capability answers through its IsAttached with a nil error.
+func (p *Provider) IsAttachedWithError(name string) (bool, error) {
+	return runtime.IsAttachedWithError(p.route(name), name)
 }
 
 // Attach delegates to the routed backend. ACP sessions return an error.
@@ -374,12 +417,24 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // ListRunning queries both backends and returns best-effort results plus a
 // partial-list error when one backend fails.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
-	defaultList, dErr := p.defaultSP.ListRunning(prefix)
-	acpList, aErr := p.acpSP.ListRunning(prefix)
-	return runtime.MergeBackendListResults(
-		runtime.BackendListResult{Label: "default", Names: defaultList, Err: dErr},
-		runtime.BackendListResult{Label: "acp", Names: acpList, Err: aErr},
-	)
+	return runtime.MergeBackendListings(p.ListRunningByBackend(prefix))
+}
+
+// ListRunningByBackend implements [runtime.BackendListingProvider]: one
+// ListRunning call per backend, default first.
+func (p *Provider) ListRunningByBackend(prefix string) []runtime.BackendListing {
+	return runtime.ListBackends(p.Backends(), prefix)
+}
+
+// Backends implements [runtime.BackendsProvider] without listing.
+func (p *Provider) Backends() []runtime.Backend {
+	return []runtime.Backend{p.defaultBackend(), p.acpBackend()}
+}
+
+// ListRunningComplete implements [runtime.ListingAttestation]: the merged
+// listing is complete only when both backends attest theirs.
+func (p *Provider) ListRunningComplete() bool {
+	return runtime.ListRunningAttested(p.defaultSP) && runtime.ListRunningAttested(p.acpSP)
 }
 
 // GetLastActivity delegates to the routed backend.
@@ -423,31 +478,27 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	}
 }
 
-// SleepCapability reports idle sleep capability for the routed backend.
+// SleepCapability reports idle sleep capability for the routed backend,
+// derived from its capabilities when it does not report one itself.
 func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
-	if scp, ok := p.route(name).(runtime.SleepCapabilityProvider); ok {
+	routed := p.route(name)
+	if scp, ok := routed.(runtime.SleepCapabilityProvider); ok {
 		return scp.SleepCapability(name)
 	}
-	return runtime.SessionSleepCapabilityDisabled
+	return runtime.SleepCapabilityFromCapabilities(routed.Capabilities())
 }
 
-// SubscribeSessionEvents forwards the session-event stream of whichever
-// backend implements runtime.SessionEventProvider. Today only herdr does, so
-// without this method, wrapping an event-capable default backend (e.g.
-// herdr) behind auto for ACP routing would fail the
-// runtime.SessionEventProvider type assertion in cmd/gc's
-// sessionEventPump.restart and silently drop the whole event-driven
-// reconcile poke, falling back to patrol polling with no underlying
-// capability loss to explain it.
+// SubscribeSessionEvents forwards the session-event streams of the backends
+// that implement runtime.SessionEventProvider. Without this method,
+// wrapping an event-capable backend behind auto for ACP routing would fail
+// the runtime.SessionEventProvider type assertion in cmd/gc's
+// sessionEventPump.restart and silently drop the event-driven reconcile
+// poke. When both backends publish events, both streams are merged, so
+// neither backend's session deaths wait for the patrol scan; a nested
+// composite without an event-capable backend is skipped. See
+// runtime.SubscribeSessionEventSources.
 func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
-	dSEP, dok := p.defaultSP.(runtime.SessionEventProvider)
-	aSEP, aok := p.acpSP.(runtime.SessionEventProvider)
-	switch {
-	case dok:
-		return dSEP.SubscribeSessionEvents(ctx)
-	case aok:
-		return aSEP.SubscribeSessionEvents(ctx)
-	default:
-		return nil, fmt.Errorf("neither default nor ACP backend implements SubscribeSessionEvents")
-	}
+	return runtime.SubscribeSessionEventSources(ctx,
+		runtime.SessionEventSource{Name: "default", Provider: p.defaultSP},
+		runtime.SessionEventSource{Name: "ACP", Provider: p.acpSP})
 }

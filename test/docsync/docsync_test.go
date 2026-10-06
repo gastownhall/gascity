@@ -16,10 +16,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/docgen"
 )
 
 func repoRoot() string {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	_, filename, _, _ := runtime.Caller(0)
 	return filepath.Join(filepath.Dir(filename), "..", "..")
 }
@@ -502,6 +506,18 @@ func TestSchemaFreshness(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// The schema reflector walks the module tree for doc comments;
+			// under `bazel test` point it at the real checkout.
+			if root := bazeltest.OverrideRoot(); root != "" {
+				orig, err0 := os.Getwd()
+				if err0 != nil {
+					t.Fatal(err0)
+				}
+				if err := os.Chdir(root); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chdir(orig) })
+			}
 			generated, err := tt.generate()
 			if err != nil {
 				t.Fatalf("generating %s: %v", tt.name, err)

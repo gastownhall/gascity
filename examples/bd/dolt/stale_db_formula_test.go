@@ -20,6 +20,9 @@ func staleDBFilteredEnv(keys ...string) []string {
 		"GC_ESCALATION_RECIPIENT",
 		"GC_SYSTEM_PACKS_DIR",
 		"GC_MAINTENANCE_DONE_TARGET",
+		// The close actor chain leads with BEADS_ACTOR; never let the host
+		// session's own actor leak into a rendered-script run.
+		"BEADS_ACTOR",
 	)
 	return filteredEnv(keys...)
 }
@@ -435,13 +438,45 @@ esac
 	}
 }
 
-// TestStaleDBFormulaCloseUsesSessionNameWhenAliasBlank pins the second tier
-// of the close actor chain. An unaliased pool slot exports GC_ALIAS as an
-// empty string rather than leaving it unset, so the formula must use `:-`
-// (empty-or-unset) and not `-` (unset-only): with `-` the close would run as
-// `--actor ""` and bd would fall back to its own resolution chain, which is
-// the identity mismatch ga-je7i97 exists to prevent.
-func TestStaleDBFormulaCloseUsesSessionNameWhenAliasBlank(t *testing.T) {
+// TestStaleDBFormulaCloseUsesClaimIdentityForUnaliasedPool pins the close
+// actor chain for an unaliased pool dog, the shape every bd-pack dog has. Such
+// a session claims its wisp under its session bead ID (gc hook --claim records
+// alias > GC_SESSION_ID) and exports that same ID as BEADS_ACTOR, while
+// GC_SESSION_NAME stays the runtime name (<template>-<beadID>). bd fences the
+// close on actor == assignee byte for byte, so closing as the session name is
+// rejected and the successful run is left open (the #5716 shape). GC_ALIAS is
+// exported as an empty string rather than left unset, so every tier must use
+// `:-` (empty-or-unset) and not `-`.
+func TestStaleDBFormulaCloseUsesClaimIdentityForUnaliasedPool(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{
+			name: "beads actor",
+			env:  []string{"GC_ALIAS=", "BEADS_ACTOR=gc-dog7", "GC_SESSION_ID=gc-dog7", "GC_SESSION_NAME=dolt__dog-gc-dog7"},
+			want: "bd close bead-1 --actor gc-dog7",
+		},
+		{
+			name: "session id when beads actor absent",
+			env:  []string{"GC_ALIAS=", "GC_SESSION_ID=gc-dog7", "GC_SESSION_NAME=dolt__dog-gc-dog7"},
+			want: "bd close bead-1 --actor gc-dog7",
+		},
+		{
+			name: "session name last",
+			env:  []string{"GC_ALIAS=", "BEADS_ACTOR=", "GC_SESSION_NAME=dog-session-7"},
+			want: "bd close bead-1 --actor dog-session-7",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runStaleDBFormulaCloseActorCase(t, tc.env, tc.want)
+		})
+	}
+}
+
+func runStaleDBFormulaCloseActorCase(t *testing.T, identityEnv []string, wantClose string) {
+	t.Helper()
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skipf("bash not found: %v", err)
 	}
@@ -497,14 +532,13 @@ esac
 	cmd.Stdin = strings.NewReader(script)
 	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_APPLY_JSON"),
 		"GC_BEAD_ID=bead-1",
-		"GC_ALIAS=",
-		"GC_SESSION_NAME=dog-session-7",
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"TMPDIR="+dir,
 		"GC_TEST_LOG="+logPath,
 		"GC_TEST_SCAN_JSON="+scanPath,
 		"GC_TEST_APPLY_JSON="+applyPath,
 	)
+	cmd.Env = append(cmd.Env, identityEnv...)
 	out, err := cmd.CombinedOutput()
 	logData, readErr := os.ReadFile(logPath)
 	if readErr != nil {
@@ -517,7 +551,7 @@ esac
 	for _, want := range []string{
 		"gc dolt-cleanup --json --probe --force --max-orphan-dbs 20",
 		"gc event emit mol-dog-stale-db.done --message 1200 bytes freed; 0 errors",
-		"bd close bead-1 --actor dog-session-7",
+		wantClose,
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)

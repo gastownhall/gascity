@@ -59,7 +59,7 @@ func TestSessionEventPumpLiveHerdr(t *testing.T) {
 	herdrtest.ReportAgent(t, session, agentName, "working", func() string { return herdrLivePaneID(p, agentName) })
 
 	pokeCh := make(chan struct{}, 1)
-	pump := newSessionEventPump(ctx, pokeCh, &bytes.Buffer{}, "live")
+	pump := newSessionEventPump(ctx, newLegacyWake(pokeCh, nil), &bytes.Buffer{}, "live")
 	// Park resync pokes outside the test window so the only poke observed
 	// below is the attributed process-exit one.
 	pump.resyncDelay = time.Minute

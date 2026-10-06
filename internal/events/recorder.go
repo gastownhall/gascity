@@ -39,11 +39,18 @@ const (
 )
 
 // FileRecorder appends events to a JSONL file. It uses O_APPEND for
-// cross-process safety, a mutex for in-process serialization, and a
-// bounded-wait advisory file lock (flock) for cross-process serialization.
+// cross-process safety, a mutex for in-process serialization, and bounded-wait
+// advisory file locks (flock) for cross-process serialization.
 // Recording errors are written to stderr and never returned.
 //
+// Every append and rotation runs under the stable sidecar lock
+// (<path>.lock, see lockLocked) and first re-points the recorder's handle
+// at the file the path names now, so a handle that another writer rotated away
+// is reopened instead of written into, and the size a rotation decides on, the
+// seq it continues from, and the file it renames are all the same live file.
+//
 // FileRecorder implements [Provider] — it can both record and read events.
+// NewReadOnlyFileProvider builds one that only reads.
 type FileRecorder struct {
 	mu     sync.Mutex
 	path   string
@@ -51,6 +58,14 @@ type FileRecorder struct {
 	seq    uint64
 	stderr io.Writer
 	closed bool
+
+	// lock is the open sidecar lock file (<path>.lock). Unlike the data file it
+	// is never renamed, so every recorder on the path contends on one inode.
+	// Nil for a read-only provider, which holds no file open at all.
+	lock *os.File
+	// readOnly marks a NewReadOnlyFileProvider: it reads and watches the log
+	// but refuses to record or rotate.
+	readOnly bool
 
 	// rotations tracks in-flight rotation goroutines so Close can
 	// drain them. Without this, callers that read events.jsonl
@@ -72,10 +87,9 @@ type FileRecorder struct {
 	lastSizeCheck         time.Time
 
 	// skipSweep suppresses the one-shot startup sweep of orphaned rotating-*
-	// files (WithoutStartupSweep). Transient per-open recorders — the
-	// per-mutation class-store emitter is the one in tree — set it so they do
-	// not race the supervisor's long-lived recorder, which owns rotation
-	// recovery. It does NOT make the open scan-free: ReadLatestSeq consults
+	// files (WithoutStartupSweep). Every writer but the log's long-lived
+	// rotation owner (CLI commands, the per-mutation class-store emitter) sets
+	// it so it does not race the owner, which owns rotation recovery. It does NOT make the open scan-free: ReadLatestSeq consults
 	// the archives to continue the sequence, so every open reads the
 	// directory regardless. Crash recovery of orphaned rotating files is
 	// unchanged: the long-lived recorder still sweeps.
@@ -191,6 +205,10 @@ type RotationResult struct {
 // truncateNulPaddedTail) and truncated back to the last complete line
 // before appends resume. Sweep failures are logged to stderr and do not
 // block the recorder from opening.
+//
+// It also opens, creating it if needed, the sidecar lock file <path>.lock
+// that every append and rotation serializes on (see lockLocked). The file is
+// empty and permanent; it holds no state, only the flock.
 func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) (*FileRecorder, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("creating event log directory: %w", err)
@@ -224,15 +242,62 @@ func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) 
 		return nil, err
 	}
 
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	file, err := openEventLog(path)
 	if err != nil {
 		return nil, fmt.Errorf("opening event log: %w", err)
 	}
+	lock, err := openLockFile(path + ".lock")
+	if err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("opening event log lock: %w", err)
+	}
 
 	r.file = file
+	r.lock = lock
 	r.seq = maxSeq
 	return r, nil
 }
+
+// openEventLog opens the active log for appending, creating it if needed. It
+// is a variable so tests can fail the reopen a rotation does after its rename.
+var openEventLog = func(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+}
+
+// openLockFile opens, creating it if needed, the sidecar lock file. It opens
+// read-write, as beads.NewFileFlock does, because some filesystems (NFS among
+// them) emulate flock with byte-range locks that need a writable handle. It
+// falls back to read-only for an existing sidecar this user may not write
+// (another user beside a group-writable log), which a local flock accepts.
+func openLockFile(path string) (*os.File, error) {
+	lock, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	if err == nil {
+		return lock, nil
+	}
+	if readOnly, roErr := os.Open(path); roErr == nil {
+		return readOnly, nil
+	}
+	return nil, err
+}
+
+// RotationEnabled reports whether the recorder rotates the log on size, which
+// only the log's rotation owner does.
+func (r *FileRecorder) RotationEnabled() bool { return r.maxSize > 0 }
+
+// ReadOnly reports whether the recorder is a NewReadOnlyFileProvider.
+func (r *FileRecorder) ReadOnly() bool { return r.readOnly }
+
+// NewReadOnlyFileProvider returns a Provider over the event log at path that
+// holds no file open: List, ListTail, ListInFlight, LatestSeq and Watch read by
+// path exactly as a FileRecorder does, while Record and AppendBatch drop the
+// event with an error and ForceRotate refuses. Long-lived watchers use it so
+// they neither pin a rotated-away log on disk nor take part in rotation.
+func NewReadOnlyFileProvider(path string, stderr io.Writer) *FileRecorder {
+	return &FileRecorder{path: path, stderr: stderr, readOnly: true}
+}
+
+// errReadOnly reports a write or rotation against a NewReadOnlyFileProvider.
+var errReadOnly = errors.New("event log provider is read-only")
 
 // errRecorderClosed reports a Record/RecordAck against a closed recorder. Record
 // swallows it to preserve its historical silent-on-closed behavior; RecordAck
@@ -269,22 +334,26 @@ func (r *FileRecorder) RecordAck(e Event) error {
 	if r.closed {
 		return errRecorderClosed
 	}
+	if r.readOnly {
+		return errReadOnly
+	}
 
-	r.maybeAutoRotateLocked()
-
-	// Cross-process flock contention only — r.mu already serializes
-	// in-process callers, so this loop never spins for an in-process peer.
-	// The bounded wait drops the recorder if a dead writer is holding the
-	// lock instead of blocking forever and piling up processes.
-	fd := int(r.file.Fd())
-	if err := lockRecorderFile(fd, r.path); err != nil {
+	unlock, err := r.lockLocked()
+	if err != nil {
 		return fmt.Errorf("lock: %w", err)
 	}
 	defer func() {
-		if err := syscall.Flock(fd, syscall.LOCK_UN); err != nil {
+		if err := unlock(); err != nil {
 			fmt.Fprintf(r.stderr, "events: unlock: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 	}()
+
+	r.maybeAutoRotateLocked()
+	if r.file == nil {
+		// The rotation renamed the log but could not reopen it (already
+		// reported); the next call's lockLocked reopens it.
+		return errors.New("event log is unavailable after a failed rotation")
+	}
 
 	if err := r.writeRecordLocked(&e); err != nil {
 		return err
@@ -307,15 +376,15 @@ func (r *FileRecorder) AppendBatch(batch []Event) (resultErr error) {
 	if r.closed {
 		return fmt.Errorf("recorder is closed")
 	}
-	if r.file == nil {
-		return fmt.Errorf("recorder file is unavailable")
+	if r.readOnly {
+		return errReadOnly
 	}
 	if len(batch) == 0 {
 		return nil
 	}
 
-	fd := int(r.file.Fd())
-	if err := lockRecorderFile(fd, r.path); err != nil {
+	unlock, err := r.lockLocked()
+	if err != nil {
 		return fmt.Errorf("lock: %w", err)
 	}
 	unlockPending := true
@@ -323,12 +392,12 @@ func (r *FileRecorder) AppendBatch(batch []Event) (resultErr error) {
 		if !unlockPending {
 			return
 		}
-		if err := syscall.Flock(fd, syscall.LOCK_UN); err != nil {
+		if err := unlock(); err != nil {
 			resultErr = errors.Join(resultErr, fmt.Errorf("unlock: %w", err))
 		}
 	}()
 
-	latest, err := readLatestActiveSeq(r.path)
+	latest, err := latestLiveSeq(r.path)
 	if err != nil {
 		return fmt.Errorf("latest seq: %w", err)
 	}
@@ -350,10 +419,124 @@ func (r *FileRecorder) AppendBatch(batch []Event) (resultErr error) {
 	r.recordCount += uint64(len(batch))
 
 	unlockPending = false
-	if err := syscall.Flock(fd, syscall.LOCK_UN); err != nil {
+	if err := unlock(); err != nil {
 		return fmt.Errorf("unlock: %w", err)
 	}
 	return nil
+}
+
+// lockLocked takes the cross-process locks every append and rotation runs
+// under and returns the function that releases them. The caller must hold r.mu.
+//
+// Order is fixed: the sidecar lock first, then the data file's own flock.
+// The sidecar is what serializes this binary's writers and rotators: rotation
+// renames the data file, so a lock on the data inode stops excluding anyone
+// the moment the file is rotated, while the sidecar's inode never changes.
+// Holding it, lockLocked re-points the handle at the file the path names now
+// (reopenIfReplacedLocked), so nothing below ever appends to, sizes, or
+// rotates on a stale handle. The data-file flock is kept for older binaries,
+// which lock only the data file: taking it too still serializes appends with
+// them. They never take the sidecar, so the two orders cannot deadlock. An
+// older binary also rotates under the data-file lock alone, so the file can be
+// renamed while this recorder waits for that lock; once it holds it, it checks
+// the handle again and, if it was replaced, starts over on the new file.
+//
+// Both waits are bounded so a dead writer holding a lock drops the event
+// instead of piling up blocked processes.
+//
+// The returned unlock releases the flock on whatever r.file is by then (a
+// rotation closes the old handle, which drops its flock, and locks the new
+// one), then the sidecar. A rotation owner that found its handle replaced
+// warns once both are released, so the warning never holds up other writers.
+func (r *FileRecorder) lockLocked() (unlock func() error, err error) {
+	lockFd := int(r.lock.Fd())
+	if err := lockRecorderFile(lockFd, r.lock.Name()); err != nil {
+		return nil, err
+	}
+	replaced := false
+	unlockSidecar := func() error {
+		err := syscall.Flock(lockFd, syscall.LOCK_UN)
+		if replaced && r.maxSize > 0 {
+			fmt.Fprintf(r.stderr, "events: rotating recorder found %s replaced by another writer; reopened the active log\n", r.path) //nolint:errcheck // best-effort stderr
+		}
+		return err
+	}
+	const maxAttempts = 3
+	for attempt := 1; ; attempt++ {
+		reopened, err := r.reopenIfReplacedLocked()
+		replaced = replaced || reopened
+		if err != nil {
+			return nil, errors.Join(err, unlockSidecar())
+		}
+		fd := int(r.file.Fd())
+		if err := lockDataFile(fd, r.path); err != nil {
+			return nil, errors.Join(err, unlockSidecar())
+		}
+		same, err := r.handleNamesPathLocked()
+		if err == nil && same {
+			return func() error {
+				var err error
+				if r.file != nil {
+					err = syscall.Flock(int(r.file.Fd()), syscall.LOCK_UN)
+				}
+				return errors.Join(err, unlockSidecar())
+			}, nil
+		}
+		if unlockErr := syscall.Flock(fd, syscall.LOCK_UN); unlockErr != nil || err != nil {
+			return nil, errors.Join(err, unlockErr, unlockSidecar())
+		}
+		if attempt == maxAttempts {
+			return nil, errors.Join(fmt.Errorf("event log %s was replaced on each of %d lock attempts", r.path, maxAttempts), unlockSidecar())
+		}
+	}
+}
+
+// lockDataFile takes the data file's own flock. It is a variable so tests can
+// stand in for an older binary that rotates the log while this recorder waits.
+var lockDataFile = lockRecorderFile
+
+// reopenIfReplacedLocked makes r.file the file r.path names now. On a mismatch
+// (another writer rotated the log, or it is mid-rotation and the path is
+// briefly absent) it reopens the path, creating it if needed, closes the stale
+// handle, and reports true. It also reopens a nil handle, which a rotation that
+// renamed the log but could not reopen it leaves behind; that is this
+// recorder's own doing, so it reports false. The caller must hold r.mu and the
+// sidecar lock.
+func (r *FileRecorder) reopenIfReplacedLocked() (bool, error) {
+	if r.file != nil {
+		same, err := r.handleNamesPathLocked()
+		if err != nil || same {
+			return false, err
+		}
+	}
+	file, err := openEventLog(r.path)
+	if err != nil {
+		return false, fmt.Errorf("reopening event log: %w", err)
+	}
+	stale := r.file
+	r.file = file
+	if stale == nil {
+		return false, nil
+	}
+	_ = stale.Close() // nothing is written through the stale handle again
+	return true, nil
+}
+
+// handleNamesPathLocked reports whether r.file is the file r.path names now,
+// by device and inode. An absent path names no file. The caller must hold r.mu.
+func (r *FileRecorder) handleNamesPathLocked() (bool, error) {
+	held, err := r.file.Stat()
+	if err != nil {
+		return false, fmt.Errorf("stat event log handle: %w", err)
+	}
+	current, err := os.Stat(r.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat event log: %w", err)
+	}
+	return os.SameFile(held, current), nil
 }
 
 func lockRecorderFile(fd int, path string) error {
@@ -412,10 +595,12 @@ func writeBatch(writer io.Writer, data []byte) error {
 // flock. Returns an error on marshal or write failure; the caller
 // decides whether to log to stderr or surface it.
 func (r *FileRecorder) writeRecordLocked(e *Event) error {
-	if latest, err := readLatestActiveSeq(r.path); err == nil && latest > r.seq {
-		r.seq = latest
-	} else if err != nil {
+	latest, err := latestLiveSeq(r.path)
+	if err != nil {
 		return fmt.Errorf("latest seq: %w", err)
+	}
+	if latest > r.seq {
+		r.seq = latest
 	}
 	r.seq++
 	e.Seq = r.seq
@@ -425,19 +610,31 @@ func (r *FileRecorder) writeRecordLocked(e *Event) error {
 		// See marshalBatch's matching normalization for why (#5300).
 		e.Ts = e.Ts.Local()
 	}
+	if err := encodeAndWriteRecord(r.file, e); err != nil {
+		return err
+	}
+	r.recordCount++
+	return nil
+}
+
+// encodeAndWriteRecord marshals e as one JSONL line and writes it to w,
+// treating a short write as an error rather than a success.
+//
+// The guard matters because a partial line is indistinguishable from a
+// torn write to every downstream reader: the recorder would otherwise
+// count the record as written and continue appending after the fragment,
+// which is the corrupted-tail shape that startup truncation has to repair.
+// Sharing writeBatch keeps the single-record and batch paths honest about
+// short writes in the same way, from one implementation.
+func encodeAndWriteRecord(w io.Writer, e *Event) error {
 	data, err := json.Marshal(e)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
 	data = append(data, '\n')
-	written, err := r.file.Write(data)
-	if written != len(data) {
-		return errors.Join(err, io.ErrShortWrite)
-	}
-	if err != nil {
+	if err := writeBatch(w, data); err != nil {
 		return fmt.Errorf("write: %w", err)
 	}
-	r.recordCount++
 	return nil
 }
 
@@ -445,8 +642,9 @@ func (r *FileRecorder) writeRecordLocked(e *Event) error {
 // Record() hot path. It returns immediately if size-triggered
 // rotation is disabled (MaxSize <= 0) or if neither the
 // records-since-check nor the time-since-check threshold has been
-// crossed. On a check, it stats the active file and triggers
-// rotateLocked if size has exceeded MaxSize.
+// crossed. On a check, it stats the active file at the path (which
+// lockLocked has just made r.file) and triggers rotateLocked if size
+// has exceeded MaxSize. The caller must hold r.mu and lockLocked's locks.
 //
 // Rotation failures are logged to stderr — Record's contract is
 // best-effort and a failed rotation must not block subsequent
@@ -468,7 +666,7 @@ func (r *FileRecorder) maybeAutoRotateLocked() {
 	}
 	r.lastSizeCheck = time.Now()
 
-	info, err := r.file.Stat()
+	info, err := os.Stat(r.path)
 	if err != nil {
 		fmt.Fprintf(r.stderr, "events: rotation: size check: %v\n", err) //nolint:errcheck // best-effort stderr
 		return
@@ -491,17 +689,39 @@ func (r *FileRecorder) ForceRotate() (RotationResult, error) {
 	if r.closed {
 		return RotationResult{}, fmt.Errorf("recorder is closed")
 	}
+	if r.readOnly {
+		return RotationResult{}, errReadOnly
+	}
+	unlock, err := r.lockLocked()
+	if err != nil {
+		return RotationResult{}, fmt.Errorf("lock: %w", err)
+	}
+	defer func() {
+		if err := unlock(); err != nil {
+			fmt.Fprintf(r.stderr, "events: unlock: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+	}()
 	return r.rotateLocked()
 }
 
 // rotateLocked performs the close+rename+open+anchor sequence. It
-// must be called with r.mu held. The caller is responsible for
-// checking r.closed.
+// must be called with r.mu and lockLocked's locks held, so r.file is
+// the file the path names and no other recorder can append or rotate
+// meanwhile. The caller is responsible for checking r.closed.
+//
+// The anchor's seq is floored at the archived window's last seq + 1,
+// so a recorder whose own counter lags the log cannot reissue seqs
+// the archive already holds. An anchor above last + 1 means this
+// recorder issued seqs that are not in the file it is archiving, i.e.
+// they were written somewhere else and lost; that is reported.
 //
 // On success, the prior active log is renamed to
 // events.jsonl.rotating-<ts> and a background goroutine compresses
 // it to its canonical archive basename. The result's Done channel
-// closes when that goroutine finishes.
+// closes when that goroutine finishes. The rename never replaces an
+// existing rotating file (only an older binary's lockless rotation in
+// the same second over the same window can produce one): the rotation
+// fails instead, and the next size check retries under a new timestamp.
 func (r *FileRecorder) rotateLocked() (RotationResult, error) {
 	info, err := r.file.Stat()
 	if err != nil {
@@ -515,6 +735,11 @@ func (r *FileRecorder) rotateLocked() (RotationResult, error) {
 	if err != nil {
 		return RotationResult{}, fmt.Errorf("reading seq window: %w", err)
 	}
+	// Floor now, before any step below can fail and return: a recorder whose
+	// counter lags the log must never continue below the window it archives.
+	if r.seq < last {
+		r.seq = last
+	}
 
 	ts := time.Now().UTC()
 	dir := filepath.Dir(r.path)
@@ -527,12 +752,12 @@ func (r *FileRecorder) rotateLocked() (RotationResult, error) {
 	}
 	r.file = nil
 
-	if err := os.Rename(r.path, rotatingPath); err != nil {
+	if err := renameNoReplace(r.path, rotatingPath); err != nil {
 		// Try to recover: re-open the original path. If that also
 		// fails, mark the recorder closed so subsequent Record calls
 		// drop cleanly instead of dereferencing a nil file under
 		// maybeAutoRotateLocked.
-		if newF, openErr := os.OpenFile(r.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); openErr == nil {
+		if newF, openErr := openEventLog(r.path); openErr == nil {
 			r.file = newF
 		} else {
 			r.closed = true
@@ -540,13 +765,19 @@ func (r *FileRecorder) rotateLocked() (RotationResult, error) {
 		return RotationResult{}, fmt.Errorf("renaming active log: %w", err)
 	}
 
-	newFile, err := os.OpenFile(r.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	newFile, err := openEventLog(r.path)
 	if err != nil {
 		return RotationResult{}, fmt.Errorf("opening new active log: %w", err)
 	}
 	r.file = newFile
 	r.recordCount = 0
 	r.lastSizeCheck = time.Now()
+	// Older binaries lock only the data file; lock the fresh one too so the
+	// anchor is not interleaved with one of their appends. lockLocked's
+	// unlock releases it.
+	if err := lockDataFile(int(newFile.Fd()), r.path); err != nil {
+		fmt.Fprintf(r.stderr, "events: rotation: lock new active log: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
 
 	payload := RotatedPayload{
 		PriorArchive:  archiveBase,
@@ -565,6 +796,10 @@ func (r *FileRecorder) rotateLocked() (RotationResult, error) {
 	}
 	if err := r.writeRecordLocked(&anchor); err != nil {
 		return RotationResult{}, fmt.Errorf("writing anchor event: %w", err)
+	}
+	if anchor.Seq != last+1 {
+		fmt.Fprintf(r.stderr, "events: rotation: anchor seq %d is not archived last seq %d + 1; seqs %d-%d were issued but are not in %s\n", //nolint:errcheck // best-effort stderr
+			anchor.Seq, last, last+1, anchor.Seq-1, r.path)
 	}
 	if err := r.file.Sync(); err != nil {
 		fmt.Fprintf(r.stderr, "events: rotation: sync new active log: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -732,14 +967,20 @@ func (r *FileRecorder) Close() error {
 	r.closed = true
 	file := r.file
 	r.file = nil
+	lock := r.lock
+	r.lock = nil
 	r.mu.Unlock()
 
 	r.rotations.Wait()
 
-	if file == nil {
-		return nil
+	var lockErr error
+	if lock != nil {
+		lockErr = lock.Close()
 	}
-	return file.Close()
+	if file == nil {
+		return lockErr
+	}
+	return errors.Join(file.Close(), lockErr)
 }
 
 // WaitForRotations blocks until every in-flight rotation goroutine

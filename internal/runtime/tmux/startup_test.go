@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -34,6 +35,10 @@ type startCall struct {
 	processNames []string
 	rc           *RuntimeConfig
 	timeout      time.Duration
+	// exitStatus and exitSignal are the dead-pane facts recordStartCrash was
+	// handed, so a test can prove the artifact records what was classified.
+	exitStatus string
+	exitSignal string
 }
 
 // fakeStartOps records calls with full arguments and simulates outcomes
@@ -76,6 +81,8 @@ type fakeStartOps struct {
 	capturePaneErr             error
 	recordStartCrashPath       string
 	recordUnconfirmedNudgePath string
+	paneDeadStatus             string
+	paneDeadSignal             string
 
 	paneBusyResult bool
 	paneBusyErr    error
@@ -213,8 +220,13 @@ func (f *fakeStartOps) capturePane(name string, _ int) (string, error) {
 	return f.capturePaneText, f.capturePaneErr
 }
 
-func (f *fakeStartOps) recordStartCrash(name, _ string) string {
-	f.calls = append(f.calls, startCall{method: "recordStartCrash", name: name})
+func (f *fakeStartOps) paneDeadInfo(name string) (string, string) {
+	f.calls = append(f.calls, startCall{method: "paneDeadInfo", name: name})
+	return f.paneDeadStatus, f.paneDeadSignal
+}
+
+func (f *fakeStartOps) recordStartCrash(name, _, status, signal string) string {
+	f.calls = append(f.calls, startCall{method: "recordStartCrash", name: name, exitStatus: status, exitSignal: signal})
 	return f.recordStartCrashPath
 }
 
@@ -725,6 +737,7 @@ func TestDoStartSession_ReadyDeadlineWithDeadPaneReportsProviderCrash(t *testing
 		"hasSession",
 		"isSessionRunning",
 		"capturePane",
+		"paneDeadInfo",
 		"recordStartCrash",
 	})
 }
@@ -764,6 +777,7 @@ func TestDoStartSession_FinalDeadPaneReportsProviderCrash(t *testing.T) {
 		"hasSession",
 		"isSessionRunning",
 		"capturePane",
+		"paneDeadInfo",
 		"recordStartCrash",
 	})
 }
@@ -804,6 +818,7 @@ func TestDoStartSession_FinalDeadPaneCaptureErrorFallsBack(t *testing.T) {
 		"hasSession",
 		"isSessionRunning",
 		"capturePane",
+		"paneDeadInfo",
 		"recordStartCrash",
 	})
 }
@@ -844,6 +859,7 @@ func TestDoStartSession_DeadPaneRecordsDurableDiagnostic(t *testing.T) {
 		"hasSession",
 		"isSessionRunning",
 		"capturePane",
+		"paneDeadInfo",
 		"recordStartCrash",
 	})
 }
@@ -3224,10 +3240,9 @@ func TestPaneDeadInfoErrorReturnsEmpty(t *testing.T) {
 func TestRecordStartCrashWritesDurableArtifact(t *testing.T) {
 	dir := t.TempDir()
 	tm := NewTmux()
-	tm.exec = &fakeExecutor{out: "139|SIGSEGV\n"}
 	o := &tmuxStartOps{tm: tm, runtimeDir: dir}
 
-	path := o.recordStartCrash("mayor", "panic: startup failed\nPane is dead")
+	path := o.recordStartCrash("mayor", "panic: startup failed\nPane is dead", "139", "SIGSEGV")
 	want := filepath.Join(citylayout.SessionDiagnosticsDirForRuntimeDir(dir), "mayor", "start-stderr.log")
 	if path != want {
 		t.Fatalf("path = %q, want %q", path, want)
@@ -3245,9 +3260,8 @@ func TestRecordStartCrashWritesDurableArtifact(t *testing.T) {
 
 func TestRecordStartCrashDisabledWhenNoRuntimeDir(t *testing.T) {
 	tm := NewTmux()
-	tm.exec = &fakeExecutor{out: "139|SIGSEGV\n"}
 	o := &tmuxStartOps{tm: tm, runtimeDir: ""}
-	if path := o.recordStartCrash("mayor", "x"); path != "" {
+	if path := o.recordStartCrash("mayor", "x", "139", "SIGSEGV"); path != "" {
 		t.Fatalf("path = %q, want empty when runtimeDir unset", path)
 	}
 }
@@ -3525,5 +3539,29 @@ func TestStartOpsSendKeysKeepsWarmBoxOnRelaunch(t *testing.T) {
 	}
 	if got := fe.killCount(); got != 0 {
 		t.Fatalf("relaunch issued %d kill(s); the warm box must survive a failed startup prompt", got)
+	}
+}
+
+func TestDoStartSession_WarnsWhenTrustDialogLeftUnconfirmed(t *testing.T) {
+	var warnings bytes.Buffer
+	old := startupDialogWarningOut
+	startupDialogWarningOut = &warnings
+	t.Cleanup(func() { startupDialogWarningOut = old })
+
+	ops := &fakeStartOps{
+		hasSessionResult:        true,
+		acceptStartupDialogsErr: fmt.Errorf("workspace trust dialog: %w", runtime.ErrWorkspaceTrustUnconfirmed),
+	}
+	cfg := runtime.Config{Command: "claude", ReadyPromptPrefix: "> ", ProcessNames: []string{"claude"}}
+
+	if err := doStartSession(context.Background(), ops, "gc-city-mayor", cfg, DefaultConfig().SetupTimeout); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Both passes fail; only the final (post-readiness) pass reports it.
+	if got := strings.Count(warnings.String(), "never reached the trust option"); got != 1 {
+		t.Fatalf("warnings = %q, want exactly one unconfirmed-trust warning", warnings.String())
+	}
+	if !strings.Contains(warnings.String(), `"gc-city-mayor"`) {
+		t.Fatalf("warning %q does not name the session", warnings.String())
 	}
 }

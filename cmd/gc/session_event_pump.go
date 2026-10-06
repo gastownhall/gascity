@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -46,11 +48,15 @@ const (
 // polled path untouched.
 type sessionEventPump struct {
 	parent         context.Context
-	pokeCh         chan<- struct{}
+	wake           *controllerWake
 	stderr         io.Writer
 	logPrefix      string
 	resyncDelay    time.Duration
 	resyncMaxDefer time.Duration
+	// wakeInventory, when set, wakes the runtime inventory lane on every
+	// poke, so a death reaches the observation cache ahead of the patrol
+	// cadence. Set it before the first restart.
+	wakeInventory func()
 
 	mu     sync.Mutex
 	gen    int64              // subscription generation counter
@@ -63,11 +69,11 @@ type sessionEventPump struct {
 }
 
 // newSessionEventPump returns a pump whose subscriptions live within parent
-// and poke pokeCh. Wire a provider with restart.
-func newSessionEventPump(parent context.Context, pokeCh chan<- struct{}, stderr io.Writer, logPrefix string) *sessionEventPump {
+// and enqueue through wake. Wire a provider with restart.
+func newSessionEventPump(parent context.Context, wake *controllerWake, stderr io.Writer, logPrefix string) *sessionEventPump {
 	return &sessionEventPump{
 		parent:         parent,
-		pokeCh:         pokeCh,
+		wake:           wake,
 		stderr:         stderr,
 		logPrefix:      logPrefix,
 		resyncDelay:    sessionEventResyncPokeDelay,
@@ -76,11 +82,12 @@ func newSessionEventPump(parent context.Context, pokeCh chan<- struct{}, stderr 
 }
 
 // restart re-points the pump at sp's session-event stream, canceling any
-// prior subscription. Providers that do not implement
-// runtime.SessionEventProvider deactivate the pump and log the same
-// patrol-polling fallback line a subscribe error would, so the degradation
-// is never silent. Callers serialize restarts (startup and config reload
-// both run on the reconciler goroutine).
+// prior subscription. A provider with no session-event stream to offer --
+// one that does not implement runtime.SessionEventProvider, or a composite
+// whose backends all lack events -- deactivates the pump and announces the
+// patrol-polling fallback, so the degradation is never silent and never
+// reads like a broken transport. Callers serialize restarts (startup and
+// config reload both run on the reconciler goroutine).
 func (p *sessionEventPump) restart(sp runtime.Provider) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -92,13 +99,20 @@ func (p *sessionEventPump) restart(sp runtime.Provider) {
 	p.streamGen.Store(0)
 	sep, ok := sp.(runtime.SessionEventProvider)
 	if !ok {
-		fmt.Fprintf(p.stderr, "%s: provider does not support session events (session liveness stays on patrol polling)\n", p.logPrefix) //nolint:errcheck // best-effort stderr
+		p.logNoEventSource()
 		return
 	}
 	ctx, cancel := context.WithCancel(p.parent)
 	events, err := sep.SubscribeSessionEvents(ctx)
 	if err != nil {
 		cancel()
+		// A composite whose backends all lack events is a non-implementer in
+		// every way that matters here, so it gets that line instead; the
+		// subscribe: line stays reserved for a transport that really failed.
+		if errors.Is(err, runtime.ErrNoSessionEventSource) {
+			p.logNoEventSource()
+			return
+		}
 		fmt.Fprintf(p.stderr, "%s: session-event subscribe: %v (session liveness stays on patrol polling)\n", p.logPrefix, err) //nolint:errcheck // best-effort stderr
 		return
 	}
@@ -106,6 +120,13 @@ func (p *sessionEventPump) restart(sp runtime.Provider) {
 	p.streamGen.Store(p.gen)
 	fmt.Fprintf(p.stderr, "%s: session-event stream active: session death pokes the reconciler\n", p.logPrefix) //nolint:errcheck // best-effort stderr
 	go p.forward(ctx, p.gen, events)
+}
+
+// logNoEventSource announces the patrol-polling fallback for a provider that
+// has no session-event stream to offer. Both callers are benign
+// configurations rather than failures, so they share one line that says so.
+func (p *sessionEventPump) logNoEventSource() {
+	fmt.Fprintf(p.stderr, "%s: provider does not support session events (session liveness stays on patrol polling)\n", p.logPrefix) //nolint:errcheck // best-effort stderr
 }
 
 // streaming reports whether a session-event stream is currently established,
@@ -192,11 +213,12 @@ func (p *sessionEventPump) forward(ctx context.Context, gen int64, events <-chan
 // poke signals the reconciler without ever blocking; a full channel means a
 // tick is already owed, which covers this event too.
 func (p *sessionEventPump) poke(kind, session string) {
-	select {
-	case p.pokeCh <- struct{}{}:
-		// Log only when the send lands: a replayed backlog burst fills the
-		// buffer once and stays quiet.
+	if p.wakeInventory != nil {
+		p.wakeInventory()
+	}
+	// Log only when the send lands: a replayed backlog burst fills the
+	// buffer once and stays quiet.
+	if p.wake.Enqueue(wakeReasonProviderEvent, reconcilekey.SessionNamed(session)) {
 		fmt.Fprintf(p.stderr, "%s: session event %s(%s) → reconcile poke\n", p.logPrefix, kind, session) //nolint:errcheck // best-effort stderr
-	default:
 	}
 }

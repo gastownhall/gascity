@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -359,8 +360,8 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			titleDone := maybeAutoTitle(sessionFrontDoor(sessStore), info.ID, title, titleHint, titleProvider, info.WorkDir, stderr)
 			defer func() { <-titleDone }() // ensure title goroutine completes on all exit paths
 
-			// Poke again after bead creation to trigger immediate reconciler tick.
-			_ = pokeController(cityPath)
+			// Enqueue the new session to trigger an immediate reconcile.
+			_ = enqueueController(cityPath, reconcilekey.Session(info.ID))
 
 			if jsonOutput {
 				if err := writeSessionNewJSON(stdout, stderr, sessionNewJSON{
@@ -1301,6 +1302,16 @@ func (p *attachmentCachingProvider) IsAttached(name string) bool {
 	return p.Provider.IsAttached(name)
 }
 
+// IsAttachedWithError answers a cached attachment with a nil error and
+// forwards anything else, so an uncached probe failure is not read as
+// "not attached".
+func (p *attachmentCachingProvider) IsAttachedWithError(name string) (bool, error) {
+	if v, ok := p.cache[name]; ok {
+		return v, nil
+	}
+	return runtime.IsAttachedWithError(p.Provider, name)
+}
+
 func (p *attachmentCachingProvider) SleepCapability(name string) runtime.SessionSleepCapability {
 	if scp, ok := p.Provider.(runtime.SleepCapabilityProvider); ok {
 		return scp.SleepCapability(name)
@@ -1739,8 +1750,8 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 				fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			// Poke again to trigger immediate reconciler tick.
-			_ = pokeController(cityPath)
+			// Enqueue the held session to trigger an immediate reconcile.
+			_ = enqueueController(cityPath, reconcilekey.Session(sessionID))
 			if asJSON {
 				if err := writeSessionActionJSON(stdout, sessionActionResult{
 					Action:    "suspend",
@@ -1883,7 +1894,7 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	// nothing and a city that relocates nothing still reads one store.
 	var rigStores map[string]beads.Store
 	if cityErr == nil && cfg != nil {
-		rigStores = buildStandaloneRigStores(cfg, cityPath, stderr)
+		rigStores = buildStandaloneRigStoresWithConfig(cfg, cityPath, stderr)
 	}
 	unclaimWorkAssignedToRetiredSessionBead(cityPath, cfg, store, rigStores, closedSessionBead, "", stderr)
 
@@ -1926,6 +1937,10 @@ func newSessionRenameCmd(stdout, stderr io.Writer) *cobra.Command {
 func cmdSessionRename(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
 	asJSON := sessionJSONRequested(jsonOutput)
 	title := args[1]
+	if err := session.ValidateTitle(title); err != nil {
+		fmt.Fprintf(stderr, "gc session rename: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	store, code := openCityStore(stderr, "gc session rename")
 	if store == nil {
@@ -2335,6 +2350,7 @@ func outputLineCount(output string) int {
 // newSessionKillCmd creates the "gc session kill <id-or-alias>" command.
 func newSessionKillCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOutput bool
+	var force bool
 	cmd := &cobra.Command{
 		Use:   "kill <session-id-or-alias>",
 		Short: "Force-kill session runtime (reconciler restarts)",
@@ -2351,7 +2367,7 @@ provider after restart.
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionKill(args, stdout, stderr, jsonOutput) != 0 {
+			if cmdSessionKillWithForce(args, stdout, stderr, jsonOutput, force) != 0 {
 				return errExit
 			}
 			return nil
@@ -2359,16 +2375,20 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
+	cmd.Flags().BoolVar(&force, "force", false, "destroy a session even when it has live background subagents")
 	return cmd
 }
 
-// sessionKillPokeController is a mutable global test seam over pokeController.
+// sessionKillPokeController is a mutable global test seam over enqueueController.
 // Tests that swap it MUST NOT call t.Parallel().
-var sessionKillPokeController = pokeController
+var sessionKillPokeController = enqueueController
 
 // cmdSessionKill is the CLI entry point for "gc session kill".
-func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
-	asJSON := sessionJSONRequested(jsonOutput)
+func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
+	return cmdSessionKillWithForce(args, stdout, stderr, false, false)
+}
+
+func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, force bool) int {
 	store, code := openCityStore(stderr, "gc session kill")
 	if store == nil {
 		return code
@@ -2377,7 +2397,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	cityPath, err := resolveCity()
 	var cfg *config.City
 	if err == nil {
-		cfg, _ = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
+		cfg, _ = loadCityConfig(cityPath, configWarnWriter(asJSON, stderr))
 	}
 	// Every store consumer here is session-class (session-ID resolution, session
 	// bead read, session worker handle, circuit-breaker clear, asleep sync), so
@@ -2416,9 +2436,48 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if !force && !runtimeAlreadyInactive && refuseKillForLiveSubagents("gc session kill", workerHandleForSessionTargetWithConfig, cityPath, sessStore, sp, cfg, sessionID, stderr) {
+		return 1
+	}
+
+	// Record the kill intent BEFORE tearing the runtime down. Stopping first left
+	// a window in which the row still claimed a live runtime next to a dead one,
+	// and a controller tick landing there handled the kill as a crash: it
+	// cleared the conversation's resume key and queued a continuation-reset
+	// restart, or reaped a lingering dead pane's bead as a dead-runtime corpse.
+	// The fence (state_reason=kill-pending) also keeps the reverse window safe:
+	// while Stop runs, the row reads asleep next to a still-live runtime, and
+	// the controller leaves a fenced row alone instead of healing it back to
+	// awake. A row whose runtime is already gone has no window to close and
+	// keeps the post-kill sync below.
+	var fence *sessionKillFence
+	if infoErr == nil && !info.Closed && !runtimeAlreadyInactive {
+		fence, err = writeSessionKillFence(sessStore, sessionID, time.Now().UTC())
+		if err != nil {
+			// Refusing the kill because the store is unavailable would hold an
+			// operator's force-kill hostage to the bead store, so fall back to
+			// the stop-then-sync order and its best-effort post-kill write.
+			fmt.Fprintf(stderr, "gc session kill: warning: recording kill intent for session %s before stopping it: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
+			fence = nil
+		}
+	}
 
 	killErr := handle.Kill(context.Background())
+	if killErr != nil && fence != nil && sessionKillRuntimeGone(info, sp) {
+		// With the fence in place Manager.Kill sees an asleep row and falls
+		// through to the provider liveness check, which reports "not active"
+		// for a runtime that is already gone. Either way the runtime is down,
+		// which is what the kill is for.
+		killErr = nil
+	}
 	if killErr != nil && (identity == "" || !runtimeAlreadyInactive) {
+		if fence != nil {
+			// The runtime survived the stop, so the fence would claim a
+			// teardown that did not happen. Put the row back the way it was.
+			if err := fence.rollback(sessStore); err != nil {
+				fmt.Fprintf(stderr, "gc session kill: warning: restoring session %s after the failed kill: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
+			}
+		}
 		fmt.Fprintf(stderr, "gc session kill: %v\n", killErr) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -2438,14 +2497,21 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		fmt.Fprintf(stderr, "gc session kill: warning: session %s runtime was already inactive; cleared named-session circuit breaker\n", sessionID) //nolint:errcheck // best-effort stderr
 	}
 
-	// Sync the bead to asleep so a later `gc session wake` / reconcile starts
-	// a fresh runtime instead of short-circuiting on the stale live state the
-	// kill leaves behind (#3629). Written here at the CLI layer rather than in
-	// Manager.Kill so the drain-ack async-stop path (verifiedStop ->
-	// handle.Kill -> Manager.Kill) keeps owning its own lifecycle state.
-	if infoErr == nil {
+	// The bead must end up asleep so a later `gc session wake` / reconcile
+	// starts a fresh runtime instead of short-circuiting on the stale live state
+	// the kill leaves behind (#3629). Written here at the CLI layer rather than
+	// in Manager.Kill so the drain-ack async-stop path (verifiedStop ->
+	// handle.Kill -> Manager.Kill) keeps owning its own lifecycle state. With a
+	// fence the asleep intent is already durable and only the kill-pending
+	// marker is lifted, handing the session back to its lifecycle rules.
+	switch {
+	case fence != nil:
+		if err := fence.clear(sessStore); err != nil {
+			fmt.Fprintf(stderr, "gc session kill: warning: releasing kill fence on session %s: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
+		}
+	case infoErr == nil:
 		now := time.Now().UTC()
-		patch := session.SleepPatch(now, "killed")
+		patch := session.SleepPatch(now, string(session.SleepReasonKilled))
 		patch["synced_at"] = now.Format(time.RFC3339)
 		if err := sessStore.SetMetadataBatch(sessionID, patch); err != nil {
 			fmt.Fprintf(stderr, "gc session kill: warning: syncing session %s to asleep: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
@@ -2459,7 +2525,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	// unconditional: a poke failure (e.g. no controller running) is non-fatal,
 	// and a spurious poke when the asleep sync was skipped is harmless — the
 	// reconciler observes unchanged state and continues.
-	if err := sessionKillPokeController(cityPath); err != nil {
+	if err := sessionKillPokeController(cityPath, reconcilekey.Session(sessionID)); err != nil {
 		fmt.Fprintf(stderr, "gc session kill: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 
@@ -2507,13 +2573,20 @@ func recordSessionKillStop(info session.Info, beadErr error, cfg *config.City) {
 	telemetry.RecordAgentStop(context.Background(), sessionName, sessionAgentMetricIdentityInfo(info, cfg), "killed", nil)
 }
 
+// sessionKillRuntimeGone reports whether the provider positively observes no
+// runtime under the session's name. A row without a session name observes
+// nothing and is never reported gone.
+func sessionKillRuntimeGone(info session.Info, sp runtime.Provider) bool {
+	sessionName := strings.TrimSpace(info.SessionNameMetadata)
+	return sp != nil && sessionName != "" && !sp.IsRunning(sessionName)
+}
+
 func sessionKillRuntimeAlreadyInactive(info session.Info, sp runtime.Provider) bool {
 	switch session.State(strings.TrimSpace(info.MetadataState)) {
 	case session.StateActive, session.StateStartPending, session.StateCreating, session.StateDraining, session.StateAwake:
 		return false
 	}
-	sessionName := strings.TrimSpace(info.SessionNameMetadata)
-	return sp != nil && sessionName != "" && !sp.IsRunning(sessionName)
+	return sessionKillRuntimeGone(info, sp)
 }
 
 // newSessionNudgeCmd creates the "gc session nudge <id-or-alias> <message>" command.

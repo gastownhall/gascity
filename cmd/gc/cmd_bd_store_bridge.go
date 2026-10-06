@@ -139,7 +139,14 @@ func runBdStoreBridge(op string, args []string, dir, host, port, user string, st
 		return fmt.Errorf("missing --port")
 	}
 	password := bdStoreBridgePassword()
-	store := beads.NewBdStore(dir, beads.ExecCommandRunnerWithEnv(bdStoreBridgeEnv(dir, host, port, user, password)))
+	env := bdStoreBridgeEnv(dir, host, port, user, password)
+	// Bridge operations can trigger bd hooks that recursively invoke gc. Pin
+	// those callbacks to this exact executable so an ambient GC_BIN cannot
+	// cross the city boundary or select a different gc installation.
+	if err := pinBdGCEnvironment(env); err != nil {
+		return fmt.Errorf("resolve invoking gc executable: %w", err)
+	}
+	store := beads.NewBdStore(dir, beads.ExecCommandRunnerWithEnv(env))
 	switch op {
 	case "create":
 		var req bdStoreBridgeCreateRequest
