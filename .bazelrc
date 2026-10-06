@@ -20,16 +20,20 @@ test --sandbox_writable_path=/tmp/bt
 # internal/bazeltest; no client export is required.
 test --test_env=GC_TEST_REPO_ROOT
 
-# Bazel test actions do not inherit HOME by default; the herdr env scrubber
-# allow-lists the real HOME value, and go-path tests depend on it.
-test --test_env=HOME
+# HOME is not forwarded: rbe-west workers run as their own user, and the
+# runner's HOME (/home/runner) is read-only there, so every git, dolt, go and
+# XDG write under it failed. Bazel points HOME at TEST_TMPDIR instead (#6815).
+#
+# Repo-lint tests exec `go` and other dev binaries. The PATH is pinned rather
+# than forwarded from the client: the runner's toolcache Go does not exist on
+# the workers, which carry Go at /usr/local/go (#7010).
+test --test_env=PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin
 
-# Repo-lint tests exec `go` and other dev binaries; bazel's default test PATH
-# is minimal, so forward the client's.
-test --test_env=PATH
-
-# Remote execution on the NativeLink farm (scheduler on cherry). Local
-# clients reach it on loopback; off-host agents should use the tailnet
-# endpoint grpc://cherry.tail3127c0.ts.net:50051 instead.
-build:remote-exec --remote_executor=grpc://127.0.0.1:50052
+# Remote execution: the endpoint, instance and client certificate come from
+# .bazelrc.local (bazel-test.yml writes them from the RBE_* secrets; rbe-west
+# since the cherry farm was retired). A loopback executor here would win over
+# that file and fail every CI run with "Connection refused 127.0.0.1:50052".
 build:remote-exec --remote_timeout=3600
+
+# Machine- and CI-local settings (remote endpoint, instance, credentials).
+try-import %workspace%/.bazelrc.local

@@ -7,6 +7,7 @@ go_test(
         "bd_version_pin_test.go",
         "build_provenance_test.go",
         "check_core_boundary_test.go",
+        "check_embedded_pins_test.go",
         "check_split_topology_rows_test.go",
         "ci_critical_path_test.go",
         "ci_required_coverage_test.go",

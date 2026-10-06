@@ -229,7 +229,7 @@ func closeThroughClassResolver(resolve func(*storageRoutes, beads.Store, *config
 // emitting class-store wrapper carries CloseWithMetadataIfMatch structurally for
 // every engine — TestEmittingClassStoreKeepsEveryEngineCapability forces that,
 // because *NativeDoltStore has it — so a bare type assertion would advertise
-// atomic close even over a backing (the sqlite CLI engine) that cannot honor it.
+// atomic close even over a backing (a plain MemStore, or a bd CLI store) that cannot honor it.
 // The wrapper's AtomicConditionalCloserHandle keeps discovery honest: yes only
 // when the resolved backing truly provides atomic close, and the closer it hands
 // back is the emitting wrapper itself, so a DISCOVERED atomic close still appends

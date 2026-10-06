@@ -241,8 +241,8 @@ func TestGCBeadsBDScript_UsesPortableSleepMS(t *testing.T) {
 	if got := strings.Count(script, `sleep_ms "$backoff_ms" 2>/dev/null || sleep 1`); got < 3 {
 		t.Fatalf("gc-beads-bd.sh must use sleep_ms for retry backoff sleeps; found %d call sites", got)
 	}
-	if !strings.Contains(script, "for attempt in 1 2 3 4 5 6 7 8; do") {
-		t.Fatalf("gc-beads-bd.sh must allow slow bd runtime schema visibility after init")
+	if !strings.Contains(script, `cap_ms="${GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS:-120000}"`) {
+		t.Fatalf("gc-beads-bd.sh must allow slow bd runtime schema visibility after init via an env-overridable hard cap")
 	}
 }
 

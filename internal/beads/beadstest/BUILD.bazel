@@ -10,6 +10,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "beadstest",
     srcs = [
+        "atomic_close_conformance.go",
         "conditional_writer_conformance.go",
         "conformance.go",
         "conformance_skips.go",

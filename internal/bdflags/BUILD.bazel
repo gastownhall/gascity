@@ -18,6 +18,7 @@ go_test(
         "bdargs_test.go",
         "bdflags_test.go",
         "testenv_import_test.go",
+        "update_force_test.go",
     ],
     embed = [":bdflags"],
     deps = ["//internal/testenv"],

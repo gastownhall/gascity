@@ -162,6 +162,7 @@ func buildAwakeInputFromReconcilerWithObservationErrors(
 			ExplicitWake:           lifecycle.HasWakeCause(session.WakeCauseExplicit),
 			DependencyOnly:         info.DependencyOnly,
 			NamedIdentity:          lifecycle.NamedIdentity,
+			Alias:                  stableAssignmentAliasForConfigInfo(info, cfg),
 			ConfiguredNamedSession: isNamedSessionInfo(info),
 			Pinned:                 lifecycle.HasWakeCause(session.WakeCausePinned),
 			Drained:                lifecycle.BaseState == session.BaseStateDrained,

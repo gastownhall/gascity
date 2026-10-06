@@ -2115,6 +2115,10 @@ entry using source plus optional version. Supported sources are:
   with the pack subpath and locked to the current commit
 - remote git repositories: cloned and locked; --version accepts a semver
   constraint or sha:&lt;commit&gt;
+- packs published in a configured pack registry: a semver --version (or no
+  --version) resolves against the registry's release entries, not git tags;
+  the constraint is kept, the lock records the release version and commit,
+  and the fetched content must match the release's content hash
 - remote GitHub repository subpaths: use dereferenceable tree URLs such as
   https://github.com/org/repo/tree/main/packs/foo
 
@@ -4656,6 +4660,13 @@ will not be found by name or auto-started again until it is re-registered
 with "gc register". Use "gc unregister" directly to remove a registration
 without stopping sessions.
 
+gc stop reports "City stopped." only when it could confirm that every
+session stopped. If it could not list the runtime's sessions completely,
+or could not check whether a session is still running, it names what it
+could not verify, still stops every session it did see, and exits
+non-zero; a supervisor registration is restored. Resolve the reported
+error and run gc stop again.
+
 Use --timeout=DURATION to cap the wall-clock time gc stop will spend
 before giving up; the default budgets configured session interrupt and
 stop waves, the configured shutdown grace wait, and a second orphan
@@ -4689,19 +4700,35 @@ gc storage
 |------------|-------------|
 | [gc storage migrate](#gc-storage-migrate) | Migrate this city's infrastructure classes onto their configured binding |
 | [gc storage preflight](#gc-storage-preflight) | Report what the migration would refuse, without migrating (read-only) |
-| [gc storage recover-stranded](#gc-storage-recover-stranded) | Copy stranded infrastructure beads from the retained work store into the converged binding |
+| [gc storage recover-stranded](#gc-storage-recover-stranded) | Copy stranded infrastructure beads from the work store into the converged binding |
+| [gc storage repair-sequence](#gc-storage-repair-sequence) | Inspect or raise a SQLite bead store's id-sequence floor |
 | [gc storage status](#gc-storage-status) | Report this city's storage-class layout (read-only) |
 
 ## gc storage migrate
 
 Copy this city's infrastructure-class beads out of the work store and into
-the binding [storage.classes] assigns them to.
+the binding [storage.classes] assigns them to, then clear the work store's
+copies.
 
 Every bead is copied with its id and its within-class dependency topology
 preserved, proven field-equal against a closed and reopened destination, and
-then recorded in a proven-copy manifest and a convergence marker. The source is
-RETAINED verbatim: nothing here writes to, moves or prunes the work store, so a
-rollback before cutover is a config edit with no data recovery step.
+then recorded in a proven-copy manifest and a convergence marker. Nothing in
+the work store changes before the marker, so a rollback before cutover is a
+config edit with no data recovery step.
+
+Past the marker the binding is the only authoritative copy, so the work
+store's now-stale copies are cleared: each is written to a backup beside the
+manifest (infra.retained-source.jsonl), the backup is re-read and proven equal
+to the rows it records, and only then are the rows removed. A work bead whose
+blocking dependency the binding has already satisfied is released; every other
+cross-store edge is kept.
+
+Run it again on a converged city to repair one that still holds its copies —
+a city migrated by an earlier build, or a clear that was interrupted. Boot
+refuses such a city and names this command.
+
+--from-backup re-copies a binding whose database is gone from that backup
+instead of from the work store, which no longer holds the slice.
 
 The move refuses while a writer can reach the source. This binary can prove the
 absence of a controller and cannot prove the absence of anything else, so that
@@ -4714,6 +4741,7 @@ gc storage migrate [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
+| `--from-backup` | bool |  | re-copy a binding whose database is gone from the retained-source backup |
 | `--from-work` | bool |  | migrate the infrastructure classes out of this city's work store |
 
 ## gc storage preflight
@@ -4760,6 +4788,9 @@ command run twice: the migration is one-shot on purpose, and forcing it to
 re-copy would re-import a serving binding from a source that no longer holds
 what the binding does.
 
+The recovered beads stay in the work store until the migration is run again,
+which clears them exactly as it clears the cutover's own copies.
+
 ```
 gc storage recover-stranded [flags]
 ```
@@ -4770,6 +4801,53 @@ gc storage recover-stranded [flags]
 | `--dump` | string |  | write every stranded bead and its source dep edges to this JSON file before any write |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--from-work` | bool |  | recover the stranded infrastructure beads out of this city's work store |
+
+## gc storage repair-sequence
+
+Inspect or raise the persisted id-sequence floor of a SQLite bead store.
+
+Without --floor this is read-only: it reports the persisted floor and the
+highest auto-minted id the store still holds, and whether minting is refused
+because a negative "&lt;prefix&gt;--&lt;n&gt;" id ranks above the floor.
+
+A negative id above the floor usually means an older build wrapped the
+sequence past 9223372036854775807. It can also come from a copy or import that
+pinned "&lt;prefix&gt;--&lt;n&gt;" ids into a store that never wrapped. If those rows are
+stray duplicates, do not raise the floor: delete every "&lt;prefix&gt;--&lt;n&gt;" row
+above the floor, not only the one the report names, and reopen the store
+(restart the processes serving it), and minting resumes in the positive range.
+Deleting destroys those beads, so if any of them is a real bead, raise the
+floor instead.
+
+With --floor=N it persists N as the floor, so the next auto id is N+1. Pick N
+at or above the highest id EVER issued under the prefix — deleted beads are no
+longer in the store, so derive it from the event log and dispatcher traces. The
+command refuses to lower the persisted floor and refuses N below the highest
+auto id present.
+
+Ids are ordered 1 &lt; ... &lt; 9223372036854775807 &lt; -9223372036854775808 &lt; ... &lt; -1.
+On a store an older build wrapped, the positive range is spent: pass a NEGATIVE
+floor above every "&lt;prefix&gt;--&lt;n&gt;" id ever issued, and allocation continues
+upward toward -1 without re-entering the positive range. That cannot be
+undone. Builds without this fix refuse to open a store whose floor is negative.
+
+Before repairing a wrapped store, stop every process serving it that runs a
+build without this fix, so none keeps minting wrapped ids past the floor you
+pick. After a floor raise, processes on this build need no restart: one that
+refuses to mint resumes at its next mint once the floor covers the store.
+
+The store defaults to this city's SQLite infrastructure binding; --dir names
+any other store directory (the directory holding beads.sqlite).
+
+```
+gc storage repair-sequence [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dir` | string |  | store directory holding beads.sqlite (default: this city's SQLite infrastructure binding) |
+| `--floor` | string |  | new floor (int64, may be negative); omit to only report |
+| `--prefix` | string | `gcg` | auto-id prefix whose sequence to inspect or repair |
 
 ## gc storage status
 

@@ -385,7 +385,7 @@ func TestIsSessionRunningFalseWhenPaneDead(t *testing.T) {
 	}
 	want := [][]string{
 		{"-u", "-L", "x", "has-session", "-t", "=runner"},
-		{"-u", "-L", "x", "display-message", "-t", "runner:^.0", "-p", "#{pane_dead}"},
+		{"-u", "-L", "x", "display-message", "-t", "=runner:^.0", "-p", "#{pane_dead}"},
 	}
 	for i := range want {
 		if len(fe.calls[i]) != len(want[i]) {
@@ -429,7 +429,7 @@ func TestProviderIsDeadRuntimeSessionRequiresEveryPaneDead(t *testing.T) {
 	if len(fe.calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(fe.calls))
 	}
-	want := []string{"-u", "-L", "x", "list-panes", "-s", "-t", "=runner", "-F", "#{pane_dead}"}
+	want := []string{"-u", "-L", "x", "list-panes", "-s", "-t", "=runner:", "-F", "#{pane_dead}"}
 	if len(fe.calls[0]) != len(want) {
 		t.Fatalf("call = %v, want %v", fe.calls[0], want)
 	}
@@ -490,7 +490,7 @@ func TestWaitForRuntimeReadyCapturesPromptAboveBlankFooter(t *testing.T) {
 		t.Fatal("expected capture-pane call")
 	}
 	got := fe.calls[0]
-	want := []string{"-u", "capture-pane", "-p", "-t", "mayor", "-S", "-120"}
+	want := []string{"-u", "capture-pane", "-p", "-t", "=mayor:", "-S", "-120"}
 	if len(got) != len(want) {
 		t.Fatalf("first call = %v, want %v", got, want)
 	}
@@ -527,7 +527,7 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 	}
 
 	setEnv := strings.Join(exec.calls[0], " ")
-	if !strings.Contains(setEnv, "set-environment -t gc-test-token-pin -r GC_CONTROLLER_TOKEN") {
+	if !strings.Contains(setEnv, "set-environment -t =gc-test-token-pin -r GC_CONTROLLER_TOKEN") {
 		t.Errorf("first call = %q, want it to mark GC_CONTROLLER_TOKEN removed from the session env", setEnv)
 	}
 	if strings.Contains(setEnv, "-u GC_CONTROLLER_TOKEN") {
@@ -562,7 +562,7 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 		}
 		for i, key := range []string{"BEADS_DB", "BEADS_FUTURE_AUTHORITY"} {
 			setEnv := strings.Join(exec.calls[i], " ")
-			if !strings.Contains(setEnv, "set-environment -t gc-test-beads-pin -r "+key) {
+			if !strings.Contains(setEnv, "set-environment -t =gc-test-beads-pin -r "+key) {
 				t.Errorf("call %d = %q, want %s marked removed from the session env", i, setEnv, key)
 			}
 		}

@@ -731,6 +731,22 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: runtime scaffold: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// A foreground start takes the controller lock before it touches the
+	// city, and in particular before it starts the bead-store provider. A
+	// start that loses the lock (to a running controller, or to gc stop,
+	// which holds it while it retires the provider) must not have restarted
+	// that provider first. The lock is held from here through the whole
+	// controller run and released when this function returns. A dry run
+	// never becomes the controller, so it previews without the lock.
+	var controllerLock *os.File
+	if controllerMode && !dryRunMode {
+		controllerLock, err = acquireControllerLock(cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		defer controllerLock.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
+	}
 	if missing := checkHardDependencies(cityPath); len(missing) > 0 {
 		fmt.Fprintf(stderr, "gc start: missing required dependencies:\n\n") //nolint:errcheck // best-effort stderr
 		for _, dep := range missing {
@@ -818,6 +834,12 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: beads health check: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal warning — server may recover by the time agents need it.
 	}
+	// One-shot is_blocked repair after a bd upgrade (beads#7037). Best-effort:
+	// it warns and retries on the next start instead of failing this one.
+	// --dry-run only previews, so it writes nothing.
+	if !dryRunMode {
+		startRepairBlockedFlags(cityPath, cfg, stderr, "gc start")
+	}
 
 	// Warm-up doctor scan. Fail-open: startup continues regardless of check,
 	// mail, or runner failures.
@@ -826,9 +848,12 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		warmupCityPath = absCityPath
 	}
 	skipRigDoltChecks := gcDoltSkip()
+	// While this start holds the controller lock no other controller runs;
+	// probing the flock would only find this start's own lock.
+	warmupControllerRunning := controllerLock == nil && doctor.IsControllerRunning(warmupCityPath)
 	warmupChecks := buildDoctorChecks(warmupCityPath, cfg, nil, buildDoctorChecksOpts{
 		Stderr:               io.Discard,
-		ControllerRunning:    doctor.IsControllerRunning(warmupCityPath),
+		ControllerRunning:    warmupControllerRunning,
 		SkipCityDoltCheck:    skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(warmupCityPath, warmupCityPath) && !workspaceNeedsCityDoltCheck(warmupCityPath, cfg)),
 		SkipManagedDoltCheck: managedDoltOpsCheckSkip(warmupCityPath, cfg, nil),
 		SkipRigDoltChecks:    skipRigDoltChecks,
@@ -937,8 +962,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	recorder := events.Discard
 	var eventProv events.Provider // nil when events disabled or FileRecorder fails
-	if fr, err := newFileEventsRecorder(
-		filepath.Join(cityPath, ".gc", "events.jsonl"), cfg.Events, stderr); err == nil {
+	fr, frErr := openStandaloneCityEventsRecorder(cityPath, cfg.Events, controllerLock != nil, stderr)
+	if frErr == nil {
 		recorder = fr
 		eventProv = fr
 	}
@@ -962,7 +987,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, cityPath, sp, stderr)
 		watchTargets := config.WatchTargets(prov, cfg, cityPath)
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
-		return runController(cityPath, tomlPath, cfg, configRev, buildAgents, buildAgentsWithSessionBeads, sp,
+		return runController(cityPath, controllerLock, tomlPath, cfg, configRev, buildAgents, buildAgentsWithSessionBeads, sp,
 			newDrainOps(sp), poolSessions, poolDeathHandlers, watchTargets, recorder, eventProv, stdout, stderr)
 	}
 

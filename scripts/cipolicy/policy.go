@@ -64,7 +64,11 @@ const (
 	//
 	// Bumped for the Beads v1.3.0 -> v1.3.1-rc.2 -> v1.3.1 pins: every job's
 	// BD_VERSION env value moves to the new tag. Reviewed delta: that value only.
-	expectedCIExecutionHash     = "3921aabd1ff956bb82e6b11ef91422f23b51cb3bc6db988f31081a7f47b268dc"
+	// Then the Dolt 2.1.7 -> 2.2.0 pin (#7070): job DOLT_VERSION env values only.
+	// Then (#7087, beads#7037) the topology job's shared-server step -run also
+	// selects TestBlockedRepairOnProxiedCityAndRig. Reviewed delta: one -run
+	// alternative, no new job, step, trigger or permission.
+	expectedCIExecutionHash     = "1aa299cb4f5be4a72c8fa0afc7bb7985984d77ea6cc7a7c1bff1a6668451511d"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (v1.5.0 Tier C
 	// first-run drain) the tier-c job's -run selector gained
@@ -72,8 +76,11 @@ const (
 	// TestFreshInit_ClaudeUnrestricted, mirroring RC Gate's acceptance C shards;
 	// same job, env, secrets and runner.
 	// Bumped for the Beads v1.3.0 -> v1.3.1-rc.2 -> v1.3.1 pins: the workflow
-	// and job BD_VERSION env values only.
-	expectedNightlyExecutionHash = "896608864491e88c6327fd49231ab0f83610a81ae24bfb3e87ec1cba570fa993"
+	// and job BD_VERSION env values only. Then (#7070) the Dolt 2.1.7 -> 2.2.0
+	// pin (DOLT_VERSION env values) and one bundled-pack-pins step,
+	// `scripts/check-embedded-pins --skip-bundled`. No new job, trigger or
+	// permission.
+	expectedNightlyExecutionHash = "3147999d25f7936dbaf3d5b8922de8299e06072f1822b8fb9e9191259fe5dcf7"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 

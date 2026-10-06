@@ -26,6 +26,11 @@ const (
 	// PublicGascityPackSource and is pinned to the same release commit
 	// (PublicGascityPackVersion), so a fresh gascity city's formulas and the
 	// rig roles they coordinate always come from one matching release.
+	//
+	// It is a bundled subpack of the gascity pack (builtinpacks
+	// bundledSubpacks): at PublicGascityPackVersion it resolves offline from
+	// the gascity pack's embedded tree, in the same synthetic cache directory,
+	// so gc init and gc rig add never clone gascity-packs for it (ga-73eoo).
 	PublicGascityRolesPackSource = "https://github.com/gastownhall/gascity-packs/tree/main/gascity/roles"
 
 	// BundledPackImportVersion pins the [imports.core]/[imports.bd] entries
@@ -35,25 +40,35 @@ const (
 	// cache slot, so different binaries never fight over one entry). A
 	// bundled source pinned at any other commit is an ordinary remote
 	// import and is fetched from git for real — so editing a pin always
-	// does what it says. The pin names a real gascity.git commit where the
-	// bundled pack paths exist, keeping that fetch path honest.
-	BundledPackImportVersion = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
+	// does what it says. The pin names a real gascity.git commit whose
+	// bundled pack trees match the content this binary embeds, so a gc that
+	// does not know the pin (an older release reading a newer city) fetches
+	// the same bytes. scripts/check-embedded-pins (RC Gate) checks that the
+	// commit is an ancestor of the release ref with identical core/bd/dolt
+	// trees; bump the pin (and append the old value to
+	// SupersededBundledPackImportVersions) when cutting a release whose
+	// bundled core/bd/dolt content changed.
+	BundledPackImportVersion = "sha:3dcfe0969e26aac651c5c65c0a5d73f2d8cc16c5"
 )
 
 // SupersededBundledPackImportVersions lists previous canonical pins for the
 // gascity.git core/bd/dolt bundled packs, oldest first. Older gc releases
-// wrote these as the canonical pin; the packv2-import-state doctor fix
-// rewrites them to the current BundledPackImportVersion so a pin bump never
-// strands a city on a network-only resolution path for content it only ever
-// wanted as "the builtin". Deliberate user pins at other commits are
-// untouched. When bumping BundledPackImportVersion, append the old value
-// here.
+// wrote these as the canonical pin for content they only ever meant as "the
+// builtin", so the running binary keeps serving its embedded content for
+// them (never a git fetch of the old commit), and the packv2-import-state
+// doctor fix rewrites them to the current BundledPackImportVersion.
+// Deliberate user pins at other commits are untouched. When bumping
+// BundledPackImportVersion, append the old value here.
 var SupersededBundledPackImportVersions = []string{
 	// Older Pack v2 lockfiles stored the bundled-pack content hash as the
 	// canonical pin for gascity.git bundled packs. That value is not a git
 	// commit, so current binaries must re-pin it offline instead of trying to
 	// fetch it as an exact commit.
 	"sha:282d2bf26b1a9396016e90b0128c1cd16b719f4d3af7cd0ea06cf25fbc426d18",
+	// The June 2026 marker commit every gc through v1.5.0 wrote. Its tree
+	// predates the content those binaries embedded, so it is served from
+	// embedded content and never fetched (isSupersededEmbeddedOnlyPin).
+	"sha:f895c0ff47d6ee9334ed282a416387eb5b084d24",
 }
 
 // SupersededPublicGastownPackVersions lists previous canonical pins for the

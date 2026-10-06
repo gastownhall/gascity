@@ -303,7 +303,7 @@ func TestDismissFeedbackSurveyModalIgnoresSurveyOnlyInScrollback(t *testing.T) {
 			t.Fatalf("stale survey scrollback sent stray keys: %v", executor.calls)
 		}
 	}
-	wantCapture := []string{"-u", "capture-pane", "-p", "-t", "agent-pane"}
+	wantCapture := []string{"-u", "capture-pane", "-p", "-t", "=agent-pane:"}
 	if len(executor.calls) != 2 || !slices.Equal(executor.calls[1], wantCapture) {
 		t.Fatalf("calls = %v, want pane lookup then visible capture %v", executor.calls, wantCapture)
 	}
@@ -454,33 +454,4 @@ func TestNudgeSessionDeliversWhenSurveyPeekFails(t *testing.T) {
 		}
 	}
 	t.Fatalf("NudgeSession dropped the message after a capture-pane failure in the survey peek: %v", executor.calls)
-}
-
-// scriptedTargetExecutor records argv and answers capture-pane from captures
-// (then capture), display-message with display, and everything else with "".
-type scriptedTargetExecutor struct {
-	calls    [][]string
-	captures []string
-	capture  string
-	display  string
-}
-
-func (s *scriptedTargetExecutor) execute(args []string) (string, error) {
-	s.calls = append(s.calls, slices.Clone(args))
-	switch {
-	case slices.Contains(args, "capture-pane"):
-		if len(s.captures) > 0 {
-			out := s.captures[0]
-			s.captures = s.captures[1:]
-			return out, nil
-		}
-		return s.capture, nil
-	case slices.Contains(args, "display-message"):
-		return s.display, nil
-	}
-	return "", nil
-}
-
-func (s *scriptedTargetExecutor) executeCtx(_ context.Context, args []string) (string, error) {
-	return s.execute(args)
 }

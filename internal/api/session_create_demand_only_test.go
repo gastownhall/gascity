@@ -159,7 +159,7 @@ func createDemandOnlyPoolSession(t *testing.T, fs *fakeState) string {
 	return b.ID
 }
 
-// assertWakeRecordedHoldCleared pins SESSION-RECON-016's wake contract: the
+// assertWakeRecordedHoldCleared pins SESSION-RECON-018's wake contract: the
 // wake is recorded and its hold cleared even though the session will not
 // start, exactly as `gc session wake` does, so a held or quarantined
 // demand-only session can still be un-held over the API.

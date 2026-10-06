@@ -530,7 +530,51 @@ func buildDesiredStateWithSessionBeadsAt(
 		store beads.Store
 		ref   string
 	}
-	activeStores := []activeStore{{store: store, ref: "city"}}
+	// cityLegs is every store a city-scope route's default probe reads past the
+	// leading handle: on a split, the work ledger AND the binding in
+	// Plan(RoutedWork) order — the legs `gc ready` serves a seat from (#6019).
+	// nil on a city that relocates nothing, which keeps its one leading target
+	// and gains no read. All of them count under the "city" key, the scope a
+	// class binding already normalizes onto.
+	//
+	// An unplannable topology (a refused city) still reads the leading handle,
+	// but the plan error rides on every city target: the count is not
+	// authoritative, so each such template is reported partial (retain, don't
+	// drain) and the error reaches the demand pass's error list instead of
+	// being dropped here.
+	var cityLegs []classStoreCandidate
+	var cityLegsErr error
+	if store != nil {
+		legs, err := routedWorkCityDemandLegs(cityPath, cfg, store, rigStores, suspendedRigPaths)
+		if err != nil {
+			cityLegsErr = fmt.Errorf("default scale_check: resolving routed-work city legs: %w", err)
+		} else {
+			cityLegs = legs
+		}
+	}
+	cityTargets := func(template string) []defaultScaleCheckTarget {
+		if len(cityLegs) == 0 {
+			return []defaultScaleCheckTarget{{template: template, store: store, storeKey: "city", err: cityLegsErr}}
+		}
+		out := make([]defaultScaleCheckTarget, 0, len(cityLegs))
+		for _, leg := range cityLegs {
+			out = append(out, defaultScaleCheckTarget{template: template, store: leg.store, storeKey: "city"})
+		}
+		return out
+	}
+	// ownTargets expands a pool's own target onto the city legs when it is the
+	// city-scope default; a rig target and a store-scoped control dispatcher's
+	// target (ownScaleCheckTarget) stay the one store they name.
+	ownTargets := func(own defaultScaleCheckTarget, storeScopedControlDispatcher bool) []defaultScaleCheckTarget {
+		if storeScopedControlDispatcher || own.storeKey != "city" || own.store != store || own.err != nil {
+			return []defaultScaleCheckTarget{own}
+		}
+		return cityTargets(own.template)
+	}
+	var activeStores []activeStore
+	for _, target := range cityTargets("") {
+		activeStores = append(activeStores, activeStore{store: target.store, ref: target.storeKey})
+	}
 	for _, rig := range cfg.Rigs {
 		if suspendedRigPaths[filepath.Clean(rig.Path)] {
 			continue
@@ -633,11 +677,12 @@ func buildDesiredStateWithSessionBeadsAt(
 				// singleton (namedWorkReady covers only direct Assignee beads, not
 				// gc.routed_to). Leave defaultNamedScaleTargets unchanged for both modes
 				// (partial-query retention).
+				own := ownTargets(ownTarget, storeScopedControlDispatcher)
 				if namedSessionMode != "always" {
-					defaultScaleTargets = append(defaultScaleTargets, ownTarget)
+					defaultScaleTargets = append(defaultScaleTargets, own...)
 					namedOnDemandTemplates[template] = true
 				}
-				defaultNamedScaleTargets = append(defaultNamedScaleTargets, ownTarget)
+				defaultNamedScaleTargets = append(defaultNamedScaleTargets, own...)
 				// Cross-store demand for named-backing pools (vp-cl4): mirror the
 				// generic-pool guard (vp-s37 / #3078 below). A rig pool that backs
 				// a named session and has no custom scale_check must also probe
@@ -652,11 +697,11 @@ func buildDesiredStateWithSessionBeadsAt(
 				// city-aliased, not city-scoped. The named-session target list
 				// mirrors these probes only for partial-query retention bookkeeping.
 				if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
-					cityTarget := defaultScaleCheckTarget{template: template, store: store, storeKey: "city"}
+					city := cityTargets(template)
 					if namedSessionMode != "always" {
-						defaultScaleTargets = append(defaultScaleTargets, cityTarget)
+						defaultScaleTargets = append(defaultScaleTargets, city...)
 					}
-					defaultNamedScaleTargets = append(defaultNamedScaleTargets, cityTarget)
+					defaultNamedScaleTargets = append(defaultNamedScaleTargets, city...)
 				}
 				continue
 			}
@@ -703,7 +748,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
 		if store != nil && !hasCustomScaleCheck {
 			ownTarget := ownScaleCheckTarget(cityPath, cfg, &cfg.Agents[i], store, rigStores, controlBinding, storeScopedControlDispatcher)
-			defaultScaleTargets = append(defaultScaleTargets, ownTarget)
+			defaultScaleTargets = append(defaultScaleTargets, ownTargets(ownTarget, storeScopedControlDispatcher)...)
 			// Cross-store demand (FR-S0.1 / vp-s37): a rig pool's routed demand
 			// may live in the city store (vp-kvp cross-store delivery), which
 			// the own-rig probe above cannot see. Add a city-store probe so the
@@ -756,7 +801,7 @@ func buildDesiredStateWithSessionBeadsAt(
 			// claim a route from the city store. Keep their cold-wake probe on the
 			// owning store instead of applying generic cross-store pool delivery.
 			if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
-				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: store, storeKey: "city"})
+				defaultScaleTargets = append(defaultScaleTargets, cityTargets(template)...)
 			}
 			continue
 		}
@@ -1961,8 +2006,23 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		store     beads.Store
 		storeKey  string
 		templates map[string]struct{}
+		// byTemplate is the group's ready rows bucketed by the template each one
+		// is servable to, in the store's own order.
+		byTemplate map[string][]beads.Bead
 	}
-	groups := make(map[string]*scaleStoreGroup)
+	// A group is one (key, store) pair: on a split city the work ledger and the
+	// binding both count under "city", and they are two stores to read, not one.
+	type scaleStoreGroupKey struct {
+		key   string
+		store beads.Store
+	}
+	groups := make(map[scaleStoreGroupKey]*scaleStoreGroup)
+	var groupOrder []*scaleStoreGroup
+	// templateGroups is each template's groups in the order its targets name
+	// them — the leg order — so the per-template dedup below is first-leg-wins,
+	// as on the claim side, rather than map-iteration order.
+	templateGroups := make(map[string][]*scaleStoreGroup)
+	var templateOrder []string
 	var errs []error
 	var partialTemplates map[string]bool
 	for _, target := range targets {
@@ -1986,15 +2046,26 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		if key == "" {
 			key = fmt.Sprintf("%p", target.store)
 		}
-		group := groups[key]
+		gk := scaleStoreGroupKey{key: key, store: target.store}
+		group := groups[gk]
 		if group == nil {
 			group = &scaleStoreGroup{store: target.store, storeKey: key, templates: make(map[string]struct{})}
-			groups[key] = group
+			groups[gk] = group
+			groupOrder = append(groupOrder, group)
 		}
-		group.templates[template] = struct{}{}
+		if _, seen := group.templates[template]; !seen {
+			group.templates[template] = struct{}{}
+			if _, known := templateGroups[template]; !known {
+				templateOrder = append(templateOrder, template)
+			}
+			templateGroups[template] = append(templateGroups[template], group)
+		}
 	}
 
-	// countedBeads dedups counted bead IDs per template ACROSS store groups.
+	// The counting pass dedups bead IDs per template ACROSS store groups,
+	// first group in the template's leg order wins. On a split city the work
+	// ledger and the binding are both city legs, and a migrated row co-resident
+	// in both resolves to the ledger's copy — as it does for `gc ready`.
 	// Bead IDs are unique within a deployment, so a legitimate cross-store
 	// union never collides — but when a rig store aliases the city store as a
 	// distinct Store object (pointer inequality passes: a legacy unscoped
@@ -2003,8 +2074,8 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 	// and "city" groups and would double the template's demand. With the city
 	// probe no longer cold-gated, that double-count would be a persistent
 	// warm condition rather than a one-tick wake overshoot, so dedup by ID.
-	countedBeads := make(map[string]map[string]struct{})
-	for key, group := range groups {
+	for _, group := range groupOrder {
+		key := group.storeKey
 		// Ready()/CachedReady() iteration surfaces actionable work
 		// matched against gc.routed_to/gc.run_target. Formula orders that
 		// should wake pools must create an actionable root, such as a
@@ -2027,58 +2098,64 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			if !servable {
 				continue
 			}
-			seen := countedBeads[template]
-			if seen == nil {
-				seen = make(map[string]struct{})
-				countedBeads[template] = seen
+			if group.byTemplate == nil {
+				group.byTemplate = make(map[string][]beads.Bead)
 			}
-			if _, dup := seen[b.ID]; dup {
-				continue
-			}
-			seen[b.ID] = struct{}{}
-			counts[template]++
-			entry := demand[template]
-			entry.Count++
-			entry.WorkBeadIDs = append(entry.WorkBeadIDs, b.ID)
-			if entry.Titles == nil {
-				entry.Titles = make(map[string]string)
-			}
-			entry.Titles[b.ID] = b.Title
-			if pack := strings.TrimSpace(b.Metadata[beadmeta.PackMetadataKey]); pack != "" {
-				if entry.Packs == nil {
-					entry.Packs = make(map[string]string)
+			group.byTemplate[template] = append(group.byTemplate[template], b)
+		}
+	}
+	for _, template := range templateOrder {
+		seen := make(map[string]struct{})
+		for _, group := range templateGroups[template] {
+			for _, b := range group.byTemplate[template] {
+				if _, dup := seen[b.ID]; dup {
+					continue
 				}
-				entry.Packs[b.ID] = pack
-			}
-			if workspace := strings.TrimSpace(b.Metadata[beadmeta.PackWorkspaceMetadataKey]); workspace != "" {
-				if entry.Workspaces == nil {
-					entry.Workspaces = make(map[string]string)
+				seen[b.ID] = struct{}{}
+				counts[template]++
+				entry := demand[template]
+				entry.Count++
+				entry.WorkBeadIDs = append(entry.WorkBeadIDs, b.ID)
+				if entry.Titles == nil {
+					entry.Titles = make(map[string]string)
 				}
-				entry.Workspaces[b.ID] = workspace
-			}
-			if entry.StoreRefs == nil {
-				entry.StoreRefs = make(map[string]string)
-			}
-			entry.StoreRefs[b.ID] = group.storeKey
-			spec, specErr := worktreeSpecForBead(b, group.storeKey)
-			if specErr != nil {
-				if entry.WorktreeErrors == nil {
-					entry.WorktreeErrors = make(map[string]string)
+				entry.Titles[b.ID] = b.Title
+				if pack := strings.TrimSpace(b.Metadata[beadmeta.PackMetadataKey]); pack != "" {
+					if entry.Packs == nil {
+						entry.Packs = make(map[string]string)
+					}
+					entry.Packs[b.ID] = pack
 				}
-				entry.WorktreeErrors[b.ID] = specErr.Error()
-			} else if spec != nil {
-				if entry.WorktreeSpecs == nil {
-					entry.WorktreeSpecs = make(map[string]*worktree.Spec)
+				if workspace := strings.TrimSpace(b.Metadata[beadmeta.PackWorkspaceMetadataKey]); workspace != "" {
+					if entry.Workspaces == nil {
+						entry.Workspaces = make(map[string]string)
+					}
+					entry.Workspaces[b.ID] = workspace
 				}
-				entry.WorktreeSpecs[b.ID] = spec
-			}
-			if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
-				if entry.ParentSIDs == nil {
-					entry.ParentSIDs = make(map[string]string)
+				if entry.StoreRefs == nil {
+					entry.StoreRefs = make(map[string]string)
 				}
-				entry.ParentSIDs[b.ID] = parentSID
+				entry.StoreRefs[b.ID] = group.storeKey
+				spec, specErr := worktreeSpecForBead(b, group.storeKey)
+				if specErr != nil {
+					if entry.WorktreeErrors == nil {
+						entry.WorktreeErrors = make(map[string]string)
+					}
+					entry.WorktreeErrors[b.ID] = specErr.Error()
+				} else if spec != nil {
+					if entry.WorktreeSpecs == nil {
+						entry.WorktreeSpecs = make(map[string]*worktree.Spec)
+					}
+					entry.WorktreeSpecs[b.ID] = spec
+				}
+				if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
+					if entry.ParentSIDs == nil {
+						entry.ParentSIDs = make(map[string]string)
+					}
+					entry.ParentSIDs[b.ID] = parentSID
+				}
+				demand[template] = entry
 			}
-			demand[template] = entry
 		}
 	}
 	return counts, demand, partialTemplates, errs
@@ -2162,9 +2239,18 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 
 	type scaleStoreGroup struct {
 		store     beads.Store
+		storeKey  string
 		templates map[string]struct{}
 	}
-	groups := make(map[string]*scaleStoreGroup)
+	// Grouped by (key, store), as in defaultScaleCheckCountsAndDemand: a split
+	// city's work ledger and binding both probe under "city", and a failed read
+	// of either must mark the templates partial.
+	type scaleStoreGroupKey struct {
+		key   string
+		store beads.Store
+	}
+	groups := make(map[scaleStoreGroupKey]*scaleStoreGroup)
+	var groupOrder []*scaleStoreGroup
 	var errs []error
 	var partialTemplates map[string]bool
 	for _, target := range targets {
@@ -2187,10 +2273,12 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 		if key == "" {
 			key = fmt.Sprintf("%p", target.store)
 		}
-		group := groups[key]
+		gk := scaleStoreGroupKey{key: key, store: target.store}
+		group := groups[gk]
 		if group == nil {
-			group = &scaleStoreGroup{store: target.store, templates: make(map[string]struct{})}
-			groups[key] = group
+			group = &scaleStoreGroup{store: target.store, storeKey: key, templates: make(map[string]struct{})}
+			groups[gk] = group
+			groupOrder = append(groupOrder, group)
 		}
 		group.templates[template] = struct{}{}
 	}
@@ -2200,7 +2288,8 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 	// This probe remains only to mark named-session backing templates partial
 	// when a default demand query is inconclusive, so existing named-session
 	// beads are retained instead of swept on a store/query failure.
-	for key, group := range groups {
+	for _, group := range groupOrder {
+		key := group.storeKey
 		_, err := cache.controllerDemandReady(group.store)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), err))
@@ -4927,6 +5016,22 @@ func createPoolSessionBeadWithGuardedAliasUsingLock(
 	if err != nil {
 		return session.Info{}, err
 	}
+	// A retired bead can leave its runtime occupying the canonical singleton
+	// name. Do not mint a fresh bead on every demand tick while it remains.
+	// Existing-bead reuse happens before this create path; this is not adoption
+	// or permission to stop an unknown owner. Start still fences later races.
+	//
+	// The probe is deliberately outside the withLocks section below, which is
+	// why Start and not this probe is the authoritative fence. A provider
+	// liveness call blocks on I/O — the ACP provider dials the session control
+	// socket and pings it, each with its own sub-second timeout, per candidate
+	// path — while withLocks takes a cross-process city lock file per
+	// identifier spelling. Probing under those locks would stall every other
+	// creator of the same identifiers behind it. Do not close the
+	// probe-to-create window by widening the lock over this call.
+	if cfgAgent != nil && cfgAgent.UsesCanonicalSingletonPoolIdentity() && bp.sp != nil && bp.sp.IsRunning(identifiers.sessionName) {
+		return session.Info{}, fmt.Errorf("%w: runtime %q still occupies singleton template %q", errPoolSessionNameUnavailable, identifiers.sessionName, template)
+	}
 	if bp.beadStore == nil {
 		return createPoolSessionBeadWithIdentifiers(bp.beadStore, template, bp.city, bp.sessionBeads, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, identifiers)
 	}
@@ -4991,23 +5096,28 @@ func isFailedCreateSessionInfo(i session.Info) bool {
 }
 
 // sessionBeadHasAssignedWorkInfo reports whether any open/in-progress work bead is
-// assigned to the session: the SESSION side reads typed Info fields (ID,
-// SessionNameMetadata, ConfiguredNamedIdentity) while the WORK bead slice stays raw
-// (ClassWork — Bead is the domain object). It is the production reuse predicate the
-// pool selection path calls; its behavior is pinned by TestSessionBeadHasAssignedWorkInfo
-// (WI-7 W-delete retired the raw sessionBeadHasAssignedWork equivalence reference along
-// with the rest of the raw pool cluster and re-pointed the pin to a golden).
-func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) bool {
+// assigned to the session: the SESSION side reads typed Info fields through
+// sessionAssignmentIdentifiersForConfigInfo (ID, SessionNameMetadata,
+// ConfiguredNamedIdentity, the stable alias, and the configured named-session
+// fallback) while the WORK bead slice stays raw (ClassWork — Bead is the domain
+// object). It is the production reuse predicate the pool selection path calls, so
+// it must recognize the same identities as the drain guards and the awake set: a
+// namepool member claims under its alias, and missing that claim lets pool
+// selection reuse a seat that is still working. Its behavior is pinned by
+// TestSessionBeadHasAssignedWorkInfo (WI-7 W-delete retired the raw
+// sessionBeadHasAssignedWork equivalence reference along with the rest of the raw
+// pool cluster and re-pointed the pin to a golden).
+func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info, cfg *config.City) bool {
+	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
 	for _, wb := range workBeads {
 		assignee := strings.TrimSpace(wb.Assignee)
 		if assignee == "" || (wb.Status != "open" && wb.Status != "in_progress") {
 			continue
 		}
-		if assignee == info.ID || assignee == strings.TrimSpace(info.SessionNameMetadata) {
-			return true
-		}
-		if namedIdentity := strings.TrimSpace(info.ConfiguredNamedIdentity); namedIdentity != "" && assignee == namedIdentity {
-			return true
+		for _, identifier := range identifiers {
+			if assignee == identifier {
+				return true
+			}
 		}
 	}
 	return false
@@ -5017,11 +5127,11 @@ func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) b
 // sessionBeadHasAssignedWorkInfo: it matches an open/in-progress work bead's
 // Assignee against every current identity of the session (ID,
 // SessionNameMetadata, ConfiguredNamedIdentity, Alias, AliasHistory — see
-// session.AssigneeIdentities), not just the narrower ID/SessionNameMetadata/
-// ConfiguredNamedIdentity trio sessionBeadHasAssignedWorkInfo pins. Work
-// claimed by an agent is commonly assigned under its actor alias (GC_ALIAS /
-// BEADS_ACTOR, see session.AssigneeIdentifier), which the narrower check
-// does not consider, so it can miss live assigned work entirely.
+// session.AssigneeIdentities), not just the current-identity set
+// sessionBeadHasAssignedWorkInfo matches. The narrower check honors a stable
+// alias but deliberately ignores a rebinding pool-slot alias and every prior
+// alias in alias_history, so it can miss work a one_shot exit left assigned
+// under one of those forms.
 //
 // It exists as a separate function (not a change to the pinned
 // sessionBeadHasAssignedWorkInfo) so its wider match is opt-in for callers

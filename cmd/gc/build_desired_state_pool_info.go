@@ -255,7 +255,7 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 	if isNamedSessionInfo(info) {
 		return false
 	}
-	if sessionBeadHasAssignedWorkInfo(bp.assignedWorkBeads, info) {
+	if sessionBeadHasAssignedWorkInfo(bp.assignedWorkBeads, info, reuseTemplateConfig(bp)) {
 		return false
 	}
 	if used != nil && used[info.ID] {

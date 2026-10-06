@@ -2365,3 +2365,52 @@ func TestCmdInitResumePreservesPreparedExternalSelector(t *testing.T) {
 		}
 	})
 }
+
+// TestInstallInitRemoteImportsGascityTemplateNeedsNoNetwork is the ga-73eoo
+// regression test. A real install of the default (gascity) template's remote
+// imports — core, the gascity pack and its gascity/roles default rig import —
+// is served entirely from the binary's embedded packs. git is replaced by a
+// stub that fails every invocation, so the clone gascity/roles used to take
+// fails this test instead of reaching github.com.
+func TestInstallInitRemoteImportsGascityTemplateNeedsNoNetwork(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
+	stubInitDependencyChecks(t)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	if code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &initStdout, &initStderr, false); code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	binDir := t.TempDir()
+	stub := "#!/bin/sh\necho \"git $*: the default template must install without git\" >&2\nexit 97\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := installInitRemoteImports(cityPath); err != nil {
+		t.Fatalf("installInitRemoteImports: %v", err)
+	}
+	lock, err := packman.ReadLockfile(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("reading packs.lock: %v", err)
+	}
+	roles, ok := lock.Packs[config.PublicGascityRolesPackSource]
+	if !ok {
+		t.Fatalf("packs.lock = %v, want the gascity/roles default rig import", lock.Packs)
+	}
+	if want := strings.TrimPrefix(config.PublicGascityPackVersion, "sha:"); roles.Commit != want {
+		t.Fatalf("roles locked at %q, want the gascity pin %q", roles.Commit, want)
+	}
+	cachePath, err := packman.RepoCachePath(config.PublicGascityRolesPackSource, roles.Commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(cachePath, "gascity", "roles", "pack.toml")); err != nil {
+		t.Fatalf("roles pack not materialized from embedded content: %v", err)
+	}
+}

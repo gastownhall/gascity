@@ -78,13 +78,11 @@ import (
 	"fmt"
 	"maps"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -143,10 +141,10 @@ type classStoreEmission struct {
 // emit appends one row per emission to the city's journal through a single
 // recorder, which owns the cross-process sequence and locking.
 //
-// events.WithoutStartupSweep is what makes a per-mutation open safe: the sweep
-// exists to recover rotating-* files a crash stranded, it belongs to the
-// supervisor's long-lived recorder, and running it here would race that
-// recorder mid-rotation. It does not make the open free — NewFileRecorder reads
+// events.WithoutStartupSweep (via newSecondaryFileEventsRecorder) is what makes
+// a per-mutation open safe: the sweep exists to recover rotating-* files a
+// crash stranded, it belongs to the supervisor's long-lived recorder, and
+// running it here would race that recorder mid-rotation. It does not make the open free — NewFileRecorder reads
 // the log directory either way, to continue the sequence past the archives —
 // only unraced.
 func (s *emittingClassStore) emit(emissions ...classStoreEmission) {
@@ -526,11 +524,12 @@ func (s *emittingClassStore) CloseWithMetadataIfMatch(id string, revision int64,
 // this wrapper. TestEmittingClassStoreKeepsEveryEngineCapability forces the
 // wrapper to carry CloseWithMetadataIfMatch structurally for every engine, so a
 // bare type assertion would advertise the capability even over a backing (for
-// example the sqlite CLI engine) that cannot honor it — and that discovery is
-// contractually a hard capability gate, not a rollout seam. Consulted first by
-// AtomicConditionalCloserFor, this answers yes only when the resolved backing
-// truly provides the atomic close, and returns the emitting wrapper (not the
-// raw backing) so the discovered closer still emits bead.closed.
+// example a plain MemStore, or a bd CLI store) that cannot honor it — and that
+// discovery is contractually a hard capability gate, not a rollout seam.
+// Consulted first by AtomicConditionalCloserFor, this answers yes only when the
+// resolved backing truly provides the atomic close, and returns the emitting
+// wrapper (not the raw backing) so the discovered closer still emits
+// bead.closed.
 func (s *emittingClassStore) AtomicConditionalCloserHandle() (beads.AtomicConditionalCloser, bool) {
 	if _, ok := beads.AtomicConditionalCloserFor(s.Store); !ok {
 		return nil, false
@@ -806,11 +805,7 @@ func beadStatusIsClosed(status string) bool {
 
 // newClassStoreEmitRecorder opens the city's journal for one emission batch.
 func newClassStoreEmitRecorder(cityPath string) (*events.FileRecorder, error) {
-	return events.NewFileRecorder(
-		filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"),
-		classStoreEmitWarnWriter{},
-		events.WithoutStartupSweep(),
-	)
+	return openCityEventsLog(cityPath, classStoreEmitWarnWriter{})
 }
 
 // classStoreEmitWarnWriter funnels the recorder's own stderr diagnostics — a

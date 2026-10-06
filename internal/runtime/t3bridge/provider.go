@@ -2100,6 +2100,13 @@ func latestSeqWithBackoff(ctx context.Context, latest func() (uint64, error)) (u
 	return 0, lastErr
 }
 
+// openWatcherEvents opens the city's event log for the event watcher. It is
+// read-only: the watcher never records, so it holds no write handle that would
+// pin a rotated-away log on disk.
+func openWatcherEvents(cityPath string) *events.FileRecorder {
+	return events.NewReadOnlyFileProvider(filepath.Join(cityPath, ".gc", "events.jsonl"), io.Discard)
+}
+
 func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Config, binding threadBinding, envelope StartupEnvelope, providerName string) {
 	cityPath := cfg.Env["GC_CITY_PATH"]
 	if cityPath == "" {
@@ -2109,11 +2116,7 @@ func (p *Provider) runEventWatcher(ctx context.Context, _ string, cfg runtime.Co
 		return
 	}
 
-	eventPath := filepath.Join(cityPath, ".gc", "events.jsonl")
-	recorder, err := events.NewFileRecorder(eventPath, io.Discard)
-	if err != nil {
-		return
-	}
+	recorder := openWatcherEvents(cityPath)
 	defer func() { _ = recorder.Close() }()
 
 	cache := beadStoreForWatcher(cfg.WorkDir, cfg.Env)

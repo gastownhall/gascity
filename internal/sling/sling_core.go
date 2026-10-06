@@ -402,7 +402,11 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	if err != nil {
 		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
 	}
-	if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.Store, mResult.RootID) {
+	// The wisp root lives in the store that minted it: the graph store, which
+	// on a city whose graph class is relocated to a [storage] binding is not
+	// the work store (#6054). Every read and stamp of the root goes there.
+	rootStore := deps.graphStore()
+	if mResult.GraphWorkflow || IsGraphWorkflowAttachment(rootStore, mResult.RootID) {
 		wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, "", a, method, deps)
 		wfResult.FormulaName = opts.BeadOrFormula
 		wfResult.Deprecations = append(wfResult.Deprecations, inv.Deprecations...)
@@ -412,7 +416,7 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	if hint := rootOnlyVaporPourHint(opts.BeadOrFormula, recipe); hint != "" {
 		result.BeadWarnings = append(result.BeadWarnings, hint)
 	}
-	return finalize(opts, deps, mResult.RootID, method, result)
+	return finalizeInStore(opts, deps, rootStore, mResult.RootID, method, result)
 }
 
 // rootOnlyVaporPourHint returns a sling-time diagnostic when a formula compiled
@@ -677,7 +681,7 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 		}
 		wispRootID := mResult.RootID
-		if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.Store, wispRootID) {
+		if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.graphStore(), wispRootID) {
 			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, beadID, a, method, deps)
 			wfResult.FormulaName = formulaName
 			return wfResult, wfErr
@@ -725,10 +729,24 @@ func slingPlainBead(opts SlingOpts, deps SlingDeps, beadID string, result SlingR
 // finalize executes the sling command, records telemetry, sets merge
 // metadata, creates auto-convoy, pokes the controller, and signals nudge.
 func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result SlingResult) (SlingResult, error) {
+	return finalizeInStore(opts, deps, deps.Store, beadID, method, result)
+}
+
+// finalizeInStore is finalize for a bead held by beadStore rather than by
+// deps.Store: the routing stamp and the merge-strategy stamp go to the store
+// that holds the bead. Auto-convoy bookkeeping stays in deps.Store, the work
+// store convoys live in.
+func finalizeInStore(opts SlingOpts, deps SlingDeps, beadStore beads.Store, beadID, method string, result SlingResult) (SlingResult, error) {
 	a := opts.Target
 
 	// Execute routing -- prefer typed Router, fall back to shell Runner.
-	slingEnv := ResolveSlingEnv(a, deps, beadID)
+	var bead beads.Bead
+	if beadStore != nil && strings.TrimSpace(beadID) != "" {
+		if got, err := beadStore.Get(beadID); err == nil {
+			bead = got
+		}
+	}
+	slingEnv := ResolveSlingEnvForBead(a, deps, bead)
 	rigDir := SlingDirForBead(deps.Cfg, deps.CityPath, beadID)
 	if deps.Router != nil {
 		if err := validateBuiltInRouteStoreReachable(deps, beadID, a); err != nil {
@@ -741,6 +759,7 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 			WorkDir: rigDir,
 			Env:     slingEnv,
 			Force:   opts.Force,
+			Store:   beadStore,
 		}
 		if err := deps.Router.Route(context.Background(), req); err != nil {
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
@@ -759,8 +778,8 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 	telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, nil)
 
 	// Merge strategy metadata.
-	if opts.Merge != "" && deps.Store != nil {
-		if err := deps.Store.SetMetadata(beadID, beadmeta.MergeStrategyMetadataKey, opts.Merge); err != nil {
+	if opts.Merge != "" && beadStore != nil {
+		if err := beadStore.SetMetadata(beadID, beadmeta.MergeStrategyMetadataKey, opts.Merge); err != nil {
 			result.MetadataErrors = append(result.MetadataErrors,
 				fmt.Sprintf("setting merge strategy: %v", err))
 		}
@@ -1648,7 +1667,7 @@ func attachBatchFormula(ctx context.Context, opts SlingOpts, deps SlingDeps, chi
 		if err != nil {
 			return SlingResult{}, fmt.Errorf("instantiating %s %q on %s: %w", formulaLabel, formulaName, child.ID, err)
 		}
-		if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.Store, mResult.RootID) {
+		if mResult.GraphWorkflow || IsGraphWorkflowAttachment(deps.graphStore(), mResult.RootID) {
 			wfResult, wfErr := doStartGraphWorkflow(mResult.RootID, child.ID, a, method, deps)
 			wfResult.FormulaName = formulaName
 			return wfResult, wfErr

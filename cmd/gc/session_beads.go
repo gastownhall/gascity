@@ -878,11 +878,13 @@ func sessionAssignmentIdentifiers(sessionBead beads.Bead) []string {
 }
 
 // sessionAssignmentIdentifiersForConfig extends the persisted session-bead
-// identifiers with the configured named-session identity when a recovered bead
-// is missing identity metadata. Keep this fallback aligned with
-// sessionAssigneeMatches and compute_awake_bridge's AwakeNamedSession fields.
+// identifiers with the session's stable alias (stableAssignmentAliasForConfig)
+// and with the configured named-session identity when a recovered bead is
+// missing identity metadata. Keep these additions aligned with
+// sessionAssigneeMatches and compute_awake_bridge's AwakeSessionBead.Alias and
+// AwakeNamedSession fields.
 func sessionAssignmentIdentifiersForConfig(sessionBead beads.Bead, cfg *config.City) []string {
-	raw := sessionAssignmentIdentifierRaw(sessionBead)
+	raw := append(sessionAssignmentIdentifierRaw(sessionBead), stableAssignmentAliasForConfig(sessionBead, cfg))
 	if cfg == nil ||
 		strings.TrimSpace(sessionBead.Metadata[namedSessionMetadataKey]) != "true" ||
 		strings.TrimSpace(sessionBead.Metadata[namedSessionIdentityMetadata]) != "" {
@@ -929,7 +931,7 @@ func sessionAssignmentIdentifierRaw(sessionBead beads.Bead) []string {
 // SessionNameMetadata, Template) instead of cracking the raw bead, staying
 // byte-identical to the raw form (TestSessionClassifierInfoEquivalence pins it).
 func sessionAssignmentIdentifiersForConfigInfo(info session.Info, cfg *config.City) []string {
-	raw := sessionAssignmentIdentifierRawInfo(info)
+	raw := append(sessionAssignmentIdentifierRawInfo(info), stableAssignmentAliasForConfigInfo(info, cfg))
 	if cfg == nil ||
 		!info.ConfiguredNamedSession ||
 		strings.TrimSpace(info.ConfiguredNamedIdentity) != "" {
@@ -968,6 +970,51 @@ func sessionAssignmentIdentifierRawInfo(info session.Info) []string {
 		strings.TrimSpace(info.SessionNameMetadata),
 		strings.TrimSpace(info.ConfiguredNamedIdentity),
 	}
+}
+
+// stableAssignmentAliasForConfig returns the session's alias when it is a
+// stable ownership identity, and "" otherwise. A session claims work under its
+// alias first (session.AssigneeIdentifier, `gc hook --claim`), so a namepool
+// member ("rig/furiosa"), a canonical singleton pool member, or an aliased
+// manual session owns alias-form work, and the awake set, drain guards and
+// pool reuse guard must all see it.
+//
+// A rebinding numeric pool slot is the exception: the controller hands it to
+// the next occupant, so slot-form ownership must never keep a session alive
+// (TestAssignmentGuardsIgnoreTransientPoolSlotAliases). Current pool beads of
+// that shape carry no alias at all; this filter covers legacy beads that still
+// do. A namepool member also records pool_slot, so the slot marker alone cannot
+// tell the two apart — the configured agent decides. When the agent cannot be
+// resolved the alias is dropped, keeping the narrower pre-alias behavior.
+func stableAssignmentAliasForConfig(sessionBead beads.Bead, cfg *config.City) string {
+	alias := strings.TrimSpace(sessionBead.Metadata["alias"])
+	if alias == "" || !isPoolManagedSessionBead(sessionBead) || strings.TrimSpace(sessionBead.Metadata["pool_slot"]) == "" {
+		return alias
+	}
+	if !poolSlotAliasIsStable(findAgentByTemplate(cfg, normalizedSessionTemplate(sessionBead, cfg))) {
+		return ""
+	}
+	return alias
+}
+
+// stableAssignmentAliasForConfigInfo is the session.Info form of
+// stableAssignmentAliasForConfig.
+func stableAssignmentAliasForConfigInfo(info session.Info, cfg *config.City) string {
+	alias := strings.TrimSpace(info.Alias)
+	if alias == "" || !isPoolManagedSessionInfo(info) || strings.TrimSpace(info.PoolSlot) == "" {
+		return alias
+	}
+	if !poolSlotAliasIsStable(findAgentByTemplate(cfg, normalizedSessionTemplateInfo(info, cfg))) {
+		return ""
+	}
+	return alias
+}
+
+// poolSlotAliasIsStable reports whether a slotted pool member of cfgAgent
+// carries a stable alias (namepool name, canonical singleton) rather than a
+// rebinding numeric slot. An unresolvable agent is treated as rebinding.
+func poolSlotAliasIsStable(cfgAgent *config.Agent) bool {
+	return cfgAgent != nil && !usesTransientPoolSlotIdentity(cfgAgent)
 }
 
 // sessionAssignmentIdentifiersInfo is the session.Info form of
@@ -2737,31 +2784,38 @@ func setMetaBatch(sessFront *session.Store, id string, batch map[string]string, 
 // and rollbackPendingCreate so the latter can fold this close into its own
 // larger transaction instead of nesting a second store.Tx call.
 func closeFailedCreateBeadInTx(tx beads.Tx, id string, now time.Time) error {
-	patch := session.ClosePatch(now.UTC(), string(session.StateFailedCreate))
-	patch["pending_create_claim"] = ""
-	patch["pending_create_started_at"] = ""
-	patch["sleep_intent"] = ""
-	if err := tx.SetMetadataBatch(id, patch); err != nil {
+	if err := tx.SetMetadataBatch(id, failedCreateClosePatch(now)); err != nil {
 		return err
 	}
 	return tx.Close(id)
 }
 
+// failedCreateClosePatch is the failed-create terminal metadata: ClosePatch for
+// the failed-create state plus the create-claim, create-start and sleep-intent
+// clears. closeFailedCreateBead and closeFailedCreateBeadInTx both write it.
+func failedCreateClosePatch(now time.Time) session.MetadataPatch {
+	patch := session.ClosePatch(now.UTC(), string(session.StateFailedCreate))
+	patch["pending_create_claim"] = ""
+	patch["pending_create_started_at"] = ""
+	patch["sleep_intent"] = ""
+	return patch
+}
+
 func closeFailedCreateBead(sessFront *session.Store, id string, now time.Time, stderr io.Writer) bool {
-	// The terminal metadata batch and the Close land inside one Tx. On an
-	// atomic backing (the production Dolt/DoltLite store) a bead that reports
-	// closed always carries its failed-create terminal state, never one without
-	// the other (ga-igcny0.1.1). The metadata batch is ordered before the Close
-	// on purpose: on a store whose Tx is not atomic the claim/marker clears
-	// still land even if the Close then fails, because a stale claim on a
-	// still-open bead would ping-pong the reconciler
-	// (TestCloseBeadClearsPendingCreateClaimEvenWhenCloseFails). The helper
-	// reports failure either way, so the reconciler re-runs the close.
-	txErr := sessFront.Store().Tx("gc: close failed-create session "+id, func(tx beads.Tx) error {
-		return closeFailedCreateBeadInTx(tx, id, now)
-	})
-	if txErr != nil {
-		fmt.Fprintf(stderr, "session beads: closing failed-create bead %s: %v\n", id, txErr) //nolint:errcheck
+	// The failed-create terminal metadata and the Close land together
+	// (ga-igcny0.1.1). On a store with the atomic terminal close (native Dolt,
+	// SQLite, FileStore, or a cache over one) they commit as ONE write fenced on
+	// the revision the front door read, so no writer can land between them and
+	// no reader sees a closed row without its failed-create state. A row that
+	// is already closed is left as it is, and a row under a fresh `gc session
+	// kill` fence is left to the kill (#6749). Every other store keeps the single
+	// Tx with the metadata ordered first: there the claim/marker clears still
+	// land even if the Close then fails, because a stale claim on a still-open
+	// bead would ping-pong the reconciler
+	// (TestCloseBeadClearsPendingCreateClaimEvenWhenCloseFails). A failure
+	// reports false either way, so the reconciler re-runs the close.
+	if _, err := sessFront.CloseWithTerminalPatch(id, failedCreateClosePatch(now), "gc: close failed-create session "+id, now); err != nil {
+		fmt.Fprintf(stderr, "session beads: closing failed-create bead %s: %v\n", id, err) //nolint:errcheck
 		return false
 	}
 	// Defense in depth: a startup race between bead creation and an early
@@ -3652,20 +3706,26 @@ func closeBeadPreservingAssignees(store beads.Store, id, reason string, preserve
 	if reason == string(session.StateFailedCreate) {
 		return closeFailedCreateBead(sessionFrontDoor(store), id, now, stderr)
 	}
-	// The terminal metadata batch and the Close land inside one Tx. On an
-	// atomic backing (the production Dolt/DoltLite store) a bead that reports
-	// closed always carries its terminal state, never one without the other
-	// (ga-igcny0.1.1). On a non-atomic Tx the metadata (ordered first) may land
-	// while the Close fails; the helper then reports failure and the reconciler
-	// re-runs the close next tick, so no bead is durably left half-closed.
-	txErr := store.Tx("gc: close session "+id, func(tx beads.Tx) error {
-		if err := tx.SetMetadataBatch(id, session.ClosePatch(now, reason)); err != nil {
-			return err
-		}
-		return tx.Close(id)
-	})
-	if txErr != nil {
-		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, txErr) //nolint:errcheck
+	// The terminal metadata and the Close land together (ga-igcny0.1.1). On a
+	// store with the atomic terminal close (native Dolt, SQLite, FileStore, or
+	// a cache over one) they commit as ONE write fenced on the revision the
+	// front door read. A concurrent writer, such as a wake stamping
+	// state=awake, can then never leave the row closed with live-looking
+	// metadata: it wins the fence, and the close re-reads and retries. If a
+	// concurrent closer wins instead, this call reports false and leaves the
+	// release cascade to that closer. If the row it reads carries a fresh
+	// `gc session kill` fence (#6749), the kill owns the row: the close writes
+	// nothing and reports false, and the next tick decides again. Every other
+	// store keeps the single Tx
+	// with the metadata ordered first. There the metadata may land while the
+	// Close fails; the helper then reports failure and the reconciler re-runs
+	// the close next tick, so no bead is durably left half-closed.
+	closed, err := sessionFrontDoor(store).CloseWithTerminalPatch(id, session.ClosePatch(now, reason), "gc: close session "+id, now)
+	if err != nil {
+		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, err) //nolint:errcheck
+		return false
+	}
+	if !closed {
 		return false
 	}
 	// Cascade extmsg cleanup. Pool retirement funnels through closeBead;
