@@ -876,7 +876,7 @@ func (p *proxiedDefaultCity) addInheritingRig(t *testing.T, rigDir string) {
 }
 
 // stopQuiescent stops the city and asserts no proxy survives under the city
-// or rigDir, and that a second stop is a no-op success.
+// or rigDir.
 func (p *proxiedDefaultCity) stopQuiescent(t *testing.T, rigDir string) {
 	t.Helper()
 	// Retire the readers before the store. On v1.3.0's proxied path any bd
@@ -895,10 +895,6 @@ func (p *proxiedDefaultCity) stopQuiescent(t *testing.T, rigDir string) {
 	}
 	if leaked := waitForNoDoltProcesses(t, rigDir, 10*time.Second); len(leaked) > 0 {
 		t.Errorf("rig proxy survived gc stop:\n%s", strings.Join(leaked, "\n"))
-	}
-	// Re-runnable: "there was nothing to stop" is success.
-	if out, err := helpers.RunGC(p.env, p.cityRoot, "stop", p.cityRoot); err != nil {
-		t.Fatalf("second gc stop: %v\n%s", err, out)
 	}
 }
 
@@ -1112,6 +1108,10 @@ func TestBeadsProxiedDefaultStart(t *testing.T) {
 
 	t.Run("stop-quiescent", func(t *testing.T) {
 		p.stopQuiescent(t, rigDir)
+		// Re-runnable: "there was nothing to stop" is success.
+		if out, err := helpers.RunGC(p.env, p.cityRoot, "stop", p.cityRoot); err != nil {
+			t.Fatalf("second gc stop: %v\n%s", err, out)
+		}
 	})
 }
 
