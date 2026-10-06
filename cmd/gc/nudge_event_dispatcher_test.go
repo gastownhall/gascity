@@ -33,6 +33,16 @@ func (w testLogWriter) Write(p []byte) (int, error) {
 
 func testWriter(t *testing.T) testLogWriter { return testLogWriter{t: t} }
 
+type legacyNudgeDispatchProbeStore struct {
+	beads.Store
+	listCalls atomic.Int32
+}
+
+func (s *legacyNudgeDispatchProbeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls.Add(1)
+	return s.Store.List(query)
+}
+
 type nudgeEventedFake struct {
 	*runtime.Fake
 
@@ -1367,5 +1377,70 @@ func TestCityRuntimeReloadConfigTracedActivatesNudgeWakeListener(t *testing.T) {
 	}
 	if cr.nudgeWakeListener == nil {
 		t.Fatal("reloadConfigTraced did not start the wake listener after the provider became event-capable")
+	}
+}
+
+func TestCityRuntimeRunActivatesNudgeWakeListenerAtStartup(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := newNudgeEventedFake()
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: testWriter(t),
+	})
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan struct{})
+	go func() {
+		cr.run(ctx)
+		close(done)
+	}()
+
+	awaitCond(t, func() bool {
+		return testWakeSocketIsHosting(cityPath)
+	}, "CityRuntime.run startup opening the nudge wake listener")
+	cancel()
+	awaitClose(t, done, "CityRuntime.run returning after nudge wake listener startup")
+}
+
+func TestCityRuntimeNudgeDispatchTickKicksActiveEventDispatcher(t *testing.T) {
+	store := &legacyNudgeDispatchProbeStore{Store: beads.NewMemStore()}
+	dispatcher := &nudgeEventDispatcher{kicked: make(chan struct{}, 1)}
+	dispatcher.setEventCapable(true)
+	cr := &CityRuntime{
+		cfg:                 supervisorCfg(),
+		nudgeEvents:         dispatcher,
+		standaloneCityStore: store,
+	}
+
+	cr.nudgeDispatchTick(context.Background())
+
+	select {
+	case <-dispatcher.kicked:
+	default:
+		t.Fatal("nudge dispatch tick did not kick the active event dispatcher")
+	}
+	if got := store.listCalls.Load(); got != 0 {
+		t.Fatalf("legacy nudge dispatch issued %d store List calls while the event dispatcher was active, want 0", got)
 	}
 }
