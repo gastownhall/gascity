@@ -258,7 +258,7 @@ func TestEvaluatePoolFanOutSumSharesCallerSemaphoreNotNested(t *testing.T) {
 
 // TestCityScopedFanOutProbesIncludesCityAndNonSuspendedRigsOnly is AC1's
 // store-set-construction half, mirroring activeStores' own suspended-rig
-// filter in buildDesiredStateWithSessionBeads: the probe list must contain
+// filter in buildDemandTargets: the probe list must contain
 // the agent's own (city) probe plus one probe per non-suspended rig, and
 // must exclude a suspended rig entirely -- the same store set activeStores
 // already computes for the default scale_check path.
@@ -411,7 +411,7 @@ func markFanOutRig(t *testing.T, rigDir string) {
 }
 
 // fanOutProbes builds the probe list the way the generic-pool call site in
-// buildDesiredStateWithSessionBeads does: the city-scoped agent's own query
+// buildDemandTargets does: the city-scoped agent's own query
 // env is resolved once and handed to cityScopedFanOutProbes.
 func (fx fanOutStoreFixture) fanOutProbes(t *testing.T) []poolStoreProbe {
 	t.Helper()
@@ -550,13 +550,11 @@ func (r *recordingScaleCheckRunner) run(command, dir string, env map[string]stri
 	return shellScaleCheck(command, dir, env)
 }
 
-// TestCityScopedFanOutRigEnvFailureContributesZeroAndIsNeverRunUnderCityEnv
-// pins the best-effort federation contract for a rig whose own store env
-// cannot be resolved: the probe contributes 0 and its failure is reported, and
-// the check is never executed for it -- in particular not under the city's env,
-// which would read the city store a second time and silently inflate the total.
-func TestCityScopedFanOutRigEnvFailureContributesZeroAndIsNeverRunUnderCityEnv(t *testing.T) {
-	fx := newFanOutStoreFixture(t)
+// addUnresolvableRig registers a non-suspended rig named "broken" whose own
+// store env cannot be resolved and returns its directory. Its count file holds
+// fanOutBrokenCount, so a probe that ever read it would show up in the sum.
+func (fx fanOutStoreFixture) addUnresolvableRig(t *testing.T) string {
+	t.Helper()
 	brokenDir := filepath.Join(fx.cityPath, "broken")
 	mustMkdirAll(t, filepath.Join(brokenDir, ".beads"))
 	// An explicit endpoint with no host or port is an invalid canonical
@@ -571,13 +569,24 @@ dolt.auto-start: false
 	writeFanOutCount(t, brokenDir, fanOutBrokenCount)
 	fx.cfg.Rigs = append(fx.cfg.Rigs, config.Rig{Name: "broken", Path: brokenDir, Prefix: "bk"})
 
-	// Prove the fixture still errors -- otherwise this test silently stops
-	// exercising the unresolvable-env branch.
+	// Prove the fixture still errors -- otherwise a test built on it silently
+	// stops exercising the unresolvable-env branch.
 	rigView := fx.cfg.Agents[0]
 	rigView.Dir = "broken"
 	if _, err := controllerQueryRuntimeEnv(fx.cityPath, fx.cfg, &rigView); err == nil {
 		t.Fatal("fixture did not produce a rig env error; the unresolvable-env branch is no longer reachable from this test")
 	}
+	return brokenDir
+}
+
+// TestCityScopedFanOutRigEnvFailureContributesZeroAndIsNeverRunUnderCityEnv
+// pins the best-effort federation contract for a rig whose own store env
+// cannot be resolved: the probe contributes 0 and its failure is reported, and
+// the check is never executed for it -- in particular not under the city's env,
+// which would read the city store a second time and silently inflate the total.
+func TestCityScopedFanOutRigEnvFailureContributesZeroAndIsNeverRunUnderCityEnv(t *testing.T) {
+	fx := newFanOutStoreFixture(t)
+	brokenDir := fx.addUnresolvableRig(t)
 
 	probes := fx.fanOutProbes(t)
 	runner := &recordingScaleCheckRunner{}
@@ -602,14 +611,14 @@ dolt.auto-start: false
 
 // TestBuildDesiredState_CityScopedCustomScaleCheckSumsEveryActiveStore is the
 // end-to-end proof through the production flow at both fan-out call sites in
-// buildDesiredStateWithSessionBeads: the generic pool, which hands the
-// city-scoped agent's resolved env to the fan-out, and the pool backing a
-// named session, which hands it none. evaluatePendingPools runs the check
-// through the real shell, and the pool's desired slots are the sum of the
-// stores' own counts -- city + riga + rigb, with the suspended rig contributing
-// nothing. fanOutRigBoundCheck makes an unbound rig probe visible at either
-// site: it reads the city's count at the generic site (3 slots) and fails, so
-// contributes nothing, at the named-session site (1 slot).
+// buildDemandTargets: the generic pool, which hands the city-scoped agent's
+// resolved env to the fan-out, and the pool backing a named session, which
+// hands it none. evaluatePendingPools runs the check through the real shell,
+// and the pool's desired slots are the sum of the stores' own counts -- city +
+// riga + rigb, with the suspended rig contributing nothing. fanOutRigBoundCheck
+// makes an unbound rig probe visible at either site: it reads the city's count
+// at the generic site (3 slots) and fails, so contributes nothing, at the
+// named-session site (1 slot).
 func TestBuildDesiredState_CityScopedCustomScaleCheckSumsEveryActiveStore(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -637,5 +646,79 @@ func TestBuildDesiredState_CityScopedCustomScaleCheckSumsEveryActiveStore(t *tes
 				t.Fatalf("worker desired slots = %d, want %d (city + riga + rigb, suspended rig excluded)", slots, want)
 			}
 		})
+	}
+}
+
+// TestRunCustomScaleChecks_CityScopedCustomScaleCheckSumsEveryActiveStore is
+// the allocator external-reads lane's twin of the test above. The lane runs
+// the same custom scale_check pools legacy's demand pass runs (POOL-005), so a
+// city-scoped pool's published count must federate across the city and every
+// non-suspended rig store at both pool shapes -- the generic pool, which gets
+// the probe env the lane built, and the pool backing a named session, which
+// gets none -- instead of reading the city store alone. fanOutRigBoundCheck
+// makes a lane that skips the fan-out visible: it publishes the city's own
+// count (1) rather than city + riga + rigb.
+func TestRunCustomScaleChecks_CityScopedCustomScaleCheckSumsEveryActiveStore(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		namedSession bool
+	}{
+		{"generic pool", false},
+		{"named-session backing pool", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newFanOutStoreFixture(t)
+			fx.cfg.Agents[0].ScaleCheck = fanOutRigBoundCheck
+			if tc.namedSession {
+				fx.cfg.NamedSessions = []config.NamedSession{{Template: "worker", Mode: "on_demand"}}
+			}
+			env := externalReadsEnv{CityName: "test-city", CityPath: fx.cityPath, Cfg: fx.cfg, SuspendedRigPaths: fx.suspended}
+
+			var stderr strings.Builder
+			result := runCustomScaleChecks(env, shellScaleCheck, controllerQueryRuntimeEnv, &stderr)
+
+			if want := fanOutCityCount + fanOutRigACount + fanOutRigBCount; result.Counts["worker"] != want {
+				t.Fatalf("lane count for worker = %d, want %d (city + riga + rigb, suspended rig excluded); stderr = %q",
+					result.Counts["worker"], want, stderr.String())
+			}
+			if result.partial("worker") {
+				t.Fatalf("worker reads partial after a clean fan-out; stderr = %q", stderr.String())
+			}
+		})
+	}
+}
+
+// TestRunCustomScaleChecks_CityScopedRigEnvFailureIsPartial pins what the lane
+// publishes when one rig's store env cannot be resolved: that probe
+// contributes 0 and is never run -- not under the city's env, which would read
+// the city store a second time -- and the pool reads partial, so the allocator
+// treats the undercount as untrusted (retain, block create; BEHAVIORS #38)
+// instead of as a sum it can act on. The failure is also reported, naming the
+// rig.
+func TestRunCustomScaleChecks_CityScopedRigEnvFailureIsPartial(t *testing.T) {
+	fx := newFanOutStoreFixture(t)
+	brokenDir := fx.addUnresolvableRig(t)
+	fx.cfg.Agents[0].ScaleCheck = fanOutRigBoundCheck
+	env := externalReadsEnv{CityName: "test-city", CityPath: fx.cityPath, Cfg: fx.cfg, SuspendedRigPaths: fx.suspended}
+	runner := &recordingScaleCheckRunner{}
+
+	var stderr strings.Builder
+	result := runCustomScaleChecks(env, runner.run, controllerQueryRuntimeEnv, &stderr)
+
+	if want := fanOutCityCount + fanOutRigACount + fanOutRigBCount; result.Counts["worker"] != want {
+		t.Fatalf("lane count for worker = %d, want %d: the broken rig must contribute 0, not another read of "+
+			"the city store (%d) or its own count (%d); stderr = %q",
+			result.Counts["worker"], want, want+fanOutCityCount, fanOutBrokenCount, stderr.String())
+	}
+	if !result.partial("worker") {
+		t.Fatal("worker reads trusted although one rig's store could not be probed; the lane must mark it partial")
+	}
+	if !strings.Contains(stderr.String(), "broken") {
+		t.Fatalf("stderr = %q, want the rig env failure reported and naming the broken rig", stderr.String())
+	}
+	for _, dir := range runner.dirs {
+		if dir == brokenDir {
+			t.Fatalf("the check ran in the broken rig's directory %q; a probe whose store env is unresolvable must not run at all", dir)
+		}
 	}
 }
