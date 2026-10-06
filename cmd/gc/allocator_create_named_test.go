@@ -1140,7 +1140,7 @@ func TestLedgerRetargetMarksIssuedCreatesOnly(t *testing.T) {
 	if l.Retarget("c1", "gc-9") {
 		t.Fatal("retargeted a reserved create")
 	}
-	if _, _, ok := l.IssueCreate("c1"); !ok || !l.Issue("g1", grant.Key) {
+	if _, ok := l.IssueCreate("c1"); !ok || !l.Issue("g1", grant.Key) {
 		t.Fatal("issue refused")
 	}
 	if l.Retarget("g1", "gc-9") || l.Retarget("c1", "") || l.Retarget("missing", "gc-9") {

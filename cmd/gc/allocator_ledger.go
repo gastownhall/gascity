@@ -222,18 +222,17 @@ func (l *intentLedger) Issue(grantID string, k rowKey) bool {
 }
 
 // IssueCreate is the create executor's commitment point: reserved → issued
-// for create entry id. It returns the entry's pre-minted instance token,
-// which the effect writes on the row, and the ConfigRev it was reserved
-// under, which fingerprints the effect's create backoff. If it fails (the
-// allocator released the entry first, or id is not a create), the effect
-// performs nothing.
-func (l *intentLedger) IssueCreate(id string) (token, configRev string, ok bool) {
+// for create entry id. It returns the entry's pre-minted instance token. If
+// it fails (the allocator released the entry first, or id is not a create),
+// the effect performs nothing. The create effect no longer calls it (C1a);
+// C1b deletes the ledger.
+func (l *intentLedger) IssueCreate(id string) (token string, ok bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	ok = l.transitionLocked(id, ledgerReserved, ledgerIssued, isCreateEntry, func(e *ledgerEntry) {
-		token, configRev = e.Marker.InstanceToken, e.ConfigRev
+		token = e.Marker.InstanceToken
 	})
-	return token, configRev, ok
+	return token, ok
 }
 
 func isCreateEntry(e *ledgerEntry) bool { return e.Kind == kindCreate }

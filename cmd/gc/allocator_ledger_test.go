@@ -369,7 +369,7 @@ func TestLedgerNoWriteFailuresClearImmediately(t *testing.T) {
 func committedCreate(t *testing.T, l *intentLedger, id string, ambiguous bool, m ledgerMarker) ledgerEntry {
 	t.Helper()
 	l.Reserve(ledgerCreate(id, "tok-"+id))
-	if _, _, ok := l.IssueCreate(id); !ok {
+	if _, ok := l.IssueCreate(id); !ok {
 		t.Fatalf("issue %s lost", id)
 	}
 	if !l.CommitCreate(id, ambiguous, m) {
@@ -507,7 +507,7 @@ func TestLedgerGrantClearsWhenRowGoneFromCompleteLeg(t *testing.T) {
 func TestLedgerCreateMovesRefuseOtherKindsAndStates(t *testing.T) {
 	l := newIntentLedger(time.Now)
 	l.Reserve(ledgerGrant("g", ledgerRowA))
-	if _, _, ok := l.IssueCreate("g"); ok {
+	if _, ok := l.IssueCreate("g"); ok {
 		t.Fatal("IssueCreate issued a grant")
 	}
 	l.Issue("g", ledgerRowA)

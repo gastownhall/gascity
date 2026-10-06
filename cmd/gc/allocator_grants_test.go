@@ -960,7 +960,7 @@ func (s *allocSim) entry(id string) ledgerEntry {
 
 // create issues c and writes its pending row, or fails without a write.
 func (s *allocSim) create(c createPlan) {
-	tok, _, ok := s.ledger.IssueCreate(c.EntryID)
+	tok, ok := s.ledger.IssueCreate(c.EntryID)
 	if !ok {
 		return
 	}
