@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -271,6 +272,48 @@ func TestCreateEffect_IdentityLeaseRefusesSecondGeneration(t *testing.T) {
 	assertFailedNoWrite(t, h)
 	if rows := sessionRows(t, store); len(rows) != 1 || rows[0].ID != holder.ID {
 		t.Fatalf("rows = %+v, want only the unconfirmed holder %s", rows, holder.ID)
+	}
+}
+
+// Kills removing the planner's identity-lease pre-check without the effect
+// fence covering it (OPTION1 F1, S1-3). The planner now plans a create for an
+// identity a later-leg copy of a pending row still holds; the create effect
+// refuses it under the identifier locks through
+// ensurePoolIdentityNotHeldByOpenRow (errPoolSessionNameUnavailable), so the
+// refusal settles with cause fence, writes nothing, and the next pass
+// advances a slot (F3).
+func TestHeldIdentityRefusedUnderCreateLocks(t *testing.T) {
+	started := ago(time.Minute)
+	canonical := poolRow("gc-1", "worker", 1, "start-pending", "pending_create_claim", "true", "pending_create_started_at", started)
+	relic := poolRow("gc-1", "worker", 1, "start-pending", "pending_create_claim", "true", "pending_create_started_at", started,
+		"agent_name", "worker-2", "pool_slot", "")
+	d := newAllocFixture(t, &config.City{Agents: []config.Agent{allocPoolAgent("worker", 2)}}).
+		sessions(canonical).rigLeg(relic).demand("worker", "w-1", "w-2").decide()
+	if !slices.ContainsFunc(d.Plans, func(p allocPlan) bool { return p.Plan.qualifiedInstance == "worker-2" }) {
+		t.Fatalf("plans %+v trace %v, want a create for worker-2: the lease is the effect's to refuse", d.Plans, d.Trace)
+	}
+
+	store := beads.NewMemStore()
+	cfg := workerCity(2)
+	plan := workerPlan(cfg, "c1", 2)
+	if _, err := store.Create(beads.Bead{
+		Title: plan.QualifiedInstance, Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template": "worker", "agent_name": plan.QualifiedInstance, "pool_managed": "true",
+			"session_name": PoolSessionName("worker", "gc-old"), "state": string(session.StateStartPending), "pending_create_claim": "true",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := newCreateHarness(t, nil)
+	h.reserve(t, "c1")
+
+	h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
+
+	assertFailedNoWrite(t, h)
+	h.assertCreateBackoff(t, plan, createStageFence)
+	if rows := sessionRows(t, store); len(rows) != 1 {
+		t.Fatalf("rows = %+v, want only the holder", rows)
 	}
 }
 

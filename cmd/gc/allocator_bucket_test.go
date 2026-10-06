@@ -11,24 +11,16 @@ import (
 // Kills: refill per pass instead of per patrol interval (per-event passes
 // multiplying the start rate); a bucket that overfills, refills on a clock
 // step back, freezes after one until the clock regains the old mark, or drops
-// its fractional credit; a debit that goes negative; a refund past capacity;
-// a capacity cut on reload left unapplied.
-func TestBucketRefillContinuousCappedDebitRefund(t *testing.T) {
+// its fractional credit; a refund past capacity; a capacity cut on reload
+// left unapplied.
+func TestBucketRefillContinuousCappedRefund(t *testing.T) {
 	const capacity, interval = 5, 15 * time.Second // one token per 3s
 	t0 := time.Unix(1_000, 0)
 	b := bucketState{}.refill(t0, capacity, interval)
 	if b.Tokens != capacity {
 		t.Fatalf("first refill: %d tokens, want a full bucket", b.Tokens)
 	}
-	var ok bool
-	for i := 0; i < capacity; i++ {
-		if b, ok = b.debit(1); !ok {
-			t.Fatalf("debit %d refused with %d tokens", i, b.Tokens)
-		}
-	}
-	if _, ok = b.debit(1); ok || b.Tokens != 0 {
-		t.Fatalf("debit from empty: ok=%v tokens=%d", ok, b.Tokens)
-	}
+	b.Tokens = 0 // every token granted
 
 	// 300 passes 10ms apart (3s) accrue exactly one token, like one pass.
 	many := b
@@ -88,7 +80,7 @@ func TestBucketRefillGuardsNonPositiveIntervalAndCapacity(t *testing.T) {
 		if b.Tokens != 5 {
 			t.Fatalf("interval %v: first refill %d tokens, want a full bucket", interval, b.Tokens)
 		}
-		b, _ = b.debit(5)
+		b.Tokens = 0
 		for i := 1; i <= 3; i++ {
 			if b = b.refill(t0.Add(time.Duration(i)*time.Hour), 5, interval); b.Tokens != 0 {
 				t.Fatalf("interval %v, pass %d: refilled to %d tokens, want none", interval, i, b.Tokens)
@@ -141,8 +133,8 @@ func TestBucketTokenConservation(t *testing.T) {
 						e, cost = ledgerGrant(id, rowKey{"sessions", "row-" + id}), 1
 						rows[e.Key] = ledgerRow{Incarnation: 1}
 					}
-					var ok bool
-					if b, ok = b.debit(cost); ok && l.Reserve(e) {
+					if b.Tokens >= cost && l.Reserve(e) {
+						b.Tokens -= cost
 						kinds[id] = e.Kind
 						ids = append(ids, id)
 					}

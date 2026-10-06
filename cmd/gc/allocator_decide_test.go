@@ -94,8 +94,7 @@ func (f *allocFixture) fact(name string, kind FactKind, v ObsFact) *allocFixture
 
 func (f *allocFixture) census() *sessionCensus {
 	f.t.Helper()
-	feed := &fakeCensusFeed{}
-	return readCensus(f.t, newCensusReader(feed.feed()), f.in.Now, f.in.Cfg, f.legs)
+	return readCensus(f.t, f.in.Now, f.in.Cfg, f.legs)
 }
 
 func (f *allocFixture) observation() *ObservationSnapshot {
@@ -728,68 +727,27 @@ func TestAllocator_ConfigSleepSuppressionDeadUsesDetachedAtLiveNeedsActivity(t *
 	}
 }
 
-// Kills: a stale leg's rows shrunk (§4.2 rule 4): served past their bound,
-// they keep, and the census is incomplete.
-func TestAllocator_StaleLegRowsKeep(t *testing.T) {
-	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
-	feed := &fakeCensusFeed{nonExact: map[beads.Store]bool{}, recordings: map[beads.Store]censusRecording{}}
-	rig := censusStore()
-	feed.nonExact[rig] = true
-	feed.recordings[rig] = censusRecording{Rows: censusInfos(t, poolRow("rg-1", "worker", 2, "active")), At: allocNow.Add(-10 * time.Minute), Expires: allocNow.Add(-9 * time.Minute)}
-	f := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "asleep"))
-	f.legs = append(f.legs, classStoreCandidate{ref: "rig:a", store: rig})
-	in := f.in
-	c, err := newCensusReader(feed.feed()).read(allocNow, cfg, f.legs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	in.Census, in.Obs = c, f.observation()
-	d := mustDecide(t, in)
-	if !slices.Contains(d.Snapshot.Partial.Legs["rig:a"], causeLegStale) || d.Snapshot.Mode != modePartial ||
-		!slices.Contains(d.Snapshot.Partial.Global, causeCensusIncomplete) {
-		t.Fatalf("stale leg: mode %s partial %+v", d.Snapshot.Mode, d.Snapshot.Partial)
-	}
-	if e := entryOf(t, d, "gc-1"); e.Desired != desireKeep || e.Reason != reasonPartialRetain {
-		t.Fatalf("row under an incomplete census = %s/%s, want partial-retain keep", e.Desired, e.Reason)
-	}
-}
-
-// Kills: retiring an identity loser under an incomplete census (C2.13,
-// M22). A stale leg may hold the winner, so the verdict retires nothing.
-func TestAllocator_StaleLegRetiresNoIdentityLoser(t *testing.T) {
+// Kills: retiring an identity loser under a partial census read (C2.13,
+// M22): the read may have missed the winner, so the verdict retires nothing.
+func TestAllocator_PartialLegRetiresNoIdentityLoser(t *testing.T) {
 	cfg := chatCity("always")
-	feed := &fakeCensusFeed{nonExact: map[beads.Store]bool{}, recordings: map[beads.Store]censusRecording{}}
-	rig := censusStore()
-	feed.nonExact[rig] = true
-	feed.recordings[rig] = censusRecording{At: allocNow.Add(-10 * time.Minute), Expires: allocNow.Add(-9 * time.Minute)}
 	f := newAllocFixture(t, cfg).sessions(chatRow("gc-1", "1"), chatRow("gc-2", "3"))
-	f.legs = append(f.legs, classStoreCandidate{ref: "rig:a", store: rig})
-	in := f.in
-	c, err := newCensusReader(feed.feed()).read(allocNow, cfg, f.legs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !c.Incomplete() {
-		t.Fatal("stale leg: census complete, want incomplete")
-	}
-	in.Census, in.Obs = c, f.observation()
-	d := mustDecide(t, in)
+	f.legs = append(f.legs, classStoreCandidate{ref: "rig:a", store: censusErrStore{Store: censusStore(), err: &beads.PartialResultError{Op: "list", Err: errors.New("down")}}})
+	d := f.decide()
 	if v := d.Snapshot.Identities["chat"]; len(v.Losers) != 0 {
-		t.Fatalf("stale leg: losers %v retired under an incomplete census", v.Losers)
+		t.Fatalf("partial leg: losers %v retired under a partial census", v.Losers)
 	}
 	if e := entryOf(t, d, "gc-1"); e.Desired == desireNone {
-		t.Fatalf("stale leg: a duplicate retired: %s/%s", e.Desired, e.Reason)
+		t.Fatalf("partial leg: a duplicate retired: %s/%s", e.Desired, e.Reason)
 	}
 }
 
 // Kills: a missing census read as an empty city (§4.2 census errors): with
-// no census the pass is partial and keeps.
-func TestAllocator_NoCensusIsPartialNotEmpty(t *testing.T) {
+// no census the pass is refused.
+func TestAllocator_NoCensusIsRefusedNotEmpty(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
-	in := newAllocFixture(t, cfg).in
-	d := mustDecide(t, in)
-	if d.Snapshot.Mode != modePartial || !slices.Contains(d.Snapshot.Partial.Global, causeCensusIncomplete) {
-		t.Fatalf("no census: mode %s partial %+v, want partial census-incomplete", d.Snapshot.Mode, d.Snapshot.Partial)
+	if _, err := decideAllocation(newAllocFixture(t, cfg).in); !errors.Is(err, errDecideNoCensus) {
+		t.Fatalf("no census: err = %v, want errDecideNoCensus", err)
 	}
 }
 
@@ -843,7 +801,7 @@ func TestAllocator_EntryTemplateResolvesLegacyRows(t *testing.T) {
 	in := f.inputs()
 	p := newDecidePass(in)
 	p.prepare()
-	p.markTemplate("worker", true, true, "pool-scale-check-partial")
+	p.markTemplate("worker", true, "pool-scale-check-partial")
 	d := p.finish()
 	if e := entryOf(t, d, "gc-2"); e.Template != "worker" || e.Desired != desireKeep {
 		t.Fatalf("legacy-template row = template %q %s/%s, want worker, retained", e.Template, e.Desired, e.Reason)
@@ -860,7 +818,7 @@ func TestAllocator_NamedScaleCheckPartialKeepsOnlyNamedRows(t *testing.T) {
 	).alive("s-gc-1", InventoryAttrs{AttachedKnown: true}).alive("s-gc-2", InventoryAttrs{AttachedKnown: true})
 	p := newDecidePass(f.inputs())
 	p.prepare()
-	p.markTemplate("chat", false, false, "named-scale-check-partial")
+	p.markTemplate("chat", false, "named-scale-check-partial")
 	d := p.finish()
 	if e := entryOf(t, d, "gc-1"); e.Desired != desireKeep || e.Reason != reasonPartialRetain {
 		t.Errorf("named row = %s/%s, want partial-retain keep", e.Desired, e.Reason)

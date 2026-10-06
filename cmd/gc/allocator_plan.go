@@ -27,24 +27,21 @@ import (
 
 // Plan-gate causes, published as ineligible:<cause> (C2.2, C5.10).
 const (
-	gateCensusIncomplete = "census-incomplete"
-	gateBlockCreate      = "block-create"
-	gateCreateRefused    = "create-refused:"
-	gateWorktreeRefused  = "worktree-refused"
-	gateIdentityLease    = "identity-lease-held"
-	gateNameOccupied     = "name-occupied"
-	gateLivenessUnknown  = "liveness-unknown"
-	gateQuarantine       = "startup-quarantine"
-	gateEndpointShut     = "endpoint-open"
-	gateProviderRed      = "provider-red"
-	gatePartial          = "partial"
-	gateTransport        = "transport-refused"
-	gateNoSlot           = "no-slot"
-	gateInFlight         = "in-flight"
-	gateNamedConflict    = "named-conflict"
-	gateOwnerPending     = "owner-pending"
-	gateNameHeld         = "name-held:"
-	gatePoolSlotShaped   = "named-identity-pool-slot-shaped"
+	gateCreateRefused   = "create-refused:"
+	gateWorktreeRefused = "worktree-refused"
+	gateNameOccupied    = "name-occupied"
+	gateLivenessUnknown = "liveness-unknown"
+	gateQuarantine      = "startup-quarantine"
+	gateEndpointShut    = "endpoint-open"
+	gateProviderRed     = "provider-red"
+	gatePartial         = "partial"
+	gateTransport       = "transport-refused"
+	gateNoSlot          = "no-slot"
+	gateInFlight        = "in-flight"
+	gateNamedConflict   = "named-conflict"
+	gateOwnerPending    = "owner-pending"
+	gateNameHeld        = "name-held:"
+	gatePoolSlotShaped  = "named-identity-pool-slot-shaped"
 )
 
 // standInPrefix marks the ID of an uncleared create's stand-in row.
@@ -102,15 +99,15 @@ func (p *decidePass) demand() {
 		}
 	}
 	for template := range p.merged.PoolScaleCheckPartial {
-		p.markTemplate(template, true, true, "pool-scale-check-partial")
+		p.markTemplate(template, true, "pool-scale-check-partial")
 	}
 	for template := range p.merged.PoolPartialRetention {
-		p.markTemplate(template, true, false, "pool-partial-retention")
+		p.markTemplate(template, true, "pool-partial-retention")
 	}
 	for template := range p.merged.NamedScaleCheckPartial {
 		tp := p.snap.Partial.Templates[template]
 		if !tp.Retain {
-			p.markTemplate(template, false, false, "named-scale-check-partial")
+			p.markTemplate(template, false, "named-scale-check-partial")
 		}
 	}
 	refs := p.in.Demand.RelocatedClaimRefs
@@ -426,8 +423,8 @@ func (p *decidePass) realizePools() {
 // planned name keeps its slot used and plans the next free one. Any other
 // refusal stalls the request, as legacy's does (build_desired_state.go:5180).
 // The plans tried are bounded by the slot range, and for an unlimited pool by
-// the names that can refuse (a fence backoff or an identity lease names one), so
-// a refusal misread as name-specific cannot loop.
+// the names that can refuse (a fence backoff names one), so a refusal misread
+// as name-specific cannot loop.
 func (p *decidePass) realizeRequest(cfgAgent *config.Agent, qualifiedName string, prefer *session.Info, request SessionRequest, used map[string]bool, usedSlots map[int]bool) {
 	tries, unlimited, _, _ := freshPoolSlotUpperBound(cfgAgent)
 	if unlimited {
@@ -516,8 +513,8 @@ func (p *decidePass) selectPoolRow(cfgAgent *config.Agent, info session.Info, sl
 // they pass (POOL-047/048/050/052, C7.3, F8). It reports whether the plan
 // was admitted and, if not, whether the refusal is specific to the plan's
 // name, so another slot may pass: a create backoff whose cause is the fence
-// (the name was taken), or an identity lease a dead or absent row holds.
-// A template-wide create failure and a #46 quarantine refuse the request.
+// (the name or its identity lease was taken). A template-wide create failure
+// and a #46 quarantine refuse the request.
 func (p *decidePass) admitPoolPlan(kind createKind, cfgAgent *config.Agent, plan poolSessionCreatePlan, request SessionRequest) (admitted, nameRefused bool) {
 	template := cfgAgent.QualifiedName()
 	refuse := func(cause string, identity bool) (bool, bool) {
@@ -529,10 +526,6 @@ func (p *decidePass) admitPoolPlan(kind createKind, cfgAgent *config.Agent, plan
 		Endpoint: endpointKeyForAgent(p.cfg, cfgAgent, session.Info{}),
 	}
 	switch {
-	case p.censusIncomplete():
-		return refuse(gateCensusIncomplete, false)
-	case p.snap.Partial.Templates[template].BlockCreate:
-		return refuse(gateBlockCreate, false)
 	case p.worktreeRefused(request):
 		return refuse(gateWorktreeRefused, false)
 	case p.endpointShut(ap.Endpoint):
@@ -544,15 +537,6 @@ func (p *decidePass) admitPoolPlan(kind createKind, cfgAgent *config.Agent, plan
 	if err != nil {
 		return refuse(gateNoSlot, false)
 	}
-	agentName := plan.qualifiedInstance
-	if identifiers.beadScoped {
-		if holder, held := p.in.Census.IdentityLeaseHolder(p.cfg, template, agentName); held {
-			if dup := p.in.Census.Rows[holder].DuplicateOf; dup != "" {
-				holder.Leg = dup // the bead's runtime is observed on its canonical copy
-			}
-			return refuse(gateIdentityLease, p.obs[holder].Liveness.startCandidate())
-		}
-	}
 	if cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 		switch readRuntimeName(p.in.Obs, identifiers.sessionName, p.in.Now, p.in.ObsMaxAge).state {
 		case nameUnknown:
@@ -563,7 +547,7 @@ func (p *decidePass) admitPoolPlan(kind createKind, cfgAgent *config.Agent, plan
 	}
 	episodeKey := identifiers.sessionName
 	if identifiers.beadScoped {
-		episodeKey = boundSessionNameLength(poolIdentitySessionName(agentName, template) + poolRuntimeNameSuffix)
+		episodeKey = boundSessionNameLength(poolIdentitySessionName(plan.qualifiedInstance, template) + poolRuntimeNameSuffix)
 	}
 	if p.quarantined(episodeKey) {
 		return refuse(gateQuarantine, false)
@@ -586,8 +570,8 @@ func (p *decidePass) admitPoolPlan(kind createKind, cfgAgent *config.Agent, plan
 }
 
 // planIdentifiers derives a plan's identifiers as the create effect will
-// (derivePoolSessionIdentifiers), so the pass checks the same identity lease
-// and the same singleton runtime name.
+// (derivePoolSessionIdentifiers), so the pass checks the same singleton
+// runtime name and quarantine key.
 func (p *decidePass) planIdentifiers(cfgAgent *config.Agent, template string, plan poolSessionCreatePlan) (poolSessionIdentifiers, error) {
 	alias, err := p.bp.resolveTmuxAliasForAgent(cfgAgent)
 	if err != nil {
@@ -674,10 +658,6 @@ func (p *decidePass) namedGate(ap allocPlan, spec namedSessionSpec) string {
 		return gateCreateRefused + p.createRefused(ap)
 	case resolvePoolSlot(plan.Identity, plan.Template) > 0:
 		return gatePoolSlotShaped
-	case p.censusIncomplete():
-		return gateCensusIncomplete
-	case p.snap.Partial.Templates[plan.Template].BlockCreate:
-		return gateBlockCreate
 	case p.providerRed(spec.Agent):
 		return gateProviderRed
 	case p.quarantined(plan.SessionName):

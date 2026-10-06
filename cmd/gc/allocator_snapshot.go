@@ -67,12 +67,8 @@ func (d desire) String() string {
 	}
 }
 
-// Global and leg partial causes (C2.8, POOL-018/047).
-const (
-	causeCensusIncomplete  = "census-incomplete"
-	causeStoreQueryPartial = "store-query-partial"
-	causeLegStale          = "leg-stale"
-)
+// The global partial cause (C2.8, POOL-018).
+const causeStoreQueryPartial = "store-query-partial"
 
 // Allocator reason codes (C2.2) and None classes (AM11, C2.11, C2.13).
 const (
@@ -103,16 +99,14 @@ const (
 // partialState is the snapshot's partial causes (CONTRACT §2.1).
 type partialState struct {
 	Global    []string
-	Legs      map[string][]string
 	Templates map[string]templatePartial
 }
 
 // templatePartial is one template's partial read: Retain keeps its rows
-// (Sleep and Drain become Keep); BlockCreate also refuses its fresh creates.
+// (Sleep and Drain become Keep).
 type templatePartial struct {
-	Retain      bool
-	BlockCreate bool
-	Causes      []string
+	Retain bool
+	Causes []string
 }
 
 // selectionSnapshot is one pass's decision. Every open census row has

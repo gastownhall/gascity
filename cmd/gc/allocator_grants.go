@@ -499,6 +499,5 @@ func entryDigest(e *selectionEntry) string {
 
 func partialChanged(prev, cur *selectionSnapshot, e *selectionEntry) bool {
 	pt, ct := prev.Partial.Templates[e.Template], cur.Partial.Templates[e.Template]
-	return pt.Retain != ct.Retain || pt.BlockCreate != ct.BlockCreate || !slices.Equal(pt.Causes, ct.Causes) ||
-		!slices.Equal(prev.Partial.Legs[e.Key.Leg], cur.Partial.Legs[e.Key.Leg])
+	return pt.Retain != ct.Retain || !slices.Equal(pt.Causes, ct.Causes)
 }

@@ -649,8 +649,9 @@ func TestCreates_DependencyFloorTakesTheScarceToken(t *testing.T) {
 }
 
 // Kills (C7.4, P3-6b owner decision 4): a create on a gated template, for
-// pool and named plans alike: an incomplete census, BlockCreate, provider
-// red, the #46 quarantine and a shut or missing endpoint view each refuse it.
+// pool and named plans alike: a scale-check partial (the pool plan only),
+// provider red, the #46 quarantine and a shut or missing endpoint view each
+// refuse it.
 func TestCreates_BlockedByPartialRedQuarantineEndpoint(t *testing.T) {
 	cfg := grantCity(5, allocPoolAgent("worker", 10), config.Agent{Name: "chat"})
 	cfg.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "always"}}
@@ -664,10 +665,7 @@ func TestCreates_BlockedByPartialRedQuarantineEndpoint(t *testing.T) {
 		want  int
 	}{
 		{"open", func(*allocFixture) {}, 2},
-		{"census incomplete", func(f *allocFixture) {
-			f.legs = append(f.legs, classStoreCandidate{ref: "rig:a", store: censusErrStore{Store: censusStore(), err: fmt.Errorf("down")}})
-		}, 0},
-		{"block create", func(f *allocFixture) {
+		{"scale-check partial", func(f *allocFixture) {
 			f.in.ScaleCheck = &scaleCheckResult{}
 			f.in.Demand.CustomCheckTemplates = []string{"worker"}
 		}, 1},
@@ -823,15 +821,14 @@ func TestGrants_InFlightCauseMatchesCreateByTokenAndKey(t *testing.T) {
 	}
 }
 
-// Kills (PR J): an ambiguous create cleared as unwritten without its create
-// backoff, a backoff that advances the slot (fence), a backoff recorded for
-// a failure whose effect already recorded one, and a cleared create keeping
-// its reservation.
-func TestHousekeep_AmbiguousUnwrittenBackoffOnlyWhenAmbiguous(t *testing.T) {
+// Kills (PR J): a backoff recorded for a failure whose effect already
+// recorded one, and a cleared create keeping its reservation. An ambiguous
+// create clears only by its marker or the hard bound: the census carries no
+// read start, so an absence proves nothing (S1-8 moves to C1a).
+func TestHousekeep_AmbiguousCreateAwaitsMarkerOrBound(t *testing.T) {
 	f := newAllocFixture(t, grantCity(5)).tokens(5)
 	f.legs = []classStoreCandidate{{ref: allocSessionsLeg, store: censusStore()}}
 	in := f.inputs()
-	in.Census.Legs[0].Exact, in.Census.Legs[0].StartedAt = false, allocNow
 	settled := allocNow.Add(-time.Second)
 	amb := ledgerEntry{
 		ID: "c-amb", Kind: kindCreate, Key: rowKey{Leg: allocSessionsLeg}, State: ledgerCommitted, WroteRow: true,
@@ -848,21 +845,11 @@ func TestHousekeep_AmbiguousUnwrittenBackoffOnlyWhenAmbiguous(t *testing.T) {
 	}
 	d := mustDecide(t, in)
 	clears := opsOf(d, opClear)
-	if len(clears) != 2 || len(d.Reservations) != 0 {
-		t.Fatalf("clears %+v reservations %+v, want both cleared and both reservations dropped", clears, d.Reservations)
+	if len(clears) != 1 || clears[0].ID != "c-fail" || clears[0].Backoff != nil {
+		t.Fatalf("clears %+v, want only c-fail, with no second backoff", clears)
 	}
-	for _, op := range clears {
-		switch op.ID {
-		case "c-amb":
-			want := backoffOp{Key: "create:worker/worker-1", Until: allocNow.Add(3 * time.Hour), Cause: createStageWrite, Fingerprint: "rev-1"}
-			if op.Clear != clearUnwritten || op.Backoff == nil || *op.Backoff != want || op.From != ledgerCommitted {
-				t.Fatalf("ambiguous clear %+v backoff %+v, want %+v", op, op.Backoff, want)
-			}
-		case "c-fail":
-			if op.Backoff != nil {
-				t.Fatalf("a no-write failure recorded a second backoff: %+v", op.Backoff)
-			}
-		}
+	if len(d.Reservations) != 1 || d.Reservations[0].EntryID != "c-amb" {
+		t.Fatalf("reservations %+v, want only c-amb's kept", d.Reservations)
 	}
 }
 
@@ -1221,7 +1208,6 @@ func TestAllocator_EnqueueDiffAgainstPrev(t *testing.T) {
 	}
 
 	for name, changed := range map[string]partialState{
-		"leg":             {Legs: map[string][]string{allocSessionsLeg: {causeStoreQueryPartial}}},
 		"template retain": {Templates: map[string]templatePartial{"worker": {Retain: true}}},
 		"template causes": {Templates: map[string]templatePartial{"worker": {Causes: []string{causeStoreQueryPartial}}}},
 	} {

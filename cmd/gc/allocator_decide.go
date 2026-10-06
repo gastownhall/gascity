@@ -38,6 +38,10 @@ import (
 // read every lease as expired and every fact as stale.
 var errDecideNoClock = errors.New("allocator decide: zero Now")
 
+// errDecideNoCensus refuses a pass without its census: no census is not an
+// empty city.
+var errDecideNoCensus = errors.New("allocator decide: no census")
+
 // allocInputs is everything one pass decides from.
 type allocInputs struct {
 	// Now is the pass's one clock (POOL-026, #35). It must be set.
@@ -173,11 +177,10 @@ type allocDecision struct {
 
 // decidePass is one decide's working state.
 type decidePass struct {
-	in       allocInputs
-	noCensus bool
-	cfg      *config.City
-	snap     *selectionSnapshot
-	obs      map[rowKey]rowObservation
+	in   allocInputs
+	cfg  *config.City
+	snap *selectionSnapshot
+	obs  map[rowKey]rowObservation
 
 	sessionsLeg string
 	// none holds the rows the allocator does not manage, by reason (AM11,
@@ -237,6 +240,9 @@ func decideAllocation(in allocInputs) (allocDecision, error) {
 	if in.Now.IsZero() {
 		return allocDecision{}, errDecideNoClock
 	}
+	if in.Census == nil {
+		return allocDecision{}, errDecideNoCensus
+	}
 	p := newDecidePass(in)
 	p.prepare()
 	if !in.CitySuspended {
@@ -271,11 +277,6 @@ func newDecidePass(in allocInputs) *decidePass {
 		desired:  make(map[string]TemplateParams),
 		selected: make(map[rowKey]*selection),
 		roots:    make(map[string]bool),
-	}
-	if in.Census == nil {
-		// No census is not an empty city: nothing is created from it.
-		p.noCensus = true
-		p.in.Census = &sessionCensus{Rows: make(map[rowKey]censusRow)}
 	}
 	if c := p.in.Census; len(c.Legs) > 0 {
 		p.sessionsLeg = c.Legs[0].Ref
@@ -391,7 +392,7 @@ func (p *decidePass) identityVerdicts() {
 		}
 		byIdentity[identity] = append(byIdentity[identity], info)
 	}
-	retire := !p.censusIncomplete() && !p.in.Demand.StorePartial
+	retire := !p.storePartial()
 	for _, identity := range slices.Sorted(maps.Keys(byIdentity)) {
 		rows := byIdentity[identity]
 		spec, _ := findNamedSessionSpec(p.cfg, p.in.CityName, identity)
@@ -440,26 +441,13 @@ func (p *decidePass) selectDecidable() {
 	p.decidable = p.withGrantSupply(p.decidable)
 }
 
-// partials is step 3: the global and leg causes, each with legacy's effect.
-// A global cause makes the snapshot partial (retain everything); census
-// incompleteness also refuses every fresh create. A stale leg keeps its
-// rows. The demand's template causes join in step 4.
+// partials is step 3: the global cause, with legacy's effect. A partial
+// demand or census read makes the snapshot partial (retain everything); it
+// refuses no create. The demand's template causes join in step 4.
 func (p *decidePass) partials() {
-	ps := &p.snap.Partial
-	if p.censusIncomplete() {
-		ps.Global = append(ps.Global, causeCensusIncomplete)
-	}
-	if p.in.Demand.StorePartial {
-		ps.Global = append(ps.Global, causeStoreQueryPartial)
-	}
-	if len(ps.Global) > 0 {
+	if p.storePartial() {
+		p.snap.Partial.Global = append(p.snap.Partial.Global, causeStoreQueryPartial)
 		p.snap.Mode = modePartial
-	}
-	for leg := range p.in.Census.StaleLegs() {
-		if ps.Legs == nil {
-			ps.Legs = make(map[string][]string)
-		}
-		ps.Legs[leg] = []string{causeLegStale}
 	}
 }
 
@@ -741,21 +729,20 @@ func (p *decidePass) decision() allocDecision {
 	}
 }
 
-// censusIncomplete reports a census with a leg that has no whole read
-// within its bound (POOL-047).
-func (p *decidePass) censusIncomplete() bool {
-	return p.noCensus || p.in.Census.Incomplete()
+// storePartial reports a partial demand or census read: what it returned is
+// kept, so nothing shrinks.
+func (p *decidePass) storePartial() bool {
+	return p.in.Demand.StorePartial || p.in.Census.Partial()
 }
 
 // markTemplate records a template partial cause.
-func (p *decidePass) markTemplate(template string, retain, blockCreate bool, cause string) {
+func (p *decidePass) markTemplate(template string, retain bool, cause string) {
 	ps := &p.snap.Partial
 	if ps.Templates == nil {
 		ps.Templates = make(map[string]templatePartial)
 	}
 	tp := ps.Templates[template]
 	tp.Retain = tp.Retain || retain
-	tp.BlockCreate = tp.BlockCreate || blockCreate
 	if !slices.Contains(tp.Causes, cause) {
 		tp.Causes = append(tp.Causes, cause)
 	}

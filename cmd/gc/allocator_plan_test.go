@@ -164,8 +164,8 @@ func TestAllocator_PartialTemplate_KeepSetNeverShrinks(t *testing.T) {
 		t.Fatalf("control: idle asleep row without a partial read = %s, want drain", e.Desired)
 	}
 	d := run(true)
-	if tp := d.Snapshot.Partial.Templates["worker"]; !tp.Retain || !tp.BlockCreate {
-		t.Fatalf("template partial = %+v, want retain and block-create", tp)
+	if tp := d.Snapshot.Partial.Templates["worker"]; !tp.Retain {
+		t.Fatalf("template partial = %+v, want retain", tp)
 	}
 	for _, id := range []string{"gc-1", "gc-2"} {
 		if e := entryOf(t, d, id); e.Desired == desireSleep || e.Desired == desireDrain {
@@ -190,24 +190,32 @@ func TestAllocator_PartialTemplate_BlocksFreshCreateNotReuse(t *testing.T) {
 	}
 }
 
-// Kills: a create from a narrower view (POOL-047). A leg with nothing to
-// serve leaves the census incomplete: the snapshot is partial, nothing
-// shrinks, every fresh create is refused with the census cause, and reuse
-// still works.
-func TestAllocator_IncompleteCensus_BlocksFreshCreate(t *testing.T) {
+// Kills a regression of S1-2/S1-9: a failed or partial non-sessions leg
+// blocking creates city-wide. Its rows are census-only relics; the create
+// effect's locked live re-census fails closed on any partial leg. A partial
+// read still retains.
+func TestCreateNotBlockedByPartialNonSessionLeg(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 4)}}
-	f := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "active")).alive("s-gc-1", InventoryAttrs{}).
-		demand("worker", "w-1", "w-2", "w-3")
-	f.legs = append(f.legs, classStoreCandidate{ref: "rig:a", store: censusErrStore{Store: censusStore(), err: errors.New("rig down")}})
-	d := f.decide()
-	if d.Snapshot.Mode != modePartial || !slices.Contains(d.Snapshot.Partial.Global, causeCensusIncomplete) {
-		t.Fatalf("mode %s partial %+v, want partial census-incomplete", d.Snapshot.Mode, d.Snapshot.Partial)
-	}
-	if len(d.Plans) != 0 || !traceHas(d, gateCensusIncomplete) {
-		t.Fatalf("plans %+v trace %v: an incomplete census creates nothing", d.Plans, d.Trace)
-	}
-	if !entryOf(t, d, "gc-1").InDesired {
-		t.Fatal("reuse must survive an incomplete census")
+	for _, tc := range []struct {
+		err  error
+		mode allocMode
+	}{
+		{errors.New("rig down"), modeNormal},
+		{&beads.PartialResultError{Op: "list", Err: errors.New("rig down")}, modePartial},
+	} {
+		f := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "active")).alive("s-gc-1", InventoryAttrs{}).
+			demand("worker", "w-1", "w-2", "w-3")
+		f.legs = append(f.legs, classStoreCandidate{ref: "rig:a", store: censusErrStore{Store: censusStore(), err: tc.err}})
+		d := f.decide()
+		if d.Snapshot.Mode != tc.mode {
+			t.Errorf("rig err %v: mode %s, want %s", tc.err, d.Snapshot.Mode, tc.mode)
+		}
+		if got := planSlots(d, "worker"); len(got) != 2 {
+			t.Errorf("rig err %v: plans %v trace %v, want two fresh creates", tc.err, got, d.Trace)
+		}
+		if !entryOf(t, d, "gc-1").InDesired {
+			t.Errorf("rig err %v: the live row is not reused", tc.err)
+		}
 	}
 }
 
@@ -233,9 +241,9 @@ func TestAllocator_FreshSlot_LowestFreeAcrossAllLegs(t *testing.T) {
 	}
 }
 
-// Kills: a failed-create row freeing its name (POOL-050). Its slot is free
-// but its identity lease holds: slot 1's identity is refused (traced), and
-// the request moves on to slot 2 rather than stalling the template.
+// Kills: a failed-create row holding its slot (POOL-050). Its slot is free;
+// its identity lease is the create effect's to refuse under the identifier
+// locks (fence), which advances the next pass to slot 2 (F3).
 func TestAllocator_FreshSlot_FailedCreateKeepsNameNotSlot(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 4)}}
 	d := newAllocFixture(t, cfg).
@@ -244,11 +252,8 @@ func TestAllocator_FreshSlot_FailedCreateKeepsNameNotSlot(t *testing.T) {
 	if e := entryOf(t, d, "gc-1"); e.Desired != desireNone || e.Reason != reasonFailedCreate {
 		t.Fatalf("failed-create row = %s/%s", e.Desired, e.Reason)
 	}
-	if got := planSlots(d, "worker"); fmt.Sprint(got) != "[2]" {
-		t.Fatalf("plan slots = %v, want [2]: slot 1 is free but its name is leased", got)
-	}
-	if !traceHas(d, gateIdentityLease) {
-		t.Fatalf("the leased identity must be traced: %v", d.Trace)
+	if got := planSlots(d, "worker"); fmt.Sprint(got) != "[1]" {
+		t.Fatalf("plan slots = %v, want [1]: the failed-create row's slot is free", got)
 	}
 }
 
@@ -354,32 +359,6 @@ func TestAllocator_TemplateWideRefusalStallsAnUnlimitedPool(t *testing.T) {
 	}
 }
 
-// Kills: an identity lease treated as name-specific whatever its holder
-// (F3, M13). A lease a dead or absent row holds frees nothing soon but
-// blocks only that name, so the request moves to the next slot; one a live
-// row holds, or a row whose liveness is unknown, stalls the request, as
-// legacy does.
-func TestAllocator_IdentityLeaseAdvancesOnlyPastANotLiveHolder(t *testing.T) {
-	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
-	started := ago(time.Minute)
-	canonical := poolRow("gc-1", "worker", 1, "start-pending", "pending_create_claim", "true", "pending_create_started_at", started)
-	stale := poolRow("gc-1", "worker", 1, "start-pending", "pending_create_claim", "true", "pending_create_started_at", started,
-		"agent_name", "worker-2", "pool_slot", "")
-	for holder, want := range map[string]string{"absent": "[3]", "alive": "[]", "unknown": "[]"} {
-		f := newAllocFixture(t, cfg).sessions(canonical).rigLeg(stale).demand("worker", "w-1", "w-2")
-		switch holder {
-		case "alive":
-			f.alive("s-gc-1", InventoryAttrs{AttachedKnown: true})
-		case "unknown":
-			f.noInventory = true
-		}
-		d := f.decide()
-		if got := fmt.Sprint(planSlots(d, "worker")); got != want || !traceHas(d, gateIdentityLease) {
-			t.Errorf("holder %s: plans %s trace %v, want %s", holder, got, d.Trace, want)
-		}
-	}
-}
-
 // singletonRuntimeName is the runtime name a canonical singleton's create
 // would claim, derived as the create effect derives it.
 func singletonRuntimeName(t *testing.T, cfg *config.City, template string) string {
@@ -435,26 +414,6 @@ func TestAllocator_SingletonQuarantineByEpisodeKey(t *testing.T) {
 	f.in.Episodes = map[string]session.StartupHealthEpisode{key: {QuarantinedUntil: allocNow.Add(time.Minute)}}
 	if d := f.decide(); len(d.Plans) != 0 || !traceHas(d, gateQuarantine) {
 		t.Fatalf("quarantined singleton: plans %+v trace %v", d.Plans, d.Trace)
-	}
-}
-
-// Kills: a create storm on held identities (R-43, F8). A later-leg copy of
-// a pending row still holds its old identity spelling; the slot it names is
-// free in the canonical census, so only the lease check stops the create.
-func TestAllocator_IdentityLeaseHeldPlansNoCreate(t *testing.T) {
-	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 2)}}
-	started := ago(time.Minute)
-	canonical := poolRow("gc-1", "worker", 1, "start-pending", "pending_create_claim", "true", "pending_create_started_at", started)
-	stale := poolRow("gc-1", "worker", 1, "start-pending", "pending_create_claim", "true", "pending_create_started_at", started,
-		"agent_name", "worker-2", "pool_slot", "")
-	d := newAllocFixture(t, cfg).sessions(canonical).rigLeg(stale).demand("worker", "w-1", "w-2").decide()
-	for _, p := range d.Plans {
-		if p.Plan.qualifiedInstance == "worker-2" {
-			t.Fatalf("planned a create for the leased identity worker-2: %+v", d.Plans)
-		}
-	}
-	if !traceHas(d, gateIdentityLease) {
-		t.Fatalf("trace %v, want identity-lease-held", d.Trace)
 	}
 }
 
@@ -642,7 +601,7 @@ func TestAllocator_NamedScaleCheckPartialMarksWithoutRetaining(t *testing.T) {
 		alive("s-gc-2", InventoryAttrs{AttachedKnown: true})
 	f.in.Demand.Collected.NamedPartials = map[string]bool{"chat": true}
 	d := f.decide()
-	if tp := d.Snapshot.Partial.Templates["chat"]; tp.Retain || tp.BlockCreate || !slices.Contains(tp.Causes, "named-scale-check-partial") {
+	if tp := d.Snapshot.Partial.Templates["chat"]; tp.Retain || !slices.Contains(tp.Causes, "named-scale-check-partial") {
 		t.Fatalf("chat partial = %+v, want marked only", tp)
 	}
 	if e := entryOf(t, d, "gc-2"); e.Desired == desireKeep {
@@ -917,9 +876,9 @@ func TestAllocator_NamedPlan_OccupancyFromObservation(t *testing.T) {
 	}
 }
 
-// Kills: a named create under a C7.4 gate (P3-6b obligations): an incomplete
-// census, the backing template's BlockCreate, provider red, a #46 quarantine
-// of its session name and a shut endpoint each refuse it, traced.
+// Kills: a named create under a C7.4 gate (P3-6b obligations): provider red,
+// a #46 quarantine of its session name and a shut endpoint each refuse it,
+// traced.
 func TestAllocator_NamedPlan_PlanTimeGates(t *testing.T) {
 	cfg := chatCity("always")
 	cfg.Workspace.Provider = "claude"
@@ -930,12 +889,6 @@ func TestAllocator_NamedPlan_PlanTimeGates(t *testing.T) {
 		setup func(*allocFixture)
 	}{
 		{"", func(*allocFixture) {}},
-		{gateCensusIncomplete, func(f *allocFixture) {
-			f.legs = append(f.legs, classStoreCandidate{ref: "rig:a", store: censusErrStore{Store: censusStore(), err: errors.New("rig down")}})
-		}},
-		{gateBlockCreate, func(f *allocFixture) {
-			f.in.Demand.CustomCheckTemplates = []string{"chat"} // no lane result: partial
-		}},
 		{gateProviderRed, func(f *allocFixture) {
 			f.in.ProviderHealth = &providerHealthSnapshot{present: true, entries: map[string]bool{"claude": false}}
 		}},
@@ -1125,7 +1078,7 @@ func TestAllocator_ScaleCheckPartialOnlyForCustomCheckTemplates(t *testing.T) {
 	if _, partial := d.Snapshot.Partial.Templates["worker"]; partial {
 		t.Fatalf("worker read partial with no custom check: %+v", d.Snapshot.Partial)
 	}
-	if !d.Snapshot.Partial.Templates["custom"].BlockCreate {
+	if !d.Snapshot.Partial.Templates["custom"].Retain {
 		t.Fatalf("custom with no lane result must read partial: %+v", d.Snapshot.Partial)
 	}
 	if e := entryOf(t, d, "gc-1"); e.Desired != desireDrain {
@@ -1147,26 +1100,6 @@ func TestAllocator_DeadRowIsAStartCandidate(t *testing.T) {
 	}
 	if len(d.Plans) != 0 {
 		t.Fatalf("plans beside a reusable dead row: %+v", d.Plans)
-	}
-}
-
-// Kills: a lease checked with an identity the create effect does not check
-// (P3-3 obligations): a canonical singleton's lease is its template
-// identity, and an aliased pool (not bead-scoped) holds no lease.
-func TestAllocator_IdentityLeaseAskedOnlyForBeadScopedIdentities(t *testing.T) {
-	solo := &config.City{Agents: []config.Agent{allocPoolAgent("solo", 1)}}
-	d := newAllocFixture(t, solo).sessions(poolRow("gc-1", "solo", 0, "failed-create", "agent_name", "solo", "pool_slot", "")).
-		demand("solo", "w-1").decide()
-	if len(d.Plans) != 0 || !traceHas(d, gateIdentityLease) {
-		t.Fatalf("singleton with a leased identity: plans %+v trace %v", d.Plans, d.Trace)
-	}
-
-	aliased := allocPoolAgent("worker", 3)
-	aliased.TmuxAlias = "box"
-	cfg := &config.City{Agents: []config.Agent{aliased}}
-	d = newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "failed-create")).demand("worker", "w-1").decide()
-	if traceHas(d, gateIdentityLease) || fmt.Sprint(planSlots(d, "worker")) != "[1]" {
-		t.Fatalf("aliased pool: plans %v trace %v; its identity is no lease (the effect checks the alias instead)", planSlots(d, "worker"), d.Trace)
 	}
 }
 
@@ -1511,8 +1444,8 @@ func TestAllocator_ControlDispatcherRetentionPartialDoesNotBlockCreate(t *testin
 	f.in.Demand.Collected.UnassignedRoutedPartial = true
 	d := f.decide()
 	tp := d.Snapshot.Partial.Templates[dispatcher]
-	if !tp.Retain || tp.BlockCreate {
-		t.Fatalf("dispatcher partial = %+v, want retain without block-create", tp)
+	if !tp.Retain {
+		t.Fatalf("dispatcher partial = %+v, want retain", tp)
 	}
 }
 

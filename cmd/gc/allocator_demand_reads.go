@@ -34,11 +34,6 @@ import (
 // Unwired in this slice: P3-5a's gather builds a v2DemandReads per pass, and
 // P3-7 starts the external-reads lane.
 
-// cacheLagBound bounds how long an exact census leg's read may be served from
-// its last good answer (P3 spec §4.2 rule 4). An older answer is refused, so
-// the leg reads partial.
-const cacheLagBound = 60 * time.Second
-
 var (
 	errDemandRecordingMissing = errors.New("no external-reads recording for this leg")
 	errDemandRecordingStale   = errors.New("external-reads recording is stale")
