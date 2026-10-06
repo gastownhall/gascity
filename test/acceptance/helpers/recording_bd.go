@@ -4,23 +4,29 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The delimiters of one recorded invocation: ASCII unit separator between
-// fields, ASCII record separator between invocations.
+// fields, ASCII record separator after the last one.
 //
 // Neither a newline nor a space can do this job. A bd argv routinely carries
-// both — a bead title, a JSON payload on `bd create` — and a line-oriented log
-// silently turns one such invocation into two records, which is a fork count
+// both — a bead title, a JSON payload on `bd create` — and a line-oriented
+// record silently turns one such invocation into two, which is a fork count
 // that overreports exactly when the city is doing real work. The two ASCII
 // separators cannot appear in an argument gc or its provider script builds.
 const (
 	fieldSeparator  = "\x1f"
 	recordSeparator = "\x1e"
 )
+
+// recordingBDRecordDir is the directory, beside the shim, that holds one file
+// per recorded invocation.
+const recordingBDRecordDir = "invocations.d"
 
 // RecordingBD is a bd that records every invocation and then execs the real
 // one.
@@ -41,8 +47,8 @@ type RecordingBD struct {
 	// Real is the bd the shim execs.
 	Real string
 
-	t       *testing.T
-	logPath string
+	t         *testing.T
+	recordDir string
 }
 
 // Invocation is one recorded bd fork.
@@ -63,7 +69,8 @@ func (i Invocation) Subcommand() string {
 	return i.Argv[0]
 }
 
-// NewRecordingBD writes a shim that records into its own log and execs realBD.
+// NewRecordingBD writes a shim that records into its own directory and execs
+// realBD.
 //
 // realBD must already be resolved: the shim takes no part in deciding which bd
 // runs, because a shim that resolved its own target could silently run a
@@ -78,131 +85,142 @@ func NewRecordingBD(t *testing.T, realBD string) *RecordingBD {
 	// anything else would make every argv[0] in the process table read as a
 	// binary nobody pinned.
 	dir := filepath.Join(TempDir(t), "recording-bd")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	recorder := &RecordingBD{
+		Path:      filepath.Join(dir, "bd"),
+		Real:      realBD,
+		t:         t,
+		recordDir: filepath.Join(dir, recordingBDRecordDir),
+	}
+	if err := os.MkdirAll(recorder.recordDir, 0o755); err != nil {
 		t.Fatalf("create recording bd directory: %v", err)
 	}
-	recorder := &RecordingBD{
-		Path:    filepath.Join(dir, "bd"),
-		Real:    realBD,
-		t:       t,
-		logPath: filepath.Join(dir, "invocations.log"),
-	}
 
-	// ONE write(2) per invocation, not one per field.
+	// ONE file per invocation, so no two forks ever write to the same file.
 	//
-	// O_APPEND makes a single write atomic; it does not make a block of them
-	// atomic, and the block this used to be issued one write per printf —
-	// strace confirms N+2 of them for an N-argument fork. Two bd forks in
-	// flight (the daemon's reconciler cascade plus an operator command, or a
-	// provider `health` racing an in-process call) therefore interleaved their
-	// fields, and Invocations() read the result as one record with a foreign
-	// ppid spliced into its argv plus one empty record — so Count() silently
-	// under-reported by one, exactly when the city was doing real work. The
-	// deterministic fork gate the next slice builds on Count() cannot stand on
-	// that.
+	// A shared append-only log cannot be made safe from sh. O_APPEND makes one
+	// write(2) atomic, and the record is assembled first and emitted with one
+	// printf, but how many writes that printf becomes is the shell's choice:
+	// dash issues one, while bash — /bin/sh on macOS and Fedora — writes in
+	// 4096-byte chunks. gc builds argv far over 4 KiB (bead bodies ride
+	// `--description`, the reaper's `bd sql` carries its whole statement), so
+	// two such forks in flight spliced their chunks and the log could no longer
+	// be counted. A file of its own per fork removes that bound altogether.
 	//
-	// The record is assembled in a variable and emitted with ONE printf. What
-	// that buys is bounded by the shell's stdout buffer, not by PIPE_BUF, and
-	// this used to claim otherwise. Measured with strace on a 20 000-byte
-	// record:
+	// The file is named for the shell's pid, which no other live process holds,
+	// so no concurrent fork can choose the same name; the suffix only steps past
+	// a file left by an exited process that held the same pid earlier. Naming it
+	// costs no fork: a counter, `[` and `$((…))` are builtins in dash and in
+	// bash 3.2, and no mktemp, date or mv runs. A fork inside the instrument
+	// would be a process the census cannot see.
 	//
-	//   - /bin/dash: one write(1, …, 20000) for the record plus a SEPARATE
-	//     write of the trailing newline (measured: one write up to 8000 bytes,
-	//     two from 8200 on). The record is never split, so dash cannot splice;
-	//     but because the newline is its own write, a concurrent fork's record
-	//     can land between a record and its newline, and the log then carries
-	//     two newlines in a row. Invocations() treats every leading newline as
-	//     belonging to no record, so that shape parses as the two intact
-	//     records it is.
-	//   - /bin/bash standing in as /bin/sh (Fedora, macOS): five writes in
-	//     4096-byte chunks. Two concurrent forks whose argv exceeds 4 KiB can
-	//     interleave chunks there.
-	//
-	// gc does build argv over 4 KiB — bead bodies ride `--description`
-	// (internal/beads/bdstore.go) — so that is an ordinary size, not an exotic
-	// one. The limitation is therefore stated rather than papered over, and
-	// Invocations() refuses to guess when it meets an interleaved record instead
-	// of quietly under-counting. A per-invocation file would remove the bound
-	// altogether; it would also cost a directory scan per assertion, which is
-	// the trade PR2's deterministic gate can make if it ever runs where /bin/sh
-	// is bash.
-	//
-	// The separators are literal bytes rather than printf escapes so that
-	// assembling a record costs no subshell: a fork per invocation inside the
-	// instrument would be a process the fork census cannot see.
-	//
-	// The bytes on disk are unchanged (ppid US arg US … US RS newline), so
-	// Invocations parses exactly what it parsed before.
+	// A file is a record once its record separator has landed. A reader that
+	// meets one still being written (a bash chunk at a time) sees no separator
+	// yet and leaves it for the next read: that bd has not been exec'd, so it
+	// has not forked yet either. Invocations depends on that, not on a rename.
 	//
 	// Failures are swallowed: a test's instrument must not be able to fail the
 	// city it is only observing.
 	script := fmt.Sprintf(`#!/bin/sh
 us='%s'
 rs='%s'
+dir=%s
 record="${PPID:-0}$us"
 for arg in "$@"; do
 	record="$record$arg$us"
 done
-printf '%%s\n' "$record$rs" >>%s 2>/dev/null || true
+n=0
+while [ -e "$dir/$$.$n" ]; do
+	n=$((n + 1))
+done
+printf '%%s\n' "$record$rs" >"$dir/$$.$n" 2>/dev/null || true
 exec %s "$@"
-`, fieldSeparator, recordSeparator, shellQuote(recorder.logPath), shellQuote(realBD))
+`, fieldSeparator, recordSeparator, shellQuote(recorder.recordDir), shellQuote(realBD))
 	if err := os.WriteFile(recorder.Path, []byte(script), 0o755); err != nil { //nolint:gosec // the shim must be executable
 		t.Fatalf("write recording bd shim: %v", err)
 	}
 	return recorder
 }
 
-// Invocations returns every recorded fork, oldest first. An absent log means
-// no bd ran, which is a legitimate answer and not an error.
+// Invocations returns every recorded fork, oldest first as far as the
+// filesystem's modification times resolve. No records means no bd ran, which
+// is a legitimate answer and not an error.
 //
-// A record whose first field is not a pid is an interleaved write (see
-// NewRecordingBD: only possible where /bin/sh chunks a printf larger than its
-// stdout buffer, with two such forks in flight) and fails the test. A fork
-// census that silently dropped one would be worse than no census: the count the
-// gate reads would be a number nobody can reproduce.
+// A record that does not parse fails the test. A fork census that silently
+// dropped one would be worse than no census: the count the gate reads would be
+// a number nobody can reproduce.
 func (r *RecordingBD) Invocations() []Invocation {
 	r.t.Helper()
-	data, err := os.ReadFile(r.logPath)
+	entries, err := os.ReadDir(r.recordDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+		r.t.Fatalf("read recording bd records: %v", err)
+	}
+	type recorded struct {
+		name       string
+		modified   time.Time
+		invocation Invocation
+	}
+	var records []recorded
+	for _, entry := range entries {
+		path := filepath.Join(r.recordDir, entry.Name())
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			if os.IsNotExist(readErr) {
+				// Reset raced this read; the record is gone by design.
+				continue
+			}
+			r.t.Fatalf("read recording bd record %s: %v", path, readErr)
 		}
-		r.t.Fatalf("read recording bd log: %v", err)
+		invocation, complete, parseErr := parseInvocation(data)
+		if parseErr != nil {
+			r.t.Fatalf("recording bd record %s: %v", path, parseErr)
+		}
+		if !complete {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			if os.IsNotExist(infoErr) {
+				continue
+			}
+			r.t.Fatalf("stat recording bd record %s: %v", path, infoErr)
+		}
+		records = append(records, recorded{name: entry.Name(), modified: info.ModTime(), invocation: invocation})
 	}
-	invocations, parseErr := parseInvocations(data)
-	if parseErr != nil {
-		r.t.Fatalf("recording bd log %s: %v", r.logPath, parseErr)
+	sort.Slice(records, func(i, j int) bool {
+		if !records[i].modified.Equal(records[j].modified) {
+			return records[i].modified.Before(records[j].modified)
+		}
+		return records[i].name < records[j].name
+	})
+	out := make([]Invocation, 0, len(records))
+	for _, record := range records {
+		out = append(out, record.invocation)
 	}
-	return invocations
+	return out
 }
 
-// parseInvocations decodes the shim's wire format. It is separated from
-// Invocations so that the refusal above has a test which does not have to fail
-// one.
-func parseInvocations(data []byte) ([]Invocation, error) {
-	var out []Invocation
-	for _, record := range strings.Split(string(data), recordSeparator) {
-		// The shim writes a newline after each record separator so the log is
-		// still readable by eye; it belongs to neither record. There can be
-		// more than one: dash writes a record over 8 KiB and its newline as two
-		// writes, so a concurrent fork's whole record (and its newline) can land
-		// between them, leaving "\n\n" ahead of the next record. Trimming only
-		// the first would leave a newline where a pid is expected and fail a log
-		// whose records are all intact.
-		record = strings.TrimLeft(record, "\n")
-		if record == "" {
-			continue
-		}
-		fields := strings.Split(strings.TrimSuffix(record, fieldSeparator), fieldSeparator)
-		if len(fields) == 0 || fields[0] == "" {
-			continue
-		}
-		if _, convErr := strconv.Atoi(fields[0]); convErr != nil {
-			return nil, fmt.Errorf("a record's first field %q is not a pid: two bd forks with argv over the shell's output buffer interleaved their writes, so this log's fork count cannot be trusted", fields[0])
-		}
-		out = append(out, Invocation{PPID: fields[0], Argv: fields[1:]})
+// parseInvocation decodes one record file in the shim's wire format: ppid, then
+// argv, every field unit-separated, the record separator last, and the newline
+// the shim writes for readability.
+//
+// complete is false while the record separator has not landed — a shell that
+// writes in chunks is still writing it — and that is not an error. A file that
+// holds anything other than exactly one record whose first field is a pid is
+// corrupt, and is.
+func parseInvocation(data []byte) (invocation Invocation, complete bool, err error) {
+	content := string(data)
+	end := strings.Index(content, recordSeparator)
+	if end < 0 {
+		return Invocation{}, false, nil
 	}
-	return out, nil
+	if rest := strings.TrimLeft(content[end+len(recordSeparator):], "\n"); rest != "" {
+		return Invocation{}, false, fmt.Errorf("the file carries %d byte(s) after its record; one invocation's file holds exactly one record", len(rest))
+	}
+	fields := strings.Split(strings.TrimSuffix(content[:end], fieldSeparator), fieldSeparator)
+	if _, convErr := strconv.Atoi(fields[0]); convErr != nil {
+		return Invocation{}, false, fmt.Errorf("the record's first field %.64q is not a pid", fields[0])
+	}
+	return Invocation{PPID: fields[0], Argv: fields[1:]}, true, nil
 }
 
 // Count returns how many recorded invocations begin with prefix. Calling it
@@ -220,10 +238,19 @@ func (r *RecordingBD) Count(prefix ...string) int {
 
 // Reset discards the recorded history, so a count can be attributed to one
 // step of a test rather than to everything that ran before it.
+//
+// It empties the record directory rather than replacing it: a fork that lands
+// while the directory was momentarily missing would go unrecorded.
 func (r *RecordingBD) Reset() {
 	r.t.Helper()
-	if err := os.Remove(r.logPath); err != nil && !os.IsNotExist(err) {
-		r.t.Fatalf("reset recording bd log: %v", err)
+	entries, err := os.ReadDir(r.recordDir)
+	if err != nil {
+		r.t.Fatalf("reset recording bd records: %v", err)
+	}
+	for _, entry := range entries {
+		if err := os.Remove(filepath.Join(r.recordDir, entry.Name())); err != nil && !os.IsNotExist(err) {
+			r.t.Fatalf("reset recording bd records: %v", err)
+		}
 	}
 }
 
