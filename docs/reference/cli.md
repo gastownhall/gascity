@@ -3941,15 +3941,16 @@ socket so the reconciler stops the session immediately rather than on
 its next patrol tick. Call this after the session has finished its
 current work in response to a drain signal.
 
-The ack is bound to the session row's current incarnation and written
-there before held claims are released and GC_DRAIN_ACK is set. A session
-acking itself must carry a GC_INSTANCE_TOKEN that matches the row; a
-missing or stale token is refused with exit 1 and nothing is written. An
-operator acking a session from outside it passes --operator and a target,
-and the ack binds to the incarnation the command read. A store that is
-unreachable or keeps changing also exits 1 with nothing acknowledged; run
-the command again. A store without conditional writes skips the row write
-with a warning and acknowledges as before.
+The ack is also written to the session row, bound to the incarnation it
+names: a session acking itself must carry a GC_INSTANCE_TOKEN matching
+the row, and an operator acking a session from outside it passes
+--operator and a target, binding to the incarnation the command read.
+
+Under the legacy session reconciler the row write is best-effort and
+the ack otherwise behaves as it always has. Under session_reconciler =
+"v2" the row ack comes first and is required: a missing or stale token,
+an operator ack without --operator, or a store that is unreachable or
+keeps changing exits 1 with nothing acknowledged.
 
 ```
 gc runtime drain-ack [name] [flags]

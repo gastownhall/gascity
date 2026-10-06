@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -249,11 +250,12 @@ func swapDrainAckSeams(t *testing.T, log *[]string) *int {
 	return &pokes
 }
 
-// TestAckRuntimeDrainBranches pins E3's branch table through the CLI flow:
+// TestAckRuntimeDrainBranches pins E3's v2 (strict) branch table through the
+// CLI flow:
 //
-//	mismatch (either store)       -> nothing written, exit 1
+//	mismatch (either store)       -> nothing written, drainAckRefused
 //	match, no conditional writer  -> legacy release + env ack, warning, exit 0
-//	match, CAS contention         -> nothing written, exit 1
+//	match, CAS contention         -> nothing written, drainAckRefused
 //	match, CAS lands              -> row, then release, then env ack, exit 0
 //
 // The env writes, when made, are exactly a bare legacy setDrainAck's (the
@@ -286,11 +288,11 @@ func TestAckRuntimeDrainBranches(t *testing.T) {
 		wantRowAck bool
 		wantStderr string
 	}{
-		{name: "mismatch", store: fenced, envToken: "tok-old", wantCode: 1, wantStderr: "refused, nothing acknowledged: GC_INSTANCE_TOKEN does not match"},
-		{name: "mismatch without a conditional writer", store: unfenced, envToken: "tok-old", wantCode: 1, wantStderr: "refused, nothing acknowledged"},
-		{name: "missing token", store: fenced, wantCode: 1, wantStderr: "refused, nothing acknowledged: GC_INSTANCE_TOKEN is not set"},
+		{name: "mismatch", store: fenced, envToken: "tok-old", wantCode: drainAckRefused, wantStderr: "refused, nothing acknowledged: GC_INSTANCE_TOKEN does not match"},
+		{name: "mismatch without a conditional writer", store: unfenced, envToken: "tok-old", wantCode: drainAckRefused, wantStderr: "refused, nothing acknowledged"},
+		{name: "missing token", store: fenced, wantCode: drainAckRefused, wantStderr: "refused, nothing acknowledged: GC_INSTANCE_TOKEN is not set"},
 		{name: "match without a conditional writer", store: unfenced, envToken: "tok-a", wantAcked: true, wantStderr: "warning: the session store has no conditional writer"},
-		{name: "match under persistent contention", store: contended, envToken: "tok-a", wantCode: 1, wantStderr: "row ack not written, nothing acknowledged: conditional write kept losing"},
+		{name: "match under persistent contention", store: contended, envToken: "tok-a", wantCode: drainAckRefused, wantStderr: "row ack not written, nothing acknowledged: conditional write kept losing"},
 		{name: "match and CAS lands", store: fenced, envToken: "tok-a", wantAcked: true, wantRowAck: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -303,11 +305,11 @@ func TestAckRuntimeDrainBranches(t *testing.T) {
 				envAcked, _ := newDrainOps(sp).isDrainAcked("worker")
 				log = append(log, fmt.Sprintf("release(row=%v env=%v)", rowAcked, envAcked))
 			}
-			checkRow := func() (func() error, error) {
-				return checkDrainAckRow(store, id, false, tc.envToken, drainAckRowNow)
-			}
-
 			var stdout, stderr bytes.Buffer
+			checkRow := func() (func() error, error) {
+				commit, err := checkDrainAckRow(store, id, false, tc.envToken, drainAckRowNow)
+				return drainAckForMode(true, commit, err, &stderr)
+			}
 			code := ackRuntimeDrain(newDrainOps(sp), checkRow, "/city", "worker", "worker", "", false, &stdout, &stderr)
 			if code != tc.wantCode {
 				t.Fatalf("code = %d, want %d; stderr=%s", code, tc.wantCode, stderr.String())
@@ -334,6 +336,169 @@ func TestAckRuntimeDrainBranches(t *testing.T) {
 			}
 			if got := mustGetBead(t, mem, id).Metadata[drainAckIncarnationKey]; (got == "3") != tc.wantRowAck {
 				t.Errorf("%s = %q, want row ack %v", drainAckIncarnationKey, got, tc.wantRowAck)
+			}
+		})
+	}
+}
+
+// TestAckRuntimeDrainLegacyMatchesOracle pins legacy mode: every case v2
+// refuses behaves in a legacy city exactly as the pre-E3 drain-ack does (the
+// oracle is doRuntimeDrainAck, which has no row step): same exit status,
+// stdout, stderr, runtime meta calls, claim release and poke. A passing check
+// still writes the row ack, best-effort. Kills: a strict refusal or warning
+// leaking into legacy, a legacy row write without the token check, and a
+// failed legacy CAS changing the exit status.
+func TestAckRuntimeDrainLegacyMatchesOracle(t *testing.T) {
+	type run struct {
+		code           int
+		stdout, stderr string
+		calls          []runtime.Call
+		log            []string
+		pokes          int
+	}
+	ack := func(t *testing.T, checkRow func(io.Writer) (func() error, error)) run {
+		var log []string
+		pokes := swapDrainAckSeams(t, &log)
+		sp := runtime.NewFake()
+		var stdout, stderr bytes.Buffer
+		var check func() (func() error, error)
+		if checkRow != nil {
+			check = func() (func() error, error) { return checkRow(&stderr) }
+		}
+		code := ackRuntimeDrain(newDrainOps(sp), check, "/city", "worker", "worker", "", false, &stdout, &stderr)
+		return run{code, stdout.String(), stderr.String(), sp.Calls, log, *pokes}
+	}
+	oracle := ack(t, nil)
+	if oracle.code != 0 || len(oracle.log) != 1 || oracle.pokes != 1 {
+		t.Fatalf("oracle premise: %+v", oracle)
+	}
+
+	resolveErr := errors.New(`resolving session "worker": session not found`)
+	for _, tc := range []struct {
+		name       string
+		store      func(*testing.T) (beads.Store, string)
+		envToken   string
+		resolveErr error
+		wantRowAck bool
+		wantStderr string
+	}{
+		{name: "self-ack without a token", envToken: ""},
+		{name: "stale self-ack", envToken: "tok-old"},
+		{name: "operator ack without --operator (shell, no token)", envToken: ""},
+		{name: "target without a session row", resolveErr: resolveErr},
+		{name: "store unreachable", resolveErr: errors.New("opening the session store: dial tcp: connection refused")},
+		{name: "persistent CAS contention", envToken: "tok-a", store: func(t *testing.T) (beads.Store, string) {
+			mem, row := drainAckRowStore(t)
+			return &contendedStore{Store: mem}, row.ID
+		}, wantStderr: "gc runtime drain-ack: session row ack skipped: conditional write kept losing"},
+		{name: "no conditional writer", envToken: "tok-a", store: func(t *testing.T) (beads.Store, string) {
+			mem := beads.NewMemStore()
+			return mem, createDrainAckRow(t, mem).ID
+		}},
+		{name: "passing check", envToken: "tok-a", wantRowAck: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.store == nil {
+				tc.store = func(t *testing.T) (beads.Store, string) {
+					mem, row := drainAckRowStore(t)
+					return mem, row.ID
+				}
+			}
+			store, id := tc.store(t)
+			got := ack(t, func(stderr io.Writer) (func() error, error) {
+				if tc.resolveErr != nil {
+					return drainAckForMode(false, nil, tc.resolveErr, stderr)
+				}
+				commit, err := checkDrainAckRow(store, id, false, tc.envToken, drainAckRowNow)
+				return drainAckForMode(false, commit, err, stderr)
+			})
+			want := oracle
+			if tc.wantStderr != "" {
+				if !strings.HasPrefix(got.stderr, tc.wantStderr) {
+					t.Errorf("stderr = %q, want the legacy note %q", got.stderr, tc.wantStderr)
+				}
+				got.stderr = oracle.stderr
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("legacy drain-ack diverged from the pre-E3 oracle:\n got %+v\nwant %+v", got, want)
+			}
+			if acked := mustGetBead(t, store, id).Metadata[drainAckIncarnationKey] == "3"; acked != tc.wantRowAck {
+				t.Errorf("row ack written = %v, want %v", acked, tc.wantRowAck)
+			}
+		})
+	}
+}
+
+// TestDrainAckModeErr pins undrain's row-clear failure by mode: v2 reports
+// it, legacy notes it on stderr and keeps legacy's exit status. Kills: a
+// legacy undrain that fails on the row, and a v2 undrain that hides it.
+func TestDrainAckModeErr(t *testing.T) {
+	cause := errors.New("store down")
+	var stderr bytes.Buffer
+	if err := drainAckModeErr(true, cause, &stderr, "gc runtime undrain: session row ack not cleared"); !errors.Is(err, cause) || stderr.Len() != 0 {
+		t.Fatalf("strict = (%v, %q), want the error and no note", err, stderr.String())
+	}
+	if err := drainAckModeErr(false, cause, &stderr, "gc runtime undrain: session row ack not cleared"); err != nil {
+		t.Fatalf("legacy = %v, want nil", err)
+	}
+	if got, want := stderr.String(), "gc runtime undrain: session row ack not cleared: store down\n"; got != want {
+		t.Errorf("legacy note = %q, want %q", got, want)
+	}
+}
+
+// TestDrainAckStrict pins mode detection: only session_reconciler = "v2" is
+// strict. Kills: treating the default, an alias, an unknown value or a config
+// that failed to load as v2.
+func TestDrainAckStrict(t *testing.T) {
+	if drainAckStrict(nil) {
+		t.Error("a config that did not load is strict")
+	}
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"", false},
+		{"legacy", false},
+		{"auto", false},
+		{"require", false},
+		{"bogus", false},
+		{"v2", true},
+		{" V2 ", true},
+	} {
+		cfg := &config.City{}
+		cfg.Daemon.SessionReconciler = tc.value
+		if got := drainAckStrict(cfg); got != tc.want {
+			t.Errorf("drainAckStrict(%q) = %v, want %v", tc.value, got, tc.want)
+		}
+	}
+}
+
+// TestHookDrainAckResult pins the hook's reading of drain-ack's status: the
+// stale-seat drains tolerate a v2 refusal (logged, the drain completes), the
+// other drains do not, and no drain tolerates a failed ack. Kills: the
+// tolerant path swallowing every failure, and the strict path swallowing a
+// refusal.
+func TestHookDrainAckResult(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		code     int
+		tolerant bool
+		wantErr  bool
+		wantLog  bool
+	}{
+		{name: "acked", code: 0},
+		{name: "refused, stale seat", code: drainAckRefused, tolerant: true, wantLog: true},
+		{name: "refused, other drain", code: drainAckRefused, wantErr: true},
+		{name: "failed, stale seat", code: 1, tolerant: true, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			err := hookDrainAckResult(tc.code, tc.tolerant, &stderr)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want error %v", err, tc.wantErr)
+			}
+			if logged := strings.Contains(stderr.String(), "drain-ack refused for this seat"); logged != tc.wantLog {
+				t.Errorf("stderr = %q, want refusal logged %v", stderr.String(), tc.wantLog)
 			}
 		})
 	}

@@ -373,7 +373,7 @@ func cmdRuntimeUndrain(args []string, jsonOutput bool, stdout, stderr io.Writer)
 	}
 	dops := newDrainOps(sp)
 	rec := openCityRecorder(stderr)
-	clearRow := func() error { return clearDrainAckRowAt(target.cityPath, target.sessionName, target.sessionID) }
+	clearRow := func() error { return clearDrainAckRowAt(target.cityPath, target.sessionName, target.sessionID, stderr) }
 	return undrainRuntime(dops, clearRow, sp, rec, target.display, target.sessionName, jsonOutput, stdout, stderr)
 }
 
@@ -543,15 +543,16 @@ socket so the reconciler stops the session immediately rather than on
 its next patrol tick. Call this after the session has finished its
 current work in response to a drain signal.
 
-The ack is bound to the session row's current incarnation and written
-there before held claims are released and GC_DRAIN_ACK is set. A session
-acking itself must carry a GC_INSTANCE_TOKEN that matches the row; a
-missing or stale token is refused with exit 1 and nothing is written. An
-operator acking a session from outside it passes --operator and a target,
-and the ack binds to the incarnation the command read. A store that is
-unreachable or keeps changing also exits 1 with nothing acknowledged; run
-the command again. A store without conditional writes skips the row write
-with a warning and acknowledges as before.`,
+The ack is also written to the session row, bound to the incarnation it
+names: a session acking itself must carry a GC_INSTANCE_TOKEN matching
+the row, and an operator acking a session from outside it passes
+--operator and a target, binding to the incarnation the command read.
+
+Under the legacy session reconciler the row write is best-effort and
+the ack otherwise behaves as it always has. Under session_reconciler =
+"v2" the row ack comes first and is required: a missing or stale token,
+an operator ack without --operator, or a store that is unreachable or
+keeps changing exits 1 with nothing acknowledged.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdRuntimeDrainAck(args, jsonOutput, operator, stdout, stderr) != 0 {
@@ -583,7 +584,7 @@ func cmdRuntimeDrainAck(args []string, jsonOutput, operator bool, stdout, stderr
 		}
 		dops := newDrainOps(sp)
 		checkRow := func() (func() error, error) {
-			return checkDrainAckRowAt(target.cityPath, target.sessionName, target.sessionID, operator)
+			return checkDrainAckRowAt(target.cityPath, target.sessionName, target.sessionID, operator, stderr)
 		}
 		return ackRuntimeDrain(dops, checkRow, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
 	}
@@ -600,7 +601,7 @@ func cmdRuntimeDrainAck(args []string, jsonOutput, operator bool, stdout, stderr
 	}
 	dops := newDrainOps(sp)
 	checkRow := func() (func() error, error) {
-		return checkDrainAckRowAt(current.cityPath, current.sessionName, "", false)
+		return checkDrainAckRowAt(current.cityPath, current.sessionName, "", false, stderr)
 	}
 	// Name-only key: the env-derived GC_SESSION_ID can be stale.
 	return ackRuntimeDrain(dops, checkRow, current.cityPath, current.display, current.sessionName, "", jsonOutput, stdout, stderr)
@@ -926,16 +927,22 @@ func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string
 	return ackRuntimeDrain(dops, nil, cityPath, targetName, sn, sessionID, jsonOutput, stdout, stderr)
 }
 
+// drainAckRefused is ackRuntimeDrain's status for an ack that wrote nothing
+// because the row check or CAS refused it. The process still exits 1; the
+// distinct value lets the hook's stale-seat drains tell a v2 refusal from a
+// failed ack (hookRuntimeDrainAckTolerant).
+const drainAckRefused = 2
+
 // ackRuntimeDrain is doRuntimeDrainAck with the row-bound ack (CONTRACT v5
 // D5). checkRow decides against one read of the row before anything is
-// written:
+// written. In a v2 city (a legacy city never refuses; see checkDrainAckRowAt):
 //
 //   - a refusal (token missing or mismatched, row unreadable) writes nothing:
-//     no row, no claim release, no env key; exit 1;
+//     no row, no claim release, no env key; drainAckRefused;
 //   - a match on a store with no conditional writer (legacy only: v2 refuses
 //     to boot without one) warns and runs legacy's flow unchanged; exit 0;
 //   - a match commits the row CAS first. A CAS that loses every retry, or a
-//     store that fails, writes nothing; exit 1. Once it lands, the claim
+//     store that fails, writes nothing; drainAckRefused. Once it lands, the claim
 //     release and the env ack follow in legacy's order (release first).
 //
 // A nil checkRow, or a nil commit with no error (not a city), keeps legacy's
@@ -950,11 +957,11 @@ func ackRuntimeDrain(dops drainOps, checkRow func() (func() error, error),
 			fmt.Fprintf(stderr, "gc runtime drain-ack: warning: %v\n", err) //nolint:errcheck // best-effort stderr
 		case err != nil:
 			fmt.Fprintf(stderr, "gc runtime drain-ack: refused, nothing acknowledged: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+			return drainAckRefused
 		case commitRow != nil:
 			if err := commitRow(); err != nil {
 				fmt.Fprintf(stderr, "gc runtime drain-ack: row ack not written, nothing acknowledged: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1
+				return drainAckRefused
 			}
 		}
 	}
@@ -993,52 +1000,94 @@ const (
 )
 
 // checkDrainAckRowAt resolves the target's row in the city at cityPath and
-// decides the ack against it (checkDrainAckRow). The pane's GC_INSTANCE_TOKEN
-// is compared in process and never leaves it.
-func checkDrainAckRowAt(cityPath, sessionName, sessionID string, operator bool) (func() error, error) {
-	store, id, err := drainAckSessionRow(cityPath, sessionName, sessionID)
-	if err != nil || store == nil {
-		return nil, err
+// decides the ack against it (checkDrainAckRow) under the city's mode
+// (drainAckForMode). The pane's GC_INSTANCE_TOKEN is compared in process and
+// never leaves it.
+func checkDrainAckRowAt(cityPath, sessionName, sessionID string, operator bool, stderr io.Writer) (func() error, error) {
+	store, id, strict, err := drainAckSessionRow(cityPath, sessionName, sessionID)
+	var commit func() error
+	if store != nil && err == nil {
+		commit, err = checkDrainAckRow(store, id, operator, os.Getenv("GC_INSTANCE_TOKEN"), time.Now())
 	}
-	return checkDrainAckRow(store, id, operator, os.Getenv("GC_INSTANCE_TOKEN"), time.Now())
+	return drainAckForMode(strict, commit, err, stderr)
+}
+
+// drainAckForMode applies the city's mode to a row-ack decision. A v2 city
+// (strict) takes it as decided. A legacy city keeps legacy's drain-ack
+// exactly: the row ack is a best-effort addition, written only when the check
+// passed and a CAS can be made; a refusal or a missing row is skipped
+// silently, and a failed CAS is only noted on stderr, so the env ack, the
+// claim release and the exit status are legacy's.
+func drainAckForMode(strict bool, commit func() error, err error, stderr io.Writer) (func() error, error) {
+	if strict {
+		return commit, err
+	}
+	if commit == nil { // checkDrainAckRow returns a commit only when the check passed
+		return nil, nil
+	}
+	return func() error {
+		return drainAckModeErr(false, commit(), stderr, "gc runtime drain-ack: session row ack skipped")
+	}, nil
+}
+
+// drainAckModeErr returns a row-ack write failure in a v2 city (strict) and
+// only notes it on stderr in a legacy one.
+func drainAckModeErr(strict bool, err error, stderr io.Writer, what string) error {
+	if err == nil || strict {
+		return err
+	}
+	fmt.Fprintf(stderr, "%s: %v\n", what, err) //nolint:errcheck // best-effort stderr
+	return nil
 }
 
 // clearDrainAckRowAt clears the row-bound ack for `gc runtime undrain`.
-func clearDrainAckRowAt(cityPath, sessionName, sessionID string) error {
-	store, id, err := drainAckSessionRow(cityPath, sessionName, sessionID)
-	if err != nil || store == nil {
-		return err
+func clearDrainAckRowAt(cityPath, sessionName, sessionID string, stderr io.Writer) error {
+	store, id, strict, err := drainAckSessionRow(cityPath, sessionName, sessionID)
+	if store != nil && err == nil {
+		err = clearDrainAckRow(store, id)
 	}
-	return clearDrainAckRow(store, id)
+	return drainAckModeErr(strict, err, stderr, "gc runtime undrain: session row ack not cleared")
 }
 
 // drainAckSessionRow opens the session leg of the city at cityPath and
-// resolves the target's row. A path that is not a city has no row and yields
-// a nil store, for the reason releaseUnexecutedClaimsForSession gives. An
-// empty sessionID resolves by name: the env-derived GC_SESSION_ID can be
-// stale.
-func drainAckSessionRow(cityPath, sessionName, sessionID string) (beads.Store, string, error) {
+// resolves the target's row, reporting whether the city runs v2 (strict). A
+// path that is not a city has no row and yields a nil store, for the reason
+// releaseUnexecutedClaimsForSession gives. An empty sessionID resolves by
+// name: the env-derived GC_SESSION_ID can be stale.
+func drainAckSessionRow(cityPath, sessionName, sessionID string) (beads.Store, string, bool, error) {
 	if strings.TrimSpace(cityPath) == "" {
-		return nil, "", nil
+		return nil, "", false, nil
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); err != nil {
-		return nil, "", nil
+		return nil, "", false, nil
 	}
 	cfg, _ := loadCityConfig(cityPath, io.Discard)
+	strict := drainAckStrict(cfg)
 	store, err := openCityStoreAtWithConfig(cityPath, cfg)
 	if err != nil {
-		return nil, "", fmt.Errorf("opening the session store: %w", err)
+		return nil, "", strict, fmt.Errorf("opening the session store: %w", err)
 	}
 	if store == nil {
-		return nil, "", errors.New("opening the session store: no store")
+		return nil, "", strict, errors.New("opening the session store: no store")
 	}
 	sessStore := cliSessionStore(store, cfg, cityPath)
 	if sessionID == "" {
 		if sessionID, err = resolveSessionID(sessStore, sessionName); err != nil {
-			return nil, "", fmt.Errorf("resolving session %q: %w", sessionName, err)
+			return sessStore, "", strict, fmt.Errorf("resolving session %q: %w", sessionName, err)
 		}
 	}
-	return sessStore, sessionID, nil
+	return sessStore, sessionID, strict, nil
+}
+
+// drainAckStrict reports whether the city's [daemon] session_reconciler is
+// v2, the only reader of the row ack. A config that does not load, or an
+// unknown value (which no controller boots with), is legacy.
+func drainAckStrict(cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	mode, _, ok := cfg.Daemon.SessionReconcilerMode()
+	return ok && mode == config.SessionReconcilerV2
 }
 
 // errDrainAckRowUnfenced reports a matching ack on a store with no

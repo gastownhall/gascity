@@ -1406,14 +1406,18 @@ func writeHookClaimNonTurnDrain(marker string, opts hookClaimOptions, stdout, st
 // with no argument binds through the caller's own GC_SESSION_ID/GC_INSTANCE_TOKEN,
 // and an adopted pane whose environment did not survive a restart acks as nobody
 // — which reads downstream as no acknowledgement at all. Naming the id lets the
-// agent run the form that resolves the target from the store instead.
+// agent run the form that resolves the target from the store instead. The
+// line also names --operator for whoever acks from outside the session: under
+// session_reconciler = "v2" a bare-id ack is a self-ack that must prove its
+// token, and legacy accepts either form.
+//
 // label names the door the refusal came through ("gc hook --claim" or
 // "gc hook"), because both are fenced and an operator reading a pane needs to
 // know which one answered. The JSON record is identical either way: the command
 // is "hook" for both, and a consumer should not have to care.
 func writeHookClaimDrainPending(label, sessionID string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) int {
 	_, _ = fmt.Fprintf(stderr,
-		"%s: drain pending for this session; run: gc runtime drain-ack %s — then exit\n",
+		"%s: drain pending for this session; run: gc runtime drain-ack %s — then exit (an operator acking it from outside the session adds --operator)\n",
 		label, sessionID)
 
 	return writeHookClaimDrain(label, hookClaimReasonDrainPending, opts.JSON, opts.DrainAck, ops.DrainAck, stdout, stderr)
@@ -1427,7 +1431,7 @@ func writeHookClaimDrainPending(label, sessionID string, opts hookClaimOptions, 
 // acknowledges drain and exits cleanly rather than seeing a bare exit 1 and
 // retrying the refusal forever.
 func writeHookClaimStaleSessionDrain(opts hookCommandOptions, stdout, stderr io.Writer) int {
-	return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, hookRuntimeDrainAck, stdout, stderr)
+	return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, hookRuntimeDrainAckTolerant, stdout, stderr)
 }
 
 func writeHookClaimSuspensionDrain(reason string, opts hookCommandOptions, stdout, stderr io.Writer) int {
@@ -1446,7 +1450,7 @@ func writeHookClaimSuspensionDrain(reason string, opts hookCommandOptions, stdou
 // distinct reason so a wrapper or dashboard can tell "never registered" apart
 // from "registered, then went stale."
 func writeHookClaimMissingSessionRegistrationDrain(opts hookCommandOptions, stdout, stderr io.Writer) int {
-	return writeHookClaimDrain(hookClaimLabel, hookClaimReasonMissingSessionRegistration, opts.JSON, opts.DrainAck, hookRuntimeDrainAck, stdout, stderr)
+	return writeHookClaimDrain(hookClaimLabel, hookClaimReasonMissingSessionRegistration, opts.JSON, opts.DrainAck, hookRuntimeDrainAckTolerant, stdout, stderr)
 }
 
 // writeHookClaimDrain writes the single structured drain result shared by every
@@ -2956,10 +2960,29 @@ func hookAssignContinuationWithBdStore(_ context.Context, dir string, env []stri
 }
 
 func hookRuntimeDrainAck(stderr io.Writer) error {
-	if code := cmdRuntimeDrainAck(nil, false, false, io.Discard, stderr); code != 0 {
+	return hookDrainAckResult(cmdRuntimeDrainAck(nil, false, false, io.Discard, stderr), false, stderr)
+}
+
+// hookRuntimeDrainAckTolerant is hookRuntimeDrainAck for the stale-session and
+// missing-registration drains. A v2 city refuses a self-ack its row cannot
+// prove (drainAckRefused), and those are exactly the seats that cannot prove
+// it. The seat is exiting either way and v2 stops it through its own drain,
+// so the refusal is logged and the drain still completes, as it did before
+// the row-bound ack existed.
+func hookRuntimeDrainAckTolerant(stderr io.Writer) error {
+	return hookDrainAckResult(cmdRuntimeDrainAck(nil, false, false, io.Discard, stderr), true, stderr)
+}
+
+func hookDrainAckResult(code int, tolerateRefusal bool, stderr io.Writer) error {
+	switch {
+	case code == 0:
+		return nil
+	case code == drainAckRefused && tolerateRefusal:
+		fmt.Fprintf(stderr, "%s: drain-ack refused for this seat; exiting anyway, the controller stops it through its own drain\n", hookClaimLabel) //nolint:errcheck
+		return nil
+	default:
 		return errors.New("runtime drain-ack returned non-zero")
 	}
-	return nil
 }
 
 func hookClaimBdStore(dir string, env []string, actor string) *beads.BdStore {
