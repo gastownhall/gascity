@@ -7,6 +7,7 @@ import (
 	"log"
 	"maps"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -276,6 +277,28 @@ func (bp *agentBuildParams) releasePoolSessionCreate() {
 	bp.poolSessionCreateBudget.Release()
 }
 
+// recoverLeg turns a panic in one demand-pass goroutine into that leg's error
+// and writes the stack to stderr. safeTick recovers only the tick goroutine,
+// and recover works only on the goroutine that panicked, so without this a
+// panic inside one leg's store read killed the controller (mc-zndi7.40). The
+// leg then reads as failed and the pass's existing partial rules apply. Defer
+// it right after wg.Done, so it runs before Done and the error is written
+// before Wait returns.
+func recoverLeg(dst *error, label string, stderr io.Writer) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	*dst = fmt.Errorf("%s panicked: %v", label, r)
+	// Sibling legs share the pass's stderr, which nothing else writes while
+	// they run (each fold prints after Wait), so serializing here is enough.
+	recoverLegMu.Lock()
+	defer recoverLegMu.Unlock()
+	fmt.Fprintf(stderr, "buildDesiredState: %s panicked: %v\n%s", label, r, debug.Stack()) //nolint:errcheck
+}
+
+var recoverLegMu sync.Mutex
+
 func evaluatePendingPools(
 	cfg *config.City,
 	pendingPools []poolEvalWork,
@@ -305,6 +328,7 @@ func evaluatePendingPools(
 		newDemand := pw.newDemand
 		go func(idx int, template, agentName string, agentIndex int, sp scaleParams, dir string, newDemand bool) {
 			defer wg.Done()
+			defer recoverLeg(&evalResults[idx].err, "scale_check "+template, stderr)
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			started := time.Now()
@@ -1516,6 +1540,8 @@ func collectOpenSessionInfos(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			results[idx].ref = source.ref
+			defer recoverLeg(&results[idx].err, "session census leg "+label, log.Writer())
 			// Per-leg default direct union (session front door over the candidate's
 			// store, CachingStore-wrapped when available) — same tier as the prior
 			// raw ListAllSessionBeads, projected to Info. Partial-result rows are
@@ -1740,6 +1766,13 @@ func collectAssignedWorkBeadsWithStores(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			var panicked error
+			defer func() {
+				if panicked != nil {
+					results[idx] = storeAssignedWorkResult{ref: source.ref, errs: []error{panicked}}
+				}
+			}()
+			defer recoverLeg(&panicked, "assigned work leg "+label, log.Writer())
 			var result []beads.Bead
 			var resultStores []beads.Store
 			var resultStoreRefs []string
@@ -1863,6 +1896,13 @@ func collectAssignedWorkBeadsWithStores(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			var panicked error
+			defer func() {
+				if panicked != nil {
+					readyResults[idx] = storeAssignedWorkResult{ref: source.ref, errs: []error{panicked}}
+				}
+			}()
+			defer recoverLeg(&panicked, "assigned work ready leg "+label, log.Writer())
 			var ready []beads.Bead
 			var err error
 			var errs []error
@@ -3848,13 +3888,18 @@ func realizePoolDesiredSessionsAt(
 			go func() {
 				defer wg.Done()
 				for idx := range jobs {
-					plan := *items[idx].plan
-					info, err := executePlannedPoolSessionBeadCreate(bp, cfgAgent, qualifiedName, plan)
-					if err != nil {
-						items[idx].createErr = err
-						continue
-					}
-					items[idx].sessionInfo = info
+					// Recover per job: a dead worker would leave the
+					// sender blocked on jobs.
+					func() {
+						defer recoverLeg(&items[idx].createErr, "pool "+qualifiedName+" create", stderr)
+						plan := *items[idx].plan
+						info, err := executePlannedPoolSessionBeadCreate(bp, cfgAgent, qualifiedName, plan)
+						if err != nil {
+							items[idx].createErr = err
+							return
+						}
+						items[idx].sessionInfo = info
+					}()
 				}
 			}()
 		}
@@ -6088,6 +6133,7 @@ func collectOpenUnassignedRoutedWork(cityPath string, cfg *config.City, store be
 		wg.Add(1)
 		go func(i int, source classStoreCandidate) {
 			defer wg.Done()
+			defer recoverLeg(&results[i].err, "routed work leg "+label, stderr)
 			// Live so the backing store's raw --status=open filter excludes blocked/
 			// deferred work: this unassigned-routed set feeds openControlDispatcherDemand
 			// and the route-repair passes, and mapBdStatus would otherwise collapse a

@@ -5941,6 +5941,211 @@ func (s *failingPoolCreateStore) claimFailure() bool {
 	return true
 }
 
+// panickingLegStore panics on one read, standing in for a bug inside a demand
+// leg's store read (a bd JSON decode edge, a nil wrapper deref). safeTick
+// recovers only the tick goroutine, so before mc-zndi7.40 a panic in a fan-out
+// leg killed the whole test binary, and the controller with it.
+type panickingLegStore struct {
+	beads.Store
+	panicOnList  bool
+	panicOnReady bool
+}
+
+func (s panickingLegStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if s.panicOnList {
+		panic("injected leg panic: List")
+	}
+	return s.Store.List(query)
+}
+
+func (s panickingLegStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	if s.panicOnReady {
+		panic("injected leg panic: Ready")
+	}
+	return s.Store.Ready(query...)
+}
+
+// panickingPoolCreateStore panics on the next panicsRemaining session-bead
+// creates, inside a realize worker.
+type panickingPoolCreateStore struct {
+	*beads.MemStore
+	mu              sync.Mutex
+	panicsRemaining int
+}
+
+func (s *panickingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
+	if bead.Type == sessionBeadType {
+		s.mu.Lock()
+		panics := s.panicsRemaining > 0
+		s.panicsRemaining--
+		s.mu.Unlock()
+		if panics {
+			panic("injected pool create panic")
+		}
+	}
+	return s.MemStore.Create(bead)
+}
+
+func TestEvaluatePendingPoolsRecoversPanickingProbe(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "alpha"}, {Name: "zulu"}}}
+	pools := []poolEvalWork{
+		{agentIdx: 0, sp: scaleParams{Max: 5, Check: "probe-alpha"}, newDemand: true},
+		{agentIdx: 1, sp: scaleParams{Max: 5, Check: "probe-zulu"}, newDemand: true},
+	}
+	runner := func(command, _ string, _ map[string]string) (string, error) {
+		if strings.Contains(command, "probe-alpha") {
+			panic("injected scale_check panic")
+		}
+		return "3", nil
+	}
+	var stderr bytes.Buffer
+
+	counts, partials := evaluatePendingPools(cfg, pools, runner, &stderr, nil)
+
+	if !partials[0] || counts[0] != 0 {
+		t.Fatalf("panicking probe: count=%d partial=%v, want 0 and partial", counts[0], partials[0])
+	}
+	if partials[1] || counts[1] != 3 {
+		t.Fatalf("healthy probe: count=%d partial=%v, want 3 and not partial", counts[1], partials[1])
+	}
+	if !strings.Contains(stderr.String(), "injected scale_check panic") || !strings.Contains(stderr.String(), "goroutine") {
+		t.Fatalf("stderr = %q, want the panic value and its stack", stderr.String())
+	}
+}
+
+func TestCollectOpenSessionInfosRecoversPanickingLeg(t *testing.T) {
+	cfg := &config.City{Rigs: []config.Rig{{Name: "rig-A", Path: "/c/rigs/rig-A"}}}
+	cityStore := beads.NewMemStore()
+	cityBead, err := cityStore.Create(beads.Bead{
+		Status: "open", Type: sessionBeadType,
+		Metadata: map[string]string{"template": "worker", "state": "active"},
+	})
+	if err != nil {
+		t.Fatalf("create city session bead: %v", err)
+	}
+	rigStores := map[string]beads.Store{"rig-A": panickingLegStore{Store: beads.NewMemStoreFrom(100, nil, nil), panicOnList: true}}
+
+	infos, err := collectAllOpenSessionInfos("", cfg, cityStore, rigStores, nil, nil)
+
+	if err == nil || !strings.Contains(err.Error(), "panicked") {
+		t.Fatalf("err = %v, want the panicking rig leg reported as an error", err)
+	}
+	if len(infos) != 1 || infos[0].ID != cityBead.ID {
+		t.Fatalf("infos = %#v, want the city leg's session intact", infos)
+	}
+}
+
+func TestCollectAssignedWorkBeadsRecoversPanickingLeg(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		rig  panickingLegStore
+	}{
+		{name: "in-progress pass", rig: panickingLegStore{panicOnList: true}},
+		{name: "ready pass", rig: panickingLegStore{panicOnReady: true}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cityStore := beads.NewMemStore()
+			// Open, assigned and ready: no first-pass leg captures it, so the
+			// Ready pass runs over every leg and finds it in the city store.
+			work, err := cityStore.Create(beads.Bead{Title: "city work", Type: "task", Status: "open", Assignee: "worker-1"})
+			if err != nil {
+				t.Fatalf("create city work: %v", err)
+			}
+			tt.rig.Store = beads.NewMemStoreFrom(100, nil, nil)
+
+			got, _, _, _, partial := collectAssignedWorkBeadsWithStores(
+				"",
+				&config.City{Rigs: []config.Rig{{Name: "repo", Path: "/repo"}}},
+				cityStore,
+				map[string]beads.Store{"repo": tt.rig},
+				nil,
+				nil,
+			)
+
+			if !partial {
+				t.Fatal("partial = false, want the panicking rig leg reported partial")
+			}
+			if len(got) != 1 || got[0].ID != work.ID {
+				t.Fatalf("got = %#v, want the city leg's work %s intact", got, work.ID)
+			}
+		})
+	}
+}
+
+func TestCollectOpenUnassignedRoutedWorkRecoversPanickingLeg(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "repo", Path: "/repo"}},
+	}
+	cityStore := beads.NewMemStore()
+	routed, err := cityStore.Create(beads.Bead{
+		Title: "routed", Type: "task", Status: "open",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create routed work: %v", err)
+	}
+	rigStores := map[string]beads.Store{"repo": panickingLegStore{Store: beads.NewMemStoreFrom(100, nil, nil), panicOnList: true}}
+	var stderr bytes.Buffer
+
+	got, _, _, partial := collectOpenUnassignedRoutedWork("", cfg, cityStore, rigStores, nil, &stderr, nil, nil)
+
+	if !partial {
+		t.Fatal("partial = false, want the panicking rig leg reported partial")
+	}
+	if len(got) != 1 || got[0].ID != routed.ID {
+		t.Fatalf("got = %#v, want the city leg's routed row %s intact", got, routed.ID)
+	}
+	if !strings.Contains(stderr.String(), "injected leg panic") {
+		t.Fatalf("stderr = %q, want the recovered panic reported", stderr.String())
+	}
+}
+
+// The second case panics on every create with one more request than there are
+// workers. A recover around the whole worker instead of each job would let every
+// worker die and leave the sender blocked on the last job.
+func TestRealizePoolDesiredSessionsRecoversPanickingCreate(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		requests    int
+		panics      int
+		wantDesired int
+	}{
+		{name: "one create panics", requests: 2, panics: 1, wantDesired: 1},
+		{name: "every create panics", requests: poolRealizeParallelism + 1, panics: poolRealizeParallelism + 1, wantDesired: 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &panickingPoolCreateStore{MemStore: beads.NewMemStore(), panicsRemaining: tt.panics}
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:              "worker",
+					StartCommand:      "true",
+					MinActiveSessions: intPtr(0),
+					MaxActiveSessions: intPtr(tt.requests),
+				}},
+			}
+			var stderr bytes.Buffer
+			bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+			bp.sessionBeads = &sessionBeadSnapshot{}
+			requests := make([]SessionRequest, tt.requests)
+			for i := range requests {
+				requests[i] = SessionRequest{Template: "worker", Tier: "new"}
+			}
+			desired := map[string]TemplateParams{}
+
+			realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{Template: "worker", Requests: requests}, desired, &stderr)
+
+			if got := len(desired); got != tt.wantDesired {
+				t.Fatalf("desired sessions = %d, want %d; stderr=%q", got, tt.wantDesired, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "injected pool create panic") {
+				t.Fatalf("stderr = %q, want the recovered create panic reported", stderr.String())
+			}
+		})
+	}
+}
+
 func (s *delayingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
 	if bead.Type == sessionBeadType {
 		s.beginSessionCreate()
