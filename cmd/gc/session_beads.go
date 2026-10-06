@@ -3543,8 +3543,11 @@ func reapRuntimesBoundToClosedBeads(
 // gone by now, and providers whose GetMeta reads sidecar files (acp,
 // subprocess) answer for a gone name, so it then stops only a name a fresh
 // exact-name listing still shows, as a live listing would have. stopped
-// reports whether Stop ran, and err is its error. The unlock is deferred, so a
-// provider panic cannot leave the name locked.
+// reports whether Stop ran, and err is its raw error: the caller reports a reap
+// only when this Stop removed the runtime, so it classifies a gone answer — a
+// missing tmux server included — with runtime.IsSessionGone itself instead of
+// having runtime.StopForCleanup turn it into success. The unlock is deferred,
+// so a provider panic cannot leave the name locked.
 func stopStillBoundClosedRuntime(cityPath, name, liveID string, sp runtime.Provider, listed bool) (bool, error) {
 	unlock := runtimeNames.tryLock(cityPath, name)
 	if unlock == nil {

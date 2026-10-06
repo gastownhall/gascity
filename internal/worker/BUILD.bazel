@@ -98,6 +98,7 @@ go_test(
         "//internal/events",
         "//internal/pricing",
         "//internal/runtime",
+        "//internal/runtime/tmux",
         "//internal/session",
         "//internal/session/sessiontest",
         "//internal/sessionlog",

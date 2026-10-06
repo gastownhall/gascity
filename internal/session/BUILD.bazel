@@ -185,6 +185,7 @@ go_test(
         "//internal/rollout/gate",
         "//internal/runtime",
         "//internal/runtime/auto",
+        "//internal/runtime/tmux",
         "//internal/sessionlog",
         "//internal/storebinding/sqlite",
         "//internal/testenv",

@@ -388,6 +388,55 @@ func TestProviderObserveFreshLivenessFollowsSupersedingFreshGeneration(t *testin
 	}
 }
 
+// TestStateCacheFreshStateBoundsRetriesUnderSustainedSupersession pins that a
+// fresh observation stops chasing a generation that keeps moving. Every fetch
+// here is superseded by an invalidation landing while it is in flight — the
+// shape sustained session churn produces — so an unbounded retry never
+// returns. Giving up must report the observation as incomplete, since no
+// generation it saw ever settled, while keeping the positive evidence the
+// superseded fetches did publish.
+func TestStateCacheFreshStateBoundsRetriesUnderSustainedSupersession(t *testing.T) {
+	var cache *StateCache
+	var churning atomic.Bool
+	churning.Store(true)
+	// Let a spinning reader settle once the test is over instead of leaking
+	// a goroutine that refreshes forever.
+	t.Cleanup(func() { churning.Store(false) })
+	fetcher := &scriptedFetcher{fn: func(context.Context, int64) (runtimeStateSnapshot, error) {
+		if churning.Load() {
+			cache.Invalidate() // lands while this fetch is in flight
+		}
+		return runningSnapshot("agent-1"), nil
+	}}
+	cache = NewStateCache(fetcher, time.Hour)
+
+	type freshResult struct {
+		state    runtimeStateSnapshot
+		complete bool
+	}
+	done := make(chan freshResult, 1)
+	go func() {
+		state, complete := cache.freshState()
+		done <- freshResult{state: state, complete: complete}
+	}()
+	var got freshResult
+	select {
+	case got = <-done:
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("freshState never returned under sustained supersession: its retry loop is unbounded")
+	}
+
+	if calls, want := fetcher.calls.Load(), int64(maxRefreshRetries+1); calls != want {
+		t.Fatalf("fetch calls = %d, want %d: the first refresh plus maxRefreshRetries", calls, want)
+	}
+	if got.complete {
+		t.Fatal("freshState reported a complete observation although no generation it saw settled")
+	}
+	if !got.state.Sessions["agent-1"].Running {
+		t.Fatalf("freshState state = %#v, want the superseded fetches' running agent-1 kept as positive evidence", got.state.Sessions)
+	}
+}
+
 func TestProviderObserveFreshLivenessRequiresCompleteFreshEvidence(t *testing.T) {
 	completedScan := func(string, time.Time) exactProcessScan {
 		return exactProcessScan{runtimes: []gcruntime.LiveRuntime{}, complete: true}

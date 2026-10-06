@@ -31,6 +31,19 @@ const defaultStaleTTL = 30 * time.Second
 // fetchTimeout is the hard timeout for a single runtime-state fetch.
 const fetchTimeout = 3 * time.Second
 
+// maxRefreshRetries bounds how many times freshState refreshes again after a
+// concurrent Invalidate or EvictSession superseded its refresh. Supersession
+// is caused by session churn, not by failure, so an unbounded retry runs at
+// the churn rate: under a reconciler pass or a fleet-wide relaunch one fresh
+// observation could keep paying for a full tmux and process snapshot for as
+// long as the churn lasts, each fetch making the next supersession likelier.
+// The bound caps a fresh observation at (1+maxRefreshRetries)*fetchTimeout.
+// On exhaustion freshState answers from what the last publish supports, which
+// is incomplete while the generation is still unsettled, so a caller about to
+// act on proven absence fails closed instead of waiting out the churn.
+// currentState needs no bound: it refreshes at most once per read.
+const maxRefreshRetries = 3
+
 // Backoff bounds for the process-table snapshot after it fails.
 //
 // The snapshot is a full-OS `ps` scan, and it fails by losing a CPU race: the
@@ -122,7 +135,9 @@ type exactProcessScan struct {
 
 // StateCache caches tmux runtime state to avoid spawning N subprocess calls per
 // status check or reconciler pass. Concurrent callers are coalesced via
-// singleflight so at most one tmux/process snapshot refresh runs at a time.
+// singleflight per cache generation: at most one refresh runs at a time for a
+// given generation, and an invalidation opens a new generation, so a caller
+// that arrives after one never joins the flight it superseded.
 type StateCache struct {
 	mu sync.RWMutex
 	// state is the published snapshot. It is copy-on-write: readers copy it
@@ -207,10 +222,11 @@ func NewStateCache(fetcher StateFetcher, ttl time.Duration) *StateCache {
 
 // freshState forces a post-invalidation cache generation and reports whether
 // that generation, or a newer generation that superseded it, published a
-// usable, non-stale snapshot.
+// usable, non-stale snapshot. A refresh that a concurrent invalidation
+// superseded is retried at most maxRefreshRetries times.
 func (c *StateCache) freshState() (runtimeStateSnapshot, bool) {
 	c.Invalidate()
-	for {
+	for attempt := 0; ; attempt++ {
 		obs, generation := c.observationAtGeneration()
 		if c.freshObservation(obs) {
 			return obs.state, true
@@ -219,7 +235,7 @@ func (c *StateCache) freshState() (runtimeStateSnapshot, bool) {
 		c.refresh(generation)
 
 		obs, currentGeneration := c.observationAtGeneration()
-		if currentGeneration != generation {
+		if currentGeneration != generation && attempt < maxRefreshRetries {
 			continue
 		}
 		return obs.state, c.freshObservation(obs)

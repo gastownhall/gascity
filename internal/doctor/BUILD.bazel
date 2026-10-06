@@ -155,6 +155,7 @@ go_test(
         "//internal/orders",
         "//internal/pathutil",
         "//internal/runtime",
+        "//internal/runtime/tmux",
         "//internal/shellquote",
         "//internal/supervisor",
         "//internal/suspensionstate",

@@ -3,6 +3,8 @@ package tmux
 import (
 	"errors"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // TestConfigureServerSendsSetOptionExitEmptyOff verifies that ConfigureServer
@@ -71,6 +73,13 @@ func TestConfigureServerRetriesExitEmptyAfterFailure(t *testing.T) {
 	}
 }
 
+// TestProviderStopDistinguishesMissingSessionFromMissingServer pins the Stop
+// contract: a responsive server's missing-session answer is idempotent
+// success, while a missing server reaches the caller. Teardown callers still
+// absorb every row through runtime.StopForCleanup, which accepts an error only
+// when each leaf is a gone answer — so this also pins that the real
+// missing-server shape (pane capture and kill-session both failing) carries
+// nothing but ErrNoServer leaves.
 func TestProviderStopDistinguishesMissingSessionFromMissingServer(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -100,12 +109,21 @@ func TestProviderStopDistinguishesMissingSessionFromMissingServer(t *testing.T) 
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			provider := NewProviderWithConfig(Config{SocketName: "gctest-stop-outcome"})
-			provider.tm.exec = &fakeExecutor{err: test.stopErr, errs: test.stopErrs}
+			// Each Stop gets its own executor: a sequenced fake is spent by
+			// one Stop, so a shared one would answer the cleanup leg's pane
+			// capture with empty output instead of replaying the row.
+			newProvider := func() *Provider {
+				provider := NewProviderWithConfig(Config{SocketName: "gctest-stop-outcome"})
+				provider.tm.exec = &fakeExecutor{err: test.stopErr, errs: test.stopErrs}
+				return provider
+			}
 
-			err := provider.Stop("worker")
+			err := newProvider().Stop("worker")
 			if !errors.Is(err, test.wantErr) {
 				t.Fatalf("Stop() error = %v, want %v", err, test.wantErr)
+			}
+			if err := runtime.StopForCleanup(newProvider(), "worker"); err != nil {
+				t.Fatalf("runtime.StopForCleanup() error = %v, want nil", err)
 			}
 		})
 	}

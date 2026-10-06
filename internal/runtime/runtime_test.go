@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -75,6 +76,59 @@ func TestTypedRuntimeSentinelsNeverMatchIsSessionGone(t *testing.T) {
 	}
 	if !errors.Is(ErrStopUnsupported, ErrStopRefused) {
 		t.Error("ErrStopUnsupported does not wrap ErrStopRefused")
+	}
+}
+
+// StopForCleanup is the one teardown absorption rule: a Stop error is success
+// only when every leaf of its tree says the session is gone. Anything else — a
+// typed stop refusal, a terminate failure joined with a gone answer, or free
+// text that merely mentions a missing session — must reach the caller so
+// durable state stays open. tmux reports a missing server as ErrNoServer,
+// whose exact message serverGone carries; this package cannot import tmux, so
+// the session, worker, and tmux Stop tests pin the real sentinel.
+func TestStopForCleanupAbsorbsOnlySessionGone(t *testing.T) {
+	refusal := fmt.Errorf("exec provider script %q op %q: %w", "/packs/box/runtime.sh", "stop", ErrStopRefused)
+	failure := errors.New("permission denied")
+	serverGone := errors.New("no tmux server running")
+	execStderr := errors.New("exec provider /packs/box/runtime.sh stop sky: sh: 1: kubectl: not found")
+	serverGoneText := errors.New("killing session sky: no tmux server running")
+	cases := []struct {
+		name    string
+		stopErr error
+		wantErr error
+	}{
+		{name: "stopped"},
+		{name: "session gone", stopErr: fmt.Errorf("stopping %q: %w", "sky", ErrSessionNotFound)},
+		{name: "tmux server gone", stopErr: fmt.Errorf("killing session sky: %w", serverGone)},
+		{name: "tmux server gone at capture and kill", stopErr: errors.Join(fmt.Errorf("observing pane before process snapshot: %w", serverGone), serverGone)},
+		{name: "stop refused", stopErr: refusal, wantErr: ErrStopRefused},
+		{name: "stop refused beside a gone session", stopErr: errors.Join(refusal, ErrSessionNotFound), wantErr: ErrStopRefused},
+		{name: "terminate failure", stopErr: failure, wantErr: failure},
+		{name: "terminate failure beside a gone server", stopErr: errors.Join(failure, serverGone), wantErr: failure},
+		{name: "exec stderr saying not found", stopErr: execStderr, wantErr: execStderr},
+		{name: "server-gone text inside a longer message", stopErr: serverGoneText, wantErr: serverGoneText},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := NewFake()
+			if err := sp.Start(context.Background(), "sky", Config{}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if tc.stopErr != nil {
+				sp.StopErrors["sky"] = tc.stopErr
+			}
+
+			err := StopForCleanup(sp, "sky")
+			if tc.wantErr == nil && err != nil {
+				t.Fatalf("StopForCleanup = %v, want nil", err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("StopForCleanup = %v, want %v", err, tc.wantErr)
+			}
+			if last := sp.Calls[len(sp.Calls)-1]; last.Method != "Stop" || last.Name != "sky" {
+				t.Fatalf("calls = %#v, want a trailing Stop for sky", sp.Calls)
+			}
+		})
 	}
 }
 

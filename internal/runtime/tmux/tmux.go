@@ -1286,6 +1286,13 @@ func processExclusionSet(pids []string) map[int]bool {
 // KillSessionWithProcesses terminates a tmux session and its owned processes.
 // Selection uses one process-table snapshot and every direct signal is fenced
 // by the target's captured start-time identity.
+//
+// Unlike KillSessionWithProcessesExcluding, it treats a missing server as
+// success, on purpose: its callers are start-path rollback, zombie or
+// dead-pane replacement, and orphan sweeps, each of which only needs the
+// session gone, and a server that is not running holds nothing left to tear
+// down. Provider.Stop, which must not read a missing server as a certified
+// absence, goes through KillSessionWithProcessesExcluding instead.
 func (t *Tmux) KillSessionWithProcesses(name string) error {
 	plan, discoveryErr := t.capturePaneProcessKillPlan(name, nil)
 

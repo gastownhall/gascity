@@ -68,6 +68,7 @@ var (
 	_ runtime.ServerDeathConfirmer          = (*Provider)(nil)
 	_ runtime.SessionObjectKiller           = (*Provider)(nil)
 	_ runtime.FreshLivenessObserver         = (*Provider)(nil)
+	_ runtime.IncarnationLivenessObserver   = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -281,7 +282,11 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 }
 
 // Stop destroys the named session and kills its entire process tree.
-// Returns nil if it doesn't exist (idempotent).
+// Returns nil if a responsive server reports no such session (idempotent).
+// A missing server is an uncertain inventory observation, not a certified
+// absence, so its error (wrapping ErrNoServer) reaches the caller; teardown
+// callers that only need the session gone absorb it through
+// runtime.StopForCleanup.
 // Invalidates the state cache after a successful stop so subsequent
 // IsRunning calls see the updated state immediately.
 func (p *Provider) Stop(name string) error {
@@ -860,54 +865,66 @@ func parseUnattendedSessionCensus(name, output string) (unattendedSessionCensus,
 		return census, fmt.Errorf("stopping unattended tmux session %q: empty pane census", name)
 	}
 	for index, line := range lines {
-		fields := strings.Split(line, "\t")
-		if len(fields) != 7 {
-			return census, fmt.Errorf("stopping unattended tmux session %q: malformed pane census row %d", name, index+1)
-		}
-		sessionID, sessionName, windowID, paneID := fields[0], fields[1], fields[2], fields[3]
-		if !wellFormedTmuxID(sessionID, '$') || !wellFormedTmuxID(windowID, '@') || !wellFormedTmuxID(paneID, '%') {
-			return census, fmt.Errorf("stopping unattended tmux session %q: malformed identity in pane census row %d", name, index+1)
-		}
-		if sessionName != name {
-			return census, fmt.Errorf("stopping unattended tmux session %q: census row %d names session %q", name, index+1, sessionName)
-		}
-		if census.sessionID == "" {
-			census.sessionID = sessionID
-		} else if census.sessionID != sessionID {
-			return census, fmt.Errorf("stopping unattended tmux session %q: mixed session identities in pane census", name)
-		}
-		if _, duplicate := seenPanes[paneID]; duplicate {
-			return census, fmt.Errorf("stopping unattended tmux session %q: duplicate pane %q in census", name, paneID)
-		}
-		seenPanes[paneID] = struct{}{}
-		census.paneIdentities[windowID+"\t"+paneID] = struct{}{}
-		census.paneIDs = append(census.paneIDs, paneID)
-
-		attached, err := parseNonnegativeTmuxCount(fields[4])
-		if err != nil {
-			return census, fmt.Errorf("stopping unattended tmux session %q: malformed attachment count in pane census row %d", name, index+1)
-		}
-		if index == 0 {
-			census.attachedClients = attached
-		} else if census.attachedClients != attached {
-			return census, fmt.Errorf("stopping unattended tmux session %q: inconsistent attachment counts in pane census", name)
-		}
-		inMode, err := parseNonnegativeTmuxCount(fields[5])
-		if err != nil {
-			return census, fmt.Errorf("stopping unattended tmux session %q: malformed copy-mode count in pane census row %d", name, index+1)
-		}
-		if inMode > 0 {
-			census.copyModePanes++
-		}
-		linked, err := parseNonnegativeTmuxCount(fields[6])
-		if err != nil {
-			return census, fmt.Errorf("stopping unattended tmux session %q: malformed linked-window count in pane census row %d", name, index+1)
-		}
-		if linked > 0 {
-			census.linkedWindows[windowID] = struct{}{}
+		if err := census.absorbRow(name, index, line, seenPanes); err != nil {
+			return census, err
 		}
 	}
 	return census, nil
+}
+
+// absorbRow folds one pane-census row into the census, returning the first
+// inconsistency that makes the census untrustworthy. index is the zero-based
+// row number: it names the row in error messages and anchors the session-wide
+// attachment count to the first row, which every later row must agree with.
+// seenPanes carries duplicate detection across rows.
+func (census *unattendedSessionCensus) absorbRow(name string, index int, line string, seenPanes map[string]struct{}) error {
+	fields := strings.Split(line, "\t")
+	if len(fields) != 7 {
+		return fmt.Errorf("stopping unattended tmux session %q: malformed pane census row %d", name, index+1)
+	}
+	sessionID, sessionName, windowID, paneID := fields[0], fields[1], fields[2], fields[3]
+	if !wellFormedTmuxID(sessionID, '$') || !wellFormedTmuxID(windowID, '@') || !wellFormedTmuxID(paneID, '%') {
+		return fmt.Errorf("stopping unattended tmux session %q: malformed identity in pane census row %d", name, index+1)
+	}
+	if sessionName != name {
+		return fmt.Errorf("stopping unattended tmux session %q: census row %d names session %q", name, index+1, sessionName)
+	}
+	if census.sessionID == "" {
+		census.sessionID = sessionID
+	} else if census.sessionID != sessionID {
+		return fmt.Errorf("stopping unattended tmux session %q: mixed session identities in pane census", name)
+	}
+	if _, duplicate := seenPanes[paneID]; duplicate {
+		return fmt.Errorf("stopping unattended tmux session %q: duplicate pane %q in census", name, paneID)
+	}
+	seenPanes[paneID] = struct{}{}
+	census.paneIdentities[windowID+"\t"+paneID] = struct{}{}
+	census.paneIDs = append(census.paneIDs, paneID)
+
+	attached, err := parseNonnegativeTmuxCount(fields[4])
+	if err != nil {
+		return fmt.Errorf("stopping unattended tmux session %q: malformed attachment count in pane census row %d", name, index+1)
+	}
+	if index == 0 {
+		census.attachedClients = attached
+	} else if census.attachedClients != attached {
+		return fmt.Errorf("stopping unattended tmux session %q: inconsistent attachment counts in pane census", name)
+	}
+	inMode, err := parseNonnegativeTmuxCount(fields[5])
+	if err != nil {
+		return fmt.Errorf("stopping unattended tmux session %q: malformed copy-mode count in pane census row %d", name, index+1)
+	}
+	if inMode > 0 {
+		census.copyModePanes++
+	}
+	linked, err := parseNonnegativeTmuxCount(fields[6])
+	if err != nil {
+		return fmt.Errorf("stopping unattended tmux session %q: malformed linked-window count in pane census row %d", name, index+1)
+	}
+	if linked > 0 {
+		census.linkedWindows[windowID] = struct{}{}
+	}
+	return nil
 }
 
 func sameUnattendedPaneIdentities(left, right map[string]struct{}) bool {
@@ -1126,11 +1143,17 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 }
 
 // Attach connects the user's terminal to the named tmux session.
-// It returns [runtime.ErrSessionNotFound] when the session is absent and
-// refuses to attach to tmux remain-on-exit dead panes with a tmux-specific
-// message-only error. Pane-state query failures fall through to tmux attach.
+// It returns [runtime.ErrSessionNotFound] when the session is absent,
+// including when a configured named socket is missing, so no server can be
+// listening on it; an ambiguous socket observation refuses with
+// [ErrServerDegraded] instead. It refuses to attach to tmux remain-on-exit
+// dead panes with a tmux-specific message-only error. Pane-state query
+// failures fall through to tmux attach.
 func (p *Provider) Attach(name string) error {
 	witness, err := p.tm.captureAttachSocketWitness()
+	if errors.Is(err, errNamedSocketMissing) {
+		return fmt.Errorf("%w: %w: %s: tmux server not running (attach_witness reason=socket-missing)", runtime.ErrSessionNotFound, ErrSessionNotFound, name)
+	}
 	if err != nil {
 		return fmt.Errorf("checking tmux server before attach: %w", err)
 	}

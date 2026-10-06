@@ -4001,6 +4001,42 @@ func TestProviderStopPreservesResponsiveEmptyNamedServer(t *testing.T) {
 	}
 }
 
+// The provider conformance suite cannot pin the missing-server half of Stop's
+// contract: its shared socket keeps whatever server an earlier case started.
+// This private socket has no server until the test starts one, so real tmux
+// decides both halves here — a missing server reaches Stop's caller and only
+// the teardown layer absorbs it, while a never-started name on a responsive
+// server is Stop's own nil.
+func TestProviderStopReportsMissingServerThatStopForCleanupAbsorbs(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = privateSocketName("ms")
+	provider := NewProviderWithConfig(cfg)
+	t.Cleanup(func() { _ = provider.TeardownServer() })
+
+	const missing = "never-started"
+	err := provider.Stop(missing)
+	if !errors.Is(err, ErrNoServer) {
+		t.Fatalf("Stop with no server = %v, want an error wrapping ErrNoServer", err)
+	}
+	if !runtimepkg.IsSessionGone(err) {
+		t.Errorf("IsSessionGone(%v) = false, want callers that classify Stop errors to see the session as gone", err)
+	}
+	if err := runtimepkg.StopForCleanup(provider, missing); err != nil {
+		t.Fatalf("StopForCleanup with no server = %v, want nil", err)
+	}
+
+	if err := provider.Start(context.Background(), "server-holder", runtimepkg.Config{Command: "sleep 600"}); err != nil {
+		t.Fatalf("start server-holder session: %v", err)
+	}
+	if err := provider.Stop(missing); err != nil {
+		t.Fatalf("Stop of a never-started session on a responsive server = %v, want nil", err)
+	}
+}
+
 func TestConfigureServerReappliesExitEmptyAfterReplacement(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")

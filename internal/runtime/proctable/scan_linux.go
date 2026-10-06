@@ -272,33 +272,13 @@ func unreadableProcessProvenOutsideIncarnation(
 	if err != nil {
 		return false, err
 	}
-	candidateBefore, exists, err := readProcessIdentity(root, pid)
-	if err != nil || !exists {
+	lineage, ok, err := readTmuxSpawnLineage(root, pid, bootedAt, incarnationStartedAt)
+	if err != nil || !ok {
 		return false, err
-	}
-	if processDefinitelyPredatesIncarnation(
-		processStartedAt(bootedAt, candidateBefore.StartTicks),
-		incarnationStartedAt,
-	) ||
-		candidateBefore.PPID <= 1 ||
-		!isUniqueTmuxSpawnScope(candidateBefore.Cgroup) {
-		return false, nil
-	}
-
-	parentBefore, exists, err := readProcessIdentity(root, candidateBefore.PPID)
-	if err != nil || !exists {
-		return false, err
-	}
-	if parentBefore.Cgroup != candidateBefore.Cgroup ||
-		!processDefinitelyPredatesIncarnation(
-			processStartedAt(bootedAt, parentBefore.StartTicks),
-			incarnationStartedAt,
-		) {
-		return false, nil
 	}
 
 	parentEnv, err := parseEnvironFile(
-		filepath.Join(root, strconv.Itoa(parentBefore.PID), "environ"),
+		filepath.Join(root, strconv.Itoa(lineage.parent.PID), "environ"),
 	)
 	if err != nil || parentEnv == nil {
 		return false, err
@@ -307,21 +287,67 @@ func unreadableProcessProvenOutsideIncarnation(
 		return false, nil
 	}
 
-	parentAfter, exists, err := readProcessIdentity(root, parentBefore.PID)
+	return lineage.stillCurrent(root)
+}
+
+// tmuxSpawnLineage is the candidate/parent identity pair captured by the first
+// census of the PID-reuse fence.
+type tmuxSpawnLineage struct {
+	candidate processIdentity
+	parent    processIdentity
+}
+
+// readTmuxSpawnLineage takes the first census of the unreadable process at pid
+// and its parent. ok is false unless the candidate sits alone in a
+// tmux-spawn-*.scope leaf whose parent provably predates
+// incarnationStartedAt — the only shape whose parent environment can stand in
+// for the candidate's own. Any other shape leaves the process unproven rather
+// than excluded.
+func readTmuxSpawnLineage(root string, pid int, bootedAt, incarnationStartedAt time.Time) (tmuxSpawnLineage, bool, error) {
+	candidate, exists, err := readProcessIdentity(root, pid)
+	if err != nil || !exists {
+		return tmuxSpawnLineage{}, false, err
+	}
+	if processDefinitelyPredatesIncarnation(
+		processStartedAt(bootedAt, candidate.StartTicks),
+		incarnationStartedAt,
+	) ||
+		candidate.PPID <= 1 ||
+		!isUniqueTmuxSpawnScope(candidate.Cgroup) {
+		return tmuxSpawnLineage{}, false, nil
+	}
+
+	parent, exists, err := readProcessIdentity(root, candidate.PPID)
+	if err != nil || !exists {
+		return tmuxSpawnLineage{}, false, err
+	}
+	if parent.Cgroup != candidate.Cgroup ||
+		!processDefinitelyPredatesIncarnation(
+			processStartedAt(bootedAt, parent.StartTicks),
+			incarnationStartedAt,
+		) {
+		return tmuxSpawnLineage{}, false, nil
+	}
+	return tmuxSpawnLineage{candidate: candidate, parent: parent}, true, nil
+}
+
+// stillCurrent takes the second census and reports whether both identities are
+// unchanged. A PID reused between the two censuses changes at least its start
+// ticks or its cgroup, so a mismatch abandons the proof rather than resolving
+// it either way.
+func (lineage tmuxSpawnLineage) stillCurrent(root string) (bool, error) {
+	parentAfter, exists, err := readProcessIdentity(root, lineage.parent.PID)
 	if err != nil || !exists {
 		return false, err
 	}
-	candidateAfter, exists, err := readProcessIdentity(root, candidateBefore.PID)
+	candidateAfter, exists, err := readProcessIdentity(root, lineage.candidate.PID)
 	if err != nil || !exists {
 		return false, err
 	}
-	if parentAfter.PID != parentBefore.PID ||
-		parentAfter.StartTicks != parentBefore.StartTicks ||
-		parentAfter.Cgroup != parentBefore.Cgroup ||
-		candidateAfter != candidateBefore {
-		return false, nil
-	}
-	return true, nil
+	return parentAfter.PID == lineage.parent.PID &&
+		parentAfter.StartTicks == lineage.parent.StartTicks &&
+		parentAfter.Cgroup == lineage.parent.Cgroup &&
+		candidateAfter == lineage.candidate, nil
 }
 
 func readProcessIdentity(root string, pid int) (processIdentity, bool, error) {

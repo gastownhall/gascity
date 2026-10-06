@@ -1444,13 +1444,19 @@ func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 			return err
 		}
 
-		// Stop the live runtime before marking the bead closed. Stop is
-		// idempotent for an already-gone session (returns nil), which also lets
-		// auto.Provider discard stale ACP route entries for suspended sessions.
-		// A genuine terminate failure must propagate and leave the bead open
-		// rather than report a "closed but still running" session — swallowing
-		// it here previously masked exactly that wedge.
-		if err := m.sp.Stop(sessName); err != nil {
+		// Stop the live runtime before marking the bead closed. Close is a
+		// cleanup path, so it absorbs a missing-session or missing-server
+		// answer via runtime.StopForCleanup — otherwise a session bead for an
+		// intentionally stopped city could never be closed once the city's
+		// tmux server is down. A genuine terminate failure still propagates,
+		// even beside such an answer, and leaves the bead open rather than
+		// reporting a "closed but still running" session; swallowing that
+		// previously masked exactly that wedge.
+		//
+		// Route-table hygiene is the provider's own concern: whether a stop
+		// clears a stale ACP route entry is not something this call site can
+		// observe or rely on.
+		if err := runtime.StopForCleanup(m.sp, sessName); err != nil {
 			return fmt.Errorf("stopping runtime for session %s: %w", id, err)
 		}
 		nudgeIDs, capped, err := NewStore(beads.SessionStore{Store: m.store}).CancelWaits(id, time.Now().UTC())
@@ -1519,6 +1525,9 @@ func (m *Manager) retireConfiguredNamedSessionIdentifiers(id string, b beads.Bea
 // Kill force-kills the runtime process for a session without changing bead
 // state. This is intended for manual intervention; the reconciler will detect
 // the dead process and restart it according to the session's lifecycle rules.
+// Like Close, it is a cleanup path: a session that is already gone is the
+// outcome Kill was asked for, so it reports success rather than surfacing the
+// provider's "nothing to stop" answer to the operator.
 func (m *Manager) Kill(id string) error {
 	b, sessName, err := m.sessionBead(id)
 	if err != nil {
@@ -1536,7 +1545,7 @@ func (m *Manager) Kill(id string) error {
 			return fmt.Errorf("session %s is not active", id)
 		}
 	}
-	return m.sp.Stop(sessName)
+	return runtime.StopForCleanup(m.sp, sessName)
 }
 
 // BeginDrain transitions a session to the draining state. The caller is

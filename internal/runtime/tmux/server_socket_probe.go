@@ -23,6 +23,14 @@ type namedSocketObservation struct {
 	isSocket bool
 }
 
+// errNamedSocketMissing marks the one witness failure that is a clean
+// observation rather than an ambiguous one: the named socket does not exist,
+// which the socket policy (observeNamedSocketWith) reads as no server able to
+// listen. The failure still wraps ErrServerDegraded, so a caller that only
+// needs to refuse keeps refusing; Provider.Attach reports it as an absent
+// session instead.
+var errNamedSocketMissing = errors.New("named tmux socket missing")
+
 func (t *Tmux) captureAttachSocketWitness() (namedSocketWitness, error) {
 	if t.cfg.SocketName == "" {
 		return namedSocketWitness{}, nil
@@ -64,7 +72,7 @@ func (t *Tmux) captureNamedSocketWitness(ctx context.Context) (namedSocketWitnes
 	before, err := t.observeNamedSocketLstat(ctx, path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return namedSocketWitness{}, namedSocketWitnessFailure("socket-missing", nil, 0)
+			return namedSocketWitness{}, fmt.Errorf("%w: %w", errNamedSocketMissing, namedSocketWitnessFailure("socket-missing", nil, 0))
 		}
 		return namedSocketWitness{}, namedSocketWitnessFailure("socket-lstat", nil, 0)
 	}

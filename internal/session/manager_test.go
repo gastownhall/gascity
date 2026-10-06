@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
@@ -4941,6 +4942,62 @@ func TestKill_UnknownState_ButRunning(t *testing.T) {
 	}
 }
 
+// TestKill_DownedServerReportsSuccess pins Kill as a cleanup path: the caller
+// asks for the session to stop, and a session that is already gone satisfies
+// that request. tmux Provider.Stop reports a missing server as ErrNoServer, so
+// without the runtime.StopForCleanup absorption, killing a session on an
+// intentionally stopped city reports a failure the caller cannot act on. The
+// error is wrapped to pin that the absorption survives wrapping.
+func TestKill_DownedServerReportsSuccess(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "test", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.StopErrors[info.SessionName] = fmt.Errorf("killing session %s: %w", info.SessionName, tmux.ErrNoServer)
+
+	if err := mgr.Kill(info.ID); err != nil {
+		t.Fatalf("Kill against a downed server: %v", err)
+	}
+	if !providerSawStop(sp, info.SessionName) {
+		t.Fatal("Kill returned success without asking the provider to stop the session")
+	}
+}
+
+// TestKill_StopFailurePropagates is the control for the absorption above: a
+// stop failure that is not "the session is gone" is a real failure and must
+// reach the caller. Without it, TestKill_DownedServerReportsSuccess would pass
+// just as well against a blanket swallow.
+func TestKill_StopFailurePropagates(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "test", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	stopErr := errors.New("permission denied")
+	sp.StopErrors[info.SessionName] = stopErr
+
+	if err := mgr.Kill(info.ID); !errors.Is(err, stopErr) {
+		t.Fatalf("Kill with a real stop failure = %v, want %v", err, stopErr)
+	}
+}
+
+// providerSawStop reports whether the fake provider recorded a Stop for name.
+func providerSawStop(sp *runtime.Fake, name string) bool {
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // PR #203 — When ensureRunning resumes with --resume <key> and the
 // process dies immediately (stale session key), it should clear the key and
 // retry fresh without the --resume flag.
@@ -5613,6 +5670,40 @@ func TestCloseDetailed_StopErrorLeavesBeadOpen(t *testing.T) {
 	}
 	if b.Status == "closed" {
 		t.Error("bead was closed despite the runtime Stop failing")
+	}
+}
+
+// TestCloseDetailed_DownedServerClosesBead pins the cleanup half of the
+// missing-session/missing-server split: tmux Provider.Stop returns ErrNoServer
+// when the whole server is down, and close must still retire the bead. Without
+// the runtime.StopForCleanup absorption, session beads for an intentionally
+// stopped city are unclosable until someone restarts a tmux server on that
+// socket. The error is wrapped to pin that the absorption survives wrapping.
+func TestCloseDetailed_DownedServerClosesBead(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	sp.StopErrors[info.SessionName] = fmt.Errorf("killing session %s: %w", info.SessionName, tmux.ErrNoServer)
+
+	if _, err := mgr.CloseDetailed(info.ID); err != nil {
+		t.Fatalf("CloseDetailed against a downed server: %v", err)
+	}
+	if !providerSawStop(sp, info.SessionName) {
+		t.Fatal("CloseDetailed closed the bead without asking the provider to stop the session")
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead Status = %q, want closed", b.Status)
 	}
 }
 

@@ -64,6 +64,7 @@ go_test(
         "scan_darwin_command_test.go",
         "scan_darwin_test.go",
         "scan_linux_test.go",
+        "scan_stub_test.go",
         "supervisor_fork_orphan_repro_test.go",
         "testenv_import_test.go",
     ],

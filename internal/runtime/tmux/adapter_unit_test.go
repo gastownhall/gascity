@@ -384,11 +384,16 @@ func TestProviderAttachNamedSocketNoServerPreflightRefusesBeforeLaunchingTmux(t 
 		name        string
 		observation namedSocketObservation
 		lstatErr    error
+		wantErr     error
+		notErr      error
 		want        string
 	}{
-		{name: "missing", lstatErr: os.ErrNotExist, want: "reason=socket-missing"},
-		{name: "non-socket", want: "reason=not-unix-socket"},
-		{name: "stat-error", lstatErr: os.ErrPermission, want: "reason=socket-lstat"},
+		// A missing socket is the socket policy's clean "no server can be
+		// listening" observation, so a stopped city reads as an absent session;
+		// only an ambiguous observation reports a degraded server.
+		{name: "missing", lstatErr: os.ErrNotExist, wantErr: runtime.ErrSessionNotFound, notErr: ErrServerDegraded, want: "reason=socket-missing"},
+		{name: "non-socket", wantErr: ErrServerDegraded, notErr: runtime.ErrSessionNotFound, want: "reason=not-unix-socket"},
+		{name: "stat-error", lstatErr: os.ErrPermission, wantErr: ErrServerDegraded, notErr: runtime.ErrSessionNotFound, want: "reason=socket-lstat"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			binDir := t.TempDir()
@@ -413,8 +418,8 @@ func TestProviderAttachNamedSocketNoServerPreflightRefusesBeforeLaunchingTmux(t 
 			}
 
 			err := p.Attach("runner")
-			if !errors.Is(err, ErrServerDegraded) {
-				t.Fatalf("Attach error = %v, want ErrServerDegraded", err)
+			if !errors.Is(err, tc.wantErr) || errors.Is(err, tc.notErr) {
+				t.Fatalf("Attach error = %v, want %v and not %v", err, tc.wantErr, tc.notErr)
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Attach error = %q, want %q", err, tc.want)

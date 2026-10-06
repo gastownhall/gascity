@@ -153,7 +153,66 @@ func IsSessionGone(err error) bool {
 	return strings.Contains(msg, "session not found") ||
 		strings.Contains(msg, "not running") ||
 		strings.Contains(msg, "not found") ||
-		strings.Contains(msg, "no tmux server running")
+		strings.Contains(msg, tmuxNoServerMessage)
+}
+
+// tmuxNoServerMessage is the exact message of tmux.ErrNoServer, the tmux
+// provider's missing-server sentinel. This package cannot import tmux, so it
+// recognizes that sentinel by its text.
+const tmuxNoServerMessage = "no tmux server running"
+
+// StopForCleanup stops the named session on behalf of a teardown caller and
+// absorbs a "the session is not there" answer as success.
+//
+// Teardown paths — close, kill, restart replacement — care whether the
+// session is gone, not whether this call is the one that removed it. Providers
+// draw a finer distinction than that on purpose: a missing session on a
+// responsive server is idempotent success, while a missing server is an
+// uncertain inventory observation the provider is required to surface. Neither
+// shape leaves anything for a cleanup caller to stop, so both are absorbed
+// here; every other error propagates, because a failure must still leave the
+// durable state open rather than report a "closed but still running" session.
+// Keeping the rule in one place is what stops a new cleanup path from
+// re-deriving it and getting it wrong; callers that need the distinction call
+// [Provider.Stop] directly and classify with [IsSessionGone] themselves.
+//
+// Unlike [IsSessionGone], the rule matches structure, not free text: an error
+// is absorbed only when every leaf of its wrap/join tree is [ErrSessionNotFound]
+// or a leaf whose whole message is the tmux missing-server sentinel's. A
+// terminate failure joined with a missing-server answer therefore propagates,
+// as do a stop refusal ([ErrStopRefused]) and a message that merely mentions a
+// missing session, such as an exec script's "sh: kubectl: not found".
+func StopForCleanup(p Provider, name string) error {
+	if err := p.Stop(name); err != nil && !stopFailureIsOnlySessionGone(err) {
+		return err
+	}
+	return nil
+}
+
+// stopFailureIsOnlySessionGone reports whether every leaf of a Stop error's
+// tree says the session is gone. errors.Is cannot express this: it accepts a
+// joined error as soon as one branch matches, which would absorb a terminate
+// failure reported alongside a missing-server answer.
+func stopFailureIsOnlySessionGone(err error) bool {
+	switch wrapped := err.(type) { //nolint:errorlint // walks the error tree by hand: every leaf must be a gone answer, which errors.Is cannot express
+	case nil:
+		return false
+	case interface{ Unwrap() []error }:
+		children := wrapped.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !stopFailureIsOnlySessionGone(child) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		return stopFailureIsOnlySessionGone(wrapped.Unwrap())
+	default:
+		return errors.Is(err, ErrSessionNotFound) || err.Error() == tmuxNoServerMessage
+	}
 }
 
 // ContentBlock represents a content element in a message.
@@ -205,7 +264,11 @@ type Provider interface {
 	Start(ctx context.Context, name string, cfg Config) error
 
 	// Stop destroys the named session and cleans up its resources.
-	// Returns nil if the session does not exist (idempotent).
+	// Returns nil if a responsive provider has no such session (idempotent).
+	// A provider that cannot observe its inventory at all — tmux with no
+	// server running — reports that as an error rather than certifying
+	// absence; teardown callers that only need the session gone absorb it
+	// through [StopForCleanup].
 	Stop(name string) error
 
 	// Interrupt sends a soft interrupt signal (e.g., Ctrl-C / SIGINT) to
