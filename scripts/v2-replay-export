@@ -200,14 +200,14 @@ def tree(root: Path) -> dict[str, bytes]:
 
 
 def self_test() -> int:
-    secret = "s3cret-" + base64.b16encode(os.urandom(6)).decode()
+    canary = "canary-" + base64.b16encode(os.urandom(6)).decode()
     calls = []
 
     def fake_clickhouse(req, timeout):
         url = urllib.parse.urlsplit(req.full_url)
         query = dict(urllib.parse.parse_qsl(url.query))
-        assert url.netloc == "127.0.0.1:18124" and secret not in req.full_url, req.full_url
-        assert req.get_header("X-clickhouse-key") == secret and query["readonly"] == "1"
+        assert url.netloc == "127.0.0.1:18124" and canary not in req.full_url, req.full_url
+        assert req.get_header("X-clickhouse-key") == canary and query["readonly"] == "1"
         assert query["param_city"] == "fixture-city", query
         query["query"] = req.data.decode()
         calls.append(query["query"])
@@ -226,14 +226,14 @@ def self_test() -> int:
     connect, socket.socket.connect = socket.socket.connect, no_network
     try:
         with tempfile.TemporaryDirectory(prefix="v2-replay-export-") as tmp:
-            run_self_test(Path(tmp), secret, calls, fake_clickhouse)
+            run_self_test(Path(tmp), canary, calls, fake_clickhouse)
     finally:
         socket.socket.connect = connect
     print("self-test: ok")
     return 0
 
 
-def run_self_test(root: Path, secret: str, calls: list[str], fake_clickhouse) -> None:
+def run_self_test(root: Path, canary: str, calls: list[str], fake_clickhouse) -> None:
     # city has a city.toml; listed is only in cities.toml. Each refusal rule is exercised alone.
     city, listed = root / "fixture-city", root / "listed-city"
     listed.mkdir()
@@ -248,10 +248,10 @@ def run_self_test(root: Path, secret: str, calls: list[str], fake_clickhouse) ->
     db.execute("INSERT INTO kv VALUES ('gascity.claim-fence.v1/s-1','9')")
     db.commit()  # left open: the -wal and -shm stay, as on a live store
     (root / "cities.toml").write_text(f'[[cities]]\npath = "{listed}"\nname = "listed-city"\n')
-    pw = root / "pw"
-    pw.write_text(secret + "\n")
+    canary_file = root / "canary_file"
+    canary_file.write_text(canary + "\n")
     base = ["--city", "fixture-city", "--since", "2026-10-05T00:00:00Z", "--until", "2026-10-06T00:00:00Z",
-            "--password-file", str(pw), "--cities-toml", str(root / "cities.toml")]
+            "--password-file", str(canary_file), "--cities-toml", str(root / "cities.toml")]
     before = tree(root)
     stdout, stderr = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -280,8 +280,8 @@ def run_self_test(root: Path, secret: str, calls: list[str], fake_clickhouse) ->
     assert (root / "bd" / "session_rows.jsonl").read_text() == '{"bead_id":"s-1","seq":1}\n'
     assert sum("FROM bead_snapshots" in c for c in calls) == 1 and len(calls) == 5, calls
     for path, data in after.items():
-        assert secret.encode() not in data or path == str(pw), f"password leaked into {path}"
-    assert secret not in stdout.getvalue() + stderr.getvalue(), "password printed"
+        assert canary.encode() not in data or path == str(canary_file), f"password leaked into {path}"
+    assert canary not in stdout.getvalue() + stderr.getvalue(), "password printed"
 
 
 def main(argv: list[str]) -> int:
