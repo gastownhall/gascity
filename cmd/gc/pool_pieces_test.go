@@ -880,6 +880,12 @@ func TestBuildDemandTargetsGoldenAgainstInlineLoop(t *testing.T) {
 		var gotErr, wantErr bytes.Buffer
 		got := buildDemandTargets("city", f.cityPath, f.cfg, f.store, f.rigStores, f.suspendedRigPaths, f.sessions, controllerQueryRuntimeEnv, &gotErr)
 		want := buildDemandTargetsPreRefactor("city", f.cityPath, f.cfg, f.store, f.rigStores, f.suspendedRigPaths, f.sessions, &wantErr)
+		// The frozen loop predates the custom scale_check fan-out and has no
+		// probes to compare; they are pinned in pool_scale_check_fanout_test.go
+		// and, against the lane's pools, by TestScaleCheckLaneWorkMatchesBuildDemandTargets.
+		for i := range got.pendingPools {
+			got.pendingPools[i].probes = nil
+		}
 		if !reflect.DeepEqual(got, want) || gotErr.String() != wantErr.String() {
 			t.Fatalf("seed %d: buildDemandTargets differs from the inline loop:\n got=%+v\nwant=%+v\nstderr got=%q want=%q", seed, got, want, gotErr.String(), wantErr.String())
 		}

@@ -1384,10 +1384,7 @@ func buildDemandTargets(
 					coldWakeTemplates[template] = true
 				}
 			}
-			var probes []poolStoreProbe
-			if rigName == "" && hasCustomScaleCheck {
-				probes = cityScopedFanOutProbes(cityPath, cfg, &cfg.Agents[i], poolDir, nil, suspendedRigPaths)
-			}
+			probes := customScaleCheckFanOutProbes(cityPath, cfg, &cfg.Agents[i], rigName, poolDir, nil, suspendedRigPaths)
 			pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, newDemand: store != nil, probes: probes})
 			continue
 		}
@@ -1477,10 +1474,7 @@ func buildDemandTargets(
 			fmt.Fprintf(stderr, "scaleCheck: building env for %s: %v\n", cfg.Agents[i].QualifiedName(), err) //nolint:errcheck
 			continue
 		}
-		var probes []poolStoreProbe
-		if rigName == "" && hasCustomScaleCheck {
-			probes = cityScopedFanOutProbes(cityPath, cfg, &cfg.Agents[i], poolDir, env, suspendedRigPaths)
-		}
+		probes := customScaleCheckFanOutProbes(cityPath, cfg, &cfg.Agents[i], rigName, poolDir, env, suspendedRigPaths)
 		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, env: env, newDemand: store != nil, probes: probes})
 	}
 	return demandTargets{
