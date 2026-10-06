@@ -98,6 +98,17 @@ describe('selectBeadsNeedingAttention (gascity-dashboard-2j8e.3)', () => {
     expect(rows).toEqual([]);
   });
 
+  it('matches the reserved human alias exactly after trimming whitespace', () => {
+    const rows = select({
+      beads: [
+        bead({ id: 'B-padded', status: 'open', assignee: '  human ' }),
+        bead({ id: 'B-cased', status: 'open', assignee: 'Human' }),
+        bead({ id: 'B-prefix', status: 'open', assignee: 'humanoid' }),
+      ],
+    });
+    expect(rows.map((row) => row.beadId)).toEqual(['B-padded']);
+  });
+
   it('includes an open escalation because the queue records its human escalation', () => {
     const rows = select({
       escalations: [

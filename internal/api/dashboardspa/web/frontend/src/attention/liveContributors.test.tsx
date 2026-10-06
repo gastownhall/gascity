@@ -9,6 +9,7 @@ import type { OperatorConfig } from '../contexts/OperatorConfigContext';
 import type * as SupervisorClient from '../supervisor/client';
 import { SupervisorApiError } from '../supervisor/client';
 import { composeAttention } from './compose';
+import { createAttentionContributors } from './registry';
 import {
   fetchBeadsAttention,
   runsFactsFromSource,
@@ -350,6 +351,7 @@ describe('useLiveAttentionContributors', () => {
       'captured-city',
       'captured-city',
       'captured-city',
+      'captured-city',
     ]);
   });
 
@@ -358,9 +360,9 @@ describe('useLiveAttentionContributors', () => {
     let calls = 0;
     mockSupervisorApi.listBeads.mockImplementation(() => {
       calls += 1;
-      // Two full cohorts fail (4 listBeads reads each: window + in-progress
-      // leg + decisions + escalations), then the city recovers.
-      if (calls <= 8) {
+      // Two full cohorts fail (5 listBeads reads each: window + in-progress
+      // leg + decisions + escalations + human-assigned), then the city recovers.
+      if (calls <= 10) {
         return Promise.reject(
           new SupervisorApiError(
             404,
@@ -375,7 +377,7 @@ describe('useLiveAttentionContributors', () => {
 
     const pending = fetchBeadsAttention('captured-city', testOperator.decisionLabel);
     await vi.advanceTimersByTimeAsync(749);
-    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(8);
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(10);
     await vi.advanceTimersByTimeAsync(1);
     const facts = await pending;
 
@@ -383,7 +385,7 @@ describe('useLiveAttentionContributors', () => {
     expect(facts.error).toBeUndefined();
     expect(facts.decisionsError).toBeUndefined();
     expect(facts.escalationsError).toBeUndefined();
-    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(12);
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(15);
   });
 
   it('bounds city-unavailable retries and marks the whole cohort for revalidation', async () => {
@@ -402,7 +404,7 @@ describe('useLiveAttentionContributors', () => {
       decisionsError: CITY_NOT_FOUND_DETAIL,
       escalationsError: CITY_NOT_FOUND_DETAIL,
     });
-    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(20);
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(25);
   });
 
   it('uses the typed problem code instead of matching legacy-looking prose', async () => {
@@ -413,7 +415,7 @@ describe('useLiveAttentionContributors', () => {
     const facts = await fetchBeadsAttention('captured-city', testOperator.decisionLabel);
 
     expect(facts.cityUnavailable).toBeUndefined();
-    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(4);
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(5);
   });
 
   it('does not retry a non-city-unavailable error', async () => {
@@ -428,7 +430,69 @@ describe('useLiveAttentionContributors', () => {
       decisionsError: 'supervisor unavailable',
       escalationsError: 'supervisor unavailable',
     });
-    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(4);
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(5);
+  });
+
+  // gascity-sc-4oix8: the general list is a capped newest-first window, so an
+  // older bead handed to `human` can fall outside it. The dedicated
+  // assignee=human leg recovers it and merges it into the window.
+  const humanBead = (overrides: Partial<Bead> = {}): Bead => ({
+    id: 'B-human-old',
+    title: 'Old human-assigned bead',
+    status: 'open',
+    issue_type: 'task',
+    assignee: 'human',
+    created_at: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  });
+
+  it('recovers a human-assigned bead that fell outside the general window', async () => {
+    mockSupervisorApi.listBeads.mockImplementation((_city, query) =>
+      Promise.resolve(
+        query?.assignee === 'human' ? { total: 1, items: [humanBead()] } : { total: 0, items: [] },
+      ),
+    );
+
+    const facts = await fetchBeadsAttention('captured-city', testOperator.decisionLabel);
+
+    expect(facts.items?.map((bead) => bead.id)).toEqual(['B-human-old']);
+    const model = composeAttention(createAttentionContributors({ beads: facts }));
+    expect(model.byDomain.beads.items.map((item) => item.id)).toEqual([
+      'beads:B-human-old:human-assigned',
+    ]);
+  });
+
+  it('dedupes a human-assigned bead returned by both the window and the human leg', async () => {
+    mockSupervisorApi.listBeads.mockImplementation((_city, query) =>
+      Promise.resolve(
+        query?.label !== undefined ? { total: 0, items: [] } : { total: 1, items: [humanBead()] },
+      ),
+    );
+
+    const facts = await fetchBeadsAttention('captured-city', testOperator.decisionLabel);
+
+    expect(facts.items?.map((bead) => bead.id)).toEqual(['B-human-old']);
+  });
+
+  it('degrades silently to the window when the human-assigned leg fails', async () => {
+    mockSupervisorApi.listBeads.mockImplementation((_city, query) => {
+      if (query?.assignee === 'human') {
+        return Promise.reject(new SupervisorApiError(503, 'human queue unavailable', undefined));
+      }
+      if (query?.label !== undefined) return Promise.resolve({ total: 0, items: [] });
+      return Promise.resolve({
+        total: 1,
+        items: [humanBead({ id: 'B-window', assignee: 'worker-1' })],
+      });
+    });
+
+    const facts = await fetchBeadsAttention('captured-city', testOperator.decisionLabel);
+
+    expect(facts.items?.map((bead) => bead.id)).toEqual(['B-window']);
+    expect(facts.error).toBeUndefined();
+    expect(facts.decisionsError).toBeUndefined();
+    expect(facts.escalationsError).toBeUndefined();
+    expect(facts.cityUnavailable).toBeUndefined();
   });
 
   it('propagates cancellation to every in-flight bead-attention read', async () => {
@@ -449,11 +513,11 @@ describe('useLiveAttentionContributors', () => {
       testOperator.decisionLabel,
       controller.signal,
     );
-    await waitFor(() => expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(5));
 
     controller.abort(new DOMException('obsolete attention read', 'AbortError'));
     const everyReadWasAborted =
-      seenSignals.length === 4 && seenSignals.every((signal) => signal?.aborted === true);
+      seenSignals.length === 5 && seenSignals.every((signal) => signal?.aborted === true);
     if (!everyReadWasAborted) {
       for (const resolve of fallbackResolvers) resolve({ total: 0, items: [] });
     }
@@ -487,7 +551,7 @@ describe('useLiveAttentionContributors', () => {
     });
 
     expect(composeAttention(result.current).byDomain.beads.items).toEqual([]);
-    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(24);
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(30);
   });
 
   it('suppresses an obsolete retry when the active city changes', async () => {
@@ -507,7 +571,7 @@ describe('useLiveAttentionContributors', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
-    expect(callsForCity('captured-city')).toHaveLength(4);
+    expect(callsForCity('captured-city')).toHaveLength(5);
 
     setActiveCity('later-city');
     rerender();
@@ -515,8 +579,8 @@ describe('useLiveAttentionContributors', () => {
       await vi.runAllTimersAsync();
     });
 
-    expect(callsForCity('captured-city')).toHaveLength(4);
-    expect(callsForCity('later-city')).toHaveLength(4);
+    expect(callsForCity('captured-city')).toHaveLength(5);
+    expect(callsForCity('later-city')).toHaveLength(5);
     expect(composeAttention(result.current).byDomain.beads.items).toEqual([]);
   });
 
@@ -534,12 +598,15 @@ describe('useLiveAttentionContributors', () => {
             ? 'decisions'
             : query.label === 'gc:escalation'
               ? 'escalations'
-              : 'all';
+              : query.assignee === 'human'
+                ? 'human'
+                : 'all';
         requests.push({ path: `/v0/city/${city}/beads`, queue });
 
         if (city === 'old-city') {
           if (queue === 'decisions') return oldDecisions.promise;
           if (queue === 'escalations') return oldEscalations.promise;
+          if (queue === 'human') return Promise.resolve({ total: 0, items: [] });
           return oldAll.promise;
         }
         if (city !== 'new-city') throw new Error(`unexpected city ${city}`);
@@ -561,7 +628,7 @@ describe('useLiveAttentionContributors', () => {
     );
 
     const view = render(<LiveBeadAttentionPanel key="old-city" />);
-    await waitFor(() => expect(requests).toHaveLength(4));
+    await waitFor(() => expect(requests).toHaveLength(5));
 
     setActiveCity('new-city');
     view.rerender(<LiveBeadAttentionPanel key="new-city" />);
@@ -618,10 +685,12 @@ describe('useLiveAttentionContributors', () => {
       { path: '/v0/city/old-city/beads', queue: 'all' },
       { path: '/v0/city/old-city/beads', queue: 'decisions' },
       { path: '/v0/city/old-city/beads', queue: 'escalations' },
+      { path: '/v0/city/old-city/beads', queue: 'human' },
       { path: '/v0/city/new-city/beads', queue: 'all' },
       { path: '/v0/city/new-city/beads', queue: 'all' },
       { path: '/v0/city/new-city/beads', queue: 'decisions' },
       { path: '/v0/city/new-city/beads', queue: 'escalations' },
+      { path: '/v0/city/new-city/beads', queue: 'human' },
     ]);
     expect(screen.queryByText('Old city decision')).toBeNull();
     expect(screen.queryByText(/Old city ready work/)).toBeNull();
@@ -641,12 +710,12 @@ describe('useLiveAttentionContributors', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
-    expect(callsForCity('captured-city')).toHaveLength(4);
+    expect(callsForCity('captured-city')).toHaveLength(5);
 
     unmount();
     await vi.runAllTimersAsync();
 
-    expect(callsForCity('captured-city')).toHaveLength(4);
+    expect(callsForCity('captured-city')).toHaveLength(5);
   });
 
   it('projects the shared run-summary source onto the Runs badge facts (gascity-dashboard-2j8e.7)', () => {

@@ -372,6 +372,8 @@ function hasLabel(bead: Bead, wanted: string): boolean {
 // than a concrete agent session (gascity-dashboard-2j8e.8: assignee is
 // otherwise always a concrete session, never the human operator, so this
 // exact value is unambiguous whenever a worker or the mayor does stamp it).
+// This is the platform-reserved `human` assignee, deliberately not tied to the
+// configurable operatorWireAlias/operatorAlias.
 function isHumanAssignee(bead: Bead): boolean {
   return bead.assignee?.trim() === 'human';
 }

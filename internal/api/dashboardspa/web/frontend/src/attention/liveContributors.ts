@@ -5,7 +5,11 @@ import { getActiveCity } from '../api/cityBase';
 import { type OperatorConfig } from '../contexts/OperatorConfigContext';
 import { useCachedData } from '../hooks/useCachedData';
 import { listAgentPendingInteractions } from '../supervisor/agentPending';
-import { listSupervisorBeads } from '../supervisor/beadReads';
+import {
+  defaultBeadFilter,
+  listSupervisorBeads,
+  type SupervisorBead,
+} from '../supervisor/beadReads';
 import {
   SupervisorApiError,
   supervisorApi,
@@ -144,11 +148,13 @@ export async function fetchBeadsAttention(
   signal?: AbortSignal,
 ): Promise<BeadsAttentionFacts> {
   if (cityName === null) return { decisionLabel };
-  // Three independent reads: the general bead list (capped), plus dedicated
-  // label+status-filtered mayor-decision and escalation queues. The queues
-  // bypass the general list's gc:-label filter and are always complete.
-  // Settle each read separately so one failure does not blank the other
-  // independent signals (gascity-dashboard-2j8e.3).
+  // Four independent reads: the general bead list (capped), dedicated
+  // label+status-filtered mayor-decision and escalation queues, and the
+  // human-assigned queue. The label queues bypass the general list's gc:-label
+  // filter and are always complete. The human-assigned leg recovers beads
+  // handed to `human` that aged out of the newest-first window. Settle each
+  // read separately so one failure does not blank the other independent
+  // signals (gascity-dashboard-2j8e.3).
   const read = () =>
     Promise.allSettled([
       listSupervisorBeads({
@@ -158,6 +164,7 @@ export async function fetchBeadsAttention(
       }),
       listDecisionBeads(cityName, decisionLabel, signal),
       listEscalationBeads(cityName, signal),
+      listHumanAssignedBeads(cityName, signal),
     ] as const);
   throwIfAborted(signal);
   let reads = await read();
@@ -169,7 +176,7 @@ export async function fetchBeadsAttention(
     reads = await read();
     throwIfAborted(signal);
   }
-  const [list, decisions, escalations] = reads;
+  const [list, decisions, escalations, humanAssigned] = reads;
   const facts: BeadsAttentionFacts = { nowMs: Date.now(), decisionLabel };
   const cityUnavailable = reads.find(isCityUnavailableRead);
   if (cityUnavailable !== undefined && cityUnavailable.status === 'rejected') {
@@ -183,7 +190,16 @@ export async function fetchBeadsAttention(
     };
   }
   if (list.status === 'fulfilled') {
-    facts.items = list.value.items;
+    // Best-effort: a failed human-assigned leg degrades silently to the window.
+    facts.items =
+      humanAssigned.status === 'fulfilled'
+        ? mergeById(
+            list.value.items,
+            (humanAssigned.value.items ?? [])
+              .filter((bead) => bead.status !== 'closed')
+              .filter(defaultBeadFilter),
+          )
+        : list.value.items;
     facts.partial = list.value.partial === true;
   } else {
     facts.error = formatApiError(list.reason, 'bead list unavailable');
@@ -254,6 +270,31 @@ async function listEscalationBeads(cityName: string, signal?: AbortSignal) {
     },
     signal,
   );
+}
+
+async function listHumanAssignedBeads(cityName: string, signal?: AbortSignal) {
+  return supervisorApi().listBeads(
+    cityName,
+    {
+      assignee: 'human',
+      limit: ATTENTION_LIST_LIMIT,
+    },
+    signal,
+  );
+}
+
+function mergeById(
+  windowItems: readonly SupervisorBead[],
+  extra: readonly SupervisorBead[],
+): SupervisorBead[] {
+  const seen = new Set(windowItems.map((bead) => bead.id));
+  const merged = [...windowItems];
+  for (const bead of extra) {
+    if (seen.has(bead.id)) continue;
+    seen.add(bead.id);
+    merged.push(bead);
+  }
+  return merged;
 }
 
 async function fetchMailAttention(
