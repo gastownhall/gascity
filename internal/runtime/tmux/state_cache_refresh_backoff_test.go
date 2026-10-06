@@ -296,7 +296,7 @@ func TestStateCacheBackoff_HoldDoesNotScaleWithTheTTL(t *testing.T) {
 
 // A cache that never primed backs off too, whether the failure is a missing
 // server (which primes an empty snapshot) or anything else (which primes
-// nothing): both used to spawn tmux on every read. Neither has a last-known-good
+// nothing): neither spawns tmux on every read. Neither has a last-known-good
 // snapshot to go stale, so the holds run the full schedule: the 29s failure
 // holds its 15s, past the instant a primed cache's cliff would have cut it.
 func TestStateCacheBackoff_UnprimedFailuresBackOff(t *testing.T) {
