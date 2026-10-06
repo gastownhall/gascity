@@ -270,13 +270,11 @@ func TestOpenStorageRoutesRefusesEngineOpenUnderNativeTransportOff(t *testing.T)
 	}
 }
 
-// TestOpenStorageRoutesRefusesEngineOpenUnderForceFallbackEnv proves Finding
-// 4's fix: the deprecated process-wide GC_BEADS_FORCE_FALLBACK alias also
-// refuses a native-transport (beads-workspace) EngineOpener bind, even though
-// the per-city beads.native_transport value is "auto". Before this fix,
-// "process-wide off" was only true for the OpenStoreAtForCity family — a
-// beads-workspace binding opened natively regardless of the env var, which is
-// not what an operator reaching for the legacy kill switch expects.
+// TestOpenStorageRoutesRefusesEngineOpenUnderForceFallbackEnv proves the
+// deprecated process-wide GC_BEADS_FORCE_FALLBACK alias also refuses a
+// native-transport (beads-workspace) EngineOpener bind when the per-city
+// beads.native_transport value is "auto", and that the refusal names the
+// alias: an operator told to set native_transport would change nothing.
 func TestOpenStorageRoutesRefusesEngineOpenUnderForceFallbackEnv(t *testing.T) {
 	t.Setenv("GC_BEADS_FORCE_FALLBACK", "1")
 	root := t.TempDir()
@@ -291,8 +289,8 @@ func TestOpenStorageRoutesRefusesEngineOpenUnderForceFallbackEnv(t *testing.T) {
 		_ = routes.close()
 		t.Fatal("GC_BEADS_FORCE_FALLBACK=1 served a binding engine that only opens natively")
 	}
-	if !strings.Contains(err.Error(), "native_transport") || !strings.Contains(err.Error(), `"off"`) {
-		t.Fatalf("err = %v, want it to name native_transport and off", err)
+	if !strings.Contains(err.Error(), "GC_BEADS_FORCE_FALLBACK") {
+		t.Fatalf("err = %v, want it to name GC_BEADS_FORCE_FALLBACK as the cause", err)
 	}
 	if errors.Is(err, beadsworkspace.ErrWorkspaceUnavailable) {
 		t.Fatalf("err = %v, refused for the wrong reason (workspace-not-there instead of the force-fallback refusal)", err)

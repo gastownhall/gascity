@@ -16,8 +16,8 @@ import (
 // writeMinimalDoltliteFixture creates just enough on disk for
 // beads.NewDoltliteReadStore to succeed: a .beads/metadata.json naming the
 // doltlite database, and an openable (if schema-empty) SQLite file at the
-// path it resolves to. No bead rows or schema are needed — this proves
-// WRAPPING decisions (Finding 9), not the read store's query behavior, which
+// path it resolves to. No bead rows or schema are needed: the fixture backs
+// wrapping decisions, not the read store's query behavior, which
 // internal/beads/doltlite_read_store_test.go already covers.
 func writeMinimalDoltliteFixture(t *testing.T, dir string) {
 	t.Helper()
@@ -47,14 +47,13 @@ func writeMinimalDoltliteFixture(t *testing.T, dir string) {
 }
 
 // TestOpenBdStoreAtScopedSkipsDoltliteOptimizationUnderNativeTransportOff
-// proves Finding 9: beads.native_transport="off" promises this city's stores
-// always use BdStore, the bd CLI subprocess — so the GC_NATIVE_DOLTLITE_BEADS
-// experiment (which wraps that same BdStore with a direct-SQL reader,
-// bypassing the subprocess for reads) must not kick in under "off", even
-// when the env var is set and a real doltlite index file is on disk. Under
-// "auto"/unset, by contrast, the wrap is exactly what the env var promises
-// and must still happen — the negative case alone would not prove the "off"
-// skip is doing anything.
+// proves "off" refuses the GC_NATIVE_DOLTLITE_BEADS read optimization even with
+// the env var set and a real doltlite index file on disk: the optimization
+// wraps BdStore with a direct-SQL reader that bypasses the bd subprocess, and
+// "off" promises every read goes through bd. Both spellings of "off" are
+// covered, the per-city value and the deprecated GC_BEADS_FORCE_FALLBACK alias.
+// The "auto" leg proves the fixture really exercises the optimization; without
+// it the refusals would prove nothing.
 func TestOpenBdStoreAtScopedSkipsDoltliteOptimizationUnderNativeTransportOff(t *testing.T) {
 	t.Setenv(nativeDoltliteBeadsEnv, "1")
 	cityDir := t.TempDir()
@@ -77,5 +76,15 @@ func TestOpenBdStoreAtScopedSkipsDoltliteOptimizationUnderNativeTransportOff(t *
 	}
 	if _, isOptimized := auto.(*beads.DoltliteReadStore); !isOptimized {
 		t.Fatalf("openBdStoreAtScoped(auto) returned %T, want *beads.DoltliteReadStore: the fixture/env setup does not actually exercise the optimization, so the off-mode assertion above proves nothing", auto)
+	}
+
+	// The deprecated process-wide alias overrides the city's "auto".
+	t.Setenv("GC_BEADS_FORCE_FALLBACK", "1")
+	aliased, err := openBdStoreAtScoped(cityDir, cityDir, &config.City{}, false, beads.NativeTransportAuto)
+	if err != nil {
+		t.Fatalf("openBdStoreAtScoped(auto, GC_BEADS_FORCE_FALLBACK=1): %v", err)
+	}
+	if _, isPlainBd := aliased.(*beads.BdStore); !isPlainBd {
+		t.Fatalf("openBdStoreAtScoped(auto) with GC_BEADS_FORCE_FALLBACK=1 returned %T, want a plain *beads.BdStore", aliased)
 	}
 }

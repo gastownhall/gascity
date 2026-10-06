@@ -59,6 +59,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value also refuses controller start. Remove the key before rolling back to an
   older gc, which rejects it under strict mode.
 
+- **`[beads] native_transport = "off"` and `GC_BEADS_FORCE_FALLBACK=1` refuse
+  a `[storage]` binding served by `beads-workspace`.** That provider opens the
+  native Dolt store, which "off" forbids. `gc start` refuses the binding before
+  it opens anything or records an outcome, and the error names the cause: the
+  city's setting or the process-wide variable. A deployment that sets
+  `GC_BEADS_FORCE_FALLBACK=1`, for example to keep `.beads/hooks` scripts
+  running, and binds a class to a beads workspace stops starting after the
+  upgrade. Unset the variable and set `native_transport = "off"` only in the
+  cities that need it, or remove the binding. `sqlite-beads` and the other
+  providers that never open the native store are unaffected (#7036).
+
+- **A command that opens a city's bead store fails when `city.toml` exists but
+  does not load.** It used to open the store with default settings, which would
+  ignore a `native_transport = "off"` in the file it failed to read. Fix the
+  reported error to proceed; setting `GC_BEADS_FORCE_FALLBACK=1` does not
+  bypass it. A directory with no `city.toml` is unaffected, and a running
+  controller keeps the value it read at boot. The `file` provider and `exec:`
+  providers other than the bundled `gc-beads-bd` script are unaffected too,
+  unless gc has to read the provider from a `city.toml` that cannot be parsed:
+  it then falls back to `bd`, and the command fails (#7036).
+
+- **An out-of-enum `[beads] conditional_writes`, `guarded_release` or
+  `native_transport` value fails config load.** These keys are now checked on
+  the composed config, so a bad value in `city.toml`, or in a fragment it
+  includes, fails the load with an error naming the key. Before, a city
+  with a bad `conditional_writes` or `guarded_release` value loaded, and its
+  controller warned and ran with that gate off. Correct the value before
+  upgrading (#7036).
+
 ### Added
 
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
@@ -71,6 +100,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tests. gc applies the value where bd lets it: `gc init`, `gc rig add` and
   `gc beads city migrate-proxied`. bd has no way yet to change the value of a
   scope that already exists (#6561).
+
+- **`[beads] native_transport` chooses whether a city's bead stores may open
+  the native Dolt store.** `"auto"`, the default, keeps the current behavior:
+  native when preflight-eligible, the bd subprocess otherwise. `"off"` keeps
+  every store of the city on the bd subprocess, which a city needs while it
+  still depends on `.beads/hooks` scripts. A `[beads]` fragment that
+  `city.toml` includes keeps the city's value unless the fragment sets
+  `native_transport` itself. A running city picks up a change at its next
+  restart. `GC_BEADS_FORCE_FALLBACK=1` still works as a deprecated alias for
+  `"off"`; it overrides every city in the process and logs a deprecation
+  warning once (#7036).
 
 ### Changed
 

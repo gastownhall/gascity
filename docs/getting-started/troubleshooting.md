@@ -289,9 +289,22 @@ For orchestrator-managed Gas City deployments, confirm that the orchestrator is
 wrapping stores with `CachingStore` and emitting `bead.created`,
 `bead.updated`, `bead.closed`, and `bead.deleted` events to the event bus. After
 that migration is verified, remove the executable hook scripts from the city or
-rig `.beads/hooks/` directory to allow native store adoption. Keep
-`GC_BEADS_FORCE_FALLBACK=1` set when a deployment still depends on those hook
-scripts directly.
+rig `.beads/hooks/` directory to allow native store adoption.
+
+While a city still depends on those hook scripts directly, keep its stores on
+the subprocess-backed store by turning native transport off in `city.toml`:
+
+```toml
+[beads]
+native_transport = "off"
+```
+
+A running city picks up the change at its next restart. This setting replaces
+the `GC_BEADS_FORCE_FALLBACK=1` environment variable, which still works but is
+deprecated and applies to every city the process serves. With either one,
+`gc start` refuses a `[storage]` binding served by `beads-workspace`, because
+that provider opens the native store. Turn native transport off only in cities
+that have no such binding, or remove the binding first.
 
 ## Native Store Falls Back Because Dolt Is in Embedded Mode
 

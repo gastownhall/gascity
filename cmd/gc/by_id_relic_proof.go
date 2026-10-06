@@ -162,6 +162,10 @@ func provenRelicRefsForCity(cityPath string) map[storeref.StoreRef]bool {
 	return proven
 }
 
+// openStorageRoutesForCensus is openStorageRoutes behind a seam, so a test can
+// pin which cfg censusRefusedCityBinding passes.
+var openStorageRoutesForCensus = openStorageRoutes
+
 // censusRefusedCityBinding is the read itself: resolve this city's storage
 // plan, open the binding it names, and ask each derived binding whether it
 // still holds a relic.
@@ -171,18 +175,6 @@ func provenRelicRefsForCity(cityPath string) map[storeref.StoreRef]bool {
 // one-shot gate, and the reasons a binding cannot be reopened here are the
 // reasons it was refused in the first place; reporting them again would put a
 // second copy of the same sentence on every by-id read of an unconverged city.
-// openStorageRoutesForCensus is openStorageRoutes behind a seam, so a test can
-// capture exactly what censusRefusedCityBinding hands it — in particular, that
-// it is the city's REAL cfg and not nil. A nil cfg here would silently drop
-// beads.native_transport="off" (resolvedNativeTransportMode(nil) resolves to
-// NativeTransportUnset, not Off), letting a beads-workspace binding on an
-// "off" city open natively on this read-only path; openStorageRoutes's own
-// native_transport refusal is already covered by
-// TestOpenStorageRoutesRefusesEngineOpenUnderNativeTransportOff, so this seam
-// exists only to pin WHICH cfg this call site passes, not to re-prove the
-// refusal logic itself.
-var openStorageRoutesForCensus = openStorageRoutes
-
 func censusRefusedCityBinding(cityPath string) map[storeref.StoreRef]bool {
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil || cfg == nil || cfg.Storage == nil {
@@ -202,17 +194,11 @@ func censusRefusedCityBinding(cityPath string) map[storeref.StoreRef]bool {
 	if err != nil {
 		return nil
 	}
-	// The real cfg is passed (not nil) so beads.native_transport="off" is
-	// honored here too: a beads-workspace binding on an "off" city must not
-	// open natively just because this is a read-only census path. cityPath is
-	// deliberately still "" and rec stays nil, so the conditional_writes
-	// stamping block's degrade-emitter and event-recorder paths stay exactly
-	// as unreachable as the old nil-cfg call left them (both require a
-	// non-empty cityPath / non-nil rec to do anything). The one behavior this
-	// enables beyond the native_transport fix is conditional_writes="require"
-	// refusing a carrier-less engine here too — which collapses into the same
-	// "no proof" outcome as every other early return below, so it is not a new
-	// failure mode for this read-only path.
+	// The real cfg, so native transport "off" refuses a beads-workspace binding
+	// here too. cityPath stays "" and rec nil, so the conditional_writes stamp
+	// can neither emit a degrade nor record an event; a "require" refusal of a
+	// carrier-less engine collapses into the same "no proof" as every early
+	// return below.
 	routes, err := openStorageRoutesForCensus(plan, infraBindingTarget{Binding: binding}, cfg, "", nil)
 	if err != nil {
 		// "Cannot open the binding" — the one refusal that really does say the

@@ -46,35 +46,15 @@ func resolvedConditionalWritesMode(cfg *config.City) gate.Mode {
 }
 
 // resolvedNativeTransportMode is the store-open view of a city's
-// beads.native_transport for threading into beads.StoreOpenOptions.
-//
-// A nil cfg (the read-only census / unstamped paths that also tolerate a nil
-// cfg for conditional_writes, above) yields NativeTransportUnset rather than
-// refusing: unset normalizes to "auto" everywhere it is consulted, so a
-// best-effort open can never be LESS available than today just because no
-// config was in hand. The deprecated GC_BEADS_FORCE_FALLBACK env alias is not
-// resolved here — it is process-wide and checked directly inside
-// beads.OpenStoreAtForCity, ahead of (and overriding) this per-city value.
+// beads.native_transport, for threading into beads.StoreOpenOptions. A nil cfg
+// yields NativeTransportUnset, which every consumer treats as "auto". The
+// deprecated GC_BEADS_FORCE_FALLBACK alias is not resolved here: it is
+// process-wide, and each consumer checks it ahead of this per-city value.
 func resolvedNativeTransportMode(cfg *config.City) beads.NativeTransportMode {
 	if cfg == nil {
 		return beads.NativeTransportUnset
 	}
 	return beads.NativeTransportMode(cfg.Beads.NormalizedNativeTransport())
-}
-
-// nativeTransportRefused reports whether a native-transport provider (e.g.
-// beads-workspace) must refuse to open for this city: either the per-city
-// beads.native_transport="off" switch, OR the deprecated process-wide
-// GC_BEADS_FORCE_FALLBACK alias. The env alias deliberately applies even when
-// cfg is nil (the read-only census path has no loaded city config to check),
-// because it is process-wide by definition — an operator reaching for
-// GC_BEADS_FORCE_FALLBACK to force every city off native expects that to hold
-// everywhere a native engine could otherwise open, not just the
-// OpenStoreAtForCity call sites. This is the single place both EngineOpener
-// callers (openStorageRoutes' pre-open refusal) and the OpenStoreAtForCity
-// family consult the two kill switches, so they never drift apart.
-func nativeTransportRefused(cfg *config.City) bool {
-	return resolvedNativeTransportMode(cfg) == beads.NativeTransportOff || beads.ForceNativeFallbackActive()
 }
 
 // lazyConditionalWritesDegradeEmitter builds the factory degrade callback for

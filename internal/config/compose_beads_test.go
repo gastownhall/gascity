@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -252,5 +253,25 @@ func TestGuardedReleaseParseAndValidate(t *testing.T) {
 	// an out-of-enum value fails load (a typo must never silently mean off).
 	if _, err := Parse([]byte("[beads]\nguarded_release = \"requre\"\n")); err == nil {
 		t.Fatalf("expected an error for an out-of-enum guarded_release value")
+	}
+}
+
+// TestBeadsModesRejectedOnBothLoadPaths pins validateBeadsModes, the single
+// list of [beads] mode fields that both Parse (one layer) and LoadWithIncludes
+// (the composed root) validate: an out-of-enum value in each field must fail
+// both paths with that field's own error.
+func TestBeadsModesRejectedOnBothLoadPaths(t *testing.T) {
+	for _, field := range []string{"conditional_writes", "guarded_release", "native_transport"} {
+		t.Run(field, func(t *testing.T) {
+			layer := "[beads]\n" + field + " = \"requre\"\n"
+			if _, err := Parse([]byte(layer)); err == nil || !strings.Contains(err.Error(), "beads."+field) {
+				t.Fatalf("Parse: err = %v, want the beads.%s validation error", err, field)
+			}
+			fs := fsys.NewFake()
+			fs.Files["/city/city.toml"] = []byte("[workspace]\nname = \"test\"\n\n" + layer)
+			if _, _, err := LoadWithIncludes(fs, "/city/city.toml"); err == nil || !strings.Contains(err.Error(), "beads."+field) {
+				t.Fatalf("LoadWithIncludes: err = %v, want the beads.%s validation error", err, field)
+			}
+		})
 	}
 }

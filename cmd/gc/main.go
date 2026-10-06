@@ -1714,41 +1714,17 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
 	}
-	// Resolve scopeRoot/provider before (possibly) loading cfg below: neither
-	// depends on a successfully-parsed config (rawBeadsProviderForScope does
-	// its own independent env/raw-file reads), and knowing provider up front
-	// lets the cfg-load-error handling below tell whether native_transport is
-	// even in play for this open — it never is for the file-backed provider.
+	// The provider comes from env and raw city.toml reads, not from cfg, so it
+	// is known before the load below and can decide what a load error costs.
 	scopeRoot := resolveStoreScopeRoot(runtimeCityPath, storePath)
 	provider := rawBeadsProviderForScope(scopeRoot, runtimeCityPath)
 	if authoritative {
 		provider = authoritativeBeadsProviderForScope(scopeRoot, runtimeCityPath)
 	}
 	if cfg == nil {
-		loaded, err := loadCityConfig(runtimeCityPath, io.Discard)
+		loaded, err := loadCityConfigForStoreOpen(runtimeCityPath, provider, nativeOverride)
 		if err != nil {
-			// missingRootCityTOML (no city.toml at this exact path) is the
-			// normal, expected case for the many callers of this shared open
-			// body that are not city-scoped at all (ad hoc store paths,
-			// rig/scope stores outside any city, tests): nil cfg keeps today's
-			// best-effort default (native_transport resolves to "auto", the
-			// resolvedConditionalWritesMode default). Any OTHER load error —
-			// city.toml exists but failed to parse or validate — must not
-			// collapse to that same silent default: beads.native_transport is
-			// a kill switch, and falling back to "auto" on a config we could
-			// not actually read is the one failure mode that promise cannot
-			// survive, so this fails the open loudly instead, consistent with
-			// how internal/config's own loaders (pack_include.go, implicit.go,
-			// skill_discovery.go) treat IsNotExist specially and propagate
-			// every other error. This only applies when native_transport is
-			// actually in play: the file-backed provider never consults it
-			// (see the OpenFileStore branch below), and legacy file-backed
-			// cities that haven't run `gc doctor --fix` yet must still be able
-			// to open their store — that backward-compatibility promise
-			// predates and is independent of the native_transport kill switch.
-			if _, missing := missingRootCityTOML(err, runtimeCityPath); !missing && strings.TrimSpace(provider) != "file" {
-				return beads.StoreOpenResult{}, fmt.Errorf("opening store for city %q: loading city.toml: %w", runtimeCityPath, err)
-			}
+			return beads.StoreOpenResult{}, err
 		}
 		cfg = loaded
 	} else {
@@ -1858,6 +1834,27 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 	return result, nil
 }
 
+// loadCityConfigForStoreOpen loads the city config for a store open that was
+// handed none. A missing city.toml is not an error: most opens through the
+// shared body are not city-scoped, and they proceed on a nil config. Any other
+// load error fails the open when no boot-latched value is in hand and the
+// provider reaches the native_transport decision: an unread "off" must not
+// open as "auto". Every other open proceeds on a nil config, best-effort,
+// because the load error cannot change it. The deprecated
+// GC_BEADS_FORCE_FALLBACK alias overrides the city's value but does not excuse
+// the error: excusing it would let a command that works under the alias start
+// failing once the alias is removed.
+func loadCityConfigForStoreOpen(cityPath, provider string, nativeOverride *beads.NativeTransportMode) (*config.City, error) {
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err == nil || nativeOverride != nil || !beads.ProviderConsultsNativeTransport(provider) {
+		return cfg, nil
+	}
+	if _, missing := missingRootCityTOML(err, cityPath); missing {
+		return cfg, nil
+	}
+	return nil, fmt.Errorf("opening store for city %q: loading city.toml: %w", cityPath, err)
+}
+
 // requireBdBinaryForCity verifies that the logical bd command has either an
 // ambient executable or the city-configured, absolute workspace pin. The
 // runner keeps the logical command name as "bd" so its timeout, telemetry,
@@ -1949,11 +1946,10 @@ func resolveStoreScopeRoot(cityPath, storePath string) string {
 // scope here. CONVERTED one-shot callers go through
 // openOneShotBdStoreAtWithConfig instead.
 //
-// nativeTransport is this call's already-resolved beads.native_transport
-// value (the sole production caller is the factory's OpenBdStore fallback in
-// openStoreResultAtForCityScoped, which has it in hand). It exists so this
-// function can refuse the GC_NATIVE_DOLTLITE_BEADS read optimization under
-// "off" — see openBdStoreAtScoped.
+// nativeTransport is this call's resolved beads.native_transport value. Under
+// "off", or with the deprecated GC_BEADS_FORCE_FALLBACK alias set, the
+// GC_NATIVE_DOLTLITE_BEADS read optimization is refused; see
+// openBdStoreAtScoped.
 func openBdStoreAtWithConfig(storePath, cityPath string, cfg *config.City, nativeTransport beads.NativeTransportMode) (beads.Store, error) {
 	return openBdStoreAtScoped(storePath, cityPath, cfg, false, nativeTransport)
 }
@@ -1965,18 +1961,12 @@ func openOneShotBdStoreAtWithConfig(storePath, cityPath string, cfg *config.City
 }
 
 func openBdStoreAtScoped(storePath, cityPath string, cfg *config.City, oneShotConfig bool, nativeTransport beads.NativeTransportMode) (beads.Store, error) {
-	// beads.native_transport="off" promises this city's stores never open
-	// natively and always use BdStore, the bd CLI subprocess. The
-	// GC_NATIVE_DOLTLITE_BEADS experiment wraps that same BdStore with a
-	// direct-SQL reader against the doltlite secondary-index file for GET/LIST
-	// performance — reads bypass the bd subprocess entirely, even though
-	// writes still go through it. An operator reaching for "off" (often
-	// mid-incident, specifically to rule out every non-subprocess code path)
-	// would not expect a direct local database read to still be in play, so
-	// the optimization is refused under "off" and this always returns the
-	// plain BdStore. It stays wired for "auto"/unset, where no such promise
-	// is made.
-	skipDoltliteOptimization := nativeTransport == beads.NativeTransportOff
+	// The GC_NATIVE_DOLTLITE_BEADS read optimization serves GET and LIST by
+	// direct SQL against the doltlite index file, bypassing the bd subprocess.
+	// "off", per city or through the deprecated process-wide
+	// GC_BEADS_FORCE_FALLBACK alias, promises every read goes through bd, so
+	// it gets the plain BdStore.
+	skipDoltliteOptimization := nativeTransport == beads.NativeTransportOff || beads.ForceNativeFallbackActive()
 	if filepath.Clean(storePath) == filepath.Clean(cityPath) {
 		var store *beads.BdStore
 		if oneShotConfig {

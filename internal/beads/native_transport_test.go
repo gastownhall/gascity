@@ -140,11 +140,10 @@ func TestOpenStoreAtForCityForceFallbackEnvForcesOffAndWarns(t *testing.T) {
 }
 
 // TestOpenStoreAtForCityForceFallbackDeprecationWarnsOnlyOncePerProcess
-// proves Finding 5's fix: two separate opens that both hit the
-// GC_BEADS_FORCE_FALLBACK path only log the deprecation warning once between
-// them (sync.Once), rather than once per open — the latter would flood logs
-// in a long-lived process that opens many city stores with the legacy env
-// var set.
+// proves two separate opens that both hit the GC_BEADS_FORCE_FALLBACK path log
+// the deprecation warning once between them (sync.Once), rather than once per
+// open — the latter would flood logs in a long-lived process that opens many
+// city stores with the legacy env var set.
 func TestOpenStoreAtForCityForceFallbackDeprecationWarnsOnlyOncePerProcess(t *testing.T) {
 	t.Setenv(nativeForceFallbackEnv, "1")
 	resetNativeForceFallbackDeprecationWarnOnceForTest(t)
@@ -209,76 +208,97 @@ func TestOpenStoreAtForCityNativeTransportPerCityOffWorksWithoutTheEnv(t *testin
 	}
 }
 
-// TestOpenStoreAtForCityNativeTransportLatchesPerOpen proves the latching
-// property the design requires: NativeTransport is threaded into
-// StoreOpenOptions BY VALUE, so a caller's config change AFTER an open
-// cannot flip a store that open already returned. It opens a native store
-// under "auto", then mutates the local mode variable to "off" and re-asserts
-// on the ALREADY-RETURNED result — proving the result's diagnostic (and the
-// factory's decision that produced it) cannot be reached by that later
-// mutation. A regression that made the factory consult a live pointer
-// instead of a value snapshot would still pass the first assertion but is
-// exactly the class of bug this test exists to catch if StoreOpenOptions
-// were ever changed to carry a *config.City instead of a resolved value.
-func TestOpenStoreAtForCityNativeTransportLatchesPerOpen(t *testing.T) {
+// TestOpenStoreAtForCityNativeTransportDecidesPerOpen proves each open decides
+// from its own NativeTransport value: opens of one eligible scope under "auto",
+// then "off", then "auto" again pick native, BdStore, and native. An "off" open
+// leaves nothing behind that a later "auto" open inherits.
+func TestOpenStoreAtForCityNativeTransportDecidesPerOpen(t *testing.T) {
 	t.Setenv(nativeForceFallbackEnv, "")
 	scope := "/city"
 	native := NewMemStore()
-
-	mode := NativeTransportAuto
-	opts := StoreOpenOptions{
-		ScopeRoot:        scope,
-		Provider:         "bd",
-		NativeTransport:  mode,
-		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
-		OpenBdStore: func() (Store, error) {
-			t.Fatal("OpenBdStore called for native-eligible scope under auto")
-			return nil, nil
-		},
-		OpenNativeStore: func() (Store, error) {
-			return native, nil
-		},
-	}
-	result, err := OpenStoreAtForCity(context.Background(), opts)
-	if err != nil {
-		t.Fatalf("OpenStoreAtForCity() error = %v", err)
-	}
-	if result.Store != native || !result.Diagnostic.NativeStoreEligible {
-		t.Fatalf("first open did not pick native: store=%T eligible=%v", result.Store, result.Diagnostic.NativeStoreEligible)
+	bd := NewMemStore()
+	open := func(mode NativeTransportMode) StoreOpenResult {
+		t.Helper()
+		result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+			ScopeRoot:        scope,
+			Provider:         "bd",
+			NativeTransport:  mode,
+			PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+			OpenBdStore: func() (Store, error) {
+				return bd, nil
+			},
+			OpenNativeStore: func() (Store, error) {
+				return native, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("OpenStoreAtForCity(native_transport=%q) error = %v", mode, err)
+		}
+		return result
 	}
 
-	// Mutate the local variable (standing in for a reloaded config) AFTER the
-	// open. The already-opened store and its diagnostic must not change.
-	mode = NativeTransportOff
-	_ = mode // the mutation is the point; opts/result were copied at call time.
+	for i, step := range []struct {
+		mode      NativeTransportMode
+		wantStore Store
+		wantName  string
+	}{
+		{mode: NativeTransportAuto, wantStore: native, wantName: storeNameNativeDoltStore},
+		{mode: NativeTransportOff, wantStore: bd, wantName: storeNameBdStore},
+		{mode: NativeTransportAuto, wantStore: native, wantName: storeNameNativeDoltStore},
+	} {
+		result := open(step.mode)
+		if result.Store != step.wantStore || result.Diagnostic.Store != step.wantName {
+			t.Fatalf("open %d (native_transport=%q): diagnostic store = %q, want %q", i+1, step.mode, result.Diagnostic.Store, step.wantName)
+		}
+	}
+}
 
-	if result.Store != native {
-		t.Fatalf("Store changed after mutating mode post-open: %T, want the original native store", result.Store)
+// TestProviderConsultsNativeTransport pins which providers reach the
+// native_transport decision, and checks each answer against the factory: an
+// open under native_transport="off" records the off gate exactly when the
+// helper says the provider consults it. Callers use the helper to decide what
+// a city.toml load error costs, so it must not drift from the factory's routing.
+func TestProviderConsultsNativeTransport(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	cases := []struct {
+		name     string
+		provider string
+		want     bool
+	}{
+		{name: "empty defaults to bd", provider: "", want: true},
+		{name: "bd", provider: "bd", want: true},
+		{name: "doltlite", provider: "doltlite", want: true},
+		{name: "bd-contract exec by name", provider: "exec:gc-beads-bd", want: true},
+		{name: "bd-contract exec by path", provider: "exec:/city/.gc/scripts/gc-beads-bd.sh", want: true},
+		{name: "file", provider: "file", want: false},
+		{name: "file with surrounding space", provider: " file ", want: false},
+		{name: "exec outside the bd contract", provider: "exec:noop.sh", want: false},
 	}
-	if !result.Diagnostic.NativeStoreEligible || result.Diagnostic.Store != storeNameNativeDoltStore {
-		t.Fatalf("Diagnostic changed after mutating mode post-open: %+v", result.Diagnostic)
-	}
-
-	// A FRESH open with the now-off mode, by contrast, DOES pick BdStore —
-	// proving the mutation really takes effect for a NEW decision and the
-	// first result's immutability is not an artifact of a broken test.
-	result2, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
-		ScopeRoot:        scope,
-		Provider:         "bd",
-		NativeTransport:  mode,
-		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
-		OpenBdStore: func() (Store, error) {
-			return NewMemStore(), nil
-		},
-		OpenNativeStore: func() (Store, error) {
-			t.Fatal("OpenNativeStore called on the fresh off-mode open")
-			return nil, nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("OpenStoreAtForCity() (second open) error = %v", err)
-	}
-	if result2.Diagnostic.Store != storeNameBdStore {
-		t.Fatalf("second open diagnostic store = %q, want %q", result2.Diagnostic.Store, storeNameBdStore)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ProviderConsultsNativeTransport(tc.provider); got != tc.want {
+				t.Fatalf("ProviderConsultsNativeTransport(%q) = %v, want %v", tc.provider, got, tc.want)
+			}
+			stub := func() (Store, error) { return NewMemStore(), nil }
+			result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+				ScopeRoot:       "/city",
+				Provider:        tc.provider,
+				NativeTransport: NativeTransportOff,
+				OpenBdStore:     stub,
+				OpenFileStore:   stub,
+				OpenExecStore:   stub,
+				OpenNativeStore: func() (Store, error) {
+					t.Fatal("OpenNativeStore called while native_transport=off")
+					return nil, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("OpenStoreAtForCity(provider %q) error = %v", tc.provider, err)
+			}
+			if consulted := result.Diagnostic.PreflightGate == nativeTransportOffGate; consulted != tc.want {
+				t.Fatalf("factory open for provider %q recorded preflight_gate %q (consulted native_transport = %v), but the helper says %v",
+					tc.provider, result.Diagnostic.PreflightGate, consulted, tc.want)
+			}
+		})
 	}
 }

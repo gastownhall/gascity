@@ -260,39 +260,103 @@ func TestOpenStoreAtForCityThreadsNativeTransportFromLoadedConfig(t *testing.T) 
 	}
 }
 
-// TestOpenStoreAtForCityFailsLoudlyOnConfigLoadError proves Finding 7: a
-// city.toml that exists but fails to load (here, an out-of-enum
-// native_transport value, which config.Parse rejects at load time) must not
-// be silently swallowed into a nil cfg and an "auto" default — this is a
-// native-transport kill switch, and defaulting to native on a config this
-// process could not actually read is exactly the failure mode the switch
-// cannot survive. The open must fail loudly instead, naming the underlying
-// load error.
-func TestOpenStoreAtForCityFailsLoudlyOnConfigLoadError(t *testing.T) {
-	cityDir := t.TempDir()
-	toml := "[workspace]\nname = \"t\"\n\n[beads]\nnative_transport = \"bogus\"\n"
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatal(err)
+// TestOpenStoreAtForCityConfigLoadError pins which opens fail when the
+// city's city.toml exists but does not load. Only an open the city's
+// native_transport value would decide fails: no boot-latched value is in hand
+// and the provider reaches that decision, so an unreadable "off" must not
+// open as "auto". Every other open proceeds on a nil config, best-effort,
+// because the load error cannot change it.
+func TestOpenStoreAtForCityConfigLoadError(t *testing.T) {
+	const brokenInclude = "include = [\"broken.toml\"]\n\n[workspace]\nname = \"t\"\n"
+	off := beads.NativeTransportOff
+	cases := []struct {
+		name     string
+		cityTOML string
+		override *beads.NativeTransportMode
+		wantErr  bool
+	}{
+		{
+			name:     "bd provider with an out-of-enum native_transport fails",
+			cityTOML: "[workspace]\nname = \"t\"\n\n[beads]\nnative_transport = \"bogus\"\n",
+			wantErr:  true,
+		},
+		{
+			name:     "bd provider with a broken include fails",
+			cityTOML: brokenInclude,
+			wantErr:  true,
+		},
+		{
+			name:     "bd-contract exec provider with a broken include fails",
+			cityTOML: brokenInclude + "\n[beads]\nprovider = \"exec:gc-beads-bd\"\n",
+			wantErr:  true,
+		},
+		{
+			name:     "file provider with a broken include opens",
+			cityTOML: brokenInclude + "\n[beads]\nprovider = \"file\"\n",
+		},
+		{
+			name:     "file provider with an out-of-enum conditional_writes opens",
+			cityTOML: "[workspace]\nname = \"t\"\n\n[beads]\nprovider = \"file\"\nconditional_writes = \"bogus\"\n",
+		},
+		{
+			name:     "exec provider outside the bd contract with a broken include opens",
+			cityTOML: brokenInclude + "\n[beads]\nprovider = \"exec:noop.sh\"\n",
+		},
+		{
+			name:     "boot-latched native_transport with a broken include opens",
+			cityTOML: brokenInclude,
+			override: &off,
+		},
+		{
+			name:     "boot-latched native_transport with an unparseable city.toml opens",
+			cityTOML: "[workspace\n",
+			override: &off,
+		},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(cityDir, "broken.toml"), []byte("["), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(tc.cityTOML), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var captured *beads.StoreOpenOptions
+			restore := openStoreFactoryForCity
+			openStoreFactoryForCity = func(_ context.Context, opts beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+				captured = &opts
+				return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
+			}
+			t.Cleanup(func() { openStoreFactoryForCity = restore })
 
-	restore := openStoreFactoryForCity
-	openStoreFactoryForCity = func(_ context.Context, _ beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
-		t.Fatal("the store factory must not be reached when the city config failed to load")
-		return beads.StoreOpenResult{}, nil
-	}
-	t.Cleanup(func() { openStoreFactoryForCity = restore })
-
-	if _, err := openStoreAtForCity(cityDir, cityDir); err == nil {
-		t.Fatal("openStoreAtForCity: want an error for an unloadable city.toml, got nil")
+			_, err := openStoreResultAtForCityWithMode(cityDir, cityDir, gate.ModeUnset, false, false, tc.override)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("open succeeded; want the city.toml load error, because this city's unread native_transport would decide the open")
+				}
+				if captured != nil {
+					t.Fatal("the store factory was reached after the city config failed to load")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("open failed on a load error that cannot change it: %v", err)
+			}
+			if captured == nil {
+				t.Fatal("the store factory was not reached")
+			}
+			if tc.override != nil && captured.NativeTransport != *tc.override {
+				t.Fatalf("NativeTransport = %q, want the boot-latched %q", captured.NativeTransport, *tc.override)
+			}
+		})
 	}
 }
 
-// TestOpenStoreAtForCityToleratesNoCityTOMLAtAll proves the Finding 7 fix is
-// scoped to real load errors, not to "there is no city.toml here at all" —
-// the vast majority of this shared open body's callers (ad hoc store paths,
-// rig/scope stores outside any city) pass a path with no city.toml, and that
-// must keep resolving to the nil-cfg best-effort default it always has,
-// matching missingRootCityTOML's existing use elsewhere in this file.
+// TestOpenStoreAtForCityToleratesNoCityTOMLAtAll pins that a path with no
+// city.toml at all is not a load error: most callers of this shared open body
+// (ad hoc store paths, rig/scope stores outside any city) pass one, and it
+// keeps resolving to the nil-cfg best-effort default.
 func TestOpenStoreAtForCityToleratesNoCityTOMLAtAll(t *testing.T) {
 	storeDir := t.TempDir() // deliberately no city.toml anywhere above this.
 

@@ -312,14 +312,26 @@ func ExecStoreDiagnostic() BeadsDiagnostic {
 	return BeadsDiagnostic{Store: storeNameExecStore}
 }
 
+// ProviderConsultsNativeTransport reports whether a store open for provider
+// reaches the beads.native_transport decision. The file store and exec
+// providers outside the bd contract open before it, so neither the city's
+// native_transport value nor GC_BEADS_FORCE_FALLBACK affects them.
+func ProviderConsultsNativeTransport(provider string) bool {
+	provider = strings.TrimSpace(provider)
+	if provider == "file" {
+		return false
+	}
+	return !strings.HasPrefix(provider, "exec:") || contract.ProviderUsesBDContract(provider)
+}
+
 // OpenStoreAtForCity opens the configured Store for a city or rig scope.
 func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenResult, error) {
 	provider := strings.TrimSpace(opts.Provider)
-	switch {
-	case provider == "file":
-		store, err := callStoreOpen("file store", opts.OpenFileStore)
-		return opts.stampedResult(StoreOpenResult{Store: store, Diagnostic: BeadsDiagnostic{Store: storeNameFileStore}}, err)
-	case strings.HasPrefix(provider, "exec:") && !contract.ProviderUsesBDContract(provider):
+	if !ProviderConsultsNativeTransport(provider) {
+		if provider == "file" {
+			store, err := callStoreOpen("file store", opts.OpenFileStore)
+			return opts.stampedResult(StoreOpenResult{Store: store, Diagnostic: BeadsDiagnostic{Store: storeNameFileStore}}, err)
+		}
 		store, err := callStoreOpen("exec store", opts.OpenExecStore)
 		return opts.stampedResult(StoreOpenResult{Store: store, Diagnostic: BeadsDiagnostic{Store: storeNameExecStore}}, err)
 	}
@@ -689,13 +701,10 @@ func forceNativeFallback() bool {
 }
 
 // ForceNativeFallbackActive reports whether the deprecated process-wide
-// GC_BEADS_FORCE_FALLBACK alias is set, for composition roots that open a
-// bead engine OUTSIDE OpenStoreAtForCity — today, the storebinding
-// EngineOpener seam (cmd/gc's native-transport-provider refusal). Without
-// this, "process-wide off" was only true for the OpenStoreAtForCity path:
-// GC_BEADS_FORCE_FALLBACK would stop every bd-contract city's native store
-// but leave a beads-workspace binding opening natively regardless, which is
-// not what an operator reaching for the process-wide kill switch expects.
+// GC_BEADS_FORCE_FALLBACK alias is set. OpenStoreAtForCity checks it itself;
+// composition roots call this where "off" must hold outside that open: a
+// [storage] binding served by a native-transport provider is refused, and a
+// bd store skips the GC_NATIVE_DOLTLITE_BEADS read optimization.
 func ForceNativeFallbackActive() bool {
 	return forceNativeFallback()
 }

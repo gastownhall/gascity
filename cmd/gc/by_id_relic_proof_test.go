@@ -102,14 +102,13 @@ func TestRefusedCityDeniesTheRelicItsLiveCensusProves(t *testing.T) {
 	}
 }
 
-// TestCensusRefusedCityBindingPassesTheRealCfgNotNil proves Finding 3: the
-// census path's call to openStorageRoutes (through the openStorageRoutesForCensus
-// seam) carries the SAME cfg censusRefusedCityBinding already loaded, not nil.
-// Before this fix, a nil cfg here let resolvedNativeTransportMode(nil) resolve
-// to NativeTransportUnset instead of the city's real "off", so a
-// native-transport binding on an "off" city could still open natively on this
-// read-only, once-per-refused-city path. openStorageRoutes's own refusal logic
-// for native_transport="off" is covered separately by
+// TestCensusRefusedCityBindingPassesTheRealCfgNotNil proves the census path's
+// call to openStorageRoutes (through the openStorageRoutesForCensus seam)
+// carries the SAME cfg censusRefusedCityBinding already loaded, not nil. A nil
+// cfg resolves native_transport to unset rather than the city's real "off", so
+// a native-transport binding on an "off" city would open natively on this
+// read-only path. openStorageRoutes's own refusal under native_transport="off"
+// is covered separately by
 // TestOpenStorageRoutesRefusesEngineOpenUnderNativeTransportOff; this row pins
 // only that the real cfg reaches the call at all.
 func TestCensusRefusedCityBindingPassesTheRealCfgNotNil(t *testing.T) {

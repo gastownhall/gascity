@@ -156,11 +156,100 @@ native_transport = "bogus"
 	}
 }
 
+// TestNativeTransportRejectsFragmentSuppliedOutOfEnum proves the composed-root
+// validation also covers a value an included fragment supplies: fragments are
+// decoded without Parse, so an out-of-enum native_transport there must fail
+// the load rather than silently override the root's valid "off".
+func TestNativeTransportRejectsFragmentSuppliedOutOfEnum(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[beads]
+native_transport = "off"
+`)
+	fs.Files["/city/fragment.toml"] = []byte(`
+[beads]
+native_transport = "bogus"
+`)
+	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err == nil {
+		t.Fatal("LoadWithIncludes: want an error for a fragment-supplied out-of-enum native_transport, got nil")
+	}
+	if !strings.Contains(err.Error(), "beads.native_transport") {
+		t.Fatalf("LoadWithIncludes error = %v, want the beads.native_transport validation error", err)
+	}
+}
+
 // TestNativeTransportRejectsRequire proves "require" specifically is refused:
 // it is a valid gate.Mode spelling (shared with conditional_writes /
 // guarded_release) but is NOT part of native_transport's off|auto grammar.
 func TestNativeTransportRejectsRequire(t *testing.T) {
 	if _, err := Parse([]byte("[beads]\nnative_transport = \"require\"\n")); err == nil {
 		t.Fatalf("expected an error for native_transport = \"require\"")
+	}
+}
+
+// TestNativeTransportSurvivesBeadsFragment is the load-bearing regression for
+// the kill switch under config layering: an included fragment that defines
+// ONLY an unrelated [beads] sibling key must NOT reset the root's explicit
+// native_transport = "off". mergeFragment overwrites base.Beads wholesale when
+// a fragment defines [beads]; without the per-field IsDefined preservation the
+// switch composes to "" — which passes validation and normalizes to "auto" —
+// so the city silently opens natively despite the operator's "off".
+func TestNativeTransportSurvivesBeadsFragment(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[beads]
+native_transport = "off"
+`)
+	fs.Files["/city/fragment.toml"] = []byte(`
+[beads]
+bd_compatibility = "bd-1.0.5"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if got := cfg.Beads.NormalizedNativeTransport(); got != "off" {
+		t.Fatalf("NormalizedNativeTransport = %q, want root off to survive a [beads] fragment", got)
+	}
+	if got := cfg.Beads.NormalizedBDCompatibility(); got != "bd-1.0.5" {
+		t.Fatalf("BDCompatibility = %q, want the fragment's bd-1.0.5", got)
+	}
+}
+
+// TestNativeTransportFragmentOverridesRoot is the companion to the
+// preservation test: a fragment that DOES set native_transport must win
+// (LWW), so the preservation branch can't drift into "base value always wins."
+func TestNativeTransportFragmentOverridesRoot(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[beads]
+native_transport = "off"
+`)
+	fs.Files["/city/fragment.toml"] = []byte(`
+[beads]
+native_transport = "auto"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if got := cfg.Beads.NormalizedNativeTransport(); got != "auto" {
+		t.Fatalf("NormalizedNativeTransport = %q, want the fragment's auto to win", got)
 	}
 }

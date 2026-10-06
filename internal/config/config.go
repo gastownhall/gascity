@@ -4876,13 +4876,7 @@ func Parse(data []byte) (*City, error) {
 	for i := range cfg.Agents {
 		cfg.Agents[i].source = sourceInline
 	}
-	if err := validateConditionalWrites(cfg.Beads.ConditionalWrites); err != nil {
-		return nil, err
-	}
-	if err := validateGuardedRelease(cfg.Beads.GuardedRelease); err != nil {
-		return nil, err
-	}
-	if err := validateNativeTransport(cfg.Beads.NativeTransport); err != nil {
+	if err := validateBeadsModes(cfg.Beads); err != nil {
 		return nil, err
 	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class
@@ -4892,6 +4886,21 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// validateBeadsModes rejects an out-of-enum value in any [beads] mode field
+// (conditional_writes, guarded_release, native_transport). Parse runs it on
+// its single layer and LoadWithIncludesOptions runs it again on the composed
+// root, because a fragment may supply any of these fields; one shared list
+// keeps the two load paths from drifting when a field is added.
+func validateBeadsModes(b BeadsConfig) error {
+	if err := validateConditionalWrites(b.ConditionalWrites); err != nil {
+		return err
+	}
+	if err := validateGuardedRelease(b.GuardedRelease); err != nil {
+		return err
+	}
+	return validateNativeTransport(b.NativeTransport)
 }
 
 // validateConditionalWrites rejects an out-of-enum beads.conditional_writes

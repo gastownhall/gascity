@@ -856,26 +856,20 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 	}
 
-	// Parse validates these three [beads] enum fields on a single layer, but
-	// this composed-root path never calls Parse on the final merged config —
-	// it decodes the root layer with parseWithMeta and merges fragments
-	// in-place (mergeCityFragment overwrites base.Beads wholesale whenever a
-	// fragment defines [beads], so even a root layer that validated cleanly
-	// could end up with a fragment-supplied out-of-enum value). Without this,
-	// a real city.toml like beads.native_transport = "bogus" loaded via `gc`
-	// silently decodes with no error at all: NormalizedNativeTransport then
-	// normalizes "bogus" to itself, every consumer's `== NativeTransportOff`
-	// check fails, and the city silently goes native regardless of operator
-	// intent. Validate once here, over the fully composed root, so every
-	// real load path (not just direct config.Parse callers, mostly tests)
-	// gets the same enum enforcement.
-	if err := validateConditionalWrites(root.Beads.ConditionalWrites); err != nil {
-		return nil, nil, err
-	}
-	if err := validateGuardedRelease(root.Beads.GuardedRelease); err != nil {
-		return nil, nil, err
-	}
-	if err := validateNativeTransport(root.Beads.NativeTransport); err != nil {
+	// Parse validates the [beads] mode fields on a single layer, but this
+	// composed-root path never calls Parse on the final merged config — it
+	// decodes the root layer with parseWithMeta and merges fragments
+	// in-place, and a fragment that sets one of these fields overrides the
+	// root's value in mergeFragment, so even a root layer that validated
+	// cleanly could end up with a fragment-supplied out-of-enum value.
+	// Without this, a real city.toml like beads.native_transport = "bogus"
+	// loaded via `gc` silently decodes with no error at all:
+	// NormalizedNativeTransport then normalizes "bogus" to itself, every
+	// consumer's `== NativeTransportOff` check fails, and the city silently
+	// goes native regardless of operator intent. Validate once here, over
+	// the fully composed root, so every real load path (not just direct
+	// config.Parse callers, mostly tests) gets the same enum enforcement.
+	if err := validateBeadsModes(root.Beads); err != nil {
 		return nil, nil, err
 	}
 
@@ -1144,15 +1138,17 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 
 	// Simple sections: last-writer-wins if fragment defines them.
 	if fragMeta.IsDefined("beads") {
-		// Preserve rollout-gate fields the fragment did not itself set: a
-		// fragment defining any [beads] key would otherwise reset the whole
-		// struct and silently downgrade an explicit conditional_writes /
-		// guarded_release opt-in (mirror of the daemon.formula_v2 preservation
-		// below). Capture before the overwrite; a fragment that DOES set the
-		// field still wins.
+		// Preserve rollout-gate and kill-switch fields the fragment did not
+		// itself set: a fragment defining any [beads] key would otherwise
+		// reset the whole struct and silently downgrade an explicit
+		// conditional_writes / guarded_release opt-in, or turn an explicit
+		// native_transport = "off" back into the "auto" default (mirror of
+		// the daemon.formula_v2 preservation below). Capture before the
+		// overwrite; a fragment that DOES set the field still wins.
 		conditionalWrites := base.Beads.ConditionalWrites
 		guardedRelease := base.Beads.GuardedRelease
 		proxiedIdleTimeout := base.Beads.ProxiedIdleTimeout
+		nativeTransport := base.Beads.NativeTransport
 		base.Beads = fragment.Beads
 		if !fragMeta.IsDefined("beads", "conditional_writes") {
 			base.Beads.ConditionalWrites = conditionalWrites
@@ -1162,6 +1158,9 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		}
 		if !fragMeta.IsDefined("beads", "proxied_idle_timeout") {
 			base.Beads.ProxiedIdleTimeout = proxiedIdleTimeout
+		}
+		if !fragMeta.IsDefined("beads", "native_transport") {
+			base.Beads.NativeTransport = nativeTransport
 		}
 	}
 	if fragMeta.IsDefined("dolt") {
