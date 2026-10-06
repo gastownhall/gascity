@@ -286,12 +286,12 @@ func TestNativeDoltStoreReopenDelegatesForAClosedBead(t *testing.T) {
 }
 
 // TestNativeDoltStoreMetadataKeyRuleSplitsByRoute pins the store's most
-// surprising route asymmetry. The facade validates every patched metadata key;
-// Create and the map-based Store.Tx write do not. A bead can therefore be
-// created carrying a key that every later standalone write refuses, which is
-// why internal/dispatch drops such keys instead of propagating them
-// (beadmeta.CopyUserKeys). The pattern itself is checked against a live server
-// in native_dolt_store_facade_integration_test.go.
+// surprising route asymmetry. The facade validates every patched metadata key,
+// conditional deltas included; Create and the map-based Store.Tx write do not.
+// A bead can therefore be created carrying a key that every later standalone
+// write refuses, which is why internal/dispatch drops such keys instead of
+// propagating them (beadmeta.CopyUserKeys). The pattern itself is checked
+// against a live server in native_dolt_store_facade_integration_test.go.
 func TestNativeDoltStoreMetadataKeyRuleSplitsByRoute(t *testing.T) {
 	store := newNativeDoltStoreForTest(newNativeDoltMemStorage())
 	created, err := store.Create(Bead{Title: "dashed", Metadata: map[string]string{"my-key": "planted"}})
@@ -308,6 +308,42 @@ func TestNativeDoltStoreMetadataKeyRuleSplitsByRoute(t *testing.T) {
 	}
 	if err := store.Update(created.ID, UpdateOpts{Metadata: map[string]string{"my-key": "rewritten"}}); err == nil {
 		t.Fatal("standalone Update accepted a non-conforming key; the facade refuses it")
+	}
+
+	// The conditional doors send their delta as the same role patch, so both
+	// UpdateIfMatch doors and CloseWithMetadataIfMatch refuse the key, and a
+	// refusal writes nothing: the bead stays open at its planted revision.
+	planted, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	status := "in_progress"
+	for _, door := range []struct {
+		name  string
+		write func() error
+	}{
+		{"UpdateIfMatch", func() error {
+			return store.UpdateIfMatch(created.ID, planted.Revision, UpdateOpts{Metadata: map[string]string{"my-key": "rewritten"}})
+		}},
+		{"UpdateIfMatch with a status edit", func() error {
+			return store.UpdateIfMatch(created.ID, planted.Revision, UpdateOpts{Status: &status, Metadata: map[string]string{"my-key": "rewritten"}})
+		}},
+		{"CloseWithMetadataIfMatch", func() error {
+			_, err := store.CloseWithMetadataIfMatch(created.ID, planted.Revision, map[string]string{"my-key": "rewritten"})
+			return err
+		}},
+	} {
+		if err := door.write(); err == nil || !strings.Contains(err.Error(), "my-key") {
+			t.Fatalf("%s error = %v, want the conditional door to refuse the key by name", door.name, err)
+		}
+	}
+	unchanged, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if unchanged.Status != "open" || unchanged.Revision != planted.Revision || unchanged.Metadata["my-key"] != "planted" {
+		t.Fatalf("after the refused conditional writes: status %q, revision %d (planted %d), metadata %#v; want the bead untouched",
+			unchanged.Status, unchanged.Revision, planted.Revision, unchanged.Metadata)
 	}
 
 	if err := store.Tx("gc: tx", func(tx Tx) error {

@@ -302,6 +302,15 @@ type ConditionalAssignmentReleaser interface {
 // ErrConditionalTransferUnsupported, discovered the same way as every other
 // optional capability here: type-assert on the resolved store, never on a
 // wrapper.
+//
+// GROUNDWORK: no production caller depends on this interface yet. Outside
+// the forwarding wrappers, the only production TransferIfCurrent call is
+// cmd/gc's hookClaimRestampWithBdStore, on a BdStore it constructs itself.
+// CachingStore and cmd/gc's emitting class-store wrapper forward the
+// capability. Wrappers that forward ReleaseIfCurrent but not this include
+// ProxiedStore, the cmd/gc policy wrapper and splittest's StrictStore, so a
+// type assertion on any of them fails even over a capable store. Wire them
+// before the first caller relies on the capability through a wrapper.
 type ConditionalAssigneeTransferer interface {
 	TransferIfCurrent(id, fromAssignee, toAssignee string) (bool, error)
 }

@@ -1220,6 +1220,16 @@ func (s *NativeDoltStore) ApplyGraphPlan(ctx context.Context, plan *GraphApplyPl
 // *beadslib.ErrUnsupported before the callback ever runs — and that refusal
 // is where *GraphApplyTooLargeError belongs: there genuinely is no atomic
 // path left for a plan this large on that backend.
+//
+// The two routes do NOT refuse alike. The split counts the composed request's
+// items (creates, edges, parent links and deferred assignments together), not
+// nodes, so whether a plan is batch-sized depends on its whole shape. A
+// hierarchy conflict on the batch route is the role's typed
+// *issueops.DependencyHierarchyConflictError or issueops.ErrDependencyCycle.
+// On the over-cap route it is an untyped error from
+// applyGraphPlanOverCapInTransaction's pairwise parent/edge check, or whatever
+// the transaction's own dependency write raises. A caller cannot classify a
+// refused plan by those types without knowing which side of the cap it fell on.
 func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan *GraphApplyPlan, storageClass StorageClass) (*GraphApplyResult, error) {
 	if err := s.readOnlyGuard(); err != nil {
 		return nil, err

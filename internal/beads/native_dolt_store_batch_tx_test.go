@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -260,6 +261,45 @@ func TestBatchTxReparentNamesItsSeam(t *testing.T) {
 	}
 	if len(spy.applier.requests) != 0 {
 		t.Fatalf("a partial batch was dialed after the refusal: %+v", spy.applier.requests)
+	}
+}
+
+// TestBatchTxRefusesMoreWritesThanOneRequestCarries pins the batch route's
+// own cap. This route is reached only after RunInTransaction refused, so a
+// callback that records more items than one BatchApplier request carries has
+// nowhere else to go: it is refused by name with nothing dialed, never
+// chunked into several requests that could land apart. A callback exactly at
+// the cap still lands as one request.
+func TestBatchTxRefusesMoreWritesThanOneRequestCarries(t *testing.T) {
+	record := func(writes int) func(Tx) error {
+		return func(tx Tx) error {
+			for i := 0; i < writes; i++ {
+				if err := tx.SetMetadataBatch(fmt.Sprintf("gc-%d", i), map[string]string{"state": "swept"}); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+
+	atCap := newBatchTxSpy()
+	if err := newNativeDoltStoreForTest(atCap).Tx("gc: at cap", record(issueops.MaxApplyBatchItems)); err != nil {
+		t.Fatalf("Tx at the cap: %v", err)
+	}
+	if req := soleBatchRequest(t, atCap.applier); len(req.Items) != issueops.MaxApplyBatchItems {
+		t.Fatalf("the batch at the cap carried %d items, want %d", len(req.Items), issueops.MaxApplyBatchItems)
+	}
+
+	overCap := newBatchTxSpy()
+	err := newNativeDoltStoreForTest(overCap).Tx("gc: over cap", record(issueops.MaxApplyBatchItems+1))
+	if !errors.Is(err, errBatchTxTooLarge) {
+		t.Fatalf("Tx over the cap = %v, want errBatchTxTooLarge", err)
+	}
+	if !overCap.txRan {
+		t.Fatal("the native transaction was never attempted; the cap belongs to the batch fallback only")
+	}
+	if len(overCap.applier.requests) != 0 {
+		t.Fatalf("ApplyBatch was called %d times over the cap; an oversized callback must dial nothing", len(overCap.applier.requests))
 	}
 }
 

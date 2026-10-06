@@ -215,6 +215,52 @@ func TestNativeApplyGraphPlanRefusesOverCapWhenNoLocalTransactionExists(t *testi
 	}
 }
 
+// TestNativeApplyGraphPlanOverCapSurfacesAPostEntryRefusalRaw pins the other
+// side of the entered distinction. A refusal raised AFTER the over-cap
+// transaction's callback ran is a failed transaction, not a backend without
+// one. It must surface as itself, even when it is an *beadslib.ErrUnsupported,
+// and never as *GraphApplyTooLargeError: that would tell the caller no atomic
+// route exists for a plan this backend just attempted in one.
+func TestNativeApplyGraphPlanOverCapSurfacesAPostEntryRefusalRaw(t *testing.T) {
+	spy := newGraphApplyBatchSpy()
+	nextID := 0
+	spy.createIssue = func(_ context.Context, issue *beadslib.Issue, _ string) error {
+		nextID++
+		issue.ID = fmt.Sprintf("gc-local-%d", nextID)
+		return nil
+	}
+	callbackRan := false
+	var callbackErr error
+	spy.runInTransaction = func(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
+		callbackRan = true
+		callbackErr = fn(nativeDoltTransactionForTest{storage: spy.nativeDoltStorageSpy})
+		return &beadslib.ErrUnsupported{Op: "commit", Backend: "embedded"}
+	}
+	store := newNativeDoltStoreForTest(spy)
+
+	nodes := make([]GraphApplyNode, issueops.MaxApplyBatchItems+1)
+	for i := range nodes {
+		nodes[i] = GraphApplyNode{Key: fmt.Sprintf("n%d", i), Title: fmt.Sprintf("Node %d", i)}
+	}
+	plan := &GraphApplyPlan{Nodes: nodes}
+
+	_, err := store.ApplyGraphPlanWithStorage(context.Background(), plan, StorageDefault)
+	if !callbackRan || callbackErr != nil {
+		t.Fatalf("over-cap callback ran=%v err=%v; want it entered and clean, so only the refusal after it is under test", callbackRan, callbackErr)
+	}
+	var tooLarge *GraphApplyTooLargeError
+	if errors.As(err, &tooLarge) {
+		t.Fatalf("error = %v; a refusal after the transaction was entered must not become *GraphApplyTooLargeError", err)
+	}
+	var unsupported *beadslib.ErrUnsupported
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("error = %v, want the post-entry *beadslib.ErrUnsupported surfaced as itself", err)
+	}
+	if len(spy.recorder.requests) != 0 {
+		t.Errorf("ApplyBatch was called %d times; an over-cap plan must never reach BatchApplier", len(spy.recorder.requests))
+	}
+}
+
 // TestNativeApplyGraphPlanOverCapUsesLocalTransactionWhenSupported pins the
 // G3 HIGH-2 fix's other half: a LOCAL backend's RunInTransaction is not
 // bound by issueops.MaxApplyBatchItems at all, since the cap belongs to

@@ -37,12 +37,23 @@ var (
 // for "close_reason" — and never written anywhere itself; the actual
 // persisted write is the role's own per-key merge below.
 //
+// Because the delta travels as a role patch, the role checks each of its
+// keys (never the row's existing ones) against the metadata-key rule it
+// applies to standalone Update, which beadmeta.ValidKeyPattern mirrors. A
+// non-conforming key fails the whole request, so the close does not land
+// either; TestNativeDoltStoreMetadataKeyRuleSplitsByRoute pins this.
+//
 // ONE REQUEST, TWO ITEMS, ONE FENCE. The update item carries ExpectedVersion;
 // the close item does not, because UpdateItem.ExpectedVersion's
 // "already-touched" rule (issueops/batchapplier.go) forbids guarding the same
 // row twice in one request, and a second guard would be redundant anyway: the
 // whole request is one transaction, so once the update's fence passes nothing
 // can interleave before the close lands beside it.
+//
+// The returned Bead is read back AFTER that transaction commits; it is not the
+// row the transaction wrote. A reopen or delete landing between the commit and
+// the readback makes this report an error for a close that did commit, and
+// the returned Bead can carry a later writer's revision.
 func (s *NativeDoltStore) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error) {
 	if err := s.readOnlyGuard(); err != nil {
 		return Bead{}, err
@@ -196,6 +207,13 @@ func (s *NativeDoltStore) conditionalLabelsGuarded() bool { return true }
 
 // UpdateIfMatch applies row-backed opts only while id still has
 // expectedRevision.
+//
+// Both doors below send opts.Metadata to the role as a patch, so the role
+// checks each of its keys against the metadata-key rule it applies to
+// standalone Update, which beadmeta.ValidKeyPattern mirrors, and a
+// non-conforming key fails the write.
+// TestNativeDoltStoreMetadataKeyRuleSplitsByRoute pins this beside the
+// routes that accept such a key.
 func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
 	if err := s.readOnlyGuard(); err != nil {
 		return err
@@ -228,12 +246,16 @@ func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts 
 	// serialization conflict, so precondition failures still propagate
 	// immediately (never retried). Mirrors DeleteIfMatch/CloseWithMetadataIfMatch.
 	//
-	// See updateOnceThroughFacade: an assignee or status edit needs a force
-	// waiver neither the plain Lifecycle door nor its wire counterpart
-	// publishes, so it takes the single-item batch door instead, carrying
-	// ExpectedVersion exactly as the plain door does. validateConditionalUpdateOpts
-	// has already rejected ParentID/Labels, so that is the only split this
-	// door needs.
+	// An assignee or status edit waives its guard and takes the single-item
+	// batch door, the same split updateOnceThroughFacade makes. The plain
+	// door is not what lacks the waiver: issueops.UpdateRequest carries both
+	// force members, and so does the server's update request. The http
+	// client is the constraint. It refuses them on updateIssue
+	// (W-UpdateRequest.*) but sends them on the apply item. An UpdateItem
+	// follows UpdateRequest's rules, ExpectedVersion included, so the fence
+	// is the same on either door. validateConditionalUpdateOpts has already
+	// rejected ParentID/Labels, so the apply patch's missing parent_id
+	// (W-ApplyPatch.ParentID) never reaches this door.
 	err = retryOnNativeDoltSerializationConflict(func() error {
 		if opts.Assignee != nil || opts.Status != nil {
 			applier, err := storage.BatchApplier()
