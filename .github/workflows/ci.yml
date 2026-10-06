@@ -212,6 +212,7 @@ jobs:
               - '.github/actions/setup-gascity-ubuntu/**'
               - '.github/actions/go-mod-download/**'
               - '.github/scripts/go-mod-download-retry.sh'
+              - '.github/scripts/go-mod-verify-cache.sh'
               - '.github/scripts/install-dolt-archive.sh'
               - '.github/scripts/install-bd-archive.sh'
               - '.github/scripts/install-claude-native.sh'

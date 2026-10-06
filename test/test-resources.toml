@@ -10,7 +10,7 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 746
+baseline_calls = 748
 baseline_files = 220
 reported_calls = 495
 reported_files = 135
@@ -51,7 +51,7 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 499
+baseline_calls = 501
 baseline_files = 147
 reported_calls = 380
 reported_files = 98
@@ -392,6 +392,17 @@ resources = ["subprocess"]
 owner_bead = "ga-cp3hwi"
 invariant = "the CI go mod download retry proof is a checked Medium subprocess owner"
 resource_owner = "the one bash subprocess per case is confined to TestGoModDownloadRetryScriptRetriesTransientFailures, which exists to run .github/scripts/go-mod-download-retry.sh against a PATH-injected fake go: the retry loop and GOPROXY selection are shell, so only a real shell run can prove a transient proxy error is retried and a persistent one fails"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestGoModVerifyCacheDetectsTamperedModules"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the CI Go module cache verification proof is a checked Medium subprocess owner"
+resource_owner = "the go and bash subprocesses are confined to TestGoModVerifyCacheDetectsTamperedModules, which exists to run .github/scripts/go-mod-download-retry.sh and .github/scripts/go-mod-verify-cache.sh with the real go command against a file:// module proxy and an isolated module cache, then tamper with the cached zip: the claim under test is the go command's own trust of a cached .ziphash, so only the real go command can prove the verify step catches what it accepts"
 migration_target = "P0.4b"
 expires = "2026-10-31"
 

@@ -131,8 +131,10 @@ const (
 	// proxy.golang.org; and the shared changes filter gains that action's
 	// directory and its retry script. Reviewed delta: one setup-go input and
 	// one local-action step per setup-go job, two filter paths. No new job,
-	// trigger, permission or secret.
-	expectedCIExecutionHash     = "3c5a72c5dc420242c1e29dc6bc766623838326bf1d69801dc915c94fcf373a4b"
+	// trigger, permission or secret. Then the shared changes filter gains
+	// .github/scripts/go-mod-verify-cache.sh, the action's go.sum
+	// verification step. Reviewed delta: one filter path.
+	expectedCIExecutionHash     = "f959051587d5829b78dcf59a4a9166c58658c630638b315ebbb438fac622f726"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -272,6 +274,7 @@ var requiredFilterPaths = map[string][]string{
 		".github/actions/setup-gascity-ubuntu/**",
 		".github/actions/go-mod-download/**",
 		".github/scripts/go-mod-download-retry.sh",
+		".github/scripts/go-mod-verify-cache.sh",
 		".github/scripts/install-dolt-archive.sh",
 		".github/scripts/install-bd-archive.sh",
 		".github/scripts/install-claude-native.sh",

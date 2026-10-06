@@ -2,8 +2,8 @@ name: Download Go modules
 description: >-
   Warm the Go module cache for this repository's module before any build or
   test step: restore the module download cache keyed on go.sum, run a
-  retried `go mod download`, and, on a key miss in a push or schedule run,
-  save the cache.
+  retried `go mod download`, verify every module against go.sum, and, on a
+  key miss in a push or schedule run, save the cache.
   Run it after actions/setup-go (or a setup-gascity-* action) and after
   checkout; build and test steps then find every module locally and never
   reach the module proxy.
@@ -33,6 +33,11 @@ description: >-
 # tampered module past go.sum; restricting writers keeps the cache as
 # trustworthy as the default branch. A pull request that changes go.sum
 # restores the default branch's entry and fetches only its delta.
+#
+# Restricting writers is not the only defence: every run re-hashes the
+# restored and downloaded modules with `go mod verify` before any build step,
+# so a poisoned or corrupt entry is detected regardless of who could write
+# the cache (see .github/scripts/go-mod-verify-cache.sh).
 
 runs:
   using: composite
@@ -55,9 +60,18 @@ runs:
       shell: bash
       run: '"$GITHUB_ACTION_PATH/../../scripts/go-mod-download-retry.sh"'
 
+    # The go command trusts a cached .ziphash without re-hashing its zip, so
+    # verify every module against go.sum before any build step or save; a
+    # mismatch purges the cache and re-downloads once, then fails the step.
+    - name: Verify Go modules against go.sum
+      id: verify
+      shell: bash
+      run: '"$GITHUB_ACTION_PATH/../../scripts/go-mod-verify-cache.sh"'
+
     - name: Save Go module download cache
       if: >-
-        ${{ steps.restore.outputs.cache-hit != 'true' &&
+        ${{ steps.verify.outcome == 'success' &&
+        steps.restore.outputs.cache-hit != 'true' &&
         (github.event_name == 'push' || github.event_name == 'schedule') }}
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
