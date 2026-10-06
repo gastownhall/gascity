@@ -79,6 +79,13 @@ type Options struct {
 	// StartTimeout bounds the start op, which may include readiness
 	// work. Default: 120s.
 	StartTimeout time.Duration
+	// RequireNudge escalates the optional nudge probe (checkSessionOps)
+	// from an absence-tolerant SKIP to a hard FAIL: set by a caller that
+	// has independently determined nudge support is required, e.g.
+	// cmd/gc for a runtime declaring prompt_delivery = "nudge-fallback"
+	// (FR5, ga-s5y62b.2). Default: false — today's SKIP-on-absence
+	// behavior, unchanged.
+	RequireNudge bool
 }
 
 func (o *Options) applyDefaults() {
@@ -342,7 +349,7 @@ func (c *checker) remainingCheckNames() []string {
 	}
 	return append(names,
 		"optional: process-alive",
-		"optional: nudge",
+		c.nudgeCheckName(),
 		"optional: metadata round-trip",
 		"optional: peek",
 		"optional: list-running",
@@ -369,7 +376,7 @@ func (c *checker) checkSessionOps(ctx context.Context, name string) {
 	c.checkCapabilityOp(ctx, runtime.ProtocolCapabilityReportActivity, name, c.validateLastActivity)
 
 	c.checkProcessAlive(ctx, name)
-	c.checkOptional(ctx, "optional: nudge", []byte("gc runtime check probe"), "nudge", name)
+	c.checkNudge(ctx, name)
 	c.checkMetadataRoundTrip(ctx, name)
 	c.checkOptional(ctx, "optional: peek", nil, "peek", name, "10")
 	c.checkListRunning(ctx, name)
@@ -460,6 +467,39 @@ func (c *checker) checkOptional(ctx context.Context, check string, stdin []byte,
 	res := c.runOp(ctx, stdin, args...)
 	switch {
 	case res.unsupported:
+		c.record(check, StatusSkip, "not implemented (exit 2)")
+	case res.err != nil:
+		c.record(check, StatusFail, res.err.Error())
+	default:
+		c.record(check, StatusPass, "")
+	}
+}
+
+// nudgeCheckName is the name checkNudge reports its result under, escalated
+// by RequireNudge so remainingCheckNames's start-failure skip listing names
+// the same check checkNudge would have run.
+func (c *checker) nudgeCheckName() string {
+	if c.opts.RequireNudge {
+		return "required: nudge"
+	}
+	return "optional: nudge"
+}
+
+// checkNudge probes the nudge op. Absence is tolerated (SKIP) by default,
+// like any other optional op — but a caller that has independently
+// determined nudge support is required (e.g. cmd/gc, for a runtime pack
+// declaring prompt_delivery = "nudge-fallback") sets RequireNudge, which
+// escalates an absent or broken nudge to a hard FAIL: self-verifying the
+// declaration is the point (FR5, ga-s5y62b.2), not trusting it unchecked.
+func (c *checker) checkNudge(ctx context.Context, name string) {
+	check := c.nudgeCheckName()
+	res := c.runOp(ctx, []byte("gc runtime check probe"), "nudge", name)
+	switch {
+	case res.unsupported:
+		if c.opts.RequireNudge {
+			c.record(check, StatusFail, "declared prompt_delivery=nudge-fallback but nudge is not implemented (exit 2)")
+			return
+		}
 		c.record(check, StatusSkip, "not implemented (exit 2)")
 	case res.err != nil:
 		c.record(check, StatusFail, res.err.Error())

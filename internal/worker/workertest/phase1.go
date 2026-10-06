@@ -105,7 +105,7 @@ func TranscriptUsageResult(profile Profile, snapshot *Snapshot) Result {
 	}
 
 	adapter := worker.SessionLogAdapter{SearchPaths: []string{snapshot.FixtureRoot}}
-	usages, err := adapter.InvocationUsage(profile.Provider, snapshot.TranscriptPath)
+	usages, err := adapter.InvocationUsage(profile.Provider, snapshot.TranscriptPath, "")
 	if err != nil {
 		return Fail(profile.ID, RequirementTranscriptUsage,
 			fmt.Sprintf("extract %s invocation usage: %v", family, err)).WithEvidence(evidence)
@@ -166,7 +166,7 @@ func TranscriptUsageCostResult(profile Profile, snapshot *Snapshot) Result {
 	}
 
 	adapter := worker.SessionLogAdapter{SearchPaths: []string{snapshot.FixtureRoot}}
-	usages, err := adapter.InvocationUsage(profile.Provider, snapshot.TranscriptPath)
+	usages, err := adapter.InvocationUsage(profile.Provider, snapshot.TranscriptPath, "")
 	if err != nil {
 		return Fail(profile.ID, RequirementInvocationUsageCost,
 			fmt.Sprintf("extract %s invocation usage: %v", family, err)).WithEvidence(evidence)

@@ -55,6 +55,34 @@ type backstopPredicate interface {
 	clear(store beads.Store, s *beads.Bead, stdout io.Writer)
 }
 
+// backstopHoldObserver is an optional predicate extension. A predicate that
+// implements it is told which engine-level gate held a session this tick
+// (backstopHold* reasons) and when the session became actionable again, so it
+// can leave a durable breadcrumb. Without one, a backstop that is holding looks
+// exactly like one that is broken.
+type backstopHoldObserver interface {
+	observeHold(store beads.Store, s *beads.Bead, reason string, stdout io.Writer)
+	clearHold(store beads.Store, s *beads.Bead, stdout io.Writer)
+}
+
+// Engine-level hold reasons passed to backstopHoldObserver.observeHold.
+const (
+	backstopHoldRuntimeNotRunning = "runtime_not_running"
+	backstopHoldRevalidate        = "revalidate_hold"
+)
+
+func observeBackstopHold(pred backstopPredicate, store beads.Store, s *beads.Bead, reason string, stdout io.Writer) {
+	if ho, ok := pred.(backstopHoldObserver); ok {
+		ho.observeHold(store, s, reason, stdout)
+	}
+}
+
+func clearBackstopHold(pred backstopPredicate, store beads.Store, s *beads.Bead, stdout io.Writer) {
+	if ho, ok := pred.(backstopHoldObserver); ok {
+		ho.clearHold(store, s, stdout)
+	}
+}
+
 // backstopTarget is the durable identity of one outstanding delivery target.
 // ID is the human-facing work bead. RootID, StoreRef, and Generation are
 // optional persisted provenance fields: the initial pool-claim predicate needs
@@ -146,6 +174,7 @@ func runNudgeBackstop(
 		}
 		sessName := strings.TrimSpace(s.Metadata["session_name"])
 		if sessName == "" || !sp.IsRunning(sessName) {
+			observeBackstopHold(pred, store, s, backstopHoldRuntimeNotRunning, stdout)
 			continue
 		}
 
@@ -155,9 +184,13 @@ func runNudgeBackstop(
 			continue
 		case backstopResolutionClear:
 			pred.clear(store, s, stdout)
+			clearBackstopHold(pred, store, s, stdout)
 			continue
 		case backstopResolutionOutstanding:
-			// Continue below.
+			// Continue below. The hold breadcrumb is cleared where the engine
+			// actually advances, not here: clearing on every outstanding tick
+			// would flap it against a standing revalidate hold, costing two
+			// writes per tick for as long as that hold lasts.
 		default:
 			continue
 		}
@@ -167,30 +200,48 @@ func runNudgeBackstop(
 			// First observation of this assignment: start the grace clock,
 			// don't nudge yet — a normal claim/confirmation almost always
 			// lands within the grace window.
+			clearBackstopHold(pred, store, s, stdout)
 			pred.observe(store, s, target, now, stdout)
 			continue
 		}
 
 		switch decideBackstopAction(attempts, last, now) {
 		case backstopActionWait:
+			clearBackstopHold(pred, store, s, stdout)
 			continue
 		case backstopActionExhausted:
+			clearBackstopHold(pred, store, s, stdout)
 			pred.exhausted(store, s, stdout)
 			continue
 		case backstopActionNudge:
-			content := pred.content(*s)
-			if content == "" {
-				continue
-			}
 			switch pred.revalidate(target) {
 			case backstopResolutionHold:
+				observeBackstopHold(pred, store, s, backstopHoldRevalidate, stdout)
 				continue
 			case backstopResolutionClear:
 				pred.clear(store, s, stdout)
+				clearBackstopHold(pred, store, s, stdout)
 				continue
 			case backstopResolutionOutstanding:
-				// Reserve below.
+				clearBackstopHold(pred, store, s, stdout)
+				// Deliver below.
 			default:
+				continue
+			}
+			content := pred.content(*s)
+			if content == "" {
+				// Nothing is deliverable for this session. `agent.Nudge` is
+				// optional and pool templates routinely leave it unset, so this
+				// is the common case, not the exotic one. Skipping silently
+				// parks the state machine on its observe marker forever: no
+				// attempt is ever reserved, the cap is never reached, and the
+				// predicate's terminal action never runs — which for the
+				// execution backstop is the drain that is the only thing that
+				// releases the claim. The bounded attempts exist to give the
+				// agent a chance to ANSWER a nudge; with no nudge to send there
+				// is nothing to wait for, so go straight to the terminal action
+				// after the same grace window.
+				pred.exhausted(store, s, stdout)
 				continue
 			}
 			// Write ahead of the external delivery. If the process crashes

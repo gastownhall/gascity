@@ -1602,7 +1602,7 @@ func TestAcceptStartupDialogsWithTimeoutRefreshesBudgetOnProgress(t *testing.T) 
 				if time.Since(start) < renderDelay {
 					return "", nil // agent still booting: nothing on screen yet
 				}
-				return "Quick safety check", nil
+				return "Quick safety check: Is this a project you created or one you trust?\n\n❯ Yes, I trust this folder\n  No, exit\n\nEnter to confirm · Esc to cancel", nil
 			}
 			if time.Since(trustAccepted) < renderDelay {
 				return "", nil // next dialog has not rendered yet
@@ -1761,6 +1761,81 @@ func TestContainsCustomAPIKeyDialog(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := containsCustomAPIKeyDialog(tt.content); got != tt.want {
 				t.Fatalf("containsCustomAPIKeyDialog(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+// feedbackSurveySessionFixture is a byte-accurate capture of Claude Code's
+// post-turn "How is Claude doing this session?" feedback survey (ga-zg7fjq).
+const feedbackSurveySessionFixture = `⏺ Done — pushed the branch and replied on the PR.
+
+● How is Claude doing this session? (optional)
+  1: Bad    2: Fine   3: Good   0: Dismiss
+
+╭──────────────────────────────────────────────────────────╮
+│ ❯                                                        │
+╰──────────────────────────────────────────────────────────╯
+  ⏵⏵ bypass permissions on (shift+tab to cycle)`
+
+// feedbackSurveyMemoryFixture is a byte-accurate capture of the memory-
+// recollection variant of the same survey, mounted with showNotSure:true so
+// it carries an extra "4: Unsure" cell and an embedded recalled-memory line
+// instead of a stable title (ga-zg7fjq).
+const feedbackSurveyMemoryFixture = `⏺ Reading the config.
+
+● Claude recalled a memory:
+
+  The user prefers tabs over spaces.
+
+  How was Claude's recollection? (optional)
+  1: Bad    2: Fine   3: Good   4: Unsure  0: Dismiss
+
+╭──────────────────────────────────────────────────────────╮
+│ ❯                                                        │
+╰──────────────────────────────────────────────────────────╯
+  ⏵⏵ bypass permissions on (shift+tab to cycle)`
+
+func TestContainsFeedbackSurveyModal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{
+			name:    "session feedback variant",
+			content: feedbackSurveySessionFixture,
+			want:    true,
+		},
+		{
+			name:    "memory recollection variant",
+			content: feedbackSurveyMemoryFixture,
+			want:    true,
+		},
+		{
+			name: "labels scattered across lines is not a match",
+			content: "⏺ The survey asks 1: Bad or 3: Good — I picked Fine.\n" +
+				"  Dismiss is 0, per the docs.",
+			want: false,
+		},
+		{
+			name:    "normal output",
+			content: "Starting Claude Code...",
+			want:    false,
+		},
+		{
+			name:    "empty",
+			content: "",
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ContainsFeedbackSurveyModal(tt.content); got != tt.want {
+				t.Fatalf("ContainsFeedbackSurveyModal(%q) = %v, want %v", tt.content, got, tt.want)
 			}
 		})
 	}

@@ -181,7 +181,10 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 	}
 	sessionName := metaString(spawnedSessionBead.Metadata, "session_name")
 	require.NotEmpty(t, sessionName, "spawned worker should record session_name metadata")
-	require.True(t, strings.HasPrefix(sessionName, "claude-"), "spawned worker should use a claude-* session name, got %q", sessionName)
+	// An unaliased pool worker runs as <template>-<beadID> so the runtime name
+	// resolves back to its session bead (not the bare template, not a
+	// "-pool" step-aside).
+	require.Equal(t, "claude-"+spawnedSessionBead.ID, sessionName, "spawned worker should use the claude-<beadID> session name")
 
 	outputPath := filepath.Join(c.Dir, outputRel)
 	var lastWorkBead beadJSON
@@ -263,7 +266,7 @@ func configureFreshInitClaudePool(t *testing.T, c *helpers.City) {
 		`min_active_sessions = 0`,
 		`max_active_sessions = 1`,
 	)
-	promptPath := filepath.Join(helpers.FindModuleRoot(), "internal", "bootstrap", "packs", "core", "assets", "prompts", "pool-worker.md")
+	promptPath := filepath.Join(helpers.FindModuleRoot(), "internal", "bootstrap", "packs", "core", "assets", "prompts", "pool-worker.template.md")
 	prompt, err := os.ReadFile(promptPath)
 	require.NoError(t, err, "read canonical pool-worker prompt")
 	prompt = append(prompt, []byte("\n## Acceptance Fixture\n\n"+

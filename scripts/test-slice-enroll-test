@@ -172,6 +172,7 @@ run_entry() {
   local name="$1" cgroup_file="$2"
   shift 2
   if ! out="$(env -u GC_TEST_NO_SLICE -u GC_TEST_SLICE_ENROLLED \
+    -u GC_TEST_SLICE_TASKS_MAX \
     PATH="$scen_bin" \
     GC_TEST_SLICE_CGROUP_FILE="$cgroup_file" \
     "$@" \
@@ -192,7 +193,7 @@ expect_log_lines() {
   fi
 }
 
-probe_args="--user --slice=gascity-test.slice --scope --collect --quiet -- true"
+probe_args="--user --slice=gascity-test.slice --scope --collect --quiet --property=TasksMax=8192 -- true"
 
 # Scenario: explicit opt-out runs plain without touching systemd at all.
 new_scenario opt-out
@@ -258,7 +259,7 @@ expect_log_lines wrap "$sdr_log" 2
 if [[ "$(head -n1 "$sdr_log")" != "$probe_args" ]]; then
   fail "wrap: unexpected probe args: $(head -n1 "$sdr_log")"
 fi
-want_wrap_args="--user --slice=gascity-test.slice --scope --collect --quiet -- $entry alpha beta"
+want_wrap_args="--user --slice=gascity-test.slice --scope --collect --quiet --property=TasksMax=8192 -- $entry alpha beta"
 if [[ "$(sed -n 2p "$sdr_log")" != "$want_wrap_args" ]]; then
   fail "wrap: unexpected wrap args: $(sed -n 2p "$sdr_log")"
 fi

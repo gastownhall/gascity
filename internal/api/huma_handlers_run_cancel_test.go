@@ -405,6 +405,99 @@ func TestRunCancelWireRoute(t *testing.T) {
 	}
 }
 
+// TestRunCancelLeavesTeardownStepOpenToExecute guards the finding that run
+// cancellation force-closed a workflow's always-run cleanup step as canceled
+// instead of letting it run: cancelRun's blanket subtree close swept the
+// teardown tail along with ordinary open work, so a step whose job is to
+// release the run's external resources (e.g. tearing down a sandbox) never
+// executed. The teardown step must stay open after cancel, and still be
+// closeable with a real outcome afterward, so the dispatcher can drive it to
+// completion — its pass condition may read ROOT_OUTCOME, which only exists
+// once the root itself is closed, which cancelRun already does.
+func TestRunCancelLeavesTeardownStepOpenToExecute(t *testing.T) {
+	fs := newFakeState(t)
+	store := fs.stores["myrig"]
+	root, err := store.Create(beads.Bead{
+		Title:    "run root",
+		Type:     "molecule",
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	openStep, err := store.Create(beads.Bead{
+		Title:    "ordinary step",
+		Type:     "task",
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	teardown, err := store.Create(beads.Bead{
+		Title: "cleanup",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.scope_role":   "teardown",
+			"gc.step_id":      "cleanup",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{state: fs}
+
+	out, err := s.humaHandleRunCancel(context.Background(), &RunCancelInput{
+		CityScope: CityScope{CityName: "test-city"},
+		RunID:     root.ID,
+	})
+	if err != nil {
+		t.Fatalf("cancel error: %v", err)
+	}
+	if out.Body.Status != RunStatusCanceled {
+		t.Errorf("status = %q, want canceled", out.Body.Status)
+	}
+	// Root + the one ordinary step close; the teardown step is excluded from
+	// the sweep and stays open.
+	if out.Body.Closed != 2 {
+		t.Errorf("closed = %d, want 2 (root + ordinary step; the teardown step stays open)", out.Body.Closed)
+	}
+
+	afterCancel, err := store.Get(teardown.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterCancel.Status == "closed" {
+		t.Fatal("teardown step was force-closed by run cancel; it must stay open so it can still execute")
+	}
+	if got := afterCancel.Metadata["gc.outcome"]; got == "canceled" {
+		t.Fatal("teardown step was stamped canceled by run cancel; it never ran")
+	}
+
+	// The ordinary step DID close as canceled — cancel still winds down the
+	// rest of the run, it only exempts the teardown tail.
+	openAfter, err := store.Get(openStep.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if openAfter.Status != "closed" || openAfter.Metadata["gc.outcome"] != "canceled" {
+		t.Errorf("ordinary step = %+v, want closed with gc.outcome=canceled", openAfter)
+	}
+
+	// The teardown step is still executable: it can now run to completion and
+	// record a real outcome, proving cancel did not strand it half-wound-down.
+	if _, err := store.CloseAll([]string{teardown.ID}, map[string]string{"gc.outcome": "pass"}); err != nil {
+		t.Fatalf("closing teardown step after cancel: %v", err)
+	}
+	executed, err := store.Get(teardown.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executed.Status != "closed" || executed.Metadata["gc.outcome"] != "pass" {
+		t.Errorf("executed teardown step = %+v, want closed with gc.outcome=pass", executed)
+	}
+}
+
 func TestRunCancelAlreadyTerminalConflict(t *testing.T) {
 	s, store, runID := newWorkflowRun(t)
 	// Close the root before canceling — the run is already terminal.

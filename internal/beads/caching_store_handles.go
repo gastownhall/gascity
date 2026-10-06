@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // CachedReader is the cache-only eventual-consistency read handle for active
@@ -211,7 +213,7 @@ func (c *CachingStore) cachedListOnly(query ListQuery) ([]Bead, error) {
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if (c.state != cacheLive && c.state != cachePartial) || c.primePartialErr != nil || len(c.dirty) > 0 {
+	if !c.cacheServableForListQueryLocked(query) || len(c.dirty) > 0 {
 		return nil, fmt.Errorf("listing beads from cache: %w", ErrCacheUnavailable)
 	}
 	rows := make([]Bead, 0, len(c.beads))
@@ -254,6 +256,7 @@ func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQ
 	}
 
 	statusByID := make(map[string]string, len(c.beads))
+	workOutcomeByID := make(map[string]string, len(c.beads))
 	openBeads := make([]Bead, 0, len(c.beads))
 	now := time.Now().UTC()
 	for _, b := range c.beads {
@@ -262,6 +265,7 @@ func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQ
 			return nil, err
 		}
 		statusByID[b.ID] = b.Status
+		workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
 		if !IsReadyCandidateForTier(b, now, query.TierMode) {
 			continue
 		}
@@ -286,7 +290,7 @@ func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQ
 
 	// The maps above are a consistent snapshot, so sorting and dependency
 	// evaluation need not hold the cache lock or delay writers.
-	return cachedReadyRows(ctx, query, statusByID, openBeads, depsByID, true)
+	return cachedReadyRows(ctx, query, statusByID, workOutcomeByID, openBeads, depsByID, true, true)
 }
 
 func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
@@ -296,10 +300,12 @@ func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
 	}
 
 	statusByID := make(map[string]string, len(c.beads))
+	workOutcomeByID := make(map[string]string, len(c.beads))
 	openBeads := make([]Bead, 0, len(c.beads))
 	now := time.Now().UTC()
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
+		workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
 		if !IsReadyCandidateForTier(b, now, query.TierMode) {
 			continue
 		}
@@ -311,16 +317,20 @@ func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
 		}
 		openBeads = append(openBeads, cloneBead(b))
 	}
-	return cachedReadyRows(context.Background(), query, statusByID, openBeads, c.deps, c.depsComplete)
+	return cachedReadyRows(
+		context.Background(), query, statusByID, workOutcomeByID, openBeads, c.deps, c.depsComplete, c.state == cacheLive,
+	)
 }
 
 func cachedReadyRows(
 	ctx context.Context,
 	query ReadyQuery,
 	statusByID map[string]string,
+	workOutcomeByID map[string]string,
 	openBeads []Bead,
 	depsByID map[string][]Dep,
 	depsComplete bool,
+	nonclosedStatusesComplete bool,
 ) ([]Bead, error) {
 	cancellable := ctx != nil && ctx.Done() != nil
 	// Sort candidates before the limit-bounded loop below: the cache source is
@@ -347,7 +357,10 @@ func cachedReadyRows(
 		default:
 			return nil, fmt.Errorf("reading ready deps from cache: %w", ErrCacheUnavailable)
 		}
-		if !cachedBeadReady(b, statusByID, deps) {
+		if !nonclosedStatusesComplete && !cachedReadyDependencyStatusesKnown(b, statusByID, deps) {
+			return nil, fmt.Errorf("reading ready dependency statuses from cache: %w", ErrCacheUnavailable)
+		}
+		if !cachedBeadReady(b, statusByID, workOutcomeByID, deps) {
 			continue
 		}
 		result = append(result, cloneBead(b))

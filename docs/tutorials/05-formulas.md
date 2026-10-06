@@ -603,6 +603,10 @@ recording the original instructions, a first iteration for the agent, and a
 control step keeping the original `implement` ID. When an iteration closes, Gas
 City runs `scripts/verify.sh`; exit 0 means done, non-zero spawns another
 iteration — up to `max_attempts` total. If all attempts fail, the step fails.
+One nonzero exit is special: 75 says the script could not reach the
+infrastructure it needed to decide, so Gas City re-runs the check without
+spending an attempt — see [Check](/reference/specs/formula-spec-v2#31-check)
+in the spec.
 
 ### Retry
 

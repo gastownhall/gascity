@@ -130,20 +130,15 @@ func bundledPackDirForTest(t testing.TB, packName string) string {
 
 func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 	doltSystemNeedle := "information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe"
-	maintenanceScratchNeedle := "benchdb|testdb_*|beads_pt*|beads_vr*|beads_test_bench_*|doctest_*|doctortest_*"
-	maintenanceTempNeedle := "beads_t[0-9a-f]"
 	for _, tt := range []struct {
 		pack     string
 		rel      string
 		needle   string
 		minCount int
 	}{
-		{"core", "assets/scripts/jsonl-export.sh", doltSystemNeedle, 1},
-		{"core", "assets/scripts/jsonl-export.sh", maintenanceScratchNeedle, 1},
-		{"core", "assets/scripts/jsonl-export.sh", maintenanceTempNeedle, 1},
-		{"core", "assets/scripts/reaper.sh", doltSystemNeedle, 1},
-		{"core", "assets/scripts/reaper.sh", maintenanceScratchNeedle, 1},
-		{"core", "assets/scripts/reaper.sh", maintenanceTempNeedle, 1},
+		// The core reaper and jsonl-export no longer enumerate server
+		// databases: they visit bound bead scopes through `gc bd`, so neither
+		// the probe database nor test scratch databases can reach them.
 		{"core", "assets/scripts/reaper.sh", "expires_at", 1},
 		{"dolt", "commands/list/run.sh", doltSystemNeedle, 1},
 		{"dolt", "commands/cleanup/run.sh", doltSystemNeedle, 1},
@@ -332,7 +327,11 @@ func TestBundledPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("before_agent_start"`,
 		"GC_PI_HOOK_VERSION",
 		"gc hook --inject",
-		`run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx))`,
+		`run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"))`,
+		`run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "PreCompact"))`,
+		"GC_MANAGED_SESSION_HOOK",
+		"GC_HOOK_EVENT_NAME",
+		"pendingPrimeContext",
 		"GC_PROVIDER_SESSION_ID",
 		"GC_PROVIDER_SESSION_ID_REQUIRED",
 		`stdio: ["ignore", "pipe", "inherit"]`,
@@ -424,7 +423,7 @@ func TestBundledBuiltinPackOrdersScanWithoutWarnings(t *testing.T) {
 }
 
 func TestBundledWorkerPromptsIncludeFilesystemSearchGuidance(t *testing.T) {
-	for _, name := range []string{"pool-worker.md", "graph-worker.md"} {
+	for _, name := range []string{"pool-worker.template.md", "graph-worker.md"} {
 		t.Run(name, func(t *testing.T) {
 			data := readBundledPackFileForTest(t, "core", "assets/prompts/"+name)
 			if !strings.Contains(data, formulaFilesystemSearchGuidance) {

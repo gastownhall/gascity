@@ -27,6 +27,10 @@ permissions: {}
 
 jobs:
   notify:
+    # Forks intentionally lack the canonical cross-repository dispatch token.
+    # Skip there instead of turning every upstream fast-forward red; the exact
+    # repository guard keeps a missing/invalid canonical secret fail-visible.
+    if: github.repository == 'gastownhall/gascity'
     runs-on: ubuntu-latest
     steps:
       - name: Trigger runtime image rebuild

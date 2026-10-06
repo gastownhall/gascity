@@ -86,7 +86,7 @@ func repairedManagedDoltRuntimeState(_ string, layout managedDoltRuntimeLayout, 
 		return doltRuntimeState{}, false
 	}
 	port := strconv.Itoa(state.Port)
-	holderPID := findPortHolderPID(port)
+	holderPID := findPortHolderPID(port, state.PID)
 	if holderPID <= 0 {
 		return doltRuntimeState{}, false
 	}

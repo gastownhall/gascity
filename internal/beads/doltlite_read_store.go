@@ -918,6 +918,16 @@ func (s *DoltliteReadStore) queryIssuesOrderedInTables(query ListQuery, sets []d
 		if query.SeekAfter != nil {
 			tableLimit = 0
 		}
+		// A before-filter admits NULL-julianday rows into the SQL result (see
+		// buildDoltliteTableQuery) precisely so filterDoltliteBeforeTimes can
+		// re-validate them Go-side. Those rows can sort anywhere in SQL's
+		// ORDER BY (it has no valid timestamp to key on), which may disagree
+		// with the Go-side zero-time treatment — so, exactly like SeekAfter
+		// above, a SQL LIMIT taken before that Go re-sort could cut the wrong
+		// prefix. Fetch unbounded whenever a before-filter is active.
+		if !query.CreatedBefore.IsZero() || !query.UpdatedBefore.IsZero() {
+			tableLimit = 0
+		}
 		rows, err := s.queryIssueTable(query, tables, extraWhere, extraArgs, tableLimit, orderBy)
 		if err != nil {
 			return nil, err
@@ -1303,11 +1313,18 @@ func (s *DoltliteReadStore) buildDoltliteTableQuery(query ListQuery, tables dolt
 		args = append(args, metadataArgs...)
 	}
 	if !query.CreatedBefore.IsZero() {
-		where = append(where, "julianday(i.created_at) < julianday(?)")
+		// julianday() returns NULL for text it cannot parse (e.g. a raw
+		// time.Time bind: modernc.org/sqlite serializes via time.Time.String(),
+		// "2026-06-01 07:00:00 +0000 UTC"), and NULL < julianday(?) is NULL, not
+		// true — so a strict "<" here silently drops such rows from the result
+		// entirely instead of letting the tolerant Go-side
+		// filterDoltliteBeforeTimes decide. Admit NULL-julianday rows and let
+		// that Go-side filter remain authoritative (ga-p7ipsu, ga-n4oyad).
+		where = append(where, "(julianday(i.created_at) < julianday(?) OR julianday(i.created_at) IS NULL)")
 		args = append(args, doltliteSQLiteTime(query.CreatedBefore))
 	}
 	if !query.UpdatedBefore.IsZero() {
-		where = append(where, "julianday(COALESCE(NULLIF(i.updated_at, ''), i.created_at)) < julianday(?)")
+		where = append(where, "(julianday(COALESCE(NULLIF(i.updated_at, ''), i.created_at)) < julianday(?) OR julianday(COALESCE(NULLIF(i.updated_at, ''), i.created_at)) IS NULL)")
 		args = append(args, doltliteSQLiteTime(query.UpdatedBefore))
 	}
 	if extraWhere != "" {

@@ -3,5 +3,5 @@ provider = "codex"
 wake_mode = "resume"
 work_dir = ".gc/worktrees/{{.Rig}}/crew"
 nudge = "Coordinate active work, call gc hook when needed, and keep the rig status current."
-pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+pre_start = ["GC_DEFAULT_BRANCH='{{.DefaultBranch}}' {{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
 max_active_sessions = 1

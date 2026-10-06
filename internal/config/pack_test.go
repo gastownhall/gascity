@@ -1062,6 +1062,42 @@ func TestPackContentHashRecursiveCachesUnchangedTree(t *testing.T) {
 	}
 }
 
+// TestPackContentHashRecursiveDetectsMtimePreservingEdit reproduces ga-b675vk:
+// mtime-preserving deploy tooling (cp -p, rsync --checksum --times) can edit
+// file content without changing size or mtime, which previously let a stale
+// hash survive in the cache. ctime cannot be rolled back by any standard
+// syscall, so it must break the tie.
+func TestPackContentHashRecursiveDetectsMtimePreservingEdit(t *testing.T) {
+	ResetPackContentHashCache()
+	t.Cleanup(ResetPackContentHashCache)
+
+	dir := "/pack"
+	path := filepath.Join(dir, "pack.toml")
+	fs := fsys.NewFake()
+	fs.Dirs[dir] = true
+
+	if err := fs.WriteFile(path, []byte("name = \"a\""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h1 := PackContentHashRecursive(fs, dir)
+	origModTime := fs.ModTimes[path]
+
+	// Same size (10 bytes), different content, then mtime forced back to its
+	// original value — simulating tooling that preserves mtime across a
+	// content-changing write. ctime is deliberately left alone: Fake advances
+	// it on every WriteFile and never lets a test roll it back, mirroring the
+	// real kernel where no userspace syscall sets ctime.
+	if err := fs.WriteFile(path, []byte("name = \"b\""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fs.ModTimes[path] = origModTime
+
+	h2 := PackContentHashRecursive(fs, dir)
+	if h2 == h1 {
+		t.Fatal("hash should change when content changes even though size and mtime match the cached fingerprint exactly (ctime must break the tie)")
+	}
+}
+
 func TestPackContentHashRecursiveIgnoresRuntimeDirs(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "pack.toml", "test")

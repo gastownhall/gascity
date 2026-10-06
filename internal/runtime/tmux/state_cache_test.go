@@ -683,7 +683,6 @@ func TestStateCache_DiscardRefreshAfterEvictSession(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for refresh to start")
 	}
-	f.setResult(runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}}, nil)
 	cache.EvictSession("agent-1")
 	close(f.release)
 
@@ -695,72 +694,8 @@ func TestStateCache_DiscardRefreshAfterEvictSession(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for IsRunning result")
 	}
-	if calls := f.getCalls(); calls != 3 {
-		t.Fatalf("fetch calls = %d, want prime, superseded refresh, and retry", calls)
-	}
-}
-
-func TestStateCache_EvictSessionDoesNotMutatePublishedSnapshot(t *testing.T) {
-	fetcher := &mockFetcher{sessions: map[string]bool{
-		"agent-1": true,
-		"agent-2": true,
-	}}
-	cache := NewStateCache(fetcher, time.Hour)
-	published := cache.currentState()
-	if !published.Sessions["agent-1"].Running {
-		t.Fatal("published snapshot missing live agent-1 before eviction")
-	}
-
-	fetcher.setResult(map[string]bool{"agent-2": true}, nil)
-	cache.EvictSession("agent-1")
-
-	if !published.Sessions["agent-1"].Running {
-		t.Fatal("retained published snapshot changed after eviction")
-	}
-	if cache.IsRunning("agent-1") {
-		t.Fatal("current liveness still contains agent-1 after eviction")
-	}
-}
-
-func TestStateCache_RetriesSupersededRefresh(t *testing.T) {
-	for _, tt := range []struct {
-		name string
-		err  error
-	}{
-		{name: "empty success"},
-		{name: "no server", err: ErrNoServer},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			fetcher := &controlledRefreshFetcher{
-				state:     runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}},
-				err:       tt.err,
-				blockCall: 1,
-				entered:   make(chan struct{}),
-				release:   make(chan struct{}),
-			}
-			cache := NewStateCache(fetcher, time.Hour)
-			result := make(chan bool, 1)
-			go func() { result <- cache.IsRunning("agent-1") }()
-			select {
-			case <-fetcher.entered:
-			case <-time.After(testutil.GoroutineRaceTimeout):
-				t.Fatal("timed out waiting for first refresh")
-			}
-			fetcher.setResult(runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{"agent-1": {Running: true}}}, nil)
-			cache.Invalidate()
-			close(fetcher.release)
-			select {
-			case got := <-result:
-				if !got {
-					t.Fatal("same IsRunning call = false, want live result after superseded refresh retry")
-				}
-			case <-time.After(testutil.GoroutineRaceTimeout):
-				t.Fatal("timed out waiting for retried IsRunning")
-			}
-			if calls := fetcher.getCalls(); calls != 2 {
-				t.Fatalf("fetch calls = %d, want superseded fetch plus retry", calls)
-			}
-		})
+	if calls := f.getCalls(); calls != 2 {
+		t.Fatalf("fetch calls = %d, want 2", calls)
 	}
 }
 
@@ -806,6 +741,109 @@ func TestStateCache_CoalescesRefreshesWithinGeneration(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestStateCache_EvictSessionDoesNotMutatePublishedSnapshot pins the
+// copy-on-write contract: a snapshot handed out by currentState is read
+// without the cache lock, so EvictSession must publish a new Sessions map
+// rather than deleting from the one readers may still hold.
+func TestStateCache_EvictSessionDoesNotMutatePublishedSnapshot(t *testing.T) {
+	f := &mockFetcher{sessions: map[string]bool{"agent-1": true, "agent-2": true}}
+	cache := NewStateCache(f, time.Hour)
+
+	published := cache.currentState()
+	if !published.Sessions["agent-1"].Running {
+		t.Fatal("published snapshot missing agent-1 before eviction")
+	}
+
+	f.setResult(map[string]bool{"agent-2": true}, nil)
+	cache.EvictSession("agent-1")
+
+	if !published.Sessions["agent-1"].Running || len(published.Sessions) != 2 {
+		t.Fatalf("published snapshot mutated by EvictSession: %v", published.Sessions)
+	}
+	if cache.IsRunning("agent-1") {
+		t.Fatal("IsRunning(agent-1) = true after eviction, want false")
+	}
+	if !cache.IsRunning("agent-2") {
+		t.Fatal("IsRunning(agent-2) = false after evicting agent-1, want true")
+	}
+}
+
+// TestStateCache_EvictSessionDoesNotRaceSnapshotReader reproduces the
+// controller crash deterministically under -race: a reader holds a published
+// snapshot (as IsRunning/ProcessAlive do after dropping the lock) and reads
+// its Sessions map while Stop evicts a session. Deleting from that shared map
+// in place is a concurrent map read/write, which is a fatal runtime error that
+// recover cannot catch. The handoff below orders only "snapshot taken" before
+// the eviction, never the map reads, so the detector sees the conflict
+// regardless of scheduling.
+func TestStateCache_EvictSessionDoesNotRaceSnapshotReader(t *testing.T) {
+	f := &mockFetcher{sessions: map[string]bool{"agent-1": true, "agent-2": true}}
+	cache := NewStateCache(f, time.Hour)
+
+	taken := make(chan struct{})
+	done := make(chan bool)
+	go func() {
+		snapshot := cache.currentState()
+		close(taken)
+		running := false
+		for range 1000 {
+			running = snapshot.Sessions["agent-1"].Running
+		}
+		done <- running
+	}()
+
+	<-taken
+	cache.EvictSession("agent-1")
+	if !<-done {
+		t.Fatal("reader's snapshot lost agent-1 to a concurrent eviction")
+	}
+}
+
+// TestStateCache_ConcurrentReadersAndEvictSession drives the same hazard
+// through the public API the controller uses: status reads (IsRunning,
+// ProcessAlive) racing Stop's EvictSession and Invalidate. Run with -race.
+func TestStateCache_ConcurrentReadersAndEvictSession(t *testing.T) {
+	names := []string{"agent-1", "agent-2", "agent-3", "agent-4"}
+	live := make(map[string]bool, len(names))
+	for _, name := range names {
+		live[name] = true
+	}
+	f := &mockFetcher{sessions: live}
+	cache := NewStateCache(f, time.Hour)
+	if !cache.IsRunning("agent-1") {
+		t.Fatal("IsRunning(agent-1) = false after prime, want true")
+	}
+
+	stop := make(chan struct{})
+	var readers sync.WaitGroup
+	for i := range 4 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				name := names[i%len(names)]
+				_ = cache.IsRunning(name)
+				_ = cache.ProcessAlive(name, []string{"claude"})
+			}
+		}()
+	}
+
+	for i := range 200 {
+		cache.EvictSession(names[i%len(names)])
+		if i%10 == 0 {
+			cache.Invalidate()
+		}
+		runtime.Gosched()
+	}
+	close(stop)
+	readers.Wait()
 }
 
 func TestStateCache_InvalidateForcesNextReadToRefresh(t *testing.T) {
@@ -1225,5 +1263,115 @@ func TestProcessAliveWrappedPane(t *testing.T) {
 	pane := paneRuntimeState{Command: "systemd-run", PID: "100"}
 	if !pane.processAlive(processNameSet([]string{"claude"}), snapshot) {
 		t.Fatal("processAlive = false for systemd-run pane with claude child, want true (descendant fallback)")
+	}
+}
+
+// The fleet snapshot must carry attachment and window activity alongside
+// liveness so the reconciler can read them without one `display-message` plus
+// one `list-windows` fork per session (gcy-8gwi: 14.2% of supervisor CPU).
+// Activity is the MAX over every one of the session's pane rows — that is the
+// same value the per-session `list-windows -t <s> -F '#{window_activity}'`
+// read returns, because every window has at least one pane and all panes of a
+// window report their window's activity. It must NOT be
+// tmux's #{session_activity}, which does not advance on detached pane I/O and
+// differs from max(window_activity) by hours on real sessions.
+func TestFetchStateCarriesAttachmentAndMaxWindowActivity(t *testing.T) {
+	fe := &fakeExecutor{
+		// Two sessions. "multi" has three windows with differing activity and
+		// a fourth remain-on-exit corpse window holding the NEWEST timestamp;
+		// it has TWO attached clients — #{session_attached} is a client count,
+		// not a boolean, and must read as attached. "solo" is attached.
+		out: strings.Join([]string{
+			"multi\t0\tclaude\t101\t2\t1000",
+			"multi\t0\tclaude\t102\t2\t3000",
+			"multi\t0\tclaude\t103\t2\t2000",
+			"multi\t1\tbash\t104\t2\t4000",
+			"solo\t0\tcodex\t201\t1\t500",
+		}, "\n"),
+	}
+	f := &tmuxFetcher{tm: &Tmux{cfg: DefaultConfig(), exec: fe}}
+
+	state, err := f.FetchState(context.Background())
+	if err != nil {
+		t.Fatalf("FetchState() error = %v", err)
+	}
+
+	multi := state.Sessions["multi"]
+	if !multi.Running {
+		t.Error("multi.Running = false, want true (it has live panes)")
+	}
+	// "multi" reads session_attached="2" (two clients): a count, not a
+	// boolean — it must be reported attached, not detached.
+	if !multi.Attached {
+		t.Error("multi.Attached = false, want true (2 attached clients)")
+	}
+	// 4000 comes from the dead pane's row: a remain-on-exit corpse window is
+	// still a window, and the per-session list-windows read reports it, so
+	// dropping it here would silently make a session look older than tmux says.
+	if multi.Activity != 4000 {
+		t.Errorf("multi.Activity = %d, want 4000 (max over ALL window rows, corpse window included)", multi.Activity)
+	}
+
+	solo := state.Sessions["solo"]
+	if !solo.Attached {
+		t.Error("solo.Attached = false, want true")
+	}
+	if solo.Activity != 500 {
+		t.Errorf("solo.Activity = %d, want 500", solo.Activity)
+	}
+
+	if len(fe.calls) != 1 {
+		t.Fatalf("tmux calls = %d (%v), want 1: the whole fleet's attachment and activity come from the single list-panes snapshot", len(fe.calls), fe.calls)
+	}
+}
+
+// A session whose only pane is a remain-on-exit corpse is not running, but it
+// still has a real window-activity timestamp. Recording the activity without
+// setting Running keeps IsRunning/ProcessAlive answering exactly as before
+// while letting the activity read be served from the snapshot.
+func TestFetchStateCorpseSessionKeepsActivityWithoutRunning(t *testing.T) {
+	fe := &fakeExecutor{out: "corpse\t1\tbash\t900\t0\t7000"}
+	f := &tmuxFetcher{tm: &Tmux{cfg: DefaultConfig(), exec: fe}}
+
+	state, err := f.FetchState(context.Background())
+	if err != nil {
+		t.Fatalf("FetchState() error = %v", err)
+	}
+	corpse, ok := state.Sessions["corpse"]
+	if !ok {
+		t.Fatal("corpse session missing from snapshot, want an entry carrying its activity")
+	}
+	if corpse.Running {
+		t.Error("corpse.Running = true, want false (its only pane is dead)")
+	}
+	if corpse.Activity != 7000 {
+		t.Errorf("corpse.Activity = %d, want 7000", corpse.Activity)
+	}
+	if cache := NewStateCache(&mockFetcher{state: state}, time.Hour); cache.IsRunning("corpse") {
+		t.Error("IsRunning(corpse) = true, want false: recording activity must not resurrect a dead-pane session")
+	}
+}
+
+// A session the snapshot has never seen must report a MISS, not a zero
+// timestamp or "detached" — the caller falls back to a direct per-session read
+// rather than acting on a fabricated value.
+func TestStateCacheSessionReadsMissForUnknownSession(t *testing.T) {
+	cache := NewStateCache(&mockFetcher{state: runtimeStateSnapshot{
+		Sessions: map[string]sessionRuntimeState{"known": {Running: true, Attached: true, Activity: 42}},
+	}}, time.Hour)
+
+	if _, ok := cache.SessionActivity("ghost"); ok {
+		t.Error("SessionActivity(ghost) ok = true, want false for a session absent from the snapshot")
+	}
+	if _, ok := cache.SessionAttached("ghost"); ok {
+		t.Error("SessionAttached(ghost) ok = true, want false for a session absent from the snapshot")
+	}
+	activity, ok := cache.SessionActivity("known")
+	if !ok || !activity.Equal(time.Unix(42, 0)) {
+		t.Errorf("SessionActivity(known) = %v, %t, want %v, true", activity, ok, time.Unix(42, 0))
+	}
+	attached, ok := cache.SessionAttached("known")
+	if !ok || !attached {
+		t.Errorf("SessionAttached(known) = %t, %t, want true, true", attached, ok)
 	}
 }

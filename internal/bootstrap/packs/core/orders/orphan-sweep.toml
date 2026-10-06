@@ -1,9 +1,9 @@
 # Replaces deacon patrol step: town-orphan-sweep
 #
 # Cross-references in-progress beads against live agents. Beads assigned
-# to non-existent agents get reset to open/unassigned so the rig's witness
-# can pick them up on its next patrol. No worktree salvage — that's the
-# witness's job.
+# to non-existent agents get reset to open/unassigned so they are routable
+# again. No worktree salvage — cities that staff a work-health patrol role
+# (e.g. the gastown pack's witness) handle that separately.
 [order]
 description = "Reset beads assigned to dead agents back to the work pool"
 trigger = "cooldown"

@@ -14,7 +14,7 @@ import { resetSupervisorApiForTests } from '../supervisor/client';
 //
 // 1. Peek button errored with "invalid session id" because the modal passed
 //    `agent.session.name` (a friendly alias like "mayor") to a route that
-//    validates against SESSION_ID_RE (`gc-XXX` format). The fix maps
+//    validates the session id (`gc-XXX` format). The fix maps
 //    agent.session.name -> session.id through the sessions cache.
 //
 // 2. The agent name column rendered `display_name ?? name`, so the

@@ -55,6 +55,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
@@ -84,7 +85,12 @@ const (
 const (
 	nudgeQueueLabel    = "gc:nudge-queue"
 	nudgeQueueBeadType = "chore"
-	nudgeQueueIDPrefix = "gcnq-"
+	// nudgeQueueIDPrefix is derived from config's reserved-prefix table rather
+	// than spelled again here. The two have to agree — that table is what routes
+	// an id minted below into the nudges binding — and a second literal would let
+	// one of them change alone, which drops queue records into the work ledger
+	// and stops the queue draining with no error anywhere.
+	nudgeQueueIDPrefix = config.NudgeQueueIDPrefix + "-"
 	// nudgeQueueIDSuffix keeps the minted bead id from ending in a digit.
 	// A store that recovers its id sequence from the maximum numeric suffix
 	// would otherwise read a hash that happens to end in digits as a

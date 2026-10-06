@@ -300,7 +300,7 @@ func ensureGitHubPRRepairBead(cityPath string, cfg *config.City, monitor config.
 	// standard branch/test/push/refinery steps instead of sitting as a raw
 	// routed task (ga-y5yhvnk). Attach failure is non-fatal: the bead is
 	// created and routed, so the pool scaler can still pick it up.
-	if err := attachGitHubPRRepairWorkflow(store, cfg, rig, monitor, created, result); err != nil {
+	if err := attachGitHubPRRepairWorkflow(store, cliGraphStore(store, cfg, cityPath), cfg, rig, monitor, created, result); err != nil {
 		outcome.dispatchErr = err
 		return outcome, nil
 	}
@@ -382,7 +382,20 @@ func githubPRRepairMetadata(result githubmonitor.Result) map[string]string {
 // workflow as a molecule attached to the repair bead, so routed repair work
 // carries the standard polecat steps. The error is treated as non-fatal by the
 // caller (the bead is already created and routed).
-func defaultAttachGitHubPRRepairWorkflow(store beads.Store, cfg *config.City, rig config.Rig, monitor config.GitHubPRMonitor, bead beads.Bead, result githubmonitor.Result) error {
+//
+// Two stores because the classes differ: the repair bead is work class, while
+// the attached workflow's class comes from the compiled recipe.
+//
+// On a converged city that therefore SPLITS the molecule from its parent: the
+// root lands in the graph binding carrying opts.ParentID, the repair bead it
+// names stays in the scope store, and the two are never in the same ledger.
+// That is the contract working, not a leak — beads.Bead.ParentID is a weak
+// city-scoped reference, so the link needs no lookup and neither store has to
+// see the other's rows. What it costs is that Children(repairBead.ID) against
+// the scope store does not return this molecule; a caller that wants the whole
+// tree asks the residency resolver, which is the one component that holds both
+// legs.
+func defaultAttachGitHubPRRepairWorkflow(store beads.Store, graphStore beads.GraphStore, cfg *config.City, rig config.Rig, monitor config.GitHubPRMonitor, bead beads.Bead, result githubmonitor.Result) error {
 	workflow := monitor.RepairWorkflowOrDefault()
 	if workflow == "" {
 		return nil
@@ -390,7 +403,13 @@ func defaultAttachGitHubPRRepairWorkflow(store beads.Store, cfg *config.City, ri
 	searchPaths := cfg.FormulaLayers.SearchPaths(strings.TrimSpace(rig.Name))
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if _, err := molecule.CookOn(ctx, store, workflow, searchPaths, molecule.Options{
+	// Unwrapped: molecule.Instantiate asserts optional store capabilities, which
+	// do not promote through the class wrapper.
+	graph := graphStore.Store
+	if graph == nil {
+		graph = store
+	}
+	if _, err := cookOnClassRouted(ctx, store, graph, workflow, searchPaths, molecule.Options{
 		ParentID:       bead.ID,
 		IdempotencyKey: "github-pr-repair-workflow:" + bead.ID,
 		Vars:           githubPRRepairWorkflowVars(bead, result),

@@ -227,7 +227,7 @@ type SessionsStore interface {
 	SetWaitHold(string, bool, string) error
 	SetMarker(string, string, string) error
 	RecordCurrentBead(string, string) error
-	Close(string, string, time.Time) (bool, error)
+	Close(session.Info, string, time.Time) (bool, error)
 	CloseWithoutReason(string) error
 	SetStatusOpen(string) error
 	RepairType(string) error
@@ -315,7 +315,7 @@ type OrdersStore interface {
 	RunDetail(string) (orders.RunDetail, error)
 	RecentRuns(string, int) ([]orders.OrderRun, error)
 	RecentRunsAll(int) ([]orders.OrderRun, error)
-	ListTracking() ([]orders.OrderRun, error)
+	ListTracking(int) ([]orders.OrderRun, error)
 	LatestOpenRun(string) (orders.OrderRun, bool, error)
 	OpenRuns() ([]orders.OrderRun, error)
 	StaleOpenRuns(time.Time) ([]orders.OrderRun, error)

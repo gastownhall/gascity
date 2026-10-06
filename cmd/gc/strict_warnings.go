@@ -21,5 +21,7 @@ func strictWarningIsNonFatal(warning string) bool {
 		config.IsLegacyWorkspaceFieldWarning(warning) ||
 		config.IsIdleSleepMaskedByIdleTimeoutWarning(warning) ||
 		config.IsAlwaysFreshWakeModeWarning(warning) ||
-		config.IsRetiredKeyWarning(warning)
+		config.IsRetiredKeyWarning(warning) ||
+		config.IsSessionReconcilerAliasWarning(warning) ||
+		config.IsSessionSetupTimeoutAdvisory(warning)
 }

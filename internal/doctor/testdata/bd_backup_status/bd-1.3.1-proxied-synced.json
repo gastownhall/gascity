@@ -1,0 +1,18 @@
+{
+  "backup": {
+    "last_dolt_commit": "",
+    "timestamp": "0001-01-01T00:00:00Z"
+  },
+  "database_size": {
+    "bytes": 2059937,
+    "human": "2.0 MB"
+  },
+  "dolt": {
+    "backup_name": "default",
+    "backup_url": "file:///backups/px",
+    "configured": true,
+    "created_at": "2026-09-29T04:00:01Z",
+    "last_sync": "2026-09-29T04:00:01Z",
+    "sync_duration": "36.64948ms"
+  }
+}

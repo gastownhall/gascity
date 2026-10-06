@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc worktree cleanup --json success result",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "command",
+    "action",
+    "path",
+    "branch",
+    "removed",
+    "already_absent",
+    "cleanup_pending"
+  ],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "worktree cleanup" },
+    "action": { "const": "cleanup" },
+    "path": { "type": "string" },
+    "branch": { "type": "string" },
+    "head": { "type": "string" },
+    "removed": { "type": "boolean" },
+    "already_absent": { "type": "boolean" },
+    "cleanup_pending": { "const": false },
+    "provenance": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "bead_id",
+        "store_ref",
+        "repo_identity",
+        "path",
+        "branch",
+        "base_ref",
+        "base_sha",
+        "creator",
+        "owner",
+        "generation",
+        "created_at",
+        "lifecycle",
+        "attempt_id"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

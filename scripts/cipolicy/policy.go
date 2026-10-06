@@ -7,23 +7,175 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 const (
 	setupGoAction = "actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c"
+	// goModDownloadAction warms the module cache with a retried
+	// `go mod download`; every Go-building job runs it right after setup-go.
+	goModDownloadAction = "./.github/actions/go-mod-download"
 
 	// These are SHA-256 digests of the display-free JSON projections below.
 	// Whole-workflow execution hashes deliberately pin shell text instead of
 	// approximating shell semantics: any execution change requires explicit
 	// policy review, while workflow, job, step, and input descriptions remain
 	// free to change. A failure prints the projection and candidate digest.
-	expectedCITriggersHash       = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
-	expectedCIExecutionHash      = "ba5381bced878344c38f6009e9449ec3c864518ebadedfbe2bea9fe530b3ac1c"
-	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
-	expectedNightlyExecutionHash = "80575ca368f28ba9f8b14bf72ce5767a7877ffe4dcadc136854ab4b0b5f1377a"
-	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
+	expectedCITriggersHash = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
+	// Bumped for the beads-topology-acceptance job: the bd/dolt-backed topology
+	// shapes had never executed in CI — every job lacked a bd with
+	// --proxied-server, so each test skipped and a suite that ran nothing
+	// reported green. The new job builds bd from BD_CURRENT_REF and sets
+	// GC_REQUIRE_ACCEPTANCE_TOOLING so a runner without that bd fails instead.
+	//
+	// Bumped again to widen that job's beads_topology path filter. The curated
+	// cmd/gc globs matched none of the files the proxied lifecycle actually lives
+	// in — the ownership journal, the provider lifecycle, the bd env plumbing,
+	// the `gc init` transport flags — so a change to the feature skipped its own
+	// acceptance job and ci-required still went green on the allowed skip. The
+	// filter is now cmd/gc/**, internal/beads/**, internal/doctor/**,
+	// examples/bd/**, test/acceptance/** plus the pins and the workflow.
+	//
+	// Bumped again on the merge with main, which carried its own reviewed delta
+	// (Beads v1.3.0-rc.2 -> v1.3.0): the merged workflow holds both changes, so
+	// neither side's digest describes it.
+	//
+	// Bumped again to widen beads_topology's internal/ globs to internal/**.
+	// The curated list repeated the same mistake one directory out: the Dolt
+	// floor (internal/doltversion), the proxied provider's auth scope
+	// (internal/doltauth), the pack state dir handed to the bd script
+	// (internal/citylayout) and the pool/binding/health packages matched
+	// neither beads_topology nor shared, so a change to any of them skipped the
+	// only job that stands up the proxied shapes and ci-required accepted the
+	// skip. `go list -deps ./test/acceptance/... ./cmd/gc` names 139 of 166
+	// internal packages, so the filter is now the graph itself.
+	//
+	// Bumped again for one added step in the same job: "Proxied-native
+	// lifecycle and safety" (council pr2 C-F1). TestProxiedNativeLifecycle and
+	// TestProxiedNativeSafety carry //go:build acceptance_a and were selected
+	// by no -run expression in any job, so the proxied-native lane's whole
+	// evidence base — the per-crash-shape ping/recover budgets, foreign-root's
+	// "0 pings, 0 dolt stop", the no-spawn positive control, both no-migrate
+	// rows and the author-at-commit pin — was a local one-off no regression
+	// could fail. Reviewed delta: one `go test` step, same job, same tooling,
+	// no new trigger and no new permission.
+	//
+	// Bumped again to split that step into its own job (round3 D-F17). The
+	// topology job's four step -timeouts summed to 115 minutes against its own
+	// 90-minute cap, so a slow-but-live run was canceled by the job timeout
+	// and lost its `--- FAIL` line and tee'd log. Reviewed delta: the topology
+	// job's -timeouts become 30/15/30 (75 under 90); the lifecycle and safety
+	// step moves to a new "Beads / proxied-native acceptance" job with the same
+	// needs, the same beads_topology `if`, the same runner, env, bd build and
+	// verify steps, one -timeout 45m test step under timeout-minutes 60, and a
+	// skip summary; ci-required needs the new job and allows its skip exactly
+	// as it does the topology job's. No new trigger and no new permission.
+	// Merged with main's reviewed delta: cmd-gc-productmetrics-testhook
+	// timeout-minutes 5 -> 12 (#6396: canceled at the 5-minute budget with no
+	// failing test).
+	//
+	// Bumped again (#6385): the integration path filter also matches
+	// internal/bootstrap/packs/core/assets/scripts/** so a reaper.sh-only
+	// change runs the real-Dolt reaper tests. Reviewed delta: one filter path,
+	// no new job, trigger or permission.
+	//
+	// Bumped again (F9): beads-topology-acceptance gains one step running
+	// TestBeadsProxiedIgnoresUserLevelSharedServer (-timeout 15m) and its job
+	// cap moves 90 -> 105 minutes to keep the step budget under it. Reviewed
+	// delta: one test step and the cap, no new job, trigger or permission.
+	//
+	// Bumped again for the Beads v1.3.0 -> v1.3.1-rc.2 -> v1.3.1 pins: every job's
+	// BD_VERSION env value moves to the new tag. Reviewed delta: that value
+	// only, no new job, step, trigger or permission.
+	//
+	// Bumped again (ga-nr9epw, restoring ga-1037rg / ga-yoxtux regression
+	// coverage without re-widening test-bd-cli-contract's own -run regex,
+	// which TestAcceptanceTargetsSeparateTierAFromExternalBdContracts pins as
+	// an exact literal substring): one new step, "bd CLI contract HOME
+	// isolation (...)", added immediately after the existing "bd CLI contract
+	// (...)" step in each of contract-acceptance-previous, contract-
+	// acceptance-current and contract-radar-bd-head. Each new step runs `make
+	// test-bd-cli-contract-home-isolation`, a separate Makefile target driving
+	// only TestRunBDIsolatesHOMEFromSharedServerConfig under the same
+	// acceptance_bd_contract tag and bd binary the preceding step already
+	// resolved onto PATH. No new job, trigger or permission.
+	//
+	// Bumped again (rbe-west plan R2 step 1): the runner-policy job's own
+	// runs-on drops its hard-coded login list for blacksmith-2vcpu-ubuntu-2404,
+	// matching runner_policy.py, which now selects Blacksmith for every event
+	// and author. Reviewed delta: that one runs-on value, no new job, step,
+	// trigger or permission.
+	//
+	// Bumped again for the Dolt 2.1.7 -> 2.2.0 pin (the Dolt beads v1.3.1
+	// qualifies): the job DOLT_VERSION env values only.
+	//
+	// Bumped again (keep managed Dolt logs from failed acceptance tests):
+	// beads-topology-acceptance and beads-proxied-native-acceptance each gain
+	// a step exporting GC_TEST_FAILURE_ARTIFACT_DIR to $GITHUB_ENV and an
+	// `if: failure()` pinned upload-artifact step for that directory. No new
+	// job, trigger, permission or secret.
+	//
+	// Bumped again (beads#7037): the topology job's shared-server step -run
+	// also selects TestBlockedRepairOnProxiedCityAndRig, the proxied city+rig
+	// proof of gc start's is_blocked repair (about 4 minutes, inside that
+	// step's 15m -timeout). Reviewed delta: one -run alternative, no new job,
+	// step, trigger or permission.
+	//
+	// Bumped again (Go module fetch resilience): every job that calls
+	// actions/setup-go directly sets its `cache: false` and gains one step
+	// right after it, `uses: ./.github/actions/go-mod-download` (restore the
+	// go.sum-keyed module download cache, run a retried `go mod download`,
+	// save on push/schedule only), so build and test steps never fetch from
+	// proxy.golang.org; and the shared changes filter gains that action's
+	// directory and its retry script. Reviewed delta: one setup-go input and
+	// one local-action step per setup-go job, two filter paths. No new job,
+	// trigger, permission or secret. Then the shared changes filter gains
+	// .github/scripts/go-mod-verify-cache.sh, the action's go.sum
+	// verification step. Reviewed delta: one filter path.
+	//
+	// Bumped again (gc 1.5.1 proxied idle timeout): the proxied-native job's
+	// test step also selects TestProxiedIdleTimeoutReapAndTransparentRestart,
+	// sets GC_ACCEPTANCE_TOPOLOGY_MATRIX=1 for that step (the row is gated off
+	// Tier A by that switch), and the step is renamed to say so. No new job,
+	// trigger or permission.
+	//
+	// Bumped again (gc 1.5.1 suspension quiescence): the same step also
+	// selects TestProxiedSuspensionIsQuiescence (~8 minutes, inside the step's
+	// 45m -timeout) and its name says so. No new job, trigger or permission.
+	expectedCIExecutionHash     = "bc49242821ebcecfe16df27169265323a40d6dcfdf659aae29fe6d009f9e819f"
+	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
+	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
+	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
+	// timeout-minutes 60, env GC_REQUIRE_ACCEPTANCE_TOOLING=1 and
+	// GC_ACCEPTANCE_PERF=1, the setup action with dolt and no released bd, the
+	// PR jobs' resolve-pin / build-bd-from-BD_CURRENT_REF / verify steps
+	// verbatim, and one `go test -tags acceptance_a -timeout 45m -run
+	// 'TestBeadsProxiedDefault$'` step. No new trigger, no new permission, no
+	// provider selector. Then (v1.5.0 Tier C first-run drain) the tier-c job's
+	// -run selector gained TestFreshInit_SlingSpawnsDefaultPoolWorker and
+	// TestFreshInit_ClaudeUnrestricted, mirroring RC Gate's acceptance C shards;
+	// same job, env, secrets and runner. Then the Beads v1.3.0 -> v1.3.1-rc.2
+	// -> v1.3.1 pins: the workflow and job BD_VERSION env values only. Then
+	// the Dolt 2.1.7 -> 2.2.0 pin (DOLT_VERSION env values) and one step in
+	// the bundled-pack-pins job, `scripts/check-embedded-pins --skip-bundled`
+	// with GITHUB_TOKEN, which fails when deps.env falls behind the latest
+	// beads release or the Dolt it qualifies. No new job, trigger or
+	// permission. Then beads-proxied-perf gains the same failure-diagnostics
+	// routing step and `if: failure()` pinned upload-artifact step as the PR
+	// acceptance jobs; no new job, trigger, permission or secret. Then the
+	// tier B job fetches tag v1.5.0-rc1 (shallow, one ref) and requires the
+	// split-storage rc1 upgrade scenario to run rather than skip; no new job,
+	// trigger, permission or secret. Then (Go module fetch resilience)
+	// bundled-pack-pins and waiver-clock each set setup-go `cache: false` and
+	// gain one step right after it, `uses: ./.github/actions/go-mod-download`;
+	// no new job, trigger, permission or secret.
+	expectedNightlyExecutionHash = "8c3b93d8471bb9f6b121f6a4713367b25fc10183c9a89a716dcd6785ef21c8d9"
+	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
+	// `cache: false` and one step right after it,
+	// `uses: ./.github/actions/go-mod-download`.
+	expectedSetupActionHash = "910f005f48c629c9bf76c69a007b60c4132a76859183e59c0fe99d642bf6141f"
 )
 
 var requiredFilterPaths = map[string][]string{
@@ -46,6 +198,21 @@ var requiredFilterPaths = map[string][]string{
 		"deps.env",
 		".github/scripts/install-bd-archive.sh",
 		"cmd/gc/init_provider_readiness.go",
+	},
+	// beads-topology-acceptance is the only job that stands up the proxied
+	// shapes for real, and ci-required allows its skip, so the paths that must
+	// trigger it are policy rather than convention. The internal/** entry is
+	// the dependency graph of the binaries the job builds:
+	// `go list -deps ./test/acceptance/... ./cmd/gc`.
+	"beads_topology": {
+		"go.mod",
+		"go.sum",
+		"deps.env",
+		"cmd/gc/**",
+		"internal/**",
+		"examples/bd/**",
+		"test/acceptance/**",
+		".github/workflows/ci.yml",
 	},
 	"packs": {
 		"examples/gastown/**",
@@ -115,6 +282,9 @@ var requiredFilterPaths = map[string][]string{
 		"Makefile",
 		".github/workflows/**",
 		".github/actions/setup-gascity-ubuntu/**",
+		".github/actions/go-mod-download/**",
+		".github/scripts/go-mod-download-retry.sh",
+		".github/scripts/go-mod-verify-cache.sh",
 		".github/scripts/install-dolt-archive.sh",
 		".github/scripts/install-bd-archive.sh",
 		".github/scripts/install-claude-native.sh",
@@ -176,6 +346,9 @@ func validate(ci, nightly, action map[string]any) error {
 		return err
 	}
 	if err := validatePRProviderOwnership(ci); err != nil {
+		return err
+	}
+	if err := validatePlaywrightInstallHardening(ci); err != nil {
 		return err
 	}
 	if err := assertWorkflowExecution("CI", ci, expectedCIExecutionHash); err != nil {
@@ -267,11 +440,13 @@ func validatePolicyWiring(workflow map[string]any) error {
 		return err
 	}
 	setupIndex := findStep(steps, "uses", setupGoAction)
+	downloadIndex := findStep(steps, "uses", goModDownloadAction)
 	policyIndex := findStep(steps, "run", "make test-ci-policy")
 	firstGuardIndex := findStep(steps, "run", "make check-gomod-replace")
-	if setupIndex < 0 || policyIndex != setupIndex+1 || firstGuardIndex <= policyIndex {
+	if setupIndex < 0 || downloadIndex != setupIndex+1 || policyIndex != downloadIndex+1 ||
+		firstGuardIndex <= policyIndex {
 		return fmt.Errorf(
-			"preflight-static must run the focused CI policy immediately after setup-go and before other guards",
+			"preflight-static must run the focused CI policy immediately after setup-go and the Go module download, and before other guards",
 		)
 	}
 	want := map[string]any{"run": "make test-ci-policy"}
@@ -331,6 +506,60 @@ func validateNightlyProviderOwnership(workflow map[string]any) error {
 				match.name,
 			)
 		}
+	}
+	return nil
+}
+
+// validatePlaywrightInstallHardening ensures the Dashboard SPA's Playwright
+// Chromium install step fails fast on a hung apt mirror instead of consuming
+// its whole retry budget on a single stuck attempt: each retry wraps the
+// install command with a per-attempt timeout, and apt itself gets an
+// explicit HTTP timeout so a dead mirror errors instead of hanging.
+func validatePlaywrightInstallHardening(workflow map[string]any) error {
+	job, err := workflowJob(workflow, "dashboard")
+	if err != nil {
+		return err
+	}
+	steps, err := mappingSlice(job["steps"], "dashboard steps")
+	if err != nil {
+		return err
+	}
+	const stepName = "Install Playwright Chromium"
+	var installStep map[string]any
+	for _, candidate := range steps {
+		if candidate["name"] == stepName {
+			installStep = candidate
+			break
+		}
+	}
+	if installStep == nil {
+		return fmt.Errorf("dashboard job is missing the %q step", stepName)
+	}
+	if installStep["timeout-minutes"] != 12 {
+		return fmt.Errorf("%q step must keep its outer timeout-minutes at 12", stepName)
+	}
+	run, ok := installStep["run"].(string)
+	if !ok {
+		return fmt.Errorf("%q step must have a run script", stepName)
+	}
+	aptTimeoutIndex := strings.Index(run, `Acquire::http::Timeout "15"`)
+	if aptTimeoutIndex < 0 {
+		return fmt.Errorf(
+			"%q step must configure an apt HTTP timeout (Acquire::http::Timeout \"15\") so a dead mirror errors instead of hanging",
+			stepName,
+		)
+	}
+	const perAttemptInstall = "timeout 240 npm run test:e2e:install:ci"
+	installIndex := strings.Index(run, perAttemptInstall)
+	if installIndex < 0 {
+		return fmt.Errorf(
+			"%q step must wrap each retry attempt with a per-attempt timeout (%q) so a hung install cannot consume the whole step budget",
+			stepName,
+			perAttemptInstall,
+		)
+	}
+	if aptTimeoutIndex > installIndex {
+		return fmt.Errorf("%q step must configure the apt HTTP timeout before the retry loop runs", stepName)
 	}
 	return nil
 }

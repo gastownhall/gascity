@@ -42,6 +42,25 @@ func TestWorkflowEventScope(t *testing.T) {
 		t.Fatalf("explicit scope = %s:%s, want rig:beta", scopeKind, scopeRef)
 	}
 
+	// A rig-stored root that names its own scope via gc.root_store_ref is
+	// rig-scoped in the event stream too, so the SSE scope agrees with the
+	// snapshot instead of falling through to the legacy rig->city preference
+	// (ga-dezas). The legacy arm below still covers stamp-less roots.
+	scopeKind, scopeRef = workflowEventScope(info, beads.Bead{
+		Metadata: map[string]string{"gc.root_store_ref": "rig:beads"},
+	}, "gascity")
+	if scopeKind != "rig" || scopeRef != "beads" {
+		t.Fatalf("root store ref scope = %s:%s, want rig:beads", scopeKind, scopeRef)
+	}
+
+	// A class binding names no scope, so the legacy rig->city preference stands.
+	scopeKind, scopeRef = workflowEventScope(info, beads.Bead{
+		Metadata: map[string]string{"gc.root_store_ref": "class:gmnos"},
+	}, "gascity")
+	if scopeKind != "city" || scopeRef != "gascity" {
+		t.Fatalf("class ref scope = %s:%s, want city:gascity", scopeKind, scopeRef)
+	}
+
 	scopeKind, scopeRef = workflowEventScope(info, beads.Bead{}, "gascity")
 	if scopeKind != "city" || scopeRef != "gascity" {
 		t.Fatalf("legacy scope = %s:%s, want city:gascity", scopeKind, scopeRef)

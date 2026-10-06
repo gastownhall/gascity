@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
@@ -21,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -46,6 +48,10 @@ type fakeState struct {
 	sessionsBeadStore beads.Store // relocated sessions store; nil falls back to cityBeadStore (default backend)
 	graphBeadStore    beads.Store // relocated graph store; nil falls back to cityBeadStore (default backend)
 	ordersBeadStore   beads.Store // relocated orders store; nil falls back to cityBeadStore (default backend)
+	// bindingRelics is the boot census a test wants replayed. Absent means
+	// uncensused, which means "assume relics" — see
+	// ClassBindingHasLegacyResidents.
+	bindingRelics     map[beads.Store]bool
 	cityBeadsDiag     *beads.BeadsDiagnostic
 	cityMailProv      mail.Provider // city-level mail provider (all mail is city-scoped)
 	eventProv         events.Provider
@@ -57,7 +63,9 @@ type fakeState struct {
 	allOrders         []orders.Order
 	services          workspacesvc.Registry
 	webhookDispatcher orderdispatch.Dispatcher // backs WebhookDispatchProvider; nil disables webhook dispatch
-	pokeCount         int
+	pokeCount         int                      // Enqueue calls (each maps to one legacy Poke)
+	enqueueMu         sync.Mutex               // guards enqueued
+	enqueued          []reconcilekey.Key       // every key passed to Enqueue, in order
 	extmsgSvc         *extmsg.Services
 	adapterReg        *extmsg.AdapterRegistry
 	maintenance       MaintenanceProvider
@@ -94,7 +102,7 @@ func newFakeState(t testing.TB) *fakeState {
 		cityMailProv: mp,
 		eventProv:    events.NewFake(),
 		cityName:     "test-city",
-		cityPath:     t.TempDir(),
+		cityPath:     beadstest.GuardedTempDir(t),
 		startedAt:    time.Now(),
 	}
 }
@@ -164,6 +172,17 @@ func (f *fakeState) OrdersBeadStore() beads.OrdersStore {
 	return beads.OrdersStore{Store: f.cityBeadStore}
 }
 
+// ClassBindingHasLegacyResidents replays whatever census a test recorded in
+// bindingRelics. A store with no entry — the default for every test that never
+// thought about relics — keeps its probe, matching an uncensused controller.
+func (f *fakeState) ClassBindingHasLegacyResidents(store beads.Store) bool {
+	verdict, censused := f.bindingRelics[store]
+	if !censused {
+		return true
+	}
+	return verdict
+}
+
 func (f *fakeState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
 	if f.cityBeadsDiag == nil {
 		return nil
@@ -178,7 +197,32 @@ func (f *fakeState) OrdersAll() []orders.Order {
 	}
 	return f.autos
 }
-func (f *fakeState) Poke()                                  { f.pokeCount++ }
+
+func (f *fakeState) Enqueue(keys ...reconcilekey.Key) {
+	f.enqueueMu.Lock()
+	defer f.enqueueMu.Unlock()
+	f.pokeCount++
+	if len(keys) == 0 {
+		keys = []reconcilekey.Key{reconcilekey.Allocator()}
+	}
+	for _, k := range keys {
+		f.enqueued = append(f.enqueued, k.Normalize())
+	}
+}
+
+// enqueueCalls returns the number of Enqueue calls (legacy pokes) so far.
+func (f *fakeState) enqueueCalls() int {
+	f.enqueueMu.Lock()
+	defer f.enqueueMu.Unlock()
+	return f.pokeCount
+}
+
+// enqueuedKeys returns a copy of every key passed to Enqueue so far.
+func (f *fakeState) enqueuedKeys() []reconcilekey.Key {
+	f.enqueueMu.Lock()
+	defer f.enqueueMu.Unlock()
+	return append([]reconcilekey.Key(nil), f.enqueued...)
+}
 func (f *fakeState) ServiceRegistry() workspacesvc.Registry { return f.services }
 
 // WebhookDispatcher lets fakeState satisfy WebhookDispatchProvider so webhook

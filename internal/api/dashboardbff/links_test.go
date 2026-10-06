@@ -46,13 +46,13 @@ func TestRunsListPath(t *testing.T) {
 }
 
 func TestValidCityName(t *testing.T) {
-	valid := []string{"a", "alpha", "alpha-1", "A1-b2-C3", strings.Repeat("a", 64)}
+	valid := []string{"a", "alpha", "alpha-1", "A1-b2-C3", "a_b", "a.b", "a-", strings.Repeat("a", 64)}
 	for _, name := range valid {
 		if !ValidCityName(name) {
 			t.Errorf("ValidCityName(%q) = false, want true", name)
 		}
 	}
-	invalid := []string{"", "-a", "a-", "a_b", "a b", "a/b", "a.b", strings.Repeat("a", 65)}
+	invalid := []string{"", "-a", ".a", "_a", "a b", "a/b", strings.Repeat("a", 65)}
 	for _, name := range invalid {
 		if ValidCityName(name) {
 			t.Errorf("ValidCityName(%q) = true, want false", name)

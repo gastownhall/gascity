@@ -57,7 +57,26 @@ type PromptContext struct {
 	// Templates use {{ .InstructionsFile }} as a provider-aware fallback when
 	// pack-specific guidance (e.g. quality-gate commands) is missing or empty.
 	InstructionsFile string
-	Env              map[string]string // from Agent.Env — custom vars
+	// ConfigDir is the directory the agent's config-relative paths (e.g.
+	// pre-start scripts) resolve against: Agent.SourceDir when set, else
+	// cityPath. Mirrors SessionSetupContext.ConfigDir (cmd/gc/pool.go).
+	ConfigDir string
+	Env       map[string]string // from Agent.Env — custom vars
+}
+
+// resolveConfigDir returns the directory an agent's config-relative paths
+// (pre-start scripts, session setup templates) resolve against: sourceDir
+// when the agent overrides it (imported-pack agents), else cityPath.
+// Shared by every site that populates ConfigDir on a PromptContext or
+// SessionSetupContext, so the resolution rule can't drift between them
+// (#5315). Note that sessionSetupContextForAgent (cmd/gc/cmd_start.go)
+// leaves ConfigDir zero for its rig-only callers; worker_handle.go patches
+// it via this helper.
+func resolveConfigDir(cityPath, sourceDir string) string {
+	if sourceDir != "" {
+		return sourceDir
+	}
+	return cityPath
 }
 
 // PromptRenderResult holds the rendered text plus the version and rendered
@@ -340,6 +359,7 @@ func buildTemplateData(ctx PromptContext) map[string]string {
 	m["ProviderKey"] = ctx.ProviderKey
 	m["ProviderDisplayName"] = ctx.ProviderDisplayName
 	m["InstructionsFile"] = ctx.InstructionsFile
+	m["ConfigDir"] = ctx.ConfigDir
 	return m
 }
 

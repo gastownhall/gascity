@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
@@ -59,9 +60,26 @@ var doltPersistenceWorkspaceCounter atomic.Int64
 // guardrail for the Dolt persistence contract, and the timing lines make any
 // fix that adds expensive subprocesses or export work visible in `go test -v`
 // output without baking in brittle machine-specific thresholds.
+//
+// beads.ExecCommandRunnerWithEnv overlays envOverrides on top of the ambient
+// process environment (including HOME) with no isolation of its own — see
+// TestRealBdRunnerIsolatesHOMEFromSharedServerConfig. A HOME override to a
+// fresh, empty per-call temp dir is injected as a baseline here (an explicit
+// caller-supplied HOME in envOverrides still wins, applied after) so a
+// shared-server config.yaml sitting in the real ambient HOME can never
+// divert the bd subprocesses this runner drives. BEADS_TEST_MODE=0 is injected
+// the same way: these tests run against a Dolt server, and test mode would make
+// bd ignore the port their workspace recorded (see beadstest.EnvBeadsTestMode).
 func realBdRunner(t testing.TB, envOverrides map[string]string) beads.CommandRunner {
 	t.Helper()
-	base := beads.ExecCommandRunnerWithEnv(envOverrides)
+	overrides := map[string]string{
+		"HOME":                     beadstest.GuardedTempDir(t),
+		beadstest.EnvBeadsTestMode: "0",
+	}
+	for k, v := range envOverrides {
+		overrides[k] = v
+	}
+	base := beads.ExecCommandRunnerWithEnv(beadstest.BdSubprocessEnv(overrides))
 	return func(dir, name string, args ...string) ([]byte, error) {
 		displayName := name
 		if name == "bd" && realBDBinary != "" {
@@ -71,6 +89,63 @@ func realBdRunner(t testing.TB, envOverrides map[string]string) beads.CommandRun
 		out, err := base(dir, name, args...)
 		logSubprocessTiming(t, append([]string{displayName}, args...), start, err)
 		return out, err
+	}
+}
+
+// TestRealBdRunnerIsolatesHOMEFromSharedServerConfig proves realBdRunner
+// does not leak the ambient HOME into the bd subprocesses it runs.
+// realBdRunner builds its CommandRunner via
+// beads.ExecCommandRunnerWithEnv(envOverrides), which overlays envOverrides
+// on top of the ambient process environment — including HOME — with no
+// isolation of its own, unlike newIsolatedToolEnv's chain. A shared-server
+// config.yaml sitting in $HOME can route the store operations this file's
+// tests exercise through that shared server instead of the workspace under
+// test.
+func TestRealBdRunnerIsolatesHOMEFromSharedServerConfig(t *testing.T) {
+	if realBDBinary == "" {
+		t.Skip("realBDBinary not configured")
+	}
+
+	pollutedHome := t.TempDir()
+	beadsDir := filepath.Join(pollutedHome, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("creating polluted HOME .beads dir: %v", err)
+	}
+	cfg := "no-db: true\ndolt:\n    shared-server: true\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("writing polluted HOME config.yaml: %v", err)
+	}
+	t.Setenv("HOME", pollutedHome)
+
+	wsDir := beadstest.GuardedTempDir(t)
+	gitCmd := exec.Command("git", "init", "--quiet")
+	gitCmd.Dir = wsDir
+	if out, err := gitCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	// This init step isn't what's under test (realBdRunner, below, is) — pin
+	// its own HOME to wsDir so the t.Setenv pollution above doesn't stop
+	// setup from reaching the part of the test that matters.
+	initCmd := exec.Command(realBDBinary, "init", "-p", "rb", "--skip-hooks", "--skip-agents")
+	initCmd.Dir = wsDir
+	initCmd.Env = replaceEnv(os.Environ(), "HOME", wsDir)
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bd init: %v: %s", err, out)
+	}
+
+	runner := realBdRunner(t, nil)
+	store := beads.NewBdStoreWithPrefix(wsDir, runner, "rb")
+
+	created, err := store.Create(beads.Bead{Title: "home-isolation probe"})
+	if err != nil {
+		t.Fatalf("realBdRunner Create under a shared-server HOME: %v", err)
+	}
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("realBdRunner Get under a shared-server HOME: %v", err)
+	}
+	if got.Title != "home-isolation probe" {
+		t.Fatalf("roundtrip title = %q, want %q", got.Title, "home-isolation probe")
 	}
 }
 
@@ -159,7 +234,7 @@ func runRealBDInit(t *testing.T, env []string, dir, prefix, port string) {
 		"--server-host", "127.0.0.1", "--server-port", port, "-p", prefix,
 		"--skip-hooks", "--skip-agents")
 	cmd.Dir = dir
-	cmd.Env = env
+	cmd.Env = isolateBdHomeEnv(env)
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	logSubprocessTiming(t, []string{"bd", "init", "--server"}, start, errorsForTiming(ctx.Err(), err))
@@ -177,7 +252,7 @@ func runRealBDConfigSet(t *testing.T, env []string, dir, key, value string) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, realBDBinary, "config", "set", key, value)
 	cmd.Dir = dir
-	cmd.Env = env
+	cmd.Env = isolateBdHomeEnv(env)
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	logSubprocessTiming(t, []string{"bd", "config", "set", key, value}, start, errorsForTiming(ctx.Err(), err))
@@ -199,7 +274,7 @@ func runRealBDExportAll(t *testing.T, env []string, dir string) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, realBDBinary, "export", "-o", ".beads/issues.jsonl", "--all")
 	cmd.Dir = dir
-	cmd.Env = env
+	cmd.Env = isolateBdHomeEnv(env)
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	logSubprocessTiming(t, []string{"bd", "export", "-o", ".beads/issues.jsonl", "--all"}, start, errorsForTiming(ctx.Err(), err))
@@ -217,7 +292,7 @@ func configureCustomTypesReal(t *testing.T, env []string, dir string, types []st
 	defer cancel()
 	cmd := exec.CommandContext(ctx, realBDBinary, "config", "set", "types.custom", strings.Join(types, ","))
 	cmd.Dir = dir
-	cmd.Env = env
+	cmd.Env = isolateBdHomeEnv(env)
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	logSubprocessTiming(t, []string{"bd", "config", "set", "types.custom", strings.Join(types, ",")}, start, errorsForTiming(ctx.Err(), err))

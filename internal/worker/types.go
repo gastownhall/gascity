@@ -13,6 +13,7 @@ const ( //nolint:revive // exported enum values are documented by the enclosing 
 	// Profile* identify the supported canonical worker profiles.
 	ProfileClaudeTmuxCLI      Profile = "claude/tmux-cli"
 	ProfileCodexTmuxCLI       Profile = "codex/tmux-cli"
+	ProfileCursorTmuxCLI      Profile = "cursor/tmux-cli"
 	ProfileGeminiTmuxCLI      Profile = "gemini/tmux-cli"
 	ProfileKimiTmuxCLI        Profile = "kimi/tmux-cli"
 	ProfileOpenCodeTmuxCLI    Profile = "opencode/tmux-cli"

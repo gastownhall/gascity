@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/execenv"
 	gitpkg "github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -352,9 +353,33 @@ func (s *Server) slingStoreScopeForBead(beadID string) (rigName string, cityScop
 	return rig.Name, false
 }
 
+// sourceWorkflowStores lists every store the source-bead singleton guard must
+// scan for a live workflow root.
+//
+// Graph-first, for the same reason workflowStores() leads with the graph store:
+// a workflow root is graph class, so on a city that relocates the graph class
+// every live root is in the binding and NOT in the work stores below. Scanning
+// only those answered "no conflict" from stores that structurally cannot hold
+// the answer, and the sling admitted a second live workflow beside the first
+// (ga-nqdff). The leg is STRICT — a fault on the store that holds the answer
+// refuses the sling instead of degrading to the tolerated non-source-store
+// warning, because a binding fault is an error, never absence.
+//
+// It is skipped on a default (non-relocated) city, where GraphBeadStore() ==
+// CityBeadStore(), so the single-store enumeration stays byte-identical and no
+// store is scanned twice. Its ref reuses workflowStores()'s "graph:<city>"
+// spelling so the store_ref round trip has one parse, not two.
 func (s *Server) sourceWorkflowStores() []sling.SourceWorkflowStore {
-	stores := make([]sling.SourceWorkflowStore, 0, len(s.state.BeadStores())+1)
-	if cityStore := s.state.CityBeadStore(); cityStore != nil {
+	stores := make([]sling.SourceWorkflowStore, 0, len(s.state.BeadStores())+2)
+	cityStore := s.state.CityBeadStore()
+	if graphStore := s.relocatedGraphStore(); graphStore != nil {
+		stores = append(stores, sling.SourceWorkflowStore{
+			Store:    graphStore,
+			StoreRef: sourceworkflow.GraphStoreRef(s.state.CityName()),
+			Strict:   true,
+		})
+	}
+	if cityStore != nil {
 		stores = append(stores, sling.SourceWorkflowStore{
 			Store:    cityStore,
 			StoreRef: "city:" + s.state.CityName(),
@@ -468,12 +493,18 @@ type apiNotifier struct {
 	state State
 }
 
+// PokeController enqueues the allocator: sling routed work to a template,
+// and demand for a template is the allocator's to turn into wakes.
 func (n *apiNotifier) PokeController(_ string) {
-	n.state.Poke()
+	n.state.Enqueue(reconcilekey.Allocator())
 }
 
+// PokeControlDispatch enqueues the control-dispatch key, matching the CLI's
+// "control-dispatcher" socket command. It used to call the generic poke,
+// so API workflow launches never ran the targeted control-dispatcher
+// reconcile (OQ-6).
 func (n *apiNotifier) PokeControlDispatch(_ string) {
-	n.state.Poke()
+	n.state.Enqueue(reconcilekey.ControlDispatch())
 }
 
 type apiBeadRouter struct {
@@ -500,18 +531,37 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 			return err
 		}
 	}
-	if r.store == nil {
+	// The core names the store that holds the bead. Honor it only when it is
+	// the relocated graph binding (a --formula wisp root minted there, #6054);
+	// on a city that relocates nothing the request keeps routing through the
+	// sling's own store, unchanged.
+	store := r.store
+	if req.Store != nil && req.Store == r.server.relocatedGraphStore() {
+		store = req.Store
+	}
+	if store == nil {
 		return fmt.Errorf("built-in sling routing requires a store")
 	}
 	routedTo := req.Target
 	if cfg != nil {
 		routedTo = agentutil.NormalizePoolRouteTarget(cfg, req.Target)
 	}
-	if err := r.store.SetMetadata(req.BeadID, beadmeta.RoutedToMetadataKey, routedTo); err != nil {
+	if err := store.SetMetadata(req.BeadID, beadmeta.RoutedToMetadataKey, routedTo); err != nil {
 		if req.Force && errors.Is(err, beads.ErrNotFound) {
 			return nil
 		}
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
 	}
 	return nil
+}
+
+// relocatedGraphStore returns the graph class store only when the city has
+// relocated the graph class to a dedicated binding, and nil otherwise. On a
+// default city GraphBeadStore() is the city store itself.
+func (s *Server) relocatedGraphStore() beads.Store {
+	graphStore := s.state.GraphBeadStore().Store
+	if graphStore == nil || graphStore == s.state.CityBeadStore() {
+		return nil
+	}
+	return graphStore
 }

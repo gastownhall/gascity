@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -47,34 +48,42 @@ func TestMonitorIdleTimeout(t *testing.T) {
 // TestMonitorOutputResetsIdle proves output keeps the context alive past the
 // idle window (the slow-but-healthy case the fixed deadline killed), and that
 // silence afterwards still cancels.
+//
+// Runs inside a synctest bubble so the write cadence and idle window advance
+// on a virtual clock: under a loaded machine (e.g. the full `make test`
+// suite), real goroutine scheduling delays could push a write past the idle
+// deadline with no actual stall, producing a spurious ErrIdle. The bubble
+// removes that dependence on real elapsed time and OS scheduling entirely.
 func TestMonitorOutputResetsIdle(t *testing.T) {
 	t.Parallel()
-	m := NewMonitor(context.Background(), 200*time.Millisecond, 0)
-	defer m.Stop()
-	w := m.Writer(io.Discard)
+	synctest.Test(t, func(t *testing.T) {
+		m := NewMonitor(context.Background(), 200*time.Millisecond, 0)
+		defer m.Stop()
+		w := m.Writer(io.Discard)
 
-	// Write every 50ms for 3x the idle window.
-	deadline := time.Now().Add(600 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if _, err := w.Write([]byte("progress\n")); err != nil {
-			t.Fatalf("write: %v", err)
+		// Write every 50ms for 3x the idle window.
+		deadline := time.Now().Add(600 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			if _, err := w.Write([]byte("progress\n")); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			select {
+			case <-m.Context().Done():
+				t.Fatalf("context canceled while output was flowing: %v", context.Cause(m.Context()))
+			case <-time.After(50 * time.Millisecond):
+			}
 		}
+
+		// Now go silent; the idle window must fire.
 		select {
 		case <-m.Context().Done():
-			t.Fatalf("context canceled while output was flowing: %v", context.Cause(m.Context()))
-		case <-time.After(50 * time.Millisecond):
+			if cause := context.Cause(m.Context()); !errors.Is(cause, ErrIdle) {
+				t.Fatalf("cause = %v, want ErrIdle", cause)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("idle timeout never fired after output stopped")
 		}
-	}
-
-	// Now go silent; the idle window must fire.
-	select {
-	case <-m.Context().Done():
-		if cause := context.Cause(m.Context()); !errors.Is(cause, ErrIdle) {
-			t.Fatalf("cause = %v, want ErrIdle", cause)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("idle timeout never fired after output stopped")
-	}
+	})
 }
 
 // TestMonitorCeiling proves the runaway backstop: continuous output does not

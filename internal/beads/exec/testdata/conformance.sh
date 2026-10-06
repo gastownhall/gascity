@@ -25,6 +25,7 @@ city | rig) ;;
 esac
 
 STATE_ROOT="$GC_STORE_ROOT"
+DEPS_FILE="$STATE_ROOT/.deps.json"
 
 # normalize_bead_output applies metadata reconstruction to a bead JSON object.
 # Extracts meta:<key>=<value> labels into a .metadata map and removes them
@@ -239,8 +240,17 @@ ready)
 		echo "[]"
 		exit 0
 	}
+	deps="[]"
+	[ -f "$DEPS_FILE" ] && deps=$(cat "$DEPS_FILE")
 	# shellcheck disable=SC2086
-	jq -s "[.[] | select(.status == \"open\") | $JQ_NORMALIZE_BEAD]" $bead_files
+	jq -s --argjson deps "$deps" "
+	  [.[] | $JQ_NORMALIZE_BEAD] as \$beads
+	  | (\$beads | map({key: .id, value: {status: .status, work_outcome: (.metadata[\"gc.work_outcome\"] // \"\")}}) | from_entries) as \$byid
+	  | [\$beads[] | select(.status == \"open\") | . as \$b | select(
+	      [\$deps[] | select(.issue_id == \$b.id and (.type == \"blocks\" or .type == \"waits-for\" or .type == \"conditional-blocks\"))]
+	      | all(\$byid[.depends_on_id].status == \"closed\" and \$byid[.depends_on_id].work_outcome != \"blocked\")
+	    )]
+	" $bead_files
 	;;
 
 children)
@@ -288,6 +298,42 @@ set-metadata)
 	jq --arg ml "$meta_label" --arg mp "$meta_prefix" '
       .labels = ([.labels // [] | .[] | select(startswith($mp) | not)] + [$ml])
     ' "$bead_file" >"$bead_file.tmp" && mv "$bead_file.tmp" "$bead_file"
+	;;
+
+dep-add)
+	issue_id="$1"
+	depends_on_id="$2"
+	dep_type="$3"
+	current="[]"
+	[ -f "$DEPS_FILE" ] && current=$(cat "$DEPS_FILE")
+	updated=$(echo "$current" | jq -c \
+		--arg i "$issue_id" --arg d "$depends_on_id" --arg t "$dep_type" \
+		'[.[] | select(.issue_id != $i or .depends_on_id != $d)] + [{issue_id: $i, depends_on_id: $d, type: $t}]')
+	echo "$updated" >"$DEPS_FILE.tmp" && mv "$DEPS_FILE.tmp" "$DEPS_FILE"
+	;;
+
+dep-remove)
+	issue_id="$1"
+	depends_on_id="$2"
+	if [ -f "$DEPS_FILE" ]; then
+		updated=$(jq -c --arg i "$issue_id" --arg d "$depends_on_id" \
+			'[.[] | select(.issue_id != $i or .depends_on_id != $d)]' "$DEPS_FILE")
+		echo "$updated" >"$DEPS_FILE.tmp" && mv "$DEPS_FILE.tmp" "$DEPS_FILE"
+	fi
+	;;
+
+dep-list)
+	id="$1"
+	direction="${2:-down}"
+	if [ ! -f "$DEPS_FILE" ]; then
+		echo "[]"
+		exit 0
+	fi
+	if [ "$direction" = "up" ]; then
+		jq -c --arg id "$id" '[.[] | select(.depends_on_id == $id)]' "$DEPS_FILE"
+	else
+		jq -c --arg id "$id" '[.[] | select(.issue_id == $id)]' "$DEPS_FILE"
+	fi
 	;;
 
 mol-cook)

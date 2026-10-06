@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 )
 
 func TestGraphTable(t *testing.T) {
@@ -22,7 +23,7 @@ func TestGraphTable(t *testing.T) {
 	_ = store.DepAdd("gc-2", "gc-1", "blocks")
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1", "gc-2", "gc-3"}, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2", "gc-3"}, graphOpts{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -62,7 +63,7 @@ func TestGraphJSON(t *testing.T) {
 	_ = store.DepAdd("gc-2", "gc-1", "blocks")
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1", "gc-2"}, graphOpts{JSON: true}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2"}, graphOpts{JSON: true}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph --json = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -92,7 +93,7 @@ func TestGraphMermaid(t *testing.T) {
 	_ = store.DepAdd("gc-2", "gc-1", "blocks")
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1", "gc-2"}, graphOpts{Mermaid: true}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2"}, graphOpts{Mermaid: true}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph mermaid = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -114,7 +115,7 @@ func TestGraphConvoyExpansion(t *testing.T) {
 	_, _ = store.Create(beads.Bead{Title: "child B", ParentID: "gc-1"}) // gc-3
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1"}, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1"}, graphOpts{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph convoy = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -142,7 +143,7 @@ func TestGraphConvoyExpansionUsesTracksDependencies(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1"}, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1"}, graphOpts{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph convoy = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -163,7 +164,7 @@ func TestGraphEpicIsTreatedAsOrdinaryBead(t *testing.T) {
 	_, _ = store.Create(beads.Bead{Title: "story 2", ParentID: "gc-1"}) // gc-3
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1"}, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1"}, graphOpts{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph epic = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -184,7 +185,7 @@ func TestGraphMissingArgs(t *testing.T) {
 	store := beads.NewMemStore()
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, nil, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), nil, graphOpts{}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doGraph no args = %d, want 1", code)
 	}
@@ -198,7 +199,7 @@ func TestGraphEmptyConvoy(t *testing.T) {
 	_, _ = store.Create(beads.Bead{Title: "empty convoy", Type: "convoy"}) // gc-1
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1"}, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1"}, graphOpts{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph empty convoy = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -219,7 +220,7 @@ func TestGraphDepsFilteredToSet(t *testing.T) {
 
 	// Only graph gc-1 and gc-2 — gc-3 dep should be filtered out.
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1", "gc-2"}, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2"}, graphOpts{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -245,7 +246,7 @@ func TestGraphMermaidClosedStyle(t *testing.T) {
 	_, _ = store.Create(beads.Bead{Title: "ready task"}) // gc-2
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1", "gc-2"}, graphOpts{Mermaid: true}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2"}, graphOpts{Mermaid: true}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph mermaid = %d, want 0", code)
 	}
@@ -266,7 +267,7 @@ func TestGraphMermaidLabelEscaping(t *testing.T) {
 	_, _ = store.Create(beads.Bead{Title: `fix "quotes" issue`}) // gc-1
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1"}, graphOpts{Mermaid: true}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1"}, graphOpts{Mermaid: true}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph = %d, want 0", code)
 	}
@@ -288,7 +289,7 @@ func TestGraphClosedBlockerIsReady(t *testing.T) {
 	_ = store.Close("gc-1")
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1", "gc-2"}, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2"}, graphOpts{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -314,7 +315,7 @@ func TestGraphDeduplicate(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	// Pass same ID twice — should only appear once.
-	code := doGraph(store, []string{"gc-1", "gc-1"}, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-1"}, graphOpts{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph = %d, want 0", code)
 	}
@@ -335,7 +336,7 @@ func TestGraphTree(t *testing.T) {
 	_ = store.DepAdd("gc-3", "gc-2", "blocks")
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1", "gc-2", "gc-3"}, graphOpts{Tree: true}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2", "gc-3"}, graphOpts{Tree: true}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph tree = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -369,7 +370,7 @@ func TestGraphTreeMultipleRoots(t *testing.T) {
 	_ = store.DepAdd("gc-3", "gc-1", "blocks")
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1", "gc-2", "gc-3"}, graphOpts{Tree: true}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2", "gc-3"}, graphOpts{Tree: true}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph tree = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -394,7 +395,7 @@ func TestGraphTreeInProgressIcon(t *testing.T) {
 	_ = store.Update(b.ID, beads.UpdateOpts{Status: strPtr("in_progress")})
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1"}, graphOpts{Tree: true}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1"}, graphOpts{Tree: true}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph tree = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -414,7 +415,7 @@ func TestGraphNonBlockingDepIgnored(t *testing.T) {
 	_ = store.DepAdd("gc-2", "gc-1", "tracks")
 
 	var stdout, stderr bytes.Buffer
-	code := doGraph(store, []string{"gc-1", "gc-2"}, graphOpts{}, &stdout, &stderr)
+	code := doGraph(graphStoresOver(store, nil), []string{"gc-1", "gc-2"}, graphOpts{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doGraph = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -514,4 +515,90 @@ func TestOpenRigAwareStoreLegacyFileCityUsesSharedCityStore(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(rigDir, ".gc")); !os.IsNotExist(err) {
 		t.Fatalf("legacy rig open should not create rig .gc state, stat err = %v", err)
 	}
+}
+
+// TestGraphResolvesRelocatedIDs pins that `gc graph` on a migrated city can graph
+// a bead that lives in the infrastructure binding.
+func TestGraphResolvesRelocatedIDs(t *testing.T) {
+	work := beads.NewMemStore()
+	binding := &beads.MemStore{IDPrefix: "gcg"}
+
+	root, err := binding.Create(beads.Bead{Title: "Formula: ship-it", Type: "molecule"})
+	if err != nil {
+		t.Fatalf("Create molecule root in the binding: %v", err)
+	}
+	step, err := binding.Create(beads.Bead{Title: "Step 1: implement", Type: "step", ParentID: root.ID})
+	if err != nil {
+		t.Fatalf("Create step in the binding: %v", err)
+	}
+	if err := binding.DepAdd(step.ID, root.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doGraph(graphStoresOver(work, binding), []string{root.ID, step.ID}, graphOpts{}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doGraph = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Formula: ship-it") || !strings.Contains(out, "Step 1: implement") {
+		t.Errorf("graph of relocated beads did not render them; got:\n%s", out)
+	}
+	if !graphRowShows(out, step.ID, root.ID) {
+		t.Errorf("row for %s should show %s as its blocker; got:\n%s", step.ID, root.ID, out)
+	}
+}
+
+// TestGraphExpandsConvoyWithRelocatedMembers pins the failure that looks like an
+// answer: unresolved members still list, so the assertion is on the EDGES.
+func TestGraphExpandsConvoyWithRelocatedMembers(t *testing.T) {
+	work := beads.NewMemStore()
+	binding := &beads.MemStore{IDPrefix: "gcg"}
+
+	convoy, err := work.Create(beads.Bead{Title: "convoy: release", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("Create convoy in work: %v", err)
+	}
+	first, err := binding.Create(beads.Bead{Title: "Step 1: implement", Type: "step"})
+	if err != nil {
+		t.Fatalf("Create first step: %v", err)
+	}
+	second, err := binding.Create(beads.Bead{Title: "Step 2: verify", Type: "step"})
+	if err != nil {
+		t.Fatalf("Create second step: %v", err)
+	}
+	for _, member := range []string{first.ID, second.ID} {
+		if err := work.DepAdd(convoy.ID, member, convoycore.TrackingDepType); err != nil {
+			t.Fatalf("DepAdd tracks %s: %v", member, err)
+		}
+	}
+	// The members' own edge lives in the binding alongside them.
+	if err := binding.DepAdd(second.ID, first.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd blocks: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doGraph(graphStoresOver(work, binding), []string{convoy.ID}, graphOpts{}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doGraph = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Step 2: verify") {
+		t.Errorf("convoy member rendered as an unresolved placeholder (no title); got:\n%s", out)
+	}
+	if !graphRowShows(out, second.ID, first.ID) {
+		t.Errorf("row for %s should show %s as its blocker; the members' edges were read from the work store, which does not hold them, so the graph printed no edges at all:\n%s", second.ID, first.ID, out)
+	}
+}
+
+// graphRowShows reports whether the table row for id names want in its
+// BLOCKED BY column, so the assertion is about the edge and not the id.
+func graphRowShows(out, id, want string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), id+" ") {
+			continue
+		}
+		return strings.Contains(line, want)
+	}
+	return false
 }

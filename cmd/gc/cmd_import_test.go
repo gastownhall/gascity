@@ -812,10 +812,16 @@ version = "^1.4"
 
 	prevSync := syncImports
 	prevInstall := installLockedImports
+	prevValidate := validateComposedConfigAfterInstall
 	t.Cleanup(func() {
 		syncImports = prevSync
 		installLockedImports = prevInstall
+		validateComposedConfigAfterInstall = prevValidate
 	})
+	// The fetch and lockfile calls below are stubbed, so no pack content is
+	// actually cached on disk; skip the post-install config load, which is
+	// covered on its own in TestDoImportInstallRejectsUnloadableComposedConfig.
+	validateComposedConfigAfterInstall = func(_ string) error { return nil }
 	syncImports = func(cityRoot string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
 		if cityRoot != dir {
 			t.Fatalf("cityRoot = %q, want %q", cityRoot, dir)
@@ -940,10 +946,16 @@ version = "^1.0"
 
 	prevSync := syncImports
 	prevInstall := installLockedImports
+	prevValidate := validateComposedConfigAfterInstall
 	t.Cleanup(func() {
 		syncImports = prevSync
 		installLockedImports = prevInstall
+		validateComposedConfigAfterInstall = prevValidate
 	})
+	// The fetch and lockfile calls below are stubbed, so no pack content is
+	// actually cached on disk; skip the post-install config load, which is
+	// covered on its own in TestDoImportInstallRejectsUnloadableComposedConfig.
+	validateComposedConfigAfterInstall = func(_ string) error { return nil }
 	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
 		return &packman.Lockfile{
 			Schema: packman.LockfileSchema,
@@ -988,10 +1000,16 @@ version = "^1.4"
 
 	prevSync := syncImports
 	prevInstall := installLockedImports
+	prevValidate := validateComposedConfigAfterInstall
 	t.Cleanup(func() {
 		syncImports = prevSync
 		installLockedImports = prevInstall
+		validateComposedConfigAfterInstall = prevValidate
 	})
+	// The fetch and lockfile calls below are stubbed, so no pack content is
+	// actually cached on disk; skip the post-install config load, which is
+	// covered on its own in TestDoImportInstallRejectsUnloadableComposedConfig.
+	validateComposedConfigAfterInstall = func(_ string) error { return nil }
 
 	syncImports = func(cityRoot string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
 		if cityRoot != dir {
@@ -1036,6 +1054,19 @@ version = "^1.4"
 	}
 }
 
+// pinnedRepoCacheRoot is the repo cache root, <GC_HOME>/cache/repos, that a
+// command run under clearGCEnv writes into. It is computed from the pinned
+// GC_HOME rather than through packman.RepoCacheRoot so an assertion on a
+// printed root does not share its resolver with the code under test.
+func pinnedRepoCacheRoot(t *testing.T) string {
+	t.Helper()
+	gcHome := os.Getenv("GC_HOME")
+	if gcHome == "" {
+		t.Fatal("GC_HOME is not pinned; call clearGCEnv first")
+	}
+	return filepath.Join(gcHome, "cache", "repos")
+}
+
 func TestDoImportInstallWithNoImportsSucceeds(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
@@ -1046,8 +1077,12 @@ func TestDoImportInstallWithNoImportsSucceeds(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Installed 0 remote import(s)") {
-		t.Fatalf("stdout = %q", stdout.String())
+	// The success line names the repo cache root the install wrote into, so a
+	// GC_HOME that differs between this shell and the process that later
+	// resolves the config is visible on both sides of the split.
+	want := "Installed 0 remote import(s) into " + pinnedRepoCacheRoot(t)
+	if got := strings.TrimSpace(stdout.String()); got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
 	}
 	lock, err := packman.ReadLockfile(fsys.OSFS{}, dir)
 	if err != nil {
@@ -1055,6 +1090,62 @@ func TestDoImportInstallWithNoImportsSucceeds(t *testing.T) {
 	}
 	if len(lock.Packs) != 0 {
 		t.Fatalf("len(Packs) = %d, want 0", len(lock.Packs))
+	}
+}
+
+// TestDoImportInstallRejectsUnloadableComposedConfig mirrors the fixture in
+// TestExpandedConfigLoadCheckReportsImportedPackLegacyOrderPath
+// (doctor_v2_checks_test.go): a locally-sourced pack whose order lives at
+// the legacy PackV1 path. `gc doctor`'s expanded-config-load check already
+// refuses to load this composed config; `gc import install` must now refuse
+// it too instead of reporting success (#5382). The import here is a local
+// path source, so syncImports/installLockedImports run for real -- no
+// network fetch is needed to reproduce the gap.
+func TestDoImportInstallRejectsUnloadableComposedConfig(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, `
+[workspace]
+name = "order-city"
+`)
+	writePackToml(t, dir, `
+[pack]
+name = "order-city"
+schema = 2
+
+[imports.ops]
+source = "./packs/ops"
+`)
+	writeDoctorFile(t, dir, "packs/ops/pack.toml", `
+[pack]
+name = "ops"
+schema = 2
+`)
+	writeDoctorFile(t, dir, "packs/ops/orders/nightly/order.toml", `
+[order]
+formula = "nightly"
+trigger = "manual"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doImportInstall(dir, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout = %s", code, stdout.String())
+	}
+	for _, want := range []string{
+		"gc import install: composed config failed to load after install",
+		"unsupported PackV1 order path",
+		"packs/ops/orders/nightly/order.toml",
+		// The install is not rolled back, so the failure must say what is
+		// already on disk rather than reading as "nothing was installed".
+		"packs.lock is written",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want substring %q", stderr.String(), want)
+		}
+	}
+	if strings.Contains(stdout.String(), "Installed") {
+		t.Fatalf("stdout = %q, install should not have reported success", stdout.String())
 	}
 }
 
@@ -1354,8 +1445,205 @@ transitive = false
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), `Upgraded import "worker"`) {
+	// Upgrade clones through the same cache as install, so its success line
+	// names the same root.
+	want := `Upgraded import "worker" (worker) into ` + pinnedRepoCacheRoot(t)
+	if got := strings.TrimSpace(stdout.String()); got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
+// TestImportWritersRefuseUnresolvableRepoCacheRoot pins the fail-closed
+// branch: install and upgrade resolve the repo cache root before their first
+// clone so the success line can name it, and an unresolvable root is an error
+// rather than a success line that names nothing. Only a test binary with
+// GC_HOME unset reaches it; production resolution always yields a root.
+func TestImportWritersRefuseUnresolvableRepoCacheRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(dir string, stdout, stderr *bytes.Buffer) int
+	}{
+		{"install", func(dir string, stdout, stderr *bytes.Buffer) int { return doImportInstall(dir, stdout, stderr) }},
+		{"upgrade", func(dir string, stdout, stderr *bytes.Buffer) int { return doImportUpgrade(dir, "", stdout, stderr) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			t.Setenv("GC_HOME", "")
+			dir := t.TempDir()
+			writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+
+			var stdout, stderr bytes.Buffer
+			if code := tc.run(dir, &stdout, &stderr); code == 0 {
+				t.Fatalf("code = 0, want failure; stdout = %q", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "resolving repo cache root: no GC_HOME available") {
+				t.Fatalf("stderr = %q", stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+		})
+	}
+}
+
+// TestDoImportUpgradeTargetUnchangedReportsNoMovement covers the targeted
+// upgrade path when the resolved commit matches the pre-upgrade lock: the
+// summary must report that the import was already at that commit rather than
+// claiming an upgrade happened.
+func TestDoImportUpgradeTargetUnchangedReportsNoMovement(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[defaults.rig.imports.worker]
+source = "https://example.com/worker.git"
+version = "^3.0"
+transitive = false
+`)
+	if err := packman.WriteLockfile(fsys.OSFS{}, dir, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/worker.git": {Version: "3.2.0", Commit: "worker"},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	prevSelective := syncImportsSelective
+	t.Cleanup(func() { syncImportsSelective = prevSelective })
+	syncImportsSelective = func(_ string, _ map[string]config.Import, _ map[string]struct{}) (*packman.Lockfile, error) {
+		// Nothing newer satisfies "^3.0", so the import resolves back to the
+		// commit already in the lock.
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				"https://example.com/worker.git": {Version: "3.2.0", Commit: "worker"},
+			},
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportUpgrade(dir, "worker", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `Import "worker" already at worker`) {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "Upgraded") {
+		t.Fatalf("stdout should not claim an upgrade happened: %q", stdout.String())
+	}
+}
+
+// TestDoImportUpgradeReportsActualMovement covers the bug in #5312: the
+// all-imports summary must count how many pins actually moved, not just how
+// many entries the resolved lockfile has.
+func TestDoImportUpgradeReportsActualMovement(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.moved]
+source = "https://example.com/moved.git"
+version = "^1.0"
+
+[imports.pinned]
+source = "https://example.com/pinned.git"
+version = "sha:cccccccccccccccccccccccccccccccccccccc"
+`)
+	if err := packman.WriteLockfile(fsys.OSFS{}, dir, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/moved.git":  {Version: "1.0.0", Commit: "aaaa"},
+			"https://example.com/pinned.git": {Version: "sha:cccc", Commit: "cccc"},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	prevSync := syncImports
+	t.Cleanup(func() { syncImports = prevSync })
+	syncImports = func(_ string, _ map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
+		if mode != packman.InstallUpgrade {
+			t.Fatalf("mode = %v, want InstallUpgrade", mode)
+		}
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				// Resolved to a newer commit: this one moved.
+				"https://example.com/moved.git": {Version: "1.1.0", Commit: "bbbb"},
+				// A sha pin has exactly one satisfying version, so it
+				// resolves back to itself; only Fetched changes.
+				"https://example.com/pinned.git": {Version: "sha:cccc", Commit: "cccc"},
+			},
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportUpgrade(dir, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Upgraded 1 of 2 remote import(s) into "+pinnedRepoCacheRoot(t)+"; 1 already up to date") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+// TestDoImportUpgradeAllPinnedReportsNoMovement is the exact scenario from
+// #5312: every import is sha-pinned, so upgrading resolves each one back to
+// itself. The summary must say nothing moved instead of implying an upgrade.
+func TestDoImportUpgradeAllPinnedReportsNoMovement(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.core]
+source = "https://example.com/core.git"
+version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
+`)
+	if err := packman.WriteLockfile(fsys.OSFS{}, dir, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/core.git": {Version: "sha:f895c0ff", Commit: "f895c0ff"},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	prevSync := syncImports
+	t.Cleanup(func() { syncImports = prevSync })
+	syncImports = func(_ string, _ map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
+		if mode != packman.InstallUpgrade {
+			t.Fatalf("mode = %v, want InstallUpgrade", mode)
+		}
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				// Same commit as before; only Fetched moved under the hood.
+				"https://example.com/core.git": {Version: "sha:f895c0ff", Commit: "f895c0ff"},
+			},
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportUpgrade(dir, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No import moved; 1 already up to date") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "Upgraded") {
+		t.Fatalf("stdout should not claim an upgrade happened: %q", stdout.String())
 	}
 }
 

@@ -27,8 +27,9 @@ import (
 //
 // A class accessor that returns the city store, or nil, relocates nothing and
 // contributes no binding — the identity gate that keeps a single-store city
-// byte-identical. MintsReserved stays false: nothing in this build verifies a
-// binding's mint prefix, so every plan keeps its residence probe.
+// byte-identical. A plan's residence probe retires only when both halves say
+// so: the mint bit observed from the store, the relic bit carried across the
+// State surface from the boot that censused the binding.
 func (s *Server) residencyTopology() storeref.Topology {
 	cfg := s.state.Config()
 	city := s.state.CityBeadStore()
@@ -49,7 +50,7 @@ func (s *Server) residencyTopology() storeref.Topology {
 	topo := storeref.Topology{
 		Work: storeref.Leg{Ref: storeref.WorkRef, Store: city, Prefix: strings.TrimSpace(config.EffectiveHQPrefix(cfg))},
 	}
-	topo.Bindings, topo.Refused = apiResidencyBindings(order, byStore)
+	topo.Bindings, topo.Refused = apiResidencyBindings(order, byStore, s.state.ClassBindingHasLegacyResidents)
 
 	if cfg != nil {
 		for _, rig := range cfg.Rigs {
@@ -137,28 +138,19 @@ func containsClass(classes []coordclass.Class, want coordclass.Class) bool {
 }
 
 // apiResidencyBindings groups the relocated classes by the store serving them.
-func apiResidencyBindings(order []beads.Store, byStore map[beads.Store][]coordclass.Class) ([]storeref.ClassBinding, error) {
-	if len(order) == 0 {
-		return nil, nil
-	}
-	var refused error
-	bindings := make([]storeref.ClassBinding, 0, len(order))
-	for _, store := range order {
-		classes := completeObservedClasses(byStore[store])
-		prefixes := make([]string, 0, len(classes))
-		for _, class := range classes {
-			if prefix, ok := config.ReservedClassPrefix(class.String()); ok {
-				prefixes = append(prefixes, prefix)
-			}
-		}
-		bindings = append(bindings, storeref.ClassBinding{
-			Classes:  classes,
-			Prefixes: prefixes,
-			Leg:      storeref.Leg{Ref: storeref.ClassRef(classes), Store: store},
-		})
-		if refusing, ok := store.(storeref.RefusingStore); ok && refused == nil {
-			refused = refusing.StorageRefusal()
-		}
-	}
-	return bindings, refused
+//
+// The body is storeref.BuildBindings, shared with the CLI plane. What survives
+// here is the only thing that is this plane's own: it observes four of the five
+// infrastructure classes, so it hands the builder completeObservedClasses to
+// round a whole-split binding back up to the class set — and therefore the
+// StoreRef — the other planes name for the same store.
+//
+// relics is the boot census's verdict, read across the State surface. A nil one
+// is the pessimistic answer for every store: a caller with no census to offer
+// has not cleared anything.
+func apiResidencyBindings(order []beads.Store, byStore map[beads.Store][]coordclass.Class, relics func(beads.Store) bool) ([]storeref.ClassBinding, error) {
+	return storeref.BuildBindings(order, byStore, storeref.BindingOptions{
+		Relics:          relics,
+		CompleteClasses: completeObservedClasses,
+	})
 }

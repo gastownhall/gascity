@@ -605,6 +605,68 @@ func TestPackRegistrySearchRefreshFallsBackToCache(t *testing.T) {
 	}
 }
 
+func TestPackRegistryCorruptCacheDiagnosticsIncludeRecovery(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GC_HOME", home)
+	writeEmptyRegistryConfig(t, home)
+	catalogDir := writeRegistryCatalog(t, packRegistryTestCatalog)
+	var stdout, stderr bytes.Buffer
+	if code := doPackRegistryAdd("main", catalogDir, false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("add main: %d %s", code, stderr.String())
+	}
+	cachePath := packregistry.CachePath(home, "main")
+	if err := os.WriteFile(cachePath, []byte("not = valid = toml"), 0o644); err != nil {
+		t.Fatalf("corrupt cache: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		run  func(stdout, stderr *bytes.Buffer) int
+	}{
+		{
+			name: "refresh",
+			run: func(stdout, stderr *bytes.Buffer) int {
+				return doPackRegistryRefresh("main", false, stdout, stderr)
+			},
+		},
+		{
+			name: "search",
+			run: func(stdout, stderr *bytes.Buffer) int {
+				return doPackRegistrySearch("light", "main", false, 50, false, false, stdout, stderr)
+			},
+		},
+		{
+			name: "show",
+			run: func(stdout, stderr *bytes.Buffer) int {
+				return doPackRegistryShow("main:lighthouse", false, false, stdout, stderr)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout.Reset()
+			stderr.Reset()
+			if code := tc.run(&stdout, &stderr); code == 0 {
+				t.Fatalf("%s succeeded with corrupt cache stdout=%q stderr=%q", tc.name, stdout.String(), stderr.String())
+			}
+			assertPackRegistryCorruptCacheRecovery(t, stderr.String(), cachePath)
+		})
+	}
+}
+
+func assertPackRegistryCorruptCacheRecovery(t *testing.T, stderr, cachePath string) {
+	t.Helper()
+	for _, want := range []string{
+		"cached catalog for registry \"main\" is unreadable or invalid",
+		"rm -f",
+		cachePath,
+		"gc pack registry refresh main",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, stderr)
+		}
+	}
+}
+
 func TestPackRegistryShowUnqualifiedFailsClosedWithUnavailableRegistry(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)

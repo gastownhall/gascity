@@ -8,6 +8,7 @@ const ( //nolint:revive // exported profile IDs are documented by the enclosing 
 	// Profile* identify the canonical worker profiles used by conformance tests.
 	ProfileClaudeTmuxCLI      ProfileID = "claude/tmux-cli"
 	ProfileCodexTmuxCLI       ProfileID = "codex/tmux-cli"
+	ProfileCursorTmuxCLI      ProfileID = "cursor/tmux-cli"
 	ProfileGeminiTmuxCLI      ProfileID = "gemini/tmux-cli"
 	ProfileKimiTmuxCLI        ProfileID = "kimi/tmux-cli"
 	ProfileOpenCodeTmuxCLI    ProfileID = "opencode/tmux-cli"
@@ -94,7 +95,7 @@ func Phase1Profiles() []Profile {
 				DefaultCostPriced: true,
 			},
 		},
-		// codex and gemini below are covered by the Phase 1 transcript/
+		// codex, cursor, and gemini below are covered by the Phase 1 transcript/
 		// continuation requirements and by the WC-STRUCT-* structured family
 		// (see structured_conformance_test.go).
 		{
@@ -120,6 +121,22 @@ func Phase1Profiles() []Profile {
 				CacheReadTokens:   10,
 				Model:             "gpt-5-codex",
 				DefaultCostPriced: false,
+			},
+		},
+		{
+			ID:       ProfileCursorTmuxCLI,
+			Provider: "cursor/tmux-cli",
+			WorkDir:  "/tmp/gascity/phase1/cursor",
+			Fixtures: ProfileFixtureSet{
+				FreshRoot:        "testdata/fixtures/cursor/fresh",
+				ContinuationRoot: "testdata/fixtures/cursor/continuation",
+				ResetRoot:        "testdata/fixtures/cursor/reset",
+			},
+			Continuation: ContinuationOracle{
+				AnchorText:             "Cursor phase 1 validates the captured JSONL transcript contract.",
+				RecallPromptContains:   "Repeat the exact Cursor phase-1 summary from earlier before answering.",
+				RecallResponseContains: "Cursor phase 1 validates the captured JSONL transcript contract.",
+				ResetResponseContains:  "I cannot repeat the earlier Cursor summary because this session started fresh.",
 			},
 		},
 		{

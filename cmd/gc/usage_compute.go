@@ -115,8 +115,11 @@ func emitComputeFactForBead(ctx context.Context, sink usage.Sink, store beads.St
 		return false
 	}
 	// Prefer the recorded sleep time as the interval end, but only when it falls
-	// after this interval's start — slept_at can be stale for non-sleep terminal
-	// states (drained/archived) that don't refresh it. Otherwise use now.
+	// after this interval's start. slept_at is refreshed by both SleepPatch and
+	// AcknowledgeDrainPatch, so for a drained session the end is the drain-ack
+	// time rather than the reconcile tick's now — more accurate, and the After
+	// guard still rejects a slept_at carried over from a PRIOR awake interval
+	// (archive and quarantine exits still don't refresh it). Otherwise use now.
 	end := now
 	if sleptRaw := strings.TrimSpace(meta["slept_at"]); sleptRaw != "" {
 		if t, perr := time.Parse(time.RFC3339, sleptRaw); perr == nil && t.After(startedAt) {
@@ -401,10 +404,14 @@ func (cr *CityRuntime) sweepLiveSessionModelUsage(
 		return
 	}
 	if memo.path == "" {
-		// A settled miss is definitive for this epoch (unregistered provider family,
-		// or a keyless codex session whose CLEAN workdir+window scan found nothing —
+		// A settled miss is definitive for this epoch (unregistered provider family;
+		// a keyless codex session whose CLEAN workdir+window scan found nothing —
 		// ambiguity, an out-of-window filename, or a TZ shift, none of which a retry
-		// resolves). Record it so the scan is never repeated; the session's usage is
+		// resolves; or a keyless claude session whose transcript lookup cleanly
+		// REFUSED an ambiguous shared workdir, which stays ambiguous while the pool
+		// shares it — note an unambiguous claude session whose transcript is merely
+		// not written yet is NOT settled, so the live lane keeps rediscovering it).
+		// Record it so the scan is never repeated; the session's usage is
 		// still recovered by the terminal sweep when its interval ends, and a re-wake
 		// starts a fresh epoch that discovers again.
 		path, settled := factory.DiscoverSweepTranscript(b.ID, b.Metadata, now)

@@ -1,6 +1,8 @@
 package beads_test
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -32,12 +34,46 @@ func TestSQLiteStoreConformance(t *testing.T) {
 	beadstest.RunMetadataTests(t, factory)
 }
 
+// TestSQLiteStoreReadyParityConformance proves a primed CachingStore over the
+// store serves the same ready rows, in the same order, as the store's own
+// Ready. A class binding's cache is the census the controller's demand reads
+// are answered from, so a divergence here offers blocked work or cuts a
+// different Limit prefix on every split city.
+func TestSQLiteStoreReadyParityConformance(t *testing.T) {
+	beadstest.RunReadyParityConformance(t, "SQLiteStore", beadstest.ReadyParityHarness{
+		Open:   func(t *testing.T) beads.Store { return newSQLiteForConformance(t) },
+		Rescan: (*beads.CachingStore).ReconcileForTest,
+	})
+}
+
 // TestSQLiteStoreConditionalWriterConformance runs the shared fenced-write
-// suite against the embedded store. Without the capability the graph plane's
-// control epochs, drain reservations, and attach fences silently degrade to
-// unconditional writes on a routed city.
+// suite against the embedded store, raw and under the CachingStore the
+// controller puts over a binding engine. Without the capability the graph
+// plane's control epochs, drain reservations, and attach fences silently
+// degrade to unconditional writes on a routed city. The row-backed leg proves
+// every whole-row write flavor mints a fresh revision, which is what makes the
+// fence honest once the engine is stamped. The cache elides a write that
+// changes nothing, so it leaves that leg off, as every cache row does.
 func TestSQLiteStoreConditionalWriterConformance(t *testing.T) {
-	beadstest.RunConditionalWriterConformance(t, "SQLiteStore", func(t *testing.T) beads.Store {
+	beadstest.RunConditionalWriterConformanceWithOptions(t, "SQLiteStore", func(t *testing.T) beads.Store {
+		return newSQLiteForConformance(t)
+	}, beadstest.ConditionalWriterOptions{RowBackedMutationFlavors: true, SuppliesCurrent: true})
+	beadstest.RunConditionalWriterConformanceWithOptions(t, "CachingStore/SQLiteStore", func(t *testing.T) beads.Store {
+		cache := beads.NewCachingStoreForTest(newSQLiteForConformance(t), nil)
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+		return cache
+	}, beadstest.ConditionalWriterOptions{SuppliesCurrent: true})
+}
+
+// TestSQLiteStoreAtomicCloserConformance runs the shared atomic terminal-close
+// suite against the embedded store. Without the capability a session close on
+// a sqlite-routed city stamps its terminal metadata and closes the row as two
+// writes, and a writer landing between them strands a closed row that still
+// looks live.
+func TestSQLiteStoreAtomicCloserConformance(t *testing.T) {
+	beadstest.RunAtomicConditionalCloserConformance(t, "SQLiteStore", func(t *testing.T) beads.Store {
 		return newSQLiteForConformance(t)
 	})
 }
@@ -48,6 +84,56 @@ func TestSQLiteStoreFenceConformance(t *testing.T) {
 	beadstest.RunFenceConformance(t, func() beads.Store {
 		return newSQLiteForConformance(t)
 	})
+}
+
+// TestSQLiteStorePinnedIDFenceConformance runs the shared fenced-Create suite.
+// It is the same contract every store serving a class binding owes, and this
+// store is the one the shipped bindings open, so a divergence here is a
+// divergence in production.
+func TestSQLiteStorePinnedIDFenceConformance(t *testing.T) {
+	beadstest.RunPinnedIDFenceConformance(t, func(t *testing.T, mintPrefix string, namespaces ...string) beads.Store {
+		t.Helper()
+		opened, err := beads.OpenSQLiteStore(t.TempDir(),
+			beads.WithSQLiteStoreIDPrefix(mintPrefix),
+			beads.WithSQLiteStoreReservedIDPrefixes(namespaces...),
+		)
+		if err != nil {
+			t.Fatalf("OpenSQLiteStore: %v", err)
+		}
+		store := opened.(*beads.SQLiteStore)
+		t.Cleanup(func() { _ = store.CloseStore() })
+		return store
+	})
+}
+
+// TestSQLiteStoreFenceRefusalNamesTheIDAndTheNamespaces covers what the shared
+// suite deliberately will not: the prose.
+//
+// A provider contract can only demand a sentinel, so the conformance rows match
+// on beads.ErrPinnedIDOutsideNamespace and say nothing about wording. But the
+// operator reading this refusal in a log has to be able to act on it, and that
+// takes both halves — which id was refused, and which namespaces this binding
+// would have accepted. Neither is inferable from the sentinel.
+func TestSQLiteStoreFenceRefusalNamesTheIDAndTheNamespaces(t *testing.T) {
+	opened, err := beads.OpenSQLiteStore(t.TempDir(),
+		beads.WithSQLiteStoreIDPrefix("gcn"),
+		beads.WithSQLiteStoreReservedIDPrefixes("gcn", "gcnq"),
+	)
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	store := opened.(*beads.SQLiteStore)
+	t.Cleanup(func() { _ = store.CloseStore() })
+
+	_, err = store.Create(beads.Bead{ID: "ga-42", Title: "a work id pinned into the nudges binding"})
+	if err == nil {
+		t.Fatal("Create accepted a foreign pinned id")
+	}
+	for _, want := range []string{"ga-42", "gcn", "gcnq"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not name %q; an operator cannot tell from it what to route where", err, want)
+		}
+	}
 }
 
 // TestSQLiteStoreDeleteBatch pins the BatchDeleter contract the wisp-GC

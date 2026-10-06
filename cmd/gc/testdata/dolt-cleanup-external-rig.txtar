@@ -569,56 +569,6 @@ if [ ! -d "$data_dir" ]; then
   exit 0
 fi
 
-metadata_files() {
-  printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
-  if command -v gc >/dev/null 2>&1; then
-    rig_paths=$(gc rig list --json 2>/dev/null \
-      | if command -v jq >/dev/null 2>&1; then
-          jq -r '.rigs[].path' 2>/dev/null
-        else
-          grep '"path"' | sed 's/.*"path": *"//;s/".*//'
-        fi) || true
-    if [ -n "$rig_paths" ]; then
-      printf '%s\n' "$rig_paths" | while IFS= read -r p; do
-        [ -n "$p" ] && printf '%s\n' "$p/.beads/metadata.json"
-      done
-      return
-    fi
-  fi
-  find "$GC_CITY_PATH/rigs" -path '*/.beads/metadata.json' 2>/dev/null || true
-}
-
-referenced=""
-while IFS= read -r meta; do
-  [ -z "$meta" ] && continue
-  [ -f "$meta" ] || continue
-  db=$(grep -o '"dolt_database"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta" 2>/dev/null \
-    | sed 's/.*"dolt_database"[[:space:]]*:[[:space:]]*"//;s/"//' || true)
-  [ -n "$db" ] && referenced="$referenced $db "
-done <<EOF
-$(metadata_files)
-EOF
-
-orphans=""
-orphan_count=0
-for d in "$data_dir"/*/; do
-  [ ! -d "$d/.dolt" ] && continue
-  name="$(basename "$d")"
-  case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|__gc_probe) continue ;; esac
-  case "$referenced" in *" $name "*) continue ;; esac
-  size_kb=$(du -sk "$d" 2>/dev/null | cut -f1)
-  size_bytes=$(( ${size_kb:-0} * 1024 ))
-  size="${size_bytes} B"
-  orphans="$orphans$name|$size|$d
-"
-  orphan_count=$((orphan_count + 1))
-done
-
-if [ "$orphan_count" -eq 0 ]; then
-  echo "No orphaned databases found."
-  exit 0
-fi
-
 compute_allowlist_file() {
   _out=$1
   if ! command -v gc >/dev/null 2>&1; then
@@ -660,19 +610,72 @@ trap 'rm -f "$allowlist_file" "${refused_tmp:-}" "${removed_tmp:-}" "${unsafe_tm
 allowlist_ready=true
 if ! compute_allowlist_file "$allowlist_file"; then
   allowlist_ready=false
-  if [ "$force" = true ]; then
-    exit 1
-  fi
   : > "$allowlist_file"
+fi
+
+metadata_files() {
+  printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
+
+  if [ "$allowlist_ready" = true ]; then
+    while IFS= read -r p; do
+      [ -n "$p" ] && printf '%s\n' "$p/.beads/metadata.json"
+    done < "$allowlist_file"
+    return
+  fi
+
+  if command -v gc >/dev/null 2>&1; then
+    return
+  fi
+
+  find "$GC_CITY_PATH/rigs" -path '*/.beads/metadata.json' 2>/dev/null || true
+}
+
+referenced=""
+while IFS= read -r meta; do
+  [ -z "$meta" ] && continue
+  [ -f "$meta" ] || continue
+  db=$(grep -o '"dolt_database"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta" 2>/dev/null \
+    | sed 's/.*"dolt_database"[[:space:]]*:[[:space:]]*"//;s/"//' || true)
+  [ -n "$db" ] && referenced="$referenced $db "
+done <<EOF
+$(metadata_files)
+EOF
+
+orphans=""
+orphan_count=0
+for d in "$data_dir"/*/; do
+  [ ! -d "$d/.dolt" ] && continue
+  name="$(basename "$d")"
+  case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|__gc_probe) continue ;; esac
+  case "$referenced" in *" $name "*) continue ;; esac
+  size_kb=$(du -sk "$d" 2>/dev/null | cut -f1)
+  size_bytes=$(( ${size_kb:-0} * 1024 ))
+  size="${size_bytes} B"
+  orphans="$orphans$name|$size|$d
+"
+  orphan_count=$((orphan_count + 1))
+done
+
+if [ "$orphan_count" -eq 0 ]; then
+  echo "No orphaned databases found."
+  exit 0
+fi
+
+if [ "$allowlist_ready" != true ] && [ "$force" = true ]; then
+  exit 1
 fi
 
 printf "%-30s  %-12s  %s\n" "NAME" "SIZE" "STATUS"
 echo "$orphans" | while IFS='|' read -r name size path; do
   [ -z "$name" ] && continue
   status=""
-  if [ "$force" != true ] && [ "$allowlist_ready" = true ]; then
-    overlap=$(overlapping_rig_path "$path")
-    [ -n "$overlap" ] && status="refused: overlaps rig at $overlap"
+  if [ "$force" != true ]; then
+    if [ "$allowlist_ready" = true ]; then
+      overlap=$(overlapping_rig_path "$path")
+      [ -n "$overlap" ] && status="refused: overlaps rig at $overlap"
+    else
+      status="unverified: rig registry query failed; not confirmed orphan"
+    fi
   fi
   printf "%-30s  %-12s  %s\n" "$name" "$size" "$status"
 done

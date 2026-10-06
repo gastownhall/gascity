@@ -86,8 +86,16 @@ type StatusRigJSON struct {
 
 // StatusSummaryJSON is the agent count summary in JSON output.
 type StatusSummaryJSON struct {
-	TotalAgents       int          `json:"total_agents"`
-	RunningAgents     int          `json:"running_agents"`
+	TotalAgents   int `json:"total_agents"`
+	RunningAgents int `json:"running_agents"`
+	// UnknownAgents is how many of TotalAgents the runtime probe never
+	// answered for. It is zero unless the status is partial. RunningAgents
+	// stays a count of agents observed running, so during partial status
+	// TotalAgents-RunningAgents is not a count of stopped agents and
+	// UnknownAgents is the part of that difference nothing was learned
+	// about. Without it a consumer reads running_agents=0 out of a probe
+	// that reached nobody and cannot tell it from a genuinely idle city.
+	UnknownAgents     int          `json:"unknown_agents,omitempty"`
 	ActiveSessions    int          `json:"active_sessions,omitempty"`
 	SuspendedSessions int          `json:"suspended_sessions,omitempty"`
 	StoreHealth       *StoreHealth `json:"store_health,omitempty"`
@@ -165,6 +173,8 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 
+	warnSupervisorBinaryMismatch("gc status", stderr)
+
 	configStderr := stderr
 	if jsonOutput {
 		configStderr = io.Discard
@@ -178,11 +188,46 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 
+	// The local snapshot opens the bead/Dolt store. Keep it behind the API
+	// fallback: the supervisor serves a cached status view, so touching the
+	// contended local store first defeats the bounded control-plane route and
+	// can leave gc status with no output until an external timeout kills it.
+	localFallback := func() int {
+		return cmdCityStatusLocalFallback(cfg, cityPath, jsonOutput, stdout, stderr)
+	}
+	c, reason := cityStatusAPIClient(cityPath)
+	if c == nil {
+		logRoute(stderr, "status", "fallback", reason)
+		return localFallback()
+	}
+
+	// API rendering only needs the runtime provider for drain-state display;
+	// a nil session snapshot deliberately avoids a bead-store read here. ACP
+	// route registration then uses deterministic session names, so ACP agents
+	// with custom runtime session names may not show "(draining)" in
+	// API-rendered text.
+	sp, err := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, nil)
+	if err != nil {
+		message := fmt.Sprintf("gc status: %v", err)
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "session_provider_failed", message, 1)
+		}
+		fmt.Fprintln(stderr, message) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	dops := newDrainOps(sp)
+	return routeCityStatus(cityPath, dops, c, reason, jsonOutput, stdout, stderr, localFallback)
+}
+
+// cmdCityStatusLocalFallback builds the direct-store status view only when no
+// supervisor API response is available. Its provider receives the loaded
+// session snapshot because ACP transport routing depends on that local state.
+func cmdCityStatusLocalFallback(cfg *config.City, cityPath string, jsonOutput bool, stdout, stderr io.Writer) int {
 	storeStderr := stderr
 	if jsonOutput {
 		storeStderr = io.Discard
 	}
-	store, _, code := openCityStatusStore(cityPath, storeStderr)
+	store, diagnostic, code := openCityStatusStore(cityPath, storeStderr)
 	if code != 0 {
 		if jsonOutput {
 			return writeJSONError(stdout, stderr, "store_open_failed", "gc status: opening bead store failed", code)
@@ -200,33 +245,39 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 	dops := newDrainOps(sp)
-	c, reason := cityStatusAPIClient(cityPath)
-	return routeCityStatus(cityPath, cfg, sp, dops, c, reason, jsonOutput, stdout, stderr)
+	if jsonOutput {
+		return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
+	}
+	return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
 }
 
 // cityStatusAPIClient returns (client, "") when the API path is available,
 // or (nil, reason) when the caller should fall back. Indirected through a
 // var so tests inject a client pointed at httptest.Server or force a
 // specific fallback reason without spinning up a real controller.
-var cityStatusAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	return nil, apiClientFallbackReason(cityPath)
-}
+//
+// Uses the shared supervisorFallthroughAPIClient helper (gascity ga-tp7,
+// ra-r9hm6v) rather than plain apiClient: a supervisor-managed city with no
+// standalone [api] port in city.toml — the common case — otherwise falls
+// straight to nil here even though the supervisor is reachable, and
+// `gc status`'s local fallback re-opens the full local bead/dolt store and
+// rescans event archives to rebuild store health, which measured ~9.5s of
+// CPU on a 26-agent/1.2GB city versus ~0.35s for the supervisor's cached
+// response. Status has a local fallback (unlike maintenance), so this
+// change only affects the ROUTE picked, not the correctness of either path.
+var cityStatusAPIClient = supervisorFallthroughAPIClient
 
 // routeCityStatus dispatches `gc status` to the supervisor API when a
 // controller is up; otherwise falls back to the local snapshot builder.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeCityStatus(
 	cityPath string,
-	cfg *config.City,
-	sp runtime.Provider,
 	dops drainOps,
 	c *api.Client,
 	nilReason string,
 	jsonOutput bool,
 	stdout, stderr io.Writer,
+	fallback func() int,
 ) int {
 	var cr api.CachedRead[api.StatusView]
 	return routeRead(c, "status", nilReason, stderr,
@@ -236,17 +287,7 @@ func routeCityStatus(
 			return err
 		},
 		func() int { return renderCityStatusFromAPI(cityPath, cr, dops, jsonOutput, stdout) },
-		func() int {
-			store, diagnostic, code := openCityStatusStore(cityPath, stderr)
-			if code != 0 {
-				return code
-			}
-			statusSnapshot := loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr)
-			if jsonOutput {
-				return doCityStatusJSONWithDiagnosticAndSnapshot(sp, cfg, cityPath, store, diagnostic, statusSnapshot, stdout, stderr)
-			}
-			return doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stdout, stderr)
-		},
+		fallback,
 	)
 }
 
@@ -326,14 +367,22 @@ func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapsho
 	}
 	if v.StoreHealth != nil {
 		snapshot.Summary.StoreHealth = &StoreHealth{
-			Path:         v.StoreHealth.Path,
-			SizeBytes:    v.StoreHealth.SizeBytes,
-			LiveRows:     v.StoreHealth.LiveRows,
-			RatioMB:      v.StoreHealth.RatioMB,
-			Warning:      v.StoreHealth.Warning,
-			ThresholdMB:  v.StoreHealth.ThresholdMB,
-			LastGCAt:     v.StoreHealth.LastGCAt,
-			LastGCStatus: v.StoreHealth.LastGCStatus,
+			Path:      v.StoreHealth.Path,
+			SizeBytes: v.StoreHealth.SizeBytes,
+			LiveRows:  v.StoreHealth.LiveRows,
+			// Inverted from the view's positive flag, never inferred from
+			// LiveRows == 0: that would report a genuinely empty store as
+			// unmeasured and reintroduce the conflation the flag removes.
+			// Before the view carried RowsMeasured this field had no source
+			// here at all, so it zero-filled to false and told the renderer
+			// every API-path count was real — including the ones that were
+			// never taken.
+			LiveRowsUnknown: !v.StoreHealth.RowsMeasured,
+			RatioMB:         v.StoreHealth.RatioMB,
+			Warning:         v.StoreHealth.Warning,
+			ThresholdMB:     v.StoreHealth.ThresholdMB,
+			LastGCAt:        v.StoreHealth.LastGCAt,
+			LastGCStatus:    v.StoreHealth.LastGCStatus,
 		}
 	}
 	return snapshot

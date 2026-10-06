@@ -159,26 +159,29 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"pending_create_started_at": "",
 				"sleep_intent":              "",
 				"slept_at":                  now.Format(time.RFC3339),
+				"suspended_at":              "",
 			},
 		},
 		{
 			name:  "acknowledge drain resume mode",
-			patch: AcknowledgeDrainPatch(false),
+			patch: AcknowledgeDrainPatch(now, false),
 			want: MetadataPatch{
 				"state":                     "drained",
 				"state_reason":              "",
 				"last_woke_at":              "",
+				"slept_at":                  now.UTC().Format(time.RFC3339),
 				"pending_create_claim":      "",
 				"pending_create_started_at": "",
 			},
 		},
 		{
 			name:  "acknowledge drain fresh mode",
-			patch: AcknowledgeDrainPatch(true),
+			patch: AcknowledgeDrainPatch(now, true),
 			want: MetadataPatch{
 				"state":                      "drained",
 				"state_reason":               "",
 				"last_woke_at":               "",
+				"slept_at":                   now.UTC().Format(time.RFC3339),
 				"pending_create_claim":       "",
 				"pending_create_started_at":  "",
 				"session_key":                "",
@@ -204,6 +207,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"pending_create_started_at":  "",
 				"sleep_intent":               "",
 				"slept_at":                   now.Format(time.RFC3339),
+				"suspended_at":               "",
 				"session_key":                "",
 				"started_config_hash":        "",
 				"started_live_hash":          "",
@@ -492,6 +496,42 @@ func TestPreWakePatchPreservesResetCommittedAt(t *testing.T) {
 	}
 }
 
+// TestPreWakePatchKeepsEpisodePendingCreateStartedAt: the pre-wake commit runs
+// before every start attempt, so re-stamping pending_create_started_at there
+// reset the stale-create clock on each retry and the bound never expired. A
+// wake that continues an episode keeps the episode's marker; a new episode, or
+// an unreadable marker, gets a fresh stamp.
+func TestPreWakePatchKeepsEpisodePendingCreateStartedAt(t *testing.T) {
+	now := time.Date(2026, 9, 3, 1, 54, 51, 0, time.UTC)
+	fresh := now.UTC().Format(time.RFC3339)
+	episode := "2026-09-02T23:17:00Z"
+	for _, tc := range []struct {
+		name    string
+		episode string
+		want    string
+	}{
+		{name: "continuing episode keeps its start", episode: episode, want: episode},
+		{name: "new episode stamps now", episode: "", want: fresh},
+		{name: "unreadable marker stamps now", episode: "not-a-time", want: fresh},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := PreWakePatch(PreWakePatchInput{
+				Generation:                    2,
+				InstanceToken:                 "token-2",
+				ContinuationEpoch:             1,
+				Now:                           now,
+				EpisodePendingCreateStartedAt: tc.episode,
+			})
+			if got["pending_create_started_at"] != tc.want {
+				t.Fatalf("pending_create_started_at = %q, want %q", got["pending_create_started_at"], tc.want)
+			}
+			if got["last_woke_at"] != fresh {
+				t.Fatalf("last_woke_at = %q, want %q: the per-attempt lease still renews", got["last_woke_at"], fresh)
+			}
+		})
+	}
+}
+
 func TestMetadataPatchApplyReturnsMergedCopy(t *testing.T) {
 	original := map[string]string{
 		"state":        string(StateAsleep),
@@ -682,7 +722,7 @@ func TestDrainCompletionPatchesClearStopPendingReason(t *testing.T) {
 		name  string
 		patch MetadataPatch
 	}{
-		{name: "acknowledge", patch: AcknowledgeDrainPatch(false)},
+		{name: "acknowledge", patch: AcknowledgeDrainPatch(now, false)},
 		{name: "complete", patch: CompleteDrainPatch(now, "idle", false)},
 	}
 	for _, tt := range tests {
@@ -706,13 +746,14 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateAsleep,
 			sleepReason: "wait-hold",
 			want: MetadataPatch{
-				"held_until":        "",
-				"quarantined_until": "",
-				"wait_hold":         "",
-				"sleep_intent":      "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
-				"sleep_reason":      "",
+				"held_until":            "",
+				"quarantined_until":     "",
+				"wait_hold":             "",
+				"sleep_intent":          "",
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+				"sleep_reason":          "",
 			},
 		},
 		{
@@ -720,14 +761,17 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateDrained,
 			sleepReason: "drained",
 			want: MetadataPatch{
-				"held_until":        "",
-				"quarantined_until": "",
-				"wait_hold":         "",
-				"sleep_intent":      "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
-				"state":             string(StateAsleep),
-				"sleep_reason":      "",
+				"held_until":            "",
+				"quarantined_until":     "",
+				"wait_hold":             "",
+				"sleep_intent":          "",
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+				"state":                 string(StateAsleep),
+				"sleep_reason":          "",
+				"suspended_at":          "",
+				"slept_at":              waitStoreNow.UTC().Format(time.RFC3339),
 			},
 		},
 		{
@@ -735,14 +779,17 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateSuspended,
 			sleepReason: "user-hold",
 			want: MetadataPatch{
-				"held_until":        "",
-				"quarantined_until": "",
-				"wait_hold":         "",
-				"sleep_intent":      "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
-				"state":             string(StateAsleep),
-				"sleep_reason":      "",
+				"held_until":            "",
+				"quarantined_until":     "",
+				"wait_hold":             "",
+				"sleep_intent":          "",
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+				"state":                 string(StateAsleep),
+				"sleep_reason":          "",
+				"suspended_at":          "",
+				"slept_at":              waitStoreNow.UTC().Format(time.RFC3339),
 			},
 		},
 		{
@@ -750,12 +797,13 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateAsleep,
 			sleepReason: "idle",
 			want: MetadataPatch{
-				"held_until":        "",
-				"quarantined_until": "",
-				"wait_hold":         "",
-				"sleep_intent":      "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
+				"held_until":            "",
+				"quarantined_until":     "",
+				"wait_hold":             "",
+				"sleep_intent":          "",
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
 			},
 		},
 		{
@@ -763,20 +811,21 @@ func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 			state:       StateAsleep,
 			sleepReason: "rate_limit",
 			want: MetadataPatch{
-				"held_until":        "",
-				"quarantined_until": "",
-				"wait_hold":         "",
-				"sleep_intent":      "",
-				"wake_attempts":     "0",
-				"churn_count":       "0",
-				"sleep_reason":      "",
+				"held_until":            "",
+				"quarantined_until":     "",
+				"wait_hold":             "",
+				"sleep_intent":          "",
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+				"sleep_reason":          "",
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ClearWakeBlockersPatch(tt.state, tt.sleepReason)
+			got := ClearWakeBlockersPatch(tt.state, tt.sleepReason, waitStoreNow)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("patch = %#v, want %#v", got, tt.want)
 			}
@@ -855,7 +904,8 @@ func TestSleepPatchClearsStaleStateReasonOnApply(t *testing.T) {
 }
 
 func TestAcknowledgeDrainPatchClearsStaleStateReasonOnApply(t *testing.T) {
-	merged := AcknowledgeDrainPatch(false).Apply(map[string]string{
+	now := time.Date(2026, 5, 18, 4, 15, 0, 0, time.UTC)
+	merged := AcknowledgeDrainPatch(now, false).Apply(map[string]string{
 		"state":        string(StateDraining),
 		"state_reason": "creation_complete",
 	})

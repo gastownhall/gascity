@@ -36,13 +36,13 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  DOLT_VERSION: "2.1.7"
-  BD_VERSION: "v1.1.0"
+  DOLT_VERSION: "2.2.0"
+  BD_VERSION: "v1.3.1"
 
 jobs:
   runner-policy:
     name: Runner policy
-    runs-on: ${{ github.event_name == 'pull_request' && contains(fromJSON('["julianknutsen","csells","sjarmak","quad341"]'), github.event.pull_request.user.login) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     outputs:
       use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
       reason: ${{ steps.policy.outputs.reason }}
@@ -81,6 +81,9 @@ jobs:
           filters: |
             review_formulas:
               - '.github/actions/setup-gascity-ubuntu/**'
+              - '.github/actions/go-mod-download/**'
+              - '.github/scripts/go-mod-download-retry.sh'
+              - '.github/scripts/go-mod-verify-cache.sh'
               - '.github/workflows/nightly.yml'
               - '.github/workflows/review-formulas.yml'
               - 'Makefile'

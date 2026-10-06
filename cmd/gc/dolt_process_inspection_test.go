@@ -52,7 +52,10 @@ func TestFindPortHolderPIDUsesProcBeforeLsof(t *testing.T) {
 	if pid != os.Getpid() {
 		t.Fatalf("findPortHolderPID(%d) = %d, want current pid %d", port, pid, os.Getpid())
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
+	// The intent: /proc is consulted before lsof (which takes seconds when it
+	// runs at all). Remote-exec workers run many shards concurrently, so keep
+	// the budget generous — 1s flaked at 1.01s under load (sharding ga-*).
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("findPortHolderPID took %s, want /proc path before lsof", elapsed)
 	}
 }

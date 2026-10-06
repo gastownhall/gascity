@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -115,7 +116,7 @@ command = "uvx"
 		},
 	}
 
-	_, err := buildStage1MCPTargets(cityPath, cfg, stubLookPath)
+	_, err := buildStage1MCPTargets(cityPath, cfg, stubLookPath, io.Discard)
 	if err == nil {
 		t.Fatal("expected MCP target conflict, got nil")
 	}
@@ -356,7 +357,7 @@ url = "https://example.com/deputy"
 		},
 	}
 
-	targets, err := buildStage1MCPTargets(cityPath, cfg, stubLookPath)
+	targets, err := buildStage1MCPTargets(cityPath, cfg, stubLookPath, io.Discard)
 	if err != nil {
 		t.Fatalf("buildStage1MCPTargets: %v", err)
 	}
@@ -476,7 +477,7 @@ url = "http://localhost:3100/mcp/kb"
 		},
 	}
 
-	targets, err := buildStage1MCPTargets(cityPath, cfg, stubLookPath)
+	targets, err := buildStage1MCPTargets(cityPath, cfg, stubLookPath, io.Discard)
 	if err != nil {
 		t.Fatalf("buildStage1MCPTargets: %v", err)
 	}

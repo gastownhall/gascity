@@ -58,8 +58,10 @@ func TestStandaloneControllerClient(t *testing.T) {
 // the socket is alive and an [api] port is configured, nil (the caller's local
 // fallback) when alive without a standalone port, the supervisor client when the
 // socket is down, and nil under the GC_NO_API escape hatch. The supervisor
-// fall-through for a managed city with no [api] port is scoped to maintenance —
-// see TestMaintenanceAPIClientRoutesToSupervisor. (gascity ga-tp7)
+// fall-through for a managed city with no [api] port is scoped to the
+// supervisorFallthroughAPIClient callers — see
+// TestMaintenanceAPIClientRoutesToSupervisor and
+// TestCityStatusAPIClientRoutesToSupervisor. (gascity ga-tp7)
 func TestAPIClientRouting(t *testing.T) {
 	sentinel := api.NewClient("http://supervisor.sentinel:1")
 
@@ -151,6 +153,71 @@ func TestMaintenanceAPIClientRoutesToSupervisor(t *testing.T) {
 		}
 		if reason != "escape-hatch" {
 			t.Fatalf("maintenanceAPIClient reason = %q, want \"escape-hatch\"", reason)
+		}
+	})
+}
+
+// TestCityStatusAPIClientRoutesToSupervisor is the ra-r9hm6v regression test.
+// Before this fix, `gc status` resolved its client through plain apiClient,
+// which returns nil whenever the per-city controller socket is alive but the
+// city has no standalone [api] port — exactly the shape of a supervisor-
+// managed city like a default `gc init`'d city (no [api] section in
+// city.toml). That nil forced every `gc status` invocation onto the local
+// fallback (open the bead/dolt store, rescan event archives to rebuild store
+// health), measured at ~9.5s of CPU on a 26-agent/1.2GB city versus ~0.35s
+// for the supervisor's already-cached response. cityStatusAPIClient now
+// shares supervisorFallthroughAPIClient with maintenanceAPIClient, so it
+// must resolve the supervisor client in that same shape instead of nil.
+func TestCityStatusAPIClientRoutesToSupervisor(t *testing.T) {
+	sentinel := api.NewClient("http://supervisor.sentinel:1")
+	origAlive, origSup := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	t.Cleanup(func() {
+		apiRouteControllerAliveHook = origAlive
+		apiRouteSupervisorClientHook = origSup
+	})
+
+	t.Run("alive-no-api-port-routes-to-supervisor", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerAliveHook = func(string) int { return 4242 }
+		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		c, reason := cityStatusAPIClient(dir)
+		if c != sentinel {
+			t.Fatalf("cityStatusAPIClient client = %p, want supervisor sentinel %p (ra-r9hm6v regression: must not fall back to nil/local)", c, sentinel)
+		}
+		if reason != "" {
+			t.Fatalf("cityStatusAPIClient reason = %q, want empty", reason)
+		}
+	})
+
+	t.Run("escape-hatch-skips-supervisor", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "1")
+		apiRouteControllerAliveHook = func(string) int { return 4242 }
+		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		c, reason := cityStatusAPIClient(dir)
+		if c != nil {
+			t.Fatalf("cityStatusAPIClient client = %p, want nil under GC_NO_API", c)
+		}
+		if reason != "escape-hatch" {
+			t.Fatalf("cityStatusAPIClient reason = %q, want \"escape-hatch\"", reason)
+		}
+	})
+
+	t.Run("controller-fully-down-still-falls-back-local", func(t *testing.T) {
+		// No socket at all (not even a supervisor-managed one): this is the
+		// genuine "nothing is running" case, where the local fallback remains
+		// correct and necessary — the fix must not paper over it.
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerAliveHook = func(string) int { return 0 }
+		apiRouteSupervisorClientHook = func(string) *api.Client { return nil }
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		c, reason := cityStatusAPIClient(dir)
+		if c != nil {
+			t.Fatalf("cityStatusAPIClient client = %p, want nil when nothing is running", c)
+		}
+		if reason != "controller-down" {
+			t.Fatalf("cityStatusAPIClient reason = %q, want \"controller-down\"", reason)
 		}
 	})
 }

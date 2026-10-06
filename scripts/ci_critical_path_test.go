@@ -57,7 +57,7 @@ type ciCriticalPathStep struct {
 	With            map[string]string `yaml:"with"`
 }
 
-const cmdGCProcessExtraTestEnv = `GO_TEST_TIMING_FILE="$${GO_TEST_TIMING_FILE}" GO_TEST_TIMING_NAME="$${GO_TEST_TIMING_NAME}" GO_TEST_TIMING_VARIANT="$${GO_TEST_TIMING_VARIANT}" GO_TEST_RUNNER_LABEL="$${GO_TEST_RUNNER_LABEL}" GITHUB_SHA="$${GITHUB_SHA}" GITHUB_WORKFLOW="$${GITHUB_WORKFLOW}" GITHUB_RUN_ID="$${GITHUB_RUN_ID}" GITHUB_RUN_ATTEMPT="$${GITHUB_RUN_ATTEMPT}" GITHUB_JOB="$${GITHUB_JOB}" RUNNER_NAME="$${RUNNER_NAME}" RUNNER_OS="$${RUNNER_OS}" RUNNER_ARCH="$${RUNNER_ARCH}"`
+const cmdGCProcessExtraTestEnv = `GO_TEST_TIMING_FILE="$${GO_TEST_TIMING_FILE}" GO_TEST_TIMING_NAME="$${GO_TEST_TIMING_NAME}" GO_TEST_TIMING_VARIANT="$${GO_TEST_TIMING_VARIANT}" GO_TEST_RUNNER_LABEL="$${GO_TEST_RUNNER_LABEL}" GC_TEST_FAILURE_ARTIFACT_DIR="$${GC_TEST_FAILURE_ARTIFACT_DIR}" GITHUB_SHA="$${GITHUB_SHA}" GITHUB_WORKFLOW="$${GITHUB_WORKFLOW}" GITHUB_RUN_ID="$${GITHUB_RUN_ID}" GITHUB_RUN_ATTEMPT="$${GITHUB_RUN_ATTEMPT}" GITHUB_JOB="$${GITHUB_JOB}" RUNNER_NAME="$${RUNNER_NAME}" RUNNER_OS="$${RUNNER_OS}" RUNNER_ARCH="$${RUNNER_ARCH}"`
 
 const cmdGCProcessRunner = "${{ needs.runner-policy.outputs.runner_32vcpu }}"
 
@@ -87,7 +87,7 @@ func TestWorkerCorePhase2SharesBuildsWithoutChangingCoverage(t *testing.T) {
 
 	wf := readCriticalPathWorkflow(t, "ci.yml")
 	const aggregateCommand = `GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-all PROFILE="$PROFILE"`
-	for _, jobName := range []string{"worker-core-phase2-claude", "worker-core-phase2-codex", "worker-core-phase2-gemini"} {
+	for _, jobName := range []string{"worker-core-phase2-claude", "worker-core-phase2-codex", "worker-core-phase2-cursor", "worker-core-phase2-gemini"} {
 		job, ok := wf.Jobs[jobName]
 		if !ok {
 			t.Errorf("CI workflow has no %s job", jobName)
@@ -158,15 +158,33 @@ func TestCmdGCProcessPublishesAdvisoryTimingArtifacts(t *testing.T) {
 	if len(runIndices) != 1 {
 		t.Fatalf("cmd-gc-process process-shard step indices = %v, want exactly one", runIndices)
 	}
-	if len(uploadIndices) != 1 {
-		t.Fatalf("cmd-gc-process artifact-upload step indices = %v, want exactly one", uploadIndices)
+	// Two uploads: the advisory timing artifact on every run, and the proxy
+	// child's logs only when the shard fails. The second exists because bd's
+	// proxied-server failure names a log file the test temp dir takes with it,
+	// so without it a red shard carries no evidence at all.
+	if len(uploadIndices) != 2 {
+		t.Fatalf("cmd-gc-process artifact-upload step indices = %v, want exactly two", uploadIndices)
 	}
-	runIndex, uploadIndex := runIndices[0], uploadIndices[0]
+	runIndex := runIndices[0]
+	diagnosticsIndex, uploadIndex := uploadIndices[0], uploadIndices[1]
+	if diagnosticsIndex <= runIndex {
+		t.Fatalf("cmd-gc-process diagnostics upload step %d must follow process-shard step %d", diagnosticsIndex, runIndex)
+	}
 	if uploadIndex <= runIndex {
 		t.Fatalf("cmd-gc-process timing upload step %d must follow process-shard step %d", uploadIndex, runIndex)
 	}
 	runStep := &job.Steps[runIndex]
+	diagnosticsStep := &job.Steps[diagnosticsIndex]
 	uploadStep := &job.Steps[uploadIndex]
+	if diagnosticsStep.Name != "Upload cmd/gc process failure diagnostics" {
+		t.Errorf("cmd-gc-process diagnostics upload step name = %q", diagnosticsStep.Name)
+	}
+	if diagnosticsStep.If != "${{ failure() }}" {
+		t.Errorf("cmd-gc-process diagnostics upload condition = %q, want failure()", diagnosticsStep.If)
+	}
+	if want := "${{ runner.temp }}/failure-artifacts/cmd-gc-process-${{ matrix.shard }}-of-12"; diagnosticsStep.With["path"] != want {
+		t.Errorf("cmd-gc-process diagnostics upload path = %q, want %q", diagnosticsStep.With["path"], want)
+	}
 	if runStep.Name != "Run cmd/gc process shard" {
 		t.Errorf("cmd-gc-process execution step name = %q", runStep.Name)
 	}
@@ -185,7 +203,10 @@ func TestCmdGCProcessPublishesAdvisoryTimingArtifacts(t *testing.T) {
 		"GO_TEST_TIMING_NAME":    "cmd-gc-process-${{ matrix.shard }}-of-12",
 		"GO_TEST_TIMING_VARIANT": "linux-default",
 		"GO_TEST_RUNNER_LABEL":   cmdGCProcessRunner,
-		"EXTRA_TEST_ENV":         cmdGCProcessExtraTestEnv,
+		// Named here so the collector directory the shard advertises and the
+		// directory the diagnostics upload reads can never drift apart.
+		"GC_TEST_FAILURE_ARTIFACT_DIR": "${{ runner.temp }}/failure-artifacts/cmd-gc-process-${{ matrix.shard }}-of-12",
+		"EXTRA_TEST_ENV":               cmdGCProcessExtraTestEnv,
 	}
 	if len(runStep.Env) != len(wantEnv) {
 		t.Errorf("cmd-gc-process timing env = %v, want exactly %v", runStep.Env, wantEnv)
@@ -661,7 +682,7 @@ func TestMacRegressionGateCentralizesTierRouting(t *testing.T) {
 	if !strings.Contains(filterStep.Uses, "dorny/paths-filter") {
 		t.Errorf("gate filter step uses = %q, want dorny/paths-filter (same tool review-formulas.yml uses)", filterStep.Uses)
 	}
-	wantFilterEntries := []string{"cmd/gc/**", "internal/pathutil/**", "internal/fsys/**"}
+	wantFilterEntries := []string{"cmd/gc/**", "internal/pathutil/**", "internal/fsys/**", ".github/actions/setup-gascity-macos/**"}
 	filterValue := filterStep.With["filters"]
 	for _, entry := range wantFilterEntries {
 		if !strings.Contains(filterValue, "'"+entry+"'") {
@@ -669,7 +690,7 @@ func TestMacRegressionGateCentralizesTierRouting(t *testing.T) {
 		}
 	}
 	if gotEntries := regexp.MustCompile(`(?m)^\s*-\s*'[^']*'\s*$`).FindAllString(filterValue, -1); len(gotEntries) != len(wantFilterEntries) {
-		t.Errorf("gate filter mac_sensitive has %d path entries, want exactly %d (%v) — no broader glob than the paths that actually touch gc/cmd or fsys/pathutil behavior", len(gotEntries), len(wantFilterEntries), wantFilterEntries)
+		t.Errorf("gate filter mac_sensitive has %d path entries, want exactly %d (%v) — no broader glob than the paths that actually touch gc/cmd or fsys/pathutil behavior, or the macOS setup action every mac job runs", len(gotEntries), len(wantFilterEntries), wantFilterEntries)
 	}
 	if !hasDecide {
 		t.Fatal("gate job has no routing-decision step (id: gate)")
@@ -1285,4 +1306,19 @@ func readCriticalPathWorkflow(t *testing.T, name string) ciCriticalPathWorkflow 
 		t.Fatalf("parse %s: %v", path, err)
 	}
 	return wf
+}
+
+// Fork main branches receive every upstream fast-forward, but they do not and
+// should not carry the canonical repository's cross-repository dispatch token.
+// Keep that expected fork run green while preserving a hard failure if the
+// canonical publisher loses its secret or dispatch permission.
+func TestNotifyImageRebuildsRunsOnlyInCanonicalRepository(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "notify-image-build.yaml")
+	notify, ok := wf.Jobs["notify"]
+	if !ok {
+		t.Fatal("notify-image-build workflow has no notify job")
+	}
+	if got, want := notify.If, "github.repository == 'gastownhall/gascity'"; got != want {
+		t.Fatalf("notify job if = %q, want %q", got, want)
+	}
 }

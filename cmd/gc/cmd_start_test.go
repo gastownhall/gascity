@@ -103,6 +103,65 @@ func TestPassthroughEnvPinsControllerTokenEmpty(t *testing.T) {
 	}
 }
 
+// A non-GC_-prefixed var is invisible to agent sessions by default — the
+// prefix sweep alone would never forward it, and nothing else short of
+// [workspace.env] does either.
+func TestPassthroughEnvOmitsNonGCVarWithoutOptIn(t *testing.T) {
+	t.Setenv("EXAMPLE_TOOL_HOME", "/opt/example-tool")
+
+	got := passthroughEnv()
+
+	if _, ok := got["EXAMPLE_TOOL_HOME"]; ok {
+		t.Error("passthroughEnv() forwarded a non-GC_ var with no GC_SUPERVISOR_ENV opt-in")
+	}
+}
+
+// Naming a non-GC_ var in GC_SUPERVISOR_ENV is the same opt-in
+// supervisorServiceExtraEnv already uses to widen the persisted service-file
+// env — this pins that it also reaches the session sweep, so one list opts a
+// var into both, rather than needing two lists kept in sync by hand.
+func TestPassthroughEnvHonorsSupervisorEnvOptIn(t *testing.T) {
+	t.Setenv("GC_SUPERVISOR_ENV", "EXAMPLE_TOOL_HOME")
+	t.Setenv("EXAMPLE_TOOL_HOME", "/opt/example-tool")
+
+	got := passthroughEnv()
+
+	if got["EXAMPLE_TOOL_HOME"] != "/opt/example-tool" {
+		t.Errorf("passthroughEnv()[EXAMPLE_TOOL_HOME] = %q, want the opted-in value", got["EXAMPLE_TOOL_HOME"])
+	}
+}
+
+// GC_SUPERVISOR_ENV accepts comma or space separated names (matching
+// supervisorServiceExplicitEnvKeys' parser) and an unset value for an opted-in
+// key is still omitted, same as the unconditional GC_ sweep.
+func TestPassthroughEnvSupervisorEnvOptInCommaSeparatedOmitsUnset(t *testing.T) {
+	t.Setenv("GC_SUPERVISOR_ENV", "EXAMPLE_TOOL_HOME,CUSTOM_TOKEN")
+	t.Setenv("EXAMPLE_TOOL_HOME", "/opt/example-tool")
+
+	got := passthroughEnv()
+
+	if got["EXAMPLE_TOOL_HOME"] != "/opt/example-tool" {
+		t.Errorf("passthroughEnv()[EXAMPLE_TOOL_HOME] = %q, want the opted-in value", got["EXAMPLE_TOOL_HOME"])
+	}
+	if _, ok := got["CUSTOM_TOKEN"]; ok {
+		t.Error("passthroughEnv() should omit an opted-in key that is unset in the environment")
+	}
+}
+
+// The controller token must stay withheld even if an operator names it in
+// GC_SUPERVISOR_ENV, deliberately or by a copy-paste mistake — the opt-in
+// widens what a non-GC_ var can reach, not a way around controllerOnlyEnvKeys.
+func TestPassthroughEnvSupervisorEnvOptInCannotUnpinControllerToken(t *testing.T) {
+	t.Setenv("GC_SUPERVISOR_ENV", convergence.TokenEnvVar)
+	t.Setenv(convergence.TokenEnvVar, "super-secret-controller-token")
+
+	got := passthroughEnv()
+
+	if val, ok := got[convergence.TokenEnvVar]; !ok || val != "" {
+		t.Errorf("passthroughEnv()[%s] = (%q, present=%v), want (\"\", true) even when named in GC_SUPERVISOR_ENV", convergence.TokenEnvVar, val, ok)
+	}
+}
+
 func TestComputePoolSessions_NamepoolMaxOneUsesPoolInstance(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{},
@@ -301,7 +360,7 @@ func TestBuildIdleTracker_PoolAgentTemplateFallbackMatchesReconcilerTemplate(t *
 	if _, ok := idle.templateTimeouts[template]; !ok {
 		t.Fatalf("idle tracker missing template %q in %v", template, idle.templateTimeouts)
 	}
-	if !idle.checkIdle(sessionName, template, sp, now) {
+	if !idle.checkIdle(sessionName, template, "", "", sp, now) {
 		t.Fatalf("pool session %q did not idle out via template %q", sessionName, template)
 	}
 }
@@ -343,10 +402,10 @@ func TestBuildIdleTracker_NamedOnDemandPoolRegistersNameAndTemplate(t *testing.T
 	if _, ok := idle.templateTimeouts[template]; !ok {
 		t.Fatalf("idle tracker missing named pool template %q in %v", template, idle.templateTimeouts)
 	}
-	if !idle.checkIdle(namedSession, template, sp, now) {
+	if !idle.checkIdle(namedSession, template, "", "", sp, now) {
 		t.Fatalf("named session %q did not idle out via per-name timeout", namedSession)
 	}
-	if !idle.checkIdle(poolSession, template, sp, now) {
+	if !idle.checkIdle(poolSession, template, "", "", sp, now) {
 		t.Fatalf("pool session %q did not inherit template idle timeout", poolSession)
 	}
 }
@@ -386,10 +445,10 @@ func TestBuildIdleTracker_NamedAlwaysPoolExemptsNamedOnly(t *testing.T) {
 	if _, ok := idle.templateTimeouts[template]; !ok {
 		t.Fatalf("idle tracker missing named pool template %q in %v", template, idle.templateTimeouts)
 	}
-	if idle.checkIdle(namedSession, template, sp, now) {
+	if idle.checkIdle(namedSession, template, "", "", sp, now) {
 		t.Fatalf("always named session %q must not inherit template idle timeout", namedSession)
 	}
-	if !idle.checkIdle(poolSession, template, sp, now) {
+	if !idle.checkIdle(poolSession, template, "", "", sp, now) {
 		t.Fatalf("pool session %q did not inherit template idle timeout", poolSession)
 	}
 }
@@ -427,10 +486,10 @@ func TestBuildIdleTracker_AliasAlwaysNamedPoolExemptsAliasOnly(t *testing.T) {
 	if !ok {
 		t.Fatalf("buildIdleTracker returned %T, want *memoryIdleTracker", idle)
 	}
-	if idle.checkIdle(namedSession, template, sp, now) {
+	if idle.checkIdle(namedSession, template, "", "", sp, now) {
 		t.Fatalf("alias always-named session %q must not inherit template idle timeout", namedSession)
 	}
-	if !idle.checkIdle(poolSession, template, sp, now) {
+	if !idle.checkIdle(poolSession, template, "", "", sp, now) {
 		t.Fatalf("pool session %q did not inherit template idle timeout", poolSession)
 	}
 }
@@ -468,10 +527,10 @@ func TestBuildIdleTracker_NamedAlwaysNoExplicitPoolRegistersTemplateFallback(t *
 	if _, ok := idle.templateTimeouts[template]; !ok {
 		t.Fatalf("idle tracker missing template %q in %v", template, idle.templateTimeouts)
 	}
-	if idle.checkIdle(namedSession, template, sp, now) {
+	if idle.checkIdle(namedSession, template, "", "", sp, now) {
 		t.Fatalf("always named session %q must not inherit template idle timeout", namedSession)
 	}
-	if !idle.checkIdle(poolSession, template, sp, now) {
+	if !idle.checkIdle(poolSession, template, "", "", sp, now) {
 		t.Fatalf("pool session %q did not inherit template idle timeout", poolSession)
 	}
 }
@@ -666,6 +725,8 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 			StoreQueryPartial:  true,
 		},
 		nil,
+		nil,
+		nil,
 	)
 	if len(released) != 0 {
 		t.Fatalf("released %d work bead(s) from a partial snapshot, want none", len(released))
@@ -690,6 +751,8 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 			SessionQueryPartial: true,
 		},
 		nil,
+		nil,
+		nil,
 	)
 	if len(released) != 0 {
 		t.Fatalf("released %d work bead(s) from a partial session snapshot, want none", len(released))
@@ -712,6 +775,8 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 			AssignedWorkBeads:  []beads.Bead{work},
 			AssignedWorkStores: []beads.Store{store},
 		},
+		nil,
+		nil,
 		nil,
 	)
 	if len(released) != 1 {
@@ -1328,6 +1393,44 @@ func TestResolveTemplateAddsKimiHookConfigArgWhenHooksInstalled(t *testing.T) {
 				t.Fatalf("Command = %q, want %q", tp.Command, tt.wantCommand)
 			}
 		})
+	}
+}
+
+// TestResolveTemplateExpandsDefaultBranchInPreStart pins the pre_start
+// carrier end to end through resolveTemplate: the setupCtx literal in
+// template_resolve.go must copy DefaultBranch from the path context, or the
+// GC_DEFAULT_BRANCH='{{.DefaultBranch}}' handoff the example packs rely on
+// silently renders empty. The unit tests on expandSessionSetup and
+// sessionSetupContextForAgent cannot catch a dropped field at THIS call site.
+func TestResolveTemplateExpandsDefaultBranchInPreStart(t *testing.T) {
+	cityDir := t.TempDir()
+	rigRoot := filepath.Join(cityDir, "repos", "demo")
+	cfgAgent := &config.Agent{
+		Name:     "worker",
+		Provider: "kimi",
+		Dir:      "demo",
+		PreStart: []string{`GC_DEFAULT_BRANCH='{{.DefaultBranch}}' setup.sh`},
+	}
+	bp := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityDir,
+		workspace:  &config.Workspace{Provider: "kimi"},
+		providers:  config.BuiltinProviders(),
+		lookPath:   func(name string) (string, error) { return "/bin/" + name, nil },
+		fs:         fsys.OSFS{},
+		rigs:       []config.Rig{{Name: "demo", Path: rigRoot, DefaultBranch: "release/v2"}},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	tp, err := resolveTemplate(bp, cfgAgent, "demo/worker", nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	want := `GC_DEFAULT_BRANCH='release/v2' setup.sh`
+	if len(tp.Hints.PreStart) == 0 || tp.Hints.PreStart[0] != want {
+		t.Fatalf("Hints.PreStart = %#v, want first entry %q", tp.Hints.PreStart, want)
 	}
 }
 

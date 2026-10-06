@@ -20,8 +20,11 @@
  * so `polecat-gc-335825` yields `gc-335825` and the role prefix is whatever
  * comes before.
  *
- * The handle prefix mirrors SESSION_ID_RE (`gc`/`td`/`th` literal or any
- * 4-letter city code). The id BODY is deliberately tightened to `[a-z0-9]`
+ * The handle prefix is `gc`/`td`/`th` literally or any 4-letter city code —
+ * deliberately narrower than the supervisor's own session-id gate (runproj's
+ * sessionIDRe), which is the only validator a session id must satisfy; this
+ * parser only has to find a handle inside an assignee, not admit every id.
+ * The id BODY is deliberately tightened to `[a-z0-9]`
  * (no internal hyphen) so the match binds to the MINIMAL trailing handle:
  * without that, a role like `scix-worker` (whose `scix` is itself a 4-letter
  * token) would let the greedy body swallow `scix-worker-gc-335812` whole. Live
@@ -29,9 +32,9 @@
  * so this loses nothing real.
  */
 // A bare session handle (the assignee IS a session id, no role prefix). Same
-// alphabet as ASSIGNEE_SESSION_ID_RX but whole-string. NOT SESSION_ID_RE: that
-// validator permits internal hyphens in the body, which would let a composite
-// like `scix-worker-gc-335812` masquerade as one bare handle.
+// alphabet as ASSIGNEE_SESSION_ID_RX but whole-string. NOT the supervisor's
+// session-id gate: that gate permits internal hyphens in the body, which would
+// let a composite like `scix-worker-gc-335812` masquerade as one bare handle.
 //
 // The id body MUST contain at least one digit. Live session ids always carry a
 // numeric handle (`gc-335825`, `td-9abc`); a plain 4-letter-prefixed *role* like

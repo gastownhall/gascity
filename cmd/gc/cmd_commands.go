@@ -424,7 +424,7 @@ func mergeCanonicalScopeDoltEnv(environ []string, cityPath string) []string {
 // directly invoked pack command talks to the same server as its scheduled order.
 // The rest of the [dolt] block was never carried, and for the managed-server
 // commands that is not cosmetic: gc-beads-bd.sh rebuilds dolt-config.yaml purely
-// from GC_DOLT_* and defaults auto-GC ON and read_timeout to 15000 when they are
+// from GC_DOLT_* and defaults auto-GC ON and read_timeout to 120000 when they are
 // absent. So `gc dolt restart` run from an operator shell wrote a *different*
 // server config than the supervisor writes from the same city.toml — silently
 // reverting a city's configured read/write timeouts and auto-GC state as a side

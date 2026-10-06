@@ -149,6 +149,7 @@
         "pages": [
           "index",
           "getting-started/installation",
+          "getting-started/upgrading",
           "getting-started/quickstart",
           "getting-started/dashboard",
           "getting-started/how-gas-city-works",
@@ -247,7 +248,8 @@
               "reference/specs/pack-spec",
               "reference/specs/formula-spec-v1",
               "reference/specs/formula-spec-v2",
-              "reference/specs/service-protocol-v0"
+              "reference/specs/service-protocol-v0",
+              "reference/specs/identity-separator-contract-v1"
             ]
           },
           {

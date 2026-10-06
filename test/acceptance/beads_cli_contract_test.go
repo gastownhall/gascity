@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
@@ -31,9 +32,11 @@ import (
 func runBD(t *testing.T, dir string, args ...string) (string, error) {
 	t.Helper()
 	bdPath := helpers.RequireBD(t)
-	cmd := exec.Command(bdPath, args...)
+	cmd := helpers.ToolCommand(t, bdPath, args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "BEADS_DIR="+filepath.Join(dir, ".beads"))
+	// BEADS_TEST_MODE keeps bd's detached metrics flusher from racing the
+	// TempDir teardown (ga-aik16g).
+	cmd.Env = append(cmd.Env, "BEADS_DIR="+filepath.Join(dir, ".beads"), beadstest.EnvBeadsTestMode+"=1")
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -53,7 +56,7 @@ func requireBD(t *testing.T, dir string, args ...string) string {
 func initBeadsDir(t *testing.T) string {
 	t.Helper()
 	helpers.RequireBD(t)
-	dir := t.TempDir()
+	dir := beadstest.GuardedTempDir(t)
 	requireBD(t, dir, "init", "-p", "ct", "--skip-hooks", "-q")
 	return dir
 }

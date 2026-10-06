@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,7 +114,7 @@ func TestReconcileCitiesClearsInitStatusOnRuntimeFailure(t *testing.T) {
 	cr := newCityRegistry()
 
 	var stdout, stderr bytes.Buffer
-	reconcileCities(reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	key := canonicalTestPath(cityPath)
 	if count := initFailureCount(cr, key); count != 1 {
@@ -150,7 +151,7 @@ func TestReconcileCitiesRetriesAfterInitBackoffElapses(t *testing.T) {
 	key := canonicalTestPath(cityPath)
 
 	var stdout, stderr bytes.Buffer
-	reconcileCities(reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
 	if count := initFailureCount(cr, key); count != 1 {
 		t.Fatalf("first pass: init failure count = %d, want 1 (stderr: %s)", count, stderr.String())
 	}
@@ -160,7 +161,7 @@ func TestReconcileCitiesRetriesAfterInitBackoffElapses(t *testing.T) {
 
 	elapseInitBackoff(cr, key)
 	stderr.Reset()
-	reconcileCities(reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	if count := initFailureCount(cr, key); count != 2 {
 		t.Fatalf("after the backoff elapsed: init failure count = %d, want 2; the promised retry never ran because the leaked initStatus entry skips the city before the backoff is ever consulted (stderr: %s)", count, stderr.String())
@@ -185,7 +186,7 @@ func TestReconcileCitiesRetriesAfterConfigEdit(t *testing.T) {
 	key := canonicalTestPath(cityPath)
 
 	var stdout, stderr bytes.Buffer
-	reconcileCities(reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
 	if count := initFailureCount(cr, key); count != 1 {
 		t.Fatalf("first pass: init failure count = %d, want 1 (stderr: %s)", count, stderr.String())
 	}
@@ -198,7 +199,7 @@ func TestReconcileCitiesRetriesAfterConfigEdit(t *testing.T) {
 	}
 
 	stderr.Reset()
-	reconcileCities(reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
+	reconcileCities(context.Background(), reg, cr, supervisor.PublicationConfig{}, &stdout, &stderr)
 
 	if !strings.Contains(stderr.String(), "init failure #") {
 		t.Fatalf("after editing city.toml the reconcile pass never attempted the city (stderr: %q); editing city.toml resets the backoff, but the leaked initStatus entry skips the city before the backoff is ever consulted, so only a supervisor restart recovers it", stderr.String())

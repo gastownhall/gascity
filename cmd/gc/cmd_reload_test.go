@@ -568,7 +568,7 @@ func TestSendReloadControlRequestNoChange(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		runController(dir, nil, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -580,15 +580,7 @@ func TestSendReloadControlRequestNoChange(t *testing.T) {
 	})
 
 	waitForController(t, dir)
-	deadline := time.After(5 * time.Second)
-	for reconcileCount.Load() < 1 {
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for initial reconcile")
-		default:
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
+	awaitCond(t, func() bool { return reconcileCount.Load() >= 1 }, "initial reconcile")
 
 	reply, err := sendReloadControlRequest(dir, reloadControlRequest{Wait: true, Timeout: "1s"})
 	if err != nil {
@@ -778,7 +770,7 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		runController(dir, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		runController(dir, nil, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, 30*time.Second, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -790,28 +782,15 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 	})
 
 	waitForController(t, dir)
-	deadline := time.After(5 * time.Second)
-	for reconcileCount.Load() < 1 {
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for initial reconcile")
-		default:
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
+	awaitCond(t, func() bool { return reconcileCount.Load() >= 1 }, "initial reconcile")
 
-	oldDebounce := debounceDelay
-	debounceDelay = 30 * time.Second
-	t.Cleanup(func() {
-		debounceDelay = oldDebounce
-	})
 	if err := os.WriteFile(tomlPath, []byte("[[[ bad toml"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	stdoutBeforeInvalid := stdout.String()
 	var reply reloadControlReply
-	deadline = time.After(45 * time.Second)
+	deadline := time.After(45 * time.Second)
 	for {
 		reply, err = sendReloadControlRequest(dir, reloadControlRequest{Wait: true, Timeout: "30s"})
 		if err != nil {
@@ -979,6 +958,8 @@ func TestReloadConfigTracedRebuildsProviderWhenPackRuntimeCommandChanges(t *test
 		stderr:     &stderr,
 		logPrefix:  "gc test",
 	}
+	// The reload restarts the config watcher; stop it with the test.
+	t.Cleanup(cr.stopConfigWatcher)
 	lastProviderName := cfg.Session.Provider
 
 	// Same selection name, different declared command. The exec proxy

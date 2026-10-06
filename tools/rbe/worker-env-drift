@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+# worker-env-drift: keep a worker-env pin that no live worker serves from
+# becoming a silent queue.
+#
+# rbe-west's oss and oss-fork schedulers match the worker-env platform
+# property exactly. CI's actions request //platforms:rbe_worker's pin, the
+# sha256 of tools/rbe/worker-env.txt. Each pool worker advertises the sha256
+# of its own host's manifest (tools/rbe/worker-env). If no live worker
+# advertises the pin, an action never runs: it queues until the client times
+# out, and the pool scaler keeps dispatching Blacksmith workers that cannot
+# take it. That happens on drift (a Blacksmith image refresh, a package, Go or
+# dolt change) and for a PR that moves the pin. A drifted worker still
+# registers, advertising its measured hash: the pools are shared, and actions
+# that send no worker-env (beads') still run on it. This script makes drift
+# loud and early:
+#
+#   pin [BUILD]       Print //platforms:rbe_worker's worker-env pin (BUILD
+#                     defaults to platforms/BUILD.bazel; "none" if it has none).
+#   check MEASURED    Compare a measured manifest with the committed one. On
+#                     drift, print the diff, the manifest and the pin to commit
+#                     (stdout and $GITHUB_STEP_SUMMARY), keep them in
+#                     $WORKER_ENV_DRIFT_DIR for `report`, and exit 1.
+#   await JOB STEP    Pool workflows' await-drift job, beside the worker job of
+#                     the same run: wait until JOB's STEP (the drift upload)
+#                     completes, and write drift=true to $GITHUB_OUTPUT if it
+#                     ran, drift=false if it was skipped, or JOB ended or
+#                     WORKER_ENV_AWAIT_SECONDS (default 1800) passed first.
+#                     The worker job keeps serving; this reports while it does.
+#   preflight BASE_BUILD CHANGED
+#                     bazel-test. Writes to $GITHUB_OUTPUT:
+#                     pin-moved=true if this checkout pins another host than
+#                     BASE_BUILD (the default branch's platforms/BUILD.bazel,
+#                     whose pin the pool workers check against);
+#                     measure=true if pin-moved, or if CHANGED (a file of
+#                     changed paths) names the worker host's definition;
+#                     drift-issue, the URL of an open drift issue for this pin.
+#                     Exits 1 if that issue exists and the run executes
+#                     remotely (WORKER_ENV_REMOTE=true) on the default
+#                     branch's pin: its actions would only queue.
+#   report DIR        Open the drift issue for DIR's pinned host, or add the
+#                     new measurement to it. Skipped for a host whose
+#                     measurement is a previous default-branch pin (a stale
+#                     image after a re-pin): it gets a warning, not a marker.
+#   resolve           Close the drift issues of pins other than the checkout's
+#                     (superseded by a re-pin). Warn if the checkout's pin
+#                     still has one.
+#
+# A drift issue carries the label rbe-worker-env-drift and the title
+# "rbe worker-env drift: <pin>", one per pinned host. preflight looks for
+# exactly that, and so does the farm: while one is open, each rbe-west pool
+# scaler caps its pool at NLPOOL_DRIFT_MAX_WORKERS. Keep the label, and keep
+# the issue open until the re-pin lands. TESTING.md "Re-pinning the RBE worker
+# host" describes the process.
+#
+# Env: GITHUB_REPOSITORY, GH_TOKEN (await, preflight, report, resolve);
+# GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT (await);
+# DEFAULT_BRANCH (report, default main); GITHUB_STEP_SUMMARY, GITHUB_OUTPUT;
+# WORKER_ENV_DRIFT_DIR (check, default $RUNNER_TEMP/worker-env-drift);
+# WORKER_ENV_BUILD, WORKER_ENV_PINNED (tests: platforms/BUILD.bazel,
+# tools/rbe/worker-env.txt).
+set -euo pipefail
+
+BUILD=${WORKER_ENV_BUILD:-platforms/BUILD.bazel}
+PINNED=${WORKER_ENV_PINNED:-tools/rbe/worker-env.txt}
+LABEL=rbe-worker-env-drift
+# The worker host's definition: a change to any of these can move what a
+# worker measures.
+HOST_PATHS='^(tools/rbe/(worker-env|worker-env\.txt|blacksmith-worker\.sh)|platforms/BUILD\.bazel)$'
+
+# Every reader of a pipe here reads all of it: under pipefail, a reader that
+# stops early (an early return, grep -q, head) can kill its writer with
+# SIGPIPE and fail the pipeline, now and then or, for a long input, always.
+# summary reads its input even without a step summary to append it to.
+summary() {
+	if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then cat >>"$GITHUB_STEP_SUMMARY"; else cat >/dev/null; fi
+}
+# matches GREP_ARGS...: whether a line of stdin matches; grep -q that reads it all.
+matches() { [ "$(grep -c "$@")" -gt 0 ]; }
+output() { [ -z "${GITHUB_OUTPUT:-}" ] || echo "$1" >>"$GITHUB_OUTPUT"; }
+title() { echo "rbe worker-env drift: $1"; }
+run_url() { echo "${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-}"; }
+
+# pin_of FILE: the worker-env pin in a platforms/BUILD.bazel, "none" if none.
+pin_of() {
+	local pins
+	pins=$(sed -n 's/^ *"worker-env": "\(sha256:[0-9a-f]\{64\}\)",$/\1/p' "$1")
+	case $(printf '%s' "$pins" | grep -c .) in
+	0) echo none ;;
+	1) echo "$pins" ;;
+	*) echo "worker-env-drift: $1 has more than one worker-env pin" >&2; return 1 ;;
+	esac
+}
+
+# open_issue PIN: the URL of PIN's open drift issue, empty if none.
+open_issue() {
+	gh issue list -R "${GITHUB_REPOSITORY:?}" --label "$LABEL" --state open --limit 100 \
+		--json title,url --jq "first(.[] | select(.title == \"$(title "$1")\") | .url) // empty"
+}
+
+# drift_markdown DIR: the drift report, for the step summary and the issue.
+drift_markdown() {
+	local dir=$1
+	cat <<-EOF
+		### rbe worker-env drift
+
+		This worker host measures \`worker-env=$(cat "$dir/measured-pin")\`, but gascity's actions request \`$(cat "$dir/pinned-pin")\` (\`//platforms:rbe_worker\`). rbe-west's oss and oss-fork schedulers match \`worker-env\` exactly, so no gascity action can run on this host. Pool workers here still register, advertising the measured hash, and serve actions that send no \`worker-env\` (beads). While this issue is open, the rbe-west pool scalers cap each pool at \`NLPOOL_DRIFT_MAX_WORKERS\`.
+
+		Measured by $(cat "$dir/source").
+
+		<details><summary>diff (pinned to measured)</summary>
+
+		\`\`\`diff
+		$(cat "$dir/diff")
+		\`\`\`
+		</details>
+
+		If this host is the one CI should use, re-pin it (TESTING.md, "Re-pinning the RBE worker host"). Commit the manifest below as \`tools/rbe/worker-env.txt\`, and in \`platforms/BUILD.bazel\` set:
+
+		\`\`\`
+		        "worker-env": "$(cat "$dir/measured-pin")",
+		\`\`\`
+
+		<details><summary>measured manifest (tools/rbe/worker-env.txt)</summary>
+
+		\`\`\`
+		$(cat "$dir/worker-env.txt")
+		\`\`\`
+		</details>
+	EOF
+}
+
+# sha256_stdin prints the hex SHA-256 of stdin. macOS ships shasum, not
+# sha256sum, and the drift tests run on macOS CI.
+sha256_stdin() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum | cut -d' ' -f1
+	else
+		shasum -a 256 | cut -d' ' -f1
+	fi
+}
+
+cmd_pin() { pin_of "${1:-$BUILD}"; }
+
+cmd_check() {
+	local measured=${1:?usage: worker-env-drift check MEASURED}
+	local pin got dir
+	pin=$(pin_of "$BUILD")
+	got=sha256:$(sha256_stdin <"$measured")
+	if cmp -s "$PINNED" "$measured"; then
+		echo "worker-env: this host is the pinned one ($pin)"
+		return 0
+	fi
+	dir=${WORKER_ENV_DRIFT_DIR:-${RUNNER_TEMP:?}/worker-env-drift}
+	mkdir -p "$dir"
+	cp -f "$measured" "$dir/worker-env.txt"
+	echo "$pin" >"$dir/pinned-pin"
+	echo "$got" >"$dir/measured-pin"
+	echo "${RUNNER_NAME:-$(hostname)} in $(run_url)" >"$dir/source"
+	diff -u --label pinned --label measured "$PINNED" "$measured" >"$dir/diff" || true
+	drift_markdown "$dir" >"$dir/report.md"
+	cat "$dir/report.md"
+	summary <"$dir/report.md"
+	echo "::error title=rbe worker-env drift::this host measures worker-env=$got, gascity requests $pin: no gascity action can run on it (a pool worker here registers with the measured hash and serves only actions without worker-env). The step summary has the diff and the manifest and pin to commit if this host is the one to use."
+	return 1
+}
+
+cmd_await() {
+	local job=${1:?usage: worker-env-drift await JOB STEP} step=${2:?usage: worker-env-drift await JOB STEP}
+	local deadline=$((SECONDS + ${WORKER_ENV_AWAIT_SECONDS:-1800})) state job_status step_status conclusion
+	local url="repos/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}/attempts/${GITHUB_RUN_ATTEMPT:-1}/jobs?per_page=100"
+	while :; do
+		# "<job status> <step status> <step conclusion>", "-" for what isn't there yet.
+		state=$(gh api "$url" --jq "first(.jobs[] | select(.name == \"$job\") | [.status, ((.steps // []) | map(select(.name == \"$step\")) | first | (.status // \"-\"), (.conclusion // \"-\"))] | map(. // \"-\") | join(\" \")) // empty" 2>/dev/null) || state=
+		read -r job_status step_status conclusion <<<"${state:-- - -}"
+		if [ "$step_status" = completed ]; then
+			if [ "$conclusion" = success ]; then output drift=true; else output drift=false; fi
+			echo "worker-env: $job / $step $step_status ($conclusion)"
+			return 0
+		fi
+		if [ "$job_status" = completed ]; then
+			echo "worker-env: $job completed without $step"
+			output drift=false
+			return 0
+		fi
+		if [ "$SECONDS" -ge "$deadline" ]; then
+			echo "::warning title=rbe worker-env await::$job / $step not done in ${WORKER_ENV_AWAIT_SECONDS:-1800}s; no drift report from this run"
+			output drift=false
+			return 0
+		fi
+		sleep "${WORKER_ENV_AWAIT_POLL:-15}"
+	done
+}
+
+cmd_preflight() {
+	local base_build=${1:?usage: worker-env-drift preflight BASE_BUILD CHANGED} changed=${2:?usage: worker-env-drift preflight BASE_BUILD CHANGED}
+	local pin base moved=false measure=false issue
+	pin=$(pin_of "$BUILD")
+	base=$(pin_of "$base_build")
+	[ "$pin" = "$base" ] || moved=true measure=true
+	if grep -qE "$HOST_PATHS" "$changed"; then measure=true; fi
+	if ! issue=$(open_issue "$pin"); then
+		echo "::warning title=rbe worker-env preflight::could not list drift issues"
+		issue=
+	fi
+	output "pin=$pin"
+	output "pin-moved=$moved"
+	output "measure=$measure"
+	output "drift-issue=$issue"
+	echo "worker-env: this checkout pins $pin, the default branch $base; pin-moved=$moved measure=$measure drift-issue=${issue:-none}"
+	if [ "$moved" = true ]; then
+		echo "::warning title=rbe worker-env pin moved::this change pins worker-env=$pin, the default branch $base. Pool workers check against the default branch's pin, so none can run these actions before this merges: the remote bazel suite is skipped here and runs on the default branch after merge. This job measures its own Blacksmith host against the new manifest instead."
+		echo "rbe worker-env: the pin moves from \`$base\` to \`$pin\`; remote bazel suite skipped, host measured instead." | summary
+	elif [ -n "$issue" ] && [ "${WORKER_ENV_REMOTE:-}" = true ]; then
+		echo "::error title=rbe worker-env drift::$issue: pool workers measure another host than the pin $pin, so remote actions would only queue. Re-pin (TESTING.md \"Re-pinning the RBE worker host\") or close the issue once workers match again."
+		echo "rbe worker-env: not executing remotely, $pin has an open drift issue: $issue" | summary
+		return 1
+	fi
+}
+
+# previous_pins: the pins of the last commits touching platforms/BUILD.bazel
+# on the default branch.
+previous_pins() {
+	local sha
+	gh api "repos/${GITHUB_REPOSITORY:?}/commits?path=platforms/BUILD.bazel&sha=${DEFAULT_BRANCH:-main}&per_page=20" --jq '.[].sha' |
+		while read -r sha; do
+			gh api -H 'Accept: application/vnd.github.raw' "repos/$GITHUB_REPOSITORY/contents/platforms/BUILD.bazel?ref=$sha" |
+				pin_of /dev/stdin || true
+		done
+}
+
+cmd_report() {
+	local dir=${1:?usage: worker-env-drift report DIR}
+	local pin got issue body
+	if [ ! -s "$dir/measured-pin" ]; then
+		echo "worker-env: no drift recorded in $dir"
+		return 0
+	fi
+	pin=$(cat "$dir/pinned-pin")
+	got=$(cat "$dir/measured-pin")
+	if previous_pins | matches -xF -- "$got"; then
+		echo "::warning title=rbe worker-env stale host::this host measures $got, a previous pin of ${DEFAULT_BRANCH:-main}: a stale image after a re-pin, or Blacksmith rolled the image back. No drift issue. If every host is stale, revert the re-pin."
+		return 0
+	fi
+	body=$dir/report.md
+	[ -s "$body" ] || drift_markdown "$dir" >"$body"
+	gh label create "$LABEL" -R "${GITHUB_REPOSITORY:?}" --force --color B60205 \
+		--description "rbe worker hosts measure another worker-env than the pin; blocks pool workers and remote CI for that pin" >/dev/null
+	issue=$(open_issue "$pin")
+	if [ -z "$issue" ]; then
+		gh issue create -R "$GITHUB_REPOSITORY" --title "$(title "$pin")" --label "$LABEL" --body-file "$body"
+	elif gh issue view "$issue" -R "$GITHUB_REPOSITORY" --json body,comments --jq '.body, .comments[].body' | matches -F -- "$got"; then
+		echo "worker-env: $issue already has $got"
+	else
+		gh issue comment "$issue" -R "$GITHUB_REPOSITORY" --body-file "$body"
+	fi
+}
+
+cmd_resolve() {
+	local pin url t
+	pin=$(pin_of "$BUILD")
+	gh issue list -R "${GITHUB_REPOSITORY:?}" --label "$LABEL" --state open --limit 100 \
+		--json title,url --jq '.[] | .url + " " + .title' |
+		while read -r url t; do
+			if [ "$t" = "$(title "$pin")" ]; then
+				echo "::warning title=rbe worker-env drift::this host matches the pin $pin, but $url is open: a partial image rollout, or a rollback. Close it once every worker matches."
+			else
+				gh issue close "$url" -R "$GITHUB_REPOSITORY" --comment "Superseded: the default branch now pins $pin, and a Blacksmith host measured it ($(run_url))."
+			fi
+		done
+}
+
+# Sourced (the tests call the helpers directly): define, don't dispatch.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
+
+sub=${1:-}
+[ $# -eq 0 ] || shift
+case "$sub" in
+pin | check | await | preflight | report | resolve) "cmd_$sub" "$@" ;;
+*) echo "usage: worker-env-drift pin|check|await|preflight|report|resolve ..." >&2; exit 2 ;;
+esac

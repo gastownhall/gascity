@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -182,12 +183,13 @@ func TestProviderStopUnattendedSession(t *testing.T) {
 		{name: "second census error", before: onePane, token: "GC_INSTANCE_TOKEN=token", errs: []error{nil, nil, sentinel}},
 		{name: "certified pane disappears", before: twoPane, token: "GC_INSTANCE_TOKEN=token", after: twoPane, errs: []error{nil, nil, nil, ErrSessionNotFound}, wantErrIs: ErrSessionNotFound, mustNotCallContain: []string{"%2", "kill-session"}},
 		{name: "final exact session disappears", before: onePane, token: "GC_INSTANCE_TOKEN=token", after: onePane, errs: []error{nil, nil, nil, nil, ErrSessionNotFound}, wantOK: true, wantPaneIDs: []string{"%1"}},
+		{name: "final kill finds no server", before: onePane, token: "GC_INSTANCE_TOKEN=token", after: onePane, errs: []error{nil, nil, nil, nil, ErrNoServer}, wantPaneIDs: []string{"%1"}, wantErrIs: ErrNoServer},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			outputs := []string{test.before, test.token, test.after}
-			if test.wantOK {
+			if len(test.wantPaneIDs) > 0 {
 				for range test.wantPaneIDs {
-					outputs = append(outputs, "999999999")
+					outputs = append(outputs, "999999999\t0")
 				}
 				outputs = append(outputs, "")
 			}
@@ -232,10 +234,10 @@ func TestProviderStopUnattendedSession(t *testing.T) {
 					}
 				}
 			}
-			if test.wantOK {
+			if len(test.wantPaneIDs) > 0 {
 				wantTail := make([][]string, 0, len(test.wantPaneIDs)+1)
 				for _, paneID := range test.wantPaneIDs {
-					wantTail = append(wantTail, []string{"-u", "-L", "cert-socket", "display-message", "-t", paneID, "-p", "#{pane_pid}"})
+					wantTail = append(wantTail, []string{"-u", "-L", "cert-socket", "display-message", "-t", paneID, "-p", "#{pane_pid}\t#{pane_dead}"})
 				}
 				wantTail = append(wantTail, []string{"-u", "-L", "cert-socket", "kill-session", "-t", "$1"})
 				gotTail := fe.calls[len(fe.calls)-len(wantTail):]
@@ -249,35 +251,30 @@ func TestProviderStopUnattendedSession(t *testing.T) {
 
 func TestProviderStopUnattendedSessionLaterCertifiedPaneLossDoesNotTerminateEarlierPane(t *testing.T) {
 	const twoPane = "$1\tworker\t@1\t%1\t0\t0\t0\n$1\tworker\t@2\t%2\t0\t0\t0"
-	binDir := t.TempDir()
-	killInvocations := filepath.Join(binDir, "kill-invocations")
-	fakeKill := filepath.Join(binDir, "kill")
-	if err := os.WriteFile(fakeKill, []byte("#!/bin/sh\nprintf '%s\n' \"$*\" >> "+killInvocations+"\n"), 0o755); err != nil {
-		t.Fatalf("write recording kill: %v", err)
-	}
-	t.Setenv("PATH", binDir)
-
 	fe := &fakeExecutor{
 		outs: []string{
 			twoPane,
 			"GC_INSTANCE_TOKEN=token",
 			twoPane,
-			"42424242",
+			"42424242\t0",
 			"",
 		},
 		errs: []error{nil, nil, nil, nil, ErrSessionNotFound},
 	}
 	p := NewProviderWithConfig(Config{SocketName: "cert-socket"})
 	p.tm.exec = fe
+	var terminated []processKillPlan
+	p.tm.certifiedPaneTerminator = func(plan processKillPlan) error {
+		terminated = append(terminated, plan)
+		return nil
+	}
 
 	err := p.StopUnattendedSession("worker", "token")
 	if !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("StopUnattendedSession error = %v, want wrapped ErrSessionNotFound", err)
 	}
-	if output, readErr := os.ReadFile(killInvocations); readErr == nil && len(output) != 0 {
-		t.Fatalf("first certified pane was terminated before later lookup failed: %s", output)
-	} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-		t.Fatalf("read kill invocations: %v", readErr)
+	if len(terminated) != 0 {
+		t.Fatalf("first certified pane was terminated before later lookup failed: %+v", terminated)
 	}
 	for _, call := range fe.calls {
 		if slices.Contains(call, "kill-session") {
@@ -304,7 +301,7 @@ func TestProviderStopUnattendedSessionClosesOnlyTrackedHiddenClient(t *testing.T
 		"$1\tworker\t@1\t%1\t0\t0\t0",
 		"GC_INSTANCE_TOKEN=token",
 		"$1\tworker\t@1\t%1\t0\t0\t0",
-		"999999999",
+		"999999999\t0",
 		"",
 	}}
 	p := NewProviderWithConfig(Config{SocketName: "cert-socket"})
@@ -549,7 +546,7 @@ func TestProviderAttachNamedSocketUsesNoStartServer(t *testing.T) {
 	wantPreflight := [][]string{
 		{"-u", "-N", "-S", path, "display-message", "-p", "#{pid}"},
 		{"-u", "-L", "city-socket", "-N", "has-session", "-t", "=runner"},
-		{"-u", "-L", "city-socket", "-N", "display-message", "-t", "runner:^.0", "-p", "#{pane_dead}"},
+		{"-u", "-L", "city-socket", "-N", "display-message", "-t", "=runner:^.0", "-p", "#{pane_dead}"},
 		{"-u", "-N", "-S", path, "display-message", "-p", "#{pid}"},
 	}
 	if !reflect.DeepEqual(p.tm.exec.(*fakeExecutor).calls, wantPreflight) {
@@ -757,5 +754,104 @@ func TestProviderAttachRefusesDisappearanceAfterInitialWitness(t *testing.T) {
 				t.Fatalf("lstat calls=%d tmux calls=%v, want A, has-session, B", lstatCalls, fe.calls)
 			}
 		})
+	}
+}
+
+// The reconciler probes attachment and last activity for every session it
+// tracks. Before gcy-8gwi each probe forked its own tmux process —
+// `display-message -t <s>` plus `list-windows -t <s>` per session, 2N forks
+// per pass on top of the fleet snapshot IsRunning already takes. Both now read
+// the snapshot the cache already holds, so a whole pass costs the one
+// list-panes call and nothing per session.
+func TestProviderAttachmentAndActivityServedFromFleetSnapshot(t *testing.T) {
+	fe := &fakeExecutor{
+		out: strings.Join([]string{
+			"agent-1\t0\tclaude\t101\t0\t1000",
+			"agent-2\t0\tclaude\t102\t1\t2000",
+			"agent-3\t0\tclaude\t103\t0\t3000",
+		}, "\n"),
+	}
+	p := NewProviderWithConfig(Config{SocketName: "x"})
+	p.tm.exec = fe
+
+	for name, want := range map[string]bool{"agent-1": false, "agent-2": true, "agent-3": false} {
+		if got := p.IsAttached(name); got != want {
+			t.Errorf("IsAttached(%s) = %t, want %t", name, got, want)
+		}
+	}
+	for name, want := range map[string]int64{"agent-1": 1000, "agent-2": 2000, "agent-3": 3000} {
+		got, err := p.GetLastActivity(name)
+		if err != nil {
+			t.Errorf("GetLastActivity(%s) error = %v", name, err)
+			continue
+		}
+		if !got.Equal(time.Unix(want, 0)) {
+			t.Errorf("GetLastActivity(%s) = %v, want %v", name, got, time.Unix(want, 0))
+		}
+	}
+
+	if len(fe.calls) != 1 {
+		t.Fatalf("tmux calls = %d, want 1 (list-panes only); per-session forks are the bug: %v", len(fe.calls), fe.calls)
+	}
+	if joined := strings.Join(fe.calls[0], " "); !strings.Contains(joined, "list-panes") {
+		t.Fatalf("single tmux call = %q, want the list-panes fleet snapshot", joined)
+	}
+}
+
+// A session absent from the snapshot (created since the last refresh, or a
+// target that is not a bare session name) must fall back to the direct
+// per-session reads rather than reporting detached-with-no-activity.
+func TestProviderAttachmentAndActivityFallBackWhenSnapshotMissesSession(t *testing.T) {
+	fe := &fakeExecutor{
+		outs: []string{
+			"agent-1\t0\tclaude\t101\t0\t1000", // list-panes: no agent-2
+			"agent-2|1",                        // display-message for agent-2 (name|client-count)
+			"5000",                             // list-windows for agent-2
+		},
+	}
+	p := NewProviderWithConfig(Config{SocketName: "x"})
+	p.tm.exec = fe
+
+	if !p.IsAttached("agent-2") {
+		t.Error("IsAttached(agent-2) = false, want true from the direct read")
+	}
+	if len(fe.calls) < 2 || !strings.Contains(strings.Join(fe.calls[1], " "), "display-message") {
+		t.Fatalf("tmux calls = %v, want the per-session display-message attachment fallback after list-panes", fe.calls)
+	}
+	got, err := p.GetLastActivity("agent-2")
+	if err != nil {
+		t.Fatalf("GetLastActivity(agent-2) error = %v", err)
+	}
+	if !got.Equal(time.Unix(5000, 0)) {
+		t.Fatalf("GetLastActivity(agent-2) = %v, want %v from the direct read", got, time.Unix(5000, 0))
+	}
+
+	joined := strings.Join(fe.calls[len(fe.calls)-1], " ")
+	if !strings.Contains(joined, "list-windows") {
+		t.Fatalf("last tmux call = %q, want the per-session list-windows fallback", joined)
+	}
+}
+
+// Reading activity from the snapshot must not lose the poke discount: a
+// woken-but-unresponsive agent whose only "activity" is gc's own send-keys
+// echo still reports its pre-poke activity (#3049). Serving the raw timestamp
+// from a batch would make every parked agent look freshly active.
+func TestProviderLastActivityFromSnapshotStillDiscountsPoke(t *testing.T) {
+	now := time.Now()
+	poke := now.Add(-time.Minute)
+	prior := now.Add(-time.Hour)
+	fe := &fakeExecutor{
+		out: fmt.Sprintf("agent-1\t0\tclaude\t101\t0\t%d", poke.Unix()),
+	}
+	p := NewProviderWithConfig(Config{SocketName: "x"})
+	p.tm.exec = fe
+	p.tm.recordPokeAt("agent-1", prior, poke)
+
+	got, err := p.GetLastActivity("agent-1")
+	if err != nil {
+		t.Fatalf("GetLastActivity error = %v", err)
+	}
+	if got.Unix() != prior.Unix() {
+		t.Fatalf("GetLastActivity = %v, want the pre-poke activity %v: the snapshot path must apply the same poke discount as the per-session read", got, prior)
 	}
 }

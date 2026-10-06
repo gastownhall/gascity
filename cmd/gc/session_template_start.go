@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -198,7 +199,7 @@ func materializeSessionForTemplateWithOptions(
 					return createErr
 				})
 				if createErr == nil {
-					_ = pokeController(cityPath)
+					_ = enqueueController(cityPath, reconcilekey.Session(info.ID))
 					return info.SessionName, nil
 				}
 				if snapshot, err := loadSessionBeadSnapshot(store); err == nil {
@@ -353,7 +354,7 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 				return createErr
 			})
 			if createErr == nil {
-				_ = pokeController(cityPath)
+				_ = enqueueController(cityPath, reconcilekey.Session(info.ID))
 				return info.SessionName, nil
 			}
 			return "", createErr

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -522,15 +522,34 @@ func TestProjectIdentity(t *testing.T) {
 // the file is ever moved without updating the offset.
 func identityRepoRoot(t *testing.T) string {
 	t.Helper()
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatalf("runtime.Caller(0) failed; cannot locate test source file")
+	// GC_TEST_REPO_ROOT lets `bazel test` point whole-repo scan guards at a
+	// real checkout; runfiles trees cannot stand in for the repository.
+	if root := bazeltest.OverrideRoot(); root != "" {
+		if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+			t.Fatalf("GC_TEST_REPO_ROOT=%s has no go.mod: %v", root, err)
+		}
+		return root
 	}
-	root := filepath.Join(filepath.Dir(filename), "..", "..", "..")
-	abs, err := filepath.Abs(root)
+
+	// Walk up from the working directory: runtime.Caller(0) arithmetic points
+	// at build-sandbox paths that do not exist under `bazel test`, where the
+	// runfiles tree rooted at the workspace marker is the repo stand-in.
+	wd, err := os.Getwd()
 	if err != nil {
-		t.Fatalf("filepath.Abs(%s): %v", root, err)
+		t.Fatalf("getwd: %v", err)
 	}
+	root := wd
+	for {
+		if _, statErr := os.Stat(filepath.Join(root, "go.mod")); statErr == nil {
+			break
+		}
+		parent := filepath.Dir(root)
+		if parent == root {
+			t.Fatalf("no go.mod found above %s", wd)
+		}
+		root = parent
+	}
+	abs := root
 	for _, marker := range []string{
 		"go.mod",
 		filepath.Join("internal", "beads", "contract", "identity.go"),

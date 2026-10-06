@@ -11,7 +11,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/workrecord"
 )
 
 // TestValidateRigNamePathContainment proves the tightened name guard: a path
@@ -443,4 +445,29 @@ func TestRigIdemRecloneRefusesForeignSameName(t *testing.T) {
 			t.Fatalf("free-name outcome = %d entry=%+v, want rigAdmitReclone reusing %s", res.outcome, res.entry, id)
 		}
 	})
+}
+
+// TestIdemRecordStaysOutOfTheWorkRecordPopulation pins the durable record's
+// shape against the ADR-0009 work-record close gate. The record is a plain
+// "task" bead carrying no gc.kind, which is exactly the population
+// workrecord.Gated covers — but it is a receipt for a request, not a work unit
+// a worker claims and reports an outcome for, and it has no commit to point at.
+// Stamping gc.kind is what keeps it out, the same default a plain dispatch child
+// gets in internal/dispatch/control.go.
+func TestIdemRecordStaysOutOfTheWorkRecordPopulation(t *testing.T) {
+	store := beads.NewMemStore()
+	id, err := createIdemRecord(store, "c1", "req-kind-00001", "d", "0", "web", idemStateInFlight)
+	if err != nil {
+		t.Fatalf("createIdemRecord: %v", err)
+	}
+	rec, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	if got := rec.Metadata[beadmeta.KindMetadataKey]; got != beadmeta.KindTask {
+		t.Fatalf("%s = %q, want %q", beadmeta.KindMetadataKey, got, beadmeta.KindTask)
+	}
+	if workrecord.Gated(rec) {
+		t.Fatalf("the rig-create idempotency record is inside the work-record close gate's population")
+	}
 }

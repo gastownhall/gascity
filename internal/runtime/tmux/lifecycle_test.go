@@ -73,9 +73,10 @@ func TestConfigureServerRetriesExitEmptyAfterFailure(t *testing.T) {
 
 func TestProviderStopDistinguishesMissingSessionFromMissingServer(t *testing.T) {
 	tests := []struct {
-		name    string
-		stopErr error
-		wantErr error
+		name     string
+		stopErr  error
+		stopErrs []error
+		wantErr  error
 	}{
 		{
 			name:    "responsive server missing session is idempotent",
@@ -90,12 +91,17 @@ func TestProviderStopDistinguishesMissingSessionFromMissingServer(t *testing.T) 
 			stopErr: ErrNoServer,
 			wantErr: ErrNoServer,
 		},
+		{
+			name:     "missing server at kill outranks an earlier missing pane",
+			stopErrs: []error{ErrSessionNotFound, ErrNoServer},
+			wantErr:  ErrNoServer,
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			provider := NewProviderWithConfig(Config{SocketName: "gctest-stop-outcome"})
-			provider.tm.exec = &fakeExecutor{err: test.stopErr}
+			provider.tm.exec = &fakeExecutor{err: test.stopErr, errs: test.stopErrs}
 
 			err := provider.Stop("worker")
 			if !errors.Is(err, test.wantErr) {

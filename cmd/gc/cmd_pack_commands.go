@@ -116,6 +116,9 @@ var stdin = func() io.Reader { return os.Stdin }
 
 // expandScriptTemplate expands Go text/template variables in the script
 // path. On any error, returns the raw script string (graceful fallback).
+//
+// Pack commands are resolved without an agent, so the rig-derived fields —
+// including DefaultBranch — stay at their zero value here by construction.
 func expandScriptTemplate(script, cityPath, cityName, packDir string) string {
 	if !strings.Contains(script, "{{") {
 		return script

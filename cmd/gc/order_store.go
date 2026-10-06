@@ -459,7 +459,7 @@ func validPublishedManagedDoltDataDirState(cityPath string, state doltRuntimeSta
 	if !pidAlive(state.PID) || !doltPortReachable(strconv.Itoa(state.Port)) {
 		return false
 	}
-	holderPID := findPortHolderPID(strconv.Itoa(state.Port))
+	holderPID := findPortHolderPID(strconv.Itoa(state.Port), state.PID)
 	if holderPID > 0 {
 		return holderPID == state.PID
 	}
@@ -525,7 +525,7 @@ func validDoltRuntimeStateForLayout(state doltRuntimeState, layout managedDoltRu
 	if !pidAlive(state.PID) || !doltPortReachable(strconv.Itoa(state.Port)) {
 		return false
 	}
-	holderPID := findPortHolderPID(strconv.Itoa(state.Port))
+	holderPID := findPortHolderPID(strconv.Itoa(state.Port), state.PID)
 	if holderPID > 0 && holderPID != state.PID {
 		return false
 	}
@@ -582,8 +582,11 @@ func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []ord
 	}}
 	if cfg != nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
+		// A suspended rig is left untouched: a bd read restarts its retired
+		// proxy, and nothing dispatches orders into it while it is suspended.
+		suspended := buildEffectiveSuspendedRigNames(cfg, loadSuspensionStateBestEffort(cityPath))
 		for _, rig := range cfg.Rigs {
-			if strings.TrimSpace(rig.Path) == "" {
+			if strings.TrimSpace(rig.Path) == "" || suspended[rig.Name] {
 				continue
 			}
 			targets = append(targets, orderTrackingSweepTarget{

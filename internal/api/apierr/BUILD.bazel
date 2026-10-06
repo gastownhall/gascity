@@ -1,0 +1,38 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "apierr",
+    srcs = [
+        "apierr.go",
+        "catalog.go",
+        "model.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/api/apierr",
+    visibility = ["//:__subpackages__"],
+    deps = ["@com_github_danielgtaylor_huma_v2//:huma"],
+)
+
+go_test(
+    name = "apierr_test",
+    srcs = [
+        "apierr_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":apierr"],
+    deps = [
+        "//internal/testenv",
+        "@com_github_danielgtaylor_huma_v2//:huma",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

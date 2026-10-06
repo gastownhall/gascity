@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -741,7 +742,14 @@ func TestControllerStatusLine(t *testing.T) {
 
 func startFakeControllerSocket(t *testing.T, cityPath, response string) <-chan struct{} {
 	t.Helper()
-	sockPath := controllerSocketPath(cityPath)
+	return startFakeUnixSocket(t, controllerSocketPath(cityPath), func(string) string { return response })
+}
+
+// startFakeUnixSocket listens on sockPath and answers each connection's
+// command line with respond(line); an empty reply closes without replying.
+// The returned channel is signaled (non-blocking) on each accept.
+func startFakeUnixSocket(t *testing.T, sockPath string, respond func(line string) string) <-chan struct{} {
+	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -768,9 +776,9 @@ func startFakeControllerSocket(t *testing.T, cityPath, response string) <-chan s
 			go func(conn net.Conn) {
 				defer conn.Close() //nolint:errcheck // test cleanup
 				_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-				_, _ = conn.Read(make([]byte, 64))
+				line, _ := bufio.NewReader(conn).ReadString('\n')
 				_ = conn.SetReadDeadline(time.Time{})
-				_, _ = conn.Write([]byte(response))
+				_, _ = conn.Write([]byte(respond(strings.TrimSuffix(line, "\n"))))
 			}(conn)
 		}
 	}()
@@ -1114,10 +1122,11 @@ func TestRouteCityStatus_SixRowMatrix(t *testing.T) {
 				c = api.NewCityScopedClient(srv.URL, "test-city")
 			}
 
-			sp := runtime.NewFake()
 			dops := newFakeDrainOps()
 			var stdout, stderr bytes.Buffer
-			code := routeCityStatus(cityPath, cfg, sp, dops, c, tc.nilReason, false, &stdout, &stderr)
+			code := routeCityStatus(cityPath, dops, c, tc.nilReason, false, &stdout, &stderr, func() int {
+				return cmdCityStatusLocalFallback(cfg, cityPath, false, &stdout, &stderr)
+			})
 
 			if code != tc.wantExit {
 				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
@@ -1141,6 +1150,109 @@ func TestRouteCityStatus_SixRowMatrix(t *testing.T) {
 	}
 }
 
+// TestCmdCityStatus_SupervisorManagedNoAPIPortUsesSupervisorAPI is the
+// ra-r9hm6v end-to-end regression test, exercising the real `gc status`
+// entry point (cmdCityStatus) rather than routeCityStatus directly. A
+// supervisor-managed city with no [api] section in city.toml — the shape
+// writeCityStatusTestCity produces, and the shape of a default `gc init`'d
+// city — used to make cmdCityStatus's real cityStatusAPIClient resolve nil
+// (apiClient's "alive socket, no standalone port" case), forcing every `gc
+// status` call onto the expensive local snapshot builder even though a
+// supervisor was reachable. It must now resolve the fake supervisor's API
+// client and take route=api end to end.
+//
+// It also keeps the supervisor route ahead of every bead/Dolt read. During a
+// store-contention burst, opening the local store can block even while the
+// supervisor's cached status endpoint is healthy; doing that work before
+// choosing the API route made gc status emit no output until the external
+// command timeout killed it.
+func TestCmdCityStatus_SupervisorManagedNoAPIPortUsesSupervisorAPI(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
+	cityPath := writeCityStatusTestCity(t)
+	if err := os.Mkdir(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("create store marker: %v", err)
+	}
+
+	srv := httptest.NewServer(okCityStatusHandler(t))
+	defer srv.Close()
+
+	origAlive, origSup := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	origOpen := openCityStoreAtForStatus
+	t.Cleanup(func() {
+		apiRouteControllerAliveHook = origAlive
+		apiRouteSupervisorClientHook = origSup
+		openCityStoreAtForStatus = origOpen
+	})
+	// Simulates a live per-city controller socket (the supervisor hosts the
+	// controller in-process) answering the "alive" ping, paired with a
+	// supervisor-managed API client — the exact combination apiClient alone
+	// cannot route because city.toml has no [api] port.
+	apiRouteControllerAliveHook = func(string) int { return 4242 }
+	apiRouteSupervisorClientHook = func(cp string) *api.Client {
+		if cp != cityPath {
+			return nil
+		}
+		return api.NewCityScopedClient(srv.URL, "test-city")
+	}
+	openCityStoreAtForStatus = func(string) (beads.StoreOpenResult, error) {
+		t.Fatal("gc status opened the local bead store before using the healthy supervisor API")
+		return beads.StoreOpenResult{}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdCityStatus([]string{cityPath}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdCityStatus exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "route=api") {
+		t.Fatalf("stderr missing route=api (still falling back to the expensive local path): %s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "route=fallback") {
+		t.Fatalf("stderr shows route=fallback, want route=api only: %s", stderr.String())
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("unmarshal stdout: %v; stdout=%s", err, stdout.String())
+	}
+	if _, ok := envelope["_cache_age_s"]; !ok {
+		t.Fatalf("stdout missing _cache_age_s (API-path envelope field), got: %s", stdout.String())
+	}
+}
+
+// TestCmdCityStatus_NoAPIClientOpensLocalStore covers the complement of
+// TestCmdCityStatus_SupervisorManagedNoAPIPortUsesSupervisorAPI: with no
+// supervisor API client available, the entry point must fall back to the
+// local store.
+func TestCmdCityStatus_NoAPIClientOpensLocalStore(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
+	cityPath := writeCityStatusTestCity(t)
+	if err := os.Mkdir(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("create store marker: %v", err)
+	}
+
+	origClient := cityStatusAPIClient
+	origOpen := openCityStoreAtForStatus
+	t.Cleanup(func() {
+		cityStatusAPIClient = origClient
+		openCityStoreAtForStatus = origOpen
+	})
+	cityStatusAPIClient = func(string) (*api.Client, string) { return nil, "controller-down" }
+	opens := 0
+	openCityStoreAtForStatus = func(path string) (beads.StoreOpenResult, error) {
+		opens++
+		return origOpen(path)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmdCityStatus([]string{cityPath}, true, &stdout, &stderr)
+	if opens < 1 {
+		t.Fatalf("gc status did not open the local bead store on the fallback route; stderr=%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "route=fallback") {
+		t.Fatalf("stderr missing route=fallback: %s", stderr.String())
+	}
+}
+
 // TestRouteCityStatus_APIJSONIncludesCacheAge verifies the API-path JSON
 // output carries the _cache_age_s envelope field while the fallback path
 // omits it. Enforces D5 from the gc-read-path design doc.
@@ -1155,10 +1267,11 @@ func TestRouteCityStatus_APIJSONIncludesCacheAge(t *testing.T) {
 	defer srv.Close()
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
-	sp := runtime.NewFake()
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	if code := routeCityStatus(cityPath, cfg, sp, dops, c, "", true, &stdout, &stderr); code != 0 {
+	if code := routeCityStatus(cityPath, dops, c, "", true, &stdout, &stderr, func() int {
+		return cmdCityStatusLocalFallback(cfg, cityPath, true, &stdout, &stderr)
+	}); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	var envelope map[string]any
@@ -1181,10 +1294,11 @@ func TestRouteCityStatus_FallbackJSONOmitsCacheAge(t *testing.T) {
 		t.Fatalf("loadCityConfig: %v", err)
 	}
 
-	sp := runtime.NewFake()
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	if code := routeCityStatus(cityPath, cfg, sp, dops, nil, "controller-down", true, &stdout, &stderr); code != 0 {
+	if code := routeCityStatus(cityPath, dops, nil, "controller-down", true, &stdout, &stderr, func() int {
+		return cmdCityStatusLocalFallback(cfg, cityPath, true, &stdout, &stderr)
+	}); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	var envelope map[string]any
@@ -1222,10 +1336,11 @@ func TestRouteCityStatus_APIStaleBanner(t *testing.T) {
 	defer srv.Close()
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
-	sp := runtime.NewFake()
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	if code := routeCityStatus(cityPath, cfg, sp, dops, c, "", false, &stdout, &stderr); code != 0 {
+	if code := routeCityStatus(cityPath, dops, c, "", false, &stdout, &stderr, func() int {
+		return cmdCityStatusLocalFallback(cfg, cityPath, false, &stdout, &stderr)
+	}); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "cache age:") {
