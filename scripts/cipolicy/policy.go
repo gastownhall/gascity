@@ -156,7 +156,13 @@ const (
 	// `make openapi-breaking-check` step. Reviewed delta: removed steps, one
 	// removed env and one renamed step command; no new job, trigger or
 	// permission.
-	expectedCIExecutionHash     = "a8330d6e8e86cab9b2712ce03cba55544a3284b3c29cc8a61adbd786efb0015d"
+	//
+	// Bumped again (ga-96smfk.26, acceptance shard floor): TestBeadsProxiedDefault
+	// was split into independent TestBeadsProxiedDefault* top-level tests, so
+	// the topology job's proxied-default step selects those eight names
+	// instead of the one. Same tests' assertions, same step, -timeout and env.
+	// No new job, trigger or permission.
+	expectedCIExecutionHash     = "9a2af83ceb5363f11125242a16305e7fc4b8b84d9b0d8bbb744eb782b38b3197"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -182,8 +188,11 @@ const (
 	// trigger, permission or secret. Then (Go module fetch resilience)
 	// bundled-pack-pins and waiver-clock each set setup-go `cache: false` and
 	// gain one step right after it, `uses: ./.github/actions/go-mod-download`;
-	// no new job, trigger, permission or secret.
-	expectedNightlyExecutionHash = "8c3b93d8471bb9f6b121f6a4713367b25fc10183c9a89a716dcd6785ef21c8d9"
+	// no new job, trigger, permission or secret. Then (ga-96smfk.26)
+	// beads-proxied-perf's -run selects TestBeadsProxiedDefaultNativeLane, the
+	// one test split out of TestBeadsProxiedDefault that reads
+	// GC_ACCEPTANCE_PERF; no new job, trigger, permission or secret.
+	expectedNightlyExecutionHash = "a4a633438d81b9eaa9308ffd687a0869a5472003c651eb8526e76085c581ec6f"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`.

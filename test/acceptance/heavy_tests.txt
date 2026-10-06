@@ -1,14 +1,21 @@
 # Acceptance (Tier A, acceptance_a) tests that each run for 40 s or more
-# (seconds measured 2026-10-06 under bazel on rbe-west, 16 shards,
-# --test_arg=-test.v). rules_go shards a go_test round-robin over its tests in
+# (seconds measured 2026-10-06 under bazel on rbe-west, --test_arg=-test.v;
+# the TestBeadsProxiedDefault* family measured unsharded on one worker, the
+# rest at 10 shards). rules_go shards a go_test round-robin over its tests in
 # source order, and the lane is as slow as its slowest shard, so two of these
 # in one shard add up. The guard scripts/acceptance_shards_test.go fails when
 # shard_count in BUILD.bazel would put two of them in the same shard, and
 # prints the counts that do not. Add a test here when it takes more than
-# about 40 s.
-TestBeadsProxiedDefault 270
-TestProxiedNativeLifecycle 111
-TestDoctorProxiedBackupCoverageLeavesAStoppedCityStopped 90
-TestProxiedNativeSafety 72
-TestBeadsProxiedIgnoresUserLevelSharedServer 45
-TestDoctorLeavesAStoppedProxiedCityStopped 45
+# about 40 s; split a test that takes more than about 90 s into independent
+# top-level tests, because Go shards per top-level test.
+TestBeadsProxiedDefaultRig 105
+TestBeadsProxiedDefaultInit 93
+TestBeadsProxiedDefaultNativeLane 88
+TestBeadsProxiedDefaultStart 85
+TestBeadsProxiedDefaultRestart 82
+TestBeadsProxiedIgnoresUserLevelSharedServer 79
+TestDoctorLeavesAStoppedProxiedCityStopped 74
+TestProxiedNativeLifecycle 70
+TestDoctorProxiedBackupCoverageLeavesAStoppedCityStopped 51
+TestBeadsProxiedDefaultLegacyManagedCityUnchanged 45
+TestProxiedNativeSafety 43

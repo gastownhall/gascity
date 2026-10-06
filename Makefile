@@ -631,7 +631,7 @@ ACCEPTANCE_TOPOLOGY_MATRIX ?= $(GC_ACCEPTANCE_TOPOLOGY_MATRIX)
 ACCEPTANCE_REQUIRE_TOOLING ?= $(GC_REQUIRE_ACCEPTANCE_TOOLING)
 ACCEPTANCE_REQUIRE_LEGACY_GC ?= $(GC_REQUIRE_ACCEPTANCE_LEGACY_GC)
 ## ACCEPTANCE_PERF turns on the proxied-native wall-clock gate in
-## TestBeadsProxiedDefault (GC_ACCEPTANCE_PERF). Off by default: wall clock on a
+## TestBeadsProxiedDefaultNativeLane (GC_ACCEPTANCE_PERF). Off by default: wall clock on a
 ## shared box is a statement about the box. The nightly perf lane sets it.
 ACCEPTANCE_PERF ?= $(GC_ACCEPTANCE_PERF)
 test-acceptance:

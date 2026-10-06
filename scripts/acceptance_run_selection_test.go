@@ -119,9 +119,9 @@ type acceptanceWorkflowDoc struct {
 
 // TestAcceptancePerfGateHasALane is round3 review (completeness).
 //
-// TestBeadsProxiedDefault gates the proxied-native lane's `gc status --json`
-// wall clock only when GC_ACCEPTANCE_PERF is set, because wall clock on a
-// shared PR runner is a statement about the runner. The plan leaves the number
+// TestBeadsProxiedDefaultNativeLane gates the proxied-native lane's
+// `gc status --json` wall clock only when GC_ACCEPTANCE_PERF is set, because
+// wall clock on a shared PR runner is a statement about the runner. The plan leaves the number
 // to "the GC_ACCEPTANCE_PERF nightly lane" — and nothing anywhere set the
 // variable: no workflow, no Makefile target, and `make test-acceptance` runs
 // under `env -i`, which dropped it even when a developer exported it. So a flag-on
@@ -133,7 +133,7 @@ type acceptanceWorkflowDoc struct {
 func TestAcceptancePerfGateHasALane(t *testing.T) {
 	const (
 		gate     = "GC_ACCEPTANCE_PERF"
-		testName = "TestBeadsProxiedDefault"
+		testName = "TestBeadsProxiedDefaultNativeLane"
 	)
 	root := repoRoot(t)
 	set := func(values ...map[string]any) bool {

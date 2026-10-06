@@ -1229,10 +1229,11 @@ unrelated Tier A flows.
 
 #### Beads topology tests (`GC_ACCEPTANCE_BD_BIN`, `GC_ACCEPTANCE_LEGACY_GC_BIN`)
 
-Two Tier A tests drive a real `bd` and a real `dolt` instead of the hermetic
-providers: `TestBeadsProxiedDefault`, which proves the proxied-local default,
-and `TestBeadsInitTopologyMatrix`, which walks every supported way to
-initialise a beads scope. Both skip typed when their tooling is absent, so the
+Two groups of Tier A tests drive a real `bd` and a real `dolt` instead of the
+hermetic providers: the `TestBeadsProxiedDefault*` tests, which prove the
+proxied-local default (independent top-level tests, so the sharded Bazel lane
+can spread them), and `TestBeadsInitTopologyMatrix`, which walks every
+supported way to initialise a beads scope. Both skip typed when their tooling is absent, so the
 default `make test-acceptance` run is unaffected.
 
 | variable | selects | who needs it |
@@ -1240,7 +1241,7 @@ default `make test-acceptance` run is unaffected.
 | `GC_ACCEPTANCE_BD_BIN` | the `bd` binary under test; must have `--proxied-server`, so bd >= 1.3.0 | both tests, all shapes |
 | `GC_ACCEPTANCE_LEGACY_GC_BIN` | a `gc` built before the scope-ownership journal | the matrix's legacy GC-managed shape only |
 | `GC_ACCEPTANCE_TOPOLOGY_MATRIX` | opts a run in to the matrix; it is too slow for the Tier A smoke budget and skips without this | `TestBeadsInitTopologyMatrix` only |
-| `GC_ACCEPTANCE_PERF` | turns the proxied-native `gc status --json` wall-clock line (0.5s target, gated at 3x) from a log line into an assertion; the nightly `Beads / proxied-native perf lane` job sets it, and `make test-acceptance` passes it through as `ACCEPTANCE_PERF` | `TestBeadsProxiedDefault` only |
+| `GC_ACCEPTANCE_PERF` | turns the proxied-native `gc status --json` wall-clock line (0.5s target, gated at 3x) from a log line into an assertion; the nightly `Beads / proxied-native perf lane` job sets it, and `make test-acceptance` passes it through as `ACCEPTANCE_PERF` | `TestBeadsProxiedDefaultNativeLane` only |
 
 `make test-beads-topology-matrix` sets the matrix opt-in and
 `GC_REQUIRE_ACCEPTANCE_TOOLING=1` itself, so a missing `bd` or `dolt` fails the

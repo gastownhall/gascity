@@ -510,7 +510,7 @@ jobs:
   # so a slow-but-live run was cancelled by the job timeout — losing the
   # `--- FAIL` line and the tee'd log the skip report reads — instead of being
   # reported by the test timeout. Measured on a loaded 32-core box:
-  # TestBeadsProxiedDefault 13-15 min, AC-X ~11 min, M1+M5 ~9.5 min, the
+  # the TestBeadsProxiedDefault* family 13-15 min, AC-X ~11 min, M1+M5 ~9.5 min, the
   # user-level shared-server isolation test ~7.5 min; CI runners are faster. The proxied-native lifecycle and safety rows moved to
   # their own job below.
   beads-topology-acceptance:
@@ -581,7 +581,7 @@ jobs:
         run: |
           set -euo pipefail
           go test -tags acceptance_a -timeout 30m -count=1 -v \
-            -run 'TestBeadsProxiedDefault$' ./test/acceptance/ 2>&1 \
+            -run 'TestBeadsProxiedDefaultInit$|TestBeadsProxiedDefaultNativeLane$|TestBeadsProxiedDefaultRig$|TestBeadsProxiedDefaultStart$|TestBeadsProxiedDefaultRestart$|TestBeadsProxiedDefaultDirectEscapeHatch$|TestBeadsProxiedDefaultBdOwnedDirectUnchanged$|TestBeadsProxiedDefaultLegacyManagedCityUnchanged$' ./test/acceptance/ 2>&1 \
             | tee "${RUNNER_TEMP}/proxied-default.log"
       - name: User-level shared-server isolation acceptance
         run: |
