@@ -28,6 +28,11 @@ package main
 // so a flag the query gains cannot silently fail to reach the controller. The
 // route half mirrors hookClaimMatchesRoute exactly, because that is the function
 // that will actually accept or reject the claim.
+//
+// One rule here has no serving-side twin yet: controlRowServableByTemplate, the
+// control-dispatcher ownership rule. The controller applies it to demand, but
+// the dispatcher's serve loop still claims by route alone (mc-zndi7.85), so for
+// a cross-scope control row the two sides do not yet agree.
 
 import (
 	"fmt"
@@ -72,13 +77,18 @@ func demandServableForTemplates(cfg *config.City, b beads.Bead, templates map[st
 // to resolve) pass.
 //
 // It is the rule repairControlDispatcherRoutesForStoreScope applies, restated
-// for a reader of the durable route. The repair suppresses a scope-gap row or a
+// for a reader of the durable route; TestControlRowServableAgreesWithTheRouteRepair
+// keeps the two in lockstep. The repair suppresses a scope-gap row or a
 // deferred route rewrite only in the collected snapshot; the default scale_check
 // probe re-reads Ready, where the stale route still names another scope's
 // dispatcher. On a class-binding city every dispatcher's probe reads the
 // binding, so without this check the probe counted the row for the dispatcher
 // the stale route names: the #3765 cross-scope wake the repair exists to stop
 // (mc-zndi7.41).
+//
+// This governs demand only. The dispatcher's serve loop does not apply it yet,
+// so a dispatcher that is awake for other work still claims a cross-scope row
+// by its route (mc-zndi7.85).
 func controlRowServableByTemplate(cfg *config.City, b beads.Bead, template string) bool {
 	if cfg == nil || !beadmeta.IsControlKind(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey])) {
 		return true

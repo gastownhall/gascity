@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"maps"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -269,6 +271,47 @@ func TestDemandCountsControlRowsOnlyForTheirScopeDispatcher(t *testing.T) {
 				t.Fatalf("demandServableForTemplates = (%q, %v), want (%q, %v)", got, ok, tt.wantTemplate, want)
 			}
 		})
+	}
+}
+
+// TestControlRowServableAgreesWithTheRouteRepair keeps the probe's ownership
+// rule and the route repair in lockstep. With no store, every route rewrite
+// the repair wants is deferred, so a route the repair leaves in place is
+// exactly a route it considers owned. controlRowServableByTemplate must hold
+// for exactly those (row, route) pairs. A rule edited on one side only fails
+// here.
+func TestControlRowServableAgreesWithTheRouteRepair(t *testing.T) {
+	bindingRef := string(storeref.ClassRef(wholeSplitClasses()))
+	configs := map[string]*config.City{
+		"two dispatchers": classBindingDispatcherFixtureConfig(t),
+		"city only":       cityOnlyDispatcherFixtureConfig(t),
+	}
+	kinds := []string{"", beadmeta.KindWorkflowFinalize, beadmeta.KindDrain}
+	roots := []string{"", "city:test-city", bindingRef, "rig:fixture", "rig:elsewhere"}
+	routes := []string{"core.control-dispatcher", "fixture/core.control-dispatcher", "control-dispatcher", "fixture/worker"}
+	for name, cfg := range configs {
+		for _, kind := range kinds {
+			for _, root := range roots {
+				for _, route := range routes {
+					meta := map[string]string{beadmeta.RoutedToMetadataKey: route}
+					if kind != "" {
+						meta[beadmeta.KindMetadataKey] = kind
+					}
+					if root != "" {
+						meta[beadmeta.RootStoreRefMetadataKey] = root
+					}
+					row := beads.Bead{ID: "c-1", Status: "open", Type: "task", Metadata: meta}
+					repaired := beads.Bead{ID: row.ID, Status: row.Status, Type: row.Type, Metadata: maps.Clone(meta)}
+					newControlDispatcherRouteRepair(cfg, io.Discard).repairBead(&repaired, nil, bindingRef)
+
+					kept := repaired.Metadata[beadmeta.RoutedToMetadataKey] == route
+					if got := controlRowServableByTemplate(cfg, row, route); got != kept {
+						t.Errorf("%s kind=%q root=%q route=%q: servable=%v, but the repair keeps the route=%v",
+							name, kind, root, route, got, kept)
+					}
+				}
+			}
+		}
 	}
 }
 

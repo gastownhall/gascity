@@ -1015,10 +1015,10 @@ func controlGapFixture(t *testing.T) (*allocFixture, string) {
 
 // Kills: control work counted that legacy's in-tick repair suppresses (P3-2
 // obligation), a projection applied to one consumer only (P3-2 re-review),
-// and the default probe counting the suppressed route (mc-zndi7.41, fixed
-// v2-only: an explained difference for P3-5c). The projection runs once,
-// and control demand, the ready routed work and the default probe all read
-// its rows.
+// and the default probe counting the suppressed route (mc-zndi7.41; legacy's
+// probe applies the same rule through controlRowServableByTemplate). The
+// projection runs once, and control demand, the ready routed work and the
+// default probe all read its rows.
 func TestAllocator_ControlRoutesProjectedForEveryConsumer(t *testing.T) {
 	f, dispatcher := controlGapFixture(t)
 	if got := openControlDispatcherDemand(f.in.Cfg, f.in.Demand.Collected.UnassignedRouted); !got[dispatcher] {

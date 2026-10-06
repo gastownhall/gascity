@@ -63,9 +63,9 @@ func (p *decidePass) plan() {
 // legacy's in-tick route repair leaves them. The projection runs once, and
 // every consumer reads its rows: control-dispatcher demand, the ready routed
 // work the idle-claim nudge reads, and the default probe, which drops the
-// control rows whose route the projection suppressed. Legacy's Ready-based
-// probe still counts them (mc-zndi7.41, open for legacy); the v2-only fix is
-// an explained difference for P3-5c.
+// control rows whose route the projection suppressed. Legacy's probe applies
+// the same ownership rule through controlRowServableByTemplate (mc-zndi7.41),
+// so this drop agrees with legacy and is not a difference for P3-5c.
 func (p *decidePass) demand() {
 	collected := p.in.Demand.Collected
 	collected.CustomCounts, collected.CustomPartials = nil, nil
