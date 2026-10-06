@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -58,19 +59,42 @@ func oracleCity(t *testing.T, seed int64) allocInputs {
 		}
 		cfg.Agents = append(cfg.Agents, a)
 	}
-	if rng.Intn(3) == 0 {
+	pools := cfg.Agents[:nTemplates:nTemplates]
+	// A named session's plan reserves its identity (planNamed), which can
+	// be a singleton pool's canonical name: the pool's own (chat) or
+	// another agent's (solo). Either pool then gets routed demand.
+	switch rng.Intn(4) {
+	case 0:
 		cfg.Agents = append(cfg.Agents, config.Agent{Name: "chat"})
 		cfg.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "always"}}
+	case 1:
+		cfg.Agents = append(cfg.Agents, config.Agent{Name: "chat", MaxActiveSessions: intPtr(1)})
+		cfg.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "always"}}
+		pools = append(pools, cfg.Agents[len(cfg.Agents)-1])
+	case 2:
+		cfg.Agents = append(cfg.Agents, config.Agent{Name: "solo", MaxActiveSessions: intPtr(1)}, config.Agent{Name: "chat"})
+		cfg.NamedSessions = []config.NamedSession{{Name: "solo", Template: "chat", Mode: "always"}}
+		pools = append(pools, cfg.Agents[len(cfg.Agents)-2])
 	}
 
 	instance := func(a config.Agent, slot int) string {
 		if len(a.NamepoolNames) > 0 {
 			return a.NamepoolNames[slot%len(a.NamepoolNames)]
 		}
-		if a.MaxActiveSessions != nil && *a.MaxActiveSessions == 1 && rng.Intn(2) == 0 {
+		if a.MaxActiveSessions != nil && *a.MaxActiveSessions == 1 && rng.Intn(4) == 0 {
 			return a.QualifiedName()
 		}
 		return fmt.Sprintf("%s-%d", a.QualifiedName(), slot)
+	}
+	// holdCanonical sometimes makes row hold a canonical name only through
+	// its title or an agent: label (infoIdentifiesAsCanonical).
+	holdCanonical := func(row *beads.Bead, canonical string) {
+		switch rng.Intn(25) {
+		case 0:
+			row.Title = canonical
+		case 1:
+			row.Labels = append(slices.Clone(row.Labels), "agent:"+canonical)
+		}
 	}
 	f := newAllocFixture(t, cfg)
 	f.in.CityName = "oracle"
@@ -129,12 +153,20 @@ func oracleCity(t *testing.T, seed int64) allocInputs {
 		}
 		row := sessionRow(id, meta...)
 		row.CreatedAt = allocNow.Add(-time.Duration(rng.Intn(5)) * time.Hour)
+		holdCanonical(&row, a.QualifiedName())
 		rows = append(rows, row)
 		identities = append(identities, []string{id, "s-" + id, name, alias, "old-" + id})
 		if rng.Intn(15) == 0 {
 			shadow := sessionRow(id, "template", template, "state", "active", "pool_managed", "true",
 				"session_name", "s-x"+id, "agent_name", instance(a, 1+rng.Intn(14)), "pool_slot", fmt.Sprint(1+rng.Intn(14)))
 			shadows = append(shadows, shadow)
+		}
+		if rng.Intn(15) == 0 {
+			// A holder only another leg shows, under its own bead ID.
+			holder := sessionRow("rg-"+id, "template", a.QualifiedName(), "state", "active", "pool_managed", "true",
+				"session_name", "s-rg-"+id, "agent_name", instance(a, 1+rng.Intn(14)), "pool_slot", fmt.Sprint(1+rng.Intn(14)))
+			holdCanonical(&holder, a.QualifiedName())
+			shadows = append(shadows, holder)
 		}
 		switch state {
 		case "active":
@@ -147,6 +179,20 @@ func oracleCity(t *testing.T, seed int64) allocInputs {
 			if rng.Intn(2) == 0 {
 				f.alive("s-"+id, InventoryAttrs{AttachedKnown: true})
 			}
+		}
+	}
+	for _, a := range pools {
+		if a.UsesCanonicalSingletonPoolIdentity() && rng.Intn(3) == 0 {
+			// The canonical name held only through a title or a label, on
+			// a row the pool cannot reuse.
+			holder := sessionRow("rc-"+a.Name, "template", a.QualifiedName(), "state", "active", "pool_managed", "true",
+				"session_name", "s-rc-"+a.Name, "agent_name", "legacy-"+a.Name)
+			if rng.Intn(2) == 0 {
+				holder.Title = a.QualifiedName()
+			} else {
+				holder.Labels = append(slices.Clone(holder.Labels), "agent:"+a.QualifiedName())
+			}
+			shadows = append(shadows, holder)
 		}
 	}
 	f.sessions(rows...)
@@ -174,7 +220,7 @@ func oracleCity(t *testing.T, seed int64) allocInputs {
 	col := collectedDemand{
 		DefaultProbed: true, DefaultCounts: map[string]int{}, DefaultDemand: map[string]scaleCheckDemand{}, DefaultPartials: map[string]bool{},
 	}
-	for _, a := range cfg.Agents[:nTemplates] {
+	for _, a := range pools {
 		template := a.QualifiedName()
 		d := scaleCheckDemand{Count: rng.Intn(8)}
 		for j := 0; j < d.Count; j++ {
@@ -213,12 +259,14 @@ func oracleCity(t *testing.T, seed int64) allocInputs {
 // unindexed one, legacy's own path: the same selected rows with their
 // config refs and binding candidates, the same plans with their slots and
 // identifiers, the same refusals, desired membership and published entries.
+// It also kills realizing over the pass's own params with the index built
+// (the index unused).
 func TestRealizationIndexOracle(t *testing.T) {
 	seeds := 500
 	if testing.Short() {
 		seeds = 50
 	}
-	var selected, plans, refusals int
+	var selected, plans, refusals, views, served int
 	for seed := int64(0); seed < int64(seeds); seed++ {
 		in := oracleCity(t, seed)
 		legacy, want := realizePass(t, in, false)
@@ -238,8 +286,11 @@ func TestRealizationIndexOracle(t *testing.T) {
 		if !reflect.DeepEqual(indexed.desired, legacy.desired) || !reflect.DeepEqual(got, want) {
 			t.Fatalf("seed %d: desired membership or published decision differ", seed)
 		}
-		// Each agent's view holds exactly legacy's reuse universe: the rows
-		// resolving to its template, once each, in snapshot order.
+		views += indexed.index.views
+		served += indexed.index.served
+		// Each agent's view keeps the city snapshot, and its memo holds
+		// exactly legacy's reuse universe: the open rows resolving to its
+		// template, once each, in snapshot order.
 		for i := range in.Cfg.Agents {
 			a := &in.Cfg.Agents[i]
 			view := indexed.realizeParams(a, nil)
@@ -249,9 +300,9 @@ func TestRealizationIndexOracle(t *testing.T) {
 					rows = append(rows, info)
 				}
 			}
-			if !reflect.DeepEqual(view.sessionBeads.OpenInfos(), rows) || !reflect.DeepEqual(view.realizeMemo.rows, rows) {
-				t.Fatalf("seed %d: %s's view holds %d rows (memo %d), want its template's %d", seed, a.QualifiedName(),
-					len(view.sessionBeads.OpenInfos()), len(view.realizeMemo.rows), len(rows))
+			if view.sessionBeads != indexed.bp.sessionBeads || !reflect.DeepEqual(view.realizeMemo.rows, rows) {
+				t.Fatalf("seed %d: %s's memo holds %d rows, want its template's %d (and the city snapshot)", seed, a.QualifiedName(),
+					len(view.realizeMemo.rows), len(rows))
 			}
 		}
 		selected += len(legacy.selected)
@@ -261,6 +312,11 @@ func TestRealizationIndexOracle(t *testing.T) {
 	// The cities must reach every outcome, or equality proves little.
 	if selected < seeds*5 || plans < seeds || refusals < seeds {
 		t.Fatalf("oracle cities too tame: %d selected, %d plans, %d refusals over %d seeds", selected, plans, refusals, seeds)
+	}
+	// And the indexed passes must have realized through the index, or
+	// they ran legacy's path against itself.
+	if views < seeds || served < seeds {
+		t.Fatalf("index unused: %d views, %d memo lookups over %d seeds", views, served, seeds)
 	}
 }
 
@@ -326,4 +382,77 @@ func TestRealizationNilIndexIsLegacy(t *testing.T) {
 	if err != nil || slot != 2 {
 		t.Fatalf("legacy fresh slot = %d, %v; want 2 (1 held by gc-1, 3 by gc-3, 4 by gc-2's census row)", slot, err)
 	}
+}
+
+// Kills: a fresh-slot occupancy that misses a named plan's reservation, a
+// holder only another leg shows, or a canonical name held only through a
+// title or an agent: label. A named session's plan reserves its identity,
+// the singleton pool's canonical name, and so do the title and label
+// holders, so the pool's fresh plan is refused no-slot; rig-1 holds
+// worker-1, so worker's plan takes slot 2. The indexed and unindexed passes
+// agree on each.
+func TestRealizationIndexCountsNamedReservationsAndForeignHolders(t *testing.T) {
+	for _, tc := range []struct {
+		name, pool string
+		cfg        *config.City
+		rig        []beads.Bead
+		wantSlots  []int
+		wantTrace  string
+	}{
+		{name: "named-same-template", pool: "chat", cfg: &config.City{
+			Agents:        []config.Agent{{Name: "chat", MaxActiveSessions: intPtr(1)}},
+			NamedSessions: []config.NamedSession{{Template: "chat", Mode: "always"}},
+		}, wantTrace: "chat:ineligible:no-slot"},
+		{name: "named-other-template", pool: "solo", cfg: &config.City{
+			Agents:        []config.Agent{{Name: "solo", MaxActiveSessions: intPtr(1)}, {Name: "chat"}},
+			NamedSessions: []config.NamedSession{{Name: "solo", Template: "chat", Mode: "always"}},
+		}, wantTrace: "solo:ineligible:no-slot"},
+		{
+			name: "canonical-title-holder", pool: "solo", cfg: &config.City{Agents: []config.Agent{{Name: "solo", MaxActiveSessions: intPtr(1)}}},
+			rig:       []beads.Bead{titled(sessionRow("rig-2", "state", "active", "session_name", "s-rig-2"), "solo", "")},
+			wantTrace: "solo:ineligible:no-slot",
+		},
+		{
+			name: "canonical-label-holder", pool: "solo", cfg: &config.City{Agents: []config.Agent{{Name: "solo", MaxActiveSessions: intPtr(1)}}},
+			rig:       []beads.Bead{titled(sessionRow("rig-3", "state", "active", "session_name", "s-rig-3"), "", "agent:solo")},
+			wantTrace: "solo:ineligible:no-slot",
+		},
+		{
+			name: "foreign-leg-holder", pool: "worker", cfg: &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}},
+			rig: []beads.Bead{sessionRow("rig-1", "template", "worker", "state", "active", "pool_managed", "true",
+				"session_name", "s-rig-1", "agent_name", "worker-1", "pool_slot", "1")},
+			wantSlots: []int{2},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAllocFixture(t, tc.cfg).sessions()
+			if tc.rig != nil {
+				f.rigLeg(tc.rig...)
+			}
+			in := f.demand(tc.pool, "w-1").inputs()
+			_, want := realizePass(t, in, false)
+			_, got := realizePass(t, in, true)
+			if !reflect.DeepEqual(got.Plans, want.Plans) || !reflect.DeepEqual(got.Trace, want.Trace) {
+				t.Fatalf("indexed plans %+v trace %+v, unindexed %+v %+v", got.Plans, got.Trace, want.Plans, want.Trace)
+			}
+			var trace []string
+			for _, r := range got.Trace {
+				trace = append(trace, r.Template+":"+r.Reason)
+			}
+			if s := planSlots(got, tc.pool); !reflect.DeepEqual(s, tc.wantSlots) || strings.Join(trace, ",") != tc.wantTrace {
+				t.Fatalf("%s slots %v, trace %v; want %v, %q", tc.pool, s, trace, tc.wantSlots, tc.wantTrace)
+			}
+		})
+	}
+}
+
+// titled is row with title (when set) and a further label (when set).
+func titled(row beads.Bead, title, label string) beads.Bead {
+	if title != "" {
+		row.Title = title
+	}
+	if label != "" {
+		row.Labels = append(slices.Clone(row.Labels), label)
+	}
+	return row
 }

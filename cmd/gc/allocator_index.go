@@ -33,14 +33,19 @@ type passIndex struct {
 	// occupancy is freshPoolOccupancyInfos over the pass's full params,
 	// taken once realization starts: nothing changes them after.
 	occupancy []session.Info
+	// views counts the realization views handed out, and served the legacy
+	// lookups their memos answered: proof the index is in use.
+	views, served int
 }
 
 // poolRealizeMemo is one pool agent's realization view's memo, carried as
 // agentBuildParams.realizeMemo.
 type poolRealizeMemo struct {
+	index *passIndex
 	cfg   *config.City
 	agent *config.Agent
-	// rows is the view's session snapshot's OpenInfos, copied once.
+	// rows are the open decidable rows of the agent's template, in snapshot
+	// order: the only rows reusablePoolSessionInfo accepts.
 	rows []session.Info
 	// all is the pass's fresh-slot occupancy (passIndex.occupancy).
 	all []session.Info
@@ -97,22 +102,28 @@ func (p *decidePass) indexRealization() {
 
 // realizeParams is the build params legacy's planner realizes cfgAgent's
 // requests with. Without an index it is the pass's own. With one it is a
-// copy whose session snapshot holds only the template's decidable rows (the
-// only ones reusablePoolSessionInfo accepts), whose assigned work holds only
-// what those rows' identities or the requests' work IDs can match (the only
-// beads the reuse and resume checks read), and whose fresh-slot occupancy is
-// the pass's, limited to the agent.
+// copy that keeps the city's session snapshot, whose assigned work holds
+// only what the template's rows' identities or the requests' work IDs can
+// match (the only beads the reuse and resume checks read), and whose memo
+// answers the reuse scan over the template's rows and the fresh-slot
+// occupancy limited to the agent.
 func (p *decidePass) realizeParams(cfgAgent *config.Agent, requests []SessionRequest) *agentBuildParams {
 	x := p.index
 	if x == nil {
 		return p.bp
 	}
+	x.views++
 	rows := x.rowsByTemplate[cfgAgent.QualifiedName()]
 	infos := make([]session.Info, 0, len(rows))
 	var work []int
 	for _, i := range rows {
 		info := p.decidable[i]
-		infos = append(infos, info)
+		if !info.Closed {
+			infos = append(infos, info)
+		}
+		// The two identity sets legacy matches work against, exactly:
+		// sessionBeadHasAssignedWorkInfo's and the one_shot reuse guard's
+		// (sessionBeadHasAssignedWorkByAnyIdentityInfo).
 		for _, id := range sessionAssignmentIdentifiersForConfigInfo(info, p.cfg) {
 			work = append(work, x.workByAssignee[id]...)
 		}
@@ -130,9 +141,8 @@ func (p *decidePass) realizeParams(cfgAgent *config.Agent, requests []SessionReq
 		assigned = append(assigned, p.poolWork[i])
 	}
 	view := *p.bp
-	view.sessionBeads = newSessionBeadSnapshotFromInfos(infos)
 	view.assignedWorkBeads = assigned
-	view.realizeMemo = &poolRealizeMemo{cfg: p.cfg, agent: cfgAgent, rows: view.sessionBeads.OpenInfos(), all: x.occupancy}
+	view.realizeMemo = &poolRealizeMemo{index: x, cfg: p.cfg, agent: cfgAgent, rows: infos, all: x.occupancy}
 	return &view
 }
 
@@ -140,6 +150,7 @@ func (p *decidePass) realizeParams(cfgAgent *config.Agent, requests []SessionReq
 // agent: the rows it can count, a canonical holder or a numbered slot of
 // the agent, in the full occupancy's order. The rest it skips anyway.
 func (m *poolRealizeMemo) freshOccupancy() []session.Info {
+	m.index.served++
 	if m.built {
 		return m.occupancy
 	}
@@ -153,9 +164,10 @@ func (m *poolRealizeMemo) freshOccupancy() []session.Info {
 	return m.occupancy
 }
 
-// reusablePoolSessionInfos is legacy's, over the memo's copy of the view's
-// rows instead of a fresh copy per request.
+// reusablePoolSessionInfos is legacy's over the template's rows instead of
+// a copy of every open row per request.
 func (m *poolRealizeMemo) reusablePoolSessionInfos(bp *agentBuildParams, cfgAgent *config.Agent, template string, used map[string]bool) []session.Info {
+	m.index.served++
 	candidates := []session.Info{}
 	for i := range m.rows {
 		if reusablePoolSessionInfo(bp, cfgAgent, template, m.rows[i], used) {
