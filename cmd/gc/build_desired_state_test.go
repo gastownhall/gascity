@@ -12903,6 +12903,99 @@ func TestBuildDesiredState_ReportsControlDispatcherScopeGapForRigRootedWork(t *t
 	}
 }
 
+// TestBuildDesiredState_ClassBoundScopeGapRowDoesNotWakeCityDispatcher is the
+// demand half of the scope-gap arm on the binding topology (mc-zndi7.41). The
+// row is rig-rooted, the rig has no dispatcher, and its durable route names the
+// CITY dispatcher (the #3765 shape). The repair suppresses it from the
+// collected snapshot and reports the gap, but the default scale_check probe
+// re-reads Ready from the binding, which is also the city dispatcher's probe
+// target, and so it saw the stale route. The city dispatcher was then desired
+// for a row the gap event called suppressed, and its serve query (by route, no
+// scope filter) would run the finalize cross-scope.
+func TestBuildDesiredState_ClassBoundScopeGapRowDoesNotWakeCityDispatcher(t *testing.T) {
+	cityPath := t.TempDir()
+	work := beads.NewMemStore()
+	binding := beads.NewMemStore()
+	routes := splitRoutes(binding)
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	control, err := binding.Create(beads.Bead{
+		Title:  "Finalize rig workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cityOnlyDispatcherFixtureConfig(t), runtime.NewFake(), binding,
+		map[string]beads.Store{"fixture": beads.NewMemStore()}, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	if len(result.ControlDispatcherScopeGaps) != 1 || result.ControlDispatcherScopeGaps[0].SampleBeadID != control.ID {
+		t.Fatalf("scope gaps = %+v, want exactly one naming %s", result.ControlDispatcherScopeGaps, control.ID)
+	}
+	if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 0 {
+		t.Fatalf("city dispatcher demand = %d, want 0 for a row the repair suppressed", got)
+	}
+	for _, desired := range result.State {
+		if desired.TemplateName == "core.control-dispatcher" {
+			t.Fatalf("desired state woke the city dispatcher for a suppressed scope-gap row: %+v", desired)
+		}
+	}
+}
+
+// TestBuildDesiredState_ClassBoundDeferredRouteRepairDoesNotWakeStaleDispatcher
+// is the deferred-repair arm of the same rule: the rig HAS a dispatcher, but
+// the repair write fails, so the row keeps its stale city route this tick. The
+// repair suppresses it from the collected snapshot until the write lands; the
+// probe must not count it for the city dispatcher the stale route names.
+func TestBuildDesiredState_ClassBoundDeferredRouteRepairDoesNotWakeStaleDispatcher(t *testing.T) {
+	cityPath := t.TempDir()
+	work := beads.NewMemStore()
+	binding := routeRepairUpdateFailStore{Store: beads.NewMemStore(), err: errors.New("route repair write failed")}
+	routes := splitRoutes(binding)
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	if _, err := binding.Create(beads.Bead{
+		Title:  "Finalize rig workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	}); err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), classBindingDispatcherFixtureConfig(t), runtime.NewFake(), binding,
+		map[string]beads.Store{"fixture": beads.NewMemStore()}, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	if len(result.ControlDispatcherScopeGaps) != 0 {
+		t.Fatalf("scope gaps = %+v, want none: the rig has a dispatcher", result.ControlDispatcherScopeGaps)
+	}
+	if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 0 {
+		t.Fatalf("city dispatcher demand = %d, want 0 for a rig-rooted row whose route repair was deferred", got)
+	}
+	for _, desired := range result.State {
+		if desired.TemplateName == "core.control-dispatcher" {
+			t.Fatalf("desired state woke the city dispatcher for a deferred rig-rooted row: %+v", desired)
+		}
+	}
+}
+
 // One scope with many suppressed rows is ONE gap carrying the count — the
 // per-row emission this replaces is exactly what made the condition invisible.
 func TestRepairControlDispatcherRoutesCountsSuppressedRowsPerScope(t *testing.T) {
