@@ -68,11 +68,14 @@ func contractRigsFamily(t *testing.T, h *contractHarness) {
 	}
 	patches, err := c.GetV0CityByCityNamePatchesRigsWithResponse(ctx, city)
 	expectStatus(t, "list rig patches", patches, err, http.StatusOK)
-	// KNOWN BUG (filed in the PR): patch reads come from the composed config,
-	// which clears [patches] after applying them, so a just-written patch
-	// reads back as 404. Accept both until the read path is fixed.
+	if items := derefSlice(mustJSON(t, "list rig patches", patches.JSON200, patches).Items); len(items) != 1 || items[0].Name != contractRig {
+		t.Fatalf("rig patches = %s, want the %s patch", contractBody(patches), contractRig)
+	}
 	one, err := c.GetV0CityByCityNamePatchesRigByNameWithResponse(ctx, city, contractRig)
-	expectStatus(t, "get rig patch", one, err, http.StatusOK, http.StatusNotFound)
+	expectStatus(t, "get rig patch", one, err, http.StatusOK)
+	if got := mustJSON(t, "get rig patch", one.JSON200, one).DefaultBranch; got == nil || *got != "trunk" {
+		t.Fatalf("rig patch default_branch = %v, want trunk: %s", got, contractBody(one))
+	}
 	unpatched, err := c.DeleteV0CityByCityNamePatchesRigByNameWithResponse(ctx, city, contractRig,
 		&genclient.DeleteV0CityByCityNamePatchesRigByNameParams{XGCRequest: contractCSRF})
 	expectStatus(t, "delete rig patch", unpatched, err, http.StatusOK)

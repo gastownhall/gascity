@@ -525,14 +525,11 @@
           "TmuxAlias",
           "Scope",
           "Suspended",
-          "Pool",
-          "Env",
           "EnvRemove",
           "PreStart",
           "PromptTemplate",
           "Session",
           "Provider",
-          "ContextAdvisory",
           "Upstream",
           "Args",
           "StartCommand",
@@ -570,8 +567,7 @@
           "InjectFragmentsAppend",
           "MaxActiveSessions",
           "MinActiveSessions",
-          "ScaleCheck",
-          "OptionDefaults"
+          "ScaleCheck"
         ],
         "type": "object"
       },
@@ -6232,7 +6228,6 @@
           "PromptFlag",
           "ReadyDelayMs",
           "AcceptStartupDialogs",
-          "Env",
           "EnvRemove",
           "Replace"
         ],
@@ -7009,7 +7004,6 @@
           "DefaultMergeStrategy",
           "Suspended",
           "SuspendedOnStart",
-          "FormulaVars",
           "BeadsProxiedIdleTimeout"
         ],
         "type": "object"

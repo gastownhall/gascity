@@ -103,12 +103,18 @@ func contractConfigFamily(t *testing.T, h *contractHarness) {
 		&genclient.PutV0CityByCityNamePatchesProvidersParams{XGCRequest: contractCSRF},
 		genclient.PutV0CityByCityNamePatchesProvidersJSONRequestBody{Name: ptr("contract-cli"), PromptMode: ptr("none")})
 	expectStatus(t, "put provider patch", pput, err, http.StatusOK)
+	// The patch reads back as written (composition clears [patches] from the
+	// composed config, so reads must come from the declared config).
 	plist, err := c.GetV0CityByCityNamePatchesProvidersWithResponse(ctx, city)
 	expectStatus(t, "list provider patches", plist, err, http.StatusOK)
-	// KNOWN BUG (filed in the PR): patch reads come from the composed config,
-	// which clears [patches] after applying them.
+	if items := derefSlice(mustJSON(t, "list provider patches", plist.JSON200, plist).Items); len(items) != 1 || items[0].Name != "contract-cli" {
+		t.Fatalf("provider patches = %s, want the contract-cli patch", contractBody(plist))
+	}
 	pget, err := c.GetV0CityByCityNamePatchesProviderByNameWithResponse(ctx, city, "contract-cli")
-	expectKnownBug(t, "get provider patch", pget, err, http.StatusNotFound, http.StatusOK)
+	expectStatus(t, "get provider patch", pget, err, http.StatusOK)
+	if got := mustJSON(t, "get provider patch", pget.JSON200, pget).PromptMode; got == nil || *got != "none" {
+		t.Fatalf("provider patch prompt_mode = %v, want none: %s", got, contractBody(pget))
+	}
 	pdel, err := c.DeleteV0CityByCityNamePatchesProviderByNameWithResponse(ctx, city, "contract-cli",
 		&genclient.DeleteV0CityByCityNamePatchesProviderByNameParams{XGCRequest: contractCSRF})
 	expectStatus(t, "delete provider patch", pdel, err, http.StatusOK)
@@ -127,8 +133,14 @@ func contractConfigFamily(t *testing.T, h *contractHarness) {
 	expectStatus(t, "put agent patch", aput, err, http.StatusOK)
 	alist, err := c.GetV0CityByCityNamePatchesAgentsWithResponse(ctx, city)
 	expectStatus(t, "list agent patches", alist, err, http.StatusOK)
+	if items := derefSlice(mustJSON(t, "list agent patches", alist.JSON200, alist).Items); len(items) != 1 || items[0].Name != contractAgent {
+		t.Fatalf("agent patches = %s, want the %s patch", contractBody(alist), contractAgent)
+	}
 	aget, err := c.GetV0CityByCityNamePatchesAgentByBaseWithResponse(ctx, city, contractAgent)
-	expectKnownBug(t, "get agent patch", aget, err, http.StatusNotFound, http.StatusOK)
+	expectStatus(t, "get agent patch", aget, err, http.StatusOK)
+	if env := mustJSON(t, "get agent patch", aget.JSON200, aget).Env; env == nil || (*env)["CONTRACT"] != "1" {
+		t.Fatalf("agent patch env = %v, want CONTRACT=1: %s", env, contractBody(aget))
+	}
 	adel, err := c.DeleteV0CityByCityNamePatchesAgentByBaseWithResponse(ctx, city, contractAgent,
 		&genclient.DeleteV0CityByCityNamePatchesAgentByBaseParams{XGCRequest: contractCSRF})
 	expectStatus(t, "delete agent patch", adel, err, http.StatusOK)

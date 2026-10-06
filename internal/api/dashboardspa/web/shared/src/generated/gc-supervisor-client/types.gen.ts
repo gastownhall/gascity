@@ -63,11 +63,11 @@ export type AgentPatch = {
     AssignedWorkDeferLimit: number | null;
     Attach: boolean | null;
     AutoReclaimStaleClaims: boolean | null;
-    ContextAdvisory: ContextAdvisory;
+    ContextAdvisory?: ContextAdvisory;
     DefaultSlingFormula: string | null;
     DependsOn: Array<string> | null;
     Dir: string;
-    Env: {
+    Env?: {
         [key: string]: string;
     };
     EnvRemove: Array<string> | null;
@@ -88,11 +88,11 @@ export type AgentPatch = {
     MouseMode: string | null;
     Name: string;
     Nudge: string | null;
-    OptionDefaults: {
+    OptionDefaults?: {
         [key: string]: string;
     };
     OverlayDir: string | null;
-    Pool: PoolOverride;
+    Pool?: PoolOverride;
     PreStart: Array<string> | null;
     PreStartAppend: Array<string> | null;
     PromptTemplate: string | null;
@@ -2446,7 +2446,7 @@ export type ProviderPatch = {
     ArgsAppend: Array<string> | null;
     Base: string | null;
     Command: string | null;
-    Env: {
+    Env?: {
         [key: string]: string;
     };
     EnvRemove: Array<string> | null;
@@ -2806,7 +2806,7 @@ export type RigPatch = {
     BeadsProxiedIdleTimeout: string | null;
     DefaultBranch: string | null;
     DefaultMergeStrategy: string | null;
-    FormulaVars: {
+    FormulaVars?: {
         [key: string]: string;
     };
     Name: string;
