@@ -4,11 +4,15 @@ package integration
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -32,11 +36,29 @@ func passwdHome() (string, bool) {
 	return lu.HomeDir, true
 }
 
+// systemdUserConfigDirs lists the systemd user configuration directories
+// `systemctl --user enable` may link a unit into: $XDG_CONFIG_HOME/systemd/user
+// when xdgConfigHome is an absolute path (the XDG spec ignores a relative
+// one), and the default ~/.config/systemd/user. The user manager, not gc,
+// resolves the directory from its own environment, which may differ from
+// this process's, so both are candidates.
+func systemdUserConfigDirs(realHome, xdgConfigHome string) []string {
+	dirs := []string{filepath.Join(realHome, ".config", "systemd", "user")}
+	if filepath.IsAbs(xdgConfigHome) {
+		if dir := filepath.Join(xdgConfigHome, "systemd", "user"); dir != dirs[0] {
+			dirs = append([]string{dir}, dirs...)
+		}
+	}
+	return dirs
+}
+
 // platformSupervisorUnitPaths lists the files gc's platform install path
-// writes under realHome for a supervisor whose GC_HOME is gcHome: the systemd
-// user unit and its default.target.wants enable link on Linux, the
-// LaunchAgent plist on macOS.
-func platformSupervisorUnitPaths(realHome, gcHome string) []string {
+// writes under realHome for a supervisor whose GC_HOME is gcHome: on Linux
+// the systemd user unit, under $HOME/.local/share/systemd/user whatever
+// XDG_DATA_HOME says (cmd/gc supervisorSystemdServicePath), and its
+// default.target.wants enable link in each systemdUserConfigDirs candidate
+// for xdgConfigHome; on macOS the LaunchAgent plist.
+func platformSupervisorUnitPaths(realHome, xdgConfigHome, gcHome string) []string {
 	suffix := expectedSupervisorServiceSuffix(gcHome)
 	if suffix == "" {
 		return nil
@@ -44,10 +66,11 @@ func platformSupervisorUnitPaths(realHome, gcHome string) []string {
 	switch runtime.GOOS {
 	case "linux":
 		unit := "gascity-supervisor-" + suffix + ".service"
-		return []string{
-			filepath.Join(realHome, ".local", "share", "systemd", "user", unit),
-			filepath.Join(realHome, ".config", "systemd", "user", "default.target.wants", unit),
+		paths := []string{filepath.Join(realHome, ".local", "share", "systemd", "user", unit)}
+		for _, dir := range systemdUserConfigDirs(realHome, xdgConfigHome) {
+			paths = append(paths, filepath.Join(dir, "default.target.wants", unit))
 		}
+		return paths
 	case "darwin":
 		return []string{
 			filepath.Join(realHome, "Library", "LaunchAgents", "com.gascity.supervisor."+suffix+".plist"),
@@ -57,11 +80,12 @@ func platformSupervisorUnitPaths(realHome, gcHome string) []string {
 	}
 }
 
-// leakedPlatformSupervisorUnits returns the platform unit files present under
-// realHome for gcHome. Lstat, so a dangling enable link still counts.
-func leakedPlatformSupervisorUnits(realHome, gcHome string) []string {
+// leakedPlatformSupervisorUnits returns the platform unit files present for
+// gcHome under realHome and xdgConfigHome. Lstat, so a dangling enable link
+// still counts.
+func leakedPlatformSupervisorUnits(realHome, xdgConfigHome, gcHome string) []string {
 	var leaked []string
-	for _, path := range platformSupervisorUnitPaths(realHome, gcHome) {
+	for _, path := range platformSupervisorUnitPaths(realHome, xdgConfigHome, gcHome) {
 		if _, err := os.Lstat(path); err == nil {
 			leaked = append(leaked, path)
 		}
@@ -105,7 +129,7 @@ func platformUnitLeakReport(gcHome string) string {
 	if !ok {
 		return ""
 	}
-	leaked := leakedPlatformSupervisorUnits(realHome, gcHome)
+	leaked := leakedPlatformSupervisorUnits(realHome, os.Getenv("XDG_CONFIG_HOME"), gcHome)
 	if len(leaked) == 0 {
 		return ""
 	}
@@ -145,11 +169,11 @@ func TestLeakedPlatformSupervisorUnitsFindsOnlyThisGCHome(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := leakedPlatformSupervisorUnits(realHome, gcHome); len(got) != 0 {
+	if got := leakedPlatformSupervisorUnits(realHome, "", gcHome); len(got) != 0 {
 		t.Fatalf("leaked units before install = %v, want none", got)
 	}
 
-	paths := platformSupervisorUnitPaths(realHome, other)
+	paths := platformSupervisorUnitPaths(realHome, "", other)
 	if len(paths) == 0 {
 		t.Fatal("no platform unit paths")
 	}
@@ -161,11 +185,47 @@ func TestLeakedPlatformSupervisorUnitsFindsOnlyThisGCHome(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := leakedPlatformSupervisorUnits(realHome, gcHome); len(got) != 0 {
+	if got := leakedPlatformSupervisorUnits(realHome, "", gcHome); len(got) != 0 {
 		t.Fatalf("leaked units for an untouched GC_HOME = %v, want none (another run's unit must not count)", got)
 	}
-	if got := leakedPlatformSupervisorUnits(realHome, other); len(got) != len(paths) {
+	if got := leakedPlatformSupervisorUnits(realHome, "", other); len(got) != len(paths) {
 		t.Fatalf("leaked units = %v, want %v (dangling enable links count)", got, paths)
+	}
+}
+
+// An enable link under $XDG_CONFIG_HOME/systemd/user is a leak too: the
+// user manager links units into its configuration directory, which is
+// $XDG_CONFIG_HOME/systemd/user when that is set, not ~/.config/systemd/user.
+func TestLeakedPlatformSupervisorUnitsHonourXDGConfigHome(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd user units are Linux-only")
+	}
+	realHome := t.TempDir()
+	xdgConfigHome := filepath.Join(t.TempDir(), "xdg-config")
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	if err := os.MkdirAll(gcHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unit := "gascity-supervisor-" + expectedSupervisorServiceSuffix(gcHome) + ".service"
+	link := filepath.Join(xdgConfigHome, "systemd", "user", "default.target.wants", unit)
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(realHome, "deleted-target"), link); err != nil {
+		t.Fatal(err)
+	}
+	if got := leakedPlatformSupervisorUnits(realHome, xdgConfigHome, gcHome); len(got) != 1 || got[0] != link {
+		t.Errorf("leaked units with XDG_CONFIG_HOME=%s = %v, want [%s]", xdgConfigHome, got, link)
+	}
+	// The default ~/.config stays a candidate: the user manager's
+	// environment, not this process's, picks the directory.
+	defaultLink := filepath.Join(realHome, ".config", "systemd", "user", "default.target.wants", unit)
+	if paths := platformSupervisorUnitPaths(realHome, xdgConfigHome, gcHome); !slices.Contains(paths, defaultLink) {
+		t.Errorf("unit paths %v lack the default enable link %s", paths, defaultLink)
+	}
+	// The XDG spec ignores a relative XDG_CONFIG_HOME.
+	if paths := platformSupervisorUnitPaths(realHome, filepath.Join("relative", "config"), gcHome); len(paths) != 2 {
+		t.Errorf("unit paths with a relative XDG_CONFIG_HOME = %v, want the unit and the default link", paths)
 	}
 }
 
@@ -203,5 +263,46 @@ func TestIsolatedEnvRootsKeepGCOffTheRealHome(t *testing.T) {
 				t.Errorf("%s = %q, want 1", supervisorIsolatedHomeEnv, got[supervisorIsolatedHomeEnv])
 			}
 		})
+	}
+}
+
+// TestEveryIntegrationEnvHasALeakGuard: only the env builders use
+// buildIntegrationEnv. A test that built gc's env from it directly would skip
+// integrationEnvFor's leak guard and could leak a unit unnoticed.
+func TestEveryIntegrationEnvHasALeakGuard(t *testing.T) {
+	allowed := map[string]bool{"integrationEnv": true, "integrationEnvDolt": true, "integrationEnvFor": true}
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no package sources in the working directory")
+	}
+	fset := token.NewFileSet()
+	uses := 0
+	for _, name := range files {
+		file, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok && id.Name == "buildIntegrationEnv" {
+					uses++
+					if !allowed[fn.Name.Name] {
+						t.Errorf("%s: %s uses buildIntegrationEnv; call integrationEnvFor(t, ...) so the platform-unit leak guard covers its GC_HOME",
+							fset.Position(id.Pos()), fn.Name.Name)
+					}
+				}
+				return true
+			})
+		}
+	}
+	if uses == 0 {
+		t.Error("found no use of buildIntegrationEnv: this check checks nothing")
 	}
 }
