@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // inc003Env builds a live, active session bead that is not in the desired
@@ -43,10 +46,12 @@ func wokeAgo(d time.Duration) func(now time.Time) string {
 	return func(now time.Time) string { return now.Add(-d).UTC().Format(time.RFC3339) }
 }
 
-func (e *reconcilerTestEnv) reconcileINC003Traced(trace *sessionReconcilerTraceCycle, sessions ...beads.Bead) {
+// reconcileINC003Traced runs one traced reconcile tick for cityPath, so a test
+// can exercise the runtime suspension state `gc suspend` writes under it.
+func (e *reconcilerTestEnv) reconcileINC003Traced(cityPath string, trace *sessionReconcilerTraceCycle, sessions ...beads.Bead) {
 	cfgNames := configuredSessionNames(e.cfg, "", e.store)
 	reconcileSessionBeadsTraced(
-		context.Background(), "", sessions, e.desiredState, cfgNames, e.cfg, e.sp,
+		context.Background(), cityPath, sessions, e.desiredState, cfgNames, e.cfg, e.sp,
 		e.store, nil, nil, nil, nil, e.dt, map[string]int{}, false, nil, "",
 		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr, trace,
 		e.startOptions...,
@@ -72,7 +77,7 @@ func TestReconcileSessionBeads_INC003_UndesiredWokeUnder5mKept(t *testing.T) {
 	wokeAt := session.Metadata["last_woke_at"]
 	trace := newPoolDesiredStateTestTrace("orphan")
 
-	env.reconcileINC003Traced(trace, session)
+	env.reconcileINC003Traced("", trace, session)
 
 	if ds := env.dt.get(session.ID); ds != nil {
 		t.Fatalf("drain began inside the undesired-wake grace: reason=%q", ds.reason)
@@ -152,7 +157,7 @@ func TestReconcileSessionBeads_INC003_SuspendedReasonAlsoDeferred(t *testing.T) 
 	env, session := inc003Env(t, true, wokeAgo(time.Minute))
 	trace := newPoolDesiredStateTestTrace("worker")
 
-	env.reconcileINC003Traced(trace, session)
+	env.reconcileINC003Traced("", trace, session)
 
 	if ds := env.dt.get(session.ID); ds != nil {
 		t.Fatalf("suspended drain began inside the undesired-wake grace: reason=%q", ds.reason)
@@ -162,13 +167,72 @@ func TestReconcileSessionBeads_INC003_SuspendedReasonAlsoDeferred(t *testing.T) 
 	}
 }
 
+// inc003DrainTraced asserts the row drained for reason with no grace traced,
+// and that the drain trace names the operator suspend cause.
+func inc003DrainTraced(t *testing.T, env *reconcilerTestEnv, trace *sessionReconcilerTraceCycle, session beads.Bead, name, reason, cause string) {
+	t.Helper()
+	if ds := env.dt.get(session.ID); ds == nil || ds.reason != reason {
+		t.Fatalf("drain = %+v, want a %s drain on this tick (cause %s)", ds, reason, cause)
+	}
+	var drained bool
+	for _, r := range trace.records {
+		if r.ReasonCode == TraceReasonUndesiredWakeGrace {
+			t.Fatalf("grace traced under a %s suspend: %+v", cause, r)
+		}
+		if r.SiteCode == TraceSiteReconcilerOrphaned && r.SessionName == name && r.OutcomeCode == TraceOutcomeDrain {
+			drained = true
+			if got := r.Fields["suspend_cause"]; got != cause {
+				t.Errorf("drain trace suspend_cause = %#v, want %q", got, cause)
+			}
+		}
+	}
+	if !drained {
+		t.Fatalf("no drain trace record for %q; records: %+v", name, trace.records)
+	}
+}
+
+// inc003LiveRow starts a live, active row woken a minute ago with extra
+// metadata, and returns its bead.
+func inc003LiveRow(t *testing.T, env *reconcilerTestEnv, name, template string, extra map[string]string) beads.Bead {
+	t.Helper()
+	if err := env.sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	session := env.createSessionBead(name, template)
+	meta := map[string]string{"state": "active", "last_woke_at": wokeAgo(time.Minute)(env.clk.Now())}
+	for k, v := range extra {
+		meta[k] = v
+	}
+	env.setSessionMetadata(&session, meta)
+	return session
+}
+
+// suspendCityAt and suspendRigAt write the runtime suspension state exactly as
+// `gc suspend` and `gc rig suspend` do.
+func suspendCityAt(t *testing.T, cityPath string) {
+	t.Helper()
+	on := true
+	if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, cityPath, &on); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func suspendRigAt(t *testing.T, cityPath, rig string) {
+	t.Helper()
+	on := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityPath, rig, &on); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // inc003SuspendEnv builds a live, active, undesired session bead woken a minute
 // ago whose agent is configured, then applies an operator suspend at scope
-// ("none", "city", "rig" or "agent"). With configured=false the agent has no
-// named session and the drain reason is "orphaned"; with configured=true it
-// has one and the reason is "suspended". The rig scope puts the agent in rig
-// "myrig".
-func inc003SuspendEnv(t *testing.T, configured bool, scope string) (*reconcilerTestEnv, beads.Bead, string) {
+// ("none", "city", "rig", "agent" or "session"). With configured=false the
+// agent has no named session and the drain reason is "orphaned"; with
+// configured=true it has one and the reason is "suspended". The rig scope puts
+// the agent in rig "myrig"; the session scope writes `gc session suspend`'s
+// managed hold.
+func inc003SuspendEnv(t *testing.T, configured bool, scope string) (*reconcilerTestEnv, beads.Bead, string, string) {
 	t.Helper()
 	env := newReconcilerTestEnv()
 	agentCfg := config.Agent{Name: "orphan"}
@@ -176,6 +240,7 @@ func inc003SuspendEnv(t *testing.T, configured bool, scope string) (*reconcilerT
 		agentCfg.Name = "worker"
 	}
 	env.cfg = &config.City{}
+	var extra map[string]string
 	switch scope {
 	case "none":
 	case "city":
@@ -185,6 +250,12 @@ func inc003SuspendEnv(t *testing.T, configured bool, scope string) (*reconcilerT
 		env.cfg.Rigs = []config.Rig{{Name: "myrig", Suspended: true}}
 	case "agent":
 		agentCfg.Suspended = true
+	case "session":
+		extra = map[string]string{
+			"held_until":   env.clk.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+			"sleep_intent": "user-hold",
+			"state":        "suspended",
+		}
 	default:
 		t.Fatalf("unknown suspend scope %q", scope)
 	}
@@ -195,20 +266,16 @@ func inc003SuspendEnv(t *testing.T, configured bool, scope string) (*reconcilerT
 		env.cfg.NamedSessions = []config.NamedSession{{Template: agentCfg.Name, Dir: agentCfg.Dir}}
 		name = config.NamedSessionRuntimeName("", env.cfg.Workspace, identity)
 	}
-	if err := env.sp.Start(context.Background(), name, runtime.Config{}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	session := env.createSessionBead(name, identity)
-	env.setSessionMetadata(&session, map[string]string{"state": "active", "last_woke_at": wokeAgo(time.Minute)(env.clk.Now())})
-	return env, session, name
+	return env, inc003LiveRow(t, env, name, identity, extra), name, identity
 }
 
-// An operator suspend (city, rig or agent) is explicit intent, not a lagging
-// desired-state view, so it gets no grace: both undesired reasons drain on the
-// first tick although the row was woken a minute ago (suspension is
-// quiescence, #7115). With no suspend the same configured rows keep the grace.
+// An operator suspend (city, rig, agent or session) is explicit intent, not a
+// lagging desired-state view, so it gets no grace: both undesired reasons
+// drain on the first tick although the row was woken a minute ago (suspension
+// is quiescence, #7115), and the drain trace names the cause. With no suspend
+// the same configured rows keep the grace.
 func TestReconcileSessionBeads_INC003_OperatorSuspendDrainsWithoutGrace(t *testing.T) {
-	for _, scope := range []string{"none", "city", "rig", "agent"} {
+	for _, scope := range []string{"none", "city", "rig", "agent", "session"} {
 		for _, tc := range []struct {
 			configured bool
 			reason     string
@@ -217,14 +284,13 @@ func TestReconcileSessionBeads_INC003_OperatorSuspendDrainsWithoutGrace(t *testi
 			{true, "suspended"},
 		} {
 			t.Run(scope+"/"+tc.reason, func(t *testing.T) {
-				env, session, name := inc003SuspendEnv(t, tc.configured, scope)
-				trace := newPoolDesiredStateTestTrace(name)
+				env, session, name, template := inc003SuspendEnv(t, tc.configured, scope)
+				trace := newPoolDesiredStateTestTrace(name, template)
 
-				env.reconcileINC003Traced(trace, session)
+				env.reconcileINC003Traced("", trace, session)
 
-				ds := env.dt.get(session.ID)
 				if scope == "none" {
-					if ds != nil {
+					if ds := env.dt.get(session.ID); ds != nil {
 						t.Fatalf("drain began inside the grace with no suspend: reason=%q", ds.reason)
 					}
 					if got := inc003GraceRecord(t, trace, name).Fields["drain_reason"]; got != tc.reason {
@@ -232,16 +298,104 @@ func TestReconcileSessionBeads_INC003_OperatorSuspendDrainsWithoutGrace(t *testi
 					}
 					return
 				}
-				if ds == nil || ds.reason != tc.reason {
-					t.Fatalf("drain = %+v, want a %s drain on the first tick under a %s suspend", ds, tc.reason, scope)
-				}
-				for _, r := range trace.records {
-					if r.ReasonCode == TraceReasonUndesiredWakeGrace {
-						t.Fatalf("grace traced under a %s suspend: %+v", scope, r)
-					}
-				}
+				inc003DrainTraced(t, env, trace, session, name, tc.reason, scope)
 			})
 		}
+	}
+}
+
+// The production suspend path: `gc suspend` and `gc rig suspend` write runtime
+// state under the city path, not config. A suspended city drains the row even
+// when its agent is gone from config, and a suspended rig drains an agent bound
+// to it by name or by path.
+func TestReconcileSessionBeads_INC003_RuntimeSuspendDrainsWithoutGrace(t *testing.T) {
+	for _, tc := range []struct {
+		name, cause    string
+		agents         []config.Agent
+		rigDir         string
+		session, templ string
+	}{
+		{name: "city", cause: "city", agents: []config.Agent{{Name: "dog"}}, session: "dog-1", templ: "dog"},
+		{name: "city-agent-removed", cause: "city", agents: []config.Agent{{Name: "other"}}, session: "gone-1", templ: "gone"},
+		{name: "rig", cause: "rig", agents: []config.Agent{{Name: "polecat", Dir: "myrig"}}, rigDir: "myrig", session: "myrig--polecat-1", templ: "myrig/polecat"},
+		{name: "rig-path-bound", cause: "rig", agents: []config.Agent{{Name: "polecat", Dir: "rigs/myrig"}}, rigDir: "rigs/myrig", session: "polecat-1", templ: "rigs/myrig/polecat"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{Agents: tc.agents}
+			if tc.cause == "city" {
+				suspendCityAt(t, cityPath)
+			} else {
+				env.cfg.Rigs = []config.Rig{{Name: "myrig", Path: filepath.Join(cityPath, tc.rigDir)}}
+				suspendRigAt(t, cityPath, "myrig")
+			}
+			session := inc003LiveRow(t, env, tc.session, tc.templ, nil)
+			trace := newPoolDesiredStateTestTrace(tc.session, tc.templ)
+
+			env.reconcileINC003Traced(cityPath, trace, session)
+
+			inc003DrainTraced(t, env, trace, session, tc.session, "orphaned", tc.cause)
+		})
+	}
+}
+
+// Only a suspend that covers the row's own agent counts: another rig suspended
+// at runtime and another agent suspended in config leave the grace in place.
+func TestReconcileSessionBeads_INC003_OtherScopeSuspendedKeepsGrace(t *testing.T) {
+	cityPath := t.TempDir()
+	suspendRigAt(t, cityPath, "otherrig")
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Rigs: []config.Rig{{Name: "myrig", Path: filepath.Join(cityPath, "myrig")}, {Name: "otherrig", Path: filepath.Join(cityPath, "otherrig")}},
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "myrig"},
+			{Name: "polecat", Dir: "otherrig"},
+			{Name: "x", Suspended: true},
+		},
+	}
+	session := inc003LiveRow(t, env, "myrig--polecat-1", "myrig/polecat", nil)
+	trace := newPoolDesiredStateTestTrace("myrig--polecat-1", "myrig/polecat")
+
+	env.reconcileINC003Traced(cityPath, trace, session)
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("drain began for a row whose own rig and agent are not suspended: %+v", ds)
+	}
+	inc003GraceRecord(t, trace, "myrig--polecat-1")
+}
+
+// A named row whose spec is gone reaches the drain through the #3630 confirm:
+// tick 1 defers for confirmation, and tick 2 drains with no grace when the
+// operator suspended its agent, or the city with the agent removed.
+func TestReconcileSessionBeads_INC003_NamedNoSpecSuspendedDrainsOnConfirm(t *testing.T) {
+	for _, tc := range []struct{ name, cause string }{
+		{"agent", "agent"},
+		{"city-agent-removed", "city"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			env := newReconcilerTestEnv()
+			env.cfg = &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{{Name: "warlord", Suspended: true}}}
+			if tc.cause == "city" {
+				suspendCityAt(t, cityPath)
+				env.cfg.Agents = []config.Agent{{Name: "other"}}
+			}
+			session := inc003LiveRow(t, env, "warlord", "warlord", map[string]string{
+				namedSessionMetadataKey:      "true",
+				namedSessionIdentityMetadata: "warlord",
+				namedSessionModeMetadata:     "always",
+			})
+			trace := newPoolDesiredStateTestTrace("warlord")
+
+			env.reconcileINC003Traced(cityPath, trace, session)
+			if ds := env.dt.get(session.ID); ds != nil {
+				t.Fatalf("tick 1 must be the #3630 confirm deferral, got drain %+v", ds)
+			}
+			env.reconcileINC003Traced(cityPath, trace, session)
+
+			inc003DrainTraced(t, env, trace, session, "warlord", "orphaned", tc.cause)
+		})
 	}
 }
 
@@ -287,7 +441,7 @@ func TestReconcileSessionBeads_INC003_TrackedDrainNotReportedAsGrace(t *testing.
 	})
 	trace := newPoolDesiredStateTestTrace("orphan")
 
-	env.reconcileINC003Traced(trace, session)
+	env.reconcileINC003Traced("", trace, session)
 
 	if ds := env.dt.get(session.ID); ds == nil || ds.reason != "orphaned" {
 		t.Fatalf("tracked drain = %+v, want the orphaned drain left in flight", ds)

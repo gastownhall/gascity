@@ -3,6 +3,7 @@ package beads
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -183,12 +184,14 @@ func (c *CachingStore) conditionalWritesStoreOpen() error {
 // writer and maintains the cache: on success it evicts the entry and installs
 // the refetched row when that row reflects the write; on failure it acts per
 // applyConditionalWriteFailure. A backing without the capability yields
-// ErrConditionalWriteUnsupported — never an unconditional write.
+// ErrConditionalWriteUnsupported — never an unconditional write. Labels pass
+// through only to a writer that guards them; otherwise they are refused here,
+// before the backing or the cache is touched.
 func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
-	if err := validateConditionalUpdateOpts(opts); err != nil {
+	writer, ok := ConditionalWriterFor(c.conditionalBacking())
+	if err := validateConditionalUpdateOpts(opts, ok && conditionalLabelsGuarded(writer)); err != nil {
 		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
-	writer, ok := ConditionalWriterFor(c.conditionalBacking())
 	if !ok {
 		return ErrConditionalWriteUnsupported
 	}
@@ -444,10 +447,11 @@ func revisionMoved(b Bead, expectedRevision int64) bool {
 	return expectedRevision == 0 || b.Revision == 0 || b.Revision != expectedRevision
 }
 
-// updateReflected reports whether b carries every row-backed field opts
-// writes. validateConditionalUpdateOpts has already rejected the parent and
-// label fields. An empty metadata value matches an absent key, since stores
-// may clear a key either way.
+// updateReflected reports whether b carries every field opts writes.
+// validateConditionalUpdateOpts has already rejected the parent. An empty
+// metadata value matches an absent key, since stores may clear a key either
+// way. Every store applies RemoveLabels after Labels, so a label named in both
+// must be absent.
 func updateReflected(b Bead, opts UpdateOpts) bool {
 	switch {
 	case opts.Title != nil && b.Title != *opts.Title,
@@ -460,6 +464,16 @@ func updateReflected(b Bead, opts UpdateOpts) bool {
 	}
 	for key, value := range opts.Metadata {
 		if b.Metadata[key] != value {
+			return false
+		}
+	}
+	for _, label := range opts.RemoveLabels {
+		if slices.Contains(b.Labels, label) {
+			return false
+		}
+	}
+	for _, label := range opts.Labels {
+		if !slices.Contains(b.Labels, label) && !slices.Contains(opts.RemoveLabels, label) {
 			return false
 		}
 	}
