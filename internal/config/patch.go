@@ -40,9 +40,9 @@ type AgentPatch struct {
 	// Suspended overrides the agent's suspended state.
 	Suspended *bool `toml:"suspended,omitempty"`
 	// Pool overrides legacy [pool] fields that map to session scaling.
-	Pool *PoolOverride `toml:"pool,omitempty"`
+	Pool *PoolOverride `toml:"pool,omitempty" json:"Pool,omitempty"`
 	// Env adds or overrides environment variables.
-	Env map[string]string `toml:"env,omitempty"`
+	Env map[string]string `toml:"env,omitempty" json:"Env,omitempty"`
 	// EnvRemove lists env var keys to remove after merging.
 	EnvRemove []string `toml:"env_remove,omitempty"`
 	// PreStart overrides the agent's pre_start commands.
@@ -56,7 +56,7 @@ type AgentPatch struct {
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
 	// ContextAdvisory overrides context-pressure guidance for this agent.
-	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty"`
+	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty" json:"ContextAdvisory,omitempty"`
 	// Upstream overrides the model-serving endpoint selection (Phase C).
 	Upstream *string `toml:"upstream,omitempty"`
 	// Args overrides the provider's default arguments. Leave unset to keep
@@ -168,7 +168,7 @@ type AgentPatch struct {
 	// Keys are option keys, values are choice values. Merges additively
 	// (patch keys win over existing agent keys).
 	// Example: option_defaults = { model = "sonnet" }
-	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
+	OptionDefaults map[string]string `toml:"option_defaults,omitempty" json:"OptionDefaults,omitempty"`
 }
 
 // NamedSessionPatch modifies an existing named session identified by canonical
@@ -225,7 +225,7 @@ type RigPatch struct {
 	// FormulaVars adds or overrides rig-scoped formula var defaults.
 	// Additive merge: patch keys win over existing rig keys, unspecified
 	// keys are preserved.
-	FormulaVars map[string]string `toml:"formula_vars,omitempty"`
+	FormulaVars map[string]string `toml:"formula_vars,omitempty" json:"FormulaVars,omitempty"`
 }
 
 // ProviderPatch modifies an existing provider identified by Name.
@@ -263,7 +263,7 @@ type ProviderPatch struct {
 	// AcceptStartupDialogs overrides startup dialog acceptance behavior.
 	AcceptStartupDialogs *bool `toml:"accept_startup_dialogs,omitempty"`
 	// Env adds or overrides environment variables.
-	Env map[string]string `toml:"env,omitempty"`
+	Env map[string]string `toml:"env,omitempty" json:"Env,omitempty"`
 	// EnvRemove lists env var keys to remove.
 	EnvRemove []string `toml:"env_remove,omitempty"`
 	// Replace replaces the entire provider block instead of deep-merging.
