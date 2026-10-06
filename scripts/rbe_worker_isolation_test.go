@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -129,10 +130,10 @@ func TestRBEWorkerScriptIsolationConfig(t *testing.T) {
 		t.Fatalf("%s: no isolation='{...}' worker config", rbeWorkerScript)
 	}
 	var iso struct {
-		Entrypoint               string            `json:"entrypoint"`
-		TimeoutHandledExternally bool              `json:"timeout_handled_externally"`
-		MaxActionTimeout         int               `json:"max_action_timeout"`
-		AdditionalEnvironment    map[string]string `json:"additional_environment"`
+		Entrypoint               string         `json:"entrypoint"`
+		TimeoutHandledExternally bool           `json:"timeout_handled_externally"`
+		MaxActionTimeout         int            `json:"max_action_timeout"`
+		AdditionalEnvironment    map[string]any `json:"additional_environment"`
 	}
 	if err := json.Unmarshal([]byte(m[1]), &iso); err != nil {
 		t.Fatalf("isolation worker config is not JSON: %v\n%s", err, m[1])
@@ -140,8 +141,14 @@ func TestRBEWorkerScriptIsolationConfig(t *testing.T) {
 	if iso.Entrypoint != "/usr/local/libexec/rbe-action/entry" || !iso.TimeoutHandledExternally {
 		t.Errorf("isolation worker config: entrypoint %q, timeout_handled_externally %v", iso.Entrypoint, iso.TimeoutHandledExternally)
 	}
-	if got := iso.AdditionalEnvironment; len(got) != 2 || got["RBE_X_TIMEOUT_MS"] != "timeout_millis" || got["RBE_X_SIDE_CHANNEL"] != "side_channel_file" {
-		t.Errorf("additional_environment = %v, want RBE_X_TIMEOUT_MS and RBE_X_SIDE_CHANNEL only", got)
+	// RBE_X_NETWORK: the action's network platform property, which the
+	// launcher reads (TestRBEActionPerActionNetwork).
+	if got, want := iso.AdditionalEnvironment, map[string]any{
+		"RBE_X_TIMEOUT_MS":   "timeout_millis",
+		"RBE_X_SIDE_CHANNEL": "side_channel_file",
+		"RBE_X_NETWORK":      map[string]any{"property": "network"},
+	}; !reflect.DeepEqual(got, want) {
+		t.Errorf("additional_environment = %v, want %v", got, want)
 	}
 
 	// The launcher's half (/etc/rbe-west/rbe-action.env).
@@ -662,6 +669,114 @@ func TestRBEActionMaskSockets(t *testing.T) {
 		`ok "action: no-open-socket (${how:-?})"`,
 		"elif ((MASK_SOCKETS)); then\n\tbad \"action: no-open-socket",
 		`sed -n 's/^S /      world-writable socket the action can connect to: /p' <<<"$out"`,
+	} {
+		if !strings.Contains(selftest, want) {
+			t.Errorf("rbe-action-selftest missing %q", want)
+		}
+	}
+}
+
+// Per-action network (#6996; infra README "Per-action network"): the action's
+// `network` platform property reaches the launcher as RBE_X_NETWORK
+// (NativeLink additional_environment, "" when the action has none). off gives
+// the action its own network namespace with loopback only, as NETNS=1 does for
+// every fork action; on or none keeps the tier's network; with NETNS=1 nothing
+// the action says gives it a network; anything else is refused. The value is
+// the action's own (its Command environment wins over additional_environment),
+// so it may only ever take network away. The launcher's decision runs here in
+// bash; the selftest proves the namespaces on every worker before NativeLink
+// starts.
+func TestRBEActionPerActionNetwork(t *testing.T) {
+	root := repoRoot(t)
+	launch := readFile(t, root, "tools/rbe/rbe-action-launch")
+	fn := regexp.MustCompile(`(?s)\naction_netns\(\) \{\n.*?\n\}\n`).FindString(launch)
+	if fn == "" {
+		t.Fatal("rbe-action-launch: no action_netns() function")
+	}
+	cases := []struct {
+		netns, value, want string
+	}{
+		{"0", "", "0"}, // no network property
+		{"0", "on", "0"},
+		{"0", "off", "1"},
+		// Malformed: refused, never guessed either way.
+		{"0", "Off", "refused"},
+		{"0", "OFF", "refused"},
+		{"0", "off ", "refused"},
+		{"0", " off", "refused"},
+		{"0", "off\n", "refused"},
+		{"0", "on\noff", "refused"},
+		{"0", "-", "refused"},
+		{"0", "0", "refused"},
+		{"0", "1", "refused"},
+		{"0", "allow", "refused"},
+		{"0", "*", "refused"},
+		// The fork tier: loopback only whatever the action says.
+		{"1", "", "1"},
+		{"1", "on", "1"},
+		{"1", "off", "1"},
+		{"1", "Off", "1"},
+		{"1", "on\n", "1"},
+	}
+	script := fn
+	env := map[string]string{}
+	for i, c := range cases {
+		env["N"+strconv.Itoa(i)], env["V"+strconv.Itoa(i)] = c.netns, c.value
+		script += fmt.Sprintf("NETNS=$N%[1]d; if r=$(action_netns \"$V%[1]d\"); then echo \"%[1]d $r\"; else echo \"%[1]d refused\"; fi\n", i)
+	}
+	out, err := runWorkflowStepScript(t, t.TempDir(), script, env)
+	if err != nil {
+		t.Fatalf("action_netns: %v\n%s", err, out)
+	}
+	got := strings.Split(strings.TrimSpace(out), "\n")
+	if len(got) != len(cases) {
+		t.Fatalf("action_netns: %d results for %d cases:\n%s", len(got), len(cases), out)
+	}
+	for i, c := range cases {
+		if want := strconv.Itoa(i) + " " + c.want; got[i] != want {
+			t.Errorf("NETNS=%s RBE_X_NETWORK=%q: got %q, want %q", c.netns, c.value, got[i], want)
+		}
+	}
+
+	for _, want := range []string{
+		`[[ $NETNS == [01] ]] || die "NETNS must be 0 or 1"`,
+		// A control value: validated, stripped from the action's environment,
+		// never given twice.
+		"\t\tRBE_X_NETWORK=*)\n\t\t\t((!net_set)) || die \"RBE_X_NETWORK given twice\"\n\t\t\tnet=${e#*=} net_set=1\n\t\t\t;;\n\t\t*) envs+=(\"$e\") ;;\n",
+		`netns=$(action_netns "$net") || die "bad RBE_X_NETWORK (off, on or empty)"`,
+		"\tif [[ $netns == 1 ]]; then\n\t\tns+=(--net)\n\t\thost_net=$(readlink /proc/self/ns/net)\n\tfi\n",
+		`"$SELF" --ns "$op" "$slot" "$rel" "$secs" "$sc" "$lk" "$host_net" "${#envs[@]}" "${envs[@]}" "${argv[@]}"`,
+		// pid 1: never the host's network when loopback only was chosen, and
+		// never the host's network with NETNS=1.
+		"\tlocal op=$1 slot=$2 rel=$3 secs=$4 sc=$5 lk=$6 host_net=$7\n\tshift 7\n",
+		`[[ $NETNS != 1 ]] || { echo "rbe-action: NETNS=1 but no network namespace" >&2; false; }`,
+		`[[ $host_net =~ ^net:\[[0-9]+\]$ && $(readlink /proc/self/ns/net) != "$host_net" ]] ||`,
+		// The egress filter stays required by the worker's own NETNS.
+		"\tif [[ $NETNS != 1 ]]; then\n\t\tlocal chain\n",
+	} {
+		if !strings.Contains(launch, want) {
+			t.Errorf("rbe-action-launch missing %q", want)
+		}
+	}
+	// One place decides the network namespace: action_netns.
+	if n := strings.Count(launch, "--net"); n != 1 {
+		t.Errorf("rbe-action-launch: %d --net, want 1 (from action_netns alone)", n)
+	}
+	if n := strings.Count(launch, "[[ $NETNS == 1 ]]"); n != 1 {
+		t.Errorf("rbe-action-launch: %d [[ $NETNS == 1 ]], want 1 (action_netns)", n)
+	}
+
+	selftest := readFile(t, root, "tools/rbe/rbe-action-selftest")
+	for _, want := range []string{
+		// The main probe runs as an action without the property does.
+		`RBE_X_TIMEOUT_MS=300000 RBE_X_NETWORK= "$LIB/entry" /bin/bash -c "$probe"`,
+		`'{"RBE_X_TIMEOUT_MS":"timeout_millis","RBE_X_SIDE_CHANNEL":"side_channel_file","RBE_X_NETWORK":{"property":"network"}}'`,
+		`loopback_only=$'I lo\nD 127.0.0.1:9 refused\nD 192.0.2.1:9 unreachable\nexit 0'`,
+		`check "off: loopback only" test "$out" = "$loopback_only"`,
+		`check "on, NETNS=1: still loopback only" test "$out" = "$loopback_only"`,
+		`check "on: this worker's network (interfaces besides lo)"`,
+		`check "Off (malformed), NETNS=1: loopback only" test "$out" = "$loopback_only"`,
+		`check "Off (malformed): refused, never run (exit 125)"`,
 	} {
 		if !strings.Contains(selftest, want) {
 			t.Errorf("rbe-action-selftest missing %q", want)

@@ -521,6 +521,9 @@ func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
 // ambient process PATH before its per-command environment applies, so using it
 // directly could select a host bd whose schema knowledge predates the pinned
 // Beads module that created the test database.
+//
+// Its only caller is TestBdStoreConformance, which stays skipped (ga-oh86kw).
+// ga-x09w8c owns un-skipping it and moving it onto isolatedBdStoreCommandRunner.
 func pinnedBdStoreCommandRunner() beads.CommandRunner {
 	runner := beads.ExecCommandRunner()
 	return func(dir, name string, args ...string) ([]byte, error) {
@@ -529,6 +532,31 @@ func pinnedBdStoreCommandRunner() beads.CommandRunner {
 		}
 		return runner(dir, name, args...)
 	}
+}
+
+// isolatedBdStoreCommandRunner is the pinned bd shim for BdStore tests that run
+// in an isolated environment. It runs every bd invocation in the same
+// environment as the test's setup commands: env with HOME moved to GC_HOME
+// (isolateBdHomeEnv), and nothing from the test process.
+// ExecCommandRunnerWithEnv only overlays its overrides on the process
+// environment, so a variable integrationEnvFor strips (BEADS_DIR,
+// BEADS_DOLT_SERVER_HOST/PORT, GC_DOLT_HOST/PORT, BEADS_ACTOR, ...) would still
+// reach bd from a process that exports it, as this fleet's sessions do, and
+// misdirect the store onto an unrelated database. The exact-env runner replaces
+// the child environment and keeps the production result handling
+// (ErrBDSilentFallback, the BD_BACKUP_ENABLED opt-out, bd timeouts,
+// process-tree kill). That handling is keyed on the command name bd, so the
+// pinned binary is passed as BD_BIN and callers keep passing bd; substituting
+// the path for the name would skip all of it. The workspaces are bound to a
+// Dolt server, so BEADS_TEST_MODE defaults to 0 unless env sets it: see
+// beadstest.EnvBeadsTestMode.
+func isolatedBdStoreCommandRunner(env []string) beads.CommandRunner {
+	bdEnv := map[string]string{beadstest.EnvBeadsTestMode: "0"}
+	for k, v := range parseEnvList(isolateBdHomeEnv(env)) {
+		bdEnv[k] = v
+	}
+	bdEnv["BD_BIN"] = bdBinary
+	return beads.ExecCommandRunnerWithExactEnvContext(context.Background(), bdEnv)
 }
 
 // pinnedBdStoreCommandRunnerWithEnv keeps direct BdStore integration tests on
@@ -1395,15 +1423,32 @@ func filterEnv(env []string, name string) []string {
 	return result
 }
 
+// integrationEnv is the env of the suite's shared GC_HOME, testGCHome; TestMain
+// checks that one for a leaked platform supervisor unit after m.Run.
 func integrationEnv() []string {
-	return integrationEnvFor(testGCHome, testRuntimeDir, false)
+	return buildIntegrationEnv(testGCHome, testRuntimeDir, false)
 }
 
+// integrationEnvDolt is integrationEnv with gc's managed Dolt enabled.
 func integrationEnvDolt() []string {
-	return integrationEnvFor(testGCHome, testRuntimeDir, true)
+	return buildIntegrationEnv(testGCHome, testRuntimeDir, true)
 }
 
-func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
+// integrationEnvFor is the env that runs gc against a test's own GC_HOME. It
+// registers the platform-unit leak guard for gcHome on t, so call it before
+// starting any supervisor: the guard's cleanup then runs after their stops
+// (t.Cleanup is LIFO).
+func integrationEnvFor(t *testing.T, gcHome, runtimeDir string, useDolt bool) []string {
+	t.Helper()
+	registerPlatformUnitLeakGuard(t, gcHome)
+	return buildIntegrationEnv(gcHome, runtimeDir, useDolt)
+}
+
+// buildIntegrationEnv builds the env that runs gc against gcHome. Only
+// integrationEnv, integrationEnvDolt and integrationEnvFor call it, so every
+// GC_HOME the suite hands gc has a leak guard
+// (TestEveryIntegrationEnvHasALeakGuard).
+func buildIntegrationEnv(gcHome, runtimeDir string, useDolt bool) []string {
 	env := filterEnv(os.Environ(), "GC_BEADS")
 	env = filterEnv(env, "BEADS_DIR")
 	env = filterEnv(env, "GC_BEADS_SCOPE_ROOT")
@@ -1593,7 +1638,6 @@ func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
 	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
 		t.Fatalf("creating isolated runtime dir: %v", err)
 	}
-	registerPlatformUnitLeakGuard(t, gcHome)
 	port, err := reserveLoopbackPort()
 	if err != nil {
 		t.Fatalf("reserving isolated supervisor port: %v", err)
@@ -1605,7 +1649,7 @@ func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
 	if err := seedDoltIdentityForRoot(gcHome); err != nil {
 		t.Fatalf("writing isolated dolt config: %v", err)
 	}
-	env := integrationEnvFor(gcHome, runtimeDir, useDolt)
+	env := integrationEnvFor(t, gcHome, runtimeDir, useDolt)
 	return gcHome, runtimeDir, env
 }
 

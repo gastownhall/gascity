@@ -179,8 +179,8 @@ worker_env_refusal() {
   if ! command -v gh >/dev/null 2>&1 || ! repo="$(github_repo "$main_remote")"; then
     return 0
   fi
-  # /dev/null, not empty: with no summary file, preflight's `echo | summary`
-  # can die of SIGPIPE (exit 141) instead of reporting the issue (exit 1).
+  # /dev/null sinks: a push from inside a GitHub Actions job must not write
+  # that job's outputs or step summary.
   out="$(GITHUB_REPOSITORY="$repo" WORKER_ENV_REMOTE=true GITHUB_OUTPUT=/dev/null GITHUB_STEP_SUMMARY=/dev/null \
     run_bounded 20 "$drift" preflight platforms/BUILD.bazel /dev/null 2>&1)" || status=$?
   issue="$(printf '%s\n' "$out" | sed -n 's/^::error title=rbe worker-env drift::\(https:[^ :]*\):.*/\1/p')"
