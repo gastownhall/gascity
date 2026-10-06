@@ -865,16 +865,36 @@ while :; do
     # once that byte is in hand the burst is known to be continuing, so the
     # rest of its line comes from a blocking read that cannot end early. A
     # prompt is therefore only ever run on whole lines.
+    #
+    # The one-byte read can still hand back a byte with its timeout status, as
+    # the idle wait's can: bash 5.2 checks the timer again after taking a byte,
+    # so a byte that lands as the timer expires returns 142 with the byte in
+    # the variable. That byte is the next line of the burst, not a timeout. The
+    # newline is checked the same way, after the read loop that consumed it, so
+    # -d '' makes the newline an ordinary byte the variable carries: a blank
+    # interior line taken at the deadline is then a "\n" in hand, not an empty
+    # variable indistinguishable from a timeout that took nothing. NUL becomes
+    # the delimiter in its place; no shell variable can hold one, so it is
+    # dropped.
+    #
+    # bash 3.2 abandons a timed-out read before assigning it and reports rc=1,
+    # the same status as end of input and a read error. All three end the
+    # burst, so rc=1 needs no telling apart here. A byte 3.2 took off the fd as
+    # its timer fired is gone before the script regains control; no script can
+    # recover it.
     while :; do
         peek=
-        IFS= read -r -n 1 -t "$DRAIN_TIMEOUT" peek
+        IFS= read -r -n 1 -d '' -t "$DRAIN_TIMEOUT" peek
         peek_rc=$?
-        # Non-zero is the idle window closing or end of input; either way the
-        # burst is over, and no byte was taken off the fd to lose.
+        if (( peek_rc > 128 )) && [[ -n "$peek" ]]; then peek_rc=0; fi
+        # Otherwise non-zero is the idle window closing or end of input; either
+        # way the burst is over, and no byte was taken off the fd to lose.
         if (( peek_rc != 0 )); then break; fi
-        if [[ -z "$peek" ]]; then
-            # The byte was the newline itself: a blank interior line, which is
-            # part of the prompt — paragraph breaks matter.
+        # A NUL byte: dropped.
+        if [[ -z "$peek" ]]; then continue; fi
+        if [[ "$peek" == $'\n' ]]; then
+            # A blank interior line, which is part of the prompt — paragraph
+            # breaks matter.
             line+=$'\n'
             continue
         fi
