@@ -140,10 +140,10 @@ var hookIdentityEnvKeys = []string{
 // still matches work routed/assigned to the city agent. Best-effort: a rig
 // whose env cannot be built is skipped (the agent's own store is always
 // queried first by the caller). A suspended rig is excluded outright via
-// buildSuspendedRigPathsForCity, the same helper buildDesiredStateWithSessionBeads
-// uses to build activeStores for scale_check — reusing it here keeps
-// work_query and scale_check agreeing on which stores exist for a
-// city-scoped agent (ga-drb140 AC3).
+// buildSuspendedRigPathsForCity, the same helper whose result the desired-state
+// pass hands to buildDemandTargets to build its activeStores for scale_check —
+// reusing it here keeps work_query and scale_check agreeing on which stores
+// exist for a city-scoped agent (ga-drb140 AC3).
 func appendRigHookStores(stores []hookStore, cityPath string, cfg *config.City, a *config.Agent, identityOverrides map[string]string) []hookStore {
 	if cfg == nil || a == nil {
 		return stores
