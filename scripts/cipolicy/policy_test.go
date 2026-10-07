@@ -109,40 +109,39 @@ func TestExecutionShapeMutationsFailPolicy(t *testing.T) {
 		{
 			name: "if",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-shards")["if"] = "false"
+				job(t, docs.ci, "integration-rest-full")["if"] = "false"
 			},
 		},
 		{
 			name: "runner",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-shards")["runs-on"] = "ubuntu-latest"
+				job(t, docs.ci, "integration-rest-full")["runs-on"] = "ubuntu-latest"
 			},
 		},
 		{
 			name: "timeout",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-shards")["timeout-minutes"] = 60
+				job(t, docs.ci, "integration-rest-full")["timeout-minutes"] = 60
 			},
 		},
 		{
 			name: "environment",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-shards")["env"].(map[string]any)["DOLT_VERSION"] = "latest"
+				job(t, docs.ci, "integration-rest-full")["env"].(map[string]any)["DOLT_VERSION"] = "latest"
 			},
 		},
 		{
 			name: "strategy",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-shards")["strategy"].(map[string]any)["fail-fast"] = true
+				job(t, docs.ci, "integration-rest-full")["strategy"].(map[string]any)["fail-fast"] = true
 			},
 		},
 		{
 			name: "nested execution field named name",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				strategy := job(t, docs.ci, "integration-shards")["strategy"].(map[string]any)
+				strategy := job(t, docs.ci, "integration-rest-full")["strategy"].(map[string]any)
 				matrix := strategy["matrix"].(map[string]any)
-				row := matrix["include"].([]any)[0].(map[string]any)
-				row["name"] = "this is matrix data, not a display label"
+				matrix["name"] = []any{"this is matrix data, not a display label"}
 			},
 		},
 		{
@@ -160,7 +159,7 @@ func TestExecutionShapeMutationsFailPolicy(t *testing.T) {
 		{
 			name: "with",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				step(t, job(t, docs.ci, "integration-shards"), 1)["with"].(map[string]any)["install-claude-cli"] = "true"
+				step(t, job(t, docs.ci, "integration-rest-full"), 1)["with"].(map[string]any)["install-claude-cli"] = "true"
 			},
 		},
 		{
@@ -632,10 +631,10 @@ func removeValue(t *testing.T, value any, remove string) []any {
 
 func TestPolicyErrorsIdentifyTheBrokenContract(t *testing.T) {
 	docs := loadPolicyDocuments(t)
-	job(t, docs.ci, "integration-shards")["runs-on"] = "ubuntu-latest"
+	job(t, docs.ci, "integration-rest-full")["runs-on"] = "ubuntu-latest"
 
 	err := validate(docs.ci, docs.nightly, docs.action)
-	if err == nil || !strings.Contains(err.Error(), "integration-shards") {
-		t.Fatalf("error = %v, want integration-shards context", err)
+	if err == nil || !strings.Contains(err.Error(), "integration-rest-full") {
+		t.Fatalf("error = %v, want integration-rest-full context", err)
 	}
 }

@@ -212,7 +212,17 @@ const (
 	// and //internal/beads:beads_native_doltlite_test (-tags
 	// gascity_native_beads). Reviewed delta: one removed job and one removed
 	// step; no new job, trigger or permission.
-	expectedCIExecutionHash     = "c85e14be1b8664699de64d3f0eae8f727c03d544bb4f29169607c4e12f577355"
+	//
+	// Bumped again (ga-96smfk.50, fork PRs on Bazel): integration-shards, the
+	// last Go integration shards (packages-*, bdstore, rest-smoke, run only
+	// for fork and Dependabot PRs since #7261), and cmd-gc-process (fork-only
+	// since #7247) are deleted: bazel.yml's gating integration-packages and
+	// integration-smoke lanes run those tests for every PR, fork ones
+	// included (fork-ro run 37569466546, fork-rw run 37572755753).
+	// ci-integration drops integration-shards, ci-required cmd-gc-process.
+	// Reviewed delta: two jobs removed, two needs and two allowed skips
+	// dropped; no new job, trigger or permission.
+	expectedCIExecutionHash     = "3d8f3bbf5af8e36c23ea494f12c94a4d529e2dd1f4feb208e1eea80c4d877d56"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

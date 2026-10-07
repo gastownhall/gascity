@@ -224,8 +224,8 @@ jobs:
 
   # Coverage reporting only matters on the main branch — codecov regression
   # info doesn't need to gate every PR, and the full ./... unit suite is
-  # already covered by integration-shards, the integration-packages Bazel lane
-  # (cmd/gc's process suite), and acceptance A.
+  # already covered by bazel.yml's lanes (cmd/gc's process suite runs in
+  # integration-packages) and acceptance A.
   # Split into two parallel push-only jobs to take the serial cmd/gc loop off
   # the critical path (ga-29jlpr); Codecov merges uploads server-side.
   preflight-unit-cover-noncmdgc:
@@ -818,79 +818,6 @@ jobs:
           version: "~> v2"
           args: check
 
-  # The cmd/gc process suite (GC_FAST_UNIT=0). bazel.yml's gating
-  # integration-packages lane runs it for every PR: //cmd/gc:gc_test under
-  # --config=integration (GC_FAST_UNIT=0, pinned bd and dolt on PATH) runs
-  # every test this job runs plus the integration-tagged ones. Like
-  # integration-shards, these fork-PR rows stay until a fork-mode run of that
-  # lane is verified (ga-96smfk.50), and go with them.
-  cmd-gc-process:
-    name: cmd/gc process (fork PR) / shard ${{ matrix.shard }} of 12
-    needs:
-      - runner-policy
-      - changes
-    if: needs.changes.outputs.cmd_gc_process == 'true' && github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork == true || github.actor == 'dependabot[bot]')
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-    env:
-      DOLT_VERSION: "2.2.0"
-      BD_VERSION: "v1.3.1"
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "false"
-      - name: Run cmd/gc process shard
-        env:
-          GO_TEST_TIMING_FILE: ${{ runner.temp }}/cmd-gc-process-${{ matrix.shard }}-of-12.json
-          GO_TEST_TIMING_NAME: cmd-gc-process-${{ matrix.shard }}-of-12
-          GO_TEST_TIMING_VARIANT: linux-default
-          GO_TEST_RUNNER_LABEL: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-          # A bd proxied-server failure names a log file and carries nothing
-          # else ("proxy child exited before publishing its OS-assigned port
-          # (see <root>/.beads/dolt/server.log)"). That file lives under the
-          # test's temp dir, which t.Cleanup removes before any workflow step
-          # could read it, so a red shard used to arrive with no evidence at
-          # all. Failing tests copy the allowlisted logs here first.
-          GC_TEST_FAILURE_ARTIFACT_DIR: ${{ runner.temp }}/failure-artifacts/cmd-gc-process-${{ matrix.shard }}-of-12
-          EXTRA_TEST_ENV: >-
-            GO_TEST_TIMING_FILE="$${GO_TEST_TIMING_FILE}"
-            GO_TEST_TIMING_NAME="$${GO_TEST_TIMING_NAME}"
-            GO_TEST_TIMING_VARIANT="$${GO_TEST_TIMING_VARIANT}"
-            GO_TEST_RUNNER_LABEL="$${GO_TEST_RUNNER_LABEL}"
-            GC_TEST_FAILURE_ARTIFACT_DIR="$${GC_TEST_FAILURE_ARTIFACT_DIR}"
-            GITHUB_SHA="$${GITHUB_SHA}"
-            GITHUB_WORKFLOW="$${GITHUB_WORKFLOW}"
-            GITHUB_RUN_ID="$${GITHUB_RUN_ID}"
-            GITHUB_RUN_ATTEMPT="$${GITHUB_RUN_ATTEMPT}"
-            GITHUB_JOB="$${GITHUB_JOB}"
-            RUNNER_NAME="$${RUNNER_NAME}"
-            RUNNER_OS="$${RUNNER_OS}"
-            RUNNER_ARCH="$${RUNNER_ARCH}"
-        run: make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12 EXTRA_TEST_ENV="$EXTRA_TEST_ENV"
-      - name: Upload cmd/gc process failure diagnostics
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: failure-diagnostics-cmd-gc-process-${{ matrix.shard }}-of-12-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/failure-artifacts/cmd-gc-process-${{ matrix.shard }}-of-12
-          if-no-files-found: ignore
-          retention-days: 7
-      - name: Upload cmd/gc process timing
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: timing-cmd-gc-process-${{ matrix.shard }}-of-12-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/cmd-gc-process-${{ matrix.shard }}-of-12.json
-          if-no-files-found: warn
-          retention-days: 7
-
   # The tagged product-metrics contracts (-tags productmetrics_testhook) run
   # as the Bazel target //cmd/gc:gc_productmetrics_testhook_test in
   # bazel.yml's unit lane, gated by the required "bazel test (side-by-side)"
@@ -915,80 +842,9 @@ jobs:
       - name: Test Windows Job Object descendant cleanup
         run: go test -tags=integration -count=1 ./internal/credentialprovider -run '^TestCredentialProviderWindowsJob' -timeout=45s
 
-  # Go integration shards, for fork and Dependabot PRs only. bazel.yml's
-  # gating lanes run the same tests for every PR: integration-packages
-  # (//test:integration_packages) the packages-* shards, integration-smoke
-  # (.bazelrc test:integration-smoke) bdstore and rest-smoke. These rows stay
-  # until a fork-mode run of those lanes is verified (ga-96smfk.50).
-  integration-shards:
-    name: Integration (fork PR) / ${{ matrix.shard_name }}
-    needs:
-      - runner-policy
-      - changes
-    if: needs.changes.outputs.integration == 'true' && github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork == true || github.actor == 'dependabot[bot]')
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    timeout-minutes: ${{ matrix.timeout_minutes }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - shard_name: packages-core-1-of-4
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard packages-core-1-of-4
-          - shard_name: packages-core-2-of-4
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard packages-core-2-of-4
-          - shard_name: packages-core-3-of-4
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard packages-core-3-of-4
-          - shard_name: packages-core-4-of-4
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard packages-core-4-of-4
-          - shard_name: packages-cmd-gc-integration
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard packages-cmd-gc-integration
-          - shard_name: packages-runtime-tmux-1-of-6
-            timeout_minutes: 10
-            command: ./scripts/test-integration-shard packages-runtime-tmux-1-of-6
-          - shard_name: packages-runtime-tmux-2-of-6
-            timeout_minutes: 10
-            command: ./scripts/test-integration-shard packages-runtime-tmux-2-of-6
-          - shard_name: packages-runtime-tmux-3-of-6
-            timeout_minutes: 10
-            command: ./scripts/test-integration-shard packages-runtime-tmux-3-of-6
-          - shard_name: packages-runtime-tmux-4-of-6
-            timeout_minutes: 10
-            command: ./scripts/test-integration-shard packages-runtime-tmux-4-of-6
-          - shard_name: packages-runtime-tmux-5-of-6
-            timeout_minutes: 10
-            command: ./scripts/test-integration-shard packages-runtime-tmux-5-of-6
-          - shard_name: packages-runtime-tmux-6-of-6
-            timeout_minutes: 10
-            command: ./scripts/test-integration-shard packages-runtime-tmux-6-of-6
-          - shard_name: bdstore
-            timeout_minutes: 15
-            command: make test-integration-bdstore
-          - shard_name: rest-smoke-1-of-2
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-smoke-1-of-2
-          - shard_name: rest-smoke-2-of-2
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-smoke-2-of-2
-    env:
-      DOLT_VERSION: "2.2.0"
-      BD_VERSION: "v1.3.1"
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "false"
-      - name: Run integration shard
-        run: ${{ matrix.command }}
-
   # The full REST suite is broad release/post-merge coverage. PRs run the
-  # focused REST smoke contract above; pushes retain all full-suite shards.
+  # focused REST smoke contract (bazel.yml's integration-smoke lane); pushes
+  # retain all full-suite shards.
   integration-rest-full:
     name: Integration / rest-full-${{ matrix.shard }}-of-16
     needs:
@@ -1318,7 +1174,6 @@ jobs:
     name: CI / integration
     needs:
       - runner-policy
-      - integration-shards
       - integration-rest-full
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
@@ -1332,11 +1187,11 @@ jobs:
           import os
           import sys
 
-          # integration-shards is path-gated and fork/Dependabot-PR-only, and
-          # integration-rest-full push-only. Their skipped results are
-          # expected for docs-only changes, same-repo PRs and pushes, and
-          # pull requests, respectively.
-          allow_skipped = {"integration-shards", "integration-rest-full"}
+          # integration-rest-full is path-gated and push-only: its skipped
+          # result is expected for docs-only changes and pull requests.
+          # bazel.yml's integration-packages and integration-smoke lanes run
+          # the per-PR integration tests.
+          allow_skipped = {"integration-rest-full"}
           needs = json.loads(os.environ["NEEDS_JSON"])
           failed = {}
           for job, meta in sorted(needs.items()):
@@ -1361,7 +1216,6 @@ jobs:
       - ci-integration
       - beads-topology-acceptance
       - beads-proxied-native-acceptance
-      - cmd-gc-process
       - credential-provider-windows
       - preflight-unit-cover-noncmdgc
       - preflight-unit-cover-cmdgc
@@ -1388,7 +1242,6 @@ jobs:
               # proxied-native job shares that filter (round3 D-F17).
               "beads-topology-acceptance",
               "beads-proxied-native-acceptance",
-              "cmd-gc-process",
               "credential-provider-windows",
               "preflight-unit-cover-noncmdgc",
               "preflight-unit-cover-cmdgc",

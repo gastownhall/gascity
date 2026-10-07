@@ -58,8 +58,6 @@ type ciCriticalPathStep struct {
 
 const cmdGCProcessExtraTestEnv = `GO_TEST_TIMING_FILE="$${GO_TEST_TIMING_FILE}" GO_TEST_TIMING_NAME="$${GO_TEST_TIMING_NAME}" GO_TEST_TIMING_VARIANT="$${GO_TEST_TIMING_VARIANT}" GO_TEST_RUNNER_LABEL="$${GO_TEST_RUNNER_LABEL}" GC_TEST_FAILURE_ARTIFACT_DIR="$${GC_TEST_FAILURE_ARTIFACT_DIR}" GITHUB_SHA="$${GITHUB_SHA}" GITHUB_WORKFLOW="$${GITHUB_WORKFLOW}" GITHUB_RUN_ID="$${GITHUB_RUN_ID}" GITHUB_RUN_ATTEMPT="$${GITHUB_RUN_ATTEMPT}" GITHUB_JOB="$${GITHUB_JOB}" RUNNER_NAME="$${RUNNER_NAME}" RUNNER_OS="$${RUNNER_OS}" RUNNER_ARCH="$${RUNNER_ARCH}"`
 
-const cmdGCProcessRunner = "${{ needs.runner-policy.outputs.runner_32vcpu }}"
-
 func TestWorkerCorePhase2RunsUnderBazel(t *testing.T) {
 	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
 	if err != nil {
@@ -97,24 +95,15 @@ func TestWorkerCorePhase2RunsUnderBazel(t *testing.T) {
 	}
 }
 
-// cmdGCProcessForkOnly is the cmd-gc-process job's route: fork and
-// Dependabot PRs only, the PRs whose bazel run starts no integration-packages
-// lane.
-const cmdGCProcessForkOnly = "needs.changes.outputs.cmd_gc_process == 'true' && github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork == true || github.actor == 'dependabot[bot]')"
-
-// Pushes and same-repo PRs run cmd/gc's process suite under Bazel only:
-// //cmd/gc:gc_test in //test:integration_packages (tools/bazel/integration_suite.py
-// lists it), which bazel.yml's gating integration-packages lane runs under
-// --config=integration (GC_FAST_UNIT=0).
-// The go-test job remains for the fork and Dependabot PRs that lane skips.
+// cmd/gc's process suite runs under Bazel only, for every PR, fork ones
+// included: //cmd/gc:gc_test in //test:integration_packages
+// (tools/bazel/integration_suite.py lists it), which bazel.yml's gating
+// integration-packages lane runs under --config=integration
+// (GC_FAST_UNIT=0). No go-test cmd-gc-process job remains (ga-96smfk.50).
 func TestCmdGCProcessSuiteRunsInTheBazelIntegrationLane(t *testing.T) {
 	root := repoRoot(t)
-	job, ok := readCriticalPathWorkflow(t, "ci.yml").Jobs["cmd-gc-process"]
-	if !ok {
-		t.Fatal("CI workflow has no cmd-gc-process job")
-	}
-	if job.If != cmdGCProcessForkOnly {
-		t.Errorf("cmd-gc-process if = %q, want fork/Dependabot PRs only %q", job.If, cmdGCProcessForkOnly)
+	if _, ok := readCriticalPathWorkflow(t, "ci.yml").Jobs["cmd-gc-process"]; ok {
+		t.Error("CI workflow has a cmd-gc-process go-test job again; bazel.yml's integration-packages lane runs that suite for every PR")
 	}
 	bazelrc, err := os.ReadFile(filepath.Join(root, ".bazelrc"))
 	if err != nil {
@@ -129,136 +118,6 @@ func TestCmdGCProcessSuiteRunsInTheBazelIntegrationLane(t *testing.T) {
 	}
 	if !strings.Contains(string(bazelYML), `"cmd":"test --config=ci --config=integration --keep_going //test:integration_packages"`) {
 		t.Error("bazel.yml has no integration-packages lane running //test:integration_packages under --config=integration")
-	}
-}
-
-func TestCmdGCProcessPublishesAdvisoryTimingArtifacts(t *testing.T) {
-	wf := readCriticalPathWorkflow(t, "ci.yml")
-	job, ok := wf.Jobs["cmd-gc-process"]
-	if !ok {
-		t.Fatal("CI workflow has no cmd-gc-process job")
-	}
-
-	wantShards := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
-	if !slices.Equal(job.Strategy.Matrix.Shard, wantShards) {
-		t.Fatalf("cmd-gc-process shards = %v, want %v", job.Strategy.Matrix.Shard, wantShards)
-	}
-	if !slices.Equal(job.Strategy.Matrix.Keys, []string{"shard"}) {
-		t.Fatalf("cmd-gc-process matrix keys = %v, want only shard", job.Strategy.Matrix.Keys)
-	}
-	if job.ContinueOnError {
-		t.Fatal("cmd-gc-process job must surface failures")
-	}
-	if job.RunsOn != cmdGCProcessRunner {
-		t.Errorf("cmd-gc-process runs-on = %q, want recorded runner %q", job.RunsOn, cmdGCProcessRunner)
-	}
-	if job.Strategy.FailFast == nil || *job.Strategy.FailFast {
-		t.Fatal("cmd-gc-process strategy must explicitly disable fail-fast so all shard timings complete")
-	}
-
-	var runIndices, uploadIndices []int
-	for i := range job.Steps {
-		step := &job.Steps[i]
-		if strings.Contains(step.Run, "test-cmd-gc-process-shard") {
-			runIndices = append(runIndices, i)
-		}
-		if strings.HasPrefix(step.Uses, "actions/upload-artifact@") {
-			uploadIndices = append(uploadIndices, i)
-		}
-	}
-	if len(runIndices) != 1 {
-		t.Fatalf("cmd-gc-process process-shard step indices = %v, want exactly one", runIndices)
-	}
-	// Two uploads: the advisory timing artifact on every run, and the proxy
-	// child's logs only when the shard fails. The second exists because bd's
-	// proxied-server failure names a log file the test temp dir takes with it,
-	// so without it a red shard carries no evidence at all.
-	if len(uploadIndices) != 2 {
-		t.Fatalf("cmd-gc-process artifact-upload step indices = %v, want exactly two", uploadIndices)
-	}
-	runIndex := runIndices[0]
-	diagnosticsIndex, uploadIndex := uploadIndices[0], uploadIndices[1]
-	if diagnosticsIndex <= runIndex {
-		t.Fatalf("cmd-gc-process diagnostics upload step %d must follow process-shard step %d", diagnosticsIndex, runIndex)
-	}
-	if uploadIndex <= runIndex {
-		t.Fatalf("cmd-gc-process timing upload step %d must follow process-shard step %d", uploadIndex, runIndex)
-	}
-	runStep := &job.Steps[runIndex]
-	diagnosticsStep := &job.Steps[diagnosticsIndex]
-	uploadStep := &job.Steps[uploadIndex]
-	if diagnosticsStep.Name != "Upload cmd/gc process failure diagnostics" {
-		t.Errorf("cmd-gc-process diagnostics upload step name = %q", diagnosticsStep.Name)
-	}
-	if diagnosticsStep.If != "${{ failure() }}" {
-		t.Errorf("cmd-gc-process diagnostics upload condition = %q, want failure()", diagnosticsStep.If)
-	}
-	if want := "${{ runner.temp }}/failure-artifacts/cmd-gc-process-${{ matrix.shard }}-of-12"; diagnosticsStep.With["path"] != want {
-		t.Errorf("cmd-gc-process diagnostics upload path = %q, want %q", diagnosticsStep.With["path"], want)
-	}
-	if runStep.Name != "Run cmd/gc process shard" {
-		t.Errorf("cmd-gc-process execution step name = %q", runStep.Name)
-	}
-	if runStep.If != "" {
-		t.Errorf("cmd-gc-process execution condition = %q, want unconditional product execution", runStep.If)
-	}
-	if runStep.ContinueOnError {
-		t.Error("cmd-gc-process execution step must surface product failures")
-	}
-	if uploadStep.Name != "Upload cmd/gc process timing" {
-		t.Errorf("cmd-gc-process timing upload step name = %q", uploadStep.Name)
-	}
-
-	wantEnv := map[string]string{
-		"GO_TEST_TIMING_FILE":    "${{ runner.temp }}/cmd-gc-process-${{ matrix.shard }}-of-12.json",
-		"GO_TEST_TIMING_NAME":    "cmd-gc-process-${{ matrix.shard }}-of-12",
-		"GO_TEST_TIMING_VARIANT": "linux-default",
-		"GO_TEST_RUNNER_LABEL":   cmdGCProcessRunner,
-		// Named here so the collector directory the shard advertises and the
-		// directory the diagnostics upload reads can never drift apart.
-		"GC_TEST_FAILURE_ARTIFACT_DIR": "${{ runner.temp }}/failure-artifacts/cmd-gc-process-${{ matrix.shard }}-of-12",
-		"EXTRA_TEST_ENV":               cmdGCProcessExtraTestEnv,
-	}
-	if len(runStep.Env) != len(wantEnv) {
-		t.Errorf("cmd-gc-process timing env = %v, want exactly %v", runStep.Env, wantEnv)
-	}
-	for name, want := range wantEnv {
-		if got := runStep.Env[name]; got != want {
-			t.Errorf("cmd-gc-process %s = %q, want %q", name, got, want)
-		}
-	}
-
-	wantRun := `make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12 EXTRA_TEST_ENV="$EXTRA_TEST_ENV"`
-	if got := strings.TrimSpace(runStep.Run); got != wantRun {
-		t.Errorf("cmd-gc-process run command:\n%s\nwant:\n%s", got, wantRun)
-	}
-	if strings.Contains(runStep.Run, "CPU_COUNT") {
-		t.Error("cmd-gc-process must let the timing collector discover CPU count instead of configuring it")
-	}
-
-	const pinnedUploadArtifactV4 = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
-	if uploadStep.Uses != pinnedUploadArtifactV4 {
-		t.Errorf("cmd-gc-process timing upload action = %q, want pinned v4 %q", uploadStep.Uses, pinnedUploadArtifactV4)
-	}
-	if uploadStep.If != "${{ always() }}" {
-		t.Errorf("cmd-gc-process timing upload condition = %q, want always()", uploadStep.If)
-	}
-	if uploadStep.ContinueOnError {
-		t.Error("cmd-gc-process timing upload must surface publication failures")
-	}
-	wantUpload := map[string]string{
-		"name":              "timing-cmd-gc-process-${{ matrix.shard }}-of-12-attempt-${{ github.run_attempt }}",
-		"path":              "${{ runner.temp }}/cmd-gc-process-${{ matrix.shard }}-of-12.json",
-		"if-no-files-found": "warn",
-		"retention-days":    "7",
-	}
-	if len(uploadStep.With) != len(wantUpload) {
-		t.Errorf("cmd-gc-process timing upload settings = %v, want exactly %v", uploadStep.With, wantUpload)
-	}
-	for name, want := range wantUpload {
-		if got := uploadStep.With[name]; got != want {
-			t.Errorf("cmd-gc-process timing upload %s = %q, want %q", name, got, want)
-		}
 	}
 }
 
@@ -409,7 +268,7 @@ func TestCmdGCProcessTimingEnvCrossesMakeIsolation(t *testing.T) {
 func TestPRTestJobsInstallOnlyRuntimeDependencies(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
 
-	for _, jobName := range []string{"cmd-gc-process", "integration-shards", "docker-session"} {
+	for _, jobName := range []string{"docker-session"} {
 		job, ok := wf.Jobs[jobName]
 		if !ok {
 			t.Errorf("CI workflow has no %s job", jobName)
@@ -426,8 +285,6 @@ func TestPRTestJobsInstallOnlyRuntimeDependencies(t *testing.T) {
 		"preflight-acceptance",
 		"contract-acceptance-current",
 		"contract-radar-bd-head",
-		"cmd-gc-process",
-		"integration-shards",
 	} {
 		job := wf.Jobs[jobName]
 		for _, step := range job.Steps {
@@ -924,33 +781,11 @@ func TestCIPreflightFansInDirectlyWithoutWaitingForHistoricalCheck(t *testing.T)
 
 func TestPRIntegrationMatrixKeepsHeavyRestCoverageInReleaseGates(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
-	shards := wf.Jobs["integration-shards"]
 	// bazel.yml's gating integration-packages and integration-smoke lanes run
-	// the packages-*, bdstore and rest-smoke tests for every PR; the Go rows
-	// remain only for fork and Dependabot PRs (ga-96smfk.50).
-	if !strings.Contains(shards.If, "github.event.pull_request.head.repo.fork == true") || !strings.Contains(shards.If, "dependabot[bot]") {
-		t.Errorf("integration-shards if = %q, want fork and Dependabot PRs only", shards.If)
-	}
-	var cmdGCRows, restSmokeRows []string
-	for _, entry := range shards.Strategy.Matrix.Include {
-		if strings.Contains(entry.Command, "rest-full") {
-			t.Errorf("PR integration shard %q runs rest-full; Makefile assigns that suite to nightly/RC and targeted validation", entry.ShardName)
-		}
-		if strings.Contains(entry.Command, "packages-cmd-gc-") {
-			cmdGCRows = append(cmdGCRows, entry.Command)
-		}
-		if strings.Contains(entry.Command, "rest-smoke-") {
-			restSmokeRows = append(restSmokeRows, entry.Command)
-		}
-	}
-	if want := []string{"./scripts/test-integration-shard packages-cmd-gc-integration"}; !slices.Equal(cmdGCRows, want) {
-		t.Errorf("PR cmd/gc integration rows = %v, want one focused integration-only row %v", cmdGCRows, want)
-	}
-	if want := []string{
-		"./scripts/test-integration-shard rest-smoke-1-of-2",
-		"./scripts/test-integration-shard rest-smoke-2-of-2",
-	}; !slices.Equal(restSmokeRows, want) {
-		t.Errorf("PR REST smoke rows = %v, want %v", restSmokeRows, want)
+	// the former packages-*, bdstore and rest-smoke Go shards for every PR,
+	// fork ones included (ga-96smfk.50); no Go integration-shards job remains.
+	if _, ok := wf.Jobs["integration-shards"]; ok {
+		t.Error("CI workflow has an integration-shards job again; bazel.yml's integration-packages and integration-smoke lanes cover it")
 	}
 
 	full, ok := wf.Jobs["integration-rest-full"]
