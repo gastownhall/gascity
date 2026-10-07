@@ -95,6 +95,8 @@ var orderCheckResponseTTLFloor = 30 * time.Second
 // body built without anyone waiting for it.
 //
 // Strict-freshness callers pass ?fresh=true and bypass all three, as before.
+// A non-fresh read may return a body built as long ago as the previous read,
+// so callers that need current due values should pass ?fresh=true.
 // A city holding a condition-triggered order is never cached at all: its
 // due-ness comes from running a subprocess, and a cached answer would report
 // a check that did not happen.
@@ -142,7 +144,8 @@ func (s *Server) refreshOrderCheckResponseInBackground(cacheKey string) {
 			}
 		}()
 		defer s.endResponseRefresh(cacheKey)
-		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), s.buildOrderCheckBody(false))
+		body := s.buildOrderCheckBody(false)
+		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), body)
 	})
 }
 

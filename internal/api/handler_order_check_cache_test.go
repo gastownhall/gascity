@@ -164,6 +164,53 @@ func TestHandleOrderCheckServesStaleAndRefreshesInBackground(t *testing.T) {
 	}
 }
 
+// TestHandleOrderCheckTTLFloorServesAcrossBucketBoundary pins the middle
+// lookup: once the time bucket has rolled over, a body younger than the floor
+// is served directly, with neither an inline rebuild nor a background refresh.
+func TestHandleOrderCheckTTLFloorServesAcrossBucketBoundary(t *testing.T) {
+	// A zero bucket TTL gives every request its own bucket, so only the floor
+	// can answer the second request.
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = 0
+	oldFloor := orderCheckResponseTTLFloor
+	orderCheckResponseTTLFloor = time.Hour
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		orderCheckResponseTTLFloor = oldFloor
+	})
+
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	state.autos = orderCheckTestOrders()
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/orders/check"), nil)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("priming orders/check = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	built := store.listByLabelCalls
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("floor-served orders/check = %d, want 200", rec.Code)
+	}
+	if store.listByLabelCalls != built {
+		t.Fatalf("labeled List calls after a floor-served repeat = %d, want %d (the floor must answer without an inline rebuild)", store.listByLabelCalls, built)
+	}
+
+	srv.waitForBackground()
+
+	if store.listByLabelCalls != built {
+		t.Fatalf("labeled List calls after waiting for background work = %d, want %d (the floor must answer before the stale path refreshes)", store.listByLabelCalls, built)
+	}
+}
+
 // TestHandleOrderCheckFreshBypassesCache holds the escape hatch open: a caller
 // that cannot tolerate a body built up to one poll interval ago asks for
 // ?fresh=true and is never served a cached one. Without this the staleness the
