@@ -39,7 +39,7 @@ func ScanBySessionIDSince(id string, incarnationStartedAt time.Time) ([]runtime.
 // carries a GC_SESSION_ID, is not itself infrastructure — a tmux server or
 // client is never a root, whoever its parent is — and sits outside its
 // parent's envelope: the parent is gone, carries a different GC_SESSION_ID,
-// or is infrastructure.
+// is infrastructure, or cannot be read (permission denied).
 func IsScanRoot(pid int) bool {
 	if err := liveScanGuard(); err != nil {
 		return false
@@ -564,7 +564,11 @@ func isRootWithSessionID(root string, pid int, sessionID string) (bool, error) {
 		return true, nil
 	}
 	parentEnv, err := parseEnvironFile(filepath.Join(root, strconv.Itoa(ppid), "environ"))
-	if err != nil {
+	switch {
+	case errors.Is(err, fs.ErrPermission):
+		// An unreadable parent names no session we can see: outside the envelope.
+		parentEnv = nil
+	case err != nil:
 		return false, err
 	}
 	if parentEnv["GC_SESSION_ID"] == sessionID && isInfrastructureProcess(root, ppid) {
