@@ -430,3 +430,42 @@ func TestCensusAndFreshReadAgreeOnCorpse(t *testing.T) {
 		t.Fatalf("fixture fresh read = %+v, %v; want a present corpse", fresh, err)
 	}
 }
+
+// Kills: a name a fresh probe listed after the latest pass started read gone
+// on that pass's absence. It is present (unknown until its identity is
+// read), not a start candidate.
+func TestObserveListedAfterPassStartIsNotGone(t *testing.T) {
+	c := observeRows(t, map[string]string{"gc-1": "s1"})
+	cache := newObserveCache()
+	cache.publish(censusNow, nil, completeBackend("tmux"))
+	cache.Note("s1", FactListed, ObsYes, censusNow.Add(time.Second), SourceProbe, "")
+	if got := observed(t, cache.Snapshot(), c, censusNow.Add(time.Second), "gc-1"); got.Liveness == livenessGone || got.Liveness.startCandidate() {
+		t.Fatalf("listed after the pass: %+v, want present, not gone", got)
+	}
+}
+
+// Kills: an identity change that does not count as a change, so an
+// unknown-to-alive transition never fires the planner; and a re-read that
+// only moves ReadAt counting as one.
+func TestIdentityChangeFlipsObservation(t *testing.T) {
+	cache := newObserveCache()
+	at := censusNow
+	publish := func(id runtimeIdentity) int {
+		at = at.Add(time.Second)
+		return cache.PublishInventory(InventoryPass{Epoch: "e1", Seq: 1, ProviderGen: 1, StartedAt: at, FinishedAt: at, Backends: []BackendPass{completeBackend("tmux", "s1")}},
+			map[string]InventoryAttrs{"s1": {Incarnation: "s1:1", DeadKnown: true, Identity: id}})
+	}
+	publish(runtimeIdentity{})
+	read := runtimeIdentity{Known: true, SessionID: "gc-1", Token: "tok", Epoch: "1", ProcessNames: []string{"claude"}, ReadAt: at}
+	if flips := publish(read); flips != 1 {
+		t.Fatalf("unknown to read: %d flips, want 1", flips)
+	}
+	read.ReadAt = read.ReadAt.Add(time.Minute)
+	if flips := publish(read); flips != 0 {
+		t.Fatalf("a re-read that only moved ReadAt: %d flips, want 0", flips)
+	}
+	read.ProcessNames = []string{"codex"}
+	if flips := publish(read); flips != 1 {
+		t.Fatalf("process names changed: %d flips, want 1", flips)
+	}
+}

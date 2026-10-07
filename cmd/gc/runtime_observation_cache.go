@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -636,8 +637,8 @@ func applyInventoryAttrs(obs *RuntimeObservation, a InventoryAttrs, at time.Time
 	}
 }
 
-// observationChanged reports whether a fact value, the incarnation or the
-// owner differs; a refresh of ObservedAt alone is not a change.
+// observationChanged reports whether a fact value, the incarnation, the
+// owner or the identity read differs; a refresh of ObservedAt alone is not a change.
 func observationChanged(old, next RuntimeObservation, had bool) bool {
 	if !had {
 		return true
@@ -647,7 +648,14 @@ func observationChanged(old, next RuntimeObservation, had bool) bool {
 			return true
 		}
 	}
-	return old.Incarnation != next.Incarnation || old.OwnerState != next.OwnerState || old.Owner != next.Owner
+	return old.Incarnation != next.Incarnation || old.OwnerState != next.OwnerState || old.Owner != next.Owner ||
+		!sameIdentity(old.Identity, next.Identity)
+}
+
+// sameIdentity compares two identity reads, ignoring when they were made.
+func sameIdentity(a, b runtimeIdentity) bool {
+	return a.Known == b.Known && a.SessionID == b.SessionID && a.Token == b.Token && a.Epoch == b.Epoch &&
+		slices.Equal(a.ProcessNames, b.ProcessNames)
 }
 
 // store publishes next, advancing Gen and signaling Changed when flipped.

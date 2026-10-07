@@ -157,6 +157,8 @@ func observeRow(snap *ObservationSnapshot, id, name string, sharers int, listed 
 		// Listed by the latest fresh pass on a backend that has not primed
 		// (exec, ssh and other unattested backends never do): present.
 		obs, present = listedObservation(snap, name, now, maxAge), true
+	case listedSincePass(snap, name, now, maxAge):
+		obs, present = snap.Observation(name, now, maxAge)
 	case complete:
 		o.Liveness = livenessGone
 	case f.Value == ObsYes:
@@ -202,6 +204,17 @@ func observeRow(snap *ObservationSnapshot, id, name string, sharers int, listed 
 	}
 	o.Uncertain = o.Uncertain || o.Liveness == livenessUnknown
 	return o
+}
+
+// listedSincePass reports whether a fresh probe wrote name's Listed=Yes
+// after the latest pass started, so that pass's absence predates it. It reads
+// the raw fact: a probe can note a name no backend has listed yet.
+func listedSincePass(snap *ObservationSnapshot, name string, now time.Time, maxAge time.Duration) bool {
+	if snap == nil {
+		return false
+	}
+	f := snap.ByName[name].Listed
+	return f.Value == ObsYes && f.ObservedAt.After(snap.Inventory.StartedAt) && now.Sub(f.ObservedAt) <= maxAge
 }
 
 // listedObservation is Observation without the priming rule, for a name the

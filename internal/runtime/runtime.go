@@ -557,6 +557,16 @@ type EnvironmentBatchProvider interface {
 	GetAllEnvironment(name string) (map[string]string, error)
 }
 
+// IdentitySidecarProvider is an optional extension for providers whose
+// GetMeta reads a local sidecar file the provider seeds from the runtime's
+// environment at start (acp, subprocess), so a per-key identity read is a
+// cheap local read. Providers whose GetMeta reaches a remote host, a pod or
+// a script do not implement it, and the v2 inventory never reads their
+// identity.
+type IdentitySidecarProvider interface {
+	LocalIdentitySidecar() bool
+}
+
 // TransportCapabilityProvider is an optional extension for providers that can
 // report whether they support starting sessions with a specific transport.
 //

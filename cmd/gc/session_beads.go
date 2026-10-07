@@ -3471,10 +3471,12 @@ func reapRuntimesBoundToClosedBeads(
 		seen[name] = true
 		if inv != nil {
 			inv.closedBound.candidates++
-			// The lane read GC_SESSION_ID once per incarnation. This filter
-			// rests on GC_SESSION_ID never changing within an incarnation:
-			// a runtime rebound to another bead is a new incarnation, which
-			// carries no owner until the lane enriches it.
+			// The lane reads GC_SESSION_ID for each incarnation and refreshes
+			// it, least recently read first; a failed refresh clears the
+			// owner until a later read. This filter rests on GC_SESSION_ID
+			// never changing within an incarnation: a runtime rebound to
+			// another bead is a new incarnation, which carries no owner
+			// until the lane reads it.
 			if owner, ok := inv.owner(name); ok {
 				if _, open := sessionBeads.FindInfoByID(owner); open {
 					inv.closedBound.filtered++

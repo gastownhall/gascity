@@ -36,12 +36,13 @@ import (
 //     failed);
 //  4. enriches names on backends that offer a batched inventory, in one
 //     bounded call per backend;
-//  5. reads runtime identity env (v5 O3): new incarnations first, then the
-//     least recently read names, inventoryAttributionBudget reads per patrol
-//     interval, through GetAllEnvironment where the backend batches it and
-//     GetMeta per key on sidecar backends (acp, subprocess);
+//  5. reads runtime identity env (v5 O3): new incarnations first, then
+//     failed reads, then the least recently read names,
+//     inventoryAttributionBudget reads per patrol interval, through
+//     GetAllEnvironment where the backend batches it and GetMeta per key on
+//     local sidecar backends (acp, subprocess); other backends are not read;
 //  6. probes agent-process liveness every pass under each live pane, with
-//     the runtime's own GT_PROCESS_NAMES;
+//     the runtime's own GT_PROCESS_NAMES, within the enrichment bound;
 //  7. publishes the snapshot, then reports health and traces;
 //  8. pokes the reconciler for every name the pass proved gone, and detects
 //     on_death edges for the worker (runtime_inventory_ondeath.go).
@@ -82,12 +83,14 @@ type runtimeInventoryLane struct {
 	providerGen  uint64
 	lastProvider runtime.Provider
 	identity     map[string]inventoryIdentity
-	// envWindowAt starts the current patrol interval's env-read budget, and
-	// envWindowReads counts the reads made in it.
-	envWindowAt    time.Time
-	envWindowReads int
-	lastSignature  string
-	alerted        map[string]time.Time
+	// envWindowAt starts the current patrol interval's env-read budget;
+	// envWindowReads counts the reads made in it, and envWindowRefreshes
+	// those that re-read a name's current incarnation.
+	envWindowAt        time.Time
+	envWindowReads     int
+	envWindowRefreshes int
+	lastSignature      string
+	alerted            map[string]time.Time
 	// poolDeathPrev holds the on_death handler names listed and not yet
 	// proven gone (detectPoolDeathEdges).
 	poolDeathPrev map[string]poolDeathSighting
@@ -136,7 +139,9 @@ const (
 	// and the other backends' answers still publish; the bound only catches
 	// a backend with no timeout of its own.
 	inventoryListingBound = 35 * time.Second
-	// inventoryEnrichBound caps the batched inventory reads of one pass.
+	// inventoryEnrichBound caps the batched inventory reads and the process
+	// probes of one pass together, so the worst-case pass (listing, this
+	// bound and the identity reads' bound) stays within maxAge.
 	inventoryEnrichBound = 10 * time.Second
 	// inventoryAttributionBound caps the identity env reads of one pass. A
 	// read still outstanding at the bound is abandoned, and the names left
@@ -149,6 +154,10 @@ const (
 	// interval (v5 O3): after a restart with 150 sessions, every identity is
 	// read within three intervals.
 	inventoryAttributionBudget = 64
+	// inventoryRefreshBudget caps the reads of an interval that refresh a
+	// name's current incarnation, so a steady state leaves half the budget
+	// to new incarnations seen by wake passes.
+	inventoryRefreshBudget = inventoryAttributionBudget / 2
 	// inventoryTraceHeartbeatPasses records a quiet pass this often.
 	inventoryTraceHeartbeatPasses = 20
 	// inventoryUnhealthyRealert repeats an unhealthy backend's alert.
@@ -369,8 +378,11 @@ func (l *runtimeInventoryLane) publish(ctx context.Context, listing inventoryLis
 		backends[i] = classifyInventoryBackend(leaf)
 	}
 
+	// The batched inventory reads and the process probes share one bound.
+	enrichCtx, cancel := context.WithTimeout(ctx, inventoryEnrichBound)
+	defer cancel()
 	phase := l.clock.Now()
-	attrs, hosts, enrichErrs := l.enrich(ctx, listing.leaves, backends)
+	attrs, hosts, enrichErrs := l.enrich(enrichCtx, listing.leaves, backends)
 	report.enrich = l.clock.Now().Sub(phase)
 	report.enrichErrors = enrichErrs
 
@@ -379,7 +391,7 @@ func (l *runtimeInventoryLane) publish(ctx context.Context, listing inventoryLis
 	report.envRead = l.clock.Now().Sub(phase)
 
 	phase = l.clock.Now()
-	report.processProbes = probeProcesses(ctx, attrs, hosts, concurrency)
+	report.processProbes = probeProcesses(enrichCtx, attrs, hosts, concurrency)
 	report.processProbe = l.clock.Now().Sub(phase)
 
 	pass := InventoryPass{
@@ -418,18 +430,29 @@ func (l *runtimeInventoryLane) publishListingFailure(sp runtime.Provider, starte
 	l.commit(pass, nil, report)
 }
 
-// commit publishes one pass, prunes identity reads to the published names,
-// and reports health.
+// commit publishes one pass, prunes identity reads to the names it listed,
+// and reports health. A name its backend failed to list keeps an
+// incarnation-keyed read, which a relisting re-checks; a read with no
+// incarnation (a sidecar backend) cannot be re-checked and is dropped, so a
+// reused name never inherits a previous runtime's identity.
 func (l *runtimeInventoryLane) commit(pass InventoryPass, attrs map[string]InventoryAttrs, report *inventoryPassReport) {
 	before := l.cache.Snapshot()
 	report.flips = l.cache.PublishInventory(pass, attrs)
 	snap := l.cache.Snapshot()
 	report.attrs = attrs
 	report.gone = inventoryGone(before, snap)
-	for name := range l.identity {
-		if _, ok := snap.ByName[name]; !ok {
-			delete(l.identity, name)
+	listed, failed := pass.listedOn(), make(map[string]bool)
+	for _, b := range pass.Backends {
+		failed[b.Label] = b.Outcome == OutcomeFailed
+	}
+	for name, got := range l.identity {
+		if _, ok := listed[name]; ok {
+			continue
 		}
+		if obs, ok := snap.ByName[name]; ok && failed[obs.Backend] && got.incarnation != "" {
+			continue
+		}
+		delete(l.identity, name)
 	}
 	report.snapshot = snap
 	report.alerts = l.updateHealth(snap.Health, pass.FinishedAt)
@@ -570,7 +593,7 @@ func classifyInventoryBackend(leaf inventoryBackend) BackendPass {
 }
 
 // enrich reads the batched inventory of every backend that offers one, in
-// one call per backend under one bound. A name belongs to the first backend
+// one call per backend under ctx's bound. A name belongs to the first backend
 // that listed it. Names on a backend without an inventory get empty attrs,
 // which record their enrichment facts as unsupported; names whose backend's
 // inventory failed, or that the inventory omits, get none and keep theirs.
@@ -579,8 +602,6 @@ func classifyInventoryBackend(leaf inventoryBackend) BackendPass {
 func (l *runtimeInventoryLane) enrich(ctx context.Context, leaves []inventoryBackend, backends []BackendPass) (attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, errs []string) {
 	attrs = make(map[string]InventoryAttrs)
 	hosts = make(map[string]runtime.Provider)
-	ctx, cancel := context.WithTimeout(ctx, inventoryEnrichBound)
-	defer cancel()
 	claimed := make(map[string]bool)
 	for i, leaf := range leaves {
 		if backends[i].Outcome == OutcomeFailed {
@@ -627,12 +648,14 @@ func (l *runtimeInventoryLane) enrich(ctx context.Context, leaves []inventoryBac
 	return attrs, hosts, errs
 }
 
-// readIdentities fills the identity of every enriched name from the lane's
-// identity reads (v5 O3). It reads names whose current incarnation has no
-// good read first, then the least recently read, within the patrol
-// interval's inventoryAttributionBudget and inventoryAttributionBound. A
-// read error leaves the name's identity unknown; a name not read this pass
-// keeps its incarnation's last read, never a previous incarnation's. The
+// readIdentities fills the identity of every enriched name on a backend
+// whose identity can be read (identityReadable) from the lane's identity
+// reads (v5 O3). It reads new incarnations first, then failed reads of the
+// current incarnation, then the least recently read, within the patrol
+// interval's inventoryAttributionBudget (refreshes within
+// inventoryRefreshBudget) and inventoryAttributionBound. A read error leaves
+// the name's identity unknown; a name not read this pass keeps its current
+// incarnation's last read (commit prunes the reads of unlisted names). The
 // reapers' owner fact is derived from the same read, and only where it was
 // always set: an incarnation on a backend with a batched environment read.
 // It returns the reads made and the names left without a good read.
@@ -640,20 +663,30 @@ func (l *runtimeInventoryLane) readIdentities(ctx context.Context, attrs map[str
 	ctx, cancel := context.WithTimeout(ctx, inventoryAttributionBound)
 	defer cancel()
 	if now := l.clock.Now(); l.envWindowAt.IsZero() || now.Sub(l.envWindowAt) >= l.interval {
-		l.envWindowAt, l.envWindowReads = now, 0
+		l.envWindowAt, l.envWindowReads, l.envWindowRefreshes = now, 0, 0
 	}
-	unread := func(name string) bool {
+	// rank orders the reads: a new incarnation (0), a failed read of the
+	// current one (1), then a refresh (2).
+	rank := func(name string) int {
 		got, ok := l.identity[name]
-		return !ok || got.incarnation != attrs[name].Incarnation || !got.id.Known
+		switch {
+		case !ok || got.incarnation != attrs[name].Incarnation:
+			return 0
+		case !got.id.Known:
+			return 1
+		}
+		return 2
 	}
 	names := make([]string, 0, len(hosts))
-	for name := range hosts {
-		names = append(names, name)
+	for name, host := range hosts {
+		if identityReadable(host) {
+			names = append(names, name)
+		}
 	}
 	sort.Slice(names, func(i, j int) bool {
 		a, b := names[i], names[j]
-		if ua, ub := unread(a), unread(b); ua != ub {
-			return ua
+		if ra, rb := rank(a), rank(b); ra != rb {
+			return ra < rb
 		}
 		if ra, rb := l.identity[a].id.ReadAt, l.identity[b].id.ReadAt; !ra.Equal(rb) {
 			return ra.Before(rb)
@@ -661,7 +694,8 @@ func (l *runtimeInventoryLane) readIdentities(ctx context.Context, attrs map[str
 		return a < b
 	})
 	for _, name := range names {
-		if l.envWindowReads >= inventoryAttributionBudget || ctx.Err() != nil {
+		refresh := rank(name) == 2
+		if l.envWindowReads >= inventoryAttributionBudget || (refresh && l.envWindowRefreshes >= inventoryRefreshBudget) || ctx.Err() != nil {
 			break
 		}
 		id, ok := l.readIdentityBounded(ctx, hosts[name], name)
@@ -670,10 +704,13 @@ func (l *runtimeInventoryLane) readIdentities(ctx context.Context, attrs map[str
 		}
 		reads++
 		l.envWindowReads++
+		if refresh {
+			l.envWindowRefreshes++
+		}
 		l.identity[name] = inventoryIdentity{incarnation: attrs[name].Incarnation, id: id}
 	}
 	for _, name := range names {
-		if unread(name) {
+		if rank(name) < 2 {
 			backlog++
 		}
 		got, ok := l.identity[name]
@@ -691,6 +728,18 @@ func (l *runtimeInventoryLane) readIdentities(ctx context.Context, attrs map[str
 		attrs[name] = a
 	}
 	return reads, backlog
+}
+
+// identityReadable reports whether leaf's identity env is cheap and local to
+// read: a batched environment read (tmux), or a local sidecar (acp,
+// subprocess). Other leaves' GetMeta reaches a pod, a host or a script, so
+// their identity is never read, and stays unknown.
+func identityReadable(leaf runtime.Provider) bool {
+	if _, ok := leaf.(runtime.EnvironmentBatchProvider); ok {
+		return true
+	}
+	sidecar, ok := leaf.(runtime.IdentitySidecarProvider)
+	return ok && sidecar.LocalIdentitySidecar()
 }
 
 // readIdentityBounded reads one name's identity on its own goroutine, so a
@@ -735,7 +784,9 @@ var identityEnvKeys = [...]string{"GC_SESSION_ID", "GC_RUNTIME_EPOCH", "GC_INSTA
 // readRuntimeIdentity is the fresh identity read (v5 O2, I11) the start,
 // stop and close effects pair with compareIdentity: one read of name's
 // identity env on leaf, bounded at fenceProbeTimeout. A read that errors,
-// panics or outlives its bound is not Known. ReadAt is left to the caller.
+// panics or outlives its bound, or a leaf whose identity is not readable
+// (identityReadable; a composite such as auto included: pass the leaf), is
+// not Known. ReadAt is left to the caller.
 func readRuntimeIdentity(ctx context.Context, leaf runtime.Provider, name string) runtimeIdentity {
 	ctx, cancel := context.WithTimeout(ctx, fenceProbeTimeout)
 	defer cancel()
@@ -757,27 +808,38 @@ func readRuntimeIdentity(ctx context.Context, leaf runtime.Provider, name string
 }
 
 // readIdentityEnv reads name's identity env from leaf: one GetAllEnvironment
-// where the leaf batches it (tmux), otherwise GetMeta per key (the acp and
-// subprocess sidecars). Any error leaves the identity unknown.
+// where the leaf batches it (tmux), otherwise GetMeta per key on a local
+// sidecar (acp, subprocess). Any error, or a leaf whose identity is not
+// readable, leaves the identity unknown.
+//
+// A sidecar is one file per key, re-seeded by clearing every key and then
+// writing each. Its keys are read twice, and only two equal reads count: a
+// clear or write between them changes a key both reads cover, so equal reads
+// never mix two seeds. A seed still writing can still show its keys not yet
+// written as empty (C4c1: a straddled read of a re-seeding sidecar may read
+// the row's token with no session ID). LL3 lists a subprocess runtime only
+// after its seed completes, so this needs a re-seed under a listed name.
 func readIdentityEnv(leaf runtime.Provider, name string) runtimeIdentity {
-	if leaf == nil {
-		return runtimeIdentity{}
-	}
-	get := func(key string) (string, error) { return leaf.GetMeta(name, key) }
+	var v [len(identityEnvKeys)]string
 	if batch, ok := leaf.(runtime.EnvironmentBatchProvider); ok {
 		vars, err := batch.GetAllEnvironment(name)
 		if err != nil {
 			return runtimeIdentity{}
 		}
-		get = func(key string) (string, error) { return vars[key], nil }
-	}
-	var v [len(identityEnvKeys)]string
-	for i, key := range identityEnvKeys {
-		val, err := get(key)
-		if err != nil {
+		for i, key := range identityEnvKeys {
+			v[i] = strings.TrimSpace(vars[key])
+		}
+	} else {
+		if !identityReadable(leaf) {
 			return runtimeIdentity{}
 		}
-		v[i] = strings.TrimSpace(val)
+		first, ok := readSidecarIdentity(leaf, name)
+		if !ok {
+			return runtimeIdentity{}
+		}
+		if v, ok = readSidecarIdentity(leaf, name); !ok || v != first {
+			return runtimeIdentity{}
+		}
 	}
 	id := runtimeIdentity{Known: true, SessionID: v[0], Epoch: v[1], Token: v[2]}
 	for _, pn := range strings.Split(v[3], ",") {
@@ -788,16 +850,27 @@ func readIdentityEnv(leaf runtime.Provider, name string) runtimeIdentity {
 	return id
 }
 
+// readSidecarIdentity reads the identity keys through GetMeta, once each.
+func readSidecarIdentity(leaf runtime.Provider, name string) (v [len(identityEnvKeys)]string, ok bool) {
+	for i, key := range identityEnvKeys {
+		val, err := leaf.GetMeta(name, key)
+		if err != nil {
+			return v, false
+		}
+		v[i] = strings.TrimSpace(val)
+	}
+	return v, true
+}
+
 // probeProcesses probes agent-process liveness for every enriched name whose
 // pane is alive and whose identity carries GT_PROCESS_NAMES, on a leaf that
 // reports failed observations (v5 O3), every pass, at most concurrency at a
-// time, within inventoryEnrichBound. Only a complete, error-free answer with
-// a live pane is known; anything else leaves the fact unknown. Other names
-// are not probed, and their fact stays unsupported. It returns the probes
-// made.
+// time, within ctx (the pass's enrichment bound). Only a complete,
+// error-free answer with a live pane, for the incarnation the pass enriched
+// (probedIncarnation), is known; anything else leaves the fact unknown.
+// Other names are not probed, and their fact stays unsupported. It returns
+// the probes made.
 func probeProcesses(ctx context.Context, attrs map[string]InventoryAttrs, hosts map[string]runtime.Provider, concurrency int) int {
-	ctx, cancel := context.WithTimeout(ctx, inventoryEnrichBound)
-	defer cancel()
 	var names []string
 	for name, a := range attrs {
 		if _, ok := hosts[name].(runtime.LivenessObserverWithError); ok && a.DeadKnown && !a.AllPanesDead && len(a.Identity.ProcessNames) > 0 {
@@ -813,11 +886,12 @@ func probeProcesses(ctx context.Context, attrs map[string]InventoryAttrs, hosts 
 	sem := make(chan struct{}, max(concurrency, 1))
 	for _, name := range names {
 		sem <- struct{}{}
-		go func(leaf runtime.Provider, processNames []string) {
+		go func(leaf runtime.Provider, a InventoryAttrs) {
 			defer func() { <-sem }()
-			lv, status, err := runtime.ObserveLivenessBounded(ctx, leaf, name, processNames, fenceProbeTimeout)
-			answers <- answer{name: name, known: status == runtime.ObservationComplete && err == nil && lv.Running, alive: lv.Alive}
-		}(hosts[name], attrs[name].Identity.ProcessNames)
+			lv, status, err := runtime.ObserveLivenessBounded(ctx, leaf, name, a.Identity.ProcessNames, fenceProbeTimeout)
+			known := status == runtime.ObservationComplete && err == nil && lv.Running && probedIncarnation(a.Incarnation, lv)
+			answers <- answer{name: name, known: known, alive: lv.Alive}
+		}(hosts[name], attrs[name])
 	}
 	for range names {
 		got := <-answers
@@ -826,6 +900,18 @@ func probeProcesses(ctx context.Context, attrs map[string]InventoryAttrs, hosts 
 		attrs[got.name] = a
 	}
 	return len(names)
+}
+
+// probedIncarnation reports whether a probe answered for incarnation: the
+// object it observed (ObjectID, ObjectCreated) leads the incarnation, as in
+// tmux's "#{session_id}:#{session_created}:#{pane_pid}". A probe that names
+// no object, or another one, answered for some other runtime.
+func probedIncarnation(incarnation string, lv runtime.Liveness) bool {
+	if lv.ObjectID == "" || lv.ObjectCreated == "" {
+		return false
+	}
+	key := lv.ObjectID + ":" + lv.ObjectCreated
+	return incarnation == key || strings.HasPrefix(incarnation, key+":")
 }
 
 // updateHealth alerts on stderr once per unhealthy episode per backend, and
