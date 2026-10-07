@@ -74,9 +74,10 @@ type bootState struct {
 }
 
 // planner runs passes on one goroutine. Only that goroutine touches inflight,
-// backoff, bucket, fairSeed, boot, last, rowTrace and memo; other goroutines
-// reach the planner through markDirty, the settlement queue, the start pause
-// and stop, and read what a pass publishes through out.
+// backoff, bucket, fairSeed, boot, last, rowTrace, memo and stalled; other
+// goroutines reach the planner through markDirty, the settlement queue, the
+// execution-stalled inbox, the start pause and stop, and read what a pass
+// publishes through out.
 type planner struct {
 	clock       plannerClock
 	patrol      func() time.Duration // read after every pass, so a reload takes effect
@@ -94,6 +95,12 @@ type planner struct {
 	rowTrace map[rowKey]string // each row's last traced (reason, outcome)
 	memo     gatherMemo
 	out      passOutputs
+
+	// stalled holds the execution-stalled requests by row ID for arm A16
+	// (C7b1); C8's step posts them to stalledPosted under stalledMu.
+	stalled       map[string]executionStalledRequest
+	stalledMu     sync.Mutex
+	stalledPosted []executionStalledRequest
 
 	dirty       chan struct{} // capacity 1: marks fold until the loop reads one
 	settlements settlementQueue
@@ -127,6 +134,46 @@ func (p *planner) markDirty(reason string) {
 	case p.dirty <- struct{}{}:
 	default:
 	}
+}
+
+// postExecutionStalled hands the planner an execution-stalled request
+// (NUDGE-022) from another goroutine, and asks for a pass.
+func (p *planner) postExecutionStalled(r executionStalledRequest) {
+	p.stalledMu.Lock()
+	p.stalledPosted = append(p.stalledPosted, r)
+	p.stalledMu.Unlock()
+	p.markDirty("execution-stalled")
+}
+
+// executionStalled folds the posted requests into the planner's, newest per
+// row, forgets rows c no longer holds, and returns the pass's copy.
+func (p *planner) executionStalled(c *sessionCensus) map[string]executionStalledRequest {
+	p.stalledMu.Lock()
+	posted := p.stalledPosted
+	p.stalledPosted = nil
+	p.stalledMu.Unlock()
+	if p.stalled == nil {
+		p.stalled = make(map[string]executionStalledRequest)
+	}
+	for _, r := range posted {
+		p.stalled[r.ID] = r
+	}
+	if len(p.stalled) == 0 {
+		return nil
+	}
+	open := make(map[string]bool)
+	for _, row := range c.Canonical() {
+		open[row.Key.ID] = true
+	}
+	out := make(map[string]executionStalledRequest, len(p.stalled))
+	for id, r := range p.stalled {
+		if !open[id] {
+			delete(p.stalled, id)
+			continue
+		}
+		out[id] = r
+	}
+	return out
 }
 
 // pauseStarts and resumeStarts bracket a provider swap; the pass reads

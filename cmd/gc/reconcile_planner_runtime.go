@@ -191,6 +191,7 @@ func (rt *plannerRuntime) start(parent context.Context) bool {
 	h := rt.host
 	lane := newExternalReadsLane(rt.env.Load().patrol(), h.gather.externalReadsEnv, func() { rt.planner.markDirty("external-reads") }, h.safeTick, h.rec, h.stderr)
 	lane.addWaitsStep()
+	lane.addPoolSteps(rt.planner.out.summary.Load, rt.planner.postExecutionStalled)
 	rt.lane.Store(lane)
 	if h.setInventoryHook != nil {
 		h.setInventoryHook(func(prev, next *ObservationSnapshot) {

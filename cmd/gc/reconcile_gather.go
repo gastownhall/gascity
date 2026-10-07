@@ -45,8 +45,8 @@ type gatherEnv struct {
 	RigStores  func() map[string]beads.Store
 	Recording  func() *externalReadsRecording // K1's latest; nil before the first
 	ReadyWaits func() map[string]bool         // K1's waits step's latest (I10)
-	// Nudges and WorkStore are the nudges-class and city work stores the
-	// waits step reads and writes through.
+	// Nudges and WorkStore are the nudges-class and city work stores C8's
+	// steps write through.
 	Nudges       func() beads.NudgesStore
 	WorkStore    func() beads.Store
 	Observations func() *ObservationCache
@@ -93,6 +93,9 @@ type World struct {
 	TransportRefused  map[string]string                     // by qualified name
 	ReadyWaits        map[string]bool                       // I10, by session bead ID
 	Templates         *templateMemo
+	// ExecutionStalled are the execution backstop's drain requests by row
+	// ID, for arm A16 (C7b1).
+	ExecutionStalled map[string]executionStalledRequest
 }
 
 // gather builds the pass's World at now. It first drains the settlements
@@ -134,6 +137,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if w.Census, err = readSessionCensus(now, legs); err != nil {
 		return World{}, fmt.Errorf("gather: %w", err)
 	}
+	w.ExecutionStalled = p.executionStalled(w.Census)
 	if e.ReadyWaits != nil {
 		w.ReadyWaits = e.ReadyWaits()
 	}
@@ -249,6 +253,7 @@ func (e gatherEnv) externalReadsEnv() (externalReadsEnv, error) {
 		return externalReadsEnv{}, err
 	}
 	k1 := k1Env(e, env, suspended, censusDemandEnv(census, store, rigs))
+	k1.SP = env.SP
 	if e.Nudges != nil {
 		k1.Nudges = e.Nudges()
 	}

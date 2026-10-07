@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -55,8 +56,9 @@ import (
 // decision (2026-10-05): ops step G′'s counts were never taken, and the doctor
 // --fix move is re-measured after cutover. Those writes run only under v2;
 // legacy keeps them in its tick, so the two never both run. The planner
-// runtime adds C8's waits step (reconcile_steps_waits.go), which a closed
-// wait dependency runs alone, without reading the legs (GUAR-010).
+// runtime adds C8's waits, nudges and orphan-release steps
+// (reconcile_steps_*.go). A closed wait dependency runs the waits step alone,
+// without reading the legs (GUAR-010).
 //
 // The lane always reads, suspended city or not (CONTRACT v5 R4), so a
 // suspended city's drains keep their work reads. Only its steps keep
@@ -271,8 +273,9 @@ type externalReadsEnv struct {
 	// Sessions is the open session census the stamp and the assigned-work
 	// canonicalization read; nil leaves both inert, as in legacy.
 	Sessions *sessionBeadSnapshot
-	// Nudges and WorkStore are the waits step's: the nudges-class store and
-	// the city work store its dependency reads plan over.
+	// SP, Nudges and WorkStore are C8's steps': the provider nudges go
+	// through, the nudges-class store and the city work store.
+	SP        runtime.Provider
 	Nudges    beads.NudgesStore
 	WorkStore beads.Store
 }
@@ -329,6 +332,10 @@ type externalReadsLane struct {
 	// readyWaits (I10) and waitDeps, the dependencies of pending deps waits,
 	// are the waits step's last run's; each is replaced, never mutated.
 	readyWaits, waitDeps atomic.Pointer[map[string]bool]
+	// summary is the planner's last allocation (S-14), and stalled its
+	// execution-stalled inbox; set with the pool steps.
+	summary func() *allocSummary
+	stalled func(executionStalledRequest)
 }
 
 // sourceRead is one read in flight.
