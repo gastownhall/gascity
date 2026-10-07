@@ -43,7 +43,7 @@ func demandOnlySingletonCreateRefusal(cfg *config.City, agentCfg config.Agent) s
 // before the wake. The wake is recorded first (holds and quarantine cleared),
 // exactly as `gc session wake` does, but a demand-only singleton's pool session
 // that is not running is started by the reconciler only from pool demand, so
-// reporting success would be false (#6858, SESSION-RECON-018). The
+// reporting success would be false (#6858, SESSION-RECON-019). The
 // classification is shared with the CLI (session.DemandOnlySingletonWakeRefused).
 func demandOnlySingletonWakeRefusal(cfg *config.City, info session.Info) string {
 	agentCfg, ok := findAgentByQualifiedTemplate(cfg, info.Template)

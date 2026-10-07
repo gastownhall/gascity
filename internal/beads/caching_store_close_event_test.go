@@ -351,6 +351,35 @@ func TestCloseAllCancellingQueuedCloseAnnouncesItOnce(t *testing.T) {
 	assertClosedExactlyOnce(t, rec, seed.ID, "after CloseAll canceled a queued close")
 }
 
+// A reconcile pass evicts a closed row before its trailing drain announces the
+// row's queued close. A CloseAll in that window finds no cached row, but its
+// absorb still cancels the queued entry, so it must announce the close.
+func TestCloseAllCancellingQueuedCloseOfEvictedRowAnnouncesItOnce(t *testing.T) {
+	t.Parallel()
+	mem, cs, rec, seed := newPrimedCloseEventCache(t)
+
+	if err := mem.Close(seed.ID); err != nil {
+		t.Fatalf("external close: %v", err)
+	}
+	external, err := mem.Get(seed.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	// A read queues the close; the reconcile pass then evicts the closed row
+	// and releases c.mu before its trailing drain.
+	cs.mu.Lock()
+	cs.absorbFreshLocked(seed.ID, external, time.Now(), absorbOpts{depsMode: depsKeepCached, seqMode: seqKeep})
+	cs.evictLocked(seed.ID)
+	cs.mu.Unlock()
+
+	if _, err := cs.CloseAll([]string{seed.ID}, nil); err != nil {
+		t.Fatalf("CloseAll: %v", err)
+	}
+	// The reconcile pass's trailing drain.
+	cs.announceUnannouncedCloses()
+	assertClosedExactlyOnce(t, rec, seed.ID, "after CloseAll canceled the queued close of an evicted row")
+}
+
 // The same lost-close shape for Close: it cancels the queued entry, so it
 // must announce.
 func TestCloseCancellingQueuedCloseAnnouncesItOnce(t *testing.T) {

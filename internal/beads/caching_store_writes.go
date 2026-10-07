@@ -373,6 +373,10 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 	}
 	for _, item := range refreshed {
 		_, hadPrevious := c.beads[item.id]
+		// A reconcile pass can evict a closed row before its trailing drain
+		// announces the row's queued close; the absorb below cancels that
+		// entry, so this CloseAll owns the announcement even with no row.
+		_, queued := c.unannouncedCloses[item.id]
 		opts := absorbOpts{depsMode: depsKeepCached, seqMode: seqKeep, clearDirty: true}
 		if item.bead.Status == "closed" {
 			opts.depsMode = depsDrop
@@ -383,8 +387,8 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 		if item.bead.Status == "closed" {
 			c.clearDependentReadyProjectionsLocked(item.id)
 		}
-		// CloseAll announces only closes of rows it had cached.
-		if announce && hadPrevious {
+		// CloseAll announces only closes of rows it had cached or had queued.
+		if announce && (hadPrevious || queued) {
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.closed",
 				bead:      cloneBead(item.bead),

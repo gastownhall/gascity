@@ -1450,7 +1450,9 @@ func TestIsDemandOnlySingletonSession(t *testing.T) {
 }
 
 // TestDemandOnlySingletonWakeRefused: a wake of the pool capacity cannot start
-// it, but a wake of one already running only clears its blockers.
+// it, but a wake of one already running, or whose provider start is already in
+// flight, only clears its blockers. A start-pending one is still refused: only
+// pool demand starts it.
 func TestDemandOnlySingletonWakeRefused(t *testing.T) {
 	one := 1
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{{Name: "worker", MaxActiveSessions: &one}}}
@@ -1464,6 +1466,8 @@ func TestDemandOnlySingletonWakeRefused(t *testing.T) {
 		{"drained", true},
 		{"active", false},
 		{"awake", false},
+		{"creating", false},
+		{"start-pending", true},
 	} {
 		info := Info{Template: "worker", PoolManaged: true, MetadataState: tt.state}
 		if got := DemandOnlySingletonWakeRefused(cfg, agent, info); got != tt.want {

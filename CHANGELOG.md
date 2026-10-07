@@ -37,7 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `max_active_sessions = 1`, `min_active_sessions = 0` and no
   `[[named_session]]` now returns 400 `demand-only-singleton` instead of 202
   and a session that never started. An API wake of such a session records the
-  wake (clearing holds) and returns the same error (#6858).
+  wake (clearing holds) and returns the same error unless the session is
+  running or its start is already in flight (#6858).
 - **A partially routed convoy sling answers 200 with status `partial`.**
   `POST /v0/city/{city}/sling` reports a convoy whose children were routed
   only in part as 200 with `status: "partial"` and the failed children in
@@ -50,8 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fields need updating:
   - Edits to a rig-qualified agent served by a generic `scope = "rig"`
     template (`PATCH`, `suspend`, `resume` on `/agent/{rig}/{name}`) now
-    apply to the template and return 200 instead of 404; `DELETE` on such an
-    agent returns 409 (delete the template instead).
+    apply to the template, and so to that agent in every rig the template
+    serves, and return 200 instead of 404; `DELETE` on such an agent returns
+    409 (delete the template instead).
   - A config edit whose `[patches]` entry names a target missing from the
     merged config returns 400 instead of 500.
   - Closed sessions report `state: "closed"` instead of an empty state.
@@ -95,7 +97,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name or alias still need `--force` (#6324). The close's audit actor is the
   assignee string.
 - `gc session pin` and `gc session wake` report a demand-only singleton's pool
-  session honestly instead of succeeding (#6858).
+  session honestly instead of succeeding: pin is refused, and wake records the
+  wake but exits non-zero unless the session is running or its start is
+  already in flight (#6858).
 - An API config edit is no longer lost when it lands while the controller is
   reloading config: a load hashes the city's convention trees before reading
   them, and a runtime reload can no longer publish an older config over a
@@ -103,7 +107,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GET /v0/city/{city}/patches/...` returns the patches declared in
   `city.toml` instead of 404/empty after they were applied (ga-8hk1fe).
 - Edits to a rig-qualified agent served by a generic rig-scoped template reach
-  that template instead of answering 404 (ga-l24lrx).
+  that template, and so every rig it serves, instead of answering 404
+  (ga-l24lrx).
 - `GET /v0/city/{city}/agents` reflects a config change right away instead of
   serving a cached list keyed only on session state (ga-79peco).
 

@@ -732,8 +732,9 @@ func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage
 }
 
 // notifyChange announces one change. Any close a read or an event patch
-// installed without announcing goes out first, so a close is never reported
-// after a later change to the same bead.
+// installed without announcing is drained first, so a queued close is
+// announced before this change. A drain racing on another goroutine emits
+// after unlocking, so its close can still follow this change on the stream.
 func (c *CachingStore) notifyChange(eventType string, b Bead) {
 	c.announceUnannouncedCloses()
 	c.emitChange(eventType, b)

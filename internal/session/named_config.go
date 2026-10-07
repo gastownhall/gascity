@@ -140,14 +140,18 @@ func IsDemandOnlySingletonSession(cfg *config.City, agentCfg *config.Agent, info
 
 // DemandOnlySingletonWakeRefused reports whether an explicit wake of info
 // cannot start it: info is demand-only singleton pool capacity (see
-// IsDemandOnlySingletonSession) whose runtime is not already up. Waking one
-// that is running only clears its blockers, so that wake is not refused.
+// IsDemandOnlySingletonSession) whose runtime is neither up nor already
+// starting (a provider Start in flight). Waking one that is running or starting
+// only clears its blockers, so that wake is not refused. A start-pending one is
+// refused: no Start is in flight, and only pool demand, never the wake, decides
+// whether the controller starts it (an API-created one can sit start-pending
+// forever, #6858).
 func DemandOnlySingletonWakeRefused(cfg *config.City, agentCfg *config.Agent, info Info) bool {
 	if !IsDemandOnlySingletonSession(cfg, agentCfg, info) {
 		return false
 	}
-	switch strings.TrimSpace(info.MetadataState) {
-	case string(StateActive), "awake":
+	switch State(strings.TrimSpace(info.MetadataState)) {
+	case StateActive, StateAwake, StateCreating:
 		return false
 	}
 	return true

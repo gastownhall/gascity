@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/api/apierr"
@@ -159,7 +160,7 @@ func createDemandOnlyPoolSession(t *testing.T, fs *fakeState) string {
 	return b.ID
 }
 
-// assertWakeRecordedHoldCleared pins SESSION-RECON-018's wake contract: the
+// assertWakeRecordedHoldCleared pins SESSION-RECON-019's wake contract: the
 // wake is recorded and its hold cleared even though the session will not
 // start, exactly as `gc session wake` does, so a held or quarantined
 // demand-only session can still be un-held over the API.
@@ -207,6 +208,29 @@ func TestHumaHandleSessionWakeRefusesDemandOnlySingletonSession(t *testing.T) {
 		t.Fatalf("problem = status %d code %q, want status %d code %q", problem.Status, problem.Code, http.StatusBadRequest, apierr.DemandOnlySingleton.Code)
 	}
 	assertDemandOnlyRefusalMessage(t, problem.Detail)
+	assertWakeRecordedHoldCleared(t, fs, id)
+}
+
+// The bead a pre-#6858 API create left behind sits start-pending: no provider
+// start is in flight, so only pool demand can start it and the wake is still
+// refused. Only a session already creating is spared the refusal.
+func TestHumaHandleSessionWakeRefusesStartPendingDemandOnlySingletonSession(t *testing.T) {
+	fs := newSessionFakeState(t)
+	id := createDemandOnlyPoolSession(t, fs)
+	if err := fs.cityBeadStore.SetMetadataBatch(id, map[string]string{
+		"state":                     string(session.StateStartPending),
+		"pending_create_claim":      "true",
+		"pending_create_started_at": time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(%s): %v", id, err)
+	}
+	srv := New(fs)
+
+	_, err := srv.humaHandleSessionWake(context.Background(), &SessionIDInput{ID: id})
+	var problem *apierr.ErrorModel
+	if !errors.As(err, &problem) || problem.Code != apierr.DemandOnlySingleton.Code {
+		t.Fatalf("humaHandleSessionWake() error = %v, want code %q", err, apierr.DemandOnlySingleton.Code)
+	}
 	assertWakeRecordedHoldCleared(t, fs, id)
 }
 

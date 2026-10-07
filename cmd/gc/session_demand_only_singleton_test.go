@@ -78,6 +78,16 @@ func TestDoSessionWake_DemandOnlySingletonReportsItWillNotStart(t *testing.T) {
 		"session_origin": "ephemeral",
 		"pool_managed":   "true",
 	}
+	starting := map[string]string{
+		"template":                  "worker",
+		"agent_name":                "worker",
+		"session_name":              "worker",
+		"state":                     string(session.StateCreating),
+		"pending_create_claim":      "true",
+		"pending_create_started_at": now.UTC().Format(time.RFC3339),
+		"session_origin":            "ephemeral",
+		"pool_managed":              "true",
+	}
 	manual := map[string]string{
 		"template":       "worker",
 		"agent_name":     "worker",
@@ -94,6 +104,7 @@ func TestDoSessionWake_DemandOnlySingletonReportsItWillNotStart(t *testing.T) {
 		{name: "API-created start-pending bead", meta: apiCreatedSingletonMetadata(now), wantCode: 1},
 		{name: "controller pool bead asleep", meta: controllerAsleep, wantCode: 1},
 		{name: "running pool bead", meta: running, wantCode: 0},
+		{name: "pool bead whose start is in flight", meta: starting, wantCode: 0},
 		{name: "manual session of the same template", meta: manual, wantCode: 0},
 		{name: "template backed by a named session", meta: apiCreatedSingletonMetadata(now), named: true, wantCode: 0},
 	}
