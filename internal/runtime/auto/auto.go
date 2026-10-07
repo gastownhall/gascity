@@ -7,6 +7,7 @@ package auto
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -48,6 +49,7 @@ var (
 	_ runtime.BackendsProvider              = (*Provider)(nil)
 	_ runtime.ListingAttestation            = (*Provider)(nil)
 	_ runtime.Router                        = (*Provider)(nil)
+	_ runtime.ServerDeathConfirmer          = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -181,6 +183,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 // Stop delegates to the routed backend and cleans up the route entry
 // only on success. If the routed backend fails, tries the other backend
 // to handle stale/missing route entries (e.g., after controller restart).
+// Two "gone" answers merge into success, except that a missing-server answer
+// counts only when its backend confirms the server dead
+// ([runtime.MissingServerUnconfirmed]).
 func (p *Provider) Stop(name string) error {
 	primary := p.route(name)
 	primaryLabel := "default"
@@ -228,11 +233,24 @@ func (p *Provider) Stop(name string) error {
 		runtime.BackendError{Label: primaryLabel, Err: err},
 		runtime.BackendError{Label: otherLabel, Err: otherErr},
 	)
+	if mergedErr == nil && otherErr != nil &&
+		(runtime.MissingServerUnconfirmed(primary, err) || runtime.MissingServerUnconfirmed(other, otherErr)) {
+		// Both backends said "gone", but one only because its server is
+		// missing and not confirmed dead: the session may still be running.
+		return errors.Join(fmt.Errorf("%s backend: %w", primaryLabel, err), fmt.Errorf("%s backend: %w", otherLabel, otherErr))
+	}
 	if mergedErr == nil {
 		p.Unroute(name)
 		return nil
 	}
 	return mergedErr
+}
+
+// ServerConfirmedDead implements [runtime.ServerDeathConfirmer] by forwarding
+// to the backends that confirm server death (tmux), so StopForCleanup keeps
+// its confirmed-dead rule for a missing-server answer Stop returns.
+func (p *Provider) ServerConfirmedDead() bool {
+	return runtime.ServersConfirmedDead(p.defaultSP, p.acpSP)
 }
 
 // Interrupt delegates to the routed backend.

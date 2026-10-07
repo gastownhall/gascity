@@ -723,3 +723,35 @@ func TestHybridBackends_NamesBackendsWithoutListing(t *testing.T) {
 		}
 	}
 }
+
+// serverDeathFake is a Fake backend that confirms, or refuses to confirm, that
+// its server is dead, as tmux does through runtime.ServerDeathConfirmer.
+type serverDeathFake struct {
+	*runtime.Fake
+	dead bool
+}
+
+func (f *serverDeathFake) ServerConfirmedDead() bool { return f.dead }
+
+// hybrid forwards ServerDeathConfirmer to its local tmux backend, so
+// StopForCleanup absorbs a missing-server answer only for a server confirmed
+// dead, never for a live one whose socket file was deleted.
+func TestStopForCleanupMissingServerUsesLocalConfirmer(t *testing.T) {
+	serverGone := fmt.Errorf("killing session sky: %w", errors.New("no tmux server running"))
+	for _, dead := range []bool{false, true} {
+		local := &serverDeathFake{Fake: runtime.NewFake(), dead: dead}
+		local.StopErrors["sky"] = serverGone
+		p := New(local, runtime.NewFake(), isRemote)
+
+		if got := p.ServerConfirmedDead(); got != dead {
+			t.Errorf("ServerConfirmedDead() = %v, want the local backend's %v", got, dead)
+		}
+		err := runtime.StopForCleanup(p, "sky")
+		if dead && err != nil {
+			t.Errorf("StopForCleanup = %v over a dead server, want nil", err)
+		}
+		if !dead && !errors.Is(err, serverGone) {
+			t.Errorf("StopForCleanup = %v over a live server, want the missing-server answer", err)
+		}
+	}
+}

@@ -187,6 +187,28 @@ func TestStopForCleanupAbsorbsMissingServerOnlyWhenConfirmedDead(t *testing.T) {
 	}
 }
 
+// A composite answers ServerDeathConfirmer from the backends that implement
+// it: one unconfirmed server is enough to refuse, and with none the composite
+// keeps the rule of a provider without the capability.
+func TestServersConfirmedDeadRefusesOnAnyUnconfirmedBackend(t *testing.T) {
+	dead := &serverDeathFake{Fake: NewFake(), dead: true}
+	live := &serverDeathFake{Fake: NewFake()}
+	for _, tc := range []struct {
+		name     string
+		backends []Provider
+		want     bool
+	}{
+		{name: "no confirming backend", backends: []Provider{NewFake(), NewFake()}, want: true},
+		{name: "confirmed dead beside a plain backend", backends: []Provider{dead, NewFake()}, want: true},
+		{name: "unconfirmed beside a plain backend", backends: []Provider{NewFake(), live}},
+		{name: "confirmed dead beside unconfirmed", backends: []Provider{dead, live}},
+	} {
+		if got := ServersConfirmedDead(tc.backends...); got != tc.want {
+			t.Errorf("%s: ServersConfirmedDead = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestMetaValueFoldsOnlyMetaUnsupported(t *testing.T) {
 	transport := fmt.Errorf("reading GC_K: %w", ErrRuntimeUnavailable)
 	cases := []struct {

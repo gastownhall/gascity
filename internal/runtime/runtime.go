@@ -188,17 +188,26 @@ const tmuxNoServerMessage = "no tmux server running"
 // missing session, such as an exec script's "sh: kubectl: not found".
 func StopForCleanup(p Provider, name string) error {
 	err := p.Stop(name)
-	if err == nil {
-		return nil
-	}
-	gone, serverMissing := stopFailureIsOnlySessionGone(err)
-	if !gone {
-		return err
-	}
-	if confirmer, ok := p.(ServerDeathConfirmer); ok && serverMissing && !confirmer.ServerConfirmedDead() {
+	if gone, _ := stopFailureIsOnlySessionGone(err); !gone || MissingServerUnconfirmed(p, err) {
 		return err
 	}
 	return nil
+}
+
+// MissingServerUnconfirmed reports whether err, a Stop answer from p, says the
+// session is gone only on the strength of a missing server that p cannot prove
+// dead: every leaf of its tree is a gone answer, at least one is the tmux
+// missing-server sentinel, and p implements [ServerDeathConfirmer] without
+// confirming its server dead. [StopForCleanup] refuses to absorb such an
+// answer, and a composite's Stop must not merge one into success, because a
+// live tmux server whose socket file was deleted answers the same way.
+func MissingServerUnconfirmed(p Provider, err error) bool {
+	gone, serverMissing := stopFailureIsOnlySessionGone(err)
+	if !gone || !serverMissing {
+		return false
+	}
+	confirmer, ok := p.(ServerDeathConfirmer)
+	return ok && !confirmer.ServerConfirmedDead()
 }
 
 // stopFailureIsOnlySessionGone reports whether every leaf of a Stop error's

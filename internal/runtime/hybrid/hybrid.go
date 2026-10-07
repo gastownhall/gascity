@@ -35,6 +35,7 @@ var (
 	_ runtime.BackendsProvider              = (*Provider)(nil)
 	_ runtime.ListingAttestation            = (*Provider)(nil)
 	_ runtime.Router                        = (*Provider)(nil)
+	_ runtime.ServerDeathConfirmer          = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -93,6 +94,13 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 // Stop delegates to the routed backend.
 func (p *Provider) Stop(name string) error {
 	return p.route(name).Stop(name)
+}
+
+// ServerConfirmedDead implements [runtime.ServerDeathConfirmer] by forwarding
+// to the backends that confirm server death (local tmux), so StopForCleanup
+// keeps its confirmed-dead rule for a missing-server answer Stop returns.
+func (p *Provider) ServerConfirmedDead() bool {
+	return runtime.ServersConfirmedDead(p.local, p.remote)
 }
 
 // Interrupt delegates to the routed backend.
