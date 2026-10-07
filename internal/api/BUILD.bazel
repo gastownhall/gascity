@@ -325,6 +325,7 @@ go_test(
         "handler_lists_keyset_test.go",
         "handler_mail_test.go",
         "handler_maintenance_test.go",
+        "handler_order_check_cache_test.go",
         "handler_orders_test.go",
         "handler_packs_write_test.go",
         "handler_patches_test.go",
