@@ -1432,6 +1432,7 @@ go_test(
         "reconcile_pass_test.go",
         "reconcile_planner_test.go",
         "reconcile_ready_fanout_test.go",
+        "reconcile_replay_test.go",
         "reconcile_session_decide_test.go",
         "reconcile_session_effects_test.go",
         "reconcile_session_fence_test.go",
