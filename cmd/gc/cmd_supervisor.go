@@ -1692,7 +1692,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 					fmt.Fprintf(stderr, "gc supervisor: reload: city '%s': state %T has no controller wake; not poked\n", v.Name, v.cs) //nolint:errcheck // best-effort stderr
 					continue
 				}
-				cs.wakeOf().Enqueue(routeReasonSupervisor, reconcilekey.Allocator()) // reload: re-plan each city
+				cs.wakeOf().Enqueue(wakeReasonSupervisor, reconcilekey.Allocator()) // reload: re-plan each city
 			}
 			// Per sd_notify(3) a reload ends with READY=1.
 			notifySdState(stderr, sdnotify.Ready)

@@ -5,7 +5,7 @@ contact_links:
     about: Start with installation, quickstart, tutorials, and guides.
   - name: Contributing
     url: https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md
-    about: Every pull request links a documented issue — read how issues and pull requests work here.
+    about: Read how issues and pull requests work here, and when an issue is worth filing first.
   - name: Support Policy
     url: https://github.com/gastownhall/gascity/blob/main/SUPPORT.md
     about: Read how to route bugs, docs issues, feature requests, and security reports.

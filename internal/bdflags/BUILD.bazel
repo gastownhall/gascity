@@ -17,10 +17,25 @@ go_test(
     srcs = [
         "bdargs_test.go",
         "bdflags_test.go",
+        "freshness_test.go",
         "testenv_import_test.go",
         "update_force_test.go",
     ],
+    data = select({
+        "//:gotags_integration": [
+            "@bd_bin_v1_3_1//:bd",
+        ],
+        "//conditions:default": [],
+    }),
     embed = [":bdflags"],
+    # The integration build's tests run bd/dolt by name: GC_TEST_TOOL_PATHS puts
+    # the pinned binaries first on PATH (internal/testenv).
+    env = select({
+        "//:gotags_integration": {
+            "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_1//:bd)",
+        },
+        "//conditions:default": {},
+    }),
     deps = ["//internal/testenv"],
 )
 
@@ -32,6 +47,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

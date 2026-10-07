@@ -125,7 +125,7 @@ func TestNativeDoltStoreSetMetadataBatchPreservesTypesAgainstRealDolt(t *testing
 }
 
 // TestNativeDoltStoreCASPreservesOtherMetadataTypesAgainstRealDolt covers the
-// compare-and-set write path: swapping one key must not retype its neighbours,
+// compare-and-set write path: swapping one key must not retype its neighbors,
 // and the compare itself must still match a stored non-string value by its
 // JSON text.
 func TestNativeDoltStoreCASPreservesOtherMetadataTypesAgainstRealDolt(t *testing.T) {

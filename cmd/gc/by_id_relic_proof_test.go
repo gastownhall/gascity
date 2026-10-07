@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/storebinding"
+	"github.com/gastownhall/gascity/internal/storebinding/beadsworkspace"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -98,6 +102,164 @@ func TestRefusedCityDeniesTheRelicItsLiveCensusProves(t *testing.T) {
 
 	if _, ok, err := cliByIDBindingOwner(control, relic.ID); err != nil || ok {
 		t.Errorf("the same refusal over a city whose binding holds no relic resolved to ok=%v err=%v, want a clean fall-through; a census that found nothing proves nothing, and denying there takes work-bead reads away from every unconverged city", ok, err)
+	}
+}
+
+// carrierlessConfigRefEngineFactory serves the foreign provider's engine behind
+// a wrapper that hides its conditional-writes carrier, the shape of an
+// out-of-tree engine that cannot hold the stamp. Unlike carrierlessEngineFactory
+// it keeps the provider's BindingLocation: the census asks where a binding
+// serves from before it opens anything, and a provider that cannot answer is
+// declined for that reason rather than for the one a row is about.
+type carrierlessConfigRefEngineFactory struct{ configRefEngineProviderFactory }
+
+func (f carrierlessConfigRefEngineFactory) New(spec storebinding.BindingSpec) (storebinding.Provider, error) {
+	provider, err := f.configRefEngineProviderFactory.New(spec)
+	if err != nil {
+		return nil, err
+	}
+	return carrierlessConfigRefEngineProvider{provider.(configRefEngineProvider)}, nil
+}
+
+type carrierlessConfigRefEngineProvider struct{ configRefEngineProvider }
+
+func (p carrierlessConfigRefEngineProvider) OpenEngine(spec storebinding.BindingSpec, classes storebinding.ClassSet) (beads.Store, io.Closer, error) {
+	store, closer, err := p.configRefEngineProvider.OpenEngine(spec, classes)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &struct{ beads.Store }{Store: store}, closer, nil
+}
+
+// workspaceIDEngineFactory serves the foreign provider's engine under the
+// beads-workspace provider ID, the one ID native transport governs, and counts
+// every engine it opens. Nothing but the native-transport refusal branches on
+// that ID, so the binding is otherwise the on-disk engine the census proves
+// relics in, and an open the switch should have stopped is observable.
+type workspaceIDEngineFactory struct {
+	configRefEngineProviderFactory
+	opens *int
+}
+
+func (workspaceIDEngineFactory) ID() storebinding.ProviderID { return beadsworkspace.ProviderID }
+
+func (f workspaceIDEngineFactory) New(spec storebinding.BindingSpec) (storebinding.Provider, error) {
+	provider, err := f.configRefEngineProviderFactory.New(spec)
+	if err != nil {
+		return nil, err
+	}
+	return openCountingConfigRefEngineProvider{configRefEngineProvider: provider.(configRefEngineProvider), opens: f.opens}, nil
+}
+
+type openCountingConfigRefEngineProvider struct {
+	configRefEngineProvider
+	opens *int
+}
+
+func (p openCountingConfigRefEngineProvider) OpenEngine(spec storebinding.BindingSpec, classes storebinding.ClassSet) (beads.Store, io.Closer, error) {
+	*p.opens++
+	return p.configRefEngineProvider.OpenEngine(spec, classes)
+}
+
+// reconfigureForeignProviderCity rewrites a seeded fixture city's city.toml so
+// its binding is served by provider under the given [beads] table, and leaves
+// the engine on disk as it is.
+func reconfigureForeignProviderCity(t *testing.T, cityPath string, provider storebinding.ProviderID, beadsTable string) {
+	t.Helper()
+	writeForeignProviderCityTOML(t, cityPath, string(provider))
+	cityTOML := filepath.Join(cityPath, "city.toml")
+	body, err := os.ReadFile(cityTOML)
+	if err != nil {
+		t.Fatalf("reading the fixture city.toml: %v", err)
+	}
+	body = append(body, []byte("\n[beads]\n"+beadsTable+"\n")...)
+	if err := os.WriteFile(cityTOML, body, 0o644); err != nil {
+		t.Fatalf("rewriting the fixture city.toml: %v", err)
+	}
+}
+
+// TestRefusedCityCensusProvesARelicBehindAnEngineThatCannotCarryTheStamp is the
+// census opening its binding unstamped. It only reads, so the city's
+// beads.conditional_writes mode has nothing to fence there. An open that
+// stamped anyway would refuse, under "require", an engine that cannot carry the
+// stamp, and the census reads that refusal as "cannot open the binding": no
+// proof, so the by-id read falls through to the copy the migration retained
+// (the ga-q8ick door) in exactly the refused cities the proof protects. Under
+// "auto" the same stamp logs a degrade on every by-id read.
+func TestRefusedCityCensusProvesARelicBehindAnEngineThatCannotCarryTheStamp(t *testing.T) {
+	for _, mode := range []string{"require", "auto"} {
+		t.Run("conditional_writes="+mode, func(t *testing.T) {
+			cityPath, _ := foreignProviderCity(t)
+			relic, _ := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "carried across by the migration")
+			registerSoleStorageProvider(t, carrierlessConfigRefEngineFactory{})
+			reconfigureForeignProviderCity(t, cityPath, configRefEngineProviderID, fmt.Sprintf("conditional_writes = %q", mode))
+			refuseTheseCities(t, theRefusalARefusedCityCarries(), cityPath)
+
+			logs := &captureHandler{}
+			prevLogger := slog.Default()
+			slog.SetDefault(slog.New(logs))
+			t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+			_, ok, err := cliByIDBindingOwner(cityPath, relic.ID)
+			if !errors.Is(err, storeref.ErrProvenRelicRefusal) {
+				t.Fatalf("a refused city whose binding holds %s resolved to ok=%v err=%v, want the proven-relic denial; the census lost its proof to a write discipline it never exercises", relic.ID, ok, err)
+			}
+			for _, r := range logs.records {
+				if strings.Contains(r.Message, "conditional_writes") {
+					t.Errorf("the census logged %q; it opens the binding only to read it, so it has no stamp to degrade", r.Message)
+				}
+			}
+		})
+	}
+}
+
+// TestRefusedCityCensusNeverOpensANativeTransportBindingSwitchedOff is the
+// native-transport kill switch on the census path. The census opens unstamped,
+// with no cfg, so it checks native transport against the city's own cfg before
+// that open: under beads.native_transport = "off", or the deprecated
+// GC_BEADS_FORCE_FALLBACK alias, a natively served binding is never opened, and
+// the by-id read falls through as it does for any binding the census cannot
+// read. The "auto" row is the control: the same binding opens and its relic is
+// proven, so the other rows' fall-through is the switch's doing.
+func TestRefusedCityCensusNeverOpensANativeTransportBindingSwitchedOff(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		transport     string
+		forceFallback bool
+		opens         bool
+	}{
+		{name: "auto", transport: "auto", opens: true},
+		{name: "off", transport: "off"},
+		{name: "GC_BEADS_FORCE_FALLBACK", transport: "auto", forceFallback: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, _ := foreignProviderCity(t)
+			relic, _ := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "carried across by the migration")
+			opens := 0
+			registerSoleStorageProvider(t, workspaceIDEngineFactory{opens: &opens})
+			reconfigureForeignProviderCity(t, cityPath, beadsworkspace.ProviderID, fmt.Sprintf("native_transport = %q", tc.transport))
+			if tc.forceFallback {
+				t.Setenv("GC_BEADS_FORCE_FALLBACK", "1")
+			}
+			refuseTheseCities(t, theRefusalARefusedCityCarries(), cityPath)
+
+			_, ok, err := cliByIDBindingOwner(cityPath, relic.ID)
+			if tc.opens {
+				if !errors.Is(err, storeref.ErrProvenRelicRefusal) {
+					t.Fatalf("the control resolved %s to ok=%v err=%v, want the proven-relic denial; this fixture no longer reaches the census open the other rows pin", relic.ID, ok, err)
+				}
+				if opens != 1 {
+					t.Fatalf("the control opened the binding %d time(s), want exactly 1", opens)
+				}
+				return
+			}
+			if opens != 0 {
+				t.Fatalf("the census opened a natively served binding %d time(s) with native transport switched off", opens)
+			}
+			if err != nil || ok {
+				t.Fatalf("a binding the census may not open resolved to ok=%v err=%v, want a clean fall-through", ok, err)
+			}
+		})
 	}
 }
 

@@ -175,6 +175,12 @@ func sessionBeadStoredTemplate(bead beads.Bead) string {
 
 // sessionBeadStoredTemplateInfo is the session.Info mirror of sessionBeadStoredTemplate.
 func sessionBeadStoredTemplateInfo(i sessionpkg.Info) string {
+	return storedTemplateRef(&i)
+}
+
+// storedTemplateRef is sessionBeadStoredTemplateInfo through a pointer, for
+// the v2 fresh-slot occupancy's every-row scan (A3).
+func storedTemplateRef(i *sessionpkg.Info) string {
 	storedTemplate := strings.TrimSpace(i.Template)
 	if storedTemplate != "" {
 		return storedTemplate
@@ -773,15 +779,7 @@ func sessionBeadAgentName(bead beads.Bead) string {
 // sessionBeadAgentNameInfo is the session.Info mirror of sessionBeadAgentName:
 // agent_name metadata (untrimmed), then the agent:<name> label fallback.
 func sessionBeadAgentNameInfo(i sessionpkg.Info) string {
-	if i.AgentName != "" {
-		return i.AgentName
-	}
-	for _, label := range i.Labels {
-		if strings.HasPrefix(label, "agent:") {
-			return strings.TrimPrefix(label, "agent:")
-		}
-	}
-	return ""
+	return sessionpkg.AgentNameInfo(i)
 }
 
 // sessionAgentMetricIdentity resolves the stable agent-identity label for the

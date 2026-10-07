@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -179,6 +180,13 @@ type Bead struct {
 	// means the store did not provide it and cached ready falls back to
 	// dependency-derived readiness for backward compatibility.
 	IsBlocked *bool `json:"is_blocked,omitempty"`
+	// CloseReason says why the bead was closed. It is empty while the bead is
+	// not closed, and when the closer gave no reason. bd-backed stores read
+	// bd's close_reason column (written by `bd close --reason`); stores that
+	// hold the whole row record the trimmed metadata.close_reason a closer
+	// stamped before closing, the same value BdStore and NativeDoltStore
+	// forward to their close. Reopening clears it.
+	CloseReason string `json:"close_reason,omitempty"`
 	// IndefinitelyDeferred preserves bd's status-based indefinite deferral
 	// after richer statuses normalize to Gas City's three-state model. Cache
 	// notifications restore status="deferred" on the event wire so another
@@ -314,11 +322,20 @@ func AssignmentGuardedUpdaterFor(store Store) (AssignmentGuardedUpdater, bool) {
 type ConditionalWriter interface {
 	// UpdateIfMatch applies row-backed opts only if the bead's revision equals
 	// expectedRevision; otherwise it returns *PreconditionFailedError. A store
-	// that persists ParentID, Labels, or RemoveLabels through separate writes
-	// cannot fold them into the guarded update and rejects them with
-	// *ConditionalUpdateFieldUnsupportedError; bd-backed and Dolt-backed stores
-	// do. Callers must therefore handle that error rather than assume the
-	// fields applied.
+	// that persists ParentID through separate writes rejects it with
+	// *ConditionalUpdateFieldUnsupportedError. Labels and RemoveLabels are
+	// applied under the same revision check only by a store that guards them
+	// (conditionalLabelsGuard: MemStore, SQLiteStore, NativeDoltStore, and a
+	// CachingStore over one of those); bd-backed stores and FileStore reject
+	// them the same way. Callers must therefore handle that error rather than
+	// assume the fields applied.
+	//
+	// On NativeDoltStore the label guarantee runs one way. A label CAS mints a
+	// revision (it advances beadmeta.LabelRevisionMetadataKey on the row), but
+	// an unconditional label-only Update does not: upstream label writes touch
+	// only the label and event tables. A CAS read before such an Update
+	// therefore still succeeds after it. Label deltas commute, so both changes
+	// survive, but a CAS cannot tell that the label set moved.
 	UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error
 	// CloseIfMatch closes the bead only if its revision equals expectedRevision;
 	// otherwise it returns *PreconditionFailedError.
@@ -391,15 +408,30 @@ func (e *ConditionalUpdateFieldUnsupportedError) Error() string {
 	return fmt.Sprintf("conditional update: %s is not supported with revision matching", e.Field)
 }
 
-// validateConditionalUpdateOpts rejects the fields bd must persist separately
-// before any store evaluates a revision fence or mutates state.
-func validateConditionalUpdateOpts(o UpdateOpts) error {
+// conditionalLabelsGuard is implemented by stores whose UpdateIfMatch applies
+// Labels and RemoveLabels inside its revision check and moves the revision
+// with them, so the next revision read sees the label change.
+type conditionalLabelsGuard interface {
+	conditionalLabelsGuarded() bool
+}
+
+// conditionalLabelsGuarded reports whether store guards labels in
+// UpdateIfMatch. A store that does not say so refuses them.
+func conditionalLabelsGuarded(store any) bool {
+	guard, ok := store.(conditionalLabelsGuard)
+	return ok && guard.conditionalLabelsGuarded()
+}
+
+// validateConditionalUpdateOpts rejects, before any store evaluates a revision
+// fence or mutates state, the fields the store cannot fold into the guarded
+// update: the parent always, and the labels unless labelsGuarded.
+func validateConditionalUpdateOpts(o UpdateOpts, labelsGuarded bool) error {
 	switch {
 	case o.ParentID != nil:
 		return &ConditionalUpdateFieldUnsupportedError{Field: "parent_id"}
-	case len(o.Labels) > 0:
+	case !labelsGuarded && len(o.Labels) > 0:
 		return &ConditionalUpdateFieldUnsupportedError{Field: "labels"}
-	case len(o.RemoveLabels) > 0:
+	case !labelsGuarded && len(o.RemoveLabels) > 0:
 		return &ConditionalUpdateFieldUnsupportedError{Field: "remove_labels"}
 	case isEmptyUpdateOpts(o):
 		return ErrEmptyConditionalUpdate
@@ -665,11 +697,35 @@ func IsReadyBlockingDependencyType(t string) bool {
 // no gc.work_outcome yet (work_record_gate.go is warn-only), so the empty
 // value stays backward-compatible, and an unrecognized future value fails
 // open rather than newly stalling dependents it doesn't understand.
+//
+// Callers pass ReadinessWorkOutcome(dep.Metadata), not the raw gc.work_outcome,
+// so a dependency whose control-plane step passed is never vetoed.
 func DependencySatisfied(depStatus, depWorkOutcome string) bool {
 	if depStatus != "closed" {
 		return false
 	}
 	return depWorkOutcome != beadmeta.WorkOutcomeBlocked
+}
+
+// ReadinessWorkOutcome is the gc.work_outcome value readiness should judge a
+// closed dependency by. gc.outcome is the control-plane step result that
+// internal/dispatch sequences a workflow on, and gc.work_outcome the worker's
+// work-record disposition (ADR-0009); the two vocabularies are disjoint and can
+// disagree. A step that closed with gc.outcome=pass has already been advanced
+// past by dispatch, so letting gc.work_outcome=blocked veto its dependents
+// strands them: the graph waits on work that readiness never offers to any
+// worker. When the step passed, its work outcome does not gate readiness.
+//
+// The override applies only to formula step beads (those carrying
+// gc.step_ref). A plain work bead can also carry gc.outcome=pass — the core
+// mol-do-work formula stamps it on the work bead it closes, blocked or not —
+// and there gc.outcome is not a dispatch verdict, so its blocked work outcome
+// keeps withholding dependents.
+func ReadinessWorkOutcome(metadata map[string]string) string {
+	if metadata[beadmeta.StepRefMetadataKey] != "" && metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomePass {
+		return ""
+	}
+	return metadata[beadmeta.WorkOutcomeMetadataKey]
 }
 
 // IsReadyExcludedType reports whether the bead type is excluded from
@@ -738,10 +794,32 @@ func IsDeferred(b Bead, now time.Time) bool {
 }
 
 // setBeadStatus applies an explicit Gas City status transition. Any such
-// transition supersedes richer source status that was normalized on read.
+// transition supersedes richer source status that was normalized on read. A
+// bead that is not closed has no close reason, so leaving closed drops it, as
+// bd's reopen clears its close_reason column.
 func setBeadStatus(b *Bead, status string) {
 	b.Status = status
 	b.IndefinitelyDeferred = false
+	if status != "closed" {
+		b.CloseReason = ""
+	}
+}
+
+// recordCloseReason stamps CloseReason on a bead a whole-row store (MemStore,
+// FileStore, SQLiteStore) has just moved from not-closed to closed. The reason
+// is the trimmed metadata.close_reason its closer stamped first, which is what
+// BdStore and NativeDoltStore forward to their close as well.
+func recordCloseReason(b *Bead) {
+	b.CloseReason = strings.TrimSpace(b.Metadata["close_reason"])
+}
+
+// forgetCloseReason drops the metadata.close_reason recordCloseReason reads,
+// on a bead a whole-row store has just moved from closed to not closed. That
+// reason belonged to the close the move undoes, as bd's reopen clears its
+// close_reason column; kept, the bead's next close would record it again. A
+// reason the same write sets is merged after this, so it survives.
+func forgetCloseReason(b *Bead) {
+	delete(b.Metadata, "close_reason")
 }
 
 func isReadyBlockingDependencyType(t string) bool {

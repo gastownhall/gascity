@@ -319,6 +319,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(newCodexHooksDriftCheck(cityPath, codexHookWorkDirs(cityPath, cfg)))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
 		register(newPackRuntimesDoctorCheck(cfg))
+		register(newPromptDeliveryBudgetDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
 	}
@@ -444,6 +445,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newHoldLabelRoutedToCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newPoolIdleRoutedWorkCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newV2DemandMigrationsCheck(cfg, cityPath, storeFactory))
+			registerCityStoreCheck(newV2SessionMigrationCheck(cfg, cityPath))
 			registerCityStoreCheck(newWorkOptionMetadataMigrationCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newBacklogDepthCheck(cityPath, storeFactory))
 			registerCityStoreCheck(newOrderTrackingRetentionCheck(cityPath, storeFactory))

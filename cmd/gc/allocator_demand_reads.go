@@ -25,19 +25,14 @@ import (
 // and get parity with legacy by construction.
 //
 // legacyDemandReads is today's calls, unchanged: a nil reads is legacy.
-// v2DemandReads does no backing I/O. An exact leg (its CachingStore's backing
-// declares beads.CachedReadExact) is read from the cache with strict reads and
-// a last-good fallback; any other leg's live reads come from the
-// external-reads lane's recording (allocator_backstop_lane.go).
+// v2DemandReads does no remote I/O. An exact leg (its CachingStore's backing
+// declares beads.CachedReadExact) is read through its cache, which refreshes
+// dirty rows and falls back to the local backing when it cannot serve; any
+// other leg's live reads come from the external-reads lane's recording
+// (allocator_backstop_lane.go).
 //
 // Unwired in this slice: P3-5a's gather builds a v2DemandReads per pass, and
-// P3-7 starts the external-reads lane and owns the demandLastGood.
-
-// cacheLagBound bounds how long an exact leg's read may be served from its
-// last good answer (P3 spec §4.2 rule 4). An older answer is refused, so the
-// leg reads partial. It is the one last-good bound of the allocator's reads:
-// the session census and its episode reader use it too.
-const cacheLagBound = 60 * time.Second
+// P3-7 starts the external-reads lane.
 
 var (
 	errDemandRecordingMissing = errors.New("no external-reads recording for this leg")
@@ -131,17 +126,18 @@ func demandLegCache(store beads.Store) (cache *beads.CachingStore, exact bool) {
 // v2DemandReads is the v2 allocator's demand reads for one pass, at one
 // clock (now). Per read:
 //
-//   - RawOpen and ReadyAll on an exact leg: the strict cached List{open} and
-//     ReadyContext. On an exact backing the cached status is the raw status
-//     and the cached ready projection is complete.
+//   - RawOpen and ReadyAll on an exact leg: the cache's List{open} and its
+//     strict ReadyContext, falling back to Ready, which reads the local
+//     backing. On an exact backing the cached status is the raw status and
+//     the cached ready projection is complete.
 //   - RawOpen and ReadyAll on any other leg: the recording's copy of
 //     legacy's own live read. A missing source, or one past its freshness,
 //     is a PartialResultError with no rows: the collectors
 //     mark the leg's templates partial (retain, block create) instead of
 //     reading zero demand. A bd leg's cache folds blocked work into "open"
 //     (EB-42o8), so it is never read for these.
-//   - Cached: the strict cached List on every leg, as legacy reads it from
-//     the cache, but with no live fallback.
+//   - Cached: the cache's List on an exact leg; the strict cached List on
+//     any other, with no live fallback.
 //   - CachedReady: unavailable, so ReadyAll is the whole Ready answer.
 //   - ReadyLimit: none. The assigned Ready set is not truncated by
 //     max_wakes_per_tick (BEHAVIORS #31 F).
@@ -151,19 +147,16 @@ func demandLegCache(store beads.Store) (cache *beads.CachingStore, exact bool) {
 //     readyAssignedWorkAssignees reads as no closed phantom (fail open, as
 //     legacy does on a failed read).
 //
-// A strict read the cache refuses (a dirty row, a busy or unprimed cache)
-// serves the leg's last good answer while it is at most cacheLagBound old,
-// and records the fallback; past that it is a
-// PartialResultError. Reads are memoized per leg and shape for the pass and
-// are safe for the collectors' concurrent legs.
+// A strict read the cache refuses (a dirty row, a busy or unprimed cache) is
+// a PartialResultError; an exact leg never reads strict alone. Reads are
+// memoized per leg and shape for the pass and are safe for the collectors'
+// concurrent legs.
 type v2DemandReads struct {
-	now      time.Time
-	rec      *externalReadsRecording
-	lastGood *demandLastGood
+	now time.Time
+	rec *externalReadsRecording
 
-	mu        sync.Mutex
-	memo      map[demandLegRead]*readyDemandEntry
-	fallbacks []demandReadFallback
+	mu   sync.Mutex
+	memo map[demandLegRead]*readyDemandEntry
 }
 
 // demandLegRead names one read of one leg: the store behind the policy front
@@ -173,22 +166,14 @@ type demandLegRead struct {
 	shape string
 }
 
-// demandReadFallback records a read served from its last good answer.
-type demandReadFallback struct {
-	Shape string
-	Age   time.Duration
-}
-
 // newV2DemandReads returns the reads for one pass at now. rec is the
 // external-reads lane's latest recording (nil before its first pass), each
-// source served while fresh. lastGood carries exact legs' answers across passes; nil keeps
-// none, so every refused strict read is partial.
-func newV2DemandReads(now time.Time, rec *externalReadsRecording, lastGood *demandLastGood) *v2DemandReads {
+// source served while fresh.
+func newV2DemandReads(now time.Time, rec *externalReadsRecording) *v2DemandReads {
 	return &v2DemandReads{
-		now:      now,
-		rec:      rec,
-		lastGood: lastGood,
-		memo:     make(map[demandLegRead]*readyDemandEntry),
+		now:  now,
+		rec:  rec,
+		memo: make(map[demandLegRead]*readyDemandEntry),
 	}
 }
 
@@ -197,9 +182,8 @@ func (r *v2DemandReads) RawOpen(store beads.Store) ([]beads.Bead, error) {
 	if !exact {
 		return r.recorded(store, "raw_open", func(l legRecording) ([]beads.Bead, error) { return l.RawOpen, l.RawOpenErr })
 	}
-	query := beads.ListQuery{Status: "open", AllowScan: true, TierMode: beads.TierBoth}
-	return r.strict(demandLegRead{leg: cache, shape: "raw_open"}, func() ([]beads.Bead, bool) {
-		return cache.CachedList(query)
+	return r.once(demandLegRead{leg: cache, shape: "raw_open"}, func() ([]beads.Bead, error) {
+		return cache.List(beads.ListQuery{Status: "open", AllowScan: true, TierMode: beads.TierBoth})
 	})
 }
 
@@ -208,12 +192,18 @@ func (r *v2DemandReads) RawOpen(store beads.Store) ([]beads.Bead, error) {
 func (r *v2DemandReads) Cached(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
 	query.Live, query.TierMode = false, beads.TierBoth
 	shape := "cached:" + query.Status
-	cache, _ := demandLegCache(store)
+	cache, exact := demandLegCache(store)
 	if cache == nil {
 		return nil, &beads.PartialResultError{Op: "v2 demand " + shape, Err: errDemandLegUncached}
 	}
-	return r.strict(demandLegRead{leg: cache, shape: shape}, func() ([]beads.Bead, bool) {
-		return cache.CachedList(query)
+	return r.once(demandLegRead{leg: cache, shape: shape}, func() ([]beads.Bead, error) {
+		if exact {
+			return cache.List(query)
+		}
+		if rows, ok := cache.CachedList(query); ok {
+			return rows, nil
+		}
+		return nil, &beads.PartialResultError{Op: "v2 demand " + shape, Err: beads.ErrCacheUnavailable}
 	})
 }
 
@@ -222,9 +212,14 @@ func (r *v2DemandReads) ReadyAll(store beads.Store) ([]beads.Bead, error) {
 	if !exact {
 		return r.recorded(store, "ready", func(l legRecording) ([]beads.Bead, error) { return l.ReadyAll, l.ReadyAllErr })
 	}
-	return r.strict(demandLegRead{leg: cache, shape: "ready"}, func() ([]beads.Bead, bool) {
-		rows, err := cache.ReadyContext(context.Background(), beads.ReadyQuery{TierMode: beads.TierBoth})
-		return rows, err == nil
+	return r.once(demandLegRead{leg: cache, shape: "ready"}, func() ([]beads.Bead, error) {
+		query := beads.ReadyQuery{TierMode: beads.TierBoth}
+		// Ready's dirty-row overlay serves only the zero query, so a refused
+		// strict read takes Ready's local backing read.
+		if rows, err := cache.ReadyContext(context.Background(), query); err == nil {
+			return rows, nil
+		}
+		return cache.Ready(query)
 	})
 }
 
@@ -243,13 +238,6 @@ func (r *v2DemandReads) ClosedNamedIndex(store beads.Store) (session.ClosedNamed
 	return s.ClosedNamed, s.Err
 }
 
-// Fallbacks returns the reads this pass served from their last good answer.
-func (r *v2DemandReads) Fallbacks() []demandReadFallback {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]demandReadFallback(nil), r.fallbacks...)
-}
-
 // recorded serves a lane-fed leg's live read from the external-reads
 // recording. A source that failed whole (a timeout) fails both reads.
 func (r *v2DemandReads) recorded(store beads.Store, shape string, pick func(legRecording) ([]beads.Bead, error)) ([]beads.Bead, error) {
@@ -263,9 +251,8 @@ func (r *v2DemandReads) recorded(store beads.Store, shape string, pick func(legR
 	return pick(s.Leg)
 }
 
-// strict runs a cache-only read once per pass, falling back to the last good
-// answer when the cache refuses.
-func (r *v2DemandReads) strict(key demandLegRead, read func() ([]beads.Bead, bool)) ([]beads.Bead, error) {
+// once runs a leg's read once per pass.
+func (r *v2DemandReads) once(key demandLegRead, read func() ([]beads.Bead, error)) ([]beads.Bead, error) {
 	r.mu.Lock()
 	e := r.memo[key]
 	if e == nil {
@@ -273,65 +260,8 @@ func (r *v2DemandReads) strict(key demandLegRead, read func() ([]beads.Bead, boo
 		r.memo[key] = e
 	}
 	r.mu.Unlock()
-	e.once.Do(func() {
-		if rows, ok := read(); ok {
-			r.lastGood.put(key, rows, r.now)
-			e.rows = rows
-			return
-		}
-		if rows, at, ok := r.lastGood.get(key); ok && r.now.Sub(at) <= cacheLagBound {
-			r.mu.Lock()
-			r.fallbacks = append(r.fallbacks, demandReadFallback{Shape: key.shape, Age: r.now.Sub(at)})
-			r.mu.Unlock()
-			e.rows = rows
-			return
-		}
-		e.err = &beads.PartialResultError{Op: "v2 demand " + key.shape, Err: beads.ErrCacheUnavailable}
-	})
+	e.once.Do(func() { e.rows, e.err = read() })
 	return e.rows, e.err
-}
-
-// demandLastGood keeps each exact leg's last good read across passes. The
-// allocator owns one; each pass's v2DemandReads reads and refreshes it. A nil
-// demandLastGood keeps nothing.
-type demandLastGood struct {
-	mu      sync.Mutex
-	answers map[demandLegRead]demandLastGoodAnswer
-}
-
-type demandLastGoodAnswer struct {
-	rows []beads.Bead
-	at   time.Time
-}
-
-func newDemandLastGood() *demandLastGood {
-	return &demandLastGood{answers: make(map[demandLegRead]demandLastGoodAnswer)}
-}
-
-// put records a good answer and drops answers too old to serve, so a leg a
-// reload replaced does not keep its rows alive.
-func (g *demandLastGood) put(key demandLegRead, rows []beads.Bead, at time.Time) {
-	if g == nil {
-		return
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	for k, a := range g.answers {
-		if at.Sub(a.at) > cacheLagBound {
-			delete(g.answers, k)
-		}
-	}
-	g.answers[key] = demandLastGoodAnswer{rows: rows, at: at}
-}
-
-func (g *demandLastGood) get(key demandLegRead) ([]beads.Bead, time.Time, bool) {
-	if g == nil {
-		return nil, time.Time{}, false
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	a, ok := g.answers[key]
-	return a.rows, a.at, ok
 }
 
 // projectControlDispatcherRoutes is the demand half of

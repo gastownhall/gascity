@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -20,29 +21,65 @@ type v2SessionMigration struct {
 	UnknownStates, SharedSlotNames, DuplicateNamed map[string]int
 }
 
-// readV2SessionMigration counts one live census of every session leg, folded
-// first-leg-wins by bead ID as legacy folds it. A failed or partial read is an
-// error: a row it missed may be one v2 refuses.
+// readV2SessionMigration counts one live census of every session leg, at
+// beads.FederatedReadTier as the planner's census reads it (CONTRACT v5 AL1),
+// folded first-leg-wins by bead ID as legacy folds it. A failed or partial
+// read is an error: a row it missed may be one v2 refuses.
 func readV2SessionMigration(cityPath, cityName string, cfg *config.City, sessions beads.Store, rigs map[string]beads.Store) (v2SessionMigration, error) {
-	m := v2SessionMigration{UnknownStates: map[string]int{}, SharedSlotNames: map[string]int{}, DuplicateNamed: map[string]int{}}
-	rows, err := collectOpenSessionInfos(cityPath, cfg, sessions, rigs, buildSuspendedRigPathsForCity(cfg, cityPath), true, true, nil)
-	for _, info := range rows {
-		if !isKnownStateInfo(info) && !isDrainAckStopPendingInfo(info) {
-			m.UnknownStates[info.MetadataState]++
+	legs, err := sessionCensusStoreCandidates(cityPath, cfg, sessions, rigs, buildSuspendedRigPathsForCity(cfg, cityPath))
+	if err != nil {
+		return tallyV2SessionMigration(cfg, cityName, nil), err
+	}
+	var rows []session.Info
+	var errs []error
+	seen := make(map[string]bool)
+	for _, leg := range legs {
+		infos, err := sessionFrontDoor(leg.store).ListAll(session.ListAllOptions{Live: true, TierMode: beads.FederatedReadTier})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("session census leg %q: %w", leg.ref, err))
 		}
-		if name := strings.TrimSpace(info.SessionName); name != "" && strings.TrimSpace(info.PoolSlot) != "" {
-			m.SharedSlotNames[name]++
-		}
-		if identity := namedSessionIdentityInfo(info); identity != "" && isNamedSessionInfo(info) && session.NamedSessionInfoContinuityEligible(info) {
-			if _, ok := findNamedSessionSpec(cfg, cityName, identity); ok {
-				m.DuplicateNamed[identity]++
+		for _, info := range infos {
+			if id := strings.TrimSpace(info.ID); !info.Closed && !seen[id] {
+				seen[id] = id != ""
+				rows = append(rows, info)
 			}
 		}
 	}
-	for _, shared := range []map[string]int{m.SharedSlotNames, m.DuplicateNamed} {
-		maps.DeleteFunc(shared, func(_ string, n int) bool { return n < 2 })
+	return tallyV2SessionMigration(cfg, cityName, rows), errors.Join(errs...)
+}
+
+// tallyV2SessionMigration counts open rows, already folded, by class.
+func tallyV2SessionMigration(cfg *config.City, cityName string, rows []session.Info) v2SessionMigration {
+	m := v2SessionMigration{UnknownStates: map[string]int{}, SharedSlotNames: map[string]int{}, DuplicateNamed: map[string]int{}}
+	for _, info := range rows {
+		state, unknown, slot, named := v2SessionMigrationKeys(cfg, cityName, info)
+		if unknown {
+			m.UnknownStates[state]++
+		}
+		m.SharedSlotNames[slot]++
+		m.DuplicateNamed[named]++
 	}
-	return m, err
+	for _, shared := range []map[string]int{m.SharedSlotNames, m.DuplicateNamed} {
+		maps.DeleteFunc(shared, func(key string, n int) bool { return key == "" || n < 2 })
+	}
+	return m
+}
+
+// v2SessionMigrationKeys is what one open row counts under: an unknown state,
+// its pool-slot session name, its configured named identity ("" for none).
+func v2SessionMigrationKeys(cfg *config.City, cityName string, info session.Info) (state string, unknown bool, slot, named string) {
+	if !isKnownStateInfo(info) && !isDrainAckStopPendingInfo(info) {
+		state, unknown = info.MetadataState, true
+	}
+	if name := strings.TrimSpace(info.SessionName); name != "" && strings.TrimSpace(info.PoolSlot) != "" {
+		slot = name
+	}
+	if identity := namedSessionIdentityInfo(info); identity != "" && isNamedSessionInfo(info) && session.NamedSessionInfoContinuityEligible(info) {
+		if _, ok := findNamedSessionSpec(cfg, cityName, identity); ok {
+			named = identity
+		}
+	}
+	return state, unknown, slot, named
 }
 
 // refusal is v2's boot error while m holds any row, or nil.
@@ -59,6 +96,6 @@ func (m v2SessionMigration) refusal() error {
 		states = " (" + states[1:] + ")"
 	}
 	return fmt.Errorf("enterprise-era session rows: %d open row(s) in a state main does not know%s, %d pool-slot session name(s) shared by open rows, "+
-		"%d configured named session(s) claimed by more than one open row; v2 refuses to boot over them: run gc doctor --check v2-session-migration --fix, or remove session_reconciler to run legacy",
+		"%d configured named session(s) claimed by more than one open row; v2 refuses to boot over them: run gc doctor --check v2-session-migration to list them, or remove session_reconciler to run legacy",
 		total, states, len(m.SharedSlotNames), len(m.DuplicateNamed))
 }

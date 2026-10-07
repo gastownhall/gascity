@@ -87,8 +87,8 @@ jobs:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
-      - name: Run make check-docs
-        run: make check-docs
+      - name: Run make check-docs-go
+        run: make check-docs-go
 
   # Release-time pin guard: the bundled core/bd/dolt pin must name an
   # ancestor commit with the content this ref embeds, and DOLT_VERSION must be

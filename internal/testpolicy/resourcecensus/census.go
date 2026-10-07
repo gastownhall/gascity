@@ -125,8 +125,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   748,
-			BaselineFiles:   220,
+			BaselineCalls:   745,
+			BaselineFiles:   221,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-cp3hwi",
@@ -166,7 +166,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   501,
+			BaselineCalls:   497,
 			BaselineFiles:   147,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
@@ -322,8 +322,8 @@ var bootstrapPolicy = Ledger{
 	},
 	Medium: []MediumOwner{
 		{
-			PackageDir:      "internal/api",
-			PackageName:     "api",
+			PackageDir:      "internal/api/apierr",
+			PackageName:     "apierr",
 			Owner:           "TestEveryEmittedErrorCodeIsRegistered",
 			Resources:       []Resource{ResourceSubprocess},
 			OwnerBead:       "ga-cp3hwi",
@@ -598,7 +598,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   476,
+			BaselineCalls:   472,
 			BaselineFiles:   138,
 			ReportedCalls:   394,
 			ReportedFiles:   105,

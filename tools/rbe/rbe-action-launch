@@ -303,10 +303,13 @@ inner() {
 	fi
 	# MASK_SOCKETS=1: connect() works on a read-only mount, so a world-writable
 	# socket on /run (a VM shutdown socket, snapd, uuidd, acpid, systemd's
-	# varlink services) would still let any action use it. Each one, but
-	# journald's (logging) and the system bus (polkit decides), gets /dev/null
-	# bound over it in this namespace only: connect() is refused, the host's
-	# socket stays as it is. One find walks /run and every mount on it but
+	# varlink services) would still let any action use it. Each one but
+	# journald's (logging) gets /dev/null bound over it in this namespace
+	# only: connect() is refused, the host's socket stays as it is. The
+	# system bus too: unix sockets ignore network namespaces, and
+	# systemd-resolved answers anyone on it (org.freedesktop.resolve1 resolves
+	# any record, a DNS tunnel out of a loopback-only action); nothing an
+	# action runs needs it. One find walks /run and every mount on it but
 	# the action's own, each with -xdev (a socket bind-mounted over a file is
 	# found as a start point only), names NUL-delimited; a hidden mount's path
 	# is gone or is what the action reaches. 2-3 ms per socket (mount).
@@ -317,7 +320,7 @@ inner() {
 			case $m in /run/*) if [[ -z ${own[$m]:-} ]]; then walk+=("$m"); fi ;; esac
 		done
 		while IFS= read -r -d '' s; do
-			case $s in /run/systemd/journal/* | /run/dbus/system_bus_socket) ;; *) socks[$s]=1 ;; esac
+			case $s in /run/systemd/journal/*) ;; *) socks[$s]=1 ;; esac
 		done < <(find "${walk[@]}" -xdev -type s -perm -o+w -print0 2>/dev/null)
 		# A socket gone meanwhile needs no mask; any other failure stops here.
 		for s in "${!socks[@]}"; do

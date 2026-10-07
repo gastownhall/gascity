@@ -14,8 +14,10 @@
 #
 # Event contract note: the close transition emits `bead.closed`, not
 # `bead.updated` (a closed bead only emits bead.updated on a later
-# metadata edit). Subscribing to bead.closed fires once, exactly on the
-# transition this order cares about.
+# metadata edit), so subscribing to bead.closed fires on the transition
+# this order cares about. Delivery is at least once: one close can reach
+# the bus twice (from the closing process and from the controller's
+# cache), and the blocker list and the per-pair dedup absorb the repeat.
 #
 # Cross-rig blocker chains within a city are supported via a prefix->rig
 # lookup so `gc bd dep list` and `gc session nudge` are scoped to the rig that

@@ -2194,6 +2194,11 @@ func beadCopyDifference(want, got beads.Bead) string {
 	// one that invented it hides ready work indefinitely.
 	case !beadCopyEqualInstant(want.DeferUntil, got.DeferUntil):
 		return fmt.Sprintf("defer_until %s != %s", beadCopyFormatInstant(want.DeferUntil), beadCopyFormatInstant(got.DeferUntil))
+	// CloseReason is the only record of why a closed bead closed: bd keeps it
+	// in its own column rather than metadata, so a copy that dropped it loses
+	// the reason outright. The destination round-trips it through bead_json.
+	case want.CloseReason != got.CloseReason:
+		return fmt.Sprintf("close_reason %q != %q", want.CloseReason, got.CloseReason)
 	}
 	if diff := stringSetDifference("label", want.Labels, got.Labels); diff != "" {
 		return diff

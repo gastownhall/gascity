@@ -135,8 +135,10 @@ NL_BIN_DIR="$RUNNER_TEMP/nl-bin"
 # - libstdc++6, libgcc-s1, zlib1g: loaded by clang, lld and the llvm-* tools;
 # - libxml2 (and its liblzma5): loaded by lld;
 # - libicu74, libstdc++6, libgcc-s1: loaded by every Bazel-built Go binary
-#   that links Dolt's go-icu-regex (most tests), as are glibc's (base below);
+#   that links Dolt's go-icu-regex (most tests), as are glibc's;
 # - xz-utils: unpacks the toolchain's .tar.xz archive.
+# tools/rbe/worker-env measures each of these that an action can reach (its
+# measured list) or names it unmeasured, with the reason.
 WORKER_TOOLSET=(make jq sqlite3 tmux lsof cmake git libstdc++6 libgcc-s1 zlib1g
 	libxml2 liblzma5 xz-utils libicu74 zlib1g-dev libsqlite3-dev libbz2-dev
 	liblzma-dev libffi-dev libexpat1-dev libxml2-dev libreadline-dev
@@ -158,23 +160,27 @@ if ! dolt version 2>/dev/null | grep -q "$DOLT_VERSION"; then
 fi
 
 # The worker-env platform property (tools/rbe/worker-env): the sha256 of this
-# host's environment manifest. rbe-west's schedulers match it exactly against
+# host's toolchain manifest. rbe-west's schedulers match it exactly against
 # the worker-env CI's actions request (//platforms:rbe_worker: the sha256 of
-# the committed tools/rbe/worker-env.txt), so an action runs only on the host
-# its key names and its cached result is never one another host produced.
-tools/rbe/worker-env "${WORKER_TOOLSET[@]}" >"$RUNNER_TEMP/worker-env.txt"
+# the committed tools/rbe/worker-env.txt), so an action runs only on a host
+# with the toolchain its key names and its cached result is never one another
+# toolchain produced. The raw listing (dpkg's versions as installed) is only
+# for the drift report and the log; it is never hashed.
+tools/rbe/worker-env >"$RUNNER_TEMP/worker-env.txt"
 WORKER_ENV=sha256:$(sha256sum <"$RUNNER_TEMP/worker-env.txt" | cut -d' ' -f1)
 echo "worker-env: $WORKER_ENV"
-# A worker on any other host (a new Blacksmith image, a package, Go or dolt
-# change) can serve no gascity action. It registers anyway, advertising what
-# it measured: the pools are shared, and actions that send no worker-env
-# (beads') still run on it. The check prints the diff and the manifest and pin
-# to commit (log and step summary) and leaves them in
-# $RUNNER_TEMP/worker-env-drift. The pool workflows measure in a step of their
-# own first (WORKER_MODE=measure) and turn that into the pin's drift issue,
-# which also caps the farm's pools while it is open. measure: drift is the
-# result, so it fails.
-if ! tools/rbe/worker-env-drift check "$RUNNER_TEMP/worker-env.txt"; then
+tools/rbe/worker-env --raw >"$RUNNER_TEMP/worker-env.raw.txt" || :
+# A worker with any other toolchain (a new distribution release, a glibc,
+# library or tool release, Go or dolt) can serve no gascity action; security
+# patches of the same releases measure the same. It registers anyway,
+# advertising what it measured: the pools are shared, and actions that send
+# no worker-env still run on it. The check prints the diff, the raw listing,
+# and the manifest and pin to commit (log and step summary) and leaves them
+# in $RUNNER_TEMP/worker-env-drift. The pool workflows measure in a step of
+# their own first (WORKER_MODE=measure) and turn that into the pin's drift
+# issue, which also caps the farm's pools while it is open. measure: drift is
+# the result, so it fails.
+if ! tools/rbe/worker-env-drift check "$RUNNER_TEMP/worker-env.txt" "$RUNNER_TEMP/worker-env.raw.txt"; then
 	[ "$WORKER_MODE" != measure ] || exit 3
 	echo "worker-env: registering anyway with worker-env=$WORKER_ENV (actions without worker-env only)"
 fi
@@ -479,10 +485,15 @@ isolate() {
 		sudo sysctl -q -w user.max_user_namespaces=0
 		[ "$(cat /proc/sys/user/max_user_namespaces)" = 0 ] || fail "user.max_user_namespaces is not 0"
 	fi
-	# Full selftest (a few seconds): it also checks worker.json routes actions
-	# through the entrypoint, the timeout path, and that an action can write
-	# no shared directory on any mount (ROOT_RO=1, TMPFS_DIRS private), and
-	# no world-writable socket on /run it can connect to (MASK_SOCKETS=1).
+	# Full selftest: it also checks worker.json routes actions through the
+	# entrypoint, the timeout path, and that an action can write no shared
+	# directory on any mount (ROOT_RO=1, TMPFS_DIRS private), and no
+	# world-writable socket on /run it can connect to (MASK_SOCKETS=1). On
+	# every VM, not just a first boot or a new image+script: the mount walk
+	# that dominates its cost on Blacksmith's large tool caches (~49 s,
+	# 2026-10-06) skips a mount that is already read-only, so it stays in
+	# the few-seconds range the rest of the selftest runs in without
+	# trusting an unverified VM on a cached pass (max review, 2026-10-07).
 	phase selftest
 	selftest_out=$RUNNER_TEMP/rbe-selftest.out
 	# shellcheck disable=SC2024 # the runner's file, not root's
@@ -497,10 +508,13 @@ isolate() {
 	# shutdown socket, snapd, a docker.sock) is a way out of the sandbox,
 	# read-only mount or not. The host keeps them; what counts is what an
 	# action reaches: the selftest above connected to each from inside one
-	# (MASK_SOCKETS=1 masks them there, journald's and the system bus aside).
+	# (MASK_SOCKETS=1 masks them there, journald's aside), and asked the
+	# host's resolver over the system bus and varlink (no-resolver).
 	phase sockets
 	grep -q '^ok    action: no-open-socket' "$selftest_out" ||
 		fail "world-writable sockets reachable by actions: $(sed -n 's/^ *world-writable socket the action can connect to: //p' "$selftest_out" | tr '\n' ' ')"
+	grep -q '^ok    action: no-resolver' "$selftest_out" ||
+		fail "the host's resolver is reachable by actions (a DNS tunnel): $(grep -m1 'action: no-resolver' "$selftest_out")"
 	phase probe
 	# What S11.3 is about, on this VM's layout: a probe action through the real
 	# entrypoint must run as a slot user and fail to read the worker key, find

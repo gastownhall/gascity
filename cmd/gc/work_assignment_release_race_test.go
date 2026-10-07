@@ -34,10 +34,9 @@ func (s *errReleaseStore) ReleaseIfCurrent(string, string) (bool, error) {
 	return false, s.err
 }
 
-// errGetStore fails the live re-read before a tier-2 write: the Get that picks
-// the fenced release's revision, and the live List the reassign re-checks. It
-// reports the conditional verb as unsupported so the release is forced onto
-// tier 2.
+// errGetStore fails the live re-read before a fenced write: the Get that picks
+// the revision a tier-2 release or a reassign is fenced on. It reports the
+// conditional verb as unsupported so the release is forced onto tier 2.
 type errGetStore struct {
 	*beads.MemStore
 	err  error
@@ -386,9 +385,10 @@ func TestReleaseWorkBead_ReleasesWhenSnapshotStillCurrent(t *testing.T) {
 // reassign computed from it carries the identical lost-update hazard: a fresh
 // worker claims the bead after the list, and an unconditional
 // Update{Assignee:&successor} stamps the retired session's replacement over that
-// live claim. There is no conditional-reassign verb, so the only guard is the
-// live re-read — which is why this test exercises a plain MemStore rather than
-// the two store shapes the release test needs.
+// live claim. The reassign is fenced on the snapshot like a tier-2 release;
+// here the re-read already sees the claim, so nothing is written.
+// TestReassignWorkBead_FencesTheWriteOnTheSnapshot covers a claim that lands
+// after the re-read.
 func TestReassignWorkBead_DoesNotClobberReclaimedAssignee(t *testing.T) {
 	store := beads.NewMemStore()
 	stale := seedReclaimedBead(t, store)
@@ -442,6 +442,194 @@ func TestReassignWorkBead_PropagatesVerificationFailure(t *testing.T) {
 	err := wa.ReassignWorkBead(claimed, "successor-session")
 	if !errors.Is(err, backendErr) {
 		t.Fatalf("ReassignWorkBead err = %v, want wrapped %v", err, backendErr)
+	}
+}
+
+// reclaimOnce moves a bead to "fresh-worker" the first time it is applied. A
+// store fake applies it immediately before its write, which is the window
+// between a reassign's snapshot (and any re-read it makes) and the write.
+type reclaimOnce struct {
+	done bool
+}
+
+func (r *reclaimOnce) apply(mem *beads.MemStore, id string) error {
+	if r.done {
+		return nil
+	}
+	r.done = true
+	fresh := "fresh-worker"
+	return mem.Update(id, beads.UpdateOpts{Assignee: &fresh})
+}
+
+// reclaimBeforeWriteStore is a revision-fenced store (MemStore's UpdateIfMatch)
+// on which a fresh worker re-claims the bead just before the reassign's write.
+type reclaimBeforeWriteStore struct {
+	*beads.MemStore
+	reclaim reclaimOnce
+}
+
+func (s *reclaimBeforeWriteStore) Update(id string, opts beads.UpdateOpts) error {
+	if err := s.reclaim.apply(s.MemStore, id); err != nil {
+		return err
+	}
+	return s.MemStore.Update(id, opts)
+}
+
+func (s *reclaimBeforeWriteStore) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	if err := s.reclaim.apply(s.MemStore, id); err != nil {
+		return err
+	}
+	return s.MemStore.UpdateIfMatch(id, expectedRevision, opts)
+}
+
+// guardedReassignStore stands in for BdStore with `bd update --if-status
+// --if-assignee`: it has the guarded update and no revision fence (embedding
+// only beads.Store hides MemStore's UpdateIfMatch). When reclaim is armed, a
+// fresh worker re-claims the bead just before each write. guarded records the
+// guarded updates' options.
+type guardedReassignStore struct {
+	beads.Store
+	mem     *beads.MemStore
+	armed   bool
+	reclaim reclaimOnce
+	guarded []beads.UpdateOpts
+}
+
+func (s *guardedReassignStore) Update(id string, opts beads.UpdateOpts) error {
+	if s.armed {
+		if err := s.reclaim.apply(s.mem, id); err != nil {
+			return err
+		}
+	}
+	return s.mem.Update(id, opts)
+}
+
+func (s *guardedReassignStore) UpdateIfAssignment(id, expectedStatus, expectedAssignee string, opts beads.UpdateOpts) (bool, error) {
+	s.guarded = append(s.guarded, opts)
+	if s.armed {
+		if err := s.reclaim.apply(s.mem, id); err != nil {
+			return false, err
+		}
+	}
+	current, err := s.mem.Get(id)
+	if errors.Is(err, beads.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if current.Status != expectedStatus || strings.TrimSpace(current.Assignee) != expectedAssignee {
+		return false, nil
+	}
+	return true, s.mem.Update(id, opts)
+}
+
+// incapableWorkStore has neither a guarded update nor a revision fence:
+// embedding only beads.Store hides every optional capability of the store
+// it wraps.
+type incapableWorkStore struct {
+	beads.Store
+}
+
+var (
+	_ beads.ConditionalWriter        = (*reclaimBeforeWriteStore)(nil)
+	_ beads.AssignmentGuardedUpdater = (*guardedReassignStore)(nil)
+)
+
+// TestReassignWorkBead_FencesTheWriteOnTheSnapshot is the regression for a
+// reassign that re-checked the snapshot and then wrote blind (mc-zndi7.66). A
+// fresh worker that re-claims the bead after the re-check had its claim
+// overwritten with the retired session's successor. The write is now fenced
+// the way ReleaseWorkBead's tier 2 fences a release: the guarded update checks
+// status and assignee in the write, a revision-fenced store re-reads and
+// writes on that read's revision, and a store with neither is refused. In
+// every case the re-claim survives.
+func TestReassignWorkBead_FencesTheWriteOnTheSnapshot(t *testing.T) {
+	t.Run("guarded update, re-claimed before the write", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		claimed := seedClaimedBead(t, mem, "retired-session")
+		store := &guardedReassignStore{Store: mem, mem: mem, armed: true}
+
+		wa := workAssignmentForStore(beads.WorkStore{Store: store})
+		if err := wa.ReassignWorkBead(claimed, "successor-session"); err != nil {
+			t.Fatalf("ReassignWorkBead: %v (a guard miss means the bead moved on, not a failure)", err)
+		}
+		if len(store.guarded) != 1 {
+			t.Fatalf("guarded updates = %d, want 1", len(store.guarded))
+		}
+		assertAssignee(t, mem, claimed.ID, "fresh-worker")
+	})
+
+	t.Run("guarded update, current snapshot writes only the assignee", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		claimed := seedClaimedBead(t, mem, "retired-session")
+		store := &guardedReassignStore{Store: mem, mem: mem}
+
+		wa := workAssignmentForStore(beads.WorkStore{Store: store})
+		if err := wa.ReassignWorkBead(claimed, "successor-session"); err != nil {
+			t.Fatalf("ReassignWorkBead: %v", err)
+		}
+		if len(store.guarded) != 1 {
+			t.Fatalf("guarded updates = %d, want 1", len(store.guarded))
+		}
+		if opts := store.guarded[0]; derefStr(opts.Assignee) != "successor-session" || opts.Status != nil || opts.Metadata != nil {
+			t.Fatalf("guarded update = %#v, want only Assignee=successor-session", opts)
+		}
+		assertAssignee(t, mem, claimed.ID, "successor-session")
+	})
+
+	t.Run("revision fence, re-claimed after the re-read", func(t *testing.T) {
+		store := &reclaimBeforeWriteStore{MemStore: beads.NewMemStore()}
+		claimed := seedClaimedBead(t, store.MemStore, "retired-session")
+
+		wa := workAssignmentForStore(beads.WorkStore{Store: store})
+		if err := wa.ReassignWorkBead(claimed, "successor-session"); err == nil {
+			t.Fatal("ReassignWorkBead returned nil after losing the revision fence; the bead may still be on the retired session")
+		}
+		assertAssignee(t, store.MemStore, claimed.ID, "fresh-worker")
+	})
+
+	t.Run("store with neither is refused", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		claimed := seedClaimedBead(t, mem, "retired-session")
+
+		wa := workAssignmentForStore(beads.WorkStore{Store: incapableWorkStore{Store: mem}})
+		err := wa.ReassignWorkBead(claimed, "successor-session")
+		if !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
+			t.Fatalf("ReassignWorkBead err = %v, want wrapped %v", err, beads.ErrConditionalWriteUnsupported)
+		}
+		assertAssignee(t, mem, claimed.ID, "retired-session")
+	})
+}
+
+// TestReassignWorkAssignedToRetiredSessionBeadLogsAndContinuesPastARefusal pins
+// the callers' side of a refused reassign: each failure is logged and the
+// sweep moves on to the next bead, which stays with the retired identity until
+// a later pass.
+func TestReassignWorkAssignedToRetiredSessionBeadLogsAndContinuesPastARefusal(t *testing.T) {
+	mem := beads.NewMemStore()
+	first := seedClaimedBead(t, mem, "retired-session")
+	second := seedClaimedBead(t, mem, "retired-session")
+
+	var stderr strings.Builder
+	reassignWorkAssignedToRetiredSessionBead("", nil, incapableWorkStore{Store: mem}, nil, beads.Bead{ID: "retired-session"}, "successor-session", &stderr)
+
+	for _, id := range []string{first.ID, second.ID} {
+		if !strings.Contains(stderr.String(), "reassigning work "+id+" from retired session retired-session") {
+			t.Errorf("stderr does not log the refused reassign of %s:\n%s", id, stderr.String())
+		}
+		assertAssignee(t, mem, id, "retired-session")
+	}
+}
+
+func assertAssignee(t *testing.T, store beads.Store, id, want string) {
+	t.Helper()
+	got, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	if got.Assignee != want {
+		t.Fatalf("assignee of %s = %q, want %q", id, got.Assignee, want)
 	}
 }
 

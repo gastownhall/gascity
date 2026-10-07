@@ -996,8 +996,48 @@ func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config
 }
 
 func buildPrimeContextFor(cityPath, cityName string, a *config.Agent, rigs []config.Rig, topo config.QueryTopology, stderr io.Writer) PromptContext {
+	ctx := buildAgentPromptContext(cityPath, cityName, a, rigs, topo, stderr)
+
+	// Agent identity: prefer GC_ALIAS, then GC_AGENT, else config.
+	if gcAlias := os.Getenv("GC_ALIAS"); gcAlias != "" {
+		ctx.AgentName = gcAlias
+	} else if gcAgent := os.Getenv("GC_AGENT"); gcAgent != "" {
+		ctx.AgentName = gcAgent
+	}
+
+	// Working directory.
+	gcDir := os.Getenv("GC_DIR")
+	if gcDir != "" {
+		ctx.WorkDir = gcDir
+	}
+
+	// Rig context.
+	gcRig := os.Getenv("GC_RIG")
+	if gcRig != "" {
+		ctx.RigName = gcRig
+		ctx.RigRoot = os.Getenv("GC_RIG_ROOT")
+		if ctx.RigRoot == "" {
+			ctx.RigRoot = rigRootForName(gcRig, rigs)
+		}
+		ctx.IssuePrefix = findRigPrefix(gcRig, rigs)
+	}
+
+	ctx.Branch = os.Getenv("GC_BRANCH")
+	if gcDir != "" || gcRig != "" {
+		ctx.DefaultBranch = defaultBranchForRig(ctx.RigName, rigs, ctx.WorkDir)
+	}
+	return ctx
+}
+
+// buildAgentPromptContext constructs a PromptContext for an agent purely from
+// configuration: the identity is the agent's qualified name, the rig is its
+// configured rig, and no GC_* session environment is consulted. Callers that
+// survey agents other than the current session (e.g. gc doctor) use this so
+// an ambient session identity cannot leak into another agent's render.
+func buildAgentPromptContext(cityPath, cityName string, a *config.Agent, rigs []config.Rig, topo config.QueryTopology, stderr io.Writer) PromptContext {
 	ctx := PromptContext{
 		CityRoot:      cityPath,
+		AgentName:     a.QualifiedName(),
 		TemplateName:  a.Name,
 		BindingName:   a.BindingName,
 		BindingPrefix: a.BindingPrefix(),
@@ -1005,35 +1045,12 @@ func buildPrimeContextFor(cityPath, cityName string, a *config.Agent, rigs []con
 		Env:           a.Env,
 	}
 
-	// Agent identity: prefer GC_ALIAS, then GC_AGENT, else config.
-	if gcAlias := os.Getenv("GC_ALIAS"); gcAlias != "" {
-		ctx.AgentName = gcAlias
-	} else if gcAgent := os.Getenv("GC_AGENT"); gcAgent != "" {
-		ctx.AgentName = gcAgent
-	} else {
-		ctx.AgentName = a.QualifiedName()
-	}
-
-	// Working directory.
-	if gcDir := os.Getenv("GC_DIR"); gcDir != "" {
-		ctx.WorkDir = gcDir
-	}
-
-	// Rig context.
-	if gcRig := os.Getenv("GC_RIG"); gcRig != "" {
-		ctx.RigName = gcRig
-		ctx.RigRoot = os.Getenv("GC_RIG_ROOT")
-		if ctx.RigRoot == "" {
-			ctx.RigRoot = rigRootForName(gcRig, rigs)
-		}
-		ctx.IssuePrefix = findRigPrefix(gcRig, rigs)
-	} else if rigName := configuredRigName(cityPath, a, rigs); rigName != "" {
+	if rigName := configuredRigName(cityPath, a, rigs); rigName != "" {
 		ctx.RigName = rigName
 		ctx.RigRoot = rigRootForName(rigName, rigs)
 		ctx.IssuePrefix = findRigPrefix(rigName, rigs)
 	}
 
-	ctx.Branch = os.Getenv("GC_BRANCH")
 	ctx.DefaultBranch = defaultBranchForRig(ctx.RigName, rigs, ctx.WorkDir)
 	ctx.WorkQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "work_query", a.EffectiveWorkQueryFor(topo), stderr)
 	ctx.AssignedInProgressQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "assigned_in_progress_query", a.EffectiveAssignedInProgressQueryFor(topo), stderr)

@@ -10,14 +10,13 @@ import (
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
-// The allocator's backoff table (I13; CONTRACT C5.11 as amended 2026-10-04
-// per SIMPLIFICATION-CHECKPOINT C3): every refusal not to retry at pass rate,
-// under one schedule. It is not part of the ledger and blocks no effect. A
-// writer records a refusal before it settles the entry it refused, and a pass
-// reads the ledger before the table, so no pass sees one without the other.
+// The planner's backoff table (I13; CONTRACT v5 P4): every refusal not to
+// retry at pass rate, under one schedule. A live row record is the row
+// deadline: admit defers every intent for the row until it expires, except
+// the stop verb's finalize. It blocks no effect already running.
 //
-// Unwired in this slice: P3-7 prunes it at each pass start and hands the pass
-// a Snapshot; P4.1's session keys record row refusals.
+// Unwired in this slice: the planner prunes it at each pass start and hands
+// the pass a Snapshot; settlements record the refusals (C4a).
 
 const (
 	// backoffBase and backoffMax bound a key's backoff (C5.11).
@@ -115,9 +114,9 @@ func (t *backoffTable) Succeed(k string) {
 // stays bounded: a create record reserved under a ConfigRev other than
 // configRev (config is fixed per revision, so this also drops an identity
 // config no longer holds), a work record for a bead not in demand, and a row
-// record whose row c shows closed (gone from a leg c holds complete). Bead
-// IDs hold no "/", so a row key splits at its last one.
-func (t *backoffTable) Prune(configRev string, c ledgerCensus, demand map[string]bool) {
+// record whose row the census rows no longer hold. Bead IDs hold no "/", so
+// a row key splits at its last one.
+func (t *backoffTable) Prune(configRev string, rows map[rowKey]censusRow, demand map[string]bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for k, r := range t.recs {
@@ -125,9 +124,8 @@ func (t *backoffTable) Prune(configRev string, c ledgerCensus, demand map[string
 		switch kind, rest, _ := strings.Cut(k, ":"); kind {
 		case "row":
 			i := strings.LastIndex(rest, "/")
-			leg := rest[:max(i, 0)]
-			_, open := c.Rows[rowKey{Leg: leg, ID: rest[i+1:]}]
-			drop = !open && c.Legs[leg]
+			_, open := rows[rowKey{Leg: rest[:max(i, 0)], ID: rest[i+1:]}]
+			drop = !open
 		case "work":
 			drop = !demand[rest]
 		default: // create and named

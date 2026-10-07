@@ -24,10 +24,10 @@ func TestProductMetricsTestOnlyCensusEscapeIsNarrow(t *testing.T) {
 		"missing annotation": func(command *cobra.Command) { command.Annotations = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
-			copy := *testOnly
-			copy.Annotations = cloneCommandAnnotations(testOnly.Annotations)
-			mutate(&copy)
-			if ignoreProductMetricsCensusCommand(&copy) {
+			mutated := *testOnly
+			mutated.Annotations = cloneCommandAnnotations(testOnly.Annotations)
+			mutate(&mutated)
+			if ignoreProductMetricsCensusCommand(&mutated) {
 				t.Fatal("malformed test-only command was accepted")
 			}
 		})

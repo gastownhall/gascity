@@ -382,6 +382,10 @@ func (c *CachingStore) runReconciliation() {
 		log.Print(logLine)
 	}
 	c.notifyChanges(ChangeScan, res.notifications)
+	// The pass may have evicted a row some read had already installed as
+	// closed; its close is still queued, and a pass with no other change has
+	// nothing else to drain it.
+	c.announceUnannouncedCloses()
 }
 
 // mergeAction is what the reconcile merge does with one id.

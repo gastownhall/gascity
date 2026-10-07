@@ -1,36 +1,56 @@
 # Multi-lane Bazel CI (rbe-west plan W1). Target shape: every gascity build,
 # test, lint and codegen check is a Bazel target; each lane below is a thin
-# client on blacksmith-2vcpu-ubuntu-2404 that checks out, merges the PR head
+# client (2 vCPU in mode remote) that checks out, merges the PR head
 # onto the run's base commit (.github/actions/fresh-merge), attaches rbe-west
 # with .github/actions/setup-bazel (a byte copy of beads' composite: modes
 # remote, fork-ro, fork-rw, cache, local) and runs one bazel command with
 # --config=ci. The rbe job decides the mode once per run; for fork and
 # Dependabot PRs rbe-west's mint decides.
 #
-# Preview: this workflow runs beside bazel-test.yml and gates nothing. Its
-# job names deliberately differ from the required checks ("bazel test
-# (side-by-side)", "BUILD files in sync"), which bazel-test.yml keeps until
-# the cutover renames this gate and deletes bazel-test.yml. Until then:
+# The only Bazel workflow: its gate job carries the required check "bazel
+# test (side-by-side)" and its sync job "BUILD files in sync" (the main
+# ruleset and branch protection name both; no other job anywhere may,
+# scripts/bazel_multilane_test.go). So:
 #   - every key-affecting flag is committed unconditionally in .bazelrc, and
-#     --config=ci, setup-bazel's rc and bazel-test.yml's .bazelrc.local carry
+#     --config=ci, setup-bazel's rc and the lane's .bazelrc.local carry
 #     transport and result policy only (scripts/bazel_key_parity_test.go), so
-#     these lanes, bazel-test.yml and pre-push hash actions alike and the
-#     second run of a commit is mostly cache hits;
+#     these lanes and pre-push hash actions alike and the second run of a
+#     commit is mostly cache hits;
 #   - lanes reuse cached test results (the farm action cache is writable
 #     only by trusted runs, so a cached PASS for hermetic, identical inputs
 #     is valid); push to main fresh re-execution to sample flakiness is a
 #     follow-up, not part of this change;
 #   - the rbe job's lane list (event and mode) decides which lanes start;
-#   - integration runs on pushes and dispatches only, evidence-only, until G3;
-#   - pull_request runs in mode cache (fork and Dependabot PRs while
-#     rbe-west's mint does not yet serve bazel.yml) run no lanes:
-#     bazel-test.yml covers them; rbe=cache dispatches still run them;
-#   - a fork run mints at most 2 rbe-fork certificates, one per lane:
-#     unit and acceptance, in fork-ro and fork-rw alike;
-#   - coverage uploads lcov as an artifact; bazel-test.yml keeps the Codecov
-#     upload (flag bazel-unit) so the flag is not reported twice;
+#     every mode starts unit and acceptance, so the gate never passes a run
+#     that tested nothing (an empty lane list fails it);
+#   - integration-packages runs every package's `//go:build integration`
+#     tests and GC_FAST_UNIT=0 process tests outside //test/integration
+#     (//test:integration_packages, tools/bazel/integration_suite.py) and
+#     gates, in every mode (fork PRs included: no network needed);
+#   - integration-smoke runs //test/integration's bdstore and REST smoke
+#     tests (scripts/test-integration-shard's bdstore_tests and
+#     rest_smoke_tests; .bazelrc test:integration-smoke) and gates, in
+#     every mode: they
+#     never failed in 33 main runs of the full suite, which is still flaky;
+#   - integration runs on the nightly schedule and dispatches only,
+#     evidence-only, until G3 (bazel-nightly.yml; off every push since
+#     rbe-ci-cost-latency-study.md recommendation 5: evidence-only, so its
+#     wall time on every push bought nothing);
+#   - fork and Dependabot PRs ask rbe-west's mint (mode fork-ro/fork-rw);
+#     closed, refused or unreachable, the run takes mode cache: lanes execute
+#     on the runner with lookups in the anonymous read-only cache. A lane
+#     whose certificate the mint then refuses falls back to that cache too;
+#   - with rbe-west off (vars.RBE_WEST_WORKERS) runs take mode cache as well;
+#   - a fork run mints at most 4 rbe-fork certificates, one per lane:
+#     unit, acceptance, integration-packages and integration-smoke, in
+#     fork-ro and fork-rw alike (the mint allows 12 per run and 160 per PR a
+#     day, so a run and two re-runs stay inside both);
+#   - coverage (nightly schedule or dispatch, remote) uploads lcov to
+#     Codecov (flag bazel-unit) and as an artifact; also off every push
+#     since recommendation 5, same reasoning as integration above;
 #   - bep-summary reports cached vs executed test targets per lane from the
-#     lanes' BEP files and gates nothing.
+#     lanes' BEP files and gates nothing; it also runs the shard-balance
+#     budget (recommendation 4) over the same BEP files, warning-only.
 name: bazel
 
 on:
@@ -58,6 +78,8 @@ on:
         required: false
       RBE_TLS_KEY:
         required: false
+      CODECOV_TOKEN:
+        required: false
 
 # A PR's runs share one group and a newer one cancels the older. Every other
 # event (push to main, dispatch, call) gets its own group (the run id), so it
@@ -65,7 +87,7 @@ on:
 # cache and report coverage. (A shared group without cancel-in-progress
 # would still replace a pending run with the next one.) The prefix is a
 # literal: under workflow_call github.workflow is the caller's name, and the
-# group would collide with the caller's own; bazel-test.yml's is bazel-test-.
+# group would collide with the caller's own.
 concurrency:
   group: bazel-yml-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -119,7 +141,9 @@ jobs:
                  echo "::warning title=rbe-fork closed for this run::$(jq -r '.reason // .error // "unreachable"' <<<"$st" 2>/dev/null || echo unreachable)" ;;
             esac
           elif [ "$RBE_VAR_ON" != true ]; then
-            mode=skip
+            # rbe-west off: no remote execution, but the run still tests
+            # (locally, with the read-only cache's hits).
+            mode=cache
           elif [ "$HAS_EXECUTOR" = true ]; then
             mode=remote
           else
@@ -131,7 +155,7 @@ jobs:
           echo "Bazel execution mode: **$mode**" >> "$GITHUB_STEP_SUMMARY"
 
       # The lane job's matrix, as JSON: a lane left out never starts a runner
-      # (nor mints an rbe-fork certificate, so a fork run mints at most 2).
+      # (nor mints an rbe-fork certificate, so a fork run mints at most 4).
       # A matrix's exclude cannot do this: GitHub applies include after
       # exclude, and an include entry keyed on the lane adds it back.
       - name: Lanes
@@ -141,26 +165,35 @@ jobs:
           MODE: ${{ steps.decide.outputs.mode }}
         run: |
           set -euo pipefail
-          case "$MODE" in remote|fork-ro|fork-rw|cache|local|skip) ;; *) echo "::error::mode '$MODE'"; exit 1 ;; esac
+          case "$MODE" in remote|fork-ro|fork-rw|cache|local) ;; *) echo "::error::mode '$MODE'"; exit 1 ;; esac
           unit='{"lane":"unit","cmd":"test --config=ci --keep_going //..."}'
-          acceptance='{"lane":"acceptance","cmd":"test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test"}'
+          acceptance='{"lane":"acceptance","cmd":"test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test //test/acceptance:acceptance_solo_tests"}'
           # Evidence-only until G3: agent-flow tests depend on ambient
           # agent-template resolution (product-side fix, D13).
           integration='{"lane":"integration","cmd":"test --config=ci --config=integration --keep_going //test/integration:integration_test","evidence-only":true}'
-          lanes=
-          if [ "$MODE" = skip ]; then
-            echo "No lanes: rbe-west is off (vars.RBE_WEST_WORKERS)." >> "$GITHUB_STEP_SUMMARY"
-          elif [ "$EVENT" = pull_request ] && [ "$MODE" = cache ]; then
-            echo "No lanes: pull_request runs in mode cache wait for rbe-west's mint to serve bazel.yml; bazel-test.yml covers this PR." >> "$GITHUB_STEP_SUMMARY"
-          else
-            # Acceptance runs on the fork pool too (mode fork-ro, instance
-            # oss-fork, loopback only): `gc init` no longer clones
-            # gascity-packs (#7005).
-            lanes="$unit,$acceptance"
-            # Pushes and dispatches only until G3 (evidence-only on pull
-            # requests would only spend the pool).
-            case "$EVENT" in push|workflow_dispatch) lanes+=",$integration" ;; esac
-          fi
+          # Gating. Every package's integration-tagged and GC_FAST_UNIT=0
+          # tests outside //test/integration (scripts/test-integration-shard's
+          # packages-* shards).
+          packages='{"lane":"integration-packages","cmd":"test --config=ci --config=integration --keep_going //test:integration_packages"}'
+          # Gating. The integration suite's bdstore and REST smoke tests
+          # (scripts/test-integration-shard bdstore_tests + rest_smoke_tests:
+          # .bazelrc test:integration-smoke's --test_filter).
+          smoke='{"lane":"integration-smoke","cmd":"test --config=ci --config=integration-smoke --keep_going //test/integration:integration_test"}'
+          # Every mode tests: the gate (the required check) fails a run that
+          # started no lane. Acceptance and integration-packages run on the
+          # fork pool too (mode fork-ro, instance oss-fork, loopback only):
+          # `gc init` no longer clones gascity-packs (#7005), and no
+          # integration_packages target needs the network.
+          lanes="$unit,$acceptance,$packages,$smoke"
+          # Dispatches and the nightly schedule only (rbe-ci-cost-latency-
+          # study.md recommendation 5): evidence-only until G3, so paying its
+          # wall time on every push to main bought nothing; bazel-nightly.yml
+          # calls this workflow on a schedule (github.event_name is then
+          # "schedule", inherited from the calling run) and workflow_dispatch
+          # dispatches it directly too. When integration becomes required,
+          # gate it in a merge queue instead of moving it back onto push
+          # (follow-up, not built here).
+          case "$EVENT" in workflow_dispatch|schedule) lanes+=",$integration" ;; esac
           echo "lanes=[$lanes]" >> "$GITHUB_OUTPUT"
 
       - name: Resolve the base branch commit (fresh-merge)
@@ -213,15 +246,15 @@ jobs:
   lane:
     name: bazel / ${{ matrix.lane }}
     needs: rbe
-    # The rbe job's lane list is empty in mode skip and for a pull_request
-    # run in mode cache, until rbe-west's mint serves bazel.yml (it mints for
-    # bazel-test.yml today): fork and Dependabot PRs would run every lane
-    # locally beside bazel-test.yml's run. rbe=cache dispatches still run
-    # them. An empty matrix is an error, so the job is skipped instead.
+    # Every mode yields lanes; should the list ever be empty, an empty
+    # matrix is an error, so the job is skipped instead and the gate fails.
     if: needs.rbe.outputs.lanes != '[]'
-    # Remote modes: the runner is only a Bazel client. Local modes (cache,
-    # local: rbe-fork closed or a dispatch) execute here, so they get 4 vCPU.
-    runs-on: ${{ (needs.rbe.outputs.mode == 'cache' || needs.rbe.outputs.mode == 'local') && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}
+    # Mode remote: the runner is only a Bazel client. Local modes (cache,
+    # local) execute here, and so may fork-ro/fork-rw (a refused certificate
+    # falls back to the read-only cache), so they get 4 vCPU. Acceptance gets
+    # 4 vCPU in every mode: its client-side analysis (~1900 packages) took
+    # ~2 m of the lane on 2 vCPU.
+    runs-on: ${{ (needs.rbe.outputs.mode != 'remote' || matrix.lane == 'acceptance') && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -241,15 +274,14 @@ jobs:
         with:
           base-sha: ${{ needs.rbe.outputs.base-sha }}
 
-      # worker-env (tools/rbe/worker-env-drift), as in bazel-test.yml:
-      # rbe-west's schedulers match the worker-env pin exactly, and pool
-      # workers serve the default branch's pin only. A change that moves the
-      # pin can't run remotely before it merges: the bazel run is skipped
-      # (pin-moved) and the unit lane measures this Blacksmith host against
-      # the new manifest instead, as it does for any change to the worker
-      # host (measure). A remote run on a pin with an open drift issue fails
-      # here rather than queueing for an hour (and before setup-bazel mints
-      # an rbe-fork certificate).
+      # worker-env (tools/rbe/worker-env-drift): rbe-west's schedulers match
+      # the worker-env pin exactly, and pool workers serve the default
+      # branch's pin only. A change that moves the pin can't run remotely
+      # before it merges: the bazel run is skipped (pin-moved) and the unit
+      # lane measures this Blacksmith host against the new manifest instead,
+      # as it does for any change to the worker host (measure). A remote run
+      # on a pin with an open drift issue fails here rather than queueing for
+      # an hour (and before setup-bazel mints an rbe-fork certificate).
       - name: worker-env preflight
         id: worker-env
         env:
@@ -265,25 +297,16 @@ jobs:
           git diff --name-only FETCH_HEAD HEAD >"$RUNNER_TEMP/worker-env-changed"
           tools/rbe/worker-env-drift preflight "$RUNNER_TEMP/worker-env-base.bazel" "$RUNNER_TEMP/worker-env-changed"
 
-      # Local modes run tests here with .bazelrc's pinned test PATH, so give
-      # them the Go the remote workers have at /usr/local/go.
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        if: needs.rbe.outputs.mode == 'cache' || needs.rbe.outputs.mode == 'local'
-        with:
-          go-version-file: go.mod
-          cache: false
-      - name: Provide /usr/local/go for locally run tests
-        if: needs.rbe.outputs.mode == 'cache' || needs.rbe.outputs.mode == 'local'
-        run: |
-          if [ ! -e /usr/local/go ]; then
-            sudo ln -s "$(go env GOROOT)" /usr/local/go
-          elif [ ! -x /usr/local/go/bin/go ]; then
-            echo "::warning::/usr/local/go exists without bin/go; tests that exec go may fail"
-          fi
-
+      # Modes fork-ro/fork-rw: the mint said open when the rbe job asked, but
+      # it may still refuse this lane's certificate (closed since, a quota, a
+      # changed tier). That must neither fail the required gate with no
+      # remedy nor leave the PR untested, so the lane falls back to mode
+      # cache (the read-only fork cache, executing here) as the rbe job would
+      # have chosen with the mint closed.
       - name: Set up Bazel
         id: bazel
         if: steps.worker-env.outputs.pin-moved != 'true'
+        continue-on-error: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') }}
         uses: ./.github/actions/setup-bazel
         env:
           BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
@@ -294,9 +317,68 @@ jobs:
           BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
           RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
           RBE_FORK_PR: ${{ github.event.pull_request.number }}
+      - name: rbe-fork refused this lane
+        if: steps.bazel.outcome == 'failure' && startsWith(needs.rbe.outputs.mode, 'fork-')
+        env:
+          MODE: ${{ needs.rbe.outputs.mode }}
+        run: |
+          echo "::warning title=rbe-fork refused this lane::mode $MODE got no certificate; this lane runs here on the read-only fork cache instead"
+          echo "bazel: mode $MODE got no rbe-fork certificate; read-only fork cache instead" >> "$GITHUB_STEP_SUMMARY"
+      - name: Set up Bazel (read-only fork cache)
+        id: bazel-fallback
+        if: steps.bazel.outcome == 'failure' && startsWith(needs.rbe.outputs.mode, 'fork-')
+        uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_FORK_CACHE: "true"
+      # After the last setup-bazel (its runner cache restore), before any
+      # bazel command.
       - name: Restore the LLVM archive
         id: llvm
         uses: ./.github/actions/llvm-archive-cache
+
+      # Lanes that execute here (modes cache and local, and a fork lane that
+      # fell back to the read-only cache) run tests with .bazelrc's pinned
+      # test PATH, so give them the Go the remote workers have at
+      # /usr/local/go.
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        if: needs.rbe.outputs.mode == 'cache' || needs.rbe.outputs.mode == 'local' || steps.bazel-fallback.outcome == 'success'
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Provide /usr/local/go for locally run tests
+        if: needs.rbe.outputs.mode == 'cache' || needs.rbe.outputs.mode == 'local' || steps.bazel-fallback.outcome == 'success'
+        run: |
+          if [ ! -e /usr/local/go ]; then
+            sudo ln -s "$(go env GOROOT)" /usr/local/go
+          elif [ ! -x /usr/local/go/bin/go ]; then
+            echo "::warning::/usr/local/go exists without bin/go; tests that exec go may fail"
+          fi
+
+      # Integration tests drive tmux, lsof and ssh from the host, as
+      # on the remote workers (tools/rbe/worker-env pins their versions).
+      # Where this lane executes here instead, install them, or those tests
+      # would skip ("tmux not installed") rather than run.
+      - name: Host tools for locally run integration tests
+        if: (matrix.lane == 'integration-packages' || matrix.lane == 'integration-smoke') && (needs.rbe.outputs.mode == 'cache' || needs.rbe.outputs.mode == 'local' || steps.bazel-fallback.outcome == 'success')
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tmux lsof openssh-client
+
+      # zstd transfers with the anonymous read-only cache (rbe-cache, :8443),
+      # only while it advertises zstd: cache-zstd-probe.sh asks its
+      # GetCapabilities, and any failure means no flag (never a failed step).
+      # A probe, not a repository variable: fork pull_request runs see no
+      # vars. Never for remote execution: rbe-west's trusted schedulers and
+      # the fork edge advertise no compressor, and Bazel then refuses the
+      # remote. Transport only (the line's config is fork-cache, which only
+      # setup-bazel's rc selects), so action keys are unchanged. .bazelrc
+      # try-imports the gitignored .bazelrc.local.
+      - name: Fork cache zstd transfers
+        if: needs.rbe.outputs.mode == 'cache' || steps.bazel-fallback.outcome == 'success'
+        run: |
+          if bash tools/rbe/cache-zstd-probe.sh; then
+            echo 'build:fork-cache --remote_cache_compression' >> .bazelrc.local
+          fi
 
       - name: Create Bazel test tmpdir
         run: |
@@ -306,8 +388,31 @@ jobs:
           # without it.
           mkdir -p /tmp/bt
 
-      # --profile and --build_event_json_file are command options, so they go
-      # after the command (CMD's first word), never in a startup position.
+      # The OpenAPI breaking-change gate (//cmd/openapi-breaking:
+      # openapi-breaking_test, in the unit lane's //...) compares the tested
+      # tree's internal/api/openapi.json with the spec of the commit the PR
+      # is merged onto (fresh-merge's base-sha). @openapi_base_spec
+      # (tools/bazel/rules/openapi_base_spec.bzl) reads the file this names
+      # from the client environment: no Bazel flag, so no other action key
+      # changes. Other events have no base; the spec compares with itself.
+      - name: OpenAPI breaking-change base spec
+        if: github.event_name == 'pull_request' && matrix.lane == 'unit'
+        env:
+          BASE_SHA: ${{ needs.rbe.outputs.base-sha }}
+        run: |
+          set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::base-sha is '$BASE_SHA'"; exit 1; }
+          spec="$RUNNER_TEMP/openapi-base.json"
+          git show "$BASE_SHA:internal/api/openapi.json" > "$spec"
+          echo "GC_OPENAPI_BREAKING_BASE_SPEC=$spec" >> "$GITHUB_ENV"
+          echo "OpenAPI breaking-change base: \`$BASE_SHA\`" >> "$GITHUB_STEP_SUMMARY"
+
+      # --profile, --build_event_json_file, --execution_log_compact_file and
+      # --experimental_build_event_upload_strategy are command options, so
+      # they go after the command (CMD's first word), never in a startup
+      # position. upload_strategy=local keeps the profile and exec log (the
+      # BEP's local_file/uri fields) out of the farm CAS: both hold argv/env
+      # values the ci-analytics extractor reads and redacts, never the farm.
       - name: bazel ${{ matrix.cmd }}
         id: test
         if: steps.worker-env.outputs.pin-moved != 'true'
@@ -323,7 +428,9 @@ jobs:
           start=$(date +%s)
           bazel "${args[@]}" \
             --profile="$RUNNER_TEMP/bazel-profile.json" \
-            --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" || rc=$?
+            --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" \
+            --experimental_build_event_upload_strategy=local || rc=$?
           echo "bazel / $LANE: exit $rc, $(( $(date +%s) - start ))s wall, mode $MODE" | tee -a "$GITHUB_STEP_SUMMARY"
           if [ "$rc" -ne 0 ] && [ "$EVIDENCE_ONLY" = true ]; then
             echo "::warning title=$LANE is evidence-only::bazel exited $rc; not gating until G3"
@@ -335,7 +442,7 @@ jobs:
       # numbers size any lane that needs a 4 vCPU (16 GB) runner instead; a
       # peak above 3.5 GB warns (the lane is near an OOM).
       - name: Bazel client heap
-        if: always() && steps.bazel.outcome == 'success'
+        if: always() && (steps.bazel.outcome == 'success' || steps.bazel-fallback.outcome == 'success')
         env:
           LANE: ${{ matrix.lane }}
         run: |
@@ -351,6 +458,38 @@ jobs:
         run: |
           [ -f "$RUNNER_TEMP/bazel-profile.json" ] || exit 0
           python3 tools/bazel/critpath.py "$RUNNER_TEMP/bazel-profile.json" --tier T2 --budget 150 || true
+
+      # CI analytics (rbe-ci-bep-analytics-design.md): a whitelisted summary of this lane's
+      # Bazel invocation for the internal-services collector. Only numbers, enums, mnemonics and
+      # validated labels leave the runner; the raw BEP, execution log and profile never do.
+      # Reporting only: continue-on-error, and no job needs it.
+      - name: CI analytics summary
+        id: ci-analytics
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          LANE: ${{ matrix.lane }}
+          MODE: ${{ steps.bazel-fallback.outcome == 'success' && 'cache' || needs.rbe.outputs.mode }}
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+          PR_HINT: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          [ -f "$RUNNER_TEMP/bazel-bep.json" ] || exit 0
+          zstd --version || echo "::warning::zstd missing: no per-mnemonic data in this lane's summary"
+          python3 tools/bazel/ci_analytics_extract.py \
+            --lane "$LANE" --mode "$MODE" --check-run-id "$CHECK_RUN_ID" --pr-hint "$PR_HINT" \
+            --invocation test "$RUNNER_TEMP/bazel-bep.json" "$RUNNER_TEMP/bazel-exec.log.zst" "$RUNNER_TEMP/bazel-profile.json" \
+            --out "$RUNNER_TEMP/ci-analytics/ci-analytics.json"
+      - name: Upload CI analytics summary
+        if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-analytics-${{ matrix.lane }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
+          retention-days: 7
+          if-no-files-found: ignore
+          overwrite: true
 
       # The bep-summary job reports every lane's BEP file in one table. The
       # raw file holds the expanded command line (--remote_executor, the
@@ -387,6 +526,22 @@ jobs:
             bazel-testlogs/**/test.log
             bazel-testlogs/**/test.xml
           if-no-files-found: ignore
+          retention-days: 7
+
+      # //cmd/genschema:genschema_in_sync_test leaves the exact regeneration
+      # patch in its test.outputs when the reference docs are stale; the Docs
+      # Autofix workflow (docs-autofix.yml) applies this artifact to the PR.
+      - name: Collect generated-docs freshness patch
+        if: failure() && steps.test.outcome == 'failure' && matrix.lane == 'unit'
+        run: |
+          patch=bazel-testlogs/cmd/genschema/genschema_in_sync_test/test.outputs/generated-docs-freshness.patch
+          if [ -s "$patch" ]; then cp -f "$patch" generated-docs-freshness.patch; fi
+      - name: Upload generated-docs freshness patch
+        if: failure() && steps.test.outcome == 'failure' && matrix.lane == 'unit' && hashFiles('generated-docs-freshness.patch') != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: generated-docs-freshness-patch
+          path: generated-docs-freshness.patch
           retention-days: 7
 
       # The LLVM archive (~1.9 GB) has a runner cache entry of its own, keyed
@@ -483,7 +638,26 @@ jobs:
             --json-out "$dir/summary.json" \
             unit="$dir/bazel-bep-unit-$ATTEMPT/bazel-bep.json" \
             acceptance="$dir/bazel-bep-acceptance-$ATTEMPT/bazel-bep.json" \
+            integration-packages="$dir/bazel-bep-integration-packages-$ATTEMPT/bazel-bep.json" \
+            integration-smoke="$dir/bazel-bep-integration-smoke-$ATTEMPT/bazel-bep.json" \
             integration="$dir/bazel-bep-integration-$ATTEMPT/bazel-bep.json" >> "$GITHUB_STEP_SUMMARY"
+      # rbe-ci-cost-latency-study.md recommendation 4: keeps #7241's
+      # acceptance re-shard gain and would have caught a slowest-shard
+      # straggler like beads' server-Dolt storage tier (4.3-4.5 min behind
+      # in 2 of 8 runs). Warns (::warning) on every lane's BEP file; does
+      # not fail the run yet (--fail-on-imbalance, not passed here, switches
+      # that on once the budget has run clean for a while).
+      - name: Shard balance
+        continue-on-error: true
+        run: |
+          dir="$RUNNER_TEMP/bazel-bep"
+          go run ./scripts/shard-budget.go \
+            "$dir/bazel-bep-unit-${{ github.run_attempt }}/bazel-bep.json" \
+            "$dir/bazel-bep-acceptance-${{ github.run_attempt }}/bazel-bep.json" \
+            "$dir/bazel-bep-integration-packages-${{ github.run_attempt }}/bazel-bep.json" \
+            "$dir/bazel-bep-integration-smoke-${{ github.run_attempt }}/bazel-bep.json" \
+            "$dir/bazel-bep-integration-${{ github.run_attempt }}/bazel-bep.json" \
+            --allow-missing >> "$GITHUB_STEP_SUMMARY"
       - name: Upload bazel test cache report
         if: always()
         continue-on-error: true
@@ -494,13 +668,17 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
-  # Push to main only: instrumented builds are their own configuration, so
-  # this is a separate lane; with bazel-test.yml's identical invocation it is
-  # mostly remote cache hits.
+  # Nightly schedule or dispatch only (rbe-ci-cost-latency-study.md
+  # recommendation 5; bazel-nightly.yml calls this workflow once a day).
+  # Reporting only, so it bought nothing paying its 90-minute budget on
+  # every push to main; moved off push the same way as the integration lane
+  # above. As the go-test arm's coverage (preflight-unit-cover-*):
+  # instrumented builds are their own configuration, so this is a separate
+  # job, and its first run on a cold cache compiles the world under coverage.
   coverage:
     name: bazel / coverage
     needs: rbe
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.rbe.outputs.mode == 'remote'
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.rbe.outputs.mode == 'remote'
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 90
     permissions:
@@ -538,10 +716,15 @@ jobs:
       - name: Create Bazel test tmpdir
         run: mkdir -p /tmp/bt
       - name: bazel coverage //... (lcov)
+        id: test
         if: steps.worker-env.outputs.pin-moved != 'true'
         run: |
           bazel coverage --config=ci //... --combined_report=lcov \
-            --keep_going --test_timeout=600
+            --keep_going --test_timeout=600 \
+            --profile="$RUNNER_TEMP/bazel-profile.json" \
+            --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" \
+            --experimental_build_event_upload_strategy=local
       - name: Bazel client heap
         if: always() && steps.bazel.outcome == 'success'
         env:
@@ -553,6 +736,36 @@ jobs:
           if [ -n "$peak" ] && [ "$peak" -gt 3584 ]; then
             echo "::warning title=bazel / $LANE client heap near its limit::peak heap ${peak}MB, above 3.5 GB of the 4 GB -Xmx4g (R4)"
           fi
+
+      # Same redacted summary as the lane job; see its comment there.
+      - name: CI analytics summary
+        id: ci-analytics
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          LANE: coverage
+          MODE: remote
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+          PR_HINT: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          [ -f "$RUNNER_TEMP/bazel-bep.json" ] || exit 0
+          zstd --version || echo "::warning::zstd missing: no per-mnemonic data in this lane's summary"
+          python3 tools/bazel/ci_analytics_extract.py \
+            --lane "$LANE" --mode "$MODE" --check-run-id "$CHECK_RUN_ID" --pr-hint "$PR_HINT" \
+            --invocation test "$RUNNER_TEMP/bazel-bep.json" "$RUNNER_TEMP/bazel-exec.log.zst" "$RUNNER_TEMP/bazel-profile.json" \
+            --out "$RUNNER_TEMP/ci-analytics/ci-analytics.json"
+      - name: Upload CI analytics summary
+        if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-analytics-coverage-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
+          retention-days: 7
+          if-no-files-found: ignore
+          overwrite: true
+
       - name: Upload lcov report
         if: hashFiles('bazel-out/_coverage/_coverage_report.dat') != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -560,9 +773,21 @@ jobs:
           name: bazel-coverage-lcov
           path: bazel-out/_coverage/_coverage_report.dat
           retention-days: 7
+      # The combined lcov report under its own flag, so Codecov keeps the
+      # bazel and go-test signals separable.
+      - name: Upload coverage to Codecov
+        if: hashFiles('bazel-out/_coverage/_coverage_report.dat') != ''
+        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
+        with:
+          files: bazel-out/_coverage/_coverage_report.dat
+          flags: bazel-unit
+          token: ${{ secrets.CODECOV_TOKEN }}
+          verbose: true
 
+  # The required check "BUILD files in sync" (main ruleset, branch
+  # protection): the one job of that name.
   sync-check:
-    name: bazel / BUILD files in sync (preview)
+    name: BUILD files in sync
     needs: rbe
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
@@ -581,11 +806,24 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      # Same env as the lane job's "Set up Bazel" step: with no env at all
+      # this job ran gazelle and GoStdlib locally on every PR (64 sandboxed
+      # actions). Mode remote gets the executor and the mint certificate;
+      # every other mode gets the read-only fork cache instead, with no
+      # mint certificate, so BUILD files in sync never needs rbe-fork-mint.
       - name: Set up Bazel
         uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_KEY || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode != 'remote' && 'true' || '' }}
       - name: Restore the LLVM archive
         uses: ./.github/actions/llvm-archive-cache
       - name: BUILD files are in sync (gazelle + repo tree)
+        env:
+          BAZEL_SYNC_FLAGS: ${{ needs.rbe.outputs.mode == 'remote' && '--config=remote-exec' || '--config=fork-cache' }}
         run: |
           make bazel-sync
           git diff --exit-code || {
@@ -594,25 +832,19 @@ jobs:
             exit 1
           }
 
-  # Preview gate. At the cutover it takes the required name "bazel test
-  # (side-by-side)" and bazel-test.yml is deleted; branch protection and the
-  # ruleset need no edit.
-  #
-  # Cutover hazard: this gate passes with zero lanes (an empty lane list:
-  # mode skip, or a pull_request run in mode cache). Under a required name
-  # that would merge fork and Dependabot PRs nothing tested. The cutover
-  # must first make a cache-mode PR run lanes (rbe-west's mint serves
-  # bazel.yml) or fail here; TestBazelMultiLaneGateUnderRequiredNameRunsLanes
-  # fails while both hold.
+  # The required check "bazel test (side-by-side)" (main ruleset, branch
+  # protection): the one job of that name. It passes only when the rbe job,
+  # every lane and sync-check succeeded. A run with an empty lane list
+  # tested nothing and fails, whatever the event (no mode yields one; this
+  # guards the required name against a future one). Lanes are never
+  # "skipped" into a pass: a skipped required check would count as passed.
   gate:
-    name: bazel lanes (preview)
+    name: bazel test (side-by-side)
     needs: [rbe, lane, sync-check]
     if: always()
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
-      # Lanes may be skipped only where the lane job's if skips them: an
-      # empty lane list.
       - name: Evaluate
         env:
           EVENT: ${{ github.event_name }}
@@ -625,8 +857,8 @@ jobs:
           echo "event=$EVENT mode=$MODE rbe=$RBE lanes=$LANES sync=$SYNC"
           [ "$RBE" = success ] || exit 1
           [ "$SYNC" = success ] || exit 1
-          if [ "$LANE_LIST" = '[]' ]; then
-            [ "$LANES" = skipped ]
-            exit $?
+          if [ -z "$LANE_LIST" ] || [ "$LANE_LIST" = '[]' ]; then
+            echo "::error title=bazel ran no lanes::mode $MODE started no lane for this $EVENT run; nothing was tested"
+            exit 1
           fi
           [ "$LANES" = success ]

@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 748
-baseline_files = 220
+baseline_calls = 745
+baseline_files = 221
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -51,7 +51,7 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 501
+baseline_calls = 497
 baseline_files = 147
 reported_calls = 380
 reported_files = 98
@@ -209,8 +209,8 @@ expires = "2026-10-31"
 # declaration leave the Small-debt census; helper bodies and sibling tests do
 # not inherit a source exemption.
 [[medium]]
-package_dir = "internal/api"
-package_name = "api"
+package_dir = "internal/api/apierr"
+package_name = "apierr"
 owner = "TestEveryEmittedErrorCodeIsRegistered"
 resources = ["subprocess"]
 owner_bead = "ga-cp3hwi"
@@ -487,7 +487,7 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 476
+baseline_calls = 472
 baseline_files = 138
 reported_calls = 394
 reported_files = 105

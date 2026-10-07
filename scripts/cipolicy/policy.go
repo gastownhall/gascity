@@ -5,19 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"sort"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	setupGoAction = "actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c"
-	// goModDownloadAction warms the module cache with a retried
-	// `go mod download`; every Go-building job runs it right after setup-go.
-	goModDownloadAction = "./.github/actions/go-mod-download"
-
 	// These are SHA-256 digests of the display-free JSON projections below.
 	// Whole-workflow execution hashes deliberately pin shell text instead of
 	// approximating shell semantics: any execution change requires explicit
@@ -144,7 +137,150 @@ const (
 	// Bumped again (gc 1.5.1 suspension quiescence): the same step also
 	// selects TestProxiedSuspensionIsQuiescence (~8 minutes, inside the step's
 	// 45m -timeout) and its name says so. No new job, trigger or permission.
-	expectedCIExecutionHash     = "bc49242821ebcecfe16df27169265323a40d6dcfdf659aae29fe6d009f9e819f"
+	//
+	// Bumped again (OpenAPI breaking-change gate): preflight-generated gains
+	// an OPENAPI_BREAKING_BASE job env (PR base SHA, else github.sha) and a
+	// "Fetch OpenAPI breaking-change base" step that shallow-fetches that
+	// commit before `make spec-ci`, which now also runs the oasdiff gate; the
+	// spec-ci step is renamed to say so. Reviewed delta: one env var, one
+	// step, one step name; no new job, trigger or permission.
+	//
+	// Bumped again (ga-96smfk.8, checks moved to Bazel): preflight-static
+	// drops the CI-policy, go.mod replace, native dependency surface,
+	// event-export isolation, open-core boundary, format and docs steps, and
+	// preflight-generated drops its GC_REQUIRE_OAPI_CODEGEN env, the spec-ci
+	// and generated-docs drift steps and the patch upload. Each now runs as a
+	// Bazel test in the required bazel.yml unit lane; the OpenAPI
+	// breaking-change gate (needs the git base commit) stays as its own
+	// `make openapi-breaking-check` step. Reviewed delta: removed steps, one
+	// removed env and one renamed step command; no new job, trigger or
+	// permission.
+	//
+	// Bumped again (ga-96smfk.26, acceptance shard floor): TestBeadsProxiedDefault
+	// was split into independent TestBeadsProxiedDefault* top-level tests, so
+	// the topology job's proxied-default step selects those eight names
+	// instead of the one. Same tests' assertions, same step, -timeout and env.
+	// No new job, trigger or permission.
+	//
+	// Bumped again (ga-96smfk.6, package integration shards moved to Bazel):
+	// the eleven packages-* rows (packages-core-N-of-4,
+	// packages-cmd-gc-integration, packages-runtime-tmux-N-of-6) leave
+	// integration-shards for a new integration-packages-fork job with the
+	// same runner, env and steps, run only for fork and Dependabot pull
+	// requests (bazel.yml's gating integration-packages lane covers pushes
+	// and same-repo PRs); ci-integration needs it and allows its skip.
+	// Reviewed delta: one job split by condition; no new trigger, step
+	// command or permission.
+	//
+	// Bumped again (ga-96smfk.5, lint and vet as nogo): preflight-static
+	// drops the static-scope classifier, the golangci-lint version/cache
+	// steps, `make lint-affected`, `make lint` and `make vet` (nogo now runs
+	// them inside every Bazel Go compile, gated by bazel.yml), and its
+	// checkout no longer needs fetch-depth 2. Reviewed delta: removed steps
+	// and one removed checkout input; no new job, trigger or permission.
+	//
+	// Bumped again (ga-96smfk.50, //test/integration smoke subset moved to
+	// Bazel): the bdstore and rest-smoke rows join the packages-* rows in one
+	// fork/Dependabot-PR-only integration-shards job (bazel.yml's gating
+	// integration-smoke and integration-packages lanes cover pushes and every
+	// other PR), and integration-packages-fork goes; ci-integration drops it.
+	// Reviewed delta: rows moved between two jobs of identical runner, env
+	// and steps, one job removed; no new trigger, step command or permission.
+	// Bumped again (ga-96smfk.7, cmd/gc process suite moved to Bazel): the
+	// 12-shard cmd-gc-process job now runs for fork and Dependabot PRs only
+	// (the integration-packages-fork condition) and its name says so. Pushes
+	// and same-repo PRs run the same suite in bazel.yml's gating
+	// integration-packages lane (//cmd/gc:gc_test, --config=integration,
+	// GC_FAST_UNIT=0). Reviewed delta: one job's if and name; no new job,
+	// trigger or permission.
+	// Bumped again (ga-96smfk.7, worker-core conformance moved to Bazel): the
+	// eight per-profile worker-core and worker-core-phase2 jobs and their two
+	// summary jobs are removed, with the changes job's worker and
+	// worker_phase2 filters and outputs that only they read, and ci-required
+	// no longer needs the two summaries. Bazel runs the same tests with
+	// PROFILE unset (every profile): workertest_test, tmux_test and gc_test
+	// in the unit lane, gc_test's integration-tagged real-transport proof in
+	// the integration-packages lane. Reviewed delta: removed jobs, filters,
+	// outputs and needs; no new job, trigger or permission.
+	//
+	// Bumped again (ga-96smfk.7, tagged suites moved to Bazel): the
+	// cmd-gc-productmetrics-testhook job and preflight-static's "Native
+	// DoltLite beads tests" step are removed, with the job's two ci-required
+	// references. bazel.yml's unit lane runs the same tests as
+	// //cmd/gc:gc_productmetrics_testhook_test (-tags productmetrics_testhook)
+	// and //internal/beads:beads_native_doltlite_test (-tags
+	// gascity_native_beads). Reviewed delta: one removed job and one removed
+	// step; no new job, trigger or permission.
+	//
+	// Bumped again (ga-96smfk.50, fork PRs on Bazel): integration-shards, the
+	// last Go integration shards (packages-*, bdstore, rest-smoke, run only
+	// for fork and Dependabot PRs since #7261), and cmd-gc-process (fork-only
+	// since #7247) are deleted: bazel.yml's gating integration-packages and
+	// integration-smoke lanes run those tests for every PR, fork ones
+	// included (fork-ro run 37569466546, fork-rw run 37572755753).
+	// ci-integration drops integration-shards, ci-required cmd-gc-process.
+	// Reviewed delta: two jobs removed, two needs and two allowed skips
+	// dropped; no new job, trigger or permission.
+	//
+	// Bumped again (ga-96smfk.10, Docker session suite moved to Bazel): the
+	// docker-session job, its `docker` changes filter/output and its
+	// ci-required need and allowed skip are removed. Every scenario of the
+	// real-Docker harness it ran now runs as TestDockerSessionScript
+	// (//test/containerhost, emulated container host) in bazel.yml's gating
+	// integration-packages lane. Reviewed delta: one job and one filter
+	// removed; no new job, trigger, step command or permission.
+	//
+	// Bumped again (ga-96smfk.9, dashboard SPA moved to Bazel): the npm
+	// dashboard job and preflight-generated's `make dashboard-ci` step (and
+	// its setup-node) are removed, and ci-preflight no longer needs the job.
+	// Bazel's unit lane runs the same typecheck, Vitest, build, drift and
+	// Playwright steps (//internal/api/dashboardspa/...). Reviewed delta:
+	// removed job, steps and need; no new job, trigger or permission.
+	// Bumped again (ga-96smfk.7, bd contract cells moved to Bazel): the
+	// contract-acceptance-previous and contract-acceptance-current jobs are
+	// removed, and Check and ci-preflight no longer need them (nor allow the
+	// current cell's skip). bazel.yml's unit lane runs the same tests against
+	// pinned bd release archives: //test/acceptance:bd_cli_contract_prev_test
+	// and :bd_cli_contract_current_test, and
+	// //internal/beads:bd_conditional_release_contract_test. Reviewed delta:
+	// two removed jobs and their fan-in references; no new job, trigger or
+	// permission.
+	//
+	// Bumped again (ga-96smfk.11, beads topology acceptance moved to Bazel):
+	// the beads-topology-acceptance and beads-proxied-native-acceptance jobs
+	// are removed, with the changes job's beads_topology filter and output
+	// that only they read, and ci-required no longer needs them (nor allows
+	// their skip). bazel.yml's required acceptance lane runs the same tests
+	// against the pinned bd and dolt, under GC_REQUIRE_ACCEPTANCE_TOOLING
+	// and GC_ACCEPTANCE_TOPOLOGY_MATRIX: //test/acceptance:acceptance_test
+	// and :acceptance_solo_tests. Reviewed delta: two removed jobs, one
+	// filter and output, and their fan-in references; no new job, trigger or
+	// permission.
+	//
+	// Bumped again (ga-96smfk.10, K8s session suite moved to Bazel): the
+	// k8s-session job, its `k8s` changes filter/output and its ci-required
+	// need and allowed skip are removed. Its one step (TestK8sSessionConformance)
+	// only ran with the GC_K8S_AVAILABLE secret, which was never set, so it
+	// executed nothing; the suite now runs against the emulated pod API in
+	// //test/containerhost in bazel.yml's gating integration-packages lane.
+	// Reviewed delta: one job and one filter removed; no new job, trigger,
+	// step command or permission.
+	//
+	// Bumped again (ga-96smfk.10, openclaw-bridge Node suite moved to
+	// Bazel): the openclaw-bridge job, its openclaw_bridge changes
+	// filter/output and its ci-required need and allowed skip are removed.
+	// The same node --test files run as //contrib/openclaw-bridge's js_tests
+	// under rules_js in bazel.yml's gating unit lane. Reviewed delta: one job
+	// and one filter removed; no new job, trigger, step command or permission.
+	//
+	// Bumped again (ga-96smfk.38, OpenAPI breaking-change gate moved to
+	// Bazel): the preflight-generated job and its need in Check and
+	// ci-preflight are removed. //cmd/openapi-breaking:openapi-breaking_test
+	// (in bazel.yml's gating unit lane) runs the gate with the pinned oasdiff
+	// against the PR base commit's spec, which the lane writes with git show
+	// and hands to @openapi_base_spec. Reviewed delta: one job removed; no
+	// new job, trigger, step command or permission.
+	expectedCIExecutionHash     = "0b81b0eead4e815e218330ee63ccec936e8a14b7867b5e784ef0aadbd3cb006b"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -170,8 +306,11 @@ const (
 	// trigger, permission or secret. Then (Go module fetch resilience)
 	// bundled-pack-pins and waiver-clock each set setup-go `cache: false` and
 	// gain one step right after it, `uses: ./.github/actions/go-mod-download`;
-	// no new job, trigger, permission or secret.
-	expectedNightlyExecutionHash = "8c3b93d8471bb9f6b121f6a4713367b25fc10183c9a89a716dcd6785ef21c8d9"
+	// no new job, trigger, permission or secret. Then (ga-96smfk.26)
+	// beads-proxied-perf's -run selects TestBeadsProxiedDefaultNativeLane, the
+	// one test split out of TestBeadsProxiedDefault that reads
+	// GC_ACCEPTANCE_PERF; no new job, trigger, permission or secret.
+	expectedNightlyExecutionHash = "81df6767fb4a45226bfdf50a367a369c86f525510772a313d0ce3fa744295153"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`.
@@ -180,17 +319,6 @@ const (
 
 var requiredFilterPaths = map[string][]string{
 	"mail": {"internal/mail/**", "contrib/mail-scripts/**"},
-	"docker": {
-		"internal/session/**",
-		"scripts/gc-session-docker",
-		"scripts/test-docker-session",
-		"contrib/session-scripts/**",
-	},
-	"k8s": {
-		"internal/session/**",
-		"contrib/session-scripts/gc-session-k8s*",
-		"test/integration/session_k8s_test.go",
-	},
 	"beads": {
 		"go.mod",
 		"internal/beads/**",
@@ -199,53 +327,12 @@ var requiredFilterPaths = map[string][]string{
 		".github/scripts/install-bd-archive.sh",
 		"cmd/gc/init_provider_readiness.go",
 	},
-	// beads-topology-acceptance is the only job that stands up the proxied
-	// shapes for real, and ci-required allows its skip, so the paths that must
-	// trigger it are policy rather than convention. The internal/** entry is
-	// the dependency graph of the binaries the job builds:
-	// `go list -deps ./test/acceptance/... ./cmd/gc`.
-	"beads_topology": {
-		"go.mod",
-		"go.sum",
-		"deps.env",
-		"cmd/gc/**",
-		"internal/**",
-		"examples/bd/**",
-		"test/acceptance/**",
-		".github/workflows/ci.yml",
-	},
 	"packs": {
 		"examples/gastown/**",
 		"internal/config/pack.go",
 		"internal/config/compose.go",
 		"cmd/gc/embed_builtin_packs.go",
 		"scripts/update-bundled-gastown-pack",
-	},
-	"worker": {
-		"go.mod",
-		"go.sum",
-		".github/workflows/**",
-		"Makefile",
-		"internal/worker/**",
-		"internal/sessionlog/**",
-		"internal/modelwindow/**",
-		"internal/runtime/**",
-		"internal/config/**",
-		"cmd/gc/template_resolve*.go",
-		"cmd/gc/session_*",
-		"test/**worker**",
-	},
-	"worker_phase2": {
-		"go.mod",
-		"go.sum",
-		".github/workflows/**",
-		"Makefile",
-		"internal/worker/**",
-		"internal/sessionlog/**",
-		"internal/modelwindow/**",
-		"internal/runtime/**",
-		"internal/config/**",
-		"cmd/gc/**",
 	},
 	"cmd_gc_process": {
 		"go.mod",
@@ -275,7 +362,6 @@ var requiredFilterPaths = map[string][]string{
 		"scripts/go-test-observable",
 		"examples/gastown/**",
 	},
-	"openclaw_bridge": {"contrib/openclaw-bridge/**", ".github/workflows/**"},
 	"shared": {
 		"go.mod",
 		"go.sum",
@@ -342,13 +428,7 @@ func validate(ci, nightly, action map[string]any) error {
 	if err := validateChangesJob(ci); err != nil {
 		return err
 	}
-	if err := validatePolicyWiring(ci); err != nil {
-		return err
-	}
 	if err := validatePRProviderOwnership(ci); err != nil {
-		return err
-	}
-	if err := validatePlaywrightInstallHardening(ci); err != nil {
 		return err
 	}
 	if err := assertWorkflowExecution("CI", ci, expectedCIExecutionHash); err != nil {
@@ -430,32 +510,6 @@ func validateChangesJob(workflow map[string]any) error {
 	return nil
 }
 
-func validatePolicyWiring(workflow map[string]any) error {
-	staticJob, err := workflowJob(workflow, "preflight-static")
-	if err != nil {
-		return err
-	}
-	steps, err := mappingSlice(staticJob["steps"], "preflight-static steps")
-	if err != nil {
-		return err
-	}
-	setupIndex := findStep(steps, "uses", setupGoAction)
-	downloadIndex := findStep(steps, "uses", goModDownloadAction)
-	policyIndex := findStep(steps, "run", "make test-ci-policy")
-	firstGuardIndex := findStep(steps, "run", "make check-gomod-replace")
-	if setupIndex < 0 || downloadIndex != setupIndex+1 || policyIndex != downloadIndex+1 ||
-		firstGuardIndex <= policyIndex {
-		return fmt.Errorf(
-			"preflight-static must run the focused CI policy immediately after setup-go and the Go module download, and before other guards",
-		)
-	}
-	want := map[string]any{"run": "make test-ci-policy"}
-	if got := projectStep(steps[policyIndex]); !reflect.DeepEqual(got, want) {
-		return fmt.Errorf("preflight-static CI policy step must be unconditional and blocking")
-	}
-	return nil
-}
-
 func validatePRProviderOwnership(workflow map[string]any) error {
 	execution, err := projectWorkflowExecution(workflow)
 	if err != nil {
@@ -506,60 +560,6 @@ func validateNightlyProviderOwnership(workflow map[string]any) error {
 				match.name,
 			)
 		}
-	}
-	return nil
-}
-
-// validatePlaywrightInstallHardening ensures the Dashboard SPA's Playwright
-// Chromium install step fails fast on a hung apt mirror instead of consuming
-// its whole retry budget on a single stuck attempt: each retry wraps the
-// install command with a per-attempt timeout, and apt itself gets an
-// explicit HTTP timeout so a dead mirror errors instead of hanging.
-func validatePlaywrightInstallHardening(workflow map[string]any) error {
-	job, err := workflowJob(workflow, "dashboard")
-	if err != nil {
-		return err
-	}
-	steps, err := mappingSlice(job["steps"], "dashboard steps")
-	if err != nil {
-		return err
-	}
-	const stepName = "Install Playwright Chromium"
-	var installStep map[string]any
-	for _, candidate := range steps {
-		if candidate["name"] == stepName {
-			installStep = candidate
-			break
-		}
-	}
-	if installStep == nil {
-		return fmt.Errorf("dashboard job is missing the %q step", stepName)
-	}
-	if installStep["timeout-minutes"] != 12 {
-		return fmt.Errorf("%q step must keep its outer timeout-minutes at 12", stepName)
-	}
-	run, ok := installStep["run"].(string)
-	if !ok {
-		return fmt.Errorf("%q step must have a run script", stepName)
-	}
-	aptTimeoutIndex := strings.Index(run, `Acquire::http::Timeout "15"`)
-	if aptTimeoutIndex < 0 {
-		return fmt.Errorf(
-			"%q step must configure an apt HTTP timeout (Acquire::http::Timeout \"15\") so a dead mirror errors instead of hanging",
-			stepName,
-		)
-	}
-	const perAttemptInstall = "timeout 240 npm run test:e2e:install:ci"
-	installIndex := strings.Index(run, perAttemptInstall)
-	if installIndex < 0 {
-		return fmt.Errorf(
-			"%q step must wrap each retry attempt with a per-attempt timeout (%q) so a hung install cannot consume the whole step budget",
-			stepName,
-			perAttemptInstall,
-		)
-	}
-	if aptTimeoutIndex > installIndex {
-		return fmt.Errorf("%q step must configure the apt HTTP timeout before the retry loop runs", stepName)
 	}
 	return nil
 }
@@ -757,20 +757,6 @@ func copyValue(value any) any {
 	default:
 		return value
 	}
-}
-
-func findStep(steps []map[string]any, field, value string) int {
-	found := -1
-	for index, step := range steps {
-		if step[field] != value {
-			continue
-		}
-		if found >= 0 {
-			return -1
-		}
-		found = index
-	}
-	return found
 }
 
 type providerSelectorMatch struct {

@@ -7,6 +7,7 @@ import (
 	"log"
 	"maps"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -276,6 +277,28 @@ func (bp *agentBuildParams) releasePoolSessionCreate() {
 	bp.poolSessionCreateBudget.Release()
 }
 
+// recoverLeg turns a panic in one demand-pass goroutine into that leg's error
+// and writes the stack to stderr. safeTick recovers only the tick goroutine,
+// and recover works only on the goroutine that panicked, so without this a
+// panic inside one leg's store read killed the controller (mc-zndi7.40). The
+// leg then reads as failed and the pass's existing partial rules apply. Defer
+// it right after wg.Done, so it runs before Done and the error is written
+// before Wait returns.
+func recoverLeg(dst *error, label string, stderr io.Writer) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	*dst = fmt.Errorf("%s panicked: %v", label, r)
+	// Sibling legs share the pass's stderr, which nothing else writes while
+	// they run (each fold prints after Wait), so serializing here is enough.
+	recoverLegMu.Lock()
+	defer recoverLegMu.Unlock()
+	fmt.Fprintf(stderr, "buildDesiredState: %s panicked: %v\n%s", label, r, debug.Stack()) //nolint:errcheck
+}
+
+var recoverLegMu sync.Mutex
+
 func evaluatePendingPools(
 	cfg *config.City,
 	pendingPools []poolEvalWork,
@@ -305,6 +328,7 @@ func evaluatePendingPools(
 		newDemand := pw.newDemand
 		go func(idx int, template, agentName string, agentIndex int, sp scaleParams, dir string, newDemand bool) {
 			defer wg.Done()
+			defer recoverLeg(&evalResults[idx].err, "scale_check "+template, stderr)
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			started := time.Now()
@@ -1516,6 +1540,8 @@ func collectOpenSessionInfos(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			results[idx].ref = source.ref
+			defer recoverLeg(&results[idx].err, "session census leg "+label, log.Writer())
 			// Per-leg default direct union (session front door over the candidate's
 			// store, CachingStore-wrapped when available) — same tier as the prior
 			// raw ListAllSessionBeads, projected to Info. Partial-result rows are
@@ -1740,6 +1766,13 @@ func collectAssignedWorkBeadsWithStores(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			var panicked error
+			defer func() {
+				if panicked != nil {
+					results[idx] = storeAssignedWorkResult{ref: source.ref, errs: []error{panicked}}
+				}
+			}()
+			defer recoverLeg(&panicked, "assigned work leg "+label, log.Writer())
 			var result []beads.Bead
 			var resultStores []beads.Store
 			var resultStoreRefs []string
@@ -1863,6 +1896,13 @@ func collectAssignedWorkBeadsWithStores(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			var panicked error
+			defer func() {
+				if panicked != nil {
+					readyResults[idx] = storeAssignedWorkResult{ref: source.ref, errs: []error{panicked}}
+				}
+			}()
+			defer recoverLeg(&panicked, "assigned work ready leg "+label, log.Writer())
 			var ready []beads.Bead
 			var err error
 			var errs []error
@@ -3848,13 +3888,18 @@ func realizePoolDesiredSessionsAt(
 			go func() {
 				defer wg.Done()
 				for idx := range jobs {
-					plan := *items[idx].plan
-					info, err := executePlannedPoolSessionBeadCreate(bp, cfgAgent, qualifiedName, plan)
-					if err != nil {
-						items[idx].createErr = err
-						continue
-					}
-					items[idx].sessionInfo = info
+					// Recover per job: a dead worker would leave the
+					// sender blocked on jobs.
+					func() {
+						defer recoverLeg(&items[idx].createErr, "pool "+qualifiedName+" create", stderr)
+						plan := *items[idx].plan
+						info, err := executePlannedPoolSessionBeadCreate(bp, cfgAgent, qualifiedName, plan)
+						if err != nil {
+							items[idx].createErr = err
+							return
+						}
+						items[idx].sessionInfo = info
+					}()
 				}
 			}()
 		}
@@ -4856,17 +4901,26 @@ func existingPoolSlotWithConfig(cfg *config.City, cfgAgent *config.Agent, sessio
 // raw bead. Byte-identical to the raw form, oracle-pinned by
 // TestExistingPoolSlotWithConfigInfoMatchesRaw.
 func existingPoolSlotWithConfigInfo(cfg *config.City, cfgAgent *config.Agent, info session.Info) int {
+	return existingPoolSlotWithTemplates(cfg, nil, cfgAgent, &info)
+}
+
+// existingPoolSlotWithTemplates is existingPoolSlotWithConfigInfo with the
+// stored-template match answered through templates, a memo over cfg. Nil
+// computes it, as legacy does: only the v2 allocator builds one (A3). It
+// reads info through a pointer: the v2 fresh-slot occupancy asks it for
+// every row of every pool, and an Info is kilobytes.
+func existingPoolSlotWithTemplates(cfg *config.City, templates *slotTemplateMemo, cfgAgent *config.Agent, info *session.Info) int {
 	if cfgAgent == nil {
 		return 0
 	}
 	if cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 		return 0
 	}
-	storedTemplateMatches := cfg == nil || storedTemplateMatchesPoolTemplate(sessionBeadStoredTemplateInfo(info), cfgAgent.QualifiedName(), cfg)
-	agentSlot := resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, sessionBeadAgentNameInfo(info))
+	storedTemplateMatches := cfg == nil || templates.storedTemplateMatchesPoolTemplate(storedTemplateRef(info), cfgAgent.QualifiedName(), cfg)
+	agentSlot := resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, sessionBeadAgentNameInfo(*info))
 	aliasSlot := resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, info.Alias)
 	sessionNameSlot := 0
-	if storedTemplateMatches && strings.TrimSpace(info.Alias) == "" && !infoOwnsPoolSessionName(info) {
+	if storedTemplateMatches && strings.TrimSpace(info.Alias) == "" && !infoOwnsPoolSessionName(*info) {
 		sessionNameSlot = resolvePersistedPoolIdentitySlot(cfgAgent, true, info.SessionNameMetadata)
 	}
 	if info.PoolSlot != "" {
@@ -5123,6 +5177,9 @@ func freshPoolOccupancyInfos(bp *agentBuildParams) []session.Info {
 	if bp == nil {
 		return nil
 	}
+	if bp.realizeMemo != nil {
+		return bp.realizeMemo.freshOccupancy()
+	}
 	primary := bp.sessionBeads.OpenInfos()
 	infos := make([]session.Info, 0, len(bp.sessionOccupancyInfos)+len(primary))
 	seen := make(map[string]bool, len(bp.sessionOccupancyInfos)+len(primary))
@@ -5246,6 +5303,19 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 		usedSlots[0] = true
 		return 0, nil
 	}
+	if bp != nil {
+		// The v2 realization memo counts its occupancy's slots once (A3).
+		if held := bp.realizeMemo.freshSlots(cfgAgent); held != nil {
+			for slot := 1; unlimited || slot <= upper; slot++ {
+				if usedSlots[slot] || held[slot] {
+					continue
+				}
+				usedSlots[slot] = true
+				return slot, nil
+			}
+			return 0, fmt.Errorf("%w: pool template %q has no free concrete slot", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
+		}
+	}
 	occupied := make(map[int]bool, len(usedSlots))
 	for slot, used := range usedSlots {
 		if used {
@@ -5340,6 +5410,12 @@ func beadIdentifiesAsCanonical(bead beads.Bead, canonical string) bool {
 
 // infoIdentifiesAsCanonical is the session.Info mirror of beadIdentifiesAsCanonical.
 func infoIdentifiesAsCanonical(i session.Info, canonical string) bool {
+	return infoRefIdentifiesAsCanonical(&i, canonical)
+}
+
+// infoRefIdentifiesAsCanonical is infoIdentifiesAsCanonical through a
+// pointer, for the v2 fresh-slot occupancy's every-row scan (A3).
+func infoRefIdentifiesAsCanonical(i *session.Info, canonical string) bool {
 	canonical = strings.TrimSpace(canonical)
 	if canonical == "" {
 		return false
@@ -6088,6 +6164,7 @@ func collectOpenUnassignedRoutedWork(cityPath string, cfg *config.City, store be
 		wg.Add(1)
 		go func(i int, source classStoreCandidate) {
 			defer wg.Done()
+			defer recoverLeg(&results[i].err, "routed work leg "+label, stderr)
 			// Live so the backing store's raw --status=open filter excludes blocked/
 			// deferred work: this unassigned-routed set feeds openControlDispatcherDemand
 			// and the route-repair passes, and mapBdStatus would otherwise collapse a

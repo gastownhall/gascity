@@ -11,72 +11,111 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// The proxied acceptance files are gated twice: by a build tag, and by the
-// -run expression of whichever CI step selects them. The tag is easy to get
-// right and easy to check; the selector is neither, and getting it wrong is
-// silent in the worst possible way.
+// The beads topology acceptance rows are gated three times: by a build tag,
+// by GC_ACCEPTANCE_TOPOLOGY_MATRIX (the slow rows skip without it), and by
+// which Bazel target runs them. Each gate is easy to get wrong silently.
 //
 // It happened. TestProxiedNativeLifecycle (695 lines) and
-// TestProxiedNativeSafety (550 lines) carried //go:build acceptance_a, sat in
-// a directory the beads_topology path filter matches, and were named by no
-// -run expression in any job — so the proxied-native lane's entire evidence
-// base ran exactly once, on the author's box: the per-crash-shape ping and
-// recover budgets, foreign-root's "0 pings, 0 dolt stop", the no-spawn
-// positive control, both no-migrate rows (the BD_ALLOW_REMOTE_MIGRATE consent
-// fence) and the author-at-commit pin. A regression in any of them would have
-// landed green, and the two files would read as gates forever (council pr2
-// C-F1).
+// TestProxiedNativeSafety (550 lines) carried //go:build acceptance_a and
+// were named by no -run expression in any CI job — so the proxied-native
+// lane's entire evidence base ran exactly once, on the author's box: the
+// per-crash-shape ping and recover budgets, foreign-root's "0 pings, 0 dolt
+// stop", the no-spawn positive control, both no-migrate rows (the
+// BD_ALLOW_REMOTE_MIGRATE consent fence) and the author-at-commit pin. A
+// regression in any of them would have landed green (council pr2 C-F1).
 //
-// This is the guard for that. It lives in ./scripts rather than in ci.yml
-// because ./scripts is inside UNIT_COVER_PKGS_NONCMDGC, which CI already runs
-// as "Preflight / unit cover (noncmdgc)" — so it is enforced with no workflow
-// edit and no shape-hash bump, the same route
-// scripts/check_split_topology_rows_test.go established.
+// Bazel's acceptance lane now runs every acceptance_a test:
+// //test/acceptance:acceptance_test runs all but the SOLO_TESTS (it skips
+// those by name), and :acceptance_solo_tests runs each SOLO_TESTS entry in a
+// target of its own. This guard pins the seams that would turn that into a
+// green no-op:
 //
-// It deliberately does NOT try to evaluate Go's -run grammar. It asserts the
-// weaker, checkable thing: the function's name appears somewhere in a CI
-// `go test` step's -run expression. A selector that names a function but
-// cannot match it is a different bug, and one a green CI run makes visible;
-// a selector that never mentions the function at all is invisible forever.
-func TestProxiedAcceptanceFunctionsAreSelectedByCI(t *testing.T) {
+//   - :acceptance_test's env is ACCEPTANCE_ENV, which sets the topology
+//     matrix switch and GC_REQUIRE_ACCEPTANCE_TOOLING (a missing bd, dolt or
+//     row precondition fails instead of skipping);
+//   - every SOLO_TESTS entry names a top-level test an acceptance_a file in
+//     test/acceptance declares (a stale name would run nothing, and skip
+//     nothing in :acceptance_test either);
+//   - bazel.yml's acceptance lane names both targets.
+func TestBeadsTopologyRowsRunInTheBazelAcceptanceLane(t *testing.T) {
 	root := repoRoot(t)
+	build := readRepoFile(t, root, "test/acceptance/BUILD.bazel")
 
-	workflow, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
+	env := regexp.MustCompile(`(?ms)^ACCEPTANCE_ENV = \{\n(.*?)^\}`).FindStringSubmatch(build)
+	if env == nil {
+		t.Fatal("test/acceptance/BUILD.bazel has no ACCEPTANCE_ENV dict")
+	}
+	for _, want := range []string{
+		`"GC_ACCEPTANCE_TOPOLOGY_MATRIX": "1",`,
+		`"GC_REQUIRE_ACCEPTANCE_TOOLING": "1",`,
+	} {
+		if !strings.Contains(env[1], want) {
+			t.Errorf("ACCEPTANCE_ENV lacks %s; the beads topology rows would skip into a cached pass:\n%s", want, env[1])
+		}
+	}
+	rule := regexp.MustCompile(`(?ms)^go_test\(\n    name = "acceptance_test",\n.*?^\)`).FindString(build)
+	if !strings.Contains(rule, "    env = ACCEPTANCE_ENV,\n") {
+		t.Errorf("acceptance_test does not set env = ACCEPTANCE_ENV:\n%s", rule)
+	}
+	if !strings.Contains(rule, `args = ["-test.skip=^(%s)$$" % "|".join(SOLO_TESTS.values())],`) {
+		t.Errorf("acceptance_test must skip exactly the SOLO_TESTS, which run in targets of their own:\n%s", rule)
+	}
+
+	solo := regexp.MustCompile(`(?ms)^SOLO_TESTS = \{\n(.*?)^\}`).FindStringSubmatch(build)
+	if solo == nil {
+		t.Fatal("test/acceptance/BUILD.bazel has no SOLO_TESTS dict")
+	}
+	entries := regexp.MustCompile(`(?m)^    "([a-z0-9_]+_test)": "(Test[A-Za-z0-9_]+)",$`).FindAllStringSubmatch(solo[1], -1)
+	if len(entries) == 0 {
+		t.Fatal("SOLO_TESTS has no entries; the scan is broken")
+	}
+
+	declared := map[string]bool{}
+	files, err := filepath.Glob(filepath.Join(root, "test", "acceptance", "*_test.go"))
 	if err != nil {
-		t.Fatalf("read ci.yml: %v", err)
+		t.Fatalf("glob test/acceptance: %v", err)
 	}
-	runExpressions := strings.Join(collectRunExpressions(string(workflow)), "\n")
-	if runExpressions == "" {
-		t.Fatal("ci.yml contains no `go test -run` expressions at all; this guard would pass vacuously")
-	}
-
-	matches, err := filepath.Glob(filepath.Join(root, "test", "acceptance", "beads_proxied_*_test.go"))
-	if err != nil {
-		t.Fatalf("glob the proxied acceptance files: %v", err)
-	}
-	if len(matches) == 0 {
-		t.Fatal("no test/acceptance/beads_proxied_*_test.go files found; the guard has nothing to guard")
-	}
-
-	found := 0
-	for _, path := range matches {
+	for _, path := range files {
 		body, err := os.ReadFile(path) //nolint:gosec // a path this test globbed inside the repo
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
+		if !strings.HasPrefix(string(body), "//go:build acceptance_a\n") {
+			continue
+		}
 		for _, name := range topLevelTestFunctions(string(body)) {
-			found++
-			if !strings.Contains(runExpressions, name) {
-				t.Errorf("%s: %s is named by no `go test -run` expression in ci.yml, so it runs in no job.\n"+
-					"A build tag is not a gate: add the function to an existing step's -run, or give it one.\n"+
-					"-run expressions currently in ci.yml:\n%s",
-					filepath.Base(path), name, runExpressions)
-			}
+			declared[name] = true
 		}
 	}
-	if found == 0 {
-		t.Fatal("the proxied acceptance files declare no top-level test functions; the scan is broken")
+	if len(declared) == 0 {
+		t.Fatal("no acceptance_a test functions found in test/acceptance; the scan is broken")
 	}
+	for _, entry := range entries {
+		if !declared[entry[2]] {
+			t.Errorf("SOLO_TESTS %s names %s, which no acceptance_a file in test/acceptance declares: "+
+				"the target runs nothing", entry[1], entry[2])
+		}
+	}
+
+	workflow := readRepoFile(t, root, ".github/workflows/bazel.yml")
+	lane := regexp.MustCompile(`(?m)^\s*acceptance='(.*)'$`).FindStringSubmatch(workflow)
+	if lane == nil {
+		t.Fatal("bazel.yml defines no acceptance lane")
+	}
+	for _, target := range []string{"//test/acceptance:acceptance_test", "//test/acceptance:acceptance_solo_tests"} {
+		if !strings.Contains(lane[1], " "+target) {
+			t.Errorf("bazel.yml's acceptance lane does not run %s:\n%s", target, lane[1])
+		}
+	}
+}
+
+func readRepoFile(t *testing.T, root, rel string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel))) //nolint:gosec // a fixed path inside the repo
+	if err != nil {
+		t.Fatalf("read %s: %v", rel, err)
+	}
+	return string(body)
 }
 
 // runPattern matches the body of a `-run '<expr>'` argument. CI writes every
@@ -119,9 +158,9 @@ type acceptanceWorkflowDoc struct {
 
 // TestAcceptancePerfGateHasALane is round3 review (completeness).
 //
-// TestBeadsProxiedDefault gates the proxied-native lane's `gc status --json`
-// wall clock only when GC_ACCEPTANCE_PERF is set, because wall clock on a
-// shared PR runner is a statement about the runner. The plan leaves the number
+// TestBeadsProxiedDefaultNativeLane gates the proxied-native lane's
+// `gc status --json` wall clock only when GC_ACCEPTANCE_PERF is set, because
+// wall clock on a shared PR runner is a statement about the runner. The plan leaves the number
 // to "the GC_ACCEPTANCE_PERF nightly lane" — and nothing anywhere set the
 // variable: no workflow, no Makefile target, and `make test-acceptance` runs
 // under `env -i`, which dropped it even when a developer exported it. So a flag-on
@@ -133,7 +172,7 @@ type acceptanceWorkflowDoc struct {
 func TestAcceptancePerfGateHasALane(t *testing.T) {
 	const (
 		gate     = "GC_ACCEPTANCE_PERF"
-		testName = "TestBeadsProxiedDefault"
+		testName = "TestBeadsProxiedDefaultNativeLane"
 	)
 	root := repoRoot(t)
 	set := func(values ...map[string]any) bool {
@@ -186,16 +225,16 @@ func TestAcceptancePerfGateHasALane(t *testing.T) {
 	recipe := ""
 	lines := strings.Split(string(makefile), "\n")
 	for i, line := range lines {
-		if strings.HasPrefix(line, "test-acceptance:") && i+1 < len(lines) {
+		if strings.HasPrefix(line, "test-acceptance-go:") && i+1 < len(lines) {
 			recipe = lines[i+1]
 			break
 		}
 	}
 	if recipe == "" {
-		t.Fatal("the Makefile has no test-acceptance recipe; the scan is broken")
+		t.Fatal("the Makefile has no test-acceptance-go recipe; the scan is broken")
 	}
 	if !strings.Contains(recipe, gate+"=") {
-		t.Errorf("`make test-acceptance` does not pass %s through its env -i allowlist, so exporting it "+
+		t.Errorf("`make test-acceptance-go` does not pass %s through its env -i allowlist, so exporting it "+
 			"runs the suite with the perf gate silently off:\n%s", gate, recipe)
 	}
 }
@@ -207,9 +246,9 @@ var inRowSkipPattern = regexp.MustCompile(`\.Skip(f|Now)?\(`)
 
 // TestProxiedAcceptanceRowsNeverSkipInRow is round4's missed completeness low.
 //
-// Every function in these files runs in a job that sets
-// GC_REQUIRE_ACCEPTANCE_TOOLING — Beads / proxied-native acceptance is a
-// required check — and that switch is what turns a missing precondition into
+// Every function in these files runs in Bazel's required acceptance lane,
+// which sets GC_REQUIRE_ACCEPTANCE_TOOLING (test/acceptance/BUILD.bazel's
+// ACCEPTANCE_ENV), and that switch is what turns a missing precondition into
 // a failure. An in-row t.Skip bypasses it: no-migrate-behind-ignored (the only
 // acceptance proof that an exported BD_ALLOW_REMOTE_MIGRATE never reaches the
 // library on the ignored lane) and dead-record-one-ping each carried one, and

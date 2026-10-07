@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -113,20 +112,12 @@ func scopeGapEvents(t *testing.T, rec *events.Fake) int {
 	return len(evts)
 }
 
-func backstopSessionBead(id, name string) beads.Bead {
+// backstopSessionBead is an open session row, gc-s1, for worker-1.
+func backstopSessionBead() beads.Bead {
 	return beads.Bead{
-		ID: id, Title: name, Type: sessionBeadType, Status: "open", Labels: []string{sessionBeadLabel},
-		Metadata: map[string]string{"session_name": name, "template": "worker", "state": "active"},
+		ID: "gc-s1", Title: "worker-1", Type: sessionBeadType, Status: "open", Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{"session_name": "worker-1", "template": "worker", "state": "active"},
 	}
-}
-
-func sessionInfoIDs(infos []session.Info) []string {
-	var out []string
-	for _, info := range infos {
-		out = append(out, info.ID)
-	}
-	slices.Sort(out)
-	return out
 }
 
 // Kills: a recording that never wakes the allocator, and one that wakes it
@@ -465,72 +456,77 @@ func writeSuspension(t *testing.T, cityPath, body string) {
 	}
 }
 
-// Kills: reads or repairs while the city is suspended (POOL-001: legacy's
-// demand pass returns before any of them), a suspended pass that drops or
-// replaces the last recording, and a lane that stays dark, or does not wake
-// the allocator, after resume. Each way of suspending: Workspace.Suspended,
-// the suspension file, GC_SUSPENDED=1.
-func TestExternalReadsSkipsWhileCitySuspendedAndWakesOnResume(t *testing.T) {
-	for _, tc := range []struct {
-		name            string
-		suspend, resume func(t *testing.T, cfg *config.City, cityPath string)
-	}{{
-		name:    "workspace suspended",
-		suspend: func(_ *testing.T, cfg *config.City, _ string) { cfg.Workspace.Suspended = true },
-		resume:  func(_ *testing.T, cfg *config.City, _ string) { cfg.Workspace.Suspended = false },
-	}, {
-		name: "suspension file",
-		suspend: func(t *testing.T, _ *config.City, cityPath string) {
-			writeSuspension(t, cityPath, `{"city":{"suspended":true}}`)
-		},
-		resume: func(t *testing.T, _ *config.City, cityPath string) { writeSuspension(t, cityPath, "") },
-	}, {
-		name:    "GC_SUSPENDED=1",
-		suspend: func(t *testing.T, _ *config.City, _ string) { t.Setenv("GC_SUSPENDED", "1") },
-		resume:  func(t *testing.T, _ *config.City, _ string) { t.Setenv("GC_SUSPENDED", "") },
-	}} {
+// suspendCases are the ways of suspending a city the lane reads, without the
+// GC_SUSPENDED escape hatch (no process env in new tests).
+var suspendCases = []struct {
+	name            string
+	suspend, resume func(t *testing.T, cfg *config.City, cityPath string)
+}{{
+	name:    "workspace suspended",
+	suspend: func(_ *testing.T, cfg *config.City, _ string) { cfg.Workspace.Suspended = true },
+	resume:  func(_ *testing.T, cfg *config.City, _ string) { cfg.Workspace.Suspended = false },
+}, {
+	name: "suspension file",
+	suspend: func(t *testing.T, _ *config.City, cityPath string) {
+		writeSuspension(t, cityPath, `{"city":{"suspended":true}}`)
+	},
+	resume: func(t *testing.T, _ *config.City, cityPath string) { writeSuspension(t, cityPath, "") },
+}}
+
+// Kills a suspended city's drains losing their reads (CONTRACT v5 R4): a
+// pass while the city is suspended still reads every lane-fed leg and
+// publishes, so the recording stays fresh.
+func TestK1ReadsWhileCitySuspended(t *testing.T) {
+	for _, tc := range suspendCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			cityPath := t.TempDir()
 			cfg := gaConfig()
 			f := newClobberedRunFixture()
 			cache, backing := newDemandCache(t, false, routedDemandBead("gc-r1"))
-			lane, wakes := newTestBackstopLane(externalReadsEnv{CityPath: cityPath, Cfg: cfg, CityStore: f.mem, RigStores: nil, ProbeStores: []beads.Store{cache}, Sessions: f.sessions})
-			t0 := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
-			if !passAndJoin(ctx, at(lane, t0)) {
-				t.Fatal("pass before suspending declined")
-			}
-			last := lane.recording()
-			if err := f.mem.SetMetadataBatch("ga-run", clobberedWorkDir()); err != nil {
-				t.Fatalf("re-clobber: %v", err)
-			}
-
-			// Each pass is past the repairs' minute, so only suspension
-			// stops them.
+			lane, _ := newTestBackstopLane(externalReadsEnv{CityPath: cityPath, Cfg: cfg, CityStore: f.mem, ProbeStores: []beads.Store{cache}, Sessions: f.sessions})
 			tc.suspend(t, cfg, cityPath)
 			backing.armed.Store(true)
-			if at(lane, t0.Add(2*externalReadsRepairInterval)).pass(ctx) {
-				t.Fatal("a pass ran while the city is suspended")
+			t0 := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+			if !passAndJoin(ctx, at(lane, t0)) {
+				t.Fatal("a pass declined while the city is suspended")
 			}
-			if lane.recording() != last || wakes.Load() != 1 {
-				t.Errorf("suspended pass: recording replaced=%t wakes=%d, want the last recording kept and no wake", lane.recording() != last, wakes.Load())
+			if got := backstopSeq(lane); got != 1 {
+				t.Errorf("suspended pass: seq %d, want 1: the pass publishes", got)
+			}
+			if ops := backing.readLog(); len(ops) == 0 {
+				t.Error("suspended pass read no lane-fed leg")
+			}
+			if leg, ok := recordedLeg(lane.recording(), cache); !ok || len(leg.RawOpen) != 1 {
+				t.Errorf("suspended pass recorded %+v (ok=%t), want the routed bead", leg, ok)
+			}
+		})
+	}
+}
+
+// Kills a write step running in a suspended city (POOL-001: legacy's demand
+// pass returns before its repairs), and a lane whose steps stay off after
+// resume. Each pass is past the repairs' minute, so only suspension stops
+// them.
+func TestK1StepsSkippedWhileCitySuspended(t *testing.T) {
+	for _, tc := range suspendCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			cityPath := t.TempDir()
+			cfg := gaConfig()
+			f := newClobberedRunFixture()
+			lane, _ := newTestBackstopLane(externalReadsEnv{CityPath: cityPath, Cfg: cfg, CityStore: f.mem, Sessions: f.sessions})
+			tc.suspend(t, cfg, cityPath)
+			t0 := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+			if !passAndJoin(ctx, at(lane, t0)) {
+				t.Fatal("a pass declined while the city is suspended")
 			}
 			if got := f.workDir(t); got != clobberPoolSlot {
 				t.Errorf("suspended pass repaired gc.work_dir = %q", got)
 			}
-			if ops := backing.readLog(); len(ops) > 0 {
-				t.Errorf("suspended pass read a leg: %q", ops)
-			}
-
 			tc.resume(t, cfg, cityPath)
-			if !passAndJoin(ctx, at(lane, t0.Add(4*externalReadsRepairInterval))) {
+			if !passAndJoin(ctx, at(lane, t0.Add(2*externalReadsRepairInterval))) {
 				t.Fatal("pass after resume declined")
-			}
-			if got := backstopSeq(lane); got != 2 {
-				t.Errorf("after resume: seq %d, want 2", got)
-			}
-			if got := wakes.Load(); got != 2 {
-				t.Errorf("after resume: wakes = %d, want 2: the stale sources turned fresh", got)
 			}
 			if got := f.workDir(t); got != clobberLiveWorkDir {
 				t.Errorf("after resume: gc.work_dir = %q, want %q", got, clobberLiveWorkDir)
@@ -577,27 +573,35 @@ func TestBackstopLaneNoPassOrRepairAfterShutdown(t *testing.T) {
 }
 
 // Kills: a declined pass counted toward the lane's pacing (R1). After a pass
-// skipped while the city was suspended, the resume's wake runs a pass at once
-// instead of waiting out a duty cycle the skipped pass never used.
+// declined because its env could not be built, the next wake runs a pass at
+// once instead of waiting out a duty cycle the declined pass never used.
 func TestBackstopLaneSkippedPassDoesNotPaceTheNextWake(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		lane, _ := newTestBackstopLane(externalReadsEnv{CityPath: t.TempDir(), Cfg: demandReadsTestConfig(), CityStore: beads.NewMemStore()})
+		env := externalReadsEnv{CityPath: t.TempDir(), Cfg: demandReadsTestConfig(), CityStore: beads.NewMemStore()}
+		var broken atomic.Bool
+		lane, _ := newTestBackstopLane(env)
+		lane.env = func() (externalReadsEnv, error) {
+			if broken.Load() {
+				return externalReadsEnv{}, errors.New("env unavailable")
+			}
+			return env, nil
+		}
 		startBackstopLaneInBubble(t, lane)
 		advanceBackstop(backstopTestInterval)
 		if got := backstopSeq(lane); got != 2 {
-			t.Fatalf("before suspending: %d passes, want 2", got)
+			t.Fatalf("before declining: %d passes, want 2", got)
 		}
-		t.Setenv("GC_SUSPENDED", "1")
+		broken.Store(true)
 		advanceBackstop(backstopTestInterval)
 		if got := backstopSeq(lane); got != 2 {
-			t.Fatalf("suspended: %d passes, want the backstop's pass skipped", got)
+			t.Fatalf("env unavailable: %d passes, want the backstop's pass declined", got)
 		}
 		advanceBackstop(externalReadsMinGap / 2)
-		t.Setenv("GC_SUSPENDED", "")
+		broken.Store(false)
 		lane.wake()
 		synctest.Wait()
 		if got := backstopSeq(lane); got != 3 {
-			t.Errorf("resume wake %v after a skipped pass: %d passes, want one at once", externalReadsMinGap/2, got)
+			t.Errorf("wake %v after a declined pass: %d passes, want one at once", externalReadsMinGap/2, got)
 		}
 	})
 }
@@ -663,7 +667,7 @@ func TestExternalReadsSlowSourceDoesNotDelayOthers(t *testing.T) {
 			if got := hung.lists.Load(); got != lists {
 				t.Fatalf("%s: %d live reads of the hung leg, want %d", when, got, lists)
 			}
-			if rows, err := newV2DemandReads(time.Now(), rec, nil).RawOpen(hung); !errors.Is(err, errSourceTimeout) || len(rows) != 0 {
+			if rows, err := newV2DemandReads(time.Now(), rec).RawOpen(hung); !errors.Is(err, errSourceTimeout) || len(rows) != 0 {
 				t.Fatalf("%s: v2 RawOpen of the hung leg = %d rows, %v; want errSourceTimeout and no rows", when, len(rows), err)
 			}
 		}
@@ -713,8 +717,7 @@ func (s slowLiveStore) Ready(q ...beads.ReadyQuery) ([]beads.Bead, error) {
 // Kills: a deadline that decides whether a read counts (M-deadline: a read
 // slower than the source deadline published as errSourceTimeout forever), a
 // late result dropped, and a slow source restarted only a duty cycle after its
-// read ended. Once the leg has been served, its demand and session reads stay
-// served at every sample over ten minutes at bd-like latencies, up to reads
+// read ended. Once the leg has been served, its demand reads stay served at every sample over ten minutes at bd-like latencies, up to reads
 // slower than the source deadline (maintainer-city patrol). Only the warm-up,
 // before the first read of each source ends, may read partial.
 func TestExternalReadsSteadyStateAtBdLatencies(t *testing.T) {
@@ -723,9 +726,6 @@ func TestExternalReadsSteadyStateAtBdLatencies(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				store := newSlowLiveStore(d)
 				if _, err := store.Create(routedDemandBead("")); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := store.Create(backstopSessionBead("", "worker-1")); err != nil {
 					t.Fatal(err)
 				}
 				lane, _ := newTestBackstopLane(externalReadsEnv{Cfg: demandReadsTestConfig(), CityStore: store})
@@ -737,9 +737,8 @@ func TestExternalReadsSteadyStateAtBdLatencies(t *testing.T) {
 				for end := start.Add(10 * time.Minute); time.Now().Before(end); {
 					<-time.After(time.Second)
 					rec := lane.recording()
-					_, derr := newV2DemandReads(time.Now(), rec, nil).RawOpen(store)
-					sl, ok := rec.sessionLeg(store)
-					served := derr == nil && ok && sl.Err == nil
+					_, derr := newV2DemandReads(time.Now(), rec).RawOpen(store)
+					served := derr == nil
 					if warmUp == 0 {
 						if served {
 							warmUp = time.Since(start)
@@ -785,12 +784,12 @@ func TestExternalReadsMissServesPreviousResultUntilStale(t *testing.T) {
 		}
 		for time.Now().Before(t0.Add(3 * backstopTestInterval)) {
 			advanceBackstop(time.Second)
-			if _, err := newV2DemandReads(time.Now(), lane.recording(), nil).RawOpen(store); err != nil {
+			if _, err := newV2DemandReads(time.Now(), lane.recording()).RawOpen(store); err != nil {
 				t.Fatalf("held over at %v: %v, want the previous result served", time.Since(t0), err)
 			}
 		}
 		advanceBackstop(time.Nanosecond)
-		if _, err := newV2DemandReads(time.Now(), lane.recording(), nil).RawOpen(store); !errors.Is(err, errDemandRecordingStale) {
+		if _, err := newV2DemandReads(time.Now(), lane.recording()).RawOpen(store); !errors.Is(err, errDemandRecordingStale) {
 			t.Fatalf("past 3 patrols from the result's end: %v, want stale", err)
 		}
 		before := wakes.Load()
@@ -864,23 +863,19 @@ func TestExternalReadsDropsLateScaleCheckOfOlderConfig(t *testing.T) {
 }
 
 // Kills: a freshness bound other than 3 × patrol from when a source's read
-// ended, a census expiry that differs from the demand reads', and no wake
-// when a fresh source replaces a stale one with the same content.
+// ended, and no wake when a fresh source replaces a stale one with the same content.
 func TestExternalReadsSourceFreshForThreePatrols(t *testing.T) {
-	cache, _ := newDemandCache(t, false, routedDemandBead("gc-r1"), backstopSessionBead("gc-s1", "worker-1"))
+	cache, _ := newDemandCache(t, false, routedDemandBead("gc-r1"))
 	lane, wakes := newTestBackstopLane(externalReadsEnv{Cfg: demandReadsTestConfig(), CityStore: cache})
 	t0 := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 	at(lane, t0).pass(context.Background())
 	rec := lane.recording()
 	bound := t0.Add(3 * backstopTestInterval)
-	if _, err := newV2DemandReads(bound, rec, nil).RawOpen(cache); err != nil {
+	if _, err := newV2DemandReads(bound, rec).RawOpen(cache); err != nil {
 		t.Errorf("RawOpen at 3 patrols: %v, want served", err)
 	}
-	if _, err := newV2DemandReads(bound.Add(time.Nanosecond), rec, nil).RawOpen(cache); !errors.Is(err, errDemandRecordingStale) {
+	if _, err := newV2DemandReads(bound.Add(time.Nanosecond), rec).RawOpen(cache); !errors.Is(err, errDemandRecordingStale) {
 		t.Errorf("RawOpen past 3 patrols: err = %v, want the stale source", err)
-	}
-	if leg, ok := rec.sessionLeg(cache); !ok || !leg.At.Equal(t0) || !leg.StartedAt.Equal(t0) || !leg.Expires.Equal(bound) {
-		t.Errorf("census session leg %+v (recorded=%t), want read at %v and expiring at %v", leg, ok, t0, bound)
 	}
 
 	at(lane, t0.Add(backstopTestInterval)).pass(context.Background())
@@ -893,35 +888,13 @@ func TestExternalReadsSourceFreshForThreePatrols(t *testing.T) {
 	}
 }
 
-// Kills: a pass that ignores the reload barrier's or the FS gate's hold, and
-// a held pass that never runs once released. A held pass declines; the
-// release wakes the lane, which runs at once.
-func TestExternalReadsPassHeldByGate(t *testing.T) {
+// Kills: steps run on the lane goroutine (a slow step stalls the reads), and
+// a second run of a step while one is in flight. With a step blocked, passes
+// keep publishing at the patrol, and the step does not start again though its
+// interval is up.
+func TestExternalReadsStepRunsOffTheReadPath(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		lane, _ := newTestBackstopLane(externalReadsEnv{Cfg: demandReadsTestConfig(), CityStore: beads.NewMemStore()})
-		lane.gate = newLaneGate(lane.wake)
-		lane.gate.hold("reload")
-		startBackstopLaneInBubble(t, lane)
-		if got := backstopSeq(lane); got != 0 {
-			t.Fatalf("held: %d passes, want none", got)
-		}
-		lane.gate.release("reload")
-		synctest.Wait()
-		if got := backstopSeq(lane); got != 1 {
-			t.Errorf("released: %d passes, want one at once", got)
-		}
-	})
-}
-
-// Kills: steps run on the lane goroutine (a slow step stalls the reads),
-// steps outside the gate (M6: waitIdle idle while a step writes), and a second
-// run of a step while one is in flight. With a step blocked, passes keep
-// publishing at the patrol, the step does not start again though its interval
-// is up, and waitIdle waits for it.
-func TestExternalReadsStepRunsOffTheReadPathInsideTheGate(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		lane, _ := newTestBackstopLane(externalReadsEnv{Cfg: demandReadsTestConfig(), CityStore: beads.NewMemStore()})
-		lane.gate = newLaneGate(lane.wake)
 		var runs atomic.Int64
 		release := make(chan struct{})
 		lane.steps = []*laneStep{{name: "slow", every: time.Second, run: func(context.Context, externalReadsEnv) {
@@ -933,24 +906,8 @@ func TestExternalReadsStepRunsOffTheReadPathInsideTheGate(t *testing.T) {
 		if seq, n := backstopSeq(lane), runs.Load(); seq != 4 || n != 1 {
 			t.Fatalf("with the step blocked: %d passes, %d step runs; want the patrol's 4 passes and one run", seq, n)
 		}
-		idle := make(chan error, 1)
-		go func() { idle <- lane.gate.waitIdle(context.Background()) }()
-		synctest.Wait()
-		select {
-		case <-idle:
-			t.Fatal("waitIdle reported idle while a step was running")
-		default:
-		}
 		close(release)
 		synctest.Wait()
-		select {
-		case err := <-idle:
-			if err != nil {
-				t.Fatalf("waitIdle = %v", err)
-			}
-		default:
-			t.Fatal("waitIdle still waiting after the step ended")
-		}
 	})
 }
 
@@ -1076,37 +1033,6 @@ func TestExternalReadsStaleTurnedFreshJudgedAtReadEnd(t *testing.T) {
 	}
 }
 
-// Kills: a session read stamped with its end as its start (M1, M24), which
-// would clear an ambiguous create against a read that started before its
-// write landed (C5.4(3)). A 4s session read publishes its start, not its end,
-// through sessionLeg and into the census ledger view.
-func TestExternalReadsSessionReadStartReachesLedger(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		store := newSlowLiveStore(2 * time.Second)
-		if _, err := store.Create(backstopSessionBead("", "worker-1")); err != nil {
-			t.Fatal(err)
-		}
-		lane, _ := newTestBackstopLane(externalReadsEnv{Cfg: demandReadsTestConfig(), CityStore: store})
-		lane.steps = nil
-		start := time.Now()
-		startBackstopLaneInBubble(t, lane)
-		advanceBackstop(5 * time.Second)
-		rec := lane.recording()
-		sl, ok := rec.sessionLeg(store)
-		if !ok || sl.Err != nil || !sl.StartedAt.Equal(start) || !sl.At.Equal(start.Add(4*time.Second)) {
-			t.Fatalf("session leg %+v: want StartedAt %v and At %v", sl, start, start.Add(4*time.Second))
-		}
-		r := newCensusReader(censusLegFeed{exact: func(beads.Store) bool { return false }, recorded: rec.sessionLeg})
-		c, err := r.read(sl.At, demandReadsTestConfig(), []classStoreCandidate{{store: store, ref: "class:sessions"}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := c.Ledger(demandReadsTestConfig()).ReadStarted["class:sessions"]; !got.Equal(start) {
-			t.Fatalf("ledger ReadStarted = %v, want the read's start %v", got, start)
-		}
-	})
-}
-
 // Kills: a join that returns while a read is in flight (the store-close path
 // would close a store under it), and a restart that forgets the reads in
 // flight (a second read of a hung source) or the recording, or keeps the old
@@ -1136,68 +1062,19 @@ func TestExternalReadsRestartKeepsReadsInFlightAndJoinWaits(t *testing.T) {
 	})
 }
 
-// Kills: a session census that misses out-of-process writes on a bd leg. A
-// session row created, and one rewritten, behind the leg's cache (no event)
-// must reach the recording on the next pass, not wait for the cache's
-// re-scan; and the change must wake the allocator.
-func TestBackstopLaneRecordsOutOfProcessSessionWriteOnNonExactLeg(t *testing.T) {
-	cache, backing := newDemandCache(t, false, backstopSessionBead("gc-s1", "worker-1"))
-	lane, wakes := newTestBackstopLane(externalReadsEnv{Cfg: demandReadsTestConfig(), CityStore: cache})
-	t0 := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
-
-	at(lane, t0).pass(context.Background())
-	first := lane.recording()
-	leg, ok := first.sessionLeg(cache)
-	if !ok || leg.Err != nil || !leg.At.Equal(t0) || !leg.StartedAt.Equal(t0) ||
-		!leg.Expires.Equal(t0.Add(3*backstopTestInterval)) || !slices.Equal(sessionInfoIDs(leg.Rows), []string{"gc-s1"}) {
-		t.Fatalf("first pass: session leg recorded=%t %+v, want gc-s1 at %v", ok, leg, t0)
+// Kills: the lane's session-census source creeping back (B5, OPTION1
+// S4-1). The census reads the cache on every leg, so a lane over a non-exact
+// leg holding session rows reads only its demand and the scale_checks.
+func TestExternalReadsLaneHasNoSessionSource(t *testing.T) {
+	cache, _ := newDemandCache(t, false, backstopSessionBead(), routedDemandBead("gc-r1"))
+	env := externalReadsEnv{Cfg: demandReadsTestConfig(), CityStore: cache}
+	lane, _ := newTestBackstopLane(env)
+	var kinds []sourceKind
+	for _, src := range lane.sources(env) {
+		kinds = append(kinds, src.key.kind)
 	}
-
-	// The out-of-process writer: straight to the backing, so the cache sees
-	// neither write.
-	created, err := backing.Create(backstopSessionBead("", "worker-2"))
-	if err != nil {
-		t.Fatalf("out-of-process create: %v", err)
-	}
-	if err := backing.SetMetadata("gc-s1", "state", "asleep"); err != nil {
-		t.Fatalf("out-of-process update: %v", err)
-	}
-	if cached, _ := cache.CachedList(beads.ListQuery{Type: sessionBeadType}); len(cached) != 1 {
-		t.Fatalf("the cache saw the out-of-process create (%d rows); the test needs it not to", len(cached))
-	}
-
-	at(lane, t0.Add(backstopTestInterval)).pass(context.Background())
-	leg, ok = lane.recording().sessionLeg(cache)
-	if !ok || leg.Err != nil || !leg.At.Equal(t0.Add(backstopTestInterval)) {
-		t.Fatalf("second pass: session leg recorded=%t %+v", ok, leg)
-	}
-	if got, want := sessionInfoIDs(leg.Rows), slices.Sorted(slices.Values([]string{"gc-s1", created.ID})); !slices.Equal(got, want) {
-		t.Errorf("second pass session rows = %v, want %v", got, want)
-	}
-	for _, info := range leg.Rows {
-		if info.ID == "gc-s1" && info.MetadataState != "asleep" {
-			t.Errorf("gc-s1 recorded in state %q, want the out-of-process asleep", info.MetadataState)
-		}
-	}
-	if got := wakes.Load(); got != 2 {
-		t.Errorf("allocator wakes = %d, want 2: the session change must wake it", got)
-	}
-	// The session rows sit in the leg's open List too; the session change
-	// alone must still count as new content.
-	sessionsOnly := &externalReadsRecording{Sources: maps.Clone(first.Sources)}
-	key := keyOf(sourceSessions, cache)
-	sessionsOnly.Sources[key] = lane.recording().Sources[key]
-	if first.sameContent(sessionsOnly) {
-		t.Error("a recording whose only change is session rows reads as unchanged")
-	}
-
-	// A failed live read is recorded as the failure, with no rows, so the
-	// census can tell it from a partial read.
-	backing.failLive.Store(true)
-	at(lane, t0.Add(2*backstopTestInterval)).pass(context.Background())
-	leg, ok = lane.recording().sessionLeg(cache)
-	if !ok || !errors.Is(leg.Err, errDemandBackingDown) || beads.IsPartialResult(leg.Err) || len(leg.Rows) != 0 {
-		t.Errorf("failed pass: session leg recorded=%t %+v, want the hard error and no rows", ok, leg)
+	if want := []sourceKind{sourceDemand, sourceScaleCheck}; !slices.Equal(kinds, want) {
+		t.Fatalf("source kinds = %v, want %v", kinds, want)
 	}
 }
 
@@ -1228,7 +1105,7 @@ func TestBackstopLaneRecordsLiveReadsNotTheCache(t *testing.T) {
 // through the front door serve it.
 func TestBackstopLaneRecordsAndServesThroughPolicyFrontDoor(t *testing.T) {
 	cfg := demandReadsTestConfig()
-	cache, _ := newDemandCache(t, false, routedDemandBead("gc-r1"), backstopSessionBead("gc-s1", "worker-1"))
+	cache, _ := newDemandCache(t, false, routedDemandBead("gc-r1"))
 	front := wrapStoreWithBeadPolicies(cache, cfg)
 	if front == beads.Store(cache) {
 		t.Fatal("the policy front door did not wrap the cache; the test needs distinct stores")
@@ -1241,11 +1118,8 @@ func TestBackstopLaneRecordsAndServesThroughPolicyFrontDoor(t *testing.T) {
 		if _, ok := recordedLeg(rec, store); !ok {
 			t.Errorf("%s: demand leg not found", name)
 		}
-		if _, ok := rec.sessionLeg(store); !ok {
-			t.Errorf("%s: session leg not found", name)
-		}
 	}
-	reads := newV2DemandReads(now, rec, newDemandLastGood())
+	reads := newV2DemandReads(now, rec)
 	if rows, err := reads.RawOpen(front); err != nil || !slices.Contains(ids(rows), "gc-r1") {
 		t.Errorf("v2 RawOpen through the front door = %v, %v; want the recorded gc-r1", ids(rows), err)
 	}
@@ -1266,49 +1140,9 @@ func TestBackstopLaneClosedNamedIndexThroughPolicyFrontDoor(t *testing.T) {
 	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 	at(lane, now).pass(context.Background())
 	for name, store := range map[string]beads.Store{"front door": front, "cache": cache} {
-		idx, err := newV2DemandReads(now, lane.recording(), nil).ClosedNamedIndex(store)
+		idx, err := newV2DemandReads(now, lane.recording()).ClosedNamedIndex(store)
 		if _, found := idx.Find("mayor"); err != nil || !found {
 			t.Errorf("%s: v2 closed index found mayor=%t err=%v, want the recorded index", name, found, err)
-		}
-	}
-}
-
-// Kills: a census feed whose recorded leg does not match the census's leg
-// keys (externalReadsRecording.sessionLeg is the feed's recorded function,
-// so both key by the store behind the policy front door), and a census that
-// ages the lane's leg on anything but the source's expiry. The census
-// reads the lane's recording through the front door and the bare cache.
-func TestCensusReadsBackstopSessionLegThroughPolicyFrontDoor(t *testing.T) {
-	cfg := demandReadsTestConfig()
-	cache, _ := newDemandCache(t, false, backstopSessionBead("gc-s1", "worker-1"))
-	front := wrapStoreWithBeadPolicies(cache, cfg)
-	if front == beads.Store(cache) {
-		t.Fatal("the policy front door did not wrap the cache; the test needs distinct stores")
-	}
-	lane, _ := newTestBackstopLane(externalReadsEnv{Cfg: cfg, CityStore: front})
-	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
-	at(lane, now).pass(context.Background())
-	rec := lane.recording()
-	sl, _ := rec.sessionLeg(cache)
-	feed := censusLegFeed{
-		exact:    func(s beads.Store) bool { _, exact := demandLegCache(s); return exact },
-		recorded: rec.sessionLeg,
-	}
-	for name, store := range map[string]beads.Store{"front door": front, "cache": cache} {
-		r := newCensusReader(feed)
-		legs := []classStoreCandidate{{store: store, ref: "class:sessions"}}
-		c, err := r.read(sl.Expires, cfg, legs)
-		if err != nil {
-			t.Fatalf("%s: census read: %v", name, err)
-		}
-		if leg := c.Legs[0]; leg.State != legRead || !leg.ReadAt.Equal(sl.At) {
-			t.Errorf("%s: leg %+v, want read at the recording's At", name, leg)
-		}
-		if _, ok := c.Rows[rowKey{Leg: "class:sessions", ID: "gc-s1"}]; !ok {
-			t.Errorf("%s: recorded session row missing from the census", name)
-		}
-		if c, err = r.read(sl.Expires.Add(time.Nanosecond), cfg, legs); err != nil || c.Legs[0].State != legStale {
-			t.Errorf("%s: past the recording's Expires: err=%v leg=%+v, want stale", name, err, c.Legs)
 		}
 	}
 }
@@ -1331,9 +1165,6 @@ func TestBackstopLaneRecordsPanickingLegAsError(t *testing.T) {
 	if !ok || leg.RawOpenErr == nil || !strings.Contains(leg.RawOpenErr.Error(), "panicked") {
 		t.Errorf("panicking leg recorded=%t open err=%v, want the panic as its error", ok, leg.RawOpenErr)
 	}
-	if s, ok := lane.recording().sessionLeg(store); !ok || s.Err == nil || !strings.Contains(s.Err.Error(), "panicked") {
-		t.Errorf("panicking session leg recorded=%t err=%v, want the panic as its error", ok, s.Err)
-	}
 }
 
 type panickingListStore struct{ beads.Store }
@@ -1341,13 +1172,12 @@ type panickingListStore struct{ beads.Store }
 func (panickingListStore) List(beads.ListQuery) ([]beads.Bead, error) { panic("list exploded") }
 
 // Kills: an exact leg recorded, which would put live reads of the sessions
-// binding back on the lane. A pass over an exact leg records neither its
-// demand nor its session rows and never reads its backing; the same leg not
-// exact is the control.
+// binding back on the lane. A pass over an exact leg records no demand and
+// never reads its backing; the same leg not exact is the control.
 func TestBackstopLaneNeverRecordsExactLeg(t *testing.T) {
 	t0 := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 	for _, exact := range []bool{true, false} {
-		cache, backing := newDemandCache(t, exact, backstopSessionBead("gc-s1", "worker-1"), routedDemandBead("gc-r1"))
+		cache, backing := newDemandCache(t, exact, backstopSessionBead(), routedDemandBead("gc-r1"))
 		lane, _ := newTestBackstopLane(externalReadsEnv{Cfg: demandReadsTestConfig(), CityStore: cache})
 		// The repairs step reads every leg live, as legacy's does; this
 		// test is about the sources.
@@ -1357,13 +1187,12 @@ func TestBackstopLaneNeverRecordsExactLeg(t *testing.T) {
 		at(lane, t0).pass(context.Background())
 
 		rec := lane.recording()
-		_, sessionRecorded := rec.sessionLeg(cache)
 		_, demandRecorded := recordedLeg(rec, cache)
 		_, closedRecorded := recordedClosedNamed(rec, cache)
 		backingRead := len(backing.readLog()) > 0
-		if want := !exact; sessionRecorded != want || demandRecorded != want || backingRead != want || closedRecorded {
-			t.Errorf("exact=%t: session recorded=%t, demand recorded=%t, closed index recorded=%t, backing read=%t; want %t, %t, false, %t",
-				exact, sessionRecorded, demandRecorded, closedRecorded, backingRead, want, want, want)
+		if want := !exact; demandRecorded != want || backingRead != want || closedRecorded {
+			t.Errorf("exact=%t: demand recorded=%t, closed index recorded=%t, backing read=%t; want %t, false, %t",
+				exact, demandRecorded, closedRecorded, backingRead, want, want)
 		}
 	}
 }
@@ -1400,7 +1229,7 @@ func TestBackstopLaneRecordsClosedNamedIndexOnEveryLeg(t *testing.T) {
 
 		legacy := readyAssignedWorkAssignees(cfg, cache, nil, nil, nil, "", nil)
 		backing.armed.Store(true)
-		v2 := readyAssignedWorkAssignees(cfg, cache, nil, nil, nil, "", newV2DemandReads(now, rec, nil))
+		v2 := readyAssignedWorkAssignees(cfg, cache, nil, nil, nil, "", newV2DemandReads(now, rec))
 		if runtime := config.NamedSessionRuntimeName(config.EffectiveCityName(cfg, ""), cfg.Workspace, "mayor"); !slices.Equal(v2, legacy) || !slices.Contains(v2, runtime) {
 			t.Errorf("exact=%t: v2 assignees %v, legacy %v; want equal, with the closed phantom's %q", exact, v2, legacy, runtime)
 		}
@@ -1478,13 +1307,12 @@ func TestBackstopLaneWakesOnReadyOnlyChange(t *testing.T) {
 func TestBackstopRecordingSameContentComparesRowsErrorsAndIndexes(t *testing.T) {
 	store := beads.NewMemStore()
 	idx, _ := session.BuildClosedNamedSessionBeadIndex(beads.NewMemStoreFrom(0, []beads.Bead{closedNamedSessionBead("gc-c", "mayor")}, nil))
-	demand, sessions, closed, scale := keyOf(sourceDemand, store), keyOf(sourceSessions, store), keyOf(sourceClosedNamed, store), sourceKey{kind: sourceScaleCheck}
+	demand, closed, scale := keyOf(sourceDemand, store), keyOf(sourceClosedNamed, store), sourceKey{kind: sourceScaleCheck}
 	base := func() *externalReadsRecording {
 		return &externalReadsRecording{Sources: map[sourceKey]sourceResult{
-			demand:   {sourcePayload: sourcePayload{Leg: legRecording{RawOpen: []beads.Bead{{ID: "gc-1"}}}}},
-			sessions: {sourcePayload: sourcePayload{Sessions: []session.Info{{ID: "gc-s"}}}},
-			closed:   {},
-			scale:    {sourcePayload: sourcePayload{ScaleCheck: &scaleCheckResult{Counts: map[string]int{"w": 1}}}},
+			demand: {sourcePayload: sourcePayload{Leg: legRecording{RawOpen: []beads.Bead{{ID: "gc-1"}}}}},
+			closed: {},
+			scale:  {sourcePayload: sourcePayload{ScaleCheck: &scaleCheckResult{Counts: map[string]int{"w": 1}}}},
 		}}
 	}
 	boom := errors.New("boom")
@@ -1507,7 +1335,6 @@ func TestBackstopRecordingSameContentComparesRowsErrorsAndIndexes(t *testing.T) 
 		{"open error", set(demand, sourceResult{sourcePayload: sourcePayload{Leg: legRecording{RawOpen: []beads.Bead{{ID: "gc-1"}}, RawOpenErr: boom}}}), false},
 		{"ready error", set(demand, sourceResult{sourcePayload: sourcePayload{Leg: legRecording{RawOpen: []beads.Bead{{ID: "gc-1"}}, ReadyAllErr: boom}}}), false},
 		{"source timeout", set(demand, sourceResult{Err: errSourceTimeout}), false},
-		{"session error", set(sessions, sourceResult{sourcePayload: sourcePayload{Sessions: []session.Info{{ID: "gc-s"}}}, Err: boom}), false},
 		{"closed index", set(closed, sourceResult{sourcePayload: sourcePayload{ClosedNamed: idx}}), false},
 		{"closed index error", set(closed, sourceResult{Err: boom}), false},
 		{"closed index dropped", func(r *externalReadsRecording) { delete(r.Sources, closed) }, false},
@@ -1554,7 +1381,7 @@ func TestBackstopLaneConcurrentWithAllocatorPasses(t *testing.T) {
 		routedClobbered,
 		workBead("ga-rlegacy", goldenLegacyPlanner, "", "open", 5),
 		workBead("ga-slot", goldenCanonicalPlanner+"-2", "", "open", 5),
-		backstopSessionBead("gc-s1", "worker-1"),
+		backstopSessionBead(),
 		closedNamedSessionBead("gc-closed", "rig-A/mayor"),
 	)
 	rigFixture := beads.NewMemStoreFrom(0, []beads.Bead{control("fx-ctl", "fixture")}, nil)
@@ -1572,7 +1399,6 @@ func TestBackstopLaneConcurrentWithAllocatorPasses(t *testing.T) {
 		return externalReadsEnv{CityPath: cityPath, Cfg: cfg, CityStore: front, RigStores: rigs, SuspendedRigPaths: suspended, ProbeStores: []beads.Store{probe, rigFixture}, Sessions: sessions}, nil
 	}, func() { wakes.Add(1) }, func(fn func(), _ string) bool { fn(); return false }, gapEvents, io.Discard)
 	ctx := context.Background()
-	lastGood := newDemandLastGood()
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		for range rounds {
@@ -1594,13 +1420,12 @@ func TestBackstopLaneConcurrentWithAllocatorPasses(t *testing.T) {
 		wg.Go(func() {
 			for range rounds {
 				rec := lane.recording()
-				reads := newV2DemandReads(time.Now(), rec, lastGood)
+				reads := newV2DemandReads(time.Now(), rec)
 				_ = runDemandCollectors(cfg, front, func() *readyDemandCache { return newReadyDemandCacheWithReads(reads) }, reads)
 				rows, _, refs, _ := collectOpenUnassignedRoutedWork(cityPath, cfg, front, rigs, suspended, io.Discard, nil, reads)
 				projected, _ := projectControlDispatcherRoutes(cfg, rows, refs)
 				_ = openControlDispatcherDemand(cfg, projected)
 				_ = readyAssignedWorkAssignees(cfg, front, sessions, nil, nil, "", reads)
-				_, _ = rec.sessionLeg(front)
 				_ = rec.scaleCheck(time.Now())
 			}
 		})

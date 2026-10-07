@@ -19,7 +19,7 @@ const (
 func countingBDContext(calls map[string]int) func(string) (PreflightBDContext, error) {
 	return func(scope string) (PreflightBDContext, error) {
 		calls[scope]++
-		return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: "1.0.4", SchemaVersion: 1}, nil
+		return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: "1.0.4"}, nil
 	}
 }
 
@@ -31,6 +31,11 @@ func skipTestChecker(fs *fsys.Fake, provider string, bdContext func(string) (Pre
 		BDContext:           bdContext,
 		DatabaseProjectID: func(string) (string, bool, error) {
 			return "gc-rig", true, nil
+		},
+		SchemaLatestVersion:        1,
+		SchemaLatestIgnoredVersion: 1,
+		DatabaseSchemaCursors: func(string) (PreflightSchemaCursors, bool, error) {
+			return PreflightSchemaCursors{Main: 1, Ignored: 1, IgnoredChecked: true}, true, nil
 		},
 	}
 }
@@ -114,10 +119,10 @@ func TestPreflightBlockedOutcomeIndependentOfBDContext(t *testing.T) {
 		unset bool
 	}
 	answers := map[string]bdAnswer{
-		"agree":     {ctx: PreflightBDContext{Backend: "postgres", BDVersion: "1.0.4", SchemaVersion: 1}},
-		"disagree":  {ctx: PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: "1.0.4", SchemaVersion: 1}},
-		"embedded":  {ctx: PreflightBDContext{Backend: "dolt", DoltMode: "embedded", BDVersion: "1.0.4", SchemaVersion: 1}},
-		"skew":      {ctx: PreflightBDContext{Backend: "postgres", BDVersion: "9.9.9", SchemaVersion: 1}},
+		"agree":     {ctx: PreflightBDContext{Backend: "postgres", BDVersion: "1.0.4"}},
+		"disagree":  {ctx: PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: "1.0.4"}},
+		"embedded":  {ctx: PreflightBDContext{Backend: "dolt", DoltMode: "embedded", BDVersion: "1.0.4"}},
+		"skew":      {ctx: PreflightBDContext{Backend: "postgres", BDVersion: "9.9.9"}},
 		"no-schema": {ctx: PreflightBDContext{Backend: "postgres", BDVersion: "1.0.4"}},
 		"error":     {err: errors.New("bd context unavailable")},
 		"unwired":   {unset: true},
@@ -175,7 +180,7 @@ func TestPreflightConsultsBDContextFreshOnEveryCheck(t *testing.T) {
 		if fail {
 			return PreflightBDContext{}, errors.New("bd context unavailable")
 		}
-		return PreflightBDContext{Backend: "dolt", DoltMode: "embedded", BDVersion: "1.0.4", SchemaVersion: 1}, nil
+		return PreflightBDContext{Backend: "dolt", DoltMode: "embedded", BDVersion: "1.0.4"}, nil
 	})
 
 	check := func() PreflightResult {

@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -1329,6 +1330,167 @@ func TestSyncSessionBeads_ReopensClosedConfiguredNamedSession(t *testing.T) {
 	}
 	if got := all[0].Metadata["session_name"]; got != sessionName {
 		t.Fatalf("session_name = %q, want %q", got, sessionName)
+	}
+}
+
+// namedReopenRivalStore runs a rival writer at one point inside
+// reopenClosedConfiguredNamedSessionBead: right after its closed-row lookup
+// (onList) or right after a Get of the row (onGet). Each hook fires once. The
+// hooks stand in for a writer that holds the identifier flock while the helper
+// waits on it, without goroutines or sleeps. A namedCondStore stamped auto
+// resolves a conditional writer; an unstamped one takes the legacy Tx.
+type namedReopenRivalStore struct {
+	*namedCondStore
+	onList func()
+	onGet  func()
+}
+
+func (s *namedReopenRivalStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	rows, err := s.namedCondStore.List(q)
+	if hook := s.onList; hook != nil {
+		s.onList = nil
+		hook()
+	}
+	return rows, err
+}
+
+func (s *namedReopenRivalStore) Get(id string) (beads.Bead, error) {
+	b, err := s.namedCondStore.Get(id)
+	if hook := s.onGet; hook != nil {
+		s.onGet = nil
+		hook()
+	}
+	return b, err
+}
+
+// rivalReopensAndAdvances is the bead's rival (mc-zndi7.42): another writer
+// reopens the row and moves it on to a live incarnation.
+func rivalReopensAndAdvances(t *testing.T, mem *beads.MemStore, id string) func() {
+	return func() {
+		open := "open"
+		if err := mem.Update(id, beads.UpdateOpts{Status: &open, Metadata: map[string]string{
+			"state": "creating", "last_woke_at": "2026-10-06T00:00:00Z", "generation": "5",
+		}}); err != nil {
+			t.Errorf("rival reopen: %v", err)
+		}
+	}
+}
+
+func assertRivalReopenIntact(t *testing.T, mem *beads.MemStore, id string) {
+	t.Helper()
+	got, err := mem.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "open" || got.Metadata["state"] != "creating" || got.Metadata["last_woke_at"] != "2026-10-06T00:00:00Z" ||
+		got.Metadata["generation"] != "5" || got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("row = %s state %q last_woke_at %q generation %q pending_create_claim %q, want the rival's reopen untouched",
+			got.Status, got.Metadata["state"], got.Metadata["last_woke_at"], got.Metadata["generation"], got.Metadata["pending_create_claim"])
+	}
+}
+
+// The bead's repro: the helper's lookup reads the row closed, then a rival
+// reopens and advances it before the helper holds the lock. The helper must
+// re-read under the lock and skip, on a fenced store and a legacy one.
+func TestReopenClosedConfiguredNamedSessionBeadSkipsRowReopenedBeforeTheLock(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		store func(t *testing.T) *namedCondStore
+	}{
+		{name: "conditional writer", store: newNamedCondStore},
+		{name: "legacy tx", store: func(*testing.T) *namedCondStore { return &namedCondStore{MemStore: beads.NewMemStore()} }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := mayorCity()
+			store := &namedReopenRivalStore{namedCondStore: tt.store(t)}
+			closed := seedClosedNamedRow(t, store.MemStore, cfg, nil)
+			spec, _ := findNamedSessionSpec(cfg, "test-city", "mayor")
+			store.onList = rivalReopensAndAdvances(t, store.MemStore, closed.ID)
+
+			_, _, ok := reopenClosedConfiguredNamedSessionBead(t.TempDir(), store, cfg, "test-city", "mayor", spec.SessionName,
+				"stopped", namedEffectNow, nil, io.Discard)
+
+			if ok {
+				t.Fatal("ok = true, want the reopen skipped: the row is no longer closed")
+			}
+			assertRivalReopenIntact(t, store.MemStore, closed.ID)
+		})
+	}
+}
+
+// An explicit close retires the canonical identifiers, so a row whose
+// session_name was cleared after the lookup is no longer the row to revive,
+// even though it is still closed.
+func TestReopenClosedConfiguredNamedSessionBeadSkipsRowRetiredBeforeTheLock(t *testing.T) {
+	cfg := mayorCity()
+	store := &namedReopenRivalStore{namedCondStore: &namedCondStore{MemStore: beads.NewMemStore()}}
+	closed := seedClosedNamedRow(t, store.MemStore, cfg, nil)
+	spec, _ := findNamedSessionSpec(cfg, "test-city", "mayor")
+	store.onList = func() {
+		if err := store.MemStore.SetMetadata(closed.ID, "session_name", ""); err != nil {
+			t.Errorf("retire session_name: %v", err)
+		}
+	}
+
+	_, _, ok := reopenClosedConfiguredNamedSessionBead(t.TempDir(), store, cfg, "test-city", "mayor", spec.SessionName,
+		"stopped", namedEffectNow, nil, io.Discard)
+
+	if ok {
+		t.Fatal("ok = true, want a row with retired identifiers left closed")
+	}
+	if got, _ := store.MemStore.Get(closed.ID); got.Status != "closed" {
+		t.Fatalf("row status = %q, want closed", got.Status)
+	}
+}
+
+// On a fenced store the write is conditional on the revision the locked
+// re-read saw, so a writer that does not take the flock and lands between the
+// re-read and the write loses nothing either.
+func TestReopenClosedConfiguredNamedSessionBeadFencesTheWriteOnTheReread(t *testing.T) {
+	cfg := mayorCity()
+	store := &namedReopenRivalStore{namedCondStore: newNamedCondStore(t)}
+	closed := seedClosedNamedRow(t, store.MemStore, cfg, nil)
+	spec, _ := findNamedSessionSpec(cfg, "test-city", "mayor")
+	store.onGet = rivalReopensAndAdvances(t, store.MemStore, closed.ID)
+
+	_, _, ok := reopenClosedConfiguredNamedSessionBead(t.TempDir(), store, cfg, "test-city", "mayor", spec.SessionName,
+		"stopped", namedEffectNow, nil, io.Discard)
+
+	if ok {
+		t.Fatal("ok = true, want the lost fence reported as no reopen")
+	}
+	assertRivalReopenIntact(t, store.MemStore, closed.ID)
+}
+
+// A write that leaves the row closed (here a metadata touch) is not a rival
+// reopen: the re-read still sees a closed row, and the fence is the re-read's
+// revision, not the earlier lookup's, so the reopen lands.
+func TestReopenClosedConfiguredNamedSessionBeadReopensRowTouchedWhileClosed(t *testing.T) {
+	cfg := mayorCity()
+	store := &namedReopenRivalStore{namedCondStore: newNamedCondStore(t)}
+	closed := seedClosedNamedRow(t, store.MemStore, cfg, nil)
+	spec, _ := findNamedSessionSpec(cfg, "test-city", "mayor")
+	store.onList = func() {
+		if err := store.MemStore.SetMetadata(closed.ID, "synced_at", "2026-10-05T00:00:00Z"); err != nil {
+			t.Errorf("touch closed row: %v", err)
+		}
+	}
+
+	_, _, ok := reopenClosedConfiguredNamedSessionBead(t.TempDir(), store, cfg, "test-city", "mayor", spec.SessionName,
+		"stopped", namedEffectNow, nil, io.Discard)
+
+	if !ok {
+		t.Fatal("ok = false, want the still-closed row reopened")
+	}
+	got, err := store.MemStore.Get(closed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "open" || got.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("row = %s pending_create_claim %q, want open with the reopen batch", got.Status, got.Metadata["pending_create_claim"])
+	}
+	if writes := store.recorded(); len(writes) != 1 || !strings.HasPrefix(writes[0], "update-if-match ") {
+		t.Fatalf("writes = %v, want one conditional update", writes)
 	}
 }
 
@@ -8342,6 +8504,48 @@ func TestSweepProcessTableOrphansContinuesAfterErrors(t *testing.T) {
 	for _, want := range []string{"partial scan failed", "gm-reaped", "gm-term-fails", "terminate failed"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+}
+
+// A scan that cannot read dozens of same-uid /proc entries used to log one
+// line per entry on every patrol. The sweep now logs one bounded summary line
+// per tick, keeping a failure of the scan as a whole verbatim.
+func TestSweepProcessTableOrphansSummarizesScanErrors(t *testing.T) {
+	var entries error
+	for pid := 1000; pid < 1070; pid++ {
+		entries = errors.Join(entries, &proctable.EntryError{PID: pid, Err: fmt.Errorf("reading environ for pid %d: permission denied", pid)})
+	}
+	listErr := errors.New("tmux list running: no tmux server running")
+	store := beads.NewMemStore()
+	sp := newProcessTableSweepProvider()
+	const scanLine = "scanning process table for orphaned runtimes"
+
+	for _, tick := range []struct {
+		name    string
+		findErr error
+		want    string
+	}{
+		{name: "entry failures", findErr: entries, want: `70 unreadable process entries in 1 classes: 70 like "reading environ for pid 1000: permission denied" (pids 1000, 1001, 1002, ...)`},
+		{name: "same entry failures next tick", findErr: entries, want: "70 unreadable process entries"},
+		{name: "whole-scan failure", findErr: errors.Join(entries, listErr), want: listErr.Error()},
+		{name: "clean scan", findErr: nil},
+	} {
+		sp.findErr = tick.findErr
+		var stderr bytes.Buffer
+		sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, t.TempDir(), &stderr)
+		got := stderr.String()
+		if tick.want == "" {
+			if strings.Contains(got, scanLine) {
+				t.Errorf("%s: stderr = %q, want no scan error line", tick.name, got)
+			}
+			continue
+		}
+		if !strings.Contains(got, scanLine) || !strings.Contains(got, tick.want) {
+			t.Errorf("%s: stderr = %q, want a scan error line naming %q", tick.name, got, tick.want)
+		}
+		if lines := strings.Count(got, "\n"); lines != 1 || len(got) > 400 {
+			t.Errorf("%s: stderr is %d lines, %d bytes; want one bounded line: %q", tick.name, lines, len(got), got)
 		}
 	}
 }

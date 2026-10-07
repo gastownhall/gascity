@@ -23,9 +23,10 @@ import (
 // fork mint reads for the rw tier.
 
 const (
-	rbeForkPoolWorkflow   = ".github/workflows/rbe-fork-pool.yml"
-	rbeForkAllowlist      = ".github/rbe-fork-allowlist.txt"
-	rbeForkCredential     = "tools/rbe/fork-credential.sh"
+	rbeForkPoolWorkflow = ".github/workflows/rbe-fork-pool.yml"
+	rbeForkAllowlist    = ".github/rbe-fork-allowlist.txt"
+	// setup-bazel's, a byte copy of beads' (TestSetupBazelIsBeadsByteCopy).
+	rbeForkCredential     = ".github/actions/setup-bazel/fork-credential.sh"
 	blacksmithAllowlist   = ".github/blacksmith-allowlist.txt"
 	rbeForkPoolMaxMinutes = 120
 )
@@ -291,8 +292,7 @@ func TestRBEWorkerScriptForkNoUserNamespaces(t *testing.T) {
 	}
 }
 
-// fork-credential.sh is a byte copy of beads' setup-bazel one (keep in sync,
-// like tools/rbe/rbe-action-*). Whatever the mint answers, a build only ever
+// fork-credential.sh is beads' setup-bazel one, byte for byte. Whatever the mint answers, a build only ever
 // goes to the fork endpoint, with ro on oss-fork or rw on oss, and its key is
 // PKCS#8 (Bazel's TLS refuses SEC1).
 func TestRBEForkCredentialPins(t *testing.T) {
@@ -398,7 +398,7 @@ echo "error=$(grep -o 'mint refused (HTTP [0-9]*)' out.txt || true)" >>.bazelrc.
 			t.Fatal(err)
 		}
 		mintLog := filepath.Join(t.TempDir(), "mint.log")
-		got := runBazelRCConfigStep(t, step, map[string]string{
+		got, _ := runBazelRCLocalStep(t, step, map[string]string{
 			"PATH":                bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"GITHUB_OUTPUT":       ".bazelrc.local",
 			"RBE_TEST_SCRIPT":     filepath.Join(repoRoot(t), rbeForkCredential),

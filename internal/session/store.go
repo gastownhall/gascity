@@ -242,6 +242,64 @@ func (s *Store) UpdateMetadataFenced(id string, attempts int, decide func(Info, 
 	return false, nil
 }
 
+// RowPatch is one fenced row write: a metadata patch, a title (nil leaves it)
+// and label deltas. Labels travel as deltas, never as a whole set.
+type RowPatch struct {
+	Metadata     MetadataPatch
+	Title        *string
+	AddLabels    []string
+	RemoveLabels []string
+}
+
+func (p RowPatch) empty() bool {
+	return len(p.Metadata) == 0 && p.Title == nil && len(p.AddLabels) == 0 && len(p.RemoveLabels) == 0
+}
+
+// UpdateRowFenced writes metadata, title and labels decided from a fresh read
+// of the row in one UpdateIfMatch at that read's revision. A lost CAS re-reads
+// and runs decide again, up to attempts times, after which nothing is written.
+// decide returning false or an empty patch writes nothing. Unlike
+// UpdateMetadataFenced it never writes blind: without a conditional writer it
+// returns beads.ErrConditionalWriteUnsupported, and a store that cannot guard
+// labels returns its *beads.ConditionalUpdateFieldUnsupportedError; either
+// way nothing is written. A success means the deltas applied, not that the
+// label set equals the read set plus the deltas (a legacy label-only write on
+// native Dolt does not move the revision). It reports whether it wrote.
+func (s *Store) UpdateRowFenced(id string, attempts int, decide func(Info) (RowPatch, bool)) (bool, error) {
+	writer, _, err := beads.ResolveConditionalWriter(s.store)
+	if err != nil {
+		return false, fmt.Errorf("updating session %q: %w", id, err)
+	}
+	if writer == nil {
+		return false, fmt.Errorf("updating session %q: %w", id, beads.ErrConditionalWriteUnsupported)
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
+		bead, err := s.validatedBead(id)
+		if err != nil {
+			return false, err
+		}
+		patch, ok := decide(infoFromPersistedBead(bead))
+		if !ok || patch.empty() {
+			return false, nil
+		}
+		err = writer.UpdateIfMatch(id, bead.Revision, beads.UpdateOpts{
+			Metadata:     map[string]string(patch.Metadata),
+			Title:        patch.Title,
+			Labels:       patch.AddLabels,
+			RemoveLabels: patch.RemoveLabels,
+		})
+		switch {
+		case err == nil:
+			return true, nil
+		case beads.IsPreconditionFailed(err):
+			continue
+		default:
+			return false, fmt.Errorf("updating session %q: %w", id, err)
+		}
+	}
+	return false, nil
+}
+
 // sameLifecycleFacts reports whether a and b agree on every persisted fact the
 // lifecycle projection reads (LifecycleInputFromInfo). Comparing the projected
 // inputs rather than a hand-picked key list keeps this check in step with the
@@ -696,38 +754,44 @@ func (s *Store) closeAtomically(closer beads.AtomicConditionalCloser, bead beads
 // Stores without the capability (BdStore, the exec store, plain MemStore, a
 // legacy SQLite layout, or conditional writes disabled), and a store that
 // refuses the capability at call time with beads.ErrConditionalWriteUnsupported,
-// keep the controller's historical write unchanged: one
-// store.Tx(commitMsg) of SetMetadataBatch(patch) then Close, with no pre-read.
-// On BdStore that Tx is staged so `bd close` carries patch's close_reason; on
-// the exec store and MemStore it runs as sequential writes. The metadata is
-// ordered first, so if the Close then fails the clears have still landed and
-// the caller retries the close. That arm keeps the residual closed-but-awake
-// race documented on Close, and it reports true on success without checking
-// whether the row was already closed, kill-fenced, or still carries expected's
-// facts. The caller owns those checks.
+// keep the controller's historical write: one store.Tx(commitMsg) of
+// SetMetadataBatch(patch) then Close, after the same checks on the row this
+// call read. An already-closed row reports false, a kill-fenced row returns
+// ErrSessionKillPending, and a row that no longer carries expected's facts
+// returns ErrSessionCloseSuperseded, each with nothing written. On BdStore
+// that Tx is staged so `bd close` carries patch's close_reason; on the exec
+// store and MemStore it runs as sequential writes. The metadata is ordered
+// first, so if the Close then fails the clears have still landed and the
+// caller retries the close. That arm keeps the residual race documented on
+// Close: a writer that lands after the read, or between the Tx's two writes,
+// is still closed over, because nothing fences the write on that read.
 func (s *Store) CloseWithTerminalPatch(expected Info, patch MetadataPatch, commitMsg string, now time.Time) (bool, error) {
 	id := expected.ID
+	bead, err := s.validatedBead(id)
+	if err != nil {
+		return false, err
+	}
+	if bead.Status == "closed" {
+		return false, nil
+	}
+	guard := func(open beads.Bead) error {
+		row := infoFromPersistedBead(open)
+		if IsKillPendingInfo(row, now) {
+			return fmt.Errorf("closing session %q: %w", id, ErrSessionKillPending)
+		}
+		if !closePremiseHolds(expected, row) {
+			return fmt.Errorf("closing session %q: %w", id, ErrSessionCloseSuperseded)
+		}
+		return nil
+	}
 	if closer, ok := beads.AtomicConditionalCloserFor(s.store); ok {
-		bead, err := s.validatedBead(id)
-		if err != nil {
-			return false, err
-		}
-		if bead.Status == "closed" {
-			return false, nil
-		}
-		closed, err := s.closeAtomically(closer, bead, patch, func(open beads.Bead) error {
-			row := infoFromPersistedBead(open)
-			if IsKillPendingInfo(row, now) {
-				return fmt.Errorf("closing session %q: %w", id, ErrSessionKillPending)
-			}
-			if !closePremiseHolds(expected, row) {
-				return fmt.Errorf("closing session %q: %w", id, ErrSessionCloseSuperseded)
-			}
-			return nil
-		})
+		closed, err := s.closeAtomically(closer, bead, patch, guard)
 		if !beads.IsConditionalWriteUnsupported(err) {
 			return closed, err
 		}
+	}
+	if err := guard(bead); err != nil {
+		return false, err
 	}
 	if err := s.store.Tx(commitMsg, func(tx beads.Tx) error {
 		if err := tx.SetMetadataBatch(id, map[string]string(patch)); err != nil {

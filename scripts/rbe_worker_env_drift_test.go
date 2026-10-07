@@ -23,8 +23,9 @@ import (
 // pin the guards (tools/rbe/worker-env-drift) that make that loud and early:
 //
 //   - a worker whose host is not the pinned one still registers, advertising
-//     what it measured: the pools are shared with beads, whose actions send
-//     no worker-env and still run there, while gascity's never match it;
+//     what it measured: the pools are shared, and actions that send no
+//     worker-env still run there, while those carrying the pin (gascity's
+//     and beads') never match it;
 //   - its run's measurement step fails with the diff and the manifest and pin
 //     to commit in the step summary, and a job beside the worker opens or
 //     updates the pin's drift issue while the worker serves (the farm caps
@@ -187,10 +188,11 @@ func TestRBEWorkerEnvDriftPin(t *testing.T) {
 }
 
 // TestRBEWorkerEnvDriftCheck: the pinned host passes quietly; any other
-// fails with the diff, the manifest and the exact pin line to commit, in the
+// fails with the diff, the manifest and the exact pin line to commit, and
+// the raw listing (dpkg's versions as installed) when there is one, in the
 // step summary and in the drift directory the report job reads.
 func TestRBEWorkerEnvDriftCheck(t *testing.T) {
-	pinned := "arch x86_64\npkg tmux 3.4-1\n"
+	pinned := "arch x86_64\npkg tmux 3.4\n"
 	e := newDriftEnv(t, pinned)
 	measured := filepath.Join(e.dir, "measured.txt")
 	writeDriftFile(t, measured, pinned)
@@ -205,10 +207,12 @@ func TestRBEWorkerEnvDriftCheck(t *testing.T) {
 		t.Errorf("check of the pinned host wrote a step summary:\n%s", s)
 	}
 
-	drifted := "arch x86_64\npkg tmux 3.5-1\n"
+	drifted := "arch x86_64\npkg tmux 3.5\n"
 	got := sha256Pin(drifted)
 	writeDriftFile(t, measured, drifted)
-	out, err = e.run("check", measured)
+	raw := filepath.Join(e.dir, "measured.raw.txt")
+	writeDriftFile(t, raw, "arch x86_64\npkg tmux 3.5-1ubuntu0.1\n")
+	out, err = e.run("check", measured, raw)
 	if err == nil {
 		t.Fatalf("check of a drifted host succeeded:\n%s", out)
 	}
@@ -218,9 +222,10 @@ func TestRBEWorkerEnvDriftCheck(t *testing.T) {
 	summary := e.read(e.summary)
 	for _, want := range []string{
 		"### rbe worker-env drift",
-		"-pkg tmux 3.4-1\n+pkg tmux 3.5-1\n",
+		"-pkg tmux 3.4\n+pkg tmux 3.5\n",
 		"        \"worker-env\": \"" + got + "\",\n",
 		"```\n" + drifted + "```",
+		"<summary>installed versions (tools/rbe/worker-env --raw; not hashed)</summary>\n\n```\narch x86_64\npkg tmux 3.5-1ubuntu0.1\n```",
 		"runner-1 in https://github.com/acme/repo/actions/runs/42",
 	} {
 		if !strings.Contains(summary, want) {
@@ -229,13 +234,27 @@ func TestRBEWorkerEnvDriftCheck(t *testing.T) {
 	}
 	dir := filepath.Join(e.dir, "worker-env-drift")
 	for name, want := range map[string]string{
-		"worker-env.txt": drifted,
-		"pinned-pin":     e.pin + "\n",
-		"measured-pin":   got + "\n",
+		"worker-env.txt":     drifted,
+		"worker-env.raw.txt": "arch x86_64\npkg tmux 3.5-1ubuntu0.1\n",
+		"pinned-pin":         e.pin + "\n",
+		"measured-pin":       got + "\n",
 	} {
 		if b := e.read(filepath.Join(dir, name)); b != want {
 			t.Errorf("drift dir %s = %q, want %q", name, b, want)
 		}
+	}
+
+	// Without a raw listing (or an empty one) the report has none, and a
+	// stale one from an earlier check is gone.
+	writeDriftFile(t, raw, "")
+	if out, err := e.run("check", measured, raw); err == nil {
+		t.Fatalf("check of a drifted host succeeded:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "worker-env.raw.txt")); !os.IsNotExist(err) {
+		t.Errorf("check without a raw listing kept worker-env.raw.txt (%v)", err)
+	}
+	if r := e.read(filepath.Join(dir, "report.md")); strings.Contains(r, "installed versions") {
+		t.Errorf("report without a raw listing has one:\n%s", r)
 	}
 }
 
@@ -299,7 +318,7 @@ func TestRBEWorkerEnvDriftAwait(t *testing.T) {
 	}
 }
 
-// TestRBEWorkerEnvDriftPreflight: bazel-test learns whether the change moves
+// TestRBEWorkerEnvDriftPreflight: bazel.yml learns whether the change moves
 // the pin off the default branch's (no worker serves it before merge),
 // whether to measure the host, and fails a remote run on a pin with an open
 // drift issue instead of queueing it.
@@ -470,8 +489,8 @@ func TestRBEWorkerScriptMeasureMode(t *testing.T) {
 		"[ \"$WORKER_MODE\" = measure ] || : \"${RBE_WORKER_TLS_CERT:?}\" \"${RBE_WORKER_TLS_KEY:?}\" \"${RBE_WEST_HOST:?}\" \"${WORKER_NAME:?}\"\n",
 		"measure) ;;\n",
 		`*) echo "WORKER_MODE must be run, pool or measure" >&2; exit 2 ;;`,
-		"\ntools/rbe/worker-env \"${WORKER_TOOLSET[@]}\" >\"$RUNNER_TEMP/worker-env.txt\"\n",
-		"\nif ! tools/rbe/worker-env-drift check \"$RUNNER_TEMP/worker-env.txt\"; then\n\t[ \"$WORKER_MODE\" != measure ] || exit 3\n",
+		"\ntools/rbe/worker-env >\"$RUNNER_TEMP/worker-env.txt\"\n",
+		"\nif ! tools/rbe/worker-env-drift check \"$RUNNER_TEMP/worker-env.txt\" \"$RUNNER_TEMP/worker-env.raw.txt\"; then\n\t[ \"$WORKER_MODE\" != measure ] || exit 3\n",
 		"\n[ \"$WORKER_MODE\" != measure ] || exit 0\n",
 		"/nativelink-${NL_VERSION}-x86_64-unknown-linux-musl.tar.gz",
 	} {
@@ -522,8 +541,8 @@ done
 
 // TestRBEWorkerRegistersOnDrift runs blacksmith-worker.sh on a host whose
 // measurement is not the pin. In pool mode it still starts NativeLink, with
-// worker.json advertising the measured hash (so actions without worker-env,
-// beads', run on it and gascity's, which carry the pin, never do), and
+// worker.json advertising the measured hash (so actions without worker-env
+// run on it and those that carry the pin never do), and
 // leaves the drift report. In measure mode the same host fails (exit 3) and
 // starts nothing.
 func TestRBEWorkerRegistersOnDrift(t *testing.T) {
@@ -758,7 +777,7 @@ type ghStep struct {
 	With            map[string]any    `yaml:"with"`
 	Env             map[string]string `yaml:"env"`
 	Run             string            `yaml:"run"`
-	ContinueOnError bool              `yaml:"continue-on-error"`
+	ContinueOnError string            `yaml:"continue-on-error"` // a string: may be an expression
 }
 
 func parseWorkflow(t *testing.T, path string) ghWorkflow {
@@ -818,7 +837,7 @@ func checkDriftReportJob(t *testing.T, path string, job ghJob, needs string) {
 		t.Errorf("%s report job concurrency %v, want group %s without cancel-in-progress", path, job.Concurrency, rbeWorkerEnvReportGrp)
 	}
 	_, dl := findStep(job, uses("actions/download-artifact"))
-	if dl == nil || dl.With["name"] != rbeWorkerEnvDriftName || !dl.ContinueOnError {
+	if dl == nil || dl.With["name"] != rbeWorkerEnvDriftName || dl.ContinueOnError != "true" {
 		t.Errorf("%s report job: download of %s missing or not continue-on-error: %+v", path, rbeWorkerEnvDriftName, dl)
 	}
 	_, rep := findStep(job, runs(rbeWorkerEnvDrift+" report "))
@@ -872,7 +891,7 @@ func TestRBEPoolWorkflowsReportDriftWhileServing(t *testing.T) {
 				t.Errorf("worker permissions %v: the worker VM gets no token beyond contents: read", worker.Permissions)
 			}
 			measureAt, measure := findStep(worker, isMeasureStep)
-			if measure == nil || measure.ID != "worker-env" || !measure.ContinueOnError || len(measure.Env) != 1 {
+			if measure == nil || measure.ID != "worker-env" || measure.ContinueOnError != "true" || len(measure.Env) != 1 {
 				t.Fatalf("worker job: no continue-on-error measure step (id worker-env, WORKER_MODE=measure alone): %+v", measure)
 			}
 			upAt := checkDriftUpload(t, path, worker, measureAt, "steps.worker-env.outcome == 'failure'")
@@ -882,8 +901,8 @@ func TestRBEPoolWorkflowsReportDriftWhileServing(t *testing.T) {
 			if serveAt < upAt {
 				t.Errorf("the pool worker step (%d) must come after the drift upload (%d)", serveAt, upAt)
 			}
-			if serve := worker.Steps[serveAt]; serve.If != "" || serve.ContinueOnError {
-				t.Errorf("the pool worker step runs if %q, continue-on-error %v; it must run whatever the measurement said", serve.If, serve.ContinueOnError)
+			if serve := worker.Steps[serveAt]; serve.If != "" || serve.ContinueOnError == "true" {
+				t.Errorf("the pool worker step runs if %q, continue-on-error %q; it must run whatever the measurement said", serve.If, serve.ContinueOnError)
 			}
 			upload := worker.Steps[upAt].Name
 
@@ -955,64 +974,8 @@ func TestRBEWorkerEnvCanaryWorkflow(t *testing.T) {
 	}
 }
 
-// TestBazelTestWorkerEnvPreflight: the required bazel job asks the preflight
-// before any remote bazel run, skips the remote suite when the change moves
-// the pin, and measures its own Blacksmith host after every bazel run when
-// the change touches the worker host (the toolset install would re-key the
-// client's own actions if it came first).
-func TestBazelTestWorkerEnvPreflight(t *testing.T) {
-	wf := parseWorkflow(t, bazelTestWorkflow)
-	job := wf.Jobs["bazel"]
-	if job.Permissions["issues"] != "read" {
-		t.Errorf("bazel job permissions %v, want issues: read (drift issues)", job.Permissions)
-	}
-	certAt, _ := findStep(job, func(s ghStep) bool { return s.ID == "fork-cert" })
-	preAt, pre := findStep(job, func(s ghStep) bool { return s.ID == "worker-env" })
-	if pre == nil || preAt < certAt {
-		t.Fatalf("bazel job: no worker-env preflight step after fork-cert")
-	}
-	if !strings.Contains(pre.Run, rbeWorkerEnvDrift+` preflight "$RUNNER_TEMP/worker-env-base.bazel" "$RUNNER_TEMP/worker-env-changed"`) {
-		t.Errorf("preflight step does not run %s preflight:\n%s", rbeWorkerEnvDrift, pre.Run)
-	}
-	for k, v := range map[string]string{
-		"GH_TOKEN":       "${{ github.token }}",
-		"DEFAULT_BRANCH": "${{ github.event.repository.default_branch }}",
-		"RBE_FORK_CERT":  bazelRCForkCertEnv,
-	} {
-		if pre.Env[k] != v {
-			t.Errorf("preflight env %s = %q, want %q", k, pre.Env[k], v)
-		}
-	}
-	// Remote exactly when the bazel steps add --config=remote-exec.
-	if !strings.Contains(pre.Run, `if [ -n "$BAZEL_REMOTE_EXECUTOR" ] || [ -n "$RBE_FORK_CERT" ]; then export WORKER_ENV_REMOTE=true; fi`) {
-		t.Errorf("preflight step does not set WORKER_ENV_REMOTE as the remote-exec guard does:\n%s", pre.Run)
-	}
-	const skip = "steps.worker-env.outputs.pin-moved != 'true'"
-	lastBazel := -1
-	for i, s := range job.Steps {
-		if !regexp.MustCompile(`(?m)^\s*bazel "\$\{ARGS\[@\]\}" (test|coverage)`).MatchString(s.Run) {
-			continue
-		}
-		lastBazel = i
-		if i < preAt {
-			t.Errorf("step %q runs bazel before the worker-env preflight", s.Name)
-		}
-		if !strings.Contains(s.If, skip) && !strings.Contains(s.If, "github.ref == 'refs/heads/main'") {
-			t.Errorf("step %q if %q: a moved pin must skip it (%s)", s.Name, s.If, skip)
-		}
-	}
-	measAt, meas := findStep(job, runs(rbeWorkerScript))
-	if meas == nil || meas.If != "always() && steps.worker-env.outputs.measure == 'true'" ||
-		len(meas.Env) != 1 || meas.Env["WORKER_MODE"] != "measure" {
-		t.Fatalf("bazel job: no host measurement step (if measure, WORKER_MODE=measure): %+v", meas)
-	}
-	if measAt < lastBazel {
-		t.Errorf("the host measurement (step %d) runs before a bazel run (step %d): its toolset install would re-key the client's actions", measAt, lastBazel)
-	}
-}
-
 // TestBazelMultiLaneWorkerEnvPreflight: bazel.yml's remote jobs ask the
-// worker-env preflight as bazel-test.yml's bazel job does. The lane job asks
+// worker-env preflight before any remote bazel run. The lane job asks
 // before setup-bazel (no rbe-fork certificate for a run that would only
 // queue), counts as remote in exactly the modes setup-bazel attaches a
 // remote executor, skips Bazel when the change moves the pin, and its unit

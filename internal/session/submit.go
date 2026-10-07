@@ -174,7 +174,10 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 		if err != nil {
 			return err
 		}
-		if err := m.sp.Stop(sessName); err != nil {
+		// Replacement only needs the outgoing incarnation gone, so a session
+		// that is already gone — including one whose tmux server died — is
+		// cleared to restart rather than reported as a failed stop.
+		if err := runtime.StopForCleanup(m.sp, sessName); err != nil {
 			return fmt.Errorf("stopping session for interrupt replacement: %w", err)
 		}
 		if err := discardPiPendingTurn(piTranscriptPath, hints); err != nil {
@@ -195,13 +198,13 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 	if err := m.waitForInterruptIdleLocked(ctx, b, sessName); err != nil {
 		// Idle wait failed (e.g. timeout). Fall back to hard
 		// restart so the session isn't left in limbo.
-		if stopErr := m.sp.Stop(sessName); stopErr != nil {
+		if stopErr := runtime.StopForCleanup(m.sp, sessName); stopErr != nil {
 			return fmt.Errorf("stopping session after idle timeout: %w", stopErr)
 		}
 		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
 	}
 	if err := m.waitForInterruptBoundaryLocked(ctx, b, sessName, interruptStartedAt); err != nil {
-		if stopErr := m.sp.Stop(sessName); stopErr != nil {
+		if stopErr := runtime.StopForCleanup(m.sp, sessName); stopErr != nil {
 			return fmt.Errorf("stopping session after interrupt boundary timeout: %w", stopErr)
 		}
 		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
