@@ -1039,8 +1039,10 @@ Raw `go test` is still appropriate for a focused package or a single failing
 test. Do not use it as the default for full local sweeps when a sharded target
 exists.
 
-The `productmetrics_testhook` profile is a required, path-gated CI lane with
-six named owners, including the real CLI re-exec process contract. Its tagged
+The `productmetrics_testhook` profile has six named owners, including the
+real CLI re-exec process contract. In CI it is the Bazel target
+`//cmd/gc:gc_productmetrics_testhook_test` (gc_test built with the tag), in
+bazel.yml's required unit lane. Its tagged
 process owner is intentionally absent from ordinary untagged `cmd/gc` shard
 enumeration. The serial `make test-cmd-gc-process` target runs the ordinary
 suite and then this profile; `make test-cmd-gc-process-parallel` and

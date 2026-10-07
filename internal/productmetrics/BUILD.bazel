@@ -1,5 +1,10 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
+# //cmd/gc:gc_productmetrics_testhook_test builds this package with -tags
+# productmetrics_testhook; gazelle lists the tagged files in srcs, and
+# rules_go drops them again in every configuration without the tag.
+# gazelle:build_tags integration,productmetrics_testhook
+
 go_library(
     name = "productmetrics",
     srcs = [
@@ -12,6 +17,7 @@ go_library(
         "notice_content.go",
         "pause.go",
         "platform_unsupported.go",
+        "productmetrics_testhook.go",
         "quota.go",
         "release.go",
         "service.go",

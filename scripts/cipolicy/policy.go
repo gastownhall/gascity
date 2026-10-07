@@ -203,7 +203,16 @@ const (
 	// in the unit lane, gc_test's integration-tagged real-transport proof in
 	// the integration-packages lane. Reviewed delta: removed jobs, filters,
 	// outputs and needs; no new job, trigger or permission.
-	expectedCIExecutionHash     = "07f580cc16c261af2b2bf16ed142187e64a6c6f7ef580660a579f84709364b33"
+	//
+	// Bumped again (ga-96smfk.7, tagged suites moved to Bazel): the
+	// cmd-gc-productmetrics-testhook job and preflight-static's "Native
+	// DoltLite beads tests" step are removed, with the job's two ci-required
+	// references. bazel.yml's unit lane runs the same tests as
+	// //cmd/gc:gc_productmetrics_testhook_test (-tags productmetrics_testhook)
+	// and //internal/beads:beads_native_doltlite_test (-tags
+	// gascity_native_beads). Reviewed delta: one removed job and one removed
+	// step; no new job, trigger or permission.
+	expectedCIExecutionHash     = "c85e14be1b8664699de64d3f0eae8f727c03d544bb4f29169607c4e12f577355"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

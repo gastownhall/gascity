@@ -1,4 +1,11 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
+
+# productmetrics_testhook (beside the root's integration): the tagged files
+# are listed in srcs, and rules_go drops them again in every configuration
+# without the tag, so gc_productmetrics_testhook_test can build gc_test with
+# -tags productmetrics_testhook.
+# gazelle:build_tags integration,productmetrics_testhook
 
 go_library(
     name = "gc_lib",
@@ -360,6 +367,8 @@ go_library(
         "productmetrics_adapter_production.go",
         "productmetrics_child_env.go",
         "productmetrics_controls_production.go",
+        "productmetrics_controls_testhook.go",
+        "productmetrics_testhook.go",
         "prompt.go",
         "prompt_delivery.go",
         "provider_health_gate.go",
@@ -1294,6 +1303,7 @@ go_test(
         "mcp_integration_test.go",
         "mcp_supervisor_test.go",
         "mcp_unsupported_harness_test.go",
+        "metrics_census_ignore_testhook_test.go",
         "metrics_census_test.go",
         "metrics_classifier_test.go",
         "metrics_lifecycle_test.go",
@@ -1386,11 +1396,16 @@ go_test(
         "proc_environ_settled_test.go",
         "productmetrics_child_env_test.go",
         "productmetrics_controls_process_test.go",
+        "productmetrics_controls_process_testhook_test.go",
+        "productmetrics_controls_pty_darwin_test.go",
+        "productmetrics_controls_pty_linux_test.go",
         "productmetrics_direct_child_env_test.go",
         "productmetrics_exit_census_test.go",
         "productmetrics_private_entry_test.go",
         "productmetrics_private_process_test.go",
+        "productmetrics_private_process_testhook_test.go",
         "productmetrics_service_child_env_test.go",
+        "productmetrics_testhook_test.go",
         "prompt_delivery_test.go",
         "prompt_meta_test.go",
         "prompt_rollout_boundary_test.go",
@@ -1778,6 +1793,7 @@ go_test(
         "//internal/formula",
         "//internal/formulatest",
         "//internal/fsys",
+        "//internal/gchome",
         "//internal/git",
         "//internal/gitcred",
         "//internal/githubmonitor",
@@ -1873,6 +1889,22 @@ go_test(
         ],
         "//conditions:default": [],
     }),
+)
+
+# The tagged product-metrics contracts (`make test-productmetrics-testhook`):
+# gc_test built with -tags productmetrics_testhook, which swaps in the test
+# hooks, running only the tests that need them.
+go_variant_test(
+    name = "gc_productmetrics_testhook_test",
+    args = ["-test.run=^(TestProductMetricsTaggedBinaryProcessContracts|TestProductMetricsTesthookEndpointAcceptsOnlyLoopbackHTTPS|TestProductMetricsTaggedRunnerReadsInjectionOnlyAtInvocation|TestProductMetricsTesthookCAReadIsBounded|TestProductMetricsTaggedProcessFixtureIsEnabled|TestProductMetricsTestOnlyCensusEscapeIsNarrow)$$"],
+    gotags = ["productmetrics_testhook"],
+    test = ":gc_test",
+)
+
+# scripts/ci_critical_path_test.go pins gc_productmetrics_testhook_test.
+exports_files(
+    ["BUILD.bazel"],
+    visibility = ["//scripts:__pkg__"],
 )
 
 exports_files(

@@ -1,4 +1,11 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
+
+# :beads_native_doltlite_test builds this package with -tags
+# gascity_native_beads (beside the root's integration); gazelle lists the
+# tagged files in srcs, and rules_go drops them again in every configuration
+# without the tag.
+# gazelle:build_tags gascity_native_beads,integration
 
 go_library(
     name = "beads",
@@ -114,6 +121,11 @@ go_test(
         "corpus_decoder_test.go",
         "delete_if_match_local_strings_internal_test.go",
         "dep_metadata_test.go",
+        "doltlite_count_test.go",
+        "doltlite_namespace_census_test.go",
+        "doltlite_read_store_graph_ready_test.go",
+        "doltlite_read_store_test.go",
+        "doltlite_seek_test.go",
         "event_payload_contract_test.go",
         "event_payload_test.go",
         "exec_timeout_linux_test.go",
@@ -240,6 +252,7 @@ go_test(
         "@com_github_steveyegge_beads//:beads",
         "@com_github_steveyegge_beads//backend",
         "@com_github_steveyegge_beads//journalops",
+        "@org_modernc_sqlite//:sqlite",
     ] + select({
         "@rules_go//go/platform:aix": [
             "//internal/processgroup/processgrouptest",
@@ -335,6 +348,20 @@ go_test(
         ],
         "//conditions:default": [],
     }),
+)
+
+# The native DoltLite read-store suite (`make test-native-doltlite-beads`):
+# beads_test built with -tags gascity_native_beads, running the TestDoltlite*
+# tests. With cgo: the Makefile's CGO_ENABLED=0 drops the cgo-only embedded
+# Dolt files and with them their imports, but gazelle's deps are
+# cgo-unconditional, so a pure build here would still compile Dolt's
+# cgo-only go-icu-regex and fail. The store's sqlite driver is pure Go
+# (modernc.org/sqlite) either way.
+go_variant_test(
+    name = "beads_native_doltlite_test",
+    args = ["-test.run=^TestDoltlite"],
+    gotags = ["gascity_native_beads"],
+    test = ":beads_test",
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

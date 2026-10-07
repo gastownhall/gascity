@@ -158,6 +158,7 @@ go_test(
         "//:go.mod",
         "//:repo_meta",
         "//:repo_source_tree",
+        "//cmd/gc:BUILD.bazel",
         "//contrib:all_files",
         "//platforms:BUILD.bazel",
         "//scripts/testdata/test-go-test-shard/env_required:pkg_files",
