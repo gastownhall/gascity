@@ -107,8 +107,8 @@ mask_top=${mask_rel%%/*}
 own_mounts="$d /tmp /var/tmp $HOME_DIR /dev/shm /dev/mqueue $TMPFS_DIRS"
 own_writable="$d/work/out /tmp /var/tmp $HOME_DIR /dev/shm $TMPFS_DIRS"
 # World-writable sockets on /run (as the host sees them, and as the action
-# does) but journald's and the system bus: none may accept the action's
-# connect() (with MASK_SOCKETS=1 the launcher masks each with /dev/null).
+# does) but journald's: none may accept the action's connect() (with
+# MASK_SOCKETS=1 the launcher masks each with /dev/null).
 # Tried with python3 (stream, datagram and seqpacket), else socat; without
 # either, any socket node left counts as reachable. find goes by the
 # directory entry: a socket bind-mounted over a file (a docker.sock) is found
@@ -116,7 +116,7 @@ own_writable="$d/work/out /tmp /var/tmp $HOME_DIR /dev/shm $TMPFS_DIRS"
 run_socks() {
 	local m s
 	while IFS= read -r -d '' s; do
-		case $s in /run/systemd/journal/* | /run/dbus/system_bus_socket) ;; *) printf '%s\0' "$s" ;; esac
+		case $s in /run/systemd/journal/*) ;; *) printf '%s\0' "$s" ;; esac
 	done < <(
 		find /run -type s -perm -o+w -print0
 		while read -r _ _ _ _ m _; do
@@ -127,6 +127,43 @@ run_socks() {
 }
 host_socks=
 while IFS= read -r -d '' s; do printf -v s '%q ' "$s" && host_socks+=$s; done < <(run_socks)
+# The host's resolver over unix sockets, which no network namespace stops:
+# the system bus (org.freedesktop.resolve1 resolves any name and record type
+# for anyone, TXT included: a two-way DNS tunnel out of a loopback-only
+# action) and systemd-resolved's varlink socket. "X <name>" for each one
+# that accepts the connection (varlink: and answers), and for resolve1 when
+# it resolves; without python3 a socket node left counts as reached. Run as
+# the worker on the host first: what there is to reach, so a pass is never
+# vacuous by accident.
+resolver_probe=$(
+	cat <<'EOF'
+if command -v python3 >/dev/null; then
+	python3 -c '
+import socket, sys
+for name, path, req in ("system-bus", "/run/dbus/system_bus_socket", b""), ("varlink-resolve",
+        "/run/systemd/resolve/io.systemd.Resolve",
+        b"{\"method\":\"io.systemd.Resolve.ResolveHostname\",\"parameters\":{\"name\":\"localhost\"}}\0"):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
+        c.settimeout(3)
+        try:
+            c.connect(path)
+            if req:
+                c.sendall(req)
+                if not c.recv(65536):
+                    continue
+        except OSError:
+            continue
+    print("X", name)
+'
+else
+	for s in /run/dbus/system_bus_socket /run/systemd/resolve/io.systemd.Resolve; do [ -S "$s" ] && echo "X $s"; done
+fi
+command -v busctl >/dev/null && timeout 5 busctl --system call org.freedesktop.resolve1 /org/freedesktop/resolve1 \
+	org.freedesktop.resolve1.Manager ResolveHostname isit 0 localhost 0 0 >/dev/null 2>&1 && echo "X resolve1"
+EOF
+)
+host_resolvers=$(setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --init-groups -- env -i PATH=/usr/bin:/bin \
+	bash -c "$resolver_probe" 2>/dev/null | sed -n 's/^X //p' | paste -sd ' ' -)
 # Full run only (walks every filesystem the action can reach, seconds): no
 # directory shared between actions is writable by one, besides its own
 # mounts. Every mount in the action is walked (-xdev each: /, /run, a data
@@ -207,6 +244,7 @@ else
 	for s in "${socks[@]}"; do [ -S "$s" ] && echo "S $s"; done
 fi)
 echo "$r"; grep -q "^S " <<<"$r" || echo "R no-open-socket"
+'"$resolver_probe"'
 mkdir -m 0700 out/private && echo x >out/private/f && chmod 0400 out/private/f && chmod 0500 out/private
 (setsid sleep 600 >/dev/null 2>&1 &)
 echo "R end"; exit 7'
@@ -240,6 +278,18 @@ else
 	echo "warn  action: no-open-socket (${how:-no result}; MASK_SOCKETS=0: reported, not enforced)"
 fi
 sed -n 's/^S /      world-writable socket the action can connect to: /p' <<<"$out"
+# The tunnel itself, whatever the socket list says (a resolver the action
+# reaches is a way out of NETNS=1's loopback-only network).
+resolvers=$(sed -n 's/^X //p' <<<"$out" | paste -sd ' ' -)
+if ! grep -qx "R end" <<<"$out"; then
+	bad "action: no-resolver (no result)"
+elif [[ -z $resolvers ]]; then
+	ok "action: no-resolver (the host reaches: ${host_resolvers:-none})"
+elif ((MASK_SOCKETS)); then
+	bad "action: no-resolver (the action reaches: $resolvers)"
+else
+	echo "warn  action: no-resolver (the action reaches: $resolvers; MASK_SOCKETS=0: reported, not enforced)"
+fi
 check "ROOT_RO=$ROOT_RO leaves the host's / and /run as they were" test "$(host_mounts 2>&1)" = "$host_before"
 for t in "${deny[@]}"; do
 	got=$(awk -v t="$t" '$1 == "D" && $2 == t { print $3 }' <<<"$out")
