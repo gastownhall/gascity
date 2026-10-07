@@ -33,35 +33,37 @@ func (v identityVerdict) String() string {
 // runtime sits under row's name. It is total, and an empty token never
 // matches. A token equal to the row's is Current whatever the session ID
 // (legacy adoption never stamped GC_SESSION_ID), so a legacy-adopted runtime
-// is never Foreign (v5.2 M2).
+// is never Foreign (v5.2 M2). Row and runtime fields are compared trimmed.
 //
 // Liveness first: callers compare only a runtime O1 reads present, since a
 // readable token on a gone runtime proves nothing.
 //
-// Ownerless needs a backend whose identity write is atomic with liveness
-// (v5 X3). Identity is read only on identityReadable leaves (tmux, acp, and
-// subprocess since LL3), which all are; any other leaf reads not Known, so
-// Unknown. A leaf added to identityReadable must be atomic too.
+// Ownerless needs a backend that seeds identity before it lists the name
+// (v5 X3): identityReadable leaves only (tmux, acp, and subprocess since
+// LL3); any other leaf reads not Known, so Unknown. An exiting runtime may
+// still read Ownerless briefly, because subprocess clears its sidecar before
+// it stops listing the name and acp right after terminating. That is benign:
+// the runtime is going.
 func compareIdentity(row session.Info, rt runtimeIdentity) identityVerdict {
 	if !rt.Known {
 		return identityUnknown
 	}
+	id, token := strings.TrimSpace(rt.SessionID), strings.TrimSpace(rt.Token)
 	switch {
-	case rt.Token != "" && rt.Token == strings.TrimSpace(row.InstanceToken):
+	case token != "" && token == strings.TrimSpace(row.InstanceToken):
 		return identityCurrent
-	case rt.SessionID == "" && rt.Token == "":
+	case id == "" && token == "":
 		return identityOwnerless
-	case rt.SessionID == "":
+	case id == "":
 		return identityUnknown
-	case rt.SessionID != strings.TrimSpace(row.ID):
+	case id != strings.TrimSpace(row.ID):
 		return identityForeign
-	case rt.Token == "":
+	case token == "":
 		return identityUnknown
 	}
-	epoch, err := strconv.Atoi(rt.Epoch)
-	generation, genErr := strconv.Atoi(strings.TrimSpace(row.Generation))
+	epoch, generation, ok := identityEpochs(row, rt)
 	switch {
-	case err != nil || genErr != nil:
+	case !ok:
 		return identityUnknown
 	case epoch > generation:
 		return identityNewerSelf
@@ -69,12 +71,32 @@ func compareIdentity(row session.Info, rt runtimeIdentity) identityVerdict {
 	return identityStaleSelf
 }
 
-// ownsName reports whether name is a bead-scoped pool name of row (C8.2(a):
-// the name embeds the row's bead ID). The stop verb (v5 D3) and the rollback
-// count such a name as own for the identity check (leg L2) only, never
-// Foreign. It waives nothing else, leg L3 included, and it is not the
-// own-runtime exception (v5.3 D3).
+// ownRuntime is O2's own-runtime test (legacy's table at
+// session_lifecycle_parallel.go:3343-3352): v is Current, or StaleSelf with
+// the runtime's epoch equal to the row's generation. The rollback, the
+// lost-commit cleanup and S7's StaleSelf exit read it.
+func ownRuntime(v identityVerdict, row session.Info, rt runtimeIdentity) bool {
+	if v == identityCurrent {
+		return true
+	}
+	epoch, generation, ok := identityEpochs(row, rt)
+	return v == identityStaleSelf && ok && epoch == generation
+}
+
+// identityEpochs parses the runtime's epoch and the row's generation.
+func identityEpochs(row session.Info, rt runtimeIdentity) (int, int, bool) {
+	epoch, err := strconv.Atoi(strings.TrimSpace(rt.Epoch))
+	generation, genErr := strconv.Atoi(strings.TrimSpace(row.Generation))
+	return epoch, generation, err == nil && genErr == nil
+}
+
+// ownsName is C8.2(a)'s bead-scoped name, legacy's predicate verbatim
+// (staleAsyncStartRuntimeAttribution): a pool-managed row whose stored
+// session name embeds its bead ID, and name is that stored name. The
+// pending-create rollback reads it as the own-runtime attribution, with L3
+// waived (v5 C3, F2). The stop verb (v5 D3) reads it as own for the identity
+// leg (L2) only, never Foreign, with L3 kept.
 func ownsName(row session.Info, name string) bool {
-	row.SessionNameMetadata = name
-	return infoOwnsPoolSessionName(row)
+	return isPoolManagedSessionInfo(row) && infoOwnsPoolSessionName(row) &&
+		strings.TrimSpace(row.SessionNameMetadata) == strings.TrimSpace(name)
 }
