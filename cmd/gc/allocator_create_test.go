@@ -1715,8 +1715,8 @@ func TestCreateEffect_ParallelTemplatesRealFlocks(t *testing.T) {
 // the planner as exactly one settlement through the settle spy.
 func TestCreateEffectSettlesOnlyByMessage(t *testing.T) {
 	shared := map[reflect.Type]bool{
-		reflect.TypeFor[*intentLedger](): true, reflect.TypeFor[*backoffTable](): true,
-		reflect.TypeFor[*inflightMap](): true, reflect.TypeFor[v2Enqueuer](): true,
+		reflect.TypeFor[*backoffTable](): true, reflect.TypeFor[*inflightMap](): true,
+		reflect.TypeFor[v2Enqueuer](): true,
 	}
 	host := reflect.TypeFor[createEffectHost]()
 	for i := range host.NumField() {

@@ -73,9 +73,9 @@ build:remote-exec --jobs=64
 # Read-only anonymous cache for fork PRs and contributors: rbe-west's
 # rbe-cache endpoint serves action-cache and CAS reads only (writes and
 # Execute are refused by the farm) and needs no credentials, so it is
-# committed. bazel-test.yml selects it for runs without an executor (fork PRs,
-# rbe=cache dispatches) by writing `build --config=fork-cache` to
-# .bazelrc.local; .githooks/lib/push-suite.sh passes --config=fork-cache when
+# committed. bazel.yml selects it for runs without an executor (mode cache:
+# fork PRs the rbe-fork mint does not serve, rbe=cache dispatches) through
+# setup-bazel's rc; .githooks/lib/push-suite.sh passes --config=fork-cache when
 # no rc file names a remote executor (scripts/bazel_fork_cache_test.go).
 # It carries transport flags only, so these actions hash like trusted CI's
 # and hit what trusted CI executed.
@@ -100,7 +100,7 @@ build:fork-cache --jobs=64
 build:fork-cache --remote_timeout=15
 build:fork-cache --remote_retries=2
 build:fork-cache --experimental_circuit_breaker_strategy=failure
-# A BEP file (bazel-test.yml's --build_event_json_file) would upload the local
+# A BEP file (bazel.yml's --build_event_json_file) would upload the local
 # files it references (test logs, the profile) to give them bytestream:// URIs.
 # rbe-cache refuses every write, each refusal counts against that breaker, and
 # once it opens every cache call is refused too, minimal-download fetches
@@ -116,7 +116,7 @@ build:fork-cache --remote_max_connections=4
 # PATH above already applies to every phase, and setup-bazel's
 # --config=remote-exec or --config=fork-cache brings minimal downloads and
 # --jobs=64. What remains is result policy, which Bazel keeps out of action
-# keys and spawns, so lanes, pre-push and bazel-test.yml share cache entries.
+# keys and spawns, so lanes and pre-push share cache entries.
 #
 # G0: a retried pass never stands in for a run (CI lanes restate the
 # single-attempt pin above).
@@ -124,14 +124,17 @@ test:ci --flaky_test_attempts=1
 # A remote cache eviction fails the action rather than silently re-running it.
 test:ci --experimental_remote_cache_eviction_retries=0
 
-# The tagged suites, as bazel-test.yml runs them (byte-identical values:
+# The tagged suites, as bazel.yml's lanes run them (byte-identical values:
 # --define and --test_timeout are key inputs). --test_timeout stays at or
 # below 1100s: the scheduler caps action timeouts at 1200s.
 test:acceptance --define=gotags=acceptance_a
 test:acceptance --test_timeout=1100
 test:integration --define=gotags=integration
 test:integration --test_timeout=1100
+# The integration tier also runs the process-backed tests the unit lane
+# skips, as scripts/test-integration-shard does.
+test:integration --test_env=GC_FAST_UNIT=0
 
-# No --remote_cache_compression here: bazel-test.yml adds it for fork-cache
+# No --remote_cache_compression here: bazel.yml's lanes add it for fork-cache
 # while rbe-cache advertises zstd (tools/rbe/cache-zstd-probe.sh), so the
 # server decides and rollback needs no change here.

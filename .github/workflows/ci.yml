@@ -238,8 +238,13 @@ jobs:
           go-version-file: go.mod
           cache: false
       - uses: ./.github/actions/go-mod-download
-      - name: CI workflow policy
-        run: make test-ci-policy
+      # The CI-policy unit tests, the shell guards (go.mod replace, native
+      # dependency surface, event-export isolation, open-core boundary),
+      # formatting and docsync run as Bazel tests in bazel.yml's unit lane:
+      # //:ci_runner_policy_test, //:ci_suite_coverage_test,
+      # //scripts/cipolicy:cipolicy_test, //scripts/prwatchdog:prwatchdog_test,
+      # //scripts:scripts_test, //scripts:check_*_test, //:go_format_test and
+      # //test/docsync:docsync_test.
       - name: Classify static-analysis scope
         id: static-scope
         env:
@@ -248,14 +253,6 @@ jobs:
         run: |
           scope="$(scripts/ci-static-scope)"
           printf 'scope=%s\n' "$scope" >> "$GITHUB_OUTPUT"
-      - name: go.mod replace guard
-        run: make check-gomod-replace
-      - name: Native dependency surface guard
-        run: make check-native-dependency-surface
-      - name: Event-export isolation guard
-        run: make check-eventexport-isolation
-      - name: Open-core boundary guard
-        run: make check-core-boundary
       - name: Native DoltLite beads tests
         run: make test-native-doltlite-beads
       - name: Get golangci-lint + Go toolchain versions for cache key
@@ -292,20 +289,9 @@ jobs:
         env:
           GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
         run: make lint
-      - name: Format changed files
-        if: steps.static-scope.outputs.scope == 'changed'
-        env:
-          LINT_CHANGED_SCOPE: tracked
-          LINT_CHANGED_REF: ${{ github.event.pull_request.base.sha }}
-        run: make fmt-check-changed
-      - name: Format full repository
-        if: steps.static-scope.outputs.scope != 'changed'
-        run: make fmt-check
       - name: Vet
         if: steps.static-scope.outputs.scope != 'changed'
         run: make vet
-      - name: Docs
-        run: make check-docs
 
   # Coverage reporting only matters on the main branch — codecov regression
   # info doesn't need to gate every PR, and the full ./... unit suite is
@@ -524,7 +510,7 @@ jobs:
   # so a slow-but-live run was cancelled by the job timeout — losing the
   # `--- FAIL` line and the tee'd log the skip report reads — instead of being
   # reported by the test timeout. Measured on a loaded 32-core box:
-  # TestBeadsProxiedDefault 13-15 min, AC-X ~11 min, M1+M5 ~9.5 min, the
+  # the TestBeadsProxiedDefault* family 13-15 min, AC-X ~11 min, M1+M5 ~9.5 min, the
   # user-level shared-server isolation test ~7.5 min; CI runners are faster. The proxied-native lifecycle and safety rows moved to
   # their own job below.
   beads-topology-acceptance:
@@ -595,7 +581,7 @@ jobs:
         run: |
           set -euo pipefail
           go test -tags acceptance_a -timeout 30m -count=1 -v \
-            -run 'TestBeadsProxiedDefault$' ./test/acceptance/ 2>&1 \
+            -run 'TestBeadsProxiedDefaultInit$|TestBeadsProxiedDefaultNativeLane$|TestBeadsProxiedDefaultRig$|TestBeadsProxiedDefaultStart$|TestBeadsProxiedDefaultRestart$|TestBeadsProxiedDefaultDirectEscapeHatch$|TestBeadsProxiedDefaultBdOwnedDirectUnchanged$|TestBeadsProxiedDefaultLegacyManagedCityUnchanged$' ./test/acceptance/ 2>&1 \
             | tee "${RUNNER_TEMP}/proxied-default.log"
       - name: User-level shared-server isolation acceptance
         run: |
@@ -800,9 +786,11 @@ jobs:
       - runner-policy
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
-      # Make TestGeneratedClientInSync fatal on missing oapi-codegen so the
-      # spec->client drift check can never silently skip in CI.
-      GC_REQUIRE_OAPI_CODEGEN: "1"
+      # Base side of the OpenAPI breaking-change gate (cmd/openapi-breaking):
+      # the PR base commit from the event payload, normally the base of the
+      # checked-out test merge ("Merge <head> into <base>"); github.sha on
+      # non-PR events.
+      OPENAPI_BREAKING_BASE: ${{ github.event.pull_request.base.sha || github.sha }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
@@ -813,21 +801,23 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
+      # The OpenAPI spec, generated Go client and generated reference docs
+      # drift checks run under Bazel: //cmd/genspec:genspec_in_sync_test,
+      # //internal/api/genclient:genclient_test (hermetic oapi-codegen) and
+      # //cmd/genschema:genschema_in_sync_test (bazel.yml uploads its
+      # regeneration patch for docs-autofix.yml).
       - name: Dashboard bundle drift check
         run: make dashboard-ci
-      - name: OpenAPI spec + client drift check
-        run: make spec-ci
-      # On drift this fails the job and leaves the exact regen patch, which
-      # the Docs Autofix workflow (docs-autofix.yml) applies to the PR branch.
-      - name: Generated reference docs drift check
-        run: ./scripts/check-generated-docs-drift.sh
-      - name: Upload generated-docs freshness patch
-        if: failure() && hashFiles('generated-docs-freshness.patch') != ''
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: generated-docs-freshness-patch
-          path: generated-docs-freshness.patch
-          retention-days: 7
+      # The OpenAPI breaking-change gate compares against the PR base commit,
+      # which needs git history, so it stays here. Non-PR events compare HEAD
+      # with itself (nothing to gate).
+      - name: Fetch OpenAPI breaking-change base
+        run: |
+          if ! git cat-file -e "${OPENAPI_BREAKING_BASE}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$OPENAPI_BREAKING_BASE"
+          fi
+      - name: OpenAPI breaking-change gate
+        run: make openapi-breaking-check
 
   # Historical fan-in name and the branch-protection-enforced required status.
   # Branch protection requires `Check`, so the cross-version contract matrix
@@ -1050,6 +1040,46 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - shard_name: bdstore
+            timeout_minutes: 15
+            command: make test-integration-bdstore
+          - shard_name: rest-smoke-1-of-2
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard rest-smoke-1-of-2
+          - shard_name: rest-smoke-2-of-2
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard rest-smoke-2-of-2
+    env:
+      DOLT_VERSION: "2.2.0"
+      BD_VERSION: "v1.3.1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "false"
+      - name: Run integration shard
+        run: ${{ matrix.command }}
+
+  # The packages-* shards: every package's `//go:build integration` tests
+  # and GC_FAST_UNIT=0 process tests outside test/integration. bazel.yml's
+  # gating integration-packages lane (//test:integration_packages) runs them
+  # for pushes and same-repo PRs. A fork or Dependabot PR's bazel run mints
+  # at most 2 rbe-fork certificates (unit, acceptance) and starts no such
+  # lane, so those PRs still run the shards here.
+  integration-packages-fork:
+    name: Integration (fork PR) / ${{ matrix.shard_name }}
+    needs:
+      - runner-policy
+      - changes
+    if: needs.changes.outputs.integration == 'true' && github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork == true || github.actor == 'dependabot[bot]')
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    timeout-minutes: ${{ matrix.timeout_minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
           - shard_name: packages-core-1-of-4
             timeout_minutes: 15
             command: ./scripts/test-integration-shard packages-core-1-of-4
@@ -1083,15 +1113,6 @@ jobs:
           - shard_name: packages-runtime-tmux-6-of-6
             timeout_minutes: 10
             command: ./scripts/test-integration-shard packages-runtime-tmux-6-of-6
-          - shard_name: bdstore
-            timeout_minutes: 15
-            command: make test-integration-bdstore
-          - shard_name: rest-smoke-1-of-2
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-smoke-1-of-2
-          - shard_name: rest-smoke-2-of-2
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-smoke-2-of-2
     env:
       DOLT_VERSION: "2.2.0"
       BD_VERSION: "v1.3.1"
@@ -1974,6 +1995,7 @@ jobs:
     needs:
       - runner-policy
       - integration-shards
+      - integration-packages-fork
       - integration-rest-full
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
@@ -1987,10 +2009,11 @@ jobs:
           import os
           import sys
 
-          # integration-shards is path-gated, while integration-rest-full is
-          # additionally push-only. Their skipped results are expected for
-          # docs-only changes and pull requests, respectively.
-          allow_skipped = {"integration-shards", "integration-rest-full"}
+          # integration-shards is path-gated, integration-packages-fork is
+          # additionally fork/Dependabot-PR-only and integration-rest-full
+          # push-only. Their skipped results are expected for docs-only
+          # changes, same-repo PRs and pushes, and pull requests, respectively.
+          allow_skipped = {"integration-shards", "integration-packages-fork", "integration-rest-full"}
           needs = json.loads(os.environ["NEEDS_JSON"])
           failed = {}
           for job, meta in sorted(needs.items()):

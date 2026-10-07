@@ -1,7 +1,11 @@
 // Command genschema generates JSON Schema and markdown reference docs
 // from Gas City's Go config structs. Run from the repository root:
 //
-//	go run ./cmd/genschema
+//	go run ./cmd/genschema [-gc PATH]
+//
+// The CLI reference comes from `gc gen-doc`; -gc names a prebuilt gc binary
+// to run for it (Bazel passes //cmd/gc), otherwise `go run ./cmd/gc` builds
+// one.
 //
 // Output:
 //
@@ -15,6 +19,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,13 +30,15 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
+	gcBin := flag.String("gc", "", "prebuilt gc binary for the CLI reference (default: go run ./cmd/gc)")
+	flag.Parse()
+	if err := run(*gcBin); err != nil {
 		fmt.Fprintf(os.Stderr, "genschema: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(gcBin string) error {
 	// Validate we're at repo root.
 	if _, err := os.Stat("go.mod"); err != nil {
 		return fmt.Errorf("must run from repository root (go.mod not found)")
@@ -74,6 +81,9 @@ func run() error {
 
 	// Generate CLI reference via "gc gen-doc" (has access to real command tree).
 	genDoc := exec.Command("go", "run", "./cmd/gc", "gen-doc")
+	if gcBin != "" {
+		genDoc = exec.Command(gcBin, "gen-doc")
+	}
 	genDoc.Stdout = os.Stdout
 	genDoc.Stderr = os.Stderr
 	if err := genDoc.Run(); err != nil {

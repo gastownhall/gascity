@@ -115,6 +115,11 @@ type agentBuildParams struct {
 	// nil elsewhere, which disables the counters.
 	realizeProbe *poolRealizeProbe
 
+	// realizeMemo is the v2 allocator's per-pass realization index for one
+	// pool agent (allocator_index.go). Legacy never sets it: nil is legacy's
+	// path, unchanged.
+	realizeMemo *poolRealizeMemo
+
 	// beadNames caches qualifiedName → session_name mappings resolved
 	// during this build cycle. Populated lazily by resolveSessionName.
 	beadNames map[string]string

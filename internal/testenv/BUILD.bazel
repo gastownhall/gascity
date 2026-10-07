@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "testenv",
-    srcs = ["testenv.go"],
+    srcs = [
+        "bazel_tools.go",
+        "testenv.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/testenv",
     visibility = ["//:__subpackages__"],
 )
@@ -10,6 +13,7 @@ go_library(
 go_test(
     name = "testenv_test",
     srcs = [
+        "bazel_tools_internal_test.go",
         "gc_env_baseline_test.go",
         "legacy_flag_freeze_test.go",
         "lint_test.go",
@@ -22,7 +26,8 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
-        "//:repo_source_tree",
+        "//:repo_go_srcs",
+        "//:repo_go_test_srcs",
     ],
     embed = [":testenv"],
     deps = [
@@ -40,6 +45,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

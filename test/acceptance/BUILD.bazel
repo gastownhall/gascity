@@ -57,13 +57,16 @@ go_test(
         "//cmd/gc",
         "//examples/bd",
         "//:go.mod",
-        "//:repo_source_tree",
+        "//examples:all_examples",
         # Pinned prebuilt release binaries (see MODULE.bazel): hermetic bd and
         # dolt, same versions the go-test CI installs.
         "@bd_bin_v1_3_1//:bd",
         "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
     ],
-    shard_count = 2,
+    # rules_go assigns tests round-robin in source order; the lane is as slow
+    # as its slowest shard. scripts/acceptance_shards_test.go keeps the tests
+    # in heavy_tests.txt in separate shards.
+    shard_count = 17,
     deps = [
         "//internal/beads",
         "//internal/beads/contract",
@@ -90,6 +93,13 @@ go_test(
     ],
 )
 
+# The shard placement guard (scripts/acceptance_shards_test.go) reads this
+# file's srcs and shard_count.
+exports_files(
+    ["BUILD.bazel"],
+    visibility = ["//scripts:__pkg__"],
+)
+
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(
@@ -98,6 +108,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

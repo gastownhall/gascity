@@ -41,4 +41,4 @@ reason = "TestRunAnalyzeReliability_FullPipelineMatchesGoldenSnapshot sizes its 
 [[reviewed]]
 package = "internal/runtime/ssh"
 signal = "network-cli"
-reason = "ssh_test.go dials 127.0.0.1:1 (refused) through the image's ssh client; the host-sshd test lives in ssh_localhost_integration_test.go behind the integration build tag, outside the Bazel target."
+reason = "ssh_test.go dials 127.0.0.1:1 (refused) through the image's ssh client. ssh_localhost_integration_test.go (compiled only under --config=integration) dials localhost only and skips without passwordless ssh to localhost, which the pinned worker image (worker-env) does not provide, so no result depends on a remote host."

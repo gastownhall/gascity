@@ -24,13 +24,13 @@ go_test(
     ],
     # bead_id_test.go reads ../agents/lib/bead-id.sh and ../agents/*.sh;
     # dolt_config_timeout_test.go parses dolt_config_test.go as a text
-    # fixture (it is not a source dep). //:repo_source_tree covers the
-    # former, the glob covers the latter.
+    # fixture (it is not a source dep). //test:agents covers the former,
+    # the glob covers the latter.
     data = glob(
         ["*.go"],
         exclude = ["BUILD.bazel"],
     ) + [
-        "//:repo_source_tree",
+        "//test:agents",
     ],
     tags = [
         "external",
@@ -100,13 +100,13 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
-        "//:repo_source_tree",
+        "//test:agents",
     ] + select({
         # Only the integration-tagged tests exec these. The untagged tests that
         # also build in the default configuration (bead_id_test.go,
         # dolt_config_timeout_test.go) read sources only, so `bazel test //...`
         # neither links nor stages them; the gc links are 207 MB each.
-        ":gotags_integration": [
+        "//:gotags_integration": [
             "//cmd/gc",
             "//cmd/gc:gc_drift_new",
             "//cmd/gc:gc_drift_old",
@@ -166,12 +166,6 @@ exports_files(
     visibility = ["//scripts:__pkg__"],
 )
 
-# The integration lane builds with --define=gotags=integration (bazel-test.yml).
-config_setting(
-    name = "gotags_integration",
-    define_values = {"gotags": "integration"},
-)
-
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(
@@ -180,6 +174,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

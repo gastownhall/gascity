@@ -322,8 +322,8 @@ var bootstrapPolicy = Ledger{
 	},
 	Medium: []MediumOwner{
 		{
-			PackageDir:      "internal/api",
-			PackageName:     "api",
+			PackageDir:      "internal/api/apierr",
+			PackageName:     "apierr",
 			Owner:           "TestEveryEmittedErrorCodeIsRegistered",
 			Resources:       []Resource{ResourceSubprocess},
 			OwnerBead:       "ga-cp3hwi",

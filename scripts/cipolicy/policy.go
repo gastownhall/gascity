@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"sort"
 	"strings"
 
@@ -13,11 +12,6 @@ import (
 )
 
 const (
-	setupGoAction = "actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c"
-	// goModDownloadAction warms the module cache with a retried
-	// `go mod download`; every Go-building job runs it right after setup-go.
-	goModDownloadAction = "./.github/actions/go-mod-download"
-
 	// These are SHA-256 digests of the display-free JSON projections below.
 	// Whole-workflow execution hashes deliberately pin shell text instead of
 	// approximating shell semantics: any execution change requires explicit
@@ -144,7 +138,41 @@ const (
 	// Bumped again (gc 1.5.1 suspension quiescence): the same step also
 	// selects TestProxiedSuspensionIsQuiescence (~8 minutes, inside the step's
 	// 45m -timeout) and its name says so. No new job, trigger or permission.
-	expectedCIExecutionHash     = "bc49242821ebcecfe16df27169265323a40d6dcfdf659aae29fe6d009f9e819f"
+	//
+	// Bumped again (OpenAPI breaking-change gate): preflight-generated gains
+	// an OPENAPI_BREAKING_BASE job env (PR base SHA, else github.sha) and a
+	// "Fetch OpenAPI breaking-change base" step that shallow-fetches that
+	// commit before `make spec-ci`, which now also runs the oasdiff gate; the
+	// spec-ci step is renamed to say so. Reviewed delta: one env var, one
+	// step, one step name; no new job, trigger or permission.
+	//
+	// Bumped again (ga-96smfk.8, checks moved to Bazel): preflight-static
+	// drops the CI-policy, go.mod replace, native dependency surface,
+	// event-export isolation, open-core boundary, format and docs steps, and
+	// preflight-generated drops its GC_REQUIRE_OAPI_CODEGEN env, the spec-ci
+	// and generated-docs drift steps and the patch upload. Each now runs as a
+	// Bazel test in the required bazel.yml unit lane; the OpenAPI
+	// breaking-change gate (needs the git base commit) stays as its own
+	// `make openapi-breaking-check` step. Reviewed delta: removed steps, one
+	// removed env and one renamed step command; no new job, trigger or
+	// permission.
+	//
+	// Bumped again (ga-96smfk.26, acceptance shard floor): TestBeadsProxiedDefault
+	// was split into independent TestBeadsProxiedDefault* top-level tests, so
+	// the topology job's proxied-default step selects those eight names
+	// instead of the one. Same tests' assertions, same step, -timeout and env.
+	// No new job, trigger or permission.
+	//
+	// Bumped again (ga-96smfk.6, package integration shards moved to Bazel):
+	// the eleven packages-* rows (packages-core-N-of-4,
+	// packages-cmd-gc-integration, packages-runtime-tmux-N-of-6) leave
+	// integration-shards for a new integration-packages-fork job with the
+	// same runner, env and steps, run only for fork and Dependabot pull
+	// requests (bazel.yml's gating integration-packages lane covers pushes
+	// and same-repo PRs); ci-integration needs it and allows its skip.
+	// Reviewed delta: one job split by condition; no new trigger, step
+	// command or permission.
+	expectedCIExecutionHash     = "219519a0f4fe05b114abc5d6b9226acd10af1985cbb7cf05586a6a305641cbec"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -170,8 +198,11 @@ const (
 	// trigger, permission or secret. Then (Go module fetch resilience)
 	// bundled-pack-pins and waiver-clock each set setup-go `cache: false` and
 	// gain one step right after it, `uses: ./.github/actions/go-mod-download`;
-	// no new job, trigger, permission or secret.
-	expectedNightlyExecutionHash = "8c3b93d8471bb9f6b121f6a4713367b25fc10183c9a89a716dcd6785ef21c8d9"
+	// no new job, trigger, permission or secret. Then (ga-96smfk.26)
+	// beads-proxied-perf's -run selects TestBeadsProxiedDefaultNativeLane, the
+	// one test split out of TestBeadsProxiedDefault that reads
+	// GC_ACCEPTANCE_PERF; no new job, trigger, permission or secret.
+	expectedNightlyExecutionHash = "a4a633438d81b9eaa9308ffd687a0869a5472003c651eb8526e76085c581ec6f"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`.
@@ -342,9 +373,6 @@ func validate(ci, nightly, action map[string]any) error {
 	if err := validateChangesJob(ci); err != nil {
 		return err
 	}
-	if err := validatePolicyWiring(ci); err != nil {
-		return err
-	}
 	if err := validatePRProviderOwnership(ci); err != nil {
 		return err
 	}
@@ -427,32 +455,6 @@ func validateChangesJob(workflow map[string]any) error {
 		}
 	}
 
-	return nil
-}
-
-func validatePolicyWiring(workflow map[string]any) error {
-	staticJob, err := workflowJob(workflow, "preflight-static")
-	if err != nil {
-		return err
-	}
-	steps, err := mappingSlice(staticJob["steps"], "preflight-static steps")
-	if err != nil {
-		return err
-	}
-	setupIndex := findStep(steps, "uses", setupGoAction)
-	downloadIndex := findStep(steps, "uses", goModDownloadAction)
-	policyIndex := findStep(steps, "run", "make test-ci-policy")
-	firstGuardIndex := findStep(steps, "run", "make check-gomod-replace")
-	if setupIndex < 0 || downloadIndex != setupIndex+1 || policyIndex != downloadIndex+1 ||
-		firstGuardIndex <= policyIndex {
-		return fmt.Errorf(
-			"preflight-static must run the focused CI policy immediately after setup-go and the Go module download, and before other guards",
-		)
-	}
-	want := map[string]any{"run": "make test-ci-policy"}
-	if got := projectStep(steps[policyIndex]); !reflect.DeepEqual(got, want) {
-		return fmt.Errorf("preflight-static CI policy step must be unconditional and blocking")
-	}
 	return nil
 }
 
@@ -757,20 +759,6 @@ func copyValue(value any) any {
 	default:
 		return value
 	}
-}
-
-func findStep(steps []map[string]any, field, value string) int {
-	found := -1
-	for index, step := range steps {
-		if step[field] != value {
-			continue
-		}
-		if found >= 0 {
-			return -1
-		}
-		found = index
-	}
-	return found
 }
 
 type providerSelectorMatch struct {

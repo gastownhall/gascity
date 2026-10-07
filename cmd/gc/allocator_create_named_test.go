@@ -781,6 +781,10 @@ type namedGuardedStore struct {
 	target string
 }
 
+// ConditionalWritesResolveTarget resolves the conditional writer LL5's row
+// token CAS needs to the wrapped store.
+func (s namedGuardedStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
 func (s namedGuardedStore) guard(id string) {
 	if id != s.target {
 		panic("named create wrote row " + id)
@@ -832,14 +836,42 @@ func namedTreeSnapshot(t *testing.T, dir string) []string {
 	return out
 }
 
+// adoptStampProvider is probePanicProvider answering only LL5's identity
+// stamp on an AdoptLive, which it records: reads of GC_SESSION_ID,
+// GC_INSTANCE_TOKEN and BEADS_HOLDER_TOKEN, and writes of those and
+// GC_RUNTIME_EPOCH. Any other call panics.
+type adoptStampProvider struct {
+	probePanicProvider
+	meta map[string]string
+}
+
+func (p adoptStampProvider) GetMeta(name, key string) (string, error) {
+	switch key {
+	case "GC_SESSION_ID", "GC_INSTANCE_TOKEN", "BEADS_HOLDER_TOKEN":
+		return p.meta[key], nil
+	}
+	panic("create effect read " + key + " from runtime " + name)
+}
+
+func (p adoptStampProvider) SetMeta(name, key, value string) error {
+	switch key {
+	case "GC_SESSION_ID", "GC_INSTANCE_TOKEN", "BEADS_HOLDER_TOKEN", "GC_RUNTIME_EPOCH":
+		p.meta[key] = value
+		return nil
+	}
+	panic("create effect wrote " + key + " to runtime " + name)
+}
+
 // Kills: the S2 side effects (a settings projection, a work-dir mkdir, a
 // skill snapshot written or removed, a RepairEmptyType write on another row)
 // and any provider probe, including SyncRuntimeAlias on an adopt (P3-6b
-// T11). The agent works in a worktree dir and has a skill on a stage-2
-// session provider, so legacy's resolution would create the dir, or rewrite
-// the snapshot its earlier resolution left there. (City skills feed the
-// snapshot only through the catalogs read-only resolution does not load;
-// the agent-local skill reaches the snapshot step without them.)
+// T11), other than LL5's identity stamp, which runs here and is the only
+// provider call (adoptStampProvider). The agent works in a worktree dir and
+// has a skill on a stage-2 session provider, so legacy's resolution would
+// create the dir, or rewrite the snapshot its earlier resolution left there.
+// (City skills feed the snapshot only through the catalogs read-only
+// resolution does not load; the agent-local skill reaches the snapshot step
+// without them.)
 func TestCreateEffect_NamedNeverProbesNorWritesFiles(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -869,6 +901,9 @@ func TestCreateEffect_NamedNeverProbesNorWritesFiles(t *testing.T) {
 				ID: "gc-bait", Title: "bait", Status: "open", Labels: []string{sessionBeadLabel},
 				Metadata: map[string]string{"template": "mayor", "session_name": "bait"},
 			}}, nil)
+			if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, nil, nil); err != nil {
+				t.Fatal(err)
+			}
 			target := ""
 			if tc.reopen {
 				target = seedClosedNamedRow(t, mem, cfg, nil).ID
@@ -880,11 +915,15 @@ func TestCreateEffect_NamedNeverProbesNorWritesFiles(t *testing.T) {
 			h.reserve(t, "c1")
 			plan := namedPlan(t, cfg, "c1", "mayor")
 			plan.Named.AdoptLive = true
-			h.runAll(t, &createPass{cfg: cfg, sp: probePanicProvider{}, store: namedGuardedStore{Store: mem, target: target}}, plan)
+			sp := adoptStampProvider{meta: map[string]string{}}
+			h.runAll(t, &createPass{cfg: cfg, sp: sp, store: namedGuardedStore{Store: mem, target: target}}, plan)
 
 			e := h.entry(t)
 			if !e.Landed {
 				t.Fatalf("settlement = %+v, want landed", e)
+			}
+			if sp.meta["GC_SESSION_ID"] != e.RowID || sp.meta["GC_INSTANCE_TOKEN"] == "" {
+				t.Fatalf("runtime meta = %v, want LL5's stamp of row %s to have run", sp.meta, e.RowID)
 			}
 			if after := namedTreeSnapshot(t, dir); !reflect.DeepEqual(after, before) {
 				t.Fatalf("city dir changed:\nbefore %v\nafter  %v", before, after)
@@ -1126,40 +1165,6 @@ func TestReadOnlyResolveMatchesResolveTemplateMetadata(t *testing.T) {
 			t.Fatalf("legacy resolve = %v, want the override's invalid JSON error", err)
 		}
 	})
-}
-
-// Kills: a retarget of an entry that is not an issued create, or one that
-// loses the row on its commit (AM-N2).
-func TestLedgerRetargetMarksIssuedCreatesOnly(t *testing.T) {
-	l := newIntentLedger(func() time.Time { return namedEffectNow })
-	create := ledgerEntry{ID: "c1", Kind: kindCreate, Key: rowKey{Leg: "sessions"}, Marker: ledgerMarker{InstanceToken: "tok"}}
-	grant := ledgerEntry{ID: "g1", Kind: kindGrant, Key: rowKey{Leg: "sessions", ID: "gc-1"}}
-	if !l.Reserve(create) || !l.Reserve(grant) {
-		t.Fatal("reserve refused")
-	}
-	if l.Retarget("c1", "gc-9") {
-		t.Fatal("retargeted a reserved create")
-	}
-	if _, ok := l.IssueCreate("c1"); !ok || !l.Issue("g1", grant.Key) {
-		t.Fatal("issue refused")
-	}
-	if l.Retarget("g1", "gc-9") || l.Retarget("c1", "") || l.Retarget("missing", "gc-9") {
-		t.Fatal("retargeted a grant, an empty row or a missing entry")
-	}
-	if !l.Retarget("c1", "gc-9") {
-		t.Fatal("issued create not retargeted")
-	}
-	e, _ := ledgerEntryOf(l, "c1")
-	if e.Key != (rowKey{Leg: "sessions", ID: "gc-9"}) || e.Marker != (ledgerMarker{RowID: "gc-9", InstanceToken: "tok"}) {
-		t.Fatalf("retargeted entry = %+v", e)
-	}
-	l.Commit("c1", ledgerMarker{RowID: "gc-9", InstanceToken: "tok"})
-	if l.Retarget("c1", "gc-8") {
-		t.Fatal("retargeted a committed create")
-	}
-	if e, _ = ledgerEntryOf(l, "c1"); e.Key.ID != "gc-9" {
-		t.Fatalf("commit dropped the reopened row: %+v", e)
-	}
 }
 
 // namedLockFiles lists the city identifier lock files a run created.
@@ -1665,5 +1670,268 @@ func TestReadOnlyResolveMatchesLegacyCreateMetadataRichCity(t *testing.T) {
 				t.Fatalf("legacyFirst=%v %s: read-only metadata differs:\nread-only: %v\nlegacy:    %v", legacyFirst, id, got, want)
 			}
 		}
+	}
+}
+
+// adoptLiveRun runs mayor's AdoptLive create on store over a stampFake alive
+// under the session name (as tmux), after prep sets it up. It returns the open row,
+// the fake, the effect's stderr and the token the create wrote. A stamp
+// never fails the create.
+func adoptLiveRun(t *testing.T, store beads.Store, prep func(sp *stampFake, name string)) (beads.Bead, *stampFake, string, string) {
+	t.Helper()
+	cfg := mayorCity()
+	var stderr strings.Builder
+	h := newNamedHarness(t, t.TempDir(), func(host *createEffectHost) { host.stderr = &stderr })
+	createToken := h.reserve(t, "c1")
+	plan := namedPlan(t, cfg, "c1", "mayor")
+	plan.Named.AdoptLive = true
+	sp := newStampFake(t, plan.Named.SessionName)
+	if prep != nil {
+		prep(sp, plan.Named.SessionName)
+	}
+	h.runAll(t, &createPass{cfg: cfg, store: store, sp: tmuxStampFake{sp}}, plan)
+	if s := h.entry(t); !s.Landed || s.Stage != "" || s.Err != nil {
+		t.Fatalf("settlement = %+v, want landed: a stamp never fails the create", s)
+	}
+	rows, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("open rows = %v (%v), want the one named row", rows, err)
+	}
+	return rows[0], sp, stderr.String(), createToken
+}
+
+// fencedMemStore is a MemStore that resolves a conditional writer.
+func fencedMemStore(t *testing.T) *beads.MemStore {
+	t.Helper()
+	mem := beads.NewMemStore()
+	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	return mem
+}
+
+// mayorRuntime is mayor's runtime name in mayorCity.
+func mayorRuntime(t *testing.T) string {
+	t.Helper()
+	return namedPlan(t, mayorCity(), "c1", "mayor").Named.SessionName
+}
+
+func setRuntimeMeta(t *testing.T, sp *stampFake, name string, kv map[string]string) {
+	t.Helper()
+	for k, v := range kv {
+		if err := sp.Fake.SetMeta(name, k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Kills: a row token the runtime never carries (v5 O2, LL5). An AdoptLive
+// create or reopen records the runtime's own token on the row by CAS and
+// stamps the row's ID and generation on the runtime; with no conditional
+// writer it never writes blind, and the runtime gets no session ID either.
+func TestNamedAdoptLiveRecordsRuntimeToken(t *testing.T) {
+	const rt = "rt-own-token"
+	own := func(sp *stampFake, name string) {
+		setRuntimeMeta(t, sp, name, map[string]string{"GC_INSTANCE_TOKEN": rt})
+	}
+	t.Run("create", func(t *testing.T) {
+		row, sp, _, _ := adoptLiveRun(t, fencedMemStore(t), own)
+		name := mayorRuntime(t)
+		if got := row.Metadata["instance_token"]; got != rt {
+			t.Fatalf("row instance_token = %q, want the runtime's %q", got, rt)
+		}
+		if sid, epoch := sp.meta(t, name, "GC_SESSION_ID"), sp.meta(t, name, "GC_RUNTIME_EPOCH"); sid != row.ID || epoch != row.Metadata["generation"] || epoch == "" {
+			t.Fatalf("runtime GC_SESSION_ID %q epoch %q, want row %s at generation %q", sid, epoch, row.ID, row.Metadata["generation"])
+		}
+		if got, holder := sp.meta(t, name, "GC_INSTANCE_TOKEN"), sp.meta(t, name, "BEADS_HOLDER_TOKEN"); got != rt || holder != "" {
+			t.Fatalf("runtime token %q holder %q, want its own %q kept and no holder written", got, holder, rt)
+		}
+	})
+	t.Run("reopen", func(t *testing.T) {
+		store := fencedMemStore(t)
+		closed := seedClosedNamedRow(t, store, mayorCity(), nil)
+		row, sp, _, _ := adoptLiveRun(t, store, own)
+		name := mayorRuntime(t)
+		if row.ID != closed.ID || row.Metadata["instance_token"] != rt {
+			t.Fatalf("row = %s token %q, want reopened %s with the runtime's %q", row.ID, row.Metadata["instance_token"], closed.ID, rt)
+		}
+		if sid, epoch := sp.meta(t, name, "GC_SESSION_ID"), sp.meta(t, name, "GC_RUNTIME_EPOCH"); sid != closed.ID || epoch != "4" {
+			t.Fatalf("runtime GC_SESSION_ID %q epoch %q, want row %s at the reopened row's generation 4", sid, epoch, closed.ID)
+		}
+	})
+	t.Run("no conditional writer", func(t *testing.T) {
+		row, sp, stderr, _ := adoptLiveRun(t, beads.NewMemStore(), own)
+		if got := row.Metadata["instance_token"]; got == rt || got == "" {
+			t.Fatalf("row instance_token = %q, want the create's own token, unwritten", got)
+		}
+		if got := sp.meta(t, mayorRuntime(t), "GC_SESSION_ID"); got != "" || !strings.Contains(stderr, "identity not stamped") {
+			t.Fatalf("runtime GC_SESSION_ID %q, stderr %q; want none while the row lacks its token, logged", got, stderr)
+		}
+	})
+}
+
+// Kills: minting over a runtime's token, and leaving a tokenless runtime
+// tokenless (v5 O2, LL5). A runtime with no token gets one minted on the row
+// and the runtime, with BEADS_HOLDER_TOKEN beside it.
+func TestNamedAdoptLiveMintsOnlyWithoutToken(t *testing.T) {
+	row, sp, _, _ := adoptLiveRun(t, fencedMemStore(t), nil)
+	name := mayorRuntime(t)
+	token := row.Metadata["instance_token"]
+	if token == "" || sp.meta(t, name, "GC_INSTANCE_TOKEN") != token || sp.meta(t, name, "BEADS_HOLDER_TOKEN") != token {
+		t.Fatalf("row token %q, runtime token %q, holder %q; want one minted token on all three",
+			token, sp.meta(t, name, "GC_INSTANCE_TOKEN"), sp.meta(t, name, "BEADS_HOLDER_TOKEN"))
+	}
+	if got := sp.meta(t, name, "GC_SESSION_ID"); got != row.ID {
+		t.Fatalf("runtime GC_SESSION_ID = %q, want row %s", got, row.ID)
+	}
+}
+
+// Kills: copying another session's token onto the row, and minting over a
+// token the effect could not read (LL5 review). A runtime naming another
+// session, or whose identity read fails, leaves the row with the create's
+// token and the runtime untouched; the effect logs it.
+func TestNamedAdoptLiveLeavesUnownedRuntimeAlone(t *testing.T) {
+	boom := errors.New("server busy")
+	for _, tc := range []struct {
+		name string
+		prep func(sp *stampFake, name string)
+	}{
+		{name: "another session's ID", prep: func(sp *stampFake, name string) {
+			setRuntimeMeta(t, sp, name, map[string]string{"GC_SESSION_ID": "gc-other", "GC_INSTANCE_TOKEN": "other-tok"})
+		}},
+		{name: "unreadable ID", prep: func(sp *stampFake, _ string) { sp.getErr["GC_SESSION_ID"] = boom }},
+		{name: "unreadable token", prep: func(sp *stampFake, _ string) { sp.getErr["GC_INSTANCE_TOKEN"] = boom }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var created string
+			var before int
+			row, sp, stderr, createToken := adoptLiveRun(t, fencedMemStore(t), func(sp *stampFake, name string) {
+				tc.prep(sp, name)
+				created, before = name, sp.CountCalls("SetMeta", name)
+			})
+			if got := row.Metadata["instance_token"]; got != createToken {
+				t.Fatalf("row instance_token = %q, want the create's own %q kept", got, createToken)
+			}
+			if n := sp.CountCalls("SetMeta", created) - before; n != 0 || !strings.Contains(stderr, "identity not stamped") {
+				t.Fatalf("SetMeta calls %d, stderr %q; want the runtime untouched and the refusal logged", n, stderr)
+			}
+		})
+	}
+}
+
+// namedRowCASStore is a fenced store whose live row reads run before, and
+// whose UpdateIfMatch can be failed by, the test.
+type namedRowCASStore struct {
+	*beads.MemStore
+	beforeGet func(id string)
+	lose      bool
+	updates   int
+}
+
+func (s *namedRowCASStore) Get(id string) (beads.Bead, error) {
+	if s.beforeGet != nil {
+		s.beforeGet(id)
+	}
+	return s.MemStore.Get(id)
+}
+
+func (s *namedRowCASStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	s.updates++
+	if s.lose {
+		return &beads.PreconditionFailedError{}
+	}
+	return s.MemStore.UpdateIfMatch(id, rev, opts)
+}
+
+func (s *namedRowCASStore) ConditionalWritesResolveTarget() beads.Store { return s }
+
+// Kills: an unbounded or blind token write, and one that runs on a moved
+// premise (LL5 review). A CAS lost every time gives up after rowTokenAttempts;
+// a row whose token another writer changed is not written at all; either way
+// the runtime gets no session ID, so it reads Unknown.
+func TestNamedAdoptLiveCASPremise(t *testing.T) {
+	t.Run("lost every time", func(t *testing.T) {
+		store := &namedRowCASStore{MemStore: fencedMemStore(t), lose: true}
+		_, sp, stderr, _ := adoptLiveRun(t, store, nil)
+		if store.updates != rowTokenAttempts || sp.meta(t, mayorRuntime(t), "GC_SESSION_ID") != "" || !strings.Contains(stderr, "identity not stamped") {
+			t.Fatalf("updates %d (want %d), runtime ID %q, stderr %q; want bounded retries, no stamp, logged",
+				store.updates, rowTokenAttempts, sp.meta(t, mayorRuntime(t), "GC_SESSION_ID"), stderr)
+		}
+	})
+	for _, moved := range []struct{ key, value string }{
+		{"instance_token", "cli-token"},
+		{"generation", "9"},
+	} {
+		t.Run(moved.key+" moved", func(t *testing.T) {
+			store := &namedRowCASStore{MemStore: fencedMemStore(t)}
+			row, sp, stderr, _ := adoptLiveRun(t, store, func(_ *stampFake, _ string) {
+				store.beforeGet = func(id string) {
+					_ = store.SetMetadata(id, moved.key, moved.value)
+					store.beforeGet = nil
+				}
+			})
+			if row.Metadata[moved.key] != moved.value || store.updates != 0 || sp.meta(t, mayorRuntime(t), "GC_SESSION_ID") != "" || !strings.Contains(stderr, "identity not stamped") {
+				t.Fatalf("row %s %q, updates %d, stderr %q; want the other writer's value kept, no CAS, no stamp", moved.key, row.Metadata[moved.key], store.updates, stderr)
+			}
+		})
+	}
+}
+
+// namedStaleCacheStore serves a stale revision from its cached reads and the
+// true row from its Live handle.
+type namedStaleCacheStore struct{ *beads.MemStore }
+
+func (s namedStaleCacheStore) Get(id string) (beads.Bead, error) {
+	b, err := s.MemStore.Get(id)
+	b.Revision--
+	return b, err
+}
+
+func (s namedStaleCacheStore) Handles() beads.StoreHandles {
+	h := beads.HandlesFor(s.MemStore)
+	h.Cached = namedStaleReader{h.Cached}
+	return h
+}
+
+// namedStaleReader is a cached reader one revision behind.
+type namedStaleReader struct{ beads.CachedReader }
+
+func (r namedStaleReader) Get(id string) (beads.Bead, error) {
+	b, err := r.CachedReader.Get(id)
+	b.Revision--
+	return b, err
+}
+
+func (s namedStaleCacheStore) ConditionalWritesResolveTarget() beads.Store { return s.MemStore }
+
+// Kills: the token CAS reading the row through the cache (LL5 review): its
+// revision must come from a live read, or a lagging cache loses every CAS.
+func TestNamedAdoptLiveReadsTheRowLive(t *testing.T) {
+	row, sp, stderr, _ := adoptLiveRun(t, namedStaleCacheStore{fencedMemStore(t)}, func(sp *stampFake, name string) {
+		setRuntimeMeta(t, sp, name, map[string]string{"GC_INSTANCE_TOKEN": "rt-own-token"})
+	})
+	if row.Metadata["instance_token"] != "rt-own-token" || sp.meta(t, mayorRuntime(t), "GC_SESSION_ID") != row.ID {
+		t.Fatalf("row token %q, runtime ID %q, stderr %q; want the CAS landed at the live revision", row.Metadata["instance_token"], sp.meta(t, mayorRuntime(t), "GC_SESSION_ID"), stderr)
+	}
+}
+
+// panicStampFake panics on the first identity read.
+type panicStampFake struct{ *stampFake }
+
+func (panicStampFake) GetMeta(string, string) (string, error) { panic("provider exploded") }
+
+// Kills: a stamp panic escaping adoptLiveIdentity (LL5 review): the create
+// already landed, and a panic past it would settle it as ambiguous.
+func TestNamedAdoptLiveStampPanicKeepsCreateLanded(t *testing.T) {
+	cfg := mayorCity()
+	var stderr strings.Builder
+	h := newNamedHarness(t, t.TempDir(), func(host *createEffectHost) { host.stderr = &stderr })
+	h.reserve(t, "c1")
+	plan := namedPlan(t, cfg, "c1", "mayor")
+	plan.Named.AdoptLive = true
+	sp := panicStampFake{newStampFake(t, plan.Named.SessionName)}
+	h.runAll(t, &createPass{cfg: cfg, store: fencedMemStore(t), sp: sp}, plan)
+	if s := h.entry(t); !s.Landed || s.Ambiguous || s.Err != nil || !strings.Contains(stderr.String(), "panicked") {
+		t.Fatalf("settlement = %+v, stderr %q; want landed, not ambiguous, panic logged", s, stderr.String())
 	}
 }

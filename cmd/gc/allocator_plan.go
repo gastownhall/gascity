@@ -43,7 +43,7 @@ const (
 	gatePoolSlotShaped  = "named-identity-pool-slot-shaped"
 )
 
-// standInPrefix marks the ID of an uncleared create's stand-in row.
+// standInPrefix marks the ID of an in-flight create's stand-in row.
 const standInPrefix = "pending-create:"
 
 // plan is steps 4-8: demand, pool desired, the realization plan and the
@@ -147,10 +147,10 @@ func withoutSuppressedRoutes(c collectedDemand, projected []beads.Bead) (map[str
 // legacy still gives them min-fill and resume requests that consume caps).
 //
 // The rows demand counts are the decidable rows plus a stand-in for each
-// uncleared create whose row the census does not show yet (C5.13 row 1:
-// in-flight demand is census ∪ ledger).
+// in-flight create whose row the census does not show yet (C5.13 row 1:
+// in-flight demand is census ∪ the in-flight map).
 func (p *decidePass) computePoolDesired() {
-	rows := make([]session.Info, 0, len(p.decidable)+len(p.in.Reservations))
+	rows := make([]session.Info, 0, len(p.decidable)+len(p.inFlight))
 	rows = append(rows, p.decidable...)
 	rows = append(rows, p.inFlightStandIns()...)
 	p.poolWork = filterAssignedWorkBeadsForPoolDemandAt(p.cfg, p.in.CityPath, p.in.Demand.RelocatedClaimRefs,
@@ -176,33 +176,39 @@ func (p *decidePass) computePoolDesired() {
 	p.snap.PoolDesired = p.poolDesired
 }
 
-// inFlightStandIns returns a pending-create row for each uncleared pool
-// create the census does not show yet, matched by its entry's
-// marker: its row ID or instance token (C5.13; a create's Key.ID is its
-// marker's row ID). A reservation whose entry the ledger view lacks still
-// stands in: counting a create twice for one pass is safe, planning its
-// work again is not.
+// inFlightCreates is the planning reservation of each running or ambiguous
+// create in the in-flight view whose token no census row carries, keyed by
+// its token. Once a census row carries the token, that row holds the slot,
+// the name and the work instead.
+func (p *decidePass) inFlightCreates() []planReservation {
+	tokens := make(map[string]bool)
+	for _, row := range p.in.Census.Rows {
+		if row.InstanceToken != "" {
+			tokens[row.InstanceToken] = true
+		}
+	}
+	var out []planReservation
+	for _, e := range p.in.InFlight.Entries {
+		if e.Kind != inflightCreate || tokens[e.Token] {
+			continue
+		}
+		r := planReservation{EntryID: e.Token, Template: e.Template, QualifiedInstance: e.QualifiedInstance, Slot: e.Slot, WorkBeadID: e.WorkBeadID}
+		if named, ok := strings.CutPrefix(e.Identity, "named:"); ok {
+			r = planReservation{EntryID: e.Token, Template: e.Template, NamedIdentity: named, SessionName: e.SessionName}
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// inFlightStandIns returns a pending-create row for each in-flight pool
+// create the census does not show yet, stamped now: it is in flight now.
 func (p *decidePass) inFlightStandIns() []session.Info {
-	entries := make(map[string]ledgerEntry)
-	for _, e := range p.in.Ledger {
-		entries[e.ID] = e
-	}
-	var lc ledgerCensus
-	if len(entries) > 0 {
-		lc = p.in.Census.Ledger(p.cfg)
-	}
+	at := p.in.Now.UTC()
 	var out []session.Info
-	for _, r := range p.in.Reservations {
+	for _, r := range p.inFlight {
 		if r.NamedIdentity != "" {
 			continue
-		}
-		if e, ok := entries[r.EntryID]; ok && e.markerVisible(lc) {
-			continue
-		}
-		at := r.ReservedAt
-		if at.IsZero() || at.After(p.in.Now) {
-			// An uncleared create is in flight now, whatever its stamp.
-			at = p.in.Now
 		}
 		info := session.Info{
 			ID:                     standInPrefix + r.EntryID,
@@ -212,7 +218,7 @@ func (p *decidePass) inFlightStandIns() []session.Info {
 			PoolManaged:            true,
 			MetadataState:          string(session.StateStartPending),
 			PendingCreateClaim:     true,
-			PendingCreateStartedAt: at.UTC().Format(time.RFC3339Nano),
+			PendingCreateStartedAt: at.Format(time.RFC3339Nano),
 			CreatedAt:              at,
 			TriggerBeadID:          r.WorkBeadID,
 		}
@@ -224,7 +230,7 @@ func (p *decidePass) inFlightStandIns() []session.Info {
 
 // newPlanParams builds the planner's plan-only build params from the census:
 // reuse selects among the decidable rows, and fresh slots avoid every census
-// row on every leg, the planning reservation of every uncleared create (C7.1
+// row on every leg, the planning reservation of every in-flight create (C7.1
 // tier 1), and every pool name a live create backoff from the fence refuses
 // (F3): the name or its identity lease was taken, so the next free slot is
 // planned instead, and the held name is traced (P-6). The planner runs
@@ -255,7 +261,7 @@ func (p *decidePass) newPlanParams() {
 		planOnly:                       true,
 		beadNames:                      make(map[string]string),
 	}
-	for _, r := range p.in.Reservations {
+	for _, r := range p.inFlight {
 		p.reserve(r)
 	}
 	// A fence backoff's key is createBackoffKey(createIdentity.key()),
@@ -311,8 +317,9 @@ func (p *decidePass) reserve(r planReservation) {
 // A reused row is selected with its config ref and its binding candidate; a
 // fresh plan must pass the plan-time gates.
 func (p *decidePass) realizePools() {
+	p.indexRealization()
 	for _, state := range p.poolStates {
-		cfgAgent := findAgentByTemplate(p.cfg, state.Template)
+		cfgAgent := p.agentByTemplate(state.Template)
 		if cfgAgent == nil {
 			p.refuse(state.Template, "", rowKey{}, "no-agent")
 			continue
@@ -325,6 +332,7 @@ func (p *decidePass) realizePools() {
 			p.refuse(qualifiedName, "", rowKey{}, gateTransport)
 			continue
 		}
+		bp := p.realizeParams(cfgAgent, state.Requests)
 		used := make(map[string]bool)
 		usedSlots := make(map[int]bool)
 		for _, request := range state.Requests {
@@ -343,20 +351,21 @@ func (p *decidePass) realizePools() {
 				}
 				prefer = &candidate
 			}
-			p.realizeRequest(cfgAgent, qualifiedName, prefer, request, used, usedSlots)
+			p.realizeRequest(bp, cfgAgent, qualifiedName, prefer, request, used, usedSlots)
 		}
 		for _, request := range state.Requests {
 			if request.SessionBeadID == "" {
-				p.realizeRequest(cfgAgent, qualifiedName, nil, request, used, usedSlots)
+				p.realizeRequest(bp, cfgAgent, qualifiedName, nil, request, used, usedSlots)
 			}
 		}
 	}
 }
 
-// realizeRequest selects or plans one request. A refusal stalls the request,
-// as legacy's does (build_desired_state.go:5180).
-func (p *decidePass) realizeRequest(cfgAgent *config.Agent, qualifiedName string, prefer *session.Info, request SessionRequest, used map[string]bool, usedSlots map[int]bool) {
-	info, slot, plan, err := selectOrPlanPoolSessionBead(p.bp, cfgAgent, qualifiedName, prefer, request, p.in.Now, used, usedSlots)
+// realizeRequest selects or plans one request over bp, the agent's
+// realization params. A refusal stalls the request, as legacy's does
+// (build_desired_state.go:5180).
+func (p *decidePass) realizeRequest(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, prefer *session.Info, request SessionRequest, used map[string]bool, usedSlots map[int]bool) {
+	info, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, request, p.in.Now, used, usedSlots)
 	switch {
 	case err != nil:
 		p.refuse(qualifiedName, "", rowKey{}, planErrorCause(err))
@@ -559,7 +568,7 @@ func (p *decidePass) planNamed() {
 // AdoptLive from I3 by the AM-N6 table.
 func (p *decidePass) namedGate(ap allocPlan, spec namedSessionSpec) string {
 	plan := ap.Named
-	for _, r := range p.in.Reservations {
+	for _, r := range p.inFlight {
 		if r.NamedIdentity == plan.Identity {
 			return gateInFlight
 		}

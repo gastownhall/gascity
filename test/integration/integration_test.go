@@ -635,9 +635,9 @@ func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	// on `push` — i.e. after merge, which is how v1.3.0-rc.2 sat stale here
 	// (tracker ga-rnwg5u). TestBDVersionPins in scripts/bd_version_pin_test.go
 	// reads wantPinnedBeadsModuleVersion by name out of this file and asserts it
-	// against go.mod's pin; `make test-ci-policy` runs it, and that target is on
-	// the PR-time preflight-static job, so drift now fails before merge. Keep
-	// the const name greppable if you move it.
+	// against go.mod's pin; //scripts:scripts_test runs it in the required
+	// PR-time Bazel lane, so drift now fails before merge. Keep the const name
+	// greppable if you move it.
 	if version != wantPinnedBeadsModuleVersion {
 		t.Errorf("pinnedIntegrationBeadsModuleVersion() = %q, want %q", version, wantPinnedBeadsModuleVersion)
 	}

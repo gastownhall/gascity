@@ -5168,6 +5168,9 @@ func freshPoolOccupancyInfos(bp *agentBuildParams) []session.Info {
 	if bp == nil {
 		return nil
 	}
+	if bp.realizeMemo != nil {
+		return bp.realizeMemo.freshOccupancy()
+	}
 	primary := bp.sessionBeads.OpenInfos()
 	infos := make([]session.Info, 0, len(bp.sessionOccupancyInfos)+len(primary))
 	seen := make(map[string]bool, len(bp.sessionOccupancyInfos)+len(primary))

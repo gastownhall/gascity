@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/overlay"
@@ -673,7 +674,16 @@ func waitTestEnv(overrides map[string]string) []string {
 func waitTestRealBDPath(t *testing.T) string {
 	t.Helper()
 	skipSlowCmdGCTest(t, "requires a managed bd lifecycle city; run make test-cmd-gc-process for full coverage")
+	// Bazel hands the test the pinned release bd (MODULE.bazel's bd_bin
+	// archive, built from the same github.com/steveyegge/beads version go.mod
+	// requires; TestBuildPinnedBDBinaryForTestsUsesGoModSource checks that
+	// against this binary's build info). Under go test, build it from source.
+	bazelBD := bazeltest.DataPath(t, "GC_TEST_PINNED_BD_BIN")
 	waitTestRealBDPathOnce.Do(func() {
+		if bazelBD != "" {
+			waitTestRealBDCached = bazelBD
+			return
+		}
 		waitTestRealBDCached, waitTestRealBDErr = buildPinnedBDBinaryForTests()
 	})
 	if waitTestRealBDErr != nil {

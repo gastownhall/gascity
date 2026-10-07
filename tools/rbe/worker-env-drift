@@ -27,7 +27,7 @@
 #                     WORKER_ENV_AWAIT_SECONDS (default 1800) passed first.
 #                     The worker job keeps serving; this reports while it does.
 #   preflight BASE_BUILD CHANGED
-#                     bazel-test. Writes to $GITHUB_OUTPUT:
+#                     bazel.yml's lanes. Writes to $GITHUB_OUTPUT:
 #                     pin-moved=true if this checkout pins another host than
 #                     BASE_BUILD (the default branch's platforms/BUILD.bazel,
 #                     whose pin the pool workers check against);

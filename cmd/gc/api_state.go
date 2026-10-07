@@ -168,6 +168,11 @@ type controllerState struct {
 	// corruption it gates — so a divergent on-disk change surfaces as a
 	// pending-restart notice via noteRolloutDrift rather than flipping mid-run.
 	rolloutFlags rollout.Flags
+	// nativeTransport is the boot-latched beads.native_transport snapshot:
+	// written once in newControllerState, never reassigned — mirroring
+	// rolloutFlags above. A mid-run city.toml edit changing this value takes
+	// effect only at the next restart; it does not flip an already-open store.
+	nativeTransport beads.NativeTransportMode
 	// rolloutDriftMu guards rolloutDrift and rolloutDriftSig.
 	rolloutDriftMu sync.Mutex
 	// rolloutDrift holds a NoticePendingRestart when a reloaded config's beads
@@ -192,8 +197,8 @@ var beadEventWatcherRetryDelay = time.Second
 // and skip spawning managed dolt (~12s per call). The store is long-lived —
 // the controller holds it for the process lifetime — so it keeps the beads
 // library's daemon-sized project pool rather than the one-shot CLI cap.
-var newControllerStateOpenCityStore = func(cityPath string, mode gate.Mode) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithMode(cityPath, cityPath, mode, true, true)
+var newControllerStateOpenCityStore = func(cityPath string, mode gate.Mode, nativeTransport beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithMode(cityPath, cityPath, mode, true, true, &nativeTransport)
 }
 
 // controllerStateOpenRigStoreAtForCity routes controller rig stores through
@@ -273,6 +278,9 @@ func newControllerStateWithRoutes(
 	if rolloutErr != nil {
 		fmt.Fprintf(os.Stderr, "api: rollout gates: %v (using zero Flags; legacy paths)\n", rolloutErr)
 	}
+	// Latch beads.native_transport ONCE from the boot config too, for the same
+	// reason: a later city.toml edit must not flip an already-open store.
+	nativeTransport := resolvedNativeTransportMode(cfg)
 	cs := &controllerState{
 		beadsQuiescent:      beadsQuiescent,
 		cfg:                 cfg,
@@ -290,6 +298,7 @@ func newControllerStateWithRoutes(
 		beadEventStartSeq:   beadEventStartSeq,
 		beadEventStartSeqOK: beadEventStartSeqOK,
 		rolloutFlags:        rolloutFlags,
+		nativeTransport:     nativeTransport,
 	}
 	// Boot-resolved rollout notices are retained on the Flags value; echo
 	// them once at startup so an env override contradicting explicit config
@@ -299,13 +308,19 @@ func newControllerStateWithRoutes(
 		cs.rolloutWarnf("api: rollout: %s\n", n.Message)
 	}
 	cs.setSuspendedRigs(buildEffectiveSuspendedRigNames(cfg, loadSuspensionStateBestEffort(cityPath)))
+	// native_transport="off" is this city's stores never opening natively, for
+	// the life of the process; logged once at boot, matching the design's
+	// "logged once at boot" requirement for the per-city kill switch.
+	if cs.nativeTransport == beads.NativeTransportOff {
+		fmt.Fprintf(os.Stderr, "api: beads.native_transport=\"off\": city %q will never open a native bead store; always BdStore\n", cityName)
+	}
 	cs.beadStores = cs.buildStores(cfg)
 	// Capture the initial raw config snapshot so provenance reads before the
 	// first reload still use the gate's basis. nil is tolerated: RawConfig
 	// lazily retries on the first read.
 	cs.rawCfg = cs.loadRawSnapshot()
 	// Open city-level store for session beads and mail (best-effort).
-	if opened, err := newControllerStateOpenCityStore(cityPath, cs.rolloutFlags.BeadsConditionalWrites()); err != nil {
+	if opened, err := newControllerStateOpenCityStore(cityPath, cs.rolloutFlags.BeadsConditionalWrites(), cs.nativeTransport); err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
 	} else {
 		store := opened.Store
@@ -409,6 +424,7 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 			CityPath:                    cs.cityPath,
 			Provider:                    "file",
 			ConditionalWrites:           cs.rolloutFlags.BeadsConditionalWrites(),
+			NativeTransport:             cs.nativeTransport,
 			OnConditionalWritesDegraded: conditionalWritesDegradedRecorder(cs.eventProv, cs.rolloutFlags, "city"),
 			OpenFileStore: func() (beads.Store, error) {
 				return openCompatibleFileStore(cs.cityPath, cs.cityPath)
@@ -543,6 +559,7 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 		Provider:                    provider,
 		PreflightChecker:            newBeadsPreflightChecker(cs.cityPath, provider),
 		ConditionalWrites:           cs.rolloutFlags.BeadsConditionalWrites(),
+		NativeTransport:             cs.nativeTransport,
 		OnConditionalWritesDegraded: conditionalWritesDegradedRecorder(cs.eventProv, cs.rolloutFlags, "rig/"+rigName),
 		// The controller holds a rig store for the process lifetime, which is
 		// what decides both the project-pool shape and whether a finite-idle
@@ -1173,7 +1190,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	// Reopen carries the BOOT-latched mode: re-resolving from the (possibly
 	// edited) on-disk config here would flip the city store's write
 	// discipline mid-process while rig stores keep the boot mode.
-	openedCityStore, err := newControllerStateOpenCityStore(cs.cityPath, cs.rolloutFlags.BeadsConditionalWrites())
+	openedCityStore, err := newControllerStateOpenCityStore(cs.cityPath, cs.rolloutFlags.BeadsConditionalWrites(), cs.nativeTransport)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store reload: %v\n", err) //nolint:errcheck // best-effort stderr
 	}

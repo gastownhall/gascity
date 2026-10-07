@@ -3941,6 +3941,14 @@ socket so the reconciler stops the session immediately rather than on
 its next patrol tick. Call this after the session has finished its
 current work in response to a drain signal.
 
+Under session_reconciler = "v2" the ack is first written to the session
+row, bound to its current incarnation. A session acking itself must
+carry a GC_INSTANCE_TOKEN that matches the row; an operator acking a
+session from outside it passes --operator and a target, and the ack binds
+to the incarnation the command read. A missing or stale token, or a store
+that is unreachable or keeps changing, exits 1 with nothing acknowledged.
+Under the legacy reconciler the ack behaves as it always has.
+
 ```
 gc runtime drain-ack [name] [flags]
 ```
@@ -3948,6 +3956,7 @@ gc runtime drain-ack [name] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output as JSON |
+| `--operator` | bool |  | ack another session as an operator, bound to the incarnation read (requires a target) |
 
 ## gc runtime drain-check
 
@@ -4018,7 +4027,8 @@ gc runtime request-restart
 Cancel a pending drain signal on a session.
 
 Clears the GC_DRAIN and GC_DRAIN_ACK metadata flags, allowing the
-session to continue normal operation. Pass a session alias or ID.
+session to continue normal operation. Pass a session alias or ID. Under
+session_reconciler = "v2" it also clears the session row's drain-ack.
 
 ```
 gc runtime undrain <name> [flags]

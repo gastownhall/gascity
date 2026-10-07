@@ -209,8 +209,8 @@ expires = "2026-10-31"
 # declaration leave the Small-debt census; helper bodies and sibling tests do
 # not inherit a source exemption.
 [[medium]]
-package_dir = "internal/api"
-package_name = "api"
+package_dir = "internal/api/apierr"
+package_name = "apierr"
 owner = "TestEveryEmittedErrorCodeIsRegistered"
 resources = ["subprocess"]
 owner_bead = "ga-cp3hwi"

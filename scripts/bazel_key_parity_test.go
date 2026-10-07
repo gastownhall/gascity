@@ -143,7 +143,7 @@ func checkBazelKeyParity(bazelrc string) []error {
 
 // checkBazelRCLocalLines checks lines destined for .bazelrc.local: only
 // build:remote-exec and build:fork-cache transport flags and the fork-cache
-// selection. bazel-test.yml's probe-gated `build:fork-cache
+// selection. bazel.yml's probe-gated `build:fork-cache
 // --remote_cache_compression` (zstd while rbe-cache advertises it) is such a
 // transport flag: compression changes the bytes on the wire, never a digest.
 func checkBazelRCLocalLines(lines []string) []error {
@@ -244,40 +244,19 @@ func TestBazelKeyParity(t *testing.T) {
 	}
 }
 
-// TestBazelCIRCLocalCarriesOnlyTransport runs bazel-test.yml's rc step in
-// every mode, with rbe-cache advertising zstd and without: whatever it
-// writes must be transport-only, so trusted, rbe-fork and fork-cache runs
-// (and developers) hash actions alike.
+// TestBazelCIRCLocalCarriesOnlyTransport runs bazel.yml's lane step that
+// writes .bazelrc.local, with rbe-cache advertising zstd and without:
+// whatever it writes must be transport-only, so fork-cache lanes hash
+// actions like trusted, rbe-fork and developer runs.
 func TestBazelCIRCLocalCarriesOnlyTransport(t *testing.T) {
-	steps := bazelTestWorkflowSteps(t, repoRoot(t))
-	var script string
-	for _, s := range steps {
-		if s.Name == bazelRCConfigStep {
-			script = s.Run
+	step := bazelCacheZstdLaneStep(t)
+	for _, probe := range []string{"", "zstd"} {
+		lines, _ := runBazelRCLocalStep(t, step.Run, map[string]string{"BAZEL_TEST_PROBE": probe})
+		for _, err := range checkBazelRCLocalLines(lines) {
+			t.Errorf("probe %q: %v", probe, err)
 		}
-	}
-	if script == "" {
-		t.Fatalf("%s has no %q step", bazelTestWorkflow, bazelRCConfigStep)
-	}
-	pem := "eA=="
-	for name, env := range map[string]map[string]string{
-		"trusted": {"BAZEL_REMOTE_EXECUTOR": "grpcs://executor.invalid:443", "BAZEL_FORK_CACHE": "true", "RBE_INSTANCE": "oss", "RBE_TLS_CERT": pem, "RBE_TLS_KEY": pem, "RBE_TLS_CA": pem},
-		"fork":    {"BAZEL_REMOTE_EXECUTOR": "", "BAZEL_FORK_CACHE": "true"},
-		"rbe-fork": {
-			"BAZEL_REMOTE_EXECUTOR": "", "BAZEL_FORK_CACHE": "true",
-			"RBE_FORK_ENDPOINT": rbeForkEndpoint, "RBE_FORK_INSTANCE": "oss-fork",
-			"RBE_FORK_CERT_FILE": "/runner/fork.crt", "RBE_FORK_KEY_FILE": "/runner/fork.key",
-		},
-	} {
-		for _, probe := range []string{"", "zstd"} {
-			env["BAZEL_TEST_PROBE"] = probe
-			lines := runBazelRCConfigStep(t, script, env)
-			for _, err := range checkBazelRCLocalLines(lines) {
-				t.Errorf("%s (probe %q): %v", name, probe, err)
-			}
-			if name == "fork" && probe == "zstd" && !slices.Contains(lines, bazelCacheZstdLine) {
-				t.Errorf("fork with rbe-cache advertising zstd wrote no %q, so this test no longer classifies it:\n%s", bazelCacheZstdLine, strings.Join(lines, "\n"))
-			}
+		if probe == "zstd" && !slices.Contains(lines, bazelCacheZstdLine) {
+			t.Errorf("with rbe-cache advertising zstd the step wrote no %q, so this test no longer classifies it:\n%s", bazelCacheZstdLine, strings.Join(lines, "\n"))
 		}
 	}
 }
@@ -322,8 +301,7 @@ func checkSetupBazelRCLines(lines []string) []error {
 
 // TestSetupBazelRCCarriesOnlyTransport runs setup-bazel's write-bazelrc.sh in
 // every mode bazel.yml uses (remote, fork-ro/fork-rw, cache, local): its rc
-// must be transport-only, so bazel.yml's lanes hash like pre-push and
-// bazel-test.yml.
+// must be transport-only, so bazel.yml's lanes hash like pre-push.
 func TestSetupBazelRCCarriesOnlyTransport(t *testing.T) {
 	script := readFile(t, repoRoot(t), setupBazelDir+"/write-bazelrc.sh")
 	pem := "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
@@ -378,8 +356,7 @@ func TestSetupBazelRCCarriesOnlyTransport(t *testing.T) {
 }
 
 // bazelSuiteConfigs select a tagged suite, keyed apart on purpose (--define,
-// --test_timeout); pre-push never runs them, and bazel-test.yml passes the
-// same flags (bazel_multilane_test.go).
+// --test_timeout); pre-push never runs them (bazel_multilane_test.go).
 var bazelSuiteConfigs = map[string]bool{"acceptance": true, "integration": true}
 
 // TestBazelMultiLaneLanesHashLikePrePush: bazel.yml's unit lane runs what

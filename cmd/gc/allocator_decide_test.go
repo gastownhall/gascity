@@ -44,7 +44,6 @@ func newAllocFixture(t *testing.T, cfg *config.City) *allocFixture {
 		in: allocInputs{
 			Now:       allocNow,
 			Epoch:     "e1",
-			SelGen:    1,
 			Cfg:       cfg,
 			ConfigRev: "rev-1",
 			CityPath:  "/city",
@@ -95,7 +94,7 @@ func (f *allocFixture) fact(name string, kind FactKind, v ObsFact) *allocFixture
 
 func (f *allocFixture) census() *sessionCensus {
 	f.t.Helper()
-	return readCensus(f.t, f.in.Now, f.in.Cfg, f.legs)
+	return readCensus(f.t, f.in.Now, f.legs)
 }
 
 func (f *allocFixture) observation() *ObservationSnapshot {
@@ -588,10 +587,10 @@ func TestNamedDuplicateIsNoneWithAlert(t *testing.T) {
 		for _, id := range tc.dups {
 			alerted = append(alerted, allocSessionsLeg+"/"+id)
 			dup := entryOf(t, d, id)
-			if dup.Desired != desireNone || dup.Reason != reasonIdentityDuplicate || dup.InDesired || dup.Start != nil ||
+			if dup.Desired != desireNone || dup.Reason != reasonIdentityDuplicate || dup.InDesired ||
 				dup.Identity == nil || dup.Identity.Identity != "chat" || dup.Identity.Canonical {
-				t.Errorf("%s: duplicate %s = %s/%s indesired=%v start=%+v identity=%+v, want None(identity-duplicate)",
-					label, id, dup.Desired, dup.Reason, dup.InDesired, dup.Start, dup.Identity)
+				t.Errorf("%s: duplicate %s = %s/%s indesired=%v identity=%+v, want None(identity-duplicate)",
+					label, id, dup.Desired, dup.Reason, dup.InDesired, dup.Identity)
 			}
 			if !slices.ContainsFunc(d.Trace, func(r allocTraceRecord) bool {
 				return r.Key.ID == id && r.Reason == reasonIdentityDuplicate && r.Instance == "chat"
