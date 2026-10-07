@@ -118,16 +118,8 @@ endif
 # (TESTING.md "Building and testing"). Each keeps a plain-`go test` twin under
 # an explicit -go name (test-go, check-go, ...) for offline work and hosts
 # Bazel does not serve; that twin is a convenience, not what CI enforces.
-#
-# TEST_ENGINE=go points the primary names at their -go twins. GitHub Actions
-# jobs default to go: the Go-tier jobs still in ci.yml, mac-regression.yml,
-# nightly.yml and rc-gate.yml call `make test`, `make test-acceptance` and
-# `make check-docs` by name until they retire (epic ga-96smfk); bazel.yml
-# invokes bazel directly and never these targets.
-TEST_ENGINE ?= $(if $(GITHUB_ACTIONS),go,bazel)
-ifeq ($(filter $(TEST_ENGINE),bazel go),)
-$(error TEST_ENGINE=$(TEST_ENGINE) is not one of bazel, go)
-endif
+# GitHub Actions jobs that still run Go-native suites call the -go names
+# explicitly.
 BAZEL ?= bazel
 # Extra flags for every `bazel test` below: --config=fork-cache (contributors:
 # the anonymous read-only cache) or --config=remote-exec (maintainers with an
@@ -228,11 +220,7 @@ complexity-update:
 	@./scripts/ci/complexity.sh update
 
 ## check: fast quality gates: the shell guards below plus `make test` (bazel test //...: nogo lint/vet, formatting, generated artifacts, unit tests)
-ifeq ($(TEST_ENGINE),go)
-check: check-go
-else
 check: check-release-dist-ignore check-routed-test-rows check-split-topology-rows check-residency-boundary test
-endif
 
 ## check-go: the same gates without Bazel: golangci-lint fmt/lint, go vet, go test (offline convenience; CI does not run it)
 check-go: fmt-check lint-golangci vet-go check-release-dist-ignore check-routed-test-rows check-split-topology-rows check-residency-boundary test-go
@@ -341,11 +329,7 @@ check-version-tag:
 	exit 1
 
 ## check-all: make check plus the acceptance and integration Bazel suites
-ifeq ($(TEST_ENGINE),go)
-check-all: check-all-go
-else
 check-all: check test-acceptance test-integration
-endif
 
 ## check-all-go: check-go plus go test integration and docs sync, without Bazel
 check-all-go: check-go check-bd check-dolt check-docker test-integration-go check-docs-go
@@ -520,12 +504,8 @@ test-ci-policy:
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestBDVersionPins|TestDoltVersionPins)$$' ./scripts
 
 ## test: bazel test //..., bazel.yml's unit lane: every untagged go_test plus nogo, format, generated-artifact and policy targets
-ifeq ($(TEST_ENGINE),go)
-test: test-go
-else
 test: bazel-tmpdir
 	$(BAZEL_TEST) //...
-endif
 
 ## test-go: fast unit tests with plain go test (skip integration-tagged and GC_FAST_UNIT-gated process tests)
 ## The skipped cmd/gc process-backed scenarios remain covered by
@@ -696,12 +676,8 @@ ACCEPTANCE_REQUIRE_LEGACY_GC ?= $(GC_REQUIRE_ACCEPTANCE_LEGACY_GC)
 ## shared box is a statement about the box. The nightly perf lane sets it.
 ACCEPTANCE_PERF ?= $(GC_ACCEPTANCE_PERF)
 ## test-acceptance: Tier A acceptance as bazel.yml's acceptance lane runs it (bazel test --config=acceptance)
-ifeq ($(TEST_ENGINE),go)
-test-acceptance: test-acceptance-go
-else
 test-acceptance: bazel-tmpdir
 	$(BAZEL_TEST) --config=acceptance //test/acceptance:acceptance_test
-endif
 
 ## test-acceptance-go: Tier A acceptance with plain go test (honours the ACCEPTANCE_* knobs above)
 test-acceptance-go:
@@ -815,12 +791,8 @@ test-acceptance-c:
 test-acceptance-all: test-acceptance test-bd-cli-contract test-acceptance-b test-acceptance-c
 
 ## test-integration: integration-tagged suites as bazel.yml's integration lanes run them (bazel test --config=integration)
-ifeq ($(TEST_ENGINE),go)
-test-integration: test-integration-go
-else
 test-integration: bazel-tmpdir
 	$(BAZEL_TEST) --config=integration //test:integration_packages //test/integration:integration_test
-endif
 
 ## test-integration-go: run all tests including integration (tmux, etc.) with plain go test
 test-integration-go:
@@ -958,12 +930,8 @@ test-tutorial: test-tutorial-goldens
 test-tutorial-regression: test-tutorial-goldens
 
 ## check-docs: docs sync tests (bazel test //test/docsync:docsync_test, as the unit lane runs them)
-ifeq ($(TEST_ENGINE),go)
-check-docs: check-docs-go
-else
 check-docs: bazel-tmpdir
 	$(BAZEL_TEST) //test/docsync:docsync_test
-endif
 
 ## check-docs-go: docs sync tests with plain go test
 check-docs-go:

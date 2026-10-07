@@ -79,8 +79,8 @@ there is not evidence for CI. The Go-native make targets (`make test-go`,
 `make check-go`, `make test-acceptance-go`, `make test-integration-go`,
 `make check-docs-go`, and the sharded runners under "Cross-category runners"
 below) exist for offline work and for hosts Bazel does not serve, such as
-the macOS jobs. `TEST_ENGINE=go` points the primary make names at them;
-GitHub Actions jobs default to it while the remaining Go-tier jobs retire.
+the macOS jobs. Workflow jobs that still run a Go-native suite call these
+`-go` names explicitly, so each workflow says which engine it uses.
 
 `//go:build integration` tests outside `test/integration` run in the
 `integration-packages` lane, the Bazel form of `go test -tags integration`

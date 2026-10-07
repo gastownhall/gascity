@@ -332,7 +332,7 @@ jobs:
           cache: false
       - uses: ./.github/actions/go-mod-download
       - name: Acceptance tests (Tier A)
-        run: make test-acceptance
+        run: make test-acceptance-go
 
   # Minimum-supported bd compatibility is a focused external contract. Run it
   # alongside hermetic Tier A instead of repeating unrelated acceptance flows.

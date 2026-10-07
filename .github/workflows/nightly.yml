@@ -106,7 +106,7 @@ jobs:
       - name: Integration tests (SQLite coordination store)
         run: make test-integration-bdstore
       - name: Acceptance tests (SQLite coordination store, Tier A)
-        run: make test-acceptance
+        run: make test-acceptance-go
 
   # The proxied-native lane's wall-clock line (`gc status --json` <= 0.5s on a
   # warm proxied city, gated at 3x headroom). TestBeadsProxiedDefaultNativeLane

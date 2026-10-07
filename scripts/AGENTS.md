@@ -20,11 +20,11 @@ ownership is explained in `CONTRIBUTING.md` ("Git hook ownership").
 
 `make test`, `check`, `check-all`, `check-docs`, `test-acceptance` and
 `test-integration` run the `bazel test` commands `bazel.yml`'s lanes run.
-Each has a plain-`go test` twin named `<target>-go`, and `TEST_ENGINE=go`
-points the primary names at those twins. GitHub Actions defaults to `go`
-because the remaining Go-tier jobs still call the primary names. A new test
-runner gets a Bazel target first; a `go test` recipe is an extra, never the
-only route. `TestMakePrimaryTargetsRunBazel` in `scripts/` pins this.
+Each has a plain-`go test` twin named `<target>-go`. A workflow that runs a
+Go-native suite calls the `-go` name explicitly (`TestWorkflowsNameTheirTestEngine`
+in `scripts/` fails on a workflow calling a bazel-backed primary name). A new
+test runner gets a Bazel target first; a `go test` recipe is an extra, never
+the only route. `TestMakePrimaryTargetsRunBazel` in `scripts/` pins this.
 
 `.githooks/lib/push-suite.sh` runs `bazel test //...` at push time. Its
 `make test-fast-parallel` fallback prints a banner with the reason, because

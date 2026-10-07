@@ -194,7 +194,7 @@ const (
 	// integration-packages lane (//cmd/gc:gc_test, --config=integration,
 	// GC_FAST_UNIT=0). Reviewed delta: one job's if and name; no new job,
 	// trigger or permission.
-	expectedCIExecutionHash     = "c94405e9a770d2e90c40be20097b9d6f8c5ce537e60766d9b1431661b95f4551"
+	expectedCIExecutionHash     = "1829e5d7c8518488ba26feb6f4d195206cbedea31a83b84154a674eef91f84e0"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -224,7 +224,7 @@ const (
 	// beads-proxied-perf's -run selects TestBeadsProxiedDefaultNativeLane, the
 	// one test split out of TestBeadsProxiedDefault that reads
 	// GC_ACCEPTANCE_PERF; no new job, trigger, permission or secret.
-	expectedNightlyExecutionHash = "a4a633438d81b9eaa9308ffd687a0869a5472003c651eb8526e76085c581ec6f"
+	expectedNightlyExecutionHash = "81df6767fb4a45226bfdf50a367a369c86f525510772a313d0ce3fa744295153"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`.

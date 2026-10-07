@@ -526,7 +526,7 @@ func TestAcceptanceJobsUseOnlyTheirHermeticProviderSetup(t *testing.T) {
 			if strings.Contains(step.Run, "make test-bd-cli-contract") {
 				acceptanceIndex = i
 			}
-			if strings.TrimSpace(step.Run) == "make test-acceptance" {
+			if strings.TrimSpace(step.Run) == "make test-acceptance-go" {
 				t.Errorf("%s step %q repeats broad Tier A instead of the focused bd contract", jobName, step.Name)
 			}
 		}
@@ -558,7 +558,7 @@ func TestAcceptanceJobsUseOnlyTheirHermeticProviderSetup(t *testing.T) {
 		if strings.Contains(step.Uses, "actions/setup-go") {
 			tierAHasSetupGo = true
 		}
-		if strings.TrimSpace(step.Run) == "make test-acceptance" {
+		if strings.TrimSpace(step.Run) == "make test-acceptance-go" {
 			tierARunsBroadSuite = true
 		}
 		if strings.Contains(step.Uses, "setup-gascity-ubuntu") {
@@ -640,7 +640,7 @@ func TestMacAcceptanceRetainsExternalBdContract(t *testing.T) {
 	job := wf.Jobs["mac-acceptance"]
 	var runsTierA, runsBDContract bool
 	for _, step := range job.Steps {
-		runsTierA = runsTierA || strings.TrimSpace(step.Run) == "make test-acceptance"
+		runsTierA = runsTierA || strings.TrimSpace(step.Run) == "make test-acceptance-go"
 		runsBDContract = runsBDContract || strings.TrimSpace(step.Run) == "make test-bd-cli-contract"
 	}
 	if !runsTierA {
@@ -1107,7 +1107,7 @@ func TestPackGateAddsOnlyParallelPackCoverage(t *testing.T) {
 		if strings.Contains(step.Uses, "setup-gascity-ubuntu") {
 			t.Errorf("pack-gate uses full-stack setup %q for Go-only focused checks", step.Uses)
 		}
-		if strings.Contains(step.Run, "make test-acceptance") {
+		if strings.Contains(step.Run, "make test-acceptance-go") {
 			t.Errorf("pack-gate step %q repeats the required preflight acceptance suite", step.Name)
 		}
 		if strings.Contains(step.Run, "make install-tools") {
