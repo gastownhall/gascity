@@ -65,6 +65,7 @@ py_test(
 # (regen.sh); poisoned-bep.json proves the redaction leaks nothing.
 py_test(
     name = "ci_analytics_extract_test",
+    size = "small",
     srcs = [
         "tools/bazel/ci_analytics_extract.py",
         "tools/bazel/ci_analytics_extract_test.py",
@@ -72,7 +73,6 @@ py_test(
     data = glob(["tools/bazel/testdata/ci_analytics/**"]),
     imports = ["tools/bazel"],
     main = "tools/bazel/ci_analytics_extract_test.py",
-    size = "small",
 )
 
 py_test(
