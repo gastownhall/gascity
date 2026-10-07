@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1372,6 +1373,50 @@ func TestDirectRigSuspensionRejectsUnconfirmedReload(t *testing.T) {
 	if !strings.Contains(stderr.String(), "run gc reload") {
 		t.Fatalf("stderr = %q, want recovery instruction", stderr.String())
 	}
+}
+
+func TestFinishDirectRigSuspensionOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		reply      reloadControlReply
+		err        error
+		want       int
+		wantStderr string
+	}{
+		{name: "missing socket", err: fmt.Errorf("dial: %w", os.ErrNotExist), want: 0},
+		{name: "stale socket", err: controllerCommandError{op: "connecting to controller", err: syscall.ECONNREFUSED, unavailable: true}, want: 0},
+		{name: "unresponsive", err: controllerCommandError{op: "reading response", err: io.ErrUnexpectedEOF, unresponsive: true}, want: 1, wantStderr: "run gc reload"},
+		{name: "no change", reply: reloadControlReply{Outcome: reloadOutcomeNoChange}, want: 0},
+		{name: "busy", reply: reloadControlReply{Outcome: reloadOutcomeBusy}, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldSend := sendReloadControlRequestHook
+			t.Cleanup(func() { sendReloadControlRequestHook = oldSend })
+			sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+				return tc.reply, tc.err
+			}
+			var stderr bytes.Buffer
+			if code := finishDirectRigSuspension(t.TempDir(), "resume", 0, &stderr); code != tc.want {
+				t.Fatalf("finishDirectRigSuspension = %d, want %d; stderr=%q", code, tc.want, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.wantStderr)
+			}
+		})
+	}
+
+	t.Run("failed mutation skips reload", func(t *testing.T) {
+		oldSend := sendReloadControlRequestHook
+		t.Cleanup(func() { sendReloadControlRequestHook = oldSend })
+		sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+			t.Error("failed direct mutation sent a controller reload")
+			return reloadControlReply{Outcome: reloadOutcomeApplied}, nil
+		}
+		var stderr bytes.Buffer
+		if code := finishDirectRigSuspension(t.TempDir(), "suspend", 1, &stderr); code != 1 {
+			t.Fatalf("finishDirectRigSuspension = %d, want 1; stderr=%q", code, stderr.String())
+		}
+	})
 }
 
 func TestDoRigResumeNotFound(t *testing.T) {
