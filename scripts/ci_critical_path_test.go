@@ -746,7 +746,6 @@ func TestCIPreflightFansInDirectlyWithoutWaitingForHistoricalCheck(t *testing.T)
 		"contract-acceptance-previous",
 		"contract-acceptance-current",
 		"release-config",
-		"dashboard",
 	} {
 		if !slices.Contains(job.Needs, need) {
 			t.Errorf("ci-preflight needs = %v, want direct dependency %q", job.Needs, need)

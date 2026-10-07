@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -230,7 +229,14 @@ const (
 	// (//test/containerhost, emulated container host) in bazel.yml's gating
 	// integration-packages lane. Reviewed delta: one job and one filter
 	// removed; no new job, trigger, step command or permission.
-	expectedCIExecutionHash     = "7566315cf58afb393fd728bc1734993c61ad86f7f876e8dde7fc135b3fcf5ac0"
+	//
+	// Bumped again (ga-96smfk.9, dashboard SPA moved to Bazel): the npm
+	// dashboard job and preflight-generated's `make dashboard-ci` step (and
+	// its setup-node) are removed, and ci-preflight no longer needs the job.
+	// Bazel's unit lane runs the same typecheck, Vitest, build, drift and
+	// Playwright steps (//internal/api/dashboardspa/...). Reviewed delta:
+	// removed job, steps and need; no new job, trigger or permission.
+	expectedCIExecutionHash     = "d4d8abba7a6b922694306ef6d10b435cf43fe5e901533b759c7b428341ada997"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -402,9 +408,6 @@ func validate(ci, nightly, action map[string]any) error {
 	if err := validatePRProviderOwnership(ci); err != nil {
 		return err
 	}
-	if err := validatePlaywrightInstallHardening(ci); err != nil {
-		return err
-	}
 	if err := assertWorkflowExecution("CI", ci, expectedCIExecutionHash); err != nil {
 		return err
 	}
@@ -534,60 +537,6 @@ func validateNightlyProviderOwnership(workflow map[string]any) error {
 				match.name,
 			)
 		}
-	}
-	return nil
-}
-
-// validatePlaywrightInstallHardening ensures the Dashboard SPA's Playwright
-// Chromium install step fails fast on a hung apt mirror instead of consuming
-// its whole retry budget on a single stuck attempt: each retry wraps the
-// install command with a per-attempt timeout, and apt itself gets an
-// explicit HTTP timeout so a dead mirror errors instead of hanging.
-func validatePlaywrightInstallHardening(workflow map[string]any) error {
-	job, err := workflowJob(workflow, "dashboard")
-	if err != nil {
-		return err
-	}
-	steps, err := mappingSlice(job["steps"], "dashboard steps")
-	if err != nil {
-		return err
-	}
-	const stepName = "Install Playwright Chromium"
-	var installStep map[string]any
-	for _, candidate := range steps {
-		if candidate["name"] == stepName {
-			installStep = candidate
-			break
-		}
-	}
-	if installStep == nil {
-		return fmt.Errorf("dashboard job is missing the %q step", stepName)
-	}
-	if installStep["timeout-minutes"] != 12 {
-		return fmt.Errorf("%q step must keep its outer timeout-minutes at 12", stepName)
-	}
-	run, ok := installStep["run"].(string)
-	if !ok {
-		return fmt.Errorf("%q step must have a run script", stepName)
-	}
-	aptTimeoutIndex := strings.Index(run, `Acquire::http::Timeout "15"`)
-	if aptTimeoutIndex < 0 {
-		return fmt.Errorf(
-			"%q step must configure an apt HTTP timeout (Acquire::http::Timeout \"15\") so a dead mirror errors instead of hanging",
-			stepName,
-		)
-	}
-	const perAttemptInstall = "timeout 240 npm run test:e2e:install:ci"
-	installIndex := strings.Index(run, perAttemptInstall)
-	if installIndex < 0 {
-		return fmt.Errorf(
-			"%q step must wrap each retry attempt with a per-attempt timeout (%q) so a hung install cannot consume the whole step budget",
-			stepName,
-			perAttemptInstall,
-		)
-	}
-	if aptTimeoutIndex > installIndex {
-		return fmt.Errorf("%q step must configure the apt HTTP timeout before the retry loop runs", stepName)
 	}
 	return nil
 }

@@ -14,9 +14,9 @@ go_library(
 go_binary(
     name = "fakesupervisor",
     embed = [":fakesupervisor_lib"],
-    # main.go is //go:build integration: only --define=gotags=integration
-    # gives the package a main to link, so `bazel build //...` skips it.
-    tags = ["manual"],
+    # main.go (and api.ServeSeededCity) are //go:build integration: the
+    # binary always builds with that tag, whatever the lane's --define.
+    gotags = ["integration"],
     visibility = ["//visibility:public"],
 )
 

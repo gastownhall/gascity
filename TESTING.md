@@ -1589,12 +1589,17 @@ in a real browser against a real HTTP supervisor, so it exercises the full
 fetch → generated client → projection helper → render path.
 
 It is a **Tier 3** browser tier — it needs a built SPA bundle + Chromium, so it
-is NOT in the Go integration shard set. Run it with `make dashboard-e2e-play`
+is NOT in the Go integration shard set. In CI it is the Bazel target
+`//internal/api/dashboardspa/web/frontend:playwright_test`, which `bazel test
+//...` runs remotely like any other test: the fakesupervisor builds with the
+`integration` tag (`gotags`) and embeds the Bazel-built SPA bundle, Chromium is
+Playwright's pinned `chrome-headless-shell` build, and the shared libraries it
+needs beyond the worker host are pinned Ubuntu packages (`MODULE.bazel`). The
+HTML report and traces land in the test's undeclared outputs. Locally, run it
+with that `bazel test` target, or with `make dashboard-e2e-play` through npm
 (builds the SPA, builds the fakesupervisor with `-tags integration`, installs
 Chromium via `npx playwright install chromium`, then runs the specs);
-`make dashboard-e2e` runs both layers. In CI it runs as appended steps in the
-existing **`dashboard`** job (`.github/workflows/ci.yml`), which already has Go +
-Node provisioned; a `playwright-report` artifact is uploaded on failure. Add new
+`make dashboard-e2e` runs both layers. Add new
 routes/assertions by editing `e2e/render-smoke.spec.ts`; keep
 `e2e/fixtures/expected.ts` aligned **manually** with the exported constants in
 `test/dashport/corpus/corpus.go` (there is no automated parity check — the two

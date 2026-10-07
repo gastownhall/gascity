@@ -23,13 +23,6 @@ func TestCurrentWorkflowsMatchPolicy(t *testing.T) {
 	}
 }
 
-func TestPlaywrightChromiumInstallHardensAgainstHungAptMirror(t *testing.T) {
-	docs := loadPolicyDocuments(t)
-	if err := validatePlaywrightInstallHardening(docs.ci); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestMakeTestCIPolicyRunsStaticScopeContracts(t *testing.T) {
 	assertTestCIPolicyRecipeLine(t, "the focused static-scope contracts",
 		"\t$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestLintAndVetRunAsNogoInBazel|TestLintChangedBuildsNogoForChangedBazelPackages|TestChangedFormattingScopesToTheDiff)$$' ./scripts")

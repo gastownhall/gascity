@@ -1,3 +1,4 @@
+load("@aspect_rules_js//js:defs.bzl", "js_test")
 load("@npm_dashboard//:defs.bzl", "npm_link_all_packages")
 load("@npm_dashboard//internal/api/dashboardspa/web/frontend:typescript/package_json.bzl", tsc_bin = "bin")
 load("@npm_dashboard//internal/api/dashboardspa/web/frontend:vite/package_json.bzl", vite_bin = "bin")
@@ -107,6 +108,43 @@ vitest_bin.vitest_test(
         "vitest.config.ts",
         ":app_srcs",
         ":node_modules",
+    ],
+)
+
+# `npm run test:e2e`: the Playwright render smoke (e2e/) in Chromium against
+# the seeded fakesupervisor, which serves this SPA bundle (embedded through
+# //internal/api/dashboardspa) and the testdata/dashport corpus. The browser
+# is Playwright's pinned chrome-headless-shell and its missing host libraries
+# a pinned Ubuntu package set (MODULE.bazel); nothing is downloaded at test
+# time. Reports and traces land in the test's undeclared outputs.
+js_test(
+    name = "playwright_test",
+    size = "large",
+    chdir = package_name(),
+    data = glob(["e2e/**"]) + [
+        "package.json",
+        "playwright.config.ts",
+        ":node_modules/@playwright/test",
+        "//test/dashport:corpus",
+        "//test/dashport/cmd/fakesupervisor",
+        "@chrome_headless_shell//:browsers",
+        "@chrome_headless_shell//:chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell",
+        "@chromium_runtime_noble_amd64//:sysroot",
+        "@chromium_runtime_noble_amd64//:usr/lib/x86_64-linux-gnu/libnss3.so",
+    ],
+    entry_point = "playwright-bazel.mjs",
+    env = {
+        "CHROME_HEADLESS_SHELL": "$(rlocationpath @chrome_headless_shell//:chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell)",
+        "CHROMIUM_RUNTIME_LIBNSS3": "$(rlocationpath @chromium_runtime_noble_amd64//:usr/lib/x86_64-linux-gnu/libnss3.so)",
+        "DASHPORT_CORPUS_FILES": "$(rlocationpaths //test/dashport:corpus)",
+        "FAKESUPERVISOR": "$(rlocationpath //test/dashport/cmd/fakesupervisor)",
+    },
+    # Native files from external repositories, used where they are.
+    no_copy_to_bin = [
+        "@chrome_headless_shell//:browsers",
+        "@chrome_headless_shell//:chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell",
+        "@chromium_runtime_noble_amd64//:sysroot",
+        "@chromium_runtime_noble_amd64//:usr/lib/x86_64-linux-gnu/libnss3.so",
     ],
 )
 

@@ -722,16 +722,14 @@ jobs:
           go-version-file: go.mod
           cache: false
       - uses: ./.github/actions/go-mod-download
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22"
       # The OpenAPI spec, generated Go client and generated reference docs
       # drift checks run under Bazel: //cmd/genspec:genspec_in_sync_test,
       # //internal/api/genclient:genclient_test (hermetic oapi-codegen) and
       # //cmd/genschema:genschema_in_sync_test (bazel.yml uploads its
-      # regeneration patch for docs-autofix.yml).
-      - name: Dashboard bundle drift check
-        run: make dashboard-ci
+      # regeneration patch for docs-autofix.yml). So do the dashboard's
+      # generated TS client and embedded bundle:
+      # //internal/api/dashboardspa/web/shared:generated_client_in_sync_test
+      # and //internal/api/dashboardspa:dist_in_sync_test.
       # The OpenAPI breaking-change gate compares against the PR base commit,
       # which needs git history, so it stays here. Non-PR events compare HEAD
       # with itself (nothing to gate).
@@ -923,106 +921,10 @@ jobs:
         env:
           GC_TEST_GASCITY_PACKS_REGISTRY: main
 
-  # Dashboard SPA typecheck + tests + build. Runs on every push/PR
-  # so TS drift against the spec (e.g. a query param tightening from
-  # string to boolean) fails CI instead of shipping as a silent
-  # runtime bug. Vite's build transpiles TS to JS and does not fail
-  # on type errors; `tsc --noEmit` via `npm run typecheck` is the
-  # load-bearing discipline step.
-  dashboard:
-    name: Dashboard SPA
-    needs:
-      - runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: go.mod
-          cache: false
-      - uses: ./.github/actions/go-mod-download
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22"
-      - name: Install SPA dependencies
-        run: npm ci --silent
-        working-directory: internal/api/dashboardspa/web
-      - name: Typecheck (tsc --noEmit)
-        run: npm run typecheck
-        working-directory: internal/api/dashboardspa/web
-      - name: Typecheck test files (tsc -p tsconfig.test.json)
-        run: npm run --workspace gas-city-dashboard-frontend typecheck:test
-        working-directory: internal/api/dashboardspa/web
-      - name: Typecheck e2e specs (tsc -p e2e/tsconfig.json)
-        run: npm run --workspace gas-city-dashboard-frontend typecheck:e2e
-        working-directory: internal/api/dashboardspa/web
-      - name: Vitest
-        run: npm run --workspace gas-city-dashboard-frontend test
-        working-directory: internal/api/dashboardspa/web
-      - name: Build
-        run: npm run build --silent
-        working-directory: internal/api/dashboardspa/web
-      # Sync the freshly built bundle into the embedded dist/ the fakesupervisor
-      # serves, so the Playwright render smoke (Layer B) runs against the SPA
-      # this job just built, not a stale committed embed.
-      - name: Sync embedded SPA bundle
-        run: rm -rf internal/api/dashboardspa/dist && cp -rf internal/api/dashboardspa/web/frontend/dist internal/api/dashboardspa/dist
-      - name: Build seeded fakesupervisor (Layer B server)
-        run: go build -tags integration -o fakesupervisor .
-        working-directory: test/dashport/cmd/fakesupervisor
-      - name: Resolve Playwright version
-        id: playwright-version
-        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
-        working-directory: internal/api/dashboardspa/web
-      # Cache the downloaded browser binaries keyed on the resolved
-      # @playwright/test version (from the lockfile-pinned install above). A cache
-      # hit skips the ~150 MB Chromium download; --with-deps in the install step
-      # below still runs (system libs aren't cached), so a hit is safe.
-      # Restore/save are split (rather than the combined actions/cache) so the
-      # save step can run with if: always() — a completed download still gets
-      # cached even if a later step in this job fails.
-      - name: Restore Playwright browsers cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
-      - name: Install Playwright Chromium
-        timeout-minutes: 12
-        run: |
-          echo 'Acquire::http::Timeout "15";' | sudo tee /etc/apt/apt.conf.d/99-ci-apt-timeout >/dev/null
-          for attempt in 1 2 3; do
-            if timeout 240 npm run test:e2e:install:ci; then
-              exit 0
-            fi
-            if [ "$attempt" = "3" ]; then
-              exit 1
-            fi
-            sleep $((attempt * 10))
-          done
-        working-directory: internal/api/dashboardspa/web/frontend
-      - name: Save Playwright browsers cache
-        if: always()
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
-      - name: Playwright render smoke (Layer B)
-        run: npm run test:e2e
-        working-directory: internal/api/dashboardspa/web/frontend
-        timeout-minutes: 10
-      - name: Upload Playwright report
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: playwright-report
-          path: internal/api/dashboardspa/web/frontend/playwright-report/
-          retention-days: 7
-          if-no-files-found: ignore
-
   # openclaw-bridge Node test suite. The bridge ships its own npm tests
   # (inbound at-least-once redelivery + gc client wire shapes); without this
   # gate, regressions under contrib/openclaw-bridge/** could merge because the
-  # only other npm job runs in internal/api/dashboardspa/web. Path-gated, so non-bridge
+  # dashboard SPA's npm tests run under Bazel only. Path-gated, so non-bridge
   # PRs skip it (and ci-required allows the skip).
   openclaw-bridge:
     name: openclaw-bridge Node tests
@@ -1109,7 +1011,6 @@ jobs:
       - contract-acceptance-previous
       - contract-acceptance-current
       - release-config
-      - dashboard
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
