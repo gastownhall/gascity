@@ -354,6 +354,8 @@ lint:
 	$(NOGO_BAZEL) build $(NOGO_BUILD_FLAGS) //...
 
 ## lint-changed: run nogo over the Bazel packages of changed Go files (LINT_CHANGED_SCOPE=staged|tracked|worktree)
+# testdata paths are dropped with sed, not a case statement: macOS /bin/sh
+# (bash 3.2) cannot parse a case pattern's ')' inside $(...).
 lint-changed:
 	@case "$(LINT_CHANGED_SCOPE)" in \
 		staged) \
@@ -378,9 +380,8 @@ lint-changed:
 		echo "lint-changed: no changed Go files"; \
 		exit 0; \
 	fi; \
-	selected="$$(printf '%s\n' "$$files" | sed '/^$$/d' | while IFS= read -r file; do \
+	selected="$$(printf '%s\n' "$$files" | sed -e '/^$$/d' -e '/^testdata\//d' -e '/\/testdata\//d' | while IFS= read -r file; do \
 		dir="$$(dirname "$$file")"; \
-		case "$$dir/" in testdata/*|*/testdata/*) continue ;; esac; \
 		if [ ! -f "$$dir/BUILD.bazel" ]; then echo "missing $$dir"; \
 		elif [ "$$dir" = "." ]; then echo "//:all"; \
 		else echo "//$$dir:all"; fi; \
