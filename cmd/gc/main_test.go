@@ -219,6 +219,7 @@ func (m cleanupTestingM) Run() int {
 // as gc: it runs under the no-city gate, as the parent's tests do.
 func testscriptGC() {
 	configureTestscriptEnvDefaults()
+	configureObservationCLIForTests()
 	os.Exit(sessionpkg.FailOnNoCityRefusals(func() int { return mainExitCode(os.Args[1:], os.Stdout, os.Stderr) }, os.Stderr))
 }
 

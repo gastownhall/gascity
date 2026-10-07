@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"regexp"
@@ -43,11 +44,18 @@ func extractShellFunction(t *testing.T, script, name string) string {
 // instead of one per test file.
 func runGCBeadsBdCommand(t *testing.T, env []string, name string, args ...string) (string, string, error) {
 	t.Helper()
-	cmd := exec.Command(name, args...)
+	cmd := testCommandContext(context.Background(), name, args...)
 	cmd.Env = env
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stdout.String(), stderr.String(), err
+}
+
+// testCommandContext shares the canonical process constructor between the
+// provider-script harness and CLI observation fixtures. Callers retain their
+// own environment, working directory, pipes and process-group policy.
+func testCommandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
+	return exec.CommandContext(ctx, name, args...)
 }
