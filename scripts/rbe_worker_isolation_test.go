@@ -1088,3 +1088,50 @@ func TestRBEWorkerScrubCAS(t *testing.T) {
 		t.Errorf("scrub summary: want 2 blobs removed (hash, size), 2 kept; got\n%s", out)
 	}
 }
+
+// Max review, 2026-10-07: the full selftest's mount walk (tools/rbe/rbe-
+// action-selftest's full_probe) found no-shared-writable-dir by `find`ing
+// every reachable mount, including Blacksmith's large, mostly-read-only tool
+// caches (~49 s of the walk). A mount whose own options already say ro (a
+// ROOT_RO=1 remount, or a mount that was ro to begin with) has nothing an
+// action can write on it, so the walk now skips `find` there; this must
+// never widen what no-shared-writable-dir catches: ROOT_RO=0 (nothing
+// remounted ro) and a world-writable directory an image adds under /dev
+// (ROOT_RO's own remount loop skips /dev/* by path, rbe-action-launch) must
+// still fail it. Container regression cases (privileged ubuntu:24.04,
+// tools/rbe/blacksmith-worker.sh's isolate()-to-selftest section, the
+// /data/tmp/r3-e2e/inside.sh pattern): V1 ROOT_RO=1 fork with a large
+// read-only tool cache passes; V2 ROOT_RO=0 plus a world-writable tool cache
+// fails; V3 a 1777 directory under /dev fails; R4 the entrypoint dropped
+// from worker.json (unrelated to the mount walk) still fails.
+func TestRBEActionSelftestMountWalkSkipsReadOnly(t *testing.T) {
+	selftest := readFile(t, repoRoot(t), "tools/rbe/rbe-action-selftest")
+	for _, want := range []string{
+		// The options column (mountinfo field 6) is read, not discarded.
+		"while read -r _ _ _ _ m o _; do",
+		// /dev is never skipped by path here (only /proc and /sys): a 1777
+		// directory an image adds under /dev must still be walked into.
+		"case $m in /proc | /proc/* | /sys | /sys/*) continue ;; esac",
+		// A mount already read-only has nothing to find() on.
+		"case ,$o, in *,ro,*) continue ;; esac",
+	} {
+		if !strings.Contains(selftest, want) {
+			t.Errorf("rbe-action-selftest missing %q", want)
+		}
+	}
+	// The ro-skip line must run after the own()/mountpoint check and before
+	// the `find` that walks the mount, or an owned mount (never probed
+	// anyway) could mask the ordering and the skip would never fire.
+	own := strings.Index(selftest, `if own "$m" || ! mountpoint -q -- "$m"; then continue; fi`)
+	skip := strings.Index(selftest, "case ,$o, in *,ro,*) continue ;; esac")
+	find := strings.Index(selftest, `done < <(find "$m" -xdev -type d -perm -0002 2>/dev/null)`)
+	if own < 0 || skip < 0 || find < 0 || own >= skip || skip >= find {
+		t.Errorf("rbe-action-selftest: want own-check(%d) < ro-skip(%d) < find(%d)", own, skip, find)
+	}
+	// /dev itself (and anything under it) is a candidate mount to `own()` or
+	// walk, not a path this loop drops before ever considering its options:
+	// only /proc and /sys are skipped unconditionally.
+	if strings.Contains(selftest, "/dev | /dev/*) continue") {
+		t.Error("rbe-action-selftest: the mount walk must not skip /dev by path (only ROOT_RO's own remount loop in rbe-action-launch does, and only there)")
+	}
+}

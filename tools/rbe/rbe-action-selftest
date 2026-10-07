@@ -164,23 +164,29 @@ EOF
 )
 host_resolvers=$(setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --init-groups -- env -i PATH=/usr/bin:/bin \
 	bash -c "$resolver_probe" 2>/dev/null | sed -n 's/^X //p' | paste -sd ' ' -)
-# Full run only (walks every filesystem the action can reach, seconds): no
-# directory shared between actions is writable by one, besides its own
-# mounts. Every mount in the action is walked (-xdev each: /, /run, a data
-# disk, ...) but /proc and /sys. A world-writable directory counts only if
-# the action can write it: access() and a real create (with ROOT_RO=1 they
-# are on read-only mounts, 0777 or not).
+# Full run only (walks every filesystem the action can reach): no directory
+# shared between actions is writable by one, besides its own mounts. Every
+# mount in the action is walked (-xdev each: /, /run, a data disk, ...) but
+# /proc and /sys. A mount whose own options are already read-only (ROOT_RO=1
+# remounted it, or it was ro to begin with: a snap squashfs, a baked-in tool
+# cache) has nothing on it the action can write, world-writable or not, so
+# `find` never runs on it; this is most of the walk's cost on Blacksmith's
+# large, mostly-read-only tool caches (2026-10-06: ~49 s of it). ROOT_RO=0
+# still walks every mount (nothing is skipped as read-only), and /dev is
+# never skipped as a mount here regardless (only /proc and /sys): a 1777
+# directory an image adds under /dev is still found and still fails.
 full_probe=
 if ((!quick)); then
 	full_probe='w=0
 own() { for o in '"$own_mounts"'; do case $1 in "$o" | "$o"/*) return 0 ;; esac; done; return 1; }
 declare -A seen=()
-while read -r _ _ _ _ m _; do
+while read -r _ _ _ _ m o _; do
 	printf -v m %b "${m//\\/\\0}"
 	[ -z "${seen[$m]:-}" ] || continue
 	seen[$m]=1
 	case $m in /proc | /proc/* | /sys | /sys/*) continue ;; esac
 	if own "$m" || ! mountpoint -q -- "$m"; then continue; fi
+	case ,$o, in *,ro,*) continue ;; esac
 	while IFS= read -r d; do
 		[ -z "${seen[$d]:-}" ] || continue
 		seen[$d]=1

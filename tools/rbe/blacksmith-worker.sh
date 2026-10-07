@@ -479,10 +479,15 @@ isolate() {
 		sudo sysctl -q -w user.max_user_namespaces=0
 		[ "$(cat /proc/sys/user/max_user_namespaces)" = 0 ] || fail "user.max_user_namespaces is not 0"
 	fi
-	# Full selftest (a few seconds): it also checks worker.json routes actions
-	# through the entrypoint, the timeout path, and that an action can write
-	# no shared directory on any mount (ROOT_RO=1, TMPFS_DIRS private), and
-	# no world-writable socket on /run it can connect to (MASK_SOCKETS=1).
+	# Full selftest: it also checks worker.json routes actions through the
+	# entrypoint, the timeout path, and that an action can write no shared
+	# directory on any mount (ROOT_RO=1, TMPFS_DIRS private), and no
+	# world-writable socket on /run it can connect to (MASK_SOCKETS=1). On
+	# every VM, not just a first boot or a new image+script: the mount walk
+	# that dominates its cost on Blacksmith's large tool caches (~49 s,
+	# 2026-10-06) skips a mount that is already read-only, so it stays in
+	# the few-seconds range the rest of the selftest runs in without
+	# trusting an unverified VM on a cached pass (max review, 2026-10-07).
 	phase selftest
 	selftest_out=$RUNNER_TEMP/rbe-selftest.out
 	# shellcheck disable=SC2024 # the runner's file, not root's
