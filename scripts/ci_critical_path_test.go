@@ -63,7 +63,7 @@ const cmdGCProcessRunner = "${{ needs.runner-policy.outputs.runner_32vcpu }}"
 
 const productMetricsTesthookExtraTestEnv = `OBSERVABLE_TIMING_FILE="$${OBSERVABLE_TIMING_FILE}" OBSERVABLE_SHARD_ID="$${OBSERVABLE_SHARD_ID}" OBSERVABLE_VARIANT="$${OBSERVABLE_VARIANT}" OBSERVABLE_RUNNER_LABEL="$${OBSERVABLE_RUNNER_LABEL}" OBSERVABLE_COMMIT_SHA="$${GITHUB_SHA}" OBSERVABLE_WORKFLOW="$${GITHUB_WORKFLOW}" OBSERVABLE_RUN_ID="$${GITHUB_RUN_ID}" OBSERVABLE_RUN_ATTEMPT="$${GITHUB_RUN_ATTEMPT}" OBSERVABLE_JOB="$${GITHUB_JOB}" OBSERVABLE_RUNNER_NAME="$${RUNNER_NAME}" OBSERVABLE_RUNNER_OS="$${RUNNER_OS}" OBSERVABLE_RUNNER_ARCH="$${RUNNER_ARCH}"`
 
-func TestWorkerCorePhase2SharesBuildsWithoutChangingCoverage(t *testing.T) {
+func TestWorkerCorePhase2RunsUnderBazel(t *testing.T) {
 	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
 	if err != nil {
 		t.Fatalf("read Makefile: %v", err)
@@ -85,38 +85,17 @@ func TestWorkerCorePhase2SharesBuildsWithoutChangingCoverage(t *testing.T) {
 		t.Fatalf("test-worker-core-phase2-all commands:\n%q\nwant exactly:\n%q", lines, wantCommands)
 	}
 
+	// CI runs the conformance under Bazel only, with PROFILE unset so every
+	// profile runs (see the note in ci.yml where the per-profile jobs were).
 	wf := readCriticalPathWorkflow(t, "ci.yml")
-	const aggregateCommand = `GC_WORKER_REPORT_DIR="$WORKER_REPORT_DIR" make test-worker-core-phase2-all PROFILE="$PROFILE"`
-	for _, jobName := range []string{"worker-core-phase2-claude", "worker-core-phase2-codex", "worker-core-phase2-cursor", "worker-core-phase2-gemini"} {
-		job, ok := wf.Jobs[jobName]
-		if !ok {
-			t.Errorf("CI workflow has no %s job", jobName)
-			continue
-		}
-		var testSteps []ciCriticalPathStep
+	for name, job := range wf.Jobs {
 		for _, step := range job.Steps {
-			if step.ID == "worker_core_phase2_tests" {
-				testSteps = append(testSteps, step)
+			if strings.Contains(step.Run, "make test-worker-core") {
+				t.Errorf("ci.yml job %s runs %q; worker-core conformance runs under Bazel", name, strings.TrimSpace(step.Run))
 			}
 		}
-		if len(testSteps) != 1 {
-			t.Errorf("%s worker-core test steps = %d, want exactly 1", jobName, len(testSteps))
-			continue
-		}
-		run := strings.TrimSpace(testSteps[0].Run)
-		if run != aggregateCommand {
-			t.Errorf("%s worker-core command:\n%s\nwant exactly:\n%s", jobName, run, aggregateCommand)
-		}
-		if got := strings.Count(run, "make test-worker-core-phase2-all"); got != 1 {
-			t.Errorf("%s aggregate invocation count = %d, want 1", jobName, got)
-		}
-		for _, retired := range []string{
-			`make test-worker-core-phase2 PROFILE=`,
-			`make test-worker-core-phase2-real-transport PROFILE=`,
-		} {
-			if strings.Contains(run, retired) {
-				t.Errorf("%s still invokes retired CI entrypoint %q", jobName, retired)
-			}
+		if strings.Contains(job.Name, "Worker core") {
+			t.Errorf("ci.yml job %s (%q) is a per-profile worker-core job", name, job.Name)
 		}
 	}
 }

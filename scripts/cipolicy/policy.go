@@ -194,7 +194,16 @@ const (
 	// integration-packages lane (//cmd/gc:gc_test, --config=integration,
 	// GC_FAST_UNIT=0). Reviewed delta: one job's if and name; no new job,
 	// trigger or permission.
-	expectedCIExecutionHash     = "1829e5d7c8518488ba26feb6f4d195206cbedea31a83b84154a674eef91f84e0"
+	// Bumped again (ga-96smfk.7, worker-core conformance moved to Bazel): the
+	// eight per-profile worker-core and worker-core-phase2 jobs and their two
+	// summary jobs are removed, with the changes job's worker and
+	// worker_phase2 filters and outputs that only they read, and ci-required
+	// no longer needs the two summaries. Bazel runs the same tests with
+	// PROFILE unset (every profile): workertest_test, tmux_test and gc_test
+	// in the unit lane, gc_test's integration-tagged real-transport proof in
+	// the integration-packages lane. Reviewed delta: removed jobs, filters,
+	// outputs and needs; no new job, trigger or permission.
+	expectedCIExecutionHash     = "07f580cc16c261af2b2bf16ed142187e64a6c6f7ef580660a579f84709364b33"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -273,32 +282,6 @@ var requiredFilterPaths = map[string][]string{
 		"internal/config/compose.go",
 		"cmd/gc/embed_builtin_packs.go",
 		"scripts/update-bundled-gastown-pack",
-	},
-	"worker": {
-		"go.mod",
-		"go.sum",
-		".github/workflows/**",
-		"Makefile",
-		"internal/worker/**",
-		"internal/sessionlog/**",
-		"internal/modelwindow/**",
-		"internal/runtime/**",
-		"internal/config/**",
-		"cmd/gc/template_resolve*.go",
-		"cmd/gc/session_*",
-		"test/**worker**",
-	},
-	"worker_phase2": {
-		"go.mod",
-		"go.sum",
-		".github/workflows/**",
-		"Makefile",
-		"internal/worker/**",
-		"internal/sessionlog/**",
-		"internal/modelwindow/**",
-		"internal/runtime/**",
-		"internal/config/**",
-		"cmd/gc/**",
 	},
 	"cmd_gc_process": {
 		"go.mod",
