@@ -1068,8 +1068,7 @@ jobs:
   # cursor and gemini legs: //internal/worker/workertest:workertest_test,
   # //internal/runtime/tmux:tmux_test and //cmd/gc:gc_test in bazel.yml's
   # unit lane, and cmd/gc's integration-tagged real-transport proof in the
-  # integration-packages lane (fork PRs: integration-packages-fork's
-  # packages-cmd-gc-integration shard).
+  # integration-packages lane.
 
   # Runs distinct live/provenance checks when pack-related files change.
   # The unconditional preflight-acceptance job already runs the complete Tier
