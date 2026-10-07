@@ -1065,9 +1065,9 @@ jobs:
   # The packages-* shards: every package's `//go:build integration` tests
   # and GC_FAST_UNIT=0 process tests outside test/integration. bazel.yml's
   # gating integration-packages lane (//test:integration_packages) runs them
-  # for pushes and same-repo PRs. A fork or Dependabot PR's bazel run mints
-  # at most 2 rbe-fork certificates (unit, acceptance) and starts no such
-  # lane, so those PRs still run the shards here.
+  # for every PR. Fork and Dependabot PRs still run the shards here too until
+  # a fork-mode run of that lane is verified; then this job goes
+  # (ga-96smfk.50).
   integration-packages-fork:
     name: Integration (fork PR) / ${{ matrix.shard_name }}
     needs:
