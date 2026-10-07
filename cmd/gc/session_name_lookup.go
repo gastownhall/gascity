@@ -175,6 +175,12 @@ func sessionBeadStoredTemplate(bead beads.Bead) string {
 
 // sessionBeadStoredTemplateInfo is the session.Info mirror of sessionBeadStoredTemplate.
 func sessionBeadStoredTemplateInfo(i sessionpkg.Info) string {
+	return storedTemplateRef(&i)
+}
+
+// storedTemplateRef is sessionBeadStoredTemplateInfo through a pointer, for
+// the v2 fresh-slot occupancy's every-row scan (A3).
+func storedTemplateRef(i *sessionpkg.Info) string {
 	storedTemplate := strings.TrimSpace(i.Template)
 	if storedTemplate != "" {
 		return storedTemplate

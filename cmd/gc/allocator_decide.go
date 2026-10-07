@@ -182,6 +182,9 @@ type decidePass struct {
 	inFlight []planReservation
 	standIns map[string]string
 
+	// sessions is decidableSnapshot's: the pool retention and the planner
+	// read one snapshot.
+	sessions *sessionBeadSnapshot
 	bp       *agentBuildParams
 	desired  map[string]TemplateParams // membership only (classifyOverlaySession)
 	selected map[rowKey]*selection
@@ -292,6 +295,9 @@ func (p *decidePass) classifyRows() {
 		keys = append(keys, k)
 	}
 	sortRowKeys(keys)
+	// An Info is kilobytes: size the row lists once.
+	p.occupancy = slices.Grow(p.occupancy, len(keys))
+	p.managed = slices.Grow(p.managed, len(keys))
 	for _, k := range keys {
 		row := c.Rows[k]
 		template := resolvedSessionTemplateInfo(row.Info, p.cfg)
@@ -395,6 +401,7 @@ func (p *decidePass) identityDuplicates() {
 }
 
 func (p *decidePass) selectDecidable() {
+	p.decidable = slices.Grow(p.decidable, len(p.managed))
 	for _, info := range p.managed {
 		if _, none := p.none[p.byID[info.ID]]; !none {
 			p.decidable = append(p.decidable, info)
@@ -493,6 +500,9 @@ func (p *decidePass) awake() map[string]AwakeDecision {
 	}
 	input := newAwakeInputFromSnapshot(p.cfg, agentSuspended, infos, p.poolDesired, p.named.workReady,
 		p.named.routedDemand, nil, p.in.ReadyWaits, work, readyAssignedFlagsForBeads(p.in.Demand.ReadyAssigned, work, workRefs), p.in.Now)
+	if p.index != nil {
+		input.workIndex = newAwakeWorkIndex(input.WorkBeads)
+	}
 	for _, info := range infos {
 		o := p.obs[p.byID[info.ID]]
 		// Unknown liveness reads running, and an uncertain attach on a live
@@ -649,7 +659,7 @@ func (p *decidePass) decision() allocDecision {
 	return allocDecision{
 		Snapshot:        p.snap,
 		Plans:           p.plans,
-		Planning:        slices.Clone(p.occupancy),
+		Planning:        slices.Clip(p.occupancy), // the pass is done with it
 		ReadyRouted:     p.merged.ReadyUnassignedRouted,
 		ReadyRoutedRefs: p.merged.ReadyUnassignedRoutedRefs,
 		Trace:           p.trace,

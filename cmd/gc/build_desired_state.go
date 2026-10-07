@@ -4901,17 +4901,26 @@ func existingPoolSlotWithConfig(cfg *config.City, cfgAgent *config.Agent, sessio
 // raw bead. Byte-identical to the raw form, oracle-pinned by
 // TestExistingPoolSlotWithConfigInfoMatchesRaw.
 func existingPoolSlotWithConfigInfo(cfg *config.City, cfgAgent *config.Agent, info session.Info) int {
+	return existingPoolSlotWithTemplates(cfg, nil, cfgAgent, &info)
+}
+
+// existingPoolSlotWithTemplates is existingPoolSlotWithConfigInfo with the
+// stored-template match answered through templates, a memo over cfg. Nil
+// computes it, as legacy does: only the v2 allocator builds one (A3). It
+// reads info through a pointer: the v2 fresh-slot occupancy asks it for
+// every row of every pool, and an Info is kilobytes.
+func existingPoolSlotWithTemplates(cfg *config.City, templates *slotTemplateMemo, cfgAgent *config.Agent, info *session.Info) int {
 	if cfgAgent == nil {
 		return 0
 	}
 	if cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 		return 0
 	}
-	storedTemplateMatches := cfg == nil || storedTemplateMatchesPoolTemplate(sessionBeadStoredTemplateInfo(info), cfgAgent.QualifiedName(), cfg)
-	agentSlot := resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, sessionBeadAgentNameInfo(info))
+	storedTemplateMatches := cfg == nil || templates.storedTemplateMatchesPoolTemplate(storedTemplateRef(info), cfgAgent.QualifiedName(), cfg)
+	agentSlot := resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, sessionBeadAgentNameInfo(*info))
 	aliasSlot := resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, info.Alias)
 	sessionNameSlot := 0
-	if storedTemplateMatches && strings.TrimSpace(info.Alias) == "" && !infoOwnsPoolSessionName(info) {
+	if storedTemplateMatches && strings.TrimSpace(info.Alias) == "" && !infoOwnsPoolSessionName(*info) {
 		sessionNameSlot = resolvePersistedPoolIdentitySlot(cfgAgent, true, info.SessionNameMetadata)
 	}
 	if info.PoolSlot != "" {
@@ -5294,6 +5303,19 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 		usedSlots[0] = true
 		return 0, nil
 	}
+	if bp != nil {
+		// The v2 realization memo counts its occupancy's slots once (A3).
+		if held := bp.realizeMemo.freshSlots(cfgAgent); held != nil {
+			for slot := 1; unlimited || slot <= upper; slot++ {
+				if usedSlots[slot] || held[slot] {
+					continue
+				}
+				usedSlots[slot] = true
+				return slot, nil
+			}
+			return 0, fmt.Errorf("%w: pool template %q has no free concrete slot", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
+		}
+	}
 	occupied := make(map[int]bool, len(usedSlots))
 	for slot, used := range usedSlots {
 		if used {
@@ -5388,6 +5410,12 @@ func beadIdentifiesAsCanonical(bead beads.Bead, canonical string) bool {
 
 // infoIdentifiesAsCanonical is the session.Info mirror of beadIdentifiesAsCanonical.
 func infoIdentifiesAsCanonical(i session.Info, canonical string) bool {
+	return infoRefIdentifiesAsCanonical(&i, canonical)
+}
+
+// infoRefIdentifiesAsCanonical is infoIdentifiesAsCanonical through a
+// pointer, for the v2 fresh-slot occupancy's every-row scan (A3).
+func infoRefIdentifiesAsCanonical(i *session.Info, canonical string) bool {
 	canonical = strings.TrimSpace(canonical)
 	if canonical == "" {
 		return false

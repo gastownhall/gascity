@@ -150,9 +150,10 @@ func withoutSuppressedRoutes(c collectedDemand, projected []beads.Bead) (map[str
 // in-flight create whose row the census does not show yet (C5.13 row 1:
 // in-flight demand is census ∪ the in-flight map).
 func (p *decidePass) computePoolDesired() {
-	rows := make([]session.Info, 0, len(p.decidable)+len(p.inFlight))
-	rows = append(rows, p.decidable...)
-	rows = append(rows, p.inFlightStandIns()...)
+	rows := p.decidable
+	if standIns := p.inFlightStandIns(); len(standIns) > 0 {
+		rows = append(slices.Clip(p.decidable), standIns...)
+	}
 	p.poolWork = filterAssignedWorkBeadsForPoolDemandAt(p.cfg, p.in.CityPath, p.in.Demand.RelocatedClaimRefs,
 		rows, p.in.Demand.AssignedWork, p.in.Demand.AssignedStoreRefs, p.in.Now.UTC())
 	poolCfg := p.cfg
@@ -168,12 +169,20 @@ func (p *decidePass) computePoolDesired() {
 	}
 	p.poolStates = computePoolDesiredStatesAt(poolCfg, p.poolWork, rows, p.merged.ScaleCheckCounts, p.merged.ScaleCheckDemand, p.in.Now, nil)
 	p.poolDesired = retainScaleCheckPartialPoolDesired(p.cfg, PoolDesiredCounts(p.poolStates),
-		newSessionBeadSnapshotFromInfos(p.decidable), p.merged.PoolPartialRetention)
+		p.decidableSnapshot(), p.merged.PoolPartialRetention)
 	if p.poolDesired == nil {
 		p.poolDesired = make(map[string]int)
 	}
 	mergeNamedSessionDemand(p.poolDesired, p.named.workReady, p.cfg)
 	p.snap.PoolDesired = p.poolDesired
+}
+
+// decidableSnapshot is the decidable rows' snapshot, built on first use.
+func (p *decidePass) decidableSnapshot() *sessionBeadSnapshot {
+	if p.sessions == nil {
+		p.sessions = newSessionBeadSnapshotFromInfos(p.decidable)
+	}
+	return p.sessions
 }
 
 // inFlightCreates is the planning reservation of each running or ambiguous
@@ -253,8 +262,8 @@ func (p *decidePass) newPlanParams() {
 		rigs:                           p.cfg.Rigs,
 		beaconTime:                     p.in.Now,
 		stderr:                         io.Discard,
-		sessionBeads:                   newSessionBeadSnapshotFromInfos(p.decidable),
-		sessionOccupancyInfos:          slices.Clone(p.occupancy),
+		sessionBeads:                   p.decidableSnapshot(),
+		sessionOccupancyInfos:          slices.Clip(p.occupancy), // reserve appends to a copy
 		assignedWorkBeads:              p.poolWork,
 		poolScaleCheckPartialTemplates: p.merged.PoolScaleCheckPartial,
 		providerHealthSnapshot:         health,
@@ -516,10 +525,13 @@ func (p *decidePass) planIdentifiers(cfgAgent *config.Agent, template string, pl
 func (p *decidePass) planNamed() {
 	// Identity duplicates never stand for their identity: the canonical
 	// lookup takes the first claimant in census order.
-	candidates := make([]session.Info, 0, len(p.occupancy))
-	for _, info := range p.occupancy {
-		if k, ok := p.byID[info.ID]; !ok || p.none[k] != reasonIdentityDuplicate {
-			candidates = append(candidates, info)
+	candidates := p.occupancy
+	if slices.Contains(slices.Collect(maps.Values(p.none)), reasonIdentityDuplicate) {
+		candidates = make([]session.Info, 0, len(p.occupancy))
+		for _, info := range p.occupancy {
+			if k, ok := p.byID[info.ID]; !ok || p.none[k] != reasonIdentityDuplicate {
+				candidates = append(candidates, info)
+			}
 		}
 	}
 	for _, identity := range slices.Sorted(maps.Keys(p.named.specs)) {
