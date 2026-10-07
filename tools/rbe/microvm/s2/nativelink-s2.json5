@@ -1,0 +1,161 @@
+// nativelink-s2.json5 -- S2 rig: one NativeLink 1.7.1 process, two workers[]
+// (oss -> AC, oss-fork -> no AC), both entrypoints go to the Firecracker
+// microVM launcher (fc-entry.sh). Local-filesystem stores only. Loopback
+// only, ports 58060-58065 (checked free with `ss -ltn` first). This mirrors
+// rbe-microvm-single-pool-design.md 3.1/3.2: two schedulers/instances, one
+// shared CAS, one AC store written only by the oss worker.
+//
+// NEVER point this at rbe-west. Everything here is state under
+// /data/tmp/microvm-s2/state; nothing talks to the core, Caddy, or the real
+// CAS/AC.
+{
+  stores: [
+    {
+      // Shared CAS: both tiers read/write the same content-addressed blobs
+      // (design 3.4 -- CAS stays shared and hash-verified; only AC upload is
+      // tier-gated).
+      name: "CAS_STORE",
+      filesystem: {
+        content_path: "/data/tmp/microvm-s2/state/cas/content",
+        temp_path: "/data/tmp/microvm-s2/state/cas/tmp",
+        eviction_policy: { max_bytes: 2000000000 },
+      },
+    },
+    {
+      // The ONLY action-result cache in this rig. Only the "oss" worker's
+      // upload_action_result.ac_store points at this; "oss-fork" has none
+      // (4.2: upload_ac_results is gated purely by the worker's static
+      // upload_ac_results_strategy / whether ac_store is set at all).
+      name: "AC_OSS_STORE",
+      filesystem: {
+        content_path: "/data/tmp/microvm-s2/state/ac-oss/content",
+        temp_path: "/data/tmp/microvm-s2/state/ac-oss/tmp",
+        eviction_policy: { max_bytes: 500000000 },
+      },
+    },
+    {
+      name: "WORKER_OSS_FAST_SLOW",
+      fast_slow: {
+        fast: {
+          filesystem: {
+            content_path: "/data/tmp/microvm-s2/state/worker-oss-cas/content",
+            temp_path: "/data/tmp/microvm-s2/state/worker-oss-cas/tmp",
+            eviction_policy: { max_bytes: 2000000000 },
+          },
+        },
+        slow: { ref_store: { name: "CAS_STORE" } },
+      },
+    },
+    {
+      name: "WORKER_FORK_FAST_SLOW",
+      fast_slow: {
+        fast: {
+          filesystem: {
+            content_path: "/data/tmp/microvm-s2/state/worker-fork-cas/content",
+            temp_path: "/data/tmp/microvm-s2/state/worker-fork-cas/tmp",
+            eviction_policy: { max_bytes: 2000000000 },
+          },
+        },
+        slow: { ref_store: { name: "CAS_STORE" } },
+      },
+    },
+  ],
+
+  schedulers: [
+    { name: "OSS_SCHEDULER", simple: {} },
+    { name: "FORK_SCHEDULER", simple: {} },
+  ],
+
+  workers: [
+    {
+      local: {
+        name: "oss",
+        worker_api_endpoint: { uri: "grpc://127.0.0.1:__P2__" },
+        cas_fast_slow_store: "WORKER_OSS_FAST_SLOW",
+        upload_action_result: {
+          ac_store: "AC_OSS_STORE",
+          // Default is already SuccessOnly; spelled out for clarity (design
+          // 4.2's `should_cache_result` gate).
+          upload_ac_results_strategy: "success_only",
+        },
+        work_directory: "/data/tmp/microvm-s2/state/work-oss",
+        entrypoint: "/data/tmp/microvm-s2/rig/fc-entry.sh",
+        additional_environment: {
+          MICROVM_BIN_DIR: { value: "/data/tmp/microvm-s2/bin" },
+          MICROVM_TAG: { value: "oss" },
+        },
+        platform_properties: {},
+      },
+    },
+    {
+      local: {
+        name: "oss-fork",
+        worker_api_endpoint: { uri: "grpc://127.0.0.1:__P4__" },
+        cas_fast_slow_store: "WORKER_FORK_FAST_SLOW",
+        // No ac_store at all: this worker uploads no AC results, period
+        // (design 3.2/3.5 -- this is the whole reason there are two
+        // workers[] entries instead of one). NativeLink 1.7.1 requires the
+        // strategy to be spelled "never" explicitly when ac_store is unset
+        // (construction otherwise refuses to start: "upload_ac_results_strategy
+        // is set, but no ac_store is configured" -- its default strategy is
+        // SuccessOnly even with no store, so omitting this field is NOT the
+        // same as "never upload").
+        upload_action_result: { upload_ac_results_strategy: "never" },
+        work_directory: "/data/tmp/microvm-s2/state/work-fork",
+        entrypoint: "/data/tmp/microvm-s2/rig/fc-entry.sh",
+        additional_environment: {
+          MICROVM_BIN_DIR: { value: "/data/tmp/microvm-s2/bin" },
+          MICROVM_TAG: { value: "oss-fork" },
+        },
+        platform_properties: {},
+      },
+    },
+  ],
+
+  servers: [
+    {
+      // OSS client-facing: CAS/AC/capabilities/execution/bytestream on the
+      // "oss" instance.
+      listener: { http: { socket_address: "127.0.0.1:__P1__" } },
+      services: {
+        cas: [{ instance_name: "oss", cas_store: "CAS_STORE" }],
+        ac: [{ instance_name: "oss", ac_store: "AC_OSS_STORE" }],
+        capabilities: [
+          { instance_name: "oss", remote_execution: { scheduler: "OSS_SCHEDULER" } },
+        ],
+        execution: [
+          { instance_name: "oss", cas_store: "CAS_STORE", scheduler: "OSS_SCHEDULER" },
+        ],
+        bytestream: [{ instance_name: "oss", cas_store: "CAS_STORE" }],
+      },
+    },
+    {
+      // OSS worker_api: separate port, per the services docs' own warning
+      // (worker_api must not share a listener with client-facing services).
+      listener: { http: { socket_address: "127.0.0.1:__P2__" } },
+      services: { worker_api: { scheduler: "OSS_SCHEDULER" }, health: {} },
+    },
+    {
+      // FORK client-facing: same CAS, AC is read-only on the "oss-fork"
+      // instance (design 3.4 -- fork tier may read AC_OSS but never writes
+      // it; the write-gate that matters is the worker's upload config above,
+      // this read_only is defense in depth matching the live fork path).
+      listener: { http: { socket_address: "127.0.0.1:__P3__" } },
+      services: {
+        cas: [{ instance_name: "oss-fork", cas_store: "CAS_STORE" }],
+        ac: [{ instance_name: "oss-fork", ac_store: "AC_OSS_STORE", read_only: true }],
+        capabilities: [
+          { instance_name: "oss-fork", remote_execution: { scheduler: "FORK_SCHEDULER" } },
+        ],
+        execution: [
+          { instance_name: "oss-fork", cas_store: "CAS_STORE", scheduler: "FORK_SCHEDULER" },
+        ],
+        bytestream: [{ instance_name: "oss-fork", cas_store: "CAS_STORE" }],
+      },
+    },
+    {
+      listener: { http: { socket_address: "127.0.0.1:__P4__" } },
+      services: { worker_api: { scheduler: "FORK_SCHEDULER" }, health: {} },
+    },
+  ],
+}
