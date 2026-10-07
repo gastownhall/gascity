@@ -1831,3 +1831,65 @@ func TestIdentityReadPanicIsUnknown(t *testing.T) {
 		t.Fatalf("identity after the panic cleared = %+v, want gc-1 (the read slot was released)", id)
 	}
 }
+
+// Kills: a sidecar read surviving a failed listing (the prune exception's
+// incarnation guard dropped). acp's listing fails for a pass, then lists the
+// same name again for another row's runtime: that row reads unknown until
+// the name is read again, never occupied by the previous runtime's identity.
+func TestInventoryEnvReadDropsSidecarReadAfterFailedListing(t *testing.T) {
+	acp := sidecarProvider([]string{"gc-c"}, map[string]map[string]string{"gc-c": {"GC_SESSION_ID": "gc-2", "GC_INSTANCE_TOKEN": "tok-2"}})
+	cr := inventoryLaneTestRuntime(t, acp, nil)
+	runTestInventoryPass(cr)
+	if id := cr.inventoryLane.cache.Snapshot().ByName["gc-c"].Identity; id.SessionID != "gc-2" {
+		t.Fatalf("first runtime identity = %+v, want gc-2", id)
+	}
+
+	acp.err = errors.New("acp socket dir unreadable")
+	runTestInventoryPass(cr)
+	if b := cr.inventoryLane.cache.Snapshot().Inventory.Backends[0]; b.Outcome != OutcomeFailed {
+		t.Fatalf("fixture: acp outcome = %v, want failed", b.Outcome)
+	}
+	acp.err = nil
+	_ = acp.SetMeta("gc-c", "GC_SESSION_ID", "gc-9")
+	_ = acp.SetMeta("gc-c", "GC_INSTANCE_TOKEN", "tok-9")
+	cr.inventoryLane.envWindowReads = inventoryAttributionBudget // not read again this interval
+	runTestInventoryPass(cr)
+
+	snap := cr.inventoryLane.cache.Snapshot()
+	c := observeRows(t, map[string]string{"gc-9": "gc-c"})
+	if got := observed(t, snap, c, cr.inventoryLane.clock.Now(), "gc-9"); got.Liveness == livenessOccupied || got.Liveness != livenessUnknown {
+		t.Fatalf("row after the failed listing = %+v (identity %+v), want unknown, not occupied", got, snap.ByName["gc-c"].Identity)
+	}
+}
+
+// Kills: the prune exception removed. A tmux name whose backend listing
+// failed for one pass keeps its incarnation-keyed read, so when the same
+// incarnation is listed again its identity and owner are current without a
+// re-read (one failed listing must not force a fleet-wide re-read).
+func TestInventoryEnvReadKeepsTmuxReadAcrossFailedListing(t *testing.T) {
+	sp := newScriptedInventoryProvider("s1")
+	sp.env["s1"] = map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": "tok"}
+	cr := inventoryLaneTestRuntime(t, sp, nil)
+	runTestInventoryPass(cr)
+
+	sp.mu.Lock()
+	sp.listErr = errors.New("list-sessions timed out")
+	sp.mu.Unlock()
+	runTestInventoryPass(cr)
+	if b := cr.inventoryLane.cache.Snapshot().Inventory.Backends[0]; b.Outcome != OutcomeFailed {
+		t.Fatalf("fixture: tmux outcome = %v, want failed", b.Outcome)
+	}
+	sp.mu.Lock()
+	sp.listErr = nil
+	sp.mu.Unlock()
+	cr.inventoryLane.envWindowReads = inventoryAttributionBudget // no re-read this interval
+	runTestInventoryPass(cr)
+
+	if sp.totalEnvCalls() != 1 {
+		t.Fatalf("identity reads = %d, want 1 (no re-read after the failed listing)", sp.totalEnvCalls())
+	}
+	obs := cr.inventoryLane.cache.Snapshot().ByName["s1"]
+	if obs.Identity.SessionID != "gc-1" || obs.Owner.SessionID != "gc-1" {
+		t.Fatalf("after the failed listing: identity %+v, owner %q; want gc-1 kept", obs.Identity, obs.Owner.SessionID)
+	}
+}
