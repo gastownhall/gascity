@@ -58,7 +58,6 @@ jobs:
       # asymmetry where a subtle change in shared code skips the jobs it could
       # break. Downstream consumers read these outputs unchanged.
       mail: ${{ steps.filter.outputs.mail == 'true' || steps.filter.outputs.shared == 'true' }}
-      k8s: ${{ steps.filter.outputs.k8s == 'true' || steps.filter.outputs.shared == 'true' }}
       beads: ${{ steps.filter.outputs.beads == 'true' || steps.filter.outputs.shared == 'true' }}
       packs: ${{ steps.filter.outputs.packs == 'true' || steps.filter.outputs.shared == 'true' }}
       cmd_gc_process: ${{ steps.filter.outputs.cmd_gc_process == 'true' || steps.filter.outputs.shared == 'true' }}
@@ -77,10 +76,6 @@ jobs:
             mail:
               - 'internal/mail/**'
               - 'contrib/mail-scripts/**'
-            k8s:
-              - 'internal/session/**'
-              - 'contrib/session-scripts/gc-session-k8s*'
-              - 'test/integration/session_k8s_test.go'
             beads:
               - 'go.mod'
               - 'internal/beads/**'
@@ -573,33 +568,6 @@ jobs:
       - name: MCP mail conformance test
         run: make test-mcp-mail
 
-  # Runs when session/K8s-related source paths change.
-  # Requires K8s CI infrastructure — no-op until secrets are configured.
-  k8s-session:
-    name: K8s session
-    needs:
-      - runner-policy
-      - changes
-    if: needs.changes.outputs.k8s == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: go.mod
-          cache: false
-      - uses: ./.github/actions/go-mod-download
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y jq
-
-      - name: K8s session tests
-        if: env.GC_K8S_AVAILABLE == 'true'
-        env:
-          GC_K8S_AVAILABLE: ${{ secrets.GC_K8S_AVAILABLE }}
-        run: make test-k8s
-
   ci-preflight:
     name: CI / preflight
     needs:
@@ -682,7 +650,6 @@ jobs:
       - preflight-unit-cover-noncmdgc
       - preflight-unit-cover-cmdgc
       - pack-gate
-      - k8s-session
       - openclaw-bridge
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
@@ -702,7 +669,6 @@ jobs:
               "preflight-unit-cover-noncmdgc",
               "preflight-unit-cover-cmdgc",
               "pack-gate",
-              "k8s-session",
               "openclaw-bridge",
           }
           failed = {}

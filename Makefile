@@ -1061,11 +1061,11 @@ test-openclaw-bridge:
 
 ## test-docker: run the Docker session adapter against the emulated container host
 test-docker:
-	$(BAZEL_TEST) --config=integration //test/containerhost:containerhost_test
+	$(BAZEL_TEST) --config=integration --test_filter='^TestDockerSession' //test/containerhost:containerhost_test
 
-## test-k8s: run K8s session provider conformance tests
+## test-k8s: run the K8s session adapter against the emulated container host's pod API
 test-k8s:
-	$(TEST_ENV) go test -tags integration ./test/integration/ -run TestK8sSessionConformance -v -count=1
+	$(BAZEL_TEST) --config=integration --test_filter='^TestK8sSession' //test/containerhost:containerhost_test
 
 ## setup: install tools and git hooks
 ## .githooks is the single core.hooksPath owner; its hooks chain every

@@ -5,10 +5,21 @@ go_library(
     srcs = [
         "docker.go",
         "host.go",
+        "kubectl.go",
         "tools.go",
     ],
     importpath = "github.com/gastownhall/gascity/test/containerhost",
     visibility = ["//visibility:public"],
+    deps = [
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/fields",
+        "@io_k8s_apimachinery//pkg/labels",
+        "@io_k8s_apimachinery//pkg/runtime",
+        "@io_k8s_apimachinery//pkg/types",
+        "@io_k8s_apimachinery//pkg/util/yaml",
+        "@io_k8s_client_go//util/jsonpath",
+    ],
 )
 
 go_test(
@@ -16,17 +27,28 @@ go_test(
     srcs = [
         "docker_session_test.go",
         "docker_test.go",
+        "k8s_session_test.go",
+        "kubectl_test.go",
         "main_test.go",
         "testenv_import_test.go",
     ],
-    # The Docker session adapter under test runs against this package's
-    # emulated container host; its tmux, bash and jq are the worker image's
-    # (tools/rbe/worker-env.txt).
-    data = ["//scripts:gc-session-docker"],
+    # The Docker and K8s session adapters under test run against this
+    # package's emulated container host; their tmux, bash and jq are the
+    # worker image's (tools/rbe/worker-env.txt).
+    data = [
+        "//contrib:session-scripts/gc-session-k8s",
+        "//scripts:gc-session-docker",
+    ],
     embed = [":containerhost"],
-    env = {"GC_SESSION_DOCKER_SCRIPT": "$(rootpath //scripts:gc-session-docker)"},
+    env = {
+        "GC_SESSION_DOCKER_SCRIPT": "$(rootpath //scripts:gc-session-docker)",
+        "GC_SESSION_K8S_SCRIPT": "$(rootpath //contrib:session-scripts/gc-session-k8s)",
+    },
     deps = [
         "//internal/bazeltest",
+        "//internal/runtime",
+        "//internal/runtime/exec",
+        "//internal/runtime/runtimetest",
         "//internal/testenv",
         "//test/tmuxtest",
     ],

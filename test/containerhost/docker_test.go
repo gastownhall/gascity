@@ -65,19 +65,40 @@ func TestNormalizeImage(t *testing.T) {
 }
 
 func TestRelocateMovesOnlyContainerPrivatePaths(t *testing.T) {
-	c := &Container{}
+	c := &Container{PrivateRoots: DockerPrivateRoots}
 	dir := "/state/c/abc"
 	for in, want := range map[string]string{
-		"/run/gc-tmux": "/state/c/abc/run/gc-tmux",
-		"/run":         "/state/c/abc/run",
-		"mkdir -p '/run/gc-tmux' && chmod 1777 '/run/gc-tmux'": "mkdir -p '/state/c/abc/run/gc-tmux' && chmod 1777 '/state/c/abc/run/gc-tmux'",
-		"TMUX_TMPDIR=/run/gc-tmux":                             "TMUX_TMPDIR=/state/c/abc/run/gc-tmux",
-		"/root":                                                "/state/c/abc/root",
-		"/root/.config":                                        "/state/c/abc/root/.config",
+		"/run/gc-tmux": "/state/c/abc/fs/run/gc-tmux",
+		"/run":         "/state/c/abc/fs/run",
+		"mkdir -p '/run/gc-tmux' && chmod 1777 '/run/gc-tmux'": "mkdir -p '/state/c/abc/fs/run/gc-tmux' && chmod 1777 '/state/c/abc/fs/run/gc-tmux'",
+		"TMUX_TMPDIR=/run/gc-tmux":                             "TMUX_TMPDIR=/state/c/abc/fs/run/gc-tmux",
+		"/root":                                                "/state/c/abc/fs/root",
+		"/root/.config":                                        "/state/c/abc/fs/root/.config",
 		"/runner/x":                                            "/runner/x",
 		"/tmp/run/x":                                           "/tmp/run/x",
 		"/rootless":                                            "/rootless",
 		"/work/dir":                                            "/work/dir",
+	} {
+		if got := c.relocate(dir, in); got != want {
+			t.Errorf("relocate(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRelocatePodRootsInOnePass(t *testing.T) {
+	c := &Container{PrivateRoots: []string{"/workspace", "/tmp", "/run"}}
+	// The state directory itself lives under /tmp: relocated text must not
+	// be relocated again.
+	dir := "/tmp/gct-1/h/c/abc"
+	for in, want := range map[string]string{
+		"/tmp":      "/tmp/gct-1/h/c/abc/fs/tmp",
+		"/tmp /tmp": "/tmp/gct-1/h/c/abc/fs/tmp /tmp/gct-1/h/c/abc/fs/tmp",
+		"while [ ! -f /workspace/.gc-ready ]; do sleep 0.5; done": "while [ ! -f /tmp/gct-1/h/c/abc/fs/workspace/.gc-ready ]; do sleep 0.5; done",
+		"mkdir -p '/workspace' && cd '/workspace' && x":           "mkdir -p '/tmp/gct-1/h/c/abc/fs/workspace' && cd '/tmp/gct-1/h/c/abc/fs/workspace' && x",
+		"cat >> /tmp/agent-output.log":                            "cat >> /tmp/gct-1/h/c/abc/fs/tmp/agent-output.log",
+		"/tmpfoo/x":                                               "/tmpfoo/x",
+		// Emulator state (image PATHs) stays a host path.
+		"PATH=/tmp/gct-1/h/images/img/bin": "PATH=/tmp/gct-1/h/images/img/bin",
 	} {
 		if got := c.relocate(dir, in); got != want {
 			t.Errorf("relocate(%q) = %q, want %q", in, got, want)

@@ -256,7 +256,16 @@ const (
 	// and :acceptance_solo_tests. Reviewed delta: two removed jobs, one
 	// filter and output, and their fan-in references; no new job, trigger or
 	// permission.
-	expectedCIExecutionHash     = "2ac0779084e73200ce74bbeb59fbedb71affa8ec4d11ec2795f976f1bae351d8"
+	//
+	// Bumped again (ga-96smfk.10, K8s session suite moved to Bazel): the
+	// k8s-session job, its `k8s` changes filter/output and its ci-required
+	// need and allowed skip are removed. Its one step (TestK8sSessionConformance)
+	// only ran with the GC_K8S_AVAILABLE secret, which was never set, so it
+	// executed nothing; the suite now runs against the emulated pod API in
+	// //test/containerhost in bazel.yml's gating integration-packages lane.
+	// Reviewed delta: one job and one filter removed; no new job, trigger,
+	// step command or permission.
+	expectedCIExecutionHash     = "6b5df2ed332dd5b8977ee854b1518240f3809ce1dbc1a1789fcb187cf8fdc0e5"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -295,11 +304,6 @@ const (
 
 var requiredFilterPaths = map[string][]string{
 	"mail": {"internal/mail/**", "contrib/mail-scripts/**"},
-	"k8s": {
-		"internal/session/**",
-		"contrib/session-scripts/gc-session-k8s*",
-		"test/integration/session_k8s_test.go",
-	},
 	"beads": {
 		"go.mod",
 		"internal/beads/**",

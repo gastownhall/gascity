@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
 	"text/template"
 	"time"
 )
@@ -221,11 +220,11 @@ type containerView struct {
 
 func (d dockerCLI) view(c *Container) containerView {
 	running := d.host.Running(c)
-	status, pid, exit := "exited", 0, c.ExitCode
+	status, pid, exit := "exited", 0, 137
 	if running {
-		status, pid, exit = "running", c.InitPID, 0
-	} else if !c.Stopped {
-		exit = 137
+		status, pid, exit = "running", c.Processes["init"], 0
+	} else if code, ok := d.host.ProcessExit(c, "init"); ok {
+		exit = code
 	}
 	var binds []string
 	for _, m := range c.Mounts {
@@ -461,17 +460,12 @@ func (d dockerCLI) exec(args []string) int {
 	// server) must not keep this CLI waiting for EOF.
 	cmd.Stdout = d.stdout
 	cmd.Stderr = d.stderr
-	if err := cmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
-				return 128 + int(ws.Signal())
-			}
-			return exitErr.ExitCode()
-		}
+	err = cmd.Run()
+	var exitErr *exec.ExitError
+	if err != nil && !errors.As(err, &exitErr) {
 		return d.fail(126, "OCI runtime exec failed: %v", err)
 	}
-	return 0
+	return exitStatus(err)
 }
 
 func (d dockerCLI) stop(args []string) int {

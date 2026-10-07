@@ -9,13 +9,19 @@
 // a container: exec'd commands, the in-container process table (the pgrep
 // this package provides), stop and remove. Images are directories whose bin/
 // is the container's whole PATH, so a command an image does not ship is not
-// found inside it. The container's /run is private (relocated per container
-// under the host's state directory), and bind mounts must map a host path to
-// the same container path, which is how the session providers mount work
-// directories. Everything else (absolute paths like /bin/sh, /tmp) is the
-// host's.
+// found inside it. A container's private roots (/run and /root for a Docker
+// container; also /tmp, /home and every volume mount for a pod) are
+// relocated per container under the host's state directory wherever a
+// container path appears in a command line or environment value, and bind
+// mounts must map a host path to the same container path, which is how the
+// Docker session provider mounts work directories. Everything else (absolute
+// paths like /bin/sh) is the host's.
 //
-// The CLI fronts (docker.go) parse and answer exactly like the real CLIs for
+// Every container process runs under this package's init shim
+// (containerhost-init), which records its exit status, as tini or a kubelet
+// would.
+//
+// The CLI fronts (docker.go, kubectl.go) parse and answer like the real CLIs for
 // the commands the providers use and fail closed (exit 125, "unsupported") on
 // anything else, so a provider change that starts relying on runtime
 // behavior this emulation does not model fails loudly instead of passing.
@@ -33,6 +39,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,10 +54,15 @@ const RootEnv = "CONTAINERHOST_ROOT"
 // MarkerEnv tags every process of a container with its ID.
 const MarkerEnv = "CONTAINERHOST_CONTAINER"
 
-// privateRoot is the container-local tmpfs every container gets its own copy
-// of. gc-session-docker keeps its tmux sockets there precisely because /run
-// is not shared with the host even when /tmp is bind-mounted.
-const privateRoot = "/run"
+// DockerPrivateRoots are a Docker container's private paths: /run is the
+// container-local tmpfs gc-session-docker keeps its tmux sockets in because
+// it is not shared with the host even when /tmp is bind-mounted, and /root
+// is the default HOME.
+var DockerPrivateRoots = []string{"/run", "/root"}
+
+// PodPrivateRoots are a pod container's private paths before its volume
+// mounts: nothing of the host's filesystem is shared with a pod.
+var PodPrivateRoots = []string{"/run", "/root", "/home", "/tmp", "/var/tmp"}
 
 // Host is one emulated container host rooted at a state directory.
 type Host struct {
@@ -95,10 +107,14 @@ type Container struct {
 	Network    string            `json:"network"`
 	Init       bool              `json:"init"`
 	Cmd        []string          `json:"cmd"`
-	InitPID    int               `json:"init_pid"`
-	Created    time.Time         `json:"created"`
-	Stopped    bool              `json:"stopped"`
-	ExitCode   int               `json:"exit_code"`
+	// PrivateRoots are the container paths relocated under its state
+	// directory, longest first.
+	PrivateRoots []string `json:"private_roots"`
+	// Processes maps each started process (a Docker container's "init", a
+	// pod's containers) to its init-shim PID.
+	Processes map[string]int `json:"processes"`
+	Created   time.Time      `json:"created"`
+	Stopped   bool           `json:"stopped"`
 }
 
 // New returns the host rooted at root, creating its layout.
@@ -237,10 +253,28 @@ func (h *Host) List() ([]*Container, error) {
 
 // Running reports whether the container's init process is alive.
 func (h *Host) Running(c *Container) bool {
-	if c.Stopped || c.InitPID <= 0 {
-		return false
+	return !c.Stopped && h.ProcessRunning(c, "init")
+}
+
+// ProcessRunning reports whether the named process of the container is alive.
+func (h *Host) ProcessRunning(c *Container, name string) bool {
+	pid, ok := c.Processes[name]
+	return ok && processInContainer(pid, c.ID)
+}
+
+// ProcessExit returns the exit status the init shim recorded for the named
+// process, or ok=false while it has not exited (or never started).
+func (h *Host) ProcessExit(c *Container, name string) (code int, ok bool) {
+	data, err := os.ReadFile(h.statusPath(c, name))
+	if err != nil {
+		return 0, false
 	}
-	return processInContainer(c.InitPID, c.ID)
+	code, err = strconv.Atoi(strings.TrimSpace(string(data)))
+	return code, err == nil
+}
+
+func (h *Host) statusPath(c *Container, name string) string {
+	return filepath.Join(h.containerDir(c.ID), "status", name)
 }
 
 // Lock serializes state changes across CLI invocations.
@@ -268,11 +302,27 @@ type CreateOptions struct {
 	Network    string
 	Init       bool
 	Cmd        []string
+	// PrivateRoots defaults to DockerPrivateRoots.
+	PrivateRoots []string
 }
 
-// Create starts a container whose init process runs opts.Cmd. The caller
-// holds the lock.
+// Create starts a Docker-style container whose init process runs opts.Cmd.
+// The caller holds the lock.
 func (h *Host) Create(opts CreateOptions) (*Container, error) {
+	c, err := h.NewSandbox(opts)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := h.Start(c, "init", ExecOptions{}, c.Cmd); err != nil {
+		_ = h.Remove(c)
+		return nil, err
+	}
+	return c, nil
+}
+
+// NewSandbox records a container and creates its private directories
+// without starting a process (a pod sandbox). The caller holds the lock.
+func (h *Host) NewSandbox(opts CreateOptions) (*Container, error) {
 	img, ok := h.LookupImage(opts.Image)
 	if !ok {
 		return nil, fmt.Errorf("no such image: %s", opts.Image)
@@ -297,50 +347,88 @@ func (h *Host) Create(opts CreateOptions) (*Container, error) {
 			return nil, fmt.Errorf("bind mount source %s: %w", m.Source, err)
 		}
 	}
-	env := mergeEnv(img.Env, opts.Env)
+	roots := opts.PrivateRoots
+	if roots == nil {
+		roots = DockerPrivateRoots
+	}
+	roots = append([]string(nil), roots...)
+	sort.Slice(roots, func(i, j int) bool { return len(roots[i]) > len(roots[j]) })
+	defaults := []string{"HOME=/root", "HOSTNAME=" + id[:12]}
+	if slices.Contains(roots, "/tmp") {
+		// tmux and mktemp fall back to a compiled-in /tmp; point them at
+		// the container's own.
+		defaults = append(defaults, "TMPDIR=/tmp", "TMUX_TMPDIR=/tmp")
+	}
+	env := mergeEnv(mergeEnv(defaults, img.Env), opts.Env)
 	c := &Container{
 		ID: id, Name: opts.Name, Image: NormalizeImage(opts.Image), Labels: opts.Labels,
 		Env: env, Mounts: opts.Mounts, WorkingDir: opts.WorkingDir, User: opts.User,
-		Network: opts.Network, Init: opts.Init, Cmd: opts.Cmd, Created: time.Now().UTC(),
+		Network: opts.Network, Init: opts.Init, Cmd: opts.Cmd, PrivateRoots: roots,
+		Processes: map[string]int{}, Created: time.Now().UTC(),
 	}
 	if c.WorkingDir == "" {
 		c.WorkingDir = "/"
 	}
 	dir := h.containerDir(id)
-	for _, sub := range []string{"run", "root"} {
+	for _, sub := range []string{"status", "fs"} {
 		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+			return nil, fmt.Errorf("creating container %s: %w", c.Name, err)
+		}
+	}
+	for _, root := range roots {
+		if err := os.MkdirAll(c.hostPath(dir, root), 0o755); err != nil {
 			return nil, fmt.Errorf("creating container %s: %w", c.Name, err)
 		}
 	}
 	if err := os.MkdirAll(c.hostPath(dir, c.WorkingDir), 0o755); err != nil {
 		return nil, fmt.Errorf("creating working directory %s: %w", c.WorkingDir, err)
 	}
-	logFile, err := os.Create(filepath.Join(dir, "log"))
-	if err != nil {
-		return nil, fmt.Errorf("creating container log: %w", err)
-	}
-	defer logFile.Close() //nolint:errcheck // the init process holds its own descriptor
-	cmd, err := h.command(c, ExecOptions{}, c.Cmd)
-	if err != nil {
-		return nil, err
-	}
-	cmd.Stdin = nil
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := writeJSON(filepath.Join(dir, "config.json"), c); err != nil {
-		return nil, err
-	}
-	if err := cmd.Start(); err != nil {
-		_ = os.RemoveAll(dir)
-		return nil, fmt.Errorf("starting container init: %w", err)
-	}
-	c.InitPID = cmd.Process.Pid
-	_ = cmd.Process.Release()
 	if err := writeJSON(filepath.Join(dir, "config.json"), c); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+// Start runs argv in the container as the named process, detached, under
+// the init shim (which records its exit status), with output appended to the
+// container's log. The caller holds the lock.
+func (h *Host) Start(c *Container, name string, opts ExecOptions, argv []string) (int, error) {
+	if _, running := c.Processes[name]; running && h.ProcessRunning(c, name) {
+		return 0, fmt.Errorf("container %s: process %s is already running", c.Name, name)
+	}
+	dir := h.containerDir(c.ID)
+	logFile, err := os.OpenFile(filepath.Join(dir, "log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return 0, fmt.Errorf("opening container log: %w", err)
+	}
+	defer logFile.Close() //nolint:errcheck // the process holds its own descriptor
+	cmd, err := h.command(c, opts, argv)
+	if err != nil {
+		return 0, err
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return 0, fmt.Errorf("locating the init shim: %w", err)
+	}
+	status := h.statusPath(c, name)
+	_ = os.Remove(status)
+	shim := exec.Command(self, append([]string{status, cmd.Path}, cmd.Args...)...)
+	shim.Args[0] = initShimName
+	shim.Env = cmd.Env
+	shim.Dir = cmd.Dir
+	shim.Stdout = logFile
+	shim.Stderr = logFile
+	shim.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := shim.Start(); err != nil {
+		return 0, fmt.Errorf("starting container process %s: %w", name, err)
+	}
+	pid := shim.Process.Pid
+	_ = shim.Process.Release()
+	c.Processes[name] = pid
+	if err := writeJSON(filepath.Join(dir, "config.json"), c); err != nil {
+		return 0, err
+	}
+	return pid, nil
 }
 
 // Stop sends SIGTERM to every process of the container, waits up to grace,
@@ -355,7 +443,6 @@ func (h *Host) Stop(c *Container, grace time.Duration) error {
 		return err
 	}
 	c.Stopped = true
-	c.ExitCode = 143
 	return writeJSON(filepath.Join(h.containerDir(c.ID), "config.json"), c)
 }
 
@@ -409,12 +496,6 @@ func (h *Host) command(c *Container, opts ExecOptions, argv []string) (*exec.Cmd
 	}
 	dir := h.containerDir(c.ID)
 	env := mergeEnv(c.Env, opts.Env)
-	if envValue(env, "HOME") == "" {
-		env = mergeEnv(env, []string{"HOME=/root"})
-	}
-	if envValue(env, "HOSTNAME") == "" {
-		env = mergeEnv(env, []string{"HOSTNAME=" + c.ID[:12]})
-	}
 	for i, kv := range env {
 		k, v, _ := strings.Cut(kv, "=")
 		env[i] = k + "=" + c.relocate(dir, v)
@@ -443,20 +524,45 @@ func (h *Host) command(c *Container, opts ExecOptions, argv []string) (*exec.Cmd
 	return cmd, nil
 }
 
-// privatePathRE matches container-absolute paths under the private root
-// inside a word: an argument, an environment value, or a shell script
-// argument ("mkdir -p '/run/x'").
-var privatePathRE = regexp.MustCompile(`(^|[\s'"=:])` + regexp.QuoteMeta(privateRoot) + `(/|$|[\s'"])`)
-
-// relocate maps container paths in s to host paths: the private root moves
-// under the container's state directory, and the image root replaces the
-// container's /root home.
+// relocate maps the container paths in s to host paths: every occurrence
+// of a private root as a path (the whole word, or a word of a shell script:
+// "mkdir -p '/run/x'", "TMUX_TMPDIR=/run/x") moves under the container's
+// state directory. One left-to-right pass: replaced text is never rescanned
+// (the state directory itself may live under a private root such as /tmp).
 func (c *Container) relocate(dir, s string) string {
-	s = privatePathRE.ReplaceAllString(s, "${1}"+filepath.Join(dir, "run")+"${2}")
-	if s == "/root" || strings.HasPrefix(s, "/root/") {
-		s = filepath.Join(dir, "root") + strings.TrimPrefix(s, "/root")
+	if len(c.PrivateRoots) == 0 {
+		return s
 	}
-	return s
+	quoted := make([]string, len(c.PrivateRoots))
+	for i, r := range c.PrivateRoots {
+		quoted[i] = regexp.QuoteMeta(r)
+	}
+	re := regexp.MustCompile(`(?:^|[\s'"=:;(])(` + strings.Join(quoted, "|") + `)`)
+	fs := filepath.Join(dir, "fs")
+	// The emulator's own files (image bin/ directories, other state) are
+	// host paths even when the state directory is under a private root.
+	stateRoot := filepath.Dir(filepath.Dir(dir))
+	var b strings.Builder
+	last := 0
+	for _, m := range re.FindAllStringSubmatchIndex(s, -1) {
+		rootStart, rootEnd := m[2], m[3]
+		if rootEnd < len(s) && !strings.ContainsRune("/ \t\n'\";)", rune(s[rootEnd])) {
+			continue // a longer name: /runner, /tmpfoo
+		}
+		if strings.HasPrefix(s[rootStart:], stateRoot+"/") {
+			continue
+		}
+		b.WriteString(s[last:rootStart])
+		b.WriteString(fs)
+		last = rootStart
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// HostPath returns the host path of a container path.
+func (h *Host) HostPath(c *Container, p string) string {
+	return c.hostPath(h.containerDir(c.ID), p)
 }
 
 func (c *Container) hostPath(dir, p string) string {
