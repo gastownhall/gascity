@@ -2561,9 +2561,123 @@ func TestDoSlingDryRunRefusesCrossStoreBeforeMutation(t *testing.T) {
 	_, err := DoSling(opts, deps, deps.Store)
 
 	requireCrossStoreRouteError(t, err)
+	for _, want := range []string{"bead " + bead.ID + " lives in city:test-city", `target "myrig/target" reads rig:myrig`, "re-file the bead in rig:myrig", "tr-6s7yx"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want %q", err, want)
+		}
+	}
 	requireNoCrossStoreRouteMutation(t, deps.Store, bead.ID, "")
+	requireOnlySeedBeads(t, deps.Store, 1)
 	if len(router.routed) != 0 {
 		t.Fatalf("router calls = %d, want 0", len(router.routed))
+	}
+}
+
+// refusalWriteSpy records attempts, including writes that leave no state change.
+type refusalWriteSpy struct {
+	beads.Store
+	writes []string
+}
+
+func (s *refusalWriteSpy) Create(b beads.Bead) (beads.Bead, error) {
+	s.writes = append(s.writes, "Create")
+	return s.Store.Create(b)
+}
+
+func (s *refusalWriteSpy) Update(id string, opts beads.UpdateOpts) error {
+	s.writes = append(s.writes, "Update")
+	return s.Store.Update(id, opts)
+}
+
+func (s *refusalWriteSpy) SetMetadata(id, key, value string) error {
+	s.writes = append(s.writes, "SetMetadata")
+	return s.Store.SetMetadata(id, key, value)
+}
+
+func (s *refusalWriteSpy) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.writes = append(s.writes, "SetMetadataBatch")
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+func (s *refusalWriteSpy) DepAdd(id, dependsOnID, depType string) error {
+	s.writes = append(s.writes, "DepAdd")
+	return s.Store.DepAdd(id, dependsOnID, depType)
+}
+
+type refusalNotifierSpy struct {
+	calls []string
+}
+
+func (n *refusalNotifierSpy) PokeController(string) {
+	n.calls = append(n.calls, "PokeController")
+}
+
+func (n *refusalNotifierSpy) PokeControlDispatch(string) {
+	n.calls = append(n.calls, "PokeControlDispatch")
+}
+
+func TestDoSlingDryRunInlineTextCrossStoreRefusalIdentity(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		text           string
+		force          bool
+		onFormula      string
+		defaultFormula string
+	}{
+		{name: "simple", text: "write docs"},
+		{name: "quoted multiline", text: "write \"operator's guide\"\ninclude `gc sling` and $HOME"},
+		{name: "force", text: "write docs", force: true},
+		{name: "explicit formula", text: "write docs", onFormula: "code-review"},
+		{name: "default formula", text: "write docs", defaultFormula: "code-review"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			deps, router, target := crossStoreSlingDeps(t)
+			if tt.defaultFormula != "" {
+				target.DefaultSlingFormula = stringPtr(tt.defaultFormula)
+			}
+			store := &refusalWriteSpy{Store: seededStore("RW-keep")}
+			deps.Store = beadstest.Work(store)
+			deps.GraphStore = beadstest.Graph(store)
+			runner := newFakeRunner()
+			deps.Runner = runner.run
+			notify := &refusalNotifierSpy{}
+			deps.Notify = notify
+			sp := runtime.NewFake()
+			deps.SP = sp
+			recorder := events.NewFake()
+			deps.Events = recorder
+			opts := SlingOpts{
+				Target: target, BeadOrFormula: tt.text, InlineText: true, DryRun: true,
+				Force: tt.force, OnFormula: tt.onFormula, Nudge: true, Reassign: true,
+			}
+
+			result, err := DoSling(opts, deps, store)
+
+			requireCrossStoreRouteError(t, err)
+			// Check the guard and all effects even when the identity is wrong.
+			if len(store.writes) != 0 || len(runner.calls) != 0 || len(router.routed) != 0 {
+				t.Errorf("writes=%v runner=%v routes=%v, want no side effects", store.writes, runner.calls, router.routed)
+			}
+			if len(notify.calls) != 0 || len(sp.SnapshotCalls()) != 0 || result.NudgeAgent != nil {
+				t.Errorf("notify=%v runtime=%v nudge=%v, want no wake/nudge", notify.calls, sp.SnapshotCalls(), result.NudgeAgent)
+			}
+			if seq, seqErr := recorder.LatestSeq(); seqErr != nil || seq != 0 {
+				t.Errorf("event sequence=%d error=%v, want no events", seq, seqErr)
+			}
+			if result.BeadID != "" || result.ConvoyID != "" || result.WorkflowID != "" || result.WispRootID != "" {
+				t.Errorf("result=%+v, want no created or routed IDs", result)
+			}
+			requireOnlySeedBeads(t, store, 1)
+			requireNoCrossStoreRouteMutation(t, store, "RW-keep", "")
+			for _, want := range []string{"refusing cross-store route", "<new-bead-id>", "city:test-city", `target "myrig/target" reads rig:myrig`, "re-file", "tr-6s7yx"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want %q", err, want)
+				}
+			}
+			if strings.Contains(err.Error(), " lives in ") || strings.Contains(err.Error(), "bead "+tt.text) {
+				t.Errorf("error = %q, must identify a not-yet-created task preview", err)
+			}
+		})
 	}
 }
 
@@ -2593,6 +2707,10 @@ func TestDoSlingBatchDryRunRefusesCrossStoreBeforeMutation(t *testing.T) {
 	result, err := DoSlingBatch(opts, deps, store)
 
 	requireCrossStoreRouteError(t, err)
+	if !strings.Contains(err.Error(), "bead "+convoy.ID+" lives in city:test-city") || strings.Contains(err.Error(), "<new-bead-id>") {
+		t.Errorf("error = %q, want the existing convoy ID", err)
+	}
+	requireOnlySeedBeads(t, store, 3)
 	if result.Routed != 0 {
 		t.Fatalf("Routed = %d, want 0", result.Routed)
 	}

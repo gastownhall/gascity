@@ -8180,11 +8180,58 @@ func TestDryRunRefusesCrossStoreRoute(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("dry-run returned 0, want non-zero (cross-store refusal); stdout: %s", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "refusing cross-store route") {
-		t.Errorf("stderr = %q, want cross-store refusal", stderr.String())
+	for _, want := range []string{"refusing cross-store route", "bead FE-123 lives in city:test-city", fmt.Sprintf("target %q reads rig:hello-world", a.QualifiedName()), "re-file the bead in rig:hello-world"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want %q", stderr.String(), want)
+		}
 	}
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
+func TestDoSlingDryRunRefusesInferredInlineText(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: "/frontend", Prefix: "FE"}},
+	}
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps = slingDepsWithStore(deps, beads.NewMemStore())
+	text := "write \"operator's guide\""
+	// --stdin supplies a single-line title and a multiline description to this
+	// inference seam. Raw multiline title arguments are refused by the parser.
+	description := "include `gc sling`\nand $HOME"
+	finalBead, inlineText, errCode, errMsg := applySlingInlineBead(cfg, text, false, true,
+		existingSlingSourceBead{}, deps.Store, deps.StoreRef, description, stdout, stderr)
+	if errCode != "" || errMsg != "" || !inlineText || finalBead != text {
+		t.Fatalf("inline inference = (%q, %t, %q, %q), want unchanged preview text", finalBead, inlineText, errCode, errMsg)
+	}
+	opts := testOpts(config.Agent{Name: "worker", Dir: "frontend"}, finalBead)
+	opts.InlineText = inlineText
+	opts.DryRun = true
+	opts.Nudge = true
+
+	code := doSling(opts, deps, deps.Store, stdout, stderr)
+
+	if code != 1 {
+		t.Errorf("doSling returned %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if len(runner.calls) != 0 || len(sp.SnapshotCalls()) != 0 || stdout.Len() != 0 {
+		t.Errorf("runner=%v runtime=%v stdout=%q, want refusal without effects or success preview", runner.calls, sp.SnapshotCalls(), stdout.String())
+	}
+	items, err := deps.Store.List(beads.ListQuery{AllowScan: true})
+	if err != nil || len(items) != 0 {
+		t.Errorf("store=%v error=%v, want empty store after refusal", items, err)
+	}
+	for _, want := range []string{"refusing cross-store route", "<new-bead-id>", "city:test-city", `target "frontend/worker" reads rig:frontend`, "re-file", "tr-6s7yx"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+	if strings.Contains(stderr.String(), " lives in ") || strings.Contains(stderr.String(), "bead "+text) {
+		t.Errorf("stderr = %q, must identify a not-yet-created task preview", stderr.String())
 	}
 }
 
