@@ -4,6 +4,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 )
@@ -23,6 +24,8 @@ import (
 type controllerWake struct {
 	pokeCh, controlDispatcherCh chan<- struct{}
 	planner                     *planner
+	// waitDepClosed, set with planner, hears each closed bead's ID (GUAR-010).
+	waitDepClosed func(id string)
 	// now, when set, is the clock routed enqueues rate-limit their landed
 	// report by; nil is time.Now, whose readings compare on the monotonic
 	// clock, so a wall-clock step neither floods nor silences the report.
@@ -140,6 +143,11 @@ func (w *controllerWake) OnBeadEvent(evt events.Event, snapshot bool) {
 		}
 		if beadEventRelevant(evt, recent) {
 			p.markDirty("bead-event")
+		}
+		if evt.Type == events.BeadClosed && w.waitDepClosed != nil {
+			if b, ok := beads.DecodeBeadEventPayload(evt.Payload); ok {
+				w.waitDepClosed(b.ID)
+			}
 		}
 		return
 	}

@@ -41,9 +41,14 @@ type gatherEnv struct {
 	Env                func() *reconcileEnv
 	// Sessions is the sessions-class store: the census's leading leg and the
 	// demand gather's city store.
-	Sessions     func() beads.Store
-	RigStores    func() map[string]beads.Store
-	Recording    func() *externalReadsRecording // K1's latest; nil before the first
+	Sessions   func() beads.Store
+	RigStores  func() map[string]beads.Store
+	Recording  func() *externalReadsRecording // K1's latest; nil before the first
+	ReadyWaits func() map[string]bool         // K1's waits step's latest (I10)
+	// Nudges and WorkStore are the nudges-class and city work stores the
+	// waits step reads and writes through.
+	Nudges       func() beads.NudgesStore
+	WorkStore    func() beads.Store
 	Observations func() *ObservationCache
 	Capacity     func() *endpointCapacityGuard
 	Health       func() *providerHealthSnapshot
@@ -86,7 +91,7 @@ type World struct {
 	Episodes          map[string]session.StartupHealthEpisode
 	SleepPolicies     map[string]resolvedSessionSleepPolicy // by bead ID
 	TransportRefused  map[string]string                     // by qualified name
-	ReadyWaits        map[string]bool                       // nil until P4.3
+	ReadyWaits        map[string]bool                       // I10, by session bead ID
 	Templates         *templateMemo
 }
 
@@ -128,6 +133,9 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	}
 	if w.Census, err = readSessionCensus(now, legs); err != nil {
 		return World{}, fmt.Errorf("gather: %w", err)
+	}
+	if e.ReadyWaits != nil {
+		w.ReadyWaits = e.ReadyWaits()
 	}
 	rows := w.Census.Canonical()
 	for _, row := range rows {
@@ -240,7 +248,14 @@ func (e gatherEnv) externalReadsEnv() (externalReadsEnv, error) {
 	if err != nil {
 		return externalReadsEnv{}, err
 	}
-	return k1Env(e, env, suspended, censusDemandEnv(census, store, rigs)), nil
+	k1 := k1Env(e, env, suspended, censusDemandEnv(census, store, rigs))
+	if e.Nudges != nil {
+		k1.Nudges = e.Nudges()
+	}
+	if e.WorkStore != nil {
+		k1.WorkStore = e.WorkStore()
+	}
+	return k1, nil
 }
 
 // censusDemandEnv is the demand gather's stores and its two session inputs

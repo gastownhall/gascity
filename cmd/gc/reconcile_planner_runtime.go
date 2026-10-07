@@ -56,7 +56,7 @@ type plannerRuntime struct {
 	planner *planner
 	host    plannerHost
 	exec    *effectExecutor
-	lane    *externalReadsLane // built at start
+	lane    atomic.Pointer[externalReadsLane] // built at start
 	env     atomic.Pointer[reconcileEnv]
 	// softReload amends a reload's reply; v2SoftReloadUnavailable until C7c
 	// hands the planner a soft-reload request instead (v5 M2).
@@ -97,10 +97,16 @@ func (rt *plannerRuntime) bindHost(h plannerHost) {
 	}
 	h.gather.Env, h.gather.Stderr = rt.env.Load, h.stderr
 	h.gather.Recording = func() *externalReadsRecording {
-		if rt.lane == nil { // a test's pass before start
-			return nil
+		if l := rt.lane.Load(); l != nil { // nil: a test's pass before start
+			return l.recording()
 		}
-		return rt.lane.recording()
+		return nil
+	}
+	h.gather.ReadyWaits = func() map[string]bool {
+		if l := rt.lane.Load(); l != nil {
+			return l.readyWaitSet()
+		}
+		return nil
 	}
 	rt.host = h
 }
@@ -183,7 +189,9 @@ func (rt *plannerRuntime) start(parent context.Context) bool {
 	ctx, cancel := context.WithCancel(parent)
 	rt.cancel = cancel
 	h := rt.host
-	rt.lane = newExternalReadsLane(rt.env.Load().patrol(), h.gather.externalReadsEnv, func() { rt.planner.markDirty("external-reads") }, h.safeTick, h.rec, h.stderr)
+	lane := newExternalReadsLane(rt.env.Load().patrol(), h.gather.externalReadsEnv, func() { rt.planner.markDirty("external-reads") }, h.safeTick, h.rec, h.stderr)
+	lane.addWaitsStep()
+	rt.lane.Store(lane)
 	if h.setInventoryHook != nil {
 		h.setInventoryHook(func(prev, next *ObservationSnapshot) {
 			if inventoryChanged(prev, next) {
@@ -191,9 +199,17 @@ func (rt *plannerRuntime) start(parent context.Context) bool {
 			}
 		})
 	}
-	rt.laneDone = rt.lane.start(ctx)
+	rt.laneDone = lane.start(ctx)
 	go rt.planner.run(ctx)
 	return true
+}
+
+// waitDependencyClosed runs the lane's waits step alone when a pending deps
+// wait watches id (GUAR-010). It never blocks, and does nothing before start.
+func (rt *plannerRuntime) waitDependencyClosed(id string) {
+	if l := rt.lane.Load(); l != nil {
+		l.dependencyClosed(id)
+	}
 }
 
 // pass is a trace-only pass over the host's city, whose changed rows go to
@@ -237,7 +253,7 @@ func (rt *plannerRuntime) stop() {
 		return
 	}
 	rt.stopped = true
-	cancel, lane, laneDone := rt.cancel, rt.lane, rt.laneDone
+	cancel, lane, laneDone := rt.cancel, rt.lane.Load(), rt.laneDone
 	rt.mu.Unlock()
 	rt.planner.stop(deadline)
 	if cancel == nil {

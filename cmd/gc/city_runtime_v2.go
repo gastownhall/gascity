@@ -82,7 +82,11 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 				return readStartupHealthEpisodes(cr.v2SessionsStore())
 			},
 			Suspension: func() suspensionstate.State { return loadSuspensionStateBestEffort(cr.cityPath) },
-			LookPath:   exec.LookPath,
+			Nudges: func() beads.NudgesStore {
+				return beads.NudgesStore{Store: resolveNudgesStore(cr.storageRoutes, cr.cityBeadStore(), cr.serviceConfigSnapshot(), cr.cityPath, cr.rec)}
+			},
+			WorkStore: cr.cityBeadStore,
+			LookPath:  exec.LookPath,
 		},
 		snapshotEnv: cr.serviceEnvSnapshot,
 		setInventoryHook: func(fn func(prev, next *ObservationSnapshot)) {
