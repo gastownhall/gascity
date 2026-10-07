@@ -231,8 +231,6 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          fetch-depth: 2
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
@@ -244,54 +242,11 @@ jobs:
       # //:ci_runner_policy_test, //:ci_suite_coverage_test,
       # //scripts/cipolicy:cipolicy_test, //scripts/prwatchdog:prwatchdog_test,
       # //scripts:scripts_test, //scripts:check_*_test, //:go_format_test and
-      # //test/docsync:docsync_test.
-      - name: Classify static-analysis scope
-        id: static-scope
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          scope="$(scripts/ci-static-scope)"
-          printf 'scope=%s\n' "$scope" >> "$GITHUB_OUTPUT"
+      # //test/docsync:docsync_test. Lint and vet (go vet's suite plus the
+      # linters .golangci.yml enables) run there too, as nogo (//tools/nogo):
+      # a finding fails the Go compile it belongs to.
       - name: Native DoltLite beads tests
         run: make test-native-doltlite-beads
-      - name: Get golangci-lint + Go toolchain versions for cache key
-        id: glint-version
-        run: |
-          version=$(grep -m1 '^GOLANGCI_LINT_VERSION := ' Makefile | awk '{print $3}')
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          # staticcheck (bundled in golangci-lint) caches type/CFG facts whose
-          # validity depends on the Go toolchain it was built with. Keying the
-          # cache on GOVERSION prevents a cache populated under one Go toolchain
-          # from being replayed under another, which produced a stale-fact
-          # SA5011 false-positive flood on main (ga-v7x9vk).
-          echo "goversion=$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
-      - name: Restore golangci-lint cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: .cache/golangci-lint
-          # Exact-key-only restore (no restore-keys fallback): a broad prefix
-          # let a partial/incompatible cache (missing testing.T.Fatal no-return
-          # facts) be inherited across differing keys and re-saved forward,
-          # repeatedly re-poisoning the cache with a SA5011 false-positive
-          # storm (ga-35qn7i, ga-v7x9vk, ga-l14mnf, ga-ndx34y). A miss now
-          # forces a fully fresh, never-poisoned recompute.
-          key: ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-${{ hashFiles('go.sum', '.golangci.yml') }}
-      - name: Lint affected packages
-        if: steps.static-scope.outputs.scope == 'changed'
-        env:
-          GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
-          LINT_CHANGED_SCOPE: tracked
-          LINT_CHANGED_REF: ${{ github.event.pull_request.base.sha }}
-        run: make lint-affected
-      - name: Lint full repository
-        if: steps.static-scope.outputs.scope != 'changed'
-        env:
-          GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
-        run: make lint
-      - name: Vet
-        if: steps.static-scope.outputs.scope != 'changed'
-        run: make vet
 
   # Coverage reporting only matters on the main branch — codecov regression
   # info doesn't need to gate every PR, and the full ./... unit suite is

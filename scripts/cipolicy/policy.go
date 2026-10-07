@@ -172,7 +172,14 @@ const (
 	// and same-repo PRs); ci-integration needs it and allows its skip.
 	// Reviewed delta: one job split by condition; no new trigger, step
 	// command or permission.
-	expectedCIExecutionHash     = "219519a0f4fe05b114abc5d6b9226acd10af1985cbb7cf05586a6a305641cbec"
+	//
+	// Bumped again (ga-96smfk.5, lint and vet as nogo): preflight-static
+	// drops the static-scope classifier, the golangci-lint version/cache
+	// steps, `make lint-affected`, `make lint` and `make vet` (nogo now runs
+	// them inside every Bazel Go compile, gated by bazel.yml), and its
+	// checkout no longer needs fetch-depth 2. Reviewed delta: removed steps
+	// and one removed checkout input; no new job, trigger or permission.
+	expectedCIExecutionHash     = "b711029d841b6ae6c715dd8ff710fc34fd7ede4d8791589afd2b323a0119963a"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
