@@ -61,7 +61,6 @@ func TestBdStoreIntegrationShardRunsOnlyBdStoreTests(t *testing.T) {
 	}
 	got := strings.Split(strings.TrimSuffix(string(captured), "\x00\x00"), "\x00")
 	wantTests := []string{
-		"TestBdStoreConformance",
 		"TestBdStoreDeleteBatchOrphansExternalDependents",
 		"TestBdStoreMailWispInsert",
 		"TestPinnedBdStoreCommandRunnerReportsSilentFallback",

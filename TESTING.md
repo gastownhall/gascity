@@ -1706,12 +1706,16 @@ beads conformance suite against `BdStore` backed by a real dolt server.
 Proves the full stack: dolt server → bd CLI → BdStore → beads.Store.
 It skips only when the `bd` under test predates the #3691 empty-DB guard
 (`helpers.RequireBDAtLeast`, v1.0.5), so on the pinned `bd` every subtest
-executes. It runs in a CI lane of its own (`bdstore-conformance`,
-`make test-integration-bdstore-conformance`); `TestBdStoreMailWispInsert` stays
-in the `bdstore` shard. BdStore's one divergence from the shared contract is
-declared as a capability, not skipped: `Options.RefusesUnresolvableParent`
-makes the ParentID row assert that BdStore refuses a parent bd cannot resolve
-(ga-6mfvtl).
+executes. It has an integration shard of its own, `bdstore-conformance`
+(`make test-integration-bdstore-conformance`, run by `rc-gate.yml`,
+`mac-regression.yml` and `make test-local-parallel`), apart from the `bdstore`
+shard that keeps `TestBdStoreMailWispInsert` and the other real-store tests;
+the gating Bazel `integration-smoke` lane selects both. It builds its stores
+through `isolatedBdStoreCommandRunner`, so an exported `BEADS_DIR` or Dolt
+server variable cannot send its `bd` calls to another database. BdStore's one
+divergence from the shared contract is declared as a capability, not skipped:
+`Options.RefusesUnresolvableParent` makes the ParentID row assert that BdStore
+refuses a parent bd cannot resolve (ga-6mfvtl).
 
 #### Session safety for end-to-end tests
 

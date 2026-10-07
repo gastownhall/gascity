@@ -516,24 +516,6 @@ func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
 	return filepath.Join(binDir, "bd"), nil
 }
 
-// pinnedBdStoreCommandRunner keeps direct BdStore integration tests on the
-// same bd shim used by their setup commands. The default runner resolves the
-// ambient process PATH before its per-command environment applies, so using it
-// directly could select a host bd whose schema knowledge predates the pinned
-// Beads module that created the test database.
-//
-// Its only caller is TestBdStoreConformance, which stays skipped (ga-oh86kw).
-// ga-x09w8c owns un-skipping it and moving it onto isolatedBdStoreCommandRunner.
-func pinnedBdStoreCommandRunner() beads.CommandRunner {
-	runner := beads.ExecCommandRunner()
-	return func(dir, name string, args ...string) ([]byte, error) {
-		if name == "bd" {
-			name = bdBinary
-		}
-		return runner(dir, name, args...)
-	}
-}
-
 // isolatedBdStoreCommandRunner is the pinned bd shim for BdStore tests that run
 // in an isolated environment. It runs every bd invocation in the same
 // environment as the test's setup commands: env with HOME moved to GC_HOME
