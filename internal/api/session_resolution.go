@@ -666,14 +666,22 @@ func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, 
 
 // sendBackgroundMessageToSession preserves the default provider nudge semantics
 // for system-driven messages that should respect wait-idle behavior when the
-// runtime supports it.
+// runtime supports it. A nudge the worker held back (an open dialog) is not a
+// delivery: it comes back as an error naming the reason, so the caller can
+// report the dropped message instead of treating it as sent.
 func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return err
 	}
-	_, err = handle.Nudge(ctx, worker.NudgeRequest{Text: message})
-	return err
+	result, err := handle.Nudge(ctx, worker.NudgeRequest{Text: message})
+	if err != nil {
+		return err
+	}
+	if !result.Delivered {
+		return fmt.Errorf("nudge not delivered: %s", result.Undelivered)
+	}
+	return nil
 }
 
 // sendUserMessageToSession keeps POST /messages as a compatibility alias for

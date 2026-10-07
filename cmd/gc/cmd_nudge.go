@@ -1234,7 +1234,10 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if mode == nudgeDeliveryWaitIdle && !result.Delivered {
+	// A nudge the worker held back (an open dialog, no idle boundary, an
+	// unsupported transport) was not delivered in either live mode: queue it for
+	// the dispatcher rather than report a delivery that never happened.
+	if !result.Delivered {
 		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, result.Undelivered, stdout, stderr)
 	}
 	if jsonOutput {
@@ -1544,6 +1547,8 @@ func queuedNudgeDowngradeNote(target nudgeTarget, undelivered worker.NudgeUndeli
 		return fmt.Sprintf(" (live delivery is unsupported for %s; the queued dispatcher delivers it)", provider)
 	case worker.NudgeUndeliveredNoIdleBoundary:
 		return " (the session never reached an idle boundary; the queued dispatcher delivers it)"
+	case worker.NudgeUndeliveredBlockedByDialog:
+		return " (the session has an open dialog awaiting an answer; the queued dispatcher delivers it afterwards)"
 	default:
 		return ""
 	}
