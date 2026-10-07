@@ -27,5 +27,12 @@ permissions:
 jobs:
   bazel:
     name: "bazel (nightly: integration + coverage)"
+    # A called workflow's jobs get at most the caller job's token
+    # permissions: bazel.yml's rbe job dispatches the worker pool (actions:
+    # write) and its lanes read worker-env drift issues (issues: read).
+    permissions:
+      contents: read
+      actions: write
+      issues: read
     uses: ./.github/workflows/bazel.yml
     secrets: inherit

@@ -85,29 +85,6 @@ jobs:
           go test -tags acceptance_c -timeout 45m -v ./test/acceptance/tier_c/...
           -run 'Test(BdCmdSeparatesStdoutAndStderrOnError|BdCmdReturnsPureStdoutOnSuccessfulJSONCommand|Swarm_SlingWorkCoderCommits|Gastown_PolecatLifecycle|Gastown_MayorDispatchPipeline|TierCEnvAuthDoesNotMirrorAuthTokenIntoAPIKey|FreshInit_SlingSpawnsDefaultPoolWorker|FreshInit_ClaudeUnrestricted)$'
 
-  integration-sqlite-coordstore:
-    name: Integration / SQLite coordination store
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      DOLT_VERSION: "2.2.0"
-      BD_VERSION: "v1.3.1"
-      GC_BEADS: sqlite
-      GC_ACCEPTANCE_BEADS_PROVIDER: sqlite
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "true"
-      - name: Install tools
-        run: make install-tools
-      - name: Integration tests (SQLite coordination store)
-        run: make test-integration-bdstore
-      - name: Acceptance tests (SQLite coordination store, Tier A)
-        run: make test-acceptance-go
-
   # The proxied-native lane's wall-clock line (`gc status --json` <= 0.5s on a
   # warm proxied city, gated at 3x headroom). TestBeadsProxiedDefaultNativeLane
   # asserts it only under GC_ACCEPTANCE_PERF, because wall clock on a shared PR runner

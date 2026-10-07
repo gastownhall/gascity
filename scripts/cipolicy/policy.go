@@ -325,7 +325,12 @@ const (
 	// beads-proxied-perf's -run selects TestBeadsProxiedDefaultNativeLane, the
 	// one test split out of TestBeadsProxiedDefault that reads
 	// GC_ACCEPTANCE_PERF; no new job, trigger, permission or secret.
-	expectedNightlyExecutionHash = "81df6767fb4a45226bfdf50a367a369c86f525510772a313d0ce3fa744295153"
+	// Bumped again (ga-96smfk.59): integration-sqlite-coordstore is removed.
+	// It selected GC_BEADS=sqlite, a provider #3151 removed (gc now
+	// hard-errors on it), so it failed every night; no job may select a
+	// provider now. Reviewed delta: one job removed; no new job, trigger or
+	// permission.
+	expectedNightlyExecutionHash = "cb54a44e7bfc392a047849ab6cfe695dcbffec56e127b5a84d427e3c1d4bef8c"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`.
@@ -522,7 +527,7 @@ func validatePRProviderOwnership(workflow map[string]any) error {
 func validateNightlyProviderOwnership(workflow map[string]any) error {
 	if match, ok := findEnvField(workflow, "nightly"); ok {
 		return fmt.Errorf(
-			"nightly provider selection must be owned only by integration-sqlite-coordstore: %s assigns %s",
+			"nightly jobs must not select a beads test provider (the sqlite coordination store it selected was removed in #3151): %s assigns %s",
 			match.path,
 			match.name,
 		)
@@ -543,13 +548,10 @@ func validateNightlyProviderOwnership(workflow map[string]any) error {
 		if !ok {
 			return fmt.Errorf("nightly job %q must be a mapping", name)
 		}
-		if name == "integration-sqlite-coordstore" {
-			continue
-		}
 		path := "nightly.jobs." + name
 		if match, found := findJobProviderSelector(projectJob(job), path); found {
 			return fmt.Errorf(
-				"nightly provider selection must be owned only by integration-sqlite-coordstore: %s assigns %s",
+				"nightly jobs must not select a beads test provider (the sqlite coordination store it selected was removed in #3151): %s assigns %s",
 				match.path,
 				match.name,
 			)
