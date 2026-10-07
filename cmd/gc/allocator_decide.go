@@ -27,10 +27,9 @@ import (
 // the canonical named rows, the partial causes, the awake set,
 // classification with its Keep conversions, and floors), and P3-5a2 steps
 // 4-8 and 14 (demand, pool desired, realization, named planning, the overlay
-// and bindings). P3-5b adds steps 15-17 (allocator_grants.go): the ledger
-// housekeeping, the bucket, start ranks, grants, create admission and the
-// diff. Unwired: P3-7 gathers the inputs, applies the ledger ops and
-// publishes the snapshot.
+// and bindings). Admission is not part of it: the planner admits the pass's
+// intents after the decide (CONTRACT v5 P4). Unwired: the planner gathers
+// the inputs.
 
 // errDecideNoClock refuses a pass without its one clock: a zero Now would
 // read every lease as expired and every fact as stale.
@@ -45,7 +44,6 @@ type allocInputs struct {
 	// Now is the pass's one clock (POOL-026, #35). It must be set.
 	Now       time.Time
 	Epoch     string
-	SelGen    uint64 // the generation this pass publishes; ledger entries carry it
 	Cfg       *config.City
 	ConfigRev string
 	EnvGen    uint64
@@ -78,24 +76,15 @@ type allocInputs struct {
 	// provider binary): legacy realizes nothing for them.
 	TransportRefused map[string]string
 	ReadyWaits       map[string]bool // I10; nil until P4.3
-	// Ledger is a copy of the uncleared entries (intentLedger.View), and
-	// Reservations the planning reservations of its create entries.
-	Ledger       []ledgerEntry
-	Reservations []planReservation
-	// Backoff is the backoff table (backoffTable.Snapshot, read after the
-	// ledger). A create record live at Now refuses its plan identity
-	// (AM-N8); a work record live at Now refuses its bead's worktree
-	// evidence while its fingerprint matches (#34).
+	// InFlight is the in-flight map's view (inflightMap.view): its running
+	// and ambiguous creates stand in for their rows until the census shows
+	// them (inFlightStandIns).
+	InFlight inflightView
+	// Backoff is the backoff table (backoffTable.Snapshot). A create record
+	// live at Now refuses its plan identity (AM-N8); a work record live at
+	// Now refuses its bead's worktree evidence while its fingerprint matches
+	// (#34).
 	Backoff map[string]backoffRecord
-	// Prev is the last published snapshot, for the diff.
-	Prev *selectionSnapshot
-	// Bucket, FairSeed and EntrySeq are allocator state, carried from the
-	// last pass's decision: the token bucket, the fair-share rotation seed
-	// (C4.8) and the sequence ledger entry IDs and create tokens are minted
-	// from, unique within the epoch.
-	Bucket   bucketState
-	FairSeed uint64
-	EntrySeq uint64
 }
 
 // demandView is the demand collectors' output for one pass (P3 spec §4.3),
@@ -157,23 +146,6 @@ type allocDecision struct {
 	// Alerts are the pass's operator alerts: each configured named identity
 	// with more than one open row (C2.13). OBS1 surfaces them.
 	Alerts []string
-
-	// LedgerOps are the pass's ledger moves in order (clears, releases,
-	// reserves), Creates the admitted plans for the create executor, and
-	// Reservations the planning reservations of every create entry still
-	// uncleared, by entry ID: allocator state, fed back as
-	// allocInputs.Reservations. Bucket holds the grant debits and no
-	// release refund: P3-7 credits a refund only on a confirmed Release.
-	LedgerOps    []ledgerOp
-	Creates      []createPlan
-	Reservations []planReservation
-	Bucket       bucketState
-	FairSeed     uint64
-	EntrySeq     uint64
-	// Enqueue is the session keys whose entry changed against Prev (C2.10);
-	// NextWake when the allocator must pass again, 0 for the patrol backstop.
-	Enqueue  []rowKey
-	NextWake time.Duration
 }
 
 // decidePass is one decide's working state.
@@ -204,8 +176,10 @@ type decidePass struct {
 	poolStates  []PoolDesiredState
 	poolDesired map[string]int
 	poolWork    []beads.Bead
-	// standIns are the templates of the pending-create rows uncleared
-	// creates stand in for in pool demand, by stand-in ID.
+	// inFlight are the planning reservations of the in-flight creates the
+	// census does not show yet (inFlightCreates), and standIns the templates
+	// of the pending-create rows the pool ones stand in for, by stand-in ID.
+	inFlight []planReservation
 	standIns map[string]string
 
 	bp       *agentBuildParams
@@ -239,13 +213,12 @@ func decideAllocation(in allocInputs) (allocDecision, error) {
 		return allocDecision{}, errDecideNoCensus
 	}
 	p := newDecidePass(in)
+	p.inFlight = p.inFlightCreates()
 	p.prepare()
 	if !in.CitySuspended {
 		p.plan()
 	}
-	d := p.finish()
-	p.admit(&d)
-	return d, nil
+	return p.finish(), nil
 }
 
 func newDecidePass(in allocInputs) *decidePass {

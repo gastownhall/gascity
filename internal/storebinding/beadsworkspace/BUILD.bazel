@@ -20,6 +20,7 @@ go_library(
 go_test(
     name = "beadsworkspace_test",
     srcs = [
+        "engine_integration_test.go",
         "provider_test.go",
         "testenv_import_test.go",
     ],

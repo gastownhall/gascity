@@ -23,14 +23,25 @@
 #   - the rbe job's lane list (event and mode) decides which lanes start;
 #     every mode starts unit and acceptance, so the gate never passes a run
 #     that tested nothing (an empty lane list fails it);
+#   - integration-packages runs every package's `//go:build integration`
+#     tests and GC_FAST_UNIT=0 process tests outside //test/integration
+#     (//test:integration_packages, tools/bazel/integration_suite.py) and
+#     gates, in every mode (fork PRs included: no network needed);
+#   - integration-smoke runs //test/integration's bdstore and REST smoke
+#     tests (scripts/test-integration-shard's bdstore_tests and
+#     rest_smoke_tests; .bazelrc test:integration-smoke) and gates, in
+#     every mode: they
+#     never failed in 33 main runs of the full suite, which is still flaky;
 #   - integration runs on pushes and dispatches only, evidence-only, until G3;
 #   - fork and Dependabot PRs ask rbe-west's mint (mode fork-ro/fork-rw);
 #     closed, refused or unreachable, the run takes mode cache: lanes execute
 #     on the runner with lookups in the anonymous read-only cache. A lane
 #     whose certificate the mint then refuses falls back to that cache too;
 #   - with rbe-west off (vars.RBE_WEST_WORKERS) runs take mode cache as well;
-#   - a fork run mints at most 2 rbe-fork certificates, one per lane:
-#     unit and acceptance, in fork-ro and fork-rw alike;
+#   - a fork run mints at most 4 rbe-fork certificates, one per lane:
+#     unit, acceptance, integration-packages and integration-smoke, in
+#     fork-ro and fork-rw alike (the mint allows 12 per run and 160 per PR a
+#     day, so a run and two re-runs stay inside both);
 #   - coverage (push to main, remote) uploads lcov to Codecov (flag
 #     bazel-unit) and as an artifact;
 #   - bep-summary reports cached vs executed test targets per lane from the
@@ -139,7 +150,7 @@ jobs:
           echo "Bazel execution mode: **$mode**" >> "$GITHUB_STEP_SUMMARY"
 
       # The lane job's matrix, as JSON: a lane left out never starts a runner
-      # (nor mints an rbe-fork certificate, so a fork run mints at most 2).
+      # (nor mints an rbe-fork certificate, so a fork run mints at most 4).
       # A matrix's exclude cannot do this: GitHub applies include after
       # exclude, and an include entry keyed on the lane adds it back.
       - name: Lanes
@@ -155,11 +166,20 @@ jobs:
           # Evidence-only until G3: agent-flow tests depend on ambient
           # agent-template resolution (product-side fix, D13).
           integration='{"lane":"integration","cmd":"test --config=ci --config=integration --keep_going //test/integration:integration_test","evidence-only":true}'
+          # Gating. Every package's integration-tagged and GC_FAST_UNIT=0
+          # tests outside //test/integration (scripts/test-integration-shard's
+          # packages-* shards).
+          packages='{"lane":"integration-packages","cmd":"test --config=ci --config=integration --keep_going //test:integration_packages"}'
+          # Gating. The integration suite's bdstore and REST smoke tests
+          # (scripts/test-integration-shard bdstore_tests + rest_smoke_tests:
+          # .bazelrc test:integration-smoke's --test_filter).
+          smoke='{"lane":"integration-smoke","cmd":"test --config=ci --config=integration-smoke --keep_going //test/integration:integration_test"}'
           # Every mode tests: the gate (the required check) fails a run that
-          # started no lane. Acceptance runs on the fork pool too (mode
-          # fork-ro, instance oss-fork, loopback only): `gc init` no longer
-          # clones gascity-packs (#7005).
-          lanes="$unit,$acceptance"
+          # started no lane. Acceptance and integration-packages run on the
+          # fork pool too (mode fork-ro, instance oss-fork, loopback only):
+          # `gc init` no longer clones gascity-packs (#7005), and no
+          # integration_packages target needs the network.
+          lanes="$unit,$acceptance,$packages,$smoke"
           # Pushes and dispatches only until G3 (evidence-only on pull
           # requests would only spend the pool).
           case "$EVENT" in push|workflow_dispatch) lanes+=",$integration" ;; esac
@@ -322,6 +342,16 @@ jobs:
           elif [ ! -x /usr/local/go/bin/go ]; then
             echo "::warning::/usr/local/go exists without bin/go; tests that exec go may fail"
           fi
+
+      # Integration tests drive tmux, lsof and ssh from the host, as
+      # on the remote workers (tools/rbe/worker-env pins their versions).
+      # Where this lane executes here instead, install them, or those tests
+      # would skip ("tmux not installed") rather than run.
+      - name: Host tools for locally run integration tests
+        if: (matrix.lane == 'integration-packages' || matrix.lane == 'integration-smoke') && (needs.rbe.outputs.mode == 'cache' || needs.rbe.outputs.mode == 'local' || steps.bazel-fallback.outcome == 'success')
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tmux lsof openssh-client
 
       # zstd transfers with the anonymous read-only cache (rbe-cache, :8443),
       # only while it advertises zstd: cache-zstd-probe.sh asks its
@@ -540,6 +570,8 @@ jobs:
             --json-out "$dir/summary.json" \
             unit="$dir/bazel-bep-unit-$ATTEMPT/bazel-bep.json" \
             acceptance="$dir/bazel-bep-acceptance-$ATTEMPT/bazel-bep.json" \
+            integration-packages="$dir/bazel-bep-integration-packages-$ATTEMPT/bazel-bep.json" \
+            integration-smoke="$dir/bazel-bep-integration-smoke-$ATTEMPT/bazel-bep.json" \
             integration="$dir/bazel-bep-integration-$ATTEMPT/bazel-bep.json" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload bazel test cache report
         if: always()

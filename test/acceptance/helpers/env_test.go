@@ -146,7 +146,7 @@ func unwritableHomeForTest(t *testing.T) string {
 // hostHomeWithBdSharedServer makes the test process look like a developer box
 // running a bd shared server: HOME holds ~/.beads/shared-server with a
 // database named like the acceptance city (the state that turned
-// TestBeadsProxiedDefault/doctor-green red on such a host). It returns that
+// TestBeadsProxiedDefaultInit/doctor-green red on such a host). It returns that
 // home.
 func hostHomeWithBdSharedServer(t *testing.T) string {
 	t.Helper()

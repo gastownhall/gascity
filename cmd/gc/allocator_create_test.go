@@ -87,7 +87,7 @@ func (h *createHarness) submit(pass *createPass, plans ...createPlan) bool {
 	stamped := make([]createPlan, len(plans))
 	for i, p := range plans {
 		if p.Token == "" {
-			p.Token, p.ConfigRev = h.tokens[p.EntryID], createHarnessRev
+			p.Token, p.ConfigRev = h.tokens[p.ID], createHarnessRev
 		}
 		stamped[i] = p
 	}
@@ -116,7 +116,7 @@ func (h *createHarness) settlementOf(t *testing.T, id string) createSettlement {
 	t.Helper()
 	var out []createSettlement
 	for _, s := range h.settlements() {
-		if s.EntryID == id {
+		if s.ID == id {
 			out = append(out, s)
 		}
 	}
@@ -147,7 +147,7 @@ func (h *createHarness) assertNoRefusal(t *testing.T) {
 // cause under createHarnessRev.
 func (h *createHarness) assertRefused(t *testing.T, plan createPlan, cause string) {
 	t.Helper()
-	s := h.settlementOf(t, plan.EntryID)
+	s := h.settlementOf(t, plan.ID)
 	if s.Stage != cause || s.Identity != plan.identity().key() || s.ConfigRev != createHarnessRev {
 		t.Fatalf("settlement %+v, want identity %q refused with cause %q under %q", s, plan.identity().key(), cause, createHarnessRev)
 	}
@@ -202,9 +202,9 @@ func workerCity(maxSessions int) *config.City {
 	}
 }
 
-func workerPlan(cfg *config.City, entryID string, slot int) createPlan {
+func workerPlan(cfg *config.City, id string, slot int) createPlan {
 	_, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(&cfg.Agents[0], slot)
-	return createPlan{EntryID: entryID, Template: cfg.Agents[0].QualifiedName(), QualifiedInstance: qualifiedInstance, Slot: poolSlot}
+	return createPlan{ID: id, Template: cfg.Agents[0].QualifiedName(), QualifiedInstance: qualifiedInstance, Slot: poolSlot}
 }
 
 // aliasQueryFailStore fails the first alias-keyed query, which is the
@@ -608,7 +608,7 @@ func TestCreateEffect_CommitsMarkerOrFailsNoWrite_AmbiguousLeavesMarker(t *testi
 		store := beads.NewMemStore()
 		h := newCreateHarness(t, nil)
 		h.reserve(t, "c1")
-		plan := createPlan{EntryID: "c1", Template: "ghost", QualifiedInstance: "ghost-1", Slot: 1}
+		plan := createPlan{ID: "c1", Template: "ghost", QualifiedInstance: "ghost-1", Slot: 1}
 
 		h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
 
@@ -1493,7 +1493,7 @@ func TestCreateEffect_PanickingSinksStillSettle(t *testing.T) {
 		record := host.settle
 		host.settle = func(s createSettlement) {
 			record(s)
-			if s.EntryID == "doomed" {
+			if s.ID == "doomed" {
 				panicked = true
 				panic("settlement queue closed")
 			}
@@ -1503,7 +1503,7 @@ func TestCreateEffect_PanickingSinksStillSettle(t *testing.T) {
 	h.reserve(t, "ok")
 	h.reserve(t, "doomed")
 	pass := &createPass{cfg: cfg, store: beads.NewMemStore()}
-	h.runAll(t, pass, workerPlan(cfg, "ok", 1), createPlan{EntryID: "doomed", Template: "ghost", QualifiedInstance: "ghost-1", Slot: 1})
+	h.runAll(t, pass, workerPlan(cfg, "ok", 1), createPlan{ID: "doomed", Template: "ghost", QualifiedInstance: "ghost-1", Slot: 1})
 	if e := h.settlementOf(t, "ok"); !e.Landed {
 		t.Fatalf("ok: %+v, want landed", e)
 	}
@@ -1533,8 +1533,8 @@ func TestCreateEffect_WorkersRestartAfterTheQueueDrains(t *testing.T) {
 		}
 		h.runAll(t, pass, plans...)
 		for _, p := range plans {
-			if e := h.settlementOf(t, p.EntryID); !e.Landed {
-				t.Fatalf("round %d: %s = %+v, want landed", round, p.EntryID, e)
+			if e := h.settlementOf(t, p.ID); !e.Landed {
+				t.Fatalf("round %d: %s = %+v, want landed", round, p.ID, e)
 			}
 		}
 	}
@@ -1627,8 +1627,8 @@ func TestCreateEffect_ReCensusSkipsSuspendedRigs(t *testing.T) {
 func TestCreateEffect_RefusesAPlanConfigDoesNotDerive(t *testing.T) {
 	cfg := workerCity(1) // canonical singleton: instance "worker", pool slot 0
 	for name, plan := range map[string]createPlan{
-		"singleton with a slot":    {EntryID: "c1", Template: "worker", QualifiedInstance: "worker", Slot: 1},
-		"instance of another slot": {EntryID: "c1", Template: "worker", QualifiedInstance: "worker-2", Slot: 0},
+		"singleton with a slot":    {ID: "c1", Template: "worker", QualifiedInstance: "worker", Slot: 1},
+		"instance of another slot": {ID: "c1", Template: "worker", QualifiedInstance: "worker-2", Slot: 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			store := beads.NewMemStore()
@@ -1691,7 +1691,7 @@ func TestCreateEffect_ParallelTemplatesRealFlocks(t *testing.T) {
 			id := fmt.Sprintf("c-%d-%d", ai, j)
 			h.reserve(t, id)
 			_, qi, ps := poolDesiredRequestIdentity(&cfg.Agents[ai], j)
-			plans = append(plans, createPlan{EntryID: id, Template: cfg.Agents[ai].QualifiedName(), QualifiedInstance: qi, Slot: ps})
+			plans = append(plans, createPlan{ID: id, Template: cfg.Agents[ai].QualifiedName(), QualifiedInstance: qi, Slot: ps})
 		}
 	}
 	pass := &createPass{cfg: cfg, store: store}
@@ -1715,8 +1715,8 @@ func TestCreateEffect_ParallelTemplatesRealFlocks(t *testing.T) {
 // the planner as exactly one settlement through the settle spy.
 func TestCreateEffectSettlesOnlyByMessage(t *testing.T) {
 	shared := map[reflect.Type]bool{
-		reflect.TypeFor[*intentLedger](): true, reflect.TypeFor[*backoffTable](): true,
-		reflect.TypeFor[*inflightMap](): true, reflect.TypeFor[v2Enqueuer](): true,
+		reflect.TypeFor[*backoffTable](): true, reflect.TypeFor[*inflightMap](): true,
+		reflect.TypeFor[v2Enqueuer](): true,
 	}
 	host := reflect.TypeFor[createEffectHost]()
 	for i := range host.NumField() {

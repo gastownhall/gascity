@@ -156,7 +156,38 @@ const (
 	// `make openapi-breaking-check` step. Reviewed delta: removed steps, one
 	// removed env and one renamed step command; no new job, trigger or
 	// permission.
-	expectedCIExecutionHash     = "a8330d6e8e86cab9b2712ce03cba55544a3284b3c29cc8a61adbd786efb0015d"
+	//
+	// Bumped again (ga-96smfk.26, acceptance shard floor): TestBeadsProxiedDefault
+	// was split into independent TestBeadsProxiedDefault* top-level tests, so
+	// the topology job's proxied-default step selects those eight names
+	// instead of the one. Same tests' assertions, same step, -timeout and env.
+	// No new job, trigger or permission.
+	//
+	// Bumped again (ga-96smfk.6, package integration shards moved to Bazel):
+	// the eleven packages-* rows (packages-core-N-of-4,
+	// packages-cmd-gc-integration, packages-runtime-tmux-N-of-6) leave
+	// integration-shards for a new integration-packages-fork job with the
+	// same runner, env and steps, run only for fork and Dependabot pull
+	// requests (bazel.yml's gating integration-packages lane covers pushes
+	// and same-repo PRs); ci-integration needs it and allows its skip.
+	// Reviewed delta: one job split by condition; no new trigger, step
+	// command or permission.
+	//
+	// Bumped again (ga-96smfk.5, lint and vet as nogo): preflight-static
+	// drops the static-scope classifier, the golangci-lint version/cache
+	// steps, `make lint-affected`, `make lint` and `make vet` (nogo now runs
+	// them inside every Bazel Go compile, gated by bazel.yml), and its
+	// checkout no longer needs fetch-depth 2. Reviewed delta: removed steps
+	// and one removed checkout input; no new job, trigger or permission.
+	//
+	// Bumped again (ga-96smfk.50, //test/integration smoke subset moved to
+	// Bazel): the bdstore and rest-smoke rows join the packages-* rows in one
+	// fork/Dependabot-PR-only integration-shards job (bazel.yml's gating
+	// integration-smoke and integration-packages lanes cover pushes and every
+	// other PR), and integration-packages-fork goes; ci-integration drops it.
+	// Reviewed delta: rows moved between two jobs of identical runner, env
+	// and steps, one job removed; no new trigger, step command or permission.
+	expectedCIExecutionHash     = "212cf931a77842415da14d344782a12592e52a11bf4ac4dd693c0447ec627260"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -182,8 +213,11 @@ const (
 	// trigger, permission or secret. Then (Go module fetch resilience)
 	// bundled-pack-pins and waiver-clock each set setup-go `cache: false` and
 	// gain one step right after it, `uses: ./.github/actions/go-mod-download`;
-	// no new job, trigger, permission or secret.
-	expectedNightlyExecutionHash = "8c3b93d8471bb9f6b121f6a4713367b25fc10183c9a89a716dcd6785ef21c8d9"
+	// no new job, trigger, permission or secret. Then (ga-96smfk.26)
+	// beads-proxied-perf's -run selects TestBeadsProxiedDefaultNativeLane, the
+	// one test split out of TestBeadsProxiedDefault that reads
+	// GC_ACCEPTANCE_PERF; no new job, trigger, permission or secret.
+	expectedNightlyExecutionHash = "a4a633438d81b9eaa9308ffd687a0869a5472003c651eb8526e76085c581ec6f"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`.

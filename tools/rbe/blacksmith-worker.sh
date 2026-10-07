@@ -497,10 +497,13 @@ isolate() {
 	# shutdown socket, snapd, a docker.sock) is a way out of the sandbox,
 	# read-only mount or not. The host keeps them; what counts is what an
 	# action reaches: the selftest above connected to each from inside one
-	# (MASK_SOCKETS=1 masks them there, journald's and the system bus aside).
+	# (MASK_SOCKETS=1 masks them there, journald's aside), and asked the
+	# host's resolver over the system bus and varlink (no-resolver).
 	phase sockets
 	grep -q '^ok    action: no-open-socket' "$selftest_out" ||
 		fail "world-writable sockets reachable by actions: $(sed -n 's/^ *world-writable socket the action can connect to: //p' "$selftest_out" | tr '\n' ' ')"
+	grep -q '^ok    action: no-resolver' "$selftest_out" ||
+		fail "the host's resolver is reachable by actions (a DNS tunnel): $(grep -m1 'action: no-resolver' "$selftest_out")"
 	phase probe
 	# What S11.3 is about, on this VM's layout: a probe action through the real
 	# entrypoint must run as a slot user and fail to read the worker key, find

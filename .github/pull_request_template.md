@@ -1,9 +1,9 @@
-Closes #
-
-<!-- Every pull request links a documented issue (file it first or alongside;
-no approval needed). The issue holds the motivation, impact, and risk; this
-description covers what changed and the evidence that it works. See
+<!-- Link an issue when there is one (`Closes #123`); it is recommended for
+user-visible bugs and changes worth discussing, and optional for small,
+self-explanatory fixes. Either way, say why the change is needed below. See
 CONTRIBUTING.md. -->
+
+Closes #
 
 ## What changed
 

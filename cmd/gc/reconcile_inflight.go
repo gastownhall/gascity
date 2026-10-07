@@ -14,8 +14,8 @@ import (
 // a landed write shows on the next pass. No lock: only the planner goroutine
 // adds, settles or clears (P1), and effects report by settlement.
 //
-// It sits beside the intent ledger until C1b deletes the ledger and the
-// grants; C2b2 and C4b wire it into the planner.
+// The planner owns it; admit (C1b-2) counts its entries, and C4b submits the
+// effects that settle them.
 
 // inflightHardBound is how long after its settlement an ambiguous create may
 // stay out of the census before it clears, with an alert (P5). A running

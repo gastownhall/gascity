@@ -605,6 +605,8 @@ func TestRBEWorkerScriptGatesNativeLinkOnIsolation(t *testing.T) {
 		// What an action can connect to (the selftest's in-action check), not
 		// what the host has on /run: the host keeps its sockets.
 		`grep -q '^ok    action: no-open-socket' "$selftest_out" ||`,
+		// ga-mglovs: no resolver over unix sockets (system bus, varlink).
+		`grep -q '^ok    action: no-resolver' "$selftest_out" ||`,
 		`probe "$ROOT/pki/worker.key"`,
 		`if ! grep -qE "^uid 590[0-9]{2}$" <<<"$out" || grep -q LEAK <<<"$out"; then`,
 		// Mode 1 runs the checks in this shell: any failure ends the worker.
@@ -638,7 +640,11 @@ func TestRBEWorkerScriptGatesNativeLinkOnIsolation(t *testing.T) {
 // sockets on Blacksmith's /run (its VM shutdown socket among them) were found
 // reachable by actions. MASK_SOCKETS=1 masks them inside each action; MAIN
 // keeps the default (0) until it opts in. The sockets phase reads the
-// selftest's line, and the launcher and the selftest keep the same sockets.
+// selftest's line, and the launcher and the selftest keep the same sockets:
+// journald's alone. The system bus is masked too (ga-mglovs): unix sockets
+// ignore network namespaces, and systemd-resolved's org.freedesktop.resolve1
+// resolves any record for anyone, a DNS tunnel out of the fork tier's
+// loopback-only actions. The selftest proves no action reaches a resolver.
 func TestRBEActionMaskSockets(t *testing.T) {
 	root := repoRoot(t)
 	launch := readFile(t, root, "tools/rbe/rbe-action-launch")
@@ -653,12 +659,15 @@ func TestRBEActionMaskSockets(t *testing.T) {
 			t.Errorf("rbe-action-launch missing %q", want)
 		}
 	}
-	const keep = "case $s in /run/systemd/journal/* | /run/dbus/system_bus_socket) ;; *)"
+	const keep = "case $s in /run/systemd/journal/*) ;; *)"
 	if n := strings.Count(launch, keep); n != 1 {
 		t.Errorf("rbe-action-launch: %d sockets-kept lists %q, want 1", n, keep)
 	}
 	if n := strings.Count(selftest, keep); n != 1 {
 		t.Errorf("rbe-action-selftest: %d sockets-kept lists %q, want 1 (run_socks, host and action)", n, keep)
+	}
+	if strings.Contains(launch, "system_bus_socket") || strings.Contains(selftest, "system_bus_socket) ;;") {
+		t.Error("the system bus must not be exempt from MASK_SOCKETS (ga-mglovs: resolve1 is a DNS tunnel)")
 	}
 	// The action runs the host's run_socks: the same list on both sides.
 	if !strings.Contains(selftest, `'"$(declare -f run_socks)"'`) {
@@ -669,6 +678,14 @@ func TestRBEActionMaskSockets(t *testing.T) {
 		`ok "action: no-open-socket (${how:-?})"`,
 		"elif ((MASK_SOCKETS)); then\n\tbad \"action: no-open-socket",
 		`sed -n 's/^S /      world-writable socket the action can connect to: /p' <<<"$out"`,
+		// The tunnel itself, through the system bus and resolved's varlink
+		// socket, from inside the probe action, against what the host reaches.
+		"org.freedesktop.resolve1.Manager ResolveHostname isit 0 localhost 0 0",
+		`"system-bus", "/run/dbus/system_bus_socket"`,
+		"io.systemd.Resolve.ResolveHostname",
+		"echo \"$r\"; grep -q \"^S \" <<<\"$r\" || echo \"R no-open-socket\"\n'\"$resolver_probe\"'\n",
+		`ok "action: no-resolver (the host reaches: ${host_resolvers:-none})"`,
+		"elif ((MASK_SOCKETS)); then\n\tbad \"action: no-resolver (the action reaches: $resolvers)\"",
 	} {
 		if !strings.Contains(selftest, want) {
 			t.Errorf("rbe-action-selftest missing %q", want)

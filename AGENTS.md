@@ -43,17 +43,18 @@ next to that code; read the matching file before changing it.
 
 ## How work flows here
 
-- **GitHub Issues is the public tracker, and every pull request links a
-  documented issue.** The issue carries the context reviewers and future
-  readers need: for a bug, the reproduction, impact, and evidence; for a
-  change, the motivation, impact, risk, and verification plan. File it before
-  or alongside the pull request; it does not need maintainer approval first.
-  The pull request says `Closes #<issue>` and shows end-to-end evidence that
-  the change works. See `CONTRIBUTING.md`.
-- **Agents:** if no issue exists for your change, file one using the bug or
-  feature form fields, filling each from evidence and answering
-  `NOT_ENOUGH_INFO` where the evidence runs out, then link it from the pull
-  request.
+- **GitHub Issues is the public tracker; use an issue when it adds
+  context.** Open or link one for a user-visible bug, a behavior or design
+  change that needs discussion, or work that spans several pull requests:
+  the issue carries the reproduction, impact, and evidence for a bug, or the
+  motivation, risk, and verification plan for a change. A small,
+  self-explanatory fix (a typo, a flake, a refactor, a CI or docs tweak) can
+  go straight to a pull request whose description covers the why. Every pull
+  request shows end-to-end evidence that the change works; when an issue
+  exists, the pull request says `Closes #<issue>`. See `CONTRIBUTING.md`.
+- **Agents:** when you do file an issue, use the bug or feature form fields,
+  fill each from evidence, and answer `NOT_ENOUGH_INFO` where the evidence
+  runs out.
 - Branch from `main` (`fix/*`, `feat/*`, `refactor/*`, `docs/*`), use
   Conventional Commits, and push to your branch — never to `main`.
 - A fix that changes an invariant or boundary updates the owning `AGENTS.md`

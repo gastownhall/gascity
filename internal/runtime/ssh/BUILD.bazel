@@ -17,16 +17,21 @@ go_library(
 go_test(
     name = "ssh_test",
     srcs = [
+        "conformance_integration_test.go",
         "provider_test.go",
         "seams_test.go",
+        "session_env_file_integration_test.go",
         "session_env_file_test.go",
+        "ssh_localhost_integration_test.go",
         "ssh_test.go",
         "testenv_import_test.go",
     ],
     embed = [":ssh"],
     deps = [
         "//internal/runtime",
+        "//internal/runtime/runtimetest",
         "//internal/testenv",
+        "//internal/testutil",
     ],
 )
 

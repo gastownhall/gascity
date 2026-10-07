@@ -234,10 +234,8 @@ func oracleCity(t *testing.T, seed int64) allocInputs {
 		col.DefaultCounts[template], col.DefaultDemand[template] = d.Count, d
 		if rng.Intn(4) == 0 {
 			slot := 1 + rng.Intn(6)
-			f.in.Reservations = append(f.in.Reservations, planReservation{
-				EntryID: fmt.Sprintf("e-%s-%d", template, slot), Template: template,
-				QualifiedInstance: fmt.Sprintf("%s-%d", template, slot), Slot: slot, ReservedAt: allocNow,
-			})
+			f.in.InFlight.Entries = append(f.in.InFlight.Entries,
+				inFlightCreate(fmt.Sprintf("e-%s-%d", template, slot), template, fmt.Sprintf("%s-%d", template, slot), slot, ""))
 		}
 		if rng.Intn(4) == 0 {
 			if f.in.Backoff == nil {

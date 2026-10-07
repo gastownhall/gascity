@@ -6,14 +6,12 @@ import (
 	"github.com/gastownhall/gascity/internal/resilience"
 )
 
-// The allocator's start budget (CONTRACT C5.7, C5.9 as amended by AM5 and
-// C6): one token bucket for grants (a create costs none), the city in-flight
-// cap, and the endpoint capacity breaker. The bucket refills by time, not by
-// pass, so per-event passes cannot multiply the start rate (design §4a). The
-// allocator is its only reader and writer, so it needs no lock.
-//
-// Unwired in this slice: P3-5b's admission walk calls admitStart, and P3-7
-// carries the bucket between passes.
+// The planner's start budget (CONTRACT v5 P4): one token bucket for starts
+// (a create or an adopt costs none), the city in-flight count, and the
+// endpoint capacity breaker. The bucket refills by time, not by pass, so
+// frequent passes cannot multiply the start rate. The planner is its only
+// reader and writer (P1), so it needs no lock; the planner's admission
+// (C1b-2) reads all three.
 
 // bucketState is the token bucket: capacity max_wakes_per_tick, refilled by
 // the same number per patrol interval. Refill is continuous: Credit holds the
@@ -49,13 +47,6 @@ func (b bucketState) refill(now time.Time, capacity int, interval time.Duration)
 	return b.capped(capacity)
 }
 
-// refund returns n tokens: a grant released before any key issued it, the
-// only refund (C5.7).
-func (b bucketState) refund(n, capacity int) bucketState {
-	b.Tokens += n
-	return b.capped(capacity)
-}
-
 // capped clamps to capacity; a full bucket accrues no credit.
 func (b bucketState) capped(capacity int) bucketState {
 	if b.Tokens >= capacity {
@@ -64,17 +55,16 @@ func (b bucketState) capped(capacity int) bucketState {
 	return b
 }
 
-// untilTokens is how long until the bucket holds cost tokens; 0 if it does.
-// The allocator arms its pass timer with it when starved.
-func (b bucketState) untilTokens(cost, capacity int, interval time.Duration) time.Duration {
-	if b.Tokens >= cost {
-		return 0
-	}
-	if cost > capacity || capacity <= 0 || interval <= 0 {
-		return interval
+// nextToken is when the bucket next holds a token, read as refill left it.
+// It is zero when the bucket holds one now, or never refills (a capacity or
+// interval that is not positive). Admission reports it so the planner can
+// schedule a pass when starts are starved for tokens.
+func (b bucketState) nextToken(capacity int, interval time.Duration) time.Time {
+	if b.Tokens >= 1 || capacity <= 0 || interval <= 0 {
+		return time.Time{}
 	}
 	period := interval / time.Duration(capacity)
-	return time.Duration(cost-b.Tokens)*period - b.Credit
+	return b.LastRefill.Add(time.Duration(1-b.Tokens)*period - b.Credit)
 }
 
 // endpointGate is one endpoint's capacity breaker as admission reads it. The
@@ -86,7 +76,7 @@ type endpointGate uint8
 const (
 	gateShut   endpointGate = iota // open, or half-open with its probe in flight: admits nothing
 	gateClosed                     // admits under tokens and the city cap
-	gateProbe                      // half-open, or open with a probe due: admits one outstanding grant, the probe
+	gateProbe                      // half-open, or open with a probe due: admits one outstanding start, the probe
 )
 
 // endpointGateOf reads k's gate from the guard. Eligible is read-only for
@@ -103,11 +93,11 @@ func endpointGateOf(g *endpointCapacityGuard, k endpointKey) endpointGate {
 	return gateProbe
 }
 
-// admitStart reports whether one more start may be reserved (AM5, C5.9):
+// admitStart reports whether one more start may be admitted (v5 P4):
 // the bucket holds its one token, the city has fewer than limit starts in
 // flight, and k's gate admits: closed admits, a probe gate admits only while
 // k has nothing outstanding, a shut gate admits nothing. A create is admitted
-// on the same test for its row's first grant.
+// on the same test for its row's first start.
 func admitStart(b bucketState, inFlight, limit int, gate endpointGate, outstanding int) bool {
 	if b.Tokens < 1 || inFlight >= limit {
 		return false
@@ -121,90 +111,69 @@ func admitStart(b bucketState, inFlight, limit int, gate endpointGate, outstandi
 	return false
 }
 
-// ledgerCounts reports whether e stands for an effect in flight: every create
-// or grant entry still in the ledger, except a failure that wrote nothing
-// (it clears at once and represents nothing). A landed grant counts until its
-// marker clears it; from then the census row's start lease counts it.
-func ledgerCounts(e ledgerEntry) bool {
-	return e.State != ledgerFailed || e.WroteRow
-}
+// inflightStart is a start's in-flight kind, which the city count reads.
+const inflightStart = "start"
 
-// cityInFlight counts starts in flight city-wide (START-003), once per effect
-// (C5.13): ledger creates and grants, plus census rows with a live start
-// lease, plus never-started pending creates whose endpoint is not shut. A
-// row an entry already stands for, by key or by create token, is not counted
-// again. Pending rows parked behind a shut endpoint hold no start slot (F5):
-// they wait for their endpoint, and starving every other endpoint behind
-// them would turn one broker outage into a city outage. Behind a probe gate
-// they count as one, the probe, so an endpoint going half-open after an
-// outage does not fill the city cap with its whole backlog (F5 probe window,
-// P3-5b). A pending row whose endpoint has no gate in gates counts, erring
-// toward fewer starts. A start lease counts whatever its endpoint's gate:
-// that start is already running.
+// cityInFlight is the city in-flight count (v5 P4): distinct bring-up rows,
+// once each. They are the rows with a running start; the census rows holding
+// a pending-create claim on an endpoint that is not shut, where every such
+// row behind one probe gate shares one slot (a running start on one of them
+// is that slot), so an endpoint going half-open after an outage does not fill
+// the city cap with its whole backlog; and the
+// running or ambiguous creates whose token no census row carries, since a
+// row that carries it counts as itself. A row whose endpoint has no gate
+// reading counts, erring toward fewer starts. No lease is an input (SC A5).
 //
-// parked holds the pending rows it counted. A grant for one continues the
-// effect already counted, so it takes no further slot (C5.13). Behind a
-// probe gate every parked row shares the one slot, so each is in parked.
-func cityInFlight(view []ledgerEntry, c ledgerCensus, gates map[endpointKey]endpointGate) (n int, parked map[rowKey]bool) {
-	keys := make(map[rowKey]bool)
+// counted holds the rows that hold a slot: a start for one continues the
+// bring-up already counted and takes no further slot.
+func cityInFlight(v inflightView, rows []bringUpRow, gate func(endpointKey) (endpointGate, bool)) (n int, counted map[rowKey]bool) {
+	counted = make(map[rowKey]bool)
+	for _, e := range v.Entries {
+		if e.Kind == inflightStart && !counted[e.Key] {
+			counted[e.Key] = true
+			n++
+		}
+	}
 	tokens := make(map[string]bool)
-	parked = make(map[rowKey]bool)
-	for _, e := range view {
-		if !ledgerCounts(e) {
+	probed := make(map[endpointKey]bool)
+	for _, r := range rows {
+		if g, ok := gate(r.Endpoint); r.PendingCreate && counted[r.Key] && ok && g == gateProbe {
+			probed[r.Endpoint] = true
+		}
+	}
+	for _, r := range rows {
+		if r.Token != "" {
+			tokens[r.Token] = true
+		}
+		if !r.PendingCreate || counted[r.Key] {
 			continue
 		}
-		if e.Key.ID != "" {
-			if keys[e.Key] {
+		switch g, ok := gate(r.Endpoint); {
+		case ok && g == gateShut:
+			continue
+		case ok && g == gateProbe:
+			counted[r.Key] = true
+			if probed[r.Endpoint] {
 				continue
 			}
-			keys[e.Key] = true
-		}
-		if e.Kind == kindCreate && e.Marker.InstanceToken != "" {
-			tokens[e.Marker.InstanceToken] = true
+			probed[r.Endpoint] = true
+		default:
+			counted[r.Key] = true
 		}
 		n++
 	}
-	probed := make(map[endpointKey]bool)
-	for k, r := range c.Rows {
-		if keys[k] || (r.InstanceToken != "" && tokens[r.InstanceToken]) {
-			continue
-		}
-		switch g, ok := gates[r.Endpoint]; {
-		case r.StartLease:
-			n++
-		case !r.PendingCreate || (ok && g == gateShut):
-		case ok && g == gateProbe && probed[r.Endpoint]:
-			parked[k] = true
-		default:
-			probed[r.Endpoint] = true
-			parked[k] = true
-			n++
-		}
-	}
-	return n, parked
+	return n + v.uncensusedCreates(inflightCensus{Tokens: tokens}), counted
 }
 
-// endpointOutstanding counts, per endpoint, the reserved or issued grants and
-// the creates still in the ledger, once per row: a probe gate admits only an
-// endpoint with none. A committed grant is not outstanding: its start has
-// already resolved the endpoint's ticket.
-func endpointOutstanding(view []ledgerEntry) map[endpointKey]int {
+// endpointOutstanding counts, per endpoint, the running starts and the
+// running or ambiguous creates: a probe gate admits only an endpoint with
+// none. An adopt takes no endpoint ticket (v5 S1), so it is not outstanding.
+func endpointOutstanding(v inflightView) map[endpointKey]int {
 	out := make(map[endpointKey]int)
-	seen := make(map[rowKey]bool)
-	for _, e := range view {
-		switch {
-		case e.Kind == kindGrant && (e.State == ledgerReserved || e.State == ledgerIssued):
-		case e.Kind == kindCreate && ledgerCounts(e):
-		default:
-			continue
+	for _, e := range v.Entries {
+		if e.Kind == inflightStart || e.Kind == inflightCreate {
+			out[e.Endpoint]++
 		}
-		if e.Key.ID != "" {
-			if seen[e.Key] {
-				continue
-			}
-			seen[e.Key] = true
-		}
-		out[e.Endpoint]++
 	}
 	return out
 }
