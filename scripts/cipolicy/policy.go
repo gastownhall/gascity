@@ -236,7 +236,16 @@ const (
 	// Bazel's unit lane runs the same typecheck, Vitest, build, drift and
 	// Playwright steps (//internal/api/dashboardspa/...). Reviewed delta:
 	// removed job, steps and need; no new job, trigger or permission.
-	expectedCIExecutionHash     = "d4d8abba7a6b922694306ef6d10b435cf43fe5e901533b759c7b428341ada997"
+	// Bumped again (ga-96smfk.7, bd contract cells moved to Bazel): the
+	// contract-acceptance-previous and contract-acceptance-current jobs are
+	// removed, and Check and ci-preflight no longer need them (nor allow the
+	// current cell's skip). bazel.yml's unit lane runs the same tests against
+	// pinned bd release archives: //test/acceptance:bd_cli_contract_prev_test
+	// and :bd_cli_contract_current_test, and
+	// //internal/beads:bd_conditional_release_contract_test. Reviewed delta:
+	// two removed jobs and their fan-in references; no new job, trigger or
+	// permission.
+	expectedCIExecutionHash     = "f473b068211415556dd8cb63dcb81b4a57bba29c9a29ef1d314ff01aea23aafd"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

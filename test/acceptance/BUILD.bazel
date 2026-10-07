@@ -1,6 +1,10 @@
 load("@rules_go//go:def.bzl", "go_test")
+load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
 
-# gazelle:build_tags acceptance_a
+# acceptance_bd_contract: the bd CLI contract files are listed in srcs too;
+# the bd_cli_contract_* targets build acceptance_test with that tag alone,
+# and rules_go drops them from every other configuration.
+# gazelle:build_tags acceptance_a,acceptance_bd_contract
 
 go_test(
     name = "acceptance_test",
@@ -8,6 +12,8 @@ go_test(
         "agent_env_test.go",
         "agent_suspend_test.go",
         "beads_blocked_repair_test.go",
+        "beads_cli_contract_home_isolation_test.go",
+        "beads_cli_contract_test.go",
         "beads_health_test.go",
         "beads_migrate_proxied_test.go",
         "beads_proxied_default_test.go",
@@ -69,6 +75,7 @@ go_test(
     shard_count = 17,
     deps = [
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/beads/contract",
         "//internal/beads/proxyendpoint",
         "//internal/builtinpacks",
@@ -98,6 +105,38 @@ go_test(
 exports_files(
     ["BUILD.bazel"],
     visibility = ["//scripts:__pkg__"],
+)
+
+# The external bd CLI contract (`make test-bd-cli-contract` and
+# `make test-bd-cli-contract-home-isolation`, one run): acceptance_test built
+# with -tags acceptance_bd_contract alone, against a pinned bd per cell.
+# GC_ACCEPTANCE_BD_BIN names the cell's bd and nothing else is used: a set
+# override that does not resolve fails the test (helpers.RequireBD).
+#
+#   prev     deps.env BD_PREV_VERSION, the minimum-supported release
+#   current  deps.env BD_CURRENT_REF; that commit is the v1.3.1 tag, whose
+#            release binary is @bd_bin_v1_3_1 (scripts/bd_contract_pins_test.go
+#            pins the correspondence)
+BD_CLI_CONTRACT_RUN = "-test.run=^(TestBdBasicCRUD|TestBdDependencies|TestBdDestructive|TestBdWorkflow|TestRunBDIsolatesHOMEFromSharedServerConfig)$$"
+
+go_variant_test(
+    name = "bd_cli_contract_prev_test",
+    size = "large",
+    args = [BD_CLI_CONTRACT_RUN],
+    data = ["@bd_bin_v1_0_4//:bd"],
+    env = {"GC_ACCEPTANCE_BD_BIN": "$(rootpath @bd_bin_v1_0_4//:bd)"},
+    gotags = ["acceptance_bd_contract"],
+    test = ":acceptance_test",
+)
+
+go_variant_test(
+    name = "bd_cli_contract_current_test",
+    size = "large",
+    args = [BD_CLI_CONTRACT_RUN],
+    data = ["@bd_bin_v1_3_1//:bd"],
+    env = {"GC_ACCEPTANCE_BD_BIN": "$(rootpath @bd_bin_v1_3_1//:bd)"},
+    gotags = ["acceptance_bd_contract"],
+    test = ":acceptance_test",
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

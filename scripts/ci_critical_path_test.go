@@ -270,7 +270,6 @@ func TestPRTestJobsInstallOnlyRuntimeDependencies(t *testing.T) {
 
 	for _, jobName := range []string{
 		"preflight-acceptance",
-		"contract-acceptance-current",
 		"contract-radar-bd-head",
 	} {
 		job := wf.Jobs[jobName]
@@ -288,12 +287,13 @@ func TestPRTestJobsInstallOnlyRuntimeDependencies(t *testing.T) {
 func TestAcceptanceJobsUseOnlyTheirHermeticProviderSetup(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
 
+	// The prev/current bd contract cells run under Bazel
+	// (scripts/bd_contract_pins_test.go); the advisory bd main HEAD radar is
+	// the one contract job left in ci.yml.
 	providerSetupMarker := map[string]string{
-		"contract-acceptance-previous": "install-bd-archive.sh",
-		"contract-acceptance-current":  "go -C \"$src\" build",
-		"contract-radar-bd-head":       "go -C \"$src\" build",
+		"contract-radar-bd-head": "go -C \"$src\" build",
 	}
-	for _, jobName := range []string{"contract-acceptance-previous", "contract-acceptance-current", "contract-radar-bd-head"} {
+	for _, jobName := range []string{"contract-radar-bd-head"} {
 		job := wf.Jobs[jobName]
 		var hasSetupGo bool
 		providerSetupIndex := -1
@@ -328,16 +328,6 @@ func TestAcceptanceJobsUseOnlyTheirHermeticProviderSetup(t *testing.T) {
 		}
 	}
 
-	var previousBDInstalled bool
-	for _, step := range wf.Jobs["contract-acceptance-previous"].Steps {
-		if strings.Contains(step.Run, "install-bd-archive.sh") && strings.Contains(step.Run, "BD_PREV_VERSION") {
-			previousBDInstalled = true
-		}
-	}
-	if !previousBDInstalled {
-		t.Error("previous-bd contract job must install the deps.env minimum-supported bd so CLI contract tests cannot silently skip")
-	}
-
 	var tierAHasSetupGo, tierARunsBroadSuite bool
 	for _, step := range wf.Jobs["preflight-acceptance"].Steps {
 		if strings.Contains(step.Uses, "actions/setup-go") {
@@ -364,11 +354,6 @@ func TestAcceptanceJobsUseOnlyTheirHermeticProviderSetup(t *testing.T) {
 	}
 
 	check := wf.Jobs["check"]
-	for _, need := range []string{"contract-acceptance-previous", "contract-acceptance-current"} {
-		if !slices.Contains(check.Needs, need) {
-			t.Errorf("Check needs = %v, want required bd contract %q", check.Needs, need)
-		}
-	}
 	if slices.Contains(check.Needs, "contract-radar-bd-head") {
 		t.Errorf("Check needs = %v: bd main HEAD radar must remain advisory", check.Needs)
 	}
@@ -743,22 +728,11 @@ func TestCIPreflightFansInDirectlyWithoutWaitingForHistoricalCheck(t *testing.T)
 		"preflight-static",
 		"preflight-acceptance",
 		"preflight-generated",
-		"contract-acceptance-previous",
-		"contract-acceptance-current",
 		"release-config",
 	} {
 		if !slices.Contains(job.Needs, need) {
 			t.Errorf("ci-preflight needs = %v, want direct dependency %q", job.Needs, need)
 		}
-	}
-	var permitsCurrentContractSkip bool
-	for _, step := range job.Steps {
-		if strings.Contains(step.Run, "allow_skipped") && strings.Contains(step.Run, `"contract-acceptance-current"`) {
-			permitsCurrentContractSkip = true
-		}
-	}
-	if !permitsCurrentContractSkip {
-		t.Error("ci-preflight must allow the path-gated current-bd contract to skip")
 	}
 	if !slices.Contains(wf.Jobs["ci-required"].Needs, "ci-preflight") {
 		t.Errorf("ci-required needs = %v, want ci-preflight aggregate", wf.Jobs["ci-required"].Needs)

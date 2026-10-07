@@ -1,10 +1,10 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
 
-# :beads_native_doltlite_test builds this package with -tags
-# gascity_native_beads (beside the root's integration); gazelle lists the
-# tagged files in srcs, and rules_go drops them again in every configuration
-# without the tag.
+# :beads_native_doltlite_test and :bd_conditional_release_contract_test
+# build this package with -tags gascity_native_beads and -tags integration;
+# gazelle lists the tagged files in srcs, and rules_go drops them again in
+# every configuration without the tag.
 # gazelle:build_tags gascity_native_beads,integration
 
 go_library(
@@ -362,6 +362,31 @@ go_variant_test(
     args = ["-test.run=^TestDoltlite"],
     gotags = ["gascity_native_beads"],
     test = ":beads_test",
+)
+
+# The ReleaseIfCurrent CAS contract against a real bd
+# (`make test-bd-conditional-release-contract`): beads_test built with
+# -tags integration, with deps.env BD_CURRENT_REF's bd (the v1.3.1 tag,
+# @bd_bin_v1_3_1) first on PATH (GC_TEST_TOOL_PATHS, internal/testenv).
+# GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's capability skip into a
+# failure. The integration-packages lane also runs the row (without that
+# switch); this target is the strict cell, and runs for fork PRs too.
+go_variant_test(
+    name = "bd_conditional_release_contract_test",
+    args = ["-test.run=^TestBdStoreReleaseIfCurrentAgainstRealBd$$"],
+    data = ["@bd_bin_v1_3_1//:bd"],
+    env = {
+        "GC_REQUIRE_BD_CONDITIONAL_RELEASE": "1",
+        "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_1//:bd)",
+    },
+    gotags = ["integration"],
+    test = ":beads_test",
+)
+
+# scripts/bd_contract_pins_test.go pins bd_conditional_release_contract_test.
+exports_files(
+    ["BUILD.bazel"],
+    visibility = ["//scripts:__pkg__"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

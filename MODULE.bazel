@@ -379,6 +379,17 @@ exports_files(["bd"])
 """,
 )
 
+# deps.env BD_PREV_VERSION, the minimum-supported bd: the "previous" cell of
+# the bd CLI contract (//test/acceptance:bd_cli_contract_prev_test).
+http_archive(
+    name = "bd_bin_v1_0_4",
+    urls = ["https://github.com/gastownhall/beads/releases/download/v1.0.4/beads_1.0.4_linux_amd64.tar.gz"],
+    sha256 = "643e602e27f666c8726abff0f22001e2b5883988fa960204bde20a3129d448a5",
+    build_file_content = """
+exports_files(["bd"])
+""",
+)
+
 http_archive(
     name = "dolt_bin_v2_2_0",
     urls = ["https://github.com/dolthub/dolt/releases/download/v2.2.0/dolt-linux-amd64.tar.gz"],
