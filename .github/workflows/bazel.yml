@@ -32,7 +32,10 @@
 #     rest_smoke_tests; .bazelrc test:integration-smoke) and gates, in
 #     every mode: they
 #     never failed in 33 main runs of the full suite, which is still flaky;
-#   - integration runs on pushes and dispatches only, evidence-only, until G3;
+#   - integration runs on the nightly schedule and dispatches only,
+#     evidence-only, until G3 (bazel-nightly.yml; off every push since
+#     rbe-ci-cost-latency-study.md recommendation 5: evidence-only, so its
+#     wall time on every push bought nothing);
 #   - fork and Dependabot PRs ask rbe-west's mint (mode fork-ro/fork-rw);
 #     closed, refused or unreachable, the run takes mode cache: lanes execute
 #     on the runner with lookups in the anonymous read-only cache. A lane
@@ -42,10 +45,12 @@
 #     unit, acceptance, integration-packages and integration-smoke, in
 #     fork-ro and fork-rw alike (the mint allows 12 per run and 160 per PR a
 #     day, so a run and two re-runs stay inside both);
-#   - coverage (push to main, remote) uploads lcov to Codecov (flag
-#     bazel-unit) and as an artifact;
+#   - coverage (nightly schedule or dispatch, remote) uploads lcov to
+#     Codecov (flag bazel-unit) and as an artifact; also off every push
+#     since recommendation 5, same reasoning as integration above;
 #   - bep-summary reports cached vs executed test targets per lane from the
-#     lanes' BEP files and gates nothing.
+#     lanes' BEP files and gates nothing; it also runs the shard-balance
+#     budget (recommendation 4) over the same BEP files, warning-only.
 name: bazel
 
 on:
@@ -180,9 +185,15 @@ jobs:
           # `gc init` no longer clones gascity-packs (#7005), and no
           # integration_packages target needs the network.
           lanes="$unit,$acceptance,$packages,$smoke"
-          # Pushes and dispatches only until G3 (evidence-only on pull
-          # requests would only spend the pool).
-          case "$EVENT" in push|workflow_dispatch) lanes+=",$integration" ;; esac
+          # Dispatches and the nightly schedule only (rbe-ci-cost-latency-
+          # study.md recommendation 5): evidence-only until G3, so paying its
+          # wall time on every push to main bought nothing; bazel-nightly.yml
+          # calls this workflow on a schedule (github.event_name is then
+          # "schedule", inherited from the calling run) and workflow_dispatch
+          # dispatches it directly too. When integration becomes required,
+          # gate it in a merge queue instead of moving it back onto push
+          # (follow-up, not built here).
+          case "$EVENT" in workflow_dispatch|schedule) lanes+=",$integration" ;; esac
           echo "lanes=[$lanes]" >> "$GITHUB_OUTPUT"
 
       - name: Resolve the base branch commit (fresh-merge)
@@ -573,6 +584,23 @@ jobs:
             integration-packages="$dir/bazel-bep-integration-packages-$ATTEMPT/bazel-bep.json" \
             integration-smoke="$dir/bazel-bep-integration-smoke-$ATTEMPT/bazel-bep.json" \
             integration="$dir/bazel-bep-integration-$ATTEMPT/bazel-bep.json" >> "$GITHUB_STEP_SUMMARY"
+      # rbe-ci-cost-latency-study.md recommendation 4: keeps #7241's
+      # acceptance re-shard gain and would have caught a slowest-shard
+      # straggler like beads' server-Dolt storage tier (4.3-4.5 min behind
+      # in 2 of 8 runs). Warns (::warning) on every lane's BEP file; does
+      # not fail the run yet (--fail-on-imbalance, not passed here, switches
+      # that on once the budget has run clean for a while).
+      - name: Shard balance
+        continue-on-error: true
+        run: |
+          dir="$RUNNER_TEMP/bazel-bep"
+          go run ./scripts/shard-budget.go \
+            "$dir/bazel-bep-unit-${{ github.run_attempt }}/bazel-bep.json" \
+            "$dir/bazel-bep-acceptance-${{ github.run_attempt }}/bazel-bep.json" \
+            "$dir/bazel-bep-integration-packages-${{ github.run_attempt }}/bazel-bep.json" \
+            "$dir/bazel-bep-integration-smoke-${{ github.run_attempt }}/bazel-bep.json" \
+            "$dir/bazel-bep-integration-${{ github.run_attempt }}/bazel-bep.json" \
+            --allow-missing >> "$GITHUB_STEP_SUMMARY"
       - name: Upload bazel test cache report
         if: always()
         continue-on-error: true
@@ -583,13 +611,17 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
-  # Push to main only, as the go-test arm's coverage (preflight-unit-cover-*):
+  # Nightly schedule or dispatch only (rbe-ci-cost-latency-study.md
+  # recommendation 5; bazel-nightly.yml calls this workflow once a day).
+  # Reporting only, so it bought nothing paying its 90-minute budget on
+  # every push to main; moved off push the same way as the integration lane
+  # above. As the go-test arm's coverage (preflight-unit-cover-*):
   # instrumented builds are their own configuration, so this is a separate
   # job, and its first run on a cold cache compiles the world under coverage.
   coverage:
     name: bazel / coverage
     needs: rbe
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.rbe.outputs.mode == 'remote'
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.rbe.outputs.mode == 'remote'
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 90
     permissions:

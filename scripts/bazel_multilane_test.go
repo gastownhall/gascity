@@ -344,7 +344,9 @@ func wantMultiLanes(event, _ string) []string {
 	// (fork-ro: no network) included: gc init no longer clones gascity-packs
 	// (#7005), and no integration_packages target needs the network.
 	lanes := []string{"unit", "acceptance", "integration-packages", "integration-smoke"}
-	if event == "push" || event == "workflow_dispatch" { // until G3
+	// Nightly (schedule, via bazel-nightly.yml) and dispatches only, until
+	// G3; off every push (rbe-ci-cost-latency-study.md recommendation 5).
+	if event == "workflow_dispatch" || event == "schedule" {
 		lanes = append(lanes, "integration")
 	}
 	return lanes
@@ -930,14 +932,14 @@ func TestBazelMultiLaneForkFallback(t *testing.T) {
 	}
 }
 
-// TestBazelMultiLaneCoverageUploadsToCodecov: push-to-main coverage reports
-// the combined lcov to Codecov under flag bazel-unit, kept apart from the
-// go-test arm's flags.
+// TestBazelMultiLaneCoverageUploadsToCodecov: nightly (schedule) or
+// dispatch coverage reports the combined lcov to Codecov under flag
+// bazel-unit, kept apart from the go-test arm's flags.
 func TestBazelMultiLaneCoverageUploadsToCodecov(t *testing.T) {
 	wf := readMultiLaneWorkflow(t)
 	cov := wf.Jobs["coverage"]
-	if !strings.HasPrefix(cov.If, "github.event_name == 'push' && github.ref == 'refs/heads/main'") {
-		t.Errorf("coverage if %q; want push to main only", cov.If)
+	if !strings.HasPrefix(cov.If, "(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'") {
+		t.Errorf("coverage if %q; want nightly schedule or dispatch, main only", cov.If)
 	}
 	n := 0
 	for _, s := range cov.Steps {
