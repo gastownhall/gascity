@@ -1,4 +1,29 @@
+load("@bazel_lib//lib:copy_directory.bzl", "copy_directory")
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@bazel_lib//lib:diff_test.bzl", "diff_test")
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# dist/, as embed.go's `//go:embed all:dist` names it, from the Bazel build.
+copy_directory(
+    name = "dist",
+    src = "//internal/api/dashboardspa/web/frontend:build",
+    out = "dist",
+)
+
+# The committed dist/ (what a Node-less `go build` embeds) must be exactly the
+# bundle the sources build to: byte-for-byte, file-for-file.
+copy_to_directory(
+    name = "committed_dist",
+    srcs = glob(["dist/**"]),
+    root_paths = ["internal/api/dashboardspa/dist"],
+)
+
+diff_test(
+    name = "dist_in_sync_test",
+    failure_message = "internal/api/dashboardspa/dist/ is stale: run make dashboard-build and commit the result.",
+    file1 = ":committed_dist",
+    file2 = ":dist",
+)
 
 go_library(
     name = "dashboardspa",
@@ -6,45 +31,10 @@ go_library(
         "embed.go",
         "handler.go",
     ],
-    embedsrcs = [
-        "dist/assets/context-window-O2hS3NR_.js",
-        "dist/assets/format-fte2CeYD.js",
-        "dist/assets/index-3CR_Qhva.css",
-        "dist/assets/inter-cyrillic-ext-wght-normal-BOeWTOD4.woff2",
-        "dist/assets/inter-cyrillic-wght-normal-DqGufNeO.woff2",
-        "dist/assets/inter-greek-ext-wght-normal-DlzME5K_.woff2",
-        "dist/assets/inter-greek-wght-normal-CkhJZR-_.woff2",
-        "dist/assets/inter-latin-ext-wght-normal-DO1Apj_S.woff2",
-        "dist/assets/inter-latin-wght-normal-Dx4kXJAl.woff2",
-        "dist/assets/inter-vietnamese-wght-normal-CBcvBZtf.woff2",
-        "dist/assets/routeHighlight-B30gQO2o.js",
-        "dist/assets/time-BVuL_AnL.js",
-        "dist/favicon-alert.svg",
-        "dist/favicon-calm.svg",
-        "dist/index.html",
-        "dist/assets/Activity-DzM4B85R.js",
-        "dist/assets/AgentDetail-BX7f70p3.js",
-        "dist/assets/Agents-DbDI-YfL.js",
-        "dist/assets/BeadDetailModal-B-vs30GL.js",
-        "dist/assets/Beads-DspN7lNM.js",
-        "dist/assets/CockpitHome-BuAsABcb.js",
-        "dist/assets/Field-GZ5Nq2GP.js",
-        "dist/assets/FormulaRunDetail-DRd_KyfS.js",
-        "dist/assets/Health-CFAZKiio.js",
-        "dist/assets/LiveSessionPeek-_eZzRYP4.js",
-        "dist/assets/Mail-DTL62R9m.js",
-        "dist/assets/PageHeader-CPqWK14Y.js",
-        "dist/assets/Runs-Dsf-WVjJ.js",
-        "dist/assets/SseIndicator-CC0ChpLn.js",
-        "dist/assets/StageLadder-UIrlHKmm.js",
-        "dist/assets/Table-CfgpG2w2.js",
-        "dist/assets/agentReads-DAWv9ZVu.js",
-        "dist/assets/constants-5vf2nIB1.js",
-        "dist/assets/index-BQrr_UeM.js",
-        "dist/assets/projectOf-CD7UB2kU.js",
-        "dist/assets/useListFilters-Bm7fwYSZ.js",
-        "dist/assets/useVisibleRefresh-6De0TJ97.js",
-    ],
+    # The SPA bundle built by Bazel (vite under rules_js), not the committed
+    # dist/ copy: //cmd/gc embeds what the sources build to. dist_in_sync_test
+    # keeps the committed copy (what a Node-less `go build` embeds) identical.
+    embedsrcs = [":dist"],  # keep
     importpath = "github.com/gastownhall/gascity/internal/api/dashboardspa",
     visibility = ["//:__subpackages__"],
 )

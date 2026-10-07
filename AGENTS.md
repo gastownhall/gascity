@@ -293,7 +293,9 @@ Before considering any task complete:
   above passes
 - `.githooks/pre-commit` is active locally (verify with `make check-hooks`)
   and has run for the staged change
-- `make dashboard-ci` passes and the dashboard serves locally for any change
+- `make dashboard-check` passes (the dashboard's Bazel targets: typecheck,
+  Vitest, build, and drift checks, which `bazel test //...` also runs) and the
+  dashboard serves locally (a manual `npm run preview` step) for any change
   touching the API, the OpenAPI spec, or the dashboard
   (`internal/api/AGENTS.md`)
 - Every exported function has a doc comment

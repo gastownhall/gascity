@@ -73,12 +73,15 @@ npm is missing and a spec change is staged, the hook now fails closed with
 the recovery command, since a stale client would otherwise ship silently
 until CI catches it — for unrelated (docs/Go-only) changes it still just
 warns and skips the rebuild. The hook runs dashboard typecheck, Vitest, and
-production build for dashboard/API-schema changes. Run `make dashboard-dev`
+production build for dashboard/API-schema changes. Bazel builds and tests
+the SPA hermetically (rules_js: a pinned Node.js, and every npm package from
+`pnpm-lock.yaml`), and that is what CI gates on. Run `make dashboard-dev`
 to iterate with Vite HMR, `make dashboard-build` to produce a fresh
-bundle, `make dashboard-check` for typecheck + build + test. For
-API-schema changes, run `make dashboard-ci` instead — it also regenerates
-the typed client from the spec and fails if that or `dist/` is stale,
-which `dashboard-check` alone does not catch. For dashboard or API-schema
+bundle, `make dashboard-check` for typecheck + Vitest + build + the drift
+checks (the committed `dist/`, the generated client and `pnpm-lock.yaml`
+must match their sources; `make dashboard-generate-client` and
+`make dashboard-lock` regenerate the latter two). After changing npm
+dependencies with npm, run `make dashboard-lock`. For dashboard or API-schema
 changes, also smoke the built app with
 `npm run preview -- --host 127.0.0.1 --port <port>` from
 `internal/api/dashboardspa/web/` and load the served page before pushing.
@@ -244,10 +247,11 @@ Run `make help` for the full list. The most useful targets are:
 | `make bazel-sync` | Regenerate BUILD files after adding packages, files, or imports |
 | `make test-go`, `make check-go`, ... | Plain-Go twins of the targets above, for offline work; not what CI enforces |
 | `make test-integration-huma` | Supervisor binary smoke test (builds `gc`, boots the supervisor, asserts `/openapi.json` + `gc cities` work) |
-| `make dashboard-build` | Compile the dashboard bundle and sync it into the embedded `dist/` |
+| `make dashboard-build` | Build the dashboard bundle under Bazel and sync it into the embedded `dist/` (`dashboard-build-npm`: the same through local npm) |
 | `make dashboard-dev` | Vite dev server for SPA iteration |
-| `make dashboard-check` | Typecheck + build + test the dashboard |
-| `make dashboard-ci` | `dashboard-check` plus fail-on-drift for the generated API client and `dist/` — the gate for openapi.json/dashboard changes |
+| `make dashboard-check` | The dashboard's Bazel gate: typecheck, Vitest, build, and drift checks for `dist/`, the generated API client and `pnpm-lock.yaml` (`dashboard-ci` is an alias; `dashboard-check-npm` runs the npm steps locally) |
+| `make dashboard-generate-client` | Regenerate the typed API client from `internal/api/openapi.json` |
+| `make dashboard-lock` | Re-derive `pnpm-lock.yaml` (what Bazel installs) from `package-lock.json` |
 | `make cover` | Go-native coverage run (CI's coverage is `bazel coverage //...`) |
 
 > **`make install` writes to the shared `$(go env GOPATH)/bin`.** It (and

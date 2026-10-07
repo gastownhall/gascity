@@ -1,3 +1,4 @@
+load("@bazel_lib//lib:copy_to_bin.bzl", "copy_to_bin")
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
@@ -543,6 +544,14 @@ exports_files([
     # //cmd/genspec:genspec_in_sync_test.
     "openapi.json",
 ])
+
+# The spec where the dashboard's openapi-ts config reads it (../../openapi.json
+# from dashboardspa/web) inside the output tree rules_js runs tools in.
+copy_to_bin(
+    name = "openapi_json_bin",
+    srcs = ["openapi.json"],
+    visibility = ["//internal/api/dashboardspa/web:__pkg__"],
+)
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 

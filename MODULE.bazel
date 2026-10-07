@@ -29,6 +29,15 @@ bazel_dep(name = "rules_cc", version = "0.2.17")
 bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_python", version = "1.7.0")
 
+# The dashboard SPA (internal/api/dashboardspa/web) builds and tests under
+# rules_js: a pinned Node.js toolchain, every npm package fetched by Bazel
+# from the committed pnpm-lock.yaml (integrity-pinned, so remote workers
+# need neither npm nor network), and tsc/vite/vitest run as Bazel actions.
+bazel_dep(name = "aspect_rules_js", version = "3.5.1")
+bazel_dep(name = "aspect_rules_ts", version = "3.10.1")
+bazel_dep(name = "rules_nodejs", version = "6.7.6")
+bazel_dep(name = "bazel_lib", version = "3.7.2")
+
 # Hermetic C/C++ toolchain. rules_go builds the Go stdlib and every cgo
 # package (Dolt's go-icu-regex, gozstd, gopsutil, ...) with the registered C
 # toolchain, and every Go compile depends on the stdlib, so a host-detected
@@ -374,3 +383,63 @@ http_archive(
 exports_files(["dolt-linux-amd64/bin/dolt"])
 """,
 )
+
+# JavaScript: ONE Node.js toolchain and ONE npm mechanism (rules_js) for
+# every Node workspace Bazel builds or tests. Workers have no npm and fork
+# lanes no network, so packages come only from committed, integrity-pinned
+# lockfiles fetched here.
+#
+# Node.js 22, sha256-checked by rules_nodejs; it satisfies every workspace's
+# engines (dashboard >=22.13.0, contrib/openclaw-bridge >=22.19.0).
+node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
+node.toolchain(node_version = "22.23.2")
+
+# One npm_translate_lock per npm workspace, named npm_<area>, each with:
+#   * package-lock.json kept as the source of truth for local `npm ci`;
+#   * pnpm-lock.yaml beside it, its `pnpm import` translation (same package
+#     set and versions), committed so the fetch never runs pnpm or touches the
+#     source tree; regenerate with
+#     `bazel run -- @pnpm//:pnpm --dir "$PWD/<dir>" import`;
+#   * a pnpm_lock_in_sync_test (//tools/bazel/rules:pnpm_lock.bzl) beside the
+#     lockfiles, which fails when the two drift;
+#   * its node_modules directories listed in .bazelignore.
+# Install scripts stay off unless a package needs one under Bazel.
+npm = use_extension("@aspect_rules_js//npm:extensions.bzl", "npm")
+
+# The dashboard SPA (internal/api/dashboardspa/web). Its only install scripts
+# (esbuild's binary check, fsevents) are not needed with esbuild's platform
+# package present.
+npm.npm_translate_lock(
+    name = "npm_dashboard",
+    data = [
+        "//internal/api/dashboardspa/web/frontend:package.json",
+        "//internal/api/dashboardspa/web/shared:package.json",
+        "//internal/api/dashboardspa/web:package.json",
+        "//internal/api/dashboardspa/web:pnpm-workspace.yaml",
+    ],
+    pnpm_lock = "//internal/api/dashboardspa/web:pnpm-lock.yaml",
+    # pnpm's default public-hoist-pattern (*types*) and npm's flat tree both
+    # make @types/react visible to react-router-dom's typings; rules_js
+    # hoists nothing unless asked.
+    public_hoist_packages = {
+        "@types/node": ["internal/api/dashboardspa/web"],
+        "@types/react": ["internal/api/dashboardspa/web"],
+        "@types/react-dom": ["internal/api/dashboardspa/web"],
+    },
+    run_lifecycle_hooks = False,
+    verify_node_modules_ignored = "//:.bazelignore",
+)
+use_repo(npm, "npm_dashboard")
+
+# pnpm itself, for `pnpm import` (make dashboard-lock).
+pnpm = use_extension("@aspect_rules_js//npm:extensions.bzl", "pnpm")
+use_repo(pnpm, "pnpm")
+
+# rules_ts's tsc for ts_project: the version the dashboard's pnpm-lock.yaml
+# resolves (its lockfiles_in_sync_test keeps them equal).
+typescript = use_extension("@aspect_rules_ts//ts:extensions.bzl", "typescript")
+typescript.deps(
+    integrity = "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
+    version = "5.9.3",
+)
+use_repo(typescript, "npm_typescript")

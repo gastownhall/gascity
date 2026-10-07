@@ -1,1 +1,4 @@
-# Starlark helpers for the repo's BUILD files (go_variant_test.bzl).
+# Starlark helpers for the repo's BUILD files (go_variant_test.bzl,
+# pnpm_lock.bzl) and the scripts they run.
+
+exports_files(["pnpm_lock_in_sync_test.py"])
