@@ -456,3 +456,99 @@ func TestSweep_SiblingStoresNeverWidenToContainer(t *testing.T) {
 		}
 	}
 }
+
+// TestSweep_KeepMarkersAndFailClosedLsofScanCompose pins the keep-marker and
+// fail-closed guarantees together. One root holds a .gc-no-reap Dolt clone, a
+// container whose nested store sits beside unrelated payload, and a flat
+// orphan. While the lsof scan is incomplete nothing is removed, and only the
+// container and the orphan count as skipped: the kept clone is exempt before
+// the scan runs. Once the scan completes, exactly the nested store and the
+// orphan go; the kept clone, the container and its payload survive.
+func TestSweep_KeepMarkersAndFailClosedLsofScanCompose(t *testing.T) {
+	old := time.Now().Add(-2 * time.Hour)
+
+	type fixture struct {
+		root        string
+		nestedStore string
+		orphan      string
+		// kept lists every path that must outlive any pass.
+		kept []string
+	}
+	build := func(t *testing.T) fixture {
+		t.Helper()
+		root := t.TempDir()
+		clone := mkStoreDir(t, root, "kept-clone", 2, old)
+		if err := os.WriteFile(filepath.Join(clone, ".gc-no-reap"), nil, 0o644); err != nil {
+			t.Fatalf("WriteFile(.gc-no-reap): %v", err)
+		}
+		// Re-age clone: writing the marker just refreshed its mtime.
+		if err := os.Chtimes(clone, old, old); err != nil {
+			t.Fatalf("Chtimes(%s): %v", clone, err)
+		}
+		container, nestedStore, binary, script := buildContainerWithNestedStoreAndSiblings(t, root, old)
+		return fixture{
+			root:        root,
+			nestedStore: nestedStore,
+			orphan:      mkStoreDir(t, root, "orphan1", 1, old),
+			kept:        []string{storeDirFor(clone, 2), container, binary, script},
+		}
+	}
+	assertExist := func(t *testing.T, paths ...string) {
+		t.Helper()
+		for _, p := range paths {
+			if _, err := os.Stat(p); err != nil {
+				t.Fatalf("%s should still exist: %v", p, err)
+			}
+		}
+	}
+
+	// putLsofOnPath makes Sweep's default lsof runner execute a stub: the
+	// stub prints one line, so the scan has output, then runs body.
+	putLsofOnPath := func(t *testing.T, body string) {
+		t.Helper()
+		dir := t.TempDir()
+		script := "#!/bin/sh\nprintf 'partial\\n'\n" + body + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "lsof"), []byte(script), 0o755); err != nil {
+			t.Fatalf("WriteFile(lsof stub): %v", err)
+		}
+		t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+
+	t.Run("incomplete scan removes nothing", func(t *testing.T) {
+		f := build(t)
+
+		putLsofOnPath(t, "exit 127")
+		result := Sweep(SweepConfig{Root: f.root})
+
+		if len(result.Removed) != 0 {
+			t.Fatalf("Removed = %v, want none when the lsof scan is incomplete", result.Removed)
+		}
+		if len(result.Errors) != 1 {
+			t.Fatalf("Errors = %v, want exactly the lsof scan error", result.Errors)
+		}
+		if result.Skipped != 2 {
+			t.Fatalf("Skipped = %d, want 2 (the container and the orphan, not the kept clone)", result.Skipped)
+		}
+		assertExist(t, append([]string{f.nestedStore, f.orphan}, f.kept...)...)
+	})
+
+	t.Run("complete scan removes only the stores", func(t *testing.T) {
+		f := build(t)
+
+		putLsofOnPath(t, "exit 0")
+		result := Sweep(SweepConfig{Root: f.root})
+
+		if len(result.Errors) != 0 {
+			t.Fatalf("Errors = %v, want none for a complete scan", result.Errors)
+		}
+		if len(result.Removed) != 2 || result.Removed[0] != f.nestedStore || result.Removed[1] != f.orphan {
+			t.Fatalf("Removed = %v, want exactly [%s %s]", result.Removed, f.nestedStore, f.orphan)
+		}
+		for _, p := range result.Removed {
+			if _, err := os.Stat(p); !os.IsNotExist(err) {
+				t.Fatalf("%s should have been removed, stat err = %v", p, err)
+			}
+		}
+		assertExist(t, f.kept...)
+	})
+}
