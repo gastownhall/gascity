@@ -134,6 +134,11 @@ test:integration --test_timeout=1100
 # The integration tier also runs the process-backed tests the unit lane
 # skips, as scripts/test-integration-shard does.
 test:integration --test_env=GC_FAST_UNIT=0
+# nogo (//tools/nogo) gates the untagged build in the unit lane. The tagged
+# suites' own files were never linted (golangci-lint ran untagged) and have
+# open findings, so their lanes skip validation actions until those are fixed.
+test:acceptance --norun_validations
+test:integration --norun_validations
 
 # No --remote_cache_compression here: bazel.yml's lanes add it for fork-cache
 # while rbe-cache advertises zstd (tools/rbe/cache-zstd-probe.sh), so the
