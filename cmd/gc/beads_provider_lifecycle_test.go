@@ -8629,12 +8629,46 @@ func readGcBeadsBdHealTestLog(t *testing.T, path string) string {
 
 // requireFlockForTest skips a test that needs the script to take its init
 // lock: without the host's flock binary op_init takes none, and refuses to
-// reset an interrupted bootstrap or force a reinit at all.
-func requireFlockForTest(t *testing.T) {
+// reset an interrupted bootstrap or force a reinit at all. It returns the
+// host flock's path.
+func requireFlockForTest(t *testing.T) string {
 	t.Helper()
-	if _, err := exec.LookPath("flock"); err != nil {
+	path, err := exec.LookPath("flock")
+	if err != nil {
 		t.Skip("flock not installed")
 	}
+	return path
+}
+
+// installMacOSFlockForTest puts a flock ahead of hostFlock on the script's
+// PATH that refuses a -w timeout of zero or less, as the macOS port
+// (discoteq/flock, `brew install flock`) does where util-linux reads -w 0 as
+// "do not wait", and runs hostFlock for everything else. A test that gives
+// init no wait budget then fails on every host, not only on macOS, when init
+// asks flock for a wait the macOS port refuses.
+func installMacOSFlockForTest(t *testing.T, binDir, hostFlock string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "flock"), fmt.Sprintf(`#!/bin/sh
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-w" ] && [ "$arg" -le 0 ] 2>/dev/null; then
+    echo "flock: timeout must be greater than 0, was $arg" >&2
+    exit 64
+  fi
+  prev="$arg"
+done
+exec %q "$@"
+`, hostFlock))
+}
+
+// failedOnHeldInitLock reports whether init gave up on database hq's init
+// lock because another initializer holds it: the lock error, and nothing
+// from flock itself, which is silent when it finds the lock held and
+// complains only when it refuses its arguments.
+func failedOnHeldInitLock(out []byte, err error) bool {
+	return err != nil &&
+		strings.Contains(string(out), "could not acquire init lock for database 'hq'") &&
+		!strings.Contains(string(out), "flock: ")
 }
 
 // holdGcBeadsBdInitLockForTest takes database db's init lock in lockDir the
@@ -8767,9 +8801,10 @@ func TestGcBeadsBdInitHealsOnlyAConfirmedInterruptedBootstrap(t *testing.T) {
 // lock, migrating (shared) or forcing a reinit (exclusive), init must give up
 // with the lock error instead of resetting the database or running bd against
 // it, on both paths the heal runs on: a present schema (the ready path) and a
-// missing one (before a forced reinit).
+// missing one (before a forced reinit). Init gets no wait budget, under a
+// flock that refuses a zero wait the way the macOS port does.
 func TestGcBeadsBdInitNeverHealsWhileAnotherInitializerHoldsTheLock(t *testing.T) {
-	requireFlockForTest(t)
+	hostFlock := requireFlockForTest(t)
 	for _, tc := range []struct {
 		name    string
 		markers []string
@@ -8782,11 +8817,12 @@ func TestGcBeadsBdInitNeverHealsWhileAnotherInitializerHoldsTheLock(t *testing.T
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newGcBeadsBdHealTest(t, true, 0, tc.markers...)
+			installMacOSFlockForTest(t, h.binDir, hostFlock)
 			lockDir := t.TempDir()
 			holdGcBeadsBdInitLockForTest(t, lockDir, "hq", tc.how)
 
 			out, err := h.runInit(t, "GC_DOLT_INIT_LOCK_DIR="+lockDir, "GC_DOLT_INIT_LOCK_TIMEOUT_MS=0")
-			if err == nil || !strings.Contains(string(out), "could not acquire init lock for database 'hq'") {
+			if !failedOnHeldInitLock(out, err) {
 				t.Fatalf("expected init to fail on the held init lock, got err=%v:\n%s", err, out)
 			}
 			sql, bdArgs := h.logs(t)
@@ -8805,9 +8841,11 @@ func TestGcBeadsBdInitNeverHealsWhileAnotherInitializerHoldsTheLock(t *testing.T
 // plain `bd init`: each runs alongside another initializer's migration (both
 // hold the lock shared, so migrations never queue behind one another, as they
 // did not before the lock existed), and neither runs while another initializer
-// holds the lock exclusively to reset the database or force a reinit.
+// holds the lock exclusively to reset the database or force a reinit. Init
+// gets no wait budget, under a flock that refuses a zero wait the way the
+// macOS port does.
 func TestGcBeadsBdInitMigrationStepsHoldTheInitLockShared(t *testing.T) {
-	requireFlockForTest(t)
+	hostFlock := requireFlockForTest(t)
 	for _, tc := range []struct {
 		name         string
 		withMetadata bool
@@ -8822,6 +8860,7 @@ func TestGcBeadsBdInitMigrationStepsHoldTheInitLockShared(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newGcBeadsBdHealTest(t, tc.withMetadata, 0, tc.markers...)
+			installMacOSFlockForTest(t, h.binDir, hostFlock)
 			lockDir := t.TempDir()
 			holdGcBeadsBdInitLockForTest(t, lockDir, "hq", tc.how)
 
@@ -8836,7 +8875,7 @@ func TestGcBeadsBdInitMigrationStepsHoldTheInitLockShared(t *testing.T) {
 				}
 				return
 			}
-			if err == nil || !strings.Contains(string(out), "could not acquire init lock for database 'hq'") {
+			if !failedOnHeldInitLock(out, err) {
 				t.Fatalf("expected init to fail on the held init lock, got err=%v:\n%s", err, out)
 			}
 			if strings.Contains(bdArgs, tc.step) {

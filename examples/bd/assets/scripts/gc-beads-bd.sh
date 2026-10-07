@@ -1089,9 +1089,14 @@ acquire_init_lock() {
         die "could not open init lock for database '$db' ($init_lock_file): $open_err; set GC_DOLT_INIT_LOCK_DIR to a directory this user can write to."
     fi
     exec 8>>"$init_lock_file"
-    if ! flock "$mode_flag" -w "$init_lock_timeout_s" 8; then
-        die "could not acquire init lock for database '$db' ($init_lock_file) within ${init_lock_timeout_s}s; a concurrent initializer may be stuck. inspect the store with 'bd dolt status' before retrying, or raise GC_DOLT_INIT_LOCK_TIMEOUT_MS."
-    fi
+    # util-linux flock reads -w 0 as "do not wait", but the macOS port
+    # (brew install flock) refuses a timeout of zero, so a budget under a
+    # second asks for that with -n, which both read the same way.
+    if [ "$init_lock_timeout_s" -gt 0 ]; then
+        flock "$mode_flag" -w "$init_lock_timeout_s" 8
+    else
+        flock "$mode_flag" -n 8
+    fi || die "could not acquire init lock for database '$db' ($init_lock_file) within ${init_lock_timeout_s}s; a concurrent initializer may be stuck. inspect the store with 'bd dolt status' before retrying, or raise GC_DOLT_INIT_LOCK_TIMEOUT_MS."
     INIT_LOCK_HELD="$mode"
 }
 
