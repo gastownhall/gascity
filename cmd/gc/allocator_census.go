@@ -170,7 +170,7 @@ func (c *sessionCensus) RowsNamed(name string) []rowKey {
 type bringUpRow struct {
 	Key           rowKey
 	Token         string      // the row's instance token
-	Endpoint      endpointKey // config-only key (endpointKeyForAgent)
+	Endpoint      endpointKey // config-only key (rowEndpoint)
 	PendingCreate bool        // canonical copy only, so one row counts once
 }
 
@@ -186,8 +186,7 @@ func (c *sessionCensus) BringUp(cfg *config.City) []bringUpRow {
 	out := make([]bringUpRow, 0, len(keys))
 	for _, k := range keys {
 		row := c.Rows[k]
-		agent := findAgentByTemplate(cfg, normalizedSessionTemplateInfo(row.Info, cfg))
-		out = append(out, bringUpRow{Key: k, Token: row.InstanceToken, Endpoint: endpointKeyForAgent(cfg, agent, row.Info), PendingCreate: row.PendingCreate})
+		out = append(out, bringUpRow{Key: k, Token: row.InstanceToken, Endpoint: rowEndpoint(cfg, row.Info), PendingCreate: row.PendingCreate})
 	}
 	return out
 }

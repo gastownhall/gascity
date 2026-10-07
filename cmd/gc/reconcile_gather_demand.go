@@ -74,7 +74,7 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 		env.OpenSessions, noProbeEnv, stderr)
 	cache := newReadyDemandCacheWithReads(reads)
 
-	v.AssignedWork, _, v.AssignedStoreRefs, v.ReadyAssigned, v.StorePartial = collectAssignedWorkBeadsWithStores(
+	v.AssignedWork, v.AssignedStores, v.AssignedStoreRefs, v.ReadyAssigned, v.StorePartial = collectAssignedWorkBeadsWithStores(
 		env.CityPath, env.Cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, env.Sessions, cache)
 	c := &v.Collected
 	c.UnassignedRouted, _, c.UnassignedRoutedRefs, c.UnassignedRoutedPartial = collectOpenUnassignedRoutedWork(

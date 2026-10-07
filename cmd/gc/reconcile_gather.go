@@ -170,7 +170,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 }
 
 // gatherGates reads each endpoint's breaker the pass may act on: every
-// census row's and every configured agent's (endpointKeyForAgent), with the
+// census row's (rowEndpoint) and every configured agent's, with the
 // census rows' refusals this episode.
 func gatherGates(g *endpointCapacityGuard, cfg *config.City, rows []censusRow) map[endpointKey]endpointView {
 	gates := make(map[endpointKey]endpointView)
@@ -187,7 +187,7 @@ func gatherGates(g *endpointCapacityGuard, cfg *config.City, rows []censusRow) m
 		}
 	}
 	for _, row := range rows {
-		k := endpointKeyForAgent(cfg, findAgentByTemplate(cfg, normalizedSessionTemplateInfo(row.Info, cfg)), row.Info)
+		k := rowEndpoint(cfg, row.Info)
 		if k == "" {
 			continue
 		}

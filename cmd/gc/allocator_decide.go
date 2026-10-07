@@ -97,6 +97,7 @@ type demandView struct {
 	// A suspended city reads them too: legacy's suspend drain spares a row
 	// with open assigned work.
 	AssignedWork      []beads.Bead
+	AssignedStores    []beads.Store
 	AssignedStoreRefs []string
 	ReadyAssigned     map[storeScopedBeadKey]bool
 	StorePartial      bool

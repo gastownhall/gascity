@@ -15,7 +15,7 @@ import (
 // state takes a lock. Effects report back through the settlement queue; every
 // other input reaches the planner as a dirty mark.
 //
-// Unwired in this slice: C2c1 supplies the pass, and C2c2 constructs the
+// Unwired: C2c1 supplies the pass (tracePass), and C2c2 constructs the
 // planner behind session_reconciler=v2.
 
 // plannerMinGap is the shortest time from one pass's start to the next's.
@@ -74,8 +74,9 @@ type bootState struct {
 }
 
 // planner runs passes on one goroutine. Only that goroutine touches inflight,
-// backoff, bucket, boot, last, rowTrace and memo; other goroutines reach the
-// planner through markDirty, the settlement queue, the start pause and stop.
+// backoff, bucket, fairSeed, boot, last, rowTrace and memo; other goroutines
+// reach the planner through markDirty, the settlement queue, the start pause
+// and stop, and read what a pass publishes through out.
 type planner struct {
 	clock       plannerClock
 	patrol      func() time.Duration // read after every pass, so a reload takes effect
@@ -87,10 +88,12 @@ type planner struct {
 	inflight plannerInflight
 	backoff  *backoffTable
 	bucket   bucketState
+	fairSeed uint64 // admission's fair-share rotation (P4)
 	boot     bootState
 	last     passRecord
 	rowTrace map[rowKey]string // each row's last traced (reason, outcome)
 	memo     gatherMemo
+	out      passOutputs
 
 	dirty       chan struct{} // capacity 1: marks fold until the loop reads one
 	settlements settlementQueue
