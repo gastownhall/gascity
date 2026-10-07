@@ -104,7 +104,7 @@ func TestEffectExecutorEnqueuesKeyUrgentAndAllocator(t *testing.T) {
 
 // Kills: an effect stuck forever behind a hung provider call: the deadline
 // must settle it (failed) and free the key.
-func TestEffectExecutorDeadlineSettlesIssuedEntry(t *testing.T) {
+func TestEffectExecutorDeadlineSettlesHungEffect(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		settled := make(chan error, 2)
 		k := rowKey{Leg: routerTestLeg, ID: "a"}

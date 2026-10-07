@@ -37,13 +37,13 @@ import (
 const createEffectParallelism = poolRealizeParallelism
 
 // createPlan is one fresh pool or dependency-floor row, or one configured
-// named session (Named), the allocator admitted under the create entry
-// EntryID. The planner mints Token at submit and records it in the entry, so
-// the row's token and the entry's cannot diverge (S-8); Seq is the entry's
-// submit, which the settlement echoes; ConfigRev is the revision the plan was
-// decided under.
+// named session (Named), that admission let through. ID names the plan in
+// logs and its settlement. The planner mints Token at submit and records it
+// in the plan's in-flight entry, so the row's token and the entry's cannot
+// diverge (S-8); Seq is the entry's submit, which the settlement echoes;
+// ConfigRev is the revision the plan was decided under.
 type createPlan struct {
-	EntryID           string
+	ID                string
 	Seq               uint64
 	Token             string
 	ConfigRev         string
@@ -116,10 +116,10 @@ func (c createIdentity) agentIn(cfg *config.City) (*config.Agent, error) {
 }
 
 // createPlanOf adapts a planner create plan (selectOrPlanPoolSessionBead, or
-// the dependency floor's) to the create entry entryID.
-func createPlanOf(entryID, template string, p poolSessionCreatePlan) createPlan {
+// the dependency floor's) to the create plan id.
+func createPlanOf(id, template string, p poolSessionCreatePlan) createPlan {
 	return createPlan{
-		EntryID:           entryID,
+		ID:                id,
 		Template:          template,
 		QualifiedInstance: p.qualifiedInstance,
 		Slot:              p.slot,
@@ -320,7 +320,7 @@ func (x *createEffects) run(job createJob) {
 		x.settle(p, prog, info, err)
 	}()
 	if p.Token == "" {
-		err = fmt.Errorf("create plan %s has no instance token", p.EntryID)
+		err = fmt.Errorf("create plan %s has no instance token", p.ID)
 		return
 	}
 	if p.Named != nil {
@@ -402,7 +402,7 @@ func (x *createEffects) view(pass *createPass, token string) poolCreateView {
 // non-empty Stage refuses Identity with cause Stage under ConfigRev (AM-N8);
 // Work refuses or resets the work item's record (C6.5(a)).
 type createSettlement struct {
-	EntryID   string
+	ID        string
 	Seq       uint64
 	Identity  string // createIdentity.key
 	Token     string
@@ -444,11 +444,11 @@ type workVerdict struct {
 func (x *createEffects) settle(p createPlan, prog createProgress, info session.Info, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			x.logf("allocator: settling create %s: panic: %v\n", p.EntryID, r)
+			x.logf("allocator: settling create %s: panic: %v\n", p.ID, r)
 		}
 	}()
 	s := createSettlement{
-		EntryID: p.EntryID, Seq: p.Seq, Identity: p.identity().key(), Token: p.Token, ConfigRev: p.ConfigRev,
+		ID: p.ID, Seq: p.Seq, Identity: p.identity().key(), Token: p.Token, ConfigRev: p.ConfigRev,
 		RetargetRowID: prog.retarget, Work: prog.work, Err: err, At: x.host.now(),
 	}
 	var written poolCreateWriteError
@@ -471,7 +471,7 @@ func (x *createEffects) settle(p createPlan, prog createProgress, info session.I
 	if p.Named != nil {
 		subject = p.Named.Identity
 	}
-	x.logf("allocator: create %s for %q: %v\n", p.EntryID, subject, err)
+	x.logf("allocator: create %s for %q: %v\n", p.ID, subject, err)
 }
 
 // createWriteRefused reports a write error that proves the store wrote

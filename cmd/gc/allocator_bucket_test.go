@@ -1,6 +1,11 @@
 package main
 
 import (
+	"fmt"
+	"maps"
+	"math/rand/v2"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -33,8 +38,8 @@ func TestBucketRefillContinuousCapped(t *testing.T) {
 	if half.Tokens != 0 || half.Credit != 1500*time.Millisecond {
 		t.Fatalf("1.5s: %+v, want 0 tokens and 1.5s credit", half)
 	}
-	if got := half.untilTokens(1, capacity, interval); got != 1500*time.Millisecond {
-		t.Fatalf("untilTokens = %v, want 1.5s", got)
+	if got := half.nextToken(capacity, interval); !got.Equal(t0.Add(3 * time.Second)) {
+		t.Fatalf("nextToken = %v, want t0+3s", got)
 	}
 	if got := half.refill(t0.Add(3*time.Second), capacity, interval); got.Tokens != 1 {
 		t.Fatalf("1.5s + 1.5s: %+v, want 1 token", got)
@@ -52,7 +57,7 @@ func TestBucketRefillContinuousCapped(t *testing.T) {
 
 	// The cap: an hour idle fills to capacity with no stored credit.
 	full := b.refill(t0.Add(time.Hour), capacity, interval)
-	if full.Tokens != capacity || full.Credit != 0 || full.untilTokens(1, capacity, interval) != 0 {
+	if full.Tokens != capacity || full.Credit != 0 || !full.nextToken(capacity, interval).IsZero() {
 		t.Fatalf("after an hour: %+v, want full", full)
 	}
 	// A reload lowers max_wakes_per_tick: the next refill clamps.
@@ -78,15 +83,15 @@ func TestBucketRefillGuardsNonPositiveIntervalAndCapacity(t *testing.T) {
 		}
 	}
 	b := bucketState{Tokens: 3, LastRefill: t0}.refill(t0.Add(time.Hour), 0, time.Minute)
-	if b.Tokens != 0 || b.Credit != 0 {
-		t.Fatalf("capacity 0: %+v, want empty", b)
+	if b.Tokens != 0 || b.Credit != 0 || !b.nextToken(0, time.Minute).IsZero() {
+		t.Fatalf("capacity 0: %+v, want empty, with no next token", b)
 	}
 }
 
 // Kills: admission past the bucket or the city cap, including a start
-// admitted on an empty bucket (C5.8: no prepaid grants); a half-open
-// endpoint admitting a herd; an open endpoint admitting anything; admission
-// demanding more than the one token a grant costs (C6).
+// admitted on an empty bucket; a half-open endpoint admitting a herd; an
+// open endpoint admitting anything; admission demanding more than the one
+// token a start costs.
 func TestAdmitStartTokensCapAndBreaker(t *testing.T) {
 	two := bucketState{Tokens: 2}
 	one := bucketState{Tokens: 1}
@@ -236,5 +241,143 @@ func TestEndpointOutstanding(t *testing.T) {
 	}})
 	if len(got) != 2 || got["provider:a"] != 2 || got["provider:b"] != 1 {
 		t.Fatalf("endpointOutstanding = %v, want provider:a 2, provider:b 1", got)
+	}
+}
+
+// lagEffect is one effect in the census-lag model: a start on a row, or a
+// create under its token, with the passes until it settles. A create lands,
+// fails without writing, or errors ambiguously after its row landed (the
+// cache declines the install, so the census shows the row only lag passes
+// later, perhaps past the hard bound) or before it did.
+type lagEffect struct {
+	kind    string
+	key     rowKey
+	token   string
+	seq     uint64
+	runFor  int
+	outcome int // create: 0 landed, 1 failed, 2 ambiguous and landed, 3 ambiguous and unwritten
+	lag     int
+}
+
+// Kills (I8, P4, P5) a bring-up counted twice or not at all across passes:
+// an ambiguous create cleared before its row shows, counted beside the row
+// that carries its token, or never cleared; a committed start's row still
+// counted. Each pass drains the settlements, applies the census installs due,
+// clears what the census shows, and the city count must equal an oracle over
+// the model's truth: running effects, ambiguous creates within the hard bound
+// whose row the census does not show, and the census's claimed rows, each
+// bring-up once by its token or row. At quiescence the map is empty.
+func TestCityInFlightCensusLagModel(t *testing.T) {
+	closed := func(endpointKey) (endpointGate, bool) { return gateClosed, true }
+	for seed := uint64(1); seed <= 300; seed++ {
+		rng := rand.New(rand.NewPCG(seed, 3))
+		now := time.Unix(10_000, 0)
+		m := newInflightMap()
+		census := make(map[rowKey]bringUpRow)
+		installs := make(map[rowKey]int) // a landed row's census install, in passes
+		var running []*lagEffect
+		ambiguous := make(map[string]time.Time) // token → settled at, until the census shows it
+		next := 0
+		identity := func(r bringUpRow) string {
+			if r.Token != "" {
+				return "tok:" + r.Token
+			}
+			return "row:" + r.Key.ID
+		}
+		pass := func() {
+			now = now.Add(10 * time.Second)
+			var still []*lagEffect
+			for _, e := range running {
+				if e.runFor--; e.runFor > 0 {
+					still = append(still, e)
+					continue
+				}
+				s := settlement{Kind: e.kind, Key: e.key, Token: e.token, Seq: e.seq, At: now}
+				switch {
+				case e.kind == inflightStart: // the commit lands and drops the claim
+					r := census[e.key]
+					r.PendingCreate = false
+					census[e.key] = r
+				case e.outcome == 0:
+					census[e.key] = bringUpRow{Key: e.key, Token: e.token, PendingCreate: true}
+				case e.outcome >= 2:
+					s.Ambiguous, ambiguous[e.token] = true, now
+					if e.outcome == 2 {
+						installs[e.key] = e.lag
+					}
+				}
+				m.settle(s)
+			}
+			running = still
+			for k, n := range installs {
+				if n--; n > 0 {
+					installs[k] = n
+					continue
+				}
+				delete(installs, k)
+				census[k] = bringUpRow{Key: k, Token: "tok-" + k.ID, PendingCreate: true}
+			}
+			tokens := make(map[string]bool)
+			rows := make([]bringUpRow, 0, len(census))
+			for _, r := range census {
+				if r.Token != "" {
+					tokens[r.Token] = true
+				}
+				rows = append(rows, r)
+			}
+			m.clearVisible(inflightCensus{Tokens: tokens}, now)
+			want := make(map[string]bool)
+			for _, e := range running {
+				if e.kind == inflightStart {
+					want[identity(census[e.key])] = true
+				} else {
+					want["tok:"+e.token] = true
+				}
+			}
+			for tok, at := range ambiguous {
+				if tokens[tok] || now.Sub(at) >= inflightHardBound {
+					delete(ambiguous, tok)
+				} else {
+					want["tok:"+tok] = true
+				}
+			}
+			for _, r := range rows {
+				if r.PendingCreate {
+					want[identity(r)] = true
+				}
+			}
+			if got, _ := cityInFlight(m.view(), rows, closed); got != len(want) {
+				t.Fatalf("seed %d at %v: in flight %d, want %d (%v)", seed, now, got, len(want), want)
+			}
+		}
+		for step := 0; step < 120; step++ {
+			switch rng.IntN(4) {
+			case 0:
+				next++
+				k := rowKey{"sessions", fmt.Sprintf("gc-%d", next)}
+				e := &lagEffect{kind: inflightCreate, key: k, token: "tok-" + k.ID, runFor: 1 + rng.IntN(3), outcome: rng.IntN(4), lag: 1 + rng.IntN(25)}
+				e.seq = m.add(inflightEntry{Kind: e.kind, Token: e.token})
+				running = append(running, e)
+			case 1:
+				for _, k := range slices.SortedFunc(maps.Keys(census), func(a, b rowKey) int { return strings.Compare(a.ID, b.ID) }) {
+					r := census[k]
+					if !r.PendingCreate {
+						continue
+					}
+					if seq := m.add(inflightEntry{Kind: inflightStart, Key: r.Key}); seq != 0 {
+						running = append(running, &lagEffect{kind: inflightStart, key: r.Key, seq: seq, runFor: 1 + rng.IntN(3)})
+					}
+					break
+				}
+			default:
+				pass()
+			}
+		}
+		for i := 0; i < 40; i++ {
+			pass()
+		}
+		if left := m.view().Entries; len(running) != 0 || len(left) != 0 {
+			t.Fatalf("seed %d: at quiescence %d effects running and %d in-flight entries, want none (I8)", seed, len(running), len(left))
+		}
 	}
 }

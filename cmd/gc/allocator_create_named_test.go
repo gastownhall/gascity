@@ -147,13 +147,13 @@ func writeNamedFixtureFile(t *testing.T, path, content string) {
 }
 
 // namedPlan is the plan P3-5a emits for identity in cfg.
-func namedPlan(t *testing.T, cfg *config.City, entryID, identity string) createPlan {
+func namedPlan(t *testing.T, cfg *config.City, id, identity string) createPlan {
 	t.Helper()
 	spec, ok := findNamedSessionSpec(cfg, "test-city", identity)
 	if !ok {
 		t.Fatalf("no named session spec for %q", identity)
 	}
-	return createPlan{EntryID: entryID, Named: &namedCreatePlan{
+	return createPlan{ID: id, Named: &namedCreatePlan{
 		Identity: identity, SessionName: spec.SessionName, Template: namedSessionBackingTemplate(spec), Mode: spec.Mode,
 	}}
 }

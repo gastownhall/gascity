@@ -52,8 +52,11 @@ type censusRow struct {
 
 	Incarnation   int64 // the row's generation; 0 when unparseable
 	InstanceToken string
-	// PendingCreate: the row holds pending_create_claim. Admission counts it
-	// in flight; no lease window applies (v5 P4, SC A5).
+	// PendingCreate: the row holds pending_create_claim and is not committed
+	// (active or awake). Admission counts it in flight; no lease window
+	// applies (v5 P4, SC A5). A row committed mid-start at cutover can still
+	// hold the claim and would otherwise count forever; a reopened named row
+	// (stopped, with the claim) still counts.
 	PendingCreate bool
 	// UnknownState is a state main does not know, other than drain-ack
 	// stop-pending (F9, SESS-044). The row still occupies its slot.
@@ -105,7 +108,8 @@ func readSessionCensus(now time.Time, legs []classStoreCandidate) (*sessionCensu
 			} else {
 				// One effect, one row: only the canonical copy counts in flight.
 				canonicalLeg[id] = source.ref
-				row.PendingCreate = info.PendingCreateClaim
+				state := session.State(strings.TrimSpace(info.MetadataState))
+				row.PendingCreate = info.PendingCreateClaim && state != session.StateActive && state != session.StateAwake
 				c.canonical = append(c.canonical, k)
 			}
 			c.Rows[k] = row

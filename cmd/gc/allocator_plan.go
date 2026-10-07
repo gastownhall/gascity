@@ -192,9 +192,9 @@ func (p *decidePass) inFlightCreates() []planReservation {
 		if e.Kind != inflightCreate || tokens[e.Token] {
 			continue
 		}
-		r := planReservation{EntryID: e.Token, Template: e.Template, QualifiedInstance: e.QualifiedInstance, Slot: e.Slot, WorkBeadID: e.WorkBeadID}
+		r := planReservation{ID: e.Token, Template: e.Template, QualifiedInstance: e.QualifiedInstance, Slot: e.Slot, WorkBeadID: e.WorkBeadID}
 		if named, ok := strings.CutPrefix(e.Identity, "named:"); ok {
-			r = planReservation{EntryID: e.Token, Template: e.Template, NamedIdentity: named, SessionName: e.SessionName}
+			r = planReservation{ID: e.Token, Template: e.Template, NamedIdentity: named, SessionName: e.SessionName}
 		}
 		out = append(out, r)
 	}
@@ -211,7 +211,7 @@ func (p *decidePass) inFlightStandIns() []session.Info {
 			continue
 		}
 		info := session.Info{
-			ID:                     standInPrefix + r.EntryID,
+			ID:                     standInPrefix + r.ID,
 			Template:               r.Template,
 			AgentName:              r.QualifiedInstance,
 			SessionOrigin:          "ephemeral",
@@ -234,7 +234,7 @@ func (p *decidePass) inFlightStandIns() []session.Info {
 // tier 1), and every pool name a live create backoff from the fence refuses
 // (F3): the name or its identity lease was taken, so the next free slot is
 // planned instead, and the held name is traced (P-6). The planner runs
-// unbudgeted: P3-5b admits plans in fair-share order. Its own
+// unbudgeted: admission takes the plans in fair-share order. Its own
 // census-completeness gate is off (no bead store: storeless builds read as
 // complete): a partial non-sessions leg blocks no plan, and the create
 // effect's locked live re-census fails closed instead (C2.8, C7.2).
@@ -280,7 +280,7 @@ func (p *decidePass) newPlanParams() {
 			if !ok || a.UsesCanonicalSingletonPoolIdentity() || existingPoolSlotWithConfigInfo(p.cfg, a, held) <= 0 {
 				continue
 			}
-			p.reserve(planReservation{EntryID: "backoff:" + template + ":" + instance, Template: template, QualifiedInstance: instance})
+			p.reserve(planReservation{ID: "backoff:" + template + ":" + instance, Template: template, QualifiedInstance: instance})
 			p.refuse(template, instance, rowKey{}, gateCreateRefused+createStageFence)
 		}
 	}
@@ -290,7 +290,7 @@ func (p *decidePass) newPlanParams() {
 // fresh slots against, as the row it will become.
 func (p *decidePass) reserve(r planReservation) {
 	info := session.Info{
-		ID:                 "reservation:" + r.EntryID,
+		ID:                 "reservation:" + r.ID,
 		Template:           r.Template,
 		AgentName:          r.QualifiedInstance,
 		PoolManaged:        r.NamedIdentity == "",
@@ -554,7 +554,7 @@ func (p *decidePass) planNamed() {
 		}
 		p.plans = append(p.plans, ap)
 		p.reserve(planReservation{
-			EntryID: "plan:" + ap.identity(), Template: template,
+			ID: "plan:" + ap.identity(), Template: template,
 			NamedIdentity: identity, SessionName: spec.SessionName,
 		})
 		p.desired["plan:"+ap.identity()] = TemplateParams{
