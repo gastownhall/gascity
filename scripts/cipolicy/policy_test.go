@@ -24,8 +24,34 @@ func TestCurrentWorkflowsMatchPolicy(t *testing.T) {
 }
 
 func TestMakeTestCIPolicyRunsStaticScopeContracts(t *testing.T) {
-	const want = "\t$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns|TestFullStaticLintExplicitlyOwnsConfiguredGolangCIGovet|TestChangedStaticTargetsScopeLintAndFormattingToTheDiff|TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge)$$' ./scripts"
+	assertTestCIPolicyRecipeLine(t, "the focused static-scope contracts",
+		"\t$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestLintAndVetRunAsNogoInBazel|TestLintChangedBuildsNogoForChangedBazelPackages|TestChangedFormattingScopesToTheDiff)$$' ./scripts")
+}
 
+// TestMakeTestCIPolicyRunsVersionPinContracts keeps the bd and Dolt pin
+// contracts in the local `make test-ci-policy` sweep. (CI runs them, with the
+// rest of ./scripts, as //scripts:scripts_test in the required Bazel lane.)
+//
+// They assert that deps.env, go.mod, the workflow env blocks, the Dockerfiles
+// and the integration suite's own literal all name the same versions; a pin
+// bump that misses one anchor otherwise only fails in the push-only
+// integration shard, after merge. That is exactly how the integration suite
+// sat on v1.3.0-rc.2 while main pinned v1.3.0 (tracker ga-rnwg5u).
+//
+// It is a separate recipe line rather than more alternatives on the
+// static-scope one so that command stays byte-identical to what
+// TestMakeTestCIPolicyRunsStaticScopeContracts pins.
+func TestMakeTestCIPolicyRunsVersionPinContracts(t *testing.T) {
+	assertTestCIPolicyRecipeLine(t, "the bd and Dolt version-pin contracts",
+		"\t$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestBDVersionPins|TestDoltVersionPins)$$' ./scripts")
+}
+
+// assertTestCIPolicyRecipeLine fails unless want appears exactly once in the
+// test-ci-policy recipe. The whole line is compared, hermetic environment and
+// all: a recipe that reaches the right tests through a different command has
+// not been reviewed for the isolation this target depends on.
+func assertTestCIPolicyRecipeLine(t *testing.T, what, want string) {
+	t.Helper()
 	makefilePath := filepath.Join("..", "..", "Makefile")
 	body, err := os.ReadFile(makefilePath)
 	if err != nil {
@@ -43,7 +69,7 @@ func TestMakeTestCIPolicyRunsStaticScopeContracts(t *testing.T) {
 		}
 	}
 	if matches != 1 {
-		t.Fatalf("test-ci-policy recipe must run the focused static-scope contracts with the exact hermetic command:\n%s", want)
+		t.Fatalf("test-ci-policy recipe must run %s with the exact hermetic command:\n%s", what, want)
 	}
 }
 
@@ -76,40 +102,39 @@ func TestExecutionShapeMutationsFailPolicy(t *testing.T) {
 		{
 			name: "if",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-shards")["if"] = "false"
+				job(t, docs.ci, "integration-rest-full")["if"] = "false"
 			},
 		},
 		{
 			name: "runner",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-shards")["runs-on"] = "ubuntu-latest"
+				job(t, docs.ci, "integration-rest-full")["runs-on"] = "ubuntu-latest"
 			},
 		},
 		{
 			name: "timeout",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-shards")["timeout-minutes"] = 60
+				job(t, docs.ci, "integration-rest-full")["timeout-minutes"] = 60
 			},
 		},
 		{
 			name: "environment",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-shards")["env"].(map[string]any)["DOLT_VERSION"] = "latest"
+				job(t, docs.ci, "integration-rest-full")["env"].(map[string]any)["DOLT_VERSION"] = "latest"
 			},
 		},
 		{
 			name: "strategy",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-shards")["strategy"].(map[string]any)["fail-fast"] = true
+				job(t, docs.ci, "integration-rest-full")["strategy"].(map[string]any)["fail-fast"] = true
 			},
 		},
 		{
 			name: "nested execution field named name",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				strategy := job(t, docs.ci, "integration-shards")["strategy"].(map[string]any)
+				strategy := job(t, docs.ci, "integration-rest-full")["strategy"].(map[string]any)
 				matrix := strategy["matrix"].(map[string]any)
-				row := matrix["include"].([]any)[0].(map[string]any)
-				row["name"] = "this is matrix data, not a display label"
+				matrix["name"] = []any{"this is matrix data, not a display label"}
 			},
 		},
 		{
@@ -127,7 +152,7 @@ func TestExecutionShapeMutationsFailPolicy(t *testing.T) {
 		{
 			name: "with",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				step(t, job(t, docs.ci, "integration-shards"), 1)["with"].(map[string]any)["install-claude-cli"] = "true"
+				step(t, job(t, docs.ci, "integration-rest-full"), 1)["with"].(map[string]any)["install-claude-cli"] = "true"
 			},
 		},
 		{
@@ -599,10 +624,10 @@ func removeValue(t *testing.T, value any, remove string) []any {
 
 func TestPolicyErrorsIdentifyTheBrokenContract(t *testing.T) {
 	docs := loadPolicyDocuments(t)
-	job(t, docs.ci, "integration-shards")["runs-on"] = "ubuntu-latest"
+	job(t, docs.ci, "integration-rest-full")["runs-on"] = "ubuntu-latest"
 
 	err := validate(docs.ci, docs.nightly, docs.action)
-	if err == nil || !strings.Contains(err.Error(), "integration-shards") {
-		t.Fatalf("error = %v, want integration-shards context", err)
+	if err == nil || !strings.Contains(err.Error(), "integration-rest-full") {
+		t.Fatalf("error = %v, want integration-rest-full context", err)
 	}
 }

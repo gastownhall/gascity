@@ -238,12 +238,17 @@ func TestPreflightReportsALiveControllerWithoutBlocking(t *testing.T) {
 // every assertion there while reporting nothing.
 func TestPreflightSaysSoWhenNoControllerIsLive(t *testing.T) {
 	request, _, _ := preflightReadyCity(t, 1)
+	// A path containing PID-like digits must not look like a live controller.
+	request.CityPath = filepath.Join(request.CityPath, "city-4242")
+	if err := os.MkdirAll(filepath.Join(request.CityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	var stdout, stderr bytes.Buffer
 	if code := doStoragePreflight(request, &stdout, &stderr); code != 0 {
 		t.Fatalf("preflight refused a ready city: exit %d stderr=%q", code, stderr.String())
 	}
-	if strings.Contains(stdout.String(), "4242") {
+	if strings.Contains(stdout.String(), "controller: PID ") {
 		t.Fatalf("the fixture leaked a PID: %q", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "controller: nothing answered") {

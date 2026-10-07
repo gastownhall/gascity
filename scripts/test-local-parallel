@@ -23,6 +23,13 @@ fi
 mode="$1"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+
+# One shared seeded gitconfig for every nested test env; resolved once so the
+# env -i block below cannot drift from the Makefile (scripts/test-gitconfig-path).
+# Exported because the xargs fan-out worker (run_fan_out) expands it in a child
+# process, which inherits only the environment (ga-cesmzs).
+gc_test_gitconfig="$("$repo_root/scripts/test-gitconfig-path")"
+export gc_test_gitconfig
 # shellcheck source=lib/test-slice.sh
 source "$repo_root/scripts/lib/test-slice.sh"
 gc_test_slice_reexec "$repo_root/scripts/test-local-parallel" "$@"
@@ -60,11 +67,11 @@ source "$repo_root/scripts/lib/harness-reap.sh"
 gc_local_parallel_drain_ticks=100
 gc_local_parallel_on_signal() {
   local sig="$1"
-  gc_harness_terminate_group "${gc_harness_supervised_pgid:-}" "$gc_local_parallel_drain_ticks"
+  gc_harness_terminate_supervised "$gc_local_parallel_drain_ticks"
   trap - "$sig"
   kill -"$sig" $$
 }
-trap 'gc_harness_terminate_group "${gc_harness_supervised_pgid:-}" "$gc_local_parallel_drain_ticks"; push_gate_release_slot "$gate_fd"' EXIT
+trap 'gc_harness_terminate_supervised "$gc_local_parallel_drain_ticks"; push_gate_release_slot "$gate_fd"' EXIT
 trap 'gc_local_parallel_on_signal INT' INT
 trap 'gc_local_parallel_on_signal TERM' TERM
 trap 'gc_local_parallel_on_signal HUP' HUP
@@ -307,12 +314,17 @@ run_fan_out() {
   log="$LOCAL_TEST_LOG_DIR/${safe_label}.log"
 
   echo "[$label] start"
+  # The pane shell is pinned to /bin/sh, not forwarded from the caller: a test
+  # tmux or herdr pane running zsh under a fresh HOME opens the new-user wizard,
+  # which swallows the typed text (ga-yghhjf; mirrors Makefile TEST_ENV).
   if ${TEST_LOCAL_NICE:-} env -i \
     PATH="${PATH}" \
     HOME="${HOME:-}" \
     USER="${USER:-}" \
     LOGNAME="${LOGNAME:-}" \
-    SHELL="${SHELL:-/bin/sh}" \
+    SHELL=/bin/sh \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL="$gc_test_gitconfig" \
     LANG="${LANG:-C.UTF-8}" \
     TMPDIR="${TMPDIR:-/var/tmp}" \
     OBSERVABLE_TEST_LOG="${OBSERVABLE_TEST_LOG-}" \

@@ -30,6 +30,7 @@ func defProperties(t *testing.T, raw map[string]interface{}, defName string) map
 }
 
 func TestGenerateCitySchema(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -64,6 +65,7 @@ func TestGenerateCitySchema(t *testing.T) {
 }
 
 func TestCitySchemaDescriptions(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -92,6 +94,7 @@ func TestCitySchemaDescriptions(t *testing.T) {
 }
 
 func TestCitySchemaCommandTemplateDescriptions(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -131,6 +134,7 @@ func TestCitySchemaCommandTemplateDescriptions(t *testing.T) {
 }
 
 func TestCitySchemaAttachmentListFieldsRemainTombstones(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -167,6 +171,7 @@ func TestCitySchemaAttachmentListFieldsRemainTombstones(t *testing.T) {
 }
 
 func TestCitySchemaOrderOverrideIncludesLegacyGateAlias(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -197,6 +202,7 @@ func TestCitySchemaOrderOverrideIncludesLegacyGateAlias(t *testing.T) {
 // lacked omitempty. Real cities use [imports.*] (PackV2) and ship without
 // any [[agent]] block; the schema must reflect that.
 func TestCitySchemaCityAgentNotRequired(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -223,6 +229,7 @@ func TestCitySchemaCityAgentNotRequired(t *testing.T) {
 }
 
 func TestCitySchemaOmitsLegacyPackSourceSurface(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -249,6 +256,7 @@ func TestCitySchemaOmitsLegacyPackSourceSurface(t *testing.T) {
 }
 
 func TestPublicImportSchemaOnlyExposesSourceAndVersion(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	for _, tc := range []struct {
 		name     string
 		generate func() (interface{}, error)
@@ -296,6 +304,7 @@ func TestPublicImportSchemaOnlyExposesSourceAndVersion(t *testing.T) {
 }
 
 func TestGeneratePackSchema(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GeneratePackSchema()
 	if err != nil {
 		t.Fatalf("GeneratePackSchema: %v", err)
@@ -320,6 +329,7 @@ func TestGeneratePackSchema(t *testing.T) {
 }
 
 func TestPackSchemaPackMetaRequired(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GeneratePackSchema()
 	if err != nil {
 		t.Fatalf("GeneratePackSchema: %v", err)
@@ -349,6 +359,7 @@ func TestPackSchemaPackMetaRequired(t *testing.T) {
 }
 
 func TestPackSchemaAliasFieldHidden(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GeneratePackSchema()
 	if err != nil {
 		t.Fatalf("GeneratePackSchema: %v", err)
@@ -491,6 +502,7 @@ func TestAddGoCommentsFilteredSkipsUntrackedTopLevelDirs(t *testing.T) {
 }
 
 func TestCitySchemaAgentDefinition(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)

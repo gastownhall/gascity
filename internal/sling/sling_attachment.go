@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -516,25 +517,97 @@ func needsConvoyRecovery(q BeadQuerier, b beads.Bead, deps SlingDeps, opts BeadC
 }
 
 func hasLiveTrackingConvoy(store beads.Store, itemID string) (bool, error) {
+	live, err := liveTrackingConvoys(store, itemID)
+	if err != nil {
+		return false, err
+	}
+	return len(live) > 0, nil
+}
+
+// liveTrackingConvoys returns every non-terminal convoy tracking itemID that is
+// eligible to serve as an auto-convoy root, oldest first
+// (TrackingConvoysForItem sorts by creation time).
+//
+// It is the shared live-root lookup behind both the convoy-recovery check
+// (which only needs existence, over every live convoy) and auto-convoy reuse
+// at the mint site, which narrows this set to dispatch roots via
+// liveAutoConvoyRoots before reusing the first and reaping the rest.
+//
+// These are convoys by construction, so the convoy type's Ready exclusion
+// (#3591) does not apply here — only convoys excluded by infrastructure label
+// (session/order-tracking bookkeeping) are skipped. Those track the item for
+// their own bookkeeping and are neither dispatch roots to reuse nor duplicates
+// to reap.
+func liveTrackingConvoys(store beads.Store, itemID string) ([]beads.Bead, error) {
 	if store == nil {
-		return false, nil
+		return nil, nil
 	}
 	convoys, err := convoycore.TrackingConvoysForItem(store, itemID)
 	if err != nil {
-		return false, fmt.Errorf("listing tracking convoys for %s: %w", itemID, err)
+		return nil, fmt.Errorf("listing tracking convoys for %s: %w", itemID, err)
 	}
+	live := make([]beads.Bead, 0, len(convoys))
 	for _, convoy := range convoys {
-		// These are convoys by construction, so the convoy type's Ready
-		// exclusion (#3591) does not apply here — only skip convoys excluded
-		// by infrastructure label (session/order-tracking bookkeeping).
-		if beads.HasReadyExcludedLabel(convoy) {
+		if beads.HasReadyExcludedLabel(convoy) || convoycore.IsTerminalStatus(convoy.Status) {
 			continue
 		}
-		if !convoycore.IsTerminalStatus(convoy.Status) {
-			return true, nil
+		live = append(live, convoy)
+	}
+	return live, nil
+}
+
+// AutoConvoyRootTitle is the title finalize mints auto-convoy roots under.
+// The reuse/reap path keys on it so only roots this dispatch path created are
+// eligible — user convoys (gc convoy create), drain unit convoys and graph.v2
+// input convoys are all unowned, unlabeled convoys that can track the same
+// bead, and must never be adopted as a dispatch root or reaped as a duplicate.
+func AutoConvoyRootTitle(beadID string) string { return "sling-" + beadID }
+
+// liveAutoConvoyRoots is liveTrackingConvoys narrowed to the auto-convoy roots
+// finalize minted for itemID, oldest first. This is the reuse/reap set: a
+// convoy that merely tracks the bead is somebody else's convoy.
+func liveAutoConvoyRoots(store beads.Store, itemID string) ([]beads.Bead, error) {
+	live, err := liveTrackingConvoys(store, itemID)
+	if err != nil {
+		return nil, err
+	}
+	want := AutoConvoyRootTitle(itemID)
+	roots := make([]beads.Bead, 0, len(live))
+	for _, c := range live {
+		if strings.TrimSpace(c.Title) == want {
+			roots = append(roots, c)
 		}
 	}
-	return false, nil
+	return roots, nil
+}
+
+// convoyReapReason is the close_reason stamped on an auto-convoy root that a
+// re-sling superseded. Long enough to satisfy bd's validation.on-close=error
+// length requirement while naming why the root was closed.
+const convoyReapReason = "convoy reap: superseded duplicate root"
+
+// reapSupersededConvoyRoots closes auto-convoy roots that a re-sling has
+// superseded, so a bead carrying several live roots converges to the single one
+// being reused instead of staying stuck at N until the tracked bead closes
+// (ga-5jnq).
+//
+// Reaping is best-effort and never blocks the dispatch: each failure is
+// returned as a message for SlingResult.MetadataErrors. A root left open is the
+// pre-existing over-count, which the drain still clears when the tracked bead
+// goes terminal; failing the sling over it would be strictly worse.
+//
+// Callers must pass only unowned roots. The "owned" label is what suppresses
+// convoy autoclose, so closing one here would silently convert a
+// caller-managed lifecycle into an auto-managed one.
+func reapSupersededConvoyRoots(store beads.Store, superseded []beads.Bead, keptID string) []string {
+	var problems []string
+	for _, root := range superseded {
+		if err := convoycore.CloseWithReason(store, root.ID, convoyReapReason); err != nil {
+			problems = append(problems,
+				fmt.Sprintf("reaping convoy root %s superseded by %s: %v", root.ID, keptID, err))
+		}
+	}
+	return problems
 }
 
 // resolveConvoyRecovery maps needsConvoyRecovery onto a BeadCheckResult for an
@@ -583,14 +656,15 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	isMulti := agentutil.IsMultiSessionAgent(&a)
 	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == target {
 		// A pool session claims routed work under its own session identity
-		// ("<target>-<session bead id>"), not under the bare pool target, so
-		// bare equality reads already-claimed pool work as un-slung and mints a
-		// second attempt for it. The original keeps gc.routed_to once wrapped,
-		// so both it and its do-work step satisfy the pool work_query: one unit
+		// (its session bead ID since #6324; "<target>-<suffix>" session_name
+		// on older claims), not under the bare pool target, so bare equality
+		// reads already-claimed pool work as un-slung and mints a second
+		// attempt for it. The original keeps gc.routed_to once wrapped, so
+		// both it and its do-work step satisfy the pool work_query: one unit
 		// of work, two dispatchable rows, two sessions. Treat a claim by any of
-		// this pool's own sessions as idempotent. Anchored to target+"-", so a
+		// this pool's own sessions as idempotent (assigneeIsOwnPoolSession); a
 		// claim by a different pool still falls through to the warning below.
-		claimedByOwnPoolSession := isMulti && strings.HasPrefix(b.Assignee, target+"-")
+		claimedByOwnPoolSession := isMulti && assigneeIsOwnPoolSession(b.Assignee, target, q, deps.Store)
 		if b.Assignee == "" || b.Assignee == target || claimedByOwnPoolSession {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)
 		}
@@ -615,6 +689,30 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 		}
 	}
 	return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
+}
+
+// assigneeIsOwnPoolSession reports whether assignee is one of pool target's own
+// sessions. A pool session's claim used to be recorded under its session_name
+// ("<target>-<suffix>"), which the prefix check still recognizes for beads
+// claimed before the upgrade. Since #6324 an unaliased pool session claims
+// under its session bead ID, which carries no pool prefix, so the assignee is
+// also resolved as a bead ID: it is this pool's own when it names an open
+// session bead created from target. getters are tried in order; the first
+// that resolves the exact ID decides (bd resolves partial IDs, so a result
+// whose ID differs from assignee is not a match).
+func assigneeIsOwnPoolSession(assignee, target string, getters ...BeadQuerier) bool {
+	assignee = strings.TrimSpace(assignee)
+	if assignee == "" || target == "" {
+		return false
+	}
+	if strings.HasPrefix(assignee, target+"-") {
+		return true
+	}
+	sb, ok := BeadFromGetters(assignee, getters...)
+	if !ok || sb.ID != assignee {
+		return false
+	}
+	return session.IsOpenSessionOfTemplate(sb, target)
 }
 
 // routedStateWarnings reports human-readable warnings describing any existing

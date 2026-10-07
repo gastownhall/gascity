@@ -1742,26 +1742,11 @@ type explicitReasonCloser interface {
 	CloseWithReason(id, reason string) error
 }
 
-// closeConvoyWithReason stamps a close_reason metadata key on the
-// convoy bead before closing it. BdStore can receive the same reason
-// directly as `bd close --reason ...`, which lets cities
-// running with validation.on-close=error accept system-driven
-// auto-closes (whose default reason "Closed" would otherwise be
-// rejected as terse). For stores whose Close path does not consult
-// the metadata, the field still serves as a permanent audit trail of
-// why the convoy was closed.
+// closeConvoyWithReason closes a convoy bead with an auditable reason. The
+// behavior lives in the convoy domain package so the sling reap path and this
+// CLI projection share one implementation.
 func closeConvoyWithReason(store beads.Store, id, reason string) error {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		return store.Close(id)
-	}
-	if err := store.SetMetadata(id, "close_reason", reason); err != nil {
-		return fmt.Errorf("stamping convoy %s close reason: %w", id, err)
-	}
-	if closer, ok := store.(explicitReasonCloser); ok {
-		return closer.CloseWithReason(id, reason)
-	}
-	return store.Close(id)
+	return convoycore.CloseWithReason(store, id, reason)
 }
 
 // doConvoyCheck auto-closes convoys where all children are closed.
@@ -2245,42 +2230,54 @@ func autocloseCityPathForStoreRoot(storeRoot string) string {
 
 // doConvoyAutocloseWith checks whether the closed bead's legacy parent or
 // tracks dependents are convoys with all children closed, and if so closes
-// them. All errors are silently swallowed — this is best-effort
-// infrastructure called from a bd hook script.
-func doConvoyAutocloseWith(store beads.Store, rec events.Recorder, beadID string, stdout, _ io.Writer) {
+// them. All errors are swallowed — this is best-effort infrastructure called
+// from a bd hook script — but reported in the returned run, so the controller
+// can retry a run a read failure or a refused close left undecided.
+func doConvoyAutocloseWith(store beads.Store, rec events.Recorder, beadID string, stdout, _ io.Writer) autocloseRun {
+	var run autocloseRun
 	bead, err := store.Get(beadID)
 	if err != nil {
-		return
+		run.note(err)
+		return run
 	}
 
 	seen := make(map[string]bool)
 	if bead.ParentID != "" {
 		parent, err := store.Get(bead.ParentID)
+		run.note(err)
 		if err == nil {
 			seen[parent.ID] = true
-			autocloseConvoyIfComplete(store, rec, parent, stdout)
+			autocloseConvoyIfComplete(store, rec, parent, stdout, &run)
 		}
 	}
 
 	trackingConvoys, err := convoycore.TrackingConvoysForItem(store, beadID)
 	if err != nil {
-		return
+		run.note(err)
+		return run
 	}
 	for _, convoy := range trackingConvoys {
 		if seen[convoy.ID] {
 			continue
 		}
 		seen[convoy.ID] = true
-		autocloseConvoyIfComplete(store, rec, convoy, stdout)
+		autocloseConvoyIfComplete(store, rec, convoy, stdout, &run)
 	}
+	return run
 }
 
-func autocloseConvoyIfComplete(store beads.Store, rec events.Recorder, convoy beads.Bead, stdout io.Writer) {
-	if convoy.Type != "convoy" || convoycore.IsTerminalStatus(convoy.Status) || hasLabel(convoy.Labels, "owned") {
+// convoyStillAutocloses is autoclose's premise about the convoy row itself.
+func convoyStillAutocloses(convoy beads.Bead) bool {
+	return convoy.Type == "convoy" && !convoycore.IsTerminalStatus(convoy.Status) && !hasLabel(convoy.Labels, "owned")
+}
+
+func autocloseConvoyIfComplete(store beads.Store, rec events.Recorder, convoy beads.Bead, stdout io.Writer, run *autocloseRun) {
+	if !convoyStillAutocloses(convoy) {
 		return
 	}
 
 	children, err := listConvoyChildren(store, convoy.ID, true)
+	run.note(err)
 	if err != nil || len(children) == 0 {
 		return
 	}
@@ -2290,7 +2287,11 @@ func autocloseConvoyIfComplete(store beads.Store, rec events.Recorder, convoy be
 		}
 	}
 
-	if err := closeConvoyWithReason(store, convoy.ID, convoyAutocloseReason); err != nil {
+	closed, err := autocloseCloseIfStill(store, convoy.ID, convoyAutocloseReason, convoyStillAutocloses, func() error {
+		return closeConvoyWithReason(store, convoy.ID, convoyAutocloseReason)
+	})
+	run.note(err)
+	if err != nil || !closed {
 		return
 	}
 

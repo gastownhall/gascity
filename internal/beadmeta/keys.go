@@ -39,18 +39,24 @@ const Namespace = "gc."
 // cmd/. Keep this block sorted by identifier; the Go compiler rejects duplicate
 // identifiers, giving us a free compile-time uniqueness guarantee.
 const (
-	AttemptLogMetadataKey      = "gc.attempt_log"
-	AttemptMetadataKey         = "gc.attempt"
-	BondMetadataKey            = "gc.bond"
-	BondVarsMetadataKey        = "gc.bond_vars"
-	BoundStepIDMetadataKey     = "gc.bound_step_id"
-	BrainParentSIDMetadataKey  = "gc.brain_parent_sid"
-	CancelRequestedMetadataKey = "gc.cancel_requested"
-	CheckInfraRetryMetadataKey = "gc.check_infra_retry"
-	CheckModeMetadataKey       = "gc.check_mode"
-	CheckPathMetadataKey       = "gc.check_path"
-	CheckTimeoutMetadataKey    = "gc.check_timeout"
-	CityPathMetadataKey        = "gc.city_path"
+	AttemptLogMetadataKey     = "gc.attempt_log"
+	AttemptMetadataKey        = "gc.attempt"
+	BondMetadataKey           = "gc.bond"
+	BondVarsMetadataKey       = "gc.bond_vars"
+	BoundStepIDMetadataKey    = "gc.bound_step_id"
+	BrainParentSIDMetadataKey = "gc.brain_parent_sid"
+	// BudgetDeferredUntilMetadataKey holds an RFC3339 timestamp stamped by the
+	// sling boundary (host/bin/gc in the outer city repo) when a claim attempt
+	// is refused for build-budget reasons; deacon-dispatch.sh clears it on
+	// successful dispatch. `gc hook --claim` must not hand out a candidate
+	// while this timestamp is still in the future. See gm-o45y5y.
+	BudgetDeferredUntilMetadataKey = "gc.budget_deferred_until"
+	CancelRequestedMetadataKey     = "gc.cancel_requested"
+	CheckInfraRetryMetadataKey     = "gc.check_infra_retry"
+	CheckModeMetadataKey           = "gc.check_mode"
+	CheckPathMetadataKey           = "gc.check_path"
+	CheckTimeoutMetadataKey        = "gc.check_timeout"
+	CityPathMetadataKey            = "gc.city_path"
 	// ClaimedAtMetadataKey records the RFC3339 UTC instant a bead was first
 	// claimed through `gc hook --claim`. It is write-once: the claim hook
 	// stamps it only when absent from the bead's current metadata and never
@@ -77,12 +83,31 @@ const (
 	ControlDispatcherFallbackMetadataKey = "gc.control_dispatcher_fallback"
 	ControlEpochMetadataKey              = "gc.control_epoch"
 	ControlForMetadataKey                = "gc.control_for"
-	ControlQuarantineReasonMetadataKey   = "gc.control_quarantine_reason"
-	ControlQuarantinedAtMetadataKey      = "gc.control_quarantined_at"
-	ControlQuarantinedMetadataKey        = "gc.control_quarantined"
-	ControllerErrorClassMetadataKey      = "gc.controller_error_class"
-	ControllerErrorMetadataKey           = "gc.controller_error"
-	ControllerRetryableMetadataKey       = "gc.controller_retryable"
+	// ControlPendingReasonMetadataKey records the latest ErrControlPending
+	// refusal text for a control bead. Pending keeps its own namespace rather
+	// than reusing the gc.controller_* keys: the two dispositions have
+	// independent budgets, and sharing one deadline anchor would let a long
+	// pending wait expire a later semantic refusal's budget on its FIRST
+	// refusal — quarantining the bead the pending disposition exists to keep
+	// open.
+	ControlPendingReasonMetadataKey = "gc.control_pending_reason"
+	// ControlPendingCountMetadataKey counts pending sweeps recorded for a
+	// control bead. Diagnostics only, like its Tier-B counterpart.
+	ControlPendingCountMetadataKey = "gc.control_pending_count"
+	// ControlPendingFirstSeenMetadataKey is the RFC3339 instant of the FIRST
+	// pending refusal recorded for a control bead. Pending retry stays
+	// unbounded; this anchor bounds only how long it stays SILENT.
+	ControlPendingFirstSeenMetadataKey = "gc.control_pending_first_seen"
+	// ControlPendingStalledMetadataKey marks that the one-shot control.stalled
+	// escalation has already been emitted for this bead's pending wait, so a
+	// never-healing pending is loud once rather than every sweep.
+	ControlPendingStalledMetadataKey   = "gc.control_pending_stalled"
+	ControlQuarantineReasonMetadataKey = "gc.control_quarantine_reason"
+	ControlQuarantinedAtMetadataKey    = "gc.control_quarantined_at"
+	ControlQuarantinedMetadataKey      = "gc.control_quarantined"
+	ControllerErrorClassMetadataKey    = "gc.controller_error_class"
+	ControllerErrorMetadataKey         = "gc.controller_error"
+	ControllerRetryableMetadataKey     = "gc.controller_retryable"
 	// ControllerRetryFirstSeenMetadataKey is the RFC3339 instant of the FIRST
 	// semantic-refusal retry recorded for a control bead. It is the persisted
 	// deadline anchor for the bounded Tier-B retry budget: it lives on the bead
@@ -149,6 +174,7 @@ const (
 	FanoutModeMetadataKey                = "gc.fanout_mode"
 	FanoutStateMetadataKey               = "gc.fanout_state"
 	FinalDispositionMetadataKey          = "gc.final_disposition"
+	FinalizerBeadIDMetadataKey           = "gc.finalizer_bead_id"
 	ForEachMetadataKey                   = "gc.for_each"
 	FormulaMetadataKey                   = "gc.formula"
 	FormulaContractMetadataKey           = "gc.formula_contract"
@@ -172,6 +198,7 @@ const (
 	// (ga-wevcl). Live closes on stamped roots remain covered by the delta
 	// lane, which reacts to the close events themselves.
 	CompletionFactsConvergedMetadataKey = "gc.completion_facts_converged"
+	LabelRevisionMetadataKey            = "gc.label_rev" // label CAS bookkeeping; see beads.NativeDoltStore.updateLabelsIfMatch
 	LastFailureClassMetadataKey         = "gc.last_failure_class"
 	LastFinalizeErrorMetadataKey        = "gc.last_finalize_error"
 	LeaseOwnerMetadataKey               = "gc.lease_owner"
@@ -201,12 +228,15 @@ const (
 	RequiredArtifactMetadataKey         = "gc.required_artifact"
 	RequiredArtifactsMetadataKey        = "gc.required_artifacts"
 	ReviewGateMetadataKey               = "gc.review_gate"
+	RetryAttemptMetadataKey             = "gc.retry_attempt" // see attempt.go
 	RetryCountMetadataKey               = "gc.retry_count"
 	RetryFromMetadataKey                = "gc.retry_from"
 	RetrySessionRecycledMetadataKey     = "gc.retry_session_recycled"
 	RetryStateMetadataKey               = "gc.retry_state"
 	RigRootMetadataKey                  = "gc.rig_root"
 	RootBeadIDMetadataKey               = "gc.root_bead_id"
+	RootSettleFailedAtMetadataKey       = "gc.root_settle_failed_at"
+	RootSettleFailedMetadataKey         = "gc.root_settle_failed"
 	RootStoreRefMetadataKey             = "gc.root_store_ref"
 	RouteQuarantineMetadataKey          = "gc.route_recovery_quarantined"
 	RouteQuarantineReasonMetadataKey    = "gc.route_recovery_quarantine_reason"
@@ -235,14 +265,42 @@ const (
 	SpecForRefMetadataKey       = "gc.spec_for_ref"
 	StderrMetadataKey           = "gc.stderr"
 	StdoutMetadataKey           = "gc.stdout"
-	StepIDMetadataKey           = "gc.step_id"
-	StepRefMetadataKey          = "gc.step_ref"
-	StepTimeoutMetadataKey      = "gc.step_timeout"
-	SyntheticKindMetadataKey    = "gc.synthetic_kind"
-	SyntheticMetadataKey        = "gc.synthetic"
-	TemplateMetadataKey         = "gc.template"
-	TerminalMetadataKey         = "gc.terminal"
-	TriggerBeadIDMetadataKey    = "gc.trigger_bead_id"
+	// StepDefinedEmittedMetadataKey records, on a graph.v2 physical step bead,
+	// that its execution.step_defined fact has already been emitted AND
+	// acknowledged durable. The level-triggered projector restates the full
+	// graph every control tick; this per-step marker is what makes that
+	// restatement idempotent, so a step_defined is emitted once and a steady
+	// tick restates nothing (ga-rd8le). A step still lacking the marker —
+	// freshly created, or one whose emit was not acknowledged durable (a dropped
+	// append, or a recorder that cannot promise durability) — is emitted and
+	// marked on the next healthy tick, so every creator and recovery path
+	// self-heals. The mark is written only after the emit is acknowledged, so a
+	// dropped emit never marks the step and is safely re-emitted; presence alone
+	// is significant, and the stamped RFC3339 value is for observability only.
+	//
+	// The marker is durable on the step bead, while the emitted step_defined
+	// lives in the event journal, which retention can trim: with opt-in archive
+	// retention (events.rotation.archive_retain_age) a long-lived run's
+	// once-emitted step_defined can age out of the retained journal while this
+	// marker persists, so a consumer reading only retained events may no longer
+	// see it. The offline full restate ('gc events reemit-execution') is the
+	// reemit path — it drives Projection.Events, which ignores this marker and
+	// re-states every step, so it re-materializes any aged-out definition.
+	//
+	// A host crash is the second way the two can diverge: the acknowledged
+	// append is not fsynced, so an OS crash can lose the JSONL line while this
+	// marker — written to a separate store with its own commit durability —
+	// survives. The same reemit path ('gc events reemit-execution')
+	// re-materializes the lost definition.
+	StepDefinedEmittedMetadataKey = "gc.step_defined_emitted"
+	StepIDMetadataKey             = "gc.step_id"
+	StepRefMetadataKey            = "gc.step_ref"
+	StepTimeoutMetadataKey        = "gc.step_timeout"
+	SyntheticKindMetadataKey      = "gc.synthetic_kind"
+	SyntheticMetadataKey          = "gc.synthetic"
+	TemplateMetadataKey           = "gc.template"
+	TerminalMetadataKey           = "gc.terminal"
+	TriggerBeadIDMetadataKey      = "gc.trigger_bead_id"
 	// InfraMigratedFromMetadataKey stamps a bead the storage-class migration
 	// copied into a binding with the name of the binding it came from, so a
 	// resumed attempt can tell a row it wrote from content the destination
@@ -264,6 +322,14 @@ const (
 	WorktreeRepoMetadataKey        = "gc.worktree_repo"
 	WorktreeRootMetadataKey        = "gc.worktree_root"
 	WorkflowIDMetadataKey          = "gc.workflow_id"
+	// WorkflowExpandedMetadataKey marks a graph.v2 workflow root that was
+	// compiled with real child steps beyond the root itself. Its absence
+	// distinguishes a genuinely root-only (#2763-shape) molecule, whose root
+	// IS the unit of work and must remain claimable via the
+	// RunTargetMetadataKey fallback, from a fully-expanded root whose real
+	// children have all closed and is only waiting on workflow-finalize —
+	// see hookClaimMatchesRoute/hookClaimRoute (#5900).
+	WorkflowExpandedMetadataKey = "gc.workflow_expanded"
 )
 
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
@@ -377,6 +443,38 @@ const (
 	MergeStrategyMetadataKey = "merge_strategy"
 )
 
+// Accepted MergeStrategyMetadataKey values. They are part of the bead-metadata
+// contract shared by `gc sling`, the HTTP sling endpoint, rig config, and the
+// pack formulas that read merge_strategy back off a work bead, so they must not
+// change without a migration. An absent key is not one of these values —
+// consumers read "unset" as their own implicit default.
+const (
+	// MergeStrategyDirect merges the work branch into its target branch.
+	MergeStrategyDirect = "direct"
+	// MergeStrategyMR delivers the work through a merge/pull request rather
+	// than by pushing to the target branch.
+	MergeStrategyMR = "mr"
+	// MergeStrategyLocal leaves the work on its branch with no merge and no
+	// request; the consumer decides what to do with it.
+	MergeStrategyLocal = "local"
+)
+
+// KnownMergeStrategies lists every accepted MergeStrategyMetadataKey value, in
+// the order validators render them into "valid values are ..." messages.
+var KnownMergeStrategies = []string{MergeStrategyDirect, MergeStrategyMR, MergeStrategyLocal}
+
+// IsKnownMergeStrategy reports whether s is an accepted merge strategy. The
+// comparison is exact: the empty string is "unset" rather than a strategy, and
+// callers are expected to trim before asking.
+func IsKnownMergeStrategy(s string) bool {
+	for _, known := range KnownMergeStrategies {
+		if s == known {
+			return true
+		}
+	}
+	return false
+}
+
 // OptionMetadataPrefix is the dynamic non-"gc."-prefixed key prefix under
 // which provider option choices are stored as opt_<OptionsSchema key> (e.g.
 // opt_model, opt_effort) on session and work beads. The suffix is open-world
@@ -396,6 +494,7 @@ var KnownMetadataKeys = []string{
 	BondVarsMetadataKey,
 	BoundStepIDMetadataKey,
 	BrainParentSIDMetadataKey,
+	BudgetDeferredUntilMetadataKey,
 	CancelRequestedMetadataKey,
 	CheckInfraRetryMetadataKey,
 	CheckModeMetadataKey,
@@ -408,6 +507,10 @@ var KnownMetadataKeys = []string{
 	ContinuationGroupMetadataKey,
 	ControlEpochMetadataKey,
 	ControlForMetadataKey,
+	ControlPendingReasonMetadataKey,
+	ControlPendingCountMetadataKey,
+	ControlPendingFirstSeenMetadataKey,
+	ControlPendingStalledMetadataKey,
 	ControlQuarantineReasonMetadataKey,
 	ControlQuarantinedAtMetadataKey,
 	ControlQuarantinedMetadataKey,
@@ -456,6 +559,7 @@ var KnownMetadataKeys = []string{
 	FanoutModeMetadataKey,
 	FanoutStateMetadataKey,
 	FinalDispositionMetadataKey,
+	FinalizerBeadIDMetadataKey,
 	ForEachMetadataKey,
 	FormulaMetadataKey,
 	FormulaContractMetadataKey,
@@ -470,6 +574,7 @@ var KnownMetadataKeys = []string{
 	IterationMetadataKey,
 	ItemRootKeyMetadataKey,
 	KindMetadataKey,
+	LabelRevisionMetadataKey,
 	LastFailureClassMetadataKey,
 	LastFinalizeErrorMetadataKey,
 	LeaseOwnerMetadataKey,
@@ -499,12 +604,15 @@ var KnownMetadataKeys = []string{
 	RequiredArtifactMetadataKey,
 	RequiredArtifactsMetadataKey,
 	ReviewGateMetadataKey,
+	RetryAttemptMetadataKey,
 	RetryCountMetadataKey,
 	RetryFromMetadataKey,
 	RetrySessionRecycledMetadataKey,
 	RetryStateMetadataKey,
 	RigRootMetadataKey,
 	RootBeadIDMetadataKey,
+	RootSettleFailedAtMetadataKey,
+	RootSettleFailedMetadataKey,
 	RootStoreRefMetadataKey,
 	RouteQuarantineMetadataKey,
 	RouteQuarantineReasonMetadataKey,
@@ -528,6 +636,7 @@ var KnownMetadataKeys = []string{
 	SpecForRefMetadataKey,
 	StderrMetadataKey,
 	StdoutMetadataKey,
+	StepDefinedEmittedMetadataKey,
 	StepIDMetadataKey,
 	StepRefMetadataKey,
 	StepTimeoutMetadataKey,
@@ -553,6 +662,7 @@ var KnownMetadataKeys = []string{
 	WorktreeRepoMetadataKey,
 	WorktreeRootMetadataKey,
 	WorkflowIDMetadataKey,
+	WorkflowExpandedMetadataKey,
 }
 
 // KnownMetadataPrefixes lists declared open-world key prefixes. A literal that

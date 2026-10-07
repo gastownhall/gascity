@@ -1,0 +1,112 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "gastown_test",
+    srcs = [
+        "bind_key_script_test.go",
+        "cycle_script_test.go",
+        "dolt_orphan_sweep_integration_test.go",
+        "embedded_pack_test.go",
+        "gastown_test.go",
+        "main_test.go",
+        "maintenance_bd_integration_test.go",
+        "maintenance_installed_layout_test.go",
+        "maintenance_scope_test.go",
+        "maintenance_scripts_dolt_integration_test.go",
+        "maintenance_scripts_test.go",
+        "operational_awareness_test.go",
+        "precompact_hook_test.go",
+        "testenv_import_test.go",
+        "tmux_theme_script_test.go",
+    ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//examples:all_examples",
+        "//examples/bd:pack_files",
+        "//examples/bd/dolt:pack_files",
+        "//internal/bootstrap/packs/core:pack_files",
+    ] + select({
+        "//:gotags_integration": [
+            "@bd_bin_v1_3_1//:bd",
+            "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
+        ],
+        "//conditions:default": [],
+    }),
+    # The integration build's tests run bd/dolt by name: GC_TEST_TOOL_PATHS puts
+    # the pinned binaries first on PATH (internal/testenv).
+    env = select({
+        "//:gotags_integration": {
+            "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_1//:bd) $(rootpath @dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt)",
+        },
+        "//conditions:default": {},
+    }),
+    shard_count = 2,
+    deps = [
+        "//examples/bd/dolt",
+        "//internal/bazeltest",
+        "//internal/beads",
+        "//internal/bootstrap/packs/core",
+        "//internal/builtinpacks",
+        "//internal/clock",
+        "//internal/config",
+        "//internal/doltorphan",
+        "//internal/extmsg",
+        "//internal/formula",
+        "//internal/fsys",
+        "//internal/molecule",
+        "//internal/packman",
+        "//internal/session",
+        "//internal/testenv",
+        "//test/dolttest",
+        "@com_github_burntsushi_toml//:toml",
+        "@com_github_gastownhall_gascity_packs//:gascity-packs",
+    ],
+)
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+filegroup(
+    name = "pack_files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

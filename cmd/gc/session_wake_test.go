@@ -3,9 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"log"
+	"maps"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +20,20 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
+
+type sequencedDrainLivenessProvider struct {
+	*runtime.Fake
+	observeCalls  atomic.Int64
+	unavailableAt int64
+}
+
+func (p *sequencedDrainLivenessProvider) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
+	if p.observeCalls.Add(1) == p.unavailableAt {
+		return runtime.Liveness{}, fmt.Errorf("drain liveness: %w", runtime.ErrRuntimeUnavailable)
+	}
+	running := p.IsRunning(name)
+	return runtime.Liveness{Running: running, Alive: running}, nil
+}
 
 type countingWakeMetadataStore struct {
 	*beads.MemStore
@@ -40,6 +58,63 @@ func makeWakeBead(id string, meta map[string]string) beads.Bead {
 		cloned["work_dir"] = "/tmp/gc-session-test"
 	}
 	return beads.Bead{ID: id, Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: cloned}
+}
+
+func TestAdvanceSessionDrains_LivenessUnavailableDefersOrdinaryDrainCompletion(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	sp := &sequencedDrainLivenessProvider{Fake: runtime.NewFake(), unavailableAt: 1}
+	store := beads.NewMemStore()
+	dt := newDrainTracker()
+	if err := sp.Start(context.Background(), "test-session", runtime.Config{}); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	b, err := store.Create(beads.Bead{
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "test-session",
+			"template":             "worker",
+			"provider":             "claude",
+			"work_dir":             t.TempDir(),
+			"generation":           "3",
+			"state":                "active",
+			"wake_mode":            "fresh",
+			"session_key":          "keep-session",
+			"started_config_hash":  "keep-hash",
+			"pending_create_claim": "true",
+			"last_woke_at":         now.Add(-time.Minute).Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	ds := &drainState{startedAt: now.Add(-10 * time.Second), deadline: now.Add(20 * time.Second), reason: "idle", generation: 3}
+	dt.set(b.ID, ds)
+	before, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get before: %v", err)
+	}
+
+	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+		got, _ := store.Get(id)
+		return &got
+	}), map[string]wakeEvaluation{}, &config.City{}, clk, nil)
+
+	if got := dt.get(b.ID); got != ds {
+		t.Fatalf("drain tracker entry = %p, want retained %p", got, ds)
+	}
+	after, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get after: %v", err)
+	}
+	if !maps.Equal(after.Metadata, before.Metadata) {
+		t.Fatalf("metadata mutated while liveness unavailable: before=%#v after=%#v", before.Metadata, after.Metadata)
+	}
+	if got := sp.CountCalls("Stop", "test-session"); got != 0 {
+		t.Fatalf("Stop calls = %d, want 0", got)
+	}
 }
 
 // wakeInfo projects a store-created fixture bead through the session front door
@@ -666,28 +741,53 @@ func TestVerifiedStop_NoToken(t *testing.T) {
 	}
 }
 
-func TestVerifiedInterrupt_MismatchedToken(t *testing.T) {
+// verifiedStopTokenFixture creates a running session whose bead expects
+// instance token "tok-a" and whose runtime token read answers readErr.
+func verifiedStopTokenFixture(t *testing.T, readErr error) (beads.Store, *runtime.Fake, sessionpkg.Info) {
+	t.Helper()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig("", store, sp, nil)
-	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := store.SetMetadata(info.ID, "instance_token", "new-token"); err != nil {
+	if err := store.SetMetadata(info.ID, "instance_token", "tok-a"); err != nil {
 		t.Fatalf("SetMetadata(instance_token): %v", err)
 	}
-	if err := sp.SetMeta(info.SessionName, "GC_INSTANCE_TOKEN", "old-token"); err != nil {
-		t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
-	}
+	sp.GetMetaErrors[info.SessionName] = map[string]error{"GC_INSTANCE_TOKEN": readErr}
 	session, err := store.Get(info.ID)
 	if err != nil {
 		t.Fatalf("store.Get: %v", err)
 	}
+	return store, sp, sessiontest.SeedBead(t, session)
+}
 
-	err = verifiedInterrupt(session, store, sp, nil)
-	if err == nil {
-		t.Error("expected error for mismatched token")
+// An empty token that came with a read error must not pass the fence: the
+// drain-timeout kill is skipped and retried, and is not mistaken for a stale
+// drain (errTokenMismatch would cancel it).
+func TestVerifiedStopDefersOnUnverifiableToken(t *testing.T) {
+	store, sp, info := verifiedStopTokenFixture(t, fmt.Errorf("show-environment timed out: %w", runtime.ErrRuntimeUnavailable))
+
+	err := verifiedStop(info, store, sp, nil)
+	if !errors.Is(err, errTokenUnverifiable) || errors.Is(err, errTokenMismatch) {
+		t.Fatalf("verifiedStop error = %v, want errTokenUnverifiable (not errTokenMismatch)", err)
+	}
+	if !sp.IsRunning(info.SessionNameMetadata) {
+		t.Fatal("verifiedStop killed a session whose instance token could not be read")
+	}
+}
+
+// A runtime with no metadata store has no token by construction: the kill
+// proceeds, or exec kills would become impossible.
+func TestVerifiedStopProceedsOnMetaUnsupported(t *testing.T) {
+	store, sp, info := verifiedStopTokenFixture(t, fmt.Errorf("exec get-meta: %w", runtime.ErrMetaUnsupported))
+
+	if err := verifiedStop(info, store, sp, nil); err != nil {
+		t.Fatalf("verifiedStop error = %v, want nil on ErrMetaUnsupported", err)
+	}
+	if sp.IsRunning(info.SessionNameMetadata) {
+		t.Fatal("verifiedStop did not stop a session on a meta-less runtime")
 	}
 }
 
@@ -1381,6 +1481,69 @@ func TestAdvanceSessionDrains_TimeoutTokenMismatch(t *testing.T) {
 	got, _ := store.Get(b.ID)
 	if got.Metadata["state"] == "asleep" {
 		t.Error("state should not be asleep after failed stop")
+	}
+}
+
+// A token that cannot be read is not a replacement: the timed-out drain is kept
+// for retry (not canceled as stale), nothing is stopped, and the retry trace
+// says token_unverifiable. The trace error omits the read error's text, which
+// IsSessionGone would read as gone.
+func TestAdvanceSessionDrains_TimeoutUnverifiableTokenKeepsDrain(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	dt := newDrainTracker()
+
+	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
+	sp.GetMetaErrors["test-session"] = map[string]error{"GC_INSTANCE_TOKEN": errors.New("no tmux server running")}
+
+	b, _ := store.Create(beads.Bead{
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":   "test-session",
+			"template":       "worker",
+			"provider":       "claude",
+			"work_dir":       t.TempDir(),
+			"generation":     "3",
+			"instance_token": "tok-a",
+		},
+	})
+	dt.set(b.ID, &drainState{
+		startedAt:  now.Add(-60 * time.Second),
+		deadline:   now.Add(-10 * time.Second),
+		reason:     "pool-excess",
+		generation: 3,
+	})
+	trace := newPoolDesiredStateTestTrace("worker")
+
+	advanceSessionDrainsWithSessionsTraced(dt, sp, store, infoLookupFromBeadLookup(func(id string) *beads.Bead {
+		got, _ := store.Get(id)
+		return &got
+	}), map[string]wakeEvaluation{}, &config.City{}, clk, trace)
+
+	if dt.get(b.ID) == nil {
+		t.Fatal("drain was canceled on an unverifiable token, want it kept for retry")
+	}
+	if !sp.IsRunning("test-session") || sp.CountCalls("Stop", "test-session") != 0 {
+		t.Fatal("drain timeout stopped a session whose instance token could not be read")
+	}
+	var retry *SessionReconcilerTraceRecord
+	for i := range trace.records {
+		if trace.records[i].SiteCode == TraceSiteDrainTimeout {
+			retry = &trace.records[i]
+		}
+	}
+	if retry == nil {
+		t.Fatal("no drain-timeout trace record")
+	}
+	if retry.OutcomeCode != TraceOutcomeRetry || retry.Fields["token"] != "token_unverifiable" {
+		t.Fatalf("drain-timeout trace = outcome %q token %v, want retry with token=token_unverifiable", retry.OutcomeCode, retry.Fields["token"])
+	}
+	if msg, _ := retry.Fields["error"].(string); runtime.IsSessionGone(errors.New(msg)) {
+		t.Fatalf("drain-timeout trace error %q reads as gone to IsSessionGone", msg)
 	}
 }
 

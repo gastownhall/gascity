@@ -104,9 +104,11 @@ func TestVendorSink(t *testing.T) {
 		{"gemini", ".gemini/skills", true},
 		{"opencode", ".opencode/skills", true},
 		{"mimocode", ".mimocode/skills", true},
+		// pi shares codex's .agents/skills sink: both scan it, and it is
+		// the location pi documents for cross-harness skill sharing.
+		{"pi", ".agents/skills", true},
 		{"copilot", "", false},
 		{"cursor", "", false},
-		{"pi", "", false},
 		{"omp", "", false},
 		{"unknown", "", false},
 		{"", "", false},
@@ -126,7 +128,7 @@ func TestVendorSink(t *testing.T) {
 func TestSupportedVendorsStable(t *testing.T) {
 	t.Parallel()
 	got := SupportedVendors()
-	want := []string{"claude", "codex", "gemini", "mimocode", "opencode"}
+	want := []string{"claude", "codex", "gemini", "mimocode", "opencode", "pi"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("SupportedVendors() = %v, want %v", got, want)
 	}

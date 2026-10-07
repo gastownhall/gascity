@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -593,6 +594,14 @@ type Rig struct {
 	// Captured by `gc rig add` from the rig's git config; set manually for
 	// rigs whose mainline isn't reachable via origin/HEAD.
 	DefaultBranch string `toml:"default_branch,omitempty"`
+	// DefaultMergeStrategy is the merge strategy `gc sling` stamps on a bead
+	// routed into this rig when the caller passes no --merge flag. One of
+	// "direct", "mr", or "local"; empty leaves the bead unstamped, which
+	// consumers read as their own implicit default. Set it to "mr" on rigs
+	// that deliver work through a pull request instead of a push to the
+	// target branch, so a bare `gc sling` records the shape the rig actually
+	// uses rather than one every caller has to remember to pass.
+	DefaultMergeStrategy string `toml:"default_merge_strategy,omitempty"`
 	// Suspended is the deprecated pre-runtime-state suspension flag.
 	// Parsed for backwards compatibility and treated as an alias for
 	// SuspendedOnStart by [Rig.EffectiveSuspendedOnStart], so existing
@@ -658,6 +667,11 @@ type Rig struct {
 	// explicit --var override. Takes precedence over formula-level defaults
 	// but loses to --var flags.
 	FormulaVars map[string]string `toml:"formula_vars,omitempty"`
+	// BeadsProxiedIdleTimeout overrides [beads] proxied_idle_timeout for this
+	// rig's bd-owned proxied scope. Go duration; "0" means never. Ignored, with
+	// a warning, for a rig that shares the city's proxy root: one proxy serves
+	// every scope on that root and carries the city's value.
+	BeadsProxiedIdleTimeout *string `toml:"beads_proxied_idle_timeout,omitempty"`
 }
 
 // AgentOverride modifies a pack-stamped agent for a specific rig.
@@ -693,6 +707,8 @@ type AgentOverride struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// ContextAdvisory overrides context-pressure guidance for this agent.
+	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty"`
 	// Upstream overrides the model-serving endpoint selection (Phase C).
 	Upstream *string `toml:"upstream,omitempty"`
 	// Args overrides the provider's default arguments. Leave unset to keep
@@ -719,6 +735,9 @@ type AgentOverride struct {
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
+	// AutoReclaimStaleClaims overrides Agent.AutoReclaimStaleClaims (see that
+	// field for semantics).
+	AutoReclaimStaleClaims *bool `toml:"auto_reclaim_stale_claims,omitempty"`
 	// InstallAgentHooks overrides the agent's install_agent_hooks list.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
 	// Skills is a tombstone field retained for v0.15.1 backwards
@@ -1172,16 +1191,17 @@ func (r *Rig) EffectivePrefix() string {
 	return DeriveBeadsPrefix(r.Name)
 }
 
-// Coordination class names, mirroring coordclass.Class.String(). They are part of
-// the [beads.classes.<name>] config contract and must not change without a
-// migration.
+// Coordination class names. They are part of the [beads.classes.<name>] config
+// contract and must not change without a migration. They no longer MIRROR
+// coordclass.Class.String() — both spell the same beadmeta constants, so the
+// two vocabularies cannot drift apart.
 const (
-	BeadClassWork      = "work"
-	BeadClassGraph     = "graph"
-	BeadClassMessaging = "messaging"
-	BeadClassSessions  = "sessions"
-	BeadClassOrders    = "orders"
-	BeadClassNudges    = "nudges"
+	BeadClassWork      = beadmeta.ClassNameWork
+	BeadClassGraph     = beadmeta.ClassNameGraph
+	BeadClassMessaging = beadmeta.ClassNameMessaging
+	BeadClassSessions  = beadmeta.ClassNameSessions
+	BeadClassOrders    = beadmeta.ClassNameOrders
+	BeadClassNudges    = beadmeta.ClassNameNudges
 )
 
 // EffectiveDefaultBranch returns the rig's recorded default branch, or the
@@ -1189,6 +1209,13 @@ const (
 // (e.g., git symbolic-ref) when this returns "".
 func (r *Rig) EffectiveDefaultBranch() string {
 	return strings.TrimSpace(r.DefaultBranch)
+}
+
+// EffectiveDefaultMergeStrategy returns the rig's recorded default merge
+// strategy, or the empty string if none is set. An empty result means `gc
+// sling` leaves merge_strategy unstamped on beads routed into this rig.
+func (r *Rig) EffectiveDefaultMergeStrategy() string {
+	return strings.TrimSpace(r.DefaultMergeStrategy)
 }
 
 // EffectiveSuspendedOnStart returns the rig's committable startup
@@ -1416,6 +1443,40 @@ type BeadsConfig struct {
 	// "require" (guarded release or a typed refusal). Empty defaults to "off".
 	// Any other value fails config load.
 	GuardedRelease string `toml:"guarded_release,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
+	// AllowSchemaBehindMigrate opts this city in to letting the linked beads
+	// library migrate its database forward when the database's own schema
+	// cursor trails the library's ceiling. Without it, the native-store
+	// preflight schema check FAILs a behind schema (stays on BdStore) instead
+	// of risking a native open that would migrate a possibly-shared database;
+	// the direct native-open path withholds BD_ALLOW_REMOTE_MIGRATE from the
+	// linked library the same way. Default: false (nil). A break-glass
+	// GC_BEADS_ALLOW_SCHEMA_BEHIND_MIGRATE env override is registered in
+	// internal/rollout (beads.allow_schema_behind_migrate); read the effective
+	// value through internal/rollout.Flags.AllowSchemaBehindMigrate, never
+	// this field directly.
+	AllowSchemaBehindMigrate *bool `toml:"allow_schema_behind_migrate,omitempty" jsonschema:"default=false"`
+	// ProxiedIdleTimeout is how long a bd-owned proxied scope's proxy and Dolt
+	// child stay up with no connections before bd retires them; the next bd
+	// command restarts them. Go duration; "0" means never. A finite value
+	// must be at least 1m. Empty uses the default, 30m. It applies to scopes gc
+	// initializes (gc init, gc rig add, gc beads city migrate-proxied); bd
+	// cannot change an existing scope's value, and gc doctor reports drift.
+	// Overridden per rig by beads_proxied_idle_timeout and by the
+	// GC_BEADS_PROXIED_IDLE_TIMEOUT environment variable.
+	ProxiedIdleTimeout string `toml:"proxied_idle_timeout,omitempty" jsonschema:"default=30m"`
+
+	// NativeTransport selects whether this city's bead stores may open the
+	// native Dolt store at all: "off" (this city's stores never open
+	// natively; always BdStore, the bd CLI subprocess — logged once at boot)
+	// or "auto" (default: native when preflight-eligible, today's behavior).
+	// Empty defaults to "auto". Any other value (including "require", which
+	// belongs to conditional_writes/guarded_release, not this switch) fails
+	// config load. A running city keeps the stores it holds open on the value
+	// it read at boot until it restarts; every other open, by a gc command or
+	// for a single tick, reads the current value.
+	// GC_BEADS_FORCE_FALLBACK remains a deprecated process-wide alias for
+	// "off" that overrides every city's value for one release.
+	NativeTransport string `toml:"native_transport,omitempty" jsonschema:"default=auto,enum=auto,enum=off"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -1474,6 +1535,44 @@ func (b BeadsConfig) NormalizedGuardedRelease() string {
 		return "off"
 	}
 	return b.GuardedRelease
+}
+
+// NormalizedNativeTransport returns the configured native-transport value,
+// mapping ONLY the empty string to the built-in default "auto" — unlike
+// ConditionalWrites/GuardedRelease, whose unset default is "off", this
+// switch's unset default is "auto" (today's eligibility-gated behavior).
+// Like the other two, an unknown non-empty value passes through verbatim
+// rather than collapsing to the default, because a typo must never silently
+// pick a mode: it is rejected upstream by validateNativeTransport on load.
+//
+// Unlike ConditionalWrites/GuardedRelease — whose raw config string is always
+// re-parsed through gate.ParseMode (case- and space-tolerant) before any
+// consumer compares it — NativeTransport's only runtime consumer
+// (resolvedNativeTransportMode) compares this string against the
+// beads.NativeTransportOff constant with a literal, case-sensitive ==. So this
+// method, not a downstream parser, is the single place that must fold case and
+// whitespace: every consumer MUST call NormalizedNativeTransport rather than
+// read the NativeTransport field directly, or "OFF"/"Off"/" off " would pass
+// validateNativeTransport (which does use gate.ParseMode) but then fail the
+// literal comparison and silently resolve to native/auto. Trimming+lowercasing
+// here (rather than in validateNativeTransport) keeps that invariant true for
+// every caller, present and future, without relying on each call site to
+// remember to normalize.
+func (b BeadsConfig) NormalizedNativeTransport() string {
+	raw := strings.ToLower(strings.TrimSpace(b.NativeTransport))
+	if raw == "" {
+		return "auto"
+	}
+	return raw
+}
+
+// AllowSchemaBehindMigrateEnabled reports the configured value, defaulting to
+// false (no opt-in) when unset. This is the raw config-only view; callers
+// deciding whether to actually let a behind schema migrate must read the
+// resolved internal/rollout gate (beads.allow_schema_behind_migrate), which
+// also applies the registered env override — never this accessor directly.
+func (b BeadsConfig) AllowSchemaBehindMigrateEnabled() bool {
+	return b.AllowSchemaBehindMigrate != nil && *b.AllowSchemaBehindMigrate
 }
 
 // UsesBD105CLISemantics reports whether bd-backed code may rely on bd 1.0.5
@@ -1754,7 +1853,19 @@ type ACPSessionConfig struct {
 	// OutputBufferLines is the number of output lines to keep in the
 	// circular buffer for Peek. Defaults to 1000.
 	OutputBufferLines int `toml:"output_buffer_lines,omitempty" jsonschema:"default=1000"`
+	// StopGrace is how long stopping an ACP session waits after SIGTERM
+	// before escalating to SIGKILL. Raise it for agents that need longer to
+	// drain in-flight tool calls on shutdown. Duration string (e.g., "5s",
+	// "20s"). Defaults to "5s"; non-positive or unparseable values fall back
+	// to the default. gc stop bounds each session at 30s, so keep stop_grace
+	// comfortably below that.
+	StopGrace string `toml:"stop_grace,omitempty" jsonschema:"default=5s"`
 }
+
+// DefaultACPStopGrace is the ACP SIGTERM-to-SIGKILL grace used when
+// [session.acp] stop_grace is unset or invalid. It matches the grace every
+// managed-process runtime uses.
+const DefaultACPStopGrace = 5 * time.Second
 
 // HandshakeTimeoutDuration returns the handshake timeout as a time.Duration.
 // Defaults to 30s if empty or unparseable.
@@ -1766,6 +1877,15 @@ func (a *ACPSessionConfig) HandshakeTimeoutDuration() time.Duration {
 // Defaults to 60s if empty or unparseable.
 func (a *ACPSessionConfig) NudgeBusyTimeoutDuration() time.Duration {
 	return durationOr(a.NudgeBusyTimeout, 60*time.Second)
+}
+
+// StopGraceDuration returns the ACP stop grace as a time.Duration.
+// Defaults to DefaultACPStopGrace if empty, unparseable, or non-positive.
+func (a *ACPSessionConfig) StopGraceDuration() time.Duration {
+	if d := durationOr(a.StopGrace, DefaultACPStopGrace); d > 0 {
+		return d
+	}
+	return DefaultACPStopGrace
 }
 
 // OutputBufferLinesOrDefault returns the output buffer line count.
@@ -1804,8 +1924,11 @@ type MailConfig struct {
 	// Provider selects the mail backend: "fake", "fail",
 	// "exec:<script>", or "" (default: beadmail).
 	Provider string `toml:"provider,omitempty"`
-	// RetentionTTL is how long read messages are retained before purge. Empty
-	// or "0" disables read-message retention.
+	// RetentionTTL has two consumers: it is how long read messages are
+	// retained before purge, and how long a read mail bead stays open before
+	// the nudge-mail sweep closes it. Empty or "0" disables read-message
+	// purge. The sweep distinguishes the two: empty leaves it at its own
+	// 60-minute default, while "0" disables its mail-close phase.
 	RetentionTTL string `toml:"retention_ttl,omitempty"`
 }
 
@@ -2120,10 +2243,23 @@ type OrdersConfig struct {
 	// BurntSushi's omitempty does not drop a zero int, so a plain int would
 	// emit max_dispatches_per_tick = 0 into every marshaled city.toml.
 
-	// MaxDispatchesPerTick caps how many orders the supervisor dispatches
-	// per tick. Unset keeps the built-in default of 4; set to 1 to drain
-	// overdue cooldown orders one-per-tick at cold start instead of firing
-	// several concurrent goroutines at once.
+	// MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron
+	// and event triggers) the supervisor dispatches per orders-lane pass, in
+	// a rotation that resumes where the previous pass stopped. The key keeps
+	// its historical name from when order dispatch ran once per controller
+	// tick. Unset keeps the built-in default of 4; set to 1 to drain overdue
+	// cooldown orders one per pass at cold start instead of firing several
+	// concurrent goroutines at once. Condition-triggered orders are outside
+	// this budget: a passing check means work is pending right now, so they
+	// dispatch on the pass that observes it. The open-tracking and open-work
+	// gates still run for them (unless the order sets no_work_gate), but
+	// those gates are keyed per order and only hold back a redispatch of an
+	// order whose previous run is still moving, so they do not bound the pass
+	// as a whole: a pass launches at most this budget plus one dispatch per
+	// condition order whose check passed on that pass. That second term grows
+	// with how many condition orders a city defines, not with this setting,
+	// and at cold start, before any tracking bead exists, neither gate holds
+	// a simultaneously-due set back.
 	MaxDispatchesPerTick *int `toml:"max_dispatches_per_tick,omitempty"`
 	// Overrides apply per-order field overrides after scanning.
 	// Each override targets an order by name and optionally by rig.
@@ -2349,15 +2485,17 @@ type LocalDoctorCheck struct {
 // (broken-worktree pointers, missing files) remain hardcoded since they
 // cannot be operator-tuned in any meaningful sense.
 type DoctorConfig struct {
-	// WorktreeRigWarnSize is the per-rig warning threshold for the total
-	// disk footprint under .gc/worktrees/<rig>/. Reported by the
-	// worktree-disk-size check. Go-style human size string ("10GB", "500MB").
+	// WorktreeRigWarnSize is the per-rig warning threshold for a
+	// worktree population's total disk footprint. Reported by the
+	// worktree-disk-size check for .gc/worktrees/<rig>/, and by the
+	// rig:<rig>:worktrees check for the per-bead worktrees at
+	// <rig>/worktrees/. Go-style human size string ("10GB", "500MB").
 	// Empty or unparseable falls back to the default (10 GB).
 	WorktreeRigWarnSize string `toml:"worktree_rig_warn_size,omitempty" jsonschema:"default=10GB"`
 
-	// WorktreeRigErrorSize is the per-rig error threshold. When any rig
-	// exceeds this, the worktree-disk-size check reports an error rather
-	// than a warning. Empty or unparseable falls back to the default
+	// WorktreeRigErrorSize is the per-rig error threshold. When a rig
+	// worktree population exceeds this, the reporting check errors
+	// rather than warns. Empty or unparseable falls back to the default
 	// (50 GB).
 	WorktreeRigErrorSize string `toml:"worktree_rig_error_size,omitempty" jsonschema:"default=50GB"`
 
@@ -2613,6 +2751,13 @@ type DaemonConfig struct {
 	// wake fast path triggered by enqueue, eliminating the per-session bd
 	// shellout storm.
 	NudgeDispatcher string `toml:"nudge_dispatcher,omitempty" jsonschema:"default=legacy,enum=legacy,enum=supervisor"`
+	// SessionReconciler selects the controller's session reconciler. "legacy"
+	// (default) runs the tick reconciler. "v2" is reserved for the keyed
+	// reconciler and is refused in this build: a controller configured with it
+	// does not start. The gc-enterprise values "off", "auto" and "require" are
+	// deprecated aliases for "legacy". Boot-latched: a change applies at the next
+	// controller restart. Leave it unset.
+	SessionReconciler string `toml:"session_reconciler,omitempty" jsonschema:"default=legacy,enum=legacy,enum=v2,enum=off,enum=auto,enum=require"`
 	// AutoRestartOnDrift controls whether `gc start` automatically restarts
 	// the supervisor when it detects the running supervisor's binary or
 	// pack snapshot has drifted from on-disk state. Nil (unset) defaults
@@ -2817,6 +2962,61 @@ func (d *DaemonConfig) NudgeDispatcherMode() string {
 	default:
 		return "legacy"
 	}
+}
+
+// Session reconciler modes returned by SessionReconcilerMode.
+const (
+	SessionReconcilerLegacy = "legacy"
+	SessionReconcilerV2     = "v2"
+)
+
+// SessionReconcilerMode returns the normalized mode ("legacy" or "v2"),
+// whether the spelling was a deprecated alias, and ok=false for an unknown
+// value. Parsing is case- and space-tolerant.
+func (d DaemonConfig) SessionReconcilerMode() (mode string, alias, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(d.SessionReconciler)) {
+	case "", SessionReconcilerLegacy:
+		return SessionReconcilerLegacy, false, true
+	case SessionReconcilerV2:
+		return SessionReconcilerV2, false, true
+	case "off", "auto", "require":
+		return SessionReconcilerLegacy, true, true
+	default:
+		return "", false, false
+	}
+}
+
+// sessionReconcilerAliasMarker ends the warning for a gc-enterprise alias
+// spelling of [daemon] session_reconciler. Matching it as a suffix keeps an
+// unknown value that quotes the marker from passing as an alias. Keep in sync
+// with IsSessionReconcilerAliasWarning.
+const sessionReconcilerAliasMarker = `is a deprecated gc-enterprise alias for "legacy"; remove the key, legacy is the default`
+
+// sessionReconcilerWarnings returns the load warning for one config layer's
+// [daemon] session_reconciler: a non-fatal deprecation for an alias, and a
+// plain (strict-fatal) warning for an unknown value. The controller latch, not
+// the loader, refuses to start on an unknown value or an inadmissible v2.
+func sessionReconcilerWarnings(cfg *City, source string) []string {
+	if cfg == nil {
+		return nil
+	}
+	raw := cfg.Daemon.SessionReconciler
+	_, alias, ok := cfg.Daemon.SessionReconcilerMode()
+	switch {
+	case !ok:
+		return []string{fmt.Sprintf(`%s: [daemon] session_reconciler = %q is not a known value; remove the key to run the legacy reconciler`, source, raw)}
+	case alias:
+		return []string{fmt.Sprintf("%s: [daemon] session_reconciler = %q %s", source, raw, sessionReconcilerAliasMarker)}
+	}
+	return nil
+}
+
+// IsSessionReconcilerAliasWarning reports whether a load warning is the
+// non-fatal deprecation notice for a gc-enterprise session_reconciler alias.
+// Strict mode and the agent warning path use it so a city that still carries
+// "off", "auto" or "require" keeps booting on legacy.
+func IsSessionReconcilerAliasWarning(warning string) bool {
+	return strings.HasSuffix(warning, sessionReconcilerAliasMarker)
 }
 
 // ShutdownTimeoutDuration returns the shutdown timeout as a time.Duration.
@@ -3057,6 +3257,8 @@ func (c *City) PackDirsForRig(rigName string) []string {
 // default_sling_formula, and append_fragments; the remaining fields are parsed
 // and composed but are not yet inherited onto agents automatically.
 type AgentDefaults struct {
+	// ContextAdvisory is the city-wide default context-pressure guidance.
+	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty"`
 	// Provider is the default provider name for agents that do not set their
 	// own provider. It also counts as a configured provider for implicit agent
 	// injection.
@@ -3225,6 +3427,8 @@ type Agent struct {
 	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
+	// ContextAdvisory overrides context-pressure guidance for this agent.
+	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty"`
 	// Upstream selects the model-serving endpoint (a key in [upstreams]) for
 	// this agent — WHO serves the model. "" (default) falls back to
 	// agent_defaults.upstream; if still empty, no upstream env is injected
@@ -3365,6 +3569,11 @@ type Agent struct {
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
 	SleepAfterIdle string `toml:"sleep_after_idle,omitempty"`
+	// AutoReclaimStaleClaims opts this agent into gc hook --claim attempting
+	// a scoped stale-lease reclaim (via `bd reclaim --id`) when a
+	// route-matched candidate's only claim blocker is an existing assignee.
+	// Off by default; staleness is decided entirely by bd's own lease TTL.
+	AutoReclaimStaleClaims bool `toml:"auto_reclaim_stale_claims,omitempty"`
 	// InstallAgentHooks overrides workspace-level install_agent_hooks for this agent.
 	// When set, replaces (not adds to) the workspace default.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
@@ -3559,6 +3768,7 @@ func (a Agent) Clone() Agent {
 	out.MaxActiveSessions = copyIntPtr(a.MaxActiveSessions)
 	out.MinActiveSessions = copyIntPtr(a.MinActiveSessions)
 	out.AssignedWorkDeferLimit = copyIntPtr(a.AssignedWorkDeferLimit)
+	out.ContextAdvisory = cloneContextAdvisory(a.ContextAdvisory)
 	out.EmitsPermissionWarning = copyBoolPtr(a.EmitsPermissionWarning)
 	out.HooksInstalled = copyBoolPtr(a.HooksInstalled)
 	out.InjectAssignedSkills = copyBoolPtr(a.InjectAssignedSkills)
@@ -3950,6 +4160,7 @@ func hasDeprecatedAttachmentFields(cfg *City) bool {
 // mergeAgentDefaults merges src into dst using later-layer precedence for
 // scalars and additive append semantics for list fields.
 func mergeAgentDefaults(dst *AgentDefaults, src AgentDefaults, label string, prov *Provenance) {
+	mergeContextAdvisory(&dst.ContextAdvisory, src.ContextAdvisory)
 	if src.Provider != "" {
 		if prov != nil && dst.Provider != "" && dst.Provider != src.Provider {
 			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.provider redefined by %q", label))
@@ -4384,6 +4595,10 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 		if branch := r.EffectiveDefaultBranch(); branch != "" && !defaultBranchCharset.MatchString(branch) {
 			return fmt.Errorf("rig %q: default_branch %q contains characters outside [A-Za-z0-9._/@+=-]; the value is interpolated into prompts, formula variables, and pre_start shell commands, so shell-active characters are refused", r.Name, branch)
 		}
+		if strategy := r.EffectiveDefaultMergeStrategy(); strategy != "" && !beadmeta.IsKnownMergeStrategy(strategy) {
+			return fmt.Errorf("rig %q: default_merge_strategy %q is not one of %s",
+				r.Name, strategy, strings.Join(beadmeta.KnownMergeStrategies, ", "))
+		}
 	}
 	return nil
 }
@@ -4659,6 +4874,13 @@ func Parse(data []byte) (*City, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
+	// Parse intentionally preserves non-storage legacy authoring surfaces for
+	// the migration reader. The removed Dolt mode is topology authority, never
+	// migration input, so reject it at decode time without broadening that
+	// tolerance.
+	if err := validateDoltModeAuthoringSurface(md); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
 	if err := validateStorageAuthoringSurface(md); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
@@ -4666,6 +4888,9 @@ func Parse(data []byte) (*City, error) {
 	applyDaemonFormulaV2Default(&cfg, md)
 	normalizeLegacyOrderOverrideAliases(&cfg)
 	NormalizeSessionSleepFields(&cfg)
+	if err := validateContextAdvisories(&cfg); err != nil {
+		return nil, err
+	}
 	// Stamp source=sourceInline on agents declared via [[agent]] in
 	// the parsed TOML. These are city.toml inline agents (or test
 	// fixtures using Parse directly); pack agents go through a
@@ -4674,10 +4899,7 @@ func Parse(data []byte) (*City, error) {
 	for i := range cfg.Agents {
 		cfg.Agents[i].source = sourceInline
 	}
-	if err := validateConditionalWrites(cfg.Beads.ConditionalWrites); err != nil {
-		return nil, err
-	}
-	if err := validateGuardedRelease(cfg.Beads.GuardedRelease); err != nil {
+	if err := validateBeadsModes(cfg.Beads); err != nil {
 		return nil, err
 	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class
@@ -4687,6 +4909,21 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// validateBeadsModes rejects an out-of-enum value in any [beads] mode field
+// (conditional_writes, guarded_release, native_transport). Parse runs it on
+// its single layer and LoadWithIncludesOptions runs it again on the composed
+// root, because a fragment may supply any of these fields; one shared list
+// keeps the two load paths from drifting when a field is added.
+func validateBeadsModes(b BeadsConfig) error {
+	if err := validateConditionalWrites(b.ConditionalWrites); err != nil {
+		return err
+	}
+	if err := validateGuardedRelease(b.GuardedRelease); err != nil {
+		return err
+	}
+	return validateNativeTransport(b.NativeTransport)
 }
 
 // validateConditionalWrites rejects an out-of-enum beads.conditional_writes
@@ -4716,6 +4953,31 @@ func validateGuardedRelease(raw string) error {
 	}
 	if _, err := gate.ParseMode(raw); err != nil {
 		return fmt.Errorf("beads.guarded_release: %w", err)
+	}
+	return nil
+}
+
+// validateNativeTransport rejects an out-of-enum beads.native_transport
+// value at load time. This switch selects between the bd CLI subprocess and
+// the native store, not a correctness discipline, but the same rule applies:
+// a typo must never silently pick a mode, so the config fails to load
+// instead. Unlike conditional_writes/guarded_release, the grammar here is
+// two-valued (off|auto) — gate.ParseMode's third spelling, "require", parses
+// cleanly as a Mode but does not belong to this field, so it is rejected
+// explicitly rather than let through. The empty string (unset) is valid and
+// defaults to auto.
+func validateNativeTransport(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	// Deliberately do not wrap gate.ParseMode's own error: it advertises all
+	// three gate.Mode spellings ("want one of off, auto, require"), but
+	// native_transport is a two-valued field, so every rejection here —
+	// whether the spelling isn't a gate.Mode at all, or it is but is
+	// "require" — must report the same, field-correct allowed set.
+	mode, err := gate.ParseMode(raw)
+	if err != nil || mode == gate.Require {
+		return fmt.Errorf("beads.native_transport: invalid mode %q: want one of off, auto", raw)
 	}
 	return nil
 }

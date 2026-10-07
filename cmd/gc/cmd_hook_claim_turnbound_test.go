@@ -64,7 +64,7 @@ func (r *turnBoundClaimRecorder) ops(t *testing.T, output string) hookClaimOps {
 		// fences under test never depend on it.
 		PublishRunMap:     func(string, string, ...string) error { return nil },
 		StampWorkMeta:     func(context.Context, string, []string, string, string, map[string]string) error { return nil },
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 	}
 }
 

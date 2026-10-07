@@ -129,6 +129,46 @@ func TestFactoryAdapterUsesConfiguredSearchPaths(t *testing.T) {
 	}
 }
 
+// A caller that builds a Factory per request threads one memo through every
+// build: the factories, and the adapters and handles they hand out, share it.
+// A factory built without one still memoizes within itself.
+func TestFactoryThreadsInjectedActivityMemo(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	build := func(shared *DerivedActivityMemo) *Factory {
+		t.Helper()
+		factory, err := NewFactory(FactoryConfig{Store: store, Provider: sp, ActivityMemo: shared})
+		if err != nil {
+			t.Fatalf("NewFactory: %v", err)
+		}
+		return factory
+	}
+
+	memo := NewDerivedActivityMemo()
+	first, second := build(memo), build(memo)
+	if first.Adapter().activity != memo || second.Adapter().activity != memo {
+		t.Fatalf("adapters from factories sharing a memo carry %p and %p, want %p", first.Adapter().activity, second.Adapter().activity, memo)
+	}
+	handle, err := second.Session(SessionSpec{
+		Profile:  ProfileZCodeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "zcode-repl",
+		WorkDir:  t.TempDir(),
+		Provider: "zcode",
+	})
+	if err != nil {
+		t.Fatalf("factory.Session: %v", err)
+	}
+	if handle.adapter.activity != memo {
+		t.Fatalf("session handle adapter carries memo %p, want the injected %p", handle.adapter.activity, memo)
+	}
+
+	if private := build(nil); private.Adapter().activity == nil {
+		t.Fatal("factory built without a memo hands out a nil one: every poll would re-derive")
+	}
+}
+
 func TestFactoryTranscriptMethodsUseConfiguredSearchPaths(t *testing.T) {
 	searchBase := t.TempDir()
 	workDir := t.TempDir()

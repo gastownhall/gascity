@@ -174,17 +174,19 @@ func providerHasKeyedTranscript(provider string) bool {
 }
 
 // DiscoverScopedPath resolves a transcript for families whose on-disk layout is
-// keyed by the session's own name and conversation epoch rather than by any
-// session id gc holds.
+// keyed by the session's own identity — name, bead id and conversation epoch —
+// rather than by any provider session id gc holds.
 //
 // Only zcode qualifies today: gc never learns its provider session id, so
 // DiscoverKeyedPath cannot hit, but the adapter names its mirror directory
-// from GC_SESSION_NAME and GC_CONTINUATION_EPOCH — both persisted on the
-// session bead. Returns "" for every other family, so callers can try it
-// unconditionally.
-func DiscoverScopedPath(searchPaths []string, provider, workDir, sessionName, continuationEpoch string) string {
+// from GC_SESSION_NAME, GC_SESSION_ID and GC_CONTINUATION_EPOCH — all
+// persisted on the session bead. The bead id is what tells two seats sharing
+// a session name apart; a mirror written by an adapter that had no bead id is
+// still found under the name-only scope. Returns "" for every other family,
+// so callers can try it unconditionally.
+func DiscoverScopedPath(searchPaths []string, provider, workDir, sessionName, sessionBeadID, continuationEpoch string) string {
 	if sessionlog.ProviderFamily(provider) != "zcode" {
 		return ""
 	}
-	return sessionlog.FindZCodeSessionFileByScope(searchPaths, workDir, sessionName, continuationEpoch)
+	return sessionlog.FindZCodeSessionFileByScope(searchPaths, workDir, sessionName, sessionBeadID, continuationEpoch)
 }

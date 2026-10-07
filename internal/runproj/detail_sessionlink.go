@@ -7,24 +7,64 @@ import (
 )
 
 // sessionIDRe gates a value before it is fed to the supervisor session routes.
-// Port of TS SESSION_ID_RE (session-id.ts) — lowercase-only, case-sensitive. It
-// stays strict (gc/td/th or exactly-four-letter prefixes) on the NAME/assignee
-// fallback path, where an id derived from an ambiguous match must not leak.
-var sessionIDRe = regexp.MustCompile(`^(gc|td|th|[a-z]{4})-[a-z0-9-]{1,32}$`)
-
-// sessionBeadIDRe validates a DURABLE session bead id — the value gc hook --claim
-// stamps from GC_SESSION_ID (a real session bead id by provenance) and the value
-// direct routing stamps as gc.session_id. It accepts a short lowercase store prefix
-// (2-4 letters, covering city stores like mc-, ga-, gcy- that sessionIDRe rejects)
-// followed by '-' and a lowercase-alnum/'-' body, while still rejecting empties,
-// whitespace, uppercase, prefixless handles, and over-long pool-name prefixes
-// (e.g. "polecat-…", "mystery-…"). It is applied ONLY to the provenance-trusted
-// durable id, never to a name/assignee-derived value.
-var sessionBeadIDRe = regexp.MustCompile(`^[a-z]{2,4}-[a-z0-9-]{1,40}$`)
+// It accepts a short lowercase store prefix (2-4 letters: gc-, td-, th-, mc-,
+// ga-, gcg-, and the per-deployment four-letter city codes) followed by '-' and
+// a lowercase-alnum/'-' body long enough for the "session-<32 hex>" ids some
+// stores mint, while still rejecting empties, whitespace, uppercase, prefixless
+// handles, and over-long pool-name prefixes (e.g. "polecat-…", "mystery-…").
+// The body bound of 40 is exactly len("session-") + 32 hex digits — the longest
+// id shape any store mints today; a longer minted form would silently regress
+// to a bare link, so widen the bound (and TestSessionIDGateAcceptsMintedShapes)
+// together with the minting side. It is applied to BOTH the provenance-trusted
+// durable stamp and the name/assignee-derived fallback: the fallback path
+// additionally re-checks the resolved id after the index lookup so an ambiguous
+// match cannot leak an untrusted id. (The former strict gc/td/th-or-four-letter
+// alternation rejected this city's gcg-session-<32hex> ids on the assignee-only
+// path — ga-3cs9p.) This is the only session-id gate: the dashboard's own TS
+// copy was removed so a stricter client-side alternation cannot re-gate ids the
+// supervisor accepts.
+//
+// A value matching this gate WHOLE is accepted as-is: supervisorSessionIDFrom
+// returns it before it ever consults supervisorSessionIDSuffixRe, so this gate —
+// not the suffix regex — decides every handle that matches end to end.
+// "bd-x-gc-335812" and "qa-agent-1" are therefore taken whole rather than
+// reduced to a trailing "gc-335812" or rejected outright. Extraction is the
+// fallback for handles this gate REJECTS — "polecat-gc-333573", and the
+// qualified-identity assignees whose "__"/"--" separator encoding
+// (agent.SanitizeQualifiedNameForSession) leaves a non-hyphen byte after the
+// prefix letters — not a minimizer applied to every value. That diverges
+// deliberately from work-in-flight.ts, whose assignee parser tightens its own
+// id body to [a-z0-9] so it binds to the minimal trailing handle: this gate
+// must admit the internal hyphen of "session-<32 hex>", so it cannot also
+// minimize. The cost is bounded — a value taken whole that names no session
+// yields a bare link plus by-id reads the retired-session miss cache backs off
+// exponentially (retiredMissTTL) — and the narrowings weighed in review do not
+// remove these values: requiring a digit in the body still admits both examples
+// above, and tightening the suffix regex never runs for them.
+var sessionIDRe = regexp.MustCompile(`^[a-z]{2,4}-[a-z0-9-]{1,40}$`)
 
 // supervisorSessionIDSuffixRe extracts a trailing supervisor id from a
-// pool-qualified handle. Port of the TS suffix match in supervisorSessionIdFrom.
-var supervisorSessionIDSuffixRe = regexp.MustCompile(`(?:^|[-_/])((?:gc|td|th|[a-z]{4})-[a-z0-9-]{1,32})$`)
+// pool-qualified handle (polecat-gc-333573 → gc-333573). Same id alphabet as
+// sessionIDRe. It is consulted ONLY after the whole value fails sessionIDRe (see
+// supervisorSessionIDFrom), so it never narrows a handle the gate already
+// accepted.
+var supervisorSessionIDSuffixRe = regexp.MustCompile(`(?:^|[-_/])([a-z]{2,4}-[a-z0-9-]{1,40})$`)
+
+// RunSessions is the request-time session enrichment for a run-detail build.
+//
+// Live is the city's OPEN session listing (the default /v0 sessions read): those
+// sessions resolve by id, by name/alias/title, and by template. Retired holds
+// sessions the caller resolved INDIVIDUALLY by durable id — the closed seats of a
+// finished run that the open-only listing no longer carries. Retired sessions are
+// indexed by id ONLY, never by name or template: pool slot names are
+// deterministic and REUSED, so a name match onto a closed session could attribute
+// a step to the wrong session (a wrong transcript link — worse than a bare one).
+// The caller bounds Retired by the run's own link count; it is never a scan of
+// the city's closed sessions.
+type RunSessions struct {
+	Live    []DashboardSession
+	Retired []DashboardSession
+}
 
 // runSessionIndex indexes sessions by id, name, and template for run-link
 // resolution. Port of TS RunSessionIndex.
@@ -41,15 +81,18 @@ type runSessionLinkContext struct {
 	scopeRef     string
 }
 
-// buildRunSessionIndex indexes a session list for link resolution. Port of TS
-// buildRunSessionIndex (first-write-wins for the id/name maps).
-func buildRunSessionIndex(sessions []DashboardSession) runSessionIndex {
+// buildRunSessionIndex indexes the session enrichment for link resolution. Port
+// of TS buildRunSessionIndex (first-write-wins for the id/name maps). Live
+// sessions are indexed first and by every key; retired sessions are added
+// afterwards and by id only (see RunSessions), so a live session always wins an
+// id collision and a retired one is never reachable through a recyclable name.
+func buildRunSessionIndex(sessions RunSessions) runSessionIndex {
 	idx := runSessionIndex{
 		byID:       make(map[string]DashboardSession),
 		byName:     make(map[string]DashboardSession),
 		byTemplate: make(map[string][]DashboardSession),
 	}
-	for _, session := range sessions {
+	for _, session := range sessions.Live {
 		rememberSession(idx.byID, session.ID, session)
 		rememberSession(idx.byName, derefString(session.Alias), session)
 		rememberSession(idx.byName, session.Title, session)
@@ -58,7 +101,63 @@ func buildRunSessionIndex(sessions []DashboardSession) runSessionIndex {
 			idx.byTemplate[template] = append(idx.byTemplate[template], session)
 		}
 	}
+	for _, session := range sessions.Retired {
+		rememberSession(idx.byID, session.ID, session)
+	}
 	return idx
+}
+
+// SessionIDsForSnapshot returns the durable session ids a run's steps reference —
+// the stamped gc.session_id (and its legacy/camelCase aliases) or, absent a stamp,
+// the supervisor id derived from the assignee — deduped in first-seen bead order.
+// Steps that have not started (pending/ready) and values the link resolver would
+// reject are excluded, so the list is the set of CANDIDATE ids — pre-index
+// resolution — that a by-id session lookup may turn from a bare link into a
+// named one. They are candidates, not resolved ids: on the assignee/name
+// fallback path the resolver can overwrite the link's SessionID with the id of
+// an index-matched session (linkForSession), so a derived id here may name no
+// session at all. That costs one bounded, miss-cached by-id read; the rendered
+// link still carries the matched session's own id. It is bounded by the run's
+// own bead count; the dashboard BFF resolves these individually against the
+// session-by-id read instead of scanning the city's closed sessions.
+func SessionIDsForSnapshot(snap RunSnapshot) []string {
+	seen := make(map[string]struct{})
+	var ids []string
+	for _, bead := range snap.raw.beads {
+		id := sessionIDForLookup(bead)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// sessionIDForLookup mirrors runSessionLinkFor's id selection without an index:
+// the durable stamp when it passes the gate, else the assignee/legacy-derived
+// supervisor id (the same fall-through the link path takes for a stamp that
+// fails the gate), gated by sessionIDRe. "" means the step yields no index-
+// independent link either way; TestSessionIDForLookupMirrorsLinkFallback pins
+// the two paths together. The result is a CANDIDATE id: on the fallback branch
+// runSessionLinkFor may still replace it with an index-matched session's own id,
+// so the two paths agree on what to look up, not always on what is rendered.
+func sessionIDForLookup(bead runSnapshotBead) string {
+	status := presentationStatus(bead)
+	if status == "pending" || status == "ready" {
+		return ""
+	}
+	if stamped := stampedSessionID(bead); stamped != "" && sessionIDRe.MatchString(stamped) {
+		return stamped
+	}
+	id := sessionIDFromBead(bead, nonEmpty(bead.assignee))
+	if !sessionIDRe.MatchString(id) {
+		return ""
+	}
+	return id
 }
 
 // runSessionLinkFor resolves a bead to a session link, or (zero, false) when none
@@ -75,10 +174,10 @@ func buildRunSessionIndex(sessions []DashboardSession) runSessionIndex {
 //     index match, because pool slot names are deterministic and REUSED: a byName
 //     hit on a recycled slot would mis-resolve a closed step to a DIFFERENT live
 //     session (a wrong transcript/diff link — worse than no link). The id is
-//     format-validated (sessionBeadIDRe) so garbage cannot leak.
+//     format-validated (sessionIDRe) so garbage cannot leak.
 //
-//  2. Legacy / direct fallback (no durable stamp): resolve via the index and keep
-//     the STRICT sessionIDRe gate on the result. Only an exact byID match on the
+//  2. Legacy / direct fallback (no durable stamp): resolve via the index and
+//     re-apply the sessionIDRe gate on the RESULT. Only an exact byID match on the
 //     durable stamp is trusted unconditionally; a name/assignee/template match must
 //     still pass the gate, so a recycled-slot byName collision yields no link rather
 //     than a wrong one.
@@ -90,7 +189,7 @@ func runSessionLinkFor(bead runSnapshotBead, status string, ctx runSessionLinkCo
 	if status == "pending" || status == "ready" {
 		return RunSessionLink{}, false
 	}
-	if stamped := stampedSessionID(bead); stamped != "" && sessionBeadIDRe.MatchString(stamped) {
+	if stamped := stampedSessionID(bead); stamped != "" && sessionIDRe.MatchString(stamped) {
 		return linkForStampedSessionID(stamped, bead, ctx), true
 	}
 	assignee := nonEmpty(bead.assignee)
@@ -133,11 +232,11 @@ func stampedSessionName(bead runSnapshotBead) string {
 }
 
 // linkForStampedSessionID builds a session link straight from a durable stamped
-// session bead id, independent of the active session index. When that exact id is
-// still live in the index we adopt its display fields; otherwise (the session has
-// closed and left the active-only index) we keep the correct id and fall back to
-// the step's own stamped display fields — so a closed step still resolves to the
-// CORRECT session it ran on.
+// session bead id, independent of the session index. When that exact id is in
+// the index — live, or retired and resolved by id (RunSessions.Retired) — we adopt
+// its display fields; otherwise we keep the correct id and fall back to the
+// step's own stamped display fields, so a closed step still resolves to the
+// CORRECT session it ran on even when nothing else is known about it.
 func linkForStampedSessionID(sessionID string, bead runSnapshotBead, ctx runSessionLinkContext) RunSessionLink {
 	name := stampedSessionName(bead)
 	assignee := nonEmpty(bead.assignee)
@@ -225,8 +324,8 @@ func supervisorSessionIDFrom(value string) string {
 
 // resolveRunSessionLink resolves rawLink against the session index for the
 // name/assignee fallback path, returning the enriched link on a match or rawLink
-// unchanged (nil index / no match). The caller always re-applies the strict
-// sessionIDRe gate, so an ambiguous match cannot leak an untrusted id.
+// unchanged (nil index / no match). The caller always re-applies the sessionIDRe
+// gate, so an ambiguous match cannot leak an untrusted id.
 func resolveRunSessionLink(rawLink RunSessionLink, sessionIndex *runSessionIndex) RunSessionLink {
 	if sessionIndex == nil {
 		return rawLink

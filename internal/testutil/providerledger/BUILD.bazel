@@ -1,0 +1,78 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "providerledger",
+    srcs = [
+        "guard.go",
+        "ledger.go",
+        "proof.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/testutil/providerledger",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/testpolicy/waiverclock",
+    ],
+)
+
+go_test(
+    name = "providerledger_test",
+    srcs = [
+        "ledger_test.go",
+        "testenv_import_test.go",
+        "waiver_clock_test.go",
+        "waiver_owner_test.go",
+        "waiver_stagger_test.go",
+    ],
+    data = [
+        "//:TESTING.md",
+        "//:go.mod",
+        "//cmd/gc:providers.go",
+        "//cmd/gc:runtime_registry.go",
+        "//internal/runtime:bazel_go_srcs",
+        "//internal/runtime:bazel_go_test_srcs",
+        "//internal/runtime/acp:bazel_go_test_srcs",
+        "//internal/runtime/auto:bazel_go_test_srcs",
+        "//internal/runtime/exec:bazel_go_test_srcs",
+        "//internal/runtime/ssh:bazel_go_test_srcs",
+        "//internal/runtime/subprocess:bazel_go_test_srcs",
+        "//internal/runtime/tmux:bazel_go_test_srcs",
+        "@go_sdk//:srcs",
+    ],
+    embed = [":providerledger"],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

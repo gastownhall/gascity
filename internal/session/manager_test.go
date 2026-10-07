@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
@@ -1761,6 +1762,34 @@ func TestCreateInjectsUnifiedSessionRuntimeEnv(t *testing.T) {
 			t.Fatalf("Env[%s] = %q, want %q (env=%v)", key, got, want, env)
 		}
 	}
+	if !strings.Contains(env["GIT_SSH_COMMAND"], "ServerAliveInterval") {
+		t.Fatalf("GIT_SSH_COMMAND = %q, want SSH keepalive", env["GIT_SSH_COMMAND"])
+	}
+}
+
+func TestCreateMergesSSHKeepaliveIntoExistingGitSSHCommand(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	_, err := mgr.CreateSession(
+		context.Background(), CreateOptions{Alias: "", ExplicitName: "test-city--worker", Template: "worker", Title: "Worker", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: map[string]string{"GIT_SSH_COMMAND": "ssh -i /keys/id -o IdentitiesOnly=yes"}, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{
+			"session_origin": "ephemeral",
+		}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	cfg := sp.LastStartConfig("test-city--worker")
+	if cfg == nil {
+		t.Fatalf("Start call not recorded: %#v", sp.Calls)
+	}
+	got := cfg.Env["GIT_SSH_COMMAND"]
+	if !strings.Contains(got, "ServerAliveInterval") {
+		t.Fatalf("GIT_SSH_COMMAND = %q, want keepalive", got)
+	}
+	if !strings.Contains(got, "-i /keys/id") {
+		t.Fatalf("GIT_SSH_COMMAND = %q, want original key flags", got)
+	}
 }
 
 func TestCreateUsesBuiltinAncestorForGCProviderEnv(t *testing.T) {
@@ -2265,6 +2294,72 @@ func TestSuspendKeepsNonRunningCleanupBestEffort(t *testing.T) {
 	}
 }
 
+// TestSuspend_DownedServerSucceeds pins suspend as a cleanup path: tmux
+// Provider.Stop reports a missing server as ErrNoServer, and a long-lived
+// process's state cache can still report the session running for its stale
+// TTL. Without runtime.StopForCleanup, `gc suspend` and the `gc stop` sweep
+// fail against a dead server with nothing left to stop. A real stop failure,
+// alone or joined beside a missing-server answer, still fails the suspend. The
+// fake has no runtime.ServerDeathConfirmer, so the missing server is taken as
+// dead; TestSuspend_RealTmuxDeletedSocketFailsAndDeadServerSucceeds pins the
+// confirmation against real tmux.
+func TestSuspend_DownedServerSucceeds(t *testing.T) {
+	stopFailed := errors.New("terminate: permission denied")
+	for _, tc := range []struct {
+		name    string
+		stopErr error
+		wantErr error
+	}{
+		{name: "downed server", stopErr: fmt.Errorf("killing session sky: %w", tmux.ErrNoServer)},
+		{name: "stop failure", stopErr: stopFailed, wantErr: stopFailed},
+		{name: "stop failure beside downed server", stopErr: errors.Join(stopFailed, tmux.ErrNoServer), wantErr: stopFailed},
+	} {
+		for _, entry := range []struct {
+			name    string
+			suspend func(*Manager, string) error
+		}{
+			{name: "Suspend", suspend: (*Manager).Suspend},
+			{name: "SuspendForShutdown", suspend: (*Manager).SuspendForShutdown},
+		} {
+			t.Run(tc.name+"/"+entry.name, func(t *testing.T) {
+				store := beads.NewMemStore()
+				sp := runtime.NewFake()
+				mgr := NewManagerWithOptions(store, sp)
+				info, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "test", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+				if err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				// The fake keeps reporting the session running, as a stale cache does.
+				sp.StopErrors[info.SessionName] = tc.stopErr
+
+				err = entry.suspend(mgr, info.ID)
+				if !providerSawStop(sp, info.SessionName) {
+					t.Fatal("suspend did not ask the provider to stop the session")
+				}
+				got, getErr := mgr.Get(info.ID)
+				if getErr != nil {
+					t.Fatalf("Get: %v", getErr)
+				}
+				if tc.wantErr == nil {
+					if err != nil {
+						t.Fatalf("%s against a downed server: %v", entry.name, err)
+					}
+					if got.State != StateSuspended {
+						t.Fatalf("State = %q, want %q", got.State, StateSuspended)
+					}
+					return
+				}
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("%s with a real stop failure = %v, want %v", entry.name, err, tc.wantErr)
+				}
+				if got.State == StateSuspended {
+					t.Fatal("suspend recorded the session suspended over a live runtime")
+				}
+			})
+		}
+	}
+}
+
 func TestCreateStoresCommand(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -2631,6 +2726,48 @@ func TestRename(t *testing.T) {
 	}
 }
 
+// TestUpdatePresentationRefusesBlankTitle guards the bead store's non-empty
+// title rule at the boundary that takes the title from user input. Without it a
+// blank rename either reaches the store and comes back as a storage validation
+// error (bd: "title is required", surfaced as a 500 by the API) or, on stores
+// that do not validate, silently blanks the session title.
+func TestUpdatePresentationRefusesBlankTitle(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(
+		context.Background(), CreateOptions{Alias: "old-alias", ExplicitName: "", Template: "helper", Title: "old title", Command: "echo test", WorkDir: "/tmp", Provider: "test", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, blank := range []string{"", "   ", "\t\n"} {
+		err := mgr.Rename(info.ID, blank)
+		if !errors.Is(err, ErrInvalidSessionTitle) {
+			t.Fatalf("Rename(%q) error = %v, want ErrInvalidSessionTitle", blank, err)
+		}
+		// A blank title must also refuse a combined presentation update, so the
+		// alias half is not applied without the title half.
+		nextAlias := "new-alias"
+		err = mgr.UpdatePresentation(info.ID, &blank, &nextAlias)
+		if !errors.Is(err, ErrInvalidSessionTitle) {
+			t.Fatalf("UpdatePresentation(title=%q, alias) error = %v, want ErrInvalidSessionTitle", blank, err)
+		}
+	}
+
+	bead, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bead.Title != "old title" {
+		t.Fatalf("Title = %q, want the original title untouched", bead.Title)
+	}
+	if bead.Metadata["alias"] != "old-alias" {
+		t.Fatalf("alias = %q, want the original alias untouched", bead.Metadata["alias"])
+	}
+}
+
 func TestUpdatePresentationSyncsRuntimeAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -2877,6 +3014,60 @@ type falseNegativeRuntimeProvider struct {
 	falseNames map[string]bool
 }
 
+type observationErrorRuntimeProvider struct {
+	*runtime.Fake
+	livenessErr error
+	activityErr error
+}
+
+func (p *observationErrorRuntimeProvider) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
+	if p.livenessErr != nil {
+		return runtime.Liveness{}, p.livenessErr
+	}
+	return runtime.Liveness{Running: true, Alive: true}, nil
+}
+
+func (p *observationErrorRuntimeProvider) GetLastActivity(string) (time.Time, error) {
+	return time.Time{}, p.activityErr
+}
+
+func TestObserveRuntimeForInfoPreservesObservationUncertainty(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		livenessErr error
+		activityErr error
+		wantError   bool
+	}{
+		{name: "liveness unavailable", livenessErr: fmt.Errorf("liveness transport: %w", runtime.ErrRuntimeUnavailable), wantError: true},
+		{name: "activity unavailable", activityErr: fmt.Errorf("activity transport: %w", runtime.ErrRuntimeUnavailable), wantError: true},
+		{name: "ordinary activity error stays best effort", activityErr: errors.New("malformed activity"), wantError: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := NewManagerWithOptions(beads.NewMemStore(), &observationErrorRuntimeProvider{
+				Fake:        runtime.NewFake(),
+				livenessErr: tc.livenessErr,
+				activityErr: tc.activityErr,
+			})
+			obs, err := mgr.ObserveRuntimeForInfo(Info{SessionName: "runtime-worker"}, nil)
+			if tc.wantError {
+				if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+					t.Fatalf("ObserveRuntimeForInfo error = %v, want runtime unavailable", err)
+				}
+				if obs != (RuntimeObservation{}) {
+					t.Fatalf("ObserveRuntimeForInfo observation = %#v, want zero with unknown result", obs)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ObserveRuntimeForInfo: %v", err)
+			}
+			if !obs.Running || !obs.Alive || !obs.LastActive.IsZero() {
+				t.Fatalf("ObserveRuntimeForInfo observation = %#v, want live with unknown activity", obs)
+			}
+		})
+	}
+}
+
 func (p *falseNegativeRuntimeProvider) IsRunning(name string) bool {
 	if p.falseNames[name] {
 		return false
@@ -2896,7 +3087,10 @@ func TestObserveRuntime_TreatsLiveProcessAsRunningWhenSessionProbeFalseNegatives
 		t.Fatalf("Create: %v", err)
 	}
 
-	obs := mgr.ObserveRuntimeForInfo(info, []string{"claude"})
+	obs, err := mgr.ObserveRuntimeForInfo(info, []string{"claude"})
+	if err != nil {
+		t.Fatalf("ObserveRuntimeForInfo: %v", err)
+	}
 	if !obs.Running || !obs.Alive {
 		t.Fatalf("ObserveRuntimeForInfo() = %#v, want running+alive true despite IsRunning false-negative", obs)
 	}
@@ -2911,7 +3105,10 @@ func TestObserveRuntime_WithoutProcessNamesTreatsRunningSessionAsAlive(t *testin
 		t.Fatalf("Create: %v", err)
 	}
 
-	obs := mgr.ObserveRuntimeForInfo(info, nil)
+	obs, err := mgr.ObserveRuntimeForInfo(info, nil)
+	if err != nil {
+		t.Fatalf("ObserveRuntimeForInfo: %v", err)
+	}
 	if !obs.Running || !obs.Alive {
 		t.Fatalf("ObserveRuntimeForInfo() = %#v, want running+alive true when no process names are configured", obs)
 	}
@@ -4594,7 +4791,14 @@ func TestTranscriptPathClassifiedDistinguishesAbsentFromAmbiguous(t *testing.T) 
 	t.Run("ambiguous", func(t *testing.T) {
 		workDir := t.TempDir()
 		searchBase := t.TempDir()
-		mgr, infos := newManagerWithSession(t, workDir, "one", "two")
+		mgr, infos := newManagerWithSession(t, workDir, "one")
+		if err := mgr.Kill(infos[0].ID); err != nil {
+			t.Fatalf("Kill(one): %v", err)
+		}
+		two, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "two", Command: "claude", WorkDir: workDir, Provider: "claude", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatalf("Create two: %v", err)
+		}
 
 		slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
 		if err := os.MkdirAll(slugDir, 0o755); err != nil {
@@ -4604,9 +4808,10 @@ func TestTranscriptPathClassifiedDistinguishesAbsentFromAmbiguous(t *testing.T) 
 			t.Fatalf("WriteFile: %v", err)
 		}
 
-		// Two keyless sessions share the workdir: the refusal is deliberate, not a
-		// missing file — the transcript above exists and is still not resolved.
-		path, lookup, err := mgr.TranscriptPathClassified(infos[1].ID, []string{searchBase})
+		// "one" was killed, not closed, while sharing the workdir with "two": the
+		// refusal is deliberate, not a missing file — the transcript above exists
+		// and is still not resolved.
+		path, lookup, err := mgr.TranscriptPathClassified(two.ID, []string{searchBase})
 		if err != nil {
 			t.Fatalf("TranscriptPathClassified: %v", err)
 		}
@@ -4801,6 +5006,62 @@ func TestKill_UnknownState_ButRunning(t *testing.T) {
 	if err := mgr.Kill(b.ID); err != nil {
 		t.Fatalf("Kill running session with unknown state: %v", err)
 	}
+}
+
+// TestKill_DownedServerReportsSuccess pins Kill as a cleanup path: the caller
+// asks for the session to stop, and a session that is already gone satisfies
+// that request. tmux Provider.Stop reports a missing server as ErrNoServer, so
+// without the runtime.StopForCleanup absorption, killing a session on an
+// intentionally stopped city reports a failure the caller cannot act on. The
+// error is wrapped to pin that the absorption survives wrapping.
+func TestKill_DownedServerReportsSuccess(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "test", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.StopErrors[info.SessionName] = fmt.Errorf("killing session %s: %w", info.SessionName, tmux.ErrNoServer)
+
+	if err := mgr.Kill(info.ID); err != nil {
+		t.Fatalf("Kill against a downed server: %v", err)
+	}
+	if !providerSawStop(sp, info.SessionName) {
+		t.Fatal("Kill returned success without asking the provider to stop the session")
+	}
+}
+
+// TestKill_StopFailurePropagates is the control for the absorption above: a
+// stop failure that is not "the session is gone" is a real failure and must
+// reach the caller. Without it, TestKill_DownedServerReportsSuccess would pass
+// just as well against a blanket swallow.
+func TestKill_StopFailurePropagates(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "test", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	stopErr := errors.New("permission denied")
+	sp.StopErrors[info.SessionName] = stopErr
+
+	if err := mgr.Kill(info.ID); !errors.Is(err, stopErr) {
+		t.Fatalf("Kill with a real stop failure = %v, want %v", err, stopErr)
+	}
+}
+
+// providerSawStop reports whether the fake provider recorded a Stop for name.
+func providerSawStop(sp *runtime.Fake, name string) bool {
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // PR #203 — When ensureRunning resumes with --resume <key> and the
@@ -5478,6 +5739,40 @@ func TestCloseDetailed_StopErrorLeavesBeadOpen(t *testing.T) {
 	}
 }
 
+// TestCloseDetailed_DownedServerClosesBead pins the cleanup half of the
+// missing-session/missing-server split: tmux Provider.Stop returns ErrNoServer
+// when the whole server is down, and close must still retire the bead. Without
+// the runtime.StopForCleanup absorption, session beads for an intentionally
+// stopped city are unclosable until someone restarts a tmux server on that
+// socket. The error is wrapped to pin that the absorption survives wrapping.
+func TestCloseDetailed_DownedServerClosesBead(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	sp.StopErrors[info.SessionName] = fmt.Errorf("killing session %s: %w", info.SessionName, tmux.ErrNoServer)
+
+	if _, err := mgr.CloseDetailed(info.ID); err != nil {
+		t.Fatalf("CloseDetailed against a downed server: %v", err)
+	}
+	if !providerSawStop(sp, info.SessionName) {
+		t.Fatal("CloseDetailed closed the bead without asking the provider to stop the session")
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead Status = %q, want closed", b.Status)
+	}
+}
+
 // TestCloseDetailed_StopSuccessClosesBead is the happy-path companion: when the
 // runtime terminate succeeds, the bead closes normally.
 func TestCloseDetailed_StopSuccessClosesBead(t *testing.T) {
@@ -5549,5 +5844,97 @@ func TestPersistInvocationUsageCursor(t *testing.T) {
 	}
 	if got := b.Metadata[MetadataKeyInvocationUsageCursor]; got != "u2" {
 		t.Fatalf("cursor metadata after no-ops = %q, want u2", got)
+	}
+}
+
+// TestTranscriptPathZCodeResolvesEachSeatByBeadID pins the wiring that keys a
+// zcode transcript by the seat. Two seats can share session_name and
+// continuation_epoch (a pool slot re-seated within one run), and the adapter's
+// mirror scope tells them apart only by the session bead id gc exports to it
+// as GC_SESSION_ID — so that is what the lookup must carry, with the name-only
+// scope kept as the fallback for mirrors written before the seat was part of
+// the key.
+func TestTranscriptPathZCodeResolvesEachSeatByBeadID(t *testing.T) {
+	store := beads.NewMemStore()
+	mgr := NewManagerWithOptions(store, runtime.NewFake())
+	workDir := t.TempDir()
+	const sharedName = "beads--gc__implementation-reviewer-1-pool"
+
+	var infos []Info
+	for _, title := range []string{"seat-a", "seat-b", "seat-c"} {
+		info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: title, Command: "zcode-repl", WorkDir: workDir, Provider: "zcode", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatalf("Create %s: %v", title, err)
+		}
+		if err := store.SetMetadataBatch(info.ID, map[string]string{"session_name": sharedName, "continuation_epoch": "1"}); err != nil {
+			t.Fatalf("SetMetadataBatch %s: %v", title, err)
+		}
+		infos = append(infos, info)
+	}
+
+	searchBase := t.TempDir()
+	write := func(scope, id string) string {
+		dir := filepath.Join(searchBase, scope)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		path := filepath.Join(dir, id+".json")
+		body := `{"info":{"id":"` + id + `","directory":"` + filepath.ToSlash(workDir) + `"},"messages":[]}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		return path
+	}
+	seatA := write(sessionlog.ZCodeSeatMirrorScope(sharedName, infos[0].ID, "1"), "sess_a")
+	seatB := write(sessionlog.ZCodeSeatMirrorScope(sharedName, infos[1].ID, "1"), "sess_b")
+	legacy := write(sessionlog.ZCodeMirrorScope(sharedName, "1"), "sess_legacy")
+
+	for i, want := range []string{seatA, seatB, legacy} {
+		got, err := mgr.TranscriptPath(infos[i].ID, []string{searchBase})
+		if err != nil {
+			t.Fatalf("TranscriptPath(%s): %v", infos[i].ID, err)
+		}
+		if got != want {
+			t.Fatalf("TranscriptPath(%s) = %q, want %q", infos[i].ID, got, want)
+		}
+	}
+}
+
+// An attachment probe that cannot tell must reach the observation as an error,
+// never as "not attached", and must not fail the liveness answer it rides on.
+func TestObserveRuntimeForInfoCarriesAttachError(t *testing.T) {
+	probeErr := fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+	notFoundText := fmt.Errorf("exec: \"tmux\": executable file not found in $PATH: %w", runtime.ErrRuntimeUnavailable)
+	for _, tc := range []struct {
+		name         string
+		attached     bool
+		attachErr    error
+		wantAttached bool
+		wantErr      error
+	}{
+		{name: "probe unavailable", attachErr: probeErr, wantErr: probeErr},
+		{name: "session vanished is not attached", attachErr: fmt.Errorf("gone: %w", runtime.ErrSessionNotFound)},
+		{name: "unavailable text that IsSessionGone matches", attachErr: notFoundText, wantErr: notFoundText},
+		{name: "attached", attached: true, wantAttached: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			sp.SetAttached("runtime-worker", tc.attached)
+			if tc.attachErr != nil {
+				sp.AttachedErrors["runtime-worker"] = tc.attachErr
+			}
+			mgr := NewManagerWithOptions(beads.NewMemStore(), &observationErrorRuntimeProvider{Fake: sp})
+
+			obs, err := mgr.ObserveRuntimeForInfo(Info{SessionName: "runtime-worker"}, nil)
+			if err != nil {
+				t.Fatalf("ObserveRuntimeForInfo: %v, want the attach error carried in the observation", err)
+			}
+			if !obs.Running || !obs.Alive {
+				t.Fatalf("ObserveRuntimeForInfo = %#v, want running+alive unaffected by the attach probe", obs)
+			}
+			if obs.Attached != tc.wantAttached || !errors.Is(obs.AttachedErr, tc.wantErr) || (tc.wantErr == nil) != (obs.AttachedErr == nil) {
+				t.Fatalf("Attached, AttachedErr = %v, %v; want %v, %v", obs.Attached, obs.AttachedErr, tc.wantAttached, tc.wantErr)
+			}
+		})
 	}
 }

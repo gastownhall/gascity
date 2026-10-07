@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -99,6 +100,21 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 
 // --- Session Get ---
 
+// resolveSessionGetID picks the resolver for GET /session/{id}. With exact_id
+// the identifier is a durable bead id by the caller's own claim, so the read is
+// the single store.Get of session.ResolveSessionIDByExactID (which finds closed
+// sessions too) and a miss is a 404 straight away. Without it the full target
+// ladder runs — configured name, live, path alias, closed — whose closed-
+// inclusive steps scan the closed session population by metadata; that is what a
+// caller holding a durable id (the dashboard's run detail, one read per retired
+// seat on every render) must never pay for a miss.
+func (s *Server) resolveSessionGetID(store beads.Store, input *SessionGetInput) (string, error) {
+	if input.ExactID {
+		return session.ResolveSessionIDByExactID(store, input.ID)
+	}
+	return s.resolveSessionIDAllowClosedWithConfig(store, input.ID)
+}
+
 // humaHandleSessionGet is the Huma-typed handler for GET /v0/session/{id}.
 
 func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput) (*IndexOutput[sessionResponse], error) {
@@ -110,7 +126,7 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, input.ID)
+	id, err := s.resolveSessionGetID(store.Store, input)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -389,48 +405,49 @@ func (s *Server) humaHandleSessionPending(_ context.Context, input *SessionIDInp
 // probes nor floods the provider with unbounded concurrent captures.
 const cityPendingProbeConcurrency = 8
 
-// cityPendingProbe is one session's pending-probe outcome, collected by index
-// so the concurrent aggregate can be reassembled in deterministic order.
-type cityPendingProbe struct {
+// cityPendingProbeRow is one probed session and its pending-probe outcome.
+type cityPendingProbeRow struct {
+	info      session.Info
 	pending   *runtime.PendingInteraction
 	supported bool
 	err       error
 }
 
-// humaHandleCityPending is the Huma-typed handler for GET
-// /v0/city/{cityName}/pending. It returns the snapshot of active sessions
-// currently awaiting a human decision by probing each active session's
-// PendingInteraction via the session manager — the city-wide poll-based
-// complement to the per-session GET .../session/{id}/pending endpoint and
-// the per-session SSE pending frame. Per-session probe failures are surfaced
-// as Partial/PartialErrors rather than failing the whole aggregate, so one
-// gone runtime session does not blind the operator to the rest.
+// cityPendingSnapshot is one pass over the city's probe set: every session
+// probed, in deterministic order, plus the listing's own partial errors.
+// listingPartial means the session listing itself was incomplete, so a session
+// missing from rows may still exist.
+type cityPendingSnapshot struct {
+	rows           []cityPendingProbeRow
+	listingErrors  []string
+	listingPartial bool
+}
+
+// probeCityPending probes every session that could be holding a pending
+// decision. It backs both GET /v0/city/{cityName}/pending and the pending
+// monitor that publishes session.pending transitions, so the stream and the
+// snapshot always agree on what is pending.
 //
 // The probe set is active sessions plus legacy empty-state ("none") beads,
-// which the codebase treats as active for upgrade/bootstrap cities; a live
-// runtime predating the state-metadata field can still hold a pending
-// decision and must not be dropped from the aggregate.
-func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (*ListOutput[cityPendingEntry], error) {
+// which the codebase treats as active for upgrade/bootstrap cities (see
+// resolveLiveSessionByPathAlias in session_resolution.go and the
+// StateNone->StateActive normalization in session/manager.go). A live runtime
+// predating the state-metadata field can still hold a PendingInteraction, so
+// it must be probed too. Asleep, draining, creating, and closed beads stay
+// excluded: they have no live runtime that could be holding a pending
+// decision. Pending() itself degrades gracefully (runtime-gone -> no pending),
+// so over-including a dormant empty-state bead is harmless.
+func (s *Server) probeCityPending() (cityPendingSnapshot, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
-		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
+		return cityPendingSnapshot{}, errNoSessionsStore
 	}
 	mgr := s.sessionManager(store.Store)
 
 	infos, partialErrors, err := sessionReadModelInfos(session.NewStore(store))
 	if err != nil {
-		return nil, apierr.Internal.Msg(err.Error())
+		return cityPendingSnapshot{}, err
 	}
-	// Active sessions can be awaiting a human decision — and so can legacy
-	// empty-state ("none") beads, which the codebase treats as active for
-	// upgrade/bootstrap cities (see resolveLiveSessionByPathAlias in
-	// session_resolution.go and the StateNone->StateActive normalization in
-	// session/manager.go). A live runtime predating the state-metadata field
-	// can still hold a PendingInteraction, so it must be probed too. Asleep,
-	// draining, creating, and closed beads stay excluded: they have no live
-	// runtime that could be holding a pending decision. Pending() itself
-	// degrades gracefully (runtime-gone -> no pending), so over-including a
-	// dormant empty-state bead is harmless.
 	// ListFromInfos takes a comma-separated state filter; StateNone is the empty
 	// string, so this resolves to "active," — both states, closed beads still
 	// excluded by the status guard (sessionMatchesFiltersInfo).
@@ -443,36 +460,64 @@ func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (
 	// the limit keeps a large city from spawning an unbounded probe storm.
 	// PendingByName reuses each session's already-resolved runtime name,
 	// skipping the redundant per-session bead-store lookup that Pending(id)
-	// would perform. Each goroutine writes its own slot in probes, and entries
-	// are assembled by iterating sessions in order afterward, so the aggregate
-	// stays deterministic regardless of probe completion order.
-	probes := make([]cityPendingProbe, len(sessions))
+	// would perform. Each goroutine writes its own slot in rows, so the
+	// result stays in session order regardless of probe completion order.
+	rows := make([]cityPendingProbeRow, len(sessions))
 	group := new(errgroup.Group)
 	group.SetLimit(cityPendingProbeConcurrency)
 	for i, sess := range sessions {
-		i, sessName := i, sess.SessionName
 		group.Go(func() error {
-			pending, supported, pErr := mgr.PendingByName(sessName)
-			probes[i] = cityPendingProbe{pending: pending, supported: supported, err: pErr}
+			pending, supported, pErr := mgr.PendingByName(sess.SessionName)
+			rows[i] = cityPendingProbeRow{info: sess, pending: pending, supported: supported, err: pErr}
 			return nil
 		})
 	}
 	_ = group.Wait()
 
-	entries := make([]cityPendingEntry, 0, len(sessions))
-	for i, sess := range sessions {
-		probe := probes[i]
-		if probe.err != nil {
-			partialErrors = append(partialErrors, fmt.Sprintf("session %s: %v", sess.ID, probe.err))
+	return cityPendingSnapshot{
+		rows:           rows,
+		listingErrors:  partialErrors,
+		listingPartial: len(partialErrors) > 0,
+	}, nil
+}
+
+// errNoSessionsStore reports a city with no session bead store configured.
+var errNoSessionsStore = errors.New("no bead store configured")
+
+// humaHandleCityPending is the Huma-typed handler for GET
+// /v0/city/{cityName}/pending. It returns the snapshot of active sessions
+// currently awaiting a human decision by probing each active session's
+// PendingInteraction via the session manager — the city-wide poll-based
+// complement to the per-session GET .../session/{id}/pending endpoint, the
+// per-session SSE pending frame, and the session.pending /
+// session.pending_cleared events on the city event stream. Per-session probe
+// failures are surfaced as Partial/PartialErrors rather than failing the whole
+// aggregate, so one gone runtime session does not blind the operator to the
+// rest.
+func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (*ListOutput[cityPendingEntry], error) {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
+		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
+	}
+	snap, err := s.probeCityPending()
+	if err != nil {
+		return nil, apierr.Internal.Msg(err.Error())
+	}
+
+	partialErrors := snap.listingErrors
+	entries := make([]cityPendingEntry, 0, len(snap.rows))
+	for _, row := range snap.rows {
+		if row.err != nil {
+			partialErrors = append(partialErrors, fmt.Sprintf("session %s: %v", row.info.ID, row.err))
 			continue
 		}
-		if !probe.supported || probe.pending == nil {
+		if !row.supported || row.pending == nil {
 			continue
 		}
 		entries = append(entries, cityPendingEntry{
-			SessionID: sess.ID,
-			RequestID: probe.pending.RequestID,
-			Kind:      probe.pending.Kind,
+			SessionID: row.info.ID,
+			RequestID: row.pending.RequestID,
+			Kind:      row.pending.Kind,
 		})
 	}
 

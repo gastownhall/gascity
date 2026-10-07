@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -127,30 +128,45 @@ func (h *RuntimeHandle) Reset(ctx context.Context) (err error) {
 	return err
 }
 
-// Stop asks the provider to stop the live runtime session.
+// Stop asks the provider to stop the live runtime session. A session that is
+// already gone satisfies the request, so it reports success — see
+// [runtime.StopForCleanup].
 func (h *RuntimeHandle) Stop(ctx context.Context) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStop)
 	defer func() { event.finish(err) }()
 
-	err = h.provider.Stop(h.sessionName)
+	err = runtime.StopForCleanup(h.provider, h.sessionName)
 	return err
 }
 
-// Kill asks the provider to stop the live runtime session immediately.
+// StopForShutdown is Stop for the city shutdown sweep. A RuntimeHandle has no
+// session bead and therefore no lifecycle state to reject, so the shutdown
+// intent adds nothing here and this is deliberately identical to Stop. It exists
+// so the sweep can express its intent through one interface regardless of which
+// handle kind it holds.
+func (h *RuntimeHandle) StopForShutdown(ctx context.Context) error {
+	return h.Stop(ctx)
+}
+
+// Kill asks the provider to stop the live runtime session immediately. A
+// session that is already gone satisfies the request, so it reports success —
+// see [runtime.StopForCleanup].
 func (h *RuntimeHandle) Kill(ctx context.Context) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationKill)
 	defer func() { event.finish(err) }()
 
-	err = h.provider.Stop(h.sessionName)
+	err = runtime.StopForCleanup(h.provider, h.sessionName)
 	return err
 }
 
-// Close asks the provider to close the live runtime session.
+// Close asks the provider to close the live runtime session. A session that is
+// already gone satisfies the request, so it reports success — see
+// [runtime.StopForCleanup].
 func (h *RuntimeHandle) Close(ctx context.Context) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationClose)
 	defer func() { event.finish(err) }()
 
-	err = h.provider.Stop(h.sessionName)
+	err = runtime.StopForCleanup(h.provider, h.sessionName)
 	return err
 }
 
@@ -298,6 +314,11 @@ func (h *RuntimeHandle) AgentMappings(context.Context) ([]AgentMapping, error) {
 	return nil, ErrHistoryUnavailable
 }
 
+// TranscriptRecords reports unavailable because runtime-only handles have no transcript.
+func (h *RuntimeHandle) TranscriptRecords(context.Context) ([]json.RawMessage, error) {
+	return nil, ErrHistoryUnavailable
+}
+
 // AgentTranscript reports unavailable because runtime-only handles have no agent transcripts.
 func (h *RuntimeHandle) AgentTranscript(context.Context, string) (*AgentTranscriptResult, error) {
 	return nil, ErrHistoryUnavailable
@@ -312,17 +333,32 @@ func (h *RuntimeHandle) History(ctx context.Context, _ HistoryRequest) (*History
 }
 
 // Pending returns the current blocking interaction for a runtime-only session if supported.
-func (h *RuntimeHandle) Pending(context.Context) (*PendingInteraction, error) {
+func (h *RuntimeHandle) Pending(ctx context.Context) (*PendingInteraction, error) {
+	pending, _, err := h.PendingStatus(ctx)
+	return pending, err
+}
+
+// PendingStatus returns the pending interaction plus whether the provider
+// supports it. Support is keyed on the provider's answer, not on the interface:
+// a provider that implements InteractionProvider but answers
+// runtime.ErrInteractionUnsupported (acp) is unsupported. A vanished session
+// has no prompt. Any other probe error is returned, so callers can tell "could
+// not tell" from "nothing pending". The mapping mirrors session.Manager.PendingByName.
+func (h *RuntimeHandle) PendingStatus(context.Context) (*PendingInteraction, bool, error) {
 	ip, ok := h.provider.(runtime.InteractionProvider)
 	if !ok {
-		return nil, nil
+		return nil, false, nil
 	}
 	pending, err := ip.Pending(h.sessionName)
-	if errors.Is(err, runtime.ErrInteractionUnsupported) || pending == nil {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
+	switch {
+	case errors.Is(err, runtime.ErrInteractionUnsupported):
+		return nil, false, nil
+	case errors.Is(err, runtime.ErrSessionNotFound):
+		return nil, true, nil
+	case err != nil:
+		return nil, true, fmt.Errorf("getting pending interaction for %q: %w", h.sessionName, err)
+	case pending == nil:
+		return nil, true, nil
 	}
 	return &PendingInteraction{
 		RequestID: pending.RequestID,
@@ -330,23 +366,16 @@ func (h *RuntimeHandle) Pending(context.Context) (*PendingInteraction, error) {
 		Prompt:    pending.Prompt,
 		Options:   append([]string(nil), pending.Options...),
 		Metadata:  cloneStringMap(pending.Metadata),
-	}, nil
-}
-
-// PendingStatus returns the pending interaction plus whether the provider supports it.
-func (h *RuntimeHandle) PendingStatus(ctx context.Context) (*PendingInteraction, bool, error) {
-	_, supported := h.provider.(runtime.InteractionProvider)
-	pending, err := h.Pending(ctx)
-	if err != nil {
-		return nil, supported, err
-	}
-	return pending, supported, nil
+	}, true, nil
 }
 
 // LiveObservation reports runtime presence metadata for a legacy runtime-only
 // worker target.
 func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, error) {
-	liveness := runtime.ObserveLiveness(h.provider, h.sessionName, h.processNames)
+	liveness, err := runtime.ObserveLivenessWithError(h.provider, h.sessionName, h.processNames)
+	if err != nil {
+		return LiveObservation{}, err
+	}
 	obs := LiveObservation{
 		Running:     liveness.Running,
 		Alive:       liveness.Alive,
@@ -359,8 +388,16 @@ func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, err
 		obs.RuntimeSessionID = strings.TrimSpace(sessionID)
 	}
 	if obs.Running {
-		obs.Attached = h.provider.IsAttached(h.sessionName)
-		if last, err := h.provider.GetLastActivity(h.sessionName); err == nil && !last.IsZero() {
+		attached, err := runtime.IsAttachedWithError(h.provider, h.sessionName)
+		if err != nil && runtime.AttachProbeHolds(attached, err) {
+			obs.AttachedErr = err
+		}
+		obs.Attached = attached && err == nil
+		last, err := h.provider.GetLastActivity(h.sessionName)
+		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			return LiveObservation{}, fmt.Errorf("observe last activity for %q: %w", h.sessionName, err)
+		}
+		if err == nil && !last.IsZero() {
 			lastCopy := last
 			obs.LastActivity = &lastCopy
 		}

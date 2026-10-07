@@ -536,6 +536,41 @@ func SessionStrandedPayloadJSON(sessionID, sessionName, template string, workBea
 	return b
 }
 
+// SessionPoolSlotRetiredAtDrainDeadlinePayload carries the machine-readable
+// context for a session.pool_slot_retired_at_drain_deadline event: a
+// pool-managed seat that entered drain, never finalized its drain-ack, and was
+// force-retired once the drain outlived the retire deadline.
+//
+// DrainAt and DrainAgeSeconds are the load-bearing fields. The bound retires
+// the symptom, not the cause, so the age distribution across emissions is how
+// operators tell "a handful of seats occasionally miss an ack" from "the
+// drain-ack path is failing wholesale and this bound is absorbing it".
+type SessionPoolSlotRetiredAtDrainDeadlinePayload struct {
+	SessionID       string `json:"session_id" doc:"Canonical session bead ID for the retired pool seat."`
+	SessionName     string `json:"session_name,omitempty" doc:"Runtime session name the seat held. This is the name the pool could not route around until the retirement freed it."`
+	Template        string `json:"template,omitempty" doc:"Pool template name when known at the emission site."`
+	DrainAt         string `json:"drain_at,omitempty" doc:"RFC3339 instant the seat entered drain (the drain_at metadata). Empty only if the marker was unreadable, in which case no retirement occurs."`
+	DrainAgeSeconds int64  `json:"drain_age_seconds" doc:"Whole seconds the seat spent in drain before the deadline retired it. Always at least the retire deadline."`
+}
+
+// IsEventPayload marks SessionPoolSlotRetiredAtDrainDeadlinePayload as an
+// events.Payload variant.
+func (SessionPoolSlotRetiredAtDrainDeadlinePayload) IsEventPayload() {}
+
+// SessionPoolSlotRetiredAtDrainDeadlinePayloadJSON builds the JSON wire form
+// for attachment to an events.Event.Payload field. SessionName, Template, and
+// DrainAt are emitted only when non-empty.
+func SessionPoolSlotRetiredAtDrainDeadlinePayloadJSON(sessionID, sessionName, template, drainAt string, drainAge time.Duration) json.RawMessage {
+	b, _ := json.Marshal(SessionPoolSlotRetiredAtDrainDeadlinePayload{
+		SessionID:       sessionID,
+		SessionName:     sessionName,
+		Template:        template,
+		DrainAt:         drainAt,
+		DrainAgeSeconds: int64(drainAge / time.Second),
+	})
+	return b
+}
+
 // BeadDeadAssigneeReopenedPayload is the typed payload for
 // bead.dead_assignee_reopened events. Emitted when the reconciler reopens a
 // routed work bead whose assignee no longer maps to any open session bead —
@@ -599,6 +634,52 @@ func SessionUnknownStatePayloadJSON(sessionID, sessionName, state string, firstS
 	return b
 }
 
+// Reasons carried by SessionPendingClearedPayload.Reason.
+const (
+	// PendingClearedResolved: the session is still probed but no longer
+	// reports an interaction — it was answered (POST .../respond or at the
+	// terminal) or withdrawn by the session itself.
+	PendingClearedResolved = "resolved"
+	// PendingClearedReplaced: the session now reports a different request_id.
+	// A session.pending for the new interaction follows immediately.
+	PendingClearedReplaced = "replaced"
+	// PendingClearedSessionGone: the session left the probed set (closed,
+	// asleep, suspended, or otherwise no longer active).
+	PendingClearedSessionGone = "session_gone"
+)
+
+// SessionPendingPayload is the typed payload for session.pending: a session
+// gained a pending interaction. It carries the full interaction, the same
+// shape GET /v0/city/{cityName}/session/{id}/pending returns, so a client can
+// show the prompt and answer it with POST .../session/{id}/respond (passing
+// request_id) without another read.
+type SessionPendingPayload struct {
+	SessionID string            `json:"session_id" doc:"Session bead ID awaiting a decision."`
+	Template  string            `json:"template,omitempty" doc:"Session template, when known."`
+	Alias     string            `json:"alias,omitempty" doc:"Session alias, when set."`
+	RequestID string            `json:"request_id" doc:"Pending interaction request ID. Pass it to POST .../session/{id}/respond."`
+	Kind      string            `json:"kind" doc:"Interaction kind (e.g. approval)."`
+	Prompt    string            `json:"prompt,omitempty" doc:"Human-readable prompt."`
+	Options   []string          `json:"options,omitempty" doc:"Answer options as the session shows them."`
+	Metadata  map[string]string `json:"metadata,omitempty" doc:"Provider metadata (e.g. tool_name, source)."`
+}
+
+// IsEventPayload marks SessionPendingPayload as an events.Payload variant.
+func (SessionPendingPayload) IsEventPayload() {}
+
+// SessionPendingClearedPayload is the typed payload for
+// session.pending_cleared: the interaction a previous session.pending
+// announced is gone. SessionID and RequestID match that session.pending.
+type SessionPendingClearedPayload struct {
+	SessionID string `json:"session_id" doc:"Session bead ID from the matching session.pending."`
+	RequestID string `json:"request_id" doc:"Request ID from the matching session.pending."`
+	Kind      string `json:"kind" doc:"Interaction kind from the matching session.pending."`
+	Reason    string `json:"reason" enum:"resolved,replaced,session_gone" doc:"Why it cleared: resolved (answered or withdrawn), replaced (a different interaction is now pending; its session.pending follows), or session_gone (the session is no longer active)."`
+}
+
+// IsEventPayload marks SessionPendingClearedPayload as an events.Payload variant.
+func (SessionPendingClearedPayload) IsEventPayload() {}
+
 // SessionWakeRefusedPayload is the typed payload for session.wake_refused: a
 // durable explicit wake request refused before the session reached a live
 // runtime (held, quarantined, or asleep past its idle-sleep window).
@@ -661,13 +742,17 @@ func init() {
 	events.RegisterPayload(events.SessionSuspended, events.NoPayload{})
 	events.RegisterPayload(events.SessionUpdated, events.NoPayload{})
 	events.RegisterPayload(events.SessionDrainAckedWithAssignedWork, SessionDrainAckedWithAssignedWorkPayload{})
+	events.RegisterPayload(events.SessionDrainStopEscalated, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionStranded, SessionStrandedPayload{})
+	events.RegisterPayload(events.SessionPoolSlotRetiredAtDrainDeadline, SessionPoolSlotRetiredAtDrainDeadlinePayload{})
 	events.RegisterPayload(events.SessionUnknownState, SessionUnknownStatePayload{})
 	events.RegisterPayload(events.SessionWakeRefused, SessionWakeRefusedPayload{})
 	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})
 	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionDrainFenceUnavailable, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionColdStartTimeout, events.NoPayload{})
+	events.RegisterPayload(events.SessionPending, SessionPendingPayload{})
+	events.RegisterPayload(events.SessionPendingCleared, SessionPendingClearedPayload{})
 	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyClosed, events.NoPayload{})
 	events.RegisterPayload(events.ControllerStarted, events.NoPayload{})

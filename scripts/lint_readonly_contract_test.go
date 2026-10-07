@@ -36,11 +36,12 @@ func TestLintUsesReadonlyModuleDownloads(t *testing.T) {
 	if !strings.Contains(string(makefile), readonlyGOFlags) {
 		t.Fatalf("Makefile must derive QUALITY_GATE_GOFLAGS from effective GOFLAGS")
 	}
+	const lintEnv = `LINT_ENV = GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GOMEMLIMIT=$(LINT_GOMEMLIMIT)`
+	if !strings.Contains(string(makefile), lintEnv) {
+		t.Fatalf("Makefile must bind readonly GOFLAGS and GOMEMLIMIT through LINT_ENV")
+	}
 	for target, wantGOFLAGS := range map[string]string{
-		"lint-full":     `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
-		"lint-new":      `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
-		"lint-changed":  `export GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
-		"lint-affected": `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
+		"lint-golangci": `$(LINT_ENV)`,
 	} {
 		t.Run(target, func(t *testing.T) {
 			body := makeTargetBody(t, string(makefile), target)
@@ -59,6 +60,25 @@ func TestLintUsesReadonlyModuleDownloads(t *testing.T) {
 	}
 }
 
+func TestLintAllowsParallelRunners(t *testing.T) {
+	configPath := filepath.Join(repoRoot(t), ".golangci.yml")
+	body, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", configPath, err)
+	}
+	var config struct {
+		Run struct {
+			AllowParallelRunners bool `yaml:"allow-parallel-runners"`
+		} `yaml:"run"`
+	}
+	if err := yaml.Unmarshal(body, &config); err != nil {
+		t.Fatalf("parse %s: %v", configPath, err)
+	}
+	if !config.Run.AllowParallelRunners {
+		t.Fatalf("run.allow-parallel-runners must be true: concurrent lint runs on a shared host otherwise fail with %q before analysis (ga-88dvlm)", "parallel golangci-lint is running")
+	}
+}
+
 func TestQualityGateTargetsUseReadonlyModuleDownloads(t *testing.T) {
 	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
 	if err != nil {
@@ -70,15 +90,38 @@ func TestQualityGateTargetsUseReadonlyModuleDownloads(t *testing.T) {
 	}
 
 	for target, wantGOFLAGS := range map[string]string{
-		"fmt-check":                `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
-		"fmt-check-changed":        `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
-		"vet":                      `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
-		"test":                     `$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
+		"fmt-check":                `$(LINT_ENV)`,
+		"fmt-check-changed":        `$(LINT_ENV)`,
+		"vet-go":                   `GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
+		"test-go":                  `$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
 		"test-fsys-darwin-compile": `$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)"`,
 	} {
 		t.Run(target, func(t *testing.T) {
 			if body := makeTargetBody(t, string(makefile), target); !strings.Contains(body, wantGOFLAGS) {
 				t.Fatalf("%s must scope QUALITY_GATE_GOFLAGS to its subprocess tree", target)
+			}
+		})
+	}
+}
+
+func TestLintTargetsApplyMemoryLimit(t *testing.T) {
+	makefile, err := os.ReadFile(filepath.Join(repoRoot(t), "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	if !strings.Contains(string(makefile), "LINT_GOMEMLIMIT ?= 6GiB") {
+		t.Fatalf("Makefile must default LINT_GOMEMLIMIT to 6GiB")
+	}
+
+	for target, wantLimit := range map[string]string{
+		"lint-golangci":     `$(LINT_ENV)`,
+		"fmt-check":         `$(LINT_ENV)`,
+		"fmt-check-changed": `$(LINT_ENV)`,
+		"fmt":               `GOMEMLIMIT=$(LINT_GOMEMLIMIT)`,
+	} {
+		t.Run(target, func(t *testing.T) {
+			if body := makeTargetBody(t, string(makefile), target); !strings.Contains(body, wantLimit) {
+				t.Fatalf("%s must apply LINT_GOMEMLIMIT to its subprocess tree", target)
 			}
 		})
 	}
@@ -134,78 +177,6 @@ printf '%s\n' 'unexpected writable formatter resolution' >> go.sum
 	if string(got) != want {
 		t.Fatalf("fmt-check modified go.sum under ambient -mod=mod:\nwant: %q\n got: %q", want, got)
 	}
-}
-
-func TestLintChangedFailsClosedWhenReadonlyMetadataIsStale(t *testing.T) {
-	fixture := newPRStaticScopeFixture(t, map[string]string{
-		"alpha/alpha.go": "package alpha\n\nfunc Value() int { return 1 }\n",
-	})
-	writeTestFile(t, filepath.Join(fixture.repoRoot, "go.sum"), "example.com/dependency v1.0.0 h1:before\n")
-	writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha.go"), "package alpha\n\nfunc Value() int { return 2 }\n")
-
-	goTool := filepath.Join(t.TempDir(), "go")
-	writeExecutable(t, goTool, `#!/bin/sh
-set -eu
-case "${1-}" in
-  env)
-    if [ "${2-}" = "GOFLAGS" ]; then
-      printf '%s\n' "${GOFLAGS-}"
-    fi
-    exit 0
-    ;;
-  list)
-    case "${GOFLAGS-}" in
-      *-mod=readonly*)
-        echo "go: updates to go.sum needed; disabled by -mod=readonly" >&2
-        exit 1
-        ;;
-    esac
-    echo "unexpected writable module resolution" >> go.sum
-    exit 0
-    ;;
-esac
-echo "unexpected go invocation: $*" >&2
-exit 1
-`)
-
-	before, err := os.ReadFile(filepath.Join(fixture.repoRoot, "go.sum"))
-	if err != nil {
-		t.Fatalf("read go.sum before lint: %v", err)
-	}
-	fixture.resetCalls(t)
-	cmd := makeCommand(
-		"--no-print-directory",
-		"-f", fixture.productionMakefile,
-		"GOLANGCI_LINT="+fixture.fakeLint,
-		"LINT_CHANGED_SCOPE=tracked",
-		"LINT_CHANGED_REF=HEAD",
-		"LINT_FLAGS=",
-		"lint-changed",
-	)
-	cmd.Dir = fixture.repoRoot
-	env := fixture.commandEnv()
-	for index, entry := range env {
-		if strings.HasPrefix(entry, "GOFLAGS=") {
-			env[index] = "GOFLAGS=-mod=mod"
-		}
-	}
-	env = append(env, "PATH="+filepath.Dir(goTool)+string(os.PathListSeparator)+os.Getenv("PATH"))
-	cmd.Env = env
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("lint-changed succeeded with stale readonly metadata:\n%s", output)
-	}
-	if !strings.Contains(string(output), "updates to go.sum needed") {
-		t.Fatalf("lint-changed error did not preserve the module failure:\n%s", output)
-	}
-	after, err := os.ReadFile(filepath.Join(fixture.repoRoot, "go.sum"))
-	if err != nil {
-		t.Fatalf("read go.sum after lint: %v", err)
-	}
-	if string(after) != string(before) {
-		t.Fatalf("lint-changed modified go.sum under ambient -mod=mod:\nbefore: %q\nafter:  %q", before, after)
-	}
-	fixture.requireNoCalls(t)
 }
 
 func makeTargetBody(t *testing.T, makefile, target string) string {

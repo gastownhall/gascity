@@ -133,7 +133,27 @@ func PrefixOwner(id string, stores []beads.Store) beads.Store {
 	return nil
 }
 
-// Resolve federates a point read: a bead lives in exactly one store, so it tries
+// Resolve federates a point read over a bare store LIST.
+//
+// # Superseded: do not add callers
+//
+// It has no callers outside this package's own tests. Every by-id read in the
+// tree now plans ByID over a Topology and executes it with ResolveOwnerRow,
+// which is not a stylistic preference: the PrefixOwner step below routes on the
+// id's OWN prefix, ahead of whatever order the caller assembled its list in, and
+// `gc storage migrate` copies-and-retains while PRESERVING ids. So for every
+// infrastructure bead minted before a cutover — which keeps its work-era prefix
+// — this function returns the work store and the caller reads the frozen
+// pre-migration row, successfully, with status and revision as of the cutover
+// and no error to notice (ga-cu12x). A plan has no such fast path: the binding
+// leads for an id inside its reserved namespace and every unretired binding is
+// probed ahead of work for an id inside none.
+//
+// It survives as the executor the plan's contract is compared against
+// (the leg-order and hard-failure rows in this package's tests) and because
+// deleting it would delete that comparison.
+//
+// The mechanics: a bead lives in exactly one store, so it tries
 // the prefix owner first (the cheap, fork-free path) and falls back to probing
 // every store in turn, returning the first hit. It preserves the first hard
 // (non-ErrNotFound) read failure seen across the owner probe and the fallback

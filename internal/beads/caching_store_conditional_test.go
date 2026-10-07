@@ -3,11 +3,39 @@ package beads_test
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+// TestCachingStoreAtomicCloserConformance runs the shared atomic terminal-close
+// table through a primed CachingStore over each in-tree backing that provides
+// the capability. The controller reaches its session rows through this cache,
+// so the handle it hands out must keep the backing's fence and all-or-nothing
+// close intact (and evict, so a lost fence re-reads the backing).
+func TestCachingStoreAtomicCloserConformance(t *testing.T) {
+	openOver := func(t *testing.T, backing beads.Store) beads.Store {
+		t.Helper()
+		c := beads.NewCachingStoreForTest(backing, nil)
+		if err := c.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+		return c
+	}
+	beadstest.RunAtomicConditionalCloserConformance(t, "CachingStore/FileStore", func(t *testing.T) beads.Store {
+		fs, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), "beads.json"))
+		if err != nil {
+			t.Fatalf("OpenFileStore: %v", err)
+		}
+		return openOver(t, fs)
+	})
+	beadstest.RunAtomicConditionalCloserConformance(t, "CachingStore/SQLiteStore", func(t *testing.T) beads.Store {
+		return openOver(t, newSQLiteForConformance(t))
+	})
+}
 
 func TestCachingStoreConditionalWriterConformance(t *testing.T) {
 	openOver := func(t *testing.T, m *beads.MemStore) beads.Store {
@@ -25,6 +53,7 @@ func TestCachingStoreConditionalWriterConformance(t *testing.T) {
 			// CachingStore forwards its errors untouched, so the wrapped row
 			// asserts Current too.
 			RestrictedUpdateFields: true,
+			LabelsGuarded:          true,
 			SuppliesCurrent:        true,
 			// Disabled is a backing-level toggle: the backing still claims the
 			// interface, returns typed unsupported per call, and CachingStore

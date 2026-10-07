@@ -1,10 +1,15 @@
 package doltpool
 
 import (
+	"database/sql"
+	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // TestFormatDSNBracketsIPv6Host pins the address form for every host
@@ -147,5 +152,65 @@ func TestOpenConcurrentSameEndpoint(t *testing.T) {
 	wg.Wait()
 	if got := Len(); got != 1 {
 		t.Fatalf("Len() = %d, want 1 after concurrent opens of one endpoint", got)
+	}
+}
+
+// TestIdleTimeoutBelowServerReaper pins the property the whole setting exists
+// for: the client must close an idle connection before the server reaps it.
+// The reaper on this dolt version is read_timeout_millis, NOT wait_timeout,
+// which measured inert on dolt 2.2.3 (#5383) — cmd/gc/cmd_dolt_config_test.go
+// guards the same attribution on the generated-config side. Bounding against
+// the wait_timeout value too keeps this correct if a future dolt implements it.
+func TestIdleTimeoutBelowServerReaper(t *testing.T) {
+	readReaper := time.Duration(config.DefaultDoltReadTimeoutMillis) * time.Millisecond
+	if connMaxIdleTime >= readReaper {
+		t.Fatalf("connMaxIdleTime = %v, must be < read_timeout %v", connMaxIdleTime, readReaper)
+	}
+	waitBound := time.Duration(config.DefaultDoltWaitTimeoutSeconds) * time.Second
+	if connMaxIdleTime >= waitBound {
+		t.Fatalf("connMaxIdleTime = %v, must be < wait_timeout %v", connMaxIdleTime, waitBound)
+	}
+	if connMaxIdleTime >= connMaxLifetime {
+		t.Fatalf("connMaxIdleTime = %v, must be < connMaxLifetime %v", connMaxIdleTime, connMaxLifetime)
+	}
+}
+
+// TestSocketPoolSharesTheIdleBound pins that the Unix-socket pool gets the same
+// connection limits as the TCP pool. OpenSocket used to skip
+// SetConnMaxIdleTime, so an idle socket connection outlived the server's idle
+// reaper and every reuse made the driver log "closing bad idle connection:
+// EOF" to stderr. database/sql exposes no getters for these limits, so the
+// test reads the unexported fields.
+func TestSocketPoolSharesTheIdleBound(t *testing.T) {
+	resetForTest(t)
+	tcp, err := Open("127.0.0.1", "3307", "root", "pw", "hq")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	sock, err := OpenSocket("/tmp/dolt.sock", "root", "pw", "hq")
+	if err != nil {
+		t.Fatalf("OpenSocket: %v", err)
+	}
+	durationField := func(db *sql.DB, name string) time.Duration {
+		t.Helper()
+		f := reflect.ValueOf(db).Elem().FieldByName(name)
+		if !f.IsValid() || f.Kind() != reflect.Int64 {
+			t.Skipf("database/sql.DB has no %s duration field in this Go version", name)
+		}
+		return time.Duration(f.Int())
+	}
+	for _, tc := range []struct {
+		pool string
+		db   *sql.DB
+	}{{"tcp", tcp}, {"socket", sock}} {
+		if got := durationField(tc.db, "maxIdleTime"); got != connMaxIdleTime {
+			t.Errorf("%s pool max idle time = %v, want %v", tc.pool, got, connMaxIdleTime)
+		}
+		if got := durationField(tc.db, "maxLifetime"); got != connMaxLifetime {
+			t.Errorf("%s pool max lifetime = %v, want %v", tc.pool, got, connMaxLifetime)
+		}
+		if got := tc.db.Stats().MaxOpenConnections; got != maxOpenConns {
+			t.Errorf("%s pool MaxOpenConnections = %d, want %d", tc.pool, got, maxOpenConns)
+		}
 	}
 }

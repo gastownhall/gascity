@@ -5,8 +5,9 @@ import "github.com/gastownhall/gascity/internal/runtime"
 // seamBackedProvider serves the legacy [runtime.Provider] through the
 // de-conflated seams (via [runtime.NewProviderFromSeams]), passing the optional
 // interfaces production callers type-assert — InteractionProvider (pending /
-// respond), TransportCapabilityProvider (SupportsTransport), and SleepCapability
-// — through to the underlying *Provider. The early cut-over for the acp provider.
+// respond), TransportCapabilityProvider (SupportsTransport), SleepCapability,
+// ProcessTableScanner (orphan reaping), LivenessObserverWithError and
+// ListingAttestation — through to the underlying *Provider. The early cut-over for the acp provider.
 type seamBackedProvider struct {
 	runtime.Provider
 	raw *Provider
@@ -17,6 +18,11 @@ var (
 	_ runtime.InteractionProvider         = (*seamBackedProvider)(nil)
 	_ runtime.TransportCapabilityProvider = (*seamBackedProvider)(nil)
 	_ runtime.SleepCapabilityProvider     = (*seamBackedProvider)(nil)
+	_ runtime.ProcessTableScanner         = (*seamBackedProvider)(nil)
+	_ runtime.LivenessObserverWithError   = (*seamBackedProvider)(nil)
+	_ runtime.ListingAttestation          = (*seamBackedProvider)(nil)
+	_ runtime.IdentitySidecarProvider     = (*seamBackedProvider)(nil)
+	_ runtime.IdentitySidecarProvider     = (*Provider)(nil)
 )
 
 // NewSeamBacked constructs an acp provider served through the seams.
@@ -50,4 +56,32 @@ func (s *seamBackedProvider) SupportsTransport(transport string) bool {
 // SleepCapability passes through to the underlying provider (non-seam).
 func (s *seamBackedProvider) SleepCapability(name string) runtime.SessionSleepCapability {
 	return s.raw.SleepCapability(name)
+}
+
+// FindRuntimesBySessionID implements [runtime.ProcessTableScanner] (non-seam
+// passthrough).
+func (s *seamBackedProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
+	return s.raw.FindRuntimesBySessionID(id)
+}
+
+// TerminateRuntime implements [runtime.ProcessTableScanner] (non-seam
+// passthrough).
+func (s *seamBackedProvider) TerminateRuntime(r runtime.LiveRuntime) error {
+	return s.raw.TerminateRuntime(r)
+}
+
+// ObserveLivenessWithError passes the underlying provider's three-outcome
+// liveness through (non-seam); the seams expose only a bool liveness read.
+func (s *seamBackedProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	return s.raw.ObserveLivenessWithError(name, processNames)
+}
+
+// LocalIdentitySidecar passes the underlying provider's sidecar declaration
+// through; the seams route GetMeta to the same sidecar.
+func (s *seamBackedProvider) LocalIdentitySidecar() bool { return s.raw.LocalIdentitySidecar() }
+
+// ListRunningComplete passes the underlying provider's listing attestation
+// through; the seams route ListRunning to the same raw listing.
+func (s *seamBackedProvider) ListRunningComplete() bool {
+	return s.raw.ListRunningComplete()
 }

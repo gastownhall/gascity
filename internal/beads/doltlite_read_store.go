@@ -34,6 +34,8 @@ type DoltliteReadStore struct {
 	readyHash       string
 }
 
+// NeedsSessionTypeFallback reports that session lookups must also match the
+// legacy session bead type; the DoltLite read path always needs it.
 func (s *DoltliteReadStore) NeedsSessionTypeFallback() bool { return true }
 
 type doltliteMetadata struct {
@@ -141,6 +143,8 @@ func doltliteDBPath(dir string) (string, error) {
 	return filepath.Join(dir, ".beads", "doltlite", dbName+".db"), nil
 }
 
+// NewDoltliteReadStore opens the DoltLite database of the beads scope at dir
+// for reads and routes every write through backing.
 func NewDoltliteReadStore(dir string, backing *BdStore) (*DoltliteReadStore, error) {
 	dbPath, err := doltliteDBPath(dir)
 	if err != nil {
@@ -209,6 +213,7 @@ func readDoltliteMetadata(dir string) (doltliteMetadata, error) {
 	return meta, nil
 }
 
+// CloseStore closes the DoltLite database handle.
 func (s *DoltliteReadStore) CloseStore() error {
 	if s.db != nil {
 		return s.db.Close()
@@ -216,6 +221,7 @@ func (s *DoltliteReadStore) CloseStore() error {
 	return nil
 }
 
+// Get returns the bead with the given ID, open or closed.
 func (s *DoltliteReadStore) Get(id string) (Bead, error) {
 	beads, err := s.queryIssues(ListQuery{AllowScan: true, IncludeClosed: true, TierMode: TierBoth}, "i.id = ?", []any{id}, 1)
 	if err != nil {
@@ -227,6 +233,8 @@ func (s *DoltliteReadStore) Get(id string) (Bead, error) {
 	return beads[0], nil
 }
 
+// GetSessionBead returns the session bead with the given ID, from the cached
+// session list when it holds the bead and from the database otherwise.
 func (s *DoltliteReadStore) GetSessionBead(id string) (Bead, error) {
 	sessions, err := s.ListSessionBeads()
 	if err == nil {
@@ -256,6 +264,7 @@ func (s *DoltliteReadStore) GetSessionBead(id string) (Bead, error) {
 	return beads[0], nil
 }
 
+// ListSessionBeads returns the session beads, cached per Dolt commit hash.
 func (s *DoltliteReadStore) ListSessionBeads() ([]Bead, error) {
 	hash, err := s.currentDoltHash()
 	if err != nil {
@@ -278,6 +287,7 @@ func (s *DoltliteReadStore) ListSessionBeads() ([]Bead, error) {
 	return rows, nil
 }
 
+// List returns the beads matching query.
 func (s *DoltliteReadStore) List(query ListQuery) ([]Bead, error) {
 	if err := query.Validate(); err != nil {
 		return nil, err
@@ -288,6 +298,7 @@ func (s *DoltliteReadStore) List(query ListQuery) ([]Bead, error) {
 	return s.queryIssues(query, "", nil, query.Limit)
 }
 
+// ListOpen returns the open beads, filtered to status[0] when given.
 func (s *DoltliteReadStore) ListOpen(status ...string) ([]Bead, error) {
 	query := ListQuery{AllowScan: true}
 	if len(status) > 0 {
@@ -296,6 +307,7 @@ func (s *DoltliteReadStore) ListOpen(status ...string) ([]Bead, error) {
 	return s.List(query)
 }
 
+// Children returns the beads whose parent is parentID.
 func (s *DoltliteReadStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 	return s.List(ListQuery{
 		ParentID:      parentID,
@@ -305,6 +317,7 @@ func (s *DoltliteReadStore) Children(parentID string, opts ...QueryOpt) ([]Bead,
 	})
 }
 
+// ListByLabel returns up to limit beads carrying label.
 func (s *DoltliteReadStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead, error) {
 	return s.List(ListQuery{
 		Label:         label,
@@ -315,6 +328,7 @@ func (s *DoltliteReadStore) ListByLabel(label string, limit int, opts ...QueryOp
 	})
 }
 
+// ListByAssignee returns up to limit beads assigned to assignee with status.
 func (s *DoltliteReadStore) ListByAssignee(assignee, status string, limit int) ([]Bead, error) {
 	return s.List(ListQuery{
 		Assignee: assignee,
@@ -323,6 +337,7 @@ func (s *DoltliteReadStore) ListByAssignee(assignee, status string, limit int) (
 	})
 }
 
+// ListByMetadata returns up to limit beads whose metadata matches every filter.
 func (s *DoltliteReadStore) ListByMetadata(filters map[string]string, limit int, opts ...QueryOpt) ([]Bead, error) {
 	return s.List(ListQuery{
 		Metadata:      filters,
@@ -333,6 +348,7 @@ func (s *DoltliteReadStore) ListByMetadata(filters map[string]string, limit int,
 	})
 }
 
+// Ready returns the beads with no open blockers, cached per Dolt commit hash.
 func (s *DoltliteReadStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	rq := readyQueryFromArgs(query)
 	cacheKey := fmt.Sprintf("%s\x00%d", rq.Assignee, rq.Limit)
@@ -388,6 +404,7 @@ func (s *DoltliteReadStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	return out, nil
 }
 
+// LastOrderRun returns when the order named name last ran, or the zero time.
 func (s *DoltliteReadStore) LastOrderRun(name string) (time.Time, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -420,7 +437,7 @@ func (s *DoltliteReadStore) loadOrderRuns() (map[string]time.Time, map[string]bo
 	if err != nil {
 		return nil, nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	lastRun := make(map[string]time.Time)
 	openRuns := make(map[string]bool)
 	for rows.Next() {
@@ -442,6 +459,7 @@ func (s *DoltliteReadStore) loadOrderRuns() (map[string]time.Time, map[string]bo
 	return lastRun, openRuns, nil
 }
 
+// HasOpenOrderRun reports whether the order named name has an open run.
 func (s *DoltliteReadStore) HasOpenOrderRun(name string) (bool, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -548,6 +566,7 @@ func (s *DoltliteReadStore) resetOrderRunCache() {
 	s.readyMu.Unlock()
 }
 
+// Create creates b through the bd store and resets the order-run cache.
 func (s *DoltliteReadStore) Create(b Bead) (Bead, error) {
 	created, err := s.BdStore.Create(b)
 	if err == nil && hasOrderRunLabel(created.Labels) {
@@ -565,6 +584,7 @@ func hasOrderRunLabel(labels []string) bool {
 	return false
 }
 
+// Update updates the bead id through the bd store and resets the order-run cache.
 func (s *DoltliteReadStore) Update(id string, opts UpdateOpts) error {
 	err := s.BdStore.Update(id, opts)
 	if err == nil {
@@ -573,6 +593,7 @@ func (s *DoltliteReadStore) Update(id string, opts UpdateOpts) error {
 	return err
 }
 
+// Close closes the bead id through the bd store and resets the order-run cache.
 func (s *DoltliteReadStore) Close(id string) error {
 	err := s.BdStore.Close(id)
 	if err == nil {
@@ -581,6 +602,7 @@ func (s *DoltliteReadStore) Close(id string) error {
 	return err
 }
 
+// CloseAll closes ids through the bd store and resets the order-run cache.
 func (s *DoltliteReadStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	n, err := s.BdStore.CloseAll(ids, metadata)
 	if err == nil && n > 0 {
@@ -589,6 +611,7 @@ func (s *DoltliteReadStore) CloseAll(ids []string, metadata map[string]string) (
 	return n, err
 }
 
+// Reopen reopens the bead id through the bd store and resets the order-run cache.
 func (s *DoltliteReadStore) Reopen(id string) error {
 	err := s.BdStore.Reopen(id)
 	if err == nil {
@@ -597,6 +620,7 @@ func (s *DoltliteReadStore) Reopen(id string) error {
 	return err
 }
 
+// Delete deletes the bead id through the bd store and resets the order-run cache.
 func (s *DoltliteReadStore) Delete(id string) error {
 	err := s.BdStore.Delete(id)
 	if err == nil {
@@ -605,6 +629,7 @@ func (s *DoltliteReadStore) Delete(id string) error {
 	return err
 }
 
+// SetMetadataBatch writes the keys of kvs whose values differ on bead id.
 func (s *DoltliteReadStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	if len(kvs) == 0 {
 		return nil
@@ -640,10 +665,12 @@ func (s *DoltliteReadStore) SetMetadataBatch(id string, kvs map[string]string) e
 	return err
 }
 
+// SetMetadata writes one metadata key on bead id.
 func (s *DoltliteReadStore) SetMetadata(id, key, value string) error {
 	return s.SetMetadataBatch(id, map[string]string{key: value})
 }
 
+// DepAdd adds a dependency through the bd store and resets the order-run cache.
 func (s *DoltliteReadStore) DepAdd(id, dep, depType string) error {
 	err := s.BdStore.DepAdd(id, dep, depType)
 	if err == nil {
@@ -652,6 +679,7 @@ func (s *DoltliteReadStore) DepAdd(id, dep, depType string) error {
 	return err
 }
 
+// DepRemove removes a dependency through the bd store and resets the order-run cache.
 func (s *DoltliteReadStore) DepRemove(id, dep string) error {
 	err := s.BdStore.DepRemove(id, dep)
 	if err == nil {
@@ -744,6 +772,8 @@ func cloneBeads(values []Bead) []Bead {
 	return out
 }
 
+// DepList returns the dependencies of id: those it depends on ("down") or
+// those that depend on it ("up").
 func (s *DoltliteReadStore) DepList(id, direction string) ([]Dep, error) {
 	if direction == "up" {
 		return s.queryDeps(doltliteDependsOnExpr()+" = ?", id)
@@ -751,6 +781,7 @@ func (s *DoltliteReadStore) DepList(id, direction string) ([]Dep, error) {
 	return s.queryDeps("issue_id = ?", id)
 }
 
+// DepListBatch returns the dependencies of each of ids, keyed by ID.
 func (s *DoltliteReadStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	result := make(map[string][]Dep, len(ids))
 	if len(ids) == 0 {
@@ -918,6 +949,16 @@ func (s *DoltliteReadStore) queryIssuesOrderedInTables(query ListQuery, sets []d
 		if query.SeekAfter != nil {
 			tableLimit = 0
 		}
+		// A before-filter admits NULL-julianday rows into the SQL result (see
+		// buildDoltliteTableQuery) precisely so filterDoltliteBeforeTimes can
+		// re-validate them Go-side. Those rows can sort anywhere in SQL's
+		// ORDER BY (it has no valid timestamp to key on), which may disagree
+		// with the Go-side zero-time treatment — so, exactly like SeekAfter
+		// above, a SQL LIMIT taken before that Go re-sort could cut the wrong
+		// prefix. Fetch unbounded whenever a before-filter is active.
+		if !query.CreatedBefore.IsZero() || !query.UpdatedBefore.IsZero() {
+			tableLimit = 0
+		}
 		rows, err := s.queryIssueTable(query, tables, extraWhere, extraArgs, tableLimit, orderBy)
 		if err != nil {
 			return nil, err
@@ -1049,7 +1090,7 @@ func (s *DoltliteReadStore) selectBoundedTopNIDs(query ListQuery, sets []doltlit
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	ids := make([]string, 0, limit)
 	for rows.Next() {
 		var id string
@@ -1303,11 +1344,18 @@ func (s *DoltliteReadStore) buildDoltliteTableQuery(query ListQuery, tables dolt
 		args = append(args, metadataArgs...)
 	}
 	if !query.CreatedBefore.IsZero() {
-		where = append(where, "julianday(i.created_at) < julianday(?)")
+		// julianday() returns NULL for text it cannot parse (e.g. a raw
+		// time.Time bind: modernc.org/sqlite serializes via time.Time.String(),
+		// "2026-06-01 07:00:00 +0000 UTC"), and NULL < julianday(?) is NULL, not
+		// true — so a strict "<" here silently drops such rows from the result
+		// entirely instead of letting the tolerant Go-side
+		// filterDoltliteBeforeTimes decide. Admit NULL-julianday rows and let
+		// that Go-side filter remain authoritative (ga-p7ipsu, ga-n4oyad).
+		where = append(where, "(julianday(i.created_at) < julianday(?) OR julianday(i.created_at) IS NULL)")
 		args = append(args, doltliteSQLiteTime(query.CreatedBefore))
 	}
 	if !query.UpdatedBefore.IsZero() {
-		where = append(where, "julianday(COALESCE(NULLIF(i.updated_at, ''), i.created_at)) < julianday(?)")
+		where = append(where, "(julianday(COALESCE(NULLIF(i.updated_at, ''), i.created_at)) < julianday(?) OR julianday(COALESCE(NULLIF(i.updated_at, ''), i.created_at)) IS NULL)")
 		args = append(args, doltliteSQLiteTime(query.UpdatedBefore))
 	}
 	if extraWhere != "" {
@@ -1329,10 +1377,14 @@ func (s *DoltliteReadStore) queryIssueTable(query ListQuery, tables doltliteTabl
 	if tq.skipTable {
 		return nil, nil
 	}
+	closeReasonColumn, err := s.closeReasonExprFor(tables)
+	if err != nil {
+		return nil, err
+	}
 	parentColumn := doltliteQualifiedDependsOnExpr("pc")
 	sqlText := `SELECT i.id, COALESCE(i.title, ''), COALESCE(i.status, ''), COALESCE(i.issue_type, ''), i.priority, i.created_at,
 		COALESCE(i.updated_at, ''), COALESCE(i.assignee, ''), COALESCE(i.description, ''), COALESCE(i.metadata, '{}'),
-		` + parentColumn + `, ` + tq.flags.ephemeral + `, ` + tq.flags.noHistory + `
+		` + parentColumn + `, ` + tq.flags.ephemeral + `, ` + tq.flags.noHistory + `, ` + closeReasonColumn + `
 		FROM ` + tables.issues + ` i` + tq.parentJoin
 	if len(tq.where) > 0 {
 		sqlText += " WHERE " + strings.Join(tq.where, " AND ")
@@ -1343,11 +1395,12 @@ func (s *DoltliteReadStore) queryIssueTable(query ListQuery, tables doltliteTabl
 	// key, not the raw sub-second text, so a single-table bounded read cuts the
 	// same prefix the Go re-sort over the truncated CreatedAt would (#3449
 	// review).
-	if orderBy != "" {
+	switch {
+	case orderBy != "":
 		sqlText += " " + orderBy
-	} else if query.Sort == SortCreatedAsc {
+	case query.Sort == SortCreatedAsc:
 		sqlText += " ORDER BY " + doltliteCreatedAtSortKey("i") + " ASC, i.id ASC"
-	} else {
+	default:
 		sqlText += " ORDER BY " + doltliteCreatedAtSortKey("i") + " DESC, i.id DESC"
 	}
 	if limit > 0 {
@@ -1357,7 +1410,7 @@ func (s *DoltliteReadStore) queryIssueTable(query ListQuery, tables doltliteTabl
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	var beads []Bead
 	for rows.Next() {
 		b, err := scanBead(rows)
@@ -1386,6 +1439,21 @@ type doltliteStorageFlagExprs struct {
 	// hasColumns reports whether the table carries at least one storage-flag
 	// column, i.e. whether per-row tier classification is possible.
 	hasColumns bool
+}
+
+// closeReasonExprFor resolves the SQL expression for bd's close_reason column
+// (the reason given to bd close --reason) on one storage table. A snapshot
+// whose table lacks the column reads as no reason; a probe failure is
+// propagated rather than treated as an absent column.
+func (s *DoltliteReadStore) closeReasonExprFor(tables doltliteTableSet) (string, error) {
+	hasCloseReason, err := s.tableHasColumn(tables.issues, "close_reason")
+	if err != nil {
+		return "", err
+	}
+	if !hasCloseReason {
+		return "''", nil
+	}
+	return "COALESCE(i.close_reason, '')", nil
 }
 
 // storageFlagExprsFor resolves the storage-flag expressions for tables.
@@ -1481,8 +1549,9 @@ func scanBead(rows interface{ Scan(...any) error }) (Bead, error) {
 		metadataRaw string
 		ephemeral   int64
 		noHistory   int64
+		closeReason string
 	)
-	if err := rows.Scan(&b.ID, &b.Title, &b.Status, &b.Type, &priority, &createdRaw, &updatedRaw, &b.Assignee, &b.Description, &metadataRaw, &b.ParentID, &ephemeral, &noHistory); err != nil {
+	if err := rows.Scan(&b.ID, &b.Title, &b.Status, &b.Type, &priority, &createdRaw, &updatedRaw, &b.Assignee, &b.Description, &metadataRaw, &b.ParentID, &ephemeral, &noHistory, &closeReason); err != nil {
 		return b, err
 	}
 	if priority.Valid {
@@ -1490,6 +1559,7 @@ func scanBead(rows interface{ Scan(...any) error }) (Bead, error) {
 		b.Priority = &p
 	}
 	b.Status = mapBdStatus(b.Status)
+	b.CloseReason = bdCloseReason(b.Status, closeReason)
 	b.CreatedAt = parseDBTime(createdRaw).Truncate(time.Second)
 	b.UpdatedAt = parseDBTime(updatedRaw).Truncate(time.Second)
 	b.Metadata = parseMetadata(metadataRaw)
@@ -1595,7 +1665,7 @@ func (s *DoltliteReadStore) hydrateLabels(beads []Bead, labelTable string) error
 		}
 		return err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	for rows.Next() {
 		var id, label string
 		if err := rows.Scan(&id, &label); err != nil {

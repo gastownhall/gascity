@@ -14,13 +14,18 @@ import (
 	"testing"
 	"time"
 
+	goruntime "runtime"
+
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packman"
+
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -204,6 +209,7 @@ func (m cleanupTestingM) Run() int {
 
 func TestMain(m *testing.M) {
 	maybeRunProductMetricsDirectChildEnvSpy()
+	maybeRunFakeDoltSQLServer()
 
 	// testscript re-executes the test binary as "gc" or "bd" for each txtar
 	// command. On that path we must not create a new temp root — the parent
@@ -240,7 +246,8 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	testTempRootAliveSentinel = sentinel
-	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
+	hostTmpRoot, err := adoptPerRunTMPDIR(testTempRoot)
+	if err != nil {
 		panic(err)
 	}
 	tmuxSocketParentRoot := os.Getenv(testTmuxSocketParentRootEnv)
@@ -267,12 +274,7 @@ func TestMain(m *testing.M) {
 	if err := tmuxtest.ConfigureProcessEnv(tmuxSocketRoot); err != nil {
 		panic(err)
 	}
-	tmpRoot := os.TempDir()
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testGCHomeDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testRuntimeDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testProviderStubDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingFormulaDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingCityDirPrefix)
+	sweepLegacyCmdGCFixtureDirs(hostTmpRoot)
 	initSharedSlingTestFixtures(testTempRoot)
 
 	gcHome, err := os.MkdirTemp("", pidPrefixedTempPattern(testGCHomeDirPrefix))
@@ -285,6 +287,14 @@ func TestMain(m *testing.M) {
 	}
 	if err := os.Setenv("GC_HOME", gcHome); err != nil {
 		panic(err)
+	}
+	// The shared GC_HOME has no registries.toml, which means the public
+	// default registry; an add without --version would fetch that catalog
+	// over the network into the shared home, where it changes what later
+	// tests resolve (registry pack names). Command tests that exercise
+	// registry defaults configure their own GC_HOME and restore this seam.
+	resolveImportRegistryRelease = func(string, string) (packman.RegistryRelease, bool, error, error) {
+		return packman.RegistryRelease{}, false, nil, nil
 	}
 	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
 		panic(err)
@@ -302,6 +312,10 @@ func TestMain(m *testing.M) {
 	}
 	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
+	// In-process init stays off the network by default. Testscript "gc"
+	// children above keep the real installer: their scripts run follow-on
+	// commands that need the installed imports.
+	configureInitRemoteImportsForTests()
 	var testRunner testscript.TestingM = newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
 	// The tmux leak guard wraps outside the dolt guard and inside
 	// cleanupTestingM: it must observe and kill leaked tmux servers while the
@@ -2837,6 +2851,9 @@ version = "` + config.PublicGascityPackVersion + `"
 # retention_ttl controls how long read messages are retained before purge.
 # 0 disables retention; use "168h" for 7 days.
 # "7d" is not a valid Go duration.
+# It also sets how long a read mail bead stays open before the nudge-mail
+# sweep closes it: unset keeps that sweep's own 60m default, while "0"
+# disables the close phase too, leaving read mail beads open.
 # retention_ttl = "0"
 `
 	if got != want {
@@ -3766,6 +3783,7 @@ func TestCmdInitProviderAcceptsAntigravity(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	stubInitRemoteImports(t)
 
 	cityPath := filepath.Join(t.TempDir(), "antigravity-city")
 	var stdout, stderr bytes.Buffer
@@ -5526,6 +5544,8 @@ func TestInitFromSkip(t *testing.T) {
 		{filepath.Join(".gc", "agents", "mayor.json"), false, true},
 		{filepath.Join(".gc", "prompts"), true, true},
 		{filepath.Join(".gc", "prompts", "mayor.md"), false, true},
+		{".beads", true, true},
+		{filepath.Join(".beads", "metadata.json"), false, true},
 		{"gastown_test.go", false, true},
 		{filepath.Join("sub", "foo_test.go"), false, true},
 		{"city.toml", false, false},
@@ -5539,6 +5559,36 @@ func TestInitFromSkip(t *testing.T) {
 				t.Errorf("initFromSkip(%q, %v) = %v, want %v", tt.relPath, tt.isDir, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDoInitFromDirExcludesProviderOwnedBeadsState(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	parent := t.TempDir()
+	srcDir := filepath.Join(parent, "template")
+	if err := os.MkdirAll(filepath.Join(srcDir, ".beads", "provider-runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"), []byte("[workspace]\nname = \"template\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, ".beads", "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"proxied-server"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, ".beads", "provider-runtime", "state"), []byte("provider-owned"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(parent, "city")
+	var stdout, stderr bytes.Buffer
+	if code := doInitFromDir(srcDir, cityPath, &stdout, &stderr); code != 0 {
+		t.Fatalf("doInitFromDir = %d; stderr: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads")); !os.IsNotExist(err) {
+		t.Fatalf("provider-owned .beads state was copied, stat err = %v", err)
 	}
 }
 
@@ -5857,18 +5907,21 @@ func TestDoStop_UsesDependencyAwareOrdering(t *testing.T) {
 	}
 }
 
-func TestDoStopStopError(t *testing.T) {
-	sp := runtime.NewFailFake() // Stop will fail
+func TestDoStopBrokenRuntimeFailsClosed(t *testing.T) {
+	sp := runtime.NewFailFake() // ListRunning and Stop fail; IsRunning is false
 
 	var stdout, stderr bytes.Buffer
 	code := doStop([]string{"mayor"}, sp, nil, nil, 0, events.Discard, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doStop = %d, want 0 (errors are non-fatal); stderr: %s", code, stderr.String())
+	// The runtime could not be listed, so gc stop cannot know that nothing is
+	// running: it must not report success.
+	if code != 1 {
+		t.Fatalf("doStop = %d, want 1 for an unlistable runtime; stderr: %s", code, stderr.String())
 	}
-	// FailFake makes IsRunning return false, so no stop attempt.
-	// Should still print "City stopped."
-	if !strings.Contains(stdout.String(), "City stopped.") {
-		t.Errorf("stdout missing 'City stopped.': %q", stdout.String())
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Errorf("stdout reported City stopped. for an unlistable runtime: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "gc stop: listing sessions: session unavailable") {
+		t.Errorf("stderr = %q, want the listing failure", stderr.String())
 	}
 }
 
@@ -7948,4 +8001,30 @@ func TestDoAgentResumeNotFound(t *testing.T) {
 	if !strings.Contains(stderr.String(), "not found") {
 		t.Errorf("stderr = %q, want 'not found'", stderr.String())
 	}
+}
+
+// gcCallerDir resolves the cmd/gc package directory from a runtime.Caller
+// file path. Under `bazel test` the caller path is runfiles-relative, so the
+// real checkout from GC_TEST_REPO_ROOT stands in for the package directory.
+func gcCallerDir(currentFile string) string {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return filepath.Join(root, "cmd", "gc")
+	}
+	return filepath.Dir(currentFile)
+}
+
+// gcRepoRootFromEnv resolves the repository root for source-scanning guards.
+func gcRepoRootFromEnv() string {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
+	_, file, _, _ := goruntime.Caller(0)
+	return filepath.Dir(filepath.Dir(filepath.Dir(file)))
+}
+
+// chdirToRealPackageDir moves the working directory to the cmd/gc package
+// in the real checkout under `bazel test` (see bazeltest.ChdirPackageDir).
+func chdirToRealPackageDir(t *testing.T) {
+	t.Helper()
+	bazeltest.ChdirPackageDir(t, "cmd/gc")
 }

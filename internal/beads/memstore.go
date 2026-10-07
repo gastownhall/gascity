@@ -235,6 +235,9 @@ func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
 	if opts.Status != nil {
 		setBeadStatus(&m.beads[i], *opts.Status)
 	}
+	if oldStatus == "closed" && m.beads[i].Status != "closed" {
+		forgetCloseReason(&m.beads[i])
+	}
 	if opts.Description != nil {
 		m.beads[i].Description = *opts.Description
 	}
@@ -273,6 +276,9 @@ func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
 			}
 		}
 		m.beads[i].Labels = filtered
+	}
+	if oldStatus != "closed" && m.beads[i].Status == "closed" {
+		recordCloseReason(&m.beads[i])
 	}
 	m.beads[i].UpdatedAt = time.Now()
 	m.beads[i].Revision++
@@ -327,6 +333,7 @@ func (m *MemStore) Close(id string) error {
 				return nil
 			}
 			setBeadStatus(&m.beads[i], "closed")
+			recordCloseReason(&m.beads[i])
 			m.beads[i].UpdatedAt = time.Now()
 			m.beads[i].Revision++
 			return nil
@@ -350,6 +357,7 @@ func (m *MemStore) Reopen(id string) error {
 			m.beads[i].UpdatedAt = time.Now()
 			m.beads[i].Revision++
 			if wasClosed {
+				forgetCloseReason(&m.beads[i])
 				// closed→open starts a new ownership generation; an
 				// in_progress→open reopen keeps the same owner and is not a
 				// transition.
@@ -383,6 +391,7 @@ func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, erro
 		for k, v := range metadata {
 			m.beads[i].Metadata[k] = v
 		}
+		recordCloseReason(&m.beads[i])
 		closed++
 	}
 	return closed, nil
@@ -462,11 +471,13 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 	}
 
 	statusByID := make(map[string]string, len(m.beads))
+	workOutcomeByID := make(map[string]string, len(m.beads))
 	for _, bead := range m.beads {
 		if err := contextErr(); err != nil {
 			return nil, err
 		}
 		statusByID[bead.ID] = bead.Status
+		workOutcomeByID[bead.ID] = ReadinessWorkOutcome(bead.Metadata)
 	}
 
 	var result []Bead
@@ -494,7 +505,7 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 			default:
 				continue
 			}
-			if statusByID[dep.DependsOnID] != "closed" {
+			if !DependencySatisfied(statusByID[dep.DependsOnID], workOutcomeByID[dep.DependsOnID]) {
 				blocked = true
 				break
 			}

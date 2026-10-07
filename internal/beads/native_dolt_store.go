@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	beadslib "github.com/steveyegge/beads"
 )
 
@@ -43,6 +46,7 @@ var nativeDoltOpenEnvKeys = []string{
 	"BEADS_CREDENTIALS_FILE",
 	"BEADS_DOLT_AUTO_START",
 	"BEADS_DOLT_DATA_DIR",
+	"BEADS_DOLT_MAX_CONNS",
 	"BEADS_DOLT_PASSWORD",
 	"BEADS_DOLT_PORT",
 	"BEADS_DOLT_SERVER_DATABASE",
@@ -131,10 +135,53 @@ func withNativeDoltOpenEnvAndCredentialCommand(env map[string]string, credential
 // open environment while nativeDoltOpenEnvMu is already held. The lock-aware
 // form is used by hermetic opens, which must withhold the whole BEADS_ namespace
 // and project the selected keys as one indivisible environment transition.
+// BDAllowRemoteMigrateEnvKey is projected from env as well, so the linked
+// library sees it only when the caller decided it.
 func withNativeDoltOpenEnvAndCredentialCommandLocked(env map[string]string, credentialCommand string) (func(), error) {
-	keys := nativeDoltOpenEnvKeys
+	restoreScoped, err := withProjectedOpenEnvLocked(nativeDoltOpenEnvKeys, env, credentialCommand)
+	if err != nil {
+		return nil, err
+	}
+	restoreRemoteMigrate, err := withProjectedOpenEnvLocked(bdRemoteMigrateOpenEnvKeys, env, "")
+	if err != nil {
+		restoreScoped()
+		return nil, err
+	}
+	return func() {
+		restoreRemoteMigrate()
+		restoreScoped()
+	}, nil
+}
+
+// BDAllowRemoteMigrateEnvKey is the beads library's opt-in for letting a
+// writable open migrate a shared or remote database's schema forward. A direct
+// native open takes it only from the env its caller passes, never from the
+// ambient process environment: gc sets it for a city that opted in through
+// beads.allow_schema_behind_migrate, the opt-in the native-store preflight
+// requires before it passes a database whose schema is behind the library's.
+// The proxied lane decides this key itself (proxiedOnlyOpenEnvKeys).
+const BDAllowRemoteMigrateEnvKey = "BD_ALLOW_REMOTE_MIGRATE"
+
+// bdRemoteMigrateOpenEnvKeys is the projection list for
+// BDAllowRemoteMigrateEnvKey. It stays out of nativeDoltOpenEnvKeys, which
+// lists the BEADS_ keys a direct open decides.
+var bdRemoteMigrateOpenEnvKeys = []string{BDAllowRemoteMigrateEnvKey}
+
+// withProjectedOpenEnvLocked is the projection itself, parameterised by the key
+// list it decides.
+//
+// The list is a parameter rather than the package-level default because the
+// proxied-native window projects a DIFFERENT set (see
+// proxiedNativeOpenEnvKeys): it must reach the author pair and explicitly unset
+// bd's migration unlocks, neither of which belongs in the list every direct and
+// hosted open uses. Growing the shared list instead would change what a
+// flag-off open does — a key listed here but absent from env is UNSET, so
+// adding GIT_AUTHOR_NAME would silently strip an operator's git identity from
+// every direct native open in the process.
+func withProjectedOpenEnvLocked(openEnvKeys []string, env map[string]string, credentialCommand string) (func(), error) {
+	keys := openEnvKeys
 	if credentialCommand != "" {
-		keys = append(append([]string(nil), nativeDoltOpenEnvKeys...), "BEADS_DOLT_CREDENTIAL_COMMAND")
+		keys = append(append([]string(nil), openEnvKeys...), "BEADS_DOLT_CREDENTIAL_COMMAND")
 	}
 	previous := make(map[string]*string, len(keys))
 	for _, key := range keys {
@@ -203,7 +250,26 @@ func withWithheldBeadsEnv() (func(), error) {
 // nativeDoltOpenEnvMu is already held. Keeping this operation on the same lock
 // as snapshots and ordinary native opens makes the process environment appear
 // atomic to every caller that uses the guarded helpers.
+//
+// It withholds BEADS_ and nothing else, on purpose. Direct and hosted opens are
+// the callers, and their contract is unchanged by the proxied lane: a second
+// prefix here would alter what every one of them projects.
 func withWithheldBeadsEnvLocked() (func(), error) {
+	return withWithheldPrefixesLocked(beadsEnvPrefix)
+}
+
+// withWithheldPrefixesLocked unsets every ambient variable under any of the
+// given prefixes and returns the restore, with nativeDoltOpenEnvMu already
+// held.
+//
+// It is prefix-parameterised rather than fixed at BEADS_ because the
+// proxied-native window has a second namespace to answer for: bd's own BD_
+// variables configure migration and schema-gate behavior that gc must not
+// inherit from whatever shell it was launched from when it opens the linked
+// library against a database bd owns. A restore is registered per key before
+// any unset fails, so a partial withholding cannot leave the process env in a
+// state no caller asked for.
+func withWithheldPrefixesLocked(prefixes ...string) (func(), error) {
 	type withheld struct{ key, value string }
 	var previous []withheld
 	restore := func() {
@@ -211,9 +277,17 @@ func withWithheldBeadsEnvLocked() (func(), error) {
 			_ = os.Setenv(entry.key, entry.value)
 		}
 	}
+	hasPrefix := func(key string) bool {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(key, prefix) {
+				return true
+			}
+		}
+		return false
+	}
 	for _, entry := range os.Environ() {
 		key, value, ok := strings.Cut(entry, "=")
-		if !ok || !strings.HasPrefix(key, beadsEnvPrefix) {
+		if !ok || !hasPrefix(key) {
 			continue
 		}
 		previous = append(previous, withheld{key: key, value: value})
@@ -248,13 +322,13 @@ func openNativeStorageWithoutAmbientEnvWithCredentialCommand(ctx context.Context
 	}
 	defer restoreEnv()
 
-	storage, err := nativeDoltOpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
+	storage, err := openNativeDoltStorage(ctx, filepath.Join(scopeRoot, ".beads"))
 	if err != nil {
 		return nil, "", err
 	}
 	var prefix string
 	if readPrefix {
-		prefix, err = storage.GetConfig(ctx, "issue_prefix")
+		prefix, err = storage.GetConfig(ctx, nativeIssuePrefixConfigKey)
 		if err != nil {
 			_ = storage.Close()
 			return nil, "", fmt.Errorf("reading native issue prefix: %w", err)
@@ -270,7 +344,8 @@ func openNativeStorageWithoutAmbientEnvWithCredentialCommand(ctx context.Context
 // configuration decides how the workspace is served — so an inherited variable
 // naming another database, another directory, or a credential command must not
 // be able to re-point it. Passing an empty scoped environment is not enough:
-// that clears only the variables gc itself projects.
+// that clears only the variables gc itself projects. BDAllowRemoteMigrateEnvKey
+// is withheld too, so an inherited unlock never migrates the workspace.
 func OpenNativeDoltStoreAtWithoutAmbientEnv(ctx context.Context, scopeRoot string, opts ...NativeDoltStoreOption) (*NativeDoltStore, error) {
 	return newNativeDoltStoreAtWithoutAmbientEnv(ctx, scopeRoot, "", opts...)
 }
@@ -305,6 +380,77 @@ type NativeDoltStore struct {
 	actor      string
 	idPrefix   string
 
+	// sawRows latches when the backend answered a read of this store with at
+	// least one row, counted as the backend returned it and before
+	// ApplyListQuery narrows it. It is the RowWitness evidence for this
+	// backend; see row_witness.go for what a caller may conclude from it.
+	sawRows atomic.Bool
+
+	// poolStale marks a handle whose pooled connections point at a proxy
+	// generation that has already been replaced, so the next read must reconnect
+	// BEFORE it is served rather than after it fails.
+	//
+	// It exists for the one hazard a read cannot see: bd's proxy root is moved
+	// and recreated at the same path, and the old pooled socket keeps serving the
+	// MOVED database without any error at all (design U22). The proxied guard
+	// tick notices the generation change from its own goroutine and sets this;
+	// the reconnect itself happens on the next READER's goroutine, through the
+	// injected reopen hook, because opening the library means mutating the
+	// process environment under nativeDoltOpenEnvMu and, while a reader exists
+	// to carry it, a background ticker is the wrong place for that.
+	//
+	// "While a reader exists" is the whole rule, not a hedge (council pr2
+	// D-F12). A handle that has already stood down non-terminally has no native
+	// leaf, so no read reaches this mark or the reopen hook, and the guard tick
+	// DOES open the library there itself — see recoverNative in
+	// proxied_guard_tick.go, whose header states the exception and its budget.
+	// This mark is only ever the serving handle's mechanism.
+	//
+	// It is false on every direct and hosted handle — only the proxied guard tick
+	// sets it — so the read path's extra atomic load is the whole cost of the
+	// mechanism on those lanes.
+	//
+	// It is an EPOCH rather than a flag (council A-F4). A flag was cleared
+	// unconditionally once the reconnect returned, with no compare-and-swap
+	// against the mark being serviced, and the window that opens is the exact
+	// hazard the mechanism exists for. Tick T1 sees generation A->B, adopts B's
+	// pin and marks the pool stale. Reader R enters withReadRetry, sees the
+	// mark and calls repinStalePool, which can sit inside the reopen hook for
+	// hundreds of milliseconds — the re-admission, the ladder's sleeps, the
+	// library open. While R is in there, tick T2 sees B->C, adopts C's pin and
+	// marks again; the flag is already true, so nothing happens. R installs
+	// B's storage and clears the flag. The handle now serves reads from
+	// generation B's socket while the pin says C, and no later tick marks it
+	// again because checkGeneration compares the record against pin C and
+	// reports Held. On the root-move shape that is silent wrong-database reads
+	// for the life of the handle.
+	//
+	// That epoch was still not enough (council pr2 D-F6): it was cleared with
+	// CompareAndSwap(seen, 0), so the counter went back to zero and the swap
+	// was an ABA test, not a watermark. Two readers R1 and R2 both load mark 1;
+	// R2 reconnects and clears to 0 while R1 is parked on the reconnect gate;
+	// tick T2 marks — the counter is 1 AGAIN; R1 wakes, finds another reader
+	// already reconnected, and its CAS(1, 0) succeeds and erases T2's mark. The
+	// same loss happened when the install that satisfied R1 came from a
+	// transient-error reconnect whose reopen began BEFORE the mark.
+	//
+	// So poolStale is now MONOTONIC — markPoolStale increments it and nothing
+	// ever decrements it — and poolServiced is a separate watermark: the mark
+	// value snapshotted immediately before the reopen whose storage is now
+	// installed began (see reconnect). A re-point is owed exactly while
+	// poolStale > poolServiced. A reader no longer clears anything on its own
+	// say-so; only an install can advance the watermark, and only to the marks
+	// that install's reopen could actually have seen.
+	poolStale    atomic.Uint64
+	poolServiced atomic.Uint64
+
+	// reservedPrefixes is the pinned-id fence: the id namespaces this store's
+	// binding claims. Empty leaves the store unfenced, which is the shipped
+	// default everywhere it is not opened as a class binding — including a
+	// binding serving the work class, whose beads carry whatever prefix an
+	// operator configured. See WithNativeDoltStoreReservedIDPrefixes.
+	reservedPrefixes []string
+
 	// reopen re-establishes the managed Dolt connection after a transient
 	// connection failure (a :3307 hard-kill/rebind). It MUST re-resolve the
 	// CURRENT managed Dolt port and return a fresh storage handle bound to the
@@ -323,9 +469,41 @@ type NativeDoltStore struct {
 	// of installing it after the store is permanently closed.
 	closed bool
 	// readRetryBudgetOverride, when non-zero, replaces nativeReadRetryBudget as the
-	// single wall-clock bound on a read's whole reconnect-and-retry chain. Only
-	// tests set it (to exercise budget exhaustion without a real 90s wait).
+	// single wall-clock bound on a read's whole reconnect-and-retry chain.
+	//
+	// Tests set it directly to exercise budget exhaustion without a real 90s
+	// wait. Production sets it through WithNativeReadRetryBudget on the
+	// proxied-native path, where the 90s default is the wrong number by an
+	// order of magnitude: that budget exists to span a MANAGED Dolt hard-kill
+	// and rebind, which gc performs itself and can therefore wait out. A
+	// bd-owned proxy is not gc's to restart, so a read that cannot reach it
+	// should demote to the bd leaf in seconds rather than hold a caller
+	// through a minute and a half of mysql i/o timeouts.
 	readRetryBudgetOverride time.Duration
+	// afterMetadataMergeRead, when set, runs after each read that starts a
+	// metadata merge attempt, before its checked write. Only tests set it, to
+	// land a competing write in the window the compare-and-swap protects.
+	afterMetadataMergeRead func(id string)
+
+	// readOnlyReason, when non-empty, latches this handle read-only: every
+	// mutating method refuses with ErrProxiedNativeReadOnly before it reaches
+	// storage. It is set once at open by WithProxiedReadOnly and never cleared
+	// in PR2. See native_dolt_readonly.go for why the fence lives here rather
+	// than in a hand-written read-only leaf type.
+	readOnlyReason string
+
+	// proxiedReadVerdicts latches that this handle was opened against a
+	// database bd's proxy serves, so the read path may name an endpoint fact as
+	// a typed *ProxiedVerdictError for the ProxiedStore wrapper to demote on.
+	//
+	// It is set structurally by OpenNativeDoltStoreAtProxied rather than by a
+	// caller option: a proxied handle without it would classify its failures
+	// correctly and then hand the wrapper an untyped error, which is the one
+	// shape that makes a dead handle invisible. A direct or hosted handle leaves
+	// it false and its callers keep receiving byte-identical errors — the shared
+	// classification table still decides transient-vs-terminal for both lanes,
+	// but only this lane renders a verdict. See native_dolt_errors.go.
+	proxiedReadVerdicts bool
 
 	// condWritesStamp carries the factory-stamped conditional-writes mode. The
 	// pinned upstream Storage contract requires row-version checked update and
@@ -356,6 +534,50 @@ func WithNativeReopen(reopen NativeReopenFunc) NativeDoltStoreOption {
 	return func(s *NativeDoltStore) { s.reopen = reopen }
 }
 
+// WithNativeReadRetryBudget replaces the 90s default wall-clock bound on one
+// read's whole reconnect-and-retry chain.
+//
+// It is a production option, not a test hook. The default is sized for a
+// managed-Dolt rebind gc performs itself: a read that spans one should recover
+// rather than fail, so it waits out ~40-56s of mysql i/o timeouts plus the
+// restart. A proxied-native handle is in the opposite situation — bd owns the
+// proxy and its Dolt child, gc never restarts either, and the recovery for an
+// unreachable endpoint is to demote this handle to the bd leaf. Holding a
+// caller for 90s first buys nothing and hides the demotion behind a timeout
+// nobody can attribute.
+//
+// A non-positive duration is ignored, so a misread knob leaves the default
+// rather than producing a store whose every read fails instantly.
+func WithNativeReadRetryBudget(budget time.Duration) NativeDoltStoreOption {
+	return func(s *NativeDoltStore) {
+		if budget > 0 {
+			s.readRetryBudgetOverride = budget
+		}
+	}
+}
+
+// WithNativeDoltStoreReservedIDPrefixes fences Create to the id namespaces the
+// binding this store serves claims, mirroring
+// WithSQLiteStoreReservedIDPrefixes. It is what makes a workspace binding's
+// namespace claim hold rather than be a convention.
+//
+// More than one prefix, because a binding holds more than it mints — the nudge
+// queue's records live in the nudges store under their own namespace. An empty
+// set leaves the store unfenced, which is the shipped default everywhere the
+// store is not a class binding.
+//
+// The pinned upstream library does not fence for us: its single-issue create
+// path sets SkipPrefixValidation for an explicit id on purpose, so this is the
+// only place the claim can be enforced.
+//
+// CreateWithForeignID deliberately bypasses the fence: carrying a preserved
+// foreign id across is the store-migration copy path's entire job.
+func WithNativeDoltStoreReservedIDPrefixes(prefixes ...string) NativeDoltStoreOption {
+	return func(s *NativeDoltStore) {
+		s.reservedPrefixes = collectReservedIDPrefixes(s.reservedPrefixes, prefixes)
+	}
+}
+
 var (
 	_ Store                         = (*NativeDoltStore)(nil)
 	_ ConditionalAssignmentReleaser = (*NativeDoltStore)(nil)
@@ -364,6 +586,7 @@ var (
 	_ StorageGraphApplyStore        = (*NativeDoltStore)(nil)
 	_ EphemeralGraphApplyStore      = (*NativeDoltStore)(nil)
 	_ conditionalWritesModeCarrier  = (*NativeDoltStore)(nil)
+	_ ForeignIDCreator              = (*NativeDoltStore)(nil)
 )
 
 func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *NativeDoltStore {
@@ -443,6 +666,10 @@ func OpenNativeStorageAtWithoutAmbientEnvWithCredentialCommand(ctx context.Conte
 	return storage, err
 }
 
+// nativeIssuePrefixConfigKey is the upstream config key naming the namespace a
+// Dolt-backed ledger mints under.
+const nativeIssuePrefixConfigKey = "issue_prefix"
+
 // openNativeStorage projects the scoped Dolt env, opens the best-available
 // native storage, and (when readPrefix) reads the configured issue prefix while
 // the env is still projected. It is shared by the initial open and the
@@ -457,13 +684,13 @@ func openNativeStorageWithCredentialCommand(ctx context.Context, scopeRoot strin
 		return nil, "", err
 	}
 	defer restoreEnv()
-	storage, err := nativeDoltOpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
+	storage, err := openNativeDoltStorage(ctx, filepath.Join(scopeRoot, ".beads"))
 	if err != nil {
 		return nil, "", err
 	}
 	var prefix string
 	if readPrefix {
-		prefix, err = storage.GetConfig(ctx, "issue_prefix")
+		prefix, err = storage.GetConfig(ctx, nativeIssuePrefixConfigKey)
 		if err != nil {
 			_ = storage.Close()
 			return nil, "", fmt.Errorf("reading native issue prefix: %w", err)
@@ -472,8 +699,27 @@ func openNativeStorageWithCredentialCommand(ctx context.Context, scopeRoot strin
 	return storage, prefix, nil
 }
 
-func newNativeDoltStoreForTest(storage beadslib.Storage) *NativeDoltStore {
-	return newNativeDoltStoreWithStorage(storage, "native-test")
+// NewNativeDoltStoreOverStorageForTest wraps a caller-supplied storage handle in
+// a NativeDoltStore, for tests in OTHER packages that need a real leaf — one
+// whose CloseStore reaches the storage's Close. cmd/gc's proxied opener tests
+// use it without a Dolt server to prove a refused open closes the leaf it
+// opened (council pr2 E-I5). The proxied-native safety acceptance row uses it
+// over OpenNativeStorageAtProxied's storage to WRITE through the proxied
+// window's author latch, because every handle OpenNativeDoltStoreAtProxied
+// returns is read-only latched (council B-F5) and PR2 ships no writable one.
+// The handle it returns carries no read-only latch, no reopen hook and no
+// issue prefix. Production opens only through OpenNativeDoltStoreAt* and
+// OpenNativeDoltStoreAtProxied.
+func NewNativeDoltStoreOverStorageForTest(storage NativeStorage) *NativeDoltStore {
+	return newNativeDoltStoreForTest(storage)
+}
+
+func newNativeDoltStoreForTest(storage beadslib.Storage, opts ...NativeDoltStoreOption) *NativeDoltStore {
+	store := newNativeDoltStoreWithStorage(storage, "native-test")
+	for _, opt := range opts {
+		opt(store)
+	}
+	return store
 }
 
 // IDPrefix returns the bead ID prefix owned by this store, without trailing "-".
@@ -541,6 +787,18 @@ const (
 // reopen hook (test handle built directly from a storage value) keeps the prior
 // fail-fast behavior.
 //
+// What "transient" means is decided by classifyNativeDoltReadError, which runs
+// a typed table (indeterminate commit, serialization conflict, open circuit,
+// MySQL 1049/1045, sentinel connection-level failures) AHEAD of the substring
+// signatures, so a fact a retry cannot move stops the loop instead of being
+// returned as if it were an endpoint state. It is classified for THIS handle's
+// lane: the serialization, open-circuit and connection-level rungs (2, 3 and 6)
+// are proxied-lane only, so a direct or hosted handle's control flow and
+// returned error are the ones it has on main — except for the two
+// mixed-signature errors native_dolt_errors.go states (an indeterminate commit,
+// or a 1049/1045, whose text also carries a transient substring). See that file
+// for the order, and for the three rungs that carry a lane gate and why.
+//
 // This closes the gap #4188 left: runBDTransientRead hardened the bd-CLI read
 // path (each bd subprocess re-resolves the port and restarts Dolt), but
 // factory.go prefers NativeDoltStore when native preflight passes, and that
@@ -566,39 +824,99 @@ func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storag
 		if err != nil {
 			return err
 		}
+		if marked, owed := s.poolStaleOwed(); owed {
+			// The guard tick saw this handle's proxy generation replaced. Re-point
+			// the pool BEFORE serving: a moved root serves the old database
+			// without an error, so waiting for a failure would wait forever.
+			release()
+			rcErr := s.repinStalePool(ctx, gen, marked)
+			if rcErr == nil {
+				continue
+			}
+			if _, typed := ProxiedVerdictOf(rcErr); typed {
+				// The re-admission inside the hook refused with a verdict. It is
+				// already the answer; looping would bury it under a budget error.
+				return rcErr
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctxErr, rcErr))
+			}
+			if classifyNativeDoltReadError(rcErr, s.readLane()).disposition != nativeReadTransient {
+				return rcErr
+			}
+			// A proxy mid-restart is worth another pass while the budget remains.
+			select {
+			case <-ctx.Done():
+				return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctx.Err(), rcErr))
+			case <-time.After(nativeReadRetryBackoff):
+			}
+			continue
+		}
 		opErr := fn(ctx, storage)
 		release()
 		if opErr == nil {
 			return nil
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nativeReadRetryBudgetError(ctxErr, opErr)
+			return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctxErr, opErr))
 		}
 		reopen, closed := s.reopenState()
 		if closed {
 			return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
 		}
-		if !isNativeDoltTransientReadError(opErr) || reopen == nil {
+		class := classifyNativeDoltReadError(opErr, s.readLane())
+		backoff := nativeReadRetryBackoff
+		switch class.disposition {
+		case nativeReadTerminal:
+			// The endpoint answered about the database or the credentials. A
+			// fresh pool would ask the same question and get the same answer.
+			return s.proxiedReadVerdict(class.verdict, opErr)
+		case nativeReadNonReplayable, nativeReadUnclassified:
 			return opErr
-		}
-		if rcErr := s.reconnect(ctx, gen); rcErr != nil {
-			reconnectErr := fmt.Errorf("native Dolt reconnect after transient read error (%w): %w", opErr, rcErr)
-			// A reconnect that itself fails transiently (server mid-restart) is
-			// worth another pass while the budget remains; a non-transient
-			// reconnect failure or an exhausted budget is terminal.
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nativeReadRetryBudgetError(ctxErr, reconnectErr)
+		case nativeReadCircuitOpen:
+			// Nothing reached a socket, so there is nothing to reconnect: wait
+			// for the breaker to re-arm and ask the SAME handle again. The wait
+			// is inside the read's own budget, so a breaker that stays open
+			// costs the budget rather than an unbounded hold.
+			//
+			// A handle with no reopen hook keeps the documented fail-fast
+			// contract: a test store built straight from a storage value must
+			// not start spending a 90s budget on a cooldown loop.
+			if reopen == nil {
+				return opErr
 			}
-			if !isNativeDoltTransientReadError(rcErr) {
-				return reconnectErr
+			backoff = class.cooldown
+		case nativeReadTransient:
+			if reopen == nil {
+				return opErr
+			}
+			if rcErr := s.reconnect(ctx, gen); rcErr != nil {
+				reconnectErr := fmt.Errorf("native Dolt reconnect after transient read error (%w): %w", opErr, rcErr)
+				// A verdict the reopen hook produced is already the answer: the
+				// proxied ladder has been walked inside the hook, and looping
+				// here would bury a typed refusal under the budget error the
+				// wrapper cannot demote on. Return it on this pass, wrapped so
+				// the cause survives and errors.As still recovers the verdict.
+				if _, ok := ProxiedVerdictOf(rcErr); ok {
+					return reconnectErr
+				}
+				// A reconnect that itself fails transiently (server mid-restart) is
+				// worth another pass while the budget remains; a non-transient
+				// reconnect failure or an exhausted budget is terminal.
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctxErr, reconnectErr))
+				}
+				if classifyNativeDoltReadError(rcErr, s.readLane()).disposition != nativeReadTransient {
+					return reconnectErr
+				}
 			}
 		}
 		// Cancellable backoff: budget expiry during the wait aborts the chain
 		// instead of sleeping past the wall.
 		select {
 		case <-ctx.Done():
-			return nativeReadRetryBudgetError(ctx.Err(), opErr)
-		case <-time.After(nativeReadRetryBackoff):
+			return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctx.Err(), opErr))
+		case <-time.After(backoff):
 		}
 	}
 }
@@ -608,6 +926,77 @@ func nativeReadRetryBudgetError(ctxErr, lastErr error) error {
 		return fmt.Errorf("native Dolt read retry budget exhausted: %w", ctxErr)
 	}
 	return fmt.Errorf("native Dolt read retry budget exhausted (%w), last error: %w", ctxErr, lastErr)
+}
+
+// markPoolStale asks this handle to reconnect before it serves another read,
+// and reports whether the request can be honored.
+//
+// It is the proxied guard tick's re-pin, minus the library open. A handle with no
+// reopen hook, or one already closed, CANNOT re-point its pool — marking it would
+// leave every later read reconnecting through a nil hook — so it reports false
+// and the caller stands the handle down instead.
+func (s *NativeDoltStore) markPoolStale() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	closed, reopen := s.closed, s.reopen
+	s.mu.RUnlock()
+	if closed || reopen == nil {
+		return false
+	}
+	s.poolStale.Add(1)
+	return true
+}
+
+// poolStaleOwed reports the current mark count and whether a re-point is owed:
+// a mark exists that no installed storage's reopen could have seen.
+func (s *NativeDoltStore) poolStaleOwed() (uint64, bool) {
+	marked := s.poolStale.Load()
+	return marked, marked > s.poolServiced.Load()
+}
+
+// notePoolServiced advances the watermark to covered, never backwards. It is a
+// max rather than a store because two installs can finish out of the order
+// their reopens started in.
+func (s *NativeDoltStore) notePoolServiced(covered uint64) {
+	for {
+		current := s.poolServiced.Load()
+		if covered <= current || s.poolServiced.CompareAndSwap(current, covered) {
+			return
+		}
+	}
+}
+
+// repinStalePool swaps the pool a guard tick invalidated for one bound to the
+// current generation, on the CALLER's goroutine.
+//
+// The reconnect is the existing single-flight path, so concurrent readers
+// re-point once and the reopen hook — which re-runs admission and re-projects the
+// current endpoint — is what decides whether the new generation may be served at
+// all. It clears NOTHING itself (council pr2 D-F6): a successful install
+// advances the watermark to the marks its own reopen could see (reconnect), and
+// a reconnect that returned nil because another reader installed first leaves
+// the watermark wherever THAT install put it. The read loop then asks
+// poolStaleOwed again, so a mark neither install covered — one a tick set while
+// this reader was parked on the gate, or before a transient reconnect's reopen
+// began — is re-pointed rather than erased.
+func (s *NativeDoltStore) repinStalePool(ctx context.Context, observedGen, servicing uint64) error {
+	reopen, closed := s.reopenState()
+	if closed {
+		return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
+	}
+	if reopen == nil {
+		// markPoolStale refuses a hook-less handle, so this is only reachable if
+		// the hook went away afterwards. There is nothing to re-point with, so
+		// the marks this reader saw are declared serviced rather than spun on.
+		s.notePoolServiced(servicing)
+		return nil
+	}
+	if err := s.reconnect(ctx, observedGen); err != nil {
+		return fmt.Errorf("native Dolt re-pin after a proxy generation change: %w", err)
+	}
+	return nil
 }
 
 // reopenState returns the reconnect hook and terminal-close state atomically.
@@ -707,6 +1096,14 @@ func (s *NativeDoltStore) reconnect(ctx context.Context, observedGen uint64) err
 		return nil // another reader already reconnected
 	}
 
+	// The stale-pool marks this reopen can honor are the ones already set
+	// before it starts: a guard tick adopts the new pin BEFORE it marks, so a
+	// reopen that begins after a mark re-admits against that pin or a newer
+	// one. A mark set while the reopen is in flight is not covered, and stays
+	// owed (council pr2 D-F6). On the direct and hosted lanes nothing ever
+	// marks, so this is a load of zero and the watermark stays at zero.
+	coversMarks := s.poolStale.Load()
+
 	// The reopen hook re-resolves the current managed port and re-opens under the
 	// caller's wall context, so a stuck env-resolution/recovery is canceled at
 	// the budget rather than running under its own separate timeout.
@@ -735,6 +1132,9 @@ func (s *NativeDoltStore) reconnect(ctx context.Context, observedGen uint64) err
 	}
 	s.storage = fresh
 	s.generation++
+	// Advanced under the lock, with the install, so no reader can acquire the
+	// fresh storage and still see the marks this reopen covered as owed.
+	s.notePoolServiced(coversMarks)
 	s.mu.Unlock()
 
 	closeStorageQuietly(old)
@@ -803,6 +1203,9 @@ func (s *NativeDoltStore) ApplyGraphPlan(ctx context.Context, plan *GraphApplyPl
 // ApplyGraphPlanWithStorage creates a bead graph atomically in the selected
 // storage tier through the native beads storage layer.
 func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan *GraphApplyPlan, storageClass StorageClass) (*GraphApplyResult, error) {
+	if err := s.readOnlyGuard(); err != nil {
+		return nil, err
+	}
 	if plan == nil {
 		return nil, fmt.Errorf("graph apply plan is nil")
 	}
@@ -882,17 +1285,11 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 			if len(node.MetadataRefs) == 0 {
 				continue
 			}
-			mergedMeta, err := metadataMapFromNative(issues[i].Metadata)
-			if err != nil {
-				return fmt.Errorf("node %q: re-parsing metadata: %w", node.Key, err)
-			}
-			if mergedMeta == nil {
-				mergedMeta = make(map[string]string, len(node.MetadataRefs))
-			}
+			refs := make(map[string]string, len(node.MetadataRefs))
 			for metaKey, refKey := range node.MetadataRefs {
-				mergedMeta[metaKey] = keyToID[refKey]
+				refs[metaKey] = keyToID[refKey]
 			}
-			raw, err := metadataRawFromMap(mergedMeta)
+			raw, err := metadataRawWithOverrides(issues[i].Metadata, refs)
 			if err != nil {
 				return fmt.Errorf("node %q: marshaling updated metadata: %w", node.Key, err)
 			}
@@ -968,8 +1365,47 @@ func (s *NativeDoltStore) SupportsEphemeralGraphApply() bool {
 	return true
 }
 
-// Create persists a new bead through the upstream beads storage layer.
+// Create persists a new bead through the upstream beads storage layer. An
+// explicit id is honored verbatim, provided it carries one of the store's
+// reserved namespaces when the store is fenced
+// (WithNativeDoltStoreReservedIDPrefixes).
 func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
+	return s.create(b, false)
+}
+
+// CreateWithForeignID persists a new bead KEEPING its explicit id whatever
+// prefix it carries, for the store-migration copy path. Refusing a preserved id
+// there would leave the beads it carries nowhere at all. It satisfies
+// ForeignIDCreator.
+func (s *NativeDoltStore) CreateWithForeignID(b Bead) (Bead, error) {
+	// Ahead of the id validation, not after it: a read-only handle must refuse
+	// for the reason it is read-only, not report an argument problem it would
+	// never have acted on anyway.
+	if err := s.readOnlyGuard(); err != nil {
+		return Bead{}, err
+	}
+	if strings.TrimSpace(b.ID) == "" {
+		return Bead{}, fmt.Errorf("creating bead with foreign id: empty id")
+	}
+	return s.create(b, true)
+}
+
+// create is the shared body. allowForeign is the CreateWithForeignID exemption.
+//
+// The fence runs FIRST — before the bead is converted, before the storage
+// handle is acquired, before any read. That ordering is the contract: a refused
+// id must reach nothing, so it cannot write a row, cannot move the mint
+// sequence, and cannot reveal through its refusal whether the store already
+// holds a relic under that id.
+func (s *NativeDoltStore) create(b Bead, allowForeign bool) (Bead, error) {
+	if err := s.readOnlyGuard(); err != nil {
+		return Bead{}, err
+	}
+	if !allowForeign {
+		if err := checkPinnedIDNamespace("native dolt create", b.ID, s.reservedPrefixes); err != nil {
+			return Bead{}, err
+		}
+	}
 	issue, err := nativeIssueFromBead(b)
 	if err != nil {
 		return Bead{}, err
@@ -1030,6 +1466,9 @@ func (s *NativeDoltStore) Get(id string) (Bead, error) {
 
 // Update modifies an existing bead through the upstream beads storage layer.
 func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1103,19 +1542,9 @@ func (s *NativeDoltStore) applySetMetadataBatchInTx(ctx context.Context, tx bead
 	if issue == nil {
 		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
 	}
-	metadata, err := metadataMapFromNative(issue.Metadata)
+	raw, err := metadataRawWithOverrides(issue.Metadata, kvs)
 	if err != nil {
 		return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
-	}
-	if metadata == nil {
-		metadata = make(map[string]string, len(kvs))
-	}
-	for k, v := range kvs {
-		metadata[k] = v
-	}
-	raw, err := metadataRawFromMap(metadata)
-	if err != nil {
-		return err
 	}
 	return nativeStoreError(id, tx.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor))
 }
@@ -1140,7 +1569,17 @@ func (s *NativeDoltStore) applyCloseInTx(ctx context.Context, tx beadslib.Transa
 // applyCreateInTx creates a bead and its dependencies within an open
 // transaction. Unlike the standalone Create, no compensation is needed: a
 // mid-create failure rolls the whole transaction back.
+//
+// It fences the same way the standalone Create does. A transaction is not an
+// exemption: the bead it writes is as resident, and as unreachable by an
+// id-shaped lookup of the namespace it lands in, as one written outside a
+// transaction. There is no foreign-id variant here on purpose — the migration
+// copy that needs the exemption runs through CreateWithForeignID on the store,
+// not inside a caller's transaction.
 func (s *NativeDoltStore) applyCreateInTx(ctx context.Context, tx beadslib.Transaction, b Bead) (Bead, error) {
+	if err := checkPinnedIDNamespace("native dolt tx create", b.ID, s.reservedPrefixes); err != nil {
+		return Bead{}, err
+	}
 	issue, err := nativeIssueFromBead(b)
 	if err != nil {
 		return Bead{}, err
@@ -1169,6 +1608,9 @@ func (s *NativeDoltStore) applyCreateInTx(ctx context.Context, tx beadslib.Trans
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still
 // has the expected assignee inside one native Dolt transaction.
 func (s *NativeDoltStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	if err := s.readOnlyGuard(); err != nil {
+		return false, err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return false, err
@@ -1206,6 +1648,9 @@ func (s *NativeDoltStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 
 // Close sets a bead's status to closed through the upstream beads storage layer.
 func (s *NativeDoltStore) Close(id string) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1271,6 +1716,9 @@ func (s *NativeDoltStore) closeOnce(ctx context.Context, storage beadslib.Storag
 
 // Reopen sets a closed bead's status back to open.
 func (s *NativeDoltStore) Reopen(id string) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1314,6 +1762,9 @@ func (s *NativeDoltStore) reopenOnce(ctx context.Context, storage beadslib.Stora
 
 // CloseAll closes multiple beads and sets metadata on each newly closed bead.
 func (s *NativeDoltStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if err := s.readOnlyGuard(); err != nil {
+		return 0, err
+	}
 	closed := 0
 	for _, id := range ids {
 		current, err := s.Get(id)
@@ -1359,6 +1810,7 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 			}
 			beads = append(beads, bead)
 		}
+		s.noteRows(len(issues))
 		out = ApplyListQuery(beads, query)
 		return nil
 	})
@@ -1431,9 +1883,19 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 			}
 			seen[bead.ID] = true
 			beads = append(beads, bead)
-			if q.Limit > 0 && len(beads) >= q.Limit {
-				break
-			}
+		}
+		// Work-outcome filtering must see the full candidate set before the
+		// limit is applied — a candidate near the front of issues can be
+		// vetoed below, and truncating first would under-fill the result
+		// instead of backfilling from the candidates that would have been
+		// skipped by an early break (mirrors BdStore.Ready's candidates-then-
+		// filter-then-limit order).
+		beads, err = s.filterReadyByWorkOutcome(ctx, storage, beads)
+		if err != nil {
+			return err
+		}
+		if q.Limit > 0 && len(beads) > q.Limit {
+			beads = beads[:q.Limit]
 		}
 		out = beads
 		return nil
@@ -1442,6 +1904,165 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// filterReadyByWorkOutcome removes candidates whose blocking dependencies are
+// closed but recorded gc.work_outcome=blocked. GetReadyWork's own readiness
+// check only looks at status==closed, so it does not know that a
+// blocked-outcome close should not satisfy a blocking dependency (ga-a7v0ex).
+//
+// This is a NARROW override on top of an already-authoritative verdict, not
+// a from-scratch recompute of blocking status — see BdStore.filterReadyByWorkOutcome
+// for the full rationale, which applies identically here.
+//
+// It takes the caller's already-open ctx/storage directly instead of calling
+// s.DepList/s.List (each of which reacquire s.withReadRetry's lock): this
+// method runs INSIDE Ready's withReadRetry closure, so nesting another
+// withReadRetry call would risk a sync.RWMutex RLock reentrancy hazard.
+//
+// The read is batched when the storage can batch it: one source-keyed edge
+// read for every candidate (GetDependencyRecordsForIssues) and one issue read
+// for the distinct ready-blocking targets (GetIssuesByIDs), the same two-step
+// shape as BdStore's mirror. Per candidate, GetDependenciesWithMetadata is
+// exactly those two reads for one id, so the batched pair sees the same rows
+// — and a frontier of N candidates costs two storage API calls instead of N
+// (each one a round trip on a served store), which over a network link
+// exhausted the whole read-retry budget every controller tick (#6491). A
+// storage without the batched edge read takes the per-candidate path
+// unchanged.
+func (s *NativeDoltStore) filterReadyByWorkOutcome(ctx context.Context, storage beadslib.Storage, candidates []Bead) ([]Bead, error) {
+	if len(candidates) == 0 {
+		return candidates, nil
+	}
+	if batch, ok := storage.(nativeDependencyRecordsBatchReader); ok {
+		return filterReadyByWorkOutcomeBatched(ctx, batch, storage, candidates)
+	}
+	result := make([]Bead, 0, len(candidates))
+	for _, c := range candidates {
+		blockers, err := storage.GetDependenciesWithMetadata(ctx, c.ID)
+		if err != nil {
+			return nil, fmt.Errorf("checking blocking dependency outcomes for %s: %w", c.ID, err)
+		}
+		blocked := false
+		for _, dep := range blockers {
+			if dep == nil || !IsReadyBlockingDependencyType(string(dep.DependencyType)) {
+				continue
+			}
+			depMetadata, err := metadataMapFromNative(dep.Metadata)
+			if err != nil {
+				return nil, fmt.Errorf("checking blocking dependency outcomes for %s: parsing blocker %s metadata: %w", c.ID, dep.ID, err)
+			}
+			// Narrow veto, deliberately NOT DependencySatisfied: a
+			// candidate is here because GetReadyWork already cleared its
+			// gating, which is richer than "the target is closed" (a pinned
+			// blocker satisfies a blocks edge, and a waits-for edge gates on
+			// the spawner's children rather than the spawner's own status).
+			// Applying the full predicate would re-block both of those. Only
+			// the closed-and-blocked case — invisible to the store's own
+			// check — may override that verdict.
+			if string(dep.Status) == "closed" && ReadinessWorkOutcome(depMetadata) == beadmeta.WorkOutcomeBlocked {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			result = append(result, c)
+		}
+	}
+	return result, nil
+}
+
+// nativeDependencyRecordsBatchReader is the source-keyed batched edge read
+// every Dolt-backed beadslib storage offers (storage.DependencyQueryStore,
+// promoted through the DoltStorage decorator contract) but the base
+// beadslib.Storage does not name, so it is reached by capability probe.
+type nativeDependencyRecordsBatchReader interface {
+	GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*beadslib.Dependency, error)
+}
+
+// filterReadyByWorkOutcomeBatched is filterReadyByWorkOutcome's veto over two
+// batched reads. The RULE is the per-candidate path's: only a ready-blocking
+// edge whose target is closed with gc.work_outcome=blocked removes a
+// candidate, and a target the issue read does not return (the per-candidate
+// read skips it too) is no evidence of blocking. The error contract differs
+// in two ways: only ready-blocking targets are hydrated, so a non-blocking
+// target's row is never read and can never fail; and a storage-level failure
+// of either batched read (the edge read's wisp/permanent partition included)
+// fails the whole filter rather than one candidate's read.
+//
+// The result does not depend on edge order. The batched edge read is sorted
+// by the store and the per-candidate read is not, so a veto that stopped at
+// the first closed-and-blocked target — and parsed a malformed target's
+// metadata only when it sorted before that one — would let the two paths
+// disagree. Every fetched ready-blocking target's metadata is therefore
+// parsed exactly once up front, and a malformed one is reported against the
+// first candidate (in candidate order) that references it, choosing the
+// lowest target id when that candidate references more than one.
+func filterReadyByWorkOutcomeBatched(ctx context.Context, batch nativeDependencyRecordsBatchReader, storage beadslib.Storage, candidates []Bead) ([]Bead, error) {
+	ids := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		ids = append(ids, c.ID)
+	}
+	edges, err := batch.GetDependencyRecordsForIssues(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("checking blocking dependency outcomes: reading dependency edges: %w", err)
+	}
+	var blockerIDs []string
+	seen := make(map[string]bool)
+	for _, id := range ids {
+		for _, dep := range edges[id] {
+			if dep == nil || !IsReadyBlockingDependencyType(string(dep.Type)) || seen[dep.DependsOnID] {
+				continue
+			}
+			seen[dep.DependsOnID] = true
+			blockerIDs = append(blockerIDs, dep.DependsOnID)
+		}
+	}
+	if len(blockerIDs) == 0 {
+		return candidates, nil
+	}
+	blockers, err := storage.GetIssuesByIDs(ctx, blockerIDs)
+	if err != nil {
+		return nil, fmt.Errorf("checking blocking dependency outcomes: fetching blockers: %w", err)
+	}
+	// One parse per fetched target: vetoes records the closed-and-blocked
+	// verdict, malformed records the parse failure for the report below.
+	vetoes := make(map[string]bool, len(blockers))
+	malformed := make(map[string]error)
+	for _, b := range blockers {
+		if b == nil {
+			continue
+		}
+		metadata, err := metadataMapFromNative(b.Metadata)
+		if err != nil {
+			malformed[b.ID] = err
+			continue
+		}
+		vetoes[b.ID] = string(b.Status) == "closed" && ReadinessWorkOutcome(metadata) == beadmeta.WorkOutcomeBlocked
+	}
+	result := make([]Bead, 0, len(candidates))
+	for _, c := range candidates {
+		blocked := false
+		badBlocker := ""
+		for _, dep := range edges[c.ID] {
+			if dep == nil || !IsReadyBlockingDependencyType(string(dep.Type)) {
+				continue
+			}
+			if _, bad := malformed[dep.DependsOnID]; bad && (badBlocker == "" || dep.DependsOnID < badBlocker) {
+				badBlocker = dep.DependsOnID
+			}
+			if vetoes[dep.DependsOnID] {
+				blocked = true
+			}
+		}
+		if badBlocker != "" {
+			return nil, fmt.Errorf("checking blocking dependency outcomes for %s: parsing blocker %s metadata: %w", c.ID, badBlocker, malformed[badBlocker])
+		}
+		if !blocked {
+			result = append(result, c)
+		}
+	}
+	return result, nil
 }
 
 // Children returns all beads whose parent-child dependency points at parentID.
@@ -1576,10 +2197,33 @@ const (
 // mid-retry, so a retry could run against a different storage than the one whose
 // transaction it is repeating.
 func retryOnNativeDoltSerializationConflict(attempt func() error) error {
+	return retryNativeDoltWrite(attempt, isNativeDoltSerializationConflict)
+}
+
+// retryOnNativeDoltMergeRace re-runs a checked read-merge-write attempt when a
+// concurrent writer preempted it: either the backend reported a serialization
+// conflict (the attempt's write never committed) or the compare-and-swap
+// refused with ErrVersionMismatch (the row changed after the attempt's read).
+// Both mean the attempt must read again and merge onto the committed row, so
+// both are retried with the budget retryOnNativeDoltSerializationConflict
+// applies; every other error is returned on the first try, as there. A version
+// mismatch is retried here and only here: for the conditional writers
+// (UpdateIfMatch and its siblings) it is the caller's fence and propagates.
+func retryOnNativeDoltMergeRace(attempt func() error) error {
+	return retryNativeDoltWrite(attempt, func(err error) bool {
+		return isNativeDoltSerializationConflict(err) || errors.Is(err, beadslib.ErrVersionMismatch)
+	})
+}
+
+// retryNativeDoltWrite runs attempt up to nativeWriteAttempts times, sleeping a
+// growing nativeWriteRetryBackoff after each error retryable accepts. The first
+// error retryable rejects, and the last attempt's error, are returned as they
+// are.
+func retryNativeDoltWrite(attempt func() error, retryable func(error) bool) error {
 	var err error
 	for n := 1; n <= nativeWriteAttempts; n++ {
 		err = attempt()
-		if err == nil || !isNativeDoltSerializationConflict(err) || n == nativeWriteAttempts {
+		if err == nil || !retryable(err) || n == nativeWriteAttempts {
 			return err
 		}
 		time.Sleep(time.Duration(n) * nativeWriteRetryBackoff)
@@ -1588,24 +2232,68 @@ func retryOnNativeDoltSerializationConflict(attempt func() error) error {
 }
 
 // SetMetadataBatch sets multiple metadata keys on a bead.
+//
+// The merge is a read-modify-write of the whole metadata map, so the write is a
+// compare-and-swap on the row version the read returned: an update that commits
+// between the read and the write makes the swap refuse, and the whole
+// read-merge-write runs again against the committed row instead of replacing it
+// with the stale map. An unchecked write-back cannot see that anything changed
+// and silently undoes the other writer's keys — a fence activation was lost
+// that way to a one-key stamp.
 func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
 	}
 	defer release()
 
-	return retryOnNativeDoltSerializationConflict(func() error {
+	// lastRead is the row version the final attempt's read returned, the
+	// version its refused swap expected.
+	var lastRead int64
+	err = retryOnNativeDoltMergeRace(func() error {
 		ctx, cancel := nativeDoltOperationContext(context.TODO())
 		defer cancel()
-		return s.setMetadataBatchOnce(ctx, storage, id, kvs)
+		return s.setMetadataBatchOnce(ctx, storage, id, kvs, &lastRead)
 	})
+	if errors.Is(err, beadslib.ErrVersionMismatch) {
+		// Every attempt lost its swap to a concurrent writer: contention, not
+		// a broken bead. Wrapping the exhaustion type lets callers that
+		// classify errors (dispatch's ClassifyControllerError, the drain
+		// reservation retry) re-enter instead of failing the work, while
+		// errors.Is(err, ErrVersionMismatch) still holds.
+		return fmt.Errorf("%w: %w", &CASRetriesExhaustedError{
+			ID:           id,
+			Key:          metadataBatchKeyList(kvs),
+			Attempts:     nativeWriteAttempts,
+			LastRevision: lastRead,
+		}, err)
+	}
+	return err
 }
 
-// setMetadataBatchOnce performs one complete metadata read-merge-write attempt.
-// A retry must call this whole operation again so metadata committed by the
-// competing transaction is included rather than overwritten from a stale read.
-func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage beadslib.Storage, id string, kvs map[string]string) error {
+// metadataBatchKeyList names the keys of a metadata batch, sorted, for error
+// messages.
+func metadataBatchKeyList(kvs map[string]string) string {
+	keys := make([]string, 0, len(kvs))
+	for k := range kvs {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return strings.Join(keys, ",")
+}
+
+// setMetadataBatchOnce performs one complete metadata read-merge-write attempt:
+// it reads the bead, merges kvs into the map it read, and writes the merged map
+// back only while the bead still carries the row version that read returned. A
+// retry must call this whole operation again so metadata committed by the
+// competing writer is merged rather than overwritten from a stale read.
+//
+// readVersion receives the row version the read returned, for the caller's
+// exhaustion report.
+func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage beadslib.Storage, id string, kvs map[string]string, readVersion *int64) error {
 	issue, err := storage.GetIssue(ctx, id)
 	if err != nil {
 		return nativeStoreError(id, err)
@@ -1613,21 +2301,18 @@ func (s *NativeDoltStore) setMetadataBatchOnce(ctx context.Context, storage bead
 	if issue == nil {
 		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
 	}
-	metadata, err := metadataMapFromNative(issue.Metadata)
+	if s.afterMetadataMergeRead != nil {
+		s.afterMetadataMergeRead(id)
+	}
+	raw, err := metadataRawWithOverrides(issue.Metadata, kvs)
 	if err != nil {
 		return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
 	}
-	if metadata == nil {
-		metadata = make(map[string]string, len(kvs))
-	}
-	for k, v := range kvs {
-		metadata[k] = v
-	}
-	raw, err := metadataRawFromMap(metadata)
-	if err != nil {
-		return err
-	}
-	return nativeStoreError(id, storage.UpdateIssue(ctx, id, map[string]interface{}{"metadata": raw}, s.actor))
+	expected := issue.RowVersion
+	*readVersion = expected
+	return nativeStoreError(id, storage.UpdateIssueChecked(ctx, id, map[string]interface{}{"metadata": raw}, s.actor, beadslib.UpdateIssueOptions{
+		ExpectedVersion: &expected,
+	}))
 }
 
 // isNativeDoltSerializationConflict reports only Dolt/MySQL transaction
@@ -1651,6 +2336,9 @@ func isNativeDoltSerializationConflict(err error) bool {
 // this never touches the Dolt DB or commits. Does not validate that id
 // refers to an existing bead — see the interface doc comment for why.
 func (s *NativeDoltStore) SetLocalString(id, key, value string) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	if err := s.localStrings.Set(id, key, value); err != nil {
 		return fmt.Errorf("setting local string on %q: %w", id, err)
 	}
@@ -1672,6 +2360,9 @@ func (s *NativeDoltStore) GetLocalString(id, key string) (string, error) {
 // caller (e.g. an extmsg bind) issue several bead writes at the cost of one
 // commit instead of one per write.
 func (s *NativeDoltStore) Tx(commitMsg string, fn func(Tx) error) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	if fn == nil {
 		return errors.New("beads tx: nil callback")
 	}
@@ -1724,6 +2415,9 @@ func (t *nativeDoltTx) Close(id string) error {
 
 // Delete permanently removes a bead from the upstream beads storage layer.
 func (s *NativeDoltStore) Delete(id string) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1741,20 +2435,92 @@ func (s *NativeDoltStore) Delete(id string) error {
 }
 
 // Ping verifies that the upstream storage is reachable.
+//
+// It goes through withReadRetry like every other read on this store, and that
+// is load-bearing rather than tidy (council B-F2). A Ping that reached
+// acquireStorage directly sat outside BOTH mechanisms the proxied lane depends
+// on:
+//
+//   - It did not honor poolStale. The guard tick's re-pin is adoptPin plus
+//     markPoolStale, and the property the root-move row asserts is that no read
+//     is served from the old generation before the mark is honored. A Ping is a
+//     read, and it was served from the old generation's pool — so on the H7
+//     root-move shape, where the old socket is still alive and serving the MOVED
+//     database, `gc doctor` pinged the moved database, got a clean answer, and
+//     reported the scope healthy after the tick already knew the generation had
+//     changed.
+//   - Its failures were never classified. proxiedReadVerdict and
+//     proxiedReadBudgetVerdict are reached only from withReadRetry, so a Ping
+//     against a dead proxy returned a raw driver error, ProxiedStore.Ping's
+//     classifyReadError found no verdict, and a handle every other read would
+//     have demoted stayed "native".
+//
+// It is also the lane's most-repeated read: P2-09 re-points ProxiedStore.Ping
+// at this method so doctor's per-scope health check costs zero forks, where
+// before PR2 it was BdStore.Ping — a `bd list --limit 0` carrying bd's own
+// transient-read recovery. Swapping a hardened read for an unhardened one on
+// that path is the trade this fixes.
+//
+// # The lane gate, and why Ping needs its own (council pr2 D-F1)
+//
+// Both reasons above are about the PROXIED lane, and routing Ping through
+// withReadRetry unconditionally reintroduced on Ping the exact flag-off
+// regression the lane gate on rungs 2 and 3 exists to prevent. Rung 7's
+// substring table contains "dial tcp" and "connection refused" and applies on
+// BOTH lanes, so a failing Ping on a direct/hosted handle became
+// nativeReadTransient → reconnect → the injected reopen hook, which re-resolves
+// the managed env with recovery enabled and can restart a city's Dolt server —
+// looping on a context.Background()-derived 90s budget no caller deadline can
+// cancel. On main a Ping was one acquireStorage plus one GetStatistics and
+// returned on the first pass.
+//
+// Three shipping callers are built on that fail-fast:
+// waitForRigStoreAccessible (cmd/gc/cmd_rig.go) and
+// waitForBeadsScopeReadyAfterRecovery (cmd/gc/beads_provider_lifecycle.go) both
+// poll `Ping(); if time.Now().After(deadline) { ... }; sleep(250ms)` — the
+// deadline is checked AFTER the ping, so one failing iteration would cost up to
+// 90s and hundreds of managed-Dolt restart attempts — and internal/doctor's
+// BeadsStoreCheck would block 90s past --check-timeout, per scope. The second
+// loop returns early for proxied scopes, so it is the flag-off lane by
+// construction.
+//
+// So the ROUTING is gated, the same way the classifier's rungs are. A direct or
+// hosted handle takes main's path verbatim; poolStale is only ever marked by the
+// proxied guard tick, and proxiedReadVerdict is a no-op off the proxied lane, so
+// the direct lane gives up nothing by skipping the wrapper.
 func (s *NativeDoltStore) Ping() error {
-	storage, release, err := s.acquireStorage()
-	if err != nil {
-		return err
+	if s.readLane() == directNativeLane {
+		storage, release, err := s.acquireStorage()
+		if err != nil {
+			return err
+		}
+		defer release()
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		defer cancel()
+		return s.pingUpstreamRead(ctx, storage)
 	}
-	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	_, err = storage.GetStatistics(ctx)
+	return s.withReadRetry(s.pingUpstreamRead)
+}
+
+// pingUpstreamRead is the one upstream call a Ping makes.
+//
+// There used to be a test seam in front of it, on the stated ground that
+// GetStatistics returns a type from beads' INTERNAL package and so no
+// in-process fixture could implement it. That was false (council pr2 E-I2):
+// beads v1.3.0 exports the type as backend.Statistics
+// (github.com/steveyegge/beads/backend, types.go:43), and a fixture implements
+// GetStatistics with it. So the tests drive this line itself, on both lanes,
+// and production carries no substitution hook.
+func (s *NativeDoltStore) pingUpstreamRead(ctx context.Context, storage beadslib.Storage) error {
+	_, err := storage.GetStatistics(ctx)
 	return err
 }
 
 // DepAdd records a dependency between two beads.
 func (s *NativeDoltStore) DepAdd(issueID, dependsOnID, depType string) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1771,6 +2537,9 @@ func (s *NativeDoltStore) DepAdd(issueID, dependsOnID, depType string) error {
 
 // DepRemove removes a dependency between two beads.
 func (s *NativeDoltStore) DepRemove(issueID, dependsOnID string) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1919,19 +2688,9 @@ func (s *NativeDoltStore) nativeUpdates(ctx context.Context, storage nativeIssue
 		if issue == nil {
 			return nil, fmt.Errorf("bead %q: %w", id, ErrNotFound)
 		}
-		metadata, err := metadataMapFromNative(issue.Metadata)
+		raw, err := metadataRawWithOverrides(issue.Metadata, opts.Metadata)
 		if err != nil {
 			return nil, fmt.Errorf("parsing metadata for bead %q: %w", id, err)
-		}
-		if metadata == nil {
-			metadata = make(map[string]string, len(opts.Metadata))
-		}
-		for k, v := range opts.Metadata {
-			metadata[k] = v
-		}
-		raw, err := metadataRawFromMap(metadata)
-		if err != nil {
-			return nil, err
 		}
 		updates["metadata"] = raw
 	}
@@ -2047,13 +2806,32 @@ func (s *NativeDoltStore) validateCreatedDependencies(ctx context.Context, stora
 		// only place it can refuse without writing: the upstream library
 		// resolves a same-namespace dependency target itself, after the issue
 		// is committed, so skipping would turn a clean refusal into a create
-		// followed by a compensating delete. Foreign ids the library already
-		// classifies as external and never resolves, so this skip and the
-		// library agree on exactly one line.
-		if dep.Type == beadslib.DepParentChild && !nativeParentIsLocal(issueID, targetID, s.idPrefix) {
-			continue
-		}
-		if !shouldPrevalidateNativeDependency(issueID, targetID, s.idPrefix) {
+		// followed by a compensating delete. Every id this skip lets through
+		// under a PREFIXED child is one the library already classifies as
+		// external (isCrossPrefixDep compares the CHILD's prefix to the
+		// target's), so nothing skipped there is resolved post-commit. The
+		// one shape it would still resolve is a dashless parent under a
+		// dashless child — ExtractPrefix reads both as "", so the library
+		// calls them same-namespace; on a mint the library sees the child's
+		// final minted id, not the empty one this check gets. The converse
+		// stopped holding when the store's prefix entered the question below:
+		// a parent inside this store's namespace, under a foreign-prefixed
+		// child, is external to the library and is still refused here, in
+		// front of the write.
+		//
+		// The namespace question is asked about the STORE here, not about
+		// issueID: on a mint the child has no id yet, and the cross-prefix rule
+		// the other dependency kinds use would then skip a parent this store
+		// owns — which is the one parent it can refuse before writing.
+		if dep.Type == beadslib.DepParentChild {
+			local, err := s.parentIsLocalForCreate(ctx, storage, issueID, targetID)
+			if err != nil {
+				return err
+			}
+			if !local {
+				continue
+			}
+		} else if !shouldPrevalidateNativeDependency(issueID, targetID, s.idPrefix) {
 			continue
 		}
 		issue, err := storage.GetIssue(ctx, targetID)
@@ -2065,6 +2843,37 @@ func (s *NativeDoltStore) validateCreatedDependencies(ctx context.Context, stora
 		}
 	}
 	return nil
+}
+
+// parentIsLocalForCreate answers nativeParentIsLocal's question on the create
+// path, where the child's id may not exist yet.
+//
+// A minted child lands in the namespace this store mints under, so that is the
+// namespace the answer has to be about. Every production open already knows it
+// — openNativeStorage reads issue_prefix while the scoped env is projected — and
+// a store constructed without one asks the storage layer, rather than
+// answering "foreign" for every parent, when the child's id names no
+// namespace either. Answering foreign there is what let Create admit a
+// dangling parent inside this store's own namespace while Update, which
+// sees the child's real id, refused the same value.
+//
+// The fallback reaches no further than that. A foreign-prefixed child on a
+// prefix-less store is still judged against the CHILD's prefix, so the two
+// arms can still disagree on that shape — but only a handle built without
+// an open reaches it, since every production open caches the prefix, and
+// an empty one there means the ledger declares no namespace at all. Closing
+// the residual needs storage plumbed through the update arms too; ga-0fmv4
+// tracks it.
+func (s *NativeDoltStore) parentIsLocalForCreate(ctx context.Context, storage beadslib.Storage, issueID, parentID string) (bool, error) {
+	prefix := s.idPrefix
+	if prefix == "" && beadIDPrefix(issueID) == "" {
+		configured, err := storage.GetConfig(ctx, nativeIssuePrefixConfigKey)
+		if err != nil {
+			return false, fmt.Errorf("reading native issue prefix: %w", err)
+		}
+		prefix = normalizeIDPrefix(configured)
+	}
+	return nativeParentIsLocal(issueID, parentID, prefix), nil
 }
 
 func (s *NativeDoltStore) compensateFailedCreate(ctx context.Context, storage beadslib.Storage, issueID string, deps []*beadslib.Dependency) error {
@@ -2101,34 +2910,47 @@ func shouldPrevalidateNativeDependency(issueID, targetID, storePrefix string) bo
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(targetID)), "external:") {
 		return false
 	}
-	sourcePrefix := nativeBeadIDPrefix(issueID)
+	sourcePrefix := beadIDPrefix(issueID)
 	if sourcePrefix == "" {
 		sourcePrefix = normalizeIDPrefix(storePrefix)
 	}
-	targetPrefix := nativeBeadIDPrefix(targetID)
+	targetPrefix := beadIDPrefix(targetID)
 	return sourcePrefix == "" || targetPrefix == "" || sourcePrefix == targetPrefix
 }
 
-// nativeParentIsLocal reports whether a parent id is one THIS store could have
-// minted — the only case in which resolving it is a legitimate refusal rather
+// nativeParentIsLocal reports whether a parent id names a row THIS store would
+// hold — the only case in which resolving it is a legitimate refusal rather
 // than a blind spot.
 //
-// A store that declares no namespace answers false for every id. That is not a
-// technicality: such a store cannot tell its own rows from another ledger's, so
-// every id it is handed might be foreign, and the weak reading is the only one
-// that cannot refuse a bead that exists.
+// Two prefixes make a parent local, and they answer different questions. The
+// STORE's own mint prefix is the namespace it owns: an absent row there is an
+// absence this store can see, whatever prefix the CHILD carries — a pinned id
+// or a relic a storage migration copied in carries another ledger's, and
+// reading the question off the child alone would call the store's own namespace
+// foreign and let the reparent land dangling. The child's prefix is local too,
+// because that is where the upstream library draws the line: issueops resolves
+// a same-prefix dependency target itself, post-commit, with no embedder knob to
+// weaken it, so agreeing with it here keeps the refusal in front of the write
+// instead of behind a compensating delete.
+//
+// Everything else is weak. A store that declares no namespace, asked about a
+// child whose own id names none, cannot tell its rows from another ledger's,
+// and the weak reading is the only one that cannot refuse a bead that exists.
 func nativeParentIsLocal(issueID, parentID, storePrefix string) bool {
-	source := nativeBeadIDPrefix(issueID)
-	if source == "" {
-		source = normalizeIDPrefix(storePrefix)
-	}
-	if source == "" {
+	target := beadIDPrefix(parentID)
+	if target == "" {
 		return false
 	}
-	return source == nativeBeadIDPrefix(parentID)
+	if store := normalizeIDPrefix(storePrefix); store != "" && target == store {
+		return true
+	}
+	return target == beadIDPrefix(issueID)
 }
 
-func nativeBeadIDPrefix(id string) string {
+// beadIDPrefix extracts the prefix segment (before the first "-") from a
+// bead ID, normalized via normalizeIDPrefix. Shared across store backends
+// that need to decide whether two bead IDs belong to the same store.
+func beadIDPrefix(id string) string {
 	before, _, ok := strings.Cut(strings.ToLower(strings.TrimSpace(id)), "-")
 	if !ok {
 		return ""
@@ -2213,6 +3035,7 @@ func nativeIssueFromBead(b Bead) (*beadslib.Issue, error) {
 		Ephemeral:   b.Ephemeral,
 		NoHistory:   b.NoHistory,
 		DeferUntil:  cloneTimePtr(b.DeferUntil),
+		CloseReason: b.CloseReason,
 		RowVersion:  b.Revision,
 	}
 	if b.Priority != nil {
@@ -2279,6 +3102,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		Ephemeral:            issue.Ephemeral,
 		NoHistory:            issue.NoHistory,
 		DeferUntil:           cloneTimePtr(issue.DeferUntil),
+		CloseReason:          bdCloseReason(status, issue.CloseReason),
 		IndefinitelyDeferred: indefinitelyDeferred,
 		Revision:             issue.RowVersion,
 	}
@@ -2466,6 +3290,44 @@ func metadataRawFromMap(metadata map[string]string) (json.RawMessage, error) {
 		return nil, fmt.Errorf("marshaling metadata: %w", err)
 	}
 	return raw, nil
+}
+
+// metadataRawWithOverrides merges overrides into a bead's stored metadata
+// document, leaving every value the caller did not name byte-identical.
+//
+// Metadata is a single JSON column, so setting one key means rewriting the
+// whole document. Decoding it into map[string]string first (as
+// metadataMapFromNative does, correctly, for callers that want Go strings)
+// renders each non-string value as JSON text, and writing that back persists
+// the rendering: a bead holding {"n": 42} became {"n": "42"} once any
+// unrelated key was set. Decoding into json.RawMessage keeps untouched values
+// exactly as stored. Named keys are written as JSON strings, matching the
+// map[string]string that the store's write API accepts.
+func metadataRawWithOverrides(raw json.RawMessage, overrides map[string]string) (json.RawMessage, error) {
+	values := make(map[string]json.RawMessage)
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &values); err != nil {
+			return nil, fmt.Errorf("unmarshaling metadata: %w", err)
+		}
+		if values == nil {
+			values = make(map[string]json.RawMessage, len(overrides))
+		}
+	}
+	for key, value := range overrides {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling metadata value %q: %w", key, err)
+		}
+		values[key] = encoded
+	}
+	if len(values) == 0 {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling metadata: %w", err)
+	}
+	return encoded, nil
 }
 
 func metadataMapFromNative(raw json.RawMessage) (map[string]string, error) {

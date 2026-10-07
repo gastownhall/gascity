@@ -50,7 +50,7 @@ func TestRunOnce_SuccessEmitsExactlyOneDoneEvent(t *testing.T) {
 
 // TestEmitRunEvent_FailureEmitsExactlyOneFailedEvent covers the error
 // path. Downstream beads (ga-74d, ga-zoj) produce failing MaintenanceRun
-// values when a stage errors; this bead's contract is that emitRunEvent
+// values when a stage errors; this bead's contract is that the completion path
 // translates any such run into exactly one gc.store.maintenance.failed
 // event whose payload faithfully reproduces the stage, message, and
 // snapshot path.
@@ -65,7 +65,7 @@ func TestEmitRunEvent_FailureEmitsExactlyOneFailedEvent(t *testing.T) {
 		Recorder: fake,
 	})
 
-	loop.emitRunEvent(MaintenanceRun{
+	emitUnderLock(loop, MaintenanceRun{
 		StartedAt:    started,
 		FinishedAt:   finished,
 		Stage:        "gc",
@@ -114,7 +114,7 @@ func TestEmitRunEvent_SuccessPayloadFieldsMatch(t *testing.T) {
 		Recorder: fake,
 	})
 
-	loop.emitRunEvent(MaintenanceRun{
+	emitUnderLock(loop, MaintenanceRun{
 		StartedAt:    started,
 		FinishedAt:   finished,
 		Stage:        "done",
@@ -145,7 +145,7 @@ func TestEmitRunEvent_SuccessPayloadFieldsMatch(t *testing.T) {
 }
 
 // TestEmitRunEvent_NilRecorderDoesNothing ensures that when the loop
-// has no recorder (Discard default), emitRunEvent is safe to call and
+// has no recorder (Discard default), the completion path is safe to run and
 // does not panic — supervisor boot paths that run without the typed
 // event stream still exercise runOnce during tests.
 func TestEmitRunEvent_NilRecorderDoesNothing(t *testing.T) {
@@ -157,7 +157,7 @@ func TestEmitRunEvent_NilRecorderDoesNothing(t *testing.T) {
 	})
 
 	// Should not panic and has no observable side effect.
-	loop.emitRunEvent(MaintenanceRun{
+	emitUnderLock(loop, MaintenanceRun{
 		StartedAt: time.Now(),
 		Stage:     "done",
 	})

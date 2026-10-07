@@ -155,6 +155,10 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state inspect-managed: %v\n", err) //nolint:errcheck
+				return errExit
+			}
 			info, err := inspectManagedDoltProcess(cityPath, portText)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state inspect-managed: %v\n", err) //nolint:errcheck
@@ -180,6 +184,10 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state probe-managed: %v\n", err) //nolint:errcheck
+				return errExit
+			}
 			report, err := probeManagedDolt(cityPath, hostText, portText)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state probe-managed: %v\n", err) //nolint:errcheck
@@ -207,6 +215,10 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state existing-managed: %v\n", err) //nolint:errcheck
+				return errExit
+			}
 			report, err := assessExistingManagedDolt(cityPath, hostText, portText, userText, time.Duration(timeoutMS)*time.Millisecond)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state existing-managed: %v\n", err) //nolint:errcheck
@@ -344,6 +356,10 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state wait-ready: %v\n", err) //nolint:errcheck
+				return errExit
+			}
 			pid, err := strconv.Atoi(pidText)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state wait-ready: invalid --pid %q: %v\n", pidText, err) //nolint:errcheck
@@ -382,6 +398,10 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state stop-managed: %v\n", err) //nolint:errcheck
+				return errExit
+			}
 			report, err := stopManagedDoltProcess(cityPath, portText)
 			for _, line := range managedDoltStopFields(report) {
 				if _, writeErr := fmt.Fprintln(stdout, line); writeErr != nil {
@@ -407,6 +427,29 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if guardErr := admitLegacyManagedDoltLifecycle(cityPath); guardErr != nil {
+				fmt.Fprintf(stderr, "gc dolt-state start-managed: %v\n", guardErr) //nolint:errcheck
+				return errExit
+			}
+			lock, _, lockErr := openManagedDoltLifecycleLock(cityPath)
+			if lockErr != nil {
+				fmt.Fprintf(stderr, "gc dolt-state start-managed: %v\n", lockErr) //nolint:errcheck
+				return errExit
+			}
+			locked, lockErr := tryManagedDoltLifecycleLock(lock)
+			if lockErr != nil || !locked {
+				releaseManagedDoltLifecycleLock(lock)
+				if lockErr == nil {
+					lockErr = fmt.Errorf("managed dolt lifecycle is busy")
+				}
+				fmt.Fprintf(stderr, "gc dolt-state start-managed: %v\n", lockErr) //nolint:errcheck
+				return errExit
+			}
+			defer releaseManagedDoltLifecycleLock(lock)
+			if guardErr := admitLegacyManagedDoltLifecycle(cityPath); guardErr != nil {
+				fmt.Fprintf(stderr, "gc dolt-state start-managed: %v\n", guardErr) //nolint:errcheck
+				return errExit
+			}
 			report, err := startManagedDoltProcess(cityPath, hostText, portText, userText, logLevel, time.Duration(timeoutMS)*time.Millisecond)
 			for _, line := range managedDoltStartFields(report) {
 				if _, writeErr := fmt.Fprintln(stdout, line); writeErr != nil {
@@ -467,6 +510,10 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state preflight-clean: %v\n", err) //nolint:errcheck
+				return errExit
+			}
 			if err := preflightManagedDoltCleanup(cityPath); err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state preflight-clean: %v\n", err) //nolint:errcheck
 				return errExit

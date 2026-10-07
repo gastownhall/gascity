@@ -155,7 +155,7 @@ func reapTmuxLeakProcesses(procs []tmuxProcInfo) {
 	for _, p := range procs {
 		pids = append(pids, p.PID)
 	}
-	_ = reapDoltLeakPIDsWithKiller(pids, killProcess)
+	_ = reapDoltLeakPIDs(pids)
 }
 
 // sweepStaleTmuxTestServers reaps tmux servers left behind by prior or
@@ -168,13 +168,31 @@ func reapTmuxLeakProcesses(procs []tmuxProcInfo) {
 // pre-guard run whose teardown removed the dir but never killed the server).
 // Roots that still exist — including this run's own — are never touched.
 func sweepStaleTmuxTestServers(label string, out io.Writer) {
+	sweepStaleTmuxServers(label, out, isTmuxTestSocketRoot)
+}
+
+// isTmuxTestSocketRoot reports whether root has the shape of a test run's
+// per-run tmux socket root, "<gct-<pid>-…>/tmux" — the shape every cmd/gc and
+// integration test binary gives its own. The startup sweep judges only servers
+// on roots of this shape.
+func isTmuxTestSocketRoot(root string) bool {
+	if root == "" || filepath.Base(root) != "tmux" {
+		return false
+	}
+	_, ok := pidFromPrefixedDirName(filepath.Base(filepath.Dir(root)), tmuxtest.SocketParentDirPrefix)
+	return ok
+}
+
+// sweepStaleTmuxServers is sweepStaleTmuxTestServers with the ownership rule
+// injected: ownsRoot picks the socket roots the sweep may judge, and a root it
+// owns is reaped exactly when it is gone from disk. The decision-boundary test
+// injects a rule that owns only its private fixture roots, which no production
+// startup sweep owns, so a sibling suite's sweep cannot reap the fixture before
+// the sweep under test reports it.
+func sweepStaleTmuxServers(label string, out io.Writer, ownsRoot func(root string) bool) {
 	stale := discoverTmuxProcessesWithSocketRootEnv(func(root string) bool {
 		root = strings.TrimSpace(root)
-		if root == "" || filepath.Base(root) != "tmux" {
-			return false
-		}
-		parent := filepath.Dir(root)
-		if _, ok := pidFromPrefixedDirName(filepath.Base(parent), tmuxtest.SocketParentDirPrefix); !ok {
+		if !ownsRoot(root) {
 			return false
 		}
 		_, err := os.Stat(root)

@@ -17,7 +17,7 @@
 #
 #   # Route work to the polecat pool:
 #   gc sling demo-repo/polecat "Write hello world"
-#   bd show <bead-id> --watch
+#   gc bd show <bead-id> --watch
 
 [workspace]
 name = "lifecycle-demo"
@@ -39,8 +39,8 @@ shutdown_timeout = "5s"
 # The builtin-pack-imports doctor check repairs missing entries.
 [imports.core]
 source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
-version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
+version = "sha:e38ce9cc55d15fa351199c042f0d07aba1a347af"
 
 [imports.bd]
 source = "https://github.com/gastownhall/gascity.git//examples/bd"
-version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
+version = "sha:e38ce9cc55d15fa351199c042f0d07aba1a347af"

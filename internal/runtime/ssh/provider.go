@@ -422,8 +422,25 @@ func (p *Provider) ClearScrollback(name string) error {
 }
 
 // SetMeta stores a key-value pair in the tmux session environment.
+//
+// A value that is not argv-safe (see [runtime.ArgvSafeEnvKey]) is staged on the
+// box and applied with `source-file`, exactly as Start stages secret env, so it
+// reaches neither the local ssh client's argv nor the box's. SetMeta stays
+// best-effort, but a staging failure skips the write rather than falling back to
+// argv — that fallback is the leak.
 func (p *Provider) SetMeta(name, key, value string) error {
-	_, _, _ = p.tmux(context.Background(), name, "set-environment", "-t", name, key, value)
+	ctx := context.Background()
+	args := []string{"set-environment", "-t", name, key, value}
+	if !runtime.ArgvSecretEnvValue(key, value) {
+		_, _, _ = p.tmux(ctx, name, args...)
+		return nil
+	}
+	staged, err := p.stageSecretEnv(ctx, map[string]string{key: value}, args)
+	if err != nil {
+		return nil // best-effort; never fall back to argv
+	}
+	defer p.cleanupStagedEnv(ctx, name, staged)
+	_, _, _ = p.tmux(ctx, name, "source-file", staged.tmuxPath)
 	return nil
 }
 

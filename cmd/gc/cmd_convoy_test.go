@@ -576,7 +576,7 @@ func TestConvoyListAndStatusJSONCommands(t *testing.T) {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
 	_, _ = store.Create(beads.Bead{Title: "release train", Type: "convoy"})
-	_, _ = store.Create(beads.Bead{Title: "ship docs", ParentID: "gc-1"})
+	_, _ = store.Create(beads.Bead{Title: "ship docs", ParentID: "tc-1"})
 
 	t.Run("list", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
@@ -598,7 +598,7 @@ func TestConvoyListAndStatusJSONCommands(t *testing.T) {
 
 	t.Run("status", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := run([]string{"convoy", "status", "gc-1", "--json"}, &stdout, &stderr)
+		code := run([]string{"convoy", "status", "tc-1", "--json"}, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("run convoy status --json = %d; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
 		}
@@ -609,8 +609,8 @@ func TestConvoyListAndStatusJSONCommands(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 			t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
 		}
-		if result.SchemaVersion != "1" || result.Convoy.ID != "gc-1" || len(result.Children) != 1 {
-			t.Fatalf("result = %+v, want gc-1 with one child", result)
+		if result.SchemaVersion != "1" || result.Convoy.ID != "tc-1" || len(result.Children) != 1 {
+			t.Fatalf("result = %+v, want tc-1 with one child", result)
 		}
 	})
 }
@@ -2799,8 +2799,7 @@ func TestBeadsListKeepsARigBeadThatCollidesWithABindingID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seeding the retained copy in the work store: %v", err)
 	}
-	classResidentWorkShapedBead(t, soleClassBindingStore(t, cityPath), frozen.ID, "the binding's live row")
-	recensusAfterSeedingARelic(t, cityPath)
+	classResidentWorkShapedBead(t, cityPath, frozen.ID, "the binding's live row")
 	rigHoldingID(t, cityPath, frozen.ID, "the rig's own row", "task")
 
 	var stdout, stderr bytes.Buffer
@@ -2835,8 +2834,7 @@ func TestBeadsListFilteredByStatusDropsTheFrozenCopy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seeding the retained copy in the work store: %v", err)
 	}
-	classResidentWorkShapedBead(t, soleClassBindingStore(t, cityPath), frozen.ID, "the binding's live row")
-	classStore := recensusAfterSeedingARelic(t, cityPath)
+	_, classStore := classResidentWorkShapedBead(t, cityPath, frozen.ID, "the binding's live row")
 	if err := classStore.Close(frozen.ID); err != nil {
 		t.Fatalf("closing the binding's row: %v", err)
 	}
@@ -2905,8 +2903,7 @@ func TestBeadsListRefusesWhenTheOwnershipProbeFaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seeding the retained copy in the work store: %v", err)
 	}
-	classResidentWorkShapedBead(t, soleClassBindingStore(t, cityPath), frozen.ID, "the binding's live row")
-	recensusAfterSeedingARelic(t, cityPath)
+	classResidentWorkShapedBead(t, cityPath, frozen.ID, "the binding's live row")
 	var probe *idsFaultingClassStore
 	installWrappedClassBinding(t, cityPath, func(previous beads.Store) beads.Store {
 		probe = &idsFaultingClassStore{Store: previous, err: errors.New("the id index is corrupt")}

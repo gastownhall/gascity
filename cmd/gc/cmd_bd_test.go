@@ -517,11 +517,24 @@ func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
 func TestBdCommandEnvUsesCanonicalRigTarget(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BIN", "/tmp/ambient-gc")
+	invokingDir := t.TempDir()
+	invokingGC := filepath.Join(invokingDir, "gc")
+	if err := os.WriteFile(invokingGC, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write invoking gc fixture: %v", err)
+	}
+	invokingLink := filepath.Join(invokingDir, "gc-link")
+	if err := os.Symlink(invokingGC, invokingLink); err != nil {
+		t.Fatalf("symlink invoking gc fixture: %v", err)
+	}
+	oldResolve := resolveInvokingExecutable
+	resolveInvokingExecutable = func() (string, error) { return invokingLink, nil }
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
 	_ = os.Unsetenv("BEADS_ACTOR")
 
-	cityDir := t.TempDir()
+	cityDir := normalizePathForCompare(t.TempDir())
 	wantPort := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
-	rigDir := filepath.Join(t.TempDir(), "repo")
+	rigDir := filepath.Join(normalizePathForCompare(t.TempDir()), "repo")
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -564,9 +577,33 @@ dolt.auto-start: false
 	if got := env["GC_BEADS_PREFIX"]; got != "repo" {
 		t.Fatalf("GC_BEADS_PREFIX = %q, want %q", got, "repo")
 	}
+	wantGC, err := filepath.EvalSymlinks(invokingGC)
+	if err != nil {
+		t.Fatalf("resolve invoking gc fixture: %v", err)
+	}
+	if got := env["GC_BIN"]; got != wantGC {
+		t.Fatalf("GC_BIN = %q, want physical invoking executable %q", got, wantGC)
+	}
 	if _, present := env["BEADS_ACTOR"]; present {
 		t.Fatalf("BEADS_ACTOR = %q, want absent for direct gc bd env without explicit actor", env["BEADS_ACTOR"])
 	}
+}
+
+func TestResolveBdInvokingGCBinaryFailsClosed(t *testing.T) {
+	oldResolve := resolveInvokingExecutable
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
+	t.Run("resolver error", func(t *testing.T) {
+		resolveInvokingExecutable = func() (string, error) { return "", errors.New("unavailable") }
+		if _, err := resolveBdInvokingGCBinary(); err == nil {
+			t.Fatal("resolveBdInvokingGCBinary unexpectedly succeeded")
+		}
+	})
+	t.Run("relative path", func(t *testing.T) {
+		resolveInvokingExecutable = func() (string, error) { return "gc", nil }
+		if _, err := resolveBdInvokingGCBinary(); err == nil {
+			t.Fatal("resolveBdInvokingGCBinary unexpectedly accepted a relative path")
+		}
+	})
 }
 
 func TestBdCommandEnvRefusesAnUnregisteredBackend(t *testing.T) {
@@ -1394,14 +1431,16 @@ func TestFreshManagedBdCityInitSeedsPinnedHQDatabaseAndKeepsGCPrefix(t *testing.
 	cityPath := setupFreshManagedBdWaitTestCity(t)
 	bdPath := waitTestRealBDPath(t)
 
-	cmd := exec.Command("dolt", "sql", "-q", "show tables")
-	cmd.Dir = filepath.Join(cityPath, ".beads", "dolt", "hq")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("dolt sql show tables in hq: %v\n%s", err, out)
+	mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json"))
+	if err != nil || !ok {
+		t.Fatalf("ReadDoltMode(metadata): mode=%q ok=%v err=%v", mode, ok, err)
 	}
-	if !strings.Contains(string(out), "config") {
-		t.Fatalf("hq database missing bead schema tables:\n%s", out)
+	if mode != "proxied-server" {
+		t.Fatalf("metadata dolt_mode = %q, want proxied-server", mode)
+	}
+	database, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json"))
+	if err != nil || !ok || database != "hq" {
+		t.Fatalf("ReadDoltDatabase(metadata) = (%q, %v, %v), want (hq, true, nil)", database, ok, err)
 	}
 
 	rawDir := filepath.Join(cityPath, "fresh-nested")
@@ -3333,5 +3372,56 @@ func writeGcBdProbeScript(t *testing.T, path, identity string) {
 	script := "#!/bin/sh\necho " + identity + "\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestGcBdPassthroughIgnoresStaleAmbientBdBin pins ga-weekw end to end: a
+// stale absolute BD_BIN inherited from a long-lived shell must not take
+// `gc bd` offline for a managed city with no workspace pin. The passthrough
+// runs the PATH bd, and the operator sees one warning naming the ignored value.
+func TestGcBdPassthroughIgnoresStaleAmbientBdBin(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	warnings := captureAmbientBdBinWarnings(t)
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	defer func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	}()
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setCwd(t, cityDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeBuiltinImportsFixture(t, cityDir, "core", "bd")
+
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(`#!/bin/sh
+set -eu
+printf '{"id":"gc-1","status":"in_progress"}\n'
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY_PATH", cityDir)
+	stale := "/nonexistent/beads/bd-rc2"
+	t.Setenv("BD_BIN", stale)
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"update", "gc-1", "--claim", "--json"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd() = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"id":"gc-1"`) {
+		t.Fatalf("stdout = %q, want PATH bd output", stdout.String())
+	}
+	if msg := warnings.String(); strings.Count(msg, "\n") != 1 || !strings.Contains(msg, stale) {
+		t.Fatalf("warning = %q, want one line naming ignored BD_BIN %q", msg, stale)
 	}
 }

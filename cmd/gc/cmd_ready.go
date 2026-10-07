@@ -73,6 +73,9 @@ type readyBead struct {
 	NoHistory    bool              `json:"no_history,omitempty"`
 	DeferUntil   *time.Time        `json:"defer_until,omitempty"`
 	IsBlocked    *bool             `json:"is_blocked,omitempty"`
+	// CloseReason follows beads.Bead onto the wire so the field set stays the
+	// HTTP Bead shape. Ready rows are open, so it is normally absent.
+	CloseReason string `json:"close_reason,omitempty"`
 	// BlockedBy carries the row's OPEN-or-not blocking dependencies, in bd's
 	// `bd ready --json` shape. It is populated only on the --status in_progress
 	// arm, which is the crash-recovery read: a resumed holder must be told
@@ -141,6 +144,7 @@ func toReadyBead(b beads.Bead) readyBead {
 		NoHistory:    b.NoHistory,
 		DeferUntil:   b.DeferUntil,
 		IsBlocked:    b.IsBlocked,
+		CloseReason:  b.CloseReason,
 	}
 }
 
@@ -264,7 +268,7 @@ func cmdReady(opts readyOpts, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cityStore, err := openCityStoreAt(cityPath)
+	cityStore, err := openCityStoreAtWithConfig(cityPath, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -554,11 +558,9 @@ func beadMatchesMetadata(b beads.Bead, want []metadataFieldFilter) bool {
 // here: a second copy of a total order across a package boundary is a copy that
 // drifts, and this one decides which rows a bounded read serves.
 //
-// Imposing it is also what makes the merged set well-ordered at all. Each leg's
-// own order is deterministic but they are not the same order — a caching-wrapped
-// work store emits (priority, created_at, id) while the canonical relocated
-// graph binding emits (created_at, id) with no priority term — so the raw
-// concatenation has no single total order for --limit to cut.
+// Imposing it is also what makes the merged set well-ordered at all. Each leg
+// emits its own rows in canonical order, but a concatenation of sorted legs is
+// not sorted, so the raw merge has no single total order for --limit to cut.
 //
 // An unrecognized order is rejected rather than falling back to the default,
 // which is how a bounded query quietly serves the wrong prefix.

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -854,6 +855,10 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 		cursor = strings.TrimSpace(input.AfterCursor)
 	}
 
+	// Subscribe to city-set changes before reading the city set, so a city
+	// that starts while the stream is still connecting closes this channel
+	// and is attached by the loop below instead of waiting for the resync.
+	changes := sm.cityChanges()
 	mux := sm.buildMultiplexer()
 	// Resolve per-city cursors so no city falls through to Watch(0) full-history
 	// replay: head-start clients start every city from now, and a resume cursor
@@ -870,32 +875,65 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 		return
 	}
 	defer mw.Close() //nolint:errcheck
+	// Keep each watched city's pending monitor running while this client is
+	// connected, so session.pending transitions reach the city logs.
+	leases := newPendingMonitorLeases()
+	defer leases.releaseAll()
+	sm.syncPendingMonitorLeases(leases)
 	flushSSEHeaders(hctx)
 
 	keepalive := time.NewTicker(sseKeepalive)
 	defer keepalive.Stop()
 
-	type result struct {
-		event events.TaggedEvent
-		err   error
-	}
-	ch := make(chan result, 1)
-	readNext := func() {
-		go func() {
-			te, err := mw.Next()
-			select {
-			case ch <- result{event: te, err: err}:
-			case <-hctx.Context().Done():
+	// The city set is not fixed at connect time (#6861): attach cities that
+	// start after the client connected and detach cities that go away,
+	// whenever the resolver signals a change and on a slow periodic resync.
+	resync := time.NewTicker(sm.eventStreamResyncInterval())
+	defer resync.Stop()
+	replayNewCitiesFromZero := cursor == "0"
+	syncCities := func() {
+		known := maps.Clone(cursors)
+		started, err := mw.Sync(sm.globalEventProviders(), func(city string, p events.Provider) (uint64, error) {
+			// A city the client already has a position for (from its resume
+			// cursor, or from before it stopped) resumes there without a gap.
+			// Otherwise it starts from "now", like a head-start connection,
+			// unless the client asked for replay from zero.
+			if seq, ok := known[city]; ok {
+				return seq, nil
 			}
-		}()
+			if replayNewCitiesFromZero {
+				return 0, nil
+			}
+			return p.LatestSeq()
+		})
+		if err != nil {
+			log.Printf("api: supervisor events-stream: syncing city watchers: %v", err)
+		}
+		sm.syncPendingMonitorLeases(leases)
+		// Record each new city's start seq so the composite SSE id carries it
+		// and a reconnect resumes the city from where this stream attached.
+		for city, seq := range started {
+			if _, ok := cursors[city]; !ok {
+				cursors[city] = seq
+			}
+		}
 	}
-	readNext()
+
+	ch := readEventsAhead(hctx.Context(), mw.Next)
 
 	for {
 		select {
 		case <-hctx.Context().Done():
 			return
-		case r := <-ch:
+		case <-changes:
+			changes = sm.cityChanges()
+			syncCities()
+		case <-resync.C:
+			syncCities()
+		case r, ok := <-ch:
+			if !ok {
+				return
+			}
 			if r.err != nil {
 				log.Printf("api: supervisor events-stream: multiplex Next failed: %v", r.err)
 				return
@@ -903,7 +941,7 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 			cursors[r.event.City] = r.event.Seq
 			var wfp *workflowEventProjection
 			if cs := sm.resolver.CityState(r.event.City); cs != nil {
-				wfp = projectWorkflowEvent(cs, r.event.Event)
+				wfp = projectWorkflowEventWithSlack(cs, r.event.Event, len(ch))
 			}
 			envelope, decodeErr := wireTaggedEventFrom(r.event, wfp)
 			if decodeErr != nil {
@@ -913,7 +951,6 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 				// firing in practice.
 				log.Printf("api: supervisor events-stream skip %s seq=%d city=%s: %v",
 					r.event.Type, r.event.Seq, r.event.City, decodeErr)
-				readNext()
 				continue
 			}
 			if err := send(StringIDMessage{ID: events.FormatCursor(cursors), Data: envelope}); err != nil {
@@ -923,7 +960,6 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 				// endpoints do the same on send failure.
 				return
 			}
-			readNext()
 		case t := <-keepalive.C:
 			// Emit a heartbeat frame (no ID so reconnect cursor is preserved).
 			// Idle proxies drop long-lived SSE without traffic; skipping this
