@@ -296,3 +296,136 @@ func TestACPStopKeepsSilentReplacementMeta(t *testing.T) {
 		t.Fatalf("GetMeta after Stop = %q, %v; want the replacement's value", got, err)
 	}
 }
+
+var acpIdentity = map[string]string{"GC_SESSION_ID": "bead-123", "GC_RUNTIME_EPOCH": "4", "GC_INSTANCE_TOKEN": "token-456"}
+
+func seedACPSidecar(t *testing.T, p *Provider, name string, env map[string]string) {
+	t.Helper()
+	for key, value := range env {
+		if err := p.SetMeta(name, key, value); err != nil {
+			t.Fatalf("SetMeta %s: %v", key, err)
+		}
+	}
+}
+
+// stdinHook is an agent's stdin whose Close runs onClose. Stop closes stdin
+// before it terminates, so the hook sees the runtime as its teardown begins.
+type stdinHook struct{ onClose func() }
+
+func (h stdinHook) Write(b []byte) (int, error) { return len(b), nil }
+
+func (h stdinHook) Close() error {
+	h.onClose()
+	return nil
+}
+
+// ownedConn is a conn this provider tracks with no process behind it: signals
+// to its never-started cmd are no-ops, and the process exits when done closes.
+func ownedConn(token string, done chan struct{}, onStdinClose func()) *sessionConn {
+	sc := newSessionConn(&exec.Cmd{}, stdinHook{onClose: onStdinClose}, nil, 0, done)
+	sc.token = token
+	return sc
+}
+
+// v5 O2 (X3): Stop clears the sidecar only once the runtime reads not alive.
+// The observer runs as Stop begins the teardown, with the conn already evicted
+// so it reads the socket, and again after Stop returns.
+// Kills: the sidecar cleared before the process is terminated.
+func TestAcpStopKeepsIdentityUntilNotAlive(t *testing.T) {
+	const name = "stopping"
+	p := newProbeProvider(t)
+	outcomes := map[string]socketOutcome{p.sockPath(name): socketOK}
+	p.dial = fakeSocketDial(t, outcomes)
+	seedACPSidecar(t, p, name, acpIdentity)
+	observe := func() (bool, string) {
+		obs, _ := p.ObserveLivenessWithError(name, nil)
+		id, _ := p.GetMeta(name, "GC_SESSION_ID")
+		return obs.Alive, id
+	}
+	done := make(chan struct{})
+	p.conns[name] = ownedConn(acpIdentity["GC_INSTANCE_TOKEN"], done, func() {
+		if alive, id := observe(); !alive || id == "" {
+			t.Errorf("as Stop terminates: alive %v, session ID %q; want alive with its identity", alive, id)
+		}
+		delete(outcomes, p.sockPath(name)) // the agent exits on EOF, unbinding its socket
+		close(done)
+	})
+
+	if err := p.Stop(name); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if alive, id := observe(); alive || id != "" {
+		t.Errorf("after Stop: alive %v, session ID %q; want not alive and cleared", alive, id)
+	}
+}
+
+// Stop clears the sidecar only while it still carries the stopped
+// incarnation's token. The socket is unreachable, so the exited-conn rows take
+// the cleanup path rather than the replacement eviction.
+// Kills: an unconditional clear (the replacement rows) and a cleanup that
+// never clears (the own rows).
+func TestAcpStopClearsOnlyItsOwnIncarnation(t *testing.T) {
+	const name = "reused"
+	replacement := map[string]string{"GC_SESSION_ID": "bead-123", "GC_RUNTIME_EPOCH": "5", "GC_INSTANCE_TOKEN": "token-789"}
+	tests := []struct {
+		name      string
+		live      bool
+		sidecar   map[string]string
+		wantClear bool
+	}{
+		{"own sidecar, exited conn", false, acpIdentity, true},
+		{"own sidecar, live conn", true, acpIdentity, true},
+		{"replacement beside an exited conn", false, replacement, false},
+		{"replacement beside a live conn", true, replacement, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newProbeProvider(t)
+			p.dial = fakeSocketDial(t, map[string]socketOutcome{p.sockPath(name): {err: errDialTimeout}})
+			seedACPSidecar(t, p, name, tt.sidecar)
+			done := make(chan struct{})
+			if !tt.live {
+				close(done)
+			}
+			p.conns[name] = ownedConn(acpIdentity["GC_INSTANCE_TOKEN"], done, func() { close(done) })
+
+			if err := p.Stop(name); err != nil {
+				t.Fatalf("Stop: %v", err)
+			}
+			for key, want := range tt.sidecar {
+				if tt.wantClear {
+					want = ""
+				}
+				if got, _ := p.GetMeta(name, key); got != want {
+					t.Errorf("sidecar %s after Stop = %q, want %q", key, got, want)
+				}
+			}
+		})
+	}
+}
+
+// Start seeds the token, then the epoch, then the session ID, so a read that
+// straddles the seed never sees an ID without its token. Squatting a key's
+// path makes its write fail; the first squatted key attempted names the order.
+// Kills: the seed written in map order.
+func TestAcpSeedsIdentityTokenEpochID(t *testing.T) {
+	const name = "seeded"
+	for _, squat := range [][]string{
+		{"GC_INSTANCE_TOKEN", "GC_RUNTIME_EPOCH", "GC_SESSION_ID"},
+		{"GC_RUNTIME_EPOCH", "GC_SESSION_ID"},
+	} {
+		for range 16 {
+			p := newProbeProvider(t)
+			p.dial = fakeSocketDial(t, nil)
+			for _, key := range squat {
+				if err := os.MkdirAll(filepath.Join(p.metaPath(name, key), "squat"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := p.Start(context.Background(), name, runtime.Config{Command: "true", Env: acpIdentity})
+			if err == nil || !strings.Contains(err.Error(), "("+squat[0]+")") {
+				t.Fatalf("squatting %v: Start error = %v, want the %s write to fail first", squat, err, squat[0])
+			}
+		}
+	}
+}
