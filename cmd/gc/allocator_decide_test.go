@@ -409,8 +409,7 @@ func TestAllocator_UnknownStateRowNoneButOccupiesSlot(t *testing.T) {
 // pending create past its lease is a rollback candidate only when its own
 // runtime is not running (absent, or the name another row holds) and its
 // endpoint does not hold it; one within its lease, alive, dead or of
-// unknown liveness stays managed. A creating row with no claim past the
-// stale window is one too, unless its start is in flight.
+// unknown liveness stays managed.
 func TestAllocator_RollbackCandidatesRequireNotRunning(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 9)}, Workspace: config.Workspace{Provider: "claude"}}
 	expired := func(id string, slot int) beads.Bead {
@@ -421,8 +420,6 @@ func TestAllocator_RollbackCandidatesRequireNotRunning(t *testing.T) {
 		expired("gc-alive", 2),
 		expired("gc-dead", 3),
 		poolRow("gc-lease", "worker", 4, "start-pending", "pending_create_claim", "true", "pending_create_started_at", ago(time.Minute)),
-		poolRow("gc-stale", "worker", 5, "creating"),
-		poolRow("gc-starting", "worker", 6, "creating", "last_woke_at", ago(10*time.Second)),
 		expired("gc-shared", 7),
 		poolRow("gc-owner", "worker", 8, "active", "session_name", "s-gc-shared"),
 	).alive("s-gc-alive", InventoryAttrs{}).corpse("s-gc-dead").
@@ -431,7 +428,7 @@ func TestAllocator_RollbackCandidatesRequireNotRunning(t *testing.T) {
 	d := f.decide()
 	for id, want := range map[string]bool{
 		"gc-absent": true, "gc-alive": false, "gc-dead": false, "gc-lease": false,
-		"gc-stale": true, "gc-starting": false, "gc-shared": true,
+		"gc-shared": true,
 	} {
 		e := entryOf(t, d, id)
 		if got := e.Desired == desireNone && e.Reason == reasonRollbackCandidate; got != want {
@@ -447,6 +444,30 @@ func TestAllocator_RollbackCandidatesRequireNotRunning(t *testing.T) {
 	held.in.Endpoints = map[endpointKey]endpointView{"provider:claude": {Gate: gateClosed, HoldsPendingCreate: true}}
 	if e := entryOf(t, held.decide(), "gc-1"); e.Reason == reasonRollbackCandidate {
 		t.Errorf("a pending create the breaker holds rolled back: %s/%s", e.Desired, e.Reason)
+	}
+}
+
+// Kills: rolling back a creating row that holds no pending-create claim
+// (v5 C3, B5, scenario R53; D2a's claimless-creating finding). Rollback is
+// for pending creates only: a claimless creating row past the stale window
+// with its runtime gone stays managed and is reused for demand, as legacy
+// reuses it, so no fresh slot is planned beside it; A6 heals it to asleep.
+// Its name held by another row's runtime makes it None(name-occupied).
+func TestAllocator_ClaimlessCreatingRowIsNeverRolledBack(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
+	d := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "creating")).demand("worker", "w-1").decide()
+	if e := entryOf(t, d, "gc-1"); e.Desired == desireNone || !e.InDesired {
+		t.Errorf("claimless creating row = %s/%s indesired=%v, want reused", e.Desired, e.Reason, e.InDesired)
+	}
+	if slots := planSlots(d, "worker"); len(slots) != 0 {
+		t.Errorf("planned fresh slots %v beside a reusable claimless creating row", slots)
+	}
+	occupied := newAllocFixture(t, cfg).sessions(
+		poolRow("gc-1", "worker", 1, "creating", "session_name", "s-gc-owner"),
+		poolRow("gc-owner", "worker", 2, "active"),
+	).alive("s-gc-owner", InventoryAttrs{OwnerState: OwnerSession, OwnerID: "gc-owner"}).decide()
+	if e := entryOf(t, occupied, "gc-1"); e.Desired != desireNone || e.Reason != reasonNameOccupied {
+		t.Errorf("claimless creating row on another row's runtime = %s/%s, want None(%s)", e.Desired, e.Reason, reasonNameOccupied)
 	}
 }
 

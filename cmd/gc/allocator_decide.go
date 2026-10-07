@@ -278,10 +278,12 @@ func (p *decidePass) finish() allocDecision {
 // classifyRows is step 2: every census row gets an entry, and the rows the
 // allocator does not manage are set aside with legacy's predicates. They
 // keep the slots and names legacy gives them (fail-closed): every one stays
-// in occupancy. A pending or stale create is a rollback candidate only when
-// its own runtime is absent, absent-unconfirmed or a name another row
-// holds. Unknown liveness keeps it managed, and so does a dead pane: legacy's
-// IsRunning reads a corpse as not running, but v2's start path recycles it.
+// in occupancy. A pending create (one holding pending_create_claim) is a
+// rollback candidate only when its own runtime is absent, absent-unconfirmed
+// or a name another row holds. Unknown liveness keeps it managed, and so does
+// a dead pane: legacy's IsRunning reads a corpse as not running, but v2's
+// start path recycles it. A creating row with no claim is never one (v5 C3,
+// B5): it stays managed and reusable, as legacy's is, and A6 heals it.
 // Any other row whose name another bead's runtime holds is None (C11).
 func (p *decidePass) classifyRows() {
 	c := p.in.Census
@@ -332,8 +334,6 @@ func (p *decidePass) classifyRows() {
 			p.none[k] = reasonFailedCreate
 		case notRunning && info.PendingCreateClaim && pendingCreateLeaseExpiredForRollbackInfo(info, clk, startupTimeout) &&
 			!endpointHolds:
-			p.none[k] = reasonRollbackCandidate
-		case notRunning && !info.PendingCreateClaim && staleCreatingStateInfo(info, clk) && !pendingCreateStartInFlightInfo(info, clk, startupTimeout):
 			p.none[k] = reasonRollbackCandidate
 		case o.Liveness == livenessOccupied:
 			p.none[k] = reasonNameOccupied

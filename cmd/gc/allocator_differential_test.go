@@ -97,12 +97,7 @@ var allocDifferences = map[string]allocDifference{
 // does not explain. They are pinned so the suite stays honest while the owner
 // decides; an entry is deleted when its fix lands (the fixture then fails
 // until its explain entry goes too). A finding is not an explanation.
-var allocFindings = map[string]allocDifference{
-	"claimless-creating": {
-		"v5 C3, B5, arm A6",
-		"FINDING (D2a): classifyRows makes a stale creating row with no pending-create claim None(rollback-candidate) and plans a fresh slot; v5 rolls back only pending creates and heals this row to asleep (A6), after which it is reusable and the fresh row is surplus. Legacy reuses the row",
-	},
-}
+var allocFindings = map[string]allocDifference{}
 
 // diffCity is one fixture city: its config, the beads both stores start
 // from, the runtime names alive on both sides, and the K1 scale_check run.
@@ -564,9 +559,8 @@ func diffCities(t *testing.T) []diffCity {
 			},
 		},
 		{
-			name:    "a stale creating row with no claim and no runtime",
-			explain: map[string]string{"selected:dr-1": "claimless-creating", "create:pool:worker/worker-2#2": "claimless-creating"},
-			cfg:     diffConfig(diffAgent("worker", 3)),
+			name: "a stale creating row with no claim and no runtime (v5 C3, B5: reused, not rolled back)",
+			cfg:  diffConfig(diffAgent("worker", 3)),
 			beads: []beads.Bead{
 				poolRow("dr-1", "worker", 1, "creating"),
 				diffWork("dw-1", "worker"),
