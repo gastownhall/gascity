@@ -65,9 +65,17 @@ func (f *allocFixture) rigLeg(rows ...beads.Bead) *allocFixture {
 	return f
 }
 
-// alive lists runtime name as a running pane with attrs.
+// alive lists runtime name as a running pane with attrs. Unless attrs set
+// an identity, the runtime's is read: a token, and attrs' owner as its
+// session ID.
 func (f *allocFixture) alive(name string, attrs InventoryAttrs) *allocFixture {
 	attrs.DeadKnown = true
+	if !attrs.Identity.Known {
+		attrs.Identity = readIdentity("")
+		if attrs.OwnerState == OwnerSession {
+			attrs.Identity.SessionID = attrs.OwnerID
+		}
+	}
 	f.attrs[name] = attrs
 	f.listed = append(f.listed, name)
 	return f
@@ -75,7 +83,7 @@ func (f *allocFixture) alive(name string, attrs InventoryAttrs) *allocFixture {
 
 // corpse lists runtime name as an exited pane.
 func (f *allocFixture) corpse(name string) *allocFixture {
-	f.attrs[name] = InventoryAttrs{DeadKnown: true, AllPanesDead: true, AttachedKnown: true}
+	f.attrs[name] = InventoryAttrs{DeadKnown: true, AllPanesDead: true, AttachedKnown: true, Identity: readIdentity("")}
 	f.listed = append(f.listed, name)
 	return f
 }
@@ -725,19 +733,16 @@ func TestAllocator_UncertainAttachOnlyWakeKeeps(t *testing.T) {
 		poolRow("gc-1", "worker", 2, "active"),
 		poolRow("gc-2", "idle", 1, "active"),
 	)
-	// The first pass reports attach; the next lists every name but reports
-	// attach for gc-0 only, so gc-1's and gc-2's attach facts age past
-	// maxAge while their listings stay fresh: a stale attach on a reporter.
-	cache := newObserveCache()
-	attrs := map[string]InventoryAttrs{}
-	for _, n := range []string{"s-gc-0", "s-gc-1", "s-gc-2"} {
-		attrs[n] = InventoryAttrs{DeadKnown: true, AttachedKnown: true}
+	// gc-1's and gc-2's runtimes are listed, with their identity read, on a
+	// backend that reports attach but has not primed: their attach facts
+	// read unprimed. A stale attach can no longer reach an alive row: a pass
+	// that does not enrich a name leaves its identity unread (v5 O1).
+	attrs := map[string]InventoryAttrs{"s-gc-0": {DeadKnown: true, AttachedKnown: true, Attached: true, Identity: readIdentity("")}}
+	for _, n := range []string{"s-gc-1", "s-gc-2"} {
+		attrs[n] = InventoryAttrs{DeadKnown: true, AttachedKnown: true, Identity: readIdentity("")}
 	}
-	cache.publish(allocNow.Add(-50*time.Second), attrs, completeBackend("tmux", "s-gc-0", "s-gc-1", "s-gc-2"))
 	in := f.inputs()
-	in.Now = allocNow.Add(observeMaxAge - 40*time.Second)
-	in.Obs = cache.publish(in.Now, map[string]InventoryAttrs{"s-gc-0": {DeadKnown: true, AttachedKnown: true, Attached: true}},
-		completeBackend("tmux", "s-gc-0", "s-gc-1", "s-gc-2"))
+	in.Obs = newObserveCache().publish(in.Now, attrs, completeBackend("tmux", "s-gc-0"), unattestedBackend("exec", "s-gc-1", "s-gc-2"))
 	p := newDecidePass(in)
 	p.prepare()
 	for _, id := range []string{"gc-0", "gc-1"} {

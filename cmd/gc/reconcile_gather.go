@@ -116,7 +116,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	}
 	store, rigs := e.Sessions(), e.RigStores()
 	cache, ok := demandLabelKey(store).(interface{ IsLive() bool }) // a *beads.CachingStore
-	w.Boot = bootState{CachePrimed: ok && cache.IsLive(), InventoryComplete: w.Obs.AllPrimed()}
+	w.Boot = bootState{CachePrimed: ok && cache.IsLive(), InventoryComplete: w.Obs.allPrimedOrConfirmedDead()}
 	if !w.Boot.CachePrimed {
 		p.boot = w.Boot
 		return w, errGatherCacheUnprimed

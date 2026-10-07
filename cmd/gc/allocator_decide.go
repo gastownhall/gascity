@@ -322,7 +322,7 @@ func (p *decidePass) classifyRows() {
 		}
 		p.occupancy = append(p.occupancy, row.Info)
 		info := row.Info
-		notRunning := observed && (o.Liveness == livenessAbsent || o.Liveness == livenessAbsentUnconfirmed || o.Liveness == livenessOccupied)
+		notRunning := observed && (o.Liveness == livenessGone || o.Liveness == livenessOccupied)
 		// A guarded endpoint the pass has no view of holds (fail closed).
 		ep, viewed := p.in.Endpoints[e.Endpoint]
 		endpointHolds := e.Endpoint != "" && (!viewed || ep.HoldsPendingCreate)

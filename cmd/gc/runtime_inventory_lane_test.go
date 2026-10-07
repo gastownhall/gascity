@@ -419,89 +419,521 @@ func TestInventoryLane_NestedCompositeListsEachLeafOnce(t *testing.T) {
 	}
 }
 
-// Kills: an attribution read every pass, and a stale owner after a respawn.
+// Kills: a stale owner after a respawn. Each incarnation's identity is read,
+// and the legacy owner fact is derived from that read.
 func TestInventoryLane_AttributionOncePerIncarnation(t *testing.T) {
 	sp := newScriptedInventoryProvider("gc-a")
-	sp.env["gc-a"] = map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": "tok-1"}
+	sp.env["gc-a"] = map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": "tok-1", "GC_RUNTIME_EPOCH": "3"}
 	cr := inventoryLaneTestRuntime(t, sp, nil)
+	clk := &clock.Fake{Time: obsTestEpoch}
+	useInventoryClock(cr, clk)
 
 	runTestInventoryPass(cr)
-	runTestInventoryPass(cr)
 	if got := sp.envCalls["gc-a"]; got != 1 {
-		t.Fatalf("attribution reads over two passes of one incarnation = %d, want 1", got)
+		t.Fatalf("identity reads on the first pass = %d, want 1", got)
 	}
 	obs := cr.inventoryLane.cache.Snapshot().ByName["gc-a"]
 	if obs.OwnerState != OwnerSession || obs.Owner.SessionID != "gc-1" || obs.InstanceToken != "tok-1" {
 		t.Fatalf("owner = %+v, want gc-1 with tok-1", obs)
+	}
+	if id := obs.Identity; !id.Known || id.SessionID != "gc-1" || id.Token != "tok-1" || id.Epoch != "3" || !id.ReadAt.Equal(obsTestEpoch) {
+		t.Fatalf("identity = %+v, want gc-1, tok-1, epoch 3, read at %v", id, obsTestEpoch)
 	}
 
 	sp.mu.Lock()
 	sp.inventory["gc-a"] = runtime.InventoryEntry{Incarnation: "gc-a:2", DeadKnown: true, AttachedKnown: true}
 	sp.env["gc-a"] = map[string]string{"GC_SESSION_ID": "gc-2", "GC_INSTANCE_TOKEN": "tok-2"}
 	sp.mu.Unlock()
+	clk.Advance(inventoryLaneInterval)
 	runTestInventoryPass(cr)
-	if got := sp.envCalls["gc-a"]; got != 2 {
-		t.Fatalf("attribution reads after a respawn = %d, want 2", got)
-	}
-	if obs := cr.inventoryLane.cache.Snapshot().ByName["gc-a"]; obs.Owner.SessionID != "gc-2" || obs.InstanceToken != "tok-2" {
+	if obs := cr.inventoryLane.cache.Snapshot().ByName["gc-a"]; obs.Owner.SessionID != "gc-2" || obs.InstanceToken != "tok-2" || obs.Identity.SessionID != "gc-2" {
 		t.Fatalf("owner after respawn = %+v, want gc-2", obs)
 	}
 }
 
-// Kills: the tmux GetMeta ("", nil) poisoning. An attribution read error is
-// Unknown and retried next pass, never ownerless; a clean read with no
-// GC_SESSION_ID is ownerless and waits inventoryOwnerlessRereadPasses.
+// Kills: the tmux GetMeta ("", nil) poisoning. An identity read error is
+// Unknown and read again first, never ownerless; a clean read with no
+// GC_SESSION_ID is ownerless.
 func TestInventoryLane_AttributionErrorIsUnknownNotOwnerless(t *testing.T) {
 	sp := newScriptedInventoryProvider("gc-err", "gc-bare")
 	sp.envErr["gc-err"] = errors.New("show-environment: server busy")
 	sp.env["gc-bare"] = map[string]string{"PATH": "/bin"}
 	cr := inventoryLaneTestRuntime(t, sp, nil)
+	clk := &clock.Fake{Time: obsTestEpoch}
+	useInventoryClock(cr, clk)
 
 	runTestInventoryPass(cr)
 	snap := cr.inventoryLane.cache.Snapshot()
-	if got := snap.ByName["gc-err"].OwnerState; got != OwnerUnknown {
-		t.Fatalf("owner after a read error = %v, want OwnerUnknown", got)
+	if got := snap.ByName["gc-err"]; got.OwnerState != OwnerUnknown || got.Identity.Known {
+		t.Fatalf("after a read error: owner %v, identity %+v; want OwnerUnknown and unknown", got.OwnerState, got.Identity)
 	}
-	if got := snap.ByName["gc-bare"].OwnerState; got != OwnerNone {
-		t.Fatalf("owner after a clean read without GC_SESSION_ID = %v, want OwnerNone", got)
+	if got := snap.ByName["gc-bare"]; got.OwnerState != OwnerNone || !got.Identity.Known || got.Identity.SessionID != "" {
+		t.Fatalf("after a clean read without GC_SESSION_ID: owner %v, identity %+v; want OwnerNone, known and empty", got.OwnerState, got.Identity)
 	}
 
 	sp.mu.Lock()
 	delete(sp.envErr, "gc-err")
 	sp.env["gc-err"] = map[string]string{"GC_SESSION_ID": "gc-7"}
 	sp.mu.Unlock()
+	clk.Advance(inventoryLaneInterval)
 	runTestInventoryPass(cr)
 	if got := cr.inventoryLane.cache.Snapshot().ByName["gc-err"]; got.OwnerState != OwnerSession || got.Owner.SessionID != "gc-7" {
 		t.Fatalf("owner after the retry = %+v, want gc-7", got)
 	}
-	for i := 2; i < inventoryOwnerlessRereadPasses; i++ {
-		runTestInventoryPass(cr)
-	}
-	if got := sp.envCalls["gc-bare"]; got != 1 {
-		t.Fatalf("ownerless reads before the re-read interval = %d, want 1", got)
-	}
-	runTestInventoryPass(cr)
-	if got := sp.envCalls["gc-bare"]; got != 2 {
-		t.Fatalf("ownerless reads at the re-read interval = %d, want 2", got)
-	}
 }
 
-// Kills: unbounded attribution reads after a restart. 150 new incarnations
-// take three passes at 64 reads each.
-func TestInventoryLane_AttributionBudgetPerPass(t *testing.T) {
+// Kills: a read storm at 200+ runtimes (reads per pass, not per patrol
+// interval), and a new incarnation left unread behind re-reads. The budget is
+// 64 reads per interval; new incarnations are read first, then the least
+// recently read names.
+func TestInventoryEnvReadBudgetNewIncarnationsFirst(t *testing.T) {
 	names := make([]string, 150)
 	for i := range names {
 		names[i] = fmt.Sprintf("gc-%03d", i)
 	}
 	sp := newScriptedInventoryProvider(names...)
 	cr := inventoryLaneTestRuntime(t, sp, nil)
+	clk := &clock.Fake{Time: obsTestEpoch}
+	useInventoryClock(cr, clk)
+	reads := func(name string) int {
+		sp.mu.Lock()
+		defer sp.mu.Unlock()
+		return sp.envCalls[name]
+	}
 
-	for pass, want := range []int{64, 128, 150, 150} {
+	for i, step := range []struct {
+		advance time.Duration
+		want    int
+	}{{0, 64}, {time.Second, 64}, {inventoryLaneInterval, 128}, {inventoryLaneInterval, 192}} {
+		clk.Advance(step.advance)
 		runTestInventoryPass(cr)
-		if got := sp.totalEnvCalls(); got != want {
-			t.Fatalf("attribution reads after pass %d = %d, want %d", pass+1, got, want)
+		if got := sp.totalEnvCalls(); got != step.want {
+			t.Fatalf("identity reads after pass %d = %d, want %d", i+1, got, step.want)
 		}
 	}
+	// The third interval read the last 22 new names, then re-read the 42
+	// least recently read (the first interval's, by name).
+	if reads("gc-149") != 1 || reads("gc-041") != 2 || reads("gc-042") != 1 {
+		t.Fatalf("third interval: gc-149 %d, gc-041 %d, gc-042 %d reads; want 1, 2, 1", reads("gc-149"), reads("gc-041"), reads("gc-042"))
+	}
+
+	sp.mu.Lock()
+	sp.inventory["gc-149"] = runtime.InventoryEntry{Incarnation: "gc-149:2", DeadKnown: true}
+	sp.mu.Unlock()
+	clk.Advance(inventoryLaneInterval)
+	runTestInventoryPass(cr)
+	// The respawn first, then the 22 left from the first interval and 41 of
+	// the second, by name.
+	for name, want := range map[string]int{"gc-149": 2, "gc-063": 2, "gc-104": 2, "gc-105": 1} {
+		if got := reads(name); got != want {
+			t.Errorf("fourth interval: %s read %d times, want %d", name, got, want)
+		}
+	}
+}
+
+// sidecarProvider is an acp- or subprocess-shaped backend: a listing, no
+// batched inventory or environment, and identity in GetMeta's sidecar.
+func sidecarProvider(names []string, meta map[string]map[string]string) *listOnlyProvider {
+	p := &listOnlyProvider{Fake: runtime.NewFake(), names: names}
+	for name, kv := range meta {
+		for k, v := range kv {
+			_ = p.SetMeta(name, k, v)
+		}
+	}
+	return p
+}
+
+// Kills: tmux-only attribution (OI F6), and a sidecar runtime's identity
+// leaking into the reapers' owner fact, which only batched backends' listed
+// incarnations carried before.
+func TestInventoryEnvReadCoversAcpAndSubprocess(t *testing.T) {
+	tmux := newScriptedInventoryProvider("gc-t")
+	tmux.env["gc-t"] = map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": "tok-1"}
+	acp := sidecarProvider([]string{"gc-c"}, map[string]map[string]string{"gc-c": {"GC_SESSION_ID": "gc-2", "GC_INSTANCE_TOKEN": "tok-2", "GC_RUNTIME_EPOCH": "4"}})
+	cr := inventoryLaneTestRuntime(t, sessionauto.New(tmux, acp), nil)
+	runTestInventoryPass(cr)
+
+	snap := cr.inventoryLane.cache.Snapshot()
+	c := snap.ByName["gc-c"]
+	if id := c.Identity; !id.Known || id.SessionID != "gc-2" || id.Token != "tok-2" || id.Epoch != "4" {
+		t.Fatalf("acp identity = %+v, want gc-2, tok-2, epoch 4", id)
+	}
+	if c.OwnerState != OwnerUnknown || c.InstanceToken != "" {
+		t.Fatalf("acp legacy owner = %v %q, want none (as before)", c.OwnerState, c.InstanceToken)
+	}
+	if got := snap.ByName["gc-t"]; got.Identity.SessionID != "gc-1" || got.Owner.SessionID != "gc-1" {
+		t.Fatalf("tmux identity and owner = %+v, want gc-1", got)
+	}
+
+	// A sidecar read that errors is unknown.
+	acp.GetMetaErrors = map[string]map[string]error{"gc-c": {"GC_INSTANCE_TOKEN": errors.New("sidecar unreadable")}}
+	runTestInventoryPass(cr)
+	if id := cr.inventoryLane.cache.Snapshot().ByName["gc-c"].Identity; id.Known {
+		t.Fatalf("acp identity after a failed read = %+v, want unknown", id)
+	}
+}
+
+// Kills: an ack key read creeping back (v5 O3). A sidecar read asks for the
+// identity keys only, and a batched read makes no per-key call.
+func TestInventoryEnvReadReadsNoAck(t *testing.T) {
+	tmux := newScriptedInventoryProvider("gc-t")
+	acp := sidecarProvider([]string{"gc-c"}, nil)
+	cr := inventoryLaneTestRuntime(t, sessionauto.New(tmux, acp), nil)
+	runTestInventoryPass(cr)
+
+	var keys []string
+	for _, call := range acp.SnapshotCalls() {
+		if call.Method == "GetMeta" {
+			keys = append(keys, call.Key)
+		}
+	}
+	if want := []string{"GC_SESSION_ID", "GC_RUNTIME_EPOCH", "GC_INSTANCE_TOKEN", "GT_PROCESS_NAMES"}; !reflect.DeepEqual(keys, want) {
+		t.Fatalf("sidecar keys read = %q, want %q", keys, want)
+	}
+	if n := tmux.CountCalls("GetMeta", "gc-t"); n != 0 || tmux.totalEnvCalls() != 1 {
+		t.Fatalf("tmux reads = %d GetMeta, %d GetAllEnvironment; want 0 and 1", n, tmux.totalEnvCalls())
+	}
+}
+
+// Kills: a legacy regression in orphan and corpse reaping. On legacy's
+// fixtures the reapers' owner fact is what attribute published: the
+// GC_SESSION_ID of the listed incarnation on a batched backend; nothing for
+// an error, an ownerless runtime, an incarnation not read yet, a name the
+// inventory omitted or a sidecar runtime; never a previous incarnation's.
+func TestInventoryOwnerFactParityForReapers(t *testing.T) {
+	tmux := newScriptedInventoryProvider("gc-own", "gc-err", "gc-bare", "gc-omit")
+	tmux.env["gc-own"] = map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": "tok-1"}
+	tmux.env["gc-omit"] = map[string]string{"GC_SESSION_ID": "gc-4"}
+	tmux.envErr["gc-err"] = errors.New("busy")
+	tmux.env["gc-bare"] = map[string]string{"GC_INSTANCE_TOKEN": "tok-3"}
+	delete(tmux.inventory, "gc-omit")
+	acp := sidecarProvider([]string{"gc-c"}, map[string]map[string]string{"gc-c": {"GC_SESSION_ID": "gc-2"}})
+	cr := inventoryLaneTestRuntime(t, sessionauto.New(tmux, acp), nil)
+	runTestInventoryPass(cr)
+
+	owners := func() map[string]string {
+		v := cr.inventoryViewForTick()
+		out := map[string]string{}
+		for _, name := range []string{"gc-own", "gc-err", "gc-bare", "gc-omit", "gc-c"} {
+			if id, ok := v.owner(name); ok {
+				out[name] = id
+			}
+		}
+		return out
+	}
+	if got := owners(); !reflect.DeepEqual(got, map[string]string{"gc-own": "gc-1"}) {
+		t.Fatalf("owners = %v, want only gc-own=gc-1", got)
+	}
+
+	// A respawn the budget defers carries no owner, never the previous one.
+	tmux.mu.Lock()
+	tmux.inventory["gc-own"] = runtime.InventoryEntry{Incarnation: "gc-own:2", DeadKnown: true}
+	tmux.mu.Unlock()
+	cr.inventoryLane.envWindowReads = inventoryAttributionBudget
+	runTestInventoryPass(cr)
+	if got := owners(); len(got) != 0 {
+		t.Fatalf("owners after an unread respawn = %v, want none", got)
+	}
+}
+
+// probingInventoryProvider is a tmux-shaped backend that also answers the
+// error-bearing liveness probe, through probe.
+type probingInventoryProvider struct {
+	*scriptedInventoryProvider
+	probe  func(name string, processNames []string) (runtime.Liveness, error)
+	probes atomic.Int64
+}
+
+func (p *probingInventoryProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	p.probes.Add(1)
+	return p.probe(name, processNames)
+}
+
+// newProbingProvider lists names with live panes and GT_PROCESS_NAMES=claude.
+func newProbingProvider(probe func(string, []string) (runtime.Liveness, error), names ...string) *probingInventoryProvider {
+	p := &probingInventoryProvider{scriptedInventoryProvider: newScriptedInventoryProvider(names...), probe: probe}
+	for _, n := range names {
+		p.env[n] = map[string]string{"GC_SESSION_ID": "id-" + n, "GC_INSTANCE_TOKEN": "tok", "GT_PROCESS_NAMES": "claude"}
+	}
+	return p
+}
+
+func processFact(t *testing.T, cr *CityRuntime, name string) RuntimeFact {
+	t.Helper()
+	return cr.inventoryLane.cache.Snapshot().ByName[name].ProcessAlive
+}
+
+// Kills: a zombie read as alive (D-16, the 2026-10-05 stall). A complete,
+// error-free "running but not alive" answer under a live pane is dead, and
+// the row reads dead; a live agent reads Yes.
+func TestInventoryMarksProcessDeadUnderLivePane(t *testing.T) {
+	sp := newProbingProvider(func(name string, _ []string) (runtime.Liveness, error) {
+		return runtime.Liveness{Running: true, Alive: name == "gc-live"}, nil
+	}, "gc-zombie", "gc-live")
+	cr := inventoryLaneTestRuntime(t, sp, nil)
+	runTestInventoryPass(cr)
+
+	wantFact(t, "zombie process", processFact(t, cr, "gc-zombie"), ObsNo, "")
+	wantFact(t, "live process", processFact(t, cr, "gc-live"), ObsYes, "")
+	c := observeRows(t, map[string]string{"id-gc-zombie": "gc-zombie", "id-gc-live": "gc-live"})
+	snap, now := cr.inventoryLane.cache.Snapshot(), cr.inventoryLane.clock.Now()
+	if got := observed(t, snap, c, now, "id-gc-zombie"); got.Liveness != livenessDead {
+		t.Errorf("zombie row = %+v, want dead", got)
+	}
+	if got := observed(t, snap, c, now, "id-gc-live"); got.Liveness != livenessAlive {
+		t.Errorf("live row = %+v, want alive", got)
+	}
+}
+
+// Kills: a timed-out probe read as dead, which would create a replacement
+// over a live agent (B-4).
+func TestInventoryProcessProbeTimeoutIsUnknown(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		gate := make(chan struct{})
+		sp := newProbingProvider(func(string, []string) (runtime.Liveness, error) {
+			<-gate
+			return runtime.Liveness{Running: true}, nil
+		}, "gc-a")
+		cr := inventoryLaneTestRuntime(t, sp, nil)
+		start := time.Now()
+		runTestInventoryPass(cr)
+		if waited := time.Since(start); waited != fenceProbeTimeout {
+			t.Fatalf("pass took %v with a wedged probe, want the %v probe bound", waited, fenceProbeTimeout)
+		}
+		wantFact(t, "timed-out probe", processFact(t, cr, "gc-a"), ObsUnknown, obsReasonProbeIncomplete)
+		close(gate)
+		synctest.Wait()
+	})
+}
+
+// Kills: a probe error or an unavailable answer read as dead (B-4), and a
+// pane that died under the probe read as a zombie.
+func TestInventoryProcessProbeErrorIsUnknown(t *testing.T) {
+	for name, probe := range map[string]func(string, []string) (runtime.Liveness, error){
+		"error": func(string, []string) (runtime.Liveness, error) {
+			return runtime.Liveness{Running: true}, errors.New("ps failed")
+		},
+		"unavailable": func(string, []string) (runtime.Liveness, error) {
+			return runtime.Liveness{Running: true}, runtime.ErrRuntimeUnavailable
+		},
+		"pane-gone": func(string, []string) (runtime.Liveness, error) { return runtime.Liveness{}, nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cr := inventoryLaneTestRuntime(t, newProbingProvider(probe, "gc-a"), nil)
+			runTestInventoryPass(cr)
+			wantFact(t, name, processFact(t, cr, "gc-a"), ObsUnknown, obsReasonProbeIncomplete)
+		})
+	}
+}
+
+// Kills: a process probe cached per incarnation. An agent that dies after
+// its identity was read, under the same incarnation, is seen on the next
+// pass, which reads no identity again.
+func TestInventoryProcessDeathAfterAttributionIsSeen(t *testing.T) {
+	var alive atomic.Bool
+	alive.Store(true)
+	sp := newProbingProvider(func(string, []string) (runtime.Liveness, error) {
+		return runtime.Liveness{Running: true, Alive: alive.Load()}, nil
+	}, "gc-a")
+	cr := inventoryLaneTestRuntime(t, sp, nil)
+	clk := &clock.Fake{Time: obsTestEpoch}
+	useInventoryClock(cr, clk)
+	runTestInventoryPass(cr)
+	wantFact(t, "first pass", processFact(t, cr, "gc-a"), ObsYes, "")
+
+	alive.Store(false)
+	cr.inventoryLane.envWindowReads = inventoryAttributionBudget // no identity read this interval
+	clk.Advance(time.Second)
+	runTestInventoryPass(cr)
+	if sp.totalEnvCalls() != 1 {
+		t.Fatalf("identity reads = %d, want 1 (the second pass reads none)", sp.totalEnvCalls())
+	}
+	wantFact(t, "after the agent died", processFact(t, cr, "gc-a"), ObsNo, "")
+}
+
+// Kills: treating a runtime that declared no process names as dead, which
+// would recycle every session, and probing with anything but the runtime's
+// own GT_PROCESS_NAMES.
+func TestInventoryProcessNamesFromRuntimeEnv(t *testing.T) {
+	var got []string
+	sp := newProbingProvider(func(_ string, pn []string) (runtime.Liveness, error) {
+		got = pn
+		return runtime.Liveness{Running: true}, nil
+	}, "gc-named", "gc-bare")
+	sp.env["gc-named"]["GT_PROCESS_NAMES"] = " codex , node,,"
+	delete(sp.env["gc-bare"], "GT_PROCESS_NAMES")
+	cr := inventoryLaneTestRuntime(t, sp, nil)
+	runTestInventoryPass(cr)
+
+	if sp.probes.Load() != 1 || !reflect.DeepEqual(got, []string{"codex", "node"}) {
+		t.Fatalf("probes = %d with names %q, want 1 with [codex node]", sp.probes.Load(), got)
+	}
+	wantFact(t, "declared", processFact(t, cr, "gc-named"), ObsNo, "")
+	wantFact(t, "undeclared", processFact(t, cr, "gc-bare"), ObsUnknown, obsReasonUnsupported)
+}
+
+// Kills: probing through the boolean fallback, which cannot say unknown, or
+// probing a corpse.
+func TestInventoryProcessProbeSkipsLeafWithoutErrorObserver(t *testing.T) {
+	plain := newScriptedInventoryProvider("gc-a")
+	plain.env["gc-a"] = map[string]string{"GC_SESSION_ID": "gc-1", "GT_PROCESS_NAMES": "claude"}
+	cr := inventoryLaneTestRuntime(t, plain, nil)
+	runTestInventoryPass(cr)
+	if n := plain.CountCalls("ProcessAlive", "gc-a"); n != 0 {
+		t.Fatalf("ProcessAlive calls = %d, want none", n)
+	}
+	wantFact(t, "no error observer", processFact(t, cr, "gc-a"), ObsUnknown, obsReasonUnsupported)
+
+	corpse := newProbingProvider(func(string, []string) (runtime.Liveness, error) { return runtime.Liveness{Running: true}, nil }, "gc-c")
+	corpse.inventory["gc-c"] = runtime.InventoryEntry{Incarnation: "gc-c:1", DeadKnown: true, AllPanesDead: true}
+	cr = inventoryLaneTestRuntime(t, corpse, nil)
+	runTestInventoryPass(cr)
+	if corpse.probes.Load() != 0 {
+		t.Fatalf("probes on a corpse = %d, want none", corpse.probes.Load())
+	}
+	wantFact(t, "corpse", processFact(t, cr, "gc-c"), ObsNo, "")
+}
+
+// Kills: unbounded probe fan-out. Probes run at most probe_concurrency at a
+// time, and every one still runs.
+func TestInventoryProcessProbeBoundedByProbeConcurrency(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var mu sync.Mutex
+		inFlight, peak := 0, 0
+		names := []string{"gc-1", "gc-2", "gc-3", "gc-4", "gc-5"}
+		sp := newProbingProvider(func(string, []string) (runtime.Liveness, error) {
+			mu.Lock()
+			inFlight++
+			peak = max(peak, inFlight)
+			mu.Unlock()
+			<-time.After(time.Second)
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+			return runtime.Liveness{Running: true, Alive: true}, nil
+		}, names...)
+		cr := inventoryLaneTestRuntime(t, sp, nil)
+		two := 2
+		cr.cfg.Daemon.ProbeConcurrency = &two
+		runTestInventoryPass(cr)
+		mu.Lock()
+		defer mu.Unlock()
+		if peak != 2 || sp.probes.Load() != 5 {
+			t.Fatalf("probes = %d at peak %d in flight, want 5 at peak 2", sp.probes.Load(), peak)
+		}
+		for _, n := range names {
+			wantFact(t, n, processFact(t, cr, n), ObsYes, "")
+		}
+	})
+}
+
+// deadServerProvider is a tmux-shaped backend whose server is absent, and
+// whose death confirmation is scripted. It records whether it was asked
+// right after its failing listing.
+type deadServerProvider struct {
+	*scriptedInventoryProvider
+	dead         atomic.Bool
+	asked        atomic.Int64
+	askedAtCalls atomic.Int64
+}
+
+func (p *deadServerProvider) ServerConfirmedDead() bool {
+	p.asked.Add(1)
+	p.askedAtCalls.Store(int64(p.calls()))
+	return p.dead.Load()
+}
+
+func newDeadServerProvider() *deadServerProvider {
+	p := &deadServerProvider{scriptedInventoryProvider: newScriptedInventoryProvider()}
+	p.listErr = &runtime.PartialListError{Err: errors.New("no server running"), ServerAbsent: true}
+	return p
+}
+
+// Kills: a confirmed-dead tmux server left partial, so a cold host never
+// opens the boot gate and a row on the dead server is never gone (I13, D-19);
+// and the confirmation asked before the listing or carried to a later pass.
+func TestConfirmedDeadTmuxServerIsCompleteEmpty(t *testing.T) {
+	sp := newDeadServerProvider()
+	sp.dead.Store(true)
+	cr := inventoryLaneTestRuntime(t, sp, nil)
+	runTestInventoryPass(cr)
+
+	snap := cr.inventoryLane.cache.Snapshot()
+	b := snap.Inventory.Backends[0]
+	if !b.ConfirmedDead || b.Outcome != OutcomePartial || snap.Primed[b.Label] || snap.AllPrimed() {
+		t.Fatalf("backend = %+v, primed %v; want confirmed dead with the legacy outcome and priming unchanged", b, snap.Primed)
+	}
+	if sp.asked.Load() != 1 || sp.askedAtCalls.Load() != 1 {
+		t.Fatalf("confirmation asked %d times, at listing %d; want once, right after listing 1", sp.asked.Load(), sp.askedAtCalls.Load())
+	}
+	if !snap.allPrimedOrConfirmedDead() {
+		t.Fatal("boot: a confirmed-dead server's pass does not count as primed")
+	}
+	c := observeRows(t, map[string]string{"gc-1": "s1"})
+	if got := observed(t, snap, c, cr.inventoryLane.clock.Now(), "gc-1"); got.Liveness != livenessGone {
+		t.Fatalf("row on the dead server = %+v, want gone", got)
+	}
+
+	// The next pass's own confirmation decides: unconfirmed is partial again.
+	sp.dead.Store(false)
+	runTestInventoryPass(cr)
+	snap = cr.inventoryLane.cache.Snapshot()
+	if snap.Inventory.Backends[0].ConfirmedDead || snap.allPrimedOrConfirmedDead() || sp.asked.Load() != 2 {
+		t.Fatalf("second pass: backend %+v, asked %d; want unconfirmed, boot incomplete, asked again", snap.Inventory.Backends[0], sp.asked.Load())
+	}
+}
+
+// Kills: an unconfirmed ServerAbsent read as complete, which would close
+// rows on a server that may be alive (I13), and a server-death probe on a
+// listing that did not fail for a missing server.
+func TestUnconfirmedServerAbsentStaysPartial(t *testing.T) {
+	sp := newDeadServerProvider()
+	cr := inventoryLaneTestRuntime(t, sp, nil)
+	runTestInventoryPass(cr)
+	snap := cr.inventoryLane.cache.Snapshot()
+	c := observeRows(t, map[string]string{"gc-1": "s1"})
+	if got := observed(t, snap, c, cr.inventoryLane.clock.Now(), "gc-1"); got.Liveness != livenessUnknown || snap.allPrimedOrConfirmedDead() {
+		t.Fatalf("unconfirmed: row %+v, boot complete %v; want unknown and incomplete", got, snap.allPrimedOrConfirmedDead())
+	}
+
+	sp.listErr = &runtime.PartialListError{Err: errors.New("one socket unanswered")}
+	sp.dead.Store(true)
+	runTestInventoryPass(cr)
+	if sp.asked.Load() != 1 || cr.inventoryLane.cache.Snapshot().Inventory.Backends[0].ConfirmedDead {
+		t.Fatalf("a partial listing with a server: asked %d times, want only the first pass's", sp.asked.Load())
+	}
+}
+
+// Kills: a fresh identity read that blocks past its bound, panics into the
+// caller, or takes GetMeta's ("", nil) on a batched backend.
+func TestReadRuntimeIdentityIsBoundedAndTotal(t *testing.T) {
+	tmux := newScriptedInventoryProvider("gc-t")
+	tmux.env["gc-t"] = map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": "tok", "GC_RUNTIME_EPOCH": "2", "GT_PROCESS_NAMES": "claude"}
+	if got := readRuntimeIdentity(context.Background(), tmux, "gc-t"); !reflect.DeepEqual(got, runtimeIdentity{Known: true, SessionID: "gc-1", Token: "tok", Epoch: "2", ProcessNames: []string{"claude"}}) {
+		t.Fatalf("batched read = %+v", got)
+	}
+	tmux.envErr["gc-t"] = errors.New("busy")
+	if got := readRuntimeIdentity(context.Background(), tmux, "gc-t"); got.Known {
+		t.Fatalf("failed batched read = %+v, want unknown", got)
+	}
+	if got := readRuntimeIdentity(context.Background(), nil, "gc-t"); got.Known {
+		t.Fatalf("nil leaf = %+v, want unknown", got)
+	}
+	acp := sidecarProvider([]string{"gc-c"}, map[string]map[string]string{"gc-c": {"GC_SESSION_ID": "gc-2"}})
+	if got := readRuntimeIdentity(context.Background(), acp, "gc-c"); !got.Known || got.SessionID != "gc-2" || got.Token != "" {
+		t.Fatalf("sidecar read = %+v, want gc-2 with no token", got)
+	}
+	synctest.Test(t, func(t *testing.T) {
+		gate := make(chan struct{})
+		wedged := newScriptedInventoryProvider("gc-w")
+		wedged.envGate = gate
+		start := time.Now()
+		if got := readRuntimeIdentity(context.Background(), wedged, "gc-w"); got.Known || time.Since(start) != fenceProbeTimeout {
+			t.Errorf("wedged read = %+v after %v, want unknown at %v", got, time.Since(start), fenceProbeTimeout)
+		}
+		close(gate)
+		synctest.Wait()
+	})
 }
 
 // Kills: a data race on cr.sp (run under -race), and a provider swap that
@@ -889,7 +1321,10 @@ func TestInventoryLane_DeferredRespawnCarriesNoStaleOwner(t *testing.T) {
 		sp.env[n] = map[string]string{"GC_SESSION_ID": "old-" + n, "GC_INSTANCE_TOKEN": "tok-old"}
 	}
 	cr := inventoryLaneTestRuntime(t, sp, nil)
+	clk := &clock.Fake{Time: obsTestEpoch}
+	useInventoryClock(cr, clk)
 	runTestInventoryPass(cr)
+	clk.Advance(inventoryLaneInterval) // the budget is per patrol interval
 	runTestInventoryPass(cr)
 
 	sp.mu.Lock()
@@ -898,6 +1333,7 @@ func TestInventoryLane_DeferredRespawnCarriesNoStaleOwner(t *testing.T) {
 		sp.env[n] = map[string]string{"GC_SESSION_ID": "new-" + n, "GC_INSTANCE_TOKEN": "tok-new"}
 	}
 	sp.mu.Unlock()
+	clk.Advance(inventoryLaneInterval)
 	runTestInventoryPass(cr)
 
 	snap := cr.inventoryLane.cache.Snapshot()

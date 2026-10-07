@@ -198,6 +198,14 @@ func TestGatherBootStateComputed(t *testing.T) {
 			obs.PublishInventory(obsPass(clk, 1, 1, partialSingle()), nil)
 			f.env.Observations = func() *ObservationCache { return obs }
 		}},
+		{name: "inventory partial, server confirmed dead", want: bootState{CachePrimed: true, InventoryComplete: true, RecordingSeen: true}, arrange: func(_ *testing.T, f *gatherFixture) {
+			clk := &clock.Fake{Time: gatherNow}
+			obs := NewObservationCache(clk, time.Minute, "e1")
+			dead := partialSingle()
+			dead.ServerAbsent, dead.ConfirmedDead = true, true
+			obs.PublishInventory(obsPass(clk, 1, 1, dead), nil)
+			f.env.Observations = func() *ObservationCache { return obs }
+		}},
 		{name: "no inventory pass", want: bootState{CachePrimed: true, RecordingSeen: true}, arrange: func(_ *testing.T, f *gatherFixture) {
 			f.env.Observations = nil
 		}},

@@ -46,7 +46,7 @@ func sessInputs(row session.Info) sessionInputs {
 		Key: k, Row: row, Found: true, Now: sessNow,
 		Snap:  &selectionSnapshot{Entries: map[rowKey]*selectionEntry{k: e}},
 		Entry: e,
-		Obs:   rowObservation{Liveness: livenessAbsent},
+		Obs:   rowObservation{Liveness: livenessGone},
 	}
 }
 

@@ -103,6 +103,9 @@ const (
 	// obsReasonProviderSwapped is a read-time Unknown: the provider changed
 	// and the name's backend has not completed a pass since.
 	obsReasonProviderSwapped = "provider-swapped"
+	// obsReasonProbeIncomplete marks an agent-process fact whose probe timed
+	// out, erred or was overtaken by the pane's death. It stays Unknown.
+	obsReasonProbeIncomplete = "probe-incomplete"
 )
 
 // observationRetentionPasses is how many consecutive passes a name may go
@@ -145,6 +148,11 @@ type RuntimeObservation struct {
 	// InstanceToken is this incarnation's GC_INSTANCE_TOKEN; "" when unknown.
 	// It is a capability: never trace it.
 	InstanceToken string
+	// Identity is the runtime's identity env as the lane last read it, on
+	// every backend (v5 O3). Owner, OwnerState and InstanceToken stay the
+	// legacy reapers' owner fact: set only for an incarnation on a backend
+	// with a batched environment read, as before.
+	Identity runtimeIdentity
 
 	// Listed: the artifact is visible in the provider listing (on tmux this
 	// includes remain-on-exit corpses).
@@ -224,6 +232,10 @@ type BackendPass struct {
 	// ServerAbsent is runtime.IsRuntimeServerAbsent on this backend's own
 	// error.
 	ServerAbsent bool
+	// ConfirmedDead is a ServerAbsent listing whose server the backend
+	// confirmed dead right after it (runtime.ServerDeathConfirmer): a
+	// complete, empty pass for v2 only (v5 O1). Outcome and Primed ignore it.
+	ConfirmedDead bool
 }
 
 // InventoryPass is one lane pass's listing.
@@ -287,13 +299,31 @@ func (p InventoryPass) concludesAbsent(label string) bool {
 
 // InventoryAttrs are one listed name's enrichment and attribution. A name
 // with no entry keeps its enrichment facts; an entry whose Known flag is
-// false records that fact as unsupported.
+// false records that fact as unsupported. ProcessProbed says a process probe
+// ran; only a Known answer sets the agent-process fact.
 type InventoryAttrs struct {
 	Incarnation             string
 	DeadKnown, AllPanesDead bool
 	AttachedKnown, Attached bool
 	OwnerState              OwnerState
 	OwnerID, InstanceToken  string
+	Identity                runtimeIdentity
+	ProcessProbed           bool
+	ProcessKnown            bool
+	ProcessAlive            bool
+}
+
+// runtimeIdentity is one read of a runtime's identity env (v5 O2, O3):
+// GC_SESSION_ID, GC_RUNTIME_EPOCH, GC_INSTANCE_TOKEN and GT_PROCESS_NAMES.
+// Known is false when the read failed, timed out or was never made; the
+// identity fields are then empty. ReadAt is when the lane issued the read.
+type runtimeIdentity struct {
+	Known        bool
+	SessionID    string
+	Epoch        string
+	Token        string
+	ProcessNames []string
+	ReadAt       time.Time
 }
 
 // Backend health states.
@@ -384,6 +414,24 @@ func (s *ObservationSnapshot) readFact(backend string, f RuntimeFact, now time.T
 		return RuntimeFact{Value: ObsUnknown, ObservedAt: f.ObservedAt, Source: f.Source, Reason: obsReasonStale}
 	}
 	return f
+}
+
+// allPrimedOrConfirmedDead is AllPrimed for v2's boot gate: a backend whose
+// latest pass confirmed its server dead counts as primed (v5 O1, P2).
+func (s *ObservationSnapshot) allPrimedOrConfirmedDead() bool {
+	if s == nil || len(s.Primed) == 0 {
+		return false
+	}
+	dead := make(map[string]bool)
+	for _, b := range s.Inventory.Backends {
+		dead[b.Label] = b.ConfirmedDead
+	}
+	for label, primed := range s.Primed {
+		if !primed && !dead[label] {
+			return false
+		}
+	}
+	return true
 }
 
 // AllPrimed reports whether every backend of the latest pass has completed a
@@ -567,17 +615,22 @@ func applyInventoryAttrs(obs *RuntimeObservation, a InventoryAttrs, at time.Time
 	obs.Running, obs.ProcessAlive = unsupported, unsupported
 	if a.DeadKnown {
 		obs.Running = poller(obsFactOf(!a.AllPanesDead))
-		// A dead pane proves the process gone; a live pane says nothing about
-		// the agent process inside it.
-		if a.AllPanesDead {
+		// A dead pane proves the process gone; under a live pane only the
+		// process probe's known answer says anything about the agent.
+		switch {
+		case a.AllPanesDead:
 			obs.ProcessAlive = poller(ObsNo)
+		case a.ProcessKnown:
+			obs.ProcessAlive = poller(obsFactOf(a.ProcessAlive))
+		case a.ProcessProbed:
+			obs.ProcessAlive.Reason = obsReasonProbeIncomplete
 		}
 	}
 	obs.Attached = unsupported
 	if a.AttachedKnown {
 		obs.Attached = poller(obsFactOf(a.Attached))
 	}
-	obs.OwnerState, obs.Owner, obs.InstanceToken = a.OwnerState, reconcilekey.Key{}, a.InstanceToken
+	obs.OwnerState, obs.Owner, obs.InstanceToken, obs.Identity = a.OwnerState, reconcilekey.Key{}, a.InstanceToken, a.Identity
 	if a.OwnerState == OwnerSession {
 		obs.Owner = reconcilekey.SessionRef(a.OwnerID, obs.SessionName)
 	}
@@ -641,8 +694,8 @@ func (c *ObservationCache) Note(name string, kind FactKind, v ObsFact, at time.T
 }
 
 // Observation returns name's observation read at now: stale facts, and facts
-// about names on unprimed backends, read ObsUnknown. Its Incarnation and owner
-// fields are returned only for the incarnation listed now: Listed must read
+// about names on unprimed backends, read ObsUnknown. Its Incarnation, owner
+// and identity fields are returned only for the incarnation listed now: Listed must read
 // Yes, and the pass that last listed the name must also have enriched it.
 // Otherwise they are cleared, so a reader never takes a stale, unprimed or
 // previous incarnation's attribution as the current one.
@@ -656,7 +709,7 @@ func (s *ObservationSnapshot) Observation(name string, now time.Time, maxAge tim
 		*f = s.readFact(obs.Backend, *f, now, maxAge)
 	}
 	if obs.Listed.Value != ObsYes || obs.EnrichedAt.IsZero() || !obs.EnrichedAt.Equal(obs.Listed.ObservedAt) {
-		obs.Incarnation, obs.Owner, obs.OwnerState, obs.InstanceToken = "", reconcilekey.Key{}, OwnerUnknown, ""
+		obs.Incarnation, obs.Owner, obs.OwnerState, obs.InstanceToken, obs.Identity = "", reconcilekey.Key{}, OwnerUnknown, "", runtimeIdentity{}
 	}
 	return obs, true
 }
