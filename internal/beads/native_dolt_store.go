@@ -1931,7 +1931,7 @@ func (s *NativeDoltStore) filterReadyByWorkOutcome(ctx context.Context, storage 
 			// Applying the full predicate would re-block both of those. Only
 			// the closed-and-blocked case — invisible to the store's own
 			// check — may override that verdict.
-			if string(dep.Status) == "closed" && depMetadata[beadmeta.WorkOutcomeMetadataKey] == beadmeta.WorkOutcomeBlocked {
+			if string(dep.Status) == "closed" && ReadinessWorkOutcome(depMetadata) == beadmeta.WorkOutcomeBlocked {
 				blocked = true
 				break
 			}
@@ -2009,7 +2009,7 @@ func filterReadyByWorkOutcomeBatched(ctx context.Context, batch nativeDependency
 			malformed[b.ID] = err
 			continue
 		}
-		vetoes[b.ID] = string(b.Status) == "closed" && metadata[beadmeta.WorkOutcomeMetadataKey] == beadmeta.WorkOutcomeBlocked
+		vetoes[b.ID] = string(b.Status) == "closed" && ReadinessWorkOutcome(metadata) == beadmeta.WorkOutcomeBlocked
 	}
 	result := make([]Bead, 0, len(candidates))
 	for _, c := range candidates {
@@ -3006,6 +3006,7 @@ func nativeIssueFromBead(b Bead) (*beadslib.Issue, error) {
 		Ephemeral:   b.Ephemeral,
 		NoHistory:   b.NoHistory,
 		DeferUntil:  cloneTimePtr(b.DeferUntil),
+		CloseReason: b.CloseReason,
 		RowVersion:  b.Revision,
 	}
 	if b.Priority != nil {
@@ -3072,6 +3073,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		Ephemeral:            issue.Ephemeral,
 		NoHistory:            issue.NoHistory,
 		DeferUntil:           cloneTimePtr(issue.DeferUntil),
+		CloseReason:          bdCloseReason(status, issue.CloseReason),
 		IndefinitelyDeferred: indefinitelyDeferred,
 		Revision:             issue.RowVersion,
 	}

@@ -2052,8 +2052,9 @@ func TestCachingStoreMultiRowRefreshFailureMarksRow(t *testing.T) {
 
 // TestCachingStoreReconcileRecoveryHoldsUnreadRow pins that a reconcile whose
 // recovery Get fails holds the cached row it merges back instead of absorbing
-// it: the absorb would clear the mark a raced Close left without any backing
-// read, and a clean census would then show the closed row as live.
+// it: the absorb would clear the mark a raced write left without any backing
+// read, and a clean census would then show the row another process closed as
+// live. (A fenced close leaves no row to hold: claimCloseLocked drops it.)
 func TestCachingStoreReconcileRecoveryHoldsUnreadRow(t *testing.T) {
 	t.Parallel()
 
@@ -2068,13 +2069,16 @@ func TestCachingStoreReconcileRecoveryHoldsUnreadRow(t *testing.T) {
 			t.Errorf("winning SetMetadata: %v", err)
 		}
 	}
-	if err := cache.Close(row.ID); err != nil {
-		t.Fatalf("Close: %v", err)
+	if err := cache.SetMetadata(row.ID, "k", "2"); err != nil {
+		t.Fatalf("fenced SetMetadata: %v", err)
 	}
 	if !isDirty(cache, row.ID) {
-		t.Fatal("the Close was not fenced; the interleaving is vacuous")
+		t.Fatal("the write was not fenced; the interleaving is vacuous")
 	}
-	closeRev := cache.WriteRev(row.ID)
+	fencedRev := cache.WriteRev(row.ID)
+	if err := backing.Store.Close(row.ID); err != nil {
+		t.Fatalf("out-of-process Close: %v", err)
+	}
 	ageLocalWrite(cache, row.ID)
 	backing.failNextGet = true
 	cache.ReconcileNowForTest()
@@ -2084,7 +2088,7 @@ func TestCachingStoreReconcileRecoveryHoldsUnreadRow(t *testing.T) {
 	if !isDirty(cache, row.ID) {
 		t.Fatalf("row %s is clean after a reconcile that could not read it", row.ID)
 	}
-	assertSettledCensusAgrees(t, cache, backing.Store, row.ID, closeRev)
+	assertSettledCensusAgrees(t, cache, backing.Store, row.ID, fencedRev)
 }
 
 // TestCachingStoreStaleClosedSnapshotTakesBackingRow delivers a delayed rich

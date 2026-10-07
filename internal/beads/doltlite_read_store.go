@@ -1346,10 +1346,14 @@ func (s *DoltliteReadStore) queryIssueTable(query ListQuery, tables doltliteTabl
 	if tq.skipTable {
 		return nil, nil
 	}
+	closeReasonColumn, err := s.closeReasonExprFor(tables)
+	if err != nil {
+		return nil, err
+	}
 	parentColumn := doltliteQualifiedDependsOnExpr("pc")
 	sqlText := `SELECT i.id, COALESCE(i.title, ''), COALESCE(i.status, ''), COALESCE(i.issue_type, ''), i.priority, i.created_at,
 		COALESCE(i.updated_at, ''), COALESCE(i.assignee, ''), COALESCE(i.description, ''), COALESCE(i.metadata, '{}'),
-		` + parentColumn + `, ` + tq.flags.ephemeral + `, ` + tq.flags.noHistory + `
+		` + parentColumn + `, ` + tq.flags.ephemeral + `, ` + tq.flags.noHistory + `, ` + closeReasonColumn + `
 		FROM ` + tables.issues + ` i` + tq.parentJoin
 	if len(tq.where) > 0 {
 		sqlText += " WHERE " + strings.Join(tq.where, " AND ")
@@ -1403,6 +1407,21 @@ type doltliteStorageFlagExprs struct {
 	// hasColumns reports whether the table carries at least one storage-flag
 	// column, i.e. whether per-row tier classification is possible.
 	hasColumns bool
+}
+
+// closeReasonExprFor resolves the SQL expression for bd's close_reason column
+// (the reason given to bd close --reason) on one storage table. A snapshot
+// whose table lacks the column reads as no reason; a probe failure is
+// propagated rather than treated as an absent column.
+func (s *DoltliteReadStore) closeReasonExprFor(tables doltliteTableSet) (string, error) {
+	hasCloseReason, err := s.tableHasColumn(tables.issues, "close_reason")
+	if err != nil {
+		return "", err
+	}
+	if !hasCloseReason {
+		return "''", nil
+	}
+	return "COALESCE(i.close_reason, '')", nil
 }
 
 // storageFlagExprsFor resolves the storage-flag expressions for tables.
@@ -1498,8 +1517,9 @@ func scanBead(rows interface{ Scan(...any) error }) (Bead, error) {
 		metadataRaw string
 		ephemeral   int64
 		noHistory   int64
+		closeReason string
 	)
-	if err := rows.Scan(&b.ID, &b.Title, &b.Status, &b.Type, &priority, &createdRaw, &updatedRaw, &b.Assignee, &b.Description, &metadataRaw, &b.ParentID, &ephemeral, &noHistory); err != nil {
+	if err := rows.Scan(&b.ID, &b.Title, &b.Status, &b.Type, &priority, &createdRaw, &updatedRaw, &b.Assignee, &b.Description, &metadataRaw, &b.ParentID, &ephemeral, &noHistory, &closeReason); err != nil {
 		return b, err
 	}
 	if priority.Valid {
@@ -1507,6 +1527,7 @@ func scanBead(rows interface{ Scan(...any) error }) (Bead, error) {
 		b.Priority = &p
 	}
 	b.Status = mapBdStatus(b.Status)
+	b.CloseReason = bdCloseReason(b.Status, closeReason)
 	b.CreatedAt = parseDBTime(createdRaw).Truncate(time.Second)
 	b.UpdatedAt = parseDBTime(updatedRaw).Truncate(time.Second)
 	b.Metadata = parseMetadata(metadataRaw)

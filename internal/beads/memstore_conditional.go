@@ -78,6 +78,7 @@ func (m *MemStore) CloseIfMatch(id string, expectedRevision int64) error {
 		return nil
 	}
 	setBeadStatus(&m.beads[i], "closed")
+	recordCloseReason(&m.beads[i])
 	m.beads[i].UpdatedAt = time.Now()
 	m.beads[i].Revision++
 	return nil

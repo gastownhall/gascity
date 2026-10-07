@@ -75,12 +75,14 @@ func (h *cachingAtomicConditionalCloser) CloseWithMetadataIfMatch(id string, exp
 	// the backing write (ev.prior), and the evicted row, if any, is still the
 	// one at expectedRevision (a reconcile can absorb an external change
 	// without a seq bump).
-	ev := h.cache.evictForConditionalWrite(id)
+	ev, own := h.cache.evictForConditionalClose(id)
 	if closed.ID == id && closed.Status == "closed" && ev.prior <= before &&
 		(!ev.cached || ev.revision == expectedRevision) {
 		h.cache.installAfterConditionalWrite(id, ev, closed)
 	}
-	h.cache.notifyChange(ChangeLocal, "bead.closed", closed)
+	if own {
+		h.cache.notifyChange(ChangeLocal, "bead.closed", closed)
+	}
 	return closed, nil
 }
 
@@ -199,8 +201,19 @@ func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts Upd
 	}
 	// EVICT unconditionally, then refetch verbatim: installing local fields
 	// over an independently-refreshed revision would fabricate a snapshot
-	// that never existed (see the file comment).
-	ev := c.evictForConditionalWrite(id)
+	// that never existed (see the file comment). A status=closed update is a
+	// close, announced as bead.closed when it owns the close, as Update does.
+	eventType := "bead.updated"
+	var ev conditionalEviction
+	if opts.Status != nil && *opts.Status == "closed" {
+		var own bool
+		ev, own = c.evictForConditionalClose(id)
+		if own {
+			eventType = "bead.closed"
+		}
+	} else {
+		ev = c.evictForConditionalWrite(id)
+	}
 	fresh, err := c.refetchAfterConditionalWrite(id, ev, func(b Bead) bool {
 		return ev.postWriteRevision(b, expectedRevision) && updateReflected(b, opts)
 	})
@@ -208,7 +221,7 @@ func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts Upd
 		c.recordProblem("refresh bead after conditional update", fmt.Errorf("%s: %w", id, err))
 		return nil
 	}
-	c.notifyChange(ChangeLocal, "bead.updated", fresh)
+	c.notifyChange(ChangeLocal, eventType, fresh)
 	return nil
 }
 
@@ -217,8 +230,10 @@ func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts Upd
 // closed beads from Get do this on every successful close — and resolves to an
 // evict, so the next read reports exactly what the backing itself would.
 // Unlike the unconditional Close, a fenced re-close of an already-closed bead
-// is not suppressed and re-fires bead.closed: fenced paths carry no
-// idempotence short-circuits, and only the backing evaluates the fence.
+// is not short-circuited: fenced paths carry no idempotence short-circuits, and
+// only the backing evaluates the fence. Its bead.closed is announced only when
+// the write owns the close (claimCloseLocked), so a close the cache already
+// announced is not announced twice.
 func (c *CachingStore) CloseIfMatch(id string, expectedRevision int64) error {
 	writer, ok := ConditionalWriterFor(c.conditionalBacking())
 	if !ok {
@@ -228,7 +243,7 @@ func (c *CachingStore) CloseIfMatch(id string, expectedRevision int64) error {
 		c.applyConditionalWriteFailure(id, err)
 		return err
 	}
-	ev := c.evictForConditionalWrite(id)
+	ev, own := c.evictForConditionalClose(id)
 	fresh, err := c.refetchAfterConditionalWrite(id, ev, func(b Bead) bool {
 		return ev.postWriteRevision(b, expectedRevision) && b.Status == "closed"
 	})
@@ -241,7 +256,9 @@ func (c *CachingStore) CloseIfMatch(id string, expectedRevision int64) error {
 	// The close is proven committed; forcing the status onto the event
 	// payload states that fact without installing anything in the cache.
 	setBeadStatus(&fresh, "closed")
-	c.notifyChange(ChangeLocal, "bead.closed", fresh)
+	if own {
+		c.notifyChange(ChangeLocal, "bead.closed", fresh)
+	}
 	return nil
 }
 
@@ -380,6 +397,26 @@ func (ev conditionalEviction) postWriteRevision(b Bead, expectedRevision int64) 
 func (c *CachingStore) evictForConditionalWrite(id string) conditionalEviction {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.evictForConditionalWriteLocked(id)
+}
+
+// evictForConditionalClose is evictForConditionalWrite for a fenced write that
+// left id closed. Under the same lock it first claims the bead.closed
+// announcement (claimCloseLocked) from the row it is about to evict, and
+// reports whether the write owns it: a close a concurrent read already
+// installed and announced is not announced again, and one a read queued is
+// announced by the write instead of the queue. A read after the eviction finds
+// no held row, so it queues nothing.
+func (c *CachingStore) evictForConditionalClose(id string) (conditionalEviction, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	own := c.claimCloseLocked(id, true, false)
+	return c.evictForConditionalWriteLocked(id), own
+}
+
+// evictForConditionalWriteLocked is evictForConditionalWrite's body. Caller
+// must hold c.mu in write mode.
+func (c *CachingStore) evictForConditionalWriteLocked(id string) conditionalEviction {
 	deps, hadDeps := c.deps[id]
 	row, cached := c.beads[id]
 	_, dirty := c.dirty[id]

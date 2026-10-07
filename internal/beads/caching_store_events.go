@@ -217,6 +217,10 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		c.applyEventBeforeCommitForTest()
 	}
 
+	// Deferred before the unlock so it runs after it: an event patch carrying
+	// status=closed can be the first sight of that close, and nothing else
+	// would announce it.
+	defer c.announceUnannouncedCloses()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.state != cacheLive && c.state != cachePartial {
@@ -337,6 +341,9 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 				depsMode:   depsKeepCached,
 				seqMode:    seqKeep,
 				clearDirty: !heldAtLock,
+				// A snapshot is another cache's own emission, and that cache
+				// announces the closes it observes; a patch is not.
+				closeAnnounced: depsAuthoritative,
 			})
 			mutated = true
 		}
@@ -360,6 +367,8 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 			depsMode:   depsKeepCached,
 			seqMode:    seqKeep,
 			clearDirty: !heldAtLock,
+			// The bead.closed being applied is already on the bus.
+			closeAnnounced: true,
 		})
 		c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking, depsAuthoritative)
 		mutated = true
@@ -600,6 +609,14 @@ func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) B
 	if hasCacheEventField(fields, "is_blocked") {
 		merged.IsBlocked = cloneBoolPtr(patch.IsBlocked)
 	}
+	// bd omits an empty close_reason, so a reopen event names only the new
+	// status; a row that is not closed keeps no reason either way.
+	if hasCacheEventField(fields, "close_reason") {
+		merged.CloseReason = patch.CloseReason
+	}
+	if merged.Status != "closed" {
+		merged.CloseReason = ""
+	}
 	return merged
 }
 
@@ -648,6 +665,9 @@ func cacheEventConflictsCurrent(current, patch Bead, fields map[string]json.RawM
 		return true
 	}
 	if hasCacheEventField(fields, "is_blocked") && !boolPtrEqual(current.IsBlocked, patch.IsBlocked) {
+		return true
+	}
+	if hasCacheEventField(fields, "close_reason") && current.CloseReason != patch.CloseReason {
 		return true
 	}
 	return false
@@ -809,7 +829,8 @@ func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage
 // re-read the store before acting on it durably.
 //
 // ApplyEvent and the list/Get refetch installs notify nothing, so they have no
-// source (mc-zndi7.55).
+// source (mc-zndi7.55), except for a close they install over a cached open row:
+// that close is queued and announced as ChangeRefresh (gastownhall/gascity#6860).
 type ChangeSource uint8
 
 const (
@@ -820,9 +841,10 @@ const (
 	// ChangeScan is the reconcile scan's diff, including its synthetic close of
 	// a cached open row the scan did not list.
 	ChangeScan
-	// ChangeRefresh is a point read: RefreshRow, and Update's refetch that
-	// found the row gone after the write (its bead.closed is the read's
-	// inference, not a close this process made).
+	// ChangeRefresh is a point read: RefreshRow, Update's refetch that found
+	// the row gone after the write (its bead.closed is the read's inference,
+	// not a close this process made), and a close a list, dirty-row read or
+	// event patch installed over a cached open row.
 	ChangeRefresh
 )
 
@@ -844,7 +866,15 @@ func (s ChangeSource) String() string {
 	}
 }
 
+// notifyChange announces one change. Any close a read or an event patch
+// installed without announcing goes out first, so a close is never reported
+// after a later change to the same bead.
 func (c *CachingStore) notifyChange(source ChangeSource, eventType string, b Bead) {
+	c.announceUnannouncedCloses()
+	c.emitChange(source, eventType, b)
+}
+
+func (c *CachingStore) emitChange(source ChangeSource, eventType string, b Bead) {
 	if c.onChange == nil {
 		return
 	}
@@ -927,7 +957,8 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 		old.Ephemeral != fresh.Ephemeral ||
 		old.IndefinitelyDeferred != fresh.IndefinitelyDeferred ||
 		!timePtrEqual(old.DeferUntil, fresh.DeferUntil) ||
-		!boolPtrEqual(old.IsBlocked, fresh.IsBlocked) {
+		!boolPtrEqual(old.IsBlocked, fresh.IsBlocked) ||
+		old.CloseReason != fresh.CloseReason {
 		return true
 	}
 	if !maps.Equal(old.Metadata, fresh.Metadata) {

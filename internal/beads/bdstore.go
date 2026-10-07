@@ -905,6 +905,8 @@ type bdIssue struct {
 	NoHistory       bool         `json:"no_history,omitempty"`
 	DeferUntil      *time.Time   `json:"defer_until,omitempty"`
 	IsBlocked       optionalBool `json:"is_blocked,omitempty"`
+	// CloseReason is bd's close_reason column: the --reason given to bd close.
+	CloseReason string `json:"close_reason,omitempty"`
 	// Revision carries bd's optimistic-concurrency token for ConditionalWriter.
 	// Older bd versions omit it, so it decodes to 0; toBead stamps it onto the
 	// otherwise json:"-" Bead.Revision field.
@@ -1115,9 +1117,20 @@ func (b *bdIssue) toBead() Bead {
 		NoHistory:            b.NoHistory,
 		DeferUntil:           cloneTimePtr(b.DeferUntil),
 		IsBlocked:            b.IsBlocked.ptr(),
+		CloseReason:          bdCloseReason(status, b.CloseReason),
 		IndefinitelyDeferred: indefinitelyDeferred,
 		Revision:             int64(b.Revision),
 	}
+}
+
+// bdCloseReason reads bd's close_reason for a bead in its normalized status. bd
+// clears the column on reopen, but a row that is not closed has no close
+// reason whatever the column still holds.
+func bdCloseReason(status, reason string) string {
+	if status != "closed" {
+		return ""
+	}
+	return reason
 }
 
 func (b *bdIssue) normalizedDependencies() []Dep {
@@ -3359,7 +3372,7 @@ func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
 	workOutcomeByID := make(map[string]string, len(blockers))
 	for _, b := range blockers {
 		statusByID[b.ID] = b.Status
-		workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
+		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
 	}
 	result := make([]Bead, 0, len(candidates))
 	for _, c := range candidates {

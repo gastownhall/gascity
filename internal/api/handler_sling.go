@@ -41,31 +41,32 @@ type slingBody struct {
 	NoFormula      bool              `json:"no_formula"`
 }
 
-// routeOptsFromBody builds the domain RouteOpts from the wire body for a plain
-// bead route (direct or default-formula), carrying every server-expressible flag.
-func routeOptsFromBody(body slingBody) sling.RouteOpts {
-	return sling.RouteOpts{
-		Force:     body.Force,
-		Reassign:  body.Reassign,
-		Merge:     body.Merge,
-		NoConvoy:  body.NoConvoy,
-		Owned:     body.Owned,
-		NoFormula: body.NoFormula,
-	}
+type slingResponse struct {
+	Status         string             `json:"status"`
+	Target         string             `json:"target"`
+	Formula        string             `json:"formula,omitempty"`
+	Bead           string             `json:"bead,omitempty"`
+	WorkflowID     string             `json:"workflow_id,omitempty"`
+	RootBeadID     string             `json:"root_bead_id,omitempty"`
+	AttachedBeadID string             `json:"attached_bead_id,omitempty"`
+	Mode           string             `json:"mode,omitempty"`
+	Warnings       []string           `json:"warnings,omitempty"`
+	DashboardURL   string             `json:"dashboard_url,omitempty" doc:"Absolute dashboard deep link for the slung work: the run detail view when a graph workflow was launched, otherwise the runs list. Present only when the serving process also hosts the dashboard (the supervisor listener); the standalone controller API omits it."`
+	Run            *RunRef            `json:"run,omitempty" doc:"Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses)."`
+	MoleculeID     string             `json:"molecule_id,omitempty" doc:"Root of the formula wisp attached to the bead, when a non-graph (v1) formula was attached. Matches gc sling --json molecule_id."`
+	ConvoyID       string             `json:"convoy_id,omitempty" doc:"Auto-convoy tracking the routed bead, when one was created or reused. Matches gc sling --json convoy_id."`
+	Batch          *SlingBatchSummary `json:"batch,omitempty" doc:"Per-child outcome counts, present only when the bead was a convoy whose open children were routed one by one (as gc sling does). Matches gc sling --json batch."`
 }
 
-type slingResponse struct {
-	Status         string   `json:"status"`
-	Target         string   `json:"target"`
-	Formula        string   `json:"formula,omitempty"`
-	Bead           string   `json:"bead,omitempty"`
-	WorkflowID     string   `json:"workflow_id,omitempty"`
-	RootBeadID     string   `json:"root_bead_id,omitempty"`
-	AttachedBeadID string   `json:"attached_bead_id,omitempty"`
-	Mode           string   `json:"mode,omitempty"`
-	Warnings       []string `json:"warnings,omitempty"`
-	DashboardURL   string   `json:"dashboard_url,omitempty" doc:"Absolute dashboard deep link for the slung work: the run detail view when a graph workflow was launched, otherwise the runs list. Present only when the serving process also hosts the dashboard (the supervisor listener); the standalone controller API omits it."`
-	Run            *RunRef  `json:"run,omitempty" doc:"Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses)."`
+// SlingBatchSummary counts the outcome of a convoy sling that routed each
+// open child separately. Field names match gc sling --json.
+type SlingBatchSummary struct {
+	ContainerType string `json:"container_type,omitempty" doc:"Container bead type, e.g. convoy."`
+	Total         int    `json:"total" doc:"Children tracked by the container."`
+	Routed        int    `json:"routed" doc:"Children routed by this sling."`
+	Failed        int    `json:"failed" doc:"Children whose routing failed."`
+	Skipped       int    `json:"skipped" doc:"Children skipped: already routed, or not open."`
+	Idempotent    int    `json:"idempotent" doc:"Children skipped because they were already routed to the target."`
 }
 
 var apiSlingStderr = func() io.Writer { return os.Stderr }
@@ -117,12 +118,17 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 	sourceWorkflowScanWarnings := make(map[string]struct{})
 	var sourceWorkflowScanMessages []string
 	deps := sling.SlingDeps{
-		CityName:   s.state.CityName(),
-		CityPath:   s.state.CityPath(),
-		Cfg:        s.state.Config(),
-		SP:         s.state.SessionProvider(),
-		Store:      store,
-		GraphStore: s.state.GraphBeadStore().Store,
+		CityName: s.state.CityName(),
+		CityPath: s.state.CityPath(),
+		Cfg:      s.state.Config(),
+		SP:       s.state.SessionProvider(),
+		Store:    store,
+		// Only a relocated graph binding; with nil the sling domain cooks the
+		// workflow in the sling's selected work store, next to its source
+		// bead, the rule `gc sling` applies through resolveGraphStore.
+		// Passing the non-relocated graph store (the city store) put a rig
+		// bead's workflow where the rig's pool workers never look.
+		GraphStore: relocatedGraphStore(s.state),
 		Events:     s.state.EventProvider(),
 		StoreRef:   storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
@@ -167,49 +173,37 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		}
 	}
 
-	formulaOpts := sling.FormulaOpts{
+	// Build the caller's whole intent and hand it to the same domain entry
+	// point `gc sling` uses, so the two cannot drift: the target's default
+	// formula, title and vars on it, --on, --no-formula and convoy expansion
+	// are all decided in one place.
+	opts := sling.SlingOpts{
+		Target:    agentCfg,
+		NoFormula: body.NoFormula,
 		Title:     strings.TrimSpace(body.Title),
 		Vars:      varSlice,
-		ScopeKind: body.ScopeKind,
-		ScopeRef:  body.ScopeRef,
-		Force:     body.Force,
-		Reassign:  body.Reassign,
 		Merge:     body.Merge,
 		NoConvoy:  body.NoConvoy,
 		Owned:     body.Owned,
+		Reassign:  body.Reassign,
+		Force:     body.Force,
+		ScopeKind: body.ScopeKind,
+		ScopeRef:  body.ScopeRef,
 	}
-
-	// Dispatch to the right intent-based method.
-	var result sling.SlingResult
 	mode := "direct"
-	workflowLaunch := false
-
 	switch {
 	case attachedBeadID != "":
 		mode = "attached"
-		workflowLaunch = true
-		result, err = sl.AttachFormula(ctx, formulaName, attachedBeadID, agentCfg, formulaOpts)
-
+		opts.BeadOrFormula = attachedBeadID
+		opts.OnFormula = formulaName
 	case formulaName != "":
 		mode = "standalone"
-		workflowLaunch = true
-		result, err = sl.LaunchFormula(ctx, formulaName, agentCfg, formulaOpts)
-
-	case strings.TrimSpace(body.Bead) != "" &&
-		!body.NoFormula &&
-		agentCfg.EffectiveDefaultSlingFormula() != "" &&
-		(len(body.Vars) > 0 || body.Title != "" || body.ScopeKind != "" || body.ScopeRef != ""):
-		mode = "attached"
-		workflowLaunch = true
-		attachedBeadID = strings.TrimSpace(body.Bead)
-		formulaName = agentCfg.EffectiveDefaultSlingFormula()
-		// Default formula: route the bead and let the domain apply the default.
-		result, err = sl.RouteBead(ctx, attachedBeadID, agentCfg, routeOptsFromBody(body))
-
+		opts.BeadOrFormula = formulaName
+		opts.IsFormula = true
 	default:
-		result, err = sl.RouteBead(ctx, body.Bead, agentCfg, routeOptsFromBody(body))
+		opts.BeadOrFormula = strings.TrimSpace(body.Bead)
 	}
-
+	result, err := sl.Dispatch(ctx, opts, store)
 	if err != nil {
 		var conflictErr *sourceworkflow.ConflictError
 		if errors.As(err, &conflictErr) {
@@ -244,14 +238,35 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		warnings = append(append([]string(nil), result.MetadataErrors...), sourceWorkflowScanMessages...)
 	}
 	resp := &slingResponse{
-		Status:   "slung",
-		Target:   body.Target,
-		Bead:     body.Bead,
-		Mode:     mode,
-		Warnings: warnings,
+		Status:     "slung",
+		Target:     body.Target,
+		Bead:       body.Bead,
+		Mode:       mode,
+		Warnings:   warnings,
+		MoleculeID: result.WispRootID,
+		ConvoyID:   result.ConvoyID,
 	}
-	if !workflowLaunch {
+	if result.ContainerType != "" {
+		resp.Batch = &SlingBatchSummary{
+			ContainerType: result.ContainerType,
+			Total:         result.Total,
+			Routed:        result.Routed,
+			Failed:        result.Failed,
+			Skipped:       result.Skipped,
+			Idempotent:    result.IdempotentCt,
+		}
+	}
+	explicitFormula := opts.IsFormula || opts.OnFormula != ""
+	// The domain names the formula it cooked. On a plain bead that is the
+	// target's default formula, which `gc sling` reports as an attachment.
+	defaultFormulaApplied := !explicitFormula && result.FormulaName != ""
+	if !explicitFormula && !defaultFormulaApplied {
 		return resp, http.StatusOK, "", "", nil
+	}
+	if defaultFormulaApplied {
+		resp.Mode = "attached"
+		formulaName = result.FormulaName
+		attachedBeadID = opts.BeadOrFormula
 	}
 
 	resp.Formula = formulaName

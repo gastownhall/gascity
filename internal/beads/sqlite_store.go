@@ -1170,11 +1170,15 @@ func scanSQLiteBead(row sqliteScanner) (Bead, error) {
 // filtered, Metadata merged). Update and UpdateIfMatch share it so the fenced
 // and unfenced paths cannot drift.
 func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
+	wasClosed := b.Status == "closed"
 	if opts.Title != nil {
 		b.Title = *opts.Title
 	}
 	if opts.Status != nil {
-		b.Status = *opts.Status
+		setBeadStatus(&b, *opts.Status)
+	}
+	if wasClosed && b.Status != "closed" {
+		forgetCloseReason(&b)
 	}
 	if opts.Type != nil {
 		b.Type = *opts.Type
@@ -1214,6 +1218,9 @@ func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
 			}
 		}
 		b.Labels = filtered
+	}
+	if !wasClosed && b.Status == "closed" {
+		recordCloseReason(&b)
 	}
 	return b
 }
@@ -1637,7 +1644,8 @@ func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
 
 // sqliteReadyBlockerExists is SQLite's one statement of "blocked": an EXISTS
 // over issueCol's blocks/waits-for/conditional-blocks edges whose target is not
-// closed, or closed with gc.work_outcome=blocked. A target missing from this
+// closed, or closed with gc.work_outcome=blocked unless it is a formula step
+// (gc.step_ref) that passed (gc.outcome=pass). A target missing from this
 // store (deleted, or another store's id) has no status and so blocks. Ready
 // negates it and enrichReadyProjectionForCache selects it, so the store and a
 // cache over it cannot disagree about which rows are blocked.
@@ -1649,14 +1657,30 @@ func sqliteReadyBlockerExists(issueCol string) string {
 			  AND d.dep_type IN ('blocks','waits-for','conditional-blocks')
 			  AND (
 			    COALESCE(blocker.status, '') <> 'closed'
-			    OR EXISTS (
-			         SELECT 1 FROM metadata m
-			         WHERE m.bead_id = blocker.id
-			           AND m.meta_key = '%s'
-			           AND m.meta_value = '%s'
+			    OR (
+			         EXISTS (
+			           SELECT 1 FROM metadata m
+			           WHERE m.bead_id = blocker.id
+			             AND m.meta_key = '%s'
+			             AND m.meta_value = '%s'
+			         )
+			         AND NOT (
+			           EXISTS (
+			             SELECT 1 FROM metadata o
+			             WHERE o.bead_id = blocker.id
+			               AND o.meta_key = '%s'
+			               AND o.meta_value = '%s'
+			           )
+			           AND EXISTS (
+			             SELECT 1 FROM metadata r
+			             WHERE r.bead_id = blocker.id
+			               AND r.meta_key = '%s'
+			               AND r.meta_value <> ''
+			           )
+			         )
 			       )
 			  )
-		  )`, issueCol, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked)
+		  )`, issueCol, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked, beadmeta.OutcomeMetadataKey, beadmeta.OutcomePass, beadmeta.StepRefMetadataKey)
 }
 
 // Children returns all non-closed beads whose ParentID matches the given ID.
@@ -1858,7 +1882,8 @@ func (t *sqliteStoreTx) Close(id string) error {
 		return nil
 	}
 	before := b
-	b.Status = "closed"
+	setBeadStatus(&b, "closed")
+	recordCloseReason(&b)
 	b.UpdatedAt = time.Now()
 	if err := t.store.upsertBeadTx(t.ctx, t.tx, b); err != nil {
 		return err
