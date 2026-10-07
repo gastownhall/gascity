@@ -37,6 +37,7 @@ test_suite(
         "//internal/runtime/ssh:ssh_test",
         "//internal/runtime/subprocess:subprocess_test",
         "//internal/runtime/tmux:tmux_test",
+        "//internal/session:session_test",
         "//internal/storebinding/beadsworkspace:beadsworkspace_test",
         "//test/containerhost:containerhost_test",
         "//test/dashport:dashport_test",

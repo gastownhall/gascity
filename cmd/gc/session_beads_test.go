@@ -8509,9 +8509,8 @@ func TestSweepProcessTableOrphansContinuesAfterErrors(t *testing.T) {
 }
 
 // A scan that cannot read dozens of same-uid /proc entries used to log one
-// line per entry on every patrol. The sweep now logs a bounded summary, and
-// only when it changes, while a failure of the scan as a whole is still logged
-// verbatim on every tick.
+// line per entry on every patrol. The sweep now logs one bounded summary line
+// per tick, keeping a failure of the scan as a whole verbatim.
 func TestSweepProcessTableOrphansSummarizesScanErrors(t *testing.T) {
 	var entries error
 	for pid := 1000; pid < 1070; pid++ {
@@ -8520,7 +8519,6 @@ func TestSweepProcessTableOrphansSummarizesScanErrors(t *testing.T) {
 	listErr := errors.New("tmux list running: no tmux server running")
 	store := beads.NewMemStore()
 	sp := newProcessTableSweepProvider()
-	cityPath := t.TempDir()
 	const scanLine = "scanning process table for orphaned runtimes"
 
 	for _, tick := range []struct {
@@ -8528,17 +8526,14 @@ func TestSweepProcessTableOrphansSummarizesScanErrors(t *testing.T) {
 		findErr error
 		want    string
 	}{
-		{name: "first entry failures", findErr: entries, want: "70 unreadable process entries (pids 1000, 1001, 1002, ...;"},
-		{name: "unchanged entry failures", findErr: entries},
+		{name: "entry failures", findErr: entries, want: `70 unreadable process entries in 1 classes: 70 like "reading environ for pid 1000: permission denied" (pids 1000, 1001, 1002, ...)`},
+		{name: "same entry failures next tick", findErr: entries, want: "70 unreadable process entries"},
 		{name: "whole-scan failure", findErr: errors.Join(entries, listErr), want: listErr.Error()},
-		{name: "whole-scan failure again", findErr: errors.Join(entries, listErr), want: listErr.Error()},
-		{name: "entry failures after it", findErr: entries, want: "70 unreadable process entries"},
 		{name: "clean scan", findErr: nil},
-		{name: "entry failures recur", findErr: entries, want: "70 unreadable process entries"},
 	} {
 		sp.findErr = tick.findErr
 		var stderr bytes.Buffer
-		sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, cityPath, &stderr)
+		sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, t.TempDir(), &stderr)
 		got := stderr.String()
 		if tick.want == "" {
 			if strings.Contains(got, scanLine) {

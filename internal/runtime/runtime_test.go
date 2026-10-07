@@ -132,6 +132,61 @@ func TestStopForCleanupAbsorbsOnlySessionGone(t *testing.T) {
 	}
 }
 
+// serverDeathFake is a Fake that confirms, or refuses to confirm, that its
+// server is dead, and counts how often it was asked.
+type serverDeathFake struct {
+	*Fake
+	dead  bool
+	asked int
+}
+
+func (f *serverDeathFake) ServerConfirmedDead() bool {
+	f.asked++
+	return f.dead
+}
+
+// A missing-server answer reads the same for a dead server and for a live
+// tmux server whose socket file was deleted. A provider that can tell them
+// apart (ServerDeathConfirmer) decides: StopForCleanup absorbs the answer
+// only when the server is confirmed dead. A missing session needs no proof.
+func TestStopForCleanupAbsorbsMissingServerOnlyWhenConfirmedDead(t *testing.T) {
+	serverGone := errors.New("no tmux server running")
+	for _, tc := range []struct {
+		name      string
+		stopErr   error
+		dead      bool
+		wantErr   bool
+		wantAsked int
+	}{
+		{name: "server confirmed dead", stopErr: fmt.Errorf("killing session sky: %w", serverGone), dead: true, wantAsked: 1},
+		{name: "server not confirmed dead", stopErr: fmt.Errorf("killing session sky: %w", serverGone), wantErr: true, wantAsked: 1},
+		{name: "missing session beside unconfirmed missing server", stopErr: errors.Join(ErrSessionNotFound, serverGone), wantErr: true, wantAsked: 1},
+		{name: "missing session needs no proof", stopErr: fmt.Errorf("stopping %q: %w", "sky", ErrSessionNotFound)},
+		{name: "stopped needs no proof"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := &serverDeathFake{Fake: NewFake(), dead: tc.dead}
+			if err := sp.Start(context.Background(), "sky", Config{}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if tc.stopErr != nil {
+				sp.StopErrors["sky"] = tc.stopErr
+			}
+
+			err := StopForCleanup(sp, "sky")
+			if tc.wantErr && !errors.Is(err, tc.stopErr) {
+				t.Fatalf("StopForCleanup = %v, want %v", err, tc.stopErr)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("StopForCleanup = %v, want nil", err)
+			}
+			if sp.asked != tc.wantAsked {
+				t.Errorf("ServerConfirmedDead asked %d times, want %d", sp.asked, tc.wantAsked)
+			}
+		})
+	}
+}
+
 func TestMetaValueFoldsOnlyMetaUnsupported(t *testing.T) {
 	transport := fmt.Errorf("reading GC_K: %w", ErrRuntimeUnavailable)
 	cases := []struct {

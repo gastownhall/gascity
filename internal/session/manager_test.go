@@ -2299,7 +2299,10 @@ func TestSuspendKeepsNonRunningCleanupBestEffort(t *testing.T) {
 // process's state cache can still report the session running for its stale
 // TTL. Without runtime.StopForCleanup, `gc suspend` and the `gc stop` sweep
 // fail against a dead server with nothing left to stop. A real stop failure,
-// alone or joined beside a missing-server answer, still fails the suspend.
+// alone or joined beside a missing-server answer, still fails the suspend. The
+// fake has no runtime.ServerDeathConfirmer, so the missing server is taken as
+// dead; TestSuspend_RealTmuxDeletedSocketFailsAndDeadServerSucceeds pins the
+// confirmation against real tmux.
 func TestSuspend_DownedServerSucceeds(t *testing.T) {
 	stopFailed := errors.New("terminate: permission denied")
 	for _, tc := range []struct {

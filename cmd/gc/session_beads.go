@@ -3567,40 +3567,6 @@ func stopStillBoundClosedRuntime(cityPath, name, liveID string, sp runtime.Provi
 	return true, sp.Stop(name)
 }
 
-// scanErrorLog remembers, per city, the last process-table scan error summary
-// the orphan sweep logged. A host's unreadable same-uid processes (setuid
-// binaries the user launched) stand for minutes, and every patrol rescans
-// them, so per-entry failures are logged when their summary changes rather
-// than on every tick.
-type scanErrorLog struct {
-	mu     sync.Mutex
-	byCity map[string]string
-}
-
-var orphanSweepScanErrors = &scanErrorLog{}
-
-// line returns the bounded line to log for this sweep's scan error, or "" to
-// stay quiet. A failure of the scan as a whole is returned every time; one
-// made only of per-entry failures, only when it differs from the last line
-// logged for cityPath. A clean scan forgets that line, so a recurrence logs.
-func (l *scanErrorLog) line(cityPath string, err error) string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if err == nil {
-		delete(l.byCity, cityPath)
-		return ""
-	}
-	summary, entriesOnly := proctable.SummarizeScanError(err)
-	if entriesOnly && l.byCity[cityPath] == summary {
-		return ""
-	}
-	if l.byCity == nil {
-		l.byCity = make(map[string]string)
-	}
-	l.byCity[cityPath] = summary
-	return summary
-}
-
 // fencedInfrastructureRootSet remembers, per city, which fenced
 // infrastructure roots the orphan sweep has already reported.
 type fencedInfrastructureRootSet struct {
@@ -3660,11 +3626,11 @@ func sweepProcessTableOrphans(
 		return 0
 	}
 	found, err := scanner.FindRuntimesBySessionID("")
-	cityPath = normalizePathForCompare(strings.TrimSpace(cityPath))
-	if line := orphanSweepScanErrors.line(cityPath, err); line != "" {
-		fmt.Fprintf(stderr, "session reconciler: scanning process table for orphaned runtimes: %s\n", line) //nolint:errcheck
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: scanning process table for orphaned runtimes: %s\n", proctable.SummarizeScanError(err)) //nolint:errcheck
 	}
 
+	cityPath = normalizePathForCompare(strings.TrimSpace(cityPath))
 	// A fenced root is reported once per process (pid + start time), not on
 	// every patrol: a stamped watchdog or bd proxy stays fenced for its whole
 	// life. The set is replaced each sweep, so it holds only roots that are

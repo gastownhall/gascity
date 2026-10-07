@@ -164,17 +164,21 @@ const tmuxNoServerMessage = "no tmux server running"
 // StopForCleanup stops the named session on behalf of a teardown caller and
 // absorbs a "the session is not there" answer as success.
 //
-// Teardown paths — close, kill, restart replacement — care whether the
-// session is gone, not whether this call is the one that removed it. Providers
-// draw a finer distinction than that on purpose: a missing session on a
-// responsive server is idempotent success, while a missing server is an
-// uncertain inventory observation the provider is required to surface. Neither
-// shape leaves anything for a cleanup caller to stop, so both are absorbed
-// here; every other error propagates, because a failure must still leave the
-// durable state open rather than report a "closed but still running" session.
-// Keeping the rule in one place is what stops a new cleanup path from
-// re-deriving it and getting it wrong; callers that need the distinction call
-// [Provider.Stop] directly and classify with [IsSessionGone] themselves.
+// Teardown paths — close, kill, suspend, restart replacement — care whether
+// the session is gone, not whether this call is the one that removed it.
+// Providers draw a finer distinction than that on purpose: a missing session
+// on a responsive server is idempotent success, while a missing server is an
+// uncertain inventory observation the provider is required to surface. A
+// missing session is always absorbed. A missing server is absorbed only when
+// it is proven: a provider that implements [ServerDeathConfirmer] must confirm
+// the server dead, because a live tmux server whose socket file was deleted
+// also answers "no server running" while its sessions keep running. A provider
+// without that capability keeps the unconfirmed rule. Every other error
+// propagates, because a failure must still leave the durable state open
+// rather than report a "closed but still running" session. Keeping the rule in
+// one place is what stops a new cleanup path from re-deriving it and getting
+// it wrong; callers that need the distinction call [Provider.Stop] directly
+// and classify with [IsSessionGone] themselves.
 //
 // Unlike [IsSessionGone], the rule matches structure, not free text: an error
 // is absorbed only when every leaf of its wrap/join tree is [ErrSessionNotFound]
@@ -183,35 +187,52 @@ const tmuxNoServerMessage = "no tmux server running"
 // as do a stop refusal ([ErrStopRefused]) and a message that merely mentions a
 // missing session, such as an exec script's "sh: kubectl: not found".
 func StopForCleanup(p Provider, name string) error {
-	if err := p.Stop(name); err != nil && !stopFailureIsOnlySessionGone(err) {
+	err := p.Stop(name)
+	if err == nil {
+		return nil
+	}
+	gone, serverMissing := stopFailureIsOnlySessionGone(err)
+	if !gone {
+		return err
+	}
+	if confirmer, ok := p.(ServerDeathConfirmer); ok && serverMissing && !confirmer.ServerConfirmedDead() {
 		return err
 	}
 	return nil
 }
 
 // stopFailureIsOnlySessionGone reports whether every leaf of a Stop error's
-// tree says the session is gone. errors.Is cannot express this: it accepts a
-// joined error as soon as one branch matches, which would absorb a terminate
-// failure reported alongside a missing-server answer.
-func stopFailureIsOnlySessionGone(err error) bool {
+// tree says the session is gone, and whether any leaf says so only because
+// its server is missing. errors.Is cannot express this: it accepts a joined
+// error as soon as one branch matches, which would absorb a terminate failure
+// reported alongside a missing-server answer.
+func stopFailureIsOnlySessionGone(err error) (gone, serverMissing bool) {
 	switch wrapped := err.(type) { //nolint:errorlint // walks the error tree by hand: every leaf must be a gone answer, which errors.Is cannot express
 	case nil:
-		return false
+		return false, false
 	case interface{ Unwrap() []error }:
 		children := wrapped.Unwrap()
 		if len(children) == 0 {
-			return false
+			return false, false
 		}
 		for _, child := range children {
-			if !stopFailureIsOnlySessionGone(child) {
-				return false
+			childGone, childServerMissing := stopFailureIsOnlySessionGone(child)
+			if !childGone {
+				return false, false
 			}
+			serverMissing = serverMissing || childServerMissing
 		}
-		return true
+		return true, serverMissing
 	case interface{ Unwrap() error }:
 		return stopFailureIsOnlySessionGone(wrapped.Unwrap())
 	default:
-		return errors.Is(err, ErrSessionNotFound) || err.Error() == tmuxNoServerMessage
+		if errors.Is(err, ErrSessionNotFound) {
+			return true, false
+		}
+		if err.Error() == tmuxNoServerMessage {
+			return true, true
+		}
+		return false, false
 	}
 }
 

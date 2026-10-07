@@ -728,7 +728,7 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 	}
 	found, err := scanner.FindRuntimesBySessionID(sessionID)
 	if err != nil {
-		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %v", sessionID, err)
+		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(err))
 	}
 	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
 	var termErrs []error
@@ -1367,8 +1367,10 @@ func (m *Manager) suspend(id string, intent suspendIntent) error {
 // provider-idempotent, so it is called even when liveness already reports false;
 // tmux remain-on-exit panes can be non-running but still need their session
 // artifact removed. It stops through runtime.StopForCleanup: a suspend only
-// needs the session gone, and a missing tmux server leaves nothing running even
-// while a cached IsRunning still lists the session.
+// needs the session gone, and a tmux server confirmed dead has nothing left
+// running even while a cached IsRunning still lists the session. An
+// unconfirmed missing-server answer, such as a live server whose socket file
+// was deleted, still fails the stop.
 //
 // A Stop failure is suppressed ONLY when the runtime did not report a live
 // process beforehand (historical Suspend semantics: cleanup of an already-dead

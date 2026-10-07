@@ -3,6 +3,7 @@ package proctable
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -35,35 +36,78 @@ func (e *EntryError) Error() string { return e.Err.Error() }
 
 func (e *EntryError) Unwrap() error { return e.Err }
 
-// maxSummarizedPIDs bounds how many unreadable PIDs a scan error summary names.
-const maxSummarizedPIDs = 3
+// Bounds on a scan error summary: how many entry error classes it describes,
+// and how many PIDs it names per class.
+const (
+	maxSummarizedClasses = 4
+	maxSummarizedPIDs    = 3
+)
 
-// SummarizeScanError renders a scan error as one bounded line. Per-entry
-// failures ([EntryError]) collapse to a count, the lowest few PIDs and the
-// first failure's message. Every other failure in the error tree, such as an
-// unenumerable /proc or a failed session listing, is kept verbatim, because a
-// summary must never hide a scan that failed as a whole. entriesOnly reports
-// that the error held nothing but per-entry failures. A nil error summarizes
-// to "", true.
-func SummarizeScanError(err error) (summary string, entriesOnly bool) {
+// digitRun matches the PIDs, inodes and other numbers that make two entry
+// failures of the same kind read differently.
+var digitRun = regexp.MustCompile(`[0-9]+`)
+
+// SummarizeScanError renders a scan error as one bounded line. Every failure
+// in the error tree that is not one entry's, such as an unenumerable /proc or
+// a failed session listing, is kept verbatim, because a summary must never
+// hide a scan that failed as a whole. Per-entry failures ([EntryError]) are
+// counted once per PID, since a composite provider's backends scan the same
+// /proc, and grouped into classes by their message with digit runs
+// normalized. Each class shows its count, its lowest PIDs and one example
+// message, so a new kind of failure is visible even when the total count does
+// not change. A nil error summarizes to "".
+func SummarizeScanError(err error) string {
 	var entries []*EntryError
 	var other []string
 	collectScanErrors(err, &entries, &other)
 	parts := other
-	if len(entries) > 0 {
-		sort.Slice(entries, func(i, j int) bool { return entries[i].PID < entries[j].PID })
+	if len(entries) == 0 {
+		return strings.Join(parts, "; ")
+	}
+	sort.SliceStable(entries, func(i, j int) bool { return entries[i].PID < entries[j].PID })
+	type entryClass struct {
+		example string
+		pids    []int
+	}
+	classes := make(map[string]*entryClass)
+	var order []string
+	count := 0
+	for i, entry := range entries {
+		if i > 0 && entries[i-1].PID == entry.PID {
+			continue
+		}
+		count++
+		msg := oneLine(entry.Error())
+		key := digitRun.ReplaceAllString(msg, "N")
+		class, ok := classes[key]
+		if !ok {
+			class = &entryClass{example: msg}
+			classes[key] = class
+			order = append(order, key)
+		}
+		class.pids = append(class.pids, entry.PID)
+	}
+	sort.SliceStable(order, func(i, j int) bool { return len(classes[order[i]].pids) > len(classes[order[j]].pids) })
+	described := make([]string, 0, maxSummarizedClasses+1)
+	for i, key := range order {
+		if i == maxSummarizedClasses {
+			described = append(described, fmt.Sprintf("%d more classes", len(order)-maxSummarizedClasses))
+			break
+		}
+		class := classes[key]
 		pids := make([]string, 0, maxSummarizedPIDs+1)
-		for i, entry := range entries {
-			if i == maxSummarizedPIDs {
+		for j, pid := range class.pids {
+			if j == maxSummarizedPIDs {
 				pids = append(pids, "...")
 				break
 			}
-			pids = append(pids, fmt.Sprint(entry.PID))
+			pids = append(pids, fmt.Sprint(pid))
 		}
-		parts = append(parts, fmt.Sprintf("%d unreadable process entries (pids %s; first: %s)",
-			len(entries), strings.Join(pids, ", "), oneLine(entries[0].Error())))
+		described = append(described, fmt.Sprintf("%d like %q (pids %s)", len(class.pids), class.example, strings.Join(pids, ", ")))
 	}
-	return strings.Join(parts, "; "), len(other) == 0
+	parts = append(parts, fmt.Sprintf("%d unreadable process entries in %d classes: %s",
+		count, len(order), strings.Join(described, "; ")))
+	return strings.Join(parts, "; ")
 }
 
 // collectScanErrors splits err's tree into per-entry failures and the

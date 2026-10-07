@@ -382,9 +382,9 @@ func TestScanWithRootReportsUnreadableEntriesAsEntryErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("scanWithRoot error = nil, want the unreadable entries reported")
 	}
-	summary, entriesOnly := SummarizeScanError(err)
-	if !entriesOnly || !strings.HasPrefix(summary, "2 unreadable process entries (pids 402, 403; first: ") {
-		t.Fatalf("SummarizeScanError = %q, %v; want both entries counted as EntryErrors", summary, entriesOnly)
+	summary := SummarizeScanError(err)
+	if !strings.HasPrefix(summary, "2 unreadable process entries in 1 classes: 2 like ") || !strings.HasSuffix(summary, "(pids 402, 403)") {
+		t.Fatalf("SummarizeScanError = %q; want both entries counted as EntryErrors", summary)
 	}
 }
 
