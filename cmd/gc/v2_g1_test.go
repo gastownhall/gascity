@@ -90,12 +90,9 @@ func v2Pass(tb testing.TB, city v2BenchCity) func() {
 		if err != nil {
 			tb.Fatal(err)
 		}
-		obs := observeCensus(in.Obs, c, in.Now, in.ObsMaxAge)
+		w := &World{Now: in.Now, Census: c, Observed: observeCensus(in.Obs, c, in.Now, in.ObsMaxAge)}
 		for _, row := range c.Canonical() {
-			decideSession(sessionInputs{
-				Key: row.Key, Row: row.Info, Found: true, Now: in.Now,
-				Snap: d.Snapshot, Entry: d.Snapshot.Entries[row.Key], Obs: obs[row.Key],
-			}, unaskedAnswers())
+			decideRow(w, &d, row.Key)
 		}
 	}
 }

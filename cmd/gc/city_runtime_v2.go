@@ -28,8 +28,6 @@ var (
 	v2StartupPhases = maintenancePhases(legacyStartupPhases)
 )
 
-var errV2NoSessionsStore = errors.New("no sessions store")
-
 // runsV2 reports whether this controller latched the v2 session reconciler.
 func (cr *CityRuntime) runsV2() bool {
 	return cr.reconcilerDrift.running == reconcilerV2

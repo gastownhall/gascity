@@ -143,8 +143,7 @@ func (m *passMetrics) snapshot(now time.Time) passMetricsSnapshot {
 	return s
 }
 
-// passSamples keeps the last passMetricsWindow durations. It is
-// reconcile_metrics.go's sampleWindow, copied because C3 deletes that file.
+// passSamples keeps the last passMetricsWindow durations.
 type passSamples struct {
 	samples []time.Duration
 	next    int

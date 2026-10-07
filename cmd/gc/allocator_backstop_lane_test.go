@@ -888,35 +888,13 @@ func TestExternalReadsSourceFreshForThreePatrols(t *testing.T) {
 	}
 }
 
-// Kills: a pass that ignores the reload barrier's or the FS gate's hold, and
-// a held pass that never runs once released. A held pass declines; the
-// release wakes the lane, which runs at once.
-func TestExternalReadsPassHeldByGate(t *testing.T) {
+// Kills: steps run on the lane goroutine (a slow step stalls the reads), and
+// a second run of a step while one is in flight. With a step blocked, passes
+// keep publishing at the patrol, and the step does not start again though its
+// interval is up.
+func TestExternalReadsStepRunsOffTheReadPath(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		lane, _ := newTestBackstopLane(externalReadsEnv{Cfg: demandReadsTestConfig(), CityStore: beads.NewMemStore()})
-		lane.gate = newLaneGate(lane.wake)
-		lane.gate.hold("reload")
-		startBackstopLaneInBubble(t, lane)
-		if got := backstopSeq(lane); got != 0 {
-			t.Fatalf("held: %d passes, want none", got)
-		}
-		lane.gate.release("reload")
-		synctest.Wait()
-		if got := backstopSeq(lane); got != 1 {
-			t.Errorf("released: %d passes, want one at once", got)
-		}
-	})
-}
-
-// Kills: steps run on the lane goroutine (a slow step stalls the reads),
-// steps outside the gate (M6: waitIdle idle while a step writes), and a second
-// run of a step while one is in flight. With a step blocked, passes keep
-// publishing at the patrol, the step does not start again though its interval
-// is up, and waitIdle waits for it.
-func TestExternalReadsStepRunsOffTheReadPathInsideTheGate(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		lane, _ := newTestBackstopLane(externalReadsEnv{Cfg: demandReadsTestConfig(), CityStore: beads.NewMemStore()})
-		lane.gate = newLaneGate(lane.wake)
 		var runs atomic.Int64
 		release := make(chan struct{})
 		lane.steps = []*laneStep{{name: "slow", every: time.Second, run: func(context.Context, externalReadsEnv) {
@@ -928,24 +906,8 @@ func TestExternalReadsStepRunsOffTheReadPathInsideTheGate(t *testing.T) {
 		if seq, n := backstopSeq(lane), runs.Load(); seq != 4 || n != 1 {
 			t.Fatalf("with the step blocked: %d passes, %d step runs; want the patrol's 4 passes and one run", seq, n)
 		}
-		idle := make(chan error, 1)
-		go func() { idle <- lane.gate.waitIdle(context.Background()) }()
-		synctest.Wait()
-		select {
-		case <-idle:
-			t.Fatal("waitIdle reported idle while a step was running")
-		default:
-		}
 		close(release)
 		synctest.Wait()
-		select {
-		case err := <-idle:
-			if err != nil {
-				t.Fatalf("waitIdle = %v", err)
-			}
-		default:
-			t.Fatal("waitIdle still waiting after the step ended")
-		}
 	})
 }
 

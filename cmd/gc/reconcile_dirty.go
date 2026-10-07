@@ -71,3 +71,15 @@ func inventoryChanged(prev, next *ObservationSnapshot) bool {
 	}
 	return primedChanged(prev.Primed, next.Primed) || healthChanged(prev.Health, next.Health)
 }
+
+func healthChanged(prev, next map[string]BackendHealth) bool {
+	if len(prev) != len(next) {
+		return true
+	}
+	for label, h := range next {
+		if p, ok := prev[label]; !ok || p.State != h.State {
+			return true
+		}
+	}
+	return false
+}

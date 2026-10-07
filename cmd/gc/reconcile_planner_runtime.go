@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -25,6 +26,15 @@ const (
 	plannerBootReady   = "ready"
 	plannerBootNoStore = "no-store" // no bead store: boot never runs (MAINT-003)
 )
+
+// The boot census retry backoff (laneBackoff).
+const (
+	v2LaneBaseBackoff = time.Second
+	v2LaneMaxBackoff  = 30 * time.Second
+	v2Jitter          = 0.1
+)
+
+var errV2Stopped = errors.New("v2 reconciler: stopped before ready")
 
 // plannerHost is the only way the planner reaches the city (F2). bindHost
 // fills gather's Env and Recording; only publishEnv calls snapshotEnv; a nil
@@ -274,4 +284,14 @@ func (rt *plannerRuntime) passRecord(now time.Time, legacyEntries int64) map[str
 		"boot": rt.bootState(), "legacy_session_entries": legacyEntries, "passes": m.Passes,
 		"wakes": m.Wakes, "admitted": m.Admitted, "deferred": deferred,
 	}
+}
+
+// laneBackoff is min(1s·2^(failures-1), 30s), jittered by ±10%.
+func laneBackoff(failures int, rand func() float64) time.Duration {
+	d := v2LaneBaseBackoff
+	for i := 1; i < failures && d < v2LaneMaxBackoff; i++ {
+		d *= 2
+	}
+	d = min(d, v2LaneMaxBackoff)
+	return time.Duration(float64(d) * (1 + v2Jitter*(2*rand()-1)))
 }

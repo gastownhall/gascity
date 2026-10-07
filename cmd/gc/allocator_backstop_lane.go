@@ -46,9 +46,9 @@ import (
 // turns a stale source fresh.
 //
 // After publishing, the pass starts its due steps, each on its own goroutine
-// under a deadline, one run in flight per step, counted by the gate, so a
-// slow step never delays the reads. The one step today is legacy's
-// demand-pass repairs (POOL-019/020), at most once a minute from the end of
+// under a deadline, one run in flight per step, so a slow step never delays
+// the reads. The one step today is legacy's demand-pass repairs
+// (POOL-019/020), at most once a minute from the end of
 // the last run, in legacy order over every leg: the session stamp, the
 // control-dispatcher route repair (which emits control.dispatcher_scope_gap
 // itself), and the four migration repairs. The four stay in the lane by owner
@@ -68,7 +68,7 @@ import (
 // reload, a store swap after the barrier, a resume, a create that wrote a row
 // on a lane-fed leg, and a read that ended after its pass published.
 //
-// Unwired in this slice: P3-7 starts it, sets its gate, wires its wakes and
+// Unwired in this slice: P3-7 starts it, wires its wakes and
 // joins it before closing the stores.
 
 const (
@@ -296,10 +296,7 @@ type externalReadsLane struct {
 	events   events.Recorder
 	stderr   io.Writer
 	now      func() time.Time
-	// gate, when set, lets the reload barrier and the worker FS gate hold
-	// passes; a held pass declines and does not pace the next wake. It counts
-	// the steps a pass starts until they end.
-	gate             *laneGate
+
 	sourceDeadline   time.Duration
 	scaleCheckBudget time.Duration
 	runner           ScaleCheckRunner
@@ -391,12 +388,6 @@ func (l *externalReadsLane) join(ctx context.Context) error {
 // suspended (POOL-001; like legacy, an unreadable suspension file reads as
 // the zero state). It reports whether it ran.
 func (l *externalReadsLane) pass(ctx context.Context) bool {
-	if l.gate != nil {
-		if !l.gate.enter() {
-			return false
-		}
-		defer l.gate.exit()
-	}
 	env, ok := l.passEnv(ctx)
 	if !ok {
 		return false
@@ -637,7 +628,7 @@ func externalReadLegs(env externalReadsEnv, stderr io.Writer) (demand []classSto
 
 // startSteps starts each due step on its own goroutine: one not already
 // running, whose interval since its last run ended is up, and whose legs read
-// fine in rec. The gate counts each run until it ends.
+// fine in rec.
 func (l *externalReadsLane) startSteps(ctx context.Context, env externalReadsEnv, rec *externalReadsRecording) {
 	now := l.now()
 	l.mu.Lock()
@@ -647,20 +638,15 @@ func (l *externalReadsLane) startSteps(ctx context.Context, env externalReadsEnv
 			continue
 		}
 		step.running = true
-		done := func() {}
-		if l.gate != nil {
-			done = l.gate.spawn()
-		}
 		l.wg.Add(1)
-		go l.runStep(ctx, env, step, done)
+		go l.runStep(ctx, env, step)
 	}
 }
 
 // runStep runs step once under the step deadline. A panic is reported and
 // counts as a run, so a broken step is not retried every pass.
-func (l *externalReadsLane) runStep(ctx context.Context, env externalReadsEnv, step *laneStep, done func()) {
+func (l *externalReadsLane) runStep(ctx context.Context, env externalReadsEnv, step *laneStep) {
 	defer l.wg.Done()
-	defer done()
 	stepCtx, cancel := context.WithTimeout(ctx, externalReadsStepDeadline)
 	defer cancel()
 	if _, err := guardedRead(func() (struct{}, error) { step.run(stepCtx, env); return struct{}{}, nil }); err != nil {

@@ -1716,7 +1716,6 @@ func TestCreateEffect_ParallelTemplatesRealFlocks(t *testing.T) {
 func TestCreateEffectSettlesOnlyByMessage(t *testing.T) {
 	shared := map[reflect.Type]bool{
 		reflect.TypeFor[*backoffTable](): true, reflect.TypeFor[*inflightMap](): true,
-		reflect.TypeFor[v2Enqueuer](): true,
 	}
 	host := reflect.TypeFor[createEffectHost]()
 	for i := range host.NumField() {

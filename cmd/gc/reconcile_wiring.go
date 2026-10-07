@@ -73,6 +73,14 @@ func (w *controllerWiring) runtimeParams(p CityRuntimeParams) CityRuntimeParams 
 	return p
 }
 
+// reloadIntent is what the tick knows about a reload: where it came from,
+// and whether it is soft (accept config drift instead of draining,
+// city_runtime.go's soft-acceptance guard).
+type reloadIntent struct {
+	Source reloadSource
+	Soft   bool
+}
+
 // v2SoftReloadUnavailable answers a soft reload under v2: drift acceptance
 // (MAINT-025) is a legacy session phase, off under v2 until C7c hands the
 // planner a soft-reload request and deletes this hook (v5 M2). The reply says

@@ -675,8 +675,8 @@ func (c *ObservationCache) store(next *ObservationSnapshot, flipped bool, at tim
 }
 
 // Note writes one fact from a fresh three-outcome probe. A write observed
-// before the stored fact loses. It reports whether the fact's value flipped.
-func (c *ObservationCache) Note(name string, kind FactKind, v ObsFact, at time.Time, src ObsSource, reason string) bool {
+// before the stored fact loses.
+func (c *ObservationCache) Note(name string, kind FactKind, v ObsFact, at time.Time, src ObsSource, reason string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	prev := c.cur.Load()
@@ -686,7 +686,7 @@ func (c *ObservationCache) Note(name string, kind FactKind, v ObsFact, at time.T
 	}
 	f := obs.fact(kind)
 	if at.Before(f.ObservedAt) {
-		return false
+		return
 	}
 	flipped := f.Value != v
 	*f = RuntimeFact{Value: v, ObservedAt: at, Source: src, Reason: reason}
@@ -698,7 +698,6 @@ func (c *ObservationCache) Note(name string, kind FactKind, v ObsFact, at time.T
 	}
 	next.ByName[name] = obs
 	c.store(&next, flipped, at)
-	return flipped
 }
 
 // Observation returns name's observation read at now: stale facts, and facts

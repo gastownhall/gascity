@@ -33,8 +33,7 @@ const v2EffectsReal = false
 
 // v2ControllersInBuild reports whether v2 would act. While the planner is
 // trace-only it would start, restart and scale nothing, so selecting it is
-// refused. The skeleton's constants (reconcile_runtime.go) are dead; C3
-// deletes them.
+// refused.
 const v2ControllersInBuild = v2EffectsReal
 
 // v2SkeletonEnv is the developer-only override that admits v2 before its

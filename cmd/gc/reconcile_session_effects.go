@@ -88,14 +88,11 @@ func newEffectExecutor(done func(rowKey, error), stderr io.Writer) *effectExecut
 	}
 }
 
-// inFlight returns k's unsettled effect's deadline.
-func (x *effectExecutor) inFlight(k rowKey) (time.Time, bool) {
+// inFlight reports whether k has an unsettled effect.
+func (x *effectExecutor) inFlight(k rowKey) bool {
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	if e := x.inflight[k]; e != nil {
-		return e.deadline, true
-	}
-	return time.Time{}, false
+	return x.inflight[k] != nil
 }
 
 // submit starts e for k. It refuses, running nothing, while k has an effect
