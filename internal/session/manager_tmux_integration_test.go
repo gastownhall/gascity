@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && linux
 
 package session
 
@@ -43,24 +43,18 @@ func TestSuspend_RealTmuxDeletedSocketFailsAndDeadServerSucceeds(t *testing.T) {
 	cfg := tmux.DefaultConfig()
 	cfg.SocketName = fmt.Sprintf("gctest-sus-%d", time.Now().UnixNano()%1e9)
 	socketPath := filepath.Join(socketRoot, fmt.Sprintf("tmux-%d", os.Getuid()), cfg.SocketName)
-	tmuxCmd := func(args ...string) (string, error) {
-		out, err := exec.Command("tmux", append([]string{"-L", cfg.SocketName}, args...)...).CombinedOutput()
-		return strings.TrimSpace(string(out)), err
-	}
+	tm := tmux.NewTmuxWithConfig(cfg)
 
 	mgr := NewManagerWithOptions(beads.NewMemStore(), tmux.NewProviderWithConfig(cfg))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "test", Command: "sleep 600", WorkDir: t.TempDir(), Provider: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	rawPID, err := tmuxCmd("display-message", "-p", "#{pid}")
+	panePID, err := tm.GetPanePID(info.SessionName)
 	if err != nil {
-		t.Fatalf("read server pid: %v: %s", err, rawPID)
+		t.Fatalf("read pane pid: %v", err)
 	}
-	serverPID, err := strconv.Atoi(rawPID)
-	if err != nil || serverPID <= 1 {
-		t.Fatalf("server pid = %q, want a pid", rawPID)
-	}
+	serverPID := parentPID(t, panePID)
 	t.Cleanup(func() {
 		// SIGUSR1 makes tmux recreate a deleted socket, so kill-server can
 		// reach it. Each attempt is a tmux round trip, which paces the retry;
@@ -68,8 +62,7 @@ func TestSuspend_RealTmuxDeletedSocketFailsAndDeadServerSucceeds(t *testing.T) {
 		_ = syscall.Kill(serverPID, syscall.SIGUSR1)
 		stopped := false
 		for attempt := 0; attempt < 100 && !stopped; attempt++ {
-			_, killErr := tmuxCmd("kill-server")
-			stopped = killErr == nil || syscall.Kill(serverPID, 0) != nil
+			stopped = tm.KillServer() == nil || syscall.Kill(serverPID, 0) != nil
 		}
 		if !stopped {
 			_ = syscall.Kill(serverPID, syscall.SIGTERM)
@@ -96,8 +89,7 @@ func TestSuspend_RealTmuxDeletedSocketFailsAndDeadServerSucceeds(t *testing.T) {
 	}
 	killed := false
 	for attempt := 0; attempt < 100 && !killed; attempt++ {
-		_, killErr := tmuxCmd("kill-server")
-		killed = killErr == nil
+		killed = tm.KillServer() == nil
 	}
 	if !killed {
 		t.Fatal("kill-server never reached the server after SIGUSR1")
@@ -108,4 +100,25 @@ func TestSuspend_RealTmuxDeletedSocketFailsAndDeadServerSucceeds(t *testing.T) {
 	if got, err := mgr.Get(info.ID); err != nil || got.State != StateSuspended {
 		t.Fatalf("after suspending against a dead server: state = %q, err = %v; want suspended", got.State, err)
 	}
+}
+
+// parentPID returns the parent of pid from /proc: a pane's parent is the tmux
+// server that spawned it.
+func parentPID(t *testing.T, pid string) int {
+	t.Helper()
+	stat, err := os.ReadFile(filepath.Join("/proc", strings.TrimSpace(pid), "stat"))
+	if err != nil {
+		t.Fatalf("read /proc/%s/stat: %v", pid, err)
+	}
+	// The command name may hold spaces; the fields after its closing paren are
+	// state, then ppid.
+	fields := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+1:]))
+	if len(fields) < 2 {
+		t.Fatalf("/proc/%s/stat = %q, want state and ppid", pid, stat)
+	}
+	ppid, err := strconv.Atoi(fields[1])
+	if err != nil || ppid <= 1 {
+		t.Fatalf("parent of pane %s = %q, want the tmux server's pid", pid, fields[1])
+	}
+	return ppid
 }
