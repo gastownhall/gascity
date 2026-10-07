@@ -354,14 +354,51 @@ func TestPaneShowsStagedDraftReadsOnlyTheLiveComposer(t *testing.T) {
 	}
 }
 
-// TestStagedDraftRecoveryIsCodexOnly: recovery runs only for a family whose
-// TUI renders a recognizable staged-draft marker and whose submit is already
-// verified. Every other provider keeps the old submit contract exactly.
-func TestStagedDraftRecoveryIsCodexOnly(t *testing.T) {
-	if _, ok := stagedDraftMarkerForFamily("codex"); !ok {
-		t.Fatal("codex has no staged-draft marker; a swallowed submit would leave its pasted prompt staged forever")
+// TestPaneShowsStagedDraftReadsClaudesLiveComposer pins Claude's marker: its
+// prompt is "❯" plus NBSP, and a submitted paste stays echoed in the transcript
+// above the composer, which must not count as staged.
+func TestPaneShowsStagedDraftReadsClaudesLiveComposer(t *testing.T) {
+	claude := stagedDraftMarkers["claude"]
+	tests := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{
+			name:  "staged paste in the composer",
+			lines: []string{"● Done.", "────", "❯\u00a0[Pasted text #2 +37 lines]", "────", "  ⏵⏵ bypass permissions on"},
+			want:  true,
+		},
+		{
+			name:  "two stacked staged pastes",
+			lines: []string{"❯\u00a0[Pasted text #1 +42 lines][Pasted text #2 +37 lines]", "────"},
+			want:  true,
+		},
+		{
+			name:  "earlier paste echoed above an empty composer",
+			lines: []string{"❯\u00a0[Pasted text #1 +44 lines]", "● Done.", "────", "❯\u00a0", "────", "  ⏵⏵ bypass permissions on"},
+			want:  false,
+		},
 	}
-	for _, family := range []string{"claude", "gemini", "kimi", "opencode", "grok", "", "some-unregistered-family"} {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := paneShowsStagedDraft(tt.lines, claude); got != tt.want {
+				t.Fatalf("paneShowsStagedDraft(%q) = %v, want %v", tt.lines, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStagedDraftRecoveryIsClaudeAndCodexOnly: recovery runs only for a family
+// whose TUI renders a recognizable staged-draft marker and whose submit is
+// already verified. Every other provider keeps the old submit contract exactly.
+func TestStagedDraftRecoveryIsClaudeAndCodexOnly(t *testing.T) {
+	for _, family := range []string{"claude", "codex"} {
+		if _, ok := stagedDraftMarkerForFamily(family); !ok {
+			t.Fatalf("%s has no staged-draft marker; a swallowed submit would leave its pasted prompt staged forever", family)
+		}
+	}
+	for _, family := range []string{"gemini", "kimi", "opencode", "grok", "", "some-unregistered-family"} {
 		if _, ok := stagedDraftMarkerForFamily(family); ok {
 			t.Errorf("stagedDraftMarkerForFamily(%q) = ok, want no marker (old submit contract)", family)
 		}

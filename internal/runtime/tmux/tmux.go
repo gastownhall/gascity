@@ -2565,12 +2565,13 @@ type stagedDraftMarker struct {
 }
 
 // stagedDraftMarkers lists the families whose staged-paste placeholder is
-// known. codex collapses a large paste into "[Pasted Content N chars]" until
-// it is submitted. A family without an entry never gets recovery submits.
-// Every entry must also be submit-verify eligible: recovery runs only on the
-// verified submit path.
+// known. codex collapses a large paste into "[Pasted Content N chars]" and
+// Claude into "[Pasted text #N +M lines]" until it is submitted. A family
+// without an entry never gets recovery submits. Every entry must also be
+// submit-verify eligible: recovery runs only on the verified submit path.
 var stagedDraftMarkers = map[string]stagedDraftMarker{
-	"codex": {promptPrefix: "› ", marker: "[Pasted Content "},
+	"claude": {promptPrefix: "❯ ", marker: "[Pasted text #"},
+	"codex":  {promptPrefix: "› ", marker: "[Pasted Content "},
 }
 
 func stagedDraftMarkerForFamily(family string) (stagedDraftMarker, bool) {
