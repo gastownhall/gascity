@@ -106,6 +106,10 @@ actually happened:
 `gc.outcome=pass` stays — it is the control-plane step result and is disjoint
 from `gc.work_outcome`.
 
+Record the metadata first, then close with `gc bd close --reason`: the reason
+is the one-line outcome reported as the bead's close reason, and an update
+cannot set one.
+
 **Shipped** (you committed a change):
 ```bash
 COMMIT=$(git rev-parse HEAD 2>/dev/null || true)
@@ -117,8 +121,8 @@ gc bd update "$WORK_BEAD_ID" \
   --set-metadata gc.work_commit="$COMMIT" \
   --set-metadata gc.work_branch="$WORK_BRANCH" \
   --set-metadata gc.work_verification="<commands you ran>" \
-  --status=closed \
-  --append-notes "Done: <brief summary of what you did>. Verification: <commands run>. Commit: ${COMMIT:-none}."
+  --append-notes "Done: <brief summary of what you did>. Verification: <commands run>. Commit: ${COMMIT:-none}." || exit 1
+gc bd close "$WORK_BEAD_ID" --reason "Done: <brief summary of what you did>. Commit: ${COMMIT:-none}." || exit 1
 ```
 
 **No-op** (the bead needed no change — already satisfied / duplicate):
@@ -126,11 +130,11 @@ gc bd update "$WORK_BEAD_ID" \
 gc bd update "$WORK_BEAD_ID" \
   --set-metadata gc.outcome=pass \
   --set-metadata gc.work_outcome=no-op \
-  --status=closed \
-  --append-notes "No-op: <why no change was needed>."
+  --append-notes "No-op: <why no change was needed>." || exit 1
+gc bd close "$WORK_BEAD_ID" --reason "No-op: <why no change was needed>." || exit 1
 ```
-For `blocked` / `abandoned`, use that value for `gc.work_outcome` and also mail
-`{{escalation_target}}`.
+For `blocked` / `abandoned`, use that value for `gc.work_outcome`, close with a
+`--reason` that says why the work stopped, and also mail `{{escalation_target}}`.
 
 **4. Close this formula step:**
 

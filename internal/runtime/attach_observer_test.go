@@ -77,3 +77,27 @@ func TestIsAttachedWithErrorBlankNameSkipsProvider(t *testing.T) {
 		t.Errorf("calls = %v, want none", f.Calls)
 	}
 }
+
+// Only a vanished session reads as not attached; an unavailable probe, an
+// untyped error, or one whose text merely says "not found" holds.
+func TestAttachProbeHolds(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		attached bool
+		err      error
+		want     bool
+	}{
+		{name: "attached", attached: true, want: true},
+		{name: "detached", want: false},
+		{name: "session not found", err: fmt.Errorf("probe: %w", ErrSessionNotFound), want: false},
+		{name: "unavailable", err: fmt.Errorf("probe: %w", ErrRuntimeUnavailable), want: true},
+		{name: "untyped", err: errors.New("probe failed"), want: true},
+		{name: "not found text only", err: errors.New("can't find session: not found"), want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := AttachProbeHolds(tc.attached, tc.err); got != tc.want {
+				t.Fatalf("AttachProbeHolds(%v, %v) = %v, want %v", tc.attached, tc.err, got, tc.want)
+			}
+		})
+	}
+}

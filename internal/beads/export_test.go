@@ -34,7 +34,7 @@ func NewNativeDoltStoreForPinnedIDFenceConformance(mintPrefix string, namespaces
 // id-resolution seam. The onChange callback receives the same 6-tuple the record
 // site (cmd/gc/api_state.go) wraps into an events.Event.
 func (c *CachingStore) NotifyChangeForTest(eventType string, b Bead) {
-	c.notifyChange(eventType, b)
+	c.notifyChange(ChangeLocal, eventType, b)
 }
 
 // NewProxiedStoreForConformance returns the proxied-native SPLIT store — native

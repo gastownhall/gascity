@@ -173,6 +173,8 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 
+	warnSupervisorBinaryMismatch("gc status", stderr)
+
 	configStderr := stderr
 	if jsonOutput {
 		configStderr = io.Discard

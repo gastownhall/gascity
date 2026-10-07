@@ -1,3 +1,4 @@
+load("@bazel_lib//lib:copy_to_bin.bzl", "copy_to_bin")
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
@@ -17,6 +18,7 @@ go_library(
         "convoy_event_stream.go",
         "convoy_sql.go",
         "cursor_token.go",
+        "dashport_support.go",
         "decode_beads.go",
         "decode_convoys.go",
         "decode_mail.go",
@@ -125,6 +127,7 @@ go_library(
         "pack_source_policy.go",
         "pagination.go",
         "partial_errors.go",
+        "pending_monitor.go",
         "readauth.go",
         "request_id.go",
         "residency_by_id.go",
@@ -174,6 +177,7 @@ go_library(
         "//internal/agentutil",
         "//internal/api/apierr",
         "//internal/api/dashboardbff",
+        "//internal/api/dashboardspa",
         "//internal/api/genclient",
         "//internal/beadmeta",
         "//internal/beads",
@@ -251,6 +255,8 @@ go_test(
         "agent_resolution_test.go",
         "apierr_guard_test.go",
         "apierr_roundtrip_test.go",
+        "bead_close_event_test.go",
+        "bead_close_reason_test.go",
         "blocking_test.go",
         "blocking_validation_test.go",
         "branch_resolver_test.go",
@@ -286,11 +292,13 @@ go_test(
         "event_stream_delivery_test.go",
         "fake_state_test.go",
         "genclient_roundtrip_test.go",
+        "global_stream_dynamic_test.go",
         "global_stream_precheck_test.go",
         "grant_e2e_test.go",
         "handler_agent_crud_test.go",
         "handler_agent_output_provider_test.go",
         "handler_agent_output_test.go",
+        "handler_agents_configured_test.go",
         "handler_agents_graph_work_test.go",
         "handler_agents_test.go",
         "handler_beads_bounded_test.go",
@@ -331,6 +339,7 @@ go_test(
         "handler_session_stream_promotion_test.go",
         "handler_session_submit_test.go",
         "handler_sessions_test.go",
+        "handler_sling_cli_parity_test.go",
         "handler_sling_graph_binding_test.go",
         "handler_sling_test.go",
         "handler_status_bench_test.go",
@@ -338,6 +347,7 @@ go_test(
         "handler_status_pool_identity_test.go",
         "handler_status_scoped_store_test.go",
         "handler_status_session_class_test.go",
+        "handler_status_suspended_city_test.go",
         "handler_status_suspended_ready_test.go",
         "handler_status_test.go",
         "handler_status_unread_store_test.go",
@@ -373,6 +383,7 @@ go_test(
         "pagination_bounds_test.go",
         "pagination_dialect_guard_test.go",
         "pagination_test.go",
+        "pending_monitor_test.go",
         "read_model_no_get_test.go",
         "readauth_test.go",
         "relic_census_state_test.go",
@@ -398,6 +409,7 @@ go_test(
         "server_rollout_test.go",
         "server_test.go",
         "session_class_routing_test.go",
+        "session_create_demand_only_test.go",
         "session_frame_types_test.go",
         "session_get_read_test.go",
         "session_materialization_guard_test.go",
@@ -432,6 +444,7 @@ go_test(
         "test_helpers_test.go",
         "testenv_import_test.go",
         "title_generate_test.go",
+        "wake_serialization_conflict_test.go",
         "webhook_dedup_test.go",
         "webhook_ratelimit_test.go",
         "work_record_close_gate_api_test.go",
@@ -448,8 +461,7 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
-        "//:repo_source_tree",
-        "//docs:all_files",
+        "//docs:reference_schema",
         "//internal/worker:operation_events.go",
     ],
     embed = [":api"],
@@ -464,6 +476,7 @@ go_test(
         "//internal/bazeltest",
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/beads/contract",
         "//internal/beads/splittest",
         "//internal/cityinit",
@@ -473,6 +486,7 @@ go_test(
         "//internal/config",
         "//internal/configedit",
         "//internal/convergence",
+        "//internal/convoy",
         "//internal/coordclass",
         "//internal/events",
         "//internal/extmsg",
@@ -504,6 +518,7 @@ go_test(
         "//internal/storeref",
         "//internal/storeref/storereftest",
         "//internal/supervisor",
+        "//internal/suspensionstate",
         "//internal/telemetry",
         "//internal/testenv",
         "//internal/testutil",
@@ -523,7 +538,20 @@ go_test(
     ],
 )
 
-exports_files(["handler_sessions.go"])
+exports_files([
+    "handler_sessions.go",
+    # Committed spec, compared against cmd/genspec output by
+    # //cmd/genspec:genspec_in_sync_test.
+    "openapi.json",
+])
+
+# The spec where the dashboard's openapi-ts config reads it (../../openapi.json
+# from dashboardspa/web) inside the output tree rules_js runs tools in.
+copy_to_bin(
+    name = "openapi_json_bin",
+    srcs = ["openapi.json"],
+    visibility = ["//internal/api/dashboardspa/web:__pkg__"],
+)
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
@@ -533,6 +561,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

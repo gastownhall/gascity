@@ -1,3 +1,50 @@
+# Scripted fake agents driven by test/integration.
+filegroup(
+    name = "agents",
+    srcs = glob(["agents/**"]),
+    visibility = ["//visibility:public"],
+)
+
+exports_files(
+    [
+        "bazel-hermeticity.toml",
+        "test-resources.toml",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# --- integration_packages (managed by tools/bazel/integration_suite.py) ---
+
+# bazel.yml's integration lane runs this under --config=integration.
+# manual: `bazel test //...` (the unit lane) does not expand it.
+test_suite(
+    name = "integration_packages",
+    tags = ["manual"],
+    tests = [
+        "//cmd/gc-write-mint:gc-write-mint_test",
+        "//cmd/gc:gc_test",
+        "//examples/bd/dolt:dolt_test",
+        "//examples/gastown:gastown_test",
+        "//internal/api:api_test",
+        "//internal/bdflags:bdflags_test",
+        "//internal/beads/exec:exec_test",
+        "//internal/beads:beads_test",
+        "//internal/credentialprovider:credentialprovider_test",
+        "//internal/orders:orders_test",
+        "//internal/processgroup:processgroup_test",
+        "//internal/runtime/acp:acp_test",
+        "//internal/runtime/herdr:herdr_test",
+        "//internal/runtime/ssh:ssh_test",
+        "//internal/runtime/subprocess:subprocess_test",
+        "//internal/runtime/tmux:tmux_test",
+        "//internal/storebinding/beadsworkspace:beadsworkspace_test",
+        "//test/containerhost:containerhost_test",
+        "//test/dashport:dashport_test",
+    ],
+)
+
+# --- end integration_packages ---
+
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(
@@ -6,6 +53,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

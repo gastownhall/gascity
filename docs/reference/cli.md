@@ -2115,6 +2115,10 @@ entry using source plus optional version. Supported sources are:
   with the pack subpath and locked to the current commit
 - remote git repositories: cloned and locked; --version accepts a semver
   constraint or sha:&lt;commit&gt;
+- packs published in a configured pack registry: a semver --version (or no
+  --version) resolves against the registry's release entries, not git tags;
+  the constraint is kept, the lock records the release version and commit,
+  and the fetched content must match the release's content hash
 - remote GitHub repository subpaths: use dereferenceable tree URLs such as
   https://github.com/org/repo/tree/main/packs/foo
 
@@ -2332,6 +2336,7 @@ gc init --template gascity --default-provider claude \
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--allow-supervisor-mismatch` | bool |  | register the city even when the running supervisor is a different gc installation than this binary |
 | `--beads-target` | string |  | beads target selector: local or external (or GC_BEADS_TARGET); give with --beads-transport. Default local. external requires --dolt-host, --dolt-port and --dolt-database (or GC_DOLT_HOST/GC_DOLT_PORT/GC_DOLT_DATABASE); bd resolves the project_id itself, so --dolt-project-id is not needed with a selector |
 | `--beads-transport` | string |  | beads transport selector: direct or proxied (or GC_BEADS_TRANSPORT); give with --beads-target. Default proxied: bd owns the Dolt process, any bd read restarts it, and gc stop stops it. direct is the escape hatch and is also bd-owned (bd init --server), not the legacy gc-managed server. Every fresh provider-owned init requires bd &gt;= 1.3.0, selector or not; only the legacy --dolt-host alias given without a selector stays on the 1.0.4 floor |
 | `--bootstrap-profile` | string |  | bootstrap profile to apply for hosted/container defaults |
@@ -3936,6 +3941,14 @@ socket so the reconciler stops the session immediately rather than on
 its next patrol tick. Call this after the session has finished its
 current work in response to a drain signal.
 
+Under session_reconciler = "v2" the ack is first written to the session
+row, bound to its current incarnation. A session acking itself must
+carry a GC_INSTANCE_TOKEN that matches the row; an operator acking a
+session from outside it passes --operator and a target, and the ack binds
+to the incarnation the command read. A missing or stale token, or a store
+that is unreachable or keeps changing, exits 1 with nothing acknowledged.
+Under the legacy reconciler the ack behaves as it always has.
+
 ```
 gc runtime drain-ack [name] [flags]
 ```
@@ -3943,6 +3956,7 @@ gc runtime drain-ack [name] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output as JSON |
+| `--operator` | bool |  | ack another session as an operator, bound to the incarnation read (requires a target) |
 
 ## gc runtime drain-check
 
@@ -4013,7 +4027,8 @@ gc runtime request-restart
 Cancel a pending drain signal on a session.
 
 Clears the GC_DRAIN and GC_DRAIN_ACK metadata flags, allowing the
-session to continue normal operation. Pass a session alias or ID.
+session to continue normal operation. Pass a session alias or ID. Under
+session_reconciler = "v2" it also clears the session row's drain-ack.
 
 ```
 gc runtime undrain <name> [flags]
@@ -4620,6 +4635,7 @@ gc supervisor run
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--allow-supervisor-mismatch` | bool |  | start even when the running supervisor is a different gc installation than this binary |
 | `-n`, `--dry-run` | bool |  | preview what agents would start without starting them |
 | `--json` | bool |  | emit JSONL summary |
 | `--no-auto-restart` | bool |  | detect supervisor binary drift but do not auto-restart; exits non-zero on drift |
@@ -4694,19 +4710,35 @@ gc storage
 |------------|-------------|
 | [gc storage migrate](#gc-storage-migrate) | Migrate this city's infrastructure classes onto their configured binding |
 | [gc storage preflight](#gc-storage-preflight) | Report what the migration would refuse, without migrating (read-only) |
-| [gc storage recover-stranded](#gc-storage-recover-stranded) | Copy stranded infrastructure beads from the retained work store into the converged binding |
+| [gc storage recover-stranded](#gc-storage-recover-stranded) | Copy stranded infrastructure beads from the work store into the converged binding |
+| [gc storage repair-sequence](#gc-storage-repair-sequence) | Inspect or raise a SQLite bead store's id-sequence floor |
 | [gc storage status](#gc-storage-status) | Report this city's storage-class layout (read-only) |
 
 ## gc storage migrate
 
 Copy this city's infrastructure-class beads out of the work store and into
-the binding [storage.classes] assigns them to.
+the binding [storage.classes] assigns them to, then clear the work store's
+copies.
 
 Every bead is copied with its id and its within-class dependency topology
 preserved, proven field-equal against a closed and reopened destination, and
-then recorded in a proven-copy manifest and a convergence marker. The source is
-RETAINED verbatim: nothing here writes to, moves or prunes the work store, so a
-rollback before cutover is a config edit with no data recovery step.
+then recorded in a proven-copy manifest and a convergence marker. Nothing in
+the work store changes before the marker, so a rollback before cutover is a
+config edit with no data recovery step.
+
+Past the marker the binding is the only authoritative copy, so the work
+store's now-stale copies are cleared: each is written to a backup beside the
+manifest (infra.retained-source.jsonl), the backup is re-read and proven equal
+to the rows it records, and only then are the rows removed. A work bead whose
+blocking dependency the binding has already satisfied is released; every other
+cross-store edge is kept.
+
+Run it again on a converged city to repair one that still holds its copies —
+a city migrated by an earlier build, or a clear that was interrupted. Boot
+refuses such a city and names this command.
+
+--from-backup re-copies a binding whose database is gone from that backup
+instead of from the work store, which no longer holds the slice.
 
 The move refuses while a writer can reach the source. This binary can prove the
 absence of a controller and cannot prove the absence of anything else, so that
@@ -4719,6 +4751,7 @@ gc storage migrate [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
+| `--from-backup` | bool |  | re-copy a binding whose database is gone from the retained-source backup |
 | `--from-work` | bool |  | migrate the infrastructure classes out of this city's work store |
 
 ## gc storage preflight
@@ -4765,6 +4798,9 @@ command run twice: the migration is one-shot on purpose, and forcing it to
 re-copy would re-import a serving binding from a source that no longer holds
 what the binding does.
 
+The recovered beads stay in the work store until the migration is run again,
+which clears them exactly as it clears the cutover's own copies.
+
 ```
 gc storage recover-stranded [flags]
 ```
@@ -4775,6 +4811,53 @@ gc storage recover-stranded [flags]
 | `--dump` | string |  | write every stranded bead and its source dep edges to this JSON file before any write |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--from-work` | bool |  | recover the stranded infrastructure beads out of this city's work store |
+
+## gc storage repair-sequence
+
+Inspect or raise the persisted id-sequence floor of a SQLite bead store.
+
+Without --floor this is read-only: it reports the persisted floor and the
+highest auto-minted id the store still holds, and whether minting is refused
+because a negative "&lt;prefix&gt;--&lt;n&gt;" id ranks above the floor.
+
+A negative id above the floor usually means an older build wrapped the
+sequence past 9223372036854775807. It can also come from a copy or import that
+pinned "&lt;prefix&gt;--&lt;n&gt;" ids into a store that never wrapped. If those rows are
+stray duplicates, do not raise the floor: delete every "&lt;prefix&gt;--&lt;n&gt;" row
+above the floor, not only the one the report names, and reopen the store
+(restart the processes serving it), and minting resumes in the positive range.
+Deleting destroys those beads, so if any of them is a real bead, raise the
+floor instead.
+
+With --floor=N it persists N as the floor, so the next auto id is N+1. Pick N
+at or above the highest id EVER issued under the prefix — deleted beads are no
+longer in the store, so derive it from the event log and dispatcher traces. The
+command refuses to lower the persisted floor and refuses N below the highest
+auto id present.
+
+Ids are ordered 1 &lt; ... &lt; 9223372036854775807 &lt; -9223372036854775808 &lt; ... &lt; -1.
+On a store an older build wrapped, the positive range is spent: pass a NEGATIVE
+floor above every "&lt;prefix&gt;--&lt;n&gt;" id ever issued, and allocation continues
+upward toward -1 without re-entering the positive range. That cannot be
+undone. Builds without this fix refuse to open a store whose floor is negative.
+
+Before repairing a wrapped store, stop every process serving it that runs a
+build without this fix, so none keeps minting wrapped ids past the floor you
+pick. After a floor raise, processes on this build need no restart: one that
+refuses to mint resumes at its next mint once the floor covers the store.
+
+The store defaults to this city's SQLite infrastructure binding; --dir names
+any other store directory (the directory holding beads.sqlite).
+
+```
+gc storage repair-sequence [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dir` | string |  | store directory holding beads.sqlite (default: this city's SQLite infrastructure binding) |
+| `--floor` | string |  | new floor (int64, may be negative); omit to only report |
+| `--prefix` | string | `gcg` | auto-id prefix whose sequence to inspect or repair |
 
 ## gc storage status
 
@@ -5280,6 +5363,7 @@ gc worktree ensure [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--agent` | string |  | qualified agent identity to best-effort materialize skills for after creation |
 | `--base` | string |  | exact base ref used for this worktree (required) |
 | `--base-sha` | string |  | recorded base SHA to verify when reusing a worktree |
 | `--bead` | string |  | work bead bound to this worktree (required) |

@@ -16,6 +16,90 @@ import (
 
 var _ runtime.Provider = (*Provider)(nil)
 
+type unattendedStopCall struct {
+	name          string
+	expectedToken string
+}
+
+type unattendedStopperProvider struct {
+	runtime.Provider
+	calls []unattendedStopCall
+	err   error
+}
+
+func newUnattendedStopperProvider(err error) *unattendedStopperProvider {
+	return &unattendedStopperProvider{Provider: runtime.NewFake(), err: err}
+}
+
+func (p *unattendedStopperProvider) StopUnattendedSession(name, expectedToken string) error {
+	p.calls = append(p.calls, unattendedStopCall{name: name, expectedToken: expectedToken})
+	return p.err
+}
+
+func TestProviderStopUnattendedSessionRoutesOnlySelectedBackend(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		defaultSP := newUnattendedStopperProvider(nil)
+		acpSP := newUnattendedStopperProvider(nil)
+		p := New(defaultSP, acpSP)
+
+		if err := p.StopUnattendedSession("plain", "token-default"); err != nil {
+			t.Fatalf("StopUnattendedSession(default): %v", err)
+		}
+		if got := defaultSP.calls; len(got) != 1 || got[0] != (unattendedStopCall{name: "plain", expectedToken: "token-default"}) {
+			t.Fatalf("default unattended stops = %#v, want exact plain/token-default call", got)
+		}
+		if got := acpSP.calls; len(got) != 0 {
+			t.Fatalf("ACP unattended stops = %#v, want none", got)
+		}
+	})
+
+	t.Run("ACP", func(t *testing.T) {
+		defaultSP := newUnattendedStopperProvider(nil)
+		acpSP := newUnattendedStopperProvider(nil)
+		p := New(defaultSP, acpSP)
+		p.RouteACP("acpsess")
+
+		if err := p.StopUnattendedSession("acpsess", "token-acp"); err != nil {
+			t.Fatalf("StopUnattendedSession(ACP): %v", err)
+		}
+		if got := acpSP.calls; len(got) != 1 || got[0] != (unattendedStopCall{name: "acpsess", expectedToken: "token-acp"}) {
+			t.Fatalf("ACP unattended stops = %#v, want exact acpsess/token-acp call", got)
+		}
+		if got := defaultSP.calls; len(got) != 0 {
+			t.Fatalf("default unattended stops = %#v, want none", got)
+		}
+	})
+
+	t.Run("unsupported default does not probe ACP", func(t *testing.T) {
+		acpSP := newUnattendedStopperProvider(nil)
+		p := New(runtime.NewFake(), acpSP)
+
+		err := p.StopUnattendedSession("plain", "token")
+		if err == nil || !strings.Contains(err.Error(), "default backend") {
+			t.Fatalf("StopUnattendedSession error = %v, want contextual default-backend error", err)
+		}
+		if got := acpSP.calls; len(got) != 0 {
+			t.Fatalf("ACP unattended stops = %#v, want no fallback probe", got)
+		}
+	})
+
+	t.Run("ACP error does not probe default", func(t *testing.T) {
+		sentinel := errors.New("ACP unattended stop unavailable")
+		defaultSP := newUnattendedStopperProvider(nil)
+		acpSP := newUnattendedStopperProvider(sentinel)
+		p := New(defaultSP, acpSP)
+		p.RouteACP("acpsess")
+
+		err := p.StopUnattendedSession("acpsess", "token")
+		if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "ACP backend") {
+			t.Fatalf("StopUnattendedSession error = %v, want wrapped contextual ACP error", err)
+		}
+		if got := defaultSP.calls; len(got) != 0 {
+			t.Fatalf("default unattended stops = %#v, want no fallback probe", got)
+		}
+	})
+}
+
 // Relaunch must reach the routed backend (default vs ACP), or the reconciler's
 // RelaunchProvider type-assert would be masked by the auto router and fall back
 // to Stop+Start.
@@ -901,6 +985,27 @@ func TestAutoBackends_NamesBackendsWithoutListing(t *testing.T) {
 	for i, b := range backends {
 		if b.Label != listings[i].Label || b.Provider != listings[i].Provider {
 			t.Errorf("backend %d = (%q, %T), listing = (%q, %T)", i, b.Label, b.Provider, listings[i].Label, listings[i].Provider)
+		}
+	}
+}
+
+// LL6: auto routes Start unchanged, so FreshOnly reaches whichever backend
+// hosts the name. Kills a router that drops or rebuilds the Config.
+func TestAutoStartPassesFreshOnlyThrough(t *testing.T) {
+	def, acp := runtime.NewFake(), runtime.NewFake()
+	p := New(def, acp)
+	p.RouteACP("acpsess")
+
+	for _, tc := range []struct {
+		name    string
+		backend *runtime.Fake
+	}{{"plain", def}, {"acpsess", acp}} {
+		if err := p.Start(context.Background(), tc.name, runtime.Config{Command: "c", FreshOnly: true}); err != nil {
+			t.Fatalf("Start(%s): %v", tc.name, err)
+		}
+		calls := tc.backend.Calls
+		if len(calls) == 0 || calls[len(calls)-1].Method != "Start" || !calls[len(calls)-1].Config.FreshOnly {
+			t.Errorf("Start(%s) did not reach its backend with FreshOnly: %+v", tc.name, calls)
 		}
 	}
 }

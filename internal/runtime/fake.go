@@ -40,6 +40,7 @@ type Fake struct {
 	StopErrors              map[string]error     // per-session Stop errors for testing
 	StopLeavesRunning       map[string]bool      // per-session Stop returns nil without deleting the session
 	PendingInteractions     map[string]*PendingInteraction
+	PendingErrors           map[string]error // per-session Pending errors for testing
 	Responses               map[string][]InteractionResponse
 	SleepCapabilityValue    SessionSleepCapability
 	WaitForIdleErrors       map[string]error
@@ -48,6 +49,7 @@ type Fake struct {
 	ResetTurnErrors         map[string]error
 	InterruptBoundaryErrors map[string]error
 	RemoveMetaErrors        map[string]map[string]error // per-session/key RemoveMeta errors for testing
+	GetMetaErrors           map[string]map[string]error // per-session/key GetMeta errors for testing
 	// WaitForIdleGates blocks WaitForIdle on a per-name channel until the
 	// caller closes it. A nil or absent entry returns the configured
 	// WaitForIdleErrors value immediately. The gate is read under f.mu
@@ -149,6 +151,8 @@ func NewFake() *Fake {
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
 		RemoveMetaErrors:        make(map[string]map[string]error),
+		GetMetaErrors:           make(map[string]map[string]error),
+		PendingErrors:           make(map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
 		WaitForIdleStarted:      make(map[string]chan struct{}),
 		RelaunchErrors:          make(map[string]error),
@@ -474,6 +478,9 @@ func (f *Fake) Pending(name string) (*PendingInteraction, error) {
 	if f.broken {
 		return nil, fmt.Errorf("session unavailable")
 	}
+	if err := f.PendingErrors[name]; err != nil {
+		return nil, err
+	}
 	pending := f.PendingInteractions[name]
 	if pending == nil {
 		return nil, nil
@@ -536,6 +543,9 @@ func (f *Fake) GetMeta(name, key string) (string, error) {
 	f.Calls = append(f.Calls, Call{Method: "GetMeta", Name: name, Key: key})
 	if f.broken {
 		return "", fmt.Errorf("session unavailable")
+	}
+	if err := f.GetMetaErrors[name][key]; err != nil {
+		return "", err
 	}
 	return f.meta[name][key], nil
 }

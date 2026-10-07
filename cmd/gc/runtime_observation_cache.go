@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,8 +22,9 @@ import (
 //   - A fact older than maxAge reads Unknown, at the reader's clock: a
 //     published snapshot is immutable, so staleness cannot be written into it.
 //   - Absence is concluded only by a complete, attested pass on the backend
-//     that last listed the name. Any other outcome leaves the name's facts
-//     alone to age out.
+//     that last listed the name, or, once a provider swap removed that
+//     backend, by a pass on which every backend is complete. Any other
+//     outcome leaves the name's facts alone to age out.
 //   - Before a backend's first complete pass within the current provider,
 //     every fact about names on it reads Unknown.
 //
@@ -102,6 +104,9 @@ const (
 	// obsReasonProviderSwapped is a read-time Unknown: the provider changed
 	// and the name's backend has not completed a pass since.
 	obsReasonProviderSwapped = "provider-swapped"
+	// obsReasonProbeIncomplete marks an agent-process fact whose probe timed
+	// out, erred or was overtaken by the pane's death. It stays Unknown.
+	obsReasonProbeIncomplete = "probe-incomplete"
 )
 
 // observationRetentionPasses is how many consecutive passes a name may go
@@ -144,6 +149,11 @@ type RuntimeObservation struct {
 	// InstanceToken is this incarnation's GC_INSTANCE_TOKEN; "" when unknown.
 	// It is a capability: never trace it.
 	InstanceToken string
+	// Identity is the runtime's identity env as the lane last read it, on
+	// every backend (v5 O3). Owner, OwnerState and InstanceToken stay the
+	// legacy reapers' owner fact: set only for an incarnation on a backend
+	// with a batched environment read, as before.
+	Identity runtimeIdentity
 
 	// Listed: the artifact is visible in the provider listing (on tmux this
 	// includes remain-on-exit corpses).
@@ -160,6 +170,9 @@ type RuntimeObservation struct {
 	// incarnation; LastListedAt the latest.
 	FirstListedAt time.Time
 	LastListedAt  time.Time
+	// EnrichedAt is the listing start of the last pass that enriched the
+	// name: Incarnation, the owner fields, Running and Attached are from it.
+	EnrichedAt time.Time
 }
 
 func (o *RuntimeObservation) fact(kind FactKind) *RuntimeFact {
@@ -220,6 +233,10 @@ type BackendPass struct {
 	// ServerAbsent is runtime.IsRuntimeServerAbsent on this backend's own
 	// error.
 	ServerAbsent bool
+	// ConfirmedDead is a ServerAbsent listing whose server the backend
+	// confirmed dead right after it (runtime.ServerDeathConfirmer): a
+	// complete, empty pass for v2 only (v5 O1). Outcome and Primed ignore it.
+	ConfirmedDead bool
 }
 
 // InventoryPass is one lane pass's listing.
@@ -246,15 +263,68 @@ func (p InventoryPass) mergedFailed() bool {
 	return p.MergedErr != nil && !runtime.IsPartialListError(p.MergedErr)
 }
 
+// listedOn maps every name a non-failed backend listed this pass to the
+// first such backend, in backend order.
+func (p InventoryPass) listedOn() map[string]string {
+	on := make(map[string]string)
+	for _, b := range p.Backends {
+		if b.Outcome == OutcomeFailed {
+			continue
+		}
+		for _, name := range b.Names {
+			if _, ok := on[name]; !ok {
+				on[name] = b.Label
+			}
+		}
+	}
+	return on
+}
+
+// concludesAbsent reports whether this pass proves gone a name it did not
+// list, given the backend that last listed it: that backend listed
+// completely, or it is no longer one of the pass's backends (the provider
+// was swapped) and every backend listed completely.
+func (p InventoryPass) concludesAbsent(label string) bool {
+	if len(p.Backends) == 0 {
+		return false
+	}
+	all := true
+	for _, b := range p.Backends {
+		if b.Label == label {
+			return b.Outcome == OutcomeComplete
+		}
+		all = all && b.Outcome == OutcomeComplete
+	}
+	return all
+}
+
 // InventoryAttrs are one listed name's enrichment and attribution. A name
 // with no entry keeps its enrichment facts; an entry whose Known flag is
-// false records that fact as unsupported.
+// false records that fact as unsupported. ProcessProbed says a process probe
+// ran; only a Known answer sets the agent-process fact.
 type InventoryAttrs struct {
 	Incarnation             string
 	DeadKnown, AllPanesDead bool
 	AttachedKnown, Attached bool
 	OwnerState              OwnerState
 	OwnerID, InstanceToken  string
+	Identity                runtimeIdentity
+	ProcessProbed           bool
+	ProcessKnown            bool
+	ProcessAlive            bool
+}
+
+// runtimeIdentity is one read of a runtime's identity env (v5 O2, O3):
+// GC_SESSION_ID, GC_RUNTIME_EPOCH, GC_INSTANCE_TOKEN and GT_PROCESS_NAMES.
+// Known is false when the read failed, timed out or was never made; the
+// identity fields are then empty. ReadAt is when the lane issued the read.
+type runtimeIdentity struct {
+	Known        bool
+	SessionID    string
+	Epoch        string
+	Token        string
+	ProcessNames []string
+	ReadAt       time.Time
 }
 
 // Backend health states.
@@ -347,6 +417,24 @@ func (s *ObservationSnapshot) readFact(backend string, f RuntimeFact, now time.T
 	return f
 }
 
+// allPrimedOrConfirmedDead is AllPrimed for v2's boot gate: a backend whose
+// latest pass confirmed its server dead counts as primed (v5 O1, P2).
+func (s *ObservationSnapshot) allPrimedOrConfirmedDead() bool {
+	if s == nil || len(s.Primed) == 0 {
+		return false
+	}
+	dead := make(map[string]bool)
+	for _, b := range s.Inventory.Backends {
+		dead[b.Label] = b.ConfirmedDead
+	}
+	for label, primed := range s.Primed {
+		if !primed && !dead[label] {
+			return false
+		}
+	}
+	return true
+}
+
 // AllPrimed reports whether every backend of the latest pass has completed a
 // pass within the current provider.
 func (s *ObservationSnapshot) AllPrimed() bool {
@@ -415,31 +503,21 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 	}
 
 	// A name listed by two backends belongs to the first, in backend order.
-	listedOn := make(map[string]string)
-	complete := make(map[string]bool)
+	listedOn := pass.listedOn()
 	unrefreshed := make(map[string]string)
 	failed := make(map[string]bool)
 	for _, b := range pass.Backends {
 		switch b.Outcome {
 		case OutcomeFailed:
 			failed[b.Label] = true
-		case OutcomeComplete:
-			complete[b.Label] = true
+			continue
 		case OutcomePartial:
 			unrefreshed[b.Label] = obsReasonPartialList
 		case OutcomeUnattested:
 			unrefreshed[b.Label] = obsReasonUnattested
 		}
-		if b.Outcome == OutcomeFailed {
-			continue
-		}
 		if len(b.Names) > 0 {
 			c.everListed[b.Label] = true
-		}
-		for _, name := range b.Names {
-			if _, ok := listedOn[name]; !ok {
-				listedOn[name] = b.Label
-			}
 		}
 	}
 
@@ -473,7 +551,7 @@ func (c *ObservationCache) PublishInventory(pass InventoryPass, attrs map[string
 		}
 		old := obs
 		switch {
-		case complete[obs.Backend]:
+		case pass.concludesAbsent(obs.Backend):
 			obs.Listed, obs.Running, obs.ProcessAlive = absent, absent, absent
 		case unrefreshed[obs.Backend] != "":
 			obs.Listed.Reason = unrefreshed[obs.Backend]
@@ -534,28 +612,33 @@ func primedChanged(prev, next map[string]bool) bool {
 func applyInventoryAttrs(obs *RuntimeObservation, a InventoryAttrs, at time.Time) {
 	poller := func(v ObsFact) RuntimeFact { return RuntimeFact{Value: v, ObservedAt: at, Source: SourcePoller} }
 	unsupported := RuntimeFact{Value: ObsUnknown, ObservedAt: at, Source: SourcePoller, Reason: obsReasonUnsupported}
-	obs.Incarnation = a.Incarnation
+	obs.Incarnation, obs.EnrichedAt = a.Incarnation, at
 	obs.Running, obs.ProcessAlive = unsupported, unsupported
 	if a.DeadKnown {
 		obs.Running = poller(obsFactOf(!a.AllPanesDead))
-		// A dead pane proves the process gone; a live pane says nothing about
-		// the agent process inside it.
-		if a.AllPanesDead {
+		// A dead pane proves the process gone; under a live pane only the
+		// process probe's known answer says anything about the agent.
+		switch {
+		case a.AllPanesDead:
 			obs.ProcessAlive = poller(ObsNo)
+		case a.ProcessKnown:
+			obs.ProcessAlive = poller(obsFactOf(a.ProcessAlive))
+		case a.ProcessProbed:
+			obs.ProcessAlive.Reason = obsReasonProbeIncomplete
 		}
 	}
 	obs.Attached = unsupported
 	if a.AttachedKnown {
 		obs.Attached = poller(obsFactOf(a.Attached))
 	}
-	obs.OwnerState, obs.Owner, obs.InstanceToken = a.OwnerState, reconcilekey.Key{}, a.InstanceToken
+	obs.OwnerState, obs.Owner, obs.InstanceToken, obs.Identity = a.OwnerState, reconcilekey.Key{}, a.InstanceToken, a.Identity
 	if a.OwnerState == OwnerSession {
 		obs.Owner = reconcilekey.SessionRef(a.OwnerID, obs.SessionName)
 	}
 }
 
-// observationChanged reports whether a fact value, the incarnation or the
-// owner differs; a refresh of ObservedAt alone is not a change.
+// observationChanged reports whether a fact value, the incarnation, the
+// owner or the identity read differs; a refresh of ObservedAt alone is not a change.
 func observationChanged(old, next RuntimeObservation, had bool) bool {
 	if !had {
 		return true
@@ -565,7 +648,14 @@ func observationChanged(old, next RuntimeObservation, had bool) bool {
 			return true
 		}
 	}
-	return old.Incarnation != next.Incarnation || old.OwnerState != next.OwnerState || old.Owner != next.Owner
+	return old.Incarnation != next.Incarnation || old.OwnerState != next.OwnerState || old.Owner != next.Owner ||
+		!sameIdentity(old.Identity, next.Identity)
+}
+
+// sameIdentity compares two identity reads, ignoring when they were made.
+func sameIdentity(a, b runtimeIdentity) bool {
+	return a.Known == b.Known && a.SessionID == b.SessionID && a.Token == b.Token && a.Epoch == b.Epoch &&
+		slices.Equal(a.ProcessNames, b.ProcessNames)
 }
 
 // store publishes next, advancing Gen and signaling Changed when flipped.
@@ -585,8 +675,8 @@ func (c *ObservationCache) store(next *ObservationSnapshot, flipped bool, at tim
 }
 
 // Note writes one fact from a fresh three-outcome probe. A write observed
-// before the stored fact loses.
-func (c *ObservationCache) Note(name string, kind FactKind, v ObsFact, at time.Time, src ObsSource, reason string) {
+// before the stored fact loses. It reports whether the fact's value flipped.
+func (c *ObservationCache) Note(name string, kind FactKind, v ObsFact, at time.Time, src ObsSource, reason string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	prev := c.cur.Load()
@@ -596,7 +686,7 @@ func (c *ObservationCache) Note(name string, kind FactKind, v ObsFact, at time.T
 	}
 	f := obs.fact(kind)
 	if at.Before(f.ObservedAt) {
-		return
+		return false
 	}
 	flipped := f.Value != v
 	*f = RuntimeFact{Value: v, ObservedAt: at, Source: src, Reason: reason}
@@ -608,22 +698,33 @@ func (c *ObservationCache) Note(name string, kind FactKind, v ObsFact, at time.T
 	}
 	next.ByName[name] = obs
 	c.store(&next, flipped, at)
+	return flipped
 }
 
-// Get returns name's observation with every fact read at the cache's clock:
-// stale facts, and facts about names on unprimed backends, read ObsUnknown.
-func (c *ObservationCache) Get(name string) (RuntimeObservation, bool) {
-	snap := c.cur.Load()
-	obs, ok := snap.ByName[name]
+// Observation returns name's observation read at now: stale facts, and facts
+// about names on unprimed backends, read ObsUnknown. Its Incarnation, owner
+// and identity fields are returned only for the incarnation listed now: Listed must read
+// Yes, and the pass that last listed the name must also have enriched it.
+// Otherwise they are cleared, so a reader never takes a stale, unprimed or
+// previous incarnation's attribution as the current one.
+func (s *ObservationSnapshot) Observation(name string, now time.Time, maxAge time.Duration) (RuntimeObservation, bool) {
+	obs, ok := s.ByName[name]
 	if !ok {
 		return RuntimeObservation{}, false
 	}
-	now := c.clock.Now()
 	for _, kind := range allFactKinds {
 		f := obs.fact(kind)
-		*f = snap.readFact(obs.Backend, *f, now, c.maxAge)
+		*f = s.readFact(obs.Backend, *f, now, maxAge)
+	}
+	if obs.Listed.Value != ObsYes || obs.EnrichedAt.IsZero() || !obs.EnrichedAt.Equal(obs.Listed.ObservedAt) {
+		obs.Incarnation, obs.Owner, obs.OwnerState, obs.InstanceToken, obs.Identity = "", reconcilekey.Key{}, OwnerUnknown, "", runtimeIdentity{}
 	}
 	return obs, true
+}
+
+// Get returns name's observation read at the cache's clock (Observation).
+func (c *ObservationCache) Get(name string) (RuntimeObservation, bool) {
+	return c.cur.Load().Observation(name, c.clock.Now(), c.maxAge)
 }
 
 // Snapshot returns the current immutable snapshot. Read facts through
@@ -632,14 +733,16 @@ func (c *ObservationCache) Snapshot() *ObservationSnapshot {
 	return c.cur.Load()
 }
 
-// FreshInventory returns the latest pass if it finished within maxAge and its
-// merged listing did not fail. A caller that gets false lists live.
-func (c *ObservationCache) FreshInventory(maxAge time.Duration) (InventoryPass, bool) {
-	pass := c.cur.Load().Inventory
+// FreshSnapshot returns the current snapshot if its pass finished within
+// maxAge and its merged listing did not fail, so a reader gets the pass and
+// the facts it published together. A caller that gets false lists live.
+func (c *ObservationCache) FreshSnapshot(maxAge time.Duration) (*ObservationSnapshot, bool) {
+	snap := c.cur.Load()
+	pass := snap.Inventory
 	if pass.FinishedAt.IsZero() || c.clock.Now().Sub(pass.FinishedAt) > maxAge || pass.mergedFailed() {
-		return InventoryPass{}, false
+		return nil, false
 	}
-	return pass, true
+	return snap, true
 }
 
 // Changed returns a channel that receives after each Gen advance; bursts

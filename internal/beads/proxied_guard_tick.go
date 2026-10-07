@@ -327,11 +327,11 @@ func (g *proxiedGuard) tickSteps(ctx context.Context, n int) proxiedGuardStep {
 		return step
 	}
 
-	// Step 3 — the events-journal slot. Deliberately a no-op: a grep for
-	// BD_EVENTS_JOURNAL / EventsJournal over non-test internal/beads and cmd/gc
-	// returns nothing, so there is no journal gate in gc for a tick to keep
-	// consistent. The slot is named here rather than dropped so the next reader
-	// finds the answer instead of the question.
+	// Step 3 — the events-journal slot. Deliberately a no-op: journal
+	// activation is applied once per open (openNativeDoltStorage) and gates no
+	// read, so there is nothing for a tick to keep consistent. The slot is named
+	// here rather than dropped so the next reader finds the answer instead of
+	// the question.
 
 	// Step 4 — the socket-owner join, every ownerEvery-th tick.
 	if g.opts.ownerEvery > 0 && n%g.opts.ownerEvery == 0 {

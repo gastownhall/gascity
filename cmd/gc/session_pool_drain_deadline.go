@@ -372,6 +372,7 @@ func retirePoolSlotAtDrainDeadline(
 	deferClosesOnBoot bool,
 	clk clock.Clock,
 	rec events.Recorder,
+	dt *drainTracker,
 	stderr io.Writer,
 ) (sessionpkg.MetadataPatch, bool) {
 	if store == nil || sp == nil || info.ID == "" || info.Closed {
@@ -410,7 +411,7 @@ func retirePoolSlotAtDrainDeadline(
 		return nil, false
 	}
 
-	stopped, performedStop := poolSlotRuntimeStoppedForRetire(cityPath, cfg, sp, store, rigStores, info, name, processNames, stderr)
+	stopped, performedStop := poolSlotRuntimeStoppedForRetire(cityPath, cfg, sp, store, rigStores, info, name, processNames, dt, clk.Now(), stderr)
 	if !stopped {
 		return nil, false
 	}
@@ -456,7 +457,7 @@ func retirePoolSlotAtDrainDeadline(
 		fmt.Fprintf(stderr, "session reconciler: stamping drain-deadline provenance on %s: %v\n", name, err) //nolint:errcheck
 		return nil, false
 	}
-	if !closeBead(store, info.ID, "drained", now, stderr) {
+	if !closeBead(store, info, "drained", now, stderr) {
 		if clearErr := sessionFrontDoor(store).ApplyPatch(info.ID, sessionpkg.MetadataPatch{drainFinalizeMetadataKey: ""}); clearErr != nil {
 			fmt.Fprintf(stderr, "session reconciler: clearing drain-deadline provenance after a refused close of %s: %v\n", name, clearErr) //nolint:errcheck
 		}
@@ -518,6 +519,8 @@ func poolSlotRuntimeStoppedForRetire(
 	info sessionpkg.Info,
 	name string,
 	processNames []string,
+	dt *drainTracker,
+	now time.Time,
 	stderr io.Writer,
 ) (confirmedGone bool, performedStop bool) {
 	obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, info.ID, processNames)
@@ -529,8 +532,13 @@ func poolSlotRuntimeStoppedForRetire(
 		return true, false
 	}
 	if expected := strings.TrimSpace(info.InstanceToken); expected != "" {
-		if actual, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); actual != "" && actual != expected {
+		switch verdict, err := readRuntimeInstanceToken(sp, name, expected); verdict {
+		case runtimeTokenMismatch:
 			fmt.Fprintf(stderr, "session reconciler: drain-deadline retire of %s skipped: instance token mismatch (session was replaced)\n", name) //nolint:errcheck
+			return false, false
+		case runtimeTokenUnverifiable:
+			logStandingCondition(dt, stderr, info.ID, "token_unverifiable.retire", fmt.Sprintf(
+				"session reconciler: drain-deadline retire of %s skipped: instance token unverifiable (token_unverifiable): %v", name, err), now)
 			return false, false
 		}
 	}

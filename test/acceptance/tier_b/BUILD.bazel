@@ -8,21 +8,24 @@ go_test(
         "idle_bead_stability_test.go",
         "lifecycle_b_test.go",
         "pool_workquery_test.go",
+        "split_storage_migrated_formula_test.go",
         "testenv_import_test.go",
     ],
     data = [
         "//cmd/gc",
         "//examples/bd",
         "//:go.mod",
-        "//:repo_source_tree",
+        "//docs:runbooks/split-storage-classes.md",
+        "//examples/gastown:pack_files",
         # Pinned prebuilt release binaries (see MODULE.bazel): hermetic bd and
         # dolt for the dolt-backed acceptance shapes, same versions the go-test
         # CI installs via install-bd-archive.sh / install-dolt-archive.sh.
         "@bd_bin_v1_3_1//:bd",
-        "@dolt_bin_v2_1_7//:dolt-linux-amd64/bin/dolt",
+        "@dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt",
     ],
     deps = [
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/fsys",
         "//internal/testenv",
         "//test/acceptance/helpers",
@@ -38,6 +41,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

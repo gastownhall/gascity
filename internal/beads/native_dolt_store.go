@@ -135,9 +135,37 @@ func withNativeDoltOpenEnvAndCredentialCommand(env map[string]string, credential
 // open environment while nativeDoltOpenEnvMu is already held. The lock-aware
 // form is used by hermetic opens, which must withhold the whole BEADS_ namespace
 // and project the selected keys as one indivisible environment transition.
+// BDAllowRemoteMigrateEnvKey is projected from env as well, so the linked
+// library sees it only when the caller decided it.
 func withNativeDoltOpenEnvAndCredentialCommandLocked(env map[string]string, credentialCommand string) (func(), error) {
-	return withProjectedOpenEnvLocked(nativeDoltOpenEnvKeys, env, credentialCommand)
+	restoreScoped, err := withProjectedOpenEnvLocked(nativeDoltOpenEnvKeys, env, credentialCommand)
+	if err != nil {
+		return nil, err
+	}
+	restoreRemoteMigrate, err := withProjectedOpenEnvLocked(bdRemoteMigrateOpenEnvKeys, env, "")
+	if err != nil {
+		restoreScoped()
+		return nil, err
+	}
+	return func() {
+		restoreRemoteMigrate()
+		restoreScoped()
+	}, nil
 }
+
+// BDAllowRemoteMigrateEnvKey is the beads library's opt-in for letting a
+// writable open migrate a shared or remote database's schema forward. A direct
+// native open takes it only from the env its caller passes, never from the
+// ambient process environment: gc sets it for a city that opted in through
+// beads.allow_schema_behind_migrate, the opt-in the native-store preflight
+// requires before it passes a database whose schema is behind the library's.
+// The proxied lane decides this key itself (proxiedOnlyOpenEnvKeys).
+const BDAllowRemoteMigrateEnvKey = "BD_ALLOW_REMOTE_MIGRATE"
+
+// bdRemoteMigrateOpenEnvKeys is the projection list for
+// BDAllowRemoteMigrateEnvKey. It stays out of nativeDoltOpenEnvKeys, which
+// lists the BEADS_ keys a direct open decides.
+var bdRemoteMigrateOpenEnvKeys = []string{BDAllowRemoteMigrateEnvKey}
 
 // withProjectedOpenEnvLocked is the projection itself, parameterised by the key
 // list it decides.
@@ -294,7 +322,7 @@ func openNativeStorageWithoutAmbientEnvWithCredentialCommand(ctx context.Context
 	}
 	defer restoreEnv()
 
-	storage, err := nativeDoltOpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
+	storage, err := openNativeDoltStorage(ctx, filepath.Join(scopeRoot, ".beads"))
 	if err != nil {
 		return nil, "", err
 	}
@@ -316,7 +344,8 @@ func openNativeStorageWithoutAmbientEnvWithCredentialCommand(ctx context.Context
 // configuration decides how the workspace is served — so an inherited variable
 // naming another database, another directory, or a credential command must not
 // be able to re-point it. Passing an empty scoped environment is not enough:
-// that clears only the variables gc itself projects.
+// that clears only the variables gc itself projects. BDAllowRemoteMigrateEnvKey
+// is withheld too, so an inherited unlock never migrates the workspace.
 func OpenNativeDoltStoreAtWithoutAmbientEnv(ctx context.Context, scopeRoot string, opts ...NativeDoltStoreOption) (*NativeDoltStore, error) {
 	return newNativeDoltStoreAtWithoutAmbientEnv(ctx, scopeRoot, "", opts...)
 }
@@ -655,7 +684,7 @@ func openNativeStorageWithCredentialCommand(ctx context.Context, scopeRoot strin
 		return nil, "", err
 	}
 	defer restoreEnv()
-	storage, err := nativeDoltOpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
+	storage, err := openNativeDoltStorage(ctx, filepath.Join(scopeRoot, ".beads"))
 	if err != nil {
 		return nil, "", err
 	}
@@ -1931,7 +1960,7 @@ func (s *NativeDoltStore) filterReadyByWorkOutcome(ctx context.Context, storage 
 			// Applying the full predicate would re-block both of those. Only
 			// the closed-and-blocked case — invisible to the store's own
 			// check — may override that verdict.
-			if string(dep.Status) == "closed" && depMetadata[beadmeta.WorkOutcomeMetadataKey] == beadmeta.WorkOutcomeBlocked {
+			if string(dep.Status) == "closed" && ReadinessWorkOutcome(depMetadata) == beadmeta.WorkOutcomeBlocked {
 				blocked = true
 				break
 			}
@@ -2009,7 +2038,7 @@ func filterReadyByWorkOutcomeBatched(ctx context.Context, batch nativeDependency
 			malformed[b.ID] = err
 			continue
 		}
-		vetoes[b.ID] = string(b.Status) == "closed" && metadata[beadmeta.WorkOutcomeMetadataKey] == beadmeta.WorkOutcomeBlocked
+		vetoes[b.ID] = string(b.Status) == "closed" && ReadinessWorkOutcome(metadata) == beadmeta.WorkOutcomeBlocked
 	}
 	result := make([]Bead, 0, len(candidates))
 	for _, c := range candidates {
@@ -3006,6 +3035,7 @@ func nativeIssueFromBead(b Bead) (*beadslib.Issue, error) {
 		Ephemeral:   b.Ephemeral,
 		NoHistory:   b.NoHistory,
 		DeferUntil:  cloneTimePtr(b.DeferUntil),
+		CloseReason: b.CloseReason,
 		RowVersion:  b.Revision,
 	}
 	if b.Priority != nil {
@@ -3072,6 +3102,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		Ephemeral:            issue.Ephemeral,
 		NoHistory:            issue.NoHistory,
 		DeferUntil:           cloneTimePtr(issue.DeferUntil),
+		CloseReason:          bdCloseReason(status, issue.CloseReason),
 		IndefinitelyDeferred: indefinitelyDeferred,
 		Revision:             issue.RowVersion,
 	}

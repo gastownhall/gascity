@@ -715,3 +715,141 @@ func createPrevBead(t *testing.T, env *restartRequestTestEnv, closedAt *time.Tim
 		}
 	}
 }
+
+// TestReconcileSessionBeads_FreshCycleWakesReliablyNextTick pins the second
+// half of ga-2fpf9z's fresh-mode fix: it isn't enough for the handoff tick to
+// record state=asleep (TestPhantomReplacementSessionKeyRepro covers that in
+// isolation) — the very next reconciler tick must actually observe that
+// recorded state and wake the session back up, with no separate trigger,
+// stall-detector pass, or heal round-trip required. Before the fix, state
+// never left "active", so ComputeAwakeSet's reset-pending desire (gated on
+// continuation_reset_pending + reset_committed_at, both already set
+// unconditionally by RestartRequestPatch) never got a chance to matter one
+// way or the other — but the session also never looked asleep, so nothing
+// woke it either.
+//
+// This deliberately does NOT assert the tick-2 session_key equals the
+// tick-1 minted value, even though a literal reading of the bead's
+// Done-when item 3 ("assert it is not regenerated") suggests it should.
+// That claim does not hold for a wake_mode=fresh session specifically:
+// preWakeCommit's freshWake gate (session_wake.go:64) is
+// `info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)`
+// — the first disjunct alone makes EVERY wake of a wake_mode=fresh session a
+// fresh-wake reset, unconditionally, regardless of ga-2fpf9z's two fix
+// sites (neither touches session_wake.go or PreWakePatch). That reset
+// clears session_key again (lifecycle_transition.go:219), independent of
+// what RestartRequestPatch minted at cycle time.
+//
+// Contrast the bead's own cited reference,
+// TestReconcileSessionBeads_RestartRequestNamedAlwaysWakesSameTick: that
+// session does not set wake_mode=fresh, so the only way freshWake could
+// fire is pendingContinuationResetNeedsFreshStart — and RestartRequestPatch
+// itself defeats that in the same patch by clearing started_config_hash. So
+// for that session shape (fix site #2, non-fresh) the minted key genuinely
+// does survive to the literal process launch, exactly as worded. For a
+// wake_mode=fresh session (fix site #1, this test) the second reset is
+// correct, pre-existing, out-of-scope behavior: a real agent's own
+// `gc prime --hook` backfills the session_key this reconciler clears, once
+// the real provider process reports its own id (cmd_prime.go:874) — which
+// this reconciler-only test correctly does not simulate.
+//
+// What this fix actually guarantees, and what this test asserts instead:
+// the session reaches a real wake commit and starts on the very next tick,
+// with no dependency on the heal or the reset-stall detector. Mirroring how
+// the cited reference test proves the same thing, this checks IsRunning
+// plus last_woke_at (stamped unconditionally by PreWakePatch) rather than
+// the "state" field: state is tick-order-dependent even within one
+// synchronous reconcile pass — it moves asleep → creating → active as this
+// tick's fake ("true") provider is started and then immediately observed
+// alive — so last_woke_at, not "creating", is the stable witness that a
+// real wake commit (not a no-op) occurred. RestartRequestPatch clears
+// last_woke_at at cycle time (tick 1), so a non-empty value here can only
+// have come from this tick's own preWakeCommit.
+func TestReconcileSessionBeads_FreshCycleWakesReliablyNextTick(t *testing.T) {
+	env := newRestartRequestTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "witness", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "witness")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "witness",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "witness",
+		namedSessionModeMetadata:     "on_demand",
+		"template":                   "witness",
+		"state":                      "active",
+		"wake_mode":                  "fresh",
+		"session_key":                "conversation-A",
+		sessionpkg.CurrentBeadIDKey:  "wb-A",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	workBead := beads.Bead{ID: "wb-B", Title: "next witness wisp", Type: "task", Status: "in_progress", Assignee: "witness"}
+
+	// Tick 1: the assignee/current-bead divergence fires the fresh-cycle
+	// kill + mint.
+	reconcileSessionBeadsWithAssignedWork(env, []beads.Bead{session}, []beads.Bead{workBead})
+
+	if env.sp.IsRunning(sessionName) {
+		t.Fatal("session should have been killed by the fresh-cycle handoff")
+	}
+	cycled, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	minted := cycled.Metadata["session_key"]
+	if minted == "" || minted == "conversation-A" {
+		t.Fatalf("session_key after cycle = %q, want a freshly minted key", minted)
+	}
+	if cycled.Metadata["state"] != "asleep" {
+		t.Fatalf("state after cycle = %q, want asleep", cycled.Metadata["state"])
+	}
+
+	env.stdout.Reset()
+	env.stderr.Reset()
+
+	// Tick 2: same work demand still assigned (wb-B, already the recorded
+	// current bead — no further cycling), runtime still dead. This is a
+	// plain "wake an asleep named session" tick.
+	reconcileSessionBeadsWithAssignedWork(env, []beads.Bead{cycled}, []beads.Bead{workBead})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q did not wake on the next tick after the fresh-cycle handoff; ComputeAwakeSet should have desired it reset-pending", sessionName)
+	}
+	woke, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s) after wake: %v", session.ID, err)
+	}
+	// preWakeCommit (session_wake.go) is what actually fired here — its
+	// PreWakePatch unconditionally stamps last_woke_at, the signal that a
+	// real wake commit happened rather than the session merely staying
+	// parked asleep. See the doc comment above for why this checks
+	// last_woke_at rather than "state".
+	if woke.Metadata["last_woke_at"] == "" {
+		t.Fatal("last_woke_at after wake = empty, want a timestamp from a real wake commit, not a no-op")
+	}
+	// session_key is cleared here, not preserved — see the doc comment
+	// above. This is preWakeCommit's own unconditional wake_mode=fresh
+	// reset, orthogonal to and untouched by ga-2fpf9z's two fix sites; the
+	// tick-1 assertions above already pin the part this fix owns (the
+	// minted key survives intact up to the point the session goes asleep).
+	if woke.Metadata["session_key"] != "" {
+		t.Fatalf("session_key after wake = %q, want empty (preWakeCommit's fresh-wake reset fires unconditionally for wake_mode=fresh, independent of this fix)", woke.Metadata["session_key"])
+	}
+}

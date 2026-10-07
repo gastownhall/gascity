@@ -10,7 +10,8 @@ import (
 // ConformanceSkip is a governed opt-out from a conformance subtest. Every skip
 // MUST name a tracking bead and carry an expiry, so an opt-out is loud at
 // definition (a committed entry), loud over time (it warns ahead of and past
-// its expiry, then fails every lane once the waiverclock grace runs out), and
+// its expiry, then fails every lane once the waiverclock grace runs out, via
+// internal/testpolicy/waiverexpiry), and
 // impossible to add silently. This is the anti-rot mechanism
 // that keeps a known defect from quietly laundering a real regression behind a
 // green suite.
@@ -59,38 +60,34 @@ func lookupSkip(subtest string) *ConformanceSkip {
 	return nil
 }
 
-// skipClock reports what a skip's expiry costs at now under mode, through the
-// one fleet clock every dated test-policy waiver uses (TESTING.md "Waiver
-// expiry clocks").
-func skipClock(s ConformanceSkip, now time.Time, mode waiverclock.Mode) waiverclock.Report {
-	return waiverclock.Check([]waiverclock.Expiry{{
-		Label:   "conformance skip " + s.Subtest,
-		Owner:   s.BeadID,
-		Expires: s.Expiry,
-	}}, now, mode)
+// SkipExpiries returns one dated expiry per ledgered skip, for the fleet waiver
+// clock to judge against today (TESTING.md "Waiver expiry clocks"). The date is
+// enforced there, in one never-cached check, rather than inside every store's
+// conformance run.
+func SkipExpiries() []waiverclock.Expiry {
+	expiries := make([]waiverclock.Expiry, 0, len(ledgeredSkips))
+	for _, s := range ledgeredSkips {
+		expiries = append(expiries, waiverclock.Expiry{
+			Label:   "conformance skip " + s.Subtest,
+			Owner:   s.BeadID,
+			Expires: s.Expiry,
+			Horizon: maxSkipHorizon,
+		})
+	}
+	return expiries
 }
 
 // requireLedgeredSkip skips the named subtest only when a ledger entry governs
-// it and the waiver clock tolerates its expiry; otherwise it fails the test
-// loudly. Callers invoke this in place of a bare t.Skip so no opt-out can
-// bypass the ledger.
+// it; otherwise it fails the test loudly. Callers invoke this in place of a
+// bare t.Skip so no opt-out can bypass the ledger. It never reads the clock:
+// it runs inside every store's conformance suite, whose cached results must not
+// depend on the date. SkipExpiries carries the expiry to the one date check.
 func requireLedgeredSkip(t *testing.T, subtest string) {
 	t.Helper()
 	s := lookupSkip(subtest)
 	if s == nil {
 		t.Fatalf("conformance opt-out for %q is not in the skip ledger; add a ConformanceSkip "+
 			"(with a tracking bead and an expiry) to conformance_skips.go before skipping", subtest)
-	}
-	mode, err := waiverclock.FromEnv()
-	if err != nil {
-		t.Fatal(err)
-	}
-	clock := skipClock(*s, time.Now(), mode)
-	for _, fatal := range clock.Fatal {
-		t.Fatal(fatal)
-	}
-	for _, warning := range clock.Warnings {
-		t.Log(warning)
 	}
 	t.Skipf("skipping %s (bead %s, expires %s): %s", subtest, s.BeadID, s.Expiry.Format("2006-01-02"), s.Reason)
 }

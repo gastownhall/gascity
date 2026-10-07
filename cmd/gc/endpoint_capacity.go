@@ -40,6 +40,43 @@ func resolvedEndpointKey(tp TemplateParams, info sessionpkg.Info) endpointKey {
 	return ""
 }
 
+// endpointKeyForAgent is resolvedEndpointKey from config alone, without
+// resolving TemplateParams. Resolution copies the agent's upstream verbatim
+// and names the provider config.ResolveProvider picks: none for a
+// start_command agent, else the agent's provider, else the workspace's.
+// Session template overrides change schema options only, so the start path
+// resolves the same key.
+func endpointKeyForAgent(cfg *config.City, agent *config.Agent, info sessionpkg.Info) endpointKey {
+	if agent != nil {
+		if u := strings.TrimSpace(agent.Upstream); u != "" {
+			return endpointKey("upstream:" + u)
+		}
+		if agent.StartCommand == "" {
+			name := agent.Provider
+			if name == "" && cfg != nil {
+				name = cfg.Workspace.Provider
+			}
+			if p := strings.TrimSpace(name); p != "" {
+				return endpointKey("provider:" + p)
+			}
+		}
+	}
+	if p := strings.TrimSpace(info.Provider); p != "" {
+		return endpointKey("provider:" + p)
+	}
+	return ""
+}
+
+// rowEndpoint is a row's config-only endpoint key: endpointKeyForAgent for
+// the agent of its resolved template, as the allocator's selection entry
+// reads it. It is the one helper for a row's endpoint: admission counts the
+// census's bring-up rows on it, gather reads their breakers by it, and the
+// pass's intents carry it, a create's from its plan's template alone, so a
+// row is counted and gated on the same endpoint before and after it lands.
+func rowEndpoint(cfg *config.City, info sessionpkg.Info) endpointKey {
+	return endpointKeyForAgent(cfg, findAgentByTemplate(cfg, resolvedSessionTemplateInfo(info, cfg)), info)
+}
+
 // capacityBreakerSettings trips on the first refusal and backs off 5s, 10s,
 // 20s, 40s, then 60s (full jitter within each cap). HalfOpenInterval is only a
 // backstop: tickets resolve probes. The values are provisional.
@@ -176,6 +213,10 @@ type endpointCapacityState struct {
 	// refusals counts this open episode's refusals per session ID, for probe
 	// rotation. Cleared when the endpoint closes.
 	refusals map[string]int
+	// windowRefused is the templates refused since the endpoint last closed.
+	// The starts a close admits resolve concurrently, in arbitrary order, so
+	// the valve asks it whether a refusal was alone in its window.
+	windowRefused map[string]struct{}
 	// valve holds each refused template's valve history. It is keyed by
 	// template (per endpoint), so replacement beads keep the count and two
 	// seats of one template cannot mask each other.
@@ -197,6 +238,9 @@ type capacityValveState struct {
 	// streak is the consecutive probe refusals with no success of this
 	// template; streakCloses is the endpoint's close count when it began.
 	streak, streakCloses int
+	// alone is whether no other template was refused before this template's
+	// previous refusal in that refusal's close window.
+	alone bool
 }
 
 // newEndpointCapacityGuard returns a guard on the given clock.
@@ -222,9 +266,10 @@ func (g *endpointCapacityGuard) stateLocked(k endpointKey) *endpointCapacityStat
 	st := g.endpoints[k]
 	if st == nil {
 		st = &endpointCapacityState{
-			refusalsBy: make(map[string]int),
-			refusals:   make(map[string]int),
-			valve:      make(map[string]capacityValveState),
+			refusalsBy:    make(map[string]int),
+			refusals:      make(map[string]int),
+			windowRefused: make(map[string]struct{}),
+			valve:         make(map[string]capacityValveState),
 		}
 		g.endpoints[k] = st
 	}
@@ -245,6 +290,7 @@ func (g *endpointCapacityGuard) onTransition(t resilience.Transition) {
 		st.openSince = time.Time{}
 		st.closes++
 		clear(st.refusals)
+		clear(st.windowRefused)
 	}
 }
 
@@ -292,12 +338,18 @@ func (g *endpointCapacityGuard) Admit(k endpointKey, sessionID, template string)
 	}
 	g.probeMu.Unlock()
 	if !allowed {
-		g.mu.Lock()
-		g.stateLocked(k).deferredAdmit++
-		g.mu.Unlock()
+		g.noteDeferredAdmit(k)
 		return nil, false
 	}
 	return t, true
+}
+
+// noteDeferredAdmit counts a start on k deferred at admission, for the
+// per-tick record.
+func (g *endpointCapacityGuard) noteDeferredAdmit(k endpointKey) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.stateLocked(k).deferredAdmit++
 }
 
 // HoldsPendingCreate reports whether never-started pending creates on k must
@@ -424,8 +476,10 @@ func (g *endpointCapacityGuard) resolve(t *capacityTicket, v startVerdict) bool 
 // reports whether the valve tripped for the template. It trips on either:
 //   - capacityValveThreshold refusals that each followed another template's
 //     success with no other template refused since the template's previous
-//     refusal (a first refusal never counts), so outages and steady
-//     saturation, where other templates are refused too, never count; or
+//     refusal, nor before it in that refusal's close window (a first refusal
+//     never counts), so outages and steady saturation, where other templates
+//     are refused too, never count whatever order a herd's refusals resolve
+//     in; or
 //   - the backstop: capacityBackstopRefusals probe refusals in a row with no
 //     success of the template while the endpoint closed
 //     capacityBackstopCloses times. Only probe refusals count: the herd a
@@ -440,11 +494,14 @@ func (st *endpointCapacityState) noteRefusal(sessionID, template string, probe b
 		}
 	}
 	prev, seen := st.valve[template]
+	_, again := st.windowRefused[template]
+	alone := len(st.windowRefused) == 0 || (again && len(st.windowRefused) == 1)
+	st.windowRefused[template] = struct{}{}
 	st.refusalSeq++
 	st.refusalsBy[template]++
 	otherRefusals := st.refusalSeq - st.refusalsBy[template]
 	v := prev
-	if seen && st.successes > prev.successes && otherRefusals == prev.otherRefusals {
+	if seen && prev.alone && st.successes > prev.successes && otherRefusals == prev.otherRefusals {
 		v.count++
 	}
 	if probe {
@@ -454,7 +511,7 @@ func (st *endpointCapacityState) noteRefusal(sessionID, template string, probe b
 		v.streak++
 	}
 	v.lastRefusalAt = now
-	v.successes, v.otherRefusals = st.successes, otherRefusals
+	v.successes, v.otherRefusals, v.alone = st.successes, otherRefusals, alone
 	if v.count >= capacityValveThreshold ||
 		(v.streak >= capacityBackstopRefusals && st.closes-v.streakCloses >= capacityBackstopCloses) {
 		delete(st.valve, template)
@@ -677,9 +734,17 @@ func sortCandidatesByProbeRotation(candidates []startCandidate, g *endpointCapac
 	if g == nil {
 		return
 	}
+	rotateProbeSlots(candidates, func(c startCandidate) endpointKey { return resolvedEndpointKey(c.tp, c.info) },
+		func(k endpointKey, c startCandidate) int { return g.refusalsInEpisode(k, c.info.ID) })
+}
+
+// rotateProbeSlots is the probe rotation over any candidate type: within
+// each endpoint's own slots, fewest refusals first, stably. The v2
+// allocator's grants share it, with refusals read from the pass's inputs.
+func rotateProbeSlots[T any](items []T, key func(T) endpointKey, refusals func(endpointKey, T) int) {
 	slots := make(map[endpointKey][]int)
-	for i, c := range candidates {
-		if k := resolvedEndpointKey(c.tp, c.info); k != "" {
+	for i, c := range items {
+		if k := key(c); k != "" {
 			slots[k] = append(slots[k], i)
 		}
 	}
@@ -687,17 +752,18 @@ func sortCandidatesByProbeRotation(candidates []startCandidate, g *endpointCapac
 		if len(idx) < 2 {
 			continue
 		}
-		members := make([]startCandidate, len(idx))
-		ranks := make(map[string]int, len(idx))
+		members := make([]T, len(idx))
+		ranks := make([]int, len(idx))
 		for j, i := range idx {
-			members[j] = candidates[i]
-			ranks[members[j].info.ID] = g.refusalsInEpisode(k, members[j].info.ID)
+			members[j], ranks[j] = items[i], refusals(k, items[i])
 		}
-		sort.SliceStable(members, func(a, b int) bool {
-			return ranks[members[a].info.ID] < ranks[members[b].info.ID]
-		})
+		order := make([]int, len(idx))
+		for j := range order {
+			order[j] = j
+		}
+		sort.SliceStable(order, func(a, b int) bool { return ranks[order[a]] < ranks[order[b]] })
 		for j, i := range idx {
-			candidates[i] = members[j]
+			items[i] = members[order[j]]
 		}
 	}
 }

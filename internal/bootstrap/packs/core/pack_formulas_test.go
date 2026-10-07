@@ -358,3 +358,24 @@ func TestMolScopedWorkResolvesRepoBeforeRemovingWorktree(t *testing.T) {
 		t.Error("cleanup-worktree runs rm -rf before the linked-worktree check; the check must gate the delete, not follow it")
 	}
 }
+
+// TestMolDoWorkWorkBeadCloseFailsClosed pins that a refused work-bead close
+// (for example, the typed work-record close gate) stops the step instead of
+// falling through to close the formula step over still-open work.
+func TestMolDoWorkWorkBeadCloseFailsClosed(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "do-work")
+	closes := 0
+	for _, line := range strings.Split(step, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, `gc bd close "$WORK_BEAD_ID"`) {
+			continue
+		}
+		closes++
+		if !strings.HasSuffix(line, "|| exit 1") {
+			t.Errorf("work-bead close must fail closed with `|| exit 1`: %s", line)
+		}
+	}
+	if closes == 0 {
+		t.Fatal("expected mol-do-work to close $WORK_BEAD_ID in the do-work step")
+	}
+}

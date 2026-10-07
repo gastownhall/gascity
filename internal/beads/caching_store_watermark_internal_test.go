@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -110,11 +111,25 @@ func censusRow(t *testing.T, rows []Bead, id string) Bead {
 	return Bead{}
 }
 
-// ageLocalWrite moves id's local-write stamp past the recency window, the
-// state of a write older than five seconds.
+// ageLocalWrite moves id's local-write stamps past every window, the state of
+// a write an hour old.
 func ageLocalWrite(cache *CachingStore, id string) {
+	ageLocalWriteBy(cache, id, time.Hour)
+}
+
+// ageLocalWriteBy backdates id's local-write stamps, both the five-second
+// recency stamp and the write stamp recentWriteVerifyWindow reads, and the
+// retention of its fences once its row left the cache, by age.
+func ageLocalWriteBy(cache *CachingStore, id string, age time.Duration) {
 	cache.mu.Lock()
-	cache.localBeadAt[id] = time.Now().Add(-time.Hour)
+	at := time.Now().Add(-age)
+	cache.localBeadAt[id] = at
+	if _, ok := cache.writeAt[id]; ok {
+		cache.writeAt[id] = at
+	}
+	if _, ok := cache.retainedAt[id]; ok {
+		cache.retainedAt[id] = at
+	}
 	cache.mu.Unlock()
 }
 
@@ -328,6 +343,7 @@ func TestCachingStoreUpdateReflected(t *testing.T) {
 	row := Bead{
 		Title: "t", Status: "in_progress", Type: "task", Priority: &priority,
 		Description: "d", Assignee: "a", Metadata: map[string]string{"k": "v"},
+		Labels: []string{"keep"},
 	}
 	unprioritized := cloneBead(row)
 	unprioritized.Priority = nil
@@ -351,6 +367,10 @@ func TestCachingStoreUpdateReflected(t *testing.T) {
 		{"lagged_assignee", row, UpdateOpts{Assignee: str("b")}, false},
 		{"lagged_metadata", row, UpdateOpts{Metadata: map[string]string{"k": "w"}}, false},
 		{"cleared_key_still_set", row, UpdateOpts{Metadata: map[string]string{"k": ""}}, false},
+		{"labels_present", row, UpdateOpts{Labels: []string{"keep"}, RemoveLabels: []string{"gone"}}, true},
+		{"lagged_added_label", row, UpdateOpts{Labels: []string{"new"}}, false},
+		{"lagged_removed_label", row, UpdateOpts{RemoveLabels: []string{"keep"}}, false},
+		{"label_added_and_removed_absent", row, UpdateOpts{Labels: []string{"x"}, RemoveLabels: []string{"x"}}, true},
 	}
 	for _, tc := range cases {
 		if got := updateReflected(tc.row, tc.opts); got != tc.want {
@@ -618,9 +638,10 @@ func (l *watermarkWriteLog) floor(rev CacheRevision) map[string]int {
 
 // runWatermarkStress drives writers against census readers. Each admitted
 // census must show, for every row, at least the highest write its CacheRev
-// covers, and one reader's CacheRev never moves backwards. Once the writers
-// stop, a census must be admitted that covers every write.
-func runWatermarkStress(t *testing.T, cache *CachingStore, ids []string, writers int, write func(w int) (string, int, bool)) map[string]int {
+// covers, and rowCheck, when set, must accept every row at that CacheRev; one
+// reader's CacheRev never moves backwards. Once the writers stop, a census must be admitted that
+// covers every write. Each background func runs alongside until done closes.
+func runWatermarkStress(t *testing.T, cache *CachingStore, ids []string, writers int, write func(w int) (string, int, bool), rowCheck func(row Bead, rev CacheRevision) error, background ...func(done <-chan struct{})) map[string]int {
 	t.Helper()
 	log := &watermarkWriteLog{records: map[string][]watermarkWriteRecord{}}
 	var writersWG, readersWG sync.WaitGroup
@@ -636,6 +657,13 @@ func runWatermarkStress(t *testing.T, cache *CachingStore, ids []string, writers
 				}
 				log.add(id, watermarkWriteRecord{n: n, rev: cache.WriteRev(id)})
 			}
+		}()
+	}
+	for _, run := range background {
+		readersWG.Add(1)
+		go func() {
+			defer readersWG.Done()
+			run(done)
 		}()
 	}
 	var admitted atomic.Int64
@@ -667,6 +695,12 @@ func runWatermarkStress(t *testing.T, cache *CachingStore, ids []string, writers
 						t.Errorf("census at %+v shows %s n=%d, but it covers a write of n=%d", rev, row.ID, got, floor[row.ID])
 						return
 					}
+					if rowCheck != nil {
+						if err := rowCheck(row, rev); err != nil {
+							t.Errorf("census at %+v: %v", rev, err)
+							return
+						}
+					}
 				}
 			}
 		}()
@@ -674,6 +708,14 @@ func runWatermarkStress(t *testing.T, cache *CachingStore, ids []string, writers
 	writersWG.Wait()
 	close(done)
 	readersWG.Wait()
+	if t.Failed() {
+		return nil
+	}
+
+	// A census is refused while any row is dirty, so it never saw a clean
+	// row that lacks a write it covers behind another row's mark. Check each
+	// clean row directly before the settling reads clean the rest.
+	requireCleanRowsReflect(t, cache, ids, log.floor, rowCheck)
 	if t.Failed() {
 		return nil
 	}
@@ -700,6 +742,34 @@ func runWatermarkStress(t *testing.T, cache *CachingStore, ids []string, writers
 	}
 	t.Logf("admitted %d concurrent censuses", admitted.Load())
 	return final
+}
+
+// requireCleanRowsReflect checks every row of ids the cache holds clean, at
+// the cache's current revision: it must show at least the highest n that
+// floor reports the revision covers, and rowCheck, when set, must accept it.
+func requireCleanRowsReflect(t *testing.T, cache *CachingStore, ids []string, floor func(CacheRevision) map[string]int, rowCheck func(row Bead, rev CacheRevision) error) {
+	t.Helper()
+	cache.mu.RLock()
+	rev := CacheRevision{Epoch: cache.epoch, Seq: cache.mutationSeq}
+	var clean []Bead
+	for _, id := range ids {
+		row, held := cache.beads[id]
+		if _, dirty := cache.dirty[id]; held && !dirty {
+			clean = append(clean, cloneBead(row))
+		}
+	}
+	cache.mu.RUnlock()
+	want := floor(rev)
+	for _, row := range clean {
+		if got, _ := strconv.Atoi(row.Metadata["n"]); got < want[row.ID] {
+			t.Errorf("clean row %s at %+v shows n=%d, but the cache covers a write of n=%d", row.ID, rev, got, want[row.ID])
+		}
+		if rowCheck != nil {
+			if err := rowCheck(row, rev); err != nil {
+				t.Errorf("clean row at %+v: %v", rev, err)
+			}
+		}
+	}
 }
 
 // TestCachingStoreWatermarkConcurrentWritersAndCensus runs one conditional
@@ -746,7 +816,7 @@ func TestCachingStoreWatermarkConcurrentWritersAndCensus(t *testing.T) {
 			return "", 0, false
 		}
 		return id, n, true
-	})
+	}, nil)
 	for _, id := range ids {
 		if final != nil && final[id] != rounds {
 			t.Fatalf("final census %s n=%d, want %d", id, final[id], rounds)
@@ -792,10 +862,413 @@ func TestCachingStoreWatermarkConcurrentWritersOnOneRow(t *testing.T) {
 				return b.ID, n + 1, true
 			}
 		}
-	})
+	}, nil)
 	if final != nil && final[b.ID] != writers*rounds {
 		t.Fatalf("final n=%d, want %d", final[b.ID], writers*rounds)
 	}
+}
+
+// assigneeLog records each row's assignee writes: an intent before the write,
+// and its WriteRev once the write returns.
+type assigneeLog struct {
+	mu sync.Mutex
+	at map[string][]*assigneeWrite
+}
+
+type assigneeWrite struct {
+	n        int
+	assignee string
+	rev      CacheRevision
+	stamped  bool
+}
+
+func (l *assigneeLog) intend(id string, n int, assignee string) *assigneeWrite {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	w := &assigneeWrite{n: n, assignee: assignee}
+	l.at[id] = append(l.at[id], w)
+	return w
+}
+
+func (l *assigneeLog) stamp(w *assigneeWrite, rev CacheRevision) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	w.rev, w.stamped = rev, true
+}
+
+// check requires a row to reflect the newest assignee write a census at rev
+// covers: its assignee must be one that write, or an assignee write after
+// it, left. A merge that keeps a field its event omitted, over a row whose
+// covered write cleared it, shows an older one.
+func (l *assigneeLog) check(row Bead, rev CacheRevision) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	covered := -1
+	for _, w := range l.at[row.ID] {
+		if w.stamped && coveredBy(w.rev, rev) && w.n > covered {
+			covered = w.n
+		}
+	}
+	if covered < 0 {
+		return nil
+	}
+	for _, w := range l.at[row.ID] {
+		if w.n >= covered && w.assignee == row.Assignee {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s has assignee %q, but the census covers assignee write n=%d and none since left it", row.ID, row.Assignee, covered)
+}
+
+// watermarkNote is one cache notification queued for delivery back into it.
+type watermarkNote struct {
+	typ     string
+	payload json.RawMessage
+}
+
+// commitOrderStore makes each row's backing commits land in the order its
+// writers took their turn, so a row's n rises with commit order while writers
+// race everywhere else: a writer takes the row's turn and picks n, and the
+// backing write releases the turn as soon as it returns.
+type commitOrderStore struct {
+	Store
+	turns map[string]*rowTurn // fixed before the writers start
+	// failGets makes every failEvery-th Get fail while set, driving the
+	// writers' refresh-failure fallbacks and the refetch failure paths.
+	failGets  atomic.Bool
+	failEvery int64
+	gets      atomic.Int64
+	// racer, when set, runs once inside the next SetMetadata or Update,
+	// before its backing write. Only the quiet phase, after the writers
+	// stop, sets it.
+	racer func()
+}
+
+func (s *commitOrderStore) race() {
+	if race := s.racer; race != nil {
+		s.racer = nil
+		race()
+	}
+}
+
+func (s *commitOrderStore) Get(id string) (Bead, error) {
+	if s.failGets.Load() && s.gets.Add(1)%s.failEvery == 0 {
+		return Bead{}, errors.New("injected refresh failure")
+	}
+	return s.Store.Get(id)
+}
+
+type rowTurn struct {
+	mu   sync.Mutex
+	last int
+	// assignee is the row's assignee after write last, kept by the holder.
+	assignee string
+	// held is the holder's released flag. Only the holder's goroutine, which
+	// makes the backing write, touches it.
+	held *bool
+}
+
+// take waits for id's turn and returns the next n with a func the writer
+// defers, which releases the turn if no backing write did.
+func (s *commitOrderStore) take(id string) (int, func()) {
+	turn := s.turns[id]
+	turn.mu.Lock()
+	turn.last++
+	released := false
+	turn.held = &released
+	return turn.last, func() {
+		if !released {
+			turn.held = nil
+			turn.mu.Unlock()
+		}
+	}
+}
+
+func (s *commitOrderStore) release(id string) {
+	if turn := s.turns[id]; turn != nil && turn.held != nil {
+		*turn.held = true
+		turn.held = nil
+		turn.mu.Unlock()
+	}
+}
+
+func (s *commitOrderStore) SetMetadata(id, key, value string) error {
+	defer s.release(id)
+	s.race()
+	return s.Store.SetMetadata(id, key, value)
+}
+
+func (s *commitOrderStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	defer s.release(id)
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+func (s *commitOrderStore) Update(id string, opts UpdateOpts) error {
+	defer s.release(id)
+	s.race()
+	return s.Store.Update(id, opts)
+}
+
+func (s *commitOrderStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	defer s.release(id)
+	w, ok := MetadataCASWriterFor(s.Store)
+	if !ok {
+		return false, ErrConditionalWriteUnsupported
+	}
+	return w.CompareAndSetMetadataKey(id, key, expected, next)
+}
+
+// TestCachingStoreWatermarkUnconditionalWritersEchoesAndReconciles races
+// unconditional writers with a conditional one on each row, while an injector
+// delivers delayed echo events of backing snapshots the writers overtake, the
+// cache's own notifications come back late through ApplyEventSnapshot as
+// cmd/gc feeds them, a toggler closes and reopens a row they write, a
+// reconciler runs reconciles and full Primes, and backing reads fail now and
+// then. It
+// catches an install that rolls a row back past a covered write: an unfenced
+// refresh or patch (F2), a refresh-failure fallback or an echo merge that
+// clears a fenced write's mark, an uncached event install (F1), or a late
+// event (F3).
+func TestCachingStoreWatermarkUnconditionalWritersEchoesAndReconciles(t *testing.T) {
+	t.Parallel()
+
+	const (
+		rows          = 4
+		verbs         = 4 // SetMetadata, SetMetadataBatch, Update, CompareAndSetMetadataKey
+		rounds        = 30
+		echoDelay     = 8 // events held back before delivery
+		primeInterval = 8 // reconciles per full Prime
+		failEvery     = 7 // backing Gets per injected failure
+	)
+	inner := NewMemStore()
+	backing := &commitOrderStore{Store: inner, turns: map[string]*rowTurn{}, failEvery: failEvery}
+	// Every notification, the setup's bead.created included, queues for
+	// delivery back into the cache.
+	var fedMu sync.Mutex
+	var fed []watermarkNote
+	cache := NewCachingStoreForTest(backing, func(typ, _ string, payload json.RawMessage) {
+		fedMu.Lock()
+		fed = append(fed, watermarkNote{typ: typ, payload: append(json.RawMessage(nil), payload...)})
+		fedMu.Unlock()
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	ids := make([]string, rows)
+	for i := range ids {
+		b, err := cache.Create(Bead{Title: "row" + strconv.Itoa(i)})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		ids[i] = b.ID
+		backing.turns[b.ID] = &rowTurn{}
+	}
+	// The toggler closes and reopens a row the writers contend on, so a
+	// reconcile drops it closed while their writes are in flight.
+	toggled := ids[0]
+
+	feedback := func(done <-chan struct{}) {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			fedMu.Lock()
+			var next []watermarkNote
+			if len(fed) > echoDelay {
+				next, fed = fed[:len(fed)-echoDelay], fed[len(fed)-echoDelay:]
+			}
+			fedMu.Unlock()
+			for _, n := range next {
+				cache.ApplyEventSnapshot(n.typ, n.payload)
+			}
+		}
+	}
+	toggler := func(done <-chan struct{}) {
+		for {
+			select {
+			case <-done:
+				// End open, so the final census counts the row.
+				if err := cache.Reopen(toggled); err != nil {
+					t.Errorf("Reopen: %v", err)
+				}
+				return
+			default:
+			}
+			if err := cache.Close(toggled); err != nil {
+				t.Errorf("Close: %v", err)
+				return
+			}
+			if err := cache.Reopen(toggled); err != nil {
+				t.Errorf("Reopen: %v", err)
+				return
+			}
+		}
+	}
+
+	echoes := func(done <-chan struct{}) {
+		var held []json.RawMessage
+		for i := 0; ; i++ {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			snapshot, err := inner.Get(ids[i%rows])
+			if err != nil {
+				t.Errorf("backing Get: %v", err)
+				return
+			}
+			payload, err := json.Marshal(snapshot)
+			if err != nil {
+				t.Errorf("marshal echo: %v", err)
+				return
+			}
+			held = append(held, payload)
+			if len(held) <= echoDelay {
+				continue
+			}
+			if i%2 == 0 {
+				cache.ApplyEvent("bead.updated", held[0])
+			} else {
+				cache.ApplyEventSnapshot("bead.updated", held[0])
+			}
+			held = held[1:]
+		}
+	}
+	reconciles := func(done <-chan struct{}) {
+		for i := 1; ; i++ {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if i%primeInterval == 0 {
+				if err := cache.Prime(context.Background()); err != nil {
+					t.Errorf("Prime: %v", err)
+					return
+				}
+				continue
+			}
+			cache.ReconcileNowForTest()
+		}
+	}
+
+	// Reads stop failing once the last writer finishes, so the harness's
+	// settling reads succeed.
+	var active atomic.Int64
+	active.Store(rows * verbs)
+	backing.failGets.Store(true)
+	// A census must also reflect the newest assignee write it covers: a merge
+	// that clears a fenced write's mark can keep an assignee the event
+	// omitted.
+	assignees := &assigneeLog{at: map[string][]*assigneeWrite{}}
+	writes := make([]int, rows*verbs)
+	final := runWatermarkStress(t, cache, ids, rows*verbs, func(w int) (string, int, bool) {
+		if writes[w] == rounds {
+			if active.Add(-1) == 0 {
+				backing.failGets.Store(false)
+			}
+			return "", 0, false
+		}
+		writes[w]++
+		id := ids[w%rows]
+		n, done := backing.take(id)
+		defer done()
+		value := strconv.Itoa(n)
+		var assigned *assigneeWrite
+		if w/rows == 2 {
+			// The Update writer alternates the row's assignee between x and
+			// empty, a field a snapshot event omits when empty. It is the
+			// row's only assignee writer, so its turn state is its own.
+			turn := backing.turns[id]
+			if turn.assignee == "" {
+				turn.assignee = "x"
+			} else {
+				turn.assignee = ""
+			}
+			assigned = assignees.intend(id, n, turn.assignee)
+		}
+		var err error
+		switch w / rows {
+		case 0:
+			err = cache.SetMetadata(id, "n", value)
+		case 1:
+			err = cache.SetMetadataBatch(id, map[string]string{"n": value, "m": value})
+		case 2:
+			err = cache.Update(id, UpdateOpts{Metadata: map[string]string{"n": value}, Assignee: &assigned.assignee})
+		default:
+			expected := strconv.Itoa(n - 1)
+			if n == 1 {
+				expected = ""
+			}
+			var swapped bool
+			swapped, err = cache.CompareAndSetMetadataKey(id, "n", expected, value)
+			if err == nil && !swapped {
+				err = errors.New("lost a CAS its turn ordered")
+			}
+		}
+		if err != nil {
+			t.Errorf("write %s n=%d by writer %d: %v", id, n, w, err)
+			return "", 0, false
+		}
+		if assigned != nil {
+			assignees.stamp(assigned, cache.WriteRev(id))
+		}
+		return id, n, true
+	}, assignees.check, echoes, reconciles, feedback, toggler)
+	if final == nil {
+		return
+	}
+	for _, id := range ids {
+		if final[id] != verbs*rounds {
+			t.Fatalf("final census %s n=%d, want %d", id, final[id], verbs*rounds)
+		}
+	}
+
+	// Quiet phase, with nothing reconciling: give each row an assignee, then
+	// race a SetMetadata winner into an Update that clears it, so the loser's
+	// install is fenced. Deliver every queued notification, then check each
+	// clean row. The loser's own notification omits the empty assignee, so
+	// merging it onto the cached row keeps the old one: an event merged onto
+	// a raced row must not clear the loser's mark.
+	want := make(map[string]int, rows)
+	updateAssignee := func(id string, n int, assignee string) {
+		w := assignees.intend(id, n, assignee)
+		if err := cache.Update(id, UpdateOpts{Metadata: map[string]string{"n": strconv.Itoa(n)}, Assignee: &w.assignee}); err != nil {
+			t.Fatalf("Update %s n=%d: %v", id, n, err)
+		}
+		assignees.stamp(w, cache.WriteRev(id))
+	}
+	for _, id := range ids {
+		n := verbs * rounds
+		updateAssignee(id, n+1, "x")
+		backing.racer = func() {
+			if err := cache.SetMetadata(id, "n", strconv.Itoa(n+2)); err != nil {
+				t.Errorf("winning SetMetadata %s: %v", id, err)
+			}
+		}
+		updateAssignee(id, n+3, "")
+		if !isDirty(cache, id) {
+			t.Fatalf("vacuous: %s's losing write was not fenced", id)
+		}
+		want[id] = n + 3
+	}
+	// As after a watcher stall: past the five-second recency window, which
+	// drops a conflicting event outright, but inside recentWriteVerifyWindow,
+	// so the backing confirms the loser's notification and it merges.
+	for _, id := range ids {
+		ageLocalWriteBy(cache, id, 10*time.Second)
+	}
+	fedMu.Lock()
+	queued := fed
+	fed = nil
+	fedMu.Unlock()
+	for _, n := range queued {
+		cache.ApplyEventSnapshot(n.typ, n.payload)
+	}
+	requireCleanRowsReflect(t, cache, ids, func(CacheRevision) map[string]int { return want }, assignees.check)
 }
 
 // TestCachingStoreAtomicCloserInstallsReturnedRow pins that the atomic closer
@@ -1061,9 +1534,10 @@ func TestCachingStoreRevisionEpochPerInstance(t *testing.T) {
 	}
 }
 
-// TestCachingStorePrimeDropsWriteRevisionsOfDroppedRows pins that a wholesale
-// prime keeps the write revision of every row it keeps and drops the rest.
-func TestCachingStorePrimeDropsWriteRevisionsOfDroppedRows(t *testing.T) {
+// TestCachingStorePrimeKeepsWriteRevisionsOfDroppedRows pins that a wholesale
+// prime keeps the write revision of every row, the ones it drops included, for
+// the next reconcile to retain.
+func TestCachingStorePrimeKeepsWriteRevisionsOfDroppedRows(t *testing.T) {
 	t.Parallel()
 
 	backing := NewMemStore()
@@ -1087,21 +1561,23 @@ func TestCachingStorePrimeDropsWriteRevisionsOfDroppedRows(t *testing.T) {
 	cache.mu.RLock()
 	_, keptRev := cache.writeSeq[kept.ID]
 	_, droppedRev := cache.writeSeq[dropped.ID]
+	_, droppedAt := cache.writeAt[dropped.ID]
 	_, droppedRow := cache.beads[dropped.ID]
 	cache.mu.RUnlock()
 	if droppedRow {
-		t.Fatal("prime kept the out-of-band closed row; the prune was not exercised")
+		t.Fatal("prime kept the out-of-band closed row; the drop was not exercised")
 	}
-	if !keptRev || droppedRev {
-		t.Fatalf("writeSeq kept=%v dropped=%v after prime, want true and false", keptRev, droppedRev)
+	if !keptRev || !droppedRev || !droppedAt {
+		t.Fatalf("after prime writeSeq kept=%v dropped=%v, writeAt dropped=%v; want all true", keptRev, droppedRev, droppedAt)
 	}
 }
 
-// TestCachingStoreEvictDropsWriteRevision pins that a row leaving the cache
-// through evictLocked takes its write revision along, so the map cannot leak
-// ids the cache no longer holds. WriteRev then falls back to the current
-// sequence.
-func TestCachingStoreEvictDropsWriteRevision(t *testing.T) {
+// TestCachingStoreEvictRetainsWriteRevision pins that a row leaving the cache
+// through evictLocked keeps its write fences until a reconcile prunes them more
+// than recentWriteVerifyWindow later, so the maps cannot leak ids the cache no
+// longer holds. WriteRev reports the write while it is retained, then falls
+// back to the current sequence.
+func TestCachingStoreEvictRetainsWriteRevision(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
@@ -1133,18 +1609,37 @@ func TestCachingStoreEvictDropsWriteRevision(t *testing.T) {
 				t.Fatalf("Create: %v", err)
 			}
 			tc.evict(t, backing, cache, b.ID)
+			w := cache.WriteRev(b.ID)
 			cache.mu.RLock()
 			_, cached := cache.beads[b.ID]
-			_, recorded := cache.writeSeq[b.ID]
+			seq, recorded := cache.writeSeq[b.ID]
 			cache.mu.RUnlock()
 			if cached {
 				t.Fatal("row still cached; the eviction was not exercised")
 			}
-			if recorded {
-				t.Fatalf("writeSeq still holds evicted %s", b.ID)
+			if !recorded || w.Seq != seq {
+				t.Fatalf("WriteRev %+v after eviction with writeSeq %d (recorded %v), want the retained write", w, seq, recorded)
 			}
-			if w := cache.WriteRev(b.ID); w.Seq != cacheMutationSeq(cache) {
-				t.Fatalf("WriteRev %+v after eviction, want the current sequence", w)
+			cache.ReconcileNowForTest()
+			if !isRetained(cache, b.ID) {
+				t.Fatalf("the reconcile did not retain the fences of evicted %s", b.ID)
+			}
+			ageLocalWriteBy(cache, b.ID, recentWriteVerifyWindow+time.Second)
+			cache.ReconcileNowForTest()
+			cache.mu.RLock()
+			_, recorded = cache.writeSeq[b.ID]
+			_, stamped := cache.writeAt[b.ID]
+			_, tombstoned := cache.deletedSeq[b.ID]
+			floor := cache.fenceFloor
+			cache.mu.RUnlock()
+			if recorded || stamped || tombstoned || isRetained(cache, b.ID) {
+				t.Fatalf("fences of %s outlived the window: writeSeq=%v writeAt=%v deletedSeq=%v", b.ID, recorded, stamped, tombstoned)
+			}
+			if floor < w.Seq {
+				t.Fatalf("fence floor %d after pruning write %+v, want it covered", floor, w)
+			}
+			if got := cache.WriteRev(b.ID); got.Seq != cacheMutationSeq(cache) {
+				t.Fatalf("WriteRev %+v after the prune, want the current sequence", got)
 			}
 		})
 	}

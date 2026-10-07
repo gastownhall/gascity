@@ -16,8 +16,10 @@ go_test(
     srcs = [
         "auto_test.go",
         "conformance_test.go",
+        "corpse_fallthrough_test.go",
         "liveness_forwarding_test.go",
         "proctable_forwarding_test.go",
+        "router_test.go",
         "session_events_test.go",
         "testenv_import_test.go",
     ],
@@ -38,6 +40,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

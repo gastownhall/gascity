@@ -8,51 +8,6 @@ import (
 	"testing"
 )
 
-// beadIDERE is the Go twin of BEAD_ID_ERE in test/agents/lib/bead-id.sh: a
-// whole-token bead ID matched by shape, never by a hardcoded prefix. Since
-// #5416 a bead store's minted prefix is store-configured or derived from the
-// city name, and the integration bd shim can mint gc-N into the same store
-// where gc mints <prefix>-N, so neither side may assume bd/gc/mc.
-const beadIDERE = `[A-Za-z][A-Za-z0-9]*(-[A-Za-z0-9]+)+([.][A-Za-z0-9]+)*`
-
-var beadIDTokenRE = regexp.MustCompile("^" + beadIDERE + "$")
-
-// isBeadIDToken reports whether s is, in its entirety, shaped like a bead ID.
-func isBeadIDToken(s string) bool {
-	return beadIDTokenRE.MatchString(s)
-}
-
-// parseBeadID extracts a bead ID from bd/gc output by shape, never by
-// scanning free text for the shape regex as a substring — preambles contain
-// shape-identical words such as "re-initializing".
-func parseBeadID(output string) (string, bool) {
-	for _, anchor := range []string{"Created bead:", "Created issue:", "Created convoy"} {
-		idx := strings.Index(output, anchor)
-		if idx < 0 {
-			continue
-		}
-		fields := strings.Fields(output[idx+len(anchor):])
-		if len(fields) == 0 {
-			continue
-		}
-		if candidate := strings.TrimRight(fields[0], ":,"); isBeadIDToken(candidate) {
-			return candidate, true
-		}
-	}
-
-	for _, line := range strings.Split(output, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-		if isBeadIDToken(fields[0]) {
-			return fields[0], true
-		}
-	}
-
-	return "", false
-}
-
 func TestIsBeadIDToken(t *testing.T) {
 	valid := []string{
 		"gc-1", "th-16", "g9-7", "bl-2", "r0-1", "BL-42",
@@ -116,7 +71,7 @@ func TestAgentScriptsShareBeadIDMatcher(t *testing.T) {
 		t.Fatalf("%s: no BEAD_ID_ERE='...' assignment found", libPath)
 	}
 	if got := string(assign[1]); got != beadIDERE {
-		t.Errorf("%s: BEAD_ID_ERE = %q, want %q to match beadIDERE in bead_id_test.go", libPath, got, beadIDERE)
+		t.Errorf("%s: BEAD_ID_ERE = %q, want %q to match beadIDERE in bead_id_helpers_test.go", libPath, got, beadIDERE)
 	}
 
 	scripts, err := filepath.Glob(filepath.Join("..", "agents", "*.sh"))

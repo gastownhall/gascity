@@ -26,7 +26,49 @@ var (
 	_ ConditionalWriter                     = (*SQLiteStore)(nil)
 	_ AtomicConditionalCloser               = (*SQLiteStore)(nil)
 	_ AtomicConditionalCloserHandleProvider = (*SQLiteStore)(nil)
+	_ conditionalWritesModeCarrier          = (*SQLiteStore)(nil)
+	_ conditionalWriteCapabilityProber      = (*SQLiteStore)(nil)
+	_ conditionalWriteStateInspector        = (*SQLiteStore)(nil)
+	_ conditionalWritesLiveness             = (*SQLiteStore)(nil)
+	_ conditionalLabelsGuard                = (*SQLiteStore)(nil)
 )
+
+// probeConditionalWriteCapability reports what the fenced verbs can do on this
+// instance. A read-only open cannot write at all, and a legacy layout without
+// the revision column refuses every verb (conditionalWrite), so both answer
+// incapable rather than letting the seam hand out a writer that always fails.
+func (s *SQLiteStore) probeConditionalWriteCapability() (bool, string) {
+	if err := s.ensureOpen(); err != nil {
+		return false, err.Error()
+	}
+	if s.readOnly {
+		return false, "sqlite store is open read-only"
+	}
+	if !s.hasRevisionColumn {
+		return false, "sqlite schema lacks the revision column needed for conditional writes"
+	}
+	return true, ""
+}
+
+// inspectConditionalWriteState mirrors the prober: its answer is read from the
+// open's own state, cheap and side-effect-free, so the probe column is always
+// definitive. SQLite has no runtime latch.
+//
+//nolint:unparam // latch is fixed by design; the tuple is the inspector contract
+func (s *SQLiteStore) inspectConditionalWriteState() (probe, latch, reason string) {
+	if capable, why := s.probeConditionalWriteCapability(); !capable {
+		return ConditionalWriteProbeIncapable, ConditionalWriteLatchUnlatched, why
+	}
+	return ConditionalWriteProbeCapable, ConditionalWriteLatchUnlatched, ""
+}
+
+// conditionalWritesStoreOpen reports ErrStoreClosed once CloseStore has run,
+// so the seam does not mistake a closed engine for an incapable one.
+func (s *SQLiteStore) conditionalWritesStoreOpen() error { return s.ensureOpen() }
+
+// conditionalLabelsGuarded reports that UpdateIfMatch rewrites labels inside
+// the fenced transaction that bumps the revision (upsertBeadTx).
+func (s *SQLiteStore) conditionalLabelsGuarded() bool { return true }
 
 // UpdateIfMatch applies opts only when the stored revision matches.
 func (s *SQLiteStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
@@ -49,7 +91,10 @@ func (s *SQLiteStore) CloseIfMatch(id string, expectedRevision int64) error {
 		return err
 	}
 	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, b Bead) error {
-		b.Status = "closed"
+		if b.Status != "closed" {
+			setBeadStatus(&b, "closed")
+			recordCloseReason(&b)
+		}
 		b.UpdatedAt = time.Now()
 		return s.upsertBeadTx(ctx, tx, b)
 	})
@@ -103,7 +148,7 @@ func (s *SQLiteStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
-	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, _ Bead) error {
+	if err := s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, _ Bead) error {
 		if _, err := tx.Exec(`DELETE FROM beads WHERE id=?`, id); err != nil {
 			return fmt.Errorf("deleting bead %q: %w", id, err)
 		}
@@ -117,7 +162,13 @@ func (s *SQLiteStore) DeleteIfMatch(id string, expectedRevision int64) error {
 			return err
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	if err := s.localStrings.DeleteBead(id); err != nil {
+		return fmt.Errorf("deleting bead %q: cleaning up local strings: %w", id, err)
+	}
+	return nil
 }
 
 // CompareAndSetMetadataKey swaps metadata[key] iff its current value equals

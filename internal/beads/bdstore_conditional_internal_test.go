@@ -1379,3 +1379,33 @@ func TestBdIssueDecodesNullRevisionAsZero(t *testing.T) {
 		t.Fatalf("Bead.Revision = %d, want 0 for a null revision column", got)
 	}
 }
+
+// TestBdStoreStillRefusesLabels pins that bd-backed conditional writes keep
+// refusing labels, directly and through a CachingStore, before bd ever runs:
+// bd persists labels through writes --if-revision does not fence.
+func TestBdStoreStillRefusesLabels(t *testing.T) {
+	calls := 0
+	s := NewBdStore("/city", func(_, _ string, _ ...string) ([]byte, error) {
+		calls++
+		return nil, errors.New("bd must not run for a refused label update")
+	})
+	cache := NewCachingStoreForTest(s, nil)
+	for _, opts := range []UpdateOpts{
+		{Labels: []string{"added"}, Title: strptr("t")},
+		{RemoveLabels: []string{"removed"}, Title: strptr("t")},
+	} {
+		var unsupported *ConditionalUpdateFieldUnsupportedError
+		if err := s.UpdateIfMatch("ga-1", 1, opts); !errors.As(err, &unsupported) {
+			t.Errorf("BdStore.UpdateIfMatch(%+v) = %v, want *ConditionalUpdateFieldUnsupportedError", opts, err)
+		}
+		if _, err := s.UpdateIfAssignment("ga-1", "open", "", opts); !errors.As(err, &unsupported) {
+			t.Errorf("BdStore.UpdateIfAssignment(%+v) = %v, want *ConditionalUpdateFieldUnsupportedError", opts, err)
+		}
+		if err := cache.UpdateIfMatch("ga-1", 1, opts); !errors.As(err, &unsupported) {
+			t.Errorf("CachingStore/BdStore.UpdateIfMatch(%+v) = %v, want *ConditionalUpdateFieldUnsupportedError", opts, err)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("bd ran %d times for refused label updates, want 0", calls)
+	}
+}

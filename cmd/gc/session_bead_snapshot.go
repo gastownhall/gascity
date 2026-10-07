@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -43,7 +44,11 @@ type sessionBeadSnapshot struct {
 	beadIDByTemplateHint      map[string]string
 	sessionNameByAgentName    map[string]string
 	sessionNameByTemplateHint map[string]string
-	loadErr                   error
+	// byID indexes openInfos by ID, first occurrence (A3). Readers build it
+	// lazily under RLock, so it is atomic: two readers may both build it,
+	// identically. Every mutator of openInfos clears it under Lock.
+	byID    atomic.Pointer[map[string]int]
+	loadErr error
 	// fingerprint is the config-change cache key (sessionBeadSnapshotFingerprint):
 	// a hash of every open bead's ID + Status + Assignee + ALL metadata keys. It is
 	// computed at the store edge from the raw beads — session.Info deliberately drops
@@ -254,6 +259,7 @@ func (s *sessionBeadSnapshot) addInfo(info sessionpkg.Info) {
 	s.beadIDByTemplateHint = rebuilt.beadIDByTemplateHint
 	s.sessionNameByAgentName = rebuilt.sessionNameByAgentName
 	s.sessionNameByTemplateHint = rebuilt.sessionNameByTemplateHint
+	s.byID.Store(nil)
 }
 
 // OpenInfos is a copy of the session.Info projection of every open session, in the
@@ -284,6 +290,7 @@ func (s *sessionBeadSnapshot) WriteBackReconcileInfos(infoByID map[string]sessio
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.byID.Store(nil)
 	for i := range s.openInfos {
 		if post, ok := infoByID[s.openInfos[i].ID]; ok {
 			s.openInfos[i] = post
@@ -325,6 +332,7 @@ func (s *sessionBeadSnapshot) ApplyOpenInfoPatch(id string, patch sessionpkg.Met
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.byID.Store(nil)
 	for i := range s.openInfos {
 		if s.openInfos[i].ID == id {
 			s.openInfos[i] = s.openInfos[i].ApplyPatch(patch)
@@ -372,13 +380,22 @@ func (s *sessionBeadSnapshot) FindInfoByID(id string) (sessionpkg.Info, bool) {
 	return s.findInfoByIDLocked(id)
 }
 
-// findInfoByIDLocked is the inner lookup over openInfos; callers must hold at least
-// s.mu.RLock.
+// findInfoByIDLocked is the inner lookup over openInfos, through the byID index;
+// callers must hold at least s.mu.RLock.
 func (s *sessionBeadSnapshot) findInfoByIDLocked(id string) (sessionpkg.Info, bool) {
-	for _, info := range s.openInfos {
-		if info.ID == id {
-			return info, true
+	index := s.byID.Load()
+	if index == nil {
+		built := make(map[string]int, len(s.openInfos))
+		for i := range s.openInfos {
+			if _, seen := built[s.openInfos[i].ID]; !seen {
+				built[s.openInfos[i].ID] = i
+			}
 		}
+		index = &built
+		s.byID.Store(index)
+	}
+	if i, ok := (*index)[id]; ok {
+		return s.openInfos[i], true
 	}
 	return sessionpkg.Info{}, false
 }

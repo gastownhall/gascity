@@ -86,7 +86,15 @@ func bdLatestSchemaVersion(bdPath string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("bd schema probe: create temp dir: %w", err)
 	}
-	defer os.RemoveAll(dir) //nolint:errcheck // best-effort probe cleanup
+	// bd's HOME (dir/home) lives under dir, so a detached child that bd spawned
+	// (the metrics flusher) may still be writing while this removal runs. A
+	// leaked probe dir must not fail suite setup, but it must not vanish
+	// silently either.
+	defer func() {
+		if rmErr := os.RemoveAll(dir); rmErr != nil {
+			fmt.Fprintf(os.Stderr, "bd schema probe: leaked temp dir %s: %v\n", dir, rmErr)
+		}
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), bdSchemaProbeTimeout)
 	defer cancel()
@@ -95,6 +103,9 @@ func bdLatestSchemaVersion(bdPath string) (int, error) {
 		return 0, fmt.Errorf("bd schema probe: create tool home: %w", err)
 	}
 	cmd := bdSchemaProbeCommand(ctx, bdPath, dir)
+	// BEADS_TEST_MODE=1 (beadstest.EnvBeadsTestMode) stops bd spawning the
+	// detached metrics flusher that would race the RemoveAll of dir above.
+	cmd.Env = append(cmd.Env, "BEADS_TEST_MODE=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return 0, fmt.Errorf("bd schema probe: %s migrate schema: %w\n%s", bdPath, err, out)

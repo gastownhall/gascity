@@ -13,8 +13,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // counterMemStore is a MemStore that also implements Counter, so the
@@ -54,7 +52,7 @@ func (s counterMemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	workOutcomeByID := make(map[string]string, len(all))
 	for _, b := range all {
 		statusByID[b.ID] = b.Status
-		workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
+		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
 	}
 	now := time.Now().UTC()
 	var result []Bead
@@ -823,7 +821,7 @@ func (s depStrippingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	workOutcomeByID := make(map[string]string, len(all))
 	for _, b := range all {
 		statusByID[b.ID] = b.Status
-		workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
+		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
 	}
 	now := time.Now().UTC()
 	var result []Bead

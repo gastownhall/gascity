@@ -1547,7 +1547,12 @@ type SlingResult struct {
 	RootBeadID     string
 	AttachedBeadID string
 	Mode           string
-	Warnings       []string
+	MoleculeID     string
+	ConvoyID       string
+	// Batch is set only when the bead was a convoy whose open children were
+	// routed one by one.
+	Batch    *SlingBatchSummary
+	Warnings []string
 }
 
 // Sling routes work to a target agent or pool over the control plane
@@ -1616,6 +1621,18 @@ func (c *Client) Sling(req SlingRequest) (SlingResult, error) {
 		RootBeadID:     derefStr(r.RootBeadId),
 		AttachedBeadID: derefStr(r.AttachedBeadId),
 		Mode:           derefStr(r.Mode),
+		MoleculeID:     derefStr(r.MoleculeId),
+		ConvoyID:       derefStr(r.ConvoyId),
+	}
+	if b := r.Batch; b != nil {
+		out.Batch = &SlingBatchSummary{
+			ContainerType: derefStr(b.ContainerType),
+			Total:         int(b.Total),
+			Routed:        int(b.Routed),
+			Failed:        int(b.Failed),
+			Skipped:       int(b.Skipped),
+			Idempotent:    int(b.Idempotent),
+		}
 	}
 	if r.Warnings != nil {
 		out.Warnings = *r.Warnings

@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -235,5 +236,60 @@ func TestSeamBackedProviderPromotesAttachmentObserver(t *testing.T) {
 	}
 	if len(ex.calls) != 1 || !slices.Equal(ex.calls[0], attachProbeArgs) {
 		t.Fatalf("calls = %q, want only the attachment probe %q", ex.calls, attachProbeArgs)
+	}
+}
+
+// attachProbeFailsExecutor fails only the attachment probe. Every other tmux
+// call answers as a detached codex pane holding a staged paste in its
+// composer: idle, draft visible, so both input-clearing gates in nudgeSession
+// are reachable.
+type attachProbeFailsExecutor struct {
+	calls [][]string
+}
+
+func (e *attachProbeFailsExecutor) execute(args []string) (string, error) {
+	e.calls = append(e.calls, slices.Clone(args))
+	switch {
+	case slices.Contains(args, "#{session_name}|#{session_attached}"):
+		return "", errors.New("server busy")
+	case slices.Contains(args, "show-environment") && slices.Contains(args, "GC_PROVIDER"):
+		return "GC_PROVIDER=codex", nil
+	case slices.Contains(args, "capture-pane"):
+		return "› [Pasted Content 120 chars]", nil
+	}
+	return "", nil
+}
+
+func (e *attachProbeFailsExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
+
+// A failed attachment probe cannot tell whether a human is composing, so
+// nudgeSession must neither clear the line (C-u) nor re-send the submit over a
+// staged draft (#5192). Reading the failure as "detached" wipes or sends the
+// operator's draft.
+func TestNudgeSessionAttachProbeErrorKeepsInput(t *testing.T) {
+	ex := &attachProbeFailsExecutor{}
+	tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+
+	err := tm.NudgeSession("worker-1", "hello world")
+	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		t.Fatalf("NudgeSession = %v, want ErrNudgeSubmitUnconfirmed", err)
+	}
+	enters := 0
+	for _, c := range ex.calls {
+		if !slices.Contains(c, "send-keys") {
+			continue
+		}
+		if slices.Contains(c, "C-u") {
+			t.Fatalf("sent C-u with the attachment probe failing: %q", c)
+		}
+		if c[len(c)-1] == "Enter" {
+			enters++
+		}
+	}
+	// Only the confirm window's submits; staged-draft recovery adds more.
+	if enters != submitEnterMaxSends {
+		t.Fatalf("submit Enter sends = %d, want %d (no staged-draft resubmit)", enters, submitEnterMaxSends)
 	}
 }

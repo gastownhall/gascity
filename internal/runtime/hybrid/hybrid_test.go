@@ -13,6 +13,88 @@ import (
 
 func isRemote(name string) bool { return strings.Contains(name, "remote-agent") }
 
+type unattendedStopCall struct {
+	name          string
+	expectedToken string
+}
+
+type unattendedStopperProvider struct {
+	runtime.Provider
+	calls []unattendedStopCall
+	err   error
+}
+
+func newUnattendedStopperProvider(err error) *unattendedStopperProvider {
+	return &unattendedStopperProvider{Provider: runtime.NewFake(), err: err}
+}
+
+func (p *unattendedStopperProvider) StopUnattendedSession(name, expectedToken string) error {
+	p.calls = append(p.calls, unattendedStopCall{name: name, expectedToken: expectedToken})
+	return p.err
+}
+
+func TestProviderStopUnattendedSessionRoutesOnlySelectedBackend(t *testing.T) {
+	t.Run("local", func(t *testing.T) {
+		local := newUnattendedStopperProvider(nil)
+		remote := newUnattendedStopperProvider(nil)
+		p := New(local, remote, isRemote)
+
+		if err := p.StopUnattendedSession("local-agent", "token-local"); err != nil {
+			t.Fatalf("StopUnattendedSession(local): %v", err)
+		}
+		if got := local.calls; len(got) != 1 || got[0] != (unattendedStopCall{name: "local-agent", expectedToken: "token-local"}) {
+			t.Fatalf("local unattended stops = %#v, want exact local-agent/token-local call", got)
+		}
+		if got := remote.calls; len(got) != 0 {
+			t.Fatalf("remote unattended stops = %#v, want none", got)
+		}
+	})
+
+	t.Run("remote", func(t *testing.T) {
+		local := newUnattendedStopperProvider(nil)
+		remote := newUnattendedStopperProvider(nil)
+		p := New(local, remote, isRemote)
+
+		if err := p.StopUnattendedSession("remote-agent-1", "token-remote"); err != nil {
+			t.Fatalf("StopUnattendedSession(remote): %v", err)
+		}
+		if got := remote.calls; len(got) != 1 || got[0] != (unattendedStopCall{name: "remote-agent-1", expectedToken: "token-remote"}) {
+			t.Fatalf("remote unattended stops = %#v, want exact remote-agent-1/token-remote call", got)
+		}
+		if got := local.calls; len(got) != 0 {
+			t.Fatalf("local unattended stops = %#v, want none", got)
+		}
+	})
+
+	t.Run("unsupported local does not probe remote", func(t *testing.T) {
+		remote := newUnattendedStopperProvider(nil)
+		p := New(runtime.NewFake(), remote, isRemote)
+
+		err := p.StopUnattendedSession("local-agent", "token")
+		if err == nil || !strings.Contains(err.Error(), "local backend") {
+			t.Fatalf("StopUnattendedSession error = %v, want contextual local-backend error", err)
+		}
+		if got := remote.calls; len(got) != 0 {
+			t.Fatalf("remote unattended stops = %#v, want no fallback probe", got)
+		}
+	})
+
+	t.Run("remote error does not probe local", func(t *testing.T) {
+		sentinel := errors.New("remote unattended stop unavailable")
+		local := newUnattendedStopperProvider(nil)
+		remote := newUnattendedStopperProvider(sentinel)
+		p := New(local, remote, isRemote)
+
+		err := p.StopUnattendedSession("remote-agent-1", "token")
+		if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "remote backend") {
+			t.Fatalf("StopUnattendedSession error = %v, want wrapped contextual remote error", err)
+		}
+		if got := local.calls; len(got) != 0 {
+			t.Fatalf("local unattended stops = %#v, want no fallback probe", got)
+		}
+	})
+}
+
 type livenessObservationErrorProvider struct {
 	*runtime.Fake
 	err error
