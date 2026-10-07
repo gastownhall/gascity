@@ -128,6 +128,8 @@ func TestBazelCIConfigSuiteConfigs(t *testing.T) {
 	for config, flags := range map[string]string{
 		"acceptance":  "--define=gotags=acceptance_a --test_timeout=1100",
 		"integration": "--define=gotags=integration --test_timeout=1100",
+		// Its --test_filter: TestIntegrationSmokeLaneMatchesShardScript.
+		"integration-smoke": "--config=integration",
 	} {
 		for _, f := range strings.Fields(flags) {
 			if !strings.Contains(rc, "\ntest:"+config+" "+f+"\n") {
@@ -202,6 +204,7 @@ var multiLaneCommands = map[string]string{
 	"acceptance":           "test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test",
 	"integration":          "test --config=ci --config=integration --keep_going //test/integration:integration_test",
 	"integration-packages": "test --config=ci --config=integration --keep_going //test:integration_packages",
+	"integration-smoke":    "test --config=ci --config=integration-smoke --keep_going //test/integration:integration_test",
 }
 
 const (
@@ -327,7 +330,7 @@ func multiLaneLanes(t *testing.T, script, event, mode string) (string, error) {
 // multiLaneForkCertificates caps the rbe-fork certificates (one per lane) a
 // fork run mints: well inside the mint's 12 per run and 160 per PR a day, so
 // a run and a few re-runs never hit them.
-const multiLaneForkCertificates = 3
+const multiLaneForkCertificates = 4
 
 var (
 	multiLaneEvents = []string{"pull_request", "push", "workflow_dispatch", "workflow_call", "schedule"}
@@ -337,10 +340,10 @@ var (
 // wantMultiLanes: the lanes each (event, mode) starts, in order.
 func wantMultiLanes(event, _ string) []string {
 	// Every mode tests (the gate fails a run with no lane). Acceptance and
-	// integration-packages run in every mode, the fork pool's (fork-ro: no
-	// network) included: gc init no longer clones gascity-packs (#7005), and
-	// no integration_packages target needs the network.
-	lanes := []string{"unit", "acceptance", "integration-packages"}
+	// the gating integration lanes run in every mode, the fork pool's
+	// (fork-ro: no network) included: gc init no longer clones gascity-packs
+	// (#7005), and no integration_packages target needs the network.
+	lanes := []string{"unit", "acceptance", "integration-packages", "integration-smoke"}
 	if event == "push" || event == "workflow_dispatch" { // until G3
 		lanes = append(lanes, "integration")
 	}

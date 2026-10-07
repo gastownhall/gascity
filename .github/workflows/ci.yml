@@ -983,47 +983,12 @@ jobs:
       - name: Test Windows Job Object descendant cleanup
         run: go test -tags=integration -count=1 ./internal/credentialprovider -run '^TestCredentialProviderWindowsJob' -timeout=45s
 
+  # Go integration shards, for fork and Dependabot PRs only. bazel.yml's
+  # gating lanes run the same tests for every PR: integration-packages
+  # (//test:integration_packages) the packages-* shards, integration-smoke
+  # (.bazelrc test:integration-smoke) bdstore and rest-smoke. These rows stay
+  # until a fork-mode run of those lanes is verified (ga-96smfk.50).
   integration-shards:
-    name: Integration / ${{ matrix.shard_name }}
-    needs:
-      - runner-policy
-      - changes
-    if: needs.changes.outputs.integration == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    timeout-minutes: ${{ matrix.timeout_minutes }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - shard_name: bdstore
-            timeout_minutes: 15
-            command: make test-integration-bdstore
-          - shard_name: rest-smoke-1-of-2
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-smoke-1-of-2
-          - shard_name: rest-smoke-2-of-2
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-smoke-2-of-2
-    env:
-      DOLT_VERSION: "2.2.0"
-      BD_VERSION: "v1.3.1"
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "false"
-      - name: Run integration shard
-        run: ${{ matrix.command }}
-
-  # The packages-* shards: every package's `//go:build integration` tests
-  # and GC_FAST_UNIT=0 process tests outside test/integration. bazel.yml's
-  # gating integration-packages lane (//test:integration_packages) runs them
-  # for every PR. Fork and Dependabot PRs still run the shards here too until
-  # a fork-mode run of that lane is verified; then this job goes
-  # (ga-96smfk.50).
-  integration-packages-fork:
     name: Integration (fork PR) / ${{ matrix.shard_name }}
     needs:
       - runner-policy
@@ -1068,6 +1033,15 @@ jobs:
           - shard_name: packages-runtime-tmux-6-of-6
             timeout_minutes: 10
             command: ./scripts/test-integration-shard packages-runtime-tmux-6-of-6
+          - shard_name: bdstore
+            timeout_minutes: 15
+            command: make test-integration-bdstore
+          - shard_name: rest-smoke-1-of-2
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard rest-smoke-1-of-2
+          - shard_name: rest-smoke-2-of-2
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard rest-smoke-2-of-2
     env:
       DOLT_VERSION: "2.2.0"
       BD_VERSION: "v1.3.1"
@@ -1950,7 +1924,6 @@ jobs:
     needs:
       - runner-policy
       - integration-shards
-      - integration-packages-fork
       - integration-rest-full
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
@@ -1964,11 +1937,11 @@ jobs:
           import os
           import sys
 
-          # integration-shards is path-gated, integration-packages-fork is
-          # additionally fork/Dependabot-PR-only and integration-rest-full
-          # push-only. Their skipped results are expected for docs-only
-          # changes, same-repo PRs and pushes, and pull requests, respectively.
-          allow_skipped = {"integration-shards", "integration-packages-fork", "integration-rest-full"}
+          # integration-shards is path-gated and fork/Dependabot-PR-only, and
+          # integration-rest-full push-only. Their skipped results are
+          # expected for docs-only changes, same-repo PRs and pushes, and
+          # pull requests, respectively.
+          allow_skipped = {"integration-shards", "integration-rest-full"}
           needs = json.loads(os.environ["NEEDS_JSON"])
           failed = {}
           for job, meta in sorted(needs.items()):

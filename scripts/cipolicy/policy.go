@@ -179,7 +179,15 @@ const (
 	// them inside every Bazel Go compile, gated by bazel.yml), and its
 	// checkout no longer needs fetch-depth 2. Reviewed delta: removed steps
 	// and one removed checkout input; no new job, trigger or permission.
-	expectedCIExecutionHash     = "b711029d841b6ae6c715dd8ff710fc34fd7ede4d8791589afd2b323a0119963a"
+	//
+	// Bumped again (ga-96smfk.50, //test/integration smoke subset moved to
+	// Bazel): the bdstore and rest-smoke rows join the packages-* rows in one
+	// fork/Dependabot-PR-only integration-shards job (bazel.yml's gating
+	// integration-smoke and integration-packages lanes cover pushes and every
+	// other PR), and integration-packages-fork goes; ci-integration drops it.
+	// Reviewed delta: rows moved between two jobs of identical runner, env
+	// and steps, one job removed; no new trigger, step command or permission.
+	expectedCIExecutionHash     = "212cf931a77842415da14d344782a12592e52a11bf4ac4dd693c0447ec627260"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

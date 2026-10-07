@@ -53,6 +53,11 @@ bazel test --config=integration //test:integration_packages
 bazel test --config=integration //internal/runtime/tmux:tmux_test
 ```
 
+`//test/integration` itself gates only through the `integration-smoke`
+lane (`bazel test --config=integration-smoke //test/integration:integration_test`):
+the bdstore and REST smoke tests `scripts/test-integration-shard` names. The
+full suite runs evidence-only on pushes until its flaky tests are fixed.
+
 `make bazel-sync` lists every package with an integration-tagged file (or a
 `GC_FAST_UNIT=0` process gate) in that suite. Tools those tests run by name
 come from pinned data deps, not the host: a go_test passes their
@@ -82,7 +87,7 @@ executed tests. Pass one `PHASE=FILE` per invocation; `--json-out PATH`
 writes the machine-readable report (schema 1), `--allow-missing` shows an
 absent file as "no BEP file" instead of failing, and `--top N` sizes the
 slowest list. In CI, each `bazel.yml` lane (unit, acceptance,
-integration-packages, integration) uploads its BEP file, redacted to the fields the report reads
+integration-packages, integration-smoke, integration) uploads its BEP file, redacted to the fields the report reads
 (`internal/testpolicy/bepsummary/redact.jq`: a raw BEP file holds the
 expanded command line, including `--remote_executor`), and the
 `bazel / test cache report` job reports them in one table in its job
