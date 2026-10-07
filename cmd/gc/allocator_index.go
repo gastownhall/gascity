@@ -302,6 +302,13 @@ func (m *poolRealizeMemo) reusablePoolSessionInfos(bp *agentBuildParams, cfgAgen
 	if !m.reusableBuilt {
 		m.reusable, m.reusableBuilt = m.scanReusable(bp, cfgAgent, template, nil), true
 	}
+	// Requests use rows in list order, so the used rows are usually a
+	// prefix: drop it without a copy.
+	k := 0
+	for k < len(m.reusable) && used[m.reusable[k].ID] {
+		k++
+	}
+	m.reusable = m.reusable[k:]
 	for i := range m.reusable {
 		if used[m.reusable[i].ID] {
 			kept := make([]session.Info, 0, len(m.reusable)-1)

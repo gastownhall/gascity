@@ -3,7 +3,9 @@ package main
 // Frozen copies of the pool desired-state code A3 bucketed by template, taken
 // from main at 0e1cb8bccd with comment lines and the trace-only branches
 // removed and functions renamed. They are the "before" side of
-// TestPoolDesiredIndexOracle and go away with the legacy reconciler.
+// TestPoolDesiredIndexOracle and go away with the legacy reconciler. If a
+// deliberate change breaks this oracle, delete the copy and the oracle;
+// never edit them.
 
 import (
 	"sort"

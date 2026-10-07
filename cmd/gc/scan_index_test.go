@@ -335,3 +335,30 @@ func TestSlotTemplateMemoOracle(t *testing.T) {
 		}
 	}
 }
+
+// Kills: reusablePoolSessionInfosForRequest filtering in place again: the
+// realization memo hands out its own list, so dropping a held row for an
+// anonymous request would overwrite the memo's rows for every later
+// request.
+func TestReuseMemoSurvivesAnonymousDrop(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 4)}}
+	held := poolRow("gc-1", "worker", 1, "active", "held_until", allocNow.Add(time.Hour).Format(time.RFC3339))
+	held.CreatedAt = allocNow.Add(-2 * time.Hour)
+	free := poolRow("gc-2", "worker", 2, "active")
+	free.CreatedAt = allocNow.Add(-time.Hour)
+	p := newDecidePass(newAllocFixture(t, cfg).sessions(held, free).inputs())
+	p.prepare()
+	p.newPlanParams()
+	p.indexRealization()
+	agent := p.agentByTemplate("worker")
+	bp := p.realizeParams(agent, nil)
+	for range 2 {
+		got := reusablePoolSessionInfosForRequest(bp, agent, "worker", SessionRequest{Template: "worker"}, allocNow, map[string]bool{})
+		if ids := infoIDs(got); !reflect.DeepEqual(ids, []string{"gc-2"}) {
+			t.Fatalf("anonymous reuse = %v, want [gc-2] (gc-1 is held)", ids)
+		}
+		if ids := infoIDs(bp.realizeMemo.reusable); !reflect.DeepEqual(ids, []string{"gc-1", "gc-2"}) {
+			t.Fatalf("memo reuse list = %v after the drop, want [gc-1 gc-2]", ids)
+		}
+	}
+}
