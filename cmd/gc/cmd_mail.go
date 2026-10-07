@@ -928,14 +928,13 @@ func formatInjectOutput(messages []mail.Message) string {
 		}
 	}
 	anyArchived := archivedCount > 0
-	remainingUnread := len(messages) - archivedCount
 
 	var sb strings.Builder
 	sb.WriteString("<system-reminder>\n")
 	fmt.Fprintf(&sb, "You have %d unread message(s).\n\n", len(messages))
 	switch {
 	case anyArchived:
-		fmt.Fprintf(&sb, "Some of these are archived on delivery below; 'gc mail inbox' will list the %d message(s) still unread afterward.\n\n", remainingUnread)
+		fmt.Fprintf(&sb, "%d of these are archived on delivery below and will not appear in 'gc mail inbox' afterward.\n\n", archivedCount)
 	case len(shown) < len(messages):
 		fmt.Fprintf(&sb, "Showing the %d most recent message(s) here; run 'gc mail inbox' for the full list.\n\n", len(shown))
 	}

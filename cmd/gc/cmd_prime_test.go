@@ -409,6 +409,9 @@ func TestSessionStartAutoHandoffInjectionAssertsRulesAAndB(t *testing.T) {
 			t.Errorf("SessionStart injection says 'gc mail inbox' %s, but %s was archived on delivery", overPromise, auto.ID)
 		}
 	}
+	if strings.Contains(injection.text, "0 message(s) still unread") {
+		t.Errorf("SessionStart injection claims no unread mail remains, but it only sees the auto-handoff subset of the inbox:\n%s", injection.text)
+	}
 
 	if injection.afterDelivery == nil {
 		t.Fatal("afterDelivery = nil, want archive acknowledgement")
