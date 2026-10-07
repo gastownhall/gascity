@@ -940,7 +940,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionHandoffFailedPayload | SessionHandoffReleasedPayload | SessionHandoffRestartAcceptedPayload | SessionHandoffStagedPayload | SessionHandoffSuccessorStartedPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -3278,6 +3278,31 @@ export type SessionDrainAckedWithAssignedWorkPayload = {
     template?: string;
 };
 
+export type SessionHandoffFailedPayload = {
+    reason: string;
+    session_key: string;
+};
+
+export type SessionHandoffReleasedPayload = {
+    message_id: string;
+    session_key: string;
+};
+
+export type SessionHandoffRestartAcceptedPayload = {
+    message_id: string;
+    session_key: string;
+};
+
+export type SessionHandoffStagedPayload = {
+    message_id: string;
+    session_key: string;
+};
+
+export type SessionHandoffSuccessorStartedPayload = {
+    message_id: string;
+    session_key: string;
+};
+
 export type SessionInfo = {
     attached: boolean;
     last_activity?: string;
@@ -5605,6 +5630,16 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionDrainStopEscalated) | ({
     type: 'session.draining';
 } & TypedEventStreamEnvelopeSessionDraining) | ({
+    type: 'session.handoff_failed';
+} & TypedEventStreamEnvelopeSessionHandoffFailed) | ({
+    type: 'session.handoff_released';
+} & TypedEventStreamEnvelopeSessionHandoffReleased) | ({
+    type: 'session.handoff_restart_accepted';
+} & TypedEventStreamEnvelopeSessionHandoffRestartAccepted) | ({
+    type: 'session.handoff_staged';
+} & TypedEventStreamEnvelopeSessionHandoffStaged) | ({
+    type: 'session.handoff_successor_started';
+} & TypedEventStreamEnvelopeSessionHandoffSuccessorStarted) | ({
     type: 'session.idle_killed';
 } & TypedEventStreamEnvelopeSessionIdleKilled) | ({
     type: 'session.max_age_killed';
@@ -7051,6 +7086,96 @@ export type TypedEventStreamEnvelopeSessionDraining = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.handoff_failed
+ */
+export type TypedEventStreamEnvelopeSessionHandoffFailed = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionHandoffFailedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.handoff_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope session.handoff_released
+ */
+export type TypedEventStreamEnvelopeSessionHandoffReleased = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionHandoffReleasedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.handoff_released';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope session.handoff_restart_accepted
+ */
+export type TypedEventStreamEnvelopeSessionHandoffRestartAccepted = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionHandoffRestartAcceptedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.handoff_restart_accepted';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope session.handoff_staged
+ */
+export type TypedEventStreamEnvelopeSessionHandoffStaged = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionHandoffStagedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.handoff_staged';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope session.handoff_successor_started
+ */
+export type TypedEventStreamEnvelopeSessionHandoffSuccessorStarted = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionHandoffSuccessorStartedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.handoff_successor_started';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.idle_killed
  */
 export type TypedEventStreamEnvelopeSessionIdleKilled = {
@@ -7712,6 +7837,16 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated) | ({
     type: 'session.draining';
 } & TypedTaggedEventStreamEnvelopeSessionDraining) | ({
+    type: 'session.handoff_failed';
+} & TypedTaggedEventStreamEnvelopeSessionHandoffFailed) | ({
+    type: 'session.handoff_released';
+} & TypedTaggedEventStreamEnvelopeSessionHandoffReleased) | ({
+    type: 'session.handoff_restart_accepted';
+} & TypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted) | ({
+    type: 'session.handoff_staged';
+} & TypedTaggedEventStreamEnvelopeSessionHandoffStaged) | ({
+    type: 'session.handoff_successor_started';
+} & TypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted) | ({
     type: 'session.idle_killed';
 } & TypedTaggedEventStreamEnvelopeSessionIdleKilled) | ({
     type: 'session.max_age_killed';
@@ -9231,6 +9366,101 @@ export type TypedTaggedEventStreamEnvelopeSessionDraining = {
     subject?: string;
     ts: string;
     type: 'session.draining';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.handoff_failed
+ */
+export type TypedTaggedEventStreamEnvelopeSessionHandoffFailed = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionHandoffFailedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.handoff_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.handoff_released
+ */
+export type TypedTaggedEventStreamEnvelopeSessionHandoffReleased = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionHandoffReleasedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.handoff_released';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.handoff_restart_accepted
+ */
+export type TypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionHandoffRestartAcceptedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.handoff_restart_accepted';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.handoff_staged
+ */
+export type TypedTaggedEventStreamEnvelopeSessionHandoffStaged = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionHandoffStagedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.handoff_staged';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.handoff_successor_started
+ */
+export type TypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionHandoffSuccessorStartedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.handoff_successor_started';
     workflow?: WorkflowEventProjection;
 };
 

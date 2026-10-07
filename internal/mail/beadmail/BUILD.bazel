@@ -21,6 +21,7 @@ go_test(
         "conformance_test.go",
         "handoff_archive_test.go",
         "handoff_test.go",
+        "staged_handoff_test.go",
         "testenv_import_test.go",
     ],
     embed = [":beadmail"],

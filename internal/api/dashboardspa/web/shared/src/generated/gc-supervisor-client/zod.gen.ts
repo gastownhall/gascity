@@ -1703,6 +1703,31 @@ export const zSessionDrainAckedWithAssignedWorkPayload = z.object({
     template: z.string().optional()
 });
 
+export const zSessionHandoffFailedPayload = z.object({
+    reason: z.string(),
+    session_key: z.string()
+});
+
+export const zSessionHandoffReleasedPayload = z.object({
+    message_id: z.string(),
+    session_key: z.string()
+});
+
+export const zSessionHandoffRestartAcceptedPayload = z.object({
+    message_id: z.string(),
+    session_key: z.string()
+});
+
+export const zSessionHandoffStagedPayload = z.object({
+    message_id: z.string(),
+    session_key: z.string()
+});
+
+export const zSessionHandoffSuccessorStartedPayload = z.object({
+    message_id: z.string(),
+    session_key: z.string()
+});
+
 export const zSessionInfo = z.object({
     attached: z.boolean(),
     last_activity: z.iso.datetime().optional(),
@@ -3446,6 +3471,11 @@ export const zEventPayload = z.union([
     zSessionCreateSucceededPayload,
     zSessionDemandClaimDivergencePayload,
     zSessionDrainAckedWithAssignedWorkPayload,
+    zSessionHandoffFailedPayload,
+    zSessionHandoffReleasedPayload,
+    zSessionHandoffRestartAcceptedPayload,
+    zSessionHandoffStagedPayload,
+    zSessionHandoffSuccessorStartedPayload,
     zSessionLifecyclePayload,
     zSessionMessageSucceededPayload,
     zSessionPendingClearedPayload,
@@ -4948,6 +4978,96 @@ export const zTypedEventStreamEnvelopeSessionDraining = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope session.handoff_failed
+ */
+export const zTypedEventStreamEnvelopeSessionHandoffFailed = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionHandoffFailedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.handoff_failed'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedEventStreamEnvelope session.handoff_released
+ */
+export const zTypedEventStreamEnvelopeSessionHandoffReleased = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionHandoffReleasedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.handoff_released'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedEventStreamEnvelope session.handoff_restart_accepted
+ */
+export const zTypedEventStreamEnvelopeSessionHandoffRestartAccepted = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionHandoffRestartAcceptedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.handoff_restart_accepted'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedEventStreamEnvelope session.handoff_staged
+ */
+export const zTypedEventStreamEnvelopeSessionHandoffStaged = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionHandoffStagedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.handoff_staged'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedEventStreamEnvelope session.handoff_successor_started
+ */
+export const zTypedEventStreamEnvelopeSessionHandoffSuccessorStarted = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionHandoffSuccessorStartedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.handoff_successor_started'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope session.idle_killed
  */
 export const zTypedEventStreamEnvelopeSessionIdleKilled = z.object({
@@ -5533,6 +5653,11 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeSessionDrainFenceUnavailable.extend({ type: z.literal('session.drain_fence_unavailable') }),
     zTypedEventStreamEnvelopeSessionDrainStopEscalated.extend({ type: z.literal('session.drain_stop_escalated') }),
     zTypedEventStreamEnvelopeSessionDraining.extend({ type: z.literal('session.draining') }),
+    zTypedEventStreamEnvelopeSessionHandoffFailed.extend({ type: z.literal('session.handoff_failed') }),
+    zTypedEventStreamEnvelopeSessionHandoffReleased.extend({ type: z.literal('session.handoff_released') }),
+    zTypedEventStreamEnvelopeSessionHandoffRestartAccepted.extend({ type: z.literal('session.handoff_restart_accepted') }),
+    zTypedEventStreamEnvelopeSessionHandoffStaged.extend({ type: z.literal('session.handoff_staged') }),
+    zTypedEventStreamEnvelopeSessionHandoffSuccessorStarted.extend({ type: z.literal('session.handoff_successor_started') }),
     zTypedEventStreamEnvelopeSessionIdleKilled.extend({ type: z.literal('session.idle_killed') }),
     zTypedEventStreamEnvelopeSessionMaxAgeKilled.extend({ type: z.literal('session.max_age_killed') }),
     zTypedEventStreamEnvelopeSessionPending.extend({ type: z.literal('session.pending') }),
@@ -7036,6 +7161,101 @@ export const zTypedTaggedEventStreamEnvelopeSessionDraining = z.object({
 });
 
 /**
+ * TypedTaggedEventStreamEnvelope session.handoff_failed
+ */
+export const zTypedTaggedEventStreamEnvelopeSessionHandoffFailed = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionHandoffFailedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.handoff_failed'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope session.handoff_released
+ */
+export const zTypedTaggedEventStreamEnvelopeSessionHandoffReleased = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionHandoffReleasedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.handoff_released'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope session.handoff_restart_accepted
+ */
+export const zTypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionHandoffRestartAcceptedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.handoff_restart_accepted'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope session.handoff_staged
+ */
+export const zTypedTaggedEventStreamEnvelopeSessionHandoffStaged = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionHandoffStagedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.handoff_staged'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope session.handoff_successor_started
+ */
+export const zTypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionHandoffSuccessorStartedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('session.handoff_successor_started'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedTaggedEventStreamEnvelope session.idle_killed
  */
 export const zTypedTaggedEventStreamEnvelopeSessionIdleKilled = z.object({
@@ -7649,6 +7869,11 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable.extend({ type: z.literal('session.drain_fence_unavailable') }),
     zTypedTaggedEventStreamEnvelopeSessionDrainStopEscalated.extend({ type: z.literal('session.drain_stop_escalated') }),
     zTypedTaggedEventStreamEnvelopeSessionDraining.extend({ type: z.literal('session.draining') }),
+    zTypedTaggedEventStreamEnvelopeSessionHandoffFailed.extend({ type: z.literal('session.handoff_failed') }),
+    zTypedTaggedEventStreamEnvelopeSessionHandoffReleased.extend({ type: z.literal('session.handoff_released') }),
+    zTypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted.extend({ type: z.literal('session.handoff_restart_accepted') }),
+    zTypedTaggedEventStreamEnvelopeSessionHandoffStaged.extend({ type: z.literal('session.handoff_staged') }),
+    zTypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted.extend({ type: z.literal('session.handoff_successor_started') }),
     zTypedTaggedEventStreamEnvelopeSessionIdleKilled.extend({ type: z.literal('session.idle_killed') }),
     zTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled.extend({ type: z.literal('session.max_age_killed') }),
     zTypedTaggedEventStreamEnvelopeSessionPending.extend({ type: z.literal('session.pending') }),

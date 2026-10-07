@@ -3753,6 +3753,36 @@ type SessionDrainAckedWithAssignedWorkPayload struct {
 	Template *string `json:"template,omitempty"`
 }
 
+// SessionHandoffFailedPayload defines model for SessionHandoffFailedPayload.
+type SessionHandoffFailedPayload struct {
+	Reason     string `json:"reason"`
+	SessionKey string `json:"session_key"`
+}
+
+// SessionHandoffReleasedPayload defines model for SessionHandoffReleasedPayload.
+type SessionHandoffReleasedPayload struct {
+	MessageId  string `json:"message_id"`
+	SessionKey string `json:"session_key"`
+}
+
+// SessionHandoffRestartAcceptedPayload defines model for SessionHandoffRestartAcceptedPayload.
+type SessionHandoffRestartAcceptedPayload struct {
+	MessageId  string `json:"message_id"`
+	SessionKey string `json:"session_key"`
+}
+
+// SessionHandoffStagedPayload defines model for SessionHandoffStagedPayload.
+type SessionHandoffStagedPayload struct {
+	MessageId  string `json:"message_id"`
+	SessionKey string `json:"session_key"`
+}
+
+// SessionHandoffSuccessorStartedPayload defines model for SessionHandoffSuccessorStartedPayload.
+type SessionHandoffSuccessorStartedPayload struct {
+	MessageId  string `json:"message_id"`
+	SessionKey string `json:"session_key"`
+}
+
 // SessionInfo defines model for SessionInfo.
 type SessionInfo struct {
 	Attached     bool       `json:"attached"`
@@ -6774,6 +6804,86 @@ type TypedEventStreamEnvelopeSessionDraining struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionHandoffFailed defines model for TypedEventStreamEnvelopeSessionHandoffFailed.
+type TypedEventStreamEnvelopeSessionHandoffFailed struct {
+	Actor            string                      `json:"actor"`
+	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
+	Message          *string                     `json:"message,omitempty"`
+	Payload          SessionHandoffFailedPayload `json:"payload"`
+	RunId            *string                     `json:"run_id,omitempty"`
+	Seq              int64                       `json:"seq"`
+	SessionId        *string                     `json:"session_id,omitempty"`
+	StepId           *string                     `json:"step_id,omitempty"`
+	Subject          *string                     `json:"subject,omitempty"`
+	Ts               time.Time                   `json:"ts"`
+	Type             string                      `json:"type"`
+	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionHandoffReleased defines model for TypedEventStreamEnvelopeSessionHandoffReleased.
+type TypedEventStreamEnvelopeSessionHandoffReleased struct {
+	Actor            string                        `json:"actor"`
+	DependsOnStepIds *[]string                     `json:"depends_on_step_ids,omitempty"`
+	Message          *string                       `json:"message,omitempty"`
+	Payload          SessionHandoffReleasedPayload `json:"payload"`
+	RunId            *string                       `json:"run_id,omitempty"`
+	Seq              int64                         `json:"seq"`
+	SessionId        *string                       `json:"session_id,omitempty"`
+	StepId           *string                       `json:"step_id,omitempty"`
+	Subject          *string                       `json:"subject,omitempty"`
+	Ts               time.Time                     `json:"ts"`
+	Type             string                        `json:"type"`
+	Workflow         *WorkflowEventProjection      `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionHandoffRestartAccepted defines model for TypedEventStreamEnvelopeSessionHandoffRestartAccepted.
+type TypedEventStreamEnvelopeSessionHandoffRestartAccepted struct {
+	Actor            string                               `json:"actor"`
+	DependsOnStepIds *[]string                            `json:"depends_on_step_ids,omitempty"`
+	Message          *string                              `json:"message,omitempty"`
+	Payload          SessionHandoffRestartAcceptedPayload `json:"payload"`
+	RunId            *string                              `json:"run_id,omitempty"`
+	Seq              int64                                `json:"seq"`
+	SessionId        *string                              `json:"session_id,omitempty"`
+	StepId           *string                              `json:"step_id,omitempty"`
+	Subject          *string                              `json:"subject,omitempty"`
+	Ts               time.Time                            `json:"ts"`
+	Type             string                               `json:"type"`
+	Workflow         *WorkflowEventProjection             `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionHandoffStaged defines model for TypedEventStreamEnvelopeSessionHandoffStaged.
+type TypedEventStreamEnvelopeSessionHandoffStaged struct {
+	Actor            string                      `json:"actor"`
+	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
+	Message          *string                     `json:"message,omitempty"`
+	Payload          SessionHandoffStagedPayload `json:"payload"`
+	RunId            *string                     `json:"run_id,omitempty"`
+	Seq              int64                       `json:"seq"`
+	SessionId        *string                     `json:"session_id,omitempty"`
+	StepId           *string                     `json:"step_id,omitempty"`
+	Subject          *string                     `json:"subject,omitempty"`
+	Ts               time.Time                   `json:"ts"`
+	Type             string                      `json:"type"`
+	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionHandoffSuccessorStarted defines model for TypedEventStreamEnvelopeSessionHandoffSuccessorStarted.
+type TypedEventStreamEnvelopeSessionHandoffSuccessorStarted struct {
+	Actor            string                                `json:"actor"`
+	DependsOnStepIds *[]string                             `json:"depends_on_step_ids,omitempty"`
+	Message          *string                               `json:"message,omitempty"`
+	Payload          SessionHandoffSuccessorStartedPayload `json:"payload"`
+	RunId            *string                               `json:"run_id,omitempty"`
+	Seq              int64                                 `json:"seq"`
+	SessionId        *string                               `json:"session_id,omitempty"`
+	StepId           *string                               `json:"step_id,omitempty"`
+	Subject          *string                               `json:"subject,omitempty"`
+	Ts               time.Time                             `json:"ts"`
+	Type             string                                `json:"type"`
+	Workflow         *WorkflowEventProjection              `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionIdleKilled defines model for TypedEventStreamEnvelopeSessionIdleKilled.
 type TypedEventStreamEnvelopeSessionIdleKilled struct {
 	Actor            string                   `json:"actor"`
@@ -8534,6 +8644,91 @@ type TypedTaggedEventStreamEnvelopeSessionDraining struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionHandoffFailed defines model for TypedTaggedEventStreamEnvelopeSessionHandoffFailed.
+type TypedTaggedEventStreamEnvelopeSessionHandoffFailed struct {
+	Actor            string                      `json:"actor"`
+	City             string                      `json:"city"`
+	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
+	Message          *string                     `json:"message,omitempty"`
+	Payload          SessionHandoffFailedPayload `json:"payload"`
+	RunId            *string                     `json:"run_id,omitempty"`
+	Seq              int64                       `json:"seq"`
+	SessionId        *string                     `json:"session_id,omitempty"`
+	StepId           *string                     `json:"step_id,omitempty"`
+	Subject          *string                     `json:"subject,omitempty"`
+	Ts               time.Time                   `json:"ts"`
+	Type             string                      `json:"type"`
+	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionHandoffReleased defines model for TypedTaggedEventStreamEnvelopeSessionHandoffReleased.
+type TypedTaggedEventStreamEnvelopeSessionHandoffReleased struct {
+	Actor            string                        `json:"actor"`
+	City             string                        `json:"city"`
+	DependsOnStepIds *[]string                     `json:"depends_on_step_ids,omitempty"`
+	Message          *string                       `json:"message,omitempty"`
+	Payload          SessionHandoffReleasedPayload `json:"payload"`
+	RunId            *string                       `json:"run_id,omitempty"`
+	Seq              int64                         `json:"seq"`
+	SessionId        *string                       `json:"session_id,omitempty"`
+	StepId           *string                       `json:"step_id,omitempty"`
+	Subject          *string                       `json:"subject,omitempty"`
+	Ts               time.Time                     `json:"ts"`
+	Type             string                        `json:"type"`
+	Workflow         *WorkflowEventProjection      `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted defines model for TypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted.
+type TypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted struct {
+	Actor            string                               `json:"actor"`
+	City             string                               `json:"city"`
+	DependsOnStepIds *[]string                            `json:"depends_on_step_ids,omitempty"`
+	Message          *string                              `json:"message,omitempty"`
+	Payload          SessionHandoffRestartAcceptedPayload `json:"payload"`
+	RunId            *string                              `json:"run_id,omitempty"`
+	Seq              int64                                `json:"seq"`
+	SessionId        *string                              `json:"session_id,omitempty"`
+	StepId           *string                              `json:"step_id,omitempty"`
+	Subject          *string                              `json:"subject,omitempty"`
+	Ts               time.Time                            `json:"ts"`
+	Type             string                               `json:"type"`
+	Workflow         *WorkflowEventProjection             `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionHandoffStaged defines model for TypedTaggedEventStreamEnvelopeSessionHandoffStaged.
+type TypedTaggedEventStreamEnvelopeSessionHandoffStaged struct {
+	Actor            string                      `json:"actor"`
+	City             string                      `json:"city"`
+	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
+	Message          *string                     `json:"message,omitempty"`
+	Payload          SessionHandoffStagedPayload `json:"payload"`
+	RunId            *string                     `json:"run_id,omitempty"`
+	Seq              int64                       `json:"seq"`
+	SessionId        *string                     `json:"session_id,omitempty"`
+	StepId           *string                     `json:"step_id,omitempty"`
+	Subject          *string                     `json:"subject,omitempty"`
+	Ts               time.Time                   `json:"ts"`
+	Type             string                      `json:"type"`
+	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted defines model for TypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted.
+type TypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted struct {
+	Actor            string                                `json:"actor"`
+	City             string                                `json:"city"`
+	DependsOnStepIds *[]string                             `json:"depends_on_step_ids,omitempty"`
+	Message          *string                               `json:"message,omitempty"`
+	Payload          SessionHandoffSuccessorStartedPayload `json:"payload"`
+	RunId            *string                               `json:"run_id,omitempty"`
+	Seq              int64                                 `json:"seq"`
+	SessionId        *string                               `json:"session_id,omitempty"`
+	StepId           *string                               `json:"step_id,omitempty"`
+	Subject          *string                               `json:"subject,omitempty"`
+	Ts               time.Time                             `json:"ts"`
+	Type             string                                `json:"type"`
+	Workflow         *WorkflowEventProjection              `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionIdleKilled defines model for TypedTaggedEventStreamEnvelopeSessionIdleKilled.
@@ -11589,6 +11784,136 @@ func (t *EventPayload) FromSessionDrainAckedWithAssignedWorkPayload(v SessionDra
 
 // MergeSessionDrainAckedWithAssignedWorkPayload performs a merge with any union data inside the EventPayload, using the provided SessionDrainAckedWithAssignedWorkPayload
 func (t *EventPayload) MergeSessionDrainAckedWithAssignedWorkPayload(v SessionDrainAckedWithAssignedWorkPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionHandoffFailedPayload returns the union data inside the EventPayload as a SessionHandoffFailedPayload
+func (t EventPayload) AsSessionHandoffFailedPayload() (SessionHandoffFailedPayload, error) {
+	var body SessionHandoffFailedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionHandoffFailedPayload overwrites any union data inside the EventPayload as the provided SessionHandoffFailedPayload
+func (t *EventPayload) FromSessionHandoffFailedPayload(v SessionHandoffFailedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionHandoffFailedPayload performs a merge with any union data inside the EventPayload, using the provided SessionHandoffFailedPayload
+func (t *EventPayload) MergeSessionHandoffFailedPayload(v SessionHandoffFailedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionHandoffReleasedPayload returns the union data inside the EventPayload as a SessionHandoffReleasedPayload
+func (t EventPayload) AsSessionHandoffReleasedPayload() (SessionHandoffReleasedPayload, error) {
+	var body SessionHandoffReleasedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionHandoffReleasedPayload overwrites any union data inside the EventPayload as the provided SessionHandoffReleasedPayload
+func (t *EventPayload) FromSessionHandoffReleasedPayload(v SessionHandoffReleasedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionHandoffReleasedPayload performs a merge with any union data inside the EventPayload, using the provided SessionHandoffReleasedPayload
+func (t *EventPayload) MergeSessionHandoffReleasedPayload(v SessionHandoffReleasedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionHandoffRestartAcceptedPayload returns the union data inside the EventPayload as a SessionHandoffRestartAcceptedPayload
+func (t EventPayload) AsSessionHandoffRestartAcceptedPayload() (SessionHandoffRestartAcceptedPayload, error) {
+	var body SessionHandoffRestartAcceptedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionHandoffRestartAcceptedPayload overwrites any union data inside the EventPayload as the provided SessionHandoffRestartAcceptedPayload
+func (t *EventPayload) FromSessionHandoffRestartAcceptedPayload(v SessionHandoffRestartAcceptedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionHandoffRestartAcceptedPayload performs a merge with any union data inside the EventPayload, using the provided SessionHandoffRestartAcceptedPayload
+func (t *EventPayload) MergeSessionHandoffRestartAcceptedPayload(v SessionHandoffRestartAcceptedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionHandoffStagedPayload returns the union data inside the EventPayload as a SessionHandoffStagedPayload
+func (t EventPayload) AsSessionHandoffStagedPayload() (SessionHandoffStagedPayload, error) {
+	var body SessionHandoffStagedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionHandoffStagedPayload overwrites any union data inside the EventPayload as the provided SessionHandoffStagedPayload
+func (t *EventPayload) FromSessionHandoffStagedPayload(v SessionHandoffStagedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionHandoffStagedPayload performs a merge with any union data inside the EventPayload, using the provided SessionHandoffStagedPayload
+func (t *EventPayload) MergeSessionHandoffStagedPayload(v SessionHandoffStagedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionHandoffSuccessorStartedPayload returns the union data inside the EventPayload as a SessionHandoffSuccessorStartedPayload
+func (t EventPayload) AsSessionHandoffSuccessorStartedPayload() (SessionHandoffSuccessorStartedPayload, error) {
+	var body SessionHandoffSuccessorStartedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionHandoffSuccessorStartedPayload overwrites any union data inside the EventPayload as the provided SessionHandoffSuccessorStartedPayload
+func (t *EventPayload) FromSessionHandoffSuccessorStartedPayload(v SessionHandoffSuccessorStartedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionHandoffSuccessorStartedPayload performs a merge with any union data inside the EventPayload, using the provided SessionHandoffSuccessorStartedPayload
+func (t *EventPayload) MergeSessionHandoffSuccessorStartedPayload(v SessionHandoffSuccessorStartedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -16000,6 +16325,146 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionDraining(
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionHandoffFailed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionHandoffFailed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionHandoffFailed() (TypedEventStreamEnvelopeSessionHandoffFailed, error) {
+	var body TypedEventStreamEnvelopeSessionHandoffFailed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionHandoffFailed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionHandoffFailed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionHandoffFailed(v TypedEventStreamEnvelopeSessionHandoffFailed) error {
+	v.Type = "session.handoff_failed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionHandoffFailed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionHandoffFailed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionHandoffFailed(v TypedEventStreamEnvelopeSessionHandoffFailed) error {
+	v.Type = "session.handoff_failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionHandoffReleased returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionHandoffReleased
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionHandoffReleased() (TypedEventStreamEnvelopeSessionHandoffReleased, error) {
+	var body TypedEventStreamEnvelopeSessionHandoffReleased
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionHandoffReleased overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionHandoffReleased
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionHandoffReleased(v TypedEventStreamEnvelopeSessionHandoffReleased) error {
+	v.Type = "session.handoff_released"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionHandoffReleased performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionHandoffReleased
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionHandoffReleased(v TypedEventStreamEnvelopeSessionHandoffReleased) error {
+	v.Type = "session.handoff_released"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionHandoffRestartAccepted returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionHandoffRestartAccepted
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionHandoffRestartAccepted() (TypedEventStreamEnvelopeSessionHandoffRestartAccepted, error) {
+	var body TypedEventStreamEnvelopeSessionHandoffRestartAccepted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionHandoffRestartAccepted overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionHandoffRestartAccepted
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionHandoffRestartAccepted(v TypedEventStreamEnvelopeSessionHandoffRestartAccepted) error {
+	v.Type = "session.handoff_restart_accepted"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionHandoffRestartAccepted performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionHandoffRestartAccepted
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionHandoffRestartAccepted(v TypedEventStreamEnvelopeSessionHandoffRestartAccepted) error {
+	v.Type = "session.handoff_restart_accepted"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionHandoffStaged returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionHandoffStaged
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionHandoffStaged() (TypedEventStreamEnvelopeSessionHandoffStaged, error) {
+	var body TypedEventStreamEnvelopeSessionHandoffStaged
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionHandoffStaged overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionHandoffStaged
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionHandoffStaged(v TypedEventStreamEnvelopeSessionHandoffStaged) error {
+	v.Type = "session.handoff_staged"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionHandoffStaged performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionHandoffStaged
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionHandoffStaged(v TypedEventStreamEnvelopeSessionHandoffStaged) error {
+	v.Type = "session.handoff_staged"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionHandoffSuccessorStarted returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionHandoffSuccessorStarted
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionHandoffSuccessorStarted() (TypedEventStreamEnvelopeSessionHandoffSuccessorStarted, error) {
+	var body TypedEventStreamEnvelopeSessionHandoffSuccessorStarted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionHandoffSuccessorStarted overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionHandoffSuccessorStarted
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionHandoffSuccessorStarted(v TypedEventStreamEnvelopeSessionHandoffSuccessorStarted) error {
+	v.Type = "session.handoff_successor_started"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionHandoffSuccessorStarted performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionHandoffSuccessorStarted
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionHandoffSuccessorStarted(v TypedEventStreamEnvelopeSessionHandoffSuccessorStarted) error {
+	v.Type = "session.handoff_successor_started"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionIdleKilled returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionIdleKilled
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionIdleKilled() (TypedEventStreamEnvelopeSessionIdleKilled, error) {
 	var body TypedEventStreamEnvelopeSessionIdleKilled
@@ -16980,6 +17445,16 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionDrainStopEscalated()
 	case "session.draining":
 		return t.AsTypedEventStreamEnvelopeSessionDraining()
+	case "session.handoff_failed":
+		return t.AsTypedEventStreamEnvelopeSessionHandoffFailed()
+	case "session.handoff_released":
+		return t.AsTypedEventStreamEnvelopeSessionHandoffReleased()
+	case "session.handoff_restart_accepted":
+		return t.AsTypedEventStreamEnvelopeSessionHandoffRestartAccepted()
+	case "session.handoff_staged":
+		return t.AsTypedEventStreamEnvelopeSessionHandoffStaged()
+	case "session.handoff_successor_started":
+		return t.AsTypedEventStreamEnvelopeSessionHandoffSuccessorStarted()
 	case "session.idle_killed":
 		return t.AsTypedEventStreamEnvelopeSessionIdleKilled()
 	case "session.max_age_killed":
@@ -19179,6 +19654,146 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionHandoffFailed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionHandoffFailed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionHandoffFailed() (TypedTaggedEventStreamEnvelopeSessionHandoffFailed, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionHandoffFailed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionHandoffFailed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionHandoffFailed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionHandoffFailed(v TypedTaggedEventStreamEnvelopeSessionHandoffFailed) error {
+	v.Type = "session.handoff_failed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionHandoffFailed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionHandoffFailed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionHandoffFailed(v TypedTaggedEventStreamEnvelopeSessionHandoffFailed) error {
+	v.Type = "session.handoff_failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionHandoffReleased returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionHandoffReleased
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionHandoffReleased() (TypedTaggedEventStreamEnvelopeSessionHandoffReleased, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionHandoffReleased
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionHandoffReleased overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionHandoffReleased
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionHandoffReleased(v TypedTaggedEventStreamEnvelopeSessionHandoffReleased) error {
+	v.Type = "session.handoff_released"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionHandoffReleased performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionHandoffReleased
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionHandoffReleased(v TypedTaggedEventStreamEnvelopeSessionHandoffReleased) error {
+	v.Type = "session.handoff_released"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted() (TypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted(v TypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted) error {
+	v.Type = "session.handoff_restart_accepted"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted(v TypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted) error {
+	v.Type = "session.handoff_restart_accepted"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionHandoffStaged returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionHandoffStaged
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionHandoffStaged() (TypedTaggedEventStreamEnvelopeSessionHandoffStaged, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionHandoffStaged
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionHandoffStaged overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionHandoffStaged
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionHandoffStaged(v TypedTaggedEventStreamEnvelopeSessionHandoffStaged) error {
+	v.Type = "session.handoff_staged"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionHandoffStaged performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionHandoffStaged
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionHandoffStaged(v TypedTaggedEventStreamEnvelopeSessionHandoffStaged) error {
+	v.Type = "session.handoff_staged"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted() (TypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted(v TypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted) error {
+	v.Type = "session.handoff_successor_started"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted(v TypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted) error {
+	v.Type = "session.handoff_successor_started"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionIdleKilled returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionIdleKilled
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionIdleKilled() (TypedTaggedEventStreamEnvelopeSessionIdleKilled, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionIdleKilled
@@ -20159,6 +20774,16 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionDrainStopEscalated()
 	case "session.draining":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionDraining()
+	case "session.handoff_failed":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionHandoffFailed()
+	case "session.handoff_released":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionHandoffReleased()
+	case "session.handoff_restart_accepted":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted()
+	case "session.handoff_staged":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionHandoffStaged()
+	case "session.handoff_successor_started":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted()
 	case "session.idle_killed":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionIdleKilled()
 	case "session.max_age_killed":

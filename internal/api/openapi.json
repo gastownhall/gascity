@@ -2764,6 +2764,21 @@
             "$ref": "#/components/schemas/SessionDrainAckedWithAssignedWorkPayload"
           },
           {
+            "$ref": "#/components/schemas/SessionHandoffFailedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/SessionHandoffReleasedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/SessionHandoffRestartAcceptedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/SessionHandoffStagedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/SessionHandoffSuccessorStartedPayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
           {
@@ -7825,6 +7840,86 @@
         ],
         "type": "object"
       },
+      "SessionHandoffFailedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "type": "string"
+          },
+          "session_key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_key",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "SessionHandoffReleasedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "type": "string"
+          },
+          "session_key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_key",
+          "message_id"
+        ],
+        "type": "object"
+      },
+      "SessionHandoffRestartAcceptedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "type": "string"
+          },
+          "session_key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_key",
+          "message_id"
+        ],
+        "type": "object"
+      },
+      "SessionHandoffStagedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "type": "string"
+          },
+          "session_key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_key",
+          "message_id"
+        ],
+        "type": "object"
+      },
+      "SessionHandoffSuccessorStartedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "type": "string"
+          },
+          "session_key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_key",
+          "message_id"
+        ],
+        "type": "object"
+      },
       "SessionInfo": {
         "additionalProperties": false,
         "properties": {
@@ -12802,6 +12897,11 @@
             "session.drain_fence_unavailable": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainFenceUnavailable",
             "session.drain_stop_escalated": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainStopEscalated",
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
+            "session.handoff_failed": "#/components/schemas/TypedEventStreamEnvelopeSessionHandoffFailed",
+            "session.handoff_released": "#/components/schemas/TypedEventStreamEnvelopeSessionHandoffReleased",
+            "session.handoff_restart_accepted": "#/components/schemas/TypedEventStreamEnvelopeSessionHandoffRestartAccepted",
+            "session.handoff_staged": "#/components/schemas/TypedEventStreamEnvelopeSessionHandoffStaged",
+            "session.handoff_successor_started": "#/components/schemas/TypedEventStreamEnvelopeSessionHandoffSuccessorStarted",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled",
             "session.pending": "#/components/schemas/TypedEventStreamEnvelopeSessionPending",
@@ -13061,6 +13161,21 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionHandoffFailed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionHandoffReleased"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionHandoffRestartAccepted"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionHandoffStaged"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionHandoffSuccessorStarted"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled"
@@ -14526,6 +14641,11 @@
                 "session.cold_start_timeout",
                 "session.pending",
                 "session.pending_cleared",
+                "session.handoff_staged",
+                "session.handoff_restart_accepted",
+                "session.handoff_successor_started",
+                "session.handoff_released",
+                "session.handoff_failed",
                 "bead.created",
                 "bead.closed",
                 "bead.deleted",
@@ -17646,6 +17766,291 @@
         "title": "TypedEventStreamEnvelope session.draining",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionHandoffFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionHandoffFailedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.handoff_failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.handoff_failed",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeSessionHandoffReleased": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionHandoffReleasedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.handoff_released",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.handoff_released",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeSessionHandoffRestartAccepted": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionHandoffRestartAcceptedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.handoff_restart_accepted",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.handoff_restart_accepted",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeSessionHandoffStaged": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionHandoffStagedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.handoff_staged",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.handoff_staged",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeSessionHandoffSuccessorStarted": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionHandoffSuccessorStartedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.handoff_successor_started",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.handoff_successor_started",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionIdleKilled": {
         "additionalProperties": false,
         "properties": {
@@ -19322,6 +19727,11 @@
             "session.drain_fence_unavailable": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable",
             "session.drain_stop_escalated": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated",
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
+            "session.handoff_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionHandoffFailed",
+            "session.handoff_released": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionHandoffReleased",
+            "session.handoff_restart_accepted": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted",
+            "session.handoff_staged": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionHandoffStaged",
+            "session.handoff_successor_started": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled",
             "session.pending": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPending",
@@ -19581,6 +19991,21 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionHandoffFailed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionHandoffReleased"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionHandoffStaged"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled"
@@ -21141,6 +21566,11 @@
                 "session.cold_start_timeout",
                 "session.pending",
                 "session.pending_cleared",
+                "session.handoff_staged",
+                "session.handoff_restart_accepted",
+                "session.handoff_successor_started",
+                "session.handoff_released",
+                "session.handoff_failed",
                 "bead.created",
                 "bead.closed",
                 "bead.deleted",
@@ -24472,6 +24902,311 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.draining",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionHandoffFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionHandoffFailedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.handoff_failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.handoff_failed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionHandoffReleased": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionHandoffReleasedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.handoff_released",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.handoff_released",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionHandoffRestartAccepted": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionHandoffRestartAcceptedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.handoff_restart_accepted",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.handoff_restart_accepted",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionHandoffStaged": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionHandoffStagedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.handoff_staged",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.handoff_staged",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionHandoffSuccessorStarted": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionHandoffSuccessorStartedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.handoff_successor_started",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.handoff_successor_started",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionIdleKilled": {
