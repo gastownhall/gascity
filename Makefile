@@ -400,6 +400,13 @@ vet:
 ## city-wide (ga-w2kh1r). Do not add them. For a bare `go test` that bypasses
 ## this wrapper, internal/testenv scrubs these vars at test-binary init in every
 ## covered package (enforced by TestRequiresDedicatedTestenvImportFile).
+##
+## The pane shell is pinned to /bin/sh rather than forwarded. A test that opens
+## a tmux or herdr pane runs that shell in it, and the invoking user's zsh under
+## a fresh HOME (a release gate, CI) opens its new-user wizard, which swallows
+## the typed text (ga-yghhjf). The nested env -i blocks in
+## scripts/test-local-parallel, scripts/test-go-test-shard and
+## scripts/test-integration-shard mirror the pin (see scripts/AGENTS.md).
 GOPATH_VAL    := $(shell go env GOPATH)
 GOCACHE_VAL   := $(shell go env GOCACHE)
 GOMODCACHE_VAL := $(shell go env GOMODCACHE)
@@ -410,7 +417,7 @@ TEST_ENV = env -i \
 	HOME="$$HOME" \
 	USER="$$USER" \
 	LOGNAME="$$LOGNAME" \
-	SHELL="$$SHELL" \
+	SHELL=/bin/sh \
 	GIT_CONFIG_NOSYSTEM=1 \
 	GIT_CONFIG_GLOBAL="$$(scripts/test-gitconfig-path)" \
 	LANG="$$LANG" \

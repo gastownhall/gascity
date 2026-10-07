@@ -75,12 +75,15 @@ while IFS='=' read -r name _; do
 done < <(env)
 
 run_in_test_env() {
+  # The pane shell is pinned to /bin/sh, not forwarded from the caller: a test
+  # tmux or herdr pane running zsh under a fresh HOME opens the new-user wizard,
+  # which swallows the typed text (ga-yghhjf; mirrors Makefile TEST_ENV).
   local base_env=(
     PATH="${PATH}" \
     HOME="${HOME:-}" \
     USER="${USER:-}" \
     LOGNAME="${LOGNAME:-}" \
-    SHELL="${SHELL:-/bin/sh}" \
+    SHELL=/bin/sh \
     GIT_CONFIG_NOSYSTEM=1 \
     GIT_CONFIG_GLOBAL="$gc_test_gitconfig" \
     LANG="${LANG:-C.UTF-8}" \
