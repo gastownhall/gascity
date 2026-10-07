@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -70,6 +69,15 @@ const (
 // the controller loop takes Lock when updating cfg/sp/stores.
 type controllerState struct {
 	mu sync.RWMutex
+	// beadsQuiescent is set by the city runtime while the city is suspended
+	// and has no running sessions: every cache this state owns then skips its
+	// periodic reconcile, so nothing touches a store whose pair was retired.
+	beadsQuiescent *atomic.Bool
+	// suspendedRigs is the set of rigs the city runtime last saw suspended,
+	// published every tick. A suspended rig's cache skips its periodic
+	// reconcile from the next tick on, with no reload: any bd read restarts
+	// the rig's retired proxy.
+	suspendedRigs atomic.Pointer[map[string]bool]
 	// onDeathGate is the city runtime's on_death start interlock, set when
 	// its inventory lane starts; nil holds nothing.
 	onDeathGate atomic.Pointer[onDeathGate]
@@ -159,6 +167,11 @@ type controllerState struct {
 	// corruption it gates — so a divergent on-disk change surfaces as a
 	// pending-restart notice via noteRolloutDrift rather than flipping mid-run.
 	rolloutFlags rollout.Flags
+	// nativeTransport is the boot-latched beads.native_transport snapshot:
+	// written once in newControllerState, never reassigned — mirroring
+	// rolloutFlags above. A mid-run city.toml edit changing this value takes
+	// effect only at the next restart; it does not flip an already-open store.
+	nativeTransport beads.NativeTransportMode
 	// rolloutDriftMu guards rolloutDrift and rolloutDriftSig.
 	rolloutDriftMu sync.Mutex
 	// rolloutDrift holds a NoticePendingRestart when a reloaded config's beads
@@ -183,8 +196,8 @@ var beadEventWatcherRetryDelay = time.Second
 // and skip spawning managed dolt (~12s per call). The store is long-lived —
 // the controller holds it for the process lifetime — so it keeps the beads
 // library's daemon-sized project pool rather than the one-shot CLI cap.
-var newControllerStateOpenCityStore = func(cityPath string, mode gate.Mode) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithMode(cityPath, cityPath, mode, true, true)
+var newControllerStateOpenCityStore = func(cityPath string, mode gate.Mode, nativeTransport beads.NativeTransportMode) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityWithMode(cityPath, cityPath, mode, true, true, &nativeTransport)
 }
 
 // controllerStateOpenRigStoreAtForCity routes controller rig stores through
@@ -254,7 +267,8 @@ func newControllerStateWithRoutes(
 	}
 	// A split city's binding gets the CachingStore its work ledger has, before
 	// the class-routed services below are built over it (class_store_cache.go).
-	routes = routes.withControllerCache(ctx, ep)
+	beadsQuiescent := new(atomic.Bool)
+	routes = routes.withControllerCache(ctx, ep, reconcileGateFor(beadsQuiescent))
 	// Latch the rollout-gate snapshot ONCE from the boot config. A resolve error
 	// (nil cfg or an out-of-enum config value) is warn-and-continue: the zero
 	// Flags is degraded-safe (legacy paths), and this constructor returns no
@@ -263,7 +277,11 @@ func newControllerStateWithRoutes(
 	if rolloutErr != nil {
 		fmt.Fprintf(os.Stderr, "api: rollout gates: %v (using zero Flags; legacy paths)\n", rolloutErr)
 	}
+	// Latch beads.native_transport ONCE from the boot config too, for the same
+	// reason: a later city.toml edit must not flip an already-open store.
+	nativeTransport := resolvedNativeTransportMode(cfg)
 	cs := &controllerState{
+		beadsQuiescent:      beadsQuiescent,
 		cfg:                 cfg,
 		sp:                  sp,
 		cacheCtx:            ctx,
@@ -279,6 +297,7 @@ func newControllerStateWithRoutes(
 		beadEventStartSeq:   beadEventStartSeq,
 		beadEventStartSeqOK: beadEventStartSeqOK,
 		rolloutFlags:        rolloutFlags,
+		nativeTransport:     nativeTransport,
 	}
 	// Boot-resolved rollout notices are retained on the Flags value; echo
 	// them once at startup so an env override contradicting explicit config
@@ -287,17 +306,24 @@ func newControllerStateWithRoutes(
 	for _, n := range cs.rolloutFlags.Notices() {
 		cs.rolloutWarnf("api: rollout: %s\n", n.Message)
 	}
+	cs.setSuspendedRigs(buildEffectiveSuspendedRigNames(cfg, loadSuspensionStateBestEffort(cityPath)))
+	// native_transport="off" is this city's stores never opening natively, for
+	// the life of the process; logged once at boot, matching the design's
+	// "logged once at boot" requirement for the per-city kill switch.
+	if cs.nativeTransport == beads.NativeTransportOff {
+		fmt.Fprintf(os.Stderr, "api: beads.native_transport=\"off\": city %q will never open a native bead store; always BdStore\n", cityName)
+	}
 	cs.beadStores = cs.buildStores(cfg)
 	// Capture the initial raw config snapshot so provenance reads before the
 	// first reload still use the gate's basis. nil is tolerated: RawConfig
 	// lazily retries on the first read.
 	cs.rawCfg = cs.loadRawSnapshot()
 	// Open city-level store for session beads and mail (best-effort).
-	if opened, err := newControllerStateOpenCityStore(cityPath, cs.rolloutFlags.BeadsConditionalWrites()); err != nil {
+	if opened, err := newControllerStateOpenCityStore(cityPath, cs.rolloutFlags.BeadsConditionalWrites(), cs.nativeTransport); err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
 	} else {
 		store := opened.Store
-		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true)
+		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true, cs.reconcileGate())
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
 		cs.cityMailProv = newCityMailProvider(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
 		cs.extmsgSvc = newCityExtMsgServices(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
@@ -308,13 +334,13 @@ func newControllerStateWithRoutes(
 }
 
 // wrapWithCachingStore wraps store in an in-memory read cache. When
-// backgroundRefresh is true the cache fully primes and runs a continuous
-// reconcile loop (the steady-state cost: one bd subprocess per cycle per scope).
-// When false the cache only pre-primes active beads synchronously — enough for
-// on-demand reads — and skips both the async full prime and the reconcile loop.
-// Suspended rigs pass false: they spawn no agents, so nothing writes locally and
-// a continuously refreshed cache buys nothing; reconciling every suspended rig
-// every cycle is what pegs the supervisor (gastownhall/gascity #1978 follow-up).
+// backgroundRefresh is true the cache pre-primes active beads, fully primes
+// and runs a continuous reconcile loop (the steady-state cost: one bd
+// subprocess per cycle per scope). When false it does none of that: reads go
+// to bd on demand. Suspended rigs pass false: they spawn no agents, so nothing
+// writes locally, and gc must not touch a suspended scope at all — any bd read
+// restarts its retired proxy and Dolt (gastownhall/gascity #1978 follow-up,
+// #6561).
 func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider, backgroundRefresh bool, opts ...beads.CachingStoreOption) beads.Store {
 	baseStore, policyStore, policyWrapped := unwrapBeadPolicyStore(store)
 	if baseStore == nil {
@@ -331,9 +357,13 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	// Pre-prime active beads synchronously (~1-2s, indexed queries).
 	// Loads open + in_progress beads — enough for the startup path
 	// (adoption, session snapshot, desired state) so the city can
-	// reach "ready" without waiting for the full prime.
-	if err := cs.PrimeActive(); err != nil {
-		log.Printf("caching-store: pre-prime failed: %v", err)
+	// reach "ready" without waiting for the full prime. A suspended rig
+	// (no background refresh) is not primed at all: it is left cold, and
+	// any read it does get goes to bd on demand.
+	if backgroundRefresh {
+		if err := cs.PrimeActive(); err != nil {
+			log.Printf("caching-store: pre-prime failed: %v", err)
+		}
 	}
 	// No cancellable ctx, or caller opted out of background refresh (suspended
 	// rig): serve from the synchronous pre-prime only, no async prime/reconcile.
@@ -393,6 +423,7 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 			CityPath:                    cs.cityPath,
 			Provider:                    "file",
 			ConditionalWrites:           cs.rolloutFlags.BeadsConditionalWrites(),
+			NativeTransport:             cs.nativeTransport,
 			OnConditionalWritesDegraded: conditionalWritesDegradedRecorder(cs.eventProv, cs.rolloutFlags, "city"),
 			OpenFileStore: func() (beads.Store, error) {
 				return openCompatibleFileStore(cs.cityPath, cs.cityPath)
@@ -421,13 +452,13 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 			// Legacy file mode aliases every rig to the same backing store, so
 			// the cache handle must be shared too for immediate cross-rig reads.
 			if sharedLegacyCachedStore == nil {
-				sharedLegacyCachedStore = wrapWithCachingStore(cs.cacheCtx, sharedLegacyFileStore, cs.eventProv, true)
+				sharedLegacyCachedStore = wrapWithCachingStore(cs.cacheCtx, sharedLegacyFileStore, cs.eventProv, true, cs.reconcileGate())
 			}
 			stores[rig.Name] = sharedLegacyCachedStore
 			continue
 		}
 		store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix(), cfg)
-		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig))
+		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig), cs.rigReconcileGate(rig.Name))
 	}
 	return stores
 }
@@ -445,6 +476,54 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 // the skip at all.
 func rigStoreBackgroundRefresh(suspState suspensionstate.State, rig config.Rig) bool {
 	return !suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart())
+}
+
+// reconcileGate is the CachingStoreOption every cache this state owns carries:
+// it pauses the cache's periodic reconcile while the city is quiescent.
+func (cs *controllerState) reconcileGate() beads.CachingStoreOption {
+	return reconcileGateFor(cs.beadsQuiescent)
+}
+
+// reconcileGateFor pauses a cache's periodic reconcile while quiescent is set.
+func reconcileGateFor(quiescent *atomic.Bool) beads.CachingStoreOption {
+	return beads.WithReconcileGate(func() bool { return quiescent == nil || !quiescent.Load() })
+}
+
+// rigReconcileGate is reconcileGate for one rig's cache: it also pauses while
+// that rig is suspended (suspendedRigs).
+func (cs *controllerState) rigReconcileGate(rigName string) beads.CachingStoreOption {
+	return beads.WithReconcileGate(func() bool {
+		if cs.beadsQuiescent != nil && cs.beadsQuiescent.Load() {
+			return false
+		}
+		return !cs.rigSuspended(rigName)
+	})
+}
+
+// rigSuspended reports whether the city runtime last saw rigName suspended.
+func (cs *controllerState) rigSuspended(rigName string) bool {
+	if cs == nil {
+		return false
+	}
+	rigs := cs.suspendedRigs.Load()
+	return rigs != nil && (*rigs)[rigName]
+}
+
+// setSuspendedRigs publishes the rigs the city runtime sees suspended.
+func (cs *controllerState) setSuspendedRigs(rigs map[string]bool) {
+	if cs == nil {
+		return
+	}
+	cs.suspendedRigs.Store(&rigs)
+}
+
+// setBeadsQuiescent records whether the city is quiescent (suspended, with no
+// running sessions). See beadsQuiescent.
+func (cs *controllerState) setBeadsQuiescent(quiescent bool) {
+	if cs == nil || cs.beadsQuiescent == nil {
+		return
+	}
+	cs.beadsQuiescent.Store(quiescent)
 }
 
 // openRigStore creates a bead store for a rig path using the given provider.
@@ -477,8 +556,9 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 		ScopeRoot:                   scopeRoot,
 		CityPath:                    cs.cityPath,
 		Provider:                    provider,
-		PreflightChecker:            newBeadsPreflightChecker(cs.cityPath, provider),
+		PreflightChecker:            newBeadsPreflightChecker(cs.cityPath, provider, cfg),
 		ConditionalWrites:           cs.rolloutFlags.BeadsConditionalWrites(),
+		NativeTransport:             cs.nativeTransport,
 		OnConditionalWritesDegraded: conditionalWritesDegradedRecorder(cs.eventProv, cs.rolloutFlags, "rig/"+rigName),
 		// The controller holds a rig store for the process lifetime, which is
 		// what decides both the project-pool shape and whether a finite-idle
@@ -714,8 +794,14 @@ func (cs *controllerState) completionReconcileInputs(plane storePlane) (events.P
 		resolveGraphStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv),
 		cs.cityBeadStore,
 	}
+	// A suspended rig is not swept: it runs nothing, and a bd read restarts
+	// its retired proxy and Dolt.
+	suspendedRigs := buildEffectiveSuspendedRigNames(cs.cfg, loadSuspensionStateBestEffort(cs.cityPath))
 	rigStores := make(map[string]beads.Store, len(cs.beadStores))
 	for name, store := range cs.beadStores {
+		if suspendedRigs[name] {
+			continue
+		}
 		rigStores[name] = store
 	}
 	cs.mu.RUnlock()
@@ -851,8 +937,6 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	if evt.Type == events.BeadClosed {
 		storeRef = cs.autocloseStoreRefLocked(evt.Subject)
 	}
-	// Only the v2 router asks whether the event landed in the sessions store.
-	appliedToSessions := wake.routes() && slices.Contains(stores, resolveSessionStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv))
 	cs.mu.RUnlock()
 
 	// A cache event (either actor) carries a CachingStore's own post-absorb
@@ -876,7 +960,7 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 			}
 		}
 	}
-	wake.OnBeadEvent(evt, snapshot, appliedToSessions)
+	wake.OnBeadEvent(evt, snapshot)
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
 		if evt.Actor == cacheReconcileActor {
 			beadCloseAutocloseDispatch(func() { cs.applyInferredClose(evt, stores, storeRef) })
@@ -1103,7 +1187,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	// Reopen carries the BOOT-latched mode: re-resolving from the (possibly
 	// edited) on-disk config here would flip the city store's write
 	// discipline mid-process while rig stores keep the boot mode.
-	openedCityStore, err := newControllerStateOpenCityStore(cs.cityPath, cs.rolloutFlags.BeadsConditionalWrites())
+	openedCityStore, err := newControllerStateOpenCityStore(cs.cityPath, cs.rolloutFlags.BeadsConditionalWrites(), cs.nativeTransport)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store reload: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
@@ -1112,7 +1196,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	var cityMailProv mail.Provider
 	var extSvc *extmsg.Services
 	if cityStore != nil {
-		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv, true)
+		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv, true, cs.reconcileGate())
 		cityMailProv = newCityMailProvider(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
 		extSvc = newCityExtMsgServices(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
 	}

@@ -87,6 +87,11 @@
             "values": [
               "x86_64"
             ]
+          },
+          "worker-env": {
+            "values": [
+              "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+            ]
           }
         }
       }

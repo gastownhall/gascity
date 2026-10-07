@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -62,7 +63,8 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 				t.Errorf("checkout must set persist-credentials: false, got %v", step.With["persist-credentials"])
 			}
 		}
-		if strings.Contains(step.Run, rbeWorkerScript) {
+		// The worker-env measure step runs the script too, without a worker.
+		if strings.Contains(step.Run, rbeWorkerScript) && step.Env["WORKER_MODE"] != "measure" {
 			worker = true
 			// Default on; the repository variable RBE_ACTION_ISOLATION=0 is the
 			// rollback without a code change.
@@ -128,10 +130,10 @@ func TestRBEWorkerScriptIsolationConfig(t *testing.T) {
 		t.Fatalf("%s: no isolation='{...}' worker config", rbeWorkerScript)
 	}
 	var iso struct {
-		Entrypoint               string            `json:"entrypoint"`
-		TimeoutHandledExternally bool              `json:"timeout_handled_externally"`
-		MaxActionTimeout         int               `json:"max_action_timeout"`
-		AdditionalEnvironment    map[string]string `json:"additional_environment"`
+		Entrypoint               string         `json:"entrypoint"`
+		TimeoutHandledExternally bool           `json:"timeout_handled_externally"`
+		MaxActionTimeout         int            `json:"max_action_timeout"`
+		AdditionalEnvironment    map[string]any `json:"additional_environment"`
 	}
 	if err := json.Unmarshal([]byte(m[1]), &iso); err != nil {
 		t.Fatalf("isolation worker config is not JSON: %v\n%s", err, m[1])
@@ -139,8 +141,14 @@ func TestRBEWorkerScriptIsolationConfig(t *testing.T) {
 	if iso.Entrypoint != "/usr/local/libexec/rbe-action/entry" || !iso.TimeoutHandledExternally {
 		t.Errorf("isolation worker config: entrypoint %q, timeout_handled_externally %v", iso.Entrypoint, iso.TimeoutHandledExternally)
 	}
-	if got := iso.AdditionalEnvironment; len(got) != 2 || got["RBE_X_TIMEOUT_MS"] != "timeout_millis" || got["RBE_X_SIDE_CHANNEL"] != "side_channel_file" {
-		t.Errorf("additional_environment = %v, want RBE_X_TIMEOUT_MS and RBE_X_SIDE_CHANNEL only", got)
+	// RBE_X_NETWORK: the action's network platform property, which the
+	// launcher reads (TestRBEActionPerActionNetwork).
+	if got, want := iso.AdditionalEnvironment, map[string]any{
+		"RBE_X_TIMEOUT_MS":   "timeout_millis",
+		"RBE_X_SIDE_CHANNEL": "side_channel_file",
+		"RBE_X_NETWORK":      map[string]any{"property": "network"},
+	}; !reflect.DeepEqual(got, want) {
+		t.Errorf("additional_environment = %v, want %v", got, want)
 	}
 
 	// The launcher's half (/etc/rbe-west/rbe-action.env).
@@ -288,7 +296,9 @@ func TestRBEWorkerScriptSlotEgressRuleOrder(t *testing.T) {
 // origin/main's jq program before O1 (4d0e45d9eb^) rendered with the same
 // arguments; regenerate it only for an intended worker config change. One
 // since: REMOTE_CAS instance "oss", not "" (rbe-west FU2 confines the worker
-// certificate to "oss"-only listeners).
+// certificate to "oss"-only listeners); and both goldens advertise the
+// worker-env platform property (rbe_worker_env_test.go), here
+// rbeWorkerEnvSample.
 //
 // The same program renders the fork tier (WORKER_TIER=fork, rbe-fork-pool.yml),
 // always with isolation on: CAS instance oss-fork on :8444, no action cache
@@ -311,6 +321,7 @@ func TestRBEWorkerJSONIsolationOffMatchesPreO1(t *testing.T) {
 			"--arg", "name", "pool-worker-1",
 			"--argjson", "slots", "8",
 			"--arg", "tier", tier,
+			"--arg", "worker_env", rbeWorkerEnvSample,
 		}
 		args = append(args, extra...)
 		args = append(args, "--argjson", "isolation", isolation, prog)
@@ -350,6 +361,9 @@ func TestRBEWorkerJSONIsolationOffMatchesPreO1(t *testing.T) {
 		if got, want := decode(out), decode(golden); !reflect.DeepEqual(got, want) {
 			t.Errorf("tier %s: worker.json differs from %s:\ngot:\n%s\nwant:\n%s", c.tier, c.golden, out, golden)
 		}
+		if err := checkWorkerJSONAdvertises(out, rbeWorkerEnvSample); err != nil {
+			t.Errorf("tier %s: %v", c.tier, err)
+		}
 		if c.tier == "fork" {
 			for _, err := range checkForkWorkerJSON(out, c.host) {
 				t.Errorf("tier fork: %v", err)
@@ -369,7 +383,8 @@ func TestRBEWorkerJSONIsolationOffMatchesPreO1(t *testing.T) {
 	// golden one (above).
 	t.Run("WireZstd", func(t *testing.T) {
 		const readDefault = `ZSTD_READ_URL=${RBE_WIRE_ZSTD_READ_URL:-grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}}`
-		if !strings.Contains(readFile(t, root, rbeWorkerScript), "\n"+readDefault+"\n") {
+		// Indented: measure mode (no farm host) skips it.
+		if !regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(readDefault) + `$`).MatchString(readFile(t, root, rbeWorkerScript)) {
 			t.Errorf("%s: want %s (REMOTE_READ defaults to the worker's own endpoint)", rbeWorkerScript, readDefault)
 		}
 		type store struct {
@@ -590,6 +605,8 @@ func TestRBEWorkerScriptGatesNativeLinkOnIsolation(t *testing.T) {
 		// What an action can connect to (the selftest's in-action check), not
 		// what the host has on /run: the host keeps its sockets.
 		`grep -q '^ok    action: no-open-socket' "$selftest_out" ||`,
+		// ga-mglovs: no resolver over unix sockets (system bus, varlink).
+		`grep -q '^ok    action: no-resolver' "$selftest_out" ||`,
 		`probe "$ROOT/pki/worker.key"`,
 		`if ! grep -qE "^uid 590[0-9]{2}$" <<<"$out" || grep -q LEAK <<<"$out"; then`,
 		// Mode 1 runs the checks in this shell: any failure ends the worker.
@@ -623,7 +640,11 @@ func TestRBEWorkerScriptGatesNativeLinkOnIsolation(t *testing.T) {
 // sockets on Blacksmith's /run (its VM shutdown socket among them) were found
 // reachable by actions. MASK_SOCKETS=1 masks them inside each action; MAIN
 // keeps the default (0) until it opts in. The sockets phase reads the
-// selftest's line, and the launcher and the selftest keep the same sockets.
+// selftest's line, and the launcher and the selftest keep the same sockets:
+// journald's alone. The system bus is masked too (ga-mglovs): unix sockets
+// ignore network namespaces, and systemd-resolved's org.freedesktop.resolve1
+// resolves any record for anyone, a DNS tunnel out of the fork tier's
+// loopback-only actions. The selftest proves no action reaches a resolver.
 func TestRBEActionMaskSockets(t *testing.T) {
 	root := repoRoot(t)
 	launch := readFile(t, root, "tools/rbe/rbe-action-launch")
@@ -638,12 +659,15 @@ func TestRBEActionMaskSockets(t *testing.T) {
 			t.Errorf("rbe-action-launch missing %q", want)
 		}
 	}
-	const keep = "case $s in /run/systemd/journal/* | /run/dbus/system_bus_socket) ;; *)"
+	const keep = "case $s in /run/systemd/journal/*) ;; *)"
 	if n := strings.Count(launch, keep); n != 1 {
 		t.Errorf("rbe-action-launch: %d sockets-kept lists %q, want 1", n, keep)
 	}
 	if n := strings.Count(selftest, keep); n != 1 {
 		t.Errorf("rbe-action-selftest: %d sockets-kept lists %q, want 1 (run_socks, host and action)", n, keep)
+	}
+	if strings.Contains(launch, "system_bus_socket") || strings.Contains(selftest, "system_bus_socket) ;;") {
+		t.Error("the system bus must not be exempt from MASK_SOCKETS (ga-mglovs: resolve1 is a DNS tunnel)")
 	}
 	// The action runs the host's run_socks: the same list on both sides.
 	if !strings.Contains(selftest, `'"$(declare -f run_socks)"'`) {
@@ -654,6 +678,122 @@ func TestRBEActionMaskSockets(t *testing.T) {
 		`ok "action: no-open-socket (${how:-?})"`,
 		"elif ((MASK_SOCKETS)); then\n\tbad \"action: no-open-socket",
 		`sed -n 's/^S /      world-writable socket the action can connect to: /p' <<<"$out"`,
+		// The tunnel itself, through the system bus and resolved's varlink
+		// socket, from inside the probe action, against what the host reaches.
+		"org.freedesktop.resolve1.Manager ResolveHostname isit 0 localhost 0 0",
+		`"system-bus", "/run/dbus/system_bus_socket"`,
+		"io.systemd.Resolve.ResolveHostname",
+		"echo \"$r\"; grep -q \"^S \" <<<\"$r\" || echo \"R no-open-socket\"\n'\"$resolver_probe\"'\n",
+		`ok "action: no-resolver (the host reaches: ${host_resolvers:-none})"`,
+		"elif ((MASK_SOCKETS)); then\n\tbad \"action: no-resolver (the action reaches: $resolvers)\"",
+	} {
+		if !strings.Contains(selftest, want) {
+			t.Errorf("rbe-action-selftest missing %q", want)
+		}
+	}
+}
+
+// Per-action network (#6996; infra README "Per-action network"): the action's
+// `network` platform property reaches the launcher as RBE_X_NETWORK
+// (NativeLink additional_environment, "" when the action has none). off gives
+// the action its own network namespace with loopback only, as NETNS=1 does for
+// every fork action; on or none keeps the tier's network; with NETNS=1 nothing
+// the action says gives it a network; anything else is refused. The value is
+// the action's own (its Command environment wins over additional_environment),
+// so it may only ever take network away. The launcher's decision runs here in
+// bash; the selftest proves the namespaces on every worker before NativeLink
+// starts.
+func TestRBEActionPerActionNetwork(t *testing.T) {
+	root := repoRoot(t)
+	launch := readFile(t, root, "tools/rbe/rbe-action-launch")
+	fn := regexp.MustCompile(`(?s)\naction_netns\(\) \{\n.*?\n\}\n`).FindString(launch)
+	if fn == "" {
+		t.Fatal("rbe-action-launch: no action_netns() function")
+	}
+	cases := []struct {
+		netns, value, want string
+	}{
+		{"0", "", "0"}, // no network property
+		{"0", "on", "0"},
+		{"0", "off", "1"},
+		// Malformed: refused, never guessed either way.
+		{"0", "Off", "refused"},
+		{"0", "OFF", "refused"},
+		{"0", "off ", "refused"},
+		{"0", " off", "refused"},
+		{"0", "off\n", "refused"},
+		{"0", "on\noff", "refused"},
+		{"0", "-", "refused"},
+		{"0", "0", "refused"},
+		{"0", "1", "refused"},
+		{"0", "allow", "refused"},
+		{"0", "*", "refused"},
+		// The fork tier: loopback only whatever the action says.
+		{"1", "", "1"},
+		{"1", "on", "1"},
+		{"1", "off", "1"},
+		{"1", "Off", "1"},
+		{"1", "on\n", "1"},
+	}
+	script := fn
+	env := map[string]string{}
+	for i, c := range cases {
+		env["N"+strconv.Itoa(i)], env["V"+strconv.Itoa(i)] = c.netns, c.value
+		script += fmt.Sprintf("NETNS=$N%[1]d; if r=$(action_netns \"$V%[1]d\"); then echo \"%[1]d $r\"; else echo \"%[1]d refused\"; fi\n", i)
+	}
+	out, err := runWorkflowStepScript(t, t.TempDir(), script, env)
+	if err != nil {
+		t.Fatalf("action_netns: %v\n%s", err, out)
+	}
+	got := strings.Split(strings.TrimSpace(out), "\n")
+	if len(got) != len(cases) {
+		t.Fatalf("action_netns: %d results for %d cases:\n%s", len(got), len(cases), out)
+	}
+	for i, c := range cases {
+		if want := strconv.Itoa(i) + " " + c.want; got[i] != want {
+			t.Errorf("NETNS=%s RBE_X_NETWORK=%q: got %q, want %q", c.netns, c.value, got[i], want)
+		}
+	}
+
+	for _, want := range []string{
+		`[[ $NETNS == [01] ]] || die "NETNS must be 0 or 1"`,
+		// A control value: validated, stripped from the action's environment,
+		// never given twice.
+		"\t\tRBE_X_NETWORK=*)\n\t\t\t((!net_set)) || die \"RBE_X_NETWORK given twice\"\n\t\t\tnet=${e#*=} net_set=1\n\t\t\t;;\n\t\t*) envs+=(\"$e\") ;;\n",
+		`netns=$(action_netns "$net") || die "bad RBE_X_NETWORK (off, on or empty)"`,
+		"\tif [[ $netns == 1 ]]; then\n\t\tns+=(--net)\n\t\thost_net=$(readlink /proc/self/ns/net)\n\tfi\n",
+		`"$SELF" --ns "$op" "$slot" "$rel" "$secs" "$sc" "$lk" "$host_net" "${#envs[@]}" "${envs[@]}" "${argv[@]}"`,
+		// pid 1: never the host's network when loopback only was chosen, and
+		// never the host's network with NETNS=1.
+		"\tlocal op=$1 slot=$2 rel=$3 secs=$4 sc=$5 lk=$6 host_net=$7\n\tshift 7\n",
+		`[[ $NETNS != 1 ]] || { echo "rbe-action: NETNS=1 but no network namespace" >&2; false; }`,
+		`[[ $host_net =~ ^net:\[[0-9]+\]$ && $(readlink /proc/self/ns/net) != "$host_net" ]] ||`,
+		// The egress filter stays required by the worker's own NETNS.
+		"\tif [[ $NETNS != 1 ]]; then\n\t\tlocal chain\n",
+	} {
+		if !strings.Contains(launch, want) {
+			t.Errorf("rbe-action-launch missing %q", want)
+		}
+	}
+	// One place decides the network namespace: action_netns.
+	if n := strings.Count(launch, "--net"); n != 1 {
+		t.Errorf("rbe-action-launch: %d --net, want 1 (from action_netns alone)", n)
+	}
+	if n := strings.Count(launch, "[[ $NETNS == 1 ]]"); n != 1 {
+		t.Errorf("rbe-action-launch: %d [[ $NETNS == 1 ]], want 1 (action_netns)", n)
+	}
+
+	selftest := readFile(t, root, "tools/rbe/rbe-action-selftest")
+	for _, want := range []string{
+		// The main probe runs as an action without the property does.
+		`RBE_X_TIMEOUT_MS=300000 RBE_X_NETWORK= "$LIB/entry" /bin/bash -c "$probe"`,
+		`'{"RBE_X_TIMEOUT_MS":"timeout_millis","RBE_X_SIDE_CHANNEL":"side_channel_file","RBE_X_NETWORK":{"property":"network"}}'`,
+		`loopback_only=$'I lo\nD 127.0.0.1:9 refused\nD 192.0.2.1:9 unreachable\nexit 0'`,
+		`check "off: loopback only" test "$out" = "$loopback_only"`,
+		`check "on, NETNS=1: still loopback only" test "$out" = "$loopback_only"`,
+		`check "on: this worker's network (interfaces besides lo)"`,
+		`check "Off (malformed), NETNS=1: loopback only" test "$out" = "$loopback_only"`,
+		`check "Off (malformed): refused, never run (exit 125)"`,
 	} {
 		if !strings.Contains(selftest, want) {
 			t.Errorf("rbe-action-selftest missing %q", want)
@@ -738,7 +878,7 @@ func TestRBEWorkerIsolationCanary(t *testing.T) {
 		cmd := exec.CommandContext(ctx, "bash", "-c", prog)
 		cmd.Env = []string{
 			"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"), "HOME=" + home, "RUNNER_TEMP=" + temp, "ROOT=" + nlRoot, "NL_BIN_DIR=" + bin,
-			"RBE_WEST_HOST=rbe-west.example.invalid", "WORKER_NAME=pool-worker-1",
+			"RBE_WEST_HOST=rbe-west.example.invalid", "WORKER_NAME=pool-worker-1", "WORKER_ENV=" + rbeWorkerEnvSample,
 			"MODE=" + mode, "SLOTS=" + strconv.Itoa(slots), "GITHUB_STEP_SUMMARY=" + filepath.Join(home, "summary.md"),
 		}
 		if runID != "" {
@@ -946,5 +1086,52 @@ func TestRBEWorkerScrubCAS(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "cas scrub: 2 blobs removed, 2 kept") {
 		t.Errorf("scrub summary: want 2 blobs removed (hash, size), 2 kept; got\n%s", out)
+	}
+}
+
+// Max review, 2026-10-07: the full selftest's mount walk (tools/rbe/rbe-
+// action-selftest's full_probe) found no-shared-writable-dir by `find`ing
+// every reachable mount, including Blacksmith's large, mostly-read-only tool
+// caches (~49 s of the walk). A mount whose own options already say ro (a
+// ROOT_RO=1 remount, or a mount that was ro to begin with) has nothing an
+// action can write on it, so the walk now skips `find` there; this must
+// never widen what no-shared-writable-dir catches: ROOT_RO=0 (nothing
+// remounted ro) and a world-writable directory an image adds under /dev
+// (ROOT_RO's own remount loop skips /dev/* by path, rbe-action-launch) must
+// still fail it. Container regression cases (privileged ubuntu:24.04,
+// tools/rbe/blacksmith-worker.sh's isolate()-to-selftest section, the
+// /data/tmp/r3-e2e/inside.sh pattern): V1 ROOT_RO=1 fork with a large
+// read-only tool cache passes; V2 ROOT_RO=0 plus a world-writable tool cache
+// fails; V3 a 1777 directory under /dev fails; R4 the entrypoint dropped
+// from worker.json (unrelated to the mount walk) still fails.
+func TestRBEActionSelftestMountWalkSkipsReadOnly(t *testing.T) {
+	selftest := readFile(t, repoRoot(t), "tools/rbe/rbe-action-selftest")
+	for _, want := range []string{
+		// The options column (mountinfo field 6) is read, not discarded.
+		"while read -r _ _ _ _ m o _; do",
+		// /dev is never skipped by path here (only /proc and /sys): a 1777
+		// directory an image adds under /dev must still be walked into.
+		"case $m in /proc | /proc/* | /sys | /sys/*) continue ;; esac",
+		// A mount already read-only has nothing to find() on.
+		"case ,$o, in *,ro,*) continue ;; esac",
+	} {
+		if !strings.Contains(selftest, want) {
+			t.Errorf("rbe-action-selftest missing %q", want)
+		}
+	}
+	// The ro-skip line must run after the own()/mountpoint check and before
+	// the `find` that walks the mount, or an owned mount (never probed
+	// anyway) could mask the ordering and the skip would never fire.
+	own := strings.Index(selftest, `if own "$m" || ! mountpoint -q -- "$m"; then continue; fi`)
+	skip := strings.Index(selftest, "case ,$o, in *,ro,*) continue ;; esac")
+	find := strings.Index(selftest, `done < <(find "$m" -xdev -type d -perm -0002 2>/dev/null)`)
+	if own < 0 || skip < 0 || find < 0 || own >= skip || skip >= find {
+		t.Errorf("rbe-action-selftest: want own-check(%d) < ro-skip(%d) < find(%d)", own, skip, find)
+	}
+	// /dev itself (and anything under it) is a candidate mount to `own()` or
+	// walk, not a path this loop drops before ever considering its options:
+	// only /proc and /sys are skipped unconditionally.
+	if strings.Contains(selftest, "/dev | /dev/*) continue") {
+		t.Error("rbe-action-selftest: the mount walk must not skip /dev by path (only ROOT_RO's own remount loop in rbe-action-launch does, and only there)")
 	}
 }

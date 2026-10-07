@@ -1,0 +1,289 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"runtime/debug"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// The v2 planner loop (architecture §1.3, §1.5): one goroutine that schedules
+// passes and solely owns the reconciler's mutable state, so none of that
+// state takes a lock. Effects report back through the settlement queue; every
+// other input reaches the planner as a dirty mark.
+//
+// Unwired: C2c1 supplies the pass (tracePass), and C2c2 constructs the
+// planner behind session_reconciler=v2.
+
+// plannerMinGap is the shortest time from one pass's start to the next's.
+const plannerMinGap = 250 * time.Millisecond
+
+// plannerPaceFactor spaces pass starts at this many times the last pass's
+// duration, which keeps the duty cycle near 1/plannerPaceFactor.
+const plannerPaceFactor = 4
+
+// passFunc runs one pass at now. C2c1 supplies gather, allocate, decideRow
+// and admit.
+type passFunc func(now time.Time) passResult
+
+// passResult is what a pass reports back to the loop.
+type passResult struct {
+	Next   time.Time // earliest row deadline; zero for none
+	Counts passCounts
+}
+
+// passRecord is the last pass, for the status surfaces OBS1 adds.
+type passRecord struct {
+	Start    time.Time
+	Duration time.Duration
+	Panicked bool
+	Result   passResult
+}
+
+// settlement is an effect's report that it finished. Seq echoes the
+// in-flight entry's submit. A create's names its entry by Token, since the
+// create has no row until it lands; Ambiguous says its write call errored
+// after the row may have landed (CONTRACT v5 P5). A zero At is stamped with
+// the drain time. C4a adds the outcome the backoff table needs.
+type settlement struct {
+	Key       rowKey
+	Kind      string
+	Err       error
+	Seq       uint64
+	Token     string
+	Ambiguous bool
+	At        time.Time
+}
+
+// plannerInflight is the in-flight map the planner owns: *inflightMap
+// (reconcile_inflight.go), or a test's fake.
+type plannerInflight interface {
+	settle(settlement)
+	view() inflightView
+}
+
+// bootState is the boot gate (CONTRACT v5 P2): no destructive intent until
+// the cache is primed, every backend of the latest inventory pass is primed
+// and, when a demand leg is lane-fed, the first external-reads recording
+// exists. gather computes it each pass; admit applies it.
+type bootState struct {
+	CachePrimed, InventoryComplete, RecordingSeen bool
+}
+
+// planner runs passes on one goroutine. Only that goroutine touches inflight,
+// backoff, bucket, fairSeed, boot, last, rowTrace and memo; other goroutines
+// reach the planner through markDirty, the settlement queue, the start pause
+// and stop, and read what a pass publishes through out.
+type planner struct {
+	clock       plannerClock
+	patrol      func() time.Duration // read after every pass, so a reload takes effect
+	pass        passFunc
+	stopEffects func(deadline time.Time) // the executor's stop
+	stderr      io.Writer
+	metrics     *passMetrics
+
+	inflight plannerInflight
+	backoff  *backoffTable
+	bucket   bucketState
+	fairSeed uint64 // admission's fair-share rotation (P4)
+	boot     bootState
+	last     passRecord
+	rowTrace map[rowKey]string // each row's last traced (reason, outcome)
+	memo     gatherMemo
+	out      passOutputs
+
+	dirty       chan struct{} // capacity 1: marks fold until the loop reads one
+	settlements settlementQueue
+	paused      atomic.Bool
+	quit        chan struct{}
+	quitOnce    sync.Once
+	running     atomic.Bool
+	done        chan struct{} // closed when run returns
+}
+
+func newPlanner(clock plannerClock, patrol func() time.Duration, pass passFunc, inflight plannerInflight, stopEffects func(time.Time), stderr io.Writer) *planner {
+	p := &planner{
+		clock: clock, patrol: patrol, pass: pass, stopEffects: stopEffects, stderr: stderr,
+		metrics:  newPassMetrics(),
+		inflight: inflight,
+		backoff:  newBackoffTable(),
+		rowTrace: make(map[rowKey]string),
+		dirty:    make(chan struct{}, 1),
+		quit:     make(chan struct{}),
+		done:     make(chan struct{}),
+	}
+	p.settlements.wake = func() { p.markDirty("settlement") }
+	return p
+}
+
+// markDirty asks for a pass. It never blocks: marks made while one is
+// pending, or while a pass runs, fold into one follow-up pass.
+func (p *planner) markDirty(reason string) {
+	p.metrics.recordWake(reason)
+	select {
+	case p.dirty <- struct{}{}:
+	default:
+	}
+}
+
+// pauseStarts and resumeStarts bracket a provider swap; the pass reads
+// startsPaused and admits no start while it is set.
+func (p *planner) pauseStarts()       { p.paused.Store(true) }
+func (p *planner) resumeStarts()      { p.paused.Store(false) }
+func (p *planner) startsPaused() bool { return p.paused.Load() }
+
+// run schedules passes until ctx ends or stop is called. A pass is owed after
+// a dirty mark, the patrol interval after the last pass ends (bounding a lost
+// wake, R-6), or the last pass's earliest row deadline. One timer serves the
+// patrol, the row deadline and the pacing wait. An owed pass starts at once
+// if the planner is idle; otherwise it waits until max(plannerMinGap,
+// plannerPaceFactor × last duration) after the last start.
+func (p *planner) run(ctx context.Context) {
+	p.running.Store(true)
+	defer close(p.done)
+	timer := p.clock.NewTimer(p.patrol())
+	defer timer.Stop()
+	due, dueReason := p.clock.Now().Add(p.patrol()), "patrol"
+	owed := false
+	for {
+		if ctx.Err() != nil || p.stopping() {
+			return
+		}
+		now := p.clock.Now()
+		wakeAt := due
+		if owed {
+			wakeAt = p.last.Start.Add(max(plannerMinGap, plannerPaceFactor*p.last.Duration))
+			if !now.Before(wakeAt) {
+				owed = false
+				res := p.runPass(now)
+				due, dueReason = p.clock.Now().Add(p.patrol()), "patrol"
+				if !res.Next.IsZero() && res.Next.Before(due) {
+					due, dueReason = res.Next, "deadline"
+				}
+				continue
+			}
+		}
+		timer.Reset(wakeAt.Sub(now))
+		select {
+		case <-ctx.Done():
+			return
+		case <-p.quit:
+			return
+		case <-p.dirty:
+			owed = true
+		case <-timer.C():
+			if !owed {
+				p.metrics.recordWake(dueReason)
+				owed = true
+			}
+		}
+	}
+}
+
+// runPass applies the settlements posted since the last pass to the in-flight
+// map, then runs the pass. A panic in either is recovered in safeTick's style:
+// the pass is skipped and logged, and a follow-up pass is owed.
+func (p *planner) runPass(now time.Time) (res passResult) {
+	defer func() {
+		r := recover()
+		if r != nil {
+			fmt.Fprintf(p.stderr, "v2 planner: pass panicked: %v (type=%T)\n%s\n", r, r, debug.Stack()) //nolint:errcheck // best-effort stderr
+			p.markDirty("panic")
+		}
+		p.last = passRecord{Start: now, Duration: p.clock.Now().Sub(now), Panicked: r != nil, Result: res}
+		p.metrics.recordPass(now, p.last.Duration, r != nil, res.Counts)
+	}()
+	p.drainSettlements(now)
+	return p.pass(now)
+}
+
+// drainSettlements applies the settlements posted so far to the in-flight
+// map, stamping a zero At with now.
+func (p *planner) drainSettlements(now time.Time) {
+	for _, s := range p.settlements.drain() {
+		if s.At.IsZero() {
+			s.At = now
+		}
+		p.inflight.settle(s)
+	}
+}
+
+func (p *planner) stopping() bool {
+	select {
+	case <-p.quit:
+		return true
+	default:
+		return false
+	}
+}
+
+// stop shuts the planner down (GUAR-013): it stops admission first, so no
+// pass starts after this call, then stops the executor until deadline, then
+// waits for run to return. A pass already running finishes; the stopped
+// executor refuses what it submits. Later calls only wait for run.
+func (p *planner) stop(deadline time.Time) {
+	p.quitOnce.Do(func() {
+		close(p.quit)
+		if p.stopEffects != nil {
+			p.stopEffects(deadline)
+		}
+	})
+	if p.running.Load() {
+		<-p.done
+	}
+}
+
+// settlementQueue carries settlements from effect goroutines to the planner.
+// It is unbounded (D-8), so post never blocks and an effect never has to
+// reason about the planner's progress to report back.
+type settlementQueue struct {
+	mu    sync.Mutex
+	items []settlement
+	wake  func() // a capacity-1 notify: the planner's dirty mark
+}
+
+func (q *settlementQueue) post(s settlement) {
+	q.mu.Lock()
+	q.items = append(q.items, s)
+	q.mu.Unlock()
+	q.wake()
+}
+
+func (q *settlementQueue) drain() []settlement {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	items := q.items
+	q.items = nil
+	return items
+}
+
+// plannerClock is the planner's clock, faked in tests.
+type plannerClock interface {
+	Now() time.Time
+	NewTimer(d time.Duration) plannerTimer
+}
+
+// plannerTimer is a one-shot timer. Reset discards a pending fire, as
+// time.Timer does from Go 1.23.
+type plannerTimer interface {
+	C() <-chan time.Time
+	Reset(d time.Duration)
+	Stop()
+}
+
+type realPlannerClock struct{}
+
+func (realPlannerClock) Now() time.Time { return time.Now() }
+
+func (realPlannerClock) NewTimer(d time.Duration) plannerTimer {
+	return realPlannerTimer{time.NewTimer(d)}
+}
+
+type realPlannerTimer struct{ t *time.Timer }
+
+func (r realPlannerTimer) C() <-chan time.Time   { return r.t.C }
+func (r realPlannerTimer) Reset(d time.Duration) { r.t.Reset(d) }
+func (r realPlannerTimer) Stop()                 { r.t.Stop() }

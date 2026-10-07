@@ -27,6 +27,12 @@ type ConditionalWriterOptions struct {
 	// one row can apply them and leaves this false.
 	RestrictedUpdateFields bool
 
+	// LabelsGuarded narrows RestrictedUpdateFields to the parent for a store
+	// whose UpdateIfMatch applies labels under the revision check (MemStore,
+	// NativeDoltStore, and a CachingStore over either).
+	// RunConditionalLabelsConformance asserts the label behavior instead.
+	LabelsGuarded bool
+
 	// OpenDisabled returns a fresh store of the same kind whose conditional
 	// writes are turned off at the instance level (e.g. MemStore/FileStore with
 	// DisableConditionalWrites=true). When non-nil, the disable_toggle subtest
@@ -74,7 +80,7 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 	t.Run(name, func(t *testing.T) { runEmptyUpdateContract(t, open) })
 	conformanceWholeBeadWriteChangesRevision(t, name, open)
 	if opts.RestrictedUpdateFields {
-		conformanceRestrictedUpdateFieldsRejected(t, name, open)
+		conformanceRestrictedUpdateFieldsRejected(t, name, open, opts.LabelsGuarded)
 	}
 	conformanceReadsNeverBump(t, name, open)
 	conformanceRevisionTokensNeverReused(t, name, open)
@@ -145,8 +151,9 @@ func conformanceWholeBeadWriteChangesRevision(t *testing.T, name string, open fu
 
 // conformanceRestrictedUpdateFieldsRejected asserts a store that cannot fold
 // parent/labels into a revision-guarded update rejects them with the typed
-// unsupported error and mutates nothing.
-func conformanceRestrictedUpdateFieldsRejected(t *testing.T, name string, open func(t *testing.T) beads.Store) {
+// unsupported error and mutates nothing. With labelsGuarded only the parent is
+// checked.
+func conformanceRestrictedUpdateFieldsRejected(t *testing.T, name string, open func(t *testing.T) beads.Store, labelsGuarded bool) {
 	t.Run(name+"/restricted_update_fields_are_rejected_without_mutation", func(t *testing.T) {
 		s := open(t)
 		w := conformanceWriterFor(t, s)
@@ -162,6 +169,9 @@ func conformanceRestrictedUpdateFieldsRejected(t *testing.T, name string, open f
 			{name: "parent", opts: beads.UpdateOpts{ParentID: &parent}},
 			{name: "add_labels", opts: beads.UpdateOpts{Labels: []string{"added"}}},
 			{name: "remove_labels", opts: beads.UpdateOpts{RemoveLabels: []string{"remove"}}},
+		}
+		if labelsGuarded {
+			tests = tests[:1]
 		}
 
 		for _, tt := range tests {

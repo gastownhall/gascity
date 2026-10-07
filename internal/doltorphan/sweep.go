@@ -33,9 +33,9 @@ const DefaultMinAge = 60 * time.Minute
 // '.dolt'` from gc-test-dolt-reaper.sh section 4.
 const maxMarkerDepth = 3
 
-// lsofScanTimeout bounds the real `lsof -w` invocation, mirroring the
+// defaultLsofScanTimeout bounds the real `lsof -w` invocation, mirroring the
 // shell script's `timeout 30 lsof -w`.
-const lsofScanTimeout = 30 * time.Second
+const defaultLsofScanTimeout = 30 * time.Second
 
 // SweepConfig configures a single Sweep pass. Root is required; every
 // other field defaults to production behavior when left zero-valued.
@@ -51,7 +51,9 @@ type SweepConfig struct {
 	RunLsof func(ctx context.Context) ([]byte, error)
 	// RemoveAll removes a candidate directory. Defaults to os.RemoveAll.
 	// Injectable for tests.
-	RemoveAll func(path string) error
+	RemoveAll       func(path string) error
+	lsofCommand     string
+	lsofScanTimeout time.Duration
 }
 
 // SweepResult reports what a Sweep pass did.
@@ -125,7 +127,7 @@ func Sweep(cfg SweepConfig) SweepResult {
 		return result
 	}
 
-	held, err := lsofHeldChildren(cfg.Root, cfg.RunLsof)
+	held, err := lsofHeldChildren(cfg.Root, cfg.RunLsof, cfg.lsofCommand, cfg.lsofScanTimeout)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Errorf("lsof -w: %w", err))
 		result.Skipped = len(candidates)
@@ -174,11 +176,19 @@ func hasDoltMarker(dir string, depth int) bool {
 // returns the set of root's direct children that appear as a path prefix
 // of some open file, i.e. directories currently held open by a live
 // process anywhere on the system.
-func lsofHeldChildren(root string, runLsof func(ctx context.Context) ([]byte, error)) (map[string]bool, error) {
+func lsofHeldChildren(root string, runLsof func(ctx context.Context) ([]byte, error), command string, scanTimeout time.Duration) (map[string]bool, error) {
 	if runLsof == nil {
-		runLsof = runLsofW
+		if command == "" {
+			command = "lsof"
+		}
+		runLsof = func(ctx context.Context) ([]byte, error) {
+			return runLsofW(ctx, command)
+		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), lsofScanTimeout)
+	if scanTimeout <= 0 {
+		scanTimeout = defaultLsofScanTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), scanTimeout)
 	defer cancel()
 	out, err := runLsof(ctx)
 	if err != nil {
@@ -192,18 +202,26 @@ func lsofHeldChildren(root string, runLsof func(ctx context.Context) ([]byte, er
 	return held, nil
 }
 
-// runLsofW runs `lsof -w` and returns its stdout. lsof commonly exits
-// non-zero when it cannot read some other process's /proc entries
-// (permission denied) even though the rest of its output is valid; that
-// case is treated as success (mirroring the shell heuristic's `2>/dev/null`,
-// which discards the warning but still uses stdout). Only a failure to run
-// lsof at all (missing binary, context deadline) is treated as fatal.
-func runLsofW(ctx context.Context) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "lsof", "-w")
+var errLsofNoOutput = errors.New("lsof produced no output")
+
+// runLsofW runs `lsof -w` and returns its stdout. Exit status 1 with output
+// is accepted because lsof exits 1 when it cannot read some other process's
+// /proc entries while the rest of its output stays valid (mirroring the
+// shell heuristic's `2>/dev/null`). Launch failures, any other exit status,
+// signal termination, context expiry and empty output are fatal, because a
+// truncated scan under-reports held directories.
+func runLsofW(ctx context.Context, command string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, command, "-w")
 	out, err := cmd.Output()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	var exitErr *exec.ExitError
-	if err != nil && !errors.As(err, &exitErr) {
+	if err != nil && (!errors.As(err, &exitErr) || exitErr.ExitCode() != 1) {
 		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, errors.Join(errLsofNoOutput, err)
 	}
 	return out, nil
 }

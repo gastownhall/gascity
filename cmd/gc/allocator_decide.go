@@ -3,11 +3,9 @@ package main
 import (
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"maps"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -18,32 +16,34 @@ import (
 )
 
 // The allocator's decide (P3 spec §4.4 steps 1-14): desire, create plans,
-// bindings and identity verdicts for one pass, computed in memory from inputs
-// the pass gathered. It reuses legacy's pure pool code (the demand merge,
-// computePoolDesiredStatesAt, the plan-only planner, the overlay
+// bindings and canonical named rows for one pass, computed in memory from
+// inputs the pass gathered. It reuses legacy's pure pool code (the demand
+// merge, computePoolDesiredStatesAt, the plan-only planner, the overlay
 // classification, computeAwakeSetKeyed) and never reads a store, a provider,
 // the filesystem, the environment or the clock: every fact, the time
 // included, comes in through allocInputs. TestDecideIsPure pins that.
 //
 // It lands in two slices: P3-5a1 is steps 1-3 and 9-13 (each row's class,
-// the identity verdicts, the partial causes, the awake set, classification
-// with its Keep conversions, and floors), and P3-5a2 steps 4-8 and 14
-// (demand, pool desired, realization, named planning, dependency floors
-// and bindings). P3-5b adds steps 15-17 (allocator_grants.go): the ledger
-// housekeeping, the bucket, start ranks, grants, create admission and the
-// diff. Unwired: P3-7 gathers the inputs, applies the ledger ops and
-// publishes the snapshot.
+// the canonical named rows, the partial causes, the awake set,
+// classification with its Keep conversions, and floors), and P3-5a2 steps
+// 4-8 and 14 (demand, pool desired, realization, named planning, the overlay
+// and bindings). Admission is not part of it: the planner admits the pass's
+// intents after the decide (CONTRACT v5 P4). Unwired: the planner gathers
+// the inputs.
 
 // errDecideNoClock refuses a pass without its one clock: a zero Now would
 // read every lease as expired and every fact as stale.
 var errDecideNoClock = errors.New("allocator decide: zero Now")
+
+// errDecideNoCensus refuses a pass without its census: no census is not an
+// empty city.
+var errDecideNoCensus = errors.New("allocator decide: no census")
 
 // allocInputs is everything one pass decides from.
 type allocInputs struct {
 	// Now is the pass's one clock (POOL-026, #35). It must be set.
 	Now       time.Time
 	Epoch     string
-	SelGen    uint64 // the generation this pass publishes; binding IDs carry it
 	Cfg       *config.City
 	ConfigRev string
 	EnvGen    uint64
@@ -56,12 +56,11 @@ type allocInputs struct {
 	SuspendedRigPaths map[string]bool
 	Census            *sessionCensus
 	Demand            demandView
-	// ScaleCheck is the scale_check lane's latest result (I5), trusted for
-	// ScaleCheckMaxAge.
-	ScaleCheck       *scaleCheckResult
-	ScaleCheckMaxAge time.Duration
-	Obs              *ObservationSnapshot
-	ObsMaxAge        time.Duration
+	// ScaleCheck is the external-reads lane's scale_check result at Now
+	// (externalReadsRecording.scaleCheck), nil when missing or stale (I5).
+	ScaleCheck *scaleCheckResult
+	Obs        *ObservationSnapshot
+	ObsMaxAge  time.Duration
 	// Endpoints is each config-only endpoint key's breaker reading.
 	Endpoints map[endpointKey]endpointView
 	// ProviderHealth is I7 at Now; nil reads as no registry (fail open).
@@ -77,24 +76,15 @@ type allocInputs struct {
 	// provider binary): legacy realizes nothing for them.
 	TransportRefused map[string]string
 	ReadyWaits       map[string]bool // I10; nil until P4.3
-	// Ledger is a copy of the uncleared entries (intentLedger.View), and
-	// Reservations the planning reservations of its create entries.
-	Ledger       []ledgerEntry
-	Reservations []planReservation
-	// Backoff is the backoff table (backoffTable.Snapshot, read after the
-	// ledger). A create record live at Now refuses its plan identity
-	// (AM-N8); a work record live at Now refuses its bead's worktree
-	// evidence while its fingerprint matches (#34).
+	// InFlight is the in-flight map's view (inflightMap.view): its running
+	// and ambiguous creates stand in for their rows until the census shows
+	// them (inFlightStandIns).
+	InFlight inflightView
+	// Backoff is the backoff table (backoffTable.Snapshot). A create record
+	// live at Now refuses its plan identity (AM-N8); a work record live at
+	// Now refuses its bead's worktree evidence while its fingerprint matches
+	// (#34).
 	Backoff map[string]backoffRecord
-	// Prev is the last published snapshot, for sticky bindings and the diff.
-	Prev *selectionSnapshot
-	// Bucket, FairSeed and EntrySeq are allocator state, carried from the
-	// last pass's decision: the token bucket, the fair-share rotation seed
-	// (C4.8) and the sequence ledger entry IDs and create tokens are minted
-	// from, unique within the epoch.
-	Bucket   bucketState
-	FairSeed uint64
-	EntrySeq uint64
 }
 
 // demandView is the demand collectors' output for one pass (P3 spec §4.3),
@@ -107,6 +97,7 @@ type demandView struct {
 	// A suspended city reads them too: legacy's suspend drain spares a row
 	// with open assigned work.
 	AssignedWork      []beads.Bead
+	AssignedStores    []beads.Store
 	AssignedStoreRefs []string
 	ReadyAssigned     map[storeScopedBeadKey]bool
 	StorePartial      bool
@@ -140,7 +131,7 @@ type endpointView struct {
 type allocDecision struct {
 	Snapshot *selectionSnapshot
 	// Plans are the fresh rows the pass would create, in planning order:
-	// named, then pool by template, then dependency floors.
+	// named, then pool by template.
 	Plans []allocPlan
 	// Planning is the census the plans were made against, every canonical
 	// row on every leg: the create effects' planning census
@@ -153,80 +144,64 @@ type allocDecision struct {
 	ReadyRouted     []beads.Bead
 	ReadyRoutedRefs []string
 	Trace           []allocTraceRecord
-
-	// LedgerOps are the pass's ledger moves in order (clears, releases,
-	// reserves), Creates the admitted plans for the create executor, and
-	// Reservations the planning reservations of every create entry still
-	// uncleared, by entry ID: allocator state, fed back as
-	// allocInputs.Reservations. Bucket holds the grant debits and no
-	// release refund: P3-7 credits a refund only on a confirmed Release.
-	LedgerOps    []ledgerOp
-	Creates      []createPlan
-	Reservations []planReservation
-	Bucket       bucketState
-	FairSeed     uint64
-	EntrySeq     uint64
-	// Enqueue is the session keys whose entry changed against Prev (C2.10);
-	// NextWake when the allocator must pass again, 0 for the patrol backstop.
-	Enqueue  []rowKey
-	NextWake time.Duration
+	// Alerts are the pass's operator alerts: each configured named identity
+	// with more than one open row (C2.13). OBS1 surfaces them.
+	Alerts []string
 }
 
 // decidePass is one decide's working state.
 type decidePass struct {
-	in       allocInputs
-	noCensus bool
-	cfg      *config.City
-	snap     *selectionSnapshot
-	obs      map[rowKey]rowObservation
+	in   allocInputs
+	cfg  *config.City
+	snap *selectionSnapshot
+	obs  map[rowKey]rowObservation
 
 	sessionsLeg string
 	// none holds the rows the allocator does not manage, by reason (AM11,
 	// C2.11, C2.13).
 	none map[rowKey]string
-	// managed are the canonical sessions-leg rows outside none, in census
-	// order; byID indexes them.
+	// managed are the canonical sessions-leg rows outside step 2's none, in
+	// census order; byID indexes them.
 	managed []session.Info
 	byID    map[string]rowKey
 	// decidable are the managed rows the pass decides from: without identity
-	// losers, so a named session never resolves to whichever claimant sorts
-	// first (P3-1 obligation).
+	// duplicates, so a named session never resolves to whichever claimant
+	// sorts first (P3-1 obligation).
 	decidable []session.Info
 	// occupancy is every canonical census row, on every leg and in every
 	// class: what holds a slot or a name (C7.1).
 	occupancy []session.Info
-
-	losers map[rowKey]bool
 
 	merged      mergedDemand
 	named       namedSessionDemand
 	poolStates  []PoolDesiredState
 	poolDesired map[string]int
 	poolWork    []beads.Bead
-	// unclaimed is the merged demand's work that no row claimed: the only
-	// work a sticky binding holds (F2).
-	unclaimed map[string]bool
-	// standIns are the templates of the pending-create rows uncleared
-	// creates stand in for in pool demand, by stand-in ID; bound maps work
-	// C6.6 counts as consumed to the row holding it.
+	// inFlight are the planning reservations of the in-flight creates the
+	// census does not show yet (inFlightCreates), and standIns the templates
+	// of the pending-create rows the pool ones stand in for, by stand-in ID.
+	inFlight []planReservation
 	standIns map[string]string
-	bound    map[string]string
 
+	// sessions is decidableSnapshot's: the pool retention and the planner
+	// read one snapshot.
+	sessions *sessionBeadSnapshot
 	bp       *agentBuildParams
 	desired  map[string]TemplateParams // membership only (classifyOverlaySession)
 	selected map[rowKey]*selection
-	roots    map[string]bool
 	plans    []allocPlan
 	trace    []allocTraceRecord
+	alerts   []string
+
+	// index is the realization index (allocator_index.go); nil realizes
+	// over the pass's own params, the index's oracle.
+	index *passIndex
 }
 
 // selection is a row the pass placed InDesired.
 type selection struct {
 	ref     desiredConfigRef
 	binding *bindingTarget // candidate; step 14 decides
-	// resume marks a row realized for its own claimed work (the resume
-	// tier): its request outranks a sticky binding.
-	resume bool
 	// normalize marks a pool-selected canonical singleton whose stored
 	// identity is a phantom slot spelling (POOL-046).
 	normalize bool
@@ -238,14 +213,16 @@ func decideAllocation(in allocInputs) (allocDecision, error) {
 	if in.Now.IsZero() {
 		return allocDecision{}, errDecideNoClock
 	}
+	if in.Census == nil {
+		return allocDecision{}, errDecideNoCensus
+	}
 	p := newDecidePass(in)
+	p.inFlight = p.inFlightCreates()
 	p.prepare()
 	if !in.CitySuspended {
 		p.plan()
 	}
-	d := p.finish()
-	p.admit(&d)
-	return d, nil
+	return p.finish(), nil
 }
 
 func newDecidePass(in allocInputs) *decidePass {
@@ -262,21 +239,13 @@ func newDecidePass(in allocInputs) *decidePass {
 			EnvGen:     in.EnvGen,
 			DecisionAt: in.Now,
 			Entries:    make(map[rowKey]*selectionEntry),
-			Identities: make(map[string]identityVerdict),
 		},
 		none:     make(map[rowKey]string),
 		byID:     make(map[string]rowKey),
-		losers:   make(map[rowKey]bool),
+		index:    newPassIndex(),
 		standIns: make(map[string]string),
-		bound:    make(map[string]string),
 		desired:  make(map[string]TemplateParams),
 		selected: make(map[rowKey]*selection),
-		roots:    make(map[string]bool),
-	}
-	if in.Census == nil {
-		// No census is not an empty city: nothing is created from it.
-		p.noCensus = true
-		p.in.Census = &sessionCensus{Rows: make(map[rowKey]censusRow)}
 	}
 	if c := p.in.Census; len(c.Legs) > 0 {
 		p.sessionsLeg = c.Legs[0].Ref
@@ -286,11 +255,11 @@ func newDecidePass(in allocInputs) *decidePass {
 }
 
 // prepare is steps 1-3 and 9: every census row's entry and class, the
-// identity verdicts, the rows the pass decides from, and the partial
+// canonical named rows, the rows the pass decides from, and the partial
 // causes. A suspended city runs it too, so its Keep conversions see them.
 func (p *decidePass) prepare() {
 	p.classifyRows()
-	p.identityVerdicts()
+	p.identityDuplicates()
 	p.selectDecidable()
 	p.partials()
 }
@@ -310,10 +279,12 @@ func (p *decidePass) finish() allocDecision {
 // classifyRows is step 2: every census row gets an entry, and the rows the
 // allocator does not manage are set aside with legacy's predicates. They
 // keep the slots and names legacy gives them (fail-closed): every one stays
-// in occupancy. A pending or stale create is a rollback candidate only when
-// its own runtime is absent, absent-unconfirmed or a name another row
-// holds. Unknown liveness keeps it managed, and so does a dead pane: legacy's
-// IsRunning reads a corpse as not running, but v2's start path recycles it.
+// in occupancy. A pending create (one holding pending_create_claim) is a
+// rollback candidate only when its own runtime is absent, absent-unconfirmed
+// or a name another row holds. Unknown liveness keeps it managed, and so does
+// a dead pane: legacy's IsRunning reads a corpse as not running, but v2's
+// start path recycles it. A creating row with no claim is never one (v5 C3,
+// B5): it stays managed and reusable, as legacy's is, and A6 heals it.
 // Any other row whose name another bead's runtime holds is None (C11).
 func (p *decidePass) classifyRows() {
 	c := p.in.Census
@@ -327,6 +298,9 @@ func (p *decidePass) classifyRows() {
 		keys = append(keys, k)
 	}
 	sortRowKeys(keys)
+	// An Info is kilobytes: size the row lists once.
+	p.occupancy = slices.Grow(p.occupancy, len(keys))
+	p.managed = slices.Grow(p.managed, len(keys))
 	for _, k := range keys {
 		row := c.Rows[k]
 		template := resolvedSessionTemplateInfo(row.Info, p.cfg)
@@ -334,7 +308,7 @@ func (p *decidePass) classifyRows() {
 			Key:      k,
 			Basis:    rowBasis{Incarnation: row.Incarnation, InstanceToken: row.InstanceToken},
 			Template: template,
-			Endpoint: endpointKeyForAgent(p.cfg, findAgentByTemplate(p.cfg, template), row.Info),
+			Endpoint: endpointKeyForAgent(p.cfg, p.agentByTemplate(template), row.Info),
 		}
 		o, observed := p.obs[k]
 		if observed {
@@ -348,7 +322,7 @@ func (p *decidePass) classifyRows() {
 		}
 		p.occupancy = append(p.occupancy, row.Info)
 		info := row.Info
-		notRunning := observed && (o.Liveness == livenessAbsent || o.Liveness == livenessAbsentUnconfirmed || o.Liveness == livenessOccupied)
+		notRunning := observed && (o.Liveness == livenessGone || o.Liveness == livenessOccupied)
 		// A guarded endpoint the pass has no view of holds (fail closed).
 		ep, viewed := p.in.Endpoints[e.Endpoint]
 		endpointHolds := e.Endpoint != "" && (!viewed || ep.HoldsPendingCreate)
@@ -362,8 +336,6 @@ func (p *decidePass) classifyRows() {
 		case notRunning && info.PendingCreateClaim && pendingCreateLeaseExpiredForRollbackInfo(info, clk, startupTimeout) &&
 			!endpointHolds:
 			p.none[k] = reasonRollbackCandidate
-		case notRunning && !info.PendingCreateClaim && staleCreatingStateInfo(info, clk) && !pendingCreateStartInFlightInfo(info, clk, startupTimeout):
-			p.none[k] = reasonRollbackCandidate
 		case o.Liveness == livenessOccupied:
 			p.none[k] = reasonNameOccupied
 		default:
@@ -373,94 +345,78 @@ func (p *decidePass) classifyRows() {
 	}
 }
 
-// identityVerdicts is step 9 (C2.13): open configured named rows grouped by
-// identity, the winner by legacy's rule, the others losers whose retire P4.4
-// executes. A partial read retires nothing: a missing leg may hold the true
-// winner.
-func (p *decidePass) identityVerdicts() {
-	byIdentity := make(map[string][]session.Info)
-	for _, info := range p.managed {
-		if !isNamedSessionInfo(info) || !session.NamedSessionInfoContinuityEligible(info) {
-			continue
-		}
+// identityDuplicates is step 9 (C2.13): among the open configured named rows
+// of one identity, legacy's rule picks the canonical row (SESS-012) from the
+// managed rows, and every other managed row is None(identity-duplicate),
+// traced. An identity with more than one row, census-only rows on other legs
+// included, raises one alert. Nothing is retired (PAR-RETIRE): C11 refuses
+// duplicates at boot.
+func (p *decidePass) identityDuplicates() {
+	canonical := make(map[string]rowKey)
+	rows := make(map[string][]rowKey)
+	keys := slices.Collect(maps.Keys(p.in.Census.Rows))
+	sortRowKeys(keys)
+	for _, k := range keys {
+		info := p.in.Census.Rows[k].Info
+		mk, managed := p.byID[info.ID]
+		managed = managed && mk == k
 		identity := namedSessionIdentityInfo(info)
-		if identity == "" {
+		if (!managed && p.none[k] != reasonCensusOnly) || !isNamedSessionInfo(info) ||
+			!session.NamedSessionInfoContinuityEligible(info) || identity == "" {
 			continue
 		}
-		if _, ok := findNamedSessionSpec(p.cfg, p.in.CityName, identity); !ok {
+		spec, ok := findNamedSessionSpec(p.cfg, p.in.CityName, identity)
+		if !ok {
 			continue
 		}
-		byIdentity[identity] = append(byIdentity[identity], info)
+		rows[identity] = append(rows[identity], k)
+		if c, seen := canonical[identity]; managed && (!seen || namedSessionWinsCanonicalRepairInfo(info, p.in.Census.Rows[c].Info, spec.SessionName)) {
+			canonical[identity] = k
+		}
 	}
-	retire := !p.censusIncomplete() && !p.in.Demand.StorePartial
-	for _, identity := range slices.Sorted(maps.Keys(byIdentity)) {
-		rows := byIdentity[identity]
-		spec, _ := findNamedSessionSpec(p.cfg, p.in.CityName, identity)
-		winner := rows[0]
-		for _, info := range rows[1:] {
-			if namedSessionWinsCanonicalRepairInfo(info, winner, spec.SessionName) {
-				winner = info
+	for _, identity := range slices.Sorted(maps.Keys(rows)) {
+		c, hasCanonical := canonical[identity]
+		var dups []string
+		for _, k := range rows[identity] {
+			if hasCanonical && k == c {
+				p.snap.Entries[k].Identity = &identityView{Identity: identity, Canonical: true}
+				continue
+			}
+			dups = append(dups, k.Leg+"/"+k.ID)
+			if p.none[k] == "" {
+				e := p.snap.Entries[k]
+				e.Identity = &identityView{Identity: identity}
+				p.none[k] = reasonIdentityDuplicate
+				p.trace = append(p.trace, allocTraceRecord{Template: e.Template, Instance: identity, Key: k, Reason: reasonIdentityDuplicate})
 			}
 		}
-		canonical := p.byID[winner.ID]
-		v := identityVerdict{Canonical: &canonical}
-		if retire {
-			for _, info := range rows {
-				if info.ID != winner.ID {
-					v.Losers = append(v.Losers, p.byID[info.ID])
-				}
+		if len(rows[identity]) > 1 {
+			canonicalID := "none"
+			if hasCanonical {
+				canonicalID = c.Leg + "/" + c.ID
 			}
-		}
-		h := fnv.New64a()
-		_, _ = fmt.Fprintf(h, "%s\x00%s/%s", identity, canonical.Leg, canonical.ID)
-		for _, l := range v.Losers {
-			_, _ = fmt.Fprintf(h, "\x00%s/%s", l.Leg, l.ID)
-		}
-		v.VerdictID = strconv.FormatUint(h.Sum64(), 16)
-		p.snap.Identities[identity] = v
-		for _, info := range rows {
-			k := p.byID[info.ID]
-			view := &identityView{Identity: identity, Canonical: k == canonical, VerdictID: v.VerdictID}
-			if slices.Contains(v.Losers, k) {
-				view.Loser = true
-				p.losers[k] = true
-			}
-			p.snap.Entries[k].Identity = view
+			p.alerts = append(p.alerts, fmt.Sprintf("allocator: named identity %s has %d open rows: canonical %s, duplicates %s (C2.13; none retired)",
+				identity, len(rows[identity]), canonicalID, strings.Join(dups, ", ")))
 		}
 	}
 }
 
 func (p *decidePass) selectDecidable() {
+	p.decidable = slices.Grow(p.decidable, len(p.managed))
 	for _, info := range p.managed {
-		k := p.byID[info.ID]
-		if p.losers[k] {
-			continue
+		if _, none := p.none[p.byID[info.ID]]; !none {
+			p.decidable = append(p.decidable, info)
 		}
-		p.decidable = append(p.decidable, info)
 	}
-	p.decidable = p.withGrantSupply(p.decidable)
 }
 
-// partials is step 3: the global and leg causes, each with legacy's effect.
-// A global cause makes the snapshot partial (retain everything); census
-// incompleteness also refuses every fresh create. A stale leg keeps its
-// rows. The demand's template causes join in step 4.
+// partials is step 3: the global cause, with legacy's effect. A partial
+// demand or census read makes the snapshot partial (retain everything); it
+// refuses no create. The demand's template causes join in step 4.
 func (p *decidePass) partials() {
-	ps := &p.snap.Partial
-	if p.censusIncomplete() {
-		ps.Global = append(ps.Global, causeCensusIncomplete)
-	}
-	if p.in.Demand.StorePartial {
-		ps.Global = append(ps.Global, causeStoreQueryPartial)
-	}
-	if len(ps.Global) > 0 {
+	if p.storePartial() {
+		p.snap.Partial.Global = append(p.snap.Partial.Global, causeStoreQueryPartial)
 		p.snap.Mode = modePartial
-	}
-	for leg := range p.in.Census.StaleLegs() {
-		if ps.Legs == nil {
-			ps.Legs = make(map[string][]string)
-		}
-		ps.Legs[leg] = []string{causeLegStale}
 	}
 }
 
@@ -476,10 +432,6 @@ func (p *decidePass) suspended() {
 	for k, e := range p.snap.Entries {
 		if reason, ok := p.none[k]; ok {
 			e.Desired, e.Reason = desireNone, reason
-			continue
-		}
-		if p.losers[k] {
-			e.Desired, e.Reason = desireNone, reasonIdentityLoser
 			continue
 		}
 		info := p.in.Census.Rows[k].Info
@@ -549,6 +501,9 @@ func (p *decidePass) awake() map[string]AwakeDecision {
 	}
 	input := newAwakeInputFromSnapshot(p.cfg, agentSuspended, infos, p.poolDesired, p.named.workReady,
 		p.named.routedDemand, nil, p.in.ReadyWaits, work, readyAssignedFlagsForBeads(p.in.Demand.ReadyAssigned, work, workRefs), p.in.Now)
+	if p.index != nil {
+		input.workIndex = newAwakeWorkIndex(input.WorkBeads)
+	}
 	for _, info := range infos {
 		o := p.obs[p.byID[info.ID]]
 		// Unknown liveness reads running, and an uncertain attach on a live
@@ -580,31 +535,6 @@ func (p *decidePass) awake() map[string]AwakeDecision {
 		}
 	}
 	return decisions
-}
-
-// withGrantSupply projects each row an issued or committed grant stands for
-// as creating: supply is the census's active and creating rows plus those
-// grants (POOL-070, C5.13), so a start whose PreWake the census does not
-// show yet keeps its scaled slot and is not planned again as a create.
-func (p *decidePass) withGrantSupply(infos []session.Info) []session.Info {
-	var out []session.Info
-	for _, e := range p.in.Ledger {
-		if e.Kind != kindGrant || (e.State != ledgerIssued && e.State != ledgerCommitted) {
-			continue
-		}
-		for i, info := range infos {
-			if p.byID[info.ID] == e.Key && info.MetadataState != string(session.StateActive) {
-				if out == nil {
-					out = slices.Clone(infos)
-				}
-				out[i].MetadataState = string(session.StateCreating)
-			}
-		}
-	}
-	if out == nil {
-		return infos
-	}
-	return out
 }
 
 // configSleepSuppressed is stage 6b (SESS-585/586/652, AM3): legacy's
@@ -648,10 +578,6 @@ func (p *decidePass) classify(decisions map[string]AwakeDecision) {
 			e.Desired, e.Reason = desireNone, reason
 			continue
 		}
-		if p.losers[k] {
-			e.Desired, e.Reason = desireNone, reasonIdentityLoser
-			continue
-		}
 		info := p.in.Census.Rows[k].Info
 		sel := p.selected[k]
 		e.InDesired = sel != nil
@@ -667,7 +593,6 @@ func (p *decidePass) classify(decisions map[string]AwakeDecision) {
 		eval := awakeSetToWakeEvals(map[string]AwakeDecision{info.SessionNameMetadata: d},
 			[]AwakeSessionBead{{ID: info.ID, SessionName: info.SessionNameMetadata}})[info.ID]
 		e.WakeReasons = eval.Reasons
-		e.DemandClass = demandClassOf(d)
 		switch {
 		case e.InDesired && d.ShouldWake:
 			e.Desired, e.Reason = desireWake, d.Reason
@@ -705,7 +630,7 @@ func (p *decidePass) floors() {
 		byTemplate[template] = append(byTemplate[template], k)
 	}
 	for template, keys := range byTemplate {
-		agent := findAgentByTemplate(p.cfg, template)
+		agent := p.agentByTemplate(template)
 		if agent == nil {
 			continue
 		}
@@ -735,28 +660,28 @@ func (p *decidePass) decision() allocDecision {
 	return allocDecision{
 		Snapshot:        p.snap,
 		Plans:           p.plans,
-		Planning:        slices.Clone(p.occupancy),
+		Planning:        slices.Clip(p.occupancy), // the pass is done with it
 		ReadyRouted:     p.merged.ReadyUnassignedRouted,
 		ReadyRoutedRefs: p.merged.ReadyUnassignedRoutedRefs,
 		Trace:           p.trace,
+		Alerts:          p.alerts,
 	}
 }
 
-// censusIncomplete reports a census with a leg that has no whole read
-// within its bound (POOL-047).
-func (p *decidePass) censusIncomplete() bool {
-	return p.noCensus || p.in.Census.Incomplete()
+// storePartial reports a partial demand or census read: what it returned is
+// kept, so nothing shrinks.
+func (p *decidePass) storePartial() bool {
+	return p.in.Demand.StorePartial || p.in.Census.Partial()
 }
 
 // markTemplate records a template partial cause.
-func (p *decidePass) markTemplate(template string, retain, blockCreate bool, cause string) {
+func (p *decidePass) markTemplate(template string, retain bool, cause string) {
 	ps := &p.snap.Partial
 	if ps.Templates == nil {
 		ps.Templates = make(map[string]templatePartial)
 	}
 	tp := ps.Templates[template]
 	tp.Retain = tp.Retain || retain
-	tp.BlockCreate = tp.BlockCreate || blockCreate
 	if !slices.Contains(tp.Causes, cause) {
 		tp.Causes = append(tp.Causes, cause)
 	}
@@ -780,34 +705,8 @@ func (p *decidePass) retains(template string, info session.Info) bool {
 // agentSuspended reports a configured template whose agent or rig is
 // suspended: its undesired rows drain as suspended, not orphaned.
 func (p *decidePass) agentSuspended(template string) bool {
-	agent := findAgentByTemplate(p.cfg, template)
+	agent := p.agentByTemplate(template)
 	return agent != nil && (agent.Suspended || agentInSuspendedRig(p.in.CityPath, agent, p.cfg.Rigs, p.in.SuspendedRigPaths))
-}
-
-// demandClassOf is C2.5: the class of the winning wake reason.
-func demandClassOf(d AwakeDecision) string {
-	if !d.ShouldWake {
-		return "none"
-	}
-	switch {
-	case d.Reason == "assigned-work":
-		return "assigned-work"
-	case d.Reason == "routed-demand" || strings.HasPrefix(d.Reason, "scaled:"):
-		return "routed-demand"
-	case d.Reason == "named-demand" || d.Reason == "work-query":
-		return "named-demand"
-	case d.Reason == "min-active":
-		return "min-active"
-	case d.Reason == "named-always" || d.Reason == "explicit-wake" || d.Reason == "pin" || d.Reason == "manual":
-		return "config"
-	case d.Reason == "pending-create" || d.Reason == "reset-pending":
-		return "lifecycle"
-	case d.Reason == "attached" || d.Reason == "pending":
-		return "human"
-	case d.Reason == "wait-ready":
-		return "wait"
-	}
-	return "none"
 }
 
 // sortRowKeys orders keys by leg, then bead ID.

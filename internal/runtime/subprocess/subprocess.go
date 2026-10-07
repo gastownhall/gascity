@@ -47,8 +47,9 @@ type Provider struct {
 }
 
 type providerOps struct {
-	start func(*exec.Cmd) error
-	dial  func(network, addr string, timeout time.Duration) (net.Conn, error)
+	start  func(*exec.Cmd) error
+	listen func(network, addr string) (net.Listener, error)
+	dial   func(network, addr string, timeout time.Duration) (net.Conn, error)
 }
 
 const (
@@ -108,8 +109,9 @@ func newProvider(dir string) *Provider {
 		procs:    make(map[string]*sessionConn),
 		workDirs: make(map[string]string),
 		ops: providerOps{
-			start: (*exec.Cmd).Start,
-			dial:  net.DialTimeout,
+			start:  (*exec.Cmd).Start,
+			listen: net.Listen,
+			dial:   net.DialTimeout,
 		},
 	}
 }
@@ -207,6 +209,15 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	}
 	_ = nullFile.Close()
 
+	// Seed the identity sidecar before the control socket exists, so no
+	// reader can see a live socket that carries no identity.
+	if err := p.persistStartMetadata(name, cfg.Env); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		clearWorkDir()
+		return fmt.Errorf("storing metadata for %q: %w", name, err)
+	}
+
 	// Create control socket for cross-process discovery.
 	done := make(chan struct{})
 	lis, err := p.startControlSocket(name, cmd, done, socketDir, euid)
@@ -214,16 +225,9 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		// Socket creation failed — kill the process and bail.
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
+		p.clearSessionMeta(name)
 		clearWorkDir()
 		return fmt.Errorf("creating control socket for %q: %w", name, err)
-	}
-	if err := p.persistStartMetadata(name, cfg.Env); err != nil {
-		lis.Close() //nolint:errcheck
-		_ = p.removeSocketArtifactsAt(name, socketDir, euid)
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		clearWorkDir()
-		return fmt.Errorf("storing metadata for %q: %w", name, err)
 	}
 
 	go func() {
@@ -425,6 +429,10 @@ func (p *Provider) SetMeta(name, key, value string) error {
 	}
 	return runtime.WritePrivateFile(p.metaPath(name, key), []byte(value))
 }
+
+// LocalIdentitySidecar implements [runtime.IdentitySidecarProvider]: GetMeta
+// reads the session's local sidecar file.
+func (p *Provider) LocalIdentitySidecar() bool { return true }
 
 // GetMeta retrieves a metadata value from a sidecar file.
 // Returns ("", nil) if the key is not set.
@@ -740,7 +748,7 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 	if err := os.WriteFile(namePath, []byte(name), 0o644); err != nil {
 		return nil, err
 	}
-	lis, err := net.Listen("unix", sp)
+	lis, err := p.ops.listen("unix", sp)
 	if err != nil {
 		_ = os.Remove(namePath)
 		return nil, err

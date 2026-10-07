@@ -34,6 +34,9 @@ type CachingStore struct {
 	// cache applies, in place of idPrefix (WithEventIDPrefixes).
 	eventPrefixes []string
 	epoch         uint64 // names this instance in every CacheRevision it issues
+	// reconcileGate, when set, is asked before each periodic reconcile; a
+	// false answer skips that cycle (WithReconcileGate).
+	reconcileGate func() bool
 
 	mu           sync.RWMutex
 	beads        map[string]Bead
@@ -87,6 +90,17 @@ type CachingStore struct {
 	// store-wide degrade latch is not enough and why "IsBlocked == nil" is not
 	// the same question (ga-cfhgr).
 	readyProjectionLost map[string]struct{}
+
+	// unannouncedCloses holds rows this cache installed as closed over a cached
+	// row that was not closed, on a path that did not itself announce the
+	// transition: a live list, a dirty-row read, or an event patch observing a
+	// close another process made (bd close, gc bd close). The next notification
+	// drains them as bead.closed. Without it the reconcile pass later found an
+	// already-closed row and evicted it silently, so the close was never
+	// announced at all (gastownhall/gascity#6860, #2546). hasUnannouncedCloses
+	// mirrors len(unannouncedCloses) > 0 so the drain costs no lock when idle.
+	unannouncedCloses    map[string]Bead
+	hasUnannouncedCloses atomic.Bool
 
 	reconciling    atomic.Bool
 	syncFailures   int
@@ -472,6 +486,18 @@ func WithEventIDPrefixes(prefixes ...string) CachingStoreOption {
 	}
 }
 
+// WithReconcileGate makes the periodic reconcile loop ask allowed before each
+// cycle and skip the cycle when it answers false. The loop keeps running, so
+// the cache resumes reconciling as soon as allowed answers true again. A
+// caller whose backing store must not be touched for a while (its scope is
+// quiescent) uses this to stop the loop's full scans without rebuilding the
+// cache.
+func WithReconcileGate(allowed func() bool) CachingStoreOption {
+	return func(c *CachingStore) {
+		c.reconcileGate = allowed
+	}
+}
+
 // NewCachingStoreForTest wraps any Store for testing without production prefix
 // validation. It keeps the legacy 3-param onChange (tests do not exercise the
 // typed correlation fields); adaptLegacyOnChange bridges it to production form.
@@ -506,6 +532,12 @@ func (c *CachingStore) ReconcileNowForTest() {
 		c.runReconciliation()
 		c.reconciling.Store(false)
 	}
+}
+
+// ReconcileIfDueForTest runs one periodic reconcile-loop step now: the cycle
+// runs only if one is due and the reconcile gate (WithReconcileGate) allows it.
+func (c *CachingStore) ReconcileIfDueForTest() {
+	c.reconcileIfDue(time.Now())
 }
 
 // SetPrimeRetryDelayForTest overrides the inter-attempt backoff Prime
@@ -755,6 +787,11 @@ type absorbOpts struct {
 	seqMode    absorbSeqMode
 	readyMode  absorbReadyMode
 	clearDirty bool
+	// closeAnnounced says the caller owns the bead.closed announcement for a
+	// closed row it installs: it emits bead.closed itself, or the row came from
+	// an event already on the bus. Every other absorb that closes a cached row
+	// queues the close for the next notification (see unannouncedCloses).
+	closeAnnounced bool
 }
 
 // absorbFreshLocked installs a fresh row for id per opts. It is the only code
@@ -768,8 +805,10 @@ func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, op
 		opts.depsMode = depsFromFields
 	}
 	c.advanceObservationLocked()
+	previous, hadPrevious := c.beads[id]
 	bead = c.absorbReadyProjectionLocked(id, bead, opts)
 	c.beads[id] = cloneBead(bead)
+	c.trackCloseTransitionLocked(id, previous, hadPrevious, bead, opts.closeAnnounced)
 	switch opts.depsMode {
 	case depsExplicit:
 		c.deps[id] = cloneDeps(opts.deps)
@@ -1049,6 +1088,9 @@ func (c *CachingStore) cacheServableLocked() bool {
 // non-NotFound error, the cache is not servable, or residual dirty churn
 // survived the bounded retry. No backing I/O happens under c.mu (I7).
 func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppressed map[string]struct{})) error {
+	// Deferred so it runs after every unlock below: a dirty-row refresh can be
+	// the first reader to see a close made by another process.
+	defer c.announceUnannouncedCloses()
 	suppressed := make(map[string]struct{})
 	for pass := 0; pass < 2; pass++ {
 		c.mu.RLock()

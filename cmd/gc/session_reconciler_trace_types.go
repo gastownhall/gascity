@@ -70,7 +70,7 @@ const (
 	TraceSiteOrderDispatch                  TraceSiteCode = "orders.dispatch"
 	TraceSiteRuntimeInventoryPass           TraceSiteCode = "runtime_inventory.pass"
 	TraceSiteRuntimeInventoryOnDeath        TraceSiteCode = "runtime_inventory.on_death"
-	TraceSiteReconcileQueue                 TraceSiteCode = "reconcile.queue"
+	TraceSiteReconcilePass                  TraceSiteCode = "reconcile.pass"
 	TraceSiteV2SessionDecision              TraceSiteCode = "reconcile.session.decision"
 	TraceSitePoolDemandCompute              TraceSiteCode = "pool_desired.compute"
 	TraceSiteSessionSnapshot                TraceSiteCode = "session_snapshot.load"
@@ -172,6 +172,7 @@ const (
 	TraceReasonDrainTimeout           TraceReasonCode = "drain_timeout"
 	TraceReasonStoreQueryPartial      TraceReasonCode = "store_query_partial"
 	TraceReasonNoWakeReason           TraceReasonCode = "no_wake_reason"
+	TraceReasonUndesiredWakeGrace     TraceReasonCode = "undesired_wake_grace"
 	TraceReasonFSPressure             TraceReasonCode = "fs_pressure"
 	TraceReasonResetStalled           TraceReasonCode = "reset_stalled"
 

@@ -58,6 +58,9 @@ func TestDecideIsPure(t *testing.T) {
 	if len(first.Plans) == 0 || len(first.Snapshot.Entries) < 5 {
 		t.Fatalf("the fixture must exercise plans and entries: %s", describeDecision(first))
 	}
+	if e := entryOf(t, first, "gc-5"); e.Desired != desireNone || e.Reason != reasonIdentityDuplicate {
+		t.Fatalf("named duplicate gc-5 = %s/%s, want None(identity-duplicate)", e.Desired, e.Reason)
+	}
 	if _, err := decideAllocation(allocInputs{}); err == nil {
 		t.Fatal("a pass with a zero Now must be refused")
 	}
@@ -101,20 +104,24 @@ func checkPureFiles(t *testing.T, files []string) {
 	}
 }
 
-// decideFiles are the P3-5a and P3-5b files.
-var decideFiles = []string{"allocator_decide.go", "allocator_plan.go", "allocator_snapshot.go", "allocator_grants.go"}
+// decideFiles are the decide's files, A2's realization index, admission,
+// decideRow's arm table and the dirty filter.
+var decideFiles = []string{
+	"allocator_decide.go", "allocator_plan.go", "allocator_snapshot.go", "allocator_index.go", "reconcile_admit.go",
+	"reconcile_session_decide.go", "reconcile_dirty.go",
+}
 
 // purityInputs is a city that exercises every step: pool reuse and plans,
 // named sessions (several planned at once, so plan order is tested), an
-// overlay row, a dependency floor, identity verdicts, a rollback candidate
-// and an unknown-state row.
+// overlay row, a named duplicate, a rollback candidate, an unknown-state
+// row, two start-lease holders of one trigger and a live fence backoff.
 func purityInputs(t *testing.T) allocInputs {
 	t.Helper()
 	cfg := &config.City{
 		Agents: []config.Agent{
-			allocPoolAgent("worker", 4),
+			allocPoolAgent("worker", 7),
 			{Name: "db", MaxActiveSessions: intPtr(2)},
-			{Name: "app", MaxActiveSessions: intPtr(3), DependsOn: []string{"db"}},
+			{Name: "app", MaxActiveSessions: intPtr(3)},
 			{Name: "chat"},
 			{Name: "alpha"},
 			{Name: "beta"},
@@ -139,7 +146,12 @@ func purityInputs(t *testing.T) allocInputs {
 			"configured_named_session", "true", "configured_named_identity", "chat", "configured_named_mode", "always", "generation", "1"),
 		sessionRow("gc-6", "template", "worker", "state", "active", "session_name", "manual-1", "manual_session", "true"),
 		sessionRow("gc-7", "template", "worker", "state", "draining-enterprise", "session_name", "s-gc-7"),
-	).alive("s-gc-1", InventoryAttrs{AttachedKnown: true}).demand("worker", "w-1", "w-2", "w-3", "w-4").demand("app", "w-5")
+		poolRow("gc-8", "worker", 4, "creating", "gc.trigger_bead_id", "w-9", "pending_create_claim", "true",
+			"pending_create_started_at", allocNow.Add(-10*time.Second).Format(time.RFC3339)),
+		poolRow("gc-9", "worker", 5, "creating", "gc.trigger_bead_id", "w-9", "pending_create_claim", "true",
+			"pending_create_started_at", allocNow.Add(-10*time.Second).Format(time.RFC3339)),
+	).alive("s-gc-1", InventoryAttrs{AttachedKnown: true}).demand("worker", "w-1", "w-2", "w-3", "w-4", "w-9").demand("app", "w-5")
+	f.in.Backoff = createRefusal("worker/worker-6", createStageFence, allocNow.Add(time.Minute))
 	return f.inputs()
 }
 

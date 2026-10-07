@@ -49,9 +49,15 @@ a sanctioned bypass of the worker boundary. Do not add others; see
 
 ## Dashboard and API-schema gates
 
-- `make dashboard-ci` passes for any change touching `internal/api/`,
+- `make dashboard-check` passes for any change touching `internal/api/`,
   `internal/api/openapi.json`, `docs/reference/schema/openapi.*`,
-  `internal/api/dashboardspa/`, or generated dashboard types
+  `internal/api/dashboardspa/`, or generated dashboard types. It runs the
+  dashboard's Bazel targets (`//internal/api/dashboardspa/...`, which CI's
+  `bazel test //...` gates on): typecheck, Vitest, the SPA build, and the
+  diff tests that fail when the committed `dist/`, generated API client, or
+  `pnpm-lock.yaml` is stale (`make dashboard-build`,
+  `make dashboard-generate-client`, `make dashboard-lock` fix them)
 - The dashboard starts locally and serves the app for dashboard/API-schema
-  changes; use `npm run preview -- --host 127.0.0.1 --port <port>` from
-  `internal/api/dashboardspa/web` after `make dashboard-ci`
+  changes (a manual step, not a CI gate); use
+  `npm run preview -- --host 127.0.0.1 --port <port>` from
+  `internal/api/dashboardspa/web/frontend` after `make dashboard-build-npm`

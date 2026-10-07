@@ -3014,11 +3014,29 @@ func (s *nativeDoltMemStorage) GetReadyWork(_ context.Context, filter beadslib.W
 }
 
 func (s *nativeDoltMemStorage) AddLabel(_ context.Context, issueID, label, _ string) error {
-	return s.store.Update(issueID, UpdateOpts{Labels: []string{label}})
+	return s.editLabelsKeepingRevision(issueID, UpdateOpts{Labels: []string{label}})
 }
 
 func (s *nativeDoltMemStorage) RemoveLabel(_ context.Context, issueID, label, _ string) error {
-	return s.store.Update(issueID, UpdateOpts{RemoveLabels: []string{label}})
+	return s.editLabelsKeepingRevision(issueID, UpdateOpts{RemoveLabels: []string{label}})
+}
+
+// editLabelsKeepingRevision changes labels without minting a revision, as
+// upstream does: its label writes touch only the label and event tables, never
+// the row's row_lock. A native label CAS must therefore move the version
+// itself (beadmeta.LabelRevisionMetadataKey), and the fast suite sees a CAS
+// that does not.
+func (s *nativeDoltMemStorage) editLabelsKeepingRevision(id string, opts UpdateOpts) error {
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+	i := s.store.indexOfLocked(id)
+	if i < 0 {
+		return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+	}
+	revision := s.store.beads[i].Revision
+	s.store.applyUpdateLocked(i, opts)
+	s.store.beads[i].Revision = revision
+	return nil
 }
 
 func (s *nativeDoltMemStorage) AddDependency(_ context.Context, dep *beadslib.Dependency, _ string) error {

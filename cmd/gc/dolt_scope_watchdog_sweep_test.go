@@ -83,8 +83,9 @@ func (s *procfsSweepScanner) TerminateRuntime(live runtime.LiveRuntime) error { 
 	return nil
 }
 
-// writeFakeProcEntry writes the environ, stat and comm files the Linux scanner
-// reads for one process under a procfs-shaped root.
+// writeFakeProcEntry writes the environ, stat, comm and status files the Linux
+// scanner reads for one process under a procfs-shaped root. The status file
+// names the test's effective UID: the scanner reports only processes it owns.
 func writeFakeProcEntry(t *testing.T, root string, pid, ppid int, comm string, env []string) {
 	t.Helper()
 	dir := filepath.Join(root, strconv.Itoa(pid))
@@ -101,6 +102,11 @@ func writeFakeProcEntry(t *testing.T, root string, pid, ppid int, comm string, e
 	}
 	if err := os.WriteFile(filepath.Join(dir, "comm"), []byte(comm+"\n"), 0o644); err != nil {
 		t.Fatalf("write comm: %v", err)
+	}
+	uid := strconv.Itoa(os.Geteuid())
+	status := "Name:\t" + comm + "\nUid:\t" + uid + "\t" + uid + "\t" + uid + "\t" + uid + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "status"), []byte(status), 0o644); err != nil {
+		t.Fatalf("write status: %v", err)
 	}
 }
 

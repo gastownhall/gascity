@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -646,9 +647,18 @@ func TestNativeDoltliteBeadsTargetRunsTaggedSuite(t *testing.T) {
 
 	cmd := exec.Command("make", "-n", "test-native-doltlite-beads")
 	cmd.Dir = repoRoot
-	out, err := cmd.CombinedOutput()
+	// The Makefile's Linux CGO fallback probes the host's cc and ICU headers
+	// at parse time and prints a line when it fires; off, the dry run is the
+	// recipe alone on any host.
+	cmd.Env = append(os.Environ(), "SYS_USR_CGO_FALLBACK=0")
+	// The recipe is on stdout. stderr carries parse-time noise such as the
+	// Makefile's $(shell go env ...) printing "go: downloading go1.x" on a
+	// fresh remote worker, which is not a command.
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("make -n test-native-doltlite-beads failed: %v\n%s", err, out)
+		t.Fatalf("make -n test-native-doltlite-beads failed: %v\n%s%s", err, out, stderr.Bytes())
 	}
 	command := string(out)
 	if err := validateNativeDoltliteDryRun(command); err != nil {

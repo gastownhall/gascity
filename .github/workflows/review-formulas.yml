@@ -81,6 +81,9 @@ jobs:
           filters: |
             review_formulas:
               - '.github/actions/setup-gascity-ubuntu/**'
+              - '.github/actions/go-mod-download/**'
+              - '.github/scripts/go-mod-download-retry.sh'
+              - '.github/scripts/go-mod-verify-cache.sh'
               - '.github/workflows/nightly.yml'
               - '.github/workflows/review-formulas.yml'
               - 'Makefile'

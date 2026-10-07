@@ -7,8 +7,9 @@
 // Resolution order, per helper:
 //
 //  1. an explicit GC_TEST_REPO_ROOT environment override (debug escape hatch)
-//  2. the bazel runfiles workspace root, whose tree is complete whenever the
-//     test declares //:repo_source_tree in its data
+//  2. the bazel runfiles workspace root, located by //:go.mod in the test's
+//     data; it holds exactly the files the test declares (a package
+//     filegroup, //:repo_go_srcs, //:repo_go_test_srcs, or //:repo_source_tree)
 //  3. the pre-bazel fallback (runtime.Caller arithmetic or a walk up to
 //     go.mod), which is the behavior under plain `go test`
 package bazeltest
@@ -128,7 +129,7 @@ func RepoRoot(t *testing.T) string {
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Fatal("could not locate go.mod (module root); under bazel add //:repo_source_tree to this test's data")
+			t.Fatal("could not locate go.mod (module root); under bazel add //:go.mod and the files the test reads to its data")
 		}
 	}
 }
@@ -256,7 +257,8 @@ func ChdirRepoRoot(t *testing.T) {
 //	if root := bazeltest.OverrideRoot(); root != "" { ... }
 //
 // letting the pre-bazel fallback below it keep serving plain `go test`.
-// Tests using it must declare //:repo_source_tree in their data so the
+// Tests using it must declare //:go.mod plus every file they read in their
+// data (see the repo trees in the root BUILD.bazel) so the
 // runfiles tree is complete on local and remote execution alike.
 func OverrideRoot() string {
 	if root := os.Getenv("GC_TEST_REPO_ROOT"); root != "" {

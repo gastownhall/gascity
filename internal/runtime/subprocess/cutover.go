@@ -25,6 +25,8 @@ var (
 	_ runtime.ProcessTableScanner       = (*seamBackedProvider)(nil)
 	_ runtime.LivenessObserverWithError = (*seamBackedProvider)(nil)
 	_ runtime.ListingAttestation        = (*seamBackedProvider)(nil)
+	_ runtime.IdentitySidecarProvider   = (*seamBackedProvider)(nil)
+	_ runtime.IdentitySidecarProvider   = (*Provider)(nil)
 )
 
 // NewSeamBacked returns a subprocess provider served through the seams, storing
@@ -41,6 +43,10 @@ func seamBack(raw *Provider) *seamBackedProvider {
 	rt, tp := raw.Seams()
 	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}
 }
+
+// LocalIdentitySidecar passes the underlying provider's sidecar declaration
+// through; the seams route GetMeta to the same sidecar.
+func (s *seamBackedProvider) LocalIdentitySidecar() bool { return s.raw.LocalIdentitySidecar() }
 
 // FindRuntimesBySessionID implements [runtime.ProcessTableScanner] (non-seam).
 func (s *seamBackedProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {

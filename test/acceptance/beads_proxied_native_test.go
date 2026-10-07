@@ -65,6 +65,7 @@ type proxiedNativeCity struct {
 func newProxiedNativeCity(t *testing.T, bdPath, doltPath string) *proxiedNativeCity {
 	t.Helper()
 	env, calls := proxiedEnvRecordingBD(t, bdPath, doltPath)
+	env = proxiedNeverIdleEnv(env)
 	city := helpers.NewCity(t, env)
 	c := &proxiedNativeCity{
 		env:    env,
@@ -76,7 +77,7 @@ func newProxiedNativeCity(t *testing.T, bdPath, doltPath string) *proxiedNativeC
 	}
 	t.Cleanup(func() { c.retire(t) })
 	city.InitNoStart("claude")
-	assertProxiedScope(t, c.root, "the lifecycle city")
+	assertProxiedScope(t, c.env, c.root, "the lifecycle city")
 	c.proxyDir = proxiedScopeProxyRoot(t, c.root)
 	return c
 }

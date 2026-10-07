@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -17,40 +18,36 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
-// Create-effect tests run effects against MemStores with a real intent
-// ledger. Each test reserves the create entry the way the allocator does,
-// submits the plan, waits for the executor to drain (wg), then reads the
-// ledger's verdict and the stores. The ledger and the effects read time.Now,
-// so tests under synctest move both with advance.
+// Create-effect tests run effects against MemStores with a recording
+// settler. Each test mints the plan's token the way the planner does at
+// submit, submits the plan, waits for the executor to drain (wg), then reads
+// the effect's one settlement and the stores. The effects read time.Now, so
+// tests under synctest move it with advance.
 
-// createHarness is one executor with a recorded enqueue.
+// createHarness is one executor with a recorded settle.
 type createHarness struct {
-	ledger  *intentLedger
-	backoff *backoffTable
-	x       *createEffects
+	x *createEffects
 
-	mu       sync.Mutex
-	enqueued [][]reconcilekey.Key
+	mu      sync.Mutex
+	tokens  map[string]string
+	settled []createSettlement
 }
 
 func newCreateHarness(t *testing.T, edit func(*createEffectHost)) *createHarness {
 	t.Helper()
-	h := &createHarness{ledger: newIntentLedger(time.Now), backoff: newBackoffTable()}
+	h := &createHarness{tokens: make(map[string]string)}
 	host := createEffectHost{
 		cityPath: t.TempDir(),
 		cityName: "test-city",
-		ledger:   h.ledger,
-		backoff:  h.backoff,
-		enqueue: func(_ string, keys ...reconcilekey.Key) {
+		settle: func(s createSettlement) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
-			h.enqueued = append(h.enqueued, keys)
+			h.settled = append(h.settled, s)
 		},
 		withLocks: func(_ string, _ []string, fn func() error) error { return fn() },
 		verify: func(worktree.Spec) (worktree.Report, error) {
@@ -69,98 +66,123 @@ func newCreateHarness(t *testing.T, edit func(*createEffectHost)) *createHarness
 	return h
 }
 
-// createHarnessRev is the ConfigRev every harness entry is reserved under.
+// createHarnessRev is the ConfigRev every harness plan is decided under.
 const createHarnessRev = "rev-1"
 
-// reserve records create entry id as the allocator would, and returns its
-// pre-minted token.
+// reserve mints create entry id's instance token, as the planner does at
+// submit (S-8), and returns it. submit stamps it on the entry's plans.
 func (h *createHarness) reserve(t *testing.T, id string) string {
 	t.Helper()
 	token := session.NewInstanceToken()
-	if !h.ledger.Reserve(ledgerEntry{
-		ID: id, Kind: kindCreate, Key: rowKey{Leg: "sessions"}, ConfigRev: createHarnessRev,
-		ReservedAt: time.Now(), Marker: ledgerMarker{InstanceToken: token},
-	}) {
-		t.Fatalf("reserve %s refused", id)
-	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.tokens[id] = token
 	return token
+}
+
+// submit stamps each plan without a token with its entry's minted token and
+// createHarnessRev, then submits them.
+func (h *createHarness) submit(pass *createPass, plans ...createPlan) bool {
+	h.mu.Lock()
+	stamped := make([]createPlan, len(plans))
+	for i, p := range plans {
+		if p.Token == "" {
+			p.Token, p.ConfigRev = h.tokens[p.ID], createHarnessRev
+		}
+		stamped[i] = p
+	}
+	h.mu.Unlock()
+	return h.x.submit(pass, stamped...)
 }
 
 // runAll submits plans and waits until every effect returned.
 func (h *createHarness) runAll(t *testing.T, pass *createPass, plans ...createPlan) {
 	t.Helper()
-	if !h.x.submit(pass, plans...) {
+	if !h.submit(pass, plans...) {
 		t.Fatal("submit refused")
 	}
 	h.x.wg.Wait()
 }
 
-// entry returns create entry c1, the entry of every single-plan test.
-func (h *createHarness) entry(t *testing.T) ledgerEntry {
-	t.Helper()
-	e, ok := ledgerEntryOf(h.ledger, "c1")
-	if !ok {
-		t.Fatal("entry c1 left the ledger")
-	}
-	return e
-}
-
-// createBackoffs returns the table's create and named records, by key.
-func (h *createHarness) createBackoffs() map[string]backoffRecord {
-	out := make(map[string]backoffRecord)
-	for k, r := range h.backoff.Snapshot() {
-		if !strings.HasPrefix(k, "work:") {
-			out[k] = r
-		}
-	}
-	return out
-}
-
-// assertNoCreateBackoff fails if any create backoff was recorded.
-func (h *createHarness) assertNoCreateBackoff(t *testing.T) {
-	t.Helper()
-	if got := h.createBackoffs(); len(got) != 0 {
-		t.Fatalf("create backoffs = %+v, want none", got)
-	}
-}
-
-// assertCreateBackoff checks that plan's identity holds a create backoff
-// live on the effect's clock, with cause, under createHarnessRev, and
-// returns it.
-func (h *createHarness) assertCreateBackoff(t *testing.T, plan createPlan, cause string) backoffRecord {
-	t.Helper()
-	key := createBackoffKey(plan.identity().key())
-	r, ok := h.backoff.Snapshot()[key]
-	if !ok || !r.live(h.x.host.now()) || r.Cause != cause || r.Fingerprint != createHarnessRev {
-		t.Fatalf("create backoff for %q = %+v (present %v), want live with cause %q", key, r, ok, cause)
-	}
-	return r
-}
-
-// refusesWork reports whether the table holds a live work record for
-// spec's evidence.
-func (h *createHarness) refusesWork(spec worktree.Spec) bool {
-	r, ok := h.backoff.Snapshot()[workBackoffKey(spec.BeadID)]
-	return ok && r.live(h.x.host.now()) && r.Fingerprint == specFingerprint(spec) && r.Cause == createStageWorktree
-}
-
-func (h *createHarness) enqueues() [][]reconcilekey.Key {
+func (h *createHarness) settlements() []createSettlement {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return append([][]reconcilekey.Key(nil), h.enqueued...)
+	return append([]createSettlement(nil), h.settled...)
 }
 
-// assertFailedNoWrite checks C5.4(2) for create entry c1: a create that
-// wrote nothing clears at the next pass, whatever the census.
+// settlementOf returns create entry id's settlement; an effect settles
+// exactly once (C5.6).
+func (h *createHarness) settlementOf(t *testing.T, id string) createSettlement {
+	t.Helper()
+	var out []createSettlement
+	for _, s := range h.settlements() {
+		if s.ID == id {
+			out = append(out, s)
+		}
+	}
+	if len(out) != 1 {
+		t.Fatalf("settlements of %s = %+v, want exactly one", id, out)
+	}
+	return out[0]
+}
+
+// entry returns create entry c1's settlement, the entry of every
+// single-plan test.
+func (h *createHarness) entry(t *testing.T) createSettlement {
+	t.Helper()
+	return h.settlementOf(t, "c1")
+}
+
+// assertNoRefusal fails if any settlement refuses its identity.
+func (h *createHarness) assertNoRefusal(t *testing.T) {
+	t.Helper()
+	for _, s := range h.settlements() {
+		if s.Stage != "" {
+			t.Fatalf("settlement %+v refuses its identity, want no refusal", s)
+		}
+	}
+}
+
+// assertRefused checks that plan's entry settled refusing its identity with
+// cause under createHarnessRev.
+func (h *createHarness) assertRefused(t *testing.T, plan createPlan, cause string) {
+	t.Helper()
+	s := h.settlementOf(t, plan.ID)
+	if s.Stage != cause || s.Identity != plan.identity().key() || s.ConfigRev != createHarnessRev {
+		t.Fatalf("settlement %+v, want identity %q refused with cause %q under %q", s, plan.identity().key(), cause, createHarnessRev)
+	}
+}
+
+// refusesWork reports whether entry c1's settlement refuses spec's evidence.
+func (h *createHarness) refusesWork(t *testing.T, spec worktree.Spec) bool {
+	t.Helper()
+	w := h.entry(t).Work
+	return w != nil && w.Refused && w.BeadID == spec.BeadID && w.Fingerprint == specFingerprint(spec)
+}
+
+// assertFailedNoWrite checks entry c1 settled a failure without a row, which
+// clears from the in-flight map at its settlement.
 func assertFailedNoWrite(t *testing.T, h *createHarness) {
 	t.Helper()
-	e := h.entry(t)
-	if e.State != ledgerFailed || e.WroteRow {
-		t.Fatalf("entry c1 = state %d wroteRow %v, want failed without a row", e.State, e.WroteRow)
+	s := h.entry(t)
+	if s.Landed || s.Ambiguous || s.Err == nil {
+		t.Fatalf("settlement %+v, want a failure without a row", s)
 	}
-	if got := e.clearVerdict(ledgerCensus{}, time.Now()); got != clearUnwritten {
-		t.Fatalf("entry c1 clear verdict = %d, want clearUnwritten", got)
+	if m := settledCreateEntry(t, s); len(m.view().Entries) != 0 {
+		t.Fatalf("in-flight entries after the settlement = %+v, want none", m.view().Entries)
 	}
+}
+
+// settledCreateEntry is an in-flight map holding s's create entry, recorded
+// at submit with the plan's token and settled by s.
+func settledCreateEntry(t *testing.T, s createSettlement) *inflightMap {
+	t.Helper()
+	m := newInflightMap()
+	if s.Seq = m.add(inflightEntry{Kind: inflightCreate, Token: s.Token, Identity: s.Identity, Leg: "sessions"}); s.Seq == 0 {
+		t.Fatal("add refused")
+	}
+	m.settle(s.settlement())
+	return m
 }
 
 func sessionRows(t *testing.T, store beads.Store) []session.Info {
@@ -180,9 +202,9 @@ func workerCity(maxSessions int) *config.City {
 	}
 }
 
-func workerPlan(cfg *config.City, entryID string, slot int) createPlan {
+func workerPlan(cfg *config.City, id string, slot int) createPlan {
 	_, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(&cfg.Agents[0], slot)
-	return createPlan{EntryID: entryID, Template: cfg.Agents[0].QualifiedName(), QualifiedInstance: qualifiedInstance, Slot: poolSlot}
+	return createPlan{ID: id, Template: cfg.Agents[0].QualifiedName(), QualifiedInstance: qualifiedInstance, Slot: poolSlot}
 }
 
 // aliasQueryFailStore fails the first alias-keyed query, which is the
@@ -239,9 +261,6 @@ func TestCreateEffect_LockedReservationRejectsLateForeignHolder(t *testing.T) {
 	if rows := sessionRows(t, primary); len(rows) != 0 {
 		t.Fatalf("primary rows = %+v, want none beside a late foreign holder", rows)
 	}
-	if got := h.enqueues(); len(got) != 1 || !reflect.DeepEqual(got[0], []reconcilekey.Key{reconcilekey.Allocator()}) {
-		t.Fatalf("enqueues = %v, want one allocator wake", got)
-	}
 }
 
 // Kills: a second generation minted beside an open unconfirmed create of the
@@ -274,6 +293,48 @@ func TestCreateEffect_IdentityLeaseRefusesSecondGeneration(t *testing.T) {
 	}
 }
 
+// Kills removing the planner's identity-lease pre-check without the effect
+// fence covering it (OPTION1 F1, S1-3). The planner now plans a create for an
+// identity a later-leg copy of a pending row still holds; the create effect
+// refuses it under the identifier locks through
+// ensurePoolIdentityNotHeldByOpenRow (errPoolSessionNameUnavailable), so the
+// refusal settles with cause fence, writes nothing, and the next pass
+// advances a slot (F3).
+func TestHeldIdentityRefusedUnderCreateLocks(t *testing.T) {
+	started := ago(time.Minute)
+	canonical := poolRow("gc-1", "worker", 1, "start-pending", "pending_create_claim", "true", "pending_create_started_at", started)
+	relic := poolRow("gc-1", "worker", 1, "start-pending", "pending_create_claim", "true", "pending_create_started_at", started,
+		"agent_name", "worker-2", "pool_slot", "")
+	d := newAllocFixture(t, &config.City{Agents: []config.Agent{allocPoolAgent("worker", 2)}}).
+		sessions(canonical).rigLeg(relic).demand("worker", "w-1", "w-2").decide()
+	if !slices.ContainsFunc(d.Plans, func(p allocPlan) bool { return p.Plan.qualifiedInstance == "worker-2" }) {
+		t.Fatalf("plans %+v trace %v, want a create for worker-2: the lease is the effect's to refuse", d.Plans, d.Trace)
+	}
+
+	store := beads.NewMemStore()
+	cfg := workerCity(2)
+	plan := workerPlan(cfg, "c1", 2)
+	if _, err := store.Create(beads.Bead{
+		Title: plan.QualifiedInstance, Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template": "worker", "agent_name": plan.QualifiedInstance, "pool_managed": "true",
+			"session_name": PoolSessionName("worker", "gc-old"), "state": string(session.StateStartPending), "pending_create_claim": "true",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := newCreateHarness(t, nil)
+	h.reserve(t, "c1")
+
+	h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
+
+	assertFailedNoWrite(t, h)
+	h.assertRefused(t, plan, createStageFence)
+	if rows := sessionRows(t, store); len(rows) != 1 {
+		t.Fatalf("rows = %+v, want only the holder", rows)
+	}
+}
+
 // Kills: alias contract changes. A proven collision creates the row without
 // its public alias (deferred); an alias query that cannot answer is not a
 // proof and fails the create closed.
@@ -299,12 +360,12 @@ func TestCreateEffect_ProvenAliasCollisionCreatesWithoutAlias_QueryErrorFailsClo
 		h.runAll(t, &createPass{cfg: cfg, store: store, planning: []session.Info{holder}}, plan)
 
 		e := h.entry(t)
-		if e.State != ledgerCommitted || e.Marker.RowID == "" {
-			t.Fatalf("entry = %+v, want committed with the new row", e)
+		if !e.Landed || e.RowID == "" {
+			t.Fatalf("settlement = %+v, want landed with the new row", e)
 		}
 		var created session.Info
 		for _, row := range sessionRows(t, store) {
-			if row.ID == e.Marker.RowID {
+			if row.ID == e.RowID {
 				created = row
 			}
 		}
@@ -401,8 +462,8 @@ func TestCreateEffect_NeverProbesProvider(t *testing.T) {
 
 	h.runAll(t, &createPass{cfg: cfg, sp: probePanicProvider{}, store: store}, plan)
 
-	if e := h.entry(t); e.State != ledgerCommitted || e.Marker.RowID == "" {
-		t.Fatalf("entry = %+v, want committed without a provider probe", e)
+	if e := h.entry(t); !e.Landed || e.RowID == "" {
+		t.Fatalf("settlement = %+v, want landed without a provider probe", e)
 	}
 	if rows := sessionRows(t, store); len(rows) != 1 || rows[0].AgentName != "worker" {
 		t.Fatalf("rows = %+v, want the canonical singleton row", rows)
@@ -411,7 +472,8 @@ func TestCreateEffect_NeverProbesProvider(t *testing.T) {
 
 // Kills: starting into an unverified work dir; retrying a bad work item
 // forever (#34, POOL-055, C6.5a). Evidence that fails verification writes
-// nothing and records a work backoff that a bead's new evidence escapes.
+// nothing and settles refusing that evidence, which a bead's new evidence
+// escapes.
 func TestCreateEffect_WorktreeEvidenceFailureNoWriteAndWorkBackoff(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := workerCity(3)
@@ -441,16 +503,16 @@ func TestCreateEffect_WorktreeEvidenceFailureNoWriteAndWorkBackoff(t *testing.T)
 	if !reflect.DeepEqual(verified, []worktree.Spec{spec}) {
 		t.Fatalf("verified = %+v, want exactly the plan's spec", verified)
 	}
-	if !h.refusesWork(spec) {
-		t.Fatal("no work backoff refuses the evidence that failed")
+	if !h.refusesWork(t, spec) {
+		t.Fatal("the settlement does not refuse the evidence that failed")
 	}
 	next := spec
 	next.Generation = "g2"
-	if h.refusesWork(next) {
-		t.Fatal("the work backoff refuses a new generation of the bead's evidence")
+	if h.refusesWork(t, next) {
+		t.Fatal("the settlement refuses a new generation of the bead's evidence")
 	}
-	// The work item is throttled, not the slot: no create backoff.
-	h.assertNoCreateBackoff(t)
+	// The work item is throttled, not the slot: no identity refusal.
+	h.assertNoRefusal(t)
 }
 
 // Kills: a plan-only create written without its verified work dir (P3-1
@@ -475,15 +537,12 @@ func TestCreateEffect_VerifiesPlanOnlyWorktreeSpecAndStampsWorkDir(t *testing.T)
 	h := newCreateHarness(t, func(host *createEffectHost) {
 		host.verify = func(s worktree.Spec) (worktree.Report, error) { return worktree.Report{Path: s.Path}, nil }
 	})
-	stale := spec
-	stale.Generation = "old"
-	h.backoff.Refuse(workBackoffKey(stale.BeadID), time.Now(), time.Time{}, createStageWorktree, specFingerprint(stale))
 	h.reserve(t, "c1")
 
 	h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
 
-	if _, ok := h.backoff.Snapshot()[workBackoffKey(stale.BeadID)]; ok {
-		t.Fatal("a successful verify left the bead's work backoff standing")
+	if w := h.entry(t).Work; w == nil || w.Refused || w.BeadID != "w-1" {
+		t.Fatalf("work verdict = %+v, want w-1 verified, so the planner forgets an earlier refusal", w)
 	}
 
 	rows, err := store.ListByLabel(sessionBeadLabel, 0)
@@ -506,11 +565,11 @@ func (failingCreateStore) Create(beads.Bead) (beads.Bead, error) {
 	return beads.Bead{}, errors.New("connection reset during create")
 }
 
-// Kills: clearing an unproven create (C5.4, C5.15). A landed create commits
-// with its row and pre-minted token; a failure before the write fails with
-// no row; an error from the write itself is ambiguous and commits with the
-// token as its marker, so it clears only through the census: by its marker,
-// or by a sessions-leg read started after it settled (C5.4(3)).
+// Kills: clearing an unproven create (CONTRACT v5 P5). A landed create
+// settles with its row and the plan's token and clears at once; a failure
+// before the write settles with no row; an error from the write itself is
+// ambiguous, so its entry clears only when a census row carries its token,
+// or at the hard bound.
 func TestCreateEffect_CommitsMarkerOrFailsNoWrite_AmbiguousLeavesMarker(t *testing.T) {
 	cfg := workerCity(2)
 
@@ -524,12 +583,14 @@ func TestCreateEffect_CommitsMarkerOrFailsNoWrite_AmbiguousLeavesMarker(t *testi
 
 		e := h.entry(t)
 		rows := sessionRows(t, store)
-		if len(rows) != 1 || e.State != ledgerCommitted || !e.WroteRow ||
-			e.Marker != (ledgerMarker{RowID: rows[0].ID, InstanceToken: token}) || e.Key.ID != rows[0].ID {
-			t.Fatalf("entry = %+v rows = %+v, want committed with the row and the pre-minted token", e, rows)
+		if len(rows) != 1 || !e.Landed || e.Ambiguous || e.RowID != rows[0].ID || e.Token != token {
+			t.Fatalf("settlement = %+v rows = %+v, want landed with the row and the plan's token", e, rows)
+		}
+		if !e.At.Equal(startedAt) {
+			t.Fatalf("settlement At = %v, want the effect's clock %v", e.At, startedAt)
 		}
 		if rows[0].InstanceToken != token {
-			t.Fatalf("row token = %q, want the entry's pre-minted %q", rows[0].InstanceToken, token)
+			t.Fatalf("row token = %q, want the plan's %q", rows[0].InstanceToken, token)
 		}
 		raw, err := store.Get(rows[0].ID)
 		if err != nil {
@@ -538,16 +599,8 @@ func TestCreateEffect_CommitsMarkerOrFailsNoWrite_AmbiguousLeavesMarker(t *testi
 		if got := raw.Metadata["pending_create_started_at"]; got != "2026-10-03T11:00:00Z" {
 			t.Fatalf("pending_create_started_at = %q, want the effect's clock in UTC", got)
 		}
-		if e.Ambiguous || e.clearVerdict(startedCensus(nil, e.SettledAt.Add(time.Second)), time.Now()) != clearKeep {
-			t.Fatal("a committed create cleared before the census showed its row")
-		}
-		census := ledgerCensusOf(map[rowKey]ledgerRow{{Leg: "sessions", ID: rows[0].ID}: {InstanceToken: token}})
-		if got := e.clearVerdict(census, time.Now()); got != clearWritten {
-			t.Fatalf("clear verdict with the row = %d, want clearWritten", got)
-		}
-		want := [][]reconcilekey.Key{{reconcilekey.Allocator(), reconcilekey.Session(rows[0].ID)}}
-		if got := h.enqueues(); !reflect.DeepEqual(got, want) {
-			t.Fatalf("enqueues = %v, want %v", got, want)
+		if m := settledCreateEntry(t, e); len(m.view().Entries) != 0 {
+			t.Fatalf("in-flight entries after a landed create = %+v, want none: the census shows its row", m.view().Entries)
 		}
 	})
 
@@ -555,12 +608,12 @@ func TestCreateEffect_CommitsMarkerOrFailsNoWrite_AmbiguousLeavesMarker(t *testi
 		store := beads.NewMemStore()
 		h := newCreateHarness(t, nil)
 		h.reserve(t, "c1")
-		plan := createPlan{EntryID: "c1", Template: "ghost", QualifiedInstance: "ghost-1", Slot: 1}
+		plan := createPlan{ID: "c1", Template: "ghost", QualifiedInstance: "ghost-1", Slot: 1}
 
 		h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
 
 		assertFailedNoWrite(t, h)
-		h.assertCreateBackoff(t, plan, createStageStalePlan)
+		h.assertRefused(t, plan, createStageStalePlan)
 	})
 
 	t.Run("ambiguous write", func(t *testing.T) {
@@ -570,23 +623,17 @@ func TestCreateEffect_CommitsMarkerOrFailsNoWrite_AmbiguousLeavesMarker(t *testi
 		h.runAll(t, &createPass{cfg: cfg, store: failingCreateStore{Store: beads.NewMemStore()}}, workerPlan(cfg, "c1", 1))
 
 		e := h.entry(t)
-		if e.State != ledgerCommitted || !e.WroteRow || !e.Ambiguous || e.Marker != (ledgerMarker{InstanceToken: token}) {
-			t.Fatalf("entry = %+v, want committed as ambiguous with only the token as its marker", e)
+		if e.Landed || !e.Ambiguous || e.RowID != "" || e.Token != token {
+			t.Fatalf("settlement = %+v, want ambiguous with only the token as its marker", e)
 		}
-		if got := e.clearVerdict(startedCensus(nil, e.SettledAt), time.Now()); got != clearKeep {
-			t.Fatalf("an ambiguous create cleared by a read that started at its settle: %d", got)
+		m := settledCreateEntry(t, e)
+		if got := m.clearVisible(inflightCensus{}, e.At.Add(time.Second)); len(got) != 0 || len(m.view().Entries) != 1 {
+			t.Fatalf("an ambiguous create cleared by a later read without its token: %+v", got)
 		}
-		if got := e.clearVerdict(startedCensus(nil, e.SettledAt.Add(time.Second)), time.Now()); got != clearUnwritten {
-			t.Fatalf("clear verdict after a later read without the token = %d, want clearUnwritten", got)
+		if got := m.clearVisible(inflightCensus{Tokens: map[string]bool{token: true}}, e.At); len(got) != 1 || got[0].HardBound {
+			t.Fatalf("clears with the token's row = %+v, want one by marker", got)
 		}
-		census := ledgerCensusOf(map[rowKey]ledgerRow{{Leg: "sessions", ID: "gc-late"}: {InstanceToken: token}})
-		if got := e.clearVerdict(census, time.Now()); got != clearWritten {
-			t.Fatalf("clear verdict with the token's row = %d, want clearWritten", got)
-		}
-		if got := h.enqueues(); !reflect.DeepEqual(got, [][]reconcilekey.Key{{reconcilekey.Allocator()}}) {
-			t.Fatalf("enqueues = %v, want one allocator wake", got)
-		}
-		h.assertNoCreateBackoff(t)
+		h.assertNoRefusal(t)
 	})
 }
 
@@ -630,7 +677,7 @@ func TestCreateEffect_LockedReadFailureBacksOffFenceRead(t *testing.T) {
 			plan := workerPlan(cfg, "c1", 1)
 			h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
 			assertFailedNoWrite(t, h)
-			h.assertCreateBackoff(t, plan, createStageFenceRead)
+			h.assertRefused(t, plan, createStageFenceRead)
 		})
 	}
 }
@@ -660,34 +707,12 @@ func TestCreateEffect_RefusedWriteFailsNoWriteAndBacksOff(t *testing.T) {
 			plan := workerPlan(cfg, "c1", 1)
 			h.runAll(t, &createPass{cfg: cfg, store: refusingCreateStore{Store: mem, err: err}}, plan)
 			assertFailedNoWrite(t, h)
-			h.assertCreateBackoff(t, plan, createStageFenceRead)
+			h.assertRefused(t, plan, createStageFenceRead)
 			if rows := sessionRows(t, mem); len(rows) != 0 {
 				t.Fatalf("rows = %+v, want none", rows)
 			}
 		})
 	}
-}
-
-// Kills: running an effect whose entry the allocator released first (C5.1):
-// the lost CAS means no effect and no write.
-func TestCreateEffect_ReleasedEntryRunsNoEffect(t *testing.T) {
-	store := beads.NewMemStore()
-	cfg := workerCity(2)
-	h := newCreateHarness(t, nil)
-	h.reserve(t, "c1")
-	if _, ok := h.ledger.Release("c1"); !ok {
-		t.Fatal("release refused")
-	}
-
-	h.runAll(t, &createPass{cfg: cfg, store: store}, workerPlan(cfg, "c1", 1))
-
-	if rows := sessionRows(t, store); len(rows) != 0 {
-		t.Fatalf("rows = %+v, want none for a released entry", rows)
-	}
-	if got := h.enqueues(); len(got) != 0 {
-		t.Fatalf("enqueues = %v, want none", got)
-	}
-	h.assertNoCreateBackoff(t)
 }
 
 // gateLocker parks every effect inside the identifier locks until release,
@@ -735,8 +760,8 @@ func TestCreateEffect_ParallelBoundedAtEight(t *testing.T) {
 		}
 		pass := &createPass{cfg: cfg, store: store}
 
-		h.x.submit(pass, plans[:5]...)
-		h.x.submit(pass, plans[5:]...)
+		h.submit(pass, plans[:5]...)
+		h.submit(pass, plans[5:]...)
 		synctest.Wait()
 		if inside, _ := gate.counts(); inside != createEffectParallelism {
 			t.Fatalf("effects inside the locks = %d, want %d", inside, createEffectParallelism)
@@ -750,16 +775,16 @@ func TestCreateEffect_ParallelBoundedAtEight(t *testing.T) {
 		if rows := sessionRows(t, store); len(rows) != 20 {
 			t.Fatalf("rows = %d, want 20", len(rows))
 		}
-		for _, e := range h.ledger.View() {
-			if e.State != ledgerCommitted {
-				t.Fatalf("entry %s state %d, want every create committed", e.ID, e.State)
+		for _, e := range h.settlements() {
+			if !e.Landed {
+				t.Fatalf("settlement %+v, want every create landed", e)
 			}
 		}
 	})
 }
 
 // Kills: leaked effect goroutines, and plans run after shutdown began (C1.8).
-// Shutdown stops admission, leaves queued plans reserved, and waits for the
+// Shutdown stops admission, drops queued plans unsettled, and waits for the
 // effects in flight; with an expired context it returns without them.
 func TestCreateEffect_JoinedAtShutdown(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -774,7 +799,7 @@ func TestCreateEffect_JoinedAtShutdown(t *testing.T) {
 			plans = append(plans, workerPlan(cfg, id, i))
 		}
 		pass := &createPass{cfg: cfg, store: store}
-		h.x.submit(pass, plans...)
+		h.submit(pass, plans...)
 		synctest.Wait()
 
 		expired, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -791,7 +816,7 @@ func TestCreateEffect_JoinedAtShutdown(t *testing.T) {
 		default:
 		}
 		h.reserve(t, "late")
-		if h.x.submit(pass, workerPlan(cfg, "late", 20)) {
+		if h.submit(pass, workerPlan(cfg, "late", 20)) {
 			t.Fatal("submit accepted a plan after shutdown began")
 		}
 
@@ -799,17 +824,18 @@ func TestCreateEffect_JoinedAtShutdown(t *testing.T) {
 		if err := <-done; err != nil {
 			t.Fatalf("shutdown = %v, want nil once effects finished", err)
 		}
-		states := map[ledgerState]int{}
-		for _, e := range h.ledger.View() {
-			states[e.State]++
+		settled := h.settlements()
+		for _, e := range settled {
+			if !e.Landed {
+				t.Fatalf("settlement %+v, want only the landed effects that were in flight", e)
+			}
 		}
-		if states[ledgerCommitted] != createEffectParallelism || states[ledgerReserved] != 11-createEffectParallelism {
-			t.Fatalf("entry states = %v, want %d committed and the rest still reserved", states, createEffectParallelism)
+		if len(settled) != createEffectParallelism {
+			t.Fatalf("settlements = %d, want %d: plans dropped at shutdown never run", len(settled), createEffectParallelism)
 		}
 		if rows := sessionRows(t, store); len(rows) != createEffectParallelism {
 			t.Fatalf("rows = %d, want %d", len(rows), createEffectParallelism)
 		}
-		h.assertNoCreateBackoff(t) // plans dropped at shutdown were never issued
 	})
 }
 
@@ -1173,117 +1199,55 @@ func closedNameOwner(t *testing.T, store beads.Store, sessionName string) {
 	}
 }
 
-// Kills (AM-N8, S4): a doomed create re-planned at pass rate; a backoff that
-// does not double, is uncapped, clears early or never; a commit that leaves
-// the backoff; a backoff on a lost issue CAS or on an ambiguous write; a
-// failed entry visible to a pass (ledger read before the table) without its
-// backoff; a backoff that survives a ConfigRev change.
-func TestCreateEffect_NoWriteFailureBacksOffIdentity(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		cfg := workerCity(60)
-		cfg.Agents[0].TmuxAlias = "crew"
-		doomed := beads.NewMemStore()
-		closedNameOwner(t, doomed, "crew")
-		h := newCreateHarness(t, nil)
-		attempt := func(id string, store beads.Store) createPlan {
-			t.Helper()
-			h.reserve(t, id)
-			plan := workerPlan(cfg, id, 1)
-			h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
-			return plan
-		}
+// Kills (AM-N8, S4): a doomed create that settles without refusing its
+// identity, so the planner re-plans it at pass rate; a refusal on a landed or
+// an ambiguous create; a parallel failure that settles other than once. The
+// refusal record's doubling, cap and ConfigRev pruning are the table's own
+// (allocator_backoff_test.go). The planner applies a settlement to the
+// in-flight map and the table in one step (C5.12), so no pass can see the
+// failure without its refusal.
+func TestCreateEffect_NoWriteFailureRefusesIdentity(t *testing.T) {
+	cfg := workerCity(60)
+	cfg.Agents[0].TmuxAlias = "crew"
+	doomed := beads.NewMemStore()
+	closedNameOwner(t, doomed, "crew")
+	h := newCreateHarness(t, nil)
+	attempt := func(id string, store beads.Store) createSettlement {
+		t.Helper()
+		h.reserve(t, id)
+		h.runAll(t, &createPass{cfg: cfg, store: store}, workerPlan(cfg, id, 1))
+		return h.settlementOf(t, id)
+	}
+	h.reserve(t, "c1")
+	h.runAll(t, &createPass{cfg: cfg, store: doomed}, workerPlan(cfg, "c1", 1))
+	assertFailedNoWrite(t, h)
+	h.assertRefused(t, workerPlan(cfg, "c1", 1), createStageFence)
+	if s := attempt("ok", beads.NewMemStore()); !s.Landed || s.Stage != "" {
+		t.Fatalf("landed settlement %+v, want landed with no refusal", s)
+	}
+	if s := attempt("ambiguous", failingCreateStore{Store: beads.NewMemStore()}); !s.Ambiguous || s.Stage != "" {
+		t.Fatalf("ambiguous settlement %+v, want ambiguous with no refusal", s)
+	}
 
-		for i, want := range []time.Duration{10, 20, 40, 80, 160, 300, 300} {
-			plan := attempt(fmt.Sprintf("c%d", i), doomed)
-			if e, _ := ledgerEntryOf(h.ledger, plan.EntryID); e.State != ledgerFailed || e.WroteRow {
-				t.Fatalf("attempt %d: entry %+v, want failed without a row", i+1, e)
-			}
-			v := h.assertCreateBackoff(t, plan, createStageFence)
-			if got := time.Until(v.Until); got != want*time.Second || v.Consecutive != i+1 {
-				t.Fatalf("attempt %d: backoff for %v (consecutive %d), want %v (%d)", i+1, got, v.Consecutive, want*time.Second, i+1)
-			}
-			key := createBackoffKey(plan.identity().key())
-			advance(time.Until(v.Until) - time.Nanosecond)
-			if !h.backoff.Snapshot()[key].live(time.Now()) {
-				t.Fatalf("attempt %d: backoff cleared before Until", i+1)
-			}
-			advance(time.Nanosecond)
-			if h.backoff.Snapshot()[key].live(time.Now()) {
-				t.Fatalf("attempt %d: backoff still live at Until", i+1)
-			}
+	// 40 doomed effects fail in parallel; each settles once, refusing its
+	// identity. Slot i's runtime name is crew-i.
+	var plans []createPlan
+	for i := 1; i <= 40; i++ {
+		if i > 1 {
+			closedNameOwner(t, doomed, fmt.Sprintf("crew-%d", i))
 		}
-
-		// A commit for the identity resets its backoff.
-		attempt("ok", beads.NewMemStore())
-		h.assertNoCreateBackoff(t)
-		plan := attempt("again", doomed)
-		if v := h.assertCreateBackoff(t, plan, createStageFence); time.Until(v.Until) != backoffBase || v.Consecutive != 1 {
-			t.Fatalf("after a commit: backoff %+v, want 10s and consecutive 1", v)
-		}
-
-		// A ConfigRev change drops the backoff.
-		h.backoff.Prune(createHarnessRev, ledgerCensus{}, nil)
-		h.assertCreateBackoff(t, plan, createStageFence)
-		h.backoff.Prune("rev-2", ledgerCensus{}, nil)
-		h.assertNoCreateBackoff(t)
-
-		// A lost issue CAS and an ambiguous write record nothing.
-		h.reserve(t, "released")
-		if _, ok := h.ledger.Release("released"); !ok {
-			t.Fatal("release refused")
-		}
-		h.runAll(t, &createPass{cfg: cfg, store: doomed}, workerPlan(cfg, "released", 1))
-		attempt("ambiguous", failingCreateStore{Store: beads.NewMemStore()})
-		h.assertNoCreateBackoff(t)
-
-		// Every failed create a pass can see carries its backoff: 40 doomed
-		// effects fail in parallel while a pass reads the ledger. Slot i's
-		// runtime name is crew-i.
-		var plans []createPlan
-		for i := 1; i <= 40; i++ {
-			if i > 1 {
-				closedNameOwner(t, doomed, fmt.Sprintf("crew-%d", i))
-			}
-			id := fmt.Sprintf("p%02d", i)
-			h.reserve(t, id)
-			plans = append(plans, workerPlan(cfg, id, i))
-		}
-		identities := make(map[string]string, len(plans))
-		for _, p := range plans {
-			identities[p.EntryID] = createBackoffKey(p.identity().key())
-		}
-		stop, observed := make(chan struct{}), make(chan error, 1)
-		go func() {
-			for {
-				entries := h.ledger.View()
-				recs := h.backoff.Snapshot()
-				for _, e := range entries {
-					if key, ok := identities[e.ID]; ok && e.State == ledgerFailed && !recs[key].live(time.Now()) {
-						observed <- fmt.Errorf("entry %s failed without its backoff", e.ID)
-						return
-					}
-				}
-				select {
-				case <-stop:
-					observed <- nil
-					return
-				default:
-				}
-			}
-		}()
-		h.runAll(t, &createPass{cfg: cfg, store: doomed}, plans...)
-		close(stop)
-		if err := <-observed; err != nil {
-			t.Fatal(err)
-		}
-		if got := len(h.createBackoffs()); got != len(plans) {
-			t.Fatalf("create backoffs = %d, want one per doomed identity (%d)", got, len(plans))
-		}
-	})
+		id := fmt.Sprintf("p%02d", i)
+		h.reserve(t, id)
+		plans = append(plans, workerPlan(cfg, id, i))
+	}
+	h.runAll(t, &createPass{cfg: cfg, store: doomed}, plans...)
+	for _, p := range plans {
+		h.assertRefused(t, p, createStageFence)
+	}
 }
 
-// Kills: the plan's own reservation fencing its create (C7.2). The ledger
-// holds the entry's reservation and the pass hands the census rows, so the
+// Kills: the plan's own reservation fencing its create (C7.2). The in-flight
+// map holds the entry's reservation and the pass hands the census rows, so the
 // create commits with its alias. The control shows why createPass.planning
 // must hold census rows only: the plan's own reservation, shaped as a row,
 // refuses the create.
@@ -1301,8 +1265,8 @@ func TestCreateEffect_OwnReservationNeverFencesItself(t *testing.T) {
 	h.runAll(t, &createPass{cfg: cfg, store: store, planning: []session.Info{other}}, plan)
 	e := h.entry(t)
 	rows := sessionRows(t, store)
-	if e.State != ledgerCommitted || len(rows) != 1 || rows[0].Alias != plan.QualifiedInstance {
-		t.Fatalf("entry %+v rows %+v, want committed with alias %q", e, rows, plan.QualifiedInstance)
+	if !e.Landed || len(rows) != 1 || rows[0].Alias != plan.QualifiedInstance {
+		t.Fatalf("settlement %+v rows %+v, want landed with alias %q", e, rows, plan.QualifiedInstance)
 	}
 
 	control := newCreateHarness(t, nil)
@@ -1353,20 +1317,18 @@ func TestCreateEffect_PreMintedRowIDIsTheMarker(t *testing.T) {
 		h := newCreateHarness(t, nil)
 		token := h.reserve(t, "c1")
 		h.runAll(t, &createPass{cfg: cfg, store: store}, workerPlan(cfg, "c1", 1))
-		want := ledgerMarker{RowID: "gc-session-" + token, InstanceToken: token}
-		if e := h.entry(t); e.State != ledgerCommitted || e.Marker != want {
-			t.Fatalf("entry %+v, want committed with marker %+v", e, want)
+		if e := h.entry(t); !e.Landed || e.RowID != "gc-session-"+token || e.Token != token {
+			t.Fatalf("settlement %+v, want landed with row gc-session-%s", e, token)
 		}
 	})
 	t.Run("ambiguous write", func(t *testing.T) {
 		h := newCreateHarness(t, nil)
 		token := h.reserve(t, "c1")
 		h.runAll(t, &createPass{cfg: cfg, store: prefixedFailingCreateStore{newPrefixedMemStore()}}, workerPlan(cfg, "c1", 1))
-		want := ledgerMarker{RowID: "gc-session-" + token, InstanceToken: token}
-		if e := h.entry(t); e.State != ledgerCommitted || !e.WroteRow || e.Marker != want {
-			t.Fatalf("entry %+v, want ambiguous commit with marker %+v", e, want)
+		if e := h.entry(t); !e.Ambiguous || e.RowID != "gc-session-"+token || e.Token != token {
+			t.Fatalf("settlement %+v, want ambiguous with row gc-session-%s", e, token)
 		}
-		h.assertNoCreateBackoff(t)
+		h.assertNoRefusal(t)
 	})
 }
 
@@ -1399,7 +1361,7 @@ func (s setMarkerFailStore) Update(id string, opts beads.UpdateOpts) error {
 }
 
 // Kills: a failure after the row landed (the session_name follow-up of a
-// store that pre-mints no ID) read as no write: a create backoff for a row
+// store that pre-mints no ID) read as no write: a refusal for a row
 // that exists. A refusal class from that follow-up (a store closed after the
 // Create, a not-found) proves only that the follow-up wrote nothing.
 func TestCreateEffect_FailureAfterTheWriteIsAmbiguous(t *testing.T) {
@@ -1418,11 +1380,10 @@ func TestCreateEffect_FailureAfterTheWriteIsAmbiguous(t *testing.T) {
 			if err != nil || len(all) != 1 {
 				t.Fatalf("rows = %+v (%v), want the one row the create wrote", all, err)
 			}
-			want := ledgerMarker{RowID: all[0].ID, InstanceToken: token}
-			if e := h.entry(t); e.State != ledgerCommitted || !e.WroteRow || !e.Ambiguous || e.Marker != want {
-				t.Fatalf("entry %+v, want ambiguous commit with marker %+v", e, want)
+			if e := h.entry(t); !e.Ambiguous || e.RowID != all[0].ID || e.Token != token {
+				t.Fatalf("settlement %+v, want ambiguous with row %s", e, all[0].ID)
 			}
-			h.assertNoCreateBackoff(t)
+			h.assertNoRefusal(t)
 		})
 	}
 }
@@ -1436,74 +1397,34 @@ func TestCreateEffect_UnprovenBusyWriteIsAmbiguous(t *testing.T) {
 	h.reserve(t, "c1")
 	busy := errors.New("bd create: database is locked (5) (SQLITE_BUSY)")
 	h.runAll(t, &createPass{cfg: cfg, store: refusingCreateStore{Store: beads.NewMemStore(), err: busy}}, workerPlan(cfg, "c1", 1))
-	if e := h.entry(t); e.State != ledgerCommitted || !e.Ambiguous {
-		t.Fatalf("entry %+v, want an ambiguous commit", e)
+	if e := h.entry(t); !e.Ambiguous {
+		t.Fatalf("settlement %+v, want ambiguous", e)
 	}
-	h.assertNoCreateBackoff(t)
+	h.assertNoRefusal(t)
 }
 
-// Kills (ME7, and a backoff fingerprinted by anything but the entry): a
-// no-write failure's create backoff under a fingerprint other than the
-// ConfigRev its entry was reserved under. The pass carries no revision, so
-// only the entry's can reach the record, and Prune keeps it exactly while
-// the pass's revision is the entry's.
-func TestCreateEffect_NoWriteBackoffFingerprintIsTheEntryConfigRev(t *testing.T) {
-	cfg := workerCity(60)
-	cfg.Agents[0].TmuxAlias = "crew"
-	doomed := beads.NewMemStore()
-	closedNameOwner(t, doomed, "crew")
-	h := newCreateHarness(t, nil)
-	if !h.ledger.Reserve(ledgerEntry{
-		ID: "c1", Kind: kindCreate, Key: rowKey{Leg: "sessions"}, ConfigRev: "rev-entry",
-		ReservedAt: time.Now(), Marker: ledgerMarker{InstanceToken: session.NewInstanceToken()},
-	}) {
-		t.Fatal("reserve refused")
-	}
-	plan := workerPlan(cfg, "c1", 1)
-	h.runAll(t, &createPass{cfg: cfg, store: doomed}, plan)
-	key := createBackoffKey(plan.identity().key())
-	if r := h.backoff.Snapshot()[key]; r.Fingerprint != "rev-entry" || r.Cause != createStageFence {
-		t.Fatalf("create backoff = %+v, want fence under the entry's ConfigRev rev-entry", r)
-	}
-	h.backoff.Prune("rev-entry", ledgerCensus{}, nil)
-	if _, ok := h.backoff.Snapshot()[key]; !ok {
-		t.Fatal("prune under the entry's ConfigRev dropped its backoff")
-	}
-	h.backoff.Prune("rev-next", ledgerCensus{}, nil)
-	if _, ok := h.backoff.Snapshot()[key]; ok {
-		t.Fatal("the backoff survived a ConfigRev change")
-	}
-}
-
-// Kills (M19, deterministic): the ledger settling a failed create before its
-// backoff is recorded. The ledger reads its clock under its lock at every
-// settle, so the hook sees the table as a pass that reads the ledger first
-// and the table second sees it once the failed entry is visible.
-func TestCreateEffect_BackoffRecordedBeforeTheLedgerSettles(t *testing.T) {
+// Kills (ME7): a refusal fingerprinted by anything but the plan's ConfigRev,
+// the revision the planner decided it under; the planner prunes the record
+// when that revision changes.
+func TestCreateEffect_RefusalCarriesThePlanConfigRev(t *testing.T) {
 	cfg := workerCity(60)
 	cfg.Agents[0].TmuxAlias = "crew"
 	doomed := beads.NewMemStore()
 	closedNameOwner(t, doomed, "crew")
 	h := newCreateHarness(t, nil)
 	plan := workerPlan(cfg, "c1", 1)
-	key := createBackoffKey(plan.identity().key())
-	var atSettle []backoffRecord
-	h.ledger.now = func() time.Time {
-		atSettle = append(atSettle, h.backoff.Snapshot()[key])
-		return time.Now()
-	}
-	h.reserve(t, "c1")
+	plan.Token, plan.ConfigRev = session.NewInstanceToken(), "rev-entry"
 	h.runAll(t, &createPass{cfg: cfg, store: doomed}, plan)
-	if len(atSettle) != 1 || !atSettle[0].live(time.Now()) || atSettle[0].Cause != createStageFence {
-		t.Fatalf("create backoff when the ledger settled = %+v, want the fence record already live", atSettle)
+	if s := h.entry(t); s.ConfigRev != "rev-entry" || s.Stage != createStageFence {
+		t.Fatalf("settlement %+v, want fence under the plan's ConfigRev rev-entry", s)
 	}
 }
 
 // Kills: a panic before the row write settled as ambiguous (an entry held
 // until a later read for a create that wrote nothing); a panic after it
-// settled as no write (a create backoff for a row that exists); the pre-minted row ID
-// lost on the panic path; a panic that skips the settle and strands the
-// entry issued.
+// settled as no write (a refusal for a row that exists); the pre-minted row
+// ID lost on the panic path; a panic that skips the settle and strands the
+// entry running.
 func TestCreateEffect_PanicSettlesByWhetherTheWriteBegan(t *testing.T) {
 	cfg := workerCity(2)
 	t.Run("before the write", func(t *testing.T) {
@@ -1518,7 +1439,7 @@ func TestCreateEffect_PanicSettlesByWhetherTheWriteBegan(t *testing.T) {
 		plan := workerPlan(cfg, "c1", 1)
 		h.runAll(t, &createPass{cfg: cfg, store: aliasPanicStore{Store: store}}, plan)
 		assertFailedNoWrite(t, h)
-		h.assertCreateBackoff(t, plan, createStagePanic)
+		h.assertRefused(t, plan, createStagePanic)
 		if rows := sessionRows(t, store); len(rows) != 0 {
 			t.Fatalf("rows = %+v, want none", rows)
 		}
@@ -1537,13 +1458,13 @@ func TestCreateEffect_PanicSettlesByWhetherTheWriteBegan(t *testing.T) {
 		token := h.reserve(t, "c1")
 		h.runAll(t, &createPass{cfg: cfg, store: store}, workerPlan(cfg, "c1", 1))
 		rowID := "gc-session-" + token
-		if e := h.entry(t); e.State != ledgerCommitted || !e.WroteRow || e.Marker != (ledgerMarker{RowID: rowID, InstanceToken: token}) {
-			t.Fatalf("entry %+v, want ambiguous commit with row %s", e, rowID)
+		if e := h.entry(t); !e.Ambiguous || e.RowID != rowID || e.Token != token {
+			t.Fatalf("settlement %+v, want ambiguous with row %s", e, rowID)
 		}
 		if _, err := store.Get(rowID); err != nil {
 			t.Fatalf("the row the panicking create wrote: %v", err)
 		}
-		h.assertNoCreateBackoff(t)
+		h.assertNoRefusal(t)
 	})
 }
 
@@ -1563,28 +1484,36 @@ type panicWriter struct{}
 
 func (panicWriter) Write([]byte) (int, error) { panic("stderr closed") }
 
-// Kills: a panicking wake or log sink killing the worker before or instead
-// of settling: the entry stays issued, and the executor loses a worker.
+// Kills: a panicking settle or log sink killing the worker: the executor
+// loses a worker, or the process dies.
 func TestCreateEffect_PanickingSinksStillSettle(t *testing.T) {
 	cfg := workerCity(20)
+	panicked := false
 	h := newCreateHarness(t, func(host *createEffectHost) {
-		host.enqueue = func(string, ...reconcilekey.Key) { panic("router stopped") }
+		record := host.settle
+		host.settle = func(s createSettlement) {
+			record(s)
+			if s.ID == "doomed" {
+				panicked = true
+				panic("settlement queue closed")
+			}
+		}
 		host.stderr = panicWriter{}
 	})
 	h.reserve(t, "ok")
 	h.reserve(t, "doomed")
 	pass := &createPass{cfg: cfg, store: beads.NewMemStore()}
-	h.runAll(t, pass, workerPlan(cfg, "ok", 1), createPlan{EntryID: "doomed", Template: "ghost", QualifiedInstance: "ghost-1", Slot: 1})
-	if e, _ := ledgerEntryOf(h.ledger, "ok"); e.State != ledgerCommitted {
-		t.Fatalf("ok: %+v, want committed", e)
+	h.runAll(t, pass, workerPlan(cfg, "ok", 1), createPlan{ID: "doomed", Template: "ghost", QualifiedInstance: "ghost-1", Slot: 1})
+	if e := h.settlementOf(t, "ok"); !e.Landed {
+		t.Fatalf("ok: %+v, want landed", e)
 	}
-	if e, _ := ledgerEntryOf(h.ledger, "doomed"); e.State != ledgerFailed {
-		t.Fatalf("doomed: %+v, want failed", e)
+	if e := h.settlementOf(t, "doomed"); e.Landed || !panicked {
+		t.Fatalf("doomed: %+v (sink panicked %v), want failed through a panicking sink", e, panicked)
 	}
 	h.reserve(t, "next")
 	h.runAll(t, pass, workerPlan(cfg, "next", 2))
-	if e, _ := ledgerEntryOf(h.ledger, "next"); e.State != ledgerCommitted {
-		t.Fatalf("next: %+v, want committed by a live executor", e)
+	if e := h.settlementOf(t, "next"); !e.Landed {
+		t.Fatalf("next: %+v, want landed by a live executor", e)
 	}
 }
 
@@ -1604,8 +1533,8 @@ func TestCreateEffect_WorkersRestartAfterTheQueueDrains(t *testing.T) {
 		}
 		h.runAll(t, pass, plans...)
 		for _, p := range plans {
-			if e, _ := ledgerEntryOf(h.ledger, p.EntryID); e.State != ledgerCommitted {
-				t.Fatalf("round %d: %s = %+v, want committed", round, p.EntryID, e)
+			if e := h.settlementOf(t, p.ID); !e.Landed {
+				t.Fatalf("round %d: %s = %+v, want landed", round, p.ID, e)
 			}
 		}
 	}
@@ -1629,21 +1558,20 @@ func TestCreateEffect_ValidatesTransportWithLookPath(t *testing.T) {
 	plan := workerPlan(cfg, "c1", 1)
 	h.runAll(t, &createPass{cfg: cfg, sp: &acpOnlyDesiredStateProvider{Fake: runtime.NewFake()}, store: store}, plan)
 	assertFailedNoWrite(t, h)
-	h.assertCreateBackoff(t, plan, createStagePrepare)
+	h.assertRefused(t, plan, createStagePrepare)
 	if rows := sessionRows(t, store); len(rows) != 0 {
 		t.Fatalf("rows = %+v, want none for an unsupported transport", rows)
 	}
 }
 
 // Kills: identifier locks taken without the city path, which fence this
-// process only (C7.1 tier 2). The executor refuses a host without one, and
-// the effect hands its city path to the real flock, which fails closed.
+// process only (C7.1 tier 2), and an executor whose outcomes reach no one.
+// The executor refuses a host without either, and the effect hands its city
+// path to the real flock, which fails closed.
 func TestCreateEffect_LocksFailClosedWithoutTheCityPath(t *testing.T) {
-	ledger := newIntentLedger(time.Now)
 	for name, host := range map[string]createEffectHost{
-		"no city path": {ledger: ledger, backoff: newBackoffTable()},
-		"no backoff":   {ledger: ledger, cityPath: t.TempDir()},
-		"no ledger":    {backoff: newBackoffTable(), cityPath: t.TempDir()},
+		"no city path": {settle: func(createSettlement) {}},
+		"no settle":    {cityPath: t.TempDir()},
 	} {
 		if _, err := newCreateEffects(host); err == nil {
 			t.Errorf("%s: newCreateEffects accepted the host", name)
@@ -1664,7 +1592,7 @@ func TestCreateEffect_LocksFailClosedWithoutTheCityPath(t *testing.T) {
 	plan := workerPlan(cfg, "c1", 1)
 	h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
 	assertFailedNoWrite(t, h)
-	h.assertCreateBackoff(t, plan, createStageLock)
+	h.assertRefused(t, plan, createStageLock)
 	if rows := sessionRows(t, store); len(rows) != 0 {
 		t.Fatalf("rows = %+v, want none without the city flock", rows)
 	}
@@ -1685,7 +1613,7 @@ func TestCreateEffect_ReCensusSkipsSuspendedRigs(t *testing.T) {
 			h.reserve(t, "c1")
 			rig := &toggleListFailStore{Store: beads.NewMemStore(), fail: true}
 			h.runAll(t, &createPass{cfg: cfg, store: beads.NewMemStore(), rigStores: map[string]beads.Store{"rig": rig}, suspendedRigPaths: suspended}, workerPlan(cfg, "c1", 1))
-			if e := h.entry(t); (e.State == ledgerCommitted) != (suspended != nil) {
+			if e := h.entry(t); e.Landed != (suspended != nil) {
 				t.Fatalf("entry %+v: a %s rig's failing leg decided the create wrongly", e, name)
 			}
 		})
@@ -1699,8 +1627,8 @@ func TestCreateEffect_ReCensusSkipsSuspendedRigs(t *testing.T) {
 func TestCreateEffect_RefusesAPlanConfigDoesNotDerive(t *testing.T) {
 	cfg := workerCity(1) // canonical singleton: instance "worker", pool slot 0
 	for name, plan := range map[string]createPlan{
-		"singleton with a slot":    {EntryID: "c1", Template: "worker", QualifiedInstance: "worker", Slot: 1},
-		"instance of another slot": {EntryID: "c1", Template: "worker", QualifiedInstance: "worker-2", Slot: 0},
+		"singleton with a slot":    {ID: "c1", Template: "worker", QualifiedInstance: "worker", Slot: 1},
+		"instance of another slot": {ID: "c1", Template: "worker", QualifiedInstance: "worker-2", Slot: 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			store := beads.NewMemStore()
@@ -1708,7 +1636,7 @@ func TestCreateEffect_RefusesAPlanConfigDoesNotDerive(t *testing.T) {
 			h.reserve(t, "c1")
 			h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
 			assertFailedNoWrite(t, h)
-			h.assertCreateBackoff(t, plan, createStageStalePlan)
+			h.assertRefused(t, plan, createStageStalePlan)
 			if rows := sessionRows(t, store); len(rows) != 0 {
 				t.Fatalf("rows = %+v, want none", rows)
 			}
@@ -1731,8 +1659,8 @@ func TestCreateEffect_ConcurrentSameIdentityRealFlocksOneRow(t *testing.T) {
 		}
 		h.runAll(t, &createPass{cfg: cfg, store: store}, plans...)
 		committed := 0
-		for _, e := range h.ledger.View() {
-			if e.State == ledgerCommitted {
+		for _, e := range h.settlements() {
+			if e.Landed {
 				committed++
 			}
 		}
@@ -1763,7 +1691,7 @@ func TestCreateEffect_ParallelTemplatesRealFlocks(t *testing.T) {
 			id := fmt.Sprintf("c-%d-%d", ai, j)
 			h.reserve(t, id)
 			_, qi, ps := poolDesiredRequestIdentity(&cfg.Agents[ai], j)
-			plans = append(plans, createPlan{EntryID: id, Template: cfg.Agents[ai].QualifiedName(), QualifiedInstance: qi, Slot: ps})
+			plans = append(plans, createPlan{ID: id, Template: cfg.Agents[ai].QualifiedName(), QualifiedInstance: qi, Slot: ps})
 		}
 	}
 	pass := &createPass{cfg: cfg, store: store}
@@ -1772,12 +1700,172 @@ func TestCreateEffect_ParallelTemplatesRealFlocks(t *testing.T) {
 		wg.Add(1)
 		go func(k int) {
 			defer wg.Done()
-			h.x.submit(pass, plans[k*4:(k+1)*4]...)
+			h.submit(pass, plans[k*4:(k+1)*4]...)
 		}(k)
 	}
 	wg.Wait()
 	h.x.wg.Wait()
 	if rows := sessionRows(t, store); len(rows) != len(plans) {
 		t.Fatalf("rows = %d, want %d", len(rows), len(plans))
+	}
+}
+
+// Kills an effect goroutine mutating shared planner state (C1.11): the host
+// holds no planner-owned table, and every outcome, a panic included, reaches
+// the planner as exactly one settlement through the settle spy.
+func TestCreateEffectSettlesOnlyByMessage(t *testing.T) {
+	shared := map[reflect.Type]bool{
+		reflect.TypeFor[*backoffTable](): true, reflect.TypeFor[*inflightMap](): true,
+	}
+	host := reflect.TypeFor[createEffectHost]()
+	for i := range host.NumField() {
+		if f := host.Field(i); shared[f.Type] {
+			t.Errorf("createEffectHost.%s is planner state (%v): effects report by settlement only", f.Name, f.Type)
+		}
+	}
+
+	cfg := workerCity(3)
+	cfg.Agents[0].TmuxAlias = "crew"
+	doomed := beads.NewMemStore()
+	closedNameOwner(t, doomed, "crew")
+	h := newCreateHarness(t, nil)
+	for _, id := range []string{"landed", "refused", "panicked"} {
+		h.reserve(t, id)
+	}
+	h.runAll(t, &createPass{cfg: workerCity(3), store: beads.NewMemStore()}, workerPlan(cfg, "landed", 1))
+	h.runAll(t, &createPass{cfg: cfg, store: doomed}, workerPlan(cfg, "refused", 1))
+	h.runAll(t, &createPass{cfg: cfg, store: aliasPanicStore{Store: beads.NewMemStore()}}, workerPlan(cfg, "panicked", 2))
+	if got := len(h.settlements()); got != 3 {
+		t.Fatalf("settlements = %d, want one per effect", got)
+	}
+	if s := h.settlementOf(t, "landed"); !s.Landed || s.Err != nil {
+		t.Fatalf("landed: %+v", s)
+	}
+	if s := h.settlementOf(t, "refused"); s.Stage != createStageFence || s.Err == nil {
+		t.Fatalf("refused: %+v, want a fence refusal", s)
+	}
+	if s := h.settlementOf(t, "panicked"); s.Stage != createStagePanic {
+		t.Fatalf("panicked: %+v, want a panic refusal", s)
+	}
+}
+
+// Kills a create that still takes its token from anywhere but the plan the
+// planner minted it into (S-8): the row and the settlement carry the plan's
+// token, and a plan without one writes nothing rather than minting a token
+// its entry's marker would never match.
+func TestCreateEffectUsesPlanToken(t *testing.T) {
+	cfg := workerCity(2)
+	store := beads.NewMemStore()
+	h := newCreateHarness(t, nil)
+	plan := workerPlan(cfg, "c1", 1)
+	plan.Token, plan.ConfigRev = session.NewInstanceToken(), "rev-plan"
+	h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
+	rows := sessionRows(t, store)
+	if s := h.entry(t); !s.Landed || s.Token != plan.Token || len(rows) != 1 || rows[0].InstanceToken != plan.Token || rows[0].ID != s.RowID {
+		t.Fatalf("settlement %+v rows %+v, want the row written with the plan's token %q", s, rows, plan.Token)
+	}
+
+	tokenless := beads.NewMemStore()
+	bare := newCreateHarness(t, nil)
+	bare.runAll(t, &createPass{cfg: cfg, store: tokenless}, workerPlan(cfg, "c1", 1))
+	if s := bare.entry(t); s.Landed || s.Ambiguous || s.Err == nil {
+		t.Fatalf("settlement %+v, want a failure without a row", s)
+	}
+	if rows := sessionRows(t, tokenless); len(rows) != 0 {
+		t.Fatalf("rows = %+v, want none for a plan without a token", rows)
+	}
+}
+
+// Kills a fence/fence-read misclassification (F3, allocator_create.go's
+// settle): fence moves the planner's request to the next slot, fence-read
+// stalls it. Only a pool create whose locked checks proved its name taken is
+// fence; a locked read failure is fence-read; a named create's locked
+// failure is always fence.
+func TestCreateSettlementFenceVersusFenceRead(t *testing.T) {
+	cfg := workerCity(60)
+	cfg.Agents[0].TmuxAlias = "crew"
+	taken := beads.NewMemStore()
+	closedNameOwner(t, taken, "crew")
+	squatted := beads.NewMemStore()
+	aliasSquatter(t, squatted)
+	for name, tc := range map[string]struct {
+		cfg   *config.City
+		store beads.Store
+		plan  func(*config.City) createPlan
+		want  string
+	}{
+		"pool name taken":         {cfg, taken, func(c *config.City) createPlan { return workerPlan(c, "c1", 1) }, createStageFence},
+		"pool re-census error":    {cfg, &firstListFailStore{Store: beads.NewMemStore()}, func(c *config.City) createPlan { return workerPlan(c, "c1", 1) }, createStageFenceRead},
+		"pool store refused":      {cfg, refusingCreateStore{Store: beads.NewMemStore(), err: beads.ErrStoreClosed}, func(c *config.City) createPlan { return workerPlan(c, "c1", 1) }, createStageFenceRead},
+		"named alias held":        {mayorCity(), squatted, func(c *config.City) createPlan { return namedPlan(t, c, "c1", "mayor") }, createStageFence},
+		"named identity read err": {mayorCity(), namedListFailStore{Store: beads.NewMemStore()}, func(c *config.City) createPlan { return namedPlan(t, c, "c1", "mayor") }, createStageFence},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newCreateHarness(t, nil)
+			h.reserve(t, "c1")
+			plan := tc.plan(tc.cfg)
+			h.runAll(t, &createPass{cfg: tc.cfg, store: tc.store}, plan)
+			assertFailedNoWrite(t, h)
+			h.assertRefused(t, plan, tc.want)
+		})
+	}
+}
+
+// partialLegStore answers every List with its rows and a partial-result
+// error: some entries on the leg could not be read.
+type partialLegStore struct{ beads.Store }
+
+func (s partialLegStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	rows, err := s.Store.List(q)
+	if err != nil {
+		return rows, err
+	}
+	return rows, &beads.PartialResultError{Op: "bd list", Err: errors.New("1 entry failed to parse")}
+}
+
+// Kills a create that trusts a partial leg (C7.2; B1's owed confirmation):
+// the census keeps a partial leg's rows, but the create effect's locked live
+// re-census fails closed on any partial leg, writing nothing (fence-read),
+// for a pool create on a rig leg and a named create on the sessions leg.
+// The control lands with the same stores read completely.
+func TestCreateEffectFenceFailsClosedOnPartialLeg(t *testing.T) {
+	rigCfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "rig", Path: t.TempDir()}},
+		Agents:    []config.Agent{{Name: "worker", Dir: "rig", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+	}
+	for _, partial := range []bool{true, false} {
+		rig := beads.Store(beads.NewMemStore())
+		if partial {
+			rig = partialLegStore{Store: rig}
+		}
+		store := beads.NewMemStore()
+		h := newCreateHarness(t, nil)
+		h.reserve(t, "c1")
+		plan := workerPlan(rigCfg, "c1", 1)
+		h.runAll(t, &createPass{cfg: rigCfg, store: store, rigStores: map[string]beads.Store{"rig": rig}}, plan)
+		if !partial {
+			if s := h.entry(t); !s.Landed {
+				t.Fatalf("control: settlement %+v, want landed", s)
+			}
+			continue
+		}
+		assertFailedNoWrite(t, h)
+		h.assertRefused(t, plan, createStageFenceRead)
+		if rows := sessionRows(t, store); len(rows) != 0 {
+			t.Fatalf("rows = %+v, want none past a partial rig leg", rows)
+		}
+	}
+
+	cfg := mayorCity()
+	mem := beads.NewMemStore()
+	h := newNamedHarness(t, t.TempDir(), nil)
+	h.reserve(t, "c1")
+	plan := namedPlan(t, cfg, "c1", "mayor")
+	h.runAll(t, &createPass{cfg: cfg, store: partialLegStore{Store: mem}}, plan)
+	assertFailedNoWrite(t, h)
+	h.assertRefused(t, plan, createStageFence)
+	if all, err := mem.List(beads.ListQuery{AllowScan: true, IncludeClosed: true}); err != nil || len(all) != 0 {
+		t.Fatalf("rows = %+v (%v), want none past a partial sessions leg", all, err)
 	}
 }

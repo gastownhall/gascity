@@ -6,8 +6,8 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
-	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -17,7 +17,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/workqueue"
 )
 
 // The effect executor's tests (CONTRACT C1.9, P4 spec §3.4), the shared
@@ -46,71 +45,12 @@ func blockingEffect(kind sessionEffectKind, deadline time.Time, release <-chan s
 	}
 }
 
-// Kills: a completion that does not re-run its key (or waits behind the
-// key's backoff), a completion that does not wake the allocator (C1.9,
-// C5.12, MAINT-054), and a failed effect re-run urgently rather than behind a
-// backoff (C1.4b).
-func TestEffectExecutorEnqueuesKeyUrgentAndAllocator(t *testing.T) {
+// Kills: an effect stuck forever behind a hung provider call: the deadline
+// must settle it (failed) and free the key.
+func TestEffectExecutorDeadlineSettlesHungEffect(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		h := newV2HarnessWithRows(t, "a")
-		h.boot(t)
+		settled := make(chan error, 2)
 		k := rowKey{Leg: routerTestLeg, ID: "a"}
-		// Back the key off: its next non-urgent run waits out the backoff.
-		h.rec.setSession(func(workqueue.Item[rowKey], *reconcileEnv) (time.Duration, error) { return 0, errors.New("boom") })
-		h.add("a", workqueue.Reason{Kind: "event"})
-		synctest.Wait()
-		h.rec.setSession(nil)
-		before, passes := len(h.rec.callsFor("a")), len(h.rec.allocatorPasses())
-
-		release, settled := make(chan struct{}), make(chan error, 1)
-		if err := h.rt.exec.submit(k, blockingEffect(effectStart, time.Now().Add(time.Hour), release, false, settled)); err != nil {
-			t.Fatal(err)
-		}
-		close(release)
-		advance(v2AllocatorMinGap)
-		if err := <-settled; err != nil {
-			t.Fatalf("settled with %v", err)
-		}
-		calls := h.rec.callsFor("a")
-		if len(calls) != before+1 || !slices.Contains(calls[len(calls)-1].kinds, v2ReasonEffect) {
-			t.Fatalf("calls %+v, want one more reconcile of a, for the effect, inside its backoff", calls)
-		}
-		var woke bool
-		for _, p := range h.rec.allocatorPasses()[passes:] {
-			woke = woke || slices.Contains(p, v2ReasonEffect)
-		}
-		if !woke {
-			t.Fatalf("allocator passes %v, want one woken by the effect", h.rec.allocatorPasses()[passes:])
-		}
-
-		// A failed effect backs its key off: no reconcile inside the 500ms
-		// (±10%) base backoff, one at its end, counted as a failure.
-		before = len(h.rec.callsFor("a"))
-		failed := sessionEffect{Kind: effectStart, Deadline: time.Now().Add(time.Hour), Run: func(context.Context) error { return errors.New("start failed") }, Settle: func(error) {}}
-		if err := h.rt.exec.submit(k, failed); err != nil {
-			t.Fatal(err)
-		}
-		advance(400 * time.Millisecond)
-		if got := len(h.rec.callsFor("a")); got != before {
-			t.Fatalf("a failed effect re-ran its key inside the backoff: %+v", h.rec.callsFor("a")[before:])
-		}
-		advance(200 * time.Millisecond)
-		calls = h.rec.callsFor("a")
-		if len(calls) != before+1 || calls[before].failures != 1 || !slices.Contains(calls[before].kinds, v2ReasonEffect) {
-			t.Fatalf("calls %+v, want one reconcile at the backoff's end, for the effect, after one failure", calls[before:])
-		}
-	})
-}
-
-// Kills: an issued ledger entry stuck forever behind a hung effect: the
-// deadline must settle it (failed) and free the key.
-func TestEffectExecutorDeadlineSettlesIssuedEntry(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		ledger := newIntentLedger(time.Now)
-		k := rowKey{Leg: routerTestLeg, ID: "a"}
-		if !ledger.Reserve(ledgerEntry{ID: "g1", Kind: kindGrant, Key: k, ReservedAt: time.Now()}) || !ledger.Issue("g1", k) {
-			t.Fatal("reserve and issue")
-		}
 		x := newEffectExecutor(func(rowKey, error) {}, io.Discard)
 		hang := make(chan struct{})
 		defer close(hang)
@@ -118,13 +58,7 @@ func TestEffectExecutorDeadlineSettlesIssuedEntry(t *testing.T) {
 			Kind:     effectStart,
 			Deadline: time.Now().Add(time.Minute),
 			Run:      func(context.Context) error { <-hang; return nil }, // ignores its context
-			Settle: func(err error) {
-				if err == nil {
-					ledger.Commit("g1", ledgerMarker{})
-				} else {
-					ledger.Fail("g1", false, ledgerMarker{})
-				}
-			},
+			Settle:   func(err error) { settled <- err },
 		}
 		if err := x.submit(k, e); err != nil {
 			t.Fatal(err)
@@ -133,49 +67,11 @@ func TestEffectExecutorDeadlineSettlesIssuedEntry(t *testing.T) {
 			t.Fatalf("second effect for the key: %v, want busy", err)
 		}
 		advance(time.Minute)
-		if view := ledger.View(); len(view) != 1 || view[0].State != ledgerFailed {
-			t.Fatalf("ledger %+v at the deadline, want g1 failed", view)
+		if len(settled) != 1 || <-settled == nil {
+			t.Fatal("at the deadline: want exactly one failed settlement")
 		}
-		if _, busy := x.inFlight(k); busy {
+		if x.inFlight(k) {
 			t.Fatal("the key is still in flight after its deadline")
-		}
-	})
-}
-
-// Kills: two v2 budgets (the executor waiting its own full timeout after
-// the workers spent theirs, P4 F15), effects leaked past the deadline, and
-// executor admission still open while stop joins the workers (C1.8).
-func TestStopJoinsWorkersAndExecutorWithinOneShutdownBudget(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		h := newV2HarnessWithRows(t, "a")
-		h.boot(t)
-		stuck := make(chan struct{})
-		defer close(stuck)
-		settled, late := make(chan error, 2), make(chan error, 1)
-		h.rec.setSession(func(workqueue.Item[rowKey], *reconcileEnv) (time.Duration, error) {
-			<-time.After(3 * time.Second) // a reconcile that ends 3s into the stop
-			late <- h.rt.exec.submit(rowKey{Leg: routerTestLeg, ID: "a"}, blockingEffect(effectStart, time.Now().Add(time.Hour), stuck, true, settled))
-			return 0, nil
-		})
-		h.add("a", workqueue.Reason{Kind: "event"})
-		synctest.Wait()
-		if err := h.rt.exec.submit(rowKey{Leg: routerTestLeg, ID: "b"}, blockingEffect(effectStart, time.Now().Add(time.Hour), stuck, true, settled)); err != nil {
-			t.Fatal(err)
-		}
-		budget := h.rt.env.Load().shutdownTimeout()
-		start := time.Now()
-		h.rt.stop()
-		if took := time.Since(start); took != budget {
-			t.Fatalf("stop took %s, want exactly the one %s budget", took, budget)
-		}
-		if err := <-late; !errors.Is(err, errEffectsClosed) {
-			t.Fatalf("a worker's submit during stop: %v, want closed before the workers are joined", err)
-		}
-		if err := <-settled; !errors.Is(err, context.Canceled) {
-			t.Fatalf("the stuck effect settled with %v, want canceled at the deadline", err)
-		}
-		if err := h.rt.exec.submit(rowKey{Leg: routerTestLeg, ID: "c"}, blockingEffect(effectOther, time.Now().Add(time.Hour), stuck, true, settled)); !errors.Is(err, errEffectsClosed) {
-			t.Fatalf("submit after stop: %v, want closed", err)
 		}
 	})
 }
@@ -186,11 +82,10 @@ func TestStopJoinsWorkersAndExecutorWithinOneShutdownBudget(t *testing.T) {
 // them.
 func TestCityShutdownKeepsGracefulStopAfterV2StopWithStartInFlight(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		h := newV2HarnessWithRows(t, "a")
-		h.boot(t)
+		rt := newDefaultPlanner(io.Discard)
 		stuck := make(chan struct{})
 		defer close(stuck)
-		if err := h.rt.exec.submit(rowKey{Leg: routerTestLeg, ID: "a"}, blockingEffect(effectStart, time.Now().Add(time.Hour), stuck, true, make(chan error, 1))); err != nil {
+		if err := rt.exec.submit(rowKey{Leg: routerTestLeg, ID: "a"}, blockingEffect(effectStart, time.Now().Add(time.Hour), stuck, true, make(chan error, 1))); err != nil {
 			t.Fatal(err)
 		}
 		cfg := &config.City{}
@@ -200,8 +95,8 @@ func TestCityShutdownKeepsGracefulStopAfterV2StopWithStartInFlight(t *testing.T)
 			t.Fatal(err)
 		}
 		var stdout bytes.Buffer
-		cr := &CityRuntime{cfg: cfg, sp: sp, v2: h.rt, rec: events.Discard, logPrefix: "gc start", stdout: &stdout, stderr: io.Discard}
-		h.rt.stop() // run() stops v2 first, and the start holds it to the deadline
+		cr := &CityRuntime{cfg: cfg, sp: sp, v2: rt, rec: events.Discard, logPrefix: "gc start", stdout: &stdout, stderr: io.Discard}
+		rt.stop() // run() stops v2 first, and the start holds it to the deadline
 		cr.shutdown()
 		if sp.CountCalls("Interrupt", "probe") != 1 || !bytes.Contains(stdout.Bytes(), []byte("waiting 1s")) {
 			t.Fatalf("interrupts=%d stdout=%q, want the graceful pass with its full 1s budget", sp.CountCalls("Interrupt", "probe"), stdout.String())
@@ -233,7 +128,7 @@ func TestEffectExecutorRecoversRunAndSettlePanics(t *testing.T) {
 		if out := stderr.String(); !strings.Contains(out, "provider exploded") || !strings.Contains(out, "goroutine ") {
 			t.Fatalf("stderr %q, want the panic logged with its stack", out)
 		}
-		if _, busy := x.inFlight(k); busy {
+		if x.inFlight(k) {
 			t.Fatal("a panicked effect still holds its key")
 		}
 
@@ -251,32 +146,6 @@ func TestEffectExecutorRecoversRunAndSettlePanics(t *testing.T) {
 			t.Fatalf("stderr %q, want the Settle panic logged", stderr.String())
 		}
 	})
-}
-
-// Kills: done (the urgent enqueue) running before the in-flight entry is
-// cleared, so the re-run key still reads its effect as in flight and decides
-// read-only until the deadline (C5.5), over the real controller and executor.
-func TestEffectDoneReRunsKeyWithEffectCleared(t *testing.T) {
-	f := newSessionCtlFixture(t, sessBead("e", map[string]string{"held_until": rfc(time.Now().Add(-time.Minute))}))
-	k := rowKey{Leg: routerTestLeg, ID: "e"}
-	enqueue := f.exec.done
-	reran := make(chan string, 1)
-	f.exec.done = func(k rowKey, err error) {
-		if _, err := f.reconcile(t, k.ID); err != nil {
-			t.Error(err)
-		}
-		reran <- f.lastDecision().Reason
-		enqueue(k, err)
-	}
-	if err := f.exec.submit(k, sessionEffect{Kind: effectStart, Deadline: time.Now().Add(time.Hour), Run: func(context.Context) error { return nil }, Settle: func(error) {}}); err != nil {
-		t.Fatal(err)
-	}
-	if reason := <-reran; reason == decideEffectInFlight {
-		t.Fatalf("the key re-ran on its effect's completion and decided %q", reason)
-	}
-	if f.store.writes() != 1 {
-		t.Fatalf("writes = %d, want the re-run's hold clear", f.store.writes())
-	}
 }
 
 // Kills: a provider swap listing the old provider while a start is still
@@ -434,7 +303,9 @@ func (s *reapRaceStore) Get(id string) (beads.Bead, error) {
 
 // Kills: the reload's provider swap listing the old provider's sessions
 // while a v2 start may still create one (the call to beforeProviderSwap
-// missing from reloadConfigTraced, C4.4 step 3).
+// missing from reloadConfigTraced, C4.4 step 3); and the planner's starts
+// left running through the wait, or left paused once the reload aborts
+// (CONTRACT v5 P7).
 func TestReloadProviderSwapWaitsForV2StartsBeforeListing(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cityPath := t.TempDir()
@@ -456,11 +327,20 @@ func TestReloadProviderSwapWaitsForV2StartsBeforeListing(t *testing.T) {
 		cs.cityBeadStore = beads.NewMemStore()
 		cr.setControllerState(cs)
 		cr.sessionDrains = newDrainTracker()
-		h := newV2HarnessWithRows(t)
-		cr.v2 = h.rt
+		cr.v2 = newDefaultPlanner(io.Discard)
 		hung := make(chan struct{})
 		defer close(hung)
-		if err := h.rt.exec.submit(rowKey{ID: "s"}, blockingEffect(effectStart, time.Now().Add(time.Hour), hung, false, make(chan error, 1))); err != nil {
+		var pausedAtCancel atomic.Bool
+		if err := cr.v2.exec.submit(rowKey{ID: "s"}, sessionEffect{
+			Kind: effectStart, Deadline: time.Now().Add(time.Hour),
+			Run: func(ctx context.Context) error {
+				<-ctx.Done() // waitStarts cancels it; it hangs on regardless
+				pausedAtCancel.Store(cr.v2.planner.startsPaused())
+				<-hung
+				return ctx.Err()
+			},
+			Settle: func(error) {},
+		}); err != nil {
 			t.Fatal(err)
 		}
 
@@ -470,8 +350,34 @@ func TestReloadProviderSwapWaitsForV2StartsBeforeListing(t *testing.T) {
 		if reply.Outcome != reloadOutcomeFailed || sp.listings != 0 {
 			t.Fatalf("reply %q after %d listings, want the swap refused before any listing", reply.Outcome, sp.listings)
 		}
-		if err := (&CityRuntime{}).beforeProviderSwap(cfg); err != nil {
+		if !pausedAtCancel.Load() || cr.v2.planner.startsPaused() {
+			t.Fatalf("starts paused at the cancel = %v, after the abort = %v; want paused, then resumed", pausedAtCancel.Load(), cr.v2.planner.startsPaused())
+		}
+		if _, err := (&CityRuntime{}).beforeProviderSwap(cfg); err != nil {
 			t.Fatalf("a legacy controller waits on nothing: %v", err)
+		}
+	})
+}
+
+// Kills the swap wait taken from a startup_timeout of zero (CONTRACT v5.4
+// P3 reads it as the 60s default, as admit's start deadline does): a start
+// that needs a minute is waited for, not canceled at 10s.
+func TestBeforeProviderSwapWaitsTheDefaultStartupForZero(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cr := &CityRuntime{v2: newDefaultPlanner(io.Discard)}
+		release, settled := make(chan struct{}), make(chan error, 1)
+		time.AfterFunc(time.Minute, func() { close(release) })
+		if err := cr.v2.exec.submit(rowKey{ID: "s"}, blockingEffect(effectStart, time.Now().Add(time.Hour), release, true, settled)); err != nil {
+			t.Fatal(err)
+		}
+		cfg := &config.City{Session: config.SessionConfig{StartupTimeout: "0s"}}
+		resume, err := cr.beforeProviderSwap(cfg)
+		resume()
+		if err != nil {
+			t.Fatalf("beforeProviderSwap = %v, want the minute-long start waited for", err)
+		}
+		if err := <-settled; err != nil {
+			t.Fatalf("the start settled %v, want it to finish uncanceled", err)
 		}
 	})
 }

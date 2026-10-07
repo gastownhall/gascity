@@ -11,8 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -501,6 +503,13 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 	sessionName := res.Info.SessionNameMetadata
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
+	}
+	// Recorded, but a demand-only singleton's pool session will not start
+	// from it (#6858); same enqueue, refusal and code as the Huma route.
+	if msg := demandOnlySingletonWakeRefusal(s.state.Config(), res.Info); msg != "" {
+		s.state.Enqueue(reconcilekey.Session(id))
+		writeError(w, apierr.DemandOnlySingleton.Status, apierr.DemandOnlySingleton.Code, msg)
+		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": id})

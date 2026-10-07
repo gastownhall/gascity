@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -165,6 +166,122 @@ func TestSweep_LsofErrorFailsClosed(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("dir %s should still exist: %v", dir, err)
+	}
+}
+
+func writeLsofStub(t *testing.T, body string) string {
+	t.Helper()
+	return writeRawLsofStub(t, "printf 'partial\\n'\n"+body)
+}
+
+func writeRawLsofStub(t *testing.T, body string) string {
+	t.Helper()
+	command := filepath.Join(t.TempDir(), "lsof-stub")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(%s): %v", command, err)
+	}
+	return command
+}
+
+func assertSweepFailedClosed(t *testing.T, result SweepResult, dir string) {
+	t.Helper()
+	if len(result.Removed) != 0 {
+		t.Fatalf("Removed = %v, want none when the lsof scan is truncated", result.Removed)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("Errors = %v, want exactly the lsof scan error", result.Errors)
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("Skipped = %d, want 1", result.Skipped)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("dir %s should still exist: %v", dir, err)
+	}
+}
+
+func TestSweep_LsofTimeoutFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "orphan1", 1, old)
+	command := writeLsofStub(t, "exec tail -f /dev/null")
+
+	result := Sweep(SweepConfig{
+		Root:            root,
+		lsofCommand:     command,
+		lsofScanTimeout: 50 * time.Millisecond,
+	})
+
+	assertSweepFailedClosed(t, result, dir)
+	if !errors.Is(result.Errors[0], context.DeadlineExceeded) {
+		t.Fatalf("Errors[0] = %v, want context.DeadlineExceeded", result.Errors[0])
+	}
+}
+
+func TestSweep_LsofKilledBySignalFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "orphan1", 1, old)
+	command := writeLsofStub(t, "kill -9 $$")
+
+	result := Sweep(SweepConfig{Root: root, lsofCommand: command})
+
+	assertSweepFailedClosed(t, result, dir)
+	var exitErr *exec.ExitError
+	if !errors.As(result.Errors[0], &exitErr) || exitErr.Exited() {
+		t.Fatalf("Errors[0] = %v, want signal termination of lsof", result.Errors[0])
+	}
+}
+
+func TestSweep_LsofUnexpectedExitStatusFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "orphan1", 1, old)
+	command := writeLsofStub(t, "exit 127")
+
+	result := Sweep(SweepConfig{Root: root, lsofCommand: command})
+
+	assertSweepFailedClosed(t, result, dir)
+	var exitErr *exec.ExitError
+	if !errors.As(result.Errors[0], &exitErr) || exitErr.ExitCode() != 127 {
+		t.Fatalf("Errors[0] = %v, want lsof exit status 127", result.Errors[0])
+	}
+}
+
+func TestSweep_LsofEmptyOutputFailsClosed(t *testing.T) {
+	for _, status := range []string{"0", "1"} {
+		t.Run("exit "+status, func(t *testing.T) {
+			root := t.TempDir()
+			old := time.Now().Add(-2 * time.Hour)
+			dir := mkStoreDir(t, root, "orphan1", 1, old)
+			command := writeRawLsofStub(t, "exit "+status)
+
+			result := Sweep(SweepConfig{Root: root, lsofCommand: command})
+
+			assertSweepFailedClosed(t, result, dir)
+			if !errors.Is(result.Errors[0], errLsofNoOutput) {
+				t.Fatalf("Errors[0] = %v, want errLsofNoOutput", result.Errors[0])
+			}
+		})
+	}
+}
+
+func TestSweep_LsofExitOneKeepsOutput(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	held := mkStoreDir(t, root, "held1", 1, old)
+	orphan := mkStoreDir(t, root, "orphan1", 1, old)
+	command := writeRawLsofStub(t, "printf '%s\\n' 'dolt 1 u cwd DIR 0,1 0 1 "+held+"/.dolt'\nexit 1")
+
+	result := Sweep(SweepConfig{Root: root, lsofCommand: command})
+
+	if len(result.Errors) != 0 {
+		t.Fatalf("Errors = %v, want none for an lsof that exits 1 with complete output", result.Errors)
+	}
+	if len(result.Removed) != 1 || result.Removed[0] != orphan {
+		t.Fatalf("Removed = %v, want [%s]", result.Removed, orphan)
+	}
+	if _, err := os.Stat(held); err != nil {
+		t.Fatalf("held dir %s should still exist: %v", held, err)
 	}
 }
 

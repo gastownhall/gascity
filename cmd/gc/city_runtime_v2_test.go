@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"path/filepath"
@@ -19,14 +22,12 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/workqueue"
 )
 
 // The P2-8 wiring tests: the v2 runtime behind the exclusive switch. Unit
@@ -36,96 +37,89 @@ import (
 // awaitCond, never sleeping.
 
 // attachTestV2 makes cr a v2 controller exactly as newCityRuntime does for
-// one that latched v2 (installV2, then the wiring's wake, which routes over
-// the runtime's signals to its router), with this build's runtime and
-// recording controllers in place of the trace-only ones.
-func attachTestV2(t *testing.T, cr *CityRuntime) (*v2Runtime, *v2Recorder) {
+// one that latched v2 (installPlanner, then the wiring's wake, which marks
+// the planner dirty).
+func attachTestV2(t *testing.T, cr *CityRuntime) *plannerRuntime {
 	t.Helper()
-	rt, rec := newTestDefaultV2Runtime(cr.cfg, cr.stderr)
+	rt := newDefaultPlanner(cr.stderr)
 	cr.reconcilerDrift.running = reconcilerV2
 	cr.sessionDrains, cr.providerHealthGate = nil, nil
-	cr.installV2(rt)
+	cr.installPlanner(rt)
 	wake := newLegacyWake(cr.pokeCh, cr.controlDispatcherCh)
-	wake.router = rt.router
+	wake.planner = rt.planner
 	cr.initWake(wake)
 	if cr.cs != nil {
 		wireControllerWakeSignals(cr.cs, cr.wake)
 	}
 	t.Cleanup(rt.stop)
-	return rt, rec
+	return rt
 }
 
-// newTestDefaultV2Runtime is newDefaultV2Runtime with recording controllers,
-// no jitter, and a worker FS gate that never reads host pressure.
-func newTestDefaultV2Runtime(cfg *config.City, stderr io.Writer) (*v2Runtime, *v2Recorder) {
-	rec := &v2Recorder{}
-	rt := newDefaultV2Runtime(v2SessionsLeg(cfg), stderr)
-	rt.ctrl = rec.controllers()
-	rt.rand = func() float64 { return 0.5 }
-	rt.fs.sample = func() (fsPressureStatus, bool) { return fsPressureStatus{}, false }
-	return rt, rec
+// primeTestV2 gives cr's controller state what the boot gate waits on
+// besides a primed inventory: a primed cache over its city store, as a
+// controller's is (CONTRACT v5 P2).
+func primeTestV2(t *testing.T, cr *CityRuntime) {
+	t.Helper()
+	cr.cs.cityBeadStore = primeTestCache(t, cr.cs.cityBeadStore)
+}
+
+func primeTestCache(t *testing.T, store beads.Store) *beads.CachingStore {
+	t.Helper()
+	cache := beads.NewCachingStoreForTest(store, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("prime: %v", err)
+	}
+	return cache
+}
+
+// newTestPlanner is a planner whose passes do nothing, for the wake's tests.
+func newTestPlanner() *planner {
+	return newPlanner(realPlannerClock{}, func() time.Duration { return time.Hour }, func(time.Time) passResult { return passResult{} }, newInflightMap(), nil, io.Discard)
+}
+
+// plannerWakes is how many times p was marked dirty for reason.
+func plannerWakes(p *planner, reason string) uint64 {
+	return p.metrics.snapshot(time.Now()).Wakes[reason]
+}
+
+// plannerPasses is how many passes p has run.
+func plannerPasses(p *planner) uint64 {
+	return p.metrics.snapshot(time.Now()).Passes
 }
 
 // newTestV2Wiring is newControllerWiring for a controller admitted to v2 by
-// the developer override, with newTestDefaultV2Runtime's runtime on its wake.
-func newTestV2Wiring(t *testing.T, cfg *config.City, stderr io.Writer) (*controllerWiring, *v2Recorder) {
+// the developer override.
+func newTestV2Wiring(t *testing.T, cfg *config.City, stderr io.Writer) *controllerWiring {
 	t.Helper()
 	latch := *cfg
 	latch.Daemon.SessionReconciler = "v2"
-	w, err := newControllerWiring(&latch, overrideEnv("1"), io.Discard)
+	w, err := newControllerWiring(&latch, overrideEnv("1"), stderr)
 	if err != nil {
 		t.Fatalf("newControllerWiring: %v", err)
 	}
-	rt, rec := newTestDefaultV2Runtime(cfg, stderr)
-	w.v2 = rt
-	w.wake.router = rt.router
-	return w, rec
+	return w
 }
 
 func bootTestV2(t *testing.T, cr *CityRuntime) {
 	t.Helper()
-	if !cr.bootV2(context.Background(), nil) {
+	primeTestV2(t, cr)
+	if !cr.bootV2(context.Background()) {
 		t.Fatal("bootV2 did not reach ready")
 	}
-}
-
-// awaitReconcile waits until key has been reconciled with a reason of kind.
-func awaitReconcile(t *testing.T, rec *v2Recorder, key, kind string) {
-	t.Helper()
-	awaitCond(t, func() bool {
-		for _, c := range rec.callsFor(key) {
-			if slices.Contains(c.kinds, kind) {
-				return true
-			}
-		}
-		return false
-	}, fmt.Sprintf("a %s reconcile of %s", kind, key))
-}
-
-func awaitAllocatorReason(t *testing.T, rec *v2Recorder, kind string) {
-	t.Helper()
-	awaitCond(t, func() bool {
-		for _, pass := range rec.allocatorPasses() {
-			if slices.Contains(pass, kind) {
-				return true
-			}
-		}
-		return false
-	}, "an allocator pass for "+kind)
 }
 
 // assertV2BootRefuses adds rows to a v2 phase fixture, whose own row is
 // clean, and boots it through the city runtime's host. Boot must refuse at
 // once, with want and the doctor command in the error, after a live read of
-// the sessions leg (C4.5 item 1b), and before anything runs: no key is
-// reconciled, no allocator pass runs, nothing is written, and the fixture's
-// running session is not stopped.
+// the sessions leg (C4.5 item 1b), and before anything runs: the planner
+// never starts, nothing is written, and the fixture's running session is not
+// stopped.
 func assertV2BootRefuses(t *testing.T, want string, rows ...beads.Bead) {
 	t.Helper()
 	cr, store := newPhaseFixtureRuntime(t, false, true)
 	stderr := &lockedBuffer{}
 	cr.stderr = stderr
-	rt, rec := attachTestV2(t, cr)
+	rt := attachTestV2(t, cr)
 	for _, row := range rows {
 		if _, err := store.Store.Create(row); err != nil {
 			t.Fatalf("Create(%s): %v", row.ID, err)
@@ -133,13 +127,13 @@ func assertV2BootRefuses(t *testing.T, want string, rows ...beads.Bead) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if cr.bootV2(ctx, nil) {
+	if cr.bootV2(ctx) {
 		t.Fatal("bootV2 reached ready over enterprise-era rows")
 	}
 	if ctx.Err() != nil {
 		t.Fatal("bootV2 retried the refusal until the deadline")
 	}
-	if got := stderr.String(); !strings.Contains(got, want) || !strings.Contains(got, "run gc doctor --check v2-session-migration --fix") {
+	if got := stderr.String(); !strings.Contains(got, want) || !strings.Contains(got, "run gc doctor --check v2-session-migration to list them") {
 		t.Errorf("stderr = %q, want %q and the doctor command", got, want)
 	}
 	liveRead := false
@@ -152,8 +146,11 @@ func assertV2BootRefuses(t *testing.T, want string, rows ...beads.Bead) {
 	if !liveRead {
 		t.Errorf("store ops = %q, want a live census read", store.recorded())
 	}
-	if rt.ready.Load() || len(rec.keys()) != 0 || len(rec.allocatorPasses()) != 0 {
-		t.Errorf("ready=%v reconciled=%q allocator passes=%d: a refused boot ran its controllers", rt.ready.Load(), rec.keys(), len(rec.allocatorPasses()))
+	rt.mu.Lock()
+	started := rt.started
+	rt.mu.Unlock()
+	if started || plannerPasses(rt.planner) != 0 {
+		t.Errorf("started=%v passes=%d: a refused boot started the planner", started, plannerPasses(rt.planner))
 	}
 	if !cr.sp.IsRunning("worker") {
 		t.Error("a refused boot stopped the running session")
@@ -183,10 +180,11 @@ func TestV2BootRefusesSharedSlotNames(t *testing.T) {
 // out of the startup step; or the boot env published without the boot
 // config's revision (m27). The step runs the maintenance phases, writes
 // nothing, never builds desired state, enters no guarded legacy path, and
-// boots the v2 runtime, which reconciles the open row.
+// boots the planner, whose first pass completes before the step returns.
 func TestCityRuntimeV2StartupSkipsLegacyBootReconcile(t *testing.T) {
 	cr, store := newPhaseFixtureRuntime(t, false, true)
-	rt, rec := attachTestV2(t, cr)
+	rt := attachTestV2(t, cr)
+	primeTestV2(t, cr)
 	var builds atomic.Int32
 	cr.buildFn = func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
 		builds.Add(1)
@@ -205,11 +203,8 @@ func TestCityRuntimeV2StartupSkipsLegacyBootReconcile(t *testing.T) {
 	if writes := storeWrites(store.recorded()); len(writes) != 0 {
 		t.Errorf("the v2 startup step wrote to the store: %v", writes)
 	}
-	if calls := rec.callsFor("gc-1"); len(calls) != 1 || !slices.Equal(calls[0].kinds, []string{v2ReasonBoot}) {
-		t.Errorf("reconciles of gc-1 = %+v, want one boot reconcile before the step returned", calls)
-	}
-	if len(rec.allocatorPasses()) == 0 {
-		t.Error("the startup step returned before the allocator primed")
+	if rec := rt.planner.out.record.Load(); rec == nil || rec.Err != "" || rt.bootState() != plannerBootReady {
+		t.Errorf("pass record = %+v boot = %s, want a completed pass before the step returned", rec, rt.bootState())
 	}
 	if env := rt.env.Load(); env.ConfigRev == "" || env.ConfigRev != cr.configRev {
 		t.Errorf("boot env revision = %q, want the boot config's %q", env.ConfigRev, cr.configRev)
@@ -219,8 +214,7 @@ func TestCityRuntimeV2StartupSkipsLegacyBootReconcile(t *testing.T) {
 // v2RunFixture is a v2 city runtime driven through run() on a fake provider.
 type v2RunFixture struct {
 	cr       *CityRuntime
-	rt       *v2Runtime
-	rec      *v2Recorder
+	rt       *plannerRuntime
 	store    *beads.MemStore
 	sp       *runtime.Fake
 	stderr   *synchronizedBuffer
@@ -231,8 +225,8 @@ type v2RunFixture struct {
 	cancel   context.CancelFunc
 }
 
-// newV2RunFixture builds a v2 city whose [daemon] section is daemon. setup,
-// when set, runs before run() starts.
+// newV2RunFixture builds a v2 city whose [daemon] section is daemon, on a
+// primed cache over its store. setup, when set, runs before run() starts.
 func newV2RunFixture(t *testing.T, daemon string, setup func(f *v2RunFixture)) *v2RunFixture {
 	t.Helper()
 	f := &v2RunFixture{stderr: &synchronizedBuffer{}, ready: make(chan struct{}), done: make(chan struct{})}
@@ -246,8 +240,8 @@ func newV2RunFixture(t *testing.T, daemon string, setup func(f *v2RunFixture)) *
 	}
 	f.sp = runtime.NewFake()
 	f.store = beads.NewMemStore()
-	wiring, rec := newTestV2Wiring(t, cfg, f.stderr)
-	f.rt, f.rec = wiring.v2, rec
+	wiring := newTestV2Wiring(t, cfg, f.stderr)
+	f.rt = wiring.v2
 	var readyOnce sync.Once
 	f.cr = newTestCityRuntime(t, wiring.runtimeParams(CityRuntimeParams{
 		CityPath:  f.cityPath,
@@ -266,7 +260,7 @@ func newV2RunFixture(t *testing.T, daemon string, setup func(f *v2RunFixture)) *
 		Stderr:    f.stderr,
 	}))
 	cs := newControllerState(context.Background(), cfg, f.sp, events.NewFake(), "test-city", f.cityPath)
-	cs.cityBeadStore = f.store
+	cs.cityBeadStore = primeTestCache(t, f.store)
 	wireControllerWakeSignals(cs, f.cr.wakeOf())
 	cs.configDirty = f.cr.configDirty
 	f.cr.setControllerState(cs)
@@ -329,9 +323,9 @@ func (f *v2RunFixture) reload(t *testing.T) reloadControlReply {
 	return reply
 }
 
-// Kills: the v2 boot enqueue-all run before the adoption barrier or before
-// the startup reload (MAINT-006, MAINT-007). The first reconciles already see
-// the adopted row and the reloaded config's revision.
+// Kills: the planner booted before the adoption barrier or before the
+// startup reload (MAINT-006, MAINT-007). At readiness the adopted row exists,
+// and boot published the reloaded config's revision as env Gen 1.
 func TestCityRuntimeV2AdoptionAndStartupReloadPrecedeBootEnqueue(t *testing.T) {
 	var reloadedRev, runtimeName string
 	f := newV2RunFixture(t, "patrol_interval = \"1h\"\n", func(f *v2RunFixture) {
@@ -357,32 +351,29 @@ func TestCityRuntimeV2AdoptionAndStartupReloadPrecedeBootEnqueue(t *testing.T) {
 	if err != nil || len(adopted) != 1 {
 		t.Fatalf("adopted session beads = %v (err %v), want one for %s", adopted, err, runtimeName)
 	}
-	calls := f.rec.callsFor(adopted[0].ID)
-	if len(calls) == 0 || !slices.Contains(calls[0].kinds, v2ReasonBoot) {
-		t.Fatalf("reconciles of the adopted row %s = %+v, want a boot reconcile first", adopted[0].ID, calls)
-	}
-	if calls[0].gen != 1 || calls[0].rev != reloadedRev {
-		t.Errorf("the boot reconcile ran on env gen %d rev %q, want gen 1 rev %q (the reloaded config)", calls[0].gen, calls[0].rev, reloadedRev)
+	if env := f.rt.env.Load(); env.Gen != 1 || env.ConfigRev != reloadedRev {
+		t.Errorf("boot env = gen %d rev %q, want gen 1 rev %q (the reloaded config)", env.Gen, env.ConfigRev, reloadedRev)
 	}
 }
 
 // Kills: the control-dispatcher arm left live under v2 (MAINT-056, API-014):
 // a stray signal would run the legacy controlDispatcherTick. Under v2 the arm
-// selects on nil, and the socket's control-dispatch key reaches the allocator
-// without touching the legacy signal.
+// selects on nil, and the socket's control-dispatch key marks the planner
+// dirty without touching the legacy signal.
 func TestCityRuntimeV2ControlDispatcherSignalNeverRunsLegacyPath(t *testing.T) {
 	cr, _ := newPhaseFixtureRuntime(t, false, false)
 	if got := cr.controlDispatcherSignal(); got == nil {
 		t.Fatal("a legacy controller's control-dispatcher arm selects on nil")
 	}
-	_, rec := attachTestV2(t, cr)
+	rt := attachTestV2(t, cr)
 	if got := cr.controlDispatcherSignal(); got != nil {
 		t.Fatal("the control-dispatcher arm is live under v2")
 	}
-	bootTestV2(t, cr)
 
 	cr.wakeOf().Enqueue(wakeReasonSocket, reconcilekey.ControlDispatch())
-	awaitAllocatorReason(t, rec, routeReasonControlDispatch)
+	if n := plannerWakes(rt.planner, wakeReasonSocket); n != 1 {
+		t.Errorf("socket wakes = %d, want 1", n)
+	}
 	if len(cr.controlDispatcherCh) != 0 || len(cr.pokeCh) != 0 {
 		t.Errorf("legacy signals (poke, dispatch) = (%d, %d), want none", len(cr.pokeCh), len(cr.controlDispatcherCh))
 	}
@@ -392,29 +383,29 @@ func TestCityRuntimeV2ControlDispatcherSignalNeverRunsLegacyPath(t *testing.T) {
 }
 
 // Kills: keys still folded onto pokeCh under v2 (API-006..010). An API
-// session key reaches the v2 queue and is reconciled; the tick is not poked.
-func TestCityRuntimeV2KeyedEnqueueReachesQueueNotTick(t *testing.T) {
+// session key marks the planner dirty; the tick is not poked.
+func TestCityRuntimeV2KeyedEnqueueMarksPlannerNotTick(t *testing.T) {
 	cr, _ := newPhaseFixtureRuntime(t, false, false)
-	_, rec := attachTestV2(t, cr)
-	bootTestV2(t, cr)
+	rt := attachTestV2(t, cr)
 
 	cr.cs.Enqueue(reconcilekey.Session("gc-1"))
-	awaitReconcile(t, rec, "gc-1", wakeReasonAPI)
+	if n := plannerWakes(rt.planner, wakeReasonAPI); n != 1 {
+		t.Errorf("api wakes = %d, want 1", n)
+	}
 	if len(cr.pokeCh) != 0 || len(cr.controlDispatcherCh) != 0 {
 		t.Errorf("legacy signals (poke, dispatch) = (%d, %d), want none: the key reached the tick", len(cr.pokeCh), len(cr.controlDispatcherCh))
 	}
 }
 
-// Kills: a config mutation that only wakes the allocator under v2, so the
-// reload waits for the patrol (API-003, API-017), or a tick reload that skips
-// the barrier. The mutation pokes the maintenance tick, whose reload applies
-// under the barrier, publishes the next env and then wakes the allocator.
-func TestCityRuntimeV2ConfigMutationRunsBarrierThenWakesAllocator(t *testing.T) {
+// Kills: a config mutation that only marks the planner under v2, so the
+// reload waits for the patrol (API-003, API-017), or a tick reload that
+// publishes no env (CONTRACT v5 P7). The mutation pokes the maintenance tick,
+// whose reload publishes the next env and marks the planner dirty.
+func TestCityRuntimeV2ConfigMutationPublishesEnvThenMarksPlanner(t *testing.T) {
 	cr, _ := newPhaseFixtureRuntime(t, false, false)
-	rt, rec := attachTestV2(t, cr)
+	rt := attachTestV2(t, cr)
 	cr.cs.configDirty = cr.configDirty
-	bootTestV2(t, cr)
-	oldRev := rt.env.Load().ConfigRev
+	oldRev := rt.publishEnv().ConfigRev
 
 	if err := cr.cs.mutateAndPoke(func() error {
 		writePhaseFixtureConfig(t, cr.tomlPath, true)
@@ -431,28 +422,31 @@ func TestCityRuntimeV2ConfigMutationRunsBarrierThenWakesAllocator(t *testing.T) 
 	if env.Gen != 2 || env.ConfigRev == oldRev {
 		t.Fatalf("env after the reload = gen %d rev %q, want gen 2 with a new revision (old %q)", env.Gen, env.ConfigRev, oldRev)
 	}
-	awaitAllocatorReason(t, rec, v2ReasonReload)
-	if holds := rt.sessions.Stats().Holds; len(holds) != 0 {
-		t.Errorf("holds after the reload = %v, want none", holds)
+	if n := plannerWakes(rt.planner, "reload"); n != 1 {
+		t.Errorf("reload wakes = %d, want 1", n)
 	}
 }
 
 // Kills: the manual reload's reply left to the end of the tick, or never
-// sent (MAINT-023), or a hard reload told drift acceptance is unavailable
-// (mhook2). The barrier answers it from inside: by the next phase that reads
-// the store, the reply is already delivered and the reconciles have resumed.
-func TestCityRuntimeV2ReloadReplyBeforeResume(t *testing.T) {
+// sent (MAINT-023); the reply amended before the planner's env is published,
+// so a client is told what applied while the next pass reads the old config;
+// or a hard reload told drift acceptance is unavailable (mhook2). The
+// reply's amend sees env Gen 2, and by the next phase that reads the store
+// the reply is delivered.
+func TestCityRuntimeV2ReloadReplyAfterPublish(t *testing.T) {
 	cr, store := newPhaseFixtureRuntime(t, true, false)
 	cr.activeReload.soft = false
-	rt, _ := attachTestV2(t, cr)
-	bootTestV2(t, cr)
+	rt := attachTestV2(t, cr)
+	rt.publishEnv()
 	doneCh := cr.activeReload.doneCh
+	var amendGen uint64
+	rt.softReload = func(intent reloadIntent, r *reloadControlReply) {
+		amendGen = rt.env.Load().Gen
+		v2SoftReloadUnavailable(intent, r)
+	}
 
 	var mu sync.Mutex
-	var firstRead *struct {
-		replied bool
-		holds   []string
-	}
+	var firstRead *struct{ replied bool }
 	store.onRecord = func(op string) {
 		if !strings.HasPrefix(op, "List ") {
 			return
@@ -460,10 +454,7 @@ func TestCityRuntimeV2ReloadReplyBeforeResume(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		if firstRead == nil {
-			firstRead = &struct {
-				replied bool
-				holds   []string
-			}{replied: len(doneCh) == 1, holds: rt.sessions.Stats().Holds}
+			firstRead = &struct{ replied bool }{replied: len(doneCh) == 1}
 		}
 	}
 	runFixtureTick(cr, "reload")
@@ -476,8 +467,8 @@ func TestCityRuntimeV2ReloadReplyBeforeResume(t *testing.T) {
 	if !firstRead.replied {
 		t.Error("the manual reply was not delivered before the phases after the reload")
 	}
-	if len(firstRead.holds) != 0 {
-		t.Errorf("holds while the tick went on = %v, want none (resumed)", firstRead.holds)
+	if amendGen != 2 {
+		t.Errorf("env gen when the reply was amended = %d, want 2", amendGen)
 	}
 	reply := <-doneCh
 	if reply.Outcome != reloadOutcomeApplied {
@@ -489,13 +480,11 @@ func TestCityRuntimeV2ReloadReplyBeforeResume(t *testing.T) {
 }
 
 // Kills: the provider event pump still poking the tick under v2 (MAINT-015,
-// API-018), or a routed replay burst logging a line per event. A session
-// event resolves through the router's name index to the row's key; a burst
-// reports one landed wake.
-func TestCityRuntimeV2ProviderEventEnqueuesSessionKey(t *testing.T) {
+// API-018), or a burst logging a line per event. Every session event marks
+// the planner dirty; a burst reports one landed wake.
+func TestCityRuntimeV2ProviderEventMarksPlanner(t *testing.T) {
 	cr, _ := newPhaseFixtureRuntime(t, false, false)
-	_, rec := attachTestV2(t, cr)
-	bootTestV2(t, cr)
+	rt := attachTestV2(t, cr)
 	now := time.Unix(1_800_000_000, 0)
 	cr.wakeOf().now = func() time.Time { return now }
 	var stderr bytes.Buffer
@@ -504,7 +493,7 @@ func TestCityRuntimeV2ProviderEventEnqueuesSessionKey(t *testing.T) {
 	for range 3 {
 		pump.poke("died", "worker")
 	}
-	awaitReconcile(t, rec, "gc-1", wakeReasonProviderEvent)
+	awaitCond(t, func() bool { return plannerWakes(rt.planner, wakeReasonProviderEvent) == 3 }, "three provider-event wakes")
 	if len(cr.pokeCh) != 0 {
 		t.Error("the provider event poked the tick under v2")
 	}
@@ -513,28 +502,33 @@ func TestCityRuntimeV2ProviderEventEnqueuesSessionKey(t *testing.T) {
 	}
 }
 
-// Kills: the inventory pass hook never installed under v2. A runtime
-// attributed to a session row, under a name no row answers to, goes away:
-// the owner's key is reconciled.
-func TestCityRuntimeV2InventoryFlipEnqueuesOwnerKey(t *testing.T) {
+// Kills: the inventory pass hook never installed under v2, or one that marks
+// nothing. A runtime that goes away marks the planner dirty.
+func TestCityRuntimeV2InventoryFlipMarksPlanner(t *testing.T) {
 	sp := newScriptedInventoryProvider("ghost-runtime")
 	sp.env["ghost-runtime"] = map[string]string{"GC_SESSION_ID": "gc-owner"}
 	cr := inventoryLaneTestRuntime(t, sp, nil)
-	_, rec := attachTestV2(t, cr)
-	bootTestV2(t, cr)
+	rt := attachTestV2(t, cr)
+	rt.publishEnv()
+	if !rt.start(context.Background()) {
+		t.Fatal("the planner did not start")
+	}
 
 	runTestInventoryPass(cr) // listed, attributed
+	listed := plannerWakes(rt.planner, "inventory")
 	sp.mu.Lock()
 	sp.names = nil
 	sp.mu.Unlock()
 	runTestInventoryPass(cr) // gone
-	awaitReconcile(t, rec, "gc-owner", routeReasonInventory)
+	if n := plannerWakes(rt.planner, "inventory"); n != listed+1 {
+		t.Errorf("inventory wakes = %d after the runtime went away, want %d", n, listed+1)
+	}
 }
 
-// Kills: v2 workers started on a city with no bead store (MAINT-003). The
-// boot step logs that the workers are disabled and lets readiness proceed
+// Kills: the planner started on a city with no bead store (MAINT-003). The
+// boot step logs that the planner is disabled and lets readiness proceed
 // without reading a census.
-func TestCityRuntimeV2NoStoreDisablesWorkers(t *testing.T) {
+func TestCityRuntimeV2NoStoreDisablesPlanner(t *testing.T) {
 	var stderr bytes.Buffer
 	cr := &CityRuntime{
 		cityName:  "test-city",
@@ -543,20 +537,20 @@ func TestCityRuntimeV2NoStoreDisablesWorkers(t *testing.T) {
 		stdout:    io.Discard,
 		stderr:    &stderr,
 	}
-	rt, _ := attachTestV2(t, cr)
+	rt := attachTestV2(t, cr)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // a boot that tried would fail at once instead of retrying
-	if !cr.bootV2(ctx, nil) {
+	if !cr.bootV2(ctx) {
 		t.Fatal("a store-less v2 city did not proceed to readiness")
 	}
 	rt.mu.Lock()
 	started := rt.started
 	rt.mu.Unlock()
 	if started {
-		t.Error("the v2 workers started with no bead store")
+		t.Error("the planner started with no bead store")
 	}
-	if !strings.Contains(stderr.String(), "no bead store; reconcile workers disabled") {
-		t.Errorf("stderr = %q, want the disabled-workers notice", stderr.String())
+	if !strings.Contains(stderr.String(), "no bead store; the planner is disabled") {
+		t.Errorf("stderr = %q, want the disabled-planner notice", stderr.String())
 	}
 }
 
@@ -591,11 +585,11 @@ func (s *panicOnLabelStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 	return s.Store.List(q)
 }
 
-// Kills: a panic in the maintenance tick reaching the v2 runtime. The tick's
-// safeTick swallows it, and the workers keep reconciling.
-func TestCityRuntimeV2PanicInMaintenanceTickLeavesWorkersRunning(t *testing.T) {
-	cr, store := newPhaseFixtureRuntime(t, false, false)
-	rt, rec := attachTestV2(t, cr)
+// Kills: a panic in the maintenance tick reaching the planner. The tick's
+// safeTick swallows it, and the planner keeps running passes.
+func TestCityRuntimeV2PanicInMaintenanceTickLeavesPlannerRunning(t *testing.T) {
+	cr, store := newPhaseFixtureRuntime(t, false, true)
+	rt := attachTestV2(t, cr)
 	bootTestV2(t, cr)
 	cr.cs.cityBeadStore = &panicOnLabelStore{Store: store, label: "gc:extmsg-binding"}
 
@@ -606,23 +600,23 @@ func TestCityRuntimeV2PanicInMaintenanceTickLeavesWorkersRunning(t *testing.T) {
 	}, "patrol") {
 		t.Fatal("the maintenance tick did not panic; the test needs it to")
 	}
+	passes := plannerPasses(rt.planner)
 	cr.cs.Enqueue(reconcilekey.Session("gc-1"))
-	awaitReconcile(t, rec, "gc-1", wakeReasonAPI)
+	awaitCond(t, func() bool { return plannerPasses(rt.planner) > passes }, "a pass after the panic")
 	rt.mu.Lock()
 	stopped := rt.stopped
 	rt.mu.Unlock()
 	if stopped {
-		t.Error("the maintenance panic stopped the v2 runtime")
+		t.Error("the maintenance panic stopped the planner")
 	}
 }
 
 // Kills: a soft reload under v2 answered as if drift acceptance ran (a
-// silent zero), or not answered (MAINT-025 is off until P4.4). The reply
+// silent zero), or not answered (MAINT-025 is off until C7c). The reply
 // applies and says acceptance is unavailable; no session row is rewritten.
 func TestCityRuntimeV2SoftReloadRepliesUnavailable(t *testing.T) {
 	cr, store := newPhaseFixtureRuntime(t, true, false)
 	attachTestV2(t, cr)
-	bootTestV2(t, cr)
 	doneCh := cr.activeReload.doneCh
 
 	runFixtureTick(cr, "reload")
@@ -642,16 +636,16 @@ func TestCityRuntimeV2SoftReloadRepliesUnavailable(t *testing.T) {
 }
 
 // Kills: any v2 construction under legacy. A legacy wiring, even with the
-// developer override set, builds no v2 runtime and no router, prints no
-// banner, and a legacy city runtime installs no inventory hook.
+// developer override set, builds no planner, prints no banner, and a legacy
+// city runtime installs no inventory hook.
 func TestLegacyRuntimeConstructsNoV2State(t *testing.T) {
 	var stderr bytes.Buffer
 	w, err := newControllerWiring(&config.City{}, overrideEnv("1"), &stderr)
 	if err != nil {
 		t.Fatalf("newControllerWiring: %v", err)
 	}
-	if w.v2 != nil || w.wake.router != nil || w.mode != reconcilerLegacy {
-		t.Errorf("legacy wiring = mode %v v2 %v router %v, want legacy with neither", w.mode, w.v2, w.wake.router)
+	if w.v2 != nil || w.wake.planner != nil || w.mode != reconcilerLegacy {
+		t.Errorf("legacy wiring = mode %v v2 %v planner %v, want legacy with neither", w.mode, w.v2, w.wake.planner)
 	}
 	if stderr.Len() != 0 {
 		t.Errorf("legacy wiring printed %q", stderr.String())
@@ -659,8 +653,8 @@ func TestLegacyRuntimeConstructsNoV2State(t *testing.T) {
 
 	cr, _ := newPhaseFixtureRuntime(t, false, true)
 	runFixtureTick(cr, "patrol")
-	if cr.v2 != nil || cr.wakeOf().router != nil {
-		t.Errorf("legacy city runtime: v2 %v router %v, want neither", cr.v2, cr.wakeOf().router)
+	if cr.v2 != nil || cr.wakeOf().planner != nil {
+		t.Errorf("legacy city runtime: v2 %v planner %v, want neither", cr.v2, cr.wakeOf().planner)
 	}
 	if cr.inventoryLane.passHook.Load() != nil {
 		t.Error("a legacy city runtime installed an inventory pass hook")
@@ -680,9 +674,9 @@ func overrideEnv(value string) func(string) (string, bool) {
 }
 
 // Kills: the developer override honored when absent or not exactly "1", or
-// the refusal skipped (OQ-1); and the router missing from the wiring. An
-// admitted v2 wiring carries an unstarted runtime whose router is already on
-// the wake, keyed by the sessions leg, and announces the skeleton.
+// the refusal skipped (OQ-1); and the planner missing from the wiring. An
+// admitted v2 wiring carries an unstarted planner that is already on the
+// wake, and announces it trace-only.
 func TestNewControllerWiringV2AdmissionGate(t *testing.T) {
 	v2 := &config.City{Workspace: config.Workspace{Name: "gate"}, Daemon: config.DaemonConfig{SessionReconciler: "v2"}}
 	for _, tc := range []struct {
@@ -709,26 +703,23 @@ func TestNewControllerWiringV2AdmissionGate(t *testing.T) {
 			if err != nil {
 				t.Fatalf("wiring err = %v, want v2 admitted", err)
 			}
-			if w.mode != reconcilerV2 || w.v2 == nil || w.wake.router != w.v2.router {
-				t.Fatalf("wiring = mode %v v2 %v, want v2 with its router on the wake", w.mode, w.v2)
+			if w.mode != reconcilerV2 || w.v2 == nil || w.wake.planner != w.v2.planner {
+				t.Fatalf("wiring = mode %v v2 %v, want v2 with its planner on the wake", w.mode, w.v2)
 			}
-			if w.v2.router.sessionsLeg != "city:gate" {
-				t.Errorf("sessions leg = %q, want city:gate", w.v2.router.sessionsLeg)
+			if w.v2.started {
+				t.Error("the wiring started the planner")
 			}
-			if w.v2.ctrl.complete() {
-				t.Error("this build's v2 controllers report complete")
-			}
-			if !strings.Contains(stderr.String(), "session reconciler: v2 (skeleton: trace-only controllers)") {
-				t.Errorf("stderr = %q, want the skeleton banner", stderr.String())
+			if !strings.Contains(stderr.String(), "session reconciler: v2 (planner: trace-only)") {
+				t.Errorf("stderr = %q, want the trace-only banner", stderr.String())
 			}
 		})
 	}
 }
 
-// Kills: the router installed after newControllerWiring returns, so a key the
-// socket delivers before the city runtime exists is lost; or the city runtime
-// building its own wake instead of the wiring's, so its follow-ups, lanes and
-// pump bypass the router.
+// Kills: the planner put on the wake after newControllerWiring returns, so a
+// key the socket delivers before the city runtime exists is lost; or the
+// city runtime building its own wake or planner instead of the wiring's, so
+// its follow-ups, lanes and pump miss the planner.
 func TestV2WiringRetainsKeysEnqueuedBeforeTheRuntime(t *testing.T) {
 	cr, _ := newPhaseFixtureRuntime(t, false, false)
 	cfg := *cr.cfg
@@ -743,9 +734,6 @@ func TestV2WiringRetainsKeysEnqueuedBeforeTheRuntime(t *testing.T) {
 		t.Fatal("an early socket key reached the legacy tick")
 	}
 
-	rec := &v2Recorder{}
-	w.v2.ctrl = rec.controllers()
-	w.v2.fs.sample = func() (fsPressureStatus, bool) { return fsPressureStatus{}, false }
 	sp := runtime.NewFake()
 	wired := newTestCityRuntime(t, w.runtimeParams(CityRuntimeParams{
 		CityPath: cr.cityPath,
@@ -759,25 +747,26 @@ func TestV2WiringRetainsKeysEnqueuedBeforeTheRuntime(t *testing.T) {
 	}))
 	t.Cleanup(w.v2.stop)
 	if wired.wakeOf() != w.wake || wired.v2 != w.v2 {
-		t.Fatal("the city runtime does not use the wiring's wake and v2 runtime")
+		t.Fatal("the city runtime does not use the wiring's wake and planner")
 	}
-	if leg := wired.v2.host.sessionsLeg; leg == "" || leg != w.v2.router.sessionsLeg {
-		t.Errorf("bound host sessions leg = %q, want the wiring's %q", leg, w.v2.router.sessionsLeg)
+	if got := wired.v2.host.gather.CityPath; got != cr.cityPath {
+		t.Errorf("bound host city path = %q, want %q", got, cr.cityPath)
 	}
-	wired.setControllerState(cr.cs)
-	bootTestV2(t, wired)
-	awaitReconcile(t, rec, "gc-1", wakeReasonSocket)
+	// The mark waits for the first pass, which boot runs at once.
+	if len(w.v2.planner.dirty) != 1 || plannerWakes(w.v2.planner, wakeReasonSocket) != 1 {
+		t.Errorf("planner dirty = %d, socket wakes = %d, want the early key's mark pending", len(w.v2.planner.dirty), plannerWakes(w.v2.planner, wakeReasonSocket))
+	}
 }
 
-// Kills: params whose wake, v2 runtime and mode disagree accepted, so the
-// runtime reconciles through a wake the socket and API do not use; or a v2
-// controller accepted without its wiring's wake and runtime (an entry point
-// that forgot them would build a private router the socket never reaches).
+// Kills: params whose wake, planner and mode disagree accepted, so the
+// planner is woken through a wake the socket and API do not use; or a v2
+// controller accepted without its wiring's wake and planner (an entry point
+// that forgot them would build a private planner the socket never reaches).
 func TestNewCityRuntimeRefusesMismatchedReconcilerWiring(t *testing.T) {
-	rt := newDefaultV2Runtime("city:x", io.Discard)
-	other := newDefaultV2Runtime("city:x", io.Discard)
+	rt := newDefaultPlanner(io.Discard)
+	other := newDefaultPlanner(io.Discard)
 	routed := newLegacyWake(nil, nil)
-	routed.router = rt.router
+	routed.planner = rt.planner
 	for _, tc := range []struct {
 		name string
 		p    CityRuntimeParams
@@ -787,11 +776,11 @@ func TestNewCityRuntimeRefusesMismatchedReconcilerWiring(t *testing.T) {
 		{name: "legacy wake", p: CityRuntimeParams{Wake: newLegacyWake(nil, nil)}, ok: true},
 		{name: "v2 wired", p: CityRuntimeParams{ReconcilerMode: reconcilerV2, V2: rt, Wake: routed}, ok: true},
 		{name: "v2 bare", p: CityRuntimeParams{ReconcilerMode: reconcilerV2}},
-		{name: "v2 runtime without a wake", p: CityRuntimeParams{ReconcilerMode: reconcilerV2, V2: rt}},
-		{name: "v2 runtime under legacy", p: CityRuntimeParams{V2: rt}},
-		{name: "routed wake under legacy", p: CityRuntimeParams{Wake: routed}},
-		{name: "v2 wake without its runtime", p: CityRuntimeParams{ReconcilerMode: reconcilerV2, Wake: routed}},
-		{name: "v2 wake to another runtime", p: CityRuntimeParams{ReconcilerMode: reconcilerV2, V2: other, Wake: routed}},
+		{name: "v2 planner without a wake", p: CityRuntimeParams{ReconcilerMode: reconcilerV2, V2: rt}},
+		{name: "v2 planner under legacy", p: CityRuntimeParams{V2: rt}},
+		{name: "planner wake under legacy", p: CityRuntimeParams{Wake: routed}},
+		{name: "v2 wake without its planner", p: CityRuntimeParams{ReconcilerMode: reconcilerV2, Wake: routed}},
+		{name: "v2 wake to another planner", p: CityRuntimeParams{ReconcilerMode: reconcilerV2, V2: other, Wake: routed}},
 		{name: "v2 legacy wake", p: CityRuntimeParams{ReconcilerMode: reconcilerV2, V2: rt, Wake: newLegacyWake(nil, nil)}},
 	} {
 		if err := checkReconcilerWiring(tc.p); (err == nil) != tc.ok {
@@ -800,82 +789,67 @@ func TestNewCityRuntimeRefusesMismatchedReconcilerWiring(t *testing.T) {
 	}
 }
 
-// Kills: a router mapping panic escaping applyBeadEventToStores into the bead
-// event watcher, which has no recover of its own (F7). The panic is counted,
-// a resync is requested, and the watcher keeps applying events.
-func TestApplyBeadEventRouterPanicDoesNotKillWatcher(t *testing.T) {
+// Kills: the bead event watcher not reaching the planner, or reaching it
+// unfiltered (F7's watcher has no recover, so the planner's half is a pure
+// filter and a non-blocking mark). A session row and assigned work mark the
+// planner dirty; unrouted, unassigned work does not; the watcher applies all
+// three.
+func TestBeadEventWatcherMarksPlannerForRelevantEvents(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		var resyncs []string
-		var added atomic.Int32
-		router := newReconcileRouter(routerTestLeg, routerSink{
-			addSession: func(rowKey, routeReason) {
-				added.Add(1)
-				panic("sink exploded")
-			},
-			wakeAllocator: func(routeReason) {},
-			requestResync: func(reason string) { resyncs = append(resyncs, reason) },
-		}, io.Discard)
-		row := func(id string, seq uint64) events.Event {
-			evt := beadEvent(t, events.BeadUpdated, routerSessionBead(id, map[string]string{"session_name": "s-" + id}))
-			evt.Seq = seq
-			return evt
+		p := newTestPlanner()
+		evt := func(typ string, b beads.Bead, seq uint64) events.Event {
+			e := beadEvent(t, typ, b)
+			e.Seq = seq
+			return e
 		}
-		ep := &scriptedEventProvider{watches: []scriptedWatch{{events: []events.Event{row("gc-1", 1), row("gc-2", 2)}}}}
-		cs := &controllerState{eventProv: ep, beadEventStartSeqOK: true, cityBeadStore: beads.NewMemStore(), wake: &controllerWake{router: router}}
+		ep := &scriptedEventProvider{watches: []scriptedWatch{{events: []events.Event{
+			evt(events.BeadUpdated, routerSessionBead("gc-1", map[string]string{"session_name": "s-1"}), 1),
+			evt(events.BeadUpdated, routerWorkBead("w-1", "open", ""), 2),
+			evt(events.BeadUpdated, routerWorkBead("w-2", "open", "worker-1"), 3),
+		}}}}
+		cs := &controllerState{eventProv: ep, beadEventStartSeqOK: true, cityBeadStore: beads.NewMemStore(), wake: &controllerWake{planner: p}}
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
 		cs.startBeadEventWatcher(ctx)
 		synctest.Wait()
-		if n := added.Load(); n != 2 {
-			t.Fatalf("session rows routed = %d, want 2: the watcher stopped at the first panic", n)
-		}
-		if got := router.stats().Panics; got != 2 {
-			t.Errorf("router panics = %d, want 2", got)
-		}
-		if n := strings.Count(strings.Join(resyncs, ","), "router-panic"); n != 2 {
-			t.Errorf("resyncs = %v, want a router-panic resync per panic", resyncs)
+		if n := plannerWakes(p, "bead-event"); n != 2 {
+			t.Fatalf("bead-event wakes = %d, want 2 (the session row and the assigned work)", n)
 		}
 	})
 }
 
-// Kills: v2 lanes started before run owns the city and arms the config
-// watcher (MAINT-001); the runtime's lifetime tied to the startup step rather
-// than run (its workers would be gone once the city is ready); the worker FS
-// gate left unarmed after readiness; the runtime not stopped when run returns;
-// the drain tracker built under v2.
+// Kills: a planner pass run before run owns the city and arms the config
+// watcher (MAINT-001); the planner's lifetime tied to the startup step rather
+// than run (it would be gone once the city is ready); the planner not stopped
+// when run returns; the drain tracker built under v2.
 func TestV2Boot_OwnsCityAndArmsWatcherBeforeLanes(t *testing.T) {
 	var violations []string
 	var mu sync.Mutex
 	f := newV2RunFixture(t, "patrol_interval = \"1h\"\n", func(f *v2RunFixture) {
-		f.rec.setAllocator(func() error {
+		inner := f.rt.planner.pass
+		f.rt.planner.pass = func(now time.Time) passResult {
 			f.cr.watchMu.Lock()
 			armed := f.cr.watchCleanup != nil
 			f.cr.watchMu.Unlock()
 			if !f.cr.ownedCity.Load() || !armed {
 				mu.Lock()
-				violations = append(violations, fmt.Sprintf("allocator pass with ownedCity=%v watcher=%v", f.cr.ownedCity.Load(), armed))
+				violations = append(violations, fmt.Sprintf("pass with ownedCity=%v watcher=%v", f.cr.ownedCity.Load(), armed))
 				mu.Unlock()
 			}
-			return nil
-		})
+			return inner(now)
+		}
 	})
 	awaitClose(t, f.ready, "readiness")
 	mu.Lock()
 	if len(violations) != 0 {
-		t.Errorf("v2 lanes ran before run owned the city: %v", violations)
+		t.Errorf("planner passes ran before run owned the city: %v", violations)
 	}
 	mu.Unlock()
 
-	id := "gc-after-ready"
-	f.cr.wakeOf().Enqueue(wakeReasonAPI, reconcilekey.Session(id))
-	awaitReconcile(t, f.rec, id, wakeReasonAPI)
-	// run arms the gate just after it reports ready.
-	awaitCond(t, func() bool {
-		f.rt.mu.Lock()
-		defer f.rt.mu.Unlock()
-		return f.rt.fsArmed
-	}, "the worker FS gate armed after readiness")
+	passes := plannerPasses(f.rt.planner)
+	f.cr.wakeOf().Enqueue(wakeReasonAPI, reconcilekey.Session("gc-after-ready"))
+	awaitCond(t, func() bool { return plannerPasses(f.rt.planner) > passes }, "a pass after readiness")
 
 	f.cancel()
 	awaitClose(t, f.done, "run returning")
@@ -883,22 +857,22 @@ func TestV2Boot_OwnsCityAndArmsWatcherBeforeLanes(t *testing.T) {
 	stopped := f.rt.stopped
 	f.rt.mu.Unlock()
 	if !stopped {
-		t.Error("run returned without stopping the v2 runtime")
+		t.Error("run returned without stopping the planner")
 	}
 	if f.cr.sessionDrains != nil {
 		t.Error("run built the legacy drain tracker under v2")
 	}
 }
 
-// Kills: a non-idempotent v2 boot, or a boot-pass panic that stops the city
-// instead of retrying (MAINT-005). A census that panics once is retried after
-// the patrol and the city starts with one boot; a census that always panics
-// gives up after max_restarts.
+// Kills: a non-idempotent v2 boot, or a boot panic that stops the city
+// instead of retrying (MAINT-005). A boot census that panics once is retried
+// after the patrol and the city starts; one that always panics gives up after
+// max_restarts.
 func TestV2Boot_FirstPassRetriesOnPanicBoundedByMaxRestarts(t *testing.T) {
 	panickingCensus := func(f *v2RunFixture, times int) *atomic.Int32 {
 		var calls atomic.Int32
-		inner := f.rt.host.sessions
-		f.rt.host.sessions = func() ([]session.Info, error) {
+		inner := f.rt.host.bootCensus
+		f.rt.host.bootCensus = func() (v2SessionMigration, error) {
 			if int(calls.Add(1)) <= times {
 				panic("census exploded")
 			}
@@ -910,9 +884,6 @@ func TestV2Boot_FirstPassRetriesOnPanicBoundedByMaxRestarts(t *testing.T) {
 	t.Run("retries", func(t *testing.T) {
 		var calls *atomic.Int32
 		f := newV2RunFixture(t, "patrol_interval = \"10ms\"\nmax_restarts = 3\n", func(f *v2RunFixture) {
-			if _, err := f.store.Create(v2TestRow("gc-row")); err != nil {
-				t.Fatalf("Create: %v", err)
-			}
 			calls = panickingCensus(f, 1)
 		})
 		awaitClose(t, f.ready, "readiness after the retried boot")
@@ -921,13 +892,6 @@ func TestV2Boot_FirstPassRetriesOnPanicBoundedByMaxRestarts(t *testing.T) {
 		}
 		if n := calls.Load(); n != 2 {
 			t.Errorf("boot census reads = %d, want 2 (one panic, one retry)", n)
-		}
-		rows, err := f.store.List(beads.ListQuery{Type: sessionBeadType})
-		if err != nil || len(rows) != 1 {
-			t.Fatalf("session rows = %v (err %v)", rows, err)
-		}
-		if got := f.rec.callsFor(rows[0].ID); len(got) != 1 {
-			t.Errorf("boot reconciles of %s = %+v, want exactly one", rows[0].ID, got)
 		}
 	})
 
@@ -947,24 +911,26 @@ func TestV2Boot_FirstPassRetriesOnPanicBoundedByMaxRestarts(t *testing.T) {
 	})
 }
 
-// Kills: a v2Host closure reading a CityRuntime field a reload writes
+// Kills: a plannerHost closure reading a CityRuntime field a reload writes
 // unlocked (F2). Under -race, each host closure loops on its own goroutine
 // (so one closure's locking cannot order another's reads) against a tick that
-// applies a new config, with resync passes running around it.
+// applies a new config, with the planner's passes running around it.
 func TestV2HostReadsRaceFreeAgainstReload(t *testing.T) {
 	cr, _ := newPhaseFixtureRuntime(t, true, true)
 	cr.activeReload.soft = false
-	rt, _ := attachTestV2(t, cr)
+	rt := attachTestV2(t, cr)
 	bootTestV2(t, cr)
 
-	h := rt.host
+	h, g := rt.host, rt.host.gather
 	probes := []func(){
-		func() { _, _ = h.sessions() },
-		func() { _, _ = h.censusLegs() },
-		func() { _ = h.cityStore() },
-		func() { _ = h.rigStores() },
+		func() { _ = g.Sessions() },
+		func() { _ = g.RigStores() },
+		func() { _ = g.Observations() },
+		func() { _, _ = g.Episodes() },
+		func() { _, _ = h.bootCensus() },
+		func() { _ = rt.publishEnv() },
 		func() { h.beginTrace("race-probe").end(TraceCompletionCompleted, traceRecordPayload{"phase": "probe"}) },
-		func() { rt.requestResync("race-probe") },
+		func() { rt.planner.markDirty("race-probe") },
 	}
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -1013,16 +979,15 @@ func TestCityRuntimeV2ReloadBuildsNoDrainTracker(t *testing.T) {
 	cr, _ := newPhaseFixtureRuntime(t, true, false)
 	cr.activeReload.soft = false
 	attachTestV2(t, cr)
-	bootTestV2(t, cr)
 	runFixtureTick(cr, "reload")
 	if cr.sessionDrains != nil || cr.providerHealthGate != nil {
 		t.Error("a v2 reload built the legacy drain tracker")
 	}
 }
 
-// Kills: a store-less or feedless city leaving the v2 router blind: a
-// watcher that cannot start (no provider, or an unresolved start cursor)
-// reports a gap, so the router resyncs.
+// Kills: a store-less or feedless city leaving the planner blind: a watcher
+// that cannot start (no provider, or an unresolved start cursor) reports a
+// gap, which marks the planner dirty.
 func TestBeadEventWatcherWithoutFeedReportsGap(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1032,20 +997,13 @@ func TestBeadEventWatcherWithoutFeedReportsGap(t *testing.T) {
 		{name: "unresolved cursor", ep: latestSeqFailingProvider{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var gaps int
-			router := newReconcileRouter(routerTestLeg, routerSink{
-				requestResync: func(reason string) {
-					if reason == "bead-event-gap" {
-						gaps++
-					}
-				},
-			}, io.Discard)
-			cs := &controllerState{wake: &controllerWake{router: router}}
+			p := newTestPlanner()
+			cs := &controllerState{wake: &controllerWake{planner: p}}
 			if tc.ep != nil {
 				cs.eventProv = tc.ep
 			}
 			cs.startBeadEventWatcher(context.Background())
-			if gaps != 1 {
+			if gaps := plannerWakes(p, "event-gap"); gaps != 1 {
 				t.Errorf("gaps = %d, want 1", gaps)
 			}
 		})
@@ -1056,17 +1014,12 @@ type latestSeqFailingProvider struct{ events.Provider }
 
 func (latestSeqFailingProvider) LatestSeq() (uint64, error) { return 0, errors.New("log unreadable") }
 
-// Kills: the routed wake reporting every enqueue landed (a replay burst logs
-// a line per event, API-018) or never. It reports landed at most once per
-// interval of its clock.
+// Kills: the planner's wake reporting every enqueue landed (a replay burst
+// logs a line per event, API-018) or never. It reports landed at most once
+// per interval of its clock.
 func TestRoutedWakeReportsLandedAtMostOncePerInterval(t *testing.T) {
-	router := newReconcileRouter(routerTestLeg, routerSink{
-		addSession:    func(rowKey, routeReason) {},
-		wakeAllocator: func(routeReason) {},
-		requestResync: func(string) {},
-	}, io.Discard)
 	now := time.Unix(1_800_000_000, 0)
-	w := &controllerWake{router: router, now: func() time.Time { return now }}
+	w := &controllerWake{planner: newTestPlanner(), now: func() time.Time { return now }}
 	var got []bool
 	for _, step := range []time.Duration{0, 0, routedLandedEvery / 2, routedLandedEvery / 2, 0, routedLandedEvery} {
 		now = now.Add(step)
@@ -1077,51 +1030,32 @@ func TestRoutedWakeReportsLandedAtMostOncePerInterval(t *testing.T) {
 	}
 }
 
-// Kills: a routed bead event still poking the legacy tick, or not reaching
-// the router; replays included (F1). The event's row is enqueued as a replay.
-func TestControllerWakeOnBeadEventRoutesUnderRouter(t *testing.T) {
-	var rows []rowKey
-	var kinds []string
-	router := newReconcileRouter(routerTestLeg, routerSink{
-		addSession: func(k rowKey, r routeReason) {
-			rows = append(rows, k)
-			kinds = append(kinds, r.Kind)
-		},
-		wakeAllocator: func(routeReason) {},
-		requestResync: func(string) {},
-	}, io.Discard)
+// Kills: a bead event under v2 still poking the legacy tick, or not reaching
+// the planner, replays included; or the relevance filter dropped, so any work
+// event runs a pass (C2c1's dirty filter). A session row's event and its
+// replay mark the planner dirty; unrouted, unassigned work does not, until a
+// pass has read it as demand.
+func TestControllerWakeOnBeadEventMarksPlanner(t *testing.T) {
+	p := newTestPlanner()
 	pokeCh, dispatchCh := make(chan struct{}, 1), make(chan struct{}, 1)
 	w := newLegacyWake(pokeCh, dispatchCh)
-	w.router = router
+	w.planner = p
 
-	evt := beadEvent(t, events.BeadUpdated, routerSessionBead("gc-1", map[string]string{"session_name": "worker"}))
-	w.OnBeadEvent(evt, false, true)
-	w.OnBeadEvent(evt, true, true)
+	row := beadEvent(t, events.BeadUpdated, routerSessionBead("gc-1", map[string]string{"session_name": "worker"}))
+	w.OnBeadEvent(row, false)
+	w.OnBeadEvent(row, true)
+	work := beadEvent(t, events.BeadUpdated, routerWorkBead("w-1", "open", ""))
+	w.OnBeadEvent(work, false)
 	if drainSignal(pokeCh) || drainSignal(dispatchCh) {
-		t.Error("a routed bead event poked the legacy reconciler")
+		t.Error("a bead event under v2 poked the legacy reconciler")
 	}
-	if want := []rowKey{{Leg: routerTestLeg, ID: "gc-1"}, {Leg: routerTestLeg, ID: "gc-1"}}; !slices.Equal(rows, want) {
-		t.Errorf("rows = %v, want %v", rows, want)
+	if n := plannerWakes(p, "bead-event"); n != 2 {
+		t.Errorf("bead-event wakes = %d, want 2 (the row's event and its replay)", n)
 	}
-	if want := []string{routeReasonEvent, routeReasonReplay}; !slices.Equal(kinds, want) {
-		t.Errorf("kinds = %v, want %v", kinds, want)
-	}
-}
-
-// Kills: the bead event watcher handing the router appliedToSessions=false
-// for a session bead in the sessions store, so v2 treats its own rows as
-// relics on another leg.
-func TestApplyBeadEventMarksSessionsStoreEvents(t *testing.T) {
-	var rows []rowKey
-	router := newReconcileRouter(routerTestLeg, routerSink{
-		addSession:    func(k rowKey, _ routeReason) { rows = append(rows, k) },
-		wakeAllocator: func(routeReason) {},
-		requestResync: func(string) {},
-	}, io.Discard)
-	cs := &controllerState{cityBeadStore: beads.NewMemStore(), wake: &controllerWake{router: router}}
-	cs.applyBeadEventToStores(beadEvent(t, events.BeadUpdated, routerSessionBead("gc-7", map[string]string{"session_name": "w"})))
-	if want := []rowKey{{Leg: routerTestLeg, ID: "gc-7"}}; !slices.Equal(rows, want) {
-		t.Errorf("rows = %v, want %v", rows, want)
+	p.out.relevant.Store(&relevantSet{"w-1": true}) // a pass read w-1 as demand
+	w.OnBeadEvent(work, false)
+	if n := plannerWakes(p, "bead-event"); n != 3 {
+		t.Errorf("bead-event wakes = %d after w-1 became demand, want 3", n)
 	}
 }
 
@@ -1166,32 +1100,19 @@ func TestSessionReconcilerOverrideFeedsDoctorAndDrift(t *testing.T) {
 	}
 }
 
-// Kills: v2SessionsLeg drifting from the sessions census's own label for the
-// sessions-class store, on a city that relocates nothing.
-func TestV2SessionsLegIsTheSessionCensusLabel(t *testing.T) {
-	cfg := &config.City{Workspace: config.Workspace{Name: "leg-city"}}
-	legs, err := sessionCensusStoreCandidates(t.TempDir(), cfg, beads.NewMemStore(), nil, nil)
-	if err != nil || len(legs) == 0 {
-		t.Fatalf("session census legs = %v, err %v", legs, err)
-	}
-	if got := v2SessionsLeg(cfg); got != legs[0].ref {
-		t.Errorf("v2SessionsLeg = %q, want the session census's leading label %q", got, legs[0].ref)
-	}
-}
-
 // assertV2WakeWired checks a v2 entry point's composition: the API state's
-// wake is the runtime's, and it routes to the runtime's own v2 router.
+// wake is the runtime's, and it marks the runtime's own planner.
 func assertV2WakeWired(t *testing.T, runtimes []*CityRuntime) {
 	t.Helper()
 	if len(runtimes) == 0 {
 		t.Fatal("no controllerState was wired")
 	}
 	for _, cr := range runtimes {
-		if cr.v2 == nil || cr.wake == nil || cr.wake.router == nil {
-			t.Fatalf("v2 city runtime: v2 %v wake %v, want a v2 runtime whose router is on the wake", cr.v2, cr.wake)
+		if cr.v2 == nil || cr.wake == nil || cr.wake.planner == nil {
+			t.Fatalf("v2 city runtime: v2 %v wake %v, want a planner on the wake", cr.v2, cr.wake)
 		}
-		if cs := cr.cs; cs == nil || cs.wake != cr.wake || cs.wake.router != cr.v2.router {
-			t.Fatal("the API state's wake is not the runtime's v2-routed wake: API keys would miss the v2 queue")
+		if cs := cr.cs; cs == nil || cs.wake != cr.wake || cs.wake.planner != cr.v2.planner {
+			t.Fatal("the API state's wake is not the runtime's planner wake: API keys would miss the planner")
 		}
 	}
 }
@@ -1260,29 +1181,25 @@ func TestCityRuntimeV2FullTickRunsOnlyMaintenance(t *testing.T) {
 	}
 }
 
-// Kills: a failed sessions census swallowed into an empty one (m32): a
-// failed read must never look like an empty city, and boot must not declare
-// ready on it. The census returns the error; boot retries it and stays not
-// ready until its context ends.
+// Kills: a failed boot census swallowed into an empty one (m32): a failed
+// read must never look like an empty city, and boot must not declare ready
+// on it. Boot retries it and stays not ready until its context ends.
 func TestV2SessionsCensusFailedReadBlocksReady(t *testing.T) {
-	cr, store := newPhaseFixtureRuntime(t, false, false)
+	cr, store := newPhaseFixtureRuntime(t, false, true)
 	stderr := &synchronizedBuffer{}
 	cr.stderr = stderr
-	rt, _ := attachTestV2(t, cr)
+	rt := attachTestV2(t, cr)
 	cr.cs.cityBeadStore = failingListStore{Store: store}
 
-	if infos, err := cr.v2SessionsCensus(); err == nil {
-		t.Fatalf("v2SessionsCensus = %v, nil on a failing store, want its error", infos)
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	result := make(chan bool, 1)
-	go func() { result <- cr.bootV2(ctx, nil) }()
+	go func() { result <- cr.bootV2(ctx) }()
 	awaitCond(t, func() bool {
 		return strings.Contains(stderr.String(), "boot census failed") || len(result) == 1
 	}, "the boot census failing")
-	if rt.ready.Load() {
-		t.Fatal("boot declared ready on a failed sessions census")
+	if got := rt.bootState(); got != plannerBootCensus {
+		t.Fatalf("boot state = %s on a failed census, want %s", got, plannerBootCensus)
 	}
 	cancel()
 	select {
@@ -1295,68 +1212,11 @@ func TestV2SessionsCensusFailedReadBlocksReady(t *testing.T) {
 	}
 }
 
-// Kills: appliedToSessions reported for an event whose bead landed in
-// another store (m23a). A session-shaped bead under a rig's prefix is a relic
-// on the rig's leg: a census input that wakes the allocator, never a row key
-// on the sessions leg. The same bead under the city prefix is a row.
-func TestApplyBeadEventRigSessionBeadRoutesCensusOnly(t *testing.T) {
-	var rows []rowKey
-	var allocs int
-	router := newReconcileRouter(routerTestLeg, routerSink{
-		addSession:    func(k rowKey, _ routeReason) { rows = append(rows, k) },
-		wakeAllocator: func(routeReason) { allocs++ },
-		requestResync: func(string) {},
-	}, io.Discard)
-	cs := identityTestController(beads.NewMemStore(), beads.NewMemStore())
-	cs.wake = &controllerWake{router: router}
-
-	cs.applyBeadEventToStores(beadEvent(t, events.BeadUpdated, routerSessionBead("rw-7", map[string]string{"session_name": "w"})))
-	if len(rows) != 0 || allocs != 1 {
-		t.Fatalf("rig session bead: rows %v allocator wakes %d, want no row and one census wake", rows, allocs)
-	}
-	cs.applyBeadEventToStores(beadEvent(t, events.BeadUpdated, routerSessionBead("ct-7", map[string]string{"session_name": "w"})))
-	if want := []rowKey{{Leg: routerTestLeg, ID: "ct-7"}}; !slices.Equal(rows, want) {
-		t.Errorf("city session bead: rows %v, want %v", rows, want)
-	}
-}
-
-// Kills: the manual reload answered after the barrier resumed (m28), which
-// TestCityRuntimeV2ReloadReplyBeforeResume cannot see because both orders
-// reply before the next phase. A post-reload hook takes reloadMu, so the
-// reply's slot clear blocks in whichever frame sends the reply; when the reply
-// lands, the reconciles must still be held under the reload's name.
-func TestCityRuntimeV2ReloadReplySentInsideTheBarrier(t *testing.T) {
-	cr, _ := newPhaseFixtureRuntime(t, true, false)
-	cr.activeReload.soft = false
-	rt, _ := attachTestV2(t, cr)
-	bootTestV2(t, cr)
-	doneCh := cr.activeReload.doneCh
-	locked := make(chan struct{})
-	rt.barrier.afterPublish = append(rt.barrier.afterPublish, func(context.Context, reloadIntent, *reconcileEnv, *reloadControlReply) {
-		cr.reloadMu.Lock() // the test unlocks it
-		close(locked)
-	})
-
-	ticked := make(chan struct{})
-	go func() {
-		defer close(ticked)
-		runFixtureTick(cr, "reload")
-	}()
-	awaitClose(t, locked, "the post-reload hook")
-	awaitCond(t, func() bool { return len(doneCh) == 1 }, "the manual reload reply")
-	holds := rt.sessions.Stats().Holds
-	cr.reloadMu.Unlock()
-	awaitClose(t, ticked, "the tick")
-	if !slices.Contains(holds, v2HoldReload) {
-		t.Errorf("holds when the reply landed = %v, want %q: the reply went out after the barrier resumed", holds, v2HoldReload)
-	}
-}
-
-// stopOrderProvider records whether the v2 runtime had stopped at each
-// session listing; run's shutdown lists last.
+// stopOrderProvider records whether the planner had stopped at each session
+// listing; run's shutdown lists last.
 type stopOrderProvider struct {
 	*runtime.Fake
-	rt                *v2Runtime
+	rt                *plannerRuntime
 	stoppedAtLastList atomic.Bool
 }
 
@@ -1368,9 +1228,9 @@ func (p *stopOrderProvider) ListRunning(prefix string) ([]string, error) {
 	return p.Fake.ListRunning(prefix)
 }
 
-// Kills: the v2 runtime stopped after run's shutdown (m33), so its workers
-// would still reconcile while shutdown stops the sessions. Shutdown's
-// session listing finds the runtime already stopped.
+// Kills: the planner stopped after run's shutdown (m33), so its passes
+// would still run while shutdown stops the sessions. Shutdown's session
+// listing finds the planner already stopped.
 func TestCityRuntimeV2StopsBeforeShutdown(t *testing.T) {
 	var sp *stopOrderProvider
 	f := newV2RunFixture(t, "patrol_interval = \"1h\"\n", func(f *v2RunFixture) {
@@ -1381,72 +1241,23 @@ func TestCityRuntimeV2StopsBeforeShutdown(t *testing.T) {
 	f.cancel()
 	awaitClose(t, f.done, "run returning")
 	if !sp.stoppedAtLastList.Load() {
-		t.Error("shutdown listed the sessions to stop while the v2 runtime still ran")
+		t.Error("shutdown listed the sessions to stop while the planner still ran")
 	}
 }
 
-// Kills: v2SessionsLeg drifting from the session census's label for the
-// sessions-class store on a city that moves the infrastructure classes to a
-// shared binding (mleg-nosplit): the leg is the binding's class ref, which
-// the census, planned over the city's registered routes, leads with.
-func TestV2SessionsLegIsTheSplitCensusLabel(t *testing.T) {
-	cityPath := t.TempDir()
-	cfg := infraSplitConfig(cityPath)
-	cfg.Workspace.Name = "leg-city"
-	work, binding := beads.NewMemStore(), beads.NewMemStore()
-	routes := &storageRoutes{binding: "infra", stores: map[coordclass.Class]beads.Store{
-		coordclass.ClassGraph:     binding,
-		coordclass.ClassSessions:  binding,
-		coordclass.ClassMessaging: binding,
-		coordclass.ClassOrders:    binding,
-		coordclass.ClassNudges:    binding,
-	}}
-	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
-	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
-
-	legs, err := sessionCensusStoreCandidates(cityPath, cfg, binding, nil, nil)
-	if err != nil || len(legs) < 2 {
-		t.Fatalf("split session census legs = %v, err %v, want the binding and the work store", legs, err)
-	}
-	if got := v2SessionsLeg(cfg); got != legs[0].ref || !strings.HasPrefix(got, "class:") {
-		t.Errorf("v2SessionsLeg = %q, want the census's leading binding label %q", got, legs[0].ref)
-	}
-}
-
-// Pins what P3-7's L1 obligation rests on: the sessions leg is spelled from
-// Workspace.Name, not the resolved city name, so a reload that renames the
-// workspace moves the census's label while the router keeps the leg it
-// latched at boot. Both agree for any one config.
-func TestV2SessionsLegFollowsWorkspaceName(t *testing.T) {
-	var labels []string
-	for _, name := range []string{"old", "new"} {
-		cfg := &config.City{Workspace: config.Workspace{Name: name}, ResolvedWorkspaceName: "site-name"}
-		legs, err := sessionCensusStoreCandidates(t.TempDir(), cfg, beads.NewMemStore(), nil, nil)
-		if err != nil || len(legs) == 0 {
-			t.Fatalf("%s: session census legs = %v, err %v", name, legs, err)
-		}
-		if got := v2SessionsLeg(cfg); got != legs[0].ref {
-			t.Errorf("%s: v2SessionsLeg = %q, census leads with %q", name, got, legs[0].ref)
-		}
-		labels = append(labels, legs[0].ref)
-	}
-	if want := []string{"city:old", "city:new"}; !slices.Equal(labels, want) {
-		t.Errorf("census labels across a rename = %v, want %v", labels, want)
-	}
-}
-
-// Kills: a host bound to a runtime that already started (mbind-nopanic),
+// Kills: a host bound to a planner that already started (mbind-nopanic),
 // whose goroutines read the host unsynchronized with the bind.
 func TestV2BindHostAfterStartPanics(t *testing.T) {
 	cr, _ := newPhaseFixtureRuntime(t, false, false)
-	rt, _ := attachTestV2(t, cr)
-	bootTestV2(t, cr)
+	rt := attachTestV2(t, cr)
+	rt.publishEnv()
+	rt.start(context.Background())
 	defer func() {
 		if recover() == nil {
-			t.Error("bindHost on a started runtime did not panic")
+			t.Error("bindHost on a started planner did not panic")
 		}
 	}()
-	rt.bindHost(cr.newV2Host())
+	rt.bindHost(cr.newPlannerHost())
 }
 
 // Kills: the city runtime's reload drift judging admission without the
@@ -1475,38 +1286,28 @@ func TestCityRuntimeDriftJudgesWithTheWiringsEnv(t *testing.T) {
 	}
 }
 
-// v2QueueRecordFields are the reconcile_queue record's fields (§4.13). They
-// are pinned: a trace consumer reads them by name.
-var v2QueueRecordFields = []string{
-	"adds", "allocator_duty", "allocator_failures", "allocator_last_pass_ms", "allocator_passes", "allocator_wakes",
-	"allocator_wakes_suppressed",
-	"bead_event_latency_p50_ms", "bead_event_latency_p99_ms", "boot", "boot_ms",
-	"deferred", "depth_hot", "depth_resync", "dirty", "dropped_adds", "fs_gate", "holds", "keys",
-	"latency_p50_ms", "latency_p99_ms", "legacy_session_entries", "longest_in_flight_ms",
-	"oldest_hot_ms", "oldest_resync_ms", "processing", "reconcile_failures", "reconcile_panics",
-	"reconciles", "resync_requests", "resync_superseded", "resync_sweep_ms",
-	"router_events", "router_keys_out", "router_panics", "router_replays", "router_undecodable",
-	"router_unresolved", "session_reasons", "timers", "work_p50_ms", "work_p99_ms",
-}
+// v2PassRecordFields are the reconcile_pass record's fields. They are
+// pinned: a trace consumer reads them by name.
+var v2PassRecordFields = []string{"admitted", "boot", "deferred", "legacy_session_entries", "passes", "wakes"}
 
-// queueRecords returns the reconcile_queue records, in order.
-func queueRecords(records []SessionReconcilerTraceRecord) []SessionReconcilerTraceRecord {
+// passRecords returns the reconcile_pass records, in order.
+func passRecords(records []SessionReconcilerTraceRecord) []SessionReconcilerTraceRecord {
 	var out []SessionReconcilerTraceRecord
 	for _, r := range records {
-		if r.RecordType == TraceRecordOperation && r.Fields["operation_name"] == "reconcile_queue" {
+		if r.RecordType == TraceRecordOperation && r.Fields["operation_name"] == "reconcile_pass" {
 			out = append(out, r)
 		}
 	}
 	return out
 }
 
-// Kills: the reconcile_queue record missing from the v2 maintenance tick,
-// recorded twice in one, its fields renamed, its adds cumulative instead of
-// since the last tick, or recorded by a legacy tick (whose trace must not
-// change); and the m14/m15 mutations of TestCityRuntimeV2FullTickRunsOnlyMaintenance
-// as they show in the record: the v2 tick running the legacy phase list (the
-// guard counts its refusals) or tracing as a controller tick.
-func TestV2MaintenanceTraceRecordsReconcileQueue(t *testing.T) {
+// Kills: the reconcile_pass record missing from the v2 maintenance tick,
+// recorded twice in one, its fields renamed, or recorded by a legacy tick
+// (whose trace must not change); and the m14/m15 mutations of
+// TestCityRuntimeV2FullTickRunsOnlyMaintenance as they show in the record:
+// the v2 tick running the legacy phase list (the guard counts its refusals)
+// or tracing as a controller tick.
+func TestV2MaintenanceTraceRecordsReconcilePass(t *testing.T) {
 	t.Run("v2", func(t *testing.T) {
 		cr, _ := newPhaseFixtureRuntime(t, false, true)
 		attachTestV2(t, cr)
@@ -1517,19 +1318,19 @@ func TestV2MaintenanceTraceRecordsReconcileQueue(t *testing.T) {
 			t.Errorf("legacySessionEntries = %d after v2 ticks, want 0", n)
 		}
 		records := closeTrace(t, cr)
-		recs := queueRecords(records)
+		recs := passRecords(records)
 		if len(recs) != 2 || recs[0].TickID == recs[1].TickID {
-			t.Fatalf("reconcile_queue records = %d over two v2 ticks, want one per tick", len(recs))
+			t.Fatalf("reconcile_pass records = %d over two v2 ticks, want one per tick", len(recs))
 		}
-		first, second := recs[0], recs[1]
+		first := recs[0]
 		details := map[string]bool{}
 		for _, r := range records {
 			if r.TickID == first.TickID && r.TriggerDetail != "" {
 				details[r.TriggerDetail] = true
 			}
 		}
-		if first.SiteCode != TraceSiteReconcileQueue || !details["maintenance_tick"] || details["controller_tick"] {
-			t.Errorf("record site %q in a trace with details %v, want %q in a maintenance_tick trace", first.SiteCode, details, TraceSiteReconcileQueue)
+		if first.SiteCode != TraceSiteReconcilePass || !details["maintenance_tick"] || details["controller_tick"] {
+			t.Errorf("record site %q in a trace with details %v, want %q in a maintenance_tick trace", first.SiteCode, details, TraceSiteReconcilePass)
 		}
 		var names []string
 		for name := range first.Fields {
@@ -1538,24 +1339,17 @@ func TestV2MaintenanceTraceRecordsReconcileQueue(t *testing.T) {
 			}
 		}
 		slices.Sort(names)
-		assertLinesEqual(t, "reconcile_queue fields", names, v2QueueRecordFields)
-		if first.Fields["boot"] != v2BootReady || first.Fields["legacy_session_entries"] != float64(0) || first.Fields["reconciles"] != float64(1) {
-			t.Errorf("record boot=%v legacy_session_entries=%v reconciles=%v, want ready, 0, 1 (the boot reconcile of the open row)",
-				first.Fields["boot"], first.Fields["legacy_session_entries"], first.Fields["reconciles"])
-		}
-		if adds, _ := first.Fields["adds"].(map[string]any); adds["boot"] != float64(1) {
-			t.Errorf("first record adds = %v, want the boot add", first.Fields["adds"])
-		}
-		if adds, _ := second.Fields["adds"].(map[string]any); len(adds) != 0 {
-			t.Errorf("second record adds = %v, want none since the first", second.Fields["adds"])
+		assertLinesEqual(t, "reconcile_pass fields", names, v2PassRecordFields)
+		if first.Fields["boot"] != plannerBootReady || first.Fields["legacy_session_entries"] != float64(0) {
+			t.Errorf("record boot=%v legacy_session_entries=%v, want ready, 0", first.Fields["boot"], first.Fields["legacy_session_entries"])
 		}
 	})
 
 	t.Run("legacy", func(t *testing.T) {
 		cr, _ := newPhaseFixtureRuntime(t, false, true)
 		runFixtureTick(cr, "patrol")
-		if recs := queueRecords(closeTrace(t, cr)); len(recs) != 0 {
-			t.Errorf("a legacy tick recorded reconcile_queue %d times, want never", len(recs))
+		if recs := passRecords(closeTrace(t, cr)); len(recs) != 0 {
+			t.Errorf("a legacy tick recorded reconcile_pass %d times, want never", len(recs))
 		}
 	})
 }
@@ -1568,9 +1362,9 @@ func TestV2LegacySessionEntriesReportedInTrace(t *testing.T) {
 	cr.beadReconcileTick(context.Background(), DesiredStateResult{}, nil, nil, false) // refused and counted
 	cr.controlDispatcherTick(context.Background())                                    // refused and counted
 	runFixtureTick(cr, "patrol")
-	recs := queueRecords(closeTrace(t, cr))
+	recs := passRecords(closeTrace(t, cr))
 	if len(recs) != 1 {
-		t.Fatalf("reconcile_queue records = %d, want 1", len(recs))
+		t.Fatalf("reconcile_pass records = %d, want 1", len(recs))
 	}
 	if got := recs[0].Fields["legacy_session_entries"]; got != float64(2) {
 		t.Errorf("legacy_session_entries = %v, want 2", got)
@@ -1580,7 +1374,7 @@ func TestV2LegacySessionEntriesReportedInTrace(t *testing.T) {
 // Kills: a store-less v2 city's record reading as a boot stuck on its census
 // (MAINT-003: boot never runs there, and readiness proceeds). bootV2 latches
 // no-store; the record does not re-read the store.
-func TestCityRuntimeV2NoStoreQueueRecordSaysNoStore(t *testing.T) {
+func TestCityRuntimeV2NoStorePassRecordSaysNoStore(t *testing.T) {
 	cityPath := t.TempDir()
 	cr := &CityRuntime{
 		cityName:  "test-city",
@@ -1592,175 +1386,49 @@ func TestCityRuntimeV2NoStoreQueueRecordSaysNoStore(t *testing.T) {
 		trace:     newSessionReconcilerTraceManager(cityPath, "test-city", io.Discard),
 	}
 	attachTestV2(t, cr)
-	if !cr.bootV2(context.Background(), nil) {
+	if !cr.bootV2(context.Background()) {
 		t.Fatal("a store-less v2 city did not proceed to readiness")
 	}
 	trace := cr.beginTraceCycle("patrol", "maintenance_tick", nil)
-	cr.recordV2Queue(trace)
+	cr.recordV2Pass(trace)
 	trace.end(TraceCompletionCompleted, traceRecordPayload{"phase": "tick"})
-	recs := queueRecords(closeTrace(t, cr))
+	recs := passRecords(closeTrace(t, cr))
 	if len(recs) != 1 {
-		t.Fatalf("reconcile_queue records = %d, want 1", len(recs))
+		t.Fatalf("reconcile_pass records = %d, want 1", len(recs))
 	}
 	if got := recs[0].Fields["boot"]; got != "no-store" {
 		t.Errorf("boot = %v, want no-store", got)
 	}
 }
 
-// startupQueueRecords returns the boot values of the reconcile_queue records
-// in the startup step's trace cycle, in order.
-func startupQueueRecords(records []SessionReconcilerTraceRecord) []string {
-	var tick string
-	for _, r := range records {
-		if r.RecordType == TraceRecordCycleResult && r.Fields["phase"] == "startup" {
-			tick = r.TickID
-		}
+// Kills: the startup watchdog saying nothing of the planner, or not what
+// boot waits on: a boot whose sessions cache never primes waits on the gate.
+func TestV2StartupWatchdogReportsTheBootGate(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, true)
+	stderr := &synchronizedBuffer{}
+	cr.stderr = stderr
+	rt := attachTestV2(t, cr) // no primed cache: the gate stays shut
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan bool, 1)
+	go func() { result <- cr.bootV2(ctx) }()
+	awaitCond(t, func() bool { return plannerPasses(rt.planner) > 0 }, "a pass that hit the shut gate")
+	cr.startupReadinessWatchdog(context.Background(), make(chan struct{}), 0, time.Minute)
+	if got := stderr.String(); !strings.Contains(got, "session reconciler v2: boot=gate") {
+		t.Errorf("startup watchdog = %q, want the planner's shut boot gate", got)
 	}
-	var boots []string
-	for _, r := range queueRecords(records) {
-		if r.TickID == tick {
-			boots = append(boots, fmt.Sprint(r.Fields["boot"]))
-		}
+	cancel()
+	if <-result {
+		t.Error("bootV2 reported ready with the cache unprimed")
 	}
-	return boots
-}
-
-// awaitQueueRecord waits until the v2 runtime builds its next reconcile_queue
-// record.
-func awaitQueueRecord(t *testing.T, rt *v2Runtime) {
-	t.Helper()
-	rt.report.mu.Lock()
-	rt.report.adds = nil
-	rt.report.mu.Unlock()
-	awaitCond(t, func() bool {
-		rt.report.mu.Lock()
-		defer rt.report.mu.Unlock()
-		return rt.report.adds != nil
-	}, "a reconcile_queue record")
-}
-
-// Kills: a boot stuck before ready leaving no record (records only on
-// maintenance ticks, which start after ready), the boot patrol recording
-// outside the startup step's trace, or the record reading no-store for a
-// city that has a store (the store re-read, or no-store whenever not ready:
-// N1); and the startup watchdog saying nothing of v2. A boot stuck on a boot
-// key's first reconcile records coverage at every patrol, and a boot stuck on
-// the allocator records allocator, in the startup step's trace; a boot whose
-// census keeps failing records census while it waits to retry.
-func TestV2BootPatrolRecordsWhatBootWaitsOn(t *testing.T) {
-	setup := func(t *testing.T) (*CityRuntime, *v2Runtime, *v2Recorder, *synchronizedBuffer) {
-		cr, _ := newPhaseFixtureRuntime(t, false, false)
-		stderr := &synchronizedBuffer{}
-		cr.stderr = stderr
-		cr.cfg.Daemon.PatrolInterval = "10ms"
-		rt, rec := attachTestV2(t, cr)
-		return cr, rt, rec, stderr
-	}
-	startup := func(cr *CityRuntime) <-chan bool {
-		done := make(chan bool, 1)
-		go func() { done <- cr.startupReconcile(context.Background()) }()
-		return done
-	}
-	finish := func(t *testing.T, done <-chan bool) {
-		t.Helper()
-		select {
-		case ok := <-done:
-			if !ok {
-				t.Fatal("the v2 startup step did not complete")
-			}
-		case <-time.After(hangBudget):
-			t.Fatalf("the v2 startup step did not complete within %s", hangBudget)
-		}
-	}
-
-	t.Run("census", func(t *testing.T) {
-		cr, rt, _, _ := setup(t)
-		cr.cs.cityBeadStore = failingListStore{Store: cr.cs.cityBeadStore}
-		trace := cr.beginTraceCycle("startup", "initial_reconcile", nil)
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		done := make(chan bool, 1)
-		go func() { done <- cr.bootV2(ctx, trace) }()
-		awaitQueueRecord(t, rt)
-		cancel()
-		select {
-		case ok := <-done:
-			if ok {
-				t.Fatal("bootV2 reported ready on a failing census")
-			}
-		case <-time.After(hangBudget):
-			t.Fatalf("bootV2 did not return within %s of its context ending", hangBudget)
-		}
-		trace.end(TraceCompletionAborted, traceRecordPayload{"phase": "startup"})
-		boots := startupQueueRecords(closeTrace(t, cr))
-		if len(boots) == 0 || slices.ContainsFunc(boots, func(b string) bool { return b != v2BootCensus }) {
-			t.Fatalf("startup trace boot records = %v, want census at every patrol while the census fails", boots)
-		}
-	})
-
-	t.Run("coverage", func(t *testing.T) {
-		cr, rt, rec, stderr := setup(t)
-		release := make(chan struct{})
-		releaseOnce := sync.OnceFunc(func() { close(release) })
-		t.Cleanup(releaseOnce)
-		rec.setSession(func(workqueue.Item[rowKey], *reconcileEnv) (time.Duration, error) {
-			<-release
-			return 0, nil
-		})
-		done := startup(cr)
-		awaitQueueRecord(t, rt)
-		awaitQueueRecord(t, rt)
-		cr.startupReadinessWatchdog(context.Background(), make(chan struct{}), 0, time.Minute)
-		if got := stderr.String(); !strings.Contains(got, "session reconciler v2: boot=coverage depth_hot=0 depth_resync=0 processing=1 longest_in_flight=") {
-			t.Errorf("startup watchdog = %q, want the v2 boot state with a reconcile in flight", got)
-		}
-		releaseOnce()
-		finish(t, done)
-		boots := startupQueueRecords(closeTrace(t, cr))
-		if len(boots) < 2 || boots[0] != v2BootCoverage || boots[1] != v2BootCoverage {
-			t.Fatalf("startup trace boot records = %v, want coverage at every patrol while the boot key reconciles", boots)
-		}
-		for _, b := range boots {
-			if b != v2BootCoverage && b != v2BootReady {
-				t.Fatalf("startup trace boot records = %v, want coverage until ready", boots)
-			}
-		}
-	})
-
-	t.Run("allocator", func(t *testing.T) {
-		cr, rt, rec, _ := setup(t)
-		var primed atomic.Bool
-		rec.setAllocator(func() error {
-			if !primed.Load() {
-				return errors.New("not yet")
-			}
-			return nil
-		})
-		done := startup(cr)
-		awaitCond(t, func() bool { return rt.bootState() == v2BootAllocator }, "boot waiting on the allocator")
-		awaitQueueRecord(t, rt)
-		primed.Store(true)
-		rt.router.Enqueue(wakeReasonAPI) // urgent: the next pass skips the failed pass's backoff
-		finish(t, done)
-		boots := startupQueueRecords(closeTrace(t, cr))
-		if len(boots) == 0 || !slices.Contains(boots, v2BootAllocator) {
-			t.Fatalf("startup trace boot records = %v, want allocator while the allocator fails", boots)
-		}
-		for _, b := range boots {
-			if b != v2BootCoverage && b != v2BootAllocator && b != v2BootReady {
-				t.Fatalf("startup trace boot records = %v, want coverage, then allocator, until ready", boots)
-			}
-		}
-	})
 }
 
 // Kills: the record left out of a maintenance tick that panics (recorded only
 // at the tick's normal end, or only when it completed). The aborted cycle
 // still carries exactly one record.
-func TestV2PanickedMaintenanceTickRecordsTheQueue(t *testing.T) {
+func TestV2PanickedMaintenanceTickRecordsThePass(t *testing.T) {
 	cr, store := newPhaseFixtureRuntime(t, false, false)
 	attachTestV2(t, cr)
-	bootTestV2(t, cr)
 	cr.cs.cityBeadStore = &panicOnLabelStore{Store: store, label: "gc:extmsg-binding"}
 	if !cr.safeTick(func() { runFixtureTick(cr, "patrol") }, "patrol") {
 		t.Fatal("the maintenance tick did not panic; the test needs it to")
@@ -1776,12 +1444,112 @@ func TestV2PanickedMaintenanceTickRecordsTheQueue(t *testing.T) {
 		}
 	}
 	var n int
-	for _, r := range queueRecords(records) {
+	for _, r := range passRecords(records) {
 		if r.TickID == tick {
 			n++
 		}
 	}
 	if n != 1 {
-		t.Fatalf("reconcile_queue records in the aborted tick = %d, want 1", n)
+		t.Fatalf("reconcile_pass records in the aborted tick = %d, want 1", n)
+	}
+}
+
+// Kills: the trace sink unwired (the pass's changed rows never reach the
+// trace) or one record per row per pass instead of per change (v5 R6). The
+// first pass records the fixture row's decision under its template and key;
+// a second, unchanged pass records nothing. The worker template is armed for
+// detail, as an operator's gc trace arms it.
+func TestPlannerTraceSinkRecordsChangedRows(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, true)
+	rt := attachTestV2(t, cr)
+	primeTestV2(t, cr)
+	now := time.Now()
+	if _, err := cr.trace.armStore.upsertArm(TraceArm{
+		ScopeType: TraceArmScopeTemplate, ScopeValue: "worker", Source: TraceArmSourceManual, Level: TraceModeDetail,
+		ArmedAt: now, ExpiresAt: now.Add(time.Hour), LastExtendedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("upsert arm: %v", err)
+	}
+	rt.publishEnv()
+	rt.pass(time.Now())
+	if rec := rt.planner.out.record.Load(); rec.Err != "" || len(rec.Rows) != 1 {
+		t.Fatalf("first pass record = %+v, want the worker row traced", rec)
+	}
+	rt.pass(time.Now())
+	var decisions []string
+	for _, r := range closeTrace(t, cr) {
+		if r.RecordType == TraceRecordDecision && r.SiteCode == TraceSiteV2SessionDecision {
+			decisions = append(decisions, fmt.Sprintf("%s %s %v", r.Template, r.SessionName, r.Fields["key"]))
+		}
+	}
+	if len(decisions) != 1 || !strings.HasPrefix(decisions[0], "worker worker city:") {
+		t.Fatalf("decision records = %q, want one for the worker row", decisions)
+	}
+}
+
+// v2PlannerSeams are the reconcile_*.go production files that are the city
+// runtime's side of the switch and so name CityRuntime by design. Every
+// other reconcile_*.go and allocator_*.go file is v2 code, a new one
+// included, and reaches the city only through plannerHost.
+var v2PlannerSeams = map[string]bool{"reconcile_maintenance.go": true}
+
+// v2PlannerSeamDecls are the only declarations inside a v2 file that may name
+// CityRuntime: the wake's runtime accessors.
+var v2PlannerSeamDecls = map[string]bool{
+	"reconcile_wake.go:(*CityRuntime).initWake": true,
+	"reconcile_wake.go:(*CityRuntime).wakeOf":   true,
+}
+
+// Kills: planner code reaching CityRuntime (F2), or a pass reading the
+// host's config directly instead of the published env. A reload writes
+// CityRuntime fields without a lock, so the v2 files never name the type,
+// and only publishEnv calls host.snapshotEnv.
+func TestPlannerDoesNotReferenceCityRuntime(t *testing.T) {
+	var files []string
+	for _, pattern := range []string{"reconcile_*.go", "allocator_*.go"} {
+		names, err := filepath.Glob(pattern)
+		if err != nil {
+			t.Fatalf("glob %s: %v", pattern, err)
+		}
+		for _, name := range names {
+			if !strings.HasSuffix(name, "_test.go") && !v2PlannerSeams[name] {
+				files = append(files, name)
+			}
+		}
+	}
+	for _, want := range []string{"reconcile_planner.go", "reconcile_planner_runtime.go", "reconcile_pass.go", "reconcile_gather.go", "reconcile_wiring.go", "reconcile_wake.go"} {
+		if !slices.Contains(files, want) {
+			t.Fatalf("v2 files %v miss %s", files, want)
+		}
+	}
+	fset := token.NewFileSet()
+	var bad []string
+	for _, name := range files {
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		for _, decl := range file.Decls {
+			if v2PlannerSeamDecls[name+":"+topLevelDeclName(decl)] {
+				continue
+			}
+			fn, _ := decl.(*ast.FuncDecl)
+			ast.Inspect(decl, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.Ident:
+					if n.Name == "CityRuntime" {
+						bad = append(bad, fset.Position(n.Pos()).String()+": names CityRuntime")
+					}
+				case *ast.SelectorExpr:
+					if n.Sel.Name == "snapshotEnv" && (fn == nil || fn.Name.Name != "publishEnv") {
+						bad = append(bad, fset.Position(n.Pos()).String()+": reads host.snapshotEnv outside publishEnv")
+					}
+				}
+				return true
+			})
+		}
+	}
+	if len(bad) > 0 {
+		t.Fatalf("planner code must reach the city only through plannerHost and the published env (F2):\n  %s", strings.Join(bad, "\n  "))
 	}
 }

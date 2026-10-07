@@ -7,6 +7,7 @@ package auto
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -20,8 +21,9 @@ type Provider struct {
 	defaultSP runtime.Provider
 	acpSP     runtime.Provider
 
-	mu     sync.RWMutex
-	routes map[string]bool // true = ACP
+	mu              sync.RWMutex
+	routeGeneration uint64
+	routes          map[string]uint64 // nonzero generation = ACP
 	// seeded is set once SeedRoutes has loaded the route table from the
 	// session beads, so a session without an ACP route is known to be default.
 	seeded bool
@@ -37,13 +39,17 @@ var (
 	_ runtime.TransportCapabilityProvider   = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
+	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
+	_ runtime.FreshLivenessObserver         = (*Provider)(nil)
+	_ runtime.SessionObjectKiller           = (*Provider)(nil)
 	_ runtime.AttachmentObserverWithError   = (*Provider)(nil)
 	_ runtime.SessionEventProvider          = (*Provider)(nil)
 	_ runtime.BackendListingProvider        = (*Provider)(nil)
 	_ runtime.BackendsProvider              = (*Provider)(nil)
 	_ runtime.ListingAttestation            = (*Provider)(nil)
 	_ runtime.Router                        = (*Provider)(nil)
+	_ runtime.ServerDeathConfirmer          = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -52,7 +58,7 @@ func New(defaultSP, acpSP runtime.Provider) *Provider {
 	return &Provider{
 		defaultSP: defaultSP,
 		acpSP:     acpSP,
-		routes:    make(map[string]bool),
+		routes:    make(map[string]uint64),
 	}
 }
 
@@ -60,8 +66,18 @@ func New(defaultSP, acpSP runtime.Provider) *Provider {
 // Must be called before Start for that session.
 func (p *Provider) RouteACP(name string) {
 	p.mu.Lock()
-	p.routes[name] = true
+	p.routes[name] = p.nextRouteGenerationLocked()
 	p.mu.Unlock()
+}
+
+// nextRouteGenerationLocked returns a fresh nonzero route generation. The
+// caller must hold p.mu for writing.
+func (p *Provider) nextRouteGenerationLocked() uint64 {
+	p.routeGeneration++
+	if p.routeGeneration == 0 {
+		p.routeGeneration++
+	}
+	return p.routeGeneration
 }
 
 // Unroute removes a session's routing entry. Called on Stop to avoid
@@ -79,7 +95,9 @@ func (p *Provider) Unroute(name string) {
 func (p *Provider) SeedRoutes(names []string) {
 	p.mu.Lock()
 	for _, name := range names {
-		p.routes[name] = true
+		if p.routes[name] == 0 {
+			p.routes[name] = p.nextRouteGenerationLocked()
+		}
 	}
 	p.seeded = true
 	p.mu.Unlock()
@@ -89,7 +107,7 @@ func (p *Provider) SeedRoutes(names []string) {
 // known; the default route is known only once SeedRoutes has run.
 func (p *Provider) RouteFor(name string) runtime.Route {
 	p.mu.RLock()
-	isACP := p.routes[name]
+	isACP := p.routes[name] != 0
 	seeded := p.seeded
 	p.mu.RUnlock()
 	if isACP {
@@ -108,6 +126,29 @@ func (p *Provider) acpBackend() runtime.Backend {
 
 func (p *Provider) route(name string) runtime.Provider {
 	return p.RouteFor(name).Provider
+}
+
+// StopUnattendedSession forwards the bound unattended stop only to the backend
+// selected for name. It must not use stale-route fallback: a different backend
+// cannot prove or stop the pending target.
+func (p *Provider) StopUnattendedSession(name, expectedToken string) error {
+	p.mu.RLock()
+	selected := p.defaultSP
+	label := "default"
+	if p.routes[name] != 0 {
+		selected = p.acpSP
+		label = "ACP"
+	}
+	p.mu.RUnlock()
+
+	stopper, ok := selected.(runtime.UnattendedSessionStopper)
+	if !ok {
+		return fmt.Errorf("auto %s backend does not support unattended-session stop for %q", label, name)
+	}
+	if err := stopper.StopUnattendedSession(name, expectedToken); err != nil {
+		return fmt.Errorf("auto %s backend stopping unattended session %q: %w", label, name, err)
+	}
+	return nil
 }
 
 // SupportsTransport reports whether this provider can route the requested
@@ -142,13 +183,16 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 // Stop delegates to the routed backend and cleans up the route entry
 // only on success. If the routed backend fails, tries the other backend
 // to handle stale/missing route entries (e.g., after controller restart).
+// Two "gone" answers merge into success, except that a missing-server answer
+// counts only when its backend confirms the server dead
+// ([runtime.MissingServerUnconfirmed]).
 func (p *Provider) Stop(name string) error {
 	primary := p.route(name)
 	primaryLabel := "default"
 	otherLabel := "acp"
 	primaryRunning := primary.IsRunning(name)
 	p.mu.RLock()
-	primaryExplicitRoute := p.routes[name]
+	primaryExplicitRoute := p.routes[name] != 0
 	p.mu.RUnlock()
 	err := primary.Stop(name)
 	if err == nil && primaryRunning {
@@ -158,7 +202,7 @@ func (p *Provider) Stop(name string) error {
 	// Fall through to the other backend in case the route is stale.
 	var other runtime.Provider
 	p.mu.RLock()
-	if p.routes[name] {
+	if p.routes[name] != 0 {
 		primaryLabel = "acp"
 		otherLabel = "default"
 		other = p.defaultSP
@@ -189,11 +233,24 @@ func (p *Provider) Stop(name string) error {
 		runtime.BackendError{Label: primaryLabel, Err: err},
 		runtime.BackendError{Label: otherLabel, Err: otherErr},
 	)
+	if mergedErr == nil && otherErr != nil &&
+		(runtime.MissingServerUnconfirmed(primary, err) || runtime.MissingServerUnconfirmed(other, otherErr)) {
+		// Both backends said "gone", but one only because its server is
+		// missing and not confirmed dead: the session may still be running.
+		return errors.Join(fmt.Errorf("%s backend: %w", primaryLabel, err), fmt.Errorf("%s backend: %w", otherLabel, otherErr))
+	}
 	if mergedErr == nil {
 		p.Unroute(name)
 		return nil
 	}
 	return mergedErr
+}
+
+// ServerConfirmedDead implements [runtime.ServerDeathConfirmer] by forwarding
+// to the backends that confirm server death (tmux), so StopForCleanup keeps
+// its confirmed-dead rule for a missing-server answer Stop returns.
+func (p *Provider) ServerConfirmedDead() bool {
+	return runtime.ServersConfirmedDead(p.defaultSP, p.acpSP)
 }
 
 // Interrupt delegates to the routed backend.
@@ -209,7 +266,7 @@ func (p *Provider) IsRunning(name string) bool {
 	}
 	// Fall through: check the other backend in case routing is stale.
 	p.mu.RLock()
-	isACP := p.routes[name]
+	isACP := p.routes[name] != 0
 	p.mu.RUnlock()
 	if isACP {
 		return p.defaultSP.IsRunning(name)
@@ -225,7 +282,7 @@ func (p *Provider) IsDeadRuntimeSession(name string) (bool, error) {
 		return dead, err
 	}
 	p.mu.RLock()
-	isACP := p.routes[name]
+	isACP := p.routes[name] != 0
 	p.mu.RUnlock()
 	if isACP {
 		return providerDeadRuntimeSession(p.defaultSP, name)
@@ -256,7 +313,7 @@ func (p *Provider) IsAttachedWithError(name string) (bool, error) {
 // Attach delegates to the routed backend. ACP sessions return an error.
 func (p *Provider) Attach(name string) error {
 	p.mu.RLock()
-	isACP := p.routes[name]
+	isACP := p.routes[name] != 0
 	p.mu.RUnlock()
 	if isACP {
 		return fmt.Errorf("agent %q uses ACP transport (no terminal to attach to)", name)
@@ -285,7 +342,7 @@ func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.L
 	// matching IsRunning's recovery so a live ACP singleton on a
 	// herdr-default city is not misread as dead.
 	p.mu.RLock()
-	isACP := p.routes[name]
+	isACP := p.routes[name] != 0
 	p.mu.RUnlock()
 	other := p.acpSP
 	if isACP {
@@ -299,18 +356,69 @@ func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.L
 // recovery matches IsRunning and ObserveLiveness without collapsing an
 // unavailable primary into absence.
 func (p *Provider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
-	primary, err := runtime.ObserveLivenessWithError(p.route(name), name, processNames)
+	return p.observeFallingThrough(name, func(sp runtime.Provider) (runtime.Liveness, error) {
+		return runtime.ObserveLivenessWithError(sp, name, processNames)
+	})
+}
+
+// ObserveLivenessSince is ObserveLivenessWithError over reads taken at or
+// after since ([runtime.ObserveLivenessSince] on each backend).
+func (p *Provider) ObserveLivenessSince(name string, processNames []string, since time.Time) (runtime.Liveness, error) {
+	return p.observeFallingThrough(name, func(sp runtime.Provider) (runtime.Liveness, error) {
+		return runtime.ObserveLivenessSince(sp, name, processNames, since)
+	})
+}
+
+// observeFallingThrough reads the routed backend and, on a confirmed
+// not-running answer, the other one. A corpse on the routed backend (tmux)
+// is kept when the other backend also answers not-running without error, so
+// the fall-through never hides it; Running, Alive and the error are those
+// the other backend answered, as before.
+func (p *Provider) observeFallingThrough(name string, observe func(runtime.Provider) (runtime.Liveness, error)) (runtime.Liveness, error) {
+	primary, err := observe(p.route(name))
 	if err != nil || primary.Running {
 		return primary, err
 	}
 	p.mu.RLock()
-	isACP := p.routes[name]
+	isACP := p.routes[name] != 0
 	p.mu.RUnlock()
 	other := p.acpSP
 	if isACP {
 		other = p.defaultSP
 	}
-	return runtime.ObserveLivenessWithError(other, name, processNames)
+	obs, err := observe(other)
+	if err == nil && !obs.Running && primary.Corpse {
+		return primary, nil
+	}
+	return obs, err
+}
+
+// KillCorpseObject forwards to the backend that kills session objects by id
+// (tmux), preferring the routed one.
+func (p *Provider) KillCorpseObject(name, objectID, created string) (runtime.SessionObjectKillResult, error) {
+	killer, err := p.sessionObjectKiller(name)
+	if err != nil {
+		return runtime.SessionObjectNotKilled, err
+	}
+	return killer.KillCorpseObject(name, objectID, created)
+}
+
+// KillZombieObject forwards like KillCorpseObject.
+func (p *Provider) KillZombieObject(name, objectID, created, panePID string) (runtime.SessionObjectKillResult, error) {
+	killer, err := p.sessionObjectKiller(name)
+	if err != nil {
+		return runtime.SessionObjectNotKilled, err
+	}
+	return killer.KillZombieObject(name, objectID, created, panePID)
+}
+
+func (p *Provider) sessionObjectKiller(name string) (runtime.SessionObjectKiller, error) {
+	for _, sp := range []runtime.Provider{p.route(name), p.defaultSP, p.acpSP} {
+		if killer, ok := sp.(runtime.SessionObjectKiller); ok {
+			return killer, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: session %q", runtime.ErrSessionObjectKillUnsupported, name)
 }
 
 // Nudge delegates to the routed backend.

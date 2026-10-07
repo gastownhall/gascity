@@ -63,7 +63,7 @@ var canonicalProviderCalls = map[string]int{
 	"cmd_restart.go:cmdRigRestart:newSessionProvider:bind-error":                                                                               1,
 	"cmd_rig.go:doRigList:rigListSessionProvider:bind-error":                                                                                   1,
 	"cmd_runtime_drain.go:cmdRuntimeDrain:newSessionProvider:bind-error":                                                                       1,
-	"cmd_runtime_drain.go:cmdRuntimeDrainAck:newSessionProvider:bind-error":                                                                    2,
+	"cmd_runtime_drain.go:cmdRuntimeDrainAck:newSessionProvider:bind-error":                                                                    1,
 	"cmd_runtime_drain.go:cmdRuntimeDrainCheck:newSessionProvider:bind-error":                                                                  2,
 	"cmd_runtime_drain.go:cmdRuntimeRequestRestart:newSessionProvider:bind-error":                                                              1,
 	"cmd_runtime_drain.go:cmdRuntimeUndrain:newSessionProvider:bind-error":                                                                     1,

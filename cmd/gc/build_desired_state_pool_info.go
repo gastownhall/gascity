@@ -269,6 +269,9 @@ func reusablePoolSessionInfos(bp *agentBuildParams, cfgAgent *config.Agent, temp
 	if bp == nil || bp.sessionBeads == nil {
 		return nil
 	}
+	if bp.realizeMemo != nil {
+		return bp.realizeMemo.reusablePoolSessionInfos(bp, cfgAgent, template, used)
+	}
 	candidates := []session.Info{}
 	for _, info := range bp.sessionBeads.OpenInfos() {
 		if reusablePoolSessionInfo(bp, cfgAgent, template, info, used) {
@@ -299,18 +302,23 @@ func reusablePoolSessionInfosForRequest(
 	if request.SessionBeadID != "" {
 		return candidates
 	}
-	filtered := candidates[:0]
-	for _, info := range candidates {
-		if poolSessionConsumesNewDemandInfo(info) {
+	// Filtered into a copy from the first dropped row only: the v2
+	// realization memo hands out a shared list (A3).
+	var filtered []session.Info
+	for i, info := range candidates {
+		keep := poolSessionConsumesNewDemandInfo(info) ||
+			(strings.TrimSpace(info.WaitHold) == "" &&
+				!metadataTimeInFuture(info.HeldUntil, decisionTime) &&
+				!metadataTimeInFuture(info.QuarantinedUntil, decisionTime))
+		switch {
+		case filtered != nil && keep:
 			filtered = append(filtered, info)
-			continue
+		case filtered == nil && !keep:
+			filtered = append(make([]session.Info, 0, len(candidates)), candidates[:i]...)
 		}
-		if strings.TrimSpace(info.WaitHold) != "" ||
-			metadataTimeInFuture(info.HeldUntil, decisionTime) ||
-			metadataTimeInFuture(info.QuarantinedUntil, decisionTime) {
-			continue
-		}
-		filtered = append(filtered, info)
+	}
+	if filtered == nil {
+		return candidates
 	}
 	return filtered
 }

@@ -817,6 +817,10 @@ func (p *Provider) SetMeta(name, key, value string) error {
 	return runtime.WritePrivateFile(p.metaPath(name, key), []byte(value))
 }
 
+// LocalIdentitySidecar implements [runtime.IdentitySidecarProvider]: GetMeta
+// reads the session's local 0600 sidecar.
+func (p *Provider) LocalIdentitySidecar() bool { return true }
+
 // GetMeta retrieves a metadata value from a sidecar file.
 // Returns ("", nil) if the key is not set.
 func (p *Provider) GetMeta(name, key string) (string, error) {

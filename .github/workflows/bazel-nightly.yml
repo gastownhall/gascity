@@ -1,0 +1,31 @@
+# rbe-ci-cost-latency-study.md recommendation 5: the evidence-only
+# //test/integration:integration_test lane and bazel.yml's coverage job
+# (bazel coverage //... -> Codecov flag bazel-unit) used to run on every
+# push to main. Neither gates a PR (integration is evidence-only until G3;
+# coverage is reporting only), so paying their wall time on every push
+# bought nothing. This workflow runs them once a day, off-peak UTC, plus
+# on demand.
+#
+# When integration becomes a required check, it will be gated in a merge
+# queue instead of moved back onto every push (follow-up; not built here).
+#
+# Keeps PR and push lanes on bazel.yml unchanged otherwise: unit,
+# acceptance, integration-packages and integration-smoke still run there.
+name: bazel nightly
+
+on:
+  schedule:
+    # 03:17 UTC: off-peak for both US and EU business hours, and ahead of
+    # nightly.yml's 06:00 UTC run so the two don't compete for the runner
+    # pool or the rbe-west worker pool.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bazel:
+    name: "bazel (nightly: integration + coverage)"
+    uses: ./.github/workflows/bazel.yml
+    secrets: inherit

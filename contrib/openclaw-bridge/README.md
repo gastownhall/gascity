@@ -268,7 +268,11 @@ and `demo-telegram.sh` exercises a per-workstream thread end to end.
    cross-restart parity path). The policy is isolated in `lib/inbound.mjs` and
    covered by `npm test` (`test/inbound.test.mjs`) — transient-failure-then-
    redelivery, poison-update-drop, and the iMessage unbounded-retry cases — which
-   runs in CI via the `openclaw-bridge` job (and `make test-openclaw-bridge`).
+   runs in CI as the Bazel suite `//contrib/openclaw-bridge:openclaw_bridge_test`
+   (and `make test-openclaw-bridge`) under rules_js, from `pnpm-lock.yaml`,
+   the `pnpm import` translation of `package-lock.json` (regenerate it with
+   `bazel run -- @pnpm//:pnpm --dir "$PWD/contrib/openclaw-bridge" import`
+   after changing dependencies).
    That job also `node --check`s both entrypoints and smoke-loads the openclaw
    connectors (`test/entrypoints.test.mjs`, `test/openclaw-loader.test.mjs`).
 

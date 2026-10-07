@@ -6,11 +6,37 @@ module(
 )
 
 bazel_dep(name = "rules_go", version = "0.63.0")
+
+# nogo honors //nolint directives through ast.CommentMap ranges, which differ
+# from golangci-lint's (a comment trailing `func f(...) {` attaches to the
+# body's first statement). This tree's directives were written against
+# golangci-lint, so the patch adds golangci-lint's ranges as well.
+single_version_override(
+    module_name = "rules_go",
+    patch_strip = 1,
+    patches = ["//third_party/patches:rules_go_nogo_golangci_nolint.patch"],
+    version = "0.63.0",
+)
 bazel_dep(name = "gazelle", version = "0.53.0")
 bazel_dep(name = "toolchains_llvm", version = "1.11.0")
 
 # Loaded by @llvm_dist_linux_x86_64's BUILD file (toolchains_llvm's template).
 bazel_dep(name = "rules_cc", version = "0.2.17")
+
+# sh_test / py_test for the repo's shell guards and CI-policy unit tests
+# (Bazel 9 has no native shell or Python rules). Same versions the rest of
+# the module graph already resolves.
+bazel_dep(name = "rules_shell", version = "0.6.1")
+bazel_dep(name = "rules_python", version = "1.7.0")
+
+# The dashboard SPA (internal/api/dashboardspa/web) builds and tests under
+# rules_js: a pinned Node.js toolchain, every npm package fetched by Bazel
+# from the committed pnpm-lock.yaml (integrity-pinned, so remote workers
+# need neither npm nor network), and tsc/vite/vitest run as Bazel actions.
+bazel_dep(name = "aspect_rules_js", version = "3.5.1")
+bazel_dep(name = "aspect_rules_ts", version = "3.10.1")
+bazel_dep(name = "rules_nodejs", version = "6.7.6")
+bazel_dep(name = "bazel_lib", version = "3.7.2")
 
 # Hermetic C/C++ toolchain. rules_go builds the Go stdlib and every cgo
 # package (Dolt's go-icu-regex, gozstd, gopsutil, ...) with the registered C
@@ -98,16 +124,23 @@ llvm_dist(
         "lib/clang/22/lib/x86_64-unknown-linux-gnu/clang_rt.crtbegin.o",
         "lib/clang/22/lib/x86_64-unknown-linux-gnu/clang_rt.crtend.o",
         "lib/clang/22/lib/x86_64-unknown-linux-gnu/libclang_rt.builtins.a",
+        # `bazel coverage` links cgo binaries with -fprofile-instr-generate,
+        # which pulls in compiler-rt's profile runtime (~170KB).
+        "lib/clang/22/lib/x86_64-unknown-linux-gnu/libclang_rt.profile.a",
     ],
-    sha256 = "df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384",
-    strip_prefix = "LLVM-22.1.8-Linux-X64",
+    # LLVM-22.1.8-Linux-X64.tar.xz (sha256 df0e1ecf...0006384), sliced to the
+    # members above by tools/cc_toolchain/repack_llvm.sh: 149 MB instead of
+    # 1.94 GB, and no single-threaded xz pass on every cold runner.
+    sha256 = "de6147773999137b70ef3d7bd8ecb1e5b91f2a161d02fd09aec591b84516bec5",
+    sliced = True,
     stub_tools = [
         "clang-format",
         "clang-tidy",
         "clangd",
         "llvm-dwp",
     ],
-    urls = ["https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz"],
+    # Hosting is decision D3 (a release asset of a gastownhall repository).
+    urls = ["https://github.com/gastownhall/gascity/releases/download/toolchain-llvm-22.1.8-slice-1/LLVM-22.1.8-Linux-X64-slice.tar.zst"],
 )
 
 # Every other host (macOS arm64, Linux arm64) runs toolchains_llvm's stock
@@ -161,8 +194,17 @@ go_sdk.download(
 )
 use_repo(go_sdk, "go_sdk")
 
+# nogo: //tools/nogo's analyzers (go vet's suite plus golangci-lint's
+# configured linters) run beside every first-party Go compile, so lint and
+# vet findings fail `bazel build`/`bazel test` wherever they execute (RBE
+# included). External repos only feed analyzer facts; they are not validated.
+go_sdk.nogo(
+    includes = ["//:__subpackages__"],
+    nogo = "//tools/nogo",
+)
+
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
-go_deps.from_file(go_mod = "//:go.mod")
+go_deps.from_file(go_work = "//:gazelle.go.work")
 
 # External repos that ship WORKSPACE-era BUILD files referencing apparent
 # repo names (@rules_go, @protobuf, @npm, @rules_pkg) which are not visible
@@ -188,7 +230,140 @@ go_deps.module_override(
     patches = ["//third_party/patches:beads_migrations.patch"],
     path = "github.com/steveyegge/beads",
 )
-use_repo(go_deps, "com_github_burntsushi_toml", "com_github_cenkalti_backoff_v4", "com_github_danielgtaylor_huma_v2", "com_github_fsnotify_fsnotify", "com_github_gastownhall_gascity_packs", "com_github_go_jose_go_jose_v4", "com_github_go_sql_driver_mysql", "com_github_golang_jwt_jwt_v5", "com_github_google_shlex", "com_github_google_uuid", "com_github_gorilla_websocket", "com_github_invopop_jsonschema", "com_github_masterminds_semver_v3", "com_github_oapi_codegen_runtime", "com_github_pb33f_libopenapi", "com_github_pb33f_libopenapi_validator", "com_github_rogpeppe_go_internal", "com_github_santhosh_tekuri_jsonschema_v6", "com_github_shirou_gopsutil_v4", "com_github_spf13_cobra", "com_github_spf13_pflag", "com_github_steveyegge_beads", "com_github_stretchr_testify", "in_gopkg_yaml_v3", "io_k8s_api", "io_k8s_apimachinery", "io_k8s_client_go", "io_opentelemetry_go_otel", "io_opentelemetry_go_otel_exporters_otlp_otlplog_otlploghttp", "io_opentelemetry_go_otel_exporters_otlp_otlpmetric_otlpmetrichttp", "io_opentelemetry_go_otel_log", "io_opentelemetry_go_otel_metric", "io_opentelemetry_go_otel_sdk", "io_opentelemetry_go_otel_sdk_log", "io_opentelemetry_go_otel_sdk_metric", "net_pgregory_rapid", "org_golang_x_mod", "org_golang_x_sync", "org_golang_x_sys", "org_golang_x_term", "org_modernc_sqlite")
+
+# protoc-gen-validate's validate package regenerates the checked-in
+# validate.pb.go with go_proto_library, both in gazelle's default proto mode
+# and in the module's own validate/BUILD, which pulls the C++ protoc and
+# abseil (~1600 targets) into the analysis of everything linking the dolt
+# driver (grpc xds -> envoy -> validate). Disable gazelle's proto rules and
+# patch validate/BUILD to build the checked-in source instead.
+go_deps.gazelle_override(
+    directives = ["gazelle:proto disable"],
+    path = "github.com/envoyproxy/protoc-gen-validate",
+)
+go_deps.module_override(
+    patch_strip = 1,
+    patches = ["//third_party/patches:protoc_gen_validate_build.patch"],
+    path = "github.com/envoyproxy/protoc-gen-validate",
+)
+
+# oapi-codegen generates internal/api/genclient/client_gen.go. It is a
+# build tool, not a gc dependency, so it stays out of go.mod (a `tool`
+# directive would pull its module graph into gc's and trip
+# scripts/check-native-dependency-surface.sh). Pinned to the version
+# `make install-oapi-codegen` installs; only the modules its go.mod needs
+# that gc's go.mod does not already provide are declared here, and those
+# shared with gc resolve to gc's versions. //internal/api/genclient's drift
+# test runs the resulting binary hermetically.
+go_deps.module(
+    path = "github.com/oapi-codegen/oapi-codegen/v2",
+    sum = "h1:4i+F2cvwBFZeplxCssNdLy3MhNzUD87mI3HnayHZkAU=",
+    version = "v2.6.0",
+)
+
+# oapi-codegen v2.6.0's requirements absent from gc's go.mod.
+go_deps.module(
+    indirect = True,
+    path = "github.com/getkin/kin-openapi",
+    sum = "h1:pJdmNohVIJ97r4AUFtEXRXwESr8b0bD721u/Tz6k8PQ=",
+    version = "v0.133.0",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/speakeasy-api/openapi-overlay",
+    sum = "h1:VOdQ03eGKeiHnpb1boZCGm7x8Haj6gST0P3SGTX95GU=",
+    version = "v0.10.2",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/dprotaso/go-yit",
+    sum = "h1:PRxIJD8XjimM5aTknUK9w6DHLDox2r2M3DI4i2pnd3w=",
+    version = "v0.0.0-20220510233725-9ba8df137936",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/mohae/deepcopy",
+    sum = "h1:RWengNIwukTxcDr9M+97sNutRR1RKhG96O6jWumTTnw=",
+    version = "v0.0.0-20170929034955-c48cc78d4826",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/oasdiff/yaml",
+    sum = "h1:G7ERwszslrBzRxj//JalHPu/3yz+De2J+4aLtSRlHiY=",
+    version = "v0.0.0-20250309154309-f31be36b4037",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/oasdiff/yaml3",
+    sum = "h1:bQx3WeLcUWy+RletIKwUIt4x3t8n2SxavmoclizMb8c=",
+    version = "v0.0.0-20250309153720-d2182401db90",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/perimeterx/marshmallow",
+    sum = "h1:a2LALqQ1BlHM8PZblsDdidgv1mWi1DgC2UmX50IvK2s=",
+    version = "v1.1.5",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/speakeasy-api/jsonpath",
+    sum = "h1:IhtFOV9EbXplhyRqsVhHoBmmYjblIRh5D1/g8DHMXJ8=",
+    version = "v0.6.0",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/vmware-labs/yaml-jsonpath",
+    sum = "h1:/5QKeCBGdsInyDCyVNLbXyilb61MXGi9NP674f9Hobk=",
+    version = "v0.3.2",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/woodsbury/decimal128",
+    sum = "h1:8pffMNWIlC0O5vbyHWFZAt5yWvWcrHA+3ovIIjVWss0=",
+    version = "v1.3.0",
+)
+
+# The Go formatters `make fmt-check` runs through golangci-lint (gofumpt and
+# goimports), as standalone binaries for //:go_format_test. gofumpt is pinned
+# to the version golangci-lint (GOLANGCI_LINT_VERSION in the Makefile)
+# bundles; goimports comes from the golang.org/x/tools gc's go.mod already
+# pins. go-cmp is the one gofumpt requirement gc's go.mod lacks.
+go_deps.module(
+    path = "mvdan.cc/gofumpt",
+    sum = "h1:zsEMWL8SVKGHNztrx6uZrXdp7AX8r421Vvp23sz7ik4=",
+    version = "v0.9.2",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/google/go-cmp",
+    sum = "h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=",
+    version = "v0.7.0",
+)
+
+# nogo analyzers (//tools/nogo) that type-check through importer.Default()
+# need `go list -export`, which nogo actions do not have; the patches read
+# the standard library's export data from rules_go's stdlib GOROOT instead.
+go_deps.module_override(
+    patch_strip = 1,
+    patches = ["//third_party/patches:go_ruleguard_bazel_gcimporter.patch"],
+    path = "github.com/quasilyte/go-ruleguard",
+)
+go_deps.module_override(
+    patch_strip = 1,
+    patches = ["//third_party/patches:revive_bazel_gcimporter.patch"],
+    path = "github.com/mgechev/revive",
+)
+
+# nogo does not analyze the standard library, so ctrlflow has no noReturn
+# facts for t.Fatal, log.Fatal, os.Exit, ...; without them staticcheck's
+# SA5011 reports every nil check followed by t.Fatal. The patch makes
+# ctrlflow know those standard-library functions intrinsically.
+go_deps.module_override(
+    patch_strip = 1,
+    patches = ["//third_party/patches:x_tools_ctrlflow_stdlib_noreturn.patch"],
+    path = "golang.org/x/tools",
+)
+use_repo(go_deps, "cc_mvdan_gofumpt", "cc_mvdan_unparam", "co_honnef_go_tools", "com_github_burntsushi_toml", "com_github_cenkalti_backoff_v4", "com_github_danielgtaylor_huma_v2", "com_github_fsnotify_fsnotify", "com_github_gastownhall_gascity_packs", "com_github_go_critic_go_critic", "com_github_go_jose_go_jose_v4", "com_github_go_sql_driver_mysql", "com_github_golang_jwt_jwt_v5", "com_github_golangci_misspell", "com_github_golangci_unconvert", "com_github_google_shlex", "com_github_google_uuid", "com_github_gordonklaus_ineffassign", "com_github_gorilla_websocket", "com_github_hashicorp_go_version", "com_github_invopop_jsonschema", "com_github_kisielk_errcheck", "com_github_masterminds_semver_v3", "com_github_mgechev_revive", "com_github_oapi_codegen_oapi_codegen_v2", "com_github_oapi_codegen_runtime", "com_github_pb33f_libopenapi", "com_github_pb33f_libopenapi_validator", "com_github_rogpeppe_go_internal", "com_github_santhosh_tekuri_jsonschema_v6", "com_github_shirou_gopsutil_v4", "com_github_spf13_cobra", "com_github_spf13_pflag", "com_github_steveyegge_beads", "com_github_stretchr_testify", "in_gopkg_yaml_v3", "io_k8s_api", "io_k8s_apimachinery", "io_k8s_client_go", "io_opentelemetry_go_otel", "io_opentelemetry_go_otel_exporters_otlp_otlplog_otlploghttp", "io_opentelemetry_go_otel_exporters_otlp_otlpmetric_otlpmetrichttp", "io_opentelemetry_go_otel_log", "io_opentelemetry_go_otel_metric", "io_opentelemetry_go_otel_sdk", "io_opentelemetry_go_otel_sdk_log", "io_opentelemetry_go_otel_sdk_metric", "net_pgregory_rapid", "org_codeberg_polyfloyd_go_errorlint", "org_golang_x_mod", "org_golang_x_sync", "org_golang_x_sys", "org_golang_x_term", "org_golang_x_tools", "org_modernc_sqlite")
 
 # Pinned prebuilt test-only binaries for hermetic integration/acceptance tests.
 # Same artifacts the go-test CI installs via .github/scripts/install-bd-archive.sh
@@ -204,6 +379,17 @@ exports_files(["bd"])
 """,
 )
 
+# deps.env BD_PREV_VERSION, the minimum-supported bd: the "previous" cell of
+# the bd CLI contract (//test/acceptance:bd_cli_contract_prev_test).
+http_archive(
+    name = "bd_bin_v1_0_4",
+    urls = ["https://github.com/gastownhall/beads/releases/download/v1.0.4/beads_1.0.4_linux_amd64.tar.gz"],
+    sha256 = "643e602e27f666c8726abff0f22001e2b5883988fa960204bde20a3129d448a5",
+    build_file_content = """
+exports_files(["bd"])
+""",
+)
+
 http_archive(
     name = "dolt_bin_v2_2_0",
     urls = ["https://github.com/dolthub/dolt/releases/download/v2.2.0/dolt-linux-amd64.tar.gz"],
@@ -211,4 +397,182 @@ http_archive(
     build_file_content = """
 exports_files(["dolt-linux-amd64/bin/dolt"])
 """,
+)
+
+# The OpenAPI breaking-change gate's comparator (//cmd/openapi-breaking),
+# the release Makefile's OASDIFF_VERSION installs for `make
+# openapi-breaking-check-go` (scripts/oasdiff_pin_test.go keeps them equal).
+http_archive(
+    name = "oasdiff_bin",
+    urls = ["https://github.com/oasdiff/oasdiff/releases/download/v1.33.0/oasdiff_1.33.0_linux_amd64.tar.gz"],
+    sha256 = "43a4e328e2d13ba1552d760aa68d2485c75c5621f309f6ff64ae895188345247",
+    build_file_content = """
+exports_files(["oasdiff"])
+""",
+)
+
+# The gate's base spec: the PR base commit's internal/api/openapi.json in
+# bazel.yml's unit lane, the committed spec elsewhere
+# (tools/bazel/rules/openapi_base_spec.bzl).
+openapi_base_spec = use_repo_rule("//tools/bazel/rules:openapi_base_spec.bzl", "openapi_base_spec")
+
+openapi_base_spec(
+    name = "openapi_base_spec",
+    revision = "//internal/api:openapi.json",
+)
+
+# JavaScript: ONE Node.js toolchain and ONE npm mechanism (rules_js) for
+# every Node workspace Bazel builds or tests. Workers have no npm and fork
+# lanes no network, so packages come only from committed, integrity-pinned
+# lockfiles fetched here.
+#
+# Node.js 22, sha256-checked by rules_nodejs; it satisfies every workspace's
+# engines (dashboard >=22.13.0, contrib/openclaw-bridge >=22.19.0).
+node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
+node.toolchain(node_version = "22.23.2")
+
+# One npm_translate_lock per npm workspace, named npm_<area>, each with:
+#   * package-lock.json kept as the source of truth for local `npm ci`;
+#   * pnpm-lock.yaml beside it, its `pnpm import` translation (same package
+#     set and versions), committed so the fetch never runs pnpm or touches the
+#     source tree; regenerate with
+#     `bazel run -- @pnpm//:pnpm --dir "$PWD/<dir>" import`;
+#   * a pnpm_lock_in_sync_test (//tools/bazel/rules:pnpm_lock.bzl) beside the
+#     lockfiles, which fails when the two drift;
+#   * its node_modules directories listed in .bazelignore.
+# Install scripts stay off unless a package needs one under Bazel.
+npm = use_extension("@aspect_rules_js//npm:extensions.bzl", "npm")
+
+# The dashboard SPA (internal/api/dashboardspa/web). Its only install scripts
+# (esbuild's binary check, fsevents) are not needed with esbuild's platform
+# package present.
+npm.npm_translate_lock(
+    name = "npm_dashboard",
+    data = [
+        "//internal/api/dashboardspa/web/frontend:package.json",
+        "//internal/api/dashboardspa/web/shared:package.json",
+        "//internal/api/dashboardspa/web:package.json",
+        "//internal/api/dashboardspa/web:pnpm-workspace.yaml",
+    ],
+    pnpm_lock = "//internal/api/dashboardspa/web:pnpm-lock.yaml",
+    # pnpm's default public-hoist-pattern (*types*) and npm's flat tree both
+    # make @types/react visible to react-router-dom's typings; rules_js
+    # hoists nothing unless asked.
+    public_hoist_packages = {
+        "@types/node": ["internal/api/dashboardspa/web"],
+        "@types/react": ["internal/api/dashboardspa/web"],
+        "@types/react-dom": ["internal/api/dashboardspa/web"],
+    },
+    run_lifecycle_hooks = False,
+    verify_node_modules_ignored = "//:.bazelignore",
+)
+
+# contrib/openclaw-bridge (//contrib/openclaw-bridge:openclaw_bridge_test).
+# Install scripts stay off: openclaw's postinstall only prunes/patches
+# packaged plugin dist the bridge does not import, and the suite is the same
+# under `npm ci --ignore-scripts`.
+npm.npm_translate_lock(
+    name = "npm_openclaw",
+    data = [
+        "//contrib/openclaw-bridge:package.json",
+        "//contrib/openclaw-bridge:pnpm-workspace.yaml",
+    ],
+    pnpm_lock = "//contrib/openclaw-bridge:pnpm-lock.yaml",
+    run_lifecycle_hooks = False,
+    verify_node_modules_ignored = "//:.bazelignore",
+)
+use_repo(npm, "npm_dashboard", "npm_openclaw")
+
+# pnpm itself, for `pnpm import` (make dashboard-lock).
+pnpm = use_extension("@aspect_rules_js//npm:extensions.bzl", "pnpm")
+use_repo(pnpm, "pnpm")
+
+# rules_ts's tsc for ts_project: the version the dashboard's pnpm-lock.yaml
+# resolves (its lockfiles_in_sync_test keeps them equal).
+typescript = use_extension("@aspect_rules_ts//ts:extensions.bzl", "typescript")
+typescript.deps(
+    integrity = "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
+    version = "5.9.3",
+)
+use_repo(typescript, "npm_typescript")
+
+# The dashboard's Playwright render smoke
+# (//internal/api/dashboardspa/web/frontend:playwright_test) runs Chromium on
+# the remote workers, which have no browser and no network: Playwright's own
+# chrome-headless-shell build for the @playwright/test version pnpm-lock.yaml
+# pins (playwright-core's browsers.json: chromium-headless-shell revision
+# 1228, Chrome 149.0.7827.55), laid out as PLAYWRIGHT_BROWSERS_PATH expects.
+http_archive(
+    name = "chrome_headless_shell",
+    add_prefix = "chromium_headless_shell-1228",
+    build_file_content = """
+filegroup(
+    name = "browsers",
+    srcs = glob(["chromium_headless_shell-1228/**"]),
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell"])
+""",
+    sha256 = "410c9407d5de3fea80d9398666be06f2aa09154a3fa7b327dc254e336bb4c4b7",
+    urls = ["https://cdn.playwright.dev/builds/cft/149.0.7827.55/linux64/chrome-headless-shell-linux64.zip"],
+)
+
+# The shared libraries chrome-headless-shell loads that the worker host
+# (tools/rbe/worker-env.txt) lacks: the ELF NEEDED closure of the shell and its
+# bundled libraries, as pinned Ubuntu 24.04 packages (the workers' release),
+# put on LD_LIBRARY_PATH by the test. glibc and libstdc++ come from the host.
+deb_sysroot(
+    name = "chromium_runtime_noble_amd64",
+    mirrors = [
+        "https://snapshot.ubuntu.com/ubuntu/20261001T000000Z/",
+        "https://archive.ubuntu.com/ubuntu/",
+    ],
+    packages = {
+        "pool/main/a/alsa-lib/libasound2t64_1.2.11-1ubuntu0.3_amd64.deb": "5d17bfb5683eb99f1be951fe48e1be5bf3c52391913b6b74a8aecf9b4f5e779f",
+        "pool/main/a/at-spi2-core/libatk-bridge2.0-0t64_2.52.0-1build1_amd64.deb": "22b7d47e3c0f7953a78d3cfd309d1b20771085de9220fbe610c0989b9e808c9b",
+        "pool/main/a/at-spi2-core/libatk1.0-0t64_2.52.0-1build1_amd64.deb": "42c5d4b00954f17c2c3c4b866844f691eb8b6d57bf08b59203e65f12dc84a4f9",
+        "pool/main/a/at-spi2-core/libatspi2.0-0t64_2.52.0-1build1_amd64.deb": "d686ace4080eca9c2d6ce8de69392a5ac56c846701894c0858922d4ce341a1d7",
+        "pool/main/u/util-linux/libblkid1_2.39.3-9ubuntu6.6_amd64.deb": "3bcf169cd65e2539059b2287924090fc629f9bf90f595fc25465a7efe950ee82",
+        "pool/main/libb/libbsd/libbsd0_0.12.1-1build1.1_amd64.deb": "f3857b0863ac5cfd4263e9bf6cfb1d4be88d5321e4070d5bc2b62b0949e6c86f",
+        "pool/main/libc/libcap2/libcap2_2.66-5ubuntu2.4_amd64.deb": "23c627c77c66552a658e62852f244f4946dc543898e0ec5428d5dc6bffde2d6a",
+        "pool/main/d/dbus/libdbus-1-3_1.14.10-4ubuntu4.1_amd64.deb": "5d630480f04b4b442300ce847a3fa705ea4d14d80ba6de91f99b51a4e4953b08",
+        "pool/main/libd/libdrm/libdrm2_2.4.125-1ubuntu0.1~24.04.2_amd64.deb": "4d3e858dd57be617c49d87c5ddcdb35df744a4f0a559981256ae2ba174718584",
+        "pool/main/e/expat/libexpat1_2.6.1-2ubuntu0.6_amd64.deb": "494b8e672f722130c6bca6a7bc4cc31a43ca891a31d60d868bfdd699a3c20b13",
+        "pool/main/libf/libffi/libffi8_3.4.6-1build1_amd64.deb": "637e6a7744de08cd331a41f4efd0d24e6ea9064843dea9d1c6ca87bdb5f038a2",
+        "pool/main/m/mesa/libgbm1_25.2.8-0ubuntu0.24.04.3_amd64.deb": "62ba0e565a7cb546e952d8e33237589bda270370c3f977cd9f122ebb5f0bd288",
+        "pool/main/libg/libgcrypt20/libgcrypt20_1.10.3-2ubuntu0.2_amd64.deb": "957b9eeaa83cf6f2d5d5d76dbb8aa31d3297e6781d8a02fa08dcc897ae650a0b",
+        "pool/main/g/glib2.0/libglib2.0-0t64_2.80.0-6ubuntu3.9_amd64.deb": "a66ef54888a18e20b55dd3988177f6029caa81dc16198c043a715500b62cf06f",
+        "pool/main/libg/libgpg-error/libgpg-error0_1.47-3build2.1_amd64.deb": "93654ee8180a73a0363f25c51dc673d67cbabcbecd164187b8a2deb54d007aef",
+        "pool/main/l/lz4/liblz4-1_1.9.4-1build1.1_amd64.deb": "319331270d5cc52d5ebffe51c941d7b01b432bc402c2924b557209a64d4ecbad",
+        "pool/main/x/xz-utils/liblzma5_5.6.1+really5.4.5-1ubuntu0.3_amd64.deb": "d2eabd41ca77d2c2dd9d5d4ef478cccb64ffde6279c47cf4699a857d46785a52",
+        "pool/main/libm/libmd/libmd0_1.1.0-2build1.1_amd64.deb": "e5ba01d3c41f256aaf57ec59aa0554857162e3e7f97cdfbff1ed2c0e8d720ee7",
+        "pool/main/u/util-linux/libmount1_2.39.3-9ubuntu6.6_amd64.deb": "8f2c25589f187dacfdc5bb6be2af0aee6c2ba7b4d2edd1ca4b26753469f07aae",
+        "pool/main/n/nspr/libnspr4_4.35-1.1build1_amd64.deb": "e579e72d091f6c7a13f5a756c31065b15aae5b81840d61b069355aa2283c07b4",
+        "pool/main/n/nss/libnss3_3.98-1ubuntu0.2_amd64.deb": "4254f11d782dfb970e78113519a59d440112ed43c4b56f709da0aef81da8651a",
+        "pool/main/p/pcre2/libpcre2-8-0_10.42-4ubuntu2.1_amd64.deb": "110a797a57673d3ee497a141cf988199258058c57525799c63194d81822529a0",
+        "pool/main/libs/libselinux/libselinux1_3.5-2ubuntu2.1_amd64.deb": "6abaa6c26f46ef17764c4a753e0e84de1cdadde5634fd2987621fdc617988d19",
+        "pool/main/s/systemd/libsystemd0_255.4-1ubuntu8.17_amd64.deb": "4776d2ac7e21efe2ae31f3f7955a7ccd97277225eecf36910a26faf4544979ae",
+        "pool/main/s/systemd/libudev1_255.4-1ubuntu8.17_amd64.deb": "6efea3770f738db2fd43ebdaed3d91ef0cde8aa8387b4803080af473326ebdb0",
+        "pool/main/libx/libx11/libx11-6_1.8.7-1build1_amd64.deb": "397f84347476a3c5786b39f3ff6f0f82866eb3d8be6d2ad3efeadf019efe5b80",
+        "pool/main/libx/libxau/libxau6_1.0.9-1build6_amd64.deb": "e40d29f1d1a62393bacaedebe0da3d9006084152a9f7e5e029293f08ce1c5c80",
+        "pool/main/libx/libxcb/libxcb1_1.15-1ubuntu2_amd64.deb": "e1c6611d11ad7398326f1bf028afc34c3b14c51d917a3426b966ed4b9687fa58",
+        "pool/main/libx/libxcomposite/libxcomposite1_0.4.5-1build3_amd64.deb": "a12d5d9ae70b798cbbf284080eae32b87367561fc9c24492f641b8860ac0f308",
+        "pool/main/libx/libxdamage/libxdamage1_1.1.6-1build1_amd64.deb": "6891faf325e996ebd28ef53ebb9c043dc96f67327500490affc3e89d366d35ed",
+        "pool/main/libx/libxdmcp/libxdmcp6_1.1.3-0ubuntu6_amd64.deb": "bcd336fce11ce2a45f34d0f95e6980af22529f22147e8f98c156e5cee8ee42bb",
+        "pool/main/libx/libxext/libxext6_1.3.4-1build2_amd64.deb": "45783969a9ece9d7b7b733b8c60981584c53c6bc5ee3b42d295d2f80d1285679",
+        "pool/main/libx/libxfixes/libxfixes3_6.0.0-2build1_amd64.deb": "0ee1015cccd063249e01c0cd0bf45f513c8ac9a1e5e485070c12e69192455e4a",
+        "pool/main/libx/libxi/libxi6_1.8.1-1build1_amd64.deb": "0ea7acb5e8a8ce4d6653b30e03a319bfe136db7bfb5ee7cad34c2aa1272ea8d9",
+        "pool/main/libx/libxkbcommon/libxkbcommon0_1.6.0-1build1_amd64.deb": "2b9caeb423efb540296a1cb20b872cc630c23908407ecb5c1c787a617622d664",
+        "pool/main/libx/libxrandr/libxrandr2_1.5.2-2build1_amd64.deb": "f2955a5e594f5724b58ad241d9231ea191cb36574a0d5e5ca6b661cd41d6256d",
+        "pool/main/libx/libxrender/libxrender1_0.9.10-1.1build1_amd64.deb": "d70bd831aebe8d4834b5dd2ed98df26dd6bd27f1042c47543bd7f66df1ae22ea",
+        "pool/main/libz/libzstd/libzstd1_1.5.5+dfsg2-2build1.1_amd64.deb": "dfcf25061e07aad7efd3f4f880ba5ad4d4d09ebe7fc8cc77ab6b8a161d6d4727",
+        "pool/main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2.2_amd64.deb": "84b9cf5752b29c9f92c27cd4c4ba9bbcc70b5ccf9b1b515421a28ae23212e273",
+    },
+    remove = [
+        "usr/share",
+        "usr/lib/tmpfiles.d",
+        "usr/lib/x86_64-linux-gnu/gbm",
+        "usr/lib/x86_64-linux-gnu/glib-2.0",
+    ],
 )

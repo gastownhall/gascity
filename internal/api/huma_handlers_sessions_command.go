@@ -105,6 +105,12 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		return nil, apierr.Internal.Msg(err.Error())
 	}
 	agentCfg := createCtx.Agent
+	// The controller's reconciler never starts a demand-only singleton's
+	// session on request, so refuse up front instead of returning 202 for a
+	// bead that would sit start-pending forever (#6858).
+	if msg := demandOnlySingletonCreateRefusal(cfg, agentCfg); msg != "" {
+		return nil, apierr.DemandOnlySingleton.Msg(msg)
+	}
 	alias = createCtx.Alias
 	explicitName := createCtx.ExplicitName
 	workDirQualifiedName := createCtx.Identity
@@ -1003,6 +1009,8 @@ func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespo
 	if err != nil {
 		return nil, err
 	}
+	// Publish the session.pending_cleared now rather than on the next tick.
+	s.pokePendingMonitor()
 
 	out := &SessionRespondOutput{}
 	out.Body.Status = "accepted"
@@ -1123,6 +1131,13 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 	sessionName := res.Info.SessionNameMetadata
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
+	}
+	// The wake is recorded and its holds are cleared, but a demand-only
+	// singleton's pool session starts only from pool demand: refuse instead of
+	// starting it, as `gc session wake` does (#6858).
+	if msg := demandOnlySingletonWakeRefusal(s.state.Config(), res.Info); msg != "" {
+		s.state.Enqueue(reconcilekey.Session(id))
+		return nil, apierr.DemandOnlySingleton.Msg(msg)
 	}
 	// The wake is recorded (wake_request=explicit). While the name's on_death
 	// hook is queued or running, the reconciler owns the start, as it does

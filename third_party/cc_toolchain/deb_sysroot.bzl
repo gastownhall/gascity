@@ -9,7 +9,8 @@ of whatever the host has under /usr.
 # Trims what no compile or link needs, then makes the sysroot self-contained:
 # package symlinks may be absolute (outside a chroot they would resolve
 # against the HOST), and glibc's linker scripts name the pre-usr-merge /lib
-# and /lib64, which the sysroot only has under /usr.
+# and /lib64, which the sysroot only has under /usr (a package set without
+# glibc has no such scripts).
 _POSTPROCESS = """
 set -euo pipefail
 shopt -s globstar nullglob
@@ -18,7 +19,7 @@ find . -type l -lname '/*' -print0 | while IFS= read -r -d '' l; do
   ln -sfn "$(realpath -m --relative-to="$(dirname "$l")" "$PWD$(readlink "$l")")" "$l"
 done
 find . -xtype l -delete
-grep -rlI --include='*.so' 'GROUP' usr/lib | while IFS= read -r s; do
+{ grep -rlI --include='*.so' 'GROUP' usr/lib || true; } | while IFS= read -r s; do
   sed -i -e 's@ /lib/@ /usr/lib/@g' -e 's@ /lib64/@ /usr/lib64/@g' "$s"
 done
 """
@@ -48,17 +49,22 @@ def _deb_sysroot_impl(rctx):
         fail("deb_sysroot: post-processing failed:\n" + res.stderr)
 
     rctx.file("BUILD.bazel", """\
+_FILES = glob(
+    ["**"],
+    exclude = [
+        "BUILD.bazel",
+        "REPO.bazel",
+    ],
+)
+
 filegroup(
     name = "sysroot",
-    srcs = glob(
-        ["**"],
-        exclude = [
-            "BUILD.bazel",
-            "REPO.bazel",
-        ],
-    ),
+    srcs = _FILES,
     visibility = ["//visibility:public"],
 )
+
+# Single files, for $(rlocationpath) into the sysroot.
+exports_files(_FILES)
 """)
     return rctx.repo_metadata(reproducible = True)
 

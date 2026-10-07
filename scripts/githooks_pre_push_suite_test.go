@@ -75,6 +75,9 @@ printf '%s\n' "$*" >> "$BAZEL_RECORD"
 exit "${BAZEL_EXIT:-0}"
 `)
 	f.env = append(f.env, "BAZEL_RECORD="+runs, "BAZEL_PROBE_RECORD="+probes, "BAZEL_ANNOUNCE="+announce)
+	// A remote run first checks the checkout's worker-env pin against
+	// origin's main (githooks_pre_push_worker_env_test.go): current here.
+	f.workerEnv = f.withWorkerEnv(t)
 	return runs, probes
 }
 
@@ -91,8 +94,9 @@ func TestPrePushSuiteModeSelection(t *testing.T) {
 		wantProbe bool
 		wantBazel string
 		wantMake  string
+		wantWhy   string
 	}{
-		{name: "no bazel falls back to go test", wantMake: prePushMakeArgs},
+		{name: "no bazel falls back to go test", wantMake: prePushMakeArgs, wantWhy: "bazel is not installed"},
 		{name: "bazel without an executor reads the cache", bazel: true, announce: announceNone, wantProbe: true, wantBazel: prePushBazelCacheArgs},
 		{name: "maintainer credential in .bazelrc.local executes remotely", bazel: true, announce: announceLocalDef, wantProbe: true, wantBazel: prePushBazelRBEArgs},
 		{name: "agent host executor in ~/.bazelrc executes remotely", bazel: true, announce: announceHome, wantProbe: true, wantBazel: prePushBazelRBEArgs},
@@ -115,7 +119,7 @@ func TestPrePushSuiteModeSelection(t *testing.T) {
 			name: "fork-cache reset does not hide a home executor", bazel: true, wantProbe: true, wantBazel: prePushBazelRBEArgs,
 			announce: announceHome + "INFO: Found applicable config definition build:fork-cache in file /repo/.bazelrc: --remote_cache=grpcs://cache.example:8443 --remote_executor= --remote_download_minimal\n",
 		},
-		{name: "go escape hatch", bazel: true, mode: "go", announce: announceHome, wantMake: prePushMakeArgs},
+		{name: "go escape hatch", bazel: true, mode: "go", announce: announceHome, wantMake: prePushMakeArgs, wantWhy: "GC_PREPUSH_SUITE=go"},
 		{name: "forced cache", bazel: true, mode: "cache", announce: announceHome, wantBazel: prePushBazelCacheArgs},
 		{name: "forced rbe", bazel: true, mode: "rbe", announce: announceHome, wantProbe: true, wantBazel: prePushBazelRBEArgs},
 		{name: "explicit auto", bazel: true, mode: "auto", announce: announceNone, wantProbe: true, wantBazel: prePushBazelCacheArgs},
@@ -135,6 +139,7 @@ func TestPrePushSuiteModeSelection(t *testing.T) {
 			if got := strings.TrimSpace(f.read(t, f.makeRuns)); got != tc.wantMake {
 				t.Errorf("make ran %q, want %q\n%s", got, tc.wantMake, out)
 			}
+			assertGoFallbackAnnounced(t, out, tc.wantMake != "", tc.wantWhy)
 			if !tc.bazel {
 				return
 			}
@@ -268,6 +273,27 @@ func TestPrePushSuiteAutoNeedsGoOnPinnedPath(t *testing.T) {
 			if tc.wantMake != "" && !strings.Contains(out, pinned) {
 				t.Errorf("fallback does not name the pinned PATH %s:\n%s", pinned, out)
 			}
+			assertGoFallbackAnnounced(t, out, tc.wantMake != "", "no go on .bazelrc's pinned test PATH")
 		})
+	}
+}
+
+// assertGoFallbackAnnounced: a push that runs plain `go test` instead of the
+// bazel suite says so loudly, with the reason, and says that CI gates on
+// bazel, so a green push is not mistaken for CI parity. A bazel run prints
+// no such banner.
+func assertGoFallbackAnnounced(t *testing.T, out string, fellBack bool, why string) {
+	t.Helper()
+	const banner = "NOT the bazel suite CI gates on"
+	if !fellBack {
+		if strings.Contains(out, banner) {
+			t.Errorf("bazel run printed the go-fallback banner:\n%s", out)
+		}
+		return
+	}
+	for _, want := range []string{banner, "why: " + why, "CI runs bazel test //..."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("go fallback output lacks %q:\n%s", want, out)
+		}
 	}
 }
