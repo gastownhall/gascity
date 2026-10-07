@@ -1366,7 +1366,9 @@ func (m *Manager) suspend(id string, intent suspendIntent) error {
 // tearDownRuntimeForSuspend kills the runtime session for a suspend. Stop is
 // provider-idempotent, so it is called even when liveness already reports false;
 // tmux remain-on-exit panes can be non-running but still need their session
-// artifact removed.
+// artifact removed. It stops through runtime.StopForCleanup: a suspend only
+// needs the session gone, and a missing tmux server leaves nothing running even
+// while a cached IsRunning still lists the session.
 //
 // A Stop failure is suppressed ONLY when the runtime did not report a live
 // process beforehand (historical Suspend semantics: cleanup of an already-dead
@@ -1381,7 +1383,7 @@ func (m *Manager) tearDownRuntimeForSuspend(sessName string) error {
 		return nil
 	}
 	running := m.sp.IsRunning(sessName)
-	err := m.sp.Stop(sessName)
+	err := runtime.StopForCleanup(m.sp, sessName)
 	if err != nil && !running {
 		err = nil
 	}

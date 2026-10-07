@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -8503,6 +8504,53 @@ func TestSweepProcessTableOrphansContinuesAfterErrors(t *testing.T) {
 	for _, want := range []string{"partial scan failed", "gm-reaped", "gm-term-fails", "terminate failed"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+}
+
+// A scan that cannot read dozens of same-uid /proc entries used to log one
+// line per entry on every patrol. The sweep now logs a bounded summary, and
+// only when it changes, while a failure of the scan as a whole is still logged
+// verbatim on every tick.
+func TestSweepProcessTableOrphansSummarizesScanErrors(t *testing.T) {
+	var entries error
+	for pid := 1000; pid < 1070; pid++ {
+		entries = errors.Join(entries, &proctable.EntryError{PID: pid, Err: fmt.Errorf("reading environ for pid %d: permission denied", pid)})
+	}
+	listErr := errors.New("tmux list running: no tmux server running")
+	store := beads.NewMemStore()
+	sp := newProcessTableSweepProvider()
+	cityPath := t.TempDir()
+	const scanLine = "scanning process table for orphaned runtimes"
+
+	for _, tick := range []struct {
+		name    string
+		findErr error
+		want    string
+	}{
+		{name: "first entry failures", findErr: entries, want: "70 unreadable process entries (pids 1000, 1001, 1002, ...;"},
+		{name: "unchanged entry failures", findErr: entries},
+		{name: "whole-scan failure", findErr: errors.Join(entries, listErr), want: listErr.Error()},
+		{name: "whole-scan failure again", findErr: errors.Join(entries, listErr), want: listErr.Error()},
+		{name: "entry failures after it", findErr: entries, want: "70 unreadable process entries"},
+		{name: "clean scan", findErr: nil},
+		{name: "entry failures recur", findErr: entries, want: "70 unreadable process entries"},
+	} {
+		sp.findErr = tick.findErr
+		var stderr bytes.Buffer
+		sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, cityPath, &stderr)
+		got := stderr.String()
+		if tick.want == "" {
+			if strings.Contains(got, scanLine) {
+				t.Errorf("%s: stderr = %q, want no scan error line", tick.name, got)
+			}
+			continue
+		}
+		if !strings.Contains(got, scanLine) || !strings.Contains(got, tick.want) {
+			t.Errorf("%s: stderr = %q, want a scan error line naming %q", tick.name, got, tick.want)
+		}
+		if lines := strings.Count(got, "\n"); lines != 1 || len(got) > 400 {
+			t.Errorf("%s: stderr is %d lines, %d bytes; want one bounded line: %q", tick.name, lines, len(got), got)
 		}
 	}
 }

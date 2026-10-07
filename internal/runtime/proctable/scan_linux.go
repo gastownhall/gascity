@@ -88,7 +88,8 @@ func scanWithRootSince(root, id string, incarnationStartedAt time.Time) ([]runti
 		}
 		live, reported, err := scanProcEntry(root, entry.Name(), id, incarnationStartedAt)
 		if err != nil {
-			scanErr = errors.Join(scanErr, err)
+			pid, _ := strconv.Atoi(entry.Name())
+			scanErr = errors.Join(scanErr, &EntryError{PID: pid, Err: err})
 			continue
 		}
 		if !reported {

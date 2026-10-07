@@ -363,6 +363,31 @@ func TestScanWithRootUnreadableEnvironReportsPartialScan(t *testing.T) {
 	}
 }
 
+// Each unreadable entry reaches the caller as an EntryError, so loggers can
+// summarize a scan that hit many of them instead of printing each one.
+func TestScanWithRootReportsUnreadableEntriesAsEntryErrors(t *testing.T) {
+	root := t.TempDir()
+	for _, pid := range []string{"403", "402"} {
+		dir := filepath.Join(root, pid)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		writeFakeProcessUID(t, dir, os.Geteuid())
+		if err := os.WriteFile(filepath.Join(dir, "environ"), []byte("GC_SESSION_ID=ga-hidden\x00"), 0o000); err != nil {
+			t.Fatalf("write environ: %v", err)
+		}
+	}
+
+	_, err := scanWithRoot(root, "")
+	if err == nil {
+		t.Fatal("scanWithRoot error = nil, want the unreadable entries reported")
+	}
+	summary, entriesOnly := SummarizeScanError(err)
+	if !entriesOnly || !strings.HasPrefix(summary, "2 unreadable process entries (pids 402, 403; first: ") {
+		t.Fatalf("SummarizeScanError = %q, %v; want both entries counted as EntryErrors", summary, entriesOnly)
+	}
+}
+
 func TestScanWithRootSinceIgnoresUnreadableProcessProvenOlderThanIncarnation(t *testing.T) {
 	root := t.TempDir()
 	boot := time.Unix(1_700_000_000, 0).UTC()
