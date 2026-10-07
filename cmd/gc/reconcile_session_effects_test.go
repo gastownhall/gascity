@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -177,11 +178,10 @@ func TestStopJoinsWorkersAndExecutorWithinOneShutdownBudget(t *testing.T) {
 // them.
 func TestCityShutdownKeepsGracefulStopAfterV2StopWithStartInFlight(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		h := newV2HarnessWithRows(t, "a")
-		h.boot(t)
+		rt := newDefaultPlanner(io.Discard)
 		stuck := make(chan struct{})
 		defer close(stuck)
-		if err := h.rt.exec.submit(rowKey{Leg: routerTestLeg, ID: "a"}, blockingEffect(effectStart, time.Now().Add(time.Hour), stuck, true, make(chan error, 1))); err != nil {
+		if err := rt.exec.submit(rowKey{Leg: routerTestLeg, ID: "a"}, blockingEffect(effectStart, time.Now().Add(time.Hour), stuck, true, make(chan error, 1))); err != nil {
 			t.Fatal(err)
 		}
 		cfg := &config.City{}
@@ -191,8 +191,8 @@ func TestCityShutdownKeepsGracefulStopAfterV2StopWithStartInFlight(t *testing.T)
 			t.Fatal(err)
 		}
 		var stdout bytes.Buffer
-		cr := &CityRuntime{cfg: cfg, sp: sp, v2: h.rt, rec: events.Discard, logPrefix: "gc start", stdout: &stdout, stderr: io.Discard}
-		h.rt.stop() // run() stops v2 first, and the start holds it to the deadline
+		cr := &CityRuntime{cfg: cfg, sp: sp, v2: rt, rec: events.Discard, logPrefix: "gc start", stdout: &stdout, stderr: io.Discard}
+		rt.stop() // run() stops v2 first, and the start holds it to the deadline
 		cr.shutdown()
 		if sp.CountCalls("Interrupt", "probe") != 1 || !bytes.Contains(stdout.Bytes(), []byte("waiting 1s")) {
 			t.Fatalf("interrupts=%d stdout=%q, want the graceful pass with its full 1s budget", sp.CountCalls("Interrupt", "probe"), stdout.String())
@@ -425,7 +425,9 @@ func (s *reapRaceStore) Get(id string) (beads.Bead, error) {
 
 // Kills: the reload's provider swap listing the old provider's sessions
 // while a v2 start may still create one (the call to beforeProviderSwap
-// missing from reloadConfigTraced, C4.4 step 3).
+// missing from reloadConfigTraced, C4.4 step 3); and the planner's starts
+// left running through the wait, or left paused once the reload aborts
+// (CONTRACT v5 P7).
 func TestReloadProviderSwapWaitsForV2StartsBeforeListing(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cityPath := t.TempDir()
@@ -447,11 +449,20 @@ func TestReloadProviderSwapWaitsForV2StartsBeforeListing(t *testing.T) {
 		cs.cityBeadStore = beads.NewMemStore()
 		cr.setControllerState(cs)
 		cr.sessionDrains = newDrainTracker()
-		h := newV2HarnessWithRows(t)
-		cr.v2 = h.rt
+		cr.v2 = newDefaultPlanner(io.Discard)
 		hung := make(chan struct{})
 		defer close(hung)
-		if err := h.rt.exec.submit(rowKey{ID: "s"}, blockingEffect(effectStart, time.Now().Add(time.Hour), hung, false, make(chan error, 1))); err != nil {
+		var pausedAtCancel atomic.Bool
+		if err := cr.v2.exec.submit(rowKey{ID: "s"}, sessionEffect{
+			Kind: effectStart, Deadline: time.Now().Add(time.Hour),
+			Run: func(ctx context.Context) error {
+				<-ctx.Done() // waitStarts cancels it; it hangs on regardless
+				pausedAtCancel.Store(cr.v2.planner.startsPaused())
+				<-hung
+				return ctx.Err()
+			},
+			Settle: func(error) {},
+		}); err != nil {
 			t.Fatal(err)
 		}
 
@@ -461,7 +472,10 @@ func TestReloadProviderSwapWaitsForV2StartsBeforeListing(t *testing.T) {
 		if reply.Outcome != reloadOutcomeFailed || sp.listings != 0 {
 			t.Fatalf("reply %q after %d listings, want the swap refused before any listing", reply.Outcome, sp.listings)
 		}
-		if err := (&CityRuntime{}).beforeProviderSwap(cfg); err != nil {
+		if !pausedAtCancel.Load() || cr.v2.planner.startsPaused() {
+			t.Fatalf("starts paused at the cancel = %v, after the abort = %v; want paused, then resumed", pausedAtCancel.Load(), cr.v2.planner.startsPaused())
+		}
+		if _, err := (&CityRuntime{}).beforeProviderSwap(cfg); err != nil {
 			t.Fatalf("a legacy controller waits on nothing: %v", err)
 		}
 	})

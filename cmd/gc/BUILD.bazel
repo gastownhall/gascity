@@ -390,6 +390,7 @@ go_library(
         "reconcile_pass.go",
         "reconcile_pass_metrics.go",
         "reconcile_planner.go",
+        "reconcile_planner_runtime.go",
         "reconcile_router.go",
         "reconcile_runtime.go",
         "reconcile_session.go",

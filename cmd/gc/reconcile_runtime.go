@@ -270,24 +270,6 @@ func newV2Runtime(host v2Host, ctrl v2Controllers, metrics *v2Metrics) *v2Runtim
 	return rt
 }
 
-// bindHost hands an unstarted runtime the city it reconciles. The controller
-// wiring builds the runtime before the city runtime exists, so its router can
-// take socket keys from the first one; only the sessions leg and stderr are
-// known then. newCityRuntime binds the rest once, before run can start it, so
-// every goroutine that reads the host starts after the bind.
-func (rt *v2Runtime) bindHost(host v2Host) {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	if rt.started || rt.stopped {
-		panic("v2 reconciler: host bound after start")
-	}
-	host.sessionsLeg = rt.host.sessionsLeg
-	if host.stderr == nil {
-		host.stderr = rt.host.stderr
-	}
-	rt.host = host
-}
-
 // publishEnv publishes the host's current config as the next generation,
 // unless the current env already holds the same config, provider and
 // revision, and returns the current env. Boot publishes Gen 1; the reload

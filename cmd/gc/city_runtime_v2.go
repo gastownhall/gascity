@@ -4,20 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // The city runtime's half of the session_reconciler switch. Under v2 the
 // tick and the startup step run only their maintenance phases, the startup
-// step boots the v2 runtime, and a config reload applies under its barrier;
+// step boots the v2 runtime, and a config reload publishes its next env;
 // the session phases, the control-dispatcher tick and the drain tracker are
 // unreachable (reconcile_maintenance.go guards them besides). The v2 code
-// itself never sees CityRuntime: it reaches the city through the v2Host built
-// here.
+// itself never sees CityRuntime: it reaches the city through the plannerHost
+// built here.
 
 // v2TickPhases and v2StartupPhases are what v2 leaves the controller of the
 // tick and of the startup step.
@@ -52,53 +54,50 @@ func (cr *CityRuntime) controlDispatcherSignal() <-chan struct{} {
 	return cr.controlDispatcherCh
 }
 
-// installV2 binds rt to this city runtime. newCityRuntime calls it once, for
-// a controller that latched v2, before it installs the wiring's wake and
-// before run.
-func (cr *CityRuntime) installV2(rt *v2Runtime) {
-	rt.bindHost(cr.newV2Host())
+// installPlanner binds rt to this city runtime. newCityRuntime calls it
+// once, for a controller that latched v2, before it installs the wiring's
+// wake and before run.
+func (cr *CityRuntime) installPlanner(rt *plannerRuntime) {
+	rt.bindHost(cr.newPlannerHost())
 	cr.v2 = rt
 }
 
-// newV2Host is the one place the v2 runtime's view of the city is built (F2).
-// Every closure reads state a lock publishes (serviceStateMu, the controller
-// state's mu) or state fixed before run starts (cityPath, cityName,
-// storageRoutes, rec, cs, trace, stderr); none reads a field a reload writes
-// unlocked. The exception is inventoryLane: run sets it before the startup
-// step, on the goroutine that then boots the runtime, which is the only
-// caller of setInventoryHook.
-func (cr *CityRuntime) newV2Host() v2Host {
-	return v2Host{
-		sessions: cr.v2SessionsCensus,
-		censusLegs: func() ([]classStoreCandidate, error) {
-			cfg := cr.serviceConfigSnapshot()
-			rigs := cr.rigBeadStores() // residency:allow — the census frame; censusStoreCandidates plans the legs (storeref.Plan)
-			return censusStoreCandidates(cr.cityPath, cfg, cr.v2SessionsStore(), rigs, buildSuspendedRigPathsForCity(cfg, cr.cityPath), censusRefBare)
+// newPlannerHost is the one place the planner's view of the city is built
+// (F2). Every closure reads state a lock publishes or state fixed before run
+// starts; run sets inventoryLane before the startup step boots the planner.
+// The capacity guard and template resolutions are left out: no trace-only
+// arm reads them.
+func (cr *CityRuntime) newPlannerHost() plannerHost {
+	return plannerHost{
+		gather: gatherEnv{
+			CityPath: cr.cityPath, CityName: cr.cityName,
+			Sessions:  cr.v2SessionsStore,
+			RigStores: cr.rigBeadStores, // residency:allow — the census frame; sessionCensusStoreCandidates plans the legs (storeref.Plan)
+			Observations: func() *ObservationCache {
+				if cr.inventoryLane == nil {
+					return nil
+				}
+				return cr.inventoryLane.cache
+			},
+			Health: func() *providerHealthSnapshot { return loadProviderHealthSnapshot(cr.cityPath) },
+			Episodes: func() (map[string]sessionpkg.StartupHealthEpisode, error) {
+				return readStartupHealthEpisodes(cr.v2SessionsStore())
+			},
+			Suspension: func() suspensionstate.State { return loadSuspensionStateBestEffort(cr.cityPath) },
+			LookPath:   exec.LookPath,
 		},
 		snapshotEnv: cr.serviceEnvSnapshot,
 		setInventoryHook: func(fn func(prev, next *ObservationSnapshot)) {
 			cr.inventoryLane.setPassHook(fn)
 		},
-		cityStore:   cr.cityBeadStore,
-		rigStores:   cr.rigBeadStores, // residency:allow — the reload barrier compares store handles to spot a rebuild; resolves no bead
-		retryReload: cr.requestConfigReloadRetry,
-		beginTrace:  cr.beginV2Trace,
-		safeTick:    cr.safeTick,
-		stderr:      cr.stderr,
-		// The controller's workers start after boot, and run sets the
-		// inventory lane before the startup step boots the runtime.
-		sessionsStore: cr.v2SessionsStore,
-		observations: func() *ObservationCache {
-			if cr.inventoryLane == nil {
-				return nil
-			}
-			return cr.inventoryLane.cache
-		},
-		rec: cr.rec,
 		bootCensus: func() (v2SessionMigration, error) {
 			rigs := cr.rigBeadStores() // residency:allow — the census frame; collectOpenSessionInfos plans the legs (storeref.Plan)
 			return readV2SessionMigration(cr.cityPath, cr.cityName, cr.serviceConfigSnapshot(), cr.v2SessionsStore(), rigs)
 		},
+		beginTrace: cr.beginV2Trace,
+		safeTick:   cr.safeTick,
+		rec:        cr.rec,
+		stderr:     cr.stderr,
 	}
 }
 
@@ -107,33 +106,15 @@ func (cr *CityRuntime) v2SessionsStore() beads.Store {
 	return resolveSessionStore(cr.storageRoutes, cr.cityBeadStore(), cr.serviceConfigSnapshot(), cr.cityPath, cr.rec)
 }
 
-// v2SessionsCensus is the router's sessions census: the open session rows of
-// the sessions-class store, through its cache. It uses the package-level
-// loader, which returns its error; the CityRuntime method maps an error to an
-// empty snapshot, and a failed read must never look like an empty city.
-func (cr *CityRuntime) v2SessionsCensus() ([]sessionpkg.Info, error) {
-	store := cr.v2SessionsStore()
-	if store == nil {
-		return nil, errV2NoSessionsStore
-	}
-	snapshot, err := loadSessionBeadSnapshot(store)
-	if err != nil {
-		return nil, err
-	}
-	return snapshot.OpenInfos(), nil
-}
-
-// recordV2Queue records the v2 runtime's reconcile_queue operation in trace:
-// a maintenance tick's, or the startup step's while boot waits. It runs
-// whether or not the tick traces, since building the record is what raises
-// the stuck-reconcile alert.
-func (cr *CityRuntime) recordV2Queue(trace *sessionReconcilerTraceCycle) {
-	fields := cr.v2.queueRecord(time.Now(), cr.legacySessionEntries.Load())
-	trace.RecordControllerOperation(TraceSiteReconcileQueue, TraceReasonRetained, TraceOutcomeComplete, "reconcile_queue", 0, fields)
+// recordV2Pass records the planner's reconcile_pass operation in a
+// maintenance tick's trace, however the tick ends.
+func (cr *CityRuntime) recordV2Pass(trace *sessionReconcilerTraceCycle) {
+	fields := cr.v2.passRecord(time.Now(), cr.legacySessionEntries.Load())
+	trace.RecordControllerOperation(TraceSiteReconcilePass, TraceReasonRetained, TraceOutcomeComplete, "reconcile_pass", 0, fields)
 }
 
 // beginV2Trace opens a trace cycle for a v2 decision. It runs off the
-// controller goroutine (the worker FS gate), so it is built like
+// controller goroutine (the planner's), so it is built like
 // beginOrdersLaneTrace: the config from the locked snapshot, no revision.
 func (cr *CityRuntime) beginV2Trace(trigger string) *sessionReconcilerTraceCycle {
 	if cr.trace == nil {
@@ -145,22 +126,17 @@ func (cr *CityRuntime) beginV2Trace(trigger string) *sessionReconcilerTraceCycle
 	}, cr.serviceConfigSnapshot(), nil)
 }
 
-// bootV2 is the startup step's v2 half, after its maintenance phases. It
-// boots the runtime on ctx, the run context, which becomes the runtime's
-// lifetime, and returns once every open session row has been reconciled once
-// and the allocator has passed (MAINT-010, MAINT-012), or false when ctx
-// ends. While boot waits, every patrol interval records the queue in trace,
-// the startup step's, so a boot stuck before ready says what it waits on.
-// With no bead store there is nothing to reconcile: the runtime latches
-// no-store, the workers stay off and readiness proceeds (MAINT-003). boot is
-// idempotent, so a startup retry after a panic resumes it (MAINT-005).
-func (cr *CityRuntime) bootV2(ctx context.Context, trace *sessionReconcilerTraceCycle) bool {
+// bootV2 is the startup step's v2 half, after its maintenance phases: it
+// boots the planner on ctx, the run context, which becomes its lifetime
+// (plannerRuntime.boot). With no bead store the planner latches no-store and
+// stays off, and readiness proceeds (MAINT-003).
+func (cr *CityRuntime) bootV2(ctx context.Context) bool {
 	if cr.cityBeadStore() == nil {
 		cr.v2.noStore.Store(true)
-		fmt.Fprintf(cr.stderr, "%s: session reconciler v2: no bead store; reconcile workers disabled\n", cr.logPrefix) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(cr.stderr, "%s: session reconciler v2: no bead store; the planner is disabled\n", cr.logPrefix) //nolint:errcheck // best-effort stderr
 		return true
 	}
-	if err := cr.v2.boot(ctx, func() { cr.recordV2Queue(trace) }); err != nil {
+	if err := cr.v2.boot(ctx); err != nil {
 		if ctx.Err() == nil {
 			fmt.Fprintf(cr.stderr, "%s: session reconciler v2: boot: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		}
@@ -169,37 +145,35 @@ func (cr *CityRuntime) bootV2(ctx context.Context, trace *sessionReconcilerTrace
 	return true
 }
 
-// reloadUnderBarrier applies the tick's config reload with every v2
-// reconcile paused (C4.4). A manual reload is answered from inside the
-// barrier, after the post-reload hooks and before the reconciles resume
-// (MAINT-023); a reload that aborts or defers is answered failed and left
-// pending for the next patrol.
-func (cr *CityRuntime) reloadUnderBarrier(p *tickPass, source reloadSource) {
-	intent := reloadIntent{Source: source, Soft: p.manualReload != nil && p.manualReload.soft}
-	apply := func() reloadControlReply {
-		return cr.reloadConfigTraced(p.ctx, p.lastProviderName, p.cityRoot, p.trace, source)
+// reloadV2 applies the tick's config reload as legacy does, publishes the
+// planner's next env (CONTRACT v5 P7), then amends and sends the reply
+// (MAINT-023). Nothing pauses: a pass reads one env however long it runs.
+func (cr *CityRuntime) reloadV2(p *tickPass, source reloadSource) {
+	defer cr.v2.publishEnv() // a panic in apply after it published still publishes
+	r := cr.reloadConfigTraced(p.ctx, p.lastProviderName, p.cityRoot, p.trace, source)
+	cr.v2.publishEnv()
+	if r.Outcome != reloadOutcomeFailed {
+		cr.v2.softReload(reloadIntent{Source: source, Soft: p.manualReload != nil && p.manualReload.soft}, &r)
 	}
-	reply := func(r reloadControlReply) {
-		p.manualReply = r
-		if p.manualReload != nil {
-			p.manualReloadCompleted = true
-			cr.completeManualReload(p)
-		}
+	cr.v2.planner.markDirty("reload")
+	p.manualReply = r
+	if p.manualReload != nil {
+		p.manualReloadCompleted = true
+		cr.completeManualReload(p)
 	}
-	_, _ = cr.v2.barrier.run(p.ctx, intent, apply, reply)
 }
 
-// beforeProviderSwap holds a provider swap until every in-flight v2 start
-// effect has committed or failed, so the swap's listing of the old
-// provider's sessions cannot miss a runtime a start is still creating (C4.4
-// step 3, R6). It waits up to the startup timeout plus 10s, then cancels the
-// starts and waits effectCancelBound; past that the reload must abort. A
-// legacy controller has nothing to wait for.
-func (cr *CityRuntime) beforeProviderSwap(cfg *config.City) error {
+// beforeProviderSwap holds a provider swap (CONTRACT v5 P7): it pauses the
+// planner's starts and creates (swap-pause), then waits for every in-flight
+// v2 start (effectExecutor.waitStarts), so the swap's listing cannot miss a
+// runtime a start is still creating; an error aborts the reload. The caller
+// resumes once the swap applied or aborted. Legacy waits on nothing.
+func (cr *CityRuntime) beforeProviderSwap(cfg *config.City) (resume func(), err error) {
 	if cr.v2 == nil {
-		return nil
+		return func() {}, nil
 	}
-	return cr.v2.exec.waitStarts(cfg.Session.StartupTimeoutDuration() + 10*time.Second)
+	cr.v2.planner.pauseStarts()
+	return cr.v2.planner.resumeStarts, cr.v2.exec.waitStarts(cfg.Session.StartupTimeoutDuration() + 10*time.Second)
 }
 
 // checkReconcilerWiring refuses runtime params whose v2 runtime and wake
@@ -212,15 +186,15 @@ func checkReconcilerWiring(p CityRuntimeParams) error {
 		switch {
 		case p.V2 != nil:
 			return errors.New("controller wiring: a v2 runtime handed to a legacy controller")
-		case p.Wake != nil && p.Wake.router != nil:
-			return errors.New("controller wiring: a legacy controller's wake routes to a v2 router")
+		case p.Wake != nil && p.Wake.planner != nil:
+			return errors.New("controller wiring: a legacy controller's wake marks a v2 planner")
 		}
 		return nil
 	}
 	switch {
 	case p.V2 == nil || p.Wake == nil:
 		return errors.New("controller wiring: a v2 controller needs its wiring's wake and v2 runtime")
-	case p.Wake.router != p.V2.router:
+	case p.Wake.planner != p.V2.planner:
 		return errors.New("controller wiring: the wake does not route to the controller's v2 runtime")
 	}
 	return nil

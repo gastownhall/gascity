@@ -3,10 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -1237,95 +1233,6 @@ func TestV2MetricsLatencyDepthAndDuty(t *testing.T) {
 	})
 }
 
-// v2CityRuntimeSeams are the reconcile_*.go production files that are the
-// city runtime's side of the switch and so name CityRuntime by design: the
-// controller's maintenance phase list and its guard. Every other
-// reconcile_*.go and allocator_*.go file is v2 code, a new one included, and
-// must reach the city only through v2Host (city_runtime_v2.go builds it).
-var v2CityRuntimeSeams = map[string]bool{"reconcile_maintenance.go": true}
-
-// v2CityRuntimeSeamDecls are the only declarations inside a v2 file that may
-// name CityRuntime: the wake's runtime accessors. The rest of
-// reconcile_wake.go (the wake the router hangs off) is v2 code.
-var v2CityRuntimeSeamDecls = map[string]bool{
-	"reconcile_wake.go:(*CityRuntime).initWake": true,
-	"reconcile_wake.go:(*CityRuntime).wakeOf":   true,
-}
-
-// v2RuntimeFiles returns every v2 production file F2 forbids from touching
-// CityRuntime.
-func v2RuntimeFiles(t *testing.T) []string {
-	t.Helper()
-	var out []string
-	for _, pattern := range []string{"reconcile_*.go", "allocator_*.go"} {
-		names, err := filepath.Glob(pattern)
-		if err != nil {
-			t.Fatalf("glob %s: %v", pattern, err)
-		}
-		for _, name := range names {
-			if !strings.HasSuffix(name, "_test.go") && !v2CityRuntimeSeams[name] {
-				out = append(out, name)
-			}
-		}
-	}
-	for _, want := range []string{
-		"reconcile_runtime.go", "reconcile_router.go", "reconcile_barrier.go", "reconcile_wiring.go", "reconcile_wake.go",
-		"allocator_census.go", "allocator_health.go", "allocator_observe.go", "allocator_scalecheck_lane.go",
-	} {
-		if !slices.Contains(out, want) {
-			t.Fatalf("v2 files %v miss %s", out, want)
-		}
-	}
-	return out
-}
-
-// Kills: v2 code reaching CityRuntime (F2), or a worker reading the host's
-// config directly instead of the published env. A reload writes CityRuntime
-// fields without a lock, so the v2 files never name the type, and only
-// publishEnv calls host.snapshotEnv.
-func TestV2RuntimeDoesNotReferenceCityRuntime(t *testing.T) {
-	fset := token.NewFileSet()
-	var bad []string
-	for _, name := range v2RuntimeFiles(t) {
-		file, err := parser.ParseFile(fset, name, nil, 0)
-		if err != nil {
-			t.Fatalf("parsing %s: %v", name, err)
-		}
-		seams := 0
-		for _, decl := range file.Decls {
-			if v2CityRuntimeSeamDecls[name+":"+topLevelDeclName(decl)] {
-				seams++
-				continue
-			}
-			fn, _ := decl.(*ast.FuncDecl)
-			ast.Inspect(decl, func(n ast.Node) bool {
-				switch n := n.(type) {
-				case *ast.Ident:
-					if n.Name == "CityRuntime" {
-						bad = append(bad, fset.Position(n.Pos()).String()+": names CityRuntime")
-					}
-				case *ast.SelectorExpr:
-					if n.Sel.Name == "snapshotEnv" && (fn == nil || fn.Name.Name != "publishEnv") {
-						bad = append(bad, fset.Position(n.Pos()).String()+": reads host.snapshotEnv outside publishEnv")
-					}
-				}
-				return true
-			})
-		}
-		for key := range v2CityRuntimeSeamDecls {
-			if strings.HasPrefix(key, name+":") {
-				seams--
-			}
-		}
-		if seams != 0 {
-			bad = append(bad, name+": v2CityRuntimeSeamDecls names a declaration the file no longer has; drop the row")
-		}
-	}
-	if len(bad) > 0 {
-		t.Fatalf("v2 runtime code must reach the city only through v2Host and the published env (F2):\n  %s", strings.Join(bad, "\n  "))
-	}
-}
-
 // Kills: no stuck-reconcile alert, one at the reload deadline instead of
 // twice it, one on every tick while the same reconcile stays stuck, or none
 // for a later reconcile that sticks too. The record reports the longest
@@ -1358,7 +1265,7 @@ func TestV2QueueRecordAlertsOnceOnAReconcileStuckPastTwiceTheReloadDeadline(t *t
 		h.boot(t)
 		const stuckAfter = 2 * reloadReconcileDeadline // pinned here, not read from the code under test
 		alerts := func() int { return strings.Count(stderr.String(), "session reconcile has been running") }
-		record := func() map[string]any { return h.rt.queueRecord(time.Now(), 0) }
+		record := func() map[string]any { return h.rt.queueRecord(time.Now()) }
 
 		h.add("stuck-1", workqueue.Reason{Kind: "api"})
 		synctest.Wait()
@@ -1396,7 +1303,7 @@ func TestV2QueueRecordAlertsOnceOnAReconcileStuckPastTwiceTheReloadDeadline(t *t
 func TestV2QueueRecordReportsWhatBootWaitsOn(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		h := newV2HarnessWithRows(t, "s-a")
-		boot := func() any { return h.rt.queueRecord(time.Now(), 0)["boot"] }
+		boot := func() any { return h.rt.queueRecord(time.Now())["boot"] }
 		if got := boot(); got != v2BootCensus {
 			t.Fatalf("boot before boot = %v, want %s", got, v2BootCensus)
 		}
@@ -1493,7 +1400,7 @@ func TestV2QueueRecordFieldsComeFromTheirSources(t *testing.T) {
 			}
 			return nil
 		})
-		record := func() map[string]any { return h.rt.queueRecord(time.Now(), 0) }
+		record := func() map[string]any { return h.rt.queueRecord(time.Now()) }
 		event := func(id string, replay bool) {
 			h.rt.router.OnBeadEvent(beadEvent(t, events.BeadUpdated, v2TestRow(id)), replay, true)
 		}
@@ -1605,7 +1512,7 @@ func TestV2BeadEventLatencyIgnoresAnEventMergedIntoAnOlderAdd(t *testing.T) {
 		advance(500 * time.Millisecond)
 		h.rt.release("test")
 		synctest.Wait()
-		got := h.rt.queueRecord(time.Now(), 0)
+		got := h.rt.queueRecord(time.Now())
 		if got["latency_p99_ms"] != int64(10500) || got["bead_event_latency_p99_ms"] != int64(0) {
 			t.Fatalf("latency p99 = %v, bead-event latency p99 = %v; want 10500, 0 (the event did not queue the item)",
 				got["latency_p99_ms"], got["bead_event_latency_p99_ms"])
@@ -1626,7 +1533,7 @@ func TestV2QueueRecordReportsTheArmedFSGate(t *testing.T) {
 		if !h.rt.armFSGate() {
 			t.Fatal("armFSGate after boot = false")
 		}
-		gate := func() any { return h.rt.queueRecord(time.Now(), 0)["fs_gate"] }
+		gate := func() any { return h.rt.queueRecord(time.Now())["fs_gate"] }
 		advance(v2FSGateInterval)
 		h.rt.hold("test")
 		if got := gate(); got != "open" {

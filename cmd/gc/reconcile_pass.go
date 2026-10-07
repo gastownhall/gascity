@@ -38,10 +38,12 @@ type passTrace struct {
 }
 
 // rowTrace is one row's decision when it changed: decideRow's reason and
-// admission's outcome for its intent.
+// admission's outcome for its intent, with the row's template and session
+// name, which the trace sink files it under.
 type rowTrace struct {
-	Key             rowKey
-	Reason, Outcome string
+	Key                   rowKey
+	Template, SessionName string
+	Reason, Outcome       string
 }
 
 // Row trace outcomes; a deferred intent's outcome is its cause after
@@ -118,8 +120,13 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 		Endpoints: w.Gates, Backoff: w.Backoff, Paused: w.Paused,
 		BootOpen: w.Boot.CachePrimed && w.Boot.InventoryComplete && w.Boot.RecordingSeen, // P2
 	}, intents)
-	// The planner state admission leaves is stored before any submit.
-	p.bucket, p.fairSeed = res.Bucket, res.FairSeed
+	// The planner state admission leaves is stored before any submit. A
+	// trace-only pass submits nothing, so it keeps no token debit, and no
+	// refill is a reason for a pass.
+	p.fairSeed = res.FairSeed
+	if v2EffectsReal {
+		p.bucket, next = res.Bucket, earliest(next, res.NextToken)
+	}
 	rec.Admitted, rec.Deferred = res.Admitted, res.Deferred
 	rec.Rows = p.traceRows(w.Census, reasons, res)
 
@@ -129,7 +136,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 		AssignedWork: v.AssignedWork, AssignedStores: v.AssignedStores, AssignedStoreRefs: v.AssignedStoreRefs,
 		ReadyAssigned: v.ReadyAssigned, ReadyRouted: a.ReadyRouted, ReadyRoutedRefs: a.ReadyRoutedRefs,
 	})
-	return passResult{Next: earliest(next, res.NextToken), Counts: passCountsOf(res, w.InFlight)}
+	return passResult{Next: next, Counts: passCountsOf(res, w.InFlight)}
 }
 
 // decideRowSafe is decideRow with P6's panic isolation: a row that panics
@@ -172,7 +179,7 @@ func (p *planner) traceRows(c *sessionCensus, reasons map[rowKey]string, res adm
 	var out []rowTrace
 	for _, row := range c.Canonical() {
 		reason, decided := reasons[row.Key]
-		t := rowTrace{Key: row.Key, Reason: reason, Outcome: cmp.Or(outcomes[row.Key], outcomeNone)}
+		t := rowTrace{Key: row.Key, Template: row.Info.Template, SessionName: row.Info.SessionNameMetadata, Reason: reason, Outcome: cmp.Or(outcomes[row.Key], outcomeNone)}
 		if line := t.Reason + "/" + t.Outcome; decided && p.rowTrace[row.Key] != line {
 			p.rowTrace[row.Key] = line
 			out = append(out, t)

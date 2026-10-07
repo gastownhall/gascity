@@ -104,7 +104,9 @@ func TestDecideRowPanicHoldsRow(t *testing.T) {
 	if got := intentKeys(rec.Admitted); !slices.Equal(got, []string{"row-heal:gc-2"}) {
 		t.Fatalf("admitted = %v, want gc-2's heal only", got)
 	}
-	if !slices.Contains(rec.Rows, rowTrace{Key: rowKey{Leg: rowLeg, ID: "gc-1"}, Reason: decidePanic, Outcome: outcomeNone}) {
+	if !slices.ContainsFunc(rec.Rows, func(r rowTrace) bool {
+		return r.Key == rowKey{Leg: rowLeg, ID: "gc-1"} && r.Template == "worker" && r.Reason == decidePanic && r.Outcome == outcomeNone
+	}) {
 		t.Fatalf("rows traced = %+v, want gc-1 held with reason panic", rec.Rows)
 	}
 	if !strings.Contains(stderr.String(), "gc-1") || !strings.Contains(stderr.String(), "boom") {
@@ -193,14 +195,14 @@ func TestPassIsDeterministic(t *testing.T) {
 }
 
 // Kills admission's planner state dropped or a row deadline lost: the pass
-// stores the bucket and the fair seed admission returned (an admitted pool
-// create advances the seed), and reports the earliest row deadline as the
-// next pass.
+// stores the fair seed admission returned (an admitted pool create advances
+// the seed; a trace-only pass keeps no bucket, TestTracePassKeepsNoTokenDebit),
+// and reports the earliest row deadline as the next pass.
 func TestPassCarriesAdmissionStateAndDeadlines(t *testing.T) {
 	f := newGatherFixture(t, poolRow("gc-1", "worker", 1, "asleep", "held_until", rowAt(time.Minute)), routedDemandBead("gc-r1"), routedDemandBead("gc-r2"))
 	res := f.p.tracePass(f.env, gatherNow)
-	if f.p.fairSeed != 1 || f.p.bucket.LastRefill.IsZero() {
-		t.Fatalf("planner state after a pass with pool creates = seed %d, bucket %+v; want seed 1 and a refilled bucket", f.p.fairSeed, f.p.bucket)
+	if f.p.fairSeed != 1 {
+		t.Fatalf("planner state after a pass with pool creates = seed %d; want seed 1", f.p.fairSeed)
 	}
 	if want := gatherNow.Add(time.Minute + time.Second); !res.Next.Equal(want) {
 		t.Fatalf("next pass = %v, want gc-1's hold expiry %v", res.Next, want)
@@ -223,5 +225,25 @@ func TestPassAppliesBootGate(t *testing.T) {
 	rec := f.passRecord(t)
 	if len(rec.Admitted) != 0 || len(rec.Deferred) != 1 || rec.Deferred[0].Cause != causeBootGate {
 		t.Fatalf("admitted %v, deferred %+v; want the stop deferred by the boot gate", intentKeys(rec.Admitted), rec.Deferred)
+	}
+}
+
+// Kills the trace-only pass keeping admission's token debit, or scheduling a
+// pass for a refill (C2c1's relay): nothing submits what it admits, so a kept
+// debit would run the bucket dry on phantom starts. With one token and three
+// creates owed, the pass admits one and waits the rest on the budget, yet
+// the planner's bucket is untouched and the pass asks for no follow-up.
+func TestTracePassKeepsNoTokenDebit(t *testing.T) {
+	f := newGatherFixture(t, routedDemandBead("gc-r1"), routedDemandBead("gc-r2"), routedDemandBead("gc-r3"))
+	cfg := *f.cur.Load().Cfg
+	cfg.Daemon.MaxWakesPerTick = intPtr(1)
+	f.cur.Store(&reconcileEnv{Gen: 1, Cfg: &cfg, SP: f.sp})
+	res := f.p.tracePass(f.env, gatherNow)
+	rec := f.p.out.record.Load()
+	if rec.Err != "" || len(rec.Admitted) != 1 || len(rec.Deferred) == 0 {
+		t.Fatalf("admitted %v deferred %v (err %q), want one create through and the rest held", intentKeys(rec.Admitted), intentKeys(rec.Deferred), rec.Err)
+	}
+	if f.p.bucket != (bucketState{}) || !res.Next.IsZero() {
+		t.Fatalf("bucket = %+v, next pass at %v; want the bucket untouched and no refill pass", f.p.bucket, res.Next)
 	}
 }

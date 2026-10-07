@@ -27,10 +27,15 @@ func (m reconcilerMode) String() string {
 	return config.SessionReconcilerLegacy
 }
 
-// v2ControllersInBuild reports whether this build carries the v2 allocator
-// (P3) and the first session controller group (P4.1). Until both land, v2
-// would start, restart and scale nothing, so selecting it is refused.
-const v2ControllersInBuild = v2SessionControllerReal && v2AllocatorControllerReal
+// v2EffectsReal reports whether the planner submits what admission lets
+// through. Until C9 it is false: the planner runs trace-only.
+const v2EffectsReal = false
+
+// v2ControllersInBuild reports whether v2 would act. While the planner is
+// trace-only it would start, restart and scale nothing, so selecting it is
+// refused. The skeleton's constants (reconcile_runtime.go) are dead; C3
+// deletes them.
+const v2ControllersInBuild = v2EffectsReal
 
 // v2SkeletonEnv is the developer-only override that admits v2 before its
 // controllers are in the build, for smoke runs of the skeleton on a throwaway

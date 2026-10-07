@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -938,8 +937,6 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	if evt.Type == events.BeadClosed {
 		storeRef = cs.autocloseStoreRefLocked(evt.Subject)
 	}
-	// Only the v2 router asks whether the event landed in the sessions store.
-	appliedToSessions := wake.routes() && slices.Contains(stores, resolveSessionStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv))
 	cs.mu.RUnlock()
 
 	// A cache event (either actor) carries a CachingStore's own post-absorb
@@ -963,7 +960,7 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 			}
 		}
 	}
-	wake.OnBeadEvent(evt, snapshot, appliedToSessions)
+	wake.OnBeadEvent(evt, snapshot)
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
 		if evt.Actor == cacheReconcileActor {
 			beadCloseAutocloseDispatch(func() { cs.applyInferredClose(evt, stores, storeRef) })

@@ -157,22 +157,12 @@ func inFlight(q workqueue.Stats, now time.Time) time.Duration {
 	return now.Sub(q.OldestInFlight)
 }
 
-// bootStatus is the startup watchdog's line on the v2 runtime: what boot
-// waits on, and whether a reconcile holds it up.
-func (rt *v2Runtime) bootStatus(now time.Time) string {
-	q := rt.sessions.Stats()
-	return fmt.Sprintf("boot=%s depth_hot=%d depth_resync=%d processing=%d longest_in_flight=%s",
-		rt.bootState(), q.Depth[workqueue.LaneHot], q.Depth[workqueue.LaneResync], q.Processing, inFlight(q, now).Round(time.Millisecond))
-}
-
 // queueRecord is the reconcile_queue record of a maintenance tick, or of a
 // boot patrol (engdocs/architecture/reconciler-v2.md#observability): the
 // queue, the reconciles, the allocator and resync lanes, the router, what boot
-// still waits on, and legacyEntries, the city runtime's count of refused
-// legacy session entries, which must stay 0. Adds are counted since the last
-// record; the rest is cumulative or current. A session reconcile in flight for
+// still waits on. Adds are counted since the last record; the rest is cumulative or current. A session reconcile in flight for
 // v2StuckReconcileAfter or longer is alerted on stderr, once.
-func (rt *v2Runtime) queueRecord(now time.Time, legacyEntries int64) map[string]any {
+func (rt *v2Runtime) queueRecord(now time.Time) map[string]any {
 	m, r := rt.metrics.snapshot(now), rt.router.stats()
 	ago := func(t time.Time) int64 {
 		if t.IsZero() {
@@ -242,7 +232,6 @@ func (rt *v2Runtime) queueRecord(now time.Time, legacyEntries int64) map[string]
 		"router_panics":              r.Panics, // recovered mapping panics; each dropped its trigger and forced a resync
 		"holds":                      q.Holds,
 		"fs_gate":                    rt.fsGateState(q.Holds),
-		"legacy_session_entries":     legacyEntries,
 	}
 }
 
