@@ -220,6 +220,7 @@ func TestMain(m *testing.M) {
 		testscript.Main(m, map[string]func(){
 			"gc": func() {
 				configureTestscriptEnvDefaults()
+				configureObservationCLIForTests()
 				os.Exit(mainExitCode(os.Args[1:], os.Stdout, os.Stderr))
 			},
 			"bd": bdTestCmd,
