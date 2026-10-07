@@ -56,7 +56,6 @@ var (
 	_ runtime.ImmediateNudgeProvider        = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
-	_ runtime.LivenessInvalidator           = (*Provider)(nil)
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
 	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
@@ -68,7 +67,6 @@ var (
 	_ runtime.ServerDeathConfirmer          = (*Provider)(nil)
 	_ runtime.SessionObjectKiller           = (*Provider)(nil)
 	_ runtime.FreshLivenessObserver         = (*Provider)(nil)
-	_ runtime.IncarnationLivenessObserver   = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -337,12 +335,6 @@ func (p *Provider) Interrupt(name string) error {
 // ObserveLiveness or ProcessAlive when agent-process liveness matters.
 func (p *Provider) IsRunning(name string) bool {
 	return p.cache.IsRunning(name)
-}
-
-// InvalidateLiveness discards the cached tmux runtime snapshot before a fresh
-// liveness observation. Tmux state is cached globally, so name is unused.
-func (p *Provider) InvalidateLiveness(_ string) {
-	p.cache.Invalidate()
 }
 
 // IsDeadRuntimeSession reports whether a visible tmux session is a

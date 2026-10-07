@@ -29,7 +29,6 @@ go_test(
         "//internal/runtime/hybrid",
         "//internal/runtime/runtimetest",
         "//internal/testenv",
-        "//internal/testutil",
     ],
 )
 

@@ -37,9 +37,7 @@ var (
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.TransportCapabilityProvider   = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
-	_ runtime.LivenessInvalidator           = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
-	_ runtime.IncarnationLivenessObserver   = (*Provider)(nil)
 	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 	_ runtime.FreshLivenessObserver         = (*Provider)(nil)
@@ -258,17 +256,6 @@ func (p *Provider) IsRunning(name string) bool {
 	return p.acpSP.IsRunning(name)
 }
 
-// InvalidateLiveness invalidates both backends because a stale route table
-// must not hide the backend that actually hosts the session.
-func (p *Provider) InvalidateLiveness(name string) {
-	if invalidator, ok := p.defaultSP.(runtime.LivenessInvalidator); ok {
-		invalidator.InvalidateLiveness(name)
-	}
-	if invalidator, ok := p.acpSP.(runtime.LivenessInvalidator); ok {
-		invalidator.InvalidateLiveness(name)
-	}
-}
-
 // IsDeadRuntimeSession checks both backends for a positive dead-artifact
 // report because ListRunning is also merged across both backends.
 func (p *Provider) IsDeadRuntimeSession(name string) (bool, error) {
@@ -344,31 +331,6 @@ func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.L
 		other = p.defaultSP
 	}
 	return runtime.ObserveLiveness(other, name, processNames)
-}
-
-// ObserveFreshLiveness forwards a decisive liveness observation to only the
-// backend selected for the target session. It deliberately does not use the
-// stale-route recovery fallback used by ordinary liveness observations: only
-// the selected backend can authoritatively prove this target absent.
-func (p *Provider) ObserveFreshLiveness(target runtime.LivenessTarget) runtime.Liveness {
-	p.mu.RLock()
-	selected := p.defaultSP
-	selectedRouteGeneration := p.routes[target.SessionName]
-	routedACP := selectedRouteGeneration != 0
-	if routedACP {
-		selected = p.acpSP
-	}
-	p.mu.RUnlock()
-
-	observation := runtime.ObserveFreshLiveness(selected, target)
-	if routedACP && observation.Complete && !observation.Running && !observation.Alive {
-		p.mu.Lock()
-		if p.routes[target.SessionName] == selectedRouteGeneration {
-			delete(p.routes, target.SessionName)
-		}
-		p.mu.Unlock()
-	}
-	return observation
 }
 
 // ObserveLivenessWithError preserves routed-backend observation failures. A

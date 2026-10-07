@@ -50,8 +50,6 @@ var (
 	_ runtime.ServerDeathConfirmer  = (*seamBackedProvider)(nil)
 	_ runtime.FreshLivenessObserver = (*seamBackedProvider)(nil)
 	_ runtime.SessionObjectKiller   = (*seamBackedProvider)(nil)
-	// So is the fresh read bound to one session incarnation.
-	_ runtime.IncarnationLivenessObserver = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBackedWithConfig constructs a tmux provider served through the seams.

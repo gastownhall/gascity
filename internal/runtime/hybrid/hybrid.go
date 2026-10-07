@@ -26,9 +26,7 @@ var (
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
-	_ runtime.LivenessInvalidator           = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
-	_ runtime.IncarnationLivenessObserver   = (*Provider)(nil)
 	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 	_ runtime.AttachmentObserverWithError   = (*Provider)(nil)
@@ -107,14 +105,6 @@ func (p *Provider) IsRunning(name string) bool {
 	return p.route(name).IsRunning(name)
 }
 
-// InvalidateLiveness forwards to the backend selected for name when it caches
-// liveness observations.
-func (p *Provider) InvalidateLiveness(name string) {
-	if invalidator, ok := p.route(name).(runtime.LivenessInvalidator); ok {
-		invalidator.InvalidateLiveness(name)
-	}
-}
-
 // IsDeadRuntimeSession delegates to the routed backend when it can positively
 // distinguish live sessions from visible dead artifacts.
 func (p *Provider) IsDeadRuntimeSession(name string) (bool, error) {
@@ -153,14 +143,6 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 // IsRunning+ProcessAlive fold.
 func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.Liveness {
 	return runtime.ObserveLiveness(p.route(name), name, processNames)
-}
-
-// ObserveFreshLiveness forwards a decisive liveness observation to only the
-// backend selected for the target session. An unselected backend cannot prove
-// this target absent, so unsupported selected backends remain incomplete.
-func (p *Provider) ObserveFreshLiveness(target runtime.LivenessTarget) runtime.Liveness {
-	selected := p.route(target.SessionName)
-	return runtime.ObserveFreshLiveness(selected, target)
 }
 
 // ObserveLivenessWithError forwards the optional error-bearing observation to
