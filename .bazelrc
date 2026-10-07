@@ -148,6 +148,12 @@ test:integration --norun_validations
 # which scripts/bazel_integration_smoke_test.go keeps this filter equal to.
 test:integration-smoke --config=integration
 test:integration-smoke --test_filter=^(TestBdStoreConformance|TestBdStoreDeleteBatchOrphansExternalDependents|TestBdStoreMailWispInsert|TestPinnedBdStoreCommandRunnerReportsSilentFallback|TestPinnedBdStoreCommandRunnerUsesExactEnvironmentAndKeepsStdoutJSON|TestE2E_WorkspaceDefaults|TestE2E_Hook_WithWork|TestE2E_MultiAgent_PoolAndFixed|TestGastown_ControllerStartStop|TestGastown_PipelineHumanToWorker|TestGraphWorkflowSuccessPath|TestIntegrationEnvForIsolatesHome|TestIsolatedEnvRootsKeepGCOffTheRealHome|TestStandaloneBDEnvForDirIsolatesHome)$
+# The review-formula tests (review-formulas.yml: pushes to main, PRs
+# labelled needs-review-formulas, dispatches): scripts/test-integration-shard's
+# formula_tests, which scripts/bazel_integration_smoke_test.go keeps this
+# filter equal to.
+test:integration-review-formulas --config=integration
+test:integration-review-formulas --test_filter=^(TestAdoptPRFormulaCompileAndRun|TestPersonalWorkFormulaCompileAndRun|TestAdoptPRFormulaRetriesTransientReviewerStep|TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries|TestReviewLoopApprovesInIterationTwoWithBodyRetry|TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash)$
 
 # No --remote_cache_compression here: bazel.yml's lanes add it for fork-cache
 # while rbe-cache advertises zstd (tools/rbe/cache-zstd-probe.sh), so the

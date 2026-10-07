@@ -11,19 +11,11 @@ coverage:
         target: auto
         flags:
           - bazel-unit
-          - integration-review-formulas
 
 flags:
   # bazel-nightly.yml: `bazel coverage //...` (bazel.yml's coverage job), the
   # combined lcov report of every default-configuration test target.
   bazel-unit:
-    paths:
-      - cmd/
-      - internal/
-      - test/
-    carryforward: true
-  # review-formulas.yml's shards.
-  integration-review-formulas:
     paths:
       - cmd/
       - internal/
