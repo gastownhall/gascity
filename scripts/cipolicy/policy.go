@@ -162,7 +162,17 @@ const (
 	// the topology job's proxied-default step selects those eight names
 	// instead of the one. Same tests' assertions, same step, -timeout and env.
 	// No new job, trigger or permission.
-	expectedCIExecutionHash     = "9a2af83ceb5363f11125242a16305e7fc4b8b84d9b0d8bbb744eb782b38b3197"
+	//
+	// Bumped again (ga-96smfk.6, package integration shards moved to Bazel):
+	// the eleven packages-* rows (packages-core-N-of-4,
+	// packages-cmd-gc-integration, packages-runtime-tmux-N-of-6) leave
+	// integration-shards for a new integration-packages-fork job with the
+	// same runner, env and steps, run only for fork and Dependabot pull
+	// requests (bazel.yml's gating integration-packages lane covers pushes
+	// and same-repo PRs); ci-integration needs it and allows its skip.
+	// Reviewed delta: one job split by condition; no new trigger, step
+	// command or permission.
+	expectedCIExecutionHash     = "219519a0f4fe05b114abc5d6b9226acd10af1985cbb7cf05586a6a305641cbec"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

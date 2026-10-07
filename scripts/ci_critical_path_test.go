@@ -431,7 +431,7 @@ func TestCmdGCProcessTimingEnvCrossesMakeIsolation(t *testing.T) {
 func TestPRTestJobsInstallOnlyRuntimeDependencies(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
 
-	for _, jobName := range []string{"cmd-gc-process", "cmd-gc-productmetrics-testhook", "integration-shards", "docker-session"} {
+	for _, jobName := range []string{"cmd-gc-process", "cmd-gc-productmetrics-testhook", "integration-shards", "integration-packages-fork", "docker-session"} {
 		job, ok := wf.Jobs[jobName]
 		if !ok {
 			t.Errorf("CI workflow has no %s job", jobName)
@@ -451,6 +451,7 @@ func TestPRTestJobsInstallOnlyRuntimeDependencies(t *testing.T) {
 		"cmd-gc-process",
 		"cmd-gc-productmetrics-testhook",
 		"integration-shards",
+		"integration-packages-fork",
 	} {
 		job := wf.Jobs[jobName]
 		for _, step := range job.Steps {
@@ -1061,15 +1062,19 @@ func TestCIPreflightFansInDirectlyWithoutWaitingForHistoricalCheck(t *testing.T)
 func TestPRIntegrationMatrixKeepsHeavyRestCoverageInReleaseGates(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
 	var cmdGCRows, restSmokeRows []string
-	for _, entry := range wf.Jobs["integration-shards"].Strategy.Matrix.Include {
-		if strings.Contains(entry.Command, "rest-full") {
-			t.Errorf("PR integration shard %q runs rest-full; Makefile assigns that suite to nightly/RC and targeted validation", entry.ShardName)
-		}
-		if strings.Contains(entry.Command, "packages-cmd-gc-") {
-			cmdGCRows = append(cmdGCRows, entry.Command)
-		}
-		if strings.Contains(entry.Command, "rest-smoke-") {
-			restSmokeRows = append(restSmokeRows, entry.Command)
+	// integration-packages-fork holds the packages-* rows bazel.yml's
+	// integration-packages lane covers for every PR but fork ones.
+	for _, jobName := range []string{"integration-shards", "integration-packages-fork"} {
+		for _, entry := range wf.Jobs[jobName].Strategy.Matrix.Include {
+			if strings.Contains(entry.Command, "rest-full") {
+				t.Errorf("PR integration shard %q runs rest-full; Makefile assigns that suite to nightly/RC and targeted validation", entry.ShardName)
+			}
+			if strings.Contains(entry.Command, "packages-cmd-gc-") {
+				cmdGCRows = append(cmdGCRows, entry.Command)
+			}
+			if strings.Contains(entry.Command, "rest-smoke-") {
+				restSmokeRows = append(restSmokeRows, entry.Command)
+			}
 		}
 	}
 	if want := []string{"./scripts/test-integration-shard packages-cmd-gc-integration"}; !slices.Equal(cmdGCRows, want) {
