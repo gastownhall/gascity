@@ -99,7 +99,7 @@ func TestBdStoreConformance(t *testing.T) {
 		configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
 		liveDBs = append(liveDBs, prefix)
 
-		return beads.NewBdStore(wsDir, pinnedBdStoreCommandRunner())
+		return beads.NewBdStore(wsDir, isolatedBdStoreCommandRunner(env))
 	}
 
 	// Run conformance suite. We skip RunSequentialIDTests because BdStore
