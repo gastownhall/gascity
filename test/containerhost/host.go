@@ -269,8 +269,12 @@ func (h *Host) ProcessExit(c *Container, name string) (code int, ok bool) {
 	if err != nil {
 		return 0, false
 	}
-	code, err = strconv.Atoi(strings.TrimSpace(string(data)))
-	return code, err == nil
+	// An exit status is 0-255; anything else is a corrupt record.
+	status, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 8)
+	if err != nil {
+		return 0, false
+	}
+	return int(status), true
 }
 
 func (h *Host) statusPath(c *Container, name string) string {

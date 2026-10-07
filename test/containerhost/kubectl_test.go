@@ -2,6 +2,8 @@ package containerhost
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -123,6 +125,37 @@ func TestKubectlRejectsUnmodelledInput(t *testing.T) {
 	} {
 		if _, _, code := k.run(tt.stdin, tt.args...); code == 0 {
 			t.Errorf("%s: kubectl %q succeeded, want a failure", name, tt.args)
+		}
+	}
+}
+
+func TestProcessExitAcceptsOnlyExitStatuses(t *testing.T) {
+	h, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &Container{ID: strings.Repeat("a", 64)}
+	if err := os.MkdirAll(filepath.Dir(h.statusPath(c, "init")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for record, want := range map[string]struct {
+		code int
+		ok   bool
+	}{
+		"0\n":          {0, true},
+		"137\n":        {137, true},
+		"255":          {255, true},
+		"256\n":        {0, false},
+		"-1\n":         {0, false},
+		"4294967297\n": {0, false},
+		"garbage":      {0, false},
+	} {
+		if err := os.WriteFile(h.statusPath(c, "init"), []byte(record), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		code, ok := h.ProcessExit(c, "init")
+		if code != want.code || ok != want.ok {
+			t.Errorf("ProcessExit(%q) = %d, %v; want %d, %v", record, code, ok, want.code, want.ok)
 		}
 	}
 }
