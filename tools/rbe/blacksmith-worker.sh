@@ -135,8 +135,10 @@ NL_BIN_DIR="$RUNNER_TEMP/nl-bin"
 # - libstdc++6, libgcc-s1, zlib1g: loaded by clang, lld and the llvm-* tools;
 # - libxml2 (and its liblzma5): loaded by lld;
 # - libicu74, libstdc++6, libgcc-s1: loaded by every Bazel-built Go binary
-#   that links Dolt's go-icu-regex (most tests), as are glibc's (base below);
+#   that links Dolt's go-icu-regex (most tests), as are glibc's;
 # - xz-utils: unpacks the toolchain's .tar.xz archive.
+# tools/rbe/worker-env measures each of these that an action can reach (its
+# measured list) or names it unmeasured, with the reason.
 WORKER_TOOLSET=(make jq sqlite3 tmux lsof cmake git libstdc++6 libgcc-s1 zlib1g
 	libxml2 liblzma5 xz-utils libicu74 zlib1g-dev libsqlite3-dev libbz2-dev
 	liblzma-dev libffi-dev libexpat1-dev libxml2-dev libreadline-dev
@@ -158,23 +160,27 @@ if ! dolt version 2>/dev/null | grep -q "$DOLT_VERSION"; then
 fi
 
 # The worker-env platform property (tools/rbe/worker-env): the sha256 of this
-# host's environment manifest. rbe-west's schedulers match it exactly against
+# host's toolchain manifest. rbe-west's schedulers match it exactly against
 # the worker-env CI's actions request (//platforms:rbe_worker: the sha256 of
-# the committed tools/rbe/worker-env.txt), so an action runs only on the host
-# its key names and its cached result is never one another host produced.
-tools/rbe/worker-env "${WORKER_TOOLSET[@]}" >"$RUNNER_TEMP/worker-env.txt"
+# the committed tools/rbe/worker-env.txt), so an action runs only on a host
+# with the toolchain its key names and its cached result is never one another
+# toolchain produced. The raw listing (dpkg's versions as installed) is only
+# for the drift report and the log; it is never hashed.
+tools/rbe/worker-env >"$RUNNER_TEMP/worker-env.txt"
 WORKER_ENV=sha256:$(sha256sum <"$RUNNER_TEMP/worker-env.txt" | cut -d' ' -f1)
 echo "worker-env: $WORKER_ENV"
-# A worker on any other host (a new Blacksmith image, a package, Go or dolt
-# change) can serve no gascity action. It registers anyway, advertising what
-# it measured: the pools are shared, and actions that send no worker-env
-# (beads') still run on it. The check prints the diff and the manifest and pin
-# to commit (log and step summary) and leaves them in
-# $RUNNER_TEMP/worker-env-drift. The pool workflows measure in a step of their
-# own first (WORKER_MODE=measure) and turn that into the pin's drift issue,
-# which also caps the farm's pools while it is open. measure: drift is the
-# result, so it fails.
-if ! tools/rbe/worker-env-drift check "$RUNNER_TEMP/worker-env.txt"; then
+tools/rbe/worker-env --raw >"$RUNNER_TEMP/worker-env.raw.txt" || :
+# A worker with any other toolchain (a new distribution release, a glibc,
+# library or tool release, Go or dolt) can serve no gascity action; security
+# patches of the same releases measure the same. It registers anyway,
+# advertising what it measured: the pools are shared, and actions that send
+# no worker-env still run on it. The check prints the diff, the raw listing,
+# and the manifest and pin to commit (log and step summary) and leaves them
+# in $RUNNER_TEMP/worker-env-drift. The pool workflows measure in a step of
+# their own first (WORKER_MODE=measure) and turn that into the pin's drift
+# issue, which also caps the farm's pools while it is open. measure: drift is
+# the result, so it fails.
+if ! tools/rbe/worker-env-drift check "$RUNNER_TEMP/worker-env.txt" "$RUNNER_TEMP/worker-env.raw.txt"; then
 	[ "$WORKER_MODE" != measure ] || exit 3
 	echo "worker-env: registering anyway with worker-env=$WORKER_ENV (actions without worker-env only)"
 fi

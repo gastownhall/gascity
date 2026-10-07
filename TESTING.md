@@ -313,27 +313,51 @@ after it merges, as `bazel.yml`'s own preflight does.
 
 Every action's key carries `worker-env`, the sha256 of
 `tools/rbe/worker-env.txt` (`//platforms:rbe_worker`). That file is the
-manifest of the Blacksmith host the pool workers run on: OS, arch, Go,
-dolt, and the dpkg versions of the worker toolset. rbe-west's oss and
-oss-fork schedulers match `worker-env` exactly. The default instance
+toolchain manifest of the Blacksmith host the pool workers run on. rbe-west's
+oss and oss-fork schedulers match `worker-env` exactly. The default instance
 ignores it. Each worker advertises the hash of the host it measures
-(`tools/rbe/worker-env`). An action runs only on a worker whose host is
-the pinned one.
+(`tools/rbe/worker-env`). An action runs only on a worker whose toolchain
+is the pinned one. gastownhall/beads shares the pools and carries a
+byte-identical copy of the manifest and the same pin.
 
-The measurement is stable while the Blacksmith image is. The worker
-installs its toolset from the image's own apt lists (no `apt-get
-update`) and Go and dolt by checksum. It changes with an image refresh,
-or with a change to the toolset, Go or dolt. That is drift, and it is
-loud (`tools/rbe/worker-env-drift`):
+The manifest records what can change an action's result, and nothing else.
+We don't control the Blacksmith image, and it takes Ubuntu security updates
+on its own schedule:
+
+- **Kept in full:** the arch, the OS release (`ubuntu 24.04`), and the Go
+  and dolt the worker installs by checksum.
+- **Kept as the upstream release:** each measured package
+  (`tools/rbe/worker-env`'s `measured` list). The Debian epoch and the
+  Ubuntu revision are dropped, so `9.4-3ubuntu6.1` and `9.4-3ubuntu6.2`
+  both measure `9.4`.
+  - The libraries the hermetic toolchain and test binaries load (glibc,
+    libstdc++, libgcc_s, ICU, zlib, libxml2, liblzma) are cut to
+    major.minor, their ABI.
+  - The tools that tests, genrules and test wrappers run (bash, dash,
+    coreutils, python3, tmux, jq, ...) are cut to major.minor too. The
+    archive holds that fixed for a release.
+  - git comes from the git-core PPA, which ships every upstream minor as a
+    security update, so it is cut to its major.
+  - yq is not a dpkg package; it is measured from `yq --version` and cut
+    to its major.
+- **Not measured:** the kernel; the `-dev` headers and cmake (no action
+  reads host headers or runs cmake); and every other image package.
+
+So a glibc minor, another arch or OS release, a library or archive tool
+minor, a git or yq major, or a Go or dolt bump is a new manifest. A
+security patch of the same releases is not. The measurement changes with
+an image refresh only when the refresh changes one of those.
+`tools/rbe/worker-env --raw` prints dpkg's versions as installed. That
+listing is for diagnosis and is never hashed. When the measurement does
+change, that is drift, and it is loud (`tools/rbe/worker-env-drift`):
 
 - A drifted worker still registers, advertising the hash it measured.
-  The pools are shared with beads, whose actions send no `worker-env`
-  and still run on it. gascity's actions carry the pin and never match
-  it.
-- The pool run's measurement step fails, with the diff and the manifest
-  and pin to commit in the step summary. The worker keeps serving. The
-  run's `await-drift` and `report-drift` jobs open or update the GitHub
-  issue labelled `rbe-worker-env-drift`, titled
+  Actions that send no `worker-env` still run on it. Actions that carry
+  the pin (gascity's and beads') never match it.
+- The pool run's measurement step fails. The step summary has the diff,
+  the manifest and pin to commit, and the raw listing. The worker keeps
+  serving. The run's `await-drift` and `report-drift` jobs open or update
+  the GitHub issue labelled `rbe-worker-env-drift`, titled
   `rbe worker-env drift: <pin>`.
 - That issue is the farm's signal too. While any open
   `rbe-worker-env-drift` issue exists, each rbe-west pool scaler caps
@@ -357,6 +381,10 @@ To re-pin, anyone with write access:
 2. Commit the manifest as `tools/rbe/worker-env.txt` and the pin in
    `platforms/BUILD.bazel`. `go test ./scripts/ -run RBEWorkerEnv`
    checks that they agree with each other, `go.mod` and the toolset.
+   Make the same change in gastownhall/beads (its
+   `tools/rbe/worker-env.txt`, byte for byte, and its pin). Merge both
+   together: once the pool workers serve the new pin, beads' actions on
+   the old pin don't schedule.
 3. Open the PR. Pool workers run the default branch's provisioning, so
    the new pin isn't reliably served before it merges, and every
    bazel.yml lane skips the remote suite. The unit lane measures its own

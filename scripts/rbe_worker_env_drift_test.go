@@ -23,8 +23,9 @@ import (
 // pin the guards (tools/rbe/worker-env-drift) that make that loud and early:
 //
 //   - a worker whose host is not the pinned one still registers, advertising
-//     what it measured: the pools are shared with beads, whose actions send
-//     no worker-env and still run there, while gascity's never match it;
+//     what it measured: the pools are shared, and actions that send no
+//     worker-env still run there, while those carrying the pin (gascity's
+//     and beads') never match it;
 //   - its run's measurement step fails with the diff and the manifest and pin
 //     to commit in the step summary, and a job beside the worker opens or
 //     updates the pin's drift issue while the worker serves (the farm caps
@@ -187,10 +188,11 @@ func TestRBEWorkerEnvDriftPin(t *testing.T) {
 }
 
 // TestRBEWorkerEnvDriftCheck: the pinned host passes quietly; any other
-// fails with the diff, the manifest and the exact pin line to commit, in the
+// fails with the diff, the manifest and the exact pin line to commit, and
+// the raw listing (dpkg's versions as installed) when there is one, in the
 // step summary and in the drift directory the report job reads.
 func TestRBEWorkerEnvDriftCheck(t *testing.T) {
-	pinned := "arch x86_64\npkg tmux 3.4-1\n"
+	pinned := "arch x86_64\npkg tmux 3.4\n"
 	e := newDriftEnv(t, pinned)
 	measured := filepath.Join(e.dir, "measured.txt")
 	writeDriftFile(t, measured, pinned)
@@ -205,10 +207,12 @@ func TestRBEWorkerEnvDriftCheck(t *testing.T) {
 		t.Errorf("check of the pinned host wrote a step summary:\n%s", s)
 	}
 
-	drifted := "arch x86_64\npkg tmux 3.5-1\n"
+	drifted := "arch x86_64\npkg tmux 3.5\n"
 	got := sha256Pin(drifted)
 	writeDriftFile(t, measured, drifted)
-	out, err = e.run("check", measured)
+	raw := filepath.Join(e.dir, "measured.raw.txt")
+	writeDriftFile(t, raw, "arch x86_64\npkg tmux 3.5-1ubuntu0.1\n")
+	out, err = e.run("check", measured, raw)
 	if err == nil {
 		t.Fatalf("check of a drifted host succeeded:\n%s", out)
 	}
@@ -218,9 +222,10 @@ func TestRBEWorkerEnvDriftCheck(t *testing.T) {
 	summary := e.read(e.summary)
 	for _, want := range []string{
 		"### rbe worker-env drift",
-		"-pkg tmux 3.4-1\n+pkg tmux 3.5-1\n",
+		"-pkg tmux 3.4\n+pkg tmux 3.5\n",
 		"        \"worker-env\": \"" + got + "\",\n",
 		"```\n" + drifted + "```",
+		"<summary>installed versions (tools/rbe/worker-env --raw; not hashed)</summary>\n\n```\narch x86_64\npkg tmux 3.5-1ubuntu0.1\n```",
 		"runner-1 in https://github.com/acme/repo/actions/runs/42",
 	} {
 		if !strings.Contains(summary, want) {
@@ -229,13 +234,27 @@ func TestRBEWorkerEnvDriftCheck(t *testing.T) {
 	}
 	dir := filepath.Join(e.dir, "worker-env-drift")
 	for name, want := range map[string]string{
-		"worker-env.txt": drifted,
-		"pinned-pin":     e.pin + "\n",
-		"measured-pin":   got + "\n",
+		"worker-env.txt":     drifted,
+		"worker-env.raw.txt": "arch x86_64\npkg tmux 3.5-1ubuntu0.1\n",
+		"pinned-pin":         e.pin + "\n",
+		"measured-pin":       got + "\n",
 	} {
 		if b := e.read(filepath.Join(dir, name)); b != want {
 			t.Errorf("drift dir %s = %q, want %q", name, b, want)
 		}
+	}
+
+	// Without a raw listing (or an empty one) the report has none, and a
+	// stale one from an earlier check is gone.
+	writeDriftFile(t, raw, "")
+	if out, err := e.run("check", measured, raw); err == nil {
+		t.Fatalf("check of a drifted host succeeded:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "worker-env.raw.txt")); !os.IsNotExist(err) {
+		t.Errorf("check without a raw listing kept worker-env.raw.txt (%v)", err)
+	}
+	if r := e.read(filepath.Join(dir, "report.md")); strings.Contains(r, "installed versions") {
+		t.Errorf("report without a raw listing has one:\n%s", r)
 	}
 }
 
@@ -470,8 +489,8 @@ func TestRBEWorkerScriptMeasureMode(t *testing.T) {
 		"[ \"$WORKER_MODE\" = measure ] || : \"${RBE_WORKER_TLS_CERT:?}\" \"${RBE_WORKER_TLS_KEY:?}\" \"${RBE_WEST_HOST:?}\" \"${WORKER_NAME:?}\"\n",
 		"measure) ;;\n",
 		`*) echo "WORKER_MODE must be run, pool or measure" >&2; exit 2 ;;`,
-		"\ntools/rbe/worker-env \"${WORKER_TOOLSET[@]}\" >\"$RUNNER_TEMP/worker-env.txt\"\n",
-		"\nif ! tools/rbe/worker-env-drift check \"$RUNNER_TEMP/worker-env.txt\"; then\n\t[ \"$WORKER_MODE\" != measure ] || exit 3\n",
+		"\ntools/rbe/worker-env >\"$RUNNER_TEMP/worker-env.txt\"\n",
+		"\nif ! tools/rbe/worker-env-drift check \"$RUNNER_TEMP/worker-env.txt\" \"$RUNNER_TEMP/worker-env.raw.txt\"; then\n\t[ \"$WORKER_MODE\" != measure ] || exit 3\n",
 		"\n[ \"$WORKER_MODE\" != measure ] || exit 0\n",
 		"/nativelink-${NL_VERSION}-x86_64-unknown-linux-musl.tar.gz",
 	} {
@@ -522,8 +541,8 @@ done
 
 // TestRBEWorkerRegistersOnDrift runs blacksmith-worker.sh on a host whose
 // measurement is not the pin. In pool mode it still starts NativeLink, with
-// worker.json advertising the measured hash (so actions without worker-env,
-// beads', run on it and gascity's, which carry the pin, never do), and
+// worker.json advertising the measured hash (so actions without worker-env
+// run on it and those that carry the pin never do), and
 // leaves the drift report. In measure mode the same host fails (exit 3) and
 // starts nothing.
 func TestRBEWorkerRegistersOnDrift(t *testing.T) {

@@ -6,17 +6,20 @@
 # the hermetic C toolchain and loads the shared libraries of every binary it
 # links (libstdc++, ICU), so the worker host is an input to every
 # cached result. Its exec_properties enter each action's key: worker-env is
-# the sha256 of tools/rbe/worker-env.txt, the manifest of the pinned worker
-# host. blacksmith-worker.sh advertises the sha256 of the manifest it
-# measures on its own host (tools/rbe/worker-env) and rbe-west's schedulers
-# match worker-env exactly, so these actions run only on the pinned host,
-# and a host change takes a new manifest and pin here, which is a new key
-# for every action. scripts/rbe_worker_env_test.go keeps the pin and the
-# manifest in step.
+# the sha256 of tools/rbe/worker-env.txt, the toolchain manifest of the
+# pinned worker host (arch, OS release, Go, dolt, and the upstream releases
+# of the libraries and tools actions reach; not the image's patch revisions).
+# blacksmith-worker.sh advertises the sha256 of the manifest it measures on
+# its own host (tools/rbe/worker-env) and rbe-west's schedulers match
+# worker-env exactly, so these actions run only on the pinned toolchain, and
+# a toolchain change takes a new manifest and pin here, which is a new key
+# for every action. gastownhall/beads carries a byte-identical copy of the
+# manifest and the same pin. scripts/rbe_worker_env_test.go keeps the pin
+# and the manifest in step.
 platform(
     name = "rbe_worker",
     exec_properties = {
-        "worker-env": "sha256:b2c8be1f53ba4c2f1603b1d65f31e0d4c7ddd498110b9928eda37f193c7eb674",
+        "worker-env": "sha256:6be1381cf08e7fd66684cfce6f26aca57de2561e722c505d1f2f578e9fdeafa7",
     },
     parents = ["@bazel_tools//tools:host_platform"],
     visibility = ["//visibility:public"],
