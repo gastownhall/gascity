@@ -86,6 +86,7 @@ const (
 // plannerInflight is the in-flight map the planner owns: *inflightMap
 // (reconcile_inflight.go), or a test's fake.
 type plannerInflight interface {
+	add(inflightEntry) uint64
 	settle(settlement)
 	view() inflightView
 }
@@ -108,6 +109,7 @@ type planner struct {
 	patrol      func() time.Duration // read after every pass, so a reload takes effect
 	pass        passFunc
 	stopEffects func(deadline time.Time) // the executor's stop
+	effects     *effectExecutor          // submits what admission lets through; nil while trace-only
 	rec         events.Recorder          // settlements' events; nil records none
 	stderr      io.Writer
 	metrics     *passMetrics

@@ -120,17 +120,23 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	for _, ap := range a.Plans {
 		intents = append(intents, createIntent(cfg, w.Env.ConfigRev, ap))
 	}
+	var unregistered []intent
+	if p.effects != nil {
+		intents, unregistered = splitRegistered(intents)
+	}
 	res := admit(admitInput{
 		Now: now, Cfg: cfg, Bucket: p.bucket, FairSeed: p.fairSeed, InFlight: w.InFlight, BringUp: w.Census.BringUp(cfg),
 		Endpoints: w.Gates, Backoff: w.Backoff, Paused: w.Paused,
 		BootOpen: w.Boot.CachePrimed && w.Boot.InventoryComplete && w.Boot.RecordingSeen, // P2
 	}, intents)
+	res.Deferred = append(res.Deferred, unregistered...)
 	// The planner state admission leaves is stored before any submit. A
 	// trace-only pass submits nothing, so it keeps no token debit, and no
 	// refill is a reason for a pass.
 	p.fairSeed = res.FairSeed
-	if v2EffectsReal {
+	if p.effects != nil {
 		p.bucket, next = res.Bucket, earliest(next, res.NextToken)
+		p.submit(&w, &a, res.Admitted)
 	}
 	rec.Admitted, rec.Deferred = res.Admitted, res.Deferred
 	rec.Rows = p.traceRows(w.Census, reasons, res)
@@ -157,6 +163,39 @@ func newAllocSummary(now time.Time, w *World, a *allocDecision) *allocSummary {
 		s.OpenSessions = append(s.OpenSessions, row.Info)
 	}
 	return s
+}
+
+// splitRegistered splits off the intents whose kind has no registered
+// effect yet, deferred with cause no-effect before admission, so they take
+// no cap, no token and no backoff: the row is traced and the arm stays
+// visible until its effect lands.
+func splitRegistered(intents []intent) (registered, unregistered []intent) {
+	for _, it := range intents {
+		if effectRegistry[it.Kind] == nil {
+			it.Cause = causeNoEffect
+			unregistered = append(unregistered, it)
+			continue
+		}
+		registered = append(registered, it)
+	}
+	return registered, unregistered
+}
+
+// submit hands each admitted intent's effect to the executor under a new
+// in-flight entry, recorded first so the next pass counts it. A submit the
+// executor refuses (busy, or stopped) runs and posts nothing, so its entry
+// is settled here at once.
+func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
+	pass := newEffectPass(w, a)
+	for _, it := range admitted {
+		seq := p.inflight.add(inflightEntry{Kind: it.Kind, Key: it.Key, Endpoint: it.Endpoint})
+		if seq == 0 {
+			continue
+		}
+		if err := p.effects.submitIntent(pass, it, seq); err != nil {
+			p.inflight.settle(settlement{Key: it.Key, Kind: it.Kind, Seq: seq})
+		}
+	}
 }
 
 // decideRowSafe is decideRow with P6's panic isolation: a row that panics

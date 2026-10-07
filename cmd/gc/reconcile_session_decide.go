@@ -181,7 +181,7 @@ func armTimerHeals(r *rowFacts) (intent, bool) {
 		return intent{}, false
 	}
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
-	return intent{Kind: intentRowHeal, Reason: decideTimerHeal, Basis: basis}, true
+	return intent{Kind: intentRowHeal, Reason: decideTimerHeal, Basis: basis, Patch: patch}, true
 }
 
 // armLivenessUnknown is A9: every arm below reads liveness and desire, so

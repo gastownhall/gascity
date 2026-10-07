@@ -96,20 +96,12 @@ func readSessionCensus(now time.Time, legs []classStoreCandidate) (*sessionCensu
 				continue
 			}
 			k := rowKey{Leg: source.ref, ID: id}
-			row := censusRow{
-				Key:           k,
-				Info:          info,
-				InstanceToken: info.InstanceToken,
-				UnknownState:  !isKnownStateInfo(info) && !isDrainAckStopPendingInfo(info),
-			}
-			row.Incarnation, _ = strconv.ParseInt(strings.TrimSpace(info.Generation), 10, 64)
+			row := newCensusRow(k, info)
 			if first, dup := canonicalLeg[id]; dup {
-				row.DuplicateOf = first
-			} else {
 				// One effect, one row: only the canonical copy counts in flight.
+				row.DuplicateOf, row.PendingCreate = first, false
+			} else {
 				canonicalLeg[id] = source.ref
-				state := session.State(strings.TrimSpace(info.MetadataState))
-				row.PendingCreate = info.PendingCreateClaim && state != session.StateActive && state != session.StateAwake
 				c.canonical = append(c.canonical, k)
 			}
 			c.Rows[k] = row
@@ -117,6 +109,20 @@ func readSessionCensus(now time.Time, legs []classStoreCandidate) (*sessionCensu
 	}
 	c.index()
 	return c, nil
+}
+
+// newCensusRow is info's census row at k, as its canonical copy.
+func newCensusRow(k rowKey, info session.Info) censusRow {
+	row := censusRow{
+		Key:           k,
+		Info:          info,
+		InstanceToken: info.InstanceToken,
+		UnknownState:  !isKnownStateInfo(info) && !isDrainAckStopPendingInfo(info),
+	}
+	row.Incarnation, _ = strconv.ParseInt(strings.TrimSpace(info.Generation), 10, 64)
+	state := session.State(strings.TrimSpace(info.MetadataState))
+	row.PendingCreate = info.PendingCreateClaim && state != session.StateActive && state != session.StateAwake
+	return row
 }
 
 // index orders the canonical rows and builds the per-pass lookups.

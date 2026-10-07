@@ -81,6 +81,9 @@ func newDefaultPlanner(stderr io.Writer) *plannerRuntime {
 	rt := &plannerRuntime{host: plannerHost{stderr: stderr}, softReload: v2SoftReloadUnavailable, ready: make(chan struct{})}
 	rt.exec = newEffectExecutor(func(s settlement) { rt.planner.settlements.post(s) }, stderr)
 	rt.planner = newPlanner(realPlannerClock{}, func() time.Duration { return rt.env.Load().patrol() }, rt.pass, newInflightMap(), rt.exec.stop, stderr)
+	if v2EffectsEnabled(reconcilerModeLookupEnv) {
+		rt.planner.effects = rt.exec
+	}
 	return rt
 }
 

@@ -188,6 +188,8 @@ type fakeInflight struct{ settled []settlement }
 
 func (f *fakeInflight) settle(s settlement) { f.settled = append(f.settled, s) }
 
+func (f *fakeInflight) add(inflightEntry) uint64 { return 0 }
+
 func (f *fakeInflight) view() inflightView { return inflightView{} }
 
 // plannerHarness runs a planner on a fake clock. Every pass reports its start

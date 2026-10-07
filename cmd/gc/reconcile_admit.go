@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/poolplan"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The planner's admission (CONTRACT v5 P2-P4): one pure function over the
@@ -130,6 +132,11 @@ type intent struct {
 	// Finalize marks the stop verb proposed for a row whose runtime reads
 	// gone: it confirms and finalizes, and stops nothing (A4, D3).
 	Finalize bool
+	// Patch is a row write's patch and Event what it records once it lands.
+	// The row-write effect re-decides on the fresh row and writes the
+	// re-decided intent's (R2).
+	Patch session.MetadataPatch
+	Event *events.Event
 	// Deadline is set on admission (P3); Cause on deferral.
 	Deadline time.Time
 	Cause    string

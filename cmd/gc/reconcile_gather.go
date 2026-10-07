@@ -96,6 +96,9 @@ type World struct {
 	// ExecutionStalled are the execution backstop's drain requests by row
 	// ID, for arm A16 (C7b1).
 	ExecutionStalled map[string]executionStalledRequest
+	// LegStores are the census legs' stores by ref, which effects reach
+	// only as fenced writers (newEffectPass).
+	LegStores map[string]beads.Store
 }
 
 // gather builds the pass's World at now. It first drains the settlements
@@ -140,6 +143,10 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	w.ExecutionStalled = p.executionStalled(w.Census)
 	if e.ReadyWaits != nil {
 		w.ReadyWaits = e.ReadyWaits()
+	}
+	w.LegStores = make(map[string]beads.Store, len(legs))
+	for _, l := range legs {
+		w.LegStores[l.ref] = l.store
 	}
 	rows := w.Census.Canonical()
 	for _, row := range rows {
