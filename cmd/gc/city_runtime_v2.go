@@ -166,7 +166,8 @@ func (cr *CityRuntime) reloadV2(p *tickPass, source reloadSource) {
 }
 
 // beforeProviderSwap holds a provider swap (CONTRACT v5 P7): it pauses the
-// planner's starts and creates (swap-pause), then waits for every in-flight
+// planner's starts and creates (swap-pause) and closes the executor to starts
+// admitted before the pause, then waits for every in-flight
 // v2 start (effectExecutor.waitStarts), so the swap's listing cannot miss a
 // runtime a start is still creating; an error aborts the reload. The caller
 // resumes once the swap applied or aborted. Legacy waits on nothing.
@@ -179,7 +180,12 @@ func (cr *CityRuntime) beforeProviderSwap(cfg *config.City) (resume func(), err 
 		startup = 60 * time.Second // as admit's start deadline (CONTRACT v5.4 P3)
 	}
 	cr.v2.planner.pauseStarts()
-	return cr.v2.planner.resumeStarts, cr.v2.exec.waitStarts(startup + startDeadlineSlack)
+	cr.v2.exec.closeStarts()
+	resume = func() {
+		cr.v2.exec.openStarts()
+		cr.v2.planner.resumeStarts()
+	}
+	return resume, cr.v2.exec.waitStarts(startup + startDeadlineSlack)
 }
 
 // checkReconcilerWiring refuses runtime params whose v2 runtime and wake

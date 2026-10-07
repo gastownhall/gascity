@@ -79,7 +79,7 @@ func newDefaultPlanner(stderr io.Writer) *plannerRuntime {
 		stderr = io.Discard
 	}
 	rt := &plannerRuntime{host: plannerHost{stderr: stderr}, softReload: v2SoftReloadUnavailable, ready: make(chan struct{})}
-	rt.exec = newEffectExecutor(func(rowKey, error) {}, stderr)
+	rt.exec = newEffectExecutor(func(s settlement) { rt.planner.settlements.post(s) }, stderr)
 	rt.planner = newPlanner(realPlannerClock{}, func() time.Duration { return rt.env.Load().patrol() }, rt.pass, newInflightMap(), rt.exec.stop, stderr)
 	return rt
 }
@@ -109,6 +109,7 @@ func (rt *plannerRuntime) bindHost(h plannerHost) {
 		return nil
 	}
 	rt.host = h
+	rt.planner.rec = h.rec
 }
 
 // publishEnv publishes the host's config as the next generation unless the

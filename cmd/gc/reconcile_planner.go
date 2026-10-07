@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // The v2 planner loop (architecture §1.3, §1.5): one goroutine that schedules
@@ -45,18 +47,41 @@ type passRecord struct {
 
 // settlement is an effect's report that it finished. Seq echoes the
 // in-flight entry's submit. A create's names its entry by Token, since the
-// create has no row until it lands; Ambiguous says its write call errored
-// after the row may have landed (CONTRACT v5 P5). A zero At is stamped with
-// the drain time. C4a adds the outcome the backoff table needs.
+// create has no row until it lands. A zero At is stamped with the drain time.
 type settlement struct {
-	Key       rowKey
-	Kind      string
-	Err       error
-	Seq       uint64
-	Token     string
-	Ambiguous bool
-	At        time.Time
+	Key     rowKey
+	Kind    string
+	Seq     uint64
+	Token   string
+	Outcome settleOutcome
+	// Cause is a refusal's or failure's cause. The backoff table keeps it
+	// verbatim: admit reads causeFinalizePrefix (P4), and the allocation
+	// createStageFence (F3).
+	Cause string
+	// BackoffKey is the record a refusal or failure backs off and a landing
+	// or no-op resets, under Fingerprint: the row's when empty; a create's
+	// createBackoffKey under its ConfigRev, set only when it landed or was
+	// refused at a stage.
+	BackoffKey, Fingerprint string
+	// Work is a create's worktree verdict, which backs off or resets the
+	// work item's record (C6.5(a)).
+	Work *workVerdict
+	// Event is recorded once the settlement is drained: a landed write's.
+	Event *events.Event
+	Err   error
+	At    time.Time
 }
+
+// settleOutcome is how an effect ended (CONTRACT v5 S1, P5).
+type settleOutcome uint8
+
+const (
+	settledLanded    settleOutcome = iota + 1
+	settledFailed                  // ran and failed; a panic or deadline included
+	settledRefused                 // refused before or instead of writing, with a cause
+	settledAmbiguous               // a create whose write call errored after the row may have landed
+	settledNoop                    // nothing to do: a start's already-running
+)
 
 // plannerInflight is the in-flight map the planner owns: *inflightMap
 // (reconcile_inflight.go), or a test's fake.
@@ -83,6 +108,7 @@ type planner struct {
 	patrol      func() time.Duration // read after every pass, so a reload takes effect
 	pass        passFunc
 	stopEffects func(deadline time.Time) // the executor's stop
+	rec         events.Recorder          // settlements' events; nil records none
 	stderr      io.Writer
 	metrics     *passMetrics
 
@@ -230,9 +256,10 @@ func (p *planner) run(ctx context.Context) {
 	}
 }
 
-// runPass applies the settlements posted since the last pass to the in-flight
-// map, then runs the pass. A panic in either is recovered in safeTick's style:
-// the pass is skipped and logged, and a follow-up pass is owed.
+// runPass applies the settlements posted since the last pass
+// (drainSettlements), then runs the pass. A panic in either is recovered in
+// safeTick's style: the pass is skipped and logged, and a follow-up pass is
+// owed.
 func (p *planner) runPass(now time.Time) (res passResult) {
 	defer func() {
 		r := recover()
@@ -247,14 +274,61 @@ func (p *planner) runPass(now time.Time) (res passResult) {
 	return p.pass(now)
 }
 
-// drainSettlements applies the settlements posted so far to the in-flight
-// map, stamping a zero At with now.
+// drainSettlements applies the settlements posted so far, stamping a zero
+// At with now: first every one to the in-flight map, so no later step's
+// panic can leave a settled effect counted in flight; then to the backoff
+// table; then their events to the recorder, each recovered alone.
 func (p *planner) drainSettlements(now time.Time) {
-	for _, s := range p.settlements.drain() {
-		if s.At.IsZero() {
-			s.At = now
+	items := p.settlements.drain()
+	for i := range items {
+		if items[i].At.IsZero() {
+			items[i].At = now
 		}
-		p.inflight.settle(s)
+		p.inflight.settle(items[i])
+	}
+	for _, s := range items {
+		p.backoffSettled(s)
+	}
+	for _, s := range items {
+		if s.Event != nil && p.rec != nil {
+			p.record(*s.Event)
+		}
+	}
+}
+
+// record records ev; a panicking recorder is logged and skips this event
+// only.
+func (p *planner) record(ev events.Event) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(p.stderr, "v2 planner: recording %s panicked: %v\n", ev.Type, r) //nolint:errcheck // best-effort stderr
+		}
+	}()
+	p.rec.Record(ev)
+}
+
+// backoffSettled applies s to the backoff table (P4): a landing or no-op
+// resets its record; a refusal or failure backs it off with its cause,
+// except a swap pause. A create's worktree verdict backs off or resets the
+// work item's record.
+func (p *planner) backoffSettled(s settlement) {
+	key := s.BackoffKey
+	if key == "" && s.Key.ID != "" {
+		key = rowBackoffKey(s.Key)
+	}
+	switch {
+	case key == "":
+	case s.Outcome == settledLanded || s.Outcome == settledNoop:
+		p.backoff.Succeed(key)
+	case (s.Outcome == settledRefused || s.Outcome == settledFailed) && s.Cause != causeSwapPause:
+		p.backoff.Refuse(key, s.At, time.Time{}, s.Cause, s.Fingerprint)
+	}
+	switch {
+	case s.Work == nil:
+	case s.Work.Refused:
+		p.backoff.Refuse(workBackoffKey(s.Work.BeadID), s.At, time.Time{}, createStageWorktree, s.Work.Fingerprint)
+	default:
+		p.backoff.Succeed(workBackoffKey(s.Work.BeadID))
 	}
 }
 
@@ -307,10 +381,13 @@ func (q *settlementQueue) drain() []settlement {
 	return items
 }
 
-// plannerClock is the planner's clock, faked in tests.
+// plannerClock is the planner's clock, faked in tests. WithDeadline is
+// context.WithDeadline on this clock: the executor hands effects a real
+// deadline, which start-path code keys on.
 type plannerClock interface {
 	Now() time.Time
 	NewTimer(d time.Duration) plannerTimer
+	WithDeadline(parent context.Context, t time.Time) (context.Context, context.CancelFunc)
 }
 
 // plannerTimer is a one-shot timer. Reset discards a pending fire, as
@@ -324,6 +401,10 @@ type plannerTimer interface {
 type realPlannerClock struct{}
 
 func (realPlannerClock) Now() time.Time { return time.Now() }
+
+func (realPlannerClock) WithDeadline(parent context.Context, t time.Time) (context.Context, context.CancelFunc) {
+	return context.WithDeadline(parent, t)
+}
 
 func (realPlannerClock) NewTimer(d time.Duration) plannerTimer {
 	return realPlannerTimer{time.NewTimer(d)}

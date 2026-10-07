@@ -64,6 +64,22 @@ func (c *fakePlannerClock) NewTimer(d time.Duration) plannerTimer {
 	return t
 }
 
+// WithDeadline cancels with cause DeadlineExceeded when the fake time
+// reaches t. It arms one timer of its own.
+func (c *fakePlannerClock) WithDeadline(parent context.Context, t time.Time) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancelCause(parent)
+	timer := c.NewTimer(t.Sub(c.Now()))
+	go func() {
+		defer timer.Stop()
+		select {
+		case <-timer.C():
+			cancel(context.DeadlineExceeded)
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, func() { cancel(context.Canceled) }
+}
+
 func (c *fakePlannerClock) Advance(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
