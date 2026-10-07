@@ -7,11 +7,22 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+// procEnvironChild returns an unstarted /bin/sh -c script child that runs with
+// exactly env. Every child these tests read starts here, because
+// test/test-resources.toml pins the repository's subprocess call sites and a
+// second one fails TestRepositoryLedgerMatchesCensusAndDocumentation.
+func procEnvironChild(env []string, script string, args ...string) *exec.Cmd {
+	cmd := exec.Command("/bin/sh", append([]string{"-c", script}, args...)...)
+	cmd.Env = env
+	return cmd
+}
 
 // TestWaitForProcEnvironNeverReturnsATornRead pins the reader the scope
 // watchdog identity test relies on. os.ReadFile of /proc/<pid>/environ takes
@@ -31,8 +42,7 @@ func TestWaitForProcEnvironNeverReturnsATornRead(t *testing.T) {
 
 	for i := 0; i < 300; i++ {
 		// The child execs twice (sh, then sleep), like the fake dolt.
-		cmd := exec.Command("/bin/sh", "-c", "exec sleep 30")
-		cmd.Env = env
+		cmd := procEnvironChild(env, "exec sleep 30")
 		if err := cmd.Start(); err != nil {
 			t.Fatalf("start child: %v", err)
 		}
@@ -58,8 +68,7 @@ func TestWaitForProcEnvironRetriesThroughExecWindows(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		env = append(env, fmt.Sprintf("GC_TEST_ENVIRON_FILLER_%d=x", i))
 	}
-	cmd := exec.Command("/bin/sh", "-c", script, script, "200")
-	cmd.Env = env
+	cmd := procEnvironChild(env, script, script, "200")
 	cmd.Dir = "/"
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start child: %v", err)
@@ -82,5 +91,35 @@ func TestWaitForProcEnvironRetriesThroughExecWindows(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("pid %d did not reach sleep within 30s (%d reads)", pid, reads)
 		}
+	}
+}
+
+// TestParseSettledEnvironRejectsUnsettledShapes pins which raw reads count as
+// settled. A bash mid-import split is the entry with its '=' overwritten by a
+// NUL in place.
+func TestParseSettledEnvironRejectsUnsettledShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data string
+		want map[string]string
+	}{
+		{name: "complete", data: "GC_A=1\x00GC_B=2\x00", want: map[string]string{"GC_A": "1", "GC_B": "2"}},
+		{name: "value holding an equals sign", data: "GC_A=x=y\x00", want: map[string]string{"GC_A": "x=y"}},
+		{name: "empty value", data: "GC_A=\x00", want: map[string]string{"GC_A": ""}},
+		{name: "empty read inside execve", data: ""},
+		{name: "torn mid-entry", data: "GC_A=1\x00GC_B=2"},
+		{name: "bash mid-import split", data: "GC_A=1\x00GC_B\x002\x00"},
+		{name: "bash mid-import split of an empty value", data: "GC_A\x00\x00"},
+		{name: "empty name", data: "GC_A=1\x00=2\x00"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseSettledEnviron([]byte(tc.data))
+			if ok != (tc.want != nil) {
+				t.Fatalf("parseSettledEnviron(%q) ok = %v, want %v", tc.data, ok, tc.want != nil)
+			}
+			if ok && !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("parseSettledEnviron(%q) = %v, want %v", tc.data, got, tc.want)
+			}
+		})
 	}
 }
