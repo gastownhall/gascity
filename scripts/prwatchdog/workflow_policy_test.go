@@ -1,6 +1,7 @@
 package prwatchdog
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -136,35 +137,88 @@ func TestWatchdogWorkflow_ConcurrencyKeyedByPRCancelsObsoleteHead(t *testing.T) 
 	}
 }
 
-func TestWatchdogWorkflow_CheckoutIsTrustedBaseOnlyOrAbsent(t *testing.T) {
+func TestWatchdogWorkflow_CheckoutUsesCurrentTrustedBaseBranch(t *testing.T) {
+	if err := watchdogCheckoutPolicy(watchdogCheckoutOptions(t)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func watchdogCheckoutOptions(t *testing.T) map[string]any {
+	t.Helper()
 	doc := loadWatchdogWorkflow(t)
 	jobs, _ := doc["jobs"].(map[string]any)
-	for jobName, raw := range jobs {
-		job, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		steps, ok := job["steps"].([]any)
-		if !ok {
-			continue
-		}
-		for _, rawStep := range steps {
-			step, ok := rawStep.(map[string]any)
-			if !ok {
-				continue
-			}
+	var checkout map[string]any
+	count := 0
+	for _, rawJob := range jobs {
+		job, _ := rawJob.(map[string]any)
+		steps, _ := job["steps"].([]any)
+		for _, raw := range steps {
+			step, _ := raw.(map[string]any)
 			uses, _ := step["uses"].(string)
-			if !strings.HasPrefix(uses, "actions/checkout@") {
-				continue
+			if strings.HasPrefix(uses, "actions/checkout@") {
+				count++
+				if count > 1 {
+					t.Fatal("watchdog must have exactly one trusted checkout")
+				}
+				checkout, _ = step["with"].(map[string]any)
 			}
-			with, _ := step["with"].(map[string]any)
-			ref, _ := with["ref"].(string)
-			if ref != "${{ github.event.pull_request.base.sha }}" {
-				t.Fatalf("job %q checkout must pin ref to the PR base SHA only, got ref=%q", jobName, ref)
+		}
+	}
+	if checkout == nil {
+		t.Fatal("watchdog local action and program require a trusted checkout")
+	}
+	return checkout
+}
+
+func watchdogCheckoutPolicy(with map[string]any) error {
+	ref, _ := with["ref"].(string)
+	if ref != "${{ github.event.pull_request.base.ref }}" && ref != "refs/heads/${{ github.event.pull_request.base.ref }}" {
+		return fmt.Errorf("checkout must use the current trusted PR base branch, got ref=%q", ref)
+	}
+	if repo, exists := with["repository"]; exists && repo != "${{ github.repository }}" && repo != "${{ github.event.pull_request.base.repo.full_name }}" {
+		return fmt.Errorf("checkout repository must remain the trusted base repository, got %v", repo)
+	}
+	if persist, ok := with["persist-credentials"].(bool); !ok || persist {
+		return fmt.Errorf("checkout must set persist-credentials: false, got %v", with["persist-credentials"])
+	}
+	return nil
+}
+
+func TestWatchdogWorkflow_CheckoutPolicyRejectsUntrustedAndStaleSources(t *testing.T) {
+	for _, ref := range []string{
+		"${{ github.event.pull_request.base.sha }}",
+		"${{ github.event.pull_request.head.sha }}",
+		"${{ github.event.pull_request.head.ref }}",
+		"${{ github.ref }}",
+		"main",
+	} {
+		t.Run(ref, func(t *testing.T) {
+			if err := watchdogCheckoutPolicy(map[string]any{"ref": ref, "persist-credentials": false}); err == nil {
+				t.Fatalf("accepted stale or untrusted checkout source %q", ref)
 			}
-			persist, hasPersist := with["persist-credentials"].(bool)
-			if !hasPersist || persist {
-				t.Fatalf("job %q checkout must set persist-credentials: false, got %v", jobName, with["persist-credentials"])
+		})
+	}
+	for _, repository := range []string{"${{ github.event.pull_request.head.repo.full_name }}", "contributor/fork"} {
+		if err := watchdogCheckoutPolicy(map[string]any{
+			"ref": "${{ github.event.pull_request.base.ref }}", "persist-credentials": false, "repository": repository,
+		}); err == nil {
+			t.Fatalf("accepted untrusted checkout repository %q", repository)
+		}
+	}
+	for _, persist := range []any{nil, true} {
+		if err := watchdogCheckoutPolicy(map[string]any{
+			"ref": "${{ github.event.pull_request.base.ref }}", "persist-credentials": persist,
+		}); err == nil {
+			t.Fatalf("accepted persisted or unspecified checkout credentials %v", persist)
+		}
+	}
+}
+
+func TestWatchdogWorkflow_CheckoutPolicyAllowsTrustedBranchForms(t *testing.T) {
+	for _, ref := range []string{"${{ github.event.pull_request.base.ref }}", "refs/heads/${{ github.event.pull_request.base.ref }}"} {
+		for _, repo := range []string{"${{ github.repository }}", "${{ github.event.pull_request.base.repo.full_name }}"} {
+			if err := watchdogCheckoutPolicy(map[string]any{"ref": ref, "repository": repo, "persist-credentials": false}); err != nil {
+				t.Fatal(err)
 			}
 		}
 	}

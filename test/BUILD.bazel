@@ -38,6 +38,7 @@ test_suite(
         "//internal/runtime/subprocess:subprocess_test",
         "//internal/runtime/tmux:tmux_test",
         "//internal/storebinding/beadsworkspace:beadsworkspace_test",
+        "//scripts/prwatchdog:prwatchdog_test",
         "//test/containerhost:containerhost_test",
         "//test/dashport:dashport_test",
     ],
