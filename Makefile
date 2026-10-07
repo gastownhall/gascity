@@ -1251,8 +1251,10 @@ help:
 ## integration lane's package suite (//test:integration_packages). Run after
 ## adding packages.
 .PHONY: bazel-sync
+# BAZEL_SYNC_FLAGS: CI passes --config=remote-exec, so gazelle and its Go
+# stdlib come from rbe-west's cache instead of 64 local compiles.
 bazel-sync:
-	bazel run //:gazelle
+	bazel run $(BAZEL_SYNC_FLAGS) //:gazelle
 	python3 tools/bazel/repo_tree.py
 	python3 tools/bazel/hermetic_tags.py
 	python3 tools/bazel/integration_suite.py

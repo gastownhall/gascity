@@ -682,11 +682,24 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      # Same env as the lane job's "Set up Bazel" step: with no env at all
+      # this job ran gazelle and GoStdlib locally on every PR (64 sandboxed
+      # actions). Mode remote gets the executor and the mint certificate;
+      # every other mode gets the read-only fork cache instead, with no
+      # mint certificate, so BUILD files in sync never needs rbe-fork-mint.
       - name: Set up Bazel
         uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_KEY || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode != 'remote' && 'true' || '' }}
       - name: Restore the LLVM archive
         uses: ./.github/actions/llvm-archive-cache
       - name: BUILD files are in sync (gazelle + repo tree)
+        env:
+          BAZEL_SYNC_FLAGS: ${{ needs.rbe.outputs.mode == 'remote' && '--config=remote-exec' || '--config=fork-cache' }}
         run: |
           make bazel-sync
           git diff --exit-code || {
