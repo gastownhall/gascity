@@ -130,6 +130,9 @@ cat >"$d/vm.json" <<EOF
 EOF
 log="$d/boot.log"
 t0=$(date +%s.%N)
+# Production workers get /dev/kvm via the kvm group; mirror that with an ACL
+# rather than running the VMM as root.
+[ -n "$SUDO" ] && $SUDO setfacl -m "u:$(id -un):rw" /dev/kvm && say "note: granted $(id -un) rw on /dev/kvm via ACL"
 timeout 30 "$FC" --no-api --config-file "$d/vm.json" >"$log" 2>&1
 rc=$?
 t1=$(date +%s.%N)
