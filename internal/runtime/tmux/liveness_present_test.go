@@ -5,7 +5,9 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -370,6 +372,56 @@ func TestProcNetUnixListening(t *testing.T) {
 	} {
 		if got := procNetUnixListening(table, path); got != want {
 			t.Errorf("procNetUnixListening(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
+
+// Kills: another or prefixed path, or a pid or fd field, read as a socket
+// bound to the path, any of which would hold a dead server alive; a bound
+// name missed, which would read a live server dead.
+func TestLsofUnixBound(t *testing.T) {
+	out := "p501\nf3\nn->0x1f2e3d4c5b6a7980\nf4\nn/private/tmp/tmux-501/client\n" +
+		"p502\nf6\nn/private/tmp/tmux-501/city\nf7\nn/private/tmp/a b/city\n"
+	for path, want := range map[string]bool{
+		"/private/tmp/tmux-501/city": true, "/private/tmp/a b/city": true, "/private/tmp/tmux-501/cit": false,
+		"/tmp/tmux-501/city": false, "501": false, "3": false,
+	} {
+		if got := lsofUnixBound(out, path); got != want {
+			t.Errorf("lsofUnixBound(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
+
+type exitCodeError int
+
+func (e exitCodeError) Error() string { return "exit status " + strconv.Itoa(int(e)) }
+func (e exitCodeError) ExitCode() int { return int(e) }
+
+// lsof exits 1 for "no file selected" and for failure alike. Kills: a
+// failure (stderr, partial output, another exit, a timeout's kill, a missing
+// binary) read as the empty answer, which would confirm a live server dead;
+// the silent exit 1 read as an error, which would make every dead server
+// unconfirmed on macOS and fail gc suspend there.
+func TestLsofAnswer(t *testing.T) {
+	if out, err := lsofAnswer([]byte("p1\nf3\nn/x\n"), "", nil); err != nil || out != "p1\nf3\nn/x\n" {
+		t.Errorf("lsofAnswer(exit 0) = (%q, %v), want the output", out, err)
+	}
+	if out, err := lsofAnswer(nil, "", exitCodeError(1)); err != nil || out != "" {
+		t.Errorf("lsofAnswer(silent exit 1) = (%q, %v), want the empty answer", out, err)
+	}
+	for name, run := range map[string]struct {
+		out    string
+		stderr string
+		err    error
+	}{
+		"exit 1 with stderr": {stderr: "lsof: can't read", err: exitCodeError(1)},
+		"exit 1 with output": {out: "p1\nf3\n", err: exitCodeError(1)},
+		"exit 2":             {err: exitCodeError(2)},
+		"killed by timeout":  {err: exitCodeError(-1)},
+		"not found on PATH":  {err: exec.ErrNotFound},
+	} {
+		if _, err := lsofAnswer([]byte(run.out), run.stderr, run.err); err == nil {
+			t.Errorf("%s: lsofAnswer error = nil, want an error", name)
 		}
 	}
 }

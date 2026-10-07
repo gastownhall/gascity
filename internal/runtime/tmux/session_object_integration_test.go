@@ -280,3 +280,29 @@ func TestServerConfirmedDeadRealTmuxUnlinkedSocket(t *testing.T) {
 		t.Fatal("ServerConfirmedDead() = true for a live server whose socket was unlinked")
 	}
 }
+
+// A server stopped by kill-server is confirmed dead, on macOS too, so
+// runtime.StopForCleanup still absorbs its missing-server answer and gc
+// suspend over a dead server succeeds. The wait is for the server process:
+// until it exits, its listener is still bound.
+func TestServerConfirmedDeadRealTmuxKilledServer(t *testing.T) {
+	p := newObjectServer(t)
+	pid := objectFormat(t, p, "keep", "#{pid}")
+	if err := p.tm.KillServer(); err != nil {
+		t.Fatalf("kill-server: %v", err)
+	}
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for processAlive(pid) {
+		select {
+		case <-timer.C:
+			t.Fatalf("tmux server %s still running after kill-server", pid)
+		case <-ticker.C:
+		}
+	}
+	if !p.ServerConfirmedDead() {
+		t.Fatal("ServerConfirmedDead() = false for a server stopped by kill-server")
+	}
+}

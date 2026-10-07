@@ -1,9 +1,11 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	goruntime "runtime"
@@ -26,7 +28,7 @@ func validSessionObjectID(id string) bool {
 
 // ServerConfirmedDead reports whether this provider's tmux server is
 // confirmed dead: its socket is missing, or refuses connections on a stable
-// inode, and the kernel lists no listener bound to the socket path. The last
+// inode, and the kernel lists no socket bound to the socket path. The last
 // check refuses a live server whose socket file was unlinked, which the
 // socket check alone reads as dead. It implements
 // [runtime.ServerDeathConfirmer] for v2 only; legacy's serverConfirmedDead
@@ -43,24 +45,35 @@ func (p *Provider) ServerConfirmedDead() bool {
 	return err == nil && !listening
 }
 
-// unixPathListening reports whether the kernel lists a listening unix socket
-// bound to path (or to path under its resolved directory) in /proc/net/unix,
-// which keeps a bound path after the file is unlinked. Off Linux there is no
-// such table and it reports false; on Linux an unreadable table is an error.
+// unixPathListening reports whether the kernel lists a unix socket bound to
+// path (or to path under its resolved directory). Both tables keep a bound
+// path after the file is unlinked: /proc/net/unix on Linux, where it counts
+// only listeners, and lsof's bound addresses on macOS. Any other platform has
+// no table and errors, so its server is never confirmed dead.
 func unixPathListening(path string) (bool, error) {
-	table, err := os.ReadFile("/proc/net/unix")
-	if err != nil {
-		if goruntime.GOOS != "linux" && errors.Is(err, os.ErrNotExist) {
-			return false, nil
+	var listed func(path string) bool
+	switch goruntime.GOOS {
+	case "linux":
+		table, err := os.ReadFile("/proc/net/unix")
+		if err != nil {
+			return false, err
 		}
-		return false, err
+		listed = func(path string) bool { return procNetUnixListening(string(table), path) }
+	case "darwin":
+		out, err := lsofUnixSockets()
+		if err != nil {
+			return false, err
+		}
+		listed = func(path string) bool { return lsofUnixBound(out, path) }
+	default:
+		return false, fmt.Errorf("no unix socket table on %s", goruntime.GOOS)
 	}
 	paths := []string{path}
 	if dir, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
 		paths = append(paths, filepath.Join(dir, filepath.Base(path)))
 	}
 	for _, candidate := range paths {
-		if procNetUnixListening(string(table), candidate) {
+		if listed(candidate) {
 			return true, nil
 		}
 	}
@@ -77,6 +90,50 @@ func procNetUnixListening(table, path string) bool {
 			continue
 		}
 		if flags, err := strconv.ParseUint(fields[3], 16, 64); err == nil && flags&0x10000 != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// lsofUnixSocketsTimeout bounds lsof's scan of every process it can read.
+const lsofUnixSocketsTimeout = 10 * time.Second
+
+// lsofUnixSockets returns lsof's field output ("n<name>" lines) for every
+// unix socket it can read: the caller's own processes, which include any
+// tmux server on the caller's sockets.
+func lsofUnixSockets() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), lsofUnixSocketsTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "lsof", "-w", "-U", "-Fn")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	return lsofAnswer(out, stderr.String(), err)
+}
+
+// lsofAnswer reads an lsof run. lsof exits 1 both when it selects no file
+// and when it fails; only a run that printed nothing at all is the empty
+// answer. Any other failure, a timeout's kill included, is an error.
+func lsofAnswer(out []byte, stderr string, err error) (string, error) {
+	if err == nil {
+		return string(out), nil
+	}
+	var exit interface{ ExitCode() int }
+	if errors.As(err, &exit) && exit.ExitCode() == 1 && len(out) == 0 && stderr == "" {
+		return "", nil
+	}
+	return "", fmt.Errorf("lsof -U: %w: %s", err, strings.TrimSpace(stderr))
+}
+
+// lsofUnixBound reports whether lsof field output names a unix socket bound
+// to path. On macOS the name is the address the kernel holds for the socket,
+// not a file lookup: a server's listener and its accepted connections keep
+// it after the file is unlinked, while a client's socket names its peer
+// ("->0x...") instead.
+func lsofUnixBound(out, path string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if line == "n"+path {
 			return true
 		}
 	}
