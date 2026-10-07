@@ -444,7 +444,22 @@ npm.npm_translate_lock(
     run_lifecycle_hooks = False,
     verify_node_modules_ignored = "//:.bazelignore",
 )
-use_repo(npm, "npm_dashboard")
+
+# contrib/openclaw-bridge (//contrib/openclaw-bridge:openclaw_bridge_test).
+# Install scripts stay off: openclaw's postinstall only prunes/patches
+# packaged plugin dist the bridge does not import, and the suite is the same
+# under `npm ci --ignore-scripts`.
+npm.npm_translate_lock(
+    name = "npm_openclaw",
+    data = [
+        "//contrib/openclaw-bridge:package.json",
+        "//contrib/openclaw-bridge:pnpm-workspace.yaml",
+    ],
+    pnpm_lock = "//contrib/openclaw-bridge:pnpm-lock.yaml",
+    run_lifecycle_hooks = False,
+    verify_node_modules_ignored = "//:.bazelignore",
+)
+use_repo(npm, "npm_dashboard", "npm_openclaw")
 
 # pnpm itself, for `pnpm import` (make dashboard-lock).
 pnpm = use_extension("@aspect_rules_js//npm:extensions.bzl", "pnpm")

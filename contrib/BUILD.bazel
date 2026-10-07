@@ -12,7 +12,7 @@ filegroup(
     srcs = glob(
         ["**"],
         exclude = ["BUILD.bazel"],
-    ),
+    ) + ["//contrib/openclaw-bridge:all_files"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

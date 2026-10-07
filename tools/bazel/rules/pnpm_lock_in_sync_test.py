@@ -115,7 +115,9 @@ def npm_packages(package_lock: dict) -> set[tuple[str, str]]:
     for path, meta in package_lock["packages"].items():
         if "node_modules/" not in path or meta.get("link") or "version" not in meta:
             continue
-        packages.add((path.rsplit("node_modules/", 1)[1], meta["version"]))
+        # An npm alias ("x": "npm:@scope/y@1") installs @scope/y under x;
+        # pnpm-lock.yaml keys the package by its real name.
+        packages.add((meta.get("name") or path.rsplit("node_modules/", 1)[1], meta["version"]))
     return packages
 
 

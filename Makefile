@@ -1055,9 +1055,9 @@ test-mail-wisp-insert:
 test-mcp-mail:
 	$(TEST_ENV) GC_TEST_MCP_MAIL=1 go test ./internal/mail/exec/ -run TestMCPMailConformanceLive -v -count=1
 
-## test-openclaw-bridge: install + run the contrib/openclaw-bridge Node test suite
+## test-openclaw-bridge: run the contrib/openclaw-bridge Node test suite (rules_js)
 test-openclaw-bridge:
-	cd contrib/openclaw-bridge && npm ci --no-audit --no-fund && npm test
+	$(BAZEL_TEST) //contrib/openclaw-bridge/...
 
 ## test-docker: run the Docker session adapter against the emulated container host
 test-docker:

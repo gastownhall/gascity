@@ -265,7 +265,14 @@ const (
 	// //test/containerhost in bazel.yml's gating integration-packages lane.
 	// Reviewed delta: one job and one filter removed; no new job, trigger,
 	// step command or permission.
-	expectedCIExecutionHash     = "6b5df2ed332dd5b8977ee854b1518240f3809ce1dbc1a1789fcb187cf8fdc0e5"
+	//
+	// Bumped again (ga-96smfk.10, openclaw-bridge Node suite moved to
+	// Bazel): the openclaw-bridge job, its openclaw_bridge changes
+	// filter/output and its ci-required need and allowed skip are removed.
+	// The same node --test files run as //contrib/openclaw-bridge's js_tests
+	// under rules_js in bazel.yml's gating unit lane. Reviewed delta: one job
+	// and one filter removed; no new job, trigger, step command or permission.
+	expectedCIExecutionHash     = "7a605931e3a506d64b959fa1d051c55964dc64fdf28b3fa123e06ab960dfc6be"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -347,7 +354,6 @@ var requiredFilterPaths = map[string][]string{
 		"scripts/go-test-observable",
 		"examples/gastown/**",
 	},
-	"openclaw_bridge": {"contrib/openclaw-bridge/**", ".github/workflows/**"},
 	"shared": {
 		"go.mod",
 		"go.sum",
