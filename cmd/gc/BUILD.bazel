@@ -1849,6 +1849,7 @@ go_test(
         "nudge_queue_lock_policy_test.go",
         "nudge_queue_seam_test.go",
         "nudge_shadow_debts_test.go",
+        "nudge_status_readonly_integration_test.go",
         "nudge_store_ownership_test.go",
         "nudge_target_info_equiv_test.go",
         "oneshot_by_id_routes_test.go",
