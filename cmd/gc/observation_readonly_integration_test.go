@@ -137,10 +137,10 @@ func (f observationFixture) attempts(t *testing.T) string {
 // Scope by a unique temp-city path, and keep PID plus command identity. A
 // same-count replacement is a leak too. No process is signalled or cleaned up
 // by this census; the hostile substitutes cannot start a server in RED.
-func observationProcessCensus(t *testing.T, city string) []string {
+func observationProcessCensus(t *testing.T, city string, fixturePIDs ...int) []string {
 	t.Helper()
 	if _, err := os.Stat("/proc"); os.IsNotExist(err) {
-		return observationPortableProcessCensus(t, city)
+		return observationPortableProcessCensus(t, city, fixturePIDs...)
 	}
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -154,7 +154,8 @@ func observationProcessCensus(t *testing.T, city string) []string {
 		}
 	}
 	for _, entry := range entries {
-		if _, err := strconv.Atoi(entry.Name()); err != nil {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
@@ -162,7 +163,7 @@ func observationProcessCensus(t *testing.T, city string) []string {
 			continue
 		}
 		command := strings.ReplaceAll(string(data), "\x00", " ")
-		if strings.Contains(command, city) && (entry.Name() == strconv.Itoa(published.PID) || strings.Contains(command, "sql-server") || strings.Contains(command, "watchdog")) {
+		if strings.Contains(command, city) && (pid == published.PID || slices.Contains(fixturePIDs, pid) || strings.Contains(command, "sql-server") || strings.Contains(command, "watchdog")) {
 			found = append(found, entry.Name()+" "+command)
 		}
 	}
@@ -432,7 +433,7 @@ func TestObservationStatusUnavailableWhileControllerRunningIsDegraded(t *testing
 	}
 }
 
-func observationPortableProcessCensus(t *testing.T, city string) []string {
+func observationPortableProcessCensus(t *testing.T, city string, fixturePIDs ...int) []string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
 	defer cancel()
@@ -449,7 +450,14 @@ func observationPortableProcessCensus(t *testing.T, city string) []string {
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) > 0 && strings.Contains(line, city) && (fields[0] == strconv.Itoa(published.PID) || strings.Contains(line, "sql-server") || strings.Contains(line, "watchdog")) {
+		if len(fields) == 0 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue
+		}
+		if strings.Contains(line, city) && (pid == published.PID || slices.Contains(fixturePIDs, pid) || strings.Contains(line, "sql-server") || strings.Contains(line, "watchdog")) {
 			found = append(found, strings.TrimSpace(line))
 		}
 	}
@@ -602,7 +610,7 @@ func TestObservationRejectsLiveButUnownedOrMismatchedPublication(t *testing.T) {
 		t.Run(state, func(t *testing.T) {
 			f := newObservationFixture(t, "stopped")
 			f.applyEnv(t)
-			f.makeAvailable(t)
+			fixturePID := f.makeAvailable(t)
 			publication, err := readDoltRuntimeStateFile(filepath.Join(f.city, ".gc", "runtime", "packs", "dolt", "dolt-state.json"))
 			if err != nil {
 				t.Fatalf("read healthy fixture publication: %v", err)
@@ -615,7 +623,12 @@ func TestObservationRejectsLiveButUnownedOrMismatchedPublication(t *testing.T) {
 			if err := writeDoltState(f.city, publication); err != nil {
 				t.Fatal(err)
 			}
-			before := observationProcessCensus(t, f.city)
+			// Keep the actual fixture owner in the census even when the
+			// publication deliberately points at a different, unowned PID.
+			before := observationProcessCensus(t, f.city, fixturePID)
+			if len(before) == 0 {
+				t.Fatal("invalid-publication process census has no fixture owner")
+			}
 			code, out, errOut := f.command(t, gc, "", "hook", "observer")
 			if code != 69 || out != "" || !strings.Contains(errOut, "store unavailable: stale-publication scope=city") {
 				t.Errorf("invalid live publication trusted: code=%d stdout=%q stderr=%q", code, out, errOut)
@@ -623,7 +636,7 @@ func TestObservationRejectsLiveButUnownedOrMismatchedPublication(t *testing.T) {
 			if attempts := f.attempts(t); attempts != "" {
 				t.Errorf("invalid live publication reached store/lifecycle: %s", attempts)
 			}
-			if after := observationProcessCensus(t, f.city); !slices.Equal(before, after) {
+			if after := observationProcessCensus(t, f.city, fixturePID); !slices.Equal(before, after) {
 				t.Errorf("invalid publication changed another process: before=%v after=%v", before, after)
 			}
 		})
