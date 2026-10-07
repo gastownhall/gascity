@@ -1015,10 +1015,23 @@ install-oasdiff:
 	fi
 
 ## openapi-breaking-check: fail when internal/api/openapi.json breaks clients of
-## the base spec (OPENAPI_BREAKING_BASE, default merge-base with origin/main).
+## the base spec (OPENAPI_BREAKING_BASE, default merge-base with origin/main):
+## //cmd/openapi-breaking:openapi-breaking_test with that commit's spec as
+## GC_OPENAPI_BREAKING_BASE_SPEC, as bazel.yml's unit lane runs it on PRs.
 ## Waive intentional breaks in internal/api/openapi-breaking.toml.
 .PHONY: openapi-breaking-check
-openapi-breaking-check: install-oasdiff
+openapi-breaking-check: bazel-tmpdir
+	@base="$${OPENAPI_BREAKING_BASE:-$$(git merge-base HEAD origin/main)}" || exit 1; \
+	spec="$$(mktemp "$${TMPDIR:-/tmp}/openapi-base.XXXXXX")" || exit 1; \
+	trap 'rm -f "$$spec"' EXIT; \
+	git show "$$base:internal/api/openapi.json" > "$$spec" || exit 1; \
+	echo "openapi-breaking-check: base $$base"; \
+	GC_OPENAPI_BREAKING_BASE_SPEC="$$spec" $(BAZEL_TEST) //cmd/openapi-breaking:openapi-breaking_test
+
+## openapi-breaking-check-go: the same gate with plain go test / go run and the
+## Makefile's OASDIFF_VERSION.
+.PHONY: openapi-breaking-check-go
+openapi-breaking-check-go: install-oasdiff
 	GC_REQUIRE_OASDIFF=1 OASDIFF=$(OASDIFF) go test -count=1 ./cmd/openapi-breaking
 	OASDIFF=$(OASDIFF) go run ./cmd/openapi-breaking
 

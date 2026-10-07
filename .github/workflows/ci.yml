@@ -304,42 +304,15 @@ jobs:
       - name: bd CLI contract HOME isolation (main HEAD)
         run: make test-bd-cli-contract-home-isolation
 
-  preflight-generated:
-    name: Preflight / generated artifacts
-    needs:
-      - runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
-    env:
-      # Base side of the OpenAPI breaking-change gate (cmd/openapi-breaking):
-      # the PR base commit from the event payload, normally the base of the
-      # checked-out test merge ("Merge <head> into <base>"); github.sha on
-      # non-PR events.
-      OPENAPI_BREAKING_BASE: ${{ github.event.pull_request.base.sha || github.sha }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: go.mod
-          cache: false
-      - uses: ./.github/actions/go-mod-download
-      # The OpenAPI spec, generated Go client and generated reference docs
-      # drift checks run under Bazel: //cmd/genspec:genspec_in_sync_test,
-      # //internal/api/genclient:genclient_test (hermetic oapi-codegen) and
-      # //cmd/genschema:genschema_in_sync_test (bazel.yml uploads its
-      # regeneration patch for docs-autofix.yml). So do the dashboard's
-      # generated TS client and embedded bundle:
-      # //internal/api/dashboardspa/web/shared:generated_client_in_sync_test
-      # and //internal/api/dashboardspa:dist_in_sync_test.
-      # The OpenAPI breaking-change gate compares against the PR base commit,
-      # which needs git history, so it stays here. Non-PR events compare HEAD
-      # with itself (nothing to gate).
-      - name: Fetch OpenAPI breaking-change base
-        run: |
-          if ! git cat-file -e "${OPENAPI_BREAKING_BASE}^{commit}" 2>/dev/null; then
-            git fetch --no-tags --depth=1 origin "$OPENAPI_BREAKING_BASE"
-          fi
-      - name: OpenAPI breaking-change gate
-        run: make openapi-breaking-check
+  # The generated-artifact drift checks run under Bazel in bazel.yml's unit
+  # lane: //cmd/genspec:genspec_in_sync_test, //internal/api/genclient:
+  # genclient_test (hermetic oapi-codegen), //cmd/genschema:
+  # genschema_in_sync_test (its regeneration patch feeds docs-autofix.yml),
+  # //internal/api/dashboardspa/web/shared:generated_client_in_sync_test and
+  # //internal/api/dashboardspa:dist_in_sync_test. So does the OpenAPI
+  # breaking-change gate: //cmd/openapi-breaking:openapi-breaking_test runs
+  # the pinned oasdiff against the PR base commit's spec, which the lane
+  # writes with git show (tools/bazel/rules/openapi_base_spec.bzl).
 
   # Historical fan-in name and the branch-protection-enforced required status.
   # The cross-version bd contract cells gate through the required Bazel check
@@ -355,7 +328,6 @@ jobs:
       - changes
       - preflight-static
       - preflight-acceptance
-      - preflight-generated
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
@@ -551,7 +523,6 @@ jobs:
       - changes
       - preflight-static
       - preflight-acceptance
-      - preflight-generated
       - release-config
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}

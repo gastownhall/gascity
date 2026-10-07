@@ -399,6 +399,28 @@ exports_files(["dolt-linux-amd64/bin/dolt"])
 """,
 )
 
+# The OpenAPI breaking-change gate's comparator (//cmd/openapi-breaking),
+# the release Makefile's OASDIFF_VERSION installs for `make
+# openapi-breaking-check-go` (scripts/oasdiff_pin_test.go keeps them equal).
+http_archive(
+    name = "oasdiff_bin",
+    urls = ["https://github.com/oasdiff/oasdiff/releases/download/v1.33.0/oasdiff_1.33.0_linux_amd64.tar.gz"],
+    sha256 = "43a4e328e2d13ba1552d760aa68d2485c75c5621f309f6ff64ae895188345247",
+    build_file_content = """
+exports_files(["oasdiff"])
+""",
+)
+
+# The gate's base spec: the PR base commit's internal/api/openapi.json in
+# bazel.yml's unit lane, the committed spec elsewhere
+# (tools/bazel/rules/openapi_base_spec.bzl).
+openapi_base_spec = use_repo_rule("//tools/bazel/rules:openapi_base_spec.bzl", "openapi_base_spec")
+
+openapi_base_spec(
+    name = "openapi_base_spec",
+    revision = "//internal/api:openapi.json",
+)
+
 # JavaScript: ONE Node.js toolchain and ONE npm mechanism (rules_js) for
 # every Node workspace Bazel builds or tests. Workers have no npm and fork
 # lanes no network, so packages come only from committed, integrity-pinned

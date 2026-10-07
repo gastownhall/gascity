@@ -727,7 +727,6 @@ func TestCIPreflightFansInDirectlyWithoutWaitingForHistoricalCheck(t *testing.T)
 		"changes",
 		"preflight-static",
 		"preflight-acceptance",
-		"preflight-generated",
 		"release-config",
 	} {
 		if !slices.Contains(job.Needs, need) {

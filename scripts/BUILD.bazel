@@ -120,6 +120,8 @@ go_test(
         "makefile_cgo_test.go",
         "makefile_install_test.go",
         "native_doltlite_target_test.go",
+        "oasdiff_pin_test.go",
+        "openapi_breaking_gate_test.go",
         "pr_static_scope_contract_test.go",
         "precommit_contract_test.go",
         "push_ownership_guard_test.go",
@@ -168,6 +170,7 @@ go_test(
         "//scripts/testdata/test-go-test-shard/no_extra_env:pkg_files",
         "//test/acceptance:BUILD.bazel",
         "//test/integration:BUILD.bazel",
+        "//tools/bazel/rules:openapi_base_spec.bzl",
     ],
     shard_count = 6,
     deps = [

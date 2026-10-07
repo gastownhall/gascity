@@ -666,7 +666,7 @@ Skipping any step lands on a CI failure, not a production bug:
 | Generated Go client out of sync with spec | `TestGeneratedClientInSync` |
 | Handler response field undeclared in spec | Layer 1 response-validation tests |
 | Spec/client method-shape drift (sampled operations) | Layer 2 round-trip tests (`genclient_roundtrip_test.go`) |
-| Spec change that breaks existing clients (removed operation, response field, schema, or problem-type URN; narrowed request) | OpenAPI breaking-change gate (`make openapi-breaking-check`, run by `make spec-ci`): pinned oasdiff diffs `internal/api/openapi.json` against the merge base with the severity policy in `internal/api/openapi-breaking.toml`. Intentional breaks need a `[[waiver]]` there (fingerprint, check, target, reason, PR); the failure prints the stanza. |
+| Spec change that breaks existing clients (removed operation, response field, schema, or problem-type URN; narrowed request) | OpenAPI breaking-change gate (`//cmd/openapi-breaking:openapi-breaking_test` in bazel.yml's unit lane; locally `make openapi-breaking-check`, also run by `make spec-ci`): pinned oasdiff diffs `internal/api/openapi.json` against the PR base commit's spec (locally the merge base) with the severity policy in `internal/api/openapi-breaking.toml`. Intentional breaks need a `[[waiver]]` there (fingerprint, check, target, reason, PR); the failure prints the stanza. |
 | End-to-end binary wire regression | Layer 3 integration tests (`//go:build integration`) |
 | New event-type constant without registered payload | `TestEveryKnownEventTypeHasRegisteredPayload` |
 | Hard-coded SPA `/v0/...` path outside typed client | TypeScript build (`satisfies SpecPath` in `api.ts`) |

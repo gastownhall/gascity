@@ -272,7 +272,15 @@ const (
 	// The same node --test files run as //contrib/openclaw-bridge's js_tests
 	// under rules_js in bazel.yml's gating unit lane. Reviewed delta: one job
 	// and one filter removed; no new job, trigger, step command or permission.
-	expectedCIExecutionHash     = "7a605931e3a506d64b959fa1d051c55964dc64fdf28b3fa123e06ab960dfc6be"
+	//
+	// Bumped again (ga-96smfk.38, OpenAPI breaking-change gate moved to
+	// Bazel): the preflight-generated job and its need in Check and
+	// ci-preflight are removed. //cmd/openapi-breaking:openapi-breaking_test
+	// (in bazel.yml's gating unit lane) runs the gate with the pinned oasdiff
+	// against the PR base commit's spec, which the lane writes with git show
+	// and hands to @openapi_base_spec. Reviewed delta: one job removed; no
+	// new job, trigger, step command or permission.
+	expectedCIExecutionHash     = "0b81b0eead4e815e218330ee63ccec936e8a14b7867b5e784ef0aadbd3cb006b"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

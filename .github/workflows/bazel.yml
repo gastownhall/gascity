@@ -388,6 +388,25 @@ jobs:
           # without it.
           mkdir -p /tmp/bt
 
+      # The OpenAPI breaking-change gate (//cmd/openapi-breaking:
+      # openapi-breaking_test, in the unit lane's //...) compares the tested
+      # tree's internal/api/openapi.json with the spec of the commit the PR
+      # is merged onto (fresh-merge's base-sha). @openapi_base_spec
+      # (tools/bazel/rules/openapi_base_spec.bzl) reads the file this names
+      # from the client environment: no Bazel flag, so no other action key
+      # changes. Other events have no base; the spec compares with itself.
+      - name: OpenAPI breaking-change base spec
+        if: github.event_name == 'pull_request' && matrix.lane == 'unit'
+        env:
+          BASE_SHA: ${{ needs.rbe.outputs.base-sha }}
+        run: |
+          set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::base-sha is '$BASE_SHA'"; exit 1; }
+          spec="$RUNNER_TEMP/openapi-base.json"
+          git show "$BASE_SHA:internal/api/openapi.json" > "$spec"
+          echo "GC_OPENAPI_BREAKING_BASE_SPEC=$spec" >> "$GITHUB_ENV"
+          echo "OpenAPI breaking-change base: \`$BASE_SHA\`" >> "$GITHUB_STEP_SUMMARY"
+
       # --profile, --build_event_json_file, --execution_log_compact_file and
       # --experimental_build_event_upload_strategy are command options, so
       # they go after the command (CMD's first word), never in a startup
