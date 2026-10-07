@@ -222,7 +222,15 @@ const (
 	// ci-integration drops integration-shards, ci-required cmd-gc-process.
 	// Reviewed delta: two jobs removed, two needs and two allowed skips
 	// dropped; no new job, trigger or permission.
-	expectedCIExecutionHash     = "3d8f3bbf5af8e36c23ea494f12c94a4d529e2dd1f4feb208e1eea80c4d877d56"
+	//
+	// Bumped again (ga-96smfk.10, Docker session suite moved to Bazel): the
+	// docker-session job, its `docker` changes filter/output and its
+	// ci-required need and allowed skip are removed. Every scenario of the
+	// real-Docker harness it ran now runs as TestDockerSessionScript
+	// (//test/containerhost, emulated container host) in bazel.yml's gating
+	// integration-packages lane. Reviewed delta: one job and one filter
+	// removed; no new job, trigger, step command or permission.
+	expectedCIExecutionHash     = "7566315cf58afb393fd728bc1734993c61ad86f7f876e8dde7fc135b3fcf5ac0"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -261,12 +269,6 @@ const (
 
 var requiredFilterPaths = map[string][]string{
 	"mail": {"internal/mail/**", "contrib/mail-scripts/**"},
-	"docker": {
-		"internal/session/**",
-		"scripts/gc-session-docker",
-		"scripts/test-docker-session",
-		"contrib/session-scripts/**",
-	},
 	"k8s": {
 		"internal/session/**",
 		"contrib/session-scripts/gc-session-k8s*",

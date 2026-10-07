@@ -725,10 +725,15 @@ provider-store owners instead of being repeated by each command consumer. Body
 review is not a reason to remove a retained boundary test.
 
 `TestDockerSessionProtocol` owns fast Docker CLI mapping, injected failures,
-and cleanup transitions through a strict `PATH`-injected executable. The
-real-Docker `scripts/test-docker-session` harness remains the composition owner
-until each retained container invariant has a replacement contract and the
-real proof is deliberately consolidated.
+and cleanup transitions through a strict `PATH`-injected executable.
+`TestDockerSessionScript` (`//test/containerhost`, integration tier) is the
+composition owner: it drives `scripts/gc-session-docker` through every
+session operation against `test/containerhost`, an emulated container host
+that runs each container as a tagged group of host processes with its own
+`/run`, an image-defined `PATH` and the adapter's real in-container tmux. It
+needs no Docker daemon, privileges or user namespaces, so it runs on every
+rbe-west lane, fork lanes included. What it does not prove is Docker itself
+(image builds, pulls, cgroups, namespaces).
 
 The canonical identity is package directory plus package clause plus top-level
 `Test`, `Benchmark`, `Fuzz`, or `TestMain` name. Nested function literals and
@@ -856,7 +861,7 @@ all-source audit while staying outside untagged and Small debt.
 | --- | --- | --- | --- | --- | --- | --- |
 | Audit baseline | all tracked test source | fixed_sleep: 497 calls / 183 files (historical regex census: 447 / 157) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
 | Audit baseline | all tracked test source | listener_helper: 60 calls / 24 files | ga-cp3hwi | all-source listener-helper call/file totals cannot drift without an explicit checked policy update; ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption | P0.4c-listener-helper | 2026-10-31 |
-| Audit baseline | all tracked test source | subprocess: 744 calls / 220 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
+| Audit baseline | all tracked test source | subprocess: 745 calls / 221 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary: subprocess | ga-p9iuv.30 | the provider-owned script boundary proof is a checked Medium subprocess owner; the test executes the copied provider script only with a test-owned BD executable and verifies its lifecycle delegation without a host service | GC6011 | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses: slow_process_gate, subprocess | ga-p9iuv.30 | the provider-owned BD lifecycle proof is a checked Medium process owner; the test runs the pinned real bd direct and proxied lifecycles under deadlines, records only provider-published identities, and stops its own scope before asserting those children are absent | GC6011 | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdReadyScopeLifecycleReadsItsPersistedTopology: subprocess | ga-p9iuv.30 | the ready-scope topology boundary proof is a checked Medium subprocess owner; the test executes the shipped provider script once per init shape with a test-owned BD executable and a scope built from files alone, so no Dolt, no bd and no host service are involved | GC6011 | 2026-10-31 |

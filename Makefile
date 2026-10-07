@@ -1059,9 +1059,9 @@ test-mcp-mail:
 test-openclaw-bridge:
 	cd contrib/openclaw-bridge && npm ci --no-audit --no-fund && npm test
 
-## test-docker: run Docker session provider integration tests
-test-docker: check-docker
-	./scripts/test-docker-session
+## test-docker: run the Docker session adapter against the emulated container host
+test-docker:
+	$(BAZEL_TEST) --config=integration //test/containerhost:containerhost_test
 
 ## test-k8s: run K8s session provider conformance tests
 test-k8s:

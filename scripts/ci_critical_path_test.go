@@ -268,19 +268,6 @@ func TestCmdGCProcessTimingEnvCrossesMakeIsolation(t *testing.T) {
 func TestPRTestJobsInstallOnlyRuntimeDependencies(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
 
-	for _, jobName := range []string{"docker-session"} {
-		job, ok := wf.Jobs[jobName]
-		if !ok {
-			t.Errorf("CI workflow has no %s job", jobName)
-			continue
-		}
-		for _, step := range job.Steps {
-			if strings.Contains(step.Run, "make install-tools") {
-				t.Errorf("%s step %q installs lint/codegen tools already owned by preflight", jobName, step.Name)
-			}
-		}
-	}
-
 	for _, jobName := range []string{
 		"preflight-acceptance",
 		"contract-acceptance-current",
