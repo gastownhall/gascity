@@ -4,6 +4,7 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 exports_files([
     "check-generated-in-sync.sh",
     "check-go-format.sh",
+    "check-goreleaser-config.sh",
     "gc-session-docker",
 ])
 

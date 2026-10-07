@@ -280,7 +280,22 @@ const (
 	// against the PR base commit's spec, which the lane writes with git show
 	// and hands to @openapi_base_spec. Reviewed delta: one job removed; no
 	// new job, trigger, step command or permission.
-	expectedCIExecutionHash     = "0b81b0eead4e815e218330ee63ccec936e8a14b7867b5e784ef0aadbd3cb006b"
+	//
+	// Bumped again (ga-96smfk.12, final cutover: every suite of this tree
+	// under Bazel): preflight-static (no steps left but setup),
+	// preflight-acceptance (Tier A: bazel.yml's acceptance lane plus the
+	// untagged helpers in the unit lane), the push-only unit cover jobs
+	// (bazel-nightly.yml's `bazel coverage //...` -> Codecov flag
+	// bazel-unit), the push-only integration-rest-full shards
+	// (bazel-nightly.yml's //test/integration lane), release-config
+	// (//:goreleaser_check_test) and the ci-preflight / ci-integration
+	// rollups are removed, with the changes job's cmd_gc_process and
+	// integration filters and outputs that only they read. Check and
+	// ci-required fan in the remaining gating jobs; credential-provider-
+	// windows moves to runner_policy.py's Blacksmith Windows runner.
+	// Reviewed delta: jobs, filters and needs removed, one runs-on and one
+	// runner-policy output; no new trigger, step command or permission.
+	expectedCIExecutionHash     = "49b8f55390b6aebb6bb845634e260a83b16e6bd26c3f00ee422fc40f648c23f6"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -334,33 +349,12 @@ var requiredFilterPaths = map[string][]string{
 		"cmd/gc/embed_builtin_packs.go",
 		"scripts/update-bundled-gastown-pack",
 	},
-	"cmd_gc_process": {
-		"go.mod",
-		"go.sum",
-		".github/workflows/**",
-		"Makefile",
-		"cmd/gc/**",
-		"internal/**",
-		"examples/gastown/**",
-	},
 	"credential_provider": {
 		"go.mod",
 		"go.sum",
 		"internal/credentialprovider/**",
 		"internal/testenv/**",
 		"internal/testutil/**",
-	},
-	"integration": {
-		"go.mod",
-		"go.sum",
-		".github/workflows/**",
-		"Makefile",
-		"**/*.go",
-		"scripts/test-integration-shard",
-		"scripts/test-go-test-shard",
-		"scripts/runtime-tmux-tests.manifest",
-		"scripts/go-test-observable",
-		"examples/gastown/**",
 	},
 	"shared": {
 		"go.mod",

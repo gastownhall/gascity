@@ -47,6 +47,21 @@ sh_test(
     ],
 )
 
+# `goreleaser check` over the release configuration (formerly ci.yml's
+# "Release config" job), with the GoReleaser pinned in MODULE.bazel.
+sh_test(
+    name = "goreleaser_check_test",
+    srcs = ["//scripts:check-goreleaser-config.sh"],
+    args = [
+        "$(rootpath @goreleaser_bin//:goreleaser)",
+        "$(rootpath .goreleaser.yml)",
+    ],
+    data = [
+        ".goreleaser.yml",
+        "@goreleaser_bin//:goreleaser",
+    ],
+)
+
 # Unit tests of the CI runner-selection and suite-coverage helpers the
 # workflows run (formerly `make test-ci-policy`'s Python half).
 py_test(
@@ -242,6 +257,7 @@ exports_files([
     "deps.env",
     ".gitignore",
     ".golangci.yml",
+    ".goreleaser.yml",
     ".trivyignore.yaml",
 ])
 

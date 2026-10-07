@@ -411,6 +411,19 @@ exports_files(["oasdiff"])
 """,
 )
 
+# GoReleaser for //:goreleaser_check_test (`goreleaser check` over
+# .goreleaser.yml, formerly ci.yml's "Release config" job). release.yml runs
+# the latest v2 ("~> v2"); bump this pin with each GoReleaser v2 release so
+# the check sees the deprecations the release run will.
+http_archive(
+    name = "goreleaser_bin",
+    urls = ["https://github.com/goreleaser/goreleaser/releases/download/v2.18.2/goreleaser_Linux_x86_64.tar.gz"],
+    sha256 = "0a96edc9d9bc594e4a41cc4d59467c182062910ab24d9d1f6dd7b667d32606d3",
+    build_file_content = """
+exports_files(["goreleaser"])
+""",
+)
+
 # The gate's base spec: the PR base commit's internal/api/openapi.json in
 # bazel.yml's unit lane, the committed spec elsewhere
 # (tools/bazel/rules/openapi_base_spec.bzl).
