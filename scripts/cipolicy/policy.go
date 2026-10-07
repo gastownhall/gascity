@@ -187,7 +187,14 @@ const (
 	// other PR), and integration-packages-fork goes; ci-integration drops it.
 	// Reviewed delta: rows moved between two jobs of identical runner, env
 	// and steps, one job removed; no new trigger, step command or permission.
-	expectedCIExecutionHash     = "212cf931a77842415da14d344782a12592e52a11bf4ac4dd693c0447ec627260"
+	// Bumped again (ga-96smfk.7, cmd/gc process suite moved to Bazel): the
+	// 12-shard cmd-gc-process job now runs for fork and Dependabot PRs only
+	// (the integration-packages-fork condition) and its name says so. Pushes
+	// and same-repo PRs run the same suite in bazel.yml's gating
+	// integration-packages lane (//cmd/gc:gc_test, --config=integration,
+	// GC_FAST_UNIT=0). Reviewed delta: one job's if and name; no new job,
+	// trigger or permission.
+	expectedCIExecutionHash     = "c94405e9a770d2e90c40be20097b9d6f8c5ce537e60766d9b1431661b95f4551"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

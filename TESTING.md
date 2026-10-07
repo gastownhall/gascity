@@ -908,8 +908,10 @@ such as managed Dolt recovery, real `bd` lifecycle, tutorial regression
 scripts, and the large `gc-beads-bd` provider suite are routed out of the
 default path so local `make check` and CI `Check` stay focused on quick
 feedback. If you need that full `cmd/gc` scenario coverage locally, run
-`make test-cmd-gc-process`. In CI, the required non-short path is the
-dedicated Linux `cmd/gc process` job. The generic integration package
+`make test-cmd-gc-process`, or `bazel test --config=integration
+//cmd/gc:gc_test`. In CI, the required non-short path is that target in
+bazel.yml's gating integration-packages lane (fork and Dependabot PRs, which
+start no such lane, run ci.yml's `cmd/gc process (fork PR)` shards instead). The generic integration package
 shards keep `GC_FAST_UNIT=1` for `cmd/gc` unless explicitly overridden,
 so they exercise the fast package sweep without duplicating the slow
 process-backed suite. If you need the heavier package
