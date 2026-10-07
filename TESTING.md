@@ -1293,12 +1293,23 @@ target instead of turning it into a green no-op. Through the general
 yourself — `TEST_ENV` is `env -i`, so exporting the variable in your shell is
 not enough.
 
-The same switch covers a row's own precondition. The required
-`Beads / proxied-native acceptance` job runs `TestProxiedNativeLifecycle` and
-`TestProxiedNativeSafety` under `GC_REQUIRE_ACCEPTANCE_TOOLING=1`, and a row
-there whose precondition the `bd` under test does not produce (a database with
-no ignored-lane row to remove, a proxy record `bd` cleaned up after a SIGKILL)
-calls `helpers.MissingPrecondition`, which skips locally and fails in that job.
+In CI these rows run in Bazel's required acceptance lane
+(`bazel test --config=acceptance //test/acceptance:acceptance_test
+//test/acceptance:acceptance_solo_tests`). `test/acceptance/BUILD.bazel`
+gives `acceptance_test` the pinned `bd` and `dolt` (first on `PATH`, so every
+`dolt sql-server` the rows start is a loopback child of the test on the remote
+worker), `GC_ACCEPTANCE_TOPOLOGY_MATRIX=1` and
+`GC_REQUIRE_ACCEPTANCE_TOOLING=1`. The few rows that wait out minutes of real
+Dolt lifecycle (the topology matrix's M1 and M5 shapes, the proxied idle
+timeout, the two suspension-quiescence rows) are its `SOLO_TESTS`: each runs
+alone in a target of its own, and `acceptance_test` skips them.
+
+The same switch covers a row's own precondition. The lane runs
+`TestProxiedNativeLifecycle` and `TestProxiedNativeSafety` under
+`GC_REQUIRE_ACCEPTANCE_TOOLING=1`, and a row there whose precondition the
+`bd` under test does not produce (a database with no ignored-lane row to
+remove, a proxy record `bd` cleaned up after a SIGKILL) calls
+`helpers.MissingPrecondition`, which skips locally and fails in the lane.
 Those files never call `t.Skip` in a row;
 `scripts/acceptance_run_selection_test.go` enforces it.
 

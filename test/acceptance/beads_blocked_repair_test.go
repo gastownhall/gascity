@@ -151,7 +151,7 @@ var blockedRepairFinishedLine = regexp.MustCompile(`blocked-flag repair finished
 
 func TestBlockedRepairOnProxiedCityAndRig(t *testing.T) {
 	// Three proxied city restarts (about 4 minutes) do not fit the Tier A smoke
-	// budget; the Beads / topology acceptance job opts in and runs it by name.
+	// budget; Bazel's acceptance lane opts in (test/acceptance/BUILD.bazel).
 	helpers.RequireTopologyMatrix(t)
 	bdPath, doltPath := helpers.RequireTopologyTooling(t)
 	helpers.RequireBDAtLeast(t, bdPath, "v1.1.0", "bd recompute-blocked")

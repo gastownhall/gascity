@@ -245,7 +245,18 @@ const (
 	// //internal/beads:bd_conditional_release_contract_test. Reviewed delta:
 	// two removed jobs and their fan-in references; no new job, trigger or
 	// permission.
-	expectedCIExecutionHash     = "f473b068211415556dd8cb63dcb81b4a57bba29c9a29ef1d314ff01aea23aafd"
+	//
+	// Bumped again (ga-96smfk.11, beads topology acceptance moved to Bazel):
+	// the beads-topology-acceptance and beads-proxied-native-acceptance jobs
+	// are removed, with the changes job's beads_topology filter and output
+	// that only they read, and ci-required no longer needs them (nor allows
+	// their skip). bazel.yml's required acceptance lane runs the same tests
+	// against the pinned bd and dolt, under GC_REQUIRE_ACCEPTANCE_TOOLING
+	// and GC_ACCEPTANCE_TOPOLOGY_MATRIX: //test/acceptance:acceptance_test
+	// and :acceptance_solo_tests. Reviewed delta: two removed jobs, one
+	// filter and output, and their fan-in references; no new job, trigger or
+	// permission.
+	expectedCIExecutionHash     = "2ac0779084e73200ce74bbeb59fbedb71affa8ec4d11ec2795f976f1bae351d8"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -296,21 +307,6 @@ var requiredFilterPaths = map[string][]string{
 		"deps.env",
 		".github/scripts/install-bd-archive.sh",
 		"cmd/gc/init_provider_readiness.go",
-	},
-	// beads-topology-acceptance is the only job that stands up the proxied
-	// shapes for real, and ci-required allows its skip, so the paths that must
-	// trigger it are policy rather than convention. The internal/** entry is
-	// the dependency graph of the binaries the job builds:
-	// `go list -deps ./test/acceptance/... ./cmd/gc`.
-	"beads_topology": {
-		"go.mod",
-		"go.sum",
-		"deps.env",
-		"cmd/gc/**",
-		"internal/**",
-		"examples/bd/**",
-		"test/acceptance/**",
-		".github/workflows/ci.yml",
 	},
 	"packs": {
 		"examples/gastown/**",

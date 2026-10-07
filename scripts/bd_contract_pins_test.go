@@ -96,7 +96,10 @@ func TestBdContractCellsRunTheDepsEnvPins(t *testing.T) {
 		r := rule(acceptance, name)
 		label := "@" + repoFor(version) + "//:bd"
 		for _, want := range []string{
-			`env = {"GC_ACCEPTANCE_BD_BIN": "$(rootpath ` + label + `)"},`,
+			// The cell's bd is the only one: named for helpers.FindBD and
+			// first on PATH, over the one :acceptance_test's env puts there.
+			`"GC_ACCEPTANCE_BD_BIN": "$(rootpath ` + label + `)",`,
+			`"GC_TEST_TOOL_PATHS": "$(rootpath ` + label + `)",`,
 			`gotags = ["acceptance_bd_contract"],`,
 			`test = ":acceptance_test",`,
 		} {
