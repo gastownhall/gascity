@@ -513,10 +513,12 @@ retry_pending_spike_alert() {
     while IFS= read -r alert_json; do
         [ -n "$alert_json" ] || continue
         pending_alerts+=("$alert_json")
-    done < <(
+    # A here-string, not process substitution: bash 3.2 (macOS) rejects <(...)
+    # in POSIX mode (POSIXLY_CORRECT).
+    done <<< "$(
         printf '%s\n' "$state_json" \
             | jq -c '.pending_spike_alerts // {} | to_entries | sort_by(.key) | .[].value'
-    )
+    )"
     if [ "${#pending_alerts[@]}" -eq 0 ]; then
         return
     fi
