@@ -44,6 +44,22 @@ CI does not re-execute locally. After changing imports or adding
 packages, run `make bazel-sync` and commit the regenerated BUILD files
 (the CI sync gate checks this).
 
+`//go:build integration` tests outside `test/integration` run in the
+`integration-packages` lane, the Bazel form of `go test -tags integration`
+with `GC_FAST_UNIT=0`:
+
+```bash
+bazel test --config=integration //test:integration_packages
+bazel test --config=integration //internal/runtime/tmux:tmux_test
+```
+
+`make bazel-sync` lists every package with an integration-tagged file (or a
+`GC_FAST_UNIT=0` process gate) in that suite. Tools those tests run by name
+come from pinned data deps, not the host: a go_test passes their
+`$(rootpath)`s in `GC_TEST_TOOL_PATHS` (prepended to `PATH` by
+`internal/testenv`), and Bazel-built helper binaries by `$(rootpath)` in an
+env var the test reads with `bazeltest.DataPath` instead of `go build`.
+
 See `engdocs/bazel-quickstart.md` for local setup and
 `engdocs/bazel-ci-budget.md` for the CI optimization loop.
 
@@ -66,7 +82,7 @@ executed tests. Pass one `PHASE=FILE` per invocation; `--json-out PATH`
 writes the machine-readable report (schema 1), `--allow-missing` shows an
 absent file as "no BEP file" instead of failing, and `--top N` sizes the
 slowest list. In CI, each `bazel.yml` lane (unit, acceptance,
-integration) uploads its BEP file, redacted to the fields the report reads
+integration-packages, integration) uploads its BEP file, redacted to the fields the report reads
 (`internal/testpolicy/bepsummary/redact.jq`: a raw BEP file holds the
 expanded command line, including `--remote_executor`), and the
 `bazel / test cache report` job reports them in one table in its job

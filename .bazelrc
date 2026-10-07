@@ -131,6 +131,9 @@ test:acceptance --define=gotags=acceptance_a
 test:acceptance --test_timeout=1100
 test:integration --define=gotags=integration
 test:integration --test_timeout=1100
+# The integration tier also runs the process-backed tests the unit lane
+# skips, as scripts/test-integration-shard does.
+test:integration --test_env=GC_FAST_UNIT=0
 
 # No --remote_cache_compression here: bazel.yml's lanes add it for fork-cache
 # while rbe-cache advertises zstd (tools/rbe/cache-zstd-probe.sh), so the

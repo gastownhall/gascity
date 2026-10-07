@@ -198,9 +198,10 @@ var gascityRequiredChecks = []string{
 // Each lane's exact bazel command. Every lane passes --config=ci and reuses
 // cached test results; there is no --config=sole-run.
 var multiLaneCommands = map[string]string{
-	"unit":        "test --config=ci --keep_going //...",
-	"acceptance":  "test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test",
-	"integration": "test --config=ci --config=integration --keep_going //test/integration:integration_test",
+	"unit":                 "test --config=ci --keep_going //...",
+	"acceptance":           "test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test",
+	"integration":          "test --config=ci --config=integration --keep_going //test/integration:integration_test",
+	"integration-packages": "test --config=ci --config=integration --keep_going //test:integration_packages",
 }
 
 const (
@@ -329,11 +330,16 @@ var (
 )
 
 // wantMultiLanes: the lanes each (event, mode) starts, in order.
-func wantMultiLanes(event, _ string) []string {
+func wantMultiLanes(event, mode string) []string {
 	// Every mode tests (the gate fails a run with no lane). Acceptance runs
 	// in every mode, the fork pool's (fork-ro: no network)
 	// included: gc init no longer clones gascity-packs (#7005).
 	lanes := []string{"unit", "acceptance"}
+	// A fork run mints at most 2 rbe-fork certificates; fork PRs keep
+	// ci.yml's Go package integration shards.
+	if !strings.HasPrefix(mode, "fork-") {
+		lanes = append(lanes, "integration-packages")
+	}
 	if event == "push" || event == "workflow_dispatch" { // until G3
 		lanes = append(lanes, "integration")
 	}

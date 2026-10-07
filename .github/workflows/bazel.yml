@@ -23,6 +23,11 @@
 #   - the rbe job's lane list (event and mode) decides which lanes start;
 #     every mode starts unit and acceptance, so the gate never passes a run
 #     that tested nothing (an empty lane list fails it);
+#   - integration-packages runs every package's `//go:build integration`
+#     tests and GC_FAST_UNIT=0 process tests outside //test/integration
+#     (//test:integration_packages, tools/bazel/integration_suite.py) and
+#     gates, in every mode but the fork ones (2 certificates: unit and
+#     acceptance); fork PRs keep ci.yml's Go package integration shards;
 #   - integration runs on pushes and dispatches only, evidence-only, until G3;
 #   - fork and Dependabot PRs ask rbe-west's mint (mode fork-ro/fork-rw);
 #     closed, refused or unreachable, the run takes mode cache: lanes execute
@@ -155,11 +160,19 @@ jobs:
           # Evidence-only until G3: agent-flow tests depend on ambient
           # agent-template resolution (product-side fix, D13).
           integration='{"lane":"integration","cmd":"test --config=ci --config=integration --keep_going //test/integration:integration_test","evidence-only":true}'
+          # Gating. Every package's integration-tagged and GC_FAST_UNIT=0
+          # tests outside //test/integration (scripts/test-integration-shard's
+          # packages-* shards).
+          packages='{"lane":"integration-packages","cmd":"test --config=ci --config=integration --keep_going //test:integration_packages"}'
           # Every mode tests: the gate (the required check) fails a run that
           # started no lane. Acceptance runs on the fork pool too (mode
           # fork-ro, instance oss-fork, loopback only): `gc init` no longer
           # clones gascity-packs (#7005).
           lanes="$unit,$acceptance"
+          # Not in the fork modes: a fork run mints at most 2 rbe-fork
+          # certificates (unit, acceptance). Fork PRs run ci.yml's Go package
+          # integration shards instead.
+          case "$MODE" in fork-ro|fork-rw) ;; *) lanes+=",$packages" ;; esac
           # Pushes and dispatches only until G3 (evidence-only on pull
           # requests would only spend the pool).
           case "$EVENT" in push|workflow_dispatch) lanes+=",$integration" ;; esac
@@ -540,6 +553,7 @@ jobs:
             --json-out "$dir/summary.json" \
             unit="$dir/bazel-bep-unit-$ATTEMPT/bazel-bep.json" \
             acceptance="$dir/bazel-bep-acceptance-$ATTEMPT/bazel-bep.json" \
+            integration-packages="$dir/bazel-bep-integration-packages-$ATTEMPT/bazel-bep.json" \
             integration="$dir/bazel-bep-integration-$ATTEMPT/bazel-bep.json" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload bazel test cache report
         if: always()

@@ -4,12 +4,24 @@ load("@rules_python//python:py_test.bzl", "py_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 # gazelle:prefix github.com/gastownhall/gascity
+# gazelle:build_tags integration
 
 # internal/config has two libraries sharing one importpath (hand-written bounded
 # experiment). All dependents must use the full :config closure.
 # gazelle:resolve go github.com/gastownhall/gascity/internal/config //internal/config:config
 
 gazelle(name = "gazelle")
+
+# The integration lane's build (.bazelrc test:integration). Every go_test
+# compiles its `//go:build integration` files only there (the build_tags
+# directive above lists them in srcs; rules_go filters by the gotags define),
+# and selects on this for what only those files need: pinned tools as data,
+# the env that hands them over, GC_FAST_UNIT.
+config_setting(
+    name = "gotags_integration",
+    define_values = {"gotags": "integration"},
+    visibility = ["//:__subpackages__"],
+)
 
 exports_files([
     "go.mod",
@@ -483,6 +495,8 @@ filegroup(
         "//test/acceptance/tutorial_goldens:bazel_repo_srcs",
         "//test/acceptance/worker_inference:bazel_repo_srcs",
         "//test/dashport:bazel_repo_srcs",
+        "//test/dashport/cmd/fakesupervisor:bazel_repo_srcs",
+        "//test/dashport/corpus:bazel_repo_srcs",
         "//test/docsync:bazel_repo_srcs",
         "//test/dolttest:bazel_repo_srcs",
         "//test/integration:bazel_repo_srcs",
@@ -716,6 +730,8 @@ filegroup(
         "//test/acceptance/tutorial_goldens:bazel_go_srcs",
         "//test/acceptance/worker_inference:bazel_go_srcs",
         "//test/dashport:bazel_go_srcs",
+        "//test/dashport/cmd/fakesupervisor:bazel_go_srcs",
+        "//test/dashport/corpus:bazel_go_srcs",
         "//test/docsync:bazel_go_srcs",
         "//test/dolttest:bazel_go_srcs",
         "//test/integration:bazel_go_srcs",
@@ -946,6 +962,8 @@ filegroup(
         "//test/acceptance/tutorial_goldens:bazel_go_test_srcs",
         "//test/acceptance/worker_inference:bazel_go_test_srcs",
         "//test/dashport:bazel_go_test_srcs",
+        "//test/dashport/cmd/fakesupervisor:bazel_go_test_srcs",
+        "//test/dashport/corpus:bazel_go_test_srcs",
         "//test/docsync:bazel_go_test_srcs",
         "//test/dolttest:bazel_go_test_srcs",
         "//test/integration:bazel_go_test_srcs",

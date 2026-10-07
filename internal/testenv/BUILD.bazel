@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "testenv",
-    srcs = ["testenv.go"],
+    srcs = [
+        "bazel_tools.go",
+        "testenv.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/testenv",
     visibility = ["//:__subpackages__"],
 )
@@ -10,6 +13,7 @@ go_library(
 go_test(
     name = "testenv_test",
     srcs = [
+        "bazel_tools_internal_test.go",
         "gc_env_baseline_test.go",
         "legacy_flag_freeze_test.go",
         "lint_test.go",

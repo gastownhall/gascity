@@ -1,15 +1,23 @@
-load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
 
 go_library(
-    name = "bazeltest",
-    srcs = [
-        "bazeltest.go",
-        "datapath.go",
-        "lock_other.go",
-        "lock_unix.go",
+    name = "fakesupervisor_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/gastownhall/gascity/test/dashport/cmd/fakesupervisor",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//internal/api",
+        "//test/dashport/corpus",
     ],
-    importpath = "github.com/gastownhall/gascity/internal/bazeltest",
-    visibility = ["//:__subpackages__"],
+)
+
+go_binary(
+    name = "fakesupervisor",
+    embed = [":fakesupervisor_lib"],
+    # main.go is //go:build integration: only --define=gotags=integration
+    # gives the package a main to link, so `bazel build //...` skips it.
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
@@ -41,15 +49,4 @@ filegroup(
         allow_empty = True,
     ),
     visibility = ["//visibility:public"],
-)
-
-go_test(
-    name = "bazeltest_test",
-    srcs = [
-        "bazeltest_test.go",
-        "datapath_test.go",
-        "testenv_import_test.go",
-    ],
-    embed = [":bazeltest"],
-    deps = ["//internal/testenv"],
 )

@@ -19,6 +19,7 @@ go_test(
     name = "subprocess_test",
     srcs = [
         "meta_privacy_test.go",
+        "seam_conformance_test.go",
         "seams_test.go",
         "socket_probe_test.go",
         "subprocess_test.go",
@@ -27,6 +28,7 @@ go_test(
     embed = [":subprocess"],
     deps = [
         "//internal/runtime",
+        "//internal/runtime/runtimetest",
         "//internal/testenv",
         "//internal/testutil",
     ],

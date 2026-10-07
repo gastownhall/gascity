@@ -1,15 +1,17 @@
-load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
-    name = "bazeltest",
-    srcs = [
-        "bazeltest.go",
-        "datapath.go",
-        "lock_other.go",
-        "lock_unix.go",
+    name = "corpus",
+    srcs = ["corpus.go"],
+    importpath = "github.com/gastownhall/gascity/test/dashport/corpus",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//internal/beads",
+        "//internal/config",
+        "//internal/events",
+        "//internal/mail/beadmail",
+        "//internal/session",
     ],
-    importpath = "github.com/gastownhall/gascity/internal/bazeltest",
-    visibility = ["//:__subpackages__"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
@@ -41,15 +43,4 @@ filegroup(
         allow_empty = True,
     ),
     visibility = ["//visibility:public"],
-)
-
-go_test(
-    name = "bazeltest_test",
-    srcs = [
-        "bazeltest_test.go",
-        "datapath_test.go",
-        "testenv_import_test.go",
-    ],
-    embed = [":bazeltest"],
-    deps = ["//internal/testenv"],
 )

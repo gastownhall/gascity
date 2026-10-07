@@ -20,11 +20,26 @@ go_binary(
 go_test(
     name = "gc-write-mint_test",
     srcs = [
+        "e2e_test.go",
         "main_test.go",
         "testenv_import_test.go",
     ],
+    data = select({
+        "//:gotags_integration": [
+            ":gc-write-mint",
+        ],
+        "//conditions:default": [],
+    }),
     embed = [":gc-write-mint_lib"],
+    # e2e_test.go (integration) execs the built binary.
+    env = select({
+        "//:gotags_integration": {
+            "GC_TEST_WRITE_MINT_BIN": "$(rootpath :gc-write-mint)",
+        },
+        "//conditions:default": {},
+    }),
     deps = [
+        "//internal/bazeltest",
         "//internal/citywriteauth",
         "//internal/clientgrant",
         "//internal/testenv",

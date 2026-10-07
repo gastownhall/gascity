@@ -106,7 +106,7 @@ go_test(
         # also build in the default configuration (bead_id_test.go,
         # dolt_config_timeout_test.go) read sources only, so `bazel test //...`
         # neither links nor stages them; the gc links are 207 MB each.
-        ":gotags_integration": [
+        "//:gotags_integration": [
             "//cmd/gc",
             "//cmd/gc:gc_drift_new",
             "//cmd/gc:gc_drift_old",
@@ -164,13 +164,6 @@ go_test(
 exports_files(
     ["BUILD.bazel"],
     visibility = ["//scripts:__pkg__"],
-)
-
-# The integration lane builds with --define=gotags=integration (.bazelrc
-# test:integration, bazel.yml's integration lane).
-config_setting(
-    name = "gotags_integration",
-    define_values = {"gotags": "integration"},
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

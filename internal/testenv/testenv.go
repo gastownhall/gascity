@@ -332,6 +332,7 @@ func init() {
 		refuseProdDoltPort(func(string) bool { return true })
 		return
 	}
+	prependBazelTools()
 	keep := map[string]bool{}
 	if list := os.Getenv(PassthroughVar); list != "" {
 		for _, name := range strings.Split(list, ",") {
