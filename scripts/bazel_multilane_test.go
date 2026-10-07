@@ -160,6 +160,7 @@ type multiLaneStep struct {
 	With map[string]string `yaml:"with"`
 	// A string: some steps set it from an expression.
 	ContinueOnError string `yaml:"continue-on-error"`
+	TimeoutMinutes  int    `yaml:"timeout-minutes"`
 }
 
 type multiLaneJob struct {
@@ -959,5 +960,85 @@ func TestBazelMultiLaneCoverageUploadsToCodecov(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("coverage job has %d Codecov uploads, want 1", n)
+	}
+}
+
+// ciAnalyticsRunTemplateRE finds a GitHub Actions expression (${{ ... }})
+// inside a `run:` block: ci_analytics_extract.py's arguments must come from
+// $LANE/$MODE/$CHECK_RUN_ID/$PR_HINT shell variables (set in `env:`, which
+// GitHub Actions substitutes before the shell ever sees them), never a raw
+// ${{ }} expression spliced into the command line itself.
+var ciAnalyticsRunTemplateRE = regexp.MustCompile(`\$\{\{`)
+
+// ciAnalyticsUploadPathForbidden rejects an upload `path` that would leak
+// the raw BEP file, the uncompressed/compressed exec log, or the profile
+// (as opposed to the redacted ci-analytics.json summary this step produces).
+var ciAnalyticsUploadPathForbidden = regexp.MustCompile(`bazel-exec\.log|bazel-profile\.json|bazel-bep\.json`)
+
+// TestCIAnalyticsStepsAreSafeAndBounded: the rbe-ci-bep-analytics-design.md
+// "CI analytics summary" step (ci_analytics_extract.py) and its upload, in
+// both the lane job and the coverage job, must stay strictly
+// reporting-only: continue-on-error, a short timeout so a parser bug can
+// never make the step (or the job) run long, no raw GitHub Actions
+// expression spliced into the shell command (only validated $ENV_VARS,
+// never a string this extractor would have to re-validate itself), and an
+// upload name/path that can't be confused with the raw artifacts the
+// extractor is specifically there to avoid uploading.
+func TestCIAnalyticsStepsAreSafeAndBounded(t *testing.T) {
+	wf := readMultiLaneWorkflow(t)
+	const maxTimeoutMinutes = 3
+
+	check := func(jobName string, job multiLaneJob, wantUploadName string) {
+		summaryIdx := slices.IndexFunc(job.Steps, func(s multiLaneStep) bool { return s.Name == "CI analytics summary" })
+		uploadIdx := slices.IndexFunc(job.Steps, func(s multiLaneStep) bool { return s.Name == "Upload CI analytics summary" })
+		if summaryIdx < 0 || uploadIdx < 0 {
+			t.Fatalf("%s job: missing CI analytics summary/upload steps", jobName)
+		}
+		summary := job.Steps[summaryIdx]
+		if summary.ContinueOnError != "true" {
+			t.Errorf("%s job %q: continue-on-error %q, want \"true\"", jobName, summary.Name, summary.ContinueOnError)
+		}
+		if summary.TimeoutMinutes <= 0 || summary.TimeoutMinutes > maxTimeoutMinutes {
+			t.Errorf("%s job %q: timeout-minutes %d, want 1-%d", jobName, summary.Name, summary.TimeoutMinutes, maxTimeoutMinutes)
+		}
+		if ciAnalyticsRunTemplateRE.MatchString(summary.Run) {
+			t.Errorf("%s job %q: run: contains a ${{ }} expression; use env: and a shell variable instead:\n%s", jobName, summary.Name, summary.Run)
+		}
+		//nolint:misspell // GitHub Actions spells it cancelled()
+		if !strings.Contains(summary.If, "!cancelled()") {
+			t.Errorf("%s job %q: if %q does not require !cancelled(); always() also runs after a workflow cancellation", jobName, summary.Name, summary.If)
+		}
+
+		upload := job.Steps[uploadIdx]
+		if upload.ContinueOnError != "true" {
+			t.Errorf("%s job %q: continue-on-error %q, want \"true\"", jobName, upload.Name, upload.ContinueOnError)
+		}
+		//nolint:misspell // GitHub Actions spells it cancelled()
+		if !strings.Contains(upload.If, "!cancelled()") {
+			t.Errorf("%s job %q: if %q does not require !cancelled()", jobName, upload.Name, upload.If)
+		}
+		if upload.With["name"] != wantUploadName {
+			t.Errorf("%s job %q: upload name %q, want %q", jobName, upload.Name, upload.With["name"], wantUploadName)
+		}
+		if ciAnalyticsUploadPathForbidden.MatchString(upload.With["path"]) {
+			t.Errorf("%s job %q: upload path %q names a raw artifact (exec log, profile, or BEP), not the redacted summary", jobName, upload.Name, upload.With["path"])
+		}
+	}
+
+	check("lane", wf.Jobs["lane"], "ci-analytics-${{ matrix.lane }}-${{ github.run_attempt }}")
+	check("coverage", wf.Jobs["coverage"], "ci-analytics-coverage-${{ github.run_attempt }}")
+
+	// CHECK_RUN_ID must come from the real job.check_run_id context, not a
+	// github.run_id substitution (the design's contract with S4; actionlint
+	// recognized job.check_run_id starting at v1.7.8).
+	for _, jobName := range []string{"lane", "coverage"} {
+		job := wf.Jobs[jobName]
+		idx := slices.IndexFunc(job.Steps, func(s multiLaneStep) bool { return s.Name == "CI analytics summary" })
+		if idx < 0 {
+			t.Fatalf("%s job: missing CI analytics summary step", jobName)
+		}
+		if got := job.Steps[idx].Env["CHECK_RUN_ID"]; got != "${{ job.check_run_id }}" {
+			t.Errorf("%s job CI analytics summary: CHECK_RUN_ID %q, want %q", jobName, got, "${{ job.check_run_id }}")
+		}
 	}
 }

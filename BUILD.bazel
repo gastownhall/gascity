@@ -59,6 +59,22 @@ py_test(
     main = ".github/workflows/scripts/test_runner_policy.py",
 )
 
+# tools/bazel/ci_analytics_extract.py: the lane/coverage job step that turns
+# a BEP file, compact exec log and profile into the redacted ci-analytics
+# artifact. testdata/ci_analytics/real/* are genuine Bazel 9.2.0 output
+# (regen.sh); poisoned-bep.json proves the redaction leaks nothing.
+py_test(
+    name = "ci_analytics_extract_test",
+    srcs = [
+        "tools/bazel/ci_analytics_extract.py",
+        "tools/bazel/ci_analytics_extract_test.py",
+    ],
+    data = glob(["tools/bazel/testdata/ci_analytics/**"]),
+    imports = ["tools/bazel"],
+    main = "tools/bazel/ci_analytics_extract_test.py",
+    size = "small",
+)
+
 py_test(
     name = "ci_suite_coverage_test",
     srcs = [

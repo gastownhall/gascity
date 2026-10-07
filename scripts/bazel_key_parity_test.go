@@ -53,7 +53,12 @@ func bazelTransportFlag(flag string) bool {
 	case "--remote_default_exec_properties", "--remote_default_platform_properties":
 		return false // platform properties are part of the action
 	case "--jobs", "--experimental_circuit_breaker_strategy", "--disk_cache", "--keep_going", "--nokeep_going",
-		"--flaky_test_attempts", "--cache_test_results", "--nocache_test_results", "--profile":
+		"--flaky_test_attempts", "--cache_test_results", "--nocache_test_results", "--profile",
+		"--execution_log_compact_file", "--experimental_build_event_upload_strategy":
+		// --execution_log_compact_file and --experimental_build_event_upload_strategy
+		// (added for the ci-analytics extractor, design doc section 7 S2) only
+		// change where Bazel writes the compact exec log and how it uploads
+		// BEP-referenced local files; neither reaches the executed action.
 		return true
 	}
 	for _, prefix := range []string{"--remote_", "--experimental_remote_", "--incompatible_remote_", "--tls_", "--credential_helper", "--google_", "--bes_", "--build_event_", "--grpc_keepalive_"} {
