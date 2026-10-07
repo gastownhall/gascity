@@ -91,7 +91,7 @@ func TestBucketRefillGuardsNonPositiveIntervalAndCapacity(t *testing.T) {
 // Kills: admission past the bucket or the city cap, including a start
 // admitted on an empty bucket; a half-open endpoint admitting a herd; an
 // open endpoint admitting anything; admission demanding more than the one
-// token a start costs.
+// token a start costs; a refusal reported under the wrong cause.
 func TestAdmitStartTokensCapAndBreaker(t *testing.T) {
 	two := bucketState{Tokens: 2}
 	one := bucketState{Tokens: 1}
@@ -102,21 +102,21 @@ func TestAdmitStartTokensCapAndBreaker(t *testing.T) {
 		inFlight    int
 		gate        endpointGate
 		outstanding int
-		want        bool
+		want        string
 	}{
-		{"closed, budget and slot", two, 0, gateClosed, 3, true},
-		{"exactly one token", one, 0, gateClosed, 0, true},
-		{"no tokens", empty, 0, gateClosed, 0, false},
-		{"city cap reached", two, 5, gateClosed, 0, false},
-		{"one under the cap", two, 4, gateClosed, 0, true},
-		{"probe, nothing outstanding", two, 0, gateProbe, 0, true},
-		{"probe already outstanding", two, 0, gateProbe, 1, false},
-		{"shut", two, 0, gateShut, 0, false},
+		{"closed, budget and slot", two, 0, gateClosed, 3, ""},
+		{"exactly one token", one, 0, gateClosed, 0, ""},
+		{"no tokens", empty, 0, gateClosed, 0, causeAwaitingBudget},
+		{"city cap reached", two, 5, gateClosed, 0, causeCityCap},
+		{"one under the cap", two, 4, gateClosed, 0, ""},
+		{"probe, nothing outstanding", two, 0, gateProbe, 0, ""},
+		{"probe already outstanding", two, 0, gateProbe, 1, causeEndpointGate},
+		{"shut", two, 0, gateShut, 0, causeEndpointGate},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := admitStart(tt.b, tt.inFlight, 5, tt.gate, tt.outstanding); got != tt.want {
-				t.Fatalf("admitStart = %v, want %v", got, tt.want)
+				t.Fatalf("admitStart = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -171,7 +171,7 @@ func TestEndpointGateZeroValueAdmitsNothing(t *testing.T) {
 		t.Fatalf("zero gate = %d, want shut", forgotten)
 	}
 	gates := map[endpointKey]endpointGate{"provider:a": gateClosed}
-	if admitStart(bucketState{Tokens: 5}, 0, 5, gates["provider:missing"], 0) {
+	if admitStart(bucketState{Tokens: 5}, 0, 5, gates["provider:missing"], 0) == "" {
 		t.Fatal("an uncaptured gate admitted a start")
 	}
 	rows := []bringUpRow{{Key: rowKey{"sessions", "gc-p"}, Endpoint: "provider:missing", PendingCreate: true}}

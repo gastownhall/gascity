@@ -250,7 +250,8 @@ jobs:
 
   # Coverage reporting only matters on the main branch — codecov regression
   # info doesn't need to gate every PR, and the full ./... unit suite is
-  # already covered by integration-shards, cmd-gc-process, and acceptance A.
+  # already covered by integration-shards, the integration-packages Bazel lane
+  # (cmd/gc's process suite), and acceptance A.
   # Split into two parallel push-only jobs to take the serial cmd/gc loop off
   # the critical path (ga-29jlpr); Codecov merges uploads server-side.
   preflight-unit-cover-noncmdgc:
@@ -843,12 +844,18 @@ jobs:
           version: "~> v2"
           args: check
 
+  # The cmd/gc process suite (GC_FAST_UNIT=0). bazel.yml's gating
+  # integration-packages lane runs it for every PR: //cmd/gc:gc_test under
+  # --config=integration (GC_FAST_UNIT=0, pinned bd and dolt on PATH) runs
+  # every test this job runs plus the integration-tagged ones. Like
+  # integration-shards, these fork-PR rows stay until a fork-mode run of that
+  # lane is verified (ga-96smfk.50), and go with them.
   cmd-gc-process:
-    name: cmd/gc process / shard ${{ matrix.shard }} of 12
+    name: cmd/gc process (fork PR) / shard ${{ matrix.shard }} of 12
     needs:
       - runner-policy
       - changes
-    if: needs.changes.outputs.cmd_gc_process == 'true'
+    if: needs.changes.outputs.cmd_gc_process == 'true' && github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork == true || github.actor == 'dependabot[bot]')
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     timeout-minutes: 10
     strategy:

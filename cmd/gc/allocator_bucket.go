@@ -10,8 +10,8 @@ import (
 // (a create or an adopt costs none), the city in-flight count, and the
 // endpoint capacity breaker. The bucket refills by time, not by pass, so
 // frequent passes cannot multiply the start rate. The planner is its only
-// reader and writer (P1), so it needs no lock; the planner's admission
-// (C1b-2) reads all three.
+// reader and writer (P1), so it needs no lock; admit (reconcile_admit.go)
+// reads all three.
 
 // bucketState is the token bucket: capacity max_wakes_per_tick, refilled by
 // the same number per patrol interval. Refill is continuous: Credit holds the
@@ -93,22 +93,21 @@ func endpointGateOf(g *endpointCapacityGuard, k endpointKey) endpointGate {
 	return gateProbe
 }
 
-// admitStart reports whether one more start may be admitted (v5 P4):
-// the bucket holds its one token, the city has fewer than limit starts in
-// flight, and k's gate admits: closed admits, a probe gate admits only while
+// admitStart is why one more start may not be admitted, or "" (v5 P4): the
+// bucket holds its one token, fewer than limit are in flight (bring-up rows,
+// or running starts for a row already counted), and k's gate admits: closed admits, a probe gate admits only while
 // k has nothing outstanding, a shut gate admits nothing. A create is admitted
 // on the same test for its row's first start.
-func admitStart(b bucketState, inFlight, limit int, gate endpointGate, outstanding int) bool {
-	if b.Tokens < 1 || inFlight >= limit {
-		return false
+func admitStart(b bucketState, inFlight, limit int, gate endpointGate, outstanding int) string {
+	switch {
+	case b.Tokens < 1:
+		return causeAwaitingBudget
+	case inFlight >= limit:
+		return causeCityCap
+	case gate == gateClosed, gate == gateProbe && outstanding == 0:
+		return ""
 	}
-	switch gate {
-	case gateClosed:
-		return true
-	case gateProbe:
-		return outstanding == 0
-	}
-	return false
+	return causeEndpointGate
 }
 
 // inflightStart is a start's in-flight kind, which the city count reads.

@@ -474,7 +474,7 @@ test-ci-policy:
 
 ## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
 ## The skipped cmd/gc process-backed scenarios remain covered by
-## `make test-cmd-gc-process` locally and the CI `cmd/gc process suite` job.
+## `make test-cmd-gc-process` locally and in CI by bazel.yml's integration-packages lane.
 ## Bound package parallelism so subprocess-heavy packages do not starve each
 ## other into false 5s probe/condition timeouts. Use -count=1 so pre-commit
 ## reports actual test results instead of hanging after PASS while Go computes
@@ -899,7 +899,7 @@ UNIT_COVER_PKGS_NONCMDGC = $(shell go list -f '{{if or .TestGoFiles .XTestGoFile
 ## cmd/gc is sharded CMD_GC_COVER_TOTAL (default 6) ways via test-go-test-shard so each
 ## shard lands well under the per-package timeout; profiles are merged via merge-coverprofiles.
 ## The skipped cmd/gc process-backed scenarios remain covered by
-## `make test-cmd-gc-process` locally and the CI `cmd/gc process suite` job.
+## `make test-cmd-gc-process` locally and in CI by bazel.yml's integration-packages lane.
 test-cover: test-fsys-darwin-compile
 	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 10m -coverprofile=coverage.noncmdgc.txt $(UNIT_COVER_PKGS_NONCMDGC)
 	@rm -f coverage.cmdgc.*.txt

@@ -121,6 +121,41 @@ func TestWorkerCorePhase2SharesBuildsWithoutChangingCoverage(t *testing.T) {
 	}
 }
 
+// cmdGCProcessForkOnly is the cmd-gc-process job's route: fork and
+// Dependabot PRs only, the PRs whose bazel run starts no integration-packages
+// lane.
+const cmdGCProcessForkOnly = "needs.changes.outputs.cmd_gc_process == 'true' && github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork == true || github.actor == 'dependabot[bot]')"
+
+// Pushes and same-repo PRs run cmd/gc's process suite under Bazel only:
+// //cmd/gc:gc_test in //test:integration_packages (tools/bazel/integration_suite.py
+// lists it), which bazel.yml's gating integration-packages lane runs under
+// --config=integration (GC_FAST_UNIT=0).
+// The go-test job remains for the fork and Dependabot PRs that lane skips.
+func TestCmdGCProcessSuiteRunsInTheBazelIntegrationLane(t *testing.T) {
+	root := repoRoot(t)
+	job, ok := readCriticalPathWorkflow(t, "ci.yml").Jobs["cmd-gc-process"]
+	if !ok {
+		t.Fatal("CI workflow has no cmd-gc-process job")
+	}
+	if job.If != cmdGCProcessForkOnly {
+		t.Errorf("cmd-gc-process if = %q, want fork/Dependabot PRs only %q", job.If, cmdGCProcessForkOnly)
+	}
+	bazelrc, err := os.ReadFile(filepath.Join(root, ".bazelrc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`(?m)^test:integration --test_env=GC_FAST_UNIT=0$`).Match(bazelrc) {
+		t.Error(".bazelrc test:integration does not set GC_FAST_UNIT=0; gc_test would skip the process suite")
+	}
+	bazelYML, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "bazel.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bazelYML), `"cmd":"test --config=ci --config=integration --keep_going //test:integration_packages"`) {
+		t.Error("bazel.yml has no integration-packages lane running //test:integration_packages under --config=integration")
+	}
+}
+
 func TestCmdGCProcessPublishesAdvisoryTimingArtifacts(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
 	job, ok := wf.Jobs["cmd-gc-process"]
@@ -295,8 +330,9 @@ func TestProductMetricsTesthookProfileIsFocusedRequiredAndObservable(t *testing.
 	if !ok {
 		t.Fatal("CI workflow has no cmd-gc-productmetrics-testhook job")
 	}
-	if job.RunsOn != cmdGCProcessRunner || job.If != wf.Jobs["cmd-gc-process"].If {
-		t.Errorf("tagged job runner/route = (%q, %q), want (%q, %q)", job.RunsOn, job.If, cmdGCProcessRunner, wf.Jobs["cmd-gc-process"].If)
+	const cmdGCProcessRoute = "needs.changes.outputs.cmd_gc_process == 'true'"
+	if job.RunsOn != cmdGCProcessRunner || job.If != cmdGCProcessRoute {
+		t.Errorf("tagged job runner/route = (%q, %q), want (%q, %q)", job.RunsOn, job.If, cmdGCProcessRunner, cmdGCProcessRoute)
 	}
 	if !slices.Equal(job.Needs, []string{"runner-policy", "changes"}) {
 		t.Errorf("tagged job needs = %v", job.Needs)
