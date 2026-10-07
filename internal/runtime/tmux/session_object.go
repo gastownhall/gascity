@@ -46,11 +46,12 @@ func (p *Provider) ServerConfirmedDead() bool {
 }
 
 // unixPathListening reports whether the kernel lists a unix socket bound to
-// path (or to path under its resolved directory). Both tables keep a bound
+// path (or to path under its resolved ancestors). Both tables keep a bound
 // path after the file is unlinked: /proc/net/unix on Linux, where it counts
 // only listeners, and lsof's bound addresses on macOS. Any other platform has
 // no table and errors, so its server is never confirmed dead.
 func unixPathListening(path string) (bool, error) {
+	paths := unixSocketPathCandidates(path)
 	var listed func(path string) bool
 	switch goruntime.GOOS {
 	case "linux":
@@ -60,6 +61,11 @@ func unixPathListening(path string) (bool, error) {
 		}
 		listed = func(path string) bool { return procNetUnixListening(string(table), path) }
 	case "darwin":
+		for _, candidate := range paths {
+			if !lsofPrintsVerbatim(candidate) {
+				return false, fmt.Errorf("socket path %q has bytes lsof escapes", candidate)
+			}
+		}
 		out, err := lsofUnixSockets()
 		if err != nil {
 			return false, err
@@ -68,16 +74,31 @@ func unixPathListening(path string) (bool, error) {
 	default:
 		return false, fmt.Errorf("no unix socket table on %s", goruntime.GOOS)
 	}
-	paths := []string{path}
-	if dir, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
-		paths = append(paths, filepath.Join(dir, filepath.Base(path)))
-	}
 	for _, candidate := range paths {
 		if listed(candidate) {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// unixSocketPathCandidates returns path and the same path rejoined under its
+// longest existing ancestor with symlinks resolved. tmux binds its socket
+// under the resolved directory (/private/tmp for /tmp on macOS), and a
+// removed socket directory still has a resolvable parent.
+func unixSocketPathCandidates(path string) []string {
+	paths := []string{path}
+	dir, tail := filepath.Dir(path), filepath.Base(path)
+	for {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			return append(paths, filepath.Join(resolved, tail))
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return paths
+		}
+		dir, tail = parent, filepath.Join(filepath.Base(dir), tail)
+	}
 }
 
 // procNetUnixListening reports whether a /proc/net/unix table ("Num RefCount
@@ -112,18 +133,26 @@ func lsofUnixSockets() (string, error) {
 	return lsofAnswer(out, stderr.String(), err)
 }
 
-// lsofAnswer reads an lsof run. lsof exits 1 both when it selects no file
-// and when it fails; only a run that printed nothing at all is the empty
-// answer. Any other failure, a timeout's kill included, is an error.
+// lsofAnswer reads an lsof run. With no search argument lsof exits 0 even
+// when it selects nothing, so any failure, a timeout's kill included, is an
+// error.
 func lsofAnswer(out []byte, stderr string, err error) (string, error) {
-	if err == nil {
-		return string(out), nil
+	if err != nil {
+		return "", fmt.Errorf("lsof -U: %w: %s", err, strings.TrimSpace(stderr))
 	}
-	var exit interface{ ExitCode() int }
-	if errors.As(err, &exit) && exit.ExitCode() == 1 && len(out) == 0 && stderr == "" {
-		return "", nil
+	return string(out), nil
+}
+
+// lsofPrintsVerbatim reports whether lsof prints path unchanged: it escapes
+// a backslash, control bytes and bytes from 0x80, so such a path would never
+// match its own listing.
+func lsofPrintsVerbatim(path string) bool {
+	for i := 0; i < len(path); i++ {
+		if c := path[i]; c == '\\' || c < 0x20 || c >= 0x7f {
+			return false
+		}
 	}
-	return "", fmt.Errorf("lsof -U: %w: %s", err, strings.TrimSpace(stderr))
+	return true
 }
 
 // lsofUnixBound reports whether lsof field output names a unix socket bound

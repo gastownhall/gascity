@@ -5,6 +5,7 @@ package tmux
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -278,6 +279,49 @@ func TestServerConfirmedDeadRealTmuxUnlinkedSocket(t *testing.T) {
 	}
 	if p.ServerConfirmedDead() {
 		t.Fatal("ServerConfirmedDead() = true for a live server whose socket was unlinked")
+	}
+}
+
+// A live server whose whole socket directory was removed is not confirmed
+// dead either: the check rejoins the bound path under the longest existing
+// ancestor, resolved as tmux resolved it. TMUX_TMPDIR is a private symlink
+// (on macOS it also sits under /tmp, itself a symlink), so the removal
+// touches no other server's sockets.
+func TestServerConfirmedDeadRealTmuxRemovedSocketDir(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	root, err := os.MkdirTemp("/tmp", "gc-cd-")
+	if err != nil {
+		t.Fatalf("create socket root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := os.Mkdir(filepath.Join(root, "r"), 0o700); err != nil {
+		t.Fatalf("create socket dir: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "r"), filepath.Join(root, "l")); err != nil {
+		t.Fatalf("link socket dir: %v", err)
+	}
+	t.Setenv("TMUX_TMPDIR", filepath.Join(root, "l"))
+	p := newObjectServer(t)
+	pid, err := strconv.Atoi(objectFormat(t, p, "keep", "#{pid}"))
+	if err != nil {
+		t.Fatalf("server pid: %v", err)
+	}
+	// The removed socket cannot be reached by kill-server: stop the server
+	// this test started by its pid.
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGTERM) })
+	if p.ServerConfirmedDead() {
+		t.Fatal("ServerConfirmedDead() = true for a live server")
+	}
+	if err := os.RemoveAll(filepath.Dir(p.tm.serverSocketPath())); err != nil {
+		t.Fatalf("remove socket dir: %v", err)
+	}
+	if !p.tm.serverConfirmedDead() {
+		t.Fatal("legacy serverConfirmedDead() = false after removal; the precondition of this test is gone")
+	}
+	if p.ServerConfirmedDead() {
+		t.Fatal("ServerConfirmedDead() = true for a live server whose socket directory was removed")
 	}
 }
 
