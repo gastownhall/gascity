@@ -172,8 +172,12 @@ func (cr *CityRuntime) beforeProviderSwap(cfg *config.City) (resume func(), err 
 	if cr.v2 == nil {
 		return func() {}, nil
 	}
+	startup := cfg.Session.StartupTimeoutDuration()
+	if startup <= 0 {
+		startup = 60 * time.Second // as admit's start deadline (CONTRACT v5.4 P3)
+	}
 	cr.v2.planner.pauseStarts()
-	return cr.v2.planner.resumeStarts, cr.v2.exec.waitStarts(cfg.Session.StartupTimeoutDuration() + 10*time.Second)
+	return cr.v2.planner.resumeStarts, cr.v2.exec.waitStarts(startup + startDeadlineSlack)
 }
 
 // checkReconcilerWiring refuses runtime params whose v2 runtime and wake

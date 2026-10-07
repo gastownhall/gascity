@@ -481,6 +481,29 @@ func TestReloadProviderSwapWaitsForV2StartsBeforeListing(t *testing.T) {
 	})
 }
 
+// Kills the swap wait taken from a startup_timeout of zero (CONTRACT v5.4
+// P3 reads it as the 60s default, as admit's start deadline does): a start
+// that needs a minute is waited for, not canceled at 10s.
+func TestBeforeProviderSwapWaitsTheDefaultStartupForZero(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cr := &CityRuntime{v2: newDefaultPlanner(io.Discard)}
+		release, settled := make(chan struct{}), make(chan error, 1)
+		time.AfterFunc(time.Minute, func() { close(release) })
+		if err := cr.v2.exec.submit(rowKey{ID: "s"}, blockingEffect(effectStart, time.Now().Add(time.Hour), release, true, settled)); err != nil {
+			t.Fatal(err)
+		}
+		cfg := &config.City{Session: config.SessionConfig{StartupTimeout: "0s"}}
+		resume, err := cr.beforeProviderSwap(cfg)
+		resume()
+		if err != nil {
+			t.Fatalf("beforeProviderSwap = %v, want the minute-long start waited for", err)
+		}
+		if err := <-settled; err != nil {
+			t.Fatalf("the start settled %v, want it to finish uncanceled", err)
+		}
+	})
+}
+
 // swapListRecorder counts ListRunning calls.
 type swapListRecorder struct {
 	*runtime.Fake
