@@ -536,12 +536,12 @@ func TestAllocator_UnknownStateRowKeepsItsSlot(t *testing.T) {
 }
 
 // Kills: duplicate creates while creates are in flight (POOL-028/029, C5.13
-// row 1: in-flight demand counts census ∪ ledger). Pass 1 plans two creates;
-// P3-5b reserves them; pass 2 runs before either row reaches the census and
-// plans nothing more, with or without a pool max. Once one row shows (by its
-// token) and demand grows by one, the next pass counts the row once and
-// plans only the new work.
-func TestAllocator_InFlightCreate_CountsCacheUnionLedger(t *testing.T) {
+// row 1: in-flight demand counts census ∪ the in-flight map). Pass 1 plans
+// two creates; the planner submits them; pass 2 runs before either row
+// reaches the census and plans nothing more, with or without a pool max.
+// Once one row shows (by its token) and demand grows by one, the next pass
+// counts the row once and plans only the new work.
+func TestAllocator_InFlightCreate_CountsCensusUnionInFlight(t *testing.T) {
 	unlimited := config.Agent{Name: "worker", MaxActiveSessions: intPtr(-1)}
 	for label, agent := range map[string]config.Agent{"max-10": allocPoolAgent("worker", 10), "no-max": unlimited} {
 		cfg := &config.City{Agents: []config.Agent{agent}}

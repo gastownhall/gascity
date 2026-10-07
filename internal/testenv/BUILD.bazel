@@ -28,6 +28,9 @@ go_test(
         "//:go.mod",
         "//:repo_go_srcs",
         "//:repo_go_test_srcs",
+        # Marks tools/nogo as a nested module, which the testenv-import lint
+        # skips.
+        "//tools/nogo:go.mod",
     ],
     embed = [":testenv"],
     deps = [

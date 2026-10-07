@@ -6,6 +6,17 @@ module(
 )
 
 bazel_dep(name = "rules_go", version = "0.63.0")
+
+# nogo honors //nolint directives through ast.CommentMap ranges, which differ
+# from golangci-lint's (a comment trailing `func f(...) {` attaches to the
+# body's first statement). This tree's directives were written against
+# golangci-lint, so the patch adds golangci-lint's ranges as well.
+single_version_override(
+    module_name = "rules_go",
+    patch_strip = 1,
+    patches = ["//third_party/patches:rules_go_nogo_golangci_nolint.patch"],
+    version = "0.63.0",
+)
 bazel_dep(name = "gazelle", version = "0.53.0")
 bazel_dep(name = "toolchains_llvm", version = "1.11.0")
 
@@ -170,8 +181,17 @@ go_sdk.download(
 )
 use_repo(go_sdk, "go_sdk")
 
+# nogo: //tools/nogo's analyzers (go vet's suite plus golangci-lint's
+# configured linters) run beside every first-party Go compile, so lint and
+# vet findings fail `bazel build`/`bazel test` wherever they execute (RBE
+# included). External repos only feed analyzer facts; they are not validated.
+go_sdk.nogo(
+    includes = ["//:__subpackages__"],
+    nogo = "//tools/nogo",
+)
+
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
-go_deps.from_file(go_mod = "//:go.mod")
+go_deps.from_file(go_work = "//:gazelle.go.work")
 
 # External repos that ship WORKSPACE-era BUILD files referencing apparent
 # repo names (@rules_go, @protobuf, @npm, @rules_pkg) which are not visible
@@ -307,7 +327,30 @@ go_deps.module(
     version = "v0.7.0",
 )
 
-use_repo(go_deps, "cc_mvdan_gofumpt", "com_github_burntsushi_toml", "com_github_cenkalti_backoff_v4", "com_github_danielgtaylor_huma_v2", "com_github_fsnotify_fsnotify", "com_github_gastownhall_gascity_packs", "com_github_go_jose_go_jose_v4", "com_github_go_sql_driver_mysql", "com_github_golang_jwt_jwt_v5", "com_github_google_shlex", "com_github_google_uuid", "com_github_gorilla_websocket", "com_github_invopop_jsonschema", "com_github_masterminds_semver_v3", "com_github_oapi_codegen_oapi_codegen_v2", "com_github_oapi_codegen_runtime", "com_github_pb33f_libopenapi", "com_github_pb33f_libopenapi_validator", "com_github_rogpeppe_go_internal", "com_github_santhosh_tekuri_jsonschema_v6", "com_github_shirou_gopsutil_v4", "com_github_spf13_cobra", "com_github_spf13_pflag", "com_github_steveyegge_beads", "com_github_stretchr_testify", "in_gopkg_yaml_v3", "io_k8s_api", "io_k8s_apimachinery", "io_k8s_client_go", "io_opentelemetry_go_otel", "io_opentelemetry_go_otel_exporters_otlp_otlplog_otlploghttp", "io_opentelemetry_go_otel_exporters_otlp_otlpmetric_otlpmetrichttp", "io_opentelemetry_go_otel_log", "io_opentelemetry_go_otel_metric", "io_opentelemetry_go_otel_sdk", "io_opentelemetry_go_otel_sdk_log", "io_opentelemetry_go_otel_sdk_metric", "net_pgregory_rapid", "org_golang_x_mod", "org_golang_x_sync", "org_golang_x_sys", "org_golang_x_term", "org_golang_x_tools", "org_modernc_sqlite")
+# nogo analyzers (//tools/nogo) that type-check through importer.Default()
+# need `go list -export`, which nogo actions do not have; the patches read
+# the standard library's export data from rules_go's stdlib GOROOT instead.
+go_deps.module_override(
+    patch_strip = 1,
+    patches = ["//third_party/patches:go_ruleguard_bazel_gcimporter.patch"],
+    path = "github.com/quasilyte/go-ruleguard",
+)
+go_deps.module_override(
+    patch_strip = 1,
+    patches = ["//third_party/patches:revive_bazel_gcimporter.patch"],
+    path = "github.com/mgechev/revive",
+)
+
+# nogo does not analyze the standard library, so ctrlflow has no noReturn
+# facts for t.Fatal, log.Fatal, os.Exit, ...; without them staticcheck's
+# SA5011 reports every nil check followed by t.Fatal. The patch makes
+# ctrlflow know those standard-library functions intrinsically.
+go_deps.module_override(
+    patch_strip = 1,
+    patches = ["//third_party/patches:x_tools_ctrlflow_stdlib_noreturn.patch"],
+    path = "golang.org/x/tools",
+)
+use_repo(go_deps, "cc_mvdan_gofumpt", "cc_mvdan_unparam", "co_honnef_go_tools", "com_github_burntsushi_toml", "com_github_cenkalti_backoff_v4", "com_github_danielgtaylor_huma_v2", "com_github_fsnotify_fsnotify", "com_github_gastownhall_gascity_packs", "com_github_go_critic_go_critic", "com_github_go_jose_go_jose_v4", "com_github_go_sql_driver_mysql", "com_github_golang_jwt_jwt_v5", "com_github_golangci_misspell", "com_github_golangci_unconvert", "com_github_google_shlex", "com_github_google_uuid", "com_github_gordonklaus_ineffassign", "com_github_gorilla_websocket", "com_github_hashicorp_go_version", "com_github_invopop_jsonschema", "com_github_kisielk_errcheck", "com_github_masterminds_semver_v3", "com_github_mgechev_revive", "com_github_oapi_codegen_oapi_codegen_v2", "com_github_oapi_codegen_runtime", "com_github_pb33f_libopenapi", "com_github_pb33f_libopenapi_validator", "com_github_rogpeppe_go_internal", "com_github_santhosh_tekuri_jsonschema_v6", "com_github_shirou_gopsutil_v4", "com_github_spf13_cobra", "com_github_spf13_pflag", "com_github_steveyegge_beads", "com_github_stretchr_testify", "in_gopkg_yaml_v3", "io_k8s_api", "io_k8s_apimachinery", "io_k8s_client_go", "io_opentelemetry_go_otel", "io_opentelemetry_go_otel_exporters_otlp_otlplog_otlploghttp", "io_opentelemetry_go_otel_exporters_otlp_otlpmetric_otlpmetrichttp", "io_opentelemetry_go_otel_log", "io_opentelemetry_go_otel_metric", "io_opentelemetry_go_otel_sdk", "io_opentelemetry_go_otel_sdk_log", "io_opentelemetry_go_otel_sdk_metric", "net_pgregory_rapid", "org_codeberg_polyfloyd_go_errorlint", "org_golang_x_mod", "org_golang_x_sync", "org_golang_x_sys", "org_golang_x_term", "org_golang_x_tools", "org_modernc_sqlite")
 
 # Pinned prebuilt test-only binaries for hermetic integration/acceptance tests.
 # Same artifacts the go-test CI installs via .github/scripts/install-bd-archive.sh

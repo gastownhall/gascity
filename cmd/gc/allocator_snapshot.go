@@ -85,7 +85,7 @@ const (
 	// closes or rolls back the row; the decision alerts on it instead.
 	reasonIdentityDuplicate = "identity-duplicate"
 	// reasonNameOccupied: another bead's runtime holds the row's runtime
-	// name. None: no grant, no drain, no close (C11).
+	// name. None: no start, no drain, no close (C11).
 	reasonNameOccupied = "name-occupied"
 	// reasonPendingCreate and reasonAssignedWork keep a row in a suspended
 	// city that legacy's suspend drain leaves alone: a pending create within
@@ -245,7 +245,7 @@ func (k createKind) String() string {
 
 // allocPlan is one fresh row the pass would create. It is data only: the
 // planner proposes it as a create intent, the pool kind as
-// createPlanOf(entryID, Template, Plan) and the named kind with Named set,
+// createPlanOf(id, Template, Plan) and the named kind with Named set,
 // and admit takes named creates first, then pool creates in fair-share order.
 type allocPlan struct {
 	Kind     createKind
@@ -275,7 +275,7 @@ func (p allocPlan) identity() string {
 // stands in for that row in pool demand (POOL-028/029, C5.13): it is in
 // flight, and its trigger work is taken.
 type planReservation struct {
-	EntryID           string
+	ID                string
 	Template          string
 	QualifiedInstance string
 	Slot              int

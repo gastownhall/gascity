@@ -239,14 +239,17 @@ jobs:
           # storm (ga-35qn7i, ga-v7x9vk, ga-l14mnf, ga-ndx34y). A miss now
           # forces a fully fresh, never-poisoned recompute.
           key: ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-${{ hashFiles('go.sum', '.golangci.yml') }}
+      # Linux lint and vet are nogo in the Bazel build (//tools/nogo), which
+      # never compiles darwin-only files; golangci-lint and go vet cover them
+      # here.
       - name: Lint
         env:
           GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
-        run: make lint
+        run: make lint-golangci
       - name: Format
         run: make fmt-check
       - name: Vet
-        run: make vet
+        run: make vet-go
       - name: Docs
         run: make check-docs
 

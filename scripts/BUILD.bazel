@@ -82,6 +82,7 @@ go_test(
         "bazel_fresh_merge_test.go",
         "bazel_hermetic_cc_test.go",
         "bazel_hermetic_tags_test.go",
+        "bazel_integration_smoke_test.go",
         "bazel_integration_suite_test.go",
         "bazel_key_parity_test.go",
         "bazel_multilane_test.go",

@@ -32,7 +32,7 @@ func TestPlaywrightChromiumInstallHardensAgainstHungAptMirror(t *testing.T) {
 
 func TestMakeTestCIPolicyRunsStaticScopeContracts(t *testing.T) {
 	assertTestCIPolicyRecipeLine(t, "the focused static-scope contracts",
-		"\t$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns|TestFullStaticLintExplicitlyOwnsConfiguredGolangCIGovet|TestChangedStaticTargetsScopeLintAndFormattingToTheDiff|TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge)$$' ./scripts")
+		"\t$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestLintAndVetRunAsNogoInBazel|TestLintChangedBuildsNogoForChangedBazelPackages|TestChangedFormattingScopesToTheDiff)$$' ./scripts")
 }
 
 // TestMakeTestCIPolicyRunsVersionPinContracts keeps the bd and Dolt pin

@@ -231,8 +231,6 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          fetch-depth: 2
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
@@ -244,54 +242,11 @@ jobs:
       # //:ci_runner_policy_test, //:ci_suite_coverage_test,
       # //scripts/cipolicy:cipolicy_test, //scripts/prwatchdog:prwatchdog_test,
       # //scripts:scripts_test, //scripts:check_*_test, //:go_format_test and
-      # //test/docsync:docsync_test.
-      - name: Classify static-analysis scope
-        id: static-scope
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          scope="$(scripts/ci-static-scope)"
-          printf 'scope=%s\n' "$scope" >> "$GITHUB_OUTPUT"
+      # //test/docsync:docsync_test. Lint and vet (go vet's suite plus the
+      # linters .golangci.yml enables) run there too, as nogo (//tools/nogo):
+      # a finding fails the Go compile it belongs to.
       - name: Native DoltLite beads tests
         run: make test-native-doltlite-beads
-      - name: Get golangci-lint + Go toolchain versions for cache key
-        id: glint-version
-        run: |
-          version=$(grep -m1 '^GOLANGCI_LINT_VERSION := ' Makefile | awk '{print $3}')
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          # staticcheck (bundled in golangci-lint) caches type/CFG facts whose
-          # validity depends on the Go toolchain it was built with. Keying the
-          # cache on GOVERSION prevents a cache populated under one Go toolchain
-          # from being replayed under another, which produced a stale-fact
-          # SA5011 false-positive flood on main (ga-v7x9vk).
-          echo "goversion=$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
-      - name: Restore golangci-lint cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: .cache/golangci-lint
-          # Exact-key-only restore (no restore-keys fallback): a broad prefix
-          # let a partial/incompatible cache (missing testing.T.Fatal no-return
-          # facts) be inherited across differing keys and re-saved forward,
-          # repeatedly re-poisoning the cache with a SA5011 false-positive
-          # storm (ga-35qn7i, ga-v7x9vk, ga-l14mnf, ga-ndx34y). A miss now
-          # forces a fully fresh, never-poisoned recompute.
-          key: ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-${{ hashFiles('go.sum', '.golangci.yml') }}
-      - name: Lint affected packages
-        if: steps.static-scope.outputs.scope == 'changed'
-        env:
-          GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
-          LINT_CHANGED_SCOPE: tracked
-          LINT_CHANGED_REF: ${{ github.event.pull_request.base.sha }}
-        run: make lint-affected
-      - name: Lint full repository
-        if: steps.static-scope.outputs.scope != 'changed'
-        env:
-          GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
-        run: make lint
-      - name: Vet
-        if: steps.static-scope.outputs.scope != 'changed'
-        run: make vet
 
   # Coverage reporting only matters on the main branch — codecov regression
   # info doesn't need to gate every PR, and the full ./... unit suite is
@@ -1028,47 +983,12 @@ jobs:
       - name: Test Windows Job Object descendant cleanup
         run: go test -tags=integration -count=1 ./internal/credentialprovider -run '^TestCredentialProviderWindowsJob' -timeout=45s
 
+  # Go integration shards, for fork and Dependabot PRs only. bazel.yml's
+  # gating lanes run the same tests for every PR: integration-packages
+  # (//test:integration_packages) the packages-* shards, integration-smoke
+  # (.bazelrc test:integration-smoke) bdstore and rest-smoke. These rows stay
+  # until a fork-mode run of those lanes is verified (ga-96smfk.50).
   integration-shards:
-    name: Integration / ${{ matrix.shard_name }}
-    needs:
-      - runner-policy
-      - changes
-    if: needs.changes.outputs.integration == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    timeout-minutes: ${{ matrix.timeout_minutes }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - shard_name: bdstore
-            timeout_minutes: 15
-            command: make test-integration-bdstore
-          - shard_name: rest-smoke-1-of-2
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-smoke-1-of-2
-          - shard_name: rest-smoke-2-of-2
-            timeout_minutes: 15
-            command: ./scripts/test-integration-shard rest-smoke-2-of-2
-    env:
-      DOLT_VERSION: "2.2.0"
-      BD_VERSION: "v1.3.1"
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "false"
-      - name: Run integration shard
-        run: ${{ matrix.command }}
-
-  # The packages-* shards: every package's `//go:build integration` tests
-  # and GC_FAST_UNIT=0 process tests outside test/integration. bazel.yml's
-  # gating integration-packages lane (//test:integration_packages) runs them
-  # for pushes and same-repo PRs. A fork or Dependabot PR's bazel run mints
-  # at most 2 rbe-fork certificates (unit, acceptance) and starts no such
-  # lane, so those PRs still run the shards here.
-  integration-packages-fork:
     name: Integration (fork PR) / ${{ matrix.shard_name }}
     needs:
       - runner-policy
@@ -1113,6 +1033,15 @@ jobs:
           - shard_name: packages-runtime-tmux-6-of-6
             timeout_minutes: 10
             command: ./scripts/test-integration-shard packages-runtime-tmux-6-of-6
+          - shard_name: bdstore
+            timeout_minutes: 15
+            command: make test-integration-bdstore
+          - shard_name: rest-smoke-1-of-2
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard rest-smoke-1-of-2
+          - shard_name: rest-smoke-2-of-2
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard rest-smoke-2-of-2
     env:
       DOLT_VERSION: "2.2.0"
       BD_VERSION: "v1.3.1"
@@ -1995,7 +1924,6 @@ jobs:
     needs:
       - runner-policy
       - integration-shards
-      - integration-packages-fork
       - integration-rest-full
     if: ${{ always() }}
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
@@ -2009,11 +1937,11 @@ jobs:
           import os
           import sys
 
-          # integration-shards is path-gated, integration-packages-fork is
-          # additionally fork/Dependabot-PR-only and integration-rest-full
-          # push-only. Their skipped results are expected for docs-only
-          # changes, same-repo PRs and pushes, and pull requests, respectively.
-          allow_skipped = {"integration-shards", "integration-packages-fork", "integration-rest-full"}
+          # integration-shards is path-gated and fork/Dependabot-PR-only, and
+          # integration-rest-full push-only. Their skipped results are
+          # expected for docs-only changes, same-repo PRs and pushes, and
+          # pull requests, respectively.
+          allow_skipped = {"integration-shards", "integration-rest-full"}
           needs = json.loads(os.environ["NEEDS_JSON"])
           failed = {}
           for job, meta in sorted(needs.items()):

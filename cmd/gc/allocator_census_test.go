@@ -246,7 +246,9 @@ func TestCensusKeysRowsThatShareANameByBeadID(t *testing.T) {
 }
 
 // Kills a lease creeping back into the census (v5 P4, SC A5): PendingCreate
-// is the claim alone, whatever last_woke_at, the state or the row's age say.
+// is the claim on an uncommitted row, whatever last_woke_at or the row's age
+// say. A committed (active or awake) row that still holds the claim is no
+// bring-up; a reopened named row (stopped, with the claim) is one.
 func TestCensusPendingCreateIsTheClaim(t *testing.T) {
 	woke := censusNow.Add(-10 * time.Second).Format(time.RFC3339)
 	old := censusNow.Add(-time.Hour)
@@ -256,8 +258,11 @@ func TestCensusPendingCreateIsTheClaim(t *testing.T) {
 	}{
 		"creating-recently-woke": {meta: map[string]string{"state": "creating", "last_woke_at": woke}},
 		"active-recently-woke":   {meta: map[string]string{"state": "active", "last_woke_at": woke}},
-		"claim-recently-woke":    {meta: map[string]string{"state": "active", "pending_create_claim": "true", "last_woke_at": woke}, pending: true},
+		"claim-recently-woke":    {meta: map[string]string{"state": "creating", "pending_create_claim": "true", "last_woke_at": woke}, pending: true},
 		"claim-an-hour-old":      {meta: map[string]string{"state": "start-pending", "pending_create_claim": "true"}, pending: true},
+		"claim-committed-active": {meta: map[string]string{"state": "active", "pending_create_claim": "true", "last_woke_at": woke}},
+		"claim-committed-awake":  {meta: map[string]string{"state": "awake", "pending_create_claim": "true"}},
+		"claim-reopened-stopped": {meta: map[string]string{"state": "stopped", "pending_create_claim": "true"}, pending: true},
 	}
 	var rows []beads.Bead
 	for name, tc := range cases {

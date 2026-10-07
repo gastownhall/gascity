@@ -128,6 +128,8 @@ func TestBazelCIConfigSuiteConfigs(t *testing.T) {
 	for config, flags := range map[string]string{
 		"acceptance":  "--define=gotags=acceptance_a --test_timeout=1100",
 		"integration": "--define=gotags=integration --test_timeout=1100",
+		// Its --test_filter: TestIntegrationSmokeLaneMatchesShardScript.
+		"integration-smoke": "--config=integration",
 	} {
 		for _, f := range strings.Fields(flags) {
 			if !strings.Contains(rc, "\ntest:"+config+" "+f+"\n") {
@@ -202,6 +204,7 @@ var multiLaneCommands = map[string]string{
 	"acceptance":           "test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test",
 	"integration":          "test --config=ci --config=integration --keep_going //test/integration:integration_test",
 	"integration-packages": "test --config=ci --config=integration --keep_going //test:integration_packages",
+	"integration-smoke":    "test --config=ci --config=integration-smoke --keep_going //test/integration:integration_test",
 }
 
 const (
@@ -324,22 +327,23 @@ func multiLaneLanes(t *testing.T, script, event, mode string) (string, error) {
 	return lanes, nil
 }
 
+// multiLaneForkCertificates caps the rbe-fork certificates (one per lane) a
+// fork run mints: well inside the mint's 12 per run and 160 per PR a day, so
+// a run and a few re-runs never hit them.
+const multiLaneForkCertificates = 4
+
 var (
 	multiLaneEvents = []string{"pull_request", "push", "workflow_dispatch", "workflow_call", "schedule"}
 	multiLaneModes  = []string{"remote", "fork-ro", "fork-rw", "cache", "local"}
 )
 
 // wantMultiLanes: the lanes each (event, mode) starts, in order.
-func wantMultiLanes(event, mode string) []string {
-	// Every mode tests (the gate fails a run with no lane). Acceptance runs
-	// in every mode, the fork pool's (fork-ro: no network)
-	// included: gc init no longer clones gascity-packs (#7005).
-	lanes := []string{"unit", "acceptance"}
-	// A fork run mints at most 2 rbe-fork certificates; fork PRs keep
-	// ci.yml's Go package integration shards.
-	if !strings.HasPrefix(mode, "fork-") {
-		lanes = append(lanes, "integration-packages")
-	}
+func wantMultiLanes(event, _ string) []string {
+	// Every mode tests (the gate fails a run with no lane). Acceptance and
+	// the gating integration lanes run in every mode, the fork pool's
+	// (fork-ro: no network) included: gc init no longer clones gascity-packs
+	// (#7005), and no integration_packages target needs the network.
+	lanes := []string{"unit", "acceptance", "integration-packages", "integration-smoke"}
 	if event == "push" || event == "workflow_dispatch" { // until G3
 		lanes = append(lanes, "integration")
 	}
@@ -349,7 +353,8 @@ func wantMultiLanes(event, mode string) []string {
 // TestBazelMultiLaneLaneList runs the rbe job's Lanes step for every event
 // and mode and checks the lane job's matrix it yields: the lanes that start,
 // each lane's exact command, evidence-only on integration alone, and at most
-// 2 lanes (2 rbe-fork certificates) for a fork PR.
+// multiLaneForkCertificates lanes (one rbe-fork certificate each) for a fork
+// PR.
 func TestBazelMultiLaneLaneList(t *testing.T) {
 	wf := readMultiLaneWorkflow(t)
 	step := multiLaneRBEStep(t, wf, "lanes")
@@ -396,8 +401,8 @@ func TestBazelMultiLaneLaneList(t *testing.T) {
 				t.Errorf("event %s, mode %s: lanes %v, want %v", event, mode, got, want)
 			}
 			// The decide step reaches a fork mode on pull_request runs only.
-			if event == "pull_request" && strings.HasPrefix(mode, "fork-") && len(got) > 2 {
-				t.Errorf("event %s, mode %s: %d lanes; a fork run mints at most 2 rbe-fork certificates", event, mode, len(got))
+			if event == "pull_request" && strings.HasPrefix(mode, "fork-") && len(got) > multiLaneForkCertificates {
+				t.Errorf("event %s, mode %s: %d lanes; a fork run mints at most %d rbe-fork certificates", event, mode, len(got), multiLaneForkCertificates)
 			}
 		}
 	}

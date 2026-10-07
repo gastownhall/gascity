@@ -55,17 +55,16 @@ func (b bucketState) capped(capacity int) bucketState {
 	return b
 }
 
-// untilTokens is how long until the bucket holds cost tokens; 0 if it does.
-// The planner can arm its pass timer with it when starts are starved.
-func (b bucketState) untilTokens(cost, capacity int, interval time.Duration) time.Duration {
-	if b.Tokens >= cost {
-		return 0
-	}
-	if cost > capacity || capacity <= 0 || interval <= 0 {
-		return interval
+// nextToken is when the bucket next holds a token, read as refill left it.
+// It is zero when the bucket holds one now, or never refills (a capacity or
+// interval that is not positive). Admission reports it so the planner can
+// schedule a pass when starts are starved for tokens.
+func (b bucketState) nextToken(capacity int, interval time.Duration) time.Time {
+	if b.Tokens >= 1 || capacity <= 0 || interval <= 0 {
+		return time.Time{}
 	}
 	period := interval / time.Duration(capacity)
-	return time.Duration(cost-b.Tokens)*period - b.Credit
+	return b.LastRefill.Add(time.Duration(1-b.Tokens)*period - b.Credit)
 }
 
 // endpointGate is one endpoint's capacity breaker as admission reads it. The
@@ -94,11 +93,11 @@ func endpointGateOf(g *endpointCapacityGuard, k endpointKey) endpointGate {
 	return gateProbe
 }
 
-// admitStart reports whether one more start may be reserved (AM5, C5.9):
+// admitStart reports whether one more start may be admitted (v5 P4):
 // the bucket holds its one token, the city has fewer than limit starts in
 // flight, and k's gate admits: closed admits, a probe gate admits only while
 // k has nothing outstanding, a shut gate admits nothing. A create is admitted
-// on the same test for its row's first grant.
+// on the same test for its row's first start.
 func admitStart(b bucketState, inFlight, limit int, gate endpointGate, outstanding int) bool {
 	if b.Tokens < 1 || inFlight >= limit {
 		return false

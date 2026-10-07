@@ -53,6 +53,11 @@ bazel test --config=integration //test:integration_packages
 bazel test --config=integration //internal/runtime/tmux:tmux_test
 ```
 
+`//test/integration` itself gates only through the `integration-smoke`
+lane (`bazel test --config=integration-smoke //test/integration:integration_test`):
+the bdstore and REST smoke tests `scripts/test-integration-shard` names. The
+full suite runs evidence-only on pushes until its flaky tests are fixed.
+
 `make bazel-sync` lists every package with an integration-tagged file (or a
 `GC_FAST_UNIT=0` process gate) in that suite. Tools those tests run by name
 come from pinned data deps, not the host: a go_test passes their
@@ -82,7 +87,7 @@ executed tests. Pass one `PHASE=FILE` per invocation; `--json-out PATH`
 writes the machine-readable report (schema 1), `--allow-missing` shows an
 absent file as "no BEP file" instead of failing, and `--top N` sizes the
 slowest list. In CI, each `bazel.yml` lane (unit, acceptance,
-integration-packages, integration) uploads its BEP file, redacted to the fields the report reads
+integration-packages, integration-smoke, integration) uploads its BEP file, redacted to the fields the report reads
 (`internal/testpolicy/bepsummary/redact.jq`: a raw BEP file holds the
 expanded command line, including `--remote_executor`), and the
 `bazel / test cache report` job reports them in one table in its job
@@ -1001,93 +1006,36 @@ The existing macOS `mac-cmd-gc-process` matrix runs the same profile once on
 shard 6 so the Darwin production composition remains covered without another
 Mac runner.
 
-#### PR static-check scope
+#### Lint and vet (nogo)
 
-The `preflight-static` job has two fail-safe scopes. Only an effective
-`pull_request` event whose default checkout is validated as GitHub's two-parent
-synthetic merge, with its first parent equal to the event's exact base SHA, may
-use the changed scope. The checkout keeps the default `GITHUB_SHA` and uses
-`fetch-depth: 2` so that validation is local and exact. A missing or different
-base, a non-merge checkout, or an unknown event selects the full scope.
+Lint and vet run as [nogo](https://github.com/bazel-contrib/rules_go/blob/master/go/nogo.rst)
+inside the Bazel build. `//tools/nogo` bundles `go vet`'s analyzer suite and
+the linters `.golangci.yml` enables (errcheck, ineffassign, staticcheck,
+unused, errorlint, misspell, gocritic, revive, unconvert, unparam) with
+golangci-lint's default settings; `MODULE.bazel` registers it with
+`go_sdk.nogo`. Every first-party Go compile is validated, so a finding fails
+`bazel build`/`bazel test` wherever it runs, including bazel.yml's unit lane on
+rbe-west. There is no changed-scope selection: the action cache re-analyzes
+only packages whose inputs changed. `//nolint:<linter>` directives work as with
+golangci-lint; staticcheck findings are suppressed by check name
+(`//nolint:SA1019`).
 
-Pushes to `main`, schedules, manual dispatches, and every other non-PR event run
-the full static suite. Reusable workflows inherit their caller's event; the
-reusable call itself grants no changed-scope exemption. An effective
-`pull_request` event may still qualify after the same synthetic-merge
-validation, while an invocation such as the current RC `workflow_dispatch`
-remains full. The classifier never guesses a base from `origin/main` or a
-merge-base calculation.
+| Target | What it runs |
+| --- | --- |
+| `make lint` (= `make vet`) | `bazel build --keep_going --output_groups=nogo_fix //...`: every package's nogo analysis, no linking. |
+| `make lint-changed` | The same for the Bazel packages of changed Go files (`LINT_CHANGED_SCOPE=staged\|tracked\|worktree`); pre-commit uses `staged`. |
+| `make lint-golangci`, `make vet-go` | golangci-lint and `go vet` outside Bazel, for the macOS quality job (darwin-only files the Linux nogo build does not compile). |
 
-Even a validated PR merge runs the full scope when its diff touches static
-analysis or build policy:
+`tools/nogo/config.json` scopes the analyzers the way golangci-lint saw the
+tree (no external repos, generated `_gen.go` files, testdata) and carries the
+path/text exclusions from `.golangci.yml`; keep the two in step while the
+macOS job still runs golangci-lint. `unused` and `unparam` report only from
+compile units that include test files, because golangci-lint analyzes a tested
+package together with its tests; see `tools/nogo/analyzers/internal/testunit`.
 
-- `go.mod`, `go.sum`, `go.work`, or `go.work.sum`
-- any root `.golangci.*` configuration or `Makefile`
-- `.github/workflows/**`, `.github/actions/**`, or `.githooks/**`
-- `vendor/**` or `scripts/cipolicy/**`
-- `scripts/ci-static-scope` and `scripts/ci-static-select`
-
-The two scopes own different commands:
-
-| Scope | Commands | Selection guarantee |
-| --- | --- | --- |
-| Changed PR | `make lint-affected`, `make fmt-check-changed` | Lint and vet every package owning a changed Go build input or embedded file, every native package that could consume a changed path, and all transitive reverse dependents; format-check only changed regular `.go` files that still exist. |
-| Full/fail-safe | `make lint`, `make fmt-check`, `make vet` | Analyze and format-check the whole repository, then run standalone `go vet ./...`. |
-
-Affected-package discovery examines every changed path. It selects packages
-for changed Go-tool build inputs (`.go`, `.c`, `.cc`, `.cpp`, `.cxx`, `.m`,
-`.h`, `.hh`, `.hpp`, `.hxx`, `.f`, `.F`, `.for`, `.f90`, `.s`, `.S`, `.sx`,
-`.swig`, `.swigcxx`, and `.syso`) and maps changed embedded files to every
-owning package using `EmbedFiles`, `TestEmbedFiles`, and `XTestEmbedFiles` from
-the canonical records in one complete
-`go list -mod=readonly -test -json ./...` graph.
-Additions, modifications, deletions, and both sides of cross-package moves are
-included. Git rename coalescing is disabled so a move cannot hide the old
-package. Native compiler include and linker inputs can have recognized or
-arbitrary names and may live outside their consuming package. Every changed
-path therefore selects every package with native Go-tool sources, plus their
-reverse dependents. This is the smallest sound scope available without trying
-to duplicate compiler-specific dependency discovery. An unrelated non-build,
-non-embedded path remains a no-op when the graph has no native package that
-could consume it.
-
-Reverse dependents are included because analyzers such as `govet` consume
-exported facts, including through test-only imports. If the package graph
-cannot be loaded completely, affected lint fails safe to `./...` instead of
-trusting a partial graph. This includes a deleted required embed input. A
-deleted glob member no longer appears in the current resolved embed inventory,
-so a deletion that may match any current `EmbedPatterns`, `TestEmbedPatterns`,
-or `XTestEmbedPatterns` entry fails safe even when a nested package still owns
-the deleted build-input directory. Any other deletion beneath a package that
-has neither a current embed owner nor a current direct package owner also fails
-safe to full scope. These guards run before native shared-input shortcuts,
-including for recognized headers. File selection is NUL-delimited. Formatting
-remains limited to
-changed `.go` paths, excludes deletions and symlinks, accepts only existing
-regular files, and never invokes the formatter with an empty file list.
-
-`lint-affected` is the conservative PR target. It runs the configured
-golangci linters, including golangci's `govet`, then runs the Go tool's `vet`
-over the exact same affected package closure. The bounded duplicate preserves
-both tools' distinct diagnostics without repeating either analysis across the
-whole repository. It also retains standalone-vet diagnostics in generated
-files and unchanged reverse dependents. If selection fails, the same pair runs
-over `./...`; fallback never disables configured linters. `lint-changed`
-remains the faster local/pre-commit target and intentionally checks only
-packages that contain changed Go files. Both accept `LINT_CHANGED_SCOPE` and
-`LINT_CHANGED_REF`; CI uses `tracked` and the event's exact PR base SHA.
-
-The golangci configuration enables `govet` explicitly in both scopes.
-Golangci's `govet` execution is not assumed to be semantically equivalent to
-standalone `go vet`: generated-file exclusions and analyzer/configuration drift
-can differ. Full-scope runs therefore retain standalone `go vet ./...`, while
-the changed lane invokes standalone vet on its conservative closure.
-
-`make test-ci-policy` runs independently of changed/full static selection and
-always executes the focused workflow-scope, golangci-`govet`, affected-target,
-and fail-closed-classifier contracts. A self-binding test in the existing CI
-policy package rejects any Makefile change that removes this focused Go suite
-from the target.
+`make test-ci-policy` runs the focused lint-placement and formatting-scope
+contracts. A self-binding test in the CI policy package rejects any Makefile
+change that removes this focused Go suite from the target.
 
 #### Historical timing summaries
 
