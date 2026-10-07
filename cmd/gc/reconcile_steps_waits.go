@@ -78,7 +78,7 @@ func (l *externalReadsLane) readyWaitSet() map[string]bool {
 }
 
 // clearSessionWaitHoldFenced is legacy's clearSessionWaitHoldIfIdle decided
-// on the fresh row and written by UpdateMetadataFenced, never blind: with no
+// on the fresh row and written through fencedWriter, never blind: with no
 // non-terminal wait left it clears wait_hold, and sleep_intent and
 // sleep_reason while each still reads wait-hold, so an operator's hold that
 // replaced ours survives. Otherwise it writes nothing.
@@ -86,14 +86,8 @@ func clearSessionWaitHoldFenced(sessFront *sessionpkg.Store, sessionID string) e
 	if sessionID == "" {
 		return nil
 	}
-	switch w, _, err := beads.ResolveConditionalWriter(sessFront.Store()); {
-	case err != nil:
-		return fmt.Errorf("clearing wait hold on %s: %w", sessionID, err)
-	case w == nil:
-		return fmt.Errorf("clearing wait hold on %s: the sessions store has no conditional writer, and v2 never writes blind (C0.7)", sessionID)
-	}
 	var waitsErr error
-	_, err := sessFront.UpdateMetadataFenced(sessionID, waitHoldClearAttempts, func(row sessionpkg.Info, _ sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
+	_, err := (fencedWriter{store: sessFront.Store()}).updateMetadataFenced(sessionID, waitHoldClearAttempts, func(row sessionpkg.Info, _ sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
 		held, err := hasNonTerminalWaits(sessFront, sessionID)
 		if waitsErr = err; err != nil || held {
 			return nil
@@ -110,5 +104,8 @@ func clearSessionWaitHoldFenced(sessFront *sessionpkg.Store, sessionID string) e
 		}
 		return patch
 	})
+	if err != nil {
+		err = fmt.Errorf("clearing wait hold on %s: %w", sessionID, err)
+	}
 	return errors.Join(err, waitsErr)
 }

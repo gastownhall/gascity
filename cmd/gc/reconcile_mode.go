@@ -42,6 +42,24 @@ const v2ControllersInBuild = v2EffectsReal
 // admissible on its own (OQ-1).
 const v2SkeletonEnv = "GC_RECONCILER_V2_SKELETON"
 
+// v2EffectsEnv is the staging-only knob (D-14) that runs the planner's
+// effects before C9, under the skeleton override only. Only the exact value
+// "1" counts. C9 deletes it with the override.
+const v2EffectsEnv = "GC_RECONCILER_V2_EFFECTS"
+
+// v2EffectsEnabled reports whether the planner submits the effects it
+// admits; otherwise its passes are trace-only.
+func v2EffectsEnabled(lookupEnv func(string) (string, bool)) bool {
+	if v2EffectsReal {
+		return true
+	}
+	if !v2SkeletonOverride(lookupEnv) {
+		return false
+	}
+	v, ok := lookupEnv(v2EffectsEnv)
+	return ok && v == "1"
+}
+
 // reconcilerModeLookupEnv is the environment the composition edges (gc start,
 // the supervisor, doctor) latch with. Tests replace it instead of setting the
 // process environment; a test that does MUST NOT call t.Parallel().
