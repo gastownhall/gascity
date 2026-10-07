@@ -240,6 +240,37 @@ func TestNativeDoltStoreReadyWorkOutcomeFilterFallsBackToGetWhenListRefuses(t *t
 	}
 }
 
+// TestNativeDoltStoreReadyWorkOutcomeFetchBlockersJudgesByReadinessWorkOutcome
+// pins #7264's readiness rule on the Get fan-out leg, which the shared
+// conformance suite cannot reach (its store answers List+IDFilter): a closed
+// formula step that passed satisfies its dependent whatever its
+// gc.work_outcome, while a plain work bead closed blocked keeps vetoing even
+// with gc.outcome=pass.
+func TestNativeDoltStoreReadyWorkOutcomeFetchBlockersJudgesByReadinessWorkOutcome(t *testing.T) {
+	storage := &readyOutcomeFanoutStorage{
+		edges: map[string][]*beadslib.Dependency{
+			"gc-a": {fanoutEdge("gc-a", "gc-step-passed")},
+			"gc-b": {fanoutEdge("gc-b", "gc-work-passed")},
+		},
+		issues: map[string]*beadslib.Issue{
+			"gc-step-passed": fanoutIssue("gc-step-passed", beadslib.StatusClosed, `{"gc.work_outcome":"blocked","gc.step_ref":"mol.step","gc.outcome":"pass"}`),
+			"gc-work-passed": fanoutIssue("gc-work-passed", beadslib.StatusClosed, `{"gc.work_outcome":"blocked","gc.outcome":"pass"}`),
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	got, err := store.filterReadyByWorkOutcome(context.Background(), storage, []Bead{{ID: "gc-a"}, {ID: "gc-b"}})
+	if err != nil {
+		t.Fatalf("filterReadyByWorkOutcome: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gc-a" {
+		t.Errorf("filtered = %v, want only gc-a (gc-a's blocker is a passed step; gc-b's is a work bead closed blocked)", readyOutcomeFanoutIDs(got))
+	}
+	if storage.getCalls != 2 {
+		t.Errorf("Get called %d times, want 2 (both blockers judged through the fallback fan-out)", storage.getCalls)
+	}
+}
+
 // TestNativeDoltStoreReadyWorkOutcomeFilterFansOutConcurrently pins that the
 // per-blocker Get calls run concurrently, bounded at
 // nativeReadyEdgeFanoutLimit, rather than serially one at a time.

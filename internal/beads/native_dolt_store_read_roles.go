@@ -547,7 +547,7 @@ func filterReadyByWorkOutcomeListBlockers(ctx context.Context, reader issueops.R
 				malformed[row.ID] = parseErr
 				continue
 			}
-			vetoes[row.ID] = string(row.Status) == "closed" && metadata[beadmeta.WorkOutcomeMetadataKey] == beadmeta.WorkOutcomeBlocked
+			vetoes[row.ID] = string(row.Status) == "closed" && ReadinessWorkOutcome(metadata) == beadmeta.WorkOutcomeBlocked
 		}
 	}
 	return vetoes, malformed, nil
@@ -636,7 +636,7 @@ func filterReadyByWorkOutcomeFetchBlockers(ctx context.Context, reader issueops.
 				malformed[id] = parseErr
 				return
 			}
-			vetoes[id] = string(details.Status) == "closed" && metadata[beadmeta.WorkOutcomeMetadataKey] == beadmeta.WorkOutcomeBlocked
+			vetoes[id] = string(details.Status) == "closed" && ReadinessWorkOutcome(metadata) == beadmeta.WorkOutcomeBlocked
 		}(blockerID)
 	}
 	wg.Wait()
