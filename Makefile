@@ -107,6 +107,39 @@ endif
 
 .PHONY: build check check-all check-bd check-docker check-docs check-dolt check-hooks check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-changed lint-affected lint-full lint-golangci vet-go fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-beads-topology-matrix test-bd-cli-contract test-bd-cli-contract-home-isolation test-bd-conditional-release-contract test-acceptance-b test-acceptance-split-storage test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx install-oasdiff openapi-breaking-check setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
 .PHONY: check-release-dist-ignore
+.PHONY: bazel-tmpdir test-go check-go check-all-go check-docs-go test-acceptance-go test-integration-go
+
+# Build and test engine. Bazel is what CI gates on: .github/workflows/bazel.yml
+# runs `bazel test` lanes on rbe-west, and nogo (lint + vet), formatting,
+# generated-artifact drift and the policy guards are Bazel test targets there.
+# The primary targets below (test, check, check-all, check-docs,
+# test-acceptance, test-integration) run the same `bazel test` commands as
+# those lanes, so a local run shares CI's action keys and its remote cache
+# (TESTING.md "Building and testing"). Each keeps a plain-`go test` twin under
+# an explicit -go name (test-go, check-go, ...) for offline work and hosts
+# Bazel does not serve; that twin is a convenience, not what CI enforces.
+#
+# TEST_ENGINE=go points the primary names at their -go twins. GitHub Actions
+# jobs default to go: the Go-tier jobs still in ci.yml, mac-regression.yml,
+# nightly.yml and rc-gate.yml call `make test`, `make test-acceptance` and
+# `make check-docs` by name until they retire (epic ga-96smfk); bazel.yml
+# invokes bazel directly and never these targets.
+TEST_ENGINE ?= $(if $(GITHUB_ACTIONS),go,bazel)
+ifeq ($(filter $(TEST_ENGINE),bazel go),)
+$(error TEST_ENGINE=$(TEST_ENGINE) is not one of bazel, go)
+endif
+BAZEL ?= bazel
+# Extra flags for every `bazel test` below: --config=fork-cache (contributors:
+# the anonymous read-only cache) or --config=remote-exec (maintainers with an
+# rbe-west certificate). Agent hosts whose ~/.bazelrc names the executor need
+# neither. Better: put `build --config=...` in the gitignored .bazelrc.local.
+BAZEL_FLAGS ?=
+BAZEL_TEST = $(BAZEL) test $(BAZEL_FLAGS) --keep_going
+
+# .bazelrc roots every locally run test's tmpdir at /tmp/bt (short unix-socket
+# paths); nothing else creates it.
+bazel-tmpdir:
+	@mkdir -p /tmp/bt
 
 ## build: compile gc binary with version metadata
 build:
@@ -194,8 +227,15 @@ complexity-check:
 complexity-update:
 	@./scripts/ci/complexity.sh update
 
-## check: run fast quality gates (pre-commit: unit tests only)
-check: fmt-check lint vet check-release-dist-ignore check-routed-test-rows check-split-topology-rows check-residency-boundary test
+## check: fast quality gates: the shell guards below plus `make test` (bazel test //...: nogo lint/vet, formatting, generated artifacts, unit tests)
+ifeq ($(TEST_ENGINE),go)
+check: check-go
+else
+check: check-release-dist-ignore check-routed-test-rows check-split-topology-rows check-residency-boundary test
+endif
+
+## check-go: the same gates without Bazel: golangci-lint fmt/lint, go vet, go test (offline convenience; CI does not run it)
+check-go: fmt-check lint-golangci vet-go check-release-dist-ignore check-routed-test-rows check-split-topology-rows check-residency-boundary test-go
 
 ## check-release-dist-ignore: keep GoReleaser output from marking release builds dirty
 check-release-dist-ignore:
@@ -300,8 +340,15 @@ check-version-tag:
 	echo "Release tags must match vMAJOR.MINOR.PATCH exactly."; \
 	exit 1
 
-## check-all: run all quality gates including integration tests (CI)
-check-all: fmt-check lint vet check-release-dist-ignore check-bd check-dolt check-docker test-integration check-docs
+## check-all: make check plus the acceptance and integration Bazel suites
+ifeq ($(TEST_ENGINE),go)
+check-all: check-all-go
+else
+check-all: check test-acceptance test-integration
+endif
+
+## check-all-go: check-go plus go test integration and docs sync, without Bazel
+check-all-go: check-go check-bd check-dolt check-docker test-integration-go check-docs-go
 
 LINT_CHANGED_REF ?= HEAD
 LINT_CHANGED_SCOPE ?= worktree
@@ -472,7 +519,15 @@ test-ci-policy:
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestLintAndVetRunAsNogoInBazel|TestLintChangedBuildsNogoForChangedBazelPackages|TestChangedFormattingScopesToTheDiff)$$' ./scripts
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestBDVersionPins|TestDoltVersionPins)$$' ./scripts
 
-## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
+## test: bazel test //..., bazel.yml's unit lane: every untagged go_test plus nogo, format, generated-artifact and policy targets
+ifeq ($(TEST_ENGINE),go)
+test: test-go
+else
+test: bazel-tmpdir
+	$(BAZEL_TEST) //...
+endif
+
+## test-go: fast unit tests with plain go test (skip integration-tagged and GC_FAST_UNIT-gated process tests)
 ## The skipped cmd/gc process-backed scenarios remain covered by
 ## `make test-cmd-gc-process` locally and in CI by bazel.yml's integration-packages lane.
 ## Bound package parallelism so subprocess-heavy packages do not starve each
@@ -480,7 +535,7 @@ test-ci-policy:
 ## reports actual test results instead of hanging after PASS while Go computes
 ## cache input hashes over local working files.
 ## Wrapped in $(TEST_ENV) — see comment above for why.
-test: test-fsys-darwin-compile
+test-go: test-fsys-darwin-compile
 	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m ./...
 
 ## test-herdr-live: run the live herdr journeys against a real herdr server —
@@ -614,7 +669,7 @@ test-worker-inference:
 ## test-worker-inference-phase3: alias for the live worker inference conformance package
 test-worker-inference-phase3: test-worker-inference
 
-## test-acceptance: run acceptance tests (Tier A — command-level PR gate).
+## Tier A acceptance knobs (command-level PR gate) for test-acceptance-go.
 ## ACCEPTANCE_TIMEOUT overrides the go-test timeout. The unsharded local/CI
 ## target runs the command-heavy Tier A package serially; RC gate shards it.
 ##
@@ -640,7 +695,16 @@ ACCEPTANCE_REQUIRE_LEGACY_GC ?= $(GC_REQUIRE_ACCEPTANCE_LEGACY_GC)
 ## TestBeadsProxiedDefaultNativeLane (GC_ACCEPTANCE_PERF). Off by default: wall clock on a
 ## shared box is a statement about the box. The nightly perf lane sets it.
 ACCEPTANCE_PERF ?= $(GC_ACCEPTANCE_PERF)
-test-acceptance:
+## test-acceptance: Tier A acceptance as bazel.yml's acceptance lane runs it (bazel test --config=acceptance)
+ifeq ($(TEST_ENGINE),go)
+test-acceptance: test-acceptance-go
+else
+test-acceptance: bazel-tmpdir
+	$(BAZEL_TEST) --config=acceptance //test/acceptance:acceptance_test
+endif
+
+## test-acceptance-go: Tier A acceptance with plain go test (honours the ACCEPTANCE_* knobs above)
+test-acceptance-go:
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off GC_ACCEPTANCE_BEADS_PROVIDER="$${GC_ACCEPTANCE_BEADS_PROVIDER-}" GC_ACCEPTANCE_BD_BIN="$${GC_ACCEPTANCE_BD_BIN-}" GC_ACCEPTANCE_LEGACY_GC_BIN="$${GC_ACCEPTANCE_LEGACY_GC_BIN-}" GC_ACCEPTANCE_TOPOLOGY_MATRIX="$(ACCEPTANCE_TOPOLOGY_MATRIX)" GC_ACCEPTANCE_PERF="$(ACCEPTANCE_PERF)" GC_REQUIRE_ACCEPTANCE_TOOLING="$(ACCEPTANCE_REQUIRE_TOOLING)" GC_REQUIRE_ACCEPTANCE_LEGACY_GC="$(ACCEPTANCE_REQUIRE_LEGACY_GC)" go test -tags acceptance_a -timeout $(ACCEPTANCE_TIMEOUT) $(ACCEPTANCE_GO_TEST_FLAGS) ./test/acceptance/...
 
 ## test-beads-topology-matrix: run the init topology matrix on its own.
@@ -658,7 +722,7 @@ test-acceptance:
 BEADS_TOPOLOGY_MATRIX_TIMEOUT ?= 90m
 BEADS_TOPOLOGY_MATRIX_REQUIRE_TOOLING ?= 1
 test-beads-topology-matrix:
-	$(MAKE) test-acceptance ACCEPTANCE_TIMEOUT=$(BEADS_TOPOLOGY_MATRIX_TIMEOUT) \
+	$(MAKE) test-acceptance-go ACCEPTANCE_TIMEOUT=$(BEADS_TOPOLOGY_MATRIX_TIMEOUT) \
 		ACCEPTANCE_GO_TEST_FLAGS='-count=1 -run TestBeadsInitTopologyMatrix' \
 		ACCEPTANCE_TOPOLOGY_MATRIX=1 \
 		ACCEPTANCE_REQUIRE_TOOLING='$(BEADS_TOPOLOGY_MATRIX_REQUIRE_TOOLING)'
@@ -750,8 +814,16 @@ test-acceptance-c:
 ## test-acceptance-all: run all acceptance tiers
 test-acceptance-all: test-acceptance test-bd-cli-contract test-acceptance-b test-acceptance-c
 
-## test-integration: run all tests including integration (tmux, etc.)
-test-integration:
+## test-integration: integration-tagged suites as bazel.yml's integration lanes run them (bazel test --config=integration)
+ifeq ($(TEST_ENGINE),go)
+test-integration: test-integration-go
+else
+test-integration: bazel-tmpdir
+	$(BAZEL_TEST) --config=integration //test:integration_packages //test/integration:integration_test
+endif
+
+## test-integration-go: run all tests including integration (tmux, etc.) with plain go test
+test-integration-go:
 	$(TEST_ENV) go test -tags integration -timeout 30m ./...
 
 ## test-integration-huma: run just the Huma binary smoke test
@@ -885,8 +957,16 @@ test-tutorial: test-tutorial-goldens
 ## test-tutorial-regression: alias for tutorial goldens
 test-tutorial-regression: test-tutorial-goldens
 
-## check-docs: verify docs sync tests
-check-docs:
+## check-docs: docs sync tests (bazel test //test/docsync:docsync_test, as the unit lane runs them)
+ifeq ($(TEST_ENGINE),go)
+check-docs: check-docs-go
+else
+check-docs: bazel-tmpdir
+	$(BAZEL_TEST) //test/docsync:docsync_test
+endif
+
+## check-docs-go: docs sync tests with plain go test
+check-docs-go:
 	$(TEST_ENV) go test ./test/docsync
 
 # Packages for coverage — exclude noise:

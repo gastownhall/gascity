@@ -114,6 +114,7 @@ go_test(
         "harness_reap_test.go",
         "integration_shards_test.go",
         "lint_readonly_contract_test.go",
+        "makefile_bazel_primary_test.go",
         "makefile_cgo_test.go",
         "makefile_install_test.go",
         "native_doltlite_target_test.go",

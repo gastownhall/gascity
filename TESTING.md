@@ -26,23 +26,61 @@ not describe a target as an existing gate.
 | Large/E2E ownership and cadence | Target; the executable manifest is owned by `ga-80po0c.6` |
 | First-attempt flake and quarantine policy | Target; required Playwright retry and legacy unledgered skips remain noncompliant debt under `ga-80po0c` |
 
-## Bazel: the fast feedback loop for agents
+## Building and testing: Bazel is the gate
 
-Everything below describes the `go test` policy that CI enforces. For
-day-to-day iteration, agents should prefer the **Bazel suite** (CI's
-`bazel.yml`, required check `bazel test (side-by-side)`): same tests,
-remote-cached, shared across worktrees and CI:
+Bazel is how Gas City is built and tested. CI gates on `bazel test`
+(`.github/workflows/bazel.yml`): its lanes run every Go test, nogo (go
+vet's analyzers plus the linters `.golangci.yml` enables), formatting,
+generated-artifact drift and the repo-policy guards as Bazel targets on
+rbe-west. The policy in the rest of this file applies to tests however they
+are run; Bazel is the runner that enforces it.
 
-```bash
-bazel test //...          # full suite; ~0.6s on a warm cache
-bazel test //internal/X   # one package while iterating
-```
+| Tier | CI lane | Command | `make` alias |
+|---|---|---|---|
+| Unit, nogo, format, generated artifacts, policy | `unit` | `bazel test //...` | `make test` (`make check` adds the shell guards) |
+| Acceptance Tier A | `acceptance` (sharded) | `bazel test --config=acceptance //test/acceptance:acceptance_test` | `make test-acceptance` |
+| Integration-tagged packages outside `test/integration` | `integration-packages` (gating) | `bazel test --config=integration //test:integration_packages` | part of `make test-integration` |
+| `test/integration` | `integration` (evidence-only) | `bazel test --config=integration //test/integration:integration_test` | part of `make test-integration` |
+| Docs sync | `unit` | `bazel test //test/docsync:docsync_test` | `make check-docs` |
+| Coverage (push to main) | `coverage` | `bazel coverage //... --combined_report=lcov` | none |
 
-The first run costs the same as `go test`; every later run is a cache
-hit because the remote CAS is shared fleet-wide. A test that passed on
-CI does not re-execute locally. After changing imports or adding
-packages, run `make bazel-sync` and commit the regenerated BUILD files
-(the CI sync gate checks this).
+Narrow while iterating: `bazel test //internal/config:config_test`, or
+`bazel test //internal/beads/...` for a subtree;
+`--test_filter=TestName` selects tests inside a target. The CI lanes add
+`--config=ci` (result policy only, no action-key change) and the per-run
+transport config. Passing `--config=acceptance` or `--config=integration`
+matters: they set the `gotags` define, the timeout and, for integration,
+`GC_FAST_UNIT=0`, exactly as the lanes do (`.bazelrc`).
+
+**Where actions run** (details in "Bazel cache tiers" below):
+
+- **Contributors:** `--config=fork-cache` reads rbe-west's anonymous,
+  read-only cache, so anything CI already ran is a hit; misses build and run
+  on your machine, nothing is uploaded, no credential is needed.
+- **Maintainers:** `--config=remote-exec` with an rbe-west mTLS client
+  certificate executes on rbe-west's `oss` pool.
+- **Agent hosts:** the operator's `~/.bazelrc` names the executor and
+  certificate, so plain `bazel test` executes remotely; whole-repo `go
+  test` fan-out on a shared host is never the right tool.
+
+Put `build --config=fork-cache` or `build --config=remote-exec` in the
+gitignored `.bazelrc.local` to make it your default, or pass it per command
+(`make test BAZEL_FLAGS=--config=fork-cache`). After changing imports or
+adding packages or files, run `make bazel-sync` and commit the regenerated
+BUILD files (the `BUILD files in sync` gate checks this). See
+`engdocs/bazel-quickstart.md` for setup and `engdocs/bazel-ci-budget.md` for
+the CI optimization loop.
+
+**Plain `go test` is an inner-loop convenience, not the gate.** `go test
+./internal/config -run TestX` is fine for a quick edit-compile-run cycle on
+one package. It runs none of the nogo, format, generated-artifact or policy
+targets, uses your host's environment instead of the pinned one, and a pass
+there is not evidence for CI. The Go-native make targets (`make test-go`,
+`make check-go`, `make test-acceptance-go`, `make test-integration-go`,
+`make check-docs-go`, and the sharded runners under "Cross-category runners"
+below) exist for offline work and for hosts Bazel does not serve, such as
+the macOS jobs. `TEST_ENGINE=go` points the primary make names at them;
+GitHub Actions jobs default to it while the remaining Go-tier jobs retire.
 
 `//go:build integration` tests outside `test/integration` run in the
 `integration-packages` lane, the Bazel form of `go test -tags integration`
@@ -64,9 +102,6 @@ come from pinned data deps, not the host: a go_test passes their
 `$(rootpath)`s in `GC_TEST_TOOL_PATHS` (prepended to `PATH` by
 `internal/testenv`), and Bazel-built helper binaries by `$(rootpath)` in an
 env var the test reads with `bazeltest.DataPath` instead of `go build`.
-
-See `engdocs/bazel-quickstart.md` for local setup and
-`engdocs/bazel-ci-budget.md` for the CI optimization loop.
 
 ### Measuring cache hits (BEP cache report)
 
@@ -224,7 +259,12 @@ endpoints, credentials, timeouts, download and parallelism policy.
 | `auto` | `bazel test //... --config=remote-exec` when any rc file Bazel reads names a remote executor and the checkout's `worker-env` pin is current; `bazel test //... --config=fork-cache` otherwise; `make test-fast-parallel` when bazel is not installed, or for `fork-cache` when the pinned test `PATH` has no `go` |
 | `rbe` | `bazel test //... --config=remote-exec`; fails when no rc file names an executor or the `worker-env` pin is not current |
 | `cache` | `bazel test //... --config=fork-cache` |
-| `go` | `make test-fast-parallel` (plain `go test`, the pre-Bazel suite) |
+| `go` | `make test-fast-parallel` (plain `go test`, the pre-Bazel suite), behind a banner saying it is not what CI enforces |
+
+Whenever the push runs `make test-fast-parallel` instead of Bazel, whether
+by `auto`'s fallback or an explicit `go`, it prints a banner with the reason
+and the fix, and says CI runs `bazel test //...`: a push that passes the go
+suite can still fail nogo, formatting or a generated-artifact target.
 
 `auto` asks Bazel which options its rc files set (`bazel info --announce_rc
 --config=remote-exec`, which contacts no remote): a non-empty
@@ -901,12 +941,12 @@ func TestFileStoreOpenCorruptedJSON(t *testing.T) {
 When to use: corrupted data, concurrent writes, specific error types,
 double-claim conflicts, rollback behavior, boundary conditions.
 
-`make test` and `make test-cover` now follow this boundary strictly: they
-run the fast unit loop only, with `GC_FAST_UNIT=1` gating slow `cmd/gc`
-process scenarios. Slow process-backed cases
+`make test` (`bazel test //...`), `make test-go` and `make test-cover`
+follow this boundary strictly: they run the fast unit loop only, with
+`GC_FAST_UNIT=1` gating slow `cmd/gc` process scenarios. Slow process-backed cases
 such as managed Dolt recovery, real `bd` lifecycle, tutorial regression
 scripts, and the large `gc-beads-bd` provider suite are routed out of the
-default path so local `make check` and CI `Check` stay focused on quick
+default path so local `make check` and the CI unit lane stay focused on quick
 feedback. If you need that full `cmd/gc` scenario coverage locally, run
 `make test-cmd-gc-process`, or `bazel test --config=integration
 //cmd/gc:gc_test`. In CI, the required non-short path is that target in
@@ -923,8 +963,10 @@ Codecov flags.
 
 ### Cross-category runners, timing, and resource isolation
 
-For broad local runs, prefer the repo's sharded wrappers over raw `go test`
-commands. They use the same buckets as CI, run under a scrubbed environment,
+These are the Go-native runners: for offline work, hosts Bazel does not
+serve, and the CI jobs that have not moved to Bazel yet. The gate is still
+`bazel test` ("Building and testing" above). When you do run Go-native
+sweeps, prefer the repo's sharded wrappers over raw `go test` commands. They use the same buckets as CI, run under a scrubbed environment,
 and split single-package bottlenecks such as `cmd/gc` across multiple
 processes.
 
@@ -1590,11 +1632,13 @@ They currently verify:
 - local Markdown link targets across the repo docs
 - Mintlify navigation page references in `docs/docs.json`
 
-Run them directly with:
+Run them with `make check-docs`, which is:
 
 ```
-go test ./test/docsync
+bazel test //test/docsync:docsync_test
 ```
+
+(`go test ./test/docsync` works for a quick local iteration.)
 
 ### Additional integration guidance
 

@@ -22,7 +22,9 @@
 #   rbe    --config=remote-exec; fails when no rc names an executor (the suite
 #          would otherwise compile and run on this machine at --jobs=64).
 #   cache  --config=fork-cache (it resets any rc's executor).
-#   go     make test-fast-parallel (plain go test, the pre-Bazel suite).
+#   go     make test-fast-parallel (plain go test, the pre-Bazel suite), with a
+#          banner saying it is not what CI enforces. auto falls back to it
+#          (with the same banner and the reason) only when bazel cannot run.
 #
 # Remote execution also needs a current worker-env pin (worker_env_refusal
 # below): rbe-west's workers serve only main's pin. On a stale pin, or an open
@@ -34,6 +36,27 @@ cd "$repo_root"
 
 mode="${GC_PREPUSH_SUITE:-auto}"
 executor=""
+# Why the push runs plain go test instead of bazel, and how to get bazel back;
+# announce_go_suite prints them. An explicit GC_PREPUSH_SUITE=go is its own
+# reason.
+go_why="GC_PREPUSH_SUITE=go"
+go_fix="unset GC_PREPUSH_SUITE to run the bazel suite"
+
+# The go suite is not what CI enforces: bazel.yml gates on bazel test, whose
+# nogo, format, generated-artifact and policy targets have no make
+# test-fast-parallel counterpart. Say so loudly, with the reason, so a green
+# push is not read as CI parity.
+announce_go_suite() {
+  {
+    echo "pre-push: ========================================================================"
+    echo "pre-push: running make test-fast-parallel (plain go test): NOT the bazel suite CI gates on."
+    echo "pre-push: why: $go_why"
+    echo "pre-push: CI runs bazel test //... (.github/workflows/bazel.yml); a push that passes"
+    echo "pre-push: here can still fail there (nogo lint/vet, formatting, generated artifacts)."
+    echo "pre-push: fix: $go_fix"
+    echo "pre-push: ========================================================================"
+  } >&2
+}
 
 # The remote executor some rc file names for this workspace, empty for none:
 # the last non-empty --remote_executor among the rc options Bazel reads
@@ -216,8 +239,8 @@ pinned_path_has_go() {
 case "$mode" in
 auto)
   if ! have_bazel; then
-    echo "pre-push: bazel is not installed; running make test-fast-parallel." >&2
-    echo "pre-push: install bazelisk to reuse CI's cached test results (TESTING.md \"Bazel cache tiers\")." >&2
+    go_why="bazel is not installed"
+    go_fix="install bazelisk (engdocs/bazel-quickstart.md)"
     mode=go
   else
     probe_executor
@@ -231,8 +254,8 @@ auto)
     if [ -n "$executor" ]; then
       mode=rbe
     elif ! pinned_path_has_go; then
-      echo "pre-push: no go on .bazelrc's pinned test PATH ($(pinned_test_path)); running make test-fast-parallel." >&2
-      echo "pre-push: link your GOROOT to /usr/local/go to run the bazel suite (TESTING.md \"Bazel cache tiers\")." >&2
+      go_why="no go on .bazelrc's pinned test PATH ($(pinned_test_path))"
+      go_fix="link your GOROOT to /usr/local/go: sudo ln -s \"\$(go env GOROOT)\" /usr/local/go (TESTING.md \"Bazel cache tiers\")"
       mode=go
     else
       mode=cache
@@ -262,6 +285,7 @@ esac
 
 case "$mode" in
 go)
+  announce_go_suite
   exec make test-fast-parallel
   ;;
 rbe) config=remote-exec ;;

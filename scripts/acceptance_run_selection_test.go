@@ -186,16 +186,16 @@ func TestAcceptancePerfGateHasALane(t *testing.T) {
 	recipe := ""
 	lines := strings.Split(string(makefile), "\n")
 	for i, line := range lines {
-		if strings.HasPrefix(line, "test-acceptance:") && i+1 < len(lines) {
+		if strings.HasPrefix(line, "test-acceptance-go:") && i+1 < len(lines) {
 			recipe = lines[i+1]
 			break
 		}
 	}
 	if recipe == "" {
-		t.Fatal("the Makefile has no test-acceptance recipe; the scan is broken")
+		t.Fatal("the Makefile has no test-acceptance-go recipe; the scan is broken")
 	}
 	if !strings.Contains(recipe, gate+"=") {
-		t.Errorf("`make test-acceptance` does not pass %s through its env -i allowlist, so exporting it "+
+		t.Errorf("`make test-acceptance-go` does not pass %s through its env -i allowlist, so exporting it "+
 			"runs the suite with the perf gate silently off:\n%s", gate, recipe)
 	}
 }

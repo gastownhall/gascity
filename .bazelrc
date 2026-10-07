@@ -5,11 +5,15 @@ common --color=no
 # would key actions to the host's gcc and lld (scripts/bazel_hermetic_cc_test.go).
 common --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 
-# Side-by-side opt-in bazel arm. `go build`/`go test` continues to work unchanged.
-# Opt-in shared cache: --config=fork-cache (defined below) reads the
-# project's anonymous, read-only cache. To make it your default, put
-# `build --config=fork-cache` in your gitignored .bazelrc.local. See
-# engdocs/bazel-quickstart.md.
+# Bazel is gascity's build and test system: CI gates on `bazel test`
+# (.github/workflows/bazel.yml), and `make test`/`make check` run the same
+# commands (TESTING.md "Building and testing"). Plain `go build`/`go test`
+# still work as an inner-loop convenience but are not what CI enforces.
+# Where actions run is per machine, never committed here: contributors read
+# the anonymous, read-only cache with --config=fork-cache (defined below);
+# maintainers with an rbe-west client certificate execute remotely with
+# --config=remote-exec. Make either the default with a `build --config=...`
+# line in the gitignored .bazelrc.local. See engdocs/bazel-quickstart.md.
 
 test --test_output=errors
 # G0: a retried pass never stands in for a run. Leaving the flag unset is not
