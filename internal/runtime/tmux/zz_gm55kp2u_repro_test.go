@@ -1,6 +1,11 @@
 package tmux
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/runtime"
+)
 
 // askUserQuestionPane is a live capture (Claude Code v2.1.280, fullscreen TUI)
 // of an open AskUserQuestion dialog; header lines sanitized. gm-55kp2u.
@@ -66,4 +71,41 @@ func TestGM55KP2UNudgeSessionSendsNoKeysIntoAskUserQuestionDialog(t *testing.T) 
 			}
 		}
 	}
+}
+
+// requireRespondRefusesAskUserQuestionDialog drives Respond("approve") against
+// pane. The dialog's numbered options are per-dialog, not the fixed
+// Yes/Yes-always/No menu Respond's approval switch encodes, so "approve" must be
+// refused rather than mapped onto whichever option shares the number — and
+// refused before any key is sent, since a refusal that already pressed "1" has
+// answered the dialog.
+func requireRespondRefusesAskUserQuestionDialog(t *testing.T, pane string) {
+	t.Helper()
+	fe := &fakeExecutor{out: pane}
+	tm := &Tmux{cfg: Config{SocketName: "gm55kp2u"}, exec: fe}
+	err := tm.Respond("auq", runtime.InteractionResponse{Action: "approve"})
+	for _, call := range fe.calls {
+		for i, a := range call {
+			if a == "send-keys" {
+				t.Fatalf("Respond sent keys into an open AskUserQuestion dialog: %q (err = %v)", call[i:], err)
+			}
+		}
+	}
+	if err == nil || !strings.Contains(err.Error(), "cannot respond to a question prompt") {
+		t.Fatalf("Respond = %v, want the question-prompt refusal", err)
+	}
+}
+
+// A stale approval prompt left in scrollback above the dialog still parses as an
+// approval, so without the refusal Respond("approve") would press "1" and select
+// the dialog's first option.
+func TestGM55KP2URespondRefusesAskUserQuestionDialogOverStaleApprovalPrompt(t *testing.T) {
+	requireRespondRefusesAskUserQuestionDialog(t, approvalPromptPane()+"\n"+askUserQuestionPane)
+}
+
+// With no approval prompt on the pane, Respond would otherwise read the pane as
+// "prompt already gone" and return nil — reporting a dialog that is still open
+// as answered.
+func TestGM55KP2URespondRefusesBareAskUserQuestionDialog(t *testing.T) {
+	requireRespondRefusesAskUserQuestionDialog(t, askUserQuestionPane)
 }

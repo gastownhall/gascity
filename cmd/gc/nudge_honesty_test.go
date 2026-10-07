@@ -2,13 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -95,8 +101,108 @@ func TestQueuedNudgeDowngradeNoteDistinguishesItsCauses(t *testing.T) {
 	if unsupported == "" || noIdle == "" || unsupported == noIdle {
 		t.Fatalf("downgrade notes must differ and be non-empty; unsupported=%q no-idle=%q", unsupported, noIdle)
 	}
+	// An open dialog is a third, distinct cause: nothing is wrong with the
+	// transport or the session's pacing, a person has to answer something first.
+	blocked := queuedNudgeDowngradeNote(target, worker.NudgeUndeliveredBlockedByDialog)
+	if blocked == "" || blocked == unsupported || blocked == noIdle {
+		t.Fatalf("a dialog-blocked note must be non-empty and differ from the others; blocked=%q unsupported=%q no-idle=%q", blocked, unsupported, noIdle)
+	}
+	if !strings.Contains(blocked, "dialog") {
+		t.Fatalf("dialog-blocked note = %q, want the open dialog named", blocked)
+	}
 	if got := queuedNudgeDowngradeNote(target, ""); got != "" {
 		t.Fatalf("note for a non-downgrade = %q, want empty", got)
+	}
+}
+
+// TestSessionNudgeIntoAnOpenDialogIsQueuedNotReportedDelivered: with a question
+// dialog open on the pane the worker boundary refuses to type — a nudge's Enter
+// would answer the dialog — and reports the nudge undelivered with reason
+// blocked_by_dialog. Wait-idle queued that for the dispatcher; the default
+// --delivery=immediate fell through to "Nudged <target>" / outcome "delivered"
+// with nothing typed and nothing queued, so the operator was told a message had
+// landed that was in fact dropped. Neither delivery mode, in neither output
+// format, may claim delivery for a nudge that was held back; both must leave it
+// queued.
+func TestSessionNudgeIntoAnOpenDialogIsQueuedNotReportedDelivered(t *testing.T) {
+	for _, mode := range []nudgeDeliveryMode{nudgeDeliveryImmediate, nudgeDeliveryWaitIdle} {
+		for _, asJSON := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%v", mode, asJSON), func(t *testing.T) {
+				t.Setenv("GC_BEADS", "file")
+				t.Setenv("GC_HOME", t.TempDir())
+				// Queueing starts a poller for a live session; none may outlive the test.
+				prevPoller := startNudgePoller
+				startNudgePoller = func(string, string, string) error { return nil }
+				t.Cleanup(func() { startNudgePoller = prevPoller })
+
+				dir := t.TempDir()
+				store := openNudgeBeadStore(dir)
+				fake := runtime.NewFake()
+				mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+				info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+				if err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+					t.Fatalf("Start: %v", err)
+				}
+				// Idle long enough that wait-idle's idle boundary is satisfied: the
+				// only thing standing between the nudge and the pane is the dialog.
+				fake.SetActivity(info.SessionName, time.Now().Add(-45*time.Minute))
+				fake.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{RequestID: "req-1", Kind: "question", Prompt: "How do you want to proceed?"})
+				beforeCalls := len(fake.Calls)
+
+				target := nudgeTarget{
+					cityPath:    dir,
+					agent:       config.Agent{Name: "worker"},
+					resolved:    &config.ResolvedProvider{Name: "claude"},
+					sessionID:   info.ID,
+					sessionName: info.SessionName,
+				}
+				var stdout, stderr bytes.Buffer
+				code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", mode, asJSON, &stdout, &stderr)
+
+				for _, call := range fake.Calls[beforeCalls:] {
+					if call.Method == "Nudge" || call.Method == "NudgeNow" {
+						t.Fatalf("typed into a pane with an open dialog: %+v", call)
+					}
+				}
+				if code != 0 {
+					t.Fatalf("exit = %d, want 0 (the nudge is queued); stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				}
+				pending, _, _, err := listQueuedNudgesForTarget(dir, target, time.Now())
+				if err != nil {
+					t.Fatalf("listQueuedNudgesForTarget: %v", err)
+				}
+				if len(pending) != 1 {
+					t.Fatalf("queued nudges = %d, want 1: the held-back nudge must not be dropped; stdout=%q", len(pending), stdout.String())
+				}
+
+				if asJSON {
+					var got sessionNudgeJSON
+					if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+						t.Fatalf("stdout is not the nudge JSON: %v; stdout=%q", err, stdout.String())
+					}
+					if got.Outcome != "queued" || !got.Queued {
+						t.Fatalf("JSON outcome=%q queued=%v, want outcome %q queued true (%+v)", got.Outcome, got.Queued, "queued", got)
+					}
+					return
+				}
+				out := stdout.String()
+				if strings.Contains(out, "Nudged ") {
+					t.Fatalf("stdout = %q claims delivery of a nudge that was held back", out)
+				}
+				if !strings.HasPrefix(out, "Queued nudge for ") {
+					t.Fatalf("stdout = %q, want the queued confirmation", out)
+				}
+				// Only immediate delivery checks for the dialog itself. Wait-idle
+				// never sees an idle boundary on a dialog pane and says so, which
+				// is already an accurate reason.
+				if mode == nudgeDeliveryImmediate && !strings.Contains(out, "dialog") {
+					t.Fatalf("stdout = %q, want the open dialog named as the reason", out)
+				}
+			})
+		}
 	}
 }
 

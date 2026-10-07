@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,7 +14,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 type testExtMsgAdapter struct {
@@ -151,6 +154,56 @@ func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *
 	}
 	if peerNudges != 1 {
 		t.Fatalf("peer nudge count = %d, want 1; calls=%#v", peerNudges, calls)
+	}
+}
+
+// TestExtmsgNotifyMembersReportsReminderHeldByOpenDialog: a peer whose pane has
+// a question dialog open refuses the reminder at the worker boundary — a typed
+// Enter would answer the dialog — and its handle reports the nudge undelivered
+// with a nil error. sendBackgroundMessageToSession discarded that result, so
+// the fan-out saw success and a reminder that never reached the peer left no
+// trace anywhere. The refusal is right; hiding it is the defect.
+func TestExtmsgNotifyMembersReportsReminderHeldByOpenDialog(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	t.Cleanup(srv.waitForBackground)
+
+	services := extmsg.NewServices(fs.cityBeadStore)
+	fs.extmsgSvc = &services
+
+	ref := extmsg.ConversationRef{
+		ScopeID:        "guild-1",
+		Provider:       "discord",
+		AccountID:      "acct-1",
+		ConversationID: "thread-1",
+		Kind:           extmsg.ConversationThread,
+	}
+	peer := createTestSession(t, fs.cityBeadStore, fs.sp, "Peer")
+	if _, err := services.Transcript.EnsureMembership(context.Background(), extmsg.EnsureMembershipInput{
+		Caller:         extmsg.Caller{Kind: extmsg.CallerController, ID: "test"},
+		Conversation:   ref,
+		SessionID:      peer.ID,
+		BackfillPolicy: extmsg.MembershipBackfillSinceJoin,
+		Owner:          extmsg.MembershipOwnerManual,
+		Now:            time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("EnsureMembership(peer): %v", err)
+	}
+	fs.sp.SetPendingInteraction(peer.SessionName, &runtime.PendingInteraction{RequestID: "req-1", Kind: "question", Prompt: "How do you want to proceed?"})
+
+	var logs bytes.Buffer
+	defer captureLog(t, &logs)()
+
+	srv.extmsgNotifyMembers(context.Background(), ref, "Alice", "human", "hello peers", "", "")
+	srv.waitForBackground()
+
+	for _, call := range fs.sp.SnapshotCalls() {
+		if call.Method == "Nudge" || call.Method == "NudgeNow" {
+			t.Fatalf("reminder typed into a pane with an open dialog: %+v", call)
+		}
+	}
+	if got := logs.String(); !strings.Contains(got, string(worker.NudgeUndeliveredBlockedByDialog)) {
+		t.Fatalf("log = %q, want the held-back reminder reported with reason %q", got, worker.NudgeUndeliveredBlockedByDialog)
 	}
 }
 
