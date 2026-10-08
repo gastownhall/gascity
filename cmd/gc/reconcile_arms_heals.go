@@ -42,6 +42,17 @@ func (r *rowFacts) heal(kind, reason string, patch session.MetadataPatch) (inten
 func (r *rowFacts) gone() bool { return r.entry != nil && r.entry.Liveness == livenessGone }
 func (r *rowFacts) wake() bool { return r.entry != nil && r.entry.Desired == desireWake }
 
+// aliveProbed reports the row's runtime alive with no failed process probe:
+// legacy defers a row's whole lifecycle when its liveness probe errs (the
+// probe-error defer, SESS-056), so no alive-gated heal or marker runs then.
+func (r *rowFacts) aliveProbed() bool {
+	if r.entry == nil || !r.entry.Liveness.alive() {
+		return false
+	}
+	name := strings.TrimSpace(r.row.Info.SessionName)
+	return r.w.Obs.Fact(name, FactProcessAlive, r.w.Now, r.w.ObsMaxAge).Reason != obsReasonProbeIncomplete
+}
+
 // committed reports state active or awake, which S2's commit writes.
 func committed(info session.Info) bool {
 	state := session.State(strings.TrimSpace(info.MetadataState))
@@ -108,7 +119,7 @@ func armCrashHeal(r *rowFacts) (intent, bool) {
 // before any runtime exists to fence.
 func armAwakeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if strings.TrimSpace(info.MetadataState) != string(session.StateAsleep) || r.entry == nil || !r.entry.Liveness.alive() || r.w.Obs == nil ||
+	if strings.TrimSpace(info.MetadataState) != string(session.StateAsleep) || !r.aliveProbed() || r.w.Obs == nil ||
 		operatorDormant(info, r.w.Now) {
 		return intent{}, false
 	}
@@ -137,7 +148,7 @@ func operatorDormant(info session.Info, now time.Time) bool {
 // armStrandedClear is SESS-603 (clearStrandedEventMarker): an alive row ends
 // its stranding episode, so the next one ages a fresh marker.
 func armStrandedClear(r *rowFacts) (intent, bool) {
-	if r.entry == nil || !r.entry.Liveness.alive() || strings.TrimSpace(r.row.Info.StrandedEventEmittedAt) == "" {
+	if !r.aliveProbed() || strings.TrimSpace(r.row.Info.StrandedEventEmittedAt) == "" {
 		return intent{}, false
 	}
 	return r.heal(intentRowHeal, decideStrandedClear, session.MetadataPatch{strandedEventEmittedKey: ""})
@@ -150,7 +161,7 @@ func armStrandedClear(r *rowFacts) (intent, bool) {
 // terms, and an early stamp would hide the reassignment the cycle reads.
 func armCurrentBead(r *rowFacts) (intent, bool) {
 	e, info := r.entry, r.row.Info
-	if e == nil || !e.Liveness.alive() || e.Desired != desireWake || e.AssignedWork == nil {
+	if !r.aliveProbed() || e.Desired != desireWake || e.AssignedWork == nil {
 		return intent{}, false
 	}
 	bead := strings.TrimSpace(e.AssignedWork.BeadID)
