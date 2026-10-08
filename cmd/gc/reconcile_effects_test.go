@@ -337,6 +337,32 @@ func TestExecutorPostsALateLandingsEvent(t *testing.T) {
 	}
 }
 
+// Kills a classification lost to a late landing (v5 S5): a zombie
+// classification completed after the deadline settled its effect is still
+// posted, under its row and with no Seq, so the drain records the pair in
+// the classified set and settles no entry.
+func TestExecutorPostsALateClassification(t *testing.T) {
+	clk := newFakePlannerClock(plannerT0)
+	x, posted := fakeClockExecutor(clk)
+	release := make(chan struct{})
+	k := rowKey{Leg: rowLeg, ID: "z"}
+	if err := x.submit(k, sessionEffect{Kind: intentZombie, Seq: 4, Deadline: plannerT0.Add(time.Minute), Run: func(context.Context) settlement {
+		<-release
+		return settlement{Outcome: settledLanded, Classified: &classifiedRuntime{Token: "rt-1"}}
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 2)
+	clk.Advance(time.Minute)
+	if s := receive(t, posted); s.Cause != causeDeadline || s.Classified != nil {
+		t.Fatalf("settlement %+v, want failed at the deadline", s)
+	}
+	close(release)
+	if s := receive(t, posted); s.Key != k || s.Seq != 0 || s.Classified == nil || s.Classified.Token != "rt-1" || s.Outcome != 0 {
+		t.Fatalf("late post %+v, want the classification under its row, alone", s)
+	}
+}
+
 // Kills an effect registered from a file the effect lint does not cover:
 // every builder in effectRegistry is defined in reconcile_effect_*.go or
 // reconcile_steps_*.go.

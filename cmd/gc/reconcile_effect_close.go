@@ -27,6 +27,13 @@ import (
 // never closed at its new revision. A landed close then runs legacy's
 // post-close cascade, best-effort as legacy does (cascade), outside the
 // section, as legacy's closeBead does.
+//
+// The section is process-local. Another process is not held off: its row
+// writes still lose the close's premise CAS, but a `gc session attach` that
+// re-creates the runtime after the last fresh read and before the CAS is
+// not seen (the cross-process attach residual, as for every C8.8 read). The
+// row then closes over a live runtime that no open row owns, as legacy's
+// close can.
 
 // Close refusal causes; a fresh read's are freshLiveness's.
 const (

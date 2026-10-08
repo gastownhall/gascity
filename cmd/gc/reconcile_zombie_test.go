@@ -84,8 +84,9 @@ func TestZombieClassPatchIsLegacys(t *testing.T) {
 
 // Kills a classified set keyed by the row's token, which a re-key or warm
 // reuse would confuse: an entry records the runtime's own token, survives a
-// row token change and an unread identity, and goes when the runtime under
-// the name reads another token or the row closes.
+// row token change, an unread identity and a partial census, and goes when
+// the runtime under the name reads another token or a complete census no
+// longer holds the row.
 func TestClassifiedSetKeyedByRuntimeToken(t *testing.T) {
 	k := rowKey{Leg: rowLeg, ID: "r"}
 	census := func(rowToken string) *sessionCensus {
@@ -124,6 +125,10 @@ func TestClassifiedSetKeyedByRuntimeToken(t *testing.T) {
 	delete(world, k)
 	if p.classified[k] != "rt-2" {
 		t.Fatalf("classified %v: a pass's copy shares the planner's set", p.classified)
+	}
+	partial := &sessionCensus{Legs: []censusLeg{{Ref: rowLeg, Err: errors.New("leg down")}}, Rows: map[rowKey]censusRow{}}
+	if got := p.classifiedFor(partial, nil, gatherNow, time.Minute); got[k] != "rt-2" {
+		t.Fatalf("classified %v after a partial census, want the entry kept: a failed leg proves no close", got)
 	}
 	if got := p.classifiedFor(&sessionCensus{Rows: map[rowKey]censusRow{}}, nil, gatherNow, time.Minute); len(got) != 0 || len(p.classified) != 0 {
 		t.Fatalf("classified %v after the row closed, want it pruned", p.classified)

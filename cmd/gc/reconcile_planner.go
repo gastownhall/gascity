@@ -6,6 +6,7 @@ import (
 	"io"
 	"maps"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -346,16 +347,21 @@ func (p *planner) drainSettlements(now time.Time) {
 }
 
 // classifiedFor prunes the classified set (v5 S5) and returns the pass's
-// copy. A row's entry goes when the census no longer holds the row (it
-// closed), or when the inventory reads another runtime token under its
-// name; a runtime whose identity is unread proves no change. A restart
+// copy. A row's entry goes when a complete census no longer holds the row
+// (it closed; a failed leg proves nothing), or when the inventory reads
+// another runtime token under its name; a runtime whose identity is unread
+// proves no change. A restart
 // empties the set, so a classification fires once more, as legacy's
 // in-memory dedup does (markZombieCrash).
 func (p *planner) classifiedFor(c *sessionCensus, snap *ObservationSnapshot, now time.Time, maxAge time.Duration) map[rowKey]string {
+	complete := !slices.ContainsFunc(c.Legs, func(l censusLeg) bool { return l.Err != nil })
 	for k, token := range p.classified {
 		row, open := c.Rows[k]
-		if !open {
+		switch {
+		case !open && complete:
 			delete(p.classified, k)
+			continue
+		case !open:
 			continue
 		}
 		if snap == nil {

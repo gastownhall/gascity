@@ -183,10 +183,11 @@ func (x *effectExecutor) setStartsClosed(closed bool) {
 // shutdown deadline comes, whichever is first; a result that is ready then
 // wins. A Run that ignores its context is abandoned at the deadline; it keeps
 // any name lock it holds, so it still serializes its runtime name, and if it
-// lands later its event is still posted, alone. An abandoned create settles
-// ambiguous, never failed: its row write may have begun (P5). A panic in Run
-// is recovered and logged, and settles failed: one bad effect never takes
-// the process down.
+// lands later its events are still posted, alone, with a classification it
+// completed (under its row, with no Seq, so it settles nothing). An
+// abandoned create settles ambiguous, never failed: its row write may have
+// begun (P5). A panic in Run is recovered and logged, and settles failed:
+// one bad effect never takes the process down.
 func (x *effectExecutor) run(base context.Context, key effectKey, e sessionEffect, f *inflightEffect) {
 	k := key.row
 	defer x.wg.Done()
@@ -233,7 +234,10 @@ func (x *effectExecutor) run(base context.Context, key effectKey, e sessionEffec
 			}
 			fmt.Fprintf(x.stderr, "v2 reconciler: effect for %s/%s still running when its context ended; settled as %v\n", k.Leg, k.ID, s.Err) //nolint:errcheck // best-effort stderr
 			x.spawn(func() {
-				if late := <-result; len(late.Events) > 0 {
+				switch late := <-result; {
+				case late.Classified != nil: // the classified set needs the row (v5 S5)
+					x.post(settlement{Key: k, Events: late.Events, Classified: late.Classified})
+				case len(late.Events) > 0:
 					x.post(settlement{Events: late.Events})
 				}
 			})

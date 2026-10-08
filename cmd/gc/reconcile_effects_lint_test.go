@@ -283,3 +283,40 @@ func TestEffectLintBansRawProviderCalls(t *testing.T) {
 		}
 	}
 }
+
+// releaserFiles are the only files that may reach effectPass.Releasers, the
+// raw stores legacy's release helpers write (v5.6 §13): the registry builds
+// them, and the close effect's cascade and work release use them.
+var releaserFiles = []string{"reconcile_effects_registry.go", "reconcile_effect_close.go"}
+
+// Kills a raw release-capable store reaching any other effect or step: no
+// other non-test file in the package names Releasers.
+func TestOnlyTheCloseReachesReleasers(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	seen := 0
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, f, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "Releasers" {
+				if !slices.Contains(releaserFiles, f) {
+					t.Errorf("%s: Releasers outside %v", fset.Position(sel.Pos()), releaserFiles)
+				}
+				seen++
+			}
+			return true
+		})
+	}
+	if seen == 0 {
+		t.Fatal("no file names Releasers: the fence checks nothing")
+	}
+}
