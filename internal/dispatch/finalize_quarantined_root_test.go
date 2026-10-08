@@ -1,22 +1,26 @@
 package dispatch
 
 import (
+	"errors"
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// quarantinedWorkflowFixture builds a workflow root that the control
-// dispatcher has already quarantined as a hard failure (the metadata
+// quarantinedWorkflowFixture builds, in store, a workflow root that the
+// control dispatcher has already quarantined as a hard failure (the metadata
 // quarantineControlFailureBead in cmd/gc writes), plus its still-open
 // workflow-finalize control whose only blocker PASSED. That is the shape of
 // the 2026-09-25 incident (ga-3wlbcj): 61 roots quarantined with
 // `unsupported control bead kind "workflow"` later read gc.outcome=pass,
 // because the finalizer recomputed the outcome from its blockers and merged
 // it onto the closed root.
-func quarantinedWorkflowFixture(t *testing.T, rootStatus string, rootMeta map[string]string) (beads.Store, beads.Bead, beads.Bead) {
+func quarantinedWorkflowFixture(t *testing.T, store beads.Store, rootStatus string, rootMeta map[string]string) (beads.Bead, beads.Bead) {
 	t.Helper()
-	store := beads.NewMemStore()
 	meta := map[string]string{
 		"gc.kind":             "workflow",
 		"gc.formula_contract": "graph.v2",
@@ -46,7 +50,7 @@ func quarantinedWorkflowFixture(t *testing.T, rootStatus string, rootMeta map[st
 	})
 	mustDepAdd(t, store, finalizer.ID, step.ID, "blocks")
 	mustDepAdd(t, store, root.ID, finalizer.ID, "blocks")
-	return store, root, finalizer
+	return root, finalizer
 }
 
 func controlQuarantinedRootMetadata() map[string]string {
@@ -61,34 +65,84 @@ func controlQuarantinedRootMetadata() map[string]string {
 	}
 }
 
+// quarantineWorkflowRoot leaves a root closed and control-quarantined, as
+// quarantineControlFailureBead does. Production writes the status and the
+// metadata in one Update; these two calls reproduce only that end state.
+func quarantineWorkflowRoot(t *testing.T, store beads.Store, rootID string) {
+	t.Helper()
+	if err := store.SetMetadataBatch(rootID, controlQuarantinedRootMetadata()); err != nil {
+		t.Fatalf("quarantining root %s: %v", rootID, err)
+	}
+	if err := store.Close(rootID); err != nil {
+		t.Fatalf("closing quarantined root %s: %v", rootID, err)
+	}
+}
+
+// quarantineRootOnFirstResolve returns f's store-ref resolver, except that its
+// first call quarantines the workflow root. The pass-path preflight makes that
+// call, so the quarantine lands after resolveFinalizeOutcome read the root
+// open and before the root close: the window closeWorkflowRoot's guard is the
+// last line for.
+func quarantineRootOnFirstResolve(t *testing.T, f sourceChainFinalizeFixture) func(string) (beads.Store, error) {
+	t.Helper()
+	fired := false
+	return func(ref string) (beads.Store, error) {
+		if !fired {
+			fired = true
+			quarantineWorkflowRoot(t, f.rigStore, f.workflow.ID)
+		}
+		return f.resolver(ref)
+	}
+}
+
 func TestProcessWorkflowFinalizeKeepsQuarantinedRootFailed(t *testing.T) {
 	t.Parallel()
 
-	store, root, finalizer := quarantinedWorkflowFixture(t, "closed", controlQuarantinedRootMetadata())
+	for _, tc := range []struct {
+		name  string
+		store beads.Store
+	}{
+		{name: "mem store", store: beads.NewMemStore()},
+		{
+			// bd refuses an unforced close while a blocker is open, and the
+			// fixture's root is blocked by its still-open finalizer: the fail
+			// arm's root write lands only because bd lets a closed bead
+			// restate closed.
+			name:  "bd close policy",
+			store: newBdClosePolicyStore(),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
-	if err != nil {
-		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
-	}
-	if !result.Processed || result.Action != "workflow-fail" {
-		t.Fatalf("result = %+v, want processed workflow-fail (a quarantined root is a failed workflow)", result)
-	}
-	rootAfter, err := store.Get(root.ID)
-	if err != nil {
-		t.Fatalf("get root: %v", err)
-	}
-	if got := rootAfter.Metadata["gc.outcome"]; got != "fail" {
-		t.Fatalf("quarantined root gc.outcome = %q, want fail", got)
-	}
-	if got := rootAfter.Metadata["gc.final_disposition"]; got != "control_quarantined" {
-		t.Fatalf("root gc.final_disposition = %q, want control_quarantined preserved", got)
-	}
-	finalizerAfter, err := store.Get(finalizer.ID)
-	if err != nil {
-		t.Fatalf("get finalizer: %v", err)
-	}
-	if finalizerAfter.Status != "closed" {
-		t.Fatalf("finalizer status = %q, want closed (it must still drain)", finalizerAfter.Status)
+			store := tc.store
+			root, finalizer := quarantinedWorkflowFixture(t, store, "closed", controlQuarantinedRootMetadata())
+
+			result, err := ProcessControl(store, finalizer, ProcessOptions{})
+			if err != nil {
+				t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+			}
+			if !result.Processed || result.Action != "workflow-fail" {
+				t.Fatalf("result = %+v, want processed workflow-fail (a quarantined root is a failed workflow)", result)
+			}
+			rootAfter, err := store.Get(root.ID)
+			if err != nil {
+				t.Fatalf("get root: %v", err)
+			}
+			if got := rootAfter.Metadata["gc.outcome"]; got != "fail" {
+				t.Fatalf("quarantined root gc.outcome = %q, want fail", got)
+			}
+			if got := rootAfter.Metadata["gc.final_disposition"]; got != "control_quarantined" {
+				t.Fatalf("root gc.final_disposition = %q, want control_quarantined preserved", got)
+			}
+			finalizerAfter, err := store.Get(finalizer.ID)
+			if err != nil {
+				t.Fatalf("get finalizer: %v", err)
+			}
+			if finalizerAfter.Status != "closed" {
+				t.Fatalf("finalizer status = %q, want closed (it must still drain)", finalizerAfter.Status)
+			}
+		})
 	}
 }
 
@@ -98,7 +152,8 @@ func TestProcessWorkflowFinalizeKeepsQuarantinedRootFailed(t *testing.T) {
 func TestProcessWorkflowFinalizePassedRootStillReadsPass(t *testing.T) {
 	t.Parallel()
 
-	store, root, finalizer := quarantinedWorkflowFixture(t, "open", nil)
+	store := beads.NewMemStore()
+	root, finalizer := quarantinedWorkflowFixture(t, store, "open", nil)
 
 	result, err := ProcessControl(store, finalizer, ProcessOptions{})
 	if err != nil {
@@ -117,28 +172,89 @@ func TestProcessWorkflowFinalizePassedRootStillReadsPass(t *testing.T) {
 }
 
 // The root close is the last line: whatever the finalizer computed, it must
-// not merge pass over a closed, control-quarantined root.
+// not merge pass over a closed, control-quarantined root, and it must say so.
+// A refusal that reads as success lets the finalizer act on its stale pass.
 func TestCloseWorkflowRootNeverPassesOverQuarantine(t *testing.T) {
 	t.Parallel()
 
-	store := beads.NewMemStore()
-	meta := controlQuarantinedRootMetadata()
-	meta["gc.kind"] = "workflow"
-	b := mustCreateWorkflowBead(t, store, beads.Bead{
-		Title:    "quarantined",
-		Type:     "task",
-		Status:   "closed",
-		Metadata: meta,
-	})
-	if err := closeWorkflowRoot(store, b.ID, "pass"); err != nil {
-		t.Fatalf("closeWorkflowRoot: %v", err)
+	workflowKind := map[string]string{"gc.kind": "workflow"}
+	for _, tc := range []struct {
+		name string
+		root map[string]string // how the bead is marked a workflow root
+		meta map[string]string
+	}{
+		{name: "quarantined control bead", root: workflowKind, meta: controlQuarantinedRootMetadata()},
+		{
+			// settleRootForQuarantinedFinalizer (cmd/gc) settles a root behind
+			// a quarantined finalizer with the disposition alone, no flag.
+			name: "root settled behind a quarantined finalizer",
+			root: workflowKind,
+			meta: map[string]string{
+				"gc.outcome":           "fail",
+				"gc.failure_class":     "hard",
+				"gc.failure_reason":    "finalizer_control_quarantined",
+				"gc.final_disposition": "control_quarantined",
+			},
+		},
+		{
+			// A graph.v2-only root carries the formula contract and no gc.kind
+			// (TestCmdWorkflowDeleteSourceClosesGraphV2OnlyRoot in cmd/gc).
+			// resolveFinalizeOutcome reads it failed, so the guard refuses its
+			// pass too.
+			name: "graph.v2-only root",
+			root: map[string]string{"gc.formula_contract": "graph.v2"},
+			meta: controlQuarantinedRootMetadata(),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := beads.NewMemStore()
+			meta := maps.Clone(tc.root)
+			maps.Copy(meta, tc.meta)
+			b := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:    "quarantined",
+				Type:     "task",
+				Status:   "closed",
+				Metadata: meta,
+			})
+			if err := closeWorkflowRoot(store, b.ID, "pass"); !errors.Is(err, errRootQuarantined) {
+				t.Fatalf("closeWorkflowRoot err = %v, want errRootQuarantined", err)
+			}
+			after, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			if got := after.Metadata["gc.outcome"]; got != "fail" {
+				t.Fatalf("gc.outcome = %q, want fail kept over a pass write", got)
+			}
+		})
 	}
-	after, err := store.Get(b.ID)
+}
+
+// A read that cannot rule the quarantine out fails the close instead of
+// writing pass, the same polarity resolveFinalizeOutcome takes, so the
+// finalizer stays open and retries.
+func TestCloseWorkflowRootRefusesPassWhenTheQuarantineReadFails(t *testing.T) {
+	t.Parallel()
+
+	mem := beads.NewMemStore()
+	b := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title:    "workflow",
+		Type:     "task",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	readErr := errors.New("injected root read failure")
+	err := closeWorkflowRoot(getErrorStore{Store: mem, failID: b.ID, err: readErr}, b.ID, "pass")
+	if !errors.Is(err, readErr) {
+		t.Fatalf("closeWorkflowRoot err = %v, want the read error", err)
+	}
+	after, err := mem.Get(b.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got := after.Metadata["gc.outcome"]; got != "fail" {
-		t.Fatalf("gc.outcome = %q, want fail kept over a pass write", got)
+	if after.Status == "closed" || after.Metadata["gc.outcome"] != "" {
+		t.Fatalf("bead = %s/%q, want it untouched: no pass is written past a failed read", after.Status, after.Metadata["gc.outcome"])
 	}
 }
 
@@ -177,14 +293,7 @@ func TestProcessWorkflowFinalizeQuarantinedRootLeavesSourcesOpenWithItsDiagnosis
 	t.Parallel()
 
 	f := newSourceChainFinalizeFixture(t)
-	for k, v := range controlQuarantinedRootMetadata() {
-		if err := f.rigStore.SetMetadata(f.workflow.ID, k, v); err != nil {
-			t.Fatalf("SetMetadata(%s): %v", k, err)
-		}
-	}
-	if err := f.rigStore.Close(f.workflow.ID); err != nil {
-		t.Fatalf("close root: %v", err)
-	}
+	quarantineWorkflowRoot(t, f.rigStore, f.workflow.ID)
 
 	result, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{ResolveStoreRef: f.resolver})
 	if err != nil {
@@ -212,5 +321,108 @@ func TestProcessWorkflowFinalizeQuarantinedRootLeavesSourcesOpenWithItsDiagnosis
 	}
 	if city.Status == "closed" {
 		t.Fatalf("city source was closed; a quarantined root must leave the chain open")
+	}
+}
+
+// A quarantine that races the finalizer still finalizes the workflow failed:
+// the outcome was read as pass, but the close helper refuses it, so the source
+// chain stays open and the direct source carries the root's own diagnosis.
+func TestProcessWorkflowFinalizeQuarantineRacingThePassFinalizesFailed(t *testing.T) {
+	t.Parallel()
+
+	f := newSourceChainFinalizeFixture(t)
+	var traces []string
+	result, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{
+		ResolveStoreRef: quarantineRootOnFirstResolve(t, f),
+		Tracef: func(format string, args ...any) {
+			traces = append(traces, fmt.Sprintf(format, args...))
+		},
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-fail" {
+		t.Fatalf("result = %+v, want processed workflow-fail (the root was quarantined before it closed)", result)
+	}
+	if !slices.ContainsFunc(traces, func(line string) bool { return strings.Contains(line, "pass_refused") }) {
+		t.Fatalf("traces = %q, want the close helper's pass refusal: the race path, not the outcome read", traces)
+	}
+	root, err := f.rigStore.Get(f.workflow.ID)
+	if err != nil {
+		t.Fatalf("get root: %v", err)
+	}
+	if root.Metadata["gc.outcome"] != "fail" || root.Metadata["gc.final_disposition"] != "control_quarantined" {
+		t.Fatalf("root = %q/%q, want fail/control_quarantined kept", root.Metadata["gc.outcome"], root.Metadata["gc.final_disposition"])
+	}
+	launch, err := f.rigStore.Get(f.rigLaunch.ID)
+	if err != nil {
+		t.Fatalf("get rig launch: %v", err)
+	}
+	if launch.Status == "closed" {
+		t.Fatalf("rig launch source was closed as passed behind a quarantined root")
+	}
+	for key, want := range map[string]string{
+		"gc.failure_reason":  "control_dispatch_error",
+		"gc.failure_class":   "hard",
+		"gc.failure_subject": f.workflow.ID,
+	} {
+		if got := launch.Metadata[key]; got != want {
+			t.Errorf("source %s = %q, want %q", key, got, want)
+		}
+	}
+	city, err := f.cityStore.Get(f.citySource.ID)
+	if err != nil {
+		t.Fatalf("get city source: %v", err)
+	}
+	if city.Status == "closed" {
+		t.Fatalf("city source was closed as passed behind a quarantined root")
+	}
+	finalizerAfter, err := f.rigStore.Get(f.finalizer.ID)
+	if err != nil {
+		t.Fatalf("get finalizer: %v", err)
+	}
+	if finalizerAfter.Status != "closed" {
+		t.Fatalf("finalizer status = %q, want closed", finalizerAfter.Status)
+	}
+}
+
+// The race path stamps the source while the finalizer is still open (it
+// closes last), so a stamp that fails leaves the finalizer open. The retry
+// then reads the quarantine up front and converges on the fail branch.
+func TestProcessWorkflowFinalizeQuarantineRaceRetriesAFailedSourceStamp(t *testing.T) {
+	t.Parallel()
+
+	f := newSourceChainFinalizeFixture(t)
+	lockErr := errors.New("injected source lock failure")
+	opts := ProcessOptions{
+		ResolveStoreRef:    quarantineRootOnFirstResolve(t, f),
+		SourceWorkflowLock: func(string, string, func() error) error { return lockErr },
+	}
+	_, err := ProcessControl(f.rigStore, f.finalizer, opts)
+	if !errors.Is(err, lockErr) || !strings.Contains(err.Error(), "marking failed source bead") {
+		t.Fatalf("ProcessControl err = %v, want the source stamp's lock failure", err)
+	}
+	finalizer, err := f.rigStore.Get(f.finalizer.ID)
+	if err != nil {
+		t.Fatalf("get finalizer: %v", err)
+	}
+	if finalizer.Status == "closed" {
+		t.Fatalf("finalizer closed although the source stamp failed; it must stay open to retry")
+	}
+
+	opts.SourceWorkflowLock = func(_, _ string, fn func() error) error { return fn() }
+	result, err := ProcessControl(f.rigStore, finalizer, opts)
+	if err != nil {
+		t.Fatalf("ProcessControl(retry): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-fail" {
+		t.Fatalf("retry result = %+v, want processed workflow-fail", result)
+	}
+	launch, err := f.rigStore.Get(f.rigLaunch.ID)
+	if err != nil {
+		t.Fatalf("get rig launch: %v", err)
+	}
+	if launch.Status == "closed" || launch.Metadata["gc.failure_reason"] != "control_dispatch_error" {
+		t.Fatalf("rig launch = %s/%q, want open and stamped control_dispatch_error", launch.Status, launch.Metadata["gc.failure_reason"])
 	}
 }
