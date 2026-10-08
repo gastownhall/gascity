@@ -124,6 +124,34 @@ Run the same thing locally with:
 bazel test //... --config=fresh
 ```
 
+The nightly run also adds `//test/acceptance:acceptance_realtime_tests` to
+the acceptance lane: the timer-bound acceptance rows at their real timers,
+which PR and push runs shorten (next section).
+
+### Test-only timer hooks
+
+A few acceptance rows assert what a running city does *not* do over a window
+long enough for every periodic controller backstop to come round several
+times. To keep them out of the lane's critical path they run shortened on PRs
+and pushes, through these variables (all in the GC_* env-read inventory,
+`internal/testenv/testdata/gc_env_read_baseline.golden`):
+
+| Variable | Read by | Effect |
+|---|---|---|
+| `GC_TEST_BACKSTOP_SPEEDUP` | gc (`internal/clock.Backstop`) and the quiescence rows | A whole number N divides every backstop cadence the controller keeps on its own clock (patrol tick, cooldown orders, cache reconcile, order-tracking watchdog, autoclose sweep, order rescan, backstop lane polls), clamped to 30. The rows divide their 3-minute window by the same N. |
+| `GC_ACCEPTANCE_PROXIED_IDLE_TIMEOUT` | the idle-timeout row only | The proxy idle timeout the row configures (default 20 s, floor 5 s). |
+
+`GC_TEST_BACKSTOP_SPEEDUP` cannot be turned on in a binary users run: gc
+honors it only when linked with
+`-X github.com/gastownhall/gascity/internal/clock.testHooks=enabled`, which
+only the testonly `//cmd/gc:gc_testhooks` target does
+(`scripts/cmd_gc_testhooks_test.go` keeps the stamp out of every other link,
+`.goreleaser.yml` and the Makefile). Any gc run with the variable set prints a
+`gc: WARNING: GC_TEST_BACKSTOP_SPEEDUP=...` line on stderr at startup saying
+whether the hook is active or ignored, and the quiescence rows fail unless gc
+reports it active. `test/acceptance/BUILD.bazel` sets both variables
+(`SOLO_ENV`); its `REALTIME_TESTS` run the same rows with neither, nightly.
+
 ### Merge queue
 
 The required-check workflows are merge-queue ready but the queue is off: it

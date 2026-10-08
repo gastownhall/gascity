@@ -15,6 +15,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
@@ -2897,9 +2898,10 @@ func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
-// Defaults to 30s if empty or unparseable.
+// Defaults to 30s if empty or unparseable. A test's
+// clock.BackstopSpeedupEnv divides it.
 func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
-	return durationOr(d.PatrolInterval, 30*time.Second)
+	return clock.Backstop(durationOr(d.PatrolInterval, 30*time.Second))
 }
 
 // TickDebounceDuration returns the tick-debounce window as a

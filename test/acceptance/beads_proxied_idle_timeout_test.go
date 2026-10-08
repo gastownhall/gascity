@@ -22,20 +22,43 @@ import (
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
-// idleTimeoutUnderTest is short so the test finishes; it is below config's
-// 1m floor, which only the environment override may cross.
-const idleTimeoutUnderTest = 20 * time.Second
+// defaultIdleTimeoutUnderTest is short so the test finishes; it is below
+// config's 1m floor, which only the environment override may cross.
+const defaultIdleTimeoutUnderTest = 20 * time.Second
+
+// idleTimeoutUnderTestEnv shortens the idle timeout further: Bazel's PR target
+// sets it, so each of the test's three idle retirements waits seconds rather
+// than half a minute; the nightly proxied_idle_timeout_realtime_test target
+// leaves it unset. Every assertion is relative to the value in force (the
+// sidecar, the proxy's argv, bd's "idleWatcher expired after" line).
+const idleTimeoutUnderTestEnv = "GC_ACCEPTANCE_PROXIED_IDLE_TIMEOUT"
+
+// idleTimeoutUnderTest is the idle timeout the test gives every scope: a
+// valid idleTimeoutUnderTestEnv of at least minIdleTimeoutUnderTest, else
+// defaultIdleTimeoutUnderTest.
+var idleTimeoutUnderTest = func() time.Duration {
+	if d, err := time.ParseDuration(os.Getenv(idleTimeoutUnderTestEnv)); err == nil && d >= minIdleTimeoutUnderTest {
+		return d
+	}
+	return defaultIdleTimeoutUnderTest
+}()
+
+// minIdleTimeoutUnderTest keeps the timeout above the gap between two of the
+// test's back-to-back commands, so a proxy never retires between a command
+// and the read of the record it left.
+const minIdleTimeoutUnderTest = 5 * time.Second
 
 // idleRetireWait bounds one idle retirement: bd's sampled watcher exits T to
 // 1.5T after the last connection it saw, and then runs a shutdown GC before it
 // removes proxy.pid.
-const idleRetireWait = idleTimeoutUnderTest*3/2 + 45*time.Second
+var idleRetireWait = idleTimeoutUnderTest*3/2 + 45*time.Second
 
 func TestProxiedIdleTimeoutReapAndTransparentRestart(t *testing.T) {
 	// Several idle retirements of a real proxy and Dolt child take minutes:
 	// not Tier A smoke material. Bazel's acceptance lane opts in and runs it
 	// as a target of its own (test/acceptance/BUILD.bazel).
 	helpers.RequireTopologyMatrix(t)
+	t.Logf("idle timeout under test: %s", idleTimeoutUnderTest)
 	bdPath, doltPath := requireProxiedTooling(t)
 	env := proxiedEnv(t, bdPath, doltPath).With(config.ProxiedIdleTimeoutEnv, idleTimeoutUnderTest.String())
 

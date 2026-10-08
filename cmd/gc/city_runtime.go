@@ -2063,7 +2063,7 @@ func orderSetChangeSummary(oldOrders, newOrders []orders.Order) string {
 // once every orderTrackingSweepWatchdogInterval. The orders lane runs it with
 // its pass's config snapshot.
 func (cr *CityRuntime) runOrderTrackingSweepWatchdog(cfg *config.City, now time.Time) {
-	if !cr.orderSweepWatchdogLast.IsZero() && now.Sub(cr.orderSweepWatchdogLast) < orderTrackingSweepWatchdogInterval {
+	if !cr.orderSweepWatchdogLast.IsZero() && now.Sub(cr.orderSweepWatchdogLast) < clock.Backstop(orderTrackingSweepWatchdogInterval) {
 		return
 	}
 	cr.orderSweepWatchdogLast = now
