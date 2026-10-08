@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -389,7 +390,11 @@ func refuseOrDegrade(store Store, mode gate.Mode, reason string) (ConditionalWri
 
 // conditionalStoreKind names the store type for diagnostics. Types that only
 // exist under build tags (DoltliteReadStore) and test doubles fall through to
-// the %T spelling, which is descriptive enough for a diagnostic surface.
+// the %T spelling, which is descriptive enough for a diagnostic surface. That
+// spelling comes from reflect.TypeOf, not fmt.Sprintf("%T"): taint analysis
+// models fmt as propagating the whole store value, so a store wrapping
+// credential-bearing config would mark every log line carrying this kind as
+// leaking it (CodeQL go/clear-text-logging), though a type name holds no data.
 func conditionalStoreKind(store Store) string {
 	switch store.(type) {
 	case *BdStore:
@@ -407,6 +412,6 @@ func conditionalStoreKind(store Store) string {
 	case nil:
 		return "<nil>"
 	default:
-		return fmt.Sprintf("%T", store)
+		return reflect.TypeOf(store).String()
 	}
 }
