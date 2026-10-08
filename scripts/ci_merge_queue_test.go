@@ -261,6 +261,7 @@ var mergeQueueEventExprs = map[string]string{
 	// codeql.yml
 	"codeql.yml jobs.runner-policy.steps[policy].env.EVENT_NAME": "merge_group",
 	"codeql.yml jobs.runner-policy.steps[policy].env.PR_AUTHOR":  "",
+	"codeql.yml jobs.analyze.steps[Save Go build cache].if":      "false", // push to main saves
 }
 
 // TestMergeQueueEventExpressionsAreAccountedFor evaluates every
