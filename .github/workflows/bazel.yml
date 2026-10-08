@@ -56,6 +56,14 @@ name: bazel
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  # Merge queue (dormant until the main ruleset enables one; TESTING.md
+  # "Merge queue"): both required checks of this workflow must report on
+  # every queue entry's merge-group commit. A merge group is same-repo
+  # trust (only people who can merge can queue), so the rbe job takes mode
+  # remote; the queue ref is already the merge, so fresh-merge and the base
+  # step skip it, and the OpenAPI gate diffs against merge_group.base_sha.
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main]
   workflow_dispatch:
@@ -89,15 +97,19 @@ on:
       CODECOV_TOKEN:
         required: false
 
-# A PR's runs share one group and a newer one cancels the older. Every other
-# event (push to main, dispatch, call) gets its own group (the run id), so it
-# is never cancelled or queued behind another run: main runs save the runner
-# cache and report coverage. (A shared group without cancel-in-progress
-# would still replace a pending run with the next one.) The prefix is a
-# literal: under workflow_call github.workflow is the caller's name, and the
-# group would collide with the caller's own.
+# A PR's runs share one group and a newer one cancels the older. A merge
+# group keys on its own queue ref (refs/heads/gh-readonly-queue/main/pr-N-
+# <base sha>, unique per entry and base) and is never cancelled: cancelling
+# a queue run fails the entry's required checks and ejects it, and a PR's
+# own runs (keyed on its number) never share a queue entry's group. Every
+# other event (push to main, dispatch, call) gets its own group (the run
+# id), so it is never cancelled or queued behind another run: main runs save
+# the runner cache and report coverage. (A shared group without
+# cancel-in-progress would still replace a pending run with the next one.)
+# The prefix is a literal: under workflow_call github.workflow is the
+# caller's name, and the group would collide with the caller's own.
 concurrency:
-  group: bazel-yml-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  group: bazel-yml-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'merge_group' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -118,6 +130,9 @@ jobs:
       lanes: ${{ steps.lanes.outputs.lanes }}
       base-sha: ${{ steps.base.outputs.base-sha }}
     steps:
+      # merge_group: PULL_REQUEST and FORK are false (no
+      # github.event.pull_request on that event), so a queue run takes the
+      # same-repo path, mode remote (scripts/ci_merge_queue_test.go).
       - name: Decide remote execution
         id: decide
         env:
@@ -416,14 +431,17 @@ jobs:
       # The OpenAPI breaking-change gate (//cmd/openapi-breaking:
       # openapi-breaking_test, in the unit lane's //...) compares the tested
       # tree's internal/api/openapi.json with the spec of the commit the PR
-      # is merged onto (fresh-merge's base-sha). @openapi_base_spec
-      # (tools/bazel/rules/openapi_base_spec.bzl) reads the file this names
-      # from the client environment: no Bazel flag, so no other action key
-      # changes. Other events have no base; the spec compares with itself.
+      # is merged onto (fresh-merge's base-sha; for a merge group, the commit
+      # the entry is queued onto, merge_group.base_sha: main or the entry
+      # ahead of it, an ancestor of this fetch-depth 0 checkout).
+      # @openapi_base_spec (tools/bazel/rules/openapi_base_spec.bzl) reads
+      # the file this names from the client environment: no Bazel flag, so no
+      # other action key changes. Other events have no base; the spec
+      # compares with itself.
       - name: OpenAPI breaking-change base spec
-        if: github.event_name == 'pull_request' && matrix.lane == 'unit'
+        if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && matrix.lane == 'unit'
         env:
-          BASE_SHA: ${{ needs.rbe.outputs.base-sha }}
+          BASE_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || needs.rbe.outputs.base-sha }}
         run: |
           set -euo pipefail
           [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::base-sha is '$BASE_SHA'"; exit 1; }

@@ -246,18 +246,20 @@ func readMultiLaneWorkflow(t *testing.T) multiLaneWorkflow {
 func TestBazelMultiLaneWorkflowTriggersAndPermissions(t *testing.T) {
 	wf := readMultiLaneWorkflow(t)
 	// pull_request (never pull_request_target: fork code must not run with
-	// the base repository's token or secrets), pushes to main, dispatches
+	// the base repository's token or secrets), merge groups (the merge
+	// queue, scripts/ci_merge_queue_test.go), pushes to main, dispatches
 	// and calls.
 	on := slices.Sorted(maps.Keys(wf.On))
-	if want := []string{"pull_request", "push", "workflow_call", "workflow_dispatch"}; !reflect.DeepEqual(on, want) {
+	if want := []string{"merge_group", "pull_request", "push", "workflow_call", "workflow_dispatch"}; !reflect.DeepEqual(on, want) {
 		t.Errorf("%s on: %v, want exactly %v", bazelMultiLaneWorkflow, on, want)
 	}
-	// A PR's runs share a group and cancel each other; every other event has
-	// a group of its own (the run id): a push to main is never canceled, nor
+	// A PR's runs share a group and cancel each other; a merge group keys on
+	// its own queue ref and is never canceled; every other event has a
+	// group of its own (the run id): a push to main is never canceled, nor
 	// replaced while pending by the next push. The prefix is a literal
 	// (under workflow_call github.workflow is the caller's name).
 	wantConcurrency := map[string]string{
-		"group":              multiLaneConcurrencyPrefix + "${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}",
+		"group":              multiLaneConcurrencyPrefix + "${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'merge_group' && github.ref || github.run_id }}",
 		"cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
 	}
 	if !reflect.DeepEqual(wf.Concurrency, wantConcurrency) {
@@ -350,7 +352,7 @@ func multiLaneLanes(t *testing.T, script, event, mode, fresh string) (string, er
 const multiLaneForkCertificates = 4
 
 var (
-	multiLaneEvents = []string{"pull_request", "push", "workflow_dispatch", "workflow_call", "schedule"}
+	multiLaneEvents = []string{"pull_request", "merge_group", "push", "workflow_dispatch", "workflow_call", "schedule"}
 	multiLaneModes  = []string{"remote", "fork-ro", "fork-rw", "cache", "local"}
 )
 

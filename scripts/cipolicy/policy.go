@@ -16,7 +16,13 @@ const (
 	// approximating shell semantics: any execution change requires explicit
 	// policy review, while workflow, job, step, and input descriptions remain
 	// free to change. A failure prints the projection and candidate digest.
-	expectedCITriggersHash = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
+	//
+	// Triggers bumped for merge-queue readiness (TESTING.md "Merge queue"):
+	// merge_group [checks_requested], so Check and CI / required report on a
+	// queue entry's merge-group commit. Reviewed delta: one trigger, no new
+	// job, step command or permission; scripts/ci_merge_queue_test.go pins
+	// what each event expression yields on it.
+	expectedCITriggersHash = "869922e05434e56d0b7fe8245e29529edc9616efac89ce4ba068edf7faa3f69b"
 	// Bumped for the beads-topology-acceptance job: the bd/dolt-backed topology
 	// shapes had never executed in CI — every job lacked a bd with
 	// --proxied-server, so each test skipped and a suite that ran nothing
@@ -295,7 +301,12 @@ const (
 	// windows moves to runner_policy.py's Blacksmith Windows runner.
 	// Reviewed delta: jobs, filters and needs removed, one runs-on and one
 	// runner-policy output; no new trigger, step command or permission.
-	expectedCIExecutionHash     = "49b8f55390b6aebb6bb845634e260a83b16e6bd26c3f00ee422fc40f648c23f6"
+	//
+	// Bumped again (merge-queue readiness): the changes job's paths-filter
+	// takes base/ref from merge_group.base_sha/head_sha, empty on every other
+	// event (the action's defaults). Reviewed delta: two `with` inputs; no
+	// new job, step command or permission.
+	expectedCIExecutionHash     = "3ec93d8109aac28d7514142496ca3777ae1e1e6502683e8ca458149a944a7cf9"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

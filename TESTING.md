@@ -123,6 +123,61 @@ Run the same thing locally with:
 bazel test //... --config=fresh
 ```
 
+### Merge queue
+
+The required-check workflows are merge-queue ready but the queue is off: it
+starts working only when a maintainer adds a `merge_queue` rule to the main
+ruleset. `bazel.yml`, `ci.yml` and `codeql.yml` run on
+`merge_group: [checks_requested]`, so every required check reports on a
+queue entry's merge-group commit: `Check` and `CI / required` (`ci.yml`),
+the four `Analyze (...)` (`codeql.yml`, which also feeds the ruleset's
+`code_scanning` rule), `bazel test (side-by-side)` and `BUILD files in sync`
+(`bazel.yml`). `scripts/ci_merge_queue_test.go` pins this:
+
+- **Same-repo trust.** A merge group has no `github.event.pull_request`, so
+  the `rbe` job takes the same-repo path (mode `remote`, no mint), whoever
+  queued the entry. Every expression in the three workflows that reads the
+  event is listed in the test with its `merge_group` value. A new one fails
+  the test until someone checks that value.
+- **The tested tree is the queue ref.** `fresh-merge` and the `rbe` job's
+  `base` step run on `pull_request` only, because the merge-group commit is
+  already the merge. The OpenAPI breaking-change gate compares the spec
+  against `merge_group.base_sha`, the commit the entry is queued onto (main
+  or the entry ahead of it). `ci.yml`'s path filter diffs `base_sha` to
+  `head_sha`, which is the entry's own change, as on a PR.
+- **Queue runs are never canceled.** `bazel.yml` and `ci.yml` key a merge
+  group's concurrency group on its own `gh-readonly-queue/*` ref, which is
+  unique per entry and base, with `cancel-in-progress` false. A PR's runs,
+  keyed on its number, never share a queue entry's group.
+- **The lanes match a PR's.** Unit, acceptance, integration-packages and
+  integration-smoke run, and a queue run reuses cached test results like
+  any other run. The `integration` lane can later be gated on `merge_group`
+  only (G3).
+
+**Recommended queue settings** (for 60-70 merges a day, with a peak of 7 an
+hour from 2026-10-05 to 10-07). A queue run costs about what a push run
+does, 6-10 minutes, so 4 parallel builds clear about 24 entries an hour:
+
+| Setting | Value | Why |
+|---|---|---|
+| Merge method | `SQUASH` | The ruleset allows merge and squash; `main` history is squash-shaped |
+| Grouping strategy | `ALLGREEN` | Every group's checks must pass; a red entry is ejected, not merged with the rest |
+| Build concurrency (`max_entries_to_build`) | 4 | About 3x the hourly peak. Each entry runs 4 remote lanes, so going higher mostly adds rbe-west load |
+| Group size (`max_entries_to_merge`) | 5 | Bursts merge together |
+| `min_entries_to_merge` / wait | 1 / 5 min | Never wait for a batch (the wait is inert at 1) |
+| Status check timeout (`check_response_timeout_minutes`) | 60 | A cold rbe-west scale-up plus a queued Windows job can pass 30 minutes; a timeout ejects the entry and rebuilds everything behind it |
+| Required checks | the ruleset's 7 contexts, unchanged | Classic branch protection keeps `CI / required`, which also reports on `merge_group` |
+
+Repository auto-merge is already on, so `gh pr merge --auto` queues a PR.
+After enabling the queue, watch the first day's `merge_group` run times, then
+adjust the build concurrency.
+
+**Security.** A queue run executes the queued commit's own workflows with
+CI secrets, including the rbe-west executor credentials. Queueing a fork PR
+is therefore the same trust decision as merging it. Review a fork PR's
+changes to `.github/**`, `.bazelrc`, `tools/**`, `MODULE.bazel` and BUILD
+files before you queue it.
+
 ### Measuring cache hits (BEP cache report)
 
 To check whether a run actually reused results, write a Build Event

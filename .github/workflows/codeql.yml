@@ -10,6 +10,12 @@ on:
       - reopened
       - synchronize
       - ready_for_review
+  # Merge queue (dormant until a ruleset enables one; TESTING.md "Merge
+  # queue"): the four required Analyze checks, and the ruleset's
+  # code_scanning rule, need results on every queue entry's merge-group
+  # commit.
+  merge_group:
+    types: [checks_requested]
   schedule:
     - cron: "24 4 * * 1"
   workflow_dispatch:

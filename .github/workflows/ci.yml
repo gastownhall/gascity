@@ -16,6 +16,13 @@ on:
       - reopened
       - synchronize
       - ready_for_review
+  # Merge queue (dormant until a ruleset enables one; TESTING.md "Merge
+  # queue"): Check and CI / required must report on every queue entry's
+  # merge-group commit. The concurrency group below keys a merge group on
+  # its own queue ref and never cancels it; `changes` diffs the entry
+  # against merge_group.base_sha.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -67,9 +74,14 @@ jobs:
       suite_mode: ${{ steps.coverage.outputs.suite_mode }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      # merge_group: the entry's own changes, merge_group.base_sha (main or
+      # the entry ahead) to head_sha, as a PR's are its diff from its base.
+      # Empty on every other event, which keeps the action's defaults.
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: filter
         with:
+          base: ${{ github.event.merge_group.base_sha }}
+          ref: ${{ github.event.merge_group.head_sha }}
           filters: |
             mail:
               - 'internal/mail/**'
