@@ -134,7 +134,7 @@ func (x *effectExecutor) submitIntent(p *effectPass, it intent, seq uint64) erro
 		}
 		return build(p, it)(ctx)
 	}
-	return x.submit(it.Key, sessionEffect{Kind: it.Kind, Reason: it.Reason, Seq: seq, Token: it.Create.Token, Finalize: it.Finalize, Deadline: it.Deadline, Run: run})
+	return x.submit(it.Key, sessionEffect{Kind: it.Kind, Reason: it.Reason, Seq: seq, Token: it.CreatePlan.Token, Finalize: it.Finalize, Deadline: it.Deadline, Run: run})
 }
 
 // submit starts e for k, or for e's token when it has one (a create). It

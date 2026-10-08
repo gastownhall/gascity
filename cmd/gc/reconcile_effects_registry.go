@@ -28,14 +28,15 @@ type effectPass struct {
 	Alloc   *allocDecision
 	// create is what the pass hands its creates, raw stores included: a
 	// create's guarded row write is v5 R1's exception 1 (§13), and only
-	// createEffect reads it. creates runs them; the planner sets it.
+	// createEffect reads it. creates runs them. The planner sets both, the
+	// first on its first admitted create (planner.submit).
 	create  *createPass
 	creates *createEffects
 }
 
 // newEffectPass is w's and a's effectPass.
 func newEffectPass(w *World, a *allocDecision) *effectPass {
-	p := &effectPass{Writers: make(map[string]fencedWriter, len(w.LegStores)), Alloc: a, create: newCreatePass(w)}
+	p := &effectPass{Writers: make(map[string]fencedWriter, len(w.LegStores)), Alloc: a}
 	if w.Env != nil {
 		p.Runtime = w.Env.SP
 	}

@@ -14,6 +14,6 @@ import "context"
 // the plan the planner minted its token into.
 func createEffect(p *effectPass, it intent) func(context.Context) settlement {
 	return func(ctx context.Context) settlement {
-		return p.creates.run(ctx, p.create, it.plan()).settlement()
+		return p.creates.run(ctx, p.create, it.CreatePlan).settlement()
 	}
 }

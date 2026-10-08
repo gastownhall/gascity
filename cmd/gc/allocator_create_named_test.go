@@ -635,7 +635,7 @@ func TestNamedReopenConcurrentWriterLosesFence(t *testing.T) {
 			t.Fatalf("row = %s, writes %v; want no blind reopen", after.Status, writes.count())
 		}
 		assertFailedNoWrite(t, h)
-		h.assertRefused(t, plan, createStageFence)
+		h.assertRefused(t, plan, createStageNoWriter)
 	})
 }
 
@@ -1958,6 +1958,27 @@ func TestCreateEffect_NamedReopenWritesNothingOnceItsEntryIsSettled(t *testing.T
 	}
 	if after, err := inner.Get(closed.ID); err != nil || after.Status != "closed" {
 		t.Fatalf("row = %+v, %v; want it still closed", after, err)
+	}
+	if e := h.entry(t); e.Landed || e.Ambiguous || e.Stage != "" || !errors.Is(e.Err, errCreateAbandoned) {
+		t.Fatalf("settlement = %+v, want an abandoned no-write that backs nothing off", e)
+	}
+}
+
+// Kills a named fresh create that writes once its effect's context ended:
+// with no closed row to reopen, the context ends during the live
+// NamedSessionIdentityRows read, and the create, which checks its context
+// just before its write, creates nothing.
+func TestCreateEffect_NamedCreateWritesNothingOnceItsContextEnded(t *testing.T) {
+	cfg := mayorCity()
+	inner := newNamedCondStore(t)
+	h := newNamedHarness(t, t.TempDir(), nil)
+	h.reserve(t, "c1")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.submit(ctx, &createPass{cfg: cfg, store: &namedCASStore{Store: inner, bump: cancel}}, namedPlan(t, cfg, "c1", "mayor"))
+	h.wg.Wait()
+	if got := inner.recorded(); len(got) != 0 {
+		t.Fatalf("writes = %v, want none once the context ended", got)
 	}
 	if e := h.entry(t); e.Landed || e.Ambiguous || e.Stage != "" || !errors.Is(e.Err, errCreateAbandoned) {
 		t.Fatalf("settlement = %+v, want an abandoned no-write that backs nothing off", e)

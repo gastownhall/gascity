@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
@@ -189,6 +192,45 @@ func TestPassClearsAmbiguousCreatesAndAlertsAtHardBound(t *testing.T) {
 	}
 }
 
+// Kills a false ambiguous-create-bound alert for a named create (P5 as
+// amended): a named identity has one open row (the flock, C11), so a named
+// ambiguous create clears once the census shows an open canonical row of its
+// identity, whatever token the row carries. That covers a reopen (the row
+// keeps its own token), an AdoptLive whose runtime's token was re-stamped on
+// the row, and a create abandoned before its write while another writer
+// made the row. A named create whose identity has no row, or a pool create,
+// still waits for its token or the bound.
+func TestNamedAmbiguousCreateClearsOnItsIdentityRow(t *testing.T) {
+	for _, tc := range []struct{ name, rowToken string }{
+		{"reopen keeps the row's token", "tok-row-own"},
+		{"adopt-live re-stamps the runtime's token", "tok-runtime"},
+		{"abandoned before its write, row made elsewhere", "tok-other-writer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newGatherFixture(t, chatRow("gc-1", "3", "instance_token", tc.rowToken))
+			var stderr strings.Builder
+			f.p.stderr = &stderr
+			for _, e := range []inflightEntry{
+				{Kind: inflightCreate, Token: "tok-plan", Identity: "named:chat", Leg: "city"},
+				{Kind: inflightCreate, Token: "tok-boss", Identity: "named:boss", Leg: "city"},
+				{Kind: inflightCreate, Token: "tok-pool", Identity: "chat/chat-1", Leg: "city"},
+			} {
+				seq := f.inflight.add(e)
+				f.inflight.settle(settlement{Kind: inflightCreate, Seq: seq, Token: e.Token, Outcome: settledAmbiguous, At: gatherNow.Add(-time.Minute)})
+			}
+			f.passRecord(t)
+			var left []string
+			for _, e := range createEntries(f.inflight.view()) {
+				left = append(left, e.Identity)
+			}
+			slices.Sort(left)
+			if !slices.Equal(left, []string{"chat/chat-1", "named:boss"}) || strings.Contains(stderr.String(), "alert "+alertAmbiguousBound) {
+				t.Fatalf("left in flight %v, stderr %q; want named:chat cleared by its row, silently, and the rest held", left, stderr.String())
+			}
+		})
+	}
+}
+
 // Kills a create admitted before a provider swap's pause running during it
 // (P7, the C2c2 swap race): while starts are closed a create runs nothing
 // and settles refused with cause swap-pause and its token, which backs
@@ -224,7 +266,7 @@ func TestPlannerStopJoinsCreateEffects(t *testing.T) {
 		plan := workerPlan(cfg, "c1", 1)
 		plan.Token = "tok-1"
 		pass := &effectPass{create: &createPass{cfg: cfg, store: store}, creates: creates}
-		if err := x.submitIntent(pass, intent{Kind: intentCreate, Create: plan, Deadline: time.Now().Add(time.Minute)}, 1); err != nil {
+		if err := x.submitIntent(pass, intent{Kind: intentCreate, CreatePlan: plan, Deadline: time.Now().Add(time.Minute)}, 1); err != nil {
 			t.Fatal(err)
 		}
 		synctest.Wait()
@@ -248,8 +290,9 @@ func TestPlannerStopJoinsCreateEffects(t *testing.T) {
 }
 
 // Kills a C0.7 bypass, or the check left unwired from the city's host: over
-// stores that resolve no conditional writer, boot refuses at once, naming
-// each class store and its missing capability, and the planner never starts.
+// stores with conditional writes off, boot refuses at once, naming each class
+// store, its mode and its missing capability, and the conditional_writes
+// fix, raises boot-refused, and never starts the planner.
 func TestBootRefusesWithoutConditionalWriter(t *testing.T) {
 	cr, _ := newPhaseFixtureRuntime(t, false, true)
 	stderr := &lockedBuffer{}
@@ -262,7 +305,10 @@ func TestBootRefusesWithoutConditionalWriter(t *testing.T) {
 	if cr.bootV2(ctx) || ctx.Err() != nil {
 		t.Fatal("bootV2 reached ready, or retried, over stores without a conditional writer")
 	}
-	for _, want := range []string{"alert " + alertBootRefused, "C0.7", "sessions store: conditional writer false", "graph store: conditional writer false"} {
+	for _, want := range []string{
+		"alert " + alertBootRefused, "C0.7", "conditional_writes=unset", `set [beads] conditional_writes = "auto"`,
+		"sessions store (", "graph store (", "conditional writer false (conditional writes are off)",
+	} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("stderr = %q, want %q", stderr.String(), want)
 		}
@@ -275,18 +321,20 @@ func TestBootRefusesWithoutConditionalWriter(t *testing.T) {
 	}
 }
 
-// Kills a C0.7 that checks the writer alone: a store that resolves a
-// conditional writer but no atomic conditional closer (a MemStore) refuses
-// boot, naming the closer.
+// Kills a C0.7 that checks the writer alone, or names the wrong fix: a store
+// that resolves a conditional writer but no atomic conditional closer (an
+// auto-stamped MemStore) refuses boot, naming its kind, mode and closer, and
+// a store that fences as the fix.
 func TestBootRefusesWithoutAtomicCloser(t *testing.T) {
 	mem := fencedMemStore(t)
-	caps := v2ClassStoreCapabilities(mem, mem)
+	caps := v2ClassStoreCapabilities(mem, mem, false)
 	if !caps[0].Writer || caps[0].Closer {
 		t.Fatalf("capabilities %+v, want a writer and no closer", caps)
 	}
 	refusal := v2CapabilityRefusal(caps)
-	if refusal == nil || !strings.Contains(refusal.Error(), "sessions store: conditional writer true, atomic conditional closer false") {
-		t.Fatalf("C0.7 = %v, want a refusal naming the missing closer", refusal)
+	if refusal == nil || !strings.Contains(refusal.Error(), "sessions store (MemStore, conditional_writes=auto): conditional writer true, atomic conditional closer false") ||
+		!strings.Contains(refusal.Error(), "a store that fences") || strings.Contains(refusal.Error(), "conditional_writes = ") {
+		t.Fatalf("C0.7 = %v, want a refusal naming the missing closer and a store that fences", refusal)
 	}
 	rt := newDefaultPlanner(io.Discard)
 	rt.host.capabilities = func() error { return refusal }
@@ -299,13 +347,45 @@ func TestBootRefusesWithoutAtomicCloser(t *testing.T) {
 }
 
 // Kills over-refusal: maintainer-city's shape, a SQLite store with the
-// revision layout, bare or under the controller's CachingStore, resolves
-// both capabilities.
+// revision layout, bare or under the controller's CachingStore, and the
+// native-Dolt wrapper chain (the bead policy store over the CachingStore
+// over an atomic-close store, stamped auto) resolve both capabilities, read
+// by boot and by doctor alike.
 func TestBootAdmitsSQLiteRevisionLayout(t *testing.T) {
 	sqlite := stampedSQLite(t, gate.Auto)
-	cached := beads.NewCachingStoreForTest(sqlite, nil)
-	if err := v2CapabilityRefusal(v2ClassStoreCapabilities(sqlite, cached)); err != nil {
-		t.Fatalf("C0.7 over the SQLite revision layout: %v", err)
+	atomic := beads.NewAtomicCloseMemStore()
+	if err := beads.StampOpenedStore(atomic, "MemStore", gate.Auto, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	chain := &beadPolicyStore{Store: beads.NewCachingStoreForTest(atomic, nil), cfg: workerCity(1)}
+	for name, store := range map[string]beads.Store{
+		"sqlite": sqlite, "cached sqlite": beads.NewCachingStoreForTest(sqlite, nil), "policy over cache over atomic close": chain,
+	} {
+		for _, inspect := range []bool{false, true} {
+			if err := v2CapabilityRefusal(v2ClassStoreCapabilities(store, store, inspect)); err != nil {
+				t.Errorf("%s (inspect=%v): %v", name, inspect, err)
+			}
+		}
+	}
+}
+
+// Kills a doctor C0.7 read that resolves the writer as boot does, which
+// fires the auto-mode degraded event from a read-only check: over an
+// incapable auto-stamped store, doctor's read fires none and still reports no
+// writer, with the store's reason; boot's read fires it.
+func TestDoctorC07ReadFiresNoDegradeEvent(t *testing.T) {
+	mem := beads.NewMemStore()
+	mem.DisableConditionalWrites = true
+	degraded := 0
+	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, func(beads.ConditionalWritesDegrade) { degraded++ }, nil); err != nil {
+		t.Fatal(err)
+	}
+	caps := v2ClassStoreCapabilities(mem, mem, true)
+	if degraded != 0 || caps[0].Writer || !strings.Contains(caps[0].String(), "conditional writes disabled on this store instance") {
+		t.Fatalf("doctor read: %d degrade events, capabilities %s; want none, no writer, and the store's reason", degraded, caps[0])
+	}
+	if v2ClassStoreCapabilities(mem, mem, false); degraded == 0 {
+		t.Fatal("boot's read fired no degrade event: the test no longer tells the two reads apart")
 	}
 }
 
@@ -314,7 +394,7 @@ func TestBootAdmitsSQLiteRevisionLayout(t *testing.T) {
 // store, and errors only when the latched mode is v2 and boot would refuse.
 func TestSessionReconcilerDoctorReportsC07(t *testing.T) {
 	mem := fencedMemStore(t)
-	caps := func() ([]v2StoreCapability, error) { return v2ClassStoreCapabilities(mem, mem), nil }
+	caps := func() ([]v2StoreCapability, error) { return v2ClassStoreCapabilities(mem, mem, true), nil }
 	for _, tc := range []struct {
 		name, mode string
 		want       doctor.CheckStatus
@@ -328,8 +408,40 @@ func TestSessionReconcilerDoctorReportsC07(t *testing.T) {
 		c.capabilities = caps
 		r := c.Run(nil)
 		details := strings.Join(r.Details, "\n")
-		if r.Status != tc.want || !strings.Contains(details, "C0.7 sessions store: conditional writer true, atomic conditional closer false") || !strings.Contains(details, "C0.7 graph store") {
+		if r.Status != tc.want || !strings.Contains(details, "C0.7 sessions store (MemStore, conditional_writes=auto): conditional writer true, atomic conditional closer false") || !strings.Contains(details, "C0.7 graph store") {
 			t.Errorf("%s: status %v, details %q; want %v with both stores' capabilities", tc.name, r.Status, details, tc.want)
 		}
+	}
+}
+
+// Kills the doctor's C0.7 read left unwired from buildDoctorChecks: on a
+// real city with a file store, the registered daemon-session-reconciler
+// check reports both class stores' capabilities, read through doctor's own
+// store factory.
+func TestBuildDoctorChecksWiresC07Capabilities(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatalf("ensurePersistedScopeLocalFileStore: %v", err)
+	}
+	var check doctor.Check
+	for _, c := range buildDoctorChecks(cityDir, &config.City{}, nil, buildDoctorChecksOpts{Stderr: io.Discard}) {
+		if c.Name() == "daemon-session-reconciler" {
+			check = c
+		}
+	}
+	if check == nil {
+		t.Fatal("daemon-session-reconciler not registered")
+	}
+	details := strings.Join(check.Run(&doctor.CheckContext{CityPath: cityDir}).Details, "\n")
+	if !strings.Contains(details, "C0.7 sessions store (") || !strings.Contains(details, "C0.7 graph store (") {
+		t.Fatalf("details = %q, want both class stores' C0.7 capabilities", details)
 	}
 }

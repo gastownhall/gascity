@@ -229,6 +229,7 @@ const (
 	createStageFenceRead = "fence-read" // a pool create's locked failure that proves no name taken
 	createStagePanic     = "panic"      // a panic before the write
 	createStageResolve   = "resolve"    // a named create's read-only template resolution
+	createStageNoWriter  = "no-writer"  // a named reopen whose store resolves no conditional writer (v5 C2)
 )
 
 // createProgress is how far one effect got: the stage a no-write failure
@@ -410,7 +411,7 @@ func (x *createEffects) settle(p createPlan, prog createProgress, info session.I
 		s.Stage = prog.stage
 	}
 	if err != nil {
-		subject := p.Template
+		subject := p.QualifiedInstance
 		if p.Named != nil {
 			subject = p.Named.Identity
 		}

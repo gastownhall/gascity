@@ -235,6 +235,6 @@ func (c *sessionReconcilerDoctorCheck) reportCapabilities(r *doctor.CheckResult,
 	}
 	if refusal := v2CapabilityRefusal(caps); refusal != nil && mode == reconcilerV2 {
 		r.Status, r.Message = doctor.StatusError, refusal.Error()
-		r.FixHint = "put the sessions and graph classes on a store that fences, or remove the key to run the legacy reconciler"
+		r.FixHint = "see the message for the fix, or remove the key to run the legacy reconciler"
 	}
 }

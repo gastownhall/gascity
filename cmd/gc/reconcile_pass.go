@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"runtime/debug"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -186,24 +187,31 @@ func splitRegistered(intents []intent, creates bool) (registered, unregistered [
 }
 
 // submit hands each admitted intent's effect to the executor under a new
-// in-flight entry, recorded first so the next pass counts it. A create gets
+// in-flight entry, recorded first so the next pass counts it; the creates'
+// inputs are built on the first admitted create. A create gets
 // its instance token minted here, into its plan and its entry, which is
 // keyed by it (S-8, P5). A submit the executor refuses (busy, or stopped)
 // runs and posts nothing, so its entry is settled here at once.
 func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
+	if len(admitted) == 0 {
+		return
+	}
 	pass := newEffectPass(w, a)
 	pass.creates = p.creates
 	for _, it := range admitted {
 		e := inflightEntry{Kind: it.Kind, Key: it.Key, Endpoint: it.Endpoint}
 		if it.Kind == intentCreate {
-			it.Create.Token = session.NewInstanceToken()
+			if pass.create == nil {
+				pass.create = newCreatePass(w)
+			}
+			it.CreatePlan.Token = session.NewInstanceToken()
 			e = createInflightEntry(it, w.SessionsLeg)
 		}
 		seq := p.inflight.add(e)
 		if seq == 0 {
 			continue
 		}
-		it.Create.Seq = seq
+		it.CreatePlan.Seq = seq
 		if err := p.effects.submitIntent(pass, it, seq); err != nil {
 			p.inflight.settle(settlement{Key: it.Key, Kind: it.Kind, Seq: seq, Token: e.Token})
 		}
@@ -214,7 +222,7 @@ func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
 // and endpoint, and the planning stand-in it reserves until the census shows
 // its row (inFlightCreates).
 func createInflightEntry(it intent, leg string) inflightEntry {
-	c := it.Create
+	c := it.CreatePlan
 	e := inflightEntry{
 		Kind: it.Kind, Endpoint: it.Endpoint, Token: c.Token, Identity: c.identity().key(), Leg: leg,
 		Template: c.Template, QualifiedInstance: c.QualifiedInstance, Slot: c.Slot, WorkBeadID: c.WorkBeadID,
@@ -225,17 +233,23 @@ func createInflightEntry(it intent, leg string) inflightEntry {
 	return e
 }
 
-// clearAmbiguous clears the ambiguous creates w's census shows by token, or
-// whose hard bound passed, alerting on each hard-bound clear (P5), and
-// refreshes w's in-flight view.
+// clearAmbiguous clears the ambiguous creates w's census shows, by token or,
+// for a named create, by an open canonical row of its identity, or whose
+// hard bound passed, alerting on each hard-bound clear (P5), and refreshes
+// w's in-flight view.
 func (p *planner) clearAmbiguous(w *World, now time.Time) {
-	tokens := make(map[string]bool)
+	c := inflightCensus{Tokens: make(map[string]bool), Named: make(map[string]bool)}
 	for _, row := range w.Census.Rows {
 		if row.InstanceToken != "" {
-			tokens[row.InstanceToken] = true
+			c.Tokens[row.InstanceToken] = true
 		}
 	}
-	p.alertCleared(p.inflight.clearVisible(inflightCensus{Tokens: tokens}, now))
+	for _, row := range w.Census.Canonical() {
+		if id := strings.TrimSpace(row.Info.ConfiguredNamedIdentity); id != "" && !row.Info.Closed {
+			c.Named[createIdentity{QualifiedInstance: id, Named: true}.key()] = true
+		}
+	}
+	p.alertCleared(p.inflight.clearVisible(c, now))
 	w.InFlight = p.inflight.view()
 }
 
@@ -261,14 +275,10 @@ func createIntent(cfg *config.City, rev string, ap allocPlan) intent {
 	}
 	plan.ConfigRev = rev
 	return intent{
-		Kind: intentCreate, Reason: "create-" + ap.Kind.String(), Create: plan, Floor: ap.Request.FloorGuarantee,
+		Kind: intentCreate, Reason: "create-" + ap.Kind.String(), CreatePlan: plan, Floor: ap.Request.FloorGuarantee,
 		Endpoint: rowEndpoint(cfg, session.Info{Template: ap.Template}),
 	}
 }
-
-// plan is a create intent's plan (the effect lint reads its field name as
-// the banned store method).
-func (it intent) plan() createPlan { return it.Create }
 
 // traceRows returns the decided rows whose (reason, outcome) changed since
 // they were last traced, in census order (R6), and forgets rows the census

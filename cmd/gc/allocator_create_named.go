@@ -236,19 +236,17 @@ func (x *createEffects) writeNamed(ctx context.Context, pass *createPass, p crea
 
 // reopenNamed reopens closed, the identity's closed canonical row, with
 // legacy's reopen batch in one write, conditional on the revision the fenced
-// read saw. A store that resolves no conditional writer refuses: legacy's
-// last-writer-wins transaction is never a v2 write (v5 C2, R3). The
+// read saw. A store that resolves no conditional writer refuses at the write,
+// after the fence checks: legacy's last-writer-wins transaction is never a v2
+// write (v5 C2, R3). The
 // settlement names the row whatever the outcome; settle reads a refused
 // write (a lost fence, a writer that cannot fence) as no write.
 func reopenNamed(ctx context.Context, store beads.Store, live beads.Store, cfg *config.City, p createPlan, closed beads.Bead, now time.Time, prog *createProgress) (session.Info, error) {
 	plan := p.Named
 	prog.retarget = closed.ID
 	writer, _, err := beads.ResolveConditionalWriter(store)
-	switch {
-	case err != nil:
+	if err != nil {
 		return session.Info{}, fmt.Errorf("reopening configured named session %q: %w", plan.Identity, err)
-	case writer == nil:
-		return session.Info{}, fmt.Errorf("reopening configured named session %q: %w", plan.Identity, errNoConditionalWriter)
 	}
 	state := "stopped"
 	if plan.AdoptLive {
@@ -262,6 +260,10 @@ func reopenNamed(ctx context.Context, store beads.Store, live beads.Store, cfg *
 		if err := checkCreateContext(ctx); err != nil {
 			return err
 		}
+		if writer == nil {
+			prog.stage = createStageNoWriter
+			return errNoConditionalWriter
+		}
 		prog.writing, prog.rowID = true, closed.ID
 		return writer.UpdateIfMatch(closed.ID, closed.Revision, opts)
 	})
@@ -269,7 +271,7 @@ func reopenNamed(ctx context.Context, store beads.Store, live beads.Store, cfg *
 	switch {
 	case err == nil:
 		return session.Info{ID: reopened.ID, InstanceToken: reopened.Metadata["instance_token"], Generation: reopened.Metadata["generation"]}, nil
-	case !errors.As(err, &written) || errors.Is(err, errCreateAbandoned):
+	case !errors.As(err, &written) || errors.Is(err, errCreateAbandoned) || errors.Is(err, errNoConditionalWriter):
 		return session.Info{}, err
 	}
 	return session.Info{}, poolCreateWriteError{err: err, rowID: closed.ID}

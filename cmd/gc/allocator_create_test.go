@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1710,24 +1711,43 @@ func TestCreateEffectFenceFailsClosedOnPartialLeg(t *testing.T) {
 	}
 }
 
-// Kills a pool create that writes once its effect's context ended: the
-// context ends inside the identifier locks, after the live re-census, and
-// the create checks it just before the row write, so no row lands and the
-// identity is not backed off.
+// censusCancelStore ends a context on the first List once armed: the
+// locked live re-census, when the identifier locks arm it.
+type censusCancelStore struct {
+	beads.Store
+	armed  atomic.Bool
+	cancel context.CancelFunc
+}
+
+func (s *censusCancelStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if s.armed.Load() {
+		s.cancel()
+	}
+	return s.Store.List(q)
+}
+
+// Kills a pool create that writes once its effect's context ended, or that
+// checks it only on entering the locks: the context ends during the locked
+// live re-census, and the create checks it just before the row write, so no
+// row lands and the identity is not backed off.
 func TestCreateEffect_PoolWritesNothingOnceItsContextEnded(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	store := &censusCancelStore{Store: beads.NewMemStore(), cancel: cancel}
 	h := newCreateHarness(t, func(host *createEffectHost) {
 		host.withLocks = func(_ string, _ []string, fn func() error) error {
-			cancel()
+			store.armed.Store(true)
 			return fn()
 		}
 	})
-	cfg, store := workerCity(2), beads.NewMemStore()
+	cfg := workerCity(2)
 	h.reserve(t, "c1")
 	h.submit(ctx, &createPass{cfg: cfg, store: store}, workerPlan(cfg, "c1", 1))
 	h.wg.Wait()
-	if rows := sessionRows(t, store); len(rows) != 0 {
+	if ctx.Err() == nil {
+		t.Fatal("the locked re-census never listed the store")
+	}
+	if rows := sessionRows(t, store.Store); len(rows) != 0 {
 		t.Fatalf("rows = %+v, want none once the context ended", rows)
 	}
 	if e := h.entry(t); e.Landed || e.Ambiguous || e.Stage != "" || !errors.Is(e.Err, errCreateAbandoned) {

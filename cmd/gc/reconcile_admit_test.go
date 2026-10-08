@@ -26,7 +26,7 @@ func startOn(i int, ep endpointKey, rank time.Duration) intent {
 func rowIntent(kind string, i int) intent { return intent{Kind: kind, Key: admitRow(i)} }
 
 func poolCreate(template string, ep endpointKey) intent {
-	return intent{Kind: intentCreate, Endpoint: ep, Create: createPlan{Template: template}}
+	return intent{Kind: intentCreate, Endpoint: ep, CreatePlan: createPlan{Template: template}}
 }
 
 func keysOf(its []intent) []string {
@@ -285,7 +285,7 @@ func TestAdmitFairShareSurvivesTheCreateCap(t *testing.T) {
 		in.FairSeed = seed
 		per := map[string]int{}
 		for _, it := range admit(in, intents).Admitted {
-			per[it.Create.Template]++
+			per[it.CreatePlan.Template]++
 		}
 		if per["a"] != 4 || per["b"] != 4 {
 			t.Fatalf("seed %d: admitted %v, want 4 each", seed, per)
@@ -374,7 +374,7 @@ func TestAdmitCreateOnlyIfStartAdmissible(t *testing.T) {
 	if res := admit(in, []intent{poolCreate("w", ""), poolCreate("w", "")}); len(res.Admitted) != 1 || res.Deferred[0].Cause != causeAwaitingBudget || res.FairSeed != 1 {
 		t.Fatalf("admitted %d deferred %v seed %d: two creates shared one token, or the seed stood still", len(res.Admitted), res.Deferred, res.FairSeed)
 	}
-	named := intent{Kind: intentCreate, Create: createPlan{Named: &namedCreatePlan{Identity: "boss"}}}
+	named := intent{Kind: intentCreate, CreatePlan: createPlan{Named: &namedCreatePlan{Identity: "boss"}}}
 	if res := admit(in, []intent{poolCreate("w", ""), named}); len(res.Admitted) != 1 || !res.Admitted[0].named() || res.FairSeed != 0 {
 		t.Fatalf("admitted %+v seed %d: a named create goes first, and no pool create advanced the seed", res.Admitted, res.FairSeed)
 	}

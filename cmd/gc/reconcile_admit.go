@@ -124,11 +124,11 @@ type intent struct {
 	Reason   string      // the arm's reason, for the trace
 	Endpoint endpointKey // config-only; a start or create is gated on it
 	Rank     time.Time   // orders starts oldest first: wakeFairnessTime (START-009)
-	// Create is a create's plan; Floor marks a pool create that satisfies a
-	// min_active_sessions floor, for the fair share.
-	Create createPlan
-	Floor  bool
-	Basis  rowBasis // the incarnation the pass saw; the effect's CAS re-checks it
+	// CreatePlan is a create's plan; Floor marks a pool create that
+	// satisfies a min_active_sessions floor, for the fair share.
+	CreatePlan createPlan
+	Floor      bool
+	Basis      rowBasis // the incarnation the pass saw; the effect's CAS re-checks it
 	// Finalize marks the stop verb proposed for a row whose runtime reads
 	// gone: it confirms and finalizes, and stops nothing (A4, D3).
 	Finalize bool
@@ -142,7 +142,7 @@ type intent struct {
 	Cause    string
 }
 
-func (it intent) named() bool { return it.Create.Named != nil }
+func (it intent) named() bool { return it.CreatePlan.Named != nil }
 
 // finalizesOnly is the stop verb's finalize, the one intent a row backoff
 // does not defer (P4), unless the finalize's own refusal recorded it.
@@ -308,9 +308,9 @@ func (a *admission) order(intents []intent) []intent {
 		if tier(it) != 3 {
 			continue
 		}
-		i := slices.IndexFunc(a.demands, func(d poolplan.Demand) bool { return d.Template == it.Create.Template })
+		i := slices.IndexFunc(a.demands, func(d poolplan.Demand) bool { return d.Template == it.CreatePlan.Template })
 		if i < 0 {
-			i, a.demands = len(a.demands), append(a.demands, poolplan.Demand{Template: it.Create.Template})
+			i, a.demands = len(a.demands), append(a.demands, poolplan.Demand{Template: it.CreatePlan.Template})
 		}
 		a.demands[i].FreshCreates++
 		a.demands[i].HasFloor = a.demands[i].HasFloor || it.Floor
@@ -388,7 +388,7 @@ func (a *admission) createCause(it intent) string {
 		a.budget, a.budgetSet = poolplan.NewCreateBudget(min(left, createsInFlightCap-a.running[capCreates])), true
 		a.budget.ConfigureFairShare(a.demands, a.in.FairSeed)
 	}
-	if !a.budget.TryClaim(it.Create.Template) {
+	if !a.budget.TryClaim(it.CreatePlan.Template) {
 		return causeFairShare
 	}
 	a.poolAdmitted = true

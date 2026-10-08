@@ -456,7 +456,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 						return nil, err
 					}
 					routes := cliStorageRoutes(cityPath)
-					return v2ClassStoreCapabilities(resolveSessionStore(routes, store, cfg, cityPath, nil), resolveGraphStore(routes, store, cfg, cityPath, nil)), nil
+					return v2ClassStoreCapabilities(resolveSessionStore(routes, store, cfg, cityPath, nil), resolveGraphStore(routes, store, cfg, cityPath, nil), true), nil
 				}
 			}
 			registerCityStoreCheck(newWorkOptionMetadataMigrationCheck(cfg, cityPath, storeFactory))
