@@ -514,8 +514,18 @@ func TestDoHookClaimSkipsBudgetDeferredStaleAssigneeCandidate(t *testing.T) {
 // agent's name onto a bead deliberately parked hold:mayor/hold:external
 // contradicts the hold contract: the required next actor is, by construction,
 // not this session.
+//
+// The case and padded variants pin the trimmed, case-insensitive comparison
+// that keeps this seam agreeing with the hook-serve filter
+// (isHeldHookCandidate); the lookalike sibling pins the other direction —
+// hold-ish labels that are not a canonical value are ordinary work and must
+// still be pre-assigned.
 func TestPreassignHookContinuationGroupSkipsHeldSiblings(t *testing.T) {
-	for _, label := range beadmeta.DispatchHoldLabels {
+	var heldLabels []string
+	for _, hold := range beadmeta.DispatchHoldLabels {
+		heldLabels = append(heldLabels, hold, strings.ToUpper(hold), " "+hold+" ")
+	}
+	for _, label := range heldLabels {
 		t.Run(label, func(t *testing.T) {
 			claimed := beads.Bead{
 				ID:       "work-1",
@@ -530,6 +540,7 @@ func TestPreassignHookContinuationGroupSkipsHeldSiblings(t *testing.T) {
 					return []beads.Bead{
 						{ID: "sib-held", Status: "open", Metadata: claimed.Metadata, Labels: []string{label}},
 						{ID: "sib-open", Status: "open", Metadata: claimed.Metadata},
+						{ID: "sib-lookalike", Status: "open", Metadata: claimed.Metadata, Labels: []string{"mpr-human-hold", "needs-mayor"}},
 					}, nil
 				},
 				AssignContinuation: func(_ context.Context, _ string, _ []string, beadID, assignee string) error {
@@ -543,13 +554,13 @@ func TestPreassignHookContinuationGroupSkipsHeldSiblings(t *testing.T) {
 			if err != nil {
 				t.Fatalf("preassignHookContinuationGroup() error = %v", err)
 			}
-			if want := []string{"sib-open"}; !reflect.DeepEqual(assigned, want) {
-				t.Fatalf("REGRESSION #6026: assigned = %#v, want %#v (held sibling must be skipped, non-held sibling must still be assigned)", assigned, want)
+			if want := []string{"sib-open", "sib-lookalike"}; !reflect.DeepEqual(assigned, want) {
+				t.Fatalf("REGRESSION #6026: assigned = %#v, want %#v (held sibling must be skipped, non-held siblings must still be assigned)", assigned, want)
 			}
-			if want := []string{"sib-open"}; !reflect.DeepEqual(assignedIDs, want) {
+			if want := []string{"sib-open", "sib-lookalike"}; !reflect.DeepEqual(assignedIDs, want) {
 				t.Fatalf("REGRESSION #6026: AssignContinuation called for %#v, want %#v; held sibling must never reach the assign mutation", assignedIDs, want)
 			}
-			if want := []string{"worker-1"}; !reflect.DeepEqual(gotAssignees, want) {
+			if want := []string{"worker-1", "worker-1"}; !reflect.DeepEqual(gotAssignees, want) {
 				t.Fatalf("pinned assignees = %#v, want %#v", gotAssignees, want)
 			}
 		})

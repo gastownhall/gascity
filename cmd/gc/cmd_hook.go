@@ -1418,9 +1418,10 @@ func isSelfBlockedHookCandidate(item map[string]any) bool {
 // hold dimension is filtered here, in the one seam every hook path already runs
 // through (the claim, the cross-store federation, and plain `gc hook`).
 //
-// Only the two canonical values match, compared exactly against the shared
-// beadmeta constants: unrelated labels that merely look hold-ish (`mpr-human-hold`,
-// the routing label `needs-mayor`) are ordinary work and must not be stranded.
+// Only the two canonical values match: each label is trimmed and compared
+// whole, case-insensitively, against the shared beadmeta constants, so
+// unrelated labels that merely look hold-ish (`mpr-human-hold`, the routing
+// label `needs-mayor`) are ordinary work and must not be stranded.
 //
 // An absent or null labels field means "no labels", never "unknown" — bd emits
 // labels:null for an unlabeled bead — so this fails open exactly like the
