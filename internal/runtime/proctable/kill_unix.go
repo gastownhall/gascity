@@ -40,9 +40,12 @@ func KillByPID(pid int) error {
 }
 
 // KillByPIDIdentity is KillByPID bound to the process a scan reported: it
-// refuses unless pid's start identity (ProcessIdentity) still equals identity,
-// so a PID recycled since the scan is never signaled. A target already gone is
-// success. An empty identity falls back to KillByPID's own capture.
+// signals only while pid's start identity (ProcessIdentity) still equals
+// identity, so a PID recycled since the scan is never signaled. A changed
+// identity means the scanned process is gone, which is success, as is a pid
+// that no longer exists ([runtime.ProcessTableScanner.TerminateRuntime]); an
+// identity that cannot be read is an error. An empty identity falls back to
+// KillByPID's own capture.
 //
 // The liveness probes are bound before the identity check, so a recycle
 // between the check and a signal reads as the target's death and sends nothing.
@@ -64,7 +67,8 @@ func killByPIDIdentity(pid int, identity string, readIdentity func(int) (string,
 	case err != nil:
 		return fmt.Errorf("proctable: re-reading start identity of PID %d: %w", pid, err)
 	case current != identity:
-		return fmt.Errorf("proctable: refusing to kill PID %d: start identity %s is not the scanned %s (PID recycled)", pid, current, identity)
+		// The PID was recycled: the scanned process is gone.
+		return nil
 	}
 	return killByPID(
 		pid,
