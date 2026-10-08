@@ -3,6 +3,7 @@ package beads
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 // mc-03lk4: an event carries no revision, so an unverified bead.updated
@@ -61,7 +62,14 @@ func staleEventAfterRescan(t *testing.T, backing Store) (*CachingStore, string, 
 
 func writeHeldUntil(t *testing.T, backing Store, id, value string) Bead {
 	t.Helper()
-	if err := backing.SetMetadata(id, "held_until", value); err != nil {
+	return writeMetadata(t, backing, id, "held_until", value)
+}
+
+// writeMetadata sets key on id around the cache, as another process would,
+// and returns the backing row after it.
+func writeMetadata(t *testing.T, backing Store, id, key, value string) Bead {
+	t.Helper()
+	if err := backing.SetMetadata(id, key, value); err != nil {
 		t.Fatalf("SetMetadata: %v", err)
 	}
 	b, err := backing.Get(id)
@@ -72,8 +80,10 @@ func writeHeldUntil(t *testing.T, backing Store, id, value string) Bead {
 }
 
 // An event reordered after a rescan neither regresses the cached row's fields
-// nor pairs them with its revision. Kills: a clean row's conflicting
-// bead.updated merged without the backing verification (staleRisk dropped).
+// nor pairs them with its revision, and the row, whose backing read equals the
+// cached row, goes dirty for a later read to settle. Kills the base code, and
+// (by the dirty mark only: the install-time drop alone keeps the fields and
+// revision) a clean row's update left unverified at read time.
 func TestCachingStoreStaleEventAfterRescanKeepsRowAndRevision(t *testing.T) {
 	t.Parallel()
 	for _, b := range staleEventBackings {
@@ -82,10 +92,14 @@ func TestCachingStoreStaleEventAfterRescanKeepsRowAndRevision(t *testing.T) {
 			cache, id, newer := staleEventAfterRescan(t, b.open(t))
 			cache.mu.RLock()
 			got := cache.beads[id]
+			_, dirty := cache.dirty[id]
 			cache.mu.RUnlock()
 			if got.Metadata["held_until"] != "new" || got.Revision != newer.Revision {
 				t.Fatalf("cached row = held_until %q at revision %d, want %q at %d",
 					got.Metadata["held_until"], got.Revision, "new", newer.Revision)
+			}
+			if !dirty {
+				t.Fatal("a stale event whose backing read equals the cached row left it clean")
 			}
 		})
 	}
@@ -196,5 +210,261 @@ func TestCachingStoreEventConflictingOnlyAtInstallDropped(t *testing.T) {
 	if got.Metadata["held_until"] != "z" || got.Revision != newer.Revision {
 		t.Fatalf("cached row = held_until %q at revision %d, want %q at %d",
 			got.Metadata["held_until"], got.Revision, "z", newer.Revision)
+	}
+}
+
+// rowFences reads id's cached row, dirty mark and beadSeq stamp.
+func rowFences(cache *CachingStore, id string) (row Bead, dirty bool, seq uint64) {
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	_, dirty = cache.dirty[id]
+	return cloneBead(cache.beads[id]), dirty, cache.beadSeq[id]
+}
+
+// A field-conflicting bead.created or bead.deleted on a clean row keeps its
+// unverified path: a created on a held row reads nothing and changes nothing,
+// and a deleted tombstones the row. Kills (M7): the verification widened to
+// every event type, which reads the backing for both and drops the delete.
+func TestCachingStoreFieldConflictingCreatedAndDeletedKeepTheirPaths(t *testing.T) {
+	t.Parallel()
+	t.Run("created", func(t *testing.T) {
+		t.Parallel()
+		backing := &casBackingStore{Store: NewMemStore()}
+		row, err := backing.Create(Bead{Title: "seed"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		cache := newConditionalCacheForTest(t, backing)
+		stale := eventPayload(t, row)
+		title := "renamed"
+		if err := backing.Update(row.ID, UpdateOpts{Title: &title}); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		cache.ReconcileNowForTest()
+		reads := backing.getCalls
+		cache.ApplyEvent("bead.created", stale)
+		got, dirty, _ := rowFences(cache, row.ID)
+		if backing.getCalls != reads || dirty || got.Title != title {
+			t.Fatalf("after a stale bead.created: backing reads %d, dirty %v, title %q; want 0, clean, %q",
+				backing.getCalls-reads, dirty, got.Title, title)
+		}
+	})
+	t.Run("deleted", func(t *testing.T) {
+		t.Parallel()
+		backing := &casBackingStore{Store: NewMemStore()}
+		row, err := backing.Create(Bead{Title: "seed"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		cache := newConditionalCacheForTest(t, backing)
+		if err := backing.Delete(row.ID); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		row.Title = "renamed before the delete"
+		reads := backing.getCalls
+		cache.ApplyEvent("bead.deleted", eventPayload(t, row))
+		cache.mu.RLock()
+		_, tombstoned := cache.deletedSeq[row.ID]
+		cache.mu.RUnlock()
+		if !tombstoned || backing.getCalls != reads {
+			t.Fatalf("after a field-conflicting bead.deleted: tombstoned %v, backing reads %d; want true, 0",
+				tombstoned, backing.getCalls-reads)
+		}
+	})
+}
+
+// snapshotListStore lists a fixed snapshot while one is set: a scan whose
+// listing predates a write it merges after.
+type snapshotListStore struct {
+	*MemStore
+	snapshot []Bead
+}
+
+func (s *snapshotListStore) List(query ListQuery) ([]Bead, error) {
+	if s.snapshot == nil {
+		return s.MemStore.List(query)
+	}
+	rows := make([]Bead, 0, len(s.snapshot))
+	for _, b := range s.snapshot {
+		rows = append(rows, cloneBead(b))
+	}
+	return ApplyListQuery(rows, query), nil
+}
+
+// A scan that merges a listing older than a verified event between its check
+// and its install leaves the older row; the event is settled against it, so
+// the row goes dirty and the next read returns the event's state. Kills: a
+// bare drop there, which leaves the older row clean until the next scan.
+func TestCachingStoreVerifiedEventSettledAgainstAScanInsideItsWindow(t *testing.T) {
+	t.Parallel()
+	backing := &snapshotListStore{MemStore: NewMemStore()}
+	row, err := backing.Create(Bead{Title: "s0"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := newConditionalCacheForTest(t, backing)
+	write := func(title string) Bead {
+		if err := backing.Update(row.ID, UpdateOpts{Title: &title}); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		b, err := backing.Get(row.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		return b
+	}
+	older := write("s1")
+	payload, err := EncodeBeadEventPayload(write("s2"))
+	if err != nil {
+		t.Fatalf("EncodeBeadEventPayload: %v", err)
+	}
+	cache.applyEventBeforeCommitForTest = func() {
+		cache.applyEventBeforeCommitForTest = nil
+		backing.snapshot = []Bead{older}
+		cache.ReconcileNowForTest()
+		backing.snapshot = nil
+	}
+	cache.ApplyEvent("bead.updated", payload)
+	if mid, _, _ := rowFences(cache, row.ID); mid.Title != "s1" {
+		t.Fatalf("the scan left title %q, want the older listing's s1; the race is vacuous", mid.Title)
+	}
+	if _, dirty, _ := rowFences(cache, row.ID); !dirty {
+		t.Fatal("the verified event lost to an older scan left the row clean")
+	}
+	got, err := cache.Get(row.ID)
+	if err != nil || got.Title != "s2" {
+		t.Fatalf("Get = %q, %v; want the event's s2", got.Title, err)
+	}
+}
+
+// Superseded events on the shared SQLite shape: a gc.outcome write's event
+// delivered after the close that followed it installs the closed backing row,
+// stamped, and the row stays clean, so the census keeps serving. Kills: an
+// unconfirmed event that always dirties the row.
+func TestCachingStoreSupersededEventInstallsTheBackingRow(t *testing.T) {
+	t.Parallel()
+	engine := staleEventBackings[1].open(t)
+	row, err := engine.Create(Bead{Title: "step"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := newConditionalCacheForTest(t, engine)
+	_, _, before := rowFences(cache, row.ID)
+	outcome, err := EncodeBeadEventPayload(writeMetadata(t, engine, row.ID, "gc.outcome", "pass"))
+	if err != nil {
+		t.Fatalf("EncodeBeadEventPayload: %v", err)
+	}
+	if err := engine.Close(row.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	closed, err := engine.Get(row.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	cache.ApplyEvent("bead.updated", outcome)
+	got, dirty, seq := rowFences(cache, row.ID)
+	if dirty || got.Status != "closed" || got.Revision != closed.Revision || got.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("after a superseded event: dirty %v, status %q, revision %d, gc.outcome %q; want clean, closed, %d, pass",
+			dirty, got.Status, got.Revision, got.Metadata["gc.outcome"], closed.Revision)
+	}
+	if seq <= before {
+		t.Fatalf("the install left beadSeq %d, not stamped past %d", seq, before)
+	}
+	if _, ok := cache.CachedList(ListQuery{Status: "open"}); !ok {
+		t.Fatal("the census declined after a superseded event")
+	}
+}
+
+// blockingSubprocessStore is a backing whose point read forks a process and,
+// while block is set, does not answer until it is closed.
+type blockingSubprocessStore struct {
+	*MemStore
+	block chan struct{}
+}
+
+func (s *blockingSubprocessStore) readsBySubprocess() bool { return true }
+
+func (s *blockingSubprocessStore) Get(id string) (Bead, error) {
+	if s.block != nil {
+		<-s.block
+	}
+	return s.MemStore.Get(id)
+}
+
+// A clean row whose event check fails, or on a subprocess backing outlasts
+// its deadline, is marked dirty and stamped, so no older scan clears the
+// mark. Kills (M6): the stamp dropped from that path, and a check that waits
+// on a stalled bd.
+func TestCachingStoreUncheckableEventDirtiesAndStamps(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T) (Store, func(*CachingStore), func())
+	}{
+		{"error", func(*testing.T) (Store, func(*CachingStore), func()) {
+			backing := &casBackingStore{Store: NewMemStore()}
+			return backing, func(*CachingStore) { backing.failNextGet = true }, func() {}
+		}},
+		{"deadline", func(*testing.T) (Store, func(*CachingStore), func()) {
+			backing := &blockingSubprocessStore{MemStore: NewMemStore()}
+			block := make(chan struct{})
+			arm := func(cache *CachingStore) {
+				backing.block = block
+				cache.eventCheckAfter = func(time.Duration) <-chan time.Time {
+					fired := make(chan time.Time)
+					close(fired)
+					return fired
+				}
+			}
+			return backing, arm, func() { close(block) }
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			backing, arm, release := tc.setup(t)
+			defer release()
+			row, err := backing.Create(Bead{Title: "seed"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			cache := newConditionalCacheForTest(t, backing)
+			_, _, before := rowFences(cache, row.ID)
+			arm(cache)
+			row.Title = "renamed elsewhere"
+			cache.ApplyEvent("bead.updated", eventPayload(t, row))
+			got, dirty, seq := rowFences(cache, row.ID)
+			if !dirty || seq <= before || got.Title != "seed" {
+				t.Fatalf("after an uncheckable event: dirty %v, beadSeq %d (was %d), title %q; want dirty, stamped, seed",
+					dirty, seq, before, got.Title)
+			}
+		})
+	}
+}
+
+// An event identical to the cached row reads nothing and marks nothing: the
+// bus's duplicates cost no backing read. Kills: a verification gated on
+// anything wider than a conflict.
+func TestCachingStoreIdenticalDuplicateEventReadsNothing(t *testing.T) {
+	t.Parallel()
+	backing := &casBackingStore{Store: NewMemStore()}
+	row, err := backing.Create(Bead{Title: "seed", Metadata: map[string]string{"held_until": "x"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := newConditionalCacheForTest(t, backing)
+	fresh, err := backing.Get(row.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	payload, err := EncodeBeadEventPayload(fresh)
+	if err != nil {
+		t.Fatalf("EncodeBeadEventPayload: %v", err)
+	}
+	reads := backing.getCalls
+	for range 3 {
+		cache.ApplyEvent("bead.updated", payload)
+	}
+	if _, dirty, _ := rowFences(cache, row.ID); dirty || backing.getCalls != reads {
+		t.Fatalf("duplicates: dirty %v, backing reads %d; want clean, 0", dirty, backing.getCalls-reads)
 	}
 }

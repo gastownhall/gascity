@@ -138,6 +138,8 @@ type CachingStore struct {
 	// once the rolling window has drained — see recomputeCadenceLocked.
 	latencyDriverActive bool
 
+	// eventCheckAfter replaces time.After for checkEvent's deadline in tests.
+	eventCheckAfter               func(time.Duration) <-chan time.Time
 	applyEventBeforeCommitForTest func()
 }
 
@@ -190,10 +192,12 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //     expected revision, on a backend that does not re-stamp no-op writes;
 //   - an atomic close whose returned row could not be attributed;
 //   - a CloseIfMatch on a backing that hides closed rows from Get;
-//   - an ApplyEvent that conflicts with a recent local write and cannot be
-//     verified against the backing, or whose field conflict the backing does
-//     not confirm (gastownhall/gascity#2927). An event merged onto a cached
-//     row never clears a mark: it is not a backing read;
+//   - an ApplyEvent whose verification against the backing fails or times
+//     out, or whose field conflict the backing does not confirm while its
+//     read equals the cached row (gastownhall/gascity#2927), a clean row's
+//     unconfirmed field update included (mc-03lk4). A read that differs
+//     from the cached row installs instead, stamped. An event merged onto a
+//     cached row never clears a mark: it is not a backing read;
 //   - an ApplyEvent for a row the cache does not hold that a local write or
 //     deletion of the row overlapped;
 //   - a refetch (Get, the overlay, a Live or Parent list, a conditional
@@ -213,13 +217,14 @@ func (o CacheObservation) CacheRev() CacheRevision {
 // of the row, never its raw patch.
 //
 // Known limits (not yet fenced), so a consumer must not trust more than this:
-//   - A conflicting event is verified against the backing only while the
-//     row's beadSeq is present or its last local write is younger than
-//     recentWriteVerifyWindow (60s, the contract's cache_lag_bound default).
-//     An older event, edge sets included, applies unverified: until the next
-//     reconcile re-reads the row, a clean census shows it without the write
-//     while covering the write's WriteRev, so it undercounts. C5.15's resync
-//     does not catch this, because the entry has already cleared.
+//   - Every field-changing bead.updated is verified against the backing
+//     (mc-03lk4). A dependency-only update or a bead.created that conflicts
+//     is verified only while the row's beadSeq is present or its last local
+//     write is younger than recentWriteVerifyWindow (60s, the contract's
+//     cache_lag_bound default). An older one applies unverified: until the
+//     next reconcile re-reads the row, a clean census shows it without the
+//     write while covering the write's WriteRev, so it undercounts. C5.15's
+//     resync does not catch this, because the entry has already cleared.
 //   - Every refresh assumes read-after-write: a backing read that lags a
 //     committed delete can install the deleted row, the same exposure Get,
 //     the dirty-row overlay and reconcile already carry.
@@ -254,13 +259,13 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //   - An uncached event installs only its backing read, so a new row whose
 //     read fails or lags at event time waits for the next reconcile to
 //     appear.
-//   - A stale event that arrives late dirties the row. A refresh that
-//     changed a row stamps it, so a delayed event older than the installed
-//     row is verified against the backing, does not match, and marks the row
-//     dirty (gastownhall/gascity#2927) rather than merging. The mark refuses
-//     the census for the whole store until a backing read of the row clears
-//     it, so a row RefreshRow installed is not thereby visible in the next
-//     census.
+//   - A stale event that arrives late dirties the row. A delayed field
+//     update older than the cached row is verified against the backing, does
+//     not match, and, the backing read equalling the cached row, marks the
+//     row dirty (gastownhall/gascity#2927) rather than merging; a backing
+//     that lags the event looks the same. The mark refuses the census for
+//     the whole store until a backing read of the row clears it, so a row
+//     RefreshRow installed is not thereby visible in the next census.
 //   - A verified bead.closed snapshot older than the backing row takes the
 //     backing row, but the order is read from updated_at. A backing whose
 //     updated_at is coarser than a close/reopen cycle can tie a delayed
@@ -700,8 +705,10 @@ func (c *CachingStore) racedWritesLocked(ids []string, startSeq uint64) map[stri
 	return raced
 }
 
-// recentWriteVerifyWindow is how long a local write makes a conflicting event
-// verify against the backing even after the row's beadSeq fence cleared. It
+// recentWriteVerifyWindow is how long a local write makes a conflicting
+// dependency-only update or bead.created verify against the backing even
+// after the row's beadSeq fence cleared; a field-changing bead.updated always
+// verifies (mc-03lk4). It
 // matches the contract's cache_lag_bound default (60s): an event older than
 // that is past the lag the watermark consumer tolerates anyway, and the leg
 // resync (C5.15) repairs it.

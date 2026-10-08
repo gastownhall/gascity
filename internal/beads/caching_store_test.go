@@ -2177,8 +2177,13 @@ func TestCachingStoreApplyEvent(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Update backing before event: %v", err)
 	}
-	updated := beads.Bead{ID: b1.ID, Title: updatedTitle, Status: "open", Metadata: map[string]string{"gc.step_ref": "mol.review"}}
-	payload, _ = json.Marshal(updated)
+	updated, err := mem.Get(b1.ID)
+	if err != nil {
+		t.Fatalf("Get backing before event: %v", err)
+	}
+	if payload, err = beads.EncodeBeadEventPayload(updated); err != nil {
+		t.Fatalf("EncodeBeadEventPayload: %v", err)
+	}
 	cs.ApplyEvent("bead.updated", payload)
 
 	got = requireCachedBead(t, cs, b1.ID, false)

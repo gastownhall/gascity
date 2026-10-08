@@ -1140,22 +1140,23 @@ func TestCachingStoreLateEventUnverifiableMarksDirty(t *testing.T) {
 }
 
 // TestCachingStoreRecentWriteVerifyWindowIsSixtySeconds pins the F3 window at
-// the contract's cache_lag_bound default: a conflicting late event the window
-// governs is verified against the backing just inside it and not just past
-// it. A field-changing bead.updated is verified on either side (mc-03lk4).
+// the contract's cache_lag_bound default: a conflicting late dependency-only
+// update, which the window governs, is verified against the backing just
+// inside it and not just past it. A field-changing bead.updated is verified
+// on either side (mc-03lk4).
 func TestCachingStoreRecentWriteVerifyWindowIsSixtySeconds(t *testing.T) {
 	t.Parallel()
 
 	const bound = 60 * time.Second
 	for _, tc := range []struct {
-		name      string
-		eventType string
-		age       time.Duration
-		verified  bool
+		name     string
+		edges    bool
+		age      time.Duration
+		verified bool
 	}{
-		{"inside", "bead.created", bound - time.Second, true},
-		{"outside", "bead.created", bound + time.Second, false},
-		{"update outside", "bead.updated", bound + time.Second, true},
+		{"inside", true, bound - time.Second, true},
+		{"outside", true, bound + time.Second, false},
+		{"field update outside", false, bound + time.Second, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1166,6 +1167,9 @@ func TestCachingStoreRecentWriteVerifyWindowIsSixtySeconds(t *testing.T) {
 				t.Fatalf("Create: %v", err)
 			}
 			stale := eventPayload(t, row)
+			if tc.edges {
+				stale = json.RawMessage(fmt.Sprintf(`{"id":%q,"dependencies":[{"issue_id":%q,"depends_on_id":"gc-elsewhere","type":"blocks"}]}`, row.ID, row.ID))
+			}
 			title := "written"
 			if err := cache.Update(row.ID, UpdateOpts{Title: &title}); err != nil {
 				t.Fatalf("Update: %v", err)
@@ -1173,9 +1177,9 @@ func TestCachingStoreRecentWriteVerifyWindowIsSixtySeconds(t *testing.T) {
 			clearBeadSeqByScan(t, cache, row.ID)
 			ageLocalWriteBy(cache, row.ID, tc.age)
 			reads := backing.getCalls
-			cache.ApplyEvent(tc.eventType, stale)
+			cache.ApplyEvent("bead.updated", stale)
 			if verified := backing.getCalls > reads; verified != tc.verified {
-				t.Fatalf("%s against a write %v old: verified=%v, want %v", tc.eventType, tc.age, verified, tc.verified)
+				t.Fatalf("event (edges only %v) against a write %v old: verified=%v, want %v", tc.edges, tc.age, verified, tc.verified)
 			}
 		})
 	}
