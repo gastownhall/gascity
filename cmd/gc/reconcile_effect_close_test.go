@@ -374,3 +374,28 @@ func TestDrainRecordsEverySettlementEvent(t *testing.T) {
 		}
 	}
 }
+
+// Kills a close whose reads and CAS are not one session mutation section
+// (#7331's rule): while another in-process writer holds the row's section,
+// the close neither settles nor writes, and it lands once the section ends.
+func TestCloseHoldsOneMutationSection(t *testing.T) {
+	p, it, store := admittedClose(t, newCloseLeaf())
+	done := make(chan settlement, 1)
+	_ = session.WithSessionMutationLock(it.Key.ID, func() error {
+		go func() { done <- closeEffect(p, it)(context.Background()) }()
+		select {
+		case s := <-done:
+			t.Errorf("the close settled %+v while another section held the row", s)
+		case <-time.After(50 * time.Millisecond):
+		}
+		return nil
+	})
+	select {
+	case s := <-done:
+		if s.Outcome != settledLanded || rowStatus(t, store, it.Key.ID) != "closed" {
+			t.Fatalf("settlement %+v, want the close landed once the section ended", s)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the close never settled")
+	}
+}

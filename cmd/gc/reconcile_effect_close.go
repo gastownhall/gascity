@@ -12,8 +12,9 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// The close effect (CONTRACT v5 C3, arm A21). Under the runtime name lock it
-// first confirms the stop (C8.8, v5 F3): a complete, error-free fresh read
+// The close effect (CONTRACT v5 C3, arm A21). Under the runtime name lock,
+// and then one session mutation section (closeLocked), it first confirms
+// the stop (C8.8, v5 F3): a complete, error-free fresh read
 // through the composite provider, begun after the effect began, that shows
 // no live pane for the row's name. A corpse counts as stopped. When the
 // attach leg (L3) passes, the effect also removes the corpse under the
@@ -23,8 +24,9 @@ import (
 // decides, and only a live pane refuses. Then the premise close: the row the
 // pass decided on is the premise, so a row that changed since (a wake that
 // landed after the read) refuses with cause superseded and is decided again,
-// never closed at its new revision. A landed close runs legacy's post-close
-// cascade, best-effort as legacy does (cascade).
+// never closed at its new revision. A landed close then runs legacy's
+// post-close cascade, best-effort as legacy does (cascade), outside the
+// section, as legacy's closeBead does.
 
 // Close refusal causes; a fresh read's are freshLiveness's.
 const (
@@ -66,32 +68,47 @@ func (e closeRun) run(ctx context.Context) settlement {
 		return settlement{Outcome: settledRefused, Cause: causeNameBusy}
 	}
 	defer unlock()
+	var s settlement
+	var snapshot beads.Bead // the open row, whose identities the release reads
+	_ = session.WithSessionMutationLock(row.Info.ID, func() error {
+		s, snapshot = e.closeLocked(ctx, writer, row.Info, name)
+		return nil
+	})
+	if s.Outcome == settledLanded {
+		e.cascade(e.pass.Releasers.Legs[e.it.Key.Leg], row.Info, snapshot, snapshot.ID != "")
+	}
+	return s
+}
+
+// closeLocked is the close inside one session mutation section, so no
+// in-process writer of the row lands between its reads and its CAS: the
+// fresh reads (their since stamp included), the open row the release reads,
+// and the premise close.
+func (e closeRun) closeLocked(ctx context.Context, writer fencedWriter, row session.Info, name string) (settlement, beads.Bead) {
 	if cause := e.noLivePane(ctx, name); cause != "" {
-		return settlement{Outcome: settledRefused, Cause: cause}
+		return settlement{Outcome: settledRefused, Cause: cause}, beads.Bead{}
 	}
 	if err := ctx.Err(); err != nil {
-		return settlement{Outcome: settledFailed, Cause: causeDeadline, Err: err}
+		return settlement{Outcome: settledFailed, Cause: causeDeadline, Err: err}, beads.Bead{}
 	}
-	releaser := e.pass.Releasers.Legs[e.it.Key.Leg]
-	var snapshot beads.Bead // the open row, whose identities the release reads
-	haveSnapshot := false
-	if releaser != nil {
-		b, err := releaser.Get(row.Info.ID)
-		snapshot, haveSnapshot = b, err == nil
+	var snapshot beads.Bead
+	if releaser := e.pass.Releasers.Legs[e.it.Key.Leg]; releaser != nil {
+		if b, err := releaser.Get(row.ID); err == nil {
+			snapshot = b
+		}
 	}
-	closed, err := writer.closeWithTerminalPatch(row.Info, e.it.Patch, "gc: close session "+row.Info.ID, e.pass.World.Now)
+	closed, err := writer.closeWithTerminalPatch(row, e.it.Patch, "gc: close session "+row.ID, e.pass.World.Now)
 	switch {
 	case errors.Is(err, errNoConditionalWriter):
-		return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: err}
+		return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: err}, snapshot
 	case errors.Is(err, session.ErrSessionCloseSuperseded), errors.Is(err, session.ErrSessionKillPending):
-		return settlement{Outcome: settledRefused, Cause: causeSuperseded, Err: err}
+		return settlement{Outcome: settledRefused, Cause: causeSuperseded, Err: err}, snapshot
 	case err != nil:
-		return settlement{Outcome: settledFailed, Cause: causeWrite, Err: err}
+		return settlement{Outcome: settledFailed, Cause: causeWrite, Err: err}, snapshot
 	case !closed: // another writer closed it first, and runs its own cascade
-		return settlement{Outcome: settledNoop}
+		return settlement{Outcome: settledNoop}, snapshot
 	}
-	e.cascade(releaser, row.Info, snapshot, haveSnapshot)
-	return settlement{Outcome: settledLanded, Events: eventsOf(e.it.Event)}
+	return settlement{Outcome: settledLanded, Events: eventsOf(e.it.Event)}, snapshot
 }
 
 // cascade is legacy's post-close cascade (closeBeadPreservingAssignees,
