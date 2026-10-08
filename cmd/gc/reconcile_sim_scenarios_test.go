@@ -212,18 +212,20 @@ func TestSimR45NeverListedStopPendingRowReadsGone(t *testing.T) {
 // the agent's pane or from an operator.
 func TestSimR47DrainAckLosesToPreWake(t *testing.T) {
 	for _, operator := range []bool{false, true} {
-		s := scripted(t, []string{"gc-2"}, poolRow("gc-2", "worker", 1, "active", "instance_token", "tok-1"))
-		commit, err := checkDrainAckRow(s.legs[0].backing, "gc-2", operator, "tok-1", s.clk.Now())
-		if err != nil {
-			t.Fatalf("operator %t: the ack refused before the race: %v", operator, err)
-		}
-		s.operator("gc-2", "generation", "2", "instance_token", "tok-2", "state", "awake")
-		if err := commit(); err == nil {
-			t.Errorf("operator %t: the ack landed across a PreWake", operator)
-		}
-		if got, _ := s.legs[0].backing.Get("gc-2"); got.Metadata[session.DrainAckIncarnationKey] != "" {
-			t.Errorf("operator %t: the row carries ack %q", operator, got.Metadata[session.DrainAckIncarnationKey])
-		}
-		s.noViolations(t)
+		t.Run(fmt.Sprintf("operator=%t", operator), func(t *testing.T) { // a sim per test (newSim)
+			s := scripted(t, []string{"gc-2"}, poolRow("gc-2", "worker", 1, "active", "instance_token", "tok-1"))
+			commit, err := checkDrainAckRow(s.legs[0].backing, "gc-2", operator, "tok-1", s.clk.Now())
+			if err != nil {
+				t.Fatalf("the ack refused before the race: %v", err)
+			}
+			s.operator("gc-2", "generation", "2", "instance_token", "tok-2", "state", "awake")
+			if err := commit(); err == nil {
+				t.Error("the ack landed across a PreWake")
+			}
+			if got, _ := s.legs[0].backing.Get("gc-2"); got.Metadata[session.DrainAckIncarnationKey] != "" {
+				t.Errorf("the row carries ack %q", got.Metadata[session.DrainAckIncarnationKey])
+			}
+			s.noViolations(t)
+		})
 	}
 }

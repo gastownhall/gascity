@@ -193,10 +193,11 @@ func (s *sim) checkWrite(w simWrite) {
 // dormantChange returns a key a v2 write changed on b that an operator owns
 // at t, or "": an honored kill fence owns the row's lifecycle and its sleep
 // reason, a suspend the row's state, and an unexpired hold or quarantine its
-// timer and sleep reason. Only an operator-dormant row (D1 rule 2: killed,
-// suspended, or sleep_intent=user-hold) is never woken or given a stop
-// request, though one it holds may be cleared; a hold or quarantine alone is
-// not dormant, and legacy drains under one (owner ruling at C6a2).
+// timer and sleep reason. No such row is woken. Only an operator-dormant
+// row (D1 rule 2: killed, suspended, or sleep_intent=user-hold) is never
+// given a stop request, though one it holds may be cleared; a hold or
+// quarantine alone is not dormant, and legacy drains under one (owner
+// ruling at C6a2).
 func dormantChange(b beads.Bead, a map[string]string, t time.Time) string {
 	m := b.Metadata
 	until := func(k string) bool { at, err := time.Parse(time.RFC3339, m[k]); return err == nil && at.After(t) }
@@ -226,15 +227,13 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time) string {
 			return k
 		}
 	}
-	if !dormant {
-		return ""
-	}
 	for _, k := range stopKeys { // the residue void clears them (v5 D1, R1 as amended at C6a)
-		if a[k] != m[k] && a[k] != "" {
+		if dormant && a[k] != m[k] && a[k] != "" {
 			return k
 		}
 	}
-	if a["state"] != m["state"] && slices.Contains([]string{"awake", "active", "creating", string(session.StateStartPending)}, a["state"]) {
+	if (dormant || len(owned) > 0) && a["state"] != m["state"] &&
+		slices.Contains([]string{"awake", "active", "creating", string(session.StateStartPending)}, a["state"]) {
 		return "state"
 	}
 	return ""
@@ -442,7 +441,7 @@ func TestSimChecksBite(t *testing.T) {
 
 // Kills an I15 checker whose dormant set strays from D1 rule 2: a stop
 // request on a held or quarantined row is no violation; on a user-hold,
-// suspended or killed row it is.
+// suspended or killed row it is. Waking any of them is.
 func TestDormantChangeFollowsRule2(t *testing.T) {
 	at := plannerT0
 	soon := at.Add(time.Minute).Format(time.RFC3339)
@@ -461,6 +460,11 @@ func TestDormantChangeFollowsRule2(t *testing.T) {
 		after[drainIntentReasonKey] = "orphaned"
 		if got := dormantChange(beads.Bead{Metadata: c.meta}, after, at); (got != "") != c.dormant {
 			t.Errorf("%s: dormantChange = %q, want a violation %v", c.name, got, c.dormant)
+		}
+		woken := maps.Clone(c.meta)
+		woken["state"] = "active"
+		if got := dormantChange(beads.Bead{Metadata: c.meta}, woken, at); got == "" {
+			t.Errorf("%s: a wake is no violation", c.name)
 		}
 	}
 }
