@@ -709,6 +709,19 @@ func providerOwnedScopeCustomTypesEnv(cityPath, dir string) (map[string]string, 
 //nolint:unparam // keep fs seam for future testable FS injection
 func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.ConfigState) error {
 	beadsDir := filepath.Join(dir, ".beads")
+	embedded, err := scopeMetadataRecordsEmbeddedDolt(fs, dir)
+	if err != nil {
+		return err
+	}
+	if embedded {
+		// An embedded scope keeps its storage mode (ga-p9iuv) and its .beads
+		// stays bd's: gc only takes back endpoint claims an earlier pass
+		// stamped. No managed endpoint, topology or policy keys, no prefix or
+		// types line (bd answers both from the store), no chmod of bd's
+		// directory, and no removal of an issues.jsonl nothing gc replaces.
+		_, err := contract.ScrubEmbeddedScopeConfig(fs, filepath.Join(beadsDir, "config.yaml"))
+		return err
+	}
 	if err := ensureBeadsDir(fs, beadsDir); err != nil {
 		return err
 	}
@@ -736,6 +749,23 @@ func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.Conf
 		removeStaleBdExportJSONL(fs, beadsDir)
 	}
 	return nil
+}
+
+// scopeMetadataRecordsEmbeddedDolt reports whether dir's metadata.json records
+// embedded Dolt storage under the explicit dolt backend — the same condition
+// under which ensureCanonicalScopeMetadata treats the recorded mode as
+// authoritative and preserves it.
+func scopeMetadataRecordsEmbeddedDolt(fs fsys.FS, dir string) (bool, error) {
+	path := scopeMetadataJSONPath(dir)
+	backend, ok, err := contract.ReadMetadataBackend(fs, path)
+	if err != nil || !ok || !strings.EqualFold(backend, "dolt") {
+		return false, err
+	}
+	mode, ok, err := contract.ReadDoltMode(fs, path)
+	if err != nil || !ok {
+		return false, err
+	}
+	return strings.EqualFold(mode, "embedded"), nil
 }
 
 // removeStaleBdExportJSONL removes .beads/issues.jsonl if present. Called after
@@ -898,6 +928,23 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 	if skipsManagedDolt, err := scopeSkipsManagedDoltForInit(cityPath, dir); err != nil {
 		return err
 	} else if skipsManagedDolt {
+		if err := installBeadHooks(dir, cityPath); err != nil {
+			return fmt.Errorf("install hooks at %s: %w", dir, err)
+		}
+		return nil
+	}
+	if embedded, err := scopeMetadataRecordsEmbeddedDolt(fsys.OSFS{}, dir); err != nil {
+		return err
+	} else if embedded && cityUsesBdStoreContract(cityPath) {
+		// An embedded scope's store already lives in .beads/embeddeddolt and
+		// stays authoritative (ga-p9iuv). The managed-Dolt init chain would
+		// register a database for it on the city's server and run a
+		// server-mode bd init over it (#6118), so only the normalization pass
+		// runs — it takes back endpoint claims an earlier gc stamped and is a
+		// no-op on a clean scope.
+		if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, ""); err != nil {
+			return err
+		}
 		if err := installBeadHooks(dir, cityPath); err != nil {
 			return fmt.Errorf("install hooks at %s: %w", dir, err)
 		}
@@ -1847,7 +1894,7 @@ func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, exe
 			args = append(args, doltDatabase)
 		}
 		script := strings.TrimPrefix(provider, "exec:")
-		if execProviderUsesCanonicalBdScopeFiles(provider) && (scopeInitUsesProxiedDoltMode(cityPath, dir)) {
+		if execProviderUsesCanonicalBdScopeFiles(provider) && scopeInitUsesProxiedDoltMode(cityPath, dir) {
 			// Callers may invoke initBeadsForDir directly without the
 			// initAndHookDir wrapper that normally supplies the canonical
 			// database name. Resolve the same fallback here so proxied and
