@@ -82,7 +82,7 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	opts.tracef("ralph check-result bead=%s logical=%s attempt=%d outcome=%s exit=%s dur=%s truncated=%v stderr=%q stdout=%q",
 		bead.ID, logicalID, attempt, result.Outcome, formatGateExitCode(result.ExitCode), result.Duration, result.Truncated,
 		traceClipString(result.Stderr, traceCheckOutputCap), traceClipString(result.Stdout, traceCheckOutputCap))
-	if err := persistCheckResult(store, bead.ID, result); err != nil {
+	if err := persistCheckResult(store, bead, result); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: persisting check result: %w", bead.ID, err)
 	}
 
@@ -555,20 +555,23 @@ func parsePositiveRalphTimeout(beadID, key, raw string) (time.Duration, error) {
 	return parsed, nil
 }
 
-func persistCheckResult(store beads.Store, beadID string, result convergence.GateResult) error {
-	batch := map[string]string{
-		beadmeta.OutcomeMetadataKey:    result.Outcome,
-		beadmeta.StdoutMetadataKey:     result.Stdout,
-		beadmeta.StderrMetadataKey:     result.Stderr,
-		beadmeta.DurationMsMetadataKey: strconv.FormatInt(result.Duration.Milliseconds(), 10),
-		beadmeta.TruncatedMetadataKey:  strconv.FormatBool(result.Truncated),
-	}
+// persistCheckResult records a launched check's result on its kind=check bead.
+// A launched check also proves any drift-pending wait (an unlaunchable script)
+// has healed, so the batch is seeded with controlCompletionMetadata, which
+// blanks whichever gc.control_pending_* keys the bead carries. That rides the
+// write every launched run already makes, so every later close is clean.
+func persistCheckResult(store beads.Store, bead beads.Bead, result convergence.GateResult) error {
+	batch := controlCompletionMetadata(bead, result.Outcome)
+	batch[beadmeta.StdoutMetadataKey] = result.Stdout
+	batch[beadmeta.StderrMetadataKey] = result.Stderr
+	batch[beadmeta.DurationMsMetadataKey] = strconv.FormatInt(result.Duration.Milliseconds(), 10)
+	batch[beadmeta.TruncatedMetadataKey] = strconv.FormatBool(result.Truncated)
 	if result.ExitCode != nil {
 		batch[beadmeta.ExitCodeMetadataKey] = strconv.Itoa(*result.ExitCode)
 	} else {
 		batch[beadmeta.ExitCodeMetadataKey] = ""
 	}
-	return store.SetMetadataBatch(beadID, batch)
+	return store.SetMetadataBatch(bead.ID, batch)
 }
 
 func appendRalphRetry(store beads.Store, logicalID string, prevSubject, prevCheck beads.Bead, nextAttempt int, opts ProcessOptions) (map[string]string, error) {
@@ -1365,6 +1368,13 @@ func clearRetryEphemera(meta map[string]string) {
 		beadmeta.ClosedByAttemptMetadataKey,
 		beadmeta.LastFailureClassMetadataKey,
 		beadmeta.RetrySessionRecycledMetadataKey,
+		// A pending budget and its one-shot stall latch belong to one bead's
+		// life; a clone that inherited them would never escalate its own
+		// pending wait (same rationale as clearControllerSpawnErrorMetadata).
+		beadmeta.ControlPendingReasonMetadataKey,
+		beadmeta.ControlPendingCountMetadataKey,
+		beadmeta.ControlPendingFirstSeenMetadataKey,
+		beadmeta.ControlPendingStalledMetadataKey,
 		"review.verdict",
 		"design_review.verdict",
 		"code_review.verdict",

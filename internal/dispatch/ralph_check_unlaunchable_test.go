@@ -13,6 +13,15 @@ import (
 	"github.com/gastownhall/gascity/internal/convergence"
 )
 
+// controlPendingBudgetKeys are the drift-pending budget keys the cmd-layer
+// disposition stamps on a bead held open by ErrControlDriftPending.
+var controlPendingBudgetKeys = []string{
+	beadmeta.ControlPendingReasonMetadataKey,
+	beadmeta.ControlPendingCountMetadataKey,
+	beadmeta.ControlPendingFirstSeenMetadataKey,
+	beadmeta.ControlPendingStalledMetadataKey,
+}
+
 // TestRunRalphCheckUnlaunchableScriptIsDriftPending pins that a check script
 // the orchestrator cannot launch (missing, not a regular file, not executable)
 // is reported as ErrControlDriftPending rather than a bare error. A bare error
@@ -366,5 +375,64 @@ func TestProcessRalphCheckUnlaunchableScriptStaysOpen(t *testing.T) {
 	}
 	if n := countAllBeads(t, store); n != beadsBefore {
 		t.Errorf("bead count = %d, want %d (no attempt-2 run or check may be cloned)", n, beadsBefore)
+	}
+}
+
+// TestProcessRalphCheckLaunchClearsHealedPendingBudget pins that a kind=check
+// bead which waited on the drift-pending lane closes clean once its script
+// launches: a launched check proves the drift healed, so the pending budget
+// and its one-shot stall latch must not outlive it.
+func TestProcessRalphCheckLaunchClearsHealedPendingBudget(t *testing.T) {
+	t.Parallel()
+	cityPath := t.TempDir()
+	checkPath := writeCheckScript(t, cityPath, "healed.sh", "#!/bin/sh\nexit 0\n")
+	store, _, run1, check1 := newSimpleRalphLoop(t, "implement", checkPath, 2)
+	if err := store.SetMetadataBatch(check1.ID, map[string]string{
+		beadmeta.ControlPendingReasonMetadataKey:    "check-1: resolving check path: no such file or directory",
+		beadmeta.ControlPendingCountMetadataKey:     "7",
+		beadmeta.ControlPendingFirstSeenMetadataKey: "2026-10-01T00:00:00Z",
+		beadmeta.ControlPendingStalledMetadataKey:   "true",
+	}); err != nil {
+		t.Fatalf("stamp pending budget: %v", err)
+	}
+	mustClose(t, store, run1.ID)
+
+	result, err := ProcessControl(store, mustGet(t, store, check1.ID), ProcessOptions{CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("ProcessControl: %v", err)
+	}
+	if result.Action != "pass" {
+		t.Fatalf("result = %+v, want pass", result)
+	}
+	got := mustGet(t, store, check1.ID)
+	if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Fatalf("check status=%q outcome=%q, want closed pass", got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	for _, key := range controlPendingBudgetKeys {
+		if v := got.Metadata[key]; v != "" {
+			t.Errorf("%s = %q after a launched check, want cleared", key, v)
+		}
+	}
+}
+
+// TestClearRetryEphemeraDropsControlPendingBudget pins that a retry clone does
+// not inherit its predecessor's pending budget or stall latch.
+func TestClearRetryEphemeraDropsControlPendingBudget(t *testing.T) {
+	t.Parallel()
+	meta := map[string]string{
+		beadmeta.ControlPendingReasonMetadataKey:    "reason",
+		beadmeta.ControlPendingCountMetadataKey:     "3",
+		beadmeta.ControlPendingFirstSeenMetadataKey: "2026-10-01T00:00:00Z",
+		beadmeta.ControlPendingStalledMetadataKey:   "true",
+		"gc.routed_to": "some-agent",
+	}
+	clearRetryEphemera(meta)
+	for _, key := range controlPendingBudgetKeys {
+		if _, ok := meta[key]; ok {
+			t.Errorf("%s survived clearRetryEphemera", key)
+		}
+	}
+	if meta["gc.routed_to"] != "some-agent" {
+		t.Errorf("gc.routed_to = %q, want preserved", meta["gc.routed_to"])
 	}
 }
