@@ -88,14 +88,31 @@ gc dolt compact --gc-only --dry-run
 
 ## The full GC and the listener read timeout
 
-`CALL DOLT_GC('--full')` runs as one statement over the managed sql-server, and
-the listener's `read_timeout_millis` caps any statement that produces no rows
-for that long. The GC produces none until it finishes, so a reclaim that needs
-longer than the ceiling fails with `context canceled` or `connection was
-closed` however healthy the store is, and the pending-GC marker retries it into
-the same ceiling on every later run. The compactor names the setting and the
-live value when this happens. Raise it in `city.toml` under `[dolt]
-read_timeout_millis` and run `gc dolt restart` before retrying.
+`CALL DOLT_GC('--full')` runs as one statement over the sql-server, and the
+listener's `read_timeout_millis` caps any statement that produces no rows for
+that long. The GC produces none until it finishes, so a reclaim that needs
+longer than the ceiling fails with `context canceled`, `connection was closed`,
+or `row read wait bigger than connection timeout` however healthy the store is.
+The compactor names the setting and the live value when the GC ran as long as
+the ceiling, and says the timeout did not end it when the GC was canceled
+sooner. Only the full GC gets that line; a failed bare `CALL DOLT_GC()` prints
+the server error without it.
+
+A GC that fails after a flatten leaves a pending-GC marker that retries
+`DOLT_GC('--full')` on every later run; `--gc-only` leaves no marker. When the
+compactor blamed the ceiling, every retry hits the same ceiling until it moves;
+when it said the timeout did not end the GC, raising `read_timeout_millis` is
+not the remedy.
+
+To raise the managed server's ceiling, set it in `city.toml` under `[dolt]
+read_timeout_millis` and run `gc dolt restart` before retrying. Keep it under
+half of `write_timeout_millis` (default `300000`): past `150000`, raise both, or
+raise it only for the reclaim and put it back afterward. The compactor also caps
+each call at `GC_DOLT_COMPACT_CALL_TIMEOUT_SECS` (default `1800`); a GC that
+outruns that fails with `rc=124` and no server error. A reclaim that needs
+longer belongs offline: follow the Recovery Procedure in
+`docs/troubleshooting/dolt-bloat-recovery.md` with
+`dolt gc --full --archive-level=1` as step 3.
 
 See `docs/troubleshooting/dolt-bloat-recovery.md` for the full bloat-recovery
 runbook, including quarantine marker evidence, the safe marker-clear procedure,

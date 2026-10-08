@@ -2172,35 +2172,62 @@ clear_compact_marker() {
   rm -f "$(compact_marker_path "$dir" "$db")"
 }
 
-# explain_full_gc_cancellation DB ERR_FILE
-#   One extra stderr line after a failed CALL DOLT_GC('--full') whose error is
-#   the managed listener's own read deadline. `connection was closed`, `row
-#   read wait bigger than connection timeout` and `context canceled` are how
-#   the managed sql-server reports killing a statement that outran
-#   listener.read_timeout_millis (mol-dog-backup.sh classifies the same family
-#   for `dolt backup sync`). DOLT_GC produces no rows until it finishes, so the
-#   timeout caps the whole reclaim, and nothing in the retry path can outwait it.
+# explain_full_gc_cancellation DB ERR_FILE ELAPSED
+#   One extra stderr line after a failed CALL DOLT_GC('--full') that ended the
+#   way a sql-server read deadline ends a statement. The sql-server reports a
+#   statement that outran listener.read_timeout_millis as `connection was
+#   closed` or `row read wait bigger than connection timeout` (the pair
+#   mol-dog-backup.sh classifies for `dolt backup sync`); DOLT_GC also surfaces
+#   the kill as `context canceled` through its own context, so this set is a
+#   superset of that one. DOLT_GC produces no rows until it finishes, so the
+#   timeout caps the whole reclaim.
+#
+#   The signature alone cannot tell the deadline from another cancellation (a
+#   server stop or restart, a dropped connection). ELAPSED is the statement's
+#   wall time, measured from before it started, so a deadline kill always has
+#   ELAPSED >= ceiling - 1s; the ceiling is blamed only when ELAPSED reached it.
+#   Both managed config writers render the file right before they launch the
+#   server, so it holds the running server's value. GC_DOLT_READ_TIMEOUT_MILLIS
+#   in this command's env is not read: it carries city.toml's current value,
+#   which an edit makes differ from the running server's until gc dolt restart.
+#   With no readable config the line is hedged. An explicit external-local
+#   target reads only GC_DOLT_CONFIG_FILE, never the managed pack state, and
+#   gets a target-neutral remedy.
 explain_full_gc_cancellation() {
   db="$1"
   err_file="$2"
+  gc_elapsed="$3"
   [ -s "$err_file" ] || return 0
   gc_stderr=$(tr '\n' ' ' <"$err_file")
   case "$gc_stderr" in
     *"connection was closed"*|*"row read wait bigger than connection timeout"*|*"context canceled"*) ;;
     *) return 0 ;;
   esac
-  managed_config="${DOLT_STATE_DIR:-}/dolt-config.yaml"
-  ceiling=""
-  if [ -n "${DOLT_STATE_DIR:-}" ] && [ -r "$managed_config" ]; then
-    ceiling=$(sed -n 's/^[[:space:]]*read_timeout_millis:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$managed_config" | sed -n '1p')
-  fi
-  if [ -n "$ceiling" ]; then
-    ceiling_text="listener.read_timeout_millis=$ceiling in $managed_config"
+  if [ "$explicit_external_local_dolt" = "1" ]; then
+    gc_server="sql-server"
+    gc_server_config="${GC_DOLT_CONFIG_FILE:-}"
+    gc_remedy="raise it in that sql-server's own config, then restart the server"
   else
-    ceiling_text="listener.read_timeout_millis in the managed server config"
+    gc_server="managed sql-server"
+    gc_server_config="${GC_DOLT_CONFIG_FILE:-${DOLT_STATE_DIR:-}/dolt-config.yaml}"
+    gc_remedy='raise it via city.toml [dolt] read_timeout_millis (keep it under half of write_timeout_millis), then gc dolt restart (see docs/troubleshooting/dolt-bloat-recovery.md "A full GC canceled at the read timeout")'
   fi
-  printf 'compact: db=%s the managed sql-server ended DOLT_GC at its %s ceiling — DOLT_GC produces no rows until it finishes, so that timeout caps the whole reclaim and the pending-GC retry fails the same way every run; raise it via city.toml [dolt] read_timeout_millis, then gc dolt restart\n' \
-    "$db" "$ceiling_text" >&2
+  gc_ceiling=""
+  if [ -n "$gc_server_config" ] && [ -r "$gc_server_config" ]; then
+    gc_ceiling=$(sed -n 's/^[[:space:]]*read_timeout_millis:[[:space:]]*\([1-9][0-9]*\).*/\1/p' "$gc_server_config" | sed -n '1p')
+  fi
+  if [ -z "$gc_ceiling" ]; then
+    printf 'compact: db=%s DOLT_GC was canceled after %ss, most likely by the %s at its listener.read_timeout_millis ceiling — DOLT_GC produces no rows until it finishes, so that timeout caps the whole reclaim; if the sql-server log shows an i/o timeout on that connection, %s\n' \
+      "$db" "$gc_elapsed" "$gc_server" "$gc_remedy" >&2
+    return 0
+  fi
+  if [ "$(( (gc_elapsed + 1) * 1000 ))" -lt "$gc_ceiling" ]; then
+    printf 'compact: db=%s DOLT_GC was canceled after %ss, before the listener.read_timeout_millis=%s ceiling in %s, so that timeout did not end it — look in the sql-server log for a stop, restart, or dropped connection\n' \
+      "$db" "$gc_elapsed" "$gc_ceiling" "$gc_server_config" >&2
+    return 0
+  fi
+  printf 'compact: db=%s the %s ended DOLT_GC after %ss at its listener.read_timeout_millis=%s ceiling in %s — DOLT_GC produces no rows until it finishes, so that timeout caps the whole reclaim and the next full GC hits the same ceiling; %s\n' \
+    "$db" "$gc_server" "$gc_elapsed" "$gc_ceiling" "$gc_server_config" "$gc_remedy" >&2
 }
 
 run_full_gc() {
@@ -2212,14 +2239,16 @@ run_full_gc() {
   printf 'compact: db=%s — running DOLT_GC --full...\n' "$db"
   gc_rc=0
   gc_err_tmp=$(mktemp)
+  gc_start=$(date +%s)
   dolt_query "$db" "CALL DOLT_GC('--full')" >/dev/null 2>"$gc_err_tmp" || gc_rc=$?
 
   elapsed=$(( $(date +%s) - start ))
+  gc_elapsed=$(( $(date +%s) - gc_start ))
   if [ "$gc_rc" -ne 0 ]; then
     printf 'compact: db=%s %s DOLT_GC failed rc=%s duration=%ss\n' \
       "$db" "$failure_prefix" "$gc_rc" "$elapsed" >&2
     emit_error_file "$db" "$gc_err_tmp"
-    explain_full_gc_cancellation "$db" "$gc_err_tmp"
+    explain_full_gc_cancellation "$db" "$gc_err_tmp" "$gc_elapsed"
     rm -f "$gc_err_tmp"
     return 1
   fi
