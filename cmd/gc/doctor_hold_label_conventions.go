@@ -79,8 +79,14 @@ func (c *holdLabelConventionsCheck) Run(_ *doctor.CheckContext) *doctor.CheckRes
 
 	var details []string
 	var queryErrs []string
-	for _, label := range retiredHoldLabels {
+	// One independent read per retired label, issued concurrently and folded
+	// in label order.
+	results := doctorParallelMap(retiredHoldLabels, func(label string) doctorListResult[[]beads.Bead] {
 		found, err := store.ListByLabel(label, 0)
+		return doctorListResult[[]beads.Bead]{value: found, err: err}
+	})
+	for i, label := range retiredHoldLabels {
+		found, err := results[i].value, results[i].err
 		if err != nil {
 			queryErrs = append(queryErrs, fmt.Sprintf("querying label %q: %v", label, err))
 			continue

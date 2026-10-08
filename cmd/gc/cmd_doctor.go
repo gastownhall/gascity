@@ -639,6 +639,10 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	// an abandoned check writes only to its own private buffer. A future caller
 	// that reuses a Doctor in-process must call Wait before releasing ctx.
 	d := &doctor.Doctor{CheckTimeout: opts.CheckTimeout}
+	// Identical bd reads are shared across this run's checks; see bdReadMemo.
+	readMemo := newBdReadMemo(cityPath)
+	defer installBdReadMemo(readMemo)()
+	d.BeforeFix = readMemo.invalidate
 	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: opts.Verbose}
 	cfg, cfgErr := loadCityConfig(cityPath, stderr)
 	if cfgErr == nil {
@@ -684,7 +688,8 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	})
 	selected, unmatched := doctor.SelectChecks(registered, splitDoctorCheckNames(opts.Checks))
 	if len(unmatched) > 0 {
-		return reportUnknownDoctorChecks(unmatched, registered, opts.JSON, stdout, stderr)
+		reportUnknownDoctorChecks(unmatched, registered, opts.JSON, stdout, stderr)
+		return 1
 	}
 	for _, check := range selected {
 		d.Register(check)
@@ -748,8 +753,8 @@ type doctorBlockingFailure struct {
 // and tells the caller what it could have asked for. Running the names that did
 // match would be worse than erroring: a caller filtering doctor output by name
 // reads a short result set as a clean one, so a single typo would report health
-// nobody measured.
-func reportUnknownDoctorChecks(unmatched []string, registered []doctor.Check, jsonOut bool, stdout, stderr io.Writer) int {
+// nobody measured. The caller exits 1.
+func reportUnknownDoctorChecks(unmatched []string, registered []doctor.Check, jsonOut bool, stdout, stderr io.Writer) {
 	names := doctor.CheckNames(registered)
 	message := unknownDoctorChecksMessage(unmatched, names)
 	if jsonOut {
@@ -767,14 +772,13 @@ func reportUnknownDoctorChecks(unmatched []string, registered []doctor.Check, js
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
-		return 1
+		return
 	}
 	fmt.Fprintf(stderr, "gc doctor: %s\n", message)                                //nolint:errcheck // best-effort stderr
 	fmt.Fprintf(stderr, "checks registered in this workspace (%d):\n", len(names)) //nolint:errcheck // best-effort stderr
 	for _, name := range names {
 		fmt.Fprintf(stderr, "  %s\n", name) //nolint:errcheck // best-effort stderr
 	}
-	return 1
 }
 
 func unknownDoctorChecksMessage(unmatched, registered []string) string {

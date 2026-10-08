@@ -161,10 +161,17 @@ func (c *v2RoutedToNamespaceCheck) collectStoreFindings(store beads.Store, alias
 		routes = append(routes, route)
 	}
 	sort.Strings(routes)
-	for _, route := range routes {
+	// The per-route reads are independent, so they run concurrently; the
+	// results are folded in route order, which keeps the first-error cutoff
+	// and the finding order identical to a serial scan.
+	results := doctorParallelMap(routes, func(route string) doctorListResult[[]beads.Bead] {
 		items, err := store.List(beads.ListQuery{
 			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: route},
 		})
+		return doctorListResult[[]beads.Bead]{value: items, err: err}
+	})
+	for _, result := range results {
+		items, err := result.value, result.err
 		if err != nil {
 			return findings, err
 		}
