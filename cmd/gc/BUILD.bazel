@@ -1453,6 +1453,8 @@ go_test(
         "reconcile_session_effects_test.go",
         "reconcile_session_fence_test.go",
         "reconcile_settle_test.go",
+        "reconcile_sim_invariants_test.go",
+        "reconcile_sim_scenarios_test.go",
         "reconcile_sim_test.go",
         "reconcile_steps_pool_test.go",
         "reconcile_steps_test.go",
