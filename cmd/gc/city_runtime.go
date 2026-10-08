@@ -2709,8 +2709,10 @@ func (cr *CityRuntime) reloadConfigTraced(
 		}
 		// Seed the new provider's routes from the session beads as they stand
 		// after the wait, so every listed name has a known route (CONTRACT P7).
-		snapshot := cr.loadSessionBeadSnapshot()
-		if !sessionBeadSnapshotLoaded(snapshot) {
+		// A city with no session store has nothing to seed; its default routes
+		// stay unknown, so a listed name on them aborts below.
+		snapshot, unreadable := cr.loadSessionBeadSnapshotWithPartial()
+		if unreadable {
 			return swapFailed(errors.New("session beads unreadable during provider swap"))
 		}
 		seedACPRoutesFromSnapshot(nextSp, snapshot, cr.cityName, nextCfg)
