@@ -99,7 +99,8 @@ func readSessionCensus(now time.Time, legs []classStoreCandidate) (*sessionCensu
 				continue
 			}
 			k := rowKey{Leg: source.ref, ID: id}
-			row := newCensusRow(k, l.Info, l.Response.Metadata)
+			row := newCensusRow(k, l.Info)
+			row.StopKeys = readStopKeys(l.Response.Metadata)
 			if first, dup := canonicalLeg[id]; dup {
 				// One effect, one row: only the canonical copy counts in flight.
 				row.DuplicateOf, row.PendingCreate = first, false
@@ -114,20 +115,33 @@ func readSessionCensus(now time.Time, legs []classStoreCandidate) (*sessionCensu
 	return c, nil
 }
 
-// newCensusRow is info's census row at k, as its canonical copy; meta is
-// its persisted metadata.
-func newCensusRow(k rowKey, info session.Info, meta map[string]string) censusRow {
+// newCensusRow is info's census row at k, as its canonical copy.
+func newCensusRow(k rowKey, info session.Info) censusRow {
 	row := censusRow{
 		Key:           k,
 		Info:          info,
 		InstanceToken: info.InstanceToken,
 		UnknownState:  !isKnownStateInfo(info) && !isDrainAckStopPendingInfo(info),
-		StopKeys:      readStopKeys(meta),
 	}
 	row.Incarnation, _ = strconv.ParseInt(strings.TrimSpace(info.Generation), 10, 64)
 	state := session.State(strings.TrimSpace(info.MetadataState))
 	row.PendingCreate = info.PendingCreateClaim && state != session.StateActive && state != session.StateAwake
 	return row
+}
+
+// reread is k's census row read again as info, with its persisted metadata
+// meta. A nil meta keeps the census's stop keys: a re-decide never drops a
+// request it was not shown.
+func (c *sessionCensus) reread(k rowKey, info session.Info, meta map[string]string) censusRow {
+	r, prev := newCensusRow(k, info), c.Rows[k]
+	r.StopKeys = prev.StopKeys
+	if meta != nil {
+		r.StopKeys = readStopKeys(meta)
+	}
+	if r.DuplicateOf = prev.DuplicateOf; r.DuplicateOf != "" {
+		r.PendingCreate = false
+	}
+	return r
 }
 
 // index orders the canonical rows and builds the per-pass lookups.

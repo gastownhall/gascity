@@ -1436,7 +1436,6 @@ go_test(
         "reconcile_arms_drain_test.go",
         "reconcile_dirty_test.go",
         "reconcile_effect_create_test.go",
-        "reconcile_effect_drain_test.go",
         "reconcile_effect_write_test.go",
         "reconcile_effects_lint_test.go",
         "reconcile_effects_mode_test.go",

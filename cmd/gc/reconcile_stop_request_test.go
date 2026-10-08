@@ -87,8 +87,9 @@ func TestActiveStopTableOverNineRowShapes(t *testing.T) {
 
 // TestDrainIntentIncarnationIsGeneration. Kills an intent keyed by the
 // token (a rekey would void it) or never re-keyed by the generation (a
-// PreWake would keep it): the begin writes the raw generation, a rekey keeps
-// the request, and a generation bump ends it.
+// PreWake would keep it), and an empty generation pinned undrained: the
+// begin writes the generation, a rekey keeps the request, a generation bump
+// ends it, and an empty generation is legacy's 0.
 func TestDrainIntentIncarnationIsGeneration(t *testing.T) {
 	row := censusRowOf(t, drainRow())
 	patch := stopBeginPatch(row, "orphaned", gatherNow)
@@ -105,13 +106,19 @@ func TestDrainIntentIncarnationIsGeneration(t *testing.T) {
 	if _, ok := activeStop(censusRowOf(t, drainRow(append(meta, "generation", "4")...))); ok {
 		t.Fatal("a generation bump kept the request")
 	}
+	empty := censusRowOf(t, drainRow("generation", ""))
+	if inc := stopBeginPatch(empty, "orphaned", gatherNow)[drainIntentIncarnationKey]; inc != "0" {
+		t.Fatalf("an empty generation's incarnation = %q, want legacy's 0", inc)
+	}
+	if _, ok := activeStop(censusRowOf(t, drainRow(append([]string{"generation", ""}, intentAt("orphaned", "0")...)...))); !ok {
+		t.Fatal("a request at generation 0 is not read back")
+	}
 }
 
 // TestStopRequestSurvivesNoOperatorDormantState (I15). Kills a transition
 // that writes over an operator's suspend or kill (the suspend-revert
-// scenario): such a row has no request and gets no begin, its residue is
-// voided by a write of the stop keys alone, and a begin decided before the
-// operator's write refuses inside the CAS.
+// scenario): such a row has no request, and its residue is voided by a
+// write of the stop keys alone. C6a2 adds the begin's half.
 func TestStopRequestSurvivesNoOperatorDormantState(t *testing.T) {
 	keys := slices.Concat(intentAt("orphaned", "3"), ackAt("3"))
 	for _, dormant := range [][]string{suspendedRow, killPending} {
@@ -133,31 +140,6 @@ func TestStopRequestSurvivesNoOperatorDormantState(t *testing.T) {
 				t.Fatalf("the void writes %q, an operator-owned key", k)
 			}
 		}
-	}
-
-	// A begin admitted on an active row; the operator suspends before the CAS.
-	store, _ := stampedMem(t, gate.Require)
-	b, err := store.Create(drainRow("last_woke_at", rowAt(-time.Hour)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	w := &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, store))}
-	k := rowKey{Leg: rowLeg, ID: b.ID}
-	a := &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{k: {Key: k, Liveness: livenessAlive, Desired: desireDrain, DrainReason: drainSuspended}}}}
-	it, _ := decideRow(w, a, k)
-	if it.Kind != intentDrainBegin {
-		t.Fatalf("fixture: %+v, want a begin", it)
-	}
-	if err := store.SetMetadataBatch(b.ID, map[string]string{"state": "suspended", "sleep_intent": "user-hold"}); err != nil {
-		t.Fatal(err)
-	}
-	w.LegStores = map[string]beads.Store{rowLeg: store}
-	if s := rowWriteEffect(newEffectPass(w, a), it)(context.Background()); s.Outcome != settledRefused || s.Cause != causeRedecided {
-		t.Fatalf("settlement %+v, want refused redecided", s)
-	}
-	got, _ := store.Get(b.ID)
-	if got.Metadata["state"] != "suspended" || got.Metadata[drainIntentReasonKey] != "" {
-		t.Fatalf("row %v, want the operator's suspend and no request", got.Metadata)
 	}
 }
 
@@ -181,9 +163,6 @@ func stopKeyNames() []string {
 	}, stopKeyFields()...)
 }
 
-// stopKeyValues are the five keys' spellings.
-var stopKeyValues = []string{drainIntentReasonKey, drainIntentAtKey, drainIntentIncarnationKey, session.DrainAckIncarnationKey, session.DrainAckAtKey}
-
 // lintStopKeys returns one "file:line: name" per stop-request key named or
 // spelled in src.
 func lintStopKeys(t *testing.T, path string, src any) []string {
@@ -203,7 +182,7 @@ func lintStopKeys(t *testing.T, path string, src any) []string {
 				hit = n.Name
 			}
 		case *ast.BasicLit:
-			if v, err := strconv.Unquote(n.Value); err == nil && n.Kind == token.STRING && slices.Contains(stopKeyValues, v) {
+			if v, err := strconv.Unquote(n.Value); err == nil && n.Kind == token.STRING && slices.Contains(stopKeys, v) {
 				hit = v
 			}
 		}
@@ -215,21 +194,22 @@ func lintStopKeys(t *testing.T, path string, src any) []string {
 	return out
 }
 
-// TestStopRequestLintBansDirectKeyReads (I6, I14). Kills a second reader of
-// the stop request: a seeded effect naming each key, field and spelling
-// trips the lint; no effect or step file trips it; and outside the
-// accessor's file no production file reads a rawStopKeys field.
+// TestStopRequestLintBansDirectKeyReads (I6, I14). Kills a second reader
+// of the stop request: a seeded effect naming each key, field and spelling
+// trips the lint; no effect or step file trips it; and no production file
+// but the accessor's, the key constants' and E3's CLI names a key, a
+// spelling or a rawStopKeys field.
 func TestStopRequestLintBansDirectKeyReads(t *testing.T) {
 	var src strings.Builder
 	src.WriteString("package main\n\nfunc seeded(row censusRow, meta map[string]string) {\n")
 	for _, n := range stopKeyNames() {
 		fmt.Fprintf(&src, "\t_ = row.%s\n", n)
 	}
-	for _, v := range stopKeyValues {
+	for _, v := range stopKeys {
 		fmt.Fprintf(&src, "\t_ = meta[%q]\n", v)
 	}
 	src.WriteString("}\n")
-	if got, want := len(lintStopKeys(t, "reconcile_effect_seeded.go", src.String())), len(stopKeyNames())+len(stopKeyValues); got != want {
+	if got, want := len(lintStopKeys(t, "reconcile_effect_seeded.go", src.String())), len(stopKeyNames())+len(stopKeys); got != want {
 		t.Fatalf("the seeded effect: %d findings, want %d", got, want)
 	}
 	for _, f := range effectLintFiles(t) {
@@ -237,19 +217,66 @@ func TestStopRequestLintBansDirectKeyReads(t *testing.T) {
 			t.Errorf("an effect or step reads the stop request directly: %s", finding)
 		}
 	}
-	fields := stopKeyFields()
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
+	owners := []string{"reconcile_stop_request.go", "reconcile_stop_keys.go", "cmd_runtime_drain.go"}
+	plumbing := []string{"StopKeys", "readStopKeys"} // the census's projection, outside effects
 	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") || f == "reconcile_stop_request.go" {
+		if strings.HasSuffix(f, "_test.go") || slices.Contains(owners, f) {
 			continue
 		}
 		for _, finding := range lintStopKeys(t, f, nil) {
-			if name := finding[strings.LastIndex(finding, " ")+1:]; slices.Contains(fields, name) {
+			if name := finding[strings.LastIndex(finding, " ")+1:]; !slices.Contains(plumbing, name) {
 				t.Errorf("a second reader of the stop request: %s", finding)
 			}
 		}
+	}
+}
+
+// TestResidueVoidSurvivesSameGenerationResume (ORCH E3: Manager.ensureRunning
+// resumes at the same generation and token). Kills a residue void that
+// leaves either ack key: after the void lands on a suspended row, a resume
+// at the same generation reads no request.
+func TestResidueVoidSurvivesSameGenerationResume(t *testing.T) {
+	store, _ := stampedMem(t, gate.Require)
+	b, err := store.Create(drainRow(slices.Concat(intentAt(drainOrphaned, "3"), ackAt("3"), suspendedRow)...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := rowKey{Leg: rowLeg, ID: b.ID}
+	w := &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, store)), LegStores: map[string]beads.Store{rowLeg: store}}
+	a := &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{k: {Key: k, Liveness: livenessAlive}}}}
+	it, _ := decideRow(w, a, k)
+	if s := effectRegistry[it.Kind](newEffectPass(w, a), it)(context.Background()); it.Reason != decideStopResidue || s.Outcome != settledLanded {
+		t.Fatalf("void %+v settled %+v, want the residue void landed", it, s)
+	}
+	got, _ := store.Get(b.ID)
+	for _, key := range stopKeys {
+		if got.Metadata[key] != "" {
+			t.Errorf("%s = %q after the void", key, got.Metadata[key])
+		}
+	}
+	if err := store.SetMetadataBatch(b.ID, map[string]string{"state": "active", "sleep_intent": "", "held_until": ""}); err != nil {
+		t.Fatal(err)
+	}
+	if req, ok := activeStop(readCensus(t, gatherNow, censusLegs(rowLeg, store)).Rows[k]); ok || req.Residue {
+		t.Fatalf("after a same-generation resume: %+v, %v; want no request", req, ok)
+	}
+}
+
+// TestRereadKeepsStopKeysWithoutMetadata. Kills a re-decide that drops a
+// request on a path with no persisted metadata: the re-read keeps the
+// census's stop keys then, and takes the fresh ones otherwise.
+func TestRereadKeepsStopKeysWithoutMetadata(t *testing.T) {
+	w, _ := rowWorld(t, drainRow(intentAt(drainOrphaned, "3")...))
+	k := rowKeyOf("gc-1")
+	info := w.Census.Rows[k].Info
+	if _, ok := activeStop(w.Census.reread(k, info, nil)); !ok {
+		t.Fatal("a nil-metadata re-read dropped the request")
+	}
+	if _, ok := activeStop(w.Census.reread(k, info, map[string]string{})); ok {
+		t.Fatal("a re-read kept keys its fresh metadata no longer holds")
 	}
 }

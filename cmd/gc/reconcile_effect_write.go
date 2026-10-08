@@ -95,11 +95,7 @@ func (w World) withRow(k rowKey, row session.Info, meta map[string]string) World
 	if row.Closed {
 		delete(c.Rows, k)
 	} else {
-		r := newCensusRow(k, row, meta)
-		if r.DuplicateOf = c.Rows[k].DuplicateOf; r.DuplicateOf != "" {
-			r.PendingCreate = false
-		}
-		c.Rows[k] = r
+		c.Rows[k] = w.Census.reread(k, row, meta)
 	}
 	w.Census = &c
 	return w

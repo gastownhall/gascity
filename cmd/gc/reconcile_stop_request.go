@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,7 +15,8 @@ import (
 // reader of the keys, and the patch builders below are D1's only writers of
 // them (I6, I14; TestStopRequestLintBansDirectKeyReads). Both halves name
 // the row's generation only, so a rekey, which moves only the token, keeps
-// them.
+// them. An empty or unparseable generation is generation 0, as legacy's
+// drain tracker reads it (strconv.Atoi).
 
 // rawStopKeys are a row's raw stop-request keys, as the census read them.
 type rawStopKeys struct {
@@ -49,6 +51,11 @@ type stopRequest struct {
 	At     time.Time // when the drain began; zero when unparseable or absent
 	// Synthesized marks a bare legacy stop-pending row (rule 3).
 	Synthesized bool
+	// Residue marks, on no request, a half of the row's generation that
+	// rule 2 ended. The void clears both halves, so a runtime restarted
+	// later at the same generation (Manager.ensureRunning bumps neither the
+	// generation nor the token) is not stopped for its predecessor's request.
+	Residue bool
 }
 
 // activeStop is a row's active stop request, by D1's rules in order:
@@ -62,12 +69,12 @@ type stopRequest struct {
 // Otherwise a current controller half is a request. A11 reads acks only
 // through rule 4 (D5).
 func activeStop(row censusRow) (stopRequest, bool) {
-	k, gen := row.StopKeys, strings.TrimSpace(row.Info.Generation)
-	intent := gen != "" && k.rawIntentReason != "" && k.rawIntentIncarnation == gen
-	acked := gen != "" && k.rawAckIncarnation == gen
+	k, gen := row.StopKeys, strconv.FormatInt(row.Incarnation, 10)
+	intent := k.rawIntentReason != "" && k.rawIntentIncarnation == gen
+	acked := k.rawAckIncarnation == gen
 	pending := isDrainAckStopPendingInfo(row.Info)
 	if !pending && !sessionBeadClaimsLiveRuntime(row.Info) {
-		return stopRequest{}, false
+		return stopRequest{Residue: intent || acked}, false
 	}
 	var req stopRequest
 	if intent {
@@ -87,18 +94,6 @@ func activeStop(row censusRow) (stopRequest, bool) {
 	return req, true
 }
 
-// stopResidue reports a row that carries a half of its own generation that
-// rule 2 ended. The void clears it, so a runtime restarted later at the same
-// generation (Manager.ensureRunning bumps neither the generation nor the
-// token) is not stopped for its predecessor's request.
-func stopResidue(row censusRow) bool {
-	k, gen := row.StopKeys, strings.TrimSpace(row.Info.Generation)
-	if _, active := activeStop(row); active || gen == "" {
-		return false
-	}
-	return (k.rawIntentReason != "" && k.rawIntentIncarnation == gen) || k.rawAckIncarnation == gen
-}
-
 // stopBeginPatch is none → requested (drain begin): the controller half at
 // the row's generation. It never writes state (no BeginDrainPatch: legacy
 // skips state=draining without stop-pending as an unknown state).
@@ -106,7 +101,7 @@ func stopBeginPatch(row censusRow, reason string, now time.Time) session.Metadat
 	return session.MetadataPatch{
 		drainIntentReasonKey:      reason,
 		drainIntentAtKey:          now.UTC().Format(time.RFC3339),
-		drainIntentIncarnationKey: strings.TrimSpace(row.Info.Generation),
+		drainIntentIncarnationKey: strconv.FormatInt(row.Incarnation, 10),
 	}
 }
 

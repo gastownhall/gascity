@@ -193,7 +193,8 @@ func (s *sim) checkWrite(w simWrite) {
 // dormantChange returns a key a v2 write changed on b that an operator owns
 // at t, or "": an honored kill fence owns the row's lifecycle and its sleep
 // reason, a suspend the row's state, and an unexpired hold or quarantine its
-// timer and sleep reason; no dormant row is woken or given a stop request.
+// timer and sleep reason; no dormant row is woken or given a stop request,
+// though one it holds may be cleared.
 func dormantChange(b beads.Bead, a map[string]string, t time.Time) string {
 	m := b.Metadata
 	until := func(k string) bool { at, err := time.Parse(time.RFC3339, m[k]); return err == nil && at.After(t) }
@@ -220,8 +221,13 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time) string {
 	if len(owned) == 0 {
 		return ""
 	}
-	for _, k := range append(owned, stopKeys...) {
+	for _, k := range owned {
 		if a[k] != m[k] {
+			return k
+		}
+	}
+	for _, k := range stopKeys { // the residue void clears them (v5 D1, R1 as amended at C6a)
+		if a[k] != m[k] && a[k] != "" {
 			return k
 		}
 	}

@@ -123,7 +123,7 @@ type rowArm struct {
 // rowArms is CONTRACT v5 §4's table in its order. Later PRs insert their
 // arms at their numbers: A3 rekey (C4c2), A4 the stop request (C6b2), A6's
 // other heals and markers (C5d), A7 row metadata (C7d), A8 the baseline
-// (C7c), A10-A18 and A21.
+// (C7c), A10-A18, A20's begin (C6a2) and A21.
 var rowArms = []rowArm{
 	{"A1", armNoRow},
 	{"A2", armKillFence},
@@ -131,7 +131,6 @@ var rowArms = []rowArm{
 	{"A6", armTimerHeals},
 	{"A9", armLivenessUnknown},
 	{"A19", armDrainVoidCancel},
-	{"A20", armDrainBegin},
 }
 
 // decideRow's other reasons.
