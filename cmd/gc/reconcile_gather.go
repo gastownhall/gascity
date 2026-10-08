@@ -66,9 +66,10 @@ type gatherEnv struct {
 // World is one pass's inputs (architecture §1.2), immutable once gathered:
 // every map is the pass's own or never mutated after publish.
 type World struct {
-	Now    time.Time
-	Env    *reconcileEnv
-	Census *sessionCensus
+	Now      time.Time
+	CityPath string // the runtime name locks' city (lockRuntimeName)
+	Env      *reconcileEnv
+	Census   *sessionCensus
 	// Mislabelled are the canonical rows with no template and no session
 	// name: beads labeled gc:session that are not sessions. Arm A1 makes
 	// each None with one trace (CONTRACT v5 AL1).
@@ -117,7 +118,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	w := World{Now: now, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused()}
+	w := World{Now: now, CityPath: e.CityPath, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused()}
 	var st suspensionstate.State
 	if e.Suspension != nil {
 		st = e.Suspension()

@@ -147,13 +147,13 @@ func newStartFixture(t *testing.T, store beads.Store, meta ...string) *startFixt
 // pass is the effect pass of a pass over the store as it reads now.
 func (f *startFixture) pass(t *testing.T) *effectPass {
 	t.Helper()
-	w := &World{Now: f.clk.Now(), Env: &reconcileEnv{Cfg: &config.City{}}, Census: readCensus(t, f.clk.Now(), censusLegs(rowLeg, f.store))}
+	w := &World{Now: f.clk.Now(), CityPath: t.Name(), Env: &reconcileEnv{Cfg: &config.City{}}, Census: readCensus(t, f.clk.Now(), censusLegs(rowLeg, f.store))}
 	w.LegStores = map[string]beads.Store{rowLeg: f.store}
 	if row, ok := w.Census.Rows[f.key]; ok {
 		w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: f.tp}}}
 	}
 	p := newEffectPass(w, f.alloc)
-	p.Runtime = effectRuntime{CityName: t.Name(), SP: f.leaf, Clock: f.clk, Capacity: f.guard, Stderr: io.Discard}
+	p.Runtime = effectRuntime{SP: f.leaf, Clock: f.clk, Capacity: f.guard, Stderr: io.Discard}
 	return p
 }
 
@@ -352,10 +352,12 @@ func TestCommitPremise(t *testing.T) {
 	})
 }
 
-// Kills a start under a name another effect or reaper holds, and a lock
-// dropped before the commit: a busy name refuses with cause name-busy (a row
-// backoff) before any read, and the effect holds the name at its read and
-// at every store read through the commit.
+// Kills a start under a name another effect or the reaper holds, a lock
+// keyed apart from theirs (the R53 race), and a lock dropped before the
+// commit: on the key the reaper takes (stopStillBoundClosedRuntime: the city
+// path and the session name), a busy name refuses with cause name-busy (a
+// row backoff) before any read, and the effect holds the name at its read
+// and at every store read through the commit.
 func TestStartEffectHoldsNameLockThroughCommit(t *testing.T) {
 	f := newStartFixture(t, requireMem(t), "state", "creating")
 	f.leaf.runtimeAs(liveAlive, f.key.ID, "tok")

@@ -26,17 +26,15 @@ type effectPass struct {
 }
 
 // effectRuntime is the runtime half of an effect's capabilities (v5 R3):
-// the provider its fresh reads and provider calls route through, the city
-// its runtime name locks are keyed by, the endpoint breaker, and the
-// clock. Rec receives the breaker's transitions only; a row's events ride
-// its settlement.
+// the provider its fresh reads and provider calls route through, the
+// endpoint breaker, and the clock. Rec receives the breaker's transitions
+// only; a row's events ride its settlement.
 type effectRuntime struct {
-	CityPath, CityName string
-	SP                 runtime.Provider
-	Capacity           *endpointCapacityGuard
-	Clock              plannerClock
-	Rec                events.Recorder
-	Stderr             io.Writer
+	SP       runtime.Provider
+	Capacity *endpointCapacityGuard
+	Clock    plannerClock
+	Rec      events.Recorder
+	Stderr   io.Writer
 }
 
 // newEffectPass is w's and a's effectPass.

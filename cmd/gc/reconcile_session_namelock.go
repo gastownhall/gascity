@@ -1,6 +1,11 @@
 package main
 
-import "sync"
+import (
+	"strings"
+	"sync"
+
+	"github.com/gastownhall/gascity/internal/session"
+)
 
 // runtimeNameLocks serializes, per runtime name, the v2 start effect's
 // provider Start with a runtime-keyed reaper's identity re-read and Stop
@@ -20,6 +25,16 @@ type runtimeNameLocks struct {
 type runtimeNameKey struct{ city, name string }
 
 var runtimeNames = &runtimeNameLocks{held: make(map[runtimeNameKey]bool)}
+
+// lockRuntimeName takes the name lock on row's runtime name in w's city,
+// keyed as the legacy reaper keys it (stopStillBoundClosedRuntime: the city
+// path and the runtime's session name), so every v2 effect and the reaper
+// exclude one another. It returns the name, and a nil unlock when the name
+// is busy.
+func lockRuntimeName(w *World, row session.Info) (name string, unlock func()) {
+	name = strings.TrimSpace(row.SessionName)
+	return name, runtimeNames.tryLock(w.CityPath, name)
+}
 
 // tryLock takes city's lock on name if it is free, or returns nil. A reaper
 // never waits: it skips the name, and the next pass reconsiders it.

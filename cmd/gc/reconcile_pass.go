@@ -204,7 +204,7 @@ func (p *planner) submit(w *World, a *allocDecision, admitted []intent, rt effec
 // effectRuntime is the runtime capability the pass's effects hold over e
 // and env.
 func (p *planner) effectRuntime(e gatherEnv, env *reconcileEnv) effectRuntime {
-	rt := effectRuntime{CityPath: e.CityPath, CityName: e.CityName, SP: env.SP, Clock: p.clock, Rec: p.rec, Stderr: p.stderr}
+	rt := effectRuntime{SP: env.SP, Clock: p.clock, Rec: p.rec, Stderr: p.stderr}
 	if e.Capacity != nil {
 		rt.Capacity = e.Capacity()
 	}

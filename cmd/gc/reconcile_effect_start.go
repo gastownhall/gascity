@@ -141,7 +141,7 @@ func (e startEffect) run(ctx context.Context) settlement {
 	if !ok || res.Err != nil {
 		return settlement{Outcome: settledRefused, Cause: causeTemplate, Err: res.Err}
 	}
-	a := startAttempt{row: row, tp: res.TP, name: strings.TrimSpace(row.Info.SessionNameMetadata), writer: writer}
+	a := startAttempt{row: row, tp: res.TP, name: strings.TrimSpace(row.Info.SessionName), writer: writer}
 	if router, ok := rt.SP.(interface{ RouteACP(string) }); ok && a.tp.IsACP {
 		router.RouteACP(a.name)
 	}
@@ -150,7 +150,7 @@ func (e startEffect) run(ctx context.Context) settlement {
 		return refused(causeRouteUnknown)
 	}
 	a.leaf = leaf
-	unlock := runtimeNames.tryLock(rt.CityName, a.name)
+	_, unlock := lockRuntimeName(e.pass.World, row.Info)
 	if unlock == nil {
 		return refused(causeNameBusy)
 	}
@@ -199,7 +199,7 @@ func (e startEffect) observe(ctx context.Context, a startAttempt, row session.In
 // prepare is legacy's prepare of row behind the refusing store, with the
 // effect's transcript state (S-1).
 func (e startEffect) prepare(a startAttempt, row session.Info, transcript sessTranscriptState) (*preparedStart, error) {
-	prepared, _, err := buildPreparedStartWithTranscript(startCandidate{info: row, tp: a.tp}, e.pass.Runtime.CityPath, e.pass.World.Env.Cfg,
+	prepared, _, err := buildPreparedStartWithTranscript(startCandidate{info: row, tp: a.tp}, e.pass.World.CityPath, e.pass.World.Env.Cfg,
 		blindWriteRefusingStore{inner: a.writer.store}, nil, &transcript)
 	return prepared, err
 }
