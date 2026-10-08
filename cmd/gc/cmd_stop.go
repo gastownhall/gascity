@@ -506,18 +506,19 @@ func newStopProbeSessionProvider(cfg *config.City, cityPath string) (runtime.Pro
 // SIGKILLed proxy, a stray Dolt child, a gc-managed Dolt, a scope that is not
 // provider-owned proxied, or a runtime it could not list completely.
 //
-// The city's nudge pollers are stopped first. They are readers the city
-// spawns, and one that outlived the city would restart the proxy this check
-// found retired; the full flow stops them for the same reason.
+// The city's nudge pollers are stopped only once the store is found retired
+// and the runtime is found empty, and the store is checked again after they
+// are gone. A poller is a reader the city spawns: one that outlived the city
+// restarts the proxy the first check found retired, which the second check
+// catches. Any other city keeps its pollers for the full flow, which stops
+// them last, with the store, so a full stop that fails or times out does not
+// leave running sessions without their pollers.
 //
 // What this path does not do is mark session beads asleep with the city-stop
 // reason: that needs the store. A clean stop already marked them, so the only
 // beads left unmarked are those of a city whose controller died without
 // stopping, whose sessions are gone and whose proxy has since retired.
 func cityAlreadyStoppedForStop(cfg *config.City, cityPath string) (bool, runtime.Provider) {
-	if err := stopCityNudgePollers(cityPath); err != nil {
-		return false, nil
-	}
 	if !stopCityStoreRetired(cityPath) {
 		return false, nil
 	}
@@ -529,6 +530,12 @@ func cityAlreadyStoppedForStop(cfg *config.City, cityPath string) (bool, runtime
 	if !complete || len(running) > 0 {
 		return false, nil
 	}
+	if err := stopCityNudgePollers(cityPath); err != nil {
+		return false, nil
+	}
+	if !stopCityStoreRetired(cityPath) {
+		return false, nil
+	}
 	return true, sp
 }
 
@@ -536,11 +543,17 @@ func cityAlreadyStoppedForStop(cfg *config.City, cityPath string) (bool, runtime
 // or a live store without a real bd proxy.
 var stopCityStoreRetired = cityStoreRetiredForStop
 
+// discoverDoltProcessesForStop lists the live Dolt servers
+// cityStoreRetiredForStop sweeps the proxy roots for. A variable so tests can
+// model a stray Dolt without starting one.
+var discoverDoltProcessesForStop = discoverDoltProcesses
+
 // cityStoreRetiredForStop reports whether every bead-store scope this city
 // would retire on stop is a provider-owned proxied scope whose proxy exited
 // cleanly (bd removes proxy.pid on an orderly exit), with no Dolt server left
-// running under any of their proxy roots. Any other shape, or any read it
-// cannot complete, answers false.
+// running under any of their proxy roots: none whose --config or --data-dir
+// sits under one, the way doltProcRigOwner matches a Dolt to a rig. Any other
+// shape, or any read it cannot complete, answers false.
 func cityStoreRetiredForStop(cityPath string) bool {
 	if !cityUsesBdStoreContract(cityPath) {
 		return false
@@ -553,7 +566,7 @@ func cityStoreRetiredForStop(cityPath string) bool {
 		return false
 	}
 	table := proxyendpoint.DefaultProcessTable()
-	proxyRoots := make([]string, 0, len(scopes))
+	proxyRoots := make([]resolverRig, 0, len(scopes))
 	for _, scopeRoot := range scopes {
 		owned, err := scopeProviderOwned(cityPath, scopeRoot)
 		if err != nil || !owned || !doctor.ProxiedStoreNotRunning(scopeRoot) {
@@ -566,21 +579,15 @@ func cityStoreRetiredForStop(cityPath string) bool {
 		if proxyendpoint.Inspect(root, table).Verdict != proxyendpoint.VerdictNoRecord {
 			return false
 		}
-		proxyRoots = append(proxyRoots, normalizePathForCompare(root))
+		proxyRoots = append(proxyRoots, resolverRig{Name: scopeRoot, Path: root})
 	}
-	procs, err := discoverDoltProcesses()
+	procs, err := discoverDoltProcessesForStop()
 	if err != nil {
 		return false
 	}
 	for _, proc := range procs {
-		configPath := extractConfigPath(proc.Argv)
-		if configPath == "" {
-			continue
-		}
-		for _, root := range proxyRoots {
-			if pathUnderRoot(configPath, root) {
-				return false
-			}
+		if _, underProxyRoot := doltProcRigOwner(proc, proxyRoots); underProxyRoot {
+			return false
 		}
 	}
 	return true

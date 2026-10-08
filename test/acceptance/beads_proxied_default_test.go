@@ -225,9 +225,9 @@ func doltProcessesUnder(t *testing.T, root string) []string {
 }
 
 // stopIfPairsRemain runs a best-effort gc stop of cityRoot when a bd proxy or
-// Dolt server still runs under any of roots. A test's last cleanup calls it
-// rather than stopping unconditionally: gc stop on an already-stopped proxied
-// city restarts its pairs only to find nothing to stop.
+// Dolt server still runs under any of roots. A test's last cleanup calls it to
+// retire a pair the city's own cleanups left behind; a city they stopped
+// cleanly costs no further gc invocation.
 func stopIfPairsRemain(t *testing.T, env *helpers.Env, cityRoot string, roots ...string) {
 	t.Helper()
 	for _, root := range append([]string{cityRoot}, roots...) {

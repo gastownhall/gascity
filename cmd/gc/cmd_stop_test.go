@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -2338,22 +2340,153 @@ func TestCmdStopBodyStoppedRuntimeWithLiveStoreRetiresStore(t *testing.T) {
 	}
 }
 
+// A runtime the check cannot list completely proves nothing about what is
+// running, so a retired store does not let the stop skip the full flow.
+func TestCmdStopBodyPartialRuntimeInventoryWithRetiredStoreTakesFullFlow(t *testing.T) {
+	cityDir, cfg := alreadyStoppedTestCity(t)
+	storeOpens, providerStops := stubAlreadyStoppedSeams(t, true)
+
+	sessionProviderForStopProbe = func(*config.City, string) (runtime.Provider, error) {
+		return sessionhybrid.New(runtime.NewFake(), runtime.NewFailFake(), func(string) bool { return false }), nil
+	}
+	oldFactory := sessionProviderForStopCity
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return runtime.NewFake(), nil }
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdStopBodyWithoutSuccess(cityDir, cfg, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdStopBodyWithoutSuccess = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if *storeOpens != 1 || *providerStops != 1 {
+		t.Errorf("store opens = %d, provider stops = %d; want 1 and 1", *storeOpens, *providerStops)
+	}
+}
+
+// The already-stopped check stops the city's nudge pollers only once the
+// store is found retired and the runtime is found empty, and checks the store
+// again after they are gone. Any other city keeps its pollers for the full
+// flow, which stops them last, with the store; a poller that restarted the
+// proxy before it was stopped sends the stop down the full flow.
+func TestCityAlreadyStoppedForStopStopsPollersBetweenStoreChecks(t *testing.T) {
+	sessionRunning := func(t *testing.T) (runtime.Provider, error) {
+		sp := runtime.NewFake()
+		startStopTestSessions(t, sp, "worker")
+		return sp, nil
+	}
+	partialInventory := func(*testing.T) (runtime.Provider, error) {
+		return sessionhybrid.New(runtime.NewFake(), runtime.NewFailFake(), func(string) bool { return false }), nil
+	}
+	probeFails := func(*testing.T) (runtime.Provider, error) {
+		return nil, errors.New("building the session provider failed")
+	}
+	for _, tc := range []struct {
+		name    string
+		retired []bool // the answer to each successive store check
+		// probe builds the runtime the check lists; nil is an empty runtime.
+		probe func(*testing.T) (runtime.Provider, error)
+		// pollerAlive is whether the poller was alive at each store check.
+		pollerAlive []bool
+		wantStopped bool
+	}{
+		{name: "store not retired", retired: []bool{false}, pollerAlive: []bool{true}},
+		{name: "session still running", retired: []bool{true}, probe: sessionRunning, pollerAlive: []bool{true}},
+		{name: "runtime inventory incomplete", retired: []bool{true}, probe: partialInventory, pollerAlive: []bool{true}},
+		{name: "runtime probe failed", retired: []bool{true}, probe: probeFails, pollerAlive: []bool{true}},
+		{name: "store retired before and after the pollers stop", retired: []bool{true, true}, pollerAlive: []bool{true, false}, wantStopped: true},
+		{name: "proxy restarted before the pollers stopped", retired: []bool{true, false}, pollerAlive: []bool{true, false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir, cfg := alreadyStoppedTestCity(t)
+			stubAlreadyStoppedSeams(t, false)
+			sessionProviderForStopProbe = func(*config.City, string) (runtime.Provider, error) {
+				if tc.probe == nil {
+					return runtime.NewFake(), nil
+				}
+				return tc.probe(t)
+			}
+			poller := startPollerLikeProcess(t, cityDir, "session-id")
+			writeNudgePollerPIDFileForTest(t, cityDir, "sess-worker", "session-id", poller.Process.Pid)
+
+			var pollerAlive []bool
+			stopCityStoreRetired = func(string) bool {
+				pollerAlive = append(pollerAlive, pidutil.Alive(poller.Process.Pid))
+				return len(pollerAlive) <= len(tc.retired) && tc.retired[len(pollerAlive)-1]
+			}
+
+			if stopped, _ := cityAlreadyStoppedForStop(cfg, cityDir); stopped != tc.wantStopped {
+				t.Errorf("cityAlreadyStoppedForStop = %t, want %t", stopped, tc.wantStopped)
+			}
+			if !slices.Equal(pollerAlive, tc.pollerAlive) {
+				t.Errorf("poller alive at each store check = %v, want %v", pollerAlive, tc.pollerAlive)
+			}
+			if wantAlive := tc.pollerAlive[len(tc.pollerAlive)-1]; pidutil.Alive(poller.Process.Pid) != wantAlive {
+				t.Errorf("poller alive after the check = %t, want %t", !wantAlive, wantAlive)
+			}
+		})
+	}
+}
+
 func TestCityStoreRetiredForStop(t *testing.T) {
-	const proxiedMetadata = `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hq"}`
+	const (
+		proxiedMetadata = `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hq"}`
+		directMetadata  = `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`
+	)
+	bindScope := func(t *testing.T, city, scopeRoot, metadata string) {
+		t.Helper()
+		writeScopeBeadsMetadata(t, scopeRoot, metadata)
+		if err := persistProviderScopeOwnership(city, scopeRoot, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := markProviderScopeOwnershipReady(city, scopeRoot); err != nil {
+			t.Fatal(err)
+		}
+	}
 	newCity := func(t *testing.T, metadata string) string {
 		t.Helper()
 		city := t.TempDir()
 		if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"t\"\n[beads]\nprovider = \"bd\"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		writeScopeBeadsMetadata(t, city, metadata)
-		if err := persistProviderScopeOwnership(city, city, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
-			t.Fatal(err)
-		}
-		if err := markProviderScopeOwnershipReady(city, city); err != nil {
-			t.Fatal(err)
-		}
+		bindScope(t, city, city, metadata)
 		return city
+	}
+	// newCityWithRig is a retired proxied city with one rig bound by
+	// rigMetadata.
+	newCityWithRig := func(t *testing.T, rigMetadata string) (city, rig string) {
+		t.Helper()
+		city = t.TempDir()
+		rig = filepath.Join(city, "rigs", "r1")
+		if err := os.MkdirAll(rig, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		toml := "[workspace]\nname = \"t\"\n[beads]\nprovider = \"bd\"\n[[rigs]]\nname = \"r1\"\npath = \"rigs/r1\"\n"
+		if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(toml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		bindScope(t, city, city, proxiedMetadata)
+		bindScope(t, city, rig, rigMetadata)
+		return city, rig
+	}
+	// leaveProxyRecord leaves a proxy record in scopeRoot's proxy root. Any
+	// record at all — here one that does not decode — means the proxy did not
+	// exit cleanly, so bd's own stop has to run.
+	leaveProxyRecord := func(t *testing.T, scopeRoot string) {
+		t.Helper()
+		root := filepath.Join(scopeRoot, ".beads", "dolt")
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "proxy.pid"), []byte("not a record"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runningDolt := func(t *testing.T, argv ...string) {
+		t.Helper()
+		old := discoverDoltProcessesForStop
+		t.Cleanup(func() { discoverDoltProcessesForStop = old })
+		discoverDoltProcessesForStop = func() ([]DoltProcInfo, error) {
+			return []DoltProcInfo{{PID: 4242, Argv: append([]string{"dolt", "sql-server"}, argv...)}}, nil
+		}
 	}
 
 	t.Run("provider-owned proxied scope with no proxy record", func(t *testing.T) {
@@ -2363,15 +2496,7 @@ func TestCityStoreRetiredForStop(t *testing.T) {
 	})
 	t.Run("proxy record left behind", func(t *testing.T) {
 		city := newCity(t, proxiedMetadata)
-		root := filepath.Join(city, ".beads", "dolt")
-		if err := os.MkdirAll(root, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		// Any record at all — here one that does not decode — means the proxy
-		// did not exit cleanly, so bd's own stop has to run.
-		if err := os.WriteFile(filepath.Join(root, "proxy.pid"), []byte("not a record"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		leaveProxyRecord(t, city)
 		if cityStoreRetiredForStop(city) {
 			t.Fatal("a scope with a proxy record was reported retired")
 		}
@@ -2379,8 +2504,56 @@ func TestCityStoreRetiredForStop(t *testing.T) {
 	t.Run("scope bound in direct mode", func(t *testing.T) {
 		// A direct-mode scope has no proxy record to read, so "no record"
 		// proves nothing about whether its server is down.
-		if cityStoreRetiredForStop(newCity(t, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`)) {
+		if cityStoreRetiredForStop(newCity(t, directMetadata)) {
 			t.Fatal("a direct-mode scope was reported to have a retired proxy")
+		}
+	})
+	t.Run("Dolt server outside the proxy roots", func(t *testing.T) {
+		city := newCity(t, proxiedMetadata)
+		elsewhere := filepath.Join(t.TempDir(), ".beads", "dolt")
+		runningDolt(t, "--config", filepath.Join(elsewhere, "config.yaml"), "--data-dir", elsewhere)
+		if !cityStoreRetiredForStop(city) {
+			t.Fatal("another store's Dolt server kept this city's retired store from being reported retired")
+		}
+	})
+	t.Run("stray Dolt server configured under the proxy root", func(t *testing.T) {
+		city := newCity(t, proxiedMetadata)
+		runningDolt(t, "--config", filepath.Join(city, ".beads", "dolt", "config.yaml"))
+		if cityStoreRetiredForStop(city) {
+			t.Fatal("a scope with a Dolt server still running under its proxy root was reported retired")
+		}
+	})
+	t.Run("stray Dolt server with its data dir under the proxy root", func(t *testing.T) {
+		city := newCity(t, proxiedMetadata)
+		runningDolt(t, "--data-dir", filepath.Join(city, ".beads", "dolt"))
+		if cityStoreRetiredForStop(city) {
+			t.Fatal("a scope with a Dolt server still serving its proxy root was reported retired")
+		}
+	})
+	t.Run("gc-managed Dolt port published", func(t *testing.T) {
+		city := newCity(t, proxiedMetadata)
+		writeReachableProviderManagedDoltState(t, city)
+		if cityStoreRetiredForStop(city) {
+			t.Fatal("a city with a live gc-managed Dolt was reported retired")
+		}
+	})
+	t.Run("rig scope retired too", func(t *testing.T) {
+		city, _ := newCityWithRig(t, proxiedMetadata)
+		if !cityStoreRetiredForStop(city) {
+			t.Fatal("a city whose city and rig scopes are both retired was not reported retired")
+		}
+	})
+	t.Run("rig scope with a proxy record left behind", func(t *testing.T) {
+		city, rig := newCityWithRig(t, proxiedMetadata)
+		leaveProxyRecord(t, rig)
+		if cityStoreRetiredForStop(city) {
+			t.Fatal("a city whose rig scope has a proxy record was reported retired")
+		}
+	})
+	t.Run("rig scope bound in direct mode", func(t *testing.T) {
+		city, _ := newCityWithRig(t, directMetadata)
+		if cityStoreRetiredForStop(city) {
+			t.Fatal("a city whose rig scope is bound in direct mode was reported retired")
 		}
 	})
 	t.Run("file store", func(t *testing.T) {

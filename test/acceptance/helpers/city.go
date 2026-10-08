@@ -29,12 +29,10 @@ type City struct {
 	logFile        *os.File
 	// tornDown records that an end-of-test cleanup has already stopped and
 	// unregistered the city. Init, RigAdd and StartWithSupervisor each
-	// register a best-effort teardown, so a test ran three or four in a row;
-	// every one after the first found nothing to stop, but gc stop on a
-	// stopped proxied city restarts its bd proxy and Dolt child to find that
-	// out, which cost 13-24 s apiece on rbe-west. Cleanups only: test code
-	// may start the city again behind the helper's back, cleanup code does
-	// not.
+	// register a best-effort teardown, so a test ran three or four in a row,
+	// and every one after the first ran a gc stop that found nothing to stop.
+	// Cleanups only: test code may start the city again behind the helper's
+	// back, cleanup code does not.
 	tornDown bool
 }
 
