@@ -2998,7 +2998,9 @@ func hookRuntimeDrainAck(stderr io.Writer) error {
 }
 
 // errDrainAckRefused is hookRuntimeDrainAck's error for a v2 drain-ack that
-// wrote nothing because the session row refused it.
+// the session row refused: the incarnation check, which releases nothing, or
+// the row CAS after the held-claim release. Neither writes the row ack or the
+// env ack.
 var errDrainAckRefused = errors.New("runtime drain-ack refused by the session row")
 
 // errHookDrainAckTolerated marks a refused drain-ack the drain may complete

@@ -625,7 +625,7 @@ func runtimeDrainAck(dops drainOps, target sessionRuntimeTarget, operator bool, 
 	drainAckReleaseHeldClaims(target.cityPath, target.sessionName, stderr)
 	if commit != nil {
 		if err := commit(); err != nil {
-			fmt.Fprintf(stderr, "gc runtime drain-ack: row ack not written, nothing acknowledged: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc runtime drain-ack: held claims released; row ack not written, nothing acknowledged (safe to re-run): %v\n", err) //nolint:errcheck // best-effort stderr
 			return drainAckRefused
 		}
 	}

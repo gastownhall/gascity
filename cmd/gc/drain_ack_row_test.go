@@ -292,14 +292,15 @@ type drainAckRun struct {
 }
 
 // runDrainAck runs ack with the release and poke seams recorded. Each
-// release records the row ack visible at that moment.
+// release records its city path and session name, and the row ack visible at
+// that moment.
 func runDrainAck(t *testing.T, store beads.Store, id string, ack func(drainOps, io.Writer, io.Writer) int) drainAckRun {
 	t.Helper()
 	originalRelease, originalPoke := drainAckReleaseHeldClaims, drainAckPokeController
 	t.Cleanup(func() { drainAckReleaseHeldClaims, drainAckPokeController = originalRelease, originalPoke })
 	var run drainAckRun
-	drainAckReleaseHeldClaims = func(string, string, io.Writer) {
-		run.releases = append(run.releases, rowAck(t, store, id))
+	drainAckReleaseHeldClaims = func(cityPath, sessionName string, _ io.Writer) {
+		run.releases = append(run.releases, cityPath+"|"+sessionName+"|"+rowAck(t, store, id))
 	}
 	drainAckPokeController = func(string, reconcilekey.Key) error { run.pokes++; return nil }
 	sp := runtime.NewFake()
@@ -314,19 +315,23 @@ func runDrainAck(t *testing.T, store beads.Store, id string, ack func(drainOps, 
 // env ack) over temp cities. A legacy city, including one naming v2 that this
 // build will not latch, is the frozen pre-E3 drain-ack in every case and
 // writes no row. A v2 city releases before the row ack lands and is otherwise
-// the oracle, or refuses with nothing written. Kills: strict-always and
-// legacy-always mode mutants, a legacy row write, a row ack before the
-// release, and a refused v2 ack that releases claims, sets env keys or pokes.
+// the oracle (whose release ran on the unacked row, with the city path and
+// the session name, never the display alias), or refuses with nothing
+// written. Kills: strict-always and legacy-always mode mutants, a legacy row
+// write, a row ack before the release, a release of the wrong city or name,
+// and a refused v2 ack that releases claims, sets env keys or pokes.
 func TestRuntimeDrainAckModeSwitch(t *testing.T) {
 	type ackCase struct {
 		name        string
 		sessionName string
+		display     string // "" = sessionName
 		operator    bool
 		envToken    string
 		v2Refusal   string // "" = the v2 ack lands
 	}
 	cases := []ackCase{
 		{name: "self, token matches", sessionName: "worker", envToken: "tok-a"},
+		{name: "self, display alias", sessionName: "worker", display: "worker-alias", envToken: "tok-a"},
 		{name: "self, no token", sessionName: "worker", v2Refusal: "GC_INSTANCE_TOKEN is not set"},
 		{name: "self, stale token", sessionName: "worker", envToken: "tok-old", v2Refusal: "does not match"},
 		{name: "operator", sessionName: "worker", operator: true},
@@ -345,7 +350,11 @@ func TestRuntimeDrainAckModeSwitch(t *testing.T) {
 		for _, tc := range cases {
 			t.Run(city.name+"/"+tc.name, func(t *testing.T) {
 				cityPath, store, id := drainAckCity(t, city.reconciler, city.admitV2)
-				target := sessionRuntimeTarget{cityPath: cityPath, display: tc.sessionName, sessionName: tc.sessionName}
+				display := tc.display
+				if display == "" {
+					display = tc.sessionName
+				}
+				target := sessionRuntimeTarget{cityPath: cityPath, display: display, sessionName: tc.sessionName}
 				oracle := runDrainAck(t, store, id, func(dops drainOps, stdout, stderr io.Writer) int {
 					return preE3DoRuntimeDrainAck(dops, cityPath, tc.sessionName, tc.sessionName, "", false, stdout, stderr)
 				})
@@ -368,7 +377,6 @@ func TestRuntimeDrainAckModeSwitch(t *testing.T) {
 					if !strings.HasPrefix(ack, "3@") {
 						t.Fatalf("v2 row ack = %q, want generation 3", ack)
 					}
-					oracle.releases = []string{noRowAck} // the release runs before the row ack (v5.7 D5)
 					if !reflect.DeepEqual(got, oracle) {
 						t.Fatalf("v2 drain-ack after the row ack diverged from pre-E3:\n got %+v\nwant %+v", got, oracle)
 					}
@@ -424,11 +432,11 @@ func TestRuntimeDrainAckV2StoreOutcomes(t *testing.T) {
 		want  string
 		acked bool
 	}{
-		{name: "PreWake inside UpdateIfMatch", want: "row ack not written, nothing acknowledged: GC_INSTANCE_TOKEN does not match", store: func(t *testing.T) (beads.Store, *beads.MemStore, string) {
+		{name: "PreWake inside UpdateIfMatch", want: "held claims released; row ack not written, nothing acknowledged (safe to re-run): GC_INSTANCE_TOKEN does not match", store: func(t *testing.T) (beads.Store, *beads.MemStore, string) {
 			mem, row := drainAckRowStore(t)
 			return &preWakeInCASStore{MemStore: mem, t: t}, mem, row.ID
 		}},
-		{name: "persistent contention", want: "row ack not written, nothing acknowledged: conditional write kept losing", store: func(t *testing.T) (beads.Store, *beads.MemStore, string) {
+		{name: "persistent contention", want: "held claims released; row ack not written, nothing acknowledged (safe to re-run): conditional write kept losing", store: func(t *testing.T) (beads.Store, *beads.MemStore, string) {
 			mem, row := drainAckRowStore(t)
 			return &contendedStore{Store: mem}, mem, row.ID
 		}},
@@ -444,7 +452,7 @@ func TestRuntimeDrainAckV2StoreOutcomes(t *testing.T) {
 			t.Cleanup(func() { drainAckOpenSessionRow = original })
 			drainAckOpenSessionRow = func(string, *config.City, string, string) (beads.Store, string, error) { return store, id, nil }
 
-			target := sessionRuntimeTarget{cityPath: cityPath, display: "worker", sessionName: "worker"}
+			target := sessionRuntimeTarget{cityPath: cityPath, display: "worker-alias", sessionName: "worker"}
 			got := runDrainAck(t, mem, id, func(dops drainOps, stdout, stderr io.Writer) int {
 				return runtimeDrainAck(dops, target, false, "tok-a", false, stdout, stderr)
 			})
@@ -453,10 +461,10 @@ func TestRuntimeDrainAckV2StoreOutcomes(t *testing.T) {
 			}
 			switch {
 			case tc.acked:
-				if got.code != 0 || len(got.releases) != 1 || len(got.calls) == 0 || got.pokes != 1 {
+				if got.code != 0 || !reflect.DeepEqual(got.releases, []string{cityPath + "|worker|" + noRowAck}) || len(got.calls) == 0 || got.pokes != 1 {
 					t.Fatalf("writer-less v2 ack = %+v, want the pre-E3 ack", got)
 				}
-			case got.code != drainAckRefused || !reflect.DeepEqual(got.releases, []string{noRowAck}) || len(got.calls)+got.pokes != 0:
+			case got.code != drainAckRefused || !reflect.DeepEqual(got.releases, []string{cityPath + "|worker|" + noRowAck}) || len(got.calls)+got.pokes != 0:
 				t.Fatalf("commit refusal = %+v, want drainAckRefused after one release, with no env write or poke", got)
 			}
 			if ack := rowAck(t, mem, id); ack != noRowAck {
@@ -467,18 +475,14 @@ func TestRuntimeDrainAckV2StoreOutcomes(t *testing.T) {
 }
 
 // orderSpyStore logs every conditional write of the row ack to a shared
-// effect log; lose makes each one fail its precondition.
+// effect log.
 type orderSpyStore struct {
 	*beads.MemStore
-	log  *[]string
-	lose bool
+	log *[]string
 }
 
 func (s *orderSpyStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
 	*s.log = append(*s.log, "cas")
-	if s.lose {
-		return &beads.PreconditionFailedError{ID: id, Expected: rev}
-	}
 	return s.MemStore.UpdateIfMatch(id, rev, opts)
 }
 
@@ -496,42 +500,34 @@ func (d orderSpyDrainOps) setDrainAck(sn string) error {
 // TestRuntimeDrainAckV2EffectOrder pins CONTRACT v5.7 D5's order with one
 // effect log across the release seam, the row store, the env ack and the
 // poke: check (no writes) → release → row CAS → env ack → poke. A refused
-// check logs nothing; a CAS that loses every attempt follows the release and
-// exits non-zero with no env write or poke. Kills: E3 as merged (row CAS
-// before the release), a release before the check, and an env ack after a
-// lost CAS.
+// check logs nothing. (A CAS that loses after the release is
+// TestRuntimeDrainAckV2StoreOutcomes.) Kills: E3 as merged (row CAS before
+// the release), and a release before the check.
 func TestRuntimeDrainAckV2EffectOrder(t *testing.T) {
-	lost := make([]string, 0, sessionKillFenceAttempts+1)
-	lost = append(lost, "release")
-	for i := 0; i < sessionKillFenceAttempts; i++ {
-		lost = append(lost, "cas")
-	}
 	for _, tc := range []struct {
 		name     string
 		envToken string
-		lose     bool
 		wantCode int
 		want     []string
 	}{
-		{name: "match", envToken: "tok-a", want: []string{"release", "cas", "env", "poke"}},
+		{name: "match", envToken: "tok-a", want: []string{"release worker", "cas", "env", "poke"}},
 		{name: "refused check", envToken: "tok-old", wantCode: drainAckRefused, want: nil},
-		{name: "CAS keeps losing", envToken: "tok-a", lose: true, wantCode: drainAckRefused, want: lost},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cityPath, _, _ := drainAckCity(t, "v2", true)
 			mem, row := drainAckRowStore(t)
 			var log []string
-			store := &orderSpyStore{MemStore: mem, log: &log, lose: tc.lose}
+			store := &orderSpyStore{MemStore: mem, log: &log}
 			originalOpen, originalRelease, originalPoke := drainAckOpenSessionRow, drainAckReleaseHeldClaims, drainAckPokeController
 			t.Cleanup(func() {
 				drainAckOpenSessionRow, drainAckReleaseHeldClaims, drainAckPokeController = originalOpen, originalRelease, originalPoke
 			})
 			drainAckOpenSessionRow = func(string, *config.City, string, string) (beads.Store, string, error) { return store, row.ID, nil }
-			drainAckReleaseHeldClaims = func(string, string, io.Writer) { log = append(log, "release") }
+			drainAckReleaseHeldClaims = func(_, sessionName string, _ io.Writer) { log = append(log, "release "+sessionName) }
 			drainAckPokeController = func(string, reconcilekey.Key) error { log = append(log, "poke"); return nil }
 
 			dops := orderSpyDrainOps{drainOps: newDrainOps(runtime.NewFake()), log: &log}
-			target := sessionRuntimeTarget{cityPath: cityPath, display: "worker", sessionName: "worker"}
+			target := sessionRuntimeTarget{cityPath: cityPath, display: "worker-alias", sessionName: "worker"}
 			var stdout, stderr bytes.Buffer
 			code := runtimeDrainAck(dops, target, false, tc.envToken, false, &stdout, &stderr)
 			if code != tc.wantCode || !reflect.DeepEqual(log, tc.want) {
@@ -541,6 +537,61 @@ func TestRuntimeDrainAckV2EffectOrder(t *testing.T) {
 				t.Fatalf("row ack = %q, want generation 3 only on success", got)
 			}
 		})
+	}
+}
+
+// casReadSpyStore calls atCAS on the row read that the CAS loop takes just
+// before its UpdateIfMatch (the second read of the row: the first is the
+// check). The conditional writer resolves through to the wrapped store.
+type casReadSpyStore struct {
+	beads.Store
+	id    string
+	reads int
+	atCAS func()
+}
+
+func (s *casReadSpyStore) Get(id string) (beads.Bead, error) {
+	if id == s.id {
+		if s.reads++; s.reads == 2 {
+			s.atCAS()
+		}
+	}
+	return s.Store.Get(id)
+}
+
+func (s *casReadSpyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+// TestRuntimeDrainAckV2RealReleaseBeforeRowCAS runs the real held-claim
+// release over drainAckCity's file store: an in_progress bead assigned to the
+// row is open and unassigned by the time the row CAS runs, and the ack then
+// lands. Kills: E3 as merged (the claim is still held at the CAS), and a
+// release given the wrong city path or the display alias.
+func TestRuntimeDrainAckV2RealReleaseBeforeRowCAS(t *testing.T) {
+	cityPath, store, id := drainAckCity(t, "v2", true)
+	held := mustCreateDrainAckBead(t, store, beads.Bead{Title: "claimed, never executed", Type: "task"}, "in_progress", id)
+
+	var atCAS []string
+	original, originalPoke := drainAckOpenSessionRow, drainAckPokeController
+	t.Cleanup(func() { drainAckOpenSessionRow, drainAckPokeController = original, originalPoke })
+	drainAckOpenSessionRow = func(cityPath string, cfg *config.City, sessionName, sessionID string) (beads.Store, string, error) {
+		rowStore, rowID, err := original(cityPath, cfg, sessionName, sessionID)
+		return &casReadSpyStore{Store: rowStore, id: rowID, atCAS: func() {
+			status, assignee := drainAckBeadStatus(t, store, held.ID)
+			atCAS = append(atCAS, status+"|"+assignee)
+		}}, rowID, err
+	}
+	drainAckPokeController = func(string, reconcilekey.Key) error { return nil }
+
+	target := sessionRuntimeTarget{cityPath: cityPath, display: "worker-alias", sessionName: "worker"}
+	var stdout, stderr bytes.Buffer
+	if code := runtimeDrainAck(newDrainOps(runtime.NewFake()), target, false, "tok-a", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("drain-ack = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !reflect.DeepEqual(atCAS, []string{"open|"}) {
+		t.Fatalf("held bead at the row CAS = %q, want open and unassigned; stderr=%s", atCAS, stderr.String())
+	}
+	if ack := rowAck(t, store, id); !strings.HasPrefix(ack, "3@") {
+		t.Fatalf("row ack = %q, want generation 3", ack)
 	}
 }
 
