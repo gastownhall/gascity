@@ -153,6 +153,9 @@ var parityKindOwners = map[string]*regexp.Regexp{
 	// A19's two kinds own exactly its rows.
 	intentDrainCancel: regexp.MustCompile(`\bA19\b`),
 	intentDrainVoid:   regexp.MustCompile(`\bA19\b`),
+	// S4 rekeys a StaleSelf row; A3, the arm proposing it, is gated
+	// through parityArmRef.
+	intentRekey: regexp.MustCompile(`\bS4\b`),
 }
 
 var parityArmRef = regexp.MustCompile(`\bA(\d{1,2})\b`)
