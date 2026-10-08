@@ -2382,6 +2382,13 @@ resume metadata, Gas City may attempt provider resume, but
 provider conversation continuity is not guaranteed; confirm it with the agent or
 provider after restart.
 
+An idle pool seat is replaced rather than restarted: the reconciler closes it
+and the pool starts a fresh seat in its slot. Assigned work the seat had not
+started is released first so another seat can pick it up. A seat that had
+started work keeps it and restarts in place on that work; while the work is
+blocked, the seat holds its slot asleep. A one_shot pool reuses an idle killed
+seat in place.
+
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {

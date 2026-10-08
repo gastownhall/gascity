@@ -1297,12 +1297,91 @@ func releaseUnexecutedClaimsOnDrainAck(
 	budget time.Duration,
 	stderr io.Writer,
 ) {
+	releaseAssignedClaimsWithStatus(cityPath, cfg, store, rigStores, sessionBead, "in_progress", nil, "draining", budget, stderr)
+}
+
+// releaseUnexecutedClaimsOnKill gives back a killed pool seat's unexecuted
+// claims before its slot close (owner ruling B1, CONTRACT C3 "Killed pool
+// seats", rule 2): every work bead assigned to one of its identities with
+// status open and no execution evidence.
+//
+// It is D5's machinery with the status filter set to open, and the difference
+// from drain-ack is the point. A drain-ack says "I am done and I hold
+// nothing", so an in_progress claim at ack time was never executed. A kill
+// says nothing of the kind: it interrupts the seat, so in_progress work may be
+// half-done, and only the seat that started it may resume it. That started
+// work is never released here; the close's live work read then finds it, the
+// close refuses, and the assigned-work wake restarts the seat in place. Open
+// work the seat names as currently_processing_bead_id or
+// current_claim_bead_id has execution evidence and is kept for the same
+// reason. Continuation preassignment, the reason drain-ack skips open work,
+// needs a live context, which a closing seat no longer has.
+//
+// The session bead is read live, so the identities and execution evidence are
+// current, and the release runs only while that row is still a freeable
+// killed row: a seat woken or re-killed since the tick snapshot keeps its
+// claims.
+func releaseUnexecutedClaimsOnKill(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	info session.Info,
+	now time.Time,
+	budget time.Duration,
+	stderr io.Writer,
+) {
+	if store == nil || strings.TrimSpace(info.ID) == "" {
+		return
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	sessionBead, err := liveBeadRead(store, info.ID)
+	if err != nil {
+		// Nothing is released; the close's live work read then finds the
+		// claims still assigned and refuses, and the next tick retries.
+		fmt.Fprintf(stderr, "session beads: reading killed session %s before releasing its unexecuted claims: %v\n", info.ID, err) //nolint:errcheck
+		return
+	}
+	if sessionBead.Status == "closed" ||
+		strings.TrimSpace(sessionBead.Metadata["sleep_reason"]) != string(session.SleepReasonKilled) ||
+		!isPoolSessionSlotFreeable(sessionBead, now) {
+		return
+	}
+	executed := make(map[string]bool, 2)
+	for _, key := range []string{session.CurrentBeadIDKey, beadmeta.CurrentClaimBeadIDMetadataKey} {
+		if id := strings.TrimSpace(sessionBead.Metadata[key]); id != "" {
+			executed[id] = true
+		}
+	}
+	releaseAssignedClaimsWithStatus(cityPath, cfg, store, rigStores, sessionBead, "open", executed, "killed", budget, stderr)
+}
+
+// releaseAssignedClaimsWithStatus is the shared body of the held-claim
+// releases: every WORK bead with the given status that is assigned to one of
+// sessionBead's identities and not named in keep is released, across
+// sweepAssignedWorkLegs' leg set, within budget. kind names the session in the
+// log lines ("draining", "killed").
+func releaseAssignedClaimsWithStatus(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	sessionBead beads.Bead,
+	status string,
+	keep map[string]bool,
+	kind string,
+	budget time.Duration,
+	stderr io.Writer,
+) {
 	if store == nil || strings.TrimSpace(sessionBead.ID) == "" {
 		return
 	}
 	if stderr == nil {
 		stderr = io.Discard
 	}
+	statusLabel := strings.ReplaceAll(status, "_", "-")
 	identifiers := sessionAssignmentIdentifiers(sessionBead)
 	seen := make(map[string]struct{})
 	deadline := time.Now().Add(budget)
@@ -1313,23 +1392,23 @@ func releaseUnexecutedClaimsOnDrainAck(
 		}
 		if time.Now().After(deadline) {
 			expired = true
-			fmt.Fprintf(stderr, "session beads: held-claim release for draining session %s ran out of its %s budget; remaining legs are left to the dead-assignee sweep\n", sessionBead.ID, budget) //nolint:errcheck
+			fmt.Fprintf(stderr, "session beads: held-claim release for %s session %s ran out of its %s budget; remaining legs are left to the dead-assignee sweep\n", kind, sessionBead.ID, budget) //nolint:errcheck
 			return
 		}
 		wa := workAssignmentForStore(beads.WorkStore{Store: ownerStore})
 		for _, assignee := range identifiers {
 			if time.Now().After(deadline) {
 				expired = true
-				fmt.Fprintf(stderr, "session beads: held-claim release for draining session %s ran out of its %s budget; remaining identities are left to the dead-assignee sweep\n", sessionBead.ID, budget) //nolint:errcheck
+				fmt.Fprintf(stderr, "session beads: held-claim release for %s session %s ran out of its %s budget; remaining identities are left to the dead-assignee sweep\n", kind, sessionBead.ID, budget) //nolint:errcheck
 				return
 			}
-			work, err := wa.OpenAssignedTo(assignee, "in_progress", beads.TierBoth, true)
+			work, err := wa.OpenAssignedTo(assignee, status, beads.TierBoth, true)
 			if err != nil {
-				fmt.Fprintf(stderr, "session beads: listing in-progress work held by draining session %s via %q: %v\n", sessionBead.ID, assignee, err) //nolint:errcheck
+				fmt.Fprintf(stderr, "session beads: listing %s work held by %s session %s via %q: %v\n", statusLabel, kind, sessionBead.ID, assignee, err) //nolint:errcheck
 				continue
 			}
 			for _, item := range work {
-				if session.IsSessionBeadOrRepairable(item) {
+				if session.IsSessionBeadOrRepairable(item) || keep[item.ID] {
 					continue
 				}
 				key := strconv.Itoa(storeIndex) + "\x00" + item.ID
@@ -1342,7 +1421,7 @@ func releaseUnexecutedClaimsOnDrainAck(
 				// ReleaseWorkBead is compare-and-swap on the assignee, so a bead
 				// that legitimately changed hands since the list is left alone.
 				if err := wa.ReleaseWorkBead(item, ""); err != nil {
-					fmt.Fprintf(stderr, "session beads: releasing unexecuted claim %s held by draining session %s: %v\n", item.ID, sessionBead.ID, err) //nolint:errcheck
+					fmt.Fprintf(stderr, "session beads: releasing unexecuted claim %s held by %s session %s: %v\n", item.ID, kind, sessionBead.ID, err) //nolint:errcheck
 				}
 			}
 		}

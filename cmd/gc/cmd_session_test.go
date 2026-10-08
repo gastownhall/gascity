@@ -102,6 +102,7 @@ func TestSessionKillHelpDistinguishesProviderConversationContinuity(t *testing.T
 		"provider resume",
 		"provider conversation continuity is not guaranteed",
 		"lifecycle state to asleep",
+		"An idle pool seat is replaced",
 	} {
 		if !strings.Contains(long, want) {
 			t.Fatalf("session kill help missing %q:\n%s", want, long)

@@ -4658,8 +4658,19 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// are disposable; singleton/named controller-managed identities must
 		// keep the same bead so later wake/restart happens in place instead
 		// of minting a fresh canonical owner.
+		//
+		// A seat `gc session kill` stopped is freeable too (owner ruling B1,
+		// CONTRACT C3 "Killed pool seats"), with its own work rules: its
+		// unexecuted open claims are given back before the work read, started
+		// work keeps the seat (the read finds it, the close refuses, and the
+		// assigned-work wake restarts the seat in place on its bead), and it
+		// never takes the stranded branch below.
 		hasAssignedWork := false
-		poolFreeable := !shouldWake && !target.alive && isPoolSessionSlotFreeableInfo(info) && isPoolManagedSessionInfo(info) && !isNamedSessionInfo(info)
+		poolFreeable := !shouldWake && !target.alive && isPoolSessionSlotFreeableInfo(info, clk.Now()) && isPoolManagedSessionInfo(info) && !isNamedSessionInfo(info)
+		killedSeat := poolFreeable && strings.TrimSpace(info.SleepReason) == string(sessionpkg.SleepReasonKilled)
+		if killedSeat {
+			releaseUnexecutedClaimsOnKill(cityPath, cfg, store, rigStores, info, clk.Now(), drainAckReleaseBudget, stderr)
+		}
 		if poolFreeable {
 			var assignedErr error
 			hasAssignedWork, assignedErr = sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, info)
@@ -4668,7 +4679,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				hasAssignedWork = true
 			}
 		}
-		if poolFreeable && hasAssignedWork {
+		if poolFreeable && hasAssignedWork && !killedSeat {
 			// The runtime is gone but the session bead still owns
 			// in_progress work — almost always a CLI process that
 			// exited or hung without going through the clean drain

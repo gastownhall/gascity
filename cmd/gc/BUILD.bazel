@@ -1633,6 +1633,7 @@ go_test(
         "session_reconciler_fresh_cycle_guard_test.go",
         "session_reconciler_idle_probe_named_test.go",
         "session_reconciler_inc003_test.go",
+        "session_reconciler_killed_seat_test.go",
         "session_reconciler_killsite_fold_test.go",
         "session_reconciler_named_collapse_test.go",
         "session_reconciler_observation_regression_test.go",
