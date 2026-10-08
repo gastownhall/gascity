@@ -41,6 +41,7 @@ type passObserver struct {
 	unknown         map[rowKey]string // rows alerted for an unknown state, with it
 	lastKey         string
 	lastEmit        time.Time
+	identity        identityObserver // arm A3's alerts (reconcile_observe_identity.go)
 }
 
 // alert writes an operator alert to stderr, records it as a
@@ -74,6 +75,7 @@ func (p *planner) observeSettlement(s settlement) {
 		return
 	}
 	p.metrics.count(&p.metrics.settled, settledKey(s))
+	p.observeRekeySettlement(s)
 	if phase := idleRespawnPhases[s.Kind]; phase != "" && s.Outcome == settledLanded && s.Reason == idleRespawnDrainReason {
 		p.metrics.count(&p.metrics.series, phase)
 	}

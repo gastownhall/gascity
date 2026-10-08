@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // Arm A3 and the rekey effect (CONTRACT v5 S4, O2; I12; scenario R44).
@@ -237,28 +238,23 @@ func TestRekeyRefusedWhilePendingCreateClaim(t *testing.T) {
 }
 
 // hookLeaf is the fixture's leaf with a session object behind the name, and
-// a hook run once, right after the rekey's identity read (its last GetMeta
-// key), on the effect's goroutine.
+// a hook run once, on the effect's goroutine, when the second presence read
+// begins: after the rekey's identity read has completed (the sidecar read
+// compares two reads, so a hook inside it would only fail that read).
 type hookLeaf struct {
 	*fenceLeaf
 	object string
+	reads  int
 	after  func()
 }
 
 func (l *hookLeaf) ObserveLivenessWithError(name string, pn []string) (runtime.Liveness, error) {
+	if l.reads++; l.reads == 2 && l.after != nil {
+		l.after()
+	}
 	live, err := l.fenceLeaf.ObserveLivenessWithError(name, pn)
 	live.ObjectID = l.object
 	return live, err
-}
-
-func (l *hookLeaf) GetMeta(name, key string) (string, error) {
-	v, err := l.fenceLeaf.GetMeta(name, key)
-	if key == identityEnvKeys[len(identityEnvKeys)-1] && l.after != nil {
-		after := l.after
-		l.after = nil
-		after()
-	}
-	return v, err
 }
 
 // Kills an identity read not bracketed by presence (v5 O2): a runtime
@@ -276,5 +272,45 @@ func TestRekeyBracketsIdentityReadWithPresence(t *testing.T) {
 	}
 	if got := f.row()["instance_token"]; got != "tok-new" {
 		t.Fatalf("row instance_token = %q, want it unwritten", got)
+	}
+}
+
+// Kills the rekey's reads outside the row's session mutation lock (the C4c2
+// review's race): an in-process restart (Manager.ensureRunning, which takes
+// that lock) that gives the runtime the row's token right after the
+// identity read must not be overwritten by a CAS of the stale token. Under
+// the lock the restart waits for the rekey and then stamps the row's new
+// token, so the row and the runtime end on one token.
+func TestRekeyHoldsTheMutationLockFromReadToCAS(t *testing.T) {
+	f := newRekeyFixture(t)
+	rt := f.residue("2", "tok-old")
+	hook := &hookLeaf{fenceLeaf: f.leaf, object: "$1"}
+	p, it := f.pass(rt)
+	p.Runtime = hook
+	restarted := make(chan struct{})
+	hook.after = func() {
+		go func() {
+			defer close(restarted)
+			_ = session.WithSessionMutationLock(f.id, func() error {
+				return f.leaf.SetMeta(f.name, "GC_INSTANCE_TOKEN", f.row()["instance_token"])
+			})
+		}()
+		select { // an open window lets the restart land before the CAS
+		case <-restarted:
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	s := f.run(p, it)
+	select {
+	case <-restarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the restart never ran")
+	}
+	token, err := f.leaf.GetMeta(f.name, "GC_INSTANCE_TOKEN")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.row()["instance_token"]; got != token {
+		t.Fatalf("settlement %+v: row token %q, runtime token %q; want one token", s, got, token)
 	}
 }
