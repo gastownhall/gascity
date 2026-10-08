@@ -8414,7 +8414,7 @@ func TestSweepProcessTableOrphansReapsClosedAndAbsentUntrackedRuntimes(t *testin
 	)
 
 	var stderr bytes.Buffer
-	got := sweepProcessTableOrphans(sp, snapshot, store, "", &stderr)
+	got := sweepProcessTableOrphans(sp, snapshot, nil, store, "", &stderr)
 	if got != 2 {
 		t.Fatalf("sweepProcessTableOrphans() = %d, want 2; stderr=%q", got, stderr.String())
 	}
@@ -8452,7 +8452,7 @@ func TestSweepProcessTableOrphansSkipsOtherCityRuntimes(t *testing.T) {
 	)
 
 	var stderr bytes.Buffer
-	got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, myCity, &stderr)
+	got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, myCity, &stderr)
 	if got != 1 {
 		t.Fatalf("sweepProcessTableOrphans() = %d, want 1 (only this city's orphan); stderr=%q", got, stderr.String())
 	}
@@ -8475,7 +8475,7 @@ func TestSweepProcessTableOrphansNormalizesCityPathBeforeCompare(t *testing.T) {
 	)
 
 	var stderr bytes.Buffer
-	got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, aliasCity, &stderr)
+	got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, aliasCity, &stderr)
 	if got != 1 {
 		t.Fatalf("sweepProcessTableOrphans() = %d, want 1 for symlink-equivalent city paths; stderr=%q", got, stderr.String())
 	}
@@ -8494,7 +8494,7 @@ func TestSweepProcessTableOrphansContinuesAfterErrors(t *testing.T) {
 	sp.terminateErr[202] = errors.New("terminate failed")
 
 	var stderr bytes.Buffer
-	got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, "", &stderr)
+	got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, "", &stderr)
 	if got != 1 {
 		t.Fatalf("sweepProcessTableOrphans() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -8533,7 +8533,7 @@ func TestSweepProcessTableOrphansSummarizesScanErrors(t *testing.T) {
 	} {
 		sp.findErr = tick.findErr
 		var stderr bytes.Buffer
-		sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, t.TempDir(), &stderr)
+		sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, t.TempDir(), &stderr)
 		got := stderr.String()
 		if tick.want == "" {
 			if strings.Contains(got, scanLine) {
@@ -8555,7 +8555,7 @@ func TestSweepProcessTableOrphansNoopsWithoutScanner(t *testing.T) {
 	sp := struct{ runtime.Provider }{Provider: runtime.NewFake()}
 	var stderr bytes.Buffer
 
-	if got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, "", &stderr); got != 0 {
+	if got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, "", &stderr); got != 0 {
 		t.Fatalf("sweepProcessTableOrphans() = %d, want 0", got)
 	}
 	if stderr.Len() != 0 {
@@ -8583,7 +8583,7 @@ func TestSweepProcessTableOrphansSkipsOnTransientStoreError(t *testing.T) {
 		runtime.LiveRuntime{SessionID: "gm-flaky", PID: 301, IsTracked: false},
 	)
 	var stderr bytes.Buffer
-	if got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, "", &stderr); got != 0 {
+	if got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, "", &stderr); got != 0 {
 		t.Fatalf("sweepProcessTableOrphans() = %d, want 0 (transient error must not reap); stderr=%q", got, stderr.String())
 	}
 	if len(sp.terminated) != 0 {
@@ -8627,7 +8627,7 @@ func TestSweepProcessTableOrphansSparesRuntimeWhoseSnapshotBeadIsOpen(t *testing
 				runtime.LiveRuntime{SessionID: "gm-live", PID: 401, IsTracked: false},
 			)
 			var stderr bytes.Buffer
-			if got := sweepProcessTableOrphans(sp, snapshot, tc.store, "", &stderr); got != 0 {
+			if got := sweepProcessTableOrphans(sp, snapshot, nil, tc.store, "", &stderr); got != 0 {
 				t.Fatalf("sweepProcessTableOrphans() = %d, want 0; stderr=%q", got, stderr.String())
 			}
 			if len(sp.terminated) != 0 {
@@ -8656,7 +8656,7 @@ func TestSweepProcessTableOrphansSkipsWithoutCleanSnapshot(t *testing.T) {
 				runtime.LiveRuntime{SessionID: "gm-missing", PID: 502, IsTracked: false},
 			)
 			var stderr bytes.Buffer
-			if got := sweepProcessTableOrphans(sp, tc.snapshot, store, "", &stderr); got != 0 {
+			if got := sweepProcessTableOrphans(sp, tc.snapshot, nil, store, "", &stderr); got != 0 {
 				t.Fatalf("sweepProcessTableOrphans() = %d, want 0; stderr=%q", got, stderr.String())
 			}
 			if len(sp.terminated) != 0 {
@@ -10331,7 +10331,7 @@ func TestSweepProcessTableOrphansConfirmsClosedLive(t *testing.T) {
 	store := cachedSessionReopenedBehindTheCache(t)
 	sp := newProcessTableSweepProvider(runtime.LiveRuntime{SessionID: "gm-reopened", PID: 501, IsTracked: false})
 	var stderr bytes.Buffer
-	if got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, "", &stderr); got != 0 || len(sp.terminated) != 0 {
+	if got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, "", &stderr); got != 0 || len(sp.terminated) != 0 {
 		t.Fatalf("swept %d (terminated %v) on a cached closed row the store has reopened; stderr=%q", got, sp.terminated, stderr.String())
 	}
 }

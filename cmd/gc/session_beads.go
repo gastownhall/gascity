@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -20,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/hostboot"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/session"
@@ -3595,9 +3597,73 @@ func (s *fencedInfrastructureRootSet) put(cityPath string, keys map[string]struc
 	s.byCity[cityPath] = keys
 }
 
+// processRowRead is one of the orphan sweep's two reads of a root's session
+// row: open with its decoded row, or not open (closed or absent).
+type processRowRead struct {
+	open bool
+	info session.Info
+}
+
+// Process-sweep orphan rules (CONTRACT C4), named in the reap's log line.
+const (
+	processOrphanRowGone   = "row-closed-or-absent"
+	processOrphanOlderRun  = "epoch-below-generation"
+	processOrphanRowAsleep = "row-claims-no-runtime"
+)
+
+// processRootIncarnationOver is the orphan sweep's verdict (CONTRACT C4) on an
+// untracked root carrying epoch, from the tick's snapshot read and a live
+// store read of its row. It names the rule under which the root's
+// incarnation is over, or returns "" when it is not or the reads disagree:
+//
+//  1. both reads have the row closed or absent;
+//  2. both have it open at one generation, and epoch is below it;
+//  3. both have it open at one generation and name, epoch equals the
+//     generation, neither read claims a live runtime, and noLivePane
+//     reports that the last complete inventory pass lists no live pane
+//     for that name.
+//
+// An epoch that is missing or unparseable (zero) admits only rule 1.
+func processRootIncarnationOver(epoch int, snapshot, store processRowRead, noLivePane func(name string) bool) string {
+	if !snapshot.open && !store.open {
+		return processOrphanRowGone
+	}
+	if !snapshot.open || !store.open || epoch <= 0 {
+		return ""
+	}
+	generation, err := strconv.Atoi(strings.TrimSpace(store.info.Generation))
+	if err != nil || strings.TrimSpace(snapshot.info.Generation) != strings.TrimSpace(store.info.Generation) {
+		return ""
+	}
+	if epoch < generation {
+		return processOrphanOlderRun
+	}
+	name := strings.TrimSpace(store.info.SessionName)
+	if epoch != generation || name == "" || strings.TrimSpace(snapshot.info.SessionName) != name ||
+		sessionBeadClaimsLiveRuntime(snapshot.info) || sessionBeadClaimsLiveRuntime(store.info) ||
+		!noLivePane(name) {
+		return ""
+	}
+	return processOrphanRowAsleep
+}
+
+// processRootReparented is the orphan sweep's parent guard (CONTRACT C4): the
+// root was reparented away from every tmux server, to init or to the user
+// subreaper, and the scan did not see a tmux parent. An agent pane, or a
+// detached handoff in its own tmux session, still has its tmux server as
+// parent and is never reaped.
+func processRootReparented(live runtime.LiveRuntime, subreaperPID int) bool {
+	return !live.ParentIsProviderInfrastructure && pidutil.IsReparentedOrphan(live.PPID, subreaperPID)
+}
+
+// sweepProcessTableOrphans terminates untracked, reparented process roots of
+// this city whose incarnation is over (processRootIncarnationOver). inv, when
+// set, is the tick's inventory view; without it, or when its pass is
+// incomplete, rule 3 never holds.
 func sweepProcessTableOrphans(
 	sp runtime.Provider,
 	sessionBeads *sessionBeadSnapshot,
+	inv *runtimeInventoryView,
 	store beads.Store,
 	cityPath string,
 	stderr io.Writer,
@@ -3638,6 +3704,7 @@ func sweepProcessTableOrphans(
 	previouslyFenced := fencedInfrastructureRoots.take(cityPath)
 	fenced := make(map[string]struct{})
 	defer fencedInfrastructureRoots.put(cityPath, fenced)
+	subreaperPID := pidutil.DetectUserSubreaperPID(os.Getpid())
 	reaped := 0
 	for _, live := range found {
 		live.SessionID = strings.TrimSpace(live.SessionID)
@@ -3655,23 +3722,28 @@ func sweepProcessTableOrphans(
 		if cityPath != "" && normalizePathForCompare(strings.TrimSpace(live.City)) != cityPath {
 			continue
 		}
+		if !processRootReparented(live, subreaperPID) {
+			continue
+		}
 		// The second read must be independent of the snapshot, and a cached
 		// Get is not: it can hold the same stale closed row. Read live.
+		var stored processRowRead
 		bead, err := beads.HandlesFor(store).Live.Get(live.SessionID)
 		switch {
 		case err == nil && bead.Status != "closed":
-			continue // bead still open — leave the runtime alone
+			stored = processRowRead{open: true, info: sessionInfoFromBead(bead)}
 		case err != nil && !errors.Is(err, beads.ErrNotFound):
 			// transient/unreadable store error — do not destroy a live runtime on uncertainty
 			fmt.Fprintf(stderr, "session reconciler: looking up process-table orphan session bead %s pid=%d: %v\n", live.SessionID, live.PID, err) //nolint:errcheck
 			continue
 		}
-		// The store says closed or absent. The snapshot must agree: if it still
-		// lists the bead open, the two reads disagree (a stale cache, a
-		// transient error mapped to not-found, or a bead closed and reopened
-		// between them) and killing on the store's word alone could SIGTERM a
-		// healthy worker. Leave it for a later sweep, when both reads settle.
-		if _, open := sessionBeads.FindInfoByID(live.SessionID); open {
+		snapInfo, snapOpen := sessionBeads.FindInfoByID(live.SessionID)
+		// The store says closed or absent while the snapshot still lists the
+		// bead open: the two reads disagree (a stale cache, a transient error
+		// mapped to not-found, or a bead closed and reopened between them) and
+		// killing on the store's word alone could SIGTERM a healthy worker.
+		// Leave it for a later sweep, when both reads settle.
+		if snapOpen && !stored.open {
 			storeVerdict := "closed"
 			if err != nil {
 				storeVerdict = "not found"
@@ -3679,15 +3751,18 @@ func sweepProcessTableOrphans(
 			fmt.Fprintf(stderr, "session reconciler: leaving process-table root pid=%d session=%s alone: store reports bead %s but session-bead snapshot has it open\n", live.PID, live.SessionID, storeVerdict) //nolint:errcheck
 			continue
 		}
-		// here: bead is closed, or confirmed absent (ErrNotFound), and the
-		// snapshot agrees it is not open — reap below,
-		// unless the root is city infrastructure that merely inherited the
-		// session's environment (a managed Dolt scope watchdog or bd's
-		// db-proxy-child started from an agent shell). Terminating it signals
-		// its process group and takes the city's Dolt server down with it
-		// (#6316). The fence is per-process argv, so it also covers watchdogs
-		// stamped before doltServerEnv began scrubbing session identity, and bd
-		// versions that still pass GC_SESSION_ID to the proxy.
+		rule := processRootIncarnationOver(live.Epoch, processRowRead{open: snapOpen, info: snapInfo}, stored, inv.noLivePane)
+		if rule == "" {
+			continue
+		}
+		// The root's incarnation is over — reap below, unless the root is city
+		// infrastructure that merely inherited the session's environment (a
+		// managed Dolt scope watchdog or bd's db-proxy-child started from an
+		// agent shell). Terminating it signals its process group and takes the
+		// city's Dolt server down with it (#6316). The fence is per-process
+		// argv, so it also covers watchdogs stamped before doltServerEnv began
+		// scrubbing session identity, and bd versions that still pass
+		// GC_SESSION_ID to the proxy.
 		if proctable.IsCityInfrastructureRoot(live.PID) {
 			key := strconv.Itoa(live.PID) + ":" + proctable.RootStartIdentity(live.PID)
 			fenced[key] = struct{}{}
@@ -3700,7 +3775,7 @@ func sweepProcessTableOrphans(
 			fmt.Fprintf(stderr, "session reconciler: terminating process-table orphan pid=%d session=%s: %v\n", live.PID, live.SessionID, err) //nolint:errcheck
 			continue
 		}
-		fmt.Fprintf(stderr, "session reconciler: reaped process-table orphan pid=%d session=%s\n", live.PID, live.SessionID) //nolint:errcheck
+		fmt.Fprintf(stderr, "session reconciler: reaped process-table orphan pid=%d session=%s (%s)\n", live.PID, live.SessionID, rule) //nolint:errcheck
 		reaped++
 	}
 	return reaped

@@ -55,7 +55,7 @@ func TestSweepProcessTableOrphansLeavesManagedDoltWatchdogAlone(t *testing.T) {
 
 			sp := &procfsSweepScanner{Fake: runtime.NewFake()}
 			var stderr bytes.Buffer
-			got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, cityPath, &stderr)
+			got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, cityPath, &stderr)
 			if got != tc.wantReaped || len(sp.terminated) != tc.wantReaped {
 				t.Fatalf("sweepProcessTableOrphans() = %d reaped, terminated %v, want %d; stderr=%q", got, sp.terminated, tc.wantReaped, stderr.String())
 			}
@@ -143,7 +143,7 @@ func TestSweepProcessTableOrphansFencesCityInfrastructureByArgv(t *testing.T) {
 
 	sp := &procfsSweepScanner{Fake: runtime.NewFake()}
 	var stderr bytes.Buffer
-	got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, cityPath, &stderr)
+	got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, cityPath, &stderr)
 	if got != 1 || len(sp.terminated) != 1 || sp.terminated[0].PID != 4300 {
 		t.Fatalf("sweepProcessTableOrphans() = %d reaped, terminated %v, want only the agent pid 4300; stderr=%q", got, sp.terminated, stderr.String())
 	}
@@ -189,7 +189,7 @@ func TestSweepProcessTableOrphansReportsFencedRootOncePerProcess(t *testing.T) {
 		t.Helper()
 		sp := &procfsSweepScanner{Fake: runtime.NewFake()}
 		var stderr bytes.Buffer
-		if got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, cityPath, &stderr); got != 0 || len(sp.terminated) != 0 {
+		if got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, cityPath, &stderr); got != 0 || len(sp.terminated) != 0 {
 			t.Fatalf("sweep reaped %d, terminated %v, want nothing", got, sp.terminated)
 		}
 		return stderr.String()

@@ -1436,6 +1436,7 @@ go_test(
         "prime_unmanaged_hook_guard_test.go",
         "probe_template_test.go",
         "proc_environ_settled_test.go",
+        "process_sweep_incarnation_test.go",
         "productmetrics_child_env_test.go",
         "productmetrics_controls_process_test.go",
         "productmetrics_controls_process_testhook_test.go",

@@ -1605,7 +1605,7 @@ func (cr *CityRuntime) phaseReapRuntimesBoundToClosedBeads(p *tickPass) bool {
 
 func (cr *CityRuntime) tickSweepProcessTableOrphans(p *tickPass) bool {
 	phaseStart := time.Now()
-	swept := sweepProcessTableOrphans(cr.sp, p.sessionBeads, cr.sessionsBeadStore().Store, cr.cityPath, cr.stderr)
+	swept := sweepProcessTableOrphans(cr.sp, p.sessionBeads, p.inv, cr.sessionsBeadStore().Store, cr.cityPath, cr.stderr)
 	if swept > 0 {
 		fmt.Fprintf(cr.stderr, "session reconciler: swept %d process-table orphan runtime(s)\n", swept) //nolint:errcheck
 	}
@@ -1906,7 +1906,7 @@ func (cr *CityRuntime) startupLoadSessionSnapshot(p *tickPass) bool {
 }
 
 func (cr *CityRuntime) startupSweepProcessTableOrphans(p *tickPass) bool {
-	if swept := sweepProcessTableOrphans(cr.sp, p.sessionBeads, cr.sessionsBeadStore().Store, cr.cityPath, cr.stderr); swept > 0 {
+	if swept := sweepProcessTableOrphans(cr.sp, p.sessionBeads, p.inv, cr.sessionsBeadStore().Store, cr.cityPath, cr.stderr); swept > 0 {
 		fmt.Fprintf(cr.stderr, "session reconciler: swept %d process-table orphan runtime(s)\n", swept) //nolint:errcheck
 	}
 	return false
