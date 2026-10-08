@@ -119,3 +119,10 @@ func CheckFinalMinimum(out, minimum string) (Info, error) {
 	}
 	return info, nil
 }
+
+// DeliberateNogoViolation is a DO-NOT-MERGE probe: its unchecked error must
+// fail nogo (errcheck) and keep the unit lane red while the package's tests
+// pass (validation-aspect proof for #7323).
+func DeliberateNogoViolation() {
+	strconv.Atoi("1")
+}
