@@ -856,7 +856,8 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // never sees raw shell sessions at all); each bound candidate is verified
 // running before it is listed. Registry agents that don't correspond to any
 // bound gc session (foreign/manual agents) are appended under their own
-// names.
+// registered names; a detected agent with no registered name is not a session
+// and is never listed (its kind is not a name).
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	ctx := context.Background()
 	agents, err := p.c.listAgents(ctx)
@@ -877,7 +878,7 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		}
 	}
 	for _, a := range agents {
-		if !mapped[a.Name] && strings.HasPrefix(a.Name, prefix) && !seen[a.Name] {
+		if a.Name != "" && !mapped[a.Name] && strings.HasPrefix(a.Name, prefix) && !seen[a.Name] {
 			seen[a.Name] = true
 			out = append(out, a.Name)
 		}

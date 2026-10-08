@@ -29,6 +29,7 @@ go_test(
     srcs = [
         "activity_live_test.go",
         "activity_test.go",
+        "agent_identity_test.go",
         "agent_name_taken_test.go",
         "agentname_test.go",
         "client_test.go",
