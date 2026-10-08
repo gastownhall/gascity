@@ -17,13 +17,18 @@ class RunnerPolicyTests(unittest.TestCase):
             "a client-side directory may not exist in the sandbox",
         )
 
-    def test_bazel_gives_script_fixtures_a_private_var_tmp(self) -> None:
+    def test_bazel_roots_test_tmpdir_at_short_writable_bt(self) -> None:
+        # Socket tests need a short per-test tmpdir. Upstream roots that at
+        # /tmp/bt and makes only that path writable; /var/tmp is not a tmpfs
+        # stand-in and is not a sandbox writable path.
         root = Path(__file__).resolve().parents[3]
         options = [
             shlex.split(line, comments=True)
             for line in (root / ".bazelrc").read_text().splitlines()
         ]
-        self.assertIn(["test", "--sandbox_tmpfs_path=/var/tmp"], options)
+        self.assertIn(["test", "--test_tmpdir=/tmp/bt"], options)
+        self.assertIn(["test", "--sandbox_writable_path=/tmp/bt"], options)
+        self.assertNotIn(["test", "--sandbox_tmpfs_path=/var/tmp"], options)
         self.assertNotIn(["test", "--sandbox_writable_path=/var/tmp"], options)
 
     def test_bazel_ownership_suites_use_real_host_uids(self) -> None:
