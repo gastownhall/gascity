@@ -19,6 +19,7 @@ go_library(
         "//internal/beadmeta",
         "//internal/beads/contract",
         "//internal/beads/proxyendpoint",
+        "//internal/clock",
         "//internal/deps",
         "//internal/doltversion",
         "//internal/fsys",

@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 )
 
 const (
@@ -213,7 +214,7 @@ func (cs *controllerState) autocloseSweepOf() *autocloseSweep {
 // ends.
 func (cs *controllerState) startAutocloseSweep(ctx context.Context) {
 	go func() {
-		ticker := time.NewTicker(autocloseSweepInterval)
+		ticker := time.NewTicker(clock.Backstop(autocloseSweepInterval))
 		defer ticker.Stop()
 		for {
 			select {

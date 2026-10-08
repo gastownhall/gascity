@@ -212,6 +212,10 @@ jobs:
           # (2026-10-07 worker-env outage review). FRESH is empty outside
           # workflow_dispatch/workflow_call, which never ask for it.
           if [ "$FRESH" = "true" ]; then
+            # Plus the timer-bound acceptance tests at their real timers
+            # (test/acceptance/BUILD.bazel REALTIME_TESTS): PR and push runs
+            # shorten their quiescence window and idle timeout.
+            acceptance="${acceptance/%\"\}/ //test/acceptance:acceptance_realtime_tests\"\}}"
             for v in unit acceptance packages smoke; do
               val="${!v}"
               val="${val/%\"\}/ --config=fresh\"\}}"

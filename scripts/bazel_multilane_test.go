@@ -225,6 +225,14 @@ var multiLaneCommands = map[string]string{
 	"integration-smoke":    "test --config=ci --config=integration-smoke --keep_going //test/integration:integration_test",
 }
 
+// multiLaneFreshTargets are the targets the nightly fresh run adds to a lane
+// before --config=fresh: the timer-bound acceptance tests at their real
+// timers (test/acceptance/BUILD.bazel REALTIME_TESTS), which PR and push runs
+// shorten.
+var multiLaneFreshTargets = map[string]string{
+	"acceptance": " //test/acceptance:acceptance_realtime_tests",
+}
+
 const (
 	// The lane job starts only for a non-empty lane list (an empty matrix is
 	// an error) and takes its matrix from it whole.
@@ -414,7 +422,7 @@ func TestBazelMultiLaneLaneList(t *testing.T) {
 					got = append(got, name)
 					wantCmd := multiLaneCommands[name]
 					if fresh == "true" {
-						wantCmd += " --config=fresh"
+						wantCmd += multiLaneFreshTargets[name] + " --config=fresh"
 					}
 					if cmd, _ := entry["cmd"].(string); cmd != wantCmd {
 						t.Errorf("event %s, mode %s, fresh %s: lane %s cmd %q, want %q", event, mode, fresh, name, cmd, wantCmd)

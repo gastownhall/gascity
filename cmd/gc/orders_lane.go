@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -396,7 +397,7 @@ func (cr *CityRuntime) orderRescanDue(now time.Time) bool {
 	lane := cr.ordersLaneOf()
 	lane.setMu.Lock()
 	defer lane.setMu.Unlock()
-	return cr.orderRescanLast.IsZero() || now.Sub(cr.orderRescanLast) >= orderRescanInterval
+	return cr.orderRescanLast.IsZero() || now.Sub(cr.orderRescanLast) >= clock.Backstop(orderRescanInterval)
 }
 
 // markOrderRescan records a rescan attempt so a failing scan is retried on the

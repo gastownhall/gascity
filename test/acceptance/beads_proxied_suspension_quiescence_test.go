@@ -16,13 +16,33 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/clock"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
-// quiescenceWindow is long enough for every periodic backstop that touches a
-// scope on a running city (the 30s beads-health, the 1m order-tracking sweep,
-// the controller's reconcile and demand passes) to come round several times.
-const quiescenceWindow = 3 * time.Minute
+// realQuiescenceWindow is long enough for every periodic backstop that
+// touches a scope on a running city (the 30s beads-health, the 1m
+// order-tracking sweep, the controller's reconcile and demand passes) to come
+// round several times.
+const realQuiescenceWindow = 3 * time.Minute
+
+// quiescenceWindow is realQuiescenceWindow divided by the backstop speedup
+// the test runs under (clock.BackstopSpeedupEnv, which forwardBackstopSpeedup
+// hands to gc). gc divides every one of those cadences by the same factor, so
+// each backstop still comes round as many times inside the window: Bazel's
+// PR targets set it, and the nightly *_realtime_test targets run the real
+// three minutes.
+func quiescenceWindow() time.Duration { return clock.Backstop(realQuiescenceWindow) }
+
+// forwardBackstopSpeedup hands this process's clock.BackstopSpeedupEnv, if
+// any, to the gc processes env starts (the supervisor and its controller
+// inherit it), so the window and gc's cadences shrink together.
+func forwardBackstopSpeedup(env *helpers.Env) *helpers.Env {
+	if v, ok := os.LookupEnv(clock.BackstopSpeedupEnv); ok {
+		return env.With(clock.BackstopSpeedupEnv, v)
+	}
+	return env.Without(clock.BackstopSpeedupEnv)
+}
 
 // suspendDrainWait bounds how long a suspend takes to reach quiescence: the
 // controller stops the suspended scope's sessions over its next ticks, then
@@ -137,7 +157,7 @@ func newQuiescenceCity(t *testing.T) *quiescenceCity {
 	bdPath, doltPath := requireProxiedTooling(t)
 	env, wrappedBD := proxiedEnvWithBD(t, bdPath, doltPath)
 	shim := newScopeRecordingBD(t, wrappedBD)
-	env = env.With("BD_BIN", shim.path)
+	env = forwardBackstopSpeedup(env.With("BD_BIN", shim.path))
 
 	city := helpers.NewCity(t, env)
 	cityRoot := city.Dir
@@ -177,7 +197,9 @@ func TestProxiedSuspensionIsQuiescenceSuspendedRig(t *testing.T) {
 	// Every city-level order once, so no order's cadence can hide a
 	// visit to the suspended rig behind the window.
 	ran := runEveryCityOrder(t, city)
-	if remaining := quiescenceWindow - time.Since(start); remaining > 0 {
+	window := quiescenceWindow()
+	t.Logf("quiescence window %s (backstop speedup %d)", window, clock.BackstopSpeedup())
+	if remaining := window - time.Since(start); remaining > 0 {
 		time.Sleep(remaining)
 	}
 	if calls := shim.callsUnder(t, rigDir); len(calls) > 0 {
@@ -211,10 +233,12 @@ func TestProxiedSuspensionIsQuiescenceSuspendedCity(t *testing.T) {
 		}
 	}
 	shim.reset(t)
-	time.Sleep(quiescenceWindow)
+	window := quiescenceWindow()
+	t.Logf("quiescence window %s (backstop speedup %d)", window, clock.BackstopSpeedup())
+	time.Sleep(window)
 	for _, root := range []string{cityRoot, rigDir} {
 		if calls := shim.callsUnder(t, root); len(calls) > 0 {
-			t.Errorf("gc touched %s %d time(s) in %s while the city was suspended:\n%s", root, len(calls), quiescenceWindow, strings.Join(calls, "\n"))
+			t.Errorf("gc touched %s %d time(s) in %s while the city was suspended:\n%s", root, len(calls), window, strings.Join(calls, "\n"))
 		}
 		if started := doltProcessesUnder(t, root); len(started) > 0 {
 			t.Errorf("a pair under %s came back while the city was suspended:\n%s", root, strings.Join(started, "\n"))

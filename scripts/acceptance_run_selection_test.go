@@ -280,3 +280,62 @@ func TestProxiedAcceptanceRowsNeverSkipInRow(t *testing.T) {
 		}
 	}
 }
+
+// TestShortenedTimerTargetsHaveANightlyRealtimeTwin guards the trade the
+// timer-bound solo targets make (test/acceptance/BUILD.bazel SOLO_ENV): on
+// PRs they run with their timers shortened, so a bug only the real window
+// shows is caught by the REALTIME_TESTS twin, which the nightly fresh run
+// adds to the acceptance lane. This pins that every shortened target has a
+// twin running the same test, that no twin sets a timer variable, and that
+// bazel.yml's fresh branch really runs :acceptance_realtime_tests.
+func TestShortenedTimerTargetsHaveANightlyRealtimeTwin(t *testing.T) {
+	root := repoRoot(t)
+	build := readRepoFile(t, root, "test/acceptance/BUILD.bazel")
+	entry := regexp.MustCompile(`(?m)^    "([a-z0-9_]+_test)": "(Test[A-Za-z0-9_]+)",$`)
+	block := func(name string) string {
+		m := regexp.MustCompile(`(?ms)^` + name + ` = \{\n(.*?)^\}`).FindStringSubmatch(build)
+		if m == nil {
+			t.Fatalf("test/acceptance/BUILD.bazel has no %s dict", name)
+		}
+		return m[1]
+	}
+	solo := map[string]string{}
+	for _, m := range entry.FindAllStringSubmatch(block("SOLO_TESTS"), -1) {
+		solo[m[1]] = m[2]
+	}
+	realtime := map[string]bool{}
+	for _, m := range entry.FindAllStringSubmatch(block("REALTIME_TESTS"), -1) {
+		realtime[m[2]] = true
+	}
+	shortened := regexp.MustCompile(`(?m)^    "([a-z0-9_]+_test)": \{`).FindAllStringSubmatch(block("SOLO_ENV"), -1)
+	if len(shortened) == 0 {
+		t.Fatal("SOLO_ENV has no entries; the scan is broken")
+	}
+	for _, m := range shortened {
+		test, ok := solo[m[1]]
+		if !ok {
+			t.Errorf("SOLO_ENV sets %s, which is not a SOLO_TESTS target", m[1])
+			continue
+		}
+		if !realtime[test] {
+			t.Errorf("%s runs %s with shortened timers and no REALTIME_TESTS target runs it at its real timers", m[1], test)
+		}
+	}
+	genEnd := strings.Index(build, ") for name, test in REALTIME_TESTS.items()]")
+	genStart := strings.LastIndex(build[:max(genEnd, 0)], "[go_variant_test(")
+	if genEnd < 0 || genStart < 0 {
+		t.Fatal("test/acceptance/BUILD.bazel generates no REALTIME_TESTS targets")
+	}
+	if gen := build[genStart:genEnd]; strings.Contains(gen, "env =") {
+		t.Errorf("the REALTIME_TESTS targets set an env; they must run at the real timers:\n%s", gen)
+	}
+
+	workflow := readRepoFile(t, root, ".github/workflows/bazel.yml")
+	fresh := regexp.MustCompile(`(?ms)if \[ "\$FRESH" = "true" \]; then\n(.*?)\n\s*fi\n`).FindStringSubmatch(workflow)
+	if fresh == nil {
+		t.Fatal("bazel.yml's Lanes step has no FRESH branch")
+	}
+	if !strings.Contains(fresh[1], "//test/acceptance:acceptance_realtime_tests") {
+		t.Errorf("bazel.yml's fresh (nightly) branch does not add //test/acceptance:acceptance_realtime_tests to the acceptance lane:\n%s", fresh[1])
+	}
+}

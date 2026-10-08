@@ -37,14 +37,14 @@ ACCEPTANCE_ENV = {
 
 # Tests that each run past the lane's ~120 s shard budget on rbe-west, by
 # design: each waits out real Dolt lifecycle timers (proxy idle retirement,
-# a 3-minute suspension quiescence window) or walks one long sequential
-# shape. Each runs alone in a target of its own (target name: top-level
-# test), in :acceptance_test's binary and environment, so the lane runs them
-# side by side instead of stacking one behind another in a shard.
-# :acceptance_test skips them. Manual, because only --config=acceptance
-# compiles the acceptance_a files they run: bazel.yml's acceptance lane
-# names :acceptance_solo_tests. scripts/acceptance_run_selection_test.go
-# reads this table.
+# a suspension quiescence window) or walks one long sequential shape. Each
+# runs alone in a target of its own (target name: top-level test), in
+# :acceptance_test's binary and environment, so the lane runs them side by
+# side instead of stacking one behind another in a shard. :acceptance_test
+# skips them. Manual, because only --config=acceptance compiles the
+# acceptance_a files they run: bazel.yml's acceptance lane names
+# :acceptance_solo_tests. scripts/acceptance_run_selection_test.go reads this
+# table.
 SOLO_TESTS = {
     "beads_topology_matrix_test": "TestBeadsInitTopologyMatrix",
     "proxied_idle_timeout_test": "TestProxiedIdleTimeoutReapAndTransparentRestart",
@@ -59,6 +59,34 @@ SOLO_TESTS = {
 # qualified on a worker yet.
 SOLO_SUBTESTS = {
     "beads_topology_matrix_test": "/^(M1-proxied-local|M5-legacy-gc-managed)$$",
+}
+
+# The timer-bound solo targets run their timers shortened on PRs and pushes:
+#
+#   GC_TEST_BACKSTOP_SPEEDUP            divides every periodic backstop
+#                                       cadence gc's controller keeps
+#                                       (internal/clock.Backstop) and the
+#                                       quiescence window by the same factor,
+#                                       so each backstop still comes round as
+#                                       many times inside the window (3 min
+#                                       -> 30 s at 6).
+#   GC_ACCEPTANCE_PROXIED_IDLE_TIMEOUT  the idle timeout the test gives bd's
+#                                       proxy (20 s otherwise).
+#
+# REALTIME_TESTS run the same tests with neither set, at their real timers,
+# in the nightly fresh run only (bazel.yml appends :acceptance_realtime_tests
+# to the acceptance lane under --config=fresh), so a bug that only a real
+# window shows still surfaces within a day.
+SOLO_ENV = {
+    "proxied_idle_timeout_test": {"GC_ACCEPTANCE_PROXIED_IDLE_TIMEOUT": "8s"},
+    "proxied_suspended_city_quiescence_test": {"GC_TEST_BACKSTOP_SPEEDUP": "6"},
+    "proxied_suspended_rig_quiescence_test": {"GC_TEST_BACKSTOP_SPEEDUP": "6"},
+}
+
+REALTIME_TESTS = {
+    "proxied_idle_timeout_realtime_test": "TestProxiedIdleTimeoutReapAndTransparentRestart",
+    "proxied_suspended_city_quiescence_realtime_test": "TestProxiedSuspensionIsQuiescenceSuspendedCity",
+    "proxied_suspended_rig_quiescence_realtime_test": "TestProxiedSuspensionIsQuiescenceSuspendedRig",
 }
 
 go_test(
@@ -138,6 +166,7 @@ go_test(
         "//internal/beads/proxyendpoint",
         "//internal/builtinpacks",
         "//internal/citylayout",
+        "//internal/clock",
         "//internal/config",
         "//internal/deps",
         "//internal/doctor",
@@ -210,6 +239,7 @@ go_variant_test(
         test,
         SOLO_SUBTESTS.get(name, ""),
     )],
+    env = SOLO_ENV.get(name, {}),
     tags = ["manual"],
     test = ":acceptance_test",
 ) for name, test in SOLO_TESTS.items()]
@@ -218,6 +248,20 @@ test_suite(
     name = "acceptance_solo_tests",
     tags = ["manual"],
     tests = [":" + name for name in SOLO_TESTS],
+)
+
+[go_variant_test(
+    name = name,
+    size = "large",
+    args = ["-test.run=^%s$$" % test],
+    tags = ["manual"],
+    test = ":acceptance_test",
+) for name, test in REALTIME_TESTS.items()]
+
+test_suite(
+    name = "acceptance_realtime_tests",
+    tags = ["manual"],
+    tests = [":" + name for name in REALTIME_TESTS],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
