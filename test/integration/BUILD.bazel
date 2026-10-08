@@ -32,10 +32,6 @@ go_test(
     ) + [
         "//test:agents",
     ],
-    tags = [
-        "external",
-        "requires-network",
-    ],
     deps = [
         "//internal/testenv",
     ],
@@ -121,10 +117,6 @@ go_test(
         "//conditions:default": [],
     }),
     shard_count = 14,
-    tags = [
-        "external",
-        "requires-network",
-    ],
     deps = [
         "//internal/bazeltest",
         "//internal/beads",
