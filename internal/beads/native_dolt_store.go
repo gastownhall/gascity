@@ -1215,11 +1215,11 @@ func (s *NativeDoltStore) ApplyGraphPlan(ctx context.Context, plan *GraphApplyPl
 // backend — but a LOCAL backend still has a second atomic route: its own
 // beadslib.RunInTransaction, which this method drives by hand
 // (applyGraphPlanOverCapInTransaction) exactly as the pre-BatchApplier
-// implementation did before #383c38552f. A served backend has no transaction
-// to retry against — RunInTransaction refuses it with a typed
-// *beadslib.ErrUnsupported before the callback ever runs — and that refusal
-// is where *GraphApplyTooLargeError belongs: there genuinely is no atomic
-// path left for a plan this large on that backend.
+// implementation did. A served backend has no transaction to retry against —
+// RunInTransaction refuses it with a typed *beadslib.ErrUnsupported before the
+// callback ever runs — and that refusal is where *GraphApplyTooLargeError
+// belongs: there genuinely is no atomic path left for a plan this large on
+// that backend.
 //
 // The two routes do NOT refuse alike. The split counts the composed request's
 // items (creates, edges, parent links and deferred assignments together), not
@@ -1297,10 +1297,10 @@ func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan
 // applyGraphPlanOverCapInTransaction is the over-cap fallback for a LOCAL
 // (embedded) backend: it drives the same plan by hand through
 // beadslib.RunInTransaction instead of issueops.BatchApplier, exactly as this
-// store did before #383c38552f ported the at-or-under-cap path onto
-// BatchApplier. Every tx.* call below is a LOCAL FALLBACK call: it lives only
-// on this route, reached only after BatchApplier's own cap has already ruled
-// out the batch path for this plan.
+// store did before the at-or-under-cap path moved onto BatchApplier. Every
+// tx.* call below is a LOCAL FALLBACK call: it lives only on this route,
+// reached only after BatchApplier's own cap has already ruled out the batch
+// path for this plan.
 //
 // entered reports whether the RunInTransaction callback ran at all, the same
 // distinction Tx() draws: a refusal raised AFTER the callback ran is a FAILED
