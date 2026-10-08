@@ -10,10 +10,8 @@ import "context"
 // fenced writer, v5 R1's exception 1, under the identifier flock with a live
 // re-census.
 
-// createEffect is the create kind's effect: the pass's create inputs, and
-// the plan the planner minted its token into.
-func createEffect(p *effectPass, it intent) func(context.Context) settlement {
-	return func(ctx context.Context) settlement {
-		return p.creates.run(ctx, p.create, it.CreatePlan).settlement()
-	}
+// createBody is the create kind's effect: the pass's create inputs, and the
+// plan the planner minted its token into.
+func createBody(ctx context.Context, p *effectPass, it intent) settlement {
+	return p.creates.run(ctx, p.create, it.CreatePlan).settlement()
 }

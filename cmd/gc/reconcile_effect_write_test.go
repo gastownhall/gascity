@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
-	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The row-write effect's tests (CONTRACT v5 R2, C0.7, D-9).
@@ -41,6 +41,19 @@ func admittedHeal(t *testing.T, census, writer beads.Store) (*effectPass, intent
 	return newEffectPass(w, a), it
 }
 
+// runRowWrite runs the row heal's transaction for it.
+func runRowWrite(ctx context.Context, p *effectPass, it intent) settlement {
+	return runTx(ctx, p, it, effectSpecs[intentRowHeal])
+}
+
+// withArms replaces rowArms for the test, which must not run in parallel.
+func withArms(t *testing.T, edit func([]rowArm) []rowArm) {
+	t.Helper()
+	saved := rowArms
+	rowArms = edit(slices.Clone(saved))
+	t.Cleanup(func() { rowArms = saved })
+}
+
 func heldUntil(t *testing.T, store beads.Store, id string) string {
 	t.Helper()
 	b, err := store.Get(id)
@@ -58,13 +71,13 @@ func TestRowWriteLandsTheRedecidedPatchAndEvent(t *testing.T) {
 			store := backend.open(t)
 			p, it := admittedHeal(t, store, store)
 			ev := events.Event{Type: "session.test", Subject: it.Key.ID}
-			decide := func(w *World, a *allocDecision, k rowKey) (intent, time.Time) {
-				fresh, next := decideRow(w, a, k)
+			withArms(t, mutateHeal(func(r *rowFacts) (intent, bool) {
+				fresh, ok := armTimerHeals(r)
 				fresh.Event = &ev
-				return fresh, next
-			}
-			s := rowWrite{pass: p, it: it, decide: decide}.run(context.Background())
-			if s.Outcome != settledLanded || s.Event == nil || s.Event.Type != ev.Type {
+				return fresh, ok
+			}))
+			s := runRowWrite(context.Background(), p, it)
+			if s.Outcome != settledLanded || len(s.Facts.Events) != 1 || s.Facts.Events[0].Type != ev.Type {
 				t.Fatalf("settlement %+v, want landed with the re-decided intent's event", s)
 			}
 			if got := heldUntil(t, store, it.Key.ID); got != "" {
@@ -91,7 +104,7 @@ func TestRowWriteRefusesWithoutConditionalWriter(t *testing.T) {
 				m.DisableConditionalWrites = true
 			}
 			p, it := admittedHeal(t, m, m)
-			s := rowWriteEffect(p, it)(context.Background())
+			s := runRowWrite(context.Background(), p, it)
 			if s.Outcome != settledRefused || s.Cause != causeNoWriter {
 				t.Fatalf("settlement %+v, want refused with cause %q", s, causeNoWriter)
 			}
@@ -102,9 +115,10 @@ func TestRowWriteRefusesWithoutConditionalWriter(t *testing.T) {
 	}
 }
 
-// Kills last-writer-wins: an operator's write that lands between the row
-// write's read and its CAS survives, and the row write refuses with cause
-// cas, writing nothing.
+// Kills last-writer-wins and a CAS decided once: an operator's write that
+// lands between the row write's read and its CAS survives, and the row write
+// reads the row again and decides again on it, refusing with cause
+// redecided, writing nothing.
 func TestRowWriteExternalWriteBetweenReadAndWrite(t *testing.T) {
 	for _, backend := range rowWriteBackends {
 		t.Run(backend.name, func(t *testing.T) {
@@ -118,9 +132,9 @@ func TestRowWriteExternalWriteBetweenReadAndWrite(t *testing.T) {
 					t.Errorf("external write: %v", err)
 				}
 			}
-			s := rowWriteEffect(p, it)(context.Background())
-			if s.Outcome != settledRefused || s.Cause != causeCAS {
-				t.Fatalf("settlement %+v, want refused with cause %q", s, causeCAS)
+			s := runRowWrite(context.Background(), p, it)
+			if s.Outcome != settledRefused || s.Cause != causePremise {
+				t.Fatalf("settlement %+v, want refused with cause %q", s, causePremise)
 			}
 			if got := heldUntil(t, store, it.Key.ID); got != rehold {
 				t.Fatalf("held_until %q, want the external write's %q", got, rehold)
@@ -132,9 +146,9 @@ func TestRowWriteExternalWriteBetweenReadAndWrite(t *testing.T) {
 // Kills writing an action decided against a stale read or a stale
 // allocation (D-9): when the fresh row decides nothing (a `gc session kill`
 // fenced it after the pass) or another kind, the write refuses with cause
-// redecided and writes nothing; so does a fresh decision of the admitted
-// kind at another incarnation (legacy's authorized). An effect abandoned at
-// its deadline writes nothing either.
+// redecided and writes nothing; a fresh row at another incarnation than the
+// pass saw (legacy's authorized) refuses with cause premise. An effect whose
+// context ended writes nothing either.
 func TestRowWriteRedecidesAndRefusesDifferentIntent(t *testing.T) {
 	store, _ := stampedMem(t, gate.Require)
 	p, it := admittedHeal(t, store, store)
@@ -145,29 +159,29 @@ func TestRowWriteRedecidesAndRefusesDifferentIntent(t *testing.T) {
 	if err := store.SetMetadataBatch(it.Key.ID, fence); err != nil {
 		t.Fatal(err)
 	}
-	if s := rowWriteEffect(p, it)(context.Background()); s.Outcome != settledRefused || s.Cause != causeRedecided {
-		t.Fatalf("kill-fenced row: settlement %+v, want refused with cause %q", s, causeRedecided)
+	if s := runRowWrite(context.Background(), p, it); s.Outcome != settledRefused || s.Cause != causePremise {
+		t.Fatalf("kill-fenced row: settlement %+v, want refused with cause %q", s, causePremise)
 	}
 
 	store, _ = stampedMem(t, gate.Require)
 	p, it = admittedHeal(t, store, store)
-	other := func(w *World, a *allocDecision, k rowKey) (intent, time.Time) {
-		fresh, next := decideRow(w, a, k)
-		fresh.Kind = intentRowMetadata // what a newer allocation decides for the row
-		return fresh, next
-	}
-	if s := (rowWrite{pass: p, it: it, decide: other}).run(context.Background()); s.Outcome != settledRefused || s.Cause != causeRedecided {
-		t.Fatalf("another kind: settlement %+v, want refused with cause %q", s, causeRedecided)
-	}
 	stale := it
 	stale.Basis.Incarnation++ // the pass saw another incarnation than the fresh row holds
-	if s := rowWriteEffect(p, stale)(context.Background()); s.Outcome != settledRefused || s.Cause != causeRedecided {
-		t.Fatalf("another basis: settlement %+v, want refused with cause %q", s, causeRedecided)
+	if s := runRowWrite(context.Background(), p, stale); s.Outcome != settledRefused || s.Cause != causePremise {
+		t.Fatalf("another basis: settlement %+v, want refused with cause %q", s, causePremise)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if s := rowWriteEffect(p, it)(ctx); s.Outcome != settledFailed {
+	if s := runRowWrite(ctx, p, it); s.Outcome != settledFailed {
 		t.Fatalf("abandoned: settlement %+v, want failed", s)
+	}
+	withArms(t, mutateHeal(func(r *rowFacts) (intent, bool) {
+		fresh, ok := armTimerHeals(r)
+		fresh.Kind = intentRowMetadata // what a newer allocation decides for the row
+		return fresh, ok
+	}))
+	if s := runRowWrite(context.Background(), p, it); s.Outcome != settledRefused || s.Cause != causeRedecided {
+		t.Fatalf("another kind: settlement %+v, want refused with cause %q", s, causeRedecided)
 	}
 	if heldUntil(t, store, it.Key.ID) == "" {
 		t.Fatal("a refused row write wrote")
@@ -191,27 +205,28 @@ func TestRowWriteUsesItsLegsWriter(t *testing.T) {
 	w.LegStores = map[string]beads.Store{rowLeg: sessions, workLeg: work}
 	a := &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{}}}
 	it, _ := decideRow(w, a, rowKey{Leg: workLeg, ID: b.ID})
-	if s := rowWriteEffect(newEffectPass(w, a), it)(context.Background()); s.Outcome != settledLanded {
+	if s := runRowWrite(context.Background(), newEffectPass(w, a), it); s.Outcome != settledLanded {
 		t.Fatalf("settlement %+v, want the heal landed on the work store", s)
 	}
 	if got := heldUntil(t, work, b.ID); got != "" {
 		t.Fatalf("work store held_until %q, want it cleared", got)
 	}
 	delete(w.LegStores, workLeg)
-	if s := rowWriteEffect(newEffectPass(w, a), it)(context.Background()); s.Outcome != settledRefused || s.Cause != causeNoWriter {
+	if s := runRowWrite(context.Background(), newEffectPass(w, a), it); s.Outcome != settledRefused || s.Cause != causeNoWriter {
 		t.Fatalf("no writer for the leg: settlement %+v, want refused with cause %q", s, causeNoWriter)
 	}
 }
 
 // Kills raw handles reaching an effect (v5 R3): the pass's World copy holds
-// no leg store, assigned-work store or provider, and the pass's own World
-// keeps them.
+// no leg store, census store, assigned-work store or provider, and the
+// pass's own World keeps them.
 func TestEffectPassStripsRawHandles(t *testing.T) {
 	store := beads.NewMemStore()
 	w := &World{
-		Env:       &reconcileEnv{Gen: 1, SP: &sleepCountingProvider{}},
-		Demand:    demandView{AssignedStores: []beads.Store{store}},
-		LegStores: map[string]beads.Store{rowLeg: store},
+		Env:           &reconcileEnv{Gen: 1, SP: &sleepCountingProvider{}},
+		Demand:        demandView{AssignedStores: []beads.Store{store}},
+		LegStores:     map[string]beads.Store{rowLeg: store},
+		SessionsStore: store, RigStores: map[string]beads.Store{"rig": store},
 	}
 	p := newEffectPass(w, &allocDecision{})
 	if p.World.LegStores != nil || p.World.Demand.AssignedStores != nil || p.World.Env.SP != nil {
@@ -223,60 +238,34 @@ func TestEffectPassStripsRawHandles(t *testing.T) {
 	if p.Runtime != w.Env.SP {
 		t.Fatal("the pass's Runtime is not the composite provider")
 	}
+	if p.World.SessionsStore != nil || p.World.RigStores != nil {
+		t.Fatal("the effects' World holds the census stores")
+	}
 }
 
-// Kills a row write that commits a decision its deadline overtook: a
-// context canceled while decideRow runs on the fresh row, after the check
-// before the lock, writes nothing and settles failed.
+// Kills a row write that commits a decision its deadline overtook, and a
+// deadline read as a cancel: a context ended while decideRow runs on the
+// fresh row writes nothing and settles failed, with cause deadline when it
+// ended at its deadline (context.Cause, as under the fake clock) and
+// canceled otherwise.
 func TestRowWriteCanceledDuringRedecideWritesNothing(t *testing.T) {
-	store, _ := stampedMem(t, gate.Require)
-	p, it := admittedHeal(t, store, store)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	canceling := func(w *World, a *allocDecision, k rowKey) (intent, time.Time) {
-		cancel() // the deadline lands mid re-decide
-		return decideRow(w, a, k)
-	}
-	if s := (rowWrite{pass: p, it: it, decide: canceling}).run(ctx); s.Outcome != settledFailed || s.Cause != causeDeadline {
-		t.Fatalf("settlement %+v, want failed with cause %q", s, causeDeadline)
-	}
-	if heldUntil(t, store, it.Key.ID) == "" {
-		t.Fatal("the row write landed after its context ended")
-	}
-}
-
-// Kills a runLocked that takes the row's session mutation lock (an effect
-// that holds it would deadlock, the lock not being reentrant), and a run
-// that does not take it.
-func TestRowWriteRunLockedTakesNoMutationLock(t *testing.T) {
-	store, _ := stampedMem(t, gate.Require)
-	p, it := admittedHeal(t, store, store)
-	done := make(chan settlement, 1)
-	_ = session.WithSessionMutationLock(it.Key.ID, func() error {
-		go func() { done <- rowWriteEffect(p, it)(context.Background()) }()
-		select {
-		case s := <-done:
-			t.Errorf("run settled %+v while another section held the row's lock", s)
-		case <-time.After(50 * time.Millisecond):
+	for _, c := range []struct {
+		err   error
+		cause string
+	}{{context.DeadlineExceeded, causeDeadline}, {context.Canceled, causeShutdown}} {
+		store, _ := stampedMem(t, gate.Require)
+		p, it := admittedHeal(t, store, store)
+		ctx, cancel := context.WithCancelCause(context.Background())
+		withArms(t, mutateHeal(func(r *rowFacts) (intent, bool) {
+			cancel(c.err) // the context ends mid re-decide
+			return armTimerHeals(r)
+		}))
+		if s := runRowWrite(ctx, p, it); s.Outcome != settledFailed || s.Cause != c.cause {
+			t.Fatalf("settlement %+v, want failed with cause %q", s, c.cause)
 		}
-		go func() { done <- (rowWrite{pass: p, it: it, decide: decideRow}).runLocked(context.Background()) }()
-		select {
-		case s := <-done:
-			if s.Outcome != settledLanded {
-				t.Errorf("runLocked settled %+v, want landed", s)
-			}
-		case <-time.After(10 * time.Second):
-			t.Error("runLocked waited on the row's session mutation lock")
+		if heldUntil(t, store, it.Key.ID) == "" {
+			t.Fatal("the row write landed after its context ended")
 		}
-		return nil
-	})
-	select {
-	case s := <-done:
-		if s.Outcome != settledRefused || s.Cause != causeRedecided {
-			t.Fatalf("run after runLocked landed: settlement %+v, want refused %q", s, causeRedecided)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("run never settled")
 	}
 }
 
@@ -287,8 +276,8 @@ func TestRowWriteCanceledBeforeTheWriteWritesNothing(t *testing.T) {
 	p, it := admittedHeal(t, store, store)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if s := rowWriteEffect(p, it)(ctx); s.Outcome != settledFailed || s.Cause != causeDeadline {
-		t.Fatalf("settlement %+v, want failed with cause %q", s, causeDeadline)
+	if s := runRowWrite(ctx, p, it); s.Outcome != settledFailed || s.Cause != causeShutdown {
+		t.Fatalf("settlement %+v, want failed with cause %q", s, causeShutdown)
 	}
 	if heldUntil(t, store, it.Key.ID) == "" {
 		t.Fatal("the row write landed after its context ended")

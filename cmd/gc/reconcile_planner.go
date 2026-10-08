@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
 // The v2 planner loop (architecture §1.3, §1.5): one goroutine that schedules
@@ -64,14 +65,13 @@ type settlement struct {
 	// createBackoffKey under its ConfigRev, set only when it landed or was
 	// refused at a stage.
 	BackoffKey, Fingerprint string
-	// Work is a create's worktree verdict, which backs off or resets the
-	// work item's record (C6.5(a)).
-	Work *workVerdict
-	// Event is recorded once the settlement is drained: a landed write's.
-	Event *events.Event
-	Err   error
-	At    time.Time
+	Facts                   effectFacts // applied once drained (applyFacts)
+	Err                     error
+	At                      time.Time
 }
+
+// drainTransition is one RecordDrainTransition.
+type drainTransition struct{ Name, Reason, Transition string }
 
 // settleOutcome is how an effect ended (CONTRACT v5 S1, P5).
 type settleOutcome uint8
@@ -291,8 +291,7 @@ func (p *planner) runPass(now time.Time) (res passResult) {
 // drainSettlements applies the settlements posted so far, stamping a zero
 // At with now: first every one to the in-flight map, so no later step's
 // panic can leave a settled effect counted in flight; then to the backoff
-// table and the pass record's counters; then their events to the recorder,
-// each recovered alone.
+// table and the pass record's counters; then their facts (applyFacts).
 func (p *planner) drainSettlements(now time.Time) {
 	items := p.settlements.drain()
 	for i := range items {
@@ -306,11 +305,34 @@ func (p *planner) drainSettlements(now time.Time) {
 		p.observeSettlement(s)
 	}
 	for _, s := range items {
-		if s.Event != nil && p.rec != nil {
-			p.record(*s.Event)
-		}
+		p.applyFacts(s.Facts, s.At)
 	}
 }
+
+// applyFacts applies an effect's facts, on time or late alike: its events to
+// the recorder, each recovered alone; its drain transition to legacy's
+// telemetry; its worktree verdict to the work item's backoff record
+// (C6.5(a)). Every field is consumed here (TestApplyFactsConsumesEveryField).
+func (p *planner) applyFacts(f effectFacts, at time.Time) {
+	for _, ev := range f.Events {
+		if p.rec != nil {
+			p.record(ev)
+		}
+	}
+	if t := f.Transition; t != nil {
+		recordDrainTransition(context.Background(), t.Name, t.Reason, t.Transition)
+	}
+	switch {
+	case f.Work == nil:
+	case f.Work.Refused:
+		p.backoff.Refuse(workBackoffKey(f.Work.BeadID), at, time.Time{}, createStageWorktree, f.Work.Fingerprint)
+	default:
+		p.backoff.Succeed(workBackoffKey(f.Work.BeadID))
+	}
+}
+
+// recordDrainTransition is legacy's drain telemetry; a test reads it.
+var recordDrainTransition = telemetry.RecordDrainTransition
 
 // record records ev, counting the stop-outstanding alerts (v5 D6) for the
 // pass record; a panicking recorder is logged and skips this event only.
@@ -328,8 +350,7 @@ func (p *planner) record(ev events.Event) {
 
 // backoffSettled applies s to the backoff table (P4): a landing or no-op
 // resets its record; a refusal or failure backs it off with its cause,
-// except a swap pause. A create's worktree verdict backs off or resets the
-// work item's record.
+// except a swap pause.
 func (p *planner) backoffSettled(s settlement) {
 	key := s.BackoffKey
 	if key == "" && s.Key.ID != "" {
@@ -341,13 +362,6 @@ func (p *planner) backoffSettled(s settlement) {
 		p.backoff.Succeed(key)
 	case (s.Outcome == settledRefused || s.Outcome == settledFailed) && s.Cause != causeSwapPause:
 		p.backoff.Refuse(key, s.At, time.Time{}, s.Cause, s.Fingerprint)
-	}
-	switch {
-	case s.Work == nil:
-	case s.Work.Refused:
-		p.backoff.Refuse(workBackoffKey(s.Work.BeadID), s.At, time.Time{}, createStageWorktree, s.Work.Fingerprint)
-	default:
-		p.backoff.Succeed(workBackoffKey(s.Work.BeadID))
 	}
 }
 

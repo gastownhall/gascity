@@ -1,10 +1,6 @@
 package main
 
-import (
-	"context"
-
-	"github.com/gastownhall/gascity/internal/runtime"
-)
+import "github.com/gastownhall/gascity/internal/runtime"
 
 // The effects registry: the effect each admitted intent kind runs on the
 // executor. Each later effect PR adds its line. An intent whose kind has none
@@ -26,9 +22,10 @@ type effectPass struct {
 	Runtime runtime.Provider
 	World   *World
 	Alloc   *allocDecision
+	Clock   plannerClock // stamps each section's since: the planner's
 	// create is what the pass hands its creates, raw stores included: a
 	// create's guarded row write is v5 R1's exception 1 (§13), and only
-	// createEffect reads it. creates runs them. The planner sets both, the
+	// createBody reads it. creates runs them. The planner sets both, the
 	// first on its first admitted create (planner.submit).
 	create  *createPass
 	creates *createEffects
@@ -36,7 +33,7 @@ type effectPass struct {
 
 // newEffectPass is w's and a's effectPass.
 func newEffectPass(w *World, a *allocDecision) *effectPass {
-	p := &effectPass{Writers: make(map[string]fencedWriter, len(w.LegStores)), Alloc: a}
+	p := &effectPass{Writers: make(map[string]fencedWriter, len(w.LegStores)), Alloc: a, Clock: realPlannerClock{}}
 	if w.Env != nil {
 		p.Runtime = w.Env.SP
 	}
@@ -55,14 +52,23 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 	return p
 }
 
-// effectBuilder builds an admitted intent's Run for one pass.
-type effectBuilder func(p *effectPass, it intent) func(context.Context) settlement
-
-var effectRegistry = map[string]effectBuilder{
-	intentRowHeal:      rowWriteEffect,     // A6
-	intentRowHealFresh: rowHealFreshEffect, // A6
-	intentCreate:       createEffect,       // C1, C2
-	intentDrainCancel:  drainClearEffect,   // A19 (C6a)
-	intentDrainVoid:    drainClearEffect,   // A19 (C6a)
-	intentRekey:        rekeyEffect,        // A3
+var effectSpecs = map[string]effectSpec{
+	intentStart:           {class: capStarts, tokens: 1},
+	intentAdopt:           {class: capProbing},
+	intentCreate:          {class: capCreates, body: createBody},                                     // C1, C2
+	intentRekey:           {class: capProbing, needs: needs{Runtime: true}, sections: rekeySections}, // A3
+	intentZombie:          {class: capProbing, bootGated: true},
+	intentDrainBegin:      {class: capRowWrites, bootGated: true},
+	intentDrainBeginFresh: {class: capProbing, bootGated: true},
+	intentSignal:          {class: capRowWrites, bootGated: true},
+	intentSignalFresh:     {class: capProbing, bootGated: true},
+	intentDrainCancel:     {class: capRowWrites, sections: drainClearSections}, // A19 (C6a)
+	intentDrainVoid:       {class: capRowWrites, sections: drainClearSections}, // A19 (C6a)
+	intentStop:            {class: capProbing, bootGated: true},
+	intentClose:           {class: capProbing, bootGated: true},
+	intentRollback:        {class: capProbing, bootGated: true},
+	intentRowMetadata:     {class: capRowWrites},
+	intentBaseline:        {class: capRowWrites},
+	intentRowHeal:         {class: capRowWrites, sections: rowWriteSections}, // A6
+	intentRowHealFresh:    {class: capProbing, body: rowHealFreshBody},       // A6
 }

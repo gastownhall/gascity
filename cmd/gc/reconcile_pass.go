@@ -177,7 +177,7 @@ func newAllocSummary(now time.Time, w *World, a *allocDecision) *allocSummary {
 // lands.
 func splitRegistered(intents []intent, creates bool) (registered, unregistered []intent) {
 	for _, it := range intents {
-		if effectRegistry[it.Kind] == nil || (it.Kind == intentCreate && !creates) {
+		if !effectSpecs[it.Kind].runs() || (it.Kind == intentCreate && !creates) {
 			it.Cause = causeNoEffect
 			unregistered = append(unregistered, it)
 			continue
@@ -198,7 +198,7 @@ func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
 		return
 	}
 	pass := newEffectPass(w, a)
-	pass.creates = p.creates
+	pass.Clock, pass.creates = p.clock, p.creates
 	for _, it := range admitted {
 		e := inflightEntry{Kind: it.Kind, Key: it.Key, Endpoint: it.Endpoint}
 		if it.Kind == intentCreate {

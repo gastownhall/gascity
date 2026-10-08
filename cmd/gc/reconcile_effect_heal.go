@@ -43,8 +43,8 @@ const (
 	causeRuntimeNotOwn       = "runtime-not-own" // the awake heal over a runtime not alive and Current
 )
 
-func rowHealFreshEffect(p *effectPass, it intent) func(context.Context) settlement {
-	return freshHeal{pass: p, it: it, now: time.Now}.run
+func rowHealFreshBody(ctx context.Context, p *effectPass, it intent) settlement {
+	return freshHeal{pass: p, it: it, now: time.Now}.run(ctx)
 }
 
 // freshHeal is one fresh heal. now is the runtime's clock: the fresh read

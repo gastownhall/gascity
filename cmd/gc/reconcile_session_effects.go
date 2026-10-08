@@ -121,19 +121,14 @@ func (x *effectExecutor) inFlight(k rowKey) bool {
 	return x.inflight[effectKey{row: k}] != nil
 }
 
-// submitIntent submits the registered effect of it for one pass, under the
-// in-flight entry's seq. The effect is built inside Run, off the planner
-// goroutine. The pass submits registered kinds only; a kind with no
-// registered effect settles refused with cause no-effect (a finalize's with
-// the finalize prefix, as run adds it).
+// submitIntent submits the effect of it for one pass, under the in-flight
+// entry's seq: its kind's transaction (runTx), off the planner goroutine.
+// The pass submits registered kinds only; a kind with no registered effect
+// settles refused with cause no-effect (a finalize's with the finalize
+// prefix, as run adds it).
 func (x *effectExecutor) submitIntent(p *effectPass, it intent, seq uint64) error {
-	build := effectRegistry[it.Kind]
-	run := func(ctx context.Context) settlement {
-		if build == nil {
-			return settlement{Outcome: settledRefused, Cause: causeNoEffect}
-		}
-		return build(p, it)(ctx)
-	}
+	spec := effectSpecs[it.Kind]
+	run := func(ctx context.Context) settlement { return runTx(ctx, p, it, spec) }
 	return x.submit(it.Key, sessionEffect{Kind: it.Kind, Reason: it.Reason, Seq: seq, Token: it.CreatePlan.Token, Finalize: it.Finalize, Deadline: it.Deadline, Run: run})
 }
 
@@ -182,8 +177,8 @@ func (x *effectExecutor) setStartsClosed(closed bool) {
 // run performs e and settles it when Run returns or its deadline or the
 // shutdown deadline comes, whichever is first; a result that is ready then
 // wins. A Run that ignores its context is abandoned at the deadline; it keeps
-// any name lock it holds, so it still serializes its runtime name, and if it
-// lands later its event is still posted, alone. An abandoned create settles
+// any name lock it holds, so it still serializes its runtime name, and
+// whatever it returns later posts its facts, alone. An abandoned create settles
 // ambiguous, never failed: its row write may have begun (P5). A panic in Run
 // is recovered and logged, and settles failed: one bad effect never takes
 // the process down.
@@ -232,9 +227,9 @@ func (x *effectExecutor) run(base context.Context, key effectKey, e sessionEffec
 				s.Outcome = settledAmbiguous
 			}
 			fmt.Fprintf(x.stderr, "v2 reconciler: effect for %s/%s still running when its context ended; settled as %v\n", k.Leg, k.ID, s.Err) //nolint:errcheck // best-effort stderr
-			x.spawn(func() {
-				if late := <-result; late.Event != nil {
-					x.post(settlement{Event: late.Event})
+			x.spawn(func() {                                                                                                                   // its facts, if any, keyed to nothing (applyFacts)
+				if f := (<-result).Facts; !f.empty() {
+					x.post(settlement{Facts: f})
 				}
 			})
 		}

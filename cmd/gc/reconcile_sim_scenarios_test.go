@@ -69,16 +69,17 @@ func heldRow() beads.Bead {
 
 // Scenario R5 (v5 R2; I15): a timer heal decided in one pass meets an
 // operator's re-hold before its CAS. The fresh row decides at the store,
-// however the operator's event travels: the effect refuses and writes
-// nothing, the hold stands, and the next pass proposes nothing.
+// however the operator's event travels: the effect reads the row from the
+// backing, whose re-hold fails the premise (a lifecycle fact moved), so it
+// writes nothing, the hold stands, and the next pass proposes nothing.
 func TestSimR5StaleHealRedecidesAtTheStore(t *testing.T) {
 	for _, c := range []struct {
 		name  string
 		event func(s *sim, rehold json.RawMessage)
 		cause string
 	}{
-		{"the re-hold's event delivered", func(s *sim, ev json.RawMessage) { s.legs[0].cache.ApplyEvent("bead.updated", ev) }, causeRedecided},
-		{"the re-hold's event held", func(*sim, json.RawMessage) {}, causeCAS},
+		{"the re-hold's event delivered", func(s *sim, ev json.RawMessage) { s.legs[0].cache.ApplyEvent("bead.updated", ev) }, causePremise},
+		{"the re-hold's event held", func(*sim, json.RawMessage) {}, causePremise},
 		// The cache, rescanned past the re-hold, then takes an older event,
 		// reordered: the cache keeps the re-hold (mc-03lk4), so the effect's
 		// read decides on it.
@@ -86,7 +87,7 @@ func TestSimR5StaleHealRedecidesAtTheStore(t *testing.T) {
 			older := s.legs[0].events[0]
 			s.legs[0].cache.ReconcileNowForTest()
 			s.legs[0].cache.ApplyEvent("bead.updated", older)
-		}, causeRedecided},
+		}, causePremise},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := scripted(t, nil, heldRow())

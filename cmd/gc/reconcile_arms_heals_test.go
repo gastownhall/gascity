@@ -83,7 +83,7 @@ func (c *healCase) run(t *testing.T, sp runtime.Provider, writer beads.Store) (i
 	if c.before != nil {
 		c.before()
 	}
-	return it, effectRegistry[it.Kind](p, it)(context.Background())
+	return it, runTx(context.Background(), p, it, effectSpecs[it.Kind])
 }
 
 // pass decides the row and returns the pass that admitted its registered
@@ -92,7 +92,7 @@ func (c *healCase) run(t *testing.T, sp runtime.Provider, writer beads.Store) (i
 func (c *healCase) pass(t *testing.T, sp runtime.Provider, writer beads.Store) (*effectPass, intent) {
 	t.Helper()
 	it := c.decide()
-	if effectRegistry[it.Kind] == nil {
+	if !effectSpecs[it.Kind].runs() {
 		t.Fatalf("decideRow = %+v, want a registered heal", it)
 	}
 	w := *c.w

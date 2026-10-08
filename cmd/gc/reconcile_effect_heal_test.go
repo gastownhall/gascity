@@ -122,7 +122,7 @@ func TestFreshHealDeadlineDuringTheReadSettlesFailed(t *testing.T) {
 	sp := gone()
 	sp.read = cancel
 	p, it := c.pass(t, sp, nil)
-	if s := rowHealFreshEffect(p, it)(ctx); s.Outcome != settledFailed || s.Cause != causeDeadline {
+	if s := rowHealFreshBody(ctx, p, it); s.Outcome != settledFailed || s.Cause != causeDeadline {
 		t.Fatalf("settlement %+v, want failed with cause %q", s, causeDeadline)
 	}
 	if got := c.meta(t)["state"]; got != "creating" {
@@ -282,7 +282,7 @@ func TestFreshHealReadsUnderTheSessionMutationLock(t *testing.T) {
 	}()
 	<-held
 	done := make(chan settlement, 1)
-	go func() { done <- rowHealFreshEffect(p, it)(context.Background()) }()
+	go func() { done <- rowHealFreshBody(context.Background(), p, it) }()
 	select {
 	case s := <-done:
 		t.Fatalf("the heal settled %+v while an in-process start held the row's lock", s)

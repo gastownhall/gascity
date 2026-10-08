@@ -803,14 +803,17 @@ func TestSessionDifferentialEntriesHaveFixtures(t *testing.T) {
 	}
 }
 
-// parityRegistered is the arms in rowArms and the kinds in effectRegistry.
+// parityRegistered is the arms in rowArms and the kinds in effectSpecs that
+// have an effect.
 func parityRegistered() (arms, kinds map[string]bool) {
 	arms, kinds = map[string]bool{}, map[string]bool{}
 	for _, a := range rowArms {
 		arms[a.name] = true
 	}
-	for k := range effectRegistry {
-		kinds[k] = true
+	for k, spec := range effectSpecs {
+		if spec.runs() {
+			kinds[k] = true
+		}
 	}
 	return arms, kinds
 }

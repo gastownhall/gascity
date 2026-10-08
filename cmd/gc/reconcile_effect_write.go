@@ -7,19 +7,14 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The row-write effect (CONTRACT v5 R2, D-9): an admitted row write commits
-// only what decideRow decides again on the fresh row. Under the process-wide
-// row lock, with its context checked inside the lock (an effect abandoned at
-// its deadline never writes), it re-reads the row through the cache, re-runs
-// decideRow on that read with the pass's World and allocation, and writes the
-// re-decided intent's patch with a CAS at that read's revision, but only when
-// the re-decided intent has the admitted kind and basis (the incarnation the
-// pass saw, as legacy's authorized checks). It writes through the fenced
-// writer of the row's own census leg. A lost CAS writes nothing: the
-// store evicts the row, and the next pass decides again.
+// only what decideRow decides again, with the pass's World and allocation,
+// on the row the transaction (runTx) reads from the backing, and only when
+// that decides the admitted kind.
 
 // Row-write refusal causes. A refusal backs the row off (P4).
 const (
@@ -43,17 +38,21 @@ type rowWrite struct {
 	sameLifecycle bool
 }
 
-func rowWriteEffect(p *effectPass, it intent) func(context.Context) settlement {
-	return rowWrite{pass: p, it: it, decide: decideRow}.run
-}
+// rowWriteSections are the row write's one section.
+var rowWriteSections = []section{{Decide: redecideRow}}
 
-func (e rowWrite) run(ctx context.Context) settlement {
-	var s settlement
-	_ = session.WithSessionMutationLock(e.it.Key.ID, func() error {
-		s = e.runLocked(ctx)
-		return nil
-	})
-	return s
+// redecideRow is the row write's Decide: decideRow on the fresh row.
+func redecideRow(v txView) txStep {
+	w := v.World.withRow(v.It.Key, v.Row, v.Meta)
+	fresh, _ := decideRow(&w, v.Alloc, v.It.Key)
+	if fresh.Kind != v.It.Kind || len(fresh.Patch) == 0 {
+		return txStep{Refuse: causeRedecided}
+	}
+	step := txStep{Write: fresh.Patch}
+	if fresh.Event != nil {
+		step.Facts.Events = []events.Event{*fresh.Event}
+	}
+	return step
 }
 
 // runLocked is run without taking the row's session mutation lock: an
@@ -89,7 +88,11 @@ func (e rowWrite) runLocked(ctx context.Context) settlement {
 	case err != nil:
 		return settlement{Outcome: settledFailed, Cause: causeWrite, Err: err}
 	case wrote: // a landing keeps its event, even past the deadline
-		return settlement{Outcome: settledLanded, Event: fresh.Event}
+		s := settlement{Outcome: settledLanded}
+		if fresh.Event != nil {
+			s.Facts.Events = []events.Event{*fresh.Event}
+		}
+		return s
 	case ctx.Err() != nil:
 		return settlement{Outcome: settledFailed, Cause: causeDeadline, Err: ctx.Err()}
 	case superseded:

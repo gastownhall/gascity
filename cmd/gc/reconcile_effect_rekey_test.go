@@ -66,14 +66,13 @@ func (f *rekeyFixture) pass(rt runtimeIdentity) (*effectPass, intent) {
 	return newEffectPass(w, a), it
 }
 
-// run runs it through the registry, as the executor does.
+// run runs it as its kind's transaction, as the executor does.
 func (f *rekeyFixture) run(p *effectPass, it intent) settlement {
 	f.t.Helper()
-	build := effectRegistry[it.Kind]
-	if build == nil {
+	if !effectSpecs[it.Kind].runs() {
 		f.t.Fatalf("no effect registered for %q", it.Kind)
 	}
-	return build(p, it)(context.Background())
+	return runTx(context.Background(), p, it, effectSpecs[it.Kind])
 }
 
 func (f *rekeyFixture) row() map[string]string {
@@ -232,8 +231,8 @@ func TestRekeyRefusedWhilePendingCreateClaim(t *testing.T) {
 	if err := f.store.SetMetadata(f.id, "pending_create_claim", "true"); err != nil {
 		t.Fatal(err)
 	}
-	if s := f.run(p, it); s.Outcome != settledRefused || s.Cause != causeRedecided || f.row()["instance_token"] != "tok-new" {
-		t.Fatalf("settlement %+v, row token %q; want refused %s, unwritten", s, f.row()["instance_token"], causeRedecided)
+	if s := f.run(p, it); s.Outcome != settledRefused || s.Cause != causePremise || f.row()["instance_token"] != "tok-new" {
+		t.Fatalf("settlement %+v, row token %q; want refused %s, unwritten", s, f.row()["instance_token"], causePremise)
 	}
 }
 

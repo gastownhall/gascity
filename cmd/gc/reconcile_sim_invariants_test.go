@@ -90,7 +90,7 @@ func (s *sim) checkCaps() {
 	caps := map[capClass]int{capStarts: s.cfg.Daemon.MaxWakesPerTickOrDefault(), capCreates: createsInFlightCap, capProbing: probe, capRowWrites: probe}
 	count := make(map[capClass]int)
 	for _, e := range s.inflight.view().Entries {
-		if spec, ok := intentKinds[e.Kind]; ok && !e.Ambiguous {
+		if spec, ok := effectSpecs[e.Kind]; ok && !e.Ambiguous {
 			count[spec.class]++
 		}
 	}

@@ -32,7 +32,7 @@ import (
 // each step, and the invariants are checked after it against ground truth
 // (the backing stores and the fake runtime). A failing seed prints its
 // schedule; GC_V2_SIM_SEED replays it. Hooks for later PRs: whatever
-// effectRegistry holds runs here unchanged, files add invariants through the
+// effectSpecs holds runs here unchanged, files add invariants through the
 // sim*Checks hooks, and scenarios drive sim's steps directly.
 
 const (
@@ -342,7 +342,7 @@ type sim struct {
 type simOpts struct {
 	rows     func(s *sim) (city, rig []beads.Bead)
 	inflight func(*inflightMap) plannerInflight
-	registry func(map[string]effectBuilder) map[string]effectBuilder
+	specs    func(map[string]effectSpec)
 	arms     func([]rowArm) []rowArm
 }
 
@@ -412,11 +412,12 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	s.p = newPlanner(s.clk, func() time.Duration { return simPatrol }, nil, inflight, nil, io.Discard)
 	s.p.pass = func(now time.Time) passResult { return s.p.tracePass(s.env, now) }
 	s.p.effects = s.x
-	reg := effectRegistry
-	if o.registry != nil {
-		reg = o.registry(reg)
-	}
-	withRegistry(t, s.gated(reg))
+	withSpecs(t, func(specs map[string]effectSpec) {
+		if o.specs != nil {
+			o.specs(specs)
+		}
+		s.gate(specs)
+	})
 	if o.arms != nil {
 		saved := rowArms
 		rowArms = o.arms(slices.Clone(saved))
@@ -460,23 +461,23 @@ func (s *sim) seedRows() (city, rig []beads.Bead) {
 
 func (s *sim) rel(d time.Duration) string { return s.clk.Now().Add(d).UTC().Format(time.RFC3339) }
 
-// gated wraps every effect so it parks until a step releases it.
-func (s *sim) gated(reg map[string]effectBuilder) map[string]effectBuilder {
-	out := make(map[string]effectBuilder, len(reg))
-	for kind, build := range reg {
-		out[kind] = func(p *effectPass, it intent) func(context.Context) settlement {
-			run := build(p, it)
-			return func(ctx context.Context) settlement {
-				e := &simEffect{it: it, release: make(chan struct{}), done: make(chan settlement, 1)}
-				s.parkCh <- e
-				<-e.release
-				res := run(ctx)
-				e.done <- res
-				return res
-			}
+// gate wraps every effect in specs so it parks until a step releases it.
+func (s *sim) gate(specs map[string]effectSpec) {
+	for kind, spec := range specs {
+		if !spec.runs() {
+			continue
 		}
+		gated := spec
+		gated.sections, gated.body = nil, func(ctx context.Context, p *effectPass, it intent) settlement {
+			e := &simEffect{it: it, release: make(chan struct{}), done: make(chan settlement, 1)}
+			s.parkCh <- e
+			<-e.release
+			res := runTx(ctx, p, it, spec)
+			e.done <- res
+			return res
+		}
+		specs[kind] = gated
 	}
-	return out
 }
 
 func (s *sim) logf(format string, args ...any) {
@@ -525,7 +526,7 @@ func (s *sim) pass() {
 }
 
 // release runs parked effect i to its end and waits for its settlement, or,
-// when its deadline already settled it, for its late event.
+// when its deadline already settled it, for its late facts.
 func (s *sim) release(i int) {
 	e := s.parked[i]
 	s.parked = slices.Delete(s.parked, i, i+1)
@@ -547,8 +548,8 @@ func (s *sim) release(i int) {
 	switch {
 	case !e.settled:
 		s.awaitPost(func(st settlement) bool { return st.Key == e.it.Key && st.Kind == e.it.Kind })
-	case res.Event != nil:
-		s.awaitPost(func(st settlement) bool { return st.Key == (rowKey{}) && st.Event != nil })
+	case !res.Facts.empty(): // its late facts, keyed to nothing
+		s.awaitPost(func(st settlement) bool { return st.Kind == "" && st.Key == (rowKey{}) })
 	}
 }
 
@@ -1093,12 +1094,10 @@ var simMutants = []struct {
 	opts      simOpts
 }{
 	{"the in-flight map loses a settlement", "I8 ", simOpts{inflight: func(m *inflightMap) plannerInflight { return droppingInflight{m} }}},
-	{"an effect reports a landing it never wrote", "I10 ", simOpts{registry: func(reg map[string]effectBuilder) map[string]effectBuilder {
-		out := maps.Clone(reg)
-		out[intentRowHeal] = func(*effectPass, intent) func(context.Context) settlement {
-			return func(context.Context) settlement { return settlement{Outcome: settledLanded} }
-		}
-		return out
+	{"an effect reports a landing it never wrote", "I10 ", simOpts{specs: func(specs map[string]effectSpec) {
+		heal := specs[intentRowHeal]
+		heal.sections, heal.body = nil, func(context.Context, *effectPass, intent) settlement { return settlement{Outcome: settledLanded} }
+		specs[intentRowHeal] = heal
 	}}},
 }
 

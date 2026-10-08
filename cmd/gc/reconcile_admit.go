@@ -51,34 +51,6 @@ const (
 	capRowWrites                     // probe_concurrency, counted apart
 )
 
-// kindSpec is all admission knows of a kind: a later kind is one line.
-type kindSpec struct {
-	class     capClass
-	bootGated bool // destructive: deferred while the boot gate is closed (P2)
-	tokens    int  // debited on admission, never refunded (I9)
-}
-
-var intentKinds = map[string]kindSpec{
-	intentStart:           {class: capStarts, tokens: 1},
-	intentAdopt:           {class: capProbing},
-	intentCreate:          {class: capCreates},
-	intentRekey:           {class: capProbing},
-	intentZombie:          {class: capProbing, bootGated: true},
-	intentDrainBegin:      {class: capRowWrites, bootGated: true},
-	intentDrainBeginFresh: {class: capProbing, bootGated: true},
-	intentSignal:          {class: capRowWrites, bootGated: true},
-	intentSignalFresh:     {class: capProbing, bootGated: true},
-	intentDrainCancel:     {class: capRowWrites},
-	intentDrainVoid:       {class: capRowWrites},
-	intentStop:            {class: capProbing, bootGated: true},
-	intentClose:           {class: capProbing, bootGated: true},
-	intentRollback:        {class: capProbing, bootGated: true},
-	intentRowMetadata:     {class: capRowWrites},
-	intentBaseline:        {class: capRowWrites},
-	intentRowHeal:         {class: capRowWrites},
-	intentRowHealFresh:    {class: capProbing},
-}
-
 // createsInFlightCap bounds running creates (P4, C1); the rest are P3's
 // flat deadlines.
 const (
@@ -90,7 +62,7 @@ const (
 
 // deadline is the effect's deadline (P3), by class alone with no exception:
 // a start startup_timeout + 10s, a row write 30s, every other effect 60s.
-func (k kindSpec) deadline(startupTimeout time.Duration) time.Duration {
+func (k effectSpec) deadline(startupTimeout time.Duration) time.Duration {
 	switch k.class {
 	case capStarts:
 		return startupTimeout + startDeadlineSlack
@@ -236,7 +208,7 @@ func admit(in admitInput, intents []intent) admitResult {
 	a.inFlight, a.counted = cityInFlight(in.InFlight, in.BringUp, a.gate)
 	a.outstanding = endpointOutstanding(in.InFlight)
 	for _, e := range in.InFlight.Entries {
-		spec, ok := intentKinds[e.Kind]
+		spec, ok := effectSpecs[e.Kind]
 		if !ok {
 			spec.class = capProbing // a running kind this table does not know
 		}
@@ -273,7 +245,7 @@ func admit(in admitInput, intents []intent) admitResult {
 // creates' fair-share demand.
 func (a *admission) order(intents []intent) []intent {
 	tier := func(it intent) int {
-		switch spec, ok := intentKinds[it.Kind]; {
+		switch spec, ok := effectSpecs[it.Kind]; {
 		case !ok:
 			return 6
 		case spec.class == capStarts:
@@ -329,7 +301,7 @@ func (a *admission) admitOne(it *intent) string {
 		}
 		a.seen[it.Key] = true
 	}
-	spec, ok := intentKinds[it.Kind]
+	spec, ok := effectSpecs[it.Kind]
 	backoff := a.in.Backoff[rowBackoffKey(it.Key)]
 	switch {
 	case !ok:

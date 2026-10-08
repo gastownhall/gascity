@@ -81,6 +81,42 @@ func (w fencedWriter) updateRowFenced(id string, attempts int, decide func(sessi
 	return front.UpdateRowFenced(id, attempts, decide)
 }
 
+// casRow is runTx's one CAS attempt: updateMetadataFenced once, reading the
+// row from the backing through the leg's cache (CachingStore.RefreshRow), so
+// decide never sees a cached copy. A newer write racing the read returns
+// beads.ErrRowRefreshFenced, wrapped.
+func (w fencedWriter) casRow(id string, decide func(session.Info, session.PersistedResponse) session.MetadataPatch) (bool, error) {
+	if _, err := w.front(); err != nil {
+		return false, err
+	}
+	store := beads.Store(blindWriteRefusingStore{inner: w.store})
+	if cache, ok := demandLabelKey(w.store).(*beads.CachingStore); ok {
+		store = freshRowStore{blindWriteRefusingStore: blindWriteRefusingStore{inner: w.store}, cache: cache}
+	}
+	return sessionFrontDoor(store).UpdateMetadataFenced(id, 1, decide)
+}
+
+// wroteRow is row as a landed CAS of patch left it: session.Info's fold
+// (ApplyPatch), not the blind store write the effect lint bans by that name.
+func wroteRow(row session.Info, patch session.MetadataPatch) session.Info {
+	return row.ApplyPatch(patch)
+}
+
+// freshRowStore is the refusing store whose Get reads the row from the
+// backing, through the cache when it is live or partial.
+type freshRowStore struct {
+	blindWriteRefusingStore
+	cache *beads.CachingStore
+}
+
+func (s freshRowStore) Get(id string) (beads.Bead, error) {
+	b, err := s.cache.RefreshRow(id)
+	if errors.Is(err, beads.ErrCacheUnavailable) {
+		return s.cache.Backing().Get(id)
+	}
+	return b, err
+}
+
 // closePremise is session.Store.Close: the premise close.
 func (w fencedWriter) closePremise(expected session.Info, stateCode string, now time.Time) (bool, error) {
 	front, err := w.closeFront()
