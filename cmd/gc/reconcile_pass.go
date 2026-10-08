@@ -83,6 +83,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 		rec.Err = err.Error()
 		return passResult{}
 	}
+	p.clearAmbiguous(&w, now)
 	cfg := w.Env.Cfg
 	a, err := decideAllocation(allocInputs{
 		Now: now, Cfg: cfg, ConfigRev: w.Env.ConfigRev, EnvGen: w.Env.Gen, CityPath: e.CityPath, CityName: e.CityName,
@@ -122,7 +123,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	}
 	var unregistered []intent
 	if p.effects != nil {
-		intents, unregistered = splitRegistered(intents)
+		intents, unregistered = splitRegistered(intents, p.creates != nil)
 	}
 	res := admit(admitInput{
 		Now: now, Cfg: cfg, Bucket: p.bucket, FairSeed: p.fairSeed, InFlight: w.InFlight, BringUp: w.Census.BringUp(cfg),
@@ -168,12 +169,13 @@ func newAllocSummary(now time.Time, w *World, a *allocDecision) *allocSummary {
 }
 
 // splitRegistered splits off the intents whose kind has no registered
-// effect yet, deferred with cause no-effect before admission, so they take
-// no cap, no token and no backoff: the row is traced and the arm stays
-// visible until its effect lands.
-func splitRegistered(intents []intent) (registered, unregistered []intent) {
+// effect yet, and the creates when no create runner is wired, deferred with
+// cause no-effect before admission, so they take no cap, no token and no
+// backoff: the row is traced and the arm stays visible until its effect
+// lands.
+func splitRegistered(intents []intent, creates bool) (registered, unregistered []intent) {
 	for _, it := range intents {
-		if effectRegistry[it.Kind] == nil {
+		if effectRegistry[it.Kind] == nil || (it.Kind == intentCreate && !creates) {
 			it.Cause = causeNoEffect
 			unregistered = append(unregistered, it)
 			continue
@@ -184,20 +186,57 @@ func splitRegistered(intents []intent) (registered, unregistered []intent) {
 }
 
 // submit hands each admitted intent's effect to the executor under a new
-// in-flight entry, recorded first so the next pass counts it. A submit the
-// executor refuses (busy, or stopped) runs and posts nothing, so its entry
-// is settled here at once.
+// in-flight entry, recorded first so the next pass counts it. A create gets
+// its instance token minted here, into its plan and its entry, which is
+// keyed by it (S-8, P5). A submit the executor refuses (busy, or stopped)
+// runs and posts nothing, so its entry is settled here at once.
 func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
 	pass := newEffectPass(w, a)
+	pass.creates = p.creates
 	for _, it := range admitted {
-		seq := p.inflight.add(inflightEntry{Kind: it.Kind, Key: it.Key, Endpoint: it.Endpoint})
+		e := inflightEntry{Kind: it.Kind, Key: it.Key, Endpoint: it.Endpoint}
+		if it.Kind == intentCreate {
+			it.Create.Token = session.NewInstanceToken()
+			e = createInflightEntry(it, w.SessionsLeg)
+		}
+		seq := p.inflight.add(e)
 		if seq == 0 {
 			continue
 		}
+		it.Create.Seq = seq
 		if err := p.effects.submitIntent(pass, it, seq); err != nil {
-			p.inflight.settle(settlement{Key: it.Key, Kind: it.Kind, Seq: seq})
+			p.inflight.settle(settlement{Key: it.Key, Kind: it.Kind, Seq: seq, Token: e.Token})
 		}
 	}
+}
+
+// createInflightEntry is an admitted create's in-flight entry: its token, identity
+// and endpoint, and the planning stand-in it reserves until the census shows
+// its row (inFlightCreates).
+func createInflightEntry(it intent, leg string) inflightEntry {
+	c := it.Create
+	e := inflightEntry{
+		Kind: it.Kind, Endpoint: it.Endpoint, Token: c.Token, Identity: c.identity().key(), Leg: leg,
+		Template: c.Template, QualifiedInstance: c.QualifiedInstance, Slot: c.Slot, WorkBeadID: c.WorkBeadID,
+	}
+	if c.Named != nil {
+		e.Template, e.SessionName = c.Named.Template, c.Named.SessionName
+	}
+	return e
+}
+
+// clearAmbiguous clears the ambiguous creates w's census shows by token, or
+// whose hard bound passed, alerting on each hard-bound clear (P5), and
+// refreshes w's in-flight view.
+func (p *planner) clearAmbiguous(w *World, now time.Time) {
+	tokens := make(map[string]bool)
+	for _, row := range w.Census.Rows {
+		if row.InstanceToken != "" {
+			tokens[row.InstanceToken] = true
+		}
+	}
+	p.alertCleared(p.inflight.clearVisible(inflightCensus{Tokens: tokens}, now))
+	w.InFlight = p.inflight.view()
 }
 
 // decideRowSafe is decideRow with P6's panic isolation: a row that panics
@@ -218,6 +257,7 @@ func createIntent(cfg *config.City, rev string, ap allocPlan) intent {
 	plan := createPlan{ID: ap.identity(), Named: ap.Named}
 	if ap.Named == nil {
 		plan = createPlanOf(ap.identity(), ap.Template, ap.Plan)
+		plan.WorkBeadID = ap.Request.WorkBeadID
 	}
 	plan.ConfigRev = rev
 	return intent{
@@ -225,6 +265,10 @@ func createIntent(cfg *config.City, rev string, ap allocPlan) intent {
 		Endpoint: rowEndpoint(cfg, session.Info{Template: ap.Template}),
 	}
 }
+
+// plan is a create intent's plan (the effect lint reads its field name as
+// the banned store method).
+func (it intent) plan() createPlan { return it.Create }
 
 // traceRows returns the decided rows whose (reason, outcome) changed since
 // they were last traced, in census order (R6), and forgets rows the census

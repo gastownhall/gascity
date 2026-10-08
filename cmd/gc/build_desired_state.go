@@ -5511,9 +5511,10 @@ type poolCreateView struct {
 	// allocator mints it at plan time as its ledger marker.
 	instanceToken string
 	// beforeWrite, when set, runs just before the row write with the row ID
-	// the store pre-mints (empty when it mints none). The allocator's effect
-	// uses it to tell a panic before the write from one after it.
-	beforeWrite func(rowID string)
+	// the store pre-mints (empty when it mints none); an error refuses the
+	// write. The allocator's effect uses it to tell a panic before the write
+	// from one after it, and to check its context last.
+	beforeWrite func(rowID string) error
 }
 
 // poolCreateViewOf is legacy's view: its build params, unchanged.

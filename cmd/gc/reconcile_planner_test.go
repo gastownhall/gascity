@@ -192,6 +192,8 @@ func (f *fakeInflight) add(inflightEntry) uint64 { return 0 }
 
 func (f *fakeInflight) view() inflightView { return inflightView{} }
 
+func (f *fakeInflight) clearVisible(inflightCensus, time.Time) []clearRecord { return nil }
+
 // plannerHarness runs a planner on a fake clock. Every pass reports its start
 // on passes, then runs the test's onPass if it has one.
 type plannerHarness struct {

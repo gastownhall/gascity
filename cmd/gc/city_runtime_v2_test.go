@@ -45,6 +45,7 @@ func attachTestV2(t *testing.T, cr *CityRuntime) *plannerRuntime {
 	cr.reconcilerDrift.running = reconcilerV2
 	cr.sessionDrains, cr.providerHealthGate = nil, nil
 	cr.installPlanner(rt)
+	rt.host.capabilities = nil // the fixtures' MemStores have no atomic closer; C0.7 has its own tests
 	wake := newLegacyWake(cr.pokeCh, cr.controlDispatcherCh)
 	wake.planner = rt.planner
 	cr.initWake(wake)
@@ -264,6 +265,7 @@ func newV2RunFixture(t *testing.T, daemon string, setup func(f *v2RunFixture)) *
 	wireControllerWakeSignals(cs, f.cr.wakeOf())
 	cs.configDirty = f.cr.configDirty
 	f.cr.setControllerState(cs)
+	f.rt.host.capabilities = nil // the fixture's MemStore has no atomic closer; C0.7 has its own tests
 	if setup != nil {
 		setup(f)
 	}

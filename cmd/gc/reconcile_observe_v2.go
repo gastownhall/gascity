@@ -67,7 +67,8 @@ func (p *planner) alertCleared(recs []clearRecord) {
 }
 
 // observeSettlement counts one drained settlement, and alerts when it
-// settled at its deadline. A late landing's lone event is not counted.
+// settled at its deadline, a create abandoned there (ambiguous) included. A
+// late landing's lone event is not counted.
 func (p *planner) observeSettlement(s settlement) {
 	if s.Kind == "" {
 		return
@@ -76,7 +77,7 @@ func (p *planner) observeSettlement(s settlement) {
 	if phase := idleRespawnPhases[s.Kind]; phase != "" && s.Outcome == settledLanded && s.Reason == idleRespawnDrainReason {
 		p.metrics.count(&p.metrics.series, phase)
 	}
-	if s.Outcome == settledFailed && strings.TrimPrefix(s.Cause, causeFinalizePrefix) == causeDeadline {
+	if (s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && strings.TrimPrefix(s.Cause, causeFinalizePrefix) == causeDeadline {
 		p.alert(alertEffectDeadline, s.Key.ID+s.Token, fmt.Sprintf("%s effect for %s settled at its deadline", s.Kind, s.Key.ID+s.Token))
 	}
 }

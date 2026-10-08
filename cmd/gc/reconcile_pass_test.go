@@ -251,8 +251,8 @@ func TestTracePassKeepsNoTokenDebit(t *testing.T) {
 
 // Kills effects that ignore the D-14 gate's other half, an unregistered kind
 // that is submitted (and backs its row off) instead of traced, and an
-// effect that never clears its entry: with effects on, the pass defers the
-// creates, which have no effect yet, with cause no-effect before admission,
+// effect that never clears its entry: with effects on but no create runner
+// wired, the pass defers the creates with cause no-effect before admission,
 // submits gc-1's heal under an in-flight entry, keeps admission's bucket,
 // and the heal's settlement clears the entry. Nothing backs the creates off.
 func TestPassWithEffectsSubmitsRegisteredKindsOnly(t *testing.T) {

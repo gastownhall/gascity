@@ -141,11 +141,14 @@ func (d *reconcilerModeDrift) observe(cfg *config.City) string {
 }
 
 // sessionReconcilerDoctorCheck reports the [daemon] session_reconciler choice.
-// queryPass asks a v2 controller for its last pass (queryV2PassStatus).
+// queryPass asks a v2 controller for its last pass (queryV2PassStatus);
+// capabilities, when the store checks run, reads C0.7's capabilities of the
+// sessions and graph class stores.
 type sessionReconcilerDoctorCheck struct {
-	cfg       *config.City
-	lookupEnv func(string) (string, bool)
-	queryPass func(cityPath string) (v2PassStatus, error)
+	cfg          *config.City
+	lookupEnv    func(string) (string, bool)
+	queryPass    func(cityPath string) (v2PassStatus, error)
+	capabilities func() ([]v2StoreCapability, error)
 }
 
 func newSessionReconcilerDoctorCheck(cfg *config.City, lookupEnv func(string) (string, bool)) *sessionReconcilerDoctorCheck {
@@ -172,8 +175,9 @@ func (*sessionReconcilerDoctorCheck) Fix(_ *doctor.CheckContext) error { return 
 // disagree. Under every mode it also lists, as Details, the v2 refusals the
 // config would hit, a dry run of the switch, and the floors outside the
 // control dispatcher (v2FloorWarnings), a warning under v2 and a note
-// otherwise; and under v2, the last pass's age when the controller answers.
-// None of them changes the status.
+// otherwise; under v2, the last pass's age when the controller answers; and
+// each class store's C0.7 capabilities. Only C0.7 changes the status: an
+// error for a latched v2 whose boot it would refuse.
 func (c *sessionReconcilerDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name()}
 	raw := c.cfg.Daemon.SessionReconciler
@@ -211,5 +215,26 @@ func (c *sessionReconcilerDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 			r.Details = append(r.Details, fmt.Sprintf("v2 last pass record: %s ago (%d passes)", time.Duration(st.LastPassAgeMS)*time.Millisecond, st.Passes))
 		}
 	}
+	c.reportCapabilities(r, mode)
 	return r
+}
+
+// reportCapabilities adds each class store's C0.7 capabilities to r, and
+// makes r an error when mode is v2 and C0.7 would refuse its boot.
+func (c *sessionReconcilerDoctorCheck) reportCapabilities(r *doctor.CheckResult, mode reconcilerMode) {
+	if c.capabilities == nil {
+		return
+	}
+	caps, err := c.capabilities()
+	if err != nil {
+		r.Details = append(r.Details, "C0.7: not checked: "+err.Error())
+		return
+	}
+	for _, got := range caps {
+		r.Details = append(r.Details, "C0.7 "+got.String())
+	}
+	if refusal := v2CapabilityRefusal(caps); refusal != nil && mode == reconcilerV2 {
+		r.Status, r.Message = doctor.StatusError, refusal.Error()
+		r.FixHint = "put the sessions and graph classes on a store that fences, or remove the key to run the legacy reconciler"
+	}
 }

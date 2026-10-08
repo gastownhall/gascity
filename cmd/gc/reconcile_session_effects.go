@@ -25,8 +25,9 @@ import (
 const effectCancelBound = 10 * time.Second
 
 // Effect causes the executor sets: a Run that outlived its deadline (or the
-// shutdown deadline) or panicked, a start submitted while starts are closed
-// (P7; no backoff), and an intent whose kind has no registered effect.
+// shutdown deadline) or panicked, and an intent whose kind has no registered
+// effect. A start or create submitted while starts are closed settles with
+// causeSwapPause (P7; no backoff).
 const (
 	causeDeadline = "deadline"
 	causePanic    = "panic"
@@ -42,14 +43,16 @@ var (
 
 // sessionEffect is one effect. Run performs it under a context that ends at
 // Deadline (a real deadline: ctx.Err() reads DeadlineExceeded then) and
-// returns its settlement; the executor stamps the key, Kind, Reason and Seq
-// on it.
-// Run must check its context before any write that would commit a late
-// result.
+// returns its settlement; the executor stamps the key, Kind, Reason, Seq
+// and Token on it. Run must check its context before any write that would
+// commit a late result.
 type sessionEffect struct {
 	Kind   string // the intent kind; a provider swap waits for intentStart
 	Reason string // the intent's reason, for the pass record
 	Seq    uint64 // the in-flight entry's, echoed in the settlement
+	// Token is a create's instance token: its single-flight key, since it
+	// has no row yet, and on every settlement, so its entry clears (P5).
+	Token string
 	// Finalize marks the stop verb's finalize: every refused or failed
 	// settlement it posts carries causeFinalizePrefix, so its own refusals
 	// back it off (P4).
@@ -75,6 +78,12 @@ type inflightEffect struct {
 	returned chan struct{} // closed when Run returns, which may be after the settle
 }
 
+// effectKey is an effect's single-flight key: its row, or a create's token.
+type effectKey struct {
+	row   rowKey
+	token string
+}
+
 // effectExecutor runs session effects, at most one per key (C5.5: while one
 // is in flight its key's decide is read-only).
 type effectExecutor struct {
@@ -89,8 +98,8 @@ type effectExecutor struct {
 	ctx          context.Context // ends at stop's deadline, not at the workers' cancel
 	cancel       context.CancelFunc
 	closed       bool
-	startsClosed bool                       // a provider swap is in progress (P7)
-	inflight     map[rowKey]*inflightEffect // until settled
+	startsClosed bool                          // a provider swap is in progress (P7)
+	inflight     map[effectKey]*inflightEffect // until settled
 	// running holds every effect whose Run has not returned, including one
 	// abandoned at its deadline.
 	running map[*inflightEffect]bool
@@ -101,7 +110,7 @@ func newEffectExecutor(post func(settlement), stderr io.Writer) *effectExecutor 
 	ctx, cancel := context.WithCancel(context.Background())
 	return &effectExecutor{
 		post: post, clock: realPlannerClock{}, spawn: func(f func()) { go f() }, stderr: stderr, ctx: ctx, cancel: cancel,
-		inflight: make(map[rowKey]*inflightEffect), running: make(map[*inflightEffect]bool),
+		inflight: make(map[effectKey]*inflightEffect), running: make(map[*inflightEffect]bool),
 	}
 }
 
@@ -109,7 +118,7 @@ func newEffectExecutor(post func(settlement), stderr io.Writer) *effectExecutor 
 func (x *effectExecutor) inFlight(k rowKey) bool {
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	return x.inflight[k] != nil
+	return x.inflight[effectKey{row: k}] != nil
 }
 
 // submitIntent submits the registered effect of it for one pass, under the
@@ -125,39 +134,42 @@ func (x *effectExecutor) submitIntent(p *effectPass, it intent, seq uint64) erro
 		}
 		return build(p, it)(ctx)
 	}
-	return x.submit(it.Key, sessionEffect{Kind: it.Kind, Reason: it.Reason, Seq: seq, Finalize: it.Finalize, Deadline: it.Deadline, Run: run})
+	return x.submit(it.Key, sessionEffect{Kind: it.Kind, Reason: it.Reason, Seq: seq, Token: it.Create.Token, Finalize: it.Finalize, Deadline: it.Deadline, Run: run})
 }
 
-// submit starts e for k. It refuses, running nothing and posting nothing,
-// while k has an effect in flight or after stop: the caller then settles the
-// in-flight entry it added (planner.submit does). A start submitted while
-// starts are closed runs nothing and settles refused with cause swap-pause.
+// submit starts e for k, or for e's token when it has one (a create). It
+// refuses, running nothing and posting nothing, while that key has an effect
+// in flight or after stop: the caller then settles the in-flight entry it
+// added (planner.submit does). A start or create submitted while starts are
+// closed runs nothing and settles refused with cause swap-pause.
 func (x *effectExecutor) submit(k rowKey, e sessionEffect) error {
+	key := effectKey{row: k, token: e.Token}
 	x.mu.Lock()
 	switch {
 	case x.closed:
 		x.mu.Unlock()
 		return errEffectsClosed
-	case x.inflight[k] != nil:
+	case x.inflight[key] != nil:
 		x.mu.Unlock()
 		return errEffectBusy
-	case x.startsClosed && e.Kind == intentStart:
+	case x.startsClosed && (e.Kind == intentStart || e.Kind == intentCreate):
 		x.mu.Unlock()
-		x.post(settlement{Key: k, Kind: e.Kind, Seq: e.Seq, Outcome: settledRefused, Cause: causeSwapPause})
+		x.post(settlement{Key: k, Kind: e.Kind, Seq: e.Seq, Token: e.Token, Outcome: settledRefused, Cause: causeSwapPause})
 		return nil
 	}
 	ctx, cancel := context.WithCancel(x.ctx)
 	f := &inflightEffect{kind: e.Kind, deadline: e.Deadline, cancel: cancel, returned: make(chan struct{})}
-	x.inflight[k], x.running[f] = f, true
+	x.inflight[key], x.running[f] = f, true
 	x.wg.Add(1)
 	x.mu.Unlock()
-	x.spawn(func() { x.run(ctx, k, e, f) })
+	x.spawn(func() { x.run(ctx, key, e, f) })
 	return nil
 }
 
 // closeStarts and openStarts bracket a provider swap (P7): admission already
-// defers starts while the planner's pause is set, and this refuses a start
-// admitted before the pause but submitted after it.
+// defers starts and creates while the planner's pause is set, and this
+// refuses one admitted before the pause but submitted after it. A start
+// submitted before it is running, so waitStarts waits for it.
 func (x *effectExecutor) closeStarts() { x.setStartsClosed(true) }
 func (x *effectExecutor) openStarts()  { x.setStartsClosed(false) }
 
@@ -171,10 +183,12 @@ func (x *effectExecutor) setStartsClosed(closed bool) {
 // shutdown deadline comes, whichever is first; a result that is ready then
 // wins. A Run that ignores its context is abandoned at the deadline; it keeps
 // any name lock it holds, so it still serializes its runtime name, and if it
-// lands later its event is still posted, alone. A panic in Run is recovered
-// and logged, and settles failed: one bad effect never takes the process
-// down.
-func (x *effectExecutor) run(base context.Context, k rowKey, e sessionEffect, f *inflightEffect) {
+// lands later its event is still posted, alone. An abandoned create settles
+// ambiguous, never failed: its row write may have begun (P5). A panic in Run
+// is recovered and logged, and settles failed: one bad effect never takes
+// the process down.
+func (x *effectExecutor) run(base context.Context, key effectKey, e sessionEffect, f *inflightEffect) {
+	k := key.row
 	defer x.wg.Done()
 	// Run's context is released when Run returns, not at the settlement, so
 	// an effect abandoned at its deadline sees DeadlineExceeded.
@@ -214,6 +228,9 @@ func (x *effectExecutor) run(base context.Context, k rowKey, e sessionEffect, f 
 				err = context.DeadlineExceeded
 			}
 			s = settlement{Outcome: settledFailed, Cause: causeDeadline, Err: err}
+			if e.Kind == intentCreate {
+				s.Outcome = settledAmbiguous
+			}
 			fmt.Fprintf(x.stderr, "v2 reconciler: effect for %s/%s still running when its context ended; settled as %v\n", k.Leg, k.ID, s.Err) //nolint:errcheck // best-effort stderr
 			x.spawn(func() {
 				if late := <-result; late.Event != nil {
@@ -222,12 +239,12 @@ func (x *effectExecutor) run(base context.Context, k rowKey, e sessionEffect, f 
 			})
 		}
 	}
-	s.Key, s.Kind, s.Reason, s.Seq = k, e.Kind, e.Reason, e.Seq
+	s.Key, s.Kind, s.Reason, s.Seq, s.Token = k, e.Kind, e.Reason, e.Seq, e.Token
 	if e.Finalize {
 		s.Cause = finalizeCause(s)
 	}
 	x.mu.Lock()
-	delete(x.inflight, k)
+	delete(x.inflight, key)
 	x.mu.Unlock()
 	x.post(s)
 }

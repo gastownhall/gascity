@@ -870,13 +870,19 @@ func (s *sim) checkInflight() {
 	exec := maps.Clone(s.x.inflight)
 	s.x.mu.Unlock()
 	for k := range s.inflight.running {
-		if exec[k] == nil && !queued[k] {
+		if exec[effectKey{row: k}] == nil && !queued[k] {
 			s.failf("I8 I-inflight", "the in-flight entry for %v outlives its effect's settlement", k)
 		}
 	}
 	for k := range exec {
-		if _, ok := s.inflight.running[k]; !ok && k != (rowKey{}) {
-			s.failf("I8 I-inflight", "the executor runs an effect for %v with no in-flight entry", k)
+		if k.token != "" {
+			if _, ok := s.inflight.creates[k.token]; !ok {
+				s.failf("I8 I-inflight", "the executor runs a create %s with no in-flight entry", k.token)
+			}
+			continue
+		}
+		if _, ok := s.inflight.running[k.row]; !ok && k.row != (rowKey{}) {
+			s.failf("I8 I-inflight", "the executor runs an effect for %v with no in-flight entry", k.row)
 		}
 	}
 	for _, e := range s.inflight.creates {

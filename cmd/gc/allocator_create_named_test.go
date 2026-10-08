@@ -414,9 +414,9 @@ func TestCreateEffect_NamedReopensClosedCanonicalAndMatchesLegacyMetadata(t *tes
 			dir := t.TempDir()
 			cfg := mayorCity()
 			legacyStore := beads.NewMemStore()
-			effectStore := &namedWriteCounter{Store: beads.NewMemStore()}
+			effectStore := newNamedCondStore(t)
 			seedClosedNamedRow(t, legacyStore, cfg, nil)
-			closed := seedClosedNamedRow(t, effectStore.Store, cfg, nil)
+			closed := seedClosedNamedRow(t, effectStore.MemStore, cfg, nil)
 
 			h := newNamedHarness(t, dir, nil)
 			h.reserve(t, "c1")
@@ -436,7 +436,7 @@ func TestCreateEffect_NamedReopensClosedCanonicalAndMatchesLegacyMetadata(t *tes
 			if !reflect.DeepEqual(effect, legacy) {
 				t.Fatalf("reopened row differs from legacy's reopen:\neffect: %+v\nlegacy: %+v", effect, legacy)
 			}
-			if got := effectStore.count(); len(got) != 1 {
+			if got := effectStore.recorded(); len(got) != 1 {
 				t.Fatalf("writes = %v, want exactly one", got)
 			}
 			raw, err := effectStore.Get(closed.ID)
@@ -530,7 +530,7 @@ func (s *namedHookStore) Update(id string, opts beads.UpdateOpts) error {
 // token, which no census would show for the plan's (CONTRACT v5 P5).
 func TestCreateEffect_NamedReopenSettlesRetargetAndClears(t *testing.T) {
 	cfg := mayorCity()
-	store := beads.NewMemStore()
+	store := fencedMemStore(t)
 	closed := seedClosedNamedRow(t, store, cfg, nil)
 	h := newNamedHarness(t, t.TempDir(), nil)
 	token := h.reserve(t, "c1")
@@ -551,11 +551,12 @@ func TestCreateEffect_NamedReopenSettlesRetargetAndClears(t *testing.T) {
 // it live under the flock; the entry clears at settlement.
 func TestCreateEffect_NamedAmbiguousReopenClearsAtSettlement(t *testing.T) {
 	cfg := mayorCity()
-	mem := beads.NewMemStore()
-	closed := seedClosedNamedRow(t, mem, cfg, nil)
+	store := newNamedCondStore(t)
+	closed := seedClosedNamedRow(t, store.MemStore, cfg, nil)
+	store.err = errors.New("connection reset during reopen")
 	h := newNamedHarness(t, t.TempDir(), nil)
 	h.reserve(t, "c1")
-	h.runAll(t, &createPass{cfg: cfg, store: &namedHookStore{Store: mem, failTx: errors.New("connection reset during reopen")}}, namedPlan(t, cfg, "c1", "mayor"))
+	h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
 
 	e := h.entry(t)
 	if !e.Ambiguous || e.RowID != closed.ID || e.RetargetRowID != closed.ID {
@@ -585,11 +586,12 @@ func (s *namedCASStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 
 func (s *namedCASStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
 
-// Kills: clobbering a concurrent CLI reopen or start (P3-6b T7, AM-N4).
-// Where the store fences, a writer that lands between the locked read and
-// the write wins: the reopen writes nothing and settles refusing its identity.
-// Without the capability the reopen keeps legacy's transaction.
-func TestCreateEffect_NamedReopenIsConditionalOnRevision(t *testing.T) {
+// Kills a blind reopen (ruling 1; P3-6b T7, AM-N4; v5 C2): a writer that
+// lands between the locked read and the write wins, so the reopen writes
+// nothing and settles refusing its identity; and a store that resolves no
+// conditional writer (a store can stop resolving after boot's C0.7) refuses
+// the reopen rather than run legacy's last-writer-wins transaction.
+func TestNamedReopenConcurrentWriterLosesFence(t *testing.T) {
 	cfg := mayorCity()
 	t.Run("fenced", func(t *testing.T) {
 		mem := beads.NewMemStore()
@@ -617,24 +619,23 @@ func TestCreateEffect_NamedReopenIsConditionalOnRevision(t *testing.T) {
 		assertFailedNoWrite(t, h)
 		h.assertRefused(t, plan, createStageFence)
 	})
-	t.Run("unfenced keeps legacy's transaction", func(t *testing.T) {
+	t.Run("unfenced refuses", func(t *testing.T) {
 		mem := beads.NewMemStore()
 		closed := seedClosedNamedRow(t, mem, cfg, nil)
-		store := &namedCASStore{Store: mem, bump: func() {
-			if err := mem.SetMetadata(closed.ID, "note", "cli touched"); err != nil {
-				t.Error(err)
-			}
-		}}
+		writes := &namedWriteCounter{Store: mem}
 		h := newNamedHarness(t, t.TempDir(), nil)
 		h.reserve(t, "c1")
-		h.runAll(t, &createPass{cfg: cfg, store: store}, namedPlan(t, cfg, "c1", "mayor"))
+		plan := namedPlan(t, cfg, "c1", "mayor")
+		h.runAll(t, &createPass{cfg: cfg, store: writes}, plan)
 		after, err := mem.Get(closed.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if after.Status != "open" || !h.entry(t).Landed {
-			t.Fatalf("row = %s, entry %+v, want the last-writer-wins reopen", after.Status, h.entry(t))
+		if after.Status != "closed" || len(writes.count()) != 0 {
+			t.Fatalf("row = %s, writes %v; want no blind reopen", after.Status, writes.count())
 		}
+		assertFailedNoWrite(t, h)
+		h.assertRefused(t, plan, createStageFence)
 	})
 }
 
@@ -647,7 +648,7 @@ func TestCreateEffect_NamedLocksIdentityAndSessionNameOnce(t *testing.T) {
 	cfg := mayorCity()
 	sn := config.NamedSessionRuntimeName("test-city", cfg.Workspace, "mayor")
 	for _, reopen := range []bool{true, false} {
-		store := beads.NewMemStore()
+		store := fencedMemStore(t)
 		var closed beads.Bead
 		if reopen {
 			closed = seedClosedNamedRow(t, store, cfg, nil)
@@ -1031,7 +1032,7 @@ func TestCreateEffect_NamedSettlementNamesTheRow(t *testing.T) {
 		}
 	})
 	t.Run("reopen", func(t *testing.T) {
-		store := beads.NewMemStore()
+		store := fencedMemStore(t)
 		closed := seedClosedNamedRow(t, store, cfg, nil)
 		if s := run(t, store); !s.Landed || s.RowID != closed.ID || s.RetargetRowID != closed.ID {
 			t.Fatalf("settlement %+v, want landed on %s", s, closed.ID)
@@ -1933,5 +1934,32 @@ func TestNamedAdoptLiveStampPanicKeepsCreateLanded(t *testing.T) {
 	h.runAll(t, &createPass{cfg: cfg, store: fencedMemStore(t), sp: sp}, plan)
 	if s := h.entry(t); !s.Landed || s.Ambiguous || s.Err != nil || !strings.Contains(stderr.String(), "panicked") {
 		t.Fatalf("settlement = %+v, stderr %q; want landed, not ambiguous, panic logged", s, stderr.String())
+	}
+}
+
+// Kills a reopen that writes after its effect was settled under it (the
+// executor settles a create abandoned at its deadline): the effect's context
+// ends during the fenced live read, and the reopen, which checks its context
+// under the identity lock just before writing, writes nothing. Ported from
+// the ledger form C1a deleted.
+func TestCreateEffect_NamedReopenWritesNothingOnceItsEntryIsSettled(t *testing.T) {
+	cfg := mayorCity()
+	inner := newNamedCondStore(t)
+	closed := seedClosedNamedRow(t, inner.MemStore, cfg, nil)
+	h := newNamedHarness(t, t.TempDir(), nil)
+	h.reserve(t, "c1")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.submit(ctx, &createPass{cfg: cfg, store: &namedCASStore{Store: inner, bump: cancel}}, namedPlan(t, cfg, "c1", "mayor"))
+	h.wg.Wait()
+
+	if got := inner.recorded(); len(got) != 0 {
+		t.Fatalf("writes = %v, want none once the context ended", got)
+	}
+	if after, err := inner.Get(closed.ID); err != nil || after.Status != "closed" {
+		t.Fatalf("row = %+v, %v; want it still closed", after, err)
+	}
+	if e := h.entry(t); e.Landed || e.Ambiguous || e.Stage != "" || !errors.Is(e.Err, errCreateAbandoned) {
+		t.Fatalf("settlement = %+v, want an abandoned no-write that backs nothing off", e)
 	}
 }

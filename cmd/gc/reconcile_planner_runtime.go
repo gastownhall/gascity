@@ -38,12 +38,13 @@ var errV2Stopped = errors.New("v2 reconciler: stopped before ready")
 
 // plannerHost is the only way the planner reaches the city (F2). bindHost
 // fills gather's Env and Recording; only publishEnv calls snapshotEnv; a nil
-// bootCensus skips C11's check.
+// bootCensus skips C11's check, and a nil capabilities C0.7's.
 type plannerHost struct {
 	gather           gatherEnv
 	snapshotEnv      func() (*config.City, runtime.Provider, string)
 	setInventoryHook func(fn func(prev, next *ObservationSnapshot))
 	bootCensus       func() (v2SessionMigration, error)
+	capabilities     func() error
 	beginTrace       func(trigger string) *sessionReconcilerTraceCycle // off the controller goroutine
 	inventoryFields  func() map[string]any                             // the pass record's view of the inventory lane
 	safeTick         func(fn func(), trigger string) (panicked bool)
@@ -115,6 +116,11 @@ func (rt *plannerRuntime) bindHost(h plannerHost) {
 	rt.host = h
 	rt.planner.rec = h.rec
 	rt.planner.emitRecord = rt.emitPassRecord
+	creates, err := newCreateEffects(createEffectHost{cityPath: h.gather.CityPath, cityName: h.gather.CityName, lookPath: h.gather.LookPath, stderr: h.stderr})
+	if err != nil {
+		fmt.Fprintf(h.stderr, "v2 planner: creates disabled: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+	rt.planner.creates = creates
 }
 
 // publishEnv publishes the host's config as the next generation unless the
@@ -136,12 +142,19 @@ func (rt *plannerRuntime) publishEnv() *reconcileEnv {
 	return e
 }
 
-// boot publishes env Gen 1, refuses enterprise-era session rows on a live
-// census (C11; a failed census is retried with backoff, as an error is not
-// an empty city), starts the planner, and returns once a pass has completed
-// with the boot gate open (CONTRACT v5 P2), or with ctx's error. It is
-// idempotent, so a startup retry after a panic resumes it (MAINT-005).
+// boot refuses stores that cannot fence (C0.7), publishes env Gen 1, refuses
+// enterprise-era session rows on a live census (C11; a failed census is
+// retried with backoff, as an error is not an empty city), starts the
+// planner, and returns once a pass has completed with the boot gate open
+// (CONTRACT v5 P2), or with ctx's error. It is idempotent, so a startup
+// retry after a panic resumes it (MAINT-005).
 func (rt *plannerRuntime) boot(ctx context.Context) error {
+	if rt.host.capabilities != nil {
+		if refusal := rt.host.capabilities(); refusal != nil {
+			rt.planner.alert(alertBootRefused, "", refusal.Error())
+			return refusal
+		}
+	}
 	if rt.env.Load() == nil {
 		rt.publishEnv()
 	}

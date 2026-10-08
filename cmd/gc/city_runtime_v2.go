@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -96,6 +97,9 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 			rigs := cr.rigBeadStores() // residency:allow — the census frame; collectOpenSessionInfos plans the legs (storeref.Plan)
 			return readV2SessionMigration(cr.cityPath, cr.cityName, cr.serviceConfigSnapshot(), cr.v2SessionsStore(), rigs)
 		},
+		capabilities: func() error {
+			return v2CapabilityRefusal(v2ClassStoreCapabilities(cr.v2SessionsStore(), cr.v2GraphStore()))
+		},
 		beginTrace: cr.beginV2Trace,
 		inventoryFields: func() map[string]any {
 			if cr.inventoryLane == nil {
@@ -112,6 +116,60 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 // v2SessionsStore is sessionsBeadStore with the config read under its lock.
 func (cr *CityRuntime) v2SessionsStore() beads.Store {
 	return resolveSessionStore(cr.storageRoutes, cr.cityBeadStore(), cr.serviceConfigSnapshot(), cr.cityPath, cr.rec)
+}
+
+// v2GraphStore is graphBeadStore with the config read under its lock.
+func (cr *CityRuntime) v2GraphStore() beads.Store {
+	return resolveGraphStore(cr.storageRoutes, cr.cityBeadStore(), cr.serviceConfigSnapshot(), cr.cityPath, cr.rec)
+}
+
+// v2StoreCapability is C0.7's reading of one class store: whether it
+// resolves a conditional writer, and an atomic conditional closer.
+type v2StoreCapability struct {
+	Class          string
+	Writer, Closer bool
+	Err            error // the writer's resolution error, if any
+}
+
+// v2ClassStoreCapabilities reads C0.7's two capabilities of the sessions
+// and graph class stores (CONTRACT v5 R2). It reads; it writes nothing.
+func v2ClassStoreCapabilities(sessions, graph beads.Store) []v2StoreCapability {
+	out := make([]v2StoreCapability, 0, 2)
+	for _, c := range []struct {
+		class string
+		store beads.Store
+	}{{"sessions", sessions}, {"graph", graph}} {
+		got := v2StoreCapability{Class: c.class}
+		w, _, err := beads.ResolveConditionalWriter(c.store)
+		got.Writer, got.Err = w != nil && err == nil, err
+		_, got.Closer = beads.AtomicConditionalCloserFor(c.store)
+		out = append(out, got)
+	}
+	return out
+}
+
+// String is c as the boot refusal and doctor name it.
+func (c v2StoreCapability) String() string {
+	writer := fmt.Sprintf("conditional writer %v", c.Writer)
+	if c.Err != nil {
+		writer += " (" + c.Err.Error() + ")"
+	}
+	return fmt.Sprintf("%s store: %s, atomic conditional closer %v", c.Class, writer, c.Closer)
+}
+
+// v2CapabilityRefusal is C0.7's boot refusal: no capability, no effect. It
+// names each store lacking one, with both its capabilities.
+func v2CapabilityRefusal(caps []v2StoreCapability) error {
+	var parts []string
+	for _, c := range caps {
+		if !c.Writer || !c.Closer {
+			parts = append(parts, c.String())
+		}
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return fmt.Errorf("v2 refuses to boot without conditional writes (C0.7): %s; v2 never writes blind: put the class on a store that fences (SQLite or native Dolt), or remove session_reconciler to run legacy", strings.Join(parts, "; "))
 }
 
 // recordV2Pass records the planner's reconcile_pass operation in a
