@@ -1142,6 +1142,7 @@ go_test(
         "context_inject_test.go",
         "continuation_nudge_test.go",
         "control_dispatch_graph_store_test.go",
+        "control_dispatch_unlaunchable_check_test.go",
         "control_dispatcher_scope_gap_event_test.go",
         "control_rig_graph_federation_test.go",
         "control_semantic_retry_test.go",
