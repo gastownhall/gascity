@@ -127,6 +127,13 @@ build:fork-cache --remote_max_connections=4
 test:ci --flaky_test_attempts=1
 # A remote cache eviction fails the action rather than silently re-running it.
 test:ci --experimental_remote_cache_eviction_retries=0
+# Validation actions (nogo) run through an aspect, in parallel with tests,
+# instead of gating each test's start: a test waits for its link, not for
+# nogo on its package (~250 s on //cmd/gc:gc_test). The build still fails on
+# a nogo finding. A build-request option, not configuration: analysis is not
+# discarded and the compact exec log's spawn digests are unchanged
+# (bazel_key_parity_test.go classifies it non-key).
+test:ci --experimental_use_validation_aspect
 
 # --config=fresh: the nightly fresh-test-results lane (bazel-nightly.yml,
 # beads' precedent) appends this to every lane's cmd so a cached PASS is

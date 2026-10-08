@@ -140,6 +140,9 @@ func TestBazelCIConfigSuiteConfigs(t *testing.T) {
 	for _, line := range []string{
 		"test:ci --flaky_test_attempts=1",
 		"test:ci --experimental_remote_cache_eviction_retries=0",
+		// Tests run beside nogo, not after it (bazel_key_parity_test.go
+		// classifies the flag non-key).
+		"test:ci --experimental_use_validation_aspect",
 	} {
 		if !strings.Contains(rc, "\n"+line+"\n") {
 			t.Errorf(".bazelrc lacks %q", line)

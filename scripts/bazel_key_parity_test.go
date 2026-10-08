@@ -56,11 +56,22 @@ func bazelTransportFlag(flag string) bool {
 		return false // platform properties are part of the action
 	case "--jobs", "--experimental_circuit_breaker_strategy", "--disk_cache", "--keep_going", "--nokeep_going",
 		"--flaky_test_attempts", "--cache_test_results", "--nocache_test_results", "--profile",
-		"--execution_log_compact_file", "--experimental_build_event_upload_strategy":
+		"--execution_log_compact_file", "--experimental_build_event_upload_strategy",
+		"--experimental_use_validation_aspect", "--noexperimental_use_validation_aspect":
 		// --execution_log_compact_file and --experimental_build_event_upload_strategy
 		// (added for the ci-analytics extractor, design doc section 7 S2) only
 		// change where Bazel writes the compact exec log and how it uploads
 		// BEP-referenced local files; neither reaches the executed action.
+		//
+		// --[no]experimental_use_validation_aspect only schedules validation
+		// actions (nogo) beside tests instead of before them. Checked against
+		// Bazel 9.2.0 on //cmd/gc:gc_test, //scripts:scripts_test and
+		// //internal/config:config_test: toggling it keeps the analysis cache
+		// (it is a build-request option, not configuration), the aquery
+		// jsonproto of their GoCompilePkg, GoLink, RunNogo, ValidateNogo and
+		// TestRunner actions is byte-identical, and the compact exec logs of
+		// a cold-output-base `bazel test` with and without it hold the same
+		// 4457 spawns with the same digests, args, env and platform.
 		return true
 	}
 	for _, prefix := range []string{"--remote_", "--experimental_remote_", "--incompatible_remote_", "--tls_", "--credential_helper", "--google_", "--bes_", "--build_event_", "--grpc_keepalive_"} {
@@ -186,6 +197,7 @@ func TestBazelKeyParity(t *testing.T) {
 		"build:fork-cache --noremote_local_fallback --experimental_circuit_breaker_strategy=failure\n" +
 		"test:ci --flaky_test_attempts=1\n" +
 		"test:ci --experimental_remote_cache_eviction_retries=0\n" +
+		"test:ci --experimental_use_validation_aspect\n" +
 		"test:fresh --nocache_test_results\n" +
 		"build:other --define=gotags=x\n" +
 		"try-import %workspace%/.bazelrc.local\n"

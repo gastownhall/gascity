@@ -47,7 +47,8 @@ are run; Bazel is the runner that enforces it.
 Narrow while iterating: `bazel test //internal/config:config_test`, or
 `bazel test //internal/beads/...` for a subtree;
 `--test_filter=TestName` selects tests inside a target. The CI lanes add
-`--config=ci` (result policy only, no action-key change) and the per-run
+`--config=ci` (result policy and scheduling only, no action-key change:
+tests start beside nogo rather than after it) and the per-run
 transport config. Passing `--config=acceptance` or `--config=integration`
 matters: they set the `gotags` define, the timeout and, for integration,
 `GC_FAST_UNIT=0`, exactly as the lanes do (`.bazelrc`).
