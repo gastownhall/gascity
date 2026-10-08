@@ -71,17 +71,15 @@ func TestSimR5StaleHealRedecidesAtTheStore(t *testing.T) {
 		{"the re-hold's event delivered", func(s *sim, ev json.RawMessage) { s.legs[0].cache.ApplyEvent("bead.updated", ev) }, causeRedecided},
 		{"the re-hold's event held", func(*sim, json.RawMessage) {}, causeCAS},
 		// The cache, rescanned past the re-hold, then takes an older event,
-		// reordered: the effect's read must still not decide on it.
+		// reordered: the cache keeps the re-hold (mc-03lk4), so the effect's
+		// read decides on it.
 		{"an older event reordered after a rescan", func(s *sim, _ json.RawMessage) {
 			older := s.legs[0].events[0]
 			s.legs[0].cache.ReconcileNowForTest()
 			s.legs[0].cache.ApplyEvent("bead.updated", older)
-		}, causeCAS},
+		}, causeRedecided},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if c.name == "an older event reordered after a rescan" {
-				t.Skip("mc-03lk4: CachingStore stale event installs at current revision")
-			}
 			s := scripted(t, nil, heldRow())
 			older := s.operator("gc-1", "held_until", s.rel(-30*time.Second))
 			s.legs[0].cache.ApplyEvent("bead.updated", older)
