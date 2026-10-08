@@ -272,14 +272,19 @@ func (cr *CityRuntime) reloadV2(p *tickPass, source reloadSource) {
 // admitted before the pause, then waits for every in-flight
 // v2 start (effectExecutor.waitStarts), so the swap's listing cannot miss a
 // runtime a start is still creating; an error aborts the reload. The caller
-// resumes once the swap applied or aborted. Legacy waits on nothing.
+// resumes once the swap applied or aborted. Legacy refuses new async starts
+// and waits for its in-flight ones the same way.
 func (cr *CityRuntime) beforeProviderSwap(cfg *config.City) (resume func(), err error) {
-	if cr.v2 == nil {
-		return func() {}, nil
-	}
 	startup := cfg.Session.StartupTimeoutDuration()
 	if startup <= 0 {
 		startup = 60 * time.Second // as admit's start deadline (CONTRACT v5.4 P3)
+	}
+	if cr.v2 == nil {
+		resume = cr.asyncStarts.reopen
+		if !cr.asyncStarts.holdForSwap(startup+startDeadlineSlack, cr.forceStopRequested) {
+			return resume, fmt.Errorf("async session starts still running after %s", startup+startDeadlineSlack)
+		}
+		return resume, nil
 	}
 	cr.v2.planner.pauseStarts()
 	cr.v2.exec.closeStarts()

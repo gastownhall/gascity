@@ -538,9 +538,13 @@ func withAssignedWorkStores(assignedWorkStores []beads.Store) startExecutionOpti
 }
 
 type asyncStartTracker struct {
-	mu               sync.Mutex
-	wg               sync.WaitGroup
-	stopping         bool
+	mu       sync.Mutex
+	wg       sync.WaitGroup
+	stopping bool
+	// inflight counts the starts wg tracks, for a provider swap's wait
+	// (holdForSwap), which must not leave a Wait behind on a WaitGroup that
+	// later starts reuse.
+	inflight         int
 	drainAckStopKeys sync.Map
 }
 
@@ -554,7 +558,13 @@ func (t *asyncStartTracker) start() (func(), bool) {
 		return nil, false
 	}
 	t.wg.Add(1)
-	return t.wg.Done, true
+	t.inflight++
+	return func() {
+		t.mu.Lock()
+		t.inflight--
+		t.mu.Unlock()
+		t.wg.Done()
+	}, true
 }
 
 func (t *asyncStartTracker) startDrainAckStop(key string) (func(), bool) {

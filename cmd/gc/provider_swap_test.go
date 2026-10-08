@@ -1,12 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"maps"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -14,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // Kills: a base carried across a changed selection name, pack runtime
@@ -56,9 +64,9 @@ func TestCarriedSessionLegs(t *testing.T) {
 	}
 }
 
-// Kills: a swap that stops a runtime its carried leg still serves (J38), and
-// one that keeps a runtime the new provider routes elsewhere, which nothing
-// could stop afterwards.
+// Kills: a swap that stops a runtime its carried leg still serves (J38), one
+// that keeps a runtime the new provider routes elsewhere, which nothing could
+// stop afterwards, and one that guesses a route the new provider does not know.
 func TestProviderSwapStops(t *testing.T) {
 	base, base2, acp, acp2 := runtime.NewFake(), runtime.NewFake(), runtime.NewFake(), runtime.NewFake()
 	composite := func(b, a runtime.Provider, acpNames ...string) runtime.Provider {
@@ -74,6 +82,7 @@ func TestProviderSwapStops(t *testing.T) {
 		listings []runtime.BackendListing
 		newSP    runtime.Provider
 		want     []swapStop
+		wantErr  bool
 	}{
 		{
 			name:     "ACP leg added over the same base",
@@ -115,13 +124,61 @@ func TestProviderSwapStops(t *testing.T) {
 			newSP:    base2,
 			want:     []swapStop{{name: "w1", backend: base}},
 		},
+		{
+			name:     "a name listed on both legs is stopped on each",
+			listings: []runtime.BackendListing{listing(base, "x"), listing(acp, "x")},
+			newSP:    composite(base2, acp2),
+			want:     []swapStop{{name: "x", backend: base}, {name: "x", backend: acp}},
+		},
+		{
+			name:     "unknown default route on an unseeded table",
+			listings: []runtime.BackendListing{listing(base, "w1"), listing(acp, "r")},
+			newSP:    sessionauto.New(base2, acp),
+			wantErr:  true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := providerSwapStops(tc.listings, tc.newSP); !slices.Equal(got, tc.want) {
-				t.Fatalf("stops = %+v, want %+v", got, tc.want)
+			got, err := providerSwapStops(tc.listings, tc.newSP)
+			if (err != nil) != tc.wantErr || !slices.Equal(got, tc.want) {
+				t.Fatalf("stops = %+v, err = %v; want %+v, error %v", got, err, tc.want, tc.wantErr)
 			}
 		})
 	}
+}
+
+// swapListStore is a MemStore whose list reads fail while failList is set.
+type swapListStore struct {
+	*beads.MemStore
+	failList bool
+}
+
+var errSwapListStore = errors.New("store list unavailable")
+
+func (s *swapListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if s.failList {
+		return nil, errSwapListStore
+	}
+	return s.MemStore.List(q)
+}
+
+func (s *swapListStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	if s.failList {
+		return nil, errSwapListStore
+	}
+	return s.MemStore.ListByLabel(label, limit, opts...)
+}
+
+// swapStopFailProvider is a fake whose Stop fails while fail is set.
+type swapStopFailProvider struct {
+	*runtime.Fake
+	fail bool
+}
+
+func (p *swapStopFailProvider) Stop(name string) error {
+	if !p.fail {
+		return p.Fake.Stop(name)
+	}
+	return errors.New("stop refused")
 }
 
 // swapReloadFixture is a city runtime on oldSP whose session store holds an
@@ -129,8 +186,11 @@ func TestProviderSwapStops(t *testing.T) {
 // running ACP name.
 type swapReloadFixture struct {
 	cr       *CityRuntime
+	oldSP    runtime.Provider
 	tomlPath string
-	store    *beads.MemStore
+	store    *swapListStore
+	rec      *events.Fake
+	stdout   bytes.Buffer
 	rows     map[string]map[string]string // bead ID -> metadata before the reload
 }
 
@@ -141,7 +201,8 @@ func newSwapReloadFixture(t *testing.T, tomlPath string, oldSP runtime.Provider,
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	cr := newTestCityRuntime(t, CityRuntimeParams{
+	f := &swapReloadFixture{oldSP: oldSP, tomlPath: tomlPath, rec: events.NewFake(), rows: map[string]map[string]string{}}
+	f.cr = newTestCityRuntime(t, CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "test-city",
 		TomlPath: tomlPath,
@@ -151,44 +212,80 @@ func newSwapReloadFixture(t *testing.T, tomlPath string, oldSP runtime.Provider,
 			return DesiredStateResult{State: map[string]TemplateParams{}}
 		},
 		Dops:   newDrainOps(oldSP),
-		Rec:    events.Discard,
-		Stdout: io.Discard,
+		Rec:    f.rec,
+		Stdout: &f.stdout,
 		Stderr: io.Discard,
 	})
-	store := beads.NewMemStore()
+	f.store = &swapListStore{MemStore: beads.NewMemStore()}
 	cs := newControllerState(context.Background(), cfg, oldSP, events.NewFake(), "test-city", cityPath)
-	cs.cityBeadStore = store
-	cr.setControllerState(cs)
-	cr.sessionDrains = newDrainTracker()
-	f := &swapReloadFixture{cr: cr, tomlPath: tomlPath, store: store, rows: map[string]map[string]string{}}
+	cs.cityBeadStore = f.store
+	f.cr.setControllerState(cs)
+	f.cr.sessionDrains = newDrainTracker()
 	row := func(name string, extra map[string]string) {
 		md := map[string]string{"session_name": name, "template": "worker", "state": "active"}
 		maps.Copy(md, extra)
-		b, err := store.Create(beads.Bead{Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: md})
+		b, err := f.store.Create(beads.Bead{Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: md})
 		if err != nil {
 			t.Fatalf("create row %s: %v", name, err)
 		}
 		f.rows[b.ID] = maps.Clone(b.Metadata)
 	}
-	for _, n := range poolNames {
-		row(n, map[string]string{"pool_slot": "1"})
+	for i, n := range poolNames {
+		row(n, map[string]string{"pool_slot": strconv.Itoa(i + 1)})
 	}
+	// Runs before the runtime's shutdown cleanup, whose graceful stop would
+	// otherwise wait out its timeout over the fakes' live sessions.
+	t.Cleanup(func() {
+		for _, sp := range []runtime.Provider{oldSP, f.cr.sp} {
+			names, _ := sp.ListRunning("")
+			for _, n := range names {
+				_ = sp.Stop(n)
+			}
+		}
+	})
 	for _, n := range acpNames {
 		row(n, nil)
 	}
 	return f
 }
 
-func (f *swapReloadFixture) reload(t *testing.T, lastProviderName string) {
+// reload applies the rewritten config to a runtime that runs the "fake"
+// selection name.
+func (f *swapReloadFixture) reload(t *testing.T) reloadControlReply {
 	t.Helper()
-	reply := f.cr.reloadConfigTraced(context.Background(), &lastProviderName, filepath.Dir(f.tomlPath), nil, reloadSourceManual)
-	if reply.Outcome == reloadOutcomeFailed {
+	lastProviderName := "fake"
+	return f.cr.reloadConfigTraced(context.Background(), &lastProviderName, filepath.Dir(f.tomlPath), nil, reloadSourceManual)
+}
+
+func (f *swapReloadFixture) mustReload(t *testing.T) {
+	t.Helper()
+	if reply := f.reload(t); reply.Outcome == reloadOutcomeFailed {
 		t.Fatalf("reload failed: %+v", reply)
 	}
 }
 
+// requireAborted fails unless the reload failed with errSub, kept the old
+// provider, and stopped nothing.
+func (f *swapReloadFixture) requireAborted(t *testing.T, reply reloadControlReply, errSub string, legs ...*runtime.Fake) {
+	t.Helper()
+	if reply.Outcome != reloadOutcomeFailed || !strings.Contains(reply.Error, errSub) {
+		t.Fatalf("reload reply = %+v, want a failure containing %q", reply, errSub)
+	}
+	if f.cr.sp != f.oldSP || strings.Contains(f.stdout.String(), "Session provider swapped") {
+		t.Fatalf("aborted swap published the new provider (%T)", f.cr.sp)
+	}
+	for _, leg := range legs {
+		for _, c := range leg.SnapshotCalls() {
+			if c.Method == "Stop" || c.Method == "Interrupt" {
+				t.Fatalf("aborted swap called %s(%s)", c.Method, c.Name)
+			}
+		}
+	}
+	f.requireNoRowWrites(t)
+}
+
 // requireNoRowWrites fails when the swap wrote any session row: no suspend,
-// sleep, city-stop or close (CONTRACT v5.7 P7, F2).
+// sleep, city-stop or close (CONTRACT P7, F2).
 func (f *swapReloadFixture) requireNoRowWrites(t *testing.T) {
 	t.Helper()
 	for id, before := range f.rows {
@@ -200,6 +297,17 @@ func (f *swapReloadFixture) requireNoRowWrites(t *testing.T) {
 			t.Fatalf("provider swap wrote row %s (status %q):\nbefore %v\nafter  %v", id, after.Status, before, after.Metadata)
 		}
 	}
+}
+
+// stoppedEvents returns the session.stopped events, keyed by session ID.
+func (f *swapReloadFixture) stoppedEvents() map[string]events.Event {
+	got := map[string]events.Event{}
+	for _, e := range f.rec.Events {
+		if e.Type == events.SessionStopped {
+			got[e.SessionID] = e
+		}
+	}
+	return got
 }
 
 func startFakeSessions(t *testing.T, sp runtime.Provider, names ...string) {
@@ -224,7 +332,7 @@ func TestReloadACPLegAddedKeepsBaseSessionsAndWritesNoRow(t *testing.T) {
 	f := newSwapReloadFixture(t, tomlPath, base, []string{"worker-1", "worker-2"}, nil)
 
 	writeACPAgentCityConfig(t, tomlPath, "fake")
-	f.reload(t, "fake")
+	f.mustReload(t)
 
 	autoSP, ok := f.cr.sp.(*sessionauto.Provider)
 	if !ok {
@@ -237,6 +345,9 @@ func TestReloadACPLegAddedKeepsBaseSessionsAndWritesNoRow(t *testing.T) {
 		if !base.IsRunning(n) || base.CountCalls("Stop", n) != 0 || base.CountCalls("Interrupt", n) != 0 {
 			t.Fatalf("%s: running=%v, Stop=%d, Interrupt=%d; want it untouched", n, base.IsRunning(n), base.CountCalls("Stop", n), base.CountCalls("Interrupt", n))
 		}
+	}
+	if got := f.stoppedEvents(); len(got) != 0 {
+		t.Fatalf("session.stopped events = %v, want none", got)
 	}
 	f.requireNoRowWrites(t)
 }
@@ -256,7 +367,7 @@ func TestReloadACPLegRemovedStopsOnlyACPSessions(t *testing.T) {
 	f := newSwapReloadFixture(t, tomlPath, old, []string{"worker-1"}, []string{reviewer})
 
 	writeCityRuntimeConfig(t, tomlPath, "fake")
-	f.reload(t, "fake")
+	f.mustReload(t)
 
 	if f.cr.sp != base {
 		t.Fatalf("session provider after the reload = %T %p, want the carried bare base %p", f.cr.sp, f.cr.sp, base)
@@ -271,9 +382,10 @@ func TestReloadACPLegRemovedStopsOnlyACPSessions(t *testing.T) {
 }
 
 // Replacing the base stops the base-routed runtimes and keeps the ACP-routed
-// ones, whose leg carries into the new composition.
-// Kills: a base replacement that stops ACP runtimes, rebuilds the ACP leg, or
-// writes a row.
+// ones, whose leg carries into the new composition. Each stop records legacy's
+// session.stopped event.
+// Kills: a base replacement that stops ACP runtimes, rebuilds the ACP leg,
+// writes a row, or records no (or a differently shaped) stop event.
 func TestReloadBaseReplacedStopsOnlyBaseSessions(t *testing.T) {
 	tomlPath := filepath.Join(t.TempDir(), "city.toml")
 	writeACPAgentCityConfig(t, tomlPath, "fake")
@@ -284,9 +396,13 @@ func TestReloadBaseReplacedStopsOnlyBaseSessions(t *testing.T) {
 	old.RouteACP(reviewer)
 	startFakeSessions(t, old, "worker-1", "worker-2", reviewer)
 	f := newSwapReloadFixture(t, tomlPath, old, []string{"worker-1", "worker-2"}, []string{reviewer})
+	ids := map[string]string{}
+	for id, md := range f.rows {
+		ids[md["session_name"]] = id
+	}
 
 	writeACPAgentCityConfig(t, tomlPath, "fail")
-	f.reload(t, "fake")
+	f.mustReload(t)
 
 	autoSP, ok := f.cr.sp.(*sessionauto.Provider)
 	if !ok {
@@ -306,5 +422,252 @@ func TestReloadBaseReplacedStopsOnlyBaseSessions(t *testing.T) {
 	if !acp.IsRunning(reviewer) || acp.CountCalls("Stop", reviewer) != 0 {
 		t.Fatalf("%s: running=%v, Stop=%d; want it untouched", reviewer, acp.IsRunning(reviewer), acp.CountCalls("Stop", reviewer))
 	}
+	got := f.stoppedEvents()
+	if len(got) != 2 {
+		t.Fatalf("session.stopped events = %v, want one per stopped worker", got)
+	}
+	for _, n := range []string{"worker-1", "worker-2"} {
+		e, ok := got[ids[n]]
+		if !ok {
+			t.Fatalf("no session.stopped event for %s (%s): %v", n, ids[n], got)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(e.Payload, &payload); err != nil {
+			t.Fatalf("payload %s: %v", e.Payload, err)
+		}
+		want := map[string]any{"session_id": ids[n], "template": "worker", "reason": "stopped"}
+		if e.Actor != "gc" || e.Subject != n || !maps.Equal(payload, want) {
+			t.Fatalf("event for %s = %+v payload %v, want actor gc, session %s, payload %v", n, e, payload, ids[n], want)
+		}
+	}
 	f.requireNoRowWrites(t)
+}
+
+// A session snapshot that does not load after the wait leaves the new
+// provider's routes unknown, so the swap aborts as a listing failure does.
+// Kills: stopping on routes seeded from a stale or missing snapshot (here the
+// base is replaced and the ACP leg carried, so a guessed default route would
+// stop the ACP runtime too, or keep it on a provider that cannot reach it).
+func TestReloadProviderSwapAbortsWhenSessionSnapshotFails(t *testing.T) {
+	tomlPath := filepath.Join(t.TempDir(), "city.toml")
+	writeACPAgentCityConfig(t, tomlPath, "fake")
+	base, acp, newBase := runtime.NewFake(), runtime.NewFake(), runtime.NewFake()
+	stubSessionProviderBuilds(t, map[string]runtime.Provider{"fail": newBase})
+	reviewer := agent.SessionNameFor("test-city", "reviewer", "")
+	old := sessionauto.New(base, acp)
+	old.RouteACP(reviewer)
+	startFakeSessions(t, old, "worker-1", reviewer)
+	f := newSwapReloadFixture(t, tomlPath, old, []string{"worker-1"}, []string{reviewer})
+
+	writeACPAgentCityConfig(t, tomlPath, "fail")
+	f.store.failList = true
+	reply := f.reload(t)
+	f.store.failList = false
+
+	f.requireAborted(t, reply, "session beads unreadable during provider swap", base, acp)
+}
+
+// Any leg's listing error aborts the swap before a stop.
+// Kills: a listing that checks only the merged or the default leg's error.
+func TestReloadProviderSwapAbortsOnACPLegListingError(t *testing.T) {
+	tomlPath := filepath.Join(t.TempDir(), "city.toml")
+	writeACPAgentCityConfig(t, tomlPath, "fake")
+	base, newBase := runtime.NewFake(), runtime.NewFake()
+	acp := &listOnlyProvider{Fake: runtime.NewFake(), err: errors.New("acp leg unavailable")}
+	stubSessionProviderBuilds(t, map[string]runtime.Provider{"fail": newBase})
+	startFakeSessions(t, base, "worker-1")
+	f := newSwapReloadFixture(t, tomlPath, sessionauto.New(base, acp), []string{"worker-1"}, nil)
+
+	writeACPAgentCityConfig(t, tomlPath, "fail")
+	f.requireAborted(t, f.reload(t), "acp leg unavailable", base, acp.Fake)
+	if !base.IsRunning("worker-1") {
+		t.Fatal("worker-1 stopped by an aborted swap")
+	}
+}
+
+// A failed stop aborts the reload before the new provider is published, so
+// the old one still reaches the runtime it could not stop.
+// Kills: publishing over a failed stop (the runtime is then unreachable) and
+// a session.stopped event for a stop that failed.
+func TestReloadProviderSwapAbortsOnFailedStop(t *testing.T) {
+	tomlPath := filepath.Join(t.TempDir(), "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	base := &swapStopFailProvider{Fake: runtime.NewFake(), fail: true}
+	stubSessionProviderBuilds(t, map[string]runtime.Provider{"fail": runtime.NewFake()})
+	startFakeSessions(t, base, "worker-1")
+	f := newSwapReloadFixture(t, tomlPath, base, []string{"worker-1"}, nil)
+
+	writeCityRuntimeConfig(t, tomlPath, "fail")
+	reply := f.reload(t)
+
+	if reply.Outcome != reloadOutcomeFailed || !strings.Contains(reply.Error, "stopping worker-1 failed") {
+		t.Fatalf("reload reply = %+v, want the failed stop to abort it", reply)
+	}
+	if f.cr.sp != f.oldSP || !base.IsRunning("worker-1") {
+		t.Fatalf("provider = %T, worker-1 running = %v; want the old provider kept over the live runtime", f.cr.sp, base.IsRunning("worker-1"))
+	}
+	if got := f.stoppedEvents(); len(got) != 0 {
+		t.Fatalf("session.stopped events = %v, want none for a failed stop", got)
+	}
+	f.requireNoRowWrites(t)
+	base.fail = false // let the fixture's cleanup stop it
+}
+
+// Legacy refuses new async starts and waits for its in-flight ones before the
+// swap lists, so the listing cannot miss a runtime a start is still creating;
+// a start that outlives the wait aborts the reload, and the swap reopens
+// starts either way.
+// Kills: a legacy swap that waits on nothing, one that never reopens starts,
+// and one that ignores a timed-out wait.
+func TestBeforeProviderSwapWaitsLegacyAsyncStarts(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cfg := &config.City{Session: config.SessionConfig{StartupTimeout: "1s"}}
+		cr := &CityRuntime{}
+		done, ok := cr.asyncStarts.start()
+		if !ok {
+			t.Fatal("start refused before the swap")
+		}
+		resume, err := cr.beforeProviderSwap(cfg)
+		if err == nil {
+			t.Fatal("swap went ahead over a start still running past startup_timeout + slack")
+		}
+		if _, ok := cr.asyncStarts.start(); ok {
+			t.Fatal("a new async start was admitted while the swap held starts")
+		}
+		resume()
+		done()
+		if d, ok := cr.asyncStarts.start(); !ok {
+			t.Fatal("starts not reopened after the swap")
+		} else {
+			d()
+		}
+
+		inFlight, _ := cr.asyncStarts.start()
+		time.AfterFunc(5*time.Second, inFlight)
+		resume, err = cr.beforeProviderSwap(cfg)
+		if err != nil {
+			t.Fatalf("swap aborted over a start that finished within the wait: %v", err)
+		}
+		resume()
+	})
+}
+
+// The accepted next-pass consequence (CONTRACT P7, §12.2 row 25): a legacy
+// pass over an active row whose runtime the swap stopped reads it as a runtime
+// death. The heal parks it asleep with runtime-missing (freeable) and resets
+// its conversation, and the churn classifier charges one strike.
+// Kills: a swap that leaves the row in a shape legacy cannot free or restart,
+// and an unpinned change to that consequence.
+func TestLegacyPassAfterProviderSwapStopReadsRuntimeDeath(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":               "active",
+		"last_woke_at":        env.clk.Now().Add(-90 * time.Second).UTC().Format(time.RFC3339),
+		"session_key":         "old-key",
+		"started_config_hash": "old-hash",
+	})
+
+	stops, err := providerSwapStops([]runtime.BackendListing{{Provider: env.sp, Names: []string{"worker"}}}, runtime.NewFake())
+	if err != nil || len(stops) != 1 {
+		t.Fatalf("stops = %+v, err = %v; want worker", stops, err)
+	}
+	if err := stopProviderSwapRuntimes(stops, env.cfg, env.store, events.Discard, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := env.store.Get(session.ID); !maps.Equal(after.Metadata, session.Metadata) {
+		t.Fatalf("the swap stop wrote the row:\nbefore %v\nafter  %v", session.Metadata, after.Metadata)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range map[string]string{
+		"state":        "asleep",
+		"sleep_reason": string(sessionpkg.SleepReasonRuntimeMissing),
+		"churn_count":  "1",
+		"session_key":  "",
+	} {
+		if got.Metadata[k] != want {
+			t.Fatalf("after the pass %s = %q, want %q (metadata %v)", k, got.Metadata[k], want, got.Metadata)
+		}
+	}
+}
+
+// The new provider's routes come from the session beads as they stand after
+// the swap waited out in-flight starts: an ACP session a start created during
+// the wait keeps its ACP route and its runtime.
+// Kills: routes seeded only from the snapshot read before the wait, which
+// default-routes the new session and stops its runtime on the carried leg.
+func TestReloadProviderSwapRoutesSessionsStartedDuringTheWait(t *testing.T) {
+	tomlPath := filepath.Join(t.TempDir(), "city.toml")
+	writeACPAgentCityConfig(t, tomlPath, "fake")
+	base, acp, newBase := runtime.NewFake(), runtime.NewFake(), runtime.NewFake()
+	old := sessionauto.New(base, acp)
+	f := newSwapReloadFixture(t, tomlPath, old, nil, nil)
+	done, ok := f.cr.asyncStarts.start()
+	if !ok {
+		t.Fatal("start refused")
+	}
+	finished := make(chan struct{})
+	old2 := buildSessionProviderByName
+	t.Cleanup(func() { buildSessionProviderByName = old2 })
+	buildSessionProviderByName = func(_ *config.City, name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
+		if name == "fail" {
+			// The new provider is built before the wait; the in-flight start
+			// lands its row and runtime only after that.
+			go func() {
+				defer close(finished)
+				defer done()
+				b := acpSessionBead("dyn-acp")
+				if _, err := f.store.Create(b); err != nil {
+					t.Errorf("create row: %v", err)
+				}
+				old.RouteACP("dyn-acp")
+				if err := old.Start(context.Background(), "dyn-acp", runtime.Config{}); err != nil {
+					t.Errorf("start: %v", err)
+				}
+			}()
+			return newBase, nil
+		}
+		return runtime.NewFake(), nil
+	}
+
+	writeACPAgentCityConfig(t, tomlPath, "fail")
+	f.mustReload(t)
+	<-finished
+
+	if !acp.IsRunning("dyn-acp") || acp.CountCalls("Stop", "dyn-acp") != 0 {
+		t.Fatalf("dyn-acp: running=%v, Stop=%d; want it kept on the carried ACP leg", acp.IsRunning("dyn-acp"), acp.CountCalls("Stop", "dyn-acp"))
+	}
+	if got := sessionRouteFor(f.cr.sp, "dyn-acp"); got.Provider != acp {
+		t.Fatalf("dyn-acp route = %+v, want the ACP leg", got)
+	}
+}
+
+// Each (leg, name) is its own target: a name listed on both legs is stopped
+// on each, by that leg's Stop.
+// Kills: grouping targets by name (one leg's runtime survives) and stopping
+// through any leg but the one that listed the runtime.
+func TestStopProviderSwapRuntimesStopsEachLeg(t *testing.T) {
+	base, acp := runtime.NewFake(), runtime.NewFake()
+	startFakeSessions(t, base, "x", "w")
+	startFakeSessions(t, acp, "x")
+	stops := []swapStop{{name: "x", backend: base}, {name: "w", backend: base}, {name: "x", backend: acp}}
+	if err := stopProviderSwapRuntimes(stops, nil, nil, events.Discard, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		leg  *runtime.Fake
+		name string
+	}{{base, "x"}, {base, "w"}, {acp, "x"}} {
+		if c.leg.IsRunning(c.name) || c.leg.CountCalls("Stop", c.name) != 1 {
+			t.Fatalf("%s: running=%v, Stop=%d; want one Stop on its own leg", c.name, c.leg.IsRunning(c.name), c.leg.CountCalls("Stop", c.name))
+		}
+	}
 }

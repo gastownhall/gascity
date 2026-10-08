@@ -2693,10 +2693,8 @@ func (cr *CityRuntime) reloadConfigTraced(
 	}
 
 	if providerChanged {
-		resume, err := cr.beforeProviderSwap(nextCfg)
-		defer resume() // after the swap publishes, or the reload aborts
-		if err != nil {
-			err = fmt.Errorf("config reload: provider swap: %w", err)
+		swapFailed := func(err error) reloadControlReply {
+			err = fmt.Errorf("config reload: %w", err)
 			fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
 			if trace != nil {
@@ -2704,22 +2702,28 @@ func (cr *CityRuntime) reloadConfigTraced(
 			}
 			return reloadControlReply{Outcome: reloadOutcomeFailed, Error: err.Error(), Warnings: warnings}
 		}
+		resume, err := cr.beforeProviderSwap(nextCfg)
+		defer resume() // after the swap publishes, or the reload aborts
+		if err != nil {
+			return swapFailed(fmt.Errorf("provider swap: %w", err))
+		}
+		// Seed the new provider's routes from the session beads as they stand
+		// after the wait, so every listed name has a known route (CONTRACT P7).
+		snapshot := cr.loadSessionBeadSnapshot()
+		if !sessionBeadSnapshotLoaded(snapshot) {
+			return swapFailed(errors.New("session beads unreadable during provider swap"))
+		}
+		seedACPRoutesFromSnapshot(nextSp, snapshot, cr.cityName, nextCfg)
 		listings, lErr := listSessionLegs(cr.sp)
 		if lErr != nil {
-			err := fmt.Errorf("config reload: listing sessions failed during provider swap: %w", lErr)
 			if runtime.IsPartialListError(lErr) {
-				err = fmt.Errorf("config reload: listing sessions partially failed during provider swap: %w", lErr)
+				return swapFailed(fmt.Errorf("listing sessions partially failed during provider swap: %w", lErr))
 			}
-			fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
-			telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
-			if trace != nil {
-				trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
-			}
-			return reloadControlReply{
-				Outcome:  reloadOutcomeFailed,
-				Error:    err.Error(),
-				Warnings: warnings,
-			}
+			return swapFailed(fmt.Errorf("listing sessions failed during provider swap: %w", lErr))
+		}
+		stops, rErr := providerSwapStops(listings, nextSp)
+		if rErr != nil {
+			return swapFailed(fmt.Errorf("provider swap: %w", rErr))
 		}
 		providerSwapSummary = fmt.Sprintf("%s → %s", displayProviderName(*lastProviderName), displayProviderName(pendingProviderName))
 		if pendingProviderName == *lastProviderName {
@@ -2729,12 +2733,15 @@ func (cr *CityRuntime) reloadConfigTraced(
 			}
 		}
 		// Stop only what the new provider cannot reach, and write no row
-		// (CONTRACT v5.7 P7, F2): the next pass reads those rows' runtimes
-		// gone and restarts or frees them as after any other death.
-		if stops := providerSwapStops(listings, nextSp); len(stops) > 0 {
+		// (CONTRACT P7, F2): the next pass reads those rows' runtimes gone and
+		// restarts or frees them as after any other death. A failed stop
+		// aborts before publication, while the old provider still reaches it.
+		if len(stops) > 0 {
 			fmt.Fprintf(cr.stdout, "Provider changed (%s), stopping %d agent(s) the new provider cannot reach...\n", //nolint:errcheck
 				providerSwapSummary, len(stops))
-			stopProviderSwapRuntimes(stops, cr.stdout, cr.stderr)
+			if err := stopProviderSwapRuntimes(stops, cr.cfg, cr.sessionsBeadStore().Store, cr.rec, cr.stdout, cr.stderr); err != nil {
+				return swapFailed(fmt.Errorf("provider swap: %w", err))
+			}
 		}
 	}
 
