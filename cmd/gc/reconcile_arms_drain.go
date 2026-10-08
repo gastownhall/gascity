@@ -4,28 +4,38 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// The drain's policy table (CONTRACT v5 D2) and decideRow's arm A19 (void
-// and cancel). A20's begin is C6a2's, the signal and its graces C6b1's,
+// The drain's policy table (CONTRACT v5 D2) and decideRow's arms A19 (void
+// and cancel) and A20 (drain begin). The signal and its graces are C6b1's,
 // idle respawn C6d's, and the config-drift begin C7b1's.
 
-// Drain decide reasons. A cancel or void carries the drain reason after the
-// colon.
+// Drain decide reasons. A begin, cancel or void carries the drain reason
+// after the colon.
 const (
-	decideDrainCancel = "drain-cancel:"
-	decideDrainVoid   = "drain-void:"
-	decideStopResidue = "drain-void:residue"
+	decideDrainBegin     = "drain-begin:"
+	decideDrainCancel    = "drain-cancel:"
+	decideDrainVoid      = "drain-void:"
+	decideStopResidue    = "drain-void:residue"
+	decideStopActive     = "stop-requested"
+	decideWakeGrace      = "undesired-wake-grace" // INC-003
+	decideDrainWorkKept  = "drain-kept:assigned-work"
+	decideIdleUnprovable = "drain-kept:idle-unprovable" // SESS-621
+	decideIdleStopClear  = "idle-stop-pending-clear"    // SESS-616
+	decideDrainTimerHeld = "drain-kept:held"            // I15: an unexpired hold or quarantine
 )
 
 // Drain reasons and markers the allocation does not name.
 const (
-	drainIdle        = string(session.SleepReasonIdle)
-	drainConfigDrift = "config-drift"
-	reasonIdleSleep  = "idle-sleep"
-	sleepIntentIdle  = "idle-stop-pending"
-	timerBlockerHold = "user_hold"
+	drainIdle              = string(session.SleepReasonIdle)
+	drainConfigDrift       = "config-drift"
+	reasonIdleSleep        = "idle-sleep"
+	sleepIntentIdle        = "idle-stop-pending"
+	timerBlockerHold       = "user_hold"
+	timerBlockerQuarantine = "quarantine"
 )
 
 // drainRank orders the reasons whose authorization is "an equal or
@@ -37,8 +47,7 @@ var drainRank = map[string]int{drainSuspended: 4, drainOrphaned: 3, reasonNoWake
 // meanwhile. The last column is "lens; otherwise void": a lens cancels; a
 // drain that lost its authorization holds under Keep where keepHolds, is
 // canceled where lostCancels (config drift), and is otherwise voided, so A20
-// begins again under the current reason, with its own fences and grace
-// (C6a2).
+// begins again under the current reason, with its own fences and grace.
 type drainPolicy struct {
 	keepHolds, lostCancels bool
 	authorized             func(r *rowFacts, reason string) bool
@@ -134,6 +143,22 @@ func driftResolvedOrDeferred(r *rowFacts) bool {
 		recentlyDeferredSessionAttachedConfigDrift(r.row.Info, &clock.Fake{Time: r.w.Now}, key)
 }
 
+// idleProof is SESS-621's gate on an idle begin: a non-interactive session
+// begins at once; an interactive one only with Full sleep capability, and
+// then probe asks its effect to prove the agent idle (WaitForIdle, with no
+// activity since). A row with no resolved policy never begins, as legacy's
+// zero policy. A legacy idle-stop-pending mark is the proof already.
+func idleProof(w *World, info session.Info, reason string) (allowed, probe bool) {
+	if reason != drainIdle || strings.TrimSpace(info.SleepIntent) == sleepIntentIdle {
+		return true, false
+	}
+	policy := w.SleepPolicies[info.ID]
+	if policy.Class == config.SessionSleepNonInteractive {
+		return true, false
+	}
+	return policy.Capability == runtime.SessionSleepCapabilityFull, true
+}
+
 // armDrainVoidCancel is A19, on a requested drain: a lens cancels it; one
 // that lost its authorization takes the table's last column. A request
 // rule 2 ended (a suspended or killed row) is voided, both halves. Acked and
@@ -163,4 +188,47 @@ func armDrainVoidCancel(r *rowFacts) (intent, bool) {
 		reason = decideDrainCancel + req.Reason
 	}
 	return intent{Kind: kind, Reason: reason, Basis: basis, Patch: stopCancelPatch()}, true
+}
+
+// armDrainBegin is A20's begin: an alive row the allocation sleeps or
+// drains, that claims its runtime and has no stop request, gets one by CAS
+// (v5 D1). An undesired row (orphaned, suspended) with open or in-progress
+// assigned work stays open (SESS-074), and one woken within INC-003's grace
+// of now, in either direction, waits for its end unless an operator
+// suspended it (v5.4). An idle begin passes SESS-621's gate. A requested or
+// acked row holds for the signal (C6b1, C6c2). A woken row's leftover
+// idle-stop-pending mark is cleared (SESS-616).
+func armDrainBegin(r *rowFacts) (intent, bool) {
+	if req, ok := activeStop(r.row); ok {
+		return intent{Reason: decideStopActive}, req.Phase != stopSignaled // a signaled one is A4's
+	}
+	e, info := r.entry, r.row.Info
+	if e.Liveness != livenessAlive || !sessionBeadClaimsLiveRuntime(info) {
+		return intent{}, false
+	}
+	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
+	if e.Desired == desireWake && strings.TrimSpace(info.SleepIntent) == sleepIntentIdle {
+		return intent{Kind: intentRowHeal, Reason: decideIdleStopClear, Basis: basis, Patch: session.MetadataPatch{"sleep_intent": ""}}, true
+	}
+	if e.Desired != desireSleep && e.Desired != desireDrain {
+		return intent{}, false
+	}
+	if b := lifecycleTimerBlockerInfo(info, r.w.Now); b == timerBlockerHold || b == timerBlockerQuarantine {
+		return intent{Reason: decideDrainTimerHeld}, true // A6's deadline re-decides at its expiry
+	}
+	reason := drainReasonOf(r)
+	allowed, _ := idleProof(r.w, info, reason)
+	switch {
+	case reason == "":
+		return intent{}, false
+	case e.Desired == desireDrain && e.OpenWork != nil:
+		return intent{Reason: decideDrainWorkKept}, true
+	case e.Desired == desireDrain && wakeGracePreservesUndesiredRow(info, r.w.Now) && r.w.OperatorSuspend[r.k] == "":
+		woke, _ := parseRFC3339Metadata(info.LastWokeAt)
+		r.after(woke.Add(wakeUndesiredGrace).Sub(r.w.Now))
+		return intent{Reason: decideWakeGrace}, true
+	case !allowed:
+		return intent{Reason: decideIdleUnprovable}, true
+	}
+	return intent{Kind: drainKind(reason, false), Reason: decideDrainBegin + reason, Basis: basis, Patch: stopBeginPatch(r.row, reason, r.w.Now)}, true
 }

@@ -33,7 +33,10 @@ import (
 //   - there is no runtime observation, so the inventory lists the rows whose
 //     state says running, with their own identity;
 //   - maintainer-city's rows are the export-time copy: every tick sees the
-//     current rows, less those created after it.
+//     current rows, less those created after it;
+//   - there are no work beads, so demand is empty: v2 reads every pool row as
+//     undesired, and its pool drains file as "unexplained" until the export
+//     carries work beads.
 
 // replayLookup reads GC_V2_REPLAY_DIR; injected, so no test sets env.
 var replayLookup = os.LookupEnv
@@ -421,7 +424,7 @@ func replay(t *testing.T, x replayExport) ([]replayDivergence, replaySummary) {
 			}
 			d := replayDivergence{Tick: tk.ID, At: tk.At.Format(time.RFC3339Nano), Template: k[0], Class: k[1], Legacy: c.legacy, V2: c.v2, Records: c.records, Intents: c.intents}
 			slices.Sort(c.arms)
-			d.Family, d.Item = replayFamily(d, c.arms, built, rec, info, tk.At)
+			d.Family, d.Item = replayFamily(d, c.arms, built, rec)
 			sum.Divergences[d.Family]++
 			out = append(out, d)
 		}
@@ -433,10 +436,11 @@ func replay(t *testing.T, x replayExport) ([]replayDivergence, replaySummary) {
 // replayFamily files a divergence: a v5 §12.2 (or §12.1 latch) difference
 // by item, a deferred arm, INC-003, unknown-never-destroys, or unexplained.
 // arms are the legacy records' owning arms. The two evidence families need
-// as many rows of the template showing the cause as legacy acted beyond v2.
+// as many rows of the template showing the cause, as v2 traced it, as legacy
+// acted beyond v2: INC-003 a row v2 held for undesired-wake-grace.
 // C8.9's fresh attach and pending reads run in the effect, which a trace-only
 // pass never runs, so the replay cannot see that family.
-func replayFamily(d replayDivergence, arms []string, built map[string]bool, rec *passTrace, info map[string]session.Info, at time.Time) (family, item string) {
+func replayFamily(d replayDivergence, arms []string, built map[string]bool, rec *passTrace) (family, item string) {
 	if d.V2 > d.Legacy {
 		return "unexplained", ""
 	}
@@ -458,7 +462,7 @@ func replayFamily(d replayDivergence, arms []string, built map[string]bool, rec 
 	}
 	short, undesired, unknown, undesiredRecords := d.Legacy-d.V2, 0, 0, 0
 	for _, r := range rec.Rows {
-		if r.Template == d.Template && wakeGracePreservesUndesiredRow(info[r.Key.ID], at) {
+		if r.Template == d.Template && r.Reason == decideWakeGrace {
 			undesired++
 		}
 		if r.Template == d.Template && r.Reason == decideLivenessUnknown {
@@ -554,12 +558,11 @@ func TestReplaySampleMatchesExpectedDivergences(t *testing.T) {
 }
 
 // Kills a family filed on too little evidence: each family needs its own
-// cause, a v2-only intent is never explained, an idle drain on a row inside
-// INC-003's grace is not INC-003, and one row in grace explains one drain.
+// cause, a v2-only intent is never explained, INC-003 needs a row v2 held
+// for the grace, an idle drain on such a row is not INC-003, and one row in
+// grace explains one drain.
 func TestReplayFamilies(t *testing.T) {
-	at := time.Date(2026, 10, 5, 0, 2, 0, 0, time.UTC)
 	k := rowKey{Leg: rowLeg, ID: "r1"}
-	info := map[string]session.Info{"r1": {Template: "t", LastWokeAt: at.Add(-time.Minute).Format(time.RFC3339)}}
 	built := map[string]bool{"A20": true, "A21": true}
 	for _, tc := range []struct {
 		name, arm, class, record, reason string
@@ -569,15 +572,16 @@ func TestReplayFamilies(t *testing.T) {
 		{"v2 only", "A20", "heal", "", "", 1, "unexplained", ""},
 		{"§12.2", "§12.2/1", "stop", "reconciler.drain.timeout/complete/drain_timeout", "", 0, "v5 §12.2", "1"},
 		{"deferred", "A18", "start", "x/start_candidate/wake", "", 0, "deferred arm", "A18"},
-		{"INC-003", "A20", "drain", "x/drain/orphaned", "", 0, "INC-003", ""},
+		{"INC-003", "A20", "drain", "x/drain/orphaned", decideWakeGrace, 0, "INC-003", ""},
+		{"woken lately, not held for the grace", "A20", "drain", "x/drain/orphaned", decideDrainWorkKept, 0, "unexplained", ""},
 		{"unknown", "A21", "close", "x/closed/orphaned", decideLivenessUnknown, 0, "unknown-never-destroys", ""},
-		{"idle drain", "A20", "drain", "x/drain/idle", "", 0, "unexplained", ""},
-		{"INC-003 on one row of two", "A20", "drain", "x/drain/orphaned,x/drain/orphaned", "", 0, "unexplained", ""},
+		{"idle drain", "A20", "drain", "x/drain/idle", decideWakeGrace, 0, "unexplained", ""},
+		{"INC-003 on one row of two", "A20", "drain", "x/drain/orphaned,x/drain/orphaned", decideWakeGrace, 0, "unexplained", ""},
 	} {
 		rec := &passTrace{Rows: []rowTrace{{Key: k, Template: "t", Reason: tc.reason}}}
 		records := strings.Split(tc.record, ",")
 		d := replayDivergence{Template: "t", Class: tc.class, Legacy: len(records) * (1 - tc.v2), V2: tc.v2, Records: records}
-		if f, i := replayFamily(d, strings.Split(tc.arm, ","), built, rec, info, at); f != tc.family || i != tc.item {
+		if f, i := replayFamily(d, strings.Split(tc.arm, ","), built, rec); f != tc.family || i != tc.item {
 			t.Errorf("%s: family %q item %q, want %q %q", tc.name, f, i, tc.family, tc.item)
 		}
 	}

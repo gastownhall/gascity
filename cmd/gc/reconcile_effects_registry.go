@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -24,8 +25,11 @@ type effectPass struct {
 	// (fenceDestructive, stopFenced) and SessionObjectKiller, and only the
 	// start effect calls Start (the effect lint).
 	Runtime runtime.Provider
-	World   *World
-	Alloc   *allocDecision
+	// Reads are the city and rig stores behind blindWriteRefusingStore, for
+	// legacy read helpers: L5's live work read.
+	Reads effectStores
+	World *World
+	Alloc *allocDecision
 	// create is what the pass hands its creates, raw stores included: a
 	// create's guarded row write is v5 R1's exception 1 (§13), and only
 	// createEffect reads it. creates runs them. The planner sets both, the
@@ -34,11 +38,24 @@ type effectPass struct {
 	creates *createEffects
 }
 
+// effectStores are read-only city and rig stores.
+type effectStores struct {
+	City beads.Store
+	Rigs map[string]beads.Store // by rig, as the census reads them
+}
+
 // newEffectPass is w's and a's effectPass.
 func newEffectPass(w *World, a *allocDecision) *effectPass {
 	p := &effectPass{Writers: make(map[string]fencedWriter, len(w.LegStores)), Alloc: a}
 	if w.Env != nil {
 		p.Runtime = w.Env.SP
+	}
+	if w.SessionsStore != nil {
+		p.Reads.City = blindWriteRefusingStore{inner: w.SessionsStore}
+	}
+	p.Reads.Rigs = make(map[string]beads.Store, len(w.RigStores))
+	for rig, store := range w.RigStores {
+		p.Reads.Rigs[rig] = blindWriteRefusingStore{inner: store}
 	}
 	for leg, store := range w.LegStores {
 		p.Writers[leg] = fencedWriter{store: store}
@@ -59,8 +76,10 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 type effectBuilder func(p *effectPass, it intent) func(context.Context) settlement
 
 var effectRegistry = map[string]effectBuilder{
-	intentRowHeal:     rowWriteEffect,   // A6
-	intentCreate:      createEffect,     // C1, C2
-	intentDrainCancel: drainClearEffect, // A19 (C6a)
-	intentDrainVoid:   drainClearEffect, // A19 (C6a)
+	intentRowHeal:         rowWriteEffect,   // A6
+	intentCreate:          createEffect,     // C1, C2
+	intentDrainBegin:      drainBeginEffect, // A20 (C6a2)
+	intentDrainBeginFresh: drainBeginEffect, // A20 (C6a2)
+	intentDrainCancel:     drainClearEffect, // A19 (C6a)
+	intentDrainVoid:       drainClearEffect, // A19 (C6a)
 }

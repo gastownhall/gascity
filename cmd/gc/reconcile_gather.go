@@ -108,6 +108,12 @@ type World struct {
 	SessionsStore beads.Store
 	RigStores     map[string]beads.Store
 	SessionsLeg   string
+	// OperatorSuspend is the explicit operator suspend cause (city, rig,
+	// agent or session) of each canonical row inside INC-003's grace, the
+	// only rows that read it: such a row gets no grace (v5.4 D2). E2b's
+	// operatorSuspendCause reads the environment, so gather reads it and
+	// decideRow does not.
+	OperatorSuspend map[rowKey]string
 }
 
 // gather builds the pass's World at now. It first drains the settlements
@@ -160,6 +166,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	}
 	w.InputAges = inputAges(now, w.LegStores, w.Obs, rec)
 	rows := w.Census.Canonical()
+	w.OperatorSuspend = operatorSuspendCauses(cfg, e.CityPath, rows, st, now)
 	for _, row := range rows {
 		if strings.TrimSpace(row.Info.Template) == "" && strings.TrimSpace(row.Info.SessionNameMetadata) == "" {
 			if w.Mislabelled == nil {
@@ -197,6 +204,22 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	w.Boot.RecordingSeen = rec != nil || !laneFed
 	p.boot = w.Boot
 	return w, nil
+}
+
+// operatorSuspendCauses is operatorSuspendCause for each of rows woken
+// within INC-003's grace of now, keeping the causes only. The rig resolver
+// is costly on path-style dirs, so no other row pays for it.
+func operatorSuspendCauses(cfg *config.City, cityPath string, rows []censusRow, st suspensionstate.State, now time.Time) map[rowKey]string {
+	causes := make(map[rowKey]string)
+	for _, row := range rows {
+		if !wakeGracePreservesUndesiredRow(row.Info, now) {
+			continue
+		}
+		if cause := operatorSuspendCause(cfg, cityPath, row.Info, st); cause != "" {
+			causes[row.Key] = cause
+		}
+	}
+	return causes
 }
 
 // gatherGates reads each endpoint's breaker the pass may act on: every

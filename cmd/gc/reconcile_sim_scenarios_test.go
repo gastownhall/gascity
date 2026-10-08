@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -159,25 +160,29 @@ func TestSimR17ReplayedEventsWriteNothing(t *testing.T) {
 func TestSimR34R35ServerGone(t *testing.T) {
 	for _, confirmed := range []bool{false, true} {
 		for _, coldBoot := range []bool{true, false} {
-			s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1"))
-			if !coldBoot {
-				s.inventory()
-			}
-			for name := range s.sp.rts {
-				s.sp.drop(name)
-			}
-			s.sp.serverDown, s.sp.confirmable = true, confirmed
-			for range 3 {
-				s.advance(simPatrol)
-				s.inventory()
-				s.pass()
-			}
-			gone := s.liveness("gc-1") == livenessGone
-			if gone != confirmed || coldBoot && s.p.boot.InventoryComplete != confirmed {
-				t.Errorf("cold boot %t, confirmed dead %t: gc-1 gone %t, boot inventory complete %t", coldBoot, confirmed, gone, s.p.boot.InventoryComplete)
-			}
-			s.audit("v2")
-			s.noViolations(t)
+			// A subtest per sim: each installs its own gated registry and
+			// tears it down before the next one gates it again.
+			t.Run(fmt.Sprintf("confirmed=%t,coldBoot=%t", confirmed, coldBoot), func(t *testing.T) {
+				s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1"))
+				if !coldBoot {
+					s.inventory()
+				}
+				for name := range s.sp.rts {
+					s.sp.drop(name)
+				}
+				s.sp.serverDown, s.sp.confirmable = true, confirmed
+				for range 3 {
+					s.advance(simPatrol)
+					s.inventory()
+					s.pass()
+				}
+				gone := s.liveness("gc-1") == livenessGone
+				if gone != confirmed || coldBoot && s.p.boot.InventoryComplete != confirmed {
+					t.Errorf("gc-1 gone %t, boot inventory complete %t", gone, s.p.boot.InventoryComplete)
+				}
+				s.audit("v2")
+				s.noViolations(t)
+			})
 		}
 	}
 }
