@@ -2550,6 +2550,8 @@ type nativeDoltMemStorage struct {
 	// issuePrefix is the namespace this storage declares, the one whose absent
 	// rows it can see; empty means nativeDoltMemIssuePrefixForTest.
 	issuePrefix string
+	// batchMu admits one batch request at a time; see BatchApplier.
+	batchMu sync.Mutex
 }
 
 func newNativeDoltMemStorage() *nativeDoltMemStorage {

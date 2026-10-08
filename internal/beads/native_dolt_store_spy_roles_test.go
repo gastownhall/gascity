@@ -529,8 +529,25 @@ func (s *nativeDoltStorageSpy) BatchApplier() (issueops.BatchApplier, error) {
 	return rawBatchApplier{storage: s}, nil
 }
 
+// The mem storage applies one batch request at a time because the facade does:
+// it runs a whole request in one transaction, so two concurrent requests never
+// interleave item by item. rawBatchApplier alone would let them, and this
+// storage cannot survive that: a losing request's fenced update fails inside
+// RunInTransaction, which restores the snapshot it took on entry and so erases
+// a winning request's close (the lifecycle double's Close writes outside any
+// transaction) that landed in between. Serializing requests models the
+// facade's isolation without the atomicity rawBatchApplier deliberately leaves
+// out: a request that fails part-way still keeps its earlier items.
 func (s *nativeDoltMemStorage) BatchApplier() (issueops.BatchApplier, error) {
-	return rawBatchApplier{storage: s}, nil
+	return nativeDoltMemBatchApplier{storage: s}, nil
+}
+
+type nativeDoltMemBatchApplier struct{ storage *nativeDoltMemStorage }
+
+func (a nativeDoltMemBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBatchRequest) (issueops.ApplyBatchResult, error) {
+	a.storage.batchMu.Lock()
+	defer a.storage.batchMu.Unlock()
+	return rawBatchApplier{storage: a.storage}.ApplyBatch(ctx, req)
 }
 
 // The failing-label double gets its own batch applier for the reason embedding
