@@ -62,7 +62,10 @@ func entryToTurn(e *worker.TranscriptEntry) outputTurn {
 
 func historyEntryToTurn(entry worker.HistoryEntry) outputTurn {
 	turn := outputTurn{
-		ID:   entry.ID,
+		// The provider entry ID, not HistoryEntry.ID: an entry without a
+		// provider UUID gets a synthesized ID that no cursor matches, and its
+		// turn must omit id instead.
+		ID:   entry.Provenance.RawEntryID,
 		Role: entry.Kind,
 	}
 	if turn.Role == "" {

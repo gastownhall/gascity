@@ -5,12 +5,11 @@ import "github.com/gastownhall/gascity/internal/worker"
 // settledHistorySnapshot returns snapshot without its partial entries.
 //
 // The conversation and raw live streams send each entry once, after the
-// last entry id they sent, and their frames carry no id a client could use
-// to replace an earlier frame. An entry a provider is still growing in place
-// (worker.ResultStatusPartial, for example an ACP agent message still
-// streaming chunks) would be sent truncated and never corrected, so these
-// streams hold it back until it settles. The structured stream upserts by
-// entry id and keeps partial entries.
+// last entry id they sent, and never send it again. An entry a provider is
+// still growing in place (worker.ResultStatusPartial, for example an ACP
+// agent message still streaming chunks) would be sent truncated and never
+// corrected, so these streams hold it back until it settles. The
+// structured stream upserts by entry id and keeps partial entries.
 //
 // A transcript that stops growing with a run still open never settles it, so
 // these two streams withhold its last entry for the life of the live session.

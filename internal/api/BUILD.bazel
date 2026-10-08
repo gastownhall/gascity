@@ -306,6 +306,7 @@ go_test(
         "handler_agent_crud_test.go",
         "handler_agent_output_provider_test.go",
         "handler_agent_output_test.go",
+        "handler_agent_output_turns_local_test.go",
         "handler_agents_configured_test.go",
         "handler_agents_graph_work_test.go",
         "handler_agents_rig_template_test.go",
