@@ -666,10 +666,12 @@ func isCanonicalWorkflowRoot(wb beads.Bead) bool {
 //
 // Release order:
 //
-// First, when conditional_writes resolves a writer, release assignment and
-// metadata in one revision-guarded UpdateIfMatch. Conflicts are left for a later
-// tick's fresh snapshot. Required-but-unavailable capability refuses the release.
-// Otherwise the legacy paths below apply:
+// First, when conditional_writes resolves a writer and wb carries a revision,
+// release assignment and metadata in one UpdateIfMatch guarded by that
+// revision. Conflicts are left for a later tick's fresh snapshot.
+// Required-but-unavailable capability refuses the release. Otherwise,
+// including for snapshots listed from the native store (or a CachingStore over
+// it), which carry no revision, the legacy paths below apply:
 //
 //  1. beads.ConditionalAssignmentReleaser.ReleaseIfCurrent when the store
 //     offers it for this snapshot shape (in_progress with a non-empty assignee

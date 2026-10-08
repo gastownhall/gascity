@@ -1153,12 +1153,15 @@ func sweepAssignedWorkLegs(cityPath string, cfg *config.City, store beads.Store,
 // unclaimResult reports the outcome of one unassign sweep over a retired
 // session bead's owned work: Released counts release attempts that completed
 // without error, Failed counts ReleaseWorkBead errors (already logged per item
-// to stderr). Released is deliberately NOT a count of writes — a release whose
-// snapshot went stale (the work was re-claimed by a live worker before the
-// write) correctly performs no write and reports no error, and is counted here
-// with the ones that did write. Both mean the same thing to every caller: this
-// session no longer holds that work. Only Failed distinguishes the case where
-// that is still unknown. Void callers (named-session retirement, closed-
+// to stderr). Released is deliberately NOT a count of writes — on the legacy
+// tiers, a release whose snapshot went stale (the work was re-claimed by a live
+// worker before the write) correctly performs no write and reports no error,
+// and is counted here with the ones that did write. Both mean the same thing
+// to every caller: this session no longer holds that work. Only Failed
+// distinguishes the case where that is still unknown, which includes every
+// conflict on the revision-guarded release: it cannot tell a re-claim from an
+// unrelated write, so the item counts as Failed and is left to the next
+// sweep's fresh snapshot. Void callers (named-session retirement, closed-
 // session release) ignore it; the stranded-repair path reads Failed to avoid
 // reporting a clean repair — or closing the session bead — when an unassign did
 // not land, so a stale-assignee item is not masked behind a "repaired" close.
@@ -1552,8 +1555,10 @@ func releaseHeldClaims(
 					continue
 				}
 				seen[key] = struct{}{}
-				// ReleaseWorkBead is compare-and-swap on the assignee, so a bead
-				// that legitimately changed hands since the list is left alone.
+				// ReleaseWorkBead is fenced on the snapshot, so a bead that
+				// legitimately changed hands since the list is left alone: the
+				// legacy tiers skip it silently, and the revision-guarded
+				// release reports the conflict as an error, logged below.
 				// An empty fallback route keeps whatever routing the bead
 				// already carried, exactly as the close-release path does.
 				if err := wa.ReleaseWorkBead(item, r.fallbackRoute); err != nil {
