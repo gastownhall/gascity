@@ -1111,8 +1111,13 @@ var supervisorServiceEnvKeys = map[string]bool{
 	// env rung — the config.yaml rung reads a viper only cmd/bd initializes,
 	// .beads/.env is bd-main-only — so on a shared/hub-bound Dolt store where
 	// the 10s default is too tight these must survive plist regeneration.
-	// Scope: the storebinding workspace open withholds the BEADS_ namespace
-	// by design and keeps its defaults either way.
+	// Scope: two opens withhold the BEADS_ namespace by design and keep the
+	// defaults either way — the storebinding workspace open, and the opt-in
+	// proxied-native read lane (GC_BEADS_PROXIED_NATIVE), whose own knob
+	// GC_BEADS_PROXIED_READ_BUDGET is a wall-clock cap on a whole read's
+	// retry chain, not a per-I/O deadline. Keep these keys out of
+	// nativeDoltOpenEnvKeys: that projection unsets a listed key whenever
+	// the open's env map omits it, as it omits these.
 	"BEADS_DOLT_POOL_READ_TIMEOUT":             true,
 	"BEADS_DOLT_POOL_WRITE_TIMEOUT":            true,
 	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": true,
