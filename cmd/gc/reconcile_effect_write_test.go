@@ -212,7 +212,7 @@ func TestEffectPassStripsRawHandles(t *testing.T) {
 	store := beads.NewMemStore()
 	w := &World{
 		Env:           &reconcileEnv{Gen: 1, SP: &sleepCountingProvider{}},
-		Demand:        demandView{AssignedStores: []beads.Store{store}},
+		Demand:        demandView{AssignedWork: []beads.Bead{{ID: "w-1"}}, AssignedStores: []beads.Store{store}},
 		LegStores:     map[string]beads.Store{rowLeg: store},
 		SessionsStore: store, RigStores: map[string]beads.Store{"rig": store},
 	}
@@ -228,6 +228,10 @@ func TestEffectPassStripsRawHandles(t *testing.T) {
 	}
 	if p.Runtime != w.Env.SP || p.Releasers.Legs[rowLeg] != store || len(p.Releasers.Assigned) != 1 {
 		t.Fatalf("want the composite provider and the release-capable stores: %+v", p)
+	}
+	w.Demand.AssignedWork = nil // misaligned: the release falls back to routing (ga-b0o6a)
+	if p := newEffectPass(w, &allocDecision{}); p.Releasers.Assigned != nil {
+		t.Fatalf("misaligned assigned-work stores reached the release: %v", p.Releasers.Assigned)
 	}
 	if _, ok := p.Writers[rowLeg]; !ok || w.Env.SP == nil || w.LegStores == nil || w.Demand.AssignedStores == nil {
 		t.Fatal("want a writer for the leg and the pass's World untouched")

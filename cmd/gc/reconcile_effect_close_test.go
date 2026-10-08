@@ -79,16 +79,16 @@ func (l *closeLeaf) KillZombieObject(string, string, string, string) (runtime.Se
 // require-stamped SQLite store (the atomic conditional closer a close
 // requires), and returns the pass that admitted its orphan
 // close over sp, the close, and the store.
-func admittedClose(t *testing.T, sp runtime.Provider) (*effectPass, intent, beads.Store) {
+func admittedClose(t *testing.T, sp runtime.Provider, meta ...string) (*effectPass, intent, beads.Store) {
 	t.Helper()
 	store := stampedSQLite(t, gate.Require)
-	b, err := store.Create(sessionRow("x", "template", "worker", "session_name", "rt_x", "state", "asleep", "generation", "3", "instance_token", "tok-x"))
+	b, err := store.Create(sessionRow("x", append([]string{"template", "worker", "session_name", "rt_x", "state", "asleep", "generation", "3", "instance_token", "tok-x"}, meta...)...))
 	if err != nil {
 		t.Fatal(err)
 	}
 	w := &World{
-		Now: gatherNow, CityPath: t.Name(), Env: &reconcileEnv{SP: sp},
-		Census: readCensus(t, gatherNow, censusLegs(rowLeg, store)), LegStores: map[string]beads.Store{rowLeg: store},
+		Now: gatherNow, CityPath: t.Name(), Env: &reconcileEnv{SP: sp, Cfg: &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}},
+		Census: readCensus(t, gatherNow, censusLegs(rowLeg, store)), LegStores: map[string]beads.Store{rowLeg: store}, SessionsStore: store,
 	}
 	it := intent{
 		Kind: intentClose, Key: rowKey{Leg: rowLeg, ID: b.ID}, Patch: session.ClosePatch(gatherNow, "orphaned"),
@@ -289,9 +289,10 @@ func TestConfirmedStopReadsFreshSinceTheStop(t *testing.T) {
 
 // Kills a close that skips legacy's post-close cascade (closeBead,
 // closeFailedCreateBead): a landed close cancels the row's waits; releases
-// the work held under any of its identities, except for a failed create and
-// except a kept assignee; and prunes the worktree only for a pool slot. A
-// refused close runs none of it.
+// the work held under any of its identities (here an alias it had, which L5
+// does not read), except for a failed create and except a kept assignee;
+// and prunes the worktree only for a pool slot. A refused close runs none of
+// it.
 func TestCloseRunsLegacysCascade(t *testing.T) {
 	for _, c := range []struct {
 		name     string
@@ -305,7 +306,7 @@ func TestCloseRunsLegacysCascade(t *testing.T) {
 		{name: "orphan", spec: closeSpec{Kind: closeReleasing}, released: true},
 		{name: "failed create", spec: closeSpec{Kind: closeFailedCreate}, patch: failedCreateClosePatch(gatherNow)},
 		{name: "pool slot", spec: closeSpec{Kind: closePoolSlot}, released: true, pruned: true},
-		{name: "kept assignee", spec: closeSpec{Kind: closeReleasing, Preserve: []string{"rt_x"}}, kept: true},
+		{name: "kept assignee", spec: closeSpec{Kind: closeReleasing, Preserve: []string{"old-alias"}}, kept: true},
 		{name: "refused", spec: closeSpec{Kind: closePoolSlot}, external: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -314,8 +315,11 @@ func TestCloseRunsLegacysCascade(t *testing.T) {
 			if c.patch != nil {
 				it.Patch = c.patch
 			}
-			work, err := store.Create(beads.Bead{Title: "work", Type: "task", Status: "in_progress", Assignee: "rt_x"})
+			work, err := store.Create(beads.Bead{Title: "work", Type: "task", Status: "in_progress", Assignee: "old-alias"})
 			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.SetMetadataBatch(it.Key.ID, map[string]string{"alias_history": "old-alias"}); err != nil {
 				t.Fatal(err)
 			}
 			wait, err := store.Create(beads.Bead{
@@ -342,8 +346,8 @@ func TestCloseRunsLegacysCascade(t *testing.T) {
 			if released := w.Assignee == "" && w.Status == "open"; released != c.released {
 				t.Fatalf("work %s/%q, want released=%v", w.Status, w.Assignee, c.released)
 			}
-			if c.kept && w.Assignee != "rt_x" {
-				t.Fatalf("work assignee %q, want the kept identity rt_x", w.Assignee)
+			if c.kept && w.Assignee != "old-alias" {
+				t.Fatalf("work assignee %q, want the kept identity old-alias", w.Assignee)
 			}
 			if wb, _ := store.Get(wait.ID); (wb.Metadata["state"] == waitStateCanceled) == c.external {
 				t.Fatalf("wait state %q, want canceled=%v", wb.Metadata["state"], !c.external)

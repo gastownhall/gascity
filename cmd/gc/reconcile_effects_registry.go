@@ -25,9 +25,10 @@ type effectPass struct {
 	// legacy read helpers: L5's live work read (C5c1b, D4).
 	Reads effectStores
 	// Releasers are the raw stores only legacy's release helpers write
-	// (v5.6 §13): each census leg's for the post-close cascade, and the
-	// assigned-work stores index-aligned with World.Demand.AssignedWork for
-	// a confirmed orphan's release (SESS-082).
+	// (v5.6 §13): each census leg's for the post-close cascade; the city and
+	// rig stores for the stranded repair's unclaim (SESS-625); and the
+	// assigned-work stores index-aligned with World.Demand.AssignedWork for a
+	// confirmed orphan's release (SESS-082), nil when misaligned (ga-b0o6a).
 	Releasers effectReleasers
 	// Runtime is the composite provider. Fresh reads and C8.8 go through it,
 	// never a routed leaf alone (mc-zndi7.24). An effect calls no provider
@@ -55,6 +56,8 @@ type effectStores struct {
 // effectReleasers are release-capable stores.
 type effectReleasers struct {
 	Legs     map[string]beads.Store // by census leg
+	City     beads.Store
+	Rigs     map[string]beads.Store
 	Assigned []beads.Store
 }
 
@@ -64,7 +67,10 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 	if w.Env != nil {
 		p.Runtime = w.Env.SP
 	}
-	p.Releasers = effectReleasers{Legs: w.LegStores, Assigned: w.Demand.AssignedStores}
+	p.Releasers = effectReleasers{Legs: w.LegStores, City: w.SessionsStore, Rigs: w.RigStores}
+	if len(w.Demand.AssignedStores) == len(w.Demand.AssignedWork) {
+		p.Releasers.Assigned = w.Demand.AssignedStores
+	}
 	if w.SessionsStore != nil {
 		p.Reads.City = blindWriteRefusingStore{inner: w.SessionsStore}
 	}

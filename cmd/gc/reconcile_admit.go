@@ -144,11 +144,20 @@ type intent struct {
 	Cause    string
 }
 
-// closeSpec is an A21 close's kind, and the assignees its release keeps
-// (SESS-080's phantom keeps work claimed under the configured identity).
+// closeSpec is an A21 close's kind and what its work guard (L5) does.
 type closeSpec struct {
-	Kind     closeKind
+	Kind closeKind
+	// Phantom is SESS-080's dead phantom of a configured named identity: it
+	// skips L5, and its release keeps Preserve, the identity's assignees.
+	Phantom  bool
 	Preserve []string
+	// Orphaned releases a held claim of a confirmed orphan, then reads L5
+	// again (SESS-082).
+	Orphaned bool
+	// Repair is a stranded pool slot whose marker has aged: its work is
+	// unclaimed, then it closes stranded-repair (SESS-625).
+	Repair   bool
+	Template string // the stranded event's
 }
 
 // closeKind picks a close's post-close cascade, as legacy's close helpers

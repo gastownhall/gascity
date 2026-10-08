@@ -377,7 +377,7 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	s.p = newPlanner(s.clk, func() time.Duration { return simPatrol }, nil, inflight, nil, io.Discard)
 	s.p.pass = func(now time.Time) passResult { return s.p.tracePass(s.env, now) }
 	s.p.effects = s.x
-	reg := effectRegistry
+	reg := simBaseRegistry
 	if o.registry != nil {
 		reg = o.registry(reg)
 	}
@@ -424,6 +424,12 @@ func (s *sim) seedRows() (city, rig []beads.Bead) {
 }
 
 func (s *sim) rel(d time.Duration) string { return s.clk.Now().Add(d).UTC().Format(time.RFC3339) }
+
+// simBaseRegistry is the effects registry as the package declares it. Each
+// sim gates this one, not the global a sim before it in the same test has
+// already replaced with its gated copy: gating a gated registry parks every
+// effect twice, and the inner park is never released.
+var simBaseRegistry = effectRegistry
 
 // gated wraps every effect so it parks until a step releases it.
 func (s *sim) gated(reg map[string]effectBuilder) map[string]effectBuilder {

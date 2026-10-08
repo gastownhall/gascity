@@ -131,9 +131,10 @@ func TestSimR14PartialListingConcludesNoAbsence(t *testing.T) {
 }
 
 // Scenario R17 (INC-006; I10): an event replayed many times, and rescans,
-// mark the planner dirty and write nothing: no write loop.
+// mark the planner dirty and write nothing: no write loop. The row's runtime
+// is live, so no close (A21) is due once its heal lands.
 func TestSimR17ReplayedEventsWriteNothing(t *testing.T) {
-	s := scripted(t, nil, heldRow())
+	s := scripted(t, []string{"gc-1"}, heldRow())
 	s.inventory()
 	s.pass()
 	s.release(0)

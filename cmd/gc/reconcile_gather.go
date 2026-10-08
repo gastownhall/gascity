@@ -68,6 +68,7 @@ type gatherEnv struct {
 type World struct {
 	Now      time.Time
 	CityPath string // the runtime name locks' city (lockRuntimeName)
+	CityName string
 	Env      *reconcileEnv
 	Census   *sessionCensus
 	// Mislabelled are the canonical rows with no template and no session
@@ -129,7 +130,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	w := World{Now: now, CityPath: e.CityPath, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused()}
+	w := World{Now: now, CityPath: e.CityPath, CityName: e.CityName, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused()}
 	var st suspensionstate.State
 	if e.Suspension != nil {
 		st = e.Suspension()

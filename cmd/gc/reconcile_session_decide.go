@@ -81,7 +81,7 @@ func earlierRequeue(a, b time.Duration) time.Duration {
 // the arm for the trace (R6). next is the row's earliest deadline, zero for
 // none. The pass skips rows with an effect in flight (R5).
 func decideRow(w *World, a *allocDecision, k rowKey) (it intent, next time.Time) {
-	r := &rowFacts{w: w, k: k, entry: a.Snapshot.Entries[k]}
+	r := &rowFacts{w: w, k: k, entry: a.Snapshot.Entries[k], partial: len(a.Snapshot.Partial.Global) > 0}
 	r.row, r.found = w.Census.Rows[k]
 	for _, arm := range rowArms {
 		if it, ok := arm.decide(r); ok {
@@ -100,7 +100,10 @@ type rowFacts struct {
 	row   censusRow
 	found bool
 	entry *selectionEntry
-	next  time.Time
+	// partial is the pass's global partial cause (P-3): the census or the
+	// demand read was partial.
+	partial bool
+	next    time.Time
 }
 
 // after records a deadline d from now, keeping the earliest; zero is none.
@@ -123,13 +126,14 @@ type rowArm struct {
 // rowArms is CONTRACT v5 §4's table in its order. Later PRs insert their
 // arms at their numbers: A3 rekey (C4c2), A4 the stop request (C6b2), A6's
 // other heals and markers (C5d), A7 row metadata (C7d), A8 the baseline
-// (C7c), and A10-A21 below A9.
+// (C7c), and A10-A20 between A9 and A21.
 var rowArms = []rowArm{
 	{"A1", armNoRow},
 	{"A2", armKillFence},
 	{"A5", armUnknownState},
 	{"A6", armTimerHeals},
 	{"A9", armLivenessUnknown},
+	{"A21", armClose},
 }
 
 // decideRow's other reasons.
