@@ -113,7 +113,7 @@ func (rt *plannerRuntime) bindHost(h plannerHost) {
 		return nil
 	}
 	rt.host = h
-	rt.planner.rec = h.rec
+	rt.planner.rec, rt.planner.observations = h.rec, h.gather.Observations
 	rt.planner.emitRecord = rt.emitPassRecord
 }
 

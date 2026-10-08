@@ -69,8 +69,18 @@ type settlement struct {
 	Work *workVerdict
 	// Event is recorded once the settlement is drained: a landed write's.
 	Event *events.Event
+	// Noted is a start's or adopt's fresh read of its runtime alive and
+	// Current, which the drain writes through to the observation cache, so
+	// no second start is proposed while the inventory lags (v5 O4).
+	Noted *notedRuntime
 	Err   error
 	At    time.Time
+}
+
+// notedRuntime is a runtime name a fresh read issued at At found alive.
+type notedRuntime struct {
+	Name string
+	At   time.Time
 }
 
 // settleOutcome is how an effect ended (CONTRACT v5 S1, P5).
@@ -117,6 +127,10 @@ type planner struct {
 	stderr      io.Writer
 	metrics     *passMetrics
 	emitRecord  func(fields map[string]any) // the reconcile.pass record; nil emits none
+
+	// observations is the cache settlements' fresh reads are noted in; nil
+	// notes none.
+	observations func() *ObservationCache
 
 	inflight plannerInflight
 	backoff  *backoffTable
@@ -303,9 +317,28 @@ func (p *planner) drainSettlements(now time.Time) {
 		p.backoffSettled(s)
 		p.observeSettlement(s)
 	}
+	p.note(items)
 	for _, s := range items {
 		if s.Event != nil && p.rec != nil {
 			p.record(*s.Event)
+		}
+	}
+}
+
+// note writes each settlement's fresh read of a live runtime to the
+// observation cache (v5 O4): listed, running and agent alive, at the read's
+// issue time, so a later inventory pass overrides it either way.
+func (p *planner) note(items []settlement) {
+	var cache *ObservationCache
+	if p.observations != nil {
+		cache = p.observations()
+	}
+	for _, s := range items {
+		if s.Noted == nil || cache == nil {
+			continue
+		}
+		for _, kind := range [...]FactKind{FactListed, FactRunning, FactProcessAlive} {
+			cache.Note(s.Noted.Name, kind, ObsYes, s.Noted.At, SourceProbe, "")
 		}
 	}
 }

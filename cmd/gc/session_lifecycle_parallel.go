@@ -1078,6 +1078,22 @@ func buildPreparedStartWithWorkDirResolver(
 	store beads.Store,
 	workDirResolver taskWorkDirResolver,
 ) (*preparedStart, sessionpkg.Info, error) {
+	return buildPreparedStartWithTranscript(candidate, cityPath, cfg, store, workDirResolver, nil)
+}
+
+// buildPreparedStartWithTranscript is buildPreparedStartWithWorkDirResolver
+// with the v2 start effect's transcript option (S-1): nil for legacy. When
+// set, it is the transcript state of the candidate's session_key, which the
+// effect probed, cleared and filled in its PreWake CAS (CONTRACT v5 S1), so
+// the helper neither probes, clears nor mints the key.
+func buildPreparedStartWithTranscript(
+	candidate startCandidate,
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	workDirResolver taskWorkDirResolver,
+	transcript *sessTranscriptState,
+) (*preparedStart, sessionpkg.Info, error) {
 	tp := candidate.tp
 	agentCfg, delivery, err := templateParamsToConfigWithDelivery(tp)
 	if err != nil {
@@ -1155,7 +1171,9 @@ func buildPreparedStartWithWorkDirResolver(
 	// transcriptState carries the same probe result forward to the firstStart
 	// classification below, so the disk is read once per launch.
 	transcriptState := sessTranscriptUnknown
-	if sk := strings.TrimSpace(candidate.info.SessionKey); sk != "" && agentCfg.WorkDir != "" {
+	if transcript != nil {
+		transcriptState = *transcript
+	} else if sk := strings.TrimSpace(candidate.info.SessionKey); sk != "" && agentCfg.WorkDir != "" {
 		provider := sessionTranscriptProvider(tp.ResolvedProvider, candidate.info)
 		present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, sk)
 		if probeable {
@@ -1178,7 +1196,7 @@ func buildPreparedStartWithWorkDirResolver(
 			candidate.info = candidate.info.ApplyPatch(clearStaleResumeKeyMetadata(candidate.info.ID, sessFront))
 		}
 	}
-	if candidate.info.SessionKey == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
+	if transcript == nil && candidate.info.SessionKey == "" && tp.ResolvedProvider != nil && tp.ResolvedProvider.SessionIDFlag != "" {
 		sessionKey, err := sessionpkg.GenerateSessionKey()
 		if err != nil {
 			return nil, candidate.info, fmt.Errorf("generating session key: %w", err)

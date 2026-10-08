@@ -84,7 +84,7 @@ func TestPlannerSubmitSettlesRefusedSubmits(t *testing.T) {
 	x.close()
 	p.effects = x
 	w := &World{Census: &sessionCensus{}}
-	p.submit(w, &allocDecision{}, []intent{{Kind: intentRowHeal, Key: rowKey{Leg: rowLeg, ID: "a"}, Deadline: plannerT0.Add(time.Minute)}})
+	p.submit(w, &allocDecision{}, []intent{{Kind: intentRowHeal, Key: rowKey{Leg: rowLeg, ID: "a"}, Deadline: plannerT0.Add(time.Minute)}}, effectRuntime{})
 	if v := m.view(); len(v.Entries) != 0 {
 		t.Fatalf("in flight after a refused submit = %+v, want none", v.Entries)
 	}

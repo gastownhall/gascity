@@ -1,6 +1,12 @@
 package main
 
-import "context"
+import (
+	"context"
+	"io"
+
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
+)
 
 // The effects registry: the effect each admitted intent kind runs on the
 // executor. Each later effect PR adds its line. An intent whose kind has none
@@ -16,6 +22,21 @@ type effectPass struct {
 	Writers map[string]fencedWriter // by census leg
 	World   *World
 	Alloc   *allocDecision
+	Runtime effectRuntime
+}
+
+// effectRuntime is the runtime half of an effect's capabilities (v5 R3):
+// the provider its fresh reads and provider calls route through, the city
+// its runtime name locks are keyed by, the endpoint breaker, and the
+// clock. Rec receives the breaker's transitions only; a row's events ride
+// its settlement.
+type effectRuntime struct {
+	CityPath, CityName string
+	SP                 runtime.Provider
+	Capacity           *endpointCapacityGuard
+	Clock              plannerClock
+	Rec                events.Recorder
+	Stderr             io.Writer
 }
 
 // newEffectPass is w's and a's effectPass.
@@ -40,4 +61,5 @@ type effectBuilder func(p *effectPass, it intent) func(context.Context) settleme
 
 var effectRegistry = map[string]effectBuilder{
 	intentRowHeal: rowWriteEffect, // A6
+	intentAdopt:   adoptEffect,    // S1: commits a live runtime, never launches
 }

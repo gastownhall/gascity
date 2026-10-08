@@ -136,7 +136,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	p.fairSeed = res.FairSeed
 	if p.effects != nil {
 		p.bucket, next = res.Bucket, earliest(next, res.NextToken)
-		p.submit(&w, &a, res.Admitted)
+		p.submit(&w, &a, res.Admitted, p.effectRuntime(e, w.Env))
 	}
 	rec.Admitted, rec.Deferred = res.Admitted, res.Deferred
 	rec.Rows = p.traceRows(w.Census, reasons, res)
@@ -187,8 +187,9 @@ func splitRegistered(intents []intent) (registered, unregistered []intent) {
 // in-flight entry, recorded first so the next pass counts it. A submit the
 // executor refuses (busy, or stopped) runs and posts nothing, so its entry
 // is settled here at once.
-func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
+func (p *planner) submit(w *World, a *allocDecision, admitted []intent, rt effectRuntime) {
 	pass := newEffectPass(w, a)
+	pass.Runtime = rt
 	for _, it := range admitted {
 		seq := p.inflight.add(inflightEntry{Kind: it.Kind, Key: it.Key, Endpoint: it.Endpoint})
 		if seq == 0 {
@@ -198,6 +199,16 @@ func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
 			p.inflight.settle(settlement{Key: it.Key, Kind: it.Kind, Seq: seq})
 		}
 	}
+}
+
+// effectRuntime is the runtime capability the pass's effects hold over e
+// and env.
+func (p *planner) effectRuntime(e gatherEnv, env *reconcileEnv) effectRuntime {
+	rt := effectRuntime{CityPath: e.CityPath, CityName: e.CityName, SP: env.SP, Clock: p.clock, Rec: p.rec, Stderr: p.stderr}
+	if e.Capacity != nil {
+		rt.Capacity = e.Capacity()
+	}
+	return rt
 }
 
 // decideRowSafe is decideRow with P6's panic isolation: a row that panics
