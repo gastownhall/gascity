@@ -48,6 +48,15 @@ dolt_escalate() {
     fi
 }
 
+# dolt_resolve_incident tells escalate.sh that an incident cleared, so its next
+# occurrence notifies at once instead of waiting out the reminder interval.
+dolt_resolve_incident() {
+    if [ -z "$DOLT_ESCALATE_SCRIPT" ] || [ ! -x "$DOLT_ESCALATE_SCRIPT" ]; then
+        return 0
+    fi
+    "$DOLT_ESCALATE_SCRIPT" --resolve-incident "$1" >/dev/null
+}
+
 dolt_notify_done() {
     local summary="$1"
     local target="${GC_MAINTENANCE_DONE_TARGET:-}"
