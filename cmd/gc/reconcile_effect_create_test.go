@@ -353,10 +353,7 @@ func TestBootRefusesWithoutAtomicCloser(t *testing.T) {
 // by boot and by doctor alike.
 func TestBootAdmitsSQLiteRevisionLayout(t *testing.T) {
 	sqlite := stampedSQLite(t, gate.Auto)
-	atomic := beads.NewAtomicCloseMemStore()
-	if err := beads.StampOpenedStore(atomic, "MemStore", gate.Auto, nil, nil); err != nil {
-		t.Fatal(err)
-	}
+	atomic := fencingAtomicCloseStore(t)
 	chain := &beadPolicyStore{Store: beads.NewCachingStoreForTest(atomic, nil), cfg: workerCity(1)}
 	for name, store := range map[string]beads.Store{
 		"sqlite": sqlite, "cached sqlite": beads.NewCachingStoreForTest(sqlite, nil), "policy over cache over atomic close": chain,
@@ -367,6 +364,17 @@ func TestBootAdmitsSQLiteRevisionLayout(t *testing.T) {
 			}
 		}
 	}
+}
+
+// fencingAtomicCloseStore is a store C0.7 admits: an atomic-close MemStore
+// stamped auto.
+func fencingAtomicCloseStore(t *testing.T) beads.Store {
+	t.Helper()
+	store := beads.NewAtomicCloseMemStore()
+	if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	return store
 }
 
 // Kills a doctor C0.7 read that resolves the writer as boot does, which
