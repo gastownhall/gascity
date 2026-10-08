@@ -2695,9 +2695,10 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if cr.cs == nil {
 		// Refresh standalone city store for auto-suspend.
 		// Also recovers from nil → non-nil when bd becomes available after startup.
-		// The stores are opened before the swap so readers never wait on an open,
+		// The store is opened before the swap so readers never wait on an open,
 		// and so a provider swap can read the session beads from a store that
-		// failed to open at boot.
+		// failed to open at boot. The rig stores follow the new config, so they
+		// are rebuilt only once it is published (below).
 		cityStore := cr.standaloneCityStore
 		if s, err := reloadOpenCityStore(cityRoot); err != nil {
 			if cityStore != nil {
@@ -2706,7 +2707,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 		} else {
 			cityStore = s
 		}
-		cr.setStandaloneStores(cityStore, buildStandaloneRigStores(nextCfg, cr.cityPath, cr.stderr))
+		cr.setStandaloneStores(cityStore, cr.standaloneRigStores)
 	}
 
 	if providerChanged {
@@ -2859,6 +2860,12 @@ func (cr *CityRuntime) reloadConfigTraced(
 		if err := cr.svc.Reload(); err != nil {
 			appendWarning(fmt.Sprintf("service reload: %v", err))
 		}
+	}
+
+	if cr.cs == nil {
+		// The city store was refreshed before the swap; rebuild the rig stores
+		// for the published config.
+		cr.setStandaloneStores(cr.standaloneCityStore, buildStandaloneRigStores(nextCfg, cr.cityPath, cr.stderr))
 	}
 
 	// Rebuild convergence scopes against the reloaded config so rigs added,

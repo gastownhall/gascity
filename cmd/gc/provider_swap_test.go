@@ -636,9 +636,12 @@ func standaloneSwapRuntime(t *testing.T, tomlPath string, base runtime.Provider)
 // boot, with a tmux session running, reloads to add its first ACP agent. The
 // reload reopens the store before the swap, so the swap reads the session
 // beads, keeps the session, and publishes; a store that still will not open
-// aborts the swap with its own reason instead of wedging on an unknown route.
+// aborts the swap with its own reason instead of wedging on an unknown route,
+// and leaves the rig stores of the config still running.
 // Kills: the store refresh left after publication (every such reload aborts
-// forever) and a no-store abort that reads like any unknown route.
+// forever), a no-store abort that reads like any unknown route, rig stores
+// rebuilt for a config the swap then does not publish, and rig stores not
+// rebuilt once it does.
 func TestReloadStandaloneSwapReopensStoreBeforeTheSwap(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -657,9 +660,14 @@ func TestReloadStandaloneSwapReopensStoreBeforeTheSwap(t *testing.T) {
 				t.Cleanup(func() { reloadOpenCityStore = old })
 			}
 
+			// A rig-store map the swap must leave alone until publication.
+			oldRigs := map[string]beads.Store{"old-rig": beads.NewMemStore()}
+			cr.setStandaloneStores(nil, oldRigs)
+
 			writeACPAgentCityConfig(t, tomlPath, "fake")
 			lastProviderName := "fake"
 			reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, filepath.Dir(tomlPath), nil, reloadSourceManual)
+			_, keptOldRigs := cr.rigBeadStores()["old-rig"]
 
 			if !base.IsRunning("worker-1") || base.CountCalls("Stop", "worker-1") != 0 {
 				t.Fatalf("worker-1: running=%v, Stop=%d; want it untouched", base.IsRunning("worker-1"), base.CountCalls("Stop", "worker-1"))
@@ -668,10 +676,16 @@ func TestReloadStandaloneSwapReopensStoreBeforeTheSwap(t *testing.T) {
 				if reply.Outcome != reloadOutcomeFailed || !strings.Contains(reply.Error, "no session bead store") || cr.sp != base {
 					t.Fatalf("reply = %+v, provider %T; want the no-store abort with the old provider kept", reply, cr.sp)
 				}
+				if !keptOldRigs {
+					t.Fatalf("aborted swap rebuilt the rig stores for the unpublished config: %v", cr.rigBeadStores())
+				}
 				return
 			}
 			if reply.Outcome == reloadOutcomeFailed || cr.cityBeadStore() == nil {
 				t.Fatalf("reply = %+v, store %v; want the reopened store and an applied swap", reply, cr.cityBeadStore())
+			}
+			if keptOldRigs {
+				t.Fatalf("rig stores not rebuilt for the published config: %v", cr.rigBeadStores())
 			}
 			if autoSP, ok := cr.sp.(*sessionauto.Provider); !ok || autoSP.RouteFor("worker-1").Provider != base {
 				t.Fatalf("provider after the swap = %T, want the auto composition over the carried base", cr.sp)
