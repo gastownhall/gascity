@@ -62,8 +62,8 @@ func (e rowWrite) runLocked(ctx context.Context) settlement {
 	}
 	var fresh intent
 	decided := false
-	wrote, err := writer.updateMetadataFenced(e.it.Key.ID, 1, func(row session.Info, _ session.PersistedResponse) session.MetadataPatch {
-		w := e.pass.World.withRow(e.it.Key, row)
+	wrote, err := writer.updateMetadataFenced(e.it.Key.ID, 1, func(row session.Info, resp session.PersistedResponse) session.MetadataPatch {
+		w := e.pass.World.withRow(e.it.Key, row, resp.Metadata)
 		fresh, _ = e.decide(&w, e.pass.Alloc, e.it.Key)
 		decided = fresh.Kind == e.it.Kind && fresh.Basis == e.it.Basis && len(fresh.Patch) > 0
 		if !decided || ctx.Err() != nil { // the last check before the CAS
@@ -86,15 +86,16 @@ func (e rowWrite) runLocked(ctx context.Context) settlement {
 	return settlement{Outcome: settledRefused, Cause: causeRedecided}
 }
 
-// withRow is w with k's census row read again as row: removed when the row
-// closed, otherwise rebuilt from row on its leg.
-func (w World) withRow(k rowKey, row session.Info) World {
+// withRow is w with k's census row read again as row, with its persisted
+// metadata meta: removed when the row closed, otherwise rebuilt from row on
+// its leg.
+func (w World) withRow(k rowKey, row session.Info, meta map[string]string) World {
 	c := *w.Census
 	c.Rows = maps.Clone(c.Rows)
 	if row.Closed {
 		delete(c.Rows, k)
 	} else {
-		r := newCensusRow(k, row)
+		r := newCensusRow(k, row, meta)
 		if r.DuplicateOf = c.Rows[k].DuplicateOf; r.DuplicateOf != "" {
 			r.PendingCreate = false
 		}

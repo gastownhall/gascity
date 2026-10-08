@@ -59,6 +59,10 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 type effectBuilder func(p *effectPass, it intent) func(context.Context) settlement
 
 var effectRegistry = map[string]effectBuilder{
-	intentRowHeal: rowWriteEffect, // A6
-	intentCreate:  createEffect,   // C1, C2
+	intentRowHeal:         rowWriteEffect,        // A6
+	intentCreate:          createEffect,          // C1, C2
+	intentDrainBegin:      rowWriteEffect,        // A20 (C6a)
+	intentDrainBeginFresh: drainBeginFreshEffect, // A20 (C6a)
+	intentDrainCancel:     rowWriteEffect,        // A19 (C6a)
+	intentDrainVoid:       rowWriteEffect,        // A19 (C6a)
 }

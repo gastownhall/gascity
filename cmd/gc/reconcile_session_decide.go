@@ -123,13 +123,15 @@ type rowArm struct {
 // rowArms is CONTRACT v5 §4's table in its order. Later PRs insert their
 // arms at their numbers: A3 rekey (C4c2), A4 the stop request (C6b2), A6's
 // other heals and markers (C5d), A7 row metadata (C7d), A8 the baseline
-// (C7c), and A10-A21 below A9.
+// (C7c), A10-A18 and A21.
 var rowArms = []rowArm{
 	{"A1", armNoRow},
 	{"A2", armKillFence},
 	{"A5", armUnknownState},
 	{"A6", armTimerHeals},
 	{"A9", armLivenessUnknown},
+	{"A19", armDrainVoidCancel},
+	{"A20", armDrainBegin},
 }
 
 // decideRow's other reasons.
@@ -202,7 +204,7 @@ func armLivenessUnknown(r *rowFacts) (intent, bool) {
 // idleness and claims, so they are the probing -fresh kinds; every other
 // reason is a plain row write. A20 (C6a, C6b1) proposes through it.
 func drainKind(reason string, signal bool) string {
-	fresh := reason == string(session.SleepReasonIdle) || reason == reasonNoWake || reason == idleRespawnDrainReason
+	fresh := reason == drainIdle || reason == reasonNoWake || reason == idleRespawnDrainReason
 	switch {
 	case signal && fresh:
 		return intentSignalFresh

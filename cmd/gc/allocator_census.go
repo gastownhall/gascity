@@ -61,6 +61,9 @@ type censusRow struct {
 	// UnknownState is a state main does not know, other than drain-ack
 	// stop-pending (F9, SESS-044). The row still occupies its slot.
 	UnknownState bool
+	// StopKeys are the row's raw stop-request keys, which only activeStop
+	// reads (v5 D1).
+	StopKeys rawStopKeys
 }
 
 // sessionCensus is one pass's census. It is immutable once read.
@@ -85,18 +88,18 @@ func readSessionCensus(now time.Time, legs []classStoreCandidate) (*sessionCensu
 	c := &sessionCensus{At: now, Rows: make(map[rowKey]censusRow)}
 	canonicalLeg := make(map[string]string)
 	for i, source := range legs {
-		infos, err := sessionFrontDoor(source.store).ListAll(session.ListAllOptions{TierMode: beads.FederatedReadTier})
+		listed, err := sessionFrontDoor(source.store).ListAllWithResponses(session.ListAllOptions{TierMode: beads.FederatedReadTier})
 		if i == 0 && err != nil && !beads.IsPartialResult(err) {
 			return nil, fmt.Errorf("session census sessions leg %q: %w", source.ref, err)
 		}
 		c.Legs = append(c.Legs, censusLeg{Ref: source.ref, Err: err})
-		for _, info := range infos {
-			id := strings.TrimSpace(info.ID)
+		for _, l := range listed {
+			id := strings.TrimSpace(l.Info.ID)
 			if id == "" {
 				continue
 			}
 			k := rowKey{Leg: source.ref, ID: id}
-			row := newCensusRow(k, info)
+			row := newCensusRow(k, l.Info, l.Response.Metadata)
 			if first, dup := canonicalLeg[id]; dup {
 				// One effect, one row: only the canonical copy counts in flight.
 				row.DuplicateOf, row.PendingCreate = first, false
@@ -111,13 +114,15 @@ func readSessionCensus(now time.Time, legs []classStoreCandidate) (*sessionCensu
 	return c, nil
 }
 
-// newCensusRow is info's census row at k, as its canonical copy.
-func newCensusRow(k rowKey, info session.Info) censusRow {
+// newCensusRow is info's census row at k, as its canonical copy; meta is
+// its persisted metadata.
+func newCensusRow(k rowKey, info session.Info, meta map[string]string) censusRow {
 	row := censusRow{
 		Key:           k,
 		Info:          info,
 		InstanceToken: info.InstanceToken,
 		UnknownState:  !isKnownStateInfo(info) && !isDrainAckStopPendingInfo(info),
+		StopKeys:      readStopKeys(meta),
 	}
 	row.Incarnation, _ = strconv.ParseInt(strings.TrimSpace(info.Generation), 10, 64)
 	state := session.State(strings.TrimSpace(info.MetadataState))
