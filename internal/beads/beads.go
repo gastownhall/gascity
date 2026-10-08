@@ -62,12 +62,16 @@ var ErrStoreClosed = errors.New("bead store closed")
 // BUSY. The error's message stays the driver's.
 var ErrSQLiteBusyExhausted = errors.New("sqlite busy retries exhausted")
 
-// ErrStoreUnavailable reports that the backing bead store could not be read,
-// which is not the same as finding nothing. gc hook's work-query classifier
-// wraps a failure that got no answer from the store (a connection error, a
-// timeout, bd's breaker failing fast) with it and exits 2, distinct from the
-// exit-1 no-work answer. Treat it as "unknown", never as "empty". Check with
-// errors.Is.
+// ErrStoreUnavailable marks a bead-store read whose answer is unknown because
+// the store could not be reached, as distinct from a store that answered with
+// no rows. Consumers must treat it as "unknown", never as "empty". Its producer
+// today is gc hook's work-query classification, which wraps a failure that got
+// no answer from the store (a connection error, a timeout, bd's breaker failing
+// fast) and renders it as exit 2 instead of the exit-1 no-work answer, with or
+// without --claim. Check with errors.Is. The control dispatcher's
+// ClassifyControllerError (internal/dispatch) does not check it yet; the first
+// producer whose error can reach the dispatcher adds it there as
+// TierAvailability.
 var ErrStoreUnavailable = errors.New("bead store unavailable")
 
 // ErrParentProjectionSuperseded reports that a parent update was overtaken by a

@@ -1537,11 +1537,13 @@ func bdTransportErrorMatches(cityPath, scopeRoot string, env map[string]string, 
 // bdSilentFallbackMarkerImport and bdSilentFallbackMarkerEmptyDB are the
 // substring pair bd emits when it loses the managed Dolt server and silently
 // falls back to opening the on-disk store with a JSONL auto-import. They are
-// load-bearing in three places — the two transport-error classifiers below
-// and bdOutputIndicatesSilentFallback — so they live here as the single
-// source of truth. If bd's banner wording ever changes, this is the only
-// edit site. (The root cause is fixed upstream in beads post-#3691; these
-// markers remain the symptom detector for deployments still on stable bd.)
+// load-bearing in four places — the two transport-error classifiers below,
+// gc hook's store-unavailable classification (through
+// bdTransportRetryableMarkers), and bdOutputIndicatesSilentFallback — so they
+// live here as the single source of truth. If bd's banner wording ever changes,
+// this is the only edit site. (The root cause is fixed upstream in beads
+// post-#3691; these markers remain the symptom detector for deployments still
+// on stable bd.)
 const (
 	bdSilentFallbackMarkerImport  = "auto-importing"
 	bdSilentFallbackMarkerEmptyDB = "into empty database"
@@ -1562,6 +1564,13 @@ var bdCommandRetrySleep = time.Sleep
 // not listed here, because the managed retry would fire on them too: it re-runs
 // any bd command, writes included, and a retry against a server whose breaker
 // is open lands inside the cooldown and fails fast again.
+//
+// The two consumers apply the table under different gates on purpose. The
+// managed retry runs only for a bd-contract store gc may recover
+// (bdTransportErrorMatches), while gc hook applies it to every failed work
+// query whatever the provider: a work query is an arbitrary shell command, and
+// a transport marker in its error leaves the answer unknown whichever store
+// printed it.
 //
 // It is an explicit compatibility surface with the bd CLI, and remains the
 // classification mechanism until bd ships a typed machine-readable error
@@ -1590,6 +1599,13 @@ func bdTransportRetryableError(cityPath, scopeRoot string, env map[string]string
 	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, bdTransportRetryableMarkers)
 }
 
+// bdTransportRecoverableError is the deliberately narrower trigger for managed
+// Dolt recovery: only markers that name an unreachable endpoint, or bd's silent
+// fallback after losing the server. The connection-teardown markers in
+// bdTransportRetryableMarkers ("broken pipe", "unexpected eof", "bad
+// connection", "use of closed network connection") are transient disconnects
+// that are retried but must not restart the managed server (#1878), so a marker
+// added to the shared table does not join this list by default.
 func bdTransportRecoverableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
 	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, []string{
 		"server unreachable",
