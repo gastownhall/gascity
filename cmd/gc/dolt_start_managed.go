@@ -984,6 +984,7 @@ func resolveManagedDoltConfigForStart(cityPath string, explicitArchiveLevel int)
 	if doltConfig.WriteTimeoutMillis <= 0 {
 		doltConfig.WriteTimeoutMillis = positiveEnvInt("GC_DOLT_WRITE_TIMEOUT_MILLIS")
 	}
+	doltConfig = applyCompactGCReadTimeoutFloor(doltConfig, os.Getenv)
 	return doltConfig, nil
 }
 
@@ -1009,7 +1010,14 @@ func parseEnvAutoGCEnabled(raw string) (value, ok bool) {
 }
 
 func positiveEnvInt(key string) int {
-	raw := os.Getenv(key)
+	return positiveEnvIntFrom(os.Getenv, key)
+}
+
+func positiveEnvIntFrom(getenv func(string) string, key string) int {
+	if getenv == nil {
+		return 0
+	}
+	raw := getenv(key)
 	if raw == "" {
 		return 0
 	}
@@ -1018,6 +1026,39 @@ func positiveEnvInt(key string) int {
 		return 0
 	}
 	return n
+}
+
+// compactGCReadTimeoutMillisFromEnv is the listener read-timeout floor implied
+// by compact GC env. GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS wins when set;
+// otherwise GC_DOLT_COMPACT_CALL_TIMEOUT_SECS. Zero means no floor: those
+// variables are compact-script defaults, not managed-server defaults, and
+// must not raise the 15s idle-reap timeout unless they are actually present
+// in the start environment (ga-ozq).
+func compactGCReadTimeoutMillisFromEnv(getenv func(string) string) int {
+	secs := positiveEnvIntFrom(getenv, "GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS")
+	if secs == 0 {
+		secs = positiveEnvIntFrom(getenv, "GC_DOLT_COMPACT_CALL_TIMEOUT_SECS")
+	}
+	if secs == 0 {
+		return 0
+	}
+	return secs * 1000
+}
+
+// applyCompactGCReadTimeoutFloor raises ReadTimeoutMillis when compact GC
+// env demands a longer inter-row produce gap than the configured listener.
+// CALL DOLT_GC('--full') emits no rows until GC finishes, so a 15s listener
+// cancels the query mid-GC; flooring here is how the start path wires
+// compact's timeout into the listener. A higher city.toml value is kept.
+func applyCompactGCReadTimeoutFloor(cfg config.DoltConfig, getenv func(string) string) config.DoltConfig {
+	floor := compactGCReadTimeoutMillisFromEnv(getenv)
+	if floor <= 0 {
+		return cfg
+	}
+	if cfg.EffectiveReadTimeoutMillis() < floor {
+		cfg.ReadTimeoutMillis = floor
+	}
+	return cfg
 }
 
 // resolveDoltArchiveLevel resolves the archive level for dolt auto_gc.

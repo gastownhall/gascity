@@ -2066,6 +2066,14 @@ const (
 	// #3022 (5m->30s), the scale_check storm RCA (30s->15s), #5053
 	// (wait_timeout knob added), #5383 (Reaper false positive; wait_timeout
 	// measured inert), #3626 (read collapse incident).
+	//
+	// CALL DOLT_GC('--full') emits no rows until GC finishes, so a listener
+	// read_timeout below expected GC duration cancels mid-GC (ga-ozq); raise
+	// it above expected GC duration, or set
+	// GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS /
+	// GC_DOLT_COMPACT_CALL_TIMEOUT_SECS in the managed-server start
+	// environment (which floors the listener) and restart. Compact's own
+	// client CALL_TIMEOUT does not extend this listener deadline on its own.
 	DefaultDoltReadTimeoutMillis = 120000
 	// DefaultDoltWriteTimeoutMillis is the managed Dolt listener write timeout.
 	DefaultDoltWriteTimeoutMillis = 300000
@@ -2093,7 +2101,13 @@ type DoltConfig struct {
 	// 0 means use the managed default.
 	MaxConnections int `toml:"max_connections,omitempty" jsonschema:"default=256"`
 	// ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.
-	// 0 means use the managed default.
+	// 0 means use the managed default. CALL DOLT_GC('--full') emits no rows
+	// until GC finishes, so a listener read_timeout below expected GC
+	// duration cancels mid-GC; raise this (or GC_DOLT_READ_TIMEOUT_MILLIS)
+	// above expected GC duration and restart managed dolt.
+	// GC_DOLT_COMPACT_CALL_TIMEOUT_SECS only bounds the compact client
+	// unless it or GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS is present in the
+	// managed-server start environment, where it floors the listener.
 	ReadTimeoutMillis int `toml:"read_timeout_millis,omitempty" jsonschema:"default=120000"`
 	// WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.
 	// 0 means use the managed default.

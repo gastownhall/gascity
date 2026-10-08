@@ -1571,7 +1571,7 @@
         },
         "read_timeout_millis": {
           "type": "integer",
-          "description": "ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.\n0 means use the managed default.",
+          "description": "ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.\n0 means use the managed default. CALL DOLT_GC('--full') emits no rows\nuntil GC finishes, so a listener read_timeout below expected GC\nduration cancels mid-GC; raise this (or GC_DOLT_READ_TIMEOUT_MILLIS)\nabove expected GC duration and restart managed dolt.\nGC_DOLT_COMPACT_CALL_TIMEOUT_SECS only bounds the compact client\nunless it or GC_DOLT_COMPACT_GC_READ_TIMEOUT_SECS is present in the\nmanaged-server start environment, where it floors the listener.",
           "default": 120000
         },
         "write_timeout_millis": {
