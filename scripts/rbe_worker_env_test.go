@@ -622,9 +622,9 @@ func TestRBEWorkerScriptAdvertisesWorkerEnv(t *testing.T) {
 		"apt-get install -y -qq \\\n\t\"${WORKER_TOOLSET[@]}\" >/dev/null\n",
 		"\tsudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf \"$RUNNER_TEMP/go.tgz\"\n",
 		"\tsudo cp -f \"$RUNNER_TEMP/dolt-linux-amd64/bin/dolt\" /usr/local/bin/dolt\n",
-		"\ntools/rbe/worker-env >\"$RUNNER_TEMP/worker-env.txt\"\n",
+		"\n\"$HERE/worker-env\" >\"$RUNNER_TEMP/worker-env.txt\"\n",
 		"WORKER_ENV=sha256:$(sha256sum <\"$RUNNER_TEMP/worker-env.txt\" | cut -d' ' -f1)\n",
-		"\ntools/rbe/worker-env --raw >\"$RUNNER_TEMP/worker-env.raw.txt\" || :\n",
+		"\n\"$HERE/worker-env\" --raw >\"$RUNNER_TEMP/worker-env.raw.txt\" || :\n",
 		"\nrender() {\n",
 		`--arg worker_env "$WORKER_ENV"`,
 		`"worker-env": { values: [$worker_env] }`,
@@ -645,7 +645,7 @@ func TestRBEWorkerScriptAdvertisesWorkerEnv(t *testing.T) {
 	// packages (installing libc6-dev upgrades libc6), so an install after
 	// the measurement could move a measured package on a host that already
 	// advertised its hash. Every later install adds packages only.
-	measured := strings.Index(script, "\ntools/rbe/worker-env ")
+	measured := strings.Index(script, "\n\"$HERE/worker-env\" ")
 	for _, m := range regexp.MustCompile(`apt-get install[^\n]*`).FindAllStringIndex(script, -1) {
 		if m[0] > measured && !strings.Contains(script[m[0]:m[1]], " --no-upgrade") {
 			t.Errorf("%s: %q runs after the worker-env measurement without --no-upgrade", rbeWorkerScript, script[m[0]:m[1]])

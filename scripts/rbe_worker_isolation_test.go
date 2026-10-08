@@ -101,6 +101,63 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 	}
 }
 
+// TestRBEWorkerScriptPathsResolveInTree proves the S1 refactor is a no-op
+// for today's callers: with RBE_PRODUCT_ROOT unset and the cwd at the repo
+// root (how the pool workflows run the script), HERE and RBE_PRODUCT_ROOT
+// must resolve to exactly the paths the old cwd-relative tools/rbe/... and
+// go.mod reads did. It runs only the script's path-resolution prelude
+// (everything up to and including the "rbe-worker: ..." log line), not the
+// whole script.
+func TestRBEWorkerScriptPathsResolveInTree(t *testing.T) {
+	root := repoRoot(t)
+	script := readFile(t, root, rbeWorkerScript)
+	m := regexp.MustCompile(`(?s)\nset -euo pipefail\n.*?\n(echo "rbe-worker: [^\n]*\n)`).FindStringSubmatch(script)
+	if m == nil {
+		t.Fatalf("%s: could not find the HERE/RBE_PRODUCT_ROOT prelude", rbeWorkerScript)
+	}
+	prelude := m[0]
+	for _, want := range []string{
+		`HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)`,
+		`RBE_PRODUCT_ROOT=$(cd "${RBE_PRODUCT_ROOT:-.}" && pwd -P)`,
+	} {
+		if !strings.Contains(prelude, want) {
+			t.Fatalf("%s: prelude %q missing %q", rbeWorkerScript, prelude, want)
+		}
+	}
+	siblings := []string{"worker-env", "worker-env-drift", "rbe-action-entry.c", "rbe-action-launch", "rbe-action-selftest", "rbe-action-sweep"}
+	script2 := prelude + "echo \"HERE=$HERE\"\necho \"RBE_PRODUCT_ROOT=$RBE_PRODUCT_ROOT\"\n"
+	for _, s := range siblings {
+		script2 += fmt.Sprintf(`echo "HERE/%s=$HERE/%s"`+"\n", s, s)
+	}
+	// BASH_SOURCE[0]'s dirname is how HERE is computed, so the probe script
+	// must live beside the real siblings in tools/rbe, exactly like
+	// blacksmith-worker.sh does today.
+	rbeDir := filepath.Join(root, "tools", "rbe")
+	probe := filepath.Join(rbeDir, ".paths-resolve-probe.sh")
+	if err := os.WriteFile(probe, []byte(script2), 0o755); err != nil {
+		t.Fatalf("write probe script: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Remove(probe); err != nil && !os.IsNotExist(err) {
+			t.Errorf("remove %s: %v", probe, err)
+		}
+	})
+	// runRBEScript (not exec.Command directly): the census's call-site count
+	// gains no new subprocess owner for this shim test (§8).
+	stdout, stderr, err := runRBEScript(root, []string{"PATH=" + os.Getenv("PATH")}, probe) // RBE_PRODUCT_ROOT deliberately unset
+	if err != nil {
+		t.Fatalf("prelude failed: %v\n%s", err, stderr)
+	}
+	out := stdout
+	want := fmt.Sprintf("rbe-worker: in-tree (%s), product %s\nHERE=%s\nRBE_PRODUCT_ROOT=%s\n", rbeDir, root, rbeDir, root)
+	for _, s := range siblings {
+		want += fmt.Sprintf("HERE/%s=%s\n", s, filepath.Join(rbeDir, s))
+	}
+	if out != want {
+		t.Errorf("prelude from repo root resolved paths to:\n%s\nwant:\n%s", out, want)
+	}
+}
+
 func TestRBEWorkerScriptIsolationSwitch(t *testing.T) {
 	script := readFile(t, repoRoot(t), rbeWorkerScript)
 	for _, want := range []string{
@@ -591,11 +648,11 @@ func TestRBEWorkerScriptGatesNativeLinkOnIsolation(t *testing.T) {
 		`taken=$(awk -F: '$3 >= 59000 && $3 <= 59063 { print FILENAME ": " $1 " (" $3 ")" }' /etc/passwd /etc/group)`,
 		`[ -z "$taken" ] || fail "uids/gids 59000-59063 must be free for the slot users, taken: $taken"`,
 		`sudo groupadd --system --gid "$id" "$u"`,
-		`gcc -static -O2 -Wall -Wextra -o "$RUNNER_TEMP/rbe-entry" tools/rbe/rbe-action-entry.c`,
-		`gcc -static -O2 -Wall -Wextra -DRBE_ACTION_EXEC -o "$RUNNER_TEMP/rbe-exec" tools/rbe/rbe-action-entry.c`,
-		`sudo install -m 0755 tools/rbe/rbe-action-launch "$LIB/launch"`,
-		`sudo install -m 0755 tools/rbe/rbe-action-sweep "$LIB/sweep"`,
-		`sudo install -m 0755 tools/rbe/rbe-action-selftest "$LIB/selftest"`,
+		`gcc -static -O2 -Wall -Wextra -o "$RUNNER_TEMP/rbe-entry" "$HERE/rbe-action-entry.c"`,
+		`gcc -static -O2 -Wall -Wextra -DRBE_ACTION_EXEC -o "$RUNNER_TEMP/rbe-exec" "$HERE/rbe-action-entry.c"`,
+		`sudo install -m 0755 "$HERE/rbe-action-launch" "$LIB/launch"`,
+		`sudo install -m 0755 "$HERE/rbe-action-sweep" "$LIB/sweep"`,
+		`sudo install -m 0755 "$HERE/rbe-action-selftest" "$LIB/selftest"`,
 		`sudo tee /etc/rbe-west/rbe-action.env >/dev/null <<-EOF`,
 		`sudo chmod 0440 /etc/sudoers.d/rbe-action && sudo visudo -cq`,
 		"render\n",

@@ -78,6 +78,10 @@
 #                       failed phase=<phase> or skipped.
 set -euo pipefail
 
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+RBE_PRODUCT_ROOT=$(cd "${RBE_PRODUCT_ROOT:-.}" && pwd -P)
+echo "rbe-worker: ${RBE_WORKER_REVISION:-in-tree} ($HERE), product $RBE_PRODUCT_ROOT"
+
 WORKER_MODE=${WORKER_MODE:-run}
 [ "$WORKER_MODE" = measure ] || : "${RBE_WORKER_TLS_CERT:?}" "${RBE_WORKER_TLS_KEY:?}" "${RBE_WEST_HOST:?}" "${WORKER_NAME:?}"
 case "$WORKER_MODE" in
@@ -120,7 +124,7 @@ if [ "$WORKER_MODE" != measure ]; then
 fi
 NL_VERSION=1.7.1
 NL_SHA256=a3d7abc2598e976d022fcdabe88a2f8fae46a3ae64f1868698002ca968dd88e9
-GO_VERSION=$(awk '/^go /{print $2; exit}' go.mod)
+GO_VERSION=$(awk '/^go /{print $2; exit}' "$RBE_PRODUCT_ROOT/go.mod")
 DOLT_VERSION=2.1.8
 DOLT_SHA256=f66318f08ed66e409fc39363ae0fff8ce6fbf6dba9f5bac632b91527b9632a74
 ROOT="$RUNNER_TEMP/nl-worker"
@@ -166,10 +170,10 @@ fi
 # with the toolchain its key names and its cached result is never one another
 # toolchain produced. The raw listing (dpkg's versions as installed) is only
 # for the drift report and the log; it is never hashed.
-tools/rbe/worker-env >"$RUNNER_TEMP/worker-env.txt"
+"$HERE/worker-env" >"$RUNNER_TEMP/worker-env.txt"
 WORKER_ENV=sha256:$(sha256sum <"$RUNNER_TEMP/worker-env.txt" | cut -d' ' -f1)
 echo "worker-env: $WORKER_ENV"
-tools/rbe/worker-env --raw >"$RUNNER_TEMP/worker-env.raw.txt" || :
+"$HERE/worker-env" --raw >"$RUNNER_TEMP/worker-env.raw.txt" || :
 # A worker with any other toolchain (a new distribution release, a glibc,
 # library or tool release, Go or dolt) can serve no gascity action; security
 # patches of the same releases measure the same. It registers anyway,
@@ -180,7 +184,7 @@ tools/rbe/worker-env --raw >"$RUNNER_TEMP/worker-env.raw.txt" || :
 # their own first (WORKER_MODE=measure) and turn that into the pin's drift
 # issue, which also caps the farm's pools while it is open. measure: drift is
 # the result, so it fails.
-if ! tools/rbe/worker-env-drift check "$RUNNER_TEMP/worker-env.txt" "$RUNNER_TEMP/worker-env.raw.txt"; then
+if ! (cd "$RBE_PRODUCT_ROOT" && "$HERE/worker-env-drift" check "$RUNNER_TEMP/worker-env.txt" "$RUNNER_TEMP/worker-env.raw.txt"); then
 	[ "$WORKER_MODE" != measure ] || exit 3
 	echo "worker-env: registering anyway with worker-env=$WORKER_ENV (actions without worker-env only)"
 fi
@@ -397,14 +401,14 @@ isolate() {
 	done
 	phase compile
 	sudo install -d -m 0755 /var/lib/rbe-action /var/lib/rbe-action/home "$LIB" /etc/rbe-west
-	gcc -static -O2 -Wall -Wextra -o "$RUNNER_TEMP/rbe-entry" tools/rbe/rbe-action-entry.c
-	gcc -static -O2 -Wall -Wextra -DRBE_ACTION_EXEC -o "$RUNNER_TEMP/rbe-exec" tools/rbe/rbe-action-entry.c
+	gcc -static -O2 -Wall -Wextra -o "$RUNNER_TEMP/rbe-entry" "$HERE/rbe-action-entry.c"
+	gcc -static -O2 -Wall -Wextra -DRBE_ACTION_EXEC -o "$RUNNER_TEMP/rbe-exec" "$HERE/rbe-action-entry.c"
 	phase install
 	sudo install -m 0755 "$RUNNER_TEMP/rbe-entry" "$LIB/entry"
 	sudo install -m 0755 "$RUNNER_TEMP/rbe-exec" "$LIB/exec"
-	sudo install -m 0755 tools/rbe/rbe-action-launch "$LIB/launch"
-	sudo install -m 0755 tools/rbe/rbe-action-sweep "$LIB/sweep"
-	sudo install -m 0755 tools/rbe/rbe-action-selftest "$LIB/selftest"
+	sudo install -m 0755 "$HERE/rbe-action-launch" "$LIB/launch"
+	sudo install -m 0755 "$HERE/rbe-action-sweep" "$LIB/sweep"
+	sudo install -m 0755 "$HERE/rbe-action-selftest" "$LIB/selftest"
 	# No directory but the action's own (its outputs, /tmp, /var/tmp, HOME,
 	# /dev/shm, TMPFS_DIRS: private per action) may be writable by every
 	# action, or one could leave files for a later one. The image's

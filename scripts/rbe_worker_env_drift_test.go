@@ -489,8 +489,8 @@ func TestRBEWorkerScriptMeasureMode(t *testing.T) {
 		"[ \"$WORKER_MODE\" = measure ] || : \"${RBE_WORKER_TLS_CERT:?}\" \"${RBE_WORKER_TLS_KEY:?}\" \"${RBE_WEST_HOST:?}\" \"${WORKER_NAME:?}\"\n",
 		"measure) ;;\n",
 		`*) echo "WORKER_MODE must be run, pool or measure" >&2; exit 2 ;;`,
-		"\ntools/rbe/worker-env >\"$RUNNER_TEMP/worker-env.txt\"\n",
-		"\nif ! tools/rbe/worker-env-drift check \"$RUNNER_TEMP/worker-env.txt\" \"$RUNNER_TEMP/worker-env.raw.txt\"; then\n\t[ \"$WORKER_MODE\" != measure ] || exit 3\n",
+		"\n\"$HERE/worker-env\" >\"$RUNNER_TEMP/worker-env.txt\"\n",
+		"\nif ! (cd \"$RBE_PRODUCT_ROOT\" && \"$HERE/worker-env-drift\" check \"$RUNNER_TEMP/worker-env.txt\" \"$RUNNER_TEMP/worker-env.raw.txt\"); then\n\t[ \"$WORKER_MODE\" != measure ] || exit 3\n",
 		"\n[ \"$WORKER_MODE\" != measure ] || exit 0\n",
 		"/nativelink-${NL_VERSION}-x86_64-unknown-linux-musl.tar.gz",
 	} {
