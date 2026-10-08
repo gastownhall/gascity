@@ -113,6 +113,13 @@ func newKilledSeatEnv(t *testing.T, agent config.Agent) *killedSeatEnv {
 	}
 }
 
+// routedClaim is the metadata of a lane-visible claim: one the kill path
+// releases (claimIsLaneVisible). It is routed to another lane, so it never
+// becomes demand for the seat's own pool.
+func routedClaim() map[string]string {
+	return map[string]string{beadmeta.RoutedToMetadataKey: "other/lane"}
+}
+
 // addWork creates a work bead assigned to assignee with the given status and
 // metadata.
 func (e *killedSeatEnv) addWork(t *testing.T, status, assignee string, meta map[string]string) beads.Bead {
@@ -234,18 +241,17 @@ func TestReconcileSessionBeads_KilledIdleOneShotSeatClosesInTheSameTick(t *testi
 	assertClosedAsKilled(t, e.reload(t, e.seat.ID))
 }
 
-// Rule 2: a seat with no started work gives back its unexecuted claims before
-// the close, with its fallback route (its template), as the close cascade and
-// the stranded repair release them; a bead's own routing is kept. The route is
-// what keeps a directly assigned workflow bead with no gc.routed_to visible to
-// pool demand, so a fresh seat is wanted for it. Released without a route, it
-// would be open, unassigned and invisible to every lane.
-//
-// A plain (non-workflow) bead's gc.run_target is not a demand or claim route
-// on this base (controllerDemandRouteCandidates, workflowRunTargetFallbackEligible),
-// so such a bead gets the stamp but is not demanded: the same outcome as the
-// close cascade and the stranded repair.
-func TestReconcileSessionBeads_KilledPoolSeatReleasesUnstartedWorkWithRouteThenCloses(t *testing.T) {
+// Rule 2 (v5.8d): a seat with no started work gives back its lane-visible
+// claims before the close, with its fallback route (its template), as the
+// close cascade and the stranded repair release them; a bead's own routing is
+// kept. Lane-visible means gc.routed_to, or a workflow bead, whose fallback
+// gc.run_target is a demand and claim route: the released workflow bead is
+// demanded, so a fresh seat is wanted for it. A directly assigned plain task
+// with no route would be invisible to every lane once released, so it stays
+// assigned: the close finds it and refuses, the seat holds its slot (no
+// stranded branch), and the assigned-work wake restarts it when the task is
+// ready.
+func TestReconcileSessionBeads_KilledPoolSeatReleasesOnlyLaneVisibleWork(t *testing.T) {
 	agent := persistentWorker()
 	agent.Dir = "" // a city-scoped pool, so the released bead's store is the probe's
 	agent.MinActiveSessions = intPtr(0)
@@ -256,21 +262,27 @@ func TestReconcileSessionBeads_KilledPoolSeatReleasesUnstartedWorkWithRouteThenC
 
 	e.tick(t, nil)
 
-	assertClosedAsKilled(t, e.reload(t, e.seat.ID))
-	for _, w := range []beads.Bead{workflow, plain} {
-		got := e.reload(t, w.ID)
-		if got.Status != "open" || got.Assignee != "" || got.Metadata[beadmeta.RunTargetMetadataKey] != "worker" {
-			t.Fatalf("unrouted work %s: status=%q assignee=%q %s=%q, want open, unassigned, routed to the seat's template worker",
-				w.ID, got.Status, got.Assignee, beadmeta.RunTargetMetadataKey, got.Metadata[beadmeta.RunTargetMetadataKey])
-		}
+	got := e.reload(t, workflow.ID)
+	if got.Status != "open" || got.Assignee != "" || got.Metadata[beadmeta.RunTargetMetadataKey] != "worker" {
+		t.Fatalf("workflow work: status=%q assignee=%q %s=%q, want open, unassigned, routed to the seat's template worker",
+			got.Status, got.Assignee, beadmeta.RunTargetMetadataKey, got.Metadata[beadmeta.RunTargetMetadataKey])
 	}
 	if got := e.reload(t, routed.ID); got.Assignee != "" || got.Metadata[beadmeta.RunTargetMetadataKey] != "" {
 		t.Fatalf("routed work: assignee=%q run_target=%q, want released and its own routing kept", got.Assignee, got.Metadata[beadmeta.RunTargetMetadataKey])
 	}
+	e.assertAssigned(t, plain, "open", e.seat.ID)
+	if got := e.reload(t, plain.ID).Metadata[beadmeta.RunTargetMetadataKey]; got != "" {
+		t.Fatalf("kept plain task was stamped %s=%q", beadmeta.RunTargetMetadataKey, got)
+	}
+	seat := e.reload(t, e.seat.ID)
+	assertKeptOpen(t, seat)
+	if seat.Metadata["state"] != "asleep" || seat.Metadata["sleep_reason"] != string(session.SleepReasonKilled) {
+		t.Fatalf("seat state=%q sleep_reason=%q, want asleep/killed holding its slot", seat.Metadata["state"], seat.Metadata["sleep_reason"])
+	}
 
 	ds := buildDesiredState("kill-town", e.city, e.now, e.cfg, e.sp, e.mem, io.Discard)
 	if got := ds.ScaleCheckCounts["worker"]; got != 1 {
-		t.Fatalf("worker demand = %d (%v), want 1: the released workflow bead (and not the plain one)", got, ds.ScaleCheckCounts)
+		t.Fatalf("worker demand = %d (%v), want 1: the released workflow bead", got, ds.ScaleCheckCounts)
 	}
 }
 
@@ -290,7 +302,9 @@ func TestReconcileSessionBeads_KilledPoolSeatReleasesAliasClaims(t *testing.T) {
 			if alias == "" || alias == e.seat.ID || alias == e.seat.Metadata["session_name"] {
 				t.Fatalf("fixture seat has no distinct stable alias: %v", e.seat.Metadata)
 			}
-			claim := e.addWork(t, "open", alias, nil)
+			// A workflow claim: lane-visible through the fallback route,
+			// and not demand for any pool before the release.
+			claim := e.addWork(t, "open", alias, map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow})
 
 			e.tick(t, nil)
 
@@ -329,7 +343,7 @@ func TestReconcileSessionBeads_KilledPoolSeatWithStartedWorkReleasesNothing(t *t
 		t.Run(name, func(t *testing.T) {
 			e := newKilledSeatEnv(t, persistentWorker())
 			started := seed(e, t)
-			sibling := e.addWork(t, "open", e.seat.ID, map[string]string{beadmeta.ContinuationGroupMetadataKey: "mol-1"})
+			sibling := e.addWork(t, "open", e.seat.ID, map[string]string{beadmeta.ContinuationGroupMetadataKey: "mol-1", beadmeta.RoutedToMetadataKey: "other/lane"})
 			// Blocked in_progress work is in the actionable snapshot with no
 			// wake demand; open work with execution evidence is not ready.
 			var assigned []beads.Bead
@@ -366,7 +380,7 @@ func TestReconcileSessionBeads_KilledPoolSeatWithDemandWakesInPlace(t *testing.T
 		t.Run(status, func(t *testing.T) {
 			e := newKilledSeatEnv(t, persistentWorker())
 			work := e.addWork(t, status, e.seat.ID, nil)
-			unready := e.addWork(t, "open", e.seat.ID, nil)
+			unready := e.addWork(t, "open", e.seat.ID, routedClaim())
 
 			// Only the first bead is in the actionable snapshot, and it is ready.
 			e.tick(t, []beads.Bead{work}, withReadyAssignedFlags([]bool{true}))
@@ -389,7 +403,7 @@ func TestReconcileSessionBeads_KilledPoolSeatWithPendingKillFenceIsNotFreed(t *t
 	if err := e.mem.SetMetadata(e.seat.ID, "state_reason", session.KillPendingReason); err != nil {
 		t.Fatalf("stamp kill fence: %v", err)
 	}
-	unstarted := e.addWork(t, "open", e.seat.ID, nil)
+	unstarted := e.addWork(t, "open", e.seat.ID, routedClaim())
 
 	e.tick(t, nil)
 
@@ -438,7 +452,7 @@ func TestReleaseUnexecutedClaimsOnKill_RechecksTheLiveRow(t *testing.T) {
 	for name, change := range cases {
 		t.Run(name, func(t *testing.T) {
 			e := newKilledSeatEnv(t, persistentWorker())
-			unstarted := e.addWork(t, "open", e.seat.ID, nil)
+			unstarted := e.addWork(t, "open", e.seat.ID, routedClaim())
 			snapshot := sessionInfosFromBeads([]beads.Bead{e.seat})[0]
 			change(e, t)
 
@@ -475,7 +489,7 @@ func TestReleaseUnexecutedClaimsOnKill_ReadsRigLegs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			claim, err := rigStore.Create(beads.Bead{Title: "rig claim", Type: "task", Assignee: seat.ID})
+			claim, err := rigStore.Create(beads.Bead{Title: "rig claim", Type: "task", Assignee: seat.ID, Metadata: routedClaim()})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -513,11 +527,11 @@ func TestReleaseUnexecutedClaimsOnKill_ReadsRigLegs(t *testing.T) {
 // stranded branch. The next pass releases it (it is not ready) and closes.
 func TestReconcileSessionBeads_KilledPoolSeatWorkAssignedAfterReleaseRefusesTheClose(t *testing.T) {
 	e := newKilledSeatEnv(t, persistentWorker())
-	unstarted := e.addWork(t, "open", e.seat.ID, nil)
+	unstarted := e.addWork(t, "open", e.seat.ID, routedClaim())
 	var late beads.Bead
 	e.store.afterList = func(beads.ListQuery, []beads.Bead) {
 		if late.ID == "" && e.reload(t, unstarted.ID).Assignee == "" {
-			late = e.addWork(t, "open", e.seat.ID, nil)
+			late = e.addWork(t, "open", e.seat.ID, routedClaim())
 		}
 	}
 
@@ -540,7 +554,7 @@ func TestReconcileSessionBeads_KilledPoolSeatWorkAssignedAfterReleaseRefusesTheC
 // seat then holds nothing and closes.
 func TestReconcileSessionBeads_KilledPoolSeatLeavesAClaimTakenMidRelease(t *testing.T) {
 	e := newKilledSeatEnv(t, persistentWorker())
-	claim := e.addWork(t, "open", e.seat.ID, nil)
+	claim := e.addWork(t, "open", e.seat.ID, routedClaim())
 	other := "other-seat"
 	e.store.afterList = func(q beads.ListQuery, got []beads.Bead) {
 		if q.Status == "open" && q.Assignee == e.seat.ID && len(got) > 0 {
@@ -571,7 +585,7 @@ func TestReconcileSessionBeads_KilledPoolSeatRowChangeMidReleaseKeepsTheSeat(t *
 	for name, patch := range cases {
 		t.Run(name, func(t *testing.T) {
 			e := newKilledSeatEnv(t, persistentWorker())
-			claim := e.addWork(t, "open", e.seat.ID, nil)
+			claim := e.addWork(t, "open", e.seat.ID, routedClaim())
 			done := false
 			e.store.afterList = func(q beads.ListQuery, got []beads.Bead) {
 				if !done && q.Status == "open" && q.Assignee == e.seat.ID && len(got) > 0 {

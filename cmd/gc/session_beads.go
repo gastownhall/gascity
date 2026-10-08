@@ -1317,9 +1317,9 @@ func releaseUnexecutedClaimsOnDrainAck(
 // or current_claim_bead_id) therefore survives: nothing is released, so it keeps
 // its whole context, including pre-assigned molecule siblings and their
 // gc.continuation_group, and the close's live work read refuses. Otherwise
-// every open claim is released, with the seat's fallback route so a directly
-// assigned bead with no gc.routed_to stays visible to a lane, as the close
-// cascade and the stranded repair release it.
+// every lane-visible open claim (claimIsLaneVisible) is released, with the
+// seat's fallback route, as the close cascade and the stranded repair release
+// it; a claim no lane would see stays assigned and keeps the seat.
 //
 // The identities include the stable alias namepool and max_active_sessions = 1
 // seats claim under (sessionAssignmentIdentifiersForConfig), the set the
@@ -1381,7 +1381,20 @@ func releaseUnexecutedClaimsOnKill(
 		status:        "open",
 		fallbackRoute: retiredSessionFallbackRoute(sessionBead),
 		leftover:      "the next close attempt, which refuses while they stay assigned",
+		releasable:    claimIsLaneVisible,
 	}, budget, stderr)
+}
+
+// claimIsLaneVisible reports whether a released claim would still be demanded
+// and claimable by route (CONTRACT v5.8d C3 rule 2): it carries gc.routed_to,
+// or it is a workflow bead, for which the fallback gc.run_target the release
+// stamps is a demand and claim route (controllerDemandRouteCandidates,
+// workflowRunTargetFallbackEligible). Any other unrouted bead, a directly
+// assigned plain task, would be stranded by a release: no lane demands or
+// claims it. It stays assigned instead; the close then finds it and refuses,
+// and the assigned-work wake restarts the seat when that work is ready.
+func claimIsLaneVisible(b beads.Bead) bool {
+	return strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" || workflowRunTargetFallbackEligible(b)
 }
 
 // killedSeatHoldsStartedWork reports whether any work bead assigned to one of
@@ -1431,10 +1444,11 @@ func killedSeatHoldsStartedWork(cityPath string, cfg *config.City, store beads.S
 // heldClaimRelease says which of a session's claims releaseHeldClaims gives
 // back and how.
 type heldClaimRelease struct {
-	kind          string // names the session in log lines: "draining", "killed"
-	status        string // the claim status released
-	fallbackRoute string // stamped on an otherwise unrouted bead; "" keeps the bead's routing
-	leftover      string // who collects the claims an exhausted budget leaves behind
+	kind          string                // names the session in log lines: "draining", "killed"
+	status        string                // the claim status released
+	fallbackRoute string                // stamped on an otherwise unrouted bead; "" keeps the bead's routing
+	leftover      string                // who collects the claims an exhausted budget leaves behind
+	releasable    func(beads.Bead) bool // nil releases every listed claim
 }
 
 // releaseHeldClaims is the shared body of the held-claim releases: every WORK
@@ -1483,7 +1497,7 @@ func releaseHeldClaims(
 				continue
 			}
 			for _, item := range work {
-				if session.IsSessionBeadOrRepairable(item) {
+				if session.IsSessionBeadOrRepairable(item) || (r.releasable != nil && !r.releasable(item)) {
 					continue
 				}
 				key := strconv.Itoa(storeIndex) + "\x00" + item.ID
