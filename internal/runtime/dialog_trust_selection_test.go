@@ -45,6 +45,12 @@ const codex0156TrustDialog = `› Ask Codex to do anything
 
   enter continue · esc quit`
 
+// codex0156TrustDialogQuitSelected is codex0156TrustDialog with the cursor on
+// "2. Quit" instead of the trust row.
+var codex0156TrustDialogQuitSelected = strings.Replace(codex0156TrustDialog,
+	"› 1. Trust and continue\n  2. Quit",
+	"  1. Trust and continue\n› 2. Quit", 1)
+
 func TestWorkspaceTrustDialogDoesNotConfirmNoExit(t *testing.T) {
 	withZeroDialogTimings(t)
 
@@ -103,9 +109,21 @@ func TestWorkspaceTrustConfirmKeysCodex0156TrustPreSelected(t *testing.T) {
 }
 
 func TestWorkspaceTrustConfirmKeysCodex0156QuitSelected(t *testing.T) {
-	content := strings.Replace(codex0156TrustDialog,
-		"› 1. Trust and continue\n  2. Quit",
-		"  1. Trust and continue\n› 2. Quit", 1)
+	keys, ok := workspaceTrustConfirmKeys(codex0156TrustDialogQuitSelected)
+	if !ok {
+		t.Fatal("workspaceTrustConfirmKeys() ok = false, want true")
+	}
+	if want := []string{"Up", "Enter"}; !reflect.DeepEqual(keys, want) {
+		t.Fatalf("workspaceTrustConfirmKeys() = %v, want %v", keys, want)
+	}
+}
+
+// TestWorkspaceTrustConfirmKeysCodex0156TrustRowIgnoresCase starts on
+// "2. Quit" so the Up can only come from finding the trust row by its label,
+// which must match regardless of case, as the other layouts' labels do.
+func TestWorkspaceTrustConfirmKeysCodex0156TrustRowIgnoresCase(t *testing.T) {
+	content := strings.Replace(codex0156TrustDialogQuitSelected,
+		"1. Trust and continue", "1. trust and continue", 1)
 	keys, ok := workspaceTrustConfirmKeys(content)
 	if !ok {
 		t.Fatal("workspaceTrustConfirmKeys() ok = false, want true")
@@ -194,6 +212,65 @@ func TestWorkspaceTrustConfirmKeysIgnoresScrollbackCursor(t *testing.T) {
 	}
 }
 
+// TestWorkspaceTrustConfirmKeysAnswersBottomMostTrustQuestion pins which
+// layout answers when the capture holds more than one agent's trust question.
+// The live dialog is the bottom-most, so a "Trust this folder?" in scrollback
+// must not pre-empt another agent's live dialog: answering with the Codex
+// layout would press Enter on Claude's "No, exit" or on Gemini's and pi's
+// "Don't trust", or find no keys and hand the phase off with the dialog still
+// up. The reverse holds too: another agent's stale dialog must not pre-empt a
+// live Codex 0.156 one.
+func TestWorkspaceTrustConfirmKeysAnswersBottomMostTrustQuestion(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    []string
+	}{
+		{
+			name:    "Codex 0.156 dialog in scrollback above live Claude dialog",
+			content: codex0156TrustDialog + "\n$ claude\n" + realTrustDialogNoExitSelected,
+			want:    []string{"Down", "Enter"},
+		},
+		{
+			name:    "Codex question quoted in scrollback above live Claude dialog",
+			content: "> Codex 0.156 now asks \"Trust this folder?\" at startup\n" + realTrustDialogNoExitSelected,
+			want:    []string{"Down", "Enter"},
+		},
+		{
+			name: "Codex 0.156 dialog in scrollback above live Gemini dialog",
+			content: codex0156TrustDialog + "\n$ gemini\n" +
+				"Do you trust the files in this folder?\n  1. Trust folder (city)\n  2. Trust parent folder\n● 3. Don't trust",
+			want: []string{"Up", "Up", "Enter"},
+		},
+		{
+			name:    "Codex 0.156 dialog in scrollback above live pi dialog",
+			content: codex0156TrustDialog + "\n$ pi\n" + " Trust project folder?\n\n   Trust\n → Don't trust",
+			want:    []string{"Up", "Enter"},
+		},
+		{
+			name:    "Codex 0.156 dialog in scrollback above live older Codex prompt",
+			content: codex0156TrustDialogQuitSelected + "\n$ codex\n" + "Do you trust the contents of this directory?",
+			want:    []string{"Enter"},
+		},
+		{
+			name:    "Claude dialog in scrollback above live Codex 0.156 dialog",
+			content: realTrustDialogNoExitSelected + "\n$ codex\n" + codex0156TrustDialogQuitSelected,
+			want:    []string{"Up", "Enter"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			keys, ok := workspaceTrustConfirmKeys(tt.content)
+			if !ok {
+				t.Fatal("workspaceTrustConfirmKeys() ok = false, want true")
+			}
+			if !reflect.DeepEqual(keys, tt.want) {
+				t.Fatalf("workspaceTrustConfirmKeys() = %v, want %v", keys, tt.want)
+			}
+		})
+	}
+}
+
 func TestWorkspaceTrustConfirmKeysBorderedLayout(t *testing.T) {
 	var bordered strings.Builder
 	for i, line := range strings.Split(realTrustDialogNoExitSelected, "\n") {
@@ -214,7 +291,7 @@ func TestWorkspaceTrustConfirmKeysBorderedLayout(t *testing.T) {
 
 func TestWorkspaceTrustConfirmKeysUpwardMovement(t *testing.T) {
 	// pi renders its trust prompt with the cursor able to start below the
-	// trust row, which is the only layout that needs Up rather than Down.
+	// trust row, so reaching it needs Up rather than Down.
 	const content = ` Trust project folder?
 
  /home/u/src/hold-court

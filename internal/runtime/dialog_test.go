@@ -1003,6 +1003,35 @@ func TestAcceptStartupDialogsFromStreamAcceptsTrustDialog(t *testing.T) {
 	}
 }
 
+// TestAcceptStartupDialogsFromStreamAcceptsCodex0156TrustDialog covers the
+// exec provider's stream path with the trust row pre-selected: the frame
+// shows the cursor on the trust row, so the stream confirms it with Enter
+// even though the composer line above the dialog reads as a ready prompt.
+func TestAcceptStartupDialogsFromStreamAcceptsCodex0156TrustDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	var sent []string
+	snapshots := make(chan string, 2)
+	snapshots <- codex0156TrustDialog
+	snapshots <- "› Ask Codex to do anything"
+	close(snapshots)
+
+	observed, err := AcceptStartupDialogsFromStreamWithStatus(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStreamWithStatus() error = %v", err)
+	}
+	if !observed || !reflect.DeepEqual(sent, []string{"Enter"}) {
+		t.Fatalf("observed = %v sent keys = %v, want observed with [Enter]", observed, sent)
+	}
+}
+
 func TestAcceptWorkspaceTrustDialogFromStreamPreservesEarlierSnapshots(t *testing.T) {
 	stream := &replayableSnapshotStream{update: make(chan struct{})}
 	stream.publish("Do you trust the contents of this directory?")
