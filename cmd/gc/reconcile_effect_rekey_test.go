@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // Arm A3 and the rekey effect (CONTRACT v5 S4, O2; I12; scenario R44).
@@ -173,6 +175,7 @@ func TestRekeyRefusesOnTokenChange(t *testing.T) {
 	}{
 		{"token changed", func(f *rekeyFixture) { _ = f.leaf.SetMeta(f.name, "GC_INSTANCE_TOKEN", "tok-other") }, causeIdentityChanged},
 		{"runtime gone", func(f *rekeyFixture) { _ = f.leaf.Stop(f.name) }, causeNotPresent},
+		{"presence unreadable", func(f *rekeyFixture) { f.leaf.LivenessErrors[f.name] = errors.New("tmux: server busy") }, causeLivenessUnknown},
 		{"name busy", func(f *rekeyFixture) { f.t.Cleanup(runtimeNames.tryLock(f.t.Name(), f.name)) }, causeNameBusy},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -230,5 +233,48 @@ func TestRekeyRefusedWhilePendingCreateClaim(t *testing.T) {
 	}
 	if s := f.run(p, it); s.Outcome != settledRefused || s.Cause != causeRedecided || f.row()["instance_token"] != "tok-new" {
 		t.Fatalf("settlement %+v, row token %q; want refused %s, unwritten", s, f.row()["instance_token"], causeRedecided)
+	}
+}
+
+// hookLeaf is the fixture's leaf with a session object behind the name, and
+// a hook run once, right after the rekey's identity read (its last GetMeta
+// key), on the effect's goroutine.
+type hookLeaf struct {
+	*fenceLeaf
+	object string
+	after  func()
+}
+
+func (l *hookLeaf) ObserveLivenessWithError(name string, pn []string) (runtime.Liveness, error) {
+	live, err := l.fenceLeaf.ObserveLivenessWithError(name, pn)
+	live.ObjectID = l.object
+	return live, err
+}
+
+func (l *hookLeaf) GetMeta(name, key string) (string, error) {
+	v, err := l.fenceLeaf.GetMeta(name, key)
+	if key == identityEnvKeys[len(identityEnvKeys)-1] && l.after != nil {
+		after := l.after
+		l.after = nil
+		after()
+	}
+	return v, err
+}
+
+// Kills an identity read not bracketed by presence (v5 O2): a runtime
+// replaced under the name right after the identity read (another session
+// object) refuses as not present, writing nothing.
+func TestRekeyBracketsIdentityReadWithPresence(t *testing.T) {
+	f := newRekeyFixture(t)
+	rt := f.residue("2", "tok-old")
+	hook := &hookLeaf{fenceLeaf: f.leaf, object: "$1"}
+	p, it := f.pass(rt)
+	p.Runtime = hook
+	hook.after = func() { hook.object = "$2" }
+	if s := f.run(p, it); s.Outcome != settledRefused || s.Cause != causeNotPresent {
+		t.Fatalf("settlement %+v, want refused %s", s, causeNotPresent)
+	}
+	if got := f.row()["instance_token"]; got != "tok-new" {
+		t.Fatalf("row instance_token = %q, want it unwritten", got)
 	}
 }

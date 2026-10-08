@@ -9,6 +9,11 @@ func seeded(leaf runtime.Provider, rt runtimeIdentity, row session.Info) {
 	_, _ = leaf.GetMeta("x", "GC_RUNTIME_EPOCH")
 	_, _ = strconv.Atoi(rt.Epoch)
 	_, _ = strconv.ParseInt(strings.TrimSpace(rt.Epoch), 10, 64)
+	_ = obs.OwnerState
+	_ = rt.SessionID == row.ID
+	_ = rt.Token != row.InstanceToken
+	_ = rt.Token == "" // an emptiness check: allowed
+	_ = attributePendingCreateRuntime(row)
 }
 
 // identityEnvKeys passes in the identity reader's file only.

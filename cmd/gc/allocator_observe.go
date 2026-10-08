@@ -4,7 +4,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -246,8 +245,8 @@ func listedObservation(snap *ObservationSnapshot, name string, now time.Time, ma
 			*f = RuntimeFact{ObservedAt: f.ObservedAt, Source: f.Source, Reason: obsReasonStale}
 		}
 	}
-	if obs.Listed.Value != ObsYes || obs.EnrichedAt.IsZero() || !obs.EnrichedAt.Equal(obs.Listed.ObservedAt) {
-		obs.Owner, obs.OwnerState, obs.Identity = reconcilekey.Key{}, OwnerUnknown, runtimeIdentity{}
+	if !obs.enrichedWithListing() {
+		obs.forgetOwner()
 	}
 	return obs
 }

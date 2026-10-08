@@ -13,12 +13,16 @@ import (
 	"testing"
 )
 
-// The identity lint (CONTRACT v5 R3, I6, I11): no v2 file reads
-// GC_INSTANCE_TOKEN, GC_SESSION_ID or GC_RUNTIME_EPOCH except through the
-// identity reader (readRuntimeIdentity, over identityEnvKeys), so
-// compareIdentity is the only reader of runtime identity; and no v2 file
-// but the comparator's parses a runtime epoch out of a struct field, so the
-// own-runtime and StaleSelf tests are never re-derived (ownRuntime).
+// The identity lint (CONTRACT v5 R3, I6, I11): compareIdentity is the only
+// way a v2 file decides whose runtime sits under a name. So no v2 file:
+//   - reads GC_INSTANCE_TOKEN, GC_SESSION_ID or GC_RUNTIME_EPOCH except
+//     through the identity reader (readRuntimeIdentity, over identityEnvKeys);
+//   - but the comparator's parses a runtime epoch out of a struct field, so
+//     the own-runtime and StaleSelf tests are never re-derived (ownRuntime);
+//   - but the comparator's and the inventory's reads the legacy owner fact
+//     (OwnerState and its values, OwnerID), or compares a SessionID or Token
+//     field with anything but "" (an emptiness check decides no owner);
+//   - calls legacy's own identity readers.
 
 // identityEnvKeyNames are the identity env keys.
 var identityEnvKeyNames = []string{"GC_INSTANCE_TOKEN", "GC_SESSION_ID", "GC_RUNTIME_EPOCH"}
@@ -30,6 +34,23 @@ var identityLintAllowed = map[string]string{"runtime_inventory_lane.go": "identi
 // epochParsers are the calls that parse a number out of a string.
 var epochParsers = []string{"Atoi", "ParseInt", "ParseUint", "Sscan", "Sscanf"}
 
+// ownerFactNames are the legacy owner fact's names.
+var ownerFactNames = []string{"OwnerState", "OwnerID", "OwnerSession", "OwnerNone", "OwnerUnknown"}
+
+// identityFields are the identity fields no v2 file compares itself.
+var identityFields = []string{"SessionID", "Token"}
+
+// legacyIdentityReaders are legacy's own ownership readers.
+var legacyIdentityReaders = []string{
+	"readPendingCreateIdentity", "readPendingCreateIdentityVia", "attributePendingCreateRuntime", "deadRuntimeBelongsToRow",
+}
+
+// identityOwnerFile reports whether base is the comparator's file or an
+// inventory file, which own the owner fact and the identity read.
+func identityOwnerFile(base string) bool {
+	return base == "reconcile_identity.go" || strings.HasPrefix(base, "runtime_inventory_") || strings.HasPrefix(base, "runtime_observation_")
+}
+
 // lintIdentitySource returns one "file:line: what" per violation in src,
 // parsed as path.
 func lintIdentitySource(t *testing.T, path string, src any) []string {
@@ -40,14 +61,27 @@ func lintIdentitySource(t *testing.T, path string, src any) []string {
 		t.Fatalf("parse %s: %v", path, err)
 	}
 	base := filepath.Base(path)
+	owner := identityOwnerFile(base)
 	var out []string
+	report := func(n ast.Node, what string) { out = append(out, fmt.Sprintf("%s: %s", fset.Position(n.Pos()), what)) }
 	for _, decl := range file.Decls {
 		allowed := identityLintAllowed[base] != "" && declNames(decl)[identityLintAllowed[base]]
 		ast.Inspect(decl, func(n ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.BasicLit:
 				if v, err := strconv.Unquote(n.Value); n.Kind == token.STRING && err == nil && slices.Contains(identityEnvKeyNames, v) && !allowed {
-					out = append(out, fmt.Sprintf("%s: %s", fset.Position(n.Pos()), v))
+					report(n, v)
+				}
+			case *ast.Ident:
+				switch {
+				case slices.Contains(ownerFactNames, n.Name) && !owner:
+					report(n, "owner fact "+n.Name)
+				case slices.Contains(legacyIdentityReaders, n.Name):
+					report(n, "legacy identity reader "+n.Name)
+				}
+			case *ast.BinaryExpr:
+				if (n.Op == token.EQL || n.Op == token.NEQ) && !owner && comparesIdentityField(n) {
+					report(n, "identity field compared")
 				}
 			case *ast.CallExpr:
 				sel, ok := n.Fun.(*ast.SelectorExpr)
@@ -56,7 +90,7 @@ func lintIdentitySource(t *testing.T, path string, src any) []string {
 				}
 				for _, arg := range n.Args {
 					if readsEpochField(arg) {
-						out = append(out, fmt.Sprintf("%s: epoch parsed by %s", fset.Position(n.Pos()), sel.Sel.Name))
+						report(n, "epoch parsed by "+sel.Sel.Name)
 					}
 				}
 			}
@@ -84,6 +118,20 @@ func declNames(decl ast.Decl) map[string]bool {
 	return names
 }
 
+// comparesIdentityField reports whether b compares a SessionID or Token
+// field with something other than "".
+func comparesIdentityField(b *ast.BinaryExpr) bool {
+	field := func(e ast.Expr) bool {
+		sel, ok := e.(*ast.SelectorExpr)
+		return ok && slices.Contains(identityFields, sel.Sel.Name)
+	}
+	empty := func(e ast.Expr) bool {
+		lit, ok := e.(*ast.BasicLit)
+		return ok && lit.Value == `""`
+	}
+	return (field(b.X) || field(b.Y)) && !empty(b.X) && !empty(b.Y)
+}
+
 // readsEpochField reports whether e reads a field named Epoch.
 func readsEpochField(e ast.Expr) bool {
 	found := false
@@ -101,7 +149,7 @@ func readsEpochField(e ast.Expr) bool {
 func identityLintFiles(t *testing.T) []string {
 	t.Helper()
 	var files []string
-	for _, pattern := range []string{"allocator_*.go", "reconcile_*.go", "runtime_inventory_*.go", "v2_*.go", "lane_pacing.go"} {
+	for _, pattern := range []string{"allocator_*.go", "reconcile_*.go", "runtime_inventory_*.go", "runtime_observation_*.go", "v2_*.go", "lane_pacing.go"} {
 		matches, err := filepath.Glob(pattern)
 		if err != nil {
 			t.Fatal(err)
@@ -119,10 +167,11 @@ func identityLintFiles(t *testing.T) []string {
 }
 
 // Kills a lint that matches nothing, an allowance that leaks past the
-// identity reader's key list or the comparator's file, and a v2 file that
-// reads the identity env or re-parses an epoch: the seeded file trips every
-// rule outside the allowances and only the allowed rule inside each, and the
-// v2 files trip none.
+// identity reader's key list, the comparator's file or the inventory's, and
+// a v2 file that reads the identity env, re-parses an epoch, reads the owner
+// fact, compares identity fields itself or calls a legacy identity reader:
+// the seeded file trips every rule outside the allowances and only the
+// allowed rules inside each, and the v2 files trip none.
 func TestIdentityLintBansDirectEnvReads(t *testing.T) {
 	seeded, err := os.ReadFile(filepath.Join("testdata", "identitylint", "seeded.go.txt"))
 	if err != nil {
@@ -132,10 +181,11 @@ func TestIdentityLintBansDirectEnvReads(t *testing.T) {
 		as   string
 		want int
 	}{
-		{"reconcile_effect_seeded.go", 6},
-		{"allocator_seeded.go", 6},
-		{"runtime_inventory_lane.go", 5}, // identityEnvKeys allowed
-		{"reconcile_identity.go", 4},     // epoch parsing allowed
+		{"reconcile_effect_seeded.go", 10},
+		{"allocator_seeded.go", 10},
+		{"runtime_inventory_lane.go", 6},    // identityEnvKeys, the owner fact and comparisons allowed
+		{"runtime_observation_cache.go", 7}, // the owner fact and comparisons allowed
+		{"reconcile_identity.go", 5},        // epoch parsing, the owner fact and comparisons allowed
 	} {
 		if got := lintIdentitySource(t, tc.as, seeded); len(got) != tc.want {
 			t.Errorf("seeded as %s: %d findings %v, want %d", tc.as, len(got), got, tc.want)

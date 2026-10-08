@@ -2005,3 +2005,23 @@ func TestCreateEffect_NamedCreateWritesNothingOnceItsContextEnded(t *testing.T) 
 		t.Fatalf("settlement = %+v, want an abandoned no-write that backs nothing off", e)
 	}
 }
+
+// Kills AdoptLive capturing a runtime that already names the row (the C4c1
+// review ruling: only an empty GC_SESSION_ID is adoptable). The reopened
+// row's own session ID on the runtime, with another token, leaves the row's
+// token and the runtime untouched, logged.
+func TestNamedAdoptLiveLeavesRuntimeNamingTheRowAlone(t *testing.T) {
+	store := fencedMemStore(t)
+	closed := seedClosedNamedRow(t, store, mayorCity(), nil)
+	var before int
+	row, sp, stderr, _ := adoptLiveRun(t, store, func(sp *stampFake, name string) {
+		setRuntimeMeta(t, sp, name, map[string]string{"GC_SESSION_ID": closed.ID, "GC_INSTANCE_TOKEN": "rt-own-token"})
+		before = sp.CountCalls("SetMeta", name)
+	})
+	if row.ID != closed.ID || row.Metadata["instance_token"] != closed.Metadata["instance_token"] {
+		t.Fatalf("row %s token %q, want reopened %s keeping its own %q", row.ID, row.Metadata["instance_token"], closed.ID, closed.Metadata["instance_token"])
+	}
+	if n := sp.CountCalls("SetMeta", mayorRuntime(t)) - before; n != 0 || !strings.Contains(stderr, "identity not stamped") {
+		t.Fatalf("SetMeta calls %d, stderr %q; want the runtime untouched and the refusal logged", n, stderr)
+	}
+}

@@ -384,3 +384,29 @@ func TestPendingUnsupportedPassesUnknownHolds(t *testing.T) {
 		t.Fatalf("no work reader: %+v, want work_unknown", v)
 	}
 }
+
+// Kills L2 reading identity off a runtime that is not present (v5 O2) and an
+// absent runtime confirmed as nothing to stop with L1 waived: with L1 waived,
+// a name never started, and one whose runtime is gone but whose sidecar
+// still carries the row's identity (acp's leftover sidecar, which reads
+// Current), both hold as unverifiable and stop nothing.
+func TestFenceL1WaivedAbsentRuntimeNeverProceeds(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		leftover bool
+	}{{"never started", false}, {"gone, sidecar left", true}} {
+		leaf := newFenceLeaf()
+		if tc.leftover {
+			startRuntime(t, leaf.Fake, "rt_a", ours("a"))
+			if err := leaf.Stop("rt_a"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		stops := leaf.CountCalls("Stop", "rt_a")
+		req := fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull &^ legLiveness}
+		v, confirmed := stopFenced(context.Background(), leaf, req, time.Now())
+		if v.Proceed || v.Reason == fenceNothingToStop || v.Reason != fenceTokenUnverifiable || confirmed || leaf.CountCalls("Stop", "rt_a") != stops {
+			t.Errorf("%s: %+v confirmed=%v, want held as token_unverifiable, nothing stopped", tc.name, v, confirmed)
+		}
+	}
+}

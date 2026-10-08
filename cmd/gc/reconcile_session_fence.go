@@ -113,6 +113,17 @@ func fenceDestructive(ctx context.Context, sp runtime.Provider, req fenceRequest
 		}
 	}
 	if req.Legs&legToken != 0 {
+		// Liveness first (v5 O2): identity read off a runtime not present
+		// (acp's leftover sidecar) proves nothing, so with L1 waived L2 reads
+		// presence itself, and an absent runtime is unverifiable, never
+		// nothing to stop.
+		if v.Liveness == "" {
+			v.Liveness = leafLiveness(ctx, leaf, name)
+		}
+		if v.Liveness != fenceLivenessPresent {
+			v.Reason, v.Escalate = fenceTokenUnverifiable, true
+			return v
+		}
 		if v.Reason, v.Escalate = tokenLeg(ctx, leaf, name, req.Row); v.Reason != "" {
 			return v
 		}

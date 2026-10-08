@@ -11,10 +11,11 @@ import (
 // The rekey effect (CONTRACT v5 S4; owner ruling 3): arm A3's intent to
 // align a row's instance_token with the runtime of the same row that carries
 // an older token, so that runtime reads Current and its stop's L2 passes.
-// Under the runtime name lock it re-reads the runtime fresh, presence first
-// and identity second (readRuntimeIdentity), and proceeds only while the
-// runtime is still StaleSelf to the pass's row under S4's guards, with the
-// token the pass saw. Then it is the row-write effect: one CAS of
+// Under the runtime name lock it re-reads the runtime fresh: presence, then
+// identity (readRuntimeIdentity), then presence again on the same session
+// object. It proceeds only while the runtime is still StaleSelf to the
+// pass's row under S4's guards, with the token the pass saw
+// (rekeyStillHolds). Then it is the row-write effect: one CAS of
 // instance_token that re-decides on the fresh row, so the row is still open,
 // at the generation and token the pass saw (the basis), and still holds no
 // pending_create_claim (rekeyable). It never writes generation. A probing
@@ -44,13 +45,34 @@ func (e rekey) run(ctx context.Context) settlement {
 		return settlement{Outcome: settledRefused, Cause: causeNameBusy}
 	}
 	defer unlock()
-	live, status, err := runtime.ObserveLivenessBoundedSince(ctx, leaf, name, nil, since, fenceProbeTimeout)
-	if status != runtime.ObservationComplete || err != nil || !live.Present() {
-		return settlement{Outcome: settledRefused, Cause: causeNotPresent}
+	before, cause := presentObject(ctx, leaf, name, since)
+	if cause != "" {
+		return settlement{Outcome: settledRefused, Cause: cause}
 	}
 	rt := readRuntimeIdentity(ctx, leaf, name)
-	if !rekeyable(row, rt) || strings.TrimSpace(rt.Token) != e.it.Patch["instance_token"] {
+	after, cause := presentObject(ctx, leaf, name, time.Now())
+	switch {
+	case cause != "":
+		return settlement{Outcome: settledRefused, Cause: cause}
+	case after.ObjectID != before.ObjectID:
+		return settlement{Outcome: settledRefused, Cause: causeNotPresent}
+	case !rekeyStillHolds(row, rt, e.it.Patch["instance_token"]):
 		return settlement{Outcome: settledRefused, Cause: causeIdentityChanged}
 	}
 	return e.rowWrite.run(ctx)
+}
+
+// presentObject is one fresh presence read of name on leaf, from a refresh
+// that started after since: the reading, or the refusal cause. The rekey
+// brackets its identity read between two, which must see the same session
+// object, so the identity read belongs to the runtime both found present.
+func presentObject(ctx context.Context, leaf runtime.Provider, name string, since time.Time) (runtime.Liveness, string) {
+	live, status, err := runtime.ObserveLivenessBoundedSince(ctx, leaf, name, nil, since, fenceProbeTimeout)
+	switch {
+	case status != runtime.ObservationComplete || err != nil:
+		return live, causeLivenessUnknown
+	case !live.Present():
+		return live, causeNotPresent
+	}
+	return live, ""
 }

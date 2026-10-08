@@ -26,11 +26,11 @@ const (
 // in flight: the pass loop skips such rows (R5).
 func armIdentity(r *rowFacts) (intent, bool) {
 	rt := r.w.Observed[r.k].Identity
-	switch compareIdentity(r.row.Info, rt) {
+	switch v := compareIdentity(r.row.Info, rt); v {
 	case identityNewerSelf:
 		return intent{Reason: decideNewerSelf}, true
 	case identityStaleSelf:
-		if !rekeyable(r.row.Info, rt) {
+		if !rekeyable(v, r.row.Info) {
 			return intent{}, false
 		}
 		basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
@@ -38,14 +38,4 @@ func armIdentity(r *rowFacts) (intent, bool) {
 		return intent{Kind: intentRekey, Reason: decideRekey, Basis: basis, Patch: patch}, true
 	}
 	return intent{}, false
-}
-
-// rekeyable is S4's guards on one identity read of row's runtime. StaleSelf
-// is three of them (compareIdentity): the row's session ID, a non-empty
-// runtime token (v5.1 B6), and the runtime's epoch at most the row's
-// generation. The fourth: the row holds no pending_create_claim, since a
-// pending create's runtime is resolved by S1 and C8.2(a), never re-keyed
-// (X2). The arm and the effect's fresh read both apply it.
-func rekeyable(row session.Info, rt runtimeIdentity) bool {
-	return compareIdentity(row, rt) == identityStaleSelf && !row.PendingCreateClaim
 }
