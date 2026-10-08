@@ -63,7 +63,12 @@ SOLO_TESTS = {
 # exactly one target's TOPOLOGY_PHASES, and TOPOLOGY_SETUP_PHASES (the steps
 # that build the state the later phases need) run in all three.
 # scripts/acceptance_run_selection_test.go keeps this equal to the test's
-# t.Run names.
+# t.Run names. Each target sees the side effects of the setup phases and its
+# own phases only: doctor-after-start and native-lane run without the
+# pre-start doctor and bd-front-door's write before them, and stop-quiescent
+# and restart without doctor-after-start and native-lane, so no target
+# exercises those orders. A phase that needs another phase's state goes in
+# that phase's target: restart reads the bead bd-front-door creates.
 TOPOLOGY_SETUP_PHASES = [
     "init-defers-the-store",
     "rig-inherits",

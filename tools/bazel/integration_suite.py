@@ -17,8 +17,8 @@ so the unit lane already covers it. This script writes a test_suite naming
 every go_test in the (a) and (b) packages into a managed block of
 test/BUILD.bazel, plus every test_suite there named *_integration_solo_tests
 (a package's long integration-build tests, each run alone in a target of its
-own, e.g. //cmd/gc:gc_integration_solo_tests). //test/integration and the acceptance tiers have lanes of
-their own and are left out.
+own, e.g. //cmd/gc:gc_integration_solo_tests). //test/integration and the
+acceptance tiers have lanes of their own and are left out.
 
 Run after gazelle (see `make bazel-sync`); the CI "BUILD files in sync" job
 fails when the result differs from what is committed, so a new
