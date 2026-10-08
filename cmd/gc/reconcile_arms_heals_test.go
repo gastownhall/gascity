@@ -451,10 +451,7 @@ func TestAwakeHealRestoresAnAsleepRowsOwnRuntime(t *testing.T) {
 		{"died since the pass", "tok-3", "tok-3", false, decideAwakeHeal, causeRuntimeNotOwn},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := newHealCase(t, livenessAlive, desireNone, "state", "asleep", "sleep_reason", "idle")
-			c.w.Now, c.w.ObsMaxAge = censusNow, observeMaxAge
-			ident := runtimeIdentity{Known: true, SessionID: c.k.ID, Token: tc.inventory}
-			c.w.Obs = newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s-heal": {Identity: ident}}, completeBackend("tmux", "s-heal"))
+			c := ownRuntimeCase(t, tc.inventory, "state", "asleep", "sleep_reason", "idle")
 			it := c.decide()
 			if it.Reason != tc.want {
 				t.Fatalf("decideRow = (%q, %q), want reason %q", it.Kind, it.Reason, tc.want)
@@ -481,5 +478,57 @@ func TestAwakeHealRestoresAnAsleepRowsOwnRuntime(t *testing.T) {
 				t.Fatalf("settlement %+v, state %q, want the row healed awake", s, c.meta(t)["state"])
 			}
 		})
+	}
+}
+
+// ownRuntimeCase is a row whose runtime the inventory reads alive at
+// censusNow, carrying token.
+func ownRuntimeCase(t *testing.T, token string, meta ...string) *healCase {
+	t.Helper()
+	c := newHealCase(t, livenessAlive, desireNone, meta...)
+	c.w.Now, c.w.ObsMaxAge = censusNow, observeMaxAge
+	ident := runtimeIdentity{Known: true, SessionID: c.k.ID, Token: token}
+	c.w.Obs = newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s-heal": {Identity: ident}}, completeBackend("tmux", "s-heal"))
+	return c
+}
+
+// Kills the awake heal reviving a row an operator holds dormant (I15,
+// I-STOP-3/4): a `gc session kill` that landed between a PreWake and its
+// provider Start leaves the row asleep and killed with its own Current
+// runtime up, and so does a kill whose fence is still live; neither, nor a
+// user-hold, city-stop, suspend intent, wait hold, live hold or live
+// quarantine, is healed awake (the simulator's attach-recreates on a
+// quarantined row found the last). A kill that lands after the pass refuses
+// the admitted heal.
+func TestAwakeHealNeverRevivesAnOperatorDormantRow(t *testing.T) {
+	later := censusNow.Add(time.Hour).Format(time.RFC3339)
+	for name, meta := range map[string][]string{
+		"killed, fence aged out": {"sleep_reason", "killed", "slept_at", censusNow.Add(-time.Hour).Format(time.RFC3339)},
+		"kill fence live":        {"sleep_reason", "killed", "state_reason", session.KillPendingReason, "slept_at", censusNow.Add(-time.Minute).Format(time.RFC3339)},
+		"user-hold":              {"sleep_reason", "user-hold"},
+		"city-stop":              {"sleep_reason", "city-stop"},
+		"suspend intent":         {"sleep_intent", "user-hold"},
+		"wait hold":              {"wait_hold", "op"},
+		"held":                   {"held_until", later},
+		"quarantined":            {"sleep_reason", "quarantine", "quarantined_until", later},
+	} {
+		c := ownRuntimeCase(t, "tok-3", append([]string{"state", "asleep"}, meta...)...)
+		if it := c.decide(); it.Reason == decideAwakeHeal {
+			t.Errorf("%s: an operator-dormant row was healed awake", name)
+		}
+	}
+
+	c := ownRuntimeCase(t, "tok-3", "state", "asleep", "sleep_reason", "idle")
+	c.before = func() {
+		if err := c.store.SetMetadataBatch(c.k.ID, session.KillPendingPatch(censusNow)); err != nil {
+			t.Error(err)
+		}
+	}
+	sp := &freshObserver{
+		Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true},
+		env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": "tok-3"},
+	}
+	if _, s := c.run(t, sp, nil); s.Outcome != settledRefused || c.meta(t)["state"] != "asleep" {
+		t.Fatalf("settlement %+v, state %q, want a kill after the pass to refuse the heal", s, c.meta(t)["state"])
 	}
 }

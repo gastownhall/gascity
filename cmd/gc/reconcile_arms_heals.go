@@ -2,6 +2,7 @@ package main
 
 import (
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -100,10 +101,15 @@ func armCrashHeal(r *rowFacts) (intent, bool) {
 // inventory's identity read must find the row's token (O2 Current); the
 // effect proves it again fresh. Without it a runtime started outside the
 // controller on an asleep row (`gc session attach`) stays orphaned, as S1
-// reads the shape as Noop.
+// reads the shape as Noop. Unlike legacy, a row an operator holds dormant is
+// never woken (I15, I-STOP-3/4; operatorDormant): its runtime is the
+// operator-dormant stop path's (C5a3's lost-commit stop, C6b2). That covers a
+// `gc session kill` that lands between a PreWake and its provider Start,
+// before any runtime exists to fence.
 func armAwakeHeal(r *rowFacts) (intent, bool) {
 	info := r.row.Info
-	if strings.TrimSpace(info.MetadataState) != string(session.StateAsleep) || r.entry == nil || !r.entry.Liveness.alive() || r.w.Obs == nil {
+	if strings.TrimSpace(info.MetadataState) != string(session.StateAsleep) || r.entry == nil || !r.entry.Liveness.alive() || r.w.Obs == nil ||
+		operatorDormant(info, r.w.Now) {
 		return intent{}, false
 	}
 	obs, ok := r.w.Obs.Observation(strings.TrimSpace(info.SessionName), r.w.Now, r.w.ObsMaxAge)
@@ -111,6 +117,18 @@ func armAwakeHeal(r *rowFacts) (intent, bool) {
 		return intent{}, false
 	}
 	return r.heal(intentRowHealFresh, decideAwakeHeal, session.MetadataPatch{"state": string(session.StateAwake)})
+}
+
+// operatorDormant reports an asleep row an operator holds dormant: a kill
+// fence, a sleep an operator owns (killed, user-hold, city-stop), a user-hold
+// sleep intent (a suspend), a wait hold, or a live hold or quarantine.
+func operatorDormant(info session.Info, now time.Time) bool {
+	switch session.SleepReason(strings.TrimSpace(info.SleepReason)) {
+	case session.SleepReasonKilled, session.SleepReasonUserHold, session.SleepReasonCityStop:
+		return true
+	}
+	return session.IsKillPendingInfo(info, now) || strings.TrimSpace(info.SleepIntent) == string(session.SleepReasonUserHold) ||
+		strings.TrimSpace(info.WaitHold) != "" || metadataTimeInFuture(info.HeldUntil, now) || metadataTimeInFuture(info.QuarantinedUntil, now)
 }
 
 // armStrandedClear is SESS-603 (clearStrandedEventMarker): an alive row ends
