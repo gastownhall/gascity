@@ -5,9 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"maps"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -51,8 +55,10 @@ import (
 // fixture inject one (EFFECT-STRUCTURE §2 item 5).
 //
 // TestEveryKeptBehaviorOfARegisteredArmHasAParityFixture gates the fixtures
-// on BEHAVIORS.md: every KEPT row whose owner names only registered arms and
-// effect kinds must be named by a fixture.
+// on BEHAVIORS.md: every KEPT row whose owner names only reachable arms and
+// effect kinds must be named by a fixture. An arm is reachable once it is in
+// rowArms; a kind once it is registered and a registered arm, or the
+// allocation's createIntent, can propose it (proposedKinds).
 
 // parityFixture is one twin-world fixture. Rows and Work seed the city leg
 // on both sides; each runtime runs under the session name of the row whose
@@ -145,8 +151,8 @@ var parityUnported = map[string]parityEntry{
 	"A7 row-metadata": {"C7d", "legacy's session-bead sync stamps the row metadata of a row created or changed this tick; v2 registers no row-metadata arm yet", []string{"synced_at", "command", "work_dir"}},
 }
 
-// parityKindOwners maps each registered effect kind to the BEHAVIORS owner
-// phrases it implements; a PR registering a kind adds its phrases.
+// parityKindOwners maps each reachable effect kind to the BEHAVIORS owner
+// phrases it implements; the PR that makes a kind reachable adds its phrases.
 var parityKindOwners = map[string]*regexp.Regexp{
 	intentRowHeal: regexp.MustCompile(`\brow write\b`),
 	intentCreate:  regexp.MustCompile(`\bC1 create\b|\bC2 named reopen\b`),
@@ -835,29 +841,177 @@ func keptOwners(t *testing.T) map[string][]string {
 	return out
 }
 
-// keptOwnerUnits is the arms and effect kinds an owner cell names.
-func keptOwnerUnits(owner string) []string {
+// keptOwnerUnits is the arms and effect kinds an owner cell names, the
+// kinds by their phrases.
+func keptOwnerUnits(owner string, phrases map[string]*regexp.Regexp) []string {
 	var units []string
 	for _, m := range parityArmRef.FindAllStringSubmatch(owner, -1) {
 		units = append(units, "A"+m[1])
 	}
-	for _, kind := range slices.Sorted(maps.Keys(parityKindOwners)) {
-		if parityKindOwners[kind].MatchString(owner) {
+	for _, kind := range slices.Sorted(maps.Keys(phrases)) {
+		if phrases[kind].MatchString(owner) {
 			units = append(units, kind)
 		}
 	}
 	return units
 }
 
-// Kills a registered arm or effect kind landing without parity fixtures for
-// the KEPT behaviors it owns: every KEPT row whose owner cell names only
-// registered arms and kinds is named by a fixture. A row naming an arm not
-// yet registered is exempt until that arm registers.
+// keptGate is the KEPT rows the gate binds, by ID to owner: those whose owner
+// names at least one arm or kind, and only reachable ones.
+func keptGate(owners map[string][]string, phrases map[string]*regexp.Regexp, reachable func(unit string) bool) map[string]string {
+	gated := map[string]string{}
+	for owner, ids := range owners {
+		units := keptOwnerUnits(owner, phrases)
+		if len(units) == 0 || slices.ContainsFunc(units, func(u string) bool { return !reachable(u) }) {
+			continue
+		}
+		for _, id := range ids {
+			gated[id] = owner
+		}
+	}
+	return gated
+}
+
+// parityReachable is reachability: an arm in rowArms, or a registered kind
+// a proposer can return.
+func parityReachable(arms, kinds, proposed map[string]bool) func(unit string) bool {
+	return func(u string) bool { return arms[u] || kinds[u] && proposed[u] }
+}
+
+// parityProposers are where a pass proposes intents (tracePass): decideRow,
+// whose arms it reaches through rowArms, and the allocation's creates.
+var parityProposers = []string{"decideRow", "createIntent"}
+
+// parityKindTables are the kind tables a walk from a proposer must not
+// enter: they name every kind and propose none.
+var parityKindTables = map[string]bool{"intentKinds": true, "effectRegistry": true}
+
+// proposedKinds is the value of every intent-kind constant (a key of
+// intentKinds) the proposers in dir's v2 files (reconcile_*, allocator_*)
+// reference, following the package functions and variables they name and
+// the methods they select, never a local, so a kind an arm returns counts
+// once the arm is in rowArms. It over-approximates: a kind an arm only
+// compares against counts too.
+func proposedKinds(t *testing.T, dir string) map[string]bool {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	funcs, methods := map[string][]ast.Node{}, map[string][]ast.Node{}
+	consts, top := map[string]ast.Expr{}, map[any]bool{}
+	fset := token.NewFileSet()
+	for _, f := range files {
+		base := filepath.Base(f)
+		if strings.HasSuffix(base, "_test.go") || !strings.HasPrefix(base, "reconcile_") && !strings.HasPrefix(base, "allocator_") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, f, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range file.Decls {
+			switch d := d.(type) {
+			case *ast.FuncDecl:
+				if top[d] = true; d.Recv != nil {
+					methods[d.Name.Name] = append(methods[d.Name.Name], d)
+				} else {
+					funcs[d.Name.Name] = append(funcs[d.Name.Name], d)
+				}
+			case *ast.GenDecl:
+				for _, spec := range d.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					top[vs] = true
+					for i, name := range vs.Names {
+						if d.Tok == token.CONST && i < len(vs.Values) {
+							consts[name.Name] = vs.Values[i]
+						} else if d.Tok == token.VAR {
+							funcs[name.Name] = append(funcs[name.Name], vs)
+						}
+					}
+				}
+			}
+		}
+	}
+	var value func(name string) (string, bool)
+	value = func(name string) (string, bool) {
+		switch e := consts[name].(type) {
+		case *ast.BasicLit:
+			v, err := strconv.Unquote(e.Value)
+			return v, err == nil && e.Kind == token.STRING
+		case *ast.Ident:
+			return value(e.Name)
+		}
+		return "", false
+	}
+	kindNames := map[string]bool{}
+	for _, d := range funcs["intentKinds"] {
+		for _, v := range d.(*ast.ValueSpec).Values {
+			for _, elt := range v.(*ast.CompositeLit).Elts {
+				if id, ok := elt.(*ast.KeyValueExpr).Key.(*ast.Ident); ok {
+					kindNames[id.Name] = true
+				}
+			}
+		}
+	}
+	out, seen := map[string]bool{}, map[string]bool{}
+	var walk func(method bool, name string)
+	var inspect func(root ast.Node)
+	inspect = func(root ast.Node) {
+		ast.Inspect(root, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.SelectorExpr:
+				walk(true, n.Sel.Name)
+				inspect(n.X)
+				return false
+			case *ast.Ident:
+				if v, ok := value(n.Name); ok && kindNames[n.Name] {
+					out[v] = true
+				}
+				if n.Obj == nil || top[n.Obj.Decl] { // a package name, never a local
+					walk(false, n.Name)
+				}
+			}
+			return true
+		})
+	}
+	walk = func(method bool, name string) {
+		key, decls := "func "+name, funcs
+		if method {
+			key, decls = "method "+name, methods
+		}
+		if seen[key] || parityKindTables[name] {
+			return
+		}
+		seen[key] = true
+		for _, d := range decls[name] {
+			inspect(d)
+		}
+	}
+	for _, p := range parityProposers {
+		walk(false, p)
+	}
+	return out
+}
+
+// Kills an arm or effect kind becoming reachable without parity fixtures
+// for the KEPT behaviors it owns: every KEPT row whose owner cell names only
+// reachable arms and kinds is named by a fixture. A row naming an arm not yet
+// registered, or a kind nothing registered proposes, is exempt until then.
 func TestEveryKeptBehaviorOfARegisteredArmHasAParityFixture(t *testing.T) {
 	arms, kinds := parityRegistered()
-	for kind := range kinds {
-		if parityKindOwners[kind] == nil {
-			t.Errorf("effect kind %s is registered with no BEHAVIORS owner phrase in parityKindOwners", kind)
+	reachable := parityReachable(arms, kinds, proposedKinds(t, "."))
+	var reached []string
+	for _, kind := range slices.Sorted(maps.Keys(kinds)) {
+		switch {
+		case !reachable(kind):
+		case parityKindOwners[kind] == nil:
+			t.Errorf("effect kind %s is registered and proposed with no BEHAVIORS owner phrase in parityKindOwners", kind)
+		default:
+			reached = append(reached, kind)
 		}
 	}
 	covered := map[string]bool{}
@@ -867,23 +1021,52 @@ func TestEveryKeptBehaviorOfARegisteredArmHasAParityFixture(t *testing.T) {
 		}
 	}
 	owners := keptOwners(t)
-	var gated, exempt int
-	for _, owner := range slices.Sorted(maps.Keys(owners)) {
-		units := keptOwnerUnits(owner)
-		registered := len(units) > 0
-		for _, u := range units {
-			registered = registered && (arms[u] || kinds[u])
-		}
-		if !registered {
-			exempt += len(owners[owner])
-			continue
-		}
-		for _, id := range owners[owner] {
-			gated++
-			if !covered[id] {
-				t.Errorf("KEPT %s (owner %q) has no parity fixture", id, owner)
-			}
+	gated := keptGate(owners, parityKindOwners, reachable)
+	for _, id := range slices.Sorted(maps.Keys(gated)) {
+		if !covered[id] {
+			t.Errorf("KEPT %s (owner %q) has no parity fixture", id, gated[id])
 		}
 	}
-	t.Logf("KEPT rows gated %d, exempt %d", gated, exempt)
+	total := 0
+	for _, ids := range owners {
+		total += len(ids)
+	}
+	t.Logf("KEPT rows gated %d, exempt %d; reachable kinds %v", len(gated), total-len(gated), reached)
+}
+
+// Kills a gate that binds a kind before anything proposes it, and one that
+// stays open after: a kind registered with no proposing arm gates no row; a
+// registered arm that proposes it gates the row, which then needs a fixture.
+func TestKeptGateBindsAKindOnceARegisteredArmProposesIt(t *testing.T) {
+	dir := t.TempDir()
+	write := func(src string) {
+		if err := os.WriteFile(filepath.Join(dir, "reconcile_fake.go"), []byte("package main\n"+src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const kinds = `
+const (
+	intentFake = "fake"
+	intentLaunch = intentFake
+)
+var effectRegistry = map[string]int{intentFake: 1}
+var intentKinds = map[string]int{intentLaunch: 1}
+func decideRow() { _ = rowArms }
+func createIntent() {}
+`
+	owners := map[string][]string{"S1 fake start (PreWake)": {"FAKE-1"}, "A99 fake gate": {"FAKE-2"}}
+	phrases := map[string]*regexp.Regexp{"fake": regexp.MustCompile(`\bS1\b`)}
+	gate := func() map[string]string {
+		reachable := parityReachable(map[string]bool{"A1": true}, map[string]bool{"fake": true}, proposedKinds(t, dir))
+		return keptGate(owners, phrases, reachable)
+	}
+	// armOther names the registry, which names every kind and proposes none.
+	write(kinds + "var rowArms = []rowArm{{\"A1\", armOther}}\nfunc armOther() { _ = effectRegistry }\n")
+	if got := gate(); len(got) != 0 {
+		t.Fatalf("a registered kind no arm proposes gated %v", got)
+	}
+	write(kinds + "var rowArms = []rowArm{{\"A1\", armFake}}\nfunc armFake() { launch() }\nfunc launch() { _ = intentLaunch }\n")
+	if got := gate(); !maps.Equal(got, map[string]string{"FAKE-1": "S1 fake start (PreWake)"}) {
+		t.Fatalf("with a proposing arm the gate binds %v, want FAKE-1 only", got)
+	}
 }
