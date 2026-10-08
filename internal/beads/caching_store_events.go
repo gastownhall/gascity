@@ -117,12 +117,20 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 			verifiedClosedFromBacking = true
 		}
 	}
-	if conflictsCached && eventType != "bead.closed" && (locallyMutated || recentWrite) && !recentlyLocal && !verifiedConflict {
+	// A field patch merges onto the cached row and keeps its revision, so an
+	// unverified one older than the read that installed that revision pairs
+	// old fields with the current revision, and a CAS at it overwrites the
+	// newer write (mc-03lk4). Events carry no revision: the install below
+	// drops a clean row's unverified field update, and this verification is
+	// what still lets a real one apply.
+	staleRisk := eventType == "bead.updated" && fieldConflictCached
+	if conflictsCached && eventType != "bead.closed" && (locallyMutated || recentWrite || staleRisk) && !recentlyLocal && !verifiedConflict {
 		// The bead is flagged locally mutated only because a prior applied
 		// event set its mutation seq (noteMutationLocked sets beadSeq on every
 		// applied event), or because of a local write older than the recency
 		// window, including one whose beadSeq a later scan cleared (a late
-		// event snapshotted before that write must not roll it back). Backing reads are reliable here (no in-flight write-through),
+		// event snapshotted before that write must not roll it back), or it
+		// is clean and the patch would change its fields (above). Backing reads are reliable here (no in-flight write-through),
 		// so verify the conflicting event against the backing store instead of
 		// dropping it outright: drop only genuinely stale events (which would
 		// clobber an unflushed local write); apply when the backing store
@@ -286,7 +294,11 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 				// seq advancing past the read-phase snapshot is the reliable
 				// signal that some local write intervened since the backing
 				// verification (gastownhall/gascity#2210).
+				// beadChanged ignores the revision, so a refresh that
+				// reinstalled equal fields at a newer one (an ABA since the
+				// verify) is caught by comparing it.
 				changedSinceVerify := beadChanged(current, verifiedRecentLocalBase, false) ||
+					current.Revision != verifiedRecentLocalBase.Revision ||
 					c.beadSeq[patch.ID] != seqBase
 				// Re-check a genuine recent local write under the write lock to
 				// catch a write that landed between the read-lock verification
@@ -299,8 +311,11 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 				// apply the conflict only if it was verified against the
 				// backing store under the read lock and nothing changed since
 				// (no concurrent local write); otherwise drop and let
-				// reconciliation reconverge (gastownhall/gascity#2210).
-				if locallyMutated &&
+				// reconciliation reconverge (gastownhall/gascity#2210). A clean
+				// row's field update is held to the same rule (mc-03lk4),
+				// including one that first conflicts here, with a row a read
+				// installed since the read phase.
+				if (locallyMutated || (eventType == "bead.updated" && fieldConflict)) &&
 					(!verifiedRecentLocal || changedSinceVerify) {
 					return
 				}

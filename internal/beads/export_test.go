@@ -96,3 +96,21 @@ func (c *CachingStore) ReconcileForTest() {
 	c.mu.Unlock()
 	c.runReconciliation()
 }
+
+// WriteRowForTest rewrites id's row as an out-of-process writer would: mutate
+// changes its fields and the revision advances. A test delivers that write's
+// event after it, since a CachingStore installs a field-changing event on a
+// cached row only once its backing read agrees (mc-03lk4).
+func (m *MemStore) WriteRowForTest(id string, mutate func(*Bead)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.beads {
+		if m.beads[i].ID == id {
+			mutate(&m.beads[i])
+			m.beads[i].Revision++
+			m.beads[i].UpdatedAt = time.Now().Round(0)
+			return
+		}
+	}
+	panic("WriteRowForTest: no row " + id)
+}
