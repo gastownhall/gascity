@@ -89,11 +89,13 @@ func (x *createEffects) createNamed(ctx context.Context, pass *createPass, p cre
 }
 
 // adoptLiveIdentity gives an AdoptLive row and the runtime it adopted one
-// identity (LL5, v5 O2), after the identifier locks are released. A runtime
-// that names another session is left alone, and so is the row: its token
-// belongs to that session. Otherwise the row records the runtime's own
-// GC_INSTANCE_TOKEN by CAS (recordRowToken), a runtime with no token getting
-// a minted one, and only then is the runtime stamped (stampAdoptedRuntime)
+// identity (LL5, v5 O2), after the identifier locks are released. Only a
+// runtime that adoptableIdentity accepts on a fresh read, and that a fresh
+// read after it confirms present, is stamped; any other is left alone, and
+// so is the row: a token under a session ID belongs to that session. The
+// row records the runtime's own GC_INSTANCE_TOKEN by CAS (recordRowToken),
+// a runtime with no token getting a minted one, and only then is the
+// runtime stamped (stampAdoptedRuntime)
 // with the epoch the row holds: a lost CAS leaves the runtime with no session
 // ID and a token that is not the row's, which the comparator reads as
 // Unknown. A failure or a panic is logged and leaves the landed create
@@ -113,18 +115,21 @@ func (x *createEffects) adoptLiveIdentity(pass *createPass, p createPlan, writte
 }
 
 func adoptLiveStamp(sp runtime.Provider, store beads.Store, name string, written session.Info) error {
-	sid, err := sp.GetMeta(name, "GC_SESSION_ID")
-	if err != nil {
-		return fmt.Errorf("reading GC_SESSION_ID: %w", err)
+	leaf, _, known := runtime.ResolveBackend(sp, name)
+	if !known {
+		return errors.New("the runtime's backend is unknown")
 	}
-	if sid = strings.TrimSpace(sid); sid != "" && sid != written.ID {
-		return fmt.Errorf("the runtime names session %s", sid)
+	rt := readRuntimeIdentity(context.Background(), leaf, name)
+	if !adoptableIdentity(rt) {
+		return fmt.Errorf("the runtime's identity is not adoptable (%s)", compareIdentity(written, rt))
 	}
-	token, err := sp.GetMeta(name, "GC_INSTANCE_TOKEN")
-	if err != nil {
-		return fmt.Errorf("reading GC_INSTANCE_TOKEN: %w", err)
+	// Liveness first: a token read off a runtime that is gone (acp's leftover
+	// sidecar) proves nothing, so presence is re-confirmed after the read.
+	live, status, err := runtime.ObserveLivenessBoundedSince(context.Background(), leaf, name, nil, time.Now(), fenceProbeTimeout)
+	if status != runtime.ObservationComplete || err != nil || !live.Present() {
+		return errors.New("the runtime is not confirmed present after its identity read")
 	}
-	token, minted := strings.TrimSpace(token), ""
+	token, minted := strings.TrimSpace(rt.Token), ""
 	if token == "" {
 		minted = session.NewInstanceToken()
 		token = minted

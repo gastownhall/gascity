@@ -852,8 +852,10 @@ func namedRuntimeName(t *testing.T, cfg *config.City) string {
 	return spec.SessionName
 }
 
-// Kills: a probe reintroduced, adopting an attributed runtime, and the S3
-// storm or stall (AM-N6, P3-6b §2.2): every row of the occupancy table.
+// Kills: a probe reintroduced, adopting an attributed runtime (a Foreign
+// acp runtime, whose OwnerState is never set, included) or an unread one,
+// and the S3 storm or stall (AM-N6, P3-6b §2.2): every row of the occupancy
+// table, AdoptLive by adoptableIdentity's rule.
 func TestAllocator_NamedPlan_OccupancyFromObservation(t *testing.T) {
 	cfg := chatCity("always")
 	name := namedRuntimeName(t, cfg)
@@ -868,10 +870,16 @@ func TestAllocator_NamedPlan_OccupancyFromObservation(t *testing.T) {
 		{"absent", func(*allocFixture) {}, true, false, ""},
 		{"corpse", func(f *allocFixture) { f.corpse(name) }, true, false, ""},
 		{"zombie", func(f *allocFixture) { f.alive(name, InventoryAttrs{}).fact(name, FactProcessAlive, ObsNo) }, true, false, ""},
-		{"alive-ownerless", func(f *allocFixture) { f.alive(name, InventoryAttrs{OwnerState: OwnerNone}) }, true, true, ""},
-		{"alive-unattributable", func(f *allocFixture) { f.alive(name, InventoryAttrs{}) }, true, true, ""},
-		{"alive-attribution-pending", func(f *allocFixture) { f.alive(name, InventoryAttrs{Incarnation: "i-1"}) }, false, false, gateOwnerPending},
+		{"alive-ownerless", func(f *allocFixture) { f.alive(name, InventoryAttrs{Identity: runtimeIdentity{Known: true}}) }, true, true, ""},
+		{"alive-legacy-adopted", func(f *allocFixture) {
+			f.alive(name, InventoryAttrs{Identity: runtimeIdentity{Known: true, Token: "rt-tok"}})
+		}, true, true, ""},
+		{"alive-identity-unread", func(f *allocFixture) { f.alive(name, InventoryAttrs{Incarnation: "i-1"}).unread(name) }, false, false, gateOwnerPending},
 		{"alive-owned", func(f *allocFixture) { f.alive(name, InventoryAttrs{OwnerState: OwnerSession, OwnerID: "gc-closed"}) }, false, false, gateNameHeld + "gc-closed"},
+		// acp never sets OwnerState: the identity alone decides (C2d review).
+		{"alive-foreign-acp", func(f *allocFixture) {
+			f.alive(name, InventoryAttrs{Identity: runtimeIdentity{Known: true, SessionID: "gc-other", Token: "other-tok"}})
+		}, false, false, gateNameHeld + "gc-other"},
 	}
 	for _, tc := range cases {
 		f := newAllocFixture(t, cfg)

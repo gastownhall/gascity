@@ -105,11 +105,12 @@ func checkPureFiles(t *testing.T, files []string) {
 }
 
 // decideFiles are the decide's files, A2's realization index, admission,
-// decideRow's arm table, the dirty filter and the identity comparator.
+// decideRow's arm table and arms, the dirty filter and the identity
+// comparator.
 var decideFiles = []string{
 	"allocator_decide.go", "allocator_plan.go", "allocator_snapshot.go", "allocator_index.go", "reconcile_admit.go",
-	"reconcile_session_decide.go", "reconcile_dirty.go", "reconcile_identity.go", "reconcile_stop_request.go",
-	"reconcile_arms_drain.go",
+	"reconcile_session_decide.go", "reconcile_arms_identity.go", "reconcile_dirty.go", "reconcile_identity.go",
+	"reconcile_stop_request.go", "reconcile_arms_drain.go",
 }
 
 // purityInputs is a city that exercises every step: pool reuse and plans,

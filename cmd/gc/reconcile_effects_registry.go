@@ -63,4 +63,5 @@ var effectRegistry = map[string]effectBuilder{
 	intentCreate:      createEffect,     // C1, C2
 	intentDrainCancel: drainClearEffect, // A19 (C6a)
 	intentDrainVoid:   drainClearEffect, // A19 (C6a)
+	intentRekey:       rekeyEffect,      // A3
 }

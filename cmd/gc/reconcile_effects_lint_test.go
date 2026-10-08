@@ -17,8 +17,9 @@ import (
 
 // The effects' write lint (CONTRACT v5 R3, I24): effect and step files reach
 // the store only through fencedWriter, start no runtime through legacy's
-// start path, and call no provider verb directly (effectProviderVerbs). C4c2 and C6a extend it to the identity env keys and
-// the stop-request keys.
+// start path, and call no provider verb directly (effectProviderVerbs).
+// C4c2's identity lint (reconcile_identity_lint_test.go) bans the identity
+// env keys in every v2 file; C6a extends this one to the stop-request keys.
 
 // effectBannedMethods are the blind writers. Any selector naming one is
 // banned, a method value included:

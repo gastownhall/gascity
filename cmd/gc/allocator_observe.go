@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The allocator's reading of the observation cache (I3) per census row, under
@@ -19,9 +20,10 @@ import (
 //   - only unknown liveness, and a stale or unprimed attach on a backend that
 //     reports attach, make a row uncertain.
 //
-// Facts are attributed by bead ID: a runtime name that several open rows
-// share (enterprise slot-scoped names, F8) is alive for its owner row only,
-// and occupied for the others.
+// Facts are attributed by the runtime's identity (compareIdentity): a
+// runtime name that several open rows share (enterprise slot-scoped names,
+// F8) is alive for its owner row only, occupied for the rows it is Foreign
+// to, and unknown for the rest.
 
 // rowLiveness is a census row's runtime liveness as the allocator reads it.
 type rowLiveness uint8
@@ -30,16 +32,16 @@ type rowLiveness uint8
 // re-proves (F3).
 const (
 	// livenessUnknown: nothing proves the runtime alive or gone, or the name
-	// is listed and its identity is unread, failed or ownerless (v5 O1). The
+	// is listed and its identity reads Unknown or Ownerless (v5 O1). The
 	// row is uncertain: Keep, and no grant (C2.9, GUAR-053).
 	livenessUnknown rowLiveness = iota
 	// livenessAlive: the row's runtime name is listed and fresh (Yes, or
 	// listed by the latest fresh pass on a backend that has not primed), its
-	// pane and process are not known dead, and the runtime is attributed to
-	// this row or its name is unique.
+	// pane and process are not known dead, and the runtime is the row's own:
+	// Current, StaleSelf or NewerSelf.
 	livenessAlive
-	// livenessOccupied: the name is listed, alive or dead, but another row
-	// owns it.
+	// livenessOccupied: the name is listed, alive or dead, and its runtime
+	// is Foreign: another row's.
 	livenessOccupied
 	// livenessGone: the latest pass finished within maxAge, every backend
 	// listed completely and attested or confirmed its server dead, and the
@@ -48,9 +50,9 @@ const (
 	// livenessDead: the row's runtime name is listed and fresh, but its pane
 	// is dead (a corpse: tmux remain-on-exit keeps an exited pane listed) or
 	// the process probe found its agent dead (a zombie), and the runtime is
-	// attributed to this row or its name is unique. A zombie is not alive
-	// (BEHAVIORS #7). It is not uncertain: like gone, the row is a start
-	// candidate, and the start path recycles the dead pane.
+	// the row's own, as for alive. A zombie is not alive (BEHAVIORS #7). It
+	// is not uncertain: like gone, the row is a start candidate, and the
+	// start path recycles the dead pane.
 	livenessDead
 )
 
@@ -81,11 +83,11 @@ func (l rowLiveness) startCandidate() bool {
 
 // Reasons a row reads uncertain or unknown.
 const (
-	observeReasonNoPass       = "no-fresh-complete-pass"
-	observeReasonOwnerUnknown = "shared-name-owner-unknown"
-	observeReasonIdentity     = "identity-unread"
-	observeReasonOwnerless    = "identity-ownerless"
-	observeReasonAttach       = "attach-"
+	observeReasonNoPass          = "no-fresh-complete-pass"
+	observeReasonIdentity        = "identity-unread"
+	observeReasonIdentityUnknown = "identity-unknown"
+	observeReasonOwnerless       = "identity-ownerless"
+	observeReasonAttach          = "attach-"
 )
 
 // rowObservation is one census row's runtime facts for one pass.
@@ -97,6 +99,9 @@ type rowObservation struct {
 	// alive and its attach is stale or unprimed on a backend that reports it.
 	Uncertain bool
 	Reason    string // why the row is unknown or uncertain
+	// Identity is a present runtime's identity as the lane read it; not
+	// Known for a runtime not present. Arm A3 compares it (v5 S4).
+	Identity runtimeIdentity
 }
 
 // observeCensus reads snap for every canonical census row at now.
@@ -105,7 +110,7 @@ func observeCensus(snap *ObservationSnapshot, c *sessionCensus, now time.Time, m
 	out := make(map[rowKey]rowObservation, len(c.canonical))
 	for _, k := range c.canonical {
 		name := strings.TrimSpace(c.Rows[k].Info.SessionName)
-		out[k] = observeRow(snap, k.ID, name, len(c.RowsNamed(name)), listed, complete, now, maxAge)
+		out[k] = observeRow(snap, c.Rows[k].Info, name, listed, complete, now, maxAge)
 	}
 	return out
 }
@@ -138,53 +143,35 @@ func inventoryAbsence(snap *ObservationSnapshot, now time.Time, maxAge time.Dura
 	return listed, complete
 }
 
-// observeRow reads one row. sharers is how many canonical rows carry name.
-// A listed name is classified on its identity first: no arm acts on a runtime
-// whose identity is unread, failed or ownerless (v5 O1). The owner test is
-// otherwise today's, over the identity read, until C4c2 rewires it through
-// compareIdentity.
-func observeRow(snap *ObservationSnapshot, id, name string, sharers int, listed map[string]bool, complete bool, now time.Time, maxAge time.Duration) rowObservation {
+// observeRow reads one row. A listed name is classified on its identity
+// first, through compareIdentity (v5 O1, O2): Foreign is occupied; Unknown
+// and Ownerless read unknown, and arm A9 holds the row; Current, and the
+// row's own older or newer incarnation (StaleSelf, NewerSelf, which arm A3
+// re-keys or holds), read alive or dead by the pane and the process.
+func observeRow(snap *ObservationSnapshot, row session.Info, name string, listed map[string]bool, complete bool, now time.Time, maxAge time.Duration) rowObservation {
 	var o rowObservation
-	var obs RuntimeObservation
-	present := false
-	f := snap.Fact(name, FactListed, now, maxAge)
-	switch {
-	case name == "":
-		o.Reason = observeReasonNoPass
-	case listed[name] && f.Value == ObsYes:
-		obs, present = snap.Observation(name, now, maxAge)
-	case listed[name]:
-		// Listed by the latest fresh pass on a backend that has not primed
-		// (exec, ssh and other unattested backends never do): present.
-		obs, present = listedObservation(snap, name, now, maxAge), true
-	case listedSincePass(snap, name, now, maxAge):
-		obs, present = snap.Observation(name, now, maxAge)
-	case complete:
+	obs, present, gone, reason := readPresence(snap, name, listed, complete, now, maxAge)
+	o.Reason = reason
+	if gone {
 		o.Liveness = livenessGone
-	case f.Value == ObsYes:
-		// Listed by an earlier fresh pass; the latest was partial there.
-		obs, present = snap.Observation(name, now, maxAge)
-	default:
-		o.Reason = observeReasonNoPass
-		if f.Reason != "" {
-			o.Reason = f.Reason
-		}
 	}
 	if present {
-		ident := obs.Identity
-		switch {
-		case !ident.Known:
-			o.Reason = observeReasonIdentity
-		case ident.SessionID == "" && ident.Token == "":
-			o.Reason = observeReasonOwnerless
-		case ident.SessionID != "" && ident.SessionID != id:
+		o.Identity = obs.Identity
+		switch compareIdentity(row, obs.Identity) {
+		case identityForeign:
 			o.Liveness = livenessOccupied
-		case ident.SessionID == "" && sharers > 1:
-			o.Reason = observeReasonOwnerUnknown
-		case obs.Running.Value == ObsNo || obs.ProcessAlive.Value == ObsNo:
-			o.Liveness = livenessDead
+		case identityOwnerless:
+			o.Reason = observeReasonOwnerless
+		case identityUnknown:
+			o.Reason = observeReasonIdentity
+			if obs.Identity.Known {
+				o.Reason = observeReasonIdentityUnknown
+			}
 		default:
 			o.Liveness = livenessAlive
+			if obs.Running.Value == ObsNo || obs.ProcessAlive.Value == ObsNo {
+				o.Liveness = livenessDead
+			}
 		}
 	}
 	if o.Liveness == livenessAlive {
@@ -204,6 +191,37 @@ func observeRow(snap *ObservationSnapshot, id, name string, sharers int, listed 
 	}
 	o.Uncertain = o.Uncertain || o.Liveness == livenessUnknown
 	return o
+}
+
+// readPresence reads name's presence from the latest pass (listed, complete:
+// inventoryAbsence) and snap's facts: the observation of a present name, or
+// gone when the pass proves the name unlisted; otherwise neither, with the
+// reason. observeRow and readRuntimeName read presence in this one order.
+func readPresence(snap *ObservationSnapshot, name string, listed map[string]bool, complete bool, now time.Time, maxAge time.Duration) (obs RuntimeObservation, present, gone bool, reason string) {
+	f := snap.Fact(name, FactListed, now, maxAge)
+	switch {
+	case name == "":
+		reason = observeReasonNoPass
+	case listed[name] && f.Value == ObsYes:
+		obs, present = snap.Observation(name, now, maxAge)
+	case listed[name]:
+		// Listed by the latest fresh pass on a backend that has not primed
+		// (exec, ssh and other unattested backends never do): present.
+		obs, present = listedObservation(snap, name, now, maxAge), true
+	case listedSincePass(snap, name, now, maxAge):
+		obs, present = snap.Observation(name, now, maxAge)
+	case complete:
+		gone = true
+	case f.Value == ObsYes:
+		// Listed by an earlier fresh pass; the latest was partial there.
+		obs, present = snap.Observation(name, now, maxAge)
+	default:
+		reason = observeReasonNoPass
+		if f.Reason != "" {
+			reason = f.Reason
+		}
+	}
+	return obs, present, gone, reason
 }
 
 // listedSincePass reports whether a fresh probe wrote name's Listed=Yes

@@ -838,12 +838,23 @@ func namedTreeSnapshot(t *testing.T, dir string) []string {
 }
 
 // adoptStampProvider is probePanicProvider answering only LL5's identity
-// stamp on an AdoptLive, which it records: reads of GC_SESSION_ID,
+// stamp on an AdoptLive, which it records: the identity read (a tmux
+// environment), the presence re-confirm after it, reads of GC_SESSION_ID,
 // GC_INSTANCE_TOKEN and BEADS_HOLDER_TOKEN, and writes of those and
 // GC_RUNTIME_EPOCH. Any other call panics.
 type adoptStampProvider struct {
 	probePanicProvider
 	meta map[string]string
+	// readErr fails the identity read and the presence probe.
+	readErr error
+}
+
+func (p adoptStampProvider) GetAllEnvironment(string) (map[string]string, error) {
+	return maps.Clone(p.meta), p.readErr
+}
+
+func (p adoptStampProvider) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
+	return runtime.Liveness{Running: true, Alive: true}, p.readErr
 }
 
 func (p adoptStampProvider) GetMeta(name, key string) (string, error) {
@@ -1787,10 +1798,12 @@ func TestNamedAdoptLiveMintsOnlyWithoutToken(t *testing.T) {
 	}
 }
 
-// Kills: copying another session's token onto the row, and minting over a
-// token the effect could not read (LL5 review). A runtime naming another
-// session, or whose identity read fails, leaves the row with the create's
-// token and the runtime untouched; the effect logs it.
+// Kills: copying another session's token onto the row, minting over a token
+// the effect could not read (LL5 review), and capturing a token without
+// re-confirming presence after the read (C4c1 review ruling). A runtime
+// naming another session, whose identity read fails, or that is gone with
+// its identity still readable, leaves the row with the create's token and
+// the runtime untouched; the effect logs it.
 func TestNamedAdoptLiveLeavesUnownedRuntimeAlone(t *testing.T) {
 	boom := errors.New("server busy")
 	for _, tc := range []struct {
@@ -1802,6 +1815,13 @@ func TestNamedAdoptLiveLeavesUnownedRuntimeAlone(t *testing.T) {
 		}},
 		{name: "unreadable ID", prep: func(sp *stampFake, _ string) { sp.getErr["GC_SESSION_ID"] = boom }},
 		{name: "unreadable token", prep: func(sp *stampFake, _ string) { sp.getErr["GC_INSTANCE_TOKEN"] = boom }},
+		// acp's leftover sidecar: the identity reads, the runtime is gone.
+		{name: "gone, identity still readable", prep: func(sp *stampFake, name string) {
+			setRuntimeMeta(t, sp, name, map[string]string{"GC_INSTANCE_TOKEN": "rt-own-token"})
+			if err := sp.Stop(name); err != nil {
+				t.Fatal(err)
+			}
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var created string
@@ -1916,10 +1936,11 @@ func TestNamedAdoptLiveReadsTheRowLive(t *testing.T) {
 	}
 }
 
-// panicStampFake panics on the first identity read.
-type panicStampFake struct{ *stampFake }
+// panicStampFake panics on the first identity write: the read is
+// readRuntimeIdentity's, which recovers a panic as an unread identity.
+type panicStampFake struct{ tmuxStampFake }
 
-func (panicStampFake) GetMeta(string, string) (string, error) { panic("provider exploded") }
+func (panicStampFake) SetMeta(string, string, string) error { panic("provider exploded") }
 
 // Kills: a stamp panic escaping adoptLiveIdentity (LL5 review): the create
 // already landed, and a panic past it would settle it as ambiguous.
@@ -1930,7 +1951,7 @@ func TestNamedAdoptLiveStampPanicKeepsCreateLanded(t *testing.T) {
 	h.reserve(t, "c1")
 	plan := namedPlan(t, cfg, "c1", "mayor")
 	plan.Named.AdoptLive = true
-	sp := panicStampFake{newStampFake(t, plan.Named.SessionName)}
+	sp := panicStampFake{tmuxStampFake{newStampFake(t, plan.Named.SessionName)}}
 	h.runAll(t, &createPass{cfg: cfg, store: fencedMemStore(t), sp: sp}, plan)
 	if s := h.entry(t); !s.Landed || s.Ambiguous || s.Err != nil || !strings.Contains(stderr.String(), "panicked") {
 		t.Fatalf("settlement = %+v, stderr %q; want landed, not ambiguous, panic logged", s, stderr.String())

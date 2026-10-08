@@ -41,8 +41,8 @@ var killPending = []string{"state", "asleep", "state_reason", session.KillPendin
 // two arms' conditions; the earlier arm in CONTRACT v5 §4 must win. Legacy's
 // order differs where v5 says so (decideSession runs its unknown-state arm
 // before the timer heals as well, but v5 puts the rekey and the stop request
-// above it, and metadata above the baseline; those arms land with C4c2,
-// C6b2, C7d and C7c, which extend this test).
+// above it, and metadata above the baseline; the rekey landed with C4c2, and
+// C6b2, C7d and C7c extend this test).
 func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 	var names []string
 	last := 0
@@ -54,16 +54,19 @@ func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 		}
 		last = n
 	}
-	if want := []string{"A1", "A2", "A5", "A6", "A9", "A19"}; !slices.Equal(names, want) {
+	if want := []string{"A1", "A2", "A3", "A5", "A6", "A9", "A19"}; !slices.Equal(names, want) {
 		t.Fatalf("rowArms = %v, want %v", names, want)
 	}
 
 	expiredHold := []string{"held_until", rowAt(-time.Minute)}
+	staleSelf := runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "3", Token: "tok-old"}
+	newerSelf := runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "4", Token: "tok-next"}
 	cases := []struct {
 		name     string
 		meta     []string
 		unknown  bool // the entry's liveness reads unknown
 		unranked bool
+		identity runtimeIdentity // the inventory's read of the row's runtime
 		noRow    bool
 		wantKind string
 		want     string
@@ -73,6 +76,9 @@ func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 		{name: "A1 mislabelled before A2 kill fence", meta: append([]string{"template", "", "session_name", ""}, killPending...), want: decideMislabelled},
 		{name: "A2 kill fence before A6 heals", meta: append(append([]string{}, killPending...), expiredHold...), want: decideKillFence, wantNext: gatherNow.Add(session.KillPendingGrace - 10*time.Second)},
 		{name: "A2 kill fence before A9 liveness", meta: killPending, unknown: true, want: decideKillFence, wantNext: gatherNow.Add(session.KillPendingGrace - 10*time.Second)},
+		{name: "A3 rekey before A5 unknown state", meta: []string{"state", "hibernating"}, identity: staleSelf, wantKind: intentRekey, want: decideRekey},
+		{name: "A3 newer-self holds before A6 heals", meta: expiredHold, identity: newerSelf, want: decideNewerSelf},
+		{name: "A3 refused rekey falls through to A6", meta: append([]string{"pending_create_claim", "true"}, expiredHold...), identity: staleSelf, wantKind: intentRowHeal, want: decideTimerHeal},
 		{name: "A5 unknown state before A6 heals", meta: append([]string{"state", "hibernating"}, expiredHold...), want: decideUnknownState},
 		{name: "stop-pending is not A5's", meta: []string{"state", "draining", "state_reason", "drain-ack-stop-pending"}, want: decideNoAction},
 		{name: "A6 heals before A9 liveness", meta: expiredHold, unknown: true, wantKind: intentRowHeal, want: decideTimerHeal},
@@ -90,6 +96,7 @@ func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 			}
 			w, a := rowWorld(t, rows...)
 			k := rowKeyOf("gc-1")
+			w.Observed = map[rowKey]rowObservation{k: {Identity: tc.identity}}
 			if e := a.Snapshot.Entries[k]; e != nil && tc.unknown {
 				e.Liveness = livenessUnknown
 			}
@@ -103,7 +110,7 @@ func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 			if !next.Equal(tc.wantNext) {
 				t.Fatalf("next = %v, want %v", next, tc.wantNext)
 			}
-			if it.Kind != "" && it.Basis != (rowBasis{Incarnation: 3}) {
+			if it.Kind != "" && it.Basis != (rowBasis{Incarnation: 3, InstanceToken: rowToken("gc-1")}) {
 				t.Fatalf("basis = %+v, want the census row's incarnation 3", it.Basis)
 			}
 		})

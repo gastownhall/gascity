@@ -83,6 +83,16 @@ func ownRuntime(v identityVerdict, row session.Info, rt runtimeIdentity) bool {
 	return v == identityStaleSelf && ok && epoch == generation
 }
 
+// adoptableIdentity is named AdoptLive's rule (v5 O2, LL5; the C4c1 review
+// ruling): a clean read with no session ID, which is Ownerless or the
+// legacy-adopted shape (a token and no GC_SESSION_ID, Unknown to every row
+// but its own), whose token the adoption captures. It never adopts Foreign,
+// an unread identity, or any other Unknown. The effect re-confirms presence
+// after its fresh read.
+func adoptableIdentity(rt runtimeIdentity) bool {
+	return rt.Known && strings.TrimSpace(rt.SessionID) == ""
+}
+
 // identityEpochs parses the runtime's epoch and the row's generation.
 func identityEpochs(row session.Info, rt runtimeIdentity) (int, int, bool) {
 	epoch, err := strconv.Atoi(strings.TrimSpace(rt.Epoch))
