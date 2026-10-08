@@ -89,6 +89,28 @@ func TestRunRalphCheckUnlaunchableScriptIsDriftPending(t *testing.T) {
 			},
 			wantRoot: fs.ErrNotExist,
 		},
+		{
+			// The worktree lookup misses but the #3008 store fallback finds a
+			// copy that is not executable: the fallback's error is the
+			// actionable one, so it must be the one surfaced.
+			name: "work_dir misses and store fallback is not executable",
+			setup: func(t *testing.T, cityPath string) (string, string) {
+				t.Helper()
+				workDir := filepath.Join(cityPath, "worktrees", "w1")
+				if err := os.MkdirAll(workDir, 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				dir := filepath.Join(cityPath, ".gc", "scripts")
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "check.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+				return ".gc/scripts/check.sh", workDir
+			},
+			wantRoot: convergence.ErrConditionNotExecutable,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -180,6 +202,25 @@ func TestRunRalphCheckSecurityRefusalsStayTerminal(t *testing.T) {
 					t.Fatalf("symlink: %v", err)
 				}
 				return "escape.sh", ""
+			},
+		},
+		{
+			// The worktree lookup misses and the #3008 store fallback hits a
+			// symlink escaping containment: the containment refusal must win
+			// over the worktree's not-exist miss.
+			name: "work_dir misses and store fallback symlink escapes containment",
+			setup: func(t *testing.T, root, cityPath string) (string, string) {
+				t.Helper()
+				workDir := filepath.Join(cityPath, "worktrees", "w1")
+				if err := os.MkdirAll(workDir, 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				outside := filepath.Join(root, "outside.sh")
+				writeExecutableScript(t, outside, "#!/bin/sh\nexit 0\n")
+				if err := os.Symlink(outside, filepath.Join(cityPath, "escape.sh")); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+				return "escape.sh", workDir
 			},
 		},
 	}

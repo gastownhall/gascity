@@ -27,8 +27,10 @@ import (
 // is treated as a genuine failure. Infra re-runs do NOT burn a gc.attempt, so a
 // transport/store outage cannot exhaust a PR's ralph attempts and abort_scope a
 // green PR (maintainer-city incident: 3 attempts burned in one outage). The
-// bound guarantees a gate that can never run (a missing script, a perpetual
-// timeout) still terminates the workflow instead of pending forever. The
+// bound guarantees a gate that launches but never yields a verdict (a
+// perpetual timeout, exit 75 forever) still terminates the workflow instead of
+// pending forever; an unlaunchable script never reaches this budget and is
+// held open on the drift-pending lane instead (see runRalphCheck). The
 // counter is cloned into each next attempt, so this is the ralph loop's total
 // infra-retry budget; at a ~15s reconcile cadence it rides a multi-minute
 // outage.
@@ -287,10 +289,16 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		// store/city root — exactly the base used when work_dir is empty, so
 		// it introduces no new trusted root and stays subject to
 		// ResolveConditionPath's containment checks. Only on a not-exist miss,
-		// so a check that does exist under the worktree keeps precedence; the
-		// original work_dir error is preserved when the fallback also misses.
-		if fallbackPath, fallbackErr := convergence.ResolveConditionPath(cityPath, storePath, checkPath); fallbackErr == nil {
+		// so a check that does exist under the worktree keeps precedence. The
+		// original work_dir error is preserved only when the fallback also
+		// misses; any other fallback error (not executable, containment
+		// refusal) describes the copy that would actually run, so it wins.
+		fallbackPath, fallbackErr := convergence.ResolveConditionPath(cityPath, storePath, checkPath)
+		switch {
+		case fallbackErr == nil:
 			scriptPath, err = fallbackPath, nil
+		case !errors.Is(fallbackErr, fs.ErrNotExist):
+			err = fallbackErr
 		}
 	}
 	if err != nil {
