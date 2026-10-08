@@ -13,6 +13,90 @@ import (
 	beadslib "github.com/steveyegge/beads"
 )
 
+// TestNativeDoltStoreSetMetadataBatchKeepsAnotherSessionsUpdate is the
+// real-store proof that a metadata stamp keeps a competing writer's keys. Two
+// handles on one sql-server are two sessions, the way two processes share a
+// ledger. A stamps a key and reads the row. B then commits the fence
+// activation: it clears two keys and sets a third. A stamps again without
+// reading. A stamp merged against A's last view would write B's cleared keys
+// back and drop B's new one. The facade merges against the row its own
+// transaction reads, so every key of both writers survives, seen from either
+// session. It runs against the issues table and the wisps table, whose writes
+// are separate backend paths.
+//
+// The ordering is forced between transactions, not inside one: no hook reaches
+// inside a facade transaction. A commit landing inside the stamp's own
+// transaction is Dolt's to merge or refuse, and the store replays the refusal;
+// TestNativeDoltStoreMetadataMergeSurvivesAConcurrentUpdateLoop exercises that
+// window by racing the two writers.
+//
+// The proof never skips: a host that cannot start the pinned server fails the
+// test, so a lane cannot go green with the proof unexecuted.
+func TestNativeDoltStoreSetMetadataBatchKeepsAnotherSessionsUpdate(t *testing.T) {
+	for tableName, ephemeral := range map[string]bool{"issues": false, "wisps": true} {
+		t.Run(tableName, func(t *testing.T) {
+			scopeRoot := initServerScopeForMergeProof(t)
+			a := openNativeDoltStoreHandleForMergeProof(t, scopeRoot)
+			b := openNativeDoltStoreHandleForMergeProof(t, scopeRoot)
+
+			created, err := a.Create(Bead{
+				Title:     "fenced entry step",
+				Ephemeral: ephemeral,
+				Metadata:  map[string]string{"gc.run_target": "pool", "gc.instantiating": "true", "gc.deferred_routed_to": "rig/pool"},
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if created.Ephemeral != ephemeral {
+				t.Fatalf("Ephemeral = %v, want %v: the variant does not exercise the table it names", created.Ephemeral, ephemeral)
+			}
+			id := created.ID
+
+			if err := a.SetMetadataBatch(id, map[string]string{"gc.attempt": "1"}); err != nil {
+				t.Fatalf("A's first stamp: %v", err)
+			}
+			view, err := a.Get(id)
+			if err != nil {
+				t.Fatalf("A's read: %v", err)
+			}
+			if view.Metadata["gc.instantiating"] != "true" || view.Metadata["gc.routed_to"] != "" {
+				t.Fatalf("A's view = %#v, want the row as it stood before B's write", view.Metadata)
+			}
+
+			if err := b.Update(id, UpdateOpts{Metadata: map[string]string{
+				"gc.instantiating":      "",
+				"gc.deferred_routed_to": "",
+				"gc.routed_to":          "rig/pool",
+			}}); err != nil {
+				t.Fatalf("B's competing Update: %v", err)
+			}
+			if err := a.SetMetadataBatch(id, map[string]string{"gc.heartbeat": "now"}); err != nil {
+				t.Fatalf("A's second stamp: %v", err)
+			}
+
+			want := map[string]string{
+				"gc.run_target":         "pool",
+				"gc.attempt":            "1",
+				"gc.instantiating":      "",
+				"gc.deferred_routed_to": "",
+				"gc.routed_to":          "rig/pool",
+				"gc.heartbeat":          "now",
+			}
+			for session, store := range map[string]*NativeDoltStore{"A": a, "B": b} {
+				got, err := store.Get(id)
+				if err != nil {
+					t.Fatalf("session %s Get: %v", session, err)
+				}
+				for key, value := range want {
+					if got.Metadata[key] != value {
+						t.Errorf("session %s: %s = %q, want %q: a stale merge lost a write (full: %#v)", session, key, got.Metadata[key], value, got.Metadata)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestNativeDoltStoreSetMetadataBatchRollsBackWhenTheEventInsertFails pins
 // the other half of the write's atomicity on the pinned server backend: the
 // audit event is inserted in the same transaction as the metadata update, so

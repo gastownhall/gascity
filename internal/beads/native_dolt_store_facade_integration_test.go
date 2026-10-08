@@ -130,10 +130,10 @@ func TestNativeDoltStoreCreateRollsBackAMissingSamePrefixTarget(t *testing.T) {
 	}
 }
 
-// TestNativeDoltStoreCreateRefusesASelfDependencyThroughFacade is the
-// gc-enterprise review item's "invalid dependency" case the deleted
-// validateCreatedDependencies prevalidation helper never checked at all: an
-// edge naming the new bead as its own target. The facade's own request
+// TestNativeDoltStoreCreateRefusesASelfDependencyThroughFacade covers the
+// "invalid dependency" case a review of the facade port raised, which the
+// deleted validateCreatedDependencies prevalidation helper never checked at
+// all: an edge naming the new bead as its own target. The facade's own request
 // validation (ValidatePublicCreateRequest, independent of any backend) refuses
 // it before a transaction ever opens, which is stricter than the storage-layer
 // create this replaced.
@@ -275,10 +275,11 @@ func TestNativeDoltStoreClosesOverOpenChildrenThroughFacade(t *testing.T) {
 	}
 }
 
-// TestNativeDoltStoreSetMetadataBatchMergesInsideTheWriteThroughFacade replaces
-// the deleted read-merge-write retry loop: the facade resolves the merge against
-// the current row inside the write transaction, so a key written by a competing
-// writer survives instead of being overwritten from a stale read.
+// TestNativeDoltStoreSetMetadataBatchMergesInsideTheWriteThroughFacade pins
+// that a batch is a merge, not a replacement: each batch names only its own
+// keys, and the facade resolves them against the current row, so every key an
+// earlier write stored survives. A competing writer in another session is
+// TestNativeDoltStoreSetMetadataBatchKeepsAnotherSessionsUpdate.
 func TestNativeDoltStoreSetMetadataBatchMergesInsideTheWriteThroughFacade(t *testing.T) {
 	store := openRealNativeDoltStoreForFacade(t, "facade-test")
 	bead, err := store.Create(Bead{Title: "meta", Metadata: map[string]string{"seeded": "yes"}})
@@ -412,6 +413,12 @@ func TestNativeDoltStoreEmptyUpdateReportsNotFoundThroughFacade(t *testing.T) {
 	err := store.Update("gc-nosuchbead", UpdateOpts{})
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Update with no fields against a missing bead = %v, want ErrNotFound", err)
+	}
+	// A pure foreign reparent leaves the same empty patch once its ParentID
+	// comes out for the edge rewrite, so it has to answer the same way.
+	foreign := "gcg-70b1e5f2-a"
+	if err := store.Update("gc-nosuchbead", UpdateOpts{ParentID: &foreign}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Update with only a foreign ParentID against a missing bead = %v, want ErrNotFound", err)
 	}
 	if txErr := store.Tx("gc: empty", func(tx Tx) error {
 		return tx.Update("gc-nosuchbead", UpdateOpts{})

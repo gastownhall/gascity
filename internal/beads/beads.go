@@ -280,11 +280,12 @@ type UpdateOpts struct {
 //     the holder. "Release a row nobody holds" describes no release, so the
 //     role's own model calls this ErrNotClaimed.
 //
-// FOLLOW-UP QUESTION for the conformance suite, deliberately left open here:
-// should RunConditionalWriterConformance (or storebindingtest's graph suite)
-// pin one semantic for each? Both edges are currently reachable only by tests
-// that target a single store, so a family that changes its answer changes it
-// silently.
+// FOLLOW-UP QUESTION for the conformance suite, open as ga-0o6h8j: should
+// RunConditionalWriterConformance (or storebindingtest's graph suite) pin one
+// semantic for each? Until one does, NativeDoltStore's and MemStore's current
+// answers are pinned side by side in
+// TestReleaseIfCurrentPinsTheFamilyDivergenceEdges, so a flip in either store
+// fails a test instead of passing silently.
 type ConditionalAssignmentReleaser interface {
 	ReleaseIfCurrent(id, expectedAssignee string) (bool, error)
 }
@@ -926,8 +927,13 @@ type Store interface {
 	Reopen(id string) error
 
 	// CloseAll closes multiple beads in a single batch operation and sets
-	// the given metadata on each. Already-closed beads are skipped.
-	// Returns the number of beads actually closed.
+	// the given metadata on each bead it closes. An already-closed bead stays
+	// closed and is not an error. Past that, what happens to it is NOT part
+	// of this contract: stores that read each status first skip it, stores
+	// that batch without that read (bd, exec, the native Dolt store) write the
+	// metadata onto it, and bd and exec count it as closed. A caller that must
+	// leave a finished bead's metadata alone, or needs an exact count, drops
+	// its closed ids before calling. Returns the number of beads closed.
 	CloseAll(ids []string, metadata map[string]string) (int, error)
 
 	// List returns beads matching the query. Queries must include at least

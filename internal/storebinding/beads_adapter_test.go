@@ -403,11 +403,10 @@ func (c *claimCapableStore) Claim(id, assignee string) (beads.Bead, bool, error)
 	return claimed, true, nil
 }
 
-// TestBeadsGraphAdapterClaimRefusesAnUnsupportedStore pins the pre-S5b-4
-// behavior: a resolved store without the two-argument Claim capability
-// (e.g. a plain beads.Store) is refused as an unavailable capability of the
-// store, before any server is asked -- this is still true today for every
-// class whose remote binding does not resolve to NativeDoltStore.
+// TestBeadsGraphAdapterClaimRefusesAnUnsupportedStore pins the capability
+// refusal: a resolved store without the two-argument Claim capability (e.g. a
+// plain beads.Store) is refused as an unavailable capability of the store,
+// before any server is asked.
 func TestBeadsGraphAdapterClaimRefusesAnUnsupportedStore(t *testing.T) {
 	graph := &beadsGraphAdapter{store: beads.NewMemStore()}
 	if _, claimed, err := graph.Claim("gc-1", "worker-1"); claimed || err == nil {
@@ -415,12 +414,11 @@ func TestBeadsGraphAdapterClaimRefusesAnUnsupportedStore(t *testing.T) {
 	}
 }
 
-// TestBeadsGraphAdapterClaimForwardsToAClaimCapableStore pins the exact
-// mechanism S5b-DESIGN.md cites at beads_adapter.go:493-505: once the
-// resolved store implements the two-argument Claim (as NativeDoltStore now
-// does over IssueClaimer), beadsGraphAdapter.Claim succeeds via plain Go
-// structural typing -- no change to this file was needed to fix the graph
-// binding's claim route.
+// TestBeadsGraphAdapterClaimForwardsToAClaimCapableStore pins the other side
+// of beadsGraphAdapter.Claim's type assertion: a resolved store that
+// implements the two-argument Claim (as NativeDoltStore does over
+// IssueClaimer) is claimed through via plain Go structural typing, with no
+// adapter-side registration.
 func TestBeadsGraphAdapterClaimForwardsToAClaimCapableStore(t *testing.T) {
 	leaf := &claimCapableStore{Store: beads.NewMemStore()}
 	bead, err := leaf.Create(beads.Bead{Title: "claimable"})

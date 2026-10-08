@@ -27,28 +27,20 @@ import (
 // counted here — that state is store corruption, and counting such a row
 // beats reporting no count at all.
 //
-// A backend whose raw CountIssues refuses before entry — httpstore's
-// generated unsupported_gen shell, via a typed *beadslib.ErrUnsupported —
-// ALWAYS reports ErrCountUnsupported here, for every shape, with no
-// server-side substitute attempted. An earlier version of this method
-// answered such a refusal through the wire-served Counter role
-// (issueops.Counter, bd-enterprise's httpstore accessors.go) for the subset
-// of shapes issueops.CountRequest could express. A real-bd-serve review at
-// the enterprise pin found that fast path unsound on three counts: (1)
-// CountRequest.IncludeInfra is a single bool that also drops the wisps
-// tier, so a TierIssues count silently UNDERCOUNTED no-history rows
-// (measured Count=4 vs List=5 against a real server); (2) Status:"all" was
-// translated as "no status filter" by the role but OVERCOUNTED against the
-// real server's semantics (Count=4 vs List=0); and (3) the fast path was
-// unreachable in production regardless, because
-// wrapStoreWithBeadPolicies/expandPolicyReadTier
-// (cmd/gc/bead_policy_store.go) promotes every TierIssues read to TierBoth
-// before it reaches here, and the gate only ever accepted TierIssues. There
-// is currently no CountRequest shape — and no other served role — that
-// reproduces List cardinality against a real server, so the fast path was
-// removed rather than narrowed further. Counts over http hydrate via the
-// List fallback until a server-side TierBoth-aware count exists (see
-// /data/tmp/bdserve-pg-design/S5b-DESIGN.md §3).
+// A backend whose raw CountIssues refuses before entry — the http client does,
+// with a typed *beadslib.ErrUnsupported — ALWAYS reports ErrCountUnsupported
+// here, for every shape, with no server-side substitute attempted. The
+// wire-served Counter role (issueops.Counter) is not one: no
+// issueops.CountRequest shape, and no other served role, reproduces List
+// cardinality against a real server. CountRequest.IncludeInfra is a single bool
+// that also drops the wisps tier, so a TierIssues count UNDERCOUNTS no-history
+// rows; Status "all" means "no status filter" to the role but OVERCOUNTS
+// against the server's own semantics; and
+// wrapStoreWithBeadPolicies/expandPolicyReadTier (cmd/gc/bead_policy_store.go)
+// promotes every TierIssues read to TierBoth before it reaches here, so a
+// TierIssues-only substitute would never run in production. Counts over http
+// hydrate via the List fallback until a server-side TierBoth-aware count
+// exists.
 //
 // Reporting ErrCountUnsupported (rather than leaking the raw
 // *beadslib.ErrUnsupported) for every refusal is the load-bearing part:
@@ -56,11 +48,9 @@ import (
 // handler) keys its hydrating List fallback off errors.Is(err,
 // ErrCountUnsupported) and treats any OTHER error as a hard failure — a raw
 // refusal escaping unclassified would read as store-health going dark
-// instead of falling back to List. A non-ErrUnsupported failure (a real
-// backend error, not a refusal) is unaffected: it keeps returning
-// unchanged, exactly as before this classification existed. The same rule
-// applies uniformly regardless of shape, so there is no longer a
-// shape-dependent branch to get wrong here.
+// instead of falling back to List. Any other failure (a real backend
+// error, not a refusal) is returned unchanged. The rule is the same for
+// every shape, so there is no shape-dependent branch to get wrong here.
 func (s *NativeDoltStore) Count(ctx context.Context, query ListQuery, excludeTypes ...string) (int, error) {
 	if err := query.Validate(); err != nil {
 		return 0, err
@@ -91,12 +81,12 @@ func (s *NativeDoltStore) Count(ctx context.Context, query ListQuery, excludeTyp
 				return ctxErr
 			}
 			// Ask-don't-handshake, the same pattern Tx and the ready-veto
-			// use: a backend with no raw CountIssues (httpstore's
-			// unsupported_gen shell) refuses before touching the database
-			// with a typed *beadslib.ErrUnsupported, so nothing was
-			// double-counted or left half-done. See the doc comment above
-			// for why this ALWAYS classifies as ErrCountUnsupported rather
-			// than attempting a server-side substitute.
+			// use: a backend with no raw CountIssues (the http client)
+			// refuses before touching the database with a typed
+			// *beadslib.ErrUnsupported, so nothing was double-counted or
+			// left half-done. See the doc comment above for why this ALWAYS
+			// classifies as ErrCountUnsupported rather than attempting a
+			// server-side substitute.
 			var unsupported *beadslib.ErrUnsupported
 			if errors.As(err, &unsupported) {
 				return fmt.Errorf("%w: %w", ErrCountUnsupported, err)
@@ -143,10 +133,9 @@ func (s *NativeDoltStore) Count(ctx context.Context, query ListQuery, excludeTyp
 // TierWisps stays unsupported: its ephemeral||no-history membership is
 // resolved Go-side and has no exact filter translation.
 //
-// This gate is unchanged by the removal of the Counter-role http fallback
-// above: it governs only when the RAW CountIssues answer (a real backend
-// query) can be trusted, which remains true regardless of how a refusal is
-// classified.
+// This gate governs only when the RAW CountIssues answer (a real backend
+// query) can be trusted; how Count classifies a backend's refusal is
+// independent of it.
 func nativeDoltCountSupported(query ListQuery, excludeTypes []string) bool {
 	return len(excludeTypes) == 0 &&
 		(query.TierMode == TierIssues || query.TierMode == TierBoth) &&

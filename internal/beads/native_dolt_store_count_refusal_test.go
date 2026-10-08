@@ -56,20 +56,20 @@ func countRefusalStorage(fixture []*beadslib.Issue) *nativeDoltStorageSpy {
 // TestNativeDoltStoreCountReportsErrCountUnsupportedOnRefusal is a
 // real-serve-shaped regression test for the review finding against the
 // now-removed Counter-role fast path: on a storage whose raw CountIssues
-// refuses with *beadslib.ErrUnsupported (httpstore's unsupported_gen shell,
-// confirmed against a real bd-serve at the pinned enterprise revision),
-// Count must ALWAYS classify the refusal as ErrCountUnsupported — never a
-// raw, unclassified *beadslib.ErrUnsupported, and never a wrong number from
-// a server-side substitute — for every shape nativeDoltCountSupported
-// approves. This includes the two shapes the real server proved the removed
-// Counter-role mapping got wrong: a plain TierIssues count (which silently
-// undercounted no-history rows through CountRequest.IncludeInfra=false) and
-// Status:"all" (which overcounted). Every existing hydrating-List fallback
-// (store_health's countBeadStoreRows, the status handler) keys off
-// errors.Is(err, ErrCountUnsupported) and treats any other error as a hard
-// failure, so this is the mutation check too: a regression that leaks the
-// raw *beadslib.ErrUnsupported, or that resurrects a server-side substitute
-// returning a wrong count instead of erroring, fails this test.
+// refuses with *beadslib.ErrUnsupported (as the http client's does, confirmed
+// against a real bd-serve), Count must ALWAYS classify the refusal as
+// ErrCountUnsupported — never a raw, unclassified *beadslib.ErrUnsupported, and
+// never a wrong number from a server-side substitute — for every shape
+// nativeDoltCountSupported approves. This includes the two shapes the real
+// server proved the removed Counter-role mapping got wrong: a plain TierIssues
+// count (which silently undercounted no-history rows through
+// CountRequest.IncludeInfra=false) and Status:"all" (which overcounted). Every
+// existing hydrating-List fallback (store_health's countBeadStoreRows, the
+// status handler) keys off errors.Is(err, ErrCountUnsupported) and treats any
+// other error as a hard failure, so this is the mutation check too: a
+// regression that leaks the raw *beadslib.ErrUnsupported, or that resurrects a
+// server-side substitute returning a wrong count instead of erroring, fails
+// this test.
 func TestNativeDoltStoreCountReportsErrCountUnsupportedOnRefusal(t *testing.T) {
 	fixture := countRefusalFixture()
 	tests := []struct {

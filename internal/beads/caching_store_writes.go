@@ -250,31 +250,26 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 	return true, nil
 }
 
-// Claim atomically claims a bead through the backing store and write-throughs
-// the result into the cache (S5b-4). A conflict (ok=false, nil error) and any
-// error both pass straight through: neither touches the cache, matching
-// ReleaseIfCurrent's own unlocked early return just above.
+// Claim claims id for assignee through the backing store's two-argument
+// compare-and-swap claim and writes the claimed row through to the cache. A
+// conflict (ok=false, nil error) and any error pass straight through without
+// touching the cache, as ReleaseIfCurrent's refusals do.
 //
-// The backing store's successful Claim hands back the bead's post-claim
-// state, but that state is the BARE ROW — Claim's own contract (see
-// NativeDoltStore.Claim and BdStore.Claim) strips labels, dependency records
-// and comments, matching what the v0 claim response and `bd update --claim
-// --json` already publish. Installing that bare row directly into the cache
-// (absorbFreshLocked replaces the whole cached row, not just the fields a
-// claim actually changes) used to wipe every label, comment, and dependency
-// field a cached row carried the moment it was claimed — a cache-populated
-// caller would see labels vanish from a bead nothing about labels touched.
+// The backing claim answers with the bare post-claim row: labels, dependency
+// records and comments stripped (see NativeDoltStore.Claim). Installing it
+// would replace the cached row wholesale and drop those fields, so Claim
+// refreshes the full row from the backing store's Get and installs that. When
+// the refresh fails, only what a claim changes (status, assignee and the
+// update time) is merged onto the cached row, which is marked dirty; with no
+// cached row, the bare row is installed as a dirty placeholder, because this
+// process has not confirmed its labels, dependencies or comments. Every branch
+// keeps the cached dependency edges (depsKeepCached): a claim never changes
+// them.
 //
-// This now follows ReleaseIfCurrent's own shape immediately above: refresh
-// from the backing store's Get (which, unlike Claim, returns the full row)
-// and absorb THAT. A refresh failure falls back to merging only the fields a
-// claim actually mutates — status, assignee, and the claim's own timestamp —
-// onto the existing cached row, preserving whatever labels/comments/deps it
-// already held, rather than discarding them for want of a successful
-// refresh. depsMode stays depsKeepCached in every branch: a claim never
-// changes a bead's dependencies, so the cache's separate deps row is left
-// exactly where it was, the same choice ReleaseIfCurrent's own cache-only
-// fallback branch makes and for the identical reason.
+// Like every other writer, Claim installs nothing when a local write or Delete
+// on id landed after the claim began (racedWriteLocked): that write's row, or
+// its tombstone, stands. The claim committed either way, so its row is still
+// notified and returned.
 func (c *CachingStore) Claim(id, assignee string) (Bead, bool, error) {
 	claimer, ok := c.backing.(interface {
 		Claim(id, assignee string) (Bead, bool, error)
@@ -282,69 +277,43 @@ func (c *CachingStore) Claim(id, assignee string) (Bead, bool, error) {
 	if !ok {
 		return Bead{}, false, ErrClaimUnsupported
 	}
+	startSeq := c.currentMutationSeq()
 	claimed, acquired, err := claimer.Claim(id, assignee)
 	if err != nil || !acquired {
 		return claimed, acquired, err
 	}
 
 	fresh, refreshed := c.refreshBeadAfterWrite(id, "refresh bead after claim")
-	var updated Bead
 	c.mu.Lock()
-	c.noteLocalMutationLocked(id)
-	switch {
-	case refreshed:
-		c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
-			depsMode:   depsKeepCached,
-			seqMode:    seqKeep,
-			clearDirty: true,
-		})
-		updated = cloneBead(fresh)
-	default:
-		if b, ok := c.beads[id]; ok {
-			// Merge only what a claim actually changes onto the row already
-			// cached, instead of the claim's bare response: this is what
-			// keeps that row's labels, comments, and dependency fields intact
-			// when the backing refresh above could not confirm the full
-			// post-claim row.
-			b.Status = claimed.Status
+	raced := c.racedWriteLocked(id, startSeq)
+	row, found := fresh, refreshed
+	if !refreshed {
+		row, found = c.patchedCachedRowLocked(id, func(b *Bead) {
+			setBeadStatus(b, claimed.Status)
 			b.Assignee = claimed.Assignee
 			b.UpdatedAt = claimed.UpdatedAt
-			c.absorbFreshLocked(id, b, time.Now(), absorbOpts{
-				depsMode:   depsKeepCached,
-				seqMode:    seqKeep,
-				clearDirty: false,
-			})
-			c.markDirtyLocked(id)
-			updated = cloneBead(b)
-		} else {
-			// Nothing cached to merge onto (a cold claim on an id this cache
-			// never saw) — install the bare claim row as a placeholder, but
-			// mark it dirty rather than clean (S5b-7 review FINAL item 7,
-			// sub-bullet 3). The refresh above already failed, so this
-			// process has never actually confirmed the full row: claimed
-			// strips labels, dependency records, and comments (see this
-			// function's doc comment), and a backing id this cache simply
-			// never saw before is not the same thing as an id with no
-			// label/dep/comment history on the backing store. Marking it
-			// clean here would let a future cache read trust that empty
-			// label/dep state as settled fact instead of bypassing to the
-			// backing store for the real row the next time anything reads
-			// id, exactly the staleness markDirtyLocked exists to prevent.
-			c.absorbFreshLocked(id, claimed, time.Now(), absorbOpts{
-				depsMode:   depsKeepCached,
-				seqMode:    seqKeep,
-				clearDirty: false,
-			})
-			c.markDirtyLocked(id)
-			updated = cloneBead(claimed)
-		}
+		})
 	}
-	c.clearDependentReadyProjectionsLocked(id)
-	c.markFreshLocked(time.Now())
+	if !found {
+		row = claimed
+	}
+	if !raced {
+		c.noteLocalMutationLocked(id)
+		c.absorbFreshLocked(id, row, time.Now(), absorbOpts{
+			depsMode:   depsKeepCached,
+			seqMode:    seqKeep,
+			clearDirty: refreshed,
+		})
+		if !refreshed {
+			c.markDirtyLocked(id)
+		}
+		c.clearDependentReadyProjectionsLocked(id)
+		c.markFreshLocked(time.Now())
+	}
 	c.updateStatsLocked()
 	c.mu.Unlock()
-	c.notifyChange(ChangeLocal, "bead.updated", updated)
-	return updated, true, nil
+	c.notifyChange(ChangeLocal, "bead.updated", row)
+	return row, true, nil
 }
 
 // Close marks a bead as closed in the backing store and cache.

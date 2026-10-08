@@ -311,19 +311,17 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 }
 
 // nativeReadEdgesChunkSize bounds how many anchor ids one ReadEdges call
-// carries. It is the shared nativeServerEdgeAnchorCap (bd-enterprise
-// internal/httpapi/edges.go: maxDependencyAnchors = 100, enforced on both the
-// dependencies and dependents edge endpoints as a 400 invalid_argument
-// rejecting the WHOLE call, not just the ids past the limit) — confirmed
-// against a real bd-serve at the pinned enterprise revision, where a 130-bead
-// ready frontier failed outright with no fallback before this chunking
-// existed (S5b-portrev item 1). filterReadyByWorkOutcome sends ReadEdges in
-// chunks of at most this many candidate ids and merges the anchors, so a
-// ready frontier of any size degrades to more calls rather than one failing
-// call. Keeping this as an alias of nativeServerEdgeAnchorCap (defined beside
-// DepListBatch's identical chunk in native_dolt_store_roles.go) means both of
-// this package's ReadEdges chunk sizes move together if the server's cap ever
-// changes (S5b-portrev item 2).
+// carries. It is the shared nativeServerEdgeAnchorCap (beads
+// internal/httpapi/edges.go: maxDependencyAnchors = 100, enforced on the served
+// edge reads as a 400 invalid_argument rejecting the WHOLE call, not just the
+// ids past the limit) — confirmed against a real bd-serve, where a 130-bead
+// ready frontier failed outright before this chunking existed.
+// filterReadyByWorkOutcome sends ReadEdges in chunks of at most this many
+// candidate ids and merges the anchors, so a ready frontier of any size
+// degrades to more calls rather than one failing call. Keeping this as an alias
+// of nativeServerEdgeAnchorCap (defined beside DepListBatch's identical chunk
+// in native_dolt_store_roles.go) means both of this package's ReadEdges chunk
+// sizes move together if the server's cap ever changes.
 const nativeReadEdgesChunkSize = nativeServerEdgeAnchorCap
 
 // nativeReadyVetoListChunkSize bounds how many blocker ids one
@@ -370,27 +368,22 @@ const nativeReadyEdgeFanoutLimit = 8
 //
 // List first, not Get-only, because a native (dolt or Postgres) IssueReader
 // answers List+IDFilter in one SQL statement regardless of the blocker count,
-// and an unconditional per-id Get fan-out against THAT backend was its own
-// regression (S5b-fixrev item 1): six-ish round trips per blocker every
-// controller tick, the same #6491 pattern the fan-out exists to avoid for an
-// http-native backend. Only an http-native IssueReader refuses this shape —
-// bd-enterprise's httpstore encode table, E-ListRequest.IDFilter: "an explicit
-// id set on the LISTING refuses ... the exact-ids question is getIssue's,
-// reached through the SearchIssues bridge's exact-ids shape, not through a
-// listing filter" — and it refuses CLIENT-SIDE, before any round trip, with a
-// *httpstore.InexpressibleError that unwraps to a typed *beadslib.ErrUnsupported
-// (errors.As reaches it through the chain). Get is the wire's door for that
-// exact-ids question instead, and it is a per-id door, so fan-out is the
-// fallback's only route to it (S5b-portrev item 1 / S5b-fixrev item 1;
-// re-ports 1aab10d3d0's ReadEdges chunking and fea3240cd5's probe-then-fallback
-// shape, which still applies here even though this call site never had the
-// capability-probed batched arm those commits guarded — the probe is now
-// List+IDFilter itself, answered or refused in the same call, rather than a
-// separate capability check). A per-candidate Get is one round trip each on a
-// served store, which over a network link exhausted the read-retry budget
-// every controller tick (#6491) — now paid only by the backend that actually
-// requires it. A target the read does not return — an external reference,
-// another ledger's row — is no evidence of blocking, on either leg.
+// while an unconditional per-id Get fan-out against THAT backend costs several
+// round trips per blocker every controller tick — the same #6491 pattern the
+// fan-out exists to avoid for an http-native backend. Only an http-native
+// IssueReader refuses this shape — the http client's encode table,
+// E-ListRequest.IDFilter, leaves the exact-ids question to getIssue rather than
+// to a listing filter — and it refuses CLIENT-SIDE, before any round trip, with
+// a client error that unwraps to a typed *beadslib.ErrUnsupported (errors.As
+// reaches it through the chain). Get is the wire's door for that exact-ids
+// question instead, and it is a per-id door, so fan-out is the fallback's only
+// route to it. The List call is its own capability probe — answered or refused
+// in the same call, with no separate capability check. A per-candidate Get is
+// one round trip each on a served store, which over a network link exhausted
+// the read-retry budget every controller tick (#6491), so only the backend that
+// actually requires the fan-out pays for it. A target the read does not return
+// — an external reference, another ledger's row — is no evidence of blocking,
+// on either leg.
 //
 // The result does not depend on edge or fetch order: every fetched target's
 // metadata is parsed exactly once up front, and a malformed one is reported
@@ -448,10 +441,10 @@ func (s *NativeDoltStore) filterReadyByWorkOutcome(ctx context.Context, storage 
 	if err != nil {
 		// List+IDFilter is the cheap-first attempt; an http-native IssueReader
 		// refuses it client-side, before any round trip, with a typed
-		// *beadslib.ErrUnsupported (possibly wrapped in httpstore's own
-		// InexpressibleError — errors.As reaches it through either). Anything
-		// else is a real failure and must fail the whole filter, exactly as a
-		// real Get failure below does.
+		// *beadslib.ErrUnsupported (possibly wrapped in the client's own error
+		// type — errors.As reaches it through either). Anything else is a real
+		// failure and must fail the whole filter, exactly as a real Get failure
+		// below does.
 		var unsupported *beadslib.ErrUnsupported
 		if !errors.As(err, &unsupported) {
 			return nil, fmt.Errorf("checking blocking dependency outcomes: listing blockers: %w", err)
@@ -492,8 +485,8 @@ func (s *NativeDoltStore) filterReadyByWorkOutcome(ctx context.Context, storage 
 //
 // A native (dolt or Postgres) IssueReader serves this directly — one SQL
 // statement regardless of blocker count. An http-native IssueReader refuses
-// IDFilter on a listing unconditionally (bd-enterprise's httpstore encode
-// table, E-ListRequest.IDFilter), client-side, before any round trip; the
+// IDFilter on a listing unconditionally (the http client's encode table,
+// E-ListRequest.IDFilter), client-side, before any round trip; the
 // caller falls back to filterReadyByWorkOutcomeFetchBlockers on exactly that
 // refusal (errors.As to *beadslib.ErrUnsupported).
 //
@@ -502,29 +495,24 @@ func (s *NativeDoltStore) filterReadyByWorkOutcome(ctx context.Context, storage 
 // silently left out of both returned maps.
 //
 // ONE CALL PER CHUNK, EXPLICIT UNLIMITED. issueops.ListRequest.Limit is a
-// *int: nil — what the zero-value request this built on left it at — means
-// "the shared list default," which beads 1.3.1 answers as a 50-row page
-// (read_roles.go's own nativeListReadRequest never touched it). A ready
-// candidate with more than 50 DISTINCT blockers silently saw only the first
-// 50 blockers' outcomes, so a blocker past that page could never veto
-// readiness: a review repro with 60 blockers-each-blocking-one-candidate
-// wrongly readied 10 of them. Limit=0 is explicitly "unlimited" per that
-// field's own doc, so it is set on every chunk rather than left at the
-// zero-value nil that reads as "50."
+// *int, and nil — which nativeListReadRequest leaves it at — is not
+// "unlimited" but the shared list default, a 50-row page (see
+// nativeListLimitPushdown). Left at nil, a chunk naming more than 50 DISTINCT
+// blockers would see only the first 50 blockers' outcomes, so a blocker past
+// that page could never veto readiness. Limit=0 is explicitly "unlimited" per
+// that field's own doc, so it is set on every chunk.
 //
 // CHUNKED AT nativeReadyVetoListChunkSize ANYWAY, even though unlimited. An
-// explicit Limit answers the TRUNCATION half of the bug (a page short of the
-// full blocker set), not the TRANSPORT half: beads' List has no documented
-// cap of its own on how many ids one IDFilter may carry, but an http-native
-// IssueReader still puts every id on one URL query string, and nothing
-// bounds that string's length today. Reusing nativeServerEdgeAnchorCap — the
-// one server-enforced id-count cap this package already knows about, shared
-// with ReadEdges and DepListBatch — keeps every List+IDFilter call's id count
-// inside a bound a served backend has already proven it accepts, rather than
-// inventing a second, untested one. A chunk's vetoes/malformed merge into the
-// running maps; a chunk's error (including the ErrUnsupported fallback
-// signal) is returned immediately, exactly as a single unchunked call would
-// have.
+// explicit Limit answers TRUNCATION (a page short of the full blocker set), not
+// TRANSPORT: beads' List has no documented cap of its own on how many ids one
+// IDFilter may carry, but an http-native IssueReader still puts every id on one
+// URL query string, and nothing bounds that string's length today. Reusing
+// nativeServerEdgeAnchorCap — the one server-enforced id-count cap this package
+// already knows about, shared with ReadEdges and DepListBatch — keeps every
+// List+IDFilter call's id count inside a bound a served backend has already
+// proven it accepts, rather than inventing a second, untested one. A chunk's
+// vetoes/malformed merge into the running maps; a chunk's error (including the
+// ErrUnsupported fallback signal) is returned immediately.
 func filterReadyByWorkOutcomeListBlockers(ctx context.Context, reader issueops.Reader, blockerIDs []string) (map[string]bool, map[string]error, error) {
 	vetoes := make(map[string]bool, len(blockerIDs))
 	malformed := make(map[string]error)
@@ -553,6 +541,18 @@ func filterReadyByWorkOutcomeListBlockers(ctx context.Context, reader issueops.R
 	return vetoes, malformed, nil
 }
 
+// fetchBlockersSkipHookForTest, when non-nil, is called with a blocker id
+// exactly when filterReadyByWorkOutcomeFetchBlockers skips it because the
+// shared fetch context was already canceled by an earlier real failure. It
+// exists so a test can observe the skip-after-cancel race deterministically —
+// by waiting on a channel the hook sends to — instead of guessing a settle
+// duration long enough for the cascade to finish before asserting on it.
+// Production code never sets it, so the extra nil check this adds to the hot
+// path costs nothing there. The fan-out goroutines read it without
+// synchronization, so a test that sets it must not run in parallel with any
+// other test in this package and must reset it in t.Cleanup.
+var fetchBlockersSkipHookForTest func(id string)
+
 // filterReadyByWorkOutcomeFetchBlockers is filterReadyByWorkOutcome's fallback
 // leg for an IssueReader that refuses List+IDFilter (http-native): one
 // IssueReader.Get call per DISTINCT ready-blocking target, bounded at
@@ -568,16 +568,6 @@ func filterReadyByWorkOutcomeListBlockers(ctx context.Context, reader issueops.R
 // contract (a miss must be ErrNotFound); treating it as "no evidence of
 // blocking" would silently trust a broken backend, and indexing into it would
 // panic.
-// fetchBlockersSkipHookForTest, when non-nil, is called with a blocker id
-// exactly when filterReadyByWorkOutcomeFetchBlockers skips it because the
-// shared fetch context was already canceled by an earlier real failure. It
-// exists so a test can observe the skip-after-cancel race deterministically —
-// by waiting on a channel the hook sends to — instead of guessing a settle
-// duration long enough for the cascade to finish before asserting on it.
-// Production code never sets it, so the extra nil check this adds to the hot
-// path costs nothing there.
-var fetchBlockersSkipHookForTest func(id string)
-
 func filterReadyByWorkOutcomeFetchBlockers(ctx context.Context, reader issueops.Reader, blockerIDs []string) (map[string]bool, map[string]error, error) {
 	vetoes := make(map[string]bool, len(blockerIDs))
 	malformed := make(map[string]error)

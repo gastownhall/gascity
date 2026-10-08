@@ -1381,10 +1381,9 @@ func TestConvoyAutocloseStoreRoot(t *testing.T) {
 			want: "/city/root",
 		},
 		{
-			// S5b-7 review FINAL item 7: filepath.Dir on a trailing-slash
-			// path does not strip the final element the way a shell's
-			// dirname would, so an unclean BEADS_DIR must not silently
-			// resolve to itself instead of its parent.
+			// filepath.Dir on a trailing-slash path does not strip the final
+			// element the way a shell's dirname would, so an unclean BEADS_DIR
+			// must not silently resolve to itself instead of its parent.
 			name: "BEADS_DIR absolute with a trailing slash still resolves to its parent",
 			env:  map[string]string{"BEADS_DIR": "/city/root/.beads/"},
 			cwd:  "/work/dir",

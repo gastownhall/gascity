@@ -16,12 +16,12 @@ type claimRoleSpy struct {
 	result   issueops.ClaimResult
 	err      error
 
-	// getResult/getErr configure IssueReader().Get, which Claim now consults
-	// (S5b-7-fixup item 8) to tell a genuinely missing id apart from a wisp id
-	// whenever Claim's own err resolves to issueops.ErrNotFound: nil getErr
-	// with a non-nil getResult simulates a row the reader finds (a wisp), and
-	// a non-nil getErr (normally issueops.ErrNotFound) simulates a row no
-	// plane holds. See newWispDisambiguationSpy below the table it is used by.
+	// getResult/getErr configure IssueReader().Get, which Claim consults to
+	// tell a genuinely missing id apart from a wisp id whenever Claim's own err
+	// resolves to issueops.ErrNotFound: nil getErr with a non-nil getResult
+	// simulates a row the reader finds (a wisp when it carries Ephemeral or
+	// NoHistory), and a non-nil getErr (normally issueops.ErrNotFound)
+	// simulates a row no plane holds.
 	getResult *issueops.IssueDetails
 	getErr    error
 }
@@ -121,9 +121,9 @@ func TestClaimReportsAConflictAsNotClaimedNotAnError(t *testing.T) {
 // BdStore.Claim, both of which already surface a missing id as an error.
 //
 // A genuinely missing id has no row for the reader to find either, so
-// Claim's wisp-disambiguation Get (S5b-7-fixup item 8: see the Claim doc
-// comment) also misses, and the original issueops.ErrNotFound passes through
-// unchanged rather than being reclassified as a wisp refusal.
+// Claim's wisp-disambiguation Get (see the Claim doc comment) also misses, and
+// the original issueops.ErrNotFound passes through unchanged rather than being
+// reclassified as a wisp refusal.
 func TestClaimMapsAMissingIDToErrNotFound(t *testing.T) {
 	spy := &claimRoleSpy{err: issueops.ErrNotFound, getErr: issueops.ErrNotFound}
 	store := newNativeDoltStoreForTest(spy)
@@ -143,31 +143,63 @@ func TestClaimMapsAMissingIDToErrNotFound(t *testing.T) {
 	}
 }
 
-// TestClaimMapsAWispIDToErrWispNotClaimableNotErrNotFound pins
-// S5b-7-fixup item 8: issueops.Claimer's own contract (claimer.go) refuses a
-// wisp id as the identical issueops.ErrNotFound sentinel a plain missing id
-// produces, BEFORE any pre-image read. Before this fix, this front door
-// forwarded that sentinel unchanged, leaving a caller unable to tell "this id
-// is a wisp" from "this id does not exist". Now Claim asks the reader role,
-// which (unlike the claimer) DOES resolve the wisp table — a row the reader
-// finds for an id the claimer could not is the signature of a wisp — and
-// reports the named beads.ErrWispNotClaimable instead.
+// TestClaimMapsAWispIDToErrWispNotClaimableNotErrNotFound pins the named wisp
+// refusal: issueops.Claimer reports a wisp id with the same
+// issueops.ErrNotFound sentinel a plain missing id produces, so Claim asks the
+// reader role, which (unlike the claimer) resolves the wisp table. A row it
+// reads carrying either wisp-plane marker turns the refusal into the named
+// beads.ErrWispNotClaimable.
 func TestClaimMapsAWispIDToErrWispNotClaimableNotErrNotFound(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		row  beadslib.Issue
+	}{
+		{"ephemeral", beadslib.Issue{ID: "gc-wisp-1", Ephemeral: true}},
+		{"no_history", beadslib.Issue{ID: "gc-wisp-1", NoHistory: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := &claimRoleSpy{
+				err:       issueops.ErrNotFound,
+				getResult: &issueops.IssueDetails{Issue: tc.row},
+			}
+			store := newNativeDoltStoreForTest(spy)
+
+			_, claimed, err := store.Claim("gc-wisp-1", "worker-1")
+			if claimed {
+				t.Fatal("claimed = true on a wisp id")
+			}
+			if err == nil {
+				t.Fatal("error = nil, want a wrapped ErrWispNotClaimable")
+			}
+			if !errors.Is(err, ErrWispNotClaimable) {
+				t.Errorf("error = %v, want it to wrap beads.ErrWispNotClaimable", err)
+			}
+		})
+	}
+}
+
+// TestClaimKeepsErrNotFoundWhenTheReaderFindsAnOrdinaryRow pins the window
+// between Claim's two reads: the claimer missed id, but by the time the reader
+// looks an ordinary issue holds it (created or promoted in between). That row
+// carries no wisp-plane marker, so it is not evidence of a wisp, and Claim
+// keeps the claimer's ErrNotFound rather than naming a wisp refusal that a
+// retry would contradict.
+func TestClaimKeepsErrNotFoundWhenTheReaderFindsAnOrdinaryRow(t *testing.T) {
 	spy := &claimRoleSpy{
 		err:       issueops.ErrNotFound,
-		getResult: &issueops.IssueDetails{Issue: beadslib.Issue{ID: "gc-wisp-1", Ephemeral: true}},
+		getResult: &issueops.IssueDetails{Issue: beadslib.Issue{ID: "gc-1"}},
 	}
 	store := newNativeDoltStoreForTest(spy)
 
-	_, claimed, err := store.Claim("gc-wisp-1", "worker-1")
+	_, claimed, err := store.Claim("gc-1", "worker-1")
 	if claimed {
-		t.Fatal("claimed = true on a wisp id")
+		t.Fatal("claimed = true on a not-found row")
 	}
-	if err == nil {
-		t.Fatal("error = nil, want a wrapped ErrWispNotClaimable")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("error = %v, want it to wrap beads.ErrNotFound", err)
 	}
-	if !errors.Is(err, ErrWispNotClaimable) {
-		t.Errorf("error = %v, want it to wrap beads.ErrWispNotClaimable", err)
+	if errors.Is(err, ErrWispNotClaimable) {
+		t.Errorf("error = %v, want it NOT to name an unmarked row a wisp", err)
 	}
 }
 
@@ -224,19 +256,18 @@ func (s *claimBlockingSpy) Claim(_ context.Context, _ issueops.ClaimRequest) (is
 	return issueops.ClaimResult{}, issueops.ErrNotFound
 }
 
-// TestClaimDoesNotDeadlockWhenAPendingWriterArrivesWhileItHoldsItsReadLock is
-// the regression test for the Opus G1+G2 review's CRITICAL finding: Claim
-// held s.mu.RLock (via acquireStorage) across its whole body, and its
-// wisp-disambiguation fallback used to call s.Get(id), which re-takes s.mu
-// through withReadRetry/acquireStorageGen — a second, nested RLock request
-// from the SAME goroutine. Go's sync.RWMutex gives a blocked Lock() writer
-// priority over new readers once one is waiting, so a writer (a reconnect
-// swap, or here a plain s.mu.Lock()/Unlock() standing in for one) arriving
-// while Claim holds its outer RLock permanently wedges Claim's nested RLock
-// behind that writer, which itself can never proceed because Claim's outer
-// RLock is never released. The fix reads the disambiguating row off the
-// storage handle and ctx Claim already has (nativeClaimWispDisambiguationFindsRow),
-// never re-taking s.mu, so neither side of this can block the other.
+// TestClaimDoesNotDeadlockWhenAPendingWriterArrivesWhileItHoldsItsReadLock
+// pins that Claim's wisp-disambiguation read never re-takes s.mu. Claim holds
+// s.mu.RLock (via acquireStorage) across its whole body; a read through s.Get
+// would re-take s.mu through withReadRetry/acquireStorageGen — a second,
+// nested RLock request from the SAME goroutine. Go's sync.RWMutex gives a
+// blocked Lock() writer priority over new readers once one is waiting, so a
+// writer (a reconnect swap, or here a plain s.mu.Lock()/Unlock() standing in
+// for one) arriving while Claim holds its outer RLock would wedge that nested
+// RLock behind the writer, which itself could never proceed because Claim's
+// outer RLock is never released. nativeClaimTargetIsWisp reads off the
+// storage handle and ctx Claim already has, so neither side can block the
+// other.
 func TestClaimDoesNotDeadlockWhenAPendingWriterArrivesWhileItHoldsItsReadLock(t *testing.T) {
 	spy := &claimBlockingSpy{inClaim: make(chan struct{}), proceed: make(chan struct{})}
 	spy.getErr = issueops.ErrNotFound
@@ -280,18 +311,16 @@ type claimReconnectSpy struct{ *claimRoleSpy }
 
 func (claimReconnectSpy) Close() error { return nil }
 
-// TestClaimDoesNotSelfDeadlockWhenTheDisambiguationReadNeedsAReconnect is the
-// regression test for the Opus G1+G2 review's companion CRITICAL case: even
-// with no other goroutine involved, a transient failure on the old
-// s.Get(id)-based disambiguation read would run withReadRetry's reconnect,
-// which takes s.mu.Lock() — a write-lock request from the SAME goroutine that
-// still holds Claim's own s.mu.RLock via acquireStorage. That can never be
-// granted: a goroutine cannot upgrade its own read lock to a write lock, and
-// nothing else can release the RLock it holds. The fix never calls
-// s.Get/withReadRetry for this read at all (see Claim's doc comment and
-// nativeClaimWispDisambiguationFindsRow), so a transient error here simply
-// degrades to the pre-fix "report the original ErrNotFound" outcome instead
-// of reaching reconnect.
+// TestClaimDoesNotSelfDeadlockWhenTheDisambiguationReadNeedsAReconnect pins
+// the companion case with no other goroutine involved: a transient failure on
+// a disambiguation read through s.Get(id) would run withReadRetry's
+// reconnect, which takes s.mu.Lock() — a write-lock request from the SAME
+// goroutine that still holds Claim's own s.mu.RLock via acquireStorage. That
+// can never be granted: a goroutine cannot upgrade its own read lock to a
+// write lock, and nothing else can release the RLock it holds. Claim never
+// calls s.Get/withReadRetry for this read (see Claim's doc comment and
+// nativeClaimTargetIsWisp), so a transient error here keeps the claimer's
+// ErrNotFound instead of reaching reconnect.
 func TestClaimDoesNotSelfDeadlockWhenTheDisambiguationReadNeedsAReconnect(t *testing.T) {
 	spy := claimReconnectSpy{&claimRoleSpy{
 		err:    issueops.ErrNotFound,
@@ -309,7 +338,7 @@ func TestClaimDoesNotSelfDeadlockWhenTheDisambiguationReadNeedsAReconnect(t *tes
 			t.Error("claimed = true on a not-found row")
 		}
 		if !errors.Is(err, ErrNotFound) {
-			t.Errorf("error = %v, want a wrapped ErrNotFound (degrade-to-pre-fix, not a manufactured wisp refusal)", err)
+			t.Errorf("error = %v, want a wrapped ErrNotFound, not a manufactured wisp refusal", err)
 		}
 		if errors.Is(err, ErrWispNotClaimable) {
 			t.Errorf("error = %v, want it NOT to claim this transient-read id is a wisp", err)

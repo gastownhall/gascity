@@ -22,7 +22,9 @@ import (
 // Ping needs it to do.
 //
 // The doubles below refuse every raw method loudly, so a re-point that is only
-// half done fails here rather than silently keeping the raw call.
+// half done fails here rather than silently keeping the raw call. The one raw
+// read left — DepList's UP leg over an anchor Relations refuses as not held —
+// is answered by localDependentsStorage where a test needs a local backend.
 
 type roleSpyEdges struct {
 	requests []issueops.EdgeReadRequest
@@ -231,16 +233,142 @@ func TestDepListDownReadsEdgesNotNeighbours(t *testing.T) {
 	}
 }
 
-// An anchor with no edges is a real answer, and an anchor the read did not
-// return at all must not be mistaken for one: DepList's callers treat an empty
-// slice as "no dependencies", so a dropped anchor would read as a clean graph.
-func TestDepListDownReportsAMissingAnchorAsNotFound(t *testing.T) {
+// An anchor this store holds no issue for has no edges here, and DepList says
+// so rather than failing. A dependency walk meets such anchors as ordinary
+// targets — an "external:" reference, an id in another repository — and an
+// error at one of them stops the whole walk: sling's cycle check reads every
+// target it reaches. Empty is what the raw read answered before the role
+// re-point, what MemStore answers, and what the shared conformance suite's
+// DepListEmpty row pins.
+func TestDepListDownAnswersAMissingAnchorWithNoEdges(t *testing.T) {
 	spy := newRoleStorageSpy()
-	spy.edges.result = issueops.EdgeReadResult{Anchors: []issueops.AnchorEdges{{ID: "gc-1", Missing: true}}}
+	spy.edges.result = issueops.EdgeReadResult{Anchors: []issueops.AnchorEdges{{ID: "external:jira-9", Missing: true}}}
 	store := newNativeDoltStoreForTest(spy)
 
-	if _, err := store.DepList("gc-1", "down"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("DepList over a missing anchor = %v, want ErrNotFound", err)
+	got, err := store.DepList("external:jira-9", "down")
+	if err != nil {
+		t.Fatalf("DepList over a missing anchor: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("DepList over a missing anchor = %+v, want no edges", got)
+	}
+}
+
+// localDependentsStorage is the role spy over a LOCAL backend: the raw
+// target-keyed dependents read answers, as the embedded and server Dolt
+// backends answer it, where the served wire refuses it.
+type localDependentsStorage struct {
+	*roleStorageSpy
+	dependents map[string][]*beadslib.IssueWithDependencyMetadata
+	rawCalls   int
+}
+
+func (s *localDependentsStorage) GetDependentsWithMetadata(_ context.Context, id string) ([]*beadslib.IssueWithDependencyMetadata, error) {
+	s.rawCalls++
+	return s.dependents[id], nil
+}
+
+// UP is a question about a TARGET, and a store can hold dependents of a target
+// it holds no issue for: a convoy's tracks edge lives with the convoy, the item
+// it tracks may live in another store, and the input-convoy root sweep probes
+// the graph store for a work-store issue on exactly that premise. Relations
+// refuses such an anchor, so the answer comes from the target-keyed read
+// beneath it — the read the UP leg made before the role re-point, and the
+// answer MemStore gives.
+func TestDepListUpReadsDependentsOfAnAnchorThisStoreDoesNotHold(t *testing.T) {
+	spy := newRoleStorageSpy()
+	spy.relations.err = fmt.Errorf("%w: issue gc-work-1", issueops.ErrNotFound)
+	storage := &localDependentsStorage{roleStorageSpy: spy, dependents: map[string][]*beadslib.IssueWithDependencyMetadata{
+		"gc-work-1": {{Issue: beadslib.Issue{ID: "gc-convoy-1"}, DependencyType: "tracks"}},
+	}}
+	store := newNativeDoltStoreForTest(storage)
+
+	got, err := store.DepList("gc-work-1", "up")
+	if err != nil {
+		t.Fatalf("DepList(up) over an anchor this store does not hold: %v", err)
+	}
+	want := []Dep{{IssueID: "gc-convoy-1", DependsOnID: "gc-work-1", Type: "tracks"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("DepList(up) = %+v, want the held convoy's edge %+v", got, want)
+	}
+}
+
+// The same read answers "none" for a target nothing here depends on, so an
+// unheld anchor with no dependents is no dependents rather than an error.
+func TestDepListUpAnswersAMissingAnchorWithNoDependents(t *testing.T) {
+	spy := newRoleStorageSpy()
+	spy.relations.err = fmt.Errorf("%w: issue external:jira-9", issueops.ErrNotFound)
+	store := newNativeDoltStoreForTest(&localDependentsStorage{roleStorageSpy: spy})
+
+	got, err := store.DepList("external:jira-9", "up")
+	if err != nil {
+		t.Fatalf("DepList(up) over a missing anchor: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("DepList(up) over a missing anchor = %+v, want no dependents", got)
+	}
+}
+
+// Over the served wire that target-keyed read is refused, and no role reads
+// inbound edges by a target that is not an issue here, so the store cannot
+// answer. The refusal IS the answer: "no dependents" would let the root sweep
+// narrow to one store and force-close a workflow root it could not fully see.
+// And it is not ErrNotFound, which invites exactly that reading.
+func TestDepListUpReportsAServedStoreThatCannotReadAMissingAnchorsDependents(t *testing.T) {
+	spy := newRoleStorageSpy()
+	spy.relations.err = fmt.Errorf("%w: issue gc-work-1", issueops.ErrNotFound)
+	store := newNativeDoltStoreForTest(spy)
+
+	got, err := store.DepList("gc-work-1", "up")
+	var unsupported *beadslib.ErrUnsupported
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("DepList(up) over a served store and a missing anchor = %+v, %v; want the refusal", got, err)
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Errorf("DepList(up) = %v; a store that cannot answer must not read as an anchor with no dependents", err)
+	}
+}
+
+// The leniency covers the miss and nothing else. A read that FAILED is an error
+// in both directions: an unreachable server reported as "no edges" is a dropped
+// link presenting as a clean graph. The backing here answers the target-keyed
+// read, so only a failure classified as a failure — and not as a miss to fall
+// back from — keeps the error.
+func TestDepListReportsAFailedReadRatherThanNoEdges(t *testing.T) {
+	for _, direction := range []string{"down", "up"} {
+		t.Run(direction, func(t *testing.T) {
+			spy := newRoleStorageSpy()
+			spy.edges.err = errors.New("server went away")
+			spy.relations.err = errors.New("server went away")
+			storage := &localDependentsStorage{roleStorageSpy: spy}
+			store := newNativeDoltStoreForTest(storage)
+
+			if got, err := store.DepList("gc-1", direction); err == nil {
+				t.Fatalf("DepList(%s) over a failing read = %+v, want the failure", direction, got)
+			}
+			if storage.rawCalls != 0 {
+				t.Errorf("DepList(%s) fell back to the target-keyed read %d time(s) after a failed read; only a miss falls back", direction, storage.rawCalls)
+			}
+		})
+	}
+}
+
+// An answer that leaves out the anchor it was asked about is neither a miss nor
+// an edge-free bead: the role reports every requested anchor, Missing or not,
+// so the omission is a broken read. It surfaces as one — and not as
+// ErrNotFound, which would invite a caller to treat a broken read as a bead
+// that is simply not there.
+func TestDepListDownRefusesAnAnswerThatOmitsTheAnchor(t *testing.T) {
+	spy := newRoleStorageSpy()
+	spy.edges.result = issueops.EdgeReadResult{Anchors: []issueops.AnchorEdges{{ID: "gc-2"}}}
+	store := newNativeDoltStoreForTest(spy)
+
+	got, err := store.DepList("gc-1", "down")
+	if err == nil {
+		t.Fatalf("DepList over an answer without its anchor = %+v, want an error", got)
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Errorf("DepList over an answer without its anchor = %v; a broken read must not read as a missing bead", err)
 	}
 }
 
@@ -468,10 +596,10 @@ func TestDepMetadataReadsTheEdgeRowThroughTheEdgeReader(t *testing.T) {
 	}
 }
 
-// An anchor that is not there answers ABSENCE rather than ErrNotFound, unlike
-// DepList. The (string, bool) shape already carries the absent channel, and the
-// callers are edge-payload lookups rather than graph walks — the danger DepList
-// guards against (a typo reading as a clean graph) has no analog here.
+// An anchor that is not there answers ABSENCE rather than ErrNotFound, as
+// DepList answers it with no edges. The (string, bool) shape already carries
+// the absent channel, so a missing anchor needs no error to say it holds no
+// payload.
 func TestDepMetadataReportsAMissingAnchorAsAbsence(t *testing.T) {
 	spy := newRoleStorageSpy()
 	spy.edges.result = issueops.EdgeReadResult{Anchors: []issueops.AnchorEdges{{ID: "gc-1", Missing: true}}}

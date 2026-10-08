@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"maps"
 	"strconv"
-	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	beadslib "github.com/steveyegge/beads"
@@ -328,8 +327,8 @@ func (s *NativeDoltStore) conditionalWriteError(
 // a hard failure on any store reached over the wire. The role is a required
 // member of the Storage contract, so every backend answers it.
 //
-// THE STRING FRONT DOOR AND THE ROLE DISAGREE ABOUT TWO THINGS, and both
-// disagreements are normalized here rather than pushed onto callers:
+// THE STRING FRONT DOOR AND THE ROLE DISAGREE ABOUT THREE THINGS, and each
+// disagreement is normalized here rather than pushed onto callers:
 //
 //   - ABSENT vs PRESENT-EMPTY. The role tells them apart (a nil Expected means
 //     absent; an Expected of `""` means present holding the empty string); this
@@ -348,6 +347,12 @@ func (s *NativeDoltStore) conditionalWriteError(
 //     physical deletion — and deletion is the spelling that leaves the NEXT
 //     acquire winning on its first arm instead of putting every workspace
 //     permanently on the fallback.
+//   - NON-STRING VALUES. The role compares JSON values; this front door names
+//     a stored value by the text the read projection rendered for it, and a
+//     stored null, number or object renders as its JSON re-encoding, which
+//     the string encoding of expected never equals. So a refusal over such a
+//     value is retried once with the stored bytes when, and only when, its
+//     rendering equals expected.
 func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
 	if err := s.readOnlyGuard(); err != nil {
 		return false, err
@@ -389,17 +394,18 @@ func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next strin
 			return true, nil
 		}
 		// Arm two, dialed only when the refusal's Current is a non-string JSON
-		// scalar whose own text equals expected -- a stored value this store's
-		// writers never produce (they only ever write strings) but that a
-		// caller still names by its plain text, the way metadataMapFromNative's
-		// map[string]string rendering does (a non-string value renders as its
-		// own JSON text). Retrying with the stored bytes verbatim is the one
-		// extra call that lets the comparison reach them. Anything else -- a
-		// live different value, or a JSON string (whose text is quoted and so
-		// never equals the unquoted expected, already covered by arm one) -- is
-		// a genuine mismatch, and retrying against it would turn a lost race
-		// into a steal.
-		raw, ok := nativeMetadataCASNonStringTextMatch(result.Current, expected)
+		// value that the read projection renders as expected -- a stored value
+		// this store's writers never produce (they only ever write strings) but
+		// that a caller still names by the text metadataMapFromNative handed it
+		// (a stored null reads as "null", a stored 1.50 as "1.5"). Retrying with
+		// the stored bytes verbatim is the one extra call that lets the
+		// comparison reach them. Anything else -- a live different value, or a
+		// JSON string (which arm one already compared) -- is a genuine mismatch,
+		// and retrying against it would turn a lost race into a steal.
+		raw, ok, err := nativeMetadataCASNonStringTextMatch(result.Current, expected)
+		if err != nil {
+			return false, fmt.Errorf("compare-and-set metadata on %q: %w", id, err)
+		}
 		if !ok {
 			return false, nil
 		}
@@ -423,7 +429,11 @@ func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next strin
 	// Arm two, and ONLY when the refusal named the empty string. A refusal
 	// carrying any other value is a live holder, and retrying against it would
 	// turn a lost race into a steal.
-	if !nativeMetadataCASIsEmptyString(result.Current) {
+	heldEmpty, err := nativeMetadataCASIsEmptyString(result.Current)
+	if err != nil {
+		return false, fmt.Errorf("compare-and-set metadata on %q: %w", id, err)
+	}
+	if !heldEmpty {
 		return false, nil
 	}
 	empty := json.RawMessage(`""`)
@@ -450,43 +460,58 @@ func nativeMetadataCASValue(value string) (*json.RawMessage, error) {
 }
 
 // nativeMetadataCASNonStringTextMatch reports whether current is a stored raw
-// JSON value that is NOT itself a JSON string but whose text equals expected
-// once surrounding whitespace is trimmed -- production carries beads with a
-// non-string metadata value written by some other path (an integer
-// gc.control_epoch, among others), and this is the one comparison that still
-// reaches them without a pre-read: the role's own refusal already carries the
-// stored value in Current, so there is nothing to fetch separately.
+// JSON value that is NOT itself a JSON string but that the read projection
+// renders as expected, and if so returns the stored bytes to retry with --
+// production carries beads with a non-string metadata value written by some
+// other path (an integer gc.control_epoch, among others), and this is the one
+// comparison that still reaches them without a pre-read: the role's own refusal
+// already carries the stored value in Current, so there is nothing to fetch
+// separately.
 //
-// A JSON string's text is quoted and so never equals the unquoted expected --
-// that shape is already handled by arm one's plain string encoding, and
-// double-matching it here would risk a false positive against a string that
-// happens to equal its own quoted form.
-func nativeMetadataCASNonStringTextMatch(current *json.RawMessage, expected string) (*json.RawMessage, bool) {
+// The comparison is against metadataValueText's rendering, not Current's own
+// text, because that rendering is what a read-then-CAS caller was handed: the
+// role reports Current canonically (literal numbers, sorted keys), the read
+// re-encodes a decoded value, and the two part on a stored 1.50 or a null. The
+// base store compared the rendering too.
+//
+// A JSON string is excluded outright: arm one's plain string encoding already
+// compared it, and matching it here would risk a false positive against a
+// string that happens to equal its own quoted form.
+func nativeMetadataCASNonStringTextMatch(current *json.RawMessage, expected string) (*json.RawMessage, bool, error) {
 	if current == nil {
-		return nil, false
+		return nil, false, nil
 	}
-	var asString string
-	if err := json.Unmarshal(*current, &asString); err == nil {
-		return nil, false
+	var decoded interface{}
+	if err := json.Unmarshal(*current, &decoded); err != nil {
+		return nil, false, fmt.Errorf("decoding the stored value the refusal reported: %w", err)
 	}
-	if strings.TrimSpace(string(*current)) != expected {
-		return nil, false
+	if _, isString := decoded.(string); isString {
+		return nil, false, nil
+	}
+	text, err := metadataValueText(decoded)
+	if err != nil {
+		return nil, false, fmt.Errorf("rendering the stored value the refusal reported: %w", err)
+	}
+	if text != expected {
+		return nil, false, nil
 	}
 	raw := append(json.RawMessage(nil), *current...)
-	return &raw, true
+	return &raw, true, nil
 }
 
 // nativeMetadataCASIsEmptyString reports the one Current value that makes the
 // present-empty arm worth dialing. A nil Current is an absent key the first arm
 // already lost to (a concurrent writer took it between the two), and anything
-// else is a live value.
-func nativeMetadataCASIsEmptyString(current *json.RawMessage) bool {
+// else is a live value -- a stored null included, which reads as "null" and
+// which a plain string decode would otherwise accept as "".
+func nativeMetadataCASIsEmptyString(current *json.RawMessage) (bool, error) {
 	if current == nil {
-		return false
+		return false, nil
 	}
-	var decoded string
+	var decoded interface{}
 	if err := json.Unmarshal(*current, &decoded); err != nil {
-		return false
+		return false, fmt.Errorf("decoding the stored value the refusal reported: %w", err)
 	}
-	return decoded == ""
+	s, isString := decoded.(string)
+	return isString && s == "", nil
 }

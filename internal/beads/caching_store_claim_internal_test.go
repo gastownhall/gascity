@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 )
 
@@ -22,13 +23,25 @@ type claimCapableBackingStore struct {
 	// separate, subsequent Get (CachingStore.Claim's post-claim refresh)
 	// failing — e.g. a transient read blip right after a successful write.
 	failGetAfterClaim bool
+	// afterClaim runs once, right after the next claim commits and before it
+	// returns to the cache.
+	afterClaim func()
+	// afterGet runs once, right after the next Get read its row and before it
+	// returns. Claim's own reads bypass it, so it fires inside the cache's
+	// post-claim refresh.
+	afterGet func()
 }
 
 func (c *claimCapableBackingStore) Get(id string) (Bead, error) {
 	if c.failGetAfterClaim {
 		return Bead{}, errors.New("backing get unavailable")
 	}
-	return c.Store.Get(id)
+	b, err := c.Store.Get(id)
+	if hook := c.afterGet; hook != nil {
+		c.afterGet = nil
+		hook()
+	}
+	return b, err
 }
 
 func (c *claimCapableBackingStore) Claim(id, assignee string) (Bead, bool, error) {
@@ -50,15 +63,18 @@ func (c *claimCapableBackingStore) Claim(id, assignee string) (Bead, bool, error
 	}
 	claimed.Dependencies = nil
 	claimed.Labels = nil
+	if hook := c.afterClaim; hook != nil {
+		c.afterClaim = nil
+		hook()
+	}
 	return claimed, true, nil
 }
 
-// TestCachingStoreClaimWriteThroughKeepsCachedDependencies is the write-through
-// correctness test for S5b-4: a successful Claim must not clobber the cache's
-// separately-tracked dependency edges (c.deps[id]) to empty, because the
-// claimed bead it absorbs deliberately carries no Dependencies. Using
-// depsFromFields here (instead of depsKeepCached) would silently wipe every
-// cached dependency edge on the claimed bead's first successful claim.
+// TestCachingStoreClaimWriteThroughKeepsCachedDependencies pins that a
+// successful Claim leaves the cache's separately tracked dependency edges
+// (c.deps[id]) alone: the claimed bead carries no Dependencies, so deriving
+// edges from its fields (depsFromFields instead of depsKeepCached) would wipe
+// every cached edge of a claimed bead.
 func TestCachingStoreClaimWriteThroughKeepsCachedDependencies(t *testing.T) {
 	t.Parallel()
 
@@ -112,14 +128,11 @@ func TestCachingStoreClaimWriteThroughKeepsCachedDependencies(t *testing.T) {
 	}
 }
 
-// TestCachingStoreClaimWriteThroughKeepsCachedLabels is the item-7 regression
-// test: Claim's bare-row contract strips Labels (see claimCapableBackingStore
-// above) the same way it strips Dependencies, but unlike dependencies there
-// was no depsKeepCached-equivalent guard protecting Labels — a successful
-// Claim used to absorb the bare row wholesale via absorbFreshLocked, wiping
-// any Labels the cache had primed for that bead. CachingStore.Claim must now
-// refresh from backing (mirroring ReleaseIfCurrent) so the richer, label-
-// bearing row — not the bare claim response — is what lands in the cache.
+// TestCachingStoreClaimWriteThroughKeepsCachedLabels pins that a successful
+// Claim keeps the claimed bead's labels. The bare claim row strips Labels (see
+// claimCapableBackingStore above) as it strips Dependencies, and installing
+// it wholesale would drop every primed label, so CachingStore.Claim must
+// install the refreshed full row, not the bare claim response.
 func TestCachingStoreClaimWriteThroughKeepsCachedLabels(t *testing.T) {
 	t.Parallel()
 
@@ -222,16 +235,13 @@ func TestCachingStoreClaimConflictAndUnsupportedNeverTouchTheCache(t *testing.T)
 	})
 }
 
-// TestCachingStoreClaimColdCacheMarksRowDirtyWhenRefreshFails is the S5b-7
-// review FINAL item 7 sub-bullet 3 regression test: when Claim's post-claim
-// refresh (refreshBeadAfterWrite) fails AND the id was never cached before
-// (a true cold claim -- nothing in c.beads to merge onto), CachingStore.Claim
-// installs the bare, stripped claim row as a placeholder. That placeholder
-// has no labels/dependencies/comments confirmed from the backing store (the
-// refresh that would have confirmed them failed), so it must be marked
-// dirty, not clean: a clean mark would let a later cache read trust the
-// empty label/dep state as settled fact instead of bypassing to the backing
-// store for the real row.
+// TestCachingStoreClaimColdCacheMarksRowDirtyWhenRefreshFails pins the cold
+// claim: when Claim's post-claim refresh (refreshBeadAfterWrite) fails and the
+// id was never cached (nothing in c.beads to merge onto), CachingStore.Claim
+// installs the bare, stripped claim row as a placeholder. Nothing confirmed
+// that placeholder's labels, dependencies or comments, so it must be marked
+// dirty, not clean: a clean mark would let a later cache read trust the empty
+// label/dep state as settled fact instead of reading the backing row.
 func TestCachingStoreClaimColdCacheMarksRowDirtyWhenRefreshFails(t *testing.T) {
 	t.Parallel()
 
@@ -268,5 +278,116 @@ func TestCachingStoreClaimColdCacheMarksRowDirtyWhenRefreshFails(t *testing.T) {
 	cache.mu.RUnlock()
 	if !isDirty {
 		t.Fatalf("cache.dirty[%s] after a cold claim whose post-claim refresh failed = false, want true (placeholder row must not be trusted as clean)", work.ID)
+	}
+}
+
+// TestCachingStoreClaimRacedWriteInstallsNothing pins Claim's write fence: a
+// local Delete or write of the claimed row that lands after the claim began
+// stands. Claim installs neither its refreshed row nor its fallback over it,
+// so a deleted row is not resurrected and a newer write is not overwritten
+// with an older read, and it still notifies the claim it committed.
+func TestCachingStoreClaimRacedWriteInstallsNothing(t *testing.T) {
+	t.Parallel()
+
+	deleteRow := func(t *testing.T, cache *CachingStore, id string) {
+		if err := cache.Delete(id); err != nil {
+			t.Errorf("racing Delete: %v", err)
+		}
+	}
+	writeRow := func(t *testing.T, cache *CachingStore, id string) {
+		if err := cache.SetMetadata(id, "k", "v"); err != nil {
+			t.Errorf("racing SetMetadata: %v", err)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		// duringRefresh fires the racer inside Claim's refresh, after it read
+		// the row; otherwise the racer fires before that read, so the refresh
+		// misses the row.
+		duringRefresh bool
+		racer         func(t *testing.T, cache *CachingStore, id string)
+		deletes       bool
+	}{
+		{name: "delete_before_refresh", racer: deleteRow, deletes: true},
+		{name: "delete_during_refresh", duringRefresh: true, racer: deleteRow, deletes: true},
+		{name: "write_during_refresh", duringRefresh: true, racer: writeRow},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			backing := &claimCapableBackingStore{Store: NewMemStore()}
+			work, err := backing.Create(Bead{Title: "claimable work"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			var (
+				mu     sync.Mutex
+				events []string
+				rows   []Bead
+			)
+			cache := NewCachingStoreForTest(backing, func(eventType, _ string, payload json.RawMessage) {
+				var row Bead
+				if err := json.Unmarshal(payload, &row); err != nil {
+					t.Errorf("unmarshal %s payload: %v", eventType, err)
+				}
+				mu.Lock()
+				events = append(events, eventType)
+				rows = append(rows, row)
+				mu.Unlock()
+			})
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+
+			raced := -1
+			race := func() {
+				tc.racer(t, cache, work.ID)
+				mu.Lock()
+				raced = len(events)
+				mu.Unlock()
+			}
+			if tc.duringRefresh {
+				backing.afterGet = race
+			} else {
+				backing.afterClaim = race
+			}
+			claimed, ok, err := cache.Claim(work.ID, "worker-1")
+			if err != nil || !ok {
+				t.Fatalf("Claim = (%v, %v, %v), want (bead, true, nil)", claimed, ok, err)
+			}
+			if raced < 0 || backing.afterGet != nil || backing.afterClaim != nil {
+				t.Fatal("the racer never ran; the race is vacuous")
+			}
+			if claimed.Assignee != "worker-1" || claimed.Status != "in_progress" {
+				t.Fatalf("Claim returned (assignee %q, status %q), want (worker-1, in_progress)", claimed.Assignee, claimed.Status)
+			}
+			mu.Lock()
+			after, afterRows := events[raced:], rows[raced:]
+			mu.Unlock()
+			if len(after) != 1 || after[0] != "bead.updated" || afterRows[0].ID != work.ID || afterRows[0].Assignee != "worker-1" {
+				t.Fatalf("events after the racer = %v (%+v), want exactly one bead.updated carrying the claim", after, afterRows)
+			}
+
+			if !tc.deletes {
+				assertSettledCensusAgrees(t, cache, backing.Store, work.ID)
+				return
+			}
+			cache.mu.RLock()
+			_, cached := cache.beads[work.ID]
+			_, tombstoned := cache.deletedSeq[work.ID]
+			_, dirty := cache.dirty[work.ID]
+			cache.mu.RUnlock()
+			if cached || !tombstoned {
+				t.Fatalf("Claim resurrected deleted row %s (cached=%v, tombstoned=%v)", work.ID, cached, tombstoned)
+			}
+			if dirty {
+				t.Fatalf("tombstoned row %s carries a dirty mark", work.ID)
+			}
+			if _, err := cache.Get(work.ID); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("Get(%s) after the racing Delete = %v, want ErrNotFound", work.ID, err)
+			}
+			if !admittedCensusAgrees(t, cache, backing.Store, work.ID) {
+				t.Fatal("census refused")
+			}
+		})
 	}
 }

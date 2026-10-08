@@ -21,6 +21,11 @@ import (
 // them is not a fork of behavior by backend, it is the ONE path that all of
 // them answer.
 //
+// One raw read is left, and only behind a role: DepList's UP leg asks the raw
+// GetDependentsWithMetadata about an anchor Relations refuses as not held,
+// because the dependents of such an anchor can still be here and no role reads
+// inbound edges by target. DepList says why that case is asked at all.
+//
 // Ping is the one that was not failing and moved anyway. GetStatistics IS
 // served, but as the off-role bridge whose own documentation says it must never
 // hard-fail: it swallows a busy server into a degraded answer, which is exactly
@@ -105,6 +110,32 @@ func (s *NativeDoltStore) DepRemove(issueID, dependsOnID string) error {
 // Direction is passed to Relations explicitly because its zero value is
 // invalid by design: a silent default is how a caller asks for "what blocks
 // this" and is handed the exact inverse graph, with the same shape and no error.
+//
+// AN ANCHOR THIS STORE HOLDS NO ISSUE FOR IS NOT AN ERROR, in either
+// direction, because gc asks about such anchors as a matter of course. DOWN
+// answers no edges: a dependency walk reaches the "external:" references and
+// foreign-repository ids the DOWN leg exists to keep, and sling's cycle check
+// fails outright on any error from a target it reaches. UP answers the
+// dependents this store DOES hold: a convoy's tracks edge lives with the
+// convoy while the item it tracks may live in another store, and the
+// input-convoy root sweep probes the graph store for a work-store issue on
+// exactly that premise. Both answers are what the raw reads gave before the
+// role re-point and what MemStore gives; the shared conformance suite pins the
+// DOWN one (DepListEmpty).
+//
+// UP is where the roles fall short. Relations refuses an anchor on neither
+// plane, and no role reads inbound edges by a target that is not an issue
+// here, so that one case takes the raw target-keyed read beneath Relations.
+// The served wire refuses that read, and the refusal is returned: a store
+// that cannot see a dependent must not report that there is none (ga-i8vpl5
+// tracks a role read that would answer it there). Only a typed miss falls
+// back — the role promises a failed read never decays into one.
+//
+// A FAILED READ IS AN ERROR in both directions, and so is a DOWN answer that
+// omits the anchor it was asked about: the role reports every requested
+// anchor, Missing or not, so the omission is a broken read. Neither is
+// ErrNotFound, which would invite the "no edges" reading this method
+// reserves for an anchor the store really does not hold.
 func (s *NativeDoltStore) DepList(id, direction string) ([]Dep, error) {
 	var out []Dep
 	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
@@ -123,29 +154,7 @@ func (s *NativeDoltStore) DepList(id, direction string) ([]Dep, error) {
 
 func (s *NativeDoltStore) depList(ctx context.Context, storage beadslib.Storage, id, direction string) ([]Dep, error) {
 	if direction == "up" {
-		relations, err := storage.IssueRelations()
-		if err != nil {
-			return nil, nativeStoreError(id, err)
-		}
-		issues, err := relations.Related(ctx, issueops.RelatedRequest{
-			ID:        id,
-			Direction: issueops.RelationIn,
-		})
-		if err != nil {
-			return nil, nativeStoreError(id, err)
-		}
-		deps := make([]Dep, 0, len(issues))
-		for _, issue := range issues {
-			if issue == nil {
-				continue
-			}
-			deps = append(deps, Dep{
-				IssueID:     issue.ID,
-				DependsOnID: id,
-				Type:        string(issue.DependencyType),
-			})
-		}
-		return deps, nil
+		return dependentDeps(ctx, storage, id)
 	}
 	reader, err := storage.EdgeReader()
 	if err != nil {
@@ -159,15 +168,50 @@ func (s *NativeDoltStore) depList(ctx context.Context, storage beadslib.Storage,
 		if anchor.ID != id {
 			continue
 		}
-		// A batch read reports a miss PER ANCHOR rather than failing the call.
-		// Collapsing that into an empty slice would make a typo read as a clean
-		// graph, which is the one thing every caller of this list acts on.
-		if anchor.Missing {
-			return nil, fmt.Errorf("bead %q: %w", id, ErrNotFound)
-		}
+		// A Missing anchor carries no edges by contract, so it answers the
+		// empty list DepList owes an anchor this store does not hold.
 		return anchorDeps(id, anchor), nil
 	}
-	return nil, fmt.Errorf("bead %q: %w", id, ErrNotFound)
+	return nil, fmt.Errorf("reading the edges of bead %q: the answer omits the anchor it was asked about", id)
+}
+
+// dependentDeps answers DepList's UP leg: the edges that point AT id.
+//
+// Relations answers it for an anchor this store holds. For one it does not,
+// Relations refuses with a typed miss and the raw target-keyed read answers
+// instead, because the dependents can still be here (DepList says why). The
+// fallback's error is wrapped rather than normalized: nothing it fails with
+// may read as a missing bead.
+func dependentDeps(ctx context.Context, storage beadslib.Storage, id string) ([]Dep, error) {
+	relations, err := storage.IssueRelations()
+	if err != nil {
+		return nil, nativeStoreError(id, err)
+	}
+	issues, err := relations.Related(ctx, issueops.RelatedRequest{
+		ID:        id,
+		Direction: issueops.RelationIn,
+	})
+	if errors.Is(err, issueops.ErrNotFound) {
+		issues, err = storage.GetDependentsWithMetadata(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("reading the dependents of %q, which this store holds no issue for: %w", id, err)
+		}
+	}
+	if err != nil {
+		return nil, nativeStoreError(id, err)
+	}
+	deps := make([]Dep, 0, len(issues))
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		deps = append(deps, Dep{
+			IssueID:     issue.ID,
+			DependsOnID: id,
+			Type:        string(issue.DependencyType),
+		})
+	}
+	return deps, nil
 }
 
 // anchorDeps projects one anchor's stored edges into gc's Dep shape.
@@ -192,23 +236,21 @@ func anchorDeps(id string, anchor issueops.AnchorEdges) []Dep {
 }
 
 // nativeServerEdgeAnchorCap is the server's own ReadEdges anchor cap
-// (bd-enterprise internal/httpapi/edges.go: maxDependencyAnchors = 100),
-// enforced on both the dependencies and dependents edge endpoints as a 400
-// invalid_argument rejecting the WHOLE call once a request names more anchors
-// than this — confirmed live against a real bd-serve at the pinned enterprise
-// revision. It is the single source of truth for every ReadEdges chunk size in
+// (beads internal/httpapi/edges.go: maxDependencyAnchors = 100), enforced on
+// the served edge reads as a 400 invalid_argument rejecting the WHOLE call once
+// a request names more anchors than this — confirmed live against a real
+// bd-serve. It is the single source of truth for every ReadEdges chunk size in
 // this package (nativeDepListBatchChunk here, and
 // filterReadyByWorkOutcome's chunking in native_dolt_store_read_roles.go), so
 // a client-side chunk can never silently drift wider than what the server
-// actually enforces (S5b-portrev item 2).
+// actually enforces.
 const nativeServerEdgeAnchorCap = 100
 
-// nativeDepListBatchChunk caps how many anchors ride one read, matching the
-// server's own ReadEdges anchor cap (nativeServerEdgeAnchorCap) rather than an
-// arbitrary, larger client-side batch size: DepListBatch rode the embedded
-// DoltliteReadStore's cap before S5b, and that cap was never checked against
-// what a served bd-serve actually enforces over http, where a batch wider than
-// the server's cap fails the WHOLE chunk outright (S5b-portrev item 2).
+// nativeDepListBatchChunk caps how many anchors ride one read at the
+// server's own ReadEdges anchor cap (nativeServerEdgeAnchorCap) rather than a
+// larger client-side batch size: over http, a batch wider than the server's
+// cap fails the WHOLE chunk outright. It bounds the statement the backend
+// builds without giving back the round-trip saving the batch exists for.
 const nativeDepListBatchChunk = nativeServerEdgeAnchorCap
 
 // DepListBatch returns the DOWN edges of many anchors in one round trip.
@@ -228,13 +270,14 @@ const nativeDepListBatchChunk = nativeServerEdgeAnchorCap
 // tree already answers this question in one call; this one was the outlier, so
 // internal/dispatch's scope-skip walk fell back to its per-id loop here too.
 //
-// MISS SEMANTICS ARE THE ONE PLACE IT CANNOT COPY DepList. A batch that answered
-// ErrNotFound for one absent id would throw away the answers for every id it did
-// find, so an anchor this store does not hold gets NO ENTRY — the same rule
-// MemStore, FileStore, BdStore and DoltliteReadStore follow. An anchor that IS
-// held and has no edges gets an entry carrying an empty slice, which is more
-// than the thin stores report and less than a caller may rely on across store
-// types: presence in this map is not a portable existence check.
+// MISS SEMANTICS ARE THE ONE PLACE IT SAYS MORE THAN DepList. DepList answers an
+// anchor this store does not hold with no edges, the same answer an edge-free
+// anchor gets. A batch is keyed by anchor, so it keeps the two apart: an anchor
+// this store does not hold gets NO ENTRY — the same rule MemStore, FileStore,
+// BdStore and DoltliteReadStore follow — and an anchor that IS held and has no
+// edges gets an entry carrying an empty slice, which is more than the thin
+// stores report and less than a caller may rely on across store types: presence
+// in this map is not a portable existence check.
 //
 // A FAILED CHUNK FAILS THE CALL. The partial map is dropped rather than returned
 // alongside the error, because a caller that walks it reads the anchors the
@@ -290,11 +333,8 @@ func (s *NativeDoltStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 // are ("", false, nil), matching the SQLite front door beside it. The
 // (string, bool) shape already has an absent channel, so none of them is an
 // error, and the three need no separate branch: a missing anchor carries no
-// edges by contract, so it falls out of the same walk. That is the one place
-// this method departs from DepList, which reports a missing anchor as
-// ErrNotFound: its callers WALK a graph, where a typo reading as a clean graph
-// is the dangerous answer, and this method's callers look up one edge's payload
-// by a target they already hold.
+// edges by contract, so it falls out of the same walk — the one DepList's DOWN
+// leg takes to answer such an anchor with no edges.
 //
 // A pair can hold more than one row (one per dep type), and the first CARRYING
 // row wins, per DepMetadataCarries: Dolt defaults an edge's metadata column to

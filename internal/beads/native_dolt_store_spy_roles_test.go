@@ -377,3 +377,11 @@ func (s *nativeDoltMemStorage) BatchApplier() (issueops.BatchApplier, error) {
 func (s *nativeDoltFailingLabelStorage) BatchApplier() (issueops.BatchApplier, error) {
 	return rawBatchApplier{storage: s}, nil
 }
+
+// The failing-dependency double needs its own dependency editor for the same
+// reason: the one promoted from the embedded mem storage writes through the
+// inner AddDependency, so an edge write taking the editor would skip this
+// double's failing override.
+func (s *nativeDoltFailingDependencyStorage) DependencyEditor() (issueops.DependencyEditor, error) {
+	return rawDependencyEditor{raw: s}, nil
+}

@@ -36,7 +36,7 @@ type edgeFixtureReader struct {
 	err      error
 
 	// maxIDs, when nonzero, mirrors the server's own ReadEdges anchor cap
-	// (nativeServerEdgeAnchorCap / bd-enterprise's maxDependencyAnchors): a
+	// (nativeServerEdgeAnchorCap / beads' maxDependencyAnchors): a
 	// request naming more than this many ids is refused outright, the way a
 	// real bd-serve refuses the WHOLE call rather than serving the first
 	// maxIDs and dropping the rest. Zero means unbounded, matching every
@@ -173,13 +173,13 @@ func TestDepListBatchAgreesWithDepListAnchorForAnchor(t *testing.T) {
 }
 
 // TestDepListBatchDistinguishesAnEdgelessAnchorFromAMissingOne pins the miss
-// semantics, which are the one place this role cannot copy DepList.
+// semantics, which are the one place this role says more than DepList.
 //
-// DepList answers ErrNotFound for an anchor that is not there. A batch cannot:
-// failing the call for one absent id would throw away the answers for every id
-// that was found (issueops.EdgeReader says so). So a missing anchor gets no
-// entry — matching MemStore, FileStore, BdStore and DoltliteReadStore — and an
-// anchor that IS held with no edges gets an entry holding an empty slice.
+// DepList answers an anchor that is not there with no edges, the same answer an
+// edge-free anchor gets. A batch keys its answer by anchor, so it can keep the
+// two apart: a missing anchor gets no entry — matching MemStore, FileStore,
+// BdStore and DoltliteReadStore — and an anchor that IS held with no edges gets
+// an entry holding an empty slice.
 func TestDepListBatchDistinguishesAnEdgelessAnchorFromAMissingOne(t *testing.T) {
 	store, _ := newEdgeFixtureStore(map[string][]*issueops.Dependency{"gc-2": nil})
 
@@ -197,9 +197,14 @@ func TestDepListBatchDistinguishesAnEdgelessAnchorFromAMissingOne(t *testing.T) 
 	if len(deps) != 0 {
 		t.Errorf("gc-2 = %+v, want no edges", deps)
 	}
-	// And DepList's own miss policy is untouched by the new method.
-	if _, err := store.DepList("gc-1", "down"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("DepList over a missing anchor = %v, want ErrNotFound", err)
+	// And DepList's own miss policy is untouched by the new method: one answer
+	// per call cannot carry the distinction, so the miss reads as no edges.
+	single, err := store.DepList("gc-1", "down")
+	if err != nil {
+		t.Fatalf("DepList over a missing anchor: %v", err)
+	}
+	if len(single) != 0 {
+		t.Errorf("DepList over a missing anchor = %+v, want no edges", single)
 	}
 }
 
@@ -235,10 +240,9 @@ func TestDepListBatchChunksALargeAnchorListWithoutLosingAnchors(t *testing.T) {
 }
 
 // realBdServeReadEdgesAnchorCap is the ReadEdges anchor cap a real bd-serve
-// enforces at the pinned enterprise revision (bd-enterprise
-// internal/httpapi/edges.go: maxDependencyAnchors = 100), confirmed live
-// against a real server with a 130-id request. It is written as a LITERAL
-// here, deliberately independent of nativeServerEdgeAnchorCap /
+// enforces (beads internal/httpapi/edges.go: maxDependencyAnchors = 100),
+// confirmed live against a real server with a 130-id request. It is written as
+// a LITERAL here, deliberately independent of nativeServerEdgeAnchorCap /
 // nativeDepListBatchChunk, so this test exercises the real, fixed wire limit
 // rather than a mutation-proof-defeating tautology against whatever value the
 // production constant happens to hold.
@@ -248,15 +252,12 @@ const realBdServeReadEdgesAnchorCap = 100
 // to the server's own ReadEdges anchor cap rather than an arbitrary, larger
 // client-side batch size.
 //
-// Red before S5b-portrev item 2: nativeDepListBatchChunk was 500, which rode
-// fine against the embedded DoltliteReadStore's own (unrelated) cap of the
-// same name, but exceeds the 100-issue_id-per-request cap a real bd-serve
-// enforces over http — confirmed live, where a batch over the cap is refused
-// outright ("400 invalid_argument: at most 100 issue_id values per request").
-// A fake EdgeReader pinned to the real server's cap (not to whatever
-// production constant this test is meant to be checking) catches any future
-// drift back above it, the way nothing in this package could before this test
-// existed.
+// A real bd-serve enforces a 100-issue_id-per-request cap over http, whatever
+// cap the embedded DoltliteReadStore applies, and refuses a batch over it
+// outright ("400 invalid_argument: at most 100 issue_id values per request"). A
+// fake EdgeReader pinned to the real server's cap (not to whatever production
+// constant this test is meant to be checking) catches any drift of
+// nativeDepListBatchChunk above it.
 func TestDepListBatchNeverExceedsTheServerAnchorCap(t *testing.T) {
 	const anchors = realBdServeReadEdgesAnchorCap*2 + 30
 	fixture := make(map[string][]*issueops.Dependency, anchors)

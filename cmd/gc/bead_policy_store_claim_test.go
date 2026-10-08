@@ -8,9 +8,9 @@ import (
 )
 
 // TestBeadPolicyStoreClaimForwardsToACapableBackingStore pins beadPolicyStore
-// as a pure pass-through for S5b-4's forwarding chain, the same shape as its
-// existing ReleaseIfCurrent: it holds no id, no assignee and no policy of its
-// own, so a successful claim on the wrapped store must come back unchanged.
+// as a pure pass-through in the claim forwarding chain, the same shape as its
+// ReleaseIfCurrent: it holds no id, no assignee and no policy of its own, so a
+// successful claim on the wrapped store must come back unchanged.
 func TestBeadPolicyStoreClaimForwardsToACapableBackingStore(t *testing.T) {
 	leaf := &claimCapableLeafStore{Store: beads.NewMemStore()}
 	bead, err := leaf.Create(beads.Bead{Title: "claimable", Status: "open"})

@@ -319,13 +319,18 @@ type sourceDepReader struct {
 	// batched holds the edges of every anchor the prefetch asked about, keyed by
 	// bead. A prefetched anchor with no entry has no edges.
 	batched map[string][]beads.Dep
-	// prefetched names the anchors the batch actually asked about, which is what
+	// prefetched names the anchors a KEPT batch answer covers, which is what
 	// makes an absent entry readable as "no edges" rather than as "not asked".
+	// A batch that answered nothing is not kept (see prefetch).
 	prefetched map[string]bool
+	// emptyBatchAnchors counts the anchors of a batch that answered nothing,
+	// so the report can say why the walk went one bead at a time.
+	emptyBatchAnchors int
 }
 
-// prefetch reads every anchor's edges in ONE round trip so the three passes
-// below can walk the whole source without asking it again.
+// prefetch reads every anchor's edges in ONE round trip, so classifying the
+// stranded rows and planning the topology walk the whole source without asking
+// it again, and the equality stage's second read (see reread) is one more.
 //
 // THE COST IS THE POINT. This repair reads a bead's source edges three times —
 // classifying the stranded rows, planning the topology over every resident bead,
@@ -356,6 +361,20 @@ type sourceDepReader struct {
 // reads as "no edges" rather than as a missing bead: the thin stores (MemStore,
 // FileStore) omit edge-free anchors by convention, and a re-read could not be
 // more current than the snapshot row being copied anyway.
+//
+// AN ANSWER WITH NOTHING IN IT IS NOT KEPT. BdStore answers a batch that bd
+// refuses as "not found" or "unsupported" — one anchor bd cannot resolve is
+// enough — with an empty map and no error, whatever edges the other anchors
+// carry, and the verify pass's own batched read would answer the same nothing
+// and agree with it. So an empty answer over a non-empty anchor list is set
+// aside and every bead is read on its own, exactly as if the store could not
+// batch. That degrade is all-or-nothing, so an answer carrying any edge came
+// from a read that ran and its absent anchors keep the "no edges" reading
+// above. Re-reading per ABSENT anchor instead would make every store that omits
+// edge-free anchors re-read each of them one at a time — the per-bead walk this
+// pass exists to remove, and on the failing link it was written for, a refused
+// bead per edge-free one. The guard's price is narrower: a source with no edges
+// at all, on such a store, takes the per-bead walk.
 func (r *sourceDepReader) prefetch(anchors []string) error {
 	batch, ok := beads.DepListBatchFor(r.source)
 	if !ok || len(anchors) == 0 {
@@ -368,12 +387,58 @@ func (r *sourceDepReader) prefetch(anchors []string) error {
 	if err != nil {
 		return fmt.Errorf("reading the source's dep edges for %d bead(s) in one batch: %w", len(anchors), err)
 	}
+	if len(edges) == 0 {
+		r.emptyBatchAnchors = len(anchors)
+		return nil
+	}
 	r.batched = edges
 	r.prefetched = make(map[string]bool, len(anchors))
 	for _, id := range anchors {
 		r.prefetched[id] = true
 	}
 	return nil
+}
+
+// sourceAnchorIDs lists every source infrastructure bead as an anchor, not just
+// the stranded ones: the topology plan and the verify pass both walk every bead
+// the binding will hold, and an anchor left out of the batch is one the walk
+// asks for separately.
+func sourceAnchorIDs(rows []beads.Bead) []string {
+	anchors := make([]string, 0, len(rows))
+	for _, b := range rows {
+		anchors = append(anchors, b.ID)
+	}
+	return anchors
+}
+
+// reread is the equality stage's SECOND read of the source's edges: a reader
+// that keeps this one's verdict on what the store can answer — which leg it
+// reads, and what witnessed the inline projection — and none of its answers.
+//
+// A proof read off the answer the plan was built from cannot fail: an edge that
+// answer lost is one the plan never wrote and the proof never asks for. So the
+// relation leg asks again, in one more batch where the first read was one (see
+// prefetch, including when an answer is set aside), and a failed batch fails
+// the run for the reason it fails the walk. It is a second answer through the
+// same read, so it catches an edge a read lost rather than one the read can
+// never see; re-reading one bead at a time would catch both, at the per-bead
+// cost prefetch exists to remove. The inline leg has nothing to ask again: its
+// edges are the snapshot row's own projection.
+func (r *sourceDepReader) reread(anchors []string) (*sourceDepReader, error) {
+	fresh := &sourceDepReader{
+		source:          r.source,
+		relationsOK:     r.relationsOK,
+		relationsErr:    r.relationsErr,
+		inlineWitnessed: r.inlineWitnessed,
+		witnessID:       r.witnessID,
+	}
+	if !fresh.relationsOK {
+		return fresh, nil
+	}
+	if err := fresh.prefetch(anchors); err != nil {
+		return nil, err
+	}
+	return fresh, nil
 }
 
 // newSourceDepReader probes the relation read once and, if the adapter refuses
@@ -448,6 +513,9 @@ func (r *sourceDepReader) describe() string {
 	if r.relationsOK {
 		if len(r.prefetched) > 0 {
 			return fmt.Sprintf("source dep edges: read through the store's relation listing, %d anchor(s) in one batched read", len(r.prefetched))
+		}
+		if r.emptyBatchAnchors > 0 {
+			return fmt.Sprintf("source dep edges: read through the store's relation listing one bead at a time — the batched read answered nothing for %d anchor(s), which cannot be told from a degraded read", r.emptyBatchAnchors)
 		}
 		return "source dep edges: read through the store's relation listing"
 	}
@@ -759,15 +827,7 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	} else if len(rows) > 0 {
 		probeID = rows[0].ID
 	}
-	// Every source infrastructure bead is an anchor, not just the stranded ones:
-	// the topology plan and the verify pass both walk every bead the binding will
-	// hold, and an anchor left out of the batch is one the walk asks for
-	// separately.
-	anchors := make([]string, 0, len(rows))
-	for _, b := range rows {
-		anchors = append(anchors, b.ID)
-	}
-	depReader, err := newSourceDepReader(source, probeID, anchors)
+	depReader, err := newSourceDepReader(source, probeID, sourceAnchorIDs(rows))
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -930,15 +990,19 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 	// from. The first cut compared the destination to the same in-memory edge
 	// list it had written from, so whatever that read lost, the proof lost too —
 	// a dep proof that cannot fail. verifyInfraCopy re-reads source.DepList
-	// independently and this stage now holds itself to the same standard.
+	// independently and this stage now holds itself to the same standard, in one
+	// batch where the walk's read was one (see reread).
 	//
 	// Fields are compared for the rows this run created and NOT for the rows that
 	// were already resident: a bead the binding has been serving legitimately
 	// diverges from the source copy it was made from, and demanding equality
-	// there would refuse every healthy city. Edges are compared one-directionally
-	// for those same rows, for the same reason — the binding may hold edges the
-	// source never had — while a row this run created is held to both directions,
-	// because anything extra on it would be fabricated.
+	// there would refuse every healthy city. Edges are held the same way (see
+	// recoveredEdgesDifference).
+	proof, err := depReader.reread(sourceAnchorIDs(rows))
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: re-reading for the equality stage: %v. The manifest was NOT extended\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	for _, b := range rows {
 		if !resident[b.ID] {
 			continue
@@ -958,31 +1022,9 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 				return 1
 			}
 		}
-		wantDeps, depsOK, _ := depReader.deps(b)
-		if !depsOK {
-			// The plan already named this bead as unstatable and the exit code
-			// below carries it. The rows this run copied still stand: an edge
-			// nobody can read is a topology this stage cannot prove, not a copy
-			// it can disprove.
-			continue
-		}
-		gotDeps, err := verifier.DepList(b.ID, "down")
-		if err != nil {
-			fmt.Fprintf(stderr, "%s: listing copied deps of %s: %v\n", logPrefix, b.ID, err) //nolint:errcheck // best-effort stderr
+		if diff := recoveredEdgesDifference(b, proof, verifier, resident, witnessed, moved[b.ID]); diff != "" {
+			fmt.Fprintf(stderr, "%s: %s\n", logPrefix, diff) //nolint:errcheck // best-effort stderr
 			return 1
-		}
-		for _, d := range wantDeps {
-			if !resident[d.DependsOnID] || infraDepEdgeHeld(d, gotDeps) {
-				continue
-			}
-			fmt.Fprintf(stderr, "%s: dep %s -> %s is in the work store and missing from the binding after the restore. The manifest was NOT extended\n", logPrefix, b.ID, d.DependsOnID) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		if moved[b.ID] {
-			if diff := infraDepDifference(b.ID, wantDeps, gotDeps, witnessed); diff != "" {
-				fmt.Fprintf(stderr, "%s: %s. The manifest was NOT extended\n", logPrefix, diff) //nolint:errcheck // best-effort stderr
-				return 1
-			}
 		}
 	}
 
@@ -1221,6 +1263,44 @@ func setOf(ids []string) map[string]bool {
 		set[id] = true
 	}
 	return set
+}
+
+// recoveredEdgesDifference holds one resident bead's edges in the reopened
+// binding to the source's second read of them, and names the first way they
+// disagree, or "" when they do not.
+//
+// Every resident bead must hold each edge the source gives it into another
+// resident bead. Only a bead this run created is held to the other direction
+// too, because anything extra on it would be fabricated; a bead that was
+// already resident may hold edges the source never had, legitimately.
+//
+// A bead whose edges the second read cannot state is no disagreement: an edge
+// nobody can read is a topology this stage cannot prove, not a copy it can
+// disprove, so the rows this run copied still stand. A bead the plan's own read
+// could not state either is named unstatable there, and the exit code carries
+// it.
+func recoveredEdgesDifference(b beads.Bead, proof *sourceDepReader, verifier beads.Store, resident, witnessed map[string]bool, moved bool) string {
+	wantDeps, depsOK, _ := proof.deps(b)
+	if !depsOK {
+		return ""
+	}
+	gotDeps, err := verifier.DepList(b.ID, "down")
+	if err != nil {
+		return fmt.Sprintf("listing copied deps of %s: %v", b.ID, err)
+	}
+	for _, d := range wantDeps {
+		if !resident[d.DependsOnID] || infraDepEdgeHeld(d, gotDeps) {
+			continue
+		}
+		return fmt.Sprintf("dep %s -> %s is in the work store and missing from the binding after the restore. The manifest was NOT extended", b.ID, d.DependsOnID)
+	}
+	if !moved {
+		return ""
+	}
+	if diff := infraDepDifference(b.ID, wantDeps, gotDeps, witnessed); diff != "" {
+		return diff + ". The manifest was NOT extended"
+	}
+	return ""
 }
 
 // writeStrandedDump records every stranded bead and its source dep edges before

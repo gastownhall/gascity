@@ -15,12 +15,11 @@ import (
 )
 
 // readyOutcomeFanoutStorage is a beadslib.Storage shaped like an http-native
-// backend (S5b-fixrev item 1): its IssueReader.List(IDFilter) refuses, exactly
-// as bd-enterprise's httpstore encoder does unconditionally
-// (E-ListRequest.IDFilter), so filterReadyByWorkOutcome must fall back to a
-// per-id IssueReader.Get fan-out rather than ever trusting the (refused) List
-// answer. Ready is wired to fail the test outright if ever invoked — nothing
-// under test calls it.
+// backend: its IssueReader.List(IDFilter) refuses, exactly as the http client's
+// encoder does unconditionally (E-ListRequest.IDFilter), so
+// filterReadyByWorkOutcome must fall back to a per-id IssueReader.Get fan-out
+// rather than ever trusting the (refused) List answer. Ready is wired to fail
+// the test outright if ever invoked — nothing under test calls it.
 //
 // ReadEdges enforces the same anchor cap the real bd-serve does
 // (readyOutcomeFanoutMaxReadEdgesAnchors), so a test against this fake proves
@@ -53,13 +52,13 @@ type readyOutcomeFanoutStorage struct {
 }
 
 // readyOutcomeFanoutMaxReadEdgesAnchors mirrors the real server's own anchor
-// cap (bd-enterprise internal/httpapi/edges.go: maxDependencyAnchors = 100,
-// confirmed against a real bd-serve at the pinned enterprise revision, which
-// rejects the WHOLE call — not just the ids past the limit — with a 400
-// invalid_argument once a ReadEdges request names more anchors than this). It
-// is hardcoded here, independently of nativeReadEdgesChunkSize, so a test
-// against this fake actually proves the store's chunking keeps every call
-// under the server's real limit rather than merely agreeing with itself.
+// cap (beads internal/httpapi/edges.go: maxDependencyAnchors = 100, confirmed
+// against a real bd-serve, which rejects the WHOLE call — not just the ids past
+// the limit — with a 400 invalid_argument once a ReadEdges request names more
+// anchors than this). It is hardcoded here, independently of
+// nativeReadEdgesChunkSize, so a test against this fake actually proves the
+// store's chunking keeps every call under the server's real limit rather than
+// merely agreeing with itself.
 const readyOutcomeFanoutMaxReadEdgesAnchors = 100
 
 func (f *readyOutcomeFanoutStorage) EdgeReader() (issueops.EdgeReader, error) {
@@ -98,7 +97,7 @@ func (r *readyOutcomeFanoutIssueReader) Ready(context.Context, issueops.ReadyReq
 	return issueops.IssuePage{}, errors.New("readyOutcomeFanoutIssueReader: Ready not implemented; filterReadyByWorkOutcome must never call it")
 }
 
-// List refuses exactly as bd-enterprise's httpstore encoder does for
+// List refuses exactly as the http client's encoder does for
 // ListRequest.IDFilter: a typed *beadslib.ErrUnsupported, client-side, before
 // any round trip. filterReadyByWorkOutcome must try this door first (and this
 // fake must see exactly one such attempt) and fall back to the Get fan-out on
@@ -166,13 +165,12 @@ func fanoutEdge(from, to string) *beadslib.Dependency {
 
 const fanoutBlockedMeta = `{"gc.work_outcome":"blocked"}`
 
-// TestNativeDoltStoreReadyWorkOutcomeFilterChunksOverAnchorCap is the
-// regression test for S5b-portrev item 1 HIGH: a ready frontier wider than
-// the server's 100-anchor cap must not send one failing ReadEdges call. The
-// fake enforces the same cap the real server does
-// (readyOutcomeFanoutMaxReadEdgesAnchors), so this test fails exactly as the
-// confirmed-live 400 invalid_argument once did if nativeReadEdgesChunkSize's
-// chunking is ever removed or widened past the server's real limit.
+// TestNativeDoltStoreReadyWorkOutcomeFilterChunksOverAnchorCap pins that a
+// ready frontier wider than the server's 100-anchor cap never sends one failing
+// ReadEdges call. The fake enforces the same cap the real server does
+// (readyOutcomeFanoutMaxReadEdgesAnchors), so this test fails the way the real
+// server's 400 invalid_argument would if nativeReadEdgesChunkSize's chunking is
+// ever removed or widened past the server's real limit.
 func TestNativeDoltStoreReadyWorkOutcomeFilterChunksOverAnchorCap(t *testing.T) {
 	const total = 250
 	candidates := make([]Bead, 0, total)
@@ -207,9 +205,9 @@ func TestNativeDoltStoreReadyWorkOutcomeFilterChunksOverAnchorCap(t *testing.T) 
 }
 
 // TestNativeDoltStoreReadyWorkOutcomeFilterFallsBackToGetWhenListRefuses pins
-// the S5b-fixrev item 1 fix: filterReadyByWorkOutcome tries
+// the List-then-Get fallback: filterReadyByWorkOutcome tries
 // IssueReader.List(IDFilter) first (exactly once), and on an http-native
-// refusal (bd-enterprise's httpstore encoder refuses E-ListRequest.IDFilter
+// refusal (the http client's encoder refuses E-ListRequest.IDFilter
 // unconditionally) falls back to IssueReader.Get, one call per DISTINCT
 // ready-blocking target.
 func TestNativeDoltStoreReadyWorkOutcomeFilterFallsBackToGetWhenListRefuses(t *testing.T) {
@@ -292,13 +290,13 @@ func TestNativeDoltStoreReadyWorkOutcomeFilterFansOutConcurrently(t *testing.T) 
 
 	// A LITERAL bound, independent of nativeReadyEdgeFanoutLimit (mirrors
 	// TestDepListBatchNeverExceedsTheServerAnchorCap's literal
-	// realBdServeReadEdgesAnchorCap): comparing against the production
-	// constant itself would move both sides of the inequality together under
-	// a mutation that widens the constant, so the bound could never fail
-	// (S5b-fixrev item 2). It also doubles as the settle target below: with
-	// 20 candidates and nativeReadyEdgeFanoutLimit well under that, the
-	// correct implementation reaches exactly this many in flight almost
-	// immediately, so waiting for it costs the passing case nothing.
+	// realBdServeReadEdgesAnchorCap): comparing against the production constant
+	// itself would move both sides of the inequality together under a mutation
+	// that widens the constant, so the bound could never fail. It also doubles
+	// as the settle target below: with 20 candidates and
+	// nativeReadyEdgeFanoutLimit well under that, the correct implementation
+	// reaches exactly this many in flight almost immediately, so waiting for it
+	// costs the passing case nothing.
 	const wantMaxFanout = 8
 
 	done := make(chan struct{})
@@ -411,8 +409,8 @@ func TestNativeDoltStoreReadyWorkOutcomeFilterNoBlockingEdgesSkipsIssueReader(t 
 // readyOutcomeFanoutListStorage is a beadslib.Storage shaped like a NATIVE
 // (dolt or Postgres) backend: its IssueReader.List(IDFilter) answers directly,
 // unlike http-native's refusal. filterReadyByWorkOutcome must try this door
-// FIRST and never fall back to a per-id Get when it succeeds (S5b-fixrev item
-// 1) — the #6491 regression this fix-review round exists to close.
+// FIRST and never fall back to a per-id Get when it succeeds: a per-id
+// fan-out against a backend that answers in one call is the #6491 cost.
 type readyOutcomeFanoutListStorage struct {
 	beadslib.Storage
 	edges  map[string][]*beadslib.Dependency
@@ -457,11 +455,10 @@ func (r *readyOutcomeFanoutListIssueReader) Ready(context.Context, issueops.Read
 // readyOutcomeFanoutListDefaultPage stands in for beads 1.3.1's real
 // workapi.DefaultListLimit (read_roles.go's own nativeListReadRequest never
 // sets ListRequest.Limit, and a nil Limit there means "the shared list
-// default," not unlimited): this fake enforces the identical rule — a nil
-// Limit truncates to this many rows, an explicit *Limit of 0 is unlimited —
-// so a unit test against it can reproduce the ready-veto truncation bug
-// (S5b-fixrev item 2 HIGH) in milliseconds, without standing up a real
-// upstream store to rediscover beads' own default.
+// default," not unlimited): this fake enforces the identical rule — a nil Limit
+// truncates to this many rows, an explicit *Limit of 0 is unlimited — so a unit
+// test against it can reproduce ready-veto truncation in milliseconds, without
+// standing up a real upstream store to rediscover beads' own default.
 const readyOutcomeFanoutListDefaultPage = 3
 
 // List answers the IDFilter directly from the graph, exactly as a native
@@ -512,9 +509,9 @@ func (r *readyOutcomeFanoutListIssueReader) Get(context.Context, issueops.GetReq
 }
 
 // TestNativeDoltStoreReadyWorkOutcomeFilterPrefersListOverGetFanout pins the
-// S5b-fixrev item 1 fix: against a native-shaped IssueReader that answers
+// List-first read: against a native-shaped IssueReader that answers
 // List+IDFilter, filterReadyByWorkOutcome must use that single call and never
-// fall back to a per-id Get fan-out (the #6491 regression: ~6 round trips per
+// fall back to a per-id Get fan-out (the #6491 cost: several round trips per
 // blocker, every controller tick, against a backend that could answer in one).
 func TestNativeDoltStoreReadyWorkOutcomeFilterPrefersListOverGetFanout(t *testing.T) {
 	storage := &readyOutcomeFanoutListStorage{
@@ -545,20 +542,20 @@ func TestNativeDoltStoreReadyWorkOutcomeFilterPrefersListOverGetFanout(t *testin
 }
 
 // TestNativeDoltStoreReadyWorkOutcomeListBlockersSetsAnExplicitUnlimitedLimit
-// is the fast unit-level regression for the HIGH bug the Opus G1+G2 review
-// caught: filterReadyByWorkOutcomeListBlockers built its List+IDFilter
-// request from nativeListReadRequest(), which never touches Limit, and a nil
+// is the fast unit-level pin on the blocker List's explicit unlimited Limit:
+// filterReadyByWorkOutcomeListBlockers builds its List+IDFilter request from
+// nativeListReadRequest(), which never touches Limit, and a nil
 // issueops.ListRequest.Limit means "the shared list default" — beads 1.3.1's
-// workapi.DefaultListLimit, fifty rows — not unlimited. A ready frontier with
-// more than that many DISTINCT blockers silently saw only the first page's
-// worth of outcomes, so a blocker past the page could never veto readiness: a
-// 60-blockers-each-blocking-one-candidate repro wrongly readied 10 of them.
+// workapi.DefaultListLimit, fifty rows — not unlimited. Left at nil, a ready
+// frontier with more than that many DISTINCT blockers would see only the first
+// page's worth of outcomes, so a blocker past the page could never veto
+// readiness.
 //
-// readyOutcomeFanoutListDefaultPage (3, not 50) stands in for the real
-// default so this reproduces in milliseconds: four blockers, closed with
+// readyOutcomeFanoutListDefaultPage (3, not 50) stands in for the real default
+// so this reproduces in milliseconds: four blockers, closed with
 // work_outcome=blocked, each gating a distinct candidate. Only the first
-// readyOutcomeFanoutListDefaultPage of them would veto their candidate under
-// the unfixed nil-Limit request; the fix must veto all four.
+// readyOutcomeFanoutListDefaultPage of them would veto their candidate under a
+// nil-Limit request; the store must veto all four.
 func TestNativeDoltStoreReadyWorkOutcomeListBlockersSetsAnExplicitUnlimitedLimit(t *testing.T) {
 	const blockerCount = readyOutcomeFanoutListDefaultPage + 1
 	edges := make(map[string][]*beadslib.Dependency, blockerCount)
@@ -638,7 +635,7 @@ func TestNativeDoltStoreReadyWorkOutcomeListBlockersChunksTheIDFilter(t *testing
 // TestNativeDoltStoreReadyWorkOutcomeFetchBlockersTreatsNotFoundAsNoEvidence
 // pins the fallback fan-out's not-found tolerance: a blocker Get reports
 // ErrNotFound for must be dropped as no evidence of blocking, never fail the
-// whole call (S5b-fixrev item 2; mutation M1b).
+// whole call.
 func TestNativeDoltStoreReadyWorkOutcomeFetchBlockersTreatsNotFoundAsNoEvidence(t *testing.T) {
 	reader := fanoutGetOnlyReader{get: func(context.Context, issueops.GetRequest) (*issueops.IssueDetails, error) {
 		return nil, beadslib.ErrNotFound
@@ -658,8 +655,7 @@ func TestNativeDoltStoreReadyWorkOutcomeFetchBlockersTreatsNotFoundAsNoEvidence(
 // TestNativeDoltStoreReadyWorkOutcomeFetchBlockersRejectsNilDetailsWithNilError
 // pins the nil-details guard: an IssueReader.Get that returns (nil, nil) — a
 // contract violation issueops.Reader never promises — must fail the call
-// rather than being silently treated as "no evidence of blocking" (S5b-fixrev
-// item 2; mutation M1g).
+// rather than being silently treated as "no evidence of blocking".
 func TestNativeDoltStoreReadyWorkOutcomeFetchBlockersRejectsNilDetailsWithNilError(t *testing.T) {
 	reader := fanoutGetOnlyReader{get: func(context.Context, issueops.GetRequest) (*issueops.IssueDetails, error) {
 		return nil, nil
@@ -673,7 +669,7 @@ func TestNativeDoltStoreReadyWorkOutcomeFetchBlockersRejectsNilDetailsWithNilErr
 // TestNativeDoltStoreReadyWorkOutcomeFetchBlockersSkipsQueuedCallsAfterCancel
 // pins the skip-after-cancel contract: once one blocker's Get fails for real,
 // every call still queued behind the semaphore must never dial IssueReader at
-// all (S5b-fixrev item 2; mutation M1d).
+// all.
 //
 // gc-fail occupies one of the nativeReadyEdgeFanoutLimit concurrent slots and
 // fails immediately, canceling the shared fetch context; cancelFetch() runs,
@@ -735,7 +731,7 @@ func TestNativeDoltStoreReadyWorkOutcomeFetchBlockersSkipsQueuedCallsAfterCancel
 	}()
 
 	// Wait for a distinct skip signal for every "queued" id rather than a
-	// fixed sleep. If the fix ever regressed and a queued id was dialed
+	// fixed sleep. If the skip ever regressed and a queued id was dialed
 	// instead of skipped, it would never signal here (it would instead block
 	// on the unclosed release channel inside the fake reader), so this times
 	// out with a clear message rather than hanging forever.

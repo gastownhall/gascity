@@ -38,11 +38,11 @@ import (
 //     claim, and the callers that do are still exactly the four above.
 //   - bead_policy_store.go FORWARDS a claim for the same reason, one layer
 //     further down the composition. beadPolicyStore.Claim is a pure type-
-//     assertion pass-through to the wrapped store, exactly like its existing
+//     assertion pass-through to the wrapped store, exactly like its
 //     ReleaseIfCurrent — it holds no id, no assignee and no policy of its own,
 //     and without it the whole CachingStore -> beadPolicyStore -> NativeDoltStore
-//     chain would degrade the S5b-4 claim capability to "unsupported" for
-//     every caller behind the policy layer, worker pull paths included.
+//     chain would degrade the two-argument claim capability to "unsupported"
+//     for every caller behind the policy layer, worker pull paths included.
 //
 // Adding a file here is a design decision about pull semantics; make it
 // deliberately.

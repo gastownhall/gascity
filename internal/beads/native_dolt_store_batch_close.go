@@ -59,19 +59,21 @@ import (
 // before, never less, and a caller that could tolerate a prefix can tolerate a
 // shorter one.
 //
-// THE STAMP REACHES ALREADY-CLOSED ROWS. The loop skipped them entirely, having
-// read their status first; the batch has no such read and stamps every id the
-// caller named. That is what BdStore.CloseAll does (its setMetadataBatchAll
-// runs over every id before the batch close), and it is the reading of "sets
-// the given metadata on each" that does not depend on a race: a row closed
-// between the caller's decision and this write is not a row whose metadata the
-// caller meant to skip.
-//
-// The sharpest instance, named so it is a decision rather than a surprise: the
-// workflow skip path (cmd/gc/cmd_convoy_dispatch.go applySourceWorkflowMatchCleanup)
-// lists with IncludeClosed and hands the whole match here, so a bead that
-// already closed with its own outcome now has gc.outcome and close_reason
-// rewritten to the skip. Its call site says the same thing.
+// THE STAMP REACHES ALREADY-CLOSED ROWS. The batch has no status read, so it
+// stamps every id the caller named, closed or not. The per-bead route a
+// backing that cannot batch still takes (closeAllOneAtATime) stamps an
+// already-closed row too, so the same call does not mean two things in this
+// store depending on the backing. BdStore.CloseAll does the same (its
+// setMetadataBatchAll runs over every id before the batch close); MemStore,
+// FileStore and SQLiteStore read each status first and skip a closed row.
+// Store.CloseAll leaves that difference open, so a caller that must not touch
+// a finished bead's metadata drops its closed ids before calling. Molecule
+// cleanup does, and so do the workflow skip and delete paths, which list with
+// IncludeClosed and would otherwise rewrite a passed step's gc.outcome and
+// close_reason to the skip (cmd/gc closeOpenWorkflowBeads, the API's workflow
+// delete handlers). A row that closes between that filter and this write is
+// still stamped: the caller named it while it was open, so it is not a row
+// whose metadata the caller meant to leave alone.
 //
 // WHY THE CHUNK IS NOT FURTHER SPLIT TO RECOVER MAIN'S EXACT PREFIX, now that
 // this has been asked (ga-opus-g12 review, 2026-10): a bad id anywhere in a

@@ -45,7 +45,7 @@ type classStoreClaimer interface {
 	Claim(id, assignee string) (beads.Bead, bool, error)
 }
 
-// TestClassStoreEmissionCoversClaim is the emittingClassStore leg of S5b-4's
+// TestClassStoreEmissionCoversClaim is the emittingClassStore leg of the claim
 // forwarding chain: a successful claim through the relocated class front
 // door must both forward to the backing store's Claim and append exactly one
 // bead.updated row, matching TestClassStoreEmissionCoversConditionalRelease's

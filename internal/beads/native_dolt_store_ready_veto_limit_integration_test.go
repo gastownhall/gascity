@@ -9,16 +9,16 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
-// TestNativeDoltStoreReadySurvivesMoreThanFiftyDistinctBlockers is the real,
-// upstream-backed regression for the Opus G1+G2 review's HIGH finding:
-// filterReadyByWorkOutcomeListBlockers built its List+IDFilter request from
-// nativeListReadRequest(), which never set Limit, and beads 1.3.1 answers a
+// TestNativeDoltStoreReadySurvivesMoreThanFiftyDistinctBlockers pins, against
+// real upstream storage, that every blocker's outcome reaches the ready veto.
+// filterReadyByWorkOutcomeListBlockers builds its List+IDFilter request from
+// nativeListReadRequest(), which leaves Limit nil, and beads 1.3.1 answers a
 // nil Limit as its own shared list default — workapi.DefaultListLimit, fifty
-// rows — not unlimited. A ready frontier with more than fifty DISTINCT
-// blockers therefore saw only the first page's worth of blocker outcomes, so
-// a blocker past that page could never veto its candidate's readiness: with
+// rows — not unlimited. Left at nil, a ready frontier with more than fifty
+// DISTINCT blockers would see only the first page's worth of blocker outcomes,
+// so a blocker past that page could never veto its candidate's readiness: with
 // 60 blockers, each closed with work_outcome=blocked and each gating exactly
-// one otherwise-ready candidate, 10 candidates were wrongly readied.
+// one otherwise-ready candidate, 10 candidates would be wrongly readied.
 //
 // The fast unit-level regression
 // (TestNativeDoltStoreReadyWorkOutcomeListBlockersSetsAnExplicitUnlimitedLimit,

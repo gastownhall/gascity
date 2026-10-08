@@ -100,3 +100,83 @@ func TestReleaseIfCurrentWithNoHolderDialsNothing(t *testing.T) {
 		t.Fatalf("a release was dialed with no holder to guard on: %+v", spy.requests)
 	}
 }
+
+// divergentRelease seeds one row and names the holder a release expects on it.
+type divergentRelease struct {
+	name     string
+	assignee string
+	status   string
+	expected string
+}
+
+// The two edges on which the store family answers a release differently,
+// pinned as NativeDoltStore answers them today so that a further flip fails
+// here instead of passing silently. Which answer the family should share is
+// still open (the FAMILY DIVERGENCE LEDGER on ConditionalAssignmentReleaser).
+// Each row runs against MemStore too, which answers it the other way: that is
+// the control proving the seed reaches the edge the row names, rather than a
+// shape on which every store agrees.
+func TestReleaseIfCurrentPinsTheFamilyDivergenceEdges(t *testing.T) {
+	for _, tc := range []struct {
+		row        divergentRelease
+		wantNative bool
+		wantMem    bool
+	}{
+		// The role releases from open as well as in_progress: an open row that
+		// still names a holder is the orphaned claim gc's reconcilers clear.
+		{divergentRelease{"an open row that still carries an assignee", "worker-1", "open", "worker-1"}, true, false},
+		// Releasing a row nobody holds describes no release, so the native
+		// front door answers it without reaching the role.
+		{divergentRelease{"an empty expected holder over an unassigned in_progress row", "", "in_progress", ""}, false, true},
+	} {
+		t.Run(tc.row.name, func(t *testing.T) {
+			assertDivergentRelease(t, "NativeDoltStore", newNativeDoltStoreForTest(newNativeDoltMemStorage()), tc.row, tc.wantNative)
+			assertDivergentRelease(t, "MemStore", NewMemStore(), tc.row, tc.wantMem)
+		})
+	}
+}
+
+// assertDivergentRelease seeds row in store, releases it against the row's
+// expected holder, and checks the verdict and the row it leaves behind: a
+// release leaves it open and unassigned, and anything else leaves the seed
+// untouched.
+func assertDivergentRelease(t *testing.T, label string, store interface {
+	Store
+	ConditionalAssignmentReleaser
+}, row divergentRelease, want bool,
+) {
+	t.Helper()
+	created, err := store.Create(Bead{Title: "claimed work", Assignee: row.assignee})
+	if err != nil {
+		t.Fatalf("%s: Create: %v", label, err)
+	}
+	if err := store.Update(created.ID, UpdateOpts{Status: &row.status}); err != nil {
+		t.Fatalf("%s: Update status to %q: %v", label, row.status, err)
+	}
+	seeded, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("%s: Get after seeding: %v", label, err)
+	}
+	if seeded.Status != row.status || seeded.Assignee != row.assignee {
+		t.Fatalf("%s: seeded row = (status %q, assignee %q), want (%q, %q)", label, seeded.Status, seeded.Assignee, row.status, row.assignee)
+	}
+
+	released, err := store.ReleaseIfCurrent(created.ID, row.expected)
+	if err != nil {
+		t.Fatalf("%s: ReleaseIfCurrent: %v", label, err)
+	}
+	if released != want {
+		t.Errorf("%s: ReleaseIfCurrent = %v, want %v", label, released, want)
+	}
+	after, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("%s: Get after release: %v", label, err)
+	}
+	wantStatus, wantAssignee := row.status, row.assignee
+	if want {
+		wantStatus, wantAssignee = "open", ""
+	}
+	if after.Status != wantStatus || after.Assignee != wantAssignee {
+		t.Errorf("%s: row after release = (status %q, assignee %q), want (%q, %q)", label, after.Status, after.Assignee, wantStatus, wantAssignee)
+	}
+}

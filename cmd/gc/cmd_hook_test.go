@@ -3019,20 +3019,15 @@ func TestDoHookClaimSkipsUnclaimableCandidateError(t *testing.T) {
 	}
 }
 
-// TestDoHookClaimSkipsReadyAssignmentThatResolvesToAWisp pins the Opus G1+G2
-// review's MEDIUM finding against the ready tier specifically
-// (claimFirstReadyHookAssignment), which fences every claim error it does not
-// recognize as benign with a terminal failure (ownership would otherwise be
-// left unresolved on a bead this session already owns). beads.ErrWispNotClaimable
-// is a routed id resolving, through the claim-time class route, to a wisp row —
-// refused before any write, so nothing is left outstanding — and must be
-// skipped like hookClaimBeadIsElsewhere and hookClaimBindingRefusedTheClaim
-// already are, not treated as an unresolved operational failure.
-//
-// This combination was unreachable before a native store could serve as the
-// relocated class binding (claim_class_route.go's capability probe used to
-// refuse every *beads.NativeDoltStore binding outright, per
-// newHookClaimClassRoute's doc comment), which is why it shipped untested.
+// TestDoHookClaimSkipsReadyAssignmentThatResolvesToAWisp pins the wisp skip in
+// the ready tier (claimFirstReadyHookAssignment), which fences every claim error
+// it does not recognize as benign with a terminal failure (ownership would
+// otherwise be left unresolved on a bead this session already owns).
+// beads.ErrWispNotClaimable is a routed id resolving, through the claim-time
+// class route, to a wisp row — refused before any write, so nothing is left
+// outstanding — and must be skipped like hookClaimBeadIsElsewhere and
+// hookClaimBindingRefusedTheClaim are, not treated as an unresolved operational
+// failure.
 func TestDoHookClaimSkipsReadyAssignmentThatResolvesToAWisp(t *testing.T) {
 	runner := func(string, string) (string, error) {
 		return `[{"id":"hw-wisp","status":"open","assignee":"worker-alias","metadata":{"gc.routed_to":"worker"}}]`, nil

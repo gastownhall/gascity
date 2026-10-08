@@ -114,6 +114,15 @@ func (t *nativeBatchTx) Create(Bead) (Bead, error) {
 }
 
 // Update records one patch. A parent change is refused by name.
+//
+// The item waives exactly the guard the native route's tx.UpdateIssue never
+// applied. That raw update has no anti-steal fence, so an assignee edit forces
+// the transfer here too; the role refuses that force without an assignee edit,
+// so it stays conditioned on one. The same raw update DOES enforce the close
+// policy, so ForceClosePolicy stays unset and a done-crossing status write is
+// refused on both routes alike (see the Update doc comment). This is not
+// updateThroughBatch, which waives both guards because the storage-layer write
+// the standalone Store.Update replaced applied neither.
 func (t *nativeBatchTx) Update(id string, opts UpdateOpts) error {
 	if opts.ParentID != nil {
 		t.err = fmt.Errorf("%w: the apply patch publishes no parent_id (W-ApplyPatch.ParentID), so a reparent cannot ride a batch; reparent through Store.Update, which routes to updateIssue", errBatchTxUnrecordable)
@@ -131,8 +140,9 @@ func (t *nativeBatchTx) Update(id string, opts UpdateOpts) error {
 	t.items = append(t.items, issueops.ApplyItem{
 		Kind: issueops.ItemUpdate,
 		Update: &issueops.UpdateItem{
-			Target: issueops.Ref{ID: id},
-			Patch:  patch,
+			Target:                issueops.Ref{ID: id},
+			Patch:                 patch,
+			ForceAssigneeTransfer: opts.Assignee != nil,
 		},
 	})
 	return nil
@@ -204,10 +214,12 @@ func (t *nativeBatchTx) stage(id string, metadata map[string]string) {
 	}
 }
 
-// nativeIssuePatchIsEmpty reports a patch that asks for nothing. The role and
-// the server both refuse an empty patch, and Store.Tx callers reach one
-// legitimately — rollbackPendingCreateClears passes an empty post-close clear
-// map when the session name was not explicit.
+// nativeIssuePatchIsEmpty reports a patch that asks for nothing. The served
+// wire refuses an empty patch on both doors (beads internal/httpapi update.go
+// and batch_apply.go), where the in-process role answers one with a row read
+// and no write. Callers reach one legitimately: rollbackPendingCreateClears
+// passes Store.Tx an empty post-close clear map when the session name was not
+// explicit, and a pure foreign reparent leaves Update's facade patch empty.
 func nativeIssuePatchIsEmpty(patch issueops.IssuePatch) bool {
 	return !patch.Title.Set &&
 		!patch.Status.Set &&

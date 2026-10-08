@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	beadslib "github.com/steveyegge/beads"
@@ -41,6 +42,11 @@ type closeChainLifecycle struct {
 	// beforeClose runs when the update returns, which is the window between the
 	// chain's status read and its fallback re-read.
 	beforeClose func()
+	// updateErrs and closeErrs fail the leading attempts of their leg, one error
+	// per attempt, and a failed attempt writes nothing: the shape of a write
+	// that lost its serialization race.
+	updateErrs []error
+	closeErrs  []error
 }
 
 var _ issueops.Lifecycle = (*closeChainLifecycle)(nil)
@@ -51,6 +57,9 @@ func (l *closeChainLifecycle) Create(context.Context, issueops.CreateRequest) (i
 
 func (l *closeChainLifecycle) Update(_ context.Context, req issueops.UpdateRequest) (issueops.UpdateResult, error) {
 	l.updates = append(l.updates, req)
+	if err := nextScriptedAttemptError(&l.updateErrs); err != nil {
+		return issueops.UpdateResult{}, err
+	}
 	l.storage.merge(req.IssueID, req.Patch.Metadata.Set)
 	if l.beforeClose != nil {
 		l.beforeClose()
@@ -63,7 +72,21 @@ func (l *closeChainLifecycle) Update(_ context.Context, req issueops.UpdateReque
 
 func (l *closeChainLifecycle) Close(_ context.Context, req issueops.CloseRequest) (issueops.CloseResult, error) {
 	l.closes = append(l.closes, req)
+	if err := nextScriptedAttemptError(&l.closeErrs); err != nil {
+		return issueops.CloseResult{}, err
+	}
 	return issueops.CloseResult{Issue: l.storage.issue(req.IssueID), Changed: true}, nil
+}
+
+// nextScriptedAttemptError pops the next scripted failure off errs, or answers
+// nil once none are left.
+func nextScriptedAttemptError(errs *[]error) error {
+	if len(*errs) == 0 {
+		return nil
+	}
+	err := (*errs)[0]
+	*errs = (*errs)[1:]
+	return err
 }
 
 func (l *closeChainLifecycle) Reopen(context.Context, issueops.ReopenRequest) (issueops.ReopenResult, error) {
@@ -258,5 +281,73 @@ func TestCloseAllPerBeadRouteWithoutMetadataKeepsTheCloseDoorsOwnRead(t *testing
 	}
 	if got := storage.lifecycle.closes[0].Reason; got != "the reason the row already held" {
 		t.Errorf("close reason = %q, want the row's own", got)
+	}
+}
+
+// Each leg of the chain retries its own serialization conflict, and only its
+// own. A conflicted stamp committed nothing, so replaying it is the replay
+// SetMetadataBatch makes of the identical merge. A conflicted close follows a
+// stamp that DID commit, so it replays alone: replaying the pair would re-run a
+// write that won its race to recover one that lost. Neither replay resolves the
+// lifecycle accessor again, which is the re-entry the deadlock guard above
+// counts.
+func TestCloseAllPerBeadRouteRetriesEachLegOnItsOwn(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		updateErrs  []error
+		closeErrs   []error
+		wantUpdates int
+		wantCloses  int
+		wantErr     string
+	}{
+		{
+			name:        "the stamp lost its serialization race",
+			updateErrs:  []error{errors.New(serializationConflictErr)},
+			wantUpdates: 2,
+			wantCloses:  1,
+		},
+		{
+			name:        "the close lost its serialization race",
+			closeErrs:   []error{errors.New(serializationConflictErr)},
+			wantUpdates: 1,
+			wantCloses:  2,
+		},
+		{
+			name:        "the stamp failed for a reason a replay cannot fix",
+			updateErrs:  []error{errors.New("Error 1062 (23000): duplicate entry")},
+			wantUpdates: 1,
+			wantErr:     "duplicate entry",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			storage := newCloseChainStorage(nil)
+			storage.lifecycle.updateErrs = tc.updateErrs
+			storage.lifecycle.closeErrs = tc.closeErrs
+			store := newNativeDoltStoreForTest(storage)
+
+			closed, err := store.CloseAll([]string{"gc-1"}, map[string]string{"close_reason": "the sweep's reason"})
+			switch {
+			case tc.wantErr != "":
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("CloseAll error = %v, want one carrying %q", err, tc.wantErr)
+				}
+			case err != nil || closed != 1:
+				t.Fatalf("CloseAll = (%d, %v), want (1, nil)", closed, err)
+			}
+			if got := len(storage.lifecycle.updates); got != tc.wantUpdates {
+				t.Errorf("stamp attempts = %d, want %d", got, tc.wantUpdates)
+			}
+			if got := len(storage.lifecycle.closes); got != tc.wantCloses {
+				t.Errorf("close attempts = %d, want %d", got, tc.wantCloses)
+			}
+			for _, req := range storage.lifecycle.closes {
+				if req.Reason != "the sweep's reason" {
+					t.Errorf("close reason = %q, want the reason the committed stamp answered with", req.Reason)
+				}
+			}
+			if storage.lifecycles != 1 {
+				t.Errorf("the chain resolved %d lifecycle accessors, want 1: a replay that re-entered a public door would take the store's read lock recursively", storage.lifecycles)
+			}
+		})
 	}
 }

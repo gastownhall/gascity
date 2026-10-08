@@ -326,12 +326,12 @@ func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 }
 
 // Claim forwards the two-argument compare-and-swap claim to the wrapped
-// store (S5b-4), the same plain pass-through ReleaseIfCurrent just above
-// uses: the policy layer shapes creation and reads, and has no claim policy
-// of its own to apply, so the inner store's ok/error idiom (a conflict is
-// ok=false with a nil error; a missing bead is ErrNotFound) travels
-// unmodified. beadPolicyGraphStore inherits this via its embedded
-// *beadPolicyStore, matching ConditionalWritesResolveTarget's comment above.
+// store, the same plain pass-through ReleaseIfCurrent just above uses: the
+// policy layer shapes creation and reads, and has no claim policy of its own
+// to apply, so the inner store's ok/error idiom (a conflict is ok=false with a
+// nil error; a missing bead is ErrNotFound) travels unmodified.
+// beadPolicyGraphStore inherits this via its embedded *beadPolicyStore,
+// matching ConditionalWritesResolveTarget's comment above.
 func (s *beadPolicyStore) Claim(id, assignee string) (beads.Bead, bool, error) {
 	claimer, ok := s.Store.(interface {
 		Claim(id, assignee string) (beads.Bead, bool, error)

@@ -284,6 +284,51 @@ func TestBatchTxDialsNothingWhenTheCallbackFails(t *testing.T) {
 	}
 }
 
+// TestBatchTxUpdateWaivesOnlyTheGuardTheNativeTxRouteWaives pins the batch
+// route's force members to the native Tx route it stands in for, one guard at
+// a time. The native route writes through tx.UpdateIssue: that raw update has
+// no anti-steal fence, so an assignee edit inside Store.Tx must waive the fence
+// on the batch too, or a served city refuses a reassignment an embedded city
+// commits. The same raw update DOES enforce the close policy, so a status edit
+// must leave that guard armed, or the batch would close over open children
+// where the native route refuses.
+func TestBatchTxUpdateWaivesOnlyTheGuardTheNativeTxRouteWaives(t *testing.T) {
+	assignee := "worker-2"
+	status := "closed"
+	tests := []struct {
+		name            string
+		opts            UpdateOpts
+		wantForceAssign bool
+	}{
+		{name: "an assignee edit waives the fence", opts: UpdateOpts{Assignee: &assignee}, wantForceAssign: true},
+		{name: "a status edit keeps the close policy", opts: UpdateOpts{Status: &status}},
+		{name: "a metadata edit arms neither", opts: UpdateOpts{Metadata: map[string]string{"state": "active"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spy := newBatchTxSpy(nativeIssueWithMetadata(t, "gc-1", map[string]string{}))
+			store := newNativeDoltStoreForTest(spy)
+
+			if err := store.Tx("gc: update gc-1", func(tx Tx) error {
+				return tx.Update("gc-1", tt.opts)
+			}); err != nil {
+				t.Fatalf("Tx: %v", err)
+			}
+			req := soleBatchRequest(t, spy.applier)
+			if len(req.Items) != 1 || req.Items[0].Update == nil {
+				t.Fatalf("batch = %+v, want one update item", req.Items)
+			}
+			item := req.Items[0].Update
+			if item.ForceAssigneeTransfer != tt.wantForceAssign {
+				t.Errorf("ForceAssigneeTransfer = %v, want %v: the native Tx route applies no anti-steal fence, and the role refuses the waiver without an assignee edit", item.ForceAssigneeTransfer, tt.wantForceAssign)
+			}
+			if item.ForceClosePolicy {
+				t.Error("ForceClosePolicy is armed: the native Tx route enforces the close policy, so the batch route must not waive it")
+			}
+		})
+	}
+}
+
 // TestTxKeepsTheNativeTransactionWhenItIsSupported is the mutation guard on
 // the routing arm: a store whose RunInTransaction WORKS must never be
 // converted to the batch path, or every gc city on embedded Dolt silently

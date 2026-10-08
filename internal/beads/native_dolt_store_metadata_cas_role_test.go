@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	beadslib "github.com/steveyegge/beads"
@@ -192,5 +193,135 @@ func TestCASReportsAMissingBeadAsAnError(t *testing.T) {
 	}
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+}
+
+// A KEY HOLDING A NON-STRING VALUE matches the expectation the store's own read
+// projection shows for it. metadataMapFromNative renders a JSON string as its
+// text and anything else as its re-encoded JSON, so a read-then-CAS loop hands
+// back "null" for a stored null and "1.5" for a stored 1.50 — the base store
+// compared against exactly that rendering. Each row reads its expectation
+// through metadataMapFromNative rather than restating it, so the CAS and the
+// read cannot drift apart; the spelled-out rendering is only a sanity check on
+// the row itself.
+func TestCASMatchesAStoredNonStringValueByItsReadRendering(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		stored   string
+		rendered string
+	}{
+		{name: "integer", stored: `3`, rendered: `3`},
+		{name: "null", stored: `null`, rendered: `null`},
+		{name: "non-canonical number", stored: `1.50`, rendered: `1.5`},
+		{name: "exponent number", stored: `1e3`, rendered: `1000`},
+		// Unsorted AND carrying a non-canonical number, so the rendering differs
+		// from the canonical form a real backend reports in Current as well as
+		// from the stored bytes.
+		{name: "unsorted object", stored: `{"b":1.50,"a":2}`, rendered: `{"a":2,"b":1.5}`},
+		{name: "object with whitespace", stored: `{"a": 1}`, rendered: `{"a":1}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			read, err := metadataMapFromNative(json.RawMessage(`{"k":` + tc.stored + `}`))
+			if err != nil {
+				t.Fatalf("read projection of %s: %v", tc.stored, err)
+			}
+			if read["k"] != tc.rendered {
+				t.Fatalf("the read projection renders %s as %q, want %q", tc.stored, read["k"], tc.rendered)
+			}
+			spy := newCASRoleSpy()
+			spy.setPresent(tc.stored)
+			store := newNativeDoltStoreForTest(spy)
+
+			ok, err := store.CompareAndSetMetadataKey("gc-1", "k", read["k"], "next")
+			if err != nil || !ok {
+				t.Fatalf("CAS(%q) over stored %s = (%v, %v), want (true, nil)", read["k"], tc.stored, ok, err)
+			}
+			if len(spy.requests) != 2 {
+				t.Fatalf("CAS made %d role calls, want 2 (the string arm, then the stored bytes)", len(spy.requests))
+			}
+			if got := spy.requests[1].Expected; got == nil || string(*got) != tc.stored {
+				t.Errorf("retry expected = %v, want the stored bytes %s verbatim", got, tc.stored)
+			}
+			if string(spy.value) != `"next"` {
+				t.Errorf("stored value = %s, want the swapped-in string", spy.value)
+			}
+		})
+	}
+}
+
+// And the other side: an expectation the read projection does NOT show for the
+// stored value is a lost race, answered in one call with no retry. A stored 1.50
+// reads as "1.5", so "1.50" is a spelling no reader of this store was handed;
+// and a JSON string is never retried, not even against its own quoted form.
+func TestCASRefusesAnExpectationTheReadRenderingDoesNotShow(t *testing.T) {
+	for _, tc := range []struct {
+		name, stored, expected string
+	}{
+		{name: "the stored literal of a non-canonical number", stored: `1.50`, expected: `1.50`},
+		{name: "a different value over null", stored: `null`, expected: `0`},
+		{name: "the quoted form of a string", stored: `"x"`, expected: `"x"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := newCASRoleSpy()
+			spy.setPresent(tc.stored)
+			store := newNativeDoltStoreForTest(spy)
+
+			ok, err := store.CompareAndSetMetadataKey("gc-1", "k", tc.expected, "thief")
+			if err != nil {
+				t.Fatalf("a lost race must not be an error: %v", err)
+			}
+			if ok {
+				t.Fatalf("CAS(%q) claimed stored %s", tc.expected, tc.stored)
+			}
+			if len(spy.requests) != 1 {
+				t.Errorf("CAS made %d role calls, want 1 — the stored-bytes retry is only for a rendering match", len(spy.requests))
+			}
+			if string(spy.value) != tc.stored {
+				t.Errorf("the value moved: %s", spy.value)
+			}
+		})
+	}
+}
+
+// A stored null is not the empty string — the read projection shows it as
+// "null" — so an empty expectation refuses it on the absent arm alone.
+func TestCASWithEmptyExpectedDoesNotTakeAStoredNullForEmpty(t *testing.T) {
+	spy := newCASRoleSpy()
+	spy.setPresent(`null`)
+	store := newNativeDoltStoreForTest(spy)
+
+	ok, err := store.CompareAndSetMetadataKey("gc-1", "lease", "", "holder")
+	if err != nil || ok {
+		t.Fatalf("CAS(\"\") over a stored null = (%v, %v), want (false, nil)", ok, err)
+	}
+	if len(spy.requests) != 1 {
+		t.Errorf("CAS made %d role calls, want 1 — the present-empty arm is conditioned on Current being the empty string", len(spy.requests))
+	}
+}
+
+// A refusal whose Current is not well-formed JSON is a broken answer, not a
+// lost race: both arms decode Current to decide whether to retry, and a decode
+// failure read as "no match" would report a backend fault as an ordinary miss.
+func TestCASReportsAMalformedRefusalAsAnError(t *testing.T) {
+	for _, tc := range []struct{ name, expected string }{
+		{name: "non-empty expectation", expected: "holder"},
+		{name: "empty expectation", expected: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := newCASRoleSpy()
+			spy.setPresent(`{"unterminated":`)
+			store := newNativeDoltStoreForTest(spy)
+
+			ok, err := store.CompareAndSetMetadataKey("gc-1", "lease", tc.expected, "next")
+			if ok || err == nil {
+				t.Fatalf("CAS over a malformed refusal = (%v, %v), want (false, error)", ok, err)
+			}
+			if !strings.Contains(err.Error(), "gc-1") {
+				t.Errorf("error %q does not name the bead", err)
+			}
+			if len(spy.requests) != 1 {
+				t.Errorf("CAS made %d role calls, want 1 — nothing is retried against a value it could not read", len(spy.requests))
+			}
+		})
 	}
 }

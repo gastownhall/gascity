@@ -422,6 +422,48 @@ func TestCloseAllFallsBackToThePerBeadRouteWhenBatchesAreUnsupported(t *testing.
 	}
 }
 
+// TestCloseAllPerBeadRouteStampsAnAlreadyClosedRowToo is the fallback's twin of
+// TestCloseAllOverAStoreCountsOnlyRowsItMoved: the same CloseAll must not
+// rewrite an already-closed bead's metadata only when the backing can batch.
+// Both routes stamp every id the caller named and count only the rows they
+// moved.
+func TestCloseAllPerBeadRouteStampsAnAlreadyClosedRowToo(t *testing.T) {
+	storage := newNativeDoltMemStorage()
+	native := newNativeDoltStoreForTest(storage)
+	open, err := native.Create(Bead{Type: "task", Status: "open", Title: "open"})
+	if err != nil {
+		t.Fatalf("Create open: %v", err)
+	}
+	already, err := native.Create(Bead{Type: "task", Status: "open", Title: "already closed"})
+	if err != nil {
+		t.Fatalf("Create already: %v", err)
+	}
+	if err := native.Close(already.ID); err != nil {
+		t.Fatalf("Close(already): %v", err)
+	}
+
+	store := newNativeDoltStoreForTest(&batchlessStorage{nativeDoltMemStorage: storage})
+	closed, err := store.CloseAll([]string{open.ID, already.ID}, map[string]string{"close_reason": "the sweep's reason"})
+	if err != nil {
+		t.Fatalf("CloseAll over a batchless backing: %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1: only the open row moved", closed)
+	}
+	for _, id := range []string{open.ID, already.ID} {
+		got, gErr := store.Get(id)
+		if gErr != nil {
+			t.Fatalf("Get(%s): %v", id, gErr)
+		}
+		if got.Status != "closed" {
+			t.Errorf("bead %s status = %q, want closed", id, got.Status)
+		}
+		if got.Metadata["close_reason"] != "the sweep's reason" {
+			t.Errorf("bead %s close_reason = %q, want the stamp to reach every id the caller named, as on the batch route", id, got.Metadata["close_reason"])
+		}
+	}
+}
+
 // batchlessStorage is a backing that refuses the batch applier the way a
 // backend without one does.
 type batchlessStorage struct{ *nativeDoltMemStorage }
