@@ -74,7 +74,7 @@ func (e rekey) rereadAndWrite(ctx context.Context, leaf runtime.Provider, name s
 	switch {
 	case cause != "":
 		return settlement{Outcome: settledRefused, Cause: cause}
-	case after.ObjectID != before.ObjectID:
+	case after.ObjectID != before.ObjectID || after.ObjectCreated != before.ObjectCreated:
 		return settlement{Outcome: settledRefused, Cause: causeNotPresent}
 	case !rekeyStillHolds(row, rt, e.it.Patch["instance_token"]):
 		return settlement{Outcome: settledRefused, Cause: causeIdentityChanged}
@@ -85,7 +85,8 @@ func (e rekey) rereadAndWrite(ctx context.Context, leaf runtime.Provider, name s
 // presentObject is one fresh presence read of name on leaf, from a refresh
 // that started after since: the reading, or the refusal cause. The rekey
 // brackets its identity read between two, which must see the same session
-// object, so the identity read belongs to the runtime both found present.
+// object (ObjectID, and ObjectCreated, which pins an id a server restart
+// reuses), so the identity read belongs to the runtime both found present.
 func presentObject(ctx context.Context, leaf runtime.Provider, name string, since time.Time) (runtime.Liveness, string) {
 	live, status, err := runtime.ObserveLivenessBoundedSince(ctx, leaf, name, nil, since, fenceProbeTimeout)
 	switch {

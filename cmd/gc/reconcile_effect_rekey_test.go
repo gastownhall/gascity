@@ -243,9 +243,9 @@ func TestRekeyRefusedWhilePendingCreateClaim(t *testing.T) {
 // compares two reads, so a hook inside it would only fail that read).
 type hookLeaf struct {
 	*fenceLeaf
-	object string
-	reads  int
-	after  func()
+	object, created string
+	reads           int
+	after           func()
 }
 
 func (l *hookLeaf) ObserveLivenessWithError(name string, pn []string) (runtime.Liveness, error) {
@@ -253,25 +253,34 @@ func (l *hookLeaf) ObserveLivenessWithError(name string, pn []string) (runtime.L
 		l.after()
 	}
 	live, err := l.fenceLeaf.ObserveLivenessWithError(name, pn)
-	live.ObjectID = l.object
+	live.ObjectID, live.ObjectCreated = l.object, l.created
 	return live, err
 }
 
-// Kills an identity read not bracketed by presence (v5 O2): a runtime
-// replaced under the name right after the identity read (another session
-// object) refuses as not present, writing nothing.
+// Kills an identity read not bracketed by presence (v5 O2), and a bracket on
+// the object ID alone: a runtime replaced under the name right after the
+// identity read, by another session object or by one reusing the ID with
+// another creation time (a server restart), refuses as not present, writing
+// nothing.
 func TestRekeyBracketsIdentityReadWithPresence(t *testing.T) {
-	f := newRekeyFixture(t)
-	rt := f.residue("2", "tok-old")
-	hook := &hookLeaf{fenceLeaf: f.leaf, object: "$1"}
-	p, it := f.pass(rt)
-	p.Runtime = hook
-	hook.after = func() { hook.object = "$2" }
-	if s := f.run(p, it); s.Outcome != settledRefused || s.Cause != causeNotPresent {
-		t.Fatalf("settlement %+v, want refused %s", s, causeNotPresent)
-	}
-	if got := f.row()["instance_token"]; got != "tok-new" {
-		t.Fatalf("row instance_token = %q, want it unwritten", got)
+	for _, tc := range []struct {
+		name            string
+		object, created string
+	}{{"another object", "$2", "100"}, {"reused id, another creation time", "$1", "200"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRekeyFixture(t)
+			rt := f.residue("2", "tok-old")
+			hook := &hookLeaf{fenceLeaf: f.leaf, object: "$1", created: "100"}
+			p, it := f.pass(rt)
+			p.Runtime = hook
+			hook.after = func() { hook.object, hook.created = tc.object, tc.created }
+			if s := f.run(p, it); s.Outcome != settledRefused || s.Cause != causeNotPresent {
+				t.Fatalf("settlement %+v, want refused %s", s, causeNotPresent)
+			}
+			if got := f.row()["instance_token"]; got != "tok-new" {
+				t.Fatalf("row instance_token = %q, want it unwritten", got)
+			}
+		})
 	}
 }
 

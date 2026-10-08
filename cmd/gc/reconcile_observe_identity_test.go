@@ -29,8 +29,9 @@ func countAlerts(t *testing.T, f *observeFixture, kind string) int {
 }
 
 // Kills a refusal alert raised before the fifth consecutive refusal, raised
-// again within one episode, or never re-armed: a landed rekey, or a pass in
-// which the row decides anything but a rekey, ends the streak.
+// again within one episode, or never re-armed (a landed rekey, or a pass in
+// which the row decides anything but a rekey, ends the streak); and failed
+// rekeys left out of the streak.
 func TestRekeyRefusalsAlertOncePerEpisode(t *testing.T) {
 	f := newObserveFixture(t)
 	k := rowKeyOf("gc-2")
@@ -48,10 +49,19 @@ func TestRekeyRefusalsAlertOncePerEpisode(t *testing.T) {
 		t.Fatalf("%d alerts in one streak, want exactly one", n)
 	}
 
+	// A failure (a write-error) counts in the streak like a refusal.
+	f.p.observeRekeySettlement(settlement{Key: k, Kind: intentRekey, Outcome: settledLanded})
+	for range rekeyRefusalsAlert {
+		f.p.observeRekeySettlement(settlement{Key: k, Kind: intentRekey, Outcome: settledFailed, Cause: causeWrite})
+	}
+	if n := countAlerts(t, f, alertRekeyRefused); n != 2 {
+		t.Fatalf("%d alerts after %d failed rekeys, want a second", n, rekeyRefusalsAlert)
+	}
+
 	f.p.observeRekeySettlement(settlement{Key: k, Kind: intentRekey, Outcome: settledLanded})
 	refuse(rekeyRefusalsAlert)
-	if n := countAlerts(t, f, alertRekeyRefused); n != 2 {
-		t.Fatalf("%d alerts after a landing and a new streak, want 2 (re-armed)", n)
+	if n := countAlerts(t, f, alertRekeyRefused); n != 3 {
+		t.Fatalf("%d alerts after a landing and a new streak, want 3 (re-armed)", n)
 	}
 
 	w := identityAlertWorld(t, gatherNow)
@@ -59,7 +69,7 @@ func TestRekeyRefusalsAlertOncePerEpisode(t *testing.T) {
 	refuse(rekeyRefusalsAlert - 1)
 	f.p.observeIdentityHolds(w, map[rowKey]string{k: decideNoAction})
 	refuse(rekeyRefusalsAlert - 1)
-	if n := countAlerts(t, f, alertRekeyRefused); n != 2 {
+	if n := countAlerts(t, f, alertRekeyRefused); n != 3 {
 		t.Fatalf("%d alerts across a pass that decided no rekey, want the streak ended", n)
 	}
 }

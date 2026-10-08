@@ -13,6 +13,11 @@ func seeded(leaf runtime.Provider, rt runtimeIdentity, row session.Info) {
 	_ = rt.SessionID == row.ID
 	_ = rt.Token != row.InstanceToken
 	_ = rt.Token == "" // an emptiness check: allowed
+	_ = strings.TrimSpace(rt.Token) == row.InstanceToken
+	_ = strings.EqualFold(rt.Token, row.InstanceToken)
+	switch rt.SessionID {
+	case row.ID:
+	}
 	_ = attributePendingCreateRuntime(row)
 }
 

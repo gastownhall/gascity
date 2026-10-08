@@ -10,7 +10,7 @@ import (
 // alerts once per episode, and re-arms when its condition clears.
 
 const (
-	alertRekeyRefused  = "rekey-refused"   // rekeyRefusalsAlert consecutive refused rekeys for a row
+	alertRekeyRefused  = "rekey-refused"   // rekeyRefusalsAlert consecutive refused or failed rekeys for a row
 	alertNewerSelfHeld = "newer-self-held" // a row held NewerSelf longer than newerSelfHeldAlert
 
 	rekeyRefusalsAlert = 5
@@ -19,20 +19,20 @@ const (
 
 // identityObserver is A3's alert memory.
 type identityObserver struct {
-	refusals     map[rowKey]int       // consecutive refused rekeys
+	refusals     map[rowKey]int       // consecutive refused or failed rekeys
 	newerSince   map[rowKey]time.Time // the first pass that held the row NewerSelf
 	newerAlerted map[rowKey]bool
 }
 
-// observeRekeySettlement counts a drained rekey settlement: a refusal
-// extends the row's streak, alerting once when it reaches
-// rekeyRefusalsAlert; any other outcome ends it.
+// observeRekeySettlement counts a drained rekey settlement: a refusal or a
+// failure (a write-error, a deadline) extends the row's streak, alerting
+// once when it reaches rekeyRefusalsAlert; any other outcome ends it.
 func (p *planner) observeRekeySettlement(s settlement) {
 	if s.Kind != intentRekey {
 		return
 	}
 	o := &p.obs.identity
-	if s.Outcome != settledRefused {
+	if s.Outcome != settledRefused && s.Outcome != settledFailed {
 		delete(o.refusals, s.Key)
 		return
 	}
@@ -40,7 +40,7 @@ func (p *planner) observeRekeySettlement(s settlement) {
 		o.refusals = make(map[rowKey]int)
 	}
 	if o.refusals[s.Key]++; o.refusals[s.Key] == rekeyRefusalsAlert {
-		p.alert(alertRekeyRefused, s.Key.ID, fmt.Sprintf("session %s on leg %q: %d consecutive rekeys refused, the last with cause %s", s.Key.ID, s.Key.Leg, rekeyRefusalsAlert, s.Cause))
+		p.alert(alertRekeyRefused, s.Key.ID, fmt.Sprintf("session %s on leg %q: %d consecutive rekeys refused or failed, the last with cause %s", s.Key.ID, s.Key.Leg, rekeyRefusalsAlert, s.Cause))
 	}
 }
 

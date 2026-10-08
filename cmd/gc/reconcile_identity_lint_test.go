@@ -21,7 +21,9 @@ import (
 //     the own-runtime and StaleSelf tests are never re-derived (ownRuntime);
 //   - but the comparator's and the inventory's reads the legacy owner fact
 //     (OwnerState and its values, OwnerID), or compares a SessionID or Token
-//     field with anything but "" (an emptiness check decides no owner);
+//     field, anywhere in an operand, with anything but "" (an emptiness
+//     check decides no owner), through strings.EqualFold or Compare, or in a
+//     switch;
 //   - calls legacy's own identity readers.
 
 // identityEnvKeyNames are the identity env keys.
@@ -39,6 +41,9 @@ var ownerFactNames = []string{"OwnerState", "OwnerID", "OwnerSession", "OwnerNon
 
 // identityFields are the identity fields no v2 file compares itself.
 var identityFields = []string{"SessionID", "Token"}
+
+// stringComparers are the strings functions that compare their arguments.
+var stringComparers = []string{"EqualFold", "Compare"}
 
 // legacyIdentityReaders are legacy's own ownership readers.
 var legacyIdentityReaders = []string{
@@ -83,14 +88,21 @@ func lintIdentitySource(t *testing.T, path string, src any) []string {
 				if (n.Op == token.EQL || n.Op == token.NEQ) && !owner && comparesIdentityField(n) {
 					report(n, "identity field compared")
 				}
+			case *ast.SwitchStmt:
+				if n.Tag != nil && !owner && readsField(n.Tag, identityFields...) {
+					report(n, "switch on an identity field")
+				}
 			case *ast.CallExpr:
 				sel, ok := n.Fun.(*ast.SelectorExpr)
-				if !ok || !slices.Contains(epochParsers, sel.Sel.Name) || base == "reconcile_identity.go" {
+				if !ok {
 					return true
 				}
 				for _, arg := range n.Args {
-					if readsEpochField(arg) {
+					switch {
+					case slices.Contains(epochParsers, sel.Sel.Name) && base != "reconcile_identity.go" && readsField(arg, "Epoch"):
 						report(n, "epoch parsed by "+sel.Sel.Name)
+					case slices.Contains(stringComparers, sel.Sel.Name) && !owner && readsField(arg, identityFields...):
+						report(n, "identity field compared by "+sel.Sel.Name)
 					}
 				}
 			}
@@ -118,25 +130,23 @@ func declNames(decl ast.Decl) map[string]bool {
 	return names
 }
 
-// comparesIdentityField reports whether b compares a SessionID or Token
-// field with something other than "".
+// comparesIdentityField reports whether b compares an operand that reads a
+// SessionID or Token field anywhere in it (strings.TrimSpace(rt.Token)
+// included) with something other than "".
 func comparesIdentityField(b *ast.BinaryExpr) bool {
-	field := func(e ast.Expr) bool {
-		sel, ok := e.(*ast.SelectorExpr)
-		return ok && slices.Contains(identityFields, sel.Sel.Name)
-	}
 	empty := func(e ast.Expr) bool {
 		lit, ok := e.(*ast.BasicLit)
 		return ok && lit.Value == `""`
 	}
-	return (field(b.X) || field(b.Y)) && !empty(b.X) && !empty(b.Y)
+	return (readsField(b.X, identityFields...) || readsField(b.Y, identityFields...)) && !empty(b.X) && !empty(b.Y)
 }
 
-// readsEpochField reports whether e reads a field named Epoch.
-func readsEpochField(e ast.Expr) bool {
+// readsField reports whether e reads a field with one of names anywhere in
+// it.
+func readsField(e ast.Expr, names ...string) bool {
 	found := false
 	ast.Inspect(e, func(n ast.Node) bool {
-		if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "Epoch" {
+		if sel, ok := n.(*ast.SelectorExpr); ok && slices.Contains(names, sel.Sel.Name) {
 			found = true
 		}
 		return !found
@@ -181,8 +191,8 @@ func TestIdentityLintBansDirectEnvReads(t *testing.T) {
 		as   string
 		want int
 	}{
-		{"reconcile_effect_seeded.go", 10},
-		{"allocator_seeded.go", 10},
+		{"reconcile_effect_seeded.go", 13},
+		{"allocator_seeded.go", 13},
 		{"runtime_inventory_lane.go", 6},    // identityEnvKeys, the owner fact and comparisons allowed
 		{"runtime_observation_cache.go", 7}, // the owner fact and comparisons allowed
 		{"reconcile_identity.go", 5},        // epoch parsing, the owner fact and comparisons allowed
