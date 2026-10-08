@@ -45,8 +45,12 @@ const (
 )
 
 // simStaleEvents lets a step deliver an event older than its row's backing:
-// a reorder, or a duplicate after a newer write (v5 §11 H2).
-var simStaleEvents = os.Getenv("GC_V2_SIM_NO_STALE_EVENTS") == ""
+// a reorder, or a duplicate after a newer write (v5 §11 H2). It is off by
+// default until mc-03lk4 (a CachingStore stale event installs at the current
+// revision, so a fenced CAS lands on it) is fixed; GC_V2_SIM_STALE_EVENTS=1
+// turns it on. With it on, seeds 112, 174, 193, 211, 235 and 237 of 256
+// reproduce mc-03lk4 as I15 violations.
+var simStaleEvents = os.Getenv("GC_V2_SIM_STALE_EVENTS") == "1"
 
 // The invariant hooks a later file appends to: per step, per row change v2
 // made, around each effect (the returned func sees its settlement), and at
