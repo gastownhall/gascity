@@ -756,6 +756,7 @@ that run as an infrastructure outcome rather than a verdict:
 | `75` | Infrastructure unreachable; the check produced no verdict | **No** — re-run attempt-free |
 | any other nonzero carrying a typed infrastructure string on stderr | Infrastructure unreachable, via the stderr fallback below | **No** — re-run attempt-free |
 | any other nonzero | Fail — the verdict is "not yet" | Yes |
+| none: the script could not be launched (missing, not a regular file, or not executable) | No verdict. The step stays open and the steps that need it stay blocked; the reason is recorded in `gc.control_pending_reason` | **No**, and no infrastructure budget either. Re-checked every sweep until the script can run |
 
 Attempt-free re-runs are themselves bounded by a separate infrastructure
 budget, so a script that exits 75 forever still terminates; it just does not
@@ -778,6 +779,20 @@ consumers — trigger conditions, hybrid dispatch, and `gc converge` — still
 read a nonzero gate as a genuine verdict. Each lane opts in separately,
 because "re-run without cost" only means something where there is an attempt
 budget to protect.
+
+**A check that cannot be launched.** When `check.path` names a script that is
+missing, is not a regular file, or is not executable, the orchestrator never
+runs it, so there is no exit status to read. The step stays open rather than
+failing: the fix is out of band (ship the script, `chmod +x` it), and closing
+the step would release the steps that need it. The orchestrator re-checks the
+step every sweep; once the script can run, the step resumes and spends attempts
+normally. If the script is still unlaunchable when the stall budget elapses (15
+minutes by default), the orchestrator emits a single `control.stalled` event
+with `error_class = "pending"` and keeps waiting. It records no `order.failed`.
+
+A `check.path` refused on safety grounds is not in this lane: one that escapes
+the trusted roots, climbs out with `../`, or follows a symlink outside the city
+or store. Such a step is refused and closed failed.
 
 ### 3.2. Retry
 
