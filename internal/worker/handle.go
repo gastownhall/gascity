@@ -145,6 +145,9 @@ const (
 type MessageRequest struct {
 	Text     string         `json:"text"`
 	Delivery DeliveryIntent `json:"delivery,omitempty"`
+	// Resume says whether the turn may resume a held session (CONTRACT v5.9
+	// D8); the zero value queues it there.
+	Resume sessionpkg.ResumePolicy `json:"-"`
 }
 
 // MessageResult reports whether a worker turn was queued or delivered now.
@@ -209,6 +212,9 @@ const (
 	// NudgeUndeliveredNoIdleBoundary means the provider CAN take live delivery
 	// but the session never reached the idle boundary within the wait window.
 	NudgeUndeliveredNoIdleBoundary NudgeUndeliveredReason = "no_idle_boundary"
+	// NudgeUndeliveredHeld means the session is held, which a nudge does not
+	// resume (CONTRACT v5.9 D8): the session queued the nudge itself.
+	NudgeUndeliveredHeld NudgeUndeliveredReason = "session_held"
 )
 
 // NudgeWakePolicy controls whether a nudge may wake a stopped session.

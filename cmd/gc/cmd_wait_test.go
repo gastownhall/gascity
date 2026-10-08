@@ -2475,6 +2475,31 @@ func TestClearSessionWaitHoldIfIdle_UsesSessionWaitLookup(t *testing.T) {
 	}
 }
 
+// TestClearSessionWaitHoldKeepsOperatorHold: the wait-hold clear drops the
+// wait's own intent and reason but never an operator's user-hold (CONTRACT
+// v5.9 D8). Kills clearing sleep_intent unconditionally.
+func TestClearSessionWaitHoldKeepsOperatorHold(t *testing.T) {
+	for intent, want := range map[string]string{"wait-hold": "", "user-hold": "user-hold"} {
+		store := beads.NewMemStore()
+		b, err := store.Create(beads.Bead{Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+			"wait_hold": "true", "sleep_intent": intent, "sleep_reason": intent,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := clearSessionWaitHold(sessionFrontDoor(store), b.ID); err != nil {
+			t.Fatalf("clearSessionWaitHold: %v", err)
+		}
+		got, err := store.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Metadata["wait_hold"] != "" || got.Metadata["sleep_intent"] != want || got.Metadata["sleep_reason"] != want {
+			t.Errorf("intent %s: after clear %v, want wait_hold cleared and intent/reason %q", intent, got.Metadata, want)
+		}
+	}
+}
+
 func TestClearSessionWaitHoldIfIdle_PropagatesWaitLoadError(t *testing.T) {
 	store := waitErrorStore{MemStore: beads.NewMemStore()}
 	sessionBead, err := store.Create(beads.Bead{

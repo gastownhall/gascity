@@ -7736,6 +7736,10 @@
             "description": "Opaque project context identifier.",
             "type": "string"
           },
+          "resume": {
+            "description": "Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued until the hold ends or an operator resumes the session.",
+            "type": "boolean"
+          },
           "session_name": {
             "description": "Deprecated: use alias.",
             "type": "string"
@@ -7874,6 +7878,10 @@
             "minLength": 1,
             "pattern": "\\S",
             "type": "string"
+          },
+          "resume": {
+            "description": "Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued until the hold ends or an operator resumes the session.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -11130,6 +11138,10 @@
             "minLength": 1,
             "pattern": "\\S",
             "type": "string"
+          },
+          "resume": {
+            "description": "Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued until the hold ends or an operator resumes the session.",
+            "type": "boolean"
           }
         },
         "required": [

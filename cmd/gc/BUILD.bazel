@@ -1664,6 +1664,7 @@ go_test(
         "session_reconfigured_pool_carveout_test.go",
         "session_refresh_async_gate_test.go",
         "session_resolve_test.go",
+        "session_resume_policy_test.go",
         "session_rollback_pending_create_atomic_test.go",
         "session_scaffold_staging_test.go",
         "session_sleep_test.go",
