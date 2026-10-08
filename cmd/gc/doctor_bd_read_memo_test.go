@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -491,34 +492,36 @@ func TestBdReadMemoIsPerRunner(t *testing.T) {
 }
 
 func TestBdReadMemoSharesInFlightRead(t *testing.T) {
-	bd := &fixtureBd{gate: make(chan struct{})}
-	run := newBdReadMemo("/city").wrap(bd.run)
-	const readers = 6
-	var wg sync.WaitGroup
-	outs := make([]string, readers)
-	for i := 0; i < readers; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			out, err := run("/city", "bd", "query", "--json", "ephemeral=true", "--limit", "0")
-			if err != nil {
-				t.Error(err)
-			}
-			outs[i] = string(out)
-		}(i)
-	}
-	// Let every reader reach the memo before the one fork returns.
-	time.Sleep(50 * time.Millisecond)
-	close(bd.gate)
-	wg.Wait()
-	if got := bd.calls.Load(); got != 1 {
-		t.Fatalf("bd forked %d times for %d concurrent identical reads, want 1", got, readers)
-	}
-	for _, out := range outs {
-		if out != "[]" {
-			t.Fatalf("reader got %q, want []", out)
+	synctest.Test(t, func(t *testing.T) {
+		bd := &fixtureBd{gate: make(chan struct{})}
+		run := newBdReadMemo("/city").wrap(bd.run)
+		const readers = 6
+		var wg sync.WaitGroup
+		outs := make([]string, readers)
+		for i := 0; i < readers; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				out, err := run("/city", "bd", "query", "--json", "ephemeral=true", "--limit", "0")
+				if err != nil {
+					t.Error(err)
+				}
+				outs[i] = string(out)
+			}(i)
 		}
-	}
+		// Every reader is now either inside the one fork or waiting on it.
+		synctest.Wait()
+		close(bd.gate)
+		wg.Wait()
+		if got := bd.calls.Load(); got != 1 {
+			t.Fatalf("bd forked %d times for %d concurrent identical reads, want 1", got, readers)
+		}
+		for _, out := range outs {
+			if out != "[]" {
+				t.Fatalf("reader got %q, want []", out)
+			}
+		}
+	})
 }
 
 func TestWithBdReadMemoOnlyWrapsTheDoctoredCity(t *testing.T) {
@@ -567,7 +570,6 @@ func TestDoctorParallelMapKeepsItemOrder(t *testing.T) {
 				break
 			}
 		}
-		time.Sleep(time.Millisecond)
 		inFlight.Add(-1)
 		return i * i
 	})
