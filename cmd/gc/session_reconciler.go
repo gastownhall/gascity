@@ -4660,16 +4660,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// of minting a fresh canonical owner.
 		//
 		// A seat `gc session kill` stopped is freeable too (owner ruling B1,
-		// CONTRACT C3 "Killed pool seats"), with its own work rules: its
-		// unexecuted open claims are given back before the work read, started
-		// work keeps the seat (the read finds it, the close refuses, and the
-		// assigned-work wake restarts the seat in place on its bead), and it
-		// never takes the stranded branch below.
+		// CONTRACT C3 "Killed pool seats"), with its own work rules: a seat
+		// holding no started work gives back its open claims before the work
+		// read; a seat holding started work releases nothing (the read finds
+		// the work, the close refuses, and the assigned-work wake restarts the
+		// seat in place on its bead); and it never takes the stranded branch
+		// below.
 		hasAssignedWork := false
 		poolFreeable := !shouldWake && !target.alive && isPoolSessionSlotFreeableInfo(info, clk.Now()) && isPoolManagedSessionInfo(info) && !isNamedSessionInfo(info)
 		killedSeat := poolFreeable && strings.TrimSpace(info.SleepReason) == string(sessionpkg.SleepReasonKilled)
 		if killedSeat {
-			releaseUnexecutedClaimsOnKill(cityPath, cfg, store, rigStores, info, clk.Now(), drainAckReleaseBudget, stderr)
+			releaseUnexecutedClaimsOnKill(cityPath, cfg, store, rigStores, clk.Now(), info, drainAckReleaseBudget, stderr)
 		}
 		if poolFreeable {
 			var assignedErr error

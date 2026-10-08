@@ -231,7 +231,7 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 		// today's behavior (a genuine crash gets a fresh identity rather than
 		// resuming a possibly-corrupt conversation); their freeable rows are
 		// closed by the reconciler's pool-slot close instead.
-		if cfgAgent.Lifecycle != config.AgentLifecycleOneShot || !isPoolSessionSlotFreeableInfo(info, time.Now().UTC()) {
+		if cfgAgent.Lifecycle != config.AgentLifecycleOneShot || !isPoolSessionSlotFreeableInfo(info, bp.now()) {
 			return false
 		}
 		// A one_shot exit that still holds an open/in-progress assigned work
@@ -638,13 +638,14 @@ func recordDeferredNonExpandingPoolAliasConflictInfo(
 	// gate rather than writing on every buildDesiredState call. Do not
 	// duplicate the backoff predicate here -- that duplication is exactly how
 	// this call site went unguarded the first time.
-	if !deferredSingletonAliasRetryDue(info.PoolAliasConflictAt, count, time.Now().UTC()) {
+	now := bp.now().UTC()
+	if !deferredSingletonAliasRetryDue(info.PoolAliasConflictAt, count, now) {
 		return info, nil
 	}
 	metadata := session.UpdatedAliasMetadataFromInfo(info, "")
 	metadata[poolAliasConflictMetadataKey] = canonical
 	metadata[poolAliasConflictCountMetadataKey] = strconv.Itoa(count + 1)
-	metadata[poolAliasConflictAtMetadataKey] = time.Now().UTC().Format(time.RFC3339)
+	metadata[poolAliasConflictAtMetadataKey] = now.Format(time.RFC3339)
 	if bp != nil && bp.beadStore != nil && info.ID != "" {
 		if err := bp.beadStore.Update(info.ID, beads.UpdateOpts{Metadata: metadata}); err != nil {
 			return info, fmt.Errorf("recording deferred singleton pool alias conflict for bead %s: %w", info.ID, err)

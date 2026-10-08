@@ -2371,7 +2371,7 @@ func newSessionKillCmd(stdout, stderr io.Writer) *cobra.Command {
 	var force bool
 	cmd := &cobra.Command{
 		Use:   "kill <session-id-or-alias>",
-		Short: "Force-kill session runtime (reconciler restarts)",
+		Short: "Force-kill session runtime",
 		Long: `Force-kill the runtime process for a session without discarding its work.
 
 The kill syncs the session's lifecycle state to asleep and pokes the controller,
@@ -2382,12 +2382,11 @@ resume metadata, Gas City may attempt provider resume, but
 provider conversation continuity is not guaranteed; confirm it with the agent or
 provider after restart.
 
-An idle pool seat is replaced rather than restarted: the reconciler closes it
-and the pool starts a fresh seat in its slot. Assigned work the seat had not
-started is released first so another seat can pick it up. A seat that had
-started work keeps it and restarts in place on that work; while the work is
-blocked, the seat holds its slot asleep. A one_shot pool reuses an idle killed
-seat in place.
+An idle pool seat (no started work and no ready work) is replaced: the
+reconciler releases any assigned work it had not started, closes it, and the
+pool starts a fresh seat in its slot. A pool seat holding started or ready work
+restarts in place on its bead; while its started work is blocked, it holds its
+slot asleep.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
