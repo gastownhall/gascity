@@ -105,8 +105,8 @@ func TestFreshHealRefusesAWakeThatLandsDuringTheRead(t *testing.T) {
 		}
 	}
 	it, s := c.run(t, sp, nil)
-	if it.Reason != decideDeadNamedHeal || s.Outcome != settledRefused || s.Cause != causeSuperseded {
-		t.Fatalf("intent %q, settlement %+v, want the dead named heal refused with cause %q", it.Reason, s, causeSuperseded)
+	if it.Reason != decideDeadRuntimeHeal || s.Outcome != settledRefused || s.Cause != causeSuperseded {
+		t.Fatalf("intent %q, settlement %+v, want the dead-runtime heal refused with cause %q", it.Reason, s, causeSuperseded)
 	}
 	if m := c.meta(t); m["state"] != "active" || m["session_key"] != "k-1" {
 		t.Fatalf("row %v, want it active with its continuation", m)

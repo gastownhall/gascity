@@ -44,7 +44,25 @@ func init() {
 			}
 			return intent{Kind: intentRowHeal, Reason: decideTimerHeal, Basis: rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}, Patch: patch}, true
 		})}},
+		// The I15 carve-out for A6's stability clear (v5.8) holds only for a
+		// committed row whose own runtime the deciding pass read alive 30s
+		// past its wake (TestSimI15StabilityCarveOut pins the rest).
+		{"a stability clear inside 30s of the wake ends a live quarantine", "I15 ", simOpts{arms: mutateHeal(quarantineClear(func(r *rowFacts, stable bool) bool {
+			return committed(r.row.Info) && r.aliveProbed() && !stable
+		}))}},
 	}...)
+}
+
+// quarantineClear is an A6 that clears a set quarantined_until where when
+// says, given whether the row woke 30s or more before the pass.
+func quarantineClear(when func(r *rowFacts, stable bool) bool) func(r *rowFacts) (intent, bool) {
+	return func(r *rowFacts) (intent, bool) {
+		woke, err := time.Parse(time.RFC3339, r.row.Info.LastWokeAt)
+		if r.row.Info.QuarantinedUntil == "" || err != nil || !when(r, r.w.Now.Sub(woke) >= stabilityThreshold) {
+			return intent{}, false
+		}
+		return r.heal(intentRowHeal, decideStabilityClear, session.MetadataPatch{"quarantined_until": ""})
+	}
 }
 
 // hidingInflight is an admission that ignores the effects in flight: the pass
@@ -180,7 +198,7 @@ func (s *sim) checkWrite(w simWrite) {
 			}
 		}
 	}
-	if k := dormantChange(w.Before, a, w.At); k != "" {
+	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" {
 		s.failf("I15 I-STOP-3/4", "v2 rewrote %s %q -> %q on %s, which an operator holds dormant at %s", k, b[k], a[k], id, w.At.Format(time.RFC3339))
 	}
 	terminal := (w.After.Status == "closed" && w.Before.Status != "closed") ||
@@ -193,9 +211,11 @@ func (s *sim) checkWrite(w simWrite) {
 // dormantChange returns a key a v2 write changed on b that an operator owns
 // at t, or "": an honored kill fence owns the row's lifecycle and its sleep
 // reason, a suspend the row's state, and an unexpired hold or quarantine its
-// timer and sleep reason; no dormant row is woken or given a stop request,
-// though one it holds may be cleared.
-func dormantChange(b beads.Bead, a map[string]string, t time.Time) string {
+// timer and sleep reason, though A6's stability clear may clear the
+// quarantine's timer on a row its pass read stable (v5.8, SESS-539; stable,
+// sim.stable); no dormant row is woken or given a stop request, though one it
+// holds may be cleared.
+func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) string {
 	m := b.Metadata
 	until := func(k string) bool { at, err := time.Parse(time.RFC3339, m[k]); return err == nil && at.After(t) }
 	reason := session.SleepReason(m["sleep_reason"])
@@ -212,13 +232,16 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time) string {
 			owned = append(owned, "sleep_reason")
 		}
 	}
-	if until("quarantined_until") {
-		owned = append(owned, "quarantined_until")
+	quarantined := until("quarantined_until")
+	if quarantined {
+		if !stable || a["quarantined_until"] != "" {
+			owned = append(owned, "quarantined_until")
+		}
 		if slices.Contains([]session.SleepReason{session.SleepReasonQuarantine, session.SleepReasonContextChurn, session.SleepReasonRateLimit}, reason) {
 			owned = append(owned, "sleep_reason")
 		}
 	}
-	if len(owned) == 0 {
+	if len(owned) == 0 && !quarantined {
 		return ""
 	}
 	for _, k := range owned {

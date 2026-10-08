@@ -299,6 +299,10 @@ type sim struct {
 	prev     map[string]beads.Bead // "leg/id" → row, after the last step
 	writes   []simWrite
 	admitted []time.Time // admitted starts (I9)
+	// stable is, by row ID, whether the pass that last admitted an effect
+	// for the row read it committed, its own runtime alive, and 30s past its
+	// wake: I15's view of A6's stability clear.
+	stable   map[string]bool
 	failures []string
 }
 
@@ -314,7 +318,7 @@ type simOpts struct {
 func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	s := &sim{
 		t: t, seed: seed, rng: rand.New(rand.NewPCG(seed, 0x51d1a)), clk: newFakePlannerClock(plannerT0), obsClk: &clock.Fake{Time: plannerT0},
-		parkCh: make(chan *simEffect, 256), postCh: make(chan settlement, 256),
+		parkCh: make(chan *simEffect, 256), postCh: make(chan settlement, 256), stable: map[string]bool{},
 	}
 	s.lag = s.rng.IntN(2) == 0
 	s.sp = &simProvider{Fake: runtime.NewFake(), rts: make(map[string]*simRuntime), changed: make(map[string]uint64), now: s.clk.Now}
@@ -399,7 +403,7 @@ func (s *sim) seedRows() (city, rig []beads.Bead) {
 		gen := 1 + s.rng.IntN(3)
 		token := fmt.Sprintf("tok-%s-%d", id, gen)
 		state := []string{"asleep", "active", "awake", "creating", "asleep"}[s.rng.IntN(5)]
-		meta := []string{"generation", strconv.Itoa(gen), "instance_token", token}
+		meta := []string{"generation", strconv.Itoa(gen), "instance_token", token, "last_woke_at", s.rel(-time.Duration(s.rng.IntN(90)) * time.Second)}
 		switch at := s.rel(time.Duration(s.rng.IntN(240)-120) * time.Second); s.rng.IntN(6) {
 		case 0:
 			meta = append(meta, "held_until", at, "sleep_reason", "user-hold")
@@ -456,9 +460,15 @@ func (s *sim) pass() {
 	s.p.runPass(now)
 	rec := s.p.out.record.Load()
 	s.logf("pass: admitted %v, %d deferred %s", intentKeys(rec.Admitted), len(rec.Deferred), rec.Err)
+	census, obs := s.observed()
 	for _, it := range rec.Admitted {
 		if it.Kind == intentStart {
 			s.admitted = append(s.admitted, now)
+		}
+		if census != nil {
+			info := census.Rows[it.Key].Info
+			woke, err := time.Parse(time.RFC3339, info.LastWokeAt)
+			s.stable[it.Key.ID] = committed(info) && obs[it.Key].Liveness == livenessAlive && err == nil && now.Sub(woke) >= stabilityThreshold
 		}
 	}
 	for _, e := range s.inflight.view().Entries {

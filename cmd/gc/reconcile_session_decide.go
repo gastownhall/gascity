@@ -1,6 +1,7 @@
 package main
 
 import (
+	"maps"
 	"strings"
 	"time"
 
@@ -83,13 +84,37 @@ func earlierRequeue(a, b time.Duration) time.Duration {
 func decideRow(w *World, a *allocDecision, k rowKey) (it intent, next time.Time) {
 	r := &rowFacts{w: w, k: k, entry: a.Snapshot.Entries[k]}
 	r.row, r.found = w.Census.Rows[k]
-	for _, arm := range rowArms {
+	for i, arm := range rowArms {
 		if it, ok := arm.decide(r); ok {
+			if arm.name == "A6" && it.Kind != "" {
+				it.Patch = r.fold(it.Patch, rowArms[i+1:])
+			}
 			it.Key = k
 			return it, r.next
 		}
 	}
 	return intent{Key: k, Reason: decideNoAction}, r.next
+}
+
+// fold adds to an A6 item's patch the plain row writes that A6's later items
+// propose for the row in the same pass, so the row's heals and markers land in
+// one CAS and none waits a pass behind another (CONTRACT v5.8 §12.3, R5). A
+// key an earlier item writes keeps its value; a later fresh heal waits.
+func (r *rowFacts) fold(patch session.MetadataPatch, rest []rowArm) session.MetadataPatch {
+	patch = maps.Clone(patch)
+	for _, arm := range rest {
+		if arm.name != "A6" {
+			break
+		}
+		if it, ok := arm.decide(r); ok && it.Kind == intentRowHeal {
+			for key, value := range it.Patch {
+				if _, set := patch[key]; !set {
+					patch[key] = value
+				}
+			}
+		}
+	}
+	return patch
 }
 
 // rowFacts is what decideRow's arms read of one row, and the earliest
@@ -132,9 +157,10 @@ var rowArms = []rowArm{
 	{"A6", armTimerHeals},
 	{"A6", armClaimClear},
 	{"A6", armCreatingHeal},
-	{"A6", armDeadNamedHeal},
-	{"A6", armCrashHeal},
+	{"A6", armDeadRuntimeHeal},
 	{"A6", armAwakeHeal},
+	{"A6", armStabilityClear},
+	{"A6", armDetachedAt},
 	{"A6", armStrandedClear},
 	{"A6", armCurrentBead},
 	{"A9", armLivenessUnknown},
