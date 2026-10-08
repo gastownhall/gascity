@@ -1456,6 +1456,7 @@ go_test(
         "reconcile_ready_fanout_test.go",
         "reconcile_replay_test.go",
         "reconcile_session_decide_test.go",
+        "reconcile_session_differential_test.go",
         "reconcile_session_effects_test.go",
         "reconcile_session_fence_test.go",
         "reconcile_session_namelock_test.go",
