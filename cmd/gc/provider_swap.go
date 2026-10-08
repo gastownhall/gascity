@@ -17,6 +17,10 @@ import (
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
+// reloadOpenCityStore opens a standalone city's bead store on reload; a test
+// seam.
+var reloadOpenCityStore = openCityStoreAt
+
 // sessionLegs are the two backends a session provider serves names from: the
 // base built for the selection name and, when the city composes, the ACP leg
 // (resolveSessionTransportProvider). A nil acp means no ACP leg.
@@ -158,33 +162,51 @@ func stopProviderSwapRuntimes(stops []swapStop, cfg *config.City, store beads.St
 	return nil
 }
 
-// holdForSwap refuses new async starts and waits up to timeout for the
-// in-flight ones, so a provider swap's listing cannot miss a runtime a legacy
-// start is still creating. It reports whether none is left; the swap reopens
-// starts afterwards either way.
-func (t *asyncStartTracker) holdForSwap(timeout time.Duration, shouldStop func() bool) bool {
-	t.mu.Lock()
-	t.stopping = true
-	t.mu.Unlock()
-	deadline := time.Now().Add(timeout)
-	for {
-		t.mu.Lock()
-		idle := t.inflight == 0
-		t.mu.Unlock()
-		switch {
-		case idle:
-			return true
-		case !time.Now().Before(deadline), shouldStop():
-			return false
-		}
-		time.Sleep(25 * time.Millisecond)
+// goStart runs f on a new goroutine that launched counts until f returns.
+// The count rises right before the goroutine starts and falls in its first
+// deferred call, so no panic can leave it raised. A nil tracker counts nothing.
+func (t *asyncStartTracker) goStart(f func()) {
+	if t == nil {
+		go f()
+		return
 	}
+	t.mu.Lock()
+	t.launched++
+	t.mu.Unlock()
+	go func() {
+		defer func() {
+			t.mu.Lock()
+			t.launched--
+			t.mu.Unlock()
+		}()
+		f()
+	}()
 }
 
-// reopen admits async starts again after holdForSwap. Only a swap reopens: a
-// shutdown's wait is final.
-func (t *asyncStartTracker) reopen() {
-	t.mu.Lock()
-	t.stopping = false
-	t.mu.Unlock()
+// waitLaunchedStarts waits up to timeout, or until ctx is done, for every
+// launched async start goroutine to return, so a provider swap's listing
+// cannot miss a runtime a legacy start is still creating. It refuses nothing:
+// the swap runs on the controller loop goroutine, the only one that launches
+// starts, so none can begin while it waits.
+func (t *asyncStartTracker) waitLaunchedStarts(ctx context.Context, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		t.mu.Lock()
+		n := t.launched
+		t.mu.Unlock()
+		if n == 0 {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("%d async session start(s) still running after %s", n, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
 }

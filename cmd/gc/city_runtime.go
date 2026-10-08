@@ -2692,6 +2692,23 @@ func (cr *CityRuntime) reloadConfigTraced(
 		return rejectSuperseded("before provider effects")
 	}
 
+	if cr.cs == nil {
+		// Refresh standalone city store for auto-suspend.
+		// Also recovers from nil → non-nil when bd becomes available after startup.
+		// The stores are opened before the swap so readers never wait on an open,
+		// and so a provider swap can read the session beads from a store that
+		// failed to open at boot.
+		cityStore := cr.standaloneCityStore
+		if s, err := reloadOpenCityStore(cityRoot); err != nil {
+			if cityStore != nil {
+				appendWarning(fmt.Sprintf("city bead store reload: %v", err))
+			}
+		} else {
+			cityStore = s
+		}
+		cr.setStandaloneStores(cityStore, buildStandaloneRigStores(nextCfg, cr.cityPath, cr.stderr))
+	}
+
 	if providerChanged {
 		swapFailed := func(err error) reloadControlReply {
 			err = fmt.Errorf("config reload: %w", err)
@@ -2702,7 +2719,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 			}
 			return reloadControlReply{Outcome: reloadOutcomeFailed, Error: err.Error(), Warnings: warnings}
 		}
-		resume, err := cr.beforeProviderSwap(nextCfg)
+		resume, err := cr.beforeProviderSwap(ctx, nextCfg)
 		defer resume() // after the swap publishes, or the reload aborts
 		if err != nil {
 			return swapFailed(fmt.Errorf("provider swap: %w", err))
@@ -2710,7 +2727,8 @@ func (cr *CityRuntime) reloadConfigTraced(
 		// Seed the new provider's routes from the session beads as they stand
 		// after the wait, so every listed name has a known route (CONTRACT P7).
 		// A city with no session store has nothing to seed; its default routes
-		// stay unknown, so a listed name on them aborts below.
+		// stay unknown, so a listed name on them aborts below with its own
+		// reason.
 		snapshot, unreadable := cr.loadSessionBeadSnapshotWithPartial()
 		if unreadable {
 			return swapFailed(errors.New("session beads unreadable during provider swap"))
@@ -2724,6 +2742,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 			return swapFailed(fmt.Errorf("listing sessions failed during provider swap: %w", lErr))
 		}
 		stops, rErr := providerSwapStops(listings, nextSp)
+		if rErr != nil && snapshot == nil {
+			return swapFailed(fmt.Errorf("provider swap: no session bead store to seed the new provider's routes from: %w", rErr))
+		}
 		if rErr != nil {
 			return swapFailed(fmt.Errorf("provider swap: %w", rErr))
 		}
@@ -2838,21 +2859,6 @@ func (cr *CityRuntime) reloadConfigTraced(
 		if err := cr.svc.Reload(); err != nil {
 			appendWarning(fmt.Sprintf("service reload: %v", err))
 		}
-	}
-
-	if cr.cs == nil {
-		// Refresh standalone city store for auto-suspend.
-		// Also recovers from nil → non-nil when bd becomes available after startup.
-		// The stores are opened before the swap so readers never wait on an open.
-		cityStore := cr.standaloneCityStore
-		if s, err := openCityStoreAt(cityRoot); err != nil {
-			if cityStore != nil {
-				appendWarning(fmt.Sprintf("city bead store reload: %v", err))
-			}
-		} else {
-			cityStore = s
-		}
-		cr.setStandaloneStores(cityStore, buildStandaloneRigStores(nextCfg, cr.cityPath, cr.stderr))
 	}
 
 	// Rebuild convergence scopes against the reloaded config so rigs added,

@@ -17,6 +17,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -513,43 +514,170 @@ func TestReloadProviderSwapAbortsOnFailedStop(t *testing.T) {
 	base.fail = false // let the fixture's cleanup stop it
 }
 
-// Legacy refuses new async starts and waits for its in-flight ones before the
-// swap lists, so the listing cannot miss a runtime a start is still creating;
-// a start that outlives the wait aborts the reload, and the swap reopens
-// starts either way.
-// Kills: a legacy swap that waits on nothing, one that never reopens starts,
-// and one that ignores a timed-out wait.
+// Legacy waits for its launched async start goroutines before the swap
+// lists, so the listing cannot miss a runtime a start is still creating. A
+// start still running past startup_timeout + slack, or a ctx done during the
+// wait (a controller stop), aborts the swap. A reservation that never
+// launched a goroutine (a panic before the launch) is not waited for.
+// Kills: a legacy swap that waits on nothing, one that ignores a timed-out
+// wait or a done ctx, and a count of reservations instead of goroutines.
 func TestBeforeProviderSwapWaitsLegacyAsyncStarts(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		cfg := &config.City{Session: config.SessionConfig{StartupTimeout: "1s"}}
-		cr := &CityRuntime{}
-		done, ok := cr.asyncStarts.start()
-		if !ok {
-			t.Fatal("start refused before the swap")
-		}
-		resume, err := cr.beforeProviderSwap(cfg)
-		if err == nil {
-			t.Fatal("swap went ahead over a start still running past startup_timeout + slack")
-		}
-		if _, ok := cr.asyncStarts.start(); ok {
-			t.Fatal("a new async start was admitted while the swap held starts")
-		}
-		resume()
-		done()
-		if d, ok := cr.asyncStarts.start(); !ok {
-			t.Fatal("starts not reopened after the swap")
-		} else {
-			d()
-		}
-
-		inFlight, _ := cr.asyncStarts.start()
-		time.AfterFunc(5*time.Second, inFlight)
-		resume, err = cr.beforeProviderSwap(cfg)
-		if err != nil {
-			t.Fatalf("swap aborted over a start that finished within the wait: %v", err)
-		}
-		resume()
+	cfg := &config.City{Session: config.SessionConfig{StartupTimeout: "1s"}}
+	t.Run("leaked reservation", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			cr := &CityRuntime{}
+			if _, ok := cr.asyncStarts.start(); !ok {
+				t.Fatal("start refused")
+			}
+			if _, err := cr.beforeProviderSwap(context.Background(), cfg); err != nil {
+				t.Fatalf("swap waited on a reservation that launched nothing: %v", err)
+			}
+		})
 	})
+	t.Run("start outlives the wait", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			cr := &CityRuntime{}
+			release := make(chan struct{})
+			cr.asyncStarts.goStart(func() { <-release })
+			if _, err := cr.beforeProviderSwap(context.Background(), cfg); err == nil {
+				t.Fatal("swap went ahead over a start still running past startup_timeout + slack")
+			}
+			close(release)
+		})
+	})
+	t.Run("start finishes within the wait", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			cr := &CityRuntime{}
+			cr.asyncStarts.goStart(func() { <-time.After(5 * time.Second) })
+			if _, err := cr.beforeProviderSwap(context.Background(), cfg); err != nil {
+				t.Fatalf("swap aborted over a start that finished within the wait: %v", err)
+			}
+		})
+	})
+	t.Run("panicking start", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			cr := &CityRuntime{}
+			cr.asyncStarts.goStart(func() {
+				defer func() { _ = recover() }()
+				panic("start blew up")
+			})
+			synctest.Wait()
+			if _, err := cr.beforeProviderSwap(context.Background(), cfg); err != nil {
+				t.Fatalf("a panicked start left the count raised: %v", err)
+			}
+		})
+	})
+	t.Run("ctx done mid-wait", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			cr := &CityRuntime{}
+			release := make(chan struct{})
+			cr.asyncStarts.goStart(func() { <-release })
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(time.Second, cancel)
+			if _, err := cr.beforeProviderSwap(ctx, cfg); !errors.Is(err, context.Canceled) {
+				t.Fatalf("err = %v, want the controller stop to abort the swap", err)
+			}
+			close(release)
+		})
+	})
+	t.Run("v2 ctx done", func(t *testing.T) {
+		cr := &CityRuntime{v2: newDefaultPlanner(io.Discard)}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		resume, err := cr.beforeProviderSwap(ctx, cfg)
+		resume()
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want a done ctx to abort the v2 swap", err)
+		}
+	})
+}
+
+// A controller stop during the swap wait aborts the reload: nothing is
+// stopped and the new provider is not published.
+// Kills: a swap that goes on to stop runtimes and publish after ctx is done.
+func TestReloadProviderSwapAbortsWhenContextDone(t *testing.T) {
+	tomlPath := filepath.Join(t.TempDir(), "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	base := runtime.NewFake()
+	stubSessionProviderBuilds(t, map[string]runtime.Provider{"fail": runtime.NewFake()})
+	startFakeSessions(t, base, "worker-1")
+	f := newSwapReloadFixture(t, tomlPath, base, []string{"worker-1"}, nil)
+
+	writeCityRuntimeConfig(t, tomlPath, "fail")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	lastProviderName := "fake"
+	reply := f.cr.reloadConfigTraced(ctx, &lastProviderName, filepath.Dir(tomlPath), nil, reloadSourceManual)
+	f.requireAborted(t, reply, context.Canceled.Error(), base)
+	if !base.IsRunning("worker-1") || lastProviderName != "fake" {
+		t.Fatalf("worker-1 running = %v, provider name %q; want both kept", base.IsRunning("worker-1"), lastProviderName)
+	}
+}
+
+// standaloneSwapRuntime is a standalone (no API) city runtime on base whose
+// city bead store failed to open at boot.
+func standaloneSwapRuntime(t *testing.T, tomlPath string, base runtime.Provider) *CityRuntime {
+	t.Helper()
+	dir := filepath.Dir(tomlPath)
+	result, err := tryReloadConfig(tomlPath, "test-city", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cr := &CityRuntime{
+		cityPath: dir, cityName: "test-city", configName: "test-city", tomlPath: tomlPath,
+		configRev: result.Revision, cfg: result.Cfg, sp: base, dops: newDrainOps(base),
+		rec: events.Discard, stdout: io.Discard, stderr: io.Discard, logPrefix: "gc test",
+	}
+	t.Cleanup(cr.stopConfigWatcher)
+	return cr
+}
+
+// The reviewer's scenario: a standalone city whose bead store failed at
+// boot, with a tmux session running, reloads to add its first ACP agent. The
+// reload reopens the store before the swap, so the swap reads the session
+// beads, keeps the session, and publishes; a store that still will not open
+// aborts the swap with its own reason instead of wedging on an unknown route.
+// Kills: the store refresh left after publication (every such reload aborts
+// forever) and a no-store abort that reads like any unknown route.
+func TestReloadStandaloneSwapReopensStoreBeforeTheSwap(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		storeOpen bool
+	}{{name: "store opens", storeOpen: true}, {name: "store still unavailable"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			tomlPath := filepath.Join(t.TempDir(), "city.toml")
+			writeCityRuntimeConfig(t, tomlPath, "fake")
+			base := runtime.NewFake()
+			stubSessionProviderBuilds(t, map[string]runtime.Provider{"acp": runtime.NewFake()})
+			startFakeSessions(t, base, "worker-1")
+			cr := standaloneSwapRuntime(t, tomlPath, base)
+			if !tc.storeOpen {
+				old := reloadOpenCityStore
+				reloadOpenCityStore = func(string) (beads.Store, error) { return nil, errSwapListStore }
+				t.Cleanup(func() { reloadOpenCityStore = old })
+			}
+
+			writeACPAgentCityConfig(t, tomlPath, "fake")
+			lastProviderName := "fake"
+			reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, filepath.Dir(tomlPath), nil, reloadSourceManual)
+
+			if !base.IsRunning("worker-1") || base.CountCalls("Stop", "worker-1") != 0 {
+				t.Fatalf("worker-1: running=%v, Stop=%d; want it untouched", base.IsRunning("worker-1"), base.CountCalls("Stop", "worker-1"))
+			}
+			if !tc.storeOpen {
+				if reply.Outcome != reloadOutcomeFailed || !strings.Contains(reply.Error, "no session bead store") || cr.sp != base {
+					t.Fatalf("reply = %+v, provider %T; want the no-store abort with the old provider kept", reply, cr.sp)
+				}
+				return
+			}
+			if reply.Outcome == reloadOutcomeFailed || cr.cityBeadStore() == nil {
+				t.Fatalf("reply = %+v, store %v; want the reopened store and an applied swap", reply, cr.cityBeadStore())
+			}
+			if autoSP, ok := cr.sp.(*sessionauto.Provider); !ok || autoSP.RouteFor("worker-1").Provider != base {
+				t.Fatalf("provider after the swap = %T, want the auto composition over the carried base", cr.sp)
+			}
+		})
+	}
 }
 
 // The accepted next-pass consequence (CONTRACT P7, §12.2 row 25): a legacy
@@ -610,10 +738,6 @@ func TestReloadProviderSwapRoutesSessionsStartedDuringTheWait(t *testing.T) {
 	base, acp, newBase := runtime.NewFake(), runtime.NewFake(), runtime.NewFake()
 	old := sessionauto.New(base, acp)
 	f := newSwapReloadFixture(t, tomlPath, old, nil, nil)
-	done, ok := f.cr.asyncStarts.start()
-	if !ok {
-		t.Fatal("start refused")
-	}
 	finished := make(chan struct{})
 	old2 := buildSessionProviderByName
 	t.Cleanup(func() { buildSessionProviderByName = old2 })
@@ -621,9 +745,8 @@ func TestReloadProviderSwapRoutesSessionsStartedDuringTheWait(t *testing.T) {
 		if name == "fail" {
 			// The new provider is built before the wait; the in-flight start
 			// lands its row and runtime only after that.
-			go func() {
+			f.cr.asyncStarts.goStart(func() {
 				defer close(finished)
-				defer done()
 				b := acpSessionBead("dyn-acp")
 				if _, err := f.store.Create(b); err != nil {
 					t.Errorf("create row: %v", err)
@@ -632,7 +755,7 @@ func TestReloadProviderSwapRoutesSessionsStartedDuringTheWait(t *testing.T) {
 				if err := old.Start(context.Background(), "dyn-acp", runtime.Config{}); err != nil {
 					t.Errorf("start: %v", err)
 				}
-			}()
+			})
 			return newBase, nil
 		}
 		return runtime.NewFake(), nil
@@ -670,4 +793,32 @@ func TestStopProviderSwapRuntimesStopsEachLeg(t *testing.T) {
 			t.Fatalf("%s: running=%v, Stop=%d; want one Stop on its own leg", c.name, c.leg.IsRunning(c.name), c.leg.CountCalls("Stop", c.name))
 		}
 	}
+}
+
+// An enqueued async start's goroutine is counted from before it launches
+// until it returns, so a provider swap waits for it.
+// Kills: async starts launched outside the tracker's count.
+func TestEnqueuedAsyncStartIsCountedUntilItReturns(t *testing.T) {
+	workDir := t.TempDir()
+	synctest.Test(t, func(t *testing.T) {
+		clk := &clock.Fake{Time: time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)}
+		store, _, _, item := postStartBeadItem(t, clk, workDir)
+		var tracker asyncStartTracker
+		gate := make(chan struct{})
+		enqueuePreparedStartWaveForCity(
+			context.Background(),
+			[]asyncPreparedStart{{item: item, release: func() { <-gate }, tracker: &tracker}},
+			"", runtime.NewFake(), store, nil, clk, events.NewFake(), postStartTimeout, 1, io.Discard, io.Discard, nil, nil,
+			immediateStartStabilityWaiter, immediateSessionStaleKeyDetectionWaiter, nil,
+		)
+		synctest.Wait()
+		if err := tracker.waitLaunchedStarts(context.Background(), 0); err == nil {
+			t.Fatal("a running async start goroutine was not counted")
+		}
+		close(gate)
+		synctest.Wait()
+		if err := tracker.waitLaunchedStarts(context.Background(), 0); err != nil {
+			t.Fatalf("a returned async start goroutine is still counted: %v", err)
+		}
+	})
 }
