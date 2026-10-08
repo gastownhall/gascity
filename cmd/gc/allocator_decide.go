@@ -605,7 +605,7 @@ func (p *decidePass) classify(decisions map[string]AwakeDecision) {
 			e.Desired, e.Reason = desireSleep, firstNonEmpty(d.Reason, reasonNoWake)
 		default:
 			e.Desired, e.Reason = desireDrain, firstNonEmpty(d.Reason, reasonNoWake)
-			e.DrainReason = drainOrphaned
+			e.DrainReason, e.OpenWork = drainOrphaned, p.openAssignedWork(info)
 			if p.agentSuspended(e.Template) {
 				e.DrainReason = drainSuspended
 			}

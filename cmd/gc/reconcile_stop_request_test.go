@@ -117,8 +117,9 @@ func TestDrainIntentIncarnationIsGeneration(t *testing.T) {
 
 // TestStopRequestSurvivesNoOperatorDormantState (I15). Kills a transition
 // that writes over an operator's suspend or kill (the suspend-revert
-// scenario): such a row has no request, and its residue is voided by a
-// write of the stop keys alone. C6a2 adds the begin's half.
+// scenario): such a row has no request and gets no begin, its residue is
+// voided by a write of the stop keys alone, and a begin decided before the
+// operator's write refuses inside the CAS.
 func TestStopRequestSurvivesNoOperatorDormantState(t *testing.T) {
 	keys := slices.Concat(intentAt("orphaned", "3"), ackAt("3"))
 	for _, dormant := range [][]string{suspendedRow, killPending} {
@@ -140,6 +141,31 @@ func TestStopRequestSurvivesNoOperatorDormantState(t *testing.T) {
 				t.Fatalf("the void writes %q, an operator-owned key", k)
 			}
 		}
+	}
+
+	// A begin admitted on an active row; the operator suspends before the CAS.
+	store, _ := stampedMem(t, gate.Require)
+	b, err := store.Create(drainRow("last_woke_at", rowAt(-time.Hour)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, store))}
+	k := rowKey{Leg: rowLeg, ID: b.ID}
+	a := &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{k: {Key: k, Liveness: livenessAlive, Desired: desireDrain, DrainReason: drainSuspended}}}}
+	it, _ := decideRow(w, a, k)
+	if it.Kind != intentDrainBegin {
+		t.Fatalf("fixture: %+v, want a begin", it)
+	}
+	if err := store.SetMetadataBatch(b.ID, map[string]string{"state": "suspended", "sleep_intent": "user-hold"}); err != nil {
+		t.Fatal(err)
+	}
+	w.LegStores = map[string]beads.Store{rowLeg: store}
+	if s := rowWriteEffect(newEffectPass(w, a), it)(context.Background()); s.Outcome != settledRefused || s.Cause != causeRedecided {
+		t.Fatalf("settlement %+v, want refused redecided", s)
+	}
+	got, _ := store.Get(b.ID)
+	if got.Metadata["state"] != "suspended" || got.Metadata[drainIntentReasonKey] != "" {
+		t.Fatalf("row %v, want the operator's suspend and no request", got.Metadata)
 	}
 }
 

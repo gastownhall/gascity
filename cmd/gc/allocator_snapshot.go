@@ -153,6 +153,9 @@ type selectionEntry struct {
 	Endpoint             endpointKey
 	ObservationUncertain bool
 	Identity             *identityView
+	// OpenWork is a Drain entry's first open or in-progress assigned work,
+	// ready or not: legacy's undesired-drain keep (SESS-074).
+	OpenWork *assignedWorkView
 }
 
 // rowBasis is the row incarnation the pass saw.

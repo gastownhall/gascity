@@ -381,6 +381,11 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	if o.registry != nil {
 		reg = o.registry(reg)
 	}
+	if simRegistryGated {
+		t.Fatal("newSim: the effect registry is already gated by another sim in this test; run each sim in its own subtest")
+	}
+	simRegistryGated = true
+	t.Cleanup(func() { simRegistryGated = false })
 	withRegistry(t, s.gated(reg))
 	if o.arms != nil {
 		saved := rowArms
@@ -424,6 +429,11 @@ func (s *sim) seedRows() (city, rig []beads.Bead) {
 }
 
 func (s *sim) rel(d time.Duration) string { return s.clk.Now().Add(d).UTC().Format(time.RFC3339) }
+
+// simRegistryGated is set while a sim's gated registry is installed: a
+// second sim in the same test would gate the first one's gated effects, and
+// its effects would park on a dead sim's channel.
+var simRegistryGated bool
 
 // gated wraps every effect so it parks until a step releases it.
 func (s *sim) gated(reg map[string]effectBuilder) map[string]effectBuilder {

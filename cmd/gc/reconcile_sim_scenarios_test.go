@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -159,25 +160,29 @@ func TestSimR17ReplayedEventsWriteNothing(t *testing.T) {
 func TestSimR34R35ServerGone(t *testing.T) {
 	for _, confirmed := range []bool{false, true} {
 		for _, coldBoot := range []bool{true, false} {
-			s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1"))
-			if !coldBoot {
-				s.inventory()
-			}
-			for name := range s.sp.rts {
-				s.sp.drop(name)
-			}
-			s.sp.serverDown, s.sp.confirmable = true, confirmed
-			for range 3 {
-				s.advance(simPatrol)
-				s.inventory()
-				s.pass()
-			}
-			gone := s.liveness("gc-1") == livenessGone
-			if gone != confirmed || coldBoot && s.p.boot.InventoryComplete != confirmed {
-				t.Errorf("cold boot %t, confirmed dead %t: gc-1 gone %t, boot inventory complete %t", coldBoot, confirmed, gone, s.p.boot.InventoryComplete)
-			}
-			s.audit("v2")
-			s.noViolations(t)
+			// A subtest per sim: each installs its own gated registry and
+			// tears it down before the next one gates it again.
+			t.Run(fmt.Sprintf("confirmed=%t,coldBoot=%t", confirmed, coldBoot), func(t *testing.T) {
+				s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1"))
+				if !coldBoot {
+					s.inventory()
+				}
+				for name := range s.sp.rts {
+					s.sp.drop(name)
+				}
+				s.sp.serverDown, s.sp.confirmable = true, confirmed
+				for range 3 {
+					s.advance(simPatrol)
+					s.inventory()
+					s.pass()
+				}
+				gone := s.liveness("gc-1") == livenessGone
+				if gone != confirmed || coldBoot && s.p.boot.InventoryComplete != confirmed {
+					t.Errorf("gc-1 gone %t, boot inventory complete %t", gone, s.p.boot.InventoryComplete)
+				}
+				s.audit("v2")
+				s.noViolations(t)
+			})
 		}
 	}
 }
@@ -207,18 +212,20 @@ func TestSimR45NeverListedStopPendingRowReadsGone(t *testing.T) {
 // the agent's pane or from an operator.
 func TestSimR47DrainAckLosesToPreWake(t *testing.T) {
 	for _, operator := range []bool{false, true} {
-		s := scripted(t, []string{"gc-2"}, poolRow("gc-2", "worker", 1, "active", "instance_token", "tok-1"))
-		commit, err := checkDrainAckRow(s.legs[0].backing, "gc-2", operator, "tok-1", s.clk.Now())
-		if err != nil {
-			t.Fatalf("operator %t: the ack refused before the race: %v", operator, err)
-		}
-		s.operator("gc-2", "generation", "2", "instance_token", "tok-2", "state", "awake")
-		if err := commit(); err == nil {
-			t.Errorf("operator %t: the ack landed across a PreWake", operator)
-		}
-		if got, _ := s.legs[0].backing.Get("gc-2"); got.Metadata[session.DrainAckIncarnationKey] != "" {
-			t.Errorf("operator %t: the row carries ack %q", operator, got.Metadata[session.DrainAckIncarnationKey])
-		}
-		s.noViolations(t)
+		t.Run(fmt.Sprintf("operator=%t", operator), func(t *testing.T) { // a sim per test (newSim)
+			s := scripted(t, []string{"gc-2"}, poolRow("gc-2", "worker", 1, "active", "instance_token", "tok-1"))
+			commit, err := checkDrainAckRow(s.legs[0].backing, "gc-2", operator, "tok-1", s.clk.Now())
+			if err != nil {
+				t.Fatalf("the ack refused before the race: %v", err)
+			}
+			s.operator("gc-2", "generation", "2", "instance_token", "tok-2", "state", "awake")
+			if err := commit(); err == nil {
+				t.Error("the ack landed across a PreWake")
+			}
+			if got, _ := s.legs[0].backing.Get("gc-2"); got.Metadata[session.DrainAckIncarnationKey] != "" {
+				t.Errorf("the row carries ack %q", got.Metadata[session.DrainAckIncarnationKey])
+			}
+			s.noViolations(t)
+		})
 	}
 }
