@@ -132,6 +132,8 @@ type intent struct {
 	// Finalize marks the stop verb proposed for a row whose runtime reads
 	// gone: it confirms and finalizes, and stops nothing (A4, D3).
 	Finalize bool
+	// Closing is a close's kind, which picks its post-close cascade (A21).
+	Closing closeSpec
 	// Patch is a row write's patch and Event what it records once it lands.
 	// The row-write effect re-decides on the fresh row and writes the
 	// re-decided intent's (R2).
@@ -141,6 +143,23 @@ type intent struct {
 	Deadline time.Time
 	Cause    string
 }
+
+// closeSpec is an A21 close's kind, and the assignees its release keeps
+// (SESS-080's phantom keeps work claimed under the configured identity).
+type closeSpec struct {
+	Kind     closeKind
+	Preserve []string
+}
+
+// closeKind picks a close's post-close cascade, as legacy's close helpers
+// run it.
+type closeKind uint8
+
+const (
+	closeReleasing    closeKind = iota // closeBead: release the row's work
+	closeFailedCreate                  // closeFailedCreateBead: release nothing
+	closePoolSlot                      // closeBead, then prune the worker worktree when safe
+)
 
 func (it intent) named() bool { return it.CreatePlan.Named != nil }
 

@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"runtime/debug"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -67,11 +70,27 @@ type settlement struct {
 	// Work is a create's worktree verdict, which backs off or resets the
 	// work item's record (C6.5(a)).
 	Work *workVerdict
-	// Event is recorded once the settlement is drained: a landed write's.
-	Event *events.Event
-	Err   error
-	At    time.Time
+	// Events are recorded once the settlement is drained, in order: a
+	// landed write's, or one per bead a close's release reopened (SESS-082).
+	Events []events.Event
+	// Classified is a completed zombie classification of Key's runtime
+	// (v5 S5), for the planner's classified set.
+	Classified *classifiedRuntime
+	Err        error
+	At         time.Time
 }
+
+// eventsOf is ev as a settlement's Events: none for nil.
+func eventsOf(ev *events.Event) []events.Event {
+	if ev == nil {
+		return nil
+	}
+	return []events.Event{*ev}
+}
+
+// classifiedRuntime is the runtime a classification read: its own
+// GC_INSTANCE_TOKEN, never the row's (v5 X10).
+type classifiedRuntime struct{ Token string }
 
 // settleOutcome is how an effect ended (CONTRACT v5 S1, P5).
 type settleOutcome uint8
@@ -104,10 +123,10 @@ type bootState struct {
 func (b bootState) open() bool { return b.CachePrimed && b.InventoryComplete && b.RecordingSeen }
 
 // planner runs passes on one goroutine. Only that goroutine touches inflight,
-// backoff, bucket, fairSeed, boot, last, rowTrace, memo and stalled; other
-// goroutines reach the planner through markDirty, the settlement queue, the
-// execution-stalled inbox, the start pause and stop, and read what a pass
-// publishes through out.
+// backoff, bucket, fairSeed, boot, last, rowTrace, classified, memo and
+// stalled; other goroutines reach the planner through markDirty, the
+// settlement queue, the execution-stalled inbox, the start pause and stop,
+// and read what a pass publishes through out.
 type planner struct {
 	clock       plannerClock
 	patrol      func() time.Duration // read after every pass, so a reload takes effect
@@ -127,9 +146,12 @@ type planner struct {
 	boot     bootState
 	last     passRecord
 	rowTrace map[rowKey]string // each row's last traced (reason, outcome)
-	memo     gatherMemo
-	out      passOutputs
-	obs      passObserver
+	// classified is v5 S5's classified set: each row's runtime token last
+	// classified, in memory only (classifiedFor).
+	classified map[rowKey]string
+	memo       gatherMemo
+	out        passOutputs
+	obs        passObserver
 
 	// stalled holds the execution-stalled requests by row ID for arm A16
 	// (C7b1); C8's step posts them to stalledPosted under stalledMu.
@@ -290,9 +312,10 @@ func (p *planner) runPass(now time.Time) (res passResult) {
 
 // drainSettlements applies the settlements posted so far, stamping a zero
 // At with now: first every one to the in-flight map, so no later step's
-// panic can leave a settled effect counted in flight; then to the backoff
-// table and the pass record's counters; then their events to the recorder,
-// each recovered alone.
+// panic can leave a settled effect counted in flight; then their
+// classifications to the classified set; then to the backoff table and the
+// pass record's counters; then their events to the recorder, each recovered
+// alone.
 func (p *planner) drainSettlements(now time.Time) {
 	items := p.settlements.drain()
 	for i := range items {
@@ -302,14 +325,54 @@ func (p *planner) drainSettlements(now time.Time) {
 		p.inflight.settle(items[i])
 	}
 	for _, s := range items {
+		if s.Classified != nil {
+			if p.classified == nil {
+				p.classified = make(map[rowKey]string)
+			}
+			p.classified[s.Key] = s.Classified.Token
+		}
+	}
+	for _, s := range items {
 		p.backoffSettled(s)
 		p.observeSettlement(s)
 	}
 	for _, s := range items {
-		if s.Event != nil && p.rec != nil {
-			p.record(*s.Event)
+		if p.rec == nil {
+			continue
+		}
+		for _, ev := range s.Events {
+			p.record(ev)
 		}
 	}
+}
+
+// classifiedFor prunes the classified set (v5 S5) and returns the pass's
+// copy. A row's entry goes when a complete census no longer holds the row
+// (it closed; a failed leg proves nothing), or when the inventory reads
+// another runtime token under its name; a runtime whose identity is unread
+// proves no change. A restart
+// empties the set, so a classification fires once more, as legacy's
+// in-memory dedup does (markZombieCrash).
+func (p *planner) classifiedFor(c *sessionCensus, snap *ObservationSnapshot, now time.Time, maxAge time.Duration) map[rowKey]string {
+	complete := !slices.ContainsFunc(c.Legs, func(l censusLeg) bool { return l.Err != nil })
+	for k, token := range p.classified {
+		row, open := c.Rows[k]
+		switch {
+		case !open && complete:
+			delete(p.classified, k)
+			continue
+		case !open:
+			continue
+		}
+		if snap == nil {
+			continue
+		}
+		obs, ok := snap.Observation(strings.TrimSpace(row.Info.SessionName), now, maxAge)
+		if ok && obs.Identity.Known && strings.TrimSpace(obs.Identity.Token) != strings.TrimSpace(token) {
+			delete(p.classified, k)
+		}
+	}
+	return maps.Clone(p.classified)
 }
 
 // record records ev, counting the stop-outstanding alerts (v5 D6) for the

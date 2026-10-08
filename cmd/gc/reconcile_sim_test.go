@@ -506,8 +506,8 @@ func (s *sim) release(i int) {
 	switch {
 	case !e.settled:
 		s.awaitPost(func(st settlement) bool { return st.Key == e.it.Key && st.Kind == e.it.Kind })
-	case res.Event != nil:
-		s.awaitPost(func(st settlement) bool { return st.Key == (rowKey{}) && st.Event != nil })
+	case len(res.Events) > 0:
+		s.awaitPost(func(st settlement) bool { return st.Key == (rowKey{}) && len(st.Events) > 0 })
 	}
 }
 

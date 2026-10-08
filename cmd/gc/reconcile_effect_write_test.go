@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -64,7 +65,7 @@ func TestRowWriteLandsTheRedecidedPatchAndEvent(t *testing.T) {
 				return fresh, next
 			}
 			s := rowWrite{pass: p, it: it, decide: decide}.run(context.Background())
-			if s.Outcome != settledLanded || s.Event == nil || s.Event.Type != ev.Type {
+			if s.Outcome != settledLanded || len(s.Events) != 1 || s.Events[0].Type != ev.Type {
 				t.Fatalf("settlement %+v, want landed with the re-decided intent's event", s)
 			}
 			if got := heldUntil(t, store, it.Key.ID); got != "" {
@@ -204,18 +205,29 @@ func TestRowWriteUsesItsLegsWriter(t *testing.T) {
 }
 
 // Kills raw handles reaching an effect (v5 R3): the pass's World copy holds
-// no leg store, assigned-work store or provider, and the pass's own World
-// keeps them.
+// no leg, city, rig or assigned-work store or provider, the city and rig
+// stores reach the effect only read-only, and the pass's own World keeps
+// them all.
 func TestEffectPassStripsRawHandles(t *testing.T) {
 	store := beads.NewMemStore()
 	w := &World{
-		Env:       &reconcileEnv{Gen: 1, SP: &sleepCountingProvider{}},
-		Demand:    demandView{AssignedStores: []beads.Store{store}},
-		LegStores: map[string]beads.Store{rowLeg: store},
+		Env:           &reconcileEnv{Gen: 1, SP: &sleepCountingProvider{}},
+		Demand:        demandView{AssignedStores: []beads.Store{store}},
+		LegStores:     map[string]beads.Store{rowLeg: store},
+		SessionsStore: store, RigStores: map[string]beads.Store{"rig": store},
 	}
 	p := newEffectPass(w, &allocDecision{})
-	if p.World.LegStores != nil || p.World.Demand.AssignedStores != nil || p.World.Env.SP != nil {
+	if p.World.LegStores != nil || p.World.Demand.AssignedStores != nil || p.World.Env.SP != nil ||
+		p.World.SessionsStore != nil || p.World.RigStores != nil {
 		t.Fatalf("the effects' World holds raw handles: %+v", p.World)
+	}
+	for name, read := range map[string]beads.Store{"city": p.Reads.City, "rig": p.Reads.Rigs["rig"]} {
+		if _, err := read.Create(beads.Bead{Title: "x"}); !errors.Is(err, errBlindWriteRefused) {
+			t.Fatalf("the %s read store wrote: %v", name, err)
+		}
+	}
+	if p.Runtime != w.Env.SP || p.Releasers.Legs[rowLeg] != store || len(p.Releasers.Assigned) != 1 {
+		t.Fatalf("want the composite provider and the release-capable stores: %+v", p)
 	}
 	if _, ok := p.Writers[rowLeg]; !ok || w.Env.SP == nil || w.LegStores == nil || w.Demand.AssignedStores == nil {
 		t.Fatal("want a writer for the leg and the pass's World untouched")

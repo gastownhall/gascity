@@ -77,7 +77,7 @@ func (e rowWrite) runLocked(ctx context.Context) settlement {
 	case err != nil:
 		return settlement{Outcome: settledFailed, Cause: causeWrite, Err: err}
 	case wrote: // a landing keeps its event, even past the deadline
-		return settlement{Outcome: settledLanded, Event: fresh.Event}
+		return settlement{Outcome: settledLanded, Events: eventsOf(fresh.Event)}
 	case ctx.Err() != nil:
 		return settlement{Outcome: settledFailed, Cause: causeDeadline, Err: ctx.Err()}
 	case decided:

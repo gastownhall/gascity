@@ -162,7 +162,7 @@ func stopFenced(ctx context.Context, sp runtime.Provider, req fenceRequest, now 
 	switch {
 	case v.Proceed:
 	case v.Reason == fenceNothingToStop:
-		return v, confirmStopped(ctx, sp, name)
+		return v, confirmStopped(ctx, sp, name, time.Now())
 	default:
 		return v, false
 	}
@@ -170,7 +170,7 @@ func stopFenced(ctx context.Context, sp runtime.Provider, req fenceRequest, now 
 		v.Proceed, v.Reason = false, fenceStopFailed
 		return v, false
 	}
-	if !confirmStopped(ctx, sp, name) {
+	if !confirmStopped(ctx, sp, name, time.Now()) {
 		v.Reason = fenceStopUnconfirmed
 		return v, false
 	}
@@ -198,17 +198,37 @@ func unroute(sp runtime.Provider, name string) {
 	}
 }
 
-// confirmStopped reports a confirmed stop (C8.8): a three-outcome absent read
-// of name through the composite sp. The composite falls through to its other
-// backend only on a confirmed absence, so a stale route (mc-zndi7.24) cannot
-// confirm on the wrong backend. A provider any backend of which answers only
-// bool liveness never confirms.
-func confirmStopped(ctx context.Context, sp runtime.Provider, name string) bool {
+// confirmStopped reports a confirmed stop (C8.8, v5 F3): a complete,
+// error-free fresh read of name through the composite sp, taken after since
+// (the last stop issued), that reports no live pane: not present, or present
+// as a corpse. The composite falls through to its other backend only on a
+// confirmed absence, so a stale route (mc-zndi7.24) cannot confirm on the
+// wrong backend. A provider any backend of which answers only bool liveness
+// never confirms.
+func confirmStopped(ctx context.Context, sp runtime.Provider, name string, since time.Time) bool {
+	live, cause := freshLiveness(ctx, sp, name, since)
+	return cause == "" && !live.Running
+}
+
+// causeLivenessUnsupported refuses a fresh read from a backend that cannot
+// give a three-outcome answer; causeLivenessUnknown one with no answer.
+const causeLivenessUnsupported = "liveness-unsupported"
+
+// freshLiveness is v5 O1's fresh read of name through sp: LL2's
+// ObserveLivenessBoundedSince, so a tmux read reflects a refresh that began
+// at or after since, never the cached snapshot (whose server check can read
+// a live server as dead). cause is empty only for a complete, error-free
+// answer from a provider that observes liveness with errors on every
+// backend.
+func freshLiveness(ctx context.Context, sp runtime.Provider, name string, since time.Time) (runtime.Liveness, string) {
 	if !threeOutcome(sp) {
-		return false
+		return runtime.Liveness{}, causeLivenessUnsupported
 	}
-	live, status, err := runtime.ObserveLivenessBounded(ctx, sp, name, nil, fenceProbeTimeout)
-	return status == runtime.ObservationComplete && err == nil && !live.Running
+	live, status, err := runtime.ObserveLivenessBoundedSince(ctx, sp, name, nil, since, fenceProbeTimeout)
+	if status != runtime.ObservationComplete || err != nil {
+		return runtime.Liveness{}, causeLivenessUnknown
+	}
+	return live, ""
 }
 
 // threeOutcome reports whether sp, and every backend under it, observes

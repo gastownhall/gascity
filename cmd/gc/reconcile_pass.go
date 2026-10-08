@@ -198,6 +198,7 @@ func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
 	}
 	pass := newEffectPass(w, a)
 	pass.creates = p.creates
+	pass.Stderr = p.stderr
 	for _, it := range admitted {
 		e := inflightEntry{Kind: it.Kind, Key: it.Key, Endpoint: it.Endpoint}
 		if it.Kind == intentCreate {
