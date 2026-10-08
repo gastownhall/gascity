@@ -163,6 +163,14 @@ func TestDecideSessionExitChurnBand(t *testing.T) {
 			}, ExitNone,
 		},
 		{
+			"startup-crash is not a deliberate sleep reason and still records churn",
+			func(f ExitFacts) ExitFacts {
+				f = withWokeAge(f, 90*time.Second)
+				f.SleepReason = "startup-crash"
+				return f
+			}, ExitChurn,
+		},
+		{
 			"subprocess provider suppresses churn",
 			func(f ExitFacts) ExitFacts {
 				f = withWokeAge(f, 90*time.Second)
@@ -209,7 +217,7 @@ func TestIsDeliberateSleepReason(t *testing.T) {
 			t.Errorf("IsDeliberateSleepReason(%q) = false, want true", reason)
 		}
 	}
-	for _, reason := range []string{"", "crash", "context-churn", "quarantine", "max-session-age"} {
+	for _, reason := range []string{"", "crash", "context-churn", "quarantine", "max-session-age", "startup-crash"} {
 		if IsDeliberateSleepReason(reason) {
 			t.Errorf("IsDeliberateSleepReason(%q) = true, want false", reason)
 		}

@@ -264,12 +264,12 @@ func beginSessionDrainInfo(
 const executionStalledDrainReason = "execution-stalled"
 
 func drainReasonCancelable(reason string) bool {
-	return reason != "config-drift" && reason != "orphaned" && reason != "suspended" &&
+	return reason != "config-drift" && reason != "orphaned" && reason != string(sessions.SleepReasonSuspended) &&
 		reason != executionStalledDrainReason && reason != idleRespawnDrainReason
 }
 
 func pendingDrainReasonCancelable(reason string) bool {
-	return reason != "orphaned" && reason != "suspended" && reason != executionStalledDrainReason
+	return reason != "orphaned" && reason != string(sessions.SleepReasonSuspended) && reason != executionStalledDrainReason
 }
 
 // liveClaimDrainReasonCancelable is the live-claim cancel lens: the in-flight

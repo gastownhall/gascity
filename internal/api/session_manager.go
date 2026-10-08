@@ -10,17 +10,17 @@ import (
 
 func (s *Server) sessionManager(store beads.Store) *session.Manager {
 	cfg := s.state.Config()
-	if cfg == nil {
-		return session.NewManagerWithOptions(store, s.state.SessionProvider(), session.WithCityPath(s.state.CityPath()))
-	}
-	return session.NewManagerWithOptions(
-		store,
-		s.state.SessionProvider(),
+	opts := []session.ManagerOption{
 		session.WithCityPath(s.state.CityPath()),
-		session.WithTransportPolicyResolver(func(template, provider string) (string, bool) {
-			return configuredSessionTransportResolution(cfg, template, provider)
-		}),
-	)
+		session.WithEventRecorder(s.state.EventProvider()),
+	}
+	if cfg == nil {
+		return session.NewManagerWithOptions(store, s.state.SessionProvider(), opts...)
+	}
+	opts = append(opts, session.WithTransportPolicyResolver(func(template, provider string) (string, bool) {
+		return configuredSessionTransportResolution(cfg, template, provider)
+	}))
+	return session.NewManagerWithOptions(store, s.state.SessionProvider(), opts...)
 }
 
 func configuredSessionTransport(cfg *config.City, template, provider string) string {

@@ -74,6 +74,9 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	if cfg.StaleKeyDetectionWaiter != nil {
 		opts = append(opts, sessionpkg.WithStaleKeyDetectionWaiter(cfg.StaleKeyDetectionWaiter))
 	}
+	if cfg.Recorder != nil {
+		opts = append(opts, sessionpkg.WithEventRecorder(cfg.Recorder))
+	}
 	manager := sessionpkg.NewManagerWithOptions(cfg.Store, cfg.Provider, opts...)
 	return newFactory(manager, cfg)
 }

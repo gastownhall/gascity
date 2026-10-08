@@ -2448,27 +2448,33 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 					reason := "orphaned"
 					if configuredNames[name] {
-						reason = "suspended"
+						reason = string(sessionpkg.SleepReasonSuspended)
 					}
-					hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForConfigInfo(cityPath, cfg, store, rigStores, infoByID[id])
-					if assignedErr != nil {
-						fmt.Fprintf(stderr, "session reconciler: checking assigned work before %s drain for %s: %v\n", reason, name, assignedErr) //nolint:errcheck
-						continue
-					}
-					if hasAssignedWork {
-						if trace != nil {
-							template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
-							if template == "" {
-								template = infoPostHeal.Template
-							}
-							trace.RecordDecision(TraceSiteReconcilerOrphaned, TraceReasonCode(reason), TraceOutcomeKeptOpen, template, name, traceRecordPayload{
-								"store_query_partial": storeQueryPartial,
-								"provider_alive":      providerAlive,
-								"live_assigned_work":  true,
-							})
+					// The assigned-work skip is for orphaned sessions: don't kill an
+					// agent that still has work just because it fell out of config.
+					// Suspend is an explicit operator stop (ga-wki). Queued work stays
+					// assigned and waits for resume; the session must drain.
+					if reason != string(sessionpkg.SleepReasonSuspended) {
+						hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForConfigInfo(cityPath, cfg, store, rigStores, infoByID[id])
+						if assignedErr != nil {
+							fmt.Fprintf(stderr, "session reconciler: checking assigned work before %s drain for %s: %v\n", reason, name, assignedErr) //nolint:errcheck
+							continue
 						}
-						logDrainSkip(dt, stdout, id, fmt.Sprintf("Skipping drain for '%s': live assigned work found", name), clk.Now())
-						continue
+						if hasAssignedWork {
+							if trace != nil {
+								template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
+								if template == "" {
+									template = infoPostHeal.Template
+								}
+								trace.RecordDecision(TraceSiteReconcilerOrphaned, TraceReasonCode(reason), TraceOutcomeKeptOpen, template, name, traceRecordPayload{
+									"store_query_partial": storeQueryPartial,
+									"provider_alive":      providerAlive,
+									"live_assigned_work":  true,
+								})
+							}
+							logDrainSkip(dt, stdout, id, fmt.Sprintf("Skipping drain for '%s': live assigned work found", name), clk.Now())
+							continue
+						}
 					}
 					// Live-claim veto (sessionOwnsLiveClaim): a pool worker that
 					// claimed its step out of process is invisible to the cached
@@ -2497,15 +2503,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 					// #3630: a LIVE named session reaches this drain only because
 					// its configured spec is absent this tick (preserve did not fire
-					// above) and it has no live assigned work. A namedSessionSpecs
-					// enumeration collapse during boot can drop a spec for a single
-					// tick and restore it on the next; draining the live runtime
-					// respawns it fresh and loses in-session context. Suspend-class
-					// drains are revertible, so require namedSuspendConfirmTicks
-					// consecutive confirming ticks before draining. The counter is
-					// cleared above once the spec reappears. Scoped to live sessions:
-					// a dead bead with no spec still releases its alias immediately
-					// (ga-ue1r).
+					// above). Orphan drains also require no live assigned work;
+					// suspend drains proceed even with a queue (ga-wki). A
+					// namedSessionSpecs enumeration collapse during boot can drop a
+					// spec for a single tick and restore it on the next; draining the
+					// live runtime respawns it fresh and loses in-session context.
+					// Suspend-class drains are revertible, so require
+					// namedSuspendConfirmTicks consecutive confirming ticks before
+					// draining. The counter is cleared above once the spec reappears.
+					// Scoped to live sessions: a dead bead with no spec still
+					// releases its alias immediately (ga-ue1r).
 					if isNamedSessionInfo(infoPostHeal) {
 						if n := dt.bumpSuspendDeferral(id); n < namedSuspendConfirmTicks {
 							if trace != nil {

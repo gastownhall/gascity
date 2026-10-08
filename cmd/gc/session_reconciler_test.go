@@ -7640,6 +7640,62 @@ func TestReconcileSessionBeads_SuspendedSessionDrained(t *testing.T) {
 	}
 }
 
+// TestReconcileSessionBeads_SuspendedDrainIgnoresAssignedWork is the
+// regression for ga-wki: gc rig suspend omits the agent from desired state,
+// but the orphan/suspend drain guard treated live assigned work the same for
+// both reasons and skipped the drain. A refinery with a non-empty merge queue
+// therefore kept running (and burning tokens) until idle_timeout.
+// Suspend is an explicit stop; queued work must stay open and assigned for
+// resume, and the drain itself must stay graceful (runtime still alive until
+// ack/timeout).
+func TestReconcileSessionBeads_SuspendedDrainIgnoresAssignedWork(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents:        []config.Agent{{Name: "refinery"}},
+		NamedSessions: []config.NamedSession{{Template: "refinery"}},
+	}
+	_ = env.sp.Start(context.Background(), "refinery", runtime.Config{})
+	session := env.createSessionBead("refinery", "refinery")
+	env.markSessionActive(&session)
+
+	work, err := env.store.Create(beads.Bead{
+		Title:    "queued merge",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "refinery",
+	})
+	if err != nil {
+		t.Fatalf("Create assigned work bead: %v", err)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatalf("expected suspend drain despite assigned work; stdout=%s stderr=%s", env.stdout.String(), env.stderr.String())
+	}
+	if ds.reason != string(sessionpkg.SleepReasonSuspended) {
+		t.Errorf("drain reason = %q, want %q", ds.reason, sessionpkg.SleepReasonSuspended)
+	}
+	if strings.Contains(env.stdout.String(), "Skipping drain for 'refinery': live assigned work found") {
+		t.Fatalf("suspend must not skip drain for assigned work, got stdout:\n%s", env.stdout.String())
+	}
+	if !env.sp.IsRunning("refinery") {
+		t.Fatal("suspend drain must be graceful: runtime still running until ack/timeout")
+	}
+
+	got, err := env.store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "open" {
+		t.Errorf("work status = %q, want open", got.Status)
+	}
+	if got.Assignee != "refinery" {
+		t.Errorf("work assignee = %q, want %q (queued work waits for resume)", got.Assignee, "refinery")
+	}
+}
+
 // TestReconcileSessionBeads_SuspendedNamedSessionInsideDesiredStateDrainsAsSuspended
 // probes ga-pmafyc step 1: discoverSessionBeadsWithRoots backfills a
 // configured named session into desiredState even when the primary
