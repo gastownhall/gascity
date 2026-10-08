@@ -474,23 +474,58 @@ func TestSQLiteStoreWriterDSNBeginsImmediate(t *testing.T) {
 // database, so a pinned overflowed id must not drag its sequence to
 // math.MaxInt64 (and the next mint into negative ids) either: as in
 // SQLiteStore.normalizeCreate, only a positive "<prefix>-<n>" consumes a value.
+// The same pins run through a real SQLiteStore, and MemStore must mint the id
+// it mints, so the parity is pinned against the store it names rather than a
+// hard-coded answer.
 func TestMemStorePinnedIDSequenceMatchesSQLite(t *testing.T) {
+	pins := append(wrappedGraphIDs(3), sqliteGraphPrefix+"-41")
+	mintedAfterPins := func(store Store) (string, error) {
+		for _, id := range pins {
+			if _, err := store.Create(Bead{ID: id, Title: "pinned"}); err != nil {
+				return "", fmt.Errorf("create pinned %s: %w", id, err)
+			}
+		}
+		minted, err := store.Create(Bead{Title: "minted"})
+		if err != nil {
+			return "", fmt.Errorf("create minted: %w", err)
+		}
+		return minted.ID, nil
+	}
+
+	want, err := mintedAfterPins(newSQLiteGraphApplyStore(t, t.TempDir(), WithSQLiteStoreIDPrefix(sqliteGraphPrefix)))
+	if err != nil {
+		t.Fatalf("SQLiteStore: %v", err)
+	}
 	m := NewMemStore()
 	m.IDPrefix = sqliteGraphPrefix
 	m.HonorExplicitIDs = true
-	for _, id := range wrappedGraphIDs(3) {
-		if _, err := m.Create(Bead{ID: id, Title: "pinned"}); err != nil {
-			t.Fatalf("Create pinned %s: %v", id, err)
-		}
+	got, err := mintedAfterPins(m)
+	if err != nil {
+		t.Fatalf("MemStore: %v", err)
 	}
-	if _, err := m.Create(Bead{ID: "gcg-41", Title: "pinned"}); err != nil {
-		t.Fatalf("Create pinned gcg-41: %v", err)
+	if got != want {
+		t.Fatalf("after pinning %v, MemStore minted %q but SQLiteStore minted %q", pins, got, want)
+	}
+}
+
+// TestMemStorePinnedIDPastMaxIntLeavesSequence: MemStore's sequence is an int,
+// so a pinned suffix past math.MaxInt is skipped rather than narrowed (no mint
+// can reach it, while int(n) would wrap the sequence negative). The suffix
+// only parses where int is 32-bit, so GOARCH=386 exercises the narrowing; on a
+// 64-bit int it overflows int64 and is never parsed.
+func TestMemStorePinnedIDPastMaxIntLeavesSequence(t *testing.T) {
+	m := NewMemStore()
+	m.IDPrefix = sqliteGraphPrefix
+	m.HonorExplicitIDs = true
+	pinned := fmt.Sprintf("%s-%d", sqliteGraphPrefix, uint64(math.MaxInt)+1)
+	if _, err := m.Create(Bead{ID: pinned, Title: "pinned"}); err != nil {
+		t.Fatalf("Create pinned %s: %v", pinned, err)
 	}
 	minted, err := m.Create(Bead{Title: "minted"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if minted.ID != "gcg-42" {
-		t.Fatalf("MemStore minted %q, want gcg-42", minted.ID)
+	if want := sqliteGraphPrefix + "-1"; minted.ID != want {
+		t.Fatalf("MemStore minted %q after pinning %s, want %s", minted.ID, pinned, want)
 	}
 }
