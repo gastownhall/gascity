@@ -26,6 +26,7 @@ go_test(
     srcs = [
         "importsvc_test.go",
         "registry_release_test.go",
+        "remote_default_version_test.go",
         "source_test.go",
         "source_userinfo_test.go",
         "testenv_import_test.go",

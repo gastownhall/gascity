@@ -234,6 +234,26 @@ func (d Deps) resolveImportVersion(cityRoot, source, versionConstraint string, g
 	return version, nil
 }
 
+// ResolveRemoteDefaultVersion returns the version constraint AddImportWith
+// writes for a remote source added without --version: the newest registry
+// release's default constraint, else the newest semver tag's, else a "sha:"
+// pin of the remote HEAD. It applies the same source checks an add does (the
+// credential-in-URL refusal, the injected SourcePolicy, and the embedded-ref
+// refusal) so a caller that persists the result (gc rig add --include) stays in
+// step with gc import add. Errors wrap ErrInvalidSource or ErrVersionResolveFailed.
+func (d Deps) ResolveRemoteDefaultVersion(cityRoot, source string) (string, error) {
+	if !isRemoteImportSource(source) {
+		return "", fmt.Errorf("%w: %q is not a remote import source", ErrInvalidSource, source)
+	}
+	if err := rejectSourceUserinfo(source); err != nil {
+		return "", fmt.Errorf("%w: %w", ErrInvalidSource, err)
+	}
+	if err := d.fenceSource(source); err != nil {
+		return "", err
+	}
+	return d.resolveImportVersion(cityRoot, source, "", true, false)
+}
+
 // AddImport resolves source once and writes it as a durable [imports.<name>]
 // entry plus a matching packs.lock entry for git-backed sources. It performs
 // the git fetch (version/HEAD resolution and lock sync) synchronously: callers
