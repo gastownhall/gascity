@@ -111,7 +111,8 @@ func TestReadyStatusLegsAreExhaustiveOnBdStore(t *testing.T) {
 	}
 	// Each bd status folded into Gas City's "open" must be served by the open
 	// leg, the same answer the native store gives (it excludes only closed and
-	// in_progress), and must not leak into the in_progress or closed legs.
+	// in_progress), and every row must be listed by its own leg only: the open
+	// leg reads all non-closed rows, so it must keep in_progress ones out.
 	for _, row := range rows {
 		want := "open"
 		switch row.status {
@@ -120,6 +121,11 @@ func TestReadyStatusLegsAreExhaustiveOnBdStore(t *testing.T) {
 		}
 		if !slices.Contains(seen[row.id], want) {
 			t.Errorf("bead %s (bd status %q) listed by legs %v, want it in the %q leg", row.id, row.status, seen[row.id], want)
+		}
+		for _, leg := range seen[row.id] {
+			if leg != want {
+				t.Errorf("bead %s (bd status %q) leaked into the %q leg; want only %q", row.id, row.status, leg, want)
+			}
 		}
 	}
 }

@@ -1455,16 +1455,6 @@ func pendingResumePreservingNamedRestartInfo(i sessionpkg.Info, clk clock.Clock,
 	return true
 }
 
-// wakeDemandOverridesSleepSuppression reports whether a wake the awake set
-// wants survives the session's config sleep suppression (the idle latch:
-// asleep with sleep_reason=idle under an unchanged sleep-policy fingerprint).
-//
-// explicitWake is the session's durable, still-pending wake_request=explicit
-// (`gc session wake`, the wake API, a peer's wake; see explicitWakePendingInfo):
-// an operator or agent asked for THIS session, so the idle latch must not
-// silently swallow the request. It is read off the session rather than
-// decision.Reason because the awake set may re-label an explicitly woken named
-// holder (e.g. to "named-demand").
 // explicitWakePendingInfo reports whether the session carries a durable
 // wake_request=explicit that has NOT yet been served, and so may override the
 // idle latch. PreWakePatch clears the request only when it prepares a start, so
@@ -1495,6 +1485,16 @@ func explicitWakePendingInfo(info sessionpkg.Info) bool {
 	return true
 }
 
+// wakeDemandOverridesSleepSuppression reports whether a wake the awake set
+// wants survives the session's config sleep suppression (the idle latch:
+// asleep with sleep_reason=idle under an unchanged sleep-policy fingerprint).
+//
+// explicitWake is the session's durable, still-pending wake_request=explicit
+// (`gc session wake`, the wake API, a peer's wake; see explicitWakePendingInfo):
+// an operator or agent asked for THIS session, so the idle latch must not
+// silently swallow the request. It is read off the session rather than
+// decision.Reason because the awake set may re-label an explicitly woken named
+// holder (e.g. to "named-demand").
 func wakeDemandOverridesSleepSuppression(
 	decision AwakeDecision,
 	eval wakeEvaluation,

@@ -1839,9 +1839,10 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	}
 	// SURGICAL route: the session-class consumers (session-ID resolution, session
 	// worker handle, session bead read) go through the session coordination-class
-	// store for relocation-safety; the post-close work-release below
-	// (unclaimWorkAssignedToRetiredSessionBead) is WORK-class and stays on the
-	// generic store.
+	// store for relocation-safety. The post-close work-release below
+	// (unclaimWorkAssignedToRetiredSessionBeadVia) releases WORK-class beads
+	// through the generic store and clears the session bead's claim back-channel
+	// in sessStore.
 	sessStore := cliSessionStore(store, cfg, cityPath)
 	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, args[0])
 	if err != nil {

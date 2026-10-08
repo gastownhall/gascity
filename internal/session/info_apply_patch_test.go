@@ -181,7 +181,7 @@ func oraclePatches() []MetadataPatch {
 		{"pending_create_claim": " true "}, // untrimmed mirror vs trimmed bool
 		{"manual_session": "1"},
 		{"session_drainable": "true"},
-		{"wake_requested_at": "2026-01-01T00:00:00Z"}, // unprojected key: must not change Info
+		{"wake_requested_at": "2026-01-01T00:00:00Z"}, // projected timestamp: folds through its codec row
 		{"env.GC_FOO": "bar"},                         // unprojected key
 		{"state": "idle", "session_name": "", "provider": "codex", "wake_attempts": "9", "held_until": ""}, // multi-key mix
 	}

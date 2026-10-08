@@ -502,7 +502,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// holder keep it via `alias` (GC_ALIAS == qualified bare name); only
 	// suffixed workers drop it. A single-slot pool session the supervisor
 	// collapsed onto the canonical identity serves that identity, so it adopts
-	// its assignments too (hookClaimCollapsedIdentity).
+	// its assignments too (hookClaimCollapsedIdentity) — on the --claim door
+	// only: fencedSession is loaded inside opts.Claim, so on the discovery door
+	// collapsedIdentity is "" and neither the query env nor these candidates
+	// carry the collapsed identity.
 	identityCandidates := hookClaimIdentityCandidates(
 		assignee,
 		sessionID,
