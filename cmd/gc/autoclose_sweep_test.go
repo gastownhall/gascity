@@ -738,3 +738,83 @@ func TestInferredCloseDefersWhileTheCityIsQuiescent(t *testing.T) {
 		t.Fatal("the inferred close of gc-1 is not owed to the sweep; it would never be confirmed after resume")
 	}
 }
+
+// quiescentReadStore counts the reads it serves while the city is quiescent.
+type quiescentReadStore struct {
+	beads.Store
+	quiescent *atomic.Bool
+	reads     atomic.Int32
+}
+
+func (s *quiescentReadStore) Get(id string) (beads.Bead, error) {
+	if s.quiescent.Load() {
+		s.reads.Add(1)
+	}
+	return s.Store.Get(id)
+}
+
+// A graph step's close that lands on a quiescent city reads nothing, not even
+// the run root its completion fact names, whether the city went quiescent
+// before the event or before the dispatched run. After resume the sweep
+// confirms it, records the fact once, and closes the convoy, though an earlier
+// close of the same row left it marked handled.
+func TestQuiescentCloseReadsNothingAndConvergesAfterResume(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		actor string
+		// quiesceOnDispatch makes the city quiescent between the event and
+		// its dispatched run instead of before the event.
+		quiesceOnDispatch bool
+	}{
+		{name: "local close", actor: cacheLocalActor},
+		{name: "foreign close run after the city went quiescent", actor: "bd-close", quiesceOnDispatch: true},
+		{name: "scan close", actor: cacheReconcileActor},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			quiescent := new(atomic.Bool)
+			quiescent.Store(!tc.quiesceOnDispatch)
+			prev := beadCloseAutocloseDispatch
+			beadCloseAutocloseDispatch = func(fn func()) {
+				quiescent.Store(true)
+				fn()
+			}
+			t.Cleanup(func() { beadCloseAutocloseDispatch = prev })
+
+			mem := beads.NewMemStore()
+			mem.HonorExplicitIDs = true
+			step, convoy, payload := graphStepFixture(t, mem)
+			if err := mem.Close(step.ID); err != nil {
+				t.Fatal(err)
+			}
+			store := &quiescentReadStore{Store: mem, quiescent: quiescent}
+			rec := events.NewFake()
+			cs := &controllerState{cityBeadStore: store, eventProv: rec, beadsQuiescent: quiescent}
+			// An earlier close of the row ran to the end, and no census saw
+			// the row reopen.
+			cs.autocloseSweepOf().noteRan(step.ID)
+
+			cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: tc.actor, Subject: step.ID, Payload: payload})
+
+			if got := store.reads.Load(); got != 0 {
+				t.Fatalf("%d store read(s) while the city was quiescent, want none", got)
+			}
+			if got := statusOf(t, mem, convoy.ID); got != "open" {
+				t.Fatalf("convoy %s while the city was quiescent, want open", got)
+			}
+			if cs.autocloseSweepOf().hasRan(step.ID) || !cs.autocloseSweepOf().isPending(step.ID) {
+				t.Fatal("the close is not owed to the sweep: the stale handled mark would make it skip the row")
+			}
+
+			quiescent.Store(false)
+			if got := cs.runAutocloseSweepPass(time.Now().Add(time.Second)); got.Ran != 1 {
+				t.Fatalf("after resume the sweep = %+v, want one confirmed close", got)
+			}
+			if got := statusOf(t, mem, convoy.ID); got != "closed" {
+				t.Fatalf("convoy %s after resume, want closed", got)
+			}
+			if got := completedFor(rec, step.ID); got != 1 {
+				t.Fatalf("completion facts = %d after resume, want 1", got)
+			}
+		})
+	}
+}

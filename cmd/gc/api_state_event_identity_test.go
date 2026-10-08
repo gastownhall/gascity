@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -261,5 +262,13 @@ func TestBeadCloseAutocloseDefersWhileTheCityIsQuiescent(t *testing.T) {
 	}
 	if !cs.autocloseSweepOf().isPending(child.ID) {
 		t.Fatalf("the close of %s is not owed to the sweep; it would never be confirmed after resume", child.ID)
+	}
+
+	quiescent.Store(false)
+	if res := cs.runAutocloseSweepPass(time.Now().Add(time.Second)); res.Ran != 1 {
+		t.Fatalf("after resume the sweep = %+v, want one confirmed close", res)
+	}
+	if got, err := backing.Get(convoy.ID); err != nil || got.Status != "closed" {
+		t.Fatalf("convoy after resume = (%+v, %v), want closed", got, err)
 	}
 }
