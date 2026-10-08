@@ -179,19 +179,9 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	if err := p.RemoveMeta(name, metaStartupUnconfirmed); err != nil {
 		fmt.Fprintf(os.Stderr, "herdr: clearing prior-life startup marker for %q failed: %v\n", name, err) //nolint:errcheck // best-effort diagnostic
 	}
-	startupText := startupDeliveryText(cfg)
-	if spec.Kind == claudeKind {
-		if err := p.SetMeta(name, metaAgentKind, claudeKind); err != nil {
-			return fmt.Errorf("herdr: record agent kind for %q: %w", name, err)
-		}
-		if isMultiline(startupText) {
-			path, err := p.writeMessageFile(name, claudeStartupPromptKey, startupText)
-			if err != nil {
-				return fmt.Errorf("herdr: write startup prompt for %q: %w", name, err)
-			}
-			spec.Args = append(spec.Args, "--append-system-prompt-file", path)
-			startupText = claudeStartupKickoff(startupText)
-		}
+	startupText, err := p.prepareStartupTurn(name, &spec, startupDeliveryText(cfg))
+	if err != nil {
+		return err
 	}
 	// Launch. herdr ≥0.7.5's `agent start` launches a supported agent kind's
 	// canonical executable into the shell pane and blocks until the TUI is

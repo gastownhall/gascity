@@ -7,6 +7,7 @@ import (
 
 // herdr 0.7.3 keys the name as "agent"; 0.9.1 keys it as "name" and reuses
 // "agent" for the kind, so two Claude panes must still decode to distinct names.
+// A 0.9.1 entry without a name keeps the "agent" value.
 func TestAgentInfoDecodesNameAcrossHerdrVersions(t *testing.T) {
 	for _, tc := range []struct {
 		version, body string
@@ -14,6 +15,7 @@ func TestAgentInfoDecodesNameAcrossHerdrVersions(t *testing.T) {
 	}{
 		{"0.7.3", `[{"agent":"mayor","pane_id":"w1:p1"},{"agent":"worker-1","pane_id":"w1:p2"}]`, []string{"mayor", "worker-1"}},
 		{"0.9.1", `[{"agent":"claude","name":"mayor","pane_id":"w1:p1"},{"agent":"claude","name":"worker-1","pane_id":"w1:p2"}]`, []string{"mayor", "worker-1"}},
+		{"0.9.1 nameless", `[{"agent":"claude","pane_id":"w1:p3"}]`, []string{"claude"}},
 	} {
 		var got []agentInfo
 		if err := json.Unmarshal([]byte(tc.body), &got); err != nil {
