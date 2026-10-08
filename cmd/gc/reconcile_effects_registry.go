@@ -59,5 +59,6 @@ type effectBuilder func(p *effectPass, it intent) func(context.Context) settleme
 
 var effectRegistry = map[string]effectBuilder{
 	intentRowHeal: rowWriteEffect, // A6
+	intentStart:   bringUpEffect,  // S1: may launch
 	intentAdopt:   adoptEffect,    // S1: commits a live runtime, never launches
 }

@@ -10,16 +10,16 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 // The start effect (CONTRACT v5 S1, S2): bringUp, which may launch and costs
 // a token, and adopt, which never launches and costs none, run one function
 // under the runtime name lock. It reads the runtime fresh (O1) and picks its
 // verb from S1's table, keyed by the row's token and that read. A refusal
-// writes nothing. C5a1-2 adds the Launch and registers bringUp; C5a2 adds
-// the abandon table and the rollback, and C5a3 the dead row's
-// classification and recycle, adoption's side effects, the lost-commit
-// cleanup and the pending-create StaleSelf exit.
+// writes nothing. C5a2 adds the abandon table and the rollback, and C5a3 the
+// dead row's classification and recycle, adoption's side effects, the
+// lost-commit cleanup and the pending-create StaleSelf exit.
 
 // Start refusal causes. Each backs the row off (P4).
 const (
@@ -107,6 +107,8 @@ type startEffect struct {
 	pass  *effectPass
 	it    intent
 	adopt bool
+	// verify is worktree.Verify unless a test injects one.
+	verify func(worktree.Spec) (worktree.Report, error)
 }
 
 func adoptEffect(p *effectPass, it intent) func(context.Context) settlement {
@@ -157,6 +159,8 @@ func (e startEffect) run(ctx context.Context) settlement {
 	defer unlock()
 	read := e.observe(ctx, a, row.Info, began)
 	switch verb, cause := resolveStart(e.adopt, read, row.Info); verb {
+	case verbLaunch:
+		return e.launch(ctx, a)
 	case verbCommit:
 		prepared, err := e.prepare(a, row.Info, sessTranscriptUnknown)
 		if err != nil {

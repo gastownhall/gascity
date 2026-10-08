@@ -108,6 +108,29 @@ func (w fencedWriter) rollbackPendingCreate(expected session.Info, closePatch, p
 	return front.RollbackPendingCreateAtomically(expected, closePatch, postClosePatch)
 }
 
+// foldInfo is info.ApplyPatch(patch), a pure fold that writes nothing. The
+// effect lint matches selector names, and the blind session.Store method
+// shares this one's, so effects fold through here.
+func foldInfo(info session.Info, patch session.MetadataPatch) session.Info {
+	return info.ApplyPatch(patch)
+}
+
+// startupHealthAccrued reports whether name's #46 startup-health episode
+// has accrued anything a launch commit must clear. A read error reads not
+// accrued: a lost clear only delays (v5 §13).
+func (w fencedWriter) startupHealthAccrued(name string) bool {
+	prior, err := sessionFrontDoor(w.store).LoadStartupHealthEpisode(name)
+	return err == nil && (prior.ConsecutiveCount != 0 || !prior.QuarantinedUntil.IsZero())
+}
+
+// clearStartupHealth is the launch commit's #46 write: it clears name's
+// episode, an unconditional upsert of the episode record that v5 §13 admits,
+// since a lost write only delays a start. It is the one #46 writer an effect
+// holds; the row's mirror of the episode rides the commit's CAS.
+func (w fencedWriter) clearStartupHealth(name string) error {
+	return sessionFrontDoor(w.store).SaveStartupHealthEpisode(session.ClearStartupHealthEpisode(name))
+}
+
 // blindWriteRefusingStore is a beads.Store that forwards a read allowlist
 // (Get, List, ListOpen, Ready, Children, ListByLabel, ListByAssignee,
 // ListByMetadata, GetLocalString, Ping, DepList) to inner and refuses every

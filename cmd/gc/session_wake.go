@@ -61,7 +61,20 @@ func preWakeCommit(
 	if !sessions.IsSessionNameSyntaxValid(name) {
 		return 0, "", nil, fmt.Errorf("invalid session_name %q", name)
 	}
+	newGen, token, batch := preWakePatch(info, clk.Now())
+	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)
+	if writeErr := sessFront.ApplyPatch(info.ID, batch); writeErr != nil {
+		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
+	}
+	traceFreshWakeMetadataReset(name, freshWakeResetPriorValues(info), batch, freshWake)
 
+	return newGen, token, batch, nil
+}
+
+// preWakePatch is the PreWakePatch preWakeCommit writes for info at now,
+// with the generation and instance token it mints. The v2 start effect
+// writes the same patch by CAS (CONTRACT v5 S1).
+func preWakePatch(info sessions.Info, now time.Time) (newGen int, token string, batch sessions.MetadataPatch) {
 	gen, _ := strconv.Atoi(info.Generation)
 	newGen = gen + 1
 	token = sessions.NewInstanceToken()
@@ -80,24 +93,18 @@ func preWakeCommit(
 		sleepReason = string(sessions.SleepReasonIdleTimeout)
 	}
 
-	freshWake := info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info)
-	batch := sessions.PreWakePatch(sessions.PreWakePatchInput{
+	batch = sessions.PreWakePatch(sessions.PreWakePatchInput{
 		Generation:        newGen,
 		InstanceToken:     token,
 		ContinuationEpoch: continuationEpoch,
-		Now:               clk.Now(),
+		Now:               now,
 		SleepReason:       sleepReason,
-		FreshWake:         freshWake,
+		FreshWake:         info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info),
 		// A retry of a claimed pending create continues its episode, so the
 		// stale-create bound must keep measuring from the episode start.
 		EpisodePendingCreateStartedAt: pendingCreateEpisodeStartedAt(info),
 	})
-	if writeErr := sessFront.ApplyPatch(info.ID, batch); writeErr != nil {
-		return 0, "", nil, fmt.Errorf("pre-wake metadata commit: %w", writeErr)
-	}
-	traceFreshWakeMetadataReset(name, freshWakeResetPriorValues(info), batch, freshWake)
-
-	return newGen, token, batch, nil
+	return newGen, token, batch
 }
 
 // pendingCreateEpisodeStartedAt returns the pending_create_started_at a wake
