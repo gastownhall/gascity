@@ -6,6 +6,7 @@ go_library(
         "cron.go",
         "discovery.go",
         "env.go",
+        "exec_outcome.go",
         "filenames.go",
         "filter.go",
         "order.go",
@@ -82,6 +83,7 @@ go_test(
     srcs = [
         "discovery_test.go",
         "env_test.go",
+        "exec_outcome_test.go",
         "filenames_test.go",
         "filter_test.go",
         "order_test.go",
@@ -110,6 +112,7 @@ go_test(
         "//internal/beads/beadstest",
         "//internal/convergence",
         "//internal/events",
+        "//internal/execenv",
         "//internal/fsys",
         "//internal/processgroup/processgrouptest",
         "//internal/testenv",
@@ -171,6 +174,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

@@ -109,7 +109,13 @@ exception: a "list" that filters on the wisps (ephemeral) tier —
 filters would otherwise return [] and exit 0 on a ledger full of live
 molecules. Every other list is forwarded as written. "heartbeat
 <issue-id>" forwards to bd's native heartbeat, which refreshes the claim's
-lease and fails loudly when the caller no longer owns it. gc adds one
+lease and fails loudly when the caller no longer owns it. "show <id>
+--watch" (or "show --current --watch", or the "view" alias) on a scope that
+uses bd's proxied-server transport (the default for a new city), where bd
+refuses watch mode, is served by gc instead: it re-runs "bd show" every 2
+seconds and redraws when the bead's status or update time changes, until
+Ctrl+C. Like bd's own watch, it renders the plain form and ignores show's
+display flags (--json, --short, --long, --refs, --children). gc adds one
 subcommand of its own: "release-if-current <issue-id> <assignee>", which
 conditionally resets an in-progress assignment only when the bead still has
 that assignee.
@@ -602,7 +608,22 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 			if storeErr == nil {
 				guardStore = store
 				guardBeads = make(map[string]beads.Bead, len(writeIDs))
-				for _, id := range writeIDs {
+				// A bulk mutation (e.g. a maintenance order closing a batch of
+				// stale wisps) reads every id in one bd show instead of one or
+				// two bd forks per id. Only ids bd answered exactly are
+				// accepted from the batch; the rest take the exact per-id Get
+				// below, which is what tells a substring collision from an
+				// absent bead.
+				verifyIDs := writeIDs
+				if getter, ok := store.(beads.ExactBatchGetter); ok && len(writeIDs) > 1 {
+					if found, unresolved, batchErr := getter.GetExactBatch(writeIDs); batchErr == nil {
+						for id, bead := range found {
+							guardBeads[id] = bead
+						}
+						verifyIDs = unresolved
+					}
+				}
+				for _, id := range verifyIDs {
 					bead, getErr := store.Get(id)
 					if errors.Is(getErr, beads.ErrIDCollision) {
 						// bd resolved a different bead — block the write to prevent
@@ -664,6 +685,22 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
+	// A session closing work it claimed closes it under the identity the claim
+	// recorded, so bd's assignee check passes without --force.
+	cmd.Env = ownClaimCloseEnv(cmd.Env, bdArgs, guardBeads, os.Getenv)
+
+	// bd refuses `show --watch` in proxied-server mode, the default transport
+	// for a new city, and bd cannot call back into gc. gc serves the watch
+	// itself there by polling plain `bd show` reads; every other scope keeps
+	// bd's own watch. Every bd call the watch makes goes through the same
+	// trace and the same silent-fallback / dolt-start stderr checks as this
+	// passthrough. See cmd_bd_show_watch.go.
+	if req, ok := parseBdShowWatchArgs(bdArgs); ok && bdScopeRefusesShowWatch(cityPath, target, cmd.Env) {
+		return serveBdShowWatch(req, &bdWatchRunner{
+			bdPath: bdPath, dir: cmd.Dir, env: cmd.Env,
+			cityPath: cityPath, scopeRoot: target.ScopeRoot, stderr: stderr,
+		}, stdout, stderr)
+	}
 
 	traceStart := time.Now()
 	runErr := cmd.Run()
@@ -758,18 +795,30 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 		return nil, false, false
 	}
 
-	// valueFlags is the complete set of flags that consume the next argument as
-	// their value for this subcommand, in both long and short form.
-	// Sourced from `bd <sub> --help` (bd 1.3.0-rc.2, 2026-09-10).
-	valueFlags := bdSubcmdValueFlags(sub)
+	// The flag sets are the complete value-consuming and boolean (no-value)
+	// flags for this subcommand, in both long and short form, sourced from
+	// `bd <sub> --help` (bd 1.3.1, 2026-09-29). Unknown flags not in either set
+	// make the scan ambiguous.
+	ids, ambiguous = bdScanPositionalIDs(args[1:], bdSubcmdValueFlags(sub), bdSubcmdBoolFlags(sub), nil)
+	if ambiguous {
+		return nil, true, true
+	}
+	return ids, true, false
+}
 
-	// boolFlags is the complete set of boolean (no-value) flags. Unknown flags
-	// not in either set trigger ambiguous=true.
-	boolFlags := bdSubcmdBoolFlags(sub)
-
+// bdScanPositionalIDs is the fail-closed argv scan behind bdMutationWriteIDs
+// and bdByIDReadSubjects: it returns the positional tokens of rest — the argv
+// AFTER the subcommand — as the bead ids the invocation addresses.
+//
+// valueFlags and boolFlags are the subcommand's complete flag manifest. A flag
+// in neither set might consume the next token, which would then be read as a
+// bead id, so the scan stops and reports ambiguous instead of guessing.
+// idValueFlags names the value flags whose value is itself an addressed id
+// (`show --id <id>`); nil means no flag value is ever a subject.
+func bdScanPositionalIDs(rest []string, valueFlags, boolFlags, idValueFlags map[string]bool) (ids []string, ambiguous bool) {
 	positional := false // true after "--"
-	for i := 1; i < len(args); i++ {
-		arg := args[i]
+	for i := 0; i < len(rest); i++ {
+		arg := rest[i]
 		if positional {
 			if arg != "" {
 				ids = append(ids, arg)
@@ -789,7 +838,10 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 		}
 		// Flag token.
 		// --flag=value form: value is embedded, no next-arg consumed.
-		if strings.Contains(arg, "=") {
+		if name, value, inline := strings.Cut(arg, "="); inline {
+			if idValueFlags[name] && value != "" {
+				ids = append(ids, value)
+			}
 			continue
 		}
 		// Strip leading dashes to get the flag name for lookup.
@@ -799,8 +851,12 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 		shortForm := "-" + flagName // only meaningful when flagName is 1 char
 
 		if valueFlags[longForm] || (len(flagName) == 1 && valueFlags[shortForm]) {
-			// Known value-consuming flag: skip its value argument.
+			// Known value-consuming flag: skip its value argument, unless the
+			// value is itself an addressed id.
 			i++
+			if idValueFlags[arg] && i < len(rest) && rest[i] != "" {
+				ids = append(ids, rest[i])
+			}
 			continue
 		}
 		if boolFlags[longForm] || (len(flagName) == 1 && boolFlags[shortForm]) {
@@ -809,9 +865,9 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 		}
 		// Unknown flag. It might consume a value argument that looks like a
 		// bead ID. Fail-closed: report ambiguity so the caller can reject.
-		return nil, true, true
+		return nil, true
 	}
-	return ids, true, false
+	return ids, false
 }
 
 // bdSubcmdValueFlags returns the set of value-consuming flag names (in

@@ -150,7 +150,7 @@ func TestCloseBeadClearsTheCurrentClaim(t *testing.T) {
 	sessionBead, _ := seedClaimingSession(t, store)
 
 	var stderr bytes.Buffer
-	if !closeBead(store, sessionBead.ID, "orphaned", time.Now(), &stderr) {
+	if !closeBead(store, decidedSessionInfo(store, sessionBead.ID), "orphaned", time.Now(), &stderr) {
 		t.Fatalf("closeBead reported no close; stderr=%s", stderr.String())
 	}
 	if got := currentClaimStamp(t, store, sessionBead.ID); got != "" {

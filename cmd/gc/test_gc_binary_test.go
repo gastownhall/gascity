@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 //nolint:unused // exercised by native_dolt_rebind_integration_test.go
@@ -35,6 +37,8 @@ func reexecGCTestBinaryForTests(t *testing.T) string {
 //nolint:unused // exercised by native_dolt_rebind_integration_test.go
 func currentGCBinaryForTests(t *testing.T) string {
 	t.Helper()
+	// Bazel hands the test the //cmd/gc it built; under go test, build it.
+	bazelGC := bazeltest.DataPath(t, "GC_TEST_GC_BIN")
 	testGCBinaryOnce.Do(func() {
 		sweepOrphanPIDPrefixedDirs(os.TempDir(), testGCBinaryDirPrefix)
 		buildDir, err := os.MkdirTemp("", pidPrefixedTempPattern(testGCBinaryDirPrefix))
@@ -42,19 +46,22 @@ func currentGCBinaryForTests(t *testing.T) string {
 			testGCBinaryErr = fmt.Errorf("mktemp gc binary dir: %w", err)
 			return
 		}
-		realBinPath := filepath.Join(buildDir, "gc-real")
 		binPath := filepath.Join(buildDir, "gc")
-		wd, err := os.Getwd()
-		if err != nil {
-			testGCBinaryErr = fmt.Errorf("getwd: %w", err)
-			return
-		}
-		cmd := exec.Command("go", "build", "-o", realBinPath, ".")
-		cmd.Dir = wd
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			testGCBinaryErr = fmt.Errorf("go build -o %s .: %w\n%s", realBinPath, err, string(out))
-			return
+		realBinPath := bazelGC
+		if realBinPath == "" {
+			realBinPath = filepath.Join(buildDir, "gc-real")
+			wd, err := os.Getwd()
+			if err != nil {
+				testGCBinaryErr = fmt.Errorf("getwd: %w", err)
+				return
+			}
+			cmd := exec.Command("go", "build", "-o", realBinPath, ".")
+			cmd.Dir = wd
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				testGCBinaryErr = fmt.Errorf("go build -o %s .: %w\n%s", realBinPath, err, string(out))
+				return
+			}
 		}
 		wrapper := fmt.Sprintf("#!/bin/sh\nexport %s=1\nif [ -z \"${%s:-}\" ]; then\n  export %s=$PPID\nfi\nexec %q \"$@\"\n",
 			managedDoltTestModeEnv,

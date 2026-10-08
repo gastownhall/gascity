@@ -733,6 +733,16 @@ func TestParseCustomTypesJSON(t *testing.T) {
 			want:  []string{"molecule", "spec", "convergence"},
 		},
 		{
+			name:  "JSON-array value (bd config set form) parses",
+			input: `{"key":"types.custom","value":"[\"molecule\", \"ops-extra\"]"}`,
+			want:  []string{"molecule", "ops-extra"},
+		},
+		{
+			name:  "entries are trimmed",
+			input: `{"key":"types.custom","value":"molecule, spec"}`,
+			want:  []string{"molecule", "spec"},
+		},
+		{
 			name:    "malformed JSON errors",
 			input:   `not json`,
 			wantErr: true,

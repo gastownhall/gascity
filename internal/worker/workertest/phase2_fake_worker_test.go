@@ -34,10 +34,21 @@ var (
 )
 
 const (
-	fakeStartupGateTimeout         = 10 * time.Second
-	fakeStartupLaunchBound         = 5 * time.Second
-	fakeStartupPostControlOverhead = 2 * time.Second
-	fakeInteractionSignalBound     = 2 * time.Second
+	fakeStartupGateTimeout = 10 * time.Second
+	fakeStartupLaunchBound = 5 * time.Second
+
+	// fakeStartupPostControlOverhead bounds a real fake-worker subprocess's
+	// own OS-scheduling and file-I/O overhead between its control_observed
+	// and state_transition events. WC-BRINGUP-001 proves the worker fake
+	// surfaces a bounded startup outcome, not a fast one, so this is a hang
+	// detector, not a latency assertion — reuse this package's hangBudget
+	// (ga-e4bhca) rather than a bespoke deadline sized for an idle box. See
+	// TestPhase2StartupOutcomeBoundStaysAHangDetector for the guard and
+	// TESTING.md's "Test deadline rule" for why a sub-floor fixed value here
+	// is a CI reliability defect, not just tightness.
+	fakeStartupPostControlOverhead = hangBudget
+
+	fakeInteractionSignalBound = 2 * time.Second
 )
 
 func runFakeStartup(t *testing.T, profile ProfileID, outcome string, delay time.Duration) fakeStartupRun {

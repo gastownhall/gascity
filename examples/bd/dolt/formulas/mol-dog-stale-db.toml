@@ -36,6 +36,7 @@ This is infrastructure work. You:
 |----------|--------|-------------|
 | max_orphans_for_sql | formula default | Max stale dropped databases before escalating instead of forcing (default 20) |
 | warn_threshold | formula default | Orphan count that triggers a warning maintenance notice (default 5) |
+| protected_warn_threshold | formula default | Non-baseline (excludes active-rig) protected process count that triggers a separate warning maintenance notice (default 10) |
 
 ## Safety
 
@@ -75,6 +76,10 @@ default = "20"
 [vars.warn_threshold]
 description = "Orphan count that triggers a warning maintenance notice"
 default = "5"
+
+[vars.protected_warn_threshold]
+description = "Non-baseline (non-active-rig) protected process count that triggers a separate warning maintenance notice"
+default = "10"
 
 [[steps]]
 id = "cleanup"
@@ -192,10 +197,17 @@ RSS_BYTES=$(jq -r '.summary.bytes_freed_rss // 0' "$SCAN_FILE")
 SCAN_ERRS=$(jq -r '.summary.errors_total // 0' "$SCAN_FILE")
 INVALID_DROP_SKIPS=$(jq -r '[.dropped.skipped[]? | select(.reason == "invalid-identifier")] | length' "$SCAN_FILE")
 SCAN_FORCE_BLOCKERS=$(jq -r '[.force_blockers[]?] | length' "$SCAN_FILE")
+# ga-xkc9mo: a 100%-protected leak (zero reap targets) must not collapse into
+# an indistinguishable orphans:0 -- roll up the protected population
+# separately. active-rig is the expected baseline (one live server per
+# registered rig); everything else is a genuine unreapable leak.
+PROTECTED_TOTAL=$(jq -r '.summary.protected_total // 0' "$SCAN_FILE")
+PROTECTED_ACTIVE_RIG=$(jq -r '.summary.protected_by_kind["active-rig"] // 0' "$SCAN_FILE")
+PROTECTED_NON_BASELINE=$((PROTECTED_TOTAL - PROTECTED_ACTIVE_RIG))
 
 run_or_warn "emit scan event" gc event emit mol-dog-stale-db.scan \
   --message "$ORPHAN_DBS orphans (${DISK_BYTES} bytes), $ORPHAN_PROCS procs (${RSS_BYTES} bytes)" \
-  --payload "$(jq -c '{dropped: .dropped.count, purge_bytes: .purge.bytes_reclaimed, procs: (.reaped.targets | length), rss_bytes: .summary.bytes_freed_rss, errors: .summary.errors_total, invalid_identifier_skips: ([.dropped.skipped[]? | select(.reason == "invalid-identifier")] | length), force_blockers: ([.force_blockers[]?] | length)}' "$SCAN_FILE")"
+  --payload "$(jq -c '{dropped: .dropped.count, purge_bytes: .purge.bytes_reclaimed, procs: (.reaped.targets | length), rss_bytes: .summary.bytes_freed_rss, errors: .summary.errors_total, invalid_identifier_skips: ([.dropped.skipped[]? | select(.reason == "invalid-identifier")] | length), force_blockers: ([.force_blockers[]?] | length), protected_total: (.summary.protected_total // 0), protected_non_baseline: ((.summary.protected_total // 0) - (.summary.protected_by_kind["active-rig"] // 0))}' "$SCAN_FILE")"
 
 append_report_note "scan (dry-run)" "$SCAN_FILE"
 
@@ -311,13 +323,17 @@ if [ "$ORPHAN_TOTAL" -ge "{{warn_threshold}}" ]; then
   maintenance_notice "MAINTENANCE_WARN: $ORPHAN_TOTAL Dolt orphan(s) seen this scan (warn_threshold={{warn_threshold}})"
 fi
 
+if [ "$PROTECTED_NON_BASELINE" -ge "{{protected_warn_threshold}}" ]; then
+  maintenance_notice "MAINTENANCE_WARN: $PROTECTED_NON_BASELINE non-baseline protected Dolt process(es) seen this scan (protected_warn_threshold={{protected_warn_threshold}}, protected_total=${PROTECTED_TOTAL})"
+fi
+
 maintenance_notice "MAINTENANCE_DONE: stale-db - orphans: ${ORPHAN_TOTAL}, applied: ${APPLIED}, escalated: ${ESCALATED}"
 
 if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then
   fail_open_after_drain "gc dolt-cleanup apply missed ${MISSED_PURGE_BYTES} reclaimable bytes; leaving work bead open"
 fi
 
-bd close "$WORK_BEAD" --actor "${GC_ALIAS:-${GC_SESSION_NAME:-${GC_SESSION_ID:-}}}" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})"
+bd close "$WORK_BEAD" --actor "${BEADS_ACTOR:-${GC_ALIAS:-${GC_SESSION_ID:-${GC_SESSION_NAME:-}}}}" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})"
 drain_ack_once # drain-ack before normal exit
 exit
 ```

@@ -1782,18 +1782,20 @@ func logicalRecipeStepID(step formula.RecipeStep) (string, bool) {
 				return trimmed, true
 			}
 		case "retry-run":
-			if trimmed, ok := trimAttemptSuffix(step.ID, ".run."+attempt); ok {
+			if trimmed, ok := trimAttemptSuffix(step.ID, ".run."+beadmeta.RetryAttemptValue(step.Metadata)); ok {
 				return trimmed, true
 			}
 		case "retry-eval":
-			if trimmed, ok := trimAttemptSuffix(step.ID, ".eval."+attempt); ok {
+			if trimmed, ok := trimAttemptSuffix(step.ID, ".eval."+beadmeta.RetryAttemptValue(step.Metadata)); ok {
 				return trimmed, true
 			}
 		}
 
 		// v2 patterns: attempt/iteration suffix stripping.
-		// v2 beads keep their original kind but have gc.attempt set.
-		if trimmed, ok := trimAttemptSuffix(step.ID, ".attempt."+attempt); ok {
+		// v2 beads keep their original kind but have gc.attempt set. A retry
+		// attempt's ".attempt.<n>" suffix names its retry counter, which inside
+		// a ralph body differs from gc.attempt (the iteration).
+		if trimmed, ok := trimAttemptSuffix(step.ID, ".attempt."+beadmeta.RetryAttemptValue(step.Metadata)); ok {
 			return trimmed, true
 		}
 		if trimmed, ok := trimAttemptSuffix(step.ID, ".iteration."+attempt); ok {

@@ -234,6 +234,7 @@ type hookCommandOptions struct {
 	Claim      bool
 	DrainAck   bool
 	JSON       bool
+	DrainAckFn hookDrainAckFunc
 }
 
 // cmdHook is the CLI entry point for gc hook. Resolves the agent from
@@ -334,9 +335,16 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		fencedSession = info
 	}
 
-	st, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
+	st, err := loadSuspensionState(fsys.OSFS{}, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook: loading suspension state: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	if citySuspendedWithState(cfg, st) {
 		fmt.Fprintln(stderr, "gc hook: city is suspended") //nolint:errcheck // best-effort stderr
+		if opts.Claim {
+			return writeHookClaimSuspensionDrain(hookClaimReasonCitySuspended, opts, stdout, stderr)
+		}
 		return 1
 	}
 
@@ -373,8 +381,17 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		return 1
 	}
 
-	if isAgentEffectivelySuspendedWith(cfg, cityPath, &a, st) {
-		fmt.Fprintf(stderr, "gc hook: agent %q is suspended\n", agentName) //nolint:errcheck // best-effort stderr
+	if scope, name, suspended := agentSuspensionCauseWith(cfg, cityPath, &a, st); suspended {
+		reason := hookClaimReasonAgentSuspended
+		if scope == "rig" {
+			fmt.Fprintf(stderr, "gc hook: rig %q is suspended\n", name) //nolint:errcheck
+			reason = hookClaimReasonRigSuspended
+		} else {
+			fmt.Fprintf(stderr, "gc hook: agent %q is suspended\n", agentName) //nolint:errcheck
+		}
+		if opts.Claim {
+			return writeHookClaimSuspensionDrain(reason, opts, stdout, stderr)
+		}
 		return 1
 	}
 
@@ -504,15 +521,18 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			Env:                queryEnv,
 			DrainAck:           opts.DrainAck,
 			JSON:               opts.JSON,
+			StrictDrainAck:     drainAckStrictConfig(cfg),
+			RuntimeActor:       strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
 		}
 		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
 	return doHookDiscovery(workQuery, workDir, false, hookClaimOptions{
-		Env:      queryEnv,
-		DrainAck: opts.DrainAck,
-		JSON:     opts.JSON,
+		Env:            queryEnv,
+		DrainAck:       opts.DrainAck,
+		JSON:           opts.JSON,
+		StrictDrainAck: drainAckStrictConfig(cfg),
 	}, hookClaimOps{}, runner, stdout, stderr, hookVisibility{
 		Identities:   identityCandidates,
 		RouteTargets: routeTargets,
@@ -790,7 +810,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// report claims_errored instead of laundering a write failure into no_work.
 	claimsErrored := false
 	for len(remaining) > 0 {
-		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run)
+		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run, &ops)
 		if err != nil {
 			emitFailure(workQuery, err)
 			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -859,13 +879,37 @@ var (
 // selectStoreWithWorkRetrying is bestStoreWithWork with a bounded retry around
 // the ERROR case only. It returns the first successful selection, or the last
 // error once the budget is spent.
-func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner) (string, hookStore, error) {
+//
+// The retry budget is also bounded by the invocation's claim window (F-B). Three
+// paced retries on top of a work query that may itself run to
+// hookWorkQueryTimeout can carry a `gc hook --claim` process well past the turn
+// that invoked it, and a read that lands past the window buys nothing: any claim
+// it leads to is refused on arrival. So a retry runs only when it would start
+// strictly inside the window, both before the pacing sleep (the sleep must not
+// run past the window) and after it (the sleep may have overrun). When the window
+// cuts the budget short, the last read error is returned, annotated, so the
+// caller keeps its failed-read contract (exit 1, no drain) instead of treating a
+// dead invocation as an idle store.
+func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner, ops *hookClaimOps) (string, hookStore, error) {
 	out, selected, err := bestStoreWithWork(workQuery, stores, primary, run)
 	for attempt := 0; err != nil && attempt < hookClaimQueryRetryAttempts; attempt++ {
-		time.Sleep(hookClaimQueryRetryInterval)
+		if ops.claimWindowSpentAfter(hookClaimQueryRetryInterval) {
+			return out, selected, hookClaimRetryWindowClosed(err, ops)
+		}
+		ops.sleepOrWallClock(hookClaimQueryRetryInterval)
+		if ops.claimWindowSpentAfter(0) {
+			return out, selected, hookClaimRetryWindowClosed(err, ops)
+		}
 		out, selected, err = bestStoreWithWork(workQuery, stores, primary, run)
 	}
 	return out, selected, err
+}
+
+// hookClaimRetryWindowClosed annotates the last claim-read error with the reason
+// the retry budget stopped early. It is a wrapped suffix, so errors.Is/As and the
+// kill/timeout markers classifyWorkQueryFailure matches on stay intact.
+func hookClaimRetryWindowClosed(err error, ops *hookClaimOps) error {
+	return fmt.Errorf("%w (claim-read retries stopped: the %s claim window closes before the next retry could run)", err, ops.claimWindowOrDefault())
 }
 
 func hookClaimPrimaryRouteTarget(a *config.Agent) string {
@@ -910,17 +954,21 @@ func hookSessionAgentForQuery() string {
 // the order is the whole of it.
 //
 // An unaliased pool spawn has no occupant name in the environment except its
-// session bead id. clearPoolTemplateRuntimeIdentity blanks GC_ALIAS and stamps
-// GC_AGENT with the runtime session name. Where that name is identity-derived —
-// tmux_alias pools, and unaliased rows minted by pre-v1.5.0 builds
-// (poolRuntimeSessionName) — it is a CHAIR: it is stable across every session
-// that ever occupies the slot. Unaliased pools are bead-scoped again
-// (PoolSessionName, <template>-<beadID>), but the bead id stays the canonical
-// claim identity. Recording a claim under a chair name makes every "is the holder
-// still alive?" consumer answer about the chair, so a dead occupant's in_progress
+// session bead id. clearPoolTemplateRuntimeIdentity blanks GC_ALIAS, and the
+// runtime session name (GC_SESSION_NAME) is only a name for the runtime. Where
+// that name is identity-derived — tmux_alias pools, and unaliased rows minted by
+// pre-v1.5.0 builds (poolRuntimeSessionName) — it is a CHAIR: it is stable
+// across every session that ever occupies the slot. Unaliased pools are
+// bead-scoped again (PoolSessionName, <template>-<beadID>), but the bead id
+// stays the canonical claim identity. Recording a claim under a chair name
+// makes every "is the holder still alive?" consumer answer about the chair, so
+// a dead occupant's in_progress
 // bead reads as held by whoever sits there next and is never released, resumed,
 // or replaced. On maintainer-city one such label was the session_name of 24
-// distinct session beads, and the worst of them 66.
+// distinct session beads, and the worst of them 66. The runtime projection
+// (session.AssigneeIdentifier) exports the same session bead id as GC_AGENT and
+// BEADS_ACTOR for an unaliased pool session, so the worker's later bd mutations
+// are actored by exactly the string the claim is recorded under (#5716).
 //
 // So the session bead id goes ahead of every session/agent NAME form. Every
 // reader already leads with it — sessionBeadAssigneeIdentities,

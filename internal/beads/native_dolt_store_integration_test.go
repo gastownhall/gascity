@@ -355,6 +355,40 @@ func TestNativeDoltStoreRealBackendCrossPrefixParent(t *testing.T) {
 	if stillForeign.ParentID != foreign {
 		t.Errorf("ParentID after the refused reparent is %q, want the previous %q; the refusal has to come before the write", stillForeign.ParentID, foreign)
 	}
+
+	// Moving between two foreign parents rewrites an edge whose target lives in
+	// depends_on_external, in one transaction: the old edge has to come out by
+	// the same pair it went in under, or the bead reads two parents.
+	otherForeign := "gcg-70b1e5f2-b"
+	if err := store.Update(control.ID, UpdateOpts{ParentID: &otherForeign}); err != nil {
+		t.Fatalf("Update moving between foreign parents %q -> %q: %v", foreign, otherForeign, err)
+	}
+	if got := realBackendParentEdges(t, store, control.ID); len(got) != 1 || got[0] != otherForeign {
+		t.Errorf("parent edges after moving between foreign parents = %v, want only %q", got, otherForeign)
+	}
+	cleared := ""
+	if err := store.Update(control.ID, UpdateOpts{ParentID: &cleared}); err != nil {
+		t.Fatalf("Update clearing a foreign parent: %v", err)
+	}
+	if got := realBackendParentEdges(t, store, control.ID); len(got) != 0 {
+		t.Errorf("parent edges after clearing a foreign parent = %v, want none", got)
+	}
+}
+
+// realBackendParentEdges lists id's stored parent-child targets.
+func realBackendParentEdges(t *testing.T, store *NativeDoltStore, id string) []string {
+	t.Helper()
+	deps, err := store.DepList(id, "down")
+	if err != nil {
+		t.Fatalf("DepList(%q, down): %v", id, err)
+	}
+	var parents []string
+	for _, dep := range deps {
+		if dep.Type == string(beadslib.DepParentChild) {
+			parents = append(parents, dep.DependsOnID)
+		}
+	}
+	return parents
 }
 
 func TestNativeDoltStoreRealBackendRoundTrip(t *testing.T) {

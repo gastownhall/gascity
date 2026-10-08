@@ -173,12 +173,9 @@ type Info struct {
 	// RAW priming-marker mirrors (primed_at / priming_attempted_at / prompt_hash),
 	// verbatim. They follow the same raw-mirror house pattern as the canonical
 	// keys: projected by infoFromPersistedBead and folded per-key (verbatim copy)
-	// by ApplyPatch. The S19 Stage 3 shadow harness snapshots the compared keys
-	// off these Info mirrors at tick start/end (the reconciler loop carries no raw
-	// session beads), so every compared key must be a projected Info field.
-	// Additive, internal-only (absent from the HTTP wire). S19 Stage 2 is
-	// WRITE-ONLY: stamped/cleared at start/clear sites but read by no decision
-	// path yet (the harness observes them; Stage 4 acts on them).
+	// by ApplyPatch. Additive, internal-only (absent from the HTTP wire). S19
+	// Stage 2 is WRITE-ONLY: stamped/cleared at start/clear sites but read by no
+	// decision path yet.
 	PrimedAtMetadata           string // primed_at (raw RFC3339)
 	PrimingAttemptedAtMetadata string // priming_attempted_at (raw RFC3339)
 	PromptHashMetadata         string // prompt_hash (raw sha256 hex)
@@ -541,6 +538,11 @@ type RuntimeObservation struct {
 	Attached    bool
 	LastActive  time.Time
 	SessionName string
+
+	// AttachedErr is set when the attachment probe could not tell (any error
+	// other than runtime.ErrSessionNotFound); Attached is false then. A caller
+	// gating a destructive action treats it as attached.
+	AttachedErr error
 }
 
 func normalizeInfoState(state State) State {
@@ -725,13 +727,13 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 // replacement is impossible because it does not exist yet.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	_ = ctx
-	scanner, ok := m.sp.(runtime.ProcessTableScanner)
+	scanner, ok := runtime.AsProcessTableScanner(m.sp)
 	if !ok || sessionID == "" {
 		return nil
 	}
 	found, err := scanner.FindRuntimesBySessionID(sessionID)
 	if err != nil {
-		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %v", sessionID, err)
+		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(err))
 	}
 	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
 	var termErrs []error
@@ -1369,7 +1371,11 @@ func (m *Manager) suspend(id string, intent suspendIntent) error {
 // tearDownRuntimeForSuspend kills the runtime session for a suspend. Stop is
 // provider-idempotent, so it is called even when liveness already reports false;
 // tmux remain-on-exit panes can be non-running but still need their session
-// artifact removed.
+// artifact removed. It stops through runtime.StopForCleanup: a suspend only
+// needs the session gone, and a tmux server confirmed dead has nothing left
+// running even while a cached IsRunning still lists the session. An
+// unconfirmed missing-server answer, such as a live server whose socket file
+// was deleted, still fails the stop.
 //
 // A Stop failure is suppressed ONLY when the runtime did not report a live
 // process beforehand (historical Suspend semantics: cleanup of an already-dead
@@ -1384,7 +1390,7 @@ func (m *Manager) tearDownRuntimeForSuspend(sessName string) error {
 		return nil
 	}
 	running := m.sp.IsRunning(sessName)
-	err := m.sp.Stop(sessName)
+	err := runtime.StopForCleanup(m.sp, sessName)
 	if err != nil && !running {
 		err = nil
 	}
@@ -1447,13 +1453,19 @@ func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 			return err
 		}
 
-		// Stop the live runtime before marking the bead closed. Stop is
-		// idempotent for an already-gone session (returns nil), which also lets
-		// auto.Provider discard stale ACP route entries for suspended sessions.
-		// A genuine terminate failure must propagate and leave the bead open
-		// rather than report a "closed but still running" session — swallowing
-		// it here previously masked exactly that wedge.
-		if err := m.sp.Stop(sessName); err != nil {
+		// Stop the live runtime before marking the bead closed. Close is a
+		// cleanup path, so it absorbs a missing-session or missing-server
+		// answer via runtime.StopForCleanup — otherwise a session bead for an
+		// intentionally stopped city could never be closed once the city's
+		// tmux server is down. A genuine terminate failure still propagates,
+		// even beside such an answer, and leaves the bead open rather than
+		// reporting a "closed but still running" session; swallowing that
+		// previously masked exactly that wedge.
+		//
+		// Route-table hygiene is the provider's own concern: whether a stop
+		// clears a stale ACP route entry is not something this call site can
+		// observe or rely on.
+		if err := runtime.StopForCleanup(m.sp, sessName); err != nil {
 			return fmt.Errorf("stopping runtime for session %s: %w", id, err)
 		}
 		nudgeIDs, capped, err := NewStore(beads.SessionStore{Store: m.store}).CancelWaits(id, time.Now().UTC())
@@ -1522,6 +1534,9 @@ func (m *Manager) retireConfiguredNamedSessionIdentifiers(id string, b beads.Bea
 // Kill force-kills the runtime process for a session without changing bead
 // state. This is intended for manual intervention; the reconciler will detect
 // the dead process and restart it according to the session's lifecycle rules.
+// Like Close, it is a cleanup path: a session that is already gone is the
+// outcome Kill was asked for, so it reports success rather than surfacing the
+// provider's "nothing to stop" answer to the operator.
 func (m *Manager) Kill(id string) error {
 	b, sessName, err := m.sessionBead(id)
 	if err != nil {
@@ -1539,7 +1554,7 @@ func (m *Manager) Kill(id string) error {
 			return fmt.Errorf("session %s is not active", id)
 		}
 	}
-	return m.sp.Stop(sessName)
+	return runtime.StopForCleanup(m.sp, sessName)
 }
 
 // BeginDrain transitions a session to the draining state. The caller is
@@ -1675,8 +1690,15 @@ func (m *Manager) Rename(id, title string) error {
 	return m.UpdatePresentation(id, &title, nil)
 }
 
-// UpdatePresentation updates user-facing session attributes.
+// UpdatePresentation updates user-facing session attributes. A blank or
+// whitespace-only title is refused with ErrInvalidSessionTitle before any
+// lock or store work, so neither half of a combined title+alias update lands.
 func (m *Manager) UpdatePresentation(id string, title *string, alias *string) error {
+	if title != nil {
+		if err := ValidateTitle(*title); err != nil {
+			return err
+		}
+	}
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.loadSessionBead(id, true)
 		if err != nil {
@@ -1982,7 +2004,11 @@ func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) (Runti
 	obs.Running = liveness.Running
 	obs.Alive = liveness.Alive
 	if obs.Running {
-		obs.Attached = m.sp.IsAttached(info.SessionName)
+		attached, err := runtime.IsAttachedWithError(m.sp, info.SessionName)
+		if err != nil && runtime.AttachProbeHolds(attached, err) {
+			obs.AttachedErr = err
+		}
+		obs.Attached = attached && err == nil
 		lastActive, err := m.sp.GetLastActivity(info.SessionName)
 		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
 			return RuntimeObservation{}, fmt.Errorf("observe last activity for %q: %w", info.SessionName, err)

@@ -1,12 +1,14 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -42,18 +44,51 @@ type resolvedMCPProjection struct {
 	Projection   materialize.MCPProjection
 }
 
+// mcpProviderKinds are the harness families gc can write an MCP config for.
+var mcpProviderKinds = []string{
+	materialize.MCPProviderClaude,
+	materialize.MCPProviderCodex,
+	materialize.MCPProviderGemini,
+	materialize.MCPProviderOpenCode,
+	materialize.MCPProviderMimoCode,
+	materialize.MCPProviderCursor,
+}
+
 func supportsMCPProviderKind(kind string) bool {
-	switch strings.TrimSpace(kind) {
-	case materialize.MCPProviderClaude,
-		materialize.MCPProviderCodex,
-		materialize.MCPProviderGemini,
-		materialize.MCPProviderOpenCode,
-		materialize.MCPProviderMimoCode,
-		materialize.MCPProviderCursor:
-		return true
-	default:
-		return false
+	kind = strings.TrimSpace(kind)
+	for _, supported := range mcpProviderKinds {
+		if kind == supported {
+			return true
+		}
 	}
+	return false
+}
+
+// unsupportedMCPHarnessError reports an agent whose scope carries MCP servers
+// while its provider runs on a harness gc cannot write an MCP config for.
+type unsupportedMCPHarnessError struct {
+	Harness string
+	Servers []string
+}
+
+func (e *unsupportedMCPHarnessError) Error() string {
+	harness := e.Harness
+	if harness == "" {
+		harness = "(none)"
+	}
+	return fmt.Sprintf(
+		"MCP servers [%s] are configured for this agent, but its provider runs on the %q harness, "+
+			"which cannot receive MCP (supported harnesses: %s); switch the agent to a provider on a "+
+			"supported harness or remove the MCP servers from its scope",
+		strings.Join(e.Servers, ", "), harness, strings.Join(mcpProviderKinds, ", "))
+}
+
+func newUnsupportedMCPHarnessError(harness string, catalog materialize.MCPCatalog) *unsupportedMCPHarnessError {
+	names := make([]string, 0, len(catalog.Servers))
+	for _, server := range catalog.Servers {
+		names = append(names, server.Name)
+	}
+	return &unsupportedMCPHarnessError{Harness: strings.TrimSpace(harness), Servers: names}
 }
 
 func loadEffectiveMCPForAgent(
@@ -85,8 +120,7 @@ func resolveAgentMCPProjection(
 			return materialize.MCPCatalog{}, materialize.MCPProjection{}, nil
 		}
 		if len(catalog.Servers) > 0 {
-			return materialize.MCPCatalog{}, materialize.MCPProjection{}, fmt.Errorf(
-				"effective MCP requires a supported provider family, got %q", providerKind)
+			return materialize.MCPCatalog{}, materialize.MCPProjection{}, newUnsupportedMCPHarnessError(providerKind, catalog)
 		}
 		return catalog, materialize.MCPProjection{}, nil
 	}
@@ -133,7 +167,23 @@ func ensureMCPGitignoreBestEffort(root string, stderr io.Writer) {
 	}
 }
 
-func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.LookPathFunc) ([]mcpTargetSpec, error) {
+// stage1MCPSkipWarned remembers which (city, agent, harness, servers) skips
+// have already been reported, so the supervisor's per-tick stage-1 pass warns
+// once per process instead of on every tick.
+var stage1MCPSkipWarned sync.Map
+
+func warnStage1MCPSkip(cityPath, agent string, harnessErr *unsupportedMCPHarnessError, stderr io.Writer) {
+	if stderr == nil {
+		return
+	}
+	key := strings.Join([]string{filepath.Clean(cityPath), agent, harnessErr.Harness, strings.Join(harnessErr.Servers, ",")}, "\x00")
+	if _, seen := stage1MCPSkipWarned.LoadOrStore(key, true); seen {
+		return
+	}
+	fmt.Fprintf(stderr, "gc: warning: skipping MCP projection for agent %q: %v\n", agent, harnessErr) //nolint:errcheck // best-effort stderr
+}
+
+func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer) ([]mcpTargetSpec, error) {
 	if cfg == nil {
 		return nil, nil
 	}
@@ -144,6 +194,13 @@ func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.Lo
 			continue
 		}
 		view, err := resolveConfiguredAgentMCPProjection(cityPath, cfg, agent, lookPath)
+		var harnessErr *unsupportedMCPHarnessError
+		if errors.As(err, &harnessErr) {
+			// One agent's harness must not fail the whole city: skip it here.
+			// Its own session start still reports the same error.
+			warnStage1MCPSkip(cityPath, agent.QualifiedName(), harnessErr, stderr)
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: %w", agent.QualifiedName(), err)
 		}
@@ -192,7 +249,7 @@ func buildStage1MCPTargets(cityPath string, cfg *config.City, lookPath config.Lo
 }
 
 func runStage1MCPProjection(cityPath string, cfg *config.City, lookPath config.LookPathFunc, stderr io.Writer) error {
-	targets, err := buildStage1MCPTargets(cityPath, cfg, lookPath)
+	targets, err := buildStage1MCPTargets(cityPath, cfg, lookPath, stderr)
 	if err != nil {
 		return err
 	}

@@ -414,7 +414,9 @@ type ArchiveFilter struct {
 // (all listing paths filter Status != "open"). Archiving an already-closed
 // message is idempotent and returns ErrAlreadyArchived without mutating it.
 func (p *Provider) Archive(id string) error {
-	b, err := p.store.Get(id)
+	// The cached Get can answer ErrNotFound from a stale tombstone for a bead
+	// that is still open in the backing store; read live so archive repairs it.
+	b, err := beads.HandlesFor(p.store).Live.Get(id)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return mail.ErrAlreadyArchived

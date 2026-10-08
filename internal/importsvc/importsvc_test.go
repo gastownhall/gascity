@@ -28,6 +28,10 @@ func stubDeps(t *testing.T, captured *map[string]config.Import) Deps {
 			return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
 		},
 		DefaultConstraint: func(_ string) (string, error) { return "^1.4", nil },
+		ResolveRegistryRelease: func(_, _ string) (packman.RegistryRelease, bool, error, error) {
+			return packman.RegistryRelease{}, false, nil, nil
+		},
+		RegistryReleaseLabel: func(string, packman.LockedPack) string { return "" },
 		SyncLock: func(_ string, imports map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
 			if captured != nil {
 				*captured = imports

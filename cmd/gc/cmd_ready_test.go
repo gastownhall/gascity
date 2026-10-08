@@ -387,7 +387,7 @@ func TestReadyWireFieldSetIsPinnedToTheHTTPBeadShape(t *testing.T) {
 	computedReadyWireFields := map[string]bool{"blocked_by": true}
 
 	want := []string{
-		"assignee", "blocked_by", "created_at", "defer_until", "dependencies",
+		"assignee", "blocked_by", "close_reason", "created_at", "defer_until", "dependencies",
 		"description", "ephemeral", "from", "id", "is_blocked", "issue_type",
 		"labels", "metadata", "needs", "no_history", "parent", "priority",
 		"ref", "status", "title", "updated_at",
@@ -958,10 +958,10 @@ func TestCmdReadyOnALegacyCityFederatesCityAndRigStores(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("creating rig dir: %v", err)
 	}
-	cityToml := "[workspace]\nname = \"readytest\"\n\n" +
+	cityToml := "[workspace]\nname = \"readytest\"\nprefix = \"re\"\n\n" +
 		"[beads]\nprovider = \"file\"\n\n" +
 		"[session]\nprovider = \"fake\"\n\n" +
-		"[[rigs]]\nname = \"frontend\"\npath = " + strconv.Quote(rigDir) + "\n"
+		"[[rigs]]\nname = \"frontend\"\npath = " + strconv.Quote(rigDir) + "\nprefix = \"re\"\n"
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
@@ -998,7 +998,7 @@ func TestCmdReadyOnALegacyCityFederatesCityAndRigStores(t *testing.T) {
 	// Now the city store, whose first bead aliases the rig's id.
 	cityBead := mustCreateReadyBead(t, cityStore, beads.Bead{Title: "city work", Type: "task"})
 	if cityBead.ID != rigBead.ID {
-		t.Fatalf("city bead %s did not alias the rig bead %s; legacy file mode was expected to mint the same id per scope", cityBead.ID, rigBead.ID)
+		t.Fatalf("city bead %s did not alias the rig bead %s; city and rig share an explicit prefix and were expected to mint the same id", cityBead.ID, rigBead.ID)
 	}
 	second := mustCreateReadyBead(t, cityStore, beads.Bead{Title: "more city work", Type: "task"})
 

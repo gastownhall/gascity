@@ -4289,6 +4289,11 @@ type sourceChainFinalizeFixture struct {
 
 func newSourceChainFinalizeFixture(t *testing.T) sourceChainFinalizeFixture {
 	t.Helper()
+	return newSourceChainFinalizeFixtureWithOutcome(t, "pass")
+}
+
+func newSourceChainFinalizeFixtureWithOutcome(t *testing.T, stepOutcome string) sourceChainFinalizeFixture {
+	t.Helper()
 
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
@@ -4319,7 +4324,7 @@ func newSourceChainFinalizeFixture(t *testing.T) sourceChainFinalizeFixture {
 		Type:   "task",
 		Status: "closed",
 		Metadata: map[string]string{
-			"gc.outcome": "pass",
+			"gc.outcome": stepOutcome,
 		},
 	})
 	finalizer := mustCreateWorkflowBead(t, rigStore, beads.Bead{
@@ -4707,6 +4712,155 @@ func TestProcessWorkflowFinalizeRecordsSourceWorkflowStoreScanFailure(t *testing
 	}
 }
 
+// TestProcessWorkflowFinalizeCompletesAfterPendingResolverHeals is the
+// red→green heal test for the pending classification's central claim: a
+// finalize that pended on config drift COMPLETES once the drift is repaired, in
+// the same process, with no dispatcher restart. Before this the claim rested on
+// reasoning alone (city config is reloaded per dispatch, the recorded reason is
+// write-only), and reasoning is exactly what a regression here would keep
+// satisfying while the finalize stayed stuck.
+//
+// It also pins the other half of the lifecycle: the recorded failure does not
+// outlive the success it preceded.
+func TestProcessWorkflowFinalizeCompletesAfterPendingResolverHeals(t *testing.T) {
+	t.Parallel()
+
+	f := newSourceChainFinalizeFixture(t)
+	rigRestored := false
+	resolver := func(ref string) (beads.Store, error) {
+		if ref == "rig:test" && !rigRestored {
+			return nil, fmt.Errorf("%w: rig %q not found in city config", ErrControlPending, "test")
+		}
+		return f.resolver(ref)
+	}
+	opts := ProcessOptions{ResolveStoreRef: resolver}
+
+	if _, err := ProcessControl(f.rigStore, f.finalizer, opts); !errors.Is(err, ErrControlPending) {
+		t.Fatalf("pre-heal ProcessControl error = %v, want ErrControlPending", err)
+	}
+	pending := mustGetBead(t, f.rigStore, f.finalizer.ID)
+	if pending.Status != "open" {
+		t.Fatalf("pre-heal finalizer status = %q, want open", pending.Status)
+	}
+	if got := pending.Metadata[workflowFinalizeErrorMetadataKey]; !strings.Contains(got, "not found in city config") {
+		t.Fatalf("pre-heal gc.last_finalize_error = %q, want the pending reason recorded", got)
+	}
+	if root := mustGetBead(t, f.rigStore, f.workflow.ID); root.Status != "open" {
+		t.Fatalf("pre-heal root status = %q, want open", root.Status)
+	}
+
+	// `gc rig add` puts the entry back.
+	rigRestored = true
+	if _, err := ProcessControl(f.rigStore, pending, opts); err != nil {
+		t.Fatalf("post-heal ProcessControl: %v", err)
+	}
+
+	healed := mustGetBead(t, f.rigStore, f.finalizer.ID)
+	if healed.Status != "closed" {
+		t.Fatalf("post-heal finalizer status = %q, want closed", healed.Status)
+	}
+	if got := healed.Metadata[beadmeta.OutcomeMetadataKey]; got != beadmeta.OutcomePass {
+		t.Fatalf("post-heal finalizer gc.outcome = %q, want pass", got)
+	}
+	if got := healed.Metadata[workflowFinalizeErrorMetadataKey]; got != "" {
+		t.Fatalf("post-heal gc.last_finalize_error = %q, want cleared — a passing finalizer must not advertise the failure it healed from", got)
+	}
+	if root := mustGetBead(t, f.rigStore, f.workflow.ID); root.Status != "closed" {
+		t.Fatalf("post-heal root status = %q, want closed", root.Status)
+	}
+	// The source chain is the reason the finalize exists: assert it was walked
+	// and closed, not merely that the finalizer stopped erroring.
+	if launch := mustGetBead(t, f.rigStore, f.rigLaunch.ID); launch.Status != "closed" {
+		t.Fatalf("post-heal rig launch status = %q, want closed", launch.Status)
+	}
+	if source := mustGetBead(t, f.cityStore, f.citySource.ID); source.Status != "closed" {
+		t.Fatalf("post-heal city source status = %q, want closed", source.Status)
+	}
+}
+
+// TestProcessWorkflowFinalizeFailOutcomeInheritsPendingResolver covers the
+// FAIL-outcome arm, which reaches the same store-ref resolver through
+// annotateSourceBeadFailure rather than preflightSourceBeadChain. It inherited
+// the pending classification by construction and was asserted by nothing: a
+// failed workflow whose rig went missing must stay retryable for exactly the
+// reason a passing one does — quarantine would settle the root and strand the
+// domain parent, and the parent is the human handle a FAILED workflow most
+// needs.
+func TestProcessWorkflowFinalizeFailOutcomeInheritsPendingResolver(t *testing.T) {
+	t.Parallel()
+
+	f := newSourceChainFinalizeFixtureWithOutcome(t, "fail")
+	resolver := func(ref string) (beads.Store, error) {
+		if ref == "rig:test" {
+			// The drift SUBCLASS, matching what the cmd-layer resolver actually
+			// returns for a removed rig — annotateSourceBeadFailure forwards
+			// with %w, so this is the live FAIL+missing-rig shape and not a
+			// stand-in.
+			return nil, fmt.Errorf("%w: rig %q not found in city config", ErrControlDriftPending, "test")
+		}
+		return f.resolver(ref)
+	}
+
+	_, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{ResolveStoreRef: resolver})
+	// Assert the subclass, not just the parent. The cmd layer keys the loudness
+	// horizon on ErrControlDriftPending, so a rewrap along the FAIL path that
+	// preserved only ErrControlPending would keep this retryable while silently
+	// dropping its escalation — retrying forever in silence. The PASS/skip path
+	// already pins exactly this; the FAIL path is the arm that reaches the
+	// resolver through annotateSourceBeadFailure instead.
+	if !errors.Is(err, ErrControlDriftPending) {
+		t.Fatalf("ProcessControl error = %v, want ErrControlDriftPending on the FAIL arm too", err)
+	}
+	finalizer := mustGetBead(t, f.rigStore, f.finalizer.ID)
+	if finalizer.Status != "open" {
+		t.Fatalf("finalizer status = %q, want open (retryable)", finalizer.Status)
+	}
+	if got := finalizer.Metadata[beadmeta.ControlQuarantinedMetadataKey]; got != "" {
+		t.Fatalf("gc.control_quarantined = %q, want empty", got)
+	}
+	if root := mustGetBead(t, f.rigStore, f.workflow.ID); root.Status != "open" {
+		t.Fatalf("root status = %q, want open", root.Status)
+	}
+}
+
+// TestRecordWorkflowFinalizeErrorSkipsUnchangedRestamp pins the write-side half
+// of the pending cadence fix. A pending finalize re-reports the identical
+// reason on every sweep for as long as the drift lasts; re-stamping it each
+// time is a store round-trip and an event-log row per sweep that says nothing
+// new.
+func TestRecordWorkflowFinalizeErrorSkipsUnchangedRestamp(t *testing.T) {
+	t.Parallel()
+
+	mem := beads.NewMemStore()
+	finalizer := mustCreateWorkflowBead(t, mem, beads.Bead{Title: "Finalize workflow", Type: "task"})
+	store := &controlCloseTrackingStore{Store: mem, targetID: finalizer.ID}
+	cause := errors.New(`rig "ghostrig" not found in city config`)
+
+	if err := recordWorkflowFinalizeError(store, finalizer, cause); !errors.Is(err, cause) {
+		t.Fatalf("first record returned %v, want the original cause", err)
+	}
+	if store.setMetadataCalls != 1 {
+		t.Fatalf("SetMetadata calls after first record = %d, want 1", store.setMetadataCalls)
+	}
+
+	// The next sweep re-reads the bead and reports the same refusal.
+	restamped := mustGetBead(t, mem, finalizer.ID)
+	if err := recordWorkflowFinalizeError(store, restamped, cause); !errors.Is(err, cause) {
+		t.Fatalf("repeat record returned %v, want the original cause", err)
+	}
+	if store.setMetadataCalls != 1 {
+		t.Fatalf("SetMetadata calls after identical repeat = %d, want 1 (no re-stamp)", store.setMetadataCalls)
+	}
+
+	// A genuinely different reason still lands.
+	if err := recordWorkflowFinalizeError(store, restamped, errors.New("closing workflow spec sidecars: boom")); err == nil {
+		t.Fatal("changed-reason record returned nil, want the cause")
+	}
+	if store.setMetadataCalls != 2 {
+		t.Fatalf("SetMetadata calls after a changed reason = %d, want 2", store.setMetadataCalls)
+	}
+}
+
 func TestRecordWorkflowFinalizeErrorTruncatesAtUTF8Boundary(t *testing.T) {
 	t.Parallel()
 
@@ -4717,7 +4871,7 @@ func TestRecordWorkflowFinalizeErrorTruncatesAtUTF8Boundary(t *testing.T) {
 	})
 	reason := strings.Repeat("a", maxWorkflowFinalizeErrorMetadata-1) + "é tail"
 
-	err := recordWorkflowFinalizeError(store, finalizer.ID, errors.New(reason))
+	err := recordWorkflowFinalizeError(store, finalizer, errors.New(reason))
 	if err == nil {
 		t.Fatal("recordWorkflowFinalizeError err = nil, want original error returned")
 	}

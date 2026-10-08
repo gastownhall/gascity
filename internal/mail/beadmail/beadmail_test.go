@@ -1,6 +1,8 @@
 package beadmail
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -1041,6 +1043,61 @@ func TestArchive(t *testing.T) {
 	}
 	if b.Description != "dismiss me" {
 		t.Errorf("bead body = %q, want \"dismiss me\"", b.Description)
+	}
+}
+
+func TestArchiveRepairsOpenMessageMissingFromDirectLookup(t *testing.T) {
+	store := beads.NewMemStore()
+	cs := beads.NewCachingStoreForTest(store, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	sender := New(store)
+	sent, err := sender.Send("human", "worker", "", "dismiss me")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Plant a stale tombstone: the cache believes the bead is deleted while
+	// it is still open in the backing store.
+	stale, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.ApplyEvent("bead.deleted", payload)
+	if _, err := cs.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("precondition: cached Get error = %v, want ErrNotFound", err)
+	}
+
+	p := New(cs)
+	if err := p.Archive(sent.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+
+	b, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead status = %q, want closed", b.Status)
+	}
+	open, err := store.List(beads.ListQuery{Status: "open", Assignee: "worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 0 {
+		t.Errorf("open assigned beads = %v, want none", open)
+	}
+	inbox, err := p.Inbox("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inbox) != 0 {
+		t.Errorf("unread inbox = %v, want none", inbox)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -179,9 +180,12 @@ func TestDoSessionWake_PokesManagedControllerAfterStateChange(t *testing.T) {
 			calls = append(calls, "managed")
 			return true
 		},
-		pokeController: func(cityPath string) error {
+		pokeController: func(cityPath string, key reconcilekey.Key) error {
 			if cityPath != "/city" {
 				t.Fatalf("poke cityPath = %q, want /city", cityPath)
+			}
+			if want := reconcilekey.Session(sessionBead.ID); key != want {
+				t.Fatalf("poke key = %v, want %v", key, want)
 			}
 			updated, getErr := store.Get(sessionBead.ID)
 			if getErr != nil {
@@ -252,7 +256,7 @@ func TestDoSessionWake_DoesNotPokeWithoutManagedController(t *testing.T) {
 		cityUsesManagedReconciler: func(string) bool {
 			return false
 		},
-		pokeController: func(string) error {
+		pokeController: func(string, reconcilekey.Key) error {
 			poked = true
 			return nil
 		},
@@ -293,7 +297,7 @@ func TestDoSessionWake_PokeFailureWarnsWithoutFailingWake(t *testing.T) {
 		cityUsesManagedReconciler: func(string) bool {
 			return true
 		},
-		pokeController: func(string) error {
+		pokeController: func(string, reconcilekey.Key) error {
 			return errors.New("dial failed")
 		},
 	}
@@ -596,7 +600,7 @@ func TestDoSessionWake_SuspendedRigRejectsWake(t *testing.T) {
 				cityUsesManagedReconciler: func(string) bool {
 					return false
 				},
-				pokeController: func(string) error {
+				pokeController: func(string, reconcilekey.Key) error {
 					return nil
 				},
 			}
@@ -717,7 +721,9 @@ func TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart(t *testi
 			t.Fatalf("timed out waiting for controller commands, got %v", gotCommands)
 		}
 	}
-	wantCommands := []string{"ping\n", "poke\n"}
+	// The wake carries its session key (a key-aware controller acks it, so
+	// no plain "poke" fallback follows).
+	wantCommands := []string{"ping\n", keyedPokeCommand(reconcilekey.Session(sessionID)) + "\n"}
 	for i, want := range wantCommands {
 		if gotCommands[i] != want {
 			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)

@@ -498,7 +498,10 @@ const (
 	bdTransientReadAttempts  = 3
 )
 
-var _ ConditionalAssignmentReleaser = (*BdStore)(nil)
+var (
+	_ ConditionalAssignmentReleaser = (*BdStore)(nil)
+	_ ConditionalAssigneeTransferer = (*BdStore)(nil)
+)
 
 // BdStoreOption configures optional bd CLI behavior for a BdStore.
 type BdStoreOption func(*BdStore)
@@ -905,6 +908,8 @@ type bdIssue struct {
 	NoHistory       bool         `json:"no_history,omitempty"`
 	DeferUntil      *time.Time   `json:"defer_until,omitempty"`
 	IsBlocked       optionalBool `json:"is_blocked,omitempty"`
+	// CloseReason is bd's close_reason column: the --reason given to bd close.
+	CloseReason string `json:"close_reason,omitempty"`
 	// Revision carries bd's optimistic-concurrency token for ConditionalWriter.
 	// Older bd versions omit it, so it decodes to 0; toBead stamps it onto the
 	// otherwise json:"-" Bead.Revision field.
@@ -1115,9 +1120,20 @@ func (b *bdIssue) toBead() Bead {
 		NoHistory:            b.NoHistory,
 		DeferUntil:           cloneTimePtr(b.DeferUntil),
 		IsBlocked:            b.IsBlocked.ptr(),
+		CloseReason:          bdCloseReason(status, b.CloseReason),
 		IndefinitelyDeferred: indefinitelyDeferred,
 		Revision:             int64(b.Revision),
 	}
+}
+
+// bdCloseReason reads bd's close_reason for a bead in its normalized status. bd
+// clears the column on reopen, but a row that is not closed has no close
+// reason whatever the column still holds.
+func bdCloseReason(status, reason string) string {
+	if status != "closed" {
+		return ""
+	}
+	return reason
 }
 
 func (b *bdIssue) normalizedDependencies() []Dep {
@@ -1168,6 +1184,43 @@ func isBdNotFound(err error) bool {
 	return strings.Contains(msg, "not found") ||
 		strings.Contains(msg, "no issue found") ||
 		strings.Contains(msg, "no issues found")
+}
+
+// bdInfraNotFoundMarkers are "not found" phrasings that describe the bd
+// binary, the Dolt server, or the workspace — not a missing bead. They
+// appear when bd cannot run or its database is mid-restart, which says
+// nothing about whether a given bead exists.
+var bdInfraNotFoundMarkers = []string{
+	"executable file not found",
+	"command not found",
+	"exec: \"bd\"",
+	"exec: bd",
+	"database not found",
+	"database path not found",
+	"table not found",
+	"column not found",
+	"workspace not found",
+	"branch not found",
+	"page not found",
+	"no such file or directory",
+}
+
+// isBdBeadNotFound reports whether err is bd saying the requested bead does
+// not exist, as opposed to isBdNotFound's loose "not found anywhere in the
+// text" match, which also fires on infrastructure failures (a missing bd
+// binary, a Dolt "database not found" during a server restart). Get uses it
+// so only a bead-level miss becomes ErrNotFound.
+func isBdBeadNotFound(err error) bool {
+	if !isBdNotFound(err) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range bdInfraNotFoundMarkers {
+		if strings.Contains(msg, marker) {
+			return false
+		}
+	}
+	return true
 }
 
 // isBdOperationUnsupported reports whether err is bd telling us a backend
@@ -1373,6 +1426,10 @@ func effectiveStorageFlags(b Bead, storage StorageClass) (ephemeral bool, noHist
 	}
 }
 
+// readsBySubprocess reports that Get forks bd, so a CachingStore bounds the
+// event check it runs on the event watcher's goroutine (checkEvent).
+func (s *BdStore) readsBySubprocess() bool { return true }
+
 // Get retrieves a bead by ID via bd show.
 func (s *BdStore) Get(id string) (Bead, error) {
 	// Read via the transient-retry wrapper so a Get that races a managed-Dolt
@@ -1383,7 +1440,11 @@ func (s *BdStore) Get(id string) (Bead, error) {
 	// BdStore read/write path (ga-gellq1).
 	out, err := s.runBDTransientRead("show", "--json", id)
 	if err != nil {
-		if !isBdNotFound(err) {
+		// Only a bead-level miss may become ErrNotFound. Callers treat
+		// ErrNotFound as "confirmed absent" (the process-table orphan sweep
+		// SIGTERMs a live runtime on it), so an infrastructure failure whose
+		// text happens to say "not found" must surface as itself.
+		if !isBdBeadNotFound(err) {
 			return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
 		}
 		// bd show only queries the issues table; ephemeral beads live in the
@@ -1395,12 +1456,16 @@ func (s *BdStore) Get(id string) (Bead, error) {
 		// must not leak into a supplemental wisp query.
 		if isWispQueryableID(id) {
 			wisps, queryErr := s.getEphemeralByID(id)
-			if queryErr == nil {
-				for _, b := range wisps {
-					if b.ID == id {
-						return b, nil
-					}
+			for _, b := range wisps {
+				if b.ID == id {
+					return b, nil
 				}
+			}
+			// The wisp lookup is half of the "absent" verdict: if it failed,
+			// absence is unproven. Return the real error so callers can tell
+			// a transient read failure from a missing bead.
+			if queryErr != nil && !isBdBeadNotFound(queryErr) {
+				return Bead{}, fmt.Errorf("getting bead %q: %w", id, queryErr)
 			}
 		}
 		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
@@ -1505,7 +1570,7 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 // nothing (bdstore_conditional_release.go). The raw `bd sql` path below is the
 // fallback for any bd predating the flags (beads#5008) — which means the
 // contract-tested minimum, deps.env BD_PREV_VERSION (1.0.4), and not the
-// installable default: deps.env BD_VERSION is v1.3.0, cut past
+// installable default: deps.env BD_VERSION is v1.3.1, cut past
 // beads#5008, so a stock install takes the verb. This path is the floor's, not
 // the live one, and it stays reachable only because deps.env holds
 // BD_PREV_VERSION below beads#5008. On that path the sqlite backend refuses
@@ -3002,7 +3067,7 @@ func isWispQueryableID(id string) bool {
 func (s *BdStore) getEphemeralByID(id string) ([]Bead, error) {
 	clause := "ephemeral=true AND id=" + id
 	args := []string{"query", "--json", clause, "--all", "--limit", "1"}
-	out, err := s.runner(s.dir, "bd", args...)
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		if isBdQueryUnsupported(err) {
 			return nil, nil
@@ -3314,7 +3379,7 @@ func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
 	workOutcomeByID := make(map[string]string, len(blockers))
 	for _, b := range blockers {
 		statusByID[b.ID] = b.Status
-		workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
+		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
 	}
 	result := make([]Bead, 0, len(candidates))
 	for _, c := range candidates {

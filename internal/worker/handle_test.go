@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
@@ -1435,6 +1436,72 @@ func TestRuntimeHandleCloseDetailedStopsRuntimeAndReturnsZeroResult(t *testing.T
 	}
 }
 
+// TestRuntimeHandleTeardownAbsorbsOnlySessionGone pins Stop, Kill and Close as
+// cleanup paths: tmux Provider.Stop reports a missing server as ErrNoServer —
+// joined with the same answer from the pre-kill pane capture when the server
+// is already down — and a session behind a downed server is already gone, so
+// each operation must report success. A stop failure that is not "the session
+// is gone" may leave the session running and must still reach the caller, even
+// when it is joined with a downed-server answer — without those control rows,
+// a blanket swallow would pass just as well.
+func TestRuntimeHandleTeardownAbsorbsOnlySessionGone(t *testing.T) {
+	realFailure := errors.New("permission denied")
+	ops := []struct {
+		name string
+		run  func(*RuntimeHandle, context.Context) error
+	}{
+		{name: "Stop", run: (*RuntimeHandle).Stop},
+		{name: "Kill", run: (*RuntimeHandle).Kill},
+		{name: "Close", run: (*RuntimeHandle).Close},
+	}
+	stops := []struct {
+		name    string
+		stopErr error
+		wantErr error
+	}{
+		{name: "downed server", stopErr: fmt.Errorf("killing session legacy-worker: %w", tmux.ErrNoServer)},
+		{name: "downed server at capture and kill", stopErr: errors.Join(fmt.Errorf("observing pane before process snapshot: %w", tmux.ErrNoServer), tmux.ErrNoServer)},
+		{name: "real failure", stopErr: realFailure, wantErr: realFailure},
+		{name: "real failure beside a downed server", stopErr: errors.Join(realFailure, tmux.ErrNoServer), wantErr: realFailure},
+	}
+	for _, op := range ops {
+		for _, stop := range stops {
+			t.Run(op.name+"/"+stop.name, func(t *testing.T) {
+				sp := runtime.NewFake()
+				if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+					t.Fatalf("Start: %v", err)
+				}
+				sp.StopErrors["legacy-worker"] = stop.stopErr
+				handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+					Provider:     sp,
+					SessionName:  "legacy-worker",
+					ProviderName: "stub",
+				})
+				if err != nil {
+					t.Fatalf("NewRuntimeHandle: %v", err)
+				}
+
+				err = op.run(handle, context.Background())
+				if stop.wantErr == nil && err != nil {
+					t.Fatalf("%s against %s: %v, want nil", op.name, stop.name, err)
+				}
+				if stop.wantErr != nil && !errors.Is(err, stop.wantErr) {
+					t.Fatalf("%s against %s = %v, want %v", op.name, stop.name, err, stop.wantErr)
+				}
+				var sawStop bool
+				for _, call := range sp.Calls {
+					if call.Method == "Stop" && call.Name == "legacy-worker" {
+						sawStop = true
+					}
+				}
+				if !sawStop {
+					t.Fatalf("%s returned without asking the provider to stop the session", op.name)
+				}
+			})
+		}
+	}
+}
+
 func TestRuntimeHandleStateStoppedSkipsPendingProbe(t *testing.T) {
 	sp := runtime.NewFake()
 	sp.SetPendingInteraction("legacy-worker", &runtime.PendingInteraction{
@@ -1463,6 +1530,47 @@ func TestRuntimeHandleStateStoppedSkipsPendingProbe(t *testing.T) {
 		if call.Method == "Pending" {
 			t.Fatalf("calls = %#v, want no Pending probe for stopped runtime handle", sp.Calls)
 		}
+	}
+}
+
+// TestRuntimeHandlePendingStatusKeysOnSentinel pins that interaction support is
+// the provider's answer, not the interface assertion: acp implements
+// InteractionProvider and answers ErrInteractionUnsupported. A probe failure is
+// returned instead of reading as "nothing pending".
+func TestRuntimeHandlePendingStatusKeysOnSentinel(t *testing.T) {
+	errProbe := fmt.Errorf("capture-pane timed out: %w", runtime.ErrRuntimeUnavailable)
+	cases := []struct {
+		name          string
+		pendingErr    error
+		wantSupported bool
+		wantErr       error
+	}{
+		{name: "answers", wantSupported: true},
+		{name: "unsupported_sentinel", pendingErr: fmt.Errorf("acp: %w", runtime.ErrInteractionUnsupported), wantSupported: false},
+		{name: "session_gone", pendingErr: fmt.Errorf("pane: %w", runtime.ErrSessionNotFound), wantSupported: true},
+		{name: "probe_error", pendingErr: errProbe, wantSupported: true, wantErr: errProbe},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if tc.pendingErr != nil {
+				sp.PendingErrors["legacy-worker"] = tc.pendingErr
+			}
+			handle, err := NewRuntimeHandle(RuntimeHandleConfig{Provider: sp, SessionName: "legacy-worker", ProviderName: "stub"})
+			if err != nil {
+				t.Fatalf("NewRuntimeHandle: %v", err)
+			}
+			pending, supported, err := handle.PendingStatus(context.Background())
+			if pending != nil || supported != tc.wantSupported {
+				t.Fatalf("PendingStatus = (%+v, %v, %v), want (nil, %v, _)", pending, supported, err, tc.wantSupported)
+			}
+			if tc.wantErr == nil && err != nil {
+				t.Fatalf("PendingStatus error = %v, want nil", err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("PendingStatus error = %v, want %v", err, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -2468,5 +2576,87 @@ func writeGeminiHistoryFixture(t *testing.T, path, sessionID string, messages []
 	body := fmt.Sprintf("{\n  \"sessionId\": %q,\n  \"messages\": [\n    %s\n  ]\n}\n", sessionID, strings.Join(messages, ",\n    "))
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("write gemini transcript %s: %v", path, err)
+	}
+}
+
+// An attachment probe that cannot tell must reach the observation as an error,
+// never as "not attached", and must not fail the liveness answer it rides on.
+func TestRuntimeHandleLiveObservationCarriesAttachError(t *testing.T) {
+	probeErr := fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+	notFoundText := fmt.Errorf("exec: \"tmux\": executable file not found in $PATH: %w", runtime.ErrRuntimeUnavailable)
+	for _, tc := range []struct {
+		name         string
+		attached     bool
+		attachErr    error
+		wantAttached bool
+		wantErr      error
+	}{
+		{name: "probe unavailable", attachErr: probeErr, wantErr: probeErr},
+		{name: "session vanished is not attached", attachErr: fmt.Errorf("gone: %w", runtime.ErrSessionNotFound)},
+		{name: "unavailable text that IsSessionGone matches", attachErr: notFoundText, wantErr: notFoundText},
+		{name: "attached", attached: true, wantAttached: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "runtime-worker", runtime.Config{}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			sp.SetAttached("runtime-worker", tc.attached)
+			if tc.attachErr != nil {
+				sp.AttachedErrors["runtime-worker"] = tc.attachErr
+			}
+			handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+				Provider:     sp,
+				SessionName:  "runtime-worker",
+				ProviderName: "claude",
+			})
+			if err != nil {
+				t.Fatalf("NewRuntimeHandle: %v", err)
+			}
+
+			obs, err := handle.LiveObservation(context.Background())
+			if err != nil {
+				t.Fatalf("LiveObservation: %v, want the attach error carried in the observation", err)
+			}
+			if !obs.Running || !obs.Alive {
+				t.Fatalf("LiveObservation() = %#v, want running+alive unaffected by the attach probe", obs)
+			}
+			if obs.Attached != tc.wantAttached || !errors.Is(obs.AttachedErr, tc.wantErr) || (tc.wantErr == nil) != (obs.AttachedErr == nil) {
+				t.Fatalf("Attached, AttachedErr = %v, %v; want %v, %v", obs.Attached, obs.AttachedErr, tc.wantAttached, tc.wantErr)
+			}
+		})
+	}
+}
+
+// SessionHandle carries the manager's attachment probe error through to the
+// observation, so a cmd/gc gate reading it holds instead of seeing "detached".
+func TestSessionHandleLiveObservationCarriesAttachError(t *testing.T) {
+	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  t.TempDir(),
+		Provider: "claude",
+	})
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := mgr.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get(%q): %v", handle.sessionID, err)
+	}
+	probeErr := fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+	sp.AttachedErrors[info.SessionName] = probeErr
+
+	obs, err := ObserveHandle(context.Background(), handle)
+	if err != nil {
+		t.Fatalf("ObserveHandle: %v, want the attach error carried in the observation", err)
+	}
+	if !obs.Running {
+		t.Fatalf("LiveObservation.Running = false, want running unaffected by the attach probe; obs=%#v", obs)
+	}
+	if obs.Attached || !errors.Is(obs.AttachedErr, probeErr) {
+		t.Fatalf("Attached, AttachedErr = %v, %v; want false, %v", obs.Attached, obs.AttachedErr, probeErr)
 	}
 }

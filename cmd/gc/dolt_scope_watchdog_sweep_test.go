@@ -55,7 +55,7 @@ func TestSweepProcessTableOrphansLeavesManagedDoltWatchdogAlone(t *testing.T) {
 
 			sp := &procfsSweepScanner{Fake: runtime.NewFake()}
 			var stderr bytes.Buffer
-			got := sweepProcessTableOrphans(sp, nil, store, cityPath, &stderr)
+			got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, cityPath, &stderr)
 			if got != tc.wantReaped || len(sp.terminated) != tc.wantReaped {
 				t.Fatalf("sweepProcessTableOrphans() = %d reaped, terminated %v, want %d; stderr=%q", got, sp.terminated, tc.wantReaped, stderr.String())
 			}
@@ -83,8 +83,9 @@ func (s *procfsSweepScanner) TerminateRuntime(live runtime.LiveRuntime) error { 
 	return nil
 }
 
-// writeFakeProcEntry writes the environ, stat and comm files the Linux scanner
-// reads for one process under a procfs-shaped root.
+// writeFakeProcEntry writes the environ, stat, comm and status files the Linux
+// scanner reads for one process under a procfs-shaped root. The status file
+// names the test's effective UID: the scanner reports only processes it owns.
 func writeFakeProcEntry(t *testing.T, root string, pid, ppid int, comm string, env []string) {
 	t.Helper()
 	dir := filepath.Join(root, strconv.Itoa(pid))
@@ -101,6 +102,11 @@ func writeFakeProcEntry(t *testing.T, root string, pid, ppid int, comm string, e
 	}
 	if err := os.WriteFile(filepath.Join(dir, "comm"), []byte(comm+"\n"), 0o644); err != nil {
 		t.Fatalf("write comm: %v", err)
+	}
+	uid := strconv.Itoa(os.Geteuid())
+	status := "Name:\t" + comm + "\nUid:\t" + uid + "\t" + uid + "\t" + uid + "\t" + uid + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "status"), []byte(status), 0o644); err != nil {
+		t.Fatalf("write status: %v", err)
 	}
 }
 
@@ -137,7 +143,7 @@ func TestSweepProcessTableOrphansFencesCityInfrastructureByArgv(t *testing.T) {
 
 	sp := &procfsSweepScanner{Fake: runtime.NewFake()}
 	var stderr bytes.Buffer
-	got := sweepProcessTableOrphans(sp, nil, store, cityPath, &stderr)
+	got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, cityPath, &stderr)
 	if got != 1 || len(sp.terminated) != 1 || sp.terminated[0].PID != 4300 {
 		t.Fatalf("sweepProcessTableOrphans() = %d reaped, terminated %v, want only the agent pid 4300; stderr=%q", got, sp.terminated, stderr.String())
 	}
@@ -183,7 +189,7 @@ func TestSweepProcessTableOrphansReportsFencedRootOncePerProcess(t *testing.T) {
 		t.Helper()
 		sp := &procfsSweepScanner{Fake: runtime.NewFake()}
 		var stderr bytes.Buffer
-		if got := sweepProcessTableOrphans(sp, nil, store, cityPath, &stderr); got != 0 || len(sp.terminated) != 0 {
+		if got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), store, cityPath, &stderr); got != 0 || len(sp.terminated) != 0 {
 			t.Fatalf("sweep reaped %d, terminated %v, want nothing", got, sp.terminated)
 		}
 		return stderr.String()

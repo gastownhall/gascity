@@ -93,17 +93,18 @@ package main
 //
 // # A binding that cannot claim is a city fact, not a bead fault
 //
-// The CAS the routed claim acquires through is a capability: *beads.SQLiteStore
-// has the two-argument Claim and the other compiled-in binding provider's engine
-// (beadsworkspace over *beads.NativeDoltStore) does not, so the closed contract
-// answers ErrBeadsAdapterCapability rather than emulating it. That is a standing
+// The CAS the routed claim acquires through is a capability: over an engine
+// without the two-argument Claim, the closed contract answers
+// ErrBeadsAdapterCapability rather than emulating it. That is a standing
 // property of the city's storage configuration, so it is refused at the DOOR —
 // newHookClaimClassRoute verifies it once, the way storebinding's
 // NewBeadsNudgeQueue verifies the same capability at construction — and
 // claimHookWork then runs unrouted with one loud line rather than failing every
 // claim of every bead in every store.
 //
-// If a refusal reaches a claim anyway, it is a per-BEAD skip and not a terminal
+// If a refusal reaches a claim anyway (a forwarding wrapper carries the method
+// its leaf lacks, so it passes the door and refuses per bead with
+// beads.ErrClaimUnsupported), it is a per-BEAD skip and not a terminal
 // tick: the escalation only ran because a work store returned not-found, which
 // proves this session owns nothing there and that no mutation is outstanding
 // anywhere (the capability refusal is returned before any write). That is the
@@ -138,6 +139,17 @@ import (
 // it. It is a property of the city's storage configuration rather than of any
 // bead, which is why the caller degrades to unrouted claiming instead of failing.
 var errClaimRouteBindingCannotClaim = errors.New("the relocated coordination-class binding cannot claim")
+
+// errRestampGraphResident reports that an adoption re-stamp was declined because
+// the bead is resident in the relocated graph store, which has no
+// conditional-transfer primitive — and needs none, since no production close
+// path fences a graph-resident bead on its stored assignee.
+//
+// It wraps beads.ErrConditionalTransferUnsupported so a caller that only asks
+// "was a transfer possible?" still sees the same class of answer, while a caller
+// that must decide whether the un-moved spelling is HARMFUL can tell this
+// resident case apart from the work store's identical error.
+var errRestampGraphResident = fmt.Errorf("graph-resident bead: %w", beads.ErrConditionalTransferUnsupported)
 
 // hookClaimClassRoute is the opened coordination-class front door a claim-time
 // write falls back to, plus the per-invocation record of which bead ids the
@@ -284,12 +296,39 @@ func hookClaimRouteVerdict(route *hookClaimClassRoute, err error, stderr io.Writ
 // answers a question about the WORK store, where only beads.ErrNotFound proves
 // the bead is absent and everything else may be an outstanding mutation; this
 // one answers a question about the BINDING, reached only after a work store
-// already proved this session owns nothing there. The refusal is returned before
-// any write (the adapter's type assertion fails first), so nothing is
-// outstanding anywhere and the bead can be skipped exactly as the work-side
-// not-found is.
+// already proved this session owns nothing there. Both refusals it recognizes
+// are returned before any write, so nothing is outstanding anywhere and the bead
+// can be skipped exactly as the work-side not-found is:
+//
+//   - storebinding.ErrBeadsAdapterCapability: the graph adapter's type
+//     assertion on the binding fails first.
+//   - beads.ErrClaimUnsupported: a forwarding wrapper has the two-argument
+//     Claim, so it passes newHookClaimClassRoute's door check, but the store it
+//     wraps does not, and the wrapper refuses before forwarding.
 func hookClaimBindingRefusedTheClaim(err error) bool {
-	return errors.Is(err, storebinding.ErrBeadsAdapterCapability)
+	return errors.Is(err, storebinding.ErrBeadsAdapterCapability) ||
+		errors.Is(err, beads.ErrClaimUnsupported)
+}
+
+// hookClaimBeadIsAWisp reports whether a routed claim failed because the
+// relocated binding resolved id to a wisp row rather than to a claimable
+// issue.
+//
+// A wisp is not an ownership conflict and not evidence of an outstanding
+// mutation: beads.NativeDoltStore.Claim returns beads.ErrWispNotClaimable (see
+// its doc comment) only for an id the claimer's own contract refused before any
+// write was attempted, which is the same "refused before any write, so nothing
+// is outstanding" shape hookClaimBindingRefusedTheClaim carries for a
+// capability-less binding. Only a native-store binding produces this sentinel;
+// a SQLite- or bd-backed binding never does.
+//
+// The ready tier's claimFirstReadyHookAssignment fails the whole hook invocation
+// on any claim error it does not recognize, so an unrecognized wisp refusal
+// would stop this session over one routed id that no front door will ever be
+// able to claim — the one outcome ErrWispNotClaimable's own doc comment says
+// should instead be "log it once and move on."
+func hookClaimBeadIsAWisp(err error) bool {
+	return errors.Is(err, beads.ErrWispNotClaimable)
 }
 
 // hookClaimClassRouteForCity resolves the claim-time class front door for a
@@ -637,6 +676,24 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return route.graph.ReleaseIfCurrent(beadID, assignee)
 		}
 		return base.Release(ctx, dir, env, beadID, assignee)
+	}
+
+	// An adoption re-stamp of a bead resident in the relocated graph store has
+	// no conditional-transfer primitive there, so it reports unsupported and
+	// the bead is adopted as-is (the pre-re-stamp behavior). Anything else
+	// is the work store's, like the release above.
+	//
+	// The unsupported answer is tagged with errRestampGraphResident, because the
+	// caller's decision turns on WHERE the bead lives rather than on the error:
+	// the identical beads.ErrConditionalTransferUnsupported from the work store
+	// (a bd below the --if-assignee floor) means the opposite — a bead whose
+	// close bd will fence on the spelling that could not be moved — and must
+	// refuse adoption. See restampHookAdoption.
+	ops.RestampAdopted = func(ctx context.Context, dir string, env []string, beadID, fromAssignee, toAssignee string) (bool, error) {
+		if route.knownResident(beadID) {
+			return false, errRestampGraphResident
+		}
+		return base.RestampAdopted(ctx, dir, env, beadID, fromAssignee, toAssignee)
 	}
 
 	// The lifecycle-start emission reads the step's workflow root, so it belongs

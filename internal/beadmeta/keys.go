@@ -83,12 +83,31 @@ const (
 	ControlDispatcherFallbackMetadataKey = "gc.control_dispatcher_fallback"
 	ControlEpochMetadataKey              = "gc.control_epoch"
 	ControlForMetadataKey                = "gc.control_for"
-	ControlQuarantineReasonMetadataKey   = "gc.control_quarantine_reason"
-	ControlQuarantinedAtMetadataKey      = "gc.control_quarantined_at"
-	ControlQuarantinedMetadataKey        = "gc.control_quarantined"
-	ControllerErrorClassMetadataKey      = "gc.controller_error_class"
-	ControllerErrorMetadataKey           = "gc.controller_error"
-	ControllerRetryableMetadataKey       = "gc.controller_retryable"
+	// ControlPendingReasonMetadataKey records the latest ErrControlPending
+	// refusal text for a control bead. Pending keeps its own namespace rather
+	// than reusing the gc.controller_* keys: the two dispositions have
+	// independent budgets, and sharing one deadline anchor would let a long
+	// pending wait expire a later semantic refusal's budget on its FIRST
+	// refusal — quarantining the bead the pending disposition exists to keep
+	// open.
+	ControlPendingReasonMetadataKey = "gc.control_pending_reason"
+	// ControlPendingCountMetadataKey counts pending sweeps recorded for a
+	// control bead. Diagnostics only, like its Tier-B counterpart.
+	ControlPendingCountMetadataKey = "gc.control_pending_count"
+	// ControlPendingFirstSeenMetadataKey is the RFC3339 instant of the FIRST
+	// pending refusal recorded for a control bead. Pending retry stays
+	// unbounded; this anchor bounds only how long it stays SILENT.
+	ControlPendingFirstSeenMetadataKey = "gc.control_pending_first_seen"
+	// ControlPendingStalledMetadataKey marks that the one-shot control.stalled
+	// escalation has already been emitted for this bead's pending wait, so a
+	// never-healing pending is loud once rather than every sweep.
+	ControlPendingStalledMetadataKey   = "gc.control_pending_stalled"
+	ControlQuarantineReasonMetadataKey = "gc.control_quarantine_reason"
+	ControlQuarantinedAtMetadataKey    = "gc.control_quarantined_at"
+	ControlQuarantinedMetadataKey      = "gc.control_quarantined"
+	ControllerErrorClassMetadataKey    = "gc.controller_error_class"
+	ControllerErrorMetadataKey         = "gc.controller_error"
+	ControllerRetryableMetadataKey     = "gc.controller_retryable"
 	// ControllerRetryFirstSeenMetadataKey is the RFC3339 instant of the FIRST
 	// semantic-refusal retry recorded for a control bead. It is the persisted
 	// deadline anchor for the bounded Tier-B retry budget: it lives on the bead
@@ -179,6 +198,7 @@ const (
 	// (ga-wevcl). Live closes on stamped roots remain covered by the delta
 	// lane, which reacts to the close events themselves.
 	CompletionFactsConvergedMetadataKey = "gc.completion_facts_converged"
+	LabelRevisionMetadataKey            = "gc.label_rev" // label CAS bookkeeping; see beads.NativeDoltStore.updateLabelsIfMatch
 	LastFailureClassMetadataKey         = "gc.last_failure_class"
 	LastFinalizeErrorMetadataKey        = "gc.last_finalize_error"
 	LeaseOwnerMetadataKey               = "gc.lease_owner"
@@ -208,6 +228,7 @@ const (
 	RequiredArtifactMetadataKey         = "gc.required_artifact"
 	RequiredArtifactsMetadataKey        = "gc.required_artifacts"
 	ReviewGateMetadataKey               = "gc.review_gate"
+	RetryAttemptMetadataKey             = "gc.retry_attempt" // see attempt.go
 	RetryCountMetadataKey               = "gc.retry_count"
 	RetryFromMetadataKey                = "gc.retry_from"
 	RetrySessionRecycledMetadataKey     = "gc.retry_session_recycled"
@@ -422,6 +443,38 @@ const (
 	MergeStrategyMetadataKey = "merge_strategy"
 )
 
+// Accepted MergeStrategyMetadataKey values. They are part of the bead-metadata
+// contract shared by `gc sling`, the HTTP sling endpoint, rig config, and the
+// pack formulas that read merge_strategy back off a work bead, so they must not
+// change without a migration. An absent key is not one of these values —
+// consumers read "unset" as their own implicit default.
+const (
+	// MergeStrategyDirect merges the work branch into its target branch.
+	MergeStrategyDirect = "direct"
+	// MergeStrategyMR delivers the work through a merge/pull request rather
+	// than by pushing to the target branch.
+	MergeStrategyMR = "mr"
+	// MergeStrategyLocal leaves the work on its branch with no merge and no
+	// request; the consumer decides what to do with it.
+	MergeStrategyLocal = "local"
+)
+
+// KnownMergeStrategies lists every accepted MergeStrategyMetadataKey value, in
+// the order validators render them into "valid values are ..." messages.
+var KnownMergeStrategies = []string{MergeStrategyDirect, MergeStrategyMR, MergeStrategyLocal}
+
+// IsKnownMergeStrategy reports whether s is an accepted merge strategy. The
+// comparison is exact: the empty string is "unset" rather than a strategy, and
+// callers are expected to trim before asking.
+func IsKnownMergeStrategy(s string) bool {
+	for _, known := range KnownMergeStrategies {
+		if s == known {
+			return true
+		}
+	}
+	return false
+}
+
 // OptionMetadataPrefix is the dynamic non-"gc."-prefixed key prefix under
 // which provider option choices are stored as opt_<OptionsSchema key> (e.g.
 // opt_model, opt_effort) on session and work beads. The suffix is open-world
@@ -454,6 +507,10 @@ var KnownMetadataKeys = []string{
 	ContinuationGroupMetadataKey,
 	ControlEpochMetadataKey,
 	ControlForMetadataKey,
+	ControlPendingReasonMetadataKey,
+	ControlPendingCountMetadataKey,
+	ControlPendingFirstSeenMetadataKey,
+	ControlPendingStalledMetadataKey,
 	ControlQuarantineReasonMetadataKey,
 	ControlQuarantinedAtMetadataKey,
 	ControlQuarantinedMetadataKey,
@@ -517,6 +574,7 @@ var KnownMetadataKeys = []string{
 	IterationMetadataKey,
 	ItemRootKeyMetadataKey,
 	KindMetadataKey,
+	LabelRevisionMetadataKey,
 	LastFailureClassMetadataKey,
 	LastFinalizeErrorMetadataKey,
 	LeaseOwnerMetadataKey,
@@ -546,6 +604,7 @@ var KnownMetadataKeys = []string{
 	RequiredArtifactMetadataKey,
 	RequiredArtifactsMetadataKey,
 	ReviewGateMetadataKey,
+	RetryAttemptMetadataKey,
 	RetryCountMetadataKey,
 	RetryFromMetadataKey,
 	RetrySessionRecycledMetadataKey,

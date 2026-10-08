@@ -25,6 +25,7 @@ go_test(
     name = "importsvc_test",
     srcs = [
         "importsvc_test.go",
+        "registry_release_test.go",
         "source_test.go",
         "source_userinfo_test.go",
         "testenv_import_test.go",
@@ -35,7 +36,9 @@ go_test(
         "//internal/fsys",
         "//internal/git",
         "//internal/packman",
+        "//internal/packregistry",
         "//internal/testenv",
+        "//internal/testutil",
     ],
 )
 
@@ -47,6 +50,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

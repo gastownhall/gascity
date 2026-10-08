@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
@@ -50,7 +51,7 @@ type sessionWakeDeps struct {
 	now                       func() time.Time
 	withdrawQueuedWaitNudges  func(string, []string) error
 	cityUsesManagedReconciler func(string) bool
-	pokeController            func(string) error
+	pokeController            func(string, reconcilekey.Key) error
 }
 
 // cmdSessionWake is the CLI entry point for "gc session wake".
@@ -74,7 +75,7 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		now:                       time.Now,
 		withdrawQueuedWaitNudges:  withdrawQueuedWaitNudges,
 		cityUsesManagedReconciler: cityUsesManagedReconciler,
-		pokeController:            pokeController,
+		pokeController:            enqueueController,
 	})
 }
 
@@ -144,6 +145,12 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 		if rigName, suspended := sessionWakeOwningRigSuspended(agent, deps.cfg, deps.cityPath); suspended {
 			fmt.Fprintf(stderr, "gc session wake: rig %q is suspended -- wake dropped; run `gc rig resume %s`\n", rigName, rigName) //nolint:errcheck
 			rejectStuck = true
+		} else if session.DemandOnlySingletonWakeRefused(deps.cfg, agent, res.Info) {
+			// Same shape again: the wake is recorded (holds and quarantine are
+			// cleared), but the reconciler starts this session only from pool
+			// demand, so reporting "wake requested" would be false (#6858).
+			fmt.Fprintf(stderr, "gc session wake: wake recorded for session %s, but it will not start: %s\n", id, session.DemandOnlySingletonExplanation(agent.QualifiedName())) //nolint:errcheck
+			rejectStuck = true
 		}
 	}
 	if deps.cityResolved {
@@ -151,7 +158,7 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 			fmt.Fprintf(stderr, "gc session wake: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck
 		}
 		if deps.cityUsesManagedReconciler(deps.cityPath) {
-			if err := deps.pokeController(deps.cityPath); err != nil {
+			if err := deps.pokeController(deps.cityPath, reconcilekey.Session(id)); err != nil {
 				fmt.Fprintf(stderr, "gc session wake: warning: poke failed: %v\n", err) //nolint:errcheck
 			}
 		}

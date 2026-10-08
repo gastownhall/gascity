@@ -1047,9 +1047,7 @@ while True:
 }
 
 func TestDoltStateInspectManagedCmdReportsPortHolderOwnership(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1086,9 +1084,7 @@ func TestDoltStateInspectManagedCmdReportsPortHolderOwnership(t *testing.T) {
 }
 
 func TestDoltStateProbeManagedCmdReportsRunningOwnedHolder(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1137,9 +1133,7 @@ func TestDoltStateProbeManagedCmdReportsRunningOwnedHolder(t *testing.T) {
 }
 
 func TestDoltStateProbeManagedCmdReportsImposterHolder(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	port := reserveRandomTCPPort(t)
 	listener := startTCPListenerProcess(t, port)
@@ -1172,9 +1166,7 @@ func TestDoltStateProbeManagedCmdReportsImposterHolder(t *testing.T) {
 }
 
 func TestDoltStateProbeManagedCmdReportsDeletedOwnedHolder(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1228,9 +1220,7 @@ func TestDoltStateProbeManagedCmdReportsDeletedOwnedHolder(t *testing.T) {
 }
 
 func TestDoltStateExistingManagedCmdRejectsForeignListenerBackedOnlyByStateDataDir(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1276,9 +1266,7 @@ func TestDoltStateExistingManagedCmdRejectsForeignListenerBackedOnlyByStateDataD
 }
 
 func TestDoltStateExistingManagedCmdReportsReusableOwnedServer(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1344,9 +1332,7 @@ esac
 }
 
 func TestDoltStateExistingManagedCmdFallsBackToPublishedRuntimeState(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1413,9 +1399,7 @@ esac
 }
 
 func TestDoltStateExistingManagedCmdReportsDeletedInodes(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1477,9 +1461,7 @@ esac
 }
 
 func TestDoltStatePreflightCleanCmdRemovesSocketsButPreservesDoltInternals(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -1544,9 +1526,7 @@ func TestDoltStatePreflightCleanCmdRemovesSocketsButPreservesDoltInternals(t *te
 
 func TestDoltStatePreflightCleanCmdPreservesLiveArtifacts(t *testing.T) {
 	skipSlowCmdGCTest(t, "spawns managed dolt holder processes; run make test-cmd-gc-process for full coverage")
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -2599,9 +2579,7 @@ func TestDoltStateStopManagedCmdCleansStaleStateWhenNoPID(t *testing.T) {
 }
 
 func TestDoltStateStopManagedCmdDoesNotKillImposterPortHolder(t *testing.T) {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		t.Skip("lsof not installed")
-	}
+	skipWithoutProcessInspection(t)
 
 	cityPath := t.TempDir()
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
@@ -3108,5 +3086,17 @@ func TestDoltStateCityScopedLifecycleCommandsRefuseProviderOwnership(t *testing.
 				}
 			})
 		}
+	}
+}
+
+// skipWithoutProcessInspection skips tests that need to identify port holders
+// and open files. Linux answers both from /proc; other hosts need lsof.
+func skipWithoutProcessInspection(t *testing.T) {
+	t.Helper()
+	if _, err := os.Stat("/proc/net/tcp"); err == nil {
+		return
+	}
+	if _, err := exec.LookPath("lsof"); err != nil {
+		t.Skip("needs /proc or lsof to identify port holders")
 	}
 }

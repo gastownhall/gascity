@@ -19,6 +19,11 @@
           "type": "integer",
           "description": "OutputBufferLines is the number of output lines to keep in the\ncircular buffer for Peek. Defaults to 1000.",
           "default": 1000
+        },
+        "stop_grace": {
+          "type": "string",
+          "description": "StopGrace is how long stopping an ACP session waits after SIGTERM\nbefore escalating to SIGKILL. Raise it for agents that need longer to\ndrain in-flight tool calls on shutdown. Duration string (e.g., \"5s\",\n\"20s\"). Defaults to \"5s\"; non-positive or unparseable values fall back\nto the default. gc stop bounds each session at 30s, so keep stop_grace\ncomfortably below that.",
+          "default": "5s"
         }
       },
       "additionalProperties": false,
@@ -1089,6 +1094,25 @@
           ],
           "description": "GuardedRelease selects the ownership-release discipline for work beads:\n\"off\" (legacy, owner-blind bd update/unclaim), \"auto\" (fence-guarded\nrelease verbs where the bd binary is capable, loud degrade otherwise), or\n\"require\" (guarded release or a typed refusal). Empty defaults to \"off\".\nAny other value fails config load."
         },
+        "allow_schema_behind_migrate": {
+          "type": "boolean",
+          "description": "AllowSchemaBehindMigrate opts this city in to letting the linked beads\nlibrary migrate its database forward when the database's own schema\ncursor trails the library's ceiling. Without it, the native-store\npreflight schema check FAILs a behind schema (stays on BdStore) instead\nof risking a native open that would migrate a possibly-shared database;\nthe direct native-open path withholds BD_ALLOW_REMOTE_MIGRATE from the\nlinked library the same way. Default: false (nil). A break-glass\nGC_BEADS_ALLOW_SCHEMA_BEHIND_MIGRATE env override is registered in\ninternal/rollout (beads.allow_schema_behind_migrate); read the effective\nvalue through internal/rollout.Flags.AllowSchemaBehindMigrate, never\nthis field directly.",
+          "default": false
+        },
+        "proxied_idle_timeout": {
+          "type": "string",
+          "description": "ProxiedIdleTimeout is how long a bd-owned proxied scope's proxy and Dolt\nchild stay up with no connections before bd retires them; the next bd\ncommand restarts them. Go duration; \"0\" means never. A finite value\nmust be at least 1m. Empty uses the default, 30m. It applies to scopes gc\ninitializes (gc init, gc rig add, gc beads city migrate-proxied); bd\ncannot change an existing scope's value, and gc doctor reports drift.\nOverridden per rig by beads_proxied_idle_timeout and by the\nGC_BEADS_PROXIED_IDLE_TIMEOUT environment variable.",
+          "default": "30m"
+        },
+        "native_transport": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "off"
+          ],
+          "description": "NativeTransport selects whether this city's bead stores may open the\nnative Dolt store at all: \"off\" (this city's stores never open\nnatively; always BdStore, the bd CLI subprocess — logged once at boot)\nor \"auto\" (default: native when preflight-eligible, today's behavior).\nEmpty defaults to \"auto\". Any other value (including \"require\", which\nbelongs to conditional_writes/guarded_release, not this switch) fails\nconfig load. A running city keeps the stores it holds open on the value\nit read at boot until it restarts; every other open, by a gc command or\nfor a single tick, reads the current value.\nGC_BEADS_FORCE_FALLBACK remains a deprecated process-wide alias for\n\"off\" that overrides every city's value for one release.",
+          "default": "auto"
+        },
         "policies": {
           "additionalProperties": {
             "$ref": "#/$defs/BeadPolicyConfig"
@@ -1436,6 +1460,18 @@
             "supervisor"
           ],
           "description": "NudgeDispatcher selects how queued nudges get delivered to running\nsessions. \"legacy\" (default) auto-spawns a per-session `gc nudge poll`\nprocess that polls the file-backed queue every 2s. \"supervisor\" runs\nthe delivery loop inside the city runtime instead, with a unix-socket\nwake fast path triggered by enqueue, eliminating the per-session bd\nshellout storm.",
+          "default": "legacy"
+        },
+        "session_reconciler": {
+          "type": "string",
+          "enum": [
+            "legacy",
+            "v2",
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "SessionReconciler selects the controller's session reconciler. \"legacy\"\n(default) runs the tick reconciler. \"v2\" is reserved for the keyed\nreconciler and is refused in this build: a controller configured with it\ndoes not start. The gc-enterprise values \"off\", \"auto\" and \"require\" are\ndeprecated aliases for \"legacy\". Boot-latched: a change applies at the next\ncontroller restart. Leave it unset.",
           "default": "legacy"
         },
         "auto_restart_on_drift": {
@@ -2167,7 +2203,7 @@
         },
         "max_dispatches_per_tick": {
           "type": "integer",
-          "description": "MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron\nand event triggers) the supervisor dispatches per tick, in a rotation\nthat resumes where the previous tick stopped. Unset keeps the built-in\ndefault of 4; set to 1 to drain overdue cooldown orders one-per-tick at\ncold start instead of firing several concurrent goroutines at once.\nCondition-triggered orders are outside this budget: a passing check\nmeans work is pending right now, so they dispatch on the tick that\nobserves it. The open-tracking and open-work gates still run for them\n(unless the order sets no_work_gate), but those gates are keyed per\norder and only hold back a redispatch of an order whose previous run\nis still moving, so they do not bound the tick as a whole: a tick\nlaunches at most this budget plus one dispatch per condition order\nwhose check passed on that tick. That second term grows with how many\ncondition orders a city defines, not with this setting, and at cold\nstart, before any tracking bead exists, neither gate holds a\nsimultaneously-due set back."
+          "description": "MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron\nand event triggers) the supervisor dispatches per orders-lane pass, in\na rotation that resumes where the previous pass stopped. The key keeps\nits historical name from when order dispatch ran once per controller\ntick. Unset keeps the built-in default of 4; set to 1 to drain overdue\ncooldown orders one per pass at cold start instead of firing several\nconcurrent goroutines at once. Condition-triggered orders are outside\nthis budget: a passing check means work is pending right now, so they\ndispatch on the pass that observes it. The open-tracking and open-work\ngates still run for them (unless the order sets no_work_gate), but\nthose gates are keyed per order and only hold back a redispatch of an\norder whose previous run is still moving, so they do not bound the pass\nas a whole: a pass launches at most this budget plus one dispatch per\ncondition order whose check passed on that pass. That second term grows\nwith how many condition orders a city defines, not with this setting,\nand at cold start, before any tracking bead exists, neither gate holds\na simultaneously-due set back."
         },
         "overrides": {
           "items": {
@@ -2605,6 +2641,10 @@
           "type": "string",
           "description": "DefaultBranch is the rig repository's mainline branch (e.g. \"main\",\n\"master\", \"develop\"). When set, routing formulas use this as the\ndefault merge target instead of probing origin/HEAD at sling time.\nCaptured by `gc rig add` from the rig's git config; set manually for\nrigs whose mainline isn't reachable via origin/HEAD."
         },
+        "default_merge_strategy": {
+          "type": "string",
+          "description": "DefaultMergeStrategy is the merge strategy `gc sling` stamps on a bead\nrouted into this rig when the caller passes no --merge flag. One of\n\"direct\", \"mr\", or \"local\"; empty leaves the bead unstamped, which\nconsumers read as their own implicit default. Set it to \"mr\" on rigs\nthat deliver work through a pull request instead of a push to the\ntarget branch, so a bare `gc sling` records the shape the rig actually\nuses rather than one every caller has to remember to pass."
+        },
         "suspended": {
           "type": "boolean",
           "description": "Suspended is the deprecated pre-runtime-state suspension flag.\nParsed for backwards compatibility and treated as an alias for\nSuspendedOnStart by [Rig.EffectiveSuspendedOnStart], so existing\ncities with `suspended = true` continue to start their rigs\nsuspended after upgrade. Live suspend/resume commands no longer\nwrite this field. `gc doctor` flags it and offers `--fix` to\nrename to suspended_on_start."
@@ -2678,6 +2718,10 @@
           },
           "type": "object",
           "description": "FormulaVars provides rig-scoped defaults for formula vars. Keys match\nvar names declared in formula `[vars.\u003cname\u003e]` blocks. Values are used\nwhen a formula runs in this rig and the caller did not pass an\nexplicit --var override. Takes precedence over formula-level defaults\nbut loses to --var flags."
+        },
+        "beads_proxied_idle_timeout": {
+          "type": "string",
+          "description": "BeadsProxiedIdleTimeout overrides [beads] proxied_idle_timeout for this\nrig's bd-owned proxied scope. Go duration; \"0\" means never. Ignored, with\na warning, for a rig that shares the city's proxy root: one proxy serves\nevery scope on that root and carries the city's value."
         }
       },
       "additionalProperties": false,
@@ -2705,6 +2749,10 @@
           "type": "string",
           "description": "DefaultBranch overrides the rig's recorded mainline branch."
         },
+        "default_merge_strategy": {
+          "type": "string",
+          "description": "DefaultMergeStrategy overrides the merge strategy `gc sling` stamps on\nbeads routed into this rig. Set to \"\" to clear the rig's default and go\nback to leaving merge_strategy unstamped."
+        },
         "suspended": {
           "type": "boolean",
           "description": "Suspended is the deprecated, pre-runtime-state suspension override.\nParsed for backwards compatibility; `gc doctor` surfaces it as a\nwarning and recommends the rename to SuspendedOnStart. No behavioral\ncode path reads it."
@@ -2719,6 +2767,10 @@
           },
           "type": "object",
           "description": "FormulaVars adds or overrides rig-scoped formula var defaults.\nAdditive merge: patch keys win over existing rig keys, unspecified\nkeys are preserved."
+        },
+        "beads_proxied_idle_timeout": {
+          "type": "string",
+          "description": "BeadsProxiedIdleTimeout overrides the rig's beads_proxied_idle_timeout."
         }
       },
       "additionalProperties": false,

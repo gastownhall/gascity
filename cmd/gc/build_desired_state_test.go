@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -357,7 +358,7 @@ func TestCollectAllOpenSessionInfos(t *testing.T) {
 			t.Fatalf("close session bead: %v", err)
 		}
 
-		infos, err := collectAllOpenSessionInfos("", &config.City{}, cityStore, nil, nil)
+		infos, err := collectAllOpenSessionInfos("", &config.City{}, cityStore, nil, nil, nil)
 		if err != nil {
 			t.Fatalf("collectAllOpenSessionInfos: %v", err)
 		}
@@ -390,7 +391,7 @@ func TestCollectAllOpenSessionInfos(t *testing.T) {
 		}
 		store := &partialSessionListStore{MemStore: backing}
 
-		infos, err := collectAllOpenSessionInfos("", &config.City{}, store, nil, nil)
+		infos, err := collectAllOpenSessionInfos("", &config.City{}, store, nil, nil, nil)
 		if err == nil {
 			t.Fatal("collectAllOpenSessionInfos returned nil error on a partial-result store")
 		}
@@ -433,7 +434,7 @@ func TestCollectAllOpenSessionInfos(t *testing.T) {
 		rigStores := map[string]beads.Store{"rig-A": rigStore}
 
 		// Control: with the rig live, both sessions are collected.
-		liveInfos, err := collectAllOpenSessionInfos("", cfg, cityStore, rigStores, nil)
+		liveInfos, err := collectAllOpenSessionInfos("", cfg, cityStore, rigStores, nil, nil)
 		if err != nil {
 			t.Fatalf("collectAllOpenSessionInfos (live rig): %v", err)
 		}
@@ -443,7 +444,7 @@ func TestCollectAllOpenSessionInfos(t *testing.T) {
 
 		// Suspending the rig drops its store from the fan-out.
 		suspended := map[string]bool{rigPath: true}
-		infos, err := collectAllOpenSessionInfos("", cfg, cityStore, rigStores, suspended)
+		infos, err := collectAllOpenSessionInfos("", cfg, cityStore, rigStores, suspended, nil)
 		if err != nil {
 			t.Fatalf("collectAllOpenSessionInfos (suspended rig): %v", err)
 		}
@@ -2447,7 +2448,7 @@ func TestReadyAssignedWorkAssigneesExcludeBroadIdentities(t *testing.T) {
 			{Template: "mayor", Mode: "always"},
 			{Dir: "repo", Template: "named-worker", Mode: "on_demand"},
 		},
-	}, nil, nil, nil)
+	}, nil, nil, nil, nil, "", nil)
 
 	for _, disallowed := range []string{"repo/worker", "mayor"} {
 		for _, value := range got {
@@ -2490,7 +2491,7 @@ func TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount(t
 
 	countListCalls := func(n int) int {
 		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
-		readyAssignedWorkAssignees(newCityWithNamedSessions(n), store, nil, nil)
+		readyAssignedWorkAssignees(newCityWithNamedSessions(n), store, nil, nil, nil, "", nil)
 		return store.listCalls
 	}
 
@@ -2513,7 +2514,7 @@ func TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount(t
 func TestReadyAssignedWorkAssigneesSkipsClosedIndexWithoutOnDemandNamedSession(t *testing.T) {
 	countListCalls := func(cfg *config.City) int {
 		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
-		readyAssignedWorkAssignees(cfg, store, nil, nil)
+		readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "", nil)
 		return store.listCalls
 	}
 
@@ -5940,6 +5941,211 @@ func (s *failingPoolCreateStore) claimFailure() bool {
 	return true
 }
 
+// panickingLegStore panics on one read, standing in for a bug inside a demand
+// leg's store read (a bd JSON decode edge, a nil wrapper deref). safeTick
+// recovers only the tick goroutine, so before mc-zndi7.40 a panic in a fan-out
+// leg killed the whole test binary, and the controller with it.
+type panickingLegStore struct {
+	beads.Store
+	panicOnList  bool
+	panicOnReady bool
+}
+
+func (s panickingLegStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if s.panicOnList {
+		panic("injected leg panic: List")
+	}
+	return s.Store.List(query)
+}
+
+func (s panickingLegStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	if s.panicOnReady {
+		panic("injected leg panic: Ready")
+	}
+	return s.Store.Ready(query...)
+}
+
+// panickingPoolCreateStore panics on the next panicsRemaining session-bead
+// creates, inside a realize worker.
+type panickingPoolCreateStore struct {
+	*beads.MemStore
+	mu              sync.Mutex
+	panicsRemaining int
+}
+
+func (s *panickingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
+	if bead.Type == sessionBeadType {
+		s.mu.Lock()
+		panics := s.panicsRemaining > 0
+		s.panicsRemaining--
+		s.mu.Unlock()
+		if panics {
+			panic("injected pool create panic")
+		}
+	}
+	return s.MemStore.Create(bead)
+}
+
+func TestEvaluatePendingPoolsRecoversPanickingProbe(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "alpha"}, {Name: "zulu"}}}
+	pools := []poolEvalWork{
+		{agentIdx: 0, sp: scaleParams{Max: 5, Check: "probe-alpha"}, newDemand: true},
+		{agentIdx: 1, sp: scaleParams{Max: 5, Check: "probe-zulu"}, newDemand: true},
+	}
+	runner := func(command, _ string, _ map[string]string) (string, error) {
+		if strings.Contains(command, "probe-alpha") {
+			panic("injected scale_check panic")
+		}
+		return "3", nil
+	}
+	var stderr bytes.Buffer
+
+	counts, partials := evaluatePendingPools(cfg, pools, runner, &stderr, nil)
+
+	if !partials[0] || counts[0] != 0 {
+		t.Fatalf("panicking probe: count=%d partial=%v, want 0 and partial", counts[0], partials[0])
+	}
+	if partials[1] || counts[1] != 3 {
+		t.Fatalf("healthy probe: count=%d partial=%v, want 3 and not partial", counts[1], partials[1])
+	}
+	if !strings.Contains(stderr.String(), "injected scale_check panic") || !strings.Contains(stderr.String(), "goroutine") {
+		t.Fatalf("stderr = %q, want the panic value and its stack", stderr.String())
+	}
+}
+
+func TestCollectOpenSessionInfosRecoversPanickingLeg(t *testing.T) {
+	cfg := &config.City{Rigs: []config.Rig{{Name: "rig-A", Path: "/c/rigs/rig-A"}}}
+	cityStore := beads.NewMemStore()
+	cityBead, err := cityStore.Create(beads.Bead{
+		Status: "open", Type: sessionBeadType,
+		Metadata: map[string]string{"template": "worker", "state": "active"},
+	})
+	if err != nil {
+		t.Fatalf("create city session bead: %v", err)
+	}
+	rigStores := map[string]beads.Store{"rig-A": panickingLegStore{Store: beads.NewMemStoreFrom(100, nil, nil), panicOnList: true}}
+
+	infos, err := collectAllOpenSessionInfos("", cfg, cityStore, rigStores, nil, nil)
+
+	if err == nil || !strings.Contains(err.Error(), "panicked") {
+		t.Fatalf("err = %v, want the panicking rig leg reported as an error", err)
+	}
+	if len(infos) != 1 || infos[0].ID != cityBead.ID {
+		t.Fatalf("infos = %#v, want the city leg's session intact", infos)
+	}
+}
+
+func TestCollectAssignedWorkBeadsRecoversPanickingLeg(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		rig  panickingLegStore
+	}{
+		{name: "in-progress pass", rig: panickingLegStore{panicOnList: true}},
+		{name: "ready pass", rig: panickingLegStore{panicOnReady: true}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cityStore := beads.NewMemStore()
+			// Open, assigned and ready: no first-pass leg captures it, so the
+			// Ready pass runs over every leg and finds it in the city store.
+			work, err := cityStore.Create(beads.Bead{Title: "city work", Type: "task", Status: "open", Assignee: "worker-1"})
+			if err != nil {
+				t.Fatalf("create city work: %v", err)
+			}
+			tt.rig.Store = beads.NewMemStoreFrom(100, nil, nil)
+
+			got, _, _, _, partial := collectAssignedWorkBeadsWithStores(
+				"",
+				&config.City{Rigs: []config.Rig{{Name: "repo", Path: "/repo"}}},
+				cityStore,
+				map[string]beads.Store{"repo": tt.rig},
+				nil,
+				nil,
+			)
+
+			if !partial {
+				t.Fatal("partial = false, want the panicking rig leg reported partial")
+			}
+			if len(got) != 1 || got[0].ID != work.ID {
+				t.Fatalf("got = %#v, want the city leg's work %s intact", got, work.ID)
+			}
+		})
+	}
+}
+
+func TestCollectOpenUnassignedRoutedWorkRecoversPanickingLeg(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "repo", Path: "/repo"}},
+	}
+	cityStore := beads.NewMemStore()
+	routed, err := cityStore.Create(beads.Bead{
+		Title: "routed", Type: "task", Status: "open",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create routed work: %v", err)
+	}
+	rigStores := map[string]beads.Store{"repo": panickingLegStore{Store: beads.NewMemStoreFrom(100, nil, nil), panicOnList: true}}
+	var stderr bytes.Buffer
+
+	got, _, _, partial := collectOpenUnassignedRoutedWork("", cfg, cityStore, rigStores, nil, &stderr, nil, nil)
+
+	if !partial {
+		t.Fatal("partial = false, want the panicking rig leg reported partial")
+	}
+	if len(got) != 1 || got[0].ID != routed.ID {
+		t.Fatalf("got = %#v, want the city leg's routed row %s intact", got, routed.ID)
+	}
+	if !strings.Contains(stderr.String(), "injected leg panic") {
+		t.Fatalf("stderr = %q, want the recovered panic reported", stderr.String())
+	}
+}
+
+// The second case panics on every create with one more request than there are
+// workers. A recover around the whole worker instead of each job would let every
+// worker die and leave the sender blocked on the last job.
+func TestRealizePoolDesiredSessionsRecoversPanickingCreate(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		requests    int
+		panics      int
+		wantDesired int
+	}{
+		{name: "one create panics", requests: 2, panics: 1, wantDesired: 1},
+		{name: "every create panics", requests: poolRealizeParallelism + 1, panics: poolRealizeParallelism + 1, wantDesired: 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &panickingPoolCreateStore{MemStore: beads.NewMemStore(), panicsRemaining: tt.panics}
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:              "worker",
+					StartCommand:      "true",
+					MinActiveSessions: intPtr(0),
+					MaxActiveSessions: intPtr(tt.requests),
+				}},
+			}
+			var stderr bytes.Buffer
+			bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+			bp.sessionBeads = &sessionBeadSnapshot{}
+			requests := make([]SessionRequest, tt.requests)
+			for i := range requests {
+				requests[i] = SessionRequest{Template: "worker", Tier: "new"}
+			}
+			desired := map[string]TemplateParams{}
+
+			realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{Template: "worker", Requests: requests}, desired, &stderr)
+
+			if got := len(desired); got != tt.wantDesired {
+				t.Fatalf("desired sessions = %d, want %d; stderr=%q", got, tt.wantDesired, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "injected pool create panic") {
+				t.Fatalf("stderr = %q, want the recovered create panic reported", stderr.String())
+			}
+		})
+	}
+}
+
 func (s *delayingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
 	if bead.Type == sessionBeadType {
 		s.beginSessionCreate()
@@ -6130,8 +6336,10 @@ func TestBuildDesiredState_MinZeroDefaultScaleCheckRoutedWorkCreatesPoolSession(
 	if err != nil {
 		t.Skip("jq not installed")
 	}
+	pinTestOwnedBDHome(t)
 
-	cityPath := t.TempDir()
+	cityPath := beadstest.GuardedTempDir(t)
+	registerRealBDServerStop(t, cityPath)
 	beadsDir := filepath.Join(cityPath, ".beads")
 	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(jqPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
 	t.Setenv("BEADS_DIR", beadsDir)
@@ -6141,9 +6349,9 @@ func TestBuildDesiredState_MinZeroDefaultScaleCheckRoutedWorkCreatesPoolSession(
 	runExternal(t, cityPath, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
 	runExternal(t, cityPath, bdPath, "config", "set", "types.custom", "session")
 
-	store := beads.NewBdStore(cityPath, beads.ExecCommandRunnerWithEnv(map[string]string{
+	store := beads.NewBdStore(cityPath, beads.ExecCommandRunnerWithEnv(beadstest.BdSubprocessEnv(map[string]string{
 		"BEADS_DIR": beadsDir,
-	}))
+	})))
 	if _, err := store.Create(beads.Bead{
 		Title:  "queued polecat work",
 		Type:   "task",
@@ -12695,6 +12903,99 @@ func TestBuildDesiredState_ReportsControlDispatcherScopeGapForRigRootedWork(t *t
 	}
 }
 
+// TestBuildDesiredState_ClassBoundScopeGapRowDoesNotWakeCityDispatcher is the
+// demand half of the scope-gap arm on the binding topology (mc-zndi7.41). The
+// row is rig-rooted, the rig has no dispatcher, and its durable route names the
+// CITY dispatcher (the #3765 shape). The repair suppresses it from the
+// collected snapshot and reports the gap, but the default scale_check probe
+// re-reads Ready from the binding, which is also the city dispatcher's probe
+// target, and so it saw the stale route. The city dispatcher was then desired
+// for a row the gap event called suppressed, and its serve query (by route, no
+// scope filter) would run the finalize cross-scope.
+func TestBuildDesiredState_ClassBoundScopeGapRowDoesNotWakeCityDispatcher(t *testing.T) {
+	cityPath := t.TempDir()
+	work := beads.NewMemStore()
+	binding := beads.NewMemStore()
+	routes := splitRoutes(binding)
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	control, err := binding.Create(beads.Bead{
+		Title:  "Finalize rig workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cityOnlyDispatcherFixtureConfig(t), runtime.NewFake(), binding,
+		map[string]beads.Store{"fixture": beads.NewMemStore()}, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	if len(result.ControlDispatcherScopeGaps) != 1 || result.ControlDispatcherScopeGaps[0].SampleBeadID != control.ID {
+		t.Fatalf("scope gaps = %+v, want exactly one naming %s", result.ControlDispatcherScopeGaps, control.ID)
+	}
+	if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 0 {
+		t.Fatalf("city dispatcher demand = %d, want 0 for a row the repair suppressed", got)
+	}
+	for _, desired := range result.State {
+		if desired.TemplateName == "core.control-dispatcher" {
+			t.Fatalf("desired state woke the city dispatcher for a suppressed scope-gap row: %+v", desired)
+		}
+	}
+}
+
+// TestBuildDesiredState_ClassBoundDeferredRouteRepairDoesNotWakeStaleDispatcher
+// is the deferred-repair arm of the same rule: the rig HAS a dispatcher, but
+// the repair write fails, so the row keeps its stale city route this tick. The
+// repair suppresses it from the collected snapshot until the write lands; the
+// probe must not count it for the city dispatcher the stale route names.
+func TestBuildDesiredState_ClassBoundDeferredRouteRepairDoesNotWakeStaleDispatcher(t *testing.T) {
+	cityPath := t.TempDir()
+	work := beads.NewMemStore()
+	binding := routeRepairUpdateFailStore{Store: beads.NewMemStore(), err: errors.New("route repair write failed")}
+	routes := splitRoutes(binding)
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	if _, err := binding.Create(beads.Bead{
+		Title:  "Finalize rig workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	}); err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), classBindingDispatcherFixtureConfig(t), runtime.NewFake(), binding,
+		map[string]beads.Store{"fixture": beads.NewMemStore()}, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	if len(result.ControlDispatcherScopeGaps) != 0 {
+		t.Fatalf("scope gaps = %+v, want none: the rig has a dispatcher", result.ControlDispatcherScopeGaps)
+	}
+	if got := result.ScaleCheckCounts["core.control-dispatcher"]; got != 0 {
+		t.Fatalf("city dispatcher demand = %d, want 0 for a rig-rooted row whose route repair was deferred", got)
+	}
+	for _, desired := range result.State {
+		if desired.TemplateName == "core.control-dispatcher" {
+			t.Fatalf("desired state woke the city dispatcher for a deferred rig-rooted row: %+v", desired)
+		}
+	}
+}
+
 // One scope with many suppressed rows is ONE gap carrying the count — the
 // per-row emission this replaces is exactly what made the condition invisible.
 func TestRepairControlDispatcherRoutesCountsSuppressedRowsPerScope(t *testing.T) {
@@ -13102,6 +13403,8 @@ func TestCollectOpenUnassignedRoutedWorkKeepsSameIDAcrossStoreScopes(t *testing.
 		map[string]beads.Store{"city": rigStore},
 		nil,
 		io.Discard,
+		nil,
+		nil,
 	)
 	if len(work) != 2 {
 		t.Fatalf("collected work count = %d, want both same-ID rows from independent stores", len(work))
@@ -13170,6 +13473,8 @@ func TestCollectOpenUnassignedRoutedWorkReportsCanonicalStoreRefs(t *testing.T) 
 		map[string]beads.Store{"fixture": listFailStore{Store: beads.NewMemStore()}},
 		nil,
 		&stderr,
+		nil,
+		nil,
 	)
 	for _, want := range []string{"city:test-city: List(open)", "rig:fixture: List(open)"} {
 		if !strings.Contains(stderr.String(), want) {
@@ -14101,74 +14406,6 @@ func TestBuildDesiredState_AsleepNamedAliasHolderStaysSingle(t *testing.T) {
 	// pool standby (alias empty because it lost the alias-acquisition race).
 	if mayorEntries[0].ConfiguredNamedIdentity != "gastown.mayor" {
 		t.Fatalf("retained entry is not the named alias-holder: %+v", mayorEntries[0])
-	}
-}
-
-// TestBuildDesiredStateRecordsDemandSubPhases verifies the sub-phase operation
-// records emitted inside buildDesiredStateWithSessionBeads (sr-5rz /
-// gastownhall/gascity#2463): the aggregate load_demand_snapshot tick phase
-// regularly dominates the controller cycle, and these records are what make
-// its internal split (collection reads vs demand probes vs scale_check execs)
-// attributable from a trace instead of requiring an instrumented rebuild.
-func TestBuildDesiredStateRecordsDemandSubPhases(t *testing.T) {
-	// The non-tick path passes no trace; the recorder must be nil-safe.
-	recordDemandSubPhase(nil, "demand_snapshot.collect_open_session_beads", time.Now(), nil)
-
-	cityDir := t.TempDir()
-	tracer := newSessionReconcilerTracer(cityDir, "trace-town", io.Discard)
-	if !tracer.Enabled() {
-		t.Fatal("tracer should be enabled")
-	}
-	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "", time.Now().UTC(), &config.City{})
-	if cycle == nil {
-		t.Fatal("BeginCycle returned nil")
-	}
-
-	store := beads.NewMemStore()
-	sessionSnapshot, err := loadSessionBeadSnapshot(store)
-	if err != nil {
-		t.Fatalf("load session snapshot: %v", err)
-	}
-	var stderr strings.Builder
-	buildDesiredStateWithSessionBeads(
-		"trace-town", cityDir, time.Now().UTC(), &config.City{}, runtime.NewFake(),
-		store, nil, sessionSnapshot, cycle, &stderr,
-	)
-
-	if err := cycle.End(TraceCompletionCompleted, map[string]any{}); err != nil {
-		t.Fatalf("End: %v", err)
-	}
-	if err := tracer.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	records, err := ReadTraceRecords(traceCityRuntimeDir(cityDir), TraceFilter{})
-	if err != nil {
-		t.Fatalf("ReadTraceRecords: %v", err)
-	}
-	// Sub-phases that must fire on every store-backed build, even with an
-	// empty config (the scale/named demand probes only fire with matching
-	// agents, so they are intentionally not asserted here).
-	want := map[string]bool{
-		"demand_snapshot.collect_open_session_beads": false,
-		"demand_snapshot.collect_assigned_work":      false,
-		"demand_snapshot.collect_unassigned_routed":  false,
-		"demand_snapshot.evaluate_pending_pools":     false,
-	}
-	for i := range records {
-		r := &records[i]
-		if r.RecordType != TraceRecordOperation || r.SiteCode != TraceSiteDemandSnapshot {
-			continue
-		}
-		name, _ := r.Fields["operation_name"].(string)
-		if _, tracked := want[name]; tracked {
-			want[name] = true
-		}
-	}
-	for name, seen := range want {
-		if !seen {
-			t.Errorf("missing demand sub-phase operation record %q", name)
-		}
 	}
 }
 

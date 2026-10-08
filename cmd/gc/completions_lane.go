@@ -367,6 +367,11 @@ func (cr *CityRuntime) runCompletionsSweepChunk(backstop *executionevent.Complet
 	if cr.cs == nil {
 		return executionevent.CompletionBackstopResult{SweepComplete: true}
 	}
+	if cr.beadsQuiescent.Load() {
+		// The city is suspended with nothing running: its stores are not
+		// touched until it resumes.
+		return executionevent.CompletionBackstopResult{}
+	}
 	ep, graphStores := cr.cs.completionReconcileInputs(reconcilePlane)
 	if ep == nil {
 		return executionevent.CompletionBackstopResult{}

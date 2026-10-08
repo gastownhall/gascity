@@ -59,7 +59,7 @@ on:
   schedule:
     - cron: "17 3 * * *"
   pull_request:
-    branches: [main]
+    branches: [main, 'hotfix/**', 'release/**']
     types:
       - opened
       - reopened
@@ -74,8 +74,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 env:
-  DOLT_VERSION: "2.1.7"
-  BD_VERSION: "v1.3.0"
+  DOLT_VERSION: "2.2.0"
+  BD_VERSION: "v1.3.1"
 
 # Tier routing is centralized in the `gate` job below, which always runs
 # and computes run_smoke/run_full/run_review_formulas plus a human-readable
@@ -89,7 +89,7 @@ env:
 jobs:
   runner-policy:
     name: Runner policy
-    runs-on: ${{ inputs.force_blacksmith && 'blacksmith-2vcpu-ubuntu-2404' || (github.event_name == 'pull_request' && contains(fromJSON('["julianknutsen","csells","sjarmak","quad341"]'), github.event.pull_request.user.login) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest') }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     outputs:
       use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
       reason: ${{ steps.policy.outputs.reason }}
@@ -239,16 +239,19 @@ jobs:
           # storm (ga-35qn7i, ga-v7x9vk, ga-l14mnf, ga-ndx34y). A miss now
           # forces a fully fresh, never-poisoned recompute.
           key: ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-${{ hashFiles('go.sum', '.golangci.yml') }}
+      # Linux lint and vet are nogo in the Bazel build (//tools/nogo), which
+      # never compiles darwin-only files; golangci-lint and go vet cover them
+      # here.
       - name: Lint
         env:
           GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
-        run: make lint
+        run: make lint-golangci
       - name: Format
         run: make fmt-check
       - name: Vet
-        run: make vet
+        run: make vet-go
       - name: Docs
-        run: make check-docs
+        run: make check-docs-go
 
   # Unit tests — the suite Mac already ran as "smoke".
   mac-unit:
@@ -332,9 +335,11 @@ jobs:
           # mediates the supervisor lifecycle; bump the go-test timeout
           # so the whole binary doesn't panic mid-test.
           ACCEPTANCE_TIMEOUT: 20m
-        run: make test-acceptance
+        run: make test-acceptance-go
       - name: Run external bd CLI contract
         run: make test-bd-cli-contract
+      - name: Run external bd CLI contract HOME isolation
+        run: make test-bd-cli-contract-home-isolation
 
   # Unit coverage pass — the Linux `Check` job's equivalent of
   # `make test-cover`. Kept best-effort while we discover Mac-specific

@@ -52,6 +52,7 @@ var canonicalProviderAliasBindings = map[string]int{
 // forwarding shapes below are the only reviewed multi-result pass-throughs.
 var canonicalProviderCalls = map[string]int{
 	"cmd_citystatus.go:cmdCityStatus:newStatusSessionProviderForCityWithSnapshot:bind-error":                                                   1,
+	"cmd_citystatus.go:cmdCityStatusLocalFallback:newStatusSessionProviderForCityWithSnapshot:bind-error":                                      1,
 	"cmd_convoy_dispatch.go:runControlDispatcherWithStoreAndConfig:dispatchControlSessionProvider:bind-error":                                  2,
 	"cmd_doctor.go:buildDoctorChecks:newSessionProvider:bind-error":                                                                            1,
 	"cmd_handoff.go:cmdHandoffRemoteWithForce:newSessionProvider:bind-error":                                                                   1,
@@ -62,7 +63,7 @@ var canonicalProviderCalls = map[string]int{
 	"cmd_restart.go:cmdRigRestart:newSessionProvider:bind-error":                                                                               1,
 	"cmd_rig.go:doRigList:rigListSessionProvider:bind-error":                                                                                   1,
 	"cmd_runtime_drain.go:cmdRuntimeDrain:newSessionProvider:bind-error":                                                                       1,
-	"cmd_runtime_drain.go:cmdRuntimeDrainAck:newSessionProvider:bind-error":                                                                    2,
+	"cmd_runtime_drain.go:cmdRuntimeDrainAck:newSessionProvider:bind-error":                                                                    1,
 	"cmd_runtime_drain.go:cmdRuntimeDrainCheck:newSessionProvider:bind-error":                                                                  2,
 	"cmd_runtime_drain.go:cmdRuntimeRequestRestart:newSessionProvider:bind-error":                                                              1,
 	"cmd_runtime_drain.go:cmdRuntimeUndrain:newSessionProvider:bind-error":                                                                     1,
@@ -82,6 +83,7 @@ var canonicalProviderCalls = map[string]int{
 	"cmd_start.go:doStartStandalone:newSessionProviderForCity:bind-error":                                                                      1,
 	"cmd_status.go:cmdRigStatus:newStatusSessionProviderForCityWithSnapshot:bind-error":                                                        1,
 	"cmd_stop.go:cmdStopBodyWithoutSuccess:sessionProviderForStopCity:bind-error":                                                              1,
+	"cmd_stop.go:newStopProbeSessionProvider:newSessionProviderFromContext:bind-error":                                                         1,
 	"cmd_supervisor.go:startOneCity:newSessionProviderFromContext:bind-error":                                                                  1,
 	"completion.go:loadSessionsForCompletion:newSessionProviderFromContext:bind-error":                                                         1,
 	"providers.go:newSessionProvider:newSessionProviderFromContext:forward-to-withSessionProviderConstructionContext":                          1,

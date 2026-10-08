@@ -40,8 +40,13 @@ go_test(
         "record_test.go",
         "testenv_import_test.go",
     ],
+    data = [
+        "//:go.mod",
+        "//:repo_go_srcs",
+    ],
     embed = [":proxyendpoint"],
     deps = [
+        "//internal/bazeltest",
         "//internal/beads/contract",
         "//internal/beads/proxyendpoint/proxyendpointtest",
         "//internal/doltpool",
@@ -59,6 +64,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )
