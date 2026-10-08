@@ -511,6 +511,7 @@ func TestAwakeHealNeverRevivesAnOperatorDormantRow(t *testing.T) {
 		"wait hold":              {"wait_hold", "op"},
 		"held":                   {"held_until", later},
 		"quarantined":            {"sleep_reason", "quarantine", "quarantined_until", later},
+		"held, padded":           {"held_until", " " + later + " "},
 	} {
 		c := ownRuntimeCase(t, "tok-3", append([]string{"state", "asleep"}, meta...)...)
 		if it := c.decide(); it.Reason == decideAwakeHeal {

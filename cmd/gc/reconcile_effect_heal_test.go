@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/auto"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The fresh heal's effect tests (CONTRACT v5 A6, R2; C5d's open race and
@@ -237,5 +239,80 @@ func TestAwakeHealReadsTheRoutedLeafOnly(t *testing.T) {
 		if routed != (s.Outcome == settledLanded) || !routed && s.Cause != causeRuntimeNotOwn {
 			t.Fatalf("routed %v: settlement %+v", routed, s)
 		}
+	}
+}
+
+// lockedObserver answers alive once up is set; up is written under the row's
+// session mutation lock, as Manager.Start/Submit start a runtime under it.
+type lockedObserver struct {
+	*runtime.Fake
+	mu sync.Mutex
+	up bool
+}
+
+func (o *lockedObserver) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.up {
+		return runtime.Liveness{Running: true, Alive: true}, nil
+	}
+	return runtime.Liveness{}, nil
+}
+
+// Kills the fresh read taken outside the row's session mutation lock (the
+// re-review's pin for M1(a)): an in-process Manager start (Submit/Send ->
+// ensureRunning) holds that lock across the provider Start and writes
+// nothing on an active row. The heal waits for the lock, reads the runtime
+// it brought up, and refuses.
+func TestFreshHealReadsUnderTheSessionMutationLock(t *testing.T) {
+	named := []string{"configured_named_session", "true", "configured_named_identity", "chat", "configured_named_mode", "on_demand"}
+	c := newHealCase(t, livenessGone, desireNone, append([]string{"state", "active", "session_key", "k-1"}, named...)...)
+	sp := &lockedObserver{Fake: runtime.NewFake()}
+	p, it := c.pass(t, sp, nil)
+	held, release := make(chan struct{}), make(chan struct{})
+	go func() {
+		_ = session.WithSessionMutationLock(c.k.ID, func() error {
+			close(held)
+			<-release
+			sp.mu.Lock()
+			sp.up = true // the Manager's provider Start lands, no row write
+			sp.mu.Unlock()
+			return nil
+		})
+	}()
+	<-held
+	done := make(chan settlement, 1)
+	go func() { done <- rowHealFreshEffect(p, it)(context.Background()) }()
+	select {
+	case s := <-done:
+		t.Fatalf("the heal settled %+v while an in-process start held the row's lock", s)
+	case <-time.After(50 * time.Millisecond): // the heal reaches the lock (or, read outside it, reads gone)
+	}
+	close(release)
+	s := <-done
+	if s.Outcome != settledRefused || s.Cause != causeRuntimePresent {
+		t.Fatalf("settlement %+v, row state %q, want refused %q", s, c.meta(t)["state"], causeRuntimePresent)
+	}
+}
+
+// Kills the awake heal trusting a sidecar that outlived its runtime (acp,
+// subprocess): the runtime reads alive, the identity read finds the row's
+// token, and the runtime is gone by the bracketing re-read. The heal
+// refuses and the row stays asleep.
+func TestAwakeHealRechecksPresenceAfterTheIdentityRead(t *testing.T) {
+	c := ownRuntimeCase(t, "tok-3", "state", "asleep", "sleep_reason", "idle")
+	sp := &freshObserver{
+		Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true},
+		env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": "tok-3"},
+	}
+	reads := 0
+	sp.read = func() {
+		if reads++; reads == 2 {
+			sp.l = runtime.Liveness{} // the runtime exited; its sidecar still answers
+		}
+	}
+	_, s := c.run(t, sp, nil)
+	if s.Outcome != settledRefused || s.Cause != causeRuntimeNotOwn || c.meta(t)["state"] != "asleep" {
+		t.Fatalf("settlement %+v, state %q, want refused %q and the row asleep", s, c.meta(t)["state"], causeRuntimeNotOwn)
 	}
 }

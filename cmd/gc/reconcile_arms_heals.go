@@ -121,14 +121,17 @@ func armAwakeHeal(r *rowFacts) (intent, bool) {
 
 // operatorDormant reports an asleep row an operator holds dormant: a kill
 // fence, a sleep an operator owns (killed, user-hold, city-stop), a user-hold
-// sleep intent (a suspend), a wait hold, or a live hold or quarantine.
+// sleep intent (a suspend), a wait hold, or a live hold or quarantine. The
+// timers are trimmed here: metadataTimeInFuture, which legacy shares, does
+// not trim, and a padded timer must not read as no hold.
 func operatorDormant(info session.Info, now time.Time) bool {
 	switch session.SleepReason(strings.TrimSpace(info.SleepReason)) {
 	case session.SleepReasonKilled, session.SleepReasonUserHold, session.SleepReasonCityStop:
 		return true
 	}
 	return session.IsKillPendingInfo(info, now) || strings.TrimSpace(info.SleepIntent) == string(session.SleepReasonUserHold) ||
-		strings.TrimSpace(info.WaitHold) != "" || metadataTimeInFuture(info.HeldUntil, now) || metadataTimeInFuture(info.QuarantinedUntil, now)
+		strings.TrimSpace(info.WaitHold) != "" || metadataTimeInFuture(strings.TrimSpace(info.HeldUntil), now) ||
+		metadataTimeInFuture(strings.TrimSpace(info.QuarantinedUntil), now)
 }
 
 // armStrandedClear is SESS-603 (clearStrandedEventMarker): an alive row ends

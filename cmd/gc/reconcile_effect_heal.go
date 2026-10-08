@@ -109,5 +109,17 @@ func (e freshHeal) prove(ctx context.Context, name string, since time.Time, row 
 	case !live.Alive || compareIdentity(row, readRuntimeIdentity(ctx, sp, name)) != identityCurrent:
 		return settlement{Outcome: settledRefused, Cause: causeRuntimeNotOwn}
 	}
+	// AdoptLive's bracket: an acp or subprocess sidecar can outlive its
+	// runtime, so the identity read proves the row's own runtime only if the
+	// runtime is still alive after it.
+	again, status, err := runtime.ObserveLivenessBoundedSince(ctx, sp, name, nil, e.now(), fenceProbeTimeout)
+	switch {
+	case ctx.Err() != nil:
+		return settlement{Outcome: settledFailed, Cause: causeDeadline, Err: ctx.Err()}
+	case status != runtime.ObservationComplete || err != nil:
+		return settlement{Outcome: settledRefused, Cause: causeLivenessUnknown, Err: err}
+	case !again.Alive:
+		return settlement{Outcome: settledRefused, Cause: causeRuntimeNotOwn}
+	}
 	return settlement{}
 }
