@@ -86,9 +86,11 @@ var errSimListing = errors.New("sim: list-sessions failed")
 
 // simProvider is a fake tmux backend over runtime.Fake, whose other knobs
 // (peek, pending) it keeps: it lists corpses, keeps identity env per runtime,
-// answers every read fresh (so runtime.ObserveLivenessSince needs no method)
-// with LL2's Present bit and object ids, and records every Start and
-// destructive call.
+// and records every Start and destructive call. Once listed it caches as tmux
+// does: a plain liveness read (ObserveLivenessWithError, so
+// ObserveLivenessBounded) answers from the last listing, and only
+// ObserveLivenessSince reads fresh, each with LL2's Present bit and object
+// ids.
 type simProvider struct {
 	*runtime.Fake
 	mu          sync.Mutex
@@ -104,6 +106,7 @@ type simProvider struct {
 	nextStart   error // the next Start's scripted outcome
 	starts      []simStart
 	kills       []simKill
+	cached      map[string]simRuntime // the runtimes at the last listing
 }
 
 // put places a runtime under name; drop removes it. Both run under mu.
@@ -142,6 +145,16 @@ func (p *simProvider) ListRunning(string) ([]string, error) {
 
 func (p *simProvider) ListRunningComplete() bool { return true }
 
+// listed caches the runtimes as a listing sees them.
+func (p *simProvider) listed() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cached = make(map[string]simRuntime, len(p.rts))
+	for name, rt := range p.rts {
+		p.cached[name] = *rt
+	}
+}
+
 func (p *simProvider) ServerConfirmedDead() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -169,19 +182,37 @@ func (p *simProvider) GetAllEnvironment(name string) (map[string]string, error) 
 	return map[string]string{"GC_SESSION_ID": rt.id, "GC_RUNTIME_EPOCH": rt.epoch, "GC_INSTANCE_TOKEN": rt.token, "GT_PROCESS_NAMES": "agent"}, nil
 }
 
+// ObserveLivenessWithError answers from the last listing, once one ran.
 func (p *simProvider) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if rt := p.rts[name]; rt != nil && rt.probeErr && !rt.corpse {
-		l := p.livenessLocked(name)
+	rt := p.rts[name]
+	if p.cached != nil {
+		rt = nil
+		if c, ok := p.cached[name]; ok {
+			rt = &c
+		}
+	}
+	return livenessOf(name, rt)
+}
+
+// ObserveLivenessSince reads the runtime as it is now.
+func (p *simProvider) ObserveLivenessSince(name string, _ []string, _ time.Time) (runtime.Liveness, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return livenessOf(name, p.rts[name])
+}
+
+func livenessOf(name string, rt *simRuntime) (runtime.Liveness, error) {
+	if rt != nil && rt.probeErr && !rt.corpse {
+		l := runtimeLiveness(rt)
 		l.Alive = false
 		return l, fmt.Errorf("sim: probe of %s: %w", name, runtime.ErrRuntimeUnavailable)
 	}
-	return p.livenessLocked(name), nil
+	return runtimeLiveness(rt), nil
 }
 
-func (p *simProvider) livenessLocked(name string) runtime.Liveness {
-	rt := p.rts[name]
+func runtimeLiveness(rt *simRuntime) runtime.Liveness {
 	if rt == nil {
 		return runtime.Liveness{}
 	}
@@ -562,6 +593,7 @@ func (s *sim) inventory() {
 		l.lastProvider, l.providerGen = s.sp, l.providerGen+1
 	}
 	listing, _ := l.listBounded(context.Background(), s.sp) // the fake answers at once
+	s.sp.listed()
 	h := heldListing{listing: listing, started: s.clk.Now(), version: s.sp.version}
 	if s.lag && s.rng.IntN(2) == 0 {
 		h.passes = s.rng.IntN(4)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -43,13 +42,9 @@ func (e rekey) run(ctx context.Context) settlement {
 		return settlement{Outcome: settledRefused, Cause: causeNameBusy}
 	}
 	defer unlock()
-	leaf, _, known := runtime.ResolveBackend(e.pass.Runtime, name)
-	if !known || leaf == nil {
-		return settlement{Outcome: settledRefused, Cause: causeRouteUnknown}
-	}
 	var s settlement
 	_ = session.WithSessionMutationLock(e.it.Key.ID, func() error {
-		s = e.rereadAndWrite(ctx, leaf, name, row)
+		s = e.rereadAndWrite(ctx, name, row)
 		return nil
 	})
 	return s
@@ -64,36 +59,30 @@ func (e rekey) run(ctx context.Context) settlement {
 // bracketing presence reads catch a replaced session object; a token
 // rewritten in place on the same object after the read can still be
 // overwritten by this CAS, and the next pass's A3 re-keys the row to it.
-func (e rekey) rereadAndWrite(ctx context.Context, leaf runtime.Provider, name string, row session.Info) settlement {
-	before, cause := presentObject(ctx, leaf, name, time.Now())
+func (e rekey) rereadAndWrite(ctx context.Context, name string, row session.Info) settlement {
+	rt, cause := readRuntime(ctx, e.pass.Runtime, processNamesFor(e.pass.World, row), name, time.Now(), time.Now)
+	if cause == "" {
+		cause = rekeyRefusal(rt, row, e.it.Patch["instance_token"])
+	}
 	if cause != "" {
 		return settlement{Outcome: settledRefused, Cause: cause}
-	}
-	rt := readRuntimeIdentity(ctx, leaf, name)
-	after, cause := presentObject(ctx, leaf, name, time.Now())
-	switch {
-	case cause != "":
-		return settlement{Outcome: settledRefused, Cause: cause}
-	case after.ObjectID != before.ObjectID || after.ObjectCreated != before.ObjectCreated:
-		return settlement{Outcome: settledRefused, Cause: causeNotPresent}
-	case !rekeyStillHolds(row, rt, e.it.Patch["instance_token"]):
-		return settlement{Outcome: settledRefused, Cause: causeIdentityChanged}
 	}
 	return e.runLocked(ctx)
 }
 
-// presentObject is one fresh presence read of name on leaf, from a refresh
-// that started after since: the reading, or the refusal cause. The rekey
-// brackets its identity read between two, which must see the same session
-// object (ObjectID, and ObjectCreated, which pins an id a server restart
-// reuses), so the identity read belongs to the runtime both found present.
-func presentObject(ctx context.Context, leaf runtime.Provider, name string, since time.Time) (runtime.Liveness, string) {
-	live, status, err := runtime.ObserveLivenessBoundedSince(ctx, leaf, name, nil, since, fenceProbeTimeout)
+// rekeyRefusal is the cause that refuses a rekey of the pass's row to token
+// on rt, or "": rt must read fresh, present, one session object around its
+// identity read, and still rekeyable (S4).
+func rekeyRefusal(rt *txRuntime, row session.Info, token string) string {
 	switch {
-	case status != runtime.ObservationComplete || err != nil:
-		return live, causeLivenessUnknown
-	case !live.Present():
-		return live, causeNotPresent
+	case rt.Class == rtUnsupported:
+		return causeLivenessUnsupported
+	case rt.Class == rtUnknown:
+		return causeLivenessUnknown
+	case rt.Class == rtAbsent || !rt.Same:
+		return causeNotPresent
+	case !rekeyStillHolds(row, rt.Identity, token):
+		return causeIdentityChanged
 	}
-	return live, ""
+	return ""
 }

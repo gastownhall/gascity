@@ -353,7 +353,7 @@ func (s *sim) checkDead() {
 		if _, ok := listed[name]; !ok || rt == nil || rt.id != row.Key.ID || s.sp.changed[name] > s.listed {
 			continue
 		}
-		fresh := s.sp.livenessLocked(name)
+		fresh := runtimeLiveness(rt)
 		dead := fresh.Present() && !fresh.Alive
 		switch got := obs[row.Key].Liveness; {
 		case dead && !rt.probeErr && got != livenessDead && got != livenessUnknown: // an erroring probe proves nothing (O3)

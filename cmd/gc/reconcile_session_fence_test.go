@@ -30,6 +30,10 @@ func newFenceLeaf() *fenceLeaf {
 // subprocess's are (readRuntimeIdentity).
 func (*fenceLeaf) LocalIdentitySidecar() bool { return true }
 
+// LivenessReadsFresh makes its liveness read fresh by construction, as
+// acp's and subprocess's are (freshReadable).
+func (*fenceLeaf) LivenessReadsFresh() bool { return true }
+
 func (l *fenceLeaf) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
 	if err := l.LivenessErrors[name]; err != nil {
 		return runtime.Liveness{}, err
