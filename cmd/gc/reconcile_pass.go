@@ -127,7 +127,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	res := admit(admitInput{
 		Now: now, Cfg: cfg, Bucket: p.bucket, FairSeed: p.fairSeed, InFlight: w.InFlight, BringUp: w.Census.BringUp(cfg),
 		Endpoints: w.Gates, Backoff: w.Backoff, Paused: w.Paused,
-		BootOpen: w.Boot.CachePrimed && w.Boot.InventoryComplete && w.Boot.RecordingSeen, // P2
+		BootOpen: w.Boot.open(), // P2
 	}, intents)
 	res.Deferred = append(res.Deferred, unregistered...)
 	// The planner state admission leaves is stored before any submit. A
@@ -143,7 +143,9 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 
 	p.out.relevant.Store(newRelevantSet(w.Demand))
 	p.out.summary.Store(newAllocSummary(now, &w, &a))
-	return passResult{Next: next, Counts: passCountsOf(res, w.InFlight)}
+	counts := passCountsOf(res, w.InFlight)
+	p.observeWorld(&w, a.Alerts, &counts)
+	return passResult{Next: next, Counts: counts}
 }
 
 // newAllocSummary is the summary a pass at now publishes for C8's steps. Any

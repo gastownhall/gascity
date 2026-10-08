@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
@@ -140,13 +141,15 @@ func (d *reconcilerModeDrift) observe(cfg *config.City) string {
 }
 
 // sessionReconcilerDoctorCheck reports the [daemon] session_reconciler choice.
+// queryPass asks a v2 controller for its last pass (queryV2PassStatus).
 type sessionReconcilerDoctorCheck struct {
 	cfg       *config.City
 	lookupEnv func(string) (string, bool)
+	queryPass func(cityPath string) (v2PassStatus, error)
 }
 
 func newSessionReconcilerDoctorCheck(cfg *config.City, lookupEnv func(string) (string, bool)) *sessionReconcilerDoctorCheck {
-	return &sessionReconcilerDoctorCheck{cfg: cfg, lookupEnv: lookupEnv}
+	return &sessionReconcilerDoctorCheck{cfg: cfg, lookupEnv: lookupEnv, queryPass: queryV2PassStatus}
 }
 
 // Name implements doctor.Check.
@@ -167,11 +170,14 @@ func (*sessionReconcilerDoctorCheck) Fix(_ *doctor.CheckContext) error { return 
 // admissible v2, OK for legacy or unset. Admissibility comes from the latch
 // itself, the developer override included, so doctor and controller start never
 // disagree. Under every mode it also lists, as Details, the v2 refusals the
-// config would hit: a dry run of the switch that never changes the status.
-func (c *sessionReconcilerDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+// config would hit, a dry run of the switch, and the floors outside the
+// control dispatcher (v2FloorWarnings), a warning under v2 and a note
+// otherwise; and under v2, the last pass's age when the controller answers.
+// None of them changes the status.
+func (c *sessionReconcilerDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name()}
 	raw := c.cfg.Daemon.SessionReconciler
-	_, alias, _ := c.cfg.Daemon.SessionReconcilerMode()
+	configured, alias, _ := c.cfg.Daemon.SessionReconcilerMode()
 	mode, err := latchReconcilerMode(c.cfg, c.lookupEnv)
 	switch {
 	case err != nil:
@@ -192,6 +198,18 @@ func (c *sessionReconcilerDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Check
 	}
 	for _, refusal := range v2LatchRefusals(c.cfg) {
 		r.Details = append(r.Details, "v2 would refuse: "+refusal.String())
+	}
+	floor := "v2 note: "
+	if configured == config.SessionReconcilerV2 {
+		floor = "v2 warning: "
+	}
+	for _, w := range v2FloorWarnings(c.cfg) {
+		r.Details = append(r.Details, floor+w)
+	}
+	if mode == reconcilerV2 && ctx != nil && ctx.CityPath != "" && c.queryPass != nil {
+		if st, qerr := c.queryPass(ctx.CityPath); qerr == nil && st.Passes > 0 {
+			r.Details = append(r.Details, fmt.Sprintf("v2 last pass record: %s ago (%d passes)", time.Duration(st.LastPassAgeMS)*time.Millisecond, st.Passes))
+		}
 	}
 	return r
 }

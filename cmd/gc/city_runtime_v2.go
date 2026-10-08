@@ -97,9 +97,15 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 			return readV2SessionMigration(cr.cityPath, cr.cityName, cr.serviceConfigSnapshot(), cr.v2SessionsStore(), rigs)
 		},
 		beginTrace: cr.beginV2Trace,
-		safeTick:   cr.safeTick,
-		rec:        cr.rec,
-		stderr:     cr.stderr,
+		inventoryFields: func() map[string]any {
+			if cr.inventoryLane == nil {
+				return nil
+			}
+			return cr.inventoryLane.v2PassFields()
+		},
+		safeTick: cr.safeTick,
+		rec:      cr.rec,
+		stderr:   cr.stderr,
 	}
 }
 

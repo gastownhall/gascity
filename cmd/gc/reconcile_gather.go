@@ -99,6 +99,8 @@ type World struct {
 	// LegStores are the census legs' stores by ref, which effects reach
 	// only as fenced writers (newEffectPass).
 	LegStores map[string]beads.Store
+	// InputAges are the inputs' ages at Now, for the pass record.
+	InputAges map[string]time.Duration
 }
 
 // gather builds the pass's World at now. It first drains the settlements
@@ -148,6 +150,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	for _, l := range legs {
 		w.LegStores[l.ref] = l.store
 	}
+	w.InputAges = inputAges(now, w.LegStores, w.Obs, rec)
 	rows := w.Census.Canonical()
 	for _, row := range rows {
 		if strings.TrimSpace(row.Info.Template) == "" && strings.TrimSpace(row.Info.SessionNameMetadata) == "" {

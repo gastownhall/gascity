@@ -45,6 +45,7 @@ type plannerHost struct {
 	setInventoryHook func(fn func(prev, next *ObservationSnapshot))
 	bootCensus       func() (v2SessionMigration, error)
 	beginTrace       func(trigger string) *sessionReconcilerTraceCycle // off the controller goroutine
+	inventoryFields  func() map[string]any                             // the pass record's view of the inventory lane
 	safeTick         func(fn func(), trigger string) (panicked bool)
 	rec              events.Recorder
 	stderr           io.Writer
@@ -113,6 +114,7 @@ func (rt *plannerRuntime) bindHost(h plannerHost) {
 	}
 	rt.host = h
 	rt.planner.rec = h.rec
+	rt.planner.emitRecord = rt.emitPassRecord
 }
 
 // publishEnv publishes the host's config as the next generation unless the
@@ -151,6 +153,7 @@ func (rt *plannerRuntime) boot(ctx context.Context) error {
 		}
 		if err == nil {
 			if refusal := m.refusal(); refusal != nil {
+				rt.planner.alert(alertBootRefused, "", refusal.Error())
 				return refusal
 			}
 			rt.census.Store(true)
@@ -226,7 +229,7 @@ func (rt *plannerRuntime) pass(now time.Time) passResult {
 	if rec.Err != "" {
 		return res
 	}
-	if b := rt.planner.boot; b.CachePrimed && b.InventoryComplete && b.RecordingSeen {
+	if rt.planner.boot.open() {
 		rt.readyOnce.Do(func() { close(rt.ready) })
 	}
 	rt.traceRows(rec.Rows)
@@ -291,19 +294,15 @@ func (rt *plannerRuntime) bootState() string {
 	}
 }
 
-// passRecord is a maintenance tick's reconcile_pass record: what boot waits
-// on, the passes and their wakes, what admission let through and held back
-// (submitted by nothing while trace-only), and legacyEntries, the refused
-// legacy session entries, which must stay 0. OBS1 owns the published record.
+// passRecord is a maintenance tick's reconcile_pass record, a summary of
+// the planner's v2_pass record (emitPassRecord): what boot waits on, the
+// passes and their wakes, what admission let through and held back, and
+// legacyEntries, the refused legacy session entries, which must stay 0.
 func (rt *plannerRuntime) passRecord(now time.Time, legacyEntries int64) map[string]any {
 	m := rt.planner.metrics.snapshot(now)
-	deferred := make(map[string]uint64, len(m.Deferred))
-	for d, n := range m.Deferred {
-		deferred[d.Kind+"/"+d.Cause] = n
-	}
 	return map[string]any{
 		"boot": rt.bootState(), "legacy_session_entries": legacyEntries, "passes": m.Passes,
-		"wakes": m.Wakes, "admitted": m.Admitted, "deferred": deferred,
+		"wakes": m.Wakes, "admitted": m.Admitted, "deferred": deferralKeys(m.Deferred),
 	}
 }
 

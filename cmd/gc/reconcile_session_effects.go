@@ -42,12 +42,14 @@ var (
 
 // sessionEffect is one effect. Run performs it under a context that ends at
 // Deadline (a real deadline: ctx.Err() reads DeadlineExceeded then) and
-// returns its settlement; the executor stamps the key, Kind and Seq on it.
+// returns its settlement; the executor stamps the key, Kind, Reason and Seq
+// on it.
 // Run must check its context before any write that would commit a late
 // result.
 type sessionEffect struct {
-	Kind string // the intent kind; a provider swap waits for intentStart
-	Seq  uint64 // the in-flight entry's, echoed in the settlement
+	Kind   string // the intent kind; a provider swap waits for intentStart
+	Reason string // the intent's reason, for the pass record
+	Seq    uint64 // the in-flight entry's, echoed in the settlement
 	// Finalize marks the stop verb's finalize: every refused or failed
 	// settlement it posts carries causeFinalizePrefix, so its own refusals
 	// back it off (P4).
@@ -123,7 +125,7 @@ func (x *effectExecutor) submitIntent(p *effectPass, it intent, seq uint64) erro
 		}
 		return build(p, it)(ctx)
 	}
-	return x.submit(it.Key, sessionEffect{Kind: it.Kind, Seq: seq, Finalize: it.Finalize, Deadline: it.Deadline, Run: run})
+	return x.submit(it.Key, sessionEffect{Kind: it.Kind, Reason: it.Reason, Seq: seq, Finalize: it.Finalize, Deadline: it.Deadline, Run: run})
 }
 
 // submit starts e for k. It refuses, running nothing and posting nothing,
@@ -220,7 +222,7 @@ func (x *effectExecutor) run(base context.Context, k rowKey, e sessionEffect, f 
 			})
 		}
 	}
-	s.Key, s.Kind, s.Seq = k, e.Kind, e.Seq
+	s.Key, s.Kind, s.Reason, s.Seq = k, e.Kind, e.Reason, e.Seq
 	if e.Finalize {
 		s.Cause = finalizeCause(s)
 	}

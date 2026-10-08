@@ -51,6 +51,7 @@ type passRecord struct {
 type settlement struct {
 	Key     rowKey
 	Kind    string
+	Reason  string // the intent's reason, which the pass record counts by
 	Seq     uint64
 	Token   string
 	Outcome settleOutcome
@@ -99,6 +100,8 @@ type bootState struct {
 	CachePrimed, InventoryComplete, RecordingSeen bool
 }
 
+func (b bootState) open() bool { return b.CachePrimed && b.InventoryComplete && b.RecordingSeen }
+
 // planner runs passes on one goroutine. Only that goroutine touches inflight,
 // backoff, bucket, fairSeed, boot, last, rowTrace, memo and stalled; other
 // goroutines reach the planner through markDirty, the settlement queue, the
@@ -113,6 +116,7 @@ type planner struct {
 	rec         events.Recorder          // settlements' events; nil records none
 	stderr      io.Writer
 	metrics     *passMetrics
+	emitRecord  func(fields map[string]any) // the reconcile.pass record; nil emits none
 
 	inflight plannerInflight
 	backoff  *backoffTable
@@ -123,6 +127,7 @@ type planner struct {
 	rowTrace map[rowKey]string // each row's last traced (reason, outcome)
 	memo     gatherMemo
 	out      passOutputs
+	obs      passObserver
 
 	// stalled holds the execution-stalled requests by row ID for arm A16
 	// (C7b1); C8's step posts them to stalledPosted under stalledMu.
@@ -260,17 +265,22 @@ func (p *planner) run(ctx context.Context) {
 
 // runPass applies the settlements posted since the last pass
 // (drainSettlements), then runs the pass. A panic in either is recovered in
-// safeTick's style: the pass is skipped and logged, and a follow-up pass is
-// owed.
+// safeTick's style: the pass is skipped and logged, a follow-up pass is
+// owed, and the first of a run of panicking passes alerts. Then the pass is
+// observed (observePass).
 func (p *planner) runPass(now time.Time) (res passResult) {
 	defer func() {
 		r := recover()
 		if r != nil {
 			fmt.Fprintf(p.stderr, "v2 planner: pass panicked: %v (type=%T)\n%s\n", r, r, debug.Stack()) //nolint:errcheck // best-effort stderr
 			p.markDirty("panic")
+			if !p.last.Panicked {
+				p.alert(alertPassPanic, "", fmt.Sprintf("pass panicked: %v", r))
+			}
 		}
 		p.last = passRecord{Start: now, Duration: p.clock.Now().Sub(now), Panicked: r != nil, Result: res}
 		p.metrics.recordPass(now, p.last.Duration, r != nil, res.Counts)
+		p.observePass(now)
 	}()
 	p.drainSettlements(now)
 	return p.pass(now)
@@ -279,7 +289,8 @@ func (p *planner) runPass(now time.Time) (res passResult) {
 // drainSettlements applies the settlements posted so far, stamping a zero
 // At with now: first every one to the in-flight map, so no later step's
 // panic can leave a settled effect counted in flight; then to the backoff
-// table; then their events to the recorder, each recovered alone.
+// table and the pass record's counters; then their events to the recorder,
+// each recovered alone.
 func (p *planner) drainSettlements(now time.Time) {
 	items := p.settlements.drain()
 	for i := range items {
@@ -290,6 +301,7 @@ func (p *planner) drainSettlements(now time.Time) {
 	}
 	for _, s := range items {
 		p.backoffSettled(s)
+		p.observeSettlement(s)
 	}
 	for _, s := range items {
 		if s.Event != nil && p.rec != nil {
@@ -298,9 +310,12 @@ func (p *planner) drainSettlements(now time.Time) {
 	}
 }
 
-// record records ev; a panicking recorder is logged and skips this event
-// only.
+// record records ev, counting the stop-outstanding alerts (v5 D6) for the
+// pass record; a panicking recorder is logged and skips this event only.
 func (p *planner) record(ev events.Event) {
+	if ev.Type == events.SessionDrainStopEscalated {
+		p.metrics.count(&p.metrics.series, "stop_escalations")
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(p.stderr, "v2 planner: recording %s panicked: %v\n", ev.Type, r) //nolint:errcheck // best-effort stderr

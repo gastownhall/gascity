@@ -133,8 +133,8 @@ func assertV2BootRefuses(t *testing.T, want string, rows ...beads.Bead) {
 	if ctx.Err() != nil {
 		t.Fatal("bootV2 retried the refusal until the deadline")
 	}
-	if got := stderr.String(); !strings.Contains(got, want) || !strings.Contains(got, "run gc doctor --check v2-session-migration to list them") {
-		t.Errorf("stderr = %q, want %q and the doctor command", got, want)
+	if got := stderr.String(); !strings.Contains(got, want) || !strings.Contains(got, "run gc doctor --check v2-session-migration to list them") || !strings.Contains(got, "alert "+alertBootRefused) {
+		t.Errorf("stderr = %q, want %q, the doctor command and the %s alert", got, want, alertBootRefused)
 	}
 	liveRead := false
 	for _, op := range store.recorded() {
@@ -1303,7 +1303,9 @@ func passRecords(records []SessionReconcilerTraceRecord) []SessionReconcilerTrac
 
 // Kills: the reconcile_pass record missing from the v2 maintenance tick,
 // recorded twice in one, its fields renamed, or recorded by a legacy tick
-// (whose trace must not change); and the m14/m15 mutations of
+// (whose trace must not change); the planner's v2_pass record not traced,
+// or traced without the boot state and the inventory lane's fields; and the
+// m14/m15 mutations of
 // TestCityRuntimeV2FullTickRunsOnlyMaintenance as they show in the record:
 // the v2 tick running the legacy phase list (the guard counts its refusals)
 // or tracing as a controller tick.
@@ -1342,6 +1344,20 @@ func TestV2MaintenanceTraceRecordsReconcilePass(t *testing.T) {
 		assertLinesEqual(t, "reconcile_pass fields", names, v2PassRecordFields)
 		if first.Fields["boot"] != plannerBootReady || first.Fields["legacy_session_entries"] != float64(0) {
 			t.Errorf("record boot=%v legacy_session_entries=%v, want ready, 0", first.Fields["boot"], first.Fields["legacy_session_entries"])
+		}
+		var v2 []SessionReconcilerTraceRecord
+		for _, r := range records {
+			if r.SiteCode == TraceSiteReconcilePass && r.Fields["operation_name"] == "v2_pass" {
+				v2 = append(v2, r)
+			}
+		}
+		if len(v2) == 0 {
+			t.Fatal("no v2_pass record traced after boot")
+		}
+		for _, f := range []string{"boot", "effects", "env_read_backlog", "process_probes"} {
+			if _, ok := v2[0].Fields[f]; !ok {
+				t.Errorf("v2_pass record lacks %q: %v", f, v2[0].Fields)
+			}
 		}
 	})
 
