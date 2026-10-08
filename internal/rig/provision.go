@@ -210,7 +210,7 @@ func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBr
 	}
 
 	// Step 6: bind and resolve the explicit rig imports (call #1).
-	explicitRigImports, commitRigImports, err := composeExplicitRigImports(deps, specs, reAdd)
+	explicitRigImports, commitRigImports, err := composeExplicitRigImports(deps, specs, reAdd, existingRig)
 	if err != nil {
 		return rigMutationPlan{}, err
 	}

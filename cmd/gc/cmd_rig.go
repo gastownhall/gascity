@@ -418,6 +418,7 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
+		printCredentialHint(stderr, err)
 		return config.Rig{}, 1
 	}
 	if reloaded, loadErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); loadErr != nil {

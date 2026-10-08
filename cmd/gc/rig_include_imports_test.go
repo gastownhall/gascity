@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/gitcred"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/remotesource"
 )
@@ -393,5 +394,71 @@ func TestRigAddIncludeRemoteMatchesImportAdd(t *testing.T) {
 	}
 	if viaImportAdd := loadRigImport(city2, "demo"); viaImportAdd != viaInclude {
 		t.Fatalf("rig add --include wrote %+v, gc import add --rig wrote %+v; they must match", viaInclude, viaImportAdd)
+	}
+}
+
+// TestRigAddReAddSameRemoteIncludeDoesNotWarn guards idempotent re-runs: a
+// fresh add writes the resolved constraint for a remote include, so an
+// identical re-add must compare equal to the stored import instead of
+// warning that the --include was ignored. A different source still warns.
+func TestRigAddReAddSameRemoteIncludeDoesNotWarn(t *testing.T) {
+	cases := map[string]struct {
+		reAddInclude string
+		wantWarn     bool
+	}{
+		"same source":      {reAddInclude: "https://github.com/example/tools.git", wantWarn: false},
+		"different source": {reAddInclude: "tools=https://github.com/example/other.git", wantWarn: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+			stubRigIncludeImportSeams(t, "1.4.0")
+			t.Setenv("GC_DOLT", "skip")
+			t.Setenv("GC_BEADS", "bd")
+			rigPath := filepath.Join(t.TempDir(), "myproj")
+			if err := os.MkdirAll(rigPath, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			const source = "https://github.com/example/tools.git"
+			var stdout, stderr bytes.Buffer
+			if code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, []string{source}, "", "", "", false, false, &stdout, &stderr); code != 0 {
+				t.Fatalf("fresh doRigAdd = %d, stderr:\n%s", code, stderr.String())
+			}
+			stdout.Reset()
+			stderr.Reset()
+			if code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, []string{tc.reAddInclude}, "", "", "", false, false, &stdout, &stderr); code != 0 {
+				t.Fatalf("re-add doRigAdd = %d, stderr:\n%s", code, stderr.String())
+			}
+			warned := strings.Contains(stderr.String(), "ignored")
+			if warned != tc.wantWarn {
+				t.Fatalf("re-add warned=%v, want %v; stderr:\n%s", warned, tc.wantWarn, stderr.String())
+			}
+		})
+	}
+}
+
+// TestRigAddIncludeAuthFailurePrintsCredentialHint keeps the gc import add
+// guidance: a private remote that rejects the clone gets the same
+// "gc import credential add" hint from rig add.
+func TestRigAddIncludeAuthFailurePrintsCredentialHint(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	stubRigIncludeImportSeams(t, "1.4.0")
+	resolveImportVersion = func(string, string, string) (packman.ResolvedVersion, error) {
+		return packman.ResolvedVersion{}, &gitcred.AuthError{Host: "github.com", OrgPrefix: "github.com/example", Repo: "https://github.com/example/tools.git"}
+	}
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "bd")
+	rigPath := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, []string{"https://github.com/example/tools.git"}, "", "", "", false, false, &stdout, &stderr); code != 1 {
+		t.Fatalf("doRigAdd = %d, want 1; stdout:\n%s", code, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "gc import credential add github.com/example") {
+		t.Fatalf("stderr missing credential hint:\n%s", stderr.String())
 	}
 }

@@ -305,3 +305,32 @@ func TestProvisionRigPathCollisionWinsOverIncludeResolution(t *testing.T) {
 		t.Fatalf("Provision err = %v, want the rig path collision error", err)
 	}
 }
+
+func TestInheritExistingImportVersions(t *testing.T) {
+	rig := &config.Rig{Imports: map[string]config.Import{
+		"tools": {Source: "https://example.com/tools.git", Version: "^1.4"},
+		"other": {Source: "https://example.com/other.git", Version: "^2.0"},
+	}}
+	in := []config.BoundImport{
+		{Binding: "tools", Import: config.Import{Source: "https://example.com/tools.git"}},
+		{Binding: "other", Import: config.Import{Source: "https://example.com/moved.git"}},
+		{Binding: "pinned", Import: config.Import{Source: "https://example.com/p.git", Version: "^3.0"}},
+		{Binding: "fresh", Import: config.Import{Source: "https://example.com/f.git"}},
+	}
+	got := inheritExistingImportVersions(in, rig)
+	want := []config.BoundImport{
+		{Binding: "tools", Import: config.Import{Source: "https://example.com/tools.git", Version: "^1.4"}},
+		{Binding: "other", Import: config.Import{Source: "https://example.com/moved.git"}},
+		{Binding: "pinned", Import: config.Import{Source: "https://example.com/p.git", Version: "^3.0"}},
+		{Binding: "fresh", Import: config.Import{Source: "https://example.com/f.git"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("inheritExistingImportVersions = %+v, want %+v", got, want)
+	}
+	if in[0].Import.Version != "" {
+		t.Fatalf("input slice was mutated: %+v", in[0])
+	}
+	if got := inheritExistingImportVersions(in, nil); !reflect.DeepEqual(got, in) {
+		t.Fatalf("nil rig changed imports: %+v", got)
+	}
+}

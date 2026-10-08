@@ -154,8 +154,11 @@ func includeBindingConflict(claims map[string][]includeBindingClaim) error {
 // them. A fresh add with imports goes through Deps.ResolveIncludeImports when
 // the caller provides it (gc import add parity: version constraints and lock
 // entries for remote sources); a re-add, an add without includes, or a caller
-// without the seam keeps the bundled-only Deps.ComposePacks hardening.
-func composeExplicitRigImports(deps Deps, specs []includeSpec, reAdd bool) ([]config.BoundImport, func() error, error) {
+// without the seam keeps the bundled-only Deps.ComposePacks hardening. On a
+// re-add, a version-less import inherits the version of existingRig's import
+// with the same binding and source, so an unchanged request compares equal to
+// what the fresh add stored.
+func composeExplicitRigImports(deps Deps, specs []includeSpec, reAdd bool, existingRig *config.Rig) ([]config.BoundImport, func() error, error) {
 	bound, err := bindIncludeSpecs(specs, deps.Cfg.Packs)
 	if err != nil {
 		return nil, nil, err
@@ -171,5 +174,28 @@ func composeExplicitRigImports(deps Deps, specs []includeSpec, reAdd bool) ([]co
 	if err != nil {
 		return nil, nil, fmt.Errorf("installing bundled rig imports: %w", err)
 	}
+	if reAdd {
+		pinned = inheritExistingImportVersions(pinned, existingRig)
+	}
 	return pinned, commit, nil
+}
+
+// inheritExistingImportVersions returns imports with each empty Version filled
+// from the rig's stored import that has the same binding and source. Imports
+// with a version, or without a matching stored import, are left as they are.
+func inheritExistingImportVersions(imports []config.BoundImport, rig *config.Rig) []config.BoundImport {
+	if rig == nil || len(rig.Imports) == 0 {
+		return imports
+	}
+	out := slices.Clone(imports)
+	for i, bound := range out {
+		if bound.Import.Version != "" {
+			continue
+		}
+		stored, ok := rig.Imports[bound.Binding]
+		if ok && stored.Source == bound.Import.Source {
+			out[i].Import.Version = stored.Version
+		}
+	}
+	return out
 }
