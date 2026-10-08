@@ -152,7 +152,10 @@ var parityUnported = map[string]parityEntry{
 // phrases it implements; the PR that makes a kind reachable adds its phrases.
 var parityKindOwners = map[string]*regexp.Regexp{
 	intentRowHeal: regexp.MustCompile(`\brow write\b`),
-	intentCreate:  regexp.MustCompile(`\bC1 create\b|\bC2 named reopen\b`),
+	// A6's fresh heals: the creating-row heal (SESS-062); the crash heal's
+	// SESS-531 is a row write.
+	intentRowHealFresh: regexp.MustCompile("\\bA6 heal of a `creating` row\\b"),
+	intentCreate:       regexp.MustCompile(`\bC1 create\b|\bC2 named reopen\b`),
 	// A19's two kinds own exactly its rows.
 	intentDrainCancel: regexp.MustCompile(`\bA19\b`),
 	intentDrainVoid:   regexp.MustCompile(`\bA19\b`),
