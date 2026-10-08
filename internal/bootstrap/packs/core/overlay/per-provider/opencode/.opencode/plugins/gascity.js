@@ -35,6 +35,9 @@ const GC_BIN = process.env.GC_BIN || "gc";
 // sibling providers resolve the same installed gc before developer-local bins.
 const PATH_PREFIX =
   `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
+// RECENT_USER_MESSAGES is how many user-message ids each session remembers
+// to tell a new turn from a late update to an earlier message (see openTurn).
+const RECENT_USER_MESSAGES = 64;
 
 async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
   try {
@@ -163,18 +166,21 @@ export default async function gascityPlugin({ directory, client }) {
   let cachedPrime = null;
 
   // experimental.chat.system.transform fires once per model generation, not
-  // once per user turn: OpenCode triggers it from Agent.generate, so every
-  // tool call in a turn rebuilds the prefix. `gc nudge drain --inject` is
+  // once per user turn: OpenCode triggers it from LLM.stream, so every tool
+  // call in a turn rebuilds the prefix. `gc nudge drain --inject` is
   // consumptive, so draining on every generation emptied the queue several
   // times per turn and the drained items landed in whichever generation won
-  // the race; each run also opened store connections (#5552).
+  // the race; each run also opened store connections (#5552). Agent.generate,
+  // which drafts a new agent's config, fires it too but with no session id,
+  // so that call takes readTurnVolatile's drain-every-time fallback.
   //
   // turns maps a session id to the turn its consumptive commands last ran
   // for and the text they returned; later generations of the same turn
   // repeat that text so every generation in a turn carries identical system
   // messages. Keying by session keeps a child session's user message from
   // reopening the parent's turn. Entries are never removed: one small record
-  // per session for the life of the process is the accepted bound.
+  // per session, holding at most RECENT_USER_MESSAGES message ids, for the
+  // life of the process is the accepted bound.
   //
   // This scopes the cache, not the queue. Every session in the process runs
   // gc with the same identity, so a drain from a child or human session in
@@ -213,41 +219,55 @@ export default async function gascityPlugin({ directory, client }) {
     }
     let state = turns.get(sessionID);
     if (!state) {
-      state = { currentTurnID: "", drainedTurnID: null, volatile: Promise.resolve("") };
+      state = {
+        currentTurnID: "",
+        drainedTurnID: null,
+        volatile: Promise.resolve(""),
+        userMessageIDs: new Set(),
+      };
       turns.set(sessionID, state);
     }
     return state;
   }
 
   // openTurn records the user message that starts a session's turn. It is
-  // driven by message.updated alone: OpenCode persists the user message, and
-  // publishes that event to plugins inline, before it starts the turn's first
-  // generation, so the turn is known by the time the transform runs as long
-  // as the event handler records it before its first await. No chat.message
-  // hook is registered for this (see the transform below).
+  // driven by message.updated alone: OpenCode persists the user message and
+  // publishes that event before it starts the turn's first generation.
+  // OpenCode 1.18 calls the event hook while publishing; 1.14 delivers it on
+  // a separate subscriber fiber, which relies on that delivery running ahead
+  // of the first generation (the prompt loop awaits several steps before it
+  // generates). Neither awaits the hook, so the event handler must record
+  // the turn before its first await. No chat.message hook is registered for
+  // this (see the transform below).
   //
-  // Only a newer message advances the turn. OpenCode also emits
-  // message.updated for an older user message when a background fiber
-  // finishes that message's diff summary; the fiber is forked and never
-  // joined, and a new prompt does not wait for the session to go idle, so
-  // the update can land any number of turns later. Treating it as current
-  // would rewind the turn and either withhold the new turn's drain or drain
-  // a second time and change its system text mid-turn. Message ids are
-  // `msg_` + a fixed-width hex encoding of the creation time and a
-  // per-millisecond counter, so within a process a plain string comparison
-  // follows creation order: an id at or below the current turn is an update
-  // to an earlier message, not a new turn. If the clock steps backwards, a
-  // genuinely new message can sort below the current turn; that turn then
-  // repeats the previous turn's volatile text and its nudges wait for the
-  // next turn, which is preferable to consuming them twice.
+  // Only a user message the session has not reported before opens a turn.
+  // OpenCode also emits message.updated for an older user message when a
+  // background fiber finishes that message's diff summary; the fiber is
+  // forked and never joined, and a new prompt does not wait for the session
+  // to go idle, so the update can land any number of turns later. Treating
+  // it as current would rewind the turn and either withhold the new turn's
+  // drain or drain a second time and change its system text mid-turn.
+  // Message ids cannot tell the two apart by order: the 12 hex digits after
+  // `msg_` are the low 48 bits of the creation time in 1/4096 ms, which wrap
+  // every 2^36 ms (last on 2026-08-14), and the clock can step backwards, so
+  // a new message can sort below the current turn's. Each session instead
+  // remembers its most recent RECENT_USER_MESSAGES user-message ids; any
+  // other id opens a turn. An update that lands after its id aged out of
+  // that window opens one too and costs one extra drain, never a withheld
+  // one.
   function openTurn(sessionID, messageID) {
     const state = turnState(sessionID);
     if (!state || !messageID) {
       return;
     }
     messageID = String(messageID);
-    if (state.currentTurnID && messageID <= state.currentTurnID) {
+    if (state.userMessageIDs.has(messageID)) {
       return;
+    }
+    state.userMessageIDs.add(messageID);
+    if (state.userMessageIDs.size > RECENT_USER_MESSAGES) {
+      // A Set iterates in insertion order, so the first id is the oldest.
+      state.userMessageIDs.delete(state.userMessageIDs.values().next().value);
     }
     state.currentTurnID = messageID;
   }

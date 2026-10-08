@@ -281,47 +281,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **The OpenCode plugin keeps the stable prime at the head of the system
-  prompt.** `experimental.chat.system.transform` prepended the cached
-  `gc prime --hook` output, the drained nudges and unread mail to `system[0]`
-  as one block. `gc nudge drain --inject` emits a `Current time: ...` line on
+- **The OpenCode and MiMo Code plugins keep the stable prime at the head of
+  the system prompt and drain queued nudges once per turn, per session.**
+  `experimental.chat.system.transform` fires once per model generation, and
+  on every generation of every session in the directory it ran the
+  consumptive `gc nudge drain --inject` and `gc mail check --inject` and
+  prepended their output, with the cached `gc prime --hook` output, to
+  `system[0]` as one block. The drain emits a `Current time: ...` line on
   every call, even with an empty queue, so the bytes right after the prime
-  changed every turn and the provider's prompt-cache prefix ended at the
-  prime; everything after it, including OpenCode's own system text, was
-  re-prefilled at every turn start. The plugin now prepends only the prime to
-  `system[0]` and appends the per-turn text as a trailing system entry, after
-  every stable entry. It also stops injecting from `chat.message`: OpenCode
-  persists that hook's `output.message.system` on the user message and joins
-  it into the tail of `system[0]` on every generation of the turn, which put
-  the prime and the clock line back into the header. The MiMo Code plugin had
-  the same shape and gets the same fix. OpenCode hook version 7, MiMo Code
-  hook version 3; `gc` upgrades installed plugins below those or without the
-  new transform. (#5732)
-
-- **The OpenCode plugin drains queued nudges once per turn, per session.**
-  `experimental.chat.system.transform` fires once per model generation, so
-  every tool call in a turn ran the consumptive `gc nudge drain --inject` and
-  `gc mail check --inject` again, emptying the
-  queue several times per turn into whichever generation won the race
-  (#5552). OpenCode also instantiates one plugin per directory, so turn state
-  kept in the plugin closure is shared by the agent's session, every subagent
-  child session and any other session opened there: a child's user message
-  would reopen the parent's turn and a child's generation could consume the
-  parent's nudges. The plugin now keys turn state by session id (opened by the
-  user message's `message.updated`, which OpenCode publishes before the turn's
-  first generation; only a message id newer than the current turn's advances
-  it, so the background diff-summary update to an earlier user message, which
-  can land several turns later, does not rewind the turn), runs the two
-  commands once per turn and repeats the
-  drained text verbatim for every later
-  generation of that turn, so a turn's system messages are identical across
-  generations; with no known session or turn it drains every time as before.
-  Child sessions no longer refresh the shared prime on `session.created` /
+  changed every generation and the provider's prompt-cache prefix ended at
+  the prime; everything after it, including OpenCode's own system text, was
+  re-prefilled each time (#5732). Every tool call in a turn also emptied the
+  queue again, into whichever generation won the race (#5552). The plugins
+  now prepend only the prime to `system[0]` and append the per-turn text as
+  a trailing system entry, after every stable entry, and they stop injecting
+  from `chat.message`: OpenCode persists that hook's `output.message.system`
+  on the user message and joins it into the tail of `system[0]` on every
+  generation of the turn, which put the prime and the clock line back into
+  the header. They run the two commands once per turn per session and repeat
+  the drained text verbatim for every later generation of that turn, so a
+  turn's system messages are identical across generations; with no known
+  session or turn they drain every time as before. A turn opens on a user
+  message the session has not reported before (its `message.updated`, which
+  OpenCode publishes before the turn's first generation), so the background
+  diff-summary update to an earlier user message, which can land several
+  turns later, does not rewind the turn. Message ids are not compared: their
+  encoded creation time wrapped on 2026-08-14 and follows the wall clock, so
+  a newer message can sort below an older one. Each session remembers its
+  last 64 user-message ids, so an update that arrives after its id has aged
+  out of that window opens a turn and costs at most one extra drain. Child
+  sessions no longer refresh the shared prime on `session.created` /
   `session.compacted`, which re-baked the beacon time into the parent's
   `system[0]` mid-turn and handed the child id to `gc prime --hook` as a
-  candidate resume key. The MiMo Code plugin gets the same change. OpenCode
-  hook version 8, MiMo Code hook version 4; `gc` upgrades installed plugins
-  below those.
+  candidate resume key. The MiMo Code plugin now also closes the `gc`
+  child's stdin, as the OpenCode plugin already did (#5562); without that,
+  `gc nudge drain --inject` waited for input until the 30-second timeout and
+  the drain returned nothing. Turn state is per session, but the nudge queue
+  is not: a child or human session in the same directory still drains the
+  agent's queue, once per its own turn. OpenCode hook version 8, MiMo Code
+  hook version 4; `gc` upgrades installed plugins below those or without the
+  new transform and turn handling. (#5552, #5732, #6629)
 
 - **An attached session is no longer idle-slept.** Under a `[session_sleep]`
   policy or an agent's `sleep_after_idle`, interactive sessions on local tmux

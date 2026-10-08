@@ -8,14 +8,15 @@
 // GC_BIN at a fake gc script before importing the plugin. The fake answers
 // `prime --hook` with a fixed role prompt and `nudge drain --inject` with a
 // clock line that changes on every call, mirroring the real command, which
-// emits `Current time: ...` even when the queue is empty.
+// reads its hook input to EOF and then emits `Current time: ...` even when
+// the queue is empty.
 
 import { after, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROLE = "ROLE PROMPT: you are the configured agent.";
 const AGENT_PROMPT = "PROVIDER SYSTEM PROMPT";
@@ -24,8 +25,15 @@ const HEADER = `${AGENT_PROMPT}\n\n${ENVIRONMENT}`;
 const MAIL = "You have unread mail.";
 const CLOCK_PREFIX = "Current time: tick-";
 
+// The suite deadline. The fake drain reads its stdin to EOF, so a plugin that
+// leaves the child's stdin open stalls every drain until the plugin's 30s
+// exec timeout; this budget fails the suite well before that adds up.
+const SUITE_TIMEOUT_MS = 20000;
+
+// Resolved from import.meta.url rather than import.meta.dirname (Node 20.11+):
+// the PATH Bazel pins for tests can resolve an older system node.
 const overlayDir = path.resolve(
-  import.meta.dirname,
+  path.dirname(fileURLToPath(import.meta.url)),
   "..",
   "bootstrap",
   "packs",
@@ -47,12 +55,16 @@ const plugins = [
 
 // Fake gc: state lives in files under the temp dir so successive drains
 // observe each other and the tests can reset between cases. Every
+// `nudge drain` call appends a line to the drain log, which drainCount
+// counts; the clock counter only numbers the clock lines, because two
+// overlapping drains can both read it before either writes it back. Every
 // `prime --hook` call appends the GC_PROVIDER_SESSION_ID it was given to the
 // prime log, and GC_FAKE_PRIME_STAMP marks the output the way the real
 // command bakes the current time into its beacon, so a test can tell a
 // refreshed prime from the cached one.
 function writeFakeGc(dir) {
   const counter = path.join(dir, "drain-count");
+  const drainLog = path.join(dir, "drain-log");
   const primeLog = path.join(dir, "prime-log");
   const script = `#!/bin/sh
 case "$1 $2" in
@@ -62,6 +74,10 @@ case "$1 $2" in
     if [ -n "\${GC_FAKE_PRIME_STAMP:-}" ]; then printf ' (stamp %s)' "\${GC_FAKE_PRIME_STAMP}"; fi
     ;;
   "nudge drain")
+    # Read the hook input to EOF first, as the real command does: a plugin
+    # that leaves the child's stdin open blocks here (#5562).
+    while IFS= read -r line; do :; done
+    printf 'drain\\n' >> "${drainLog}"
     if [ "\${GC_INJECT_CLOCK:-}" = "0" ]; then exit 0; fi
     n=0
     if [ -f "${counter}" ]; then n=$(cat "${counter}"); fi
@@ -78,21 +94,27 @@ esac
 `;
   const bin = path.join(dir, "gc");
   fs.writeFileSync(bin, script, { mode: 0o755 });
-  return { bin, counter, primeLog };
+  return { bin, counter, drainLog, primeLog };
+}
+
+function readLines(file) {
+  if (!fs.existsSync(file)) {
+    return [];
+  }
+  return fs.readFileSync(file, "utf-8").split("\n").filter(Boolean);
 }
 
 function readPrimeLog(fake) {
-  if (!fs.existsSync(fake.primeLog)) {
-    return [];
-  }
-  return fs.readFileSync(fake.primeLog, "utf-8").split("\n").filter(Boolean);
+  return readLines(fake.primeLog);
 }
 
 function drainCount(fake) {
-  if (!fs.existsSync(fake.counter)) {
-    return 0;
-  }
-  return Number(fs.readFileSync(fake.counter, "utf-8"));
+  return readLines(fake.drainLog).length;
+}
+
+function resetDrains(fake) {
+  fs.rmSync(fake.counter, { force: true });
+  fs.rmSync(fake.drainLog, { force: true });
 }
 
 function userMessageEvent(sessionID, messageID) {
@@ -118,7 +140,10 @@ function sessionEvent(type, sessionID, info) {
 function stagePlugin(dir, plugin) {
   const stage = path.join(dir, plugin.name);
   fs.mkdirSync(stage, { recursive: true });
-  fs.copyFileSync(plugin.source, path.join(stage, "gascity.js"));
+  // Write the bytes rather than copyFileSync: that carries over the source's
+  // mode, and Bazel's remote runfiles are read-only, so staging the same
+  // plugin a second time could not overwrite the first copy.
+  fs.writeFileSync(path.join(stage, "gascity.js"), fs.readFileSync(plugin.source));
   // OpenCode loads workdir plugins as ES modules; the module-type package.json
   // gives the staged copy the same semantics outside a package.
   fs.writeFileSync(path.join(stage, "package.json"), '{"type":"module"}');
@@ -132,13 +157,19 @@ function countOccurrences(haystack, needle) {
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gc-plugin-test-"));
 const fake = writeFakeGc(tmp);
 process.env.GC_BIN = fake.bin;
+// Both plugins mirror session transcripts through the client, and MiMo Code
+// mirrors by default into the user's Gas City data directory, so keep every
+// mirror under the suite's temp dir.
+const transcriptDir = path.join(tmp, "transcripts");
+process.env.GC_OPENCODE_TRANSCRIPT_DIR = transcriptDir;
+process.env.GC_MIMOCODE_TRANSCRIPT_DIR = transcriptDir;
 
 after(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
 for (const plugin of plugins) {
-  describe(`${plugin.name} plugin experimental.chat.system.transform`, () => {
+  describe(`${plugin.name} plugin experimental.chat.system.transform`, { timeout: SUITE_TIMEOUT_MS }, () => {
     let hooks;
 
     before(async () => {
@@ -148,7 +179,7 @@ for (const plugin of plugins) {
     });
 
     beforeEach(() => {
-      fs.rmSync(fake.counter, { force: true });
+      resetDrains(fake);
       delete process.env.GC_FAKE_MAIL;
     });
 
@@ -311,9 +342,8 @@ for (const plugin of plugins) {
     });
 
     it("registers no chat.message hook and opens the turn from message.updated alone", async () => {
-      // OpenCode persists the user message (publishing message.updated to
-      // plugins inline, before the handler's first await can yield) and only
-      // then starts the turn's first generation, so message.updated is
+      // OpenCode persists the user message (publishing message.updated) and
+      // only then starts the turn's first generation, so message.updated is
       // sufficient to open the turn. chat.message would arrive earlier still,
       // but any hook registered there risks writing output.message.system,
       // which OpenCode folds back into system[0] every generation.
@@ -428,6 +458,73 @@ for (const plugin of plugins) {
       assert.deepEqual(second, first, "system text changed mid-turn");
     });
 
+    // Real OpenCode ids: the 12 hex digits after `msg_` are the low 48 bits of
+    // the creation time in 1/4096 ms, so they wrapped on 2026-08-14 and a
+    // message created after that sorts below one created before it.
+    // CLOCK_STEP_ID was created after POST_WRAP_ID once the clock stepped back
+    // 412 ms; LATER_ID was created 5 s after POST_WRAP_ID and sorts above it.
+    const PRE_WRAP_ID = "msg_f4d541459001u0Kb7U0n31y156";
+    const POST_WRAP_ID = "msg_10001428c001o7DH2T7BpAk6CR";
+    const CLOCK_STEP_ID = "msg_1000140f0001Qm4TzR8vXc2LpA";
+    const LATER_ID = "msg_100015614001Vb9KcT3wQe7NhZ";
+
+    it("opens a turn for every new user message whatever order the ids sort in", async () => {
+      const ids = [PRE_WRAP_ID, POST_WRAP_ID, CLOCK_STEP_ID];
+      for (const [i, id] of ids.entries()) {
+        const n = i + 1;
+        await hooks.event(userMessageEvent("ses_wrap", id));
+        const first = await transform([HEADER], "ses_wrap");
+        assert.equal(drainCount(fake), n, `user message ${id} did not open a turn`);
+        assert.equal(first[1], `${CLOCK_PREFIX}${n} (epoch ${n})`);
+        const second = await transform([HEADER], "ses_wrap");
+        assert.equal(drainCount(fake), n, "a later generation of the turn drained again");
+        assert.deepEqual(second, first);
+      }
+    });
+
+    for (const [order, earlier, later] of [
+      ["above", PRE_WRAP_ID, POST_WRAP_ID],
+      ["below", POST_WRAP_ID, LATER_ID],
+    ]) {
+      it(`ignores a delayed update to a user message whose id sorts ${order} the current turn's`, async () => {
+        const sessionID = `ses_wrap_${order}`;
+        await hooks.event(userMessageEvent(sessionID, earlier));
+        await transform([HEADER], sessionID);
+        await hooks.event(userMessageEvent(sessionID, later));
+        // The earlier message's summary update lands before turn two drained.
+        await hooks.event(userMessageEvent(sessionID, earlier));
+        const first = await transform([HEADER], sessionID);
+        assert.equal(drainCount(fake), 2, "turn two never drained");
+        assert.equal(first[1], `${CLOCK_PREFIX}2 (epoch 2)`);
+
+        // And again after it drained.
+        await hooks.event(userMessageEvent(sessionID, earlier));
+        const second = await transform([HEADER], sessionID);
+        assert.equal(drainCount(fake), 2, "late update caused another consumptive drain");
+        assert.deepEqual(second, first, "system text changed mid-turn");
+      });
+    }
+
+    it("forgets the oldest user messages so a session's memory stays bounded", async () => {
+      const ids = Array.from({ length: 1000 }, (_, i) => `msg_bound${String(i).padStart(4, "0")}`);
+      for (const id of ids) {
+        await hooks.event(userMessageEvent("ses_bound", id));
+      }
+      await transform([HEADER], "ses_bound");
+      assert.equal(drainCount(fake), 1);
+
+      // A recent message is still known, so its late update is ignored.
+      await hooks.event(userMessageEvent("ses_bound", ids.at(-2)));
+      await transform([HEADER], "ses_bound");
+      assert.equal(drainCount(fake), 1, "a recent message's late update opened a turn");
+
+      // The first message aged out long ago: its late update opens a turn and
+      // costs one extra drain rather than the session keeping every id.
+      await hooks.event(userMessageEvent("ses_bound", ids[0]));
+      await transform([HEADER], "ses_bound");
+      assert.equal(drainCount(fake), 2, "the session still remembers its first message");
+    });
+
     it("shares one pending drain between concurrent generations of a turn", async () => {
       await hooks.event(userMessageEvent("ses_race", "msg_r1"));
       const [g1, g2] = await Promise.all([
@@ -440,9 +537,10 @@ for (const plugin of plugins) {
     });
 
     it("drains every generation when no turn is known", async () => {
-      // No session id on the transform input (older payloads) and a session
-      // that never reported a user message both fall back to draining each
-      // time so nudges are never silently withheld.
+      // No session id on the transform input (OpenCode's Agent.generate sends
+      // only the model) and a session that never reported a user message
+      // both fall back to draining each time so nudges are never silently
+      // withheld.
       const noSession1 = await transform([HEADER], null);
       const noSession2 = await transform([HEADER], null);
       assert.equal(noSession1[1], `${CLOCK_PREFIX}1 (epoch 1)`);
@@ -455,7 +553,60 @@ for (const plugin of plugins) {
     });
   });
 
-  describe(`${plugin.name} plugin session lifecycle events`, () => {
+  describe(`${plugin.name} plugin turn order under transcript mirroring`, { timeout: SUITE_TIMEOUT_MS }, () => {
+    beforeEach(() => {
+      resetDrains(fake);
+    });
+
+    it("opens the turn before the event handler awaits the transcript mirror", async () => {
+      // message.updated mirrors the transcript after opening the turn, and
+      // the mirror waits on client round trips (MiMo Code mirrors in every
+      // default session). This client holds them until both generations of
+      // the turn have run, so a turn opened after the mirror is seen late.
+      let release;
+      const released = new Promise((resolve) => {
+        release = resolve;
+      });
+      let mirrorStarted = false;
+      const client = {
+        session: {
+          get: async ({ path: { id } }) => {
+            mirrorStarted = true;
+            await released;
+            return { data: { id } };
+          },
+          messages: async () => {
+            await released;
+            return { data: [] };
+          },
+        },
+      };
+      const staged = stagePlugin(tmp, plugin);
+      const { default: gascityPlugin } = await import(pathToFileURL(staged).href);
+      const hooks = await gascityPlugin({ directory: tmp, client });
+      async function generate() {
+        const output = { system: [HEADER] };
+        await hooks["experimental.chat.system.transform"]({ sessionID: "ses_mirror", model: {} }, output);
+        return output.system;
+      }
+
+      const pending = hooks.event(userMessageEvent("ses_mirror", "msg_x1"));
+      const first = await generate();
+      const second = await generate();
+      assert.ok(mirrorStarted, "the handler never reached the client, so nothing held it");
+      release();
+      await pending;
+
+      assert.equal(drainCount(fake), 1, "turn was not open when the first generation ran");
+      assert.deepEqual(second, first);
+      assert.ok(
+        fs.existsSync(path.join(transcriptDir, "ses_mirror.json")),
+        "the mirror wrote outside the suite's temp dir",
+      );
+    });
+  });
+
+  describe(`${plugin.name} plugin session lifecycle events`, { timeout: SUITE_TIMEOUT_MS }, () => {
     // A fresh plugin instance per test: the prime cache is per instance and
     // these tests stamp it.
     const known = new Map();
@@ -479,7 +630,7 @@ for (const plugin of plugins) {
     });
 
     beforeEach(() => {
-      fs.rmSync(fake.counter, { force: true });
+      resetDrains(fake);
       fs.rmSync(fake.primeLog, { force: true });
       known.clear();
       delete process.env.GC_FAKE_MAIL;

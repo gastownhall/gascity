@@ -362,7 +362,11 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		// because OpenCode instantiates one plugin per directory, the turn
 		// state must be keyed by session so a subagent's user message does
 		// not reopen the parent's turn.
-		!strings.Contains(content, "const turns = new Map()") {
+		!strings.Contains(content, "const turns = new Map()") ||
+		// A turn opens on a user-message id the session has not seen, not
+		// on a higher one: OpenCode's ids wrap and follow the wall clock, so
+		// an id-order gate stops opening turns (#6629).
+		!strings.Contains(content, "state.userMessageIDs.has(messageID)") {
 		return true
 	}
 	for _, marker := range []string{
@@ -398,13 +402,18 @@ func mimocodeHookNeedsUpgrade(existing []byte) bool {
 		return false
 	}
 	return mimocodeHookVersion(content) < managedMimoCodeHookVersion ||
+		// The child's stdin must be closed or gc blocks on it (#5562).
+		!strings.Contains(content, "pending.child.stdin?.end();") ||
 		// Per-turn text must trail the stable system entries, not share
 		// system[0] with the prime (#5732). A version-only check would keep
 		// a same-numbered plugin with a different body.
 		!strings.Contains(content, "appendVolatileSystem") ||
 		// Turn state must be keyed by session; the plugin instance is shared
 		// by every session in the directory (same shape as OpenCode).
-		!strings.Contains(content, "const turns = new Map()")
+		!strings.Contains(content, "const turns = new Map()") ||
+		// A turn opens on an unseen user-message id, not a higher one
+		// (#6629, same shape as OpenCode).
+		!strings.Contains(content, "state.userMessageIDs.has(messageID)")
 }
 
 func mimocodeHookVersion(content string) int {
