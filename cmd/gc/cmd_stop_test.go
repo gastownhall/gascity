@@ -2206,3 +2206,190 @@ func TestCmdStopFailsClosedOnPartialRuntimeInventory(t *testing.T) {
 		t.Fatal("positively observed orphan survived the stop")
 	}
 }
+
+// stubAlreadyStoppedSeams installs the store-retired answer and records every
+// store open and provider stop the stop body attempts.
+func stubAlreadyStoppedSeams(t *testing.T, retired bool) (storeOpens, providerStops *int) {
+	t.Helper()
+	opens, stops := 0, 0
+	oldRetired, oldOpen, oldShutdown, oldProbe := stopCityStoreRetired, openCityStoreForStop, shutdownBeadsProviderForStop, sessionProviderForStopProbe
+	stopCityStoreRetired = func(string) bool { return retired }
+	openCityStoreForStop = func(cityPath string) (beads.Store, error) {
+		opens++
+		return oldOpen(cityPath)
+	}
+	shutdownBeadsProviderForStop = func(string) error {
+		stops++
+		return nil
+	}
+	// The probe lists through the same runtime the full flow stops through.
+	sessionProviderForStopProbe = func(cfg *config.City, cityPath string) (runtime.Provider, error) {
+		return sessionProviderForStopCity(cfg, cityPath)
+	}
+	t.Cleanup(func() {
+		stopCityStoreRetired, openCityStoreForStop, shutdownBeadsProviderForStop, sessionProviderForStopProbe = oldRetired, oldOpen, oldShutdown, oldProbe
+	})
+	return &opens, &stops
+}
+
+func alreadyStoppedTestCity(t *testing.T) (string, *config.City) {
+	t.Helper()
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+	cityDir := shortSocketTempDir(t, "gc-stopped-city-")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "stopped-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "sleep 1"}},
+	}
+	// The full flow opens the store from disk, so the file provider has to be
+	// on disk too: without a city.toml the store defaults to bd.
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return cityDir, cfg
+}
+
+// A stop of a city that is already stopped must not read the bead store: on a
+// provider-owned proxied store every read restarts the proxy and its Dolt
+// child, which is what made a repeated `gc stop` cost seconds and dozens of bd
+// forks.
+func TestCmdStopBodyAlreadyStoppedCityTouchesNoStore(t *testing.T) {
+	cityDir, cfg := alreadyStoppedTestCity(t)
+	storeOpens, providerStops := stubAlreadyStoppedSeams(t, true)
+
+	// The full session provider loads a session-bead snapshot from the store,
+	// so the already-stopped path must list through the probe alone.
+	fullProviders := 0
+	oldFactory := sessionProviderForStopCity
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
+		fullProviders++
+		return runtime.NewFake(), nil
+	}
+	sessionProviderForStopProbe = func(*config.City, string) (runtime.Provider, error) { return runtime.NewFake(), nil }
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdStopBodyWithoutSuccess(cityDir, cfg, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdStopBodyWithoutSuccess = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if fullProviders != 0 {
+		t.Errorf("stop of a stopped city built the snapshot-loading session provider %d time(s), want 0", fullProviders)
+	}
+	if *storeOpens != 0 {
+		t.Errorf("stop of a stopped city opened the bead store %d time(s), want 0", *storeOpens)
+	}
+	if *providerStops != 0 {
+		t.Errorf("stop of a stopped city stopped the bead store provider %d time(s), want 0", *providerStops)
+	}
+}
+
+// A partially stopped city — a session still running while the proxy has
+// retired — still gets the full stop: the session is stopped and the store is
+// read and then retired.
+func TestCmdStopBodyRunningSessionWithRetiredStoreStillStops(t *testing.T) {
+	cityDir, cfg := alreadyStoppedTestCity(t)
+	storeOpens, providerStops := stubAlreadyStoppedSeams(t, true)
+
+	sp := runtime.NewFake()
+	sessionName := lookupSessionNameOrLegacy(nil, loadedCityName(cfg, cityDir), cfg.Agents[0].QualifiedName(), cfg.Workspace.SessionTemplate)
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	oldFactory := sessionProviderForStopCity
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdStopBodyWithoutSuccess(cityDir, cfg, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdStopBodyWithoutSuccess = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if sp.IsRunning(sessionName) {
+		t.Errorf("session %s still running after stop", sessionName)
+	}
+	if *storeOpens != 1 || *providerStops != 1 {
+		t.Errorf("store opens = %d, provider stops = %d; want 1 and 1", *storeOpens, *providerStops)
+	}
+}
+
+// With nothing running but a store that is not provably retired (a live or
+// killed proxy, a stray Dolt child), the full flow still retires the store.
+func TestCmdStopBodyStoppedRuntimeWithLiveStoreRetiresStore(t *testing.T) {
+	cityDir, cfg := alreadyStoppedTestCity(t)
+	storeOpens, providerStops := stubAlreadyStoppedSeams(t, false)
+
+	oldFactory := sessionProviderForStopCity
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return runtime.NewFake(), nil }
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdStopBodyWithoutSuccess(cityDir, cfg, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdStopBodyWithoutSuccess = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if *storeOpens != 1 || *providerStops != 1 {
+		t.Errorf("store opens = %d, provider stops = %d; want 1 and 1", *storeOpens, *providerStops)
+	}
+}
+
+func TestCityStoreRetiredForStop(t *testing.T) {
+	const proxiedMetadata = `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hq"}`
+	newCity := func(t *testing.T, metadata string) string {
+		t.Helper()
+		city := t.TempDir()
+		if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"t\"\n[beads]\nprovider = \"bd\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeScopeBeadsMetadata(t, city, metadata)
+		if err := persistProviderScopeOwnership(city, city, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := markProviderScopeOwnershipReady(city, city); err != nil {
+			t.Fatal(err)
+		}
+		return city
+	}
+
+	t.Run("provider-owned proxied scope with no proxy record", func(t *testing.T) {
+		if !cityStoreRetiredForStop(newCity(t, proxiedMetadata)) {
+			t.Fatal("a cleanly retired proxied scope was not reported retired")
+		}
+	})
+	t.Run("proxy record left behind", func(t *testing.T) {
+		city := newCity(t, proxiedMetadata)
+		root := filepath.Join(city, ".beads", "dolt")
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Any record at all — here one that does not decode — means the proxy
+		// did not exit cleanly, so bd's own stop has to run.
+		if err := os.WriteFile(filepath.Join(root, "proxy.pid"), []byte("not a record"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if cityStoreRetiredForStop(city) {
+			t.Fatal("a scope with a proxy record was reported retired")
+		}
+	})
+	t.Run("scope bound in direct mode", func(t *testing.T) {
+		// A direct-mode scope has no proxy record to read, so "no record"
+		// proves nothing about whether its server is down.
+		if cityStoreRetiredForStop(newCity(t, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`)) {
+			t.Fatal("a direct-mode scope was reported to have a retired proxy")
+		}
+	})
+	t.Run("file store", func(t *testing.T) {
+		city := t.TempDir()
+		if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"t\"\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if cityStoreRetiredForStop(city) {
+			t.Fatal("a file store city was reported to have a retired proxied store")
+		}
+	})
+}

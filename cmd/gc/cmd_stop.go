@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -382,7 +384,18 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 		return 1
 	}
 
-	store, _ := openCityStoreAt(cityPath)
+	// A city that is already stopped has nothing for this stop to do, and on
+	// a provider-owned proxied store the rest of this flow is not free: the
+	// session provider's snapshot and every session lookup read the store,
+	// and each bd read restarts the scope's proxy and Dolt child, only for the
+	// final provider stop to retire them again. Answer from the runtime and
+	// the proxy records instead, without touching the store.
+	if stopped, sp := cityAlreadyStoppedForStop(cfg, cityPath); stopped {
+		teardownServerForStop(sp, stderr, "gc stop")
+		return 0
+	}
+
+	store, _ := openCityStoreForStop(cityPath)
 	// Every store consumer in this stop flow is session-class (sleep-reason marks,
 	// session-name lookups, session-runtime stop, orphan cleanup), so route the
 	// whole flow through the session coordination-class store for relocation-safety.
@@ -447,14 +460,130 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	// would leave the city up with a live proxy every time.
 	//
 	// The call is re-runnable: `bd dolt stop` is idempotent on rc.2 (exit 0,
-	// stopped/verified true, with or without a live proxy), so a second
-	// `gc stop` finds nothing to do and still exits 0.
+	// stopped/verified true, with or without a live proxy). A second `gc stop`
+	// of a fully stopped proxied city does not get this far: it returns at
+	// cityAlreadyStoppedForStop above without reading the store.
 	if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal warning.
 	}
 
 	return code
+}
+
+// openCityStoreForStop opens the store the full stop flow reads sessions
+// from. A variable so tests can prove the already-stopped path never opens it.
+var openCityStoreForStop = openCityStoreAt
+
+// sessionProviderForStopProbe builds the session provider
+// cityAlreadyStoppedForStop lists the runtime through. A variable so tests can
+// substitute a fake runtime.
+var sessionProviderForStopProbe = newStopProbeSessionProvider
+
+// newStopProbeSessionProvider is the city's session provider without the
+// session-bead snapshot sessionProviderForStopCity loads to seed ACP routes.
+// Listing what is running needs no routes: the composite provider lists every
+// backend. Loading the snapshot would read the store, which is the one thing
+// the already-stopped check must not do.
+func newStopProbeSessionProvider(cfg *config.City, cityPath string) (runtime.Provider, error) {
+	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+	sp, err := newSessionProviderFromContext(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	return sp, nil
+}
+
+// cityAlreadyStoppedForStop reports whether the standalone stop flow, once it
+// has proven no controller serves the city, would find nothing to stop: the
+// bead store's backing service is already retired and no runtime session is
+// running. It reads only the proxy records, the process table and the runtime
+// inventory; it never opens the store or runs bd. When it answers true it also
+// returns the provider it listed through, for the runtime server teardown.
+//
+// It answers false whenever it cannot prove the city is stopped, so the full
+// flow still handles a partially stopped city: a live session, a live or
+// SIGKILLed proxy, a stray Dolt child, a gc-managed Dolt, a scope that is not
+// provider-owned proxied, or a runtime it could not list completely.
+//
+// The city's nudge pollers are stopped first. They are readers the city
+// spawns, and one that outlived the city would restart the proxy this check
+// found retired; the full flow stops them for the same reason.
+//
+// What this path does not do is mark session beads asleep with the city-stop
+// reason: that needs the store. A clean stop already marked them, so the only
+// beads left unmarked are those of a city whose controller died without
+// stopping, whose sessions are gone and whose proxy has since retired.
+func cityAlreadyStoppedForStop(cfg *config.City, cityPath string) (bool, runtime.Provider) {
+	if err := stopCityNudgePollers(cityPath); err != nil {
+		return false, nil
+	}
+	if !stopCityStoreRetired(cityPath) {
+		return false, nil
+	}
+	sp, err := sessionProviderForStopProbe(cfg, cityPath)
+	if err != nil {
+		return false, nil
+	}
+	running, complete := listRunningForStop(sp, io.Discard)
+	if !complete || len(running) > 0 {
+		return false, nil
+	}
+	return true, sp
+}
+
+// stopCityStoreRetired is a variable so stop-flow tests can model a retired
+// or a live store without a real bd proxy.
+var stopCityStoreRetired = cityStoreRetiredForStop
+
+// cityStoreRetiredForStop reports whether every bead-store scope this city
+// would retire on stop is a provider-owned proxied scope whose proxy exited
+// cleanly (bd removes proxy.pid on an orderly exit), with no Dolt server left
+// running under any of their proxy roots. Any other shape, or any read it
+// cannot complete, answers false.
+func cityStoreRetiredForStop(cityPath string) bool {
+	if !cityUsesBdStoreContract(cityPath) {
+		return false
+	}
+	if currentResolvableManagedDoltPort(cityPath) != "" {
+		return false
+	}
+	scopes, err := providerOwnedLifecycleScopeRoots(cityPath, "stop")
+	if err != nil || len(scopes) == 0 {
+		return false
+	}
+	table := proxyendpoint.DefaultProcessTable()
+	proxyRoots := make([]string, 0, len(scopes))
+	for _, scopeRoot := range scopes {
+		owned, err := scopeProviderOwned(cityPath, scopeRoot)
+		if err != nil || !owned || !doctor.ProxiedStoreNotRunning(scopeRoot) {
+			return false
+		}
+		root, err := proxyendpoint.ProviderRoot(scopeRoot)
+		if err != nil {
+			return false
+		}
+		if proxyendpoint.Inspect(root, table).Verdict != proxyendpoint.VerdictNoRecord {
+			return false
+		}
+		proxyRoots = append(proxyRoots, normalizePathForCompare(root))
+	}
+	procs, err := discoverDoltProcesses()
+	if err != nil {
+		return false
+	}
+	for _, proc := range procs {
+		configPath := extractConfigPath(proc.Argv)
+		if configPath == "" {
+			continue
+		}
+		for _, root := range proxyRoots {
+			if pathUnderRoot(configPath, root) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // teardownServerForStop terminates a provider's shared server after every
