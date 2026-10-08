@@ -12,23 +12,24 @@ import (
 )
 
 // stopKeyOwners are the only production files that may name the stop
-// request's controller-half keys: the definitions, and the C6a accessor and
-// patch builders. Other writers clear them through
+// request's keys: the definitions, the C6a accessor and patch builders, and
+// E3's drain-ack CLI (the request half). Other writers clear them through
 // session.ClearStopRequestPatch, which lives with the definitions.
-var stopKeyOwners = []string{"internal/session/stop_request_keys.go", "cmd/gc/reconcile_stop_request.go"}
+var stopKeyOwners = []string{"internal/session/stop_request_keys.go", "cmd/gc/reconcile_stop_request.go", "cmd/gc/cmd_runtime_drain.go"}
 
 // Kills a legacy reader of the stop request's controller half (v5 R1's
 // rollback rule: legacy ignores the new keys): no production Go file under
-// cmd/ or internal/ but stopKeyOwners spells a key or names its exported
-// constant.
+// cmd/, internal/ or pkg/ but stopKeyOwners spells a key of either half or
+// names its exported constant.
 func TestStopRequestKeysAreNewKeys(t *testing.T) {
 	banned := []string{
 		session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey,
-		"DrainIntentReasonKey", "DrainIntentAtKey", "DrainIntentIncarnationKey",
+		session.DrainAckIncarnationKey, session.DrainAckAtKey,
+		"DrainIntentReasonKey", "DrainIntentAtKey", "DrainIntentIncarnationKey", "DrainAckIncarnationKey", "DrainAckAtKey",
 	}
 	root := repoRootForLint(t)
 	scanned, owners := 0, 0
-	for _, dir := range []string{"cmd", "internal"} {
+	for _, dir := range []string{"cmd", "internal", "pkg"} {
 		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 				return err
