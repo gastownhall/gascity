@@ -49,12 +49,12 @@ func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 	for _, arm := range rowArms {
 		names = append(names, arm.name)
 		n, err := strconv.Atoi(arm.name[1:])
-		if err != nil || n <= last {
+		if err != nil || n < last {
 			t.Fatalf("arm %s out of CONTRACT v5 §4 order after A%d", arm.name, last)
 		}
 		last = n
 	}
-	if want := []string{"A1", "A2", "A3", "A5", "A6", "A9", "A19"}; !slices.Equal(names, want) {
+	if want := []string{"A1", "A2", "A3", "A5", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A9", "A19"}; !slices.Equal(names, want) {
 		t.Fatalf("rowArms = %v, want %v", names, want)
 	}
 

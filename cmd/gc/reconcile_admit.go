@@ -38,6 +38,7 @@ const (
 	intentRowMetadata     = "row-metadata"      // A7 (M1)
 	intentBaseline        = "baseline"          // A8 (M2)
 	intentRowHeal         = "row-heal"          // A6's heals and markers, and other row writes
+	intentRowHealFresh    = "row-heal-fresh"    // A6's not-alive heals: a fresh read under the name lock first
 )
 
 // capClass is the cap an intent counts against (P4); none is per endpoint.
@@ -75,6 +76,7 @@ var intentKinds = map[string]kindSpec{
 	intentRowMetadata:     {class: capRowWrites},
 	intentBaseline:        {class: capRowWrites},
 	intentRowHeal:         {class: capRowWrites},
+	intentRowHealFresh:    {class: capProbing},
 }
 
 // createsInFlightCap bounds running creates (P4, C1); the rest are P3's

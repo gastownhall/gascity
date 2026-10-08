@@ -387,6 +387,10 @@ type Info struct {
 	// (CurrentBeadIDKey). compute_awake_bridge maps it (trimmed) onto
 	// LifecycleInput.CurrentlyProcessingBeadID.
 	CurrentlyProcessingBeadID string // currently_processing_bead_id (raw)
+	// CurrentClaimBeadID is the RAW current_claim_bead_id metadata
+	// (beadmeta.CurrentClaimBeadIDMetadataKey): the work the session claimed
+	// for itself (SetCurrentClaim), which CurrentClaimBeadID reads live.
+	CurrentClaimBeadID string // current_claim_bead_id (raw)
 	// CoreHashBreakdown is the RAW core_hash_breakdown metadata (a JSON blob). The
 	// config-drift path feeds it verbatim to runtime.CoreFingerprintDriftFieldsFromJSON
 	// / LogCoreFingerprintDrift for the drift trace payload; the mirror keeps the
