@@ -383,6 +383,18 @@ if [ -d "$backup_artifact_dir" ]; then
       db_fresh=$(format_age "$db_age")
       db_stale=false
       [ "$db_age" -gt "$backup_stale_after" ] && db_stale=true
+      # Same rule as mol-dog-doctor.sh: an idle database's no-op sync rewrites
+      # no manifest, so a backup no older than its last commit is current
+      # however old it is. Queried only when stale; $bname passed the
+      # identifier filter above.
+      if [ "$db_stale" = true ] && [ "$server_reachable" = true ]; then
+        db_last_write=$(run_bounded 5 dolt $conn_args sql --result-format csv \
+          -q "SELECT TIMESTAMPDIFF(SECOND, '1970-01-01 00:00:00', MAX(latest_commit_date)) FROM \`$bname\`.dolt_branches" 2>/dev/null | grep -E '^[0-9]+$' | head -1 || true)
+        case "$db_last_write" in ''|*[!0-9]*) db_last_write=0 ;; esac
+        if [ "$db_last_write" -gt 0 ] && [ "$db_last_write" -le "$db_newest" ]; then
+          db_stale=false
+        fi
+      fi
     fi
     backup_db_list="$backup_db_list$bname|$db_age|$db_fresh|$db_stale
 "
