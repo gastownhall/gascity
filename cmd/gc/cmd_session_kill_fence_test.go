@@ -542,16 +542,31 @@ func TestCmdSessionKill_StopFailureRestoresPendingWake(t *testing.T) {
 	}
 }
 
-// TestManagedSuspendPatchClearsPendingWake is D7 rule 3 for the managed
-// `gc session suspend`, which writes the hold without stopping the runtime.
-func TestManagedSuspendPatchClearsPendingWake(t *testing.T) {
-	patch := managedSuspendPatch(time.Now())
-	for key := range pendingWake {
-		if v, ok := patch[key]; !ok || v != "" {
-			t.Errorf("managed suspend %s = %q (present %v), want cleared", key, v, ok)
-		}
+// TestCmdSessionSuspend_ManagedClearsPendingWake is D7 rule 3 for the
+// managed `gc session suspend`, which writes the hold and leaves the stop to
+// the controller. Kills the call site writing a patch without the clear.
+func TestCmdSessionSuspend_ManagedClearsPendingWake(t *testing.T) {
+	store, bead, _ := newKillPokeSession(t, "s-gc-suspend-wake")
+	setKillFixtureMetadata(t, store, bead.ID, pendingWake)
+	oldManaged, oldPoke, oldEnqueue := sessionSuspendManagedReconciler, sessionSuspendPokeController, sessionSuspendEnqueueController
+	sessionSuspendManagedReconciler = func(string) bool { return true }
+	sessionSuspendPokeController = func(string) error { return nil }
+	sessionSuspendEnqueueController = func(string, reconcilekey.Key) error { return nil }
+	t.Cleanup(func() {
+		sessionSuspendManagedReconciler, sessionSuspendPokeController, sessionSuspendEnqueueController = oldManaged, oldPoke, oldEnqueue
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionSuspend([]string{killPokeSessionIdentity}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionSuspend = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if patch["state"] != "suspended" || patch["sleep_intent"] != "user-hold" || patch["held_until"] == "" {
-		t.Errorf("managed suspend patch = %v, want the hold", patch)
+	final := mustGetBead(t, store, bead.ID)
+	if final.Metadata["state"] != "suspended" || final.Metadata["sleep_intent"] != "user-hold" || final.Metadata["held_until"] == "" {
+		t.Fatalf("managed suspend left %v, want the hold", final.Metadata)
+	}
+	for key := range pendingWake {
+		if got := final.Metadata[key]; got != "" {
+			t.Errorf("after managed suspend %s = %q, want cleared", key, got)
+		}
 	}
 }

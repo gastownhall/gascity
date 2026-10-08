@@ -431,7 +431,6 @@ go_library(
         "reconcile_session_namelock.go",
         "reconcile_steps_nudges.go",
         "reconcile_steps_waits.go",
-        "reconcile_stop_keys.go",
         "reconcile_stop_request.go",
         "reconcile_tick.go",
         "reconcile_wake.go",

@@ -130,11 +130,11 @@ var parityFindings = map[string]parityEntry{
 	"named-trigger-clear": {"POOL-056 follow-up (ORCH-NOTES C5d ruling)", "legacy clears a preserved named row's stale trigger stamp; v2's A6 does not yet", []string{"gc.trigger_bead_id", "gc.trigger_bead_store_ref", "brain_parent_sid"}},
 	"drain-cancel-on-probe-error": {
 		"CONTRACT v5 O3, BEHAVIORS DRAIN-042", "legacy skips a drain whose running probe errors; v2's inventory still classifies the row, so A19's wake lens cancels the drain. No completion either way, but §12.2 does not list the cancel",
-		[]string{drainIntentReasonKey, drainIntentAtKey, drainIntentIncarnationKey},
+		[]string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey},
 	},
 	"idle-respawn-void": {
 		"C6d, BEHAVIORS DRAIN-044", "legacy cancels an idle-respawn drain no longer eligible; A19 holds it until C6d completes its policy row",
-		[]string{drainIntentReasonKey, drainIntentAtKey, drainIntentIncarnationKey},
+		[]string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey},
 	},
 	"mislabelled-close": {"CONTRACT v5 AL1, A1", "legacy closes a row with no template and no session name as orphaned; v2's A1 leaves it open as None, which §12.2 does not list", []string{"status", "state", "close_reason", "closed_at"}},
 }
@@ -382,10 +382,10 @@ func (w *legacyWorld) projectDrains(all []beads.Bead) {
 			continue
 		}
 		meta := maps.Clone(b.Metadata)
-		meta[drainIntentReasonKey], meta[drainIntentAtKey], meta[drainIntentIncarnationKey] = "", "", ""
+		meta[session.DrainIntentReasonKey], meta[session.DrainIntentAtKey], meta[session.DrainIntentIncarnationKey] = "", "", ""
 		if ds := w.dt.get(b.ID); ds != nil {
-			meta[drainIntentReasonKey], meta[drainIntentAtKey] = ds.reason, ds.startedAt.UTC().Format(time.RFC3339)
-			meta[drainIntentIncarnationKey] = strconv.Itoa(ds.generation)
+			meta[session.DrainIntentReasonKey], meta[session.DrainIntentAtKey] = ds.reason, ds.startedAt.UTC().Format(time.RFC3339)
+			meta[session.DrainIntentIncarnationKey] = strconv.Itoa(ds.generation)
 		}
 		all[i].Metadata = meta
 	}
@@ -454,7 +454,7 @@ func (f parityFixture) converged(t *testing.T, cityPath string) []beads.Bead {
 		meta := maps.Clone(synced[b.ID].Metadata)
 		maps.Copy(meta, b.Metadata)
 		if reason, ok := f.Drains[b.ID]; ok {
-			meta[drainIntentReasonKey], meta[drainIntentAtKey], meta[drainIntentIncarnationKey] = reason, parityDrainAt.Format(time.RFC3339), "1"
+			meta[session.DrainIntentReasonKey], meta[session.DrainIntentAtKey], meta[session.DrainIntentIncarnationKey] = reason, parityDrainAt.Format(time.RFC3339), "1"
 		}
 		out[i].Metadata = meta
 	}

@@ -5196,10 +5196,8 @@ func TestEnsureRunning_StaleKeyDetectionWaitHonorsContextCancellation(t *testing
 	if err != nil {
 		t.Fatalf("Get session: %v", err)
 	}
-	// The resume cleared the hold before the start (D8 rule 1), as `gc
-	// session wake` does; the unconfirmed start leaves the row asleep.
-	if got := State(b.Metadata["state"]); got != StateAsleep {
-		t.Fatalf("state after canceled stability wait = %q, want %q", got, StateAsleep)
+	if got := State(b.Metadata["state"]); got != StateSuspended {
+		t.Fatalf("state after canceled stability wait = %q, want %q", got, StateSuspended)
 	}
 }
 

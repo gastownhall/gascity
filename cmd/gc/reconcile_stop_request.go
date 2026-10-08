@@ -27,9 +27,9 @@ type rawStopKeys struct {
 // readStopKeys is the census's projection of a row's metadata.
 func readStopKeys(meta map[string]string) rawStopKeys {
 	return rawStopKeys{
-		rawIntentReason:      strings.TrimSpace(meta[drainIntentReasonKey]),
-		rawIntentAt:          strings.TrimSpace(meta[drainIntentAtKey]),
-		rawIntentIncarnation: strings.TrimSpace(meta[drainIntentIncarnationKey]),
+		rawIntentReason:      strings.TrimSpace(meta[session.DrainIntentReasonKey]),
+		rawIntentAt:          strings.TrimSpace(meta[session.DrainIntentAtKey]),
+		rawIntentIncarnation: strings.TrimSpace(meta[session.DrainIntentIncarnationKey]),
 		rawAckIncarnation:    strings.TrimSpace(meta[session.DrainAckIncarnationKey]),
 		rawAckAt:             strings.TrimSpace(meta[session.DrainAckAtKey]),
 	}
@@ -99,16 +99,16 @@ func activeStop(row censusRow) (stopRequest, bool) {
 // skips state=draining without stop-pending as an unknown state).
 func stopBeginPatch(row censusRow, reason string, now time.Time) session.MetadataPatch {
 	return session.MetadataPatch{
-		drainIntentReasonKey:      reason,
-		drainIntentAtKey:          now.UTC().Format(time.RFC3339),
-		drainIntentIncarnationKey: strconv.FormatInt(row.Incarnation, 10),
+		session.DrainIntentReasonKey:      reason,
+		session.DrainIntentAtKey:          now.UTC().Format(time.RFC3339),
+		session.DrainIntentIncarnationKey: strconv.FormatInt(row.Incarnation, 10),
 	}
 }
 
 // stopCancelPatch is requested → none (a lens, or lost authorization): the
 // controller half cleared.
 func stopCancelPatch() session.MetadataPatch {
-	return session.MetadataPatch{drainIntentReasonKey: "", drainIntentAtKey: "", drainIntentIncarnationKey: ""}
+	return session.MetadataPatch{session.DrainIntentReasonKey: "", session.DrainIntentAtKey: "", session.DrainIntentIncarnationKey: ""}
 }
 
 // stopVoidResiduePatch clears both halves of a request rule 2 ended.

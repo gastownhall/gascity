@@ -1718,6 +1718,14 @@ func managedSuspendPatch(now time.Time) session.MetadataPatch {
 	return patch
 }
 
+// The managed `gc session suspend` path's controller calls, as mutable
+// global test seams.
+var (
+	sessionSuspendManagedReconciler = cityUsesManagedReconciler
+	sessionSuspendPokeController    = pokeController
+	sessionSuspendEnqueueController = enqueueController
+)
+
 // cmdSessionSuspend is the CLI entry point for "gc session suspend".
 //
 // Phase 2: sets held_until metadata on the session bead and pokes the
@@ -1748,8 +1756,8 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 	// Try reconciler-first path: set held_until metadata, poke controller.
 	// Only use this path when the city is managed by a standalone controller
 	// or the machine-wide supervisor — not for unmanaged ad-hoc cities.
-	if cityErr == nil && cityUsesManagedReconciler(cityPath) {
-		if pokeErr := pokeController(cityPath); pokeErr == nil {
+	if cityErr == nil && sessionSuspendManagedReconciler(cityPath) {
+		if pokeErr := sessionSuspendPokeController(cityPath); pokeErr == nil {
 			// Controller is running — metadata-only suspend.
 			// Set held_until far in the future so the reconciler drains/stops the session.
 			if err := sessionFrontDoor(sessStore).ApplyPatch(sessionID, managedSuspendPatch(time.Now())); err != nil {
@@ -1757,7 +1765,7 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 				return 1
 			}
 			// Enqueue the held session to trigger an immediate reconcile.
-			_ = enqueueController(cityPath, reconcilekey.Session(sessionID))
+			_ = sessionSuspendEnqueueController(cityPath, reconcilekey.Session(sessionID))
 			if asJSON {
 				if err := writeSessionActionJSON(stdout, sessionActionResult{
 					Action:    "suspend",

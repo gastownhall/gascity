@@ -151,7 +151,7 @@ func (s *sim) checkTokens() {
 }
 
 // stopKeys are the stop request's five keys (v5 D1, R1).
-var stopKeys = []string{drainIntentReasonKey, drainIntentAtKey, drainIntentIncarnationKey, session.DrainAckIncarnationKey, session.DrainAckAtKey}
+var stopKeys = []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, session.DrainAckIncarnationKey, session.DrainAckAtKey}
 
 // checkWrite checks one row change v2 made:
 //   - I7 (I-legacy): it writes no state outside knownSessionStates, but the
@@ -167,7 +167,7 @@ func (s *sim) checkWrite(w simWrite) {
 	if st := a["state"]; st != b["state"] && !knownSessionStates[st] && (st != string(session.StateDraining) || a["state_reason"] != session.DrainAckStopPendingReason) {
 		s.failf("I7 I-legacy", "v2 wrote state %q on %s", st, id)
 	}
-	if inc := a[drainIntentIncarnationKey]; inc != "" && inc != b[drainIntentIncarnationKey] && inc != a["generation"] {
+	if inc := a[session.DrainIntentIncarnationKey]; inc != "" && inc != b[session.DrainIntentIncarnationKey] && inc != a["generation"] {
 		s.failf("I14 I-STOP-1/2", "v2 bound %s's stop request to incarnation %s at generation %s", id, inc, a["generation"])
 	}
 	if w.Before.ID == "" {
@@ -401,7 +401,7 @@ func TestSimChecksBite(t *testing.T) {
 			}
 		}},
 		{"I14 ", func(s *sim) {
-			s.checkWrite(simWrite{Leg: "city", Before: row("x"), After: row("x", drainIntentIncarnationKey, "1")})
+			s.checkWrite(simWrite{Leg: "city", Before: row("x"), After: row("x", session.DrainIntentIncarnationKey, "1")})
 		}},
 		{"I15 ", func(s *sim) { // a request that survives a v2 PreWake
 			s.checkWrite(simWrite{Leg: "city", Before: row("x", "generation", "1"), After: row("x", session.DrainAckIncarnationKey, "1")})
