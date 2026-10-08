@@ -3630,10 +3630,16 @@ Register an external project directory as a rig.
 
 Initializes beads database, installs agent hooks if configured,
 generates cross-rig routes, and appends the rig to city.toml.
-If the target directory doesn't exist, it is created. Use --include
-to apply a pack source that defines the rig's agent configuration;
-repeat the flag to compose multiple packs for one rig. The flag is
-compatibility sugar: gc rig add writes canonical rig imports.
+If the target directory doesn't exist, it is created.
+
+Use --include to import a pack into the rig; repeat the flag to compose
+multiple packs for one rig. Each --include becomes a [rigs.imports.&lt;binding&gt;]
+entry in city.toml, resolved the way "gc import add --rig &lt;rig&gt;" resolves an
+import: a bundled pack is pinned to the version shipped with gc; any other
+remote source gets the version constraint gc import add would write (the
+newest registry release, else the newest semver tag, else the remote HEAD
+commit) plus a packs.lock entry; a local path is imported as given. If a
+version cannot be resolved, nothing is written.
 
 --include takes a pack source (local path or remote URL) or a pack name: a
 bundled pack ("gastown"), or a registry pack resolved from the cached
@@ -3642,6 +3648,12 @@ prefix or a "packs/&lt;name&gt;" token is never read as a registry name (a
 bundled pack still canonicalizes, so "./gastown" resolves to the bundled
 source), and an existing directory always wins over a registry pack of the
 same name.
+
+The binding defaults to the pack's name (its [packs] key or the source's last
+path segment). Write --include &lt;binding&gt;=&lt;source&gt; to choose it, for example
+--include gt=gastown. A binding is letters, digits, "-" and "_", starting with
+a letter or digit, and an explicit binding may not name a different pack than
+another --include. Prefix a path with "./" if its name itself contains "=".
 
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
@@ -3674,6 +3686,7 @@ gc rig add /path/to/master-repo --default-branch master
 gc rig add ./my-project --include gastown
 gc rig add ./my-project --include packs/planner --include packs/architect
 gc rig add ./my-project --include acme/planner
+gc rig add ./my-project --include gc=https://github.com/gastownhall/gascity-packs/tree/main/gascity
 gc rig add ./my-project --include gastown --start-suspended
 gc rig add /path/to/existing --adopt
 ```
@@ -3684,7 +3697,7 @@ gc rig add /path/to/existing --adopt
 | `--allow-ephemeral` | bool |  | register the rig even though its path is on a filesystem that does not survive a restart |
 | `--default-branch` | string |  | mainline branch (default: auto-detect from a remote HEAD — origin preferred — or the current branch) |
 | `--git-url` | string |  | git URL to clone into a new rig on a REMOTE city (server-side provisioning) |
-| `--include` | stringArray |  | pack source or pack name for rig agents (repeatable; writes canonical rig imports) |
+| `--include` | stringArray |  | pack to import into the rig: a source, a pack name, or &lt;binding&gt;=&lt;source&gt; (repeatable) |
 | `--json` | bool |  | Output in JSONL format |
 | `--name` | string |  | rig name (default: directory basename, or git URL basename for --git-url) |
 | `--prefix` | string |  | bead ID prefix (default: derived from name) |

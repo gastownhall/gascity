@@ -115,6 +115,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `"off"`; it overrides every city in the process and logs a deprecation
   warning once (#7036).
 
+- **`gc rig add --include <binding>=<source>` chooses the rig import's
+  binding.** Without it the binding is still the pack's name (its `[packs]` key
+  or the source's last path segment); `--include gc=<source>` writes
+  `[rigs.imports.gc]` instead. The left side must be letters, digits, `-` and
+  `_`, so a URL or path is never split. A binding that two `--include` flags
+  claim for different packs fails the add.
+
 ### Changed
 
 - **A suspended rig or city is left cold.** gc no longer touches the bead
@@ -155,6 +162,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the relocated graph leg's rows in this order: the API concatenates its legs
   without re-sorting them, so on a split city the graph rows at the end of the
   response are now priority-ordered.
+
+- **`gc rig add --include` resolves a remote pack's version like
+  `gc import add`.** A non-bundled remote include used to be written with no
+  version and no `packs.lock` entry, so `gc import check` reported a missing
+  lock entry and the import floated. It now gets the constraint
+  `gc import add` would write (the newest registry release, else the newest
+  semver tag, else the remote HEAD commit) and a `packs.lock` entry in the same
+  add. That needs network access to the source; if resolution fails, the add
+  fails and `city.toml` and `packs.lock` are untouched. Bundled packs and local
+  paths are unchanged.
 
 ### Fixed
 
