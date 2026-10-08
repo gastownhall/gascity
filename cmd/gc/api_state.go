@@ -517,6 +517,12 @@ func (cs *controllerState) setSuspendedRigs(rigs map[string]bool) {
 	cs.suspendedRigs.Store(&rigs)
 }
 
+// storesQuiescent reports whether the city is quiescent (see beadsQuiescent):
+// its stores take no read until it resumes.
+func (cs *controllerState) storesQuiescent() bool {
+	return cs != nil && cs.beadsQuiescent != nil && cs.beadsQuiescent.Load()
+}
+
 // setBeadsQuiescent records whether the city is quiescent (suspended, with no
 // running sessions). See beadsQuiescent.
 func (cs *controllerState) setBeadsQuiescent(quiescent bool) {
@@ -981,6 +987,10 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 // unreadable row gets nothing yet: the autoclose sweep re-reads it, and the
 // completions sweep backstops its fact.
 func (cs *controllerState) applyInferredClose(evt events.Event, stores []beads.Store, storeRef string) {
+	if cs.storesQuiescent() {
+		cs.autocloseSweepOf().deferID(evt.Subject, time.Now())
+		return
+	}
 	store, live, err := liveReadOwner(stores, evt.Subject)
 	switch confirmInferredClose(live, err) {
 	case closeConfirmed:
@@ -1052,9 +1062,20 @@ func (cs *controllerState) autocloseStoreRefLocked(beadID string) string {
 // bead via the controller's store. Replaces the shell on_close hook chain that
 // spawned gc subprocesses per bead write (gastownhall/gascity#3248). The bead
 // is marked handled only once the run has finished its reads (settle).
+//
+// A run the dispatcher starts once the city is quiescent reads nothing: a
+// close that lands as the city drains (a stopped session's wisp) is owed to
+// the sweep, which confirms it after resume. Read now, it would restart the
+// bd pair the quiescent city just retired.
 func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Store, storeRef string) {
 	run := cs.beadCloseAutoclose(beadID, store, storeRef)
-	beadCloseAutocloseDispatch(func() { cs.autocloseSweepOf().settle(beadID, run(), time.Now()) })
+	beadCloseAutocloseDispatch(func() {
+		if cs.storesQuiescent() {
+			cs.autocloseSweepOf().deferID(beadID, time.Now())
+			return
+		}
+		cs.autocloseSweepOf().settle(beadID, run(), time.Now())
+	})
 }
 
 // autocloseRefusalAttempts bounds the runs one trigger makes while a fenced
