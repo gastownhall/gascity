@@ -82,6 +82,9 @@ func scanWithRootSince(root, id string, incarnationStartedAt time.Time) ([]runti
 		out     []runtime.LiveRuntime
 		scanErr error
 	)
+	// Boot time turns each root's start ticks into a wall-clock StartedAt;
+	// without it StartedAt stays zero and callers that bound on it refuse.
+	bootedAt, bootErr := readBootTime(root)
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -94,6 +97,9 @@ func scanWithRootSince(root, id string, incarnationStartedAt time.Time) ([]runti
 		}
 		if !reported {
 			continue
+		}
+		if ticks, err := strconv.ParseUint(live.StartIdentity, 10, 64); err == nil && bootErr == nil {
+			live.StartedAt = processStartedAt(bootedAt, ticks)
 		}
 		out = append(out, live)
 	}
@@ -164,7 +170,7 @@ func scanProcEntry(root, entryName, id string, incarnationStartedAt time.Time) (
 	if city == "" {
 		city = env["GC_CITY"]
 	}
-	ppid, _, _ := readParentPID(filepath.Join(root, entryName, "stat"))
+	ppid, _, startIdentity, _, _ := readProcStatIdentity(filepath.Join(root, entryName, "stat"))
 	comm, _ := os.ReadFile(filepath.Join(root, entryName, "comm"))
 	return runtime.LiveRuntime{
 		SessionID: sessionID,
@@ -177,7 +183,10 @@ func scanProcEntry(root, entryName, id string, incarnationStartedAt time.Time) (
 		// parent is init or an unreadable stat, never the provider's server, so
 		// it is refused without a comm read.
 		ParentIsProviderInfrastructure: ppid > 1 && isInfrastructureProcess(root, ppid),
-		Name:                           strings.TrimSpace(string(comm)),
+		// The same token ProcessIdentity and RootStartIdentity read, so a
+		// killer can re-check it against the live process.
+		StartIdentity: startIdentity,
+		Name:          strings.TrimSpace(string(comm)),
 	}, true, nil
 }
 

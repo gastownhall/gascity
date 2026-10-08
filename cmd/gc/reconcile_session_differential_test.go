@@ -116,21 +116,18 @@ var parityFindings = map[string]parityEntry{
 		"BEHAVIORS SESS-601 (KEPT: AL1 allocate)", "legacy persists the seven sleep-policy keys on every visited row; the allocate is pure and no v2 arm or effect writes them, and neither CONTRACT v5 nor the plan names a writer",
 		[]string{"requested_sleep_after_idle", "effective_sleep_after_idle", "sleep_policy_source", "sleep_capability", "sleep_policy_adjustment_reason", "sleep_policy_fingerprint", "config_wake_suppressed"},
 	},
-	"current-bead-stamp": {"C5d (#7315), SESS-613", "legacy stamps currently_processing_bead_id on an alive Wake row; v2's A6 does not yet", []string{"currently_processing_bead_id"}},
 	"unknown-state-diagnostic": {
 		"CONTRACT v5 A5; ORCH-NOTES C2c1 (sync SESS-045/046)", "legacy stamps the unknown_state_* markers and emits session.unknown_state (escalating at 30 minutes); v2 writes no marker and records reconciler.alert instead. Not a §12.2 item, and against the plan's event-parity rule (§2.3)",
 		[]string{"unknown_state_first_seen", "unknown_state_value", "unknown_state_escalated_at"},
 	},
-	"creating-row-heal": {"C5d (#7315), SESS-062", "legacy heals a creating row with no claim and its runtime gone to asleep; v2's A6 does not yet", []string{"state"}},
 	"advisory-state-heal": {
 		"C5d (#7315) in part (CONTRACT v5.6 note), SESS-531", "legacy heals an awake row whose runtime is gone to asleep and resets its continuation; v2's A6 does neither",
 		[]string{"state", "sleep_reason", "session_key", "started_config_hash", "continuation_reset_pending"},
 	},
-	"detached-at":           {"BEHAVIORS SESS-533..536 (KEPT: A6 timer heals + row write)", "legacy stamps detached_at on a detached interactive row and clears it otherwise; v2's A6 has no such heal, and neither CONTRACT v5 A6 nor the plan names one", []string{"detached_at"}},
-	"wake-failure-clear":    {"BEHAVIORS SESS-539/540 (KEPT: A6 timer heals + row write)", "legacy clears wake_attempts, an unexpired quarantine and churn_count on a row alive past the stability and productivity thresholds; v2 has no such heal, and neither CONTRACT v5 A6 nor the plan names one", []string{"wake_attempts", "quarantined_until", "churn_count"}},
-	"stranded-marker-clear": {"C5d (#7315), SESS-603", "legacy clears stranded_event_emitted_at on an alive row; v2's A6 does not yet", []string{"stranded_event_emitted_at"}},
-	"empty-type-repair":     {"BEHAVIORS SESS-701 (KEPT: A6 timer heals + row write)", "legacy repairs a session row's empty type to session; v2 has no such repair, and neither CONTRACT v5 A6 nor the plan names one", []string{"type"}},
-	"named-trigger-clear":   {"POOL-056 follow-up (ORCH-NOTES C5d ruling)", "legacy clears a preserved named row's stale trigger stamp; v2's A6 does not yet", []string{"gc.trigger_bead_id", "gc.trigger_bead_store_ref", "brain_parent_sid"}},
+	"detached-at":         {"BEHAVIORS SESS-533..536 (KEPT: A6 timer heals + row write)", "legacy stamps detached_at on a detached interactive row and clears it otherwise; v2's A6 has no such heal, and neither CONTRACT v5 A6 nor the plan names one", []string{"detached_at"}},
+	"wake-failure-clear":  {"BEHAVIORS SESS-539/540 (KEPT: A6 timer heals + row write)", "legacy clears wake_attempts, an unexpired quarantine and churn_count on a row alive past the stability and productivity thresholds, and so stamps the current bead on a row v2 still reads quarantined (not Wake); v2 has no such heal, and neither CONTRACT v5 A6 nor the plan names one", []string{"wake_attempts", "quarantined_until", "churn_count", "currently_processing_bead_id"}},
+	"empty-type-repair":   {"BEHAVIORS SESS-701 (KEPT: A6 timer heals + row write)", "legacy repairs a session row's empty type to session; v2 has no such repair, and neither CONTRACT v5 A6 nor the plan names one", []string{"type"}},
+	"named-trigger-clear": {"POOL-056 follow-up (ORCH-NOTES C5d ruling)", "legacy clears a preserved named row's stale trigger stamp; v2's A6 does not yet", []string{"gc.trigger_bead_id", "gc.trigger_bead_store_ref", "brain_parent_sid"}},
 	"drain-cancel-on-probe-error": {
 		"CONTRACT v5 O3, BEHAVIORS DRAIN-042", "legacy skips a drain whose running probe errors; v2's inventory still classifies the row, so A19's wake lens cancels the drain. No completion either way, but §12.2 does not list the cancel",
 		[]string{drainIntentReasonKey, drainIntentAtKey, drainIntentIncarnationKey},
@@ -155,7 +152,10 @@ var parityUnported = map[string]parityEntry{
 // phrases it implements; the PR that makes a kind reachable adds its phrases.
 var parityKindOwners = map[string]*regexp.Regexp{
 	intentRowHeal: regexp.MustCompile(`\brow write\b`),
-	intentCreate:  regexp.MustCompile(`\bC1 create\b|\bC2 named reopen\b`),
+	// A6's fresh heals: the creating-row heal (SESS-062); the crash heal's
+	// SESS-531 is a row write.
+	intentRowHealFresh: regexp.MustCompile("\\bA6 heal of a `creating` row\\b"),
+	intentCreate:       regexp.MustCompile(`\bC1 create\b|\bC2 named reopen\b`),
 	// A19's two kinds own exactly its rows.
 	intentDrainCancel: regexp.MustCompile(`\bA19\b`),
 	intentDrainVoid:   regexp.MustCompile(`\bA19\b`),
@@ -612,7 +612,7 @@ func parityFixtures() []parityFixture {
 	}
 	// explain merges the alive wanted row gc-1's standing findings with more.
 	explain := func(more map[string]string) map[string]string {
-		out := map[string]string{"row:gc-1:*policy": "sleep-policy-keys", "row:gc-1:*bead": "current-bead-stamp"}
+		out := map[string]string{"row:gc-1:*policy": "sleep-policy-keys"}
 		maps.Copy(out, more)
 		return out
 	}
@@ -661,7 +661,7 @@ func parityFixtures() []parityFixture {
 		{
 			Name: "a creating row with no claim whose runtime is gone", Behaviors: []string{"SESS-062"},
 			Rows: []parityRow{poolRow("gc-1", "worker", 1, "creating", "instance_token", "tok-gc-1", "quarantined_until", at(time.Hour))}, Work: assigned,
-			Explain: map[string]string{"row:gc-1:*heal": "creating-row-heal", "row:gc-1:*policy": "sleep-policy-keys"},
+			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
 		},
 		{
 			Name: "an awake row whose runtime is gone", Behaviors: []string{"SESS-531"},
@@ -698,7 +698,7 @@ func parityFixtures() []parityFixture {
 		{
 			Name: "an alive row clears its stranded marker", Behaviors: []string{"SESS-603"},
 			Rows: []parityRow{awake("stranded_event_emitted_at", at(-time.Hour))}, Work: assigned, Runtimes: []simRuntime{live},
-			Explain: explain(map[string]string{"row:gc-1:*stranded": "stranded-marker-clear"}),
+			Explain: explain(nil),
 		},
 		{
 			Name: "wake reasons cancel an idle drain", Behaviors: []string{"SESS-615", "SESS-632", "DRAIN-047"},

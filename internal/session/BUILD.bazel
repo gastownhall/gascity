@@ -141,6 +141,7 @@ go_test(
         "store_start_fence_test.go",
         "store_test.go",
         "submit_family_test.go",
+        "submit_poller_env_test.go",
         "submit_test.go",
         "target_classifier_test.go",
         "template_overrides_test.go",

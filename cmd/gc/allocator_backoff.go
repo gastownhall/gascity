@@ -138,6 +138,13 @@ func (t *backoffTable) Prune(configRev string, rows map[rowKey]censusRow, demand
 }
 
 // Snapshot returns a copy of every record: the pass's Backoff view.
+// Record is k's record, zero when it has none.
+func (t *backoffTable) Record(k string) backoffRecord {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.recs[k]
+}
+
 func (t *backoffTable) Snapshot() map[string]backoffRecord {
 	t.mu.Lock()
 	defer t.mu.Unlock()
