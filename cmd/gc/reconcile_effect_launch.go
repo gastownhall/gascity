@@ -16,10 +16,11 @@ import (
 )
 
 // The start effect's Launch (CONTRACT v5 S1): the endpoint ticket, PreWake by
-// CAS, prepare behind the refusing store, the routed leaf's Start with
-// FreshOnly (LL6, I24), and the post-call check, which commits only a
-// runtime that carries the PreWake token (S2, I3). Until C5a2's abandon
-// table, every failure settles failed and writes nothing more.
+// CAS, prepare behind the refusing store, the agent's side effects, the
+// routed leaf's Start with FreshOnly (LL6, I24), and the post-call check,
+// which commits only a runtime that carries the PreWake token (S2, I3).
+// Until C5a2's abandon table, every failure settles failed and writes
+// nothing more.
 
 // Launch refusal and failure causes.
 const (
@@ -69,6 +70,9 @@ func (e startEffect) launch(ctx context.Context, a startAttempt) settlement {
 		return settlement{Outcome: settledFailed, Cause: causePrepare, Work: work, Err: err}
 	}
 	prepared.cfg.FreshOnly = true
+	// The agent's hooks and ACP route, as legacy installs them every tick;
+	// a launch without them starts an agent with no hooks.
+	e.pass.World.Templates.installSideEffects(a.agent, a.tp)
 	startCtx, stop := rt.Clock.WithDeadline(ctx, e.it.Deadline.Add(-startDeadlineSlack))
 	startErr := a.leaf.Start(startCtx, a.name, prepared.cfg)
 	stop()

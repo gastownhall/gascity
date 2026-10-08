@@ -312,7 +312,7 @@ func templateMemoKeyOf(info session.Info) templateMemoKey {
 }
 
 // templateResolution is one memoized resolution, its error included. Agent
-// is the configured agent the row resolved under.
+// is the configured agent whose side effects a launch installs.
 type templateResolution struct {
 	TP    TemplateParams
 	Agent *config.Agent
@@ -320,9 +320,11 @@ type templateResolution struct {
 }
 
 // templateResolver is one env generation's template resolution: Resolve
-// resolves one row, on the planner goroutine.
+// resolves one row (on the planner goroutine), and Install installs a
+// resolved agent's side effects before its launch (on an effect's).
 type templateResolver struct {
 	Resolve func(info session.Info) templateResolution
+	Install func(agent *config.Agent, tp TemplateParams)
 }
 
 // newTemplateResolver resolves rows under bp, one env generation's build
@@ -354,7 +356,8 @@ func newTemplateResolver(bp *agentBuildParams) templateResolver {
 		tp, err := resolveDiscoveredSessionTemplate(&row, cfg, agent, info)
 		return templateResolution{TP: tp, Agent: agent, Err: err}
 	}
-	return templateResolver{Resolve: resolve}
+	install := func(agent *config.Agent, tp TemplateParams) { installAgentSideEffects(bp, agent, tp, bp.stderr) }
+	return templateResolver{Resolve: resolve, Install: install}
 }
 
 // templateMemo is one generation's template resolutions (S-17). It is
@@ -364,6 +367,16 @@ func newTemplateResolver(bp *agentBuildParams) templateResolver {
 type templateMemo struct {
 	Gen     uint64
 	entries map[templateMemoKey]templateResolution
+	install func(agent *config.Agent, tp TemplateParams)
+}
+
+// installSideEffects installs agent's side effects for a launch of tp
+// (installAgentSideEffects, which legacy runs every tick); a memo with no
+// resolver installs none.
+func (m *templateMemo) installSideEffects(agent *config.Agent, tp TemplateParams) {
+	if m != nil && m.install != nil {
+		m.install(agent, tp)
+	}
 }
 
 // lookup returns info's resolution, and false when the memo has none.
@@ -406,7 +419,7 @@ func (m *gatherMemo) refresh(e gatherEnv, env *reconcileEnv, now time.Time, rows
 		if e.Templates != nil {
 			m.resolver = e.Templates(env, now)
 		}
-		m.templates.Store(&templateMemo{Gen: env.Gen})
+		m.templates.Store(&templateMemo{Gen: env.Gen, install: m.resolver.Install})
 	}
 	if m.resolver.Resolve == nil {
 		return
@@ -430,7 +443,7 @@ func (m *gatherMemo) refresh(e gatherEnv, env *reconcileEnv, now time.Time, rows
 		next[k] = r
 	}
 	if missed || len(next) != len(cur.entries) {
-		m.templates.Store(&templateMemo{Gen: env.Gen, entries: next})
+		m.templates.Store(&templateMemo{Gen: env.Gen, entries: next, install: cur.install})
 	}
 }
 

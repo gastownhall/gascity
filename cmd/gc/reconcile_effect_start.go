@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worktree"
@@ -115,11 +116,12 @@ func adoptEffect(p *effectPass, it intent) func(context.Context) settlement {
 	return startEffect{pass: p, it: it, adopt: true}.run
 }
 
-// startAttempt is one effect's row, template, runtime name, routed leaf and
-// writer.
+// startAttempt is one effect's row, template and its configured agent,
+// runtime name, routed leaf and writer.
 type startAttempt struct {
 	row    censusRow
 	tp     TemplateParams
+	agent  *config.Agent
 	name   string
 	leaf   runtime.Provider
 	writer fencedWriter
@@ -143,7 +145,7 @@ func (e startEffect) run(ctx context.Context) settlement {
 	if !ok || res.Err != nil {
 		return settlement{Outcome: settledRefused, Cause: causeTemplate, Err: res.Err}
 	}
-	a := startAttempt{row: row, tp: res.TP, name: strings.TrimSpace(row.Info.SessionName), writer: writer}
+	a := startAttempt{row: row, tp: res.TP, agent: res.Agent, name: strings.TrimSpace(row.Info.SessionName), writer: writer}
 	if router, ok := rt.SP.(interface{ RouteACP(string) }); ok && a.tp.IsACP {
 		router.RouteACP(a.name)
 	}

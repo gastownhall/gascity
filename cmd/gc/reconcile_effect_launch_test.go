@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -318,5 +319,57 @@ func TestPreWakeFoldsVerifiedBinding(t *testing.T) {
 		case verifyErr != nil && (s.Cause != causeWorktree || m["generation"] != "3"):
 			t.Fatalf("refused evidence: settlement %+v, row %v; want refused before PreWake", s, m)
 		}
+	}
+}
+
+// Kills a launch that starts an agent without its hooks and ACP route, that
+// installs them before PreWake decides or after the Start, and an install on
+// any verb but Launch: the row's resolved agent's side effects run once,
+// after PreWake landed and before the provider Start, and a Noop, an adopt
+// and a refused PreWake install nothing.
+func TestLaunchInstallsAgentSideEffectsBeforeStart(t *testing.T) {
+	agent := &config.Agent{Name: "worker"}
+	for _, c := range []struct {
+		name     string
+		kind     string
+		setup    func(*testing.T, *startFixture)
+		installs int
+	}{
+		{"launch", intentStart, nil, 1},
+		{"noop over a committed runtime", intentStart, func(t *testing.T, f *startFixture) {
+			f.set(t, map[string]string{"state": "active"})
+			f.leaf.runtimeAs(liveAlive, f.key.ID, "tok")
+		}, 0},
+		{"adopt", intentAdopt, func(t *testing.T, f *startFixture) {
+			f.set(t, map[string]string{"state": "creating"})
+			f.leaf.runtimeAs(liveAlive, f.key.ID, "tok")
+		}, 0},
+		{"PreWake refused", intentStart, func(t *testing.T, f *startFixture) {
+			f.leaf.onRead = func() { f.set(t, map[string]string{"held_until": startT0.Add(time.Hour).Format(time.RFC3339)}) }
+		}, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newStartFixture(t, requireMem(t))
+			f.agent = agent
+			var installs []string
+			f.install = func(a *config.Agent, tp TemplateParams) {
+				if a != agent || tp.SessionName != f.tp.SessionName {
+					t.Errorf("installed for %v %q, want the row's agent and template", a, tp.SessionName)
+				}
+				installs = append(installs, "install@generation="+f.meta(t)["generation"])
+			}
+			f.leaf.onStart = func() { installs = append(installs, "start") }
+			if c.setup != nil {
+				c.setup(t, f)
+			}
+			f.run(t, c.kind)
+			want := []string{"install@generation=4", "start"}
+			if c.installs == 0 {
+				want = slices.DeleteFunc(slices.Clone(installs), func(s string) bool { return strings.HasPrefix(s, "install") })
+			}
+			if !slices.Equal(installs, want) {
+				t.Fatalf("calls %v, want %v", installs, want)
+			}
+		})
 	}
 }

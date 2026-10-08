@@ -116,6 +116,9 @@ type startFixture struct {
 	tp    TemplateParams
 	guard *endpointCapacityGuard
 	alloc *allocDecision
+	// agent and install are the memo's resolved agent and its installer.
+	agent   *config.Agent
+	install func(*config.Agent, TemplateParams)
 }
 
 // requireMem is a MemStore stamped require.
@@ -150,7 +153,7 @@ func (f *startFixture) pass(t *testing.T) *effectPass {
 	w := &World{Now: f.clk.Now(), CityPath: t.Name(), Env: &reconcileEnv{Cfg: &config.City{}}, Census: readCensus(t, f.clk.Now(), censusLegs(rowLeg, f.store))}
 	w.LegStores = map[string]beads.Store{rowLeg: f.store}
 	if row, ok := w.Census.Rows[f.key]; ok {
-		w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: f.tp}}}
+		w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: f.tp, Agent: f.agent}}, install: f.install}
 	}
 	p := newEffectPass(w, f.alloc)
 	p.Runtime = effectRuntime{SP: f.leaf, Clock: f.clk, Capacity: f.guard, Stderr: io.Discard}

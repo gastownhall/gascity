@@ -285,30 +285,38 @@ func TestTemplateMemoKeyCoversResolverReads(t *testing.T) {
 	}
 }
 
-// Kills params built per pass or per row: gather builds the resolver once
-// per env generation, however many rows and passes.
+// Kills params built per pass or per row, and a launch installing through a
+// previous generation's params: gather builds the resolver once per env
+// generation, however many rows and passes, and the published memo installs
+// through that generation's.
 func TestGatherBuildsTemplateResolverOncePerGeneration(t *testing.T) {
 	f := newGatherFixture(t,
 		poolRow("gc-1", "worker", 1, "active"), poolRow("gc-2", "worker", 2, "active"), poolRow("gc-3", "worker", 3, "asleep"))
 	var builds []uint64
+	var installs []uint64
 	f.env.Templates = func(env *reconcileEnv, now time.Time) templateResolver {
 		gen := env.Gen
 		builds = append(builds, gen)
 		if !now.Equal(gatherNow) {
 			t.Errorf("resolver built at %v, want the pass's %v", now, gatherNow)
 		}
-		return templateResolver{Resolve: func(info session.Info) templateResolution {
-			return templateResolution{TP: TemplateParams{SessionName: info.SessionNameMetadata}}
-		}}
+		return templateResolver{
+			Resolve: func(info session.Info) templateResolution {
+				return templateResolution{TP: TemplateParams{SessionName: info.SessionNameMetadata}}
+			},
+			Install: func(*config.Agent, TemplateParams) { installs = append(installs, gen) },
+		}
 	}
 	var w World
 	for range 3 {
 		w = f.gather(t)
 	}
+	w.Templates.installSideEffects(nil, TemplateParams{})
 	f.cur.Store(&reconcileEnv{Gen: 2, Cfg: f.cur.Load().Cfg, SP: f.sp})
 	w = f.gather(t)
-	if !slices.Equal(builds, []uint64{1, 2}) {
-		t.Fatalf("resolver builds by generation %v, want [1 2]", builds)
+	w.Templates.installSideEffects(nil, TemplateParams{})
+	if !slices.Equal(builds, []uint64{1, 2}) || !slices.Equal(installs, []uint64{1, 2}) {
+		t.Fatalf("resolver builds by generation %v, installs %v; want [1 2] and [1 2]", builds, installs)
 	}
 	if _, ok := w.Templates.lookup(w.Census.Rows[rowKey{Leg: "city:test-city", ID: "gc-2"}].Info); !ok {
 		t.Fatal("the memo has no entry for a pool row")

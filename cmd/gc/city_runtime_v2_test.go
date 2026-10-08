@@ -1272,7 +1272,7 @@ func TestV2HostSharesEndpointCapacityGuard(t *testing.T) {
 
 // Kills the host leaving the template resolver out, which refuses every v2
 // start template-unresolved (C5a1-wire): the host's resolver resolves a
-// configured row.
+// configured row and installs through its generation's params.
 func TestV2HostResolvesTemplates(t *testing.T) {
 	cr, _ := newPhaseFixtureRuntime(t, false, false)
 	h := cr.newPlannerHost()
@@ -1282,8 +1282,8 @@ func TestV2HostResolvesTemplates(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 	r := h.gather.Templates(&reconcileEnv{Gen: 1, Cfg: cfg, SP: runtime.NewFake()}, time.Now())
 	res := r.Resolve(session.Info{ID: "gc-1", Template: "worker", SessionNameMetadata: "worker"})
-	if res.Err != nil || res.TP.SessionName != "worker" || res.Agent == nil || res.Agent.QualifiedName() != "worker" {
-		t.Fatalf("resolution %+v (agent %v, err %v), want worker resolved", res.TP, res.Agent, res.Err)
+	if res.Err != nil || res.TP.SessionName != "worker" || res.Agent == nil || res.Agent.QualifiedName() != "worker" || r.Install == nil {
+		t.Fatalf("resolution %+v (agent %v, err %v), installer set %v; want worker resolved with an installer", res.TP, res.Agent, res.Err, r.Install != nil)
 	}
 }
 
