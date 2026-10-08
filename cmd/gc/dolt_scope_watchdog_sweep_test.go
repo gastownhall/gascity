@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
@@ -68,14 +69,22 @@ func TestSweepProcessTableOrphansLeavesManagedDoltWatchdogAlone(t *testing.T) {
 
 // procfsSweepScanner is the ProcessTableScanner the sweep sees in production,
 // backed by the real proctable scan over the injected root, with termination
-// recorded instead of signaled.
+// recorded instead of signaled. Tracking is a provider's: roots of a session
+// in tracked are marked tracked, and trackErr stands for a failed session
+// listing or per-session GC_SESSION_ID read, returned beside the results.
 type procfsSweepScanner struct {
 	*runtime.Fake
+	tracked    map[string]bool
+	trackErr   error
 	terminated []runtime.LiveRuntime
 }
 
 func (s *procfsSweepScanner) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
-	return proctable.ScanBySessionID(id)
+	found, err := proctable.ScanBySessionID(id)
+	for i := range found {
+		found[i].IsTracked = s.tracked[found[i].SessionID]
+	}
+	return found, errors.Join(err, s.trackErr)
 }
 
 func (s *procfsSweepScanner) TerminateRuntime(live runtime.LiveRuntime) error { //nolint:unparam // interface compliance; error always nil in the recorder

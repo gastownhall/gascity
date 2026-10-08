@@ -150,6 +150,7 @@ var infoKeyCodec = []infoKeySpec{
 	{"continuity_eligible", func(i *Info, v string) { i.ContinuityEligible = v }},
 	{"last_woke_at", func(i *Info, v string) { i.LastWokeAt = v }},
 	{"slept_at", func(i *Info, v string) { i.SleptAt = v }},
+	{"suspended_at", func(i *Info, v string) { i.SuspendedAt = v }},
 	{"awake_started_at", func(i *Info, v string) { i.AwakeStartedAt = v }},
 	{"usage_compute_emitted_at", func(i *Info, v string) { i.UsageComputeEmittedAt = v }},
 	{"state_reason", func(i *Info, v string) { i.StateReason = v }},

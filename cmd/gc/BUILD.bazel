@@ -1361,6 +1361,7 @@ go_test(
         "nudge_honesty_test.go",
         "nudge_mail_sweep_test.go",
         "nudge_poller_city_stop_test.go",
+        "nudge_poller_env_test.go",
         "nudge_queue_bounded_maintenance_test.go",
         "nudge_store_ownership_test.go",
         "nudge_target_info_equiv_test.go",

@@ -81,20 +81,25 @@ func (v *runtimeInventoryView) livePane(name string) bool {
 }
 
 // noLivePane reports whether the view's pass is complete (inventoryAbsence:
-// every backend listed completely and attested, or confirmed its server
-// dead) and shows no live pane for name: the name is gone, or listed as a
-// corpse. An incomplete pass, an unknown pane, a live pane or a nil view is
-// false. The process-table orphan sweep reads it (CONTRACT C4 rule 3).
+// every backend listed completely and attested, or confirmed its server dead)
+// and shows, by that pass's own facts, no live pane for name: the pass did not
+// list it and no probe has listed it since, or the pass listed it with a dead
+// pane observed by the same pass. An incomplete pass, a later listing, an
+// unknown or live pane, a fact from another pass, or a nil view is false. The
+// process-table orphan sweep reads it (CONTRACT C4 rule 2).
 func (v *runtimeInventoryView) noLivePane(name string) bool {
 	if v == nil || name == "" {
 		return false
 	}
 	listed, complete := inventoryAbsence(v.snap, v.now, v.maxAge)
-	if !complete {
+	if !complete || listedSincePass(v.snap, name, v.now, v.maxAge) {
 		return false
 	}
-	obs, present, gone, _ := readPresence(v.snap, name, listed, complete, v.now, v.maxAge)
-	return gone || present && obs.Running.Value == ObsNo
+	if !listed[name] {
+		return true
+	}
+	obs, ok := v.listedNow(name)
+	return ok && obs.Running.Value == ObsNo && obs.Running.ObservedAt.Equal(v.snap.Inventory.StartedAt)
 }
 
 // owner returns the GC_SESSION_ID the lane read for name's listed

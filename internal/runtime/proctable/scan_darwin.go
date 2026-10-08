@@ -28,7 +28,24 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if err != nil {
 		return []runtime.LiveRuntime{}, err
 	}
-	return scanRecordsBySessionID(records, id), nil
+	return withStartIdentities(scanRecordsBySessionID(records, id)), nil
+}
+
+// withStartIdentities fills each root's StartIdentity and StartedAt from the
+// kernel's start time (ProcessIdentity: nanoseconds since the epoch). A root
+// whose identity cannot be read keeps both empty.
+func withStartIdentities(roots []runtime.LiveRuntime) []runtime.LiveRuntime {
+	for i := range roots {
+		identity, err := ProcessIdentity(roots[i].PID)
+		if err != nil {
+			continue
+		}
+		roots[i].StartIdentity = identity
+		if ns, err := strconv.ParseInt(identity, 10, 64); err == nil {
+			roots[i].StartedAt = time.Unix(0, ns).UTC()
+		}
+	}
+	return roots
 }
 
 // scanRecordsBySessionID is the pure half of ScanBySessionID, over an

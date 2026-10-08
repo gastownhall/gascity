@@ -15,6 +15,22 @@ const (
 	sessionFlag = "--session"
 )
 
+// ChildEnv returns a copy of environ for a poller child, without the
+// spawning session's GC_SESSION_ID and GC_RUNTIME_EPOCH. The poller names its
+// target in argv and outlives its spawner by design, so it must not read as
+// that session's leaked process to the process-table orphan sweep.
+func ChildEnv(environ []string) []string {
+	out := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		switch key, _, _ := strings.Cut(entry, "="); key {
+		case "GC_SESSION_ID", "GC_RUNTIME_EPOCH":
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 // CommandArgs returns the argv tail for a nudge poller.
 func CommandArgs(cityPath, sessionName, agentName string) []string {
 	return []string{"nudge", "poll", cityFlag, cityPath, sessionFlag, sessionName, agentName}

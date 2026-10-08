@@ -110,6 +110,17 @@ func SummarizeScanError(err error) string {
 	return strings.Join(parts, "; ")
 }
 
+// HasWholeScanFailure reports whether err holds any failure that is not one
+// process entry's ([EntryError]): an unenumerable /proc, or a failed session
+// listing or tracking read. Such a scan cannot vouch for IsTracked, while
+// unreadable entries only drop those processes from the results.
+func HasWholeScanFailure(err error) bool {
+	var entries []*EntryError
+	var other []string
+	collectScanErrors(err, &entries, &other)
+	return len(other) > 0
+}
+
 // collectScanErrors splits err's tree into per-entry failures and the
 // messages of every subtree that holds none.
 func collectScanErrors(err error, entries *[]*EntryError, other *[]string) {

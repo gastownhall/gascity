@@ -67,11 +67,13 @@ go_test(
         "scan_linux_test.go",
         "scan_stub_test.go",
         "supervisor_fork_orphan_repro_test.go",
+        "sweep_guards_test.go",
         "testenv_import_test.go",
     ],
     embed = [":proctable"],
     deps = [
         "//internal/beads/proxyendpoint",
+        "//internal/nudgepoller",
         "//internal/testenv",
     ] + select({
         "@rules_go//go/platform:android": [

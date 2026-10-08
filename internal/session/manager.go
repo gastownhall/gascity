@@ -280,6 +280,10 @@ type Info struct {
 	// clearing last_woke_at, so a same-tick sleep/drain-ack falls back to this
 	// instead of collapsing straight to CreatedAt (#2574).
 	SleptAt string // slept_at (raw)
+	// SuspendedAt is the RAW suspended_at metadata (RFC3339 or empty), stamped
+	// by a suspend. The process-table orphan sweep reads it, after SleptAt, as
+	// the row's last stop.
+	SuspendedAt string // suspended_at (raw)
 	// AwakeStartedAt is the RAW awake_started_at metadata (RFC3339 or empty):
 	// the immutable start-of-awake-interval epoch that survives sleep/drain
 	// teardowns (unlike last_woke_at / pending_create_started_at, which are

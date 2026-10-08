@@ -8407,10 +8407,10 @@ func TestSweepProcessTableOrphansReapsClosedAndAbsentUntrackedRuntimes(t *testin
 	}, nil)
 	snapshot := newSessionBeadSnapshot([]beads.Bead{{ID: "gm-open", Status: "open"}})
 	sp := newProcessTableSweepProvider(
-		runtime.LiveRuntime{SessionID: "gm-open", PID: 101, IsTracked: false},
-		runtime.LiveRuntime{SessionID: "gm-closed", PID: 102, IsTracked: false},
-		runtime.LiveRuntime{SessionID: "gm-missing", PID: 103, IsTracked: false},
-		runtime.LiveRuntime{SessionID: "gm-tracked-closed", PID: 104, IsTracked: true},
+		runtime.LiveRuntime{SessionID: "gm-open", PID: 101, PPID: 1, StartIdentity: "1", IsTracked: false},
+		runtime.LiveRuntime{SessionID: "gm-closed", PID: 102, PPID: 1, StartIdentity: "1", IsTracked: false},
+		runtime.LiveRuntime{SessionID: "gm-missing", PID: 103, PPID: 1, StartIdentity: "1", IsTracked: false},
+		runtime.LiveRuntime{SessionID: "gm-tracked-closed", PID: 104, PPID: 1, StartIdentity: "1", IsTracked: true},
 	)
 
 	var stderr bytes.Buffer
@@ -8442,13 +8442,13 @@ func TestSweepProcessTableOrphansSkipsOtherCityRuntimes(t *testing.T) {
 	}, nil)
 	sp := newProcessTableSweepProvider(
 		// This city's own closed/untracked runtime — must be reaped.
-		runtime.LiveRuntime{SessionID: "gm-closed", City: myCity, PID: 101, IsTracked: false},
+		runtime.LiveRuntime{SessionID: "gm-closed", City: myCity, PID: 101, PPID: 1, StartIdentity: "1", IsTracked: false},
 		// A sibling city's session, absent from this store and untracked here.
 		// Must NOT be reaped despite looking like an orphan from here.
-		runtime.LiveRuntime{SessionID: "sq-eeq", City: "/home/jaword/sqtest", PID: 102, IsTracked: false},
+		runtime.LiveRuntime{SessionID: "sq-eeq", City: "/home/jaword/sqtest", PID: 102, PPID: 1, StartIdentity: "1", IsTracked: false},
 		// A runtime with no attributable city — must NOT be reaped when we
 		// know our own city (cannot confirm it belongs to us).
-		runtime.LiveRuntime{SessionID: "unknown", City: "", PID: 103, IsTracked: false},
+		runtime.LiveRuntime{SessionID: "unknown", City: "", PID: 103, PPID: 1, StartIdentity: "1", IsTracked: false},
 	)
 
 	var stderr bytes.Buffer
@@ -8471,7 +8471,7 @@ func TestSweepProcessTableOrphansNormalizesCityPathBeforeCompare(t *testing.T) {
 		{ID: "gm-closed", Status: "closed"},
 	}, nil)
 	sp := newProcessTableSweepProvider(
-		runtime.LiveRuntime{SessionID: "gm-closed", City: realCity, PID: 101, IsTracked: false},
+		runtime.LiveRuntime{SessionID: "gm-closed", City: realCity, PID: 101, PPID: 1, StartIdentity: "1", IsTracked: false},
 	)
 
 	var stderr bytes.Buffer
@@ -8487,8 +8487,8 @@ func TestSweepProcessTableOrphansNormalizesCityPathBeforeCompare(t *testing.T) {
 func TestSweepProcessTableOrphansContinuesAfterErrors(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := newProcessTableSweepProvider(
-		runtime.LiveRuntime{SessionID: "gm-reaped", PID: 201, IsTracked: false},
-		runtime.LiveRuntime{SessionID: "gm-term-fails", PID: 202, IsTracked: false},
+		runtime.LiveRuntime{SessionID: "gm-reaped", PID: 201, PPID: 1, StartIdentity: "1", IsTracked: false},
+		runtime.LiveRuntime{SessionID: "gm-term-fails", PID: 202, PPID: 1, StartIdentity: "1", IsTracked: false},
 	)
 	sp.findErr = errors.New("partial scan failed")
 	sp.terminateErr[202] = errors.New("terminate failed")
@@ -8580,7 +8580,7 @@ func TestSweepProcessTableOrphansSkipsOnTransientStoreError(t *testing.T) {
 	inner := beads.NewMemStore()
 	store := &flakyGetStore{Store: inner, failID: "gm-flaky", failErr: errors.New("dolt: connection reset")}
 	sp := newProcessTableSweepProvider(
-		runtime.LiveRuntime{SessionID: "gm-flaky", PID: 301, IsTracked: false},
+		runtime.LiveRuntime{SessionID: "gm-flaky", PID: 301, PPID: 1, StartIdentity: "1", IsTracked: false},
 	)
 	var stderr bytes.Buffer
 	if got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, "", &stderr); got != 0 {
@@ -8624,7 +8624,7 @@ func TestSweepProcessTableOrphansSparesRuntimeWhoseSnapshotBeadIsOpen(t *testing
 		t.Run(tc.name, func(t *testing.T) {
 			snapshot := newSessionBeadSnapshot([]beads.Bead{{ID: "gm-live", Status: "open"}})
 			sp := newProcessTableSweepProvider(
-				runtime.LiveRuntime{SessionID: "gm-live", PID: 401, IsTracked: false},
+				runtime.LiveRuntime{SessionID: "gm-live", PID: 401, PPID: 1, StartIdentity: "1", IsTracked: false},
 			)
 			var stderr bytes.Buffer
 			if got := sweepProcessTableOrphans(sp, snapshot, nil, tc.store, "", &stderr); got != 0 {
@@ -8652,8 +8652,8 @@ func TestSweepProcessTableOrphansSkipsWithoutCleanSnapshot(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gm-closed", Status: "closed"}}, nil)
 			sp := newProcessTableSweepProvider(
-				runtime.LiveRuntime{SessionID: "gm-closed", PID: 501, IsTracked: false},
-				runtime.LiveRuntime{SessionID: "gm-missing", PID: 502, IsTracked: false},
+				runtime.LiveRuntime{SessionID: "gm-closed", PID: 501, PPID: 1, StartIdentity: "1", IsTracked: false},
+				runtime.LiveRuntime{SessionID: "gm-missing", PID: 502, PPID: 1, StartIdentity: "1", IsTracked: false},
 			)
 			var stderr bytes.Buffer
 			if got := sweepProcessTableOrphans(sp, tc.snapshot, nil, store, "", &stderr); got != 0 {
@@ -10329,7 +10329,7 @@ func TestReapRuntimesBoundToClosedBeadsConfirmsClosedLive(t *testing.T) {
 // cached Get that holds the same stale closed row as the snapshot.
 func TestSweepProcessTableOrphansConfirmsClosedLive(t *testing.T) {
 	store := cachedSessionReopenedBehindTheCache(t)
-	sp := newProcessTableSweepProvider(runtime.LiveRuntime{SessionID: "gm-reopened", PID: 501, IsTracked: false})
+	sp := newProcessTableSweepProvider(runtime.LiveRuntime{SessionID: "gm-reopened", PID: 501, PPID: 1, StartIdentity: "1", IsTracked: false})
 	var stderr bytes.Buffer
 	if got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, "", &stderr); got != 0 || len(sp.terminated) != 0 {
 		t.Fatalf("swept %d (terminated %v) on a cached closed row the store has reopened; stderr=%q", got, sp.terminated, stderr.String())

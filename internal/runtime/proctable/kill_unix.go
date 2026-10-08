@@ -39,6 +39,43 @@ func KillByPID(pid int) error {
 	)
 }
 
+// KillByPIDIdentity is KillByPID bound to the process a scan reported: it
+// refuses unless pid's start identity (ProcessIdentity) still equals identity,
+// so a PID recycled since the scan is never signaled. A target already gone is
+// success. An empty identity falls back to KillByPID's own capture.
+//
+// The liveness probes are bound before the identity check, so a recycle
+// between the check and a signal reads as the target's death and sends nothing.
+func KillByPIDIdentity(pid int, identity string) error {
+	if identity == "" {
+		return KillByPID(pid)
+	}
+	return killByPIDIdentity(pid, identity, ProcessIdentity, syscall.Kill)
+}
+
+// killByPIDIdentity is KillByPIDIdentity with its identity read and signal
+// injected, so the refusal can be tested without signaling anything.
+func killByPIDIdentity(pid int, identity string, readIdentity func(int) (string, error), kill func(int, syscall.Signal) error) error {
+	termLive, runLive := killLivenessFuncsForPID(pid)
+	current, err := readIdentity(pid)
+	switch {
+	case errors.Is(err, ErrProcessGone):
+		return nil
+	case err != nil:
+		return fmt.Errorf("proctable: re-reading start identity of PID %d: %w", pid, err)
+	case current != identity:
+		return fmt.Errorf("proctable: refusing to kill PID %d: start identity %s is not the scanned %s (PID recycled)", pid, current, identity)
+	}
+	return killByPID(
+		pid,
+		kill,
+		termLive,
+		runLive,
+		runtime.ManagedProcessStopGrace,
+		runtime.ManagedProcessReapGrace,
+	)
+}
+
 // killLivenessFuncsForPID builds the two liveness probes KillByPID signals
 // against, both bound to the target's start-time identity captured up front.
 //

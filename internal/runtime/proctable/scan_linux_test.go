@@ -867,3 +867,29 @@ func TestScanWithRootReportsWhetherTheParentIsProviderInfrastructure(t *testing.
 			"and killing it signals the process group whose SIGTERM handler stops the city's shared dolt sql-server")
 	}
 }
+
+// Kills: a scan that leaves StartIdentity or StartedAt unset, reads them from
+// another field, or reports a start time without a boot time.
+func TestScanWithRootReportsStartIdentity(t *testing.T) {
+	root := t.TempDir()
+	boot := time.Date(2026, 10, 8, 9, 0, 0, 0, time.UTC)
+	buildFakeProc(t, root, 100, map[string]string{"GC_SESSION_ID": "ga-start"})
+	writeFakeProcessStat(t, filepath.Join(root, strconv.Itoa(100)), 100, 1, 12345)
+
+	got, err := scanWithRoot(root, "ga-start")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("scanWithRoot = %v, %v; want one root", got, err)
+	}
+	if got[0].StartIdentity != "12345" || !got[0].StartedAt.IsZero() {
+		t.Fatalf("without btime: StartIdentity=%q StartedAt=%v, want 12345 and zero", got[0].StartIdentity, got[0].StartedAt)
+	}
+
+	writeFakeBootTime(t, root, boot)
+	got, err = scanWithRoot(root, "ga-start")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("scanWithRoot = %v, %v; want one root", got, err)
+	}
+	if want := boot.Add(123*time.Second + 450*time.Millisecond); !got[0].StartedAt.Equal(want) || got[0].StartIdentity != "12345" {
+		t.Fatalf("StartIdentity=%q StartedAt=%v, want 12345 and %v", got[0].StartIdentity, got[0].StartedAt, want)
+	}
+}
