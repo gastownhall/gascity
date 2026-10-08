@@ -235,27 +235,39 @@ func ReadAutoStartDisabled(fs fsys.FS, path string) (bool, error) {
 // value (e.g. "yes", "off", "foo") returns ok=false so callers fall back
 // to other gc-managed signals rather than mis-treating the scope as
 // canonical.
+//
+// err is reserved for a config.yaml that exists but cannot be read, which
+// may hide an explicit true, so callers can leave the JSONL alone on it. A
+// file that reads but does not parse is line-scanned for the key instead;
+// without a recognizable value it reports ok=false and a nil error.
 func ReadExportAuto(fs fsys.FS, path string) (value bool, ok bool, err error) {
 	doc, err := readConfigDoc(fs, path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, false, nil
 		}
-		if raw, scanOK := scanConfigLineValue(fs, path, "export.auto:"); scanOK {
-			if parsed, parseErr := strconv.ParseBool(raw); parseErr == nil {
-				return parsed, true, nil
-			}
-			return false, false, nil
+		if !isConfigParseError(err) {
+			return false, false, err
 		}
-		return false, false, err
-	}
-	if raw, present := configStringValue(mappingRoot(doc), "export.auto"); present {
-		if parsed, parseErr := strconv.ParseBool(raw); parseErr == nil {
-			return parsed, true, nil
+		data, readErr := fs.ReadFile(path)
+		if readErr != nil {
+			return false, false, readErr
 		}
-		return false, false, nil
+		value, ok = parseExportAuto(scanConfigLineValueFromData(data, "export.auto:"))
+		return value, ok, nil
 	}
-	return false, false, nil
+	value, ok = parseExportAuto(configStringValue(mappingRoot(doc), "export.auto"))
+	return value, ok, nil
+}
+
+// parseExportAuto applies ReadExportAuto's strict boolean parsing to a raw
+// export.auto value: only strconv.ParseBool literals count as present.
+func parseExportAuto(raw string, present bool) (value bool, ok bool) {
+	if !present {
+		return false, false
+	}
+	parsed, err := strconv.ParseBool(raw)
+	return parsed, err == nil
 }
 
 // ReadDoltConfig reads the Dolt-specific GC config object from config.yaml.

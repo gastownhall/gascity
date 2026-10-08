@@ -387,7 +387,7 @@ func reapStaleBdExportJSONL(scopeRoot string) {
 		// only reached during the one-shot transition.
 		return
 	}
-	if !scopeJSONLIsReapable(scopeRoot) {
+	if !scopeJSONLIsReapable(fsys.OSFS{}, scopeRoot) {
 		// Unmanaged scope: leave the file alone. Removing it under those
 		// conditions could race with a legitimate auto-exporter (e.g., a
 		// rig that opted out of managed canonicalization).
@@ -400,7 +400,8 @@ func reapStaleBdExportJSONL(scopeRoot string) {
 // the scope is gc-managed under the canonical (non-explicit) shape. An
 // explicit export.auto:true is the scope-independent retention opt-out; it
 // takes precedence over endpoint ownership so cities can retain JSONL without
-// claiming the rig-only EndpointOriginExplicit topology.
+// claiming the rig-only EndpointOriginExplicit topology. A config that exists
+// but cannot be read is never reaped, since it may hold that opt-out.
 //
 // Otherwise, either of two signals counts as proof:
 //   - export.auto is explicitly false (PR 1965 wrote it; the user did not
@@ -420,16 +421,17 @@ func reapStaleBdExportJSONL(scopeRoot string) {
 // endpoint-origin check runs ahead of the export.auto:false signal so that
 // an opt-out rig that *also* has export.auto:false (e.g. left over from a
 // prior canonicalization, or hand-set) is still never reaped.
-func scopeJSONLIsReapable(scopeRoot string) bool {
+func scopeJSONLIsReapable(fs fsys.FS, scopeRoot string) bool {
 	configPath := filepath.Join(scopeRoot, ".beads", "config.yaml")
 	// One snapshot of export.auto for both arms below: re-reading the file
 	// after the endpoint-origin switch would answer from a config that may
-	// have been rewritten in between.
-	autoExport, autoExportSet, autoExportErr := contract.ReadExportAuto(fsys.OSFS{}, configPath)
-	if autoExportErr == nil && autoExportSet && autoExport {
+	// have been rewritten in between. A config that cannot be read may hide
+	// an explicit true, so a read error leaves the file alone.
+	autoExport, autoExportSet, autoExportErr := contract.ReadExportAuto(fs, configPath)
+	if autoExportErr != nil || (autoExportSet && autoExport) {
 		return false
 	}
-	state, stateOK, stateErr := contract.ReadConfigState(fsys.OSFS{}, configPath)
+	state, stateOK, stateErr := contract.ReadConfigState(fs, configPath)
 	if stateErr == nil && stateOK {
 		switch state.EndpointOrigin {
 		case contract.EndpointOriginExplicit:
@@ -442,9 +444,9 @@ func scopeJSONLIsReapable(scopeRoot string) bool {
 			return true
 		}
 	}
-	// The early return above already consumed an explicit true, so a
-	// readable, present key here is an explicit false.
-	return autoExportErr == nil && autoExportSet
+	// The early return above already consumed a read error and an explicit
+	// true, so a present key here is an explicit false.
+	return autoExportSet
 }
 
 func controlBdStoreForCity(dir, cityPath string, cfg *config.City) *beads.BdStore {

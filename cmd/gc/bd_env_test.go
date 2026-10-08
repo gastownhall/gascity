@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func mustBdRuntimeEnv(t *testing.T, cityPath string) map[string]string {
@@ -5182,7 +5183,7 @@ func TestScopeJSONLIsReapableRecognizesExplicitAutoOff(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if !scopeJSONLIsReapable(scope) {
+	if !scopeJSONLIsReapable(fsys.OSFS{}, scope) {
 		t.Fatalf("scopeJSONLIsReapable = false, want true for explicit export.auto:false")
 	}
 }
@@ -5203,7 +5204,7 @@ func TestScopeJSONLIsReapableRecognizesManagedOrigin(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if !scopeJSONLIsReapable(scope) {
+	if !scopeJSONLIsReapable(fsys.OSFS{}, scope) {
 		t.Fatalf("scopeJSONLIsReapable = false, want true for gc.endpoint_origin: managed_city")
 	}
 }
@@ -5219,7 +5220,7 @@ func TestScopeJSONLIsReapableHonorsCityAutoExportOptOut(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if scopeJSONLIsReapable(scope) {
+	if scopeJSONLIsReapable(fsys.OSFS{}, scope) {
 		t.Fatalf("scopeJSONLIsReapable = true, want false for city export.auto:true opt-out")
 	}
 }
@@ -5239,7 +5240,7 @@ func TestScopeJSONLIsReapableDoesNotClaimExplicitOptOut(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if scopeJSONLIsReapable(scope) {
+	if scopeJSONLIsReapable(fsys.OSFS{}, scope) {
 		t.Fatalf("scopeJSONLIsReapable = true, want false for explicit opt-out")
 	}
 }
@@ -5262,7 +5263,7 @@ func TestScopeJSONLIsReapableExplicitOptOutBeatsExportAutoFalse(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if scopeJSONLIsReapable(scope) {
+	if scopeJSONLIsReapable(fsys.OSFS{}, scope) {
 		t.Fatalf("scopeJSONLIsReapable = true, want false for explicit opt-out (export.auto:false must not override endpoint_origin)")
 	}
 }
@@ -5313,6 +5314,101 @@ func TestReapStaleBdExportJSONLLeavesFileOnCityAutoExportOptOut(t *testing.T) {
 
 	if _, err := os.Stat(jsonlPath); err != nil {
 		t.Fatalf("jsonl removed despite city export.auto:true opt-out; stat err = %v", err)
+	}
+}
+
+// TestReapStaleBdExportJSONLRemovesFileWhenTrueDuplicatesFalse pins the
+// runbook's warning: appending export.auto: true below the canonical
+// export.auto: false is not an opt-in. gc honors the first key, so the
+// managed scope's stale export is still reaped.
+func TestReapStaleBdExportJSONLRemovesFileWhenTrueDuplicatesFalse(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"_type":"issue","id":"zz-1"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\nexport.auto: false\nexport.auto: true\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	reapStaleBdExportJSONL(scope)
+
+	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
+		t.Fatalf("jsonl present after reap despite a duplicate export.auto key; stat err = %v, want IsNotExist", err)
+	}
+}
+
+// configReadFaultFS fails the listed ReadFile calls (1-based) of one
+// config.yaml and passes every other call through to the real filesystem. A
+// fault that clears between two reads is the window in which an export.auto
+// opt-in could be misread as absent.
+type configReadFaultFS struct {
+	fsys.OSFS
+	path      string
+	failCalls map[int]bool
+	calls     int
+}
+
+func (f *configReadFaultFS) ReadFile(name string) ([]byte, error) {
+	if name == f.path {
+		f.calls++
+		if f.failCalls[f.calls] {
+			return nil, fmt.Errorf("injected read failure of %s (call %d)", name, f.calls)
+		}
+	}
+	return f.OSFS.ReadFile(name)
+}
+
+// TestScopeJSONLIsReapableFailsClosedOnUnreadableExportAuto verifies that an
+// export.auto read failure leaves the JSONL alone even when the endpoint
+// origin reads fine a moment later: the value that could not be read may be
+// the city's explicit true. The quoted spelling is valid YAML that bd honors
+// but the line scanner cannot read, so the fault must not be retried through
+// it.
+func TestScopeJSONLIsReapableFailsClosedOnUnreadableExportAuto(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath,
+		[]byte("issue_prefix: zz\nexport.auto: \"true\"\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	// ReadExportAuto's read fails; any later read succeeds.
+	fs := &configReadFaultFS{path: configPath, failCalls: map[int]bool{1: true}}
+
+	if scopeJSONLIsReapable(fs, scope) {
+		t.Fatalf("scopeJSONLIsReapable = true, want false when export.auto could not be read")
+	}
+	if fs.calls < 1 {
+		t.Fatalf("injected fault never reached ReadExportAuto (%d config reads)", fs.calls)
+	}
+}
+
+// TestScopeJSONLIsReapableReapsUnparseableManagedConfig verifies that only a
+// read failure fails closed. A config.yaml that reads but does not parse, with
+// no export.auto line, holds no opt-in to protect, so a managed scope's stale
+// export is still reaped (sa-41j3kp).
+func TestScopeJSONLIsReapableReapsUnparseableManagedConfig(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\ngc.endpoint_origin: managed_city\n: not yaml\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if !scopeJSONLIsReapable(fsys.OSFS{}, scope) {
+		t.Fatalf("scopeJSONLIsReapable = false, want true for an unparseable managed_city config without export.auto")
 	}
 }
 

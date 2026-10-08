@@ -726,7 +726,7 @@ func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.Conf
 	}
 	autoExport, autoExportSet, autoExportErr := contract.ReadExportAuto(fs, filepath.Join(beadsDir, "config.yaml"))
 	if changed && state.EndpointOrigin != contract.EndpointOriginExplicit &&
-		(autoExportErr != nil || !autoExportSet || !autoExport) {
+		autoExportErr == nil && (!autoExportSet || !autoExport) {
 		// PR 1965 made export.auto:false canonical, but a pre-existing
 		// .beads/issues.jsonl from before this normalization still triggers
 		// bd's auto-import-on-write trap (sa-41j3kp) — bd sees the file,
@@ -735,7 +735,8 @@ func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.Conf
 		// stale export from when auto-export was on; with the canonical
 		// config now suppressing auto-export, nothing will refresh it. Explicit
 		// opt-out scopes and scopes with export.auto:true keep JSONL as
-		// load-bearing state.
+		// load-bearing state. A config that cannot be read back may hold that
+		// true, so the file is left for the store-open reaper to judge.
 		removeStaleBdExportJSONL(fs, beadsDir)
 	}
 	return nil

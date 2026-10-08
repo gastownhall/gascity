@@ -58,10 +58,16 @@ Two TOML fields, one per scope, describe endpoint ownership:
 
 `gc.endpoint_origin` describes endpoint ownership, not JSONL retention. To
 keep a city-root `.beads/issues.jsonl` on disk, leave the city origin as
-`managed_city` or `city_canonical` and set `export.auto: true` in that
-scope's `.beads/config.yaml`. Gas City preserves that explicit setting and
-skips stale-JSONL cleanup for the scope. Do not use `explicit` at city
-scope; it is a rig-only endpoint origin and fails canonical validation.
+`managed_city` or `city_canonical` and change the existing
+`export.auto: false` line in that scope's `.beads/config.yaml` to
+`export.auto: true`. Running `bd config set export.auto true` from the scope
+root makes the same change. Gas City preserves that explicit setting and
+skips stale-JSONL cleanup for the scope. Do not append a second
+`export.auto` key instead: bd cannot parse a `config.yaml` with a duplicate
+key and ignores the whole file, and Gas City honors only the first
+occurrence, so the scope stays opted out and the file is still removed. Do
+not use `explicit` at city scope; it is a rig-only endpoint origin and fails
+canonical validation.
 Do not keep the file with bd 1.0.4 (check `bd version`): that release
 re-imports a present `issues.jsonl` on every write, not only into an empty
 database, so it re-applies the retained rows over newer Dolt data and can
