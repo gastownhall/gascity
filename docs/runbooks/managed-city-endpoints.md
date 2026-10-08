@@ -196,20 +196,25 @@ that a prior edit or orphan server made the mirror drift.
 `.beads/embeddeddolt/<dolt_database>`. Nothing copies rows between
 them.
 
-`gc rig add`, `gc start`, `gc supervisor run`, `gc rig set-endpoint`
-and `gc beads city use-managed|use-external` all canonicalize a
-managed scope to `server` mode, because a Dolt directory opened
-in-process cannot be shared by the controller, every agent's `bd`
-and the dashboard at once. On a workspace you had initialized in
-embedded mode, that flip re-points the ledger and leaves the old
-database on disk, unread — and `bd` does not fail, it answers `[]`
-with exit 0. This is not split-store specific: it bites a city with
-exactly one store just as hard.
+`gc rig add`, `gc start`, `gc supervisor run` and
+`gc beads city use-managed|use-external` keep the mode a scope's
+`metadata.json` records: an embedded scope stays embedded, and gc
+neither converts it nor moves its rows. `gc rig set-endpoint` refuses
+an embedded rig outright — its beads live in its own
+`.beads/embeddeddolt`, so it has no server endpoint to set.
 
-Three things now tell you:
+Older gc releases did canonicalize a managed scope to `server` mode.
+On a workspace you had initialized in embedded mode, that flip
+re-pointed the ledger and left the old database on disk, unread —
+and `bd` does not fail, it answers `[]` with exit 0. This is not
+split-store specific: it bites a city with exactly one store just
+as hard.
 
-1. The flip prints the scope, both modes and the exact directory it
-   is about to stop reading, before it happens.
+Three things tell you:
+
+1. Any canonicalization that changes a scope's mode prints the
+   scope, both modes and the exact directory it is about to stop
+   reading, before it happens.
 2. `gc doctor`'s `bd-split-store` check enumerates both databases.
 3. An empty **whole-ledger** read (`gc ready`'s city leg, an
    unfiltered `List`) from a scope that has not returned a row in
@@ -225,9 +230,9 @@ Three things now tell you:
 
 Recovery is `gc doctor`'s: export from a copy of the unread
 database, review with `bd import --dry-run`, import into the active
-one, and keep both directories until reconciled. Editing
-`dolt_mode` back does not hold — the next `gc start` re-canonicalizes
-it. While you reconcile, `GC_BD_ALLOW_UNREAD_STORE_READ=1` silences
+one, and keep both directories until reconciled. Do not just edit
+`dolt_mode` back: rows written since the flip live in the other
+database and would go unread in turn. While you reconcile, `GC_BD_ALLOW_UNREAD_STORE_READ=1` silences
 the read-time notice without changing any answer.
 
 ## Recovery recipe — slung beads not reaching agents
