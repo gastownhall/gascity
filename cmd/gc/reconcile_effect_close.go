@@ -118,7 +118,7 @@ func (e closeRun) closeLocked(ctx context.Context, writer fencedWriter, row sess
 	var evs []events.Event
 	if !e.it.Closing.Phantom {
 		var cause string
-		if patch, cause, evs = e.guardWork(writer, row); cause != "" {
+		if patch, cause, evs = e.guardWork(ctx, writer, row); cause != "" {
 			return settlement{Outcome: settledRefused, Cause: cause, Events: evs}, beads.Bead{}
 		}
 	}
@@ -156,7 +156,7 @@ func (e closeRun) closeLocked(ctx context.Context, writer fencedWriter, row sess
 //   - a pool slot with no marker stamps it and records session.stranded
 //     (SESS-624), and holds until it ages;
 //   - anything else refuses has-work.
-func (e closeRun) guardWork(writer fencedWriter, row session.Info) (session.MetadataPatch, string, []events.Event) {
+func (e closeRun) guardWork(ctx context.Context, writer fencedWriter, row session.Info) (session.MetadataPatch, string, []events.Event) {
 	has, err := e.hasWork(row)
 	spec := e.it.Closing
 	switch {
@@ -179,7 +179,7 @@ func (e closeRun) guardWork(writer fencedWriter, row session.Info) (session.Meta
 		}
 		return session.ClosePatch(e.pass.World.Now, strandedRepairCloseReason), "", nil
 	case spec.Kind == closePoolSlot && strings.TrimSpace(row.StrandedEventEmittedAt) == "":
-		if evs := e.markStranded(writer, row); len(evs) > 0 {
+		if evs := e.markStranded(ctx, writer, row); len(evs) > 0 {
 			return nil, causeStranded, evs
 		}
 		return nil, causeUnstamped, nil
@@ -202,9 +202,9 @@ func (e closeRun) hasWork(row session.Info) (bool, error) {
 // incarnation are the ones the pass decided on (v5.6 C3). Work that every
 // detached probe still reports alive is not stranded: nothing is stamped
 // or recorded.
-func (e closeRun) markStranded(writer fencedWriter, row session.Info) []events.Event {
+func (e closeRun) markStranded(ctx context.Context, writer fencedWriter, row session.Info) []events.Event {
 	work, err := collectSessionAssignedWorkInfo(e.pass.World.CityPath, e.cfg(), e.pass.Reads.City, e.pass.Reads.Rigs, row)
-	diagnostic := strandedDiagnosticWork(work)
+	diagnostic := strandedDiagnosticWork(ctx, work)
 	if err == nil && len(work) > 0 && len(diagnostic) == 0 {
 		return nil
 	}
@@ -231,12 +231,13 @@ func (e closeRun) markStranded(writer fencedWriter, row session.Info) []events.E
 // strandedDiagnosticWork is legacy's detached-probe filter
 // (filterDetachedStrandedDiagnosticWork) without its metadata clear on a
 // dead probe: the effect reads through refusing stores, and the release
-// clears it. Work whose probe reports alive is not stranded.
-func strandedDiagnosticWork(work []strandedAssignedWork) []strandedAssignedWork {
+// clears it. Work whose probe reports alive is not stranded. Each probe runs
+// under ctx, the effect's deadline, since it runs inside the close's locks.
+func strandedDiagnosticWork(ctx context.Context, work []strandedAssignedWork) []strandedAssignedWork {
 	out := make([]strandedAssignedWork, 0, len(work))
 	for _, item := range work {
 		spec := strings.TrimSpace(item.bead.Metadata[detachedProbeMetadataKey])
-		if spec == "" || probeDetachedWork(context.Background(), spec).Status != detachedProbeAlive {
+		if spec == "" || probeDetachedWork(ctx, spec).Status != detachedProbeAlive {
 			out = append(out, item)
 		}
 	}
