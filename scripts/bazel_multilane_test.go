@@ -480,12 +480,13 @@ func TestBazelMultiLaneWorkflowShape(t *testing.T) {
 	if lane.Strategy.FailFast == nil || *lane.Strategy.FailFast {
 		t.Errorf("lane strategy: want fail-fast: false")
 	}
-	// Mode remote runs a 2 vCPU client, except acceptance: its client-side
-	// analysis (~1900 packages) took ~2 m of its lane on 2 vCPU. Every other
-	// mode executes here, or may (a fork lane's fallback to the read-only
-	// cache), so it gets 4 vCPU.
-	if want := "${{ (needs.rbe.outputs.mode != 'remote' || matrix.lane == 'acceptance') && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}"; lane.RunsOn != want {
-		t.Errorf("lane runs-on = %q, want %q (2 vCPU clients in mode remote, 4 vCPU otherwise and for acceptance)", lane.RunsOn, want)
+	// Mode remote runs a 2 vCPU client, except acceptance and unit: their
+	// client-side loading and analysis is CPU-bound (acceptance ~1900
+	// packages took ~2 m on 2 vCPU; unit's //... ~3000 packages took
+	// 107-137 s). Every other mode executes here, or may (a fork lane's
+	// fallback to the read-only cache), so it gets 4 vCPU.
+	if want := "${{ (needs.rbe.outputs.mode != 'remote' || matrix.lane == 'acceptance' || matrix.lane == 'unit') && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}"; lane.RunsOn != want {
+		t.Errorf("lane runs-on = %q, want %q (2 vCPU clients in mode remote, 4 vCPU otherwise and for acceptance and unit)", lane.RunsOn, want)
 	}
 
 	// Every checkout is full blobless history, then fresh-merge onto the rbe
