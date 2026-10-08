@@ -27,6 +27,15 @@ type City struct {
 	usedSupervisor bool
 	cmd            *exec.Cmd
 	logFile        *os.File
+	// tornDown records that an end-of-test cleanup has already stopped and
+	// unregistered the city. Init, RigAdd and StartWithSupervisor each
+	// register a best-effort teardown, so a test ran three or four in a row;
+	// every one after the first found nothing to stop, but gc stop on a
+	// stopped proxied city restarts its bd proxy and Dolt child to find that
+	// out, which cost 13-24 s apiece on rbe-west. Cleanups only: test code
+	// may start the city again behind the helper's back, cleanup code does
+	// not.
+	tornDown bool
 }
 
 // NewCity creates a temp directory for a city and returns the DSL handle.
@@ -227,15 +236,23 @@ func (c *City) StartExpectingFatal(t *testing.T) string {
 
 // Stop runs gc stop.
 func (c *City) Stop() {
+	c.stop()
+}
+
+// stop is Stop, reporting whether it stopped and unregistered the city: gc
+// stop succeeded and gc unregister ran.
+func (c *City) stop() bool {
 	if !c.started {
-		return
+		return false
 	}
 	c.started = false
 	// Best-effort stop — don't fail the test on cleanup errors.
-	RunGC(c.Env, c.Dir, "stop", c.Dir) //nolint:errcheck
+	_, stopErr := RunGC(c.Env, c.Dir, "stop", c.Dir)
+	tornDown := false
 	if c.usedSupervisor {
 		RunGC(c.Env, c.Dir, "unregister", c.Dir) //nolint:errcheck
 		c.usedSupervisor = false
+		tornDown = stopErr == nil
 	}
 	if c.cmd != nil {
 		done := make(chan struct{})
@@ -257,15 +274,13 @@ func (c *City) Stop() {
 		_ = c.logFile.Close()
 		c.logFile = nil
 	}
+	return tornDown
 }
 
 func (c *City) cleanupRuntime() {
 	c.t.Helper()
-	if out, err := RunGC(c.Env, c.Dir, "stop", c.Dir); err != nil {
-		c.t.Logf("cleanup: gc stop %s: %v\n%s", c.Dir, err, out)
-	}
-	if out, err := RunGC(c.Env, c.Dir, "unregister", c.Dir); err != nil {
-		c.t.Logf("cleanup: gc unregister %s: %v\n%s", c.Dir, err, out)
+	if !c.tornDown {
+		c.teardown()
 	}
 	if out, err := RunGC(c.Env, "", "supervisor", "stop", "--wait"); err != nil {
 		c.t.Logf("cleanup: gc supervisor stop --wait: %v\n%s", err, out)
@@ -274,17 +289,31 @@ func (c *City) cleanupRuntime() {
 
 func (c *City) cleanupScaffoldOnly() {
 	c.t.Helper()
-	if out, err := RunGC(c.Env, c.Dir, "stop", c.Dir); err != nil {
+	if !c.tornDown {
+		c.teardown()
+	}
+}
+
+// teardown stops and unregisters the city, best effort, and records a clean
+// stop in tornDown so the cleanups registered after it skip theirs.
+func (c *City) teardown() {
+	c.t.Helper()
+	out, err := RunGC(c.Env, c.Dir, "stop", c.Dir)
+	if err != nil {
 		c.t.Logf("cleanup: gc stop %s: %v\n%s", c.Dir, err, out)
 	}
 	if out, err := RunGC(c.Env, c.Dir, "unregister", c.Dir); err != nil {
 		c.t.Logf("cleanup: gc unregister %s: %v\n%s", c.Dir, err, out)
 	}
+	c.tornDown = err == nil
 }
 
-// CleanupRuntime tears down supervisor-backed runtime state for manually initialized test cities.
+// CleanupRuntime tears down supervisor-backed runtime state for manually
+// initialized test cities. It always stops the city: a test may call it
+// after starting the city behind the helper's back.
 func (c *City) CleanupRuntime() {
 	c.t.Helper()
+	c.tornDown = false
 	c.cleanupRuntime()
 }
 

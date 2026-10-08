@@ -163,7 +163,10 @@ func newQuiescenceCity(t *testing.T) *quiescenceCity {
 	cityRoot := city.Dir
 	rigDir := createGitRig(t)
 	t.Cleanup(func() {
-		helpers.RunGC(env, cityRoot, "stop", cityRoot)         //nolint:errcheck // best effort
+		// The city's own cleanups (helpers.City) have stopped it by now; a
+		// further gc stop would restart the stopped scopes' pairs to find
+		// nothing to stop, so only a pair still running calls for one.
+		stopIfPairsRemain(t, env, cityRoot, rigDir)
 		helpers.RunGC(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best effort
 		for _, root := range []string{cityRoot, rigDir} {
 			if leaked := waitForNoDoltProcesses(t, root, 20*time.Second); len(leaked) > 0 {

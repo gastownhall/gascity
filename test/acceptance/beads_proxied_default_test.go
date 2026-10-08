@@ -224,6 +224,20 @@ func doltProcessesUnder(t *testing.T, root string) []string {
 	return found
 }
 
+// stopIfPairsRemain runs a best-effort gc stop of cityRoot when a bd proxy or
+// Dolt server still runs under any of roots. A test's last cleanup calls it
+// rather than stopping unconditionally: gc stop on an already-stopped proxied
+// city restarts its pairs only to find nothing to stop.
+func stopIfPairsRemain(t *testing.T, env *helpers.Env, cityRoot string, roots ...string) {
+	t.Helper()
+	for _, root := range append([]string{cityRoot}, roots...) {
+		if len(doltProcessesUnder(t, root)) > 0 {
+			helpers.RunGC(env, cityRoot, "stop", cityRoot) //nolint:errcheck // best effort
+			return
+		}
+	}
+}
+
 func waitForNoDoltProcesses(t *testing.T, root string, timeout time.Duration) []string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -761,12 +775,7 @@ func newProxiedDefaultCity(t *testing.T, rigNames ...string) *proxiedDefaultCity
 		roots = append(roots, dir)
 	}
 	t.Cleanup(func() {
-		for _, root := range roots {
-			if len(doltProcessesUnder(t, root)) > 0 {
-				helpers.RunGC(env, p.cityRoot, "stop", p.cityRoot) //nolint:errcheck
-				break
-			}
-		}
+		stopIfPairsRemain(t, env, p.cityRoot, roots...)
 		helpers.RunGC(env, "", "supervisor", "stop", "--wait") //nolint:errcheck
 		for _, root := range roots {
 			if leaked := waitForNoDoltProcesses(t, root, 15*time.Second); len(leaked) > 0 {
