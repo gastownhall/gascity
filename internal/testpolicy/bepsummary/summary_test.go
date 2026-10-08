@@ -391,7 +391,7 @@ func TestSummarizePhaseValidationAspectFailure(t *testing.T) {
 	if err := WriteMarkdown(&md, BuildReport("pr/remote", []Phase{p}, 5)); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(md.String(), "validation (nogo) failed") {
+	if !strings.Contains(md.String(), "validation (nogo) failed for 2 target(s)") {
 		t.Errorf("markdown does not report the validation failure:\n%s", md.String())
 	}
 }

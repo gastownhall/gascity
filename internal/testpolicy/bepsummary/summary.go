@@ -87,7 +87,7 @@ type Phase struct {
 	Actions      *ActionSummary `json:"actions"`
 	Tests        []TestTarget   `json:"tests"`
 	// ValidationFailed lists the targets, test or not, whose validation
-	// actions (nogo) failed under the validation aspect.
+	// aspect failed: their own validation actions (nogo) or a dependency's.
 	ValidationFailed []string `json:"validation_failed,omitempty"`
 }
 

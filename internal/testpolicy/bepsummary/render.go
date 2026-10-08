@@ -7,6 +7,9 @@ import (
 	"time"
 )
 
+// maxValidationLabels caps the validation-failure labels listed per phase.
+const maxValidationLabels = 20
+
 // WriteMarkdown renders the report as GitHub-flavored markdown suitable for
 // $GITHUB_STEP_SUMMARY.
 func WriteMarkdown(w io.Writer, rep Report) error {
@@ -35,9 +38,14 @@ func WriteMarkdown(w io.Writer, rep Report) error {
 	}
 
 	for _, p := range rep.Phases {
-		if len(p.ValidationFailed) > 0 {
-			fmt.Fprintf(&b, "\n**%s: validation (nogo) failed** for `%s`; a test target there counts as %s whatever its test run reported.\n",
-				p.Label, strings.Join(p.ValidationFailed, "`, `"), StatusFailedValidation)
+		if n := len(p.ValidationFailed); n > 0 {
+			// The aspect fails every dependent too, so the list can be long.
+			shown, more := p.ValidationFailed, ""
+			if n > maxValidationLabels {
+				shown, more = shown[:maxValidationLabels], fmt.Sprintf(" and %d more", n-maxValidationLabels)
+			}
+			fmt.Fprintf(&b, "\n**%s: validation (nogo) failed for %d target(s)** (the target or a dependency): `%s`%s. A test target among them counts as %s whatever its test run reported.\n",
+				p.Label, n, strings.Join(shown, "`, `"), more, StatusFailedValidation)
 		}
 	}
 
