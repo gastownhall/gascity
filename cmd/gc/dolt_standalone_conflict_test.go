@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -54,20 +55,45 @@ func startStandaloneBdDoltLikeProcess(t *testing.T, dataDir string) *exec.Cmd {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll(dataDir): %v", err)
 	}
-	fifo := filepath.Join(dataDir, "sql-server")
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		t.Fatalf("Mkfifo(sql-server): %v", err)
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test binary: %v", err)
 	}
-	cmd := exec.Command("bash", "-c", `exec -a dolt cat sql-server -- --data-dir "$1"`, "fake-dolt", dataDir)
-	cmd.Dir = dataDir
+	cmd := exec.Command(testBinary)
+	cmd.Args = []string{"dolt", "sql-server", "--data-dir", dataDir}
+	cmd.Env = append(os.Environ(), fakeDoltSQLServerMarkerEnv+"=1")
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("Start fake dolt sql-server: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		killErr := cmd.Process.Kill()
+		if killErr != nil {
+			if errors.Is(killErr, os.ErrProcessDone) {
+				t.Errorf("fake dolt sql-server pid %d exited before cleanup", cmd.Process.Pid)
+			} else {
+				t.Errorf("killing fake dolt sql-server pid %d: %v", cmd.Process.Pid, killErr)
+			}
+		}
+		waitErr := cmd.Wait()
+		if waitErr == nil {
+			if killErr == nil {
+				t.Errorf("fake dolt sql-server pid %d exited successfully after cleanup kill", cmd.Process.Pid)
+			}
+			return
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(waitErr, &exitErr) {
+			t.Errorf("waiting for fake dolt sql-server pid %d: %v", cmd.Process.Pid, waitErr)
+			return
+		}
+		if killErr == nil {
+			status, ok := exitErr.Sys().(syscall.WaitStatus)
+			if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+				t.Errorf("fake dolt sql-server pid %d wait status = %v, want SIGKILL", cmd.Process.Pid, waitErr)
+			}
+		}
 	})
 	// 30s: must outlast a worst-case processArgsPSTimeout (10s) ps fallback plus
 	// process-exec/proc-reflection latency under heavy parallel CI load.
