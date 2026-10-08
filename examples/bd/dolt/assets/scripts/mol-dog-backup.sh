@@ -283,7 +283,10 @@ if RIG_LIST=$(cd "$CITY_ABS" && run_bounded "$BACKUP_BD_TIMEOUT_SECS" gc rig lis
         [ -n "$rig_name" ] || continue
         SCOPE_SPECS="$SCOPE_SPECS
 rig $rig_name"
-    done < <(printf '%s\n' "$RIG_LIST" | jq -r '.rigs[]? | select((.hq // false) == false) | .name // empty' 2>/dev/null)
+    # Suspended rigs are left cold: any bd call restarts a suspended scope's
+    # retired proxy and Dolt, and nothing writes to it while it is suspended,
+    # so its backup waits for it to resume.
+    done < <(printf '%s\n' "$RIG_LIST" | jq -r '.rigs[]? | select((.hq // false) == false and (.suspended // false) == false) | .name // empty' 2>/dev/null)
 else
     echo "backup: gc rig list failed; backing up the city scope only" >&2
     outcome_scope_skipped "rigs" "rig list unavailable"

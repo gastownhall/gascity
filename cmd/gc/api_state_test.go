@@ -2046,6 +2046,10 @@ func TestControllerStateAppliesCacheReconcileBeadEventsToStores(t *testing.T) {
 
 	updated := created
 	updated.Status = "in_progress"
+	// The scan that emitted the snapshot read it from the backing.
+	if err := backing.Update(created.ID, beads.UpdateOpts{Status: &updated.Status}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
 	payload, err := json.Marshal(updated)
 	if err != nil {
 		t.Fatalf("marshal updated bead: %v", err)
@@ -2178,7 +2182,7 @@ func TestControllerStateBeadEventWatcherLeavesCompletionRepairToStartupSweep(t *
 	ep := &listCountingEventProvider{Fake: events.NewFake()}
 	ep.Record(events.Event{Type: events.BeadClosed, Actor: "bd-close", Subject: step.ID, Payload: payload})
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: backing}, nil
 	}
 	t.Cleanup(func() { newControllerStateOpenCityStore = prevCityStore })
@@ -2363,7 +2367,7 @@ func TestControllerStateUpdateClosesReplacedCityStore(t *testing.T) {
 	setControllerStateStoreCloseDelayForTest(t, time.Millisecond)
 
 	replacement := beads.NewMemStore()
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: replacement}, nil
 	}
 	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
@@ -2387,7 +2391,7 @@ func TestControllerStateUpdateClosesReplacedRigStores(t *testing.T) {
 	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
 	setControllerStateStoreCloseDelayForTest(t, time.Millisecond)
 
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{}, nil
 	}
 	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
@@ -2423,7 +2427,7 @@ func TestControllerStateUpdateKeepsStaleRigStoreUsableDuringReload(t *testing.T)
 	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
 	setControllerStateStoreCloseDelayForTest(t, 200*time.Millisecond)
 
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{}, nil
 	}
 	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
@@ -2455,7 +2459,7 @@ func TestControllerStateUpdateReturnsTypedStoreClosedAfterReloadDrain(t *testing
 	t.Cleanup(func() { newControllerStateOpenCityStore = prevOpen })
 	setControllerStateStoreCloseDelayForTest(t, time.Millisecond)
 
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{}, nil
 	}
 	oldStore := &closeStoreSpy{Store: beads.NewMemStore()}
@@ -2492,11 +2496,11 @@ func TestControllerStateBeadEventsRespectStorePrefixes(t *testing.T) {
 		}
 	}
 
-	payload, err := json.Marshal(beads.Bead{
-		ID:     "mc-source",
-		Title:  "city source",
-		Status: "open",
-	})
+	// Both backings hold each row, so an event applied to the wrong cache
+	// would install it there.
+	cityBead := beads.Bead{ID: "mc-source", Title: "city source", Status: "open"}
+	createInBackings(t, cityBead, cityBacking, rigBacking)
+	payload, err := json.Marshal(cityBead)
 	if err != nil {
 		t.Fatalf("marshal city bead: %v", err)
 	}
@@ -2528,11 +2532,9 @@ func TestControllerStateBeadEventsRespectStorePrefixes(t *testing.T) {
 		t.Fatalf("rig cache items = %+v, want no city bead", rigItems)
 	}
 
-	payload, err = json.Marshal(beads.Bead{
-		ID:     "ga-rig",
-		Title:  "rig work",
-		Status: "open",
-	})
+	rigBead := beads.Bead{ID: "ga-rig", Title: "rig work", Status: "open"}
+	createInBackings(t, rigBead, cityBacking, rigBacking)
+	payload, err = json.Marshal(rigBead)
 	if err != nil {
 		t.Fatalf("marshal rig bead: %v", err)
 	}
@@ -2571,16 +2573,15 @@ func TestControllerStateBeadEventsUseScopePrefixWhenConfiguredPrefixDrifts(t *te
 	}
 	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: "rigs/repo", Prefix: "ga"}}}
 	bdStore := bdStoreForRig(rigDir, cityDir, cfg, cfg.Rigs[0].EffectivePrefix())
-	rigCache := beads.NewCachingStoreForTestWithPrefix(beads.NewMemStore(), bdStore.IDPrefix(), nil)
+	rigBacking := beads.NewMemStore()
+	rigCache := beads.NewCachingStoreForTestWithPrefix(rigBacking, bdStore.IDPrefix(), nil)
 	if err := rigCache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime rig cache: %v", err)
 	}
 
-	payload, err := json.Marshal(beads.Bead{
-		ID:     "repo-owned",
-		Title:  "rig-owned work",
-		Status: "open",
-	})
+	rigBead := beads.Bead{ID: "repo-owned", Title: "rig-owned work", Status: "open"}
+	createInBackings(t, rigBead, rigBacking)
+	payload, err := json.Marshal(rigBead)
 	if err != nil {
 		t.Fatalf("marshal rig bead: %v", err)
 	}
@@ -2683,6 +2684,9 @@ func TestControllerStateAppliesBeadEventsOnlyToOwningCache(t *testing.T) {
 		cityBeadStore: cityStore,
 		beadStores:    map[string]beads.Store{"rig1": rigStore},
 	}
+	// Both backings hold the row, so an event applied to the wrong cache
+	// would install it there.
+	createInBackings(t, beads.Bead{ID: "rw-1", Title: "rig bead", Type: "task"}, cityBacking, rigBacking)
 
 	cs.applyBeadEventToStores(events.Event{
 		Type:    events.BeadCreated,
@@ -2690,19 +2694,19 @@ func TestControllerStateAppliesBeadEventsOnlyToOwningCache(t *testing.T) {
 		Payload: json.RawMessage(`{"id":"rw-1","title":"rig bead","status":"open","issue_type":"task","created_at":"2026-04-26T21:37:46Z"}`),
 	})
 
-	if _, err := cityStore.Get("rw-1"); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("city cache Get(rw-1) error = %v, want ErrNotFound", err)
+	if got := cachedTitles(t, cityStore); len(got) != 0 {
+		t.Fatalf("city cache holds %v, want nothing", got)
 	}
-	if got, err := rigStore.Get("rw-1"); err != nil {
-		t.Fatalf("rig cache Get(rw-1): %v", err)
-	} else if got.Title != "rig bead" {
-		t.Fatalf("rig cache title = %q, want rig bead", got.Title)
+	if got := cachedTitles(t, rigStore); got["rw-1"] != "rig bead" || len(got) != 1 {
+		t.Fatalf("rig cache holds %v, want rw-1 titled rig bead", got)
 	}
 }
 
 func TestControllerStateAppliesHyphenatedPrefixEventsOnlyToOwningCache(t *testing.T) {
-	cityStore := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
-	rigStore := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
+	cityBacking := beads.NewMemStore()
+	rigBacking := beads.NewMemStore()
+	cityStore := beads.NewCachingStoreForTest(cityBacking, nil)
+	rigStore := beads.NewCachingStoreForTest(rigBacking, nil)
 	if err := cityStore.Prime(context.Background()); err != nil {
 		t.Fatalf("city Prime: %v", err)
 	}
@@ -2719,6 +2723,9 @@ func TestControllerStateAppliesHyphenatedPrefixEventsOnlyToOwningCache(t *testin
 		cityBeadStore: cityStore,
 		beadStores:    map[string]beads.Store{"rig1": rigStore},
 	}
+	// Both backings hold the row, so an event applied to the wrong cache
+	// would install it there.
+	createInBackings(t, beads.Bead{ID: "mc-mogbzvrs-hiv.1", Title: "rig bead", Type: "task"}, cityBacking, rigBacking)
 
 	cs.applyBeadEventToStores(events.Event{
 		Type:    events.BeadCreated,
@@ -2726,14 +2733,40 @@ func TestControllerStateAppliesHyphenatedPrefixEventsOnlyToOwningCache(t *testin
 		Payload: json.RawMessage(`{"id":"mc-mogbzvrs-hiv.1","title":"rig bead","status":"open","issue_type":"task","created_at":"2026-04-26T21:37:46Z"}`),
 	})
 
-	if _, err := cityStore.Get("mc-mogbzvrs-hiv.1"); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("city cache Get(hyphenated rig bead) error = %v, want ErrNotFound", err)
+	if got := cachedTitles(t, cityStore); len(got) != 0 {
+		t.Fatalf("city cache holds %v, want nothing", got)
 	}
-	if got, err := rigStore.Get("mc-mogbzvrs-hiv.1"); err != nil {
-		t.Fatalf("rig cache Get(hyphenated rig bead): %v", err)
-	} else if got.Title != "rig bead" {
-		t.Fatalf("rig cache title = %q, want rig bead", got.Title)
+	if got := cachedTitles(t, rigStore); got["mc-mogbzvrs-hiv.1"] != "rig bead" || len(got) != 1 {
+		t.Fatalf("rig cache holds %v, want mc-mogbzvrs-hiv.1 titled rig bead", got)
 	}
+}
+
+// createInBackings lands b in each backing behind its cache's back, as an
+// external bd write does, so only a bead event brings the row into a cache:
+// an uncached event installs only the cache's backing read of the row.
+func createInBackings(t *testing.T, b beads.Bead, backings ...*beads.MemStore) {
+	t.Helper()
+	for _, backing := range backings {
+		backing.HonorExplicitIDs = true
+		if _, err := backing.Create(b); err != nil {
+			t.Fatalf("backing Create(%s): %v", b.ID, err)
+		}
+	}
+}
+
+// cachedTitles returns the title of every row a live cache holds, by id.
+// CachedList reads only the cache, never the backing.
+func cachedTitles(t *testing.T, cache *beads.CachingStore) map[string]string {
+	t.Helper()
+	rows, ok := cache.CachedList(beads.ListQuery{AllowScan: true})
+	if !ok {
+		t.Fatal("CachedList: the cache cannot serve the query")
+	}
+	titles := make(map[string]string, len(rows))
+	for _, row := range rows {
+		titles[row.ID] = row.Title
+	}
+	return titles
 }
 
 func TestControllerStateBuildStoresFileStoresUseLockFiles(t *testing.T) {
@@ -3703,7 +3736,7 @@ func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing
 	ep := newBlockingLatestEventProvider()
 	var storeOpened atomic.Bool
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		storeOpened.Store(true)
 		return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
 	}
@@ -3737,7 +3770,7 @@ func TestControllerStateEstablishesBeadEventCursorBeforePrimingStores(t *testing
 func TestControllerStateBeadEventWatcherReplaysEventsAfterCachePrime(t *testing.T) {
 	backing := beads.NewMemStore()
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: backing}, nil
 	}
 	t.Cleanup(func() {
@@ -3793,7 +3826,7 @@ func TestControllerStateBeadEventWatcherReplaysEventsAfterCachePrime(t *testing.
 func TestControllerStateBeadEventWatcherRetriesSetupErrors(t *testing.T) {
 	backing := beads.NewMemStore()
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: backing}, nil
 	}
 	t.Cleanup(func() {
@@ -3844,7 +3877,7 @@ func TestControllerStateBeadEventWatcherRetriesSetupErrors(t *testing.T) {
 func TestControllerStateBeadEventWatcherConsumesExternalFileEvent(t *testing.T) {
 	backing := beads.NewMemStore()
 	prevCityStore := newControllerStateOpenCityStore
-	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+	newControllerStateOpenCityStore = func(string, gate.Mode, beads.NativeTransportMode) (beads.StoreOpenResult, error) {
 		return beads.StoreOpenResult{Store: backing}, nil
 	}
 	t.Cleanup(func() {

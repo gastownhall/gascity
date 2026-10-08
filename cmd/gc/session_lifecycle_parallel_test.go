@@ -3248,47 +3248,6 @@ func TestReconcileSessionBeads_RollsBackPendingCreateWhenRuntimeTokenMismatches(
 	}
 }
 
-func TestRunningSessionMatchesPendingCreateAcceptsTokenOnlyRuntime(t *testing.T) {
-	session := sessionpkg.Info{
-		ID:                  "gc-worker",
-		SessionName:         "worker",
-		SessionNameMetadata: "worker",
-		Generation:          "2",
-		InstanceToken:       "tok-worker",
-	}
-	sp := runtime.NewFake()
-	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := sp.SetMeta("worker", "GC_INSTANCE_TOKEN", "tok-worker"); err != nil {
-		t.Fatal(err)
-	}
-
-	if !runningSessionMatchesPendingCreateInfo(session, "worker", sp) {
-		t.Fatal("runtime with matching token and no session id should match pending create")
-	}
-}
-
-func TestRunningSessionMatchesPendingCreateAcceptsIDOnlyRuntime(t *testing.T) {
-	session := sessionpkg.Info{
-		ID:                  "gc-worker",
-		SessionName:         "worker",
-		SessionNameMetadata: "worker",
-		Generation:          "2",
-	}
-	sp := runtime.NewFake()
-	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
-		t.Fatal(err)
-	}
-
-	if !runningSessionMatchesPendingCreateInfo(session, "worker", sp) {
-		t.Fatal("runtime with matching session id and no token should match pending create")
-	}
-}
-
 func TestReconcileSessionBeads_SkipsPendingCreateStartAlreadyInFlight(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 0, 30, 0, time.UTC)}

@@ -1,0 +1,380 @@
+#!/bin/bash
+# rbe-action-launch: run one NativeLink action as a per-action slot user in
+# private namespaces (README "Action isolation"). Installed root:root 0755 at
+# /usr/local/libexec/rbe-action/launch. Only ever started as root by sudo from
+# the static entrypoint stub (sudoers.d/rbe-action), which NativeLink runs as
+# the worker user for every action.
+#
+#   launch <n> <env_1> ... <env_n> <argv...>
+#       first: re-exec under setpriv --pdeathsig KILL as
+#   launch --parent <sudo_pid> <n> <env...> <argv...>
+#       outer: dies with sudo from here on (cancel, backstop) and refuses to
+#       start if sudo is already gone. Check the egress filter and the action
+#       directory (from the working directory NativeLink set), claim it, take a
+#       free slot, hand the action's directories to the slot user, then exec
+#       unshare (new pid/mount/ipc[/net] namespaces; net with NETNS=1, or when
+#       the action asked for RBE_X_NETWORK=off).
+#   launch --ns <op> <slot> <rel> <timeout_s> <side_channel|-> <lock_fd> <host_net|-> <n> <env...> <argv...>
+#       inner: pid 1 of those namespaces. host_net (the outer's
+#       /proc/self/ns/net link): pid 1 checks it is in another network
+#       namespace and brings up its loopback; -: the host's (filtered)
+#       network. Hides the worker's state, gives the
+#       action private /tmp, /var/tmp, HOME, /dev/shm (and TMPFS_DIRS), with
+#       ROOT_RO=1 makes everything else read-only, with MASK_SOCKETS=1
+#       world-writable sockets on /run unreachable, runs it as the slot user
+#       without privileges, enforces its timeout, kills
+#       whatever it leaves behind, and gives every file back to the worker user
+#       for upload and cleanup.
+#
+# The action controls its environment, argv and working directory: they are
+# data here. Nothing from them is evaluated, used as a path for a privileged
+# operation, or trusted as configuration. Exit 125: the launcher failed.
+set -euo pipefail
+umask 022
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+CONF=/etc/rbe-west/rbe-action.env
+SELF=/usr/local/libexec/rbe-action/launch
+EXEC=/usr/local/libexec/rbe-action/exec
+RUN=/run/rbe-action
+
+die() { echo "rbe-action: $*" >&2; exit 125; }
+
+[[ $(id -u) == 0 ]] || die "must run as root (through sudo)"
+
+# sudo forks the launcher and waits for it; NativeLink kills sudo (SIGKILL) on
+# cancel and at the backstop. Before anything else, make the launcher die with
+# sudo, then check sudo did not die first (pdeathsig is not retroactive): no
+# cancelled action is ever set up and run by an orphaned launcher.
+first() {
+	local pp=$PPID comm
+	comm=$(cat "/proc/$pp/comm" 2>/dev/null) || comm=
+	[[ $comm == sudo ]] || die "must be started by sudo (parent $pp: ${comm:-gone})"
+	exec setpriv --pdeathsig KILL -- "$SELF" --parent "$pp" "$@"
+}
+case ${1:-} in --ns | --parent) ;; *) first "$@" ;; esac
+
+[[ -f $CONF && ! -L $CONF && $(stat -c '%u %a' "$CONF") =~ ^0\ [0-7][0145][0145]$ ]] ||
+	die "$CONF must be a root-owned file, not group/world-writable"
+# shellcheck source=/dev/null
+. "$CONF"
+: "${WORK_ROOT:?}" "${MASK_ROOT:?}" "${WORKER_UID:?}" "${WORKER_GID:?}" "${SLOT_UID0:?}" "${SLOT_COUNT:?}"
+: "${MAX_TIMEOUT_S:?}" "${BACKSTOP_S:?}" "${HOME_DIR:?}"
+NETNS=${NETNS:-0} SHM_SIZE=${SHM_SIZE:-8g} TMPFS_DIRS=${TMPFS_DIRS:-/run/lock /var/crash} ROOT_RO=${ROOT_RO:-0}
+MASK_SOCKETS=${MASK_SOCKETS:-0}
+[[ $NETNS == [01] ]] || die "NETNS must be 0 or 1"
+[[ $ROOT_RO == [01] ]] || die "ROOT_RO must be 0 or 1"
+[[ $MASK_SOCKETS == [01] ]] || die "MASK_SOCKETS must be 0 or 1"
+# RO_DIRS (a list of read-only directories) is gone: ROOT_RO=1 covers them all.
+[[ -z ${RO_DIRS:-} ]] || die "RO_DIRS is no longer supported: set ROOT_RO=1"
+EGRESS_CHAIN=${EGRESS_CHAIN:-inet filter rbe_action_out}
+
+# action_netns <RBE_X_NETWORK>: 1 if the action gets its own network
+# namespace with loopback only, 0 if it keeps this worker's network (behind
+# the slot egress filter). The value is the action's `network` platform
+# property (README "Per-action network"): off asks for loopback only; on, or
+# empty (NativeLink passes "" when the action has no such property), keeps
+# today's network. NETNS=1 (the fork tier, where it is the security
+# boundary) is loopback only whatever the action says, and its value is not
+# even read. Anything else fails: refused, never run on a guess.
+action_netns() {
+	if [[ $NETNS == 1 ]]; then echo 1 && return; fi
+	case $1 in
+	"" | on) echo 0 ;;
+	off) echo 1 ;;
+	*) return 1 ;;
+	esac
+}
+
+outer() {
+	[[ ${1:-} =~ ^[0-9]+$ && $1 == "$PPID" ]] || die "sudo (pid ${1:-?}) exited during setup"
+	shift
+	local n=${1:-}
+	if ! [[ $n =~ ^[0-9]{1,5}$ ]] || (($# < n + 2)); then
+		die "usage: launch <n> <env...> <argv...>"
+	fi
+	# The action directory comes from the working directory, canonical (no
+	# symlinks): WORK_ROOT/<op>/work[/<rel>].
+	local cwd tail op rest rel
+	cwd=$(pwd -P) || die "no working directory"
+	case $cwd in "$WORK_ROOT"/*) ;; *) die "working directory $cwd is outside $WORK_ROOT" ;; esac
+	tail=${cwd#"$WORK_ROOT"/} op=${tail%%/*} rest=${tail#*/}
+	[[ $op =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ ]] || die "bad action directory name"
+	# The slot egress filter (nftables) is not part of this process: a flushed
+	# or replaced ruleset would let actions reach the private network. With
+	# NETNS=1 the action has loopback only.
+	if [[ $NETNS != 1 ]]; then
+		local chain
+		read -r -a chain <<<"$EGRESS_CHAIN"
+		nft list chain "${chain[@]}" >/dev/null 2>&1 ||
+			die "the slot egress filter (nft chain $EGRESS_CHAIN) is not loaded: refusing to run actions"
+	fi
+	case /$rest in /work) rel= ;; /work/*) rel=${rest#work/} ;; *) die "working directory $cwd is not under $WORK_ROOT/$op/work" ;; esac
+	local op_dir=$WORK_ROOT/$op
+	local work=$op_dir/work
+	if [[ ! -d $op_dir || -L $op_dir || ! -d $work || -L $work ]] ||
+		[[ $(stat -c %u "$op_dir" "$work") != "$WORKER_UID"$'\n'"$WORKER_UID" ]]; then
+		die "$work is not an unclaimed action directory of the worker"
+	fi
+	[[ -d $RUN/orphans ]] || install -d -m 0700 "$RUN" "$RUN/slots" "$RUN/claims" "$RUN/stash" "$RUN/orphans"
+	# One launch per action directory, ever: the claim (name and inode of this
+	# directory instance) is only removed by rbe-action-sweep once the
+	# directory is gone, so a second launch steered into it (a symlinked
+	# working directory) is refused even after the first one finished.
+	local claim
+	claim=$RUN/claims/$op.$(stat -c %i "$op_dir")
+	mkdir "$claim" 2>/dev/null || die "action directory $op was already launched"
+
+	# Control values from additional_environment. The action can override them
+	# (its Command environment wins), so they are validated, and stripped from
+	# the environment the action gets.
+	local i e secs="" sc=- ms="" net="" net_set=0 netns envs=() argv
+	for ((i = 2; i <= n + 1; i++)); do
+		e=${!i}
+		case $e in
+		RBE_X_TIMEOUT_MS=*) ms=${e#*=} ;;
+		RBE_X_SIDE_CHANNEL=*) sc=${e#*=} ;;
+		RBE_X_NETWORK=*)
+			((!net_set)) || die "RBE_X_NETWORK given twice"
+			net=${e#*=} net_set=1
+			;;
+		*) envs+=("$e") ;;
+		esac
+	done
+	argv=("${@:n+2}")
+	# RBE_X_NETWORK: the action's own choice either way (its property, or its
+	# environment over it). It can only take network away: off is loopback
+	# only, on is this worker's default, and with NETNS=1 nothing it says
+	# gives it a network.
+	netns=$(action_netns "$net") || die "bad RBE_X_NETWORK (off, on or empty)"
+	# NativeLink passes the action's timeout, or its own max_action_timeout
+	# (BACKSTOP_S, where it kills the launcher) when the action has none. So
+	# exactly BACKSTOP_S * 1000 ms means "none" (MAX_TIMEOUT_S), also when an
+	# action asked for exactly BACKSTOP_S s; any other request over
+	# MAX_TIMEOUT_S is refused.
+	if [[ -n $ms ]]; then
+		[[ $ms =~ ^[0-9]{1,12}$ ]] || die "bad RBE_X_TIMEOUT_MS"
+		ms=$((10#$ms))
+		if ((ms != 0 && ms != BACKSTOP_S * 1000)); then secs=$(((ms + 999) / 1000)); fi
+	fi
+	[[ -n $secs ]] || secs=$MAX_TIMEOUT_S
+	((secs <= MAX_TIMEOUT_S)) ||
+		die "action timeout ${secs}s is greater than the maximum allowed timeout of ${MAX_TIMEOUT_S}s"
+	if [[ $sc != - ]] && ! [[ ${sc%/*} == "$op_dir" && ${sc##*/} =~ ^[0-9a-f]{32}$ && ! -e $sc && ! -L $sc ]]; then
+		sc=-
+	fi
+
+	# A free slot: an exclusive lock held (inherited) until pid 1 of the
+	# action's namespaces exits.
+	local lk="" slot uid
+	for ((slot = 0; slot < SLOT_COUNT; slot++)); do
+		exec {lk}>"$RUN/slots/$slot"
+		if flock -n "$lk"; then break; fi
+		exec {lk}>&-
+		lk=""
+	done
+	[[ -n $lk ]] || die "no free slot (SLOT_COUNT=$SLOT_COUNT)"
+	uid=$((SLOT_UID0 + slot))
+	# A slot's previous action normally ends with pid 1 killing and reaping
+	# everything, then removing <slot>.busy. A leftover marker means it was
+	# killed instead (NativeLink cancel/backstop): make sure none of its
+	# processes survive into this action before handing the slot on, and leave
+	# its directory (slot-owned: NativeLink could not remove it) to
+	# rbe-action-sweep through orphans/<op>.
+	local busy=$RUN/slots/$slot.busy old
+	if [[ -e $busy ]]; then
+		pkill -KILL -U "$uid" 2>/dev/null || true
+		for i in 1 2 3 4 5 6 7 8 9 10; do
+			pgrep -U "$uid" >/dev/null || break
+			sleep 0.1
+		done
+		if pgrep -U "$uid" >/dev/null; then die "slot $slot (uid $uid) still has processes"; fi
+		old=$(head -c 200 "$busy")
+		if [[ $old =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ ]]; then
+			mv -f "$busy" "$RUN/orphans/$old"
+		else
+			rm -f "$busy"
+		fi
+	fi
+	printf '%s' "$op" >"$RUN/slots/$slot.busy"
+
+	# Private, per-action /tmp, /var/tmp and HOME next to the exec root, under a
+	# root-only parent like systemd's PrivateTmp (NativeLink deletes the whole
+	# action directory), then every directory of the exec root to the slot
+	# user. Files stay the worker's: inputs are hardlinks of the worker's CAS
+	# blobs (0444/0555) and must stay immutable for the action.
+	mkdir -m 0700 "$op_dir/rbe"
+	mkdir -m 1777 "$op_dir/rbe/tmp" "$op_dir/rbe/vartmp"
+	mkdir -m 0700 "$op_dir/rbe/home"
+	# (Long on a big tree: dies with the launcher, without the slot's lock.)
+	setpriv --pdeathsig KILL -- find "$work" "$op_dir/rbe/home" -xdev -type d -exec chown -h "$uid:$uid" {} + {lk}>&-
+	chmod 0700 "$work"
+
+	local ns=(--pid --fork --kill-child=KILL --mount --mount-proc --ipc) host_net=-
+	if [[ $netns == 1 ]]; then
+		ns+=(--net)
+		host_net=$(readlink /proc/self/ns/net)
+	fi
+	# pdeathsig: if NativeLink kills sudo (cancel, backstop timeout), unshare
+	# dies, and --kill-child takes pid 1 and with it the whole pid namespace.
+	exec setpriv --pdeathsig KILL -- unshare "${ns[@]}" -- \
+		"$SELF" --ns "$op" "$slot" "$rel" "$secs" "$sc" "$lk" "$host_net" "${#envs[@]}" "${envs[@]}" "${argv[@]}"
+}
+
+# Everything back to the worker user, readable and removable, for upload and
+# cleanup. Runs once no process of the action is left, so nothing races it.
+fixup() {
+	find "$op_dir/work" "$op_dir/rbe" -xdev \
+		\( -user "$uid" -exec chown -h "$WORKER_UID:$WORKER_GID" {} + \) , \
+		\( -type d ! -perm -u=rwx -exec chmod u+rwx {} + \) , \
+		\( -type f ! -perm -u=r -exec chmod u+r {} + \)
+	chown -h "$WORKER_UID:$WORKER_GID" "$op_dir/rbe" "$op_dir/rbe/tmp" "$op_dir/rbe/vartmp"
+	chmod 0755 "$op_dir/work"
+	rm -f "$RUN/slots/$slot.busy"
+}
+
+inner() {
+	local op=$1 slot=$2 rel=$3 secs=$4 sc=$5 lk=$6 host_net=$7
+	shift 7
+	uid=$((SLOT_UID0 + slot)) op_dir=$WORK_ROOT/$op
+	local stash=$RUN/stash/$slot
+	trap 'fixup; exit 125' ERR
+	# Loopback only: in a network namespace that is not the host's (never
+	# the host's network by mistake, NETNS=1 above all), with lo up.
+	if [[ $host_net == - ]]; then
+		[[ $NETNS != 1 ]] || { echo "rbe-action: NETNS=1 but no network namespace" >&2; false; }
+	else
+		[[ $host_net =~ ^net:\[[0-9]+\]$ && $(readlink /proc/self/ns/net) != "$host_net" ]] ||
+			{ echo "rbe-action: not in a network namespace of its own" >&2; false; }
+		ip link set lo up
+	fi
+	# Only this action's directory stays visible under MASK_ROOT (the worker's
+	# CAS, its temp files and every other action are hidden).
+	[[ -d $stash ]] || mkdir -m 0700 "$stash"
+	mount --bind "$op_dir" "$stash"
+	mount -t tmpfs -o mode=0755,size=1m,nosuid,nodev rbe-mask "$MASK_ROOT"
+	mkdir -p "$op_dir"
+	mount --bind "$stash" "$op_dir"
+	umount "$stash"
+	mount --bind "$op_dir/rbe/tmp" /tmp
+	mount --bind "$op_dir/rbe/vartmp" /var/tmp
+	mount --bind "$op_dir/rbe/home" "$HOME_DIR"
+	mount -t tmpfs -o "mode=1777,size=$SHM_SIZE,nosuid,nodev" rbe-shm /dev/shm
+	local d
+	for d in $TMPFS_DIRS; do
+		if [[ -d $d ]]; then mount -t tmpfs -o mode=1777,size=16m,nosuid,nodev rbe-tmpfs "$d"; fi
+	done
+	mount -t mqueue -o nosuid,nodev,noexec rbe-mqueue /dev/mqueue
+	# ROOT_RO=1: the action can write only the mounts above. / and every
+	# other mount it can reach (/run, a data disk, ...) are read-only in here,
+	# whatever an image leaves world-writable (a shared tool cache), so no
+	# action leaves files for a later one; the host keeps them as they are
+	# (bind remounts change this namespace's mounts only). /proc, /sys and
+	# /dev keep theirs (device nodes; their writable files are per process or
+	# root's). RUN gets its own mount first: pid 1 still writes there.
+	local m o ex
+	local -A own=() opts=()
+	if [[ $ROOT_RO == 1 ]]; then mount --bind "$RUN" "$RUN"; fi
+	if [[ $ROOT_RO == 1 || $MASK_SOCKETS == 1 ]]; then
+		for d in "$op_dir" /tmp /var/tmp "$HOME_DIR" "$RUN" $TMPFS_DIRS; do own[$d]=1; done
+		# Mount points are octal-escaped (\040 for a space); the last line for
+		# a path is its top mount.
+		while read -r _ _ _ _ m o _; do
+			printf -v m '%b' "${m//\\/\\0}"
+			opts[$m]=$o
+		done </proc/self/mountinfo
+	fi
+	if [[ $ROOT_RO == 1 ]]; then
+		for m in "${!opts[@]}"; do
+			case $m in / | /proc | /proc/* | /sys | /sys/* | /dev | /dev/*) continue ;; esac
+			# Hidden under a mount above (the mask, /tmp, ...): not reachable.
+			if [[ -n ${own[$m]:-} ]] || ! mountpoint -q -- "$m"; then continue; fi
+			# Already read-only (snap squashfs, ...): nothing to write; a remount
+			# of some of them fails (EROFS) and would abort the action.
+			if [[ ,${opts[$m]}, == *,ro,* ]]; then continue; fi
+			ex=
+			if [[ ,${opts[$m]}, == *,noexec,* ]]; then ex=,noexec; fi
+			mount -o "remount,bind,ro,nosuid,nodev$ex" -- "$m"
+		done
+		# nodev on / only with /dev on its own mount (device nodes there).
+		ex=
+		if mountpoint -q /dev; then ex=,nodev; fi
+		if [[ ,${opts[/]}, == *,noexec,* ]]; then ex+=,noexec; fi
+		mount -o "remount,bind,ro,nosuid$ex" /
+	fi
+	# MASK_SOCKETS=1: connect() works on a read-only mount, so a world-writable
+	# socket on /run (a VM shutdown socket, snapd, uuidd, acpid, systemd's
+	# varlink services) would still let any action use it. Each one but
+	# journald's (logging) gets /dev/null bound over it in this namespace
+	# only: connect() is refused, the host's socket stays as it is. The
+	# system bus too: unix sockets ignore network namespaces, and
+	# systemd-resolved answers anyone on it (org.freedesktop.resolve1 resolves
+	# any record, a DNS tunnel out of a loopback-only action); nothing an
+	# action runs needs it. One find walks /run and every mount on it but
+	# the action's own, each with -xdev (a socket bind-mounted over a file is
+	# found as a start point only), names NUL-delimited; a hidden mount's path
+	# is gone or is what the action reaches. 2-3 ms per socket (mount).
+	if [[ $MASK_SOCKETS == 1 ]]; then
+		local s walk=(/run)
+		local -A socks=()
+		for m in "${!opts[@]}"; do
+			case $m in /run/*) if [[ -z ${own[$m]:-} ]]; then walk+=("$m"); fi ;; esac
+		done
+		while IFS= read -r -d '' s; do
+			case $s in /run/systemd/journal/*) ;; *) socks[$s]=1 ;; esac
+		done < <(find "${walk[@]}" -xdev -type s -perm -o+w -print0 2>/dev/null)
+		# A socket gone meanwhile needs no mask; any other failure stops here.
+		for s in "${!socks[@]}"; do
+			mount --bind /dev/null "$s" 2>/dev/null || [[ ! -S $s ]] || mount --bind /dev/null "$s"
+		done
+	fi
+	cd "$op_dir/work${rel:+/$rel}"
+
+	(
+		exec {lk}>&-
+		exec setpriv --reuid="$uid" --regid="$uid" --clear-groups \
+			--inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+			-- "$EXEC" "$@"
+	) &
+	trap - ERR
+	local ap=$! timer status=0 fin="" timed_out=0
+	sleep "$secs" &
+	timer=$!
+	wait -n -p fin "$ap" "$timer" || status=$?
+	if [[ $fin == "$timer" ]]; then
+		timed_out=1 status=124
+	fi
+	# Nothing the action started may outlive it (pid 1 is never signalled):
+	# kill and reap until pid 1 is alone in the namespace (a process forked
+	# during kill(-1) can miss it). Files are handed back only then. A process
+	# that will not die (D state) leaves the slot busy for rbe-action-sweep.
+	local p alone=0
+	for ((i = 0; i < 200; i++)); do
+		kill -KILL -1 2>/dev/null || true
+		while wait -n 2>/dev/null; do :; done
+		wait 2>/dev/null || true
+		alone=1
+		for p in /proc/[0-9]*; do
+			if [[ ${p#/proc/} != 1 ]]; then alone=0 && break; fi
+		done
+		((alone)) && break
+		sleep 0.05
+	done
+	((alone)) || { echo "rbe-action: processes of the action survive SIGKILL; slot $slot left to rbe-action-sweep" >&2; exit 125; }
+
+	fixup
+	if ((timed_out)); then
+		echo "rbe-action: timed out after ${secs}s" >&2
+		if [[ $sc != - ]] && (set -o noclobber && printf '{"failure":"timeout"}\n' >"$sc") 2>/dev/null; then
+			chown "$WORKER_UID:$WORKER_GID" "$sc"
+		fi
+	fi
+	exit "$status"
+}
+
+if [[ $1 == --ns ]]; then
+	shift
+	inner "$@"
+else
+	shift
+	outer "$@"
+fi

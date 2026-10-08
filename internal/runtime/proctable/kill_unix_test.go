@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 func TestKillByPIDRefusesLowPIDs(t *testing.T) {
@@ -175,13 +177,51 @@ func TestKillLivenessFuncsAreIdentityBound(t *testing.T) {
 		t.Error("runLive(self) = false; the probe must recognize its own target")
 	}
 
-	// PID 1 is always live and is never us, so it stands in for a recycled PID
-	// now owned by an unrelated process.
-	const recycled = 1
+	// A live child with a start time distinct from ours stands in for a
+	// recycled PID now owned by an unrelated process.
+	recycled := startDistinctLiveProcess(t, self)
 	if termLive(recycled) {
 		t.Error("termLive reported a DIFFERENT live pid as our target: a recycled PID would receive a process-group SIGKILL")
 	}
 	if runLive(recycled) {
 		t.Error("runLive reported a DIFFERENT live pid as our target")
+	}
+}
+
+// startDistinctLiveProcess starts a long-lived child whose start-time identity
+// differs from pid's, and returns the child's PID. Start times have clock-tick
+// resolution on Linux (10ms) and one-second resolution through ps on darwin, so
+// processes started close together share one. That is why PID 1 cannot stand
+// in for "a different process": inside a fresh PID namespace (Bazel's
+// linux-sandbox) init starts moments before the test binary and intermittently
+// lands in the same tick, so the identity probe rightly answers "same
+// process". A child that collides is discarded and another started.
+func startDistinctLiveProcess(t *testing.T, pid int) int {
+	t.Helper()
+	own, err := pidutil.StartTime(pid)
+	if err != nil || own == "" {
+		t.Fatalf("start time of pid %d: %q, %v", pid, own, err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		cmd := exec.Command("sleep", "60")
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start stand-in process: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		})
+		started, err := pidutil.StartTime(cmd.Process.Pid)
+		if err != nil || started == "" {
+			t.Fatalf("start time of stand-in pid %d: %q, %v", cmd.Process.Pid, started, err)
+		}
+		if started != own {
+			return cmd.Process.Pid
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("every stand-in process shared pid %d's start time %q", pid, own)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

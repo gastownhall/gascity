@@ -293,9 +293,10 @@ type orderSetSnapshot struct {
 //
 // inflightN + inflightDone together track dispatchOne goroutines so
 // drain can select on either completion or ctx.Done without spawning an
-// orphaned waiter goroutine. dispatch is only ever called from the tick
-// goroutine, so addInflight's check-and-create happens-before any
-// concurrent drain call on the same instance.
+// orphaned waiter goroutine. dispatch is only ever called under the
+// orders lane's passMu (orders_lane.go), and every drain of a lane-owned
+// instance runs under that lock too, so addInflight's check-and-create
+// happens-before any drain call on the same instance.
 //
 // dispatchCtx is the parent context for every dispatchOne goroutine. The
 // per-goroutine ctx is derived to cancel when EITHER the caller's tick
@@ -1114,7 +1115,7 @@ func (m *memoryOrderDispatcher) cancel() {
 }
 
 // addInflight increments the in-flight count and lazily creates the done
-// signal. Called synchronously from dispatch on the tick goroutine.
+// signal. Called synchronously from dispatch, under the orders lane's passMu.
 func (m *memoryOrderDispatcher) addInflight() {
 	m.inflightMu.Lock()
 	m.inflightN++
@@ -3881,9 +3882,11 @@ func openSubtreeOlderThan(subtree []beads.Bead, cutoff time.Time) bool {
 // bounded retries. On startup the bead store's backing server may not be
 // query-ready yet (dolt cold-start race, #753). Errors are retried; the
 // total count of beads closed across attempts is returned. Retrying on
-// partial closes is safe because beads.Store.CloseAll skips already-closed
-// beads (see internal/beads/beads.go). The wrapper sleeps for up to
-// attempts*backoff in the worst case.
+// partial closes is safe because every attempt lists the open tracking beads
+// again, so the next attempt closes only what is still open (whether CloseAll
+// would stamp an already-closed bead is store-specific; see
+// internal/beads/beads.go). The wrapper sleeps for up to attempts*backoff in
+// the worst case.
 func sweepOrphanedOrderTrackingRetry(store beads.Store, attempts int, backoff time.Duration) (int, error) { //nolint:unparam // attempts is configurable for testability
 	return sweepOrphanedOrderTrackingRetryLimit(store, attempts, backoff, 0)
 }

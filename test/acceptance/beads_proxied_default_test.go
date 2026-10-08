@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
@@ -125,7 +126,7 @@ func requireProxiedTooling(t *testing.T) (string, string) {
 	if bdPath == "" {
 		helpers.MissingTooling(t, "bd is not available; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0")
 	}
-	out, err := exec.Command(bdPath, "init", "--help").CombinedOutput() //nolint:gosec // resolved test binary
+	out, err := helpers.ToolCommand(t, bdPath, "init", "--help").CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "--proxied-server") {
 		helpers.MissingTooling(t, "bd at %s has no proxied-server support; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0", bdPath)
 	}
@@ -150,22 +151,24 @@ func requireProxiedTooling(t *testing.T) (string, string) {
 // proxiedNativeLaneEnv.
 func proxiedEnv(t *testing.T, bdPath, doltPath string) *helpers.Env {
 	t.Helper()
+	env, _ := proxiedEnvWithBD(t, bdPath, doltPath)
+	return env
+}
+
+// proxiedEnvWithBD is proxiedEnv plus the bd it put on PATH: the tool-home
+// wrapper around bdPath (helpers.LinkBeadsTooling), which is the bd anything
+// standing in for BD_BIN must exec so the operator's HOME never reaches bd.
+func proxiedEnvWithBD(t *testing.T, bdPath, doltPath string) (*helpers.Env, string) {
+	t.Helper()
 	linkDir := filepath.Join(helpers.TempDir(t), "bin")
-	if err := os.MkdirAll(linkDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for name, target := range map[string]string{"bd": bdPath, "dolt": doltPath} {
-		if err := os.Symlink(target, filepath.Join(linkDir, name)); err != nil {
-			t.Fatal(err)
-		}
-	}
+	wrappedBD := helpers.LinkBeadsTooling(t, testEnv, linkDir, bdPath, doltPath)
 	env := testEnv.Clone()
 	entries := filepath.SplitList(env.Get("PATH"))
 	path := append([]string{entries[0], linkDir}, entries[1:]...)
 	return env.With("PATH", strings.Join(path, string(os.PathListSeparator))).
 		With("GC_BEADS", "bd").
 		Without("GC_DOLT").
-		Without(proxiedNativeFlagEnv)
+		Without(proxiedNativeFlagEnv), wrappedBD
 }
 
 // proxiedNativeFlagEnv is PR2's rollout flag: native reads over bd's proxy,
@@ -195,8 +198,9 @@ func proxiedNativeLaneEnv(env *helpers.Env) *helpers.Env {
 // added.
 func proxiedEnvRecordingBD(t *testing.T, bdPath, doltPath string) (*helpers.Env, *helpers.RecordingBD) {
 	t.Helper()
-	recorder := helpers.NewRecordingBD(t, bdPath)
-	return proxiedEnv(t, bdPath, doltPath).With("BD_BIN", recorder.Path), recorder
+	env, wrappedBD := proxiedEnvWithBD(t, bdPath, doltPath)
+	recorder := helpers.NewRecordingBD(t, wrappedBD)
+	return env.With("BD_BIN", recorder.Path), recorder
 }
 
 // doltProcessesUnder returns the command lines of every live bd proxy or dolt
@@ -218,6 +222,20 @@ func doltProcessesUnder(t *testing.T, root string) []string {
 		}
 	}
 	return found
+}
+
+// stopIfPairsRemain runs a best-effort gc stop of cityRoot when a bd proxy or
+// Dolt server still runs under any of roots. A test's last cleanup calls it to
+// retire a pair the city's own cleanups left behind; a city they stopped
+// cleanly costs no further gc invocation.
+func stopIfPairsRemain(t *testing.T, env *helpers.Env, cityRoot string, roots ...string) {
+	t.Helper()
+	for _, root := range append([]string{cityRoot}, roots...) {
+		if len(doltProcessesUnder(t, root)) > 0 {
+			helpers.RunGC(env, cityRoot, "stop", cityRoot) //nolint:errcheck // best effort
+			return
+		}
+	}
 }
 
 func waitForNoDoltProcesses(t *testing.T, root string, timeout time.Duration) []string {
@@ -596,7 +614,7 @@ func makeCityLookLegacyManaged(t *testing.T, env *helpers.Env, bdPath, cityRoot 
 
 	stop := exec.Command(bdPath, "dolt", "stop") //nolint:gosec // resolved test binary
 	stop.Dir = cityRoot
-	stop.Env = env.List()
+	stop.Env = env.ToolList()
 	if out, err := stop.CombinedOutput(); err != nil {
 		t.Fatalf("bd dolt stop on the fixture city: %v\n%s", err, out)
 	}
@@ -621,10 +639,11 @@ func makeCityLookLegacyManaged(t *testing.T, env *helpers.Env, bdPath, cityRoot 
 		t.Fatal(err)
 	}
 	// No issue_prefix: `bd init` leaves it commented out in its template (the
-	// same fact the adopt subtest hand-writes around), and gc's own
-	// canonicalisation supplies it on the next lifecycle command. What the
-	// fixture has to state is the part gc reads as "this city's Dolt is mine":
-	// the managed-city endpoint origin and direct server mode.
+	// same fact TestBeadsProxiedDefaultRig/adopt-un-journaled hand-writes
+	// around), and gc's own canonicalisation supplies it on the next lifecycle
+	// command. What the fixture has to state is the part gc reads as "this
+	// city's Dolt is mine": the managed-city endpoint origin and direct server
+	// mode.
 	legacyConfig := "gc.endpoint_origin: managed_city\n" +
 		"gc.endpoint_status: verified\n" +
 		"dolt.mode: server\n" +
@@ -635,7 +654,33 @@ func makeCityLookLegacyManaged(t *testing.T, env *helpers.Env, bdPath, cityRoot 
 	}
 }
 
-func assertProxiedScope(t *testing.T, scopeRoot, label string) {
+// expectedSidecarIdleTimeout is the sidecar idle_timeout gc's init writes in
+// env: the GC_BEADS_PROXIED_IDLE_TIMEOUT override when set (-1 for never),
+// otherwise the default.
+func expectedSidecarIdleTimeout(t *testing.T, env *helpers.Env) int {
+	t.Helper()
+	raw := env.Get(config.ProxiedIdleTimeoutEnv)
+	if raw == "" {
+		return helpers.DefaultSidecarIdleTimeout()
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		t.Fatalf("%s=%q: %v", config.ProxiedIdleTimeoutEnv, raw, err)
+	}
+	if d <= 0 {
+		return -1
+	}
+	return int(d)
+}
+
+// proxiedNeverIdleEnv pins every scope a city initializes in env to bd's
+// never-idle. The proxied-native lane admits a long-lived open only on a
+// never-idle proxy, so the lane's tests need one regardless of gc's default.
+func proxiedNeverIdleEnv(env *helpers.Env) *helpers.Env {
+	return env.With(config.ProxiedIdleTimeoutEnv, "0")
+}
+
+func assertProxiedScope(t *testing.T, env *helpers.Env, scopeRoot, label string) {
 	t.Helper()
 	var metadata proxiedBeadsMetadata
 	readJSONFile(t, filepath.Join(scopeRoot, ".beads", "metadata.json"), &metadata)
@@ -648,8 +693,8 @@ func assertProxiedScope(t *testing.T, scopeRoot, label string) {
 
 	var sidecar proxiedSidecar
 	readJSONFile(t, filepath.Join(scopeRoot, ".beads", "proxied_server_client_info.json"), &sidecar)
-	if sidecar.IdleTimeout != -1 {
-		t.Errorf("%s idle_timeout = %d, want -1 (bd's IdleTimeoutNever)", label, sidecar.IdleTimeout)
+	if want := expectedSidecarIdleTimeout(t, env); sidecar.IdleTimeout != want {
+		t.Errorf("%s idle_timeout = %d, want %d (the idle timeout gc resolves for this environment)", label, sidecar.IdleTimeout, want)
 	}
 
 	root := filepath.Join(scopeRoot, ".beads", "dolt")
@@ -676,69 +721,208 @@ func assertProxiedScope(t *testing.T, scopeRoot, label string) {
 	}
 }
 
-func TestBeadsProxiedDefault(t *testing.T) {
+// The proxied-local default is proved by the TestBeadsProxiedDefault* family
+// below. They used to be one test whose phases ran in sequence on one city,
+// and Go (and so Bazel) shards per top-level test, which made that one test
+// the floor of the sharded acceptance lane. Each test now builds its own city
+// through newProxiedDefaultCity and carries the phases that genuinely depend
+// on each other; phases that only shared a city by accident are their own
+// tests.
+
+// proxiedDefaultCity is one test's proxied-local city: the bd and dolt it runs
+// over, the environment with every bd fork counted, and the rig workspaces it
+// may register.
+type proxiedDefaultCity struct {
+	bdPath   string
+	env      *helpers.Env
+	bdCalls  *helpers.RecordingBD
+	city     *helpers.City
+	cityRoot string
+	rigs     map[string]string
+}
+
+// newProxiedDefaultCity sets up a city directory (not yet initialised) in a
+// proxied environment, plus a git workspace for each of rigNames.
+//
+// The rig workspaces are created here, before the city's cleanup is
+// registered: a rig the city still has registered has to outlive the city's
+// stop, or that stop cannot even reach the scope. Whatever the test does,
+// nothing bd started for the city or its rigs may outlive it; the check is
+// registered before any init so it runs even if init leaves a half-built
+// scope behind.
+//
+// The city harness's own cleanups (helpers.City.Init, StartWithSupervisor)
+// already stop a city that came up, so this cleanup only stops the city
+// itself when a process is still alive under one of its roots.
+func newProxiedDefaultCity(t *testing.T, rigNames ...string) *proxiedDefaultCity {
+	t.Helper()
 	bdPath, doltPath := requireProxiedTooling(t)
 	env, bdCalls := proxiedEnvRecordingBD(t, bdPath, doltPath)
-
 	city := helpers.NewCity(t, env)
-	cityRoot := city.Dir
-	// Both rig workspaces are created here, in the parent: a subtest's
-	// temporary directory is removed when that subtest ends, and a rig the city
-	// still has registered has to outlive it or the next `gc start` cannot even
-	// reach the scope.
-	rigDir := createGitRig(t)
-	// createGitRig always names its workspace "testrig", and a city cannot hold
-	// two rigs under one name, so the adopted workspace gets its own.
-	adoptedDir := filepath.Join(filepath.Dir(createGitRig(t)), "adopted-rig")
-	if err := os.Rename(filepath.Join(filepath.Dir(adoptedDir), "testrig"), adoptedDir); err != nil {
-		t.Fatal(err)
+	p := &proxiedDefaultCity{
+		bdPath:   bdPath,
+		env:      env,
+		bdCalls:  bdCalls,
+		city:     city,
+		cityRoot: city.Dir,
+		rigs:     map[string]string{},
 	}
-
-	// Whatever the subtests do, nothing bd started for this city may outlive
-	// the test. Registered before Init so it runs even if init itself leaves a
-	// half-built scope behind.
+	roots := []string{p.cityRoot}
+	for _, name := range rigNames {
+		dir := createNamedGitRig(t, name)
+		p.rigs[name] = dir
+		roots = append(roots, dir)
+	}
 	t.Cleanup(func() {
-		helpers.RunGC(env, cityRoot, "stop", cityRoot)         //nolint:errcheck
+		stopIfPairsRemain(t, env, p.cityRoot, roots...)
 		helpers.RunGC(env, "", "supervisor", "stop", "--wait") //nolint:errcheck
-		for _, root := range []string{cityRoot, rigDir, adoptedDir} {
+		for _, root := range roots {
 			if leaked := waitForNoDoltProcesses(t, root, 15*time.Second); len(leaked) > 0 {
 				t.Errorf("processes under %s outlived the test:\n%s", root, strings.Join(leaked, "\n"))
 			}
 		}
 	})
+	return p
+}
+
+// createNamedGitRig is createGitRig under a chosen directory name.
+// createGitRig always names its workspace "testrig", and a city cannot hold
+// two rigs under one name.
+func createNamedGitRig(t *testing.T, name string) string {
+	t.Helper()
+	dir := createGitRig(t)
+	if name == filepath.Base(dir) {
+		return dir
+	}
+	renamed := filepath.Join(filepath.Dir(dir), name)
+	if err := os.Rename(dir, renamed); err != nil {
+		t.Fatal(err)
+	}
+	return renamed
+}
+
+// initDefault runs a plain `gc init` (no transport selector) and asserts the
+// proxied-local default it must produce.
+func (p *proxiedDefaultCity) initDefault(t *testing.T) {
+	t.Helper()
+	p.city.Init("claude")
+
+	assertProxiedScope(t, p.env, p.cityRoot, "city")
+
+	var journal scopeOwnershipDoc
+	readJSONFile(t, filepath.Join(p.cityRoot, ".gc", "scope-ownership.json"), &journal)
+	entry, ok := journal.Scopes["city"]
+	if !ok {
+		t.Fatalf("ownership journal has no city scope: %+v", journal)
+	}
+	if entry.LifecycleOwner != "provider" || entry.State != "ready" {
+		t.Errorf("city ownership = %+v, want provider/ready", entry)
+	}
+	if entry.Intent.Transport != "" || entry.Intent.Target != "" {
+		t.Errorf("ready city ownership retains intent %+v", entry.Intent)
+	}
+
+	// bd owns the lifecycle, so gc's managed-Dolt runtime state must never
+	// be written: a dolt-state.json here would mean two owners.
+	if _, err := os.Stat(filepath.Join(p.cityRoot, ".gc", "runtime", "packs", "dolt", "dolt-state.json")); err == nil {
+		t.Error("gc wrote managed-Dolt runtime state for a bd-owned scope")
+	}
+}
+
+// createBead drives `gc bd create`, `list` and `show` through the front door
+// and returns the created bead's id.
+func (p *proxiedDefaultCity) createBead(t *testing.T) string {
+	t.Helper()
+	out, err := p.city.GCStdout("bd", "create", "e2e proxied default", "--json")
+	if err != nil {
+		t.Fatalf("gc bd create: %v\n%s", err, out)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	lastJSONLine(t, out, &created)
+	if strings.TrimSpace(created.ID) == "" {
+		t.Fatalf("gc bd create returned no id:\n%s", out)
+	}
+
+	list, err := p.city.GCStdout("bd", "list", "--json")
+	if err != nil {
+		t.Fatalf("gc bd list: %v\n%s", err, list)
+	}
+	if !strings.Contains(list, created.ID) {
+		t.Fatalf("gc bd list does not contain %s:\n%s", created.ID, list)
+	}
+	show, err := p.city.GCStdout("bd", "show", created.ID, "--json")
+	if err != nil {
+		t.Fatalf("gc bd show %s: %v\n%s", created.ID, err, show)
+	}
+	return created.ID
+}
+
+// addInheritingRig registers rigDir and asserts it got a proxied scope of its
+// own, journaled ready, that takes writes.
+func (p *proxiedDefaultCity) addInheritingRig(t *testing.T, rigDir string) {
+	t.Helper()
+	p.city.RigAdd(rigDir, "")
+	assertProxiedScope(t, p.env, rigDir, "rig")
+
+	var journal scopeOwnershipDoc
+	readJSONFile(t, filepath.Join(p.cityRoot, ".gc", "scope-ownership.json"), &journal)
+	key := "rig:" + filepath.Base(rigDir)
+	entry, ok := journal.Scopes[key]
+	if !ok {
+		t.Fatalf("ownership journal has no %s: %+v", key, journal.Scopes)
+	}
+	if entry.State != "ready" {
+		t.Errorf("%s state = %q, want ready", key, entry.State)
+	}
+
+	out, err := p.city.GCStdout("bd", "--rig", filepath.Base(rigDir), "create", "rig bead", "--json")
+	if err != nil {
+		t.Fatalf("gc bd --rig create: %v\n%s", err, out)
+	}
+}
+
+// stopQuiescent stops the city and asserts no proxy survives under the city
+// or rigDir.
+func (p *proxiedDefaultCity) stopQuiescent(t *testing.T, rigDir string) {
+	t.Helper()
+	// Retire the readers before the store. On v1.3.0's proxied path any bd
+	// read restarts the proxy (R2), so `bd dolt stop` has to be the last
+	// thing that touches the scope — the order the design specifies:
+	// agents, then the supervisor, then the provider's own processes.
+	if out, err := helpers.RunGC(p.env, "", "supervisor", "stop", "--wait"); err != nil {
+		t.Fatalf("gc supervisor stop --wait: %v\n%s", err, out)
+	}
+	out, err := helpers.RunGC(p.env, p.cityRoot, "stop", p.cityRoot)
+	if err != nil {
+		t.Fatalf("gc stop: %v\n%s", err, out)
+	}
+	if leaked := waitForNoDoltProcesses(t, p.cityRoot, 10*time.Second); len(leaked) > 0 {
+		t.Errorf("city proxy survived gc stop:\n%s", strings.Join(leaked, "\n"))
+	}
+	if leaked := waitForNoDoltProcesses(t, rigDir, 10*time.Second); len(leaked) > 0 {
+		t.Errorf("rig proxy survived gc stop:\n%s", strings.Join(leaked, "\n"))
+	}
+}
+
+// TestBeadsProxiedDefaultInit proves a fresh `gc init` produces a bd-owned
+// proxied city that doctor calls green, and that the fork counter the native
+// lane's gates rest on actually counts.
+func TestBeadsProxiedDefaultInit(t *testing.T) {
+	p := newProxiedDefaultCity(t)
 
 	t.Run("init-default", func(t *testing.T) {
-		city.Init("claude")
-
-		assertProxiedScope(t, cityRoot, "city")
-
-		var journal scopeOwnershipDoc
-		readJSONFile(t, filepath.Join(cityRoot, ".gc", "scope-ownership.json"), &journal)
-		entry, ok := journal.Scopes["city"]
-		if !ok {
-			t.Fatalf("ownership journal has no city scope: %+v", journal)
-		}
-		if entry.LifecycleOwner != "provider" || entry.State != "ready" {
-			t.Errorf("city ownership = %+v, want provider/ready", entry)
-		}
-		if entry.Intent.Transport != "" || entry.Intent.Target != "" {
-			t.Errorf("ready city ownership retains intent %+v", entry.Intent)
-		}
-
-		// bd owns the lifecycle, so gc's managed-Dolt runtime state must never
-		// be written: a dolt-state.json here would mean two owners.
-		if _, err := os.Stat(filepath.Join(cityRoot, ".gc", "runtime", "packs", "dolt", "dolt-state.json")); err == nil {
-			t.Error("gc wrote managed-Dolt runtime state for a bd-owned scope")
-		}
+		p.initDefault(t)
 	})
 
 	t.Run("doctor-green", func(t *testing.T) {
-		assertDoctorGreen(t, city, "a fresh proxied city")
-		assertDoctorReportsBdOwnedProxiedStore(t, city, "a fresh proxied city")
+		assertDoctorGreen(t, p.city, "a fresh proxied city")
+		assertDoctorReportsBdOwnedProxiedStore(t, p.city, "a fresh proxied city")
 	})
 
 	t.Run("bd-forks-are-counted", func(t *testing.T) {
-		// The instrument, proved on the city the rest of this test uses.
+		// The instrument, proved on this city.
 		//
 		// The fork counts the native-over-proxy work is measured against are
 		// only as good as the thing counting them, and the calls that matter
@@ -750,6 +934,7 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		// `gc init` is the step under the count here because it is the one that
 		// definitely pings: the provider-owned readiness op is what declares
 		// the scope ready, and nothing declares it ready without observing it.
+		bdCalls := p.bdCalls
 		if total := bdCalls.Count(); total == 0 {
 			t.Fatalf("no bd invocations recorded through BD_BIN; the shim is not the bd gc forks, so every count taken through it is zero by construction:\n%s", bdCalls.Describe())
 		}
@@ -764,205 +949,61 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		// attributable rather than cumulative. `gc doctor --json` on a healthy
 		// proxied city is the read-only shape PR2's budget is stated against.
 		bdCalls.Reset()
-		if out, err := city.GC("doctor", "--json"); err != nil {
+		if out, err := p.city.GC("doctor", "--json"); err != nil {
 			t.Fatalf("gc doctor --json: %v\n%s", err, out)
 		}
 		t.Logf("gc doctor --json on a 0-rig proxied city: %d bd fork(s), %d ping(s)\n%s",
 			bdCalls.Count(), bdCalls.Count("ping"), bdCalls.Describe())
 	})
+}
 
-	t.Run("native-lane", func(t *testing.T) {
-		runProxiedNativeLaneGates(t, bdPath, doltPath)
-	})
+// TestBeadsProxiedDefaultNativeLane is the PR2 native-lane gate on a city of
+// its own (runProxiedNativeLaneGates). It is also the test the nightly perf
+// lane selects, because it is the one that reads GC_ACCEPTANCE_PERF.
+func TestBeadsProxiedDefaultNativeLane(t *testing.T) {
+	bdPath, doltPath := requireProxiedTooling(t)
+	runProxiedNativeLaneGates(t, bdPath, doltPath)
+}
 
-	var createdBead string
+// TestBeadsProxiedDefaultRig proves the bd front door and a rig on a proxied
+// city: the rig inherits the proxied default, doctor stays green with it, and
+// an un-journaled bd workspace is adopted while a store-less clone is refused.
+func TestBeadsProxiedDefaultRig(t *testing.T) {
+	p := newProxiedDefaultCity(t, "testrig", "adopted-rig")
+	rigDir := p.rigs["testrig"]
+	p.initDefault(t)
+
 	t.Run("bd-front-door", func(t *testing.T) {
-		out, err := city.GCStdout("bd", "create", "e2e proxied default", "--json")
-		if err != nil {
-			t.Fatalf("gc bd create: %v\n%s", err, out)
-		}
-		var created struct {
-			ID string `json:"id"`
-		}
-		lastJSONLine(t, out, &created)
-		if strings.TrimSpace(created.ID) == "" {
-			t.Fatalf("gc bd create returned no id:\n%s", out)
-		}
-		createdBead = created.ID
-
-		list, err := city.GCStdout("bd", "list", "--json")
-		if err != nil {
-			t.Fatalf("gc bd list: %v\n%s", err, list)
-		}
-		if !strings.Contains(list, createdBead) {
-			t.Fatalf("gc bd list does not contain %s:\n%s", createdBead, list)
-		}
-		show, err := city.GCStdout("bd", "show", createdBead, "--json")
-		if err != nil {
-			t.Fatalf("gc bd show %s: %v\n%s", createdBead, err, show)
-		}
+		p.createBead(t)
 	})
 
 	t.Run("rig-inherits", func(t *testing.T) {
-		city.RigAdd(rigDir, "")
-		assertProxiedScope(t, rigDir, "rig")
-
-		var journal scopeOwnershipDoc
-		readJSONFile(t, filepath.Join(cityRoot, ".gc", "scope-ownership.json"), &journal)
-		key := "rig:" + filepath.Base(rigDir)
-		entry, ok := journal.Scopes[key]
-		if !ok {
-			t.Fatalf("ownership journal has no %s: %+v", key, journal.Scopes)
-		}
-		if entry.State != "ready" {
-			t.Errorf("%s state = %q, want ready", key, entry.State)
-		}
-
-		out, err := city.GCStdout("bd", "--rig", filepath.Base(rigDir), "create", "rig bead", "--json")
-		if err != nil {
-			t.Fatalf("gc bd --rig create: %v\n%s", err, out)
-		}
+		p.addInheritingRig(t, rigDir)
 	})
 
 	t.Run("doctor-green-with-rig", func(t *testing.T) {
-		// The zero-rig run above is the easy case. A rig adds its own proxied
-		// scope, its own per-rig checks, and — before this was measured — a
-		// per-bd-command readiness fan-out that multiplied every store read by
-		// the number of provider-owned scopes until three checks died on their
-		// timeouts. The one-rig topology is the default one an operator has.
-		assertDoctorGreen(t, city, "a proxied city with a rig")
+		// The zero-rig run in TestBeadsProxiedDefaultInit is the easy case. A
+		// rig adds its own proxied scope, its own per-rig checks, and — before
+		// this was measured — a per-bd-command readiness fan-out that
+		// multiplied every store read by the number of provider-owned scopes
+		// until three checks died on their timeouts. The one-rig topology is
+		// the default one an operator has.
+		assertDoctorGreen(t, p.city, "a proxied city with a rig")
 		// Green is not the same as covered. The city and its rig are both
 		// bd-owned proxied scopes with no backup anywhere, and this is the only
 		// doctor line that says so.
-		assertProxiedBackupAdvisory(t, city, "a proxied city with a rig", true, "city", filepath.Base(rigDir))
-	})
-
-	t.Run("start-default-pack", func(t *testing.T) {
-		city.StartWithSupervisor()
-
-		status, err := city.GC("status")
-		if err != nil {
-			t.Fatalf("gc status: %v\n%s", err, status)
-		}
-
-		// The bd pack imports the dolt pack, whose orders fire on every city.
-		// mol-dog-stale-db's front door is `gc dolt-cleanup --json --probe`;
-		// on a bd-owned scope it has to be a typed no-op rather than a probe of
-		// a managed server that does not exist. Driving the front door directly
-		// is the same proof as waiting for the cron tick, without the wait.
-		cleanup, err := city.GCStdout("dolt-cleanup", "--json", "--probe")
-		if err != nil {
-			t.Fatalf("gc dolt-cleanup --json --probe: %v\n%s", err, cleanup)
-		}
-		var report struct {
-			Skipped *struct {
-				Reason string `json:"reason"`
-			} `json:"skipped"`
-		}
-		lastJSONLine(t, cleanup, &report)
-		if report.Skipped == nil || report.Skipped.Reason != "bd-owned-proxied-scope" {
-			t.Fatalf("dolt cleanup did not report the bd-owned no-op:\n%s", cleanup)
-		}
-		// What must never appear is gc's managed-Dolt runtime state: writing it
-		// would mean a second owner for bd's process.
-		if _, err := os.Stat(filepath.Join(cityRoot, ".gc", "runtime", "packs", "dolt", "dolt-state.json")); err == nil {
-			t.Error("a dolt order wrote managed-Dolt state on a bd-owned scope")
-		}
-	})
-
-	t.Run("stop-quiescent", func(t *testing.T) {
-		// Retire the readers before the store. On v1.3.0's proxied path any bd
-		// read restarts the proxy (R2), so `bd dolt stop` has to be the last
-		// thing that touches the scope — the order the design specifies:
-		// agents, then the supervisor, then the provider's own processes.
-		if out, err := helpers.RunGC(env, "", "supervisor", "stop", "--wait"); err != nil {
-			t.Fatalf("gc supervisor stop --wait: %v\n%s", err, out)
-		}
-		out, err := helpers.RunGC(env, cityRoot, "stop", cityRoot)
-		if err != nil {
-			t.Fatalf("gc stop: %v\n%s", err, out)
-		}
-		if leaked := waitForNoDoltProcesses(t, cityRoot, 10*time.Second); len(leaked) > 0 {
-			t.Errorf("city proxy survived gc stop:\n%s", strings.Join(leaked, "\n"))
-		}
-		if leaked := waitForNoDoltProcesses(t, rigDir, 10*time.Second); len(leaked) > 0 {
-			t.Errorf("rig proxy survived gc stop:\n%s", strings.Join(leaked, "\n"))
-		}
-		// Re-runnable: "there was nothing to stop" is success.
-		if out, err := helpers.RunGC(env, cityRoot, "stop", cityRoot); err != nil {
-			t.Fatalf("second gc stop: %v\n%s", err, out)
-		}
-	})
-
-	t.Run("restart", func(t *testing.T) {
-		city.StartWithSupervisor()
-		assertProxiedScope(t, cityRoot, "restarted city")
-		assertProxiedScope(t, rigDir, "restarted rig")
-
-		// The store has to be the same one, not a fresh empty proxy: the bead
-		// created before the stop must still be there.
-		list, err := city.GCStdout("bd", "list", "--json")
-		if err != nil {
-			t.Fatalf("gc bd list after restart: %v\n%s", err, list)
-		}
-		if !strings.Contains(list, createdBead) {
-			t.Fatalf("restarted city lost %s; the proxy came back over a different store:\n%s", createdBead, list)
-		}
-		if out, err := helpers.RunGC(env, cityRoot, "stop", cityRoot); err != nil {
-			t.Fatalf("gc stop after restart: %v\n%s", err, out)
-		}
-	})
-
-	t.Run("direct-escape-hatch", func(t *testing.T) {
-		direct := helpers.NewCity(t, env)
-		directRoot := direct.Dir
-		t.Cleanup(func() {
-			helpers.RunGC(env, directRoot, "stop", directRoot) //nolint:errcheck
-			if leaked := waitForNoDoltProcesses(t, directRoot, 15*time.Second); len(leaked) > 0 {
-				t.Errorf("direct city processes outlived the test:\n%s", strings.Join(leaked, "\n"))
-			}
-		})
-		out, err := helpers.RunGC(env, "", "init", "--skip-provider-readiness", "--no-start",
-			"--provider", "claude", "--beads-transport", "direct", "--beads-target", "local", directRoot)
-		if err != nil {
-			t.Fatalf("gc init --beads-transport direct: %v\n%s", err, out)
-		}
-
-		var metadata proxiedBeadsMetadata
-		readJSONFile(t, filepath.Join(directRoot, ".beads", "metadata.json"), &metadata)
-		if !strings.EqualFold(metadata.DoltMode, "server") {
-			t.Fatalf("direct city dolt_mode = %q, want server", metadata.DoltMode)
-		}
-		for _, name := range []string{"dolt-server.pid", "dolt-server.port"} {
-			if _, err := os.Stat(filepath.Join(directRoot, ".beads", name)); err != nil {
-				t.Errorf("bd-owned direct city has no %s: %v", name, err)
-			}
-		}
-		var journal scopeOwnershipDoc
-		readJSONFile(t, filepath.Join(directRoot, ".gc", "scope-ownership.json"), &journal)
-		if entry := journal.Scopes["city"]; entry.State != "ready" || entry.LifecycleOwner != "provider" {
-			t.Errorf("direct city ownership = %+v, want provider/ready", entry)
-		}
-		if procs := doltProcessesUnder(t, directRoot); len(procs) != 1 {
-			t.Errorf("direct city = %d dolt process(es), want 1:\n%s", len(procs), strings.Join(procs, "\n"))
-		}
-
-		if out, err := helpers.RunGC(env, directRoot, "stop", directRoot); err != nil {
-			t.Fatalf("gc stop on the direct city: %v\n%s", err, out)
-		}
-		if leaked := waitForNoDoltProcesses(t, directRoot, 10*time.Second); len(leaked) > 0 {
-			t.Errorf("direct city server survived gc stop:\n%s", strings.Join(leaked, "\n"))
-		}
+		assertProxiedBackupAdvisory(t, p.city, "a proxied city with a rig", true, "city", filepath.Base(rigDir))
 	})
 
 	t.Run("adopt-un-journaled", func(t *testing.T) {
 		// A workspace bd initialised on its own carries the proxied binding
 		// with no gc journal entry — the migrated and cloned shapes R1 covers.
-		adopted := adoptedDir
+		env, bdPath, cityRoot := p.env, p.bdPath, p.cityRoot
+		adopted := p.rigs["adopted-rig"]
 		initCmd := exec.Command(bdPath, "init", "--proxied-server", "--proxied-server-idle-timeout", "0", //nolint:gosec // resolved test binary
 			"-p", "adopt", "--quiet", "--skip-hooks", "--skip-agents", "--non-interactive", adopted)
 		initCmd.Dir = adopted
-		initCmd.Env = env.List()
+		initCmd.Env = env.ToolList()
 		if out, err := initCmd.CombinedOutput(); err != nil {
 			t.Fatalf("bd init --proxied-server: %v\n%s", err, out)
 		}
@@ -972,7 +1013,7 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		t.Cleanup(func() {
 			stop := exec.Command(bdPath, "dolt", "stop") //nolint:gosec // resolved test binary
 			stop.Dir = adopted
-			stop.Env = env.List()
+			stop.Env = env.ToolList()
 			stop.Run() //nolint:errcheck // best effort
 		})
 
@@ -997,7 +1038,7 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		if addErr != nil {
 			t.Fatalf("gc rig add --adopt on a bd-initialised proxied workspace: %v\n%s", addErr, owned)
 		}
-		assertProxiedScope(t, adopted, "adopted rig")
+		assertProxiedScope(t, proxiedNeverIdleEnv(env.Clone()), adopted, "adopted rig")
 
 		// The clone shape: metadata says proxied-server, but bd's store is
 		// gitignored and never came along. gc must refuse rather than let bd
@@ -1029,140 +1070,104 @@ func TestBeadsProxiedDefault(t *testing.T) {
 			t.Error("the refused clone had a store created under it anyway")
 		}
 	})
+}
 
-	t.Run("bd-owned-direct-unchanged", func(t *testing.T) {
-		// A scope whose persisted metadata says server mode keeps the direct
-		// lifecycle whatever the fresh-init default is. This is the bd-owned
-		// direct city the escape hatch produces; the GC-managed shape is the
-		// subtest below.
-		direct := helpers.NewCity(t, env)
-		directRoot := direct.Dir
-		t.Cleanup(func() {
-			helpers.RunGC(env, directRoot, "stop", directRoot) //nolint:errcheck
-			if leaked := waitForNoDoltProcesses(t, directRoot, 15*time.Second); len(leaked) > 0 {
-				t.Errorf("direct city processes outlived the test:\n%s", strings.Join(leaked, "\n"))
-			}
-		})
-		out, err := helpers.RunGC(env, "", "init", "--skip-provider-readiness", "--no-start",
-			"--provider", "claude", "--beads-transport", "direct", "--beads-target", "local", directRoot)
+// TestBeadsProxiedDefaultStart proves a supervisor start of a proxied city
+// with a rig loads the default pack without the dolt orders claiming bd's
+// process, and that stopping it leaves nothing behind.
+func TestBeadsProxiedDefaultStart(t *testing.T) {
+	p := newProxiedDefaultCity(t, "testrig")
+	rigDir := p.rigs["testrig"]
+	p.initDefault(t)
+	p.addInheritingRig(t, rigDir)
+
+	t.Run("start-default-pack", func(t *testing.T) {
+		p.city.StartWithSupervisor()
+
+		status, err := p.city.GC("status")
 		if err != nil {
-			t.Fatalf("gc init direct: %v\n%s", err, out)
+			t.Fatalf("gc status: %v\n%s", err, status)
 		}
-		// Re-running init must not reclassify the scope as proxied.
-		if out, err := helpers.RunGC(env, "", "init", "--skip-provider-readiness", "--no-start",
-			"--provider", "claude", directRoot); err != nil {
-			t.Fatalf("re-init of an existing direct city: %v\n%s", err, out)
+
+		// The bd pack imports the dolt pack, whose orders fire on every city.
+		// mol-dog-stale-db's front door is `gc dolt-cleanup --json --probe`;
+		// on a bd-owned scope it has to be a typed no-op rather than a probe of
+		// a managed server that does not exist. Driving the front door directly
+		// is the same proof as waiting for the cron tick, without the wait.
+		cleanup, err := p.city.GCStdout("dolt-cleanup", "--json", "--probe")
+		if err != nil {
+			t.Fatalf("gc dolt-cleanup --json --probe: %v\n%s", err, cleanup)
 		}
-		var metadata proxiedBeadsMetadata
-		readJSONFile(t, filepath.Join(directRoot, ".beads", "metadata.json"), &metadata)
-		if !strings.EqualFold(metadata.DoltMode, "server") {
-			t.Fatalf("an existing direct city was reclassified to %q by the proxied default", metadata.DoltMode)
+		var report struct {
+			Skipped *struct {
+				Reason string `json:"reason"`
+			} `json:"skipped"`
 		}
-		if procs := doltProcessesUnder(t, directRoot); len(procs) != 1 {
-			t.Errorf("existing direct city = %d dolt process(es), want 1:\n%s", len(procs), strings.Join(procs, "\n"))
+		lastJSONLine(t, cleanup, &report)
+		if report.Skipped == nil || report.Skipped.Reason != "bd-owned-proxied-scope" {
+			t.Fatalf("dolt cleanup did not report the bd-owned no-op:\n%s", cleanup)
+		}
+		// What must never appear is gc's managed-Dolt runtime state: writing it
+		// would mean a second owner for bd's process.
+		if _, err := os.Stat(filepath.Join(p.cityRoot, ".gc", "runtime", "packs", "dolt", "dolt-state.json")); err == nil {
+			t.Error("a dolt order wrote managed-Dolt state on a bd-owned scope")
 		}
 	})
 
-	t.Run("legacy-managed-city-unchanged", func(t *testing.T) {
-		// The grandfathering claim this branch has to keep is about the cities
-		// that exist today: GC-managed direct servers — metadata dolt_mode
-		// server, canonical config gc.endpoint_origin managed_city, no
-		// scope-ownership journal, gc's own sql-server under
-		// .gc/runtime/packs/dolt. No gc on this branch can create one, because
-		// `gc init` journals every fresh scope as provider-owned, so the
-		// fixture is built by writing the pre-PR on-disk shape and then driving
-		// the real front doors over it.
-		legacy := helpers.NewCity(t, env)
-		legacyRoot := legacy.Dir
-		legacyRig := filepath.Join(filepath.Dir(createGitRig(t)), "legacy-rig")
-		if err := os.Rename(filepath.Join(filepath.Dir(legacyRig), "testrig"), legacyRig); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			helpers.RunGC(env, legacyRoot, "stop", legacyRoot)     //nolint:errcheck
-			helpers.RunGC(env, "", "supervisor", "stop", "--wait") //nolint:errcheck
-			for _, root := range []string{legacyRoot, legacyRig} {
-				if leaked := waitForNoDoltProcesses(t, root, 15*time.Second); len(leaked) > 0 {
-					t.Errorf("legacy city processes outlived the test under %s:\n%s", root, strings.Join(leaked, "\n"))
-				}
-			}
-		})
-
-		out, err := helpers.RunGC(env, "", "init", "--skip-provider-readiness", "--no-start",
-			"--provider", "claude", legacyRoot)
+	t.Run("stop-quiescent", func(t *testing.T) {
+		p.stopQuiescent(t, rigDir)
+		// Re-runnable: "there was nothing to stop" is success, and it is a
+		// no-op. Any bd read of a proxied scope restarts its proxy and Dolt
+		// child, so a stop that looks for sessions in the store resurrects
+		// the processes the first stop retired (and costs seconds doing it).
+		p.bdCalls.Reset()
+		started := time.Now()
+		out, err := helpers.RunGC(p.env, p.cityRoot, "stop", p.cityRoot)
+		wall := time.Since(started)
 		if err != nil {
-			t.Fatalf("gc init: %v\n%s", err, out)
+			t.Fatalf("second gc stop: %v\n%s", err, out)
 		}
-		makeCityLookLegacyManaged(t, env, bdPath, legacyRoot)
+		t.Logf("second gc stop: %d bd fork(s), %s", p.bdCalls.Count(), wall.Round(time.Millisecond))
+		if forks := p.bdCalls.Count(); forks != 0 {
+			t.Errorf("gc stop on a stopped proxied city forked bd %d time(s), want 0:\n%s", forks, p.bdCalls.Describe())
+		}
+		for _, root := range []string{p.cityRoot, rigDir} {
+			if procs := doltProcessesUnder(t, root); len(procs) > 0 {
+				t.Errorf("gc stop on a stopped proxied city started a proxy or Dolt under %s:\n%s", root, strings.Join(procs, "\n"))
+			}
+		}
+	})
+}
 
-		legacy.StartWithSupervisor()
+// TestBeadsProxiedDefaultRestart proves a stopped proxied city with a rig
+// comes back over the same store, and records the cold-start timing sample.
+func TestBeadsProxiedDefaultRestart(t *testing.T) {
+	p := newProxiedDefaultCity(t, "testrig")
+	rigDir := p.rigs["testrig"]
+	p.initDefault(t)
+	createdBead := p.createBead(t)
+	p.addInheritingRig(t, rigDir)
 
-		// gc, not bd, owns the Dolt process: its runtime state is written and
-		// the sql-server is the one gc launched from its own pack state dir.
-		doltState := filepath.Join(legacyRoot, ".gc", "runtime", "packs", "dolt", "dolt-state.json")
-		if _, err := os.Stat(doltState); err != nil {
-			t.Fatalf("gc did not write managed-Dolt runtime state for a grandfathered city: %v", err)
-		}
-		procs := doltProcessesUnder(t, legacyRoot)
-		var managed, proxies int
-		for _, p := range procs {
-			if strings.Contains(p, "db-proxy-child") {
-				proxies++
-			}
-			if strings.Contains(p, "sql-server") && strings.Contains(p, filepath.Join(".gc", "runtime", "packs", "dolt")) {
-				managed++
-			}
-		}
-		if proxies != 0 {
-			t.Errorf("a grandfathered city got a bd proxy:\n%s", strings.Join(procs, "\n"))
-		}
-		if managed != 1 {
-			t.Errorf("gc-managed sql-server count = %d, want 1:\n%s", managed, strings.Join(procs, "\n"))
-		}
+	t.Run("stop-quiescent", func(t *testing.T) {
+		p.stopQuiescent(t, rigDir)
+	})
 
-		// A rig added to it joins that one server rather than acquiring a
-		// lifecycle owner of its own.
-		if out, err := helpers.RunGC(env, legacyRoot, "rig", "add", legacyRig); err != nil {
-			t.Fatalf("gc rig add on a grandfathered city: %v\n%s", err, out)
-		}
-		var journal scopeOwnershipDoc
-		if data, err := os.ReadFile(filepath.Join(legacyRoot, ".gc", "scope-ownership.json")); err == nil {
-			if err := json.Unmarshal(data, &journal); err != nil {
-				t.Fatalf("parse ownership journal: %v\n%s", err, data)
-			}
-			for key := range journal.Scopes {
-				t.Errorf("a grandfathered city journaled %q as provider-owned", key)
-			}
-		} else if !os.IsNotExist(err) {
-			t.Fatal(err)
-		}
-		rigConfig, err := os.ReadFile(filepath.Join(legacyRig, ".beads", "config.yaml"))
+	t.Run("restart", func(t *testing.T) {
+		p.city.StartWithSupervisor()
+		assertProxiedScope(t, p.env, p.cityRoot, "restarted city")
+		assertProxiedScope(t, p.env, rigDir, "restarted rig")
+
+		// The store has to be the same one, not a fresh empty proxy: the bead
+		// created before the stop must still be there.
+		list, err := p.city.GCStdout("bd", "list", "--json")
 		if err != nil {
-			t.Fatalf("read rig canonical config: %v", err)
+			t.Fatalf("gc bd list after restart: %v\n%s", err, list)
 		}
-		if !strings.Contains(string(rigConfig), "inherited_city") {
-			t.Errorf("rig did not inherit the city endpoint:\n%s", rigConfig)
+		if !strings.Contains(list, createdBead) {
+			t.Fatalf("restarted city lost %s; the proxy came back over a different store:\n%s", createdBead, list)
 		}
-		if leaked := doltProcessesUnder(t, legacyRig); len(leaked) != 0 {
-			t.Errorf("the rig got a Dolt process of its own:\n%s", strings.Join(leaked, "\n"))
-		}
-
-		// The proxied backup advisory is gated on the city actually having a
-		// proxied scope, and a grandfathered city has none: gc registers its
-		// backups the ordinary way here, so the line would be false. This is
-		// the negative half of the gate — without it, an unconditional advisory
-		// would pass the positive assertion just as well.
-		assertProxiedBackupAdvisory(t, legacy, "a grandfathered managed city", false)
-
-		// And gc stop takes the server it started back down.
-		if out, err := helpers.RunGC(env, "", "supervisor", "stop", "--wait"); err != nil {
-			t.Fatalf("gc supervisor stop --wait: %v\n%s", err, out)
-		}
-		if out, err := helpers.RunGC(env, legacyRoot, "stop", legacyRoot); err != nil {
-			t.Fatalf("gc stop on a grandfathered city: %v\n%s", err, out)
-		}
-		if leaked := waitForNoDoltProcesses(t, legacyRoot, 15*time.Second); len(leaked) > 0 {
-			t.Errorf("the gc-managed server survived gc stop:\n%s", strings.Join(leaked, "\n"))
+		if out, err := helpers.RunGC(p.env, p.cityRoot, "stop", p.cityRoot); err != nil {
+			t.Fatalf("gc stop after restart: %v\n%s", err, out)
 		}
 	})
 
@@ -1182,7 +1187,7 @@ func TestBeadsProxiedDefault(t *testing.T) {
 			{"gc bd list --json", []string{"bd", "list", "--json"}},
 		} {
 			start := time.Now()
-			if _, err := helpers.RunGC(env, cityRoot, run.args...); err != nil {
+			if _, err := helpers.RunGC(p.env, p.cityRoot, run.args...); err != nil {
 				t.Logf("%s: %v", run.label, err)
 			}
 			samples = append(samples, fmt.Sprintf("| %s | proxied-local | %s |", run.label, time.Since(start).Round(time.Millisecond)))
@@ -1200,6 +1205,178 @@ func TestBeadsProxiedDefault(t *testing.T) {
 			t.Logf("timing report not written to %s: %v", proxiedTimingReportPath, err)
 		}
 	})
+}
+
+// initDirectCity runs `gc init --beads-transport direct` on a fresh city in
+// env, the escape hatch from the proxied default, and registers a cleanup
+// that stops it if it is still up and checks nothing under it outlives the
+// test.
+func initDirectCity(t *testing.T, env *helpers.Env) string {
+	t.Helper()
+	direct := helpers.NewCity(t, env)
+	directRoot := direct.Dir
+	t.Cleanup(func() {
+		if len(doltProcessesUnder(t, directRoot)) > 0 {
+			helpers.RunGC(env, directRoot, "stop", directRoot) //nolint:errcheck
+		}
+		if leaked := waitForNoDoltProcesses(t, directRoot, 15*time.Second); len(leaked) > 0 {
+			t.Errorf("direct city processes outlived the test:\n%s", strings.Join(leaked, "\n"))
+		}
+	})
+	out, err := helpers.RunGC(env, "", "init", "--skip-provider-readiness", "--no-start",
+		"--provider", "claude", "--beads-transport", "direct", "--beads-target", "local", directRoot)
+	if err != nil {
+		t.Fatalf("gc init --beads-transport direct: %v\n%s", err, out)
+	}
+	return directRoot
+}
+
+// TestBeadsProxiedDefaultDirectEscapeHatch proves `--beads-transport direct`
+// still produces a bd-owned direct server, and that gc stop retires it.
+func TestBeadsProxiedDefaultDirectEscapeHatch(t *testing.T) {
+	bdPath, doltPath := requireProxiedTooling(t)
+	env, _ := proxiedEnvRecordingBD(t, bdPath, doltPath)
+	directRoot := initDirectCity(t, env)
+
+	var metadata proxiedBeadsMetadata
+	readJSONFile(t, filepath.Join(directRoot, ".beads", "metadata.json"), &metadata)
+	if !strings.EqualFold(metadata.DoltMode, "server") {
+		t.Fatalf("direct city dolt_mode = %q, want server", metadata.DoltMode)
+	}
+	for _, name := range []string{"dolt-server.pid", "dolt-server.port"} {
+		if _, err := os.Stat(filepath.Join(directRoot, ".beads", name)); err != nil {
+			t.Errorf("bd-owned direct city has no %s: %v", name, err)
+		}
+	}
+	var journal scopeOwnershipDoc
+	readJSONFile(t, filepath.Join(directRoot, ".gc", "scope-ownership.json"), &journal)
+	if entry := journal.Scopes["city"]; entry.State != "ready" || entry.LifecycleOwner != "provider" {
+		t.Errorf("direct city ownership = %+v, want provider/ready", entry)
+	}
+	if procs := doltProcessesUnder(t, directRoot); len(procs) != 1 {
+		t.Errorf("direct city = %d dolt process(es), want 1:\n%s", len(procs), strings.Join(procs, "\n"))
+	}
+
+	if out, err := helpers.RunGC(env, directRoot, "stop", directRoot); err != nil {
+		t.Fatalf("gc stop on the direct city: %v\n%s", err, out)
+	}
+	if leaked := waitForNoDoltProcesses(t, directRoot, 10*time.Second); len(leaked) > 0 {
+		t.Errorf("direct city server survived gc stop:\n%s", strings.Join(leaked, "\n"))
+	}
+}
+
+// TestBeadsProxiedDefaultBdOwnedDirectUnchanged proves a scope whose persisted
+// metadata says server mode keeps the direct lifecycle whatever the fresh-init
+// default is. This is the bd-owned direct city the escape hatch produces; the
+// GC-managed shape is TestBeadsProxiedDefaultLegacyManagedCityUnchanged.
+func TestBeadsProxiedDefaultBdOwnedDirectUnchanged(t *testing.T) {
+	bdPath, doltPath := requireProxiedTooling(t)
+	env, _ := proxiedEnvRecordingBD(t, bdPath, doltPath)
+	directRoot := initDirectCity(t, env)
+
+	// Re-running init must not reclassify the scope as proxied.
+	if out, err := helpers.RunGC(env, "", "init", "--skip-provider-readiness", "--no-start",
+		"--provider", "claude", directRoot); err != nil {
+		t.Fatalf("re-init of an existing direct city: %v\n%s", err, out)
+	}
+	var metadata proxiedBeadsMetadata
+	readJSONFile(t, filepath.Join(directRoot, ".beads", "metadata.json"), &metadata)
+	if !strings.EqualFold(metadata.DoltMode, "server") {
+		t.Fatalf("an existing direct city was reclassified to %q by the proxied default", metadata.DoltMode)
+	}
+	if procs := doltProcessesUnder(t, directRoot); len(procs) != 1 {
+		t.Errorf("existing direct city = %d dolt process(es), want 1:\n%s", len(procs), strings.Join(procs, "\n"))
+	}
+}
+
+// TestBeadsProxiedDefaultLegacyManagedCityUnchanged is the grandfathering
+// claim this branch has to keep, about the cities that exist today:
+// GC-managed direct servers — metadata dolt_mode server, canonical config
+// gc.endpoint_origin managed_city, no scope-ownership journal, gc's own
+// sql-server under .gc/runtime/packs/dolt. No gc on this branch can create
+// one, because `gc init` journals every fresh scope as provider-owned, so the
+// fixture is built by writing the pre-PR on-disk shape and then driving the
+// real front doors over it.
+func TestBeadsProxiedDefaultLegacyManagedCityUnchanged(t *testing.T) {
+	p := newProxiedDefaultCity(t, "legacy-rig")
+	env, legacy, legacyRoot, legacyRig := p.env, p.city, p.cityRoot, p.rigs["legacy-rig"]
+
+	out, err := helpers.RunGC(env, "", "init", "--skip-provider-readiness", "--no-start",
+		"--provider", "claude", legacyRoot)
+	if err != nil {
+		t.Fatalf("gc init: %v\n%s", err, out)
+	}
+	makeCityLookLegacyManaged(t, env, p.bdPath, legacyRoot)
+
+	legacy.StartWithSupervisor()
+
+	// gc, not bd, owns the Dolt process: its runtime state is written and
+	// the sql-server is the one gc launched from its own pack state dir.
+	doltState := filepath.Join(legacyRoot, ".gc", "runtime", "packs", "dolt", "dolt-state.json")
+	if _, err := os.Stat(doltState); err != nil {
+		t.Fatalf("gc did not write managed-Dolt runtime state for a grandfathered city: %v", err)
+	}
+	procs := doltProcessesUnder(t, legacyRoot)
+	var managed, proxies int
+	for _, proc := range procs {
+		if strings.Contains(proc, "db-proxy-child") {
+			proxies++
+		}
+		if strings.Contains(proc, "sql-server") && strings.Contains(proc, filepath.Join(".gc", "runtime", "packs", "dolt")) {
+			managed++
+		}
+	}
+	if proxies != 0 {
+		t.Errorf("a grandfathered city got a bd proxy:\n%s", strings.Join(procs, "\n"))
+	}
+	if managed != 1 {
+		t.Errorf("gc-managed sql-server count = %d, want 1:\n%s", managed, strings.Join(procs, "\n"))
+	}
+
+	// A rig added to it joins that one server rather than acquiring a
+	// lifecycle owner of its own.
+	if out, err := helpers.RunGC(env, legacyRoot, "rig", "add", legacyRig); err != nil {
+		t.Fatalf("gc rig add on a grandfathered city: %v\n%s", err, out)
+	}
+	var journal scopeOwnershipDoc
+	if data, err := os.ReadFile(filepath.Join(legacyRoot, ".gc", "scope-ownership.json")); err == nil {
+		if err := json.Unmarshal(data, &journal); err != nil {
+			t.Fatalf("parse ownership journal: %v\n%s", err, data)
+		}
+		for key := range journal.Scopes {
+			t.Errorf("a grandfathered city journaled %q as provider-owned", key)
+		}
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	rigConfig, err := os.ReadFile(filepath.Join(legacyRig, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read rig canonical config: %v", err)
+	}
+	if !strings.Contains(string(rigConfig), "inherited_city") {
+		t.Errorf("rig did not inherit the city endpoint:\n%s", rigConfig)
+	}
+	if leaked := doltProcessesUnder(t, legacyRig); len(leaked) != 0 {
+		t.Errorf("the rig got a Dolt process of its own:\n%s", strings.Join(leaked, "\n"))
+	}
+
+	// The proxied backup advisory is gated on the city actually having a
+	// proxied scope, and a grandfathered city has none: gc registers its
+	// backups the ordinary way here, so the line would be false. This is
+	// the negative half of the gate — without it, an unconditional advisory
+	// would pass the positive assertion just as well.
+	assertProxiedBackupAdvisory(t, legacy, "a grandfathered managed city", false)
+
+	// And gc stop takes the server it started back down.
+	if out, err := helpers.RunGC(env, "", "supervisor", "stop", "--wait"); err != nil {
+		t.Fatalf("gc supervisor stop --wait: %v\n%s", err, out)
+	}
+	if out, err := helpers.RunGC(env, legacyRoot, "stop", legacyRoot); err != nil {
+		t.Fatalf("gc stop on a grandfathered city: %v\n%s", err, out)
+	}
+	if leaked := waitForNoDoltProcesses(t, legacyRoot, 15*time.Second); len(leaked) > 0 {
+		t.Errorf("the gc-managed server survived gc stop:\n%s", strings.Join(leaked, "\n"))
+	}
 }
 
 // proxiedNativeGCSideBudget bounds gc's OWN marginal share of
@@ -1311,6 +1488,7 @@ func describeEndpointAccount(payload beadsStorePayloadDoc) string {
 func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 	t.Helper()
 	env, bdCalls := proxiedEnvRecordingBD(t, bdPath, doltPath)
+	env = proxiedNeverIdleEnv(env)
 	lane := proxiedNativeLaneEnv(env)
 
 	// Its own city, its own recording shim, and NO supervisor.
@@ -1338,7 +1516,7 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 	city.InitNoStart("claude")
 
 	t.Run("precondition-gc-initialised", func(t *testing.T) {
-		assertProxiedScope(t, cityRoot, "the fork-gate city")
+		assertProxiedScope(t, env, cityRoot, "the fork-gate city")
 		assertGCInitialisedProxiedPrecondition(t, env, cityRoot, "the fork-gate city")
 		// Quiescence, proved rather than assumed: with no command running,
 		// nothing may fork bd. This is the assumption every count below rests
@@ -1502,8 +1680,8 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 	t.Run("health-pass-one-ping-per-scope", func(t *testing.T) {
 		// Unchanged from today's line, asserted in the new lane: readiness is
 		// still bd's to declare, and the native lane must not have bought a
-		// second ping per scope on the way to declaring it. The city has no rig
-		// yet — rig-inherits runs after this — so one provider-owned scope.
+		// second ping per scope on the way to declaring it. The lane's city has
+		// no rig, so one provider-owned scope.
 		const providerOwnedScopes = 1
 		bdCalls.Reset()
 		out, err := helpers.RunGC(lane, cityRoot, "beads", "health")

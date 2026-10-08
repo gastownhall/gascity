@@ -19,13 +19,16 @@ go_test(
     name = "subprocess_test",
     srcs = [
         "meta_privacy_test.go",
+        "seam_conformance_test.go",
         "seams_test.go",
+        "socket_probe_test.go",
         "subprocess_test.go",
         "testenv_import_test.go",
     ],
     embed = [":subprocess"],
     deps = [
         "//internal/runtime",
+        "//internal/runtime/runtimetest",
         "//internal/testenv",
         "//internal/testutil",
     ],
@@ -39,6 +42,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

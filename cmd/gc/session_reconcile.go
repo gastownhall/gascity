@@ -59,7 +59,7 @@ const (
 // (Info.HeldUntil, Info.QuarantinedUntil, Info.WaitHold — untrimmed, matching the
 // raw session.Metadata reads, Info.SessionNameMetadata, Info.ID) and route every
 // classifier through its Info twin, while keeping the runtime probes
-// (sessionAttachedForWakeReason, pendingInteractionReady) raw (§7 live edge).
+// (sessionAttachedForWakeReason, pendingInteractionProbe) raw (§7 live edge).
 func wakeReasonsInfo(
 	info sessionpkg.Info,
 	cfg *config.City,
@@ -133,7 +133,7 @@ func evaluateWakeReasonsInfo(
 		reasons = append(reasons, WakeAttached)
 	}
 
-	if pendingInteractionReady(sp, name) {
+	if answer, _ := pendingInteractionProbe(sp, name); answer == pendingInteractionYes {
 		reasons = append(reasons, WakePending)
 	}
 

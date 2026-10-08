@@ -1,0 +1,8 @@
+# Starlark helpers for the repo's BUILD files (go_variant_test.bzl,
+# pnpm_lock.bzl) and the scripts they run.
+
+exports_files([
+    # Read by //scripts:scripts_test (openapi_breaking_gate_test.go).
+    "openapi_base_spec.bzl",
+    "pnpm_lock_in_sync_test.py",
+])

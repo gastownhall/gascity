@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
@@ -2290,6 +2291,72 @@ func TestSuspendKeepsNonRunningCleanupBestEffort(t *testing.T) {
 	}
 	if got.State != StateSuspended {
 		t.Fatalf("State = %q, want %q", got.State, StateSuspended)
+	}
+}
+
+// TestSuspend_DownedServerSucceeds pins suspend as a cleanup path: tmux
+// Provider.Stop reports a missing server as ErrNoServer, and a long-lived
+// process's state cache can still report the session running for its stale
+// TTL. Without runtime.StopForCleanup, `gc suspend` and the `gc stop` sweep
+// fail against a dead server with nothing left to stop. A real stop failure,
+// alone or joined beside a missing-server answer, still fails the suspend. The
+// fake has no runtime.ServerDeathConfirmer, so the missing server is taken as
+// dead; TestSuspend_RealTmuxDeletedSocketFailsAndDeadServerSucceeds pins the
+// confirmation against real tmux.
+func TestSuspend_DownedServerSucceeds(t *testing.T) {
+	stopFailed := errors.New("terminate: permission denied")
+	for _, tc := range []struct {
+		name    string
+		stopErr error
+		wantErr error
+	}{
+		{name: "downed server", stopErr: fmt.Errorf("killing session sky: %w", tmux.ErrNoServer)},
+		{name: "stop failure", stopErr: stopFailed, wantErr: stopFailed},
+		{name: "stop failure beside downed server", stopErr: errors.Join(stopFailed, tmux.ErrNoServer), wantErr: stopFailed},
+	} {
+		for _, entry := range []struct {
+			name    string
+			suspend func(*Manager, string) error
+		}{
+			{name: "Suspend", suspend: (*Manager).Suspend},
+			{name: "SuspendForShutdown", suspend: (*Manager).SuspendForShutdown},
+		} {
+			t.Run(tc.name+"/"+entry.name, func(t *testing.T) {
+				store := beads.NewMemStore()
+				sp := runtime.NewFake()
+				mgr := NewManagerWithOptions(store, sp)
+				info, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "test", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+				if err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				// The fake keeps reporting the session running, as a stale cache does.
+				sp.StopErrors[info.SessionName] = tc.stopErr
+
+				err = entry.suspend(mgr, info.ID)
+				if !providerSawStop(sp, info.SessionName) {
+					t.Fatal("suspend did not ask the provider to stop the session")
+				}
+				got, getErr := mgr.Get(info.ID)
+				if getErr != nil {
+					t.Fatalf("Get: %v", getErr)
+				}
+				if tc.wantErr == nil {
+					if err != nil {
+						t.Fatalf("%s against a downed server: %v", entry.name, err)
+					}
+					if got.State != StateSuspended {
+						t.Fatalf("State = %q, want %q", got.State, StateSuspended)
+					}
+					return
+				}
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("%s with a real stop failure = %v, want %v", entry.name, err, tc.wantErr)
+				}
+				if got.State == StateSuspended {
+					t.Fatal("suspend recorded the session suspended over a live runtime")
+				}
+			})
+		}
 	}
 }
 
@@ -4941,6 +5008,62 @@ func TestKill_UnknownState_ButRunning(t *testing.T) {
 	}
 }
 
+// TestKill_DownedServerReportsSuccess pins Kill as a cleanup path: the caller
+// asks for the session to stop, and a session that is already gone satisfies
+// that request. tmux Provider.Stop reports a missing server as ErrNoServer, so
+// without the runtime.StopForCleanup absorption, killing a session on an
+// intentionally stopped city reports a failure the caller cannot act on. The
+// error is wrapped to pin that the absorption survives wrapping.
+func TestKill_DownedServerReportsSuccess(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "test", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.StopErrors[info.SessionName] = fmt.Errorf("killing session %s: %w", info.SessionName, tmux.ErrNoServer)
+
+	if err := mgr.Kill(info.ID); err != nil {
+		t.Fatalf("Kill against a downed server: %v", err)
+	}
+	if !providerSawStop(sp, info.SessionName) {
+		t.Fatal("Kill returned success without asking the provider to stop the session")
+	}
+}
+
+// TestKill_StopFailurePropagates is the control for the absorption above: a
+// stop failure that is not "the session is gone" is a real failure and must
+// reach the caller. Without it, TestKill_DownedServerReportsSuccess would pass
+// just as well against a blanket swallow.
+func TestKill_StopFailurePropagates(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "test", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	stopErr := errors.New("permission denied")
+	sp.StopErrors[info.SessionName] = stopErr
+
+	if err := mgr.Kill(info.ID); !errors.Is(err, stopErr) {
+		t.Fatalf("Kill with a real stop failure = %v, want %v", err, stopErr)
+	}
+}
+
+// providerSawStop reports whether the fake provider recorded a Stop for name.
+func providerSawStop(sp *runtime.Fake, name string) bool {
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // PR #203 — When ensureRunning resumes with --resume <key> and the
 // process dies immediately (stale session key), it should clear the key and
 // retry fresh without the --resume flag.
@@ -5616,6 +5739,40 @@ func TestCloseDetailed_StopErrorLeavesBeadOpen(t *testing.T) {
 	}
 }
 
+// TestCloseDetailed_DownedServerClosesBead pins the cleanup half of the
+// missing-session/missing-server split: tmux Provider.Stop returns ErrNoServer
+// when the whole server is down, and close must still retire the bead. Without
+// the runtime.StopForCleanup absorption, session beads for an intentionally
+// stopped city are unclosable until someone restarts a tmux server on that
+// socket. The error is wrapped to pin that the absorption survives wrapping.
+func TestCloseDetailed_DownedServerClosesBead(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	sp.StopErrors[info.SessionName] = fmt.Errorf("killing session %s: %w", info.SessionName, tmux.ErrNoServer)
+
+	if _, err := mgr.CloseDetailed(info.ID); err != nil {
+		t.Fatalf("CloseDetailed against a downed server: %v", err)
+	}
+	if !providerSawStop(sp, info.SessionName) {
+		t.Fatal("CloseDetailed closed the bead without asking the provider to stop the session")
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead Status = %q, want closed", b.Status)
+	}
+}
+
 // TestCloseDetailed_StopSuccessClosesBead is the happy-path companion: when the
 // runtime terminate succeeds, the bead closes normally.
 func TestCloseDetailed_StopSuccessClosesBead(t *testing.T) {
@@ -5740,5 +5897,44 @@ func TestTranscriptPathZCodeResolvesEachSeatByBeadID(t *testing.T) {
 		if got != want {
 			t.Fatalf("TranscriptPath(%s) = %q, want %q", infos[i].ID, got, want)
 		}
+	}
+}
+
+// An attachment probe that cannot tell must reach the observation as an error,
+// never as "not attached", and must not fail the liveness answer it rides on.
+func TestObserveRuntimeForInfoCarriesAttachError(t *testing.T) {
+	probeErr := fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+	notFoundText := fmt.Errorf("exec: \"tmux\": executable file not found in $PATH: %w", runtime.ErrRuntimeUnavailable)
+	for _, tc := range []struct {
+		name         string
+		attached     bool
+		attachErr    error
+		wantAttached bool
+		wantErr      error
+	}{
+		{name: "probe unavailable", attachErr: probeErr, wantErr: probeErr},
+		{name: "session vanished is not attached", attachErr: fmt.Errorf("gone: %w", runtime.ErrSessionNotFound)},
+		{name: "unavailable text that IsSessionGone matches", attachErr: notFoundText, wantErr: notFoundText},
+		{name: "attached", attached: true, wantAttached: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			sp.SetAttached("runtime-worker", tc.attached)
+			if tc.attachErr != nil {
+				sp.AttachedErrors["runtime-worker"] = tc.attachErr
+			}
+			mgr := NewManagerWithOptions(beads.NewMemStore(), &observationErrorRuntimeProvider{Fake: sp})
+
+			obs, err := mgr.ObserveRuntimeForInfo(Info{SessionName: "runtime-worker"}, nil)
+			if err != nil {
+				t.Fatalf("ObserveRuntimeForInfo: %v, want the attach error carried in the observation", err)
+			}
+			if !obs.Running || !obs.Alive {
+				t.Fatalf("ObserveRuntimeForInfo = %#v, want running+alive unaffected by the attach probe", obs)
+			}
+			if obs.Attached != tc.wantAttached || !errors.Is(obs.AttachedErr, tc.wantErr) || (tc.wantErr == nil) != (obs.AttachedErr == nil) {
+				t.Fatalf("Attached, AttachedErr = %v, %v; want %v, %v", obs.Attached, obs.AttachedErr, tc.wantAttached, tc.wantErr)
+			}
+		})
 	}
 }

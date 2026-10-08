@@ -8,8 +8,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // MemStore is an in-memory Store implementation backed by a slice. It is
@@ -133,7 +131,7 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 		if prefix == "" {
 			prefix = "gc"
 		}
-		if n, ok := allocatableSequenceOfID(prefix, explicit); ok && n > int64(m.seq) {
+		if n, ok := parseSQLiteAutoIDSuffix(prefix, explicit); ok && n > 0 && n > int64(m.seq) {
 			m.seq = int(n)
 		}
 		b.ID = explicit
@@ -241,6 +239,9 @@ func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
 	if opts.Status != nil {
 		setBeadStatus(&m.beads[i], *opts.Status)
 	}
+	if oldStatus == "closed" && m.beads[i].Status != "closed" {
+		forgetCloseReason(&m.beads[i])
+	}
 	if opts.Description != nil {
 		m.beads[i].Description = *opts.Description
 	}
@@ -279,6 +280,9 @@ func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
 			}
 		}
 		m.beads[i].Labels = filtered
+	}
+	if oldStatus != "closed" && m.beads[i].Status == "closed" {
+		recordCloseReason(&m.beads[i])
 	}
 	m.beads[i].UpdatedAt = time.Now()
 	m.beads[i].Revision++
@@ -333,6 +337,7 @@ func (m *MemStore) Close(id string) error {
 				return nil
 			}
 			setBeadStatus(&m.beads[i], "closed")
+			recordCloseReason(&m.beads[i])
 			m.beads[i].UpdatedAt = time.Now()
 			m.beads[i].Revision++
 			return nil
@@ -356,6 +361,7 @@ func (m *MemStore) Reopen(id string) error {
 			m.beads[i].UpdatedAt = time.Now()
 			m.beads[i].Revision++
 			if wasClosed {
+				forgetCloseReason(&m.beads[i])
 				// closed→open starts a new ownership generation; an
 				// in_progress→open reopen keeps the same owner and is not a
 				// transition.
@@ -389,6 +395,7 @@ func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, erro
 		for k, v := range metadata {
 			m.beads[i].Metadata[k] = v
 		}
+		recordCloseReason(&m.beads[i])
 		closed++
 	}
 	return closed, nil
@@ -474,7 +481,7 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 			return nil, err
 		}
 		statusByID[bead.ID] = bead.Status
-		workOutcomeByID[bead.ID] = bead.Metadata[beadmeta.WorkOutcomeMetadataKey]
+		workOutcomeByID[bead.ID] = ReadinessWorkOutcome(bead.Metadata)
 	}
 
 	var result []Bead

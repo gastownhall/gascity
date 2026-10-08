@@ -19,8 +19,20 @@ automations, and garbage-collects expired wisps.
 
 - **Controller Loop**: The persistent `select` loop in `controllerLoop()`
   that fires on a configurable ticker (default 30s) and on config file
-  changes. Each tick runs the full reconciliation, wisp GC, and order
-  dispatch pipeline. Implemented in `cmd/gc/controller.go`.
+  changes. Each tick runs the full reconciliation and wisp GC pipeline.
+  Implemented in `cmd/gc/controller.go`.
+
+- **Orders Lane**: Order dispatch runs on its own goroutine
+  (`cmd/gc/orders_lane.go`), not in the tick. Each tick wakes the lane.
+  A wake runs a pass at once if the lane has idled as long as its previous
+  pass ran, and otherwise as soon as it has, so the lane is busy at most
+  half the time while a pass fits in the patrol interval (a longer pass is
+  followed by one interval idle) and never runs back to back. A timer
+  reset after every pass runs a pass one patrol interval after the last
+  one ended if nothing else has (the backstop for a wedged tick). A reload
+  stages the rebuilt dispatcher under an order-set generation, so a lane rescan of older config cannot
+  overwrite it. A forced shutdown that overlaps a running pass skips the
+  order drain. See [Orders](orders.md#data-flow).
 
 - **Config Reload**: The debounced mechanism by which filesystem changes
   to `city.toml` and pack directories trigger a full config re-parse.
@@ -79,16 +91,25 @@ gc start --foreground
   │     ├─ build trackers (crash, idle, wisp GC, order)
   │     └─ controllerLoop()
   │           ├─ watchConfigDirs()   →  fsnotify on config + pack dirs
+  │           ├─ startup order dispatch (once, synchronous)
+  │           ├─ startOrdersLane()   →  orders lane goroutine (below)
   │           ├─ initial reconciliation
   │           └─ ticker loop:
-  │                 ├─ if dirty: tryReloadConfig() + rebuild trackers
+  │                 ├─ if dirty: tryReloadConfig() + stage order dispatcher
+  │                 ├─ wake orders lane  (no dispatch in the tick)
   │                 ├─ buildAgents(cfg)  →  evaluate pools in parallel
   │                 ├─ reconcileSessionBeads()
-  │                 ├─ wispGC.runGC()
-  │                 └─ orderDispatcher.dispatch()
+  │                 └─ wispGC.runGC()
+  │
+  │     orders lane (own goroutine; wake after a duty-cycle gap, or backstop):
+  │           ├─ FS-pressure gate + managed-Dolt preflight
+  │           ├─ rescan; install staged dispatcher; watchdogs
+  │           └─ orderDispatcher.dispatch()
   │
   └─ shutdown:
+        ├─ stop + join orders lane
         ├─ orderDispatcher.drain(ctx) →  wait for in-flight order goroutines
+        │                               (skipped if a forced stop overlaps a pass)
         ├─ gracefulStopAll()         →  interrupt → wait → kill
         ├─ record controller.stopped event
         └─ release lock + remove socket + pid
@@ -120,10 +141,12 @@ Each tick of `controllerLoop()` (`cmd/gc/controller.go:268-320`) performs:
    `wisp_ttl` both set), queries closed molecules via `bd list` and
    deletes those older than the TTL cutoff.
 
-5. **Order dispatch** (`ad.dispatch()`): Evaluates trigger conditions
-   for all non-manual orders. See
-   [Health Patrol](health-patrol.md) for trigger evaluation and dispatch
-   details.
+5. **Orders lane wake**: The tick does not dispatch orders. It wakes the
+   orders lane, which evaluates trigger conditions for all non-manual
+   orders on its own goroutine, paced by its duty cycle and backstop
+   timer. It also records the age of the lane's last pass that reached
+   dispatch on the tick trace. See
+   [Orders](orders.md#data-flow) for the lane and for trigger evaluation.
 
 ### Key Types
 
@@ -378,6 +401,9 @@ testing philosophy and tier boundaries.
 
 - [Health Patrol](health-patrol.md) -- reconciliation state machine,
   crash loop quarantine, idle tracking, and order dispatch details
+- [Session Reconciler v2](reconciler-v2.md) -- the keyed reconciler
+  behind `[daemon] session_reconciler`: queue, router, exclusivity, the
+  per-tick `reconcile_queue` record, and the A1-A17 guarantees
 - [Architecture glossary](glossary.md) -- authoritative definitions
   of controller, pool, provider, rig, and other terms used in this doc
 - [Config struct definitions](https://github.com/gastownhall/gascity/blob/main/internal/config/config.go) --

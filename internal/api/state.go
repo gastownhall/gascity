@@ -276,6 +276,19 @@ type RawConfigProvider interface {
 	RawConfig() *config.City
 }
 
+// OnDeathHookGate is an optional State capability. A controller that runs
+// on_death hooks off its tick holds a session name while that name's hook is
+// queued or running, and its reconciler defers the name's start until the
+// hook has run (the hook releases work the dead incarnation held; a restart
+// racing it could resume that work only to have it released). A handler that
+// would start a runtime directly checks the gate and leaves the start to the
+// reconciler instead. Optional for the same reason as WebhookDispatchProvider.
+type OnDeathHookGate interface {
+	// OnDeathHookPending reports whether sessionName's on_death hook is
+	// queued or running.
+	OnDeathHookPending(sessionName string) bool
+}
+
 // WebhookDispatchProvider is optionally implemented by State to expose the live
 // order dispatcher the supervisor webhook receiver (E3) fires verified+matched
 // deliveries through. It is the H1/E0.5 dispatch seam: the dispatch machine lives

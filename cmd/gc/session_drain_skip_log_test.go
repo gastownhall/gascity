@@ -28,6 +28,11 @@ func TestDrainSkipLineLogsOnTransition(t *testing.T) {
 	}
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
+	// Past the INC-003 wake grace, so the healthy pass below drains rather than
+	// deferring a freshly woken orphan.
+	env.setSessionMetadata(&session, map[string]string{
+		"last_woke_at": env.clk.Now().Add(-wakeUndesiredGrace - time.Minute).UTC().Format(time.RFC3339),
+	})
 
 	tick := func(sessions []beads.Bead, partial bool) {
 		t.Helper()

@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "beacon.go",
         "carrier.go",
+        "control_socket.go",
         "dialog.go",
         "dialog_midsession.go",
         "envsecret.go",
@@ -21,10 +22,12 @@ go_library(
         "protocol.go",
         "provider_core.go",
         "redact.go",
+        "router.go",
         "runtime.go",
         "seam_adapter.go",
         "session_events.go",
         "session_events_merge.go",
+        "session_object.go",
         "setupcommand.go",
         "staging.go",
         "startup_hints.go",
@@ -38,7 +41,9 @@ go_library(
 go_test(
     name = "runtime_test",
     srcs = [
+        "attach_observer_test.go",
         "beacon_test.go",
+        "capacity_test.go",
         "carrier_test.go",
         "dialog_midsession_test.go",
         "dialog_model_switch_test.go",
@@ -55,12 +60,14 @@ go_test(
         "fingerprint_test.go",
         "import_boundary_test.go",
         "import_trust_test.go",
+        "liveness_present_test.go",
         "liveness_test.go",
         "privatedir_test.go",
         "probe_test.go",
         "process_table_scanner_test.go",
         "provider_core_test.go",
         "redact_test.go",
+        "router_test.go",
         "runtime_test.go",
         "seam_adapter_test.go",
         "session_events_contract_test.go",
@@ -78,6 +85,8 @@ go_test(
     ),
     embed = [":runtime"],
     deps = [
+        "//internal/runtime/auto",
+        "//internal/runtime/hybrid",
         "//internal/runtime/runtimetest",
         "//internal/testenv",
     ],
@@ -100,6 +109,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

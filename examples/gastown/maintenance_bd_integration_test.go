@@ -167,7 +167,20 @@ func (c *bdTopologyCity) addScope(t *testing.T, name, db, prefix string, proxied
 		args = append(args, "--server", "--server-host", "127.0.0.1", "--server-port", strconv.Itoa(c.ensureServer(t)))
 	}
 	args = append(args, "-p", prefix, "--database", db, "--skip-hooks", "--skip-agents", dir)
-	c.bdIn(t, s, args...)
+	if proxied {
+		out, err := retryOnBdProxyStartTimeout(
+			func() (string, error) { return c.run(t, dir, c.scopeEnv(s), c.bd, args...) },
+			func() error {
+				c.signalScopeProcesses(s, syscall.SIGKILL)
+				return os.RemoveAll(filepath.Join(dir, ".beads"))
+			},
+		)
+		if err != nil {
+			t.Fatalf("bd %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
+		}
+	} else {
+		c.bdIn(t, s, args...)
+	}
 	c.scopes = append(c.scopes, s)
 	c.writeRouter(t)
 	return s
@@ -280,23 +293,106 @@ func shellSingleQuote(s string) string {
 // scopes started, found through their own pidfiles.
 func (c *bdTopologyCity) stopProcesses() {
 	for _, s := range c.scopes {
-		if !s.proxied {
-			continue
-		}
-		for _, name := range []string{"proxy.pid", "proxy-child.pid"} {
-			data, err := os.ReadFile(filepath.Join(s.dir, ".beads", "dolt", name))
-			if err != nil {
-				continue
-			}
-			var rec struct {
-				PID int `json:"pid"`
-			}
-			if json.Unmarshal(data, &rec) != nil || rec.PID <= 1 {
-				continue
-			}
-			_ = syscall.Kill(rec.PID, syscall.SIGTERM)
+		if s.proxied {
+			c.signalScopeProcesses(s, syscall.SIGTERM)
 		}
 	}
+}
+
+// signalScopeProcesses signals the processes a proxied scope's pid records
+// name: the proxy (proxy.pid) and its dolt backend (proxy-child.pid).
+func (c *bdTopologyCity) signalScopeProcesses(s bdTopologyScope, sig syscall.Signal) {
+	for _, name := range []string{"proxy.pid", "proxy-child.pid"} {
+		data, err := os.ReadFile(filepath.Join(s.dir, ".beads", "dolt", name))
+		if err != nil {
+			continue
+		}
+		var rec struct {
+			PID int `json:"pid"`
+		}
+		if json.Unmarshal(data, &rec) != nil || rec.PID <= 1 {
+			continue
+		}
+		_ = syscall.Kill(rec.PID, sig)
+	}
+}
+
+// bdProxyStartTimeout is how bd reports a proxied first start that missed its
+// fixed 15 s open deadline (beads internal/storage/dbproxy/proxy/endpoint.go).
+// Two host conditions cause it, neither a fault of the scope being created: the
+// backend Dolt port that bd picked by bind-and-close for .beads/dolt/config.yaml
+// was taken before dolt sql-server bound it (beads#7184 recovers from that, in
+// no release yet), or a disk stall held the backend's boot past the deadline.
+// The failed init leaves .beads behind with that port recorded, and bd init
+// then refuses the scope, so a retry has to start from a clean .beads.
+const bdProxyStartTimeout = "timeout waiting for proxy to become ready on its OS-assigned port"
+
+// retryOnBdProxyStartTimeout runs init once more, after reset, when the first
+// attempt failed with bdProxyStartTimeout. Any other failure is returned as is.
+func retryOnBdProxyStartTimeout(init func() (string, error), reset func() error) (string, error) {
+	out, err := init()
+	if err == nil || !strings.Contains(out, bdProxyStartTimeout) {
+		return out, err
+	}
+	if resetErr := reset(); resetErr != nil {
+		return out, fmt.Errorf("%w; resetting the scope for a retry: %w", err, resetErr)
+	}
+	return init()
+}
+
+func TestRetryOnBdProxyStartTimeoutRetriesOnlyKnownSignature(t *testing.T) {
+	timeoutOut := "Error: failed to open uow provider: uow: get proxy endpoint: " + bdProxyStartTimeout
+	errExit := fmt.Errorf("exit status 1")
+
+	t.Run("retries once from a reset scope", func(t *testing.T) {
+		var calls []string
+		out, err := retryOnBdProxyStartTimeout(
+			func() (string, error) {
+				calls = append(calls, "init")
+				if len(calls) == 1 {
+					return timeoutOut, errExit
+				}
+				return "ok", nil
+			},
+			func() error { calls = append(calls, "reset"); return nil },
+		)
+		if err != nil || out != "ok" {
+			t.Fatalf("got (%q, %v), want (ok, nil)", out, err)
+		}
+		if got := strings.Join(calls, ","); got != "init,reset,init" {
+			t.Fatalf("calls = %s, want init,reset,init", got)
+		}
+	})
+	t.Run("does not retry other failures", func(t *testing.T) {
+		calls := 0
+		_, err := retryOnBdProxyStartTimeout(
+			func() (string, error) { calls++; return "Error: database not found", errExit },
+			func() error { t.Fatal("reset called for an unrelated failure"); return nil },
+		)
+		if err == nil || calls != 1 {
+			t.Fatalf("err = %v after %d call(s), want the first failure after 1 call", err, calls)
+		}
+	})
+	t.Run("retries at most once", func(t *testing.T) {
+		calls := 0
+		out, err := retryOnBdProxyStartTimeout(
+			func() (string, error) { calls++; return timeoutOut, errExit },
+			func() error { return nil },
+		)
+		if err == nil || calls != 2 || !strings.Contains(out, bdProxyStartTimeout) {
+			t.Fatalf("got (%q, %v) after %d calls, want the second timeout after 2 calls", out, err, calls)
+		}
+	})
+	t.Run("a failed reset ends the attempt", func(t *testing.T) {
+		calls := 0
+		_, err := retryOnBdProxyStartTimeout(
+			func() (string, error) { calls++; return timeoutOut, errExit },
+			func() error { return fmt.Errorf("remove .beads: busy") },
+		)
+		if err == nil || calls != 1 || !strings.Contains(err.Error(), "remove .beads: busy") {
+			t.Fatalf("err = %v after %d call(s), want the reset error after 1 call", err, calls)
+		}
+	})
 }
 
 func (c *bdTopologyCity) sqlValue(t *testing.T, s bdTopologyScope, query string) string {
@@ -515,7 +611,16 @@ func TestBackupOrderTakesOverALegacyBackupDestination(t *testing.T) {
 	c.bdIn(t, city, "create", "--silent", "-t", "task", "something to back up")
 	c.bdIn(t, city, "dolt", "commit", "-m", "seed")
 
-	artifact := filepath.Join(c.cityDir, ".dolt-backup", city.db)
+	// The order names the destination from the city's canonical path (`pwd -P`
+	// in mol-dog-backup.sh), and Dolt matches backup URLs as strings. On macOS
+	// t.TempDir() lives under /var, a symlink to /private/var, so the legacy
+	// entry must be registered at the canonical path too or the order sees no
+	// conflict to take over.
+	cityDir, err := filepath.EvalSymlinks(c.cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(cityDir, ".dolt-backup", city.db)
 	if err := os.MkdirAll(artifact, 0o755); err != nil {
 		t.Fatal(err)
 	}

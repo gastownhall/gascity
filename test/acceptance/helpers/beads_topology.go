@@ -14,7 +14,37 @@ import (
 	"time"
 
 	"golang.org/x/mod/semver"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
+
+// DefaultSidecarIdleTimeout is the idle_timeout bd persists in a sidecar gc
+// initialized at the default proxied idle timeout: -1 (bd's never) when the
+// default is never, the window in nanoseconds otherwise.
+func DefaultSidecarIdleTimeout() int {
+	if config.DefaultProxiedIdleTimeout <= 0 {
+		return -1
+	}
+	return int(config.DefaultProxiedIdleTimeout)
+}
+
+// NativeLaneExpectation is the beads-store payload with
+// GC_BEADS_PROXIED_NATIVE on, for a proxied scope gc initialized at the
+// default idle timeout. Doctor's open is short-lived, so the store that serves
+// its reads is the native one (design 5.3) whatever the idle policy, pinned to
+// a generation established from argv AND the birth token; only a long-lived
+// open (the controller's) is refused on a finite policy. The idle policy the
+// payload reports follows the default.
+func NativeLaneExpectation() *BeadsStoreExpectation {
+	idle := "never"
+	if config.DefaultProxiedIdleTimeout > 0 {
+		idle = "finite"
+	}
+	return &BeadsStoreExpectation{
+		Store: "NativeDoltStore", RequireProxiedAccount: true, RequireNoVerdict: true,
+		Evidence: "argv+birth", IdlePolicyPrefix: idle,
+	}
+}
 
 // The init topology matrix.
 //
@@ -68,7 +98,8 @@ type ScopeShape struct {
 	// the proxied default.
 	ForbiddenDoltMode string
 	// Sidecar requires .beads/proxied_server_client_info.json, and IdleTimeout
-	// the value in it. GC-owned proxies are pinned resident (-1).
+	// the value in it: what gc's init writes at the default config
+	// (DefaultSidecarIdleTimeout).
 	Sidecar     bool
 	IdleTimeout int
 	// ExternalUpstreamSidecar requires the sidecar to name the external
@@ -275,7 +306,7 @@ func StartExternalDolt(t *testing.T, env *Env, dataDir, database string) *Extern
 
 	cmd := exec.Command("dolt", "sql-server", "-H", "127.0.0.1", "-P", strconv.Itoa(port), "--data-dir", dataDir) //nolint:gosec // fixed argv, resolved through the test PATH
 	cmd.Dir = dataDir
-	cmd.Env = env.List()
+	cmd.Env = env.ToolList()
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
@@ -314,12 +345,7 @@ func (e *ExternalDolt) ProvisionBeadsDatabase(t *testing.T, env *Env, bdPath, wo
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		t.Fatalf("create provisioning workspace: %v", err)
 	}
-	cmd := exec.Command(bdPath, "init", "--server", //nolint:gosec // resolved test binary
-		"--server-host", e.Host, "--server-port", e.Port,
-		"--database", e.Database, "-p", prefix,
-		"--skip-hooks", "--skip-agents", "--quiet", "--non-interactive", workspace)
-	cmd.Dir = workspace
-	cmd.Env = append(env.List(), "BEADS_DIR="+filepath.Join(workspace, ".beads"))
+	cmd := e.provisionCommand(env, bdPath, workspace, prefix)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("provision beads database %q on %s: %v\n%s", e.Database, e.Addr(), err, out)
 	}
@@ -339,6 +365,23 @@ func (e *ExternalDolt) ProvisionBeadsDatabase(t *testing.T, env *Env, bdPath, wo
 	e.ProjectID = identity.ProjectID
 }
 
+// provisionCommand is ProvisionBeadsDatabase's `bd init --server`.
+//
+// It runs under the Env's tool home, never the real HOME. This is the command
+// that started the operator's own shared Dolt server on 2026-09-29: bd init in
+// shared-server mode (a user-level `dolt.shared-server: true`) ignores the
+// explicit --server-host/--server-port and starts the host-wide server under
+// ~/.beads/shared-server with whatever dolt is on PATH — here, this run's.
+func (e *ExternalDolt) provisionCommand(env *Env, bdPath, workspace, prefix string) *exec.Cmd {
+	cmd := exec.Command(bdPath, "init", "--server", //nolint:gosec // resolved test binary
+		"--server-host", e.Host, "--server-port", e.Port,
+		"--database", e.Database, "-p", prefix,
+		"--skip-hooks", "--skip-agents", "--quiet", "--non-interactive", workspace)
+	cmd.Dir = workspace
+	cmd.Env = env.Clone().With("BEADS_DIR", filepath.Join(workspace, ".beads")).ToolList()
+	return cmd
+}
+
 // BeadsTopologies returns the matrix in the order AC-M lists it.
 func BeadsTopologies() []BeadsTopology {
 	// The bd-owned proxied store, as doctor reports it with the flag off: the
@@ -346,15 +389,11 @@ func BeadsTopologies() []BeadsTopology {
 	proxiedProviderStore := BeadsStoreExpectation{
 		Store: "BdStore", PreflightGate: "proxied_provider", RefuseProxiedAccount: true,
 	}
-	// And with the flag on: the store that serves the reads is the native one
-	// (design 5.3), pinned to a generation established from argv AND the birth
-	// token, on a proxy gc's own init pins resident.
-	proxiedNativeStore := &BeadsStoreExpectation{
-		Store: "NativeDoltStore", RequireProxiedAccount: true, RequireNoVerdict: true,
-		Evidence: "argv+birth", IdlePolicyPrefix: "never",
-	}
+	// And with the flag on: what the native lane does with a scope gc
+	// initialized at the default idle timeout (NativeLaneExpectation).
+	proxiedNativeStore := NativeLaneExpectation()
 	proxiedLocalScope := ScopeShape{
-		DoltMode: "proxied-server", Sidecar: true, IdleTimeout: -1,
+		DoltMode: "proxied-server", Sidecar: true, IdleTimeout: DefaultSidecarIdleTimeout(),
 		Journaled: true, Proxies: 1, Servers: 1, Owner: OwnerProvider,
 	}
 	directLocalScope := ScopeShape{
@@ -460,12 +499,12 @@ func BeadsTopologies() []BeadsTopology {
 			Doc:      "a local bd proxy fronting the external server: the proxy is ours, the data is not",
 			Upstream: true,
 			City: ScopeShape{
-				DoltMode: "proxied-server", Sidecar: true, IdleTimeout: -1,
+				DoltMode: "proxied-server", Sidecar: true, IdleTimeout: DefaultSidecarIdleTimeout(),
 				ExternalUpstreamSidecar: true,
 				Journaled:               true, Proxies: 1, Servers: 0, Owner: OwnerProvider,
 			},
 			Rig: ScopeShape{
-				DoltMode: "proxied-server", Sidecar: true, IdleTimeout: -1,
+				DoltMode: "proxied-server", Sidecar: true, IdleTimeout: DefaultSidecarIdleTimeout(),
 				ExternalUpstreamSidecar: true,
 				Journaled:               true, Proxies: 1, Servers: 0, Owner: OwnerProvider,
 			},
@@ -604,7 +643,7 @@ func RequireTopologyTooling(t *testing.T) (bdPath, doltPath string) {
 	if bdPath == "" {
 		MissingTooling(t, "bd is not available; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0")
 	}
-	out, err := exec.Command(bdPath, "init", "--help").CombinedOutput() //nolint:gosec // resolved test binary
+	out, err := ToolCommand(t, bdPath, "init", "--help").CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "--proxied-server") {
 		MissingTooling(t, "bd at %s has no proxied-server support; set GC_ACCEPTANCE_BD_BIN to a bd >= 1.3.0", bdPath)
 	}
@@ -623,7 +662,7 @@ var bdVersionPattern = regexp.MustCompile(`bd version (\d+\.\d+\.\d+[0-9A-Za-z.+
 // the older bd lacks, for the skip message.
 func RequireBDAtLeast(t *testing.T, bdPath, minVersion, feature string) {
 	t.Helper()
-	out, err := exec.Command(bdPath, "version").CombinedOutput() //nolint:gosec // resolved test binary
+	out, err := ToolCommand(t, bdPath, "version").CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s version: %v\n%s", bdPath, err, out)
 	}
@@ -715,14 +754,7 @@ func LegacyInitEnv(env *Env) *Env {
 func TopologyEnv(t *testing.T, base *Env, root, bdPath, doltPath string) *Env {
 	t.Helper()
 	linkDir := filepath.Join(root, "bin")
-	if err := os.MkdirAll(linkDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for name, target := range map[string]string{"bd": bdPath, "dolt": doltPath} {
-		if err := os.Symlink(target, filepath.Join(linkDir, name)); err != nil && !os.IsExist(err) {
-			t.Fatal(err)
-		}
-	}
+	LinkBeadsTooling(t, base, linkDir, bdPath, doltPath)
 	env := base.Clone()
 	entries := filepath.SplitList(env.Get("PATH"))
 	path := append([]string{entries[0], linkDir}, entries[1:]...)

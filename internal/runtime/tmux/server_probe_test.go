@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -362,6 +363,150 @@ func TestNamedSocketPathFallsBackToTmpWhenTMUXTMPDIREmpty(t *testing.T) {
 	t.Setenv("TMPDIR", "/must-not-be-used")
 	if got, want := namedSocketPath("gc-test"), filepath.Join("/tmp", fmt.Sprintf("tmux-%d", os.Getuid()), "gc-test"); got != want {
 		t.Fatalf("namedSocketPath() = %q, want %q", got, want)
+	}
+}
+
+func TestCaptureNamedSocketWitnessFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("TMUX_TMPDIR", root)
+	socketName := "attach-witness"
+	path := namedSocketPath(socketName)
+
+	newTmux := func(out string) *Tmux {
+		return &Tmux{cfg: Config{SocketName: socketName}, exec: &fakeExecutor{out: out}}
+	}
+	capture := func(tm *Tmux, lstat func(context.Context, string) (namedSocketObservation, error)) (namedSocketWitness, error) {
+		tm.namedSocketLstat = lstat
+		return tm.captureNamedSocketWitness(context.Background())
+	}
+	socketFixture := func(t *testing.T, name string) os.FileInfo {
+		t.Helper()
+		fixture := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(fixture, []byte("fixture"), 0o600); err != nil {
+			t.Fatalf("write socket fixture: %v", err)
+		}
+		info, err := os.Lstat(fixture)
+		if err != nil {
+			t.Fatalf("lstat socket fixture: %v", err)
+		}
+		return info
+	}
+
+	t.Run("stable", func(t *testing.T) {
+		tm := newTmux("41")
+		node := socketFixture(t, "stable")
+		witness, err := capture(tm, func(context.Context, string) (namedSocketObservation, error) {
+			return namedSocketObservation{node: node, isSocket: true}, nil
+		})
+		if err != nil {
+			t.Fatalf("captureNamedSocketWitness: %v", err)
+		}
+		if witness.canonicalPath != path || !filepath.IsAbs(witness.canonicalPath) {
+			t.Fatalf("canonical path = %q, want absolute clean %q", witness.canonicalPath, path)
+		}
+		if witness.node == nil || witness.serverPID != 41 {
+			t.Fatalf("witness = %#v, want socket node and server PID", witness)
+		}
+		if got, want := tm.exec.(*fakeExecutor).calls, [][]string{{"-u", "-N", "-S", path, "display-message", "-p", "#{pid}"}}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("witness command = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("missing", func(t *testing.T) {
+		_, err := capture(newTmux("41"), func(context.Context, string) (namedSocketObservation, error) {
+			return namedSocketObservation{}, os.ErrNotExist
+		})
+		if !errors.Is(err, ErrServerDegraded) || !strings.Contains(err.Error(), "reason=socket-missing") {
+			t.Fatalf("capture missing socket = %v, want degraded socket-missing", err)
+		}
+		if strings.Contains(err.Error(), root) {
+			t.Fatalf("capture missing socket exposed absolute path: %v", err)
+		}
+	})
+
+	t.Run("non socket", func(t *testing.T) {
+		fixture := filepath.Join(t.TempDir(), "plain-file")
+		if err := os.WriteFile(fixture, []byte("not a socket"), 0o600); err != nil {
+			t.Fatalf("write non-socket: %v", err)
+		}
+		info, err := os.Lstat(fixture)
+		if err != nil {
+			t.Fatalf("lstat non-socket: %v", err)
+		}
+		_, err = capture(newTmux("41"), func(context.Context, string) (namedSocketObservation, error) {
+			return namedSocketObservation{node: info}, nil
+		})
+		if !errors.Is(err, ErrServerDegraded) || !strings.Contains(err.Error(), "reason=not-unix-socket") {
+			t.Fatalf("capture non-socket = %v, want degraded non-socket", err)
+		}
+	})
+
+	t.Run("stat error", func(t *testing.T) {
+		_, err := capture(newTmux("41"), func(context.Context, string) (namedSocketObservation, error) {
+			return namedSocketObservation{}, os.ErrPermission
+		})
+		if !errors.Is(err, ErrServerDegraded) || !strings.Contains(err.Error(), "reason=socket-lstat") {
+			t.Fatalf("capture stat error = %v, want degraded socket-lstat", err)
+		}
+	})
+
+	t.Run("malformed server pid", func(t *testing.T) {
+		node := socketFixture(t, "malformed-pid")
+		_, err := capture(newTmux("not-a-pid"), func(context.Context, string) (namedSocketObservation, error) {
+			return namedSocketObservation{node: node, isSocket: true}, nil
+		})
+		if !errors.Is(err, ErrServerDegraded) || !strings.Contains(err.Error(), "reason=malformed-server-pid") {
+			t.Fatalf("capture malformed PID = %v, want degraded malformed-server-pid", err)
+		}
+	})
+
+	t.Run("replacement during capture", func(t *testing.T) {
+		original := socketFixture(t, "original")
+		replacement := socketFixture(t, "replacement")
+		calls := 0
+		tm := newTmux("42")
+		_, err := capture(tm, func(context.Context, string) (namedSocketObservation, error) {
+			calls++
+			if calls == 1 {
+				return namedSocketObservation{node: original, isSocket: true}, nil
+			}
+			return namedSocketObservation{node: replacement, isSocket: true}, nil
+		})
+		if !errors.Is(err, ErrServerDegraded) || !strings.Contains(err.Error(), "reason=socket-replaced-during-capture") {
+			t.Fatalf("capture replacement = %v, want degraded replacement refusal", err)
+		}
+	})
+}
+
+func TestAttachSessionWitnessDoesNotRequireTargetToExist(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("TMUX_TMPDIR", root)
+	socketName := "server-scoped-witness"
+	path := namedSocketPath(socketName)
+	fixture := filepath.Join(t.TempDir(), "socket-node")
+	if err := os.WriteFile(fixture, []byte("fixture"), 0o600); err != nil {
+		t.Fatalf("write socket fixture: %v", err)
+	}
+	info, err := os.Lstat(fixture)
+	if err != nil {
+		t.Fatalf("lstat socket fixture: %v", err)
+	}
+	node := info
+	fe := &fakeExecutor{outs: []string{"41", "41", ""}, errs: []error{nil, nil, ErrSessionNotFound}}
+	tm := &Tmux{cfg: Config{SocketName: socketName}, exec: fe}
+	tm.namedSocketLstat = func(context.Context, string) (namedSocketObservation, error) {
+		return namedSocketObservation{node: node, isSocket: true}, nil
+	}
+	err = tm.AttachSession("missing")
+	if !errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrServerDegraded) {
+		t.Fatalf("AttachSession missing target = %v, want ErrSessionNotFound without degraded witness", err)
+	}
+	if got, want := fe.calls, [][]string{
+		{"-u", "-N", "-S", path, "display-message", "-p", "#{pid}"},
+		{"-u", "-N", "-S", path, "display-message", "-p", "#{pid}"},
+		{"-u", "-N", "-S", path, "attach-session", "-t", "missing"},
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("AttachSession argv = %#v, want %#v", got, want)
 	}
 }
 

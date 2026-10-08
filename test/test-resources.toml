@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 715
-baseline_files = 210
+baseline_calls = 745
+baseline_files = 221
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -23,8 +23,8 @@ expires = "2026-10-31"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 490
-baseline_files = 179
+baseline_calls = 498
+baseline_files = 184
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-cp3hwi"
@@ -36,10 +36,10 @@ expires = "2026-10-31"
 [[audit_baseline]]
 scope = "all"
 resource = "listener_helper"
-baseline_calls = 58
-baseline_files = 23
-reported_calls = 58
-reported_files = 23
+baseline_calls = 60
+baseline_files = 24
+reported_calls = 60
+reported_files = 24
 owner_bead = "ga-cp3hwi"
 invariant = "all-source listener-helper call/file totals cannot drift without an explicit checked policy update"
 resource_owner = "ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption"
@@ -51,8 +51,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 481
-baseline_files = 139
+baseline_calls = 497
+baseline_files = 147
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -64,8 +64,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 319
-baseline_files = 122
+baseline_calls = 320
+baseline_files = 123
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-cp3hwi"
@@ -77,8 +77,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 122
-baseline_files = 14
+baseline_calls = 124
+baseline_files = 16
 reported_calls = 3960
 reported_files = 184
 owner_bead = "ga-cp3hwi"
@@ -116,8 +116,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 318
-baseline_files = 66
+baseline_calls = 319
+baseline_files = 67
 reported_calls = 255
 reported_files = 56
 owner_bead = "ga-cp3hwi"
@@ -129,9 +129,9 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "listener_helper"
-baseline_calls = 38
+baseline_calls = 39
 baseline_files = 13
-reported_calls = 38
+reported_calls = 39
 reported_files = 13
 owner_bead = "ga-cp3hwi"
 invariant = "untagged listener-helper call/file totals cannot grow; reductions must lower this baseline"
@@ -209,8 +209,8 @@ expires = "2026-10-31"
 # declaration leave the Small-debt census; helper bodies and sibling tests do
 # not inherit a source exemption.
 [[medium]]
-package_dir = "internal/api"
-package_name = "api"
+package_dir = "internal/api/apierr"
+package_name = "apierr"
 owner = "TestEveryEmittedErrorCodeIsRegistered"
 resources = ["subprocess"]
 owner_bead = "ga-cp3hwi"
@@ -384,6 +384,72 @@ resource_owner = "the one go run subprocess is confined to TestAddTestenvImportS
 migration_target = "P0.4b"
 expires = "2026-10-31"
 
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestGoModDownloadRetryScriptRetriesTransientFailures"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the CI go mod download retry proof is a checked Medium subprocess owner"
+resource_owner = "the one bash subprocess per case is confined to TestGoModDownloadRetryScriptRetriesTransientFailures, which exists to run .github/scripts/go-mod-download-retry.sh against a PATH-injected fake go: the retry loop and GOPROXY selection are shell, so only a real shell run can prove a transient proxy error is retried and a persistent one fails"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestGoModVerifyCacheDetectsTamperedModules"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the CI Go module cache verification proof is a checked Medium subprocess owner"
+resource_owner = "the go and bash subprocesses are confined to TestGoModVerifyCacheDetectsTamperedModules, which exists to run .github/scripts/go-mod-download-retry.sh and .github/scripts/go-mod-verify-cache.sh with the real go command against a file:// module proxy and an isolated module cache, then tamper with the cached zip: the claim under test is the go command's own trust of a cached .ziphash, so only the real go command can prove the verify step catches what it accepts"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestRBEWorkerJSONIsolationOffMatchesPreO1"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the OSS worker rollback-config and fork-tier worker-config proof is a checked Medium subprocess owner"
+resource_owner = "the one jq subprocess is confined to TestRBEWorkerJSONIsolationOffMatchesPreO1, which exists to render tools/rbe/blacksmith-worker.sh's own jq program for the OSS tier with isolation off, compared with the pre-O1 worker.json, and for the fork tier, compared with its golden: the program is jq, so only jq can prove the rollback renders the same config and the fork tier caches nothing"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestRBEWorkerScrubCAS"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the sticky-disk CAS scrub proof is a checked Medium subprocess owner"
+resource_owner = "the one bash subprocess is confined to TestRBEWorkerScrubCAS, which exists to run tools/rbe/blacksmith-worker.sh's own scrub_cas function on a scratch store of odd names (quotes, spaces, a newline, a backslash) and bad blobs: the function is GNU find, xargs and sha256sum plumbing, so only bash can prove it deletes every bad file without aborting the worker"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestFreshMergeActionBehaviour"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "the fresh-merge composite action's behavior proof is a checked Medium subprocess owner"
+resource_owner = "the git and bash subprocesses are confined to TestFreshMergeActionBehaviour, which exists to run .github/actions/fresh-merge's own bash script against a scratch git origin (clean merge, workflow skew, conflict, head already containing the tip, unfetchable base): the script is git plumbing, so only real git can prove what it merges and when it fails"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestCacheZstdProbe"
+resources = ["http_test_server"]
+owner_bead = "ga-cp3hwi"
+invariant = "the anonymous-cache zstd probe's behavior proof is a checked Medium HTTP test server owner"
+resource_owner = "the loopback TLS HTTP/2 servers are confined to TestCacheZstdProbe, which exists to run tools/rbe/cache-zstd-probe.sh against a stand-in rbe-cache GetCapabilities (zstd advertised or not, gRPC and HTTP errors, malformed answers, a timeout): the probe is curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
 # A reviewed-hermetic-body row is narrower than a Small test declaration. It
 # proves that the exact untagged test body and statically reachable
 # receiverless same-package helpers contain none of the cataloged resources.
@@ -421,8 +487,8 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 462
-baseline_files = 132
+baseline_calls = 472
+baseline_files = 138
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-cp3hwi"
@@ -434,8 +500,8 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 319
-baseline_files = 122
+baseline_calls = 320
+baseline_files = 123
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-cp3hwi"
@@ -447,8 +513,8 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 117
-baseline_files = 14
+baseline_calls = 119
+baseline_files = 16
 reported_calls = 4348
 reported_files = 200
 owner_bead = "ga-cp3hwi"
@@ -499,9 +565,9 @@ expires = "2026-10-31"
 [[small_debt]]
 scope = "untagged"
 resource = "listener_helper"
-baseline_calls = 38
+baseline_calls = 39
 baseline_files = 13
-reported_calls = 38
+reported_calls = 39
 reported_files = 13
 owner_bead = "ga-cp3hwi"
 invariant = "untagged Small listener-helper call/file totals cannot grow; reductions must lower this baseline"

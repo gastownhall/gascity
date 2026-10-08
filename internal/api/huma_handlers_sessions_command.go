@@ -105,6 +105,12 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		return nil, apierr.Internal.Msg(err.Error())
 	}
 	agentCfg := createCtx.Agent
+	// The controller's reconciler never starts a demand-only singleton's
+	// session on request, so refuse up front instead of returning 202 for a
+	// bead that would sit start-pending forever (#6858).
+	if msg := demandOnlySingletonCreateRefusal(cfg, agentCfg); msg != "" {
+		return nil, apierr.DemandOnlySingleton.Msg(msg)
+	}
 	alias = createCtx.Alias
 	explicitName := createCtx.ExplicitName
 	workDirQualifiedName := createCtx.Identity
@@ -935,6 +941,38 @@ func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionIDInput)
 	return out, nil
 }
 
+// --- Session Reset ---
+
+// humaHandleSessionReset is the Huma-typed handler for POST /v0/session/{id}/reset.
+// It records a fresh-restart request through the worker boundary (the same
+// path as `gc session reset`) and enqueues the session's reconcile key, which
+// restarts the session on the next continuation epoch.
+func (s *Server) humaHandleSessionReset(ctx context.Context, input *SessionIDInput) (*OKWithIDResponse, error) {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
+		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
+	}
+
+	id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
+	if err != nil {
+		return nil, humaResolveError(err)
+	}
+
+	handle, err := s.workerHandleForSession(store.Store, id)
+	if err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	if err := handle.Reset(ctx); err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	s.state.Enqueue(reconcilekey.Session(id))
+
+	out := &OKWithIDResponse{}
+	out.Body.Status = "ok"
+	out.Body.ID = id
+	return out, nil
+}
+
 // --- Session Respond ---
 
 // humaHandleSessionRespond is the Huma-typed handler for POST /v0/session/{id}/respond.
@@ -971,6 +1009,8 @@ func (s *Server) humaHandleSessionRespond(_ context.Context, input *SessionRespo
 	if err != nil {
 		return nil, err
 	}
+	// Publish the session.pending_cleared now rather than on the next tick.
+	s.pokePendingMonitor()
 
 	out := &SessionRespondOutput{}
 	out.Body.Status = "accepted"
@@ -1091,6 +1131,23 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionIDInpu
 	sessionName := res.Info.SessionNameMetadata
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
+	}
+	// The wake is recorded and its holds are cleared, but a demand-only
+	// singleton's pool session starts only from pool demand: refuse instead of
+	// starting it, as `gc session wake` does (#6858).
+	if msg := demandOnlySingletonWakeRefusal(s.state.Config(), res.Info); msg != "" {
+		s.state.Enqueue(reconcilekey.Session(id))
+		return nil, apierr.DemandOnlySingleton.Msg(msg)
+	}
+	// The wake is recorded (wake_request=explicit). While the name's on_death
+	// hook is queued or running, the reconciler owns the start, as it does
+	// for gc session wake: its start path waits for the hook.
+	if gate, ok := s.state.(OnDeathHookGate); ok && sessionName != "" && gate.OnDeathHookPending(sessionName) {
+		s.state.Enqueue(reconcilekey.Session(id))
+		out := &OKWithIDResponse{}
+		out.Body.Status = "ok"
+		out.Body.ID = id
+		return out, nil
 	}
 	handle, err := s.workerHandleForSession(store.Store, id)
 	if err != nil {
