@@ -67,3 +67,18 @@ func resetSuppressed(t *testing.T, reason SleepReason) bool {
 	input := LifecycleInput{SessionKey: "sk-1"}
 	return !shouldResetContinuation(BaseStateActive, input, string(reason))
 }
+
+// TestKilledIsDeliberateAndSuppressesReset (GH#7308): an operator `gc session
+// kill` is a deliberate stop, like "drained" or "city-stop" — it must not
+// accrue churn, and the heal pass that runs on the now-dead runtime must not
+// reset the session's resume identity (session_key/started_config_hash). A
+// killed session that wakes should resume its provider conversation, not
+// start a fresh one.
+func TestKilledIsDeliberateAndSuppressesReset(t *testing.T) {
+	if !IsDeliberateSleepReason(string(SleepReasonKilled)) {
+		t.Error("killed must be a deliberate sleep reason (operator stop, no churn)")
+	}
+	if !resetSuppressed(t, SleepReasonKilled) {
+		t.Error("killed must suppress continuation reset, preserving resume identity")
+	}
+}
