@@ -82,7 +82,7 @@ func (s *NativeDoltStore) CloseWithMetadataIfMatch(id string, expectedRevision i
 	if err != nil {
 		return Bead{}, fmt.Errorf("parsing metadata for bead %q: %w", id, err)
 	}
-	merged := make(map[string]string, len(currentMetadata)+len(metadata))
+	merged := make(map[string]string, len(currentMetadata))
 	for key, value := range currentMetadata {
 		merged[key] = value
 	}
