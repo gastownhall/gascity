@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
@@ -35,6 +36,9 @@ func backdatePastSweepAge(t *testing.T, path string) {
 
 func pidPrefixedTestDir(t *testing.T, root, prefix string, pid int) string {
 	t.Helper()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	dir := filepath.Join(root, prefix+strconv.Itoa(pid)+"-fixture")
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatalf("Mkdir(%s): %v", dir, err)
@@ -44,6 +48,12 @@ func pidPrefixedTestDir(t *testing.T, root, prefix string, pid int) string {
 
 func TestSweepOrphanPIDPrefixedDirsRemovesStaleDeadPIDWithNilDiagnostics(t *testing.T) {
 	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := canonicalOwnedSocketParentRoot(root); err != nil {
+		t.Fatalf("t.TempDir is not a canonical private scope: %v", err)
+	}
 	dir := pidPrefixedTestDir(t, root, "pfx-", nonLivePID(t))
 	backdatePastSweepAge(t, dir)
 
@@ -54,8 +64,58 @@ func TestSweepOrphanPIDPrefixedDirsRemovesStaleDeadPIDWithNilDiagnostics(t *test
 	}
 }
 
+func TestSweepOrphanPIDPrefixedDirsRequiresPrivateScopeAndStaysInsideIt(t *testing.T) {
+	scope := t.TempDir()
+	foreignScope := t.TempDir()
+	owned := makeAgedFreeSentinelOrphan(t, scope, "gct-2147483647-owned")
+	foreign := makeAgedFreeSentinelOrphan(t, foreignScope, "gct-2147483646-foreign")
+	if err := os.Chmod(scope, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	SweepOrphanPIDPrefixedDirs(scope, SocketParentDirPrefix, io.Discard)
+	if _, err := os.Stat(owned); err != nil {
+		t.Fatalf("non-private configured scope was swept; root should remain: %v", err)
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Fatalf("foreign same-prefix fixture changed outside scope: %v", err)
+	}
+	if err := os.Chmod(scope, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	SweepOrphanPIDPrefixedDirs(scope, SocketParentDirPrefix, io.Discard)
+	if _, err := os.Stat(owned); !os.IsNotExist(err) {
+		t.Fatalf("aged orphan in private owned scope survived: %v", err)
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Fatalf("sweep crossed into foreign same-prefix fixture: %v", err)
+	}
+}
+
+func makeAgedFreeSentinelOrphan(t *testing.T, root, name string) string {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel, err := HoldAliveSentinel(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sentinel.Close(); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-socketParentFreeSentinelSweepMinAge - time.Minute)
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func TestSweepOrphanPIDPrefixedDirsPreservesHeldSentinel(t *testing.T) {
 	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	dir := pidPrefixedTestDir(t, root, "pfx-", nonLivePID(t))
 	backdatePastSweepAge(t, dir)
 
@@ -74,6 +134,9 @@ func TestSweepOrphanPIDPrefixedDirsPreservesHeldSentinel(t *testing.T) {
 
 func TestSweepOrphanPIDPrefixedDirsRemovesFreeSentinel(t *testing.T) {
 	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	dir := pidPrefixedTestDir(t, root, "pfx-", nonLivePID(t))
 
 	sentinel, err := HoldAliveSentinel(dir)
@@ -98,6 +161,9 @@ func TestSweepOrphanPIDPrefixedDirsRemovesFreeSentinel(t *testing.T) {
 
 func TestSweepOrphanPIDPrefixedDirsSkipsYoungDir(t *testing.T) {
 	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	dir := pidPrefixedTestDir(t, root, "pfx-", nonLivePID(t))
 	// No backdate: dir is fresh, inside the min-age window.
 
@@ -122,6 +188,9 @@ func TestSweepOrphanPIDPrefixedDirsSkipsSelfPID(t *testing.T) {
 
 func TestSweepOrphanPIDPrefixedDirsSkipsNonDirectories(t *testing.T) {
 	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(root, "pfx-123")
 	if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
 		t.Fatal(err)
@@ -132,8 +201,55 @@ func TestSweepOrphanPIDPrefixedDirsSkipsNonDirectories(t *testing.T) {
 	}
 }
 
+func TestNewSocketParentDirUsesCanonicalConfiguredScope(t *testing.T) {
+	scope := t.TempDir()
+	if err := os.Chmod(scope, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(SocketParentRootEnv, scope)
+	configured, err := SocketParentRootFromEnv("")
+	if err != nil {
+		t.Fatalf("SocketParentRootFromEnv: %v", err)
+	}
+	dir, sentinel, err := NewSocketParentDir(configured, io.Discard)
+	if err != nil {
+		t.Fatalf("NewSocketParentDir: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("removing socket parent %q: %v", dir, err)
+		}
+		if err := sentinel.Close(); err != nil {
+			t.Errorf("closing socket parent sentinel for %q: %v", dir, err)
+		}
+	})
+	if !pathutil.PathWithin(configured, dir) {
+		t.Fatalf("socket parent created outside configured scope: %q", dir)
+	}
+}
+
+func TestNewSocketParentDirRejectsInvalidExplicitScope(t *testing.T) {
+	scope := t.TempDir()
+	if err := os.Chmod(scope, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(SocketParentRootEnv, scope)
+	if dir, sentinel, err := NewSocketParentDir("/tmp", io.Discard); err == nil {
+		if sentinel != nil {
+			_ = sentinel.Close()
+		}
+		if dir != "" {
+			_ = os.RemoveAll(dir)
+		}
+		t.Fatal("NewSocketParentDir accepted invalid explicit scope")
+	}
+}
+
 func TestNewSocketParentDirCreatesSentinelHeldDir(t *testing.T) {
 	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 
 	dir, sentinel, err := NewSocketParentDir(root, io.Discard)
 	if err != nil {
@@ -157,6 +273,9 @@ func TestNewSocketParentDirCreatesSentinelHeldDir(t *testing.T) {
 
 func TestNewSocketParentDirReapsOrphanedSibling(t *testing.T) {
 	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	orphan := pidPrefixedTestDir(t, root, SocketParentDirPrefix, nonLivePID(t))
 	backdatePastSweepAge(t, orphan)
 
@@ -182,6 +301,9 @@ func TestNewSocketParentDirReapsOrphanedSibling(t *testing.T) {
 
 func TestSweepOrphanPIDPrefixedDirsPreservesLegacyNoDashDir(t *testing.T) {
 	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	// The pre-sweep harness created its socket parent with
 	// os.MkdirTemp(root, "pfx-"), yielding an all-digit "pfx-<random>" name
 	// with no "-" separator and no alive sentinel. Those trailing digits are a
@@ -266,6 +388,9 @@ func TestSweepOrphanPIDPrefixedDirsAgeFenceBySentinelState(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
+			if err := os.Chmod(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
 			dir := pidPrefixedTestDir(t, root, "pfx-", nonLivePID(t))
 			cleanup := tt.setup(t, dir)
 			defer cleanup()

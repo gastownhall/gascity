@@ -574,7 +574,7 @@ func TestStripLeakGuardNoise(t *testing.T) {
 	}
 }
 
-const testTmuxSocketParentRootEnv = "GC_TEST_TMUX_SOCKET_PARENT_ROOT"
+const testTmuxSocketParentRootEnv = tmuxtest.SocketParentRootEnv
 
 func createAgedFreeTmuxSocketParent(t *testing.T) (string, string) {
 	t.Helper()
