@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"reflect"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/session"
@@ -26,6 +27,8 @@ const (
 	causeCAS       = "cas"       // another writer landed between the read and the write
 	causeNoWriter  = "no-conditional-writer"
 	causeWrite     = "write-error"
+	// causeSuperseded: the row's lifecycle changed since the pass read it.
+	causeSuperseded = "superseded"
 )
 
 // rowWrite is one admitted row write.
@@ -34,6 +37,10 @@ type rowWrite struct {
 	it   intent
 	// decide is decideRow; a test supplies its own arm table.
 	decide func(*World, *allocDecision, rowKey) (intent, time.Time)
+	// sameLifecycle also refuses, with cause superseded, a fresh row whose
+	// lifecycle facts differ from the pass's row: legacy's heal fence
+	// (ApplyPatchIfLifecycleUnchanged), which sees a wake request too.
+	sameLifecycle bool
 }
 
 func rowWriteEffect(p *effectPass, it intent) func(context.Context) settlement {
@@ -61,8 +68,13 @@ func (e rowWrite) runLocked(ctx context.Context) settlement {
 		return settlement{Outcome: settledFailed, Cause: causeDeadline, Err: err}
 	}
 	var fresh intent
-	decided := false
+	decided, superseded := false, false
+	pass := e.pass.World.Census.Rows[e.it.Key].Info
 	wrote, err := writer.updateMetadataFenced(e.it.Key.ID, 1, func(row session.Info, resp session.PersistedResponse) session.MetadataPatch {
+		if e.sameLifecycle && !reflect.DeepEqual(session.LifecycleInputFromInfo(pass), session.LifecycleInputFromInfo(row)) {
+			superseded = true
+			return nil
+		}
 		w := e.pass.World.withRow(e.it.Key, row, resp.Metadata)
 		fresh, _ = e.decide(&w, e.pass.Alloc, e.it.Key)
 		decided = fresh.Kind == e.it.Kind && fresh.Basis == e.it.Basis && len(fresh.Patch) > 0
@@ -80,6 +92,8 @@ func (e rowWrite) runLocked(ctx context.Context) settlement {
 		return settlement{Outcome: settledLanded, Event: fresh.Event}
 	case ctx.Err() != nil:
 		return settlement{Outcome: settledFailed, Cause: causeDeadline, Err: ctx.Err()}
+	case superseded:
+		return settlement{Outcome: settledRefused, Cause: causeSuperseded}
 	case decided:
 		return settlement{Outcome: settledRefused, Cause: causeCAS}
 	}

@@ -30,7 +30,12 @@ const (
 	alertPassPanic      = "pass-panic"             // P6
 	alertEffectDeadline = "effect-deadline"        // an effect settled at its deadline
 	alertUnknownState   = "unknown-state"          // a state legacy does not know was written (I-legacy broke)
+	alertHealRefused    = "heal-refused"           // an A6 heal refused until its backoff reached the cap
 )
+
+// healRefusalsBeforeAlert is how many backed-off refusals in a row an A6 heal
+// takes before it alerts: the sixth reaches P4's 5-minute cap.
+const healRefusalsBeforeAlert = 6
 
 // passObserver is the planner's memory for alerting once and emitting on
 // change.
@@ -78,6 +83,10 @@ func (p *planner) observeSettlement(s settlement) {
 	p.observeRekeySettlement(s)
 	if phase := idleRespawnPhases[s.Kind]; phase != "" && s.Outcome == settledLanded && s.Reason == idleRespawnDrainReason {
 		p.metrics.count(&p.metrics.series, phase)
+	}
+	if (s.Kind == intentRowHeal || s.Kind == intentRowHealFresh) && (s.Outcome == settledRefused || s.Outcome == settledFailed) &&
+		p.backoff.Record(rowBackoffKey(s.Key)).Consecutive == healRefusalsBeforeAlert {
+		p.alert(alertHealRefused, s.Key.ID, fmt.Sprintf("%s effect for %s refused %d times in a row, last with cause %q", s.Kind, s.Key.ID, healRefusalsBeforeAlert, s.Cause))
 	}
 	if (s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && strings.TrimPrefix(s.Cause, causeFinalizePrefix) == causeDeadline {
 		p.alert(alertEffectDeadline, s.Key.ID+s.Token, fmt.Sprintf("%s effect for %s settled at its deadline", s.Kind, s.Key.ID+s.Token))

@@ -133,6 +133,8 @@ var rowArms = []rowArm{
 	{"A6", armClaimClear},
 	{"A6", armCreatingHeal},
 	{"A6", armDeadNamedHeal},
+	{"A6", armCrashHeal},
+	{"A6", armAwakeHeal},
 	{"A6", armStrandedClear},
 	{"A6", armCurrentBead},
 	{"A9", armLivenessUnknown},
