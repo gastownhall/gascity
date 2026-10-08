@@ -96,13 +96,31 @@ backup_path_matches_db() {
 # manifest did not reference that chunk. Reading file mtimes there reports a
 # six-hour-old backup as nine minutes old.
 #
-# Layouts with no manifest fall back to the newest matching file, because
-# BACKUP_ARTIFACT_DIR may point at something that is not a Dolt remote at all
-# and those layouts have no commit point to read. The one exception is a
-# db-named directory holding no manifest: that is a Dolt remote whose first
-# sync never completed, so it holds nothing restorable and reports 0.
+# A db-named directory is the remote the backup order configures
+# (file://$BACKUP_ARTIFACT_DIR/<db>), so it is dated only by its own root
+# manifest, the same file `gc dolt health` reads. With no manifest it is a
+# remote whose first sync never completed: it holds nothing restorable and
+# reports 0. Nothing else is read for it, because the prefix arms of
+# backup_path_matches_db also accept a sibling such as <db>-dev/manifest or a
+# moved-aside <db>.old/manifest, and either would date this database by a
+# backup that is not its own.
+#
+# Only layouts without that directory fall back to the prefix-matched files,
+# because BACKUP_ARTIFACT_DIR may point at something that is not a Dolt remote
+# at all. A matched manifest still wins there and, with none, the newest
+# matching file is the only age there is to read. The prefix arms can still
+# credit a sibling's files on that path.
 backup_commit_mtime_for_db() {
     db_name="$1"
+    db_remote_dir="$BACKUP_ARTIFACT_DIR/$db_name"
+    if [ -d "$db_remote_dir" ]; then
+        if [ -f "$db_remote_dir/manifest" ]; then
+            file_mtime "$db_remote_dir/manifest"
+        else
+            printf '0\n'
+        fi
+        return 0
+    fi
     newest_mtime=0
     manifest_mtime=0
     while IFS= read -r -d '' backup_path; do
@@ -125,8 +143,6 @@ backup_commit_mtime_for_db() {
     done < <(find "$BACKUP_ARTIFACT_DIR" -type f -print0 2>/dev/null)
     if [ "$manifest_mtime" -gt 0 ]; then
         printf '%s\n' "$manifest_mtime"
-    elif [ -d "$BACKUP_ARTIFACT_DIR/$db_name" ]; then
-        printf '0\n'
     else
         printf '%s\n' "$newest_mtime"
     fi

@@ -5804,6 +5804,132 @@ exit 0
 	}
 }
 
+// TestDoctorDatesADatabaseRemoteOnlyByItsOwnManifest asserts a db-named backup
+// remote is aged by its own root manifest even when a sibling directory that
+// the prefix arms of backup_path_matches_db also accept holds a fresher one.
+// Bash case `*` spans `/`, so prod-dev/manifest (the remote of a database whose
+// name merely starts with "prod-") and prod.broken/manifest (a remote moved
+// aside) both match prod. Crediting either would report prod's stale or
+// never-completed remote as fresh, which is the reading the manifest rule
+// exists to prevent.
+func TestDoctorDatesADatabaseRemoteOnlyByItsOwnManifest(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		databases []string
+		stale     []string // remote files stamped two hours back
+		fresh     []string // remote files stamped now
+		want      string
+		dontWant  string
+	}{
+		{
+			name:      "stale manifest beside a fresh hyphenated sibling remote",
+			databases: []string{"prod", "prod-dev"},
+			stale:     []string{"prod/chunk.darc", "prod/manifest"},
+			fresh:     []string{"prod-dev/chunk.darc", "prod-dev/manifest"},
+			want:      "prod backup is 2h old",
+			// The sibling is still dated by its own fresh manifest.
+			dontWant: "prod-dev backup",
+		},
+		{
+			name:      "no manifest beside a fresh moved-aside remote",
+			databases: []string{"prod"},
+			fresh:     []string{"prod/chunk.darc", "prod.broken/chunk.darc", "prod.broken/manifest"},
+			want:      "prod backup missing",
+			dontWant:  "prod backup is",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			dataDir := filepath.Join(cityPath, "dolt-data")
+			artifactDir := filepath.Join(cityPath, ".dolt-backup")
+			for _, db := range tc.databases {
+				if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+					t.Fatalf("mkdir %s: %v", db, err)
+				}
+			}
+			now := time.Now()
+			stamp := func(rel string, mtime time.Time) {
+				path := filepath.Join(artifactDir, filepath.FromSlash(rel))
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatalf("mkdir backup remote for %s: %v", rel, err)
+				}
+				writeBackupRemoteFile(t, path, mtime)
+			}
+			for _, rel := range tc.stale {
+				stamp(rel, now.Add(-2*time.Hour))
+			}
+			for _, rel := range tc.fresh {
+				stamp(rel, now)
+			}
+
+			binDir := t.TempDir()
+			gcLogPath := writeDogFakeGC(t, binDir)
+			writeDoctorFakeDoltWithBackupRemotes(t, binDir, tc.databases...)
+
+			out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
+			if !strings.Contains(out, "server: ok") {
+				t.Fatalf("unexpected doctor output:\n%s", out)
+			}
+			// No log means the doctor sent no advisory at all, which is how
+			// the sibling's manifest hides prod; let the assertion report it.
+			gcLog, err := os.ReadFile(gcLogPath)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatalf("read gc log: %v", err)
+			}
+			if !strings.Contains(string(gcLog), tc.want) {
+				t.Fatalf("doctor dated prod by a sibling's manifest, want %q in log:\n%s", tc.want, gcLog)
+			}
+			if strings.Contains(string(gcLog), tc.dontWant) {
+				t.Fatalf("unexpected %q in log:\n%s", tc.dontWant, gcLog)
+			}
+		})
+	}
+}
+
+// TestDoctorFallbackScanReadsTheManifestNotTheNewestChunk asserts the fallback
+// scan, which dates a database that has no db-named remote directory, still
+// prefers a matched manifest over a fresher chunk. prod.backup/ holds the
+// orphan-chunk shape of
+// TestDoctorReadsBackupFreshnessFromTheManifestNotTheNewestChunk: a manifest
+// two hours old beside a chunk written now. There is no prod/ directory, so
+// the db-named branch never runs and only the manifest preference keeps the
+// fresh chunk from dating prod.
+func TestDoctorFallbackScanReadsTheManifestNotTheNewestChunk(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir prod: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(artifactDir, "prod.backup"), 0o755); err != nil {
+		t.Fatalf("mkdir prod.backup: %v", err)
+	}
+	now := time.Now()
+	writeBackupRemoteFile(t, filepath.Join(artifactDir, "prod.backup", "manifest"), now.Add(-2*time.Hour))
+	writeBackupRemoteFile(t, filepath.Join(artifactDir, "prod.backup", "chunk.darc"), now)
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDoctorFakeDoltWithBackupRemotes(t, binDir, "prod")
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, doctorBackupStaleEnv)
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("unexpected doctor output:\n%s", out)
+	}
+	// No log means the doctor sent no advisory at all, which is how the fresh
+	// chunk hides prod's stale manifest; let the assertion report it.
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "prod backup is 2h old") {
+		t.Fatalf("fallback scan dated prod by its fresh chunk instead of its stale manifest, log:\n%s", gcLog)
+	}
+	if strings.Contains(string(gcLog), "prod backup missing") {
+		t.Fatalf("fallback scan found no backup for prod.backup/, log:\n%s", gcLog)
+	}
+}
+
 func TestDoctorScriptUsesServerMaxConnections(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
