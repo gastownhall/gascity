@@ -870,7 +870,7 @@ func SleepReasonKeepsContinuation(reason string) bool {
 	case SleepReasonIdle, SleepReasonIdleTimeout, SleepReasonNoWakeReason,
 		SleepReasonConfigDrift, SleepReasonDrained, SleepReasonCityStop,
 		SleepReasonUserHold, SleepReasonWaitHold, SleepReasonRateLimit,
-		SleepReasonRuntimeMissing:
+		SleepReasonRuntimeMissing, SleepReasonKilled:
 		return true
 	}
 	return false
