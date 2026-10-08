@@ -41,28 +41,35 @@ func rowWriteEffect(p *effectPass, it intent) func(context.Context) settlement {
 }
 
 func (e rowWrite) run(ctx context.Context) settlement {
+	var s settlement
+	_ = session.WithSessionMutationLock(e.it.Key.ID, func() error {
+		s = e.runLocked(ctx)
+		return nil
+	})
+	return s
+}
+
+// runLocked is run without taking the row's session mutation lock: an
+// effect that holds it already, to make a fresh read and this write in one
+// section, calls it (the lock is not reentrant).
+func (e rowWrite) runLocked(ctx context.Context) settlement {
 	writer, ok := e.pass.Writers[e.it.Key.Leg]
 	if !ok {
 		return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: errNoConditionalWriter}
 	}
+	if err := ctx.Err(); err != nil {
+		return settlement{Outcome: settledFailed, Cause: causeDeadline, Err: err}
+	}
 	var fresh intent
 	decided := false
-	var wrote bool
-	err := session.WithSessionMutationLock(e.it.Key.ID, func() error {
-		if err := ctx.Err(); err != nil {
-			return err
+	wrote, err := writer.updateMetadataFenced(e.it.Key.ID, 1, func(row session.Info, _ session.PersistedResponse) session.MetadataPatch {
+		w := e.pass.World.withRow(e.it.Key, row)
+		fresh, _ = e.decide(&w, e.pass.Alloc, e.it.Key)
+		decided = fresh.Kind == e.it.Kind && fresh.Basis == e.it.Basis && len(fresh.Patch) > 0
+		if !decided || ctx.Err() != nil { // the last check before the CAS
+			return nil
 		}
-		var err error
-		wrote, err = writer.updateMetadataFenced(e.it.Key.ID, 1, func(row session.Info, _ session.PersistedResponse) session.MetadataPatch {
-			w := e.pass.World.withRow(e.it.Key, row)
-			fresh, _ = e.decide(&w, e.pass.Alloc, e.it.Key)
-			decided = fresh.Kind == e.it.Kind && fresh.Basis == e.it.Basis && len(fresh.Patch) > 0
-			if !decided || ctx.Err() != nil { // the last check before the CAS
-				return nil
-			}
-			return fresh.Patch
-		})
-		return err
+		return fresh.Patch
 	})
 	switch {
 	case errors.Is(err, errNoConditionalWriter):

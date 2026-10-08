@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The row-write effect's tests (CONTRACT v5 R2, C0.7, D-9).
@@ -219,6 +220,9 @@ func TestEffectPassStripsRawHandles(t *testing.T) {
 	if _, ok := p.Writers[rowLeg]; !ok || w.Env.SP == nil || w.LegStores == nil || w.Demand.AssignedStores == nil {
 		t.Fatal("want a writer for the leg and the pass's World untouched")
 	}
+	if p.Runtime != w.Env.SP {
+		t.Fatal("the pass's Runtime is not the composite provider")
+	}
 }
 
 // Kills a row write that commits a decision its deadline overtook: a
@@ -234,6 +238,56 @@ func TestRowWriteCanceledDuringRedecideWritesNothing(t *testing.T) {
 		return decideRow(w, a, k)
 	}
 	if s := (rowWrite{pass: p, it: it, decide: canceling}).run(ctx); s.Outcome != settledFailed || s.Cause != causeDeadline {
+		t.Fatalf("settlement %+v, want failed with cause %q", s, causeDeadline)
+	}
+	if heldUntil(t, store, it.Key.ID) == "" {
+		t.Fatal("the row write landed after its context ended")
+	}
+}
+
+// Kills a runLocked that takes the row's session mutation lock (an effect
+// that holds it would deadlock, the lock not being reentrant), and a run
+// that does not take it.
+func TestRowWriteRunLockedTakesNoMutationLock(t *testing.T) {
+	store, _ := stampedMem(t, gate.Require)
+	p, it := admittedHeal(t, store, store)
+	done := make(chan settlement, 1)
+	_ = session.WithSessionMutationLock(it.Key.ID, func() error {
+		go func() { done <- rowWriteEffect(p, it)(context.Background()) }()
+		select {
+		case s := <-done:
+			t.Errorf("run settled %+v while another section held the row's lock", s)
+		case <-time.After(50 * time.Millisecond):
+		}
+		go func() { done <- (rowWrite{pass: p, it: it, decide: decideRow}).runLocked(context.Background()) }()
+		select {
+		case s := <-done:
+			if s.Outcome != settledLanded {
+				t.Errorf("runLocked settled %+v, want landed", s)
+			}
+		case <-time.After(10 * time.Second):
+			t.Error("runLocked waited on the row's session mutation lock")
+		}
+		return nil
+	})
+	select {
+	case s := <-done:
+		if s.Outcome != settledRefused || s.Cause != causeRedecided {
+			t.Fatalf("run after runLocked landed: settlement %+v, want refused %q", s, causeRedecided)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run never settled")
+	}
+}
+
+// Kills a row write that writes once its context has ended before the
+// write began.
+func TestRowWriteCanceledBeforeTheWriteWritesNothing(t *testing.T) {
+	store, _ := stampedMem(t, gate.Require)
+	p, it := admittedHeal(t, store, store)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if s := rowWriteEffect(p, it)(ctx); s.Outcome != settledFailed || s.Cause != causeDeadline {
 		t.Fatalf("settlement %+v, want failed with cause %q", s, causeDeadline)
 	}
 	if heldUntil(t, store, it.Key.ID) == "" {

@@ -16,8 +16,8 @@ import (
 )
 
 // The effects' write lint (CONTRACT v5 R3, I24): effect and step files reach
-// the store only through fencedWriter, and start no runtime through
-// legacy's start path. C4c2 and C6a extend it to the identity env keys and
+// the store only through fencedWriter, start no runtime through legacy's
+// start path, and call no provider verb directly (effectProviderVerbs). C4c2 and C6a extend it to the identity env keys and
 // the stop-request keys.
 
 // effectBannedMethods are the blind writers. Any selector naming one is
@@ -72,6 +72,24 @@ var effectLintAllowed = map[string][]string{
 	"externalReadsLane.requestExecutionStalled": {"sessionFrontDoor"},
 }
 
+// effectProviderVerbs are the runtime.Provider verbs an effect or step never
+// calls on a provider directly: destructive calls go through the fence
+// (fenceDestructive, stopFenced) or a SessionObjectKiller, and only the
+// start effect starts a runtime. Every verb takes the runtime name, so a
+// call with no arguments (a timer's Stop) is not one; a selector that is not
+// called (a field such as Start) is not one either.
+var effectProviderVerbs = []string{"Start", "Stop", "SetMeta", "Nudge", "Interrupt"}
+
+// effectProviderAllowed are the functions ("Recv.Name" for a method), in
+// effect and step files alike, whose body may call the verbs listed. The
+// fence helpers live outside the linted files today; their entries keep
+// them allowed wherever they live. fenceDestructive and the
+// SessionObjectKiller kills call no verb.
+var effectProviderAllowed = map[string][]string{
+	"startEffect.launch": {"Start"}, // the start effect's FreshOnly provider Start (C5a1)
+	"stopFenced":         {"Stop"},  // the fenced leaf's Stop, then C8.8
+}
+
 // lintEffectSource returns one "file:line: name" per banned reference in
 // src, parsed as path.
 func lintEffectSource(t *testing.T, path string, src any) []string {
@@ -84,13 +102,21 @@ func lintEffectSource(t *testing.T, path string, src any) []string {
 	steps := strings.HasPrefix(filepath.Base(path), "reconcile_steps_")
 	var out []string
 	for _, decl := range file.Decls {
-		var allowed []string
-		if fn, ok := decl.(*ast.FuncDecl); ok && steps {
-			allowed = effectLintAllowed[funcDeclName(fn)]
+		var allowed, verbs []string
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			if steps {
+				allowed = effectLintAllowed[funcDeclName(fn)]
+			}
+			verbs = effectProviderAllowed[funcDeclName(fn)]
 		}
 		ast.Inspect(decl, func(n ast.Node) bool {
 			var name string
 			switch n := n.(type) {
+			case *ast.CallExpr:
+				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && len(n.Args) > 0 &&
+					slices.Contains(effectProviderVerbs, sel.Sel.Name) && !slices.Contains(verbs, sel.Sel.Name) {
+					out = append(out, fmt.Sprintf("%s: provider %s", fset.Position(n.Pos()), sel.Sel.Name))
+				}
 			case *ast.SelectorExpr:
 				if slices.Contains(effectBannedMethods, n.Sel.Name) {
 					name = n.Sel.Name
@@ -214,6 +240,46 @@ func TestEffectLintClassifiesEverySessionStoreMethod(t *testing.T) {
 		banned, read := slices.Contains(effectBannedMethods, name), slices.Contains(effectLintSessionReads, name)
 		if banned == read {
 			t.Errorf("session.Store.%s: banned=%v read=%v; classify it exactly once", name, banned, read)
+		}
+	}
+}
+
+// Kills a lint that misses a raw provider call, an allowlist that leaks
+// past its function or its verbs, and a raw provider call in an effect or
+// step: a generated fixture calls every verb from a plain function and each
+// allowlisted function's verbs from that function, alongside a timer Stop
+// and a Start field, which are not provider calls.
+func TestEffectLintBansRawProviderCalls(t *testing.T) {
+	var src strings.Builder
+	src.WriteString("package main\n\nfunc seeded(sp provider) {\n\t_ = p.last.Start\n\tt.Stop()\n")
+	for _, v := range effectProviderVerbs {
+		fmt.Fprintf(&src, "\t_ = sp.%s(name)\n", v)
+	}
+	src.WriteString("}\n")
+	leaks := 0
+	for _, fn := range slices.Sorted(maps.Keys(effectProviderAllowed)) {
+		decl := "func " + fn + "() {\n"
+		if recv, name, ok := strings.Cut(fn, "."); ok {
+			decl = "func (e " + recv + ") " + name + "() {\n"
+		}
+		src.WriteString(decl)
+		for _, v := range effectProviderVerbs { // the allowlisted verbs pass, the rest leak
+			fmt.Fprintf(&src, "\t_ = leaf.%s(name)\n", v)
+			if !slices.Contains(effectProviderAllowed[fn], v) {
+				leaks++
+			}
+		}
+		src.WriteString("}\n")
+	}
+	for _, path := range []string{"reconcile_effect_seeded.go", "reconcile_steps_seeded.go"} {
+		got := lintEffectSource(t, path, src.String())
+		for _, v := range effectProviderVerbs {
+			if !slices.ContainsFunc(got, func(f string) bool { return strings.HasSuffix(f, ": provider "+v) }) {
+				t.Errorf("%s: the seeded raw %s is not reported", path, v)
+			}
+		}
+		if want := len(effectProviderVerbs) + leaks; len(got) != want {
+			t.Errorf("%s: %d findings %q, want %d (each verb once outside the allowlist, and each verb an allowlisted function is not allowed)", path, len(got), got, want)
 		}
 	}
 }
