@@ -32,6 +32,8 @@ type effectPass struct {
 	// first on its first admitted create (planner.submit).
 	create  *createPass
 	creates *createEffects
+	// Start is what a start effect holds beyond the pass (startEnv).
+	Start startEnv
 }
 
 // newEffectPass is w's and a's effectPass.
@@ -64,4 +66,5 @@ var effectRegistry = map[string]effectBuilder{
 	intentDrainCancel: drainClearEffect, // A19 (C6a)
 	intentDrainVoid:   drainClearEffect, // A19 (C6a)
 	intentRekey:       rekeyEffect,      // A3
+	intentAdopt:       adoptEffect,      // S1: commits a live runtime, never launches
 }

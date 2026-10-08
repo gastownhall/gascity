@@ -138,7 +138,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	p.fairSeed = res.FairSeed
 	if p.effects != nil {
 		p.bucket, next = res.Bucket, earliest(next, res.NextToken)
-		p.submit(&w, &a, res.Admitted)
+		p.submit(&w, &a, res.Admitted, p.startEnv(e))
 	}
 	rec.Admitted, rec.Deferred = res.Admitted, res.Deferred
 	rec.Rows = p.traceRows(w.Census, reasons, res)
@@ -193,12 +193,12 @@ func splitRegistered(intents []intent, creates bool) (registered, unregistered [
 // its instance token minted here, into its plan and its entry, which is
 // keyed by it (S-8, P5). A submit the executor refuses (busy, or stopped)
 // runs and posts nothing, so its entry is settled here at once.
-func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
+func (p *planner) submit(w *World, a *allocDecision, admitted []intent, start startEnv) {
 	if len(admitted) == 0 {
 		return
 	}
 	pass := newEffectPass(w, a)
-	pass.creates = p.creates
+	pass.creates, pass.Start = p.creates, start
 	for _, it := range admitted {
 		e := inflightEntry{Kind: it.Kind, Key: it.Key, Endpoint: it.Endpoint}
 		if it.Kind == intentCreate {
@@ -252,6 +252,16 @@ func (p *planner) clearAmbiguous(w *World, now time.Time) {
 	}
 	p.alertCleared(p.inflight.clearVisible(c, now))
 	w.InFlight = p.inflight.view()
+}
+
+// startEnv is what the pass's start effects hold beyond the pass: the
+// endpoint breaker, the planner's clock, and its recorder and stderr.
+func (p *planner) startEnv(e gatherEnv) startEnv {
+	env := startEnv{Clock: p.clock, Rec: p.rec, Stderr: p.stderr}
+	if e.Capacity != nil {
+		env.Capacity = e.Capacity()
+	}
+	return env
 }
 
 // decideRowSafe is decideRow with P6's panic isolation: a row that panics
