@@ -190,19 +190,6 @@ jobs:
         run: |
           set -euo pipefail
           case "$MODE" in remote|fork-ro|fork-rw|cache|local) ;; *) echo "::error::mode '$MODE'"; exit 1 ;; esac
-          unit='{"lane":"unit","cmd":"test --config=ci --keep_going //..."}'
-          acceptance='{"lane":"acceptance","cmd":"test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test //test/acceptance:acceptance_solo_tests"}'
-          # Evidence-only until G3: agent-flow tests depend on ambient
-          # agent-template resolution (product-side fix, D13).
-          integration='{"lane":"integration","cmd":"test --config=ci --config=integration --keep_going //test/integration:integration_test","evidence-only":true}'
-          # Gating. Every package's integration-tagged and GC_FAST_UNIT=0
-          # tests outside //test/integration (scripts/test-integration-shard's
-          # packages-* shards).
-          packages='{"lane":"integration-packages","cmd":"test --config=ci --config=integration --keep_going //test:integration_packages"}'
-          # Gating. The integration suite's bdstore and REST smoke tests
-          # (scripts/test-integration-shard bdstore_tests + rest_smoke_tests:
-          # .bazelrc test:integration-smoke's --test_filter).
-          smoke='{"lane":"integration-smoke","cmd":"test --config=ci --config=integration-smoke --keep_going //test/integration:integration_test"}'
           # The nightly fresh-test-results run (bazel-nightly.yml) appends
           # --config=fresh (.bazelrc: --nocache_test_results) to every
           # lane's cmd: worker-env (tools/rbe/worker-env) keys git and yq
@@ -211,14 +198,25 @@ jobs:
           # hide behind every push's cached PASS forever otherwise
           # (2026-10-07 worker-env outage review). FRESH is empty outside
           # workflow_dispatch/workflow_call, which never ask for it.
-          if [ "$FRESH" = "true" ]; then
-            for v in unit acceptance packages smoke; do
-              val="${!v}"
-              val="${val/%\"\}/ --config=fresh\"\}}"
-              printf -v "$v" "%s" "$val"
-            done
-            integration="${integration/%\",\"evidence-only\":true\}/ --config=fresh\",\"evidence-only\":true\}}"
-          fi
+          # Built as a suffix rather than substituted into each lane's JSON:
+          # bash 3.2 (macOS's /bin/bash, which scripts/bazel_multilane_test.go
+          # runs this step with) keeps the backslash of an escaped brace in a
+          # ${var/pat/rep} replacement.
+          fresh=""
+          if [ "$FRESH" = "true" ]; then fresh=" --config=fresh"; fi
+          unit='{"lane":"unit","cmd":"test --config=ci --keep_going //...'"$fresh"'"}'
+          acceptance='{"lane":"acceptance","cmd":"test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test //test/acceptance:acceptance_solo_tests'"$fresh"'"}'
+          # Evidence-only until G3: agent-flow tests depend on ambient
+          # agent-template resolution (product-side fix, D13).
+          integration='{"lane":"integration","cmd":"test --config=ci --config=integration --keep_going //test/integration:integration_test'"$fresh"'","evidence-only":true}'
+          # Gating. Every package's integration-tagged and GC_FAST_UNIT=0
+          # tests outside //test/integration (scripts/test-integration-shard's
+          # packages-* shards).
+          packages='{"lane":"integration-packages","cmd":"test --config=ci --config=integration --keep_going //test:integration_packages'"$fresh"'"}'
+          # Gating. The integration suite's bdstore and REST smoke tests
+          # (scripts/test-integration-shard bdstore_tests + rest_smoke_tests:
+          # .bazelrc test:integration-smoke's --test_filter).
+          smoke='{"lane":"integration-smoke","cmd":"test --config=ci --config=integration-smoke --keep_going //test/integration:integration_test'"$fresh"'"}'
           # Every mode tests: the gate (the required check) fails a run that
           # started no lane. Acceptance and integration-packages run on the
           # fork pool too (mode fork-ro, instance oss-fork, loopback only):
