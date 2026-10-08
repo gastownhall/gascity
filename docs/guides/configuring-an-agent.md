@@ -22,7 +22,7 @@ the model without changing the box, and so on.
 | Axis | Question | Where you set it | Example |
 |------|----------|------------------|---------|
 | **Harness** | which agent CLI? | agent `provider` | `provider = "claude"` |
-| **Model** | which model label? | agent `option_defaults.model` | `option_defaults = { model = "sonnet" }` |
+| **Model** | which model label? | agent `option_defaults.model` | `option_defaults = { model = "sonnet", effort = "low" }` |
 | **Upstream** | who serves the model? | agent `upstream` + `[upstreams.<name>]` | `upstream = "bedrock"` |
 | **Transport** | how does gc drive it? | agent `session` | `session = "acp"` |
 | **Runtime** | where does it run? | city `[session] provider` / `GC_SESSION` | `provider = "k8s"` |
@@ -104,6 +104,33 @@ option_defaults = { model = "sonnet", permission_mode = "plan" }
 (see `ProviderOption` / `OptionChoice` in the [reference](/reference/config)).
 This is why you write `model = "sonnet"` and not a raw `--model` flag: the schema
 keeps the model selection portable and the flags server-side.
+
+### Reasoning effort (`option_defaults.effort`)
+
+`effort` is an options-schema key like `model`. Its tiers are
+`low · medium · high · xhigh · max`, and the harness renders the matching flag
+(for `claude`, `--effort <tier>`). The builtin `claude` harness defaults to
+`effort = "max"`, so set it explicitly when you want cheaper, faster turns.
+
+```toml
+# agents/reviewer/agent.toml — one agent
+provider        = "claude"
+option_defaults = { effort = "low" }
+```
+
+```toml
+# city.toml — every agent on the claude harness
+[providers.claude]
+option_defaults = { effort = "high" }
+```
+
+Agent keys win over provider keys, so the reviewer above runs at `low` while
+other claude agents run at `high`. `gc config explain --provider claude` shows
+the resolved value and which layer set it.
+
+A single step can override these for the session launched to run it: `opt_effort`
+or `opt_model` metadata on the step's bead applies to that launch only (see
+[per-dispatch provider options](/reference/specs/formula-spec-v2)).
 
 ## Axis 3 — Upstream (who serves the model)
 

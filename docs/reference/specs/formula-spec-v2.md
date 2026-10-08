@@ -580,9 +580,17 @@ children (section 3.5).
 **Dispatch routing intent.** A step's `gc.run_target` metadata is
 compile-time routing intent: at dispatch the router resolves it into
 `gc.routed_to`, the sole persisted routing key, overriding the convoy-wide
-default for that step. Per-dispatch provider options ride `opt_*` step
-metadata (for example `opt_model`), validated against the provider's
-options schema at spawn; `gc.model` is a deprecated spelling that the
+default for that step. Per-dispatch provider options ride `opt_<key>` step
+metadata, where `<key>` is any key of the provider's options schema (for
+example `opt_model`, `opt_effort`). They are validated against that schema,
+and invalid values are skipped per key. They apply when a session is launched
+for the step: from the session's claimed in-progress bead when it holds one,
+otherwise from the bead the session was spawned for (its trigger bead — the
+routed demand a pool slot starts on). An explicit session `template_overrides`
+value wins per key. Options are launch flags: a warm session reused for a
+later step keeps the flags it launched with, and a pool slot that claims a
+different ready bead than the one it was spawned for runs with the options of
+the bead it was spawned for. `gc.model` is a deprecated spelling that the
 `gc doctor` check `work-option-metadata-migration` migrates to `opt_model`.
 
 **Role target aliases.** In the *value* of `gc.run_target`, `gc.<role>` is a
