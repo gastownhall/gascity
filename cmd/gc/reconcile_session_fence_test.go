@@ -243,7 +243,7 @@ func TestConfirmedStopNeedsThreeOutcomeAbsentViaComposite(t *testing.T) {
 	})
 	t.Run("bool-only absence", func(t *testing.T) {
 		leaf := boolLeaf{runtime.NewFake()}
-		if confirmStopped(ctx, leaf, "rt_a") {
+		if confirmStopped(ctx, leaf, "rt_a", time.Now()) {
 			t.Fatal("a bool liveness answer confirmed a stop")
 		}
 	})
@@ -252,34 +252,34 @@ func TestConfirmedStopNeedsThreeOutcomeAbsentViaComposite(t *testing.T) {
 		startRuntime(t, tmux.Fake, "rt_a", ours("a")) // really on the default backend
 		sp := auto.New(tmux, acp)
 		sp.SeedRoutes([]string{"rt_a"}) // but routed to ACP
-		if confirmStopped(ctx, sp, "rt_a") {
+		if confirmStopped(ctx, sp, "rt_a", time.Now()) {
 			t.Fatal("a stale route's absence on the ACP leaf confirmed the stop")
 		}
 		if err := tmux.Stop("rt_a"); err != nil {
 			t.Fatal(err)
 		}
-		if !confirmStopped(ctx, sp, "rt_a") {
+		if !confirmStopped(ctx, sp, "rt_a", time.Now()) {
 			t.Fatal("three-outcome absence on every backend must confirm")
 		}
 	})
 	t.Run("liveness unknown", func(t *testing.T) {
 		leaf := newFenceLeaf()
 		leaf.LivenessErrors["rt_a"] = runtime.ErrRuntimeUnavailable
-		if confirmStopped(ctx, leaf, "rt_a") {
+		if confirmStopped(ctx, leaf, "rt_a", time.Now()) {
 			t.Fatal("an unknown liveness confirmed a stop")
 		}
 	})
 	t.Run("plain liveness error", func(t *testing.T) {
 		leaf := newFenceLeaf()
 		leaf.LivenessErrors["rt_a"] = errors.New("tmux: server busy") // a complete observation that erred
-		if confirmStopped(ctx, leaf, "rt_a") {
+		if confirmStopped(ctx, leaf, "rt_a", time.Now()) {
 			t.Fatal("a liveness error confirmed a stop")
 		}
 	})
 	t.Run("a composite with a bool-only backend", func(t *testing.T) {
 		sp := auto.New(boolLeaf{runtime.NewFake()}, newFenceLeaf())
 		sp.SeedRoutes(nil)
-		if confirmStopped(ctx, sp, "rt_a") {
+		if confirmStopped(ctx, sp, "rt_a", time.Now()) {
 			t.Fatal("a composite whose default backend answers only bool liveness confirmed a stop")
 		}
 	})

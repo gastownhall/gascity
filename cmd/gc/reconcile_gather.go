@@ -97,6 +97,9 @@ type World struct {
 	// ExecutionStalled are the execution backstop's drain requests by row
 	// ID, for arm A16 (C7b1).
 	ExecutionStalled map[string]executionStalledRequest
+	// Classified is the planner's classified set (v5 S5): each row's runtime
+	// token last classified, for arm A12.
+	Classified map[rowKey]string
 	// LegStores are the census legs' stores by ref, which effects reach
 	// only as fenced writers (newEffectPass).
 	LegStores map[string]beads.Store
@@ -178,6 +181,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 
 	w.ObsMaxAge = 2 * env.patrol()
 	w.Observed = observeCensus(w.Obs, w.Census, now, w.ObsMaxAge)
+	w.Classified = p.classifiedFor(w.Census, w.Obs, now, w.ObsMaxAge)
 	var guard *endpointCapacityGuard
 	if e.Capacity != nil {
 		guard = e.Capacity()

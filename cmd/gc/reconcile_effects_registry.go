@@ -61,4 +61,5 @@ type effectBuilder func(p *effectPass, it intent) func(context.Context) settleme
 var effectRegistry = map[string]effectBuilder{
 	intentRowHeal: rowWriteEffect, // A6
 	intentCreate:  createEffect,   // C1, C2
+	intentClose:   closeEffect,    // A21
 }
