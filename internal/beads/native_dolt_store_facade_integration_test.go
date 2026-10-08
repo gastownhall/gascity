@@ -107,6 +107,86 @@ func TestNativeDoltStoreCreateToleratesUnresolvableDependencyTargets(t *testing.
 	}
 }
 
+// TestNativeDoltStoreGetCarriesEveryStoredEdgeThroughACache reads back the
+// edges the test above only writes. This store declares its rows complete, so a
+// cache installs a Get row's edge set as the bead's whole topology; on real
+// Dolt the detail view resolves far ends and has no entry for an "external:"
+// target or an id in another ledger, the cross-ledger molecule parent most of
+// all. Get must carry every stored edge anyway, or one Update through the cache
+// erases those blockers and that parent from every cached dependency walk.
+func TestNativeDoltStoreGetCarriesEveryStoredEdgeThroughACache(t *testing.T) {
+	store := openRealNativeDoltStoreForFacade(t, "facade-test")
+	blocker, err := store.Create(Bead{Title: "blocker"})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	const foreignParent = "gcg-70b1e5f2-a"
+	child, err := store.Create(Bead{
+		Title:    "step whose molecule and blockers live elsewhere",
+		ParentID: foreignParent,
+		Needs:    []string{"blocks:external:github/1", "blocks:gcg-9999", "blocks:" + blocker.ID},
+	})
+	if err != nil {
+		t.Fatalf("Create child: %v", err)
+	}
+	want := []Dep{
+		{IssueID: child.ID, DependsOnID: "external:github/1", Type: "blocks"},
+		{IssueID: child.ID, DependsOnID: blocker.ID, Type: "blocks"},
+		{IssueID: child.ID, DependsOnID: foreignParent, Type: "parent-child"},
+		{IssueID: child.ID, DependsOnID: "gcg-9999", Type: "blocks"},
+	}
+	sameEdges := func(t *testing.T, what string, got []Dep) {
+		t.Helper()
+		got = slices.Clone(got)
+		slices.SortFunc(got, func(a, b Dep) int { return strings.Compare(a.DependsOnID, b.DependsOnID) })
+		if !slices.Equal(got, want) {
+			t.Fatalf("%s = %+v, want every stored edge %+v", what, got, want)
+		}
+	}
+
+	down, err := store.DepList(child.ID, "down")
+	if err != nil {
+		t.Fatalf("DepList down: %v", err)
+	}
+	sameEdges(t, "DepList down", down)
+	got, err := store.Get(child.ID)
+	if err != nil {
+		t.Fatalf("Get child: %v", err)
+	}
+	if !slices.Equal(got.Dependencies, down) {
+		t.Fatalf("Get Dependencies = %+v, DepList down = %+v; a row must carry the edges a walk reads", got.Dependencies, down)
+	}
+	if got.ParentID != foreignParent {
+		t.Fatalf("Get ParentID = %q, want %q", got.ParentID, foreignParent)
+	}
+
+	cache := NewCachingStoreForTest(store, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	cache.mu.RLock()
+	live, complete := cache.state == cacheLive, cache.depsComplete
+	cache.mu.RUnlock()
+	if !live || !complete {
+		t.Fatalf("primed cache live=%v depsComplete=%v; DepList would pass through to the store and prove nothing", live, complete)
+	}
+	primed, err := cache.DepList(child.ID, "down")
+	if err != nil {
+		t.Fatalf("cached DepList down after Prime: %v", err)
+	}
+	sameEdges(t, "cached DepList down after Prime", primed)
+
+	title := "retitled"
+	if err := cache.Update(child.ID, UpdateOpts{Title: &title}); err != nil {
+		t.Fatalf("Update through the cache: %v", err)
+	}
+	refreshed, err := cache.DepList(child.ID, "down")
+	if err != nil {
+		t.Fatalf("cached DepList down after Update: %v", err)
+	}
+	sameEdges(t, "cached DepList down after Update", refreshed)
+}
+
 // TestNativeDoltStoreCreateRollsBackAMissingSamePrefixTarget shows the facade's
 // single transaction replacing the hand-rolled compensation: the refusal leaves
 // no partial bead behind without the store deleting anything.

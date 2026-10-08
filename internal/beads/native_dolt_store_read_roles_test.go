@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -314,12 +315,17 @@ func TestNativeDoltStoreGetKeepsABackendFailureDistinctFromAMiss(t *testing.T) {
 
 func TestNativeDoltStoreGetAsksForTheDependencyEdgesTheBeadModelNeeds(t *testing.T) {
 	var captured issueops.GetRequest
+	var edgeReads []issueops.EdgeReadRequest
 	storage := &nativeDoltReaderSpy{
 		get: func(_ context.Context, req issueops.GetRequest) (*issueops.IssueDetails, error) {
 			captured = req
 			return &issueops.IssueDetails{Issue: beadslib.Issue{
 				ID: req.ID, Title: "t", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2,
 			}}, nil
+		},
+		edges: func(ctx context.Context, req issueops.EdgeReadRequest) (issueops.EdgeReadResult, error) {
+			edgeReads = append(edgeReads, req)
+			return edgelessReader{}.ReadEdges(ctx, req)
 		},
 	}
 	store := newNativeDoltStoreForTest(storage)
@@ -328,28 +334,40 @@ func TestNativeDoltStoreGetAsksForTheDependencyEdgesTheBeadModelNeeds(t *testing
 		t.Fatalf("Get: %v", err)
 	}
 	// The two expensive lists stay off: Bead carries neither dependents nor
-	// comments, and the detail view hydrates its own dependencies either way.
+	// comments.
 	if captured.IncludeDependents {
 		t.Error("IncludeDependents = true; Bead has no dependents field and the row list is the expensive one")
 	}
 	if captured.IncludeComments {
 		t.Error("IncludeComments = true; Bead has no comments field")
 	}
-	if captured.BriefDeps {
-		t.Error("BriefDeps = true; the parent-child scan reads the far-end id and type, which brief keeps, but the edge list is what gc converts")
+	// The edges come from one edge read about this bead alone, of every type: a
+	// type filter would hand a cache a partial edge set as the whole topology.
+	if len(edgeReads) != 1 {
+		t.Fatalf("edge reads = %+v, want exactly one", edgeReads)
+	}
+	if got := edgeReads[0]; len(got.IDs) != 1 || got.IDs[0] != "gc-1" || len(got.Types) != 0 {
+		t.Fatalf("edge read = %+v, want IDs [gc-1] with no type filter", got)
 	}
 }
 
-func TestNativeDoltStoreGetDerivesTheParentFromTheDetailViewEdges(t *testing.T) {
+// The parent comes from the stored edges, not from the detail view's resolved
+// dependency list: a molecule parent in another ledger has no entry there.
+func TestNativeDoltStoreGetDerivesTheParentFromTheStoredEdges(t *testing.T) {
 	storage := &nativeDoltReaderSpy{
 		get: func(_ context.Context, req issueops.GetRequest) (*issueops.IssueDetails, error) {
 			return &issueops.IssueDetails{
 				Issue: beadslib.Issue{ID: req.ID, Title: "child", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2},
 				Dependencies: []*beadslib.IssueWithDependencyMetadata{
 					{Issue: beadslib.Issue{ID: "gc-blocker"}, DependencyType: beadslib.DepBlocks},
-					{Issue: beadslib.Issue{ID: "gc-mol"}, DependencyType: beadslib.DepParentChild},
 				},
 			}, nil
+		},
+		edges: func(_ context.Context, req issueops.EdgeReadRequest) (issueops.EdgeReadResult, error) {
+			return issueops.EdgeReadResult{Anchors: []issueops.AnchorEdges{{ID: req.IDs[0], Edges: []*beadslib.Dependency{
+				{IssueID: req.IDs[0], DependsOnID: "gc-blocker", Type: beadslib.DepBlocks},
+				{IssueID: req.IDs[0], DependsOnID: "gcg-mol", Type: beadslib.DepParentChild},
+			}}}}, nil
 		},
 	}
 	store := newNativeDoltStoreForTest(storage)
@@ -358,8 +376,8 @@ func TestNativeDoltStoreGetDerivesTheParentFromTheDetailViewEdges(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.ParentID != "gc-mol" {
-		t.Fatalf("ParentID = %q, want gc-mol", got.ParentID)
+	if got.ParentID != "gcg-mol" {
+		t.Fatalf("ParentID = %q, want gcg-mol", got.ParentID)
 	}
 	if len(got.Dependencies) != 2 {
 		t.Fatalf("Dependencies = %+v, want both edges", got.Dependencies)
@@ -368,6 +386,117 @@ func TestNativeDoltStoreGetDerivesTheParentFromTheDetailViewEdges(t *testing.T) 
 		if dep.IssueID != "gc-child" {
 			t.Fatalf("edge %+v: IssueID = %q, want the anchor", dep, dep.IssueID)
 		}
+	}
+}
+
+// A store that declares its rows complete owes every stored edge on a Get row,
+// because a cache installs that set as the bead's whole topology. The detail
+// view resolves far ends, so it drops an "external:" target and an id in
+// another ledger; the edge read keeps both, and the row carries exactly what a
+// DOWN walk reads.
+func TestNativeDoltStoreGetCarriesTheEdgesTheDetailViewCannotResolve(t *testing.T) {
+	stored := []*beadslib.Dependency{
+		{IssueID: "gc-1", DependsOnID: "external:github/1", Type: beadslib.DepBlocks},
+		{IssueID: "gc-1", DependsOnID: "gc-2", Type: beadslib.DepBlocks},
+		{IssueID: "gc-1", DependsOnID: "gcg-9999", Type: beadslib.DepBlocks},
+	}
+	storage := &nativeDoltReaderSpy{
+		get: func(_ context.Context, req issueops.GetRequest) (*issueops.IssueDetails, error) {
+			return &issueops.IssueDetails{
+				Issue: beadslib.Issue{ID: req.ID, Title: "t", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2},
+				Dependencies: []*beadslib.IssueWithDependencyMetadata{
+					{Issue: beadslib.Issue{ID: "gc-2"}, DependencyType: beadslib.DepBlocks},
+				},
+			}, nil
+		},
+		edges: func(_ context.Context, req issueops.EdgeReadRequest) (issueops.EdgeReadResult, error) {
+			return issueops.EdgeReadResult{Anchors: []issueops.AnchorEdges{{ID: req.IDs[0], Edges: stored}}}, nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	got, err := store.Get("gc-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	want := []Dep{
+		{IssueID: "gc-1", DependsOnID: "external:github/1", Type: "blocks"},
+		{IssueID: "gc-1", DependsOnID: "gc-2", Type: "blocks"},
+		{IssueID: "gc-1", DependsOnID: "gcg-9999", Type: "blocks"},
+	}
+	if !slices.Equal(got.Dependencies, want) {
+		t.Fatalf("Get Dependencies = %+v, want every stored edge %+v", got.Dependencies, want)
+	}
+	down, err := store.DepList("gc-1", "down")
+	if err != nil {
+		t.Fatalf("DepList down: %v", err)
+	}
+	if !slices.Equal(got.Dependencies, down) {
+		t.Fatalf("Get Dependencies = %+v, DepList down = %+v; a row must carry the edges a walk reads", got.Dependencies, down)
+	}
+}
+
+// An edge-read failure is a failed Get, never a bead without edges: a cache
+// would install the empty set as the bead's topology.
+func TestNativeDoltStoreGetFailsWhenTheEdgeReadFails(t *testing.T) {
+	wantErr := errors.New("dial tcp: connection refused")
+	storage := &nativeDoltReaderSpy{
+		get: func(_ context.Context, req issueops.GetRequest) (*issueops.IssueDetails, error) {
+			return &issueops.IssueDetails{Issue: beadslib.Issue{ID: req.ID, Title: "t", Status: beadslib.StatusOpen}}, nil
+		},
+		edges: func(context.Context, issueops.EdgeReadRequest) (issueops.EdgeReadResult, error) {
+			return issueops.EdgeReadResult{}, wantErr
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	_, err := store.Get("gc-1")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Get error = %v, want the edge-read failure", err)
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get error = %v, want it NOT classified as a miss", err)
+	}
+}
+
+// The detail view and the edge read are two transactions. A bead deleted
+// between them comes back Missing from the edge read, and the later read is
+// the answer: ErrNotFound, not a row with no edges.
+func TestNativeDoltStoreGetReportsABeadDeletedBetweenItsReadsAsAMiss(t *testing.T) {
+	storage := &nativeDoltReaderSpy{
+		get: func(_ context.Context, req issueops.GetRequest) (*issueops.IssueDetails, error) {
+			return &issueops.IssueDetails{Issue: beadslib.Issue{ID: req.ID, Title: "t", Status: beadslib.StatusOpen}}, nil
+		},
+		edges: func(_ context.Context, req issueops.EdgeReadRequest) (issueops.EdgeReadResult, error) {
+			return issueops.EdgeReadResult{Anchors: []issueops.AnchorEdges{{ID: req.IDs[0], Edges: []*beadslib.Dependency{}, Missing: true}}}, nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	if _, err := store.Get("gc-1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get error = %v, want ErrNotFound", err)
+	}
+}
+
+// The role reports every anchor it was asked about, so an answer without this
+// bead is a broken read rather than a bead with no edges.
+func TestNativeDoltStoreGetRefusesAnEdgeAnswerThatOmitsTheBead(t *testing.T) {
+	storage := &nativeDoltReaderSpy{
+		get: func(_ context.Context, req issueops.GetRequest) (*issueops.IssueDetails, error) {
+			return &issueops.IssueDetails{Issue: beadslib.Issue{ID: req.ID, Title: "t", Status: beadslib.StatusOpen}}, nil
+		},
+		edges: func(context.Context, issueops.EdgeReadRequest) (issueops.EdgeReadResult, error) {
+			return issueops.EdgeReadResult{Anchors: []issueops.AnchorEdges{{ID: "gc-other", Edges: []*beadslib.Dependency{}}}}, nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	_, err := store.Get("gc-1")
+	if err == nil {
+		t.Fatal("Get = nil error, want the omitted anchor reported")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get error = %v, want it NOT classified as a miss", err)
 	}
 }
 

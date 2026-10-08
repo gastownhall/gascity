@@ -82,7 +82,8 @@ func nativeListReadRequest() issueops.ListRequest {
 	}
 }
 
-// Get retrieves a bead by ID through the reader role's detail view.
+// Get retrieves a bead by ID: the row from the reader role's detail view, the
+// edges from EdgeReader.
 //
 // THE DETAIL VIEW IS THE ONE TOKEN SOURCE. issueops.IssueDetails.Revision is
 // the only place the optimistic-concurrency token is published to a client: the
@@ -93,14 +94,25 @@ func nativeListReadRequest() issueops.ListRequest {
 // and Bead.Revision is left at zero there deliberately: absent is absent, never
 // 0, and a caller that means to act on a row it listed re-reads it here first.
 //
+// THE EDGES ARE THE STORED ROWS, read by the same door DepList's DOWN leg uses.
+// The detail view lists the far-end ISSUES rather than the edge rows, so an
+// edge whose target is an "external:" reference or an id in another ledger —
+// a cross-ledger molecule parent, most often — has no entry there. This store
+// declares its rows complete (listIncludesCompleteDependencies), so a cache
+// installs a Get row's edge set as the bead's whole topology, and a thinner set
+// would erase those edges from every cached dependency walk. ParentID is
+// derived from the same set, so a parent this store cannot resolve still
+// round-trips. The two reads are two transactions: an edge written between them
+// is seen by the next read, and a bead deleted between them is ErrNotFound —
+// the later read is the answer.
+//
 // A miss is ErrNotFound on both sides of the door — the role promises it, and
 // the wire's problem mapper turns a 404 into the same sentinel — and a backend
 // failure passes through unchanged rather than decaying into not-found.
 //
 // The two include parameters stay off. Bead carries neither dependents nor
 // comments, and both are the expensive row lists the detail view exists to
-// avoid materializing; the DEPENDENCIES it needs for the parent-child scan are
-// hydrated either way.
+// avoid materializing.
 func (s *NativeDoltStore) Get(id string) (Bead, error) {
 	var out Bead
 	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
@@ -115,87 +127,21 @@ func (s *NativeDoltStore) Get(id string) (Bead, error) {
 		if details == nil {
 			return fmt.Errorf("bead %q: %w", id, ErrNotFound)
 		}
-		bead, err := beadFromNativeIssueDetails(details)
+		edges, err := readAnchorEdges(ctx, storage, id)
 		if err != nil {
 			return err
 		}
-		if bead.ParentID == "" && nativeDetailDependencyWasDropped(details) {
-			parentID, err := s.nativeDetailParentFallback(ctx, storage, id)
-			if err != nil {
-				return err
-			}
-			bead.ParentID = parentID
+		if edges.Missing {
+			return fmt.Errorf("bead %q: deleted while it was read: %w", id, ErrNotFound)
+		}
+		bead, err := beadFromNativeIssueDetails(details, edges)
+		if err != nil {
+			return err
 		}
 		out = bead
 		return nil
 	})
 	return out, err
-}
-
-// nativeDetailDependencyWasDropped reports whether the detail view's
-// RESOLVED Dependencies list is shorter than the backend's own raw edge
-// count -- the one cheap, already-fetched signal that distinguishes "this
-// bead really has no outgoing edges" from "the detail view's target-join
-// silently dropped one or more it could not resolve" (see
-// nativeDetailParentFallback).
-//
-// DependencyCount is a plain `COUNT(*) FROM dependencies WHERE issue_id = ?`
-// (embeddeddolt's counts.go), unfiltered by whether the target resolves, so
-// it never drops what Dependencies() drops. A backend that leaves
-// DependencyCount nil -- every lightweight Storage double in this package's
-// own tests, none of which populate it -- is treated as "nothing to recover"
-// rather than as license to call EdgeReader, which is what keeps this gate
-// from forcing every such double to implement a role it has no other reason
-// to carry.
-func nativeDetailDependencyWasDropped(details *issueops.IssueDetails) bool {
-	if details == nil || details.DependencyCount == nil {
-		return false
-	}
-	return *details.DependencyCount > int64(len(details.Dependencies))
-}
-
-// nativeDetailParentFallback recovers a parent-child edge that the detail
-// view's target-RESOLVING Dependencies() dropped, because the far end is not
-// a row the detail view's own join can resolve to an issue -- a cross-ledger
-// molecule parent, most often, where nothing reconciles the two ledgers and
-// this store never minted the row. beadFromNativeIssueDetails's doc comment
-// explains why the detail view alone cannot answer this: its dependency list
-// is the far-end ISSUES, not the edge rows, so an unresolvable target is not
-// represented there at all, parent or not.
-//
-// EdgeReader answers from the EDGE instead, through issueops.DepTargetExpr,
-// which COALESCEs the three target spellings (an issue id, a wisp id, or
-// depends_on_external) -- so a genuinely foreign or unresolvable target
-// crosses here exactly as a resolvable one does. It is the same door DepList's
-// DOWN leg and DepMetadata already ride for this reason.
-//
-// Only called when the detail view produced no ParentID at all: a bead that
-// legitimately has none pays one extra lookup confirming that, rather than
-// Get silently trusting an empty field that might mean "dropped".
-func (s *NativeDoltStore) nativeDetailParentFallback(ctx context.Context, storage beadslib.Storage, id string) (string, error) {
-	reader, err := storage.EdgeReader()
-	if err != nil {
-		return "", nativeStoreError(id, err)
-	}
-	result, err := reader.ReadEdges(ctx, issueops.EdgeReadRequest{
-		IDs:   []string{id},
-		Types: []issueops.DependencyType{issueops.DepParentChild},
-	})
-	if err != nil {
-		return "", nativeStoreError(id, err)
-	}
-	for _, anchor := range result.Anchors {
-		if anchor.ID != id || anchor.Missing {
-			continue
-		}
-		for _, edge := range anchor.Edges {
-			if edge == nil {
-				continue
-			}
-			return edge.DependsOnID, nil
-		}
-	}
-	return "", nil
 }
 
 // List returns beads matching the query, through the reader role's listing.
@@ -772,15 +718,16 @@ func nativeReadyRequestFromReadyQuery(q ReadyQuery) issueops.ReadyRequest {
 	return req
 }
 
-// beadFromNativeIssueDetails converts the reader role's detail view.
+// beadFromNativeIssueDetails converts the reader role's detail view, with the
+// anchor's stored edges read beside it.
 //
-// The detail view carries its labels and its edges BESIDE the row rather than
-// on it, and its dependency list is the far-end ISSUES rather than the edge
-// rows — so an edge whose target is an "external:" reference or an id in
-// another repository is not represented here. DepList remains the edge-row door
-// for the callers that walk those; this one exists to answer "what is this
-// bead", and its parent-child scan reads a target that is always resident.
-func beadFromNativeIssueDetails(details *issueops.IssueDetails) (Bead, error) {
+// The detail view carries its labels BESIDE the row rather than on it, and its
+// own dependency list is the far-end ISSUES rather than the edge rows — so an
+// edge whose target is an "external:" reference or an id in another repository
+// is not represented there. That list is not read: the edges are EdgeReader's
+// (see Get), attributed to the anchor the way anchorDeps attributes them, and
+// ParentID is derived from them exactly as it is for any other row.
+func beadFromNativeIssueDetails(details *issueops.IssueDetails, edges issueops.AnchorEdges) (Bead, error) {
 	if details == nil {
 		return Bead{}, nil
 	}
@@ -789,14 +736,14 @@ func beadFromNativeIssueDetails(details *issueops.IssueDetails) (Bead, error) {
 		issue.Labels = details.Labels
 	}
 	issue.Dependencies = nil
-	for _, dep := range details.Dependencies {
-		if dep == nil {
+	for _, edge := range edges.Edges {
+		if edge == nil {
 			continue
 		}
 		issue.Dependencies = append(issue.Dependencies, &beadslib.Dependency{
-			IssueID:     details.ID,
-			DependsOnID: dep.ID,
-			Type:        dep.DependencyType,
+			IssueID:     edges.ID,
+			DependsOnID: edge.DependsOnID,
+			Type:        edge.Type,
 		})
 	}
 	bead, err := beadFromNativeIssue(&issue)

@@ -156,23 +156,37 @@ func (s *NativeDoltStore) depList(ctx context.Context, storage beadslib.Storage,
 	if direction == "up" {
 		return dependentDeps(ctx, storage, id)
 	}
+	anchor, err := readAnchorEdges(ctx, storage, id)
+	if err != nil {
+		return nil, err
+	}
+	// A Missing anchor carries no edges by contract, so it answers the empty
+	// list DepList owes an anchor this store does not hold.
+	return anchorDeps(id, anchor), nil
+}
+
+// readAnchorEdges reads one anchor's stored outgoing edges, of every type,
+// through EdgeReader. DepList's DOWN leg and Get both answer from it, so the
+// edge set a bead row carries is the set a dependency walk reads.
+//
+// An answer that omits the anchor it was asked about is an error rather than
+// an empty set: the role reports every requested anchor, Missing or not, so
+// the omission is a broken read.
+func readAnchorEdges(ctx context.Context, storage beadslib.Storage, id string) (issueops.AnchorEdges, error) {
 	reader, err := storage.EdgeReader()
 	if err != nil {
-		return nil, nativeStoreError(id, err)
+		return issueops.AnchorEdges{}, nativeStoreError(id, err)
 	}
 	result, err := reader.ReadEdges(ctx, issueops.EdgeReadRequest{IDs: []string{id}})
 	if err != nil {
-		return nil, nativeStoreError(id, err)
+		return issueops.AnchorEdges{}, nativeStoreError(id, err)
 	}
 	for _, anchor := range result.Anchors {
-		if anchor.ID != id {
-			continue
+		if anchor.ID == id {
+			return anchor, nil
 		}
-		// A Missing anchor carries no edges by contract, so it answers the
-		// empty list DepList owes an anchor this store does not hold.
-		return anchorDeps(id, anchor), nil
 	}
-	return nil, fmt.Errorf("reading the edges of bead %q: the answer omits the anchor it was asked about", id)
+	return issueops.AnchorEdges{}, fmt.Errorf("reading the edges of bead %q: the answer omits the anchor it was asked about", id)
 }
 
 // dependentDeps answers DepList's UP leg: the edges that point AT id.

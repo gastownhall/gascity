@@ -359,9 +359,24 @@ type nativeDoltReaderSpy struct {
 	list  func(context.Context, issueops.ListRequest) (issueops.IssuePage, error)
 	ready func(context.Context, issueops.ReadyRequest) (issueops.IssuePage, error)
 	get   func(context.Context, issueops.GetRequest) (*issueops.IssueDetails, error)
+	edges func(context.Context, issueops.EdgeReadRequest) (issueops.EdgeReadResult, error)
 }
 
 func (s *nativeDoltReaderSpy) IssueReader() (issueops.Reader, error) { return s, nil }
+
+// EdgeReader is the door Get reads a bead's edges through, beside the detail
+// view.
+func (s *nativeDoltReaderSpy) EdgeReader() (issueops.EdgeReader, error) { return s, nil }
+
+// ReadEdges answers from the edge fixture when the test states the edge rows,
+// and as edgelessReader otherwise: a detail fixture with no edge fixture is a
+// bead with none.
+func (s *nativeDoltReaderSpy) ReadEdges(ctx context.Context, req issueops.EdgeReadRequest) (issueops.EdgeReadResult, error) {
+	if s.edges != nil {
+		return s.edges(ctx, req)
+	}
+	return edgelessReader{}.ReadEdges(ctx, req)
+}
 
 func (s *nativeDoltReaderSpy) List(ctx context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
 	if s.list == nil {
@@ -384,4 +399,22 @@ func (s *nativeDoltReaderSpy) Get(ctx context.Context, req issueops.GetRequest) 
 	return s.get(ctx, req)
 }
 
-var _ issueops.Reader = (*nativeDoltReaderSpy)(nil)
+// edgelessReader is the edge door of a double whose beads carry no edges: it
+// reports every anchor it is asked about as held, with an empty edge set. Get
+// reads a bead's edges through this door beside the detail view, so a double
+// that serves Get serves this too.
+type edgelessReader struct{}
+
+func (edgelessReader) ReadEdges(_ context.Context, req issueops.EdgeReadRequest) (issueops.EdgeReadResult, error) {
+	result := issueops.EdgeReadResult{Anchors: make([]issueops.AnchorEdges, 0, len(req.IDs))}
+	for _, id := range req.IDs {
+		result.Anchors = append(result.Anchors, issueops.AnchorEdges{ID: id, Edges: []*beadslib.Dependency{}})
+	}
+	return result, nil
+}
+
+var (
+	_ issueops.Reader     = (*nativeDoltReaderSpy)(nil)
+	_ issueops.EdgeReader = (*nativeDoltReaderSpy)(nil)
+	_ issueops.EdgeReader = edgelessReader{}
+)

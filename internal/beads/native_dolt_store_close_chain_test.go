@@ -165,6 +165,10 @@ func (s *closeChainStorage) BatchApplier() (issueops.BatchApplier, error) {
 
 func (s *closeChainStorage) IssueReader() (issueops.Reader, error) { return closeChainReader{s}, nil }
 
+// EdgeReader serves the edge half of the detail read: the chain's bead has no
+// edges.
+func (s *closeChainStorage) EdgeReader() (issueops.EdgeReader, error) { return edgelessReader{}, nil }
+
 type closeChainReader struct{ storage *closeChainStorage }
 
 func (r closeChainReader) Get(_ context.Context, req issueops.GetRequest) (*issueops.IssueDetails, error) {

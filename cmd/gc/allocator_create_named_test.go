@@ -599,7 +599,9 @@ func TestNamedReopenConcurrentWriterLosesFence(t *testing.T) {
 			t.Fatal(err)
 		}
 		closed := seedClosedNamedRow(t, mem, cfg, nil)
-		store := &namedCASStore{Store: mem, bump: func() {
+		// The write lands right after the reopen's live re-read of the row,
+		// the read its fence is taken on.
+		store := &interleavedStore{Store: mem, id: closed.ID, between: func() {
 			if err := mem.SetMetadata(closed.ID, "note", "cli touched"); err != nil {
 				t.Error(err)
 			}
@@ -637,6 +639,106 @@ func TestNamedReopenConcurrentWriterLosesFence(t *testing.T) {
 		assertFailedNoWrite(t, h)
 		h.assertRefused(t, plan, createStageNoWriter)
 	})
+}
+
+// revisionlessListStore reads its rows back from List with no revision, as
+// the native store does: there, Get is the only read that carries one.
+type revisionlessListStore struct{ beads.Store }
+
+func (s revisionlessListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	rows, err := s.Store.List(q)
+	for i := range rows {
+		rows[i].Revision = 0
+	}
+	return rows, err
+}
+
+func (s revisionlessListStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+// Kills a reopen fenced on the revision of its List read (PR #7049 review): a
+// store need not publish a revision on a List row, so a CAS at that one is
+// refused on every pass there, and a closed configured named session never
+// comes back. The reopen re-reads the row by Get under the identifier locks,
+// as legacy's reopen does, and fences on that read.
+func TestCreateEffect_NamedReopenFencesOnTheLiveReReadOfTheRow(t *testing.T) {
+	cfg := mayorCity()
+	mem := fencedMemStore(t)
+	closed := seedClosedNamedRow(t, mem, cfg, nil)
+	h := newNamedHarness(t, t.TempDir(), nil)
+	h.reserve(t, "c1")
+	plan := namedPlan(t, cfg, "c1", "mayor")
+	h.runAll(t, &createPass{cfg: cfg, store: revisionlessListStore{Store: mem}}, plan)
+
+	row, err := mem.Get(closed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Status != "open" || row.Revision == closed.Revision {
+		t.Fatalf("row = %s at revision %d (closed at %d), want reopened over a List that publishes no revision",
+			row.Status, row.Revision, closed.Revision)
+	}
+	if e := h.entry(t); !e.Landed || e.RowID != closed.ID {
+		t.Fatalf("settlement = %+v, want a landed reopen of %s", e, closed.ID)
+	}
+	h.assertNoRefusal(t)
+}
+
+// Kills a reopen that re-reads the row through the cache: a cached row's
+// revision lags (a List-primed native row carries none), so the CAS must be
+// taken on a live read.
+func TestCreateEffect_NamedReopenReReadsTheRowLive(t *testing.T) {
+	cfg := mayorCity()
+	mem := fencedMemStore(t)
+	closed := seedClosedNamedRow(t, mem, cfg, nil)
+	h := newNamedHarness(t, t.TempDir(), nil)
+	h.reserve(t, "c1")
+	plan := namedPlan(t, cfg, "c1", "mayor")
+	h.runAll(t, &createPass{cfg: cfg, store: namedStaleCacheStore{mem}}, plan)
+
+	row, err := mem.Get(closed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Status != "open" {
+		t.Fatalf("row = %s, want reopened at the live revision", row.Status)
+	}
+	if e := h.entry(t); !e.Landed || e.RowID != closed.ID {
+		t.Fatalf("settlement = %+v, want a landed reopen of %s", e, closed.ID)
+	}
+}
+
+// Kills a reopen of a row that is no longer the identity's closed row by the
+// time the reopen holds the identifier locks: another writer reopened it
+// after the fenced List read. The live re-read sees that, so the reopen
+// attempts no write and settles refusing at the fence; the row keeps the
+// other writer's state.
+func TestCreateEffect_NamedReopenWritesNothingWhenTheReReadRowMovedOn(t *testing.T) {
+	cfg := mayorCity()
+	inner := newNamedCondStore(t)
+	closed := seedClosedNamedRow(t, inner.MemStore, cfg, nil)
+	open := "open"
+	store := &namedCASStore{Store: inner, bump: func() {
+		if err := inner.MemStore.Update(closed.ID, beads.UpdateOpts{Status: &open}); err != nil {
+			t.Error(err)
+		}
+	}}
+	h := newNamedHarness(t, t.TempDir(), nil)
+	h.reserve(t, "c1")
+	plan := namedPlan(t, cfg, "c1", "mayor")
+	h.runAll(t, &createPass{cfg: cfg, store: store}, plan)
+
+	if got := inner.recorded(); len(got) != 0 {
+		t.Fatalf("writes = %v, want none for a row that is no longer closed", got)
+	}
+	after, err := inner.Get(closed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != "open" || after.Metadata["state"] != "asleep" || after.Metadata["instance_token"] != "tok-old" {
+		t.Fatalf("row = %s %v, want the other writer's reopen left as it wrote it", after.Status, after.Metadata)
+	}
+	assertFailedNoWrite(t, h)
+	h.assertRefused(t, plan, createStageFence)
 }
 
 // Kills: the S1 self-deadlock (a helper that takes the city flock again
