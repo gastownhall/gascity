@@ -1707,6 +1707,17 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 	return cmd
 }
 
+// managedSuspendPatch is the metadata-only suspend `gc session suspend` writes
+// when a controller owns the stop: a hold far in the future, which also
+// supersedes any pending wake request (CONTRACT v5.7 D7).
+func managedSuspendPatch(now time.Time) session.MetadataPatch {
+	patch := session.ClearWakeRequestPatch()
+	patch["held_until"] = now.Add(indefiniteHoldDuration).UTC().Format(time.RFC3339)
+	patch["sleep_intent"] = "user-hold"
+	patch["state"] = "suspended"
+	return patch
+}
+
 // cmdSessionSuspend is the CLI entry point for "gc session suspend".
 //
 // Phase 2: sets held_until metadata on the session bead and pokes the
@@ -1741,12 +1752,7 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 		if pokeErr := pokeController(cityPath); pokeErr == nil {
 			// Controller is running — metadata-only suspend.
 			// Set held_until far in the future so the reconciler drains/stops the session.
-			heldUntil := time.Now().Add(indefiniteHoldDuration).UTC().Format(time.RFC3339)
-			if err := sessionFrontDoor(sessStore).ApplyPatch(sessionID, map[string]string{
-				"held_until":   heldUntil,
-				"sleep_intent": "user-hold",
-				"state":        "suspended",
-			}); err != nil {
+			if err := sessionFrontDoor(sessStore).ApplyPatch(sessionID, managedSuspendPatch(time.Now())); err != nil {
 				fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
@@ -2513,6 +2519,9 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 		now := time.Now().UTC()
 		patch := session.SleepPatch(now, string(session.SleepReasonKilled))
 		patch["synced_at"] = now.Format(time.RFC3339)
+		for k, v := range session.ClearWakeRequestPatch() {
+			patch[k] = v
+		}
 		if err := sessStore.SetMetadataBatch(sessionID, patch); err != nil {
 			fmt.Fprintf(stderr, "gc session kill: warning: syncing session %s to asleep: %v\n", sessionID, err) //nolint:errcheck // best-effort stderr
 		}

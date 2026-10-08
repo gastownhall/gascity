@@ -1357,13 +1357,21 @@ func (m *Manager) suspend(id string, intent suspendIntent) error {
 		}
 
 		// Update state and suspension timestamp together so stores with a
-		// write-through cache preserve one coherent lifecycle transition.
-		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
+		// write-through cache preserve one coherent lifecycle transition. An
+		// operator's suspend supersedes any pending wake request (D7); the
+		// shutdown sweep leaves it for the next start.
+		patch := MetadataPatch{
 			"state":        string(StateSuspended),
 			"suspended_at": time.Now().UTC().Format(time.RFC3339),
 			"slept_at":     "",
 			"sleep_reason": "",
-		}}); err != nil {
+		}
+		if intent == suspendIntentOperator {
+			for k, v := range ClearWakeRequestPatch() {
+				patch[k] = v
+			}
+		}
+		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string(patch)}); err != nil {
 			return fmt.Errorf("updating suspension state: %w", err)
 		}
 

@@ -473,3 +473,85 @@ func TestApplySessionKillFencePatch_RedecidesAfterConcurrentWrite(t *testing.T) 
 		t.Errorf("sleep_reason = %q, want the decision made on the fresh row", got)
 	}
 }
+
+// pendingWake is a pending explicit wake request (CONTRACT v5.7 D7).
+var pendingWake = map[string]string{"wake_request": "explicit", "wake_requested_at": "2026-10-08T11:00:00Z"}
+
+// TestCmdSessionKill_ClearsPendingWake is D7 rule 3: the kill supersedes a
+// pending wake in its own write, through the kill fence or, for a runtime
+// already gone, the post-kill sync. A stale wake would keep a killed idle seat
+// wanted. Kills either write dropping the clear.
+func TestCmdSessionKill_ClearsPendingWake(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		stopped bool
+	}{{name: "fenced"}, {name: "runtime already gone", stopped: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			const sessionName = "s-gc-kill-wake"
+			store, bead, _ := newKillPokeSession(t, sessionName)
+			stubKillPoke(t)
+			setKillFixtureMetadata(t, store, bead.ID, pendingWake)
+			inner := wrapKillPokeProvider(t, &killHookProvider{})
+			if tc.stopped {
+				setKillFixtureMetadata(t, store, bead.ID, map[string]string{"state": string(sessionpkg.StateAsleep)})
+				if err := inner.Stop(sessionName); err != nil {
+					t.Fatalf("pre-stopping runtime: %v", err)
+				}
+			}
+
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionKill([]string{killPokeSessionIdentity}, &stdout, &stderr); code != 0 {
+				t.Fatalf("cmdSessionKill = %d, want 0; stderr=%s", code, stderr.String())
+			}
+			final := mustGetBead(t, store, bead.ID)
+			for key := range pendingWake {
+				if got := final.Metadata[key]; got != "" {
+					t.Errorf("after kill %s = %q, want cleared", key, got)
+				}
+			}
+		})
+	}
+}
+
+// TestCmdSessionKill_StopFailureRestoresPendingWake: the wake clear rides in
+// the kill-fence patch, so a failed kill's rollback restores the wake with
+// the rest of the row. Kills a separate clear write the rollback misses.
+func TestCmdSessionKill_StopFailureRestoresPendingWake(t *testing.T) {
+	const sessionName = "s-gc-kill-wake-restore"
+	store, bead, _ := newKillPokeSession(t, sessionName)
+	stubKillPoke(t)
+	setKillFixtureMetadata(t, store, bead.ID, pendingWake)
+	var atStop beads.Bead
+	hooks := &killHookProvider{}
+	hooks.beforeStop = func() { atStop = mustGetBead(t, store, bead.ID) }
+	fake := wrapKillPokeProvider(t, hooks).(*runtime.Fake)
+	fake.StopErrors[sessionName] = errors.New("tmux: kill-session refused")
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionKill([]string{killPokeSessionIdentity}, &stdout, &stderr); code != 1 {
+		t.Fatalf("cmdSessionKill = %d, want 1 when the runtime survives; stderr=%s", code, stderr.String())
+	}
+	final := mustGetBead(t, store, bead.ID)
+	for key, want := range pendingWake {
+		if got := atStop.Metadata[key]; got != "" {
+			t.Errorf("under the fence %s = %q, want cleared", key, got)
+		}
+		if got := final.Metadata[key]; got != want {
+			t.Errorf("after rollback %s = %q, want %q restored", key, got, want)
+		}
+	}
+}
+
+// TestManagedSuspendPatchClearsPendingWake is D7 rule 3 for the managed
+// `gc session suspend`, which writes the hold without stopping the runtime.
+func TestManagedSuspendPatchClearsPendingWake(t *testing.T) {
+	patch := managedSuspendPatch(time.Now())
+	for key := range pendingWake {
+		if v, ok := patch[key]; !ok || v != "" {
+			t.Errorf("managed suspend %s = %q (present %v), want cleared", key, v, ok)
+		}
+	}
+	if patch["state"] != "suspended" || patch["sleep_intent"] != "user-hold" || patch["held_until"] == "" {
+		t.Errorf("managed suspend patch = %v, want the hold", patch)
+	}
+}

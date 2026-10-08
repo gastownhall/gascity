@@ -113,7 +113,5 @@ func stopCancelPatch() session.MetadataPatch {
 
 // stopVoidResiduePatch clears both halves of a request rule 2 ended.
 func stopVoidResiduePatch() session.MetadataPatch {
-	patch := stopCancelPatch()
-	patch[session.DrainAckIncarnationKey], patch[session.DrainAckAtKey] = "", ""
-	return patch
+	return session.ClearStopRequestPatch()
 }

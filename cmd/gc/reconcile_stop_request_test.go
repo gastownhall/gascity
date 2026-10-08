@@ -159,7 +159,8 @@ func stopKeyFields() []string {
 func stopKeyNames() []string {
 	return append([]string{
 		"drainIntentReasonKey", "drainIntentAtKey", "drainIntentIncarnationKey", "DrainAckIncarnationKey",
-		"DrainAckAtKey", "StopKeys", "readStopKeys",
+		"DrainAckAtKey", "DrainIntentReasonKey", "DrainIntentAtKey", "DrainIntentIncarnationKey",
+		"StopKeys", "readStopKeys",
 	}, stopKeyFields()...)
 }
 

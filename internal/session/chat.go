@@ -536,19 +536,32 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if KillPendingMetadata(b.Metadata["state"], b.Metadata["state_reason"], b.Metadata["sleep_reason"], b.Metadata["slept_at"], m.now()) {
 		return fmt.Errorf("%w: %s", ErrSessionKillPending, id)
 	}
+	// Attach and Send resume a dormant row (CONTRACT v5.7 D8): the hold goes
+	// as `gc session wake` clears it, and the confirmation consumes it.
+	resume := isDormantForResume(b.Metadata)
 	transport, transportVerified := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
 		if b.Metadata["transport"] == "" && transportVerified {
 			m.persistTransport(id, b.Metadata["provider"], transport)
 		}
-		if err := m.confirmLiveSessionState(id, &b); err != nil {
-			return err
+		if resume {
+			if err := m.clearResumeBlockers(id, &b); err != nil {
+				return err
+			}
 		}
-		return nil
+		return m.confirmLiveSessionState(id, &b, resume)
 	}
 	if resumeCommand == "" {
 		return fmt.Errorf("%w: %s", ErrResumeRequired, id)
+	}
+	if resume {
+		if err := m.clearResumeBlockers(id, &b); err != nil {
+			if unroute != nil {
+				unroute()
+			}
+			return err
+		}
 	}
 
 	cfg := hints
@@ -640,8 +653,8 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 			// Context canceled during stale-key sleep: the runtime session
 			// may already be running but we skip setting state="active".
 			// This is self-healing via NDI — the next ensureRunning call
-			// sees the suspended-state bead, attempts sp.Start, gets
-			// ErrSessionExists (IsRunning=true), and persists "active".
+			// sees the dormant bead next to a running runtime and confirms
+			// it, persisting "active".
 			if unroute != nil {
 				unroute()
 			}
@@ -661,7 +674,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if err := m.syncStoredMCPServers(id, &b, cfg.MCPServers); err != nil {
 		return fmt.Errorf("%w: %w", ErrStateSync, err)
 	}
-	if err := m.confirmLiveSessionState(id, &b); err != nil {
+	if err := m.confirmLiveSessionState(id, &b, resume); err != nil {
 		if started && !errors.Is(err, ErrStateSync) {
 			_ = m.sp.Stop(sessName)
 		}
@@ -773,30 +786,118 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	return nil
 }
 
-func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
+// resumeWriteAttempts bounds the re-read/re-decide loop of a resume write.
+const resumeWriteAttempts = 3
+
+// errResumeSuperseded reports that the row a resume read changed underneath
+// it: it closed, took a new generation or instance token, or kept winning
+// the revision fence.
+var errResumeSuperseded = errors.New("session row changed during resume")
+
+// isDormantForResume reports whether ensureRunning resumes a dormant row
+// (D8): asleep, suspended, drained, or holding a sleep intent.
+func isDormantForResume(meta map[string]string) bool {
+	switch State(strings.TrimSpace(meta["state"])) {
+	case StateAsleep, StateSuspended, StateDrained:
+		return true
+	}
+	return strings.TrimSpace(meta["sleep_intent"]) != ""
+}
+
+// clearResumeBlockers applies what `gc session wake` applies,
+// ClearWakeBlockersPatch, before the runtime starts (D8 rule 1).
+func (m *Manager) clearResumeBlockers(id string, b *beads.Bead) error {
+	now := m.now()
+	if err := m.writeResumePatch(id, b, func(cur Info) MetadataPatch {
+		return ClearWakeBlockersPatch(State(strings.TrimSpace(cur.MetadataState)), cur.SleepReason, now)
+	}); err != nil {
+		return fmt.Errorf("clearing wake blockers: %w", err)
+	}
+	return nil
+}
+
+// confirmLiveSessionState records a live runtime: one lifecycle CAS that
+// marks the row active and drops a pending-create claim. A resume (D8 rule
+// 2) also consumes the dormant state: the sleep and suspend markers, the
+// pending wake request and both stop-request halves are cleared, and
+// last_woke_at and awake_started_at are stamped. It leaves the generation
+// and the start baseline (CommitStartedPatch's hashes) alone.
+func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, resume bool) error {
 	if b == nil {
 		return nil
 	}
-	batch := make(map[string]string)
-	switch State(b.Metadata["state"]) {
-	case "", StateStartPending, StateCreating, StateAsleep, StateSuspended:
-		batch["state"] = string(StateActive)
-		batch["state_reason"] = "creation_complete"
-	}
-	if strings.TrimSpace(b.Metadata["pending_create_claim"]) != "" {
-		batch["pending_create_claim"] = ""
-		batch["pending_create_started_at"] = ""
-	}
-	if len(batch) == 0 {
-		return nil
-	}
-	if err := m.store.SetMetadataBatch(id, batch); err != nil {
+	now := m.now()
+	if err := m.writeResumePatch(id, b, func(cur Info) MetadataPatch {
+		return liveConfirmPatch(cur, resume, now)
+	}); err != nil {
 		return fmt.Errorf("%w: updating session state: %w", ErrStateSync, err)
+	}
+	return nil
+}
+
+// liveConfirmPatch is confirmLiveSessionState's patch over the row cur.
+func liveConfirmPatch(cur Info, resume bool, now time.Time) MetadataPatch {
+	patch := MetadataPatch{}
+	switch state := State(cur.MetadataState); state {
+	case "", StateStartPending, StateCreating, StateAsleep, StateSuspended:
+		patch["state"] = string(StateActive)
+		patch["state_reason"] = "creation_complete"
+	default:
+		if resume && state != StateActive {
+			patch["state"] = string(StateActive)
+			patch["state_reason"] = "creation_complete"
+		}
+	}
+	if strings.TrimSpace(cur.PendingCreateClaimMetadata) != "" {
+		patch["pending_create_claim"] = ""
+		patch["pending_create_started_at"] = ""
+	}
+	if !resume {
+		return patch
+	}
+	patch["sleep_reason"] = ""
+	patch["slept_at"] = ""
+	patch["suspended_at"] = ""
+	patch["sleep_intent"] = ""
+	patch["last_woke_at"] = now.UTC().Format(time.RFC3339)
+	patch["awake_started_at"] = awakeIntervalStartedAt(now)
+	for k, v := range ClearWakeRequestPatch() {
+		patch[k] = v
+	}
+	for k, v := range ClearStopRequestPatch() {
+		patch[k] = v
+	}
+	return patch
+}
+
+// writeResumePatch writes decide's patch by UpdateMetadataFenced while the
+// row is open and carries the generation and instance token b holds, and
+// folds what it wrote into b. A lost CAS re-reads and re-decides; a changed
+// row, or a fence lost on every attempt, writes nothing and returns
+// errResumeSuperseded. Callers hold the session mutation lock.
+func (m *Manager) writeResumePatch(id string, b *beads.Bead, decide func(Info) MetadataPatch) error {
+	var written MetadataPatch
+	superseded := false
+	ok, err := NewStore(beads.SessionStore{Store: m.store}).UpdateMetadataFenced(id, resumeWriteAttempts, func(cur Info, _ PersistedResponse) MetadataPatch {
+		written = nil
+		superseded = cur.Closed || cur.Generation != b.Metadata["generation"] || cur.InstanceToken != b.Metadata["instance_token"]
+		if !superseded {
+			written = decide(cur)
+		}
+		return written
+	})
+	switch {
+	case err != nil:
+		return err
+	case !ok && (superseded || len(written) > 0):
+		return fmt.Errorf("%w: %s", errResumeSuperseded, id)
+	case !ok:
+		return nil
 	}
 	if b.Metadata == nil {
 		b.Metadata = make(map[string]string)
 	}
-	for k, v := range batch {
+	for k, v := range written {
 		b.Metadata[k] = v
 	}
 	return nil
