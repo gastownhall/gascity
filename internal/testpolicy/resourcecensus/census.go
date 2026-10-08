@@ -125,8 +125,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   717,
-			BaselineFiles:   210,
+			BaselineCalls:   745,
+			BaselineFiles:   221,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-cp3hwi",
@@ -138,8 +138,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   490,
-			BaselineFiles:   179,
+			BaselineCalls:   498,
+			BaselineFiles:   184,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-cp3hwi",
@@ -151,10 +151,10 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceListenerHelper,
-			BaselineCalls:   58,
-			BaselineFiles:   23,
-			ReportedCalls:   58,
-			ReportedFiles:   23,
+			BaselineCalls:   60,
+			BaselineFiles:   24,
+			ReportedCalls:   60,
+			ReportedFiles:   24,
 			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "all-source listener-helper call/file totals cannot drift without an explicit checked policy update",
 			ResourceOwner:   "ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption",
@@ -166,8 +166,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   486,
-			BaselineFiles:   141,
+			BaselineCalls:   497,
+			BaselineFiles:   147,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-cp3hwi",
@@ -179,8 +179,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   319,
-			BaselineFiles:   122,
+			BaselineCalls:   320,
+			BaselineFiles:   123,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
 			OwnerBead:       "ga-cp3hwi",
@@ -192,8 +192,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   122,
-			BaselineFiles:   14,
+			BaselineCalls:   124,
+			BaselineFiles:   16,
 			ReportedCalls:   3960,
 			ReportedFiles:   184,
 			OwnerBead:       "ga-cp3hwi",
@@ -231,8 +231,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceHTTPTestServer,
-			BaselineCalls:   318,
-			BaselineFiles:   66,
+			BaselineCalls:   319,
+			BaselineFiles:   67,
 			ReportedCalls:   255,
 			ReportedFiles:   56,
 			OwnerBead:       "ga-cp3hwi",
@@ -244,9 +244,9 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceListenerHelper,
-			BaselineCalls:   38,
+			BaselineCalls:   39,
 			BaselineFiles:   13,
-			ReportedCalls:   38,
+			ReportedCalls:   39,
 			ReportedFiles:   13,
 			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged listener-helper call/file totals cannot grow; reductions must lower this baseline",
@@ -322,8 +322,8 @@ var bootstrapPolicy = Ledger{
 	},
 	Medium: []MediumOwner{
 		{
-			PackageDir:      "internal/api",
-			PackageName:     "api",
+			PackageDir:      "internal/api/apierr",
+			PackageName:     "apierr",
 			Owner:           "TestEveryEmittedErrorCodeIsRegistered",
 			Resources:       []Resource{ResourceSubprocess},
 			OwnerBead:       "ga-cp3hwi",
@@ -497,6 +497,72 @@ var bootstrapPolicy = Ledger{
 			MigrationTarget: "P0.4b",
 			Expires:         "2026-10-31",
 		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestGoModDownloadRetryScriptRetriesTransientFailures",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the CI go mod download retry proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the one bash subprocess per case is confined to TestGoModDownloadRetryScriptRetriesTransientFailures, which exists to run .github/scripts/go-mod-download-retry.sh against a PATH-injected fake go: the retry loop and GOPROXY selection are shell, so only a real shell run can prove a transient proxy error is retried and a persistent one fails",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestGoModVerifyCacheDetectsTamperedModules",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the CI Go module cache verification proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the go and bash subprocesses are confined to TestGoModVerifyCacheDetectsTamperedModules, which exists to run .github/scripts/go-mod-download-retry.sh and .github/scripts/go-mod-verify-cache.sh with the real go command against a file:// module proxy and an isolated module cache, then tamper with the cached zip: the claim under test is the go command's own trust of a cached .ziphash, so only the real go command can prove the verify step catches what it accepts",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestRBEWorkerJSONIsolationOffMatchesPreO1",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the OSS worker rollback-config and fork-tier worker-config proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the one jq subprocess is confined to TestRBEWorkerJSONIsolationOffMatchesPreO1, which exists to render tools/rbe/blacksmith-worker.sh's own jq program for the OSS tier with isolation off, compared with the pre-O1 worker.json, and for the fork tier, compared with its golden: the program is jq, so only jq can prove the rollback renders the same config and the fork tier caches nothing",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestRBEWorkerScrubCAS",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the sticky-disk CAS scrub proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the one bash subprocess is confined to TestRBEWorkerScrubCAS, which exists to run tools/rbe/blacksmith-worker.sh's own scrub_cas function on a scratch store of odd names (quotes, spaces, a newline, a backslash) and bad blobs: the function is GNU find, xargs and sha256sum plumbing, so only bash can prove it deletes every bad file without aborting the worker",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestFreshMergeActionBehaviour",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the fresh-merge composite action's behavior proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the git and bash subprocesses are confined to TestFreshMergeActionBehaviour, which exists to run .github/actions/fresh-merge's own bash script against a scratch git origin (clean merge, workflow skew, conflict, head already containing the tip, unfetchable base): the script is git plumbing, so only real git can prove what it merges and when it fails",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestCacheZstdProbe",
+			Resources:       []Resource{ResourceHTTPTestServer},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the anonymous-cache zstd probe's behavior proof is a checked Medium HTTP test server owner",
+			ResourceOwner:   "the loopback TLS HTTP/2 servers are confined to TestCacheZstdProbe, which exists to run tools/rbe/cache-zstd-probe.sh against a stand-in rbe-cache GetCapabilities (zstd advertised or not, gRPC and HTTP errors, malformed answers, a timeout): the probe is curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
 	},
 	ReviewedHermeticBody: []ReviewedHermeticBody{
 		{
@@ -532,8 +598,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   467,
-			BaselineFiles:   134,
+			BaselineCalls:   472,
+			BaselineFiles:   138,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-cp3hwi",
@@ -545,8 +611,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   319,
-			BaselineFiles:   122,
+			BaselineCalls:   320,
+			BaselineFiles:   123,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
 			OwnerBead:       "ga-cp3hwi",
@@ -558,8 +624,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   117,
-			BaselineFiles:   14,
+			BaselineCalls:   119,
+			BaselineFiles:   16,
 			ReportedCalls:   4348,
 			ReportedFiles:   200,
 			OwnerBead:       "ga-cp3hwi",
@@ -610,9 +676,9 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceListenerHelper,
-			BaselineCalls:   38,
+			BaselineCalls:   39,
 			BaselineFiles:   13,
-			ReportedCalls:   38,
+			ReportedCalls:   39,
 			ReportedFiles:   13,
 			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged Small listener-helper call/file totals cannot grow; reductions must lower this baseline",
@@ -1862,24 +1928,31 @@ func LoadLedger(name string) (Ledger, error) {
 	return ParseLedger(data)
 }
 
-// Validate checks schema ownership, expiration, and exact census baselines.
-func Validate(ledger Ledger, census Census, now time.Time, mode waiverclock.Mode) (warnings []string, err error) {
-	return validateAgainstPolicy(bootstrapPolicy, ledger, census, now, mode)
+// Validate checks schema ownership and exact census baselines. It never reads
+// or takes a clock: whether a row's date is acceptable today is answered by
+// handing PolicyExpiries to internal/testpolicy/waiverclock from the one
+// never-cached date check (internal/testpolicy/waiverexpiry). Keeping the two
+// apart is what lets this check's result be cached without going stale on the
+// calendar.
+func Validate(ledger Ledger, census Census) error {
+	return validateAgainstPolicy(bootstrapPolicy, ledger, census)
 }
 
-func validateAgainstPolicy(policy, ledger Ledger, census Census, now time.Time, mode waiverclock.Mode) (warnings []string, err error) {
-	// The clock runs separately from everything below, because a passing date is
-	// the only failure here that needs nobody to change any code. Its findings
-	// join the rest rather than short-circuiting them: neither a tolerated lapse
-	// nor a fatal one should be able to hide a real regression.
-	clock := waiverclock.Check(collectExpiries(ledger), now, mode)
-	fail := func(problems ...string) ([]string, error) {
-		problems = append(problems, clock.Fatal...)
+// PolicyExpiries returns one dated expiry per bootstrap policy row, for the
+// waiver clock to judge against today. Validate forces every row of the checked
+// ledger to equal its policy row, expires included, so these are the checked
+// ledger's dates.
+func PolicyExpiries() []waiverclock.Expiry {
+	return collectExpiries(bootstrapPolicy)
+}
+
+func validateAgainstPolicy(policy, ledger Ledger, census Census) error {
+	fail := func(problems ...string) error {
 		if len(problems) == 0 {
-			return clock.Warnings, nil
+			return nil
 		}
 		sort.Strings(problems)
-		return clock.Warnings, errors.New(strings.Join(problems, "\n"))
+		return errors.New(strings.Join(problems, "\n"))
 	}
 
 	if problems := validateManifestAgainstPolicy(policy, ledger); len(problems) > 0 {
@@ -2035,10 +2108,9 @@ func validateOwnership(prefix string, row Baseline) []string {
 
 // validateOwnershipFields checks that a row declares who owns it and when it is
 // meant to be gone. It checks that the date is well formed but deliberately does
-// not check whether it has passed: that verdict depends on an enforcement mode
-// only the top-level caller knows, and it is collected once per ledger row by
-// collectExpiries rather than at each of the two or three sites that reach a row
-// during validation. See internal/testpolicy/waiverclock.
+// not check whether it has passed: that verdict depends on today, which this
+// cached check must never read. collectExpiries hands each row to the waiver
+// clock once instead. See internal/testpolicy/waiverexpiry.
 func validateOwnershipFields(prefix, owner, invariant, resourceOwner, migration, expiryText string) []string {
 	var problems []string
 	for name, value := range map[string]string{

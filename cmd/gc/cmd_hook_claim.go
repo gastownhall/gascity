@@ -162,6 +162,9 @@ type hookClaimOptions struct {
 	Env                []string
 	DrainAck           bool
 	JSON               bool
+	// StrictDrainAck reports that the city runs session_reconciler = "v2",
+	// under which a drain-ack is row-bound and can be refused.
+	StrictDrainAck bool
 	// AutoReclaimStaleClaims opts into a scoped stale-lease reclaim attempt
 	// (ga-7rj87d) when a route-matched candidate's only claim blocker is an
 	// existing assignee. Off by default; wired from config.Agent.
@@ -710,9 +713,13 @@ func refuseExpiredHookClaimWindow(candidateID string, ops hookClaimOps, stderr i
 // A candidate whose claim errors because THIS store cannot resolve the id is
 // skipped rather than fatal (see hookClaimBeadIsElsewhere), so the federated
 // caller can try the store that actually holds it; the returned result's
-// claimsErrored flag carries the skip to the shared drain. Every other claim
-// error still fails closed: ownership is unresolved on a bead this session
-// already owns, and claiming unrelated fresh work would strand it.
+// claimsErrored flag carries the skip to the shared drain. A routed candidate
+// that resolves to a wisp row (hookClaimBeadIsAWisp) and a binding that refuses
+// the claim CAS outright (hookClaimBindingRefusedTheClaim) are skipped for the
+// same reason: both are refused before any write, so nothing is outstanding.
+// Every other claim error still fails closed: ownership is unresolved on a
+// bead this session already owns, and claiming unrelated fresh work would
+// strand it.
 func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) hookClaimResult {
 	ctx, cancel := ops.claimMutationContext()
 	defer cancel()
@@ -744,7 +751,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		claimActor := strings.TrimSpace(candidate.Assignee)
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
 		if err != nil {
-			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err)) {
+			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err) || hookClaimBeadIsAWisp(err)) {
 				// The read federated and the write did not: the assigned tier
 				// reads city-wide, so a graph step in a relocated class store
 				// arrives here while the claim runs against this store's bd
@@ -758,6 +765,12 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 				// lands before any write (hookClaimBindingRefusedTheClaim). One
 				// bead no store can claim must not stop this session claiming
 				// the work that other stores can.
+				//
+				// A routed id that resolves to a wisp row carries the same proof
+				// for the same reason (hookClaimBeadIsAWisp): the claimer refused
+				// before any write, so nothing is outstanding, and a wisp is never
+				// claimable through this role no matter how many times it is
+				// retried.
 				fmt.Fprintf(stderr, "gc hook --claim: skipping ready assignment %s: %v\n", candidate.ID, err) //nolint:errcheck
 				claimsErrored = true
 				continue
@@ -1406,17 +1419,25 @@ func writeHookClaimNonTurnDrain(marker string, opts hookClaimOptions, stdout, st
 // with no argument binds through the caller's own GC_SESSION_ID/GC_INSTANCE_TOKEN,
 // and an adopted pane whose environment did not survive a restart acks as nobody
 // — which reads downstream as no acknowledgement at all. Naming the id lets the
-// agent run the form that resolves the target from the store instead.
+// agent run the form that resolves the target from the store instead. Under
+// session_reconciler = "v2" the line also names --operator for whoever acks
+// from outside the session, since there a bare-id ack must prove its token.
+// A refused v2 ack is tolerated, as on the stale-session drain.
+//
 // label names the door the refusal came through ("gc hook --claim" or
 // "gc hook"), because both are fenced and an operator reading a pane needs to
 // know which one answered. The JSON record is identical either way: the command
 // is "hook" for both, and a consumer should not have to care.
 func writeHookClaimDrainPending(label, sessionID string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) int {
+	operatorHint := ""
+	if opts.StrictDrainAck {
+		operatorHint = " (an operator acking it from outside the session adds --operator)"
+	}
 	_, _ = fmt.Fprintf(stderr,
-		"%s: drain pending for this session; run: gc runtime drain-ack %s — then exit\n",
-		label, sessionID)
+		"%s: drain pending for this session; run: gc runtime drain-ack %s — then exit%s\n",
+		label, sessionID, operatorHint)
 
-	return writeHookClaimDrain(label, hookClaimReasonDrainPending, opts.JSON, opts.DrainAck, ops.DrainAck, stdout, stderr)
+	return writeHookClaimDrain(label, hookClaimReasonDrainPending, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(ops.DrainAck), stdout, stderr)
 }
 
 // writeHookClaimStaleSessionDrain emits the terminal result for a refused stale
@@ -1427,15 +1448,19 @@ func writeHookClaimDrainPending(label, sessionID string, opts hookClaimOptions, 
 // acknowledges drain and exits cleanly rather than seeing a bare exit 1 and
 // retrying the refusal forever.
 func writeHookClaimStaleSessionDrain(opts hookCommandOptions, stdout, stderr io.Writer) int {
-	return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, hookRuntimeDrainAck, stdout, stderr)
+	return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(opts.drainAckFn()), stdout, stderr)
+}
+
+// drainAckFn returns the injected drain-ack, or the runtime one.
+func (opts hookCommandOptions) drainAckFn() hookDrainAckFunc {
+	if opts.DrainAckFn != nil {
+		return opts.DrainAckFn
+	}
+	return hookRuntimeDrainAck
 }
 
 func writeHookClaimSuspensionDrain(reason string, opts hookCommandOptions, stdout, stderr io.Writer) int {
-	drainAckFn := opts.DrainAckFn
-	if drainAckFn == nil {
-		drainAckFn = hookRuntimeDrainAck
-	}
-	return writeHookClaimDrain(hookClaimLabel, reason, opts.JSON, opts.DrainAck, drainAckFn, stdout, stderr)
+	return writeHookClaimDrain(hookClaimLabel, reason, opts.JSON, opts.DrainAck, opts.drainAckFn(), stdout, stderr)
 }
 
 // writeHookClaimMissingSessionRegistrationDrain emits the terminal result for a
@@ -1446,7 +1471,7 @@ func writeHookClaimSuspensionDrain(reason string, opts hookCommandOptions, stdou
 // distinct reason so a wrapper or dashboard can tell "never registered" apart
 // from "registered, then went stale."
 func writeHookClaimMissingSessionRegistrationDrain(opts hookCommandOptions, stdout, stderr io.Writer) int {
-	return writeHookClaimDrain(hookClaimLabel, hookClaimReasonMissingSessionRegistration, opts.JSON, opts.DrainAck, hookRuntimeDrainAck, stdout, stderr)
+	return writeHookClaimDrain(hookClaimLabel, hookClaimReasonMissingSessionRegistration, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(opts.drainAckFn()), stdout, stderr)
 }
 
 // writeHookClaimDrain writes the single structured drain result shared by every
@@ -1476,12 +1501,18 @@ func writeHookClaimDrain(label, reason string, jsonOut, drainAck bool, drainAckF
 	// the seat that is trying to leave. The exit code still reports that nothing
 	// was acknowledged; the record still reports that the answer was "drain".
 	// Those are different facts and the consumer needs both.
+	//
+	// A tolerated refusal (errHookDrainAckTolerated) reports the drain without
+	// drain_acknowledged and still exits 0: the seat is leaving either way.
 	ackFailed := false
 	if drainAck {
-		if err := drainAckFn(stderr); err != nil {
+		switch err := drainAckFn(stderr); {
+		case errors.Is(err, errHookDrainAckTolerated):
+			fmt.Fprintf(stderr, "%s: drain-ack refused for this seat; exiting anyway, the controller stops it through its own drain\n", label) //nolint:errcheck
+		case err != nil:
 			fmt.Fprintf(stderr, "%s: drain-ack failed: %v\n", label, err) //nolint:errcheck
 			ackFailed = true
-		} else {
+		default:
 			result.DrainAcknowledged = true
 		}
 	}
@@ -2956,10 +2987,38 @@ func hookAssignContinuationWithBdStore(_ context.Context, dir string, env []stri
 }
 
 func hookRuntimeDrainAck(stderr io.Writer) error {
-	if code := cmdRuntimeDrainAck(nil, false, io.Discard, stderr); code != 0 {
+	switch cmdRuntimeDrainAck(nil, false, false, io.Discard, stderr) {
+	case 0:
+		return nil
+	case drainAckRefused:
+		return errDrainAckRefused
+	default:
 		return errors.New("runtime drain-ack returned non-zero")
 	}
-	return nil
+}
+
+// errDrainAckRefused is hookRuntimeDrainAck's error for a v2 drain-ack that
+// the session row refused: the incarnation check, which releases nothing, or
+// the row CAS after the held-claim release. Neither writes the row ack or the
+// env ack.
+var errDrainAckRefused = errors.New("runtime drain-ack refused by the session row")
+
+// errHookDrainAckTolerated marks a refused drain-ack the drain may complete
+// without (see tolerateDrainAckRefusal).
+var errHookDrainAckTolerated = errors.New("runtime drain-ack refused; tolerated")
+
+// tolerateDrainAckRefusal wraps the drain-ack of the stale-session,
+// missing-registration and drain-pending drains. Under v2 those are the seats
+// whose self-ack the row cannot prove, the seat is exiting either way, and v2
+// stops it through its own drain, so a refusal must not fail the hook. Any
+// other failure still does.
+func tolerateDrainAckRefusal(fn hookDrainAckFunc) hookDrainAckFunc {
+	return func(stderr io.Writer) error {
+		if err := fn(stderr); !errors.Is(err, errDrainAckRefused) {
+			return err
+		}
+		return errHookDrainAckTolerated
+	}
 }
 
 func hookClaimBdStore(dir string, env []string, actor string) *beads.BdStore {

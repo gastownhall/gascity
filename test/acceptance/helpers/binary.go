@@ -70,13 +70,16 @@ func FindModuleRoot() string {
 }
 
 // FindBD returns the path to the bd binary, or empty string if not found.
+//
+// GC_ACCEPTANCE_BD_BIN, when set, is the only candidate: a set override that
+// does not name a file yields "", never another bd, so a run that pinned a
+// bd version cannot silently test a different one.
 func FindBD() string {
 	if override := strings.TrimSpace(os.Getenv("GC_ACCEPTANCE_BD_BIN")); override != "" {
-		if bin, err := filepath.Abs(override); err == nil {
-			if info, statErr := os.Stat(bin); statErr == nil && !info.IsDir() {
-				return bin
-			}
+		if bin := resolveToolOverride(override); statBinary(bin) {
+			return bin
 		}
+		return ""
 	}
 	// Under bazel the pinned bd ships prebuilt in runfiles as a data dep
 	// (http_archive of the same release the go-test CI installs); prefer it
@@ -86,7 +89,7 @@ func FindBD() string {
 			if rf == "" {
 				continue
 			}
-			if bin := filepath.Join(rf, "+http_archive+bd_bin_v1_3_1_rc_2", "bd"); statBinary(bin) {
+			if bin := filepath.Join(rf, "+http_archive+bd_bin_v1_3_1", "bd"); statBinary(bin) {
 				return bin
 			}
 		}
@@ -96,6 +99,24 @@ func FindBD() string {
 		return ""
 	}
 	return p
+}
+
+// resolveToolOverride makes a tool path from the environment absolute. Under
+// bazel test a relative path is a $(rootpath ...) a BUILD target expanded,
+// relative to the main repository's runfiles directory rather than to the
+// package directory the test runs in; elsewhere it is relative to the
+// working directory.
+func resolveToolOverride(path string) string {
+	if !filepath.IsAbs(path) && bazeltest.IsBazel() {
+		if workspace := os.Getenv("TEST_WORKSPACE"); workspace != "" {
+			return filepath.Join(os.Getenv("TEST_SRCDIR"), workspace, filepath.FromSlash(path))
+		}
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return ""
+	}
+	return abs
 }
 
 func statBinary(path string) bool {
@@ -108,6 +129,9 @@ func RequireBD(t *testing.T) string {
 	t.Helper()
 	p := FindBD()
 	if p == "" {
+		if override := strings.TrimSpace(os.Getenv("GC_ACCEPTANCE_BD_BIN")); override != "" {
+			t.Fatalf("GC_ACCEPTANCE_BD_BIN=%s names no bd binary", override)
+		}
 		t.Skip("bd not available")
 	}
 	return p

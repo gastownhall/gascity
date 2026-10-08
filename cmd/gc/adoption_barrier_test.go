@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,6 +41,8 @@ type fakeAdoptionProvider struct {
 	// GC_INSTANCE_TOKEN (e.g. a runtime that survived a supervisor restart).
 	// A name with no entry has no live token, i.e. GetMeta returns "".
 	tokens map[string]string
+	// stamps records LL5's SetMeta writes by name, then key.
+	stamps map[string]map[string]string
 }
 
 type adoptionLockProbeStore struct {
@@ -147,6 +150,17 @@ func (f *fakeAdoptionProvider) GetMeta(name, key string) (string, error) {
 		return "", nil
 	}
 	return f.tokens[name], nil
+}
+
+func (f *fakeAdoptionProvider) SetMeta(name, key, value string) error {
+	if f.stamps == nil {
+		f.stamps = make(map[string]map[string]string)
+	}
+	if f.stamps[name] == nil {
+		f.stamps[name] = make(map[string]string)
+	}
+	f.stamps[name][key] = value
+	return nil
 }
 
 func (f *fakeAdoptionProvider) GetLastActivity(string) (time.Time, error) { return time.Time{}, nil }
@@ -270,35 +284,288 @@ func TestAdoptionBarrier_PreservesLiveInstanceToken(t *testing.T) {
 	}
 }
 
-// TestAdoptionBarrier_TokenlessRuntimeAdoptsWithoutFabricatingToken verifies
-// that adopting a running session whose runtime carries NO live
-// GC_INSTANCE_TOKEN leaves the adopted bead's instance_token empty rather
-// than fabricating one. An empty instance_token is the codebase's existing
-// "cannot verify identity" signal (see verifiedStop/verifiedInterrupt in
-// session_wake.go and the drain-ack fence in session_reconciler.go) and
-// deliberately fails open at drain time; a fabricated token would instead
-// fence the runtime from ever being drained, since it could never match.
-func TestAdoptionBarrier_TokenlessRuntimeAdoptsWithoutFabricatingToken(t *testing.T) {
-	store := beads.NewMemStore()
-	sp := &fakeAdoptionProvider{running: []string{"test-city-worker"}}
+// stampFake is a runtime.Fake whose metadata reads (getErr) and writes
+// (setErr) fail per key. lateToken, when set, is the GC_INSTANCE_TOKEN every
+// read after the first returns: a token that appears mid-adoption.
+type stampFake struct {
+	*runtime.Fake
+	getErr, setErr map[string]error
+	lateToken      string
+	tokenReads     int
+}
+
+func newStampFake(t *testing.T, name string) *stampFake {
+	t.Helper()
+	f := &stampFake{Fake: runtime.NewFake(), getErr: map[string]error{}, setErr: map[string]error{}}
+	if err := f.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func (f *stampFake) GetMeta(name, key string) (string, error) {
+	if err := f.getErr[key]; err != nil {
+		return "", err
+	}
+	if key == "GC_INSTANCE_TOKEN" && f.lateToken != "" {
+		if f.tokenReads++; f.tokenReads > 1 {
+			return f.lateToken, nil
+		}
+	}
+	return f.Fake.GetMeta(name, key)
+}
+
+func (f *stampFake) SetMeta(name, key, value string) error {
+	if err := f.setErr[key]; err != nil {
+		return err
+	}
+	return f.Fake.SetMeta(name, key, value)
+}
+
+func (*stampFake) SupportsTransport(string) bool { return true }
+
+// tmuxStampFake is a stampFake whose metadata is a session environment, as
+// tmux's is: it is a runtime.EnvironmentBatchProvider. A plain stampFake is
+// a sidecar provider. Its batched read returns the identity keys through
+// GetMeta, so an injected read failure fails it.
+type tmuxStampFake struct{ *stampFake }
+
+func (f tmuxStampFake) GetAllEnvironment(name string) (map[string]string, error) {
+	env := make(map[string]string, len(identityEnvKeys))
+	for _, key := range identityEnvKeys {
+		v, err := f.GetMeta(name, key)
+		if err != nil {
+			return nil, err
+		}
+		env[key] = v
+	}
+	return env, nil
+}
+
+// meta reads key straight from the fake, past any injected failure.
+func (f *stampFake) meta(t *testing.T, name, key string) string {
+	t.Helper()
+	v, err := f.Fake.GetMeta(name, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+const adoptedName = "test-city-worker"
+
+// adoptOne runs the barrier over sp's one running worker on store and
+// returns the open rows and the barrier's stderr.
+func adoptOne(t *testing.T, store beads.Store, sp runtime.Provider, dryRun bool) ([]beads.Bead, string) {
+	t.Helper()
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	var stderr bytes.Buffer
-	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clock.Real{}, &stderr, dryRun)
+	if !passed || result.Adopted != 1 || result.Skipped != 0 {
+		t.Fatalf("barrier passed=%v result=%+v, want one adoption; stderr: %s", passed, result, stderr.String())
+	}
+	rows, _ := store.ListByLabel(sessionBeadLabel, 0)
+	return rows, stderr.String()
+}
 
-	result, passed := runAdoptionBarrier("", sessionFrontDoor(store), sp, cfg, "test-city", clk, &stderr, false)
-	if !passed {
-		t.Fatalf("barrier should pass, stderr: %s", stderr.String())
+// Kills: a half-identified adopted runtime (v5 O2, LL5). Boot adoption stamps
+// the new row's ID and generation-1 epoch on the runtime; it keeps a
+// runtime's own token and mints one, on the row and the runtime, only when
+// the runtime has none, with BEADS_HOLDER_TOKEN beside it on tmux only. A
+// token it cannot read mints nothing and stamps nothing.
+func TestAdoptionStampsSessionIDAndToken(t *testing.T) {
+	const live = "440f67722bf9e7382ad684e057191659"
+	for _, tc := range []struct {
+		name, token string
+		tokenErr    error
+		sidecar     bool
+	}{
+		{name: "own token", token: live},
+		{name: "no token"},
+		{name: "no token on a sidecar provider", sidecar: true},
+		{name: "unreadable token", tokenErr: errors.New("server busy")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := newStampFake(t, adoptedName)
+			var provider runtime.Provider = tmuxStampFake{sp}
+			if tc.sidecar {
+				provider = sp
+			}
+			if tc.token != "" {
+				if err := sp.Fake.SetMeta(adoptedName, "GC_INSTANCE_TOKEN", tc.token); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sp.getErr["GC_INSTANCE_TOKEN"] = tc.tokenErr
+			rows, stderr := adoptOne(t, beads.NewMemStore(), provider, false)
+			if len(rows) != 1 {
+				t.Fatalf("rows = %d, want 1", len(rows))
+			}
+			row := rows[0]
+			token, rtToken := row.Metadata["instance_token"], sp.meta(t, adoptedName, "GC_INSTANCE_TOKEN")
+			sid, epoch, holder := sp.meta(t, adoptedName, "GC_SESSION_ID"), sp.meta(t, adoptedName, "GC_RUNTIME_EPOCH"), sp.meta(t, adoptedName, "BEADS_HOLDER_TOKEN")
+			if tc.tokenErr != nil {
+				if token != "" || rtToken != "" || sid != "" || epoch != "" || !strings.Contains(stderr, "identity not stamped") {
+					t.Fatalf("row token %q, runtime %q/%q/%q, stderr %q; want nothing minted or stamped, logged", token, rtToken, sid, epoch, stderr)
+				}
+				return
+			}
+			switch {
+			case tc.token != "" && (token != live || rtToken != live || holder != ""):
+				t.Fatalf("row token %q, runtime token %q, holder %q; want the runtime's own token kept, nothing minted", token, rtToken, holder)
+			case tc.token == "" && tc.sidecar && (token == "" || rtToken != token || holder != ""):
+				t.Fatalf("row token %q, runtime token %q, holder %q; want one minted token on row and runtime, no holder on a sidecar", token, rtToken, holder)
+			case tc.token == "" && !tc.sidecar && (token == "" || rtToken != token || holder != token):
+				t.Fatalf("row token %q, runtime token %q, holder %q; want one minted token on all three", token, rtToken, holder)
+			}
+			if sid != row.ID || epoch != "1" || stderr != "" {
+				t.Fatalf("runtime GC_SESSION_ID %q epoch %q (stderr %q), want row %s at epoch 1", sid, epoch, stderr, row.ID)
+			}
+		})
 	}
-	if result.Adopted != 1 {
-		t.Fatalf("Adopted = %d, want 1", result.Adopted)
-	}
+}
 
-	beadList, _ := store.ListByLabel(sessionBeadLabel, 0)
-	if len(beadList) != 1 {
-		t.Fatalf("beads count = %d, want 1", len(beadList))
+// Kills: re-stamping a runtime that already names a session (LL5, as the
+// coordinator ruled on #7223). A runtime adopted while it still carries a
+// closed row's GC_SESSION_ID keeps that ID (and gets no epoch), so the
+// closed-bead reaper stops it exactly as before LL5; the new row holds the
+// runtime's token, own or minted, which v5 O2 reads as Current whatever the
+// session ID.
+func TestAdoptionKeepsAnotherRowsSessionID(t *testing.T) {
+	for _, tc := range []struct{ name, token string }{
+		{name: "own token", token: "440f67722bf9e7382ad684e057191659"},
+		{name: "no token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			closed, err := store.Create(beads.Bead{
+				Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{"session_name": adoptedName, "agent_name": "worker", "state": "active"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(closed.ID); err != nil {
+				t.Fatal(err)
+			}
+			sp := newStampFake(t, adoptedName)
+			for k, v := range map[string]string{"GC_SESSION_ID": closed.ID, "GC_INSTANCE_TOKEN": tc.token} {
+				if err := sp.Fake.SetMeta(adoptedName, k, v); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rows, stderr := adoptOne(t, store, sp, false)
+			if len(rows) != 1 || stderr != "" {
+				t.Fatalf("open rows = %d, stderr %q; want the adopted row, cleanly", len(rows), stderr)
+			}
+			if got, epoch := sp.meta(t, adoptedName, "GC_SESSION_ID"), sp.meta(t, adoptedName, "GC_RUNTIME_EPOCH"); got != closed.ID || epoch != "" {
+				t.Fatalf("runtime GC_SESSION_ID %q epoch %q, want the closed row's %s kept and no epoch", got, epoch, closed.ID)
+			}
+			live := sp.meta(t, adoptedName, "GC_INSTANCE_TOKEN")
+			if verdict := classifyRuntimeInstanceToken(live, nil, rows[0].Metadata["instance_token"]); live == "" || verdict != runtimeTokenMatch {
+				t.Fatalf("runtime token %q vs row %q: verdict %d, want a non-empty match (Current by token)", live, rows[0].Metadata["instance_token"], verdict)
+			}
+			if tc.token != "" && live != tc.token {
+				t.Fatalf("runtime token = %q, want its own %q kept", live, tc.token)
+			}
+			if n := reapRuntimesBoundToClosedBeads(store, newSessionBeadSnapshot(rows), nil, sp, nil, t.TempDir(), io.Discard); n != 1 || sp.IsRunning(adoptedName) {
+				t.Fatalf("reaped %d, running %v; want the closed-bound runtime reaped as before LL5", n, sp.IsRunning(adoptedName))
+			}
+		})
 	}
-	if got := beadList[0].Metadata["instance_token"]; got != "" {
-		t.Errorf("instance_token = %q, want empty (token-less)", got)
+}
+
+// Kills: a stamp failure failing the barrier or the row, a session ID
+// stamped without its epoch, over an unreadable ID or after a failed token
+// write (see TestAdoptionStampedEpochKeepsStaleIncarnationForeign), and a
+// minted token written over one that appeared after the first read (LL5).
+// Each keeps the row, passes the barrier and logs.
+func TestAdoptionStampFailuresKeepRow(t *testing.T) {
+	boom := errors.New("tmux gone")
+	for _, tc := range []struct {
+		name      string
+		set       func(*stampFake)
+		wantID    bool
+		wantToken string // "" none, "row" the row's token, else that value
+	}{
+		{name: "token stamp fails", set: func(f *stampFake) { f.setErr["GC_INSTANCE_TOKEN"] = boom }},
+		{name: "epoch stamp fails", set: func(f *stampFake) { f.setErr["GC_RUNTIME_EPOCH"] = boom }, wantToken: "row"},
+		{name: "ID stamp fails", set: func(f *stampFake) { f.setErr["GC_SESSION_ID"] = boom }, wantToken: "row"},
+		{name: "ID unreadable", set: func(f *stampFake) { f.getErr["GC_SESSION_ID"] = boom }, wantToken: "row"},
+		{name: "token appears mid-adoption", set: func(f *stampFake) { f.lateToken = "late" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := newStampFake(t, adoptedName)
+			tc.set(sp)
+			rows, stderr := adoptOne(t, beads.NewMemStore(), sp, false)
+			if len(rows) != 1 || !strings.Contains(stderr, "identity not stamped") {
+				t.Fatalf("rows %d, stderr %q; want the row kept and the failure logged", len(rows), stderr)
+			}
+			if got := sp.meta(t, adoptedName, "GC_SESSION_ID"); (got == rows[0].ID) != tc.wantID {
+				t.Fatalf("runtime GC_SESSION_ID = %q, want stamped=%v", got, tc.wantID)
+			}
+			want := tc.wantToken
+			if want == "row" {
+				want = rows[0].Metadata["instance_token"]
+			}
+			if got := sp.meta(t, adoptedName, "GC_INSTANCE_TOKEN"); got != want {
+				t.Fatalf("runtime token = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// Kills: a dry run that writes to the runtime (LL5): `gc migration plan`
+// reports, and writes nothing anywhere.
+func TestAdoptionDryRunStampsNothing(t *testing.T) {
+	sp := newStampFake(t, adoptedName)
+	store := beads.NewMemStore()
+	rows, _ := adoptOne(t, store, sp, true)
+	if len(rows) != 0 || sp.CountCalls("SetMeta", adoptedName) != 0 {
+		t.Fatalf("rows %d, SetMeta calls %d; want a dry run to write nothing", len(rows), sp.CountCalls("SetMeta", adoptedName))
+	}
+}
+
+// Kills: a session ID stamped without GC_RUNTIME_EPOCH (LL5 review). After
+// the adopted row restarts (preWakeCommit rotates its token and bumps its
+// generation), legacy's pending-create attribution must read the adopted
+// incarnation as foreign: an ID match with a token mismatch and no epoch
+// reads as ours, which would commit the new row over a runtime that never
+// carries its token (ga-lfr06j).
+func TestAdoptionStampedEpochKeepsStaleIncarnationForeign(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T, sp *stampFake, store beads.Store) string // returns the row ID
+	}{
+		{name: "pre-LL5 adoption (token only)", run: func(t *testing.T, sp *stampFake, _ beads.Store) string {
+			if err := sp.Fake.SetMeta(adoptedName, "GC_INSTANCE_TOKEN", "adopted-tok"); err != nil {
+				t.Fatal(err)
+			}
+			return "gc-adopted"
+		}},
+		{name: "epoch stamp fails", run: func(t *testing.T, sp *stampFake, store beads.Store) string {
+			sp.setErr["GC_RUNTIME_EPOCH"] = errors.New("tmux gone")
+			rows, _ := adoptOne(t, store, sp, false)
+			return rows[0].ID
+		}},
+		{name: "minted token stamp fails", run: func(t *testing.T, sp *stampFake, store beads.Store) string {
+			sp.setErr["GC_INSTANCE_TOKEN"] = errors.New("tmux gone")
+			rows, _ := adoptOne(t, store, sp, false)
+			return rows[0].ID
+		}},
+		{name: "stamped with epoch", run: func(t *testing.T, sp *stampFake, store beads.Store) string {
+			rows, _ := adoptOne(t, store, sp, false)
+			return rows[0].ID
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := newStampFake(t, adoptedName)
+			id := tc.run(t, sp, beads.NewMemStore())
+			restarted := session.Info{ID: id, InstanceToken: "rotated-token", Generation: "2"}
+			if got := readPendingCreateIdentity(restarted, adoptedName, sp.Fake).attribution(); got != pendingCreateRuntimeForeign {
+				t.Fatalf("attribution of the adopted incarnation after a restart = %d, want foreign", got)
+			}
+		})
 	}
 }
 
@@ -345,7 +612,7 @@ func TestAdoptionBarrier_AdoptedRuntimeCanLaterBeDrained(t *testing.T) {
 	// actually stop the still-running pre-restart runtime.
 	tracker := &asyncStartTracker{}
 	var drainStderr synchronizedBuffer
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, beadList[0].ID, "test-city-worker", adoptedToken, nil, tracker, &drainStderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, beadList[0].ID, "test-city-worker", adoptedToken, nil, tracker, nil, &drainStderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -361,14 +628,10 @@ func TestAdoptionBarrier_AdoptedRuntimeCanLaterBeDrained(t *testing.T) {
 // TestAdoptionBarrier_TokenlessAdoptedRuntimeCanLaterBeDrained is the
 // token-less counterpart to TestAdoptionBarrier_AdoptedRuntimeCanLaterBeDrained
 // above (round-2 exit contract on ga-lfr06j / ga-3kfb6y): a runtime adopted
-// with NO live GC_INSTANCE_TOKEN (instance_token left empty, never
-// fabricated — see TestAdoptionBarrier_TokenlessRuntimeAdoptsWithoutFabricatingToken)
-// must still be actually stoppable by a later drain-ack, not skipped forever
-// as an unverifiable mismatch. queueDrainAckAsyncStop treats an empty
-// expected token as "cannot verify" and falls through to the kill
-// (session_reconciler.go), so this proves that fall-through actually drains
-// a token-less adoptee end-to-end rather than merely asserting the fence
-// code reads that way.
+// with NO live GC_INSTANCE_TOKEN must still be actually stoppable by a later
+// drain-ack, not skipped forever as a mismatch. Adoption mints a token and
+// stamps it on the runtime too (LL5, see TestAdoptionStampsSessionIDAndToken),
+// so the drain-ack fence reads a match rather than a token it can never see.
 func TestAdoptionBarrier_TokenlessAdoptedRuntimeCanLaterBeDrained(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -395,8 +658,8 @@ func TestAdoptionBarrier_TokenlessAdoptedRuntimeCanLaterBeDrained(t *testing.T) 
 		t.Fatalf("beads count = %d, want 1", len(beadList))
 	}
 	adoptedToken := beadList[0].Metadata["instance_token"]
-	if adoptedToken != "" {
-		t.Fatalf("adoptedToken = %q, want empty (token-less adoption must not fabricate one)", adoptedToken)
+	if live, _ := sp.GetMeta("test-city-worker", "GC_INSTANCE_TOKEN"); adoptedToken == "" || live != adoptedToken {
+		t.Fatalf("row token %q, runtime token %q, want one minted token on both", adoptedToken, live)
 	}
 
 	// Reconciler later decides to drain the adopted bead. This must actually
@@ -404,7 +667,7 @@ func TestAdoptionBarrier_TokenlessAdoptedRuntimeCanLaterBeDrained(t *testing.T) 
 	// unverifiable mismatch.
 	tracker := &asyncStartTracker{}
 	var drainStderr synchronizedBuffer
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, beadList[0].ID, "test-city-worker", adoptedToken, nil, tracker, &drainStderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, beadList[0].ID, "test-city-worker", adoptedToken, nil, tracker, nil, &drainStderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -413,7 +676,7 @@ func TestAdoptionBarrier_TokenlessAdoptedRuntimeCanLaterBeDrained(t *testing.T) 
 		t.Fatal("token-less adopted runtime was never stopped — drain-ack skipped it forever (round-2 gap on ga-lfr06j)")
 	}
 	if got := drainStderr.String(); strings.Contains(got, "instance token mismatch") {
-		t.Fatalf("drain stderr = %q, unexpected token mismatch for a token-less adoptee (empty must mean cannot-verify, not skip)", got)
+		t.Fatalf("drain stderr = %q, unexpected token mismatch for a token-less adoptee whose minted token was stamped", got)
 	}
 }
 

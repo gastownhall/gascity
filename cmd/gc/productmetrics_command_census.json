@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 209,
+  "next_id": 210,
   "permanent_ids": [
     {
       "name": "help",
@@ -4069,6 +4069,21 @@
       "classification": "storage-recover-stranded",
       "owner": "immediate",
       "id": 201
+    },
+    {
+      "path": "gc storage repair-sequence",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-repair-sequence",
+      "owner": "immediate",
+      "id": 209
     },
     {
       "path": "gc storage status",

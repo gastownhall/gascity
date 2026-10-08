@@ -471,6 +471,8 @@ Use "gc supervisor run" for foreground operation.`,
 		"preview what agents would start without starting them")
 	cmd.Flags().BoolVar(&noAutoRestartMode, "no-auto-restart", false,
 		"detect supervisor binary drift but do not auto-restart; exits non-zero on drift")
+	cmd.Flags().BoolVar(&allowSupervisorMismatch, allowSupervisorMismatchFlag, false,
+		"start even when the running supervisor is a different gc installation than this binary")
 	cmd.Flags().BoolVar(&startVerboseMode, "verbose", false,
 		"disable warning deduplication and print every supervisor warning")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
@@ -567,8 +569,23 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 	if jsonOut {
 		driftStdout = stderr
 	}
-	if exitCode, cont := runStartDriftCheck(cityPath, driftStdout, stderr); !cont {
-		return exitCode
+	// A supervisor running a different gc installation cannot be fixed by
+	// the drift auto-restart (it would relaunch that other binary), so it is
+	// checked first. --dry-run only previews, so it warns instead.
+	skipDriftCheck := false
+	if dryRunMode {
+		warnSupervisorBinaryMismatch("gc start", stderr)
+	} else {
+		proceed, acceptedDifferentInstall := checkSupervisorBinaryBeforeRegister("gc start", stderr, false)
+		if !proceed {
+			return 1
+		}
+		skipDriftCheck = acceptedDifferentInstall
+	}
+	if !skipDriftCheck {
+		if exitCode, cont := runStartDriftCheck(cityPath, driftStdout, stderr); !cont {
+			return exitCode
+		}
 	}
 
 	// --dry-run routes to the standalone preview path *after* the drift
@@ -773,6 +790,25 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	for _, w := range prov.Warnings {
 		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
+	// Refuse an inadmissible session_reconciler before any init, so a refused
+	// start (including --dry-run) starts no bead store and opens no event log.
+	// runController latches again (newControllerWiring) for the mode it runs.
+	// The two cannot disagree: both read only cfg's session_reconciler, which
+	// nothing below rewrites, and reconcilerModeLookupEnv's override, which no
+	// gc code sets.
+	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	// The one-shot reconcile below calls the legacy session reconciler
+	// directly, behind no legacySessionEntry guard, so v2 refuses it rather
+	// than run legacy session work under a v2 latch. Production never reaches
+	// it (A6, F11); --dry-run reconciles nothing.
+	if mode == reconcilerV2 && !controllerMode && !dryRunMode {
+		fmt.Fprintln(stderr, "gc start: session_reconciler = \"v2\" has no one-shot reconcile; run the controller (gc start --foreground) or remove the key") //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	cityName := loadedCityName(cfg, cityPath)
 
@@ -816,6 +852,12 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	if err := healthBeadsProvider(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc start: beads health check: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal warning — server may recover by the time agents need it.
+	}
+	// One-shot is_blocked repair after a bd upgrade (beads#7037). Best-effort:
+	// it warns and retries on the next start instead of failing this one.
+	// --dry-run only previews, so it writes nothing.
+	if !dryRunMode {
+		startRepairBlockedFlags(cityPath, cfg, stderr, "gc start")
 	}
 
 	// Warm-up doctor scan. Fail-open: startup continues regardless of check,
@@ -939,8 +981,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	recorder := events.Discard
 	var eventProv events.Provider // nil when events disabled or FileRecorder fails
-	if fr, err := newFileEventsRecorder(
-		filepath.Join(cityPath, ".gc", "events.jsonl"), cfg.Events, stderr); err == nil {
+	fr, frErr := openStandaloneCityEventsRecorder(cityPath, cfg.Events, controllerLock != nil, stderr)
+	if frErr == nil {
 		recorder = fr
 		eventProv = fr
 	}
@@ -965,7 +1007,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		watchTargets := config.WatchTargets(prov, cfg, cityPath)
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
 		return runController(cityPath, controllerLock, tomlPath, cfg, configRev, buildAgents, buildAgentsWithSessionBeads, sp,
-			newDrainOps(sp), poolSessions, poolDeathHandlers, watchTargets, recorder, eventProv, stdout, stderr)
+			newDrainOps(sp), poolSessions, poolDeathHandlers, watchTargets, defaultConfigDebounce, recorder, eventProv, stdout, stderr)
 	}
 
 	// One-shot reconciliation (default): no drain (kill is fine).
@@ -1264,6 +1306,23 @@ func ensureClaudeSettingsArgs(fs fsys.FS, cityPath, providerName string, stderr 
 	return settingsArgs(cityPath, providerName), nil
 }
 
+// claudeSettingsArgsReadOnly is ensureClaudeSettingsArgs without the
+// projection, for a read-only resolution (AM-N3): it validates the settings
+// Install would project and returns the arg a successful projection yields,
+// which always points at <city>/.gc/settings.json.
+func claudeSettingsArgsReadOnly(fs fsys.FS, cityPath, providerName string) (string, error) {
+	if providerName != "claude" || cityPath == "" {
+		return "", nil
+	}
+	if fs == nil {
+		fs = fsys.OSFS{}
+	}
+	if err := hooks.ValidateClaudeSettings(fs, cityPath); err != nil {
+		return "", fmt.Errorf("validating Claude settings: %w", err)
+	}
+	return fmt.Sprintf("--settings %q", filepath.Join(cityPath, ".gc", "settings.json")), nil
+}
+
 func claudeSettingsSource(cityPath string) (src, rel string) {
 	candidates := []struct {
 		src string
@@ -1455,6 +1514,18 @@ func sessionSetupContextForAgent(cityPath, cityName, qualifiedName string, a *co
 // filesystem (gc-r9fx). Session-start paths that need the directory to exist
 // use resolveConfiguredWorkDir.
 func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
+	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, true)
+}
+
+// resolveConfiguredWorkDirPathUnvalidated is resolveConfiguredWorkDirPath
+// without the stale-ancestor worktree check, which reads the filesystem: a
+// pure path computation for a plan whose effect runs the check before it
+// writes the path.
+func resolveConfiguredWorkDirPathUnvalidated(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
+	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, false)
+}
+
+func configuredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, validate bool) (string, error) {
 	if a == nil {
 		return resolveAgentDirPath(cityPath, ""), nil
 	}
@@ -1470,8 +1541,10 @@ func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *c
 	// so the operator sees the broken ancestor instead of a structurally
 	// orphaned spawn. workDir is already absolute (ResolveWorkDirPathStrict
 	// returns through ResolveDirPath), so no further resolution is needed.
-	if err := workdirutil.ValidateAncestorWorktreesNotStale(workDir); err != nil {
-		return "", err
+	if validate {
+		if err := workdirutil.ValidateAncestorWorktreesNotStale(workDir); err != nil {
+			return "", err
+		}
 	}
 	return resolveAgentDirPath(cityPath, workDir), nil
 }

@@ -17,16 +17,21 @@ go_library(
 go_test(
     name = "ssh_test",
     srcs = [
+        "conformance_integration_test.go",
         "provider_test.go",
         "seams_test.go",
+        "session_env_file_integration_test.go",
         "session_env_file_test.go",
+        "ssh_localhost_integration_test.go",
         "ssh_test.go",
         "testenv_import_test.go",
     ],
     embed = [":ssh"],
     deps = [
         "//internal/runtime",
+        "//internal/runtime/runtimetest",
         "//internal/testenv",
+        "//internal/testutil",
     ],
 )
 
@@ -38,6 +43,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

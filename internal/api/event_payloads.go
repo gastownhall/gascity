@@ -634,6 +634,52 @@ func SessionUnknownStatePayloadJSON(sessionID, sessionName, state string, firstS
 	return b
 }
 
+// Reasons carried by SessionPendingClearedPayload.Reason.
+const (
+	// PendingClearedResolved: the session is still probed but no longer
+	// reports an interaction — it was answered (POST .../respond or at the
+	// terminal) or withdrawn by the session itself.
+	PendingClearedResolved = "resolved"
+	// PendingClearedReplaced: the session now reports a different request_id.
+	// A session.pending for the new interaction follows immediately.
+	PendingClearedReplaced = "replaced"
+	// PendingClearedSessionGone: the session left the probed set (closed,
+	// asleep, suspended, or otherwise no longer active).
+	PendingClearedSessionGone = "session_gone"
+)
+
+// SessionPendingPayload is the typed payload for session.pending: a session
+// gained a pending interaction. It carries the full interaction, the same
+// shape GET /v0/city/{cityName}/session/{id}/pending returns, so a client can
+// show the prompt and answer it with POST .../session/{id}/respond (passing
+// request_id) without another read.
+type SessionPendingPayload struct {
+	SessionID string            `json:"session_id" doc:"Session bead ID awaiting a decision."`
+	Template  string            `json:"template,omitempty" doc:"Session template, when known."`
+	Alias     string            `json:"alias,omitempty" doc:"Session alias, when set."`
+	RequestID string            `json:"request_id" doc:"Pending interaction request ID. Pass it to POST .../session/{id}/respond."`
+	Kind      string            `json:"kind" doc:"Interaction kind (e.g. approval)."`
+	Prompt    string            `json:"prompt,omitempty" doc:"Human-readable prompt."`
+	Options   []string          `json:"options,omitempty" doc:"Answer options as the session shows them."`
+	Metadata  map[string]string `json:"metadata,omitempty" doc:"Provider metadata (e.g. tool_name, source)."`
+}
+
+// IsEventPayload marks SessionPendingPayload as an events.Payload variant.
+func (SessionPendingPayload) IsEventPayload() {}
+
+// SessionPendingClearedPayload is the typed payload for
+// session.pending_cleared: the interaction a previous session.pending
+// announced is gone. SessionID and RequestID match that session.pending.
+type SessionPendingClearedPayload struct {
+	SessionID string `json:"session_id" doc:"Session bead ID from the matching session.pending."`
+	RequestID string `json:"request_id" doc:"Request ID from the matching session.pending."`
+	Kind      string `json:"kind" doc:"Interaction kind from the matching session.pending."`
+	Reason    string `json:"reason" enum:"resolved,replaced,session_gone" doc:"Why it cleared: resolved (answered or withdrawn), replaced (a different interaction is now pending; its session.pending follows), or session_gone (the session is no longer active)."`
+}
+
+// IsEventPayload marks SessionPendingClearedPayload as an events.Payload variant.
+func (SessionPendingClearedPayload) IsEventPayload() {}
+
 // SessionWakeRefusedPayload is the typed payload for session.wake_refused: a
 // durable explicit wake request refused before the session reached a live
 // runtime (held, quarantined, or asleep past its idle-sleep window).
@@ -705,6 +751,8 @@ func init() {
 	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionDrainFenceUnavailable, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionColdStartTimeout, events.NoPayload{})
+	events.RegisterPayload(events.SessionPending, SessionPendingPayload{})
+	events.RegisterPayload(events.SessionPendingCleared, SessionPendingClearedPayload{})
 	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyClosed, events.NoPayload{})
 	events.RegisterPayload(events.ControllerStarted, events.NoPayload{})

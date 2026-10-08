@@ -498,7 +498,10 @@ func controlReadyCachesFor(dir, cityPath string, cfg *config.City) []*beads.Cach
 	}()
 	caches := make([]*beads.CachingStore, 0, len(sources))
 	for _, source := range sources {
-		cs := beads.NewCachingStore(source, nil)
+		// Snapshot the engine, not the one-shot emitter around a binding leg:
+		// this cache never writes, so the emitter adds nothing, and between the
+		// cache and the engine it would hide the engine's ready projection.
+		cs := beads.NewCachingStore(bindingEngine(source), nil)
 		if err := cs.PrimeActive(); err != nil {
 			log.Printf("control-ready cache: pre-prime failed for %s: %v (falling back to a live bd query)", dir, err)
 			return nil

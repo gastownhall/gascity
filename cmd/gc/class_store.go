@@ -114,8 +114,8 @@ func (cr *CityRuntime) graphBeadStore() beads.GraphStore {
 // configured session class store when [beads.classes.sessions] relocates
 // sessions, else the work store. The recorder is passed for signature parity
 // and is not what makes a write observable — the controller's emission comes
-// from the CachingStore around its work ledger, and a relocated class store has
-// no such layer on this side (class_store_emit.go covers the one-shot CLI's).
+// from the CachingStore around each store it serves, the relocated binding's
+// included (class_store_cache.go; class_store_emit.go covers the one-shot CLI's).
 // Byte-identical to cityBeadStore() at the default bd backend.
 // Returned as the strongly-typed beads.SessionStore so the session class stays
 // statically visible; the wrapper carries the same underlying store value.
@@ -267,12 +267,13 @@ func (s *beadPolicyGraphStore) graphApplierFor(_ coordclass.Class) beads.GraphAp
 //
 // cfg, cityPath and rec stay in the signature for the per-scope work routing
 // that resolves elsewhere; they are not read here. rec in particular does NOT
-// make a relocated write observable, for any class: a class store is a bare
-// bead engine with no emitting layer, and what a caller passes here changes
-// nothing about that. Emission is decided where the ROUTES are built, once —
-// the one-shot CLI funnel gives its stores an emit target
-// (storageRoutes.withCLIEmission), and the controller's boot does not, because
-// its own emitter already covers it. See class_store_emit.go.
+// make a relocated write observable, for any class: what a caller passes here
+// changes nothing about emission. Emission is decided on the ROUTES, once per
+// process — the one-shot CLI funnel gives its stores an emit target
+// (storageRoutes.withCLIEmission), and the controller puts its CachingStore
+// over the binding's engine (storageRoutes.withControllerCache), which emits
+// the way the work ledger's does. See class_store_emit.go and
+// class_store_cache.go.
 func resolveClassStore(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath, class string, rec events.Recorder) beads.Store {
 	_ = cfg
 	_ = cityPath

@@ -28,6 +28,11 @@ package main
 // so a flag the query gains cannot silently fail to reach the controller. The
 // route half mirrors hookClaimMatchesRoute exactly, because that is the function
 // that will actually accept or reject the claim.
+//
+// One rule here has no serving-side twin yet: controlRowServableByTemplate, the
+// control-dispatcher ownership rule. The controller applies it to demand, but
+// the dispatcher's serve loop still claims by route alone (mc-zndi7.85), so for
+// a cross-scope control row the two sides do not yet agree.
 
 import (
 	"fmt"
@@ -39,6 +44,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // demandServableForTemplates reports the template a row is capacity demand for,
@@ -57,11 +63,42 @@ func demandServableForTemplates(cfg *config.City, b beads.Bead, templates map[st
 	}
 	for _, candidate := range controllerDemandRouteCandidates(b) {
 		normalized := agentutil.NormalizePoolRouteTarget(cfg, candidate)
-		if _, ok := templates[normalized]; ok {
+		if _, ok := templates[normalized]; ok && controlRowServableByTemplate(cfg, b, normalized) {
 			return normalized, true
 		}
 	}
 	return "", false
+}
+
+// controlRowServableByTemplate applies the control-dispatcher ownership rule to
+// one row: a control-kind row whose gc.root_store_ref names a scope is demand
+// only for that scope's configured dispatcher, and for no template when the
+// scope has none. Work rows, unscoped control rows, and a nil cfg (no ownership
+// to resolve) pass.
+//
+// It is the rule repairControlDispatcherRoutesForStoreScope applies, restated
+// for a reader of the durable route; TestControlRowServableAgreesWithTheRouteRepair
+// keeps the two in lockstep. The repair suppresses a scope-gap row or a
+// deferred route rewrite only in the collected snapshot; the default scale_check
+// probe re-reads Ready, where the stale route still names another scope's
+// dispatcher. On a class-binding city every dispatcher's probe reads the
+// binding, so without this check the probe counted the row for the dispatcher
+// the stale route names: the #3765 cross-scope wake the repair exists to stop
+// (mc-zndi7.41).
+//
+// This governs demand only. The dispatcher's serve loop does not apply it yet,
+// so a dispatcher that is awake for other work still claims a cross-scope row
+// by its route (mc-zndi7.85).
+func controlRowServableByTemplate(cfg *config.City, b beads.Bead, template string) bool {
+	if cfg == nil || !beadmeta.IsControlKind(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey])) {
+		return true
+	}
+	rigContext, scoped := storeref.ScopeRigContext(b.Metadata[beadmeta.RootStoreRefMetadataKey])
+	if !scoped {
+		return true
+	}
+	owner, ok := configuredControlDispatcherRouteForScope(cfg, rigContext)
+	return ok && owner == template
 }
 
 // demandRowServable applies the route-independent half of the Tier-3 serving
@@ -237,7 +274,7 @@ func beadHasUnmetPlainBlocksDep(store beads.Store, id string) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		if !beads.DependencySatisfied(blocker.Status, blocker.Metadata[beadmeta.WorkOutcomeMetadataKey]) {
+		if !beads.DependencySatisfied(blocker.Status, beads.ReadinessWorkOutcome(blocker.Metadata)) {
 			return true, nil
 		}
 	}

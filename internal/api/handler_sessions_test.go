@@ -13,9 +13,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -38,6 +40,13 @@ func newSessionFakeState(t *testing.T) *fakeState {
 }
 
 const testEventTimeout = 5 * time.Second
+
+// streamHeaderCommitTimeout bounds how long the stopped-stream tests wait for
+// committed status headers. The server normally flushes them within a few
+// milliseconds, but client and server share one test process, and full-suite
+// load has stalled that process for 2.4 s and 4.8 s (ga-kaca7z). The bound
+// only has to catch headers that never arrive.
+const streamHeaderCommitTimeout = 15 * time.Second
 
 func sameCanonicalTestPath(got, want string) bool {
 	canonicalGot, gotErr := filepath.EvalSymlinks(got)
@@ -1858,6 +1867,55 @@ func TestHandleSessionWakeStartsSuspendedRuntime(t *testing.T) {
 	}
 	if !fs.sp.IsRunning(info.SessionName) {
 		t.Fatalf("session %q should be running after async POST /wake start", info.SessionName)
+	}
+}
+
+// onDeathGatedState holds one session name in the on_death start interlock.
+type onDeathGatedState struct {
+	*fakeState
+	pending string
+}
+
+func (s *onDeathGatedState) OnDeathHookPending(name string) bool { return name == s.pending }
+
+// Kills: an API wake starting a runtime while the name's on_death hook is
+// queued or running. The wake is recorded and handed to the reconciler,
+// whose start path waits for the hook.
+func TestHandleSessionWakeDefersStartWhileOnDeathHookPending(t *testing.T) {
+	fs := newSessionFakeState(t)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Gated Session")
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	gated := &onDeathGatedState{fakeState: fs, pending: info.SessionName}
+	h := newTestCityHandlerWith(t, gated, New(gated))
+	startsBefore := fs.sp.CountCalls("Start", info.SessionName)
+
+	// The bubble makes the "no Start" check exact: synctest.Wait returns only
+	// once every goroutine the request started (an async start included) has
+	// finished or blocked.
+	w := httptest.NewRecorder()
+	synctest.Test(t, func(*testing.T) {
+		h.ServeHTTP(w, newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil))
+		synctest.Wait()
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if n := fs.sp.CountCalls("Start", info.SessionName); n != startsBefore {
+		t.Fatalf("Start calls = %d, want none while the on_death hook is pending", n-startsBefore)
+	}
+	if got := fs.enqueuedKeys(); !slices.Contains(got, reconcilekey.Session(info.ID)) {
+		t.Fatalf("enqueued keys = %v, want the session handed to the reconciler", got)
+	}
+	b, err := fs.cityBeadStore.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["wake_request"] == "" {
+		t.Fatalf("metadata = %v, want the wake recorded for the reconciler", b.Metadata)
 	}
 }
 
@@ -6779,7 +6837,7 @@ func TestHandleSessionStreamStoppedSessionCommitsStatusHeaders(t *testing.T) {
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), streamHeaderCommitTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+cityURL(fs, "/session/")+info.ID+"/stream", nil)
 	if err != nil {

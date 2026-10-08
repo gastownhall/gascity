@@ -453,7 +453,7 @@ func TestStopStaleAsyncStartRuntime_RecordsAgentStopMetric(t *testing.T) {
 		reader := installManualMetricReader(t)
 		sp := runtime.NewFake()
 		// No sp.Start for sessionName here, so the identity/token match in
-		// runningSessionMatchesPendingCreateInfo fails on its own terms
+		// attributePendingCreateRuntime fails on its own terms
 		// (rather than short-circuiting on a blank info.ID as the guard above
 		// would) — this exercises the "found a runtime but it isn't the one
 		// this pending create owns" branch, not the trivial empty-ID guard.
@@ -945,8 +945,7 @@ func TestCmdSessionKill_RecordsAgentStopMetric(t *testing.T) {
 		nil,
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
-		make(chan struct{}, 1),
-		make(chan struct{}, 1),
+		newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)),
 	)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)

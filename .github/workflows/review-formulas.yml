@@ -35,14 +35,10 @@ concurrency:
   group: review-formulas-${{ github.event_name }}-${{ inputs.pr_number || github.event.pull_request.number || github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  DOLT_VERSION: "2.1.7"
-  BD_VERSION: "v1.3.1-rc.2"
-
 jobs:
   runner-policy:
     name: Runner policy
-    runs-on: ${{ github.event_name == 'pull_request' && contains(fromJSON('["julianknutsen","csells","sjarmak","quad341"]'), github.event.pull_request.user.login) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     outputs:
       use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
       reason: ${{ steps.policy.outputs.reason }}
@@ -68,6 +64,7 @@ jobs:
     outputs:
       run_shard: ${{ steps.gate.outputs.run_shard }}
       reason: ${{ steps.gate.outputs.reason }}
+      mode: ${{ steps.mode.outputs.mode }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -81,6 +78,9 @@ jobs:
           filters: |
             review_formulas:
               - '.github/actions/setup-gascity-ubuntu/**'
+              - '.github/actions/go-mod-download/**'
+              - '.github/scripts/go-mod-download-retry.sh'
+              - '.github/scripts/go-mod-verify-cache.sh'
               - '.github/workflows/nightly.yml'
               - '.github/workflows/review-formulas.yml'
               - 'Makefile'
@@ -91,6 +91,7 @@ jobs:
               - 'examples/dolt/**'
               - 'examples/gastown/**'
               - 'scripts/test-integration-shard'
+              - '.bazelrc'
               - 'test/agents/**'
               - 'test/integration/**'
               - 'test/tmuxtest/**'
@@ -136,80 +137,115 @@ jobs:
       - name: Report routing decision
         run: |
           echo "review-formulas shard: ${{ steps.gate.outputs.reason }}"
+      # Remote execution on rbe-west only for code this repository trusts
+      # (a push, a same-repo PR or a dispatch of a same-repo head) while
+      # rbe-west is on; otherwise mode cache.
+      - name: Decide Bazel execution mode
+        id: mode
+        env:
+          RBE_VAR_ON: ${{ vars.RBE_WEST_WORKERS == 'true' }}
+          HAS_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR != '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          DISPATCH_HEAD_REPO: ${{ inputs.head_repo }}
+          REPO: ${{ github.repository }}
+        run: |
+          trusted=false
+          case "$EVENT_NAME" in
+            push) trusted=true ;;
+            pull_request) [ "$PR_HEAD_REPO" = "$REPO" ] && trusted=true ;;
+            workflow_dispatch) { [ -z "$DISPATCH_HEAD_REPO" ] || [ "$DISPATCH_HEAD_REPO" = "$REPO" ]; } && trusted=true ;;
+          esac
+          mode=cache
+          if [ "$trusted" = true ] && [ "$RBE_VAR_ON" = true ] && [ "$HAS_EXECUTOR" = true ]; then
+            mode=remote
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "review-formulas Bazel mode: $mode (trusted=$trusted)"
 
+  # The six review-formula tests (scripts/test-integration-shard's
+  # formula_tests: .bazelrc test:integration-review-formulas) as one Bazel
+  # run of //test/integration:integration_test, executing on rbe-west. A
+  # trusted run (push, same-repo PR, same-repo dispatch) runs remotely;
+  # anything else (a fork head via the label dispatcher, or rbe-west off)
+  # executes here with lookups in the anonymous read-only cache, as
+  # bazel.yml's mode cache does.
   review-formulas-shard:
-    name: Integration / review-formulas (${{ matrix.label }})
+    name: Integration / review-formulas (bazel)
     needs:
       - runner-policy
       - gate
     if: needs.gate.outputs.run_shard == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    runs-on: ${{ needs.gate.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'blacksmith-16vcpu-ubuntu-2404' }}
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - label: basic-1-of-2
-            command: >-
-              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-basic-1-of-2.txt
-              ./scripts/test-integration-shard review-formulas-basic-1-of-2
-            coverprofile: coverage.integration-review-formulas-basic-1-of-2.txt
-          - label: basic-2-of-2
-            command: >-
-              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-basic-2-of-2.txt
-              ./scripts/test-integration-shard review-formulas-basic-2-of-2
-            coverprofile: coverage.integration-review-formulas-basic-2-of-2.txt
-          - label: retries-1-of-2
-            command: >-
-              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-retries-1-of-2.txt
-              ./scripts/test-integration-shard review-formulas-retries-1-of-2
-            coverprofile: coverage.integration-review-formulas-retries-1-of-2.txt
-          - label: retries-2-of-2
-            command: >-
-              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-retries-2-of-2.txt
-              ./scripts/test-integration-shard review-formulas-retries-2-of-2
-            coverprofile: coverage.integration-review-formulas-retries-2-of-2.txt
-          - label: recovery
-            command: make test-integration-review-formulas-recovery-cover
-            coverprofile: coverage.integration-review-formulas-recovery.txt
+    permissions:
+      contents: read
+      issues: read # worker-env drift issues (tools/rbe/worker-env-drift)
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: ${{ inputs.head_repo || github.repository }}
           ref: ${{ inputs.head_sha || github.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-gascity-ubuntu
-        with:
-          dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
-          install-claude-cli: "true"
-      - name: Install tools
-        run: make install-tools
-      - name: Run review-formulas shard
-        id: shard
-        run: ${{ matrix.command }}
-      - name: Inspect shard coverage profile
-        if: steps.shard.outcome == 'success'
+      # Remote only: fail on an open drift issue for the default branch's
+      # worker-env pin rather than queue; a change that moves the pin can't
+      # run remotely before it merges (bazel.yml's lane preflight).
+      - name: worker-env preflight
+        id: worker-env
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          MODE: ${{ needs.gate.outputs.mode }}
         run: |
-          if [[ -f "${{ matrix.coverprofile }}" ]]; then
-            ls -lh "${{ matrix.coverprofile }}"
-          else
-            echo "coverage file missing: ${{ matrix.coverprofile }}"
-          fi
-      - name: Upload shard coverage to Codecov
-        if: >-
-          steps.shard.outcome == 'success' &&
-          hashFiles(matrix.coverprofile) != '' &&
-          (
-            github.event_name != 'pull_request' ||
-            github.event.pull_request.head.repo.full_name == github.repository
-          )
-        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
+          [ "$MODE" = remote ] && export WORKER_ENV_REMOTE=true
+          git fetch --no-tags --depth=1 origin "refs/heads/$DEFAULT_BRANCH"
+          git show FETCH_HEAD:platforms/BUILD.bazel >"$RUNNER_TEMP/worker-env-base.bazel" 2>/dev/null ||
+            : >"$RUNNER_TEMP/worker-env-base.bazel"
+          git diff --name-only FETCH_HEAD HEAD >"$RUNNER_TEMP/worker-env-changed"
+          tools/rbe/worker-env-drift preflight "$RUNNER_TEMP/worker-env-base.bazel" "$RUNNER_TEMP/worker-env-changed"
+      - name: Set up Bazel
+        uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.gate.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.gate.outputs.mode == 'remote' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.gate.outputs.mode == 'remote' && secrets.RBE_TLS_KEY || '' }}
+          RBE_INSTANCE: ${{ needs.gate.outputs.mode == 'remote' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.gate.outputs.mode != 'remote' && 'true' || '' }}
+      - name: Restore the LLVM archive
+        uses: ./.github/actions/llvm-archive-cache
+      # Mode cache executes the tests here, with .bazelrc's pinned test PATH:
+      # the Go the remote workers have at /usr/local/go, and the tmux, lsof
+      # and ssh they drive.
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        if: needs.gate.outputs.mode != 'remote'
         with:
-          files: ${{ matrix.coverprofile }}
-          flags: integration-review-formulas
-          token: ${{ secrets.CODECOV_TOKEN }}
-          verbose: true
+          go-version-file: go.mod
+          cache: false
+      - name: Host tools for locally run tests
+        if: needs.gate.outputs.mode != 'remote'
+        run: |
+          if [ ! -e /usr/local/go ]; then
+            sudo ln -s "$(go env GOROOT)" /usr/local/go
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tmux lsof openssh-client
+      - name: Create Bazel test tmpdir
+        run: mkdir -p /tmp/bt
+      - name: bazel test (review formulas)
+        if: steps.worker-env.outputs.pin-moved != 'true'
+        run: |
+          bazel test --config=ci --config=integration-review-formulas --keep_going \
+            //test/integration:integration_test
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: review-formulas-testlogs
+          path: |
+            bazel-testlogs/**/test.log
+            bazel-testlogs/**/test.xml
+          if-no-files-found: ignore
+          retention-days: 7
 
   review-formulas:
     # This synthesized result is the historical branch-protected gate.

@@ -27,18 +27,37 @@ go_test(
         "acp_test.go",
         "activity_test.go",
         "capacity_test.go",
+        "conformance_test.go",
         "meta_privacy_test.go",
         "pipe_error_test.go",
+        "proctable_integration_test.go",
         "proctable_linux_test.go",
+        "protocol_conformance_test.go",
         "protocol_test.go",
         "seams_test.go",
+        "socket_probe_test.go",
         "startup_test.go",
         "stop_grace_test.go",
         "testenv_import_test.go",
     ],
+    data = select({
+        "//:gotags_integration": [
+            "//internal/runtime/acp/testdata/fakeacp",
+        ],
+        "//conditions:default": [],
+    }),
     embed = [":acp"],
+    # The integration conformance suites exec the built fake agent.
+    env = select({
+        "//:gotags_integration": {
+            "GC_TEST_FAKEACP_BIN": "$(rootpath //internal/runtime/acp/testdata/fakeacp)",
+        },
+        "//conditions:default": {},
+    }),
     deps = [
+        "//internal/bazeltest",
         "//internal/runtime",
+        "//internal/runtime/runtimetest",
         "//internal/testenv",
         "//internal/testutil",
     ] + select({
@@ -60,6 +79,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

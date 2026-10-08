@@ -17,8 +17,8 @@ import (
 // cached view of it. fenced reports whether the store resolves a conditional
 // writer, so the patch is revision-fenced rather than re-read-checked only.
 // staleCache marks a cached front door whose re-read cannot see a write to the
-// backing. (SQLiteStore carries no conditional-writes stamp, so it resolves as
-// unfenced under every mode and appears only in the off rows.)
+// backing. The SQLiteStore rows are a split city's relocated session binding,
+// stamped the way storage boot stamps the engine it opens.
 type patchFenceBackend struct {
 	name       string
 	fenced     bool
@@ -49,6 +49,14 @@ func patchFenceBackends() []patchFenceBackend {
 		store := opened.(*beads.SQLiteStore)
 		t.Cleanup(func() { _ = store.CloseStore() })
 		return store
+	}
+	stampSQLite := func(t *testing.T, mode gate.Mode) beads.Store {
+		t.Helper()
+		s := openSQLite(t)
+		if err := beads.StampOpenedStore(s, "SQLiteStore", mode, nil, nil); err != nil {
+			t.Fatalf("StampOpenedStore: %v", err)
+		}
+		return s
 	}
 	openFile := func(t *testing.T) beads.Store {
 		t.Helper()
@@ -85,10 +93,18 @@ func patchFenceBackends() []patchFenceBackend {
 			s := stamp(t, gate.Auto, openFile(t))
 			return s, s
 		}},
+		{name: "SQLiteStore/auto", fenced: true, open: func(t *testing.T) (beads.Store, beads.Store) {
+			s := stampSQLite(t, gate.Auto)
+			return s, s
+		}},
 		// The concurrent write hits the backing, so the cache serves the
 		// pre-write row to the re-read. Only the revision fence can see it.
 		{name: "CachingStore/FileStore/auto", fenced: true, staleCache: true, open: func(t *testing.T) (beads.Store, beads.Store) {
 			backing := stamp(t, gate.Auto, openFile(t))
+			return cached(t, backing), backing
+		}},
+		{name: "CachingStore/SQLiteStore/require", fenced: true, staleCache: true, open: func(t *testing.T) (beads.Store, beads.Store) {
+			backing := stampSQLite(t, gate.Require)
 			return cached(t, backing), backing
 		}},
 	}
@@ -340,5 +356,45 @@ func TestApplyPatchIfLifecycleUnchangedRequireModeFailsClosed(t *testing.T) {
 	}
 	if got.Metadata["state"] != string(StateActive) {
 		t.Fatalf("state = %q, want the row untouched", got.Metadata["state"])
+	}
+}
+
+// TestUpdateMetadataFencedRedecidesOverAConcurrentSuspend proves the fenced
+// write re-reads and re-decides when a suspend lands between its read and its
+// write, on stores that can fence; legacy stores keep the unfenced write.
+func TestUpdateMetadataFencedRedecidesOverAConcurrentSuspend(t *testing.T) {
+	for _, backend := range patchFenceBackends() {
+		t.Run(backend.name, func(t *testing.T) {
+			store, backing := backend.open(t)
+			created := seedPatchFenceSession(t, store, "s-fenced")
+			front := NewStore(beads.SessionStore{Store: store})
+			decisions := 0
+
+			written, err := front.UpdateMetadataFenced(created.ID, 3, func(current Info, _ PersistedResponse) MetadataPatch {
+				decisions++
+				if decisions == 1 {
+					if err := backing.SetMetadataBatch(created.ID, suspendPatch); err != nil {
+						t.Fatalf("suspend write: %v", err)
+					}
+				}
+				if current.MetadataState == string(StateSuspended) {
+					return nil
+				}
+				return MetadataPatch{"state": string(StateAwake)}
+			})
+			if err != nil {
+				t.Fatalf("UpdateMetadataFenced: %v", err)
+			}
+			if !backend.fenced {
+				if !written {
+					t.Fatal("legacy store: patch not written")
+				}
+				return
+			}
+			if written {
+				t.Fatal("fenced store: stale patch written over the concurrent suspend")
+			}
+			assertSuspendSurvived(t, backing, created.ID)
+		})
 	}
 }

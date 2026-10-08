@@ -392,7 +392,7 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		},
 	}
 
-	r, _, err := rig.Provision(deps, rig.ProvisionRequest{
+	r, provisioned, err := rig.Provision(deps, rig.ProvisionRequest{
 		Name:               name,
 		Path:               rigPath,
 		Prefix:             prefixOverride,
@@ -412,6 +412,9 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	} else if ownershipErr := ensureFreshRigProviderOwnership(cityPath, reloaded); ownershipErr != nil {
 		fmt.Fprintf(stderr, "gc rig add: attach provider ownership after rig add: %v\n", ownershipErr) //nolint:errcheck // best-effort stderr
 		return config.Rig{}, 1
+	} else if !provisioned.Deferred {
+		// An adopted store may predate migration 0059's fix (beads#7037).
+		rigAddRepairBlockedFlags(cityPath, reloaded, r.Name, stderr)
 	}
 	return r, 0
 }
@@ -1015,6 +1018,11 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 	if err := saveSuspensionState(fs, cityPath, st); err != nil {
 		fmt.Fprintf(stderr, "gc rig suspend: writing state: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	for _, r := range cfg.Rigs {
+		if r.Name == rigName {
+			retireSuspendedScopesWithoutController(cityPath, []string{resolveStoreScopeRoot(cityPath, r.Path)}, false, stderr)
+		}
 	}
 
 	fmt.Fprintf(stdout, "Suspended rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout

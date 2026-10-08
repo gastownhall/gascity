@@ -295,9 +295,12 @@ func recordDrainAckEscalationAttempt(store beads.Store, bead beads.Bead, now tim
 //
 // Unreadable activity HOLDS, matching drainReminderQuietHold's #312 rule that
 // "we cannot tell" is never "idle" — the more so here, where the action is
-// destructive rather than informational.
+// destructive rather than informational. An attachment probe that cannot tell
+// holds for the same reason.
 func drainAckEscalationQuietHold(sp runtime.Provider, name string, now time.Time) (string, bool) {
-	if sp.IsAttached(name) {
+	if attached, err := attachmentHolds(sp, name); err != nil {
+		return "attach_unknown", true
+	} else if attached {
 		return "attached", true
 	}
 	activity, err := sp.GetLastActivity(name)
@@ -343,6 +346,7 @@ func escalateWedgedDrainAckStopPending(
 	tracker *asyncStartTracker,
 	clk clock.Clock,
 	rec events.Recorder,
+	dt *drainTracker,
 	stderr io.Writer,
 ) bool {
 	if sp == nil || store == nil || clk == nil {
@@ -381,12 +385,18 @@ func escalateWedgedDrainAckStopPending(
 	}
 
 	// Gate 3 — the token fence (mirrors verifiedStop and the async stop path).
-	// Cheap, and ahead of the work fan-out on purpose. Only a DEFINITE mismatch
-	// refuses: an empty expected or live token means "cannot verify" and falls
-	// through, matching the conservative posture of the sibling fences.
+	// Cheap, and ahead of the work fan-out on purpose. A DEFINITE mismatch
+	// refuses, and so does a token that cannot be read. An empty expected
+	// token, or a live token confirmed unset, falls through, matching the
+	// conservative posture of the sibling fences.
 	if expected := strings.TrimSpace(info.InstanceToken); expected != "" {
-		if actual, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); actual != "" && strings.TrimSpace(actual) != expected {
+		switch verdict, err := readRuntimeInstanceToken(sp, name, expected); verdict {
+		case runtimeTokenMismatch:
 			fmt.Fprintf(stderr, "%s: %s skipped: instance token mismatch (session was replaced)\n", drainAckEscalationLabel, name) //nolint:errcheck
+			return false
+		case runtimeTokenUnverifiable:
+			logStandingCondition(dt, stderr, info.ID, "token_unverifiable.escalation", fmt.Sprintf(
+				"%s: %s skipped: instance token unverifiable (token_unverifiable): %v", drainAckEscalationLabel, name, err), clk.Now())
 			return false
 		}
 	}
@@ -558,9 +568,13 @@ func terminateDrainAckRuntimeByProcessTable(
 	// stop and its confirm loop have just spent seconds, and a replacement may
 	// have taken the name in the meantime.
 	if expected := strings.TrimSpace(expectedToken); expected != "" {
-		if actual, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); actual != "" && strings.TrimSpace(actual) != expected {
+		switch verdict, err := readRuntimeInstanceToken(sp, name, expected); verdict {
+		case runtimeTokenMismatch:
 			fmt.Fprintf(stderr, "%s: %s force-terminate skipped: instance token mismatch (session was replaced)\n", drainAckEscalationLabel, name) //nolint:errcheck
 			return "token_mismatch"
+		case runtimeTokenUnverifiable:
+			fmt.Fprintf(stderr, "%s: %s force-terminate skipped: instance token unverifiable: %v\n", drainAckEscalationLabel, name, err) //nolint:errcheck
+			return "token_unverifiable"
 		}
 	}
 	// Re-check the quiet hold too, for the same reason and against the same

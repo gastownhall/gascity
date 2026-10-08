@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "agent_discovery.go",
         "bead_policy_validation.go",
+        "beads_proxied_idle.go",
         "chain.go",
         "command_discovery.go",
         "compose.go",
@@ -94,6 +95,7 @@ go_test(
         "acp_session_config_test.go",
         "agent_discovery_test.go",
         "agent_layout_test.go",
+        "beads_proxied_idle_test.go",
         "builtin_family_test.go",
         "bundled_import_test.go",
         "chain_test.go",
@@ -125,6 +127,7 @@ go_test(
         "maintenance_test.go",
         "migration_guide_overlay_test.go",
         "namepool_test.go",
+        "native_transport_test.go",
         "options_test.go",
         "order_discovery_test.go",
         "pack_agent_defaults_test.go",
@@ -151,6 +154,7 @@ go_test(
         "resolved_cache_test.go",
         "retired_key_test.go",
         "revision_test.go",
+        "rig_merge_strategy_test.go",
         "service_test.go",
         "session_model_phase0_spec_test.go",
         "session_setup_path_test.go",
@@ -190,9 +194,9 @@ go_test(
         ["**"],
         exclude = ["BUILD.bazel"],
     ) + [
+        "//:engdocs_packv2_design",
         "//:go.mod",
-        "//:repo_source_tree",
-        "//docs:all_files",
+        "//docs:guides_and_tutorials",
         "//examples/storage:pack_files",
     ],
     embed = [":config"],
@@ -220,6 +224,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

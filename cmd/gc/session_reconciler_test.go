@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -902,8 +903,8 @@ func TestReconcileSessionBeads_DesiredFastPathSkipsAttachmentActivityObservation
 	if woken != 0 {
 		t.Fatalf("woken = %d, want 0", woken)
 	}
-	if got := env.sp.CountCalls("IsAttached", "worker"); got != 0 {
-		t.Fatalf("IsAttached calls = %d, want 0 on desired fast path", got)
+	if got := env.sp.CountCalls("IsAttached", "worker") + env.sp.CountCalls("IsAttachedWithError", "worker"); got != 0 {
+		t.Fatalf("IsAttached/IsAttachedWithError calls = %d, want 0 on desired fast path", got)
 	}
 	if got := env.sp.CountCalls("GetLastActivity", "worker"); got != 0 {
 		t.Fatalf("GetLastActivity calls = %d, want 0 on desired fast path", got)
@@ -1213,7 +1214,7 @@ func TestQueueDrainAckAsyncStopTracksShutdownWait(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, nil, &stderr)
 
 	select {
 	case <-sp.stopStarted:
@@ -1254,14 +1255,14 @@ func TestQueueDrainAckAsyncStopDedupScopedToTracker(t *testing.T) {
 	var stderr synchronizedBuffer
 	firstTracker := &asyncStartTracker{}
 	secondTracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, first, &config.City{}, "gc-worker", "worker", "", nil, firstTracker, &stderr)
+	queueDrainAckAsyncStop("", store, first, &config.City{}, "gc-worker", "worker", "", nil, firstTracker, nil, &stderr)
 	select {
 	case <-first.stopStarted:
 	case <-time.After(time.Second):
 		t.Fatal("first async drain-ack stop did not start")
 	}
 
-	queueDrainAckAsyncStop("", store, second, &config.City{}, "gc-worker", "worker", "", nil, secondTracker, &stderr)
+	queueDrainAckAsyncStop("", store, second, &config.City{}, "gc-worker", "worker", "", nil, secondTracker, nil, &stderr)
 	select {
 	case <-second.stopStarted:
 	case <-time.After(time.Second):
@@ -1287,7 +1288,7 @@ func TestQueueDrainAckAsyncStopRecoversStopPanic(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
+	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, nil, &stderr)
 
 	select {
 	case <-sp.stopStarted:
@@ -1332,7 +1333,7 @@ func TestQueueDrainAckAsyncStopPokesAfterSuccessfulStop(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1372,7 +1373,7 @@ func TestQueueDrainAckAsyncStopDoesNotPokeOnHardError(t *testing.T) {
 	sp.StopErrors = map[string]error{"worker": errors.New("hard kill error")}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1416,7 +1417,7 @@ func TestQueueDrainAckAsyncStopTokenFenceSkipsReusedName(t *testing.T) {
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
 	// We queued the stop for the OLD session (stale token).
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "stale-token", nil, tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "stale-token", nil, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1449,7 +1450,7 @@ func TestQueueDrainAckAsyncStopTokenFenceKillsMatchingSession(t *testing.T) {
 
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "live-token", nil, tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "live-token", nil, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1490,7 +1491,7 @@ func TestQueueDrainAckAsyncStopConfirmsRuntimeDead(t *testing.T) {
 
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", []string{"claude"}, tracker, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", []string{"claude"}, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1521,7 +1522,7 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncDrainAckStopsBeforeStopSnapshot(
 		stdout:              ioDiscard{},
 		stderr:              ioDiscard{},
 	}
-	queueDrainAckAsyncStop("", store, sp, cr.cfg, "gc-worker", "worker", "", nil, &cr.asyncStops, &synchronizedBuffer{})
+	queueDrainAckAsyncStop("", store, sp, cr.cfg, "gc-worker", "worker", "", nil, &cr.asyncStops, nil, &synchronizedBuffer{})
 
 	select {
 	case <-sp.stopStarted:
@@ -1733,6 +1734,168 @@ func TestConfirmDrainAckRuntimeDeadTokenFenceStopsOnReplacement(t *testing.T) {
 	}
 	if got := stderr.String(); !strings.Contains(got, "instance token mismatch") {
 		t.Fatalf("stderr = %q, want token mismatch diagnostic", got)
+	}
+}
+
+// unverifiableTokenFake returns a running "worker" whose GC_INSTANCE_TOKEN
+// read fails, so the token fence cannot prove which incarnation owns the name.
+func unverifiableTokenFake(t *testing.T) *runtime.Fake {
+	t.Helper()
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.GetMetaErrors["worker"] = map[string]error{
+		"GC_INSTANCE_TOKEN": fmt.Errorf("show-environment timed out: %w", runtime.ErrRuntimeUnavailable),
+	}
+	return sp
+}
+
+// An empty token that came with a read error must not pass the async stop's
+// fence: the attempt is skipped (the next tick re-queues), nothing is killed and
+// the controller is not poked.
+// Not parallel — modifies the package-level drainAckAsyncStopPokeController seam.
+func TestAsyncDrainAckStopSkipsOnUnverifiableToken(t *testing.T) {
+	var pokes atomic.Int32
+	old := drainAckAsyncStopPokeController
+	drainAckAsyncStopPokeController = func(string, reconcilekey.Key) error {
+		pokes.Add(1)
+		return nil
+	}
+	t.Cleanup(func() { drainAckAsyncStopPokeController = old })
+	sp := unverifiableTokenFake(t)
+
+	var stderr synchronizedBuffer
+	tracker := &asyncStartTracker{}
+	queueDrainAckAsyncStop("", beads.NewMemStore(), sp, &config.City{}, "gc-worker", "worker", "live-token", nil, tracker, nil, &stderr)
+	if !tracker.wait(time.Second) {
+		t.Fatal("async drain-ack stop did not complete")
+	}
+
+	if sp.CountCalls("Stop", "worker") != 0 || !sp.IsRunning("worker") {
+		t.Fatal("async drain-ack stop killed a session whose instance token could not be read")
+	}
+	if got := stderr.String(); !strings.Contains(got, "token_unverifiable") {
+		t.Fatalf("stderr = %q, want token_unverifiable diagnostic", got)
+	}
+	if n := pokes.Load(); n != 0 {
+		t.Fatalf("poke count = %d, want 0 (skipped stop must not poke)", n)
+	}
+}
+
+// An unreadable token is a standing condition and the stop is re-queued every
+// tick: the skip is logged on the transition, not on every attempt.
+// Not parallel — modifies the package-level drainAckAsyncStopPokeController seam.
+func TestAsyncDrainAckStopUnverifiableTokenLogsOncePerEpisode(t *testing.T) {
+	old := drainAckAsyncStopPokeController
+	drainAckAsyncStopPokeController = func(string, reconcilekey.Key) error { return nil }
+	t.Cleanup(func() { drainAckAsyncStopPokeController = old })
+	t.Setenv("GC_DEBUG", "")
+	sp := unverifiableTokenFake(t)
+	dt := newDrainTracker()
+
+	var stderr synchronizedBuffer
+	for range 3 {
+		tracker := &asyncStartTracker{}
+		queueDrainAckAsyncStop("", beads.NewMemStore(), sp, &config.City{}, "gc-worker", "worker", "live-token", nil, tracker, dt, &stderr)
+		if !tracker.wait(time.Second) {
+			t.Fatal("async drain-ack stop did not complete")
+		}
+	}
+	if got := strings.Count(stderr.String(), "token_unverifiable"); got != 1 {
+		t.Fatalf("token_unverifiable logged %d times over 3 attempts, want 1; stderr=%q", got, stderr.String())
+	}
+}
+
+// A pending probe that cannot answer defers the session's lifecycle every
+// tick; the deferral is logged once per episode, and again once the probe has
+// answered in between.
+func TestReconcileSessionBeads_PendingUnknownLogsOncePerEpisode(t *testing.T) {
+	t.Setenv("GC_DEBUG", "")
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	probeErr := errors.New("capturing pane: fork failed")
+	env.sp.PendingErrors["worker"] = probeErr
+	const line = "deferring lifecycle for worker"
+
+	for range 3 {
+		env.reconcile([]beads.Bead{session})
+	}
+	if got := strings.Count(env.stderr.String(), line); got != 1 {
+		t.Fatalf("lifecycle deferral logged %d times over 3 ticks, want 1; stderr=%q", got, env.stderr.String())
+	}
+	if !strings.Contains(env.stderr.String(), "pending_unknown") || !strings.Contains(env.stderr.String(), probeErr.Error()) {
+		t.Fatalf("stderr = %q, want the pending_unknown deferral with its cause", env.stderr.String())
+	}
+
+	delete(env.sp.PendingErrors, "worker")
+	env.reconcile([]beads.Bead{session})
+	env.sp.PendingErrors["worker"] = probeErr
+	env.reconcile([]beads.Bead{session})
+	if got := strings.Count(env.stderr.String(), line); got != 2 {
+		t.Fatalf("lifecycle deferral logged %d times after a new episode, want 2; stderr=%q", got, env.stderr.String())
+	}
+}
+
+// A token that cannot be read confirms nothing: confirm-dead reports
+// not-confirmed and does not re-kill (a replacement may own the name).
+func TestConfirmDeadSkipsReKillOnUnverifiableToken(t *testing.T) {
+	sp := unverifiableTokenFake(t)
+
+	var stderr synchronizedBuffer
+	// The fence answers before the first re-kill, so the deadline never
+	// elapses and the zero poll never sleeps.
+	if confirmDrainAckRuntimeDead("", beads.NewMemStore(), sp, &config.City{}, "worker", "original-token", nil, &stderr, time.Hour, 0) {
+		t.Fatal("confirm-dead reported the runtime dead on an unreadable instance token")
+	}
+	if sp.CountCalls("Stop", "worker") != 0 || !sp.IsRunning("worker") {
+		t.Fatal("confirm-dead re-killed a session whose instance token could not be read")
+	}
+	if got := stderr.String(); !strings.Contains(got, "token_unverifiable") {
+		t.Fatalf("stderr = %q, want token_unverifiable diagnostic", got)
+	}
+}
+
+// A zombie pane has no live agent to raise a prompt, so a pending probe that
+// cannot answer must not cancel the reconciler's acked drain: the drain
+// finalizes, as it did when a failed probe read "not pending".
+func TestReconcileSessionBeads_ZombieDrainAckPendingUnknownFinalizes(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.desiredState["worker"] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  "worker",
+		TemplateName: "worker",
+		Hints:        agent.StartupHints{ProcessNames: []string{"test-cmd"}},
+	}
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	beginSessionDrainInfo(sessiontest.SeedBead(t, session), env.sp, env.dt, "idle", env.clk, defaultDrainTimeout)
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatal("expected idle drain")
+	}
+	ds.ackSet = true
+	if err := setReconcilerDrainAckMetadata(env.sp, "worker", ds); err != nil {
+		t.Fatalf("setReconcilerDrainAckMetadata: %v", err)
+	}
+	env.sp.Zombies["worker"] = true
+	env.sp.PendingErrors["worker"] = errors.New("capturing pane: no tmux server running")
+
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, map[string]int{"worker": 1}, newDrainOps(env.sp))
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got.Metadata["state"] != "drained" {
+		t.Fatalf("state = %q, want drained (zombie drain-ack finalized, not canceled); stderr=%s", got.Metadata["state"], env.stderr.String())
 	}
 }
 
@@ -6886,6 +7049,8 @@ func TestReconcileSessionBeads_OrphanDrainLiveAssignedWorkStaysOpen(t *testing.T
 	_ = env.sp.Start(context.Background(), "orphan", runtime.Config{})
 	session := env.createSessionBead("orphan", "orphan")
 	env.markSessionActive(&session)
+	// Past the INC-003 wake grace, so the live assigned work is what keeps it.
+	env.setSessionMetadata(&session, map[string]string{"last_woke_at": env.clk.Now().Add(-wakeUndesiredGrace - time.Minute).UTC().Format(time.RFC3339)})
 
 	if _, err := env.store.Create(beads.Bead{
 		Title:    "claimed work",
@@ -7547,9 +7712,11 @@ func TestReconcileSessionBeads_FailedCreateNotDesiredClosed(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "polecat", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)}}}
 	session := env.createSessionBead("polecat", "polecat-ga-mg0")
-	session.Metadata["state"] = "failed-create"
-	session.Metadata["pool_managed"] = "true"
-	session.Metadata["pool_slot"] = "1"
+	env.setSessionMetadata(&session, map[string]string{
+		"state":        "failed-create",
+		"pool_managed": "true",
+		"pool_slot":    "1",
+	})
 
 	env.reconcile([]beads.Bead{session})
 
@@ -9479,6 +9646,136 @@ func TestReconcileSessionBeads_RollsBackPendingCreatePreservesConfiguredNamedSes
 	}
 }
 
+// TestReconcileSessionBeads_ConfiguredNamedSessionRetriesAfterTransientStartFailure
+// pins the retry the preservation above exists for (ga-vohht8). The failed
+// attempt is over when commitStartFailure preserves the row, so it must not
+// keep the attempt's in-flight start lease (last_woke_at): with the lease
+// left in place, pendingCreateStartInFlightInfo reports start_in_flight on
+// every tick until startup_timeout+7s has passed, and a session whose first
+// start lost a transient race (tmux's new-session preflight, for one) stays
+// down for over a minute while nothing is starting it.
+func TestReconcileSessionBeads_ConfiguredNamedSessionRetriesAfterTransientStartFailure(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "helper",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "helper", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "helper")
+	env.sp.StartErrors = map[string]error{sessionName: errors.New("tmux server degraded: refusing new-session to avoid socket clobber")}
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  sessionName,
+		TemplateName: "helper",
+	}
+
+	session := env.createSessionBead(sessionName, "helper")
+	env.setSessionMetadata(&session, map[string]string{
+		"session_name_explicit":      "true",
+		"pending_create_claim":       "true",
+		"state":                      "creating",
+		"continuation_epoch":         "1",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "helper",
+		namedSessionModeMetadata:     "always",
+	})
+
+	if woken := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, nil, nil); woken != 0 {
+		t.Fatalf("first tick woken = %d, want 0 (the start fails)", woken)
+	}
+	failed, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) after failed start: %v", session.ID, err)
+	}
+	if failed.Status != "open" || failed.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("after failed start: status=%q pending_create_claim=%q, want the configured row preserved open with its claim", failed.Status, failed.Metadata["pending_create_claim"])
+	}
+	if got := failed.Metadata["last_woke_at"]; got != "" {
+		t.Errorf("last_woke_at = %q after the start failed, want empty (the attempt is over; its in-flight lease must not outlive it)", got)
+	}
+
+	// The transient cause is gone by the next patrol tick.
+	delete(env.sp.StartErrors, sessionName)
+	env.clk.Advance(time.Second)
+
+	if woken := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{failed}, nil, nil); woken != 1 {
+		t.Fatalf("second tick woken = %d, want 1 (a preserved named session must be retried, not held as start_in_flight)\nstderr:\n%s", woken, env.stderr.String())
+	}
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q not running after the retry tick", sessionName)
+	}
+}
+
+// TestReconcileSessionBeads_ConfiguredNamedSessionStartFailureLoopQuarantines
+// pins the bound on those prompt retries: with no in-flight lease to wait
+// out, a start that keeps failing is retried each tick only until the
+// startup-health episode reaches defaultMaxWakeAttempts and quarantines the
+// name.
+func TestReconcileSessionBeads_ConfiguredNamedSessionStartFailureLoopQuarantines(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "helper",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "helper", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "helper")
+	env.sp.StartErrors = map[string]error{sessionName: errors.New("start failed")}
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  sessionName,
+		TemplateName: "helper",
+	}
+
+	session := env.createSessionBead(sessionName, "helper")
+	env.setSessionMetadata(&session, map[string]string{
+		"session_name_explicit":      "true",
+		"pending_create_claim":       "true",
+		"state":                      "creating",
+		"continuation_epoch":         "1",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "helper",
+		namedSessionModeMetadata:     "always",
+	})
+
+	current := session
+	for tick := 0; tick < 2*defaultMaxWakeAttempts; tick++ {
+		if woken := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{current}, nil, nil); woken != 0 {
+			t.Fatalf("tick %d woken = %d, want 0 (every start fails)", tick, woken)
+		}
+		env.clk.Advance(time.Second)
+		var err error
+		if current, err = env.store.Get(session.ID); err != nil {
+			t.Fatalf("Get(%s) after tick %d: %v", session.ID, tick, err)
+		}
+		if current.Status != "open" {
+			t.Fatalf("status = %q after tick %d, want the configured row preserved open", current.Status, tick)
+		}
+	}
+
+	starts := 0
+	for _, call := range env.sp.Calls {
+		if call.Method == "Start" && call.Name == sessionName {
+			starts++
+		}
+	}
+	if starts != defaultMaxWakeAttempts {
+		t.Fatalf("start attempts = %d over %d ticks, want %d (retried each tick until the startup-health quarantine)", starts, 2*defaultMaxWakeAttempts, defaultMaxWakeAttempts)
+	}
+	episode, err := sessionFrontDoor(env.store).LoadStartupHealthEpisode(sessionName)
+	if err != nil {
+		t.Fatalf("LoadStartupHealthEpisode: %v", err)
+	}
+	if !env.clk.Now().Before(episode.QuarantinedUntil) {
+		t.Fatalf("episode QuarantinedUntil = %v at %v, want an active quarantine after %d consecutive failures", episode.QuarantinedUntil, env.clk.Now(), defaultMaxWakeAttempts)
+	}
+}
+
 // TestReconcileSessionBeads_RollsBackConfiguredNamedSessionThatDiedDuringStartup
 // probes ga-pmafyc (round 4): the flip side of
 // TestReconcileSessionBeads_RollsBackPendingCreatePreservesConfiguredNamedSession
@@ -10172,6 +10469,38 @@ func TestReconcileSessionBeads_ConfigDriftAttachmentErrorDefersLiveDrift(t *test
 	}
 }
 
+// An attachment probe that cannot tell defers config drift and keeps the
+// false-negative guard stamp fresh, so the first "detached" answer after the
+// probe recovers is still held as a possible flicker.
+func TestReconcileSessionBeads_ConfigDriftAttachUnknownRefreshesGuardStamp(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addRunningWorkerDesiredWithNewConfig()
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
+	env.sp.AttachedErrors["worker"] = fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+
+	env.reconcile([]beads.Bead{session})
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("attach unknown: expected no drain, got reason=%q", ds.reason)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata[sessionAttachedConfigDriftDeferredAtMetadata] == "" {
+		t.Fatalf("attach unknown did not stamp %s; metadata=%v", sessionAttachedConfigDriftDeferredAtMetadata, got.Metadata)
+	}
+
+	delete(env.sp.AttachedErrors, "worker")
+	env.reconcile([]beads.Bead{got})
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("first detached answer after attach unknown: expected the guard to hold, got drain reason=%q", ds.reason)
+	}
+}
+
 // The deferred_attached outcome must persist across reconciler cycles:
 // as long as the session stays attached, each cycle skips config-drift restart.
 func TestReconcileSessionBeads_AttachedDeferralPersistsAcrossCycles(t *testing.T) {
@@ -10574,6 +10903,38 @@ func TestReconcileSessionBeads_IdleTimeoutStopsAndStaysAsleep(t *testing.T) {
 	}
 	if b.Metadata["slept_at"] != env.clk.Now().UTC().Format(time.RFC3339) {
 		t.Errorf("slept_at = %q, want idle stop timestamp", b.Metadata["slept_at"])
+	}
+}
+
+// A pending probe that cannot tell is not "nothing pending": the idle kill
+// defers, as it does for a pending interaction (fail closed, like the
+// assigned-work gather).
+func TestIdleGatherPendingUnknownDefers(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.sp.PendingErrors["worker"] = fmt.Errorf("capture-pane timed out: %w", runtime.ErrRuntimeUnavailable)
+	it := newFakeIdleTracker()
+	it.idle["worker"] = true
+
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if !env.sp.IsRunning("worker") {
+		t.Fatalf("idle worker was stopped while its pending probe could not answer; stderr=%q", env.stderr.String())
+	}
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["sleep_reason"] == "idle-timeout" {
+		t.Fatalf("sleep_reason = idle-timeout, want the idle kill deferred on an unknown pending answer")
 	}
 }
 
@@ -11139,6 +11500,35 @@ func (e *reconcilerTestEnv) maxAgeReconcile(sessions []beads.Bead, tr maxSession
 		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr, nil,
 		withMaxSessionAgeTracker(tr),
 	)
+}
+
+// A pending probe that cannot tell defers the max-age restart, as a pending
+// interaction does: the agent may be mid-turn.
+func TestMaxAgeGatherPendingUnknownDefers(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"creation_complete_at": env.clk.Now().Add(-6 * time.Hour).UTC().Format(time.RFC3339),
+	})
+	env.sp.PendingErrors["witness"] = fmt.Errorf("capture-pane timed out: %w", runtime.ErrRuntimeUnavailable)
+	tr := newMaxSessionAgeTracker()
+	tr.setConfig("witness", 5*time.Hour, 0)
+	rec := events.NewFake()
+	env.rec = rec
+
+	env.maxAgeReconcile([]beads.Bead{session}, tr)
+
+	if !env.sp.IsRunning("witness") {
+		t.Fatalf("aged witness was killed while its pending probe could not answer; stderr=%q", env.stderr.String())
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionMaxAgeKilled {
+			t.Fatal("SessionMaxAgeKilled fired on an unknown pending answer, want the restart deferred")
+		}
+	}
 }
 
 func TestReconcileSessionBeads_MaxSessionAgeKillsAgedSession(t *testing.T) {

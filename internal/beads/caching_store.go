@@ -17,33 +17,68 @@ import (
 // Reads are served from memory when the cache is live. Writes pass
 // through to the backing store and update the cache on success.
 //
-// External writes (agents running bd directly) are picked up via the
-// bd hook -> gc event emit -> event bus path. Call ApplyEvent when the
-// event bus delivers bead.created/updated/closed events. The background
-// reconciler acts as a watchdog and only performs a full scan once the
-// cache has gone stale or degraded.
+// Writes that emit no gc event (agents running bd directly, humans, raw SQL)
+// reach the cache only when the background reconciler's scan notices them,
+// collapsed to the latest state; the bd hook -> gc event emit path that once
+// delivered them is gone (cmd/gc/hooks.go). ApplyEvent installs bead events
+// from the event bus, which carries gc's own writes. The cache is therefore
+// always potentially stale: a caller whose decision leads to a write must
+// fence that write at the store, never trust the cached row.
 //
 // BdStore-backed caches can filter hook events by issue prefix. Other Store
 // implementations are valid backings, but run without foreign-event filtering.
 type CachingStore struct {
 	backing  Store // runtime: usually *BdStore; tests and projections may use any Store
 	idPrefix string
-	epoch    uint64 // names this instance in every CacheRevision it issues
+	// eventPrefixes, when set, are the id namespaces whose bead events this
+	// cache applies, in place of idPrefix (WithEventIDPrefixes).
+	eventPrefixes []string
+	epoch         uint64 // names this instance in every CacheRevision it issues
+	// reconcileGate, when set, is asked before each periodic reconcile; a
+	// false answer skips that cycle (WithReconcileGate).
+	reconcileGate func() bool
+	// now is the clock every window and due time reads (WithClock); nil
+	// reads the real one. Read it through clockNow.
+	now func() time.Time
 
-	mu                  sync.RWMutex
-	beads               map[string]Bead
-	deps                map[string][]Dep
-	depsComplete        bool
-	dirty               map[string]struct{}
-	beadSeq             map[string]uint64
-	localBeadAt         map[string]time.Time
-	writeSeq            map[string]uint64
-	deletedSeq          map[string]uint64
-	state               cacheState
-	lastFreshAt         time.Time
-	mutationSeq         uint64
+	mu           sync.RWMutex
+	beads        map[string]Bead
+	deps         map[string][]Dep
+	depsComplete bool
+	dirty        map[string]struct{}
+	beadSeq      map[string]uint64
+	localBeadAt  map[string]time.Time
+	writeSeq     map[string]uint64
+	writeAt      map[string]time.Time // when writeSeq was stamped; cleared with it
+	deletedSeq   map[string]uint64
+	// retainedAt holds, for an id whose row left the cache with a write
+	// fence, when a reconcile's sweep first found it gone. A fence is pruned
+	// only once both this and its write stamp are older than
+	// recentWriteVerifyWindow (pruneRetainedFencesLocked). A row a full Prime
+	// replace brings back keeps its start, so if it leaves again its fences
+	// can go sooner than a window after that; the floor still covers them.
+	retainedAt  map[string]time.Time
+	state       cacheState
+	lastFreshAt time.Time
+	mutationSeq uint64
+	// fenceFloor is the highest fence the cache dropped: the mutationSeq at
+	// the last full Prime replace, which drops beadSeq and deletedSeq, or a
+	// retained write fence pruned since. An install whose start predates it
+	// cannot be fenced per row and is refused (writeFencedLocked). A start
+	// equal to it saw no newer mutation, so no fence it needed was dropped.
+	fenceFloor          uint64
 	observationRevision uint64
-	primePartialErr     error
+	// scanGen counts scan merges: a reconcile's (mergeSnapshotLocked), a
+	// full Prime's in either branch, and a PrimeActive's. None moves
+	// mutationSeq or a per-row fence, so a refetch captures it with its
+	// startSeq and installs nothing if it moved (scanRacedLocked).
+	scanGen uint64
+	// fullScanGen is the scanGen of the latest reconcile or full Prime
+	// merge. A reconcile, Prime or PrimeActive whose listing started before
+	// it skips its merge: the full scan is at least as complete and may be
+	// newer.
+	fullScanGen     uint64
+	primePartialErr error
 
 	// readyProjectionDegraded latches when the backing store reported it cannot
 	// serve the ready projection at all. It is deliberately NOT primePartialErr:
@@ -59,11 +94,22 @@ type CachingStore struct {
 	// the same question (ga-cfhgr).
 	readyProjectionLost map[string]struct{}
 
+	// unannouncedCloses holds rows this cache installed as closed over a cached
+	// row that was not closed, on a path that did not itself announce the
+	// transition: a live list, a dirty-row read, or an event patch observing a
+	// close another process made (bd close, gc bd close). The next notification
+	// drains them as bead.closed. Without it the reconcile pass later found an
+	// already-closed row and evicted it silently, so the close was never
+	// announced at all (gastownhall/gascity#6860, #2546). hasUnannouncedCloses
+	// mirrors len(unannouncedCloses) > 0 so the drain costs no lock when idle.
+	unannouncedCloses    map[string]Bead
+	hasUnannouncedCloses atomic.Bool
+
 	reconciling    atomic.Bool
 	syncFailures   int
 	circuitTripped bool
 	stats          CacheStats
-	onChange       func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage)
+	onChange       func(source ChangeSource, eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage)
 	problemf       func(string)
 	problemLog     map[string]cacheProblemLogState
 
@@ -95,6 +141,13 @@ type CachingStore struct {
 	// once the rolling window has drained — see recomputeCadenceLocked.
 	latencyDriverActive bool
 
+	// eventCheckDeadline bounds a subprocess event check
+	// (WithEventCheckDeadline); eventCheckBusy holds the one such check in
+	// flight. eventCheckAfter replaces time.After for its deadline in tests.
+	// The deadline is real time, not now's: it bounds a real process wait.
+	eventCheckDeadline            time.Duration
+	eventCheckBusy                atomic.Bool
+	eventCheckAfter               func(time.Duration) <-chan time.Time
 	applyEventBeforeCommitForTest func()
 }
 
@@ -134,34 +187,104 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //     Reopen, SetMetadata, Create and DepAdd errors mark nothing);
 //   - a failed post-write refresh in Update or ReleaseIfCurrent, in
 //     SetMetadata or SetMetadataBatch on a row the cache does not hold, or in
-//     Tx, graph apply or CloseAll (other verbs patch the cached row and leave
-//     it clean);
+//     Tx, graph apply or CloseAll (other verbs patch their own change into the
+//     cached row and leave its dirty mark as it was, since the patch says
+//     nothing about the rest of the row);
+//   - an unconditional write that another local write or deletion of the row
+//     overlapped, or that a full Prime replace overlapped: its own change,
+//     laid over its refresh read or patched into the cached row, could roll
+//     the other write back, so it installs nothing;
 //   - a conditional write's refetch that failed, did not reflect the write,
 //     or was superseded by a newer write racing it;
 //   - an idempotent conditional write whose evicted row was not clean at the
 //     expected revision, on a backend that does not re-stamp no-op writes;
 //   - an atomic close whose returned row could not be attributed;
 //   - a CloseIfMatch on a backing that hides closed rows from Get;
-//   - an ApplyEvent that conflicts with a recent local write and cannot be
-//     verified against the backing, or whose field conflict the backing does
-//     not confirm (gastownhall/gascity#2927).
+//   - an ApplyEvent whose verification against the backing fails or times
+//     out, or whose field conflict the backing does not confirm while its
+//     read equals the cached row (gastownhall/gascity#2927), a clean row's
+//     unconfirmed field update included (mc-03lk4). A read that differs
+//     from the cached row installs instead, stamped. An event merged onto a
+//     cached row never clears a mark: it is not a backing read;
+//   - an ApplyEvent for a row the cache does not hold that a local write or
+//     deletion of the row overlapped;
+//   - a refetch (Get, the overlay, a Live or Parent list, a conditional
+//     write's install) that a reconcile, full Prime or PrimeActive merge
+//     overlapped, when its read disagrees with what the cache then holds, or
+//     an uncached ApplyEvent whose backing read disagrees with a row a
+//     refresh installed after it. The two reads cannot be ordered, so the
+//     refetch installs nothing and the mark sends the next read to the
+//     backing.
+//
+// A row's write fences (writeSeq, writeAt, deletedSeq) outlive the row: when
+// it leaves the cache, the next reconcile retains them, and a later one prunes
+// them once the retention and the last write stamp are older than
+// recentWriteVerifyWindow, raising the fence floor over each, so an install whose start predates a pruned fence spans more than the
+// window and is refused as raced. A full Prime replace drops tombstones but
+// raises the floor over them. An uncached event installs only a backing read
+// of the row, never its raw patch.
 //
 // Known limits (not yet fenced), so a consumer must not trust more than this:
-//   - ApplyEvent's branch for rows the cache does not hold installs a backing
-//     read or the raw patch without checking writeSeq.
-//   - Unconditional writes (Update, ReleaseIfCurrent, Close, Reopen, CloseAll,
-//     SetMetadata, SetMetadataBatch, Tx, DepAdd/DepRemove, graph apply)
-//     install a refresh read before taking the lock, without a writeSeq fence.
-//   - A conflicting event is verified only while the row's beadSeq is present
-//     or its local write is under five seconds old; once a newer scan clears
-//     beadSeq, a late event can apply.
-//   - A full Prime that replaces the maps wholesale drops every fence.
+//   - Every field-changing bead.updated is verified against the backing
+//     (mc-03lk4). A dependency-only update or a bead.created that conflicts
+//     is verified only while the row's beadSeq is present or its last local
+//     write is younger than recentWriteVerifyWindow (60s, the contract's
+//     cache_lag_bound default). An older one applies unverified: until the
+//     next reconcile re-reads the row, a clean census shows it without the
+//     write while covering the write's WriteRev, so it undercounts. C5.15's
+//     resync does not catch this, because the entry has already cleared.
+//   - Every refresh assumes read-after-write: a backing read that lags a
+//     committed delete can install the deleted row, the same exposure Get,
+//     the dirty-row overlay and reconcile already carry.
+//   - A raced write's dirty mark can survive a reconcile that runs within five
+//     seconds of the write (the recency skip keeps the row); the first
+//     reconcile after that, or any Get or overlay read of the row, drains it.
+//   - The atomic conditional closer installs the row its backing returns
+//     when no fence moved between the write's start and its eviction. It
+//     checks only that the row has the right id and is closed, and otherwise
+//     trusts it to be the committed row.
+//   - A dependency write whose refresh failed patches its one edge into the
+//     cached edge set. On a clean row the census then covers the write while
+//     trusting that the rest of the cached edge set was current.
 //   - Any dirty row refuses the census for the whole store, and there is no
 //     API to drain dirty rows, so a consumer that needs bounded lag cannot
-//     force it today.
+//     force it today. Overlapping local writes to one row leave it dirty,
+//     which adds to that.
+//   - On a backing whose rows omit edges, a path that installs a row without
+//     reading its edges (a Live or Parent list, a conditional write's
+//     refetch) or whose DepList read failed (a reconcile or full Prime)
+//     keeps a dirty row's mark, but takes a clean row's cached or
+//     field-derived edge set as current. A full Prime replace, or a reconcile
+//     over a BdStore, whose dependency read failed installs the field-derived
+//     set, empty on such a backing, so until a later scan reads the edges a
+//     census can show a row without an edge a settled dependency write added.
+//   - A scan can roll a refetch back. Get, the overlay and a Live or Parent
+//     list clear or skip a row's beadSeq when they install it (RefreshRow
+//     stamps a changed row), so a reconcile whose listing predates the
+//     install, or a full Prime replace or PrimeActive that no mutation
+//     followed, installs its older row over it. It covers no local write
+//     (not a C5.4 breach) and lasts until the next scan.
+//   - An uncached event installs only its backing read, so a new row whose
+//     read fails or lags at event time waits for the next reconcile to
+//     appear.
+//   - A stale event that arrives late dirties the row. A delayed field
+//     update older than the cached row is verified against the backing, does
+//     not match, and, the backing read equalling the cached row, marks the
+//     row dirty (gastownhall/gascity#2927) rather than merging; a backing
+//     that lags the event looks the same. The mark refuses the census for
+//     the whole store until a backing read of the row clears it, so a row
+//     RefreshRow installed is not thereby visible in the next census.
+//   - A verified bead.closed snapshot older than the backing row takes the
+//     backing row, but the order is read from updated_at. A backing whose
+//     updated_at is coarser than a close/reopen cycle can tie a delayed
+//     snapshot from an earlier cycle with the current row, and the snapshot
+//     then merges, rolling back the writes since.
 //
-// A store opened without a CachingStore has no watermark at all; its
-// consumers must fall back to per-row markers.
+// A store read without a CachingStore has no watermark at all; its consumers
+// must fall back to per-row markers. The controller reads the work and rig
+// ledgers and, on a split city, each relocated class binding through one, so
+// every leg it censuses has a watermark. A one-shot CLI process's class
+// stores have none.
 type CacheRevision struct {
 	Epoch uint64
 	Seq   uint64
@@ -173,6 +296,8 @@ var cacheEpochs atomic.Uint64
 
 var (
 	_ ConditionalAssignmentReleaser = (*CachingStore)(nil)
+	_ ConditionalAssigneeTransferer = (*CachingStore)(nil)
+	_ AssignmentGuardedUpdater      = (*CachingStore)(nil)
 	_ AtomicTxStore                 = (*CachingStore)(nil)
 )
 
@@ -316,7 +441,7 @@ func computeAutoStagger(agentID string) time.Duration {
 // NewCachingStore wraps a Store with an in-memory read cache.
 // Call Prime() before serving reads, then StartReconciler() for
 // watchdog reconciliation. The onChange callback (optional) is called for
-// each detected external change with event type and bead JSON.
+// each change with its source (see ChangeSource), event type and bead JSON.
 //
 // BdStore-backed caches filter hook events by issue prefix. Other Store
 // implementations are valid backings, but run without foreign-event filtering.
@@ -325,7 +450,7 @@ func computeAutoStagger(agentID string) time.Duration {
 // changed bead's metadata at the record site (see notifyChange); the wiring
 // stamps them onto the recorded event so the redacted export can forward them
 // as typed primitives without ever decoding the payload.
-func NewCachingStore(backing Store, onChange func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage)) *CachingStore {
+func NewCachingStore(backing Store, onChange func(source ChangeSource, eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage), opts ...CachingStoreOption) *CachingStore {
 	prefix := ""
 	bdBacking := false
 	nilBdBacking := false
@@ -340,6 +465,9 @@ func NewCachingStore(backing Store, onChange func(eventType, beadID, runID, sess
 		prefix = backing.IDPrefix()
 	}
 	cs := newCachingStore(backing, prefix, onChange)
+	for _, opt := range opts {
+		opt(cs)
+	}
 	switch {
 	case backing == nil:
 		cs.recordProblem("cache backing", errors.New("nil store backing; cache will panic on first use"))
@@ -351,11 +479,72 @@ func NewCachingStore(backing Store, onChange func(eventType, beadID, runID, sess
 	return cs
 }
 
+// CachingStoreOption configures a CachingStore at construction.
+type CachingStoreOption func(*CachingStore)
+
+// WithEventIDPrefixes sets the id namespaces whose bead events the cache
+// applies. By default that is the backing's own mint prefix, which is right for
+// a store that holds only what it mints. A bead engine serving several
+// coordination classes holds rows under every namespace those classes reserve
+// (the nudge queue's records, older per-class prefixes), and a cache filtering
+// on the mint prefix alone would drop the events for all of them. IDPrefix still
+// reports the mint prefix. Prefixes that normalize to nothing are ignored, and
+// with none left the default stands.
+func WithEventIDPrefixes(prefixes ...string) CachingStoreOption {
+	return func(c *CachingStore) {
+		for _, prefix := range prefixes {
+			if normalized := normalizeIDPrefix(prefix); normalized != "" {
+				c.eventPrefixes = append(c.eventPrefixes, normalized)
+			}
+		}
+	}
+}
+
+// WithReconcileGate makes the periodic reconcile loop ask allowed before each
+// cycle and skip the cycle when it answers false. The loop keeps running, so
+// the cache resumes reconciling as soon as allowed answers true again. A
+// caller whose backing store must not be touched for a while (its scope is
+// quiescent) uses this to stop the loop's full scans without rebuilding the
+// cache.
+func WithReconcileGate(allowed func() bool) CachingStoreOption {
+	return func(c *CachingStore) {
+		c.reconcileGate = allowed
+	}
+}
+
+// WithClock sets the clock the cache's windows and due times read: the
+// recent-local-write and write-verify windows, fence retention, the lazy
+// full-Prime retry, the reconcile due time and its problem backoff, and the
+// stamps they compare (default time.Now). A simulator whose clock runs faster
+// than the wall's passes its own, so a window closes on simulated time. Real
+// waits and measurements stay on the real clock: the reconcile loop's
+// timers, Prime's retry sleep, the event check deadline
+// (WithEventCheckDeadline), and the backing latencies that drive cadence.
+// So do readiness's defer_until checks and the UpdatedAt a conditional
+// release or transfer patches in, which mirror the backing's own clock. A
+// nil now keeps the default.
+//
+// now can run with c.mu held, from any goroutine, so it must be safe for
+// concurrent use, must not block, and must never call back into the cache.
+// Stats' timestamps (LastFreshAt, LastReconcileAt, LastProblemAt) follow it
+// too, so a reader comparing them with the wall clock, as the API's cache-age
+// header does (internal/api/cache_liveness.go), reads a skewed age. No
+// production cache injects a clock.
+func WithClock(now func() time.Time) CachingStoreOption {
+	return func(c *CachingStore) {
+		c.now = now
+	}
+}
+
 // NewCachingStoreForTest wraps any Store for testing without production prefix
 // validation. It keeps the legacy 3-param onChange (tests do not exercise the
 // typed correlation fields); adaptLegacyOnChange bridges it to production form.
-func NewCachingStoreForTest(backing Store, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
-	return newCachingStore(backing, "", adaptLegacyOnChange(onChange))
+func NewCachingStoreForTest(backing Store, onChange func(eventType, beadID string, payload json.RawMessage), opts ...CachingStoreOption) *CachingStore {
+	cs := newCachingStore(backing, "", adaptLegacyOnChange(onChange))
+	for _, opt := range opts {
+		opt(cs)
+	}
+	return cs
 }
 
 // NewCachingStoreForTestWithPrefix wraps any Store for tests that need
@@ -365,15 +554,32 @@ func NewCachingStoreForTestWithPrefix(backing Store, idPrefix string, onChange f
 }
 
 // adaptLegacyOnChange bridges the legacy 3-param onChange used by the test
-// constructors to the production 5-param form, dropping the run/session ids the
-// tests do not exercise. Nil-safe.
-func adaptLegacyOnChange(fn func(eventType, beadID string, payload json.RawMessage)) func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage) {
+// constructors to the production form, dropping the source and the run/session
+// ids the tests do not exercise. Nil-safe.
+func adaptLegacyOnChange(fn func(eventType, beadID string, payload json.RawMessage)) func(source ChangeSource, eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage) {
 	if fn == nil {
 		return nil
 	}
-	return func(eventType, beadID string, _, _, _ string, _ *[]string, payload json.RawMessage) {
+	return func(_ ChangeSource, eventType, beadID string, _, _, _ string, _ *[]string, payload json.RawMessage) {
 		fn(eventType, beadID, payload)
 	}
+}
+
+// ReconcileNowForTest runs one re-scan synchronously, as the reconcile loop
+// would at its next due tick, and skips it if one is already running. It lets
+// a composition test outside this package drive the re-scan without waiting on
+// the loop's timers. Test-only.
+func (c *CachingStore) ReconcileNowForTest() {
+	if c.reconciling.CompareAndSwap(false, true) {
+		c.runReconciliation()
+		c.reconciling.Store(false)
+	}
+}
+
+// ReconcileIfDueForTest runs one periodic reconcile-loop step now: the cycle
+// runs only if one is due and the reconcile gate (WithReconcileGate) allows it.
+func (c *CachingStore) ReconcileIfDueForTest() {
+	c.reconcileIfDue(c.clockNow())
 }
 
 // SetPrimeRetryDelayForTest overrides the inter-attempt backoff Prime
@@ -383,7 +589,7 @@ func (c *CachingStore) SetPrimeRetryDelayForTest(fn func(attempt int) time.Durat
 	c.primeRetryDelay = fn
 }
 
-func newCachingStore(backing Store, idPrefix string, onChange func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage)) *CachingStore {
+func newCachingStore(backing Store, idPrefix string, onChange func(source ChangeSource, eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage)) *CachingStore {
 	return &CachingStore{
 		backing:             backing,
 		idPrefix:            normalizeIDPrefix(idPrefix),
@@ -394,7 +600,9 @@ func newCachingStore(backing Store, idPrefix string, onChange func(eventType, be
 		beadSeq:             make(map[string]uint64),
 		localBeadAt:         make(map[string]time.Time),
 		writeSeq:            make(map[string]uint64),
+		writeAt:             make(map[string]time.Time),
 		deletedSeq:          make(map[string]uint64),
+		retainedAt:          make(map[string]time.Time),
 		readyProjectionLost: make(map[string]struct{}),
 		problemLog:          make(map[string]cacheProblemLogState),
 		onChange:            onChange,
@@ -404,6 +612,14 @@ func newCachingStore(backing Store, idPrefix string, onChange func(eventType, be
 		primeRetryDelay: defaultCachePrimeRetryDelay,
 		stopCh:          make(chan struct{}),
 	}
+}
+
+// clockNow reads the cache's clock (WithClock), the real one by default.
+func (c *CachingStore) clockNow() time.Time {
+	if c.now == nil {
+		return time.Now()
+	}
+	return c.now()
 }
 
 func defaultCachePrimeRetryDelay(attempt int) time.Duration {
@@ -423,10 +639,18 @@ func normalizeIDPrefix(prefix string) string {
 }
 
 func (c *CachingStore) ownsBeadID(id string) bool {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if len(c.eventPrefixes) > 0 {
+		for _, prefix := range c.eventPrefixes {
+			if strings.HasPrefix(id, prefix+"-") {
+				return true
+			}
+		}
+		return false
+	}
 	if c.idPrefix == "" {
 		return true
 	}
-	id = strings.ToLower(strings.TrimSpace(id))
 	return strings.HasPrefix(id, c.idPrefix+"-")
 }
 
@@ -465,15 +689,81 @@ func (c *CachingStore) advanceObservationLocked() {
 
 func (c *CachingStore) noteLocalMutationLocked(ids ...string) uint64 {
 	seq := c.noteMutationLocked(ids...)
-	now := time.Now()
+	now := c.clockNow()
 	for _, id := range ids {
 		if id == "" {
 			continue
 		}
 		c.localBeadAt[id] = now
 		c.writeSeq[id] = seq
+		c.writeAt[id] = now
 	}
 	return seq
+}
+
+// writeFencedLocked reports whether an install whose start was captured at
+// startSeq must be refused because the row may no longer be the newest local
+// state: a local write or deletion newer than startSeq touched id, or a full
+// Prime replace since startSeq dropped the fences that would say so. It does
+// not look at beadSeq, so a write's own echo event never trips it. Caller must
+// hold c.mu.
+func (c *CachingStore) writeFencedLocked(id string, startSeq uint64) bool {
+	return startSeq < c.fenceFloor || c.writeSeq[id] > startSeq || c.deletedSeq[id] > startSeq
+}
+
+// racedWriteLocked is the install gate for a local write that captured
+// startSeq before its backing write. When writeFencedLocked refuses the
+// install, it stamps the write, marks id dirty so no clean census covers the
+// write before a backing read settles the row, drops the ready verdicts of
+// id's dependents (the write may have changed id's status), and reports true.
+// The caller must then install nothing for id, but still notify: skipping the
+// event would lose it for good. Its echo, like any event merged onto a cached
+// row, leaves the mark in place: merging an event is not a backing read.
+// A tombstoned id gets no dirty mark; the tombstone already keeps readers off
+// it. Otherwise it changes nothing. Caller must hold c.mu in write mode.
+func (c *CachingStore) racedWriteLocked(id string, startSeq uint64) bool {
+	if !c.writeFencedLocked(id, startSeq) {
+		return false
+	}
+	c.noteLocalMutationLocked(id)
+	if _, deleted := c.deletedSeq[id]; !deleted {
+		c.markDirtyLocked(id)
+	}
+	c.clearDependentReadyProjectionsLocked(id)
+	return true
+}
+
+// racedWritesLocked applies racedWriteLocked to each of a multi-row write's
+// ids and returns the ones whose install it refused. Caller must hold c.mu in
+// write mode.
+func (c *CachingStore) racedWritesLocked(ids []string, startSeq uint64) map[string]struct{} {
+	var raced map[string]struct{}
+	for _, id := range ids {
+		if id == "" || !c.racedWriteLocked(id, startSeq) {
+			continue
+		}
+		if raced == nil {
+			raced = make(map[string]struct{})
+		}
+		raced[id] = struct{}{}
+	}
+	return raced
+}
+
+// recentWriteVerifyWindow is how long a local write makes a conflicting
+// dependency-only update or bead.created verify against the backing even
+// after the row's beadSeq fence cleared; a field-changing bead.updated always
+// verifies (mc-03lk4). It
+// matches the contract's cache_lag_bound default (60s): an event older than
+// that is past the lag the watermark consumer tolerates anyway, and the leg
+// resync (C5.15) repairs it.
+const recentWriteVerifyWindow = 60 * time.Second
+
+// recentWriteLocked reports whether id carries a local write stamped within
+// recentWriteVerifyWindow of now. Caller must hold c.mu.
+func (c *CachingStore) recentWriteLocked(id string, now time.Time) bool {
+	at, ok := c.writeAt[id]
+	return ok && now.Sub(at) <= recentWriteVerifyWindow
 }
 
 // absorbDepsMode selects how absorbFreshLocked sources the deps row for a bead.
@@ -486,8 +776,9 @@ const (
 	// (setting a nil entry when the bead carries no dependency fields).
 	depsFromFields
 	// depsFromFieldsIfCarried recomputes deps from the bead's fields only when
-	// the bead carries dependency fields; otherwise the cached deps row is left
-	// untouched.
+	// the bead carries dependency fields, or when the backing declares its rows
+	// complete (then no fields means no edges); otherwise the cached deps row is
+	// left untouched. Use it only for rows read from the backing.
 	depsFromFieldsIfCarried
 	// depsKeepCached leaves the cached deps row untouched.
 	depsKeepCached
@@ -548,6 +839,11 @@ type absorbOpts struct {
 	seqMode    absorbSeqMode
 	readyMode  absorbReadyMode
 	clearDirty bool
+	// closeAnnounced says the caller owns the bead.closed announcement for a
+	// closed row it installs: it emits bead.closed itself, or the row came from
+	// an event already on the bus. Every other absorb that closes a cached row
+	// queues the close for the next notification (see unannouncedCloses).
+	closeAnnounced bool
 }
 
 // absorbFreshLocked installs a fresh row for id per opts. It is the only code
@@ -555,9 +851,16 @@ type absorbOpts struct {
 // state. now is the caller's clock read for the whole pass; it is consulted
 // only by seqClearGuarded. Caller must hold c.mu in write mode.
 func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, opts absorbOpts) {
+	// A backing that declares complete rows makes a row without dependency
+	// fields a row without edges: its absence is an answer, not a gap.
+	if opts.depsMode == depsFromFieldsIfCarried && c.backingRowsCarryDependencies() {
+		opts.depsMode = depsFromFields
+	}
 	c.advanceObservationLocked()
+	previous, hadPrevious := c.beads[id]
 	bead = c.absorbReadyProjectionLocked(id, bead, opts)
 	c.beads[id] = cloneBead(bead)
+	c.trackCloseTransitionLocked(id, previous, hadPrevious, bead, opts.closeAnnounced)
 	switch opts.depsMode {
 	case depsExplicit:
 		c.deps[id] = cloneDeps(opts.deps)
@@ -576,6 +879,7 @@ func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, op
 		delete(c.dirty, id)
 	}
 	delete(c.deletedSeq, id)
+	delete(c.retainedAt, id)
 	switch opts.seqMode {
 	case seqClearGuarded:
 		if !recentLocalMutation(c.localBeadAt[id], now) {
@@ -721,18 +1025,19 @@ func (c *CachingStore) readyProjectionUnknownLocked(id string) bool {
 	return !c.readyPredicateCanAnswerLocked(c.deps[id])
 }
 
-// evictLocked removes every trace of id from the eight per-row maps. It does
-// not touch mutationSeq, depsComplete, state, or stats. Caller must hold c.mu
-// in write mode.
+// evictLocked removes id's row and its per-row state from the cache, but not
+// its write fences (writeSeq, writeAt, deletedSeq): the next reconcile retains
+// them, so a write still in flight whose refresh read predates a newer write
+// or deletion of the row cannot install it unfenced. It does not touch
+// mutationSeq, depsComplete, state, or stats. Caller must hold c.mu in write
+// mode.
 func (c *CachingStore) evictLocked(id string) {
 	c.advanceObservationLocked()
 	delete(c.beads, id)
 	delete(c.deps, id)
 	delete(c.dirty, id)
-	delete(c.deletedSeq, id)
 	delete(c.beadSeq, id)
 	delete(c.localBeadAt, id)
-	delete(c.writeSeq, id)
 	delete(c.readyProjectionLost, id)
 }
 
@@ -742,6 +1047,51 @@ func (c *CachingStore) evictLocked(id string) {
 func (c *CachingStore) tombstoneLocked(id string, seq uint64) {
 	c.evictLocked(id)
 	c.deletedSeq[id] = seq
+	// A new fence restarts retention, so a prune cannot raise the floor over
+	// it before the window has passed.
+	delete(c.retainedAt, id)
+}
+
+// retainFencesLocked starts retaining the write fences of id, whose row the
+// cache does not hold, at now: the reconcile's orphan sweep calls it for every
+// row that left the cache since, however it left. A retention already running
+// keeps its start. Caller must hold c.mu in write mode.
+func (c *CachingStore) retainFencesLocked(id string, now time.Time) {
+	if _, retained := c.retainedAt[id]; retained {
+		return
+	}
+	_, wrote := c.writeSeq[id]
+	_, deleted := c.deletedSeq[id]
+	if !wrote && !deleted {
+		return
+	}
+	if c.retainedAt == nil {
+		c.retainedAt = make(map[string]time.Time)
+	}
+	c.retainedAt[id] = now
+}
+
+// pruneRetainedFencesLocked drops the write fences of rows the cache has not
+// held for more than recentWriteVerifyWindow and that no local write stamped
+// within it, so retained fences stay bounded by the rows that left the cache
+// in the last window. A dropped fence can no longer refuse an install, so the
+// fence floor rises over it: an install whose start predates a pruned fence
+// spans more than the window and is refused as raced (writeFencedLocked).
+// Caller must hold c.mu in write mode.
+func (c *CachingStore) pruneRetainedFencesLocked(now time.Time) {
+	for id, at := range c.retainedAt {
+		if now.Sub(at) <= recentWriteVerifyWindow || c.recentWriteLocked(id, now) {
+			continue
+		}
+		delete(c.retainedAt, id)
+		if _, held := c.beads[id]; held {
+			continue
+		}
+		c.fenceFloor = max(c.fenceFloor, c.writeSeq[id], c.deletedSeq[id])
+		delete(c.writeSeq, id)
+		delete(c.writeAt, id)
+		delete(c.deletedSeq, id)
+	}
 }
 
 // markDirtyLocked flags id as known-stale so reads bypass the cache until a
@@ -749,15 +1099,6 @@ func (c *CachingStore) tombstoneLocked(id string, seq uint64) {
 func (c *CachingStore) markDirtyLocked(id string) {
 	c.advanceObservationLocked()
 	c.dirty[id] = struct{}{}
-}
-
-// clearStalenessMarksLocked clears the dirty flag and deletion fence for id
-// without touching the cached row or its deps. Used by the deps-overlay
-// fallbacks that trust an in-place dependency mutation. Caller must hold c.mu
-// in write mode.
-func (c *CachingStore) clearStalenessMarksLocked(id string) {
-	delete(c.dirty, id)
-	delete(c.deletedSeq, id)
 }
 
 // dirtyOverlayMaxGets bounds the inline per-ID refresh a cached read will do
@@ -799,6 +1140,9 @@ func (c *CachingStore) cacheServableLocked() bool {
 // non-NotFound error, the cache is not servable, or residual dirty churn
 // survived the bounded retry. No backing I/O happens under c.mu (I7).
 func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppressed map[string]struct{})) error {
+	// Deferred so it runs after every unlock below: a dirty-row refresh can be
+	// the first reader to see a close made by another process.
+	defer c.announceUnannouncedCloses()
 	suppressed := make(map[string]struct{})
 	for pass := 0; pass < 2; pass++ {
 		c.mu.RLock()
@@ -806,7 +1150,7 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 			c.mu.RUnlock()
 			return errDirtyOverlayFallback
 		}
-		startSeq := c.mutationSeq
+		startSeq, startScan := c.mutationSeq, c.scanGen
 		todo := c.dirtyToRefreshLocked(suppressed)
 		if len(todo) == 0 {
 			// Cache is clean, or every remaining dirty row is a confirmed
@@ -836,13 +1180,14 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 			c.mu.Unlock()
 			return errDirtyOverlayFallback
 		}
-		now := time.Now()
+		now := c.clockNow()
 		absorbed := 0
 		for _, f := range fetched {
 			// Fence discipline (I3): never overwrite a mutation that landed
 			// after the snapshot. A skipped-but-still-dirty row is caught by
-			// the re-check below and handled by the retry-or-fallback.
-			if c.refetchFencedLocked(f.id, startSeq) {
+			// the re-check below and handled by the retry-or-fallback, as is
+			// one a scan merge left disagreeing with the fetch.
+			if c.refetchFencedLocked(f.id, startSeq) || c.scanRacedLocked(f.id, startScan, f.bead, true) {
 				continue
 			}
 			opts := absorbOpts{
@@ -984,7 +1329,7 @@ func (c *CachingStore) fetchDirtyOverlay(todo []string, suppressed map[string]st
 // beads, while closed-bead queries still delegate to the backing store.
 func (c *CachingStore) PrimeActive() error {
 	c.mu.RLock()
-	startSeq := c.mutationSeq
+	startSeq, startScan := c.mutationSeq, c.scanGen
 	c.mu.RUnlock()
 
 	var all []Bead
@@ -1000,12 +1345,6 @@ func (c *CachingStore) PrimeActive() error {
 		}
 		all = append(all, beads...)
 	}
-	enriched, enrichErr := c.applyReadyProjection("prime active ready projection", all)
-	all = enriched
-	if enrichErr != nil {
-		partialErr = errors.Join(partialErr, enrichErr)
-	}
-
 	beadMap := make(map[string]Bead, len(all))
 	for _, b := range all {
 		beadMap[b.ID] = cloneBead(b)
@@ -1015,13 +1354,31 @@ func (c *CachingStore) PrimeActive() error {
 		partialErr = errors.Join(partialErr, depErr)
 		c.recordProblem("prime active dep cache", depErr)
 	}
+	// Project after the deps read (see applyReadyProjection).
+	enriched, enrichErr := c.applyReadyProjection("prime active ready projection", all)
+	all = enriched
+	if enrichErr != nil {
+		partialErr = errors.Join(partialErr, enrichErr)
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	now := time.Now()
+	if c.fullScanGen > startScan {
+		// A reconcile or full Prime merged after this listing started. Its
+		// scan covers these statuses, and may be newer, so this merges
+		// nothing, as prime() skips after a newer reconcile.
+		return nil
+	}
+	// Every row is installed only when no mutation or merge followed the
+	// listing. Otherwise a row the cache holds, or one a refetch fence
+	// (writes, deletions, events, RefreshRow and list evictions) claims, is
+	// newer than the listing and kept.
+	guarded := c.mutationSeq != startSeq || c.scanGen != startScan
+	c.scanGen++
+	now := c.clockNow()
 	for _, b := range all {
-		if c.mutationSeq != startSeq {
-			if c.deletedSeq[b.ID] > startSeq || c.writeSeq[b.ID] > startSeq {
+		if guarded {
+			if c.refetchFencedLocked(b.ID, startSeq) {
 				continue
 			}
 			if _, exists := c.beads[b.ID]; exists {
@@ -1083,7 +1440,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	}
 
 	c.mu.RLock()
-	startSeq := c.mutationSeq
+	startSeq, startScan := c.mutationSeq, c.scanGen
 	c.mu.RUnlock()
 
 	var all []Bead
@@ -1116,15 +1473,6 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("prime list: %w", err)
 	}
-	enriched, enrichErr := c.applyReadyProjection("prime ready projection", all)
-	all = enriched
-	if enrichErr != nil {
-		partialErr = errors.Join(partialErr, enrichErr)
-	}
-	if err := c.cacheContextErr(ctx); err != nil {
-		return err
-	}
-
 	beadMap := make(map[string]Bead, len(all))
 	for _, b := range all {
 		beadMap[b.ID] = cloneBead(b)
@@ -1137,11 +1485,34 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	if err := c.cacheContextErr(ctx); err != nil {
 		return err
 	}
+	// Project after the deps read (see applyReadyProjection).
+	enriched, enrichErr := c.applyReadyProjection("prime ready projection", all)
+	if enrichErr != nil {
+		partialErr = errors.Join(partialErr, enrichErr)
+	}
+	for _, b := range enriched {
+		beadMap[b.ID] = cloneBead(b)
+	}
+	if err := c.cacheContextErr(ctx); err != nil {
+		return err
+	}
 
-	now := time.Now()
+	now := c.clockNow()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.mutationSeq == startSeq {
+	if c.fullScanGen > startScan {
+		// A reconcile merged after this listing started (full Primes do not
+		// overlap). It is as complete and may be newer, and it promoted the
+		// cache live, so this merges nothing, including the store-wide flags,
+		// as a reconcile skips after a newer full Prime.
+		return nil
+	}
+	// The replace runs only when no mutation or merge followed the listing:
+	// a PrimeActive's rows, like a write's, may be newer than it.
+	replace := c.mutationSeq == startSeq && c.scanGen == startScan
+	c.scanGen++
+	c.fullScanGen = c.scanGen
+	if replace {
 		nextBeads := beadMap
 		nextDeps := depsFromBeads(beadMap, depMap, depsComplete && depErr == nil)
 		nextDirty := make(map[string]struct{})
@@ -1176,24 +1547,35 @@ func (c *CachingStore) prime(ctx context.Context) error {
 				c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
 			}
 		}
+		if depErr != nil {
+			// With the deps read failed, a row that omits its edges installs
+			// field-derived ones, which may predate a raced dependency write,
+			// so its mark stays.
+			for id := range c.dirty {
+				if fresh, ok := nextBeads[id]; ok && !c.rowAnswersEdges(fresh) {
+					nextDirty[id] = struct{}{}
+				}
+			}
+		}
 		c.beads = nextBeads
 		c.deps = nextDeps
 		c.depsComplete = depsComplete && depErr == nil
 		c.dirty = nextDirty
 		c.beadSeq = nextBeadSeq
 		c.localBeadAt = nextLocalBeadAt
-		for id := range c.writeSeq {
-			if _, kept := nextBeads[id]; !kept {
-				delete(c.writeSeq, id)
-			}
-		}
 		c.readyProjectionLost = nextReadyLost
 		c.deletedSeq = make(map[string]uint64)
+		// The replace dropped every beadSeq fence and the deletion fences;
+		// like an eviction, it keeps the write fences of the rows it drops
+		// for the next reconcile to retain. It runs only when no mutation
+		// followed startSeq, so every start below the current seq saw one
+		// and is refused wholesale (writeFencedLocked).
+		c.fenceFloor = c.mutationSeq
 	} else {
 		for id, b := range beadMap {
-			// A local write after the snapshot owns the id: installing the
-			// snapshot row would clear that write's beadSeq fence.
-			if c.deletedSeq[id] > startSeq || c.writeSeq[id] > startSeq {
+			// A write, deletion, event or eviction after the snapshot owns the
+			// id: installing the snapshot row would undo it or clear its fence.
+			if c.refetchFencedLocked(id, startSeq) {
 				continue
 			}
 			if _, exists := c.beads[id]; exists {
@@ -1272,7 +1654,7 @@ func (c *CachingStore) ensureFullPrime(ctx context.Context) error {
 	if err := c.cacheContextErr(ctx); err != nil {
 		return errors.Join(ErrCacheUnavailable, err)
 	}
-	cycle, owner, suppressed := c.beginLazyFullPrime(time.Now())
+	cycle, owner, suppressed := c.beginLazyFullPrime(c.clockNow())
 	if suppressed {
 		return ErrCacheUnavailable
 	}
@@ -1320,7 +1702,7 @@ func (c *CachingStore) startFullPrimeLocked() *fullPrimeCycle {
 	cycle := &fullPrimeCycle{done: make(chan struct{})}
 	c.primeRunning = true
 	c.primeCycle = cycle
-	c.lastFullPrimeStartedAt = time.Now()
+	c.lastFullPrimeStartedAt = c.clockNow()
 	return cycle
 }
 
@@ -1467,7 +1849,7 @@ func (c *CachingStore) recordProblemLocked(op string, err error) {
 		return
 	}
 	msg := fmt.Sprintf("%s: %v", op, err)
-	now := time.Now()
+	now := c.clockNow()
 	c.stats.ProblemCount++
 	c.stats.LastProblemAt = now
 	c.stats.LastProblem = msg
@@ -1539,6 +1921,13 @@ func (c *CachingStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, erro
 // and returns the failure that leaves the snapshot INCOMPLETE, having already
 // recorded every failure on the problem log.
 //
+// Callers run it AFTER reading the deps they install beside the rows. A cached
+// verdict is trusted over the cached edges, so the verdict must be at least as
+// fresh as they are: an edge added between an earlier projection and the deps
+// read would sit, open, next to IsBlocked=false, and the cache would offer work
+// the store holds back. Projected last, a racing edge can only leave a verdict
+// stricter than the edges, which the next re-scan corrects.
+//
 // A projection the backing store cannot serve AT ALL costs the snapshot one
 // column, not rows: the cache latches readyProjectionDegraded, its readiness
 // reads decline to the live backing, and every other cached read keeps serving.
@@ -1583,6 +1972,21 @@ func (c *CachingStore) applyReadyProjection(op string, items []Bead) ([]Bead, er
 // spending a subprocess, so a cleared flag could never be re-derived.
 func (c *CachingStore) readyReadsMustGoLive() bool {
 	return c.readyProjectionDegraded.Load()
+}
+
+// backingRowsCarryDependencies reports whether the backing declares that every
+// row it returns carries its complete edge set, so a row with none has none.
+func (c *CachingStore) backingRowsCarryDependencies() bool {
+	backing, ok := c.backing.(listDependencyCompletenessStore)
+	return ok && backing.listIncludesCompleteDependencies()
+}
+
+// rowAnswersEdges reports whether b, read from the backing, answers for its
+// edge set: it carries its edges, or the backing declares its rows complete.
+// A row that does not leaves the cached edges standing, which may predate a
+// dependency write, so installing it must not clear the row's dirty mark.
+func (c *CachingStore) rowAnswersEdges(b Bead) bool {
+	return beadCarriesDependencyFields(b) || c.backingRowsCarryDependencies()
 }
 
 func (c *CachingStore) fetchDepsForBeads(beadMap map[string]Bead) (map[string][]Dep, bool, error) {

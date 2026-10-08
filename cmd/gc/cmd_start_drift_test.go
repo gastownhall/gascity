@@ -129,7 +129,7 @@ func TestDecideDriftAction(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			sv := SupervisorStatus{BuildID: tc.supervisorID}
-			got := decideDriftAction(tc.localBuildID, sv, nil, tc.flags)
+			got := decideDriftAction(gcBinaryIdentity{BuildID: tc.localBuildID}, sv, nil, tc.flags)
 			if got.ProceedNormally != tc.wantProceed {
 				t.Errorf("ProceedNormally = %v, want %v", got.ProceedNormally, tc.wantProceed)
 			}
@@ -270,7 +270,15 @@ func driftCheckEnv(t *testing.T, supervisorBuildID string) (cityPath string, res
 	supervisorAliveHook = os.Getpid
 	supervisorAPIBaseURLHook = func() (string, error) { return srv.URL, nil }
 	supervisorSystemctlActive = func(string) bool { return false }
-	readSupervisorExePathHook = func(int) (string, error) { return "/tmp/gc-test-supervisor", nil }
+	// The fake supervisor runs this very executable, i.e. an in-place
+	// upgrade: the drift restart can bring it onto the local build. A
+	// supervisor from a different gc installation is refused before the
+	// drift check (supervisor_binary_mismatch_test.go).
+	supervisorExe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	readSupervisorExePathHook = func(int) (string, error) { return supervisorExe, nil }
 	restartHelpersHook = func() restartHelpers {
 		return restartHelpers{
 			Systemctl: func(...string) error { return nil },

@@ -885,7 +885,7 @@ func TestBuildAttachmentCache_UsesSessionInfoForActiveSessions(t *testing.T) {
 	sleepingRunningCalls := 0
 	for _, call := range sp.Calls {
 		switch call.Method {
-		case "IsAttached":
+		case "IsAttached", "IsAttachedWithError":
 			switch call.Name {
 			case "active":
 				activeCalls++

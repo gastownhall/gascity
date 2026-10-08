@@ -177,7 +177,25 @@ func TestFileStore(t *testing.T) {
 	beadstest.RunCreationOrderTests(t, factory)
 	beadstest.RunDepTests(t, factory)
 	beadstest.RunMetadataTests(t, factory)
+	beadstest.RunCloseReasonTests(t, factory)
+	beadstest.RunCloseReasonAfterReopenTests(t, factory)
 	beadstest.RunFenceConformance(t, factory)
+}
+
+// TestFileStoreReadyParityConformance runs the cache ready-parity suite under
+// its ledgered waiver (ga-gmf8r): FileStore serves MemStore's Ready, which
+// has no ready projection and no canonical ready order yet.
+func TestFileStoreReadyParityConformance(t *testing.T) {
+	beadstest.RunReadyParityConformanceWithOptions(t, "FileStore", beadstest.ReadyParityHarness{
+		Open: func(st *testing.T) beads.Store {
+			s, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(st.TempDir(), "beads.json"))
+			if err != nil {
+				st.Fatal(err)
+			}
+			return s
+		},
+		Rescan: (*beads.CachingStore).ReconcileForTest,
+	}, beadstest.ReadyParityOptions{SkipCachedReadyParity: true})
 }
 
 func TestFileStoreConditionalWriterConformance(t *testing.T) {
