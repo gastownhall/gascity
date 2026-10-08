@@ -11,18 +11,23 @@ import (
 )
 
 // BackstopSpeedupEnv is a test-only knob: a whole number N >= 2 divides the
-// cadence of every periodic backstop a city controller runs on its own clock
-// (Backstop's callers: the patrol tick, cooldown orders, the bead caches'
+// cadence of each periodic backstop a city controller times through Backstop
+// (its callers: the patrol tick, cooldown orders, the bead caches'
 // reconcile, the order-tracking watchdog, the autoclose sweep, the order
 // rescan, and the backstop lanes' polls) by N, clamped to
-// MaxBackstopSpeedup.
+// MaxBackstopSpeedup. Cadences that do not go through Backstop keep their
+// real periods; among them are the supervisor's patrol, the proxied guard
+// tick, the managed Dolt scope watchdog, and the backstop lanes' intervals
+// and retries.
 //
 // It exists for acceptance tests that assert what a running city does NOT
-// do over a window long enough for every backstop to come round several
+// do over a window long enough for its backstops to come round several
 // times (test/acceptance's suspension quiescence rows): shrinking the window
-// and every cadence by the same factor keeps the assertion's strength (each
-// backstop comes round as many times inside the window) while the test runs
-// in a fraction of the time.
+// and the divided cadences by the same factor keeps each divided backstop
+// coming round as many times inside the window while the test runs in a
+// fraction of the time. An undivided cadence comes round fewer times in the
+// shortened window; the rows' nightly copies at real timers
+// (test/acceptance/BUILD.bazel's REALTIME_TESTS) cover it.
 //
 // Only a gc binary stamped with test hooks honors it (testHooks below): the
 // testonly //cmd/gc:gc_testhooks link. A release build (goreleaser), `go
@@ -96,11 +101,11 @@ func resolveBackstopSpeedup(raw string, hooks bool) (int, string) {
 	case !ok:
 		return 1, "ignored: not a whole number >= 1"
 	case clamped:
-		return n, fmt.Sprintf(BackstopActiveNotice+": clamped to %d; every controller backstop cadence is divided by %d", n, n)
+		return n, fmt.Sprintf(BackstopActiveNotice+": clamped to %d; controller backstop cadences that go through clock.Backstop are divided by %d", n, n)
 	case n == 1:
 		return 1, "test hook present but 1: cadences unchanged"
 	default:
-		return n, fmt.Sprintf(BackstopActiveNotice+": every controller backstop cadence is divided by %d", n)
+		return n, fmt.Sprintf(BackstopActiveNotice+": controller backstop cadences that go through clock.Backstop are divided by %d", n)
 	}
 }
 

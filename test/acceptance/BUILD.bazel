@@ -99,19 +99,25 @@ SOLO_SUBTESTS = {
 
 # The timer-bound solo targets run their timers shortened on PRs and pushes:
 #
-#   GC_TEST_BACKSTOP_SPEEDUP            divides every periodic backstop
-#                                       cadence gc's controller keeps
-#                                       (internal/clock.Backstop) and the
+#   GC_TEST_BACKSTOP_SPEEDUP            divides the controller backstop
+#                                       cadences that go through
+#                                       internal/clock.Backstop (listed in
+#                                       internal/clock/backstop.go) and the
 #                                       quiescence window by the same factor,
-#                                       so each backstop still comes round as
-#                                       many times inside the window (3 min
-#                                       -> 30 s at 6). Only a gc linked with
-#                                       test hooks honors it, so these rows
-#                                       run //cmd/gc:gc_testhooks
+#                                       so each of those backstops still
+#                                       comes round as many times inside the
+#                                       window (3 min -> 30 s at 6). A
+#                                       cadence outside that list comes round
+#                                       fewer times; the nightly
+#                                       REALTIME_TESTS cover it. Only a gc
+#                                       linked with test hooks honors it, so
+#                                       these rows run //cmd/gc:gc_testhooks
 #                                       (GC_ACCEPTANCE_GC_BIN), and fail if
 #                                       gc does not report the hook active.
 #   GC_ACCEPTANCE_PROXIED_IDLE_TIMEOUT  the idle timeout the test gives bd's
-#                                       proxy (20 s otherwise).
+#                                       proxy (20 s when unset; a value that
+#                                       is not a duration of at least 5 s
+#                                       fails the test).
 #
 # REALTIME_TESTS run the same tests with neither set, at their real timers,
 # in the nightly fresh run only (bazel.yml appends :acceptance_realtime_tests

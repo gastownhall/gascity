@@ -39,16 +39,20 @@ func backstopSpeedup() int {
 }
 
 // quiescenceWindow is realQuiescenceWindow divided by backstopSpeedup. gc
-// divides every one of those cadences by the same factor, so each backstop
-// still comes round as many times inside the window.
+// divides the backstop cadences that go through clock.Backstop (listed in
+// clock.BackstopSpeedupEnv's doc) by the same factor, so each of those still
+// comes round as many times inside the window. A cadence outside that list
+// keeps its real period and comes round fewer times; the nightly
+// *_realtime_test targets, which run the full window, cover it.
 func quiescenceWindow() time.Duration { return realQuiescenceWindow / time.Duration(backstopSpeedup()) }
 
 // forwardBackstopSpeedup hands this process's clock.BackstopSpeedupEnv, if
 // any, to the gc processes env starts (the supervisor and its controller
-// inherit it), so the window and gc's cadences shrink together. A shortened
-// window is only as strong as the real one if gc really shortened its
-// cadences, so with a factor above 1 it requires gc's active-hook notice:
-// a gc without test hooks ignores the variable and fails the test here.
+// inherit it), so the window and gc's divided cadences shrink together. Those
+// backstops come round as many times in the shortened window as in the real
+// one only if gc really divided them, so with a factor above 1 it requires
+// gc's active-hook notice: a gc without test hooks ignores the variable and
+// fails the test here.
 func forwardBackstopSpeedup(t *testing.T, env *helpers.Env) *helpers.Env {
 	t.Helper()
 	v, ok := os.LookupEnv(clock.BackstopSpeedupEnv)
@@ -59,8 +63,8 @@ func forwardBackstopSpeedup(t *testing.T, env *helpers.Env) *helpers.Env {
 	if backstopSpeedup() > 1 {
 		_, stderr, _ := helpers.RunGCStreams(env, "", "version")
 		if !strings.Contains(stderr, clock.BackstopActiveNotice) {
-			t.Fatalf("%s=%s but gc did not report %q (a gc without test hooks ignores it, and the shortened window "+
-				"would no longer cover every backstop); gc stderr:\n%s", clock.BackstopSpeedupEnv, v, clock.BackstopActiveNotice, stderr)
+			t.Fatalf("%s=%s but gc did not report %q (a gc without test hooks ignores it, so its backstops would come round "+
+				"fewer times in the shortened window); gc stderr:\n%s", clock.BackstopSpeedupEnv, v, clock.BackstopActiveNotice, stderr)
 		}
 	}
 	return env

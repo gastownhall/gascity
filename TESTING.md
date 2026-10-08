@@ -131,15 +131,18 @@ which PR and push runs shorten (next section).
 ### Test-only timer hooks
 
 A few acceptance rows assert what a running city does *not* do over a window
-long enough for every periodic controller backstop to come round several
+long enough for the controller's periodic backstops to come round several
 times. To keep them out of the lane's critical path they run shortened on PRs
-and pushes, through these variables (all in the GC_* env-read inventory,
-`internal/testenv/testdata/gc_env_read_baseline.golden`):
+and pushes, through these variables. `GC_TEST_BACKSTOP_SPEEDUP` is read by
+non-test code, so it is in the GC_* env-read inventory
+(`internal/testenv/testdata/gc_env_read_baseline.golden`);
+`GC_ACCEPTANCE_PROXIED_IDLE_TIMEOUT` is read only by a test file, which that
+inventory does not scan.
 
 | Variable | Read by | Effect |
 |---|---|---|
-| `GC_TEST_BACKSTOP_SPEEDUP` | gc (`internal/clock.Backstop`) and the quiescence rows | A whole number N divides every backstop cadence the controller keeps on its own clock (patrol tick, cooldown orders, cache reconcile, order-tracking watchdog, autoclose sweep, order rescan, backstop lane polls), clamped to 30. The rows divide their 3-minute window by the same N. |
-| `GC_ACCEPTANCE_PROXIED_IDLE_TIMEOUT` | the idle-timeout row only | The proxy idle timeout the row configures (default 20 s, floor 5 s). |
+| `GC_TEST_BACKSTOP_SPEEDUP` | gc (`internal/clock.Backstop`) and the quiescence rows | A whole number N divides the controller backstop cadences that go through `internal/clock.Backstop` (patrol tick, cooldown orders, cache reconcile, order-tracking watchdog, autoclose sweep, order rescan, backstop lane polls), clamped to 30. The rows divide their 3-minute window by the same N. Other cadences (the supervisor patrol, the proxied guard tick, the Dolt scope watchdog, the lanes' intervals and retries) keep their real periods, so they come round fewer times in the shortened window; the nightly real-timer rows cover them. |
+| `GC_ACCEPTANCE_PROXIED_IDLE_TIMEOUT` | the idle-timeout row only | The proxy idle timeout the row configures: 20 s when unset; a value that is not a duration of at least 5 s fails the row. |
 
 `GC_TEST_BACKSTOP_SPEEDUP` cannot be turned on in a binary users run: gc
 honors it only when linked with
