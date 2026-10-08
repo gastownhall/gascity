@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -86,6 +88,40 @@ func TestV2RoutedToNamespaceCheckUsesTargetedRouteQueries(t *testing.T) {
 			t.Fatalf("query %+v missing gc.routed_to metadata filter", query)
 		}
 	}
+}
+
+// TestV2RoutedToNamespaceCheckStopsQueryingAfterAFailedRoute: the scan ends
+// at the first failed route, so once one fails no further route query may
+// start. On a store that is down, each one would fork bd and run its recovery
+// only to have its answer discarded.
+func TestV2RoutedToNamespaceCheckStopsQueryingAfterAFailedRoute(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cfg := &config.City{}
+		for i := range 12 {
+			cfg.Agents = append(cfg.Agents, config.Agent{Name: fmt.Sprintf("agent%02d", i), BindingName: "pack"})
+		}
+		store := &routeGateSpyStore{Store: beads.NewMemStore(), failRoute: "agent00", gate: make(chan struct{})}
+		check := newV2RoutedToNamespaceCheck(cfg, t.TempDir(), func(string) (beads.Store, error) {
+			return store, nil
+		})
+
+		done := make(chan *doctor.CheckResult)
+		go func() { done <- check.Run(&doctor.CheckContext{}) }()
+		// Every route query that will start has started: the first route's
+		// has failed and any others are held at the gate.
+		synctest.Wait()
+		close(store.gate)
+		result := <-done
+
+		if details := strings.Join(result.Details, "\n"); result.Status != doctor.StatusWarning ||
+			!strings.Contains(details, "city skipped: listing beads: store unreachable") {
+			t.Fatalf("result = %+v, want the city scope skipped with the first route's error", result)
+		}
+		if len(store.queried) > doctorStoreReadConcurrency {
+			t.Fatalf("queried %d of %d routes once the first had failed (%v), want at most the %d already in flight",
+				len(store.queried), len(cfg.Agents), store.queried, doctorStoreReadConcurrency)
+		}
+	})
 }
 
 func TestV2RoutedToNamespaceCheckAllowsCanonicalRoutes(t *testing.T) {
@@ -363,5 +399,28 @@ type routeQuerySpyStore struct {
 
 func (s *routeQuerySpyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	s.queries = append(s.queries, query)
+	return s.Store.List(query)
+}
+
+// routeGateSpyStore fails the query for failRoute at once, holds every other
+// route query until gate is closed, and records each route queried.
+type routeGateSpyStore struct {
+	beads.Store
+	failRoute string
+	gate      chan struct{}
+
+	mu      sync.Mutex
+	queried []string
+}
+
+func (s *routeGateSpyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	route := query.Metadata["gc.routed_to"]
+	s.mu.Lock()
+	s.queried = append(s.queried, route)
+	s.mu.Unlock()
+	if route == s.failRoute {
+		return nil, errors.New("store unreachable")
+	}
+	<-s.gate
 	return s.Store.List(query)
 }

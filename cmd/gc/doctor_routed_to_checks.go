@@ -148,11 +148,13 @@ func (c *v2RoutedToNamespaceCheck) collect(aliases map[string][]string) (finding
 
 // collectStoreFindings queries store once per candidate short-form route
 // (a targeted metadata lookup, not a full-store scan) and returns every
-// distinct bead found carrying one of those short forms. It stops and
-// returns whatever it already found, plus the error, the first time a route
-// query fails — mirroring the targeted-query error handling the rest of this
-// check relies on, so a single flaky query does not silently drop the routes
-// that already succeeded.
+// distinct bead found carrying one of those short forms. The first route, in
+// route order, whose query fails ends the scan: it returns whatever the
+// routes before it found, plus the error — mirroring the targeted-query error
+// handling the rest of this check relies on, so a single flaky query does not
+// silently drop the routes that already succeeded. The queries run
+// concurrently, and once one fails no further query starts, so a store that
+// is down costs only the queries already in flight, not one per route.
 func (c *v2RoutedToNamespaceCheck) collectStoreFindings(store beads.Store, aliases map[string][]string, label string) ([]routedToDriftFinding, error) {
 	var findings []routedToDriftFinding
 	seen := make(map[string]bool)
@@ -161,15 +163,19 @@ func (c *v2RoutedToNamespaceCheck) collectStoreFindings(store beads.Store, alias
 		routes = append(routes, route)
 	}
 	sort.Strings(routes)
-	// The per-route reads are independent, so they run concurrently; the
-	// results are folded in route order, which keeps the first-error cutoff
-	// and the finding order identical to a serial scan.
+	// The per-route reads are independent, so they run concurrently, and a
+	// failed read stops new ones from starting. Folding the results in route
+	// order reports the findings and the error a serial scan would have,
+	// except when an earlier route's read fails and a later route's read,
+	// already started, panics: the check then fails with that panic, where
+	// the serial scan would have stopped at the failure and reported its
+	// error (see doctorParallelMap).
 	results := doctorParallelMap(routes, func(route string) doctorListResult[[]beads.Bead] {
 		items, err := store.List(beads.ListQuery{
 			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: route},
 		})
 		return doctorListResult[[]beads.Bead]{value: items, err: err}
-	})
+	}, func(r doctorListResult[[]beads.Bead]) bool { return r.err != nil })
 	for _, result := range results {
 		items, err := result.value, result.err
 		if err != nil {

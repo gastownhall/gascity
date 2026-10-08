@@ -640,9 +640,7 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	// that reuses a Doctor in-process must call Wait before releasing ctx.
 	d := &doctor.Doctor{CheckTimeout: opts.CheckTimeout}
 	// Identical bd reads are shared across this run's checks; see bdReadMemo.
-	readMemo := newBdReadMemo(cityPath)
-	defer installBdReadMemo(readMemo)()
-	d.BeforeFix = readMemo.invalidate
+	defer installDoctorBdReadMemo(d, cityPath)()
 	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: opts.Verbose}
 	cfg, cfgErr := loadCityConfig(cityPath, stderr)
 	if cfgErr == nil {
@@ -1113,11 +1111,13 @@ func openStoreForCity(cityPath string) func(string) (beads.Store, error) {
 // run, so the dozen-odd store-backed checks share one store per scope instead
 // of each opening its own.
 //
-// A doctor run is a read-only snapshot of a city that is not being mutated
-// underneath it, and no check closes the store it is handed, so reusing the
-// handle is the same object lifetime the checks already assume. What it saves
-// is the open: on a bd-backed scope that is a version probe, a config read and
-// a custom-types read per check, all of them subprocesses.
+// No check closes the store it is handed, so reusing the handle is the same
+// object lifetime the checks already assume. What it saves is the open: on a
+// bd-backed scope that is a version probe, a config read and a custom-types
+// read per check, all of them subprocesses. A shared bd-backed handle also
+// shares its bd runner, which a doctor run memoizes (see bdReadMemo), so a
+// check repeating an earlier check's read may get that earlier answer rather
+// than a live re-read.
 //
 // Failures are memoized too. A store that could not be opened will not open on
 // the next check either, and re-attempting it once per check is how one

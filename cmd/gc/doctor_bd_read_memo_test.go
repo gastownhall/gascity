@@ -216,20 +216,18 @@ func newFixtureCity(t *testing.T, broken bool) *fixtureCity {
 	}
 }
 
-// storeFactory opens a BdStore per scope over that scope's fixture bd, through
-// the read memo when memo is non-nil, and shares it for the run exactly as
-// gc doctor's perRunStoreFactory does.
-func (fc *fixtureCity) storeFactory(memo *bdReadMemo) func(string) (beads.Store, error) {
+// storeFactory opens a BdStore per scope over that scope's fixture bd and
+// shares it for the run exactly as gc doctor's perRunStoreFactory does. Like
+// the bd store constructors, it passes each runner through withBdReadMemo, so
+// a store reads through the memo while a doctor run has one installed for
+// this city.
+func (fc *fixtureCity) storeFactory() func(string) (beads.Store, error) {
 	return perRunStoreFactory(func(dir string) (beads.Store, error) {
 		bd, ok := fc.bds[dir]
 		if !ok {
 			return nil, fmt.Errorf("no fixture store at %q", dir)
 		}
-		var run beads.CommandRunner = bd.run
-		if memo != nil {
-			run = memo.wrap(run)
-		}
-		return beads.NewBdStore(dir, run), nil
+		return beads.NewBdStore(dir, withBdReadMemo(fc.cityPath, bd.run)), nil
 	})
 }
 
@@ -241,23 +239,29 @@ func (fc *fixtureCity) calls() int64 {
 	return n
 }
 
-// runDoctor runs the store-backed checks that issue the most bd reads on a
-// live city, in doctor's registration order, and returns the streamed text
-// report and the --json report.
-func (fc *fixtureCity) runDoctor(t *testing.T, memo *bdReadMemo, fix bool) (string, string) {
-	t.Helper()
-	factory := fc.storeFactory(memo)
-	d := &doctor.Doctor{}
-	if memo != nil {
-		d.BeforeFix = memo.invalidate
-	}
-	for _, c := range []doctor.Check{
+// doctorChecks returns the store-backed checks that issue the most bd reads
+// on a live city, in doctor's registration order.
+func (fc *fixtureCity) doctorChecks(factory func(string) (beads.Store, error)) []doctor.Check {
+	return []doctor.Check{
 		newV2RoutedToNamespaceCheck(fc.cfg, fc.cityPath, factory),
 		newExecutorIdentityResidueCheck(fc.cfg, fc.cityPath, factory),
 		newPoolIdleRoutedWorkCheck(fc.cfg, fc.cityPath, factory),
 		newHoldLabelConventionsCheck(fc.cityPath, "city", factory),
 		newHoldLabelConventionsCheck(fc.rigPath, "repo", factory),
-	} {
+	}
+}
+
+// runDoctor runs the checks that checks builds over this run's stores and
+// returns the streamed text report and the --json report. With memoize set,
+// the read memo is installed by installDoctorBdReadMemo, exactly as doDoctor
+// installs it.
+func (fc *fixtureCity) runDoctor(t *testing.T, memoize, fix bool, checks func(func(string) (beads.Store, error)) []doctor.Check) (string, string) {
+	t.Helper()
+	d := &doctor.Doctor{}
+	if memoize {
+		defer installDoctorBdReadMemo(d, fc.cityPath)()
+	}
+	for _, c := range checks(fc.storeFactory()) {
 		d.Register(c)
 	}
 	var text bytes.Buffer
@@ -316,11 +320,10 @@ func TestDoctorBdReadMemoReportIsByteIdentical(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			plain := newFixtureCity(t, tc.broken)
-			plainText, plainJSON := plain.runDoctor(t, nil, false)
+			plainText, plainJSON := plain.runDoctor(t, false, false, plain.doctorChecks)
 
 			memoized := newFixtureCity(t, tc.broken)
-			memo := newBdReadMemo(memoized.cityPath)
-			memoText, memoJSON := memoized.runDoctor(t, memo, false)
+			memoText, memoJSON := memoized.runDoctor(t, true, false, memoized.doctorChecks)
 
 			if plainText != tc.wantText {
 				t.Errorf("doctor text report changed:\n--- got ---\n%s\n--- want ---\n%s", plainText, tc.wantText)
@@ -345,14 +348,84 @@ func TestDoctorBdReadMemoReportIsByteIdentical(t *testing.T) {
 // and the report must match a run without the memo.
 func TestDoctorBdReadMemoFixSeesItsOwnWrites(t *testing.T) {
 	plain := newFixtureCity(t, true)
-	plainText, plainJSON := plain.runDoctor(t, nil, true)
+	plainText, plainJSON := plain.runDoctor(t, false, true, plain.doctorChecks)
 
 	memoized := newFixtureCity(t, true)
-	memo := newBdReadMemo(memoized.cityPath)
-	memoText, memoJSON := memoized.runDoctor(t, memo, true)
+	memoText, memoJSON := memoized.runDoctor(t, true, true, memoized.doctorChecks)
 
 	if !strings.Contains(plainText, "✓ v2-routed-to-namespace — no short-form gc.routed_to values targeting bound agents found (fixed)") {
 		t.Fatalf("fixture --fix did not fix the routes:\n%s", plainText)
+	}
+	if memoText != plainText || memoJSON != plainJSON {
+		t.Fatalf("memoized --fix report differs:\n--- memo ---\n%s\n--- plain ---\n%s", memoText, plainText)
+	}
+}
+
+// labelStrippingFixCheck flags the beads that carry label and fixes them the
+// way a pack script's remediation does: by rewriting the scope's ledger
+// directly rather than through this process's stores, so no memoized runner
+// ever sees the write.
+type labelStrippingFixCheck struct {
+	bd       *fixtureBd
+	dir      string
+	label    string
+	newStore func(string) (beads.Store, error)
+}
+
+func (c *labelStrippingFixCheck) Name() string         { return "strip-label" }
+func (c *labelStrippingFixCheck) CanFix() bool         { return true }
+func (c *labelStrippingFixCheck) WarmupEligible() bool { return false }
+
+func (c *labelStrippingFixCheck) Run(*doctor.CheckContext) *doctor.CheckResult {
+	store, err := c.newStore(c.dir)
+	if err != nil {
+		return errorCheck(c.Name(), err.Error(), "", nil)
+	}
+	found, err := store.ListByLabel(c.label, 0)
+	switch {
+	case err != nil:
+		return errorCheck(c.Name(), err.Error(), "", nil)
+	case len(found) > 0:
+		return errorCheck(c.Name(), fmt.Sprintf("%d bead(s) carry %q", len(found), c.label), "", nil)
+	}
+	return okCheck(c.Name(), fmt.Sprintf("no bead carries %q", c.label))
+}
+
+func (c *labelStrippingFixCheck) Fix(*doctor.CheckContext) error {
+	c.bd.mu.Lock()
+	defer c.bd.mu.Unlock()
+	for i := range c.bd.rows {
+		c.bd.rows[i].Labels = slices.DeleteFunc(c.bd.rows[i].Labels, func(l string) bool { return l == c.label })
+	}
+	return nil
+}
+
+// TestDoctorBdReadMemoRereadsAfterAFixThatBypassesIt runs --fix with a
+// remediation that writes the ledger outside this process's stores. The memo
+// cannot see that write, so only the BeforeFix hook installDoctorBdReadMemo
+// wires keeps the verifying re-run, and a later check asking the same
+// question, from being answered with the pre-fix read: the report must match
+// a run without the memo.
+func TestDoctorBdReadMemoRereadsAfterAFixThatBypassesIt(t *testing.T) {
+	run := func(memoize bool) (string, string) {
+		fc := newFixtureCity(t, true)
+		return fc.runDoctor(t, memoize, true, func(factory func(string) (beads.Store, error)) []doctor.Check {
+			return []doctor.Check{
+				&labelStrippingFixCheck{bd: fc.bds[fc.cityPath], dir: fc.cityPath, label: "on-hold", newStore: factory},
+				newHoldLabelConventionsCheck(fc.cityPath, "city", factory),
+			}
+		})
+	}
+	plainText, plainJSON := run(false)
+	memoText, memoJSON := run(true)
+
+	for _, want := range []string{
+		`✓ strip-label — no bead carries "on-hold" (fixed)`,
+		"✓ hold-label-conventions:city — no retired hold/blocked labels found in city",
+	} {
+		if !strings.Contains(plainText, want) {
+			t.Fatalf("fixture --fix report lacks %q:\n%s", want, plainText)
+		}
 	}
 	if memoText != plainText || memoJSON != plainJSON {
 		t.Fatalf("memoized --fix report differs:\n--- memo ---\n%s\n--- plain ---\n%s", memoText, plainText)
@@ -524,6 +597,61 @@ func TestBdReadMemoSharesInFlightRead(t *testing.T) {
 	})
 }
 
+// TestBdReadMemoNeverSharesAFailedInFlightRead: readers that joined a read
+// still in flight must each run their own read when it fails, never inherit
+// its failure or an empty answer.
+func TestBdReadMemoNeverSharesAFailedInFlightRead(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		gate := make(chan struct{})
+		var calls atomic.Int64
+		run := newBdReadMemo("/city").wrap(func(string, string, ...string) ([]byte, error) {
+			if calls.Add(1) == 1 {
+				<-gate
+				return nil, errors.New("connection refused")
+			}
+			return []byte("[]"), nil
+		})
+		read := func() ([]byte, error) { return run("/city", "bd", "list", "--json") }
+
+		var wg sync.WaitGroup
+		var leaderErr error
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, leaderErr = read()
+		}()
+		synctest.Wait() // the leader is inside the one fork
+		const waiters = 5
+		outs := make([][]byte, waiters)
+		errs := make([]error, waiters)
+		for i := range waiters {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				outs[i], errs[i] = read()
+			}()
+		}
+		synctest.Wait()
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("bd forked %d times while the first read was in flight, want 1: identical readers must join it", got)
+		}
+		close(gate)
+		wg.Wait()
+
+		if leaderErr == nil {
+			t.Fatal("the first read succeeded, want the runner's error")
+		}
+		for i := range waiters {
+			if errs[i] != nil || string(outs[i]) != "[]" {
+				t.Fatalf("waiter %d got (%q, %v), want its own successful read", i, outs[i], errs[i])
+			}
+		}
+		if got := calls.Load(); got != 1+waiters {
+			t.Fatalf("bd forked %d times, want %d: each waiter re-runs a read that failed", got, 1+waiters)
+		}
+	})
+}
+
 func TestWithBdReadMemoOnlyWrapsTheDoctoredCity(t *testing.T) {
 	inner := &countingRunner{}
 	if run := withBdReadMemo("/city", inner.run); run == nil {
@@ -572,7 +700,7 @@ func TestDoctorParallelMapKeepsItemOrder(t *testing.T) {
 		}
 		inFlight.Add(-1)
 		return i * i
-	})
+	}, nil)
 	for i, v := range got {
 		if v != i*i {
 			t.Fatalf("result[%d] = %d, want %d", i, v, i*i)
@@ -581,7 +709,68 @@ func TestDoctorParallelMapKeepsItemOrder(t *testing.T) {
 	if p := peak.Load(); p > doctorStoreReadConcurrency {
 		t.Fatalf("peak concurrency %d exceeds bound %d", p, doctorStoreReadConcurrency)
 	}
-	if len(doctorParallelMap([]int(nil), func(int) int { return 0 })) != 0 {
+	if len(doctorParallelMap([]int(nil), func(int) int { return 0 }, nil)) != 0 {
 		t.Fatal("empty input must give empty output")
+	}
+}
+
+// TestDoctorParallelMapRepanicsOnTheCallingGoroutine: a panic in fn reaches
+// the goroutine that called doctorParallelMap, where doctor's per-check fence
+// can recover it, and when several calls panic it is the lowest item's.
+func TestDoctorParallelMapRepanicsOnTheCallingGoroutine(t *testing.T) {
+	items := make([]int, doctorStoreReadConcurrency)
+	for i := range items {
+		items[i] = i
+	}
+	// Every call waits until all of them have started, so both panicking
+	// calls are in flight before either one can stop the scan.
+	var started sync.WaitGroup
+	started.Add(len(items))
+	recovered := func() (r any) {
+		defer func() { r = recover() }()
+		doctorParallelMap(items, func(i int) int {
+			started.Done()
+			started.Wait()
+			if i == 1 || i == len(items)-1 {
+				panic(fmt.Sprintf("read %d exploded", i))
+			}
+			return i
+		}, nil)
+		return nil
+	}()
+	if recovered != "read 1 exploded" {
+		t.Fatalf("the calling goroutine recovered %v, want the lowest item's panic", recovered)
+	}
+}
+
+// labelPanicStore panics on every label read, standing in for a bug deep in
+// one scope's store.
+type labelPanicStore struct{ beads.Store }
+
+func (labelPanicStore) ListByLabel(string, int, ...beads.QueryOpt) ([]beads.Bead, error) {
+	panic("label read exploded")
+}
+
+// TestDoctorParallelReadPanicFailsOnlyItsCheck: a panic in one of a check's
+// concurrent reads fails that check, as a panic in a serial read always did,
+// instead of crashing the doctor run with every check after it.
+func TestDoctorParallelReadPanicFailsOnlyItsCheck(t *testing.T) {
+	dir := t.TempDir()
+	d := &doctor.Doctor{}
+	d.Register(newHoldLabelConventionsCheck(dir, "city", func(string) (beads.Store, error) {
+		return labelPanicStore{beads.NewMemStore()}, nil
+	}))
+	d.Register(newHoldLabelConventionsCheck(dir, "repo", func(string) (beads.Store, error) {
+		return beads.NewMemStore(), nil
+	}))
+	report := d.RunCollect(&doctor.CheckContext{CityPath: dir}, false)
+	if len(report.Results) != 2 {
+		t.Fatalf("doctor reported %d results, want 2", len(report.Results))
+	}
+	if got := report.Results[0]; got.Status != doctor.StatusError || got.Message != "panic: label read exploded" {
+		t.Fatalf("panicking check = %+v, want its panic reported as its failure", got)
+	}
+	if got := report.Results[1]; got.Status != doctor.StatusOK {
+		t.Fatalf("check after the panic = %+v, want it run and passing", got)
 	}
 }

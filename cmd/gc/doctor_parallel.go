@@ -1,6 +1,9 @@
 package main
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // doctorStoreReadConcurrency bounds how many independent store reads one
 // doctor check issues at once. Each read on a bd-backed scope is a bd
@@ -9,31 +12,62 @@ import "sync"
 // that otherwise dominates a check making a dozen targeted reads.
 const doctorStoreReadConcurrency = 4
 
-// doctorParallelMap calls fn for every item with at most
-// doctorStoreReadConcurrency calls in flight and returns the results in item
-// order, so a caller that folds them in order behaves exactly as the serial
-// loop it replaces.
-func doctorParallelMap[T, R any](items []T, fn func(T) R) []R {
+// doctorParallelMap calls fn for every item, starting them in item order with
+// at most doctorStoreReadConcurrency calls in flight, and returns the results
+// in item order.
+//
+// stop, when non-nil, marks a result that ends the scan the way an error ends
+// a serial loop: once a call's result satisfies stop, no further item is
+// started. Calls already in flight finish, and every item before the stopping
+// one has run, so a caller that folds the results in order and returns at the
+// first stopping result reports what the serial loop would, with the one
+// exception for panics below; the results of items never started are left
+// zero, and that fold never reads them.
+//
+// A panic in fn also stops the scan, and is re-raised on the calling goroutine
+// once every started call has returned (the lowest item's, when several
+// panic). Raised on a worker goroutine it would escape doctor's per-check
+// panic fence and crash the whole run; re-raised here, it fails only the check.
+// The re-raise comes before any fold, so if an item past the first stopping
+// one had already started and its call panics, the check still fails with
+// that panic, where the serial loop would have returned at the stopping
+// result without ever making the call.
+func doctorParallelMap[T, R any](items []T, fn func(T) R, stop func(R) bool) []R {
 	out := make([]R, len(items))
 	if len(items) == 0 {
 		return out
 	}
-	limit := doctorStoreReadConcurrency
-	if len(items) < limit {
-		limit = len(items)
-	}
-	sem := make(chan struct{}, limit)
+	panics := make([]any, len(items))
+	var stopped atomic.Bool
+	sem := make(chan struct{}, min(doctorStoreReadConcurrency, len(items)))
 	var wg sync.WaitGroup
 	for i, item := range items {
-		wg.Add(1)
 		sem <- struct{}{}
-		go func(i int, item T) {
+		if stopped.Load() {
+			break
+		}
+		wg.Add(1)
+		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
+			defer func() {
+				if r := recover(); r != nil {
+					panics[i] = r
+					stopped.Store(true)
+				}
+			}()
 			out[i] = fn(item)
-		}(i, item)
+			if stop != nil && stop(out[i]) {
+				stopped.Store(true)
+			}
+		}()
 	}
 	wg.Wait()
+	for _, r := range panics {
+		if r != nil {
+			panic(r)
+		}
+	}
 	return out
 }
 

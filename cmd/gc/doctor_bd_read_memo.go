@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/doctor"
 )
 
 // bdReadMemo shares identical read-only bd subprocess results across one
@@ -31,8 +32,12 @@ import (
 //     invalidate(), which the doctor runner calls before each --fix
 //     remediation and before the re-run that verifies it.
 //
-// A doctor run is already a snapshot of the city taken check by check; the memo
-// pins repeated identical reads to their first answer within that snapshot.
+// Within one run the memo is a snapshot: once a question has been answered,
+// every later check asking it gets that answer, even if the controller, an
+// agent or another process has written to the ledger since. Only this
+// process's own writes through a memoized runner, and invalidate(), refresh
+// it. A doctor report has never been an atomic snapshot, and every answer
+// here is still from within this run: each run starts with an empty memo.
 type bdReadMemo struct {
 	// cityPath is the city this doctor run inspects (normalized); stores
 	// opened for any other city get plain runners.
@@ -73,6 +78,18 @@ func newBdReadMemo(cityPath string) *bdReadMemo {
 func installBdReadMemo(m *bdReadMemo) (restore func()) {
 	activeBdReadMemos.Store(m.cityPath, m)
 	return func() { activeBdReadMemos.CompareAndDelete(m.cityPath, m) }
+}
+
+// installDoctorBdReadMemo makes the bd stores opened for cityPath during d's
+// run share identical reads (see bdReadMemo), and has d drop them before each
+// --fix remediation and before the re-run that verifies it. A fix may write
+// the ledger without going through those stores (a pack script does), so
+// without that hook the verification would be answered from reads taken
+// before the fix. It returns a function that removes the memo again.
+func installDoctorBdReadMemo(d *doctor.Doctor, cityPath string) (restore func()) {
+	memo := newBdReadMemo(cityPath)
+	d.BeforeFix = memo.invalidate
+	return installBdReadMemo(memo)
 }
 
 // invalidate drops every memoized read.
