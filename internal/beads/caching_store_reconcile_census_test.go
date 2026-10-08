@@ -120,6 +120,8 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"stopped": true, "latencyWindow": true, "latencyDriverActive": true,
 		"applyEventBeforeCommitForTest": true,
 		"eventCheckAfter":               true, // a test-only deadline timer, fixed per instance
+		"eventCheckDeadline":            true, // event-check config, fixed at construction
+		"eventCheckBusy":                true, // the in-flight event check slot, not cache state
 		// readyProjectionDegraded is a one-way capability latch about the
 		// BACKING STORE, set by applyReadyProjection before the seam runs and
 		// never touched by mergeSnapshotLocked. It routes readiness reads to the

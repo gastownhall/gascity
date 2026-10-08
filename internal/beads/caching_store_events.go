@@ -142,14 +142,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		// cleared the mutation seq (gastownhall/gascity#2210).
 		check, verifyErr := c.checkEvent(patch.ID, patch, fields)
 		if verifyErr != nil {
-			// As below: an event that could not be verified leaves the row
-			// dirty rather than trusted, and the seq bump keeps an older scan
-			// from clearing the mark.
-			c.recordProblem(fmt.Sprintf("verify %s event", eventType), verifyErr)
-			c.mu.Lock()
-			c.noteMutationLocked(patch.ID)
-			c.markDirtyLocked(patch.ID)
-			c.mu.Unlock()
+			c.dirtyUncheckedEvent(eventType, patch.ID, verifyErr)
 			return
 		}
 		if !check.matches {
@@ -168,7 +161,7 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 			// tolerated without declining.
 			if fieldConflictCached {
 				c.mu.Lock()
-				c.settleUnconfirmedEventLocked(patch.ID, check, readSeq, readScan)
+				c.settleUnconfirmedEventLocked(patch.ID, check, conflictBase, readSeq, readScan)
 				c.mu.Unlock()
 				c.announceUnannouncedCloses()
 			}
@@ -195,14 +188,8 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		verifiedFresh = check.fresh
 		if verifyErr != nil {
 			// An unverifiable event must not overwrite a recent local write
-			// as a clean row: fence the cached row and let the next read or
-			// reconcile consult the backing. The seq bump keeps a scan that
-			// started before this point from clearing the mark.
-			c.recordProblem(fmt.Sprintf("verify %s event", eventType), verifyErr)
-			c.mu.Lock()
-			c.noteMutationLocked(patch.ID)
-			c.markDirtyLocked(patch.ID)
-			c.mu.Unlock()
+			// as a clean row.
+			c.dirtyUncheckedEvent(eventType, patch.ID, verifyErr)
 			return
 		}
 	}
@@ -710,10 +697,27 @@ func cacheEventDependencyConflict(currentDeps []Dep, depsKnown bool, patch Bead,
 	return cacheEventHasDependencyField(fields) && depsKnown && depsChanged(currentDeps, depsFromBeadFields(patch))
 }
 
-// eventCheckDeadline bounds checkEvent on a backing that reads by subprocess.
-// The check runs on the event watcher's goroutine, which must not stall behind
-// a slow bd: past the deadline the row goes dirty instead.
-const eventCheckDeadline = time.Second
+// defaultEventCheckDeadline bounds checkEvent on a backing that reads by
+// subprocess (WithEventCheckDeadline overrides it). The check runs on the
+// event watcher's goroutine, which must not stall behind a slow bd: past the
+// deadline the row goes dirty instead. A bd over hosted Postgres reads in
+// about 4.85s, so every check there times out and dirties its row; that is
+// acceptable while such stores see almost no out-of-process updates.
+const defaultEventCheckDeadline = time.Second
+
+// errEventCheckBusy refuses a subprocess check while another is in flight.
+var errEventCheckBusy = errors.New("another event check is in flight")
+
+// WithEventCheckDeadline sets how long an event check on a backing that reads
+// by subprocess may hold the event watcher (default 1s). A non-positive d
+// keeps the default.
+func WithEventCheckDeadline(d time.Duration) CachingStoreOption {
+	return func(c *CachingStore) {
+		if d > 0 {
+			c.eventCheckDeadline = d
+		}
+	}
+}
 
 // subprocessReader is a backing whose point read forks a process (bd's CLI).
 type subprocessReader interface {
@@ -732,12 +736,20 @@ type eventCheck struct {
 
 // checkEvent reads id from the backing and reports whether the event agrees
 // with it: one Get, plus a DepList when the event carries edges and the
-// backing's point read does not. On a subprocessReader it waits at most
-// eventCheckDeadline; a read still running then is abandoned, its result
-// unused.
+// backing's point read does not. On a subprocessReader at most one check runs
+// per cache, and the event watcher waits for it at most the deadline; a read
+// still running then is abandoned, its result unused, and holds the slot
+// until it returns, so a burst of events forks one bd, not one each.
 func (c *CachingStore) checkEvent(id string, patch Bead, fields map[string]json.RawMessage) (eventCheck, error) {
 	if r, ok := c.backing.(subprocessReader); !ok || !r.readsBySubprocess() {
 		return c.readEventCheck(id, patch, fields)
+	}
+	if !c.eventCheckBusy.CompareAndSwap(false, true) {
+		return eventCheck{}, fmt.Errorf("reading %s: %w", id, errEventCheckBusy)
+	}
+	deadline := c.eventCheckDeadline
+	if deadline <= 0 {
+		deadline = defaultEventCheckDeadline
 	}
 	after := c.eventCheckAfter
 	if after == nil {
@@ -749,15 +761,30 @@ func (c *CachingStore) checkEvent(id string, patch Bead, fields map[string]json.
 	}
 	done := make(chan result, 1)
 	go func() {
+		defer c.eventCheckBusy.Store(false)
 		check, err := c.readEventCheck(id, patch, fields)
 		done <- result{check, err}
 	}()
 	select {
 	case r := <-done:
 		return r.check, r.err
-	case <-after(eventCheckDeadline):
-		return eventCheck{}, fmt.Errorf("reading %s: no answer within %s", id, eventCheckDeadline)
+	case <-after(deadline):
+		return eventCheck{}, fmt.Errorf("reading %s: no answer within %s", id, deadline)
 	}
+}
+
+// dirtyUncheckedEvent marks id dirty for an event whose check failed, timed
+// out or was refused as busy, and stamps it so a scan that started earlier
+// cannot clear the mark. The row is not trusted: the next read or reconcile
+// consults the backing.
+func (c *CachingStore) dirtyUncheckedEvent(eventType, id string, err error) {
+	if !errors.Is(err, errEventCheckBusy) {
+		c.recordProblem(fmt.Sprintf("verify %s event", eventType), err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.noteMutationLocked(id)
+	c.markDirtyLocked(id)
 }
 
 func (c *CachingStore) readEventCheck(id string, patch Bead, fields map[string]json.RawMessage) (eventCheck, error) {
@@ -788,9 +815,11 @@ func (c *CachingStore) readEventCheck(id string, patch Bead, fields map[string]j
 // read equal to the cached row means the event is stale, or real but not yet
 // visible to this read (a lagging backing), and the row goes dirty
 // (gastownhall/gascity#2927); so does a read that cannot answer for the row's
-// edges, or one a newer mutation fenced. startSeq and startScan are the
-// event's read-phase stamps. Caller must hold c.mu in write mode.
-func (c *CachingStore) settleUnconfirmedEventLocked(id string, check eventCheck, startSeq, startScan uint64) {
+// edges, or one a newer mutation fenced. A row that moved since the read phase
+// is settled as an unordered read instead. base is the cached row the event
+// conflicted with, and startSeq and startScan are the event's read-phase
+// stamps. Caller must hold c.mu in write mode.
+func (c *CachingStore) settleUnconfirmedEventLocked(id string, check eventCheck, base Bead, startSeq, startScan uint64) {
 	if c.state != cacheLive && c.state != cachePartial {
 		return
 	}
@@ -802,6 +831,13 @@ func (c *CachingStore) settleUnconfirmedEventLocked(id string, check eventCheck,
 		return
 	}
 	if c.scanRacedLocked(id, startScan, check.fresh, true) {
+		return
+	}
+	// A Live or Parent list or a dirty-row refetch installs a row with neither
+	// a stamp nor a scan: one that moved since the read phase is as unordered
+	// against the check's read as a scan's.
+	if cached, held := c.beads[id]; !held || beadChanged(cached, base, false) || cached.Revision != base.Revision {
+		c.settleUnorderedReadLocked(id, check.fresh, true)
 		return
 	}
 	if !c.rowReadDisagreesLocked(id, check.fresh, true) || !check.depsRead && !c.rowAnswersEdges(check.fresh) {

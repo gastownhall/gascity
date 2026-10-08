@@ -138,7 +138,11 @@ type CachingStore struct {
 	// once the rolling window has drained — see recomputeCadenceLocked.
 	latencyDriverActive bool
 
-	// eventCheckAfter replaces time.After for checkEvent's deadline in tests.
+	// eventCheckDeadline bounds a subprocess event check
+	// (WithEventCheckDeadline); eventCheckBusy holds the one such check in
+	// flight. eventCheckAfter replaces time.After for its deadline in tests.
+	eventCheckDeadline            time.Duration
+	eventCheckBusy                atomic.Bool
 	eventCheckAfter               func(time.Duration) <-chan time.Time
 	applyEventBeforeCommitForTest func()
 }

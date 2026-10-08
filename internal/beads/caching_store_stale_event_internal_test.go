@@ -1,7 +1,13 @@
 package beads
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -339,8 +345,10 @@ func TestCachingStoreVerifiedEventSettledAgainstAScanInsideItsWindow(t *testing.
 
 // Superseded events on the shared SQLite shape: a gc.outcome write's event
 // delivered after the close that followed it installs the closed backing row,
-// stamped, and the row stays clean, so the census keeps serving. Kills: an
-// unconfirmed event that always dirties the row.
+// stamped, and the row stays clean, so the census keeps serving; the close
+// it installed is announced before ApplyEvent returns. Kills (M9): an
+// unconfirmed event that always dirties the row; (N7) the announcement left
+// queued behind the next change.
 func TestCachingStoreSupersededEventInstallsTheBackingRow(t *testing.T) {
 	t.Parallel()
 	engine := staleEventBackings[1].open(t)
@@ -348,7 +356,16 @@ func TestCachingStoreSupersededEventInstallsTheBackingRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	cache := newConditionalCacheForTest(t, engine)
+	var mu sync.Mutex
+	var announced []string
+	cache := NewCachingStoreForTest(engine, func(eventType, id string, _ json.RawMessage) {
+		mu.Lock()
+		defer mu.Unlock()
+		announced = append(announced, eventType+" "+id)
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
 	_, _, before := rowFences(cache, row.ID)
 	outcome, err := EncodeBeadEventPayload(writeMetadata(t, engine, row.ID, "gc.outcome", "pass"))
 	if err != nil {
@@ -372,6 +389,11 @@ func TestCachingStoreSupersededEventInstallsTheBackingRow(t *testing.T) {
 	}
 	if _, ok := cache.CachedList(ListQuery{Status: "open"}); !ok {
 		t.Fatal("the census declined after a superseded event")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Contains(announced, "bead.closed "+row.ID) {
+		t.Fatalf("announced %v, want the installed close of %s", announced, row.ID)
 	}
 }
 
@@ -466,5 +488,251 @@ func TestCachingStoreIdenticalDuplicateEventReadsNothing(t *testing.T) {
 	}
 	if _, dirty, _ := rowFences(cache, row.ID); dirty || backing.getCalls != reads {
 		t.Fatalf("duplicates: dirty %v, backing reads %d; want clean, 0", dirty, backing.getCalls-reads)
+	}
+}
+
+// hookedEngine is a SQLite engine (complete rows, so a check read can
+// install) whose next Get runs onGet after reading, inside an event check,
+// and whose List serves snapshot while one is set.
+type hookedEngine struct {
+	*SQLiteStore
+	onGet    func()
+	snapshot []Bead
+}
+
+func openHookedEngine(t *testing.T) *hookedEngine {
+	t.Helper()
+	return &hookedEngine{SQLiteStore: staleEventBackings[1].open(t).(*SQLiteStore)}
+}
+
+func (s *hookedEngine) Get(id string) (Bead, error) {
+	b, err := s.SQLiteStore.Get(id)
+	if hook := s.onGet; hook != nil {
+		s.onGet = nil
+		hook()
+	}
+	return b, err
+}
+
+func (s *hookedEngine) List(query ListQuery) ([]Bead, error) {
+	if s.snapshot == nil {
+		return s.SQLiteStore.List(query)
+	}
+	rows := make([]Bead, 0, len(s.snapshot))
+	for _, b := range s.snapshot {
+		rows = append(rows, cloneBead(b))
+	}
+	return ApplyListQuery(rows, query), nil
+}
+
+// supersededEvent writes k=1 then k=2 on a fresh row around a primed cache and
+// returns the cache, the row as cached, and the k=1 write's event.
+func supersededEvent(t *testing.T, backing Store) (*CachingStore, Bead, json.RawMessage) {
+	t.Helper()
+	row, err := backing.Create(Bead{Title: "row"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := newConditionalCacheForTest(t, backing)
+	cached, _, _ := rowFences(cache, row.ID)
+	payload, err := EncodeBeadEventPayload(writeMetadata(t, backing, row.ID, "k", "1"))
+	if err != nil {
+		t.Fatalf("EncodeBeadEventPayload: %v", err)
+	}
+	writeMetadata(t, backing, row.ID, "k", "2")
+	return cache, cached, payload
+}
+
+// assertNotInstalled checks the superseding read was not installed and the
+// row was left dirty for a backing read.
+func assertNotInstalled(t *testing.T, cache *CachingStore, id, wantK string) {
+	t.Helper()
+	got, dirty, _ := rowFences(cache, id)
+	if got.Metadata["k"] != wantK || !dirty {
+		t.Fatalf("cached k = %q, dirty %v; want %q, dirty", got.Metadata["k"], dirty, wantK)
+	}
+}
+
+// A mutation stamped on the row while its event check read the backing fences
+// the read: the row goes dirty and the read is not installed. Kills (N1): the
+// settle's refetch fence dropped.
+func TestCachingStoreSettleFencedByAStampDuringTheCheck(t *testing.T) {
+	t.Parallel()
+	engine := openHookedEngine(t)
+	cache, row, payload := supersededEvent(t, engine)
+	engine.onGet = func() {
+		cache.mu.Lock()
+		cache.noteMutationLocked(row.ID)
+		cache.mu.Unlock()
+	}
+	cache.ApplyEvent("bead.updated", payload)
+	assertNotInstalled(t, cache, row.ID, "")
+}
+
+// A scan merged while the check read the backing, listing the row as cached,
+// leaves the two reads unordered: the row goes dirty, the read is not
+// installed. Kills (N2): the settle's scan fence dropped.
+func TestCachingStoreSettleFencedByAScanDuringTheCheck(t *testing.T) {
+	t.Parallel()
+	engine := openHookedEngine(t)
+	cache, row, payload := supersededEvent(t, engine)
+	engine.onGet = func() {
+		engine.snapshot = []Bead{row}
+		cache.ReconcileNowForTest()
+		engine.snapshot = nil
+	}
+	cache.ApplyEvent("bead.updated", payload)
+	assertNotInstalled(t, cache, row.ID, "")
+}
+
+// A Live list that installed a newer row while the check read the backing
+// (no stamp, no scan) leaves the check's older read uninstalled and the row
+// dirty. Kills: the settle installing over a row that moved since the read
+// phase.
+func TestCachingStoreSettleUnorderedAgainstALiveListDuringTheCheck(t *testing.T) {
+	t.Parallel()
+	engine := openHookedEngine(t)
+	cache, row, payload := supersededEvent(t, engine)
+	engine.onGet = func() {
+		writeMetadata(t, engine, row.ID, "k", "3")
+		if _, err := cache.List(ListQuery{Live: true, Status: "open"}); err != nil {
+			t.Errorf("Live List: %v", err)
+		}
+	}
+	cache.ApplyEvent("bead.updated", payload)
+	assertNotInstalled(t, cache, row.ID, "3")
+}
+
+// On a backing whose point read does not answer for a row's edges, a
+// superseding read is not installed: the row goes dirty. Kills (N4): the
+// edges guard dropped, which would install the read over cached edges it
+// says nothing about.
+func TestCachingStoreSettleKeepsTheMarkWhenTheReadCannotAnswerEdges(t *testing.T) {
+	t.Parallel()
+	cache, row, payload := supersededEvent(t, NewMemStore())
+	cache.ApplyEvent("bead.updated", payload)
+	assertNotInstalled(t, cache, row.ID, "")
+}
+
+// An event carrying edges makes the check read them; a superseding read then
+// installs with that edge set, not the cached one. Kills (N15): the install
+// ignoring check.deps, which keeps a removed edge.
+func TestCachingStoreSettleInstallsTheEdgesTheCheckRead(t *testing.T) {
+	t.Parallel()
+	backing := NewMemStore()
+	row, err := backing.Create(Bead{Title: "row"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	blocker, err := backing.Create(Bead{Title: "blocker"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := backing.DepAdd(row.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+	cache := newConditionalCacheForTest(t, backing)
+	payload := json.RawMessage(fmt.Sprintf(`{"id":%q,"metadata":{"k":"1"},"dependencies":[{"issue_id":%q,"depends_on_id":%q,"type":"blocks"}]}`,
+		row.ID, row.ID, blocker.ID))
+	if err := backing.DepRemove(row.ID, blocker.ID); err != nil {
+		t.Fatalf("DepRemove: %v", err)
+	}
+	writeMetadata(t, backing, row.ID, "k", "2")
+	cache.ApplyEvent("bead.updated", payload)
+	got, dirty, _ := rowFences(cache, row.ID)
+	cache.mu.RLock()
+	edges := cloneDeps(cache.deps[row.ID])
+	cache.mu.RUnlock()
+	if got.Metadata["k"] != "2" || dirty || len(edges) != 0 {
+		t.Fatalf("cached k %q, dirty %v, edges %v; want 2, clean, none", got.Metadata["k"], dirty, edges)
+	}
+}
+
+// A superseding read that changes a blocker's status drops its dependents'
+// ready verdicts. Kills (N6): the dependents left with a verdict the blocker's
+// close voided.
+func TestCachingStoreSettleClearsDependentsOnAStatusChange(t *testing.T) {
+	t.Parallel()
+	blocked := true
+	backing := &completeEmbeddedDepsStore{beads: []Bead{
+		{ID: "bd-b", Title: "blocker", Status: "open", Type: "task"},
+		{
+			ID: "bd-d", Title: "dependent", Status: "open", Type: "task", IsBlocked: &blocked,
+			Dependencies: []Dep{{IssueID: "bd-d", DependsOnID: "bd-b", Type: "blocks"}},
+		},
+	}}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if d, _, _ := rowFences(cache, "bd-d"); d.IsBlocked == nil || !*d.IsBlocked {
+		t.Fatalf("primed bd-d IsBlocked = %v, want true; the path is vacuous", d.IsBlocked)
+	}
+	backing.beads[0].Status = "closed"
+	backing.beads[0].Metadata = map[string]string{"k": "2"}
+	cache.ApplyEvent("bead.updated", json.RawMessage(`{"id":"bd-b","status":"open","metadata":{"k":"1"}}`))
+	if b, dirty, _ := rowFences(cache, "bd-b"); b.Status != "closed" || dirty {
+		t.Fatalf("bd-b = %q, dirty %v; want the closed read installed clean", b.Status, dirty)
+	}
+	if d, _, _ := rowFences(cache, "bd-d"); d.IsBlocked != nil {
+		t.Fatalf("bd-d IsBlocked = %v after its blocker closed, want cleared", *d.IsBlocked)
+	}
+}
+
+// gatedSubprocessStore forks per Get (readsBySubprocess) and, while gate is
+// set, holds every Get until gate closes, counting each and signaling entry.
+type gatedSubprocessStore struct {
+	*MemStore
+	gate    chan struct{}
+	entered chan struct{}
+	gets    atomic.Int32
+}
+
+func (s *gatedSubprocessStore) readsBySubprocess() bool { return true }
+
+func (s *gatedSubprocessStore) Get(id string) (Bead, error) {
+	if s.gate != nil {
+		s.gets.Add(1)
+		s.entered <- struct{}{}
+		<-s.gate
+	}
+	return s.MemStore.Get(id)
+}
+
+// While one subprocess check is in flight, another event's check reads
+// nothing: its row goes dirty and stamped. Kills: a check per event, which
+// forks one bd per event in a burst.
+func TestCachingStoreOneSubprocessCheckInFlight(t *testing.T) {
+	t.Parallel()
+	backing := &gatedSubprocessStore{MemStore: NewMemStore(), entered: make(chan struct{}, 4)}
+	a, err := backing.Create(Bead{Title: "a"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	b, err := backing.Create(Bead{Title: "b"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := newConditionalCacheForTest(t, backing)
+	_, _, before := rowFences(cache, b.ID)
+	gate := make(chan struct{})
+	defer close(gate)
+	backing.gate = gate
+	// The deadline passes once a check's read has begun.
+	cache.eventCheckAfter = func(time.Duration) <-chan time.Time {
+		fired := make(chan time.Time)
+		go func() {
+			<-backing.entered
+			close(fired)
+		}()
+		return fired
+	}
+	a.Title, b.Title = "a elsewhere", "b elsewhere"
+	cache.ApplyEvent("bead.updated", eventPayload(t, a))
+	cache.ApplyEvent("bead.updated", eventPayload(t, b))
+	got, dirty, seq := rowFences(cache, b.ID)
+	if n := backing.gets.Load(); n != 1 || !dirty || seq <= before || got.Title != "b" {
+		t.Fatalf("backing reads %d; b dirty %v, beadSeq %d (was %d), title %q; want 1, dirty, stamped, b",
+			n, dirty, seq, before, got.Title)
 	}
 }
