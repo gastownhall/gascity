@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -278,6 +279,84 @@ func TestStageFilesPropagatesFatalProviderOverlayError(t *testing.T) {
 	}
 }
 
+func TestStageFilesFailsClosedWhenStreamedCopyFails(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		cfg     func(src string) runtime.Config
+		wantErr string
+	}{
+		{
+			name:    "workdir",
+			cfg:     func(src string) runtime.Config { return runtime.Config{WorkDir: src} },
+			wantErr: "staging workdir",
+		},
+		{
+			name: "copy_files directory",
+			cfg: func(src string) runtime.Config {
+				return runtime.Config{CopyFiles: []runtime.CopyEntry{{Src: src, RelDst: "data"}}}
+			},
+			wantErr: "staging copy_file",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := t.TempDir()
+			if err := os.WriteFile(filepath.Join(src, "a.txt"), []byte("first entry"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			removedDir := filepath.Join(src, "z-dir")
+			if err := os.Mkdir(removedDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			ops := &streamStageOps{onTarStdin: func(_ context.Context, stdin io.Reader) error {
+				// a.txt's header has reached the pod and its producer is blocked
+				// on the body, so the walk has not yet reached z-dir.
+				if _, err := tar.NewReader(stdin).Next(); err != nil {
+					return err
+				}
+				if err := os.Remove(removedDir); err != nil {
+					return err
+				}
+				_, err := io.Copy(io.Discard, stdin)
+				return err
+			}}
+
+			var warnings bytes.Buffer
+			err := stageFiles(context.Background(), ops, "gc-stream", tc.cfg(src), "", &warnings)
+			if !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("stageFiles error = %v, want %q wrapping the walk failure", err, tc.wantErr)
+			}
+			if ops.ran("touch", "/workspace/.gc-ready") {
+				t.Fatal("stageFiles released the init container onto a partially extracted tree")
+			}
+			if warnings.Len() != 0 {
+				t.Fatalf("warnings = %q, want the copy failure returned instead", warnings.String())
+			}
+		})
+	}
+}
+
+func TestStageFilesSkipsAbsentSources(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	ops := &streamStageOps{onTarStdin: func(context.Context, io.Reader) error {
+		return errors.New("an absent source was streamed")
+	}}
+
+	var warnings bytes.Buffer
+	err := stageFiles(context.Background(), ops, "gc-absent", runtime.Config{
+		WorkDir:   missing,
+		CopyFiles: []runtime.CopyEntry{{Src: missing, RelDst: "data"}},
+	}, "", &warnings)
+	if err != nil {
+		t.Fatalf("stageFiles: %v", err)
+	}
+	if !ops.ran("touch", "/workspace/.gc-ready") {
+		t.Fatal("stageFiles did not release the init container")
+	}
+	if warnings.Len() != 0 {
+		t.Fatalf("warnings = %q, want absent sources skipped silently", warnings.String())
+	}
+}
+
 func TestWaitForExecReadySucceedsImmediately(t *testing.T) {
 	ops := &execReadyOps{}
 
@@ -468,13 +547,19 @@ type streamStageOps struct {
 	capturingStageOps
 	onTarStdin func(ctx context.Context, stdin io.Reader) error
 	omitAck    bool
+	commands   [][]string
 }
 
 type stagingWriteFunc func([]byte) (int, error)
 
 func (f stagingWriteFunc) Write(p []byte) (int, error) { return f(p) }
 
+func (o *streamStageOps) ran(cmd ...string) bool {
+	return slices.ContainsFunc(o.commands, func(got []string) bool { return slices.Equal(got, cmd) })
+}
+
 func (o *streamStageOps) execInPod(ctx context.Context, pod, container string, cmd []string, stdin io.Reader) (string, error) {
+	o.commands = append(o.commands, slices.Clone(cmd))
 	if len(cmd) == 6 && cmd[0] == "sh" && stdin != nil {
 		if err := o.onTarStdin(ctx, stdin); err != nil {
 			return "", err
@@ -717,21 +802,22 @@ func TestCopyDirToPodAcceptsFirstTarTrailerBlock(t *testing.T) {
 
 func TestStreamArchiveProducerFailureIsReturnedAndConsumerSeesError(t *testing.T) {
 	produceErr := errors.New("walk failed")
-	var consumerErr error
+	extractErr := errors.New("tar: unexpected EOF")
+	var readErr error
 	err := streamArchive(
 		func(w io.Writer, _ func()) error {
 			_, _ = w.Write([]byte("partial"))
 			return produceErr
 		},
 		func(r io.Reader) error {
-			_, consumerErr = io.ReadAll(r)
-			return consumerErr
+			_, readErr = io.ReadAll(r)
+			return extractErr // the extractor's own report of the truncated stream
 		})
-	if !errors.Is(err, produceErr) {
-		t.Fatalf("streamArchive error = %v, want %v", err, produceErr)
+	if !errors.Is(err, produceErr) || errors.Is(err, extractErr) {
+		t.Fatalf("streamArchive error = %v, want the producer error %v instead of the consumer's", err, produceErr)
 	}
-	if !errors.Is(consumerErr, produceErr) {
-		t.Fatalf("consumer read error = %v, want the producer error", consumerErr)
+	if !errors.Is(readErr, produceErr) {
+		t.Fatalf("consumer read error = %v, want the producer error", readErr)
 	}
 }
 

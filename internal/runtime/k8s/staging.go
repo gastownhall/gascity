@@ -16,7 +16,13 @@ import (
 )
 
 // stageFiles copies overlay, copy_files, and rig workdir into the pod
-// via the init container, then signals it to exit.
+// via the init container, then signals it to exit. Copies extract in place, so
+// a failed copy is returned before that signal: the pod may hold a partial
+// tree, and the caller deletes it. A workdir or copy_files source that cannot
+// be stat'ed is skipped silently, whatever the error (absent, permission
+// denied, symlink loop), and so is a workdir that is not a directory. An
+// overlay dir is skipped only when absent; any other stat error, or a
+// non-directory, fails staging.
 func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, ctrlCity string, warn io.Writer) error {
 	// Wait for init container to be running (up to 60s).
 	if err := waitForInitContainer(ctx, ops, podName, 60*time.Second); err != nil {
@@ -38,7 +44,7 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 	}
 	if cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
 		if err := copyDirToPod(ctx, ops, podName, "stage", cfg.WorkDir, podWorkDir); err != nil {
-			fmt.Fprintf(warn, "gc: warning: staging workdir %s to %s: %v\n", cfg.WorkDir, podWorkDir, err) //nolint:errcheck
+			return fmt.Errorf("staging workdir %s to %s: %w", cfg.WorkDir, podWorkDir, err)
 		}
 	}
 
@@ -53,7 +59,7 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 			dst = "/workspace/" + entry.RelDst
 		}
 		if err := copyToPod(ctx, ops, podName, "stage", entry.Src, dst); err != nil {
-			fmt.Fprintf(warn, "gc: warning: staging copy_file %s → %s: %v\n", entry.Src, dst, err) //nolint:errcheck
+			return fmt.Errorf("staging copy_file %s → %s: %w", entry.Src, dst, err)
 		}
 	}
 
