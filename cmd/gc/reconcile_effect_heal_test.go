@@ -215,3 +215,27 @@ func TestHealRefusalsAlertAtTheCap(t *testing.T) {
 		}
 	}
 }
+
+// Kills the awake heal mixing backends: under the auto composite, an own
+// Current runtime alive on the backend the name is not routed to is not
+// read through the routed leaf, so the heal refuses (a stale route only
+// refuses, the C4c2 re-review ruling); on the routed backend it lands.
+func TestAwakeHealReadsTheRoutedLeafOnly(t *testing.T) {
+	for _, routed := range []bool{true, false} {
+		c := ownRuntimeCase(t, "tok-3", "state", "asleep", "sleep_reason", "idle")
+		own := &freshObserver{
+			Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true},
+			env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": "tok-3"},
+		}
+		sp := auto.New(gone(), own)
+		if routed {
+			sp.SeedRoutes([]string{"s-heal"})
+		} else {
+			sp.SeedRoutes(nil)
+		}
+		_, s := c.run(t, sp, nil)
+		if routed != (s.Outcome == settledLanded) || !routed && s.Cause != causeRuntimeNotOwn {
+			t.Fatalf("routed %v: settlement %+v", routed, s)
+		}
+	}
+}

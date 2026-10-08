@@ -85,24 +85,28 @@ func (e freshHeal) run(ctx context.Context) settlement {
 }
 
 // prove reads name fresh and returns the refusal or failure that stops the
-// heal, or a zero settlement when the read proves it.
+// heal, or a zero settlement when the read proves it. An asleep heal reads
+// absence through the composite, so a stale route falls through and cannot
+// fake it; the awake heal reads presence and identity through the one routed
+// leaf, never mixing backends, so a stale route only refuses.
 func (e freshHeal) prove(ctx context.Context, name string, since time.Time, row session.Info) settlement {
-	live, status, err := runtime.ObserveLivenessBoundedSince(ctx, e.pass.Runtime, name, nil, since, fenceProbeTimeout)
+	awake := e.it.Reason == decideAwakeHeal
+	sp := e.pass.Runtime
+	if awake {
+		sp, _, _ = runtime.ResolveBackend(sp, name)
+	}
+	live, status, err := runtime.ObserveLivenessBoundedSince(ctx, sp, name, nil, since, fenceProbeTimeout)
 	switch {
 	case ctx.Err() != nil:
 		return settlement{Outcome: settledFailed, Cause: causeDeadline, Err: ctx.Err()}
 	case status != runtime.ObservationComplete || err != nil:
 		return settlement{Outcome: settledRefused, Cause: causeLivenessUnknown, Err: err}
-	case e.it.Reason != decideAwakeHeal:
+	case !awake:
 		if live.Present() {
 			return settlement{Outcome: settledRefused, Cause: causeRuntimePresent}
 		}
 		return settlement{}
-	case !live.Alive:
-		return settlement{Outcome: settledRefused, Cause: causeRuntimeNotOwn}
-	}
-	leaf, _, _ := runtime.ResolveBackend(e.pass.Runtime, name)
-	if compareIdentity(row, readRuntimeIdentity(ctx, leaf, name)) != identityCurrent {
+	case !live.Alive || compareIdentity(row, readRuntimeIdentity(ctx, sp, name)) != identityCurrent:
 		return settlement{Outcome: settledRefused, Cause: causeRuntimeNotOwn}
 	}
 	return settlement{}
