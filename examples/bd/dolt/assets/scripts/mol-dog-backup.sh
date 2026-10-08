@@ -23,6 +23,31 @@ OFFSITE_PATH="${GC_BACKUP_OFFSITE_PATH:-}"
 BACKUP_ARTIFACT_DIR="${GC_BACKUP_ARTIFACT_DIR:-$CITY_ABS/.dolt-backup}"
 BACKUP_LOCK_FILE="${GC_DOLT_BACKUP_LOCK_FILE:-$CITY_ABS/.gc/runtime/packs/dolt/backup-sync.lock}"
 BACKUP_LOCK_WAIT_SECONDS="${GC_DOLT_BACKUP_LOCK_WAIT_SECONDS:-5}"
+BACKUP_RECEIPT_DIR="${GC_DOLT_BACKUP_RECEIPT_DIR:-${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY_ABS/.gc/runtime}/packs/dolt}/backup-receipts}"
+
+write_backup_receipt() {
+    python3 "$PACK_DIR/assets/scripts/backup_receipt.py" \
+        "$BACKUP_RECEIPT_DIR" "$1" "$2" "$BACKUP_ARTIFACT_DIR/$1/manifest" "$3" "$4" "${5:--}" "${6:--}"
+}
+
+manifest_hash() {
+    [ -f "$BACKUP_ARTIFACT_DIR/$1/manifest" ] || { printf '%s' '-'; return; }
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$BACKUP_ARTIFACT_DIR/$1/manifest" | awk '{print $1}'
+    else
+        shasum -a 256 "$BACKUP_ARTIFACT_DIR/$1/manifest" | awk '{print $1}'
+    fi
+}
+destination_hash() {
+    local destination
+    destination=$(cd "$BACKUP_ARTIFACT_DIR/$1" 2>/dev/null && pwd -P) || return 0
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$destination" | sha256sum | awk '{print $1}'
+    else
+        printf '%s' "$destination" | shasum -a 256 | awk '{print $1}'
+    fi
+}
+
 # Wall-clock bound for one `bd backup sync` attempt, and how many attempts a
 # scope gets before it is reported failed.
 #
@@ -109,6 +134,44 @@ scope_database() {
     printf '%s' "$db"
 }
 
+scope_source_head() {
+    local out head
+    out=$(scope_bd_bounded "$BACKUP_BD_TIMEOUT_SECS" sql --csv "SELECT hashof('HEAD')" 2>/dev/null) || return 1
+    head=$(printf '%s\n' "$out" | tail -n 1 | tr -d '\r')
+    [ "${#head}" -eq 32 ] || return 1
+    case "$head" in *[!0-9a-v]*) return 1 ;; esac
+    printf '%s' "$head"
+}
+
+# Reuse an already restored snapshot only when its manifest and HEAD are
+# unchanged. Otherwise restore into a disposable offline directory and read
+# the actual backup HEAD. Never open the source database's on-disk directory.
+verify_backup_head() {
+    local db="$1" source_head="$2" fingerprint="$3"
+    local version outcome at mtime size digest prior_source prior_backup prior_destination extra
+    if [ -f "$BACKUP_RECEIPT_DIR/$db" ]; then
+        read -r version outcome at mtime size digest prior_source prior_backup prior_destination extra < "$BACKUP_RECEIPT_DIR/$db" || true
+        if [ "$version" = v3 ] && [ -z "$extra" ] &&
+            { [ "$outcome" = success ] || [ "$outcome" = noop ]; } &&
+            [ "$digest" = "$fingerprint" ] && [ "$fingerprint" != - ] &&
+            [ "$prior_destination" = "$(destination_hash "$db")" ] &&
+            [ "$prior_source" = "$source_head" ] && [ "$prior_backup" = "$source_head" ]; then
+            return 0
+        fi
+    fi
+    local verify_dir restored_head verify_rc=0
+    verify_dir=$(mktemp -d "${TMPDIR:-/var/tmp}/gc-backup-verify.XXXXXX") || return 1
+    restored_head=$(
+        cd "$verify_dir" &&
+        run_bounded "$BACKUP_SYNC_TIMEOUT_SECS" dolt backup restore "file://$BACKUP_ARTIFACT_DIR/$db" snapshot >/dev/null &&
+        cd snapshot && run_bounded "$BACKUP_BD_TIMEOUT_SECS" dolt sql --result-format csv -q "SELECT hashof('HEAD')" |
+            tail -n 1 | tr -d '\r'
+    ) || verify_rc=$?
+    rm -rf -- "$verify_dir"
+    [ "$verify_rc" -eq 0 ] && [ "$restored_head" = "$source_head" ] &&
+        [ "$(manifest_hash "$db")" = "$fingerprint" ]
+}
+
 same_path() {
     local left="$1"
     local right="$2"
@@ -171,8 +234,8 @@ backup_unsupported() {
 }
 
 # ensure_backup_destination registers <artifact-dir>/<db> as the scope's bd
-# backup destination when bd reports none. An existing destination is left
-# alone (operators may point it elsewhere). Prints a diagnostic and returns 1
+# backup destination when bd reports none. An existing destination must match
+# the artifacts inspected by health; other destinations are left untouched. Prints a diagnostic and returns 1
 # on failure, 2 when bd refuses backup for the scope.
 ensure_backup_destination() {
     local db="$1"
@@ -192,8 +255,15 @@ ensure_backup_destination() {
         return 1
     fi
     if [ "$(printf '%s' "$status" | jq -r '.dolt.configured // false' 2>/dev/null)" = "true" ]; then
+        url=$(printf '%s' "$status" | jq -r '.dolt.backup_url // empty' 2>/dev/null)
         rm -f "$err_file"
-        return 0
+        case "$url" in
+            file://*)
+                if same_path "${url#file://}" "$BACKUP_ARTIFACT_DIR/$db"; then return 0; fi
+                ;;
+        esac
+        printf 'configured backup destination does not match artifact directory for %s' "$db"
+        return 1
     fi
     url="file://$BACKUP_ARTIFACT_DIR/$db"
     mkdir -p "$BACKUP_ARTIFACT_DIR/$db"
@@ -212,6 +282,7 @@ ensure_backup_destination() {
 
 sync_scope() {
     local sync_err_tmp
+    local sync_out_tmp
     local sync_attempt=1
     local sync_rc
     local sync_detail=""
@@ -220,21 +291,23 @@ sync_scope() {
         printf 'cannot create temp file for sync diagnostics'
         return 1
     }
+    sync_out_tmp=$(mktemp) || { rm -f "$sync_err_tmp"; printf 'cannot create temp file for sync response'; return 1; }
     while [ "$sync_attempt" -le "$BACKUP_SYNC_ATTEMPTS" ]; do
         sync_rc=0
-        scope_bd_bounded "$BACKUP_SYNC_TIMEOUT_SECS" backup sync --json >/dev/null 2>"$sync_err_tmp" || sync_rc=$?
-        if [ "$sync_rc" -eq 0 ]; then
+        scope_bd_bounded "$BACKUP_SYNC_TIMEOUT_SECS" backup sync --json >"$sync_out_tmp" 2>"$sync_err_tmp" || sync_rc=$?
+        if [ "$sync_rc" -eq 0 ] && jq -e '.synced == true' "$sync_out_tmp" >/dev/null 2>&1; then
             if [ "$sync_attempt" -gt 1 ]; then
                 echo "backup: $SCOPE_LABEL: succeeded on attempt $sync_attempt/$BACKUP_SYNC_ATTEMPTS" >&2
             fi
-            rm -f "$sync_err_tmp"
+            rm -f "$sync_err_tmp" "$sync_out_tmp"
             return 0
         fi
+        [ "$sync_rc" -eq 0 ] && { sync_rc=1; printf 'backup sync did not return synced=true\n' >"$sync_err_tmp"; }
         sync_detail=$(classify_sync_failure "$sync_rc" "$sync_err_tmp")
         echo "backup: $SCOPE_LABEL: attempt $sync_attempt/$BACKUP_SYNC_ATTEMPTS failed — $sync_detail" >&2
         sync_attempt=$((sync_attempt + 1))
     done
-    rm -f "$sync_err_tmp"
+    rm -f "$sync_err_tmp" "$sync_out_tmp"
     printf '%s' "$sync_detail"
     return 1
 }
@@ -342,21 +415,42 @@ $db
     if [ "$dest_rc" -eq 2 ]; then
         UNSUPPORTED=$((UNSUPPORTED + 1))
         echo "backup: $SCOPE_LABEL ($db): bd does not support backup for this scope's transport; skipped" >&2
+        write_backup_receipt "$db" skipped - - || append_failed_detail "$db" "skip receipt could not be written"
         outcome_scope_skipped "$SCOPE_LABEL" "bd-backup-unsupported"
         continue
     elif [ "$dest_rc" -ne 0 ]; then
         append_failed_db "$db(backup init failed)"
         append_failed_detail "$db" "$dest_detail"
+        write_backup_receipt "$db" failure - - || append_failed_detail "$db" "failure receipt could not be written"
         outcome_scope_skipped "$SCOPE_LABEL" "backup destination failed"
         continue
     fi
 
+    before_manifest=$(manifest_hash "$db")
     sync_failure_detail=""
     if sync_failure_detail=$(sync_scope); then
-        SYNCED=$((SYNCED + 1))
+        after_head=$(scope_source_head) || after_head=""
+        verified_hash=$(manifest_hash "$db")
+        backup_head=""
+        if [ -n "$after_head" ] && verify_backup_head "$db" "$after_head" "$verified_hash"; then
+            backup_head="$after_head"
+        fi
+        if [ -z "$backup_head" ]; then
+            append_failed_db "$db(backup HEAD unverified)"
+            append_failed_detail "$db" "restored backup HEAD does not match source HEAD, or verification unavailable"
+            write_backup_receipt "$db" unverified "${after_head:--}" "$before_manifest" || true
+            outcome_scope_skipped "$SCOPE_LABEL" "backup HEAD unverified"
+        elif write_backup_receipt "$db" success "$after_head" "$before_manifest" "$backup_head" "$verified_hash"; then
+            SYNCED=$((SYNCED + 1))
+        else
+            append_failed_db "$db(receipt unverified)"
+            append_failed_detail "$db" "sync returned success but its manifest receipt could not be verified"
+            outcome_scope_skipped "$SCOPE_LABEL" "backup receipt unverified"
+        fi
     else
         append_failed_db "$db(sync failed)"
         append_failed_detail "$db" "$sync_failure_detail"
+        write_backup_receipt "$db" failure - "$before_manifest" || append_failed_detail "$db" "failure receipt could not be written"
         outcome_scope_skipped "$SCOPE_LABEL" "backup sync failed"
     fi
 done <<EOF

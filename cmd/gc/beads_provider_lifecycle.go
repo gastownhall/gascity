@@ -1847,7 +1847,7 @@ func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, exe
 			args = append(args, doltDatabase)
 		}
 		script := strings.TrimPrefix(provider, "exec:")
-		if execProviderUsesCanonicalBdScopeFiles(provider) && (scopeInitUsesProxiedDoltMode(cityPath, dir)) {
+		if execProviderUsesCanonicalBdScopeFiles(provider) && scopeInitUsesProxiedDoltMode(cityPath, dir) {
 			// Callers may invoke initBeadsForDir directly without the
 			// initAndHookDir wrapper that normally supplies the canonical
 			// database name. Resolve the same fallback here so proxied and

@@ -25,6 +25,7 @@ import (
 //	FAKE_CONFIGURED_DBS      databases that already have a backup destination
 //	FAKE_INIT_FAIL_DBS       databases whose backup init fails
 //	FAKE_SYNC_FAIL_UNTIL     fail each database's first N syncs (default 0)
+//	FAKE_SYNC_NOOP_DBS      databases whose existing manifest remains unchanged
 //	FAKE_SYNC_STARTED/FAKE_SYNC_RELEASE  block sync until the release file exists
 type backupFakeGC struct {
 	logPath string
@@ -67,7 +68,10 @@ for pair in ${FAKE_SCOPE_DBS:-}; do
 done
 case "${1:-} ${2:-}" in
   "sql --csv")
-    printf 'DATABASE()\n%%s\n' "$db"
+    case "${3:-}" in
+      *hashof*) printf "hashof('HEAD')\n%%s\n" "${FAKE_SOURCE_HEAD:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" ;;
+      *) printf 'DATABASE()\n%%s\n' "$db" ;;
+    esac
     ;;
   "backup "*)
     case " ${FAKE_UNSUPPORTED_SCOPES:-} " in
@@ -81,7 +85,8 @@ case "${1:-} ${2:-}" in
         configured=false
         case " ${FAKE_CONFIGURED_DBS:-} " in *" $db "*) configured=true ;; esac
         [ -f "$state/$db.configured" ] && configured=true
-        printf '{"backup":{},"dolt":{"configured":%%s}}\n' "$configured"
+        url="${FAKE_BACKUP_URL:-file://${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}/$db}"
+        printf '{"backup":{},"dolt":{"configured":%%s,"backup_url":"%%s"}}\n' "$configured" "$url"
         ;;
       init)
         case " ${FAKE_INIT_FAIL_DBS:-} " in
@@ -101,6 +106,12 @@ case "${1:-} ${2:-}" in
           printf 'Error: backup sync failed: Error 1105 (HY000): connection was closed\n' >&2
           exit 1
         fi
+        artifact="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
+        mkdir -p "$artifact/$db"
+        case " ${FAKE_SYNC_NOOP_DBS:-} " in
+          *" $db "*) [ -f "$artifact/$db/manifest" ] || printf 'backup=%%s\n' "$db" > "$artifact/$db/manifest" ;;
+          *) printf 'backup=%%s attempt=%%s\n' "$db" "$attempts" > "$artifact/$db/manifest" ;;
+        esac
         printf '{"synced":true,"duration":"1ms"}\n'
         ;;
     esac
@@ -108,6 +119,18 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 `, shellQuote(logPath), shellQuote(stateDir)))
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "backup restore")
+    [ "${FAKE_RESTORE_FAIL:-0}" = 1 ] && exit 1
+    mkdir -p snapshot
+    ;;
+  "sql --result-format")
+    printf "hashof('HEAD')\n%s\n" "${FAKE_BACKUP_HEAD:-${FAKE_SOURCE_HEAD:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}}"
+    ;;
+  *) exit 1 ;;
+esac
+`)
 	return backupFakeGC{logPath: logPath}
 }
 
@@ -149,6 +172,10 @@ func runBackupOrder(t *testing.T, binDir, cityPath string, extraEnv ...string) (
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
+		"GC_CITY_RUNTIME_DIR="+filepath.Join(cityPath, ".gc", "runtime"),
+		"GC_PACK_STATE_DIR="+filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt"),
+		"GC_DOLT_BACKUP_RECEIPT_DIR="+filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "backup-receipts"),
+		"GC_BACKUP_ARTIFACT_DIR="+filepath.Join(cityPath, ".dolt-backup"),
 	)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()
@@ -201,8 +228,6 @@ func TestBackupOrderSyncsEveryScopeThroughGCBdAndPublishesOffsite(t *testing.T) 
 	binDir := t.TempDir()
 	gc := writeBackupFakeGC(t, binDir)
 	rsyncLog := writeBackupFakeRsyncTool(t, binDir, 0)
-	// A dolt binary that fails loudly proves the order never dials Dolt itself.
-	writeExecutable(t, filepath.Join(binDir, "dolt"), "#!/bin/sh\necho 'dolt must not be called' >&2\nexit 97\n")
 
 	out := mustRunBackupOrder(t, binDir, cityPath,
 		`FAKE_RIG_LIST_JSON={"rigs":[{"name":"hq","hq":true},{"name":"api","hq":false}]}`,
@@ -231,6 +256,114 @@ func TestBackupOrderSyncsEveryScopeThroughGCBdAndPublishesOffsite(t *testing.T) 
 	}
 	if !strings.Contains(string(rsync), artifactDir+"/ "+offsiteDir+"/") {
 		t.Fatalf("offsite rsync should publish the artifact dir:\n%s", rsync)
+	}
+}
+
+func TestBackupOrderReceiptsDistinguishNoopChangedAndFailedScopes(t *testing.T) {
+	cityPath := resolvedTempDir(t)
+	binDir := t.TempDir()
+	writeBackupFakeGC(t, binDir)
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	for _, db := range []string{"hq", "office"} {
+		path := filepath.Join(artifactDir, db, "manifest")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("old "+db), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-24 * time.Hour)
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	baseEnv := []string{
+		`FAKE_RIG_LIST_JSON={"rigs":[{"name":"office","hq":false}]}`,
+		"FAKE_SCOPE_DBS=city=hq rig:office=office",
+		"FAKE_CONFIGURED_DBS=hq office",
+	}
+	out := mustRunBackupOrder(t, binDir, cityPath, append(baseEnv, "FAKE_SYNC_NOOP_DBS=office")...)
+	if !strings.Contains(out, "synced: 2/2") {
+		t.Fatalf("backup summary: %s", out)
+	}
+	receiptDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "backup-receipts")
+	readReceipt := func(db string) []string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(receiptDir, db))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fields := strings.Fields(string(data))
+		if len(fields) != 9 || fields[0] != "v3" || fields[6] != fields[7] && fields[1] != "failure" && fields[1] != "unverified" {
+			t.Fatalf("invalid %s receipt: %q", db, data)
+		}
+		return fields
+	}
+	if got := readReceipt("office")[1]; got != "noop" {
+		t.Fatalf("unchanged office outcome = %q, want noop", got)
+	}
+	if got := readReceipt("hq")[1]; got != "success" {
+		t.Fatalf("changed hq outcome = %q, want success", got)
+	}
+	out = mustRunBackupOrder(t, binDir, cityPath, append(baseEnv,
+		"GC_BACKUP_DATABASES=office", "FAKE_SYNC_NOOP_DBS=office", "FAKE_RESTORE_FAIL=1")...)
+	if !strings.Contains(out, "synced: 1/1") || readReceipt("office")[1] != "noop" {
+		t.Fatalf("previously verified no-op should reuse its manifest evidence: %s", out)
+	}
+	copiedArtifacts := filepath.Join(cityPath, "copied-artifacts")
+	if err := os.MkdirAll(filepath.Join(copiedArtifacts, "office"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	originalManifest, err := os.ReadFile(filepath.Join(artifactDir, "office", "manifest"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(copiedArtifacts, "office", "manifest"), originalManifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out = mustRunBackupOrder(t, binDir, cityPath, append(baseEnv,
+		"GC_BACKUP_DATABASES=office", "GC_BACKUP_ARTIFACT_DIR="+copiedArtifacts,
+		"FAKE_SYNC_NOOP_DBS=office", "FAKE_RESTORE_FAIL=1")...)
+	if !strings.Contains(out, "synced: 0/1") || readReceipt("office")[1] != "unverified" {
+		t.Fatalf("destination change must force restore even for copied manifest: %s", out)
+	}
+	out = mustRunBackupOrder(t, binDir, cityPath, append(baseEnv,
+		"GC_BACKUP_DATABASES=office", "FAKE_SYNC_NOOP_DBS=office")...)
+	if !strings.Contains(out, "synced: 1/1") {
+		t.Fatalf("restore original office proof: %s", out)
+	}
+	beforeOffice, err := os.ReadFile(filepath.Join(receiptDir, "office"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = mustRunBackupOrder(t, binDir, cityPath, append(baseEnv,
+		"GC_BACKUP_DATABASES=hq", "FAKE_SYNC_FAIL_UNTIL=99", "GC_DOLT_BACKUP_SYNC_ATTEMPTS=1")...)
+	if !strings.Contains(out, "synced: 0/1") || readReceipt("hq")[1] != "failure" {
+		t.Fatalf("failed hq sync did not persist failure: %s", out)
+	}
+	afterOffice, err := os.ReadFile(filepath.Join(receiptDir, "office"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterOffice) != string(beforeOffice) {
+		t.Fatal("failed hq sync rewrote office receipt")
+	}
+	out = mustRunBackupOrder(t, binDir, cityPath, append(baseEnv,
+		"GC_BACKUP_DATABASES=office", "FAKE_SYNC_NOOP_DBS=office",
+		"FAKE_SOURCE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"FAKE_BACKUP_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")...)
+	if !strings.Contains(out, "synced: 0/1") || readReceipt("office")[1] != "unverified" {
+		t.Fatalf("changed source with unchanged manifest must fail closed: %s", out)
+	}
+	out = mustRunBackupOrder(t, binDir, cityPath, append(baseEnv,
+		"GC_BACKUP_DATABASES=hq", "FAKE_SOURCE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")...)
+	if !strings.Contains(out, "synced: 1/1") || readReceipt("hq")[1] != "success" || readReceipt("hq")[6] != strings.Repeat("b", 32) {
+		t.Fatalf("changed source and matching restored backup should be fresh: %s", out)
+	}
+	out = mustRunBackupOrder(t, binDir, cityPath, append(baseEnv,
+		"GC_BACKUP_DATABASES=hq", "FAKE_BACKUP_URL=file:///different-backup")...)
+	if !strings.Contains(out, "synced: 0/1") || readReceipt("hq")[1] != "failure" {
+		t.Fatalf("different backup destination must not credit local manifest: %s", out)
 	}
 }
 
@@ -362,6 +495,10 @@ func TestBackupOrderReportsUnsupportedBackupAsSkippedWithoutEscalating(t *testin
 	if !ok || outcome.Outcome != "partial" || len(outcome.Scopes) != 1 ||
 		outcome.Scopes[0].Scope != "city" || outcome.Scopes[0].Reason != "bd-backup-unsupported" {
 		t.Fatalf("outcome = %+v (declared %v), want partial with city bd-backup-unsupported", outcome, ok)
+	}
+	receipt, err := os.ReadFile(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "backup-receipts", "prod"))
+	if err != nil || !strings.HasPrefix(string(receipt), "v3 skipped ") {
+		t.Fatalf("unsupported scope needs durable skipped receipt: %q (%v)", receipt, err)
 	}
 }
 
@@ -553,12 +690,15 @@ exit %d
 func writeRecordingTimeout(t *testing.T, binDir string) string {
 	t.Helper()
 	logPath := filepath.Join(binDir, "timeout.log")
-	writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
+	script := fmt.Sprintf(`#!/bin/sh
 printf 'timeout %%s\n' "$*" >> %s
 [ "$1" = "--kill-after=2" ] && shift
 shift
 exec "$@"
-`, shellQuote(logPath)))
+`, shellQuote(logPath))
+	for _, name := range []string{"timeout", "gtimeout"} {
+		writeExecutable(t, filepath.Join(binDir, name), script)
+	}
 	return logPath
 }
 

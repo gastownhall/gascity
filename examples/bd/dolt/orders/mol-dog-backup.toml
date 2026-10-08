@@ -1,14 +1,15 @@
 # Converted from formula+pool to exec. All backup operations are
 # deterministic: `bd backup status/init/sync` per bead scope through gc bd,
 # then an rsync of the backup artifacts to the offsite path. No LLM judgment
-# needed — runs inline in the controller. The timeout covers the per-scope bd
-# calls, up to 10 120s scope syncs, and one offsite rsync bounded by
-# GC_BACKUP_OFFSITE_TIMEOUT (default 300s). Raising that variable may require
-# raising this timeout: the run is killed mid-rsync once it exceeds the bound
-# below, before the script can report the offsite failure.
+# needed — runs inline in the controller. For up to ten scopes, the default
+# budget covers scope lookup/status/init (3*60s), three sync attempts (3*120s),
+# source HEAD lookup (60s), offline restore verification (120s+60s), plus
+# rig discovery (60s), the lock wait (5s), and offsite rsync (300s): 8165s.
+# A known verified no-op avoids the restore. Larger cities or raised bounds
+# require a corresponding order timeout increase.
 [order]
 description = "Back up every bead scope with bd backup"
 exec = "$PACK_DIR/assets/scripts/mol-dog-backup.sh"
 trigger = "cooldown"
 interval = "6h"
-timeout = "1800s"
+timeout = "9000s"

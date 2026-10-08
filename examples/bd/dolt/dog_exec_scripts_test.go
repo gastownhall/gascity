@@ -5363,9 +5363,9 @@ func TestBackupOrderTimeoutCoversScriptBudget(t *testing.T) {
 	}
 
 	const intendedDBs = 10
-	required := 30*time.Second + intendedDBs*120*time.Second + 300*time.Second
+	required := 65*time.Second + intendedDBs*(3*60+3*120+60+120+60)*time.Second + 300*time.Second
 	if got := order.TimeoutOrDefault(); got < required {
-		t.Fatalf("backup order timeout = %s, want at least %s for SQL probe + %d DB syncs + offsite rsync", got, required, intendedDBs)
+		t.Fatalf("backup order timeout = %s, want at least %s for discovery/lock + %d scope attempts and restore verification + offsite rsync", got, required, intendedDBs)
 	}
 }
 
@@ -5398,19 +5398,27 @@ func TestDoctorScriptChecksBackupArtifactFreshnessPerDatabase(t *testing.T) {
 			t.Fatalf("mkdir %s: %v", db, err)
 		}
 	}
-	freshBackup := filepath.Join(artifactDir, "prod.backup")
+	if err := os.MkdirAll(filepath.Join(artifactDir, "prod"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	freshBackup := filepath.Join(artifactDir, "prod", "manifest")
 	writeTestFile(t, freshBackup, "backup")
 	fresh := time.Now()
 	if err := os.Chtimes(freshBackup, fresh, fresh); err != nil {
 		t.Fatalf("chtimes fresh backup: %v", err)
 	}
-	staleBackup := filepath.Join(artifactDir, "archive.backup")
+	if err := os.MkdirAll(filepath.Join(artifactDir, "archive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staleBackup := filepath.Join(artifactDir, "archive", "manifest")
 	writeTestFile(t, staleBackup, "backup")
 	old := time.Now().Add(-2 * time.Hour)
 	if err := os.Chtimes(staleBackup, old, old); err != nil {
 		t.Fatalf("chtimes stale backup: %v", err)
 	}
 
+	writeHealthSuccessReceipt(t, cityPath, "prod", fresh)
+	writeHealthSuccessReceipt(t, cityPath, "archive", old)
 	binDir := t.TempDir()
 	gcLogPath := writeDogFakeGC(t, binDir)
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
@@ -5418,7 +5426,7 @@ set -euo pipefail
 case "$1" in
   backup)
     case "$(basename "$PWD")" in
-      prod) printf 'prod-backup\n' ;;
+      prod) printf 'default\n' ;;
       archive) printf 'archive-backup\n' ;;
     esac
     exit 0
@@ -5463,7 +5471,10 @@ func TestDoctorScriptIgnoresDocumentedSystemSchemasForBackupFreshness(t *testing
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatalf("mkdir data dir: %v", err)
 	}
-	freshBackup := filepath.Join(artifactDir, "prod.backup")
+	if err := os.MkdirAll(filepath.Join(artifactDir, "prod"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	freshBackup := filepath.Join(artifactDir, "prod", "manifest")
 	writeTestFile(t, freshBackup, "backup")
 	fresh := time.Now()
 	if err := os.Chtimes(freshBackup, fresh, fresh); err != nil {
@@ -5557,7 +5568,7 @@ exit 0
 	if !strings.Contains(string(gcLog), "archive backup remote missing") {
 		t.Fatalf("doctor did not warn about archive's missing <db>-backup remote (#3176 coverage gap):\n%s", gcLog)
 	}
-	if !strings.Contains(string(gcLog), "prod backup missing") {
+	if !strings.Contains(string(gcLog), "prod backup receipt missing") {
 		t.Fatalf("doctor did not warn about prod (eligible: has prod-backup remote, no artifact); scope filter should not exclude it:\n%s", gcLog)
 	}
 }
@@ -5616,13 +5627,17 @@ func TestDoctorScriptDoesNotCreditSharedPrefixBackupToDatabase(t *testing.T) {
 			t.Fatalf("mkdir %s: %v", db, err)
 		}
 	}
-	freshSiblingBackup := filepath.Join(artifactDir, "prod_dev.backup")
+	if err := os.MkdirAll(filepath.Join(artifactDir, "prod_dev"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	freshSiblingBackup := filepath.Join(artifactDir, "prod_dev", "manifest")
 	writeTestFile(t, freshSiblingBackup, "backup")
 	fresh := time.Now()
 	if err := os.Chtimes(freshSiblingBackup, fresh, fresh); err != nil {
 		t.Fatalf("chtimes fresh sibling backup: %v", err)
 	}
 
+	writeHealthSuccessReceipt(t, cityPath, "prod_dev", fresh)
 	binDir := t.TempDir()
 	gcLogPath := writeDogFakeGC(t, binDir)
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
@@ -5657,7 +5672,7 @@ exit 0
 	if err != nil {
 		t.Fatalf("read gc log: %v", err)
 	}
-	if !strings.Contains(string(gcLog), "prod backup missing") {
+	if !strings.Contains(string(gcLog), "prod backup receipt missing") {
 		t.Fatalf("doctor should not credit prod_dev backup to prod, log:\n%s", gcLog)
 	}
 	if strings.Contains(string(gcLog), "prod_dev backup") {
