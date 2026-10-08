@@ -23,7 +23,7 @@ func (h *SessionHandle) Start(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	err = h.manager.Start(ctx, id, startCommand, h.runtimeHints())
+	err = h.manager.Start(ctx, id, startCommand, h.runtimeHints(), sessionpkg.ResumeIfUnheld)
 	return err
 }
 
@@ -310,7 +310,7 @@ func (h *SessionHandle) Message(ctx context.Context, req MessageRequest) (result
 	if err != nil {
 		return MessageResult{}, err
 	}
-	outcome, err := h.manager.Submit(ctx, id, req.Text, resumeCommand, h.runtimeHints(), submitIntent(req.Delivery))
+	outcome, err := h.manager.Submit(ctx, id, req.Text, resumeCommand, h.runtimeHints(), submitIntent(req.Delivery), req.Resume)
 	if err != nil {
 		return MessageResult{}, err
 	}
@@ -364,10 +364,11 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
-		if err := h.manager.Send(ctx, id, req.Text, resumeCommand, h.runtimeHints()); err != nil {
+		outcome, err := h.manager.Send(ctx, id, req.Text, resumeCommand, h.runtimeHints(), sessionpkg.ResumeIfUnheld)
+		if err != nil {
 			return NudgeResult{}, err
 		}
-		result = NudgeResult{Delivered: true}
+		result = sentNudgeResult(outcome)
 		return result, nil
 	case NudgeDeliveryImmediate:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
@@ -378,10 +379,11 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
-		if err := h.manager.SendImmediate(ctx, id, req.Text, resumeCommand, h.runtimeHints()); err != nil {
+		outcome, err := h.manager.SendImmediate(ctx, id, req.Text, resumeCommand, h.runtimeHints(), sessionpkg.ResumeIfUnheld)
+		if err != nil {
 			return NudgeResult{}, err
 		}
-		result = NudgeResult{Delivered: true}
+		result = sentNudgeResult(outcome)
 		return result, nil
 	case NudgeDeliveryWaitIdle:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
@@ -392,7 +394,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
-		delivered, err := h.manager.TryWaitIdleNudge(ctx, id, req.Source, req.Text, resumeCommand, h.runtimeHints())
+		delivered, err := h.manager.TryWaitIdleNudge(ctx, id, req.Source, req.Text, resumeCommand, h.runtimeHints(), sessionpkg.ResumeIfUnheld)
 		if err != nil {
 			return NudgeResult{}, err
 		}
@@ -402,6 +404,14 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 		err = fmt.Errorf("unknown nudge delivery %q", req.Delivery)
 		return NudgeResult{}, err
 	}
+}
+
+// sentNudgeResult: a held session queued the nudge rather than taking it.
+func sentNudgeResult(outcome sessionpkg.SubmitOutcome) NudgeResult {
+	if outcome.Queued {
+		return NudgeResult{Undelivered: NudgeUndeliveredHeld}
+	}
+	return NudgeResult{Delivered: true}
 }
 
 func (h *SessionHandle) ensureSessionID() (string, error) {

@@ -649,14 +649,22 @@ func (s *Server) resolveSessionIDMaterializingNamedWithContext(ctx context.Conte
 	return s.resolveSessionTargetIDWithContext(ctx, store, identifier, apiSessionResolveOptions{materialize: true})
 }
 
-func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent) (session.SubmitOutcome, error) {
+// submitMessageToSession submits message to session id. resume is the
+// request's `resume: true`: only then may the message resume a held session
+// (CONTRACT v5.9 D8, owner ruling 2026-10-08); otherwise it queues there.
+func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent, resume bool) (session.SubmitOutcome, error) {
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return session.SubmitOutcome{}, err
 	}
+	policy := session.ResumeIfUnheld
+	if resume {
+		policy = session.ResumeOperator
+	}
 	result, err := handle.Message(ctx, worker.MessageRequest{
 		Text:     message,
 		Delivery: workerDeliveryIntent(intent),
+		Resume:   policy,
 	})
 	if err != nil {
 		return session.SubmitOutcome{}, err
@@ -678,8 +686,8 @@ func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads
 
 // sendUserMessageToSession keeps POST /messages as a compatibility alias for
 // the semantic default submit path.
-func (s *Server) sendUserMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
-	_, err := s.submitMessageToSession(ctx, store, id, message, session.SubmitIntentDefault)
+func (s *Server) sendUserMessageToSession(ctx context.Context, store beads.Store, id, message string, resume bool) error {
+	_, err := s.submitMessageToSession(ctx, store, id, message, session.SubmitIntentDefault, resume)
 	return err
 }
 

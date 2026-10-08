@@ -1434,13 +1434,15 @@ func clearSessionWaitHold(sessFront *sessionpkg.Store, sessionID string) error {
 	if sessionID == "" {
 		return nil
 	}
-	batch := map[string]string{
-		"wait_hold":    "",
-		"sleep_intent": "",
-	}
+	batch := map[string]string{"wait_hold": ""}
 	if sessFront != nil {
 		if markers, err := sessFront.PersistedMarkers(sessionID); err == nil && markers.SleepReason == string(sessionpkg.SleepReasonWaitHold) {
 			batch["sleep_reason"] = ""
+		}
+		// Only the wait's own intent goes: an operator's user-hold, or any
+		// other intent, outlives the wait (CONTRACT v5.9 D8).
+		if info, err := sessFront.Get(sessionID); err == nil && info.SleepIntent == string(sessionpkg.SleepReasonWaitHold) {
+			batch["sleep_intent"] = ""
 		}
 	}
 	return sessFront.ApplyPatch(sessionID, batch)

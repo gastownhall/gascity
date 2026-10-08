@@ -4869,7 +4869,7 @@ func TestHandleSessionMessageQueuesSuspendedSessionMessage(t *testing.T) {
 	srv := New(&stateWithSessionProvider{fakeState: fs, provider: blocker})
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello","resume":true}`))
 	req.Header.Set("Idempotency-Key", "sess-msg-1")
 	w := httptest.NewRecorder()
 	done := make(chan struct{})

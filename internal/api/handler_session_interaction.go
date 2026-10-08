@@ -10,6 +10,9 @@ import (
 
 type sessionMessageRequest struct {
 	Message string `json:"message"`
+	// Resume lets the message resume a held session (CONTRACT v5.9 D8);
+	// without it the message queues on one.
+	Resume bool `json:"resume,omitempty"`
 }
 
 type sessionPendingResponse struct {
@@ -57,7 +60,7 @@ func (s *Server) handleSessionMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.sendUserMessageToSession(r.Context(), store.Store, id, body.Message); err != nil {
+	if err := s.sendUserMessageToSession(r.Context(), store.Store, id, body.Message, body.Resume); err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
 		return

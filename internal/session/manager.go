@@ -1229,15 +1229,16 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 }
 
 // Attach attaches the user's terminal to the session. If the session is
-// suspended, it is resumed first using resumeCommand. If the tmux session
-// died (active bead but no process), it is restarted.
+// dormant, it is resumed first using resumeCommand, consuming the operator's
+// hold (ResumeOperator, CONTRACT v5.9 D8). If the tmux session died (active
+// bead but no process), it is restarted.
 func (m *Manager) Attach(ctx context.Context, id string, resumeCommand string, hints runtime.Config) error {
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
+		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints, ResumeOperator); err != nil {
 			return err
 		}
 

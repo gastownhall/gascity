@@ -2715,6 +2715,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 	outcome, err := handle.Message(context.Background(), worker.MessageRequest{
 		Text:     message,
 		Delivery: workerDeliveryIntentForSubmitIntent(intent),
+		Resume:   session.ResumeOperator,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr

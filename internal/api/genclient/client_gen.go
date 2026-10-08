@@ -3711,6 +3711,9 @@ type SessionCreateBody struct {
 	// ProjectId Opaque project context identifier.
 	ProjectId *string `json:"project_id,omitempty"`
 
+	// Resume Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued until the hold ends or an operator resumes the session.
+	Resume *bool `json:"resume,omitempty"`
+
 	// SessionName Deprecated: use alias.
 	SessionName *string `json:"session_name,omitempty"`
 
@@ -3776,6 +3779,9 @@ type SessionLifecyclePayload struct {
 type SessionMessageInputBody struct {
 	// Message Message text to send.
 	Message string `json:"message"`
+
+	// Resume Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued until the hold ends or an operator resumes the session.
+	Resume *bool `json:"resume,omitempty"`
 }
 
 // SessionMessageSucceededPayload defines model for SessionMessageSucceededPayload.
@@ -4814,6 +4820,9 @@ type SessionSubmitInputBody struct {
 
 	// Message Message text to submit.
 	Message string `json:"message"`
+
+	// Resume Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued until the hold ends or an operator resumes the session.
+	Resume *bool `json:"resume,omitempty"`
 }
 
 // SessionSubmitSucceededPayload defines model for SessionSubmitSucceededPayload.

@@ -3226,6 +3226,10 @@ export type SessionCreateBody = {
      */
     project_id?: string;
     /**
+     * Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued until the hold ends or an operator resumes the session.
+     */
+    resume?: boolean;
+    /**
      * Deprecated: use alias.
      */
     session_name?: string;
@@ -3304,6 +3308,10 @@ export type SessionMessageInputBody = {
      * Message text to send.
      */
     message: string;
+    /**
+     * Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued until the hold ends or an operator resumes the session.
+     */
+    resume?: boolean;
 };
 
 export type SessionMessageSucceededPayload = {
@@ -4557,6 +4565,10 @@ export type SessionSubmitInputBody = {
      * Message text to submit.
      */
     message: string;
+    /**
+     * Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued until the hold ends or an operator resumes the session.
+     */
+    resume?: boolean;
 };
 
 export type SessionSubmitSucceededPayload = {

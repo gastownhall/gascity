@@ -123,7 +123,6 @@ var (
 	nudgeCityUsesManagedReconciler           = cityUsesManagedReconciler
 	nudgePokeController                      = enqueueController
 	nudgeObserveTarget                       = workerObserveNudgeTarget
-	nudgeWithdrawQueuedWaitNudges            = withdrawQueuedWaitNudges
 	nudgePollDeliverQueued                   = tryDeliverQueuedNudgesByPoller
 	nudgeWarningWriter             io.Writer = os.Stderr
 )
@@ -1234,6 +1233,10 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	if result.Undelivered == worker.NudgeUndeliveredHeld {
+		// The session is held and queued the nudge itself (CONTRACT v5.9 D8).
+		return writeQueuedSessionNudgeResult(target, mode, jsonOutput, result.Undelivered, stdout, stderr)
+	}
 	if mode == nudgeDeliveryWaitIdle && !result.Delivered {
 		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, result.Undelivered, stdout, stderr)
 	}
@@ -1323,13 +1326,10 @@ func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item que
 	return nil
 }
 
-// requestManagedNudgeWake wakes a managed session that owns queued nudges. The
-// sessFront param is the session coordination-class write front door:
-// WakeSession operates on the session bead plus its gc:wait beads (both
-// ClassSessions). Callers construct it at the root via cliSessionFrontDoor so a
-// [beads.classes.sessions] relocation reaches it. The one nudge op inside —
-// nudgeWithdrawQueuedWaitNudges — opens its own nudge store and stays on the
-// nudges class.
+// requestManagedNudgeWake asks the controller to wake a managed session that
+// owns queued nudges, never over an operator's hold (CONTRACT v5.9 D8): a
+// held row keeps its nudge queued until an operator resumes it. sessFront is
+// the session-class front door (cliSessionFrontDoor).
 func requestManagedNudgeWake(target nudgeTarget, sessFront *session.Store) error {
 	if !sessFront.Backed() || target.sessionID == "" {
 		// The item IS enqueued; what did not happen is the wake that gets a
@@ -1345,19 +1345,8 @@ func requestManagedNudgeWake(target nudgeTarget, sessFront *session.Store) error
 		}
 		return nil
 	}
-	res, err := sessFront.WakeSession(target.sessionID, time.Now().UTC(), session.WakeOpts{})
-	if err != nil {
-		return err
-	}
-	nudgeIDs := res.NudgeIDs
-	if len(nudgeIDs) > 0 {
-		if err := nudgeWithdrawQueuedWaitNudges(target.cityPath, nudgeIDs); err != nil {
-			if nudgeWarningWriter != nil {
-				fmt.Fprintf(nudgeWarningWriter, "gc session wake: warning: withdrawing queued wait nudges after managed wake: %v\n", err) //nolint:errcheck
-			}
-		}
-	}
-	return nil
+	_, err := sessFront.RequestWakeUnlessHeld(target.sessionID, time.Now().UTC())
+	return err
 }
 
 // managedNudgeWakeSkipReason names which precondition of the managed wake was
@@ -1544,6 +1533,8 @@ func queuedNudgeDowngradeNote(target nudgeTarget, undelivered worker.NudgeUndeli
 		return fmt.Sprintf(" (live delivery is unsupported for %s; the queued dispatcher delivers it)", provider)
 	case worker.NudgeUndeliveredNoIdleBoundary:
 		return " (the session never reached an idle boundary; the queued dispatcher delivers it)"
+	case worker.NudgeUndeliveredHeld:
+		return " (the session is held by an operator or a wait; it is delivered once the hold ends or an operator resumes the session)"
 	default:
 		return ""
 	}
