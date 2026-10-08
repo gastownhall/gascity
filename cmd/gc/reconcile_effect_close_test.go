@@ -79,10 +79,10 @@ func (l *closeLeaf) KillZombieObject(string, string, string, string) (runtime.Se
 // require-stamped SQLite store (the atomic conditional closer a close
 // requires), and returns the pass that admitted its orphan
 // close over sp, the close, and the store.
-func admittedClose(t *testing.T, sp runtime.Provider) (*effectPass, intent, beads.Store) {
+func admittedClose(t *testing.T, sp runtime.Provider, meta ...string) (*effectPass, intent, beads.Store) {
 	t.Helper()
 	store := stampedSQLite(t, gate.Require)
-	b, err := store.Create(sessionRow("x", "template", "worker", "session_name", "rt_x", "state", "asleep", "generation", "3", "instance_token", "tok-x"))
+	b, err := store.Create(sessionRow("x", append([]string{"template", "worker", "session_name", "rt_x", "state", "asleep", "generation", "3", "instance_token", "tok-x"}, meta...)...))
 	if err != nil {
 		t.Fatal(err)
 	}

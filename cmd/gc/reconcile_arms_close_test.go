@@ -44,8 +44,8 @@ func orphanRow(state string) beads.Bead {
 // Kills a close on a runtime that may still be live, or that the row still
 // claims: each close fires on a gone runtime and on a corpse of a row that
 // no longer claims a live one, and never on a zombie, a corpse the row
-// claims (C5c2's MAINT-031), an occupied, alive or unknown row, on Keep, or
-// on a partial pass (P-3).
+// claims (C5c2's MAINT-031), an occupied, alive or unknown row, on Keep, on
+// an undesired pending create (A10's rollback), or on a partial pass (P-3).
 func TestCloseArmsFireOnlyOnClosableRuntime(t *testing.T) {
 	gone := rowObservation{Liveness: livenessGone}
 	corpse := rowObservation{Liveness: livenessDead, Corpse: true}
@@ -74,6 +74,7 @@ func TestCloseArmsFireOnlyOnClosableRuntime(t *testing.T) {
 		{name: "orphan, occupied", row: orphanRow("asleep"), entry: orphanEntry, obs: rowObservation{Liveness: livenessOccupied}},
 		{name: "orphan, unknown", row: orphanRow("asleep"), entry: orphanEntry, obs: rowObservation{}},
 		{name: "orphan, Keep", row: orphanRow("asleep"), entry: selectionEntry{Desired: desireKeep, Reason: reasonPartialRetain}, obs: gone},
+		{name: "orphan, pending create", row: sessionRow("o", "template", "gone-agent", "session_name", "s-o", "state", "creating", "pending_create_claim", "true"), entry: orphanEntry, obs: gone},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := closeFacts(c.row, c.entry, c.obs)
@@ -115,10 +116,11 @@ func TestCloseArmsCarryLegacysReasons(t *testing.T) {
 }
 
 // Kills a stranded repair that fires before its confirmation window, or a
-// marker that pins its row: no marker proposes the close (whose L5 stamps
-// one); a fresh marker holds until it is 2 minutes old, with that deadline;
-// an aged or future marker proposes the repair; an unparseable one holds,
-// as legacy's repair never fires on it.
+// marker that pins its row (v5.6 C3): no marker, or an unparseable one,
+// proposes the plain close (whose L5 decides); a fresh marker holds until it
+// is 2 minutes old, with that deadline; so does one up to 2 minutes in the
+// future (skew); an aged marker, or one further in the future, proposes the
+// repair.
 func TestStrandedMarkerHoldsThenRepairs(t *testing.T) {
 	gone := rowObservation{Liveness: livenessGone}
 	for _, c := range []struct {
@@ -130,8 +132,10 @@ func TestStrandedMarkerHoldsThenRepairs(t *testing.T) {
 		{name: "no marker"},
 		{name: "fresh", marker: rowAt(-time.Minute), hold: true, next: gatherNow.Add(time.Minute)},
 		{name: "aged", marker: rowAt(-2 * time.Minute), repair: true},
-		{name: "future", marker: rowAt(time.Hour), repair: true},
-		{name: "unparseable", marker: "yesterday", hold: true},
+		{name: "skew band", marker: rowAt(time.Minute), hold: true, next: gatherNow.Add(3 * time.Minute)},
+		{name: "skew band edge", marker: rowAt(2 * time.Minute), hold: true, next: gatherNow.Add(4 * time.Minute)},
+		{name: "far future", marker: rowAt(2*time.Minute + time.Second), repair: true},
+		{name: "unparseable", marker: "yesterday"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := closeFacts(idlePoolRow(strandedEventEmittedKey, c.marker), poolSleepEntry, gone)
@@ -148,12 +152,12 @@ func TestStrandedMarkerHoldsThenRepairs(t *testing.T) {
 	}
 }
 
-// Kills A10 taking a claimless failed-create row from A21 (ruling Q3): the
-// allocation reads such a row None(failed-create), never a rollback
-// candidate, and decideRow proposes A21's failed-create close for it. The
-// inventory's corpse fact reaches the arm: a dead pane is a corpse, a dead
-// agent under a live pane is not.
-func TestA10NeverSelectsAClaimlessFailedCreateRow(t *testing.T) {
+// Kills a claimless failed-create row read as a rollback candidate (ruling
+// Q3; A10 itself is C5b's): the allocation reads it None(failed-create), and
+// decideRow proposes A21's failed-create close for it. The inventory's corpse
+// fact reaches the arm: a dead pane is a corpse, a dead agent under a live
+// pane is not.
+func TestClaimlessFailedCreateRowGoesToA21(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}
 	f := newAllocFixture(t, cfg).sessions(
 		poolRow("gc-1", "worker", 1, "failed-create", "pending_create_started_at", allocNow.Add(-time.Hour).Format(time.RFC3339)),

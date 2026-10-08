@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"time"
 
@@ -45,8 +46,15 @@ const (
 	causeSuperseded = "superseded" // the row changed since the pass decided
 	causeHasWork    = "has-work"   // L5: work is assigned, or the read failed
 	causeStranded   = "stranded"   // L5 found work on a pool slot: the marker is stamped
-	causeUnclaim    = "unclaim-failed"
+	// causeUnstamped: L5 found work on an unmarked pool slot, and nothing was
+	// stamped (its work is detached and alive, or the fresh row moved).
+	causeUnstamped     = "stranded-unstamped"
+	causeReleaseFailed = "release-failed" // the stranded repair's unclaim failed on a leg
 )
+
+// errNoReadStore refuses L5 when the pass has no read-only city store: the
+// work guard fails closed.
+var errNoReadStore = errors.New("v2 close: no read-only city store for the work guard (L5)")
 
 // closeEffect is an admitted close. Its intent's Patch is the terminal patch
 // (session.ClosePatch and any clears the close kind adds) and its Event what
@@ -114,6 +122,9 @@ func (e closeRun) closeLocked(ctx context.Context, writer fencedWriter, row sess
 			return settlement{Outcome: settledRefused, Cause: cause, Events: evs}, beads.Bead{}
 		}
 	}
+	if err := ctx.Err(); err != nil { // the work guard may have run past the deadline
+		return settlement{Outcome: settledFailed, Cause: causeDeadline, Err: err, Events: evs}, beads.Bead{}
+	}
 	var snapshot beads.Bead
 	if releaser := e.pass.Releasers.Legs[e.it.Key.Leg]; releaser != nil {
 		if b, err := releaser.Get(row.ID); err == nil {
@@ -123,11 +134,11 @@ func (e closeRun) closeLocked(ctx context.Context, writer fencedWriter, row sess
 	closed, err := writer.closeWithTerminalPatch(row, patch, "gc: close session "+row.ID, e.pass.World.Now)
 	switch {
 	case errors.Is(err, errNoConditionalWriter):
-		return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: err}, snapshot
+		return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: err, Events: evs}, snapshot
 	case errors.Is(err, session.ErrSessionCloseSuperseded), errors.Is(err, session.ErrSessionKillPending):
-		return settlement{Outcome: settledRefused, Cause: causeSuperseded, Err: err}, snapshot
+		return settlement{Outcome: settledRefused, Cause: causeSuperseded, Err: err, Events: evs}, snapshot
 	case err != nil:
-		return settlement{Outcome: settledFailed, Cause: causeWrite, Err: err}, snapshot
+		return settlement{Outcome: settledFailed, Cause: causeWrite, Err: err, Events: evs}, snapshot
 	case !closed: // another writer closed it first, and runs its own cascade
 		return settlement{Outcome: settledNoop, Events: evs}, snapshot
 	}
@@ -164,11 +175,14 @@ func (e closeRun) guardWork(writer fencedWriter, row session.Info) (session.Meta
 	case spec.Kind == closePoolSlot && spec.Repair:
 		res := unclaimWorkAssignedToRetiredSessionInfo(e.pass.World.CityPath, e.cfg(), e.pass.Releasers.City, e.pass.Releasers.Rigs, row, retiredSessionFallbackRouteInfo(row), e.pass.Stderr)
 		if res.Failed > 0 {
-			return nil, causeUnclaim, nil
+			return nil, causeReleaseFailed, nil
 		}
 		return session.ClosePatch(e.pass.World.Now, strandedRepairCloseReason), "", nil
 	case spec.Kind == closePoolSlot && strings.TrimSpace(row.StrandedEventEmittedAt) == "":
-		return nil, causeStranded, e.markStranded(writer, row)
+		if evs := e.markStranded(writer, row); len(evs) > 0 {
+			return nil, causeStranded, evs
+		}
+		return nil, causeUnstamped, nil
 	}
 	return nil, causeHasWork, nil
 }
@@ -176,25 +190,29 @@ func (e closeRun) guardWork(writer fencedWriter, row session.Info) (session.Meta
 // hasWork is L5's live read; a missing store fails closed.
 func (e closeRun) hasWork(row session.Info) (bool, error) {
 	if e.pass.Reads.City == nil {
-		return true, errNoConditionalWriter
+		return true, errNoReadStore
 	}
 	return sessionHasOpenAssignedWorkForReachableStore(e.pass.World.CityPath, e.cfg(), e.pass.Reads.City, e.pass.Reads.Rigs, row)
 }
 
-// markStranded stamps the stranded marker by CAS, only while it is empty
-// and the row is the incarnation the pass read, and returns session.stranded
-// with legacy's payload (emitSessionStrandedDiagnostic) when it landed.
-// Work that every detached probe still reports alive is not stranded:
-// nothing is stamped or recorded.
+// markStranded stamps the stranded marker by CAS, and returns
+// session.stranded with legacy's payload (emitSessionStrandedDiagnostic)
+// when it landed. The CAS stamps only while the fresh row's marker is
+// empty, it is still a freeable pool slot, and its lifecycle facts and
+// incarnation are the ones the pass decided on (v5.6 C3). Work that every
+// detached probe still reports alive is not stranded: nothing is stamped
+// or recorded.
 func (e closeRun) markStranded(writer fencedWriter, row session.Info) []events.Event {
 	work, err := collectSessionAssignedWorkInfo(e.pass.World.CityPath, e.cfg(), e.pass.Reads.City, e.pass.Reads.Rigs, row)
-	diagnostic := filterDetachedStrandedDiagnosticWork(work)
+	diagnostic := strandedDiagnosticWork(work)
 	if err == nil && len(work) > 0 && len(diagnostic) == 0 {
 		return nil
 	}
 	now := e.pass.World.Now.UTC()
 	wrote, _ := writer.updateMetadataFenced(row.ID, 1, func(fresh session.Info, _ session.PersistedResponse) session.MetadataPatch {
-		if strings.TrimSpace(fresh.StrandedEventEmittedAt) != "" || fresh.Generation != row.Generation || fresh.InstanceToken != row.InstanceToken {
+		if strings.TrimSpace(fresh.StrandedEventEmittedAt) != "" || !isPoolSessionSlotFreeableInfo(fresh) ||
+			!reflect.DeepEqual(session.LifecycleInputFromInfo(fresh), session.LifecycleInputFromInfo(row)) ||
+			fresh.Generation != row.Generation || fresh.InstanceToken != row.InstanceToken {
 			return nil
 		}
 		return session.MetadataPatch{strandedEventEmittedKey: now.Format(time.RFC3339)}
@@ -208,6 +226,21 @@ func (e closeRun) markStranded(writer fencedWriter, row session.Info) []events.E
 		Message: formatStrandedMessage(e.it.Closing.Template, row.SessionNameMetadata, ids),
 		Payload: api.SessionStrandedPayloadJSON(row.ID, row.SessionNameMetadata, e.it.Closing.Template, ids),
 	}}
+}
+
+// strandedDiagnosticWork is legacy's detached-probe filter
+// (filterDetachedStrandedDiagnosticWork) without its metadata clear on a
+// dead probe: the effect reads through refusing stores, and the release
+// clears it. Work whose probe reports alive is not stranded.
+func strandedDiagnosticWork(work []strandedAssignedWork) []strandedAssignedWork {
+	out := make([]strandedAssignedWork, 0, len(work))
+	for _, item := range work {
+		spec := strings.TrimSpace(item.bead.Metadata[detachedProbeMetadataKey])
+		if spec == "" || probeDetachedWork(context.Background(), spec).Status != detachedProbeAlive {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // cfg is the pass's config.

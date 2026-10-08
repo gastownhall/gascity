@@ -45,7 +45,8 @@ func armClose(r *rowFacts) (intent, bool) {
 		}
 		it.Reason, it.Patch = decideClosePoolSlot, session.ClosePatch(r.w.Now, cmp.Or(strings.TrimSpace(info.SleepReason), "drained"))
 		it.Closing = closeSpec{Kind: closePoolSlot, Repair: aged, Template: e.Template}
-	case e.Desired == desireDrain && e.DrainReason != "":
+	case e.Desired == desireDrain && e.DrainReason != "" && !info.PendingCreateClaim:
+		// An undesired pending create is A10's rollback, never a close.
 		it.Reason, it.Patch = decideCloseOrphan, session.ClosePatch(r.w.Now, e.DrainReason)
 		it.Closing = closeSpec{Kind: closeReleasing, Orphaned: e.DrainReason == drainOrphaned}
 		if r.w.Env == nil || r.w.Env.Cfg == nil {
@@ -79,21 +80,18 @@ func closableRuntime(r *rowFacts) bool {
 }
 
 // strandedMarker reads the stranded marker the close effect stamps on a
-// pool slot that still holds work (SESS-624). aged: the episode passed
-// strandedRepairConfirmGrace (a marker in the future counts as aged, so
-// skew never pins a row), and the effect repairs it. held: the window still
-// runs, and its end is the row's deadline; an unparseable marker holds, as
-// legacy's repair never fires on one.
+// pool slot that still holds work (SESS-624; v5.6 C3). aged: the episode
+// passed strandedRepairConfirmGrace, or the marker is more than that far in
+// the future (skew never pins a row), and the effect repairs it. held: the
+// window still runs, and its end is the row's deadline. An empty or
+// unparseable marker neither ages nor holds: the plain close is proposed,
+// and its L5 decides (only the repair waits on a marker).
 func (r *rowFacts) strandedMarker() (aged, held bool) {
-	marker := strings.TrimSpace(r.row.Info.StrandedEventEmittedAt)
-	if marker == "" {
-		return false, false
-	}
-	at, err := time.Parse(time.RFC3339, marker)
+	at, err := time.Parse(time.RFC3339, strings.TrimSpace(r.row.Info.StrandedEventEmittedAt))
 	switch {
 	case err != nil:
-		return false, true
-	case at.After(r.w.Now) || r.w.Now.Sub(at) >= strandedRepairConfirmGrace:
+		return false, false
+	case r.w.Now.Sub(at) >= strandedRepairConfirmGrace || at.Sub(r.w.Now) > strandedRepairConfirmGrace:
 		return true, false
 	}
 	r.after(at.Add(strandedRepairConfirmGrace).Sub(r.w.Now))

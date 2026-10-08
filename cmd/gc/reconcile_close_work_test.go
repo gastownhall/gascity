@@ -140,7 +140,7 @@ func TestConfirmedOrphanReleasesThenCloses(t *testing.T) {
 // the marker and records nothing; the repair unclaims the work and closes
 // stranded-repair, then prunes.
 func TestStrandedPoolSlotMarksThenRepairs(t *testing.T) {
-	p, it, store := admittedClose(t, newCloseLeaf())
+	p, it, store := admittedClose(t, newCloseLeaf(), "sleep_reason", "idle")
 	work := assignWork(t, store)
 	it.Closing = closeSpec{Kind: closePoolSlot, Template: "worker"}
 	pruned := 0
@@ -152,7 +152,7 @@ func TestStrandedPoolSlotMarksThenRepairs(t *testing.T) {
 	if s.Cause != causeStranded || len(s.Events) != 1 || row.Metadata[strandedEventEmittedKey] != gatherNow.Format(time.RFC3339) {
 		t.Fatalf("first: settlement %+v, marker %q; want refused %q, one event, the marker stamped", s, row.Metadata[strandedEventEmittedKey], causeStranded)
 	}
-	legacy := strandedLegacyEvent(t, sessionRow("x", "template", "worker", "session_name", "rt_x", "state", "asleep", "generation", "3", "instance_token", "tok-x"))
+	legacy := strandedLegacyEvent(t, sessionRow("x", "template", "worker", "session_name", "rt_x", "state", "asleep", "generation", "3", "instance_token", "tok-x", "sleep_reason", "idle"))
 	if got := s.Events[0]; got.Type != legacy.Type || got.Message != legacy.Message || string(got.Payload) != string(legacy.Payload) {
 		t.Fatalf("session.stranded %+v, want legacy's %+v", got, legacy)
 	}
@@ -211,7 +211,67 @@ func TestStrandedRepairRefusesAFailedUnclaim(t *testing.T) {
 	assignWork(t, store)
 	p.Releasers.City = failingReads{store}
 	it.Closing = closeSpec{Kind: closePoolSlot, Repair: true}
-	if s := closeEffect(p, it)(context.Background()); s.Cause != causeUnclaim || rowStatus(t, store, it.Key.ID) != "open" {
-		t.Fatalf("settlement %+v; want refused %q with the row open", s, causeUnclaim)
+	if s := closeEffect(p, it)(context.Background()); s.Cause != causeReleaseFailed || rowStatus(t, store, it.Key.ID) != "open" {
+		t.Fatalf("settlement %+v; want refused %q with the row open", s, causeReleaseFailed)
+	}
+}
+
+// Kills a stranded marker stamped on a row the close no longer stands on
+// (v5.6 C3): the stamp's CAS requires a freeable pool slot whose lifecycle
+// facts are the pass's, so a row that is not freeable (no sleep reason and
+// no slept_at), or whose sleep reason moved, gets no marker and no event,
+// and the close refuses stranded-unstamped.
+func TestStrandedStampRequiresTheFreeableRowThePassRead(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		meta  []string
+		moved map[string]string
+	}{
+		{name: "not freeable"},
+		{name: "lifecycle moved", meta: []string{"sleep_reason", "idle"}, moved: map[string]string{"sleep_reason": "idle-timeout"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p, it, store := admittedClose(t, newCloseLeaf(), c.meta...)
+			assignWork(t, store)
+			if c.moved != nil {
+				if err := store.SetMetadataBatch(it.Key.ID, c.moved); err != nil {
+					t.Fatal(err)
+				}
+			}
+			it.Closing = closeSpec{Kind: closePoolSlot, Template: "worker"}
+			s := closeEffect(p, it)(context.Background())
+			row, _ := store.Get(it.Key.ID)
+			if s.Cause != causeUnstamped || len(s.Events) != 0 || row.Metadata[strandedEventEmittedKey] != "" {
+				t.Fatalf("settlement %+v, marker %q; want refused %q, no event, no marker", s, row.Metadata[strandedEventEmittedKey], causeUnstamped)
+			}
+		})
+	}
+}
+
+// Kills a marker that holds a slot with no work: a marked pool slot whose
+// L5 finds no work closes with its sleep reason; the marker only gates the
+// repair.
+func TestMarkedPoolSlotWithNoWorkCloses(t *testing.T) {
+	p, it, store := admittedClose(t, newCloseLeaf(), "sleep_reason", "idle", strandedEventEmittedKey, "yesterday")
+	it.Closing = closeSpec{Kind: closePoolSlot, Template: "worker"}
+	if s := closeEffect(p, it)(context.Background()); s.Outcome != settledLanded || rowStatus(t, store, it.Key.ID) != "closed" {
+		t.Fatalf("settlement %+v, want the close landed", s)
+	}
+}
+
+// Kills release events dropped by a close that then fails: a confirmed
+// orphan's release lands, a wake then fails the close's premise, and the
+// settlement still carries each bead.dead_assignee_reopened.
+func TestReleaseEventsSurviveAFailedClose(t *testing.T) {
+	p, it, store := admittedClose(t, newCloseLeaf())
+	work := assignWork(t, store)
+	p.World.Demand.AssignedWork, p.Releasers.Assigned = []beads.Bead{work}, []beads.Store{store}
+	it.Closing = closeSpec{Kind: closeReleasing, Orphaned: true}
+	if err := store.SetMetadataBatch(it.Key.ID, map[string]string{"state": "active"}); err != nil {
+		t.Fatal(err)
+	}
+	s := closeEffect(p, it)(context.Background())
+	if s.Cause != causeSuperseded || len(s.Events) != 1 || s.Events[0].Type != events.BeadDeadAssigneeReopened {
+		t.Fatalf("settlement %+v, want refused %q carrying the release's event", s, causeSuperseded)
 	}
 }
