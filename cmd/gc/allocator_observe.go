@@ -93,6 +93,7 @@ type rowObservation struct {
 	Liveness rowLiveness
 	Attached bool // only for an alive row
 	Pending  bool // a fresh Yes, only for an alive row
+	Corpse   bool // a dead row whose pane is dead, not only its agent
 	// Uncertain is ObservationUncertain: liveness is unknown, or the row is
 	// alive and its attach is stale or unprimed on a backend that reports it.
 	Uncertain bool
@@ -182,7 +183,7 @@ func observeRow(snap *ObservationSnapshot, id, name string, sharers int, listed 
 		case ident.SessionID == "" && sharers > 1:
 			o.Reason = observeReasonOwnerUnknown
 		case obs.Running.Value == ObsNo || obs.ProcessAlive.Value == ObsNo:
-			o.Liveness = livenessDead
+			o.Liveness, o.Corpse = livenessDead, obs.Running.Value == ObsNo
 		default:
 			o.Liveness = livenessAlive
 		}

@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -24,9 +27,10 @@ import (
 // decides, and only a live pane refuses. Then the premise close: the row the
 // pass decided on is the premise, so a row that changed since (a wake that
 // landed after the read) refuses with cause superseded and is decided again,
-// never closed at its new revision. A landed close then runs legacy's
-// post-close cascade, best-effort as legacy does (cascade), outside the
-// section, as legacy's closeBead does.
+// never closed at its new revision. Right before the close, in the same
+// section, it reads the work guard (L5) live (guardWork). A landed close then
+// runs legacy's post-close cascade, best-effort as legacy does (cascade),
+// outside the section, as legacy's closeBead does.
 //
 // The section is process-local. Another process is not held off: its row
 // writes still lose the close's premise CAS, but a `gc session attach` that
@@ -39,6 +43,9 @@ import (
 const (
 	causeLivePane   = "live-pane"  // the fresh read shows a live pane: not stopped
 	causeSuperseded = "superseded" // the row changed since the pass decided
+	causeHasWork    = "has-work"   // L5: work is assigned, or the read failed
+	causeStranded   = "stranded"   // L5 found work on a pool slot: the marker is stamped
+	causeUnclaim    = "unclaim-failed"
 )
 
 // closeEffect is an admitted close. Its intent's Patch is the terminal patch
@@ -89,8 +96,9 @@ func (e closeRun) run(ctx context.Context) settlement {
 
 // closeLocked is the close inside one session mutation section, so no
 // in-process writer of the row lands between its reads and its CAS: the
-// fresh reads (their since stamp included), the open row the release reads,
-// and the premise close.
+// fresh reads (their since stamp included), the work guard (L5) with the
+// stranded marker's CAS, the open row the release reads, and the premise
+// close.
 func (e closeRun) closeLocked(ctx context.Context, writer fencedWriter, row session.Info, name string) (settlement, beads.Bead) {
 	if cause := e.noLivePane(ctx, name); cause != "" {
 		return settlement{Outcome: settledRefused, Cause: cause}, beads.Bead{}
@@ -98,13 +106,21 @@ func (e closeRun) closeLocked(ctx context.Context, writer fencedWriter, row sess
 	if err := ctx.Err(); err != nil {
 		return settlement{Outcome: settledFailed, Cause: causeDeadline, Err: err}, beads.Bead{}
 	}
+	patch := e.it.Patch
+	var evs []events.Event
+	if !e.it.Closing.Phantom {
+		var cause string
+		if patch, cause, evs = e.guardWork(writer, row); cause != "" {
+			return settlement{Outcome: settledRefused, Cause: cause, Events: evs}, beads.Bead{}
+		}
+	}
 	var snapshot beads.Bead
 	if releaser := e.pass.Releasers.Legs[e.it.Key.Leg]; releaser != nil {
 		if b, err := releaser.Get(row.ID); err == nil {
 			snapshot = b
 		}
 	}
-	closed, err := writer.closeWithTerminalPatch(row, e.it.Patch, "gc: close session "+row.ID, e.pass.World.Now)
+	closed, err := writer.closeWithTerminalPatch(row, patch, "gc: close session "+row.ID, e.pass.World.Now)
 	switch {
 	case errors.Is(err, errNoConditionalWriter):
 		return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: err}, snapshot
@@ -113,10 +129,100 @@ func (e closeRun) closeLocked(ctx context.Context, writer fencedWriter, row sess
 	case err != nil:
 		return settlement{Outcome: settledFailed, Cause: causeWrite, Err: err}, snapshot
 	case !closed: // another writer closed it first, and runs its own cascade
-		return settlement{Outcome: settledNoop}, snapshot
+		return settlement{Outcome: settledNoop, Events: evs}, snapshot
 	}
-	return settlement{Outcome: settledLanded, Events: eventsOf(e.it.Event)}, snapshot
+	return settlement{Outcome: settledLanded, Events: append(evs, eventsOf(e.it.Event)...)}, snapshot
 }
+
+// guardWork is L5, read live right before the close through the read-only
+// city and rig stores, over every store the row's agent can reach
+// (sessionHasOpenAssignedWorkForReachableStore); a failed read counts as
+// work. With no work the close proceeds with patch. With work:
+//   - a confirmed orphan releases its held claims (releaseConfirmedOrphanSessionWork,
+//     one bead.dead_assignee_reopened each) and reads L5 again (SESS-082);
+//   - a pool slot whose stranded marker has aged unclaims its work on every
+//     leg, and closes stranded-repair only if every release landed (SESS-625);
+//   - a pool slot with no marker stamps it and records session.stranded
+//     (SESS-624), and holds until it ages;
+//   - anything else refuses has-work.
+func (e closeRun) guardWork(writer fencedWriter, row session.Info) (session.MetadataPatch, string, []events.Event) {
+	has, err := e.hasWork(row)
+	spec := e.it.Closing
+	switch {
+	case err == nil && !has:
+		return e.it.Patch, "", nil
+	case err != nil:
+		return nil, causeHasWork, nil
+	case spec.Orphaned:
+		var evs eventSlice
+		released := releaseConfirmedOrphanSessionWork(e.cfg(), e.pass.Releasers.City, e.pass.Releasers.Rigs, e.pass.World.Demand.AssignedWork, e.pass.Releasers.Assigned, row)
+		emitDeadAssigneeReopenedEvents(&evs, e.pass.World.Demand.AssignedWork, released, e.pass.World.Now)
+		if has, err = e.hasWork(row); len(released) > 0 && err == nil && !has {
+			return e.it.Patch, "", evs
+		}
+		return nil, causeHasWork, evs
+	case spec.Kind == closePoolSlot && spec.Repair:
+		res := unclaimWorkAssignedToRetiredSessionInfo(e.pass.World.CityPath, e.cfg(), e.pass.Releasers.City, e.pass.Releasers.Rigs, row, retiredSessionFallbackRouteInfo(row), e.pass.Stderr)
+		if res.Failed > 0 {
+			return nil, causeUnclaim, nil
+		}
+		return session.ClosePatch(e.pass.World.Now, strandedRepairCloseReason), "", nil
+	case spec.Kind == closePoolSlot && strings.TrimSpace(row.StrandedEventEmittedAt) == "":
+		return nil, causeStranded, e.markStranded(writer, row)
+	}
+	return nil, causeHasWork, nil
+}
+
+// hasWork is L5's live read; a missing store fails closed.
+func (e closeRun) hasWork(row session.Info) (bool, error) {
+	if e.pass.Reads.City == nil {
+		return true, errNoConditionalWriter
+	}
+	return sessionHasOpenAssignedWorkForReachableStore(e.pass.World.CityPath, e.cfg(), e.pass.Reads.City, e.pass.Reads.Rigs, row)
+}
+
+// markStranded stamps the stranded marker by CAS, only while it is empty
+// and the row is the incarnation the pass read, and returns session.stranded
+// with legacy's payload (emitSessionStrandedDiagnostic) when it landed.
+// Work that every detached probe still reports alive is not stranded:
+// nothing is stamped or recorded.
+func (e closeRun) markStranded(writer fencedWriter, row session.Info) []events.Event {
+	work, err := collectSessionAssignedWorkInfo(e.pass.World.CityPath, e.cfg(), e.pass.Reads.City, e.pass.Reads.Rigs, row)
+	diagnostic := filterDetachedStrandedDiagnosticWork(work)
+	if err == nil && len(work) > 0 && len(diagnostic) == 0 {
+		return nil
+	}
+	now := e.pass.World.Now.UTC()
+	wrote, _ := writer.updateMetadataFenced(row.ID, 1, func(fresh session.Info, _ session.PersistedResponse) session.MetadataPatch {
+		if strings.TrimSpace(fresh.StrandedEventEmittedAt) != "" || fresh.Generation != row.Generation || fresh.InstanceToken != row.InstanceToken {
+			return nil
+		}
+		return session.MetadataPatch{strandedEventEmittedKey: now.Format(time.RFC3339)}
+	})
+	if !wrote {
+		return nil
+	}
+	ids := strandedAssignedWorkIDs(diagnostic)
+	return []events.Event{{
+		Type: events.SessionStranded, Ts: now, Actor: "gc", Subject: row.ID, SessionID: row.ID,
+		Message: formatStrandedMessage(e.it.Closing.Template, row.SessionNameMetadata, ids),
+		Payload: api.SessionStrandedPayloadJSON(row.ID, row.SessionNameMetadata, e.it.Closing.Template, ids),
+	}}
+}
+
+// cfg is the pass's config.
+func (e closeRun) cfg() *config.City {
+	if e.pass.World.Env == nil {
+		return nil
+	}
+	return e.pass.World.Env.Cfg
+}
+
+// eventSlice is an events.Recorder that keeps what it records, for a
+// settlement's Events.
+type eventSlice []events.Event
+
+func (s *eventSlice) Record(ev events.Event) { *s = append(*s, ev) }
 
 // cascade is legacy's post-close cascade (closeBeadPreservingAssignees,
 // closeFailedCreateBead), on the row's own leg store: cancel the row's waits
@@ -132,8 +238,8 @@ func (e closeRun) cascade(store beads.Store, row session.Info, snapshot beads.Be
 	if e.it.Closing.Kind != closeFailedCreate && haveSnapshot {
 		releaseWorkFromClosedSessionBeadExcept(store, snapshot, assigneePreserveSet(e.it.Closing.Preserve), e.pass.Stderr)
 	}
-	if e.it.Closing.Kind == closePoolSlot && e.pass.World.Env != nil {
-		e.prune(row, e.pass.World.CityPath, e.pass.World.Env.Cfg, e.pass.Stderr)
+	if e.it.Closing.Kind == closePoolSlot && e.cfg() != nil {
+		e.prune(row, e.pass.World.CityPath, e.cfg(), e.pass.Stderr)
 	}
 }
 
