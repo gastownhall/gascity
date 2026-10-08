@@ -2,9 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -63,18 +68,27 @@ func nameLocked(city, name string) bool {
 	return runtimeNames.held[runtimeNameKey{city, name}]
 }
 
-// txKit is the kit: row gc-1, runtime name s-gc-1, the pass, and its
-// runtime: the simulator's cache-aware provider behind a recording leaf.
+// txKit is the kit: row gc-1, runtime name s-gc-1, the pass, its runtime
+// (the simulator's cache-aware provider behind a recording leaf), and the
+// outside operations queued per seam, each run once, in order.
 type txKit struct {
-	t       *testing.T
-	backing *beads.MemStore
-	cache   *beads.CachingStore
-	p       *effectPass
-	it      intent
-	locks   *lockObserver
-	sp      *simProvider
-	leaf    *recordingLeaf
+	t        *testing.T
+	backing  *beads.MemStore
+	cache    *beads.CachingStore
+	p        *effectPass
+	it       intent
+	locks    *lockObserver
+	sp       *simProvider
+	leaf     *recordingLeaf
+	ops      map[txSeam][]func()
+	seen     []txSeam
+	sections []int            // each seam's section index, as seen
+	attempts []int            // each seam's attempt, as seen
+	fail     map[txSeam]error // a seam that fails the effect
 }
+
+// on queues op for the next time the transaction reaches seam at.
+func (k *txKit) on(at txSeam, op func()) { k.ops[at] = append(k.ops[at], op) }
 
 func newTxKit(t *testing.T) *txKit {
 	t.Helper()
@@ -86,7 +100,7 @@ func newTxKit(t *testing.T) *txKit {
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	k := &txKit{t: t, backing: m, cache: cache, locks: observeRowLocks(t), sp: newSimProvider()}
+	k := &txKit{t: t, backing: m, cache: cache, locks: observeRowLocks(t), sp: newSimProvider(), ops: make(map[txSeam][]func())}
 	k.leaf = &recordingLeaf{simProvider: k.sp}
 	w := &World{
 		Now: gatherNow, CityPath: t.TempDir(), Env: &reconcileEnv{Gen: 1, Cfg: workerCity(1)},
@@ -95,6 +109,14 @@ func newTxKit(t *testing.T) *txKit {
 	}
 	k.p = newEffectPass(w, &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{}}})
 	k.p.Clock, k.p.Runtime = newFakePlannerClock(gatherNow), k.leaf
+	k.p.seam = func(_ context.Context, at txSeam, _ intent, section, attempt int) error {
+		k.seen, k.sections, k.attempts = append(k.seen, at), append(k.sections, section), append(k.attempts, attempt)
+		if ops := k.ops[at]; len(ops) > 0 {
+			k.ops[at] = ops[1:]
+			ops[0]()
+		}
+		return k.fail[at]
+	}
 	key := rowKey{Leg: rowLeg, ID: "gc-1"}
 	row := k.p.World.Census.Rows[key]
 	tp := TemplateParams{TemplateName: "worker"}
@@ -127,7 +149,7 @@ func (k *txKit) meta(key string) string {
 }
 
 func (k *txKit) run(ctx context.Context, spec effectSpec) settlement {
-	return runTx(ctx, k.p, k.it, spec)
+	return runTx(ctx, k.p, k.it, spec, nil)
 }
 
 // mark is a Decide that writes key=1.
@@ -298,28 +320,129 @@ func TestTxMergesFacts(t *testing.T) {
 	}
 }
 
-// Kills a context checked before Decide rather than last, and a deadline
-// read as a shutdown (or the reverse): a context that ends after Decide and
-// before the CAS writes nothing, and settles with its cause.
-func TestTxChecksItsContextLast(t *testing.T) {
+// Kills a context or latch checked before the last seam rather than last, a
+// latch begun before the context check, a deadline read as a shutdown (or
+// the reverse), and a write after the executor abandoned the effect: a
+// context that ends, or a latch the executor closes, immediately before the
+// CAS writes nothing, and a context that ended leaves the latch unbegun; a
+// landed write leaves it begun.
+func TestTxChecksItsContextAndLatchLast(t *testing.T) {
 	for _, c := range []struct {
-		err   error
+		name  string
+		end   func(cancel context.CancelCauseFunc, l *writeLatch)
 		cause string
-	}{{context.DeadlineExceeded, causeDeadline}, {context.Canceled, causeShutdown}} {
-		k := newTxKit(t)
-		ctx, cancel := context.WithCancelCause(context.Background())
-		decide := func(v txView) txStep { cancel(c.err); return mark("a")(v) }
-		s := k.run(ctx, effectSpec{sections: []section{{Decide: decide}}})
-		if s.Outcome != settledFailed || s.Cause != c.cause || k.meta("a") != "" {
-			t.Fatalf("%v: settlement %+v, a=%q; want failed %q, nothing written", c.err, s, k.meta("a"), c.cause)
+	}{
+		{"deadline", func(cancel context.CancelCauseFunc, _ *writeLatch) { cancel(context.DeadlineExceeded) }, causeDeadline},
+		{"shutdown", func(cancel context.CancelCauseFunc, _ *writeLatch) { cancel(context.Canceled) }, causeShutdown},
+		{"abandoned", func(_ context.CancelCauseFunc, l *writeLatch) { l.abandon() }, causeDeadline},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			k := newTxKit(t)
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			latch := new(writeLatch)
+			k.on(seamBeforeCAS, func() { c.end(cancel, latch) })
+			s := runTx(ctx, k.p, k.it, effectSpec{sections: []section{{Decide: mark("a")}}}, latch)
+			if s.Outcome != settledFailed || s.Cause != c.cause || k.meta("a") != "" || latch.begun() {
+				t.Fatalf("settlement %+v, a=%q, latch begun %t; want failed %q, nothing written or begun", s, k.meta("a"), latch.begun(), c.cause)
+			}
+		})
+	}
+	k := newTxKit(t)
+	latch := new(writeLatch)
+	if s := runTx(context.Background(), k.p, k.it, effectSpec{sections: []section{{Decide: mark("a")}}}, latch); s.Outcome != settledLanded || !latch.begun() {
+		t.Fatalf("settlement %+v, want landed with its latch begun", s)
+	}
+}
+
+// Kills a latch reopened after its abandonment: once the executor closes a
+// begun latch, no further write begins.
+func TestWriteLatchAbandonIsTerminal(t *testing.T) {
+	l := new(writeLatch)
+	if !l.begin() || !l.abandon() || l.begin() || !l.begun() {
+		t.Fatal("a begun latch, abandoned, began again or forgot it had begun")
+	}
+	l = new(writeLatch)
+	if l.abandon() || l.begin() || l.begun() {
+		t.Fatal("an open latch, abandoned, reported a write or began one")
+	}
+}
+
+// Kills an around that can run its effect twice, or that runs inside the
+// locks: it runs outside both, and a second run fails, writing nothing more.
+func TestTxAroundRunsTheEffectAtMostOnce(t *testing.T) {
+	k := newTxKit(t)
+	spec := effectSpec{needs: needs{NameLock: true}, sections: []section{{Decide: mark("a")}}}
+	var second settlement
+	spec.around = func(_ context.Context, _ aroundCaps, run func() settlement) settlement {
+		if k.locks.holds(k.it.Key.ID) || nameLocked(k.p.World.CityPath, "s-gc-1") {
+			t.Error("around ran inside a lock")
 		}
+		first := run()
+		second = run()
+		return first
+	}
+	if s := k.run(context.Background(), spec); s.Outcome != settledLanded || second.Outcome != settledFailed || second.Cause != causeAroundRun {
+		t.Fatalf("settlement %+v, second run %+v; want landed once and the second refused", s, second)
+	}
+}
+
+// Kills an executor that reads an abandoned effect's kind rather than its
+// latch, a shutdown labeled as a deadline, and a panic after a write began
+// settled failed: a row write abandoned after its write began settles
+// ambiguous, one abandoned before settles failed and can begin no write, a
+// shutdown abandonment says so, and a panic once a write began is
+// ambiguous.
+func TestExecutorSettlesAnAbandonedEffectByItsLatch(t *testing.T) {
+	clk := newFakePlannerClock(plannerT0)
+	x, posted := fakeClockExecutor(clk)
+	release := make(chan struct{})
+	defer close(release)
+	latches := map[string]*writeLatch{"begun": new(writeLatch), "open": new(writeLatch)}
+	latches["begun"].begin()
+	for id, l := range latches {
+		e := hungEffect(intentRowHeal, 1, plannerT0.Add(30*time.Second), release)
+		e.Latch = l
+		if err := x.submit(rowKey{Leg: rowLeg, ID: id}, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitTimersAt(t, clk, plannerT0.Add(30*time.Second), 4)
+	clk.Advance(30 * time.Second)
+	for range latches {
+		switch s := receive(t, posted); s.Key.ID {
+		case "begun":
+			if s.Outcome != settledAmbiguous || s.Cause != causeDeadline {
+				t.Errorf("begun: settlement %+v, want ambiguous at the deadline", s)
+			}
+		default:
+			if s.Outcome != settledFailed || s.Cause != causeDeadline || latches["open"].begin() {
+				t.Errorf("open: settlement %+v, want failed at the deadline and the write refused", s)
+			}
+		}
+	}
+	panicky := new(writeLatch)
+	panicky.begin()
+	if err := x.submit(rowKey{Leg: rowLeg, ID: "panic"}, sessionEffect{Kind: intentRowHeal, Deadline: plannerT0.Add(time.Hour), Latch: panicky, Run: func(context.Context) settlement { panic("mid-write") }}); err != nil {
+		t.Fatal(err)
+	}
+	if s := receive(t, posted); s.Outcome != settledAmbiguous || s.Cause != causePanic {
+		t.Fatalf("panic after its write began: settlement %+v, want ambiguous", s)
+	}
+	if err := x.submit(rowKey{Leg: rowLeg, ID: "shutdown"}, hungEffect(intentRowHeal, 2, plannerT0.Add(time.Hour), release)); err != nil {
+		t.Fatal(err)
+	}
+	x.cancel()
+	if s := receive(t, posted); s.Cause != causeShutdown {
+		t.Fatalf("abandoned at shutdown: settlement %+v, want cause %q", s, causeShutdown)
 	}
 }
 
 // Kills a spec table that loses a kind's admission facts or runs an effect
-// that has not merged, and a body anywhere but the create: every kind has a
-// cap class, only the merged kinds run, and the create's body declares no
-// needs.
+// that has not merged, a body anywhere but the create, and a capability
+// reached without its grant: every kind has a cap class, only the merged
+// kinds run, the create's body declares no needs and alone holds a
+// capability, and caps without capCreate hold no create handle.
 func TestEffectSpecsCoverEveryKind(t *testing.T) {
 	var running []string
 	for kind, spec := range effectSpecs {
@@ -328,6 +451,9 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 		}
 		if spec.runs() {
 			running = append(running, kind)
+		}
+		if spec.caps != 0 && kind != intentCreate {
+			t.Errorf("%s holds capabilities %b", kind, spec.caps)
 		}
 	}
 	slices.Sort(running)
@@ -338,6 +464,13 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 	}
 	if want := []string{intentCreate, intentDrainCancel, intentDrainVoid, intentRekey, intentRowHeal, intentRowHealFresh}; !slices.Equal(running, want) {
 		t.Fatalf("running kinds %v, want %v", running, want)
+	}
+	p := &effectPass{held: heldCaps{create: &createPass{}, creates: &createEffects{}}}
+	if c := p.capsFor(intent{}, 0, nil); c.create != nil || c.creates != nil {
+		t.Fatal("caps without capCreate hold the create runner")
+	}
+	if c := p.capsFor(intent{}, capCreate, nil); c.create == nil || c.creates == nil {
+		t.Fatal("capCreate does not reach the create runner")
 	}
 }
 
@@ -444,6 +577,79 @@ func TestEffectSpecsRetryTheirCAS(t *testing.T) {
 	for kind, spec := range effectSpecs {
 		if n := spec.needs.Attempts; n != 0 && n < 3 && attemptsWaivers[kind] == "" {
 			t.Errorf("%s retries its CAS %d times: add a waiver with its reason to attemptsWaivers", kind, n)
+		}
+	}
+}
+
+// Kills a seam that cannot fail the effect, fails it as something else, or
+// reports the wrong section or attempt (H1's fail action): each seam's error
+// ends the effect with cause injected, failed before the write and
+// ambiguous after it, the write landed; seams report the section and the
+// attempt they fire in; a bound planner is armed with the staging seam for
+// its city.
+func TestTxSeamsInjectFailures(t *testing.T) {
+	boom := errors.New("staging fault")
+	for _, at := range []txSeam{seamAfterReads, seamAfterRowRead, seamBeforeCAS, seamAfterWrite} {
+		k := newTxKit(t)
+		k.fail = map[txSeam]error{at: boom}
+		s := k.run(context.Background(), effectSpec{sections: []section{{Decide: mark("a")}}})
+		want := settledFailed
+		if at == seamAfterWrite {
+			want = settledAmbiguous
+		}
+		if s.Outcome != want || s.Cause != causeInjected || !errors.Is(s.Err, boom) || (k.meta("a") == "1") != (at == seamAfterWrite) {
+			t.Fatalf("seam %d: settlement %+v, a=%q; want outcome %d %q, written only past the write", at, s, k.meta("a"), want, causeInjected)
+		}
+	}
+	k := newTxKit(t)
+	k.on(seamBeforeCAS, func() { k.outside("note", "x") }) // loses the first CAS
+	k.run(context.Background(), effectSpec{sections: []section{{Decide: mark("a")}, {Decide: mark("b")}}})
+	if !slices.Contains(k.attempts, 2) || k.attempts[0] != 1 || k.sections[0] != 0 || k.sections[len(k.sections)-1] != 1 {
+		t.Fatalf("sections %v, attempts %v at seams %v, want attempts 1 then 2 in section 0, then section 1", k.sections, k.attempts, k.seen)
+	}
+	saved, city := stagingSeam, ""
+	stagingSeam = func(c string) txSeamFunc {
+		city = c
+		return func(context.Context, txSeam, intent, int, int) error { return nil }
+	}
+	t.Cleanup(func() { stagingSeam = saved })
+	rt := newDefaultPlanner(io.Discard)
+	rt.bindHost(plannerHost{gather: gatherEnv{CityPath: "/city"}})
+	if rt.planner.seam == nil || city != "/city" {
+		t.Fatalf("seam set %t for city %q; want the bound planner armed for /city", rt.planner.seam != nil, city)
+	}
+}
+
+// Kills a production path that arms the staging seam: only gcstaging-tagged
+// code assigns stagingSeam (H1).
+func TestOnlyStagingCodeAssignsTheStagingSeam(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assign := regexp.MustCompile(`(?m)^\s*stagingSeam\s*=`)
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if assign.Match(src) && !regexp.MustCompile(`(?m)^//go:build .*\bgcstaging\b`).Match(src) {
+			t.Errorf("%s assigns stagingSeam without the gcstaging build tag", f)
+		}
+	}
+}
+
+// Kills a hook reaching handles its place forbids: around, outside every
+// lock, holds only these fields; a Call's handles (provider start,
+// routing, release, kill) go on txCaps alone.
+func TestAroundCapsAreScoped(t *testing.T) {
+	allowed := map[string]bool{"it": true}
+	for i, ty := 0, reflect.TypeFor[aroundCaps](); i < ty.NumField(); i++ {
+		if f := ty.Field(i).Name; !allowed[f] {
+			t.Errorf("aroundCaps.%s: around runs outside every lock; a write or provider handle belongs to a Call", f)
 		}
 	}
 }

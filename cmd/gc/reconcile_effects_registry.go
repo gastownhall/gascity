@@ -14,19 +14,26 @@ import "github.com/gastownhall/gascity/internal/runtime"
 // handles. The pass never mutates them after submit.
 type effectPass struct {
 	Writers map[string]fencedWriter // by census leg
-	// Runtime is the composite provider. Fresh reads and C8.8 go through it,
-	// never a routed leaf alone (mc-zndi7.24). An effect calls no provider
-	// verb on it directly: destructive verbs go through the fence
-	// (fenceDestructive, stopFenced) and SessionObjectKiller, and only the
-	// start effect calls Start (the effect lint).
+	// Runtime is the composite provider. The transaction's runtime read
+	// (readRuntime) reads presence and identity on its routed leaf and
+	// confirms absence through its fall-through hops. An effect calls no
+	// provider verb on it: destructive verbs go through the fence and
+	// SessionObjectKiller, and only a Call starts a runtime (the effect lint).
 	Runtime runtime.Provider
 	World   *World
 	Alloc   *allocDecision
 	Clock   plannerClock // stamps each section's since: the planner's
-	// create is what the pass hands its creates, raw stores included: a
-	// create's guarded row write is v5 R1's exception 1 (§13), and only
-	// createBody reads it. creates runs them. The planner sets both, the
-	// first on its first admitted create (planner.submit).
+	// held are the capabilities the pass holds beyond its writers; an
+	// effect reaches each only through txCaps, as its spec grants (capsFor).
+	held heldCaps
+	seam txSeamFunc // the planner's: runs at the effect's seams (tests, staging)
+}
+
+// heldCaps are a pass's capabilities. create is what the pass hands its
+// creates, raw stores included: a create's guarded row write is v5 R1's
+// exception 1 (§13). creates runs them. The planner sets both, the first on
+// its first admitted create (planner.submit).
+type heldCaps struct {
 	create  *createPass
 	creates *createEffects
 }
@@ -55,7 +62,7 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 var effectSpecs = map[string]effectSpec{
 	intentStart:           {class: capStarts, tokens: 1},
 	intentAdopt:           {class: capProbing},
-	intentCreate:          {class: capCreates, body: createBody},                                     // C1, C2
+	intentCreate:          {class: capCreates, caps: capCreate, body: createBody},                    // C1, C2
 	intentRekey:           {class: capProbing, needs: needs{Runtime: true}, sections: rekeySections}, // A3
 	intentZombie:          {class: capProbing, bootGated: true},
 	intentDrainBegin:      {class: capRowWrites, bootGated: true},

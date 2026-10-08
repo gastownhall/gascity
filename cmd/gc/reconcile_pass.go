@@ -198,12 +198,12 @@ func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
 		return
 	}
 	pass := newEffectPass(w, a)
-	pass.Clock, pass.creates = p.clock, p.creates
+	pass.Clock, pass.held.creates, pass.seam = p.clock, p.creates, p.seam
 	for _, it := range admitted {
 		e := inflightEntry{Kind: it.Kind, Key: it.Key, Endpoint: it.Endpoint}
 		if it.Kind == intentCreate {
-			if pass.create == nil {
-				pass.create = newCreatePass(w)
+			if pass.held.create == nil {
+				pass.held.create = newCreatePass(w)
 			}
 			it.CreatePlan.Token = session.NewInstanceToken()
 			e = createInflightEntry(it, w.SessionsLeg)

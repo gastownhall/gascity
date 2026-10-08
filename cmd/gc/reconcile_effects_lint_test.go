@@ -91,6 +91,22 @@ var effectProviderAllowed = map[string][]string{
 	"stopFenced":         {"Stop"},  // the fenced leaf's Stop, then C8.8
 }
 
+// effectTxOnly are the effect mechanics only the transaction
+// (reconcile_effect_tx.go) calls: the locks, runTx itself, and fencedWriter's
+// verbs (EFFECT-STRUCTURE §2.1). An effect or step file naming one is an
+// effect assembling its own mechanics again.
+var effectTxOnly = []string{
+	"lockRuntimeName", "WithSessionMutationLock", "withRowMutationLock", "runTx",
+	"casRow", "updateMetadataFenced", "updateRowFenced", "closePremise", "closeWithTerminalPatch", "rollbackPendingCreate",
+}
+
+// effectTxOnlyAllowed are the functions outside the transaction whose body
+// may name the mechanics listed: K1's wait-hold clear, a step's fenced
+// decide-and-CAS with its own retries (C8a).
+var effectTxOnlyAllowed = map[string][]string{
+	"clearSessionWaitHoldFenced": {"updateMetadataFenced"},
+}
+
 // lintEffectSource returns one "file:line: name" per banned reference in
 // src, parsed as path.
 func lintEffectSource(t *testing.T, path string, src any) []string {
@@ -101,14 +117,15 @@ func lintEffectSource(t *testing.T, path string, src any) []string {
 		t.Fatalf("parse %s: %v", path, err)
 	}
 	steps := strings.HasPrefix(filepath.Base(path), "reconcile_steps_")
+	tx := filepath.Base(path) == "reconcile_effect_tx.go"
 	var out []string
 	for _, decl := range file.Decls {
-		var allowed, verbs []string
+		var allowed, verbs, mechanics []string
 		if fn, ok := decl.(*ast.FuncDecl); ok {
 			if steps {
 				allowed = effectLintAllowed[funcDeclName(fn)]
 			}
-			verbs = effectProviderAllowed[funcDeclName(fn)]
+			verbs, mechanics = effectProviderAllowed[funcDeclName(fn)], effectTxOnlyAllowed[funcDeclName(fn)]
 		}
 		ast.Inspect(decl, func(n ast.Node) bool {
 			var name string
@@ -125,6 +142,9 @@ func lintEffectSource(t *testing.T, path string, src any) []string {
 			case *ast.Ident:
 				if slices.Contains(effectBannedFuncs, n.Name) {
 					name = n.Name
+				}
+				if !tx && slices.Contains(effectTxOnly, n.Name) && !slices.Contains(mechanics, n.Name) {
+					out = append(out, fmt.Sprintf("%s: mechanics %s", fset.Position(n.Pos()), n.Name))
 				}
 			}
 			if name != "" && !slices.Contains(allowed, name) {
@@ -282,5 +302,29 @@ func TestEffectLintBansRawProviderCalls(t *testing.T) {
 		if want := len(effectProviderVerbs) + leaks; len(got) != want {
 			t.Errorf("%s: %d findings %q, want %d (each verb once outside the allowlist, and each verb an allowlisted function is not allowed)", path, len(got), got, want)
 		}
+	}
+}
+
+// Kills an effect or step that assembles its own mechanics again (the
+// conformance review's delta 8): each lock helper, runTx and fencedWriter
+// verb, named in an effect or step file, is reported, and passes only in the
+// transaction or the allowlisted function.
+func TestEffectLintBansMechanicsOutsideTheTransaction(t *testing.T) {
+	var src strings.Builder
+	src.WriteString("package main\n\nfunc seeded(x fake) {\n")
+	for _, m := range effectTxOnly {
+		fmt.Fprintf(&src, "\t_ = x.%s\n\t%s()\n", m, m)
+	}
+	src.WriteString("}\n\nfunc clearSessionWaitHoldFenced(x fake) {\n\t_ = x.updateMetadataFenced\n}\n")
+	for _, path := range []string{"reconcile_effect_seeded.go", "reconcile_steps_seeded.go"} {
+		got := lintEffectSource(t, path, src.String())
+		for _, m := range effectTxOnly {
+			if n := len(slices.DeleteFunc(slices.Clone(got), func(f string) bool { return !strings.HasSuffix(f, ": mechanics "+m) })); n != 2 {
+				t.Errorf("%s: %s reported %d times, want both uses in seeded and none in the allowlisted function", path, m, n)
+			}
+		}
+	}
+	if got := lintEffectSource(t, "reconcile_effect_tx.go", src.String()); slices.ContainsFunc(got, func(f string) bool { return strings.Contains(f, ": mechanics ") }) {
+		t.Errorf("the transaction's own file: %v, want its mechanics allowed", got)
 	}
 }

@@ -88,7 +88,7 @@ func (c *healCase) run(t *testing.T, sp runtime.Provider, writer beads.Store) (i
 	if c.before != nil {
 		c.before()
 	}
-	return it, runTx(context.Background(), p, it, effectSpecs[it.Kind])
+	return it, runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
 }
 
 // pass decides the row and returns the pass that admitted its registered

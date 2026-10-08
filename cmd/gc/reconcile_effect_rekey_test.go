@@ -72,7 +72,7 @@ func (f *rekeyFixture) run(p *effectPass, it intent) settlement {
 	if !effectSpecs[it.Kind].runs() {
 		f.t.Fatalf("no effect registered for %q", it.Kind)
 	}
-	return runTx(context.Background(), p, it, effectSpecs[it.Kind])
+	return runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
 }
 
 func (f *rekeyFixture) row() map[string]string {
