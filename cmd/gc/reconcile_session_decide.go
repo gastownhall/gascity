@@ -120,16 +120,21 @@ type rowArm struct {
 	decide func(r *rowFacts) (it intent, ok bool)
 }
 
-// rowArms is CONTRACT v5 §4's table in its order. Later PRs insert their
-// arms at their numbers: A4 the stop request (C6b2), A6's other heals and
-// markers (C5d), A7 row metadata (C7d), A8 the baseline (C7c), A10-A18,
-// A20's begin (C6a2) and A21.
+// rowArms is CONTRACT v5 §4's table in its order; an arm with several rows
+// (A6) takes one line per row. Later PRs insert their arms at their numbers:
+// A4 the stop request (C6b2), A7 row metadata (C7d), A8 the baseline (C7c),
+// A10-A18, A20's begin (C6a2) and A21.
 var rowArms = []rowArm{
 	{"A1", armNoRow},
 	{"A2", armKillFence},
 	{"A3", armIdentity},
 	{"A5", armUnknownState},
 	{"A6", armTimerHeals},
+	{"A6", armClaimClear},
+	{"A6", armCreatingHeal},
+	{"A6", armDeadNamedHeal},
+	{"A6", armStrandedClear},
+	{"A6", armCurrentBead},
 	{"A9", armLivenessUnknown},
 	{"A19", armDrainVoidCancel},
 }
