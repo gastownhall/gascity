@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -139,7 +141,7 @@ func TestCloseRequiresThreeOutcomeAbsent(t *testing.T) {
 				if s.Outcome != settledRefused || s.Cause != c.cause || rowStatus(t, store, it.Key.ID) != "open" {
 					t.Fatalf("settlement %+v, row %s; want refused %q with the row open", s, rowStatus(t, store, it.Key.ID), c.cause)
 				}
-			} else if s.Outcome != settledLanded || s.Event == nil || rowStatus(t, store, it.Key.ID) != "closed" {
+			} else if s.Outcome != settledLanded || len(s.Events) != 1 || rowStatus(t, store, it.Key.ID) != "closed" {
 				t.Fatalf("settlement %+v, row %s; want landed with its event and the row closed", s, rowStatus(t, store, it.Key.ID))
 			}
 			for _, since := range leaf.since {
@@ -282,5 +284,93 @@ func TestConfirmedStopReadsFreshSinceTheStop(t *testing.T) {
 	leaf.corpses["rt_x"] = "$1"
 	if !confirmStopped(context.Background(), leaf, "rt_x", since) {
 		t.Fatal("a corpse (no live pane) did not confirm the stop")
+	}
+}
+
+// Kills a close that skips legacy's post-close cascade (closeBead,
+// closeFailedCreateBead): a landed close cancels the row's waits; releases
+// the work held under any of its identities, except for a failed create and
+// except a kept assignee; and prunes the worktree only for a pool slot. A
+// refused close runs none of it.
+func TestCloseRunsLegacysCascade(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		spec     closeSpec
+		patch    session.MetadataPatch
+		external bool // a wake lands first: the close refuses
+		released bool
+		kept     bool // work under the kept identity stays assigned
+		pruned   bool
+	}{
+		{name: "orphan", spec: closeSpec{Kind: closeReleasing}, released: true},
+		{name: "failed create", spec: closeSpec{Kind: closeFailedCreate}, patch: failedCreateClosePatch(gatherNow)},
+		{name: "pool slot", spec: closeSpec{Kind: closePoolSlot}, released: true, pruned: true},
+		{name: "kept assignee", spec: closeSpec{Kind: closeReleasing, Preserve: []string{"rt_x"}}, kept: true},
+		{name: "refused", spec: closeSpec{Kind: closePoolSlot}, external: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p, it, store := admittedClose(t, newCloseLeaf())
+			it.Closing = c.spec
+			if c.patch != nil {
+				it.Patch = c.patch
+			}
+			work, err := store.Create(beads.Bead{Title: "work", Type: "task", Status: "in_progress", Assignee: "rt_x"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			wait, err := store.Create(beads.Bead{
+				Title: "wait", Type: waitBeadType, Labels: []string{waitBeadLabel, "session:" + it.Key.ID},
+				Metadata: map[string]string{"session_id": it.Key.ID, "state": waitStatePending},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.external {
+				if err := store.SetMetadataBatch(it.Key.ID, map[string]string{"state": "active"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var pruned []string
+			run := closeRun{pass: p, it: it, now: time.Now, prune: func(info session.Info, _ string, _ *config.City, _ io.Writer) {
+				pruned = append(pruned, info.ID)
+			}}
+			s := run.run(context.Background())
+			if (s.Outcome == settledLanded) == c.external {
+				t.Fatalf("settlement %+v, want landed=%v", s, !c.external)
+			}
+			w, _ := store.Get(work.ID)
+			if released := w.Assignee == "" && w.Status == "open"; released != c.released {
+				t.Fatalf("work %s/%q, want released=%v", w.Status, w.Assignee, c.released)
+			}
+			if c.kept && w.Assignee != "rt_x" {
+				t.Fatalf("work assignee %q, want the kept identity rt_x", w.Assignee)
+			}
+			if wb, _ := store.Get(wait.ID); (wb.Metadata["state"] == waitStateCanceled) == c.external {
+				t.Fatalf("wait state %q, want canceled=%v", wb.Metadata["state"], !c.external)
+			}
+			if (len(pruned) == 1) != c.pruned {
+				t.Fatalf("pruned %v, want pruned=%v", pruned, c.pruned)
+			}
+		})
+	}
+}
+
+// Kills a drain that records only one event per settlement: a confirmed
+// orphan's release reports one bead.dead_assignee_reopened per bead
+// (SESS-082), and every one is recorded, in order.
+func TestDrainRecordsEverySettlementEvent(t *testing.T) {
+	p := settlePlanner(newInflightMap())
+	rec := events.NewFake()
+	p.rec = rec
+	evs := []events.Event{{Type: events.SessionStranded, Subject: "a"}, {Type: "bead.dead_assignee_reopened", Subject: "w-1"}, {Type: "bead.dead_assignee_reopened", Subject: "w-2"}}
+	p.settlements.post(settlement{Key: rowKey{Leg: rowLeg, ID: "a"}, Kind: intentClose, Outcome: settledLanded, Events: evs})
+	p.drainSettlements(gatherNow)
+	if len(rec.Events) != len(evs) {
+		t.Fatalf("recorded %v, want %v", rec.Events, evs)
+	}
+	for i := range evs {
+		if rec.Events[i].Subject != evs[i].Subject {
+			t.Fatalf("recorded %v, want %v in order", rec.Events, evs)
+		}
 	}
 }

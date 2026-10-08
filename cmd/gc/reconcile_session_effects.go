@@ -233,8 +233,8 @@ func (x *effectExecutor) run(base context.Context, key effectKey, e sessionEffec
 			}
 			fmt.Fprintf(x.stderr, "v2 reconciler: effect for %s/%s still running when its context ended; settled as %v\n", k.Leg, k.ID, s.Err) //nolint:errcheck // best-effort stderr
 			x.spawn(func() {
-				if late := <-result; late.Event != nil {
-					x.post(settlement{Event: late.Event})
+				if late := <-result; len(late.Events) > 0 {
+					x.post(settlement{Events: late.Events})
 				}
 			})
 		}

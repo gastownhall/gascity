@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -20,8 +23,8 @@ import (
 // decides, and only a live pane refuses. Then the premise close: the row the
 // pass decided on is the premise, so a row that changed since (a wake that
 // landed after the read) refuses with cause superseded and is decided again,
-// never closed at its new revision. Releasing the closed row's work is C8's
-// orphan-release step.
+// never closed at its new revision. A landed close runs legacy's post-close
+// cascade, best-effort as legacy does (cascade).
 
 // Close refusal causes; a fresh read's are freshLiveness's.
 const (
@@ -33,15 +36,17 @@ const (
 // (session.ClosePatch and any clears the close kind adds) and its Event what
 // a landed close records.
 func closeEffect(p *effectPass, it intent) func(context.Context) settlement {
-	return closeRun{pass: p, it: it, now: time.Now}.run
+	return closeRun{pass: p, it: it, now: time.Now, prune: pruneAgentHomeWorktreeIfSafeInfo}.run
 }
 
 // closeRun is one close. now is the runtime's clock: a fresh read accepts
-// only a refresh begun at or after the time it gives.
+// only a refresh begun at or after the time it gives. prune is the worker
+// worktree prune.
 type closeRun struct {
-	pass *effectPass
-	it   intent
-	now  func() time.Time
+	pass  *effectPass
+	it    intent
+	now   func() time.Time
+	prune func(info session.Info, cityPath string, cfg *config.City, stderr io.Writer)
 }
 
 func (e closeRun) run(ctx context.Context) settlement {
@@ -67,6 +72,13 @@ func (e closeRun) run(ctx context.Context) settlement {
 	if err := ctx.Err(); err != nil {
 		return settlement{Outcome: settledFailed, Cause: causeDeadline, Err: err}
 	}
+	releaser := e.pass.Releasers.Legs[e.it.Key.Leg]
+	var snapshot beads.Bead // the open row, whose identities the release reads
+	haveSnapshot := false
+	if releaser != nil {
+		b, err := releaser.Get(row.Info.ID)
+		snapshot, haveSnapshot = b, err == nil
+	}
 	closed, err := writer.closeWithTerminalPatch(row.Info, e.it.Patch, "gc: close session "+row.Info.ID, e.pass.World.Now)
 	switch {
 	case errors.Is(err, errNoConditionalWriter):
@@ -75,10 +87,30 @@ func (e closeRun) run(ctx context.Context) settlement {
 		return settlement{Outcome: settledRefused, Cause: causeSuperseded, Err: err}
 	case err != nil:
 		return settlement{Outcome: settledFailed, Cause: causeWrite, Err: err}
-	case !closed: // another writer closed it first
+	case !closed: // another writer closed it first, and runs its own cascade
 		return settlement{Outcome: settledNoop}
 	}
-	return settlement{Outcome: settledLanded, Event: e.it.Event}
+	e.cascade(releaser, row.Info, snapshot, haveSnapshot)
+	return settlement{Outcome: settledLanded, Events: eventsOf(e.it.Event)}
+}
+
+// cascade is legacy's post-close cascade (closeBeadPreservingAssignees,
+// closeFailedCreateBead), on the row's own leg store: cancel the row's waits
+// and close its external-message bindings; then, except for a failed
+// create, release its work (every identity it carried, alias history
+// included, but the kept assignees), from the open row read before the
+// close, as legacy skips it when that read failed; then, for a pool slot,
+// prune its worker worktree when safe. Each step is best-effort: errors go
+// to the diagnostics, and C8's orphan release is the fallback.
+func (e closeRun) cascade(store beads.Store, row session.Info, snapshot beads.Bead, haveSnapshot bool) {
+	now := e.pass.World.Now
+	cancelStateAssignedToRetiredSessionBead(store, row.ID, now, e.pass.Stderr)
+	if e.it.Closing.Kind != closeFailedCreate && haveSnapshot {
+		releaseWorkFromClosedSessionBeadExcept(store, snapshot, assigneePreserveSet(e.it.Closing.Preserve), e.pass.Stderr)
+	}
+	if e.it.Closing.Kind == closePoolSlot && e.pass.World.Env != nil {
+		e.prune(row, e.pass.World.CityPath, e.pass.World.Env.Cfg, e.pass.Stderr)
+	}
 }
 
 // noLivePane is C8.8 for the close, removing a detached corpse on the way.

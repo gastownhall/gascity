@@ -69,13 +69,22 @@ type settlement struct {
 	// Work is a create's worktree verdict, which backs off or resets the
 	// work item's record (C6.5(a)).
 	Work *workVerdict
-	// Event is recorded once the settlement is drained: a landed write's.
-	Event *events.Event
+	// Events are recorded once the settlement is drained, in order: a
+	// landed write's, or one per bead a close's release reopened (SESS-082).
+	Events []events.Event
 	// Classified is a completed zombie classification of Key's runtime
 	// (v5 S5), for the planner's classified set.
 	Classified *classifiedRuntime
 	Err        error
 	At         time.Time
+}
+
+// eventsOf is ev as a settlement's Events: none for nil.
+func eventsOf(ev *events.Event) []events.Event {
+	if ev == nil {
+		return nil
+	}
+	return []events.Event{*ev}
 }
 
 // classifiedRuntime is the runtime a classification read: its own
@@ -327,8 +336,11 @@ func (p *planner) drainSettlements(now time.Time) {
 		p.observeSettlement(s)
 	}
 	for _, s := range items {
-		if s.Event != nil && p.rec != nil {
-			p.record(*s.Event)
+		if p.rec == nil {
+			continue
+		}
+		for _, ev := range s.Events {
+			p.record(ev)
 		}
 	}
 }

@@ -322,7 +322,7 @@ func TestExecutorPostsALateLandingsEvent(t *testing.T) {
 	ev := events.Event{Type: "session.test"}
 	if err := x.submit(rowKey{ID: "a"}, sessionEffect{Kind: intentRowHeal, Deadline: plannerT0.Add(time.Minute), Run: func(context.Context) settlement {
 		<-release
-		return settlement{Outcome: settledLanded, Event: &ev}
+		return settlement{Outcome: settledLanded, Events: []events.Event{ev}}
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +332,7 @@ func TestExecutorPostsALateLandingsEvent(t *testing.T) {
 		t.Fatalf("settlement %+v, want failed at the deadline", s)
 	}
 	close(release)
-	if s := receive(t, posted); s.Event == nil || s.Event.Type != ev.Type || s.Key.ID != "" || s.Outcome != 0 {
+	if s := receive(t, posted); len(s.Events) != 1 || s.Events[0].Type != ev.Type || s.Key.ID != "" || s.Outcome != 0 {
 		t.Fatalf("late post %+v, want the event alone", s)
 	}
 }

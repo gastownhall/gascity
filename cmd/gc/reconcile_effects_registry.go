@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"io"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -13,11 +15,20 @@ import (
 
 // effectPass is what one pass hands every effect it submits: a fenced
 // writer per census leg (session rows live in work stores too, #5187; v5 R3),
-// the composite provider, and the inputs the pass decided from, which a row
-// write re-decides against (R2), stripped of their raw store and provider
-// handles. The pass never mutates them after submit.
+// read-only and release-capable stores, the composite provider, and the
+// inputs the pass decided from, which a row write re-decides against (R2),
+// stripped of their raw store and provider handles. The pass never mutates
+// them after submit.
 type effectPass struct {
 	Writers map[string]fencedWriter // by census leg
+	// Reads are the city and rig stores behind blindWriteRefusingStore, for
+	// legacy read helpers: L5's live work read (C5c1b, D4).
+	Reads effectStores
+	// Releasers are the raw stores only legacy's release helpers write
+	// (v5.6 §13): each census leg's for the post-close cascade, and the
+	// assigned-work stores index-aligned with World.Demand.AssignedWork for
+	// a confirmed orphan's release (SESS-082).
+	Releasers effectReleasers
 	// Runtime is the composite provider. Fresh reads and C8.8 go through it,
 	// never a routed leaf alone (mc-zndi7.24). An effect calls no provider
 	// verb on it directly: destructive verbs go through the fence
@@ -32,6 +43,19 @@ type effectPass struct {
 	// first on its first admitted create (planner.submit).
 	create  *createPass
 	creates *createEffects
+	Stderr  io.Writer // best-effort helpers' diagnostics; nil discards
+}
+
+// effectStores are read-only city and rig stores.
+type effectStores struct {
+	City beads.Store
+	Rigs map[string]beads.Store // by rig, as the census reads them
+}
+
+// effectReleasers are release-capable stores.
+type effectReleasers struct {
+	Legs     map[string]beads.Store // by census leg
+	Assigned []beads.Store
 }
 
 // newEffectPass is w's and a's effectPass.
@@ -39,6 +63,14 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 	p := &effectPass{Writers: make(map[string]fencedWriter, len(w.LegStores)), Alloc: a}
 	if w.Env != nil {
 		p.Runtime = w.Env.SP
+	}
+	p.Releasers = effectReleasers{Legs: w.LegStores, Assigned: w.Demand.AssignedStores}
+	if w.SessionsStore != nil {
+		p.Reads.City = blindWriteRefusingStore{inner: w.SessionsStore}
+	}
+	p.Reads.Rigs = make(map[string]beads.Store, len(w.RigStores))
+	for rig, store := range w.RigStores {
+		p.Reads.Rigs[rig] = blindWriteRefusingStore{inner: store}
 	}
 	for leg, store := range w.LegStores {
 		p.Writers[leg] = fencedWriter{store: store}
