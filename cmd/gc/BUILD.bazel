@@ -7,6 +7,28 @@ load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
 # -tags productmetrics_testhook.
 # gazelle:build_tags integration,productmetrics_testhook
 
+# gc_test's process-backed tests that run for 20 s or more in the integration
+# build (GC_FAST_UNIT=0; seconds measured 2026-10-08 under bazel on rbe-west,
+# --config=ci --config=integration --config=fresh, 12 shards). rules_go
+# assigns a go_test's tests to shards round-robin in source order, and
+# gc_test's ~12,000 tests shift on nearly every cmd/gc PR, so no shard_count
+# keeps these apart for long: two of them in one shard is how
+# integration-packages' gc_test shards #1 and #7 ran 110-128 s against ~40 s
+# for the rest (spec-speed S5). In the integration build gc_test skips them
+# and each runs alone in a target of its own (same binary, no extra compile),
+# which //test:integration_packages runs through :gc_integration_solo_tests.
+# The unit build keeps them in gc_test, where all but
+# TestPackCommandCobraHelpAndUnknownParity skip under GC_FAST_UNIT.
+# scripts/cmd_gc_shards_test.go reads this table.
+INTEGRATION_SOLO_TESTS = {
+    "gc_bd_runtime_custom_types_heal_test": "TestEnsureBdRuntimeCustomTypesHealsUpgradedNativeStore",  # 36 s
+    "gc_managed_beads_native_cli_test": "TestManagedBeadsNativeCLICompatibility",  # 32 s
+    "gc_managed_bd_rig_hard_kill_test": "TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind",  # 26 s
+    "gc_pack_command_cobra_parity_test": "TestPackCommandCobraHelpAndUnknownParity",  # 22 s
+    "gc_phase2_worker_core_transport_test": "TestPhase2WorkerCoreRealTransportProof",  # 58 s
+    "gc_provider_owned_real_init_test": "TestGcBeadsBdProviderOwnedRealInitIgnoresAncestorBeadsWorkspace",  # 29 s
+}
+
 go_library(
     name = "gc_lib",
     srcs = [
@@ -1733,6 +1755,10 @@ go_test(
         "workflow_trace_rotation_test.go",
         "write_auth_boot_warning_test.go",
     ],
+    args = select({
+        "//:gotags_integration": ["-test.skip=^(%s)$$" % "|".join(INTEGRATION_SOLO_TESTS.values())],
+        "//conditions:default": [],
+    }),
     data = glob([
         "testdata/**",
         "*.go",
@@ -1779,7 +1805,7 @@ go_test(
         },
         "//conditions:default": {},
     }),
-    shard_count = 12,
+    shard_count = 15,
     deps = [
         "//:gascity",
         "//examples/bd",
@@ -1934,6 +1960,24 @@ go_variant_test(
     args = ["-test.run=^(TestProductMetricsTaggedBinaryProcessContracts|TestProductMetricsTesthookEndpointAcceptsOnlyLoopbackHTTPS|TestProductMetricsTaggedRunnerReadsInjectionOnlyAtInvocation|TestProductMetricsTesthookCAReadIsBounded|TestProductMetricsTaggedProcessFixtureIsEnabled|TestProductMetricsTestOnlyCensusEscapeIsNarrow)$$"],
     gotags = ["productmetrics_testhook"],
     test = ":gc_test",
+)
+
+# INTEGRATION_SOLO_TESTS, each alone, in gc_test's integration build.
+# Manual: the unit lane's //... does not run them (gc_test runs them there);
+# tools/bazel/integration_suite.py lists :gc_integration_solo_tests in
+# //test:integration_packages.
+[go_variant_test(
+    name = name,
+    size = "large",
+    args = ["-test.run=^%s$$" % test],
+    tags = ["manual"],
+    test = ":gc_test",
+) for name, test in INTEGRATION_SOLO_TESTS.items()]
+
+test_suite(
+    name = "gc_integration_solo_tests",
+    tags = ["manual"],
+    tests = [":" + name for name in INTEGRATION_SOLO_TESTS],
 )
 
 # scripts/ci_critical_path_test.go pins gc_productmetrics_testhook_test.
