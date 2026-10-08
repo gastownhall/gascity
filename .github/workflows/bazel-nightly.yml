@@ -35,4 +35,16 @@ jobs:
       actions: write
       issues: read
     uses: ./.github/workflows/bazel.yml
+    with:
+      # Re-execute every lane instead of reusing a cached PASS: worker-env
+      # (tools/rbe/worker-env) keys git and yq at major version only, so a
+      # minor upgrade on the rbe-west workers moves no action key and a
+      # regression it causes can hide behind every push's cached result
+      # (2026-10-07 worker-env outage review). Beads' nightly does the same
+      # with --config=fresh (gastownhall/beads .bazelrc, bazel.yml). The
+      # lanes still write the shared remote cache (--nocache_test_results
+      # only skips reading a cached result; rbe-west's workers upload their
+      # own results regardless, .bazelrc build:remote-exec
+      # --noremote_upload_local_results).
+      fresh-test-results: true
     secrets: inherit

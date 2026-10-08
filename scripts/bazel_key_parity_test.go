@@ -30,8 +30,10 @@ const bazelPinnedTestPath = "/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
 // bazelNonKeyConfigs select how actions run, where results come from and
 // whether a result is reused or retried; none may change what an action is.
 // remote-exec and fork-cache are the remote modes (CI and pre-push); ci is
-// bazel.yml's lane policy.
-var bazelNonKeyConfigs = []string{"remote-exec", "fork-cache", "ci"}
+// bazel.yml's lane policy; fresh is the nightly fresh-test-results run's
+// (bazel-nightly.yml), which forces re-execution (--nocache_test_results)
+// without changing what any lane's actions are.
+var bazelNonKeyConfigs = []string{"remote-exec", "fork-cache", "ci", "fresh"}
 
 // bazelClientEnvAllowed may be forwarded from the client environment: it is a
 // debug override (internal/bazeltest) that no phase sets, so an unset value
@@ -184,6 +186,7 @@ func TestBazelKeyParity(t *testing.T) {
 		"build:fork-cache --noremote_local_fallback --experimental_circuit_breaker_strategy=failure\n" +
 		"test:ci --flaky_test_attempts=1\n" +
 		"test:ci --experimental_remote_cache_eviction_retries=0\n" +
+		"test:fresh --nocache_test_results\n" +
 		"build:other --define=gotags=x\n" +
 		"try-import %workspace%/.bazelrc.local\n"
 	if errs := checkBazelKeyParity(good); len(errs) != 0 {
@@ -210,6 +213,9 @@ func TestBazelKeyParity(t *testing.T) {
 		"ci define":            good + "test:ci --define=gotags=x\n",
 		"ci test timeout":      good + "test:ci --test_timeout=1100\n",
 		"ci action env":        good + "build:ci --action_env=GOFLAGS=-mod=mod\n",
+		"no fresh":             strings.ReplaceAll(good, "test:fresh", "test:gone"),
+		"fresh define":         good + "test:fresh --define=gotags=x\n",
+		"fresh action env":     good + "build:fresh --action_env=GOFLAGS=-mod=mod\n",
 	} {
 		if len(checkBazelKeyParity(rc)) == 0 {
 			t.Errorf("%s: expected an error for .bazelrc fixture:\n%s", name, rc)

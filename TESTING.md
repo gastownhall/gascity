@@ -103,6 +103,26 @@ come from pinned data deps, not the host: a go_test passes their
 `internal/testenv`), and Bazel-built helper binaries by `$(rootpath)` in an
 env var the test reads with `bazeltest.DataPath` instead of `go build`.
 
+### Nightly fresh test run
+
+`bazel-nightly.yml` passes `fresh-test-results: true` to every `bazel.yml`
+lane it runs, which appends `--config=fresh` (`.bazelrc`:
+`--nocache_test_results`) to each lane's `bazel test`. This exists because
+`tools/rbe/worker-env` keys `git` and `yq` at major version only: a minor
+upgrade of either tool on the rbe-west workers moves no action key, so a PR
+or push run reuses its cached `PASS` forever and a regression that upgrade
+introduced never shows up (the 2026-10-07 worker-env outage review). The
+nightly run re-executes every test once a day instead, exercising the real
+worker toolchain, exactly as beads' nightly does
+(`gastownhall/beads` `.bazelrc`'s `test:fresh`). It still writes the shared
+remote cache: `--nocache_test_results` only skips reading a cached result,
+and rbe-west's workers upload their own results regardless of this flag.
+Run the same thing locally with:
+
+```bash
+bazel test //... --config=fresh
+```
+
 ### Measuring cache hits (BEP cache report)
 
 To check whether a run actually reused results, write a Build Event

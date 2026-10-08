@@ -65,12 +65,20 @@ on:
         type: choice
         default: "on"
         options: ["on", "cache", "off"]
+      fresh-test-results:
+        description: "Re-execute every lane's tests (--config=fresh: no cached test results), as the nightly run does"
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       rbe:
         type: string
         required: false
         default: "on"
+      fresh-test-results:
+        type: boolean
+        required: false
+        default: false
     secrets:
       RBE_WEST_EXECUTOR:
         required: false
@@ -163,6 +171,7 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           MODE: ${{ steps.decide.outputs.mode }}
+          FRESH: ${{ inputs.fresh-test-results }}
         run: |
           set -euo pipefail
           case "$MODE" in remote|fork-ro|fork-rw|cache|local) ;; *) echo "::error::mode '$MODE'"; exit 1 ;; esac
@@ -179,6 +188,22 @@ jobs:
           # (scripts/test-integration-shard bdstore_tests + rest_smoke_tests:
           # .bazelrc test:integration-smoke's --test_filter).
           smoke='{"lane":"integration-smoke","cmd":"test --config=ci --config=integration-smoke --keep_going //test/integration:integration_test"}'
+          # The nightly fresh-test-results run (bazel-nightly.yml) appends
+          # --config=fresh (.bazelrc: --nocache_test_results) to every
+          # lane's cmd: worker-env (tools/rbe/worker-env) keys git and yq
+          # at major version only, so a minor upgrade on the rbe-west
+          # workers moves no action key, and a regression it causes can
+          # hide behind every push's cached PASS forever otherwise
+          # (2026-10-07 worker-env outage review). FRESH is empty outside
+          # workflow_dispatch/workflow_call, which never ask for it.
+          if [ "$FRESH" = "true" ]; then
+            for v in unit acceptance packages smoke; do
+              val="${!v}"
+              val="${val/%\"\}/ --config=fresh\"\}}"
+              printf -v "$v" "%s" "$val"
+            done
+            integration="${integration/%\",\"evidence-only\":true\}/ --config=fresh\",\"evidence-only\":true\}}"
+          fi
           # Every mode tests: the gate (the required check) fails a run that
           # started no lane. Acceptance and integration-packages run on the
           # fork pool too (mode fork-ro, instance oss-fork, loopback only):

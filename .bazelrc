@@ -128,6 +128,21 @@ test:ci --flaky_test_attempts=1
 # A remote cache eviction fails the action rather than silently re-running it.
 test:ci --experimental_remote_cache_eviction_retries=0
 
+# --config=fresh: the nightly fresh-test-results lane (bazel-nightly.yml,
+# beads' precedent) appends this to every lane's cmd so a cached PASS is
+# never reused. worker-env (tools/rbe/worker-env) keys git and yq at major
+# version only, so a minor upgrade on the rbe-west workers moves neither the
+# pin nor any action key, and Bazel's test cache would never re-run a test
+# whose inputs and key are unchanged -- hiding a regression that minor
+# upgrade introduced behind every PR's and push's cached pass. Nightly
+# re-executes everything once a day instead. Like remote-exec, fork-cache and
+# ci, --nocache_test_results is result policy only (bazel_key_parity_test.go
+# classifies it transport-only), so a fresh run still hashes actions like
+# every other phase and still writes the shared cache from the workers that
+# ran it (--noremote_upload_local_results, build:remote-exec above, is
+# unaffected: this flag only stops a read, never a write).
+test:fresh --nocache_test_results
+
 # The tagged suites, as bazel.yml's lanes run them (byte-identical values:
 # --define and --test_timeout are key inputs). --test_timeout stays at or
 # below 1100s: the scheduler caps action timeouts at 1200s.
