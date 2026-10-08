@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -562,5 +564,73 @@ func TestPrepareStartCandidateForCityThreadsTriggerBeadResolver(t *testing.T) {
 	}
 	if !strings.Contains(prepared.cfg.Command, "--effort low") {
 		t.Fatalf("prepared command = %q, want rig-resident trigger --effort low", prepared.cfg.Command)
+	}
+}
+
+// TestExecutePlannedStartsAppliesRigResidentTriggerOptionsViaResolver covers the
+// production wiring: executePlannedStarts must thread withTriggerBeadResolver
+// down to the options lookup so a rig-resident trigger's opt_* pins reach the
+// started command. Without the resolver the rig stamp is not read and the
+// session-store decoy (effort=high) must not leak in either.
+func TestExecutePlannedStartsAppliesRigResidentTriggerOptionsViaResolver(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		withResolver bool
+		want         string
+		forbidden    []string
+	}{
+		{name: "with resolver", withResolver: true, want: "--effort low", forbidden: []string{"--effort high"}},
+		{name: "without resolver", withResolver: false, forbidden: []string{"--effort low", "--effort high"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sessionStore, rigStore, candidate := rigResidentTrigger(t)
+			sp := runtime.NewFake()
+			clk := &clock.Fake{Time: time.Date(2026, 10, 8, 9, 0, 0, 0, time.UTC)}
+			cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+			options := []startExecutionOption{
+				withStartStabilityWaiter(immediateStartStabilityWaiter),
+				withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
+			}
+			if tc.withResolver {
+				options = append(options, withTriggerBeadResolver(rigStore.Get))
+			}
+
+			woken := executePlannedStarts(
+				context.Background(),
+				[]startCandidate{candidate},
+				cfg,
+				map[string]TemplateParams{"worker": candidate.tp},
+				sp,
+				sessionStore,
+				"",
+				clk,
+				events.Discard,
+				5*time.Second,
+				io.Discard,
+				io.Discard,
+				options...,
+			)
+			if woken != 1 {
+				t.Fatalf("woken = %d, want 1", woken)
+			}
+			var command string
+			for _, call := range sp.Calls {
+				if call.Method == "Start" && call.Name == "worker" {
+					command = call.Config.Command
+					break
+				}
+			}
+			if command == "" {
+				t.Fatalf("expected Start call for worker, calls=%#v", sp.Calls)
+			}
+			if tc.want != "" && !strings.Contains(command, tc.want) {
+				t.Fatalf("Start command = %q, want %q", command, tc.want)
+			}
+			for _, bad := range tc.forbidden {
+				if strings.Contains(command, bad) {
+					t.Fatalf("Start command = %q, must not contain %q", command, bad)
+				}
+			}
+		})
 	}
 }

@@ -964,6 +964,10 @@ func prepareStartCandidate(
 	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard, nil, nil)
 }
 
+// prepareStartCandidateForCity prepares a start for candidate within the city at
+// cityPath. workDirResolver resolves the task work dir; triggerResolver reads the
+// session's trigger bead for opt_* pins when it holds no claimed work, and nil
+// reads the session store only for a same-store trigger stamp.
 func prepareStartCandidateForCity(
 	candidate startCandidate,
 	cityPath string,
@@ -1089,7 +1093,9 @@ func buildPreparedStart(
 // on an abort partway through. recoverRunningPendingCreate's abort path folds
 // pendingCreateResidueFold from this store-coherent Info so its infoByID snapshot
 // matches the persisted state (WI-6 R4: the former raw-bead mirror carried this
-// coherence).
+// coherence). triggerResolver reads the session's trigger bead for opt_* pins when
+// no claimed in-progress work exists; nil reads the session store only for a
+// same-store trigger stamp.
 func buildPreparedStartWithWorkDirResolver(
 	candidate startCandidate,
 	cityPath string,

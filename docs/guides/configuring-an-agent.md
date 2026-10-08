@@ -126,7 +126,9 @@ option_defaults = { effort = "high" }
 
 Agent keys win over provider keys, so the reviewer above runs at `low` while
 other claude agents run at `high`. `gc config explain --provider claude` shows
-the resolved value and which layer set it.
+the provider-level resolved value and which layer set it; it does not include
+agent-level `option_defaults`, so an agent's own `effort` is read from its
+`agent.toml`.
 
 A single step can override these for the session launched to run it: `opt_effort`
 or `opt_model` metadata on the step's bead applies to that launch only (see
