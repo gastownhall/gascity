@@ -49,29 +49,36 @@ func TestStartupDeliveryPromptsWithConfirmation(t *testing.T) {
 // bare Enter cannot do anything else — followed by a confirming wait. No
 // re-prompt: retyping would double the text in the box.
 func TestStartupDeliveryStallRecoversWithEnter(t *testing.T) {
-	p, state := newFakeHerdrProvider(t)
-	listenHerdrSocket(t, p)
-	setState(t, state, "prompt_stalled")
+	for _, shape := range []string{"stdout", "stderr_exit_1"} {
+		t.Run(shape, func(t *testing.T) {
+			p, state := newFakeHerdrProvider(t)
+			listenHerdrSocket(t, p)
+			setState(t, state, "prompt_stalled")
+			if shape == "stderr_exit_1" {
+				setState(t, state, "prompt_error_stderr")
+			}
 
-	cfg := runtime.Config{Command: "claude", Nudge: "Run gc hook --claim --json now."}
-	if err := p.Start(context.Background(), "gastown__witness", cfg); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	calls := fakeCalls(t, state)
-	if get := strings.Index(calls, "agent get %5"); get < 0 || get > strings.Index(calls, "pane send-keys %5 Enter") {
-		t.Fatalf("recovery Enter was not qualified by reading the agent state first:\n%s", calls)
-	}
-	if !strings.Contains(calls, "pane send-keys %5 Enter") {
-		t.Fatalf("stalled submit was not recovered with an explicit Enter:\n%s", calls)
-	}
-	if !strings.Contains(calls, "agent wait %5 --until working --until done --until blocked --timeout 60000") {
-		t.Fatalf("Enter recovery was not re-confirmed:\n%s", calls)
-	}
-	if n := strings.Count(calls, "agent prompt"); n != 1 {
-		t.Fatalf("stall recovery must not re-prompt (typed text would double); prompts = %d:\n%s", n, calls)
-	}
-	if v, _ := p.GetMeta("gastown__witness", metaStartupUnconfirmed); v != "" {
-		t.Fatalf("recovered delivery recorded an unconfirmed marker: %q", v)
+			cfg := runtime.Config{Command: "claude", Nudge: "Run gc hook --claim --json now."}
+			if err := p.Start(context.Background(), "gastown__witness", cfg); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			calls := fakeCalls(t, state)
+			if strings.Count(calls, "pane send-keys %5 Enter") != 1 {
+				t.Fatalf("stalled submit was not recovered with an explicit Enter:\n%s", calls)
+			}
+			if get := strings.Index(calls, "agent get %5"); get < 0 || get > strings.Index(calls, "pane send-keys %5 Enter") {
+				t.Fatalf("recovery Enter was not qualified by reading the agent state first:\n%s", calls)
+			}
+			if !strings.Contains(calls, "agent wait %5 --until working --until done --until blocked --timeout 60000") {
+				t.Fatalf("Enter recovery was not re-confirmed:\n%s", calls)
+			}
+			if n := strings.Count(calls, "agent prompt"); n != 1 {
+				t.Fatalf("stall recovery must not re-prompt (typed text would double); prompts = %d:\n%s", n, calls)
+			}
+			if v, _ := p.GetMeta("gastown__witness", metaStartupUnconfirmed); v != "" {
+				t.Fatalf("recovered delivery recorded an unconfirmed marker: %q", v)
+			}
+		})
 	}
 }
 
@@ -80,25 +87,35 @@ func TestStartupDeliveryStallRecoversWithEnter(t *testing.T) {
 // strand must be recorded durably on the sidecar so it is machine-visible
 // and countable — stderr alone is discarded in daemon contexts.
 func TestStartupDeliveryUnconfirmedRecordsSidecarMarker(t *testing.T) {
-	p, state := newFakeHerdrProvider(t)
-	listenHerdrSocket(t, p)
-	setState(t, state, "prompt_stalled")
-	setState(t, state, "wait_times_out")
+	for _, shape := range []string{"stdout", "stderr_exit_1"} {
+		t.Run(shape, func(t *testing.T) {
+			p, state := newFakeHerdrProvider(t)
+			listenHerdrSocket(t, p)
+			setState(t, state, "prompt_stalled")
+			setState(t, state, "wait_times_out")
+			if shape == "stderr_exit_1" {
+				setState(t, state, "prompt_error_stderr")
+			}
 
-	cfg := runtime.Config{Command: "claude", Nudge: "Run gc hook --claim --json now."}
-	if err := p.Start(context.Background(), "gastown__witness", cfg); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	calls := fakeCalls(t, state)
-	if !strings.Contains(calls, "pane send-keys %5 Enter") {
-		t.Fatalf("unconfirmed delivery skipped the Enter recovery attempt:\n%s", calls)
-	}
-	v, err := p.GetMeta("gastown__witness", metaStartupUnconfirmed)
-	if err != nil || v == "" {
-		t.Fatalf("unconfirmed startup delivery left no sidecar marker (v=%q err=%v)", v, err)
-	}
-	if !strings.Contains(v, "agent_prompt_stalled") {
-		t.Fatalf("marker does not carry the stall verdict: %q", v)
+			cfg := runtime.Config{Command: "claude", Nudge: "Run gc hook --claim --json now."}
+			if err := p.Start(context.Background(), "gastown__witness", cfg); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			calls := fakeCalls(t, state)
+			if !strings.Contains(calls, "pane send-keys %5 Enter") {
+				t.Fatalf("unconfirmed delivery skipped the Enter recovery attempt:\n%s", calls)
+			}
+			v, err := p.GetMeta("gastown__witness", metaStartupUnconfirmed)
+			if err != nil || v == "" {
+				t.Fatalf("unconfirmed startup delivery left no sidecar marker (v=%q err=%v)", v, err)
+			}
+			if !strings.Contains(v, "agent_prompt_stalled") {
+				t.Fatalf("marker does not carry the stall verdict: %q", v)
+			}
+			if !strings.Contains(v, "after Enter recovery") {
+				t.Fatalf("marker does not record failed recovery: %q", v)
+			}
+		})
 	}
 }
 
@@ -110,25 +127,35 @@ func TestStartupDeliveryUnconfirmedRecordsSidecarMarker(t *testing.T) {
 // the Enter is withheld, because there it would answer the dialog rather than
 // no-op on an empty input box.
 func TestStartupDeliveryStallOnBlockedAgentWithholdsEnter(t *testing.T) {
-	p, state := newFakeHerdrProvider(t)
-	listenHerdrSocket(t, p)
-	setState(t, state, "prompt_stalled")
-	setState(t, state, "agent_blocked")
+	for _, shape := range []string{"stdout", "stderr_exit_1"} {
+		t.Run(shape, func(t *testing.T) {
+			p, state := newFakeHerdrProvider(t)
+			listenHerdrSocket(t, p)
+			setState(t, state, "prompt_stalled")
+			setState(t, state, "agent_blocked")
+			if shape == "stderr_exit_1" {
+				setState(t, state, "prompt_error_stderr")
+			}
 
-	cfg := runtime.Config{Command: "claude", Nudge: "Run gc hook --claim --json now."}
-	if err := p.Start(context.Background(), "gastown__witness", cfg); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	calls := fakeCalls(t, state)
-	if strings.Contains(calls, "send-keys") {
-		t.Fatalf("stall recovery keystroked an agent sitting on a dialog:\n%s", calls)
-	}
-	v, err := p.GetMeta("gastown__witness", metaStartupUnconfirmed)
-	if err != nil || v == "" {
-		t.Fatalf("withheld recovery left no sidecar marker (v=%q err=%v)", v, err)
-	}
-	if !strings.Contains(v, "blocked") {
-		t.Fatalf("marker does not say which state withheld the Enter: %q", v)
+			cfg := runtime.Config{Command: "claude", Nudge: "Run gc hook --claim --json now."}
+			if err := p.Start(context.Background(), "gastown__witness", cfg); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			calls := fakeCalls(t, state)
+			if strings.Contains(calls, "send-keys") {
+				t.Fatalf("stall recovery keystroked an agent sitting on a dialog:\n%s", calls)
+			}
+			v, err := p.GetMeta("gastown__witness", metaStartupUnconfirmed)
+			if err != nil || v == "" {
+				t.Fatalf("withheld recovery left no sidecar marker (v=%q err=%v)", v, err)
+			}
+			if !strings.Contains(v, `agent is "blocked"`) {
+				t.Fatalf("marker does not say which state withheld the Enter: %q", v)
+			}
+			if !strings.Contains(v, "recovery Enter withheld") {
+				t.Fatalf("marker does not record withheld recovery: %q", v)
+			}
+		})
 	}
 }
 
@@ -143,27 +170,61 @@ func TestStartupDeliveryStallOnBlockedAgentWithholdsEnter(t *testing.T) {
 // recorded, because "submitted but unsettled" is not proof the turn is
 // running.
 func TestStartupDeliveryTimeoutNeverBlindEnters(t *testing.T) {
+	for _, shape := range []string{"stdout", "stderr_exit_1"} {
+		t.Run(shape, func(t *testing.T) {
+			p, state := newFakeHerdrProvider(t)
+			listenHerdrSocket(t, p)
+			setState(t, state, "prompt_times_out")
+			if shape == "stderr_exit_1" {
+				setState(t, state, "prompt_error_stderr")
+			}
+
+			cfg := runtime.Config{Command: "claude", Nudge: "Run gc hook --claim --json now."}
+			if err := p.Start(context.Background(), "gastown__witness", cfg); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			calls := fakeCalls(t, state)
+			if strings.Contains(calls, "send-keys") {
+				t.Fatalf("timeout verdict fired a recovery Enter; herdr already observed the submit land:\n%s", calls)
+			}
+			if n := strings.Count(calls, "agent prompt"); n != 1 {
+				t.Fatalf("timeout verdict must not re-prompt; prompts = %d:\n%s", n, calls)
+			}
+			v, err := p.GetMeta("gastown__witness", metaStartupUnconfirmed)
+			if err != nil || v == "" {
+				t.Fatalf("unsettled startup delivery left no sidecar marker (v=%q err=%v)", v, err)
+			}
+			if !strings.Contains(v, "timeout") {
+				t.Fatalf("marker does not carry the timeout verdict: %q", v)
+			}
+			if !strings.Contains(v, "startup submit landed but never reached") {
+				t.Fatalf("marker does not classify unsettled submission: %q", v)
+			}
+		})
+	}
+}
+
+// A stall envelope echoed inside diagnostic text is not herdr's answer to
+// this invocation. It must not authorize a recovery keystroke, even if the
+// registered agent is idle.
+func TestStartupDeliveryQuotedStallDoesNotAuthorizeEnter(t *testing.T) {
 	p, state := newFakeHerdrProvider(t)
 	listenHerdrSocket(t, p)
-	setState(t, state, "prompt_times_out")
-
-	cfg := runtime.Config{Command: "claude", Nudge: "Run gc hook --claim --json now."}
-	if err := p.Start(context.Background(), "gastown__witness", cfg); err != nil {
+	setState(t, state, "prompt_stalled")
+	setState(t, state, "prompt_error_decorated")
+	if err := p.Start(context.Background(), "gastown__witness", runtime.Config{Command: "claude", Nudge: "Start work."}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	calls := fakeCalls(t, state)
-	if strings.Contains(calls, "send-keys") {
-		t.Fatalf("timeout verdict fired a recovery Enter; herdr already observed the submit land:\n%s", calls)
+	if strings.Contains(calls, "send-keys") || strings.Contains(calls, "pane run") {
+		t.Fatalf("diagnostic text authorized input to the pane:\n%s", calls)
 	}
-	if n := strings.Count(calls, "agent prompt"); n != 1 {
-		t.Fatalf("timeout verdict must not re-prompt; prompts = %d:\n%s", n, calls)
+	if strings.Count(calls, "agent prompt") != 1 {
+		t.Fatalf("startup delivery must not re-prompt:\n%s", calls)
 	}
 	v, err := p.GetMeta("gastown__witness", metaStartupUnconfirmed)
-	if err != nil || v == "" {
-		t.Fatalf("unsettled startup delivery left no sidecar marker (v=%q err=%v)", v, err)
-	}
-	if !strings.Contains(v, "timeout") {
-		t.Fatalf("marker does not carry the timeout verdict: %q", v)
+	if err != nil || !strings.Contains(v, "invalid_args") {
+		t.Fatalf("unclassified delivery lost its error (v=%q err=%v)", v, err)
 	}
 }
 
