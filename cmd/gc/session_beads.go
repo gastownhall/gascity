@@ -1319,7 +1319,8 @@ func releaseUnexecutedClaimsOnDrainAck(
 // gc.continuation_group, and the close's live work read refuses. Otherwise
 // every lane-visible open claim (claimIsLaneVisible) is released, with the
 // seat's fallback route, as the close cascade and the stranded repair release
-// it; a claim no lane would see stays assigned and keeps the seat.
+// it; a claim no lane would see stays assigned and keeps the seat. One
+// deadline, budget from the start, bounds the gate and the release.
 //
 // The identities include the stable alias namepool and max_active_sessions = 1
 // seats claim under (sessionAssignmentIdentifiersForConfig), the set the
@@ -1368,7 +1369,9 @@ func releaseUnexecutedClaimsOnKill(
 		}
 	}
 	identifiers := sessionAssignmentIdentifiersForConfig(sessionBead, cfg)
-	started, err := killedSeatHoldsStartedWork(cityPath, cfg, store, rigStores, identifiers, executed)
+	// One deadline bounds the started-work gate and the release together.
+	deadline := time.Now().Add(budget)
+	started, err := killedSeatHoldsStartedWork(cityPath, cfg, store, rigStores, identifiers, executed, deadline)
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: checking killed session %s for started work: %v; releasing nothing\n", sessionBead.ID, err) //nolint:errcheck
 		return
@@ -1376,31 +1379,68 @@ func releaseUnexecutedClaimsOnKill(
 	if started {
 		return
 	}
+	fallbackRoute := retiredSessionFallbackRoute(sessionBead)
 	releaseHeldClaims(cityPath, cfg, store, rigStores, sessionBead.ID, identifiers, heldClaimRelease{
 		kind:          "killed",
 		status:        "open",
-		fallbackRoute: retiredSessionFallbackRoute(sessionBead),
+		fallbackRoute: fallbackRoute,
 		leftover:      "the next close attempt, which refuses while they stay assigned",
-		releasable:    claimIsLaneVisible,
+		releasable:    func(b beads.Bead) bool { return claimIsLaneVisible(cfg, b, fallbackRoute) },
+		deadline:      deadline,
 	}, budget, stderr)
 }
 
+// killedSeatSnapshotHasReleasableClaim reports whether the tick's assigned-work
+// snapshot shows an open, lane-visible claim held by one of info's identities.
+// Without one the pool-slot close skips the started-work gate and the release,
+// so a surviving killed seat costs no store reads per tick; the close's live
+// work read still decides. A claim the snapshot does not carry (an unready
+// workflow bead with no route of its own) is not released: like a plain task,
+// it keeps the seat until it is ready and the assigned-work wake restarts it.
+func killedSeatSnapshotHasReleasableClaim(cfg *config.City, assigned []beads.Bead, info session.Info) bool {
+	identities := make(map[string]bool)
+	for _, id := range sessionAssignmentIdentifiersForConfigInfo(info, cfg) {
+		identities[id] = true
+	}
+	fallbackRoute := retiredSessionFallbackRouteInfo(info)
+	for _, b := range assigned {
+		if b.Status == "open" && identities[strings.TrimSpace(b.Assignee)] && claimIsLaneVisible(cfg, b, fallbackRoute) {
+			return true
+		}
+	}
+	return false
+}
+
 // claimIsLaneVisible reports whether a released claim would still be demanded
-// and claimable by route (CONTRACT v5.8d C3 rule 2): it carries gc.routed_to,
-// or it is a workflow bead, for which the fallback gc.run_target the release
-// stamps is a demand and claim route (controllerDemandRouteCandidates,
-// workflowRunTargetFallbackEligible). Any other unrouted bead, a directly
-// assigned plain task, would be stranded by a release: no lane demands or
-// claims it. It stays assigned instead; the close then finds it and refuses,
-// and the assigned-work wake restarts the seat when that work is ready.
-func claimIsLaneVisible(b beads.Bead) bool {
-	return strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" || workflowRunTargetFallbackEligible(b)
+// and claimable by route (CONTRACT v5.8d C3 rule 2). Its route is gc.routed_to,
+// or, for a workflow bead, gc.run_target (controllerDemandRouteCandidates,
+// workflowRunTargetFallbackEligible), which the release stamps with
+// fallbackRoute when the bead carries none. The route must resolve to a
+// configured agent that can run generic sessions, the check the orphan release
+// makes (pool_session_name.go). Any other bead, a directly assigned plain task
+// or a bead routed to no served lane, would be stranded by a release. It stays
+// assigned instead; the close then finds it and refuses, and the assigned-work
+// wake restarts the seat when that work is ready.
+func claimIsLaneVisible(cfg *config.City, b beads.Bead, fallbackRoute string) bool {
+	route := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey])
+	if route == "" && workflowRunTargetFallbackEligible(b) {
+		route = strings.TrimSpace(b.Metadata[beadmeta.RunTargetMetadataKey])
+		if route == "" {
+			route = fallbackRoute
+		}
+	}
+	if route == "" {
+		return false
+	}
+	agentCfg := findAgentByTemplate(cfg, route)
+	return agentCfg != nil && agentCfg.SupportsGenericEphemeralSessions()
 }
 
 // killedSeatHoldsStartedWork reports whether any work bead assigned to one of
 // identifiers is started: in_progress, or open and named in executed. It reads
-// the release's own leg set and fails closed: an unreadable leg is an error.
-func killedSeatHoldsStartedWork(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, identifiers []string, executed map[string]bool) (bool, error) {
+// the release's own leg set and fails closed: an unreadable leg, or a deadline
+// that passes before the read completes, is an error.
+func killedSeatHoldsStartedWork(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, identifiers []string, executed map[string]bool, deadline time.Time) (bool, error) {
 	plan, err := assignedWorkSweepPlan(cityPath, cfg, store, rigStores, identifiers)
 	if err != nil {
 		return false, err
@@ -1412,6 +1452,9 @@ func killedSeatHoldsStartedWork(cityPath string, cfg *config.City, store beads.S
 			for _, status := range []string{"in_progress", "open"} {
 				if status == "open" && len(executed) == 0 {
 					continue
+				}
+				if time.Now().After(deadline) {
+					return false, errors.New("started-work check ran out of the release budget")
 				}
 				work, err := wa.OpenAssignedTo(assignee, status, beads.TierBoth, true)
 				if err != nil {
@@ -1449,6 +1492,7 @@ type heldClaimRelease struct {
 	fallbackRoute string                // stamped on an otherwise unrouted bead; "" keeps the bead's routing
 	leftover      string                // who collects the claims an exhausted budget leaves behind
 	releasable    func(beads.Bead) bool // nil releases every listed claim
+	deadline      time.Time             // zero: now + budget
 }
 
 // releaseHeldClaims is the shared body of the held-claim releases: every WORK
@@ -1473,7 +1517,10 @@ func releaseHeldClaims(
 	}
 	statusLabel := strings.ReplaceAll(r.status, "_", "-")
 	seen := make(map[string]struct{})
-	deadline := time.Now().Add(budget)
+	deadline := r.deadline
+	if deadline.IsZero() {
+		deadline = time.Now().Add(budget)
+	}
 	expired := false
 	sweepAssignedWorkLegs(cityPath, cfg, store, rigStores, identifiers, stderr, func(storeIndex int, ownerStore beads.Store) {
 		if expired {

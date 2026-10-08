@@ -2383,10 +2383,11 @@ provider conversation continuity is not guaranteed; confirm it with the agent or
 provider after restart.
 
 An idle pool seat (no started work and no ready work) is replaced: the
-reconciler releases any assigned work it had not started, closes it, and the
-pool starts a fresh seat in its slot. A pool seat holding started or ready work
+reconciler releases the routed work it had not started so another seat can
+pick it up, closes it, and the pool starts a fresh seat in its slot. A pool seat holding started or ready work
 restarts in place on its bead; while its started work is blocked, it holds its
-slot asleep.
+slot asleep. A task assigned directly to the seat with no route is kept, not
+released, and the seat holds its slot until that task is ready.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),

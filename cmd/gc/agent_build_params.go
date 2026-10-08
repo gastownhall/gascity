@@ -176,7 +176,6 @@ func (p *agentBuildParams) hasCompleteSessionSnapshot() bool {
 	return p.sessionBeads != nil && p.sessionBeads.LoadError() == nil
 }
 
-// newAgentBuildParams constructs agentBuildParams from the common startup values.
 // now is the build's decision clock: decisionTime when the caller set it,
 // else beaconTime, which the v2 allocator sets to its pass time. The pool
 // decide reads no wall clock (allocator_decide_purity_test.go).
@@ -190,6 +189,7 @@ func (p *agentBuildParams) now() time.Time {
 	return p.beaconTime
 }
 
+// newAgentBuildParams constructs agentBuildParams from the common startup values.
 func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime.Provider, beaconTime time.Time, store beads.Store, stderr io.Writer) *agentBuildParams {
 	params := baseAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
 	if store != nil {
