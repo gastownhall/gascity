@@ -34,6 +34,13 @@ func WriteMarkdown(w io.Writer, rep Report) error {
 		writeCountsRow(&b, "**total**", rep.Totals, "")
 	}
 
+	for _, p := range rep.Phases {
+		if len(p.ValidationFailed) > 0 {
+			fmt.Fprintf(&b, "\n**%s: validation (nogo) failed** for `%s`; a test target there counts as %s whatever its test run reported.\n",
+				p.Label, strings.Join(p.ValidationFailed, "`, `"), StatusFailedValidation)
+		}
+	}
+
 	writeActions(&b, rep.Phases)
 	writeSlowest(&b, rep.Slowest)
 	_, err := io.WriteString(w, b.String())

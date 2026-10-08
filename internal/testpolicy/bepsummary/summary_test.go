@@ -365,3 +365,59 @@ func TestRunUsageErrors(t *testing.T) {
 		}
 	}
 }
+
+// validation_aspect.bep.json is a real Bazel 9.2.0 run of `bazel test
+// --config=ci --keep_going //internal/doltversion/...` (test:ci sets
+// --experimental_use_validation_aspect) with a deliberate errcheck finding in
+// the package, passed through redact.jq. The test ran beside nogo and its
+// testSummary says PASSED, yet Bazel exited BUILD_FAILURE ("1 fails to
+// build"): the report must not count that target as passed.
+func TestSummarizePhaseValidationAspectFailure(t *testing.T) {
+	p := fixture(t, "validation_aspect.bep.json")
+	if p.ExitCode != "BUILD_FAILURE" {
+		t.Errorf("exit code = %q, want BUILD_FAILURE", p.ExitCode)
+	}
+	wantFailed := []string{"//internal/doltversion:doltversion", "//internal/doltversion:doltversion_test"}
+	if !reflect.DeepEqual(p.ValidationFailed, wantFailed) {
+		t.Errorf("validation failed = %v, want %v", p.ValidationFailed, wantFailed)
+	}
+	if len(p.Tests) != 1 || p.Tests[0].Status != StatusFailedValidation {
+		t.Fatalf("tests = %+v, want one %s target", p.Tests, StatusFailedValidation)
+	}
+	if p.Targets.Passed != 0 || p.Targets.Failed != 1 {
+		t.Errorf("passed/failed = %d/%d, want 0/1", p.Targets.Passed, p.Targets.Failed)
+	}
+	var md bytes.Buffer
+	if err := WriteMarkdown(&md, BuildReport("pr/remote", []Phase{p}, 5)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(md.String(), "validation (nogo) failed") {
+		t.Errorf("markdown does not report the validation failure:\n%s", md.String())
+	}
+}
+
+func TestSummarizePhaseValidationAspectSynthetic(t *testing.T) {
+	lines := []string{
+		`{"id":{"targetCompleted":{"label":"//a:ok_test","aspect":"ValidateTarget"}},"completed":{"success":true}}`,
+		`{"id":{"testSummary":{"label":"//a:ok_test"}},"testSummary":{"overallStatus":"PASSED"}}`,
+		// Aborted: no completed payload; it never validated either.
+		`{"id":{"targetCompleted":{"label":"//a:aborted_test","aspect":"ValidateTarget"}}}`,
+		`{"id":{"testSummary":{"label":"//a:aborted_test"}},"testSummary":{"overallStatus":"FLAKY"}}`,
+		// A failed test stays failed; its status is not rewritten.
+		`{"id":{"targetCompleted":{"label":"//a:bad_test","aspect":"ValidateTarget"}},"completed":{}}`,
+		`{"id":{"testSummary":{"label":"//a:bad_test"}},"testSummary":{"overallStatus":"FAILED"}}`,
+		// A plain (non-aspect) failed completion is not a validation failure.
+		`{"id":{"targetCompleted":{"label":"//a:lib"}},"completed":{}}`,
+	}
+	p, err := SummarizePhase("synthetic", "inline", strings.NewReader(strings.Join(lines, "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"//a:aborted_test", "//a:bad_test"}; !reflect.DeepEqual(p.ValidationFailed, want) {
+		t.Errorf("validation failed = %v, want %v", p.ValidationFailed, want)
+	}
+	want := map[string]int{"PASSED": 1, StatusFailedValidation: 1, "FAILED": 1}
+	if !reflect.DeepEqual(p.Targets.ByStatus, want) {
+		t.Errorf("by status = %v, want %v", p.Targets.ByStatus, want)
+	}
+}
