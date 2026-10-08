@@ -37,19 +37,49 @@ ACCEPTANCE_ENV = {
 
 # Tests that each run past the lane's ~120 s shard budget on rbe-west, by
 # design: each waits out real Dolt lifecycle timers (proxy idle retirement,
-# a 3-minute suspension quiescence window) or walks one long sequential
-# shape. Each runs alone in a target of its own (target name: top-level
-# test), in :acceptance_test's binary and environment, so the lane runs them
-# side by side instead of stacking one behind another in a shard.
-# :acceptance_test skips them. Manual, because only --config=acceptance
-# compiles the acceptance_a files they run: bazel.yml's acceptance lane
-# names :acceptance_solo_tests. scripts/acceptance_run_selection_test.go
-# reads this table.
+# a suspension quiescence window) or walks one long sequential shape. Each
+# runs alone in a target of its own (target name: top-level test), in
+# :acceptance_test's binary and environment, so the lane runs them side by
+# side instead of stacking one behind another in a shard. :acceptance_test
+# skips them. Manual, because only --config=acceptance compiles the
+# acceptance_a files they run: bazel.yml's acceptance lane names
+# :acceptance_solo_tests. scripts/acceptance_run_selection_test.go reads this
+# table. A test may appear under several targets, each running a disjoint
+# share of its subtests (SOLO_SUBTESTS).
 SOLO_TESTS = {
+    "beads_topology_matrix_doctor_test": "TestBeadsInitTopologyMatrix",
+    "beads_topology_matrix_native_lane_test": "TestBeadsInitTopologyMatrix",
     "beads_topology_matrix_test": "TestBeadsInitTopologyMatrix",
     "proxied_idle_timeout_test": "TestProxiedIdleTimeoutReapAndTransparentRestart",
     "proxied_suspended_city_quiescence_test": "TestProxiedSuspensionIsQuiescenceSuspendedCity",
     "proxied_suspended_rig_quiescence_test": "TestProxiedSuspensionIsQuiescenceSuspendedRig",
+}
+
+# The topology matrix walks one sequential shape per row (init, doctor, bd,
+# rig add, start, doctor, stop, start, stop), about 230 s for
+# M1-proxied-local, two thirds of it in gc start/stop/doctor round trips.
+# It runs as three targets side by side, each walking the shape up to the
+# phases it asserts: every subtest of TestBeadsInitTopologyMatrix is in
+# exactly one target's TOPOLOGY_PHASES, and TOPOLOGY_SETUP_PHASES (the steps
+# that build the state the later phases need) run in all three.
+# scripts/acceptance_run_selection_test.go keeps this equal to the test's
+# t.Run names.
+TOPOLOGY_SETUP_PHASES = [
+    "init-defers-the-store",
+    "rig-inherits",
+    "start-default-pack",
+]
+
+TOPOLOGY_PHASES = {
+    "beads_topology_matrix_doctor_test": ["doctor-after-start"],
+    "beads_topology_matrix_native_lane_test": ["native-lane"],
+    "beads_topology_matrix_test": [
+        "init-shape",
+        "doctor",
+        "bd-front-door",
+        "stop-quiescent",
+        "restart",
+    ],
 }
 
 # Subtests a solo target narrows its test to. The topology matrix runs its
@@ -58,7 +88,8 @@ SOLO_TESTS = {
 # GC_REQUIRE_ACCEPTANCE_LEGACY_GC stays off). The other shapes are not
 # qualified on a worker yet.
 SOLO_SUBTESTS = {
-    "beads_topology_matrix_test": "/^(M1-proxied-local|M5-legacy-gc-managed)$$",
+    name: "/^(M1-proxied-local|M5-legacy-gc-managed)$$/^(%s)$$" % "|".join(TOPOLOGY_SETUP_PHASES + phases)
+    for name, phases in TOPOLOGY_PHASES.items()
 }
 
 go_test(
