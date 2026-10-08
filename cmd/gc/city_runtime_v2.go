@@ -65,8 +65,8 @@ func (cr *CityRuntime) installPlanner(rt *plannerRuntime) {
 // starts; run sets inventoryLane before the startup step boots the planner.
 // The endpoint capacity guard is built here, before run, so the planner and
 // its effects share the controller's guard without racing its lazy build.
-// Template resolutions are left out until their resolver lands: until then
-// every start refuses with cause template-unresolved.
+// A generation's template resolver builds its params once, as legacy's
+// buildDesiredState does each tick, over the sessions store gather reads.
 func (cr *CityRuntime) newPlannerHost() plannerHost {
 	guard := cr.ensureEndpointCapacityGuard()
 	return plannerHost{
@@ -90,7 +90,10 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 				return beads.NudgesStore{Store: resolveNudgesStore(cr.storageRoutes, cr.cityBeadStore(), cr.serviceConfigSnapshot(), cr.cityPath, cr.rec)}
 			},
 			WorkStore: cr.cityBeadStore,
-			LookPath:  exec.LookPath,
+			Templates: func(env *reconcileEnv, now time.Time) templateResolver {
+				return newTemplateResolver(newAgentBuildParams(cr.cityName, cr.cityPath, env.Cfg, env.SP, now.UTC(), cr.v2SessionsStore(), cr.stderr))
+			},
+			LookPath: exec.LookPath,
 		},
 		snapshotEnv: cr.serviceEnvSnapshot,
 		setInventoryHook: func(fn func(prev, next *ObservationSnapshot)) {

@@ -4810,10 +4810,24 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 	} else {
 		info = bound
 	}
+	tp, err := resolveConfiguredNamedSessionTemplate(bp, spec, identity, info)
+	if err != nil {
+		return TemplateParams{}, info, err
+	}
+	installAgentSideEffects(bp, spec.Agent, tp, stderr)
+	return tp, info, nil
+}
+
+// resolveConfiguredNamedSessionTemplate is the resolution half of
+// resolvePreservedConfiguredNamedSessionTemplate: info's template under bp
+// for spec, with the named adjustments. It never rebinds the trigger bead
+// (no store write) and installs no agent side effects; the v2 start's
+// resolver calls it directly.
+func resolveConfiguredNamedSessionTemplate(bp *agentBuildParams, spec namedSessionSpec, identity string, info sessionpkg.Info) (TemplateParams, error) {
 	fpExtra := buildFingerprintExtra(spec.Agent)
 	tp, err := resolveTemplateForSessionBeadInfo(bp, spec.Agent, identity, fpExtra, info)
 	if err != nil {
-		return TemplateParams{}, info, err
+		return TemplateParams{}, err
 	}
 	tp.Alias = identity
 	tp.TemplateName = namedSessionBackingTemplate(spec)
@@ -4827,8 +4841,7 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 	tp.Env["GC_ALIAS"] = identity
 	tp.Env["GC_AGENT"] = identity
 	tp.Env["GC_SESSION_ORIGIN"] = "named"
-	installAgentSideEffects(bp, spec.Agent, tp, stderr)
-	return tp, info, nil
+	return tp, nil
 }
 
 // sessionHasOpenAssignedWorkForConfig uses the same configured-named-session

@@ -262,8 +262,10 @@ func replayPass(t *testing.T, x replayExport, rows []beads.Bead, at time.Time) *
 		Recording:    func() *externalReadsRecording { return nil },
 		Observations: func() *ObservationCache { return obs },
 		Episodes:     func() (map[string]session.StartupHealthEpisode, error) { return readStartupHealthEpisodes(cache) },
-		ResolveTemplate: func(_ *reconcileEnv, info session.Info) (TemplateParams, error) {
-			return TemplateParams{SessionName: info.SessionNameMetadata}, nil
+		Templates: func(*reconcileEnv, time.Time) templateResolver {
+			return templateResolver{Resolve: func(info session.Info) templateResolution {
+				return templateResolution{TP: TemplateParams{SessionName: info.SessionNameMetadata}}
+			}}
 		},
 		LookPath: func(name string) (string, error) { return "/bin/" + name, nil },
 	}, at)
