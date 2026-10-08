@@ -76,6 +76,8 @@ go_test(
         "caching_store_cadence_internal_test.go",
         "caching_store_change_source_test.go",
         "caching_store_claim_internal_test.go",
+        "caching_store_clock_census_test.go",
+        "caching_store_clock_test.go",
         "caching_store_close_event_test.go",
         "caching_store_conditional_internal_test.go",
         "caching_store_conditional_test.go",

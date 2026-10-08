@@ -331,9 +331,12 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 		if err := beads.StampOpenedStore(m, "MemStore", gate.Require, nil, nil); err != nil {
 			t.Fatalf("stamp: %v", err)
 		}
-		cache := beads.NewCachingStoreForTest(simBacking{m}, nil)
+		cache := beads.NewCachingStoreForTest(simBacking{m}, nil, beads.WithClock(s.clk.Now)) // its windows run on sim time
 		if err := cache.Prime(context.Background()); err != nil {
 			t.Fatalf("prime %s: %v", name, err)
+		}
+		if got := cache.Stats().LastFreshAt; !got.Equal(s.clk.Now()) {
+			t.Fatalf("%s cache: LastFreshAt %v, want the sim clock %v (its windows must run on sim time)", name, got, s.clk.Now())
 		}
 		s.legs = append(s.legs, &simLeg{name: name, backing: m, cache: cache})
 	}
@@ -933,12 +936,50 @@ func (s *sim) quiesce() {
 			quiet++
 		}
 		s.advance(simPatrol)
+		for _, l := range s.legs {
+			// The periodic reconcile. The first rescan above ran inside a
+			// local write's 5s window, which skips the row; one past it
+			// re-reads the row.
+			l.cache.ReconcileNowForTest()
+		}
+	}
+	if len(s.failures) == 0 {
+		s.checkConverged()
 	}
 	for _, c := range simQuietChecks {
 		c(s)
 	}
 	if n := len(s.inflight.view().Entries); n > 0 && len(s.failures) == 0 {
 		s.failf("I8 I-inflight", "%d entries in flight at quiescence", n)
+	}
+}
+
+// checkConverged fails I10 when a leg's cache is clean (no dirty row, so it
+// answers CachedList) but disagrees with its backing: a stale row that no
+// event or scan will revisit, so the fixed point the pass saw was the cache's.
+func (s *sim) checkConverged() {
+	for _, l := range s.legs {
+		cached, ok := l.cache.CachedList(beads.ListQuery{AllowScan: true})
+		if !ok {
+			continue
+		}
+		active, err := l.backing.List(beads.ListQuery{AllowScan: true})
+		if err != nil {
+			s.t.Fatal(err)
+		}
+		want := make(map[string]beads.Bead, len(active))
+		for _, b := range active {
+			want[b.ID] = b
+		}
+		for _, b := range cached {
+			if w, ok := want[b.ID]; !ok || !sameBead(b, w) {
+				s.failf("I10 I-bounded", "cache not converged at quiescence: %s/%s cached %s %v, backing %s %v", l.name, b.ID, b.Status, b.Metadata, w.Status, w.Metadata)
+			}
+			delete(want, b.ID)
+		}
+		for id := range want {
+			s.failf("I10 I-bounded", "cache not converged at quiescence: %s/%s active in the backing, missing from the clean cache", l.name, id)
+		}
 	}
 }
 

@@ -56,12 +56,12 @@ func (c *CachingStore) createWith(create func() (Bead, error)) (Bead, error) {
 		return created, nil
 	}
 	c.noteLocalMutationLocked(created.ID)
-	c.absorbFreshLocked(created.ID, created, time.Now(), absorbOpts{
+	c.absorbFreshLocked(created.ID, created, c.clockNow(), absorbOpts{
 		depsMode:   depsFromFieldsIfCarried,
 		seqMode:    seqKeep,
 		clearDirty: true,
 	})
-	c.markFreshLocked(time.Now())
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 	c.mu.Unlock()
 
@@ -128,7 +128,7 @@ func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq uint64)
 			seq := c.noteLocalMutationLocked(id)
 			c.tombstoneLocked(id, seq)
 			c.clearDependentReadyProjectionsLocked(id)
-			c.markFreshLocked(time.Now())
+			c.markFreshLocked(c.clockNow())
 		}
 		c.updateStatsLocked()
 		c.mu.Unlock()
@@ -149,7 +149,7 @@ func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq uint64)
 		if !raced {
 			c.noteLocalMutationLocked(id)
 			if found {
-				c.absorbFreshLocked(id, patched, time.Now(), absorbOpts{
+				c.absorbFreshLocked(id, patched, c.clockNow(), absorbOpts{
 					depsMode:       depsKeepCached,
 					seqMode:        seqKeep,
 					clearDirty:     false,
@@ -180,7 +180,7 @@ func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq uint64)
 	fresh = applyUpdateOptsToBead(fresh, opts)
 	eventType := c.updateEventTypeLocked(id, fresh, opts, false)
 	c.noteLocalMutationLocked(id)
-	c.absorbFreshLocked(id, fresh, time.Now(), absorbOpts{
+	c.absorbFreshLocked(id, fresh, c.clockNow(), absorbOpts{
 		depsMode:       depsFromFieldsIfCarried,
 		seqMode:        seqKeep,
 		clearDirty:     true,
@@ -189,7 +189,7 @@ func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq uint64)
 	if opts.Status != nil {
 		c.clearDependentReadyProjectionsLocked(id)
 	}
-	c.markFreshLocked(time.Now())
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 	c.mu.Unlock()
 
@@ -224,13 +224,13 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 		c.noteLocalMutationLocked(id)
 		switch {
 		case refreshed:
-			c.absorbFreshLocked(id, row, time.Now(), absorbOpts{
+			c.absorbFreshLocked(id, row, c.clockNow(), absorbOpts{
 				depsMode:   depsFromFieldsIfCarried,
 				seqMode:    seqKeep,
 				clearDirty: true,
 			})
 		case found:
-			c.absorbFreshLocked(id, row, time.Now(), absorbOpts{
+			c.absorbFreshLocked(id, row, c.clockNow(), absorbOpts{
 				depsMode:   depsKeepCached,
 				seqMode:    seqKeep,
 				clearDirty: false,
@@ -240,7 +240,7 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 			c.markDirtyLocked(id)
 		}
 		c.clearDependentReadyProjectionsLocked(id)
-		c.markFreshLocked(time.Now())
+		c.markFreshLocked(c.clockNow())
 	}
 	c.updateStatsLocked()
 	c.mu.Unlock()
@@ -283,13 +283,13 @@ func (c *CachingStore) TransferIfCurrent(id, fromAssignee, toAssignee string) (b
 		c.noteLocalMutationLocked(id)
 		switch {
 		case refreshed:
-			c.absorbFreshLocked(id, row, time.Now(), absorbOpts{
+			c.absorbFreshLocked(id, row, c.clockNow(), absorbOpts{
 				depsMode:   depsFromFieldsIfCarried,
 				seqMode:    seqKeep,
 				clearDirty: true,
 			})
 		case found:
-			c.absorbFreshLocked(id, row, time.Now(), absorbOpts{
+			c.absorbFreshLocked(id, row, c.clockNow(), absorbOpts{
 				depsMode:   depsKeepCached,
 				seqMode:    seqKeep,
 				clearDirty: false,
@@ -298,7 +298,7 @@ func (c *CachingStore) TransferIfCurrent(id, fromAssignee, toAssignee string) (b
 		default:
 			c.markDirtyLocked(id)
 		}
-		c.markFreshLocked(time.Now())
+		c.markFreshLocked(c.clockNow())
 	}
 	c.updateStatsLocked()
 	c.mu.Unlock()
@@ -368,7 +368,7 @@ func (c *CachingStore) Claim(id, assignee string) (Bead, bool, error) {
 	}
 	if !raced {
 		c.noteLocalMutationLocked(id)
-		c.absorbFreshLocked(id, row, time.Now(), absorbOpts{
+		c.absorbFreshLocked(id, row, c.clockNow(), absorbOpts{
 			depsMode:   depsKeepCached,
 			seqMode:    seqKeep,
 			clearDirty: refreshed,
@@ -377,7 +377,7 @@ func (c *CachingStore) Claim(id, assignee string) (Bead, bool, error) {
 			c.markDirtyLocked(id)
 		}
 		c.clearDependentReadyProjectionsLocked(id)
-		c.markFreshLocked(time.Now())
+		c.markFreshLocked(c.clockNow())
 	}
 	c.updateStatsLocked()
 	c.mu.Unlock()
@@ -431,7 +431,7 @@ func (c *CachingStore) Close(id string) error {
 		c.noteLocalMutationLocked(id)
 		if found {
 			// A patch reflects only this write, so any mark stands.
-			c.absorbFreshLocked(id, closed, time.Now(), absorbOpts{
+			c.absorbFreshLocked(id, closed, c.clockNow(), absorbOpts{
 				depsMode:       depsKeepCached,
 				seqMode:        seqKeep,
 				clearDirty:     refreshed,
@@ -439,7 +439,7 @@ func (c *CachingStore) Close(id string) error {
 			})
 		}
 		if c.clearDependentReadyProjectionsLocked(id) || found {
-			c.markFreshLocked(time.Now())
+			c.markFreshLocked(c.clockNow())
 		}
 	}
 	c.updateStatsLocked()
@@ -494,14 +494,14 @@ func (c *CachingStore) Reopen(id string) error {
 		c.noteLocalMutationLocked(id)
 		switch {
 		case refreshed:
-			c.absorbFreshLocked(id, reopened, time.Now(), absorbOpts{
+			c.absorbFreshLocked(id, reopened, c.clockNow(), absorbOpts{
 				depsMode:   depsFromFieldsIfCarried,
 				seqMode:    seqKeep,
 				clearDirty: true,
 			})
 		case found:
 			// The patch reflects only this write, so any mark stands.
-			c.absorbFreshLocked(id, reopened, time.Now(), absorbOpts{
+			c.absorbFreshLocked(id, reopened, c.clockNow(), absorbOpts{
 				depsMode:   depsKeepCached,
 				seqMode:    seqKeep,
 				clearDirty: false,
@@ -512,7 +512,7 @@ func (c *CachingStore) Reopen(id string) error {
 			c.markDirtyLocked(id)
 		}
 		if c.clearDependentReadyProjectionsLocked(id) || found {
-			c.markFreshLocked(time.Now())
+			c.markFreshLocked(c.clockNow())
 		}
 	}
 	c.updateStatsLocked()
@@ -576,7 +576,7 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 				// Announced below whenever this close is claimed.
 				opts.closeAnnounced = true
 			}
-			c.absorbFreshLocked(item.id, item.bead, time.Now(), opts)
+			c.absorbFreshLocked(item.id, item.bead, c.clockNow(), opts)
 			if item.bead.Status == "closed" {
 				c.clearDependentReadyProjectionsLocked(item.id)
 			}
@@ -588,7 +588,7 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 			})
 		}
 	}
-	c.markFreshLocked(time.Now())
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	c.notifyChanges(ChangeLocal, notifications)
@@ -669,14 +669,14 @@ func (c *CachingStore) finishMetadataWrite(id string, kvs map[string]string, sta
 		c.noteLocalMutationLocked(id)
 		switch {
 		case refreshed:
-			c.absorbFreshLocked(id, row, time.Now(), absorbOpts{
+			c.absorbFreshLocked(id, row, c.clockNow(), absorbOpts{
 				depsMode:   depsFromFieldsIfCarried,
 				seqMode:    seqKeep,
 				clearDirty: true,
 			})
 		case found:
 			// The patch reflects only this write, so any mark stands.
-			c.absorbFreshLocked(id, row, time.Now(), absorbOpts{
+			c.absorbFreshLocked(id, row, c.clockNow(), absorbOpts{
 				depsMode:   depsKeepCached,
 				seqMode:    seqKeep,
 				clearDirty: false,
@@ -684,7 +684,7 @@ func (c *CachingStore) finishMetadataWrite(id string, kvs map[string]string, sta
 		default:
 			c.markDirtyLocked(id)
 		}
-		c.markFreshLocked(time.Now())
+		c.markFreshLocked(c.clockNow())
 	}
 	c.updateStatsLocked()
 	c.mu.Unlock()
@@ -870,7 +870,7 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 	}
 
 	notifications := make([]cacheNotification, 0, len(refreshed))
-	now := time.Now()
+	now := c.clockNow()
 	c.mu.Lock()
 	raced := c.racedWritesLocked(ids, startSeq)
 	c.noteLocalMutationLocked(ids...)
@@ -1126,14 +1126,14 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 	}
 	c.noteLocalMutationLocked(issueID)
 	if refreshed {
-		c.absorbFreshLocked(issueID, fresh, time.Now(), absorbOpts{
+		c.absorbFreshLocked(issueID, fresh, c.clockNow(), absorbOpts{
 			depsMode:   depsExplicit,
 			deps:       deps,
 			seqMode:    seqKeep,
 			clearDirty: true,
 		})
 		c.clearReadyProjectionLocked(issueID)
-		c.markFreshLocked(time.Now())
+		c.markFreshLocked(c.clockNow())
 		c.updateStatsLocked()
 		c.mu.Unlock()
 		c.notifyChange(ChangeLocal, "bead.updated", fresh)
@@ -1141,7 +1141,7 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 	}
 	if !c.depsComplete {
 		if _, known := c.deps[issueID]; !known {
-			c.markFreshLocked(time.Now())
+			c.markFreshLocked(c.clockNow())
 			c.updateStatsLocked()
 			c.mu.Unlock()
 			return nil
@@ -1153,7 +1153,7 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 			cachedDeps[i].Type = depType
 			c.deps[issueID] = cachedDeps
 			c.clearReadyProjectionLocked(issueID)
-			c.markFreshLocked(time.Now())
+			c.markFreshLocked(c.clockNow())
 			c.updateStatsLocked()
 			c.mu.Unlock()
 			return nil
@@ -1161,7 +1161,7 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 	}
 	c.deps[issueID] = append(cachedDeps, Dep{IssueID: issueID, DependsOnID: dependsOnID, Type: depType})
 	c.clearReadyProjectionLocked(issueID)
-	c.markFreshLocked(time.Now())
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	return nil
@@ -1186,14 +1186,14 @@ func (c *CachingStore) DepRemove(issueID, dependsOnID string) error {
 	}
 	c.noteLocalMutationLocked(issueID)
 	if refreshed {
-		c.absorbFreshLocked(issueID, fresh, time.Now(), absorbOpts{
+		c.absorbFreshLocked(issueID, fresh, c.clockNow(), absorbOpts{
 			depsMode:   depsExplicit,
 			deps:       deps,
 			seqMode:    seqKeep,
 			clearDirty: true,
 		})
 		c.clearReadyProjectionLocked(issueID)
-		c.markFreshLocked(time.Now())
+		c.markFreshLocked(c.clockNow())
 		c.updateStatsLocked()
 		c.mu.Unlock()
 		c.notifyChange(ChangeLocal, "bead.updated", fresh)
@@ -1201,7 +1201,7 @@ func (c *CachingStore) DepRemove(issueID, dependsOnID string) error {
 	}
 	if !c.depsComplete {
 		if _, known := c.deps[issueID]; !known {
-			c.markFreshLocked(time.Now())
+			c.markFreshLocked(c.clockNow())
 			c.updateStatsLocked()
 			c.mu.Unlock()
 			return nil
@@ -1215,7 +1215,7 @@ func (c *CachingStore) DepRemove(issueID, dependsOnID string) error {
 			break
 		}
 	}
-	c.markFreshLocked(time.Now())
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	return nil
@@ -1232,7 +1232,7 @@ func (c *CachingStore) Delete(id string) error {
 	seq := c.noteLocalMutationLocked(id)
 	c.tombstoneLocked(id, seq)
 	c.clearDependentReadyProjectionsLocked(id)
-	c.markFreshLocked(time.Now())
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	if haveDeleted {
@@ -1317,7 +1317,7 @@ func (c *CachingStore) evictBatchDeletedLocked(deleted map[string]struct{}) {
 		c.clearDependentReadyProjectionsLocked(id)
 	}
 	c.dropIncomingEdgesToDeletedLocked(deleted)
-	c.markFreshLocked(time.Now())
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 }
 

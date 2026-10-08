@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
@@ -281,7 +280,7 @@ func (c *CachingStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	seq := c.noteLocalMutationLocked(id)
 	c.tombstoneLocked(id, seq)
 	c.clearDependentReadyProjectionsLocked(id)
-	c.markFreshLocked(time.Now())
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	if haveDeleted {
@@ -435,7 +434,7 @@ func (c *CachingStore) evictForConditionalWriteLocked(id string) conditionalEvic
 	delete(c.deps, id)
 	c.dirty[id] = struct{}{}
 	c.clearDependentReadyProjectionsLocked(id)
-	c.markFreshLocked(time.Now())
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 	return ev
 }
@@ -522,8 +521,8 @@ func (c *CachingStore) installAfterConditionalWrite(id string, ev conditionalEvi
 		opts.depsMode = depsExplicit
 		opts.deps = ev.deps
 	}
-	c.absorbFreshLocked(id, row, time.Now(), opts)
-	c.markFreshLocked(time.Now())
+	c.absorbFreshLocked(id, row, c.clockNow(), opts)
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 }
 

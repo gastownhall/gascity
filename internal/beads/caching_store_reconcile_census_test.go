@@ -113,6 +113,7 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"eventPrefixes": true, // event-ownership config, fixed at construction
 		"epoch":         true, // instance identity, fixed at construction
 		"reconcileGate": true, // reconcile-loop gate, fixed at construction
+		"now":           true, // the clock (WithClock), fixed at construction
 		"onChange":      true, "problemf": true, "problemLog": true,
 		"lastReconcileLogAt": true, "primeMu": true, "primeRunning": true,
 		"primeCycle": true, "lastFullPrimeStartedAt": true, "primeRetryDelay": true,

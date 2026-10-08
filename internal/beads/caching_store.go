@@ -37,6 +37,9 @@ type CachingStore struct {
 	// reconcileGate, when set, is asked before each periodic reconcile; a
 	// false answer skips that cycle (WithReconcileGate).
 	reconcileGate func() bool
+	// now is the clock every window and due time reads (WithClock); nil
+	// reads the real one. Read it through clockNow.
+	now func() time.Time
 
 	mu           sync.RWMutex
 	beads        map[string]Bead
@@ -141,6 +144,7 @@ type CachingStore struct {
 	// eventCheckDeadline bounds a subprocess event check
 	// (WithEventCheckDeadline); eventCheckBusy holds the one such check in
 	// flight. eventCheckAfter replaces time.After for its deadline in tests.
+	// The deadline is real time, not now's: it bounds a real process wait.
 	eventCheckDeadline            time.Duration
 	eventCheckBusy                atomic.Bool
 	eventCheckAfter               func(time.Duration) <-chan time.Time
@@ -508,11 +512,39 @@ func WithReconcileGate(allowed func() bool) CachingStoreOption {
 	}
 }
 
+// WithClock sets the clock the cache's windows and due times read: the
+// recent-local-write and write-verify windows, fence retention, the lazy
+// full-Prime retry, the reconcile due time and its problem backoff, and the
+// stamps they compare (default time.Now). A simulator whose clock runs faster
+// than the wall's passes its own, so a window closes on simulated time. Real
+// waits and measurements stay on the real clock: the reconcile loop's
+// timers, Prime's retry sleep, the event check deadline
+// (WithEventCheckDeadline), and the backing latencies that drive cadence.
+// So do readiness's defer_until checks and the UpdatedAt a conditional
+// release or transfer patches in, which mirror the backing's own clock. A
+// nil now keeps the default.
+//
+// now can run with c.mu held, from any goroutine, so it must be safe for
+// concurrent use, must not block, and must never call back into the cache.
+// Stats' timestamps (LastFreshAt, LastReconcileAt, LastProblemAt) follow it
+// too, so a reader comparing them with the wall clock, as the API's cache-age
+// header does (internal/api/cache_liveness.go), reads a skewed age. No
+// production cache injects a clock.
+func WithClock(now func() time.Time) CachingStoreOption {
+	return func(c *CachingStore) {
+		c.now = now
+	}
+}
+
 // NewCachingStoreForTest wraps any Store for testing without production prefix
 // validation. It keeps the legacy 3-param onChange (tests do not exercise the
 // typed correlation fields); adaptLegacyOnChange bridges it to production form.
-func NewCachingStoreForTest(backing Store, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
-	return newCachingStore(backing, "", adaptLegacyOnChange(onChange))
+func NewCachingStoreForTest(backing Store, onChange func(eventType, beadID string, payload json.RawMessage), opts ...CachingStoreOption) *CachingStore {
+	cs := newCachingStore(backing, "", adaptLegacyOnChange(onChange))
+	for _, opt := range opts {
+		opt(cs)
+	}
+	return cs
 }
 
 // NewCachingStoreForTestWithPrefix wraps any Store for tests that need
@@ -547,7 +579,7 @@ func (c *CachingStore) ReconcileNowForTest() {
 // ReconcileIfDueForTest runs one periodic reconcile-loop step now: the cycle
 // runs only if one is due and the reconcile gate (WithReconcileGate) allows it.
 func (c *CachingStore) ReconcileIfDueForTest() {
-	c.reconcileIfDue(time.Now())
+	c.reconcileIfDue(c.clockNow())
 }
 
 // SetPrimeRetryDelayForTest overrides the inter-attempt backoff Prime
@@ -580,6 +612,14 @@ func newCachingStore(backing Store, idPrefix string, onChange func(source Change
 		primeRetryDelay: defaultCachePrimeRetryDelay,
 		stopCh:          make(chan struct{}),
 	}
+}
+
+// clockNow reads the cache's clock (WithClock), the real one by default.
+func (c *CachingStore) clockNow() time.Time {
+	if c.now == nil {
+		return time.Now()
+	}
+	return c.now()
 }
 
 func defaultCachePrimeRetryDelay(attempt int) time.Duration {
@@ -649,7 +689,7 @@ func (c *CachingStore) advanceObservationLocked() {
 
 func (c *CachingStore) noteLocalMutationLocked(ids ...string) uint64 {
 	seq := c.noteMutationLocked(ids...)
-	now := time.Now()
+	now := c.clockNow()
 	for _, id := range ids {
 		if id == "" {
 			continue
@@ -1140,7 +1180,7 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 			c.mu.Unlock()
 			return errDirtyOverlayFallback
 		}
-		now := time.Now()
+		now := c.clockNow()
 		absorbed := 0
 		for _, f := range fetched {
 			// Fence discipline (I3): never overwrite a mutation that landed
@@ -1335,7 +1375,7 @@ func (c *CachingStore) PrimeActive() error {
 	// newer than the listing and kept.
 	guarded := c.mutationSeq != startSeq || c.scanGen != startScan
 	c.scanGen++
-	now := time.Now()
+	now := c.clockNow()
 	for _, b := range all {
 		if guarded {
 			if c.refetchFencedLocked(b.ID, startSeq) {
@@ -1457,7 +1497,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		return err
 	}
 
-	now := time.Now()
+	now := c.clockNow()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.fullScanGen > startScan {
@@ -1614,7 +1654,7 @@ func (c *CachingStore) ensureFullPrime(ctx context.Context) error {
 	if err := c.cacheContextErr(ctx); err != nil {
 		return errors.Join(ErrCacheUnavailable, err)
 	}
-	cycle, owner, suppressed := c.beginLazyFullPrime(time.Now())
+	cycle, owner, suppressed := c.beginLazyFullPrime(c.clockNow())
 	if suppressed {
 		return ErrCacheUnavailable
 	}
@@ -1662,7 +1702,7 @@ func (c *CachingStore) startFullPrimeLocked() *fullPrimeCycle {
 	cycle := &fullPrimeCycle{done: make(chan struct{})}
 	c.primeRunning = true
 	c.primeCycle = cycle
-	c.lastFullPrimeStartedAt = time.Now()
+	c.lastFullPrimeStartedAt = c.clockNow()
 	return cycle
 }
 
@@ -1809,7 +1849,7 @@ func (c *CachingStore) recordProblemLocked(op string, err error) {
 		return
 	}
 	msg := fmt.Sprintf("%s: %v", op, err)
-	now := time.Now()
+	now := c.clockNow()
 	c.stats.ProblemCount++
 	c.stats.LastProblemAt = now
 	c.stats.LastProblem = msg
