@@ -65,9 +65,11 @@ func (cr *CityRuntime) installPlanner(rt *plannerRuntime) {
 // newPlannerHost is the one place the planner's view of the city is built
 // (F2). Every closure reads state a lock publishes or state fixed before run
 // starts; run sets inventoryLane before the startup step boots the planner.
-// The capacity guard and template resolutions are left out: no trace-only
-// arm reads them.
+// The capacity guard is built here, before run, so the planner shares the
+// controller's without racing its lazy build. Template resolutions wait for
+// their resolver (C5a1-wire); until then every start refuses.
 func (cr *CityRuntime) newPlannerHost() plannerHost {
+	guard := cr.ensureEndpointCapacityGuard()
 	return plannerHost{
 		gather: gatherEnv{
 			CityPath: cr.cityPath, CityName: cr.cityName,
@@ -79,7 +81,8 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 				}
 				return cr.inventoryLane.cache
 			},
-			Health: func() *providerHealthSnapshot { return loadProviderHealthSnapshot(cr.cityPath) },
+			Capacity: func() *endpointCapacityGuard { return guard },
+			Health:   func() *providerHealthSnapshot { return loadProviderHealthSnapshot(cr.cityPath) },
 			Episodes: func() (map[string]sessionpkg.StartupHealthEpisode, error) {
 				return readStartupHealthEpisodes(cr.v2SessionsStore())
 			},

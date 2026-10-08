@@ -1262,6 +1262,16 @@ func TestV2BindHostAfterStartPanics(t *testing.T) {
 	rt.bindHost(cr.newPlannerHost())
 }
 
+// Kills a planner whose effects never see the endpoint breaker (C5a1): the
+// host hands gather and the start effect the controller's own guard.
+func TestV2HostSharesEndpointCapacityGuard(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, false)
+	h := cr.newPlannerHost()
+	if h.gather.Capacity == nil || h.gather.Capacity() == nil || h.gather.Capacity() != cr.ensureEndpointCapacityGuard() {
+		t.Fatal("the planner host does not share the controller's endpoint capacity guard")
+	}
+}
+
 // Kills: the city runtime's reload drift judging admission without the
 // environment its controller latched with (mdrift-noenv). A legacy
 // controller latched with the developer override does not warn that a v2

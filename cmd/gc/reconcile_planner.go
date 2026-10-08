@@ -361,7 +361,8 @@ func (p *planner) record(ev events.Event) {
 
 // backoffSettled applies s to the backoff table (P4): a landing or no-op
 // resets its record; a refusal or failure backs it off with its cause,
-// except a swap pause. A create's worktree verdict backs off or resets the
+// except a swap pause and an endpoint-gate refusal, which are deferrals the
+// gate itself paces. A create's worktree verdict backs off or resets the
 // work item's record.
 func (p *planner) backoffSettled(s settlement) {
 	key := s.BackoffKey
@@ -372,7 +373,7 @@ func (p *planner) backoffSettled(s settlement) {
 	case key == "":
 	case s.Outcome == settledLanded || s.Outcome == settledNoop:
 		p.backoff.Succeed(key)
-	case (s.Outcome == settledRefused || s.Outcome == settledFailed) && s.Cause != causeSwapPause:
+	case (s.Outcome == settledRefused || s.Outcome == settledFailed) && s.Cause != causeSwapPause && s.Cause != causeEndpointGate:
 		p.backoff.Refuse(key, s.At, time.Time{}, s.Cause, s.Fingerprint)
 	}
 	switch {

@@ -54,8 +54,10 @@ type startLeaf struct {
 	// onIdentity runs at each identity read: between the fresh read and the
 	// commit, where an out-of-process writer can land.
 	onIdentity func()
-	// onRead runs at each fresh read; onStart inside each Start.
-	onRead, onStart func()
+	// onRead runs at each fresh read; onStart inside each Start, with its
+	// context.
+	onRead  func()
+	onStart func(context.Context)
 }
 
 func newStartLeaf() *startLeaf {
@@ -98,9 +100,9 @@ func (l *startLeaf) GetAllEnvironment(name string) (map[string]string, error) {
 	return l.env[name], nil
 }
 
-func (l *startLeaf) Start(_ context.Context, name string, cfg runtime.Config) error {
+func (l *startLeaf) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if l.onStart != nil {
-		l.onStart()
+		l.onStart(ctx)
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -176,11 +178,11 @@ func (f *startFixture) pass(t *testing.T) *effectPass {
 	return p
 }
 
-// run runs the registered adopt effect on the row.
-func (f *startFixture) run(t *testing.T) settlement {
+// run runs kind's registered effect on the row.
+func (f *startFixture) run(t *testing.T, kind string) settlement {
 	t.Helper()
-	it := intent{Kind: intentAdopt, Key: f.key, Deadline: f.clk.Now().Add(70 * time.Second)}
-	return effectRegistry[intentAdopt](f.pass(t), it)(context.Background())
+	it := intent{Kind: kind, Key: f.key, Deadline: f.clk.Now().Add(70 * time.Second)}
+	return effectRegistry[kind](f.pass(t), it)(context.Background())
 }
 
 func (f *startFixture) meta(t *testing.T) map[string]string {
@@ -279,7 +281,7 @@ func TestAdoptCommitsAliveCurrentUncommittedRow(t *testing.T) {
 			f := newStartFixture(t, backend.open(t), "state", "creating", "pending_create_claim", "true")
 			f.leaf.runtimeAs(liveAlive, f.key.ID, "tok")
 			f.clk.Advance(time.Second)
-			s := f.run(t)
+			s := f.run(t, intentAdopt)
 			if s.Outcome != settledLanded || s.Event != nil || s.Noted == nil || s.Noted.Name != "s-a" || !s.Noted.At.Equal(f.clk.Now()) {
 				t.Fatalf("settlement %+v, want landed, noted at the read, with no event", s)
 			}
@@ -315,7 +317,7 @@ func TestCommitRequiresRuntimeToCarryIntentToken(t *testing.T) {
 				id = ""
 			}
 			f.leaf.runtimeAs(liveAlive, id, c.token)
-			if s := f.run(t); s.Outcome != settledRefused || s.Cause != c.cause {
+			if s := f.run(t, intentAdopt); s.Outcome != settledRefused || s.Cause != c.cause {
 				t.Fatalf("settlement %+v, want refused with cause %q", s, c.cause)
 			}
 			if m := f.meta(t); m["state"] != "creating" || m["started_config_hash"] != "" {
@@ -347,7 +349,7 @@ func TestCommitPremise(t *testing.T) {
 				f := newStartFixture(t, backend.open(t), "state", "creating")
 				f.leaf.runtimeAs(liveAlive, f.key.ID, "tok")
 				f.leaf.onIdentity = func() { f.set(t, c.write) }
-				s := f.run(t)
+				s := f.run(t, intentAdopt)
 				if got := s.Outcome == settledLanded; got != c.landed || (!got && s.Cause != causeCommitLost) {
 					t.Fatalf("%s: settlement %+v, want landed=%v (else commit-lost)", backend.name, s, c.landed)
 				}
@@ -365,7 +367,7 @@ func TestCommitPremise(t *testing.T) {
 				t.Error(err)
 			}
 		}
-		if s := f.run(t); s.Outcome != settledRefused || s.Cause != causeCommitLost {
+		if s := f.run(t, intentAdopt); s.Outcome != settledRefused || s.Cause != causeCommitLost {
 			t.Fatalf("settlement %+v, want commit-lost", s)
 		}
 	})
@@ -379,7 +381,7 @@ func TestStartEffectHoldsNameLockThroughCommit(t *testing.T) {
 	f := newStartFixture(t, requireMem(t), "state", "creating")
 	f.leaf.runtimeAs(liveAlive, f.key.ID, "tok")
 	unlock := runtimeNames.tryLock(t.Name(), "s-a")
-	if s := f.run(t); s.Outcome != settledRefused || s.Cause != causeNameBusy || len(f.leaf.since) != 0 {
+	if s := f.run(t, intentAdopt); s.Outcome != settledRefused || s.Cause != causeNameBusy || len(f.leaf.since) != 0 {
 		t.Fatalf("settlement %+v after %d reads, want name-busy before any read", s, len(f.leaf.since))
 	}
 	unlock()
@@ -393,7 +395,7 @@ func TestStartEffectHoldsNameLockThroughCommit(t *testing.T) {
 	}
 	f.leaf.onIdentity = held
 	f.store = &getHookStore{Store: f.store, onGet: func() { gets++; held() }}
-	if s := f.run(t); s.Outcome != settledLanded || gets == 0 {
+	if s := f.run(t, intentAdopt); s.Outcome != settledLanded || gets == 0 {
 		t.Fatalf("settlement %+v after %d store reads, want landed", s, gets)
 	}
 	if u := runtimeNames.tryLock(t.Name(), "s-a"); u == nil {
@@ -427,7 +429,7 @@ func TestFreshTmuxReadIsPerNameNotGlobalInvalidate(t *testing.T) {
 	f.leaf.runtimeAs(liveAlive, f.key.ID, "tok")
 	f.leaf.cached["s-a"] = runtime.Liveness{}
 	began := f.clk.Now()
-	s := f.run(t)
+	s := f.run(t, intentAdopt)
 	if s.Outcome != settledNoop || s.Cause != causeAlreadyRunning || s.Noted == nil {
 		t.Fatalf("settlement %+v, want a noted Noop", s)
 	}
@@ -454,7 +456,7 @@ func TestStartEffectMakesNoBlindWrites(t *testing.T) {
 			f := newStartFixture(t, requireMem(t), "state", c.state)
 			f.leaf.runtimeAs(liveAlive, f.key.ID, c.token)
 			f.store = blindSpyStore{Store: f.store, t: t, row: f.key.ID}
-			f.run(t)
+			f.run(t, intentAdopt)
 		})
 	}
 }
@@ -595,7 +597,7 @@ func TestNoteStampedAtReadNotDrain(t *testing.T) {
 	f.leaf.runtimeAs(liveAlive, f.key.ID, "tok")
 	read := f.clk.Now()
 	f.leaf.onIdentity = func() { f.clk.Advance(time.Minute) }
-	s := f.run(t)
+	s := f.run(t, intentAdopt)
 	if s.Noted == nil || !s.Noted.At.Equal(read) {
 		t.Fatalf("noted %+v, want stamped at the read %s", s.Noted, read)
 	}
@@ -629,7 +631,7 @@ func TestCommitRetriesContention(t *testing.T) {
 				}
 			}
 		}}
-		s := f.run(t)
+		s := f.run(t, intentAdopt)
 		if got := s.Outcome == settledLanded; got != c.landed || (!got && s.Cause != causeCommitContended) {
 			t.Fatalf("%d races: settlement %+v, want landed=%v, else commit-contended", c.races, s, c.landed)
 		}
@@ -651,7 +653,7 @@ func TestStartEffectHoldsMutationLockFromReadThroughCommit(t *testing.T) {
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	if s := f.run(t); s.Outcome != settledLanded {
+	if s := f.run(t, intentAdopt); s.Outcome != settledLanded {
 		t.Fatalf("settlement %+v, want landed", s)
 	}
 	<-acquired
@@ -809,7 +811,7 @@ func TestAdoptPrepareWritesNothing(t *testing.T) {
 	f.leaf.runtimeAs(liveAlive, f.key.ID, "tok")
 	templateDir := f.meta(t)[beadmeta.WorkDirMetadataKey]
 	f.store = blindSpyStore{Store: f.store, t: t, row: f.key.ID}
-	if s := f.run(t); s.Outcome != settledLanded {
+	if s := f.run(t, intentAdopt); s.Outcome != settledLanded {
 		t.Fatalf("settlement %+v, want landed", s)
 	}
 	if got := f.meta(t)[beadmeta.WorkDirMetadataKey]; got != templateDir {

@@ -11,16 +11,16 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 // The start effect (CONTRACT v5 S1, S2): bringUp, which may launch and costs
 // a token, and adopt, which never launches and costs none, run one function
 // under the runtime name lock. It reads the runtime fresh (O1) and picks its
 // verb from S1's table, keyed by the row's token and that read. A refusal
-// writes nothing. C5a1-2 adds the Launch and registers bringUp; C5a2 adds
-// the abandon table and the rollback, and C5a3 the dead row's
-// classification and recycle, adoption's side effects, the lost-commit
-// cleanup and the pending-create StaleSelf exit.
+// writes nothing. C5a2 adds the abandon table and the rollback, and C5a3
+// the dead row's classification and recycle, adoption's side effects, the
+// lost-commit cleanup and the pending-create StaleSelf exit.
 
 // Start refusal causes. Each backs the row off (P4). The shared ones
 // (name-busy, route-unknown, liveness-unknown, not-present) are
@@ -121,6 +121,8 @@ type startEffect struct {
 	pass  *effectPass
 	it    intent
 	adopt bool
+	// verify is worktree.Verify unless a test injects one.
+	verify func(worktree.Spec) (worktree.Report, error)
 }
 
 func adoptEffect(p *effectPass, it intent) func(context.Context) settlement {
@@ -139,8 +141,9 @@ type startAttempt struct {
 
 // run is S1: resolve the template and the route, take the name lock, then
 // the row's session mutation lock around one section that reads fresh and
-// acts on the table's verb (runLocked). The name lock is held through the
-// commit, and past the deadline while a provider call runs (P3).
+// acts on the table's verb (runLocked); a Launch continues outside it. The
+// name lock is held through the commit, and past the deadline while a
+// provider call runs (P3).
 func (e startEffect) run(ctx context.Context) settlement {
 	row, ok := e.pass.World.Census.Rows[e.it.Key]
 	if !ok {
@@ -172,31 +175,38 @@ func (e startEffect) run(ctx context.Context) settlement {
 	}
 	defer unlock()
 	var s settlement
+	var launch *launchPrep
 	_ = session.WithSessionMutationLock(row.Info.ID, func() error {
-		s = e.runLocked(ctx, a)
+		s, launch = e.runLocked(ctx, a)
 		return nil
 	})
+	if launch != nil {
+		return e.launch(ctx, a, launch)
+	}
 	return s
 }
 
 // runLocked is run's section under the row's session mutation lock: the
-// fresh read, taken since the section began, and the verb's write.
-func (e startEffect) runLocked(ctx context.Context, a startAttempt) settlement {
+// fresh read, taken since the section began, and the verb's write; a
+// Launch's PreWake returns the launch to run outside the section.
+func (e startEffect) runLocked(ctx context.Context, a startAttempt) (settlement, *launchPrep) {
 	read := e.observe(ctx, a, a.row.Info, e.pass.Start.Clock.Now())
 	if ctx.Err() != nil { // the read proves nothing then
-		return deadlineSettlement(ctx)
+		return deadlineSettlement(ctx), nil
 	}
 	switch verb, cause := resolveStart(e.adopt, read, a.row.Info); verb {
+	case verbLaunch:
+		return e.preWake(ctx, a)
 	case verbCommit:
 		prepared, err := e.prepare(a, a.row.Info, sessTranscriptUnknown)
 		if err != nil {
-			return settlement{Outcome: settledFailed, Cause: causePrepare, Err: err}
+			return settlement{Outcome: settledFailed, Cause: causePrepare, Err: err}, nil
 		}
-		return e.commit(ctx, a, prepared, a.row.InstanceToken, read.At, nil)
+		return e.commit(ctx, a, prepared, a.row.InstanceToken, read.At, nil), nil
 	case verbNoop:
-		return settlement{Outcome: settledNoop, Cause: cause, Noted: &notedRuntime{Name: a.name, At: read.At}}
+		return settlement{Outcome: settledNoop, Cause: cause, Noted: &notedRuntime{Name: a.name, At: read.At}}, nil
 	default:
-		return refused(cause)
+		return refused(cause), nil
 	}
 }
 
@@ -238,7 +248,7 @@ func (e startEffect) observe(ctx context.Context, a startAttempt, row session.In
 // effect's transcript state (S-1), so it writes nothing.
 func (e startEffect) prepare(a startAttempt, row session.Info, transcript sessTranscriptState) (*preparedStart, error) {
 	prepared, _, err := buildPreparedStartWithTranscript(startCandidate{info: row, tp: a.tp}, e.pass.World.CityPath, e.pass.World.Env.Cfg,
-		blindWriteRefusingStore{inner: a.writer.store}, nil, &transcript)
+		blindWriteRefusingStore{inner: a.writer.store}, e.taskWorkDirs(), &transcript)
 	return prepared, err
 }
 
