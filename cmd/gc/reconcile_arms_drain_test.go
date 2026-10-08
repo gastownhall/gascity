@@ -263,10 +263,9 @@ func TestLensCancelsAnAuthorizedDrain(t *testing.T) {
 	}
 }
 
-// TestNoDrainOnKeepOrUnknownLiveness (P-3, GUAR-053, I15). Kills a begin
-// under Keep, on a runtime not read alive, on a row with open assigned work
-// (SESS-074), on a row that no longer claims its runtime, or on a row under
-// an unexpired hold or quarantine.
+// TestNoDrainOnKeepOrUnknownLiveness (P-3, GUAR-053). Kills a begin under
+// Keep, on a runtime not read alive, on a row with open assigned work
+// (SESS-074), or on a row that no longer claims its runtime.
 func TestNoDrainOnKeepOrUnknownLiveness(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -279,8 +278,6 @@ func TestNoDrainOnKeepOrUnknownLiveness(t *testing.T) {
 		{name: "gone", entry: func(e *selectionEntry) { e.Desired, e.Liveness = desireDrain, livenessGone }, want: decideNoAction},
 		{name: "open work", entry: func(e *selectionEntry) { undesired(drainOrphaned)(e); e.OpenWork = &assignedWorkView{BeadID: "w"} }, want: decideDrainWorkKept},
 		{name: "asleep", meta: []string{"state", "asleep"}, entry: undesired(drainOrphaned), want: decideNoAction},
-		{name: "held (I15)", meta: []string{"held_until", rowAt(time.Minute), "sleep_reason", "user-hold"}, entry: undesired(drainOrphaned), want: decideDrainTimerHeld},
-		{name: "quarantined (I15)", meta: []string{"quarantined_until", rowAt(time.Minute), "sleep_reason", "quarantine"}, entry: func(e *selectionEntry) { e.Desired = desireSleep }, want: decideDrainTimerHeld},
 	} {
 		it, _ := decideDrain(t, c.meta, c.entry)
 		if it.Kind != "" || it.Reason != c.want {
@@ -402,5 +399,25 @@ func TestGatherReadsOperatorSuspendOnlyInsideGrace(t *testing.T) {
 	w := f.gather(t)
 	if len(w.OperatorSuspend) != 1 || w.OperatorSuspend[rowKeyOf("gc-1")] != "agent" {
 		t.Fatalf("OperatorSuspend = %v, want only gc-1's agent cause", w.OperatorSuspend)
+	}
+}
+
+// TestDrainBeginsUnderHoldOrQuarantineAsLegacy (owner ruling: an unexpired
+// hold or quarantine is not operator-dormant, D1 rule 2). Kills a begin
+// withheld where legacy drains: a live quarantined row the allocation
+// sleeps, and an orphaned row under a hold.
+func TestDrainBeginsUnderHoldOrQuarantineAsLegacy(t *testing.T) {
+	for _, c := range []struct {
+		name, reason string
+		meta         []string
+		entry        func(*selectionEntry)
+	}{
+		{"live quarantined row", reasonNoWake, []string{"quarantined_until", rowAt(time.Minute), "sleep_reason", "quarantine"}, func(e *selectionEntry) { e.Desired = desireSleep }},
+		{"orphaned row under a hold", drainOrphaned, []string{"held_until", rowAt(time.Minute), "sleep_reason", "user-hold"}, undesired(drainOrphaned)},
+	} {
+		it, _ := decideDrain(t, c.meta, c.entry)
+		if it.Reason != decideDrainBegin+c.reason || it.Patch[drainIntentReasonKey] != c.reason {
+			t.Errorf("%s: %+v, want the %s begin", c.name, it, c.reason)
+		}
 	}
 }

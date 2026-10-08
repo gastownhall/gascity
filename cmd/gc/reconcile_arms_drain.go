@@ -25,17 +25,15 @@ const (
 	decideDrainWorkKept  = "drain-kept:assigned-work"
 	decideIdleUnprovable = "drain-kept:idle-unprovable" // SESS-621
 	decideIdleStopClear  = "idle-stop-pending-clear"    // SESS-616
-	decideDrainTimerHeld = "drain-kept:held"            // I15: an unexpired hold or quarantine
 )
 
 // Drain reasons and markers the allocation does not name.
 const (
-	drainIdle              = string(session.SleepReasonIdle)
-	drainConfigDrift       = "config-drift"
-	reasonIdleSleep        = "idle-sleep"
-	sleepIntentIdle        = "idle-stop-pending"
-	timerBlockerHold       = "user_hold"
-	timerBlockerQuarantine = "quarantine"
+	drainIdle        = string(session.SleepReasonIdle)
+	drainConfigDrift = "config-drift"
+	reasonIdleSleep  = "idle-sleep"
+	sleepIntentIdle  = "idle-stop-pending"
+	timerBlockerHold = "user_hold"
 )
 
 // drainRank orders the reasons whose authorization is "an equal or
@@ -195,7 +193,9 @@ func armDrainVoidCancel(r *rowFacts) (intent, bool) {
 // (v5 D1). An undesired row (orphaned, suspended) with open or in-progress
 // assigned work stays open (SESS-074), and one woken within INC-003's grace
 // of now, in either direction, waits for its end unless an operator
-// suspended it (v5.4). An idle begin passes SESS-621's gate. A requested or
+// suspended it (v5.4). An unexpired hold or quarantine is not
+// operator-dormant (D1 rule 2), so a begin proceeds where legacy drains. An
+// idle begin passes SESS-621's gate. A requested or
 // acked row holds for the signal (C6b1, C6c2). A woken row's leftover
 // idle-stop-pending mark is cleared (SESS-616).
 func armDrainBegin(r *rowFacts) (intent, bool) {
@@ -212,9 +212,6 @@ func armDrainBegin(r *rowFacts) (intent, bool) {
 	}
 	if e.Desired != desireSleep && e.Desired != desireDrain {
 		return intent{}, false
-	}
-	if b := lifecycleTimerBlockerInfo(info, r.w.Now); b == timerBlockerHold || b == timerBlockerQuarantine {
-		return intent{Reason: decideDrainTimerHeld}, true // A6's deadline re-decides at its expiry
 	}
 	reason := drainReasonOf(r)
 	allowed, _ := idleProof(r.w, info, reason)

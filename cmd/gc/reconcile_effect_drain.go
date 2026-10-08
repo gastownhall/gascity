@@ -104,10 +104,13 @@ func provedIdle(ctx context.Context, p *effectPass, name string) bool {
 	return err == nil && (last.IsZero() || !last.After(p.World.Now))
 }
 
+// recordDrainTransition is legacy's drain telemetry; a test reads it.
+var recordDrainTransition = telemetry.RecordDrainTransition
+
 // drainTransition records legacy's drain telemetry for a landed write.
 func drainTransition(ctx context.Context, s settlement, name, reason, transition string) settlement {
 	if s.Outcome == settledLanded {
-		telemetry.RecordDrainTransition(context.WithoutCancel(ctx), name, reason, transition)
+		recordDrainTransition(context.WithoutCancel(ctx), name, reason, transition)
 	}
 	return s
 }

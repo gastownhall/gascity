@@ -211,3 +211,24 @@ func TestDrainBeginTakesTheRuntimeNameLock(t *testing.T) {
 		t.Fatalf("a refused begin wrote %v", got.Metadata)
 	}
 }
+
+// TestDrainBeginRecordsItsTransition. Kills a begin that lands without
+// legacy's drain telemetry, or records one it did not land: a landed begin
+// records (name, reason, "begin") once, a refused one nothing.
+func TestDrainBeginRecordsItsTransition(t *testing.T) {
+	var got []string
+	saved := recordDrainTransition
+	t.Cleanup(func() { recordDrainTransition = saved })
+	recordDrainTransition = func(_ context.Context, name, reason, transition string) {
+		got = append(got, name+"/"+reason+"/"+transition)
+	}
+	p, it, _, leaf := admittedBegin(t, func(e *selectionEntry) { e.Desired = desireSleep })
+	leaf.SetAttached("s-gc-1", true)
+	if s := runBegin(p, it); s.Outcome != settledRefused || len(got) != 0 {
+		t.Fatalf("refused begin %+v recorded %v, want nothing", s, got)
+	}
+	p, it, _, _ = admittedBegin(t, func(e *selectionEntry) { e.Desired = desireSleep })
+	if s := runBegin(p, it); s.Outcome != settledLanded || len(got) != 1 || got[0] != "s-gc-1/"+reasonNoWake+"/begin" {
+		t.Fatalf("landed begin %+v recorded %v, want s-gc-1/%s/begin once", s, got, reasonNoWake)
+	}
+}

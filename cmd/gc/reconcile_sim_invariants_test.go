@@ -193,18 +193,21 @@ func (s *sim) checkWrite(w simWrite) {
 // dormantChange returns a key a v2 write changed on b that an operator owns
 // at t, or "": an honored kill fence owns the row's lifecycle and its sleep
 // reason, a suspend the row's state, and an unexpired hold or quarantine its
-// timer and sleep reason; no dormant row is woken or given a stop request,
-// though one it holds may be cleared.
+// timer and sleep reason. Only an operator-dormant row (D1 rule 2: killed,
+// suspended, or sleep_intent=user-hold) is never woken or given a stop
+// request, though one it holds may be cleared; a hold or quarantine alone is
+// not dormant, and legacy drains under one (owner ruling at C6a2).
 func dormantChange(b beads.Bead, a map[string]string, t time.Time) string {
 	m := b.Metadata
 	until := func(k string) bool { at, err := time.Parse(time.RFC3339, m[k]); return err == nil && at.After(t) }
 	reason := session.SleepReason(m["sleep_reason"])
 	var owned []string
+	dormant := strings.TrimSpace(m["sleep_intent"]) == string(session.SleepReasonUserHold)
 	if session.KillPendingMetadata(m["state"], m["state_reason"], m["sleep_reason"], m["slept_at"], t) {
-		owned = append(owned, "state", "state_reason", "sleep_reason", "slept_at")
+		owned, dormant = append(owned, "state", "state_reason", "sleep_reason", "slept_at"), true
 	}
 	if m["state"] == string(session.StateSuspended) {
-		owned = append(owned, "state", "suspended_at")
+		owned, dormant = append(owned, "state", "suspended_at"), true
 	}
 	if until("held_until") {
 		owned = append(owned, "held_until")
@@ -218,13 +221,13 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time) string {
 			owned = append(owned, "sleep_reason")
 		}
 	}
-	if len(owned) == 0 {
-		return ""
-	}
 	for _, k := range owned {
 		if a[k] != m[k] {
 			return k
 		}
+	}
+	if !dormant {
+		return ""
 	}
 	for _, k := range stopKeys { // the residue void clears them (v5 D1, R1 as amended at C6a)
 		if a[k] != m[k] && a[k] != "" {
@@ -434,5 +437,30 @@ func TestSimChecksBite(t *testing.T) {
 				t.Errorf("the check reported %q, want an %sviolation", s.failures, c.inv)
 			}
 		})
+	}
+}
+
+// Kills an I15 checker whose dormant set strays from D1 rule 2: a stop
+// request on a held or quarantined row is no violation; on a user-hold,
+// suspended or killed row it is.
+func TestDormantChangeFollowsRule2(t *testing.T) {
+	at := plannerT0
+	soon := at.Add(time.Minute).Format(time.RFC3339)
+	for _, c := range []struct {
+		name    string
+		meta    map[string]string
+		dormant bool
+	}{
+		{"held", map[string]string{"held_until": soon, "sleep_reason": "user-hold"}, false},
+		{"quarantined", map[string]string{"quarantined_until": soon, "sleep_reason": "quarantine"}, false},
+		{"user-hold", map[string]string{"sleep_intent": "user-hold"}, true},
+		{"suspended", map[string]string{"state": "suspended"}, true},
+		{"killed", map[string]string{"state": "asleep", "state_reason": session.KillPendingReason, "sleep_reason": "killed", "slept_at": at.Format(time.RFC3339)}, true},
+	} {
+		after := maps.Clone(c.meta)
+		after[drainIntentReasonKey] = "orphaned"
+		if got := dormantChange(beads.Bead{Metadata: c.meta}, after, at); (got != "") != c.dormant {
+			t.Errorf("%s: dormantChange = %q, want a violation %v", c.name, got, c.dormant)
+		}
 	}
 }
