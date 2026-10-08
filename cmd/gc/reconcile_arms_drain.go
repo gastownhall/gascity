@@ -194,7 +194,8 @@ func armDrainVoidCancel(r *rowFacts) (intent, bool) {
 // assigned work stays open (SESS-074), and one woken within INC-003's grace
 // of now, in either direction, waits for its end unless an operator
 // suspended it (v5.4). An unexpired hold or quarantine is not
-// operator-dormant (D1 rule 2), so a begin proceeds where legacy drains. An
+// operator-dormant (D1 rule 2), so a begin proceeds where legacy drains; a
+// sleep_intent=user-hold row is, and C6b2's direct stop owns it. An
 // idle begin passes SESS-621's gate. A requested or
 // acked row holds for the signal (C6b1, C6c2). A woken row's leftover
 // idle-stop-pending mark is cleared (SESS-616).
@@ -203,8 +204,9 @@ func armDrainBegin(r *rowFacts) (intent, bool) {
 		return intent{Reason: decideStopActive}, req.Phase != stopSignaled // a signaled one is A4's
 	}
 	e, info := r.entry, r.row.Info
-	if e.Liveness != livenessAlive || !sessionBeadClaimsLiveRuntime(info) {
-		return intent{}, false
+	if e.Liveness != livenessAlive || !sessionBeadClaimsLiveRuntime(info) ||
+		strings.TrimSpace(info.SleepIntent) == string(session.SleepReasonUserHold) {
+		return intent{}, false // a user-hold row is operator-dormant: C6b2's direct stop
 	}
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
 	if e.Desired == desireWake && strings.TrimSpace(info.SleepIntent) == sleepIntentIdle {

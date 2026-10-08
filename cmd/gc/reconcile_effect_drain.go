@@ -16,8 +16,9 @@ import (
 //     interaction (L4) read fresh through the routed backend (C8.9), and
 //     for an interactive idle session the agent proved idle (SESS-621);
 //   - orphaned and suspended: L5, the row's open or in-progress assigned
-//     work read live through the read-only stores (SESS-074); work or a
-//     failed read refuses.
+//     work read live through the read-only stores, bounded by ctx and
+//     fenceProbeTimeout (SESS-074); work, a failed read or an expired one
+//     refuses.
 //
 // Every drain write records legacy's drain transition once it lands.
 
@@ -85,8 +86,15 @@ func drainBeginLegs(ctx context.Context, p *effectPass, info session.Info, reaso
 	if p.Reads.City == nil || p.World.Env == nil {
 		return causeHasWork
 	}
-	has, err := sessionHasOpenAssignedWorkForReachableStore(p.World.CityPath, p.World.Env.Cfg, p.Reads.City, p.Reads.Rigs, info)
-	if err != nil || has {
+	type read struct {
+		has bool
+		err error
+	}
+	r, ok := boundedProbe(ctx, func() read {
+		has, err := sessionHasOpenAssignedWorkForReachableStore(p.World.CityPath, p.World.Env.Cfg, p.Reads.City, p.Reads.Rigs, info)
+		return read{has, err}
+	})
+	if !ok || r.err != nil || r.has {
 		return causeHasWork
 	}
 	return ""

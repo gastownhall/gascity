@@ -265,7 +265,9 @@ func TestLensCancelsAnAuthorizedDrain(t *testing.T) {
 
 // TestNoDrainOnKeepOrUnknownLiveness (P-3, GUAR-053). Kills a begin under
 // Keep, on a runtime not read alive, on a row with open assigned work
-// (SESS-074), or on a row that no longer claims its runtime.
+// (SESS-074), on a row that no longer claims its runtime, on a Sleep row
+// under a heartbeat hold (SESS-617), or on an operator's user-hold row,
+// which C6b2's direct stop owns.
 func TestNoDrainOnKeepOrUnknownLiveness(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -278,6 +280,8 @@ func TestNoDrainOnKeepOrUnknownLiveness(t *testing.T) {
 		{name: "gone", entry: func(e *selectionEntry) { e.Desired, e.Liveness = desireDrain, livenessGone }, want: decideNoAction},
 		{name: "open work", entry: func(e *selectionEntry) { undesired(drainOrphaned)(e); e.OpenWork = &assignedWorkView{BeadID: "w"} }, want: decideDrainWorkKept},
 		{name: "asleep", meta: []string{"state", "asleep"}, entry: undesired(drainOrphaned), want: decideNoAction},
+		{name: "heartbeat hold (SESS-617)", meta: []string{"held_until", rowAt(time.Minute)}, entry: func(e *selectionEntry) { e.Desired = desireSleep }, want: decideNoAction},
+		{name: "user-hold intent (C6b2's)", meta: []string{"sleep_intent", "user-hold"}, entry: undesired(drainOrphaned), want: decideNoAction},
 	} {
 		it, _ := decideDrain(t, c.meta, c.entry)
 		if it.Kind != "" || it.Reason != c.want {

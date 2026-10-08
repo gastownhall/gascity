@@ -132,10 +132,26 @@ func (failingReads) ListByAssignee(string, string, int) ([]beads.Bead, error) {
 	return nil, errReadFailed
 }
 
+// blockingReads is a work store whose reads wait for release.
+type blockingReads struct {
+	beads.Store
+	release chan struct{}
+}
+
+func (b blockingReads) List(q beads.ListQuery) ([]beads.Bead, error) {
+	<-b.release
+	return b.Store.List(q)
+}
+
+func (b blockingReads) ListByAssignee(a, s string, n int) ([]beads.Bead, error) {
+	<-b.release
+	return b.Store.ListByAssignee(a, s, n)
+}
+
 // TestDrainBeginReReadsWorkLive (SESS-074, L5). Kills an undesired begin
-// that trusts the pass's work view: work assigned after the pass, or a work
-// read that fails, refuses
-// with has-work and writes nothing.
+// that trusts the pass's work view, or waits on it unbounded: work assigned
+// after the pass, a work read still running when the effect's context ends,
+// or one that fails, refuses with has-work and writes nothing.
 func TestDrainBeginReReadsWorkLive(t *testing.T) {
 	p, it, store, _ := admittedBegin(t, undesired(drainOrphaned))
 	if _, err := store.Create(beads.Bead{Title: "w", Type: "task", Status: "open", Assignee: it.Key.ID}); err != nil {
@@ -143,6 +159,15 @@ func TestDrainBeginReReadsWorkLive(t *testing.T) {
 	}
 	if s := runBegin(p, it); s.Outcome != settledRefused || s.Cause != causeHasWork {
 		t.Fatalf("work assigned after the pass: %+v, want refused %q", s, causeHasWork)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p, it, store, _ = admittedBegin(t, undesired(drainOrphaned))
+	stuck := make(chan struct{})
+	t.Cleanup(func() { close(stuck) })
+	p.Reads.City = blockingReads{store, stuck}
+	if s := effectRegistry[it.Kind](p, it)(ctx); s.Outcome != settledRefused || s.Cause != causeHasWork {
+		t.Fatalf("work read past its context: %+v, want refused %q", s, causeHasWork)
 	}
 	p, it, store, _ = admittedBegin(t, undesired(drainSuspended))
 	p.Reads.City = failingReads{store}
