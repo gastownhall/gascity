@@ -23,8 +23,13 @@ import (
 var staleEventBackings = []struct {
 	name string
 	open func(t *testing.T) Store
+	// listsRevision reports that the store's listing carries each row's
+	// revision. The native store's does not (beadFromNativeIssueRow), so a
+	// rescan installs its row at revision 0, the absent token, which its
+	// CAS refuses against any written row.
+	listsRevision bool
 }{
-	{"mem", func(*testing.T) Store { return NewMemStore() }},
+	{"mem", func(*testing.T) Store { return NewMemStore() }, true},
 	{"sqlite", func(t *testing.T) Store {
 		s, err := OpenSQLiteStore(t.TempDir())
 		if err != nil {
@@ -32,15 +37,16 @@ var staleEventBackings = []struct {
 		}
 		t.Cleanup(func() { _ = s.(*SQLiteStore).CloseStore() })
 		return s
-	}},
-	{"native-dolt", func(*testing.T) Store { return newNativeDoltStoreForTest(newNativeDoltMemStorage()) }},
+	}, true},
+	{"native-dolt", func(*testing.T) Store { return newNativeDoltStoreForTest(newNativeDoltMemStorage()) }, false},
 }
 
 // staleEventAfterRescan writes held_until=old then =new around the cache, as
 // another process would, lets a rescan install the newer row, and then
 // delivers the older write's event. It returns the cache, the row id and the
-// newer backing row.
-func staleEventAfterRescan(t *testing.T, backing Store) (*CachingStore, string, Bead) {
+// revision the rescan installed: the newer backing row's, or 0 when the
+// store's listing carries no revision (listsRevision).
+func staleEventAfterRescan(t *testing.T, backing Store, listsRevision bool) (*CachingStore, string, int64) {
 	t.Helper()
 	row, err := backing.Create(Bead{Title: "held"})
 	if err != nil {
@@ -50,20 +56,24 @@ func staleEventAfterRescan(t *testing.T, backing Store) (*CachingStore, string, 
 	older := writeHeldUntil(t, backing, row.ID, "old")
 	newer := writeHeldUntil(t, backing, row.ID, "new")
 	cache.ReconcileNowForTest()
+	scanned := newer.Revision
+	if !listsRevision {
+		scanned = 0
+	}
 	cache.mu.RLock()
 	installed := cache.beads[row.ID]
 	_, mutated := cache.beadSeq[row.ID]
 	cache.mu.RUnlock()
-	if installed.Metadata["held_until"] != "new" || installed.Revision != newer.Revision || mutated {
+	if installed.Metadata["held_until"] != "new" || installed.Revision != scanned || mutated {
 		t.Fatalf("the rescan left %v at revision %d (mutated=%v), want the clean newer row at %d; the path is vacuous",
-			installed.Metadata, installed.Revision, mutated, newer.Revision)
+			installed.Metadata, installed.Revision, mutated, scanned)
 	}
 	payload, err := EncodeBeadEventPayload(older)
 	if err != nil {
 		t.Fatalf("EncodeBeadEventPayload: %v", err)
 	}
 	cache.ApplyEvent("bead.updated", payload)
-	return cache, row.ID, newer
+	return cache, row.ID, scanned
 }
 
 func writeHeldUntil(t *testing.T, backing Store, id, value string) Bead {
@@ -95,14 +105,14 @@ func TestCachingStoreStaleEventAfterRescanKeepsRowAndRevision(t *testing.T) {
 	for _, b := range staleEventBackings {
 		t.Run(b.name, func(t *testing.T) {
 			t.Parallel()
-			cache, id, newer := staleEventAfterRescan(t, b.open(t))
+			cache, id, scanned := staleEventAfterRescan(t, b.open(t), b.listsRevision)
 			cache.mu.RLock()
 			got := cache.beads[id]
 			_, dirty := cache.dirty[id]
 			cache.mu.RUnlock()
-			if got.Metadata["held_until"] != "new" || got.Revision != newer.Revision {
+			if got.Metadata["held_until"] != "new" || got.Revision != scanned {
 				t.Fatalf("cached row = held_until %q at revision %d, want %q at %d",
-					got.Metadata["held_until"], got.Revision, "new", newer.Revision)
+					got.Metadata["held_until"], got.Revision, "new", scanned)
 			}
 			if !dirty {
 				t.Fatal("a stale event whose backing read equals the cached row left it clean")
@@ -120,7 +130,7 @@ func TestCachingStoreCASAfterStaleEventRefusesOrDecidesFresh(t *testing.T) {
 		t.Run(b.name, func(t *testing.T) {
 			t.Parallel()
 			backing := b.open(t)
-			cache, id, _ := staleEventAfterRescan(t, backing)
+			cache, id, _ := staleEventAfterRescan(t, backing, b.listsRevision)
 			read, err := cache.Get(id)
 			if err != nil {
 				t.Fatalf("Get: %v", err)
