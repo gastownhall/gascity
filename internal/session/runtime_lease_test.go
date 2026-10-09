@@ -70,6 +70,15 @@ func (f leaseFixture) meta(t *testing.T) map[string]string {
 	return b.Metadata
 }
 
+func TestRuntimeLeaseTTLIsCapped(t *testing.T) {
+	if got := RuntimeLeaseTTL(3 * time.Minute); got != 4*time.Minute {
+		t.Errorf("RuntimeLeaseTTL(3m) = %v, want 4m", got)
+	}
+	if got := RuntimeLeaseTTL(time.Hour); got != RuntimeLeaseMaxTTL {
+		t.Errorf("RuntimeLeaseTTL(1h) = %v, want the %v cap", got, RuntimeLeaseMaxTTL)
+	}
+}
+
 func TestRuntimeLeaseRecordFree(t *testing.T) {
 	now := leaseT0
 	at := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339) }
@@ -83,12 +92,13 @@ func TestRuntimeLeaseRecordFree(t *testing.T) {
 		{"held on another host", map[string]string{RuntimeLeaseHolderKey: "host-b/7/n", RuntimeLeaseExpiresKey: at(time.Minute)}, false},
 		{"expired", map[string]string{RuntimeLeaseHolderKey: "host-b/7/n", RuntimeLeaseExpiresKey: at(0)}, true},
 		{"expiry unparseable", map[string]string{RuntimeLeaseHolderKey: "host-b/7/n", RuntimeLeaseExpiresKey: "soon"}, true},
-		{"expiry at the skew bound", map[string]string{RuntimeLeaseHolderKey: "host-b/7/n", RuntimeLeaseExpiresKey: at(leaseTTL + RuntimeLeaseMargin)}, false},
-		{"expiry past the skew bound", map[string]string{RuntimeLeaseHolderKey: "host-b/7/n", RuntimeLeaseExpiresKey: at(leaseTTL + RuntimeLeaseMargin + time.Second)}, true},
+		{"expiry at the skew bound", map[string]string{RuntimeLeaseHolderKey: "host-b/7/n", RuntimeLeaseExpiresKey: at(RuntimeLeaseMaxTTL + RuntimeLeaseMargin)}, false},
+		{"expiry beyond this contender's own TTL", map[string]string{RuntimeLeaseHolderKey: "host-b/7/n", RuntimeLeaseExpiresKey: at(2 * leaseTTL)}, false},
+		{"expiry past the skew bound", map[string]string{RuntimeLeaseHolderKey: "host-b/7/n", RuntimeLeaseExpiresKey: at(RuntimeLeaseMaxTTL + RuntimeLeaseMargin + time.Second)}, true},
 		{"held on this host, flock free: dead", map[string]string{RuntimeLeaseHolderKey: "host-a/7/n", RuntimeLeaseExpiresKey: at(time.Minute)}, true},
 		{"host prefix is not the host", map[string]string{RuntimeLeaseHolderKey: "host-ab/7/n", RuntimeLeaseExpiresKey: at(time.Minute)}, false},
 	} {
-		if got := parseRuntimeLease(c.meta).free(now, leaseTTL, "host-a"); got != c.want {
+		if got := parseRuntimeLease(c.meta).free(now, "host-a"); got != c.want {
 			t.Errorf("%s: free = %v, want %v", c.name, got, c.want)
 		}
 	}
@@ -340,5 +350,31 @@ func TestRuntimeLeaseKeepAliveEndsAtExpiry(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("KeepAlive outlived the record's expiry")
+	}
+}
+
+// TestRuntimeLeaseUnderTheSessionMutationLock: a caller holding the row's
+// session mutation lock (every Manager start path) can take the lease, and
+// the record's lifetime is capped.
+func TestRuntimeLeaseUnderTheSessionMutationLock(t *testing.T) {
+	f := newLeaseFixture(t)
+	done := make(chan error, 1)
+	go func() {
+		done <- WithSessionMutationLock(f.id, func() error {
+			l, err := TryRuntimeLease(f.front, RuntimeLeaseRequest{City: t.TempDir(), Name: "s-lease", ID: f.id, TTL: time.Hour, Now: func() time.Time { return leaseT0 }})
+			if err == nil && !l.Expires().Equal(leaseT0.Add(RuntimeLeaseMaxTTL)) {
+				err = errors.New("expiry " + l.Expires().String() + " is not capped")
+			}
+			l.Release()
+			return err
+		})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("TryRuntimeLease deadlocked under the session mutation lock")
 	}
 }
