@@ -7736,6 +7736,10 @@
             "description": "Opaque project context identifier.",
             "type": "string"
           },
+          "resume": {
+            "description": "Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued for the session's next run and expires after 24h.",
+            "type": "boolean"
+          },
           "session_name": {
             "description": "Deprecated: use alias.",
             "type": "string"
@@ -7874,6 +7878,10 @@
             "minLength": 1,
             "pattern": "\\S",
             "type": "string"
+          },
+          "resume": {
+            "description": "Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued for the session's next run and expires after 24h.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -7884,6 +7892,10 @@
       "SessionMessageSucceededPayload": {
         "additionalProperties": false,
         "properties": {
+          "queued": {
+            "description": "True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h.",
+            "type": "boolean"
+          },
           "request_id": {
             "description": "Correlation ID from the 202 response.",
             "type": "string"
@@ -7895,7 +7907,8 @@
         },
         "required": [
           "request_id",
-          "session_id"
+          "session_id",
+          "queued"
         ],
         "type": "object"
       },
@@ -11130,6 +11143,10 @@
             "minLength": 1,
             "pattern": "\\S",
             "type": "string"
+          },
+          "resume": {
+            "description": "Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued for the session's next run and expires after 24h.",
+            "type": "boolean"
           }
         },
         "required": [

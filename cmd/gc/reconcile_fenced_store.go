@@ -89,11 +89,25 @@ func (w fencedWriter) casRow(id string, decide func(session.Info, session.Persis
 	if _, err := w.front(); err != nil {
 		return false, err
 	}
-	store := beads.Store(blindWriteRefusingStore{inner: w.store})
-	if cache, ok := demandLabelKey(w.store).(*beads.CachingStore); ok {
-		store = freshRowStore{blindWriteRefusingStore: blindWriteRefusingStore{inner: w.store}, cache: cache}
+	return sessionFrontDoor(w.freshStore()).UpdateMetadataFenced(id, 1, decide)
+}
+
+// closeRow is runTx's one close attempt: CloseWithMetadataIfMatch at the
+// revision of a row read as casRow reads it, the atomic conditional closer
+// required, with no fallback.
+func (w fencedWriter) closeRow(id string, decide func(session.Info, session.PersistedResponse) (session.MetadataPatch, bool)) (bool, error) {
+	if _, err := w.closeFront(); err != nil {
+		return false, err
 	}
-	return sessionFrontDoor(store).UpdateMetadataFenced(id, 1, decide)
+	return sessionFrontDoor(w.freshStore()).CloseWithMetadataIfMatch(id, decide)
+}
+
+// freshStore is the refusing store whose reads of a row go to the backing.
+func (w fencedWriter) freshStore() beads.Store {
+	if cache, ok := demandLabelKey(w.store).(*beads.CachingStore); ok {
+		return freshRowStore{blindWriteRefusingStore: blindWriteRefusingStore{inner: w.store}, cache: cache}
+	}
+	return blindWriteRefusingStore{inner: w.store}
 }
 
 // wroteRow is row as a landed CAS of patch left it: session.Info's fold
@@ -163,6 +177,11 @@ var (
 )
 
 func (s blindWriteRefusingStore) ConditionalWritesResolveTarget() beads.Store { return s.inner }
+
+// readOnlyStore is what Probes and Calls read through (capReadStores): a
+// blind-write-refusing store that, holding only beads.Store, resolves no
+// conditional writer either.
+type readOnlyStore struct{ beads.Store }
 
 func (s blindWriteRefusingStore) ConditionalWriterHandle() (beads.ConditionalWriter, bool) {
 	return beads.ConditionalWriterForTarget(s.inner)

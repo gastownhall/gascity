@@ -3226,6 +3226,10 @@ export type SessionCreateBody = {
      */
     project_id?: string;
     /**
+     * Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued for the session's next run and expires after 24h.
+     */
+    resume?: boolean;
+    /**
      * Deprecated: use alias.
      */
     session_name?: string;
@@ -3304,9 +3308,17 @@ export type SessionMessageInputBody = {
      * Message text to send.
      */
     message: string;
+    /**
+     * Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued for the session's next run and expires after 24h.
+     */
+    resume?: boolean;
 };
 
 export type SessionMessageSucceededPayload = {
+    /**
+     * True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h.
+     */
+    queued: boolean;
     /**
      * Correlation ID from the 202 response.
      */
@@ -4557,6 +4569,10 @@ export type SessionSubmitInputBody = {
      * Message text to submit.
      */
     message: string;
+    /**
+     * Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued for the session's next run and expires after 24h.
+     */
+    resume?: boolean;
 };
 
 export type SessionSubmitSucceededPayload = {

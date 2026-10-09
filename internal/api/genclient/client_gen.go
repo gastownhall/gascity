@@ -3711,6 +3711,9 @@ type SessionCreateBody struct {
 	// ProjectId Opaque project context identifier.
 	ProjectId *string `json:"project_id,omitempty"`
 
+	// Resume Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued for the session's next run and expires after 24h.
+	Resume *bool `json:"resume,omitempty"`
+
 	// SessionName Deprecated: use alias.
 	SessionName *string `json:"session_name,omitempty"`
 
@@ -3776,10 +3779,16 @@ type SessionLifecyclePayload struct {
 type SessionMessageInputBody struct {
 	// Message Message text to send.
 	Message string `json:"message"`
+
+	// Resume Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued for the session's next run and expires after 24h.
+	Resume *bool `json:"resume,omitempty"`
 }
 
 // SessionMessageSucceededPayload defines model for SessionMessageSucceededPayload.
 type SessionMessageSucceededPayload struct {
+	// Queued True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h.
+	Queued bool `json:"queued"`
+
 	// RequestId Correlation ID from the 202 response.
 	RequestId string `json:"request_id"`
 
@@ -4814,6 +4823,9 @@ type SessionSubmitInputBody struct {
 
 	// Message Message text to submit.
 	Message string `json:"message"`
+
+	// Resume Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued for the session's next run and expires after 24h.
+	Resume *bool `json:"resume,omitempty"`
 }
 
 // SessionSubmitSucceededPayload defines model for SessionSubmitSucceededPayload.

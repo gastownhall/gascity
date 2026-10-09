@@ -517,8 +517,9 @@ func (s *sim) gate(specs map[string]effectSpec) {
 // goroutine waiting on it: it checks the transaction's lock scope, then runs
 // the effect's outside writer if this is its seam. Inside a section the
 // row's session mutation lock is held, so no in-process writer lands
-// between the fresh read and the CAS; a spec that needs the name lock holds
-// it at every seam.
+// between the fresh read and the CAS; after a Call it is free while the
+// name lock holds, so a reaper skips the name. A spec that needs the name
+// lock holds it at every seam.
 func (s *sim) atSeam(_ context.Context, at txSeam, it intent, _, _ int) error {
 	s.runMu.Lock()
 	e := s.running[effectKey{row: it.Key, token: it.CreatePlan.Token}]
@@ -528,12 +529,12 @@ func (s *sim) atSeam(_ context.Context, at txSeam, it intent, _, _ int) error {
 	}
 	e.seams = append(e.seams, at)
 	if k := it.Key; k.ID != "" {
-		needs := effectSpecs[it.Kind].needs
+		needs := effectSpecs[it.Kind].needs // a kind's per-intent needs only add to these
 		row := s.prev[s.legOf(k.Leg).name+"/"+k.ID]
 		switch named := nameLocked(s.env.CityPath, strings.TrimSpace(row.Metadata["session_name"])); {
-		case !s.locks.holds(k.ID):
-			s.failf("LOCK tx-scope", "%s effect on %s at seam %d: row mutation lock not held", it.Kind, k.ID, at)
-		case (needs.NameLock || needs.Runtime) && !named:
+		case s.locks.holds(k.ID) != (at != seamBeforeCall && at != seamAfterCall):
+			s.failf("LOCK tx-scope", "%s effect on %s at seam %d: row mutation lock held %t", it.Kind, k.ID, at, s.locks.holds(k.ID))
+		case (needs.NameLock || needs.Runtime || needs.Legs != 0 || needs.Idle || at == seamBeforeCall || at == seamAfterCall) && !named:
 			s.failf("LOCK tx-scope", "%s effect on %s at seam %d: runtime name not locked", it.Kind, k.ID, at)
 		}
 	}

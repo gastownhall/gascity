@@ -36,10 +36,10 @@ var effectBannedMethods = []string{
 	"Sleep", "BeginDrainAckStopPending", "RequestRestart", "ResetConfigDrift", "SetWaitHold", "RecordCurrentBead",
 	"SetCurrentClaim", "SetStatusOpen", "RepairType", "RepairTypeBestEffort", "SetLocalString", "CloseWithoutReason",
 	"UpdateMetadataFenced", "ApplyPatchIfLifecycleUnchanged", "WithPendingCreateRollback", "CloseWithTerminalPatch",
-	"RollbackPendingCreateAtomically",
+	"RollbackPendingCreateAtomically", "CloseWithMetadataIfMatch",
 	"Create", "Update", "Close", "Reopen", "CloseAll", "Delete", "Tx", "DepAdd", "DepRemove",
 	"CommitStartedIfCurrent",
-	"WakeSession", "CreateSession", "CreateSessionInfo", "SaveStartupHealthEpisode",
+	"WakeSession", "RequestWakeUnlessHeld", "CreateSession", "CreateSessionInfo", "SaveStartupHealthEpisode",
 	"CreateWait", "CancelWait", "CancelWaits", "ExpireWait", "FailWait", "CloseWaitFromNudge", "FailWaitFromNudge",
 	"MarkWaitReady", "MarkWaitReadyForRedelivery", "SetWaitNudgeID", "RetryClosedWait", "ReassignWaits",
 	"StopUnattendedSession", "StopForCleanup",
@@ -92,12 +92,13 @@ var effectProviderAllowed = map[string][]string{
 }
 
 // effectTxOnly are the effect mechanics only the transaction
-// (reconcile_effect_tx.go) calls: the locks, runTx itself, and fencedWriter's
-// verbs (EFFECT-STRUCTURE §2.1). An effect or step file naming one is an
+// (reconcile_effect_tx.go) calls: the locks, runTx itself, fencedWriter's
+// verbs (EFFECT-STRUCTURE §2.1) and the conditional writer they use. An effect or step file naming one is an
 // effect assembling its own mechanics again.
 var effectTxOnly = []string{
 	"lockRuntimeName", "WithSessionMutationLock", "withRowMutationLock", "runTx",
-	"casRow", "updateMetadataFenced", "updateRowFenced", "closePremise", "closeWithTerminalPatch", "rollbackPendingCreate",
+	"casRow", "closeRow", "updateMetadataFenced", "updateRowFenced", "closePremise", "closeWithTerminalPatch", "rollbackPendingCreate",
+	"UpdateIfMatch", "ResolveConditionalWriter",
 }
 
 // effectTxOnlyAllowed are the functions outside the transaction whose body
@@ -326,5 +327,10 @@ func TestEffectLintBansMechanicsOutsideTheTransaction(t *testing.T) {
 	}
 	if got := lintEffectSource(t, "reconcile_effect_tx.go", src.String()); slices.ContainsFunc(got, func(f string) bool { return strings.Contains(f, ": mechanics ") }) {
 		t.Errorf("the transaction's own file: %v, want its mechanics allowed", got)
+	}
+	// A Probe or Call holding a store resolves no writer of its own (review N7).
+	const writer = "package main\n\nfunc probe(s store) {\n\tw, _, _ := beads.ResolveConditionalWriter(s)\n\t_ = w.UpdateIfMatch(\"id\", 1, opts)\n}\n"
+	if got := lintEffectSource(t, "reconcile_effect_seeded.go", writer); len(got) != 2 {
+		t.Errorf("a conditional writer resolved in an effect file: %v, want both uses reported", got)
 	}
 }

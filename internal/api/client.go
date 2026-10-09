@@ -1471,7 +1471,10 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 	if err := c.requireCityScope(); err != nil {
 		return SessionSubmitResponse{}, err
 	}
-	body := genclient.SubmitSessionJSONRequestBody{Message: message}
+	// `gc session submit` is an operator's own send, so it resumes a held
+	// session (CONTRACT v5.9 D8).
+	resume := true
+	body := genclient.SubmitSessionJSONRequestBody{Message: message, Resume: &resume}
 	if intent != "" {
 		i := genclient.SubmitIntent(intent)
 		body.Intent = &i

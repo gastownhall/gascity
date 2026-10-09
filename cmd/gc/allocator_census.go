@@ -78,6 +78,16 @@ type sessionCensus struct {
 	byName    map[string][]rowKey // canonical rows by runtime session name
 }
 
+// sessionsLeg is the sessions leg's ref, the census's first leg, or "" when
+// there is none: the one leg v2 reconciles, every other leg's rows being
+// AL1's None(census-only).
+func (c *sessionCensus) sessionsLeg() string {
+	if c == nil || len(c.Legs) == 0 {
+		return ""
+	}
+	return c.Legs[0].Ref
+}
+
 // readSessionCensus takes one census over legs, which
 // sessionCensusStoreCandidates resolved with the sessions leg first. It
 // errors when there are no legs, or when the sessions leg failed hard.

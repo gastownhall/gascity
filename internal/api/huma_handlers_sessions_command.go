@@ -353,7 +353,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 			return
 		}
 		if msg := strings.TrimSpace(body.Message); msg != "" {
-			if _, sendErr := s.submitMessageToSession(context.Background(), store.Store, info.ID, msg, session.SubmitIntentDefault); sendErr != nil {
+			if _, sendErr := s.submitMessageToSession(context.Background(), store.Store, info.ID, msg, session.SubmitIntentDefault, body.Resume); sendErr != nil {
 				if rollbackErr := s.rollbackCreatedSession(store, info.ID); rollbackErr != nil {
 					s.emitSessionCreateFailed(reqID, "message_delivery_failed",
 						fmt.Sprintf("initial message delivery failed: %v (rollback failed: %v)", sendErr, rollbackErr))
@@ -743,7 +743,7 @@ func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitIn
 	if cursorErr != nil {
 		return asyncAcceptedBody{}, apierr.Internal.Msg(cursorErr.Error())
 	}
-	message := input.Body.Message
+	message, resume := input.Body.Message, input.Body.Resume
 	sessionTarget := input.ID
 	go func() {
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionSubmit)
@@ -752,7 +752,7 @@ func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitIn
 			s.emitSessionSubmitFailed(reqID, "resolve_failed", err.Error())
 			return
 		}
-		outcome, submitErr := s.submitMessageToSession(context.Background(), store.Store, id, message, intent)
+		outcome, submitErr := s.submitMessageToSession(context.Background(), store.Store, id, message, intent, resume)
 		if submitErr != nil {
 			s.emitSessionSubmitFailed(reqID, "submit_failed", submitErr.Error())
 		} else {
@@ -806,13 +806,14 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 	if cursorErr != nil {
 		return asyncAcceptedBody{}, apierr.Internal.Msg(cursorErr.Error())
 	}
-	message := input.Body.Message
+	message, resume := input.Body.Message, input.Body.Resume
 	sessionTarget := input.ID
 	go func() {
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionMessage)
 
 		type messageResult struct {
 			sessionID string
+			queued    bool
 			errorCode string
 			err       error
 		}
@@ -843,7 +844,8 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 				sendResult(messageResult{errorCode: "resolve_failed", err: err})
 				return
 			}
-			if err := s.sendUserMessageToSession(ctx, store.Store, id, message); err != nil {
+			outcome, err := s.sendUserMessageToSession(ctx, store.Store, id, message, resume)
+			if err != nil {
 				code := "message_failed"
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 					code = "timeout"
@@ -851,7 +853,7 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 				sendResult(messageResult{sessionID: id, errorCode: code, err: err})
 				return
 			}
-			sendResult(messageResult{sessionID: id})
+			sendResult(messageResult{sessionID: id, queued: outcome.Queued})
 		}()
 
 		timer := time.NewTimer(sessionMessageAsyncTimeout)
@@ -863,7 +865,7 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 				s.emitSessionMessageFailed(reqID, result.errorCode, result.err.Error())
 				return
 			}
-			s.emitSessionMessageSucceeded(reqID, result.sessionID)
+			s.emitSessionMessageSucceeded(reqID, result.sessionID, result.queued)
 		case <-timer.C:
 			cancel()
 			select {
@@ -873,7 +875,7 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 					s.emitSessionMessageFailed(reqID, result.errorCode, result.err.Error())
 					return
 				}
-				s.emitSessionMessageSucceeded(reqID, result.sessionID)
+				s.emitSessionMessageSucceeded(reqID, result.sessionID, result.queued)
 				return
 			default:
 			}

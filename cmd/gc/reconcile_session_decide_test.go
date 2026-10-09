@@ -34,6 +34,12 @@ func rowWorld(t *testing.T, rows ...beads.Bead) (*World, *allocDecision) {
 
 func rowKeyOf(id string) rowKey { return rowKey{Leg: rowLeg, ID: id} }
 
+// withSessionsLeg makes ref w's sessions leg, ahead of its census's legs, so
+// a row on any of those legs reads census-only.
+func withSessionsLeg(w *World, ref string) {
+	w.Census.Legs = append([]censusLeg{{Ref: ref}}, w.Census.Legs...)
+}
+
 // killPending is a `gc session kill` fence stamped 10s before gatherNow.
 var killPending = []string{"state", "asleep", "state_reason", session.KillPendingReason, "sleep_reason", "killed", "slept_at", rowAt(-10 * time.Second)}
 
@@ -54,7 +60,7 @@ func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 		}
 		last = n
 	}
-	if want := []string{"A1", "A2", "A3", "A5", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A9", "A19"}; !slices.Equal(names, want) {
+	if want := []string{"A1", "A1", "A2", "A3", "A5", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A6", "A9", "A19"}; !slices.Equal(names, want) {
 		t.Fatalf("rowArms = %v, want %v", names, want)
 	}
 
@@ -68,11 +74,14 @@ func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 		unranked bool
 		identity runtimeIdentity // the inventory's read of the row's runtime
 		noRow    bool
+		rigLeg   bool // the row is census-only: the pass's sessions leg is another
 		wantKind string
 		want     string
 		wantNext time.Time
 	}{
 		{name: "A1 no row", noRow: true, want: decideNoRow},
+		{name: "A1 mislabelled before census-only (D-32's trace)", meta: append([]string{"template", "", "session_name", ""}, expiredHold...), rigLeg: true, want: decideMislabelled},
+		{name: "A1 census-only before A3 rekey and A6 heals", meta: expiredHold, identity: staleSelf, rigLeg: true, want: reasonCensusOnly},
 		{name: "A1 mislabelled before A2 kill fence", meta: append([]string{"template", "", "session_name", ""}, killPending...), want: decideMislabelled},
 		{name: "A2 kill fence before A6 heals", meta: append(append([]string{}, killPending...), expiredHold...), want: decideKillFence, wantNext: gatherNow.Add(session.KillPendingGrace - 10*time.Second)},
 		{name: "A2 kill fence before A9 liveness", meta: killPending, unknown: true, want: decideKillFence, wantNext: gatherNow.Add(session.KillPendingGrace - 10*time.Second)},
@@ -97,6 +106,9 @@ func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 			w, a := rowWorld(t, rows...)
 			k := rowKeyOf("gc-1")
 			w.Observed = map[rowKey]rowObservation{k: {Identity: tc.identity}}
+			if tc.rigLeg {
+				withSessionsLeg(w, "rig:other")
+			}
 			if e := a.Snapshot.Entries[k]; e != nil && tc.unknown {
 				e.Liveness = livenessUnknown
 			}

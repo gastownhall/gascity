@@ -527,7 +527,7 @@ func (m *Manager) commitPendingContinuationReset(id string, b beads.Bead) (int, 
 	return epoch, nil
 }
 
-func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, policy ResumePolicy) error {
 	// A kill-fenced row reads asleep while its runtime is still being torn
 	// down. Treating that runtime as live would flip the row back to active
 	// (confirmLiveSessionState) and erase the fence, so once the Stop landed the
@@ -535,6 +535,11 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	// the input with the process. Starting a replacement would race the kill.
 	if KillPendingMetadata(b.Metadata["state"], b.Metadata["state_reason"], b.Metadata["sleep_reason"], b.Metadata["slept_at"], m.now()) {
 		return fmt.Errorf("%w: %s", ErrSessionKillPending, id)
+	}
+	// Only an operator's own resume consumes an operator's hold (CONTRACT
+	// v5.9 D8 rule 1); any other caller queues instead.
+	if policy != ResumeOperator && HoldVerdict(b.Metadata, m.sp.IsRunning(sessName), m.now()) {
+		return fmt.Errorf("%w: %s", ErrResumeHeld, id)
 	}
 	transport, transportVerified := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
@@ -868,9 +873,9 @@ func normalizeWaitIdleNudgeSource(source string) string {
 	return source
 }
 
-func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads.Bead, source, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
+func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads.Bead, source, sessName, message, resumeCommand string, hints runtime.Config, policy ResumePolicy) (bool, error) {
 	if transportFromMetadata(b) == "acp" {
-		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
+		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints, policy); err != nil {
 			return false, err
 		}
 		if err := m.nudgeSession(ctx, sessName, message, false); err != nil {
@@ -878,7 +883,7 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads
 		}
 		return true, nil
 	}
-	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
+	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints, policy); err != nil {
 		return false, err
 	}
 	if providerKind(b) != "claude" {
@@ -957,34 +962,42 @@ func (m *Manager) markStartupDialogsVerifiedLocked(id string, b *beads.Bead) {
 	b.Metadata[startupDialogVerifiedKey] = "true"
 }
 
-func (m *Manager) sendLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, immediate bool) error {
-	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
-		return err
+// sendLocked delivers message, starting or resuming the runtime as policy
+// allows; a row it may not resume gets the message queued (reports true).
+func (m *Manager) sendLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, immediate bool, policy ResumePolicy) (bool, error) {
+	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints, policy); err != nil {
+		if !errors.Is(err, ErrResumeHeld) {
+			return false, err
+		}
+		return true, m.enqueueDeferredSubmitLocked(b, sessName, message)
 	}
 	verifyDeferredDialogs := needsDeferredStartupDialogVerification(b)
 	if verifyDeferredDialogs {
 		m.dismissKnownDialogsLocked(ctx, sessName, codexDeferredDialogDelay)
 	}
 	if err := m.pendingInteractionLocked(sessName); err != nil {
-		return err
+		return false, err
 	}
 	if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
-		return err
+		return false, err
 	}
 	if verifyDeferredDialogs && m.dismissKnownDialogsLocked(ctx, sessName, codexDeferredDialogDelay) {
 		m.markStartupDialogsVerifiedLocked(id, &b)
 	}
-	return nil
+	return false, nil
 }
 
-func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, immediate bool) error {
-	return withSessionMutationLock(id, func() error {
+func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, immediate bool, policy ResumePolicy) (SubmitOutcome, error) {
+	var outcome SubmitOutcome
+	err := withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, immediate)
+		outcome.Queued, err = m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, immediate, policy)
+		return err
 	})
+	return outcome, err
 }
 
 func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediate bool) (bool, error) {
@@ -1009,14 +1022,15 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 
 // Start ensures the session runtime is live without sending a message.
 // It is the canonical manager-level bring-up path for worker handles and
-// other callers that need bounded startup without attaching a terminal.
-func (m *Manager) Start(ctx context.Context, id, resumeCommand string, hints runtime.Config) error {
+// other callers that need bounded startup without attaching a terminal. A
+// dormant row it may not resume under policy returns ErrResumeHeld.
+func (m *Manager) Start(ctx context.Context, id, resumeCommand string, hints runtime.Config, policy ResumePolicy) error {
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		return m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints)
+		return m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints, policy)
 	})
 }
 
@@ -1034,18 +1048,17 @@ func (m *Manager) StartRuntimeOnly(ctx context.Context, id, resumeCommand string
 	})
 }
 
-// Send resumes a suspended session if needed, then nudges the runtime with a
-// new user message.
-func (m *Manager) Send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config) error {
-	return m.send(ctx, id, message, resumeCommand, hints, false)
+// Send starts or resumes the session as policy allows, then nudges the
+// runtime with a new user message, or queues it (SubmitOutcome.Queued).
+func (m *Manager) Send(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, policy ResumePolicy) (SubmitOutcome, error) {
+	return m.send(ctx, id, message, resumeCommand, hints, false, policy)
 }
 
-// SendImmediate resumes a suspended session if needed, then injects the new
-// user message without waiting for an idle boundary when the runtime supports
-// immediate nudges. Falls back to Send semantics on runtimes without the
-// optional immediate nudge capability.
-func (m *Manager) SendImmediate(ctx context.Context, id, message, resumeCommand string, hints runtime.Config) error {
-	return m.send(ctx, id, message, resumeCommand, hints, true)
+// SendImmediate is Send, injecting the new user message without waiting for
+// an idle boundary when the runtime supports immediate nudges. Falls back to
+// Send semantics on runtimes without the optional immediate nudge capability.
+func (m *Manager) SendImmediate(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, policy ResumePolicy) (SubmitOutcome, error) {
+	return m.send(ctx, id, message, resumeCommand, hints, true, policy)
 }
 
 // SendLiveOnly nudges the runtime only when the current session is already
@@ -1064,15 +1077,16 @@ func (m *Manager) SendImmediateLiveOnly(ctx context.Context, id, message string)
 // safe boundary. It resumes supported runtimes if needed, then reports whether
 // live delivery actually happened. Unsupported providers return (false, nil)
 // so higher layers can fall back to queue semantics without treating that as
-// an operational error.
-func (m *Manager) TryWaitIdleNudge(ctx context.Context, id, source, message, resumeCommand string, hints runtime.Config) (bool, error) {
+// an operational error. A held row the policy may not resume returns
+// ErrResumeHeld, queueing nothing, so the caller queues it and says why.
+func (m *Manager) TryWaitIdleNudge(ctx context.Context, id, source, message, resumeCommand string, hints runtime.Config, policy ResumePolicy) (bool, error) {
 	var delivered bool
 	err := withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		delivered, err = m.tryWaitIdleNudgeLocked(ctx, id, b, source, sessName, message, resumeCommand, hints)
+		delivered, err = m.tryWaitIdleNudgeLocked(ctx, id, b, source, sessName, message, resumeCommand, hints, policy)
 		return err
 	})
 	return delivered, err
