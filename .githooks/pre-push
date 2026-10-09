@@ -44,7 +44,13 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
     go_changed=1
     continue
   fi
-  if git diff --name-only "$remote_sha" "$local_sha" -- '*.go' 2>/dev/null | grep -q .; then
+  # Read the whole result: under pipefail, grep -q can close a large diff's
+  # pipe early, turn git's SIGPIPE into a false condition, and skip the suite.
+  if ! changed_go_files="$(git diff --name-only "$remote_sha" "$local_sha" -- '*.go')"; then
+    echo "pre-push: cannot inspect Go changes for $remote_sha..$local_sha" >&2
+    exit 1
+  fi
+  if [ -n "$changed_go_files" ]; then
     go_changed=1
   fi
 done < <(replay_refs)
