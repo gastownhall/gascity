@@ -19,6 +19,10 @@ import (
 	"time"
 )
 
+// ErrNudgeDeliveredUnobserved reports proven delivery without an observed busy transition.
+// Callers must not resend; completion must be observed separately.
+var ErrNudgeDeliveredUnobserved = errors.New("nudge: submit Enter delivered and composer drained but busy state was never observed")
+
 // ErrSessionExists reports that the runtime already has a live session with the
 // requested name.
 var ErrSessionExists = errors.New("session already exists")

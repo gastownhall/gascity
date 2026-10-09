@@ -1214,9 +1214,6 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		// busy-indicator OBSERVATION timed out. Delivery is proven, so this
 		// must report success like any other delivered nudge, not a CLI
 		// failure — fall through to the normal success path below.
-		if store != nil {
-			stampLastNudgeDeliveredAt(sessionFrontDoor(sessStore), target.sessionID, time.Now())
-		}
 		result.Delivered = true
 		err = nil
 	}
@@ -1240,6 +1237,12 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	}
 	if mode == nudgeDeliveryWaitIdle && !result.Delivered {
 		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, result.Undelivered, stdout, stderr)
+	}
+	// The shared session boundary can acknowledge proven delivery without
+	// returning its observation-timeout sentinel. Account for every confirmed
+	// delivery here, independently of how the worker reported that success.
+	if result.Delivered && store != nil {
+		stampLastNudgeDeliveredAt(sessionFrontDoor(sessStore), target.sessionID, time.Now())
 	}
 	if jsonOutput {
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc session nudge", sessionNudgeJSON{
