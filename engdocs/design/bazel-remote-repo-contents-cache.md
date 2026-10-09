@@ -99,7 +99,8 @@ OSS backend with an integrity story.
 - **Opt-in and eligibility.** `--experimental_remote_repo_contents_cache` is
   a startup option. Only *reproducible* repository rules are cached (those
   returning `repo_metadata(reproducible = True)`), and not `local` ones. In
-  the prototype, 3690 of the ~3700 repos `//...` needs qualified.
+  the prototype, all but 9-16 of the repos `//...` needs qualified (3690
+  entries written).
 - **Storage format.** A repo is stored as the ActionResult of a synthetic,
   never-executed action:
   - Command: one argument, a per-release UUID (9.2.0 `0336b325-...`, 9.3.0
