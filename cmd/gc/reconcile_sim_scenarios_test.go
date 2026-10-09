@@ -431,3 +431,52 @@ func TestSimDeadRuntimeHealSkipsCensusOnlyRigRows(t *testing.T) {
 	}
 	s.noViolations(t)
 }
+
+// The effect transaction inside the simulator (EFFECT-STRUCTURE §2.1, §2.5;
+// v5 R2; I15): an operator's write behind the cache lands inside the heal,
+// at a seam between its fresh read and its CAS. An unrelated write loses the
+// heal's first CAS, and the heal reads the row again and lands; a re-hold
+// loses it too, and the heal refuses on the premise. Either way the
+// operator's write stands. A write behind the cache before the heal runs is
+// read from the backing, so the heal lands on its first CAS.
+func TestSimTxDecidesAgainInsideTheEffect(t *testing.T) {
+	for _, c := range []struct {
+		name, key string
+		seam      txSeam // 0: before the release
+		healed    bool
+		attempts  int
+	}{
+		{"an unrelated write before the CAS", "note", seamBeforeCAS, true, 2},
+		{"an unrelated write after the fresh read", "note", seamAfterRowRead, true, 2},
+		{"a re-hold before the CAS", "held_until", seamBeforeCAS, false, 1},
+		{"an unrelated write before the heal runs", "note", 0, true, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := scripted(t, nil, heldRow())
+			s.inventory()
+			s.pass()
+			if len(s.parked) != 1 || s.parked[0].it.Kind != intentRowHeal {
+				t.Fatalf("parked %d effects, want gc-1's heal", len(s.parked))
+			}
+			val := s.rel(time.Hour)
+			e := s.parked[0]
+			write := func() {
+				b, _ := s.legs[0].backing.Get("gc-1")
+				s.outside("operator", s.legs[0], b, func(l *simLeg, b beads.Bead) { s.setMeta(l, b.ID, c.key, val) })
+			}
+			if e.seam, e.outside = c.seam, write; c.seam == 0 {
+				write()
+			}
+			s.release(0)
+			s.audit("v2")
+			got, _ := s.legs[0].backing.Get("gc-1")
+			if got.Metadata[c.key] != val || c.healed != (got.Metadata["held_until"] == "") {
+				t.Errorf("row %v, want the operator's %s=%s and healed %t", got.Metadata, c.key, val, c.healed)
+			}
+			if n := len(slices.DeleteFunc(slices.Clone(e.seams), func(at txSeam) bool { return at != seamBeforeCAS })); c.healed && n != c.attempts {
+				t.Errorf("the heal reached its CAS %d times, want %d", n, c.attempts)
+			}
+			s.noViolations(t)
+		})
+	}
+}

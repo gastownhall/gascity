@@ -228,15 +228,14 @@ func (x *createEffects) writeNamed(ctx context.Context, pass *createPass, p crea
 	liveHash := runtime.LiveFingerprint(templateParamsToConfig(tp))
 	meta := syncCreateMetadata(tp, plan.SessionName, plan.Identity, liveHash, state, p.Token, 0, now)
 	meta["alias"] = plan.Identity
-	if err := checkCreateContext(ctx); err != nil {
+	if err := prog.beginWrite(ctx); err != nil {
 		return session.Info{}, err
 	}
-	prog.writing = true
 	info, err := sessionFrontDoor(store).CreateSessionInfo(session.CreateSpec{Title: plan.Identity, AgentName: plan.Identity, Metadata: meta})
 	if err != nil {
 		return session.Info{}, poolCreateWriteError{err: fmt.Errorf("creating named session %q: %w", plan.Identity, err)}
 	}
-	return info, nil
+	return info, prog.afterWrite(ctx, info.ID)
 }
 
 // reopenNamed reopens closed, the identity's closed canonical row, with
@@ -275,20 +274,20 @@ func reopenNamed(ctx context.Context, store beads.Store, live beads.Store, cfg *
 	open := "open"
 	opts := beads.UpdateOpts{Status: &open, Metadata: batch}
 	reopened, err := reopenClosedConfiguredNamedSessionBeadLocked(live, cfg, plan.Identity, plan.SessionName, closed, batch, func() error {
-		if err := checkCreateContext(ctx); err != nil {
-			return err
-		}
 		if writer == nil {
 			prog.stage = createStageNoWriter
 			return errNoConditionalWriter
 		}
-		prog.writing, prog.rowID = true, closed.ID
+		if err := prog.beginWrite(ctx); err != nil {
+			return err
+		}
+		prog.rowID = closed.ID
 		return writer.UpdateIfMatch(closed.ID, closed.Revision, opts)
 	})
 	var written reopenWriteError
 	switch {
 	case err == nil:
-		return session.Info{ID: reopened.ID, InstanceToken: reopened.Metadata["instance_token"], Generation: reopened.Metadata["generation"]}, nil
+		return session.Info{ID: reopened.ID, InstanceToken: reopened.Metadata["instance_token"], Generation: reopened.Metadata["generation"]}, prog.afterWrite(ctx, reopened.ID)
 	case !errors.As(err, &written) || errors.Is(err, errCreateAbandoned) || errors.Is(err, errNoConditionalWriter):
 		return session.Info{}, err
 	}

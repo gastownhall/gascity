@@ -68,6 +68,9 @@ type settlement struct {
 	Facts                   effectFacts // applied once drained (applyFacts)
 	Err                     error
 	At                      time.Time
+	// Late marks what an effect returned after the executor settled it: the
+	// drain applies only its facts.
+	Late bool
 }
 
 // drainTransition is one RecordDrainTransition.
@@ -80,7 +83,7 @@ const (
 	settledLanded    settleOutcome = iota + 1
 	settledFailed                  // ran and failed; a panic or deadline included
 	settledRefused                 // refused before or instead of writing, with a cause
-	settledAmbiguous               // a create whose write call errored after the row may have landed
+	settledAmbiguous               // its write began and may have landed, or a create was abandoned
 	settledNoop                    // nothing to do: a start's already-running
 )
 
@@ -110,6 +113,7 @@ func (b bootState) open() bool { return b.CachePrimed && b.InventoryComplete && 
 // publishes through out.
 type planner struct {
 	clock       plannerClock
+	seam        txSeamFunc           // every pass's (effectPass.seam): stagingSeam's, or a test's
 	patrol      func() time.Duration // read after every pass, so a reload takes effect
 	pass        passFunc
 	stopEffects func(deadline time.Time) // the executor's stop
@@ -291,18 +295,23 @@ func (p *planner) runPass(now time.Time) (res passResult) {
 // drainSettlements applies the settlements posted so far, stamping a zero
 // At with now: first every one to the in-flight map, so no later step's
 // panic can leave a settled effect counted in flight; then to the backoff
-// table and the pass record's counters; then their facts (applyFacts).
+// table and the pass record's counters; then their facts (applyFacts). A
+// late settlement applies only its facts.
 func (p *planner) drainSettlements(now time.Time) {
 	items := p.settlements.drain()
 	for i := range items {
 		if items[i].At.IsZero() {
 			items[i].At = now
 		}
-		p.inflight.settle(items[i])
+		if !items[i].Late {
+			p.inflight.settle(items[i])
+		}
 	}
 	for _, s := range items {
-		p.backoffSettled(s)
-		p.observeSettlement(s)
+		if !s.Late {
+			p.backoffSettled(s)
+			p.observeSettlement(s)
+		}
 	}
 	for _, s := range items {
 		p.applyFacts(s.Facts, s.At)
@@ -349,8 +358,8 @@ func (p *planner) record(ev events.Event) {
 }
 
 // backoffSettled applies s to the backoff table (P4): a landing or no-op
-// resets its record; a refusal or failure backs it off with its cause,
-// except a swap pause.
+// resets its record; a refusal, failure or ambiguous outcome (an abandoned
+// write) backs it off with its cause, except a swap pause.
 func (p *planner) backoffSettled(s settlement) {
 	key := s.BackoffKey
 	if key == "" && s.Key.ID != "" {
@@ -360,7 +369,7 @@ func (p *planner) backoffSettled(s settlement) {
 	case key == "":
 	case s.Outcome == settledLanded || s.Outcome == settledNoop:
 		p.backoff.Succeed(key)
-	case (s.Outcome == settledRefused || s.Outcome == settledFailed) && s.Cause != causeSwapPause:
+	case (s.Outcome == settledRefused || s.Outcome == settledFailed || s.Outcome == settledAmbiguous) && s.Cause != causeSwapPause:
 		p.backoff.Refuse(key, s.At, time.Time{}, s.Cause, s.Fingerprint)
 	}
 }

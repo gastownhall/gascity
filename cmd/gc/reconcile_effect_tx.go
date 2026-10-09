@@ -4,8 +4,10 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -15,7 +17,8 @@ import (
 
 // The effect transaction (simplify/EFFECT-STRUCTURE.md §2.1): runTx alone
 // takes the name and session mutation locks and CASes the row (casRow), each
-// attempt reading first, so the CAS window holds only the row read and Decide.
+// attempt reading first, so the CAS window holds only the row read and Decide,
+// and beginning its write through the latch (beginWrite).
 
 // effectSpec is one intent kind: what admission knows of it (P2-P4) and its
 // effect. A kind with neither sections nor a body has none yet (no-effect).
@@ -24,10 +27,135 @@ type effectSpec struct {
 	bootGated bool // destructive: deferred while the boot gate is closed (P2)
 	tokens    int  // debited on admission, never refunded (I9)
 	needs     needs
+	caps      caps
 	sections  []section
 	// body is the create's guarded row create (v5 R1 exception 1), the one
-	// effect whose write is no row CAS.
-	body func(ctx context.Context, p *effectPass, it intent) settlement
+	// effect whose write is no row CAS; it begins it through beginWrite.
+	body func(ctx context.Context, c txCaps) settlement
+	// around, when set, wraps the effect (C5a1's endpoint ticket, C5c1's
+	// post-close cascade): it calls run at most once, outside every lock.
+	around func(ctx context.Context, a aroundCaps, run func() settlement) settlement
+}
+
+// caps are what a kind reaches beyond its row CAS, only through txCaps. A
+// later capability is a bit and a txCaps field, added with its first kind.
+type caps uint8
+
+const capCreate caps = 1 // the create runner and its raw stores (v5 R1 exception 1)
+
+// txCaps is what a body (and A4's Call) holds: the handles its spec grants,
+// its latch, and the test seam; never the pass.
+type txCaps struct {
+	it      intent
+	latch   *writeLatch
+	seam    txSeamFunc
+	section int         // the section's index, from 0, which seams report
+	attempt int         // the CAS attempt, from 1, which seams report
+	create  *createPass // capCreate
+	creates *createEffects
+}
+
+// aroundCaps is what an around holds. It runs outside every lock, so it
+// reaches no write and none of a Call's handles (provider start, routing,
+// release, kill); C5a1's endpoint gate may add Eligible here, never Admit.
+type aroundCaps struct{ it intent }
+
+// capsFor is it's txCaps under grant.
+func (p *effectPass) capsFor(it intent, grant caps, latch *writeLatch) txCaps {
+	c := txCaps{it: it, latch: latch, seam: p.seam, attempt: 1}
+	if grant&capCreate != 0 {
+		c.create, c.creates = p.held.create, p.held.creates
+	}
+	return c
+}
+
+// beginWrite is a write's last check, immediately before it: the context,
+// then the latch. Only a nil error lets the write begin.
+func (c txCaps) beginWrite(ctx context.Context) error {
+	if err := c.at(ctx, seamBeforeCAS); err != nil {
+		return err
+	}
+	if ctx.Err() != nil {
+		return context.Cause(ctx)
+	}
+	if !c.latch.begin() {
+		return errAbandoned
+	}
+	return nil
+}
+
+// afterWrite is the after-write seam, for a write outside a row CAS (the
+// create's).
+func (c txCaps) afterWrite(ctx context.Context) error { return c.at(ctx, seamAfterWrite) }
+
+// at runs the seam s, when one is set; its error, wrapping errInjected, ends
+// the effect.
+func (c txCaps) at(ctx context.Context, s txSeam) error {
+	if c.seam == nil {
+		return nil
+	}
+	if err := c.seam(ctx, s, c.it, c.section, c.attempt); err != nil {
+		return fmt.Errorf("%w: %w", errInjected, err)
+	}
+	return nil
+}
+
+// txSeam is a point in an effect where a test, or a staging fault (H1),
+// acts: pauses, runs an outside operation, or fails the effect.
+type txSeam uint8
+
+const (
+	seamAfterReads   txSeam = iota + 1 // the attempt's runtime and leg reads done, before the row read
+	seamAfterRowRead                   // the row read, before the premise
+	seamBeforeCAS                      // a write's last check, before the context and the latch
+	seamAfterWrite                     // a landed write, still under the section's lock
+)
+
+// txSeamFunc acts at a seam of one effect's section and attempt; an error
+// ends the effect with cause injected: failed, or ambiguous once a write
+// landed. stagingSeam, nil in production, is what only a gcstaging-tagged
+// init sets (H1); bindHost arms each planner with it for its city.
+type txSeamFunc func(ctx context.Context, s txSeam, it intent, section, attempt int) error
+
+var stagingSeam func(cityPath string) txSeamFunc
+
+// writeLatch is an effect's write-begun latch: the effect sets it
+// immediately before each write (beginWrite), and the executor closes it
+// when it abandons the effect. The first wins, and closing is terminal: an
+// effect abandoned before its write writes nothing and settles failed; one
+// abandoned after settles ambiguous, and no later beginWrite opens (P5). The
+// create's follow-up writes past its row write (the marker, the failed-row
+// close, the adopt stamp) do not pass through the latch.
+type writeLatch struct{ state atomic.Uint32 }
+
+const (
+	latchOpen uint32 = iota
+	latchBegun
+	latchAbandoned      // before any write began
+	latchAbandonedBegun // after one began
+)
+
+// begin opens a write; a nil latch always does.
+func (l *writeLatch) begin() bool {
+	return l == nil || l.state.CompareAndSwap(latchOpen, latchBegun) || l.state.Load() == latchBegun
+}
+
+// abandon closes the latch and reports whether a write had begun.
+func (l *writeLatch) abandon() (begun bool) {
+	if l == nil || l.state.CompareAndSwap(latchOpen, latchAbandoned) {
+		return false
+	}
+	l.state.CompareAndSwap(latchBegun, latchAbandonedBegun)
+	return l.state.Load() == latchAbandonedBegun
+}
+
+// begun reports whether a write began.
+func (l *writeLatch) begun() bool {
+	if l == nil {
+		return false
+	}
+	s := l.state.Load()
+	return s == latchBegun || s == latchAbandonedBegun
 }
 
 func (s effectSpec) runs() bool { return s.body != nil || len(s.sections) > 0 }
@@ -83,18 +211,47 @@ func (f *effectFacts) merge(g effectFacts) {
 
 // Transaction causes. A refusal backs the row off (P4).
 const (
-	causePremise  = "premise"  // the fresh row is not the row expected
-	causeShutdown = "shutdown" // the context ended before its deadline
+	causePremise   = "premise"    // the fresh row is not the row expected
+	causeShutdown  = "shutdown"   // the context ended before its deadline
+	causeAroundRun = "around-run" // an around ran its effect twice
+	causeInjected  = "injected"   // a seam failed the effect (tests, staging)
 )
+
+// errInjected wraps a seam's error.
+var errInjected = errors.New("v2 effect: failed at a seam")
+
+// injected is the failure a seam's error ends the effect with.
+func injected(err error) settlement {
+	return settlement{Outcome: settledFailed, Cause: causeInjected, Err: err}
+}
+
+// errAbandoned: the executor abandoned the effect before its write began.
+var errAbandoned = errors.New("v2 effect: abandoned at its deadline before its write")
 
 // withRowMutationLock is session.WithSessionMutationLock, observed by tests.
 var withRowMutationLock = session.WithSessionMutationLock
 
-// runTx runs the effect of it as spec describes.
-func runTx(ctx context.Context, p *effectPass, it intent, spec effectSpec) settlement {
+// runTx runs the effect of it as spec describes, under latch.
+func runTx(ctx context.Context, p *effectPass, it intent, spec effectSpec, latch *writeLatch) settlement {
+	c := p.capsFor(it, spec.caps, latch)
+	if spec.around == nil {
+		return runSpec(ctx, p, it, spec, c)
+	}
+	ran := false
+	return spec.around(ctx, aroundCaps{it: it}, func() settlement {
+		if ran {
+			return settlement{Outcome: settledFailed, Cause: causeAroundRun}
+		}
+		ran = true
+		return runSpec(ctx, p, it, spec, c)
+	})
+}
+
+// runSpec is the effect itself: the body, or the sections under the locks.
+func runSpec(ctx context.Context, p *effectPass, it intent, spec effectSpec, c txCaps) settlement {
 	switch {
 	case spec.body != nil:
-		return spec.body(ctx, p, it)
+		return spec.body(ctx, c)
 	case len(spec.sections) == 0:
 		return refused(causeNoEffect)
 	}
@@ -106,7 +263,7 @@ func runTx(ctx context.Context, p *effectPass, it intent, spec effectSpec) settl
 	if !ok {
 		return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: errNoConditionalWriter}
 	}
-	t := &tx{p: p, needs: spec.needs, writer: writer, expect: row.Info, basis: it.Basis, view: txView{It: it, World: p.World, Alloc: p.Alloc}}
+	t := &tx{c: c, p: p, needs: spec.needs, writer: writer, expect: row.Info, basis: it.Basis, view: txView{It: it, World: p.World, Alloc: p.Alloc}}
 	if spec.needs.NameLock || spec.needs.Runtime {
 		name, unlock, ok := lockRuntimeName(p.World, row.Info)
 		switch {
@@ -123,6 +280,7 @@ func runTx(ctx context.Context, p *effectPass, it intent, spec effectSpec) settl
 
 // tx is one transaction across its sections.
 type tx struct {
+	c      txCaps
 	p      *effectPass
 	needs  needs
 	writer fencedWriter
@@ -137,7 +295,8 @@ type tx struct {
 // run runs the sections, each under the row's mutation lock.
 func (t *tx) run(ctx context.Context, sections []section) settlement {
 	s := settlement{Outcome: settledNoop}
-	for _, sec := range sections {
+	for i, sec := range sections {
+		t.c.section = i
 		end := false
 		_ = withRowMutationLock(t.view.It.Key.ID, func() error {
 			s, end = t.section(ctx, sec)
@@ -153,7 +312,8 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 
 // section runs sec's attempts; end ends the effect with the settlement.
 func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) {
-	for range cmp.Or(t.needs.Attempts, 3) {
+	for attempt := range cmp.Or(t.needs.Attempts, 3) {
+		t.c.attempt = attempt + 1
 		if s, ok := t.read(ctx); !ok {
 			return s, true
 		}
@@ -178,6 +338,11 @@ func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) 
 			t.landed, t.expect = true, wroteRow(t.view.Row, step.Write)
 			t.basis = rowBasisOf(t.view.It.Key, t.expect)
 			t.facts.merge(step.Facts)
+			if err := t.c.at(ctx, seamAfterWrite); err != nil {
+				s := injected(err)
+				s.Outcome = settledAmbiguous // the write landed
+				return s, true
+			}
 			return t.done(), false
 		case len(step.Write) == 0:
 			t.facts.merge(step.Facts)
@@ -208,6 +373,9 @@ func (t *tx) read(ctx context.Context) (settlement, bool) {
 		}
 		t.view.RT = rt
 	}
+	if err := t.c.at(ctx, seamAfterReads); err != nil {
+		return injected(err), false
+	}
 	if ctx.Err() != nil {
 		return ended(ctx), false
 	}
@@ -221,6 +389,10 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 	v := t.view
 	v.Row, v.Meta = row, meta
 	t.view.Row = row
+	if err := t.c.at(ctx, seamAfterRowRead); err != nil {
+		s := injected(err)
+		return txStep{}, &s
+	}
 	if !t.premise(row) {
 		s := refused(causePremise)
 		return txStep{}, &s
@@ -232,11 +404,17 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 		s = refused(step.Refuse)
 	case len(step.Write) == 0:
 		return step, nil
-	case ctx.Err() != nil:
-		s = ended(ctx)
-		return step, &s
 	default:
-		return step, nil
+		err := t.c.beginWrite(ctx)
+		switch {
+		case err == nil:
+			return step, nil
+		case errors.Is(err, errInjected):
+			s = injected(err)
+		default:
+			s = ended(ctx)
+		}
+		return step, &s
 	}
 	t.facts.merge(step.Facts)
 	return step, &s
@@ -259,12 +437,15 @@ func rowBasisOf(k rowKey, row session.Info) rowBasis {
 	return rowBasis{Incarnation: r.Incarnation, InstanceToken: r.InstanceToken}
 }
 
-// ended is the failure of an effect whose context ended: context.Cause
-// tells its deadline from a shutdown's cancel, whatever Err reads under a
-// fake clock.
+// ended is the failure of an effect that may not write: its context ended
+// (context.Cause tells its deadline from a shutdown's cancel, whatever Err
+// reads under a fake clock), or the executor abandoned it first.
 func ended(ctx context.Context) settlement {
-	if cause := context.Cause(ctx); !errors.Is(cause, context.DeadlineExceeded) {
-		return settlement{Outcome: settledFailed, Cause: causeShutdown, Err: cause}
+	switch cause := context.Cause(ctx); {
+	case cause == nil:
+		return settlement{Outcome: settledFailed, Cause: causeDeadline, Err: errAbandoned}
+	case !errors.Is(cause, context.DeadlineExceeded):
+		return settlement{Outcome: settledFailed, Cause: canceledCause(ctx), Err: cause}
 	}
 	return settlement{Outcome: settledFailed, Cause: causeDeadline, Err: context.DeadlineExceeded}
 }

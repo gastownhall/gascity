@@ -43,7 +43,7 @@ func admittedHeal(t *testing.T, census, writer beads.Store) (*effectPass, intent
 
 // runRowWrite runs the row heal's transaction for it.
 func runRowWrite(ctx context.Context, p *effectPass, it intent) settlement {
-	return runTx(ctx, p, it, effectSpecs[intentRowHeal])
+	return runTx(ctx, p, it, effectSpecs[intentRowHeal], nil)
 }
 
 // withArms replaces rowArms for the test, which must not run in parallel.

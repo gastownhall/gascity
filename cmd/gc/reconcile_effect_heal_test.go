@@ -123,7 +123,7 @@ func TestFreshHealDeadlineDuringTheReadSettlesFailed(t *testing.T) {
 	sp := gone()
 	sp.read = func() { cancel(context.DeadlineExceeded) }
 	p, it := c.pass(t, sp, nil)
-	if s := runTx(ctx, p, it, effectSpecs[it.Kind]); s.Outcome != settledFailed || s.Cause != causeDeadline {
+	if s := runTx(ctx, p, it, effectSpecs[it.Kind], nil); s.Outcome != settledFailed || s.Cause != causeDeadline {
 		t.Fatalf("settlement %+v, want failed with cause %q", s, causeDeadline)
 	}
 	if got := c.meta(t)["state"]; got != "creating" {
@@ -182,7 +182,7 @@ func TestFreshHealReadIsFreshForTheEffect(t *testing.T) {
 					t.Error("the fresh read's time was taken before the name lock")
 				}
 			}}
-			if s := runTx(context.Background(), p, it, effectSpecs[it.Kind]); s.Outcome != tc.want {
+			if s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil); s.Outcome != tc.want {
 				t.Fatalf("settlement %+v, want outcome %v", s, tc.want)
 			}
 		})
@@ -295,7 +295,7 @@ func TestFreshHealReadsUnderTheSessionMutationLock(t *testing.T) {
 	}()
 	<-held
 	done := make(chan settlement, 1)
-	go func() { done <- runTx(context.Background(), p, it, effectSpecs[it.Kind]) }()
+	go func() { done <- runTx(context.Background(), p, it, effectSpecs[it.Kind], nil) }()
 	select {
 	case s := <-done:
 		t.Fatalf("the heal settled %+v while an in-process start held the row's lock", s)

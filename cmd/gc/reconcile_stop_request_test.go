@@ -249,7 +249,7 @@ func TestResidueVoidSurvivesSameGenerationResume(t *testing.T) {
 	w := &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, store)), LegStores: map[string]beads.Store{rowLeg: store}}
 	a := &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{k: {Key: k, Liveness: livenessAlive}}}}
 	it, _ := decideRow(w, a, k)
-	if s := runTx(context.Background(), newEffectPass(w, a), it, effectSpecs[it.Kind]); it.Reason != decideStopResidue || s.Outcome != settledLanded {
+	if s := runTx(context.Background(), newEffectPass(w, a), it, effectSpecs[it.Kind], nil); it.Reason != decideStopResidue || s.Outcome != settledLanded {
 		t.Fatalf("void %+v settled %+v, want the residue void landed", it, s)
 	}
 	got, _ := store.Get(b.ID)

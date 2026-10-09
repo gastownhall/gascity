@@ -8,10 +8,10 @@ import "context"
 // into its plan at submit. Its body is the allocator's guarded create
 // (createEffects.run, allocator_create.go): the one v2 write outside a
 // fenced writer, v5 R1's exception 1, under the identifier flock with a live
-// re-census.
+// re-census, which begins its row write through the transaction's latch.
 
 // createBody is the create kind's effect: the pass's create inputs, and the
 // plan the planner minted its token into.
-func createBody(ctx context.Context, p *effectPass, it intent) settlement {
-	return p.creates.run(ctx, p.create, it.CreatePlan).settlement()
+func createBody(ctx context.Context, c txCaps) settlement {
+	return c.creates.run(ctx, c.create, c.it.CreatePlan, c.beginWrite, c.afterWrite).settlement()
 }
