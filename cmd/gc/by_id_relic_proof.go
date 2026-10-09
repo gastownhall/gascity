@@ -76,6 +76,40 @@ package main
 // pin what a proven binding plans, and this file now only decides, per id,
 // whether to hand the planner that proof.
 //
+// # The same census answers before the funnel, and usually ends the question
+//
+// Entering the by-id door resolves the one-shot funnel, which is the boot gate:
+// on a converged or refused split it lists the WORK store's whole
+// infrastructure slice through bd (both tiers, closed rows included) to prove
+// containment, and on a served one it also censuses the binding. On
+// maintainer-city that was ~6 s of a ~14 s `gc bd show <work-id>` whose bd
+// call takes ~5 s — paid for a verdict the answer did not depend on.
+//
+// For a NON-RESERVED id the verdict decides nothing once this census has
+// answered twinNone or twinNoSplit, because every verdict then falls through:
+//
+//   - bypass (no relocated class): the door is not entered at all;
+//   - served: the binding is the only leg the door probes, and its Get
+//     answered not-found (a retired probe falls through without asking);
+//   - refused, for ANY reason: the probe is tolerated unless this census
+//     denies the id, and twinNone is exactly bindingGivesIDATwin's "no" (the
+//     per-id manifest rule when the manifest was read, the binding-wide rule
+//     when it was not). twinNoSplit is the shape the census never denies
+//     anything for, so a refused city with no whole split falls through too.
+//
+// So bdByIDAnswerIsThePassthroughForEveryVerdict takes the census first and
+// skips the funnel when every subject is non-reserved and twinNone or
+// twinNoSplit. Every other answer — a reserved id, a binding hit, a binding
+// Get fault, a manifest-delivered id, a binding-wide relic with no readable
+// manifest, any undecided read — enters the funnel exactly as before, and the
+// refused path then reads the proof from the memo this census filled rather
+// than opening the binding a second time. The denial is unchanged: it is
+// computed by the same function, for the same ids, from the same reads.
+//
+// What the skip drops is the funnel's side output, never an answer: the boot
+// refusal it prints once to stderr, and a served city's served-binding note,
+// which the controller's own boot writes.
+//
 // # The absent case is the tolerant one
 //
 // Every way of not reaching an answer — a config that will not load, a plan
@@ -142,16 +176,54 @@ func byIDResidencyTopology(cityPath string, cfg *config.City, work beads.Store, 
 	return assembleResidencyTopology(cfg, work, rigs, bindings, refused)
 }
 
+// bdByIDAnswerIsThePassthroughForEveryVerdict reports whether the by-id door
+// would hand ids to the passthrough whatever the boot gate's verdict, so the
+// door need not resolve the funnel (and pay its work-store census) to say so.
+// See "The same census answers before the funnel" above for why each verdict
+// falls through on these ids.
+//
+// false is always safe: it sends the caller into the funnel, which is the
+// path every answer took before. It is returned for a reserved id, an empty id
+// set, a census that proved a twin or could not decide, and for the two states
+// in which this process already holds the city's routes (a resolved funnel, or
+// a controller's registration) — there the census would open a second handle
+// on a binding root that is already open, and the routes answer cheaply anyway.
+func bdByIDAnswerIsThePassthroughForEveryVerdict(cityPath string, ids []string) bool {
+	if cityPath == "" || len(ids) == 0 {
+		return false
+	}
+	for _, id := range ids {
+		if strings.TrimSpace(id) == "" || bdIDIsClassReserved(id) {
+			return false
+		}
+	}
+	if _, registered := registeredResidencyEntry(cityPath); registered {
+		return false
+	}
+	if cliStorageRoutesResolved(cityPath) {
+		return false
+	}
+	for _, proof := range byIDTwinProofsFor(cityPath, ids) {
+		if proof.verdict != twinNone && proof.verdict != twinNoSplit {
+			return false
+		}
+	}
+	return true
+}
+
 // provenTwinRefsForID opens the binding this city is configured for and
 // returns the binding refs PROVEN to give id a frozen twin in the work store:
 // the binding holds id now, or the migration's copy manifest records
 // delivering it there.
 //
-// It is called only for a city whose boot refused, which is also what makes
+// It is called for a city whose boot refused, which is also what makes
 // opening the binding here safe: the refusal is why nothing else in this
 // process holds it open. A served city's binding is already open on the funnel,
 // and a second handle on a binding root — a duplicate managed-Dolt server, a
 // second sqlite writer — is the bug the residency constructors exist to avoid.
+// The by-id door's funnel skip (bdByIDAnswerIsThePassthroughForEveryVerdict)
+// takes the same census BEFORE the funnel has opened anything, which is the
+// other moment no handle exists, and the memo it fills is this one.
 //
 // The handle is closed before the verdict is returned. Nothing downstream reads
 // through it: what travels is a set of refs.
@@ -159,51 +231,125 @@ func byIDResidencyTopology(cityPath string, cfg *config.City, work beads.Store, 
 // An empty result is "nothing proved", which every failure path also produces
 // and which the caller reads as no evidence.
 func provenTwinRefsForID(cityPath, id string) map[storeref.StoreRef]bool {
-	key := filepath.Clean(cityPath)
 	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil
+	}
+	return byIDTwinProofsFor(cityPath, []string{id})[id].proven
+}
+
+// byIDTwinVerdict is what one census read established about one id.
+type byIDTwinVerdict uint8
+
+const (
+	// twinUndecided is the tolerant unknown: a config that will not load, a
+	// plan that will not resolve, a binding not on disk or not openable, a
+	// binding leg with no store. It proves nothing, so the refused path
+	// denies nothing on it — and the funnel skip takes nothing from it either.
+	twinUndecided byIDTwinVerdict = iota
+	// twinDeny: the read must be denied (bindingGivesIDATwin): the binding
+	// holds the id, its Get failed other than not-found, the copy manifest
+	// records delivering it, or — with no readable manifest — the binding
+	// holds some id outside its reserved namespaces.
+	twinDeny
+	// twinNone: the binding ANSWERED not-found for the id and no twin is
+	// proven by the rule bindingGivesIDATwin applies (the manifest, when it
+	// was read; else the binding-wide census).
+	twinNone
+	// twinNoSplit: the city configures no whole-split binding, the only
+	// arrangement a migration can have produced, so no binding can hold a
+	// preserved id. It is also the one arrangement the boot gate never serves.
+	twinNoSplit
+)
+
+// byIDTwinProof is one id's census answer: the verdict, and on twinDeny the
+// binding refs the proof is keyed by.
+type byIDTwinProof struct {
+	verdict byIDTwinVerdict
+	proven  map[storeref.StoreRef]bool
+}
+
+// byIDTwinProofsFor answers the census for every id, memoized per (city, id),
+// taking ONE census — one config load, one binding open, one Get per id and at
+// most one manifest read — for the ids the memo does not hold yet. A bulk
+// by-id argv (a maintenance close of a batch of stale wisps) therefore opens
+// the binding once, not once per id.
+func byIDTwinProofsFor(cityPath string, ids []string) map[string]byIDTwinProof {
+	key := filepath.Clean(cityPath)
+	out := make(map[string]byIDTwinProof, len(ids))
+	var missing []string
 	provenRelicRefsMu.Lock()
 	if provenRelicRefsByCity == nil {
-		provenRelicRefsByCity = make(map[string]map[string]map[storeref.StoreRef]bool, 1)
+		provenRelicRefsByCity = make(map[string]map[string]byIDTwinProof, 1)
 	}
-	cached, ok := provenRelicRefsByCity[key][id]
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if cached, ok := provenRelicRefsByCity[key][id]; ok {
+			out[id] = cached
+			continue
+		}
+		missing = append(missing, id)
+	}
 	provenRelicRefsMu.Unlock()
-	if ok {
-		return cached
+	if len(missing) == 0 {
+		return out
 	}
 
-	proven := censusRefusedCityBindingFor(cityPath, id)
+	read := censusCityBindingTwins(cityPath, missing)
 
 	provenRelicRefsMu.Lock()
 	defer provenRelicRefsMu.Unlock()
+	for _, id := range missing {
+		out[id] = read[id]
+	}
 	if provenRelicRefsByCity == nil {
 		// resetProvenRelicRefs ran while this read was in flight. The answer
 		// is still right for this caller, so it is returned unmemoized rather
 		// than assigned into a nil map.
-		return proven
+		return out
 	}
 	if provenRelicRefsByCity[key] == nil {
-		provenRelicRefsByCity[key] = make(map[string]map[storeref.StoreRef]bool, 1)
+		provenRelicRefsByCity[key] = make(map[string]byIDTwinProof, len(missing))
 	}
-	provenRelicRefsByCity[key][id] = proven
-	return proven
+	for _, id := range missing {
+		provenRelicRefsByCity[key][id] = read[id]
+	}
+	return out
 }
 
-// censusRefusedCityBindingFor is the read itself: resolve this city's storage
-// plan, open the binding it names, and ask each derived binding whether id has
-// a twin there.
+// censusCityBindingTwins is the read itself: resolve this city's storage
+// plan, open the binding it names, and ask each derived binding whether each
+// id has a twin there.
 //
-// Every early return is the same answer — no proof — and they are deliberately
-// silent. A refused city has already had its refusal printed once by the
-// one-shot gate, and the reasons a binding cannot be reopened here are the
-// reasons it was refused in the first place; reporting them again would put a
-// second copy of the same sentence on every by-id read of an unconverged city.
-func censusRefusedCityBindingFor(cityPath, id string) map[storeref.StoreRef]bool {
-	if id == "" {
-		return nil
+// Every early return before the open is either twinNoSplit (the config names
+// no whole split, so no binding can hold a preserved id) or twinUndecided, and
+// they are deliberately silent. A refused city has already had its refusal
+// printed once by the one-shot gate, and the reasons a binding cannot be
+// reopened here are the reasons it was refused in the first place; reporting
+// them again would put a second copy of the same sentence on every by-id read
+// of an unconverged city.
+//
+// The config is loaded without the revision snapshot, for the funnel's reason
+// (cliStorageRoutesLoad): nothing here reads config.Revision(), and the
+// snapshot content-hashes every pack file, which on maintainer-city was most of
+// this function's CPU.
+func censusCityBindingTwins(cityPath string, ids []string) map[string]byIDTwinProof {
+	out := make(map[string]byIDTwinProof, len(ids))
+	all := func(verdict byIDTwinVerdict) map[string]byIDTwinProof {
+		for _, id := range ids {
+			out[id] = byIDTwinProof{verdict: verdict}
+		}
+		return out
 	}
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
-	if err != nil || cfg == nil || cfg.Storage == nil {
-		return nil
+	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), cliStorageRoutesLoad)
+	if err != nil || cfg == nil {
+		return all(twinUndecided)
+	}
+	if cfg.Storage == nil {
+		return all(twinNoSplit)
 	}
 	storage := cfg.EffectiveStorage()
 	shape, binding := storageSplitShapeOf(storage)
@@ -211,21 +357,21 @@ func censusRefusedCityBindingFor(cityPath, id string) map[storeref.StoreRef]bool
 		// The only arrangement this build serves is also the only one a
 		// migration can have produced, so it is the only one whose binding can
 		// hold a preserved id.
-		return nil
+		return all(twinNoSplit)
 	}
 	// Native transport is checked here, against the city's own cfg, because
 	// the open below carries none: native_transport "off" keeps the census from
 	// opening a natively served binding, as it keeps the boot gate from
 	// serving one.
 	if nativeTransportBindingRefusal(binding, storebinding.ProviderID(storage.Bindings[binding].Provider), cfg) != nil {
-		return nil
+		return all(twinUndecided)
 	}
 	if !refusedBindingIsAlreadyOnDisk(cityPath, cfg) {
-		return nil
+		return all(twinUndecided)
 	}
 	plan, err := resolveCityStoragePlan(cityPath, cfg)
 	if err != nil {
-		return nil
+		return all(twinUndecided)
 	}
 	// Unstamped (nil cfg): the census only reads, and a require refusal here
 	// would read as "cannot open the binding".
@@ -233,19 +379,47 @@ func censusRefusedCityBindingFor(cityPath, id string) map[storeref.StoreRef]bool
 	if err != nil {
 		// "Cannot open the binding" — the one refusal that really does say the
 		// binding is unreadable. No proof, and the read falls through.
-		return nil
+		return all(twinUndecided)
 	}
 	defer routes.close() //nolint:errcheck // a close failure cannot unsay what the census already read
 
 	manifest, manifestRead := migrationCopyManifest(cityPath, cfg)
 	bindings, _ := residencyBindingsFromRoutes(routes)
-	proven := make(map[storeref.StoreRef]bool, len(bindings))
+	for _, id := range ids {
+		out[id] = bindingsTwinProof(bindings, id, manifest, manifestRead)
+	}
+	return out
+}
+
+// bindingsTwinProof folds every derived binding's answer for id into one
+// proof. Any binding denying the id denies it; the id is twinNone only when
+// there was at least one binding and EVERY one of them answered absence and
+// proved no twin.
+func bindingsTwinProof(bindings []storeref.ClassBinding, id string, manifest map[string]bool, manifestRead bool) byIDTwinProof {
+	proof := byIDTwinProof{verdict: twinUndecided}
+	if len(bindings) == 0 {
+		return proof
+	}
+	allNone := true
 	for _, b := range bindings {
-		if bindingGivesIDATwin(b, id, manifest, manifestRead) {
-			proven[b.Leg.Ref] = true
+		switch bindingTwinVerdict(b, id, manifest, manifestRead) {
+		case twinDeny:
+			if proof.proven == nil {
+				proof.proven = make(map[storeref.StoreRef]bool, len(bindings))
+			}
+			proof.proven[b.Leg.Ref] = true
+		case twinNone:
+		default:
+			allNone = false
 		}
 	}
-	return proven
+	switch {
+	case len(proof.proven) > 0:
+		proof.verdict = twinDeny
+	case allNone:
+		proof.verdict = twinNone
+	}
+	return proof
 }
 
 // bindingGivesIDATwin reports whether the work store's copy of id may be a
@@ -282,19 +456,34 @@ func censusRefusedCityBindingFor(cityPath, id string) map[storeref.StoreRef]bool
 // and is reported as one: the binding is treated as owning id, so the read is
 // DENIED (an error naming the binding) rather than handed to the work ledger.
 func bindingGivesIDATwin(b storeref.ClassBinding, id string, manifest map[string]bool, manifestRead bool) bool {
+	return bindingTwinVerdict(b, id, manifest, manifestRead) == twinDeny
+}
+
+// bindingTwinVerdict is bindingGivesIDATwin's decision with the one bit the
+// funnel skip needs on top: twinNone says not only "no twin" but that the
+// binding ANSWERED for id — its Get came back not-found — so a served city's
+// probe of the same binding falls through too. A binding with no store decides
+// nothing (twinUndecided); the refused path reads that as no twin, as it always
+// has, and the skip reads it as "take the verdict".
+func bindingTwinVerdict(b storeref.ClassBinding, id string, manifest map[string]bool, manifestRead bool) byIDTwinVerdict {
 	if b.Leg.Store == nil {
-		return false
+		return twinUndecided
 	}
 	_, err := b.Leg.Store.Get(id) // residency:allow — the per-id twin proof for a refused binding; resolves nothing
 	switch {
 	case err == nil:
-		return true
+		return twinDeny
 	case !errors.Is(err, beads.ErrNotFound):
-		return true
+		return twinDeny
 	case manifestRead:
-		return manifest[id]
+		if manifest[id] {
+			return twinDeny
+		}
+		return twinNone
+	case bindingHoldsAnyRelic(b):
+		return twinDeny
 	default:
-		return bindingHoldsAnyRelic(b)
+		return twinNone
 	}
 }
 
@@ -395,7 +584,7 @@ func foreignBindingLocationExists(cityPath string, cfg *config.City) bool {
 	if shape != storageSplitWhole {
 		// Deliberately re-derived, not a second independent precondition: the
 		// one caller today reaches here having already established this on the
-		// same cfg (censusRefusedCityBinding). It is kept because it is what
+		// same cfg (censusCityBindingTwins). It is kept because it is what
 		// makes `binding` safe to read below — storageSplitShapeOf names no
 		// binding for any other shape — so the helper stays correct for a
 		// caller it may later acquire.
@@ -415,8 +604,8 @@ func foreignBindingLocationExists(cityPath string, cfg *config.City) bool {
 
 var (
 	provenRelicRefsMu sync.Mutex
-	// provenRelicRefsByCity memoizes provenTwinRefsForID: city -> id -> refs.
-	provenRelicRefsByCity map[string]map[string]map[storeref.StoreRef]bool
+	// provenRelicRefsByCity memoizes byIDTwinProofsFor: city -> id -> proof.
+	provenRelicRefsByCity map[string]map[string]byIDTwinProof
 )
 
 // resetProvenRelicRefs drops the memo wholesale, alongside the routes and the

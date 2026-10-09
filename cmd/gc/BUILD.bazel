@@ -927,6 +927,7 @@ go_test(
         "builtin_packs_for_test_test.go",
         "builtin_readiness_cost_bench_test.go",
         "by_id_binding_owner_test.go",
+        "by_id_funnel_skip_test.go",
         "by_id_relic_proof_test.go",
         "by_id_store_route_test.go",
         "cache_notification_test.go",

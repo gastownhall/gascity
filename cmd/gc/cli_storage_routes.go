@@ -173,6 +173,19 @@ func resolveCLIStorageRoutes(cityPath string) *storageRoutes {
 	return refusingStorageRoutes(binding, err)
 }
 
+// cliStorageRoutesResolved reports whether this process has already entered
+// the funnel for cityPath, WITHOUT entering it. A caller about to open the
+// city's binding for itself uses it to stay off a root the funnel may hold.
+func cliStorageRoutesResolved(cityPath string) bool {
+	if cityPath == "" {
+		return false
+	}
+	cliStorageRoutesMu.Lock()
+	defer cliStorageRoutesMu.Unlock()
+	_, ok := cliStorageRoutesByCity[filepath.Clean(cityPath)]
+	return ok
+}
+
 // cliStorageRoutesEntryFor returns the memo slot for one city, creating it under
 // the lock and resolving it outside — an open that takes a database lock must
 // not be performed holding a mutex every other call site is waiting on.
