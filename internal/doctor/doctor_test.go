@@ -1054,3 +1054,62 @@ func TestPanickingFixDoesNotCrashTheRun(t *testing.T) {
 }
 
 func (panickingFixCheck) WarmupEligible() bool { return false }
+
+// abandonObservingCheck blocks until the runner signals abandonment through
+// CheckContext.Done, then records what Canceled reported.
+type abandonObservingCheck struct {
+	sawCancel chan bool
+}
+
+func (c *abandonObservingCheck) Name() string { return "abandon-observer" }
+func (c *abandonObservingCheck) Run(ctx *CheckContext) *CheckResult {
+	if ctx.Canceled() {
+		c.sawCancel <- false // canceled before the timeout fired: wrong
+		return &CheckResult{Name: c.Name(), Status: StatusOK}
+	}
+	select {
+	case <-ctx.Done:
+		c.sawCancel <- ctx.Canceled()
+	case <-time.After(5 * time.Second):
+		c.sawCancel <- false
+	}
+	return &CheckResult{Name: c.Name(), Status: StatusOK}
+}
+func (c *abandonObservingCheck) CanFix() bool              { return false }
+func (c *abandonObservingCheck) Fix(_ *CheckContext) error { return nil }
+func (c *abandonObservingCheck) WarmupEligible() bool      { return false }
+
+// TestRunCheckTimeoutSignalsAbandonedCheck: when the runner abandons a check at
+// the per-check timeout it closes CheckContext.Done, so a check that issues
+// many store calls can stop issuing them instead of running on unobserved.
+func TestRunCheckTimeoutSignalsAbandonedCheck(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	check := &abandonObservingCheck{sawCancel: make(chan bool, 1)}
+	d.Register(check)
+
+	report := d.Run(&CheckContext{}, io.Discard, false)
+	if len(report.Results) != 1 || !report.Results[0].TimedOut {
+		t.Fatalf("report = %+v, want the check to time out", report)
+	}
+	select {
+	case canceled := <-check.sawCancel:
+		if !canceled {
+			t.Fatal("abandoned check did not observe cancellation through CheckContext.Done/Canceled")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("abandoned check never observed CheckContext.Done closing")
+	}
+	d.Wait()
+}
+
+// TestCheckContextCanceledNilSafe: an unbounded run leaves Done nil, and a nil
+// context is never canceled.
+func TestCheckContextCanceledNilSafe(t *testing.T) {
+	var nilCtx *CheckContext
+	if nilCtx.Canceled() {
+		t.Fatal("nil CheckContext reported canceled")
+	}
+	if (&CheckContext{}).Canceled() {
+		t.Fatal("CheckContext without Done reported canceled")
+	}
+}
