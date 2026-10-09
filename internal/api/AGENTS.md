@@ -61,3 +61,9 @@ a sanctioned bypass of the worker boundary. Do not add others; see
   changes (a manual step, not a CI gate); use
   `npm run preview -- --host 127.0.0.1 --port <port>` from
   `internal/api/dashboardspa/web/frontend` after `make dashboard-build-npm`
+
+## Fresh active-work lookup
+
+Batch a session's assignee aliases into one fresh query per bead store. Preserve
+assignee priority across stores and newest-first order within a store, so a
+concrete session's work wins over a template fallback.
