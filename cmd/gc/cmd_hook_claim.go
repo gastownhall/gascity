@@ -3059,12 +3059,19 @@ func hookContinuationNudgeEnqueue(assignee string) {
 	// Apply a session fence so a stale nudge from a prior run of this slot
 	// is rejected at delivery if the slot is recycled before the nudge fires.
 	// Best-effort: if the store is unavailable the nudge enqueues without a
-	// fence (same behavior as before this fix).
-	store := openNudgeBeadStore(cityPath)
-	if store.Store != nil {
-		defer closeBeadStoreHandle(store.Store) //nolint:errcheck
-		target = withNudgeTargetFence(store.Store, target)
+	// fence (same behavior as before this fix). Close only the handle this
+	// call opened, never the nudges-class store (see openOwnedNudgeBeadStore),
+	// and read session beads from the session class, not the nudges class.
+	store, opened := openOwnedNudgeBeadStore(cityPath)
+	if opened != nil {
+		defer closeBeadStoreHandle(opened) //nolint:errcheck
+		target = withNudgeTargetFence(cliSessionStore(opened, cfg, cityPath), target)
 	}
+	// The assignee is the right queue key: hookClaimAssigneeIdentity picks the
+	// first of alias, session ID, agent, resolved agent name, and session name,
+	// and delivery (queuedNudgeClaimableForTarget and the supervisor
+	// dispatcher) matches item.Agent against nudgeTarget.queueKeys, which
+	// carries each of those for the session.
 	item := newQueuedNudgeWithOptions(assignee, "Work slung. Check your hook.", "hook-claim-continuation", time.Now(), queuedNudgeOptionsFromTarget(target))
 	if err := enqueueQueuedNudgeWithStore(cityPath, store, item); err != nil {
 		return

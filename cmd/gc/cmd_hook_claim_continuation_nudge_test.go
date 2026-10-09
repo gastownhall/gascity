@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
 // workflowRootCandidates returns a slice of candidates suitable for testing
@@ -190,5 +193,77 @@ func TestHookClaimZeroContinuationDoesNotEnqueueContinuationNudge(t *testing.T) 
 	}
 	if len(enqueued) != 0 {
 		t.Fatalf("continuation nudge must not be enqueued when no siblings assigned, got %v", enqueued)
+	}
+}
+
+// TestHookContinuationNudgeEnqueueClosesOnlyOpenedHandle exercises the
+// production EnqueueContinuationNudge helper against a relocated-shape seam:
+// the nudges-class store and the handle the call opened are distinct. The
+// helper must queue the nudge under the assignee, read the session fence from
+// the session class (the opened work store at the default backend), and close
+// only the handle it opened — closing the class store would close the storage
+// routes' shared engine. Replaces package seams; must stay serial.
+func TestHookContinuationNudgeEnqueueClosesOnlyOpenedHandle(t *testing.T) {
+	const assignee = "gascity/worker/slot-0"
+	clearGCEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	resetCLIStorageRoutes(t)
+
+	var classCloses, openedCloses, opens int
+	classStore := &countingNudgeStore{MemStore: beads.NewMemStore(), closes: &classCloses}
+	openedStore := &countingNudgeStore{MemStore: beads.NewMemStore(), closes: &openedCloses}
+	sessionBead, err := openedStore.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       assignee,
+			"continuation_epoch": "3",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	prevOpen := openOwnedNudgeBeadStore
+	openOwnedNudgeBeadStore = func(string) (beads.NudgesStore, beads.Store) {
+		opens++
+		return beads.NudgesStore{Store: classStore}, openedStore
+	}
+	t.Cleanup(func() { openOwnedNudgeBeadStore = prevOpen })
+	prevPoller := startNudgePoller
+	startNudgePoller = func(string, string, string) error { return nil }
+	t.Cleanup(func() { startNudgePoller = prevPoller })
+
+	hookContinuationNudgeEnqueue(assignee)
+
+	state, err := nudgequeue.LoadState(cityDir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 1 {
+		t.Fatalf("pending = %#v, want exactly one continuation nudge", state.Pending)
+	}
+	item := state.Pending[0]
+	if item.Agent != assignee {
+		t.Fatalf("queued nudge Agent = %q, want %q", item.Agent, assignee)
+	}
+	if item.Source != "hook-claim-continuation" {
+		t.Fatalf("queued nudge Source = %q, want hook-claim-continuation", item.Source)
+	}
+	if item.SessionID != sessionBead.ID || item.ContinuationEpoch != "3" {
+		t.Fatalf("fence = (%q, %q), want (%q, 3): the fence must come from the session class", item.SessionID, item.ContinuationEpoch, sessionBead.ID)
+	}
+	if opens != 1 {
+		t.Fatalf("opens = %d, want 1", opens)
+	}
+	if openedCloses != 1 {
+		t.Fatalf("opened handle closes = %d, want 1", openedCloses)
+	}
+	if classCloses != 0 {
+		t.Fatalf("nudges-class store closes = %d, want 0: only the opened handle may be closed", classCloses)
 	}
 }
