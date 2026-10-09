@@ -91,6 +91,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gc pack diff <old> <new>` classifies the change between two versions of
+  a pack.** It computes each pack directory's capability surface (commands,
+  agents and formulas shipped; claim commands its prompts mandate; reserved
+  metadata it demands; formula constructs it uses; normative lines in its role
+  prompts; a digest per prose file) and reports `BREAKING` (exit 2),
+  `ADDITIVE` (exit 0), `UNCLASSIFIED` (exit 1: prose moved, nothing
+  computable did) or `NONE` (exit 0). `gc pack capability <dir>` prints one
+  surface. Both take `--json`.
+
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
   proxy and Dolt child stay up with no connections.** bd retires the pair
   after that much quiet and the next bd command restarts it. The value is a Go

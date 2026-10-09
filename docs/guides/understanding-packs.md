@@ -405,6 +405,33 @@ loading uses the local resolved pack instead of re-fetching the remote source.
 
 </Accordion>
 
+### Compare Two Versions Of A Pack
+
+A pack's `[pack].version` says nothing about compatibility: packs often keep
+`0.1.0` across many commits, and `0.x` allows breaking changes in any release.
+`gc pack diff` computes what each version commits to and classifies the change:
+
+```shell
+old=$(mktemp -d)
+git archive <old-ref> path/to/pack | tar -x -C "$old"
+gc pack diff "$old/path/to/pack" path/to/pack
+```
+
+| Verdict | Meaning | Exit |
+|---|---|---|
+| `BREAKING` | a commitment was removed or changed | 2 |
+| `ADDITIVE` | a commitment was added and none was removed | 0 |
+| `UNCLASSIFIED` | prompt prose changed and no computable commitment did | 1 |
+| `NONE` | the two surfaces are identical | 0 |
+
+The surface covers the commands, agents and formulas a pack ships, the claim
+commands its prompts tell agents to run, the reserved metadata it requires, the
+formula constructs it uses, and every *must*, *never* and *do not* line in its
+role prompts and template fragments. Read the files an `UNCLASSIFIED` verdict
+lists: a rewritten prompt can change an agent's judgment with the same surface.
+`gc pack capability <dir>` prints one version's surface, and `--json` makes both
+commands scriptable.
+
 ### Registry State Is Local
 
 Registry commands manage local discovery state. Pack imports manage shared city
