@@ -1175,6 +1175,7 @@ go_test(
         "dispatch_control_ready_hold_label_test.go",
         "dispatch_control_ready_leak_test.go",
         "dispatch_control_ready_test.go",
+        "dispatch_control_ready_wal_test.go",
         "dispatch_ep8_recovery_hold_label_test.go",
         "dispatch_runtime_hold_label_test.go",
         "dispatch_runtime_quiet_retry_test.go",
