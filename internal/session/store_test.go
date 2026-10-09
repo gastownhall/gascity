@@ -490,8 +490,8 @@ func TestCloseWithoutReasonEmitsSingleClose(t *testing.T) {
 }
 
 // TestSetStatusOpenEmitsStatusOnlyUpdate proves SetStatusOpen emits exactly one
-// Update with only Status="open" set — byte-identical to the raw
-// store.Update(id, UpdateOpts{Status: &"open"}) reopen/retire-archive writes.
+// Update with Status="open" and the runtime lease clear (a reopened row holds
+// no lease), and nothing else.
 func TestSetStatusOpenEmitsStatusOnlyUpdate(t *testing.T) {
 	b := sessionBeadFixture("s-1", "closed", map[string]string{"state": "archived"})
 	is, rec := recordingStore(t, b)
@@ -510,8 +510,8 @@ func TestSetStatusOpenEmitsStatusOnlyUpdate(t *testing.T) {
 	if c.Opts.Status == nil || *c.Opts.Status != "open" {
 		t.Errorf("Update Status = %v, want open", c.Opts.Status)
 	}
-	if c.Opts.Type != nil || c.Opts.Metadata != nil || c.Opts.Labels != nil {
-		t.Errorf("Update set fields beyond Status: %#v", c.Opts)
+	if c.Opts.Type != nil || c.Opts.Labels != nil || !reflect.DeepEqual(c.Opts.Metadata, map[string]string(RuntimeLeaseClearPatch())) {
+		t.Errorf("Update set fields beyond Status and the runtime lease clear: %#v", c.Opts)
 	}
 }
 

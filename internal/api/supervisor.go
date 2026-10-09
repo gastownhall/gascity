@@ -76,6 +76,16 @@ type TransientCityEventSource interface {
 	TransientCityEventProviders() map[string]events.Provider
 }
 
+// CityChangeNotifier is an optional CityResolver extension that signals
+// changes to the set of cities or their running state (a city registered,
+// started, stopped, or unregistered). CityChanges returns a channel that is
+// closed at the next such change; callers call it again after each wake to
+// wait for the following one. Long-lived supervisor-scope event streams use
+// it to attach and detach city event providers while they stay open.
+type CityChangeNotifier interface {
+	CityChanges() <-chan struct{}
+}
+
 type cityInitializer interface {
 	Scaffold(context.Context, cityinit.InitRequest) (*cityinit.InitResult, error)
 	Unregister(context.Context, cityinit.UnregisterRequest) (*cityinit.UnregisterResult, error)
@@ -140,7 +150,15 @@ type SupervisorMux struct {
 	// create endpoints (POST /v0/city). Per-city creates use the per-city
 	// Server's own cache instead.
 	idem *idempotencyCache
+
+	// eventStreamResync overrides defaultEventStreamResync; zero uses the
+	// default. Tests shorten it.
+	eventStreamResync time.Duration
 }
+
+// defaultEventStreamResync is how often an open supervisor-scope event
+// stream re-reads the city set without a change signal.
+const defaultEventStreamResync = 30 * time.Second
 
 // NewSupervisorMux creates a SupervisorMux that routes requests to cities
 // resolved by the given CityResolver. The initializer is invoked by the
@@ -500,17 +518,46 @@ func (sm *SupervisorMux) getCityServer(name string, state State) *Server {
 // exists from Scaffold onward, but the city isn't in Running=true yet.
 func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {
 	mux := events.NewMultiplexer()
-	for name, ep := range sm.EventProviders() {
+	for name, ep := range sm.globalEventProviders() {
 		mux.Add(name, ep)
 	}
+	return mux
+}
+
+// globalEventProviders returns every provider the supervisor-scope event
+// endpoints merge: the per-city providers from EventProviders plus the
+// supervisor-level recorder under "__supervisor__".
+func (sm *SupervisorMux) globalEventProviders() map[string]events.Provider {
+	out := sm.EventProviders()
 	if supSrc, ok := sm.resolver.(SupervisorEventSource); ok {
 		if rec := supSrc.SupervisorEventRecorder(); rec != nil {
 			if prov, ok := rec.(events.Provider); ok {
-				mux.Add("__supervisor__", prov)
+				out["__supervisor__"] = prov
 			}
 		}
 	}
-	return mux
+	return out
+}
+
+// cityChanges returns the resolver's next city-change signal, or nil (which
+// never fires) when the resolver does not implement CityChangeNotifier.
+func (sm *SupervisorMux) cityChanges() <-chan struct{} {
+	if n, ok := sm.resolver.(CityChangeNotifier); ok {
+		return n.CityChanges()
+	}
+	return nil
+}
+
+// eventStreamResyncInterval is how often a supervisor-scope event stream
+// re-reads the city set even without a change signal. It is the only way a
+// resolver without CityChangeNotifier gets new cities onto an open stream,
+// and it drops providers that leave the set without a change signal (for
+// example a recently unregistered city whose grace period expired).
+func (sm *SupervisorMux) eventStreamResyncInterval() time.Duration {
+	if sm.eventStreamResync > 0 {
+		return sm.eventStreamResync
+	}
+	return defaultEventStreamResync
 }
 
 // EventProviders returns the live per-city event providers (running cities plus

@@ -30,8 +30,10 @@ const bazelPinnedTestPath = "/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
 // bazelNonKeyConfigs select how actions run, where results come from and
 // whether a result is reused or retried; none may change what an action is.
 // remote-exec and fork-cache are the remote modes (CI and pre-push); ci is
-// bazel.yml's lane policy.
-var bazelNonKeyConfigs = []string{"remote-exec", "fork-cache", "ci"}
+// bazel.yml's lane policy; fresh is the nightly fresh-test-results run's
+// (bazel-nightly.yml), which forces re-execution (--nocache_test_results)
+// without changing what any lane's actions are.
+var bazelNonKeyConfigs = []string{"remote-exec", "fork-cache", "ci", "fresh"}
 
 // bazelClientEnvAllowed may be forwarded from the client environment: it is a
 // debug override (internal/bazeltest) that no phase sets, so an unset value
@@ -53,7 +55,23 @@ func bazelTransportFlag(flag string) bool {
 	case "--remote_default_exec_properties", "--remote_default_platform_properties":
 		return false // platform properties are part of the action
 	case "--jobs", "--experimental_circuit_breaker_strategy", "--disk_cache", "--keep_going", "--nokeep_going",
-		"--flaky_test_attempts", "--cache_test_results", "--nocache_test_results", "--profile":
+		"--flaky_test_attempts", "--cache_test_results", "--nocache_test_results", "--profile",
+		"--execution_log_compact_file", "--experimental_build_event_upload_strategy",
+		"--experimental_use_validation_aspect", "--noexperimental_use_validation_aspect":
+		// --execution_log_compact_file and --experimental_build_event_upload_strategy
+		// (added for the ci-analytics extractor, design doc section 7 S2) only
+		// change where Bazel writes the compact exec log and how it uploads
+		// BEP-referenced local files; neither reaches the executed action.
+		//
+		// --[no]experimental_use_validation_aspect only schedules validation
+		// actions (nogo) beside tests instead of before them. Checked against
+		// Bazel 9.2.0 on //cmd/gc:gc_test, //scripts:scripts_test and
+		// //internal/config:config_test: toggling it keeps the analysis cache
+		// (it is a build-request option, not configuration), the aquery
+		// jsonproto of their GoCompilePkg, GoLink, RunNogo, ValidateNogo and
+		// TestRunner actions is byte-identical, and the compact exec logs of
+		// a cold-output-base `bazel test` with and without it hold the same
+		// 4457 spawns with the same digests, args, env and platform.
 		return true
 	}
 	for _, prefix := range []string{"--remote_", "--experimental_remote_", "--incompatible_remote_", "--tls_", "--credential_helper", "--google_", "--bes_", "--build_event_", "--grpc_keepalive_"} {
@@ -143,7 +161,7 @@ func checkBazelKeyParity(bazelrc string) []error {
 
 // checkBazelRCLocalLines checks lines destined for .bazelrc.local: only
 // build:remote-exec and build:fork-cache transport flags and the fork-cache
-// selection. bazel-test.yml's probe-gated `build:fork-cache
+// selection. bazel.yml's probe-gated `build:fork-cache
 // --remote_cache_compression` (zstd while rbe-cache advertises it) is such a
 // transport flag: compression changes the bytes on the wire, never a digest.
 func checkBazelRCLocalLines(lines []string) []error {
@@ -179,6 +197,8 @@ func TestBazelKeyParity(t *testing.T) {
 		"build:fork-cache --noremote_local_fallback --experimental_circuit_breaker_strategy=failure\n" +
 		"test:ci --flaky_test_attempts=1\n" +
 		"test:ci --experimental_remote_cache_eviction_retries=0\n" +
+		"test:ci --experimental_use_validation_aspect\n" +
+		"test:fresh --nocache_test_results\n" +
 		"build:other --define=gotags=x\n" +
 		"try-import %workspace%/.bazelrc.local\n"
 	if errs := checkBazelKeyParity(good); len(errs) != 0 {
@@ -205,6 +225,9 @@ func TestBazelKeyParity(t *testing.T) {
 		"ci define":            good + "test:ci --define=gotags=x\n",
 		"ci test timeout":      good + "test:ci --test_timeout=1100\n",
 		"ci action env":        good + "build:ci --action_env=GOFLAGS=-mod=mod\n",
+		"no fresh":             strings.ReplaceAll(good, "test:fresh", "test:gone"),
+		"fresh define":         good + "test:fresh --define=gotags=x\n",
+		"fresh action env":     good + "build:fresh --action_env=GOFLAGS=-mod=mod\n",
 	} {
 		if len(checkBazelKeyParity(rc)) == 0 {
 			t.Errorf("%s: expected an error for .bazelrc fixture:\n%s", name, rc)
@@ -244,40 +267,19 @@ func TestBazelKeyParity(t *testing.T) {
 	}
 }
 
-// TestBazelCIRCLocalCarriesOnlyTransport runs bazel-test.yml's rc step in
-// every mode, with rbe-cache advertising zstd and without: whatever it
-// writes must be transport-only, so trusted, rbe-fork and fork-cache runs
-// (and developers) hash actions alike.
+// TestBazelCIRCLocalCarriesOnlyTransport runs bazel.yml's lane step that
+// writes .bazelrc.local, with rbe-cache advertising zstd and without:
+// whatever it writes must be transport-only, so fork-cache lanes hash
+// actions like trusted, rbe-fork and developer runs.
 func TestBazelCIRCLocalCarriesOnlyTransport(t *testing.T) {
-	steps := bazelTestWorkflowSteps(t, repoRoot(t))
-	var script string
-	for _, s := range steps {
-		if s.Name == bazelRCConfigStep {
-			script = s.Run
+	step := bazelCacheZstdLaneStep(t)
+	for _, probe := range []string{"", "zstd"} {
+		lines, _ := runBazelRCLocalStep(t, step.Run, map[string]string{"BAZEL_TEST_PROBE": probe})
+		for _, err := range checkBazelRCLocalLines(lines) {
+			t.Errorf("probe %q: %v", probe, err)
 		}
-	}
-	if script == "" {
-		t.Fatalf("%s has no %q step", bazelTestWorkflow, bazelRCConfigStep)
-	}
-	pem := "eA=="
-	for name, env := range map[string]map[string]string{
-		"trusted": {"BAZEL_REMOTE_EXECUTOR": "grpcs://executor.invalid:443", "BAZEL_FORK_CACHE": "true", "RBE_INSTANCE": "oss", "RBE_TLS_CERT": pem, "RBE_TLS_KEY": pem, "RBE_TLS_CA": pem},
-		"fork":    {"BAZEL_REMOTE_EXECUTOR": "", "BAZEL_FORK_CACHE": "true"},
-		"rbe-fork": {
-			"BAZEL_REMOTE_EXECUTOR": "", "BAZEL_FORK_CACHE": "true",
-			"RBE_FORK_ENDPOINT": rbeForkEndpoint, "RBE_FORK_INSTANCE": "oss-fork",
-			"RBE_FORK_CERT_FILE": "/runner/fork.crt", "RBE_FORK_KEY_FILE": "/runner/fork.key",
-		},
-	} {
-		for _, probe := range []string{"", "zstd"} {
-			env["BAZEL_TEST_PROBE"] = probe
-			lines := runBazelRCConfigStep(t, script, env)
-			for _, err := range checkBazelRCLocalLines(lines) {
-				t.Errorf("%s (probe %q): %v", name, probe, err)
-			}
-			if name == "fork" && probe == "zstd" && !slices.Contains(lines, bazelCacheZstdLine) {
-				t.Errorf("fork with rbe-cache advertising zstd wrote no %q, so this test no longer classifies it:\n%s", bazelCacheZstdLine, strings.Join(lines, "\n"))
-			}
+		if probe == "zstd" && !slices.Contains(lines, bazelCacheZstdLine) {
+			t.Errorf("with rbe-cache advertising zstd the step wrote no %q, so this test no longer classifies it:\n%s", bazelCacheZstdLine, strings.Join(lines, "\n"))
 		}
 	}
 }
@@ -322,8 +324,7 @@ func checkSetupBazelRCLines(lines []string) []error {
 
 // TestSetupBazelRCCarriesOnlyTransport runs setup-bazel's write-bazelrc.sh in
 // every mode bazel.yml uses (remote, fork-ro/fork-rw, cache, local): its rc
-// must be transport-only, so bazel.yml's lanes hash like pre-push and
-// bazel-test.yml.
+// must be transport-only, so bazel.yml's lanes hash like pre-push.
 func TestSetupBazelRCCarriesOnlyTransport(t *testing.T) {
 	script := readFile(t, repoRoot(t), setupBazelDir+"/write-bazelrc.sh")
 	pem := "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
@@ -378,9 +379,8 @@ func TestSetupBazelRCCarriesOnlyTransport(t *testing.T) {
 }
 
 // bazelSuiteConfigs select a tagged suite, keyed apart on purpose (--define,
-// --test_timeout); pre-push never runs them, and bazel-test.yml passes the
-// same flags (bazel_multilane_test.go).
-var bazelSuiteConfigs = map[string]bool{"acceptance": true, "integration": true}
+// --test_timeout); pre-push never runs them (bazel_multilane_test.go).
+var bazelSuiteConfigs = map[string]bool{"acceptance": true, "integration": true, "integration-smoke": true}
 
 // TestBazelMultiLaneLanesHashLikePrePush: bazel.yml's unit lane runs what
 // pre-push runs (`bazel test //...`) with only non-key configs and flags, so

@@ -1,6 +1,11 @@
 package main
 
-import "sync"
+import (
+	"strings"
+	"sync"
+
+	"github.com/gastownhall/gascity/internal/session"
+)
 
 // runtimeNameLocks serializes, per runtime name, the v2 start effect's
 // provider Start with a runtime-keyed reaper's identity re-read and Stop
@@ -36,4 +41,32 @@ func (l *runtimeNameLocks) tryLock(city, name string) (unlock func()) {
 		delete(l.held, k)
 		l.mu.Unlock()
 	}
+}
+
+// The v2 effects' shared refusal causes for a row's runtime. A refusal backs
+// the row off (P4).
+//
+//nolint:unused // the wave-7 effects (C4c2, C5a1, C5c1, C5d, C6a) refuse with them
+const (
+	causeNameBusy        = "name-busy"        // another effect, or a reaper, holds the runtime name
+	causeRouteUnknown    = "route-unknown"    // no backend resolves the runtime name
+	causeLivenessUnknown = "liveness-unknown" // the fresh liveness read was incomplete or failed
+	causeNotPresent      = "not-present"      // the runtime the intent acts on is gone
+)
+
+// lockRuntimeName takes w's city lock on row's runtime name, as every v2
+// effect that reads or calls the provider for a row takes it: keyed by the
+// city path and the runtime name (Info.SessionName), as the legacy reaper
+// (stopStillBoundClosedRuntime) keys it. ok is false, and unlock nil, when
+// the row has no runtime name or the name is busy; the caller refuses with
+// causeNameBusy and never waits.
+func lockRuntimeName(w *World, row session.Info) (name string, unlock func(), ok bool) {
+	name = strings.TrimSpace(row.SessionName)
+	if name == "" {
+		return "", nil, false
+	}
+	if unlock = runtimeNames.tryLock(w.CityPath, name); unlock == nil {
+		return name, nil, false
+	}
+	return name, unlock, true
 }

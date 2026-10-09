@@ -1,0 +1,7 @@
+{"family":"deferred arm","item":"A20","tick":"tk-1","at":"2026-10-05T00:01:09Z","template":"gascity/polecat","class":"drain","legacy":1,"v2":0,"legacy_records":["reconciler.session.drain/drain/idle"]}
+{"family":"deferred arm","item":"A18","tick":"tk-1","at":"2026-10-05T00:01:09Z","template":"gascity/polecat","class":"start","legacy":1,"v2":0,"legacy_records":["reconciler.session.wake_decision/start_candidate/wake"]}
+{"family":"deferred arm","item":"A21","tick":"tk-2","at":"2026-10-05T00:02:08Z","template":"gascity/polecat","class":"close","legacy":1,"v2":0,"legacy_records":["reconciler.session.close_orphan/closed/orphaned"]}
+{"family":"deferred arm","item":"A20","tick":"tk-2","at":"2026-10-05T00:02:08Z","template":"gascity/polecat","class":"drain","legacy":1,"v2":0,"legacy_records":["reconciler.session.orphan_or_suspended/drain/orphaned"]}
+{"family":"unexplained","tick":"tk-1","at":"2026-10-05T00:01:09Z","template":"gascity/polecat","class":"heal","legacy":0,"v2":1,"v2_intents":["row-heal/timer-heal"]}
+{"family":"unexplained","tick":"tk-2","at":"2026-10-05T00:02:08Z","template":"gascity/polecat","class":"heal","legacy":0,"v2":1,"v2_intents":["row-heal/timer-heal"]}
+{"family":"v5 §12.2","item":"1","tick":"tk-2","at":"2026-10-05T00:02:08Z","template":"mayor","class":"stop","legacy":1,"v2":0,"legacy_records":["reconciler.drain.timeout/complete/drain_timeout"]}

@@ -110,7 +110,7 @@ func TestManagedNudgeWakeReportsASkippedWake(t *testing.T) {
 	t.Cleanup(func() { nudgeWarningWriter = prev })
 
 	target := nudgeTarget{cityPath: t.TempDir(), alias: "worker-1", agent: config.Agent{Name: "worker"}}
-	if err := requestManagedNudgeWake(target, nil); err != nil {
+	if _, err := requestManagedNudgeWake(target, nil); err != nil {
 		t.Fatalf("requestManagedNudgeWake = %v, want nil (the enqueue still stands)", err)
 	}
 	if !strings.Contains(warnings.String(), "no managed wake was requested") {

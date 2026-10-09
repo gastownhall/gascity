@@ -242,6 +242,64 @@ func (s *Store) UpdateMetadataFenced(id string, attempts int, decide func(Info, 
 	return false, nil
 }
 
+// RowPatch is one fenced row write: a metadata patch, a title (nil leaves it)
+// and label deltas. Labels travel as deltas, never as a whole set.
+type RowPatch struct {
+	Metadata     MetadataPatch
+	Title        *string
+	AddLabels    []string
+	RemoveLabels []string
+}
+
+func (p RowPatch) empty() bool {
+	return len(p.Metadata) == 0 && p.Title == nil && len(p.AddLabels) == 0 && len(p.RemoveLabels) == 0
+}
+
+// UpdateRowFenced writes metadata, title and labels decided from a fresh read
+// of the row in one UpdateIfMatch at that read's revision. A lost CAS re-reads
+// and runs decide again, up to attempts times, after which nothing is written.
+// decide returning false or an empty patch writes nothing. Unlike
+// UpdateMetadataFenced it never writes blind: without a conditional writer it
+// returns beads.ErrConditionalWriteUnsupported, and a store that cannot guard
+// labels returns its *beads.ConditionalUpdateFieldUnsupportedError; either
+// way nothing is written. A success means the deltas applied, not that the
+// label set equals the read set plus the deltas (a legacy label-only write on
+// native Dolt does not move the revision). It reports whether it wrote.
+func (s *Store) UpdateRowFenced(id string, attempts int, decide func(Info) (RowPatch, bool)) (bool, error) {
+	writer, _, err := beads.ResolveConditionalWriter(s.store)
+	if err != nil {
+		return false, fmt.Errorf("updating session %q: %w", id, err)
+	}
+	if writer == nil {
+		return false, fmt.Errorf("updating session %q: %w", id, beads.ErrConditionalWriteUnsupported)
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
+		bead, err := s.validatedBead(id)
+		if err != nil {
+			return false, err
+		}
+		patch, ok := decide(infoFromPersistedBead(bead))
+		if !ok || patch.empty() {
+			return false, nil
+		}
+		err = writer.UpdateIfMatch(id, bead.Revision, beads.UpdateOpts{
+			Metadata:     map[string]string(patch.Metadata),
+			Title:        patch.Title,
+			Labels:       patch.AddLabels,
+			RemoveLabels: patch.RemoveLabels,
+		})
+		switch {
+		case err == nil:
+			return true, nil
+		case beads.IsPreconditionFailed(err):
+			continue
+		default:
+			return false, fmt.Errorf("updating session %q: %w", id, err)
+		}
+	}
+	return false, nil
+}
+
 // sameLifecycleFacts reports whether a and b agree on every persisted fact the
 // lifecycle projection reads (LifecycleInputFromInfo). Comparing the projected
 // inputs rather than a hand-picked key list keeps this check in step with the
@@ -629,6 +687,36 @@ func closePremiseHolds(decided, open Info) bool {
 		decided.InstanceToken == open.InstanceToken
 }
 
+// CloseWithMetadataIfMatch reads id's row, asks decide for its terminal
+// patch, and closes the row with it in one atomic conditional close at the
+// read's revision: one attempt, no retry and no re-decide, so the caller
+// (the v2 effect transaction) owns every retry. A lost fence returns
+// (false, nil). decide returning false, or a row already closed, writes
+// nothing. Without an atomic conditional closer it returns
+// beads.ErrConditionalWriteUnsupported and writes nothing: there is no
+// two-write fallback.
+func (s *Store) CloseWithMetadataIfMatch(id string, decide func(Info, PersistedResponse) (MetadataPatch, bool)) (bool, error) {
+	closer, ok := beads.AtomicConditionalCloserFor(s.store)
+	if !ok {
+		return false, fmt.Errorf("closing session %q: %w", id, beads.ErrConditionalWriteUnsupported)
+	}
+	bead, err := s.validatedBead(id)
+	if err != nil || bead.Status == "closed" {
+		return false, err
+	}
+	patch, ok := decide(infoFromPersistedBead(bead), PersistedResponseFromBead(bead))
+	if !ok {
+		return false, nil
+	}
+	switch _, err = closer.CloseWithMetadataIfMatch(id, bead.Revision, map[string]string(patch)); {
+	case err == nil:
+		return true, nil
+	case beads.IsPreconditionFailed(err):
+		return false, nil
+	}
+	return false, fmt.Errorf("closing session %q: %w", id, err)
+}
+
 // closeAtomically runs Close's fenced single-write arm, starting from the
 // observed open row. The observed revision is passed through as-is, including
 // 0: whether a token is usable is the store's call (a fresh SQLite row fences
@@ -646,7 +734,7 @@ func (s *Store) closeAtomically(closer beads.AtomicConditionalCloser, bead beads
 				return false, err
 			}
 		}
-		_, err := closer.CloseWithMetadataIfMatch(id, bead.Revision, map[string]string(patch))
+		_, err := closer.CloseWithMetadataIfMatch(id, bead.Revision, map[string]string(withRuntimeLeaseCleared(patch)))
 		switch {
 		case err == nil:
 			return true, nil
@@ -861,10 +949,11 @@ func (s *Store) applyPatchIfClosed(id string, patch MetadataPatch) (bool, error)
 // reopen and named-session retire-archive paths (session_beads.go), which open
 // the bead row after stamping archive/reopen metadata via setMetaBatch. It
 // emits a single Update op with only Status set, byte-identical to the raw
-// write.
+// write, plus the runtime lease clear (RuntimeLeaseClearPatch): a reopened
+// row holds no lease.
 func (s *Store) SetStatusOpen(id string) error {
 	open := "open"
-	if err := s.store.Update(id, beads.UpdateOpts{Status: &open}); err != nil {
+	if err := s.store.Update(id, beads.UpdateOpts{Status: &open, Metadata: map[string]string(RuntimeLeaseClearPatch())}); err != nil {
 		return err
 	}
 	return nil

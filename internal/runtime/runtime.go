@@ -170,7 +170,96 @@ func IsSessionGone(err error) bool {
 	return strings.Contains(msg, "session not found") ||
 		strings.Contains(msg, "not running") ||
 		strings.Contains(msg, "not found") ||
-		strings.Contains(msg, "no tmux server running")
+		strings.Contains(msg, tmuxNoServerMessage)
+}
+
+// tmuxNoServerMessage is the exact message of tmux.ErrNoServer, the tmux
+// provider's missing-server sentinel. This package cannot import tmux, so it
+// recognizes that sentinel by its text.
+const tmuxNoServerMessage = "no tmux server running"
+
+// StopForCleanup stops the named session on behalf of a teardown caller and
+// absorbs a "the session is not there" answer as success.
+//
+// Teardown paths — close, kill, suspend, restart replacement — care whether
+// the session is gone, not whether this call is the one that removed it.
+// Providers draw a finer distinction than that on purpose: a missing session
+// on a responsive server is idempotent success, while a missing server is an
+// uncertain inventory observation the provider is required to surface. A
+// missing session is always absorbed. A missing server is absorbed only when
+// it is proven: a provider that implements [ServerDeathConfirmer] must confirm
+// the server dead, because a live tmux server whose socket file was deleted
+// also answers "no server running" while its sessions keep running. A provider
+// without that capability keeps the unconfirmed rule. Every other error
+// propagates, because a failure must still leave the durable state open
+// rather than report a "closed but still running" session. Keeping the rule in
+// one place is what stops a new cleanup path from re-deriving it and getting
+// it wrong; callers that need the distinction call [Provider.Stop] directly
+// and classify with [IsSessionGone] themselves.
+//
+// Unlike [IsSessionGone], the rule matches structure, not free text: an error
+// is absorbed only when every leaf of its wrap/join tree is [ErrSessionNotFound]
+// or a leaf whose whole message is the tmux missing-server sentinel's. A
+// terminate failure joined with a missing-server answer therefore propagates,
+// as do a stop refusal ([ErrStopRefused]) and a message that merely mentions a
+// missing session, such as an exec script's "sh: kubectl: not found".
+func StopForCleanup(p Provider, name string) error {
+	err := p.Stop(name)
+	if gone, _ := stopFailureIsOnlySessionGone(err); !gone || MissingServerUnconfirmed(p, err) {
+		return err
+	}
+	return nil
+}
+
+// MissingServerUnconfirmed reports whether err, a Stop answer from p, says the
+// session is gone only on the strength of a missing server that p cannot prove
+// dead: every leaf of its tree is a gone answer, at least one is the tmux
+// missing-server sentinel, and p implements [ServerDeathConfirmer] without
+// confirming its server dead. [StopForCleanup] refuses to absorb such an
+// answer, and a composite's Stop must not merge one into success, because a
+// live tmux server whose socket file was deleted answers the same way.
+func MissingServerUnconfirmed(p Provider, err error) bool {
+	gone, serverMissing := stopFailureIsOnlySessionGone(err)
+	if !gone || !serverMissing {
+		return false
+	}
+	confirmer, ok := p.(ServerDeathConfirmer)
+	return ok && !confirmer.ServerConfirmedDead()
+}
+
+// stopFailureIsOnlySessionGone reports whether every leaf of a Stop error's
+// tree says the session is gone, and whether any leaf says so only because
+// its server is missing. errors.Is cannot express this: it accepts a joined
+// error as soon as one branch matches, which would absorb a terminate failure
+// reported alongside a missing-server answer.
+func stopFailureIsOnlySessionGone(err error) (gone, serverMissing bool) {
+	switch wrapped := err.(type) { //nolint:errorlint // walks the error tree by hand: every leaf must be a gone answer, which errors.Is cannot express
+	case nil:
+		return false, false
+	case interface{ Unwrap() []error }:
+		children := wrapped.Unwrap()
+		if len(children) == 0 {
+			return false, false
+		}
+		for _, child := range children {
+			childGone, childServerMissing := stopFailureIsOnlySessionGone(child)
+			if !childGone {
+				return false, false
+			}
+			serverMissing = serverMissing || childServerMissing
+		}
+		return true, serverMissing
+	case interface{ Unwrap() error }:
+		return stopFailureIsOnlySessionGone(wrapped.Unwrap())
+	default:
+		if errors.Is(err, ErrSessionNotFound) {
+			return true, false
+		}
+		if err.Error() == tmuxNoServerMessage {
+			return true, true
+		}
+		return false, false
+	}
 }
 
 // ContentBlock represents a content element in a message.
@@ -222,7 +311,11 @@ type Provider interface {
 	Start(ctx context.Context, name string, cfg Config) error
 
 	// Stop destroys the named session and cleans up its resources.
-	// Returns nil if the session does not exist (idempotent).
+	// Returns nil if a responsive provider has no such session (idempotent).
+	// A provider that cannot observe its inventory at all — tmux with no
+	// server running — reports that as an error rather than certifying
+	// absence; teardown callers that only need the session gone absorb it
+	// through [StopForCleanup].
 	Stop(name string) error
 
 	// Interrupt sends a soft interrupt signal (e.g., Ctrl-C / SIGINT) to
@@ -307,6 +400,13 @@ type Provider interface {
 	// Capabilities reports what this provider can reliably detect.
 	// Used by the reconciler to skip inapplicable wake reasons.
 	Capabilities() ProviderCapabilities
+}
+
+// UnattendedSessionStopper is an optional extension for providers that can
+// prove a destructive effect still targets the expected session incarnation,
+// has no interactive owner, and then stop that exact runtime incarnation.
+type UnattendedSessionStopper interface {
+	StopUnattendedSession(name, expectedToken string) error
 }
 
 // AttachmentObserverWithError is the optional capability for an attachment
@@ -504,6 +604,16 @@ type EnvironmentBatchProvider interface {
 	GetAllEnvironment(name string) (map[string]string, error)
 }
 
+// IdentitySidecarProvider is an optional extension for providers whose
+// GetMeta reads a local sidecar file the provider seeds from the runtime's
+// environment at start (acp, subprocess), so a per-key identity read is a
+// cheap local read. Providers whose GetMeta reaches a remote host, a pod or
+// a script do not implement it, and the v2 inventory never reads their
+// identity.
+type IdentitySidecarProvider interface {
+	LocalIdentitySidecar() bool
+}
+
 // TransportCapabilityProvider is an optional extension for providers that can
 // report whether they support starting sessions with a specific transport.
 //
@@ -631,6 +741,15 @@ type LiveRuntime struct {
 	// require it; a caller that only reports should not, because a runtime whose
 	// parent is not recognizable to the scan is still a live runtime.
 	ParentIsProviderInfrastructure bool
+	// StartIdentity is the root's start-time token as proctable.ProcessIdentity
+	// reads it (Linux /proc/<pid>/stat start ticks, darwin's kernel start
+	// time), or "" when unreadable. A caller that kills re-checks it at kill
+	// time, so a recycled PID is never signaled.
+	StartIdentity string
+	// StartedAt is the root's wall-clock start time, or zero when unreadable.
+	// On Linux it is derived from whole-second btime and USER_HZ ticks, so it
+	// can be off by about a second.
+	StartedAt time.Time
 	// Name is the process's command basename ("" when unreadable). Advisory: the
 	// agent process is often a DESCENDANT of the runtime root rather than the
 	// root itself (a pane's foreground can be a wrapper), so an empty or

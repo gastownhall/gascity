@@ -8,17 +8,20 @@
 # of its own host's manifest (tools/rbe/worker-env). If no live worker
 # advertises the pin, an action never runs: it queues until the client times
 # out, and the pool scaler keeps dispatching Blacksmith workers that cannot
-# take it. That happens on drift (a Blacksmith image refresh, a package, Go or
-# dolt change) and for a PR that moves the pin. A drifted worker still
-# registers, advertising its measured hash: the pools are shared, and actions
-# that send no worker-env (beads') still run on it. This script makes drift
-# loud and early:
+# take it. That happens on drift (a toolchain change on the Blacksmith image:
+# a distribution, library or tool release, Go or dolt; security patches of
+# the same releases measure the same) and for a PR that moves the pin. A
+# drifted worker still registers, advertising its measured hash: the pools
+# are shared, and actions that send no worker-env still run on it. This
+# script makes drift loud and early:
 #
 #   pin [BUILD]       Print //platforms:rbe_worker's worker-env pin (BUILD
 #                     defaults to platforms/BUILD.bazel; "none" if it has none).
-#   check MEASURED    Compare a measured manifest with the committed one. On
+#   check MEASURED [RAW]
+#                     Compare a measured manifest with the committed one. On
 #                     drift, print the diff, the manifest and the pin to commit
-#                     (stdout and $GITHUB_STEP_SUMMARY), keep them in
+#                     (stdout and $GITHUB_STEP_SUMMARY), with RAW (worker-env
+#                     --raw, the versions as installed) if given, keep them in
 #                     $WORKER_ENV_DRIFT_DIR for `report`, and exit 1.
 #   await JOB STEP    Pool workflows' await-drift job, beside the worker job of
 #                     the same run: wait until JOB's STEP (the drift upload)
@@ -27,7 +30,7 @@
 #                     WORKER_ENV_AWAIT_SECONDS (default 1800) passed first.
 #                     The worker job keeps serving; this reports while it does.
 #   preflight BASE_BUILD CHANGED
-#                     bazel-test. Writes to $GITHUB_OUTPUT:
+#                     bazel.yml's lanes. Writes to $GITHUB_OUTPUT:
 #                     pin-moved=true if this checkout pins another host than
 #                     BASE_BUILD (the default branch's platforms/BUILD.bazel,
 #                     whose pin the pool workers check against);
@@ -103,7 +106,7 @@ drift_markdown() {
 	cat <<-EOF
 		### rbe worker-env drift
 
-		This worker host measures \`worker-env=$(cat "$dir/measured-pin")\`, but gascity's actions request \`$(cat "$dir/pinned-pin")\` (\`//platforms:rbe_worker\`). rbe-west's oss and oss-fork schedulers match \`worker-env\` exactly, so no gascity action can run on this host. Pool workers here still register, advertising the measured hash, and serve actions that send no \`worker-env\` (beads). While this issue is open, the rbe-west pool scalers cap each pool at \`NLPOOL_DRIFT_MAX_WORKERS\`.
+		This worker host measures \`worker-env=$(cat "$dir/measured-pin")\`, but gascity's actions request \`$(cat "$dir/pinned-pin")\` (\`//platforms:rbe_worker\`). rbe-west's oss and oss-fork schedulers match \`worker-env\` exactly, so no gascity action can run on this host. Pool workers here still register, advertising the measured hash, and serve actions that send no \`worker-env\`. While this issue is open, the rbe-west pool scalers cap each pool at \`NLPOOL_DRIFT_MAX_WORKERS\`.
 
 		Measured by $(cat "$dir/source").
 
@@ -114,7 +117,7 @@ drift_markdown() {
 		\`\`\`
 		</details>
 
-		If this host is the one CI should use, re-pin it (TESTING.md, "Re-pinning the RBE worker host"). Commit the manifest below as \`tools/rbe/worker-env.txt\`, and in \`platforms/BUILD.bazel\` set:
+		If this host is the one CI should use, re-pin it (TESTING.md, "Re-pinning the RBE worker host"). Commit the manifest below as \`tools/rbe/worker-env.txt\`, and in \`platforms/BUILD.bazel\` set the pin below; gastownhall/beads carries a byte-identical copy of the manifest and the same pin, and moves in step:
 
 		\`\`\`
 		        "worker-env": "$(cat "$dir/measured-pin")",
@@ -124,6 +127,16 @@ drift_markdown() {
 
 		\`\`\`
 		$(cat "$dir/worker-env.txt")
+		\`\`\`
+		</details>
+	EOF
+	[ -s "$dir/worker-env.raw.txt" ] || return 0
+	cat <<-EOF
+
+		<details><summary>installed versions (tools/rbe/worker-env --raw; not hashed)</summary>
+
+		\`\`\`
+		$(cat "$dir/worker-env.raw.txt")
 		\`\`\`
 		</details>
 	EOF
@@ -142,7 +155,7 @@ sha256_stdin() {
 cmd_pin() { pin_of "${1:-$BUILD}"; }
 
 cmd_check() {
-	local measured=${1:?usage: worker-env-drift check MEASURED}
+	local measured=${1:?usage: worker-env-drift check MEASURED [RAW]} raw=${2:-}
 	local pin got dir
 	pin=$(pin_of "$BUILD")
 	got=sha256:$(sha256_stdin <"$measured")
@@ -153,6 +166,8 @@ cmd_check() {
 	dir=${WORKER_ENV_DRIFT_DIR:-${RUNNER_TEMP:?}/worker-env-drift}
 	mkdir -p "$dir"
 	cp -f "$measured" "$dir/worker-env.txt"
+	rm -f "$dir/worker-env.raw.txt"
+	[ -z "$raw" ] || [ ! -s "$raw" ] || cp -f "$raw" "$dir/worker-env.raw.txt"
 	echo "$pin" >"$dir/pinned-pin"
 	echo "$got" >"$dir/measured-pin"
 	echo "${RUNNER_NAME:-$(hostname)} in $(run_url)" >"$dir/source"

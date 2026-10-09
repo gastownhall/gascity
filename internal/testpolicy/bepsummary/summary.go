@@ -52,6 +52,16 @@ const (
 	statusNoStatus = "NO_STATUS"
 )
 
+// validationAspect is the aspect Bazel reports validation actions (nogo)
+// under when --experimental_use_validation_aspect is set (.bazelrc test:ci).
+// Tests then run beside validation, so a test target whose validation
+// failed still reports testSummary PASSED while Bazel exits BUILD_FAILURE.
+const validationAspect = "ValidateTarget"
+
+// StatusFailedValidation replaces PASSED or FLAKY for a test target whose
+// validation (nogo) failed: Bazel counts the target as failed to build.
+const StatusFailedValidation = "FAILED_VALIDATION"
+
 // Report is the JSON artifact: one entry per Bazel invocation (phase) plus
 // cross-phase totals.
 type Report struct {
@@ -76,6 +86,9 @@ type Phase struct {
 	Attempts     map[string]int `json:"attempts_by_strategy"`
 	Actions      *ActionSummary `json:"actions"`
 	Tests        []TestTarget   `json:"tests"`
+	// ValidationFailed lists the targets, test or not, whose validation
+	// aspect failed: their own validation actions (nogo) or a dependency's.
+	ValidationFailed []string `json:"validation_failed,omitempty"`
 }
 
 // TargetCounts are test-target tallies. Cached + Executed + NotRun == Total.
@@ -233,6 +246,7 @@ func SummarizePhase(label, source string, r io.Reader) (Phase, error) {
 	}
 	p := Phase{Label: label, Source: source, Truncated: s.truncated, Attempts: map[string]int{}}
 	targets := map[targetKey]*targetAccumulator{}
+	validationFailed := map[string]bool{}
 	get := func(id *bepTestID) *targetAccumulator {
 		k := targetKey{id.Label, id.Configuration.ID}
 		acc, ok := targets[k]
@@ -257,8 +271,17 @@ func SummarizePhase(label, source string, r io.Reader) (Phase, error) {
 			p.Actions = actionSummary(ev.BuildMetrics)
 		case ev.BuildFinished != nil && ev.BuildFinished.ExitCode != nil:
 			p.ExitCode = ev.BuildFinished.ExitCode.Name
+		case ev.ID.TargetCompleted != nil && ev.ID.TargetCompleted.Aspect == validationAspect &&
+			(ev.Completed == nil || !ev.Completed.Success):
+			// An aborted completion (no completed payload) never validated
+			// either.
+			validationFailed[ev.ID.TargetCompleted.Label] = true
 		}
 	}
+	for l := range validationFailed {
+		p.ValidationFailed = append(p.ValidationFailed, l)
+	}
+	sort.Strings(p.ValidationFailed)
 	if p.ExitCode == "" && finishedWithoutExitCode(s) {
 		p.ExitCode = "SUCCESS"
 	}
@@ -274,6 +297,9 @@ func SummarizePhase(label, source string, r io.Reader) (Phase, error) {
 	})
 	for _, k := range keys {
 		t := classify(k.label, targets[k])
+		if validationFailed[k.label] && (t.Status == statusPassed || t.Status == statusFlaky) {
+			t.Status = StatusFailedValidation
+		}
 		for _, r := range targets[k].results {
 			p.Attempts[resultStrategy(r)]++
 		}

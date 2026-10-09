@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -132,5 +133,83 @@ func TestBdLatestSchemaVersionIsolatesHOMEFromSharedServerConfig(t *testing.T) {
 
 	if _, err := bdLatestSchemaVersion(bdPath); err != nil {
 		t.Fatalf("bdLatestSchemaVersion under a shared-server HOME: %v", err)
+	}
+}
+
+// bd keeps a workspace gate file beside the directory it treats as the
+// workspace, and never deletes it (beads internal/workspacegate). The probe must
+// leave the temp root it was given exactly as it found it; otherwise every
+// acceptance run leaks one file into the shared temp root (ga-01i5ul).
+func TestBdLatestSchemaVersionLeavesNothingInItsTempRoot(t *testing.T) {
+	bdPath := RequireBD(t)
+	// The root comes from the probe's own roots, not t.TempDir: on a durable
+	// filesystem this real probe would carry exactly the fsync cost
+	// bdSchemaProbeRoots exists to avoid.
+	root, err := mkdirTempUnder(bdSchemaProbeRoots(), "gc-bd-schema-probe-root-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("removing probe root %s: %v", root, err)
+		}
+	})
+
+	if _, err := bdLatestSchemaVersionUnder(bdPath, []string{root}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var left []string
+	for _, e := range entries {
+		left = append(left, e.Name())
+	}
+	if len(left) > 0 {
+		t.Fatalf("the probe left %v behind in its temp root %s", left, root)
+	}
+}
+
+// The probe's database is deleted as soon as bd answers, so it must not pay
+// for durability: on a durable filesystem under load its fsyncs alone overran
+// the probe timeout (ga-01i5ul). On Linux it goes to the RAM-backed /dev/shm
+// first, with the default temp directory as the fallback.
+func TestBdSchemaProbeRootsPreferRAMBackedStorageOnLinux(t *testing.T) {
+	want := []string{""}
+	if runtime.GOOS == "linux" {
+		want = []string{"/dev/shm", ""}
+	}
+	if got := bdSchemaProbeRoots(); !slices.Equal(got, want) {
+		t.Fatalf("bdSchemaProbeRoots() = %q, want %q", got, want)
+	}
+}
+
+// A root that cannot take the probe is a fast path not taken, not a failure:
+// a host without a usable /dev/shm still probes in the default temp directory.
+func TestBdLatestSchemaVersionFallsBackPastAnUnusableRoot(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	got, err := bdLatestSchemaVersionUnder(stubBd(t, 7), []string{missing, t.TempDir()})
+	if err != nil {
+		t.Fatalf("probe with an unusable first root: %v", err)
+	}
+	if got != 7 {
+		t.Fatalf("probe = v%d, want v7", got)
+	}
+}
+
+// When no root takes the probe, the error has to say why for each of them;
+// reporting only the last would hide why the fast path was refused.
+func TestMkdirTempUnderNamesEveryRootThatRefused(t *testing.T) {
+	first := filepath.Join(t.TempDir(), "first")
+	second := filepath.Join(t.TempDir(), "second")
+	_, err := mkdirTempUnder([]string{first, second}, "probe-*")
+	if err == nil {
+		t.Fatal("mkdirTempUnder succeeded under two missing roots")
+	}
+	for _, root := range []string{first, second} {
+		if !strings.Contains(err.Error(), root) {
+			t.Errorf("error does not name refused root %s: %v", root, err)
+		}
 	}
 }

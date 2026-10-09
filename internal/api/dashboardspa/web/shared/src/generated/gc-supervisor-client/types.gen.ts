@@ -172,7 +172,14 @@ export type AgentResponse = {
     name: string;
     pack?: string;
     pack_derived: boolean;
+    /**
+     * Qualified name of the configured pool this row belongs to. Equals name on the row for an on-demand pool that has no live session.
+     */
     pool?: string;
+    /**
+     * Configured session limits of the agent (or of its pool).
+     */
+    pool_limits?: PoolLimits;
     provider?: string;
     rig?: string;
     running: boolean;
@@ -281,6 +288,7 @@ export type BackendCredentialResolvedPayload = {
 
 export type Bead = {
     assignee?: string;
+    close_reason?: string;
     created_at: string;
     defer_until?: string;
     dependencies?: Array<Dep> | null;
@@ -321,6 +329,13 @@ export type BeadClaimReleasedPayload = {
     assignee: string;
     bead_id: string;
     reason: string;
+};
+
+export type BeadCloseBody = {
+    /**
+     * Why the bead is being closed. Recorded as the bead's close_reason (bd close --reason). Blank means no reason.
+     */
+    reason?: string;
 };
 
 export type BeadCreateInputBody = {
@@ -925,7 +940,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -2339,6 +2354,17 @@ export type PendingInteraction = {
     request_id: string;
 };
 
+export type PoolLimits = {
+    /**
+     * Maximum concurrent sessions; -1 means unlimited.
+     */
+    max: number;
+    /**
+     * Minimum concurrent sessions kept running.
+     */
+    min: number;
+};
+
 export type PoolOverride = {
     Check: string | null;
     DrainTimeout: string | null;
@@ -2864,11 +2890,25 @@ export type RigProvisionProgressPayload = {
 
 export type RigResponse = {
     agent_count: number;
+    /**
+     * Mainline branch (e.g. main, master).
+     */
     default_branch?: string;
+    /**
+     * Agent qualified name that targetless gc sling routes this rig's work to.
+     */
+    default_sling_target?: string;
+    /**
+     * Agents targetless gc sling picks from at random; takes precedence over default_sling_target when set.
+     */
+    default_sling_targets?: Array<string> | null;
     git?: GitStatus;
     last_activity?: string;
     name: string;
     path: string;
+    /**
+     * Effective bead ID prefix: the configured prefix, or the one derived from the rig name.
+     */
     prefix?: string;
     running_count: number;
     suspended: boolean;
@@ -3264,9 +3304,17 @@ export type SessionMessageInputBody = {
      * Message text to send.
      */
     message: string;
+    /**
+     * Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.
+     */
+    resume?: boolean;
 };
 
 export type SessionMessageSucceededPayload = {
+    /**
+     * True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h.
+     */
+    queued: boolean;
     /**
      * Correlation ID from the 202 response.
      */
@@ -3275,6 +3323,14 @@ export type SessionMessageSucceededPayload = {
      * Session ID that received the message.
      */
     session_id: string;
+    /**
+     * Why the controller will not start the session for a queued message, with the remedy.
+     */
+    will_not_start_reason?: string;
+    /**
+     * Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.
+     */
+    will_start?: boolean;
 };
 
 export type SessionPatchBody = {
@@ -3293,6 +3349,62 @@ export type SessionPendingClearedEvent = {
      * Request ID of the interaction that was cleared.
      */
     request_id: string;
+};
+
+export type SessionPendingClearedPayload = {
+    /**
+     * Interaction kind from the matching session.pending.
+     */
+    kind: string;
+    /**
+     * Why it cleared: resolved (answered or withdrawn), replaced (a different interaction is now pending; its session.pending follows), or session_gone (the session is no longer active).
+     */
+    reason: 'resolved' | 'replaced' | 'session_gone';
+    /**
+     * Request ID from the matching session.pending.
+     */
+    request_id: string;
+    /**
+     * Session bead ID from the matching session.pending.
+     */
+    session_id: string;
+};
+
+export type SessionPendingPayload = {
+    /**
+     * Session alias, when set.
+     */
+    alias?: string;
+    /**
+     * Interaction kind (e.g. approval).
+     */
+    kind: string;
+    /**
+     * Provider metadata (e.g. tool_name, source).
+     */
+    metadata?: {
+        [key: string]: string;
+    };
+    /**
+     * Answer options as the session shows them.
+     */
+    options?: Array<string> | null;
+    /**
+     * Human-readable prompt.
+     */
+    prompt?: string;
+    /**
+     * Pending interaction request ID. Pass it to POST .../session/{id}/respond.
+     */
+    request_id: string;
+    /**
+     * Session bead ID awaiting a decision.
+     */
+    session_id: string;
+    /**
+     * Session template, when known.
+     */
+    template?: string;
 };
 
 export type SessionPendingResponse = {
@@ -4461,6 +4573,10 @@ export type SessionSubmitInputBody = {
      * Message text to submit.
      */
     message: string;
+    /**
+     * Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.
+     */
+    resume?: boolean;
 };
 
 export type SessionSubmitSucceededPayload = {
@@ -4480,6 +4596,14 @@ export type SessionSubmitSucceededPayload = {
      * Session ID that received the submission.
      */
     session_id: string;
+    /**
+     * Why the controller will not start the session for a queued message, with the remedy.
+     */
+    will_not_start_reason?: string;
+    /**
+     * Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.
+     */
+    will_start?: boolean;
 };
 
 export type SessionTranscriptConversationResponse = {
@@ -4616,13 +4740,40 @@ export type SessionWakeRefusedPayload = {
     wake_request: string;
 };
 
+export type SlingBatchSummary = {
+    /**
+     * Container bead type, e.g. convoy.
+     */
+    container_type?: string;
+    /**
+     * Children whose routing failed.
+     */
+    failed: number;
+    /**
+     * Children skipped because they were already routed to the target.
+     */
+    idempotent: number;
+    /**
+     * Children routed by this sling.
+     */
+    routed: number;
+    /**
+     * Children skipped: already routed, or not open.
+     */
+    skipped: number;
+    /**
+     * Children tracked by the container.
+     */
+    total: number;
+};
+
 export type SlingInputBody = {
     /**
-     * Bead ID to attach a formula to.
+     * Bead or convoy ID to attach formula to, in place of bead (gc sling --on).
      */
     attached_bead_id?: string;
     /**
-     * Bead ID to sling.
+     * Bead or convoy ID to sling, like gc sling <target> <bead>. The target's default formula is cooked onto the bead unless no_formula is set; a convoy's open children are routed one by one.
      */
     bead?: string;
     /**
@@ -4630,7 +4781,7 @@ export type SlingInputBody = {
      */
     force?: boolean;
     /**
-     * Formula name for workflow launch.
+     * Formula name. Alone, it launches the formula standalone (gc sling --formula). With attached_bead_id, it is attached to that bead (gc sling <target> <bead> --on <formula>).
      */
     formula?: string;
     /**
@@ -4642,7 +4793,7 @@ export type SlingInputBody = {
      */
     no_convoy?: boolean;
     /**
-     * Suppress the target's default_sling_formula even when configured.
+     * Suppress the target's default_sling_formula and route the raw bead (gc sling --no-formula).
      */
     no_formula?: boolean;
     /**
@@ -4670,11 +4821,11 @@ export type SlingInputBody = {
      */
     target: string;
     /**
-     * Workflow title.
+     * Workflow title (gc sling --title), for an explicit or default formula.
      */
     title?: string;
     /**
-     * Formula variables.
+     * Formula variables (gc sling --var), for an explicit or default formula.
      */
     vars?: {
         [key: string]: string;
@@ -4683,13 +4834,25 @@ export type SlingInputBody = {
 
 export type SlingResponse = {
     attached_bead_id?: string;
+    /**
+     * Per-child outcome counts, present only when the bead was a convoy whose open children were routed one by one (as gc sling does). Matches gc sling --json batch.
+     */
+    batch?: SlingBatchSummary;
     bead?: string;
+    /**
+     * Auto-convoy tracking the routed bead, when one was created or reused. Matches gc sling --json convoy_id.
+     */
+    convoy_id?: string;
     /**
      * Absolute dashboard deep link for the slung work: the run detail view when a graph workflow was launched, otherwise the runs list. Present only when the serving process also hosts the dashboard (the supervisor listener); the standalone controller API omits it.
      */
     dashboard_url?: string;
     formula?: string;
     mode?: string;
+    /**
+     * Root of the formula wisp attached to the bead, when a non-graph (v1) formula was attached. Matches gc sling --json molecule_id.
+     */
+    molecule_id?: string;
     root_bead_id?: string;
     /**
      * Reference to the launched run resource, present only when a graph workflow was launched (the same run the Location header addresses).
@@ -5474,6 +5637,10 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionIdleKilled) | ({
     type: 'session.max_age_killed';
 } & TypedEventStreamEnvelopeSessionMaxAgeKilled) | ({
+    type: 'session.pending';
+} & TypedEventStreamEnvelopeSessionPending) | ({
+    type: 'session.pending_cleared';
+} & TypedEventStreamEnvelopeSessionPendingCleared) | ({
     type: 'session.pool_slot_retired_at_drain_deadline';
 } & TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) | ({
     type: 'session.quarantined';
@@ -6948,6 +7115,42 @@ export type TypedEventStreamEnvelopeSessionMaxAgeKilled = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.pending
+ */
+export type TypedEventStreamEnvelopeSessionPending = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionPendingPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.pending';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope session.pending_cleared
+ */
+export type TypedEventStreamEnvelopeSessionPendingCleared = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionPendingClearedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.pending_cleared';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.pool_slot_retired_at_drain_deadline
  */
 export type TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline = {
@@ -7541,6 +7744,10 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionIdleKilled) | ({
     type: 'session.max_age_killed';
 } & TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled) | ({
+    type: 'session.pending';
+} & TypedTaggedEventStreamEnvelopeSessionPending) | ({
+    type: 'session.pending_cleared';
+} & TypedTaggedEventStreamEnvelopeSessionPendingCleared) | ({
     type: 'session.pool_slot_retired_at_drain_deadline';
 } & TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline) | ({
     type: 'session.quarantined';
@@ -9090,6 +9297,44 @@ export type TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled = {
     subject?: string;
     ts: string;
     type: 'session.max_age_killed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.pending
+ */
+export type TypedTaggedEventStreamEnvelopeSessionPending = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionPendingPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.pending';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.pending_cleared
+ */
+export type TypedTaggedEventStreamEnvelopeSessionPendingCleared = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionPendingClearedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.pending_cleared';
     workflow?: WorkflowEventProjection;
 };
 
@@ -11339,7 +11584,7 @@ export type PostV0CityByCityNameBeadByIdAssignResponses = {
 export type PostV0CityByCityNameBeadByIdAssignResponse = PostV0CityByCityNameBeadByIdAssignResponses[keyof PostV0CityByCityNameBeadByIdAssignResponses];
 
 export type PostV0CityByCityNameBeadByIdCloseData = {
-    body?: never;
+    body?: BeadCloseBody;
     headers: {
         /**
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.

@@ -1,38 +1,144 @@
 #!/usr/bin/env bash
 # worker-env: print this remote-execution worker's environment manifest.
 #
-#   tools/rbe/worker-env PACKAGE...
+#   tools/rbe/worker-env [--raw]
 #
-# Test actions exec host tools through the client's PATH and cgo actions
-# compile against host headers, so the host is an input to every result the
-# worker caches, yet nothing of it is in the action key. blacksmith-worker.sh
-# advertises sha256(this manifest) as the worker-env platform property, and
-# CI's actions request //platforms:rbe_worker's worker-env, the sha256 of the
+# Test actions exec host tools through the client's PATH, and the host runs
+# the hermetic C toolchain and loads the shared libraries of every binary it
+# links, so the host is an input to every result the worker caches, yet
+# nothing of it is in the action key. blacksmith-worker.sh advertises
+# sha256(this manifest) as the worker-env platform property, and CI's
+# actions request //platforms:rbe_worker's worker-env, the sha256 of the
 # committed manifest tools/rbe/worker-env.txt. rbe-west's schedulers match
 # worker-env exactly: an action runs only on a worker whose host is the one
-# its key names, and a host change (a new runner image, a package or Go
-# upgrade) is a new key once the pin moves. scripts/rbe_worker_env_test.go
-# pins both halves.
+# its key names. scripts/rbe_worker_env_test.go pins both halves.
 #
-# What it measures, one sorted line each: the OS release and architecture,
-# the Go and dolt that actions find on that PATH, and the installed version of
-# each PACKAGE (blacksmith-worker.sh passes its toolset) and of the base
-# packages below. "missing" for a package that is not installed. The kernel
-# is deliberately not measured: Blacksmith moves it under every image.
+# The manifest is the host's toolchain identity, not an inventory of its
+# image. We don't control the Blacksmith image, and it takes Ubuntu security
+# updates on its own schedule; the manifest must move with what can change
+# an action's result, and with nothing else. One sorted line each:
+#
+#   arch   the machine (uname -m): the ISA of every host binary.
+#   os     the distribution release (ID VERSION_ID). It fixes the ABI
+#          baseline: glibc's minor, the libstdc++ and ICU sonames, and the
+#          upstream release of every archive package below.
+#   go     the Go on that PATH (//scripts tests run it), in full: the worker
+#          installs go.mod's Go by checksum.
+#   dolt   the dolt on that PATH, in full: installed by checksum.
+#   pkg    each package of `measured` below, as its upstream version cut to
+#          PARTS components (upstream below). Debian epochs and Ubuntu
+#          revisions (9.4-3ubuntu6.1 -> 6.2, 2.39-0ubuntu8.6 -> 8.8) are
+#          security and packaging patches of the same release, and are
+#          dropped; "missing" for a package that is not installed.
+#   tool   a host tool on that PATH that dpkg does not own (yq), as the
+#          upstream version it reports, cut to its major.
+#
+# Deliberately not measured: the kernel (Blacksmith moves it under every
+# image; Linux keeps its userspace ABI, and its major number is cosmetic),
+# and the packages in `unmeasured` below.
 #
 # Env (tests only): WORKER_ENV_PATH (default the CI test PATH below),
 # WORKER_ENV_OS_RELEASE (default /etc/os-release).
 set -euo pipefail
 
+# NAME:PARTS, the packages measured and the upstream components kept.
+measured=(
+	# Loaded by the hermetic LLVM toolchain (clang, lld, llvm-*: libstdc++,
+	# libgcc_s, zlib; lld: libxml2 and its liblzma), by every Bazel-built Go
+	# binary that links go-icu-regex (libstdc++, libgcc_s, ICU), and by every
+	# dynamically linked host tool (glibc). Their ABI is major.minor: glibc's
+	# symbol versions, libstdc++'s GLIBCXX_*, ICU's data and API.
+	libc6:2 libgcc-s1:2 libicu74:2 liblzma5:2 libstdc++6:2 libxml2:2 zlib1g:2
+	# Run by tests, genrules and test wrappers through that PATH (bash for
+	# Bazel's wrappers and genrules, dash as /bin/sh for #!/bin/sh stubs;
+	# beads' policy tests also run python3, curl, openssl and unzip). The
+	# Ubuntu archive keeps their upstream major.minor fixed for a release,
+	# so major.minor moves only with a new os line or a real upgrade.
+	bash:2 coreutils:2 curl:2 dash:2 diffutils:2 findutils:2 grep:2 jq:2
+	lsof:2 make:2 openssl:2 procps:2 python3:2 sed:2 sqlite3:2 tar:2
+	tmux:2 unzip:2 util-linux:2 xz-utils:2
+	# From the git-core PPA, outside the archive: the image takes each
+	# upstream minor (2.52 -> 2.55 on 2026-10-07) as a security update. Tests
+	# drive git through plumbing and porcelain that is stable across a major;
+	# git puts its breaking changes (default branch, hash, refs) in majors.
+	git:1
+)
+# WORKER_TOOLSET packages (blacksmith-worker.sh) the manifest leaves out: no
+# action reads them. C/C++ and cgo actions compile against the hermetic
+# toolchain's pinned sysroot (MODULE.bazel), never host headers, and no
+# action runs cmake. They stay installed for the farm's other users.
+# shellcheck disable=SC2034 # read by scripts/rbe_worker_env_test.go
+unmeasured=(cmake libbz2-dev libexpat1-dev libffi-dev liblzma-dev
+	libncurses-dev libreadline-dev libsqlite3-dev libxml2-dev python3-dev
+	zlib1g-dev)
+
+# upstream VERSION PARTS: the upstream release of a Debian VERSION, its first
+# PARTS dot-separated numbers: 1:2.55.0-0ppa1~ubuntu24.04.2 PARTS=1 is 2,
+# 5.6.1+really5.4.5-1ubuntu0.3 PARTS=2 is 5.4 (the release it really is),
+# 1:1.3.dfsg-3.1ubuntu2.2 PARTS=2 is 1.3. A version with no leading number
+# prints whole: drift, never a collision with a parsed one.
+upstream() {
+	local v=$1 parts=$2 out='' i
+	[[ $v =~ ^[0-9]+: ]] && v=${v#*:}
+	[[ $v == *-* ]] && v=${v%-*}
+	[[ $v == *really* ]] && v=${v##*really}
+	if ! [[ $v =~ ^[0-9]+(\.[0-9]+)* ]]; then
+		echo "$1"
+		return
+	fi
+	local -a nums
+	IFS=. read -ra nums <<<"${BASH_REMATCH[0]}"
+	for ((i = 0; i < parts && i < ${#nums[@]}; i++)); do
+		out+=${out:+.}${nums[i]}
+	done
+	echo "$out"
+}
+
+# Sourced (the tests call upstream directly): define, don't measure.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
+
+raw=false
+case "${1:-}" in
+"") ;;
+--raw) raw=true ;; # diagnostics: dpkg's versions as installed, never hashed
+*) echo "usage: worker-env [--raw]" >&2; exit 2 ;;
+esac
+
 # The PATH CI pins for every test action (scripts/rbe_worker_env_test.go).
 PATH=${WORKER_ENV_PATH:-/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin}
 os_release=${WORKER_ENV_OS_RELEASE:-/etc/os-release}
-# Packages every test reaches through that PATH whatever the toolset says.
-base=(bash coreutils diffutils findutils grep libc6 procps sed tar util-linux)
 
 # No go.mod around (a toolchain line would make go fetch another Go).
 cd /
 export GOTOOLCHAIN=local
+
+# pkg_version NAME PARTS: NAME's installed version(s), one per installed
+# architecture (libc6:amd64 and :i386 alike), "missing" if none.
+pkg_version() {
+	local v
+	v=$(dpkg-query -W -f '${db:Status-Status} ${Version}\n' "$1" 2>/dev/null |
+		sed -n 's/^installed //p' || true)
+	if [ -z "$v" ]; then
+		echo missing
+		return
+	fi
+	while read -r v; do
+		if $raw; then echo "$v"; else upstream "$v" "$2"; fi
+	done <<<"$v" | LC_ALL=C sort -u | paste -sd, -
+}
+
+# yq_version: mikefarah yq's "yq (https://github.com/mikefarah/yq/) version
+# v4.47.2" as its major, "missing" without one, whole if it says otherwise.
+yq_version() {
+	local out
+	if ! out=$(yq --version 2>/dev/null) || [ -z "$out" ]; then
+		echo missing
+	elif [[ $out =~ \ version\ v?([0-9][^ ]*)$ ]] && ! $raw; then
+		upstream "${BASH_REMATCH[1]}" 1
+	else
+		echo "$out"
+	fi
+}
 
 # Assignments, so a tool that is missing or fails ends the script (set -e).
 # shellcheck source=/dev/null # the host's os-release
@@ -40,15 +146,14 @@ os_id=$(. "$os_release" && echo "${ID:?} ${VERSION_ID:?}")
 arch=$(uname -m)
 dolt_version=$(dolt version | sed -n 1p)
 go_version=$(go version)
+yq=$(yq_version)
 {
 	echo "arch $arch"
 	echo "dolt $dolt_version"
 	echo "go $go_version"
 	echo "os $os_id"
-	for p in $(printf '%s\n' "${base[@]}" "$@" | sort -u); do
-		# One line per installed architecture (libc6:amd64 and :i386 alike).
-		v=$(dpkg-query -W -f '${db:Status-Status} ${Version}\n' "$p" 2>/dev/null |
-			sed -n 's/^installed //p' | LC_ALL=C sort -u | paste -sd, - || true)
-		echo "pkg $p ${v:-missing}"
+	echo "tool yq $yq"
+	for m in "${measured[@]}"; do
+		echo "pkg ${m%:*} $(pkg_version "${m%:*}" "${m##*:}")"
 	done
 } | LC_ALL=C sort

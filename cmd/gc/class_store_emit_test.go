@@ -975,6 +975,67 @@ func TestClassStoreEmissionCoversConditionalRelease(t *testing.T) {
 	}
 }
 
+// transferCapableMemStore adds TransferIfCurrent over a plain *beads.MemStore,
+// which never grew that capability (only BdStore and the role-backed
+// NativeDoltStore did). The emitting class store's forwarding path has
+// nothing real to delegate to without a double for this leaf.
+type transferCapableMemStore struct {
+	*beads.MemStore
+}
+
+func (s *transferCapableMemStore) TransferIfCurrent(id, fromAssignee, toAssignee string) (bool, error) {
+	current, err := s.Get(id)
+	if err != nil {
+		return false, nil
+	}
+	if current.Status != "in_progress" || current.Assignee != fromAssignee {
+		return false, nil
+	}
+	assignee := toAssignee
+	if err := s.Update(id, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// A landed conditional transfer is a state change a fold has to see: the
+// bead's assignee spelling changed under the emitting wrapper, matching
+// TestClassStoreEmissionCoversConditionalRelease immediately above for the
+// sibling ConditionalAssigneeTransferer capability.
+func TestClassStoreEmissionCoversConditionalTransfer(t *testing.T) {
+	cityPath := t.TempDir()
+	leaf := &transferCapableMemStore{MemStore: beads.NewMemStore()}
+	store := resolveGraphStore(splitClassRoutes(leaf).withCLIEmission(cityPath), beads.NewMemStore(), nil, cityPath, nil)
+
+	bead := seedClassBead(t, leaf, "transfer")
+	fromAssignee := "worker-1"
+	inProgress := "in_progress"
+	if err := leaf.Update(bead.ID, beads.UpdateOpts{Assignee: &fromAssignee, Status: &inProgress}); err != nil {
+		t.Fatalf("assigning the bead: %v", err)
+	}
+
+	mover, ok := store.(beads.ConditionalAssigneeTransferer)
+	if !ok {
+		t.Fatalf("the emitting class store dropped ConditionalAssigneeTransferer (%T)", store)
+	}
+	moved, err := mover.TransferIfCurrent(bead.ID, fromAssignee, "worker-2")
+	if err != nil || !moved {
+		t.Fatalf("transfer: moved=%v err=%v", moved, err)
+	}
+	got := beadEvents(readCityJournal(t, cityPath))
+	if len(got) != 1 || got[0].Type != events.BeadUpdated || got[0].Subject != bead.ID {
+		t.Fatalf("got %s, want one bead.updated for %s", eventSummary(got), bead.ID)
+	}
+
+	// A transfer that does not fire changes nothing, and must say nothing.
+	if _, err := mover.TransferIfCurrent(bead.ID, "someone-else", "worker-3"); err != nil {
+		t.Fatalf("no-op transfer: %v", err)
+	}
+	if got := beadEvents(readCityJournal(t, cityPath)); len(got) != 1 {
+		t.Fatalf("a transfer that did not fire appended a row: %s", eventSummary(got))
+	}
+}
+
 // A landed atomic fenced close — merge metadata and close in one revision-guarded
 // transaction — is a terminal transition a fold has to see. The capability is
 // discovered through AtomicConditionalCloserFor, and it must resolve to the

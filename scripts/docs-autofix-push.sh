@@ -50,8 +50,9 @@ PATCH_FILE="$(readlink -f "$PATCH_FILE")"
 COMMENT_MARKER="<!-- generated-docs-autofix -->"
 AUTOFIX_SUBJECT="docs: auto-regenerate reference docs"
 
-# Exactly the files cmd/genschema writes - keep in sync with GEN_PATHS in
-# scripts/check-generated-docs-drift.sh. Exact matches only: no traversal,
+# Exactly the files cmd/genschema writes - keep in sync with the paths
+# //cmd/genschema:genschema_in_sync_test compares (cmd/genschema/BUILD.bazel)
+# and GEN_PATHS in scripts/check-generated-docs-drift.sh. Exact matches only: no traversal,
 # no nesting, no metacharacters can slip through.
 path_allowed() {
     case "$1" in *..*) return 1 ;; esac
@@ -212,7 +213,7 @@ git -c user.name="github-actions[bot]" \
     commit --quiet -m "$AUTOFIX_SUBJECT
 
 Applied from the generated-docs-freshness-patch artifact of $RUN_URL.
-See scripts/check-generated-docs-drift.sh for how drift is detected."
+See //cmd/genschema:genschema_in_sync_test for how drift is detected."
 
 if ! git -c "$AUTH_CONFIG" push --quiet origin "HEAD:refs/heads/$HEAD_BRANCH"; then
     cd - >/dev/null

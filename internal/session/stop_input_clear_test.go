@@ -130,7 +130,7 @@ func TestSubmitInterruptNowLeavesAttachedClaudeInputAlone(t *testing.T) {
 	mgr, sp, info := newStopTestSession(t, "claude")
 	sp.ClearInputErrors[info.SessionName] = fmt.Errorf("%w: a client is attached", runtime.ErrInputClearSkipped)
 
-	if _, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow); err != nil {
+	if _, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator); err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
 	for _, call := range sp.SnapshotCalls() {
@@ -171,7 +171,7 @@ func TestStopTurnDoesNotClearCodexInput(t *testing.T) {
 func TestSubmitInterruptNowClearsWholeClaudeInput(t *testing.T) {
 	mgr, sp, info := newStopTestSession(t, "claude")
 
-	if _, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow); err != nil {
+	if _, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow, ResumeOperator); err != nil {
 		t.Fatalf("Submit(interrupt_now): %v", err)
 	}
 

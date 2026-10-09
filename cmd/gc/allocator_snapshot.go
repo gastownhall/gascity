@@ -7,10 +7,8 @@ import (
 )
 
 // The allocator's selection snapshot (CONTRACT §2, P3 spec §4.5): the
-// immutable decision of one allocator pass, which session keys read. This
-// slice computes desire, plans, bindings and canonical named rows; grants,
-// start ranks and the diff enqueue are P3-5b's, and SelGen and publication
-// are P3-7's.
+// immutable decision of one allocator pass: desire, plans, bindings and
+// canonical named rows. Admission is the planner's (CONTRACT v5 P4).
 
 // allocMode is the snapshot's mode (C2.1, C2.8, #41).
 type allocMode uint8
@@ -87,7 +85,7 @@ const (
 	// closes or rolls back the row; the decision alerts on it instead.
 	reasonIdentityDuplicate = "identity-duplicate"
 	// reasonNameOccupied: another bead's runtime holds the row's runtime
-	// name. None: no grant, no drain, no close (C11).
+	// name. None: no start, no drain, no close (C11).
 	reasonNameOccupied = "name-occupied"
 	// reasonPendingCreate and reasonAssignedWork keep a row in a suspended
 	// city that legacy's suspend drain leaves alone: a pending create within
@@ -144,12 +142,8 @@ type selectionEntry struct {
 	DrainReason  string
 	Floor        *floorView
 	Config       *desiredConfigRef
-	// Liveness is the row's runtime as I3 reads it; P3-5b ranks only start
-	// candidates (absent, absent-unconfirmed, dead).
+	// Liveness is the row's runtime as I3 reads it.
 	Liveness rowLiveness
-	// Start is a ranked start candidate's place in the start order and its
-	// grant (C2.7, C5.9); nil for an entry that is not an eligible candidate.
-	Start *startView
 	// Binding is the work a row that is not alive is bound to at start
 	// (AM2); live rows never carry one.
 	Binding *bindingTarget
@@ -159,13 +153,6 @@ type selectionEntry struct {
 	Endpoint             endpointKey
 	ObservationUncertain bool
 	Identity             *identityView
-}
-
-// startView is an eligible start candidate's rank, published with or
-// without a grant, and the grant ID it holds, if any (C2.7, C5.9).
-type startView struct {
-	Rank  int
-	Grant string
 }
 
 // rowBasis is the row incarnation the pass saw.
@@ -256,17 +243,17 @@ func (k createKind) String() string {
 	}
 }
 
-// allocPlan is one fresh row the pass would create. It is data only: P3-5b
-// admits named plans first, then the rest in fair-share order, reserves
-// their create entries and hands P3-6 the pool kind as
-// createPlanOf(entryID, Template, Plan) and the named kind with Named set.
+// allocPlan is one fresh row the pass would create. It is data only: the
+// planner proposes it as a create intent, the pool kind as
+// createPlanOf(id, Template, Plan) and the named kind with Named set,
+// and admit takes named creates first, then pool creates in fair-share order.
 type allocPlan struct {
 	Kind     createKind
 	Template string
 	// Plan is the planner's create plan (pool kind).
 	Plan poolSessionCreatePlan
-	// Request is the pool request the plan realizes; its FloorGuarantee and
-	// tier feed P3-5b's fair share.
+	// Request is the pool request the plan realizes; its FloorGuarantee
+	// feeds admission's fair share.
 	Request  SessionRequest
 	Named    *namedCreatePlan
 	Endpoint endpointKey
@@ -282,21 +269,18 @@ func (p allocPlan) identity() string {
 	return createIdentity{Template: p.Template, QualifiedInstance: p.Plan.qualifiedInstance, Slot: p.Plan.slot}.key()
 }
 
-// planReservation is an uncleared create entry's planning reservation (C7.1
-// tier 1): the identifiers it holds until its row is in the census. P3-4's
-// entries carry no plan (P3-6b N10), so allocator state keeps these by entry
-// ID and the pass reads them as input. Until the census shows its row, a
-// pool reservation also stands in for that row in pool demand
-// (POOL-028/029, C5.13): it is in flight, and its trigger work is taken.
+// planReservation is a planning reservation (C7.1 tier 1): the identifiers
+// an in-flight create holds until its row is in the census, or a plan this
+// pass made. Until the census shows its row, an in-flight pool create also
+// stands in for that row in pool demand (POOL-028/029, C5.13): it is in
+// flight, and its trigger work is taken.
 type planReservation struct {
-	EntryID           string
+	ID                string
 	Template          string
 	QualifiedInstance string
 	Slot              int
-	// WorkBeadID is the plan's trigger work (its request's), ReservedAt
-	// when its entry was reserved.
+	// WorkBeadID is the plan's trigger work (its request's).
 	WorkBeadID string
-	ReservedAt time.Time
 	// NamedIdentity and SessionName are set for a named create.
 	NamedIdentity string
 	SessionName   string

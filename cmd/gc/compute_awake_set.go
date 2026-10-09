@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -35,6 +36,56 @@ type AwakeInput struct {
 	ChatIdleTimeout          time.Duration   // global idle timeout for manual/chat sessions (0 = disabled)
 	ManualGracePeriod        time.Duration   // grace period before manual sessions can be idle-slept (0 = disabled)
 	Now                      time.Time
+	// workIndex indexes WorkBeads by assignee (newAwakeWorkIndex). Nil scans
+	// every work bead for every session, as legacy does: only the v2
+	// allocator builds one (A3, TestAwakeSetIndexOracle).
+	workIndex awakeWorkIndex
+}
+
+// awakeWorkIndex is a work bead list's indexes by trimmed assignee.
+type awakeWorkIndex map[string][]int
+
+func newAwakeWorkIndex(work []AwakeWorkBead) awakeWorkIndex {
+	x := make(awakeWorkIndex)
+	for i, wb := range work {
+		if assignee := strings.TrimSpace(wb.Assignee); assignee != "" {
+			x[assignee] = append(x[assignee], i)
+		}
+	}
+	return x
+}
+
+// candidates is the work beads, in order, whose trimmed assignee is one
+// sessionAssigneeMatches can accept for bead: every bead without an index.
+// Callers still apply the match.
+func (x awakeWorkIndex) candidates(work []AwakeWorkBead, named []AwakeNamedSession, bead AwakeSessionBead) []AwakeWorkBead {
+	if x == nil {
+		return work
+	}
+	var hits []int
+	add := func(identity string) {
+		if identity != "" {
+			hits = append(hits, x[identity]...)
+		}
+	}
+	add(bead.ID)
+	add(bead.SessionName)
+	add(bead.Alias)
+	add(bead.NamedIdentity)
+	if bead.ConfiguredNamedSession {
+		for _, ns := range named {
+			if ns.RuntimeName != "" && ns.RuntimeName == bead.SessionName {
+				add(ns.Identity)
+			}
+		}
+	}
+	slices.Sort(hits)
+	hits = slices.Compact(hits)
+	out := make([]AwakeWorkBead, len(hits))
+	for i, h := range hits {
+		out[i] = work[h]
+	}
+	return out
 }
 
 // AwakeAgent represents an [[agent]] config entry.
@@ -316,12 +367,12 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 			continue
 		}
 		active := collectActiveBeads(input.SessionBeads, template, input.Now)
-		filled := countAssignedScaleSlots(input.SessionBeads, input.WorkBeads, input.NamedSessions, template)
+		filled := countAssignedScaleSlotsIndexed(input.SessionBeads, input.WorkBeads, input.workIndex, input.NamedSessions, template)
 		for _, bead := range active {
 			if filled >= count {
 				break
 			}
-			if sessionHasAssignedWork(input.WorkBeads, input.NamedSessions, bead) {
+			if sessionHasAssignedWork(input.workIndex.candidates(input.WorkBeads, input.NamedSessions, bead), input.NamedSessions, bead) {
 				continue
 			}
 			desired[key(bead)] = "scaled:demand"
@@ -332,7 +383,7 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 			if filled >= count {
 				break
 			}
-			if sessionHasAssignedWork(input.WorkBeads, input.NamedSessions, bead) {
+			if sessionHasAssignedWork(input.workIndex.candidates(input.WorkBeads, input.NamedSessions, bead), input.NamedSessions, bead) {
 				continue
 			}
 			desired[key(bead)] = "scaled:creating"
@@ -405,7 +456,7 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 			recorded   = bead.CurrentlyProcessingBeadID
 			matchedAny = false
 		)
-		for _, wb := range input.WorkBeads {
+		for _, wb := range input.workIndex.candidates(input.WorkBeads, input.NamedSessions, bead) {
 			assignee := strings.TrimSpace(wb.Assignee)
 			if assignee == "" || !workBeadHasAwakeDemand(wb) {
 				continue
@@ -501,7 +552,7 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 		}
 		if hasAssignedWork {
 			decision.AssignedWorkBeadID = anchor
-			for _, work := range input.WorkBeads {
+			for _, work := range input.workIndex.candidates(input.WorkBeads, input.NamedSessions, bead) {
 				if work.Status != "in_progress" {
 					continue
 				}
@@ -595,7 +646,7 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 		// supervisor-restart re-projection) must not silently cancel it. See
 		// #5739.
 		agent, hasAgent := lookupAgent(bead.Template)
-		holdsClaimedWork := hasAgent && !agent.Suspended && sessionHasClaimedInProgressWork(input.WorkBeads, input.NamedSessions, bead)
+		holdsClaimedWork := hasAgent && !agent.Suspended && sessionHasClaimedInProgressWork(input.workIndex.candidates(input.WorkBeads, input.NamedSessions, bead), input.NamedSessions, bead)
 		if decision.ShouldWake && !input.AttachedSessions[name] && !input.PendingSessions[name] && !bead.Pinned && !holdsClaimedWork && !bead.IdleSince.IsZero() &&
 			!isAlwaysNamedSession(input.NamedSessions, bead) &&
 			desired[name] != "assigned-work" && desired[name] != "min-active" &&
@@ -644,6 +695,12 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 }
 
 func countAssignedScaleSlots(beads []AwakeSessionBead, workBeads []AwakeWorkBead, named []AwakeNamedSession, template string) int {
+	return countAssignedScaleSlotsIndexed(beads, workBeads, nil, named, template)
+}
+
+// countAssignedScaleSlotsIndexed is countAssignedScaleSlots through index;
+// nil scans every work bead.
+func countAssignedScaleSlotsIndexed(beads []AwakeSessionBead, workBeads []AwakeWorkBead, index awakeWorkIndex, named []AwakeNamedSession, template string) int {
 	n := 0
 	for _, bead := range beads {
 		if bead.Template != template || bead.State == "closed" {
@@ -652,7 +709,7 @@ func countAssignedScaleSlots(beads []AwakeSessionBead, workBeads []AwakeWorkBead
 		if bead.NamedIdentity != "" || bead.ConfiguredNamedSession || bead.ManualSession {
 			continue
 		}
-		if sessionHasAssignedWork(workBeads, named, bead) {
+		if sessionHasAssignedWork(index.candidates(workBeads, named, bead), named, bead) {
 			n++
 		}
 	}

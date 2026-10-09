@@ -33,7 +33,8 @@ const idleRetireWait = idleTimeoutUnderTest*3/2 + 45*time.Second
 
 func TestProxiedIdleTimeoutReapAndTransparentRestart(t *testing.T) {
 	// Several idle retirements of a real proxy and Dolt child take minutes:
-	// not Tier A smoke material. The proxied-native acceptance job runs it.
+	// not Tier A smoke material. Bazel's acceptance lane opts in and runs it
+	// as a target of its own (test/acceptance/BUILD.bazel).
 	helpers.RequireTopologyMatrix(t)
 	bdPath, doltPath := requireProxiedTooling(t)
 	env := proxiedEnv(t, bdPath, doltPath).With(config.ProxiedIdleTimeoutEnv, idleTimeoutUnderTest.String())
@@ -42,7 +43,8 @@ func TestProxiedIdleTimeoutReapAndTransparentRestart(t *testing.T) {
 	cityRoot := city.Dir
 	rigDir := createGitRig(t)
 	t.Cleanup(func() {
-		helpers.RunGC(env, cityRoot, "stop", cityRoot) //nolint:errcheck // best effort
+		// The city's own cleanup (helpers.City) has stopped it by now.
+		stopIfPairsRemain(t, env, cityRoot, rigDir)
 		for _, root := range []string{cityRoot, rigDir} {
 			if leaked := waitForNoDoltProcesses(t, root, 20*time.Second); len(leaked) > 0 {
 				t.Errorf("processes under %s outlived the test:\n%s", root, strings.Join(leaked, "\n"))

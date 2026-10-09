@@ -64,8 +64,13 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 			}
 		}
 		// The worker-env measure step runs the script too, without a worker.
-		if strings.Contains(step.Run, rbeWorkerScript) && step.Env["WORKER_MODE"] != "measure" {
+		// S3b: the step runs "$RBE_WORKER_DIR/blacksmith-worker.sh" (the
+		// cutover shim's fetch output), in-tree by default (D8).
+		if strings.Contains(step.Run, "blacksmith-worker.sh") && step.Env["WORKER_MODE"] != "measure" {
 			worker = true
+			if got, want := step.Env["RBE_WORKER_DIR"], "${{ steps.rbe-worker.outputs.dir }}"; got != want {
+				t.Errorf("worker step RBE_WORKER_DIR = %q, want %q", got, want)
+			}
 			// Default on; the repository variable RBE_ACTION_ISOLATION=0 is the
 			// rollback without a code change.
 			if got, want := step.Env["RBE_ACTION_ISOLATION"], "${{ vars.RBE_ACTION_ISOLATION || '1' }}"; got != want {
@@ -98,6 +103,63 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 	}
 	if !checkout || !worker {
 		t.Fatalf("%s: checkout step found %v, worker step found %v", rbeWorkerWorkflow, checkout, worker)
+	}
+}
+
+// TestRBEWorkerScriptPathsResolveInTree proves the S1 refactor is a no-op
+// for today's callers: with RBE_PRODUCT_ROOT unset and the cwd at the repo
+// root (how the pool workflows run the script), HERE and RBE_PRODUCT_ROOT
+// must resolve to exactly the paths the old cwd-relative tools/rbe/... and
+// go.mod reads did. It runs only the script's path-resolution prelude
+// (everything up to and including the "rbe-worker: ..." log line), not the
+// whole script.
+func TestRBEWorkerScriptPathsResolveInTree(t *testing.T) {
+	root := repoRoot(t)
+	script := readFile(t, root, rbeWorkerScript)
+	m := regexp.MustCompile(`(?s)\nset -euo pipefail\n.*?\n(echo "rbe-worker: [^\n]*\n)`).FindStringSubmatch(script)
+	if m == nil {
+		t.Fatalf("%s: could not find the HERE/RBE_PRODUCT_ROOT prelude", rbeWorkerScript)
+	}
+	prelude := m[0]
+	for _, want := range []string{
+		`HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)`,
+		`RBE_PRODUCT_ROOT=$(cd "${RBE_PRODUCT_ROOT:-.}" && pwd -P)`,
+	} {
+		if !strings.Contains(prelude, want) {
+			t.Fatalf("%s: prelude %q missing %q", rbeWorkerScript, prelude, want)
+		}
+	}
+	siblings := []string{"worker-env", "worker-env-drift", "rbe-action-entry.c", "rbe-action-launch", "rbe-action-selftest", "rbe-action-sweep"}
+	script2 := prelude + "echo \"HERE=$HERE\"\necho \"RBE_PRODUCT_ROOT=$RBE_PRODUCT_ROOT\"\n"
+	for _, s := range siblings {
+		script2 += fmt.Sprintf(`echo "HERE/%s=$HERE/%s"`+"\n", s, s)
+	}
+	// BASH_SOURCE[0]'s dirname is how HERE is computed, so the probe script
+	// must live beside the real siblings in tools/rbe, exactly like
+	// blacksmith-worker.sh does today.
+	rbeDir := filepath.Join(root, "tools", "rbe")
+	probe := filepath.Join(rbeDir, ".paths-resolve-probe.sh")
+	if err := os.WriteFile(probe, []byte(script2), 0o755); err != nil {
+		t.Fatalf("write probe script: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Remove(probe); err != nil && !os.IsNotExist(err) {
+			t.Errorf("remove %s: %v", probe, err)
+		}
+	})
+	// runRBEScript (not exec.Command directly): the census's call-site count
+	// gains no new subprocess owner for this shim test (§8).
+	stdout, stderr, err := runRBEScript(root, []string{"PATH=" + os.Getenv("PATH")}, probe) // RBE_PRODUCT_ROOT deliberately unset
+	if err != nil {
+		t.Fatalf("prelude failed: %v\n%s", err, stderr)
+	}
+	out := stdout
+	want := fmt.Sprintf("rbe-worker: in-tree (%s), product %s\nHERE=%s\nRBE_PRODUCT_ROOT=%s\n", rbeDir, root, rbeDir, root)
+	for _, s := range siblings {
+		want += fmt.Sprintf("HERE/%s=%s\n", s, filepath.Join(rbeDir, s))
+	}
+	if out != want {
+		t.Errorf("prelude from repo root resolved paths to:\n%s\nwant:\n%s", out, want)
 	}
 }
 
@@ -591,11 +653,11 @@ func TestRBEWorkerScriptGatesNativeLinkOnIsolation(t *testing.T) {
 		`taken=$(awk -F: '$3 >= 59000 && $3 <= 59063 { print FILENAME ": " $1 " (" $3 ")" }' /etc/passwd /etc/group)`,
 		`[ -z "$taken" ] || fail "uids/gids 59000-59063 must be free for the slot users, taken: $taken"`,
 		`sudo groupadd --system --gid "$id" "$u"`,
-		`gcc -static -O2 -Wall -Wextra -o "$RUNNER_TEMP/rbe-entry" tools/rbe/rbe-action-entry.c`,
-		`gcc -static -O2 -Wall -Wextra -DRBE_ACTION_EXEC -o "$RUNNER_TEMP/rbe-exec" tools/rbe/rbe-action-entry.c`,
-		`sudo install -m 0755 tools/rbe/rbe-action-launch "$LIB/launch"`,
-		`sudo install -m 0755 tools/rbe/rbe-action-sweep "$LIB/sweep"`,
-		`sudo install -m 0755 tools/rbe/rbe-action-selftest "$LIB/selftest"`,
+		`gcc -static -O2 -Wall -Wextra -o "$RUNNER_TEMP/rbe-entry" "$HERE/rbe-action-entry.c"`,
+		`gcc -static -O2 -Wall -Wextra -DRBE_ACTION_EXEC -o "$RUNNER_TEMP/rbe-exec" "$HERE/rbe-action-entry.c"`,
+		`sudo install -m 0755 "$HERE/rbe-action-launch" "$LIB/launch"`,
+		`sudo install -m 0755 "$HERE/rbe-action-sweep" "$LIB/sweep"`,
+		`sudo install -m 0755 "$HERE/rbe-action-selftest" "$LIB/selftest"`,
 		`sudo tee /etc/rbe-west/rbe-action.env >/dev/null <<-EOF`,
 		`sudo chmod 0440 /etc/sudoers.d/rbe-action && sudo visudo -cq`,
 		"render\n",
@@ -605,6 +667,8 @@ func TestRBEWorkerScriptGatesNativeLinkOnIsolation(t *testing.T) {
 		// What an action can connect to (the selftest's in-action check), not
 		// what the host has on /run: the host keeps its sockets.
 		`grep -q '^ok    action: no-open-socket' "$selftest_out" ||`,
+		// ga-mglovs: no resolver over unix sockets (system bus, varlink).
+		`grep -q '^ok    action: no-resolver' "$selftest_out" ||`,
 		`probe "$ROOT/pki/worker.key"`,
 		`if ! grep -qE "^uid 590[0-9]{2}$" <<<"$out" || grep -q LEAK <<<"$out"; then`,
 		// Mode 1 runs the checks in this shell: any failure ends the worker.
@@ -638,7 +702,11 @@ func TestRBEWorkerScriptGatesNativeLinkOnIsolation(t *testing.T) {
 // sockets on Blacksmith's /run (its VM shutdown socket among them) were found
 // reachable by actions. MASK_SOCKETS=1 masks them inside each action; MAIN
 // keeps the default (0) until it opts in. The sockets phase reads the
-// selftest's line, and the launcher and the selftest keep the same sockets.
+// selftest's line, and the launcher and the selftest keep the same sockets:
+// journald's alone. The system bus is masked too (ga-mglovs): unix sockets
+// ignore network namespaces, and systemd-resolved's org.freedesktop.resolve1
+// resolves any record for anyone, a DNS tunnel out of the fork tier's
+// loopback-only actions. The selftest proves no action reaches a resolver.
 func TestRBEActionMaskSockets(t *testing.T) {
 	root := repoRoot(t)
 	launch := readFile(t, root, "tools/rbe/rbe-action-launch")
@@ -653,12 +721,15 @@ func TestRBEActionMaskSockets(t *testing.T) {
 			t.Errorf("rbe-action-launch missing %q", want)
 		}
 	}
-	const keep = "case $s in /run/systemd/journal/* | /run/dbus/system_bus_socket) ;; *)"
+	const keep = "case $s in /run/systemd/journal/*) ;; *)"
 	if n := strings.Count(launch, keep); n != 1 {
 		t.Errorf("rbe-action-launch: %d sockets-kept lists %q, want 1", n, keep)
 	}
 	if n := strings.Count(selftest, keep); n != 1 {
 		t.Errorf("rbe-action-selftest: %d sockets-kept lists %q, want 1 (run_socks, host and action)", n, keep)
+	}
+	if strings.Contains(launch, "system_bus_socket") || strings.Contains(selftest, "system_bus_socket) ;;") {
+		t.Error("the system bus must not be exempt from MASK_SOCKETS (ga-mglovs: resolve1 is a DNS tunnel)")
 	}
 	// The action runs the host's run_socks: the same list on both sides.
 	if !strings.Contains(selftest, `'"$(declare -f run_socks)"'`) {
@@ -669,6 +740,14 @@ func TestRBEActionMaskSockets(t *testing.T) {
 		`ok "action: no-open-socket (${how:-?})"`,
 		"elif ((MASK_SOCKETS)); then\n\tbad \"action: no-open-socket",
 		`sed -n 's/^S /      world-writable socket the action can connect to: /p' <<<"$out"`,
+		// The tunnel itself, through the system bus and resolved's varlink
+		// socket, from inside the probe action, against what the host reaches.
+		"org.freedesktop.resolve1.Manager ResolveHostname isit 0 localhost 0 0",
+		`"system-bus", "/run/dbus/system_bus_socket"`,
+		"io.systemd.Resolve.ResolveHostname",
+		"echo \"$r\"; grep -q \"^S \" <<<\"$r\" || echo \"R no-open-socket\"\n'\"$resolver_probe\"'\n",
+		`ok "action: no-resolver (the host reaches: ${host_resolvers:-none})"`,
+		"elif ((MASK_SOCKETS)); then\n\tbad \"action: no-resolver (the action reaches: $resolvers)\"",
 	} {
 		if !strings.Contains(selftest, want) {
 			t.Errorf("rbe-action-selftest missing %q", want)
@@ -1069,5 +1148,52 @@ func TestRBEWorkerScrubCAS(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "cas scrub: 2 blobs removed, 2 kept") {
 		t.Errorf("scrub summary: want 2 blobs removed (hash, size), 2 kept; got\n%s", out)
+	}
+}
+
+// Max review, 2026-10-07: the full selftest's mount walk (tools/rbe/rbe-
+// action-selftest's full_probe) found no-shared-writable-dir by `find`ing
+// every reachable mount, including Blacksmith's large, mostly-read-only tool
+// caches (~49 s of the walk). A mount whose own options already say ro (a
+// ROOT_RO=1 remount, or a mount that was ro to begin with) has nothing an
+// action can write on it, so the walk now skips `find` there; this must
+// never widen what no-shared-writable-dir catches: ROOT_RO=0 (nothing
+// remounted ro) and a world-writable directory an image adds under /dev
+// (ROOT_RO's own remount loop skips /dev/* by path, rbe-action-launch) must
+// still fail it. Container regression cases (privileged ubuntu:24.04,
+// tools/rbe/blacksmith-worker.sh's isolate()-to-selftest section, the
+// /data/tmp/r3-e2e/inside.sh pattern): V1 ROOT_RO=1 fork with a large
+// read-only tool cache passes; V2 ROOT_RO=0 plus a world-writable tool cache
+// fails; V3 a 1777 directory under /dev fails; R4 the entrypoint dropped
+// from worker.json (unrelated to the mount walk) still fails.
+func TestRBEActionSelftestMountWalkSkipsReadOnly(t *testing.T) {
+	selftest := readFile(t, repoRoot(t), "tools/rbe/rbe-action-selftest")
+	for _, want := range []string{
+		// The options column (mountinfo field 6) is read, not discarded.
+		"while read -r _ _ _ _ m o _; do",
+		// /dev is never skipped by path here (only /proc and /sys): a 1777
+		// directory an image adds under /dev must still be walked into.
+		"case $m in /proc | /proc/* | /sys | /sys/*) continue ;; esac",
+		// A mount already read-only has nothing to find() on.
+		"case ,$o, in *,ro,*) continue ;; esac",
+	} {
+		if !strings.Contains(selftest, want) {
+			t.Errorf("rbe-action-selftest missing %q", want)
+		}
+	}
+	// The ro-skip line must run after the own()/mountpoint check and before
+	// the `find` that walks the mount, or an owned mount (never probed
+	// anyway) could mask the ordering and the skip would never fire.
+	own := strings.Index(selftest, `if own "$m" || ! mountpoint -q -- "$m"; then continue; fi`)
+	skip := strings.Index(selftest, "case ,$o, in *,ro,*) continue ;; esac")
+	find := strings.Index(selftest, `done < <(find "$m" -xdev -type d -perm -0002 2>/dev/null)`)
+	if own < 0 || skip < 0 || find < 0 || own >= skip || skip >= find {
+		t.Errorf("rbe-action-selftest: want own-check(%d) < ro-skip(%d) < find(%d)", own, skip, find)
+	}
+	// /dev itself (and anything under it) is a candidate mount to `own()` or
+	// walk, not a path this loop drops before ever considering its options:
+	// only /proc and /sys are skipped unconditionally.
+	if strings.Contains(selftest, "/dev | /dev/*) continue") {
+		t.Error("rbe-action-selftest: the mount walk must not skip /dev by path (only ROOT_RO's own remount loop in rbe-action-launch does, and only there)")
 	}
 }

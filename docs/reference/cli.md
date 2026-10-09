@@ -2114,7 +2114,10 @@ entry using source plus optional version. Supported sources are:
 - local paths inside git worktrees at HEAD: promoted to a file:// repo source
   with the pack subpath and locked to the current commit
 - remote git repositories: cloned and locked; --version accepts a semver
-  constraint or sha:&lt;commit&gt;
+  constraint or sha:&lt;commit&gt;. Without --version, a source the city already
+  imports or locks keeps the constraint the city holds for it, so its
+  packs.lock entry does not move (a local path inside a git worktree is
+  still locked to its current commit)
 - packs published in a configured pack registry: a semver --version (or no
   --version) resolves against the registry's release entries, not git tags;
   the constraint is kept, the lock records the release version and commit,
@@ -3630,10 +3633,20 @@ Register an external project directory as a rig.
 
 Initializes beads database, installs agent hooks if configured,
 generates cross-rig routes, and appends the rig to city.toml.
-If the target directory doesn't exist, it is created. Use --include
-to apply a pack source that defines the rig's agent configuration;
-repeat the flag to compose multiple packs for one rig. The flag is
-compatibility sugar: gc rig add writes canonical rig imports.
+If the target directory doesn't exist, it is created.
+
+Use --include to import a pack into the rig; repeat the flag to compose
+multiple packs for one rig. Each --include becomes a [rigs.imports.&lt;binding&gt;]
+entry in city.toml, resolved the way "gc import add --rig &lt;rig&gt;" resolves an
+import: a bundled pack is pinned to the version shipped with gc; any other
+remote source gets the version constraint gc import add would write (the
+constraint the city already holds for that source, else the newest registry
+release, else the newest semver tag, else the remote HEAD commit) plus a
+packs.lock entry; a remote source with an embedded "#ref" and a local path
+are imported as given, with no packs.lock entry. If a version cannot be
+resolved, nothing is written. Imports do not honor a "#ref": the city fails
+to load until gc import install locks such a source, at a commit chosen
+without the ref; use gc import add --rig &lt;rig&gt; --version to pin a version.
 
 --include takes a pack source (local path or remote URL) or a pack name: a
 bundled pack ("gastown"), or a registry pack resolved from the cached
@@ -3642,6 +3655,12 @@ prefix or a "packs/&lt;name&gt;" token is never read as a registry name (a
 bundled pack still canonicalizes, so "./gastown" resolves to the bundled
 source), and an existing directory always wins over a registry pack of the
 same name.
+
+The binding defaults to the pack's name (its [packs] key or the source's last
+path segment). Write --include &lt;binding&gt;=&lt;source&gt; to choose it, for example
+--include gt=gastown. A binding is letters, digits, "-" and "_", starting with
+a letter or digit, and an explicit binding may not name a different pack than
+another --include. Prefix a path with "./" if its name itself contains "=".
 
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
@@ -3674,6 +3693,7 @@ gc rig add /path/to/master-repo --default-branch master
 gc rig add ./my-project --include gastown
 gc rig add ./my-project --include packs/planner --include packs/architect
 gc rig add ./my-project --include acme/planner
+gc rig add ./my-project --include gc=https://github.com/gastownhall/gascity-packs/tree/main/gascity
 gc rig add ./my-project --include gastown --start-suspended
 gc rig add /path/to/existing --adopt
 ```
@@ -3684,7 +3704,7 @@ gc rig add /path/to/existing --adopt
 | `--allow-ephemeral` | bool |  | register the rig even though its path is on a filesystem that does not survive a restart |
 | `--default-branch` | string |  | mainline branch (default: auto-detect from a remote HEAD — origin preferred — or the current branch) |
 | `--git-url` | string |  | git URL to clone into a new rig on a REMOTE city (server-side provisioning) |
-| `--include` | stringArray |  | pack source or pack name for rig agents (repeatable; writes canonical rig imports) |
+| `--include` | stringArray |  | pack to import into the rig: a source, a pack name, or &lt;binding&gt;=&lt;source&gt; (repeatable) |
 | `--json` | bool |  | Output in JSONL format |
 | `--name` | string |  | rig name (default: directory basename, or git URL basename for --git-url) |
 | `--prefix` | string |  | bead ID prefix (default: derived from name) |
@@ -3941,6 +3961,14 @@ socket so the reconciler stops the session immediately rather than on
 its next patrol tick. Call this after the session has finished its
 current work in response to a drain signal.
 
+Under session_reconciler = "v2" the ack is first written to the session
+row, bound to its current incarnation. A session acking itself must
+carry a GC_INSTANCE_TOKEN that matches the row; an operator acking a
+session from outside it passes --operator and a target, and the ack binds
+to the incarnation the command read. A missing or stale token, or a store
+that is unreachable or keeps changing, exits 1 with nothing acknowledged.
+Under the legacy reconciler the ack behaves as it always has.
+
 ```
 gc runtime drain-ack [name] [flags]
 ```
@@ -3948,6 +3976,7 @@ gc runtime drain-ack [name] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output as JSON |
+| `--operator` | bool |  | ack another session as an operator, bound to the incarnation read (requires a target) |
 
 ## gc runtime drain-check
 
@@ -4018,7 +4047,8 @@ gc runtime request-restart
 Cancel a pending drain signal on a session.
 
 Clears the GC_DRAIN and GC_DRAIN_ACK metadata flags, allowing the
-session to continue normal operation. Pass a session alias or ID.
+session to continue normal operation. Pass a session alias or ID. Under
+session_reconciler = "v2" it also clears the session row's drain-ack.
 
 ```
 gc runtime undrain <name> [flags]
@@ -4097,7 +4127,7 @@ gc session
 |------------|-------------|
 | [gc session attach](#gc-session-attach) | Attach to (or resume) a chat session |
 | [gc session close](#gc-session-close) | Close a session permanently |
-| [gc session kill](#gc-session-kill) | Force-kill session runtime (reconciler restarts) |
+| [gc session kill](#gc-session-kill) | Force-kill session runtime |
 | [gc session list](#gc-session-list) | List chat sessions |
 | [gc session logs](#gc-session-logs) | Show session logs for a session |
 | [gc session new](#gc-session-new) | Create a new chat session from an agent template |
@@ -4152,6 +4182,13 @@ assignments, and work still point at the same session bead. If the provider has
 resume metadata, Gas City may attempt provider resume, but
 provider conversation continuity is not guaranteed; confirm it with the agent or
 provider after restart.
+
+An idle pool seat (no started work and no ready work) is replaced: the
+reconciler releases the routed work it had not started so another seat can
+pick it up, closes it, and the pool starts a fresh seat in its slot. A pool seat holding started or ready work
+restarts in place on its bead; while its started work is blocked, it holds its
+slot asleep. A task assigned directly to the seat with no route is kept, not
+released, and the seat holds its slot until that task is ready.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 

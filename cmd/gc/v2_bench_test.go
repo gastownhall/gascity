@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/config"
 )
 
 // The v2 pass benchmarks (architecture §1.8; gate G1 is A3's). Run with
@@ -48,11 +47,10 @@ func BenchmarkV2CensusRead(b *testing.B) {
 				b.Fatal(err)
 			}
 			legs := []classStoreCandidate{{ref: benchSessionsLeg, store: cache}}
-			cfg := &config.City{}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				c, err := readSessionCensus(censusNow, cfg, legs)
+				c, err := readSessionCensus(censusNow, legs)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -64,8 +62,8 @@ func BenchmarkV2CensusRead(b *testing.B) {
 	}
 }
 
-// BenchmarkV2RowDecide is decideSession over every row, against the
-// synthetic city's decided snapshot.
+// BenchmarkV2RowDecide is decideRow over every row, against the synthetic
+// city's decided snapshot.
 func BenchmarkV2RowDecide(b *testing.B) {
 	for _, n := range []int{100, 300, 1000} {
 		b.Run(fmt.Sprintf("sessions=%d/templates=30", n), func(b *testing.B) {
@@ -74,19 +72,13 @@ func BenchmarkV2RowDecide(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			obs := observeCensus(in.Obs, in.Census, in.Now, in.ObsMaxAge)
-			var rows []sessionInputs
-			for _, row := range in.Census.Canonical() {
-				rows = append(rows, sessionInputs{
-					Key: row.Key, Row: row.Info, Found: true, Now: in.Now,
-					Snap: d.Snapshot, Entry: d.Snapshot.Entries[row.Key], Obs: obs[row.Key],
-				})
-			}
+			w := &World{Now: in.Now, Census: in.Census, Observed: observeCensus(in.Obs, in.Census, in.Now, in.ObsMaxAge)}
+			rows := in.Census.Canonical()
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				for _, row := range rows {
-					decideSession(row, unaskedAnswers())
+					decideRow(w, &d, row.Key)
 				}
 			}
 		})

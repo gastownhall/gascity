@@ -164,8 +164,7 @@ func TestBackoffPruneBoundsTheTable(t *testing.T) {
 	}
 	b.Refuse(createBackoffKey("worker/worker-1"), now, time.Time{}, createStageFence, "rev-2")
 	b.Refuse(createBackoffKey("worker/worker-2"), now, time.Time{}, createStageFence, "rev-1")
-	c := ledgerCensusOf(map[rowKey]ledgerRow{open: {}}, "rigs/a")
-	b.Prune("rev-2", c, map[string]bool{"w-demand": true})
+	b.Prune("rev-2", map[rowKey]censusRow{open: {}}, map[string]bool{"w-demand": true})
 	snap := b.Snapshot()
 	for _, k := range keep {
 		if _, ok := snap[k]; !ok {
@@ -192,12 +191,12 @@ func TestBackoffNamedIdentityPrunedWhenUnconfigured(t *testing.T) {
 		t.Fatalf("named key = %q, want named:mayor (C5.11)", mayor)
 	}
 	b.Refuse(mayor, now, time.Time{}, createStageResolve, "rev-with-mayor")
-	b.Prune("rev-with-mayor", ledgerCensus{}, nil)
+	b.Prune("rev-with-mayor", nil, nil)
 	if _, ok := b.Snapshot()[mayor]; !ok {
 		t.Fatal("prune under the same ConfigRev dropped a configured identity's record")
 	}
 	b.Refuse(chat, now, time.Time{}, createStageLock, "rev-without-mayor")
-	b.Prune("rev-without-mayor", ledgerCensus{}, nil)
+	b.Prune("rev-without-mayor", nil, nil)
 	snap := b.Snapshot()
 	if _, ok := snap[mayor]; ok {
 		t.Fatal("the unconfigured identity's record survived the ConfigRev change")

@@ -234,7 +234,7 @@ func TestRepositoryTestsAreHermeticOrLedgered(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(packages) < 100 {
-		t.Fatalf("scanned only %d test packages; under bazel the test needs //:repo_source_tree in data", len(packages))
+		t.Fatalf("scanned only %d test packages; under bazel the test needs //:repo_go_test_srcs in data", len(packages))
 	}
 	if problems := Check(findings, ledger, packages); len(problems) > 0 {
 		t.Fatalf("%d Bazel hermeticity problem(s):\n  %s", len(problems), strings.Join(problems, "\n  "))

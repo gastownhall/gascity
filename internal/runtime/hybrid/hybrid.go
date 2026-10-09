@@ -4,6 +4,7 @@ package hybrid
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -27,6 +28,7 @@ var (
 	_ runtime.InputClearProvider            = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
+	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
 	_ runtime.AttachmentObserverWithError   = (*Provider)(nil)
 	_ runtime.SessionEventProvider          = (*Provider)(nil)
@@ -34,6 +36,7 @@ var (
 	_ runtime.BackendsProvider              = (*Provider)(nil)
 	_ runtime.ListingAttestation            = (*Provider)(nil)
 	_ runtime.Router                        = (*Provider)(nil)
+	_ runtime.ServerDeathConfirmer          = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -63,6 +66,27 @@ func (p *Provider) route(name string) runtime.Provider {
 	return p.RouteFor(name).Provider
 }
 
+// StopUnattendedSession forwards the bound unattended stop only to the backend
+// selected for name. Evidence from another backend cannot prove or stop the
+// pending target, so unsupported or failed stops never fall through.
+func (p *Provider) StopUnattendedSession(name, expectedToken string) error {
+	selected := p.local
+	label := "local"
+	if p.isRemote(name) {
+		selected = p.remote
+		label = "remote"
+	}
+
+	stopper, ok := selected.(runtime.UnattendedSessionStopper)
+	if !ok {
+		return fmt.Errorf("hybrid %s backend does not support unattended-session stop for %q", label, name)
+	}
+	if err := stopper.StopUnattendedSession(name, expectedToken); err != nil {
+		return fmt.Errorf("hybrid %s backend stopping unattended session %q: %w", label, name, err)
+	}
+	return nil
+}
+
 // Start delegates to the routed backend.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	return p.route(name).Start(ctx, name, cfg)
@@ -71,6 +95,13 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 // Stop delegates to the routed backend.
 func (p *Provider) Stop(name string) error {
 	return p.route(name).Stop(name)
+}
+
+// ServerConfirmedDead implements [runtime.ServerDeathConfirmer] by forwarding
+// to the backends that confirm server death (local tmux), so StopForCleanup
+// keeps its confirmed-dead rule for a missing-server answer Stop returns.
+func (p *Provider) ServerConfirmedDead() bool {
+	return runtime.ServersConfirmedDead(p.local, p.remote)
 }
 
 // Interrupt delegates to the routed backend.

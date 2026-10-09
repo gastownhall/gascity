@@ -415,15 +415,7 @@ func sqliteStoreDSN(path string, readOnly bool) string {
 // It is a begin mode, not a pragma, so it does not ride the per-connection
 // pragma budget, and it is deliberately off the read pool and read-only DSN.
 func sqliteStoreWriterDSN(path string) string {
-	dsn := sqliteStoreDSNWithMode(path, "")
-	parsed, err := url.Parse(dsn)
-	if err != nil {
-		return dsn
-	}
-	query := parsed.Query()
-	query.Set("_txlock", "immediate")
-	parsed.RawQuery = query.Encode()
-	return parsed.String()
+	return sqliteStoreDSNWithOptions(path, "", "immediate")
 }
 
 func sqliteStorePrivateRecoveryDSN(path string) string {
@@ -431,6 +423,12 @@ func sqliteStorePrivateRecoveryDSN(path string) string {
 }
 
 func sqliteStoreDSNWithMode(path, mode string) string {
+	return sqliteStoreDSNWithOptions(path, mode, "")
+}
+
+// sqliteStoreDSNWithOptions is the one DSN builder. txlock, when set, is the
+// modernc _txlock begin mode ("immediate" for the write connection only).
+func sqliteStoreDSNWithOptions(path, mode, txlock string) string {
 	query := url.Values{}
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "foreign_keys(1)")
@@ -485,6 +483,9 @@ func sqliteStoreDSNWithMode(path, mode string) string {
 
 	if mode != "" {
 		query.Set("mode", mode)
+	}
+	if txlock != "" {
+		query.Set("_txlock", txlock)
 	}
 	return (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
 }
@@ -1170,11 +1171,15 @@ func scanSQLiteBead(row sqliteScanner) (Bead, error) {
 // filtered, Metadata merged). Update and UpdateIfMatch share it so the fenced
 // and unfenced paths cannot drift.
 func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
+	wasClosed := b.Status == "closed"
 	if opts.Title != nil {
 		b.Title = *opts.Title
 	}
 	if opts.Status != nil {
-		b.Status = *opts.Status
+		setBeadStatus(&b, *opts.Status)
+	}
+	if wasClosed && b.Status != "closed" {
+		forgetCloseReason(&b)
 	}
 	if opts.Type != nil {
 		b.Type = *opts.Type
@@ -1214,6 +1219,9 @@ func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
 			}
 		}
 		b.Labels = filtered
+	}
+	if !wasClosed && b.Status == "closed" {
+		recordCloseReason(&b)
 	}
 	return b
 }
@@ -1637,7 +1645,8 @@ func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
 
 // sqliteReadyBlockerExists is SQLite's one statement of "blocked": an EXISTS
 // over issueCol's blocks/waits-for/conditional-blocks edges whose target is not
-// closed, or closed with gc.work_outcome=blocked. A target missing from this
+// closed, or closed with gc.work_outcome=blocked unless it is a formula step
+// (gc.step_ref) that passed (gc.outcome=pass). A target missing from this
 // store (deleted, or another store's id) has no status and so blocks. Ready
 // negates it and enrichReadyProjectionForCache selects it, so the store and a
 // cache over it cannot disagree about which rows are blocked.
@@ -1649,14 +1658,30 @@ func sqliteReadyBlockerExists(issueCol string) string {
 			  AND d.dep_type IN ('blocks','waits-for','conditional-blocks')
 			  AND (
 			    COALESCE(blocker.status, '') <> 'closed'
-			    OR EXISTS (
-			         SELECT 1 FROM metadata m
-			         WHERE m.bead_id = blocker.id
-			           AND m.meta_key = '%s'
-			           AND m.meta_value = '%s'
+			    OR (
+			         EXISTS (
+			           SELECT 1 FROM metadata m
+			           WHERE m.bead_id = blocker.id
+			             AND m.meta_key = '%s'
+			             AND m.meta_value = '%s'
+			         )
+			         AND NOT (
+			           EXISTS (
+			             SELECT 1 FROM metadata o
+			             WHERE o.bead_id = blocker.id
+			               AND o.meta_key = '%s'
+			               AND o.meta_value = '%s'
+			           )
+			           AND EXISTS (
+			             SELECT 1 FROM metadata r
+			             WHERE r.bead_id = blocker.id
+			               AND r.meta_key = '%s'
+			               AND r.meta_value <> ''
+			           )
+			         )
 			       )
 			  )
-		  )`, issueCol, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked)
+		  )`, issueCol, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked, beadmeta.OutcomeMetadataKey, beadmeta.OutcomePass, beadmeta.StepRefMetadataKey)
 }
 
 // Children returns all non-closed beads whose ParentID matches the given ID.
@@ -1858,7 +1883,8 @@ func (t *sqliteStoreTx) Close(id string) error {
 		return nil
 	}
 	before := b
-	b.Status = "closed"
+	setBeadStatus(&b, "closed")
+	recordCloseReason(&b)
 	b.UpdatedAt = time.Now()
 	if err := t.store.upsertBeadTx(t.ctx, t.tx, b); err != nil {
 		return err
@@ -2106,23 +2132,4 @@ func (s *SQLiteStore) purgeTerminal(ctx context.Context, olderThan time.Duration
 
 func ptrTo(v string) *string {
 	return &v
-}
-
-// numericIDSuffix parses the trailing numeric portion of a bead ID like
-// "gc-42" and returns 42. Returns 0 if the ID has no numeric suffix or the
-// suffix does not fit in an int. It is a loose parser for MemStore's pinned-id
-// bookkeeping; the SQLite allocator uses the strict parseSQLiteAutoIDSuffix.
-func numericIDSuffix(id string) int {
-	i := len(id)
-	for i > 0 && id[i-1] >= '0' && id[i-1] <= '9' {
-		i--
-	}
-	if i == len(id) {
-		return 0
-	}
-	n, err := strconv.Atoi(id[i:])
-	if err != nil {
-		return 0
-	}
-	return n
 }

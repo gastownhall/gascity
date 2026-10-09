@@ -393,6 +393,12 @@ type startExecutionOptions struct {
 	// the reconciler where the cached rig stores are in scope and consumed in
 	// startPreparedStartCandidate's warm-reuse branch. Nil disables the nudge.
 	warmClaimProbe warmClaimTriggerProbe
+	// dispatchOptionSources are the reads a pool session launched before it
+	// claims needs to apply its trigger bead's opt_* pins: the trigger resolved
+	// through the city's residency contract (newWarmClaimTriggerResolver), and a
+	// claimed-work probe across every leg the session can claim from. The zero
+	// value reads the session store only.
+	dispatchOptionSources dispatchOptionSources
 	// capacityGuard gates starts per serving endpoint. Nil leaves every
 	// endpoint unguarded (legacy failure accounting).
 	capacityGuard *endpointCapacityGuard
@@ -486,6 +492,24 @@ func withWarmClaimProbe(probe warmClaimTriggerProbe) startExecutionOption {
 	}
 }
 
+// withTriggerBeadResolver installs the residency-correct trigger-bead reader the
+// start path uses to apply a pool session's trigger-bead opt_* pins at launch.
+// Nil (or the option omitted) reads only a same-store trigger from the session store.
+func withTriggerBeadResolver(resolve warmClaimTriggerResolver) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.dispatchOptionSources.trigger = resolve
+	}
+}
+
+// withClaimedWorkProbe installs the claimed-work probe that keeps a session
+// holding claimed work on any leg from launching with its trigger bead's opt_*
+// pins. Nil (or the option omitted) consults the session store only.
+func withClaimedWorkProbe(probe claimedWorkProbe) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.dispatchOptionSources.claimedWork = probe
+	}
+}
+
 // withEndpointCapacityGuard installs the per-endpoint capacity breaker for
 // this reconcile pass. Nil (or the option omitted) leaves endpoints unguarded.
 func withEndpointCapacityGuard(guard *endpointCapacityGuard) startExecutionOption {
@@ -538,9 +562,12 @@ func withAssignedWorkStores(assignedWorkStores []beads.Store) startExecutionOpti
 }
 
 type asyncStartTracker struct {
-	mu               sync.Mutex
-	wg               sync.WaitGroup
-	stopping         bool
+	mu       sync.Mutex
+	wg       sync.WaitGroup
+	stopping bool
+	// launched counts the async start goroutines running now (goStart), for
+	// a provider swap's wait (waitLaunchedStarts).
+	launched         int
 	drainAckStopKeys sync.Map
 }
 
@@ -652,6 +679,7 @@ type asyncPreparedStart struct {
 	item    preparedStart
 	release func()
 	done    func()
+	tracker *asyncStartTracker // counts the start's goroutine; nil counts nothing
 }
 
 type stopTarget struct {
@@ -943,9 +971,13 @@ func prepareStartCandidate(
 	store beads.Store,
 	clk clock.Clock,
 ) (*preparedStart, error) {
-	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard, nil)
+	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard, nil, dispatchOptionSources{})
 }
 
+// prepareStartCandidateForCity prepares a start for candidate within the city at
+// cityPath. workDirResolver resolves the task work dir; dispatchSources read the
+// session's trigger bead for opt_* pins when it holds no claimed work, and the
+// zero value reads the session store only, for a same-store trigger stamp.
 func prepareStartCandidateForCity(
 	candidate startCandidate,
 	cityPath string,
@@ -956,6 +988,7 @@ func prepareStartCandidateForCity(
 	clk clock.Clock,
 	stderr io.Writer,
 	workDirResolver taskWorkDirResolver,
+	dispatchSources dispatchOptionSources,
 ) (*preparedStart, error) {
 	var undo preWakeUndo
 	if id := strings.TrimSpace(candidate.info.ID); id != "" && store != nil {
@@ -1002,7 +1035,7 @@ func prepareStartCandidateForCity(
 	// recordWakeFailure's session_key/started_config_hash) read that folded twin. The
 	// partial-Info second return is only load-bearing for recoverRunningPendingCreate's
 	// abort residue; here the prepared already carries it, so it is discarded.
-	prepared, _, err := buildPreparedStartWithWorkDirResolver(candidate, cityPath, cfg, store, workDirResolver)
+	prepared, _, err := buildPreparedStartWithWorkDirResolver(candidate, cityPath, cfg, store, workDirResolver, dispatchSources)
 	if prepared != nil && undo.written != nil {
 		undo.token = prepared.candidate.info.InstanceToken
 		prepared.preWakeUndo = undo
@@ -1057,7 +1090,7 @@ func buildPreparedStart(
 	cfg *config.City,
 	store beads.Store,
 ) (*preparedStart, sessionpkg.Info, error) {
-	return buildPreparedStartWithWorkDirResolver(candidate, "", cfg, store, nil)
+	return buildPreparedStartWithWorkDirResolver(candidate, "", cfg, store, nil, dispatchOptionSources{})
 }
 
 // buildPreparedStartWithWorkDirResolver builds the prepared start for a candidate,
@@ -1070,13 +1103,16 @@ func buildPreparedStart(
 // on an abort partway through. recoverRunningPendingCreate's abort path folds
 // pendingCreateResidueFold from this store-coherent Info so its infoByID snapshot
 // matches the persisted state (WI-6 R4: the former raw-bead mirror carried this
-// coherence).
+// coherence). dispatchSources read the session's trigger bead for opt_* pins when
+// no claimed in-progress work exists; the zero value reads the session store
+// only, for a same-store trigger stamp.
 func buildPreparedStartWithWorkDirResolver(
 	candidate startCandidate,
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
 	workDirResolver taskWorkDirResolver,
+	dispatchSources dispatchOptionSources,
 ) (*preparedStart, sessionpkg.Info, error) {
 	tp := candidate.tp
 	agentCfg, delivery, err := templateParamsToConfigWithDelivery(tp)
@@ -1105,10 +1141,12 @@ func buildPreparedStartWithWorkDirResolver(
 
 	// Work beads may carry one-shot provider option overrides as opt_<key>
 	// metadata, where <key> is an OptionsSchema key such as "model" or
-	// "effort". Apply them after core/live hash calculation because they are
-	// dispatch inputs from the current work bead, not durable session config.
-	// Explicit session template_overrides still win per key.
-	dispatchOptions := resolveTaskOptionOverrides(store, tp.ResolvedProvider, taskWorkDirAssignees(candidate, cfg)...)
+	// "effort". The source is the session's claimed in-progress bead, or —
+	// when it holds none, as a pool slot spawned on unassigned demand does —
+	// its trigger bead. Apply them after core/live hash calculation because
+	// they are dispatch inputs from the current work bead, not durable session
+	// config. Explicit session template_overrides still win per key.
+	dispatchOptions := resolveDispatchOptionOverrides(candidate, cityPath, cfg, store, tp.ResolvedProvider, dispatchSources)
 	if len(dispatchOptions) > 0 {
 		launchOverrides := make(map[string]string, len(dispatchOptions))
 		for k, v := range dispatchOptions {
@@ -1725,9 +1763,16 @@ func runPreparedStartCandidate(
 	// API which can dominate start_call when the runtime is wedged.
 	// state_sync_recovery only fires when err==ErrStateSync, so it stays
 	// zero on the happy path.
+	//
+	// Every wait on the runtime from here on is held to a fixed
+	// postStartObservationBound derived from ctx, not startCtx: startCtx is
+	// often spent by now and the bound must not depend on what is left of it.
+	// A runtime that does not answer in time reads as
+	// runtime.ErrRuntimeUnavailable, so the start defers and gives up its slot
+	// instead of holding it behind a call nothing can cancel.
 	if err != nil && errors.Is(err, sessionpkg.ErrStateSync) {
 		recoveryBegin := time.Now()
-		obs, runningErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
+		obs, runningErr := workerObserveSessionTargetBounded(ctx, cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
 		phases.StateSyncRecovery = time.Since(recoveryBegin)
 		switch {
 		case errors.Is(runningErr, runtime.ErrRuntimeUnavailable):
@@ -1740,7 +1785,7 @@ func runPreparedStartCandidate(
 	var sessionExistsObservation worker.LiveObservation
 	var sessionExistsObservationErr error
 	if err != nil && errors.Is(err, runtime.ErrSessionExists) && startCtxErr == nil && !errors.Is(err, runtime.ErrRuntimeUnavailable) {
-		sessionExistsObservation, sessionExistsObservationErr = workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
+		sessionExistsObservation, sessionExistsObservationErr = workerObserveSessionTargetBounded(ctx, cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
 		if errors.Is(sessionExistsObservationErr, runtime.ErrRuntimeUnavailable) {
 			err = fmt.Errorf("observing session %q after start collision: %w", item.candidate.name(), sessionExistsObservationErr)
 		}
@@ -1756,10 +1801,10 @@ func runPreparedStartCandidate(
 			running := false
 			alive := false
 			if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {
-				running, alive, err = observeRuntimeProviderLiveness(sp, item.candidate.name(), item.cfg.ProcessNames)
+				running, alive, err = observeRuntimeProviderLivenessBounded(ctx, cityPath, sp, item.candidate.name(), item.cfg.ProcessNames)
 			} else {
 				var obs worker.LiveObservation
-				obs, err = workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
+				obs, err = workerObserveSessionTargetBounded(ctx, cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
 				running = obs.Running
 				alive = obs.Alive
 			}
@@ -1776,13 +1821,23 @@ func runPreparedStartCandidate(
 	livenessUnavailable := errors.Is(err, runtime.ErrRuntimeUnavailable)
 	capacityRefused := !livenessUnavailable && runtime.IsProviderCapacity(err)
 	rollbackPending := err != nil && !livenessUnavailable && shouldRollbackPendingCreateInfo(item.candidate.info)
+	// The two probes that classify a failed start, the rate-limit screen peek
+	// and the pending-create identity reads, share one startFailureProbeBudget.
+	// A peek that does not answer reads as no screen. An identity read that does
+	// not answer is unverifiable, so the attribution is unknown and the start
+	// defers without a rollback.
+	probeCtx, cancelProbes := ctx, func() {}
+	if err != nil {
+		probeCtx, cancelProbes = context.WithTimeout(ctx, startFailureProbeBudget)
+	}
+	defer cancelProbes()
 	// A capacity refusal never peeks for a rate-limit screen: the launcher
 	// exited before the provider drew one, and the peek is a provider call.
-	rateLimitScreen := err != nil && !livenessUnavailable && !capacityRefused && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
+	rateLimitScreen := err != nil && !livenessUnavailable && !capacityRefused && startupRateLimitScreenDetected(probeCtx, item, cityPath, sp, store, cfg)
 	attribution := pendingCreateRuntimeForeign
 	var identity pendingCreateIdentity
 	if err != nil && rollbackPending && !rateLimitScreen {
-		identity = readPendingCreateIdentity(item.candidate.info, item.candidate.name(), sp)
+		identity = readPendingCreateIdentityBounded(probeCtx, cityPath, item.candidate.info, item.candidate.name(), sp)
 		attribution = identity.attribution()
 	}
 	if attribution == pendingCreateRuntimeOurs {
@@ -1882,7 +1937,11 @@ func restartPromptNudge(prompt, nudge string) string {
 	return prependStartupPromptToNudge(prompt, nudge)
 }
 
+// startupRateLimitScreenDetected reports whether the session's pane shows a
+// provider rate-limit screen. The peek is held to ctx: a peek that does not
+// answer in time is read as no screen.
 func startupRateLimitScreenDetected(
+	ctx context.Context,
 	item preparedStart,
 	cityPath string,
 	sp runtime.Provider,
@@ -1902,15 +1961,17 @@ func startupRateLimitScreenDetected(
 	if _, err := time.Parse(time.RFC3339, lastWoke); err != nil {
 		return false
 	}
-	content, err := workerSessionTargetPeekWithConfig(
-		cityPath,
-		store,
-		sp,
-		cfg,
-		item.candidate.name(),
-		rateLimitPeekLines,
-		item.cfg.ProcessNames,
-	)
+	content, err := observeSessionBounded(ctx, cityPath, item.candidate.name(), func() (string, error) {
+		return workerSessionTargetPeekWithConfig(
+			cityPath,
+			store,
+			sp,
+			cfg,
+			item.candidate.name(),
+			rateLimitPeekLines,
+			item.cfg.ProcessNames,
+		)
+	})
 	return err == nil && runtime.ContainsProviderRateLimitScreen(content)
 }
 
@@ -1948,7 +2009,7 @@ func enqueuePreparedStartWaveForCity(
 			finished: now,
 		}
 		done := reserved.done
-		go func(item preparedStart, release func(), done func()) {
+		reserved.tracker.goStart(func() {
 			if done != nil {
 				defer done()
 			}
@@ -1963,7 +2024,7 @@ func enqueuePreparedStartWaveForCity(
 			if asyncFollowUp != nil {
 				asyncFollowUp()
 			}
-		}(item, release, done)
+		})
 	}
 	return results
 }
@@ -3289,6 +3350,15 @@ type pendingCreateIdentity struct {
 // instance_token (Info.InstanceToken) and generation (Info.Generation). The
 // generation is read only to settle a token that differs or cannot be read.
 func readPendingCreateIdentity(info sessionpkg.Info, sessionName string, sp runtime.Provider) pendingCreateIdentity {
+	return readPendingCreateIdentityVia(info, sp, func(key string) (string, error) {
+		return sp.GetMeta(sessionName, key)
+	})
+}
+
+// readPendingCreateIdentityVia is readPendingCreateIdentity with the metadata
+// read supplied by the caller, so a caller can hold each read to a deadline.
+// A nil sp reads nothing: every key stays runtimeTokenAbsent.
+func readPendingCreateIdentityVia(info sessionpkg.Info, sp runtime.Provider, getMeta func(key string) (string, error)) pendingCreateIdentity {
 	r := pendingCreateIdentity{
 		id:           runtimeTokenAbsent,
 		token:        runtimeTokenAbsent,
@@ -3299,7 +3369,7 @@ func readPendingCreateIdentity(info sessionpkg.Info, sessionName string, sp runt
 		return r
 	}
 	read := func(key, expected string) runtimeTokenVerdict {
-		actual, err := sp.GetMeta(sessionName, key)
+		actual, err := getMeta(key)
 		verdict := classifyRuntimeInstanceToken(actual, err, expected)
 		if verdict == runtimeTokenUnverifiable {
 			r.failed = append(r.failed, fmt.Sprintf("%s: %v", key, err))
@@ -3962,7 +4032,7 @@ func executePlannedStartsTraced(
 						}
 					}
 				}
-				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver)
+				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver, startOpts.dispatchOptionSources)
 				if err != nil {
 					abandonCapacityTicket(ticket, rec, stderr)
 					clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
@@ -3981,7 +4051,7 @@ func executePlannedStartsTraced(
 					probed[endpoint] = true
 				}
 				if startOpts.async {
-					asyncPrepared = append(asyncPrepared, asyncPreparedStart{item: *item, release: release, done: done})
+					asyncPrepared = append(asyncPrepared, asyncPreparedStart{item: *item, release: release, done: done, tracker: startOpts.asyncTracker})
 				} else {
 					prepared = append(prepared, *item)
 				}

@@ -43,12 +43,27 @@ type bepEvent struct {
 	ID struct {
 		TestResult  *bepTestID `json:"testResult"`
 		TestSummary *bepTestID `json:"testSummary"`
+		// TargetCompleted is read only for the validation aspect's
+		// completions (see validationAspect).
+		TargetCompleted *bepTargetID `json:"targetCompleted"`
 	} `json:"id"`
-	Started       *bepStarted       `json:"started"`
-	TestResult    *bepTestResult    `json:"testResult"`
-	TestSummary   *bepTestSummary   `json:"testSummary"`
-	BuildMetrics  *bepBuildMetrics  `json:"buildMetrics"`
-	BuildFinished *bepBuildFinished `json:"finished"`
+	Started       *bepStarted        `json:"started"`
+	TestResult    *bepTestResult     `json:"testResult"`
+	TestSummary   *bepTestSummary    `json:"testSummary"`
+	BuildMetrics  *bepBuildMetrics   `json:"buildMetrics"`
+	BuildFinished *bepBuildFinished  `json:"finished"`
+	Completed     *bepTargetComplete `json:"completed"`
+}
+
+type bepTargetID struct {
+	Label  string `json:"label"`
+	Aspect string `json:"aspect"`
+}
+
+// bepTargetComplete is a targetCompleted payload. proto3 JSON omits a false
+// success, so a failed completion decodes as a non-nil value with Success false.
+type bepTargetComplete struct {
+	Success bool `json:"success"`
 }
 
 type bepTestID struct {

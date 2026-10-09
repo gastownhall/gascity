@@ -389,6 +389,16 @@ type Tmux struct {
 	// (serverConfirmedDead). Nil selects the production observer; tests inject
 	// a deterministic observation without opening a socket.
 	serverSocketObserver func(context.Context, string) error
+
+	// namedSocketLstat observes a named socket before an attach. Nil selects
+	// the production filesystem observation.
+	namedSocketLstat func(context.Context, string) (namedSocketObservation, error)
+
+	// certifiedPaneTerminator terminates each process plan captured by
+	// KillSessionWithCertifiedPaneProcessesExcluding. Nil selects
+	// terminateProcessKillPlan; tests inject a recorder to observe when
+	// termination happens without signaling real processes.
+	certifiedPaneTerminator func(processKillPlan) error
 }
 
 // pokeInfo records a gc-initiated send-keys ("poke", e.g. a wake or nudge) to a
@@ -458,6 +468,15 @@ func (t *Tmux) runCtx(ctx context.Context, args ...string) (string, error) {
 // Every invocation is bounded by tmuxSubprocessTimeout via runCtx.
 func (t *Tmux) run(args ...string) (string, error) {
 	return t.runCtx(context.Background(), args...)
+}
+
+// runForAttach adds tmux's no-start-server flag for a named socket. The
+// default socket keeps its existing behavior.
+func (t *Tmux) runForAttach(args ...string) (string, error) {
+	if t.cfg.SocketName == "" {
+		return t.run(args...)
+	}
+	return t.run(append([]string{"-N"}, args...)...)
 }
 
 // wrapError wraps tmux errors with context.
@@ -1215,6 +1234,7 @@ func teardownSessionProcessPlan(
 	discoveryErr error,
 	killSession func() error,
 	terminatePlan func(processKillPlan) error,
+	killConfirmsMissing func(error) bool,
 ) error {
 	var terminationErr error
 	if plan.PreserveExclusion {
@@ -1224,15 +1244,32 @@ func teardownSessionProcessPlan(
 	if !plan.PreserveExclusion {
 		terminationErr = terminatePlan(plan)
 	}
-	killConfirmedMissing := errors.Is(killErr, ErrSessionNotFound) || errors.Is(killErr, ErrNoServer)
+	killConfirmedMissing := killConfirmsMissing(killErr)
 	if killConfirmedMissing {
 		killErr = nil
 	}
-	if killConfirmedMissing && (errors.Is(discoveryErr, ErrSessionNotFound) ||
+	// A discovery error that only reports a missing session or server is
+	// superseded by the later kill answer. When the kill itself fails, that
+	// stale ErrSessionNotFound must not mask the kill error from callers that
+	// treat missing sessions as idempotent success.
+	if (killConfirmedMissing || killErr != nil) && (errors.Is(discoveryErr, ErrSessionNotFound) ||
 		errors.Is(discoveryErr, ErrNoServer) || errors.Is(discoveryErr, errEmptyPaneProcessState)) {
 		discoveryErr = nil
 	}
 	return errors.Join(discoveryErr, terminationErr, killErr)
+}
+
+// sessionOrServerMissing reports a kill-session error that confirms the
+// session is gone: tmux could not find it, or no server is running at all.
+func sessionOrServerMissing(err error) bool {
+	return errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)
+}
+
+// sessionMissingOnLiveServer accepts only a responsive server's answer: no such
+// session, or no sessions at all. A missing server is an uncertain inventory
+// observation and must reach the caller.
+func sessionMissingOnLiveServer(err error) bool {
+	return errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoCurrentTarget)
 }
 
 func processExclusionSet(pids []string) map[int]bool {
@@ -1249,6 +1286,13 @@ func processExclusionSet(pids []string) map[int]bool {
 // KillSessionWithProcesses terminates a tmux session and its owned processes.
 // Selection uses one process-table snapshot and every direct signal is fenced
 // by the target's captured start-time identity.
+//
+// Unlike KillSessionWithProcessesExcluding, it treats a missing server as
+// success, on purpose: its callers are start-path rollback, zombie or
+// dead-pane replacement, and orphan sweeps, each of which only needs the
+// session gone, and a server that is not running holds nothing left to tear
+// down. Provider.Stop, which must not read a missing server as a certified
+// absence, goes through KillSessionWithProcessesExcluding instead.
 func (t *Tmux) KillSessionWithProcesses(name string) error {
 	plan, discoveryErr := t.capturePaneProcessKillPlan(name, nil)
 
@@ -1256,7 +1300,7 @@ func (t *Tmux) KillSessionWithProcesses(name string) error {
 	// before using direct descendant/leader signals as identity-fenced fallbacks.
 	// Killing a "sleep & wait" child first lets its shell exit before tmux owns
 	// teardown and can leave that shell as an unreaped zombie on Linux.
-	return teardownSessionProcessPlan(plan, discoveryErr, func() error { return t.KillSession(name) }, terminateProcessKillPlan)
+	return teardownSessionProcessPlan(plan, discoveryErr, func() error { return t.KillSession(name) }, terminateProcessKillPlan, sessionOrServerMissing)
 }
 
 // KillSessionWithProcessesExcluding is like KillSessionWithProcesses but excludes
@@ -1270,8 +1314,44 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 	// An exclusion captured inside this pane is the self-close case: finish the
 	// non-excluded cleanup first so the in-pane caller is not torn down early.
 	// A foreign exclusion needs no such delay, so tmux owns and reaps the live
-	// leader first, before identity-fenced direct fallbacks.
-	return teardownSessionProcessPlan(plan, discoveryErr, func() error { return t.KillSession(name) }, terminateProcessKillPlan)
+	// leader first, before identity-fenced direct fallbacks. A missing session
+	// on a responsive server is idempotent success. A missing server is an
+	// uncertain inventory observation and must reach the caller.
+	return teardownSessionProcessPlan(plan, discoveryErr, func() error { return t.KillSession(name) }, terminateProcessKillPlan, sessionMissingOnLiveServer)
+}
+
+// KillSessionWithCertifiedPaneProcessesExcluding captures the process trees of
+// the already-certified pane IDs, then kills the already-certified session ID
+// and terminates the captured trees, ordered like
+// KillSessionWithProcessesExcluding. It never accepts a session name,
+// preventing a post-certification name lookup from targeting a replacement
+// session, and it fails closed before any kill when a certified pane cannot be
+// captured.
+func (t *Tmux) KillSessionWithCertifiedPaneProcessesExcluding(sessionID string, paneIDs, excludePIDs []string) error {
+	exclude := processExclusionSet(excludePIDs)
+	plans := make([]processKillPlan, 0, len(paneIDs))
+	preserveExclusion := false
+	for _, paneID := range paneIDs {
+		plan, err := t.capturePaneProcessKillPlan(paneID, exclude)
+		if err != nil {
+			return fmt.Errorf("capturing certified pane %q for session %q: %w", paneID, sessionID, err)
+		}
+		plans = append(plans, plan)
+		preserveExclusion = preserveExclusion || plan.PreserveExclusion
+	}
+	terminatePlan := t.certifiedPaneTerminator
+	if terminatePlan == nil {
+		terminatePlan = terminateProcessKillPlan
+	}
+	terminatePlans := func(processKillPlan) error {
+		var err error
+		for _, plan := range plans {
+			err = errors.Join(err, terminatePlan(plan))
+		}
+		return err
+	}
+	return teardownSessionProcessPlan(processKillPlan{PreserveExclusion: preserveExclusion}, nil,
+		func() error { return t.KillSession(sessionID) }, terminatePlans, sessionMissingOnLiveServer)
 }
 
 // KillPaneProcesses terminates the processes owned by a tmux pane. Selection
@@ -1351,6 +1431,17 @@ func (t *Tmux) IsAvailable() bool {
 // (e.g., "gt-deacon-boot" won't match when checking for "gt-deacon").
 func (t *Tmux) HasSession(name string) (bool, error) {
 	_, err := t.run("has-session", "-t", "="+name)
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (t *Tmux) hasSessionForAttach(name string) (bool, error) {
+	_, err := t.runForAttach("has-session", "-t", "="+name)
 	if err != nil {
 		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 			return false, nil
@@ -1790,10 +1881,14 @@ func (t *Tmux) IsSessionAttached(target string) bool {
 // A blank target is not-found without a probe: display-message with an empty
 // -t answers for the current or most recent session, not the one asked about.
 func (t *Tmux) SessionAttachedWithError(target string) (bool, error) {
+	return t.sessionAttachedWithError(target, t.run)
+}
+
+func (t *Tmux) sessionAttachedWithError(target string, run func(...string) (string, error)) (bool, error) {
 	if strings.TrimSpace(target) == "" {
 		return false, fmt.Errorf("probing attachment of session %q: %w", target, runtime.ErrSessionNotFound)
 	}
-	out, err := t.run("display-message", "-t", paneTarget(target), "-p", "#{session_name}|#{session_attached}")
+	out, err := run("display-message", "-t", paneTarget(target), "-p", "#{session_name}|#{session_attached}")
 	if err != nil {
 		if errors.Is(err, ErrSessionNotFound) {
 			return false, fmt.Errorf("probing attachment of session %q: %w: %w", target, runtime.ErrSessionNotFound, err)
@@ -1852,6 +1947,11 @@ func parseAttachedClients(field string) (uint64, error) {
 	return clients, nil
 }
 
+func (t *Tmux) isSessionAttachedForAttach(target string) bool {
+	attached, err := t.sessionAttachedWithError(target, t.runForAttach)
+	return attached && err == nil
+}
+
 // WakePane triggers a SIGWINCH in a pane by resizing it slightly then restoring.
 // This wakes up Claude Code's event loop by simulating a terminal resize.
 //
@@ -1899,7 +1999,11 @@ func (t *Tmux) requiresHiddenAttachedInterrupt(target string) bool {
 }
 
 func (t *Tmux) ensureHiddenAttachedClient(target string) error {
-	if t.IsSessionAttached(target) {
+	witness, err := t.captureAttachSocketWitness()
+	if err != nil {
+		return err
+	}
+	if t.isSessionAttachedForAttach(target) {
 		return nil
 	}
 
@@ -1910,11 +2014,7 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), hiddenAttachMaxLifetime)
-	cmdArgs := []string{"-u"}
-	if t.cfg.SocketName != "" {
-		cmdArgs = append(cmdArgs, "-L", t.cfg.SocketName)
-	}
-	cmdArgs = append(cmdArgs, "attach-session", "-t", target)
+	cmdArgs := t.hiddenAttachCommandArgsForWitness(target, witness)
 	cmd := exec.CommandContext(ctx, "script", hiddenAttachScriptArgs(goruntime.GOOS, cmdArgs)...)
 	cmd.Env = append(cmd.Environ(), "TERM=xterm-256color")
 	cmd.Stdout = io.Discard
@@ -1922,6 +2022,12 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		cancel()
+		t.hiddenAttachMu.Unlock()
+		return err
+	}
+	if err := t.verifyAttachSocketWitness(witness); err != nil {
+		_ = stdin.Close()
 		cancel()
 		t.hiddenAttachMu.Unlock()
 		return err
@@ -1968,6 +2074,16 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 		return err
 	}
 	return nil
+}
+
+func (t *Tmux) hiddenAttachCommandArgsForWitness(target string, witness namedSocketWitness) []string {
+	args := []string{"-u"}
+	if witness.canonicalPath != "" {
+		args = append(args, "-N", "-S", witness.canonicalPath)
+	} else if t.cfg.SocketName != "" {
+		args = append(args, "-N", "-L", t.cfg.SocketName)
+	}
+	return append(args, "attach-session", "-t", target)
 }
 
 func hiddenAttachScriptArgs(goos string, tmuxArgs []string) []string {
@@ -3572,8 +3688,20 @@ func (t *Tmux) capturePaneProcessKillPlan(target string, exclude map[int]bool) (
 // pane remains visible (for example because remain-on-exit is enabled).
 // When target is a session name, pane 0 is queried explicitly.
 func (t *Tmux) IsPaneDead(target string) (bool, error) {
+	return t.isPaneDead(target, false)
+}
+
+func (t *Tmux) isPaneDeadForAttach(target string) (bool, error) {
+	return t.isPaneDead(target, true)
+}
+
+func (t *Tmux) isPaneDead(target string, noStart bool) (bool, error) {
 	tmuxTarget := primaryPaneTarget(target)
-	out, err := t.run("display-message", "-t", tmuxTarget, "-p", "#{pane_dead}")
+	run := t.run
+	if noStart {
+		run = t.runForAttach
+	}
+	out, err := run("display-message", "-t", tmuxTarget, "-p", "#{pane_dead}")
 	if err != nil {
 		return false, err
 	}
@@ -4028,7 +4156,14 @@ func (t *Tmux) CapturePaneLines(session string, lines int) ([]string, error) {
 // AttachSession attaches to an existing session.
 // Note: This replaces the current process with tmux attach.
 func (t *Tmux) AttachSession(session string) error {
-	_, err := t.run("attach-session", "-t", session)
+	witness, err := t.captureAttachSocketWitness()
+	if err != nil {
+		return err
+	}
+	if err := t.verifyAttachSocketWitness(witness); err != nil {
+		return err
+	}
+	_, err = t.runForAttachWitness(witness, "attach-session", "-t", session)
 	return err
 }
 

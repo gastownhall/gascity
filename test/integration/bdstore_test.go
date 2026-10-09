@@ -93,6 +93,7 @@ func TestBdStoreConformance(t *testing.T) {
 	// uses bd's ID format (prefix-XXXX), not gc-N sequential format.
 	beadstest.RunStoreTests(t, newStore)
 	beadstest.RunMetadataTests(t, newStore)
+	beadstest.RunCloseReasonTests(t, newStore)
 }
 
 // startSharedDoltServer starts one explicit Dolt SQL server for the test and

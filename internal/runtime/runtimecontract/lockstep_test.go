@@ -34,6 +34,7 @@ var contractCoverage = map[string]classification{
 	"Stop_MakesSessionNotRunning":    {Code: ReqLifecycleStopNotRunning},
 	"Stop_Idempotent_NotRunning":     {Code: ReqLifecycleStopIdempotent},
 	"Stop_Idempotent_AlreadyStopped": {Code: ReqLifecycleStopIdempotent},
+	"StopForCleanup_NeverStarted":    {Code: ReqLifecycleStopIdempotent},
 	"IsRunning_UnknownSession":       {Code: ReqLifecycleUnknownNotRunning},
 
 	// --- Optional error-bearing capabilities (deferred: in-process provider
