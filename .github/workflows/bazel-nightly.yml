@@ -29,11 +29,13 @@ jobs:
     name: "bazel (nightly: integration + coverage)"
     # A called workflow's jobs get at most the caller job's token
     # permissions: bazel.yml's rbe job dispatches the worker pool (actions:
-    # write) and its lanes read worker-env drift issues (issues: read).
+    # write), its lanes read worker-env drift issues (issues: read) and its
+    # rrc-verify job opens an alert issue on a remote repo contents cache
+    # mismatch (issues: write; no other bazel.yml job asks for it).
     permissions:
       contents: read
       actions: write
-      issues: read
+      issues: write
     uses: ./.github/workflows/bazel.yml
     with:
       # Re-execute every lane instead of reusing a cached PASS: worker-env

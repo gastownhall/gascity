@@ -283,7 +283,9 @@ func TestBazelMultiLaneWorkflowTriggersAndPermissions(t *testing.T) {
 		// rbe-worker S3a: secret-free (rbe-worker-repo-design.md §5.4, §6.3);
 		// issues: read for the same worker-env preflight the lane job runs.
 		"worker-host": {"contents": "read", "issues": "read"},
-		"gate":        nil, // the top-level contents: read
+		"rrc-seed":    {"contents": "read", "id-token": "write"}, // the rbe-rrc-writer certificate (bazel_rrc_test.go)
+		"rrc-verify":  {"contents": "read", "issues": "write"},   // the rrc-verify alert issue (bazel_rrc_test.go)
+		"gate":        nil,                                       // the top-level contents: read
 	}
 	if len(wf.Jobs) != len(wantJobs) {
 		t.Errorf("%s has %d jobs, want %d (%v)", bazelMultiLaneWorkflow, len(wf.Jobs), len(wantJobs), wantJobs)

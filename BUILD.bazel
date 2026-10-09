@@ -90,6 +90,22 @@ py_test(
     main = "tools/bazel/ci_analytics_extract_test.py",
 )
 
+# tools/bazel/rrc_verify.py: bazel-rrc-verify.yml's nightly check of the
+# remote repo contents cache against a cold fetch (ga-vnycm2.26). Its golden
+# keys come from Bazel 9.3.0's own writes; .bazelversion must name a release
+# it knows the cache GUID of.
+py_test(
+    name = "rrc_verify_test",
+    size = "small",
+    srcs = [
+        "tools/bazel/rrc_verify.py",
+        "tools/bazel/rrc_verify_test.py",
+    ],
+    data = [".bazelversion"],
+    imports = ["tools/bazel"],
+    main = "tools/bazel/rrc_verify_test.py",
+)
+
 py_test(
     name = "ci_suite_coverage_test",
     srcs = [

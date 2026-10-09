@@ -385,6 +385,35 @@ rules above), and `rbe` fails the push. Rebase onto main to execute
 remotely again; a change that moves the pin runs its remote suite in CI
 after it merges, as `bazel.yml`'s own preflight does.
 
+### Remote repo contents cache (CI lanes)
+
+A cold lane client spends 15-38 s re-running repository rules (go_deps,
+npm, debs) before its first action. Bazel's remote repo contents cache
+serves those extracted trees from rbe-west's `oss` action cache instead
+(`engdocs/design/bazel-remote-repo-contents-cache.md`). The repository
+variable `RBE_REPO_CONTENTS_CACHE` rolls it out in mode `remote` only:
+
+| value | effect |
+|---|---|
+| unset / `off` | nothing (default) |
+| `seed` | each push to main runs `bazel.yml`'s `rrc-seed` job: every lane's command with `--nobuild`, uploading repository trees with a 30-minute `rbe-rrc-writer` certificate rbe-west's mint signs only for that job (GitHub OIDC; `.github/scripts/rrc-writer-credential.sh`). rbe-west's `rrc-gate` admits only repo-contents entries from it |
+| `canary` | `seed`, and the `unit` lane reads the cache |
+| `on` | `seed`, and every lane reads the cache |
+
+Readers add `startup --experimental_remote_repo_contents_cache` and
+`common --loading_phase_threads=64` to `.bazelrc.local` (key neutral,
+`scripts/bazel_key_parity_test.go`) and still upload nothing. Developer
+machines, fork runs and macOS/Windows jobs never read it. Rollback: set the
+variable to `off`; lanes fetch as before.
+
+Nothing on a reader checks a cached tree against what its repository rule
+produces, so `bazel.yml`'s `rrc-verify` job (from `bazel-nightly.yml`, or a
+dispatch, whenever the variable is not `off`) fetches every lane's
+repositories cold and compares each tree and marker file with the entry a
+lane would read (`tools/bazel/rrc_verify.py`). A mismatch, a poisoned entry
+or a rule falsely marked reproducible, fails the job and opens an issue
+labeled `rrc-verify`: set the variable to `off` first, then investigate.
+
 ### Re-pinning the RBE worker host
 
 Every action's key carries `worker-env`, the sha256 of
