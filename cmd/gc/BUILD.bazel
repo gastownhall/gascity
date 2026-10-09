@@ -2322,6 +2322,7 @@ go_test(
         "session_target_test.go",
         "session_template_overrides_test.go",
         "session_template_start_test.go",
+        "session_timing_reload_test.go",
         "session_types_test.go",
         "session_w3_split_equiv_test.go",
         "session_w4_split_equiv_test.go",
