@@ -1881,8 +1881,8 @@ func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string
 	}
 }
 
-// syncSessionBeads ensures every desired session has a corresponding session
-// bead. Accepts desiredState (sessionName → TemplateParams) instead of
+// syncSessionBeads materializes configured desired sessions and retains existing
+// manual sessions. Accepts desiredState (sessionName → TemplateParams) instead of
 // map[string]TemplateParams, and uses runtime.Provider for liveness checks.
 //
 // configuredNames is the set of ALL configured agent session names (including
@@ -2213,6 +2213,13 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				}
 				openBeads = upsertOpenSessionBead(openBeads, indexBySessionName, recovered)
 			}
+		}
+		if !exists && tp.ManualSession {
+			// Manual entries retain sessions discovered during planning; they
+			// are not create requests. A close can win before this fresh store
+			// read. Never replace that terminal conversation with a new bead
+			// carrying its old alias and runtime name.
+			continue
 		}
 		state := syncSessionCachedState(sn, b, exists, sp)
 		if !exists && isConfiguredNamed {
