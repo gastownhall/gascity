@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"maps"
 	"sync"
 	"testing"
 	"time"
@@ -424,5 +425,138 @@ func TestFreshHealDecidesItsFoldOnTheFreshRow(t *testing.T) {
 		if m := hc.meta(t); m["state"] != "asleep" || m["detached_at"] != "" || m["session_key"] != "" {
 			t.Fatalf("%s: row %v, want asleep, its continuation reset and no marker, in the one CAS", c.name, m)
 		}
+	}
+}
+
+// Kills rests recorded where they do not belong, or not recorded (ruling
+// (c)): each fresh heal's arm rests its decision on the runtime; a plain
+// row write's arm (the stranded clear, the claim clear) rests on nothing,
+// though it reads liveness; and admission refuses a plain intent that rests
+// on a fresh fact, and a fresh kind's that rests on none, before
+// admission, by what the kind reads for the intent (needsFor included).
+func TestOnlyFreshKindsRestOnTheRuntime(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		c     *healCase
+		kind  string
+		rests rests
+	}{
+		{"creating heal", newHealCase(t, livenessGone, desireNone, "state", "creating"), intentRowHealFresh, restRuntime},
+		{"dead-runtime heal", newHealCase(t, livenessGone, desireWake, "state", "active"), intentRowHealFresh, restRuntime},
+		{"awake heal", ownRuntimeCase(t, "tok-3", "state", "asleep", "sleep_reason", "idle"), intentRowHealFresh, restRuntime},
+		{"stranded clear", newHealCase(t, livenessAlive, desireKeep, "state", "active", strandedEventEmittedKey, rowAt(-time.Hour)), intentRowHeal, 0},
+		{"claim clear", newHealCase(t, livenessAlive, desireKeep, "state", "active", "pending_create_claim", "true"), intentRowHeal, 0},
+	} {
+		if it := c.c.decide(); it.Kind != c.kind || it.Rests != c.rests {
+			t.Errorf("%s: decideRow = (%q, rests %b), want (%q, rests %b)", c.name, it.Kind, it.Rests, c.kind, c.rests)
+		}
+	}
+	w := &World{}
+	const probe = "rests-test-probe" // a kind that reads the runtime only by its needsFor
+	effectSpecs[probe] = effectSpec{class: capProbing, sections: rowWriteSections, needsFor: func(_ *World, it intent) needs {
+		return needs{Runtime: it.Reason == "fresh"}
+	}}
+	t.Cleanup(func() { delete(effectSpecs, probe) })
+	registered, deferred := splitRegistered(w, []intent{
+		{Kind: intentRowHeal, Key: rowKeyOf("a"), Rests: restRuntime},
+		{Kind: intentRowHealFresh, Key: rowKeyOf("b"), Rests: restRuntime},
+		{Kind: intentRowHealFresh, Key: rowKeyOf("c")},
+		{Kind: probe, Key: rowKeyOf("d"), Reason: "fresh", Rests: restRuntime},
+		{Kind: probe, Key: rowKeyOf("e"), Reason: "plain", Rests: restRuntime},
+	}, true)
+	causes := map[string]string{}
+	for _, it := range deferred {
+		causes[it.Key.ID] = it.Cause
+	}
+	if want := map[string]string{"a": causeRestsUnread, "c": causeRestsMissing, "e": causeRestsUnread}; !maps.Equal(causes, want) || len(registered) != 2 {
+		t.Fatalf("registered %d, deferred %v; want %v, b and d registered", len(registered), causes, want)
+	}
+}
+
+// Kills a fresh heal whose own Decide parts from its arm (EFFECT-A-
+// CONFORMANCE §5 item 6, fresh-world redecide): for each fresh heal's row
+// and each runtime the effect's fresh read can find, the heal lands exactly
+// when its arm, decided again on that fresh read (withRuntime), still
+// proposes it.
+func TestFreshHealDecideMatchesItsArmOnTheFreshRead(t *testing.T) {
+	own := map[string]string{"GC_SESSION_ID": "heal", "GC_INSTANCE_TOKEN": "tok-3"}
+	foreign := map[string]string{"GC_SESSION_ID": "other", "GC_INSTANCE_TOKEN": "tok-x"}
+	runtimes := map[string]func() *freshObserver{
+		"absent": gone,
+		"own, alive": func() *freshObserver {
+			return &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true}, env: own}
+		},
+		"foreign": func() *freshObserver {
+			return &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true}, env: foreign}
+		},
+		"agent dead": func() *freshObserver {
+			return &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true}, env: own}
+		},
+		"corpse": func() *freshObserver {
+			return &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Corpse: true}, env: own}
+		},
+		"read failed": func() *freshObserver {
+			return &freshObserver{Fake: runtime.NewFake(), err: runtime.ErrRuntimeUnavailable}
+		},
+		"replaced mid-read": func() *freshObserver {
+			o := &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true, ObjectID: "$1"}, env: own}
+			reads := 0
+			o.read = func() {
+				if reads++; reads == 2 {
+					o.l.ObjectID = "$2" // another object under the name by the bracket's second read
+				}
+			}
+			return o
+		},
+	}
+	rows := map[string]func() *healCase{
+		"creating":     func() *healCase { return newHealCase(t, livenessGone, desireNone, "state", "creating") },
+		"dead runtime": func() *healCase { return newHealCase(t, livenessGone, desireWake, "state", "active") },
+		"asleep, own":  func() *healCase { return ownRuntimeCase(t, "tok-3", "state", "asleep", "sleep_reason", "idle") },
+	}
+	for rowName, row := range rows {
+		for rtName, sp := range runtimes {
+			c := row()
+			it := c.decide()
+			if it.Kind != intentRowHealFresh {
+				t.Fatalf("%s: the pass proposes %q, want a fresh heal", rowName, it.Kind)
+			}
+			rt, _ := readRuntime(context.Background(), sp(), nil, "s-heal", gatherNow, func() time.Time { return gatherNow })
+			w := c.w.withRuntime(c.k, rt)
+			again, _ := decideRow(&w, c.a, c.k)
+			_, s := c.run(t, sp(), nil)
+			if landed, arm := s.Outcome == settledLanded, again.Kind == it.Kind && again.Reason == it.Reason; landed != arm {
+				t.Errorf("%s over %s: landed %t (settlement %+v), the arm on the fresh read proposes %t", rowName, rtName, landed, s, arm)
+			}
+		}
+	}
+}
+
+// Kills a redecide that reads the pass's liveness rather than the fresh read
+// the effect made: redecideRow refuses a creating heal the pass proposed
+// once the fresh read finds the runtime up, and writes it over a fresh
+// absence, whatever rests its intent records; with no fresh read it decides
+// on the pass's facts.
+func TestRedecideRowDecidesOnTheFreshRead(t *testing.T) {
+	c := newHealCase(t, livenessGone, desireNone, "state", "creating")
+	it := c.decide()
+	row := c.w.Census.Rows[c.k].Info
+	view := func(it intent, class runtimeClass) txView {
+		return txView{It: it, World: c.w, Alloc: c.a, Row: row, Meta: map[string]string{"state": "creating"}, RT: &txRuntime{Class: class}}
+	}
+	if step := redecideRow(view(it, rtAlive)); step.Refuse != causeRedecided {
+		t.Fatalf("fresh read up: step %+v, want refused %q", step, causeRedecided)
+	}
+	if step := redecideRow(view(it, rtAbsent)); len(step.Write) == 0 {
+		t.Fatalf("fresh read absent: step %+v, want the heal written", step)
+	}
+	it.Rests = 0
+	if step := redecideRow(view(it, rtAlive)); step.Refuse != causeRedecided {
+		t.Fatalf("no rests recorded, the fresh read up: step %+v, want refused %q", step, causeRedecided)
+	}
+	noRead := view(it, rtAlive)
+	noRead.RT = nil
+	if step := redecideRow(noRead); len(step.Write) == 0 {
+		t.Fatalf("no fresh read: step %+v, want the pass's facts decided (the heal written)", step)
 	}
 }

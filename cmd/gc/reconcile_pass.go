@@ -124,7 +124,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	}
 	var unregistered []intent
 	if p.effects != nil {
-		intents, unregistered = splitRegistered(intents, p.creates != nil)
+		intents, unregistered = splitRegistered(&w, intents, p.creates != nil)
 	}
 	res := admit(admitInput{
 		Now: now, Cfg: cfg, Bucket: p.bucket, FairSeed: p.fairSeed, InFlight: w.InFlight, BringUp: w.Census.BringUp(cfg),
@@ -171,15 +171,32 @@ func newAllocSummary(now time.Time, w *World, a *allocDecision) *allocSummary {
 	return s
 }
 
+// Rests causes, a deferral before admission like causeNoEffect.
+const (
+	causeRestsUnread  = "rests-unread"  // rests on a fresh fact its kind does not read
+	causeRestsMissing = "rests-missing" // a fresh kind's intent that records no rest
+)
+
 // splitRegistered splits off the intents whose kind has no registered
 // effect yet, and the creates when no create runner is wired, deferred with
 // cause no-effect before admission, so they take no cap, no token and no
 // backoff: the row is traced and the arm stays visible until its effect
-// lands.
-func splitRegistered(intents []intent, creates bool) (registered, unregistered []intent) {
+// lands. So, with cause rests-unread or rests-missing, are the intents whose
+// rests do not match what their kind reads fresh on w (ruling (c)): an arm
+// that rests on a fresh fact proposes a fresh kind, and a fresh kind's arm
+// records the facts it rests on.
+func splitRegistered(w *World, intents []intent, creates bool) (registered, unregistered []intent) {
 	for _, it := range intents {
-		if !effectSpecs[it.Kind].runs() || (it.Kind == intentCreate && !creates) {
+		spec := effectSpecs[it.Kind]
+		switch reads := spec.reads(w, it); {
+		case !spec.runs() || (it.Kind == intentCreate && !creates):
 			it.Cause = causeNoEffect
+		case it.Rests&^reads != 0:
+			it.Cause = causeRestsUnread
+		case reads != 0 && it.Rests == 0:
+			it.Cause = causeRestsMissing
+		}
+		if it.Cause != "" {
 			unregistered = append(unregistered, it)
 			continue
 		}

@@ -111,6 +111,9 @@ type intent struct {
 	// re-decided intent's (R2).
 	Patch session.MetadataPatch
 	Event *events.Event
+	// Rests are the fresh facts the decision rests on, which only a fresh
+	// kind's arm records: its effect reads them and decides again on them.
+	Rests rests
 	// Deadline is set on admission (P3); Cause on deferral.
 	Deadline time.Time
 	Cause    string

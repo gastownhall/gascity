@@ -34,33 +34,32 @@ const (
 	causeRuntimeNotOwn       = "runtime-not-own" // the awake heal over a runtime not alive and Current
 )
 
-// healSections are the fresh heal's one section: the runtime proof, then the
-// row write's decision on the fresh row, with the A6 items decideRow folds
-// into it (C5d2's one CAS per row), so the merged patch lands in one CAS.
+// healSections are the fresh heal's one section: its arm decided again on
+// the fresh row and the fresh runtime read (redecideRow; the rule, once),
+// a refusal named by what that read found (healCause).
 var healSections = []section{{Decide: func(v txView) txStep {
-	if cause := healRefusal(v); cause != "" {
-		return txStep{Refuse: cause}
+	step := redecideRow(v)
+	if step.Refuse == causeRedecided {
+		step.Refuse = healCause(v)
 	}
-	return redecideRow(v)
+	return step
 }}}
 
-// healRefusal is the cause that stops the heal on its fresh read, or "".
-// An asleep heal needs the name proven absent through the composite, so a
-// stale route cannot fake it; the awake heal needs the routed leaf's own
-// Current runtime alive across the identity read (AdoptLive's bracket: an
-// acp or subprocess sidecar can outlive its runtime).
-func healRefusal(v txView) string {
+// healCause names a fresh heal's refusal by its fresh read: a backend that
+// cannot read fresh, a read that proved nothing, the awake heal's runtime
+// not its own and alive, an asleep heal's runtime present; or redecided
+// when the read stands and the row moved on.
+func healCause(v txView) string {
 	switch rt := v.RT; {
 	case rt.Class == rtUnsupported:
 		return causeLivenessUnsupported
+	case v.It.Reason == decideAwakeHeal && (!rt.Alive() || compareIdentity(v.Row, rt.Identity) != identityCurrent):
+		return causeRuntimeNotOwn
 	case v.It.Reason == decideAwakeHeal:
-		if !rt.Alive() || compareIdentity(v.Row, rt.Identity) != identityCurrent {
-			return causeRuntimeNotOwn
-		}
 	case rt.Class == rtUnknown:
 		return causeLivenessUnknown
 	case rt.Class != rtAbsent:
 		return causeRuntimePresent
 	}
-	return ""
+	return causeRedecided
 }

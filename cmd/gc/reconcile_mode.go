@@ -83,7 +83,7 @@ func latchReconcilerMode(cfg *config.City, lookupEnv func(string) (string, bool)
 	case mode != config.SessionReconcilerV2:
 		return reconcilerLegacy, nil
 	}
-	if refusals := v2LatchRefusals(cfg); len(refusals) > 0 {
+	if refusals := v2LatchRefusals(cfg, lookupEnv); len(refusals) > 0 {
 		parts := make([]string, len(refusals))
 		for i, r := range refusals {
 			parts[i] = r.String()
@@ -200,7 +200,7 @@ func (c *sessionReconcilerDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 		r.Status = doctor.StatusOK
 		r.Message = "session reconciler: legacy"
 	}
-	for _, refusal := range v2LatchRefusals(c.cfg) {
+	for _, refusal := range v2LatchRefusals(c.cfg, c.lookupEnv) {
 		r.Details = append(r.Details, "v2 would refuse: "+refusal.String())
 	}
 	floor := "v2 note: "
