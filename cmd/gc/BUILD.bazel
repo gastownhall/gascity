@@ -1595,6 +1595,7 @@ go_test(
         "session_drainack_info_equiv_test.go",
         "session_event_pump_live_test.go",
         "session_event_pump_test.go",
+        "session_fields_runtime_test.go",
         "session_identity_test.go",
         "session_idle_kill_wake_treadmill_test.go",
         "session_idle_latched_named_holder_test.go",
