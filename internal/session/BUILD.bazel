@@ -99,6 +99,7 @@ go_test(
         "enrich_and_twins_test.go",
         "fields_guard_test.go",
         "fields_test.go",
+        "fields_universe_test.go",
         "get_persisted_response_test.go",
         "hangbudget_test.go",
         "holds_test.go",
