@@ -24,6 +24,7 @@ from workers only.
 | Feature | Verdict |
 |---|---|
 | **Remote repo contents cache** (`--experimental_remote_repo_contents_cache`) | **Recommended.** It halves lane analysis time. The prerequisites: Bazel 9.3.0, `--loading_phase_threads=64`, and a narrow write path. That write path is one writer identity, used only by main-push CI, whose action-cache writes go through a gate that admits repo-contents entries and nothing else. D2 stays unchanged for every other identity. |
+| **Same cache backed by Google Cloud Storage** (GCS IAM + GitHub OIDC instead of the gate) | **Not feasible for the remote-execution lanes.** The repo contents cache has no endpoint of its own: it uses the single `--remote_cache`. Bazel refuses an HTTP cache (GCS) next to a gRPC executor. Even where it works (local-execution runs only), it would cost about $0.05 per cold lane in egress and requests, and add latency. See [GCS as the backend](#alternative-google-cloud-storage-as-the-backend). |
 | **Skycache** (`--experimental_remote_analysis_cache*`) | **Not possible in OSS Bazel.** Bazel 9.2.0, 9.3.0 and master ship only an in-memory backend, and `--experimental_remote_analysis_cache` is never read. Its entries also could not be verified (see below). Do not pursue it. |
 
 Measured on Blacksmith runners (the lanes' own runner sizes), with the
@@ -243,6 +244,102 @@ main push (bazel.yml)                                  PR / fork runs
   were all remote cache hits for a run without it (2693/2693). Both flags
   belong with the rc's transport flags (`scripts/bazel_key_parity_test.go`
   classification).
+
+## Alternative: Google Cloud Storage as the backend
+
+The question: back the repo contents cache with a GCS bucket, written only by
+main-push CI and read by everyone else under GCS IAM with GitHub OIDC
+Workload Identity Federation, and drop the rbe-west server change (gate,
+writer certificate, Caddy route).
+
+### Feasibility (Bazel 9.3.0)
+
+- **No endpoint of its own.** `--experimental_remote_repo_contents_cache` is
+  a startup *boolean* (`RemoteStartupOptions`). `RemoteRepoContentsCacheImpl`
+  is handed the build's one `CombinedCache`, from
+  `RemoteModule.initRepoHelpersAndOverlayFs`, via
+  `actionContextProvider.getCombinedCache()`. That is the `--remote_cache`
+  (plus `--disk_cache`). No flag points repo contents anywhere else.
+- **The HTTP protocol works on its own.** `initHttpAndDiskCache` also calls
+  `initRepoHelpersAndOverlayFs`. A GCS bucket used as Bazel's HTTP cache
+  (`--remote_cache=https://storage.googleapis.com/<bucket>` with
+  `--google_credentials` / `--google_default_credentials`) therefore works,
+  *without remote execution*.
+  - Verified with a local HTTP cache (the same GET/PUT `/ac/<sha>`,
+    `/cas/<sha>` protocol GCS serves).
+  - Seeding the unit lane took 119,705 PUTs (3.9 GB).
+  - A cold read took 32,434 GETs (32,402 hits) and 311 MB, ran 8 repository
+    rules, and analysed in 13.4 s on cherry.
+- **Not with remote execution.** `RemoteModule.java` (9.3.0) rejects an HTTP
+  cache next to a gRPC executor:
+  `ERROR: Cannot combine gRPC based remote execution with HTTP-based caching`.
+  Reproduced with `--remote_executor=grpc://… --remote_cache=http://…`.
+  Every lane runs with rbe-west as its executor.
+- **Not through a gRPC proxy either.** A separate gRPC `--remote_cache` in
+  front of GCS would be accepted. But Bazel assumes the executor reads the
+  same CAS. The repo files' contents would then live only in GCS, and remote
+  actions would fail on inputs missing from rbe-west's CAS. The point of the
+  feature under remote execution is that the tree is already in the
+  executor's CAS.
+- **No other route.**
+  - A `--disk_cache` pre-filled from the bucket would mean downloading the
+    whole 3.9 GB snapshot per lane.
+  - A GCS slow tier under NativeLink keeps every write going through
+    rbe-west, so the trust model is unchanged. It also uses a different
+    object layout (`<hash>-<size>`, not Bazel's `ac/<hash>`).
+- **What it would take.** A GCS-backed path for these lanes needs an upstream
+  Bazel feature: a separate repo-contents cache endpoint. Even then, the
+  client or rbe-west would have to copy the trees into rbe-west's CAS.
+
+### Comparison (had it been feasible)
+
+| | rbe-west + rrc-gate (recommended) | GCS bucket + IAM/WIF |
+|---|---|---|
+| Works with the remote-execution lanes | **Yes** (prototype, 2693 remote actions) | **No** (HTTP cache and gRPC remote execution are mutually exclusive in Bazel 9.3.0) |
+| Server change on rbe-west | Gate unit, Caddy block, mint OIDC path | None |
+| Trust: who writes | One OIDC-minted 30-min cert, main-push only, scoped by the gate to repo-contents entries; D2 intact | WIF provider with an attribute condition (`repository`, `ref == refs/heads/main`, `event_name == push`, `job_workflow_ref`) bound to `roles/storage.objectCreator`. Simpler to state, but GCS cannot check *what* is written. The bucket only ever holds this cache, so there is nothing else to forge. |
+| Trust: who reads | Existing certificates; forks through rbe-cache (anonymous, read-only) later | `objectViewer` for CI's WIF principal; forks need `allUsers` read (public bucket) |
+| Round trip from Blacksmith Phoenix | 1 ms (TCP connect, measured) | Network to us-west4 (Las Vegas) 16-20 ms and us-west2 18-20 ms (gcping, measured on the runners). A GCS object request measured 49-53 ms (US multi-region bucket, warm connection); a regional bucket would be lower, but needs a test bucket to measure |
+| Unit lane analysis (8 vCPU, modelled with gRPC at that RTT) | 10.3 s | 11.1 s at 17 ms; 14.7-14.8 s at 51 ms (11.0 s with `--loading_phase_threads=256`) |
+| Bytes per cold lane read | 311 MB (from rbe-west, no transfer fee) | 311 MB of GCS egress |
+| Cost | No new spend (existing host and disk) | Storage about 4-20 GB, about $0.10-0.50/month. Per cold lane: 0.31 GB at about $0.12/GB internet egress, plus ~32k Class B ops at $0.0004/1k, so **about $0.05**. bazel.yml ran 1178 times in the last 14 days (gascity, about 4 lanes each), so about **$500/month** for gascity and about the same again for beads |
+| Fork PRs | Read through the existing anonymous rbe-cache (to be enabled) | Public-read bucket; forks still could not combine it with the gRPC fork cache |
+| Poisoning | The writer is trusted, and its scope is enforced by the gate | The writer is trusted. The scope is "this bucket" (contents not checked), plus object versioning and Data Access audit logs |
+| Nightly verification (R1) | Cold fetch; compare tree digests with `GetActionResult` final entries | Same comparison, reading `ac/<key>` objects; versioning lets you diff and roll back |
+| Operational burden | A small Go service plus Caddy config on a host we already run; the selftest and lint extend | A bucket, WIF pool and provider, IAM, a lifecycle rule (Terraform), billing and egress monitoring, and a second cloud dependency on the critical path |
+
+Latency model, from the same Blacksmith run
+(https://github.com/gastownhall/gascity/actions/runs/37979785470, gRPC
+through the delay proxy):
+
+- **unit (8 vCPU):**
+  - 1 ms: 10.3 s
+  - 17 ms: 11.1 s
+  - 51 ms: 14.7 and 14.8 s
+  - 51 ms with `--loading_phase_threads=256`: 11.0 s
+  - cold, no cache: 16.9 s
+- **integration-smoke (4 vCPU):** the runner was slow throughout that run
+  (cold 37.4 s, against 22-24 s before), so the readings carry no signal:
+  - 1 ms: 23.8 s
+  - 16 ms: 21.0 s
+  - 52 ms: 25.0 and 26.0 s
+
+### Verdict on GCS
+
+**Do not use GCS for the lanes.**
+
+- Bazel 9.3.0 cannot serve repo contents from GCS to a build that executes
+  on rbe-west.
+- Even if it could, the trees would have to reach rbe-west's CAS anyway.
+- It would add 1-4 s of analysis per lane and about $0.05 of egress per
+  lane.
+
+What GCS does buy, a write path with no rbe-west code, is real only for
+local-execution clients, and those already read rbe-west's action cache
+through `--remote_cache`. The rbe-west gate design stays the recommendation.
+
+Revisit if upstream adds a separate endpoint for the repo contents cache.
+bazelbuild/bazel#31456, the stabilization tracker, lists no such item today.
 
 ## Prototype and measurements
 
