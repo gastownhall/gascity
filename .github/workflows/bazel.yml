@@ -1,6 +1,6 @@
 # Multi-lane Bazel CI (rbe-west plan W1). Target shape: every gascity build,
 # test, lint and codegen check is a Bazel target; each lane below is a thin
-# client (4 vCPU) that checks out, merges the PR head
+# client (4-8 vCPU) that checks out, merges the PR head
 # onto the run's base commit (.github/actions/fresh-merge), attaches rbe-west
 # with .github/actions/setup-bazel (a byte copy of beads' composite: modes
 # remote, fork-ro, fork-rw, cache, local) and runs one bazel command with
@@ -287,14 +287,15 @@ jobs:
     # Every mode yields lanes; should the list ever be empty, an empty
     # matrix is an error, so the job is skipped instead and the gate fails.
     if: needs.rbe.outputs.lanes != '[]'
-    # Every lane gets 4 vCPU. Local modes (cache, local) execute here, and so
-    # may fork-ro/fork-rw (a refused certificate falls back to the read-only
-    # cache). In mode remote the runner is only a Bazel client, but its
-    # loading and analysis (go_deps fetches, gazelle, npm, Starlark) is
-    # CPU-bound and gates every action: analysis-only measurements per lane
-    # (ga-vnycm2.8, seeded runner cache) took 34-58 s on 2 vCPU and 23-34 s
-    # on 4 (8 vCPU: 15-19 s).
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Unit and acceptance get 8 vCPU, every other lane 4. Local modes (cache,
+    # local) execute here, and so may fork-ro/fork-rw (a refused certificate
+    # falls back to the read-only cache). In mode remote the runner is only a
+    # Bazel client, but its loading and analysis (go_deps fetches, gazelle,
+    # npm, Starlark) is CPU-bound and gates every action: analysis-only
+    # measurements per lane (ga-vnycm2.8, seeded runner cache) took 34-58 s
+    # on 2 vCPU, 23-34 s on 4 and 15-19 s on 8. Unit and acceptance are the
+    # critical lanes (ga-vnycm2.12).
+    runs-on: ${{ (matrix.lane == 'unit' || matrix.lane == 'acceptance') && 'blacksmith-8vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}
     timeout-minutes: 90
     permissions:
       contents: read
