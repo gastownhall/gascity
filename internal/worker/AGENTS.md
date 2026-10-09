@@ -49,3 +49,10 @@ when the context ends. Take the bound from the caller's own context.
   observes the same session must derive the key the same way, or the
   one-in-flight limit no longer holds. `cmd/gc` derives it in
   `postStartObservationKey`.
+
+## Codex activity
+
+Codex activity comes from matching native turn lifecycle events, not assistant
+text or token usage. History and tail observations must use the same provider
+parser. Large tool output must not erase the latest turn boundary; a torn final
+record leaves activity unknown.

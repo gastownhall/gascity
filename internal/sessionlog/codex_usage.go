@@ -2,6 +2,7 @@ package sessionlog
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,9 +29,10 @@ type codexUsageInfo struct {
 // codexUsagePayload is the subset of an event_msg payload needed for usage
 // extraction. Info is null on rate-limit-only refreshes.
 type codexUsagePayload struct {
-	Type  string          `json:"type"`
-	Model string          `json:"model"` // turn_context payloads only
-	Info  *codexUsageInfo `json:"info"`
+	Type   string          `json:"type"`
+	TurnID string          `json:"turn_id"`
+	Model  string          `json:"model"` // turn_context payloads only
+	Info   *codexUsageInfo `json:"info"`
 }
 
 // ExtractCodexTailMeta reads model and context metadata from the tail of a
@@ -43,7 +45,9 @@ type codexUsagePayload struct {
 // a later distinct total can be paired only with an in-window turn_context.
 // When no attributable usage exists, the latest turn_context still supplies
 // model-only metadata. Codex input_tokens already includes cached_input_tokens,
-// so context occupancy uses input_tokens directly.
+// so context occupancy uses input_tokens directly. Activity comes only from
+// explicit task_started/task_complete/turn_aborted lifecycle events; assistant
+// text and token usage do not establish completion.
 func ExtractCodexTailMeta(path string) (*TailMeta, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -51,7 +55,13 @@ func ExtractCodexTailMeta(path string) (*TailMeta, error) {
 	}
 	defer f.Close() //nolint:errcheck // best-effort close on read-only file
 
-	data, startsMidLine, truncated, err := readTailWindow(f, tailChunkSize)
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	// Use one size snapshot for metadata and lifecycle reads while the writer appends.
+	snapshot := io.NewSectionReader(f, 0, info.Size())
+	data, startsMidLine, truncated, err := readTailWindow(snapshot, tailChunkSize)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +69,103 @@ func ExtractCodexTailMeta(path string) (*TailMeta, error) {
 	if err != nil {
 		return nil, err
 	}
-	return extractCodexTailMetaFromLines(lines, startsMidLine, truncated), nil
+	meta := extractCodexTailMetaFromLines(lines, startsMidLine, truncated)
+	activity, err := extractCodexLifecycleActivity(snapshot, info.Size())
+	if err != nil {
+		return nil, err
+	}
+	if meta == nil && activity != "" {
+		meta = &TailMeta{}
+	}
+	if meta != nil {
+		meta.Activity = activity
+	}
+	return meta, nil
+}
+
+// extractCodexLifecycleActivity searches backward to the latest turn start.
+// Tool output can be much larger than the metadata window. Neither losing that
+// start nor seeing a delayed completion for a different turn establishes idle.
+// Reads stop at the latest start and memory is bounded by one JSONL record.
+func extractCodexLifecycleActivity(r io.ReaderAt, size int64) (string, error) {
+	terminalIDs := make(map[string]bool)
+	terminalWithoutID, anyTerminal, firstRecord := false, false, true
+	consume := func(line []byte) (string, bool) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			return "", false
+		}
+		if firstRecord {
+			firstRecord = false
+			// A torn last record could be a new start; do not report the previous idle.
+			if !json.Valid(line) {
+				return "", true
+			}
+		}
+		if !bytes.Contains(line, []byte(`"event_msg"`)) {
+			return "", false
+		}
+		var entry codexRawEntry
+		if json.Unmarshal(line, &entry) != nil || entry.Type != "event_msg" {
+			return "", false
+		}
+		var payload codexUsagePayload
+		if json.Unmarshal(entry.Payload, &payload) != nil {
+			return "", false
+		}
+		switch payload.Type {
+		case "task_started":
+			if terminalWithoutID || terminalIDs[payload.TurnID] || (payload.TurnID == "" && anyTerminal) {
+				return "idle", true
+			}
+			return "in-turn", true
+		case "task_complete", "turn_aborted":
+			anyTerminal = true
+			if payload.TurnID == "" {
+				terminalWithoutID = true
+			} else {
+				terminalIDs[payload.TurnID] = true
+			}
+		}
+		return "", false
+	}
+	var pending []byte
+	for end := size; end > 0; {
+		n := min(int64(tailChunkSize), end)
+		end -= n
+		block := make([]byte, int(n))
+		if _, err := r.ReadAt(block, end); err != nil {
+			return "", fmt.Errorf("reading Codex lifecycle: %w", err)
+		}
+		block = append(block, pending...)
+		data := block
+		boundary := len(data)
+		for boundary > 0 {
+			newline := bytes.LastIndexByte(data[:boundary], '\n')
+			if newline < 0 {
+				break
+			}
+			if activity, done := consume(data[newline+1 : boundary]); done {
+				return activity, nil
+			}
+			boundary = newline
+		}
+		if end == 0 {
+			if activity, done := consume(data[:boundary]); done {
+				return activity, nil
+			}
+		} else {
+			if boundary > maxTailTokenBytes {
+				return "", fmt.Errorf("codex lifecycle record exceeds %d bytes", maxTailTokenBytes)
+			}
+			pending = data[:boundary]
+		}
+	}
+	// Legacy or retained fragments may have a completion without a start.
+	if anyTerminal {
+		return "idle", nil
+	}
+	return "", nil
 }
 
 // ExtractCodexTailMetaFromSearchPaths reads Codex tail metadata only after
@@ -96,6 +202,20 @@ func extractCodexTailMetaFromLines(lines [][]byte, startsMidLine, truncated bool
 			scan.latestModel = payload.Model
 			continue
 		}
+		if entry.Type == "event_msg" {
+			switch payload.Type {
+			case "task_started":
+				scan.activity = "in-turn"
+				scan.activeTurnID = payload.TurnID
+			case "task_complete", "turn_aborted":
+				// A delayed completion for another turn must not close the
+				// current one. Older event formats can omit the turn ID.
+				if scan.activeTurnID == "" || payload.TurnID == "" || payload.TurnID == scan.activeTurnID {
+					scan.activity = "idle"
+					scan.activeTurnID = ""
+				}
+			}
+		}
 		if entry.Type == "event_msg" && payload.Type == "token_count" && payload.Info != nil {
 			scan.observeTokenCount(payload.Info)
 		}
@@ -109,6 +229,8 @@ func extractCodexTailMetaFromLines(lines [][]byte, startsMidLine, truncated bool
 // total pairs only with an in-window turn_context, so usage never relabels
 // another model's work.
 type codexTailScan struct {
+	activity            string
+	activeTurnID        string
 	truncated           bool
 	latestModel         string
 	usageModel          string
@@ -172,10 +294,14 @@ func (s *codexTailScan) result() *TailMeta {
 		// model with the prior turn's usage would produce inconsistent context.
 		model = s.usageModel
 	}
-	if model == "" && s.latestUsage == nil && !s.malformedTail {
+	if model == "" && s.latestUsage == nil && !s.malformedTail && s.activity == "" {
 		return nil
 	}
-	result := &TailMeta{Model: model, MalformedTail: s.malformedTail}
+	result := &TailMeta{Model: model, MalformedTail: s.malformedTail, Activity: s.activity}
+	if s.malformedTail {
+		// A partial final record may be the next turn's start.
+		result.Activity = ""
+	}
 	if s.latestUsage == nil {
 		return result
 	}

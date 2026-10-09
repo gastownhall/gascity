@@ -165,7 +165,7 @@ func (a SessionLogAdapter) InvocationUsage(provider, path, cursorID string) ([]s
 // tail cannot be read from a trailing record. Whole-file-JSON mirror families
 // need the normalized history; everything else keeps the cheap tail path.
 func (a SessionLogAdapter) TailActivityForProvider(provider, path string) (TailActivity, error) {
-	if sessionlog.ProviderFamily(provider) == "kimi" {
+	if family := sessionlog.ProviderFamily(provider); family == "kimi" || family == "codex" {
 		meta, err := a.TailMetaForProvider(provider, path)
 		return tailActivity(meta), err
 	}
@@ -348,7 +348,12 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 	}
 	compactionCount, lastEntryID, pendingIDs := transcriptGlobalFacts(fullSession.Messages)
 
-	tailMeta, err := sessionlog.ExtractTailMeta(path)
+	var tailMeta *sessionlog.TailMeta
+	if sessionlog.ProviderFamily(req.Provider) == "codex" {
+		tailMeta, err = sessionlog.ExtractCodexTailMeta(path)
+	} else {
+		tailMeta, err = sessionlog.ExtractTailMeta(path)
+	}
 	if err != nil {
 		return nil, err
 	}
