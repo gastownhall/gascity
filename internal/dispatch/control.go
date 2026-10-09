@@ -395,13 +395,19 @@ func markControllerSpawnError(store beads.Store, beadID string, err error, opts 
 	if writeErr := store.SetMetadataBatch(beadID, metadata); writeErr != nil {
 		opts.tracef("controller-spawn-error bead=%s recording hard failure metadata failed err=%v", beadID, writeErr)
 	}
-	if closeErr := setOutcomeAndClose(store, beadID, beadmeta.OutcomeFail); closeErr != nil {
-		opts.tracef("controller-spawn-error bead=%s closing failed bead failed err=%v", beadID, closeErr)
-	}
-	// Reconcile any enclosing scope so a controller_error terminal closure
-	// does not leave the scope body stalled.
-	if _, scopeErr := reconcileClosedScopeMemberWithOptions(store, beadID, opts); scopeErr != nil {
-		opts.tracef("controller-spawn-error bead=%s reconciling enclosing scope failed err=%v", beadID, scopeErr)
+	// Settle any enclosing scope before the bead closes so a controller_error
+	// terminal closure does not leave the scope body stalled: once the bead is
+	// closed nothing re-drives that settle.
+	if _, settleErr := closeScopedControl(store, beadID, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail}, "", opts); settleErr != nil {
+		opts.tracef("controller-spawn-error bead=%s settling enclosing scope before close failed err=%v", beadID, settleErr)
+		// The hard error is terminal regardless: close the bead and reconcile
+		// the scope best-effort, as before the settle-first order.
+		if closeErr := setOutcomeAndClose(store, beadID, beadmeta.OutcomeFail); closeErr != nil {
+			opts.tracef("controller-spawn-error bead=%s closing failed bead failed err=%v", beadID, closeErr)
+		}
+		if _, scopeErr := reconcileClosedScopeMemberWithOptions(store, beadID, opts); scopeErr != nil {
+			opts.tracef("controller-spawn-error bead=%s reconciling enclosing scope failed err=%v", beadID, scopeErr)
+		}
 	}
 	return false
 }

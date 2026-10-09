@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
@@ -345,14 +346,15 @@ func snapshotLedger(t *testing.T, stores []*beads.MemStore, ignoreKeys ...string
 
 // canonicalizeLedger makes two converged ledgers comparable when recovery
 // legitimately minted different bead IDs. A partially appended retry is
-// closed as skipped residue (gc.partial_retry) and re-appended under fresh
-// IDs, so residue is dropped and every bead carrying a gc.step_ref that is
+// closed as skipped residue (gc.partial_retry), as is a partially
+// instantiated fanout fragment (gc.partial_fragment), and re-appended under
+// fresh IDs, so residue is dropped and every bead carrying a gc.step_ref that is
 // unique within its store is keyed by that ref instead of its ID, in the bead
 // itself, in its dependency edges, and in metadata values naming it.
 func canonicalizeLedger(in []ledgerBead) []ledgerBead {
 	kept := make([]ledgerBead, 0, len(in))
 	for _, b := range in {
-		if b.Status == "closed" && b.Metadata[beadmeta.PartialRetryMetadataKey] == "true" {
+		if b.Status == "closed" && (b.Metadata[beadmeta.PartialRetryMetadataKey] == "true" || b.Metadata[beadmeta.PartialFragmentMetadataKey] == "true") {
 			continue
 		}
 		kept = append(kept, b)
@@ -959,5 +961,213 @@ func TestCrashInjectionCompiledMolecule(t *testing.T) {
 			t.Parallel()
 			runCrashScenario(t, sc)
 		})
+	}
+}
+
+// --- fanout and drain in a scope (fanout.go, drain.go) ---
+//
+// fanout and drain are scope-check-exempt: they reconcile their enclosing scope
+// themselves, so nothing else re-drives the scope if that reconciliation is
+// lost. Each settles the scope (body outcome, output and close) while it is
+// still open and closes itself last; an open control whose scope is already
+// settled only closes itself (ga-l6kddq). The scope body is blocked by the
+// control, as a body is by its members, so the body close must be the forced
+// close the bd close policy allows while the control is still open.
+
+func fanoutScopeCrashScenario(name, formulaDir string, source map[string]string, check func(t *testing.T, ledger []ledgerBead, bodyID, fanoutID string)) crashScenario {
+	var bodyID, fanoutID string
+	return crashScenario{
+		name: name,
+		build: func(t *testing.T, wrap func(beads.Store) beads.Store) crashFixture {
+			store := newBdClosePolicyStore()
+			workflow := mustCreateWorkflowBead(t, store, beads.Bead{Title: "workflow", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey: beadmeta.KindWorkflow, "gc.formula_contract": "graph.v2",
+			}})
+			body := mustCreateWorkflowBead(t, store, beads.Bead{Title: "body", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:       beadmeta.KindScope,
+				beadmeta.RootBeadIDMetadataKey: workflow.ID,
+				beadmeta.StepRefMetadataKey:    "body",
+				beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleBody,
+			}})
+			sourceMeta := map[string]string{
+				beadmeta.RootBeadIDMetadataKey: workflow.ID,
+				beadmeta.StepRefMetadataKey:    "demo.survey",
+				beadmeta.ScopeRefMetadataKey:   "body",
+				beadmeta.ScopeRoleMetadataKey:  "member",
+			}
+			maps.Copy(sourceMeta, source)
+			src := mustCreateWorkflowBead(t, store, beads.Bead{Title: "survey", Type: "task", Status: "closed", Metadata: sourceMeta})
+			fanout := mustCreateWorkflowBead(t, store, beads.Bead{Title: "fanout", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:       beadmeta.KindFanout,
+				beadmeta.RootBeadIDMetadataKey: workflow.ID,
+				beadmeta.ScopeRefMetadataKey:   "body",
+				beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleControl,
+				beadmeta.ControlForMetadataKey: "demo.survey",
+				beadmeta.ForEachMetadataKey:    "output.items",
+				beadmeta.BondMetadataKey:       "expansion-review",
+				beadmeta.BondVarsMetadataKey:   `{"reviewer":"{item.name}"}`,
+				beadmeta.FanoutModeMetadataKey: beadmeta.FanoutModeParallel,
+			}})
+			mustDepAdd(t, store, fanout.ID, src.ID, "blocks")
+			mustDepAdd(t, store, body.ID, fanout.ID, "blocks")
+			bodyID, fanoutID = body.ID, fanout.ID
+			// The expanded members carry the scope ref, so each gets a
+			// scope-check routed to the control dispatcher.
+			opts := testProcessOptionsWithControlDispatcher("")
+			opts.FormulaSearchPaths = []string{formulaDir}
+			return crashFixture{
+				ledger:   []*beads.MemStore{store.MemStore},
+				dispatch: wrap(store),
+				opts:     opts,
+				work: func(t *testing.T) bool {
+					open, err := store.ListOpen()
+					if err != nil {
+						t.Fatalf("listing open beads: %v", err)
+					}
+					slices.SortFunc(open, func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) })
+					for _, b := range open {
+						if !strings.HasSuffix(b.Metadata[beadmeta.StepRefMetadataKey], ".review") {
+							continue
+						}
+						if err := store.SetMetadataBatch(b.ID, map[string]string{
+							beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass,
+							"review.verdict":            "approve",
+						}); err != nil {
+							t.Fatalf("stamping review: %v", err)
+						}
+						if err := store.Close(b.ID); err != nil {
+							t.Fatalf("closing review: %v", err)
+						}
+						return true
+					}
+					return false
+				},
+			}
+		},
+		check: func(t *testing.T, ledger []ledgerBead) { check(t, ledger, bodyID, fanoutID) },
+	}
+}
+
+const crashExpansionReviewFormula = `formula = "expansion-review"
+type = "expansion"
+version = 2
+contract = "graph.v2"
+
+[[template]]
+id = "{target}.review"
+title = "Review {reviewer}"
+metadata = { "gc.scope_ref" = "{scope_ref}", "gc.scope_role" = "member" }
+`
+
+func TestCrashInjectionFanoutScope(t *testing.T) {
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "expansion-review.toml"), []byte(crashExpansionReviewFormula), 0o644); err != nil {
+		t.Fatalf("writing formula: %v", err)
+	}
+	passed := map[string]string{
+		beadmeta.OutcomeMetadataKey:    beadmeta.OutcomePass,
+		beadmeta.OutputJSONMetadataKey: `{"items":[{"name":"claude"},{"name":"codex"}]}`,
+	}
+	scenarios := []crashScenario{
+		fanoutScopeCrashScenario("pass", formulaDir, passed, func(t *testing.T, ledger []ledgerBead, bodyID, fanoutID string) {
+			requireClosedWithOutcome(t, ledger, 0, fanoutID, beadmeta.OutcomePass)
+			requireClosedWithOutcome(t, ledger, 0, bodyID, beadmeta.OutcomePass)
+			body := ledgerBeadByID(t, ledger, 0, bodyID)
+			if got := body.Metadata["review.verdict"]; got != "approve" {
+				t.Fatalf("body review.verdict = %q, want propagated member metadata", got)
+			}
+			if body.Metadata[beadmeta.OutputJSONMetadataKey] == "" {
+				t.Fatal("body gc.output_json is empty, want the scope output")
+			}
+		}),
+		fanoutScopeCrashScenario("source-failed", formulaDir, map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail},
+			func(t *testing.T, ledger []ledgerBead, bodyID, fanoutID string) {
+				requireClosedWithOutcome(t, ledger, 0, fanoutID, beadmeta.OutcomeFail)
+				requireClosedWithOutcome(t, ledger, 0, bodyID, beadmeta.OutcomeFail)
+			}),
+		fanoutScopeCrashScenario("empty", formulaDir, map[string]string{
+			beadmeta.OutcomeMetadataKey:    beadmeta.OutcomePass,
+			beadmeta.OutputJSONMetadataKey: `{"items":[]}`,
+		}, func(t *testing.T, ledger []ledgerBead, bodyID, fanoutID string) {
+			requireClosedWithOutcome(t, ledger, 0, fanoutID, beadmeta.OutcomePass)
+			requireClosedWithOutcome(t, ledger, 0, bodyID, beadmeta.OutcomePass)
+		}),
+	}
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) { runCrashScenario(t, sc) })
+	}
+}
+
+// drainScopeCrashScenario builds a scoped separate-context drain over a convoy
+// of memberCount members. drainMeta overrides the drain control's metadata.
+func drainScopeCrashScenario(name, formulaDir string, memberCount int, drainMeta map[string]string, check func(t *testing.T, ledger []ledgerBead, bodyID, drainID string)) crashScenario {
+	var bodyID, drainID string
+	return crashScenario{
+		name: name,
+		build: func(t *testing.T, wrap func(beads.Store) beads.Store) crashFixture {
+			store := newBdClosePolicyStore()
+			parent := mustCreateWorkflowBead(t, store, beads.Bead{Title: "parent", Type: "convoy"})
+			for i := range memberCount {
+				member := mustCreateWorkflowBead(t, store, beads.Bead{Title: fmt.Sprintf("member %d", i+1), Type: "task"})
+				if err := convoycore.TrackItem(store, parent.ID, member.ID); err != nil {
+					t.Fatalf("tracking member: %v", err)
+				}
+			}
+			root := mustCreateWorkflowBead(t, store, beads.Bead{Title: "workflow", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:          beadmeta.KindWorkflow,
+				"gc.formula_contract":             "graph.v2",
+				beadmeta.InputConvoyIDMetadataKey: parent.ID,
+			}})
+			body := mustCreateWorkflowBead(t, store, beads.Bead{Title: "scope body", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:       beadmeta.KindScope,
+				beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleBody,
+				beadmeta.RootBeadIDMetadataKey: root.ID,
+				beadmeta.StepRefMetadataKey:    "demo.iter",
+			}})
+			meta := map[string]string{
+				beadmeta.KindMetadataKey:              beadmeta.KindDrain,
+				beadmeta.RootBeadIDMetadataKey:        root.ID,
+				beadmeta.ScopeRefMetadataKey:          "demo.iter",
+				beadmeta.ScopeRoleMetadataKey:         beadmeta.ScopeRoleControl,
+				beadmeta.DrainContextMetadataKey:      beadmeta.DrainContextSeparate,
+				beadmeta.DrainFormulaMetadataKey:      "drain-item",
+				beadmeta.DrainMemberAccessMetadataKey: "read",
+			}
+			maps.Copy(meta, drainMeta)
+			drain := mustCreateWorkflowBead(t, store, beads.Bead{Title: "drain", Type: "task", Metadata: meta})
+			mustDepAdd(t, store, body.ID, drain.ID, "blocks")
+			bodyID, drainID = body.ID, drain.ID
+			return crashFixture{
+				ledger:   []*beads.MemStore{store.MemStore},
+				dispatch: wrap(store),
+				opts:     ProcessOptions{FormulaSearchPaths: []string{formulaDir}},
+			}
+		},
+		check: func(t *testing.T, ledger []ledgerBead) { check(t, ledger, bodyID, drainID) },
+	}
+}
+
+func TestCrashInjectionDrainScope(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeDrainItemFormula(t, formulaDir)
+	scenarios := []crashScenario{
+		drainScopeCrashScenario("succeeded-empty", formulaDir, 0, nil, func(t *testing.T, ledger []ledgerBead, bodyID, drainID string) {
+			requireClosedWithOutcome(t, ledger, 0, drainID, beadmeta.OutcomePass)
+			requireClosedWithOutcome(t, ledger, 0, bodyID, beadmeta.OutcomePass)
+			if got := ledgerBeadByID(t, ledger, 0, drainID).Metadata[beadmeta.DrainStateMetadataKey]; got != beadmeta.DrainStateSucceeded {
+				t.Fatalf("drain gc.drain_state = %q, want %s", got, beadmeta.DrainStateSucceeded)
+			}
+		}),
+		drainScopeCrashScenario("limit-exceeded", formulaDir, 2, map[string]string{beadmeta.DrainMaxUnitsMetadataKey: "1"},
+			func(t *testing.T, ledger []ledgerBead, bodyID, drainID string) {
+				requireClosedWithOutcome(t, ledger, 0, drainID, beadmeta.OutcomeFail)
+				requireClosedWithOutcome(t, ledger, 0, bodyID, beadmeta.OutcomeFail)
+				if got := ledgerBeadByID(t, ledger, 0, drainID).Metadata[beadmeta.FailureReasonMetadataKey]; got != "limit_exceeded" {
+					t.Fatalf("drain gc.failure_reason = %q, want limit_exceeded", got)
+				}
+			}),
+	}
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) { runCrashScenario(t, sc) })
 	}
 }
