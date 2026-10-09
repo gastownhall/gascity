@@ -1,0 +1,85 @@
+load("@aspect_rules_js//npm:defs.bzl", "npm_package")
+load("@aspect_rules_ts//ts:defs.bzl", "ts_project")
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@bazel_lib//lib:diff_test.bzl", "diff_test")
+load("@npm_dashboard//:defs.bzl", "npm_link_all_packages")
+
+npm_link_all_packages(name = "node_modules")
+
+# `npm run build` in this workspace: tsc -p tsconfig.json into dist/.
+ts_project(
+    name = "shared_ts",
+    srcs = glob(
+        ["src/**/*.ts"],
+        exclude = ["src/**/*.test.ts"],
+    ),
+    declaration = True,
+    declaration_map = True,
+    out_dir = "dist",
+    root_dir = "src",
+    # tsc emits the JS too, exactly as `npm run build` does.
+    transpiler = "tsc",
+    tsconfig = "tsconfig.json",
+    deps = [
+        ":node_modules/@hey-api/client-fetch",
+        ":node_modules/zod",
+    ],
+)
+
+# The gas-city-dashboard-shared workspace package the frontend links.
+npm_package(
+    name = "pkg",
+    srcs = [
+        "package.json",
+        ":shared_ts",
+    ],
+    visibility = ["//internal/api/dashboardspa/web:__subpackages__"],
+)
+
+exports_files(["package.json"])
+
+# The committed generated client must be exactly what openapi-ts generates from
+# the committed spec (formerly `make dashboard-ci`'s git-diff check).
+copy_to_directory(
+    name = "committed_generated_client",
+    srcs = glob(["src/generated/gc-supervisor-client/**"]),
+    root_paths = ["internal/api/dashboardspa/web/shared/src/generated/gc-supervisor-client"],
+)
+
+diff_test(
+    name = "generated_client_in_sync_test",
+    failure_message = "The dashboard API client is stale: run make dashboard-generate-client and commit the result.",
+    file1 = ":committed_generated_client",
+    file2 = "//internal/api/dashboardspa/web:gc_supervisor_client",
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

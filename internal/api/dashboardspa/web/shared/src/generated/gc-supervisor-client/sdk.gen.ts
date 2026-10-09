@@ -194,7 +194,14 @@ export const postV0CityByCityNameBeadByIdAssign = <ThrowOnError extends boolean 
 /**
  * Post v0 city by city name bead by ID close
  */
-export const postV0CityByCityNameBeadByIdClose = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameBeadByIdCloseData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameBeadByIdCloseResponses, PostV0CityByCityNameBeadByIdCloseErrors, ThrowOnError>({ url: '/v0/city/{cityName}/bead/{id}/close', ...options });
+export const postV0CityByCityNameBeadByIdClose = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameBeadByIdCloseData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameBeadByIdCloseResponses, PostV0CityByCityNameBeadByIdCloseErrors, ThrowOnError>({
+    url: '/v0/city/{cityName}/bead/{id}/close',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
 
 /**
  * Get v0 city by city name bead by ID deps

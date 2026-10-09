@@ -1140,19 +1140,23 @@ func TestCachingStoreLateEventUnverifiableMarksDirty(t *testing.T) {
 }
 
 // TestCachingStoreRecentWriteVerifyWindowIsSixtySeconds pins the F3 window at
-// the contract's cache_lag_bound default: a conflicting late event is verified
-// against the backing just inside it and applied unverified just past it.
+// the contract's cache_lag_bound default: a conflicting late dependency-only
+// update, which the window governs, is verified against the backing just
+// inside it and not just past it. A field-changing bead.updated is verified
+// on either side (mc-03lk4).
 func TestCachingStoreRecentWriteVerifyWindowIsSixtySeconds(t *testing.T) {
 	t.Parallel()
 
 	const bound = 60 * time.Second
 	for _, tc := range []struct {
 		name     string
+		edges    bool
 		age      time.Duration
 		verified bool
 	}{
-		{"inside", bound - time.Second, true},
-		{"outside", bound + time.Second, false},
+		{"inside", true, bound - time.Second, true},
+		{"outside", true, bound + time.Second, false},
+		{"field update outside", false, bound + time.Second, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1163,6 +1167,9 @@ func TestCachingStoreRecentWriteVerifyWindowIsSixtySeconds(t *testing.T) {
 				t.Fatalf("Create: %v", err)
 			}
 			stale := eventPayload(t, row)
+			if tc.edges {
+				stale = json.RawMessage(fmt.Sprintf(`{"id":%q,"dependencies":[{"issue_id":%q,"depends_on_id":"gc-elsewhere","type":"blocks"}]}`, row.ID, row.ID))
+			}
 			title := "written"
 			if err := cache.Update(row.ID, UpdateOpts{Title: &title}); err != nil {
 				t.Fatalf("Update: %v", err)
@@ -1172,7 +1179,7 @@ func TestCachingStoreRecentWriteVerifyWindowIsSixtySeconds(t *testing.T) {
 			reads := backing.getCalls
 			cache.ApplyEvent("bead.updated", stale)
 			if verified := backing.getCalls > reads; verified != tc.verified {
-				t.Fatalf("event against a write %v old: verified=%v, want %v", tc.age, verified, tc.verified)
+				t.Fatalf("event (edges only %v) against a write %v old: verified=%v, want %v", tc.edges, tc.age, verified, tc.verified)
 			}
 		})
 	}
@@ -2052,8 +2059,9 @@ func TestCachingStoreMultiRowRefreshFailureMarksRow(t *testing.T) {
 
 // TestCachingStoreReconcileRecoveryHoldsUnreadRow pins that a reconcile whose
 // recovery Get fails holds the cached row it merges back instead of absorbing
-// it: the absorb would clear the mark a raced Close left without any backing
-// read, and a clean census would then show the closed row as live.
+// it: the absorb would clear the mark a raced write left without any backing
+// read, and a clean census would then show the row another process closed as
+// live. (A fenced close leaves no row to hold: claimCloseLocked drops it.)
 func TestCachingStoreReconcileRecoveryHoldsUnreadRow(t *testing.T) {
 	t.Parallel()
 
@@ -2068,13 +2076,16 @@ func TestCachingStoreReconcileRecoveryHoldsUnreadRow(t *testing.T) {
 			t.Errorf("winning SetMetadata: %v", err)
 		}
 	}
-	if err := cache.Close(row.ID); err != nil {
-		t.Fatalf("Close: %v", err)
+	if err := cache.SetMetadata(row.ID, "k", "2"); err != nil {
+		t.Fatalf("fenced SetMetadata: %v", err)
 	}
 	if !isDirty(cache, row.ID) {
-		t.Fatal("the Close was not fenced; the interleaving is vacuous")
+		t.Fatal("the write was not fenced; the interleaving is vacuous")
 	}
-	closeRev := cache.WriteRev(row.ID)
+	fencedRev := cache.WriteRev(row.ID)
+	if err := backing.Store.Close(row.ID); err != nil {
+		t.Fatalf("out-of-process Close: %v", err)
+	}
 	ageLocalWrite(cache, row.ID)
 	backing.failNextGet = true
 	cache.ReconcileNowForTest()
@@ -2084,7 +2095,7 @@ func TestCachingStoreReconcileRecoveryHoldsUnreadRow(t *testing.T) {
 	if !isDirty(cache, row.ID) {
 		t.Fatalf("row %s is clean after a reconcile that could not read it", row.ID)
 	}
-	assertSettledCensusAgrees(t, cache, backing.Store, row.ID, closeRev)
+	assertSettledCensusAgrees(t, cache, backing.Store, row.ID, fencedRev)
 }
 
 // TestCachingStoreStaleClosedSnapshotTakesBackingRow delivers a delayed rich

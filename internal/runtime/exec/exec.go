@@ -79,7 +79,7 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
-	// Run the adapter in its own process group with interrupt-then-kill
+	// Run the adapter in its own process group with TERM-then-kill
 	// cancellation (execgrace.Apply) so cooperative cancellation reaches a
 	// foreground child (e.g. a readiness sleep in the adapter), not just the
 	// shell leader — without this the shell defers its rollback trap until
@@ -103,9 +103,9 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	}
 
 	// An accepted cancellation action wins over the adapter's exit status. In
-	// particular, an INT trap may use protocol-reserved exit 2; treating that as
+	// particular, a TERM trap may use protocol-reserved exit 2; treating that as
 	// an unsupported operation would turn cancellation into success. Signal can
-	// race with process completion: a delivered interrupt makes cancellation the
+	// race with process completion: a delivered SIGTERM makes cancellation the
 	// observed winner, while os.ErrProcessDone leaves the flag false and
 	// preserves the ordinary exit result because completion was observed first.
 	// Neither result claims physical signal-delivery ordering.

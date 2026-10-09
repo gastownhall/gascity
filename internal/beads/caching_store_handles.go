@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // CachedReader is the cache-only eventual-consistency read handle for active
@@ -265,7 +263,7 @@ func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQ
 			return nil, err
 		}
 		statusByID[b.ID] = b.Status
-		workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
+		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
 		if !IsReadyCandidateForTier(b, now, query.TierMode) {
 			continue
 		}
@@ -305,7 +303,7 @@ func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
 	now := time.Now().UTC()
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
-		workOutcomeByID[b.ID] = b.Metadata[beadmeta.WorkOutcomeMetadataKey]
+		workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
 		if !IsReadyCandidateForTier(b, now, query.TierMode) {
 			continue
 		}

@@ -289,9 +289,24 @@ For orchestrator-managed Gas City deployments, confirm that the orchestrator is
 wrapping stores with `CachingStore` and emitting `bead.created`,
 `bead.updated`, `bead.closed`, and `bead.deleted` events to the event bus. After
 that migration is verified, remove the executable hook scripts from the city or
-rig `.beads/hooks/` directory to allow native store adoption. Keep
-`GC_BEADS_FORCE_FALLBACK=1` set when a deployment still depends on those hook
-scripts directly.
+rig `.beads/hooks/` directory to allow native store adoption.
+
+While a city still depends on those hook scripts directly, keep its stores on
+the subprocess-backed store by turning native transport off in `city.toml`:
+
+```toml
+[beads]
+native_transport = "off"
+```
+
+Restart a running city after the change: the stores it holds open keep the
+value it read at boot. `gc` commands, and the stores the city opens for a
+single tick, read the current `city.toml` every time. This setting replaces
+the `GC_BEADS_FORCE_FALLBACK=1` environment variable, which still works but is
+deprecated and applies to every city the process serves. With either one,
+`gc start` refuses a `[storage]` binding served by `beads-workspace`, because
+that provider opens the native store. Turn native transport off only in cities
+that have no such binding, or remove the binding first.
 
 ## Native Store Falls Back Because Dolt Is in Embedded Mode
 
@@ -434,15 +449,36 @@ The file uses dotenv syntax: `KEY=VALUE` per line, `#` comments, blank lines,
 an optional `export ` prefix, and optional surrounding quotes. Only keys that
 are already eligible for the supervisor environment are merged — provider
 credentials (recognized by their standard prefixes such as `ANTHROPIC_`,
-`OPENAI_`, `GEMINI_`) plus any keys you opt in via `GC_SUPERVISOR_ENV`; any
-other key in the file is ignored. A value exported in the calling shell still
-takes precedence over the file, and `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1`
-suppresses provider credentials from both sources.
+`OPENAI_`, `GEMINI_`), a short built-in list of settings (among them the Dolt
+credential and logging settings `GC_DOLT_USER`, `GC_DOLT_PASSWORD`, and
+`GC_DOLT_LOGLEVEL`, and the beads pool deadlines below), plus any keys you opt
+in via `GC_SUPERVISOR_ENV`; any other key in the file is ignored. A value
+exported in the calling shell still takes precedence over the file, and
+`GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1` suppresses provider credentials from both
+sources.
+
+The same file is the durable home for the beads connection-pool deadlines.
+`gc` reads `BEADS_DOLT_POOL_READ_TIMEOUT` and `BEADS_DOLT_POOL_WRITE_TIMEOUT`
+for its own store connections only from its process environment; the
+`dolt.pool-*-timeout` keys in `.beads/config.yaml` and entries in `.beads/.env`
+reach the `bd` CLI, not `gc`. If the 10-second default is too tight for a
+loaded shared Dolt server (store operations fail with `i/o timeout` or
+`invalid connection`), raise both here:
+
+```bash
+# ~/.gc/secrets.env
+BEADS_DOLT_POOL_READ_TIMEOUT=90s
+BEADS_DOLT_POOL_WRITE_TIMEOUT=90s
+```
+
+These values also reach the `bd` commands and agent sessions that inherit the
+supervisor's environment, where they take precedence over the per-workspace
+`.beads/` settings.
 
 Apply the change by regenerating the service file:
 
 ```bash
-gc service restart     # restarts the launchd/systemd service
+gc supervisor install  # rewrites the service file; restarts on change
 ```
 
 ## A Custom Environment Variable Doesn't Reach Agent Sessions
