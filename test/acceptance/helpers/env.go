@@ -158,12 +158,18 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	// ambient identity made that a coin flip: green on a developer box, red on a
 	// fresh CI runner. Seed under GC_HOME rather than the real home so a run
 	// never writes host Dolt state; test/integration seeds the same config. It
-	// also turns dolt's usage metrics off, so no dolt the suite runs calls
-	// eventsapi.dolthub.com.
+	// also turns dolt's usage metrics and release version check off, so no dolt
+	// the suite runs calls eventsapi.dolthub.com or stalls in `dolt version` on a
+	// slow network.
 	if err := testutil.SeedDoltGlobalConfig(gcHome); err != nil {
 		panic(fmt.Sprintf("acceptance: %v", err))
 	}
 	e.vars["DOLT_ROOT_PATH"] = gcHome
+	// That config does not stop dolt forking a detached `dolt send-metrics` after
+	// each command; only the presence of this variable does. NewEnv hands a child
+	// only the vars set here, so the one internal/testenv sets for the test
+	// process never reaches it.
+	e.vars["DOLT_DISABLE_EVENT_FLUSH"] = "1"
 
 	// The Makefile points GIT_CONFIG_GLOBAL at scripts/test-gitconfig-path, but a
 	// caller that runs `go test -tags acceptance_a` directly supplies no seed at

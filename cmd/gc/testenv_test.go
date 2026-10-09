@@ -198,6 +198,10 @@ func preserveTestControlEnv(key string) bool {
 		key == managedDoltTestModeEnv ||
 		key == managedDoltTestParentPIDEnv ||
 		key == "GC_DOLT_REAL_BINARY" ||
+		// internal/testenv sets this once per test binary so no dolt a test runs
+		// forks a detached `dolt send-metrics`. The DOLT_ prefix scrub below would
+		// otherwise strip it before sanitizedBaseEnv could hand it to a child.
+		key == "DOLT_DISABLE_EVENT_FLUSH" ||
 		// The live herdr tier's opt-in. Without it here the scrub below would
 		// strip the variable before any cmd/gc live journey could read it, so
 		// `make test-herdr-live` could never reach the journeys in this package.

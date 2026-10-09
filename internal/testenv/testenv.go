@@ -61,6 +61,14 @@
 // store traced back to test clients reaching the local server on port 3307
 // (ga-4c2ss6). For the rare legitimate case, set ProdDoltPortOptOutVar
 // (GC_ALLOW_PROD_DOLT_PORT_IN_TESTS) to "1".
+//
+// Dolt event flush: in a go-test binary init() also sets
+// DOLT_DISABLE_EVENT_FLUSH. dolt forks a detached `dolt send-metrics` after each
+// command unless that variable is present, and metrics.disabled in the dolt
+// global config does not stop the fork, so every dolt a test runs, directly or
+// through gc or bd, would otherwise leave a metrics process behind. The variable
+// is a presence switch; dolt does not read its value. Testscript subcommand mode
+// skips it with the scrub, because testscript owns that child env exactly.
 package testenv
 
 import (
@@ -94,6 +102,10 @@ func isGoTestBinary() bool {
 // the list are scrubbed as usual; the passthrough var itself is unset so the
 // list does not flow onward to further subprocesses.
 const PassthroughVar = "GC_TESTENV_PASSTHROUGH"
+
+// doltDisableEventFlushVar is the variable dolt checks, by presence only, before
+// it forks the detached `dolt send-metrics` it otherwise runs after each command.
+const doltDisableEventFlushVar = "DOLT_DISABLE_EVENT_FLUSH"
 
 // LeakVectorVars is the list of env vars that point at live-city paths,
 // session identities, bead stores, or Dolt runtimes. If any of these survive
@@ -349,4 +361,7 @@ func init() {
 			_ = os.Unsetenv(name)
 		}
 	}
+	// Not a leak vector, so the scrub above leaves it alone and a passthrough
+	// list cannot name it; set unconditionally because only its presence counts.
+	_ = os.Setenv(doltDisableEventFlushVar, "1")
 }
