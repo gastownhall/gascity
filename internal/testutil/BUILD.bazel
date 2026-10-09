@@ -17,6 +17,7 @@ go_library(
 go_test(
     name = "testutil_test",
     srcs = [
+        "dolt_test.go",
         "failure_artifacts_test.go",
         "testenv_import_test.go",
     ],

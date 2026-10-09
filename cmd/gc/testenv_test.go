@@ -119,6 +119,7 @@ func TestClearProcessLiveEnvForTestsUnsetsInheritedState(t *testing.T) {
 		"GC_SUPERVISOR_SYSTEMD_UNIT",
 	}
 	preserved := []string{
+		"DOLT_DISABLE_EVENT_FLUSH",
 		"GC_FAST_UNIT",
 		"GC_HERDR_LIVE_TESTS",
 		"GC_REAL_PROCESS_SIGNAL_TESTS",

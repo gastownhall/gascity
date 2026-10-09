@@ -84,6 +84,25 @@ func TestNewEnvSeedsDoltAuthorIdentity(t *testing.T) {
 	if !strings.Contains(string(body), `"metrics.disabled":"true"`) {
 		t.Errorf("seeded dolt config does not disable dolt usage metrics: %s", body)
 	}
+	// Without versioncheck.disabled `dolt version` fetches the latest release
+	// over HTTPS before it prints, and gc's and bd's version probes time out on
+	// a slow network.
+	if !strings.Contains(string(body), `"versioncheck.disabled":"true"`) {
+		t.Errorf("seeded dolt config does not disable dolt's release version check: %s", body)
+	}
+}
+
+// NewEnv hands a child only the variables it lists, so the process-wide
+// DOLT_DISABLE_EVENT_FLUSH that internal/testenv sets never reaches it. Without
+// its own entry every dolt a tier A, B or C test forks leaves a detached
+// `dolt send-metrics` behind, even though the seeded config sets
+// metrics.disabled.
+func TestNewEnvDisablesDoltEventFlush(t *testing.T) {
+	env := NewEnv("", t.TempDir(), t.TempDir())
+
+	if got := env.Get("DOLT_DISABLE_EVENT_FLUSH"); got != "1" {
+		t.Fatalf("NewEnv() DOLT_DISABLE_EVENT_FLUSH = %q, want %q", got, "1")
+	}
 }
 
 // With no seed from the caller — a bare `go test -tags acceptance_a`, which is

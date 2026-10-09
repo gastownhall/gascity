@@ -26,3 +26,21 @@ func SeedDoltGlobalConfig(root string) error {
 	}
 	return nil
 }
+
+// UnroutableHTTPSProxy is a proxy address no route reaches: a connection to it
+// hangs instead of failing fast, which is how a slow or firewalled network
+// looks to a child process.
+const UnroutableHTTPSProxy = "http://10.255.255.1:9"
+
+// UnroutableHTTPSProxyEnv returns the environment entries that send every HTTPS
+// request a child makes to UnroutableHTTPSProxy. Both spellings are set because
+// tools differ on which they read, and NO_PROXY is cleared so an ambient bypass
+// list cannot route a request around the black hole.
+func UnroutableHTTPSProxyEnv() []string {
+	return []string{
+		"HTTPS_PROXY=" + UnroutableHTTPSProxy,
+		"https_proxy=" + UnroutableHTTPSProxy,
+		"NO_PROXY=",
+		"no_proxy=",
+	}
+}

@@ -14,6 +14,7 @@ go_test(
     name = "testenv_test",
     srcs = [
         "bazel_tools_internal_test.go",
+        "dolt_config_test.go",
         "gc_env_baseline_test.go",
         "legacy_flag_freeze_test.go",
         "lint_test.go",
