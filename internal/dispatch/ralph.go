@@ -235,10 +235,11 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	return ControlResult{Processed: true, Action: "retry"}, nil
 }
 
-// settleLogicalBead records a check's terminal verdict on its logical bead and
-// closes it. The close is a forced Close, not a status update: the check being
-// processed still blocks the logical bead (it must stay open until the logical
-// bead is durable), and bd refuses an unforced close of a blocked bead.
+// settleLogicalBead records a control's terminal verdict on its logical bead
+// and closes it. The close is a forced Close, not a status update: the control
+// being processed (a check or retry-eval) still blocks the logical bead (it
+// must stay open until the logical bead is durable), and bd refuses an
+// unforced close of a blocked bead.
 func settleLogicalBead(store beads.Store, logicalID string, metadata map[string]string) error {
 	if err := store.SetMetadataBatch(logicalID, metadata); err != nil {
 		return fmt.Errorf("recording verdict: %w", err)

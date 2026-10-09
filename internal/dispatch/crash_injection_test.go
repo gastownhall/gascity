@@ -753,31 +753,102 @@ func TestCrashInjectionWorkflowFinalize(t *testing.T) {
 
 // --- retry-eval (retry.go) ---
 //
-// retry-eval has the ordering ga-up0tmv fixed for check: it closes the eval
-// before the logical bead, and its stale-attempt guard turns an interrupted
-// settle into an open, unblocked logical bead that the next sweep quarantines
-// as malformed. Fixing it changes the guard's behavior; tracked in ga-wzqjs4.
+// Every terminal retry-eval branch settles the logical bead (one verdict batch
+// stamped gc.closed_by_attempt, then a forced close) and closes the eval last;
+// an open eval over a logical bead its own attempt settled finishes the settle
+// without re-evaluating (ga-wzqjs4). The retry scenario pins that a fault
+// anywhere in the spawn path converges on exactly one appended attempt.
 
-func retryEvalCrashScenario(name string, runOutcome map[string]string) crashScenario {
+func retryEvalCrashScenario(name string, runOutcome, evalOverrides map[string]string, check func(t *testing.T, ledger []ledgerBead, logicalID, evalID string)) crashScenario {
+	var logicalID, evalID string
 	return crashScenario{
 		name: name,
 		build: func(t *testing.T, wrap func(beads.Store) beads.Store) crashFixture {
-			store, _, _ := newRetryEvalOrderingFixture(t, runOutcome)
-			policy := bdClosePolicyStore{store}
+			store, logical, eval := newRetryEvalOrderingFixture(t, runOutcome)
+			if len(evalOverrides) > 0 {
+				if err := store.SetMetadataBatch(eval.ID, evalOverrides); err != nil {
+					t.Fatalf("override eval metadata: %v", err)
+				}
+			}
+			logicalID, evalID = logical.ID, eval.ID
 			return crashFixture{
 				ledger:   []*beads.MemStore{store.MemStore},
-				dispatch: wrap(policy),
+				dispatch: wrap(store),
 			}
 		},
+		check: func(t *testing.T, ledger []ledgerBead) { check(t, ledger, logicalID, evalID) },
+	}
+}
+
+func requireRetryDisposition(t *testing.T, ledger []ledgerBead, logicalID, disposition string) {
+	t.Helper()
+	if got := ledgerBeadByID(t, ledger, 0, logicalID).Metadata[beadmeta.FinalDispositionMetadataKey]; got != disposition {
+		t.Fatalf("logical gc.final_disposition = %q, want %q", got, disposition)
 	}
 }
 
 func TestCrashInjectionRetryEval(t *testing.T) {
 	t.Parallel()
-	t.Skip("ga-wzqjs4: retry-eval closes the eval before its logical bead")
+	transient := map[string]string{"gc.outcome": "fail", "gc.failure_class": "transient", "gc.failure_reason": "rate_limited"}
+	lastAttempt := func(onExhausted string) map[string]string {
+		return map[string]string{beadmeta.MaxAttemptsMetadataKey: "1", beadmeta.OnExhaustedMetadataKey: onExhausted}
+	}
 	scenarios := []crashScenario{
-		retryEvalCrashScenario("pass", map[string]string{"gc.outcome": "pass", "gc.output_json": `{"ok":true}`}),
-		retryEvalCrashScenario("hard", map[string]string{"gc.outcome": "fail", "gc.failure_class": "hard", "gc.failure_reason": "boom"}),
+		retryEvalCrashScenario("pass", map[string]string{"gc.outcome": "pass", "gc.output_json": `{"ok":true}`, "review.verdict": "approve"}, nil,
+			func(t *testing.T, ledger []ledgerBead, logicalID, evalID string) {
+				requireClosedWithOutcome(t, ledger, 0, logicalID, beadmeta.OutcomePass)
+				requireClosedWithOutcome(t, ledger, 0, evalID, beadmeta.OutcomePass)
+				requireRetryDisposition(t, ledger, logicalID, beadmeta.DispositionPass)
+				if got := ledgerBeadByID(t, ledger, 0, logicalID).Metadata["review.verdict"]; got != "approve" {
+					t.Fatalf("logical review.verdict = %q, want propagated subject metadata", got)
+				}
+			}),
+		retryEvalCrashScenario("hard", map[string]string{"gc.outcome": "fail", "gc.failure_class": "hard", "gc.failure_reason": "boom"}, nil,
+			func(t *testing.T, ledger []ledgerBead, logicalID, evalID string) {
+				requireClosedWithOutcome(t, ledger, 0, logicalID, beadmeta.OutcomeFail)
+				requireClosedWithOutcome(t, ledger, 0, evalID, beadmeta.OutcomeFail)
+				requireRetryDisposition(t, ledger, logicalID, beadmeta.DispositionHardFail)
+			}),
+		retryEvalCrashScenario("canceled", map[string]string{"gc.outcome": "canceled"}, nil,
+			func(t *testing.T, ledger []ledgerBead, logicalID, evalID string) {
+				requireClosedWithOutcome(t, ledger, 0, logicalID, beadmeta.OutcomeCanceled)
+				requireClosedWithOutcome(t, ledger, 0, evalID, beadmeta.OutcomeCanceled)
+			}),
+		retryEvalCrashScenario("exhausted-hard-fail", transient, lastAttempt(beadmeta.DispositionHardFail),
+			func(t *testing.T, ledger []ledgerBead, logicalID, evalID string) {
+				requireClosedWithOutcome(t, ledger, 0, logicalID, beadmeta.OutcomeFail)
+				requireClosedWithOutcome(t, ledger, 0, evalID, beadmeta.OutcomeFail)
+				requireRetryDisposition(t, ledger, logicalID, beadmeta.DispositionHardFail)
+			}),
+		retryEvalCrashScenario("exhausted-soft-fail", transient, lastAttempt(beadmeta.DispositionSoftFail),
+			func(t *testing.T, ledger []ledgerBead, logicalID, evalID string) {
+				requireClosedWithOutcome(t, ledger, 0, logicalID, beadmeta.OutcomePass)
+				requireClosedWithOutcome(t, ledger, 0, evalID, beadmeta.OutcomeFail)
+				requireRetryDisposition(t, ledger, logicalID, beadmeta.DispositionSoftFail)
+			}),
+		retryEvalCrashScenario("retry", transient, nil,
+			func(t *testing.T, ledger []ledgerBead, logicalID, evalID string) {
+				requireClosedWithOutcome(t, ledger, 0, evalID, beadmeta.OutcomeFail)
+				if got := ledgerBeadByID(t, ledger, 0, logicalID).Status; got != "open" {
+					t.Fatalf("logical status after retry = %s, want open for attempt 2", got)
+				}
+				runs := 0
+				for _, b := range ledger {
+					if b.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRetryRun && b.Metadata["gc.attempt"] == "2" {
+						runs++
+					}
+				}
+				if runs != 1 {
+					t.Fatalf("attempt-2 runs = %d, want exactly 1", runs)
+				}
+			}),
+	}
+	// ga-5ysi6e: a transient spawn error recorded on eval 1 is cloned into
+	// eval 2 because the retry clone keeps the controller-error keys.
+	scenarios[len(scenarios)-1].ignoreMetadataKeys = []string{
+		beadmeta.ControllerErrorMetadataKey,
+		beadmeta.ControllerErrorClassMetadataKey,
+		beadmeta.ControllerRetryableMetadataKey,
 	}
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
