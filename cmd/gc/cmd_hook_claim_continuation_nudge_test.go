@@ -199,71 +199,134 @@ func TestHookClaimZeroContinuationDoesNotEnqueueContinuationNudge(t *testing.T) 
 // TestHookContinuationNudgeEnqueueClosesOnlyOpenedHandle exercises the
 // production EnqueueContinuationNudge helper against a relocated-shape seam:
 // the nudges-class store and the handle the call opened are distinct. The
-// helper must queue the nudge under the assignee, read the session fence from
-// the session class (the opened work store at the default backend), and close
-// only the handle it opened — closing the class store would close the storage
-// routes' shared engine. Replaces package seams; must stay serial.
+// helper must queue the nudge under the assignee, resolve the assignee (which
+// may be an alias or session bead ID, not the runtime session name) to the
+// session bead in the session class (the opened work store at the default
+// backend), fence the item to that session, start the poller for the real
+// runtime session name unless the transport is ACP, and close only the handle
+// it opened — closing the class store would close the storage routes' shared
+// engine. Replaces package seams; must stay serial.
 func TestHookContinuationNudgeEnqueueClosesOnlyOpenedHandle(t *testing.T) {
-	const assignee = "gascity/worker/slot-0"
-	clearGCEnv(t)
-	t.Setenv("GC_BEADS", "file")
-	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
-	t.Setenv("GC_CITY", cityDir)
-	resetCLIStorageRoutes(t)
-
-	var classCloses, openedCloses, opens int
-	classStore := &countingNudgeStore{MemStore: beads.NewMemStore(), closes: &classCloses}
-	openedStore := &countingNudgeStore{MemStore: beads.NewMemStore(), closes: &openedCloses}
-	sessionBead, err := openedStore.Create(beads.Bead{
-		Type:   sessionBeadType,
-		Labels: []string{sessionBeadLabel},
-		Metadata: map[string]string{
-			"session_name":       assignee,
-			"continuation_epoch": "3",
+	const runtimeName = "rt-slot-0"
+	const alias = "gascity/worker/slot-0"
+	tests := []struct {
+		name        string
+		sessionName string
+		transport   string
+		// assignee returns the claim assignee given the session bead ID.
+		assignee    func(id string) string
+		wantSession string
+		wantPoller  bool
+	}{
+		{
+			name:        "assignee is session name",
+			sessionName: alias,
+			assignee:    func(string) string { return alias },
+			wantSession: alias,
+			wantPoller:  true,
 		},
-	})
-	if err != nil {
-		t.Fatalf("create session bead: %v", err)
+		{
+			name:        "assignee is session alias",
+			sessionName: runtimeName,
+			assignee:    func(string) string { return alias },
+			wantSession: runtimeName,
+			wantPoller:  true,
+		},
+		{
+			name:        "assignee is session bead ID",
+			sessionName: runtimeName,
+			assignee:    func(id string) string { return id },
+			wantSession: runtimeName,
+			wantPoller:  true,
+		},
+		{
+			name:        "acp transport skips poller",
+			sessionName: runtimeName,
+			transport:   "acp",
+			assignee:    func(string) string { return alias },
+			wantPoller:  false,
+		},
 	}
-	prevOpen := openOwnedNudgeBeadStore
-	openOwnedNudgeBeadStore = func(string) (beads.NudgesStore, beads.Store) {
-		opens++
-		return beads.NudgesStore{Store: classStore}, openedStore
-	}
-	t.Cleanup(func() { openOwnedNudgeBeadStore = prevOpen })
-	prevPoller := startNudgePoller
-	startNudgePoller = func(string, string, string) error { return nil }
-	t.Cleanup(func() { startNudgePoller = prevPoller })
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			t.Setenv("GC_BEADS", "file")
+			cityDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile(city.toml): %v", err)
+			}
+			t.Setenv("GC_CITY", cityDir)
+			resetCLIStorageRoutes(t)
 
-	hookContinuationNudgeEnqueue(assignee)
+			var classCloses, openedCloses, opens int
+			classStore := &countingNudgeStore{MemStore: beads.NewMemStore(), closes: &classCloses}
+			openedStore := &countingNudgeStore{MemStore: beads.NewMemStore(), closes: &openedCloses}
+			meta := map[string]string{
+				"session_name":       tc.sessionName,
+				"alias":              alias,
+				"continuation_epoch": "3",
+			}
+			if tc.transport != "" {
+				meta["transport"] = tc.transport
+			}
+			sessionBead, err := openedStore.Create(beads.Bead{
+				Type:     sessionBeadType,
+				Labels:   []string{sessionBeadLabel},
+				Metadata: meta,
+			})
+			if err != nil {
+				t.Fatalf("create session bead: %v", err)
+			}
+			assignee := tc.assignee(sessionBead.ID)
+			prevOpen := openOwnedNudgeBeadStore
+			openOwnedNudgeBeadStore = func(string) (beads.NudgesStore, beads.Store) {
+				opens++
+				return beads.NudgesStore{Store: classStore}, openedStore
+			}
+			t.Cleanup(func() { openOwnedNudgeBeadStore = prevOpen })
+			var pollerSessions []string
+			prevPoller := startNudgePoller
+			startNudgePoller = func(_, _, sessionName string) error {
+				pollerSessions = append(pollerSessions, sessionName)
+				return nil
+			}
+			t.Cleanup(func() { startNudgePoller = prevPoller })
 
-	state, err := nudgequeue.LoadState(cityDir)
-	if err != nil {
-		t.Fatalf("LoadState: %v", err)
-	}
-	if len(state.Pending) != 1 {
-		t.Fatalf("pending = %#v, want exactly one continuation nudge", state.Pending)
-	}
-	item := state.Pending[0]
-	if item.Agent != assignee {
-		t.Fatalf("queued nudge Agent = %q, want %q", item.Agent, assignee)
-	}
-	if item.Source != "hook-claim-continuation" {
-		t.Fatalf("queued nudge Source = %q, want hook-claim-continuation", item.Source)
-	}
-	if item.SessionID != sessionBead.ID || item.ContinuationEpoch != "3" {
-		t.Fatalf("fence = (%q, %q), want (%q, 3): the fence must come from the session class", item.SessionID, item.ContinuationEpoch, sessionBead.ID)
-	}
-	if opens != 1 {
-		t.Fatalf("opens = %d, want 1", opens)
-	}
-	if openedCloses != 1 {
-		t.Fatalf("opened handle closes = %d, want 1", openedCloses)
-	}
-	if classCloses != 0 {
-		t.Fatalf("nudges-class store closes = %d, want 0: only the opened handle may be closed", classCloses)
+			hookContinuationNudgeEnqueue(assignee)
+
+			state, err := nudgequeue.LoadState(cityDir)
+			if err != nil {
+				t.Fatalf("LoadState: %v", err)
+			}
+			if len(state.Pending) != 1 {
+				t.Fatalf("pending = %#v, want exactly one continuation nudge", state.Pending)
+			}
+			item := state.Pending[0]
+			if item.Agent != assignee {
+				t.Fatalf("queued nudge Agent = %q, want %q", item.Agent, assignee)
+			}
+			if item.Source != "hook-claim-continuation" {
+				t.Fatalf("queued nudge Source = %q, want hook-claim-continuation", item.Source)
+			}
+			if item.SessionID != sessionBead.ID || item.ContinuationEpoch != "3" {
+				t.Fatalf("fence = (%q, %q), want (%q, 3): the fence must come from the session class", item.SessionID, item.ContinuationEpoch, sessionBead.ID)
+			}
+			if tc.wantPoller {
+				if len(pollerSessions) != 1 || pollerSessions[0] != tc.wantSession {
+					t.Fatalf("startNudgePoller sessions = %v, want [%s]", pollerSessions, tc.wantSession)
+				}
+			} else if len(pollerSessions) != 0 {
+				t.Fatalf("startNudgePoller sessions = %v, want none for acp transport", pollerSessions)
+			}
+			if opens != 1 {
+				t.Fatalf("opens = %d, want 1", opens)
+			}
+			if openedCloses != 1 {
+				t.Fatalf("opened handle closes = %d, want 1", openedCloses)
+			}
+			if classCloses != 0 {
+				t.Fatalf("nudges-class store closes = %d, want 0: only the opened handle may be closed", classCloses)
+			}
+		})
 	}
 }

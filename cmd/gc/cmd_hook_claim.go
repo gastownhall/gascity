@@ -3056,22 +3056,34 @@ func hookContinuationNudgeEnqueue(assignee string) {
 		sessionName: assignee,
 		cfg:         cfg,
 	}
-	// Apply a session fence so a stale nudge from a prior run of this slot
-	// is rejected at delivery if the slot is recycled before the nudge fires.
-	// Best-effort: if the store is unavailable the nudge enqueues without a
-	// fence (same behavior as before this fix). Close only the handle this
-	// call opened, never the nudges-class store (see openOwnedNudgeBeadStore),
-	// and read session beads from the session class, not the nudges class.
+	// The assignee is the claim identity (hookClaimAssigneeIdentity picks the
+	// first of alias, session ID, agent, resolved agent name, and session
+	// name), not necessarily the runtime session name. Resolve it to the
+	// session bead without materializing named sessions so the poller gets the
+	// real runtime session name and transport, and the fence ties the item to
+	// this session's generation; delivery may re-fence it to a replacement
+	// occupant of the same seat. Best-effort: if the store is unavailable or
+	// the assignee does not resolve, fall back to a session-name fence lookup.
+	// Close only the handle this call opened, never the nudges-class store
+	// (see openOwnedNudgeBeadStore), and read session beads from the session
+	// class, not the nudges class.
 	store, opened := openOwnedNudgeBeadStore(cityPath)
 	if opened != nil {
 		defer closeBeadStoreHandle(opened) //nolint:errcheck
-		target = withNudgeTargetFence(cliSessionStore(opened, cfg, cityPath), target)
+		sessStore := cliSessionStore(opened, cfg, cityPath)
+		if id, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, assignee); err == nil {
+			if info, err := sessionFrontDoor(sessStore).Get(id); err == nil {
+				target = resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
+			}
+		}
+		if target.sessionID == "" {
+			target = withNudgeTargetFence(sessStore, target)
+		}
 	}
-	// The assignee is the right queue key: hookClaimAssigneeIdentity picks the
-	// first of alias, session ID, agent, resolved agent name, and session name,
-	// and delivery (queuedNudgeClaimableForTarget and the supervisor
-	// dispatcher) matches item.Agent against nudgeTarget.queueKeys, which
-	// carries each of those for the session.
+	// The assignee is the right queue key: delivery
+	// (queuedNudgeClaimableForTarget and the supervisor dispatcher) matches
+	// item.Agent against nudgeTarget.queueKeys, which carries the alias,
+	// session ID, agent identity, and session name for the session.
 	item := newQueuedNudgeWithOptions(assignee, "Work slung. Check your hook.", "hook-claim-continuation", time.Now(), queuedNudgeOptionsFromTarget(target))
 	if err := enqueueQueuedNudgeWithStore(cityPath, store, item); err != nil {
 		return

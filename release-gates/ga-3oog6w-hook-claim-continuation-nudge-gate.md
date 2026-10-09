@@ -106,10 +106,3 @@ The suite ran as a session-independent systemd service, with the official load g
 
 `test_log_dir: /var/tmp/gc-heavy-gate/runs/ga-3oog6w-rekey-fresh.c3/logs`
 Full proof: `/var/tmp/gc-heavy-gate/runs/ga-3oog6w-rekey-fresh.c3/FULL_SUITE_VERIFIED.json`; SHA-256 `05b2bb3ec2bafd3225b9c03973ba79d227dfde4c037721695788ff5bd5dd69c2`.
-
-## Publication disposition
-
-Mayor’s recorded disposition in `ga-au739d` authorizes publication only on `deploy/ga-3oog6w-gate`. Open no new PR; push nothing to the existing `work/ga-zdunsh-hook-claim-continuation-nudge` branch; make no PR edit or contributor response. Publish and verify `release-gate/deploy-clearance=success` on the exact gate-doc commit in `gastownhall/gascity`, then send the mayor `gated ga-3oog6w <gate-doc sha>`. The mayor owns the existing PR #3842 fast-forward and MPR routing. This explicit disposition is the reason clearance precedes the mayor’s PR-head update. No merge is authorized for the deployer.
-
-Supplemental pre-publication freshness check: {"base_moved": true, "checked_at": "2026-10-08T12:28:28.638380+00:00", "main": "7e91a156e3ccce0339d03494e8626298e51c42d2", "merge_tree": "a39f3b5c26e9903e28c8c417469573c72e1c2e83", "merge_tree_rc": 0, "source": "839e1ffdfdf9cef270e741e5a09eb5e75a9c3bec"}
-The full suite remains evidence for the pinned base/merge above; this supplemental check does not claim another suite run.
