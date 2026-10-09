@@ -80,7 +80,7 @@ func TestRollbackPendingCreateAtomicallyRetriesALostPostCloseFence(t *testing.T)
 			store, backing := backend.open(t)
 			created, info := seedRollbackPendingSession(t, store)
 			hooked := &closedReadHookStore{Store: store, hook: func(id string) {
-				if err := backing.SetMetadata(id, "archived_note", "kept"); err != nil {
+				if err := backing.SetMetadata(id, "test_archived_note", "kept"); err != nil {
 					t.Errorf("SetMetadata: %v", err)
 				}
 			}}
@@ -95,9 +95,9 @@ func TestRollbackPendingCreateAtomicallyRetriesALostPostCloseFence(t *testing.T)
 				t.Fatalf("Get: %v", err)
 			}
 			if got.Status != "closed" || got.Metadata["state"] != string(StateFailedCreate) ||
-				got.Metadata["session_name"] != "" || got.Metadata["archived_note"] != "kept" {
+				got.Metadata["session_name"] != "" || got.Metadata["test_archived_note"] != "kept" {
 				t.Fatalf("row = status %q state %q session_name %q archived_note %q, want closed failed-create, name released, the other write kept",
-					got.Status, got.Metadata["state"], got.Metadata["session_name"], got.Metadata["archived_note"])
+					got.Status, got.Metadata["state"], got.Metadata["session_name"], got.Metadata["test_archived_note"])
 			}
 		})
 	}

@@ -1118,7 +1118,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 			namedSessionMetadataKey:      "true",
 			namedSessionIdentityMetadata: "mayor",
 			namedSessionModeMetadata:     "always",
-			"config_hash":                runtime.CoreFingerprint(seedCfg),
+			"test_config_hash":           runtime.CoreFingerprint(seedCfg),
 			"live_hash":                  runtime.LiveFingerprint(seedCfg),
 			"generation":                 "1",
 			"continuation_epoch":         "1",

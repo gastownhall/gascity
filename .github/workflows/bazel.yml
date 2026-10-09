@@ -129,6 +129,7 @@ jobs:
       tier: ${{ steps.decide.outputs.tier }}
       lanes: ${{ steps.lanes.outputs.lanes }}
       base-sha: ${{ steps.base.outputs.base-sha }}
+      rrc: ${{ steps.rrc.outputs.rrc }}
     steps:
       # merge_group: PULL_REQUEST and FORK are false (no
       # github.event.pull_request on that event), so a queue run takes the
@@ -176,6 +177,35 @@ jobs:
           case "$mode" in remote|fork-ro|fork-rw) enabled=true ;; esac
           { echo "mode=$mode"; echo "enabled=$enabled"; echo "tier=$tier"; } >> "$GITHUB_OUTPUT"
           echo "Bazel execution mode: **$mode**" >> "$GITHUB_STEP_SUMMARY"
+
+      # Bazel's remote repo contents cache on rbe-west (ga-vnycm2.25,
+      # engdocs/design/bazel-remote-repo-contents-cache.md): extracted
+      # external repositories (go_deps, npm, debs) come from rbe-west's
+      # action cache instead of being re-fetched by every cold lane client.
+      # vars.RBE_REPO_CONTENTS_CACHE rolls it out after rbe-west's writer
+      # path (rrc-gate, the rbe-rrc-writer certificate) is deployed:
+      #   unset/off  nothing (the default: merging this changes no run);
+      #   seed       main pushes seed the cache (rrc-seed); no lane reads it;
+      #   canary     seed, and the unit lane reads;
+      #   on         seed, and every lane reads.
+      # Mode remote only: fork pull_request runs see no vars, and only
+      # rbe-west's trusted edge serves the entries. Any other value is off,
+      # with a warning, so a typo never fails the required gate.
+      - name: Remote repo contents cache
+        id: rrc
+        env:
+          RRC: ${{ vars.RBE_REPO_CONTENTS_CACHE }}
+          MODE: ${{ steps.decide.outputs.mode }}
+        run: |
+          rrc=off
+          case "$RRC" in
+            "" | off) ;;
+            seed | canary | on)
+              if [ "$MODE" = remote ]; then rrc=$RRC; fi ;;
+            *) echo "::warning title=RBE_REPO_CONTENTS_CACHE::unknown value '$RRC' (want off, seed, canary or on); treated as off" ;;
+          esac
+          echo "rrc=$rrc" >> "$GITHUB_OUTPUT"
+          echo "Remote repo contents cache: **$rrc**" >> "$GITHUB_STEP_SUMMARY"
 
       # The lane job's matrix, as JSON: a lane left out never starts a runner
       # (nor mints an rbe-fork certificate, so a fork run mints at most 4).
@@ -406,6 +436,22 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq tmux lsof openssh-client
 
+      # The remote repo contents cache, read-only (the rbe job's rrc output:
+      # canary, the unit lane; on, every lane). Each cached repository costs
+      # several sequential round trips and ~3700 of them resolve through
+      # Skyframe's loading threads (default: the CPU count), so without 64 of
+      # them a cached read is slower than fetching. Both lines are key
+      # neutral (scripts/bazel_key_parity_test.go). Reading only: the lane
+      # keeps setup-bazel's --noremote_upload_local_results, so nothing here
+      # writes; rrc-seed writes, on push to main.
+      - name: Remote repo contents cache (read)
+        if: needs.rbe.outputs.mode == 'remote' && (needs.rbe.outputs.rrc == 'on' || (needs.rbe.outputs.rrc == 'canary' && matrix.lane == 'unit'))
+        run: |
+          {
+            echo 'startup --experimental_remote_repo_contents_cache'
+            echo 'common --loading_phase_threads=64'
+          } >> .bazelrc.local
+
       # zstd transfers with the anonymous read-only cache (rbe-cache, :8443),
       # only while it advertises zstd: cache-zstd-probe.sh asks its
       # GetCapabilities, and any failure means no flag (never a failed step).
@@ -623,6 +669,172 @@ jobs:
         with:
           path: ${{ runner.temp }}/bazel-ci-cache
           key: bazel-repo-v4-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}
+
+  # The remote repo contents cache's only writer (ga-vnycm2.25). On a push to
+  # main, with the rbe job's rrc not off, run every lane's command with
+  # --nobuild: loading and analysis only, so only main's repository rules and
+  # Starlark run (gazelle, fetch_repo, pnpm-lock parsing, extraction: what
+  # every lane already runs on its runner), never a build or test action.
+  # Bazel uploads each reproducible repository's tree
+  # (--remote_upload_local_results) with a 30-minute rbe-rrc-writer
+  # certificate that rbe-west's mint signs only for this workflow on a push
+  # to main (.github/scripts/rrc-writer-credential.sh); rbe-west's rrc-gate
+  # admits repo-contents entries from it and refuses every other action
+  # cache write, and the certificate cannot Execute. Cache only (--remote_cache, no
+  # executor). Not in the gate's needs: a failed seed only leaves the lanes
+  # fetching. setup-bazel runs in local mode (no secrets): its rc, the
+  # runner cache and the pinned Bazel, nothing else.
+  rrc-seed:
+    name: bazel / repo contents cache seed
+    needs: rbe
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.rbe.outputs.mode == 'remote' && needs.rbe.outputs.rrc != 'off'
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # the rbe-rrc-writer certificate (GitHub OIDC)
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Set up Bazel
+        uses: ./.github/actions/setup-bazel
+      - name: Restore the LLVM archive
+        uses: ./.github/actions/llvm-archive-cache
+      - name: rbe-rrc-writer certificate
+        id: writer
+        env:
+          BAZEL_CI_SECRET_DIR: ${{ runner.temp }}/bazel-ci-secret
+        run: bash .github/scripts/rrc-writer-credential.sh
+      # Bazel exits 1 after `test --nobuild` even when loading and analysis
+      # succeed ("Couldn't start the build. Unable to run tests"); any other
+      # ERROR line, or no "Build completed successfully", fails the seed.
+      - name: Seed the remote repo contents cache
+        if: steps.writer.outputs.cert != ''
+        env:
+          LANES: ${{ needs.rbe.outputs.lanes }}
+          CERT: ${{ steps.writer.outputs.cert }}
+          KEY: ${{ steps.writer.outputs.key }}
+          ENDPOINT: ${{ steps.writer.outputs.endpoint }}
+          INSTANCE: ${{ steps.writer.outputs.instance }}
+        run: |
+          set -euo pipefail
+          jq -r '.[].cmd' <<<"$LANES" >"$RUNNER_TEMP/rrc-seed-cmds"
+          [ -s "$RUNNER_TEMP/rrc-seed-cmds" ] || { echo "::error::no lane commands"; exit 1; }
+          log="$RUNNER_TEMP/rrc-seed.log"
+          while IFS= read -r cmd; do
+            read -r -a args <<<"$cmd"
+            start=$(date +%s)
+            rc=0
+            bazel --experimental_remote_repo_contents_cache "${args[@]}" --nobuild \
+              --loading_phase_threads=64 \
+              --remote_cache="$ENDPOINT" --remote_instance_name="$INSTANCE" \
+              --tls_client_certificate="$CERT" --tls_client_key="$KEY" \
+              --remote_upload_local_results </dev/null 2>&1 | tee "$log" || rc=$?
+            if [ "$rc" -ne 0 ] && grep -q '^INFO: Build completed successfully' "$log" &&
+              ! grep '^ERROR:' "$log" | grep -qv "^ERROR: Couldn't start the build. Unable to run tests$"; then
+              rc=0
+            fi
+            echo "rrc-seed: \`$cmd\`: exit $rc, $(( $(date +%s) - start ))s" | tee -a "$GITHUB_STEP_SUMMARY"
+            [ "$rc" -eq 0 ] || exit "$rc"
+          done <"$RUNNER_TEMP/rrc-seed-cmds"
+      - name: Remove the writer key
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/bazel-ci-secret/rrc-writer.key" "$RUNNER_TEMP/bazel-ci-secret/rrc-writer.crt"
+
+  # Nightly check of the remote repo contents cache (ga-vnycm2.26, design
+  # R1/R2). A cached repository tree is trusted by every reader, and nothing
+  # on the reader checks it against what its rule produces. So, from
+  # bazel-nightly.yml (or a dispatch), fetch every lane's repositories cold
+  # (each lane's command with --nobuild and no repo contents cache, Bazel set
+  # up exactly as a lane) and compare each repository's tree and marker with
+  # the cached entry a lane would read for the same key
+  # (tools/bazel/rrc_verify.py, reads only, with the lanes' certificate). A
+  # mismatch is a poisoned entry or a rule falsely marked reproducible: the
+  # job fails and opens (or comments on) an rrc-verify issue. Nothing to
+  # check while RBE_REPO_CONTENTS_CACHE is off.
+  rrc-verify:
+    name: bazel / repo contents cache verify
+    needs: rbe
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.rbe.outputs.mode == 'remote' && needs.rbe.outputs.rrc != 'off'
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      issues: write # the rrc-verify alert issue
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Set up Bazel
+        uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR }}
+          RBE_TLS_CERT: ${{ secrets.RBE_TLS_CERT }}
+          RBE_TLS_KEY: ${{ secrets.RBE_TLS_KEY }}
+          RBE_INSTANCE: oss
+      - name: Restore the LLVM archive
+        uses: ./.github/actions/llvm-archive-cache
+      - name: Create Bazel test tmpdir
+        run: mkdir -p /tmp/bt
+      # The same `test --nobuild` exit handling as rrc-seed.
+      - name: Cold fetch (every lane, no repo contents cache)
+        env:
+          LANES: ${{ needs.rbe.outputs.lanes }}
+        run: |
+          set -euo pipefail
+          jq -r '.[].cmd' <<<"$LANES" >"$RUNNER_TEMP/rrc-verify-cmds"
+          [ -s "$RUNNER_TEMP/rrc-verify-cmds" ] || { echo "::error::no lane commands"; exit 1; }
+          log="$RUNNER_TEMP/rrc-verify-fetch.log"
+          while IFS= read -r cmd; do
+            read -r -a args <<<"$cmd"
+            rc=0
+            bazel "${args[@]}" --nobuild --loading_phase_threads=64 </dev/null 2>&1 | tee "$log" || rc=$?
+            if [ "$rc" -ne 0 ] && grep -q '^INFO: Build completed successfully' "$log" &&
+              ! grep '^ERROR:' "$log" | grep -qv "^ERROR: Couldn't start the build. Unable to run tests$"; then
+              rc=0
+            fi
+            [ "$rc" -eq 0 ] || exit "$rc"
+          done <"$RUNNER_TEMP/rrc-verify-cmds"
+      - name: Compare with the cache
+        id: verify
+        env:
+          ENDPOINT: ${{ secrets.RBE_WEST_EXECUTOR }}
+          SECRET_DIR: ${{ runner.temp }}/bazel-ci-secret
+        run: |
+          set -euo pipefail
+          python3 tools/bazel/rrc_verify.py \
+            --output-base "$(bazel info output_base)" \
+            --endpoint "$ENDPOINT" --instance oss \
+            --cert "$SECRET_DIR/client.crt" --key "$SECRET_DIR/client.key" \
+            --bazel-version "$(tr -d '[:space:]' < .bazelversion)" \
+            --json "$RUNNER_TEMP/rrc-verify.json" --summary "$GITHUB_STEP_SUMMARY"
+      - name: Upload the report
+        if: always() && hashFiles(format('{0}/rrc-verify.json', runner.temp)) != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rrc-verify-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rrc-verify.json
+          retention-days: 30
+      - name: Alert (rrc-verify issue)
+        if: failure() && steps.verify.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="rrc-verify: remote repo contents cache differs from a cold fetch"
+          body="The nightly rrc-verify run found cached repository trees that differ from a cold fetch, or could not check them: $RUN_URL (summary and the rrc-verify report artifact).
+
+          A mismatch is a poisoned entry or a repository rule falsely marked reproducible (engdocs/design/bazel-remote-repo-contents-cache.md, R1/R2). Stop readers first: set the repository variable RBE_REPO_CONTENTS_CACHE to off. Then follow gascity/infra nativelink-cas/west/README.md (remote repo contents cache writer, poisoned entries)."
+          gh label create rrc-verify -R "$GITHUB_REPOSITORY" --color B60205 \
+            --description "Remote repo contents cache verification failures" 2>/dev/null || true
+          n=$(gh issue list -R "$GITHUB_REPOSITORY" --label rrc-verify --state open --json number --jq '.[0].number // empty')
+          if [ -n "$n" ]; then
+            gh issue comment "$n" -R "$GITHUB_REPOSITORY" --body "Again: $RUN_URL"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --label rrc-verify --title "$title" --body "$body"
+          fi
 
   # Cross-phase test skipping, measured: one report over every lane's BEP file
   # (scripts/bazel-bep-summary.go, internal/testpolicy/bepsummary), one phase

@@ -1418,7 +1418,7 @@ func TestOneShotCLIFencedWritesResolveTheEmittingStoreOnAMigratedCity(t *testing
 		err = applySessionKillFencePatch(sessions, row.ID, func(beads.Bead) (map[string]string, bool) {
 			decisions++
 			if decisions == 1 {
-				if err := leaf.SetMetadata(row.ID, "racer", "won"); err != nil {
+				if err := leaf.SetMetadata(row.ID, "test_racer", "won"); err != nil {
 					t.Fatalf("interleaving a write: %v", err)
 				}
 			}

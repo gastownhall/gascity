@@ -2928,7 +2928,6 @@ func TestProcessScopeCheckUsesSingleWorkflowSnapshotAndEmitsTrace(t *testing.T) 
 		"scope-check bead=" + control.ID + " phase=load-snapshot start",
 		"scope-check bead=" + control.ID + " phase=load-snapshot ok",
 		"scope-check bead=" + control.ID + " snapshot root=" + workflow.ID,
-		"scope-check bead=" + control.ID + " phase=propagate-metadata",
 		"scope-check bead=" + control.ID + " phase=close-body",
 	} {
 		if !strings.Contains(traceText, want) {
@@ -3164,6 +3163,15 @@ func (s *failBodyMetadataStore) SetMetadataBatch(id string, kvs map[string]strin
 		return errors.New("injected body metadata failure")
 	}
 	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// Update fails the same body closeout when it arrives as one write: the
+// propagated member metadata and the close together.
+func (s *failBodyMetadataStore) Update(id string, opts beads.UpdateOpts) error {
+	if id == s.failID && opts.Metadata["review.verdict"] != "" {
+		return errors.New("injected body metadata failure")
+	}
+	return s.Store.Update(id, opts)
 }
 
 func newStrictCloseStore() *strictCloseStore {
@@ -11309,8 +11317,8 @@ func TestProcessWorkflowFinalize_PurgeOnMissingDir(t *testing.T) {
 
 // TestCloseScopeAsPassedSharedConvergence exercises the single scope-close
 // helper that both processScopeCheck branches and reconcileTerminalScopedMember
-// now share: propagate non-gc.* member metadata onto the body, write the
-// resolved output_json, and close the body pass unless it is already closed.
+// now share: propagate non-gc.* member metadata and the resolved output_json
+// onto the body, and close it pass unless it is already closed, as one write.
 func TestCloseScopeAsPassedSharedConvergence(t *testing.T) {
 	t.Parallel()
 
@@ -11387,14 +11395,18 @@ func TestCloseScopeAsPassedSharedConvergence(t *testing.T) {
 			}
 
 			traceText := trace.String()
-			for _, want := range []string{"phase=propagate-metadata", "phase=resolve-output", "phase=write-output", "phase=reload-body"} {
-				if !strings.Contains(traceText, want) {
-					t.Fatalf("trace missing %q:\n%s", want, traceText)
-				}
+			if !strings.Contains(traceText, "phase=resolve-output") {
+				t.Fatalf("trace missing %q:\n%s", "phase=resolve-output", traceText)
 			}
+			// An open body takes its metadata and its close in one write; an
+			// already closed body takes the metadata alone.
 			gotClose := strings.Contains(traceText, "phase=close-body ")
 			if gotClose != tc.wantCloseTrace {
 				t.Fatalf("close-body trace present=%v, want %v:\n%s", gotClose, tc.wantCloseTrace, traceText)
+			}
+			gotPropagate := strings.Contains(traceText, "phase=propagate-metadata ")
+			if gotPropagate == tc.wantCloseTrace {
+				t.Fatalf("propagate-metadata trace present=%v, want %v:\n%s", gotPropagate, !tc.wantCloseTrace, traceText)
 			}
 		})
 	}

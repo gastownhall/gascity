@@ -34,7 +34,7 @@ const (
 // is a change in beads first: copy the files from beads and update these
 // digests in the same PR.
 var setupBazelBeadsDigests = map[string]string{
-	"action.yml":         "a104b74c2d470ee77b0fb4c3a12c506fd9a8771a23521f96bd28a1bc574c0e5f",
+	"action.yml":         "e3e8b2904de5153a9f8006ecd7058c11569c3e5311d2381f0c192843b760f559",
 	"fork-credential.sh": "abd68bbacb42fa5c7a71d06aa652bcf0f2fbe870f00b13b51650fe95c3bef59e",
 	"write-bazelrc.sh":   "ffd2f3ebca5a449e12db342c143b9d082cd1d3d5ab7abc8fac84475d5ed56550",
 }
@@ -283,7 +283,9 @@ func TestBazelMultiLaneWorkflowTriggersAndPermissions(t *testing.T) {
 		// rbe-worker S3a: secret-free (rbe-worker-repo-design.md §5.4, §6.3);
 		// issues: read for the same worker-env preflight the lane job runs.
 		"worker-host": {"contents": "read", "issues": "read"},
-		"gate":        nil, // the top-level contents: read
+		"rrc-seed":    {"contents": "read", "id-token": "write"}, // the rbe-rrc-writer certificate (bazel_rrc_test.go)
+		"rrc-verify":  {"contents": "read", "issues": "write"},   // the rrc-verify alert issue (bazel_rrc_test.go)
+		"gate":        nil,                                       // the top-level contents: read
 	}
 	if len(wf.Jobs) != len(wantJobs) {
 		t.Errorf("%s has %d jobs, want %d (%v)", bazelMultiLaneWorkflow, len(wf.Jobs), len(wantJobs), wantJobs)
