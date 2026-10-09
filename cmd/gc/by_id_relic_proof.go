@@ -95,7 +95,12 @@ package main
 //     denies the id, and twinNone is exactly bindingGivesIDATwin's "no" (the
 //     per-id manifest rule when the manifest was read, the binding-wide rule
 //     when it was not). twinNoSplit is the shape the census never denies
-//     anything for, so a refused city with no whole split falls through too.
+//     anything for, so a refused city with no split falls through too. It is
+//     withheld from a revert the served-binding note holds and from an
+//     unsupported arrangement: there a binding the config no longer serves
+//     may hold every preserved relic, the work store answers from frozen
+//     copies, and the funnel's refusal is the only thing that says so — so
+//     those take the verdict (it refuses before any listing, so cheaply).
 //
 // So bdByIDAnswerIsThePassthroughForEveryVerdict takes the census first and
 // skips the funnel when every subject is non-reserved and twinNone or
@@ -256,9 +261,11 @@ const (
 	// proven by the rule bindingGivesIDATwin applies (the manifest, when it
 	// was read; else the binding-wide census).
 	twinNone
-	// twinNoSplit: the city configures no whole-split binding, the only
-	// arrangement a migration can have produced, so no binding can hold a
-	// preserved id. It is also the one arrangement the boot gate never serves.
+	// twinNoSplit: the city points every class at work (or has no [storage])
+	// and no served-binding note says it ever served a split, so no binding
+	// can hold a preserved id. An unsupported arrangement, or a revert held by
+	// the note, is twinUndecided: a binding the config no longer names may
+	// still hold every relic.
 	twinNoSplit
 )
 
@@ -324,8 +331,9 @@ func byIDTwinProofsFor(cityPath string, ids []string) map[string]byIDTwinProof {
 // plan, open the binding it names, and ask each derived binding whether each
 // id has a twin there.
 //
-// Every early return before the open is either twinNoSplit (the config names
-// no whole split, so no binding can hold a preserved id) or twinUndecided, and
+// Every early return before the open is either twinNoSplit (every class on
+// work and no note says the city ever served a split, so no binding can hold a
+// preserved id) or twinUndecided, and
 // they are deliberately silent. A refused city has already had its refusal
 // printed once by the one-shot gate, and the reasons a binding cannot be
 // reopened here are the reasons it was refused in the first place; reporting
@@ -348,17 +356,31 @@ func censusCityBindingTwins(cityPath string, ids []string) map[string]byIDTwinPr
 	if err != nil || cfg == nil {
 		return all(twinUndecided)
 	}
-	if cfg.Storage == nil {
+	shape, binding := storageSplitNone, ""
+	if cfg.Storage != nil {
+		shape, binding = storageSplitShapeOf(cfg.EffectiveStorage())
+	}
+	switch shape {
+	case storageSplitWhole:
+	case storageSplitNone:
+		// The only arrangement this build serves is also the only one a
+		// migration can have produced, so a city pointing every class at work
+		// has no binding that can hold a preserved id — unless it HAS served
+		// a split and was pointed back. The served-binding note is that
+		// history, and while it holds, a binding this config no longer names
+		// may hold every relic the migration preserved: decide nothing, so
+		// the funnel's refusal reaches the operator.
+		if _, held := revertHoldingNote(storageSplitNone, cityPath); held {
+			return all(twinUndecided)
+		}
 		return all(twinNoSplit)
+	default:
+		// An arrangement this build cannot serve — a partial move, a fan-out —
+		// may be a served split edited out from under its binding, so it
+		// decides nothing either. The funnel refuses it before any listing.
+		return all(twinUndecided)
 	}
 	storage := cfg.EffectiveStorage()
-	shape, binding := storageSplitShapeOf(storage)
-	if shape != storageSplitWhole {
-		// The only arrangement this build serves is also the only one a
-		// migration can have produced, so it is the only one whose binding can
-		// hold a preserved id.
-		return all(twinNoSplit)
-	}
 	// Native transport is checked here, against the city's own cfg, because
 	// the open below carries none: native_transport "off" keeps the census from
 	// opening a natively served binding, as it keeps the boot gate from

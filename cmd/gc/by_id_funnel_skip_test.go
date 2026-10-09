@@ -280,6 +280,84 @@ func TestByIDFunnelSkipNeverReadsABindingFaultAsAbsence(t *testing.T) {
 	if proof := bindingsTwinProof(nil, "gc-work1", map[string]bool{}, true); proof.verdict != twinUndecided {
 		t.Fatalf("no bindings at all folded to verdict %d, want twinUndecided", proof.verdict)
 	}
+	// One binding answered absence and one decided nothing: absence is not
+	// proven for the binding that never answered, so the fold is not twinNone.
+	if proof := bindingsTwinProof([]storeref.ClassBinding{clean, {}}, "gc-work1", map[string]bool{}, true); proof.verdict != twinUndecided {
+		t.Fatalf("one clean miss and one storeless binding folded to verdict %d, want twinUndecided", proof.verdict)
+	}
+}
+
+// TestByIDFunnelSkipTakesTheVerdictWhenTheConfigNoLongerNamesTheBinding pins
+// the two no-split shapes that are not twin-free. A city that served a split
+// and was pointed back at work (the served-binding note holds the revert), or
+// edited into an arrangement this build cannot serve, still has a binding
+// holding every preserved relic — the config just no longer names it. The work
+// store answers those ids from frozen copies on every verdict, and the funnel's
+// refusal is the only thing that tells the operator so. The census can prove
+// nothing there, so the skip must take the verdict (which refuses before any
+// listing), and the answer must still be the verdict's.
+func TestByIDFunnelSkipTakesTheVerdictWhenTheConfigNoLongerNamesTheBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		toml string
+	}{
+		{name: "reverted with the served-binding note", toml: ""},
+		{name: "an unsupported arrangement", toml: "unsupported"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, relic := funnelSkipCity(t, false)
+			// Serve the split once, as the controller's boot does, so the
+			// served-binding note records the history a revert is held by.
+			cliStorageRoutes(cityPath)
+			freshByIDProcess(t)
+			if tc.toml == "" {
+				writeOneShotCityTOML(t, cityPath, "")
+				if _, held := revertHoldingNote(storageSplitNone, cityPath); !held {
+					t.Fatal("the fixture's revert is not held by a served-binding note; it would not exercise the hazard")
+				}
+			} else {
+				// A partial move back: sessions on work, the rest still on the
+				// binding, which stays defined.
+				tomlPath := filepath.Join(cityPath, "city.toml")
+				body, err := os.ReadFile(tomlPath)
+				if err != nil {
+					t.Fatalf("reading city.toml: %v", err)
+				}
+				edited := strings.Replace(string(body), `sessions = "infra"`, `sessions = "work"`, 1)
+				if edited == string(body) {
+					t.Fatal("the fixture's city.toml carries no sessions class line to move")
+				}
+				if err := os.WriteFile(tomlPath, []byte(edited), 0o644); err != nil {
+					t.Fatalf("writing city.toml: %v", err)
+				}
+				cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+				if err != nil {
+					t.Fatalf("loading the edited city: %v", err)
+				}
+				if shape, _ := storageSplitShapeOf(cfg.EffectiveStorage()); shape != storageSplitUnsupported {
+					t.Fatalf("the edited city's shape is %d, want storageSplitUnsupported", shape)
+				}
+			}
+			for _, argv := range [][]string{
+				{"show", "gc-work1", "--json"},
+				{"show", relic.ID, "--json"},
+			} {
+				freshByIDProcess(t)
+				if bdByIDAnswerIsThePassthroughForEveryVerdict(cityPath, argv[1:2]) {
+					t.Errorf("%v: skipped the funnel on a city whose config no longer names the binding that may hold its relics", argv)
+				}
+				freshByIDProcess(t)
+				skipCode, skipHandled, skipOut := routeByIDForTest(cityPath, argv)
+				freshByIDProcess(t)
+				cliStorageRoutes(cityPath)
+				gateCode, gateHandled, gateOut := routeByIDForTest(cityPath, argv)
+				if skipCode != gateCode || skipHandled != gateHandled || skipOut != gateOut {
+					t.Errorf("%v: door answered (code=%d handled=%v out=%q), the verdict answers (code=%d handled=%v out=%q)",
+						argv, skipCode, skipHandled, skipOut, gateCode, gateHandled, gateOut)
+				}
+			}
+		})
+	}
 }
 
 // TestByIDFunnelSkipNeverOpensABindingTheFunnelHolds pins the second-handle
