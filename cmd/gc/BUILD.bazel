@@ -1756,6 +1756,7 @@ go_test(
         "testenv_test.go",
         "tick_read_budget_test.go",
         "tmux_leak_guard_check_test.go",
+        "tmux_leak_guard_mntns_test.go",
         "tmux_leak_guard_other_test.go",
         "tmux_leak_guard_test.go",
         "transcriptmeta_reconcile_test.go",

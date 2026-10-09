@@ -206,6 +206,13 @@ func sweepStaleTmuxServers(label string, out io.Writer, ownsRoot func(root strin
 	reapTmuxLeakProcesses(stale)
 }
 
+// socketRootGoneInOwnMountNamespace is the RED placeholder for ga-5hohvc: it
+// still judges root in this process's own mount namespace.
+func socketRootGoneInOwnMountNamespace(_ int, root string) bool {
+	_, err := os.Stat(root)
+	return os.IsNotExist(err)
+}
+
 func writeTmuxLeakReport(w io.Writer, leaked []tmuxProcInfo) {
 	for _, proc := range leaked {
 		fmt.Fprintf(w, "  pid=%d argv=%q\n", proc.PID, strings.Join(proc.Argv, " ")) //nolint:errcheck
