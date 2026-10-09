@@ -2,6 +2,7 @@
 package closeorder
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -24,13 +25,13 @@ func Order(store beads.Store, ids []string) ([]string, error) {
 		priority[id] = i
 	}
 
+	depsByID, err := closeDependencies(store, ids)
+	if err != nil {
+		return nil, err
+	}
 	blockedBy := make(map[string]map[string]struct{}, len(ids))
 	for _, id := range ids {
-		deps, err := store.DepList(id, "down")
-		if err != nil {
-			return nil, fmt.Errorf("listing close dependencies for %q: %w", id, err)
-		}
-		for _, d := range deps {
+		for _, d := range depsByID[id] {
 			if d.IssueID != id || d.Type != "blocks" {
 				continue
 			}
@@ -81,4 +82,27 @@ func Order(store beads.Store, ids []string) ([]string, error) {
 		emitted[pick] = true
 	}
 	return out, nil
+}
+
+// closeDependencies reads the DOWN edges of every id: in one round trip when
+// the store has a batched dep read, one DepList per id otherwise.
+func closeDependencies(store beads.Store, ids []string) (map[string][]beads.Dep, error) {
+	if batch, ok := beads.DepListBatchFor(store); ok {
+		deps, err := batch.DepListBatch(ids)
+		if err == nil {
+			return deps, nil
+		}
+		if !errors.Is(err, beads.ErrDepListBatchUnsupported) {
+			return nil, fmt.Errorf("listing close dependencies: %w", err)
+		}
+	}
+	deps := make(map[string][]beads.Dep, len(ids))
+	for _, id := range ids {
+		d, err := store.DepList(id, "down")
+		if err != nil {
+			return nil, fmt.Errorf("listing close dependencies for %q: %w", id, err)
+		}
+		deps[id] = d
+	}
+	return deps, nil
 }

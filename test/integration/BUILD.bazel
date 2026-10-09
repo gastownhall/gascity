@@ -41,6 +41,7 @@ go_test(
     name = "integration_test",
     srcs = [
         "bdstore_batch_delete_test.go",
+        "bdstore_batch_reads_test.go",
         "bdstore_runner_isolation_test.go",
         "bdstore_test.go",
         "bead_id_helpers_test.go",

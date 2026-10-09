@@ -119,6 +119,7 @@ go_test(
         "caching_store_watermark_holes_internal_test.go",
         "caching_store_watermark_internal_test.go",
         "caching_store_writes_internal_test.go",
+        "children_batch_test.go",
         "class_store_test.go",
         "close_reason_internal_test.go",
         "conditional_labels_conformance_test.go",
@@ -231,6 +232,7 @@ go_test(
         "testenv_import_test.go",
         "unread_store_notice_internal_test.go",
         "unread_store_notice_test.go",
+        "update_reporting_test.go",
         "updated_at_store_test.go",
     ],
     data = glob(
