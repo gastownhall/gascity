@@ -1984,14 +1984,13 @@ esac
 // contracts to this one. The served bytes stay pinned by the workquery
 // goldens.
 func TestEffectiveWorkQueryRoutedTierServesCanonicalPriorityOrder(t *testing.T) {
-	blind := `"gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json --sort oldest`
 	mk := routedReadyTierCommand
 	for name, got := range map[string]string{
 		"default":   mk(QueryTopology{}),
 		"bd105":     mk(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}}),
 		"federated": mk(QueryTopology{FederatedReady: true}),
 	} {
-		if strings.Contains(got, blind) {
+		if strings.Contains(got, "--sort") {
 			t.Errorf("%s: routed tier must serve the reader's canonical priority-first default order, not --sort oldest: %q", name, got)
 		}
 	}

@@ -116,7 +116,7 @@ func agreementRows() []agreementRow {
 			wantServable: true,
 		},
 		{
-			// The discriminating row for LABEL comparison, and it points the
+			// The discriminating row for HOLD comparison, and it points the
 			// other way: the reader serves it (exact-match miss) but the hook
 			// strips it (EqualFold hit), so the worker never sees it.
 			name: "routed bead held by a case-variant hold label",
@@ -142,6 +142,26 @@ func agreementRows() []agreementRow {
 				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
 			},
 			wantServable: false,
+		},
+		{
+			// Human labels are exact-match exclusions; case variants remain
+			// claimable and must also count as demand.
+			name: "routed bead with Human label",
+			bead: beads.Bead{
+				ID: "a-15", Status: "open", Type: "task",
+				Labels:   []string{"Human"},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
+			wantServable: true,
+		},
+		{
+			name: "routed bead with HUMAN label",
+			bead: beads.Bead{
+				ID: "a-16", Status: "open", Type: "task",
+				Labels:   []string{"HUMAN"},
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
+			},
+			wantServable: true,
 		},
 		{
 			// Collapse x hold: the route form is fixed by the pass, and the row
