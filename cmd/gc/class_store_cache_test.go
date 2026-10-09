@@ -506,7 +506,7 @@ func TestControlReadySnapshotCachesTheBindingEngine(t *testing.T) {
 	installControlReadyCacheSourcesFn(t, dir, func(string, string, *config.City) ([]beads.Store, []beads.Store, error) {
 		return []beads.Store{leg}, nil, nil
 	})
-	caches := controlReadyCachesFor(dir, t.TempDir(), &config.City{})
+	caches := controlReadyCachesFor(dir, t.TempDir(), func() *config.City { return &config.City{} })
 	if len(caches) != 1 {
 		t.Fatalf("control-ready caches = %d, want 1", len(caches))
 	}

@@ -464,7 +464,16 @@ type controlReadyCacheEntry struct {
 // and the registry loser's CachingStores are pure in-memory snapshots
 // (CachedReady never touches a backing), so an overwritten entry is never a
 // use-after-close.
-func controlReadyCachesFor(dir, cityPath string, cfg *config.City) []*beads.CachingStore {
+//
+// cfgFn is called at most once, and only on the branch that actually opens
+// the leg stores (no entry yet, or an expired one) -- the hot within-TTL path
+// never touches it. A full config load re-validates every builtin pack's file
+// manifest (EnsureBuiltinRuntimeAssets), so paying it on ticks this cache
+// already answers from a warm snapshot was the dominant cost of the
+// control-dispatcher serve loop's steady-state CPU (sample-profiled: 86/87
+// samples under loadCityConfig). cfgFn lets the caller defer that cost to the
+// ticks that truly need it.
+func controlReadyCachesFor(dir, cityPath string, cfgFn func() *config.City) []*beads.CachingStore {
 	controlReadyCacheRegistry.mu.Lock()
 	entry, ok := controlReadyCacheRegistry.byDir[dir]
 	fresh := ok && time.Since(entry.primedAt) < controlReadyCacheTTL
@@ -473,6 +482,10 @@ func controlReadyCachesFor(dir, cityPath string, cfg *config.City) []*beads.Cach
 		return entry.caches
 	}
 
+	var cfg *config.City
+	if cfgFn != nil {
+		cfg = cfgFn()
+	}
 	sources, owned, err := controlReadyCacheSourcesFn(dir, cityPath, cfg)
 	if err != nil {
 		return nil
@@ -580,6 +593,15 @@ func cachedControlReadyUnion(caches []*beads.CachingStore) ([]beads.Bead, bool) 
 	return mergeControlReadyLegs(legs...), true
 }
 
+// loadCityConfigForControlReady is a seam so tests can observe (or stub out)
+// the config load tryControlReadyFromCacheOrFallback pays for on a cold-start
+// or expired cache. Production loads the real config, at the same cost
+// EnsureBuiltinRuntimeAssets always charges the first caller into a city.
+var loadCityConfigForControlReady = func(cityPath string) *config.City {
+	cfg, _ := loadCityConfig(cityPath, io.Discard)
+	return cfg
+}
+
 // tryControlReadyFromCacheOrFallback answers a control-dispatcher readiness
 // scan in-process instead of running workflowServeControlReadyQueryForBeads's
 // shell script. handled reports whether workQuery was even recognized as a
@@ -595,11 +617,11 @@ func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]st
 	}
 
 	cityPath := cityForStoreDir(dir)
-	cfg, _ := loadCityConfig(cityPath, io.Discard)
 	envList := mergeRuntimeEnv(os.Environ(), env)
 
 	if !parsed.includeEphemeral {
-		if caches := controlReadyCachesFor(dir, cityPath, cfg); len(caches) > 0 {
+		cfgFn := func() *config.City { return loadCityConfigForControlReady(cityPath) }
+		if caches := controlReadyCachesFor(dir, cityPath, cfgFn); len(caches) > 0 {
 			if ready, ok := cachedControlReadyUnion(caches); ok {
 				return beadsToHookBeads(evaluateControlReady(ready, parsed, envList)), true, nil
 			}
