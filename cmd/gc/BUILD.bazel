@@ -1535,6 +1535,7 @@ go_test(
         "reconcile_session_effects_test.go",
         "reconcile_session_fence_test.go",
         "reconcile_session_namelock_test.go",
+        "reconcile_session_timeline_test.go",
         "reconcile_settle_test.go",
         "reconcile_sim_invariants_test.go",
         "reconcile_sim_scenarios_test.go",

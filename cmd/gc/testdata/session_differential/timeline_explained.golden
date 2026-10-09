@@ -1,0 +1,56 @@
+# The explained legacy/v2 differences at each step's end, with their values.
+# Regenerate with -update-golden when an arm's port moves them.
+
+=== a crash 29s after wake
+## 0 seed (+20s)
+@ +0s
+row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
+row:gc-1:labels legacy="agent:worker,gc:session" v2="gc:session" [A7 identity]
+row:gc-1:pool_slot legacy="" v2="1" [A7 identity]
+row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
+row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
+row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|source=legacy_off|wake=resume|cap=full|deps=|template=worker" v2="" [sleep-policy-keys]
+row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
+## 1 crash (+1m19s)
+@ +29s
+row:gc-1:last_woke_at legacy="" v2="T+0s" [A18 start]
+row:gc-1:wake_attempts legacy="3" v2="2" [stability-accrual]
+@ +39s
+event:session.woke worker null legacy="1" v2="" [A18 start]
+provider:RemoveMeta s-gc-1 legacy="5" v2="" [A18 start]
+provider:Start s-gc-1 legacy="1" v2="" [A18 start]
+row:gc-1:awake_started_at legacy="T+39s" v2="" [A18 start]
+row:gc-1:core_hash_breakdown.AcceptStartupDialogs legacy="e3b0c44298fc1c14" v2="" [A18 start]
+row:gc-1:core_hash_breakdown.Command legacy="b5bea41b6c623f7c" v2="" [A18 start]
+row:gc-1:core_hash_breakdown.CopyFiles legacy="e3b0c44298fc1c14" v2="" [A18 start]
+row:gc-1:core_hash_breakdown.Env legacy="<changed>" v2="" [A18 start]
+row:gc-1:core_hash_breakdown.FPExtra legacy="730fa5bc1a6062f2" v2="" [A18 start]
+row:gc-1:core_hash_breakdown.Lifecycle legacy="e3b0c44298fc1c14" v2="" [A18 start]
+row:gc-1:core_hash_breakdown.MCPServers legacy="e3b0c44298fc1c14" v2="" [A18 start]
+row:gc-1:core_hash_breakdown.MouseOn legacy="b1865da277ec01c2" v2="" [A18 start]
+row:gc-1:core_hash_breakdown.OverlayDir legacy="e3b0c44298fc1c14" v2="" [A18 start]
+row:gc-1:core_hash_breakdown.OverlayProviders legacy="e3b0c44298fc1c14" v2="" [A18 start]
+row:gc-1:core_hash_breakdown.PreStart legacy="e3b0c44298fc1c14" v2="" [A18 start]
+row:gc-1:core_hash_breakdown.SessionSetup legacy="e3b0c44298fc1c14" v2="" [A18 start]
+row:gc-1:core_hash_breakdown.SessionSetupScript legacy="e3b0c44298fc1c14" v2="" [A18 start]
+row:gc-1:core_hash_breakdown.version legacy="v6" v2="" [A18 start]
+row:gc-1:creation_complete_at legacy="T+39s" v2="" [A18 start]
+row:gc-1:generation legacy="2" v2="1" [A18 start]
+row:gc-1:last_woke_at legacy="T+39s" v2="T+0s" [A18 start]
+row:gc-1:live_hash legacy="<changed>" v2="" [A18 start]
+row:gc-1:primed_at legacy="T+39s" v2="" [A18 start]
+row:gc-1:prompt_hash legacy="<changed>" v2="" [A18 start]
+row:gc-1:started_config_hash legacy="<changed>" v2="" [A18 start]
+row:gc-1:started_launch_hash legacy="<changed>" v2="" [A18 start]
+row:gc-1:started_live_hash legacy="<changed>" v2="" [A18 start]
+row:gc-1:started_provision_hash legacy="<changed>" v2="" [A18 start]
+row:gc-1:state legacy="active" v2="asleep" [A18 start]
+row:gc-1:state_reason legacy="creation_complete" v2="" [A18 start]
+runtime:s-gc-1 legacy="id=gc-1 epoch=2 token=<set> alive attached=false" v2="" [A18 start]
+@ +49s
+event:session.woke worker null resolved
+provider:RemoveMeta s-gc-1 resolved
+provider:Start s-gc-1 resolved
+row:gc-1:state legacy="awake" v2="asleep" [A18 start]
+@ +1m9s
+row:gc-1:wake_attempts legacy="0" v2="2" [stability-accrual]
