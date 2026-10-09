@@ -3304,9 +3304,17 @@ export type SessionMessageInputBody = {
      * Message text to send.
      */
     message: string;
+    /**
+     * Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.
+     */
+    resume?: boolean;
 };
 
 export type SessionMessageSucceededPayload = {
+    /**
+     * True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h.
+     */
+    queued: boolean;
     /**
      * Correlation ID from the 202 response.
      */
@@ -3315,6 +3323,14 @@ export type SessionMessageSucceededPayload = {
      * Session ID that received the message.
      */
     session_id: string;
+    /**
+     * Why the controller will not start the session for a queued message, with the remedy.
+     */
+    will_not_start_reason?: string;
+    /**
+     * Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.
+     */
+    will_start?: boolean;
 };
 
 export type SessionPatchBody = {
@@ -4557,6 +4573,10 @@ export type SessionSubmitInputBody = {
      * Message text to submit.
      */
     message: string;
+    /**
+     * Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.
+     */
+    resume?: boolean;
 };
 
 export type SessionSubmitSucceededPayload = {
@@ -4576,6 +4596,14 @@ export type SessionSubmitSucceededPayload = {
      * Session ID that received the submission.
      */
     session_id: string;
+    /**
+     * Why the controller will not start the session for a queued message, with the remedy.
+     */
+    will_not_start_reason?: string;
+    /**
+     * Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.
+     */
+    will_start?: boolean;
 };
 
 export type SessionTranscriptConversationResponse = {

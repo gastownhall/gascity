@@ -247,6 +247,7 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 		"GC_DOLT_COMPACT_SKIP_FETCH_DBS",
 		"GC_DOLT_RIG_LIST_TIMEOUT_SECS",
 		"GC_DOLT_COMPACT_ALERT_TO",
+		"GC_DOLT_CONFIG_FILE",
 		"GC_FAKE_DOLT_COMPACT_MODE",
 		"GC_FAKE_DOLT_COUNT_FILE",
 		"GC_FAKE_DOLT_STATE_FILE",
@@ -1390,6 +1391,9 @@ case "$query" in
       printf 'commit rejected after external writer advanced HEAD\n' >&2
       exit 44
     fi
+    if [ "$mode" = "gc_read_timeout_after_slow_flatten" ]; then
+      sleep 3
+    fi
     set_head compactcommit
     if [ "$mode" = "same_row_count_writer" ]; then
       set_hash hash-after-writer
@@ -1416,6 +1420,21 @@ case "$query" in
     if [ "$mode" = "gc_failure" ]; then
       printf 'gc exploded\n' >&2
       exit 45
+    fi
+    if [ "$mode" = "gc_read_timeout_slow" ]; then
+      sleep 2
+    fi
+    if [ "$mode" = "gc_read_timeout" ] || [ "$mode" = "gc_read_timeout_slow" ] || [ "$mode" = "gc_read_timeout_after_slow_flatten" ]; then
+      printf "error on line 1 for query CALL DOLT_GC('--full'): Error 1105 (HY000): Error in SaveHashes call: SaveHashes, error calling getManyCompressed: context canceled\n" >&2
+      exit 1
+    fi
+    if [ "$mode" = "gc_connection_closed" ]; then
+      printf "error on line 1 for query CALL DOLT_GC('--full'): Error 1105 (HY000): connection was closed\n" >&2
+      exit 1
+    fi
+    if [ "$mode" = "gc_row_read_wait" ]; then
+      printf "error on line 1 for query CALL DOLT_GC('--full'): Error 1105 (HY000): row read wait bigger than connection timeout\n" >&2
+      exit 1
     fi
     rm -rf -- "${GC_DOLT_DATA_DIR:-}/$db/.dolt/noms/oldgen"
     exit 0
@@ -3902,6 +3921,207 @@ func TestCompactScriptSurfacesGCFailureStderr(t *testing.T) {
 	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("GC failure should write pending-GC marker: %v", err)
+	}
+}
+
+// writeCompactDoltConfig renders a sql-server config the way both managed
+// config writers do, with the given listener.read_timeout_millis.
+func writeCompactDoltConfig(t *testing.T, path, readTimeoutMillis string) {
+	t.Helper()
+	config := "listener:\n  port: 3307\n  read_timeout_millis: " + readTimeoutMillis + "\n  write_timeout_millis: 300000\n"
+	if err := os.WriteFile(path, []byte(config), 0o644); err != nil {
+		t.Fatalf("write dolt config: %v", err)
+	}
+}
+
+// The listener's read_timeout_millis is a wall-clock cap on any statement that
+// produces no rows, and DOLT_GC produces none until it finishes. The server
+// reports the kill as "context canceled", "connection was closed" or "row read
+// wait bigger than connection timeout", which read like a network fault. A GC
+// that ran as long as the rendered ceiling must be blamed on it, with the live
+// value and the city.toml override. A GC canceled well short of the ceiling
+// was ended by something else, so the ceiling must not be blamed. Either way
+// the pending-GC marker stays behind.
+func TestCompactScriptNamesReadTimeoutWhenFullGCIsCanceled(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		mode        string
+		serverError string
+		// The fake GC fails at once unless its mode sleeps, so a 1000 ms
+		// ceiling is one the run reached and a 120000 ms ceiling is one it
+		// fell far short of. The slow modes pin which clock is compared: a
+		// GC that sleeps 2s reaches a 2000 ms ceiling, while a 3s flatten
+		// before an instant GC takes the whole run to a 4000 ms ceiling but
+		// leaves the GC itself short of it.
+		readTimeoutMillis string
+		blamed            bool
+	}{
+		{name: "context_canceled", mode: "gc_read_timeout", serverError: "context canceled", readTimeoutMillis: "1000", blamed: true},
+		{name: "connection_was_closed", mode: "gc_connection_closed", serverError: "connection was closed", readTimeoutMillis: "1000", blamed: true},
+		{name: "row_read_wait", mode: "gc_row_read_wait", serverError: "row read wait bigger than connection timeout", readTimeoutMillis: "1000", blamed: true},
+		{name: "canceled_before_ceiling", mode: "gc_read_timeout", serverError: "context canceled", readTimeoutMillis: "120000"},
+		{name: "slow_gc_reaches_ceiling", mode: "gc_read_timeout_slow", serverError: "context canceled", readTimeoutMillis: "2000", blamed: true},
+		{name: "slow_flatten_does_not_count", mode: "gc_read_timeout_after_slow_flatten", serverError: "context canceled", readTimeoutMillis: "4000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			stateDir := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt")
+			managedConfig := filepath.Join(stateDir, "dolt-config.yaml")
+			writeCompactDoltConfig(t, managedConfig, tc.readTimeoutMillis)
+
+			out, err := fixture.run(t, tc.mode, "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+			if err == nil {
+				t.Fatalf("compact succeeded despite DOLT_GC cancellation:\n%s", out)
+			}
+			if !strings.Contains(out, tc.serverError) {
+				t.Fatalf("output missing the server's own error text %q:\n%s", tc.serverError, out)
+			}
+			ceiling := "listener.read_timeout_millis=" + tc.readTimeoutMillis + " ceiling in " + managedConfig
+			want := []string{
+				"before the " + ceiling + ", so that timeout did not end it",
+				"look in the sql-server log for a stop, restart, or dropped connection",
+			}
+			unwanted := []string{"ended DOLT_GC", "city.toml", "gc dolt restart"}
+			if tc.blamed {
+				want = []string{
+					"the managed sql-server ended DOLT_GC after ",
+					"s at its " + ceiling,
+					"the next full GC hits the same ceiling",
+					"raise it via city.toml [dolt] read_timeout_millis (keep it under half of write_timeout_millis), then gc dolt restart",
+				}
+				unwanted = []string{"so that timeout did not end it", "pending-GC retry fails"}
+			}
+			for _, w := range want {
+				if !strings.Contains(out, w) {
+					t.Fatalf("output missing %q:\n%s", w, out)
+				}
+			}
+			for _, u := range unwanted {
+				if strings.Contains(out, u) {
+					t.Fatalf("output must not contain %q:\n%s", u, out)
+				}
+			}
+			marker := filepath.Join(stateDir, "compact-pending-gc", "beads")
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatalf("canceled GC should still write the pending-GC marker: %v", err)
+			}
+		})
+	}
+}
+
+// Without a readable rendered config the run time cannot be checked against
+// the ceiling, so the diagnostic names the setting, hedges, and sends the
+// operator to the server log before the remedy.
+func TestCompactScriptNamesReadTimeoutWithoutRenderedConfig(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "gc_read_timeout", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite DOLT_GC cancellation:\n%s", out)
+	}
+	for _, want := range []string{
+		"most likely by the managed sql-server at its listener.read_timeout_millis ceiling",
+		"if the sql-server log shows an i/o timeout on that connection, raise it via city.toml [dolt] read_timeout_millis",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"read_timeout_millis=", "ended DOLT_GC"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("no rendered config, so the output must not contain %q:\n%s", unwanted, out)
+		}
+	}
+}
+
+// An explicit external-local target is a sql-server Gas City does not manage.
+// The server reads its own config, never the managed pack state, and
+// city.toml cannot reconfigure it, so a leftover managed config must not be
+// quoted and the remedy must be target-neutral. GC_DOLT_CONFIG_FILE names the
+// server's config when the caller knows it.
+func TestCompactScriptNamesReadTimeoutForExternalLocalTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// configFile returns GC_DOLT_CONFIG_FILE, or "" to leave it unset.
+		configFile func(t *testing.T, externalRoot string) string
+		quoted     bool
+	}{
+		{
+			name: "order_sentinel_config_absent",
+			configFile: func(_ *testing.T, externalRoot string) string {
+				return filepath.Join(externalRoot, "dolt-config.yaml")
+			},
+		},
+		{
+			name:       "config_file_unset",
+			configFile: func(*testing.T, string) string { return "" },
+		},
+		{
+			name: "server_config_rendered",
+			configFile: func(t *testing.T, externalRoot string) string {
+				path := filepath.Join(externalRoot, "server-config.yaml")
+				writeCompactDoltConfig(t, path, "1000")
+				return path
+			},
+			quoted: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			stateDir := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt")
+			managedConfig := filepath.Join(stateDir, "dolt-config.yaml")
+			writeCompactDoltConfig(t, managedConfig, "1000")
+			externalRoot := filepath.Join(stateDir, "external-target")
+			if err := os.MkdirAll(filepath.Join(externalRoot, "beads", ".dolt"), 0o755); err != nil {
+				t.Fatalf("mkdir external target db: %v", err)
+			}
+			env := []string{
+				"GC_DOLT_MANAGED_LOCAL=0",
+				"GC_DOLT_HOST=127.0.0.2",
+				"GC_DOLT_DATA_DIR=" + externalRoot,
+				"GC_DOLT_STATE_FILE=" + filepath.Join(externalRoot, "dolt-state.json"),
+				"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+			}
+			configFile := tc.configFile(t, externalRoot)
+			if configFile != "" {
+				env = append(env, "GC_DOLT_CONFIG_FILE="+configFile)
+			}
+
+			out, err := fixture.run(t, "gc_read_timeout", env...)
+			if err == nil {
+				t.Fatalf("compact succeeded despite DOLT_GC cancellation:\n%s", out)
+			}
+			want := []string{"most likely by the sql-server at its listener.read_timeout_millis ceiling"}
+			unwanted := []string{"read_timeout_millis="}
+			if tc.quoted {
+				want = []string{"the sql-server ended DOLT_GC after ", "s at its listener.read_timeout_millis=1000 ceiling in " + configFile}
+				unwanted = nil
+			}
+			want = append(want, "raise it in that sql-server's own config, then restart the server")
+			unwanted = append(unwanted, managedConfig, "managed sql-server", "city.toml", "gc dolt restart")
+			for _, w := range want {
+				if !strings.Contains(out, w) {
+					t.Fatalf("output missing %q:\n%s", w, out)
+				}
+			}
+			for _, u := range unwanted {
+				if strings.Contains(out, u) {
+					t.Fatalf("external-local target output must not contain %q:\n%s", u, out)
+				}
+			}
+		})
+	}
+}
+
+// An ordinary GC failure carries none of the read-deadline signatures and must
+// not be blamed on the listener timeout.
+func TestCompactScriptDoesNotBlameReadTimeoutForOtherGCFailures(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "gc_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite DOLT_GC failure:\n%s", out)
+	}
+	if strings.Contains(out, "read_timeout_millis") {
+		t.Fatalf("plain GC failure must not mention the read timeout:\n%s", out)
 	}
 }
 

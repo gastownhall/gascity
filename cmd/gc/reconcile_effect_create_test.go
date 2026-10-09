@@ -169,6 +169,70 @@ func TestAbandonedCreateSettlesAmbiguousWithToken(t *testing.T) {
 	}
 }
 
+// Kills a create abandoned before its write left unthrottled (review pin;
+// the conformance review's delta 7): settled ambiguous at its deadline with
+// its identity's backoff key, its entry holds the identity in flight and the
+// identity backs off, so the next pass re-creates nothing while the
+// abandoned create may still hold the identifier flock; its write can no
+// longer begin.
+func TestCreateAbandonedBeforeItsWriteStaysThrottled(t *testing.T) {
+	clk := newFakePlannerClock(plannerT0)
+	x, posted := fakeClockExecutor(clk)
+	release := make(chan struct{})
+	defer close(release)
+	m := newInflightMap()
+	const ident = "worker/worker-1"
+	seq := m.add(inflightEntry{Kind: inflightCreate, Token: "tok-1", Identity: ident, Leg: "sessions"})
+	e := hungEffect(intentCreate, seq, plannerT0.Add(time.Minute), release)
+	e.Token, e.Latch, e.BackoffKey, e.Fingerprint = "tok-1", new(writeLatch), createBackoffKey(ident), "rev-1"
+	if err := x.submit(rowKey{}, e); err != nil {
+		t.Fatal(err)
+	}
+	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 2)
+	clk.Advance(time.Minute)
+	s := receive(t, posted)
+	if s.Outcome != settledAmbiguous || s.BackoffKey != createBackoffKey(ident) || e.Latch.begin() {
+		t.Fatalf("settlement %+v, want ambiguous with the identity's backoff key, its write refused", s)
+	}
+	p := newPlanner(clk, func() time.Duration { return time.Minute }, nil, m, nil, io.Discard)
+	p.settlements.post(s)
+	p.drainSettlements(plannerT0.Add(time.Minute))
+	_, held := m.creates["tok-1"]
+	r, backedOff := p.backoff.Snapshot()[createBackoffKey(ident)]
+	if !held || !backedOff || r.Fingerprint != "rev-1" {
+		t.Fatalf("held %t, backoff %+v; want the identity held in flight and backed off", held, r)
+	}
+}
+
+// Kills a create that writes past a latch its executor closed, and one that
+// never begins its write through the latch: run as its kind's transaction, a
+// create abandoned before its write writes no row and is not ambiguous, and
+// one not abandoned lands with its latch begun.
+func TestCreateBeginsItsWriteThroughTheLatch(t *testing.T) {
+	creates, err := newCreateEffects(createEffectHost{cityPath: t.TempDir(), cityName: "test-city", withLocks: func(_ string, _ []string, fn func() error) error { return fn() }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, store := workerCity(2), beads.NewMemStore()
+	for _, abandoned := range []bool{true, false} {
+		plan := workerPlan(cfg, "c1", 1)
+		plan.Token = "tok-1"
+		pass := &effectPass{held: heldCaps{create: &createPass{cfg: cfg, store: store}, creates: creates}}
+		latch := new(writeLatch)
+		if abandoned {
+			latch.abandon()
+		}
+		s := runTx(context.Background(), pass, intent{Kind: intentCreate, CreatePlan: plan}, effectSpecs[intentCreate], latch)
+		rows := sessionRows(t, store)
+		switch {
+		case abandoned && (len(rows) != 0 || s.Outcome == settledLanded || s.Outcome == settledAmbiguous):
+			t.Fatalf("abandoned: settlement %+v, rows %d; want no row and no ambiguity", s, len(rows))
+		case !abandoned && (len(rows) != 1 || s.Outcome != settledLanded || !latch.begun()):
+			t.Fatalf("settlement %+v, rows %d; want the row landed with its latch begun", s, len(rows))
+		}
+	}
+}
+
 // Kills clearVisible left unwired from the pass, or its hard-bound clears
 // left off OBS1's alert (P5): an ambiguous create whose row never showed
 // clears at three minutes from its settlement with one ambiguous-create-bound
@@ -265,7 +329,7 @@ func TestPlannerStopJoinsCreateEffects(t *testing.T) {
 		cfg, store := workerCity(2), beads.NewMemStore()
 		plan := workerPlan(cfg, "c1", 1)
 		plan.Token = "tok-1"
-		pass := &effectPass{create: &createPass{cfg: cfg, store: store}, creates: creates}
+		pass := &effectPass{held: heldCaps{create: &createPass{cfg: cfg, store: store}, creates: creates}}
 		if err := x.submitIntent(pass, intent{Kind: intentCreate, CreatePlan: plan, Deadline: time.Now().Add(time.Minute)}, 1); err != nil {
 			t.Fatal(err)
 		}
@@ -451,5 +515,29 @@ func TestBuildDoctorChecksWiresC07Capabilities(t *testing.T) {
 	details := strings.Join(check.Run(&doctor.CheckContext{CityPath: cityDir}).Details, "\n")
 	if !strings.Contains(details, "C0.7 sessions store (") || !strings.Contains(details, "C0.7 graph store (") {
 		t.Fatalf("details = %q, want both class stores' C0.7 capabilities", details)
+	}
+}
+
+// Kills a create's after-write seam that is not wired or reads as a clean
+// landing: an injected failure once the row landed settles ambiguous, the
+// row there.
+func TestCreateAfterWriteSeamIsAmbiguous(t *testing.T) {
+	creates, err := newCreateEffects(createEffectHost{cityPath: t.TempDir(), cityName: "test-city", withLocks: func(_ string, _ []string, fn func() error) error { return fn() }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, store := workerCity(2), beads.NewMemStore()
+	plan := workerPlan(cfg, "c1", 1)
+	plan.Token = "tok-1"
+	pass := &effectPass{held: heldCaps{create: &createPass{cfg: cfg, store: store}, creates: creates}}
+	pass.seam = func(_ context.Context, at txSeam, _ intent, _, _ int) error {
+		if at == seamAfterWrite {
+			return errors.New("staging fault")
+		}
+		return nil
+	}
+	s := runTx(context.Background(), pass, intent{Kind: intentCreate, CreatePlan: plan}, effectSpecs[intentCreate], new(writeLatch))
+	if rows := sessionRows(t, store); len(rows) != 1 || s.Outcome != settledAmbiguous {
+		t.Fatalf("settlement %+v, rows %d; want the row landed and the create ambiguous", s, len(rows))
 	}
 }

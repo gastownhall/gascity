@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -32,6 +33,11 @@ func (f *freshObserver) ObserveLivenessWithError(string, []string) (runtime.Live
 		f.read()
 	}
 	return f.l, f.err
+}
+
+// ObserveLivenessSince is its error-bearing read, fresh for any since.
+func (f *freshObserver) ObserveLivenessSince(name string, pn []string, _ time.Time) (runtime.Liveness, error) {
+	return f.ObserveLivenessWithError(name, pn)
 }
 
 func (f *freshObserver) GetAllEnvironment(name string) (map[string]string, error) {
@@ -82,7 +88,7 @@ func (c *healCase) run(t *testing.T, sp runtime.Provider, writer beads.Store) (i
 	if c.before != nil {
 		c.before()
 	}
-	return it, effectRegistry[it.Kind](p, it)(context.Background())
+	return it, runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
 }
 
 // pass decides the row and returns the pass that admitted its registered
@@ -91,7 +97,7 @@ func (c *healCase) run(t *testing.T, sp runtime.Provider, writer beads.Store) (i
 func (c *healCase) pass(t *testing.T, sp runtime.Provider, writer beads.Store) (*effectPass, intent) {
 	t.Helper()
 	it := c.decide()
-	if effectRegistry[it.Kind] == nil {
+	if !effectSpecs[it.Kind].runs() {
 		t.Fatalf("decideRow = %+v, want a registered heal", it)
 	}
 	w := *c.w
@@ -148,9 +154,9 @@ func TestCreatingRowWithoutClaimHealedToAsleep(t *testing.T) {
 
 // Kills a heal that overwrites a newer incarnation: a rekey (the token
 // alone) or a PreWake (token and generation) landing after the pass read the
-// row refuses the heal on the re-decided basis, and one landing between the
-// effect's read and its CAS refuses on the CAS. The row keeps the new
-// incarnation, still creating.
+// row refuses the heal on its premise, and one landing between the effect's
+// read and its CAS loses the CAS, then the next attempt's premise. The row
+// keeps the new incarnation, still creating.
 func TestCreatingHealFencedOnToken(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -158,9 +164,9 @@ func TestCreatingHealFencedOnToken(t *testing.T) {
 		between bool
 		cause   string
 	}{
-		{"rekey after the pass", map[string]string{"instance_token": "tok-rekeyed"}, false, causeRedecided},
-		{"prewake after the pass", map[string]string{"instance_token": "tok-4", "generation": "4"}, false, causeRedecided},
-		{"prewake before the CAS", map[string]string{"instance_token": "tok-4", "generation": "4"}, true, causeCAS},
+		{"rekey after the pass", map[string]string{"instance_token": "tok-rekeyed"}, false, causePremise},
+		{"prewake after the pass", map[string]string{"instance_token": "tok-4", "generation": "4"}, false, causePremise},
+		{"prewake before the CAS", map[string]string{"instance_token": "tok-4", "generation": "4"}, true, causePremise},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newHealCase(t, livenessGone, desireNone, "state", "creating")
@@ -216,39 +222,64 @@ func TestCreatingHealSkipsPendingCreateAndWakeRows(t *testing.T) {
 	}
 }
 
-// Kills a dead unwanted named row left active forever, a heal of a pool
-// row (A21 closes those) or of a runtime A12 has not classified, and a patch
-// that drifts from legacy's (v5.2 A6). A Wake named row is the crash heal's.
-func TestDeadUnwantedActiveNamedRowHealedToAsleep(t *testing.T) {
+// Kills SESS-531 lost, narrowed back to Wake or named rows, or widened (v5.8
+// A6 item 4): a committed row whose runtime is gone and that AL1 does not
+// Drain heals asleep with legacy's patch, by the fresh heal, whatever else AL1
+// wants of it; a pool row AL1 wants asleep so reads runtime-missing, which
+// A21's pool-slot close frees. A Drain row, named or not (A21's orphan
+// close), a census-only rig-leg row (another city's, on a shared rig store), a
+// heartbeat-held row (A17's), a dead runtime A12 has not classified, a
+// creating row (the creating heal's) and an asleep row are not healed by it.
+func TestDeadRuntimeHealCoversEveryCommittedRowAL1DoesNotDrain(t *testing.T) {
 	named := []string{"configured_named_session", "true", "configured_named_identity", "chat", "configured_named_mode", "always"}
+	held := []string{"held_until", rowAt(time.Hour)}
 	for _, tc := range []struct {
 		name     string
 		liveness rowLiveness
 		desired  desire
 		meta     []string
-		want     string
+		sessions string // the pass's sessions leg, when not the row's
+		heal     bool
 	}{
-		{"named active", livenessGone, desireNone, append([]string{"state", "active", "session_key", "k-1"}, named...), decideDeadNamedHeal},
-		{"named awake", livenessGone, desireSleep, append([]string{"state", "awake"}, named...), decideDeadNamedHeal},
-		{"named wake", livenessGone, desireWake, append([]string{"state", "active"}, named...), decideCrashHeal},
-		{"named dead", livenessDead, desireNone, append([]string{"state", "active"}, named...), decideNoAction},
-		{"pool active", livenessGone, desireNone, []string{"state", "active"}, decideNoAction},
-		{"named asleep", livenessGone, desireNone, append([]string{"state", "asleep"}, named...), decideNoAction},
+		{"named active", livenessGone, desireNone, append([]string{"state", "active"}, named...), "", true},
+		{"named awake", livenessGone, desireSleep, append([]string{"state", "awake"}, named...), "", true},
+		{"wake", livenessGone, desireWake, []string{"state", "active"}, "", true},
+		{"pool sleep", livenessGone, desireSleep, []string{"state", "active"}, "", true},
+		{"pool keep", livenessGone, desireKeep, []string{"state", "awake"}, "", true},
+		{"pool quarantined", livenessGone, desireSleep, []string{"state", "awake", "quarantined_until", rowAt(time.Hour)}, "", true},
+		{"held for a suspend", livenessGone, desireSleep, append([]string{"state", "active", "sleep_intent", "user-hold"}, held...), "", true},
+		{"drain", livenessGone, desireDrain, []string{"state", "active"}, "", false},
+		{"named drain", livenessGone, desireDrain, append([]string{"state", "active"}, named...), "", false},
+		{"census-only rig leg", livenessGone, desireNone, []string{"state", "active"}, "rig:other", false},
+		{"heartbeat-held", livenessGone, desireSleep, append([]string{"state", "active"}, held...), "", false},
+		{"heartbeat-held, padded", livenessGone, desireSleep, []string{"state", "active", "held_until", " " + rowAt(time.Hour) + " "}, "", false},
+		{"dead, before A12 classifies it", livenessDead, desireWake, []string{"state", "active"}, "", false},
+		{"alive", livenessAlive, desireNone, []string{"state", "active"}, "", false},
+		{"creating", livenessGone, desireNone, []string{"state", "creating"}, "", false},
+		{"asleep", livenessGone, desireNone, []string{"state", "asleep"}, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := newHealCase(t, tc.liveness, tc.desired, tc.meta...)
-			it := c.decide()
-			if it.Reason != tc.want {
-				t.Fatalf("decideRow = (%q, %q), want reason %q", it.Kind, it.Reason, tc.want)
+			c := newHealCase(t, tc.liveness, tc.desired, append([]string{"session_key", "k-1", "started_config_hash", "h"}, tc.meta...)...)
+			if tc.sessions != "" {
+				withSessionsLeg(c.w, tc.sessions)
 			}
-			if tc.want != decideDeadNamedHeal {
+			it := c.decide()
+			if got := it.Reason == decideDeadRuntimeHeal; got != tc.heal {
+				t.Fatalf("decideRow = (%q, %q), want the dead-runtime heal %v", it.Kind, it.Reason, tc.heal)
+			}
+			if !tc.heal {
 				return
 			}
-			if want := legacyHeal(c.w.Census.Rows[c.k].Info); !maps.Equal(it.Patch, want) {
-				t.Fatalf("patch %v, want legacy's %v", it.Patch, want)
+			if want := legacyHeal(c.w.Census.Rows[c.k].Info); it.Kind != intentRowHealFresh || !maps.Equal(it.Patch, want) {
+				t.Fatalf("intent (%q, %v), want a fresh heal of legacy's %v", it.Kind, it.Patch, want)
 			}
-			if _, s := c.run(t, gone(), nil); s.Outcome != settledLanded || c.meta(t)["state"] != "asleep" {
-				t.Fatalf("settlement %+v, want the row healed asleep", s)
+			_, s := c.run(t, gone(), nil)
+			m := c.meta(t)
+			if s.Outcome != settledLanded || m["state"] != "asleep" {
+				t.Fatalf("settlement %+v, row %v, want the row healed asleep", s, m)
+			}
+			if tc.name == "pool sleep" && !isPoolSessionSlotFreeableInfo(session.Info{MetadataState: m["state"], SleepReason: m["sleep_reason"]}, gatherNow) {
+				t.Fatalf("row %v: A21's pool-slot close cannot free it", m)
 			}
 		})
 	}
@@ -298,7 +329,7 @@ func TestAsleepHealPatchMatchesLegacy(t *testing.T) {
 
 // Kills a leftover claim left on a committed row (v5 P4, the C1b ruling), a
 // claim cleared on an uncommitted row (A10's), and the claim clear ordered
-// after the dead named heal, which legacy would project start-pending.
+// after the dead-runtime heal, which legacy would project start-pending.
 func TestLeftoverClaimClearedOnCommittedRow(t *testing.T) {
 	want := session.MetadataPatch{"pending_create_claim": "", "pending_create_started_at": ""}
 	for _, tc := range []struct {
@@ -396,39 +427,6 @@ func TestCurrentBeadStampedOnAliveWakeRow(t *testing.T) {
 				t.Fatalf("settlement %+v, want the bead recorded", s)
 			}
 		})
-	}
-}
-
-// Kills SESS-531 lost or widened: a committed Wake row whose runtime is gone
-// heals asleep with legacy's desired-path patch, its continuation reset so
-// the relaunch does not resume the crashed conversation, by the fresh heal.
-// A creating Wake row (S1's), a committed pool row not Wake (A21's) and a
-// dead Wake row (A12's, then S5's recycle) do not.
-func TestCrashHealResetsAWakeRowsContinuation(t *testing.T) {
-	c := newHealCase(t, livenessGone, desireWake, "state", "active", "session_key", "k-1", "started_config_hash", "h")
-	it, s := c.run(t, gone(), nil)
-	if it.Kind != intentRowHealFresh || it.Reason != decideCrashHeal {
-		t.Fatalf("decideRow = (%q, %q), want the crash heal", it.Kind, it.Reason)
-	}
-	if want := legacyHeal(c.w.Census.Rows[c.k].Info); !maps.Equal(it.Patch, want) {
-		t.Fatalf("patch %v, want legacy's %v", it.Patch, want)
-	}
-	if m := c.meta(t); s.Outcome != settledLanded || m["state"] != "asleep" || m["session_key"] != "" || m["continuation_reset_pending"] != "true" {
-		t.Fatalf("settlement %+v, row %v, want asleep with the continuation reset", s, m)
-	}
-	for _, tc := range []struct {
-		name     string
-		liveness rowLiveness
-		desired  desire
-		state    string
-	}{
-		{"creating wake", livenessGone, desireWake, "creating"},
-		{"active keep", livenessGone, desireKeep, "active"},
-		{"dead wake", livenessDead, desireWake, "active"},
-	} {
-		if it := newHealCase(t, tc.liveness, tc.desired, "state", tc.state, "session_key", "k-1").decide(); it.Reason == decideCrashHeal {
-			t.Errorf("%s: the crash heal fired", tc.name)
-		}
 	}
 }
 
@@ -531,5 +529,240 @@ func TestAwakeHealNeverRevivesAnOperatorDormantRow(t *testing.T) {
 	}
 	if _, s := c.run(t, sp, nil); s.Outcome != settledRefused || c.meta(t)["state"] != "asleep" {
 		t.Fatalf("settlement %+v, state %q, want a kill after the pass to refuse the heal", s, c.meta(t)["state"])
+	}
+}
+
+// Kills the stability clears (v5.8 A6 item 6; SESS-539/540) lost, early, or
+// drifting from legacy's clearWakeFailures and clearChurn: a committed row
+// alive 30s past its wake ends up as legacy's, and 5 minutes past it also
+// clears churn; a row 29s past it, one already clear, one not committed or
+// not alive, and one with no readable wake, are left alone.
+func TestStabilityClearMatchesLegacy(t *testing.T) {
+	failures := []string{"wake_attempts", "2", "churn_count", "3", "quarantined_until", rowAt(time.Hour)}
+	for _, tc := range []struct {
+		name     string
+		liveness rowLiveness
+		meta     []string
+		clear    bool
+	}{
+		{"31s", livenessAlive, append([]string{"state", "active", "last_woke_at", rowAt(-31 * time.Second)}, failures...), true},
+		{"5m", livenessAlive, append([]string{"state", "awake", "last_woke_at", rowAt(-5 * time.Minute)}, failures...), true},
+		{"churn only, 5m", livenessAlive, []string{"state", "active", "last_woke_at", rowAt(-5 * time.Minute), "churn_count", "1", "wake_attempts", "0"}, true},
+		{"30s", livenessAlive, append([]string{"state", "active", "last_woke_at", rowAt(-30 * time.Second)}, failures...), true},
+		{"29s", livenessAlive, append([]string{"state", "active", "last_woke_at", rowAt(-29 * time.Second)}, failures...), false},
+		{"already clear", livenessAlive, []string{"state", "active", "last_woke_at", rowAt(-time.Hour), "wake_attempts", "0", "churn_count", "0"}, false},
+		{"not committed", livenessAlive, append([]string{"state", "creating", "last_woke_at", rowAt(-time.Hour)}, failures...), false},
+		{"dead", livenessDead, append([]string{"state", "active", "last_woke_at", rowAt(-time.Hour)}, failures...), false},
+		{"no wake", livenessAlive, append([]string{"state", "active", "last_woke_at", "soon"}, failures...), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newHealCase(t, tc.liveness, desireKeep, tc.meta...)
+			it := c.decide()
+			if got := it.Reason == decideStabilityClear; got != tc.clear {
+				t.Fatalf("decideRow = (%q, %q, %v), want the stability clear %v", it.Kind, it.Reason, it.Patch, tc.clear)
+			}
+			if !tc.clear {
+				return
+			}
+			legacyStore := beads.NewMemStoreFrom(0, []beads.Bead{sessionRow(c.k.ID, tc.meta...)}, nil)
+			info, front, clk := c.w.Census.Rows[c.k].Info, sessionFrontDoor(legacyStore), &clock.Fake{Time: gatherNow}
+			info = clearWakeFailures(info, front)
+			if productiveLongEnoughInfo(info, clk) {
+				clearChurn(info, front)
+			}
+			legacy, _ := legacyStore.Get(c.k.ID)
+			if _, s := c.run(t, nil, nil); s.Outcome != settledLanded || it.Kind != intentRowHeal {
+				t.Fatalf("intent %q, settlement %+v, want a landed row heal", it.Kind, s)
+			}
+			m := c.meta(t)
+			for _, key := range []string{"wake_attempts", "churn_count", "quarantined_until"} {
+				if m[key] != legacy.Metadata[key] {
+					t.Errorf("%s = %q, legacy's %q", key, m[key], legacy.Metadata[key])
+				}
+			}
+		})
+	}
+}
+
+// Kills the detached-at marker (v5.8 A6 item 7; SESS-533..536) lost or
+// widened: on a committed, alive row under an interactive, enabled, Full
+// policy the attach fact stamps the pass time once and clears while
+// attached; an uncertain attach, an unknown liveness or an unranked row
+// writes nothing; on any other row a set marker clears.
+func TestDetachedAtFollowsTheAttachFact(t *testing.T) {
+	tracked := resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Effective: "5m", Capability: runtime.SessionSleepCapabilityFull}
+	stamp, set := rowAt(0), rowAt(-time.Hour)
+	for _, tc := range []struct {
+		name     string
+		liveness rowLiveness
+		desired  desire
+		state    string
+		policy   resolvedSessionSleepPolicy
+		obs      rowObservation
+		marker   string
+		want     *string // the written detached_at; nil for none
+	}{
+		{"detached", livenessAlive, desireKeep, "active", tracked, rowObservation{}, "", &stamp},
+		{"still detached", livenessAlive, desireKeep, "active", tracked, rowObservation{}, set, nil},
+		{"attached", livenessAlive, desireKeep, "awake", tracked, rowObservation{Attached: true}, set, new(string)},
+		{"attached, unset", livenessAlive, desireKeep, "active", tracked, rowObservation{Attached: true}, "", nil},
+		{"uncertain attach", livenessAlive, desireKeep, "active", tracked, rowObservation{Uncertain: true, Reason: observeReasonAttach + "stale"}, "", nil},
+		{"uncertain attach, set", livenessAlive, desireKeep, "active", tracked, rowObservation{Uncertain: true}, set, nil},
+		{"non-interactive", livenessAlive, desireKeep, "active", resolvedSessionSleepPolicy{Class: config.SessionSleepNonInteractive, Effective: "5m", Capability: runtime.SessionSleepCapabilityFull}, rowObservation{}, set, new(string)},
+		{"sleep off", livenessAlive, desireKeep, "active", resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Effective: config.SessionSleepOff, Capability: runtime.SessionSleepCapabilityFull}, rowObservation{}, set, new(string)},
+		{"timed only", livenessAlive, desireKeep, "active", resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Effective: "5m", Capability: runtime.SessionSleepCapabilityTimedOnly}, rowObservation{}, set, new(string)},
+		{"not committed", livenessAlive, desireKeep, "creating", tracked, rowObservation{}, set, new(string)},
+		{"not committed, uncertain attach", livenessAlive, desireKeep, "creating", tracked, rowObservation{Uncertain: true}, set, nil},
+		{"gone, draining", livenessGone, desireDrain, "active", tracked, rowObservation{}, set, new(string)},
+		{"dead", livenessDead, desireKeep, "active", tracked, rowObservation{}, set, new(string)},
+		{"gone, unset", livenessGone, desireDrain, "active", tracked, rowObservation{}, "", nil},
+		{"unknown", livenessUnknown, desireKeep, "active", tracked, rowObservation{}, set, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newHealCase(t, tc.liveness, tc.desired, "state", tc.state, "detached_at", tc.marker)
+			c.w.SleepPolicies = map[string]resolvedSessionSleepPolicy{c.k.ID: tc.policy}
+			c.w.Observed = map[rowKey]rowObservation{c.k: tc.obs}
+			it := c.decide()
+			got, wrote := it.Patch["detached_at"]
+			if wrote != (tc.want != nil) || wrote && got != *tc.want {
+				t.Fatalf("decideRow = (%q, %q, %v), want detached_at %v", it.Kind, it.Reason, it.Patch, tc.want)
+			}
+		})
+	}
+	c := newHealCase(t, livenessAlive, desireKeep, "state", "active")
+	c.w.SleepPolicies = map[string]resolvedSessionSleepPolicy{c.k.ID: tracked}
+	if _, s := c.run(t, nil, nil); s.Outcome != settledLanded || c.meta(t)["detached_at"] != stamp {
+		t.Fatalf("settlement %+v, detached_at %q, want the pass time %q", s, c.meta(t)["detached_at"], stamp)
+	}
+}
+
+// Kills A6's items pre-empting each other across passes (CONTRACT v5.8
+// §12.3): the plain row writes the row's later items propose fold into the
+// first item's CAS, a fresh heal's included, and the effect writes them all;
+// a later fresh heal does not fold into a plain write, and the timer heal
+// keeps its own patch.
+func TestA6ItemsFoldIntoOneCAS(t *testing.T) {
+	tracked := map[string]resolvedSessionSleepPolicy{}
+	stable := []string{"state", "active", "last_woke_at", rowAt(-time.Minute), "wake_attempts", "2", strandedEventEmittedKey, rowAt(-time.Hour)}
+	c := newHealCase(t, livenessAlive, desireWake, stable...)
+	tracked[c.k.ID] = resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Effective: "5m", Capability: runtime.SessionSleepCapabilityFull}
+	c.w.SleepPolicies = tracked
+	c.a.Snapshot.Entries[c.k].AssignedWork = &assignedWorkView{BeadID: "ga-7"}
+	want := session.MetadataPatch{"wake_attempts": "0", "detached_at": rowAt(0), strandedEventEmittedKey: "", session.CurrentBeadIDKey: "ga-7"}
+	it, s := c.run(t, nil, nil)
+	if it.Kind != intentRowHeal || it.Reason != decideStabilityClear || !maps.Equal(it.Patch, want) || s.Outcome != settledLanded {
+		t.Fatalf("intent (%q, %q, %v), settlement %+v, want the stability clear carrying %v", it.Kind, it.Reason, it.Patch, s, want)
+	}
+	for key, value := range want {
+		if c.meta(t)[key] != value {
+			t.Errorf("%s = %q after the CAS, want %q", key, c.meta(t)[key], value)
+		}
+	}
+
+	gone := newHealCase(t, livenessGone, desireWake, "state", "active", "session_key", "k-1", "detached_at", rowAt(-time.Hour))
+	if it := gone.decide(); it.Kind != intentRowHealFresh || it.Patch["state"] != "asleep" || it.Patch["detached_at"] != "" || len(it.Patch) != len(legacyHeal(gone.w.Census.Rows[gone.k].Info))+1 {
+		t.Fatalf("decideRow = (%q, %v), want the dead-runtime heal carrying the detached_at clear", it.Kind, it.Patch)
+	}
+	held := newHealCase(t, livenessGone, desireWake, "state", "active", "held_until", rowAt(-time.Minute), "sleep_reason", "user-hold")
+	if it := held.decide(); it.Reason != decideTimerHeal || it.Patch["state"] != "" {
+		t.Fatalf("decideRow = (%q, %v), want the timer heal without the fresh heal's state", it.Reason, it.Patch)
+	}
+	quarantine := newHealCase(t, livenessAlive, desireKeep, "state", "active", "last_woke_at", rowAt(-time.Hour), "quarantined_until", rowAt(-time.Minute),
+		"sleep_reason", "quarantine", "wake_attempts", "4", strandedEventEmittedKey, rowAt(-time.Hour))
+	if it := quarantine.decide(); it.Reason != decideTimerHeal || it.Patch["sleep_reason"] != "" || it.Patch["wake_attempts"] != "0" || it.Patch[strandedEventEmittedKey] != "" || len(it.Patch) != 5 {
+		t.Fatalf("decideRow = (%q, %v), want the timer heal's own patch carrying the stranded clear", it.Reason, it.Patch)
+	}
+}
+
+// Kills a census-only rig-leg row acted on (CONTRACT v5 AL1; §4 A6 item 4,
+// held for every arm): legacy reconciles only the sessions store, and a
+// shared rig store holds other cities' rows. Each row below takes its arm on
+// the sessions leg; on another leg it is None(census-only) and proposes
+// nothing. An intent admitted while it was the sessions leg's finds no
+// writer for its leg, or, given one, re-decides on the fresh row and refuses;
+// either way the row is left as it was.
+func TestNoArmActsOnACensusOnlyRow(t *testing.T) {
+	tracked := resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Effective: "5m", Capability: runtime.SessionSleepCapabilityFull}
+	alive := func(c *healCase) runtime.Provider {
+		return &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true}, env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": "tok-3"}}
+	}
+	for _, tc := range []struct {
+		name string
+		want string // the reason on the sessions leg
+		row  func(t *testing.T) *healCase
+	}{
+		{"A6 1 timer heal", decideTimerHeal, func(t *testing.T) *healCase {
+			return newHealCase(t, livenessGone, desireNone, "state", "asleep", "held_until", rowAt(-time.Minute), "sleep_reason", "user-hold")
+		}},
+		{"A6 2 claim clear", decideClaimClear, func(t *testing.T) *healCase {
+			return newHealCase(t, livenessAlive, desireKeep, "state", "active", "pending_create_claim", "true")
+		}},
+		{"A6 3 creating heal", decideCreatingHeal, func(t *testing.T) *healCase {
+			return newHealCase(t, livenessGone, desireNone, "state", "creating", "session_key", "k-1")
+		}},
+		{"A6 4 dead-runtime heal", decideDeadRuntimeHeal, func(t *testing.T) *healCase {
+			return newHealCase(t, livenessGone, desireSleep, "state", "active", "session_key", "k-1")
+		}},
+		{"A6 5 awake heal", decideAwakeHeal, func(t *testing.T) *healCase {
+			return ownRuntimeCase(t, "tok-3", "state", "asleep", "sleep_reason", "idle")
+		}},
+		{"A6 6 stability clear", decideStabilityClear, func(t *testing.T) *healCase {
+			return newHealCase(t, livenessAlive, desireKeep, "state", "active", "last_woke_at", rowAt(-time.Hour), "wake_attempts", "2")
+		}},
+		{"A6 7 detached-at stamp", decideDetachedAt, func(t *testing.T) *healCase {
+			c := newHealCase(t, livenessAlive, desireKeep, "state", "active")
+			c.w.SleepPolicies = map[string]resolvedSessionSleepPolicy{c.k.ID: tracked}
+			return c
+		}},
+		{"A6 7 detached-at clear", decideDetachedAt, func(t *testing.T) *healCase {
+			return newHealCase(t, livenessGone, desireDrain, "state", "active", "detached_at", rowAt(-time.Hour))
+		}},
+		{"A6 8 stranded clear", decideStrandedClear, func(t *testing.T) *healCase {
+			return newHealCase(t, livenessAlive, desireKeep, "state", "active", strandedEventEmittedKey, rowAt(-time.Hour))
+		}},
+		{"A6 9 current bead", decideCurrentBead, func(t *testing.T) *healCase {
+			c := newHealCase(t, livenessAlive, desireWake, "state", "active")
+			c.a.Snapshot.Entries[c.k].AssignedWork = &assignedWorkView{BeadID: "ga-7"}
+			return c
+		}},
+		{"A3 rekey", decideRekey, func(t *testing.T) *healCase {
+			c := newHealCase(t, livenessAlive, desireKeep, "state", "active")
+			c.w.Observed = map[rowKey]rowObservation{c.k: {Identity: runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "2", Token: "tok-old"}}}
+			return c
+		}},
+		{"A19 drain void", decideDrainVoid + drainSuspended, func(t *testing.T) *healCase {
+			return newHealCase(t, livenessAlive, desireWake, append([]string{"state", "active"}, intentAt(drainSuspended, "3")...)...)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := tc.row(t)
+			it := c.decide()
+			if it.Reason != tc.want || it.Kind == "" {
+				t.Fatalf("sessions leg: decideRow = (%q, %q), want %q", it.Kind, it.Reason, tc.want)
+			}
+			withSessionsLeg(c.w, "rig:other")
+			if got := c.decide(); got.Kind != "" || got.Reason != reasonCensusOnly {
+				t.Fatalf("census-only: decideRow = (%q, %q, %v), want None(census-only)", got.Kind, got.Reason, got.Patch)
+			}
+			before := maps.Clone(c.meta(t))
+			var sp runtime.Provider = gone()
+			switch {
+			case it.Kind == intentRekey:
+				sp = &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true}, env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_RUNTIME_EPOCH": "2", "GC_INSTANCE_TOKEN": "tok-old"}}
+			case c.a.Snapshot.Entries[c.k].Liveness == livenessAlive:
+				sp = alive(c)
+			}
+			// The pass's writer for the row's leg is a test's: gather builds
+			// the sessions leg's alone, and the effect refuses no-writer.
+			for leg, cause := range map[string]string{rowLeg: causeRedecided, "rig:other": causeNoWriter} {
+				w := *c.w
+				w.Env = &reconcileEnv{SP: sp}
+				w.LegStores = map[string]beads.Store{leg: c.store}
+				s := runTx(context.Background(), newEffectPass(&w, c.a), it, effectSpecs[it.Kind], nil)
+				if s.Outcome != settledRefused || s.Cause != cause || !maps.Equal(c.meta(t), before) {
+					t.Fatalf("admitted %q on a census-only row, writer on %s: settlement %+v, row %v, want refused %q and the row %v", it.Kind, leg, s, c.meta(t), cause, before)
+				}
+			}
+		})
 	}
 }

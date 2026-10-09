@@ -9,6 +9,7 @@ import (
 	"reflect"
 	goruntime "runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -74,8 +75,8 @@ func hungEffect(kind string, seq uint64, deadline time.Time, release <-chan stru
 
 // Kills dependence on the real clock (N5) and a second settlement: an
 // effect that ignores its context settles failed when the injected clock
-// reaches its deadline, echoing its key, kind and seq, and its late return
-// posts nothing more.
+// reaches its deadline, echoing its key, kind and seq, and its late return,
+// with no facts, posts nothing more.
 func TestExecutorSettlesOnceUnderFakeClock(t *testing.T) {
 	clk := newFakePlannerClock(plannerT0)
 	x, posted := fakeClockExecutor(clk)
@@ -152,18 +153,19 @@ func TestUnregisteredKindRefusesNoEffect(t *testing.T) {
 	if s := receive(t, posted); s.Outcome != settledRefused || s.Cause != causeNoEffect || s.Key != k || s.Kind != "drift-drain" || s.Seq != 3 {
 		t.Fatalf("settlement %+v, want refused with cause %q for %v seq 3", s, causeNoEffect, k)
 	}
-	if effectRegistry[intentRowHeal] == nil {
+	if !effectSpecs[intentRowHeal].runs() {
 		t.Fatal("the row heal has no effect")
 	}
 }
 
-// withRegistry replaces effectRegistry for the test. Tests that call it
-// must not run in parallel.
-func withRegistry(t *testing.T, reg map[string]effectBuilder) {
+// withSpecs replaces effectSpecs for the test with a copy that edit
+// changes. Tests that call it must not run in parallel.
+func withSpecs(t *testing.T, edit func(map[string]effectSpec)) {
 	t.Helper()
-	saved := effectRegistry
-	effectRegistry = reg
-	t.Cleanup(func() { effectRegistry = saved })
+	saved := effectSpecs
+	effectSpecs = maps.Clone(saved)
+	edit(effectSpecs)
+	t.Cleanup(func() { effectSpecs = saved })
 }
 
 // Kills a per-kind exception to P3's deadlines in the executor: every kind,
@@ -175,26 +177,27 @@ func TestDeadlinesHaveNoException(t *testing.T) {
 	x, posted := fakeClockExecutor(clk)
 	release := make(chan struct{})
 	defer close(release)
-	hung := func(*effectPass, intent) func(context.Context) settlement {
-		return func(context.Context) settlement { <-release; return settlement{Outcome: settledLanded} }
-	}
-	reg := make(map[string]effectBuilder)
-	for kind := range intentKinds {
-		reg[kind] = hung
-	}
-	withRegistry(t, reg)
+	withSpecs(t, func(specs map[string]effectSpec) {
+		for kind, spec := range specs {
+			spec.body = func(context.Context, txCaps) settlement {
+				<-release
+				return settlement{Outcome: settledLanded}
+			}
+			specs[kind] = spec
+		}
+	})
 	startup := 2 * time.Minute
-	kinds := slices.Sorted(maps.Keys(intentKinds))
+	kinds := slices.Sorted(maps.Keys(effectSpecs))
 	armed := make(map[time.Time]int)
 	for i, kind := range kinds {
 		want := providerEffectDeadline
-		switch intentKinds[kind].class {
+		switch effectSpecs[kind].class {
 		case capStarts:
 			want = startup + 10*time.Second
 		case capRowWrites:
 			want = 30 * time.Second
 		}
-		if got := intentKinds[kind].deadline(startup); got != want {
+		if got := effectSpecs[kind].deadline(startup); got != want {
 			t.Fatalf("%s: admission's deadline %v, want %v", kind, got, want)
 		}
 		if err := x.submitIntent(&effectPass{}, intent{Kind: kind, Key: rowKey{ID: kind}, Deadline: plannerT0.Add(want)}, uint64(i+1)); err != nil {
@@ -228,19 +231,19 @@ func TestExecutorCausesCarryTheFinalizePrefix(t *testing.T) {
 		"prefixed": {Outcome: settledFailed, Cause: causeFinalizePrefix + "write-error"},
 		"landed":   {Outcome: settledLanded},
 	}
-	withRegistry(t, map[string]effectBuilder{
-		intentStop: func(_ *effectPass, it intent) func(context.Context) settlement {
-			return func(context.Context) settlement {
-				if s, ok := runs[it.Key.ID]; ok {
-					return s
-				}
-				if it.Key.ID == "panic" {
-					panic("finalize exploded")
-				}
-				<-release
-				return settlement{Outcome: settledLanded}
+	withSpecs(t, func(specs map[string]effectSpec) {
+		stop := specs[intentStop]
+		stop.body = func(_ context.Context, c txCaps) settlement {
+			if s, ok := runs[c.it.Key.ID]; ok {
+				return s
 			}
-		},
+			if c.it.Key.ID == "panic" {
+				panic("finalize exploded")
+			}
+			<-release
+			return settlement{Outcome: settledLanded}
+		}
+		specs[intentStop] = stop
 	})
 	finalize := func(kind, id string) intent {
 		return intent{Kind: kind, Key: rowKey{Leg: rowLeg, ID: id}, Finalize: true, Deadline: plannerT0.Add(time.Minute)}
@@ -312,9 +315,11 @@ func TestEffectContextCarriesTheDeadline(t *testing.T) {
 	}
 }
 
-// Kills an event lost to a late landing: an effect that lands after the
-// executor settled it at its deadline still has its event posted, alone,
-// so the drain records it and touches no entry or backoff.
+// Kills facts lost to a late landing, its drain transition among them, and
+// a late settlement counted, alerted or applied to an entry: an effect that
+// lands after the executor settled it at its deadline is posted whole,
+// marked late with its key; the drain applies its facts and touches no
+// entry, backoff or count.
 func TestExecutorPostsALateLandingsEvent(t *testing.T) {
 	clk := newFakePlannerClock(plannerT0)
 	x, posted := fakeClockExecutor(clk)
@@ -322,7 +327,7 @@ func TestExecutorPostsALateLandingsEvent(t *testing.T) {
 	ev := events.Event{Type: "session.test"}
 	if err := x.submit(rowKey{ID: "a"}, sessionEffect{Kind: intentRowHeal, Deadline: plannerT0.Add(time.Minute), Run: func(context.Context) settlement {
 		<-release
-		return settlement{Outcome: settledLanded, Event: &ev}
+		return settlement{Outcome: settledLanded, Facts: effectFacts{Events: []events.Event{ev}, Transition: &drainTransition{Name: "s-a", Reason: "idle", Transition: "cancel"}}}
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -332,23 +337,143 @@ func TestExecutorPostsALateLandingsEvent(t *testing.T) {
 		t.Fatalf("settlement %+v, want failed at the deadline", s)
 	}
 	close(release)
-	if s := receive(t, posted); s.Event == nil || s.Event.Type != ev.Type || s.Key.ID != "" || s.Outcome != 0 {
-		t.Fatalf("late post %+v, want the event alone", s)
+	late := receive(t, posted)
+	if !late.Late || len(late.Facts.Events) != 1 || late.Facts.Transition == nil || late.Key.ID != "a" || late.Kind != intentRowHeal || late.Outcome != settledLanded {
+		t.Fatalf("late post %+v, want the landing whole, marked late", late)
+	}
+	var recorded []string
+	saved := recordDrainTransition
+	recordDrainTransition = func(_ context.Context, name, _, transition string) {
+		recorded = append(recorded, name+"/"+transition)
+	}
+	t.Cleanup(func() { recordDrainTransition = saved })
+	rec := &memRecorder{}
+	m := newInflightMap()
+	late.Seq = m.add(inflightEntry{Kind: intentRowHeal, Key: rowKey{ID: "a"}})
+	var stderr strings.Builder
+	p := newPlanner(clk, func() time.Duration { return time.Minute }, nil, m, nil, &stderr)
+	p.rec = rec
+	late.Outcome, late.Cause = settledFailed, causeDeadline // as counted and alerted on time
+	p.settlements.post(late)
+	p.drainSettlements(plannerT0)
+	if len(rec.events) != 1 || len(recorded) != 1 || len(m.view().Entries) != 1 || len(p.backoff.Snapshot()) != 0 || len(p.metrics.settled) != 0 || stderr.Len() != 0 {
+		t.Fatalf("drained late: events %v, transitions %v, entries %v, backoff %v, counts %v, stderr %q; want only the facts applied", rec.events, recorded, m.view().Entries, p.backoff.Snapshot(), p.metrics.settled, stderr.String())
 	}
 }
 
-// Kills an effect registered from a file the effect lint does not cover:
-// every builder in effectRegistry is defined in reconcile_effect_*.go or
-// reconcile_steps_*.go.
-func TestEffectRegistryBuildersAreLinted(t *testing.T) {
-	linted := effectLintFiles(t)
-	for kind, build := range effectRegistry {
-		file, _ := goruntime.FuncForPC(reflect.ValueOf(build).Pointer()).FileLine(reflect.ValueOf(build).Pointer())
-		if !slices.Contains(linted, filepath.Base(file)) {
-			t.Errorf("%s's effect is built in %s, outside the effect lint", kind, file)
+// Kills a late settlement that backs the row off or resets its backoff
+// (review pin P1): after an abandoned effect backed its row off, its late
+// landing and its late refusal leave that record as it was.
+func TestLateSettlementLeavesTheBackoffAlone(t *testing.T) {
+	clk := newFakePlannerClock(plannerT0)
+	m := newInflightMap()
+	k := rowKey{Leg: rowLeg, ID: "a"}
+	seq := m.add(inflightEntry{Kind: intentRowHeal, Key: k})
+	p := newPlanner(clk, func() time.Duration { return time.Minute }, nil, m, nil, io.Discard)
+	p.settlements.post(settlement{Key: k, Kind: intentRowHeal, Seq: seq, Outcome: settledFailed, Cause: causeDeadline})
+	p.drainSettlements(plannerT0)
+	before, ok := p.backoff.Snapshot()[rowBackoffKey(k)]
+	if !ok {
+		t.Fatal("the abandoned effect left no backoff")
+	}
+	for _, late := range []settlement{{Outcome: settledLanded}, {Outcome: settledRefused, Cause: causeCAS}} {
+		late.Key, late.Kind, late.Seq, late.Late = k, intentRowHeal, seq, true
+		p.settlements.post(late)
+		p.drainSettlements(plannerT0.Add(time.Second))
+		if got := p.backoff.Snapshot()[rowBackoffKey(k)]; got != before {
+			t.Fatalf("a late %v changed the row's backoff to %+v, want %+v", late.Outcome, got, before)
 		}
 	}
-	if len(effectRegistry) == 0 {
-		t.Fatal("the registry is empty")
+}
+
+// Kills an abandoned write that leaves its row unpaced (review FIX2): a row
+// write settled ambiguous (abandoned once its write began) backs the row
+// off, as main's failed abandonment did; it never resets the record.
+func TestAbandonedRowWriteStillBacksOff(t *testing.T) {
+	m := newInflightMap()
+	k := rowKey{Leg: rowLeg, ID: "a"}
+	seq := m.add(inflightEntry{Kind: intentRowHeal, Key: k})
+	p := newPlanner(newFakePlannerClock(plannerT0), func() time.Duration { return time.Minute }, nil, m, nil, io.Discard)
+	p.settlements.post(settlement{Key: k, Kind: intentRowHeal, Seq: seq, Outcome: settledAmbiguous, Cause: causeDeadline})
+	p.drainSettlements(plannerT0)
+	if r, ok := p.backoff.Snapshot()[rowBackoffKey(k)]; !ok || r.Cause != causeDeadline {
+		t.Fatalf("backoff %+v, want the abandoned row write backed off", p.backoff.Snapshot())
+	}
+}
+
+// Kills an effect defined in a file the effect lint does not cover: the
+// transaction, and every kind's body, around, needsFor, and each section's
+// Decide, Probe and Call, are defined in reconcile_effect_*.go or
+// reconcile_steps_*.go.
+func TestEffectSpecFuncsAreLinted(t *testing.T) {
+	linted := effectLintFiles(t)
+	check := func(kind string, fn any) {
+		pc := reflect.ValueOf(fn).Pointer()
+		if file, _ := goruntime.FuncForPC(pc).FileLine(pc); !slices.Contains(linted, filepath.Base(file)) {
+			t.Errorf("%s's effect is defined in %s, outside the effect lint", kind, file)
+		}
+	}
+	check("every kind", runTx)
+	n := 0
+	for kind, spec := range effectSpecs {
+		for _, fn := range []any{spec.body, spec.around, spec.needsFor} {
+			if !reflect.ValueOf(fn).IsNil() {
+				check(kind, fn)
+				n++
+			}
+		}
+		for _, sec := range spec.sections {
+			for _, fn := range append([]any{sec.Decide}, sec.defs...) {
+				check(kind, fn)
+			}
+			n++
+		}
+	}
+	if n == 0 {
+		t.Fatal("no kind has an effect")
+	}
+}
+
+// Kills an abandoned finalize exempt from its own backoff (review pin N3):
+// a finalize abandoned after its write began settles ambiguous with the
+// finalize prefix, which then holds the finalize back.
+func TestAmbiguousFinalizeIsPacedByItsOwnBackoff(t *testing.T) {
+	clk := newFakePlannerClock(plannerT0)
+	x, posted := fakeClockExecutor(clk)
+	release := make(chan struct{})
+	defer close(release)
+	e := hungEffect(intentStop, 1, plannerT0.Add(time.Minute), release)
+	e.Finalize, e.Latch = true, new(writeLatch)
+	e.Latch.begin() // its write began
+	k := rowKey{Leg: rowLeg, ID: "a"}
+	if err := x.submit(k, e); err != nil {
+		t.Fatal(err)
+	}
+	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 2)
+	clk.Advance(time.Minute)
+	s := receive(t, posted)
+	p := newPlanner(clk, func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+	p.settlements.post(s)
+	p.drainSettlements(plannerT0.Add(time.Minute))
+	if r := p.backoff.Snapshot()[rowBackoffKey(k)]; s.Outcome != settledAmbiguous || (intent{Kind: intentStop, Finalize: true}).finalizesOnly(r) {
+		t.Fatalf("settlement %+v recorded %+v, which the finalize is exempt from", s, r)
+	}
+}
+
+// Kills a provider swap's cancel labeled as a shutdown: a start the swap
+// cancels settles swap-cancel, at the executor and in the transaction.
+func TestSwapCancelIsLabeledApartFromShutdown(t *testing.T) {
+	x, posted := fakeClockExecutor(newFakePlannerClock(plannerT0))
+	if err := x.submit(rowKey{ID: "s"}, sessionEffect{Kind: intentStart, Deadline: plannerT0.Add(time.Hour), Run: func(ctx context.Context) settlement {
+		<-ctx.Done()
+		return ended(ctx)
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.waitStarts(0); err != nil {
+		t.Fatal(err)
+	}
+	if s := receive(t, posted); s.Cause != causeSwapCancel {
+		t.Fatalf("settlement %+v, want cause %q", s, causeSwapCancel)
 	}
 }

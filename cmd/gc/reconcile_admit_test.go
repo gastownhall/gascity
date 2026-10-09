@@ -412,7 +412,7 @@ func TestAdmitBootGateClosedDefersExactlyTheSixKinds(t *testing.T) {
 	in := admitIn(50, 50)
 	in.BootOpen = false
 	var intents []intent
-	for i, kind := range slices.Sorted(maps.Keys(intentKinds)) {
+	for i, kind := range slices.Sorted(maps.Keys(effectSpecs)) {
 		it := rowIntent(kind, i)
 		if kind == intentCreate {
 			it = poolCreate("w", "")
@@ -472,7 +472,7 @@ func TestIntentDeadlinesAreFlat(t *testing.T) {
 	rowWrites := []string{intentBaseline, intentDrainBegin, intentDrainCancel, intentDrainVoid, intentRowHeal, intentRowMetadata, intentSignal}
 	in := admitIn(50, 50)
 	in.Cfg.Session.StartupTimeout = "2m"
-	for kind := range intentKinds {
+	for kind := range effectSpecs {
 		it := rowIntent(kind, 1)
 		if kind == intentCreate {
 			it = poolCreate("w", "")
@@ -506,7 +506,7 @@ func TestIntentDeadlinesAreFlat(t *testing.T) {
 func TestAdmitRowBackoffDefersAllButGoneFinalize(t *testing.T) {
 	in := admitIn(50, 50)
 	in.Backoff = map[string]backoffRecord{rowBackoffKey(admitRow(1)): {Until: admitT0.Add(time.Second), Cause: "fence-l3"}}
-	for kind := range intentKinds {
+	for kind := range effectSpecs {
 		if kind == intentCreate {
 			continue
 		}

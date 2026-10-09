@@ -54,12 +54,18 @@ func TestResumeVoidsSuspendedDrain(t *testing.T) {
 	if it.Kind != intentDrainVoid || it.Reason != decideDrainVoid+drainSuspended {
 		t.Fatalf("resumed: %+v, want the void", it)
 	}
-	if s := effectRegistry[it.Kind](newEffectPass(w, a), it)(context.Background()); s.Outcome != settledLanded {
-		t.Fatalf("void settlement %+v, want landed", s)
+	s := runTx(context.Background(), newEffectPass(w, a), it, effectSpecs[it.Kind], nil)
+	if want := (drainTransition{Name: w.Census.Rows[k].Info.SessionNameMetadata, Reason: drainSuspended, Transition: "cancel"}); s.Outcome != settledLanded || s.Facts.Transition == nil || *s.Facts.Transition != want {
+		t.Fatalf("void settlement %+v (transition %+v), want landed with legacy's %+v", s, s.Facts.Transition, want)
 	}
 	got, _ := store.Get(b.ID)
 	if got.Metadata[session.DrainIntentReasonKey] != "" || got.Metadata[session.DrainIntentIncarnationKey] != "" || got.Metadata["state"] != "active" {
 		t.Fatalf("row after the void %v, want the request cleared and the state kept", got.Metadata)
+	}
+	// Run again, the request gone: it decides no void, and records no
+	// transition for a write it did not make.
+	if s := runTx(context.Background(), newEffectPass(w, a), it, effectSpecs[it.Kind], nil); s.Outcome == settledLanded || s.Facts.Transition != nil {
+		t.Fatalf("a void with nothing to clear: settlement %+v, want no landing and no transition", s)
 	}
 }
 

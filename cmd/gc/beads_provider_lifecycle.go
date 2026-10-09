@@ -724,7 +724,9 @@ func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.Conf
 	if err != nil {
 		return err
 	}
-	if changed && state.EndpointOrigin != contract.EndpointOriginExplicit {
+	autoExport, autoExportSet, autoExportErr := contract.ReadExportAuto(fs, filepath.Join(beadsDir, "config.yaml"))
+	if changed && state.EndpointOrigin != contract.EndpointOriginExplicit &&
+		autoExportErr == nil && (!autoExportSet || !autoExport) {
 		// PR 1965 made export.auto:false canonical, but a pre-existing
 		// .beads/issues.jsonl from before this normalization still triggers
 		// bd's auto-import-on-write trap (sa-41j3kp) — bd sees the file,
@@ -732,16 +734,20 @@ func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.Conf
 		// subprocess timeout while it re-imports the JSONL. The file is a
 		// stale export from when auto-export was on; with the canonical
 		// config now suppressing auto-export, nothing will refresh it. Explicit
-		// opt-out scopes keep JSONL as load-bearing state.
+		// opt-out scopes and scopes with export.auto:true keep JSONL as
+		// load-bearing state. A config that cannot be read back may hold that
+		// true, so the file is left for the store-open reaper to judge.
 		removeStaleBdExportJSONL(fs, beadsDir)
 	}
 	return nil
 }
 
-// removeStaleBdExportJSONL removes .beads/issues.jsonl if present. Called after
-// EnsureCanonicalConfig writes export.auto:false, since the file is a stale
-// export that bd's auto-import path would otherwise re-load on every write,
-// stalling bd create for the full subprocess timeout on large datasets.
+// removeStaleBdExportJSONL removes .beads/issues.jsonl if present. Called
+// after EnsureCanonicalConfig has canonicalized export.auto to false — that
+// is, for scopes where gc does not observe an explicit export.auto:true —
+// since the file is then a stale export that bd's auto-import path would
+// otherwise re-load on every write, stalling bd create for the full
+// subprocess timeout on large datasets.
 // Best-effort: any error is non-fatal because the env-var BD_EXPORT_AUTO=false
 // path (bdRuntimeEnv) is a second line of defense for gc-initiated calls.
 func removeStaleBdExportJSONL(fs fsys.FS, beadsDir string) {

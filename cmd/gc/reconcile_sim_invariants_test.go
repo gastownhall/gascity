@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,15 +16,15 @@ import (
 )
 
 // The simulator's invariant checks (D1a; CONTRACT v5 §10) beyond I8 and I10,
-// against ground truth: I1, I7, I15 and I23, which merged code can break, each
-// with a seeded mutant; and I2, I4, I5, I9, I14, I16, I17 and I24, whose
-// writers have not merged, each shown to report by TestSimChecksBite until its
-// PR adds a mutant.
+// against ground truth: I1, I7, I15, I23 and AL1's census-only rows, which
+// merged code can break, each with a seeded mutant; and I2, I4, I5, I9, I14,
+// I16, I17 and I24, whose writers have not merged, each shown to report by
+// TestSimChecksBite until its PR adds a mutant.
 
 func init() {
 	simStepChecks = append(simStepChecks, (*sim).checkCaps, (*sim).checkStarts, (*sim).checkDestructive, (*sim).checkTokens, (*sim).checkDead)
 	simWriteChecks = append(simWriteChecks, (*sim).checkWrite)
-	simEffectChecks = append(simEffectChecks, (*sim).checkFinalized)
+	simEffectChecks = append(simEffectChecks, (*sim).checkFinalized, (*sim).checkCensusOnly)
 	simQuietChecks = append(simQuietChecks, (*sim).checkDwell)
 	simMutants = append(simMutants, []struct {
 		name, inv string
@@ -44,7 +45,30 @@ func init() {
 			}
 			return intent{Kind: intentRowHeal, Reason: decideTimerHeal, Basis: rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}, Patch: patch}, true
 		})}},
+		// The I15 carve-out for A6's stability clear (v5.8) holds only for a
+		// committed row whose own runtime the deciding pass read alive 30s
+		// past its wake (TestSimI15StabilityCarveOut pins the rest).
+		{"a stability clear inside 30s of the wake ends a live quarantine", "I15 ", simOpts{arms: mutateHeal(quarantineClear(func(r *rowFacts, stable bool) bool {
+			return committed(r.row.Info) && r.aliveProbed() && !stable
+		}))}},
+		{"an arm acts on a census-only row", "AL1 ", simOpts{arms: func(arms []rowArm) []rowArm {
+			return slices.DeleteFunc(arms, func(a rowArm) bool {
+				return reflect.ValueOf(a.decide).Pointer() == reflect.ValueOf(armCensusOnly).Pointer()
+			})
+		}}},
 	}...)
+}
+
+// quarantineClear is an A6 that clears a set quarantined_until where when
+// says, given whether the row woke 30s or more before the pass.
+func quarantineClear(when func(r *rowFacts, stable bool) bool) func(r *rowFacts) (intent, bool) {
+	return func(r *rowFacts) (intent, bool) {
+		woke, err := time.Parse(time.RFC3339, r.row.Info.LastWokeAt)
+		if r.row.Info.QuarantinedUntil == "" || err != nil || !when(r, r.w.Now.Sub(woke) >= stabilityThreshold) {
+			return intent{}, false
+		}
+		return r.heal(intentRowHeal, decideStabilityClear, session.MetadataPatch{"quarantined_until": ""})
+	}
 }
 
 // hidingInflight is an admission that ignores the effects in flight: the pass
@@ -72,7 +96,7 @@ func (s *sim) checkCaps() {
 	caps := map[capClass]int{capStarts: s.cfg.Daemon.MaxWakesPerTickOrDefault(), capCreates: createsInFlightCap, capProbing: probe, capRowWrites: probe}
 	count := make(map[capClass]int)
 	for _, e := range s.inflight.view().Entries {
-		if spec, ok := intentKinds[e.Kind]; ok && !e.Ambiguous {
+		if spec, ok := effectSpecs[e.Kind]; ok && !e.Ambiguous {
 			count[spec.class]++
 		}
 	}
@@ -160,10 +184,15 @@ var stopKeys = []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, 
 //   - I15 (I-STOP-3/4): no request survives a v2 PreWake, and no write
 //     rewrites what an operator holds dormant (dormantChange);
 //   - I4 (I-fence): no terminal write lands while the row's own runtime has a
-//     live pane, which C8.8 would have read.
+//     live pane, which C8.8 would have read;
+//   - AL1 (census-only): it writes no row off the sessions leg, which legacy
+//     never reconciles and a shared rig store fills with other cities' rows.
 func (s *sim) checkWrite(w simWrite) {
 	b, a := w.Before.Metadata, w.After.Metadata
 	id := w.Leg + "/" + w.After.ID
+	if w.Leg != simCityLeg {
+		s.failf("AL1 census-only", "v2 wrote %s, a census-only row", id)
+	}
 	if st := a["state"]; st != b["state"] && !knownSessionStates[st] && (st != string(session.StateDraining) || a["state_reason"] != session.DrainAckStopPendingReason) {
 		s.failf("I7 I-legacy", "v2 wrote state %q on %s", st, id)
 	}
@@ -180,7 +209,7 @@ func (s *sim) checkWrite(w simWrite) {
 			}
 		}
 	}
-	if k := dormantChange(w.Before, a, w.At); k != "" {
+	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" {
 		s.failf("I15 I-STOP-3/4", "v2 rewrote %s %q -> %q on %s, which an operator holds dormant at %s", k, b[k], a[k], id, w.At.Format(time.RFC3339))
 	}
 	terminal := (w.After.Status == "closed" && w.Before.Status != "closed") ||
@@ -193,9 +222,11 @@ func (s *sim) checkWrite(w simWrite) {
 // dormantChange returns a key a v2 write changed on b that an operator owns
 // at t, or "": an honored kill fence owns the row's lifecycle and its sleep
 // reason, a suspend the row's state, and an unexpired hold or quarantine its
-// timer and sleep reason; no dormant row is woken or given a stop request,
-// though one it holds may be cleared.
-func dormantChange(b beads.Bead, a map[string]string, t time.Time) string {
+// timer and sleep reason, though A6's stability clear may clear the
+// quarantine's timer on a row its pass read stable (v5.8, SESS-539; stable,
+// sim.stable); no dormant row is woken or given a stop request, though one it
+// holds may be cleared.
+func dormantChange(b beads.Bead, a map[string]string, t time.Time, stable bool) string {
 	m := b.Metadata
 	until := func(k string) bool { at, err := time.Parse(time.RFC3339, m[k]); return err == nil && at.After(t) }
 	reason := session.SleepReason(m["sleep_reason"])
@@ -212,13 +243,16 @@ func dormantChange(b beads.Bead, a map[string]string, t time.Time) string {
 			owned = append(owned, "sleep_reason")
 		}
 	}
-	if until("quarantined_until") {
-		owned = append(owned, "quarantined_until")
+	quarantined := until("quarantined_until")
+	if quarantined {
+		if !stable || a["quarantined_until"] != "" {
+			owned = append(owned, "quarantined_until")
+		}
 		if slices.Contains([]session.SleepReason{session.SleepReasonQuarantine, session.SleepReasonContextChurn, session.SleepReasonRateLimit}, reason) {
 			owned = append(owned, "sleep_reason")
 		}
 	}
-	if len(owned) == 0 {
+	if len(owned) == 0 && !quarantined {
 		return ""
 	}
 	for _, k := range owned {
@@ -265,6 +299,16 @@ func (s *sim) checkFinalized(e *simEffect) func(settlement) {
 			s.failf("I16 I-STOP-5", "the stop effect on %v confirmed no live pane and left the request signaled", e.it.Key)
 		}
 	}
+}
+
+// checkCensusOnly is AL1 (census-only) on what the planner admits: no
+// effect runs for a row off the sessions leg, which gather gives no writer,
+// so checkWrite alone would not see the arm that proposed it.
+func (s *sim) checkCensusOnly(e *simEffect) func(settlement) {
+	if e.it.Kind != intentCreate && s.legOf(e.it.Key.Leg) != s.legs[0] {
+		s.failf("AL1 census-only", "v2 admitted %s for %v, a census-only row", e.it.Kind, e.it.Key)
+	}
+	return func(settlement) {}
 }
 
 // legOf is the leg whose cache the census reads as ref.
@@ -330,7 +374,7 @@ func (s *sim) checkDead() {
 		if _, ok := listed[name]; !ok || rt == nil || rt.id != row.Key.ID || s.sp.changed[name] > s.listed {
 			continue
 		}
-		fresh := s.sp.livenessLocked(name)
+		fresh := runtimeLiveness(rt)
 		dead := fresh.Present() && !fresh.Alive
 		switch got := obs[row.Key].Liveness; {
 		case dead && !rt.probeErr && got != livenessDead && got != livenessUnknown: // an erroring probe proves nothing (O3)

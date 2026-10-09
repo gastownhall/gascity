@@ -120,13 +120,7 @@ var parityFindings = map[string]parityEntry{
 		"CONTRACT v5 A5; ORCH-NOTES C2c1 (sync SESS-045/046)", "legacy stamps the unknown_state_* markers and emits session.unknown_state (escalating at 30 minutes); v2 writes no marker and records reconciler.alert instead. Not a §12.2 item, and against the plan's event-parity rule (§2.3)",
 		[]string{"unknown_state_first_seen", "unknown_state_value", "unknown_state_escalated_at"},
 	},
-	"advisory-state-heal": {
-		"C5d (#7315) in part (CONTRACT v5.6 note), SESS-531", "legacy heals an awake row whose runtime is gone to asleep and resets its continuation; v2's A6 does neither",
-		[]string{"state", "sleep_reason", "session_key", "started_config_hash", "continuation_reset_pending"},
-	},
-	"detached-at":         {"BEHAVIORS SESS-533..536 (KEPT: A6 timer heals + row write)", "legacy stamps detached_at on a detached interactive row and clears it otherwise; v2's A6 has no such heal, and neither CONTRACT v5 A6 nor the plan names one", []string{"detached_at"}},
-	"wake-failure-clear":  {"BEHAVIORS SESS-539/540 (KEPT: A6 timer heals + row write)", "legacy clears wake_attempts, an unexpired quarantine and churn_count on a row alive past the stability and productivity thresholds, and so stamps the current bead on a row v2 still reads quarantined (not Wake); v2 has no such heal, and neither CONTRACT v5 A6 nor the plan names one", []string{"wake_attempts", "quarantined_until", "churn_count", "currently_processing_bead_id"}},
-	"empty-type-repair":   {"BEHAVIORS SESS-701 (KEPT: A6 timer heals + row write)", "legacy repairs a session row's empty type to session; v2 has no such repair, and neither CONTRACT v5 A6 nor the plan names one", []string{"type"}},
+	"empty-type-repair":   {"C7d, BEHAVIORS SESS-701 (KEPT: A7 row-metadata verb, CONTRACT v5.8 M1)", "legacy repairs a session row's empty type to session; v2's A7 row-metadata verb takes it with RowPatch.Type, which C7d adds", []string{"type"}},
 	"named-trigger-clear": {"POOL-056 follow-up (ORCH-NOTES C5d ruling)", "legacy clears a preserved named row's stale trigger stamp; v2's A6 does not yet", []string{"gc.trigger_bead_id", "gc.trigger_bead_store_ref", "brain_parent_sid"}},
 	"drain-cancel-on-probe-error": {
 		"CONTRACT v5 O3, BEHAVIORS DRAIN-042", "legacy skips a drain whose running probe errors; v2's inventory still classifies the row, so A19's wake lens cancels the drain. No completion either way, but §12.2 does not list the cancel",
@@ -148,13 +142,19 @@ var parityUnported = map[string]parityEntry{
 	"A7 row-metadata": {"C7d", "legacy's session-bead sync stamps the row metadata of a row created or changed this tick; v2 registers no row-metadata arm yet", []string{"synced_at", "command", "work_dir"}},
 }
 
+// parityPinned are KEPT rows a registered arm implements whose owner cell
+// also names an arm not yet registered, which exempts them from the gate;
+// they need a fixture all the same. SESS-531's cell names A17 (the heartbeat
+// hold) and SESS-539's A20, beside A6's items 4 and 6.
+var parityPinned = []string{"SESS-531", "SESS-539"}
+
 // parityKindOwners maps each reachable effect kind to the BEHAVIORS owner
 // phrases it implements; the PR that makes a kind reachable adds its phrases.
 var parityKindOwners = map[string]*regexp.Regexp{
 	intentRowHeal: regexp.MustCompile(`\brow write\b`),
-	// A6's fresh heals: the creating-row heal (SESS-062); the crash heal's
-	// SESS-531 is a row write.
-	intentRowHealFresh: regexp.MustCompile("\\bA6 heal of a `creating` row\\b"),
+	// A6's fresh heals: the creating-row heal (SESS-062) and the
+	// dead-runtime heal (SESS-531).
+	intentRowHealFresh: regexp.MustCompile("\\bA6 heal of a `creating` row\\b|\\bA6 dead-runtime heal\\b"),
 	intentCreate:       regexp.MustCompile(`\bC1 create\b|\bC2 named reopen\b`),
 	// A19's two kinds own exactly its rows.
 	intentDrainCancel: regexp.MustCompile(`\bA19\b`),
@@ -667,33 +667,33 @@ func parityFixtures() []parityFixture {
 			Name: "an awake row whose runtime is gone", Behaviors: []string{"SESS-531"},
 			Rows: []parityRow{awake("last_woke_at", at(-2*time.Hour), "quarantined_until", at(time.Hour), "session_key", "conversation-1", "started_config_hash", "v6:abc")}, Work: assigned,
 			Explain: map[string]string{
-				"row:gc-1:*heal": "advisory-state-heal", "row:gc-1:*policy": "sleep-policy-keys",
+				"row:gc-1:*policy":   "sleep-policy-keys",
 				"row:gc-1:*stranded": "A21 stranded", "event:session.stranded gc-1 [session_id session_name template work_bead_ids]": "A21 stranded",
 			},
 		},
 		{
 			Name: "detached_at clears when idle sleep is off", Behaviors: []string{"SESS-533"},
 			Rows: []parityRow{awake("detached_at", at(-time.Hour))}, Work: assigned, Runtimes: []simRuntime{live},
-			Explain: explain(map[string]string{"row:gc-1:*detach": "detached-at"}),
+			Explain: explain(nil),
 		},
 		{
 			Name: "detached_at clears while attached", Behaviors: []string{"SESS-535"}, City: napping,
 			Rows: []parityRow{awake("detached_at", at(-time.Hour))}, Work: assigned, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", attached: true}},
-			Explain: explain(map[string]string{"row:gc-1:*detach": "detached-at"}),
+			Explain: explain(nil),
 		},
 		{
 			Name: "detached_at is stamped on detach", Behaviors: []string{"SESS-536"}, City: napping,
 			Rows: []parityRow{awake()}, Work: assigned, Runtimes: []simRuntime{live},
-			Explain: explain(map[string]string{"row:gc-1:*detach": "detached-at"}),
+			Explain: explain(nil),
 		},
 		{
 			Name: "an ambiguous probe defers the lifecycle and writes nothing else", Behaviors: []string{"SESS-534", "GUAR-011"}, City: napping,
-			Rows: []parityRow{awake("held_until", at(-time.Minute), "sleep_reason", "user-hold")}, Work: assigned, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", probeErr: true}},
+			Rows: []parityRow{awake("held_until", at(-time.Minute), "sleep_reason", "user-hold", "last_woke_at", at(-2*time.Hour), "wake_attempts", "2")}, Work: assigned, Runtimes: []simRuntime{{id: "gc-1", epoch: "1", token: "tok-gc-1", probeErr: true}},
 		},
 		{
 			Name: "a row alive past the thresholds clears wake failures and churn", Behaviors: []string{"SESS-539", "SESS-540"},
 			Rows: []parityRow{awake("last_woke_at", at(-2*time.Hour), "wake_attempts", "2", "quarantined_until", at(time.Hour), "churn_count", "2")}, Work: assigned, Runtimes: []simRuntime{live},
-			Explain: explain(map[string]string{"row:gc-1:*clear": "wake-failure-clear"}),
+			Explain: explain(nil),
 		},
 		{
 			Name: "an alive row clears its stranded marker", Behaviors: []string{"SESS-603"},
@@ -803,14 +803,17 @@ func TestSessionDifferentialEntriesHaveFixtures(t *testing.T) {
 	}
 }
 
-// parityRegistered is the arms in rowArms and the kinds in effectRegistry.
+// parityRegistered is the arms in rowArms and the kinds in effectSpecs that
+// have an effect.
 func parityRegistered() (arms, kinds map[string]bool) {
 	arms, kinds = map[string]bool{}, map[string]bool{}
 	for _, a := range rowArms {
 		arms[a.name] = true
 	}
-	for k := range effectRegistry {
-		kinds[k] = true
+	for k, spec := range effectSpecs {
+		if spec.runs() {
+			kinds[k] = true
+		}
 	}
 	return arms, kinds
 }
@@ -1027,9 +1030,18 @@ func TestEveryKeptBehaviorOfARegisteredArmHasAParityFixture(t *testing.T) {
 			t.Errorf("KEPT %s (owner %q) has no parity fixture", id, gated[id])
 		}
 	}
+	kept := map[string]bool{}
 	total := 0
 	for _, ids := range owners {
 		total += len(ids)
+		for _, id := range ids {
+			kept[id] = true
+		}
+	}
+	for _, id := range parityPinned {
+		if !kept[id] || !covered[id] {
+			t.Errorf("pinned KEPT %s: kept %t, has a parity fixture %t", id, kept[id], covered[id])
+		}
 	}
 	t.Logf("KEPT rows gated %d, exempt %d; reachable kinds %v", len(gated), total-len(gated), reached)
 }

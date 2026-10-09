@@ -257,6 +257,7 @@ go_test(
         "apierr_roundtrip_test.go",
         "bead_close_event_test.go",
         "bead_close_reason_test.go",
+        "bead_reopen_lease_test.go",
         "blocking_test.go",
         "blocking_validation_test.go",
         "branch_resolver_test.go",

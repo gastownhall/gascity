@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -20,6 +21,16 @@ import (
 func setupLaunchDriftResumeEnv(t *testing.T) (*reconcilerTestEnv, TemplateParams, beads.Bead) {
 	t.Helper()
 	env := newReconcilerTestEnv()
+	tp, session := seedLaunchDriftResumeSession(t, env, forkClaude(), nil)
+	return env, tp, session
+}
+
+// seedLaunchDriftResumeSession seeds env with the launch-only-drift "worker"
+// session setupLaunchDriftResumeEnv describes, on provider rp. sessionMeta is
+// stamped before the baseline is taken, so it shapes the desired config the
+// stored launch half drifts from.
+func seedLaunchDriftResumeSession(t *testing.T, env *reconcilerTestEnv, rp *config.ResolvedProvider, sessionMeta map[string]string) (TemplateParams, beads.Bead) {
+	t.Helper()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	tp := TemplateParams{
 		Command:          "claude",
@@ -28,7 +39,7 @@ func setupLaunchDriftResumeEnv(t *testing.T) (*reconcilerTestEnv, TemplateParams
 		InstanceName:     "worker",
 		Alias:            "worker",
 		Prompt:           "do the work",
-		ResolvedProvider: forkClaude(),
+		ResolvedProvider: rp,
 	}
 	env.desiredState["worker"] = tp
 	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "claude"}); err != nil {
@@ -36,6 +47,7 @@ func setupLaunchDriftResumeEnv(t *testing.T) (*reconcilerTestEnv, TemplateParams
 	}
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, sessionMeta)
 
 	// Desired (current) config and an old baseline that differs only in the
 	// launch half (Command) → provision hash matches, launch hash differs. The
@@ -51,7 +63,7 @@ func setupLaunchDriftResumeEnv(t *testing.T) (*reconcilerTestEnv, TemplateParams
 		"started_launch_hash":    runtime.LaunchFingerprint(oldCfg),
 		"started_live_hash":      runtime.LiveFingerprint(agentCfg),
 	})
-	return env, tp, session
+	return tp, session
 }
 
 // TestReconcileSessionBeads_LaunchDriftRelaunchResumesTrackedConversation is the
@@ -93,6 +105,44 @@ func TestReconcileSessionBeads_LaunchDriftRelaunchResumesTrackedConversation(t *
 	// The runtime env the durable hash-form config lacked is present.
 	if got := rc.Env["GC_SESSION_ID"]; got == "" {
 		t.Errorf("Relaunch Env[GC_SESSION_ID] empty, want session-context env merged")
+	}
+}
+
+// TestReconcileSessionBeads_LaunchDriftRelaunchAppliesRigResidentTriggerPins
+// pins that a launch-only drift relaunch of an unclaimed seat reads its trigger
+// bead through the pass's trigger resolver, as a fresh start does. The trigger
+// lives in a rig store (effort=low) and the session store holds a same-id decoy
+// (effort=high). Without the resolver the rig stamp fails closed, so the seat is
+// relaunched, and rebaselined, on provider defaults that no later tick revisits.
+func TestReconcileSessionBeads_LaunchDriftRelaunchAppliesRigResidentTriggerPins(t *testing.T) {
+	const triggerID = "fe-42"
+	env := newReconcilerTestEnv()
+	env.store = &beads.MemStore{HonorExplicitIDs: true}
+	rigStore := &beads.MemStore{HonorExplicitIDs: true}
+	newTriggerOptionBead(t, rigStore, triggerID, map[string]string{"effort": "low"})
+	newTriggerOptionBead(t, env.store, triggerID, map[string]string{"effort": "high"})
+	rp := forkClaude()
+	rp.OptionsSchema = optionSchemaProvider().OptionsSchema
+	_, session := seedLaunchDriftResumeSession(t, env, rp, map[string]string{
+		beadmeta.TriggerBeadIDMetadataKey:       triggerID,
+		beadmeta.TriggerBeadStoreRefMetadataKey: "rig:frontend",
+	})
+	env.startOptions = append(env.startOptions, withTriggerBeadResolver(rigStore.Get))
+
+	env.reconcile([]beads.Bead{session})
+
+	if got := env.sp.CountCalls("Relaunch", "worker"); got != 1 {
+		t.Fatalf("Relaunch calls = %d, want 1 (launch-only drift must relaunch); stderr=%s", got, env.stderr.String())
+	}
+	rc := env.sp.LastRelaunchConfig("worker")
+	if rc == nil {
+		t.Fatal("no Relaunch config recorded")
+	}
+	if !strings.Contains(rc.Command, "--effort low") {
+		t.Errorf("Relaunch Command = %q, want rig-resident trigger pin --effort low", rc.Command)
+	}
+	if strings.Contains(rc.Command, "--effort high") {
+		t.Errorf("Relaunch Command = %q, must not read the session-store decoy's --effort high", rc.Command)
 	}
 }
 
@@ -223,7 +273,7 @@ func TestRelaunchAgentForLaunchDrift_AbortClearsSpeculativeResumeKey(t *testing.
 	callRelaunch := func(env *reconcilerTestEnv, tp TemplateParams, session *beads.Bead, storedHash, currentHash, storedProvision, storedLaunch string) (bool, map[string]string) {
 		return relaunchAgentForLaunchDrift(
 			context.Background(), env.sp, sessionFrontDoor(env.store), env.sessionInfo(session.ID), "worker",
-			tp, "", env.cfg, env.store, storedHash, currentHash, storedProvision, storedLaunch,
+			tp, "", env.cfg, env.store, dispatchOptionSources{}, storedHash, currentHash, storedProvision, storedLaunch,
 			[]string{"Command"}, env.rec, nil, &env.stdout, &env.stderr,
 		)
 	}

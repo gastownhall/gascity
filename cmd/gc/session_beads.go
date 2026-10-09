@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -589,6 +590,8 @@ func reopenNamedSessionBatch(state, sleepReason string, now time.Time) map[strin
 		"pending_create_claim": pendingCreateClaim,
 		"synced_at":            now.Format("2006-01-02T15:04:05Z07:00"),
 	}
+	// A reopened row holds no runtime lease: a close may leave its record.
+	maps.Copy(batch, session.RuntimeLeaseClearPatch())
 	// Reset the pending-create stale clock to NOW. The bead row's
 	// CreatedAt reflects when it was first minted (potentially
 	// long ago); this reopen is a fresh spawn attempt, so the

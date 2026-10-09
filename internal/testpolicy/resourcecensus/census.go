@@ -125,8 +125,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   745,
-			BaselineFiles:   221,
+			BaselineCalls:   746,
+			BaselineFiles:   222,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-cp3hwi",
@@ -138,7 +138,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   498,
+			BaselineCalls:   497,
 			BaselineFiles:   184,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
@@ -166,8 +166,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   497,
-			BaselineFiles:   147,
+			BaselineCalls:   498,
+			BaselineFiles:   148,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-cp3hwi",
@@ -179,7 +179,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   320,
+			BaselineCalls:   319,
 			BaselineFiles:   123,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
@@ -432,6 +432,17 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-31",
 		},
 		{
+			PackageDir:      "internal/session",
+			PackageName:     "session",
+			Owner:           "TestRuntimeLeaseCrossProcess",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the runtime lease cross-process harness is a checked Medium subprocess owner",
+			ResourceOwner:   "the role processes are confined to TestRuntimeLeaseCrossProcess, which re-execs the test binary to prove the lease across real processes: a flock dies with its process, so only a killed process proves crash release, and the store record must fence a second process that shares nothing but the store",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
 			PackageDir:      "scripts",
 			PackageName:     "scripts_test",
 			Owner:           "TestDockerSessionProtocol",
@@ -611,7 +622,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   320,
+			BaselineCalls:   319,
 			BaselineFiles:   123,
 			ReportedCalls:   287,
 			ReportedFiles:   113,

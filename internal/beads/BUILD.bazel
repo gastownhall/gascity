@@ -258,6 +258,11 @@ go_test(
         },
         "//conditions:default": {},
     }),
+    # The integration build (//test:integration_packages) runs ~1700 tests for
+    # ~300 s on one worker; 9 shards bring each to about a minute. The guard
+    # scripts/integration_packages_shards_test.go keeps the tests in
+    # heavy_tests.txt apart.
+    shard_count = 9,
     deps = [
         "//internal/beadmeta",
         "//internal/beads/beadstest",

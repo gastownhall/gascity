@@ -138,7 +138,7 @@ var ErrControlPending = errors.New("workflow control pending")
 // ErrControlDriftPending is the subset of ErrControlPending that no progress
 // inside the graph can ever clear: the control bead is waiting on an
 // out-of-band repair — a rig re-added to city.toml, a city name restored, a
-// store that comes back.
+// store that comes back, a check script shipped or made executable.
 //
 // The split is load-bearing at the cmd layer. Ordinary pending — a retry
 // waiting for its subject, a drain waiting for its members, a scope waiting for

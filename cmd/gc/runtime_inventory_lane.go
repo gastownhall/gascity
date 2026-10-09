@@ -241,9 +241,6 @@ func (cr *CityRuntime) initRuntimeInventoryLane() *runtimeInventoryLane {
 		return nil
 	}
 	cr.inventoryLane = newRuntimeInventoryLane(cfg.Daemon.PatrolIntervalDuration(), cr.stderr, cr.logPrefix)
-	if cr.cs != nil {
-		cr.cs.onDeathGate.Store(cr.inventoryLane.onDeath)
-	}
 	return cr.inventoryLane
 }
 

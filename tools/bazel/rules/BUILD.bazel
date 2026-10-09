@@ -2,6 +2,8 @@
 # pnpm_lock.bzl) and the scripts they run.
 
 exports_files([
+    # Read by //scripts:scripts_test (bazel_go_repository_tools_test.go).
+    "go_repository_tools.bzl",
     # Read by //scripts:scripts_test (openapi_breaking_gate_test.go).
     "openapi_base_spec.bzl",
     "pnpm_lock_in_sync_test.py",

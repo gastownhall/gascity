@@ -60,6 +60,7 @@ go_test(
         "factory_test.go",
         "handle_clone_test.go",
         "handle_history_provider_test.go",
+        "handle_resume_policy_test.go",
         "handle_stop_intent_test.go",
         "handle_test.go",
         "handle_transcriptmeta_test.go",
