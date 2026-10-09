@@ -1096,3 +1096,26 @@ func lifecycleRepoRoot(t *testing.T) string {
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 }
+
+func TestPreserveConversationOnRuntimeLoss(t *testing.T) {
+	tests := []struct {
+		name string
+		info Info
+		want bool
+	}{
+		{"manual started", Info{SessionOrigin: "manual", SessionKey: "native", StartedConfigHash: "config"}, true},
+		{"legacy manual started", Info{ManualSessionMetadata: "true", SessionKey: "native", StartedConfigHash: "config"}, true},
+		{"manual never started", Info{SessionOrigin: "manual", SessionKey: "allocated"}, false},
+		{"manual missing key", Info{SessionOrigin: "manual", StartedConfigHash: "config"}, false},
+		{"pool started", Info{SessionOrigin: "pool", SessionKey: "native", StartedConfigHash: "config"}, false},
+		{"named always", Info{ConfiguredNamedSession: true, ConfiguredNamedMode: "always"}, true},
+		{"named on demand", Info{ConfiguredNamedSession: true, ConfiguredNamedMode: "on-demand", SessionKey: "native", StartedConfigHash: "config"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := PreserveConversationOnRuntimeLoss(tt.info); got != tt.want {
+				t.Fatalf("preserve = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

@@ -66,3 +66,11 @@ evidence from tests, source, an issue, or a commit.
   Propagate that stale verdict to the provider-aware caller and clean up using
   the attempted identity outside the mutation lock. Persistence failure alone
   must not trigger runtime cleanup.
+
+## Committed conversation recovery
+
+Use the session-owned `PreserveConversationOnRuntimeLoss` policy when healing
+a lost process or retrying a failed start. A committed manual conversation keeps
+its provider key and start configuration through reaping, wake failure and
+churn; retry and quarantine accounting still apply. `session_origin=manual` and
+the legacy manual marker both count. Explicit reset is a separate operation.

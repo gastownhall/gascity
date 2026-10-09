@@ -3526,3 +3526,54 @@ func TestReconcileSessionBeads_StaleSnapshotHealKeepsConcurrentSuspend(t *testin
 		}
 	}
 }
+
+func TestHealStatePatch_ManualRuntimeLossRetainsStartedConversation(t *testing.T) {
+	for _, origin := range []string{"manual", "pool"} {
+		t.Run(origin, func(t *testing.T) {
+			b := makeBead("conversation", map[string]string{
+				"state": "active", "session_origin": origin, "session_key": "native-conversation",
+				"started_config_hash": "config", "primed_at": "primed", "prompt_hash": "prompt",
+			})
+			patch := healStatePatchFromBead(b, false, &clock.Fake{Time: time.Now()}, 0)
+			if patch["state"] != "asleep" {
+				t.Fatalf("missing runtime not healed: %#v", patch)
+			}
+			for _, key := range []string{"session_key", "started_config_hash", "primed_at", "prompt_hash", "continuation_reset_pending"} {
+				_, changed := patch[key]
+				if changed != (origin == "pool") {
+					t.Fatalf("%s: unexpected %s mutation: %#v", origin, key, patch)
+				}
+			}
+		})
+	}
+}
+
+func TestRecordFailure_ManualConversationKeepsIdentityAndAccrues(t *testing.T) {
+	for _, kind := range []string{"wake", "churn"} {
+		t.Run(kind, func(t *testing.T) {
+			clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+			store := newTestStore()
+			b := makeBead("manual-conversation", map[string]string{
+				"session_origin": "manual", "session_key": "native", "started_config_hash": "config",
+				"wake_attempts": "1", "churn_count": "1",
+			})
+			info := seedSessionInfo(b)
+			if kind == "wake" {
+				recordWakeFailure(info, sessionFrontDoor(store), clk, "test")
+			} else {
+				recordChurn(info, sessionFrontDoor(store), clk, "test")
+			}
+			syncBeadFromStore(&b, store)
+			if b.Metadata["session_key"] != "native" || b.Metadata["started_config_hash"] != "config" || b.Metadata["continuation_reset_pending"] == "true" {
+				t.Errorf("manual conversation was discarded: %#v", b.Metadata)
+			}
+			counter := "wake_attempts"
+			if kind == "churn" {
+				counter = "churn_count"
+			}
+			if b.Metadata[counter] != "2" {
+				t.Errorf("failure accounting changed: %#v", b.Metadata)
+			}
+		})
+	}
+}

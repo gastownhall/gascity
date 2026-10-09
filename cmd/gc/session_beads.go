@@ -3242,7 +3242,9 @@ func reapStaleSessionBeads(
 		// They may legitimately be stopped between supervisor restarts; the
 		// named-session reconciler is responsible for preserving, waking, or
 		// retiring them after desired state is rebuilt from config.
-		if isNamedSessionInfo(info) {
+		// A committed manual conversation may be creating again while it
+		// resumes after runtime loss. It is not an abandoned first creation.
+		if isNamedSessionInfo(info) || session.HasStartedManualConversation(info) {
 			continue
 		}
 		// Session is alive — nothing to reap.
@@ -3402,7 +3404,7 @@ func reapPreBootSessionBeads(
 		}
 		// Manual sessions are operator-owned; drain/archive states have their
 		// own lifecycle paths that must not be short-circuited here.
-		if info.ManualSession || !reapableStateForPreBoot(info) {
+		if info.ManualSession || session.HasStartedManualConversation(info) || !reapableStateForPreBoot(info) {
 			continue
 		}
 		// A clean `gc stop` parks pool beads asleep with sleep_reason=city-stop;
