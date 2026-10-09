@@ -2664,3 +2664,75 @@ func TestSessionHandleLiveObservationCarriesAttachError(t *testing.T) {
 		t.Fatalf("Attached, AttachedErr = %v, %v; want false, %v", obs.Attached, obs.AttachedErr, probeErr)
 	}
 }
+
+func TestSessionHandleHistoryIdentitySurvivesLateCodexResumeKey(t *testing.T) {
+	base := t.TempDir()
+	dayDir := filepath.Join(base, "2026", "04", "14")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatalf("mkdir dayDir: %v", err)
+	}
+
+	workDir := "/tmp/codex-project"
+	resumeID := "019d8afb-efe8-7280-abf9-5901fd92e0cd"
+	transcriptPath := filepath.Join(dayDir, "rollout-2026-04-14T09-54-20-"+resumeID+".jsonl")
+	transcript := strings.Join([]string{
+		fmt.Sprintf(`{"timestamp":"2026-04-14T09:54:20Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
+		`{"timestamp":"2026-04-14T09:54:21Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"remember alpha"}]}}`,
+		`{"timestamp":"2026-04-14T09:54:22Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"remembered"}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(transcript), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	handle, _, _, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileCodexTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "codex --dangerously-bypass-approvals-and-sandbox",
+		WorkDir:  workDir,
+		Provider: "codex",
+		Resume: sessionpkg.ProviderResume{
+			ResumeFlag:  "resume",
+			ResumeStyle: "subcommand",
+		},
+	})
+	handle.adapter.SearchPaths = []string{base}
+
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start(first): %v", err)
+	}
+
+	history, err := handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if history.GCSessionID == resumeID {
+		t.Fatalf("History().GCSessionID = %q, want Gas City session id, not transcript-derived Codex resume id", history.GCSessionID)
+	}
+	if history.LogicalConversationID == resumeID {
+		t.Fatalf("History().LogicalConversationID = %q, want non-Codex-derived logical id", history.LogicalConversationID)
+	}
+
+	if err := handle.manager.PersistSessionKey(handle.sessionID, resumeID); err != nil {
+		t.Fatalf("PersistSessionKey: %v", err)
+	}
+	// The real hook records the resume key while the CLI continues appending.
+	// A new generation must preserve the GC identity even after that metadata write.
+	transcript += `{"timestamp":"2026-04-14T09:54:23Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"next turn"}]}}` + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(transcript), 0o644); err != nil {
+		t.Fatalf("append transcript: %v", err)
+	}
+	after, err := handle.History(context.Background(), HistoryRequest{})
+	if err != nil {
+		t.Fatalf("History(after hook): %v", err)
+	}
+	if after.GCSessionID != history.GCSessionID || after.LogicalConversationID != history.LogicalConversationID {
+		t.Fatalf("native resume-key discovery changed GC identity: before=%q/%q after=%q/%q", history.GCSessionID, history.LogicalConversationID, after.GCSessionID, after.LogicalConversationID)
+	}
+	if after.GCSessionID != handle.sessionID {
+		t.Fatalf("GCSessionID=%q, want bead ID %q", after.GCSessionID, handle.sessionID)
+	}
+	if after.ProviderSessionID != history.ProviderSessionID || after.TranscriptStreamID != history.TranscriptStreamID {
+		t.Fatal("same provider transcript changed identity")
+	}
+}

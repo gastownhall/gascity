@@ -5940,3 +5940,50 @@ func TestObserveRuntimeForInfoCarriesAttachError(t *testing.T) {
 		})
 	}
 }
+
+func TestTranscriptPathWaitsForKnownClaudeKey(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	workDir := t.TempDir()
+	resume := ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	searchBase := t.TempDir()
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	latestPath := filepath.Join(slugDir, "latest.jsonl")
+	if err := os.WriteFile(latestPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(latest): %v", err)
+	}
+
+	path, lookup, err := mgr.TranscriptPathClassified(info.ID, []string{searchBase})
+	if err != nil {
+		t.Fatalf("TranscriptPathClassified: %v", err)
+	}
+	if path != "" || lookup != TranscriptAbsent {
+		t.Fatalf("new keyed session read another conversation: path=%q classification=%v; want absent", path, lookup)
+	}
+
+	keyPath := filepath.Join(slugDir, info.SessionKey+".jsonl")
+	if err := os.WriteFile(keyPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(key): %v", err)
+	}
+	path, lookup, err = mgr.TranscriptPathClassified(info.ID, []string{searchBase})
+	if err != nil {
+		t.Fatalf("TranscriptPathClassified(after write): %v", err)
+	}
+	if path != keyPath || lookup != TranscriptFound {
+		t.Fatalf("path=%q classification=%v, want exact keyed transcript", path, lookup)
+	}
+}
