@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
@@ -33,12 +34,11 @@ import (
 // gc ships no driver for it. See engdocs/runbooks/beads-migrate-proxied.md.
 
 const (
-	migrateProxiedStatusMigrated  = "migrated"
-	migrateProxiedStatusAlready   = "already-migrated"
-	migrateProxiedStatusPlanned   = "would-migrate"
-	migrateProxiedStatusFailed    = "failed"
-	migrateProxiedStatusSkipped   = "skipped"
-	migrateProxiedIdleTimeoutFlag = "0"
+	migrateProxiedStatusMigrated = "migrated"
+	migrateProxiedStatusAlready  = "already-migrated"
+	migrateProxiedStatusPlanned  = "would-migrate"
+	migrateProxiedStatusFailed   = "failed"
+	migrateProxiedStatusSkipped  = "skipped"
 )
 
 type migrateProxiedOptions struct {
@@ -62,13 +62,14 @@ type migrateProxiedScope struct {
 }
 
 type migrateProxiedScopeResult struct {
-	Scope       string `json:"scope"`
-	Path        string `json:"path"`
-	Status      string `json:"status"`
-	DoltMode    string `json:"dolt_mode,omitempty"`
-	DoltDataDir string `json:"dolt_data_dir,omitempty"`
-	Detail      string `json:"detail,omitempty"`
-	Error       string `json:"error,omitempty"`
+	Scope       string   `json:"scope"`
+	Path        string   `json:"path"`
+	Status      string   `json:"status"`
+	DoltMode    string   `json:"dolt_mode,omitempty"`
+	DoltDataDir string   `json:"dolt_data_dir,omitempty"`
+	Detail      string   `json:"detail,omitempty"`
+	Warnings    []string `json:"warnings,omitempty"`
+	Error       string   `json:"error,omitempty"`
 }
 
 type migrateProxiedReport struct {
@@ -275,7 +276,9 @@ func migrateProxiedScopeOutcome(cityPath string, scope migrateProxiedScope, opts
 			return result
 		}
 		if inFlight {
-			if err := resumeInterruptedScopeMigration(cityPath, scope); err != nil {
+			warnings, err := resumeInterruptedScopeMigration(cityPath, scope)
+			result.Warnings = append(result.Warnings, warnings...)
+			if err != nil {
 				result.Status = migrateProxiedStatusFailed
 				result.Error = err.Error()
 				return result
@@ -306,7 +309,9 @@ func migrateProxiedScopeOutcome(cityPath string, scope migrateProxiedScope, opts
 		result.Detail = migrateProxiedPlanDetail(scope, classification)
 		return result
 	}
-	if err := migrateProxiedScopeNow(cityPath, scope, classification); err != nil {
+	warnings, err := migrateProxiedScopeNow(cityPath, scope, classification)
+	result.Warnings = append(result.Warnings, warnings...)
+	if err != nil {
 		result.Status = migrateProxiedStatusFailed
 		result.Error = err.Error()
 		return result
@@ -339,55 +344,102 @@ func migrateProxiedPlanDetail(scope migrateProxiedScope, classification migrateP
 }
 
 // migrateProxiedScopeNow performs the ordered, non-dry-run work for one scope.
-func migrateProxiedScopeNow(cityPath string, scope migrateProxiedScope, classification migrateProxiedClassification) error {
+func migrateProxiedScopeNow(cityPath string, scope migrateProxiedScope, classification migrateProxiedClassification) ([]string, error) {
 	// Fence before the first write of this scope's turn, not just before bd's.
 	// `dolt init` goes into the same data directory a live gc-managed server
 	// holds locked, and the entry check ran an unbounded number of scopes ago.
 	if err := requireNoManagedDoltServer(cityPath); err != nil {
-		return err
+		return nil, err
 	}
 	// The ordering stop in the scope loop is the common path into this refusal;
 	// this is the invariant itself, so no route into a rig's turn can hand bd
 	// the city's root before the city has been migrated onto it.
 	if err := requireCityProxiedForSharedRootRig(cityPath, scope); err != nil {
-		return err
+		return nil, err
 	}
 	if classification.NeedsDoltInit {
 		dataDir := classification.DoltDataDir
 		if out, err := runDoltInitDataDir(dataDir); err != nil {
-			return fmt.Errorf("dolt init %s: %w: %s", dataDir, err, strings.TrimSpace(string(out)))
+			return nil, fmt.Errorf("dolt init %s: %w: %s", dataDir, err, strings.TrimSpace(string(out)))
 		}
 	}
 	if scope.SharedRootRel != "" {
 		if err := contract.SetMetadataDoltDataDir(fsys.OSFS{}, scopeMetadataJSONPath(scope.Path), scope.SharedRootRel); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	// Re-fence immediately before handing control to bd. bd's own running-server
 	// check consults only its own .beads/dolt-server.pid, which gc never writes.
 	if err := requireNoManagedDoltServer(cityPath); err != nil {
-		return err
+		return nil, err
 	}
-	if err := runScopeMigrateToProxied(cityPath, scope); err != nil {
-		return err
+	warnings, err := runScopeMigrateToProxied(cityPath, scope)
+	if err != nil {
+		return warnings, err
 	}
 	if err := requireScopeMigrationCommitted(scope.Path); err != nil {
-		return err
+		return warnings, err
 	}
-	return normalizeMigratedScopeConfig(cityPath, scope)
+	return warnings, normalizeMigratedScopeConfig(cityPath, scope)
 }
 
-// runScopeMigrateToProxied hands the scope to bd's own migration verb.
-func runScopeMigrateToProxied(cityPath string, scope migrateProxiedScope) error {
-	args := []string{"migrate", "from-server-to-proxied-server", "--idle-timeout", migrateProxiedIdleTimeoutFlag}
+// runScopeMigrateToProxied hands the scope to bd's own migration verb with the
+// idle timeout configured for the scope. The returned warnings name anything
+// the operator should know about that value; they are not failures.
+func runScopeMigrateToProxied(cityPath string, scope migrateProxiedScope) ([]string, error) {
+	idle, warnings, err := migrateProxiedScopeIdleTimeout(cityPath, scope)
+	if err != nil {
+		return warnings, err
+	}
+	args := []string{"migrate", "from-server-to-proxied-server", "--idle-timeout", idle.BdFlagValue()}
 	if migrateProxiedSupportsJSON(cityPath, scope.Path) {
 		args = append(args, "--json")
 	}
 	out, err := runBdScopeCommand(cityPath, scope.Path, args...)
 	if err != nil {
-		return fmt.Errorf("bd migrate from-server-to-proxied-server: %w: %s", err, strings.TrimSpace(string(out)))
+		return warnings, fmt.Errorf("bd migrate from-server-to-proxied-server: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	return nil
+	return append(warnings, migratedScopeIdleTimeoutDrift(scope, idle)...), nil
+}
+
+// migrateProxiedScopeIdleTimeout resolves the idle timeout a scope migrates
+// with. A rig standing on the city's Dolt root is served by the city's proxy,
+// so it takes the city's value; its own override is ignored with a warning.
+func migrateProxiedScopeIdleTimeout(cityPath string, scope migrateProxiedScope) (config.ProxiedIdleTimeout, []string, error) {
+	cfg, err := loadCityConfigForProxiedIdleTimeout(cityPath)
+	if err != nil {
+		return config.ProxiedIdleTimeout{}, nil, err
+	}
+	var rig *config.Rig
+	if cfg != nil && !scope.IsCity {
+		rig = rigConfigForScopeRoot(cityPath, scope.Path, cfg.Rigs)
+	}
+	shares := rig != nil && (scope.SharedRootRel != "" || rigSharesCityDoltDataDir(cityPath, scope))
+	idle, ignored, err := config.ProxiedIdleTimeoutForScope(cfg, rig, shares)
+	var warnings []string
+	if ignored {
+		warnings = append(warnings, ignoredSharedRootIdleOverride(rig.Name))
+	}
+	return idle, warnings, err
+}
+
+// migratedScopeIdleTimeoutDrift reports a migrated scope whose sidecar does
+// not carry the configured idle timeout. bd's resume path keeps the value its
+// journal recorded when the migration started and ignores the one passed now,
+// and an operator who changed the config in between must hear about it.
+func migratedScopeIdleTimeoutDrift(scope migrateProxiedScope, idle config.ProxiedIdleTimeout) []string {
+	sidecar, err := proxyendpoint.ReadSidecar(filepath.Join(scope.Path, ".beads"))
+	if err != nil {
+		return []string{fmt.Sprintf("could not read the migrated sidecar to confirm the idle timeout: %v", err)}
+	}
+	if !sidecar.Present {
+		return nil
+	}
+	if sidecar.IdleMatches(idle.Duration) {
+		return nil
+	}
+	return []string{fmt.Sprintf("bd kept the idle timeout it recorded when this migration started (%s); the configured value is %s. gc doctor reports the drift",
+		sidecar.IdlePolicy(), idle)}
 }
 
 // resumeInterruptedScopeMigration replays the phases bd did not reach.
@@ -397,14 +449,15 @@ func runScopeMigrateToProxied(cityPath string, scope migrateProxiedScope) error 
 // finished flip is finished. Re-fence first: the entry fence ran an unbounded
 // number of scopes ago, and bd's own running-server check consults only its own
 // .beads/dolt-server.pid, which gc never writes.
-func resumeInterruptedScopeMigration(cityPath string, scope migrateProxiedScope) error {
+func resumeInterruptedScopeMigration(cityPath string, scope migrateProxiedScope) ([]string, error) {
 	if err := requireNoManagedDoltServer(cityPath); err != nil {
-		return err
+		return nil, err
 	}
-	if err := runScopeMigrateToProxied(cityPath, scope); err != nil {
-		return fmt.Errorf("resume interrupted migration for %s: %w", scope.Label, err)
+	warnings, err := runScopeMigrateToProxied(cityPath, scope)
+	if err != nil {
+		return warnings, fmt.Errorf("resume interrupted migration for %s: %w", scope.Label, err)
 	}
-	return requireScopeMigrationCommitted(scope.Path)
+	return warnings, requireScopeMigrationCommitted(scope.Path)
 }
 
 // scopeMigrationJournalPath is where bd keeps the in-flight record of a
@@ -986,5 +1039,8 @@ func printMigrateProxiedReport(stdout io.Writer, report migrateProxiedReport) {
 			detail = strings.TrimSpace("dolt_data_dir=" + r.DoltDataDir + " " + detail)
 		}
 		fmt.Fprintf(stdout, "%-*s  %-17s  %s\n", width, r.Scope, r.Status, detail) //nolint:errcheck
+		for _, w := range r.Warnings {
+			fmt.Fprintf(stdout, "%-*s  %-17s  warning: %s\n", width, "", "", w) //nolint:errcheck
+		}
 	}
 }

@@ -1,8 +1,9 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "testutil",
     srcs = [
+        "dolt.go",
         "failure_artifacts.go",
         "git.go",
         "path.go",
@@ -13,6 +14,16 @@ go_library(
     deps = ["//internal/pathutil"],
 )
 
+go_test(
+    name = "testutil_test",
+    srcs = [
+        "failure_artifacts_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":testutil"],
+    deps = ["//internal/testenv"],
+)
+
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(
@@ -21,6 +32,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

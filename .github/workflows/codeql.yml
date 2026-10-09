@@ -4,12 +4,18 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, 'hotfix/**', 'release/**']
     types:
       - opened
       - reopened
       - synchronize
       - ready_for_review
+  # Merge queue (dormant until a ruleset enables one; TESTING.md "Merge
+  # queue"): the four required Analyze checks, and the ruleset's
+  # code_scanning rule, need results on every queue entry's merge-group
+  # commit.
+  merge_group:
+    types: [checks_requested]
   schedule:
     - cron: "24 4 * * 1"
   workflow_dispatch:
@@ -22,7 +28,7 @@ permissions:
 jobs:
   runner-policy:
     name: Runner policy
-    runs-on: ${{ github.event_name == 'pull_request' && contains(fromJSON('["julianknutsen","csells","sjarmak","quad341"]'), github.event.pull_request.user.login) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     outputs:
       use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
       reason: ${{ steps.policy.outputs.reason }}
@@ -62,6 +68,53 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
+      # Go leg only: warm caches for the autobuild. The Go autobuilder runs
+      # the extractor on ./... through go/packages, which parses and
+      # type-checks every package from source, so a cache hit never drops a
+      # package from the database (unlike traced C#/Java builds); it saves
+      # the go.mod toolchain and module downloads (~12 s) and go list's
+      # cgo/compile work.
+      #   - setup-go: the go.mod toolchain instead of a download, before
+      #     init so CodeQL wraps that go;
+      #   - go-mod-download: the shared module cache, restored on every
+      #     event and saved only by push and schedule runs after go mod
+      #     verify (the composite's trust note);
+      #   - the build cache: on Blacksmith, GOCACHEPROG (blacksmithd) already
+      #     serves it, as for every Go job here; elsewhere (runner_policy.py's
+      #     GitHub-hosted labels) an actions/cache entry keyed on go.mod and
+      #     go.sum, restored on every event, saved only by a push to main.
+      - name: Set up Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Restore Go modules
+        if: matrix.language == 'go'
+        uses: ./.github/actions/go-mod-download
+      - name: Go build cache backend
+        id: gocache
+        if: matrix.language == 'go'
+        run: |
+          prog="$(go env GOCACHEPROG)"
+          dir="$(go env GOCACHE)"
+          if [ -n "$prog" ]; then managed=true; else managed=false; fi
+          { echo "dir=$dir"; echo "managed=$managed"; } >> "$GITHUB_OUTPUT"
+          if [ "$managed" = true ]; then
+            echo "Go build cache: GOCACHEPROG \`$prog\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Go build cache: actions/cache at \`$dir\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Restore Go build cache
+        id: gocache-restore
+        if: matrix.language == 'go' && steps.gocache.outputs.managed == 'false'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.gocache.outputs.dir }}
+          key: codeql-go-build-v1-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: |
+            codeql-go-build-v1-${{ runner.os }}-
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
         with:
@@ -71,6 +124,15 @@ jobs:
       - name: Autobuild
         if: matrix.build-mode == 'autobuild'
         uses: github/codeql-action/autobuild@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
+
+      # Only a push to main that missed the exact key writes the build cache
+      # (pull_request and merge_group runs restore it, never write it).
+      - name: Save Go build cache
+        if: matrix.language == 'go' && steps.gocache.outputs.managed == 'false' && steps.gocache-restore.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.gocache.outputs.dir }}
+          key: codeql-go-build-v1-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum') }}
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4

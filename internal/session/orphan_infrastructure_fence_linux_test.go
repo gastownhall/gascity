@@ -37,8 +37,10 @@ func (p *procfsOrphanProvider) TerminateRuntime(r runtime.LiveRuntime) error {
 	return nil
 }
 
-// writeFakeProcess writes the environ, stat, comm and cmdline files the Linux
-// scanner and the kill-path argv fence read for one process.
+// writeFakeProcess writes the environ, stat, comm, cmdline and status files
+// the Linux scanner and the kill-path argv fence read for one process. The
+// status file names the test's effective UID: the scanner reports only
+// processes it owns.
 func writeFakeProcess(t *testing.T, root string, pid, ppid int, argv, env []string) {
 	t.Helper()
 	dir := filepath.Join(root, strconv.Itoa(pid))
@@ -46,11 +48,13 @@ func writeFakeProcess(t *testing.T, root string, pid, ppid int, argv, env []stri
 		t.Fatalf("mkdir %s: %v", dir, err)
 	}
 	comm := filepath.Base(argv[0])
+	uid := strconv.Itoa(os.Geteuid())
 	files := map[string]string{
 		"environ": strings.Join(env, "\x00") + "\x00",
 		"stat":    strconv.Itoa(pid) + " (" + comm + ") S " + strconv.Itoa(ppid) + strings.Repeat(" 0", 48),
 		"comm":    comm + "\n",
 		"cmdline": strings.Join(argv, "\x00") + "\x00",
+		"status":  "Name:\t" + comm + "\nUid:\t" + uid + "\t" + uid + "\t" + uid + "\t" + uid + "\n",
 	}
 	for name, content := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
@@ -96,7 +100,7 @@ func TestSameSessionRestartDoesNotReachManagedDoltWatchdog(t *testing.T) {
 	writeFakeProcess(t, root, agentPID, 1, []string{"claude", "--resume"}, env)
 	t.Cleanup(proctable.SetScanRootForTesting(root))
 
-	if err := mgr.Start(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+	if err := mgr.Start(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, ResumeOperator); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if len(sp.terminated) != 1 || sp.terminated[0] != agentPID {

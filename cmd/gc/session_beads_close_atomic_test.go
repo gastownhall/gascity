@@ -159,6 +159,16 @@ func controllerCloseBackends() []controllerCloseBackend {
 	}
 }
 
+// decidedSessionInfo is the Info a caller would decide a close of id on: the
+// row as store reads it now, or a bare Info for a row it cannot read.
+func decidedSessionInfo(store beads.Store, id string) session.Info {
+	b, err := store.Get(id)
+	if err != nil {
+		return session.Info{ID: id}
+	}
+	return sessionInfoFromBead(b)
+}
+
 func createControllerCloseSession(t *testing.T, store beads.Store) beads.Bead {
 	t.Helper()
 	created, err := store.Create(beads.Bead{
@@ -193,28 +203,93 @@ func controllerClosePaths(now time.Time) []struct {
 		{
 			name: "closeBead",
 			close: func(store beads.Store, id string, stderr *bytes.Buffer) bool {
-				return closeBead(store, id, "dead-runtime", now, stderr)
+				return closeBead(store, decidedSessionInfo(store, id), "dead-runtime", now, stderr)
 			},
 			want: session.ClosePatch(now, "dead-runtime"),
 		},
 		{
 			name: "closeFailedCreateBead",
 			close: func(store beads.Store, id string, stderr *bytes.Buffer) bool {
-				return closeFailedCreateBead(sessionFrontDoor(store), id, now, stderr)
+				return closeFailedCreateBead(sessionFrontDoor(store), decidedSessionInfo(store, id), now, stderr)
 			},
 			want: failedCreateClosePatch(now),
 		},
 	}
 }
 
+// TestControllerClosesRefuseAWakeAfterTheCallersDecision is the regression for
+// a close premise taken from the close's own first read. The reconciler
+// decides to close a session from its tick snapshot, and a wake stamps
+// state=awake before closeBead reads the row. The close must be judged against
+// the caller's decision, not against that later read: on every store with the
+// atomic close it writes nothing, reports false, and skips the release
+// cascade, and the next pass decides again from the woken row.
+func TestControllerClosesRefuseAWakeAfterTheCallersDecision(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	for _, path := range []struct {
+		name  string
+		close func(store beads.Store, decided session.Info, stderr *bytes.Buffer) bool
+	}{
+		{name: "closeBead", close: func(store beads.Store, decided session.Info, stderr *bytes.Buffer) bool {
+			return closeBead(store, decided, "dead-runtime", now, stderr)
+		}},
+		{name: "closeFailedCreateBead", close: func(store beads.Store, decided session.Info, stderr *bytes.Buffer) bool {
+			return closeFailedCreateBead(sessionFrontDoor(store), decided, now, stderr)
+		}},
+	} {
+		for _, backend := range controllerCloseBackends() {
+			if !backend.atomic {
+				continue
+			}
+			t.Run(path.name+"/"+backend.name, func(t *testing.T) {
+				store, backing := backend.open(t)
+				created := createControllerCloseSession(t, store)
+				work, err := store.Create(beads.Bead{Title: "task", Type: "task", Assignee: created.ID})
+				if err != nil {
+					t.Fatalf("Create work: %v", err)
+				}
+				decided := decidedSessionInfo(store, created.ID)
+				if err := wakeStampOnce(backing)(created.ID); err != nil {
+					t.Fatalf("stamping the wake: %v", err)
+				}
+
+				var stderr bytes.Buffer
+				if path.close(store, decided, &stderr) {
+					t.Fatalf("%s closed a row woken after the decision", path.name)
+				}
+				if !strings.Contains(stderr.String(), session.ErrSessionCloseSuperseded.Error()) {
+					t.Fatalf("stderr = %q, want the superseded close reported", stderr.String())
+				}
+				got, err := backing.Get(created.ID)
+				if err != nil {
+					t.Fatalf("Get: %v", err)
+				}
+				if got.Status != "open" || got.Metadata["state"] != string(session.StateAwake) || got.Metadata["close_reason"] != "" {
+					t.Fatalf("row = status %q state %q close_reason %q, want the woken row untouched", got.Status, got.Metadata["state"], got.Metadata["close_reason"])
+				}
+				heldWork, err := store.Get(work.ID)
+				if err != nil {
+					t.Fatalf("Get work: %v", err)
+				}
+				if heldWork.Assignee != created.ID {
+					t.Fatalf("work assignee = %q, want %q: a refused close must not run the release cascade", heldWork.Assignee, created.ID)
+				}
+			})
+		}
+	}
+}
+
 // TestControllerClosesKeepAConcurrentWakeOutOfTheClosedRow is the regression.
 // A wake stamps state=awake in the window before the close's terminal write.
-// Before the fix, on a store whose Tx splits its writes (FileStore, a cache
-// over it), the stamp landed between the metadata write and the Close, and the
-// row came to rest status=closed state=awake. Now every store with the atomic
-// close commits the close as one fenced write: the stamp wins the fence, the
-// close re-reads and retries, and the row ends closed with its terminal
-// metadata. A store without the capability keeps the controller's single Tx.
+// Before the atomic close, on a store whose Tx splits its writes (FileStore, a
+// cache over it), the stamp landed between the metadata write and the Close,
+// and the row came to rest status=closed state=awake. With the atomic close
+// the stamp won the fence, but the retry re-read only the revision and closed
+// the woken session anyway. The wake moved the facts the close was decided
+// on, so every store with the atomic close must now leave the row open and
+// awake, write no terminal metadata, and skip the release cascade; the next
+// pass decides again. A store without the capability keeps the controller's
+// single Tx.
 func TestControllerClosesKeepAConcurrentWakeOutOfTheClosedRow(t *testing.T) {
 	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
 	for _, path := range controllerClosePaths(now) {
@@ -226,32 +301,57 @@ func TestControllerClosesKeepAConcurrentWakeOutOfTheClosedRow(t *testing.T) {
 				if _, ok := beads.AtomicConditionalCloserFor(race); ok != backend.atomic {
 					t.Fatalf("AtomicConditionalCloserFor(%s) = %v, want %v", backend.name, ok, backend.atomic)
 				}
-				if backend.atomic {
-					race.interfere = wakeStampOnce(backing)
+				if !backend.atomic {
+					var stderr bytes.Buffer
+					if !path.close(race, created.ID, &stderr) {
+						t.Fatalf("%s returned false for an open session: %s", path.name, stderr.String())
+					}
+					got, err := backing.Get(created.ID)
+					if err != nil {
+						t.Fatalf("Get: %v", err)
+					}
+					if got.Status != "closed" {
+						t.Fatalf("status = %q, want closed", got.Status)
+					}
+					for key, want := range path.want {
+						if got.Metadata[key] != want {
+							t.Errorf("metadata[%q] = %q, want %q", key, got.Metadata[key], want)
+						}
+					}
+					if race.atomicCalls != 0 || race.txCalls != 1 {
+						t.Fatalf("atomic/tx calls = %d/%d, want 0/1 (the controller's Tx, unchanged)", race.atomicCalls, race.txCalls)
+					}
+					return
 				}
+				work, err := store.Create(beads.Bead{Title: "task", Type: "task", Assignee: created.ID})
+				if err != nil {
+					t.Fatalf("Create work: %v", err)
+				}
+				race.interfere = wakeStampOnce(backing)
 
 				var stderr bytes.Buffer
-				if !path.close(race, created.ID, &stderr) {
-					t.Fatalf("%s returned false for an open session: %s", path.name, stderr.String())
+				if path.close(race, created.ID, &stderr) {
+					t.Fatalf("%s closed a session a wake won the fence for", path.name)
+				}
+				if !strings.Contains(stderr.String(), session.ErrSessionCloseSuperseded.Error()) {
+					t.Fatalf("stderr = %q, want the superseded close reported", stderr.String())
 				}
 				got, err := backing.Get(created.ID)
 				if err != nil {
 					t.Fatalf("Get: %v", err)
 				}
-				if got.Status != "closed" {
-					t.Fatalf("status = %q, want closed", got.Status)
+				if got.Status != "open" || got.Metadata["state"] != string(session.StateAwake) || got.Metadata["close_reason"] != "" {
+					t.Fatalf("row = status %q state %q close_reason %q, want the wake's open/awake row untouched", got.Status, got.Metadata["state"], got.Metadata["close_reason"])
 				}
-				for key, want := range path.want {
-					if got.Metadata[key] != want {
-						t.Errorf("metadata[%q] = %q, want %q (status=closed must carry its terminal metadata, never state=awake)", key, got.Metadata[key], want)
-					}
+				if race.atomicCalls != 1 || race.txCalls != 0 {
+					t.Fatalf("atomic/tx calls = %d/%d, want 1/0 (one lost fence, no retry, no split write)", race.atomicCalls, race.txCalls)
 				}
-				if backend.atomic {
-					if race.atomicCalls != 2 || race.txCalls != 0 {
-						t.Fatalf("atomic/tx calls = %d/%d, want 2/0 (one lost fence, one retry, no split write)", race.atomicCalls, race.txCalls)
-					}
-				} else if race.atomicCalls != 0 || race.txCalls != 1 {
-					t.Fatalf("atomic/tx calls = %d/%d, want 0/1 (the controller's Tx, unchanged)", race.atomicCalls, race.txCalls)
+				heldWork, err := backing.Get(work.ID)
+				if err != nil {
+					t.Fatalf("Get work: %v", err)
+				}
+				if heldWork.Assignee != created.ID {
+					t.Fatalf("work assignee = %q, want %q: a refused close must not run the release cascade", heldWork.Assignee, created.ID)
 				}
 			})
 		}
@@ -379,14 +479,14 @@ func TestCloseFailedCreateBeadLeavesAnAlreadyClosedRowRecordAlone(t *testing.T) 
 	}
 	created := createControllerCloseSession(t, store)
 	var stderr bytes.Buffer
-	if !closeBead(store, created.ID, "orphaned", now, &stderr) {
+	if !closeBead(store, decidedSessionInfo(store, created.ID), "orphaned", now, &stderr) {
 		t.Fatalf("closeBead: %s", stderr.String())
 	}
 	before, err := store.Get(created.ID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if !closeFailedCreateBead(sessionFrontDoor(store), created.ID, now.Add(time.Minute), &stderr) {
+	if !closeFailedCreateBead(sessionFrontDoor(store), decidedSessionInfo(store, created.ID), now.Add(time.Minute), &stderr) {
 		t.Fatalf("closeFailedCreateBead on a closed row returned false: %s", stderr.String())
 	}
 	after, err := store.Get(created.ID)

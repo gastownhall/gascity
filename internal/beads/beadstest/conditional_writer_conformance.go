@@ -27,6 +27,12 @@ type ConditionalWriterOptions struct {
 	// one row can apply them and leaves this false.
 	RestrictedUpdateFields bool
 
+	// LabelsGuarded narrows RestrictedUpdateFields to the parent for a store
+	// whose UpdateIfMatch applies labels under the revision check (MemStore,
+	// NativeDoltStore, and a CachingStore over either).
+	// RunConditionalLabelsConformance asserts the label behavior instead.
+	LabelsGuarded bool
+
 	// OpenDisabled returns a fresh store of the same kind whose conditional
 	// writes are turned off at the instance level (e.g. MemStore/FileStore with
 	// DisableConditionalWrites=true). When non-nil, the disable_toggle subtest
@@ -74,7 +80,7 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 	t.Run(name, func(t *testing.T) { runEmptyUpdateContract(t, open) })
 	conformanceWholeBeadWriteChangesRevision(t, name, open)
 	if opts.RestrictedUpdateFields {
-		conformanceRestrictedUpdateFieldsRejected(t, name, open)
+		conformanceRestrictedUpdateFieldsRejected(t, name, open, opts.LabelsGuarded)
 	}
 	conformanceReadsNeverBump(t, name, open)
 	conformanceRevisionTokensNeverReused(t, name, open)
@@ -145,8 +151,9 @@ func conformanceWholeBeadWriteChangesRevision(t *testing.T, name string, open fu
 
 // conformanceRestrictedUpdateFieldsRejected asserts a store that cannot fold
 // parent/labels into a revision-guarded update rejects them with the typed
-// unsupported error and mutates nothing.
-func conformanceRestrictedUpdateFieldsRejected(t *testing.T, name string, open func(t *testing.T) beads.Store) {
+// unsupported error and mutates nothing. With labelsGuarded only the parent is
+// checked.
+func conformanceRestrictedUpdateFieldsRejected(t *testing.T, name string, open func(t *testing.T) beads.Store, labelsGuarded bool) {
 	t.Run(name+"/restricted_update_fields_are_rejected_without_mutation", func(t *testing.T) {
 		s := open(t)
 		w := conformanceWriterFor(t, s)
@@ -162,6 +169,9 @@ func conformanceRestrictedUpdateFieldsRejected(t *testing.T, name string, open f
 			{name: "parent", opts: beads.UpdateOpts{ParentID: &parent}},
 			{name: "add_labels", opts: beads.UpdateOpts{Labels: []string{"added"}}},
 			{name: "remove_labels", opts: beads.UpdateOpts{RemoveLabels: []string{"remove"}}},
+		}
+		if labelsGuarded {
+			tests = tests[:1]
 		}
 
 		for _, tt := range tests {
@@ -354,7 +364,9 @@ func conformanceRowBackedMutationFlavors(t *testing.T, name string, open func(t 
 			t.Fatal(err)
 		}
 		seen := map[int64]struct{}{conformanceRevOf(t, s, row.ID): {}}
-		priority := 2
+		// Every value below must differ from bd's create defaults (type task,
+		// priority 2): a same-value update is a no-op that need not mint.
+		priority := 1
 
 		assertFresh := func(label string, mutate func() error) {
 			t.Helper()
@@ -378,7 +390,7 @@ func conformanceRowBackedMutationFlavors(t *testing.T, name string, open func(t 
 		}{
 			{name: "Update(title)", opts: beads.UpdateOpts{Title: strPtr("updated")}},
 			{name: "Update(status)", opts: beads.UpdateOpts{Status: strPtr("in_progress")}},
-			{name: "Update(type)", opts: beads.UpdateOpts{Type: strPtr("task")}},
+			{name: "Update(type)", opts: beads.UpdateOpts{Type: strPtr("bug")}},
 			{name: "Update(priority)", opts: beads.UpdateOpts{Priority: &priority}},
 			{name: "Update(description)", opts: beads.UpdateOpts{Description: strPtr("description")}},
 			{name: "Update(assignee)", opts: beads.UpdateOpts{Assignee: strPtr("agent")}},
@@ -387,6 +399,23 @@ func conformanceRowBackedMutationFlavors(t *testing.T, name string, open func(t 
 		for _, update := range updates {
 			assertFresh(update.name, func() error { return s.Update(row.ID, update.opts) })
 		}
+
+		// A guarded write of a value the row already holds is a successful
+		// no-op: it must not fail or change content. Whether it mints is
+		// backend-dependent (bd writes nothing; the in-process stores bump), so
+		// only success, unchanged content, and a nonzero token are asserted.
+		noopBefore := conformanceRevOf(t, s, row.ID)
+		if err := w.UpdateIfMatch(row.ID, noopBefore, beads.UpdateOpts{Type: strPtr("bug")}); err != nil {
+			t.Fatalf("same-value UpdateIfMatch: %v", err)
+		}
+		noop, err := s.Get(row.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if noop.Type != "bug" || noop.Revision == 0 {
+			t.Fatalf("same-value UpdateIfMatch left type=%q revision=%d, want bug and nonzero", noop.Type, noop.Revision)
+		}
+		seen[noop.Revision] = struct{}{}
 
 		assertFresh("SetMetadata", func() error {
 			return s.SetMetadata(row.ID, "key", "value")

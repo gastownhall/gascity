@@ -200,6 +200,7 @@ func TestSessionLifecycleChaosPendingInteractionDoesNotOverrideOrphanDrain(t *te
 	h.assertStarted()
 
 	h.setDesired(false)
+	h.ageBeyondWakeGrace()
 	h.env.sp.SetPendingInteraction(h.sessionName, &runtime.PendingInteraction{
 		RequestID: "chaos-pending",
 		Kind:      "question",
@@ -228,6 +229,7 @@ func TestSessionLifecycleChaosPendingInteractionDoesNotOverrideSuspendedDrain(t 
 		Template: h.template,
 	}}
 	h.setDesired(false)
+	h.ageBeyondWakeGrace()
 	h.env.sp.SetPendingInteraction(h.sessionName, &runtime.PendingInteraction{
 		RequestID: "chaos-pending-suspended",
 		Kind:      "question",
@@ -624,6 +626,7 @@ func TestSessionLifecycleChaosPendingInteractionPreservesNonCancelableDrains(t *
 			h.assertStarted()
 
 			tc.setup(h)
+			h.ageBeyondWakeGrace()
 			h.record("start non-cancelable drain=%s", tc.name)
 			h.reconcileTick()
 			if ds := h.env.dt.get(h.sessionID); ds == nil || ds.reason != tc.name {
@@ -849,6 +852,7 @@ func TestSessionLifecycleChaosPendingInteractionRespectsWakeBlockers(t *testing.
 			h.assertStarted()
 
 			h.setDesired(false)
+			h.ageBeyondWakeGrace()
 			if err := h.env.store.SetMetadataBatch(h.sessionID, tc.meta); err != nil {
 				h.failf("set blocker metadata: %v", err)
 			}
@@ -1041,6 +1045,25 @@ func (h *sessionChaosHarness) templateParams() TemplateParams {
 			PromptMode: "none",
 		},
 	}
+}
+
+// ageBeyondWakeGrace backdates the row's last wake past wakeUndesiredGrace.
+//
+// The undesired arm spares a runtime the wake family started moments ago
+// (ga-qgtb3), and "moments ago" is exactly what this harness produces: it starts
+// a session and removes its demand on the same frozen tick, which is the
+// wake-vs-demand race the grace exists to survive. A test whose subject is the
+// drain itself therefore has to age the row first, the way a real one ages on
+// its own between patrols.
+func (h *sessionChaosHarness) ageBeyondWakeGrace() {
+	if h.sessionID == "" {
+		return
+	}
+	aged := h.env.clk.Now().Add(-wakeUndesiredGrace - time.Minute).UTC().Format(time.RFC3339)
+	if err := h.env.store.SetMetadataBatch(h.sessionID, map[string]string{"last_woke_at": aged}); err != nil {
+		h.failf("age the row past the wake grace: %v", err)
+	}
+	h.record("aged last_woke_at past the %s wake grace", wakeUndesiredGrace)
 }
 
 func (h *sessionChaosHarness) setDesired(on bool) {

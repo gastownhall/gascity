@@ -1,5 +1,29 @@
 #!/usr/bin/env bash
+# check-native-dependency-surface.sh [--gc-binary PATH]
+#
+# Guards the native beads dependency surface: module-graph size and per-family
+# module counts (from go.sum, run from the repository root), and the gc binary
+# (no product-metrics testhook, size cap).
+#
+# Without --gc-binary the script builds the release-shaped binary itself
+# (`CGO_ENABLED=0 go build -trimpath ./cmd/gc`, what max_binary_bytes below is
+# measured against). The Bazel sh_test //scripts:check_native_dependency_surface_test
+# passes the hermetically built //cmd/gc instead (cgo, so a larger binary) and
+# sets its own GC_NATIVE_DEP_MAX_BINARY_BYTES.
 set -euo pipefail
+
+gc_binary=""
+case "${1:-}" in
+"") ;;
+--gc-binary)
+	[ -n "${2:-}" ] || { echo "usage: $0 [--gc-binary PATH]" >&2; exit 2; }
+	gc_binary="$2"
+	;;
+*)
+	echo "usage: $0 [--gc-binary PATH]" >&2
+	exit 2
+	;;
+esac
 
 # max_modules re-baselined 2026-09-01 for beads v1.3.0-rc.1: measured 727 before
 # and 737 after, with ten additions and no removals. Re-measured 2026-09-10 on
@@ -21,14 +45,30 @@ max_modules="${GC_NATIVE_DEP_MAX_MODULES:-737}"
 # grows the binary ~90KB/day, so 180,000,000 gives ~88 days of headroom.
 # Re-baseline with fresh measurement + growth-rate evidence, not an
 # arbitrary bump, when this next fails.
-max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-180000000}"
+#
+# Re-baselined 2026-10-05 (lane split151, #7074). Same build command:
+# origin/main bf395c1fe4 measured 179,875,091 bytes and the split-storage
+# clear adds ~156KB (180,031,776). Growth since the 2026-08-29 measurement
+# is 7.78MB over 37 days, ~210KB/day, so 190,000,000 gives ~48 days of
+# headroom from main's measurement.
+max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-190000000}"
 max_aws_modules="${GC_NATIVE_DEP_MAX_AWS_MODULES:-25}"
 max_azure_modules="${GC_NATIVE_DEP_MAX_AZURE_MODULES:-9}"
 max_dolthub_modules="${GC_NATIVE_DEP_MAX_DOLTHUB_MODULES:-15}"
 max_google_api_modules="${GC_NATIVE_DEP_MAX_GOOGLE_API_MODULES:-1}"
 
-modules="$(go list -m all)"
-total_modules="$(printf '%s\n' "$modules" | sed '/^$/d' | wc -l | tr -d ' ')"
+# The module graph is read from go.sum rather than `go list -m all`, which
+# needs a module cache (and the network to fill it). go.sum holds a checksum
+# for every module in the build list (the go command refuses to load the
+# graph otherwise), so its distinct module paths plus the main module are an
+# upper bound that equals `go list -m all` on a tidy go.sum; a stale entry
+# can only over-count, failing loud until `go mod tidy`.
+if [ ! -s go.sum ]; then
+	echo "native dependency guard: go.sum not found in $(pwd); run from the repository root" >&2
+	exit 1
+fi
+modules="$(awk 'NF >= 3 {print $1 " "}' go.sum | sort -u)"
+total_modules="$(( $(printf '%s\n' "$modules" | sed '/^$/d' | wc -l | tr -d ' ') + 1 ))"
 if [ "$total_modules" -gt "$max_modules" ]; then
 	echo "native dependency guard: module graph has $total_modules modules; max is $max_modules" >&2
 	exit 1
@@ -70,16 +110,23 @@ fi
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT INT TERM HUP
-CGO_ENABLED=0 go build -trimpath -o "$tmpdir/gc" ./cmd/gc
+if [ -n "$gc_binary" ]; then
+	[ -x "$gc_binary" ] || { echo "native dependency guard: --gc-binary $gc_binary is not executable" >&2; exit 1; }
+	cp -f "$gc_binary" "$tmpdir/gc"
+else
+	CGO_ENABLED=0 go build -trimpath -o "$tmpdir/gc" ./cmd/gc
+fi
 
-go tool nm "$tmpdir/gc" > "$tmpdir/gc.nm"
+# Symbol names live in the binary itself (the ELF symbol table, and the
+# pclntab for every linked function), so a byte search finds any linked
+# testhook symbol without `go tool nm` and the Go toolchain it needs.
 for forbidden_symbol in \
 	"main.runProductMetricsTesthookChild" \
 	"main.newProductMetricsTesthookRecordHelpCommand" \
 	"internal/productmetrics.OpenTesthook" \
 	"internal/productmetrics.testhookLoopbackHost"
 do
-	if grep -Fq -- "$forbidden_symbol" "$tmpdir/gc.nm"; then
+	if LC_ALL=C grep -aFq -- "$forbidden_symbol" "$tmpdir/gc"; then
 		echo "native dependency guard: normal gc contains product-metrics testhook symbol $forbidden_symbol" >&2
 		exit 1
 	fi

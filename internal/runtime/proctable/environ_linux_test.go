@@ -3,6 +3,8 @@
 package proctable
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -30,6 +32,27 @@ func TestProcessEnvValueReadsScanRoot(t *testing.T) {
 	}
 	if got, err := ProcessEnvValue(4343, "MARKER"); err != nil || got != "" {
 		t.Fatalf("ProcessEnvValue(gone pid) = %q, %v; want empty, nil", got, err)
+	}
+}
+
+func TestProcessEnvValueReportsUnreadableEnvironment(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads files regardless of permission bits")
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "4242")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "environ"), []byte("MARKER=/tmp/x.sock\x00"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	restore := SetScanRootForTesting(root)
+	defer restore()
+
+	got, err := ProcessEnvValue(4242, "MARKER")
+	if !errors.Is(err, fs.ErrPermission) || got != "" {
+		t.Fatalf("ProcessEnvValue(unreadable environ) = %q, %v; want empty and a permission error", got, err)
 	}
 }
 

@@ -496,10 +496,6 @@ func TestClassRoutedRestampSplitsOnResidency(t *testing.T) {
 // leaf without the two-argument CAS claim cannot serve a claim-time route, and
 // discovering that per-bead in the middle of a tick is what made a whole
 // `gc hook --claim` invocation terminal.
-//
-// *beads.SQLiteStore is the only production store with it; the other compiled-in
-// binding provider (beadsworkspace) opens a *beads.NativeDoltStore, which has
-// ReleaseIfCurrent and no Claim.
 func TestHookClaimClassRouteRefusesABindingThatCannotClaim(t *testing.T) {
 	route, err := newHookClaimClassRoute(claimRouteNoCASStore{Store: beads.NewMemStore()})
 	if !errors.Is(err, errClaimRouteBindingCannotClaim) {
@@ -558,10 +554,9 @@ func TestHookClaimRouteVerdictDegradesRatherThanWedgingTheTick(t *testing.T) {
 	}
 }
 
-// claimRouteNoCASStore models the production binding leaf that has no
-// two-argument claim: beads.NativeDoltStore, which beadsworkspace's OpenEngine
-// returns. beads.MemStore implements Claim, so the capability has to be hidden
-// behind a wrapper that does not.
+// claimRouteNoCASStore models a binding leaf without the two-argument claim.
+// Embedding the beads.Store INTERFACE re-exports only that interface's methods,
+// so the leaf lacks the capability whatever store it wraps.
 type claimRouteNoCASStore struct{ beads.Store }
 
 // newClaimRouteFor opens a claim-time class route over a store the row controls.

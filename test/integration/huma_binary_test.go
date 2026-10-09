@@ -57,7 +57,7 @@ func TestHumaBinary_SupervisorBootsAndServesSpec(t *testing.T) {
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
 	cityRoot := filepath.Join(gcHome, "city")
-	env := integrationEnvFor(gcHome, runtimeDir, true)
+	env := integrationEnvFor(t, gcHome, runtimeDir, true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -339,7 +339,7 @@ func TestHumaBinary_CityCreateAsync(t *testing.T) {
 	}
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
-	env := integrationEnvFor(gcHome, runtimeDir, true)
+	env := integrationEnvFor(t, gcHome, runtimeDir, true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -526,7 +526,7 @@ func TestHumaBinary_CityUnregisterAsync(t *testing.T) {
 	}
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
-	env := integrationEnvFor(gcHome, runtimeDir, true)
+	env := integrationEnvFor(t, gcHome, runtimeDir, true)
 	// This test covers the supervisor's async unregister contract, not
 	// provider startup. Keep the city runtime deterministic so unregister
 	// does not race provider resume/startup-key handling.
@@ -794,7 +794,7 @@ func TestHumaBinary_SessionMessageAsync(t *testing.T) {
 	}
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
-	env := integrationEnvFor(gcHome, runtimeDir, true)
+	env := integrationEnvFor(t, gcHome, runtimeDir, true)
 	envMap := parseEnvList(env)
 	env = replaceEnv(env, "PATH", prependPath(providerBinDir, envMap["PATH"]))
 	env = replaceEnv(env, "GC_SESSION", "fake")

@@ -2740,6 +2740,20 @@ func (s *gcTestStore) Delete(id string) error {
 	return nil
 }
 
+// DeleteIfMatch records exactly as Delete does, so the fenced session purge
+// stays observable through deleteAttempts, deleteErrors and deletedIDs.
+func (s *gcTestStore) DeleteIfMatch(id string, expectedRevision int64) error {
+	s.deleteAttempts = append(s.deleteAttempts, id)
+	if err := s.deleteErrors[id]; err != nil {
+		return err
+	}
+	if err := s.MemStore.DeleteIfMatch(id, expectedRevision); err != nil {
+		return err
+	}
+	s.deletedIDs = append(s.deletedIDs, id)
+	return nil
+}
+
 //nolint:unparam // helper mirrors makeGCBeadWithLabels signature for readability
 func makeGCBead(id string, createdAt time.Time, status, beadType string) beads.Bead {
 	return makeGCBeadWithLabels(id, createdAt, status, beadType)

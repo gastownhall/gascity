@@ -477,9 +477,12 @@ func TestDoSessionWake_NoRunnableTemplateAgeGate(t *testing.T) {
 			}
 			deps := sessionWakeDeps{store: store, cfg: cfg, cityPath: "/city", now: time.Now}
 
+			// The wake is recorded (and a stale create healed), but no agent
+			// runs the template: the shared will-not-start predicate says so
+			// and the CLI exits 1, as the API answers 409.
 			var stdout, stderr bytes.Buffer
-			if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 0 {
-				t.Fatalf("doSessionWake() = %d, want 0; stderr=%s", code, stderr.String())
+			if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 1 || !strings.Contains(stderr.String(), "no configured agent runs its template") {
+				t.Fatalf("doSessionWake() = %d, want 1 naming the missing template; stderr=%s", code, stderr.String())
 			}
 
 			updated, err := store.Get(b.ID)
@@ -863,5 +866,29 @@ func TestCmdSessionWake_RequestsStartForContinuityEligibleArchivedSessionID(t *t
 	}
 	if got := updated.Metadata["wake_request"]; got != "explicit" {
 		t.Fatalf("wake_request = %q, want explicit", got)
+	}
+}
+
+// TestDoSessionWake_JudgesThePostWakeRow: an explicit wake of a drained pool
+// seat moves it to asleep, so the shared will-not-start predicate, reading
+// the row after the wake, does not report it as a drained seat. Kills a
+// predicate fed the pre-wake row.
+func TestDoSessionWake_JudgesThePostWakeRow(t *testing.T) {
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Title: "worker", Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{
+		"template": "worker", "session_name": "worker-1", "state": "drained", "pool_managed": "true", "session_origin": "ephemeral",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := sessionWakeDeps{
+		store: store, cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, cityPath: t.TempDir(), cityResolved: true, now: time.Now,
+		withdrawQueuedWaitNudges:  func(string, []string) error { return nil },
+		cityUsesManagedReconciler: func(string) bool { return false },
+		pokeController:            func(string, reconcilekey.Key) error { return nil },
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 0 || strings.Contains(stderr.String(), "drained pool seat") {
+		t.Fatalf("doSessionWake() = %d, stderr=%s; want the woken (asleep) seat not refused as drained", code, stderr.String())
 	}
 }

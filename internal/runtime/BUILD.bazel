@@ -27,6 +27,7 @@ go_library(
         "seam_adapter.go",
         "session_events.go",
         "session_events_merge.go",
+        "session_object.go",
         "setupcommand.go",
         "staging.go",
         "startup_hints.go",
@@ -59,6 +60,7 @@ go_test(
         "fingerprint_test.go",
         "import_boundary_test.go",
         "import_trust_test.go",
+        "liveness_present_test.go",
         "liveness_test.go",
         "privatedir_test.go",
         "probe_test.go",
@@ -107,6 +109,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

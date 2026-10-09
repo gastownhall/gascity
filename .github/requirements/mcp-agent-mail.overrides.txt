@@ -4,10 +4,12 @@
 fastmcp>=3.2.0
 authlib>=1.6.9
 
-# Security floor: CVE-2026-48526 (HIGH, auth bypass) in PyJWT < 2.13.0.
+# Security floor: CVE-2026-48526 (HIGH, auth bypass) in PyJWT < 2.13.0, and
+# CVE-2026-102268 (CRITICAL) plus CVE-2026-102266/-102267/-102271/-102272/
+# -102273 (HIGH, authentication bypass and token forgery) in PyJWT < 2.14.0.
 # CVE-2026-69247 affects cryptography < 50.0.0. python-multipart and starlette lower-severity
 # issues in the same Trivy scan. Remove once transitive deps carry fixed versions.
-pyjwt>=2.13.0
+pyjwt>=2.14.0
 cryptography>=50.0.0
 python-multipart>=0.0.30
 starlette>=1.1.0

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -2310,5 +2311,49 @@ func TestInitCityInPodSkipsDolt(t *testing.T) {
 		if !found {
 			t.Errorf("gc init should run with %s; got cmd=%v", flag, gcInitCmd)
 		}
+	}
+}
+
+type cleanupCaptureOps struct {
+	*fakeK8sOps
+	cancel              context.CancelFunc
+	uploadErr           error
+	cleanupCalled       bool
+	cleanupContextError error
+	cleanupRemaining    time.Duration
+}
+
+func (o *cleanupCaptureOps) execInPod(ctx context.Context, pod, container string, cmd []string, stdin io.Reader) (string, error) {
+	_, _ = o.fakeK8sOps.execInPod(ctx, pod, container, cmd, stdin)
+	if len(cmd) == 6 && cmd[0] == "sh" && cmd[5] == archiveExtractAck {
+		o.cancel()
+		return "", o.uploadErr
+	}
+	if strings.Join(cmd, " ") == "rm -rf /tmp/city-src" {
+		o.cleanupCalled = true
+		o.cleanupContextError = ctx.Err()
+		if deadline, ok := ctx.Deadline(); ok {
+			o.cleanupRemaining = time.Until(deadline)
+		}
+	}
+	return "", nil
+}
+
+func TestInitCityInPodRemovesPartialCopyAfterUploadFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	uploadErr := errors.New("pod upload failed")
+	ops := &cleanupCaptureOps{fakeK8sOps: newFakeK8sOps(), cancel: cancel, uploadErr: uploadErr}
+
+	err := initCityInPod(ctx, ops, "gc-mayor", t.TempDir())
+	if !errors.Is(err, uploadErr) {
+		t.Fatalf("initCityInPod error = %v, want %v", err, uploadErr)
+	}
+	if !ops.cleanupCalled || ops.cleanupContextError != nil || ops.cleanupRemaining <= 0 || ops.cleanupRemaining > 5*time.Second {
+		t.Fatalf("cleanup called=%v context error=%v remaining=%s; want live context with a five-second deadline", ops.cleanupCalled, ops.cleanupContextError, ops.cleanupRemaining)
+	}
+	last := ops.calls[len(ops.calls)-1]
+	if last.method != "execInPod" || strings.Join(last.cmd, " ") != "rm -rf /tmp/city-src" {
+		t.Fatalf("last pod command = %v, want partial-copy cleanup", last.cmd)
 	}
 }

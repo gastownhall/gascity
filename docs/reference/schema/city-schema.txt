@@ -234,7 +234,7 @@
         },
         "work_query": {
           "type": "string",
-          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before\nprobe, hook, and prompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems."
+          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before\nprobe, hook, and prompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems.\nA custom query that looks up assigned work should read $GC_ALIAS: under\ngc hook --claim, a single-slot pool session the supervisor collapsed onto\nthe agent's canonical [[named_session]] identity runs the query with\n$GC_ALIAS set to that identity, while $GC_AGENT keeps the session's\nruntime value."
         },
         "sling_query": {
           "type": "string",
@@ -1093,6 +1093,25 @@
             "require"
           ],
           "description": "GuardedRelease selects the ownership-release discipline for work beads:\n\"off\" (legacy, owner-blind bd update/unclaim), \"auto\" (fence-guarded\nrelease verbs where the bd binary is capable, loud degrade otherwise), or\n\"require\" (guarded release or a typed refusal). Empty defaults to \"off\".\nAny other value fails config load."
+        },
+        "allow_schema_behind_migrate": {
+          "type": "boolean",
+          "description": "AllowSchemaBehindMigrate opts this city in to letting the linked beads\nlibrary migrate its database forward when the database's own schema\ncursor trails the library's ceiling. Without it, the native-store\npreflight schema check FAILs a behind schema (stays on BdStore) instead\nof risking a native open that would migrate a possibly-shared database;\nthe direct native-open path withholds BD_ALLOW_REMOTE_MIGRATE from the\nlinked library the same way. Default: false (nil). A break-glass\nGC_BEADS_ALLOW_SCHEMA_BEHIND_MIGRATE env override is registered in\ninternal/rollout (beads.allow_schema_behind_migrate); read the effective\nvalue through internal/rollout.Flags.AllowSchemaBehindMigrate, never\nthis field directly.",
+          "default": false
+        },
+        "proxied_idle_timeout": {
+          "type": "string",
+          "description": "ProxiedIdleTimeout is how long a bd-owned proxied scope's proxy and Dolt\nchild stay up with no connections before bd retires them; the next bd\ncommand restarts them. Go duration; \"0\" means never. A finite value\nmust be at least 1m. Empty uses the default, 30m. It applies to scopes gc\ninitializes (gc init, gc rig add, gc beads city migrate-proxied); bd\ncannot change an existing scope's value, and gc doctor reports drift.\nOverridden per rig by beads_proxied_idle_timeout and by the\nGC_BEADS_PROXIED_IDLE_TIMEOUT environment variable.",
+          "default": "30m"
+        },
+        "native_transport": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "off"
+          ],
+          "description": "NativeTransport selects whether this city's bead stores may open the\nnative Dolt store at all: \"off\" (this city's stores never open\nnatively; always BdStore, the bd CLI subprocess — logged once at boot)\nor \"auto\" (default: native when preflight-eligible, today's behavior).\nEmpty defaults to \"auto\". Any other value (including \"require\", which\nbelongs to conditional_writes/guarded_release, not this switch) fails\nconfig load. A running city keeps the stores it holds open on the value\nit read at boot until it restarts; every other open, by a gc command or\nfor a single tick, reads the current value.\nGC_BEADS_FORCE_FALLBACK remains a deprecated process-wide alias for\n\"off\" that overrides every city's value for one release.",
+          "default": "auto"
         },
         "policies": {
           "additionalProperties": {
@@ -2699,6 +2718,10 @@
           },
           "type": "object",
           "description": "FormulaVars provides rig-scoped defaults for formula vars. Keys match\nvar names declared in formula `[vars.\u003cname\u003e]` blocks. Values are used\nwhen a formula runs in this rig and the caller did not pass an\nexplicit --var override. Takes precedence over formula-level defaults\nbut loses to --var flags."
+        },
+        "beads_proxied_idle_timeout": {
+          "type": "string",
+          "description": "BeadsProxiedIdleTimeout overrides [beads] proxied_idle_timeout for this\nrig's bd-owned proxied scope. Go duration; \"0\" means never. Ignored, with\na warning, for a rig that shares the city's proxy root: one proxy serves\nevery scope on that root and carries the city's value."
         }
       },
       "additionalProperties": false,
@@ -2744,6 +2767,10 @@
           },
           "type": "object",
           "description": "FormulaVars adds or overrides rig-scoped formula var defaults.\nAdditive merge: patch keys win over existing rig keys, unspecified\nkeys are preserved."
+        },
+        "beads_proxied_idle_timeout": {
+          "type": "string",
+          "description": "BeadsProxiedIdleTimeout overrides the rig's beads_proxied_idle_timeout."
         }
       },
       "additionalProperties": false,

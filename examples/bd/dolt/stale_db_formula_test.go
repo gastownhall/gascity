@@ -90,6 +90,8 @@ func TestStaleDBFormulaRenderedShellIsStrictAndValid(t *testing.T) {
 	for _, want := range []string{
 		`set -euo pipefail`,
 		`WORK_BEAD="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-$(gc hook current --id-only)}}"`,
+		`if [ "$PROTECTED_NON_BASELINE" -ge "10" ]; then`,
+		`protected_non_baseline: ((.summary.protected_total // 0) - (.summary.protected_by_kind["active-rig"] // 0))`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("rendered script missing %q", want)

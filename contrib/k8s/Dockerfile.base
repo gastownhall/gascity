@@ -8,7 +8,7 @@
 #   make docker-base
 #   # or: docker build -f contrib/k8s/Dockerfile.base -t gc-agent-base:latest .
 
-FROM golang:1.26.6-bookworm@sha256:433f9dc4f8ea3a1ce4e28f9f15d0f7c056b10475307f886d6f1ac1ccc4abd976 AS go-toolchain
+FROM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS go-toolchain
 
 FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b AS tool-builder
 
@@ -16,9 +16,9 @@ ARG GH_VERSION=2.96.0
 ARG GH_SOURCE_REF=b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0
 ARG GH_SOURCE_SHA256=a0c18c98c73f7333f73e19b3a0bf5bd18673f3dc226193ab6478b3ea1ea18f03
 ARG GH_SOURCE_DATE_EPOCH=1783026608
-ARG DOLT_VERSION=2.1.7
-ARG DOLT_SOURCE_REF=781cbb730221ea7df4fc7995255bb336df9c3864
-ARG DOLT_SOURCE_SHA256=0b0c9bce8baef26baa7e0e5825cd2d7d6101daf6fc9673f38dac9670afb66847
+ARG DOLT_VERSION=2.2.0
+ARG DOLT_SOURCE_REF=a6690826d767743df7adf0b8bfea3830ee2c4cf6
+ARG DOLT_SOURCE_SHA256=3d7ed1a4ad464dca37228c8b069fc84c803be7ab5254534774728559492a0622
 ARG GRPC_VERSION=1.83.2
 # Patched module versions forced into the gh and Dolt rebuilds below, matching
 # the versions this repo's own go.mod carries. The rebuilt bd tracks its own

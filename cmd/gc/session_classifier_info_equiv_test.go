@@ -237,6 +237,35 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		// alone. failed-create appears here in its asleep+sleep_reason spelling,
 		// which is distinct from the "failed-create" fixture below (state=
 		// failed-create) and reaches a different arm.
+		// sleep_reason=killed is freeable only without an honored kill fence
+		// (owner ruling B1): one fixture per side of the fence check.
+		"asleep-killed-freeable": {
+			ID:     "ga-killed",
+			Type:   session.BeadType,
+			Title:  "killed",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        "asleep",
+				"sleep_reason": string(session.SleepReasonKilled),
+				"slept_at":     recentWokeRFC3339,
+				"pool_slot":    "2",
+			},
+		},
+		"asleep-killed-fence-pending": {
+			ID:     "ga-killfence",
+			Type:   session.BeadType,
+			Title:  "killfence",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        "asleep",
+				"sleep_reason": string(session.SleepReasonKilled),
+				"state_reason": session.KillPendingReason,
+				"slept_at":     recentWokeRFC3339,
+				"pool_slot":    "2",
+			},
+		},
 		"asleep-city-stop-freeable": {
 			ID:     "ga-citystop",
 			Type:   session.BeadType,
@@ -945,8 +974,11 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 		// bead-metadata read (self-sufficient oracle, not a side door).
 		"shouldRollbackPendingCreate": {func(b beads.Bead) bool { return strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true" }, shouldRollbackPendingCreateInfo},
 		"isStaleCreating":             {isStaleCreating, isStaleCreatingInfo},
-		"isPoolSessionSlotFreeable":   {isPoolSessionSlotFreeable, isPoolSessionSlotFreeableInfo},
-		"beadOwnsPoolSessionName":     {beadOwnsPoolSessionName, infoOwnsPoolSessionName},
+		"isPoolSessionSlotFreeable": {
+			func(b beads.Bead) bool { return isPoolSessionSlotFreeable(b, clk.Now()) },
+			func(i session.Info) bool { return isPoolSessionSlotFreeableInfo(i, clk.Now()) },
+		},
+		"beadOwnsPoolSessionName": {beadOwnsPoolSessionName, infoOwnsPoolSessionName},
 	}
 
 	// Agent-dependent classifiers. A bare pool agent (no instance-expansion, no

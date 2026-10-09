@@ -93,17 +93,18 @@ package main
 //
 // # A binding that cannot claim is a city fact, not a bead fault
 //
-// The CAS the routed claim acquires through is a capability: *beads.SQLiteStore
-// has the two-argument Claim and the other compiled-in binding provider's engine
-// (beadsworkspace over *beads.NativeDoltStore) does not, so the closed contract
-// answers ErrBeadsAdapterCapability rather than emulating it. That is a standing
+// The CAS the routed claim acquires through is a capability: over an engine
+// without the two-argument Claim, the closed contract answers
+// ErrBeadsAdapterCapability rather than emulating it. That is a standing
 // property of the city's storage configuration, so it is refused at the DOOR —
 // newHookClaimClassRoute verifies it once, the way storebinding's
 // NewBeadsNudgeQueue verifies the same capability at construction — and
 // claimHookWork then runs unrouted with one loud line rather than failing every
 // claim of every bead in every store.
 //
-// If a refusal reaches a claim anyway, it is a per-BEAD skip and not a terminal
+// If a refusal reaches a claim anyway (a forwarding wrapper carries the method
+// its leaf lacks, so it passes the door and refuses per bead with
+// beads.ErrClaimUnsupported), it is a per-BEAD skip and not a terminal
 // tick: the escalation only ran because a work store returned not-found, which
 // proves this session owns nothing there and that no mutation is outstanding
 // anywhere (the capability refusal is returned before any write). That is the
@@ -295,12 +296,39 @@ func hookClaimRouteVerdict(route *hookClaimClassRoute, err error, stderr io.Writ
 // answers a question about the WORK store, where only beads.ErrNotFound proves
 // the bead is absent and everything else may be an outstanding mutation; this
 // one answers a question about the BINDING, reached only after a work store
-// already proved this session owns nothing there. The refusal is returned before
-// any write (the adapter's type assertion fails first), so nothing is
-// outstanding anywhere and the bead can be skipped exactly as the work-side
-// not-found is.
+// already proved this session owns nothing there. Both refusals it recognizes
+// are returned before any write, so nothing is outstanding anywhere and the bead
+// can be skipped exactly as the work-side not-found is:
+//
+//   - storebinding.ErrBeadsAdapterCapability: the graph adapter's type
+//     assertion on the binding fails first.
+//   - beads.ErrClaimUnsupported: a forwarding wrapper has the two-argument
+//     Claim, so it passes newHookClaimClassRoute's door check, but the store it
+//     wraps does not, and the wrapper refuses before forwarding.
 func hookClaimBindingRefusedTheClaim(err error) bool {
-	return errors.Is(err, storebinding.ErrBeadsAdapterCapability)
+	return errors.Is(err, storebinding.ErrBeadsAdapterCapability) ||
+		errors.Is(err, beads.ErrClaimUnsupported)
+}
+
+// hookClaimBeadIsAWisp reports whether a routed claim failed because the
+// relocated binding resolved id to a wisp row rather than to a claimable
+// issue.
+//
+// A wisp is not an ownership conflict and not evidence of an outstanding
+// mutation: beads.NativeDoltStore.Claim returns beads.ErrWispNotClaimable (see
+// its doc comment) only for an id the claimer's own contract refused before any
+// write was attempted, which is the same "refused before any write, so nothing
+// is outstanding" shape hookClaimBindingRefusedTheClaim carries for a
+// capability-less binding. Only a native-store binding produces this sentinel;
+// a SQLite- or bd-backed binding never does.
+//
+// The ready tier's claimFirstReadyHookAssignment fails the whole hook invocation
+// on any claim error it does not recognize, so an unrecognized wisp refusal
+// would stop this session over one routed id that no front door will ever be
+// able to claim — the one outcome ErrWispNotClaimable's own doc comment says
+// should instead be "log it once and move on."
+func hookClaimBeadIsAWisp(err error) bool {
+	return errors.Is(err, beads.ErrWispNotClaimable)
 }
 
 // hookClaimClassRouteForCity resolves the claim-time class front door for a

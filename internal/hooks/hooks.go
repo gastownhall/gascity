@@ -471,6 +471,14 @@ func installClaude(fs fsys.FS, cityDir string) error {
 	return writeManagedFile(fs, runtimeDst, data, forceOverwrite)
 }
 
+// ValidateClaudeSettings computes the Claude settings Install would project
+// to <cityDir>/.gc/settings.json and reports why it cannot, writing nothing:
+// a malformed or empty override fails exactly as Install would.
+func ValidateClaudeSettings(fs fsys.FS, cityDir string) error {
+	_, _, err := desiredClaudeSettings(fs, cityDir)
+	return err
+}
+
 type writeManagedFilePolicy int
 
 const (

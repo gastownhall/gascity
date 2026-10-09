@@ -80,6 +80,29 @@ func TestSupervisorForkEnv(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:   "keeps provider credentials by default",
+			parent: []string{"PATH=/bin", "ANTHROPIC_API_KEY=sk-test"},
+			check: func(t *testing.T, got []string) {
+				if !containsExactly(got, "ANTHROPIC_API_KEY=sk-test") {
+					t.Fatalf("supervisorForkEnv result %v dropped a credential without the opt-out", got)
+				}
+			},
+		},
+		{
+			name:   "drops provider credentials when GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1 (#6966)",
+			parent: []string{"PATH=/bin", "ANTHROPIC_API_KEY=sk-test", supervisorOmitProviderCredsEnv + "=1", "HOME=/home/x"},
+			check: func(t *testing.T, got []string) {
+				for _, kv := range got {
+					if strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") {
+						t.Fatalf("supervisorForkEnv result %v leaks a provider credential despite the opt-out", got)
+					}
+				}
+				if !containsExactly(got, "PATH=/bin") || !containsExactly(got, "HOME=/home/x") {
+					t.Fatalf("supervisorForkEnv result %v dropped non-credential vars", got)
+				}
+			},
+		},
 	}
 
 	for _, tc := range cases {

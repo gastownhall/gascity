@@ -166,6 +166,13 @@ func RequestExplicitWakePatch(reason string, now time.Time) MetadataPatch {
 	}
 }
 
+// ClearWakeRequestPatch drops a pending wake request (CONTRACT v5.7 D7). Its
+// consumers write it in the CAS that satisfies the request, and `gc session
+// suspend` and `gc session kill` in their own write, as newer operator intent.
+func ClearWakeRequestPatch() MetadataPatch {
+	return MetadataPatch{"wake_request": "", "wake_requested_at": ""}
+}
+
 // RequestWakePatch records a controller-owned one-shot create claim.
 func RequestWakePatch(reason string, now time.Time) MetadataPatch {
 	return MetadataPatch{

@@ -138,7 +138,7 @@ var ErrControlPending = errors.New("workflow control pending")
 // ErrControlDriftPending is the subset of ErrControlPending that no progress
 // inside the graph can ever clear: the control bead is waiting on an
 // out-of-band repair — a rig re-added to city.toml, a city name restored, a
-// store that comes back.
+// store that comes back, a check script shipped or made executable.
 //
 // The split is load-bearing at the cmd layer. Ordinary pending — a retry
 // waiting for its subject, a drain waiting for its members, a scope waiting for
@@ -1016,10 +1016,9 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 		// store and nothing crosses the store boundary, leaving the parent
 		// indistinguishable from never-run. Stamp the failing step's
 		// diagnostics onto the still-open parent so it is visibly failed.
-		// Stamped here, in the pass-path preflight's slot, for the same
-		// reason the preflight exists: an error past this point strands the
-		// finalizer closed-as-skipped by the subtree close below. The stamp
-		// is metadata-only and idempotent, so re-running it on retry is safe.
+		// Stamped here, in the pass-path preflight's slot, so the parent is
+		// marked before the root settles. The stamp is metadata-only and
+		// idempotent, so re-running it on retry is safe.
 		//
 		// The parent outlives every DAG launched from it, so the stamp is a
 		// whole-value contract rather than a set of independent keys: each
@@ -1063,10 +1062,17 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	if err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: resolving teardown members: %w", rootID, err))
 	}
+	// The finalizer is itself a root member, but it must not sweep itself: it
+	// is the bead that re-drives this function, so it closes last, after the
+	// source chain. Swept here it would close as skipped before the sources
+	// and a crash in between would strand them open with nothing to retry.
+	excludeFromSweep := func(member beads.Bead) bool {
+		return member.ID == bead.ID || excludeTeardown(member)
+	}
 	if _, err := molecule.CloseSubtreeWithMetadataExcept(store, rootID, map[string]string{
 		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 		"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
-	}, excludeTeardown); err != nil {
+	}, excludeFromSweep); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: closing terminal workflow members: %w", rootID, err))
 	}
 	if outcome == beadmeta.OutcomePass {

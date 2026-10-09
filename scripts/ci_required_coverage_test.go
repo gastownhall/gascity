@@ -1,9 +1,7 @@
 package scripts_test
 
 import (
-	"slices"
 	"sort"
-	"strings"
 	"testing"
 )
 
@@ -13,18 +11,12 @@ const ciRequiredRoot = "ci-required"
 
 // ciAggregateJobs summarize a subset of the job graph by reading
 // needs.*.result -- they never run tests themselves, so they are exempt
-// from the coverage requirement below. ci-preflight and ci-integration
-// are ci-required's own intermediate rollups. check is a second,
-// independently branch-protection-enforced rollup kept alive under its
-// historical name (see TestCIPreflightFansInDirectlyWithoutWaitingForHistoricalCheck
-// above, which asserts ci-preflight deliberately does not wait on it) --
-// it mirrors a subset of the same graph rather than adding coverage of
-// its own, so it is exempted the same way as the other aggregators.
+// from the coverage requirement below. check is the main ruleset's
+// required rollup, kept under its historical name; it fans in the same
+// gating jobs as ci-required (TestCheckAndCIRequiredFanInTheGatingJobs).
 var ciAggregateJobs = map[string]bool{
-	ciRequiredRoot:   true,
-	"ci-preflight":   true,
-	"ci-integration": true,
-	"check":          true,
+	ciRequiredRoot: true,
+	"check":        true,
 }
 
 // ciAdvisoryAllowlist holds real jobs deliberately left out of
@@ -100,30 +92,5 @@ func TestCIRequiredCoversEveryRealJob(t *testing.T) {
 	if len(stale) > 0 {
 		sort.Strings(stale)
 		t.Fatalf("ciAdvisoryAllowlist is stale:\n  %v", stale)
-	}
-}
-
-// TestCIRequiredSkipsPushOnlyCoverageJobs documents why the two
-// push-only coverage jobs are allowed to report "skipped" on every pull
-// request without failing ci-required: they are gated
-// `if: github.event_name == 'push'` (ci.yml:270, ci.yml:299) and so never
-// run on a PR by design. Mirrors the allow_skipped assertion style of
-// TestProductMetricsTesthookProfileIsFocusedRequiredAndObservable above.
-func TestCIRequiredSkipsPushOnlyCoverageJobs(t *testing.T) {
-	wf := readCriticalPathWorkflow(t, "ci.yml")
-	required := wf.Jobs[ciRequiredRoot]
-	for _, jobName := range []string{"preflight-unit-cover-noncmdgc", "preflight-unit-cover-cmdgc"} {
-		if !slices.Contains(required.Needs, jobName) {
-			t.Errorf("ci-required needs = %v, want push-only coverage job %q", required.Needs, jobName)
-		}
-		var permitsSkip bool
-		for _, step := range required.Steps {
-			if strings.Contains(step.Run, "allow_skipped") && strings.Contains(step.Run, `"`+jobName+`"`) {
-				permitsSkip = true
-			}
-		}
-		if !permitsSkip {
-			t.Errorf("ci-required must allow push-only job %q to report skipped on pull requests (add it to the allow_skipped set)", jobName)
-		}
 	}
 }

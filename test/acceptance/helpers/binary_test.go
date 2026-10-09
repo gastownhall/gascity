@@ -52,3 +52,37 @@ func TestRunGCUsesExactBinaryOverridePath(t *testing.T) {
 		t.Fatalf("RunGC() output = %q, want override invocation for %q", out, override)
 	}
 }
+
+func TestFindBDResolvesBazelRootpathOverride(t *testing.T) {
+	srcdir := t.TempDir()
+	want := filepath.Join(srcdir, "+http_archive+bd_pinned", "bd")
+	if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(want, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEST_SRCDIR", srcdir)
+	t.Setenv("TEST_WORKSPACE", "_main")
+	// $(rootpath @bd_pinned//:bd) is relative to the main repository's
+	// runfiles directory, not to the package directory the test runs in.
+	t.Setenv("GC_ACCEPTANCE_BD_BIN", "../+http_archive+bd_pinned/bd")
+
+	if got := FindBD(); got != want {
+		t.Fatalf("FindBD() = %q, want %q", got, want)
+	}
+}
+
+func TestFindBDNeverFallsBackFromABrokenOverride(t *testing.T) {
+	pathDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(pathDir, "bd"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", pathDir)
+	t.Setenv("TEST_SRCDIR", "")
+	t.Setenv("GC_ACCEPTANCE_BD_BIN", filepath.Join(t.TempDir(), "missing-bd"))
+
+	if got := FindBD(); got != "" {
+		t.Fatalf("FindBD() = %q with a broken GC_ACCEPTANCE_BD_BIN, want \"\" (no fallback to PATH)", got)
+	}
+}

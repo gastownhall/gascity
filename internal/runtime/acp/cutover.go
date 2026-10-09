@@ -21,6 +21,8 @@ var (
 	_ runtime.ProcessTableScanner         = (*seamBackedProvider)(nil)
 	_ runtime.LivenessObserverWithError   = (*seamBackedProvider)(nil)
 	_ runtime.ListingAttestation          = (*seamBackedProvider)(nil)
+	_ runtime.IdentitySidecarProvider     = (*seamBackedProvider)(nil)
+	_ runtime.IdentitySidecarProvider     = (*Provider)(nil)
 )
 
 // NewSeamBacked constructs an acp provider served through the seams.
@@ -73,6 +75,13 @@ func (s *seamBackedProvider) TerminateRuntime(r runtime.LiveRuntime) error {
 func (s *seamBackedProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
 	return s.raw.ObserveLivenessWithError(name, processNames)
 }
+
+// LocalIdentitySidecar passes the underlying provider's sidecar declaration
+// through; the seams route GetMeta to the same sidecar.
+func (s *seamBackedProvider) LocalIdentitySidecar() bool { return s.raw.LocalIdentitySidecar() }
+
+// LivenessReadsFresh forwards [runtime.FreshByConstruction].
+func (s *seamBackedProvider) LivenessReadsFresh() bool { return s.raw.LivenessReadsFresh() }
 
 // ListRunningComplete passes the underlying provider's listing attestation
 // through; the seams route ListRunning to the same raw listing.

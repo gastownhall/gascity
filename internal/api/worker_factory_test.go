@@ -1049,8 +1049,9 @@ func TestWorkerFactorySessionByIDUsesResolvedCommandAndResumeSettingsOnResume(t 
 	if err != nil {
 		t.Fatalf("SessionByID(%q): %v", info.ID, err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
-		t.Fatalf("Start: %v", err)
+	// Resuming a suspended session is an operator's own act (D8): Attach.
+	if err := handle.Attach(context.Background()); err != nil {
+		t.Fatalf("Attach: %v", err)
 	}
 
 	start := fs.sp.LastStartConfig(info.SessionName)
@@ -1096,8 +1097,9 @@ func TestWorkerFactorySessionByIDAppliesTemplateOverridesToExplicitResumeCommand
 	if err != nil {
 		t.Fatalf("SessionByID(%q): %v", info.ID, err)
 	}
-	if err := handle.Start(context.Background()); err != nil {
-		t.Fatalf("Start: %v", err)
+	// Resuming a suspended session is an operator's own act (D8): Attach.
+	if err := handle.Attach(context.Background()); err != nil {
+		t.Fatalf("Attach: %v", err)
 	}
 
 	start := fs.sp.LastStartConfig(info.SessionName)

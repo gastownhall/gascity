@@ -118,10 +118,18 @@ config_ref = "infra"
 // engine provider, for the whole of one test.
 func registerConfigRefEngineProvider(t *testing.T) {
 	t.Helper()
+	registerSoleStorageProvider(t, configRefEngineProviderFactory{})
+}
+
+// registerSoleStorageProvider freezes a registry carrying only factory, for the
+// rest of one test. A row that re-registers over a city already seeded swaps
+// the provider its binding resolves to without touching the engine on disk.
+func registerSoleStorageProvider(t *testing.T, factory storebinding.ProviderFactory) {
+	t.Helper()
 	prev := newStorageRegistryForPlan
 	newStorageRegistryForPlan = func() (*storebinding.ProviderRegistry, error) {
 		registry := storebinding.NewProviderRegistry()
-		if err := registry.Register(configRefEngineProviderFactory{}); err != nil {
+		if err := registry.Register(factory); err != nil {
 			return nil, err
 		}
 		if err := registry.Freeze(); err != nil {
@@ -835,7 +843,7 @@ func TestBdByIDUnservedVerbReservedMissFallsThrough(t *testing.T) {
 //
 // The work-prefixed half of this arm is pinned by
 // TestBdUpdateUnservedWorkResidentFailsLoudOnClassProbeFault, and it reaches the
-// error branch only through mutationIDs. A reserved id reaches it through the
+// error branch only through the mutation scanner's subjects. A reserved id reaches it through the
 // OTHER candidate source, bdArgsAddressedClassIDs' — so without this row the
 // error arm can be made conditional on that flag and every existing pin stays
 // green, which is the shape the pre-change code (a namesClassBead-first branch
@@ -1245,6 +1253,10 @@ func TestBdByIDEntersTheFunnelOnlyForInvocationsThatCouldConcernAClassBead(t *te
 		"class close":                {[]string{"close", reserved}, true},
 		"class id in an id flag":     {[]string{"list", "--parent", reserved}, true},
 		"unserved dep tree spelling": {[]string{"dep", "tree", "--show-all-paths", "gc-123"}, false},
+		"unserved multi-id show":     {[]string{"show", "gc-123", "gc-124"}, true},
+		"unserved show flag":         {[]string{"show", "--long", "gc-123"}, true},
+		"show with an unknown flag":  {[]string{"show", "--bogus", "v", "gc-123"}, false},
+		"unserved multi-id dep list": {[]string{"dep", "list", "gc-123", "gc-124"}, true},
 		"served read on a work id":   {[]string{"show", "gc-123"}, true},
 		"served dep tree":            {[]string{"dep", "tree", "gc-123"}, true},
 		"served write on a work id":  {[]string{"update", "gc-123", "--status", "closed"}, true},
@@ -2612,5 +2624,239 @@ func TestDoorUpdateAfterFoundSurfacesStoreErrorVerbatim(t *testing.T) {
 				t.Errorf("the failure does not name the bead: %q", stderr.String())
 			}
 		})
+	}
+}
+
+// TestBdByIDUnservedReadOfAMigratedBeadIsRefusedNotAnsweredFromTheRetainedCopy
+// is gastownhall/gascity#6015 on the city shape that produced it.
+//
+// `gc storage migrate` PRESERVES ids and RETAINS the work store's copy, so a
+// relocated workflow step keeps its work-shaped id and its pre-migration row
+// stays behind in the work ledger. The served read (`show <id>`) routes to the
+// binding; an unserved spelling of the same read (`show --long <id>`, a second
+// positional id) used to miss the served parser, skip the funnel entirely and
+// fall through to a bd subprocess pointed at the work store — which answered
+// from the retained copy, in bd's own shape, with no diagnostic.
+func TestBdByIDUnservedReadOfAMigratedBeadIsRefusedNotAnsweredFromTheRetainedCopy(t *testing.T) {
+	cityPath := oneShotCLICity(t, filepath.Join(t.TempDir(), "store"))
+	stubInfraControllerPing(t, 0)
+
+	work, err := openInfraMigrationSource(cityPath)
+	if err != nil {
+		t.Fatalf("opening the work store: %v", err)
+	}
+	root := mustCreateInfraBead(t, work, beads.Bead{Title: "wf root", Type: "task", Metadata: map[string]string{"gc.kind": "workflow"}})
+	step := mustCreateInfraBead(t, work, beads.Bead{Title: "wf step", Type: "task", Metadata: map[string]string{"gc.root_bead_id": root.ID}})
+	plain := mustCreateInfraBead(t, work, beads.Bead{Title: "ordinary work", Type: "task"})
+	if c := coordclass.Classify(step); c != coordclass.ClassGraph {
+		t.Fatalf("the seeded step classifies as %v, want graph", c)
+	}
+	if c := coordclass.Classify(plain); c != coordclass.ClassWork {
+		t.Fatalf("the seeded work bead classifies as %v, want work", c)
+	}
+	if err := closeBeadStoreHandle(work); err != nil {
+		t.Fatalf("closing the work store: %v", err)
+	}
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err != nil {
+		t.Fatalf("loading the split city config: %v", err)
+	}
+	var log bytes.Buffer
+	if report := migrateInfraClasses(t, cityPath, cfg, &log); report.Outcome != infraMigrationConverged {
+		t.Fatalf("the fixture city did not converge (%s): %s", report.Outcome, log.String())
+	}
+	resetCLIStorageRoutes(t)
+
+	binding, _, err := cliSoleClassBinding(cityPath)
+	if err != nil {
+		t.Fatalf("resolving the class binding: %v", err)
+	}
+	for name, tc := range map[string]struct {
+		args  []string
+		verb  string
+		shape string
+	}{
+		"an unimplemented show flag":      {[]string{"show", "--long", step.ID}, "show", "with --long"},
+		"a trailing unimplemented flag":   {[]string{"show", step.ID, "--include-comments"}, "show", "with --include-comments"},
+		"a second positional id":          {[]string{"show", step.ID, root.ID}, "show", "with more than one id"},
+		"the relocated id second":         {[]string{"show", plain.ID, step.ID}, "show", "with more than one id"},
+		"a flag and a second id":          {[]string{"show", "--json", plain.ID, "--long", step.ID}, "show", "with --long and more than one id"},
+		"a root flag before the verb":     {[]string{"--actor", "someone", "show", "--long", step.ID}, "show", "with --long"},
+		"only a root flag":                {[]string{"--actor", "someone", "show", step.ID}, "show", "with --actor"},
+		"the id behind --id":              {[]string{"show", "--id", step.ID, "--long"}, "show", "with --id"},
+		"a multi-subject dep list":        {[]string{"dep", "list", plain.ID, "--direction", "up", step.ID}, "dep list", "with more than one id"},
+		"a multi-subject dep tree":        {[]string{"dep", "tree", plain.ID, step.ID}, "dep tree", "with more than one id"},
+		"after the end-of-flags marker":   {[]string{"show", "--long", "--", step.ID}, "show", "with --long"},
+		"a value flag before the subject": {[]string{"show", "--as-of", "HEAD", step.ID}, "show", "with --as-of"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetCLIStorageRoutes(t)
+			var stdout, stderr bytes.Buffer
+			code, handled := maybeRouteBdByID(cityPath, "", tc.args, &stdout, &stderr)
+			if !handled {
+				t.Fatalf("%v fell through to the bd subprocess, which answers from the retained work-store copy", tc.args)
+			}
+			if code != 1 {
+				t.Fatalf("%v exited %d; an unserved read of a relocated bead must refuse: %s", tc.args, code, stderr.String())
+			}
+			want := fmt.Sprintf("gc bd: %s is owned by the %s class binding, and `gc bd %s` %s is not served in process; refusing rather than running it against the work store, which does not hold the authoritative copy — read each id on its own: `gc bd %s <id>`\n", step.ID, binding.Name, tc.verb, tc.shape, tc.verb)
+			if got := stderr.String(); got != want {
+				t.Fatalf("refusal for %v:\n got %q\nwant %q", tc.args, got, want)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("%v printed %q to stdout; a refusal answers nothing", tc.args, stdout.String())
+			}
+		})
+	}
+
+	// The same spellings over a bead the migration left in the work store are
+	// bd's to answer, byte-identically.
+	for name, args := range map[string][]string{
+		"an unimplemented show flag": {"show", "--long", plain.ID},
+		"a second positional id":     {"show", plain.ID, "demo-notanywhere"},
+	} {
+		t.Run("work bead "+name, func(t *testing.T) {
+			resetCLIStorageRoutes(t)
+			var stdout, stderr bytes.Buffer
+			if code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr); handled {
+				t.Fatalf("%v was taken by the by-ID surface (exit %d, %q); bd is still the truth for work beads", args, code, stderr.String())
+			}
+		})
+	}
+}
+
+// TestBdByIDUnservedReadOfAClassResidentIsRefusedWithoutARetainedCopy is the
+// same rule on a binding whose resident has NO work-store copy behind it — the
+// shape a migration that deletes its source leaves. Residence alone decides:
+// the refusal must not depend on the work store happening to hold a stale row.
+func TestBdByIDUnservedReadOfAClassResidentIsRefusedWithoutARetainedCopy(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	relic, _ := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "carried across by the migration")
+
+	for name, args := range map[string][]string{
+		"an unimplemented flag":  {"show", "--long", relic.ID},
+		"a second positional id": {"show", "demo-otherwork", relic.ID},
+		"a dep list pair":        {"dep", "list", relic.ID, "demo-otherwork", "--direction", "up"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetCLIStorageRoutes(t)
+			var stdout, stderr bytes.Buffer
+			code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr)
+			if !handled || code != 1 {
+				t.Fatalf("%v = (exit %d, handled %t), want a refusal: %s", args, code, handled, stderr.String())
+			}
+			if got := stderr.String(); !strings.Contains(got, relic.ID) || !strings.Contains(got, "class binding") {
+				t.Fatalf("the refusal for %v does not name the bead and the binding: %q", args, got)
+			}
+		})
+	}
+}
+
+// TestBdByIDUnservedReadOfAWorkBeadKeepsThePassthrough is the other half of the
+// widening: entering the funnel is not the same as taking the command. An
+// unserved read whose subjects the binding does not hold must still reach bd,
+// byte-identically, or the widening breaks every `show --long` in the city.
+func TestBdByIDUnservedReadOfAWorkBeadKeepsThePassthrough(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+
+	for name, args := range map[string][]string{
+		"an unimplemented flag":  {"show", "--long", "demo-notresident"},
+		"a second positional id": {"show", "demo-notresident", "demo-alsonot"},
+		"a dep list pair":        {"dep", "list", "demo-notresident", "demo-alsonot"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetCLIStorageRoutes(t)
+			var stdout, stderr bytes.Buffer
+			if code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr); handled {
+				t.Fatalf("%v was taken by the by-ID surface (exit %d, %q); bd is still the truth for work beads", args, code, stderr.String())
+			}
+		})
+	}
+}
+
+// TestBdByIDAmbiguousReadScanStaysOutside pins the fail-closed direction of the
+// read scanner: a flag it cannot classify might consume the next token, so the
+// scan yields no ids and the argv stays on its existing path without paying for
+// the funnel — even when the token that follows is a class resident.
+func TestBdByIDAmbiguousReadScanStaysOutside(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	relic, _ := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "an orphaned patrol root")
+
+	for _, args := range [][]string{
+		{"show", "--bogus", relic.ID},
+		{"show", relic.ID, "--bogus", "demo-x"},
+		{"dep", "list", relic.ID, "demo-x", "--bogus"},
+		{"dep", "tree", relic.ID, "demo-x", "--status", "open"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			if ids := bdByIDReadSubjects(args); ids != nil {
+				t.Fatalf("bdByIDReadSubjects(%v) = %v, want nil for an ambiguous scan", args, ids)
+			}
+			resetCLIStorageRoutes(t)
+			registries := countStorageRegistryConstructions(t)
+			var stdout, stderr bytes.Buffer
+			if code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr); handled {
+				t.Errorf("%v was answered here (exit %d): %s%s", args, code, stdout.String(), stderr.String())
+			}
+			if *registries != 0 {
+				t.Errorf("%v constructed %d provider registr(ies); an ambiguous scan has no ids to probe", args, *registries)
+			}
+		})
+	}
+}
+
+// TestBdByIDReadSubjects pins what the read scanner treats as an addressed
+// subject: positional ids and the value of show's --id, for the by-ID read verbs
+// only. Selectors and mutations are not its business.
+func TestBdByIDReadSubjects(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args []string
+		want []string
+	}{
+		"bare show":            {[]string{"show", "a-1"}, []string{"a-1"}},
+		"show with bool flags": {[]string{"show", "--long", "a-1", "--json", "a-2"}, []string{"a-1", "a-2"}},
+		"show --as-of value":   {[]string{"show", "--as-of", "HEAD", "a-1"}, []string{"a-1"}},
+		"show --id value":      {[]string{"show", "--id", "-weird", "--id=a-2"}, []string{"-weird", "a-2"}},
+		"global before verb":   {[]string{"--db", "x.db", "show", "a-1"}, []string{"a-1"}},
+		"end of flags":         {[]string{"show", "--", "--long"}, []string{"--long"}},
+		"dep list":             {[]string{"dep", "list", "a-1", "-t", "blocks", "a-2"}, []string{"a-1", "a-2"}},
+		"dep tree":             {[]string{"dep", "tree", "a-1", "--max-depth", "3", "--reverse"}, []string{"a-1"}},
+		"selector":             {[]string{"list", "--parent", "a-1"}, nil},
+		"search":               {[]string{"search", "a-1"}, nil},
+		"mutation":             {[]string{"close", "a-1"}, nil},
+		"dep add":              {[]string{"dep", "add", "a-1", "a-2"}, nil},
+		"no verb":              {[]string{"--json"}, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := bdByIDReadSubjects(tc.args); !slices.Equal(got, tc.want) {
+				t.Fatalf("bdByIDReadSubjects(%v) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBdByIDUnservedReadOnASingleStoreCityPaysNothing is the compatibility row
+// for the widened gate: a city that authors no [storage] routes nothing, so an
+// unserved by-ID read reaches the passthrough exactly as before and constructs
+// no provider registry on the way.
+func TestBdByIDUnservedReadOnASingleStoreCityPaysNothing(t *testing.T) {
+	cityPath := oneShotCLICity(t, "")
+	refuseInfraMigrationSource(t)
+	captureCLIStorageStderr(t)
+	registries := countStorageRegistryConstructions(t)
+
+	for _, args := range [][]string{
+		{"show", "--long", "gc-1"},
+		{"show", "gc-1", "gc-2"},
+		{"dep", "list", "gc-1", "gc-2"},
+		{"dep", "tree", "gc-1", "gc-2"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code, handled := maybeRouteBdByID(cityPath, "", args, &stdout, &stderr); handled {
+			t.Errorf("an unrelocated city answered %v here (exit %d): %s%s", args, code, stdout.String(), stderr.String())
+		}
+	}
+	if *registries != 0 {
+		t.Errorf("an unrelocated city constructed %d provider registr(ies) for an unserved read; the bypass must short-circuit first", *registries)
 	}
 }

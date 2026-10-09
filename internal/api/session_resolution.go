@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"time"
@@ -649,38 +650,129 @@ func (s *Server) resolveSessionIDMaterializingNamedWithContext(ctx context.Conte
 	return s.resolveSessionTargetIDWithContext(ctx, store, identifier, apiSessionResolveOptions{materialize: true})
 }
 
-func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent) (session.SubmitOutcome, error) {
+// messageOutcome is a delivered or queued message and, for one the resume
+// policy queued, whether the controller will start the session for it.
+type messageOutcome struct {
+	session.SubmitOutcome
+	willStart          *bool
+	willNotStartReason string
+}
+
+// submitMessageToSession submits message to session id. resume is the
+// request's `resume: true`: only then may the message start or resume the
+// session, here in the controller's process (CONTRACT v5.9 D8, owner ruling
+// 2026-10-08). Otherwise a session that is not running gets the message
+// queued and the start is left to the controller (deferToController).
+func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent, resume bool) (messageOutcome, error) {
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
-		return session.SubmitOutcome{}, err
+		return messageOutcome{}, err
+	}
+	policy := session.ResumeViaController
+	if resume {
+		policy = session.ResumeOperator
 	}
 	result, err := handle.Message(ctx, worker.MessageRequest{
 		Text:     message,
 		Delivery: workerDeliveryIntent(intent),
+		Resume:   policy,
 	})
 	if err != nil {
-		return session.SubmitOutcome{}, err
+		return messageOutcome{}, err
 	}
-	return session.SubmitOutcome{Queued: result.Queued}, nil
+	out := messageOutcome{SubmitOutcome: session.SubmitOutcome{Queued: result.Queued, Deferred: result.Deferred}}
+	if result.Deferred {
+		out.willStart, out.willNotStartReason = s.deferToController(store, id)
+	}
+	return out, nil
+}
+
+// deferToController asks the controller to start a session a message was
+// queued for (D8 rule 1): it records the wake on an asleep or drained row
+// nothing holds and pokes; a held row gets no wake and no poke. It reports
+// whether the controller will start the session, nil when it cannot tell (a
+// lost wake CAS, a row that is not dormant, a pool seat that starts only for
+// demand) and, if not, why, with the remedy.
+func (s *Server) deferToController(store beads.Store, id string) (*bool, string) {
+	no := false
+	outcome, err := session.NewStore(beads.SessionStore{Store: store}).RequestWakeUnlessHeld(id, false, time.Now().UTC())
+	d := deferralFor(outcome, err)
+	switch d {
+	case deferFailed:
+		log.Printf("gc api: recording the wake for a message queued to %s: %v", id, err)
+		return nil, ""
+	case deferHeld:
+		return &no, "an operator holds the session; resend with resume: true to resume it"
+	}
+	s.state.Enqueue(reconcilekey.Session(id))
+	if d == deferUnknown {
+		return nil, ""
+	}
+	certain := true
+	if refuser, ok := s.state.(WakeStartRefuser); ok {
+		if info, err := session.NewStore(beads.SessionStore{Store: store}).Get(id); err == nil {
+			var why string
+			if why, certain = refuser.WakeStartRefusal(info); why != "" {
+				return &no, why + "; resend with resume: true to start it now"
+			}
+		}
+	}
+	if !certain {
+		return nil, ""
+	}
+	yes := true
+	return &yes, ""
+}
+
+// deferral is what deferToController does with a wake request's answer.
+type deferral uint8
+
+const (
+	deferFailed  deferral = iota // the wake was not recorded: log, no poke, unknown
+	deferHeld                    // held: no poke, will not start
+	deferUnknown                 // poke; whether it starts is unknown
+	deferAsk                     // wake recorded: poke, and ask the refuser
+)
+
+// deferralFor maps RequestWakeUnlessHeld's answer. A lost CAS still pokes
+// (another writer may have recorded the wake); a row that is not dormant (an
+// active row whose runtime died, a create in flight) is the controller's to
+// handle, and neither claims a start.
+func deferralFor(outcome session.WakeRequestOutcome, err error) deferral {
+	switch {
+	case errors.Is(err, session.ErrWakeRequestContended):
+		return deferUnknown
+	case err != nil:
+		return deferFailed
+	case outcome == session.WakeHeld:
+		return deferHeld
+	case outcome == session.WakeRecorded:
+		return deferAsk
+	}
+	return deferUnknown
 }
 
 // sendBackgroundMessageToSession preserves the default provider nudge semantics
 // for system-driven messages that should respect wait-idle behavior when the
-// runtime supports it.
+// runtime supports it. It never starts a session in the controller's process:
+// one that is not running gets the nudge queued and the start left to the
+// controller (CONTRACT v5.9 D8 7(e)).
 func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return err
 	}
-	_, err = handle.Nudge(ctx, worker.NudgeRequest{Text: message})
+	result, err := handle.Nudge(ctx, worker.NudgeRequest{Text: message, Resume: session.ResumeViaController})
+	if err == nil && result.Undelivered == worker.NudgeQueuedHeld {
+		s.deferToController(store, id)
+	}
 	return err
 }
 
 // sendUserMessageToSession keeps POST /messages as a compatibility alias for
 // the semantic default submit path.
-func (s *Server) sendUserMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
-	_, err := s.submitMessageToSession(ctx, store, id, message, session.SubmitIntentDefault)
-	return err
+func (s *Server) sendUserMessageToSession(ctx context.Context, store beads.Store, id, message string, resume bool) (messageOutcome, error) {
+	return s.submitMessageToSession(ctx, store, id, message, session.SubmitIntentDefault, resume)
 }
 
 func (s *Server) workerHandleForSession(store beads.Store, id string) (worker.Handle, error) {

@@ -601,8 +601,9 @@ func closeRootWithMarker(store beads.Store, rootID string, rootMeta map[string]s
 		return store.CloseAll([]string{rootID}, rootMeta)
 	}
 	// Re-read as close to the write as possible and skip an already-closed root,
-	// so a concurrently finalized root is not re-stamped — the same guard CloseAll
-	// applies per id before it writes.
+	// so a concurrently finalized root is not re-stamped. CloseAll is no such
+	// guard: whether it stamps a closed id is store-specific (see the
+	// beads.Store CloseAll doc).
 	current, err := store.Get(rootID)
 	if err != nil {
 		return 0, err

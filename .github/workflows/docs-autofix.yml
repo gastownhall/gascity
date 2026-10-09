@@ -1,11 +1,12 @@
 # Auto-fix stale generated reference docs on PRs.
 #
-# CI's preflight-generated job runs scripts/check-generated-docs-drift.sh,
-# which computes the exact regeneration patch (go run ./cmd/genschema) and
-# uploads it as the generated-docs-freshness-patch artifact when the docs are
-# stale. This workflow closes the loop: when a PR's CI run fails and left that
-# artifact, it pushes the regen commit to the PR branch (same-repo PRs) or
-# leaves an idempotent comment with the one-liner apply recipe (fork PRs).
+# The bazel workflow's unit lane runs //cmd/genschema:genschema_in_sync_test,
+# which computes the exact regeneration patch (cmd/genschema's output against
+# the committed docs) and, when the docs are stale, the lane uploads it as
+# the generated-docs-freshness-patch artifact. This workflow closes the loop:
+# when a PR's bazel run fails and left that artifact, it pushes the
+# regen commit to the PR branch (same-repo PRs) or leaves an idempotent
+# comment with the one-liner apply recipe (fork PRs).
 #
 # Ported from the beads project's docs-autofix pipeline; the security model is
 # unchanged. SECURITY MODEL: this runs with write permissions via
@@ -16,18 +17,24 @@
 # and `git apply --index` supplies the underlying escape guards, so a hostile
 # patch can at most rewrite generated doc files on its own PR branch.
 #
+# SECURITY MODEL (App token): the gastownhall-autofix GitHub App's private
+# key is a secret of this repo's `autofix` environment, whose deployment-
+# branch policy allows only `main`, so only a job running on main (this one,
+# via workflow_run) can read it; the minted token itself is scoped to this
+# one repo with contents:write only.
+#
 # TOKEN NOTE: pushes made with the default GITHUB_TOKEN do not retrigger PR
-# checks. Configure a DOCS_AUTOFIX_TOKEN repo secret (fine-grained PAT or
-# GitHub App token with contents:write on this repo) for fully hands-off
-# operation on same-repo PRs; without it the pushed fix still lands but
-# checks need a manual re-run. Fork PRs always get the apply-recipe comment -
-# no token we hold can push to a fork.
+# checks. On same-repo PRs the push step mints a short-lived installation
+# token for the gastownhall-autofix GitHub App (contents:write, scoped to
+# this repo only) and uses that instead. Fork PRs always get the apply-recipe
+# comment - no token we hold can push to a fork, so the mint step is skipped
+# for them.
 
 name: Docs Autofix
 
 on:
   workflow_run:
-    workflows: ["CI"]
+    workflows: ["bazel"]
     types: [completed]
 
 permissions:
@@ -46,6 +53,10 @@ jobs:
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.conclusion == 'failure'
     runs-on: ubuntu-latest
+    # Grants the job read access to this environment's secrets; its
+    # deployment-branch policy restricts that to jobs running on main
+    # (workflow_run always does), not to any PR branch.
+    environment: autofix
     steps:
       # Trusted side only: base repo default branch, never the PR head.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -69,6 +80,22 @@ jobs:
           ls -la "${RUNNER_TEMP}/docs-patch"
           echo "found=true" >> "$GITHUB_OUTPUT"
 
+      # Same-repo PRs only: no token we hold can push to a fork, and a fork's
+      # head_repository can even be absent (deleted fork), so this mints
+      # nothing for it and the push script falls back to the apply-recipe
+      # comment. app-token outputs are empty (not failed) when the step is
+      # skipped, which is what the fallback below relies on.
+      - name: Mint autofix app token
+        id: app-token
+        if: github.event.workflow_run.head_repository.full_name == github.repository
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3
+        with:
+          app-id: ${{ secrets.AUTOFIX_APP_ID }}
+          private-key: ${{ secrets.AUTOFIX_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
       - name: Push regen commit or leave apply recipe
         if: steps.patch.outputs.found == 'true'
         env:
@@ -81,9 +108,9 @@ jobs:
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           # Split tokens: gh api calls (PR lookup, comments) always use the
           # workflow token, which carries this job's pull-requests:write; the
-          # optional PAT is used ONLY for the git push, so it needs no more
+          # App token is used ONLY for the git push, so it needs no more
           # than contents:write.
           GH_TOKEN: ${{ github.token }}
-          PUSH_TOKEN: ${{ secrets.DOCS_AUTOFIX_TOKEN || github.token }}
-          AUTOFIX_TOKEN_KIND: ${{ secrets.DOCS_AUTOFIX_TOKEN && 'pat' || 'default' }}
+          PUSH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          AUTOFIX_TOKEN_KIND: ${{ steps.app-token.outputs.token && 'app' || 'default' }}
         run: ./scripts/docs-autofix-push.sh

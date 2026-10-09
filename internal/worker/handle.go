@@ -145,11 +145,16 @@ const (
 type MessageRequest struct {
 	Text     string         `json:"text"`
 	Delivery DeliveryIntent `json:"delivery,omitempty"`
+	// Resume says whether the turn may resume a held session (CONTRACT v5.9
+	// D8); the zero value queues it there.
+	Resume sessionpkg.ResumePolicy `json:"-"`
 }
 
 // MessageResult reports whether a worker turn was queued or delivered now.
 type MessageResult struct {
 	Queued bool `json:"queued"`
+	// Deferred: the resume policy queued it (session.SubmitOutcome.Deferred).
+	Deferred bool `json:"-"`
 }
 
 // CreateMode controls how a worker session should be materialized.
@@ -183,6 +188,9 @@ type NudgeRequest struct {
 	Delivery NudgeDelivery   `json:"delivery,omitempty"`
 	Source   string          `json:"source,omitempty"`
 	Wake     NudgeWakePolicy `json:"wake,omitempty"`
+	// Resume is the resume policy a nudge that may wake runs under; the zero
+	// value never consumes a hold (CONTRACT v5.9 D8).
+	Resume sessionpkg.ResumePolicy `json:"-"`
 }
 
 // NudgeResult reports whether the requested live delivery actually happened.
@@ -209,6 +217,13 @@ const (
 	// NudgeUndeliveredNoIdleBoundary means the provider CAN take live delivery
 	// but the session never reached the idle boundary within the wait window.
 	NudgeUndeliveredNoIdleBoundary NudgeUndeliveredReason = "no_idle_boundary"
+	// NudgeUndeliveredHeld means the session is held, which a nudge does not
+	// resume (CONTRACT v5.9 D8), and nothing queued the nudge: the caller
+	// must queue it (a wait-idle nudge).
+	NudgeUndeliveredHeld NudgeUndeliveredReason = "session_held"
+	// NudgeQueuedHeld means the session is held, or (ResumeViaController) not
+	// running, and queued the nudge itself; the caller must not queue it again.
+	NudgeQueuedHeld NudgeUndeliveredReason = "session_held_queued"
 )
 
 // NudgeWakePolicy controls whether a nudge may wake a stopped session.

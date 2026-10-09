@@ -559,7 +559,7 @@ func TestAgentOutputStreamStoppedAgentCommitsStatusHeader(t *testing.T) {
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), streamHeaderCommitTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+cityURL(state, "/agent/myrig/worker/output/stream"), nil)
 	if err != nil {

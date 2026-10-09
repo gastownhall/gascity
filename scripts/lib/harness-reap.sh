@@ -25,8 +25,11 @@
 
 # PID of the supervised run's process-group leader, published so a caller's
 # signal trap can tear the group down. Empty when no run is in flight.
-# shellcheck disable=SC2034  # read by the sourcing entrypoints' signal traps
 gc_harness_supervised_pgid=""
+
+# PID of the run's watchdog process-group leader, published for the same
+# reason. Empty when no run is in flight or the run has no watchdog.
+gc_harness_watchdog_pgid=""
 
 # gc_harness_duration_seconds converts a Go-style duration of the form
 # <n>[s|m|h] (a bare <n> is seconds) to whole seconds on stdout. It fails on
@@ -82,6 +85,26 @@ gc_harness_terminate_group() {
   gc_harness_signal_group "$pgid" KILL
 }
 
+# gc_harness_terminate_supervised ends the supervised run in flight, if any:
+# its watchdog first, then the run's own process group, drained as
+# gc_harness_terminate_group does with drain_ticks. This is the teardown a
+# caller's signal and EXIT traps run. Ending only the run's group is not
+# enough, because the watchdog lives in a group of its own: left behind, it
+# sleeps out its budget as an orphan holding the caller's descriptors, then
+# signals the run's process-group id, which by then the kernel may have
+# handed to an unrelated group (ga-880tzy).
+gc_harness_terminate_supervised() {
+  local drain_ticks="${1:-25}"
+  if [[ -n "${gc_harness_watchdog_pgid:-}" ]]; then
+    gc_harness_signal_group "$gc_harness_watchdog_pgid" KILL
+    # Reaped here, as on the normal path, so bash does not report the killed
+    # job in the run's log.
+    wait "$gc_harness_watchdog_pgid" 2>/dev/null || true
+    gc_harness_watchdog_pgid=""
+  fi
+  gc_harness_terminate_group "${gc_harness_supervised_pgid:-}" "$drain_ticks"
+}
+
 # gc_harness_watchdog kills process group pgid once fire_after seconds have
 # passed. SIGQUIT goes first on purpose: the Go runtime answers it by dumping
 # every goroutine's stack, which names the wedged test in the shard log. That
@@ -104,8 +127,8 @@ gc_harness_watchdog() {
 #   gc_harness_run_supervised <label> <deadline-seconds|""> <quit-grace> -- cmd...
 #
 # An empty deadline runs without a watchdog. The caller is expected to trap
-# INT/TERM/EXIT and call gc_harness_terminate_group "$gc_harness_supervised_pgid"
-# so a signal to the runner tears down the run rather than orphaning it.
+# INT/TERM/EXIT and call gc_harness_terminate_supervised so a signal to the
+# runner tears down the run and its watchdog rather than orphaning them.
 gc_harness_run_supervised() {
   local label="${1}" deadline="${2}" quit_grace="${3}"
   shift 3
@@ -140,7 +163,10 @@ gc_harness_run_supervised() {
   if [[ -n "$deadline" ]]; then
     set -m
     gc_harness_watchdog "$job_pgid" "$deadline" "$quit_grace" "$label" &
-    watchdog_pgid=$!
+    # Publish first: until this assignment runs, a trap cannot see the
+    # watchdog to end it.
+    gc_harness_watchdog_pgid=$!
+    watchdog_pgid="$gc_harness_watchdog_pgid"
     if (( monitor_was_on == 0 )); then
       set +m
     fi
@@ -153,6 +179,7 @@ gc_harness_run_supervised() {
     gc_harness_signal_group "$watchdog_pgid" KILL
     wait "$watchdog_pgid" 2>/dev/null || true
   fi
+  gc_harness_watchdog_pgid=""
   # The group leader can exit while a descendant it spawned is still running;
   # that descendant is the orphan this whole file exists to prevent.
   gc_harness_terminate_group "$job_pgid"

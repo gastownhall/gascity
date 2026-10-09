@@ -54,18 +54,21 @@ type poolSessionCreateIdentity struct {
 	// allocator mints it at plan time: it is the create's ledger marker.
 	InstanceToken string
 	// BeforeWrite, when set, runs just before the row write with the row ID
-	// the store pre-mints (empty when it mints none).
-	BeforeWrite func(rowID string)
+	// the store pre-mints (empty when it mints none); an error refuses the
+	// write, which then never happens.
+	BeforeWrite func(rowID string) error
 }
 
 // poolCreateWriteError marks a create error from the row write itself, or
 // from after it: the row may exist (rowID, when known, names it). The v2
 // create effect settles such an error as ambiguous, with its token as the
-// marker, so lag repair decides (C5.4). The message is the cause's, so legacy
-// output is unchanged.
+// marker, so a read started after the settle decides (C5.4(3)). landed marks
+// an error from a write after the row landed, which no refusal class can
+// unwrite. The message is the cause's, so legacy output is unchanged.
 type poolCreateWriteError struct {
-	err   error
-	rowID string
+	err    error
+	rowID  string
+	landed bool
 }
 
 func (e poolCreateWriteError) Error() string { return e.err.Error() }
@@ -173,6 +176,12 @@ func sessionBeadStoredTemplate(bead beads.Bead) string {
 
 // sessionBeadStoredTemplateInfo is the session.Info mirror of sessionBeadStoredTemplate.
 func sessionBeadStoredTemplateInfo(i sessionpkg.Info) string {
+	return storedTemplateRef(&i)
+}
+
+// storedTemplateRef is sessionBeadStoredTemplateInfo through a pointer, for
+// the v2 fresh-slot occupancy's every-row scan (A3).
+func storedTemplateRef(i *sessionpkg.Info) string {
 	storedTemplate := strings.TrimSpace(i.Template)
 	if storedTemplate != "" {
 		return storedTemplate
@@ -400,7 +409,9 @@ func createPoolSessionBeadWithIdentifiers(
 		meta[sessionpkg.CanonicalPoolSlotMetadata] = strconv.Itoa(identity.Slot)
 	}
 	if identity.BeforeWrite != nil {
-		identity.BeforeWrite(explicitID)
+		if err := identity.BeforeWrite(explicitID); err != nil {
+			return sessionpkg.Info{}, err
+		}
 	}
 	// CreateSessionInfo projects the just-created bead (no post-create store.Get).
 	// The session_name is already final in meta, so there is no second write.
@@ -418,8 +429,8 @@ func createPoolSessionBeadWithIdentifiers(
 			if err := sessionFrontDoor(store).SetMarker(info.ID, "session_name", want); err != nil {
 				// Nothing was started under the placeholder; closing as
 				// failed_create releases the identity lease for the next tick.
-				closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, io.Discard)
-				return sessionpkg.Info{}, poolCreateWriteError{err: err, rowID: info.ID}
+				closeFailedCreateBead(sessionFrontDoor(store), info, now, io.Discard)
+				return sessionpkg.Info{}, poolCreateWriteError{err: err, rowID: info.ID, landed: true}
 			}
 			info = info.ApplyPatch(sessionpkg.MetadataPatch{"session_name": want})
 		}
@@ -771,15 +782,7 @@ func sessionBeadAgentName(bead beads.Bead) string {
 // sessionBeadAgentNameInfo is the session.Info mirror of sessionBeadAgentName:
 // agent_name metadata (untrimmed), then the agent:<name> label fallback.
 func sessionBeadAgentNameInfo(i sessionpkg.Info) string {
-	if i.AgentName != "" {
-		return i.AgentName
-	}
-	for _, label := range i.Labels {
-		if strings.HasPrefix(label, "agent:") {
-			return strings.TrimPrefix(label, "agent:")
-		}
-	}
-	return ""
+	return sessionpkg.AgentNameInfo(i)
 }
 
 // sessionAgentMetricIdentity resolves the stable agent-identity label for the

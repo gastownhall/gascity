@@ -161,6 +161,7 @@ type StatusBody struct {
 	Version             string                     `json:"version,omitempty" doc:"Server version."`
 	UptimeSec           int                        `json:"uptime_sec" doc:"Server uptime in seconds."`
 	Suspended           bool                       `json:"suspended" doc:"Whether the city is suspended."`
+	StoresNotRead       bool                       `json:"stores_not_read,omitempty" doc:"True when the city is suspended: the body was built without reading any bead store (a read would restart its retired bd proxy), so work, mail, session-count and store-health figures are absent."`
 	AgentCount          int                        `json:"agent_count" doc:"Total agent count (deprecated, use agents.total)."`
 	RigCount            int                        `json:"rig_count" doc:"Total rig count (deprecated, use rigs.total)."`
 	Running             int                        `json:"running" doc:"Number of running agent processes."`

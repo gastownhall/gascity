@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
-
-	"github.com/gastownhall/gascity/internal/testpolicy/waiverclock"
 )
 
 func TestScanAttributesResourcesToExactRunnableOwners(t *testing.T) {
@@ -289,7 +287,7 @@ func TestValidateUsesRawAuditAndExactMediumFilteredSmallDebt(t *testing.T) {
 		Medium:        []MediumOwner{medium},
 		SmallDebt:     []Baseline{validDebt(ScopeUntagged, ResourceSubprocess, 1, 1)},
 	}
-	if _, err := validateAgainstPolicy(policy, cloneLedger(policy), census, fixedNow(), waiverclock.ModeStrict); err != nil {
+	if err := validateAgainstPolicy(policy, cloneLedger(policy), census); err != nil {
 		t.Fatalf("validateAgainstPolicy: %v", err)
 	}
 
@@ -297,7 +295,7 @@ func TestValidateUsesRawAuditAndExactMediumFilteredSmallDebt(t *testing.T) {
 		grown := cloneLedger(policy)
 		grown.AuditBaseline[0].BaselineCalls = 1
 		grown.AuditBaseline[0].BaselineFiles = 1
-		_, err := validateAgainstPolicy(grown, cloneLedger(grown), census, fixedNow(), waiverclock.ModeStrict)
+		err := validateAgainstPolicy(grown, cloneLedger(grown), census)
 		requireErrorContains(t, err, "source resource census grew: scope=all resource=subprocess calls=2 (baseline 1), files=2 (baseline 1)")
 	})
 
@@ -305,7 +303,7 @@ func TestValidateUsesRawAuditAndExactMediumFilteredSmallDebt(t *testing.T) {
 		grown := cloneLedger(policy)
 		grown.SmallDebt[0].BaselineCalls = 0
 		grown.SmallDebt[0].BaselineFiles = 0
-		_, err := validateAgainstPolicy(grown, cloneLedger(grown), census, fixedNow(), waiverclock.ModeStrict)
+		err := validateAgainstPolicy(grown, cloneLedger(grown), census)
 		requireErrorContains(t, err, "Small resource census grew: scope=untagged resource=subprocess calls=1 (baseline 0), files=1 (baseline 0)")
 	})
 
@@ -313,7 +311,7 @@ func TestValidateUsesRawAuditAndExactMediumFilteredSmallDebt(t *testing.T) {
 		stale := cloneLedger(policy)
 		stale.SmallDebt[0].BaselineCalls = 2
 		stale.SmallDebt[0].BaselineFiles = 2
-		_, err := validateAgainstPolicy(stale, cloneLedger(stale), census, fixedNow(), waiverclock.ModeStrict)
+		err := validateAgainstPolicy(stale, cloneLedger(stale), census)
 		requireErrorContains(t, err, "Small resource census baseline is stale: scope=untagged resource=subprocess calls=1 (baseline 2), files=1 (baseline 2); lower the checked baseline to bank the improvement")
 	})
 }
@@ -383,7 +381,7 @@ func TestValidateRejectsMediumPolicyDriftBeforeLiveCensus(t *testing.T) {
 			t.Parallel()
 			ledger := cloneLedger(policy)
 			tt.mutate(&ledger.Medium[0])
-			_, err := validateAgainstPolicy(policy, ledger, census, fixedNow(), waiverclock.ModeStrict)
+			err := validateAgainstPolicy(policy, ledger, census)
 			requireErrorContains(t, err, tt.want)
 			if strings.Contains(err.Error(), "resource census") {
 				t.Fatalf("live census was compared before Medium policy drift was rejected: %v", err)
@@ -443,7 +441,7 @@ func TestValidateRequiresExactMediumAndSmallDebtRowSets(t *testing.T) {
 			t.Parallel()
 			ledger := cloneLedger(policy)
 			tt.mutate(&ledger)
-			_, err := validateAgainstPolicy(policy, ledger, census, fixedNow(), waiverclock.ModeStrict)
+			err := validateAgainstPolicy(policy, ledger, census)
 			requireErrorContains(t, err, tt.want)
 			if strings.Contains(err.Error(), "resource census") {
 				t.Fatalf("live census was compared before row-set drift was rejected: %v", err)

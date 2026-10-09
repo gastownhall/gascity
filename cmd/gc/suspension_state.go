@@ -72,6 +72,9 @@ func isRigSuspendedInState(st suspensionstate.State, name string) bool {
 // files with `suspended = true` continue to start rigs suspended.
 func buildEffectiveSuspendedRigNames(cfg *config.City, st suspensionstate.State) map[string]bool {
 	names := make(map[string]bool)
+	if cfg == nil {
+		return names
+	}
 	for i := range cfg.Rigs {
 		r := &cfg.Rigs[i]
 		if suspensionstate.EffectiveRigSuspended(st, r.Name, r.EffectiveSuspendedOnStart()) {

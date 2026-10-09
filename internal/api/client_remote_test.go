@@ -225,6 +225,24 @@ func TestRemoteTLSConfig(t *testing.T) {
 	})
 }
 
+// TestNewRemoteHTTPClientsDoNotShareTLSConfig guards a data race: each
+// http.Transport writes NextProtos into its TLSClientConfig on first use while
+// a sibling transport sharing that config clones it to dial.
+func TestNewRemoteHTTPClientsDoNotShareTLSConfig(t *testing.T) {
+	rest, stream, err := newRemoteHTTPClients(RemoteOptions{TLSServerName: "box"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restTLS := rest.Transport.(*http.Transport).TLSClientConfig
+	streamTLS := stream.Transport.(*http.Transport).TLSClientConfig
+	if restTLS == streamTLS {
+		t.Fatal("REST and stream transports share one *tls.Config")
+	}
+	if restTLS.ServerName != "box" || streamTLS.ServerName != "box" {
+		t.Errorf("ServerName = %q/%q, want box/box", restTLS.ServerName, streamTLS.ServerName)
+	}
+}
+
 func TestRemoteAuthEditor(t *testing.T) {
 	t.Run("attaches bearer", func(t *testing.T) {
 		c := &Client{tokenSource: func() (string, error) { return "tok123", nil }}

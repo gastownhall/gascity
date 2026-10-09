@@ -361,6 +361,36 @@ func TestExecutePlannedStarts_HalfOpenAdmitsExactlyOneProbe(t *testing.T) {
 	}
 }
 
+// TestExecutePlannedStarts_ProbePassAdmitsNoHerd pins that a pass which
+// admitted an endpoint's probe admits nothing else on that endpoint, even
+// when the probe resolves before the pass reaches its later batches. A herd
+// let in mid-pass is cut short by its own first refusal, so it can be one
+// session refused alone after the probe's success, which is the poison valve's
+// signature for a broken template.
+func TestExecutePlannedStarts_ProbePassAdmitsNoHerd(t *testing.T) {
+	names := []string{"s1", "s2", "s3", "s4", "s5", "s6"}
+	e := newCapacityEnv(t, true, names...)
+	var cands []startCandidate
+	for _, n := range names {
+		cands = append(cands, e.pendingCreate(t, n, "e", nil))
+	}
+	e.openEndpoint(t)
+	e.makeProbeDue()
+
+	e.start(context.Background(), cands...)
+
+	starts := 0
+	for _, c := range cands {
+		starts += e.sp.CountCalls("Start", c.name())
+	}
+	if starts != 1 {
+		t.Fatalf("Start calls in the probe's pass = %d, want only the probe", starts)
+	}
+	if st := e.breakerStatus(capacityTestEndpoint); st.State != resilience.StateClosed {
+		t.Fatalf("breaker = %v after a successful probe, want closed", st.State)
+	}
+}
+
 func TestExecutePlannedStarts_ProbeRotatesAmongRefusedSessions(t *testing.T) {
 	e := newCapacityEnv(t, true, "s1", "s2")
 	e.limitToOneWake()
@@ -759,6 +789,31 @@ func TestCommitStartResult_CapacityValveReturnsSessionToLegacyAfterPeerSuccesses
 				t.Fatalf("valve tripped on round %d for a template refused only as part of the herd", i+1)
 			}
 			refuseAt(t, e, "other", "other")
+		}
+	})
+
+	t.Run("herd resolution order never counts", func(t *testing.T) {
+		// Each close admits a herd of "s" and one other template, all while
+		// closed. Their concurrent starts resolve in arbitrary order, so "s"
+		// can be refused last in one herd and first in the next, with no
+		// other refusal in between. Its peers were refused in both herds.
+		e := newCapacityEnv(t, true)
+		for i := 0; i < 2*capacityValveThreshold+2; i++ {
+			peerSuccess(t, e) // the probe closes the endpoint
+			other := fmt.Sprintf("other-%d", i)
+			s, ok := e.guard.Admit(capacityTestEndpoint, "s", "s")
+			o, ok2 := e.guard.Admit(capacityTestEndpoint, other, other)
+			if !ok || !ok2 || s.probe || o.probe {
+				t.Fatalf("round %d: herd not admitted while closed", i+1)
+			}
+			first, second := o, s
+			if i%2 == 1 {
+				first, second = s, o
+			}
+			if first.Resolve(verdictCapacity) || second.Resolve(verdictCapacity) {
+				t.Fatalf("valve tripped on round %d for a template refused only as part of a herd", i+1)
+			}
+			e.makeProbeDue()
 		}
 	})
 
@@ -1228,7 +1283,7 @@ func TestAsyncStart_CapacityRefusalDefersDriftRollback(t *testing.T) {
 func TestCommitStartResult_ConvergedResultIgnoresCapacityArm(t *testing.T) {
 	e := newCapacityEnv(t, true, "s")
 	c := e.pendingCreate(t, "s", "e", nil)
-	prepared, err := prepareStartCandidateForCity(c, "", "", e.cfg, e.sp, e.store, e.clk, &e.log, nil)
+	prepared, err := prepareStartCandidateForCity(c, "", "", e.cfg, e.sp, e.store, e.clk, &e.log, nil, dispatchOptionSources{})
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}

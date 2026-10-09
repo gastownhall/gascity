@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -275,6 +277,28 @@ func (bp *agentBuildParams) releasePoolSessionCreate() {
 	bp.poolSessionCreateBudget.Release()
 }
 
+// recoverLeg turns a panic in one demand-pass goroutine into that leg's error
+// and writes the stack to stderr. safeTick recovers only the tick goroutine,
+// and recover works only on the goroutine that panicked, so without this a
+// panic inside one leg's store read killed the controller (mc-zndi7.40). The
+// leg then reads as failed and the pass's existing partial rules apply. Defer
+// it right after wg.Done, so it runs before Done and the error is written
+// before Wait returns.
+func recoverLeg(dst *error, label string, stderr io.Writer) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	*dst = fmt.Errorf("%s panicked: %v", label, r)
+	// Sibling legs share the pass's stderr, which nothing else writes while
+	// they run (each fold prints after Wait), so serializing here is enough.
+	recoverLegMu.Lock()
+	defer recoverLegMu.Unlock()
+	fmt.Fprintf(stderr, "buildDesiredState: %s panicked: %v\n%s", label, r, debug.Stack()) //nolint:errcheck
+}
+
+var recoverLegMu sync.Mutex
+
 func evaluatePendingPools(
 	cfg *config.City,
 	pendingPools []poolEvalWork,
@@ -304,6 +328,7 @@ func evaluatePendingPools(
 		newDemand := pw.newDemand
 		go func(idx int, template, agentName string, agentIndex int, sp scaleParams, dir string, newDemand bool) {
 			defer wg.Done()
+			defer recoverLeg(&evalResults[idx].err, "scale_check "+template, stderr)
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			started := time.Now()
@@ -496,6 +521,7 @@ func buildDesiredStateWithSessionBeadsAt(
 	}
 
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, beaconTime, store, stderr)
+	bp.decisionTime = poolDecisionTime.UTC()
 	bp.sessionBeads = sessionBeads
 	bp.sessionSnapshotCompletenessKnown = true
 	bp.sessionSnapshotComplete = store == nil || (sessionBeads != nil && sessionBeads.LoadError() == nil)
@@ -649,18 +675,26 @@ func buildDesiredStateWithSessionBeadsAt(
 		// an explicit-handle CachingStore returns its memoized pre-write live
 		// snapshot as the authoritative demand read.
 		demandReadyCache := newTracedReadyDemandCache(pass, demandReadPointDemand)
-		controlDispatcherOpenDemand := openControlDispatcherDemand(cfg, unassignedRoutedBeads)
 		recordDemandSubPhase(trace, "demand_snapshot.collect_unassigned_routed", subPhaseStart, map[string]any{
 			"beads": len(unassignedRoutedBeads),
 		})
+		collected := collectedDemand{
+			UnassignedRouted:        unassignedRoutedBeads,
+			UnassignedRoutedRefs:    unassignedRoutedStoreRefs,
+			UnassignedRoutedPartial: unassignedRoutedPartial,
+			ColdWakeTemplates:       targets.coldWakeTemplates,
+			NamedOnDemandTemplates:  targets.namedOnDemandTemplates,
+		}
 		subPhaseStart = trace.demandNow()
-		scaleCheckCounts, poolScaleCheckPartialTemplates = evaluatePendingPoolsMap(cfg, targets.pendingPools, stderr, trace)
+		collected.CustomCounts, collected.CustomPartials = evaluatePendingPoolsMap(cfg, targets.pendingPools, stderr, trace)
 		recordDemandSubPhase(trace, "demand_snapshot.evaluate_pending_pools", subPhaseStart, map[string]any{
 			"pools": len(targets.pendingPools),
 		})
 		if len(targets.defaultScaleTargets) > 0 {
 			subPhaseStart = trace.demandNow()
-			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(cfg, targets.defaultScaleTargets, demandReadyCache)
+			var errs []error
+			collected.DefaultProbed = true
+			collected.DefaultCounts, collected.DefaultDemand, collected.DefaultPartials, errs = defaultScaleCheckCountsAndDemand(cfg, targets.defaultScaleTargets, demandReadyCache)
 			recordDemandSubPhase(trace, "demand_snapshot.default_scale_demand", subPhaseStart, map[string]any{
 				"targets": len(targets.defaultScaleTargets),
 			})
@@ -671,72 +705,25 @@ func buildDesiredStateWithSessionBeadsAt(
 				// necessarily zero.
 				fmt.Fprintf(stderr, "buildDesiredState: %v (counts above may be a partial of one demand source)\n", err) //nolint:errcheck
 			}
-			poolScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(poolScaleCheckPartialTemplates, partialTemplates)
-			if scaleCheckCounts == nil {
-				scaleCheckCounts = make(map[string]int)
-			}
-			if scaleCheckDemandByTemplate == nil {
-				scaleCheckDemandByTemplate = make(map[string]scaleCheckDemand)
-			}
-			for template, count := range defaultCounts {
-				// A cold-pool wake probe only wakes the pool from zero; clamp its
-				// contribution to 1 so it never overrides a custom scale_check's
-				// authoritative count for the same template.
-				if targets.coldWakeTemplates[template] && count > 1 {
-					count = 1
-				}
-				// An on_demand named-session backing template is a singleton: one pool
-				// slot is enough to drain N queued routed tasks sequentially. Clamp to
-				// 1 so N unassigned gc.routed_to beads do not spawn {name}-N phantoms.
-				if targets.namedOnDemandTemplates[template] && count > 1 {
-					count = 1
-				}
-				if count > scaleCheckCounts[template] {
-					scaleCheckCounts[template] = count
-				}
-				scaleCheckDemandByTemplate[template] = mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], defaultDemand[template], count)
-			}
 		}
-		poolPartialRetentionTemplates = mergeScaleCheckPartialTemplates(poolPartialRetentionTemplates, poolScaleCheckPartialTemplates)
-		if len(controlDispatcherOpenDemand) > 0 {
-			if scaleCheckCounts == nil {
-				scaleCheckCounts = make(map[string]int)
-			}
-			for template, hasDemand := range controlDispatcherOpenDemand {
-				if hasDemand && scaleCheckCounts[template] < 1 {
-					scaleCheckCounts[template] = 1
-				}
-			}
-		}
-		if unassignedRoutedPartial {
-			// The unassigned-routed live read failed, so controlDispatcherOpenDemand
-			// above is a partial (possibly empty) view — not proof of zero demand.
-			// Mark every deterministic control-dispatcher template for retention so
-			// a running dispatcher survives this tick. This is intentionally not a
-			// create-suppression marker: another healthy store may have proved real
-			// control demand that justifies starting a cold dispatcher (gc-ft31x.2).
-			poolPartialRetentionTemplates = markControlDispatcherTemplatesPartial(cfg, poolPartialRetentionTemplates)
-		}
-		readyUnassignedRoutedWorkBeads, readyUnassignedRoutedWorkStoreRefs = selectReadyUnassignedRoutedWork(
-			unassignedRoutedBeads,
-			unassignedRoutedStoreRefs,
-			scaleCheckDemandByTemplate,
-		)
 		if len(targets.defaultNamedScaleTargets) > 0 {
 			var namedErrs []error
-			var partialTemplates map[string]bool
 			subPhaseStart = trace.demandNow()
-			namedDefaultDemand, partialTemplates, namedErrs = defaultNamedSessionDemand(targets.defaultNamedScaleTargets, cfg, cityName, demandReadyCache)
+			namedDefaultDemand, collected.NamedPartials, namedErrs = defaultNamedSessionDemand(targets.defaultNamedScaleTargets, cfg, cityName, demandReadyCache)
 			recordDemandSubPhase(trace, "demand_snapshot.named_session_demand", subPhaseStart, map[string]any{
 				"targets": len(targets.defaultNamedScaleTargets),
 			})
 			for _, err := range namedErrs {
 				fmt.Fprintf(stderr, "buildDesiredState: %v (using named demand=false)\n", err) //nolint:errcheck
 			}
-			namedScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(namedScaleCheckPartialTemplates, partialTemplates)
 		}
-		scaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(scaleCheckPartialTemplates, poolPartialRetentionTemplates)
-		scaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(scaleCheckPartialTemplates, namedScaleCheckPartialTemplates)
+		merged := mergeCollectedDemand(cfg, collected)
+		scaleCheckCounts, scaleCheckDemandByTemplate = merged.ScaleCheckCounts, merged.ScaleCheckDemand
+		poolScaleCheckPartialTemplates = merged.PoolScaleCheckPartial
+		poolPartialRetentionTemplates = merged.PoolPartialRetention
+		namedScaleCheckPartialTemplates = merged.NamedScaleCheckPartial
+		scaleCheckPartialTemplates = merged.ScaleCheckPartial
+		readyUnassignedRoutedWorkBeads, readyUnassignedRoutedWorkStoreRefs = merged.ReadyUnassignedRouted, merged.ReadyUnassignedRoutedRefs
 		if len(scaleCheckPartialTemplates) > 0 {
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
 		}
@@ -843,19 +830,7 @@ func buildDesiredStateWithSessionBeadsAt(
 			fmt.Fprintf(stderr, "buildDesiredState: named session %q: %v (skipping)\n", identity, err) //nolint:errcheck
 			continue
 		}
-		tp.Alias = identity
-		tp.TemplateName = namedSessionBackingTemplate(spec)
-		tp.InstanceName = identity
-		tp.ConfiguredNamedIdentity = identity
-		tp.ConfiguredNamedMode = spec.Mode
-		tp.BoundStepID = named.workBeadID[identity]
-		if tp.Env == nil {
-			tp.Env = make(map[string]string)
-		}
-		tp.Env["GC_TEMPLATE"] = namedSessionBackingTemplate(spec)
-		tp.Env["GC_ALIAS"] = identity
-		tp.Env["GC_AGENT"] = identity
-		tp.Env["GC_SESSION_ORIGIN"] = "named"
+		applyNamedTemplateOverrides(&tp, spec, identity, named.workBeadID[identity])
 		// When a canonical bead exists, use ITS session_name as the
 		// desiredState key so syncSessionBeads finds it in bySessionName
 		// and takes the UPDATE path. Without this, resolveSessionName
@@ -965,6 +940,26 @@ func computeNamedSessionDemand(
 	scaleCheckCounts map[string]int,
 	stderr io.Writer,
 ) namedSessionDemand {
+	claimRefs := func() []string { return assignedWorkRelocatedClaimRefs(cityPath, cfg, store) }
+	return computeNamedSessionDemandOn(cityName, cityPath, cfg, claimRefs, suspendedRigPaths, namedDefaultDemand, assignedWorkBeads, assignedWorkStoreRefs, readyAssigned, scaleCheckCounts, stderr)
+}
+
+// computeNamedSessionDemandOn is computeNamedSessionDemand with the claim-ref
+// lookup supplied: claimRefs runs only when there is work to match and a named
+// spec to match it, as before. The v2 allocator passes refs it resolved
+// outside its pure pass.
+func computeNamedSessionDemandOn(
+	cityName, cityPath string,
+	cfg *config.City,
+	claimRefs func() []string,
+	suspendedRigPaths map[string]bool,
+	namedDefaultDemand map[string]bool,
+	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
+	readyAssigned map[storeScopedBeadKey]bool,
+	scaleCheckCounts map[string]int,
+	stderr io.Writer,
+) namedSessionDemand {
 	namedSpecs := make(map[string]namedSessionSpec)
 	for i := range cfg.NamedSessions {
 		identity := cfg.NamedSessions[i].QualifiedName()
@@ -1008,7 +1003,7 @@ func computeNamedSessionDemand(
 	// rig gate where the base rig-equality test is all that is correct.
 	var namedClaimRefs []string
 	if len(assignedWorkBeads) > 0 && len(namedSpecs) > 0 {
-		namedClaimRefs = assignedWorkRelocatedClaimRefs(cityPath, cfg, store)
+		namedClaimRefs = claimRefs()
 	}
 	for identity, spec := range namedSpecs {
 		for i, wb := range assignedWorkBeads {
@@ -1133,7 +1128,51 @@ func buildDemandTargets(
 		store beads.Store
 		ref   string
 	}
-	activeStores := []activeStore{{store: store, ref: "city"}}
+	// cityLegs is every store a city-scope route's default probe reads past the
+	// leading handle: on a split, the work ledger AND the binding in
+	// Plan(RoutedWork) order — the legs `gc ready` serves a seat from (#6019).
+	// nil on a city that relocates nothing, which keeps its one leading target
+	// and gains no read. All of them count under the "city" key, the scope a
+	// class binding already normalizes onto.
+	//
+	// An unplannable topology (a refused city) still reads the leading handle,
+	// but the plan error rides on every city target: the count is not
+	// authoritative, so each such template is reported partial (retain, don't
+	// drain) and the error reaches the demand pass's error list instead of
+	// being dropped here.
+	var cityLegs []classStoreCandidate
+	var cityLegsErr error
+	if store != nil {
+		legs, err := routedWorkCityDemandLegs(cityPath, cfg, store, rigStores, suspendedRigPaths)
+		if err != nil {
+			cityLegsErr = fmt.Errorf("default scale_check: resolving routed-work city legs: %w", err)
+		} else {
+			cityLegs = legs
+		}
+	}
+	cityTargets := func(template string) []defaultScaleCheckTarget {
+		if len(cityLegs) == 0 {
+			return []defaultScaleCheckTarget{{template: template, store: store, storeKey: "city", err: cityLegsErr}}
+		}
+		out := make([]defaultScaleCheckTarget, 0, len(cityLegs))
+		for _, leg := range cityLegs {
+			out = append(out, defaultScaleCheckTarget{template: template, store: leg.store, storeKey: "city"})
+		}
+		return out
+	}
+	// ownTargets expands a pool's own target onto the city legs when it is the
+	// city-scope default; a rig target and a store-scoped control dispatcher's
+	// target (ownScaleCheckTarget) stay the one store they name.
+	ownTargets := func(own defaultScaleCheckTarget, storeScopedControlDispatcher bool) []defaultScaleCheckTarget {
+		if storeScopedControlDispatcher || own.storeKey != "city" || own.store != store || own.err != nil {
+			return []defaultScaleCheckTarget{own}
+		}
+		return cityTargets(own.template)
+	}
+	var activeStores []activeStore
+	for _, target := range cityTargets("") {
+		activeStores = append(activeStores, activeStore{store: target.store, ref: target.storeKey})
+	}
 	for _, rig := range cfg.Rigs {
 		if suspendedRigPaths[filepath.Clean(rig.Path)] {
 			continue
@@ -1236,11 +1275,12 @@ func buildDemandTargets(
 				// singleton (namedWorkReady covers only direct Assignee beads, not
 				// gc.routed_to). Leave defaultNamedScaleTargets unchanged for both modes
 				// (partial-query retention).
+				own := ownTargets(ownTarget, storeScopedControlDispatcher)
 				if namedSessionMode != "always" {
-					defaultScaleTargets = append(defaultScaleTargets, ownTarget)
+					defaultScaleTargets = append(defaultScaleTargets, own...)
 					namedOnDemandTemplates[template] = true
 				}
-				defaultNamedScaleTargets = append(defaultNamedScaleTargets, ownTarget)
+				defaultNamedScaleTargets = append(defaultNamedScaleTargets, own...)
 				// Cross-store demand for named-backing pools (vp-cl4): mirror the
 				// generic-pool guard (vp-s37 / #3078 below). A rig pool that backs
 				// a named session and has no custom scale_check must also probe
@@ -1255,11 +1295,11 @@ func buildDemandTargets(
 				// city-aliased, not city-scoped. The named-session target list
 				// mirrors these probes only for partial-query retention bookkeeping.
 				if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
-					cityTarget := defaultScaleCheckTarget{template: template, store: store, storeKey: "city"}
+					city := cityTargets(template)
 					if namedSessionMode != "always" {
-						defaultScaleTargets = append(defaultScaleTargets, cityTarget)
+						defaultScaleTargets = append(defaultScaleTargets, city...)
 					}
-					defaultNamedScaleTargets = append(defaultNamedScaleTargets, cityTarget)
+					defaultNamedScaleTargets = append(defaultNamedScaleTargets, city...)
 				}
 				continue
 			}
@@ -1306,7 +1346,7 @@ func buildDemandTargets(
 		poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
 		if store != nil && !hasCustomScaleCheck {
 			ownTarget := ownScaleCheckTarget(cityPath, cfg, &cfg.Agents[i], store, rigStores, controlBinding, storeScopedControlDispatcher)
-			defaultScaleTargets = append(defaultScaleTargets, ownTarget)
+			defaultScaleTargets = append(defaultScaleTargets, ownTargets(ownTarget, storeScopedControlDispatcher)...)
 			// Cross-store demand (FR-S0.1 / vp-s37): a rig pool's routed demand
 			// may live in the city store (vp-kvp cross-store delivery), which
 			// the own-rig probe above cannot see. Add a city-store probe so the
@@ -1359,7 +1399,7 @@ func buildDemandTargets(
 			// claim a route from the city store. Keep their cold-wake probe on the
 			// owning store instead of applying generic cross-store pool delivery.
 			if !storeScopedControlDispatcher && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
-				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: store, storeKey: "city"})
+				defaultScaleTargets = append(defaultScaleTargets, cityTargets(template)...)
 			}
 			continue
 		}
@@ -1501,6 +1541,8 @@ func collectOpenSessionInfos(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			results[idx].ref = source.ref
+			defer recoverLeg(&results[idx].err, "session census leg "+label, log.Writer())
 			// Per-leg default direct union (session front door over the candidate's
 			// store, CachingStore-wrapped when available) — same tier as the prior
 			// raw ListAllSessionBeads, projected to Info. Partial-result rows are
@@ -1627,6 +1669,7 @@ func refreshDesiredStateWithSessionBeads(
 	}
 
 	bp := newAgentBuildParams(cityName, cityPath, cfg, sp, result.BeaconTime, store, stderr)
+	bp.decisionTime = time.Now().UTC()
 	bp.sessionBeads = sessionBeads
 	bp.sessionSnapshotCompletenessKnown = true
 	bp.sessionSnapshotComplete = false
@@ -1725,6 +1768,13 @@ func collectAssignedWorkBeadsWithStores(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			var panicked error
+			defer func() {
+				if panicked != nil {
+					results[idx] = storeAssignedWorkResult{ref: source.ref, errs: []error{panicked}}
+				}
+			}()
+			defer recoverLeg(&panicked, "assigned work leg "+label, log.Writer())
 			var result []beads.Bead
 			var resultStores []beads.Store
 			var resultStoreRefs []string
@@ -1848,6 +1898,13 @@ func collectAssignedWorkBeadsWithStores(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			var panicked error
+			defer func() {
+				if panicked != nil {
+					readyResults[idx] = storeAssignedWorkResult{ref: source.ref, errs: []error{panicked}}
+				}
+			}()
+			defer recoverLeg(&panicked, "assigned work ready leg "+label, log.Writer())
 			var ready []beads.Bead
 			var err error
 			var errs []error
@@ -2157,8 +2214,23 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		store     beads.Store
 		storeKey  string
 		templates map[string]struct{}
+		// byTemplate is the group's ready rows bucketed by the template each one
+		// is servable to, in the store's own order.
+		byTemplate map[string][]beads.Bead
 	}
-	groups := make(map[string]*scaleStoreGroup)
+	// A group is one (key, store) pair: on a split city the work ledger and the
+	// binding both count under "city", and they are two stores to read, not one.
+	type scaleStoreGroupKey struct {
+		key   string
+		store beads.Store
+	}
+	groups := make(map[scaleStoreGroupKey]*scaleStoreGroup)
+	var groupOrder []*scaleStoreGroup
+	// templateGroups is each template's groups in the order its targets name
+	// them — the leg order — so the per-template dedup below is first-leg-wins,
+	// as on the claim side, rather than map-iteration order.
+	templateGroups := make(map[string][]*scaleStoreGroup)
+	var templateOrder []string
 	var errs []error
 	var partialTemplates map[string]bool
 	for _, target := range targets {
@@ -2182,15 +2254,26 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		if key == "" {
 			key = fmt.Sprintf("%p", target.store)
 		}
-		group := groups[key]
+		gk := scaleStoreGroupKey{key: key, store: target.store}
+		group := groups[gk]
 		if group == nil {
 			group = &scaleStoreGroup{store: target.store, storeKey: key, templates: make(map[string]struct{})}
-			groups[key] = group
+			groups[gk] = group
+			groupOrder = append(groupOrder, group)
 		}
-		group.templates[template] = struct{}{}
+		if _, seen := group.templates[template]; !seen {
+			group.templates[template] = struct{}{}
+			if _, known := templateGroups[template]; !known {
+				templateOrder = append(templateOrder, template)
+			}
+			templateGroups[template] = append(templateGroups[template], group)
+		}
 	}
 
-	// countedBeads dedups counted bead IDs per template ACROSS store groups.
+	// The counting pass dedups bead IDs per template ACROSS store groups,
+	// first group in the template's leg order wins. On a split city the work
+	// ledger and the binding are both city legs, and a migrated row co-resident
+	// in both resolves to the ledger's copy — as it does for `gc ready`.
 	// Bead IDs are unique within a deployment, so a legitimate cross-store
 	// union never collides — but when a rig store aliases the city store as a
 	// distinct Store object (pointer inequality passes: a legacy unscoped
@@ -2199,8 +2282,8 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 	// and "city" groups and would double the template's demand. With the city
 	// probe no longer cold-gated, that double-count would be a persistent
 	// warm condition rather than a one-tick wake overshoot, so dedup by ID.
-	countedBeads := make(map[string]map[string]struct{})
-	for key, group := range groups {
+	for _, group := range groupOrder {
+		key := group.storeKey
 		// Ready()/CachedReady() iteration surfaces actionable work
 		// matched against gc.routed_to/gc.run_target. Formula orders that
 		// should wake pools must create an actionable root, such as a
@@ -2223,61 +2306,179 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			if !servable {
 				continue
 			}
-			seen := countedBeads[template]
-			if seen == nil {
-				seen = make(map[string]struct{})
-				countedBeads[template] = seen
+			if group.byTemplate == nil {
+				group.byTemplate = make(map[string][]beads.Bead)
 			}
-			if _, dup := seen[b.ID]; dup {
-				continue
-			}
-			seen[b.ID] = struct{}{}
-			counts[template]++
-			entry := demand[template]
-			entry.Count++
-			entry.WorkBeadIDs = append(entry.WorkBeadIDs, b.ID)
-			if entry.Titles == nil {
-				entry.Titles = make(map[string]string)
-			}
-			entry.Titles[b.ID] = b.Title
-			if pack := strings.TrimSpace(b.Metadata[beadmeta.PackMetadataKey]); pack != "" {
-				if entry.Packs == nil {
-					entry.Packs = make(map[string]string)
+			group.byTemplate[template] = append(group.byTemplate[template], b)
+		}
+	}
+	for _, template := range templateOrder {
+		seen := make(map[string]struct{})
+		for _, group := range templateGroups[template] {
+			for _, b := range group.byTemplate[template] {
+				if _, dup := seen[b.ID]; dup {
+					continue
 				}
-				entry.Packs[b.ID] = pack
-			}
-			if workspace := strings.TrimSpace(b.Metadata[beadmeta.PackWorkspaceMetadataKey]); workspace != "" {
-				if entry.Workspaces == nil {
-					entry.Workspaces = make(map[string]string)
+				seen[b.ID] = struct{}{}
+				counts[template]++
+				entry := demand[template]
+				entry.Count++
+				entry.WorkBeadIDs = append(entry.WorkBeadIDs, b.ID)
+				if entry.Titles == nil {
+					entry.Titles = make(map[string]string)
 				}
-				entry.Workspaces[b.ID] = workspace
-			}
-			if entry.StoreRefs == nil {
-				entry.StoreRefs = make(map[string]string)
-			}
-			entry.StoreRefs[b.ID] = group.storeKey
-			spec, specErr := worktreeSpecForBead(b, group.storeKey)
-			if specErr != nil {
-				if entry.WorktreeErrors == nil {
-					entry.WorktreeErrors = make(map[string]string)
+				entry.Titles[b.ID] = b.Title
+				if pack := strings.TrimSpace(b.Metadata[beadmeta.PackMetadataKey]); pack != "" {
+					if entry.Packs == nil {
+						entry.Packs = make(map[string]string)
+					}
+					entry.Packs[b.ID] = pack
 				}
-				entry.WorktreeErrors[b.ID] = specErr.Error()
-			} else if spec != nil {
-				if entry.WorktreeSpecs == nil {
-					entry.WorktreeSpecs = make(map[string]*worktree.Spec)
+				if workspace := strings.TrimSpace(b.Metadata[beadmeta.PackWorkspaceMetadataKey]); workspace != "" {
+					if entry.Workspaces == nil {
+						entry.Workspaces = make(map[string]string)
+					}
+					entry.Workspaces[b.ID] = workspace
 				}
-				entry.WorktreeSpecs[b.ID] = spec
-			}
-			if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
-				if entry.ParentSIDs == nil {
-					entry.ParentSIDs = make(map[string]string)
+				if entry.StoreRefs == nil {
+					entry.StoreRefs = make(map[string]string)
 				}
-				entry.ParentSIDs[b.ID] = parentSID
+				entry.StoreRefs[b.ID] = group.storeKey
+				spec, specErr := worktreeSpecForBead(b, group.storeKey)
+				if specErr != nil {
+					if entry.WorktreeErrors == nil {
+						entry.WorktreeErrors = make(map[string]string)
+					}
+					entry.WorktreeErrors[b.ID] = specErr.Error()
+				} else if spec != nil {
+					if entry.WorktreeSpecs == nil {
+						entry.WorktreeSpecs = make(map[string]*worktree.Spec)
+					}
+					entry.WorktreeSpecs[b.ID] = spec
+				}
+				if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
+					if entry.ParentSIDs == nil {
+						entry.ParentSIDs = make(map[string]string)
+					}
+					entry.ParentSIDs[b.ID] = parentSID
+				}
+				demand[template] = entry
 			}
-			demand[template] = entry
 		}
 	}
 	return counts, demand, partialTemplates, errs
+}
+
+// collectedDemand is what one demand pass's collectors read: custom
+// scale_check counts, default-probe counts and demand, the open unassigned
+// routed collection, and default named-session partials. mergeCollectedDemand
+// turns it into the pass's demand without further reads, so legacy's demand
+// pass and the v2 allocator merge demand with one function.
+type collectedDemand struct {
+	// CustomCounts and CustomPartials are the custom scale_check results
+	// (evaluatePendingPoolsMap).
+	CustomCounts   map[string]int
+	CustomPartials map[string]bool
+	// DefaultProbed reports that default-probe targets existed, so the
+	// default counts, demand and partials below were read.
+	DefaultProbed   bool
+	DefaultCounts   map[string]int
+	DefaultDemand   map[string]scaleCheckDemand
+	DefaultPartials map[string]bool
+	// ColdWakeTemplates and NamedOnDemandTemplates clamp default demand to 1
+	// (demandTargets).
+	ColdWakeTemplates      map[string]bool
+	NamedOnDemandTemplates map[string]bool
+	// UnassignedRouted, UnassignedRoutedRefs and UnassignedRoutedPartial are
+	// collectOpenUnassignedRoutedWork's index-aligned rows, after the route
+	// repairs the caller applies.
+	UnassignedRouted        []beads.Bead
+	UnassignedRoutedRefs    []string
+	UnassignedRoutedPartial bool
+	// NamedPartials are defaultNamedSessionDemand's partial templates.
+	NamedPartials map[string]bool
+}
+
+// mergedDemand is one pass's demand: the merged scale-check counts and
+// demand provenance, each partial-template set, and the ready unassigned
+// routed work the counts selected.
+type mergedDemand struct {
+	ScaleCheckCounts          map[string]int
+	ScaleCheckDemand          map[string]scaleCheckDemand
+	PoolScaleCheckPartial     map[string]bool
+	PoolPartialRetention      map[string]bool
+	NamedScaleCheckPartial    map[string]bool
+	ScaleCheckPartial         map[string]bool
+	ReadyUnassignedRouted     []beads.Bead
+	ReadyUnassignedRoutedRefs []string
+}
+
+// mergeCollectedDemand merges one pass's collected demand. It does no I/O and
+// never edits in's maps or rows.
+func mergeCollectedDemand(cfg *config.City, in collectedDemand) mergedDemand {
+	controlDispatcherOpenDemand := openControlDispatcherDemand(cfg, in.UnassignedRouted)
+	scaleCheckCounts := maps.Clone(in.CustomCounts)
+	poolScaleCheckPartialTemplates := maps.Clone(in.CustomPartials)
+	var scaleCheckDemandByTemplate map[string]scaleCheckDemand
+	if in.DefaultProbed {
+		poolScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(poolScaleCheckPartialTemplates, in.DefaultPartials)
+		if scaleCheckCounts == nil {
+			scaleCheckCounts = make(map[string]int)
+		}
+		scaleCheckDemandByTemplate = make(map[string]scaleCheckDemand)
+		for template, count := range in.DefaultCounts {
+			// A cold-pool wake probe only wakes the pool from zero; clamp its
+			// contribution to 1 so it never overrides a custom scale_check's
+			// authoritative count for the same template.
+			if in.ColdWakeTemplates[template] && count > 1 {
+				count = 1
+			}
+			// An on_demand named-session backing template is a singleton: one pool
+			// slot is enough to drain N queued routed tasks sequentially. Clamp to
+			// 1 so N unassigned gc.routed_to beads do not spawn {name}-N phantoms.
+			if in.NamedOnDemandTemplates[template] && count > 1 {
+				count = 1
+			}
+			if count > scaleCheckCounts[template] {
+				scaleCheckCounts[template] = count
+			}
+			scaleCheckDemandByTemplate[template] = mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], in.DefaultDemand[template], count)
+		}
+	}
+	poolPartialRetentionTemplates := mergeScaleCheckPartialTemplates(nil, poolScaleCheckPartialTemplates)
+	if len(controlDispatcherOpenDemand) > 0 {
+		if scaleCheckCounts == nil {
+			scaleCheckCounts = make(map[string]int)
+		}
+		for template, hasDemand := range controlDispatcherOpenDemand {
+			if hasDemand && scaleCheckCounts[template] < 1 {
+				scaleCheckCounts[template] = 1
+			}
+		}
+	}
+	if in.UnassignedRoutedPartial {
+		// The unassigned-routed live read failed, so controlDispatcherOpenDemand
+		// above is a partial (possibly empty) view — not proof of zero demand.
+		// Mark every deterministic control-dispatcher template for retention so
+		// a running dispatcher survives this tick. This is intentionally not a
+		// create-suppression marker: another healthy store may have proved real
+		// control demand that justifies starting a cold dispatcher (gc-ft31x.2).
+		poolPartialRetentionTemplates = markControlDispatcherTemplatesPartial(cfg, poolPartialRetentionTemplates)
+	}
+	ready, readyRefs := selectReadyUnassignedRoutedWork(in.UnassignedRouted, in.UnassignedRoutedRefs, scaleCheckDemandByTemplate)
+	namedScaleCheckPartialTemplates := mergeScaleCheckPartialTemplates(nil, in.NamedPartials)
+	scaleCheckPartialTemplates := mergeScaleCheckPartialTemplates(nil, poolPartialRetentionTemplates)
+	scaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(scaleCheckPartialTemplates, namedScaleCheckPartialTemplates)
+	return mergedDemand{
+		ScaleCheckCounts:          scaleCheckCounts,
+		ScaleCheckDemand:          scaleCheckDemandByTemplate,
+		PoolScaleCheckPartial:     poolScaleCheckPartialTemplates,
+		PoolPartialRetention:      poolPartialRetentionTemplates,
+		NamedScaleCheckPartial:    namedScaleCheckPartialTemplates,
+		ScaleCheckPartial:         scaleCheckPartialTemplates,
+		ReadyUnassignedRouted:     ready,
+		ReadyUnassignedRoutedRefs: readyRefs,
+	}
 }
 
 func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scaleCheckDemand {
@@ -2358,9 +2559,18 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 
 	type scaleStoreGroup struct {
 		store     beads.Store
+		storeKey  string
 		templates map[string]struct{}
 	}
-	groups := make(map[string]*scaleStoreGroup)
+	// Grouped by (key, store), as in defaultScaleCheckCountsAndDemand: a split
+	// city's work ledger and binding both probe under "city", and a failed read
+	// of either must mark the templates partial.
+	type scaleStoreGroupKey struct {
+		key   string
+		store beads.Store
+	}
+	groups := make(map[scaleStoreGroupKey]*scaleStoreGroup)
+	var groupOrder []*scaleStoreGroup
 	var errs []error
 	var partialTemplates map[string]bool
 	for _, target := range targets {
@@ -2383,10 +2593,12 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 		if key == "" {
 			key = fmt.Sprintf("%p", target.store)
 		}
-		group := groups[key]
+		gk := scaleStoreGroupKey{key: key, store: target.store}
+		group := groups[gk]
 		if group == nil {
-			group = &scaleStoreGroup{store: target.store, templates: make(map[string]struct{})}
-			groups[key] = group
+			group = &scaleStoreGroup{store: target.store, storeKey: key, templates: make(map[string]struct{})}
+			groups[gk] = group
+			groupOrder = append(groupOrder, group)
 		}
 		group.templates[template] = struct{}{}
 	}
@@ -2396,7 +2608,8 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 	// This probe remains only to mark named-session backing templates partial
 	// when a default demand query is inconclusive, so existing named-session
 	// beads are retained instead of swept on a store/query failure.
-	for key, group := range groups {
+	for _, group := range groupOrder {
+		key := group.storeKey
 		_, err := cache.controllerDemandReady(group.store, cache.storeLabel(group.store, key))
 		if err != nil {
 			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), err))
@@ -3677,13 +3890,18 @@ func realizePoolDesiredSessionsAt(
 			go func() {
 				defer wg.Done()
 				for idx := range jobs {
-					plan := *items[idx].plan
-					info, err := executePlannedPoolSessionBeadCreate(bp, cfgAgent, qualifiedName, plan)
-					if err != nil {
-						items[idx].createErr = err
-						continue
-					}
-					items[idx].sessionInfo = info
+					// Recover per job: a dead worker would leave the
+					// sender blocked on jobs.
+					func() {
+						defer recoverLeg(&items[idx].createErr, "pool "+qualifiedName+" create", stderr)
+						plan := *items[idx].plan
+						info, err := executePlannedPoolSessionBeadCreate(bp, cfgAgent, qualifiedName, plan)
+						if err != nil {
+							items[idx].createErr = err
+							return
+						}
+						items[idx].sessionInfo = info
+					}()
 				}
 			}()
 		}
@@ -4102,7 +4320,13 @@ func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedN
 	}
 	// Pure path computation: this feeds a metadata patch, so it must never
 	// create directories (gc-r9fx dry-run purity).
-	base, err := resolveConfiguredWorkDirPath(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
+	resolveWorkDir := resolveConfiguredWorkDirPath
+	if bp.planOnly {
+		// The stale-ancestor worktree check reads the filesystem, so a plan
+		// skips it; the effect that writes the work dir runs it.
+		resolveWorkDir = resolveConfiguredWorkDirPathUnvalidated
+	}
+	base, err := resolveWorkDir(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
 	if err != nil || strings.TrimSpace(base) == "" {
 		return ""
 	}
@@ -4679,17 +4903,26 @@ func existingPoolSlotWithConfig(cfg *config.City, cfgAgent *config.Agent, sessio
 // raw bead. Byte-identical to the raw form, oracle-pinned by
 // TestExistingPoolSlotWithConfigInfoMatchesRaw.
 func existingPoolSlotWithConfigInfo(cfg *config.City, cfgAgent *config.Agent, info session.Info) int {
+	return existingPoolSlotWithTemplates(cfg, nil, cfgAgent, &info)
+}
+
+// existingPoolSlotWithTemplates is existingPoolSlotWithConfigInfo with the
+// stored-template match answered through templates, a memo over cfg. Nil
+// computes it, as legacy does: only the v2 allocator builds one (A3). It
+// reads info through a pointer: the v2 fresh-slot occupancy asks it for
+// every row of every pool, and an Info is kilobytes.
+func existingPoolSlotWithTemplates(cfg *config.City, templates *slotTemplateMemo, cfgAgent *config.Agent, info *session.Info) int {
 	if cfgAgent == nil {
 		return 0
 	}
 	if cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 		return 0
 	}
-	storedTemplateMatches := cfg == nil || storedTemplateMatchesPoolTemplate(sessionBeadStoredTemplateInfo(info), cfgAgent.QualifiedName(), cfg)
-	agentSlot := resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, sessionBeadAgentNameInfo(info))
+	storedTemplateMatches := cfg == nil || templates.storedTemplateMatchesPoolTemplate(storedTemplateRef(info), cfgAgent.QualifiedName(), cfg)
+	agentSlot := resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, sessionBeadAgentNameInfo(*info))
 	aliasSlot := resolvePersistedPoolIdentitySlot(cfgAgent, storedTemplateMatches, info.Alias)
 	sessionNameSlot := 0
-	if storedTemplateMatches && strings.TrimSpace(info.Alias) == "" && !infoOwnsPoolSessionName(info) {
+	if storedTemplateMatches && strings.TrimSpace(info.Alias) == "" && !infoOwnsPoolSessionName(*info) {
 		sessionNameSlot = resolvePersistedPoolIdentitySlot(cfgAgent, true, info.SessionNameMetadata)
 	}
 	if info.PoolSlot != "" {
@@ -4946,6 +5179,9 @@ func freshPoolOccupancyInfos(bp *agentBuildParams) []session.Info {
 	if bp == nil {
 		return nil
 	}
+	if bp.realizeMemo != nil {
+		return bp.realizeMemo.freshOccupancy()
+	}
 	primary := bp.sessionBeads.OpenInfos()
 	infos := make([]session.Info, 0, len(bp.sessionOccupancyInfos)+len(primary))
 	seen := make(map[string]bool, len(bp.sessionOccupancyInfos)+len(primary))
@@ -5069,6 +5305,19 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 		usedSlots[0] = true
 		return 0, nil
 	}
+	if bp != nil {
+		// The v2 realization memo counts its occupancy's slots once (A3).
+		if held := bp.realizeMemo.freshSlots(cfgAgent); held != nil {
+			for slot := 1; unlimited || slot <= upper; slot++ {
+				if usedSlots[slot] || held[slot] {
+					continue
+				}
+				usedSlots[slot] = true
+				return slot, nil
+			}
+			return 0, fmt.Errorf("%w: pool template %q has no free concrete slot", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
+		}
+	}
 	occupied := make(map[int]bool, len(usedSlots))
 	for slot, used := range usedSlots {
 		if used {
@@ -5163,6 +5412,12 @@ func beadIdentifiesAsCanonical(bead beads.Bead, canonical string) bool {
 
 // infoIdentifiesAsCanonical is the session.Info mirror of beadIdentifiesAsCanonical.
 func infoIdentifiesAsCanonical(i session.Info, canonical string) bool {
+	return infoRefIdentifiesAsCanonical(&i, canonical)
+}
+
+// infoRefIdentifiesAsCanonical is infoIdentifiesAsCanonical through a
+// pointer, for the v2 fresh-slot occupancy's every-row scan (A3).
+func infoRefIdentifiesAsCanonical(i *session.Info, canonical string) bool {
 	canonical = strings.TrimSpace(canonical)
 	if canonical == "" {
 		return false
@@ -5258,9 +5513,10 @@ type poolCreateView struct {
 	// allocator mints it at plan time as its ledger marker.
 	instanceToken string
 	// beforeWrite, when set, runs just before the row write with the row ID
-	// the store pre-mints (empty when it mints none). The allocator's effect
-	// uses it to tell a panic before the write from one after it.
-	beforeWrite func(rowID string)
+	// the store pre-mints (empty when it mints none); an error refuses the
+	// write. The allocator's effect uses it to tell a panic before the write
+	// from one after it, and to check its context last.
+	beforeWrite func(rowID string) error
 }
 
 // poolCreateViewOf is legacy's view: its build params, unchanged.
@@ -5911,6 +6167,7 @@ func collectOpenUnassignedRoutedWork(cityPath string, cfg *config.City, store be
 		wg.Add(1)
 		go func(i int, source classStoreCandidate) {
 			defer wg.Done()
+			defer recoverLeg(&results[i].err, "routed work leg "+label, stderr)
 			// Live so the backing store's raw --status=open filter excludes blocked/
 			// deferred work: this unassigned-routed set feeds openControlDispatcherDemand
 			// and the route-repair passes, and mapBdStatus would otherwise collapse a

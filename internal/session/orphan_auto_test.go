@@ -2,11 +2,16 @@ package session
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"log"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // In a mixed city the manager's provider is the auto router. The pre-start
@@ -50,5 +55,44 @@ func TestKillExistingOrphansThroughAutoTerminatesOnlyUntrackedSameCityRoots(t *t
 	}
 	if len(terminated) != 1 || terminated[0] != "100" {
 		t.Fatalf("terminated pids = %v, want only the untracked same-city orphan 100", terminated)
+	}
+}
+
+// scanErrorFake is a Fake whose process-table scan fails with err.
+type scanErrorFake struct {
+	*runtime.Fake
+	err error
+}
+
+func (f *scanErrorFake) FindRuntimesBySessionID(string) ([]runtime.LiveRuntime, error) {
+	return nil, f.err
+}
+
+// Every session start runs the pre-start orphan scan, and a scan that cannot
+// read dozens of same-uid /proc entries used to log one line per entry each
+// time. It logs one bounded summary line instead.
+func TestKillExistingOrphansSummarizesScanError(t *testing.T) {
+	var entries error
+	for pid := 1000; pid < 1070; pid++ {
+		entries = errors.Join(entries, &proctable.EntryError{PID: pid, Err: fmt.Errorf("reading environ for pid %d: permission denied", pid)})
+	}
+	var buf strings.Builder
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+
+	mgr := NewManagerWithOptions(beads.NewMemStore(), &scanErrorFake{Fake: runtime.NewFake(), err: entries})
+	if err := mgr.killExistingOrphans(context.Background(), "sid-scan"); err != nil {
+		t.Fatalf("killExistingOrphans: %v", err)
+	}
+
+	logged := buf.String()
+	want := `session: scanning for orphaned runtimes for sid-scan (failing closed): 70 unreadable process entries in 1 classes: 70 like "reading environ for pid 1000: permission denied" (pids 1000, 1001, 1002, ...)` + "\n"
+	if logged != want {
+		t.Fatalf("logged %q, want one summary line %q", logged, want)
 	}
 }

@@ -140,8 +140,13 @@ at the adapter seam.** Anything that fails either test goes through
    allowed to import genclient directly; no case-by-case approval
    needed.
 3. **Layer 2 conformance probe** —
-   `genclient_roundtrip_test.go` exercises every generated method
-   against a real supervisor so spec/reality drift fails CI.
+   `genclient_roundtrip_test.go` drives a representative sample of
+   generated methods (cities, agents, sessions, beads, formulas, mail,
+   convoys, readiness, session-stream cursors) over HTTP against the
+   in-package `fakeState`, not the production `controllerState`. It
+   catches method-name, request-encoding, status-code, and
+   decoded-shape drift for those operations only; it is not an
+   exhaustive per-operation contract suite.
 
 The generated client is not promoted as a public Go SDK for
 external consumers. External Go consumers, if they ever appear,
@@ -660,7 +665,8 @@ Skipping any step lands on a CI failure, not a production bug:
 | Spec not regenerated after Go-type change | `TestOpenAPISpecInSync` |
 | Generated Go client out of sync with spec | `TestGeneratedClientInSync` |
 | Handler response field undeclared in spec | Layer 1 response-validation tests |
-| Spec/client method-shape drift | Layer 2 round-trip tests (`genclient_roundtrip_test.go`) |
+| Spec/client method-shape drift (sampled operations) | Layer 2 round-trip tests (`genclient_roundtrip_test.go`) |
+| Spec change that breaks existing clients (removed operation, response field, schema, or problem-type URN; narrowed request) | OpenAPI breaking-change gate (`//cmd/openapi-breaking:openapi-breaking_test` in bazel.yml's unit lane; locally `make openapi-breaking-check`, also run by `make spec-ci`): pinned oasdiff diffs `internal/api/openapi.json` against the PR base commit's spec (locally the merge base) with the severity policy in `internal/api/openapi-breaking.toml`. Intentional breaks need a `[[waiver]]` there (fingerprint, check, target, reason, PR); the failure prints the stanza. |
 | End-to-end binary wire regression | Layer 3 integration tests (`//go:build integration`) |
 | New event-type constant without registered payload | `TestEveryKnownEventTypeHasRegisteredPayload` |
 | Hard-coded SPA `/v0/...` path outside typed client | TypeScript build (`satisfies SpecPath` in `api.ts`) |

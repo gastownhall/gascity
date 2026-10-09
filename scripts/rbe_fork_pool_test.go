@@ -23,9 +23,10 @@ import (
 // fork mint reads for the rw tier.
 
 const (
-	rbeForkPoolWorkflow   = ".github/workflows/rbe-fork-pool.yml"
-	rbeForkAllowlist      = ".github/rbe-fork-allowlist.txt"
-	rbeForkCredential     = "tools/rbe/fork-credential.sh"
+	rbeForkPoolWorkflow = ".github/workflows/rbe-fork-pool.yml"
+	rbeForkAllowlist    = ".github/rbe-fork-allowlist.txt"
+	// setup-bazel's, a byte copy of beads' (TestSetupBazelIsBeadsByteCopy).
+	rbeForkCredential     = ".github/actions/setup-bazel/fork-credential.sh"
 	blacksmithAllowlist   = ".github/blacksmith-allowlist.txt"
 	rbeForkPoolMaxMinutes = 120
 )
@@ -51,6 +52,12 @@ func TestRBEWorkerScriptForkTier(t *testing.T) {
 		`*) echo "RBE_ACTION_ISOLATION must be 0, 1 or canary" >&2; exit 2 ;;`,
 		gate,
 		"RBE_WEST_PORT=${RBE_WEST_PORT:-443}\n",
+		// zstd needs the dedicated zread host: the worker's own endpoint
+		// answers compressed reads with InvalidArgument (no fallback), so the
+		// worker exits before installing anything rather than register.
+		// Indented: measure mode (no farm host) skips the farm checks.
+		`if [ "$wire_zstd" = true ] && [ "$ZSTD_READ_URL" = "grpcs://${RBE_WEST_HOST}:${RBE_WEST_PORT}" ]; then`,
+		"\t\texit 2\n\tfi\nfi\n",
 		"sudo DEBIAN_FRONTEND=noninteractive",
 		`if [ "$ACTION_ISOLATION" = canary ]; then`,
 		"\t\tNETNS=${NETNS:-0}\n",
@@ -119,9 +126,11 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 		t.Errorf("permissions %v, want contents: read only", wf.Permissions)
 	}
 
+	// The worker-env drift jobs beside it, and its measure step, are
+	// TestRBEPoolWorkflowsReportDriftWhileServing's.
 	job, ok := wf.Jobs["worker"]
-	if !ok || len(wf.Jobs) != 1 {
-		t.Fatalf("%s: jobs %v, want worker alone", rbeForkPoolWorkflow, rbeSortedKeys(wf.Jobs))
+	if !ok || len(wf.Jobs) != 3 {
+		t.Fatalf("%s: jobs %v, want worker, await-drift and report-drift", rbeForkPoolWorkflow, rbeSortedKeys(wf.Jobs))
 	}
 	// Blacksmith donates this compute for our OSS repos' workflows; the
 	// default branch only, as rbe-worker-pool.yml.
@@ -145,7 +154,12 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 				t.Errorf("checkout must set persist-credentials: false, got %v", step.With["persist-credentials"])
 			}
 		}
-		if strings.TrimSpace(step.Run) != rbeWorkerScript {
+		// S3b: the step runs "$RBE_WORKER_DIR/blacksmith-worker.sh" (the
+		// cutover shim's fetch output), in-tree by default (D8). Only this
+		// new form is accepted now: a workflow that still runs the old
+		// in-tree literal has not actually cut over to the shim.
+		run := strings.TrimSpace(step.Run)
+		if run != `"$RBE_WORKER_DIR/blacksmith-worker.sh"` || step.Env["WORKER_MODE"] == "measure" {
 			continue
 		}
 		worker = true
@@ -164,6 +178,15 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 			"POOL_MAX_MINUTES":     "${{ inputs.max_minutes }}",
 			"WORKER_NAME":          "gha-fork-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}",
 			"RBE_ACTION_ISOLATION": "1",
+			// S3b cutover shim (D8): the fetch step's outputs.
+			"RBE_WORKER_DIR":      "${{ steps.rbe-worker.outputs.dir }}",
+			"RBE_WORKER_REVISION": "${{ steps.rbe-worker.outputs.sha }}",
+			// zstd fetches only (blacksmith-worker.sh keeps uploads identity),
+			// off unless the repository variable says 1: merging changes
+			// nothing, and rollback is the variable.
+			"RBE_WIRE_ZSTD": "${{ vars.RBE_FORK_WIRE_ZSTD || '0' }}",
+			// The dedicated zread host; the worker refuses zstd without it.
+			"RBE_WIRE_ZSTD_READ_URL": "${{ vars.RBE_FORK_WIRE_ZSTD_READ_URL || '' }}",
 		}
 		for k, v := range want {
 			if step.Env[k] != v {
@@ -181,8 +204,10 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	}
 
 	// No secret but the fork worker certificate (never the OSS worker's, which
-	// writes AC_OSS), and no repository variable that could turn isolation
-	// down.
+	// writes AC_OSS), and no repository variables but RBE_FORK_WIRE_ZSTD,
+	// RBE_FORK_WIRE_ZSTD_READ_URL (pinned above) and the S3b cutover switch
+	// RBE_WORKER_SOURCE_FORK (D8, once per fetch step): none can turn
+	// isolation down.
 	secrets := map[string]bool{}
 	for _, m := range regexp.MustCompile(`secrets\.([A-Za-z0-9_]+)`).FindAllStringSubmatch(text, -1) {
 		secrets[m[1]] = true
@@ -190,8 +215,10 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	if got := rbeSortedKeys(secrets); strings.Join(got, ",") != "RBE_FORK_WORKER_TLS_CERT,RBE_FORK_WORKER_TLS_KEY" {
 		t.Errorf("%s uses secrets %v, want RBE_FORK_WORKER_TLS_CERT and RBE_FORK_WORKER_TLS_KEY only", rbeForkPoolWorkflow, got)
 	}
-	if strings.Contains(text, "vars.") {
-		t.Errorf("%s must not read repository variables", rbeForkPoolWorkflow)
+	wantSourceVar := strings.Count(text, "vars.RBE_WORKER_SOURCE_FORK ")
+	if n := strings.Count(text, "vars."); n != 2+wantSourceVar || !strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD ") ||
+		!strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD_READ_URL ") || wantSourceVar == 0 {
+		t.Errorf("%s reads repository variables %d times (source variable %d); want RBE_FORK_WIRE_ZSTD, RBE_FORK_WIRE_ZSTD_READ_URL once each, RBE_WORKER_SOURCE_FORK per fetch step, nothing else", rbeForkPoolWorkflow, n, wantSourceVar)
 	}
 }
 
@@ -276,8 +303,7 @@ func TestRBEWorkerScriptForkNoUserNamespaces(t *testing.T) {
 	}
 }
 
-// fork-credential.sh is a byte copy of beads' setup-bazel one (keep in sync,
-// like tools/rbe/rbe-action-*). Whatever the mint answers, a build only ever
+// fork-credential.sh is beads' setup-bazel one, byte for byte. Whatever the mint answers, a build only ever
 // goes to the fork endpoint, with ro on oss-fork or rw on oss, and its key is
 // PKCS#8 (Bazel's TLS refuses SEC1).
 func TestRBEForkCredentialPins(t *testing.T) {
@@ -383,7 +409,7 @@ echo "error=$(grep -o 'mint refused (HTTP [0-9]*)' out.txt || true)" >>.bazelrc.
 			t.Fatal(err)
 		}
 		mintLog := filepath.Join(t.TempDir(), "mint.log")
-		got := runBazelRCConfigStep(t, step, map[string]string{
+		got, _ := runBazelRCLocalStep(t, step, map[string]string{
 			"PATH":                bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"GITHUB_OUTPUT":       ".bazelrc.local",
 			"RBE_TEST_SCRIPT":     filepath.Join(repoRoot(t), rbeForkCredential),

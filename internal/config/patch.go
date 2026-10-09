@@ -230,6 +230,8 @@ type RigPatch struct {
 	// Additive merge: patch keys win over existing rig keys, unspecified
 	// keys are preserved.
 	FormulaVars map[string]string `toml:"formula_vars,omitempty"`
+	// BeadsProxiedIdleTimeout overrides the rig's beads_proxied_idle_timeout.
+	BeadsProxiedIdleTimeout *string `toml:"beads_proxied_idle_timeout,omitempty"`
 }
 
 // ProviderPatch modifies an existing provider identified by Name.
@@ -747,6 +749,10 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			}
 			if patch.SuspendedOnStart != nil {
 				r.SuspendedOnStart = *patch.SuspendedOnStart
+			}
+			if patch.BeadsProxiedIdleTimeout != nil {
+				v := *patch.BeadsProxiedIdleTimeout
+				r.BeadsProxiedIdleTimeout = &v
 			}
 			if len(patch.FormulaVars) > 0 {
 				if r.FormulaVars == nil {

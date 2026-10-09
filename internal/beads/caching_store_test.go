@@ -1467,6 +1467,8 @@ func TestCachingStoreApplyEventUpdatesCachedReadyFields(t *testing.T) {
 	assertCachedReadyHas(t, cache, ephemeralByEvent.ID, true)
 
 	future := time.Now().UTC().Add(24 * time.Hour)
+	mem.WriteRowForTest(deferredByEvent.ID, func(b *beads.Bead) { b.DeferUntil = &future })
+	mem.WriteRowForTest(ephemeralByEvent.ID, func(b *beads.Bead) { b.Ephemeral = true })
 	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+deferredByEvent.ID+`","defer_until":"`+future.Format(time.RFC3339Nano)+`"}`))
 	cache.ApplyEvent("bead.updated", []byte(`{"id":"`+ephemeralByEvent.ID+`","ephemeral":true}`))
 
@@ -2175,8 +2177,13 @@ func TestCachingStoreApplyEvent(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Update backing before event: %v", err)
 	}
-	updated := beads.Bead{ID: b1.ID, Title: updatedTitle, Status: "open", Metadata: map[string]string{"gc.step_ref": "mol.review"}}
-	payload, _ = json.Marshal(updated)
+	updated, err := mem.Get(b1.ID)
+	if err != nil {
+		t.Fatalf("Get backing before event: %v", err)
+	}
+	if payload, err = beads.EncodeBeadEventPayload(updated); err != nil {
+		t.Fatalf("EncodeBeadEventPayload: %v", err)
+	}
 	cs.ApplyEvent("bead.updated", payload)
 
 	got = requireCachedBead(t, cs, b1.ID, false)
@@ -2404,12 +2411,10 @@ func TestCachingStoreApplyEventRefreshesPartialHookPayload(t *testing.T) {
 		t.Fatalf("Create child: %v", err)
 	}
 
-	backing := &eventGetFailStore{Store: mem}
-	cs := beads.NewCachingStoreForTest(backing, nil)
+	cs := beads.NewCachingStoreForTest(mem, nil)
 	if err := cs.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
-	backing.failGet = true
 
 	updatedTitle := "child updated externally"
 	if err := mem.Update(child.ID, beads.UpdateOpts{Title: &updatedTitle}); err != nil {
@@ -2472,6 +2477,11 @@ func TestCachingStoreApplyEventCoercesNonStringMetadata(t *testing.T) {
 		t.Fatalf("Prime: %v", err)
 	}
 
+	if err := mem.Update(created.ID, beads.UpdateOpts{Type: strPtr("session"), Metadata: map[string]string{
+		"generation": "3", "pending_create_claim": "true", "state": "creating", "wake_attempts": "0",
+	}}); err != nil {
+		t.Fatalf("Update backing: %v", err)
+	}
 	payload, err := json.Marshal(map[string]any{
 		"id":         created.ID,
 		"title":      "mayor",
@@ -2523,6 +2533,9 @@ func TestCachingStoreApplyEventAcceptsWrappedHookPayload(t *testing.T) {
 		t.Fatalf("Prime: %v", err)
 	}
 
+	if err := mem.Update(created.ID, beads.UpdateOpts{Type: strPtr("message"), Metadata: map[string]string{"mail.read": "false"}}); err != nil {
+		t.Fatalf("Update backing: %v", err)
+	}
 	payload, err := json.Marshal(map[string]any{
 		"bead": map[string]any{
 			"id":         created.ID,

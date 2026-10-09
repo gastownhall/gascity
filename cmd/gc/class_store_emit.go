@@ -82,13 +82,11 @@ import (
 	"fmt"
 	"maps"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -147,10 +145,10 @@ type classStoreEmission struct {
 // emit appends one row per emission to the city's journal through a single
 // recorder, which owns the cross-process sequence and locking.
 //
-// events.WithoutStartupSweep is what makes a per-mutation open safe: the sweep
-// exists to recover rotating-* files a crash stranded, it belongs to the
-// supervisor's long-lived recorder, and running it here would race that
-// recorder mid-rotation. It does not make the open free — NewFileRecorder reads
+// events.WithoutStartupSweep (via newSecondaryFileEventsRecorder) is what makes
+// a per-mutation open safe: the sweep exists to recover rotating-* files a
+// crash stranded, it belongs to the supervisor's long-lived recorder, and
+// running it here would race that recorder mid-rotation. It does not make the open free — NewFileRecorder reads
 // the log directory either way, to continue the sequence past the archives —
 // only unraced.
 func (s *emittingClassStore) emit(emissions ...classStoreEmission) {
@@ -573,6 +571,17 @@ func (s *emittingClassStore) AtomicConditionalCloserHandle() (beads.AtomicCondit
 	return s, true
 }
 
+// ConditionalWritesModeSource points the conditional-writes resolver at the
+// stamped engine for the mode, liveness, capability and degrade latch, while
+// the writer it resolves stays this wrapper. A resolve TARGET would hand back
+// the bare engine as the writer, and every fenced CLI write would land
+// event-dark; declaring nothing would read the wrapper's missing stamp as
+// unset, and every fenced CLI write on a split city would fall back to the
+// unconditional legacy write.
+func (s *emittingClassStore) ConditionalWritesModeSource() beads.Store {
+	return s.Store
+}
+
 // HasResidentOutside forwards the relic census to the backing capability. It
 // exists because TestEmittingClassStoreKeepsEveryEngineCapability holds this
 // wrapper to every engine method, and a wrapper that carries the method must
@@ -641,7 +650,7 @@ func (s *emittingClassStore) Claim(id, assignee string) (beads.Bead, bool, error
 		Claim(string, string) (beads.Bead, bool, error)
 	})
 	if !ok {
-		return beads.Bead{}, false, beads.ErrConditionalWriteUnsupported
+		return beads.Bead{}, false, beads.ErrClaimUnsupported
 	}
 	bead, claimed, err := claimer.Claim(id, assignee)
 	if err == nil && claimed {
@@ -662,6 +671,18 @@ func (s *emittingClassStore) ReleaseIfCurrent(id, expectedAssignee string) (bool
 	return released, err
 }
 
+func (s *emittingClassStore) TransferIfCurrent(id, fromAssignee, toAssignee string) (bool, error) {
+	mover, ok := s.Store.(beads.ConditionalAssigneeTransferer)
+	if !ok {
+		return false, beads.ErrConditionalTransferUnsupported
+	}
+	moved, err := mover.TransferIfCurrent(id, fromAssignee, toAssignee)
+	if err == nil && moved {
+		s.emitUpdated(id)
+	}
+	return moved, err
+}
+
 func (s *emittingClassStore) DeleteBatch(ids []string) error {
 	deleter, ok := s.Store.(beads.BatchDeleter)
 	if !ok {
@@ -673,6 +694,20 @@ func (s *emittingClassStore) DeleteBatch(ids []string) error {
 	}
 	s.emitDeleted(snapshots)
 	return nil
+}
+
+// DepListBatch forwards the batched dep-edge read.
+//
+// It emits nothing because it writes nothing — but it has to exist, because the
+// embedded Store interface does not promote an optional capability and this
+// wrapper is what a class-routed caller holds. Without it the batch is invisible
+// and the caller silently pays a round trip per anchor (ga-50tsx).
+func (s *emittingClassStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
+	batch, ok := beads.DepListBatchFor(s.Store)
+	if !ok {
+		return nil, beads.ErrDepListBatchUnsupported
+	}
+	return batch.DepListBatch(ids)
 }
 
 func (s *emittingClassStore) ApplyGraphPlan(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
@@ -860,11 +895,7 @@ func beadStatusIsClosed(status string) bool {
 
 // newClassStoreEmitRecorder opens the city's journal for one emission batch.
 func newClassStoreEmitRecorder(cityPath string) (*events.FileRecorder, error) {
-	return events.NewFileRecorder(
-		filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"),
-		classStoreEmitWarnWriter{},
-		events.WithoutStartupSweep(),
-	)
+	return openCityEventsLog(cityPath, classStoreEmitWarnWriter{})
 }
 
 // classStoreEmitWarnWriter funnels the recorder's own stderr diagnostics — a

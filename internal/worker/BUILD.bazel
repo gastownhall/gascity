@@ -16,6 +16,7 @@ go_library(
         "handle_transcriptmeta.go",
         "invocation_telemetry.go",
         "observe.go",
+        "observe_bounded.go",
         "operation_events.go",
         "profile_identity.go",
         "provider_resume.go",
@@ -59,6 +60,7 @@ go_test(
         "factory_test.go",
         "handle_clone_test.go",
         "handle_history_provider_test.go",
+        "handle_resume_policy_test.go",
         "handle_stop_intent_test.go",
         "handle_test.go",
         "handle_transcriptmeta_test.go",
@@ -67,6 +69,7 @@ go_test(
         "invocation_telemetry_test.go",
         "invocation_telemetry_usagefact_test.go",
         "normalize_entry_invariants_test.go",
+        "observe_bounded_test.go",
         "observe_capability_test.go",
         "operation_events_1a_test.go",
         "operation_events_test.go",
@@ -96,6 +99,7 @@ go_test(
         "//internal/events",
         "//internal/pricing",
         "//internal/runtime",
+        "//internal/runtime/tmux",
         "//internal/session",
         "//internal/session/sessiontest",
         "//internal/sessionlog",
@@ -124,6 +128,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

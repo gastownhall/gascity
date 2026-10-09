@@ -178,8 +178,8 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// advertise liveness. Discard sidecars from a dead incarnation first.
 	p.cleanupMeta(name)
 	seedMeta, _ := runtime.SplitEnvForMetaSeed(cfg.Env)
-	for key, value := range seedMeta {
-		if err := p.SetMeta(name, key, value); err != nil {
+	for _, key := range runtime.MetaSeedKeys(seedMeta) {
+		if err := p.SetMeta(name, key, seedMeta[key]); err != nil {
 			p.cleanupMeta(name)
 			p.mu.Unlock()
 			return fmt.Errorf("seeding metadata for %q (%s): %w", name, key, err)
@@ -323,6 +323,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	sc := newSessionConn(cmd, stdinPipe, lis, p.cfg.outputBufferLines(), processDone)
+	sc.token = seedMeta["GC_INSTANCE_TOKEN"]
 
 	// Start readLoop before handshake so we can receive responses.
 	go sc.readLoop(stdoutPipe)
@@ -590,13 +591,13 @@ func (p *Provider) Stop(name string) error {
 
 	if ok {
 		if !sc.alive() {
-			p.cleanupMeta(name)
+			p.cleanupOwnMeta(name, sc.token)
 			return nil
 		}
 		_ = sc.stdin.Close()
 		err := terminateProcess(sc, p.cfg.stopGrace())
 		if err == nil || runtime.IsSessionGone(err) {
-			p.cleanupMeta(name)
+			p.cleanupOwnMeta(name, sc.token)
 			return nil
 		}
 		return err
@@ -817,6 +818,13 @@ func (p *Provider) SetMeta(name, key, value string) error {
 	return runtime.WritePrivateFile(p.metaPath(name, key), []byte(value))
 }
 
+// LocalIdentitySidecar implements [runtime.IdentitySidecarProvider]: GetMeta
+// reads the session's local 0600 sidecar.
+func (p *Provider) LocalIdentitySidecar() bool { return true }
+
+// LivenessReadsFresh implements [runtime.FreshByConstruction].
+func (p *Provider) LivenessReadsFresh() bool { return true }
+
 // GetMeta retrieves a metadata value from a sidecar file.
 // Returns ("", nil) if the key is not set.
 func (p *Provider) GetMeta(name, key string) (string, error) {
@@ -982,6 +990,17 @@ func (p *Provider) ListRunningComplete() bool { return true }
 
 func (p *Provider) metaPath(name, key string) string {
 	return filepath.Join(p.dir, metaFilePrefix(name)+".meta."+metaFileKey(key))
+}
+
+// cleanupOwnMeta clears name's sidecars only while they still carry token, the
+// one the stopped incarnation seeded. The lifecycle lock keeps any Start in
+// this or another provider out while it runs, but a replacement another
+// provider started earlier, beside a dead or unreachable conn of this one, has
+// reseeded the sidecars with its own token and keeps them.
+func (p *Provider) cleanupOwnMeta(name, token string) {
+	if current, err := p.GetMeta(name, "GC_INSTANCE_TOKEN"); err == nil && current == token {
+		p.cleanupMeta(name)
+	}
 }
 
 // cleanupMeta removes all sidecar meta files for the named session.
