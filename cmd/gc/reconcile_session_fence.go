@@ -336,17 +336,32 @@ func boundedPending(ctx context.Context, leaf runtime.Provider, name string) pen
 }
 
 // boundedProbe runs probe under fenceProbeTimeout and ctx. ok is false when the
-// bound expires first; the probe's goroutine is then abandoned.
+// bound expires first, the probe's goroutine then abandoned, or when the probe
+// panics: a panicking probe proves nothing and never takes the process down.
 func boundedProbe[T any](ctx context.Context, probe func() T) (T, bool) {
+	return boundedProbeCtx(ctx, func(context.Context) T { return probe() })
+}
+
+// boundedProbeCtx is boundedProbe for a probe that takes the bounded context.
+func boundedProbeCtx[T any](ctx context.Context, probe func(context.Context) T) (T, bool) {
 	ctx, cancel := context.WithTimeout(ctx, fenceProbeTimeout)
 	defer cancel()
-	out := make(chan T, 1)
-	go func() { out <- probe() }()
+	out, failed := make(chan T, 1), make(chan struct{})
+	go func() {
+		defer func() {
+			if recover() != nil {
+				close(failed)
+			}
+		}()
+		out <- probe(ctx)
+	}()
+	var zero T
 	select {
 	case v := <-out:
 		return v, true
+	case <-failed:
+		return zero, false
 	case <-ctx.Done():
-		var zero T
 		return zero, false
 	}
 }

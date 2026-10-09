@@ -402,8 +402,9 @@ func TestAbandonedRowWriteStillBacksOff(t *testing.T) {
 }
 
 // Kills an effect defined in a file the effect lint does not cover: the
-// transaction, and every Decide and body in effectSpecs, are defined in
-// reconcile_effect_*.go or reconcile_steps_*.go.
+// transaction, and every kind's body, around, needsFor, and each section's
+// Decide, Probe and Call, are defined in reconcile_effect_*.go or
+// reconcile_steps_*.go.
 func TestEffectSpecFuncsAreLinted(t *testing.T) {
 	linted := effectLintFiles(t)
 	check := func(kind string, fn any) {
@@ -415,12 +416,16 @@ func TestEffectSpecFuncsAreLinted(t *testing.T) {
 	check("every kind", runTx)
 	n := 0
 	for kind, spec := range effectSpecs {
-		if spec.body != nil {
-			check(kind, spec.body)
-			n++
+		for _, fn := range []any{spec.body, spec.around, spec.needsFor} {
+			if !reflect.ValueOf(fn).IsNil() {
+				check(kind, fn)
+				n++
+			}
 		}
 		for _, sec := range spec.sections {
-			check(kind, sec.Decide)
+			for _, fn := range append([]any{sec.Decide}, sec.defs...) {
+				check(kind, fn)
+			}
 			n++
 		}
 	}

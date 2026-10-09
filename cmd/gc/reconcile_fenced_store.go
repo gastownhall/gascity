@@ -164,6 +164,11 @@ var (
 
 func (s blindWriteRefusingStore) ConditionalWritesResolveTarget() beads.Store { return s.inner }
 
+// readOnlyStore is what Probes and Calls read through (capReadStores): a
+// blind-write-refusing store that, holding only beads.Store, resolves no
+// conditional writer either.
+type readOnlyStore struct{ beads.Store }
+
 func (s blindWriteRefusingStore) ConditionalWriterHandle() (beads.ConditionalWriter, bool) {
 	return beads.ConditionalWriterForTarget(s.inner)
 }

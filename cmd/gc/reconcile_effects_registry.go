@@ -1,6 +1,9 @@
 package main
 
-import "github.com/gastownhall/gascity/internal/runtime"
+import (
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime"
+)
 
 // The effects registry: the effect each admitted intent kind runs on the
 // executor. Each later effect PR adds its line. An intent whose kind has none
@@ -26,7 +29,15 @@ type effectPass struct {
 	// held are the capabilities the pass holds beyond its writers; an
 	// effect reaches each only through txCaps, as its spec grants (capsFor).
 	held heldCaps
-	seam txSeamFunc // the planner's: runs at the effect's seams (tests, staging)
+	// reads are the read-only city and rig stores of the live work read.
+	reads effectReads
+	seam  txSeamFunc // the planner's: runs at the effect's seams (tests, staging)
+}
+
+// effectReads are read-only city and rig stores.
+type effectReads struct {
+	city beads.Store
+	rigs map[string]beads.Store
 }
 
 // heldCaps are a pass's capabilities. create is what the pass hands its
@@ -46,6 +57,13 @@ func newEffectPass(w *World, a *allocDecision) *effectPass {
 	}
 	for leg, store := range w.LegStores {
 		p.Writers[leg] = fencedWriter{store: store}
+	}
+	if w.SessionsStore != nil {
+		p.reads.city = readOnlyStore{blindWriteRefusingStore{inner: w.SessionsStore}}
+	}
+	p.reads.rigs = make(map[string]beads.Store, len(w.RigStores))
+	for rig, store := range w.RigStores {
+		p.reads.rigs[rig] = readOnlyStore{blindWriteRefusingStore{inner: store}}
 	}
 	stripped := *w
 	stripped.LegStores, stripped.Demand.AssignedStores = nil, nil

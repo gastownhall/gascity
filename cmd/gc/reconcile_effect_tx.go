@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -18,7 +20,8 @@ import (
 // The effect transaction (simplify/EFFECT-STRUCTURE.md §2.1): runTx alone
 // takes the name and session mutation locks and CASes the row (casRow), each
 // attempt reading first, so the CAS window holds only the row read and Decide,
-// and beginning its write through the latch (beginWrite).
+// and beginning its write through the latch (beginWrite). A section's Call
+// runs after it under the name lock alone, gated like a write.
 
 // effectSpec is one intent kind: what admission knows of it (P2-P4) and its
 // effect. A kind with neither sections nor a body has none yet (no-effect).
@@ -27,13 +30,15 @@ type effectSpec struct {
 	bootGated bool // destructive: deferred while the boot gate is closed (P2)
 	tokens    int  // debited on admission, never refunded (I9)
 	needs     needs
+	needsFor  func(w *World, it intent) needs // per-intent needs, when set (drain begin's legs by reason and policy)
 	caps      caps
 	sections  []section
 	// body is the create's guarded row create (v5 R1 exception 1), the one
 	// effect whose write is no row CAS; it begins it through beginWrite.
 	body func(ctx context.Context, c txCaps) settlement
-	// around, when set, wraps the effect (C5a1's endpoint ticket, C5c1's
-	// post-close cascade): it calls run at most once, outside every lock.
+	// around, when set, wraps the effect (C5a1's endpoint gate, C5c1's
+	// post-close cascade): it calls run at most once, outside every lock. A
+	// ticket admitted only on Launch is an onExit finalizer instead.
 	around func(ctx context.Context, a aroundCaps, run func() settlement) settlement
 }
 
@@ -41,32 +46,73 @@ type effectSpec struct {
 // later capability is a bit and a txCaps field, added with its first kind.
 type caps uint8
 
-const capCreate caps = 1 // the create runner and its raw stores (v5 R1 exception 1)
+const (
+	capCreate     caps = 1 << iota // the create runner and its raw stores (v5 R1 exception 1)
+	capReadStores                  // the read-only city and rig stores (reads)
+)
 
-// txCaps is what a body (and A4's Call) holds: the handles its spec grants,
-// its latch, and the test seam; never the pass.
+// txCaps is what a body, Probe or Call holds: the handles its spec grants,
+// its latch, its finalizers and the seam; never the pass.
 type txCaps struct {
 	it      intent
 	latch   *writeLatch
 	seam    txSeamFunc
-	section int         // the section's index, from 0, which seams report
-	attempt int         // the CAS attempt, from 1, which seams report
-	create  *createPass // capCreate
+	section int                       // the section's index, from 0, which seams report
+	attempt int                       // the CAS attempt, from 1, which seams report
+	exits   *[]func(final settlement) // onExit's, run at every exit
+	create  *createPass               // capCreate
 	creates *createEffects
+	reads   effectReads // capReadStores: read-only, blind writes refused
 }
 
 // aroundCaps is what an around holds. It runs outside every lock, so it
 // reaches no write and none of a Call's handles (provider start, routing,
 // release, kill); C5a1's endpoint gate may add Eligible here, never Admit.
-type aroundCaps struct{ it intent }
+type aroundCaps struct {
+	it    intent
+	reads effectReads // capReadStores: read-only
+}
 
 // capsFor is it's txCaps under grant.
 func (p *effectPass) capsFor(it intent, grant caps, latch *writeLatch) txCaps {
-	c := txCaps{it: it, latch: latch, seam: p.seam, attempt: 1}
+	c := txCaps{it: it, latch: latch, seam: p.seam, attempt: 1, exits: new([]func(settlement))}
 	if grant&capCreate != 0 {
 		c.create, c.creates = p.held.create, p.held.creates
 	}
+	if grant&capReadStores != 0 {
+		c.reads = p.reads
+	}
 	return c
+}
+
+// onExit registers f to run with the effect's final settlement at every
+// exit, a panic included (as a failed causePanic, then re-panicking): C5a1's
+// endpoint ticket, admitted only on Launch (SC N1), resolved however the
+// effect ends. The last registered runs first.
+func (c txCaps) onExit(f func(final settlement)) { *c.exits = append(*c.exits, f) }
+
+// exit runs every finalizer, last registered first, with s, or with a
+// panic's failure; a finalizer's panic skips none of the others, and the
+// first panic, the effect's own before any finalizer's, is raised again.
+func (c txCaps) exit(s *settlement) {
+	r := recover()
+	final := *s
+	if r != nil {
+		final = settlement{Outcome: settledFailed, Cause: causePanic, Err: fmt.Errorf("effect panicked: %v", r)}
+	}
+	for i := len(*c.exits) - 1; i >= 0; i-- {
+		func() {
+			defer func() {
+				if fr := recover(); fr != nil && r == nil {
+					r = fr
+				}
+			}()
+			(*c.exits)[i](final)
+		}()
+	}
+	if r != nil {
+		panic(r)
+	}
 }
 
 // beginWrite is a write's last check, immediately before it: the context,
@@ -109,6 +155,8 @@ const (
 	seamAfterRowRead                   // the row read, before the premise
 	seamBeforeCAS                      // a write's last check, before the context and the latch
 	seamAfterWrite                     // a landed write, still under the section's lock
+	seamBeforeCall                     // before a Call's gate (the context, then the latch)
+	seamAfterCall                      // a Call returned: the name lock held, the mutation lock released
 )
 
 // txSeamFunc acts at a seam of one effect's section and attempt; an error
@@ -160,19 +208,87 @@ func (l *writeLatch) begun() bool {
 
 func (s effectSpec) runs() bool { return s.body != nil || len(s.sections) > 0 }
 
-// needs are a kind's locks, fresh reads and CAS budget.
+// needs are a kind's locks, fresh reads and CAS budget. Every read implies
+// the name lock, as does a Call.
 type needs struct {
-	NameLock bool // held across every section
-	Runtime  bool // the runtime read fresh each attempt; implies NameLock
-	Attempts int  // CAS rounds per section, each deciding again; 0 is 3
+	NameLock bool      // held across every section
+	Runtime  bool      // the runtime read fresh each attempt
+	Legs     fenceLegs // legAttach (L3), legPending (L4) on the routed leaf; legWork (L5) live
+	Idle     bool      // the agent proved idle on the routed leaf
+	Attempts int       // CAS rounds per section, each deciding again; 0 is 3
 }
 
-// section is one span of an effect under the row's session mutation lock,
-// behind its premise (v5 R2; tx.premise).
-type section struct {
-	// Decide decides on each attempt's fresh reads, under both locks, no I/O.
-	Decide func(v txView) txStep
+func (s effectSpec) needsOf(w *World, it intent) needs {
+	if s.needsFor != nil {
+		return s.needsFor(w, it)
+	}
+	return s.needs
 }
+
+// premiseRule is what a section's fresh row must still be (v5 R2).
+type premiseRule uint8
+
+const (
+	// premiseDefault: open, carrying the locked runtime name, at the
+	// incarnation and token expected, with the lifecycle facts
+	// (session.LifecycleInputFromInfo) of the expected row: the pass's, then
+	// the one the last landed section wrote.
+	premiseDefault premiseRule = iota
+	// premiseOwnToken (v5 S2's commit): after an earlier section's write
+	// landed, open, creating, active or awake, and still carrying the token
+	// that write set; holds do not veto it.
+	premiseOwnToken
+)
+
+// section is one span of an effect under the row's session mutation lock,
+// behind its premise (tx.premise). Build one with a Probe or a Call through probed and called, which type
+// their data.
+type section struct {
+	Premise premiseRule
+	// Decide decides on the attempt's fresh reads, under both locks, with no
+	// I/O; it runs once per attempt.
+	Decide func(v txView) txStep
+	probe  func(ctx context.Context, r effectReads, v txView) (any, error)
+	call   func(ctx context.Context, c txCaps, in any) (any, error)
+	defs   []any // the kind's own Probe and Call, which the effect lint covers
+}
+
+// probed is a section whose Probe, a bounded read under both locks after the
+// transaction's own reads (it sees the expected row), hands Decide its typed
+// result. A probe past fenceProbeTimeout answers errProbeExpired.
+func probed[P any](probe func(context.Context, effectReads, txView) (P, error), decide func(txView, P, error) txStep) section {
+	return section{
+		probe: func(ctx context.Context, r effectReads, v txView) (any, error) { return probe(ctx, r, v) },
+		Decide: func(v txView) txStep {
+			p, _ := v.probe.(P)
+			return decide(v, p, v.probeErr)
+		},
+		defs: []any{probe, decide},
+	}
+}
+
+// called is sec with a provider Call after it, run under the name lock with
+// the mutation lock released, and only like a write (the context, then the
+// latch). It takes the step's Pass, typed In, and hands the next section's
+// Decide its result (callResult[Out]).
+func called[In, Out any](sec section, call func(context.Context, txCaps, In) (Out, error)) section {
+	sec.call = func(ctx context.Context, c txCaps, in any) (any, error) {
+		typed, _ := in.(In)
+		return call(ctx, c, typed)
+	}
+	sec.defs = append(sec.defs, call)
+	return sec
+}
+
+// callResult is the previous section's Call result and error.
+func callResult[Out any](v txView) (Out, error) {
+	out, _ := v.prev.(Out)
+	return out, v.prevErr
+}
+
+// errProbeExpired: a section's Probe, or the live work read, ran past its
+// bound.
+var errProbeExpired = errors.New("v2 effect: probe expired")
 
 // txView is what Decide sees: the intent, the pass's inputs, fresh reads.
 type txView struct {
@@ -182,15 +298,35 @@ type txView struct {
 	Row   session.Info      // read from the backing this attempt
 	Meta  map[string]string // Row's persisted metadata, which the census reads
 	RT    *txRuntime        // when the spec needs Runtime
+	Fence txFence           // the legs the spec needs
 	Now   time.Time         // the attempt's since
+	// The section's Probe result, and the previous section's Call result
+	// (probed, callResult).
+	probe, prev       any
+	probeErr, prevErr error
 }
 
-// txStep is Decide's verdict: refuse (writing nothing), write, or neither.
-// The effect lands if a section wrote, and is a no-op otherwise.
+// txFence is the fence legs read fresh for Decide: each reason holds the
+// action, "" passes (attachLeg, boundedPending); Work is L5, read live.
+type txFence struct {
+	Attach, Pending string
+	Work            *txWork
+	Idle            bool // proved idle: WaitForIdle, then no activity since the pass
+}
+
+// txStep is Decide's verdict: refuse or fail (writing nothing), write, or
+// neither. Done ends the effect after the step: landed if a section wrote,
+// otherwise a no-op with Cause. Without Done, the section's Call and the
+// next section run. Pass is what the section's Call takes.
 type txStep struct {
 	Write  session.MetadataPatch
 	Refuse string
+	Fail   string
+	Err    error
+	Done   bool
+	Cause  string
 	Facts  effectFacts
+	Pass   any
 }
 
 // effectFacts are what an effect learned or did besides its outcome, merged
@@ -215,6 +351,7 @@ const (
 	causeShutdown  = "shutdown"   // the context ended before its deadline
 	causeAroundRun = "around-run" // an around ran its effect twice
 	causeInjected  = "injected"   // a seam failed the effect (tests, staging)
+	causeCallError = "call-error" // the last section's provider call failed
 )
 
 // errInjected wraps a seam's error.
@@ -232,13 +369,14 @@ var errAbandoned = errors.New("v2 effect: abandoned at its deadline before its w
 var withRowMutationLock = session.WithSessionMutationLock
 
 // runTx runs the effect of it as spec describes, under latch.
-func runTx(ctx context.Context, p *effectPass, it intent, spec effectSpec, latch *writeLatch) settlement {
+func runTx(ctx context.Context, p *effectPass, it intent, spec effectSpec, latch *writeLatch) (s settlement) {
 	c := p.capsFor(it, spec.caps, latch)
+	defer c.exit(&s)
 	if spec.around == nil {
 		return runSpec(ctx, p, it, spec, c)
 	}
 	ran := false
-	return spec.around(ctx, aroundCaps{it: it}, func() settlement {
+	return spec.around(ctx, aroundCaps{it: it, reads: c.reads}, func() settlement {
 		if ran {
 			return settlement{Outcome: settledFailed, Cause: causeAroundRun}
 		}
@@ -263,8 +401,8 @@ func runSpec(ctx context.Context, p *effectPass, it intent, spec effectSpec, c t
 	if !ok {
 		return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: errNoConditionalWriter}
 	}
-	t := &tx{c: c, p: p, needs: spec.needs, writer: writer, expect: row.Info, basis: it.Basis, view: txView{It: it, World: p.World, Alloc: p.Alloc}}
-	if spec.needs.NameLock || spec.needs.Runtime {
+	t := &tx{c: c, p: p, needs: spec.needsOf(p.World, it), writer: writer, expect: row.Info, basis: it.Basis, view: txView{It: it, World: p.World, Alloc: p.Alloc}}
+	if n := t.needs; n.NameLock || n.Runtime || n.Legs != 0 || n.Idle || slices.ContainsFunc(spec.sections, func(s section) bool { return s.call != nil }) {
 		name, unlock, ok := lockRuntimeName(p.World, row.Info)
 		switch {
 		case !ok && name == "":
@@ -289,6 +427,7 @@ type tx struct {
 	basis  rowBasis     // its incarnation and token
 	landed bool         // a section's write landed
 	facts  effectFacts
+	pass   any // the concluded step's Pass, to its section's Call
 	view   txView
 }
 
@@ -305,6 +444,27 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 		if end {
 			break
 		}
+		if t.view.prev, t.view.prevErr = nil, nil; sec.call == nil {
+			continue
+		}
+		if err := t.c.at(ctx, seamBeforeCall); err != nil {
+			s = injected(err)
+			break
+		}
+		// A provider call is a write: an effect the executor abandoned first
+		// never calls, and one abandoned during it is ambiguous.
+		if ctx.Err() != nil || !t.c.latch.begin() {
+			s = ended(ctx)
+			break
+		}
+		t.view.prev, t.view.prevErr = sec.call(ctx, t.c, t.pass)
+		if err := t.c.at(ctx, seamAfterCall); err != nil {
+			s = injected(err)
+			break
+		}
+		if i == len(sections)-1 && t.view.prevErr != nil {
+			s = settlement{Outcome: settledFailed, Cause: causeCallError, Err: t.view.prevErr}
+		}
 	}
 	s.Facts = t.facts
 	return s
@@ -314,7 +474,7 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) {
 	for attempt := range cmp.Or(t.needs.Attempts, 3) {
 		t.c.attempt = attempt + 1
-		if s, ok := t.read(ctx); !ok {
+		if s, ok := t.read(ctx, sec); !ok {
 			return s, true
 		}
 		var step txStep
@@ -337,16 +497,17 @@ func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) 
 		case wrote:
 			t.landed, t.expect = true, wroteRow(t.view.Row, step.Write)
 			t.basis = rowBasisOf(t.view.It.Key, t.expect)
-			t.facts.merge(step.Facts)
 			if err := t.c.at(ctx, seamAfterWrite); err != nil {
+				t.facts.merge(step.Facts)
 				s := injected(err)
 				s.Outcome = settledAmbiguous // the write landed
 				return s, true
 			}
-			return t.done(), false
+			fallthrough
 		case len(step.Write) == 0:
 			t.facts.merge(step.Facts)
-			return t.done(), false
+			t.pass = step.Pass
+			return t.done(step), step.Done
 		}
 		// The CAS lost to another writer: read again and decide again.
 	}
@@ -354,17 +515,18 @@ func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) 
 }
 
 // done is the settlement after a concluded step: landed once a section
-// wrote, otherwise a no-op.
-func (t *tx) done() settlement {
+// wrote, otherwise a no-op with the step's cause.
+func (t *tx) done(step txStep) settlement {
 	if t.landed {
 		return settlement{Outcome: settledLanded}
 	}
-	return settlement{Outcome: settledNoop}
+	return settlement{Outcome: settledNoop, Cause: step.Cause}
 }
 
-// read is an attempt's reads before the row: the since stamp and the
-// runtime, which a context that ended proves nothing by.
-func (t *tx) read(ctx context.Context) (settlement, bool) {
+// read is an attempt's reads before the row: the since stamp, the runtime,
+// the fence legs and the Probe, which a context that ended proves nothing
+// by.
+func (t *tx) read(ctx context.Context, sec section) (settlement, bool) {
 	t.view.Now = t.p.Clock.Now()
 	if t.needs.Runtime {
 		rt, cause := readRuntime(ctx, t.p.Runtime, processNamesFor(t.p.World, t.expect), t.name, t.view.Now, t.p.Clock.Now)
@@ -372,6 +534,25 @@ func (t *tx) read(ctx context.Context) (settlement, bool) {
 			return refused(cause), false
 		}
 		t.view.RT = rt
+	}
+	if t.needs.Legs != 0 || t.needs.Idle {
+		if cause := t.readFence(ctx); cause != "" {
+			return refused(cause), false
+		}
+	}
+	if sec.probe != nil {
+		v := t.view
+		v.Row = t.expect
+		type result struct {
+			v   any
+			err error
+		}
+		r, ok := boundedProbeCtx(ctx, func(ctx context.Context) result { p, err := sec.probe(ctx, t.c.reads, v); return result{p, err} })
+		if t.view.probe, t.view.probeErr = r.v, r.err; !ok {
+			t.view.probeErr = errProbeExpired
+		}
+	} else {
+		t.view.probe, t.view.probeErr = nil, nil // a section's Probe is its own
 	}
 	if err := t.c.at(ctx, seamAfterReads); err != nil {
 		return injected(err), false
@@ -393,7 +574,7 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 		s := injected(err)
 		return txStep{}, &s
 	}
-	if !t.premise(row) {
+	if !t.premise(sec.Premise, row) {
 		s := refused(causePremise)
 		return txStep{}, &s
 	}
@@ -401,7 +582,9 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 	var s settlement
 	switch {
 	case step.Refuse != "":
-		s = refused(step.Refuse)
+		s = settlement{Outcome: settledRefused, Cause: step.Refuse, Err: step.Err}
+	case step.Fail != "":
+		s = settlement{Outcome: settledFailed, Cause: step.Fail, Err: step.Err}
 	case len(step.Write) == 0:
 		return step, nil
 	default:
@@ -421,14 +604,36 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 }
 
 // premise reports whether row is still the expected row (the pass's, then
-// the last landed write's): open, under the locked runtime name, at its
-// incarnation and token, with its lifecycle facts (LifecycleInputFromInfo).
-func (t *tx) premise(row session.Info) bool {
+// the last landed write's) under rule.
+func (t *tx) premise(rule premiseRule, row session.Info) bool {
 	if row.Closed || t.name != "" && strings.TrimSpace(row.SessionName) != t.name {
 		return false
 	}
-	return rowBasisOf(t.view.It.Key, row) == t.basis &&
-		reflect.DeepEqual(session.LifecycleInputFromInfo(row), session.LifecycleInputFromInfo(t.expect))
+	switch rule {
+	case premiseOwnToken:
+		// After the effect's own write: holding its token, and creating,
+		// active or awake, so a kill fence (asleep, same token) refuses.
+		switch session.State(strings.TrimSpace(row.MetadataState)) {
+		case session.StateCreating, session.StateActive, session.StateAwake:
+			return t.landed && row.InstanceToken == t.expect.InstanceToken
+		}
+		return false
+	case premiseDefault:
+		return rowBasisOf(t.view.It.Key, row) == t.basis &&
+			reflect.DeepEqual(session.LifecycleInputFromInfo(row), session.LifecycleInputFromInfo(t.expect)) &&
+			(t.needs.Legs&legWork == 0 || t.sameAssignees(row))
+	}
+	return false
+}
+
+// sameAssignees reports that row is assigned work under the identifiers the
+// L5 read used (the expected row's), its alias among them.
+func (t *tx) sameAssignees(row session.Info) bool {
+	var cfg *config.City
+	if t.p.World.Env != nil {
+		cfg = t.p.World.Env.Cfg
+	}
+	return slices.Equal(sessionAssignmentIdentifiersForConfigInfo(row, cfg), sessionAssignmentIdentifiersForConfigInfo(t.expect, cfg))
 }
 
 // rowBasisOf is row's incarnation and token, as the census reads them.
