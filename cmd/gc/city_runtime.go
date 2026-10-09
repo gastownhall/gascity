@@ -3221,6 +3221,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 			cr.cfg,
 			cr.sp,
 			result.snapshotQueryPartial(),
+			clock.Real{},
 		) > 0 {
 			var sessionQueryPartial bool
 			sessionBeads, sessionQueryPartial = cr.loadSessionBeadSnapshotWithPartial()
@@ -3805,12 +3806,13 @@ func sweepUndesiredPoolSessionBeads(
 	cfg *config.City,
 	sp runtime.Provider,
 	storeQueryPartial bool,
+	clk clock.Clock, // its leases, protections and close stamp all read it
 ) int {
 	if store.Store == nil || sessionBeads == nil || cfg == nil || storeQueryPartial {
 		return 0
 	}
 	startupTimeout := cfg.Session.StartupTimeoutDuration()
-	sweepTime := time.Now()
+	sweepTime := clk.Now()
 	var candidates []sessionpkg.Info
 	for _, info := range sessionBeads.OpenInfos() {
 		if info.Closed {
@@ -3836,10 +3838,10 @@ func sweepUndesiredPoolSessionBeads(
 		// on the same tick it's created (no work assigned →
 		// GCSweepSessionBeads closes it), spinning the pool in a rapid
 		// create→sweep→recreate loop.
-		if pendingCreateClaimStillLeasedForSweepInfo(info, startupTimeout) {
+		if pendingCreateLeaseActiveInfo(info, clk, startupTimeout) {
 			continue
 		}
-		if strings.TrimSpace(info.MetadataState) == "creating" && !isStaleCreatingInfo(info) {
+		if strings.TrimSpace(info.MetadataState) == "creating" && !isStaleCreatingInfoAt(info, sweepTime) {
 			continue
 		}
 		// Age grace period for the post-creating, pre-wake window. After
@@ -3907,7 +3909,7 @@ func sweepUndesiredPoolSessionBeads(
 		// front door.
 		candidates = append(candidates, info)
 	}
-	return len(GCSweepSessionBeads(cityPath, store.Store, rigStores, candidates))
+	return len(gcSweepSessionBeadsAt(cityPath, store.Store, rigStores, candidates, sweepTime))
 }
 
 func poolSessionBeadRuntimeRunning(bead beads.Bead, sp runtime.Provider, processNames []string) (bool, error) {
