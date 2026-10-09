@@ -903,8 +903,8 @@ func completeDrain(info sessions.Info, sessFront *sessions.Store, ds *drainState
 	if sessFront == nil {
 		return
 	}
-	batch := sessions.CompleteDrainPatch(info, clk.Now(), ds.reason)
-	_ = sessFront.ApplyPatch(info.ID, batch)
+	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, info.WakeMode == "fresh")
+	_, _ = sessFront.ApplyKeepingUserHold(info.ID, batch)
 }
 
 // verifiedStop stops a session after verifying the instance_token matches.

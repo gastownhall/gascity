@@ -179,15 +179,39 @@ const IndefiniteHoldDuration = 100 * 365 * 24 * time.Hour
 
 // OperatorSuspendPatch is the one shape of an operator's suspend (`gc session
 // suspend`, managed or not, and POST /v0/session/{id}/suspend): an indefinite
-// held_until explained by sleep_intent=user-hold, state=suspended, and the
-// pending wake cleared as newer intent (D7). The intent is what tells the hold
-// from a `gc runtime heartbeat` keep-alive, which writes held_until alone.
+// held_until explained by sleep_intent=user-hold, state=suspended stamped now,
+// and the pending wake cleared as newer intent (D7). The intent is what tells
+// the hold from a `gc runtime heartbeat` keep-alive, which writes held_until
+// alone.
 func OperatorSuspendPatch(now time.Time) MetadataPatch {
 	patch := ClearWakeRequestPatch()
 	patch["held_until"] = now.Add(IndefiniteHoldDuration).UTC().Format(time.RFC3339)
 	patch["sleep_intent"] = string(SleepReasonUserHold)
 	patch["state"] = string(StateSuspended)
+	patch["suspended_at"] = now.UTC().Format(time.RFC3339)
+	patch["slept_at"] = ""
+	patch["sleep_reason"] = ""
 	return patch
+}
+
+// KeepUserHold is patch as written over fresh: when fresh carries an
+// operator's sleep_intent=user-hold, the intent stays, so a sleep decided from
+// an older read (a drain completion, a timer stop, a city stop) never turns
+// the operator's indefinite held_until into a heartbeat hold. The patch
+// carries fresh's value, so a caller folding it onto an older snapshot sees
+// the hold too; write it fenced on fresh's revision, or it could revive a
+// hold cleared since.
+func KeepUserHold(fresh Info, patch MetadataPatch) MetadataPatch {
+	// HoldUser reads no timer, so the clock does not matter here.
+	if _, ok := patch["sleep_intent"]; !ok || HoldsInfo(fresh, time.Time{}).In&HoldUser == 0 {
+		return patch
+	}
+	kept := make(MetadataPatch, len(patch))
+	for k, v := range patch {
+		kept[k] = v
+	}
+	kept["sleep_intent"] = string(SleepReasonUserHold)
+	return kept
 }
 
 // RequestWakePatch records a controller-owned one-shot create claim.
@@ -504,19 +528,11 @@ func AcknowledgeDrainPatch(now time.Time, freshWake bool) MetadataPatch {
 	return patch
 }
 
-// CompleteDrainPatch records info's completed controller drain as ordinary
-// asleep. An operator's suspend outlives the drain it began: the patch leaves
-// sleep_intent=user-hold in place rather than clearing it, so the indefinite
-// held_until never reads as a heartbeat hold that legacy's crash recovery
-// restarts through. Leaving the key unwritten, rather than rewriting it, never
-// revives a hold a wake cleared after info was read.
-func CompleteDrainPatch(info Info, now time.Time, reason string) MetadataPatch {
+// CompleteDrainPatch records a completed controller drain as ordinary asleep.
+func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPatch {
 	patch := SleepPatch(now, reason)
 	patch["state_reason"] = ""
-	if strings.TrimSpace(info.SleepIntent) == string(SleepReasonUserHold) {
-		delete(patch, "sleep_intent")
-	}
-	if info.WakeMode == "fresh" {
+	if freshWake {
 		patch["session_key"] = ""
 		applyFreshWakeConversationReset(patch)
 		patch["continuation_reset_pending"] = "true"

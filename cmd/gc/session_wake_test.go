@@ -959,7 +959,9 @@ func TestAdvanceSessionDrains_ProcessExited(t *testing.T) {
 
 	// No session running (process exited).
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Title:  "test",
 		Metadata: map[string]string{
 			"session_name": "test-session",
 			"template":     "worker",
@@ -1553,7 +1555,9 @@ func TestCompleteDrain_ClearsLastWokeAt(t *testing.T) {
 	store := beads.NewMemStore()
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Title:  "test",
 		Metadata: map[string]string{
 			"session_name": "test-session",
 			"last_woke_at": now.Add(-10 * time.Second).UTC().Format(time.RFC3339),
@@ -1581,7 +1585,9 @@ func TestCompleteDrain_FreshModeClearsIdentity(t *testing.T) {
 	store := beads.NewMemStore()
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Title:  "test",
 		Metadata: map[string]string{
 			"session_name":        "test-session",
 			"wake_mode":           "fresh",
@@ -1615,7 +1621,9 @@ func TestCompleteDrain_ResumeModePreservesIdentity(t *testing.T) {
 	store := beads.NewMemStore()
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Title:  "test",
 		Metadata: map[string]string{
 			"session_name":        "test-session",
 			"wake_mode":           "resume",
@@ -1646,7 +1654,9 @@ func TestCompleteDrain_ClearsPendingCreateClaim(t *testing.T) {
 	store := beads.NewMemStore()
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Title:  "test",
 		Metadata: map[string]string{
 			"session_name":         "test-session",
 			"pending_create_claim": "true",

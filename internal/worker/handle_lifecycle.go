@@ -155,6 +155,21 @@ func (h *SessionHandle) StopForShutdown(ctx context.Context) (err error) {
 	return err
 }
 
+// StopIdle is Stop for the chat idle auto-suspend ([chat_sessions]
+// idle_timeout): it suspends without the operator's hold, so the session
+// resumes on its next wake reason.
+func (h *SessionHandle) StopIdle(ctx context.Context) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationStop)
+	defer func() { event.finish(err) }()
+
+	id := h.currentSessionID()
+	if id == "" {
+		return nil
+	}
+	err = h.manager.SuspendIdle(ctx, id)
+	return err
+}
+
 // Kill terminates the live runtime without mutating the persisted lifecycle.
 func (h *SessionHandle) Kill(ctx context.Context) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationKill)

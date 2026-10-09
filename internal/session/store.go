@@ -404,28 +404,29 @@ func (s *Store) SetState(id string, state State, reason string) error {
 	})
 }
 
-// Sleep records a non-terminal sleep/drain result via SleepPatch. It replaces
-// the max-age and idle-timeout sleep writes in session_reconciler.go.
+// Sleep records a non-terminal sleep/drain result via SleepPatch, keeping an
+// operator's user hold (ApplyKeepingUserHold). The city stop writes it.
 func (s *Store) Sleep(id, reason string, now time.Time) error {
-	return s.ApplyPatch(id, SleepPatch(now, reason))
+	_, err := s.ApplyKeepingUserHold(id, SleepPatch(now, reason))
+	return err
 }
 
-// OperatorSuspend writes an operator's suspend, OperatorSuspendPatch(now) plus
-// extra, decided from a fresh read of the row and fenced on its revision where
-// the store can (UpdateMetadataFenced). A row closed since the caller read it
-// is refused with an illegal-transition error and written nothing; a CAS lost
-// on every attempt writes nothing and returns an error to retry.
-func (s *Store) OperatorSuspend(id string, now time.Time, extra MetadataPatch) error {
+// operatorSuspendAttempts bounds the suspend's CAS retries: an operator's
+// write competes with every controller write to the row.
+const operatorSuspendAttempts = 8
+
+// OperatorSuspend writes an operator's suspend, OperatorSuspendPatch(now),
+// decided from a fresh read of the row and fenced on its revision where the
+// store can (UpdateMetadataFenced). A row closed since the caller read it is
+// refused with an illegal-transition error and written nothing; a CAS lost on
+// every attempt writes nothing and returns an error to retry.
+func (s *Store) OperatorSuspend(id string, now time.Time) error {
 	closed := false
-	ok, err := s.UpdateMetadataFenced(id, 3, func(info Info, _ PersistedResponse) MetadataPatch {
+	ok, err := s.UpdateMetadataFenced(id, operatorSuspendAttempts, func(info Info, _ PersistedResponse) MetadataPatch {
 		if closed = info.Closed; closed {
 			return nil
 		}
-		patch := OperatorSuspendPatch(now)
-		for k, v := range extra {
-			patch[k] = v
-		}
-		return patch
+		return OperatorSuspendPatch(now)
 	})
 	switch {
 	case err != nil:
@@ -436,6 +437,32 @@ func (s *Store) OperatorSuspend(id string, now time.Time, extra MetadataPatch) e
 		return fmt.Errorf("suspending session %q: lost to concurrent writes; retry", id)
 	}
 	return nil
+}
+
+// ApplyKeepingUserHold writes a sleep patch decided from an older read,
+// fenced on a fresh one (UpdateMetadataFenced) and passed through
+// KeepUserHold, so an operator's suspend that landed since keeps its intent.
+// It returns the patch it wrote, for the caller's fold: nil with no error
+// when the row is closed, and an error when every CAS attempt lost.
+func (s *Store) ApplyKeepingUserHold(id string, patch MetadataPatch) (MetadataPatch, error) {
+	var written MetadataPatch
+	closed := false
+	ok, err := s.UpdateMetadataFenced(id, 3, func(info Info, _ PersistedResponse) MetadataPatch {
+		if closed = info.Closed; closed {
+			return nil
+		}
+		written = KeepUserHold(info, patch)
+		return written
+	})
+	switch {
+	case err != nil:
+		return nil, err
+	case closed:
+		return nil, nil
+	case !ok:
+		return nil, fmt.Errorf("writing session %q: lost to concurrent writes; retry", id)
+	}
+	return written, nil
 }
 
 // SetWaitHold sets or clears the wait-hold + sleep-intent markers. Replaces the
