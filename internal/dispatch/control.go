@@ -117,7 +117,7 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 	}
 
 	// Find the most recent attempt.
-	attempt, err := findLatestAttemptWithRoot(store, bead, opts.gateRoot)
+	attempt, err := findLatestAttemptInView(store, bead, opts)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: finding latest %s: %w", bead.ID, strategy.subjectNoun, err)
 	}
@@ -166,6 +166,7 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed: %w", bead.ID, err)
 		}
+		noteWrite(opts, bead.ID, closed)
 		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, withWrittenRow(bead, closed), opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
@@ -186,6 +187,7 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing hard-failed: %w", bead.ID, err)
 		}
+		noteWrite(opts, bead.ID, closed)
 		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, withWrittenRow(bead, closed), opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
@@ -1740,24 +1742,18 @@ func isFailedPartialMolecule(bead beads.Bead) bool {
 // matches the durable gc.control_for lineage stamp (with a legacy ref-string
 // fallback for pre-S38 molecules) and returns the max gc.attempt.
 func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error) {
-	return findLatestAttemptWithRoot(store, control, nil)
+	return findLatestAttemptInView(store, control, ProcessOptions{})
 }
 
-// findLatestAttemptWithRoot is findLatestAttempt reusing root, when non-nil
-// and it is the control's workflow root, instead of reading the root again.
-func findLatestAttemptWithRoot(store beads.Store, control beads.Bead, root *beads.Bead) (beads.Bead, error) {
+// findLatestAttemptInView is findLatestAttempt answered from the invocation's
+// root view (rootViewMembers) when opts carries one.
+func findLatestAttemptInView(store beads.Store, control beads.Bead, opts ProcessOptions) (beads.Bead, error) {
 	rootID := control.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID == "" {
 		rootID = control.ID
 	}
 
-	var all []beads.Bead
-	var err error
-	if root != nil && root.ID == rootID {
-		all, err = beads.DirectMembersWithRoot(store, *root)
-	} else {
-		all, err = beads.DirectMembers(store, rootID)
-	}
+	all, err := rootViewMembers(store, rootID, opts)
 	if err == nil {
 		latest := latestAttemptFromCandidates(control, all)
 		if latest.ID != "" {

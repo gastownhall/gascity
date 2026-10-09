@@ -466,10 +466,10 @@ func TestControlCallBudgetsRetryPath(t *testing.T) {
 // and a write is one.
 var (
 	controlCallBudgetsPass = map[string]callBudget{
-		// gate Get(root), List(root members), close, List(scope body),
-		// List(scope members).
-		"retry/pass@setup":     {reads: 4, writes: 1},
-		"retry/pass@implement": {reads: 4, writes: 1},
+		// gate Get(root), List(root members), close; the scope reconcile is
+		// answered from the root view.
+		"retry/pass@setup":     {reads: 2, writes: 1},
+		"retry/pass@implement": {reads: 2, writes: 1},
 		// Unscoped: gate Get(root), List(root members), close.
 		"retry/pass@report": {reads: 2, writes: 1},
 		// gate Get(root), DepList(subject), Get(subject), List(scope body),
@@ -479,30 +479,30 @@ var (
 		// write.
 		"scope-check/scope-pass@implement": {reads: 6, writes: 2},
 		"retry/retry@cleanup-worktree":     {reads: 8, writes: 5},
-		"retry/pass@cleanup-worktree":      {reads: 6, writes: 1},
+		"retry/pass@cleanup-worktree":      {reads: 2, writes: 1},
 		// DepList + one exact batch for the blockers, one subtree read
 		// (Get(root), ListByMetadata, one batched children read per level),
 		// one batched close-order read.
 		"workflow-finalize/workflow-pass@call-budget.workflow-finalize": {reads: 11, writes: 3},
 	}
 	controlCallBudgetsFail = map[string]callBudget{
-		"retry/hard-fail@setup":                                         {reads: 9, writes: 5},
+		"retry/hard-fail@setup":                                         {reads: 8, writes: 5},
 		"scope-check/scope-fail@setup":                                  {reads: 8, writes: 3},
 		"retry/hard-fail@report":                                        {reads: 2, writes: 1},
 		"retry/retry@cleanup-worktree":                                  {reads: 8, writes: 5},
-		"retry/pass@cleanup-worktree":                                   {reads: 6, writes: 1},
+		"retry/pass@cleanup-worktree":                                   {reads: 2, writes: 1},
 		"workflow-finalize/workflow-fail@call-budget.workflow-finalize": {reads: 10, writes: 3},
 	}
 	controlCallBudgetsRetry = map[string]callBudget{
-		"retry/pass@setup":                                              {reads: 4, writes: 1},
+		"retry/pass@setup":                                              {reads: 2, writes: 1},
 		"scope-check/continue@setup":                                    {reads: 5, writes: 1},
 		"retry/retry@implement":                                         {reads: 9, writes: 7},
-		"retry/pass@implement":                                          {reads: 4, writes: 1},
+		"retry/pass@implement":                                          {reads: 2, writes: 1},
 		"scope-check/continue@implement":                                {reads: 5, writes: 1},
 		"scope-check/scope-pass@implement":                              {reads: 6, writes: 2},
 		"retry/pass@report":                                             {reads: 2, writes: 1},
 		"retry/retry@cleanup-worktree":                                  {reads: 8, writes: 5},
-		"retry/pass@cleanup-worktree":                                   {reads: 6, writes: 1},
+		"retry/pass@cleanup-worktree":                                   {reads: 2, writes: 1},
 		"workflow-finalize/workflow-pass@call-budget.workflow-finalize": {reads: 11, writes: 3},
 	}
 )
