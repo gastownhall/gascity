@@ -53,11 +53,13 @@ package main
 //
 // # Who the denial reaches
 //
-// The proof is PER ID: a refused city's residence probe turns Fatal for an id
-// only when that id has a frozen twin, i.e. when the binding holds the id now,
-// or when the migration's copy manifest records delivering it (the binding's
-// own GC has since removed it, and the retained work-store copy is still the
-// pre-migration one). Every other non-reserved id falls through to the work
+// The proof is PER ID whenever the migration's copy manifest could be read: a
+// refused city's residence probe turns Fatal for an id only when that id has a
+// frozen twin, i.e. when the binding holds the id now, or when the manifest
+// records delivering it (the binding's own GC has since removed it, and the
+// retained work-store copy is still the pre-migration one). With no readable
+// manifest a miss proves nothing, and the binding-wide rule below still
+// applies (bindingGivesIDATwin). Every other non-reserved id falls through to the work
 // ledger exactly as on a refused city with no relics at all, because for that
 // id the work ledger IS the only copy: a bead minted in the work store after the
 // cutover, a rig-shadowed id, or one of the "stranded" infra beads the boot gate
@@ -235,31 +237,51 @@ func censusRefusedCityBindingFor(cityPath, id string) map[storeref.StoreRef]bool
 	}
 	defer routes.close() //nolint:errcheck // a close failure cannot unsay what the census already read
 
-	delivered := migrationDeliveredID(cityPath, cfg)
+	manifest, manifestRead := migrationCopyManifest(cityPath, cfg)
 	bindings, _ := residencyBindingsFromRoutes(routes)
 	proven := make(map[storeref.StoreRef]bool, len(bindings))
 	for _, b := range bindings {
-		if bindingGivesIDATwin(b, id, delivered) {
+		if bindingGivesIDATwin(b, id, manifest, manifestRead) {
 			proven[b.Leg.Ref] = true
 		}
 	}
 	return proven
 }
 
-// bindingGivesIDATwin reports whether the work store's copy of id is a frozen
-// pre-migration twin of a bead this binding owns.
+// bindingGivesIDATwin reports whether the work store's copy of id may be a
+// frozen pre-migration twin of a bead this binding owns, so the by-id read
+// must be denied rather than fall through to the work ledger.
 //
 // A binding that HOLDS id proves it outright: an id outside every reserved
 // namespace (the only kind that reaches a residence probe) can be in the
-// binding only because a migration or recover-stranded carried it across with
-// its id preserved, and neither deletes the source. A binding that no longer
-// holds id still owns it when the copy manifest says the migration delivered
-// it — the binding's own GC hard-deletes expired closed wisps and read mail,
-// and the work store keeps the pre-migration row forever.
+// binding only because a migration or `gc storage recover-stranded` carried it
+// across with its id preserved, and neither deletes the source.
 //
-// Only a completed read proves anything: a Get that fails for any reason other
-// than absence is proof-absent, the same tolerant unknown as the open above.
-func bindingGivesIDATwin(b storeref.ClassBinding, id string, delivered func(string) bool) bool {
+// A binding that does NOT hold id still owns it when the migration delivered it
+// and the binding's own GC has since hard-deleted it (expired closed wisps,
+// read mail) — the work store keeps the pre-migration row forever. Only the
+// copy manifest can tell that id from one that was never migrated, so:
+//
+//   - manifest READ: the per-id rule. Deny iff the manifest lists id. This is
+//     what lets a plain work bead on a refused city with relics (the
+//     maintainer-city shape) reach bd.
+//   - manifest absent (a city converged before the manifest was recorded, a
+//     provider this build resolves no migration target for) or unreadable:
+//     a miss proves nothing, so the pre-per-id rule applies — deny whenever
+//     the binding holds ANY id outside its reserved namespaces. Without that,
+//     a collected relic on a pre-manifest city is served from its frozen copy.
+//
+// recover-stranded edge: it copies stranded beads into the binding with their
+// ids preserved and does not add them to the manifest. While the binding holds
+// them, the Get below denies them; once the binding's GC collects one, the
+// per-id rule lets its work-store row (the pre-recovery copy) be read again.
+// That copy was the authoritative one until the recovery, so the exposure is a
+// closed-and-collected wisp or mail row reading as its pre-recovery state.
+//
+// A Get that fails for any reason other than absence is a failure to decide,
+// and is reported as one: the binding is treated as owning id, so the read is
+// DENIED (an error naming the binding) rather than handed to the work ledger.
+func bindingGivesIDATwin(b storeref.ClassBinding, id string, manifest map[string]bool, manifestRead bool) bool {
 	if b.Leg.Store == nil {
 		return false
 	}
@@ -267,39 +289,45 @@ func bindingGivesIDATwin(b storeref.ClassBinding, id string, delivered func(stri
 	switch {
 	case err == nil:
 		return true
-	case errors.Is(err, beads.ErrNotFound):
-		return delivered(id)
+	case !errors.Is(err, beads.ErrNotFound):
+		return true
+	case manifestRead:
+		return manifest[id]
 	default:
-		return false
+		return bindingHoldsAnyRelic(b)
 	}
 }
 
-// migrationDeliveredID answers "did the infra migration's equality stage prove
-// it copied this id into the binding" from the copy manifest the migration
-// recorded (infra.migrated.beads), the same evidence the boot gate's own
-// containment check classifies GC'd rows by. It is read at most once per call,
-// lazily, and only on a Get miss. A binding this build resolves no migration
-// target for, an absent manifest, or one that cannot be read, answers false:
-// nothing is proved.
-func migrationDeliveredID(cityPath string, cfg *config.City) func(string) bool {
-	var (
-		once     sync.Once
-		manifest map[string]bool
-	)
-	return func(id string) bool {
-		once.Do(func() {
-			target, configured, err := resolveInfraBindingTarget(cityPath, cfg)
-			if err != nil || !configured {
-				return
-			}
-			proven, recorded, err := readInfraCopyManifest(target)
-			if err != nil || !recorded {
-				return
-			}
-			manifest = proven
-		})
-		return manifest[id]
+// bindingHoldsAnyRelic is the city-wide fallback verdict: does the binding hold
+// any id outside its reserved namespaces, closed rows and both tiers included.
+// It asks the store's one-statement census when the store has one and lists the
+// binding only when it does not. A census that could not run proves nothing
+// (false), exactly as the binding-keyed proof always answered.
+func bindingHoldsAnyRelic(b storeref.ClassBinding) bool {
+	if census, ok := beads.NamespaceCensusFor(b.Leg.Store); ok {
+		has, err := census.HasResidentOutside(b.Prefixes)
+		return err == nil && has
 	}
+	return storeref.ProvenLegacyResidents(b) // residency:allow — censuses the binding this proof is about; resolves nothing
+}
+
+// migrationCopyManifest reads the copy manifest the infra migration recorded
+// (infra.migrated.beads): the ids its equality stage proved it copied into the
+// binding, the same evidence the boot gate's containment check classifies
+// GC'd rows by. read=false whenever no manifest was actually read — no
+// migration target this build resolves, no manifest on disk, or one that could
+// not be read — and the caller then falls back to the binding-wide verdict
+// rather than reading the absence as "never delivered".
+func migrationCopyManifest(cityPath string, cfg *config.City) (manifest map[string]bool, read bool) {
+	target, configured, err := resolveInfraBindingTarget(cityPath, cfg)
+	if err != nil || !configured {
+		return nil, false
+	}
+	proven, recorded, err := readInfraCopyManifest(target)
+	if err != nil || !recorded {
+		return nil, false
+	}
+	return proven, true
 }
 
 // refusedBindingIsAlreadyOnDisk reports whether this city's configured binding

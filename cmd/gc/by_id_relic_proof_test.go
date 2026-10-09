@@ -641,22 +641,63 @@ func passthroughFakeBd(t *testing.T, cityPath string) string {
 	return log
 }
 
-// TestGcBdShowOfAWorkIDOnARefusedCityWithRelicsReachesThePassthroughOnce is the
-// maintainer-city shape: the boot gate refuses (790 stranded wisps), the
-// binding holds ~790 migration-preserved relics, and the operator asks for a
-// plain work bead the migration never touched. The class door used to deny it
-// — the relic proof was keyed by binding, so one relic took every non-reserved
-// by-id read away from the city — and `gc bd show <work-id>` exited 1 before
-// bd ever ran. The id has no twin anywhere, so the work ledger is its only
-// copy: the read must reach the passthrough, exactly once.
-func TestGcBdShowOfAWorkIDOnARefusedCityWithRelicsReachesThePassthroughOnce(t *testing.T) {
-	cityPath, _ := foreignProviderCity(t)
-	relic, _ := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "carried across by the migration")
+// refusedSQLiteBindingCity is the maintainer-city fixture: a city whose infra
+// classes moved to a built-in sqlite binding, whose binding holds the given
+// migration-preserved ids, and whose boot gate refuses. manifest==nil writes no
+// copy manifest (a city converged before the manifest was recorded).
+func refusedSQLiteBindingCity(t *testing.T, held, manifest []string) (cityPath string, target infraBindingTarget) {
+	t.Helper()
+	cityPath = oneShotCLICity(t, filepath.Join(t.TempDir(), "store"))
+	captureCLIStorageStderr(t)
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("loading the fixture city: %v", err)
+	}
+	target, configured, err := resolveInfraBindingTarget(cityPath, cfg)
+	if err != nil || !configured {
+		t.Fatalf("the fixture resolved no infra binding target (configured=%v): %v", configured, err)
+	}
+	prefix, err := infraBindingIDPrefix()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := beads.OpenSQLiteStore(target.Dir, beads.WithSQLiteStoreIDPrefix(prefix))
+	if err != nil {
+		t.Fatalf("creating the binding database: %v", err)
+	}
+	for _, id := range held {
+		if _, err := migrationSeed(binding, beads.Bead{ID: id, Title: id, Type: "task"}); err != nil {
+			t.Fatalf("seeding %s in the binding: %v", id, err)
+		}
+	}
+	if err := closeBeadStoreHandle(binding); err != nil {
+		t.Fatalf("closing the binding: %v", err)
+	}
+	if manifest != nil {
+		if err := writeInfraCopyManifest(target, manifest); err != nil {
+			t.Fatalf("recording the copy manifest: %v", err)
+		}
+	}
 	refuseTheseCities(t, theRefusalARefusedCityCarries(), cityPath)
+	return cityPath, target
+}
+
+// TestRelicProofByIDLetsAWorkIDThroughToThePassthroughOnce is the
+// maintainer-city shape: the boot gate refuses (790 stranded wisps), the
+// binding holds migration-preserved relics, the copy manifest is on disk, and
+// the operator asks for a plain work bead the migration never touched. The
+// relic proof used to be keyed by binding, so `gc bd show <work-id>` exited 1
+// before bd ran. The id is in neither the binding nor the manifest, so the work
+// ledger is its only copy: the read must reach the passthrough, exactly once.
+func TestRelicProofByIDLetsAWorkIDThroughToThePassthroughOnce(t *testing.T) {
+	cityPath, _ := refusedSQLiteBindingCity(t, []string{"gc-relic1"}, []string{"gc-relic1"})
 
 	const workID = "gc-work1"
 	if _, ok, err := cliByIDBindingOwner(cityPath, workID); err != nil || ok {
-		t.Fatalf("a work id the binding never held resolved to ok=%v err=%v on a refused city whose binding holds %s; with no twin there is nothing to protect, and denying takes the work ledger's only copy away", ok, err, relic.ID)
+		t.Fatalf("a work id neither held nor delivered resolved to ok=%v err=%v; with no twin there is nothing to protect, and denying takes the work ledger's only copy away", ok, err)
+	}
+	if _, _, err := cliByIDBindingOwner(cityPath, "gc-relic1"); !errors.Is(err, storeref.ErrProvenRelicRefusal) {
+		t.Fatalf("the relic the binding holds resolved to err=%v, want the proven-relic denial", err)
 	}
 
 	log := passthroughFakeBd(t, cityPath)
@@ -674,11 +715,82 @@ func TestGcBdShowOfAWorkIDOnARefusedCityWithRelicsReachesThePassthroughOnce(t *t
 	}
 }
 
-// TestGcBdShowOfAClassOwnedRelicOnARefusedCityIsDeniedPrecisely is the other
+// TestRelicProofByIDDeniesAManifestDeliveredIDTheBindingCollected pins the twin
+// the binding no longer holds: the manifest says the migration delivered it, the
+// binding's GC removed it, and the work store keeps the pre-migration row.
+func TestRelicProofByIDDeniesAManifestDeliveredIDTheBindingCollected(t *testing.T) {
+	cityPath, _ := refusedSQLiteBindingCity(t, []string{"gc-relic1"}, []string{"gc-relic1", "gc-collected1"})
+
+	if _, ok, err := cliByIDBindingOwner(cityPath, "gc-collected1"); !errors.Is(err, storeref.ErrProvenRelicRefusal) {
+		t.Fatalf("an id the manifest records delivering, since collected by the binding, resolved to ok=%v err=%v; its work-store row is the frozen pre-migration copy", ok, err)
+	}
+	if _, ok, err := cliByIDBindingOwner(cityPath, "gc-never1"); err != nil || ok {
+		t.Errorf("an id neither held nor delivered resolved to ok=%v err=%v, want a clean fall-through to the work ledger", ok, err)
+	}
+}
+
+// TestRelicProofByIDFallsBackBindingWideWithoutAReadableManifest is the
+// pre-manifest city: converged before infra.migrated.beads was recorded, and
+// the binding's GC has already collected migrated beads. Nothing can tell a
+// collected id from a never-migrated one, so a miss proves nothing and the
+// binding-wide rule applies: any relic in the binding denies every
+// non-reserved id. An unreadable manifest is the same unknown. A binding with
+// no relic still lets the read through.
+func TestRelicProofByIDFallsBackBindingWideWithoutAReadableManifest(t *testing.T) {
+	t.Run("absent manifest, binding holds a relic", func(t *testing.T) {
+		cityPath, _ := refusedSQLiteBindingCity(t, []string{"gc-relic1"}, nil)
+		if _, ok, err := cliByIDBindingOwner(cityPath, "gc-collected1"); !errors.Is(err, storeref.ErrProvenRelicRefusal) {
+			t.Fatalf("with no manifest, a binding-absent id resolved to ok=%v err=%v; it may be a collected relic whose work-store row is the frozen copy", ok, err)
+		}
+	})
+	t.Run("unreadable manifest, binding holds a relic", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("running as root: a mode-0 file is still readable")
+		}
+		cityPath, target := refusedSQLiteBindingCity(t, []string{"gc-relic1"}, []string{"gc-relic1"})
+		if err := os.Chmod(target.ManifestPath(), 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(target.ManifestPath(), 0o600) })
+		if _, ok, err := cliByIDBindingOwner(cityPath, "gc-collected1"); !errors.Is(err, storeref.ErrProvenRelicRefusal) {
+			t.Fatalf("with an unreadable manifest, a binding-absent id resolved to ok=%v err=%v; a manifest read error is not proof of absence", ok, err)
+		}
+	})
+	t.Run("absent manifest, binding holds no relic", func(t *testing.T) {
+		cityPath, _ := refusedSQLiteBindingCity(t, nil, nil)
+		if _, ok, err := cliByIDBindingOwner(cityPath, "gc-work1"); err != nil || ok {
+			t.Fatalf("a binding with no relic resolved to ok=%v err=%v, want a clean fall-through", ok, err)
+		}
+	})
+}
+
+// faultingGetStore fails every Get with an error that is not absence.
+type faultingGetStore struct{ beads.Store }
+
+func (faultingGetStore) Get(string) (beads.Bead, error) {
+	return beads.Bead{}, errors.New("disk I/O error")
+}
+
+// TestRelicProofByIDDeniesWhenTheBindingCannotAnswer: a binding Get that fails
+// for any reason other than not-found has said nothing about id, so it must
+// deny rather than send the read to the work ledger — even with a manifest that
+// does not list the id.
+func TestRelicProofByIDDeniesWhenTheBindingCannotAnswer(t *testing.T) {
+	b := storeref.ClassBinding{Leg: storeref.Leg{Store: faultingGetStore{beads.NewMemStore()}}}
+	if !bindingGivesIDATwin(b, "gc-work1", map[string]bool{}, true) {
+		t.Fatal("a binding Get fault was read as absence; the by-id read falls through to a possibly frozen work-store copy")
+	}
+	ok := storeref.ClassBinding{Leg: storeref.Leg{Store: beads.NewMemStore()}}
+	if bindingGivesIDATwin(ok, "gc-work1", map[string]bool{}, true) {
+		t.Fatal("a clean miss with a read manifest that does not list the id was denied")
+	}
+}
+
+// TestRelicProofByIDRefusesAClassOwnedRelicPrecisely is the other
 // half: the id the binding DOES hold still has a frozen pre-migration twin in
 // the work store, so it is still refused (ga-q8ick), never handed to bd, and
 // the refusal names the binding, the id, the reason and the way out.
-func TestGcBdShowOfAClassOwnedRelicOnARefusedCityIsDeniedPrecisely(t *testing.T) {
+func TestRelicProofByIDRefusesAClassOwnedRelicPrecisely(t *testing.T) {
 	cityPath, _ := foreignProviderCity(t)
 	relic, _ := classResidentWorkShapedBead(t, cityPath, "gc-relic1", "carried across by the migration")
 	refuseTheseCities(t, theRefusalARefusedCityCarries(), cityPath)
@@ -703,49 +815,5 @@ func TestGcBdShowOfAClassOwnedRelicOnARefusedCityIsDeniedPrecisely(t *testing.T)
 		if !strings.Contains(msg, want) {
 			t.Errorf("the refusal %q does not say %q", msg, want)
 		}
-	}
-}
-
-// TestRefusedCityDeniesAnIDTheCopyManifestDeliveredAndTheBindingCollected pins
-// the twin the binding no longer holds. The binding's own GC hard-deletes
-// expired closed wisps and read mail, and the work store keeps the
-// pre-migration row forever, so "absent from the binding" alone is not "no
-// twin": the copy manifest the migration recorded says it was delivered. An id
-// neither held nor delivered falls through.
-func TestRefusedCityDeniesAnIDTheCopyManifestDeliveredAndTheBindingCollected(t *testing.T) {
-	bindingRoot := filepath.Join(t.TempDir(), "store")
-	cityPath := oneShotCLICity(t, bindingRoot)
-	captureCLIStorageStderr(t)
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		t.Fatalf("loading the fixture city: %v", err)
-	}
-	target, configured, err := resolveInfraBindingTarget(cityPath, cfg)
-	if err != nil || !configured {
-		t.Fatalf("the fixture resolved no infra binding target (configured=%v): %v", configured, err)
-	}
-	prefix, err := infraBindingIDPrefix()
-	if err != nil {
-		t.Fatal(err)
-	}
-	binding, err := beads.OpenSQLiteStore(target.Dir, beads.WithSQLiteStoreIDPrefix(prefix))
-	if err != nil {
-		t.Fatalf("creating the binding database: %v", err)
-	}
-	if err := closeBeadStoreHandle(binding); err != nil {
-		t.Fatalf("closing the binding: %v", err)
-	}
-	const collected = "gc-collected1"
-	if err := writeInfraCopyManifest(target, []string{collected}); err != nil {
-		t.Fatalf("recording the copy manifest: %v", err)
-	}
-
-	refuseTheseCities(t, theRefusalARefusedCityCarries(), cityPath)
-
-	if _, ok, err := cliByIDBindingOwner(cityPath, collected); err == nil || !errors.Is(err, storeref.ErrProvenRelicRefusal) {
-		t.Fatalf("an id the manifest records delivering, since collected by the binding, resolved to ok=%v err=%v; its work-store row is the frozen pre-migration copy", ok, err)
-	}
-	if _, ok, err := cliByIDBindingOwner(cityPath, "gc-never1"); err != nil || ok {
-		t.Errorf("an id neither held nor delivered resolved to ok=%v err=%v, want a clean fall-through to the work ledger", ok, err)
 	}
 }
