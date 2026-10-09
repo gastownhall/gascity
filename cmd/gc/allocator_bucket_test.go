@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"math/rand/v2"
-	"sort"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -11,27 +13,15 @@ import (
 // Kills: refill per pass instead of per patrol interval (per-event passes
 // multiplying the start rate); a bucket that overfills, refills on a clock
 // step back, freezes after one until the clock regains the old mark, or drops
-// its fractional credit; a debit that goes negative; a refund past capacity;
-// a capacity cut on reload left unapplied.
-func TestBucketRefillContinuousCappedDebitRefund(t *testing.T) {
+// its fractional credit; a capacity cut on reload left unapplied.
+func TestBucketRefillContinuousCapped(t *testing.T) {
 	const capacity, interval = 5, 15 * time.Second // one token per 3s
 	t0 := time.Unix(1_000, 0)
 	b := bucketState{}.refill(t0, capacity, interval)
 	if b.Tokens != capacity {
 		t.Fatalf("first refill: %d tokens, want a full bucket", b.Tokens)
 	}
-	var ok bool
-	for i := 0; i < capacity; i++ {
-		if b, ok = b.debit(1); !ok {
-			t.Fatalf("debit %d refused with %d tokens", i, b.Tokens)
-		}
-	}
-	if _, ok = b.debit(1); ok || b.Tokens != 0 {
-		t.Fatalf("debit from empty: ok=%v tokens=%d", ok, b.Tokens)
-	}
-	if b, ok = b.debit(0); !ok {
-		t.Fatal("a prepaid (cost 0) debit was refused on an empty bucket")
-	}
+	b.Tokens = 0 // every token spent
 
 	// 300 passes 10ms apart (3s) accrue exactly one token, like one pass.
 	many := b
@@ -48,8 +38,8 @@ func TestBucketRefillContinuousCappedDebitRefund(t *testing.T) {
 	if half.Tokens != 0 || half.Credit != 1500*time.Millisecond {
 		t.Fatalf("1.5s: %+v, want 0 tokens and 1.5s credit", half)
 	}
-	if got := half.untilTokens(1, capacity, interval); got != 1500*time.Millisecond {
-		t.Fatalf("untilTokens = %v, want 1.5s", got)
+	if got := half.nextToken(capacity, interval); !got.Equal(t0.Add(3 * time.Second)) {
+		t.Fatalf("nextToken = %v, want t0+3s", got)
 	}
 	if got := half.refill(t0.Add(3*time.Second), capacity, interval); got.Tokens != 1 {
 		t.Fatalf("1.5s + 1.5s: %+v, want 1 token", got)
@@ -67,14 +57,8 @@ func TestBucketRefillContinuousCappedDebitRefund(t *testing.T) {
 
 	// The cap: an hour idle fills to capacity with no stored credit.
 	full := b.refill(t0.Add(time.Hour), capacity, interval)
-	if full.Tokens != capacity || full.Credit != 0 || full.untilTokens(1, capacity, interval) != 0 {
+	if full.Tokens != capacity || full.Credit != 0 || !full.nextToken(capacity, interval).IsZero() {
 		t.Fatalf("after an hour: %+v, want full", full)
-	}
-	if got := full.refund(2, capacity); got.Tokens != capacity {
-		t.Fatalf("refund past capacity: %d tokens", got.Tokens)
-	}
-	if got := b.refund(2, capacity); got.Tokens != 2 {
-		t.Fatalf("refund 2 to empty: %d tokens", got.Tokens)
 	}
 	// A reload lowers max_wakes_per_tick: the next refill clamps.
 	if got := full.refill(t0.Add(time.Hour), 2, interval); got.Tokens != 2 {
@@ -91,7 +75,7 @@ func TestBucketRefillGuardsNonPositiveIntervalAndCapacity(t *testing.T) {
 		if b.Tokens != 5 {
 			t.Fatalf("interval %v: first refill %d tokens, want a full bucket", interval, b.Tokens)
 		}
-		b, _ = b.debit(5)
+		b.Tokens = 0
 		for i := 1; i <= 3; i++ {
 			if b = b.refill(t0.Add(time.Duration(i)*time.Hour), 5, interval); b.Tokens != 0 {
 				t.Fatalf("interval %v, pass %d: refilled to %d tokens, want none", interval, i, b.Tokens)
@@ -99,429 +83,40 @@ func TestBucketRefillGuardsNonPositiveIntervalAndCapacity(t *testing.T) {
 		}
 	}
 	b := bucketState{Tokens: 3, LastRefill: t0}.refill(t0.Add(time.Hour), 0, time.Minute)
-	if b.Tokens != 0 || b.Credit != 0 {
-		t.Fatalf("capacity 0: %+v, want empty", b)
+	if b.Tokens != 0 || b.Credit != 0 || !b.nextToken(0, time.Minute).IsZero() {
+		t.Fatalf("capacity 0: %+v, want empty, with no next token", b)
 	}
 }
 
-// Kills: a token leaked or counted twice anywhere in the ledger's life (a
-// release refund applied when the key won the race, a refund on a clear after
-// a release, a provider-called grant refunded, a landed create refunded). The
-// property is I-tokens: once every entry has cleared, debits minus refunds
-// equal the cost of grants whose provider Start was called plus one per
-// create whose row the census showed.
-func TestBucketTokenConservation(t *testing.T) {
-	const capacity = 1 << 20 // never caps a refund, so the level is exact
-	for seed := uint64(1); seed <= 200; seed++ {
-		t.Run(fmt.Sprint(seed), func(t *testing.T) {
-			rng := rand.New(rand.NewPCG(seed, 7))
-			now := time.Unix(1_000, 0)
-			l := newIntentLedger(func() time.Time { return now })
-			b := bucketState{}.refill(now, capacity, time.Minute)
-			rows := make(map[rowKey]ledgerRow) // the census
-			// The model: what the test did to each entry.
-			type model struct {
-				e              ledgerEntry
-				providerCalled bool
-				visible        bool // its marker reached the census before any absent proof
-				absent         bool
-			}
-			ms := make(map[string]*model)
-			var ids []string
-			charged := 0 // expected: provider-called grant costs + visible creates
-			pass := func() {
-				c := ledgerCensusOf(rows, "sessions")
-				for _, e := range l.View() {
-					clears, refund := e.clearVerdict(c, now)
-					if !clears {
-						continue
-					}
-					if !l.Transition(e.ID, e.State, ledgerCleared, nil) {
-						t.Fatalf("clear of %s lost", e.ID)
-					}
-					b = b.refund(refund, capacity)
-					if m := ms[e.ID]; m != nil {
-						if (m.e.Kind == kindGrant && m.providerCalled) || (m.e.Kind == kindCreate && m.visible && !m.absent) {
-							charged += m.e.Cost
-						}
-					}
-				}
-			}
-			for step := 0; step < 60; step++ {
-				now = now.Add(time.Second)
-				var id string
-				if len(ids) > 0 {
-					id = ids[rng.IntN(len(ids))]
-				}
-				m := ms[id]
-				switch op := rng.IntN(9); {
-				case op == 0 || id == "":
-					id = fmt.Sprintf("e%02d", step)
-					var e ledgerEntry
-					if rng.IntN(2) == 0 {
-						e = ledgerCreate(id, "tok-"+id)
-					} else {
-						e = ledgerGrant(id, rowKey{"sessions", "row-" + id}, rng.IntN(2))
-						rows[e.Key] = ledgerRow{Incarnation: 1}
-					}
-					var ok bool
-					if b, ok = b.debit(e.Cost); ok && l.Reserve(e) {
-						ms[id] = &model{e: e}
-						ids = append(ids, id)
-					}
-				case op == 1:
-					if m.e.Kind == kindGrant {
-						l.Issue(id, m.e.Key)
-					} else {
-						l.Transition(id, ledgerReserved, ledgerIssued, nil)
-					}
-				case op == 2:
-					if e, ok := ledgerEntryOf(l, id); ok && e.State == ledgerIssued && e.Kind == kindGrant {
-						l.MarkProviderCalled(id)
-						m.providerCalled = true
-					}
-				case op == 3:
-					l.Commit(id, ledgerMarker{RowID: "row-" + id, Incarnation: 2})
-				case op == 4:
-					l.Fail(id, rng.IntN(2) == 0, ledgerMarker{RowID: "row-" + id, Incarnation: 2})
-				case op == 5:
-					if refund, ok := l.Release(id); ok {
-						b = b.refund(refund, capacity)
-					}
-				case op == 6: // the effect's write reaches the census
-					if e, ok := ledgerEntryOf(l, id); ok && (e.State == ledgerCommitted || e.State == ledgerFailed) && e.WroteRow && !m.absent {
-						rows[rowKey{"sessions", "row-" + id}] = ledgerRow{Incarnation: 2}
-						m.visible = true
-					}
-				case op == 7:
-					if !m.visible && l.ResolveLag(id, lagNotFound) {
-						m.absent = true
-					}
-				default:
-					pass()
-				}
-			}
-			// Quiesce: release what is reserved, finalize what is issued,
-			// let every landed marker reach the census, clear.
-			for _, e := range l.View() {
-				switch e.State {
-				case ledgerReserved:
-					if refund, ok := l.Release(e.ID); ok {
-						b = b.refund(refund, capacity)
-					}
-				case ledgerIssued:
-					l.Fail(e.ID, false, ledgerMarker{})
-				}
-			}
-			for _, e := range l.View() {
-				if m := ms[e.ID]; e.WroteRow && !m.absent {
-					rows[rowKey{"sessions", "row-" + e.ID}] = ledgerRow{Incarnation: 2}
-					m.visible = true
-				}
-			}
-			pass()
-			if left := l.View(); len(left) != 0 {
-				t.Fatalf("entries left at quiescence: %+v", left)
-			}
-			if spent := capacity - b.Tokens; spent != charged {
-				t.Fatalf("tokens spent %d, want %d (I-tokens)", spent, charged)
-			}
-		})
-	}
-}
-
-// flightRow is one session row in the in-flight model: the store's truth,
-// or the cache's lagging copy of it.
-type flightRow struct {
-	ledgerRow
-	Open  bool
-	Owner string // the effect whose start lease or pending create the row carries
-}
-
-// flightEffect is the model's truth about one admitted effect.
-type flightEffect struct {
-	kind    ledgerKind
-	key     rowKey // grant: its row; create: the row it writes
-	token   string
-	written bool  // its write landed in the store
-	inc     int64 // grant: the incarnation its write sets
-}
-
-// Kills (I-ledger, C5.13): an effect counted zero times or twice by
-// cityInFlight on the view a pass counts, before or after the pass clears
-// entries. Random interleavings cover census lag (writes reach the cache
-// late, singly), rows closing and leases ending under the ledger, lag repair
-// that reports the store's truth (and installs what it found), reserve TTL,
-// release racing issue in both orders, and settles that land before or
-// after the census shows the write. Every effect truly in flight must be
-// represented, by an entry that counts or by a census row that carries its
-// lease or pending create, and cityInFlight must equal the number of effects
-// represented. Lag repair is truthful: a write never lands after a read
-// proved it absent (TestLedgerMarkerBeatsLateAbsenceProof covers the
-// census showing such a write).
-func TestLedgerInFlightExactlyOnce(t *testing.T) {
-	seeds, steps := 3000, 80
-	if testing.Short() {
-		seeds = 300
-	}
-	for seed := uint64(1); seed <= uint64(seeds); seed++ {
-		runInFlightModel(t, seed, steps)
-		if t.Failed() {
-			return
-		}
-	}
-}
-
-func runInFlightModel(t *testing.T, seed uint64, steps int) {
-	t.Helper()
-	rng := rand.New(rand.NewPCG(seed, 11))
-	now := time.Unix(1_000, 0)
-	l := newIntentLedger(func() time.Time { return now })
-	store := make(map[rowKey]flightRow)
-	cache := make(map[rowKey]flightRow) // open rows only, as delivered
-	for i := 0; i < 4; i++ {
-		k := rowKey{"sessions", fmt.Sprintf("gc-%d", i)}
-		store[k] = flightRow{ledgerRow: ledgerRow{Incarnation: 1}, Open: true}
-		cache[k] = store[k]
-	}
-	effects := make(map[string]*flightEffect)
-	var ids []string
-	step := 0
-	census := func() ledgerCensus {
-		rows := make(map[rowKey]ledgerRow, len(cache))
-		for k, r := range cache {
-			rows[k] = r.ledgerRow
-		}
-		return ledgerCensusOf(rows, "sessions")
-	}
-	deliver := func(k rowKey) {
-		if r, ok := store[k]; ok && r.Open {
-			cache[k] = r
-		} else {
-			delete(cache, k)
-		}
-	}
-	entryOf := func(id string) (ledgerEntry, bool) { return ledgerEntryOf(l, id) }
-	check := func(phase string) {
-		t.Helper()
-		view, c := l.View(), census()
-		live := make(map[string]ledgerEntry, len(view))
-		represented := make(map[string]bool)
-		for _, e := range view {
-			live[e.ID] = e
-			if ledgerCounts(e) {
-				represented[e.ID] = true
-			}
-		}
-		for _, r := range cache {
-			if r.StartLease || r.PendingCreate {
-				represented[r.Owner] = true
-			}
-		}
-		for id, f := range effects {
-			e, ok := live[id]
-			inFlight := ok && (e.State == ledgerReserved || e.State == ledgerIssued)
-			if r := store[f.key]; f.written && r.Open && r.Owner == id && (r.StartLease || r.PendingCreate) {
-				inFlight = true
-			}
-			if inFlight && !represented[id] {
-				t.Fatalf("seed %d step %d %s: %s in flight but unrepresented (entry %+v present=%v)", seed, step, phase, id, e, ok)
-			}
-		}
-		if got := cityInFlight(view, c, nil); got != len(represented) {
-			t.Fatalf("seed %d step %d %s: cityInFlight %d, represented %d: %v\nview %+v\ncache %+v", seed, step, phase, got, len(represented), represented, view, cache)
-		}
-	}
-	pass := func() {
-		check("pre-clear")
-		c := census()
-		for _, e := range l.View() {
-			if clears, _ := e.clearVerdict(c, now); clears && !l.Transition(e.ID, e.State, ledgerCleared, nil) {
-				t.Fatalf("seed %d step %d: clear of %s lost", seed, step, e.ID)
-			}
-		}
-		check("post-clear")
-		for _, e := range l.View() {
-			if e.reserveExpired(now) {
-				l.Release(e.ID)
-			}
-		}
-	}
-	pick := func() (string, *flightEffect) {
-		if len(ids) == 0 {
-			return "", nil
-		}
-		id := ids[rng.IntN(len(ids))]
-		return id, effects[id]
-	}
-	pickRow := func(m map[rowKey]flightRow) (rowKey, bool) {
-		keys := make([]rowKey, 0, len(m))
-		for k := range m {
-			keys = append(keys, k)
-		}
-		if len(keys) == 0 {
-			return rowKey{}, false
-		}
-		sort.Slice(keys, func(i, j int) bool { return keys[i].ID < keys[j].ID })
-		return keys[rng.IntN(len(keys))], true
-	}
-	for ; step < steps; step++ {
-		now = now.Add(time.Duration(rng.IntN(16)) * time.Second)
-		id, f := pick()
-		switch op := rng.IntN(12); op {
-		case 0: // reserve a grant for an idle row the census shows
-			k, ok := pickRow(cache)
-			if !ok || cache[k].StartLease || cache[k].PendingCreate {
-				continue
-			}
-			// C5.5: no other uncleared entry for the row, matched by key or,
-			// for a create the census shows before it settles, by token.
-			busy := false
-			for _, e := range l.View() {
-				busy = busy || (e.Kind != kindVeto && e.Key == k) ||
-					(e.Kind == kindCreate && e.Marker.InstanceToken == cache[k].InstanceToken)
-			}
-			gid := fmt.Sprintf("g%02d", step)
-			if !busy && l.Reserve(ledgerGrant(gid, k, rng.IntN(2))) {
-				effects[gid] = &flightEffect{kind: kindGrant, key: k}
-				ids = append(ids, gid)
-			}
-		case 1: // reserve a create
-			cid := fmt.Sprintf("c%02d", step)
-			e := ledgerCreate(cid, "tok-"+cid)
-			if l.Reserve(e) {
-				effects[cid] = &flightEffect{kind: kindCreate, key: rowKey{"sessions", "row-" + cid}, token: "tok-" + cid}
-				ids = append(ids, cid)
-			}
-		case 2: // the key or executor issues
-			if f == nil {
-				continue
-			}
-			if f.kind == kindGrant {
-				l.Issue(id, f.key)
-			} else {
-				l.Transition(id, ledgerReserved, ledgerIssued, nil)
-			}
-		case 3: // the allocator releases
-			if f != nil {
-				l.Release(id)
-			}
-		case 4: // the effect's write lands, before or after its settle
-			e, ok := entryOf(id)
-			// Issued, or committed without its write (ambiguous).
-			if !ok || f.written || e.Repair != 0 || (e.State != ledgerIssued && e.State != ledgerCommitted) {
-				continue
-			}
-			if f.kind == kindGrant {
-				r := store[f.key]
-				if !r.Open || (e.State == ledgerCommitted && r.Incarnation+1 != e.Marker.Incarnation) {
-					continue
-				}
-				r.Incarnation++
-				r.StartLease, r.PendingCreate, r.Owner = true, false, id
-				store[f.key], f.inc, f.written = r, r.Incarnation, true
-			} else {
-				store[f.key] = flightRow{ledgerRow: ledgerRow{Incarnation: 1, InstanceToken: f.token, PendingCreate: true}, Open: true, Owner: id}
-				f.written = true
-			}
-		case 5: // the effect settles
-			e, ok := entryOf(id)
-			if !ok || e.State != ledgerIssued {
-				continue
-			}
-			if f.kind == kindGrant && rng.IntN(2) == 0 {
-				l.MarkProviderCalled(id)
-			}
-			var m ledgerMarker
-			switch {
-			case f.kind == kindGrant && f.written:
-				m.Incarnation = f.inc
-			case f.kind == kindGrant:
-				m.Incarnation = store[f.key].Incarnation + 1 // what PreWake would write
-			case f.written:
-				m.RowID = f.key.ID
-			}
-			switch {
-			case f.written && rng.IntN(2) == 0:
-				l.Fail(id, true, m)
-			case f.written:
-				l.Commit(id, m)
-			case rng.IntN(2) == 0:
-				l.Fail(id, false, ledgerMarker{})
-			default:
-				l.Commit(id, m) // ambiguous: the write may yet land
-			}
-		case 6, 7: // one row's latest state reaches the cache
-			if k, ok := pickRow(store); ok {
-				deliver(k)
-			}
-		case 8: // a row closes
-			if k, ok := pickRow(store); ok {
-				r := store[k]
-				r.Open = false
-				store[k] = r
-			}
-		case 9: // a start lease or pending create ends
-			if k, ok := pickRow(store); ok {
-				r := store[k]
-				r.StartLease, r.PendingCreate = false, false
-				store[k] = r
-			}
-		case 10: // lag repair reads the store and reports its truth
-			c := census()
-			for _, e := range l.View() {
-				if !e.lagging(c, now) {
-					continue
-				}
-				f := effects[e.ID]
-				k := f.key
-				r, found := store[k]
-				if f.kind == kindCreate && found && r.InstanceToken != f.token {
-					found = false
-				}
-				o := e.lagOutcomeOf(k, r.ledgerRow, found, r.Open)
-				if o == lagInstalled {
-					cache[k] = r
-				}
-				if o != lagInstalled && f.written && r.Open {
-					t.Fatalf("seed %d step %d: truthful read of written %s reported %d", seed, step, e.ID, o)
-				}
-				l.ResolveLag(e.ID, o)
-			}
-		default:
-			pass()
-		}
-	}
-	pass()
-}
-
-// Kills: admission past the bucket or the city cap; a half-open endpoint
-// admitting a herd; an open endpoint admitting anything.
+// Kills: admission past the bucket or the city cap, including a start
+// admitted on an empty bucket; a half-open endpoint admitting a herd; an
+// open endpoint admitting anything; admission demanding more than the one
+// token a start costs; a refusal reported under the wrong cause.
 func TestAdmitStartTokensCapAndBreaker(t *testing.T) {
 	two := bucketState{Tokens: 2}
+	one := bucketState{Tokens: 1}
 	empty := bucketState{}
 	tests := []struct {
 		name        string
 		b           bucketState
-		cost        int
 		inFlight    int
 		gate        endpointGate
 		outstanding int
-		want        bool
+		want        string
 	}{
-		{"closed, budget and slot", two, 1, 0, gateClosed, 3, true},
-		{"no tokens", empty, 1, 0, gateClosed, 0, false},
-		{"prepaid on an empty bucket", empty, 0, 0, gateClosed, 0, true},
-		{"city cap reached", two, 0, 5, gateClosed, 0, false},
-		{"one under the cap", two, 1, 4, gateClosed, 0, true},
-		{"probe, nothing outstanding", two, 1, 0, gateProbe, 0, true},
-		{"probe already outstanding", two, 1, 0, gateProbe, 1, false},
-		{"shut", two, 0, 0, gateShut, 0, false},
+		{"closed, budget and slot", two, 0, gateClosed, 3, ""},
+		{"exactly one token", one, 0, gateClosed, 0, ""},
+		{"no tokens", empty, 0, gateClosed, 0, causeAwaitingBudget},
+		{"city cap reached", two, 5, gateClosed, 0, causeCityCap},
+		{"one under the cap", two, 4, gateClosed, 0, ""},
+		{"probe, nothing outstanding", two, 0, gateProbe, 0, ""},
+		{"probe already outstanding", two, 0, gateProbe, 1, causeEndpointGate},
+		{"shut", two, 0, gateShut, 0, causeEndpointGate},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := admitStart(tt.b, tt.cost, tt.inFlight, 5, tt.gate, tt.outstanding); got != tt.want {
-				t.Fatalf("admitStart = %v, want %v", got, tt.want)
+			if got := admitStart(tt.b, tt.inFlight, 5, tt.gate, tt.outstanding); got != tt.want {
+				t.Fatalf("admitStart = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -576,135 +171,213 @@ func TestEndpointGateZeroValueAdmitsNothing(t *testing.T) {
 		t.Fatalf("zero gate = %d, want shut", forgotten)
 	}
 	gates := map[endpointKey]endpointGate{"provider:a": gateClosed}
-	if admitStart(bucketState{Tokens: 5}, 0, 0, 5, gates["provider:missing"], 0) {
+	if admitStart(bucketState{Tokens: 5}, 0, 5, gates["provider:missing"], 0) == "" {
 		t.Fatal("an uncaptured gate admitted a start")
 	}
-	c := ledgerCensusOf(map[rowKey]ledgerRow{{"sessions", "gc-p"}: {Endpoint: "provider:missing", PendingCreate: true}})
-	if got := cityInFlight(nil, c, gates); got != 1 {
+	rows := []bringUpRow{{Key: rowKey{"sessions", "gc-p"}, Endpoint: "provider:missing", PendingCreate: true}}
+	if got, _ := cityInFlight(inflightView{}, rows, gatesOf(gates)); got != 1 {
 		t.Fatalf("pending row behind an uncaptured gate: in flight %d, want 1", got)
 	}
 }
 
-// Kills: an effect counted twice (entry and row, create and its row's
-// grant), or not at all (a landed grant whose marker the census lags); a
-// failure that wrote nothing hiding the row's own lease; vetoes counted.
-func TestCityInFlightCountsOncePerEffect(t *testing.T) {
-	grant := func(id string, k rowKey, st ledgerState, wrote bool) ledgerEntry {
-		e := ledgerGrant(id, k, 1)
-		e.State, e.WroteRow = st, wrote
-		return e
+func gatesOf(m map[endpointKey]endpointGate) func(endpointKey) (endpointGate, bool) {
+	return func(k endpointKey) (endpointGate, bool) { g, ok := m[k]; return g, ok }
+}
+
+// Kills double counting and dropped bring-ups in the city count (v5 P4): a
+// running start for a row holding a claim counts once; a create whose token
+// a census row carries counts as that row; a running or ambiguous create no
+// row carries counts; a duplicate copy's claim, a row without a claim (a
+// fresh last_woke_at is no lease) and a claim behind a shut endpoint count
+// nothing; a probe-gated backlog counts once in total, its running probe
+// start included; counted names the rows holding a slot.
+func TestCityInFlightCountsDistinctBringUpRowsOnce(t *testing.T) {
+	r := func(id string) rowKey { return rowKey{"sessions", id} }
+	view := inflightView{Entries: []inflightEntry{
+		{Kind: inflightStart, Key: r("started")},
+		{Kind: inflightStart, Key: r("probe-1"), Endpoint: "provider:probe"},
+		{Kind: inflightStart, Key: r("plain")},
+		{Kind: inflightCreate, Token: "tok-landed"},
+		{Kind: inflightCreate, Token: "tok-running"},
+		{Kind: inflightCreate, Token: "tok-ambiguous", Ambiguous: true},
+	}}
+	rows := []bringUpRow{
+		{Key: r("started"), PendingCreate: true},
+		{Key: r("landed"), Token: "tok-landed", PendingCreate: true},
+		{Key: rowKey{"rig", "landed"}, Token: "tok-landed"},
+		{Key: r("woke"), Token: "tok-w"},
+		{Key: r("shut"), Endpoint: "provider:shut", PendingCreate: true},
+		{Key: r("probe-1"), Endpoint: "provider:probe", PendingCreate: true},
+		{Key: r("probe-2"), Endpoint: "provider:probe", PendingCreate: true},
+		{Key: r("probe-3"), Endpoint: "provider:probe", PendingCreate: true},
 	}
-	created := ledgerCreate("c-landed", "tok-landed")
-	created.State, created.WroteRow, created.Key.ID = ledgerCommitted, true, "gc-new"
-	pending := ledgerCreate("c-pending", "tok-pending")
-	rows := map[rowKey]ledgerRow{
-		ledgerRowA:               {StartLease: true},                                  // with a reserved grant
-		ledgerRowB:               {Incarnation: 4},                                    // landed grant, census lagging
-		{"sessions", "gc-c"}:     {StartLease: true},                                  // failed before writing
-		{"sessions", "gc-new"}:   {PendingCreate: true},                               // the landed create's row
-		{"sessions", "gc-tok"}:   {InstanceToken: "tok-pending", PendingCreate: true}, // the pending create's row, by token
-		{"sessions", "gc-lease"}: {StartLease: true},                                  // a start from before the restart
-		{"sessions", "gc-idle"}:  {},                                                  // nothing in flight
+	gates := gatesOf(map[endpointKey]endpointGate{"": gateClosed, "provider:shut": gateShut, "provider:probe": gateProbe})
+	n, counted := cityInFlight(view, rows, gates)
+	// started, probe-1 (the backlog's slot), plain, landed, tok-running, tok-ambiguous.
+	if n != 6 {
+		t.Fatalf("in flight = %d, want 6", n)
 	}
-	view := []ledgerEntry{
-		grant("g-a", ledgerRowA, ledgerReserved, false),
-		grant("g-b", ledgerRowB, ledgerCommitted, true),
-		grant("g-c", rowKey{"sessions", "gc-c"}, ledgerFailed, false),
-		grant("g-new", rowKey{"sessions", "gc-new"}, ledgerReserved, false), // the landed create's prepaid grant
-		created, pending,
-		{ID: "veto", Kind: kindVeto, Key: rowKey{"sessions", "gc-idle"}, State: ledgerCommitted},
+	for _, id := range []string{"started", "probe-1", "probe-2", "probe-3", "plain", "landed"} {
+		if !counted[r(id)] {
+			t.Errorf("%s holds no slot, want one", id)
+		}
 	}
-	// g-a, g-b, gc-c's lease, gc-new (create + grant + row), pending (entry + row), gc-lease.
-	if got := cityInFlight(view, ledgerCensusOf(rows), nil); got != 6 {
-		t.Fatalf("cityInFlight = %d, want 6", got)
+	if counted[r("woke")] || counted[r("shut")] {
+		t.Errorf("counted = %v: a row without a claim, or behind a shut endpoint, holds no slot", counted)
+	}
+	if got, _ := cityInFlight(inflightView{}, rows[5:], gates); got != 1 {
+		t.Fatalf("idle probe backlog: in flight %d, want 1", got)
 	}
 }
 
-// Kills (N32, N33): a create counted only once its row is in the census
-// (a reserved create, or a committed create the census lags, would let the
-// pass admit past the city cap); (N36) a running start's lease dropped
-// because its endpoint's breaker shut after the start was admitted.
-func TestCityInFlightCountsCreatesWithoutRowsAndLeasesBehindShutEndpoints(t *testing.T) {
-	reserved := ledgerCreate("c-reserved", "tok-r")
-	committed := ledgerCreate("c-committed", "tok-c")
-	committed.State, committed.WroteRow, committed.Key.ID = ledgerCommitted, true, "gc-unseen"
-	committed.Marker.RowID = "gc-unseen"
-	empty := ledgerCensusOf(nil, "sessions")
-	for _, tt := range []struct {
-		name string
-		e    ledgerEntry
-	}{{"reserved create (N32)", reserved}, {"committed create, no census row (N33)", committed}} {
-		if got := cityInFlight([]ledgerEntry{tt.e}, empty, nil); got != 1 {
-			t.Errorf("%s: in flight %d, want 1", tt.name, got)
-		}
-		if clears, _ := tt.e.clearVerdict(empty, time.Unix(1_000, 0)); clears {
-			t.Errorf("%s: cleared with no census row", tt.name)
-		}
-	}
-	shut := map[endpointKey]endpointGate{"provider:a": gateShut}
-	c := ledgerCensusOf(map[rowKey]ledgerRow{{"sessions", "gc-run"}: {Endpoint: "provider:a", StartLease: true}})
-	if got := cityInFlight(nil, c, shut); got != 1 {
-		t.Fatalf("start lease behind a shut endpoint (N36): in flight %d, want 1", got)
-	}
-}
-
-// Kills (F5, R-park): rows parked behind a shut endpoint filling the city
-// cap and starving a healthy endpoint; parked rows not counted once their
-// endpoint can admit again.
-func TestCityInFlightParkedPendingCountsOnlyWhileEndpointEligible(t *testing.T) {
-	const capacity = 50
-	rows := make(map[rowKey]ledgerRow)
-	for i := 0; i < capacity; i++ {
-		rows[rowKey{"sessions", fmt.Sprintf("a-%02d", i)}] = ledgerRow{Endpoint: "provider:a", PendingCreate: true}
-	}
-	rows[rowKey{"sessions", "b-live"}] = ledgerRow{Endpoint: "provider:b", StartLease: true}
-	c := ledgerCensusOf(rows)
-	b := bucketState{Tokens: capacity}
-
-	shut := map[endpointKey]endpointGate{"provider:a": gateShut}
-	inFlight := cityInFlight(nil, c, shut)
-	if inFlight != 1 {
-		t.Fatalf("A shut: in flight %d, want 1 (B's lease only)", inFlight)
-	}
-	if !admitStart(b, 1, inFlight, capacity, gateClosed, endpointOutstanding(nil)["provider:b"]) {
-		t.Fatal("B starved behind A's parked rows")
-	}
-	for _, gate := range []endpointGate{gateProbe, gateClosed} {
-		gates := map[endpointKey]endpointGate{"provider:a": gate}
-		if got := cityInFlight(nil, c, gates); got != capacity+1 {
-			t.Fatalf("A gate %d: in flight %d, want %d", gate, got, capacity+1)
-		}
-	}
-}
-
-// Kills: a half-open endpoint admitting a second probe while a grant or a
-// create for it is outstanding; a create and its row's grant counted as two
-// probes; a committed start still blocking the probe.
+// Kills a half-open endpoint admitting a second probe while a start or a
+// create for it runs, or an adopt (which takes no ticket) holding it.
 func TestEndpointOutstanding(t *testing.T) {
-	g := func(id string, k rowKey, ep endpointKey, st ledgerState) ledgerEntry {
-		e := ledgerGrant(id, k, 1)
-		e.Endpoint, e.State = ep, st
-		return e
+	got := endpointOutstanding(inflightView{Entries: []inflightEntry{
+		{Kind: inflightStart, Key: rowKey{"sessions", "a"}, Endpoint: "provider:a"},
+		{Kind: inflightCreate, Token: "t1", Endpoint: "provider:a"},
+		{Kind: inflightCreate, Token: "t2", Endpoint: "provider:b", Ambiguous: true},
+		{Kind: "adopt", Key: rowKey{"sessions", "c"}, Endpoint: "provider:c"},
+	}})
+	if len(got) != 2 || got["provider:a"] != 2 || got["provider:b"] != 1 {
+		t.Fatalf("endpointOutstanding = %v, want provider:a 2, provider:b 1", got)
 	}
-	created := ledgerCreate("c", "tok")
-	created.Endpoint, created.State, created.WroteRow, created.Key.ID = "provider:b", ledgerCommitted, true, "gc-new"
-	reserved := ledgerCreate("c2", "tok2")
-	reserved.Endpoint = "provider:c"
-	view := []ledgerEntry{
-		g("g1", ledgerRowA, "provider:a", ledgerReserved),
-		g("g2", ledgerRowB, "provider:a", ledgerIssued),
-		g("g3", rowKey{"sessions", "gc-3"}, "provider:d", ledgerCommitted),
-		g("g4", rowKey{"sessions", "gc-new"}, "provider:b", ledgerReserved),
-		created, reserved,
-	}
-	got := endpointOutstanding(view)
-	want := map[endpointKey]int{"provider:a": 2, "provider:b": 1, "provider:c": 1}
-	if len(got) != len(want) {
-		t.Fatalf("endpointOutstanding = %v, want %v", got, want)
-	}
-	for k, n := range want {
-		if got[k] != n {
-			t.Fatalf("endpointOutstanding = %v, want %v", got, want)
+}
+
+// lagEffect is one effect in the census-lag model: a start on a row, or a
+// create under its token, with the passes until it settles. A create lands,
+// fails without writing, or errors ambiguously after its row landed (the
+// cache declines the install, so the census shows the row only lag passes
+// later, perhaps past the hard bound) or before it did.
+type lagEffect struct {
+	kind    string
+	key     rowKey
+	token   string
+	seq     uint64
+	runFor  int
+	outcome int // create: 0 landed, 1 failed, 2 ambiguous and landed, 3 ambiguous and unwritten
+	lag     int
+}
+
+// Kills (I8, P4, P5) a bring-up counted twice or not at all across passes:
+// an ambiguous create cleared before its row shows, counted beside the row
+// that carries its token, or never cleared; a committed start's row still
+// counted. Each pass drains the settlements, applies the census installs due,
+// clears what the census shows, and the city count must equal an oracle over
+// the model's truth: running effects, ambiguous creates within the hard bound
+// whose row the census does not show, and the census's claimed rows, each
+// bring-up once by its token or row. At quiescence the map is empty.
+func TestCityInFlightCensusLagModel(t *testing.T) {
+	closed := func(endpointKey) (endpointGate, bool) { return gateClosed, true }
+	for seed := uint64(1); seed <= 300; seed++ {
+		rng := rand.New(rand.NewPCG(seed, 3))
+		now := time.Unix(10_000, 0)
+		m := newInflightMap()
+		census := make(map[rowKey]bringUpRow)
+		installs := make(map[rowKey]int) // a landed row's census install, in passes
+		var running []*lagEffect
+		ambiguous := make(map[string]time.Time) // token → settled at, until the census shows it
+		next := 0
+		identity := func(r bringUpRow) string {
+			if r.Token != "" {
+				return "tok:" + r.Token
+			}
+			return "row:" + r.Key.ID
+		}
+		pass := func() {
+			now = now.Add(10 * time.Second)
+			var still []*lagEffect
+			for _, e := range running {
+				if e.runFor--; e.runFor > 0 {
+					still = append(still, e)
+					continue
+				}
+				s := settlement{Kind: e.kind, Key: e.key, Token: e.token, Seq: e.seq, At: now}
+				switch {
+				case e.kind == inflightStart: // the commit lands and drops the claim
+					r := census[e.key]
+					r.PendingCreate = false
+					census[e.key] = r
+				case e.outcome == 0:
+					census[e.key] = bringUpRow{Key: e.key, Token: e.token, PendingCreate: true}
+				case e.outcome >= 2:
+					s.Outcome, ambiguous[e.token] = settledAmbiguous, now
+					if e.outcome == 2 {
+						installs[e.key] = e.lag
+					}
+				}
+				m.settle(s)
+			}
+			running = still
+			for k, n := range installs {
+				if n--; n > 0 {
+					installs[k] = n
+					continue
+				}
+				delete(installs, k)
+				census[k] = bringUpRow{Key: k, Token: "tok-" + k.ID, PendingCreate: true}
+			}
+			tokens := make(map[string]bool)
+			rows := make([]bringUpRow, 0, len(census))
+			for _, r := range census {
+				if r.Token != "" {
+					tokens[r.Token] = true
+				}
+				rows = append(rows, r)
+			}
+			m.clearVisible(inflightCensus{Tokens: tokens}, now)
+			want := make(map[string]bool)
+			for _, e := range running {
+				if e.kind == inflightStart {
+					want[identity(census[e.key])] = true
+				} else {
+					want["tok:"+e.token] = true
+				}
+			}
+			for tok, at := range ambiguous {
+				if tokens[tok] || now.Sub(at) >= inflightHardBound {
+					delete(ambiguous, tok)
+				} else {
+					want["tok:"+tok] = true
+				}
+			}
+			for _, r := range rows {
+				if r.PendingCreate {
+					want[identity(r)] = true
+				}
+			}
+			if got, _ := cityInFlight(m.view(), rows, closed); got != len(want) {
+				t.Fatalf("seed %d at %v: in flight %d, want %d (%v)", seed, now, got, len(want), want)
+			}
+		}
+		for step := 0; step < 120; step++ {
+			switch rng.IntN(4) {
+			case 0:
+				next++
+				k := rowKey{"sessions", fmt.Sprintf("gc-%d", next)}
+				e := &lagEffect{kind: inflightCreate, key: k, token: "tok-" + k.ID, runFor: 1 + rng.IntN(3), outcome: rng.IntN(4), lag: 1 + rng.IntN(25)}
+				e.seq = m.add(inflightEntry{Kind: e.kind, Token: e.token})
+				running = append(running, e)
+			case 1:
+				for _, k := range slices.SortedFunc(maps.Keys(census), func(a, b rowKey) int { return strings.Compare(a.ID, b.ID) }) {
+					r := census[k]
+					if !r.PendingCreate {
+						continue
+					}
+					if seq := m.add(inflightEntry{Kind: inflightStart, Key: r.Key}); seq != 0 {
+						running = append(running, &lagEffect{kind: inflightStart, key: r.Key, seq: seq, runFor: 1 + rng.IntN(3)})
+					}
+					break
+				}
+			default:
+				pass()
+			}
+		}
+		for i := 0; i < 40; i++ {
+			pass()
+		}
+		if left := m.view().Entries; len(running) != 0 || len(left) != 0 {
+			t.Fatalf("seed %d: at quiescence %d effects running and %d in-flight entries, want none (I8)", seed, len(running), len(left))
 		}
 	}
 }

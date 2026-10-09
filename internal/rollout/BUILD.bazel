@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "capability.go",
         "doc.go",
+        "flag_beads_allow_schema_behind_migrate.go",
         "flag_beads_conditional_writes.go",
         "flag_beads_guarded_release.go",
         "flag_daemon_formula_v2.go",
@@ -49,6 +50,7 @@ go_test(
     embed = [":rollout"],
     deps = [
         "//internal/config",
+        "//internal/fsys",
         "//internal/testenv",
     ],
 )
@@ -67,6 +69,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

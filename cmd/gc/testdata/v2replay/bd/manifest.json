@@ -1,0 +1,12 @@
+{
+  "city": "bd-city",
+  "exported_at": "2026-10-07T08:00:00.000000+00:00",
+  "rows": {
+    "controller_trace.jsonl": 3,
+    "events.jsonl": 1,
+    "session_rows.jsonl": 4
+  },
+  "session_rows_source": "mdash bead_snapshots, baseline + window",
+  "since": "2026-10-05 00:00:00.000000",
+  "until": "2026-10-05 00:05:00.000000"
+}

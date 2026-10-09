@@ -128,12 +128,14 @@ func (h *RuntimeHandle) Reset(ctx context.Context) (err error) {
 	return err
 }
 
-// Stop asks the provider to stop the live runtime session.
+// Stop asks the provider to stop the live runtime session. A session that is
+// already gone satisfies the request, so it reports success — see
+// [runtime.StopForCleanup].
 func (h *RuntimeHandle) Stop(ctx context.Context) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStop)
 	defer func() { event.finish(err) }()
 
-	err = h.provider.Stop(h.sessionName)
+	err = runtime.StopForCleanup(h.provider, h.sessionName)
 	return err
 }
 
@@ -146,21 +148,25 @@ func (h *RuntimeHandle) StopForShutdown(ctx context.Context) error {
 	return h.Stop(ctx)
 }
 
-// Kill asks the provider to stop the live runtime session immediately.
+// Kill asks the provider to stop the live runtime session immediately. A
+// session that is already gone satisfies the request, so it reports success —
+// see [runtime.StopForCleanup].
 func (h *RuntimeHandle) Kill(ctx context.Context) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationKill)
 	defer func() { event.finish(err) }()
 
-	err = h.provider.Stop(h.sessionName)
+	err = runtime.StopForCleanup(h.provider, h.sessionName)
 	return err
 }
 
-// Close asks the provider to close the live runtime session.
+// Close asks the provider to close the live runtime session. A session that is
+// already gone satisfies the request, so it reports success — see
+// [runtime.StopForCleanup].
 func (h *RuntimeHandle) Close(ctx context.Context) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationClose)
 	defer func() { event.finish(err) }()
 
-	err = h.provider.Stop(h.sessionName)
+	err = runtime.StopForCleanup(h.provider, h.sessionName)
 	return err
 }
 

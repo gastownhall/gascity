@@ -24,11 +24,15 @@ const (
 // be answered from a cache that predates the claim.
 const readyStatusInProgress = "in_progress"
 
+// readyStatusOpen is Gas City's open status: every non-closed bead that is not
+// in_progress (see readOpenStatusCandidates).
+const readyStatusOpen = "open"
+
 // readyKnownStatuses is the closed set --status accepts. It is closed on
 // purpose: an unrecognized status matches no bead in any store, so accepting one
 // would answer a typo with an empty array — the fail-open this whole command
 // exists to close, reappearing as a flag bug.
-var readyKnownStatuses = []string{"open", readyStatusInProgress, "blocked", "closed"}
+var readyKnownStatuses = []string{readyStatusOpen, readyStatusInProgress, "blocked", "closed"}
 
 // readyBead is the external wire shape of one row of `gc ready` output.
 //
@@ -73,6 +77,9 @@ type readyBead struct {
 	NoHistory    bool              `json:"no_history,omitempty"`
 	DeferUntil   *time.Time        `json:"defer_until,omitempty"`
 	IsBlocked    *bool             `json:"is_blocked,omitempty"`
+	// CloseReason follows beads.Bead onto the wire so the field set stays the
+	// HTTP Bead shape. Ready rows are open, so it is normally absent.
+	CloseReason string `json:"close_reason,omitempty"`
 	// BlockedBy carries the row's OPEN-or-not blocking dependencies, in bd's
 	// `bd ready --json` shape. It is populated only on the --status in_progress
 	// arm, which is the crash-recovery read: a resumed holder must be told
@@ -141,6 +148,7 @@ func toReadyBead(b beads.Bead) readyBead {
 		NoHistory:    b.NoHistory,
 		DeferUntil:   b.DeferUntil,
 		IsBlocked:    b.IsBlocked,
+		CloseReason:  b.CloseReason,
 	}
 }
 
@@ -415,6 +423,10 @@ func readReadyCandidates(legs []readyLeg, status string) ([]beads.Bead, map[stri
 		items, err := federateReadyBeads(legs, beads.ReadyQuery{TierMode: beads.FederatedReadTier})
 		return items, nil, err
 	}
+	if status == readyStatusOpen {
+		items, err := readOpenStatusCandidates(legs)
+		return items, nil, err
+	}
 	query := beads.ListQuery{
 		Status:   status,
 		TierMode: beads.FederatedReadTier,
@@ -428,6 +440,40 @@ func readReadyCandidates(legs []readyLeg, status string) ([]beads.Bead, map[stri
 		return items, nil, err
 	}
 	return federateListBeadsWithOwner(legs, query)
+}
+
+// readOpenStatusCandidates answers `--status open` with Gas City's "open": every
+// non-closed bead that is not in_progress, whatever richer status its store
+// records.
+//
+// The bd-backed store keeps bd's own statuses (blocked, deferred, hooked,
+// pinned, custom ones like review) and folds them into "open" only when it maps
+// a row (beads.mapBdStatus). A ListQuery{Status: "open"} is pushed down to bd as
+// `--status=open`, which matches only the literal stored "open", so those rows
+// were missing from the open leg — and the blocked leg's bd rows are relabeled
+// "open" and filtered out there too. They were invisible to all four --status
+// legs, which the workflows pack uses as its exhaustive root inventory, so an
+// invisible root could be slung a duplicate child workflow. The native store
+// already answers open as "exclude closed and in_progress"
+// (NativeDoltStore list filter); reading every non-closed row and keeping the
+// mapped "open" ones gives the bd-backed store the same answer without widening
+// ListQuery{Status: "open"} for the controller callers whose readiness gates
+// rely on bd's narrower status (ga-3mv5d3).
+func readOpenStatusCandidates(legs []readyLeg) ([]beads.Bead, error) {
+	items, err := federateListBeads(legs, beads.ListQuery{
+		AllowScan: true,
+		TierMode:  beads.FederatedReadTier,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := items[:0]
+	for _, item := range items {
+		if item.Status == readyStatusOpen {
+			out = append(out, item)
+		}
+	}
+	return out, nil
 }
 
 // readyStatusSelector validates --status and returns the status to list, or ""

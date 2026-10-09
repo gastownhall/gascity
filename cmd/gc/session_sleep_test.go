@@ -388,15 +388,15 @@ func TestReconcilerWakeDemandOverridesSleepSuppressionForMinActive(t *testing.T)
 	decision := AwakeDecision{ShouldWake: true, Reason: "min-active"}
 	eval := wakeEvaluation{Reasons: []WakeReason{WakeConfig}}
 
-	if !wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", false) {
+	if !wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", false, false) {
 		t.Fatal("min-active config wake should override stale interactive sleep suppression")
 	}
-	if wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", true) {
+	if wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", true, false) {
 		t.Fatal("explicit sleep intent should still override min-active demand")
 	}
 
 	scaledDemand := AwakeDecision{ShouldWake: true, Reason: "scaled:demand"}
-	if wakeDemandOverridesSleepSuppression(scaledDemand, eval, policy, map[string]int{"worker": 1}, "worker", false) {
+	if wakeDemandOverridesSleepSuppression(scaledDemand, eval, policy, map[string]int{"worker": 1}, "worker", false, false) {
 		t.Fatal("ordinary interactive pool demand should still honor sleep suppression")
 	}
 }
@@ -409,10 +409,10 @@ func TestReconcilerWakeDemandOverridesSleepSuppressionForAssignedWork(t *testing
 		HasAssignedWork: true,
 	}
 
-	if !wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", false) {
+	if !wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", false, false) {
 		t.Fatal("assigned-work wake should override interactive sleep suppression")
 	}
-	if wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", true) {
+	if wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", true, false) {
 		t.Fatal("explicit sleep intent should still override assigned-work demand")
 	}
 }
@@ -426,13 +426,13 @@ func TestReconcilerWakeDemandOverridesSleepSuppressionForRoutedDemand(t *testing
 	decision := AwakeDecision{ShouldWake: true, Reason: "routed-demand"}
 	eval := wakeEvaluation{Reasons: []WakeReason{WakeWork}}
 
-	if !wakeDemandOverridesSleepSuppression(decision, eval, policy, map[string]int{"worker": 0}, "worker", false) {
+	if !wakeDemandOverridesSleepSuppression(decision, eval, policy, map[string]int{"worker": 0}, "worker", false, false) {
 		t.Fatal("routed demand should override noninteractive sleep suppression when alias suppression zeroed poolDesired")
 	}
-	if !wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", false) {
+	if !wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", false, false) {
 		t.Fatal("routed demand should override noninteractive sleep suppression with no pool entry at all")
 	}
-	if wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", true) {
+	if wakeDemandOverridesSleepSuppression(decision, eval, policy, nil, "worker", true, false) {
 		t.Fatal("explicit sleep intent should still override routed demand")
 	}
 }
@@ -633,6 +633,9 @@ func TestReconcileSessionBeads_IdleLatchedSessionDoesNotWake(t *testing.T) {
 // A dead target has no prompt: a pending probe that cannot answer (here the
 // tmux server is gone) must not lift config suppression and wake an
 // idle-latched session. On main a dead target always read "not pending".
+// The explicit wake request predates the sleep, so it keeps the session in
+// the awake set without overriding the idle latch (explicitWakePendingInfo):
+// only the pending probe could lift the suppression.
 func TestReconcileSessionBeads_PendingUnknownDoesNotWakeIdleLatchedSession(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
@@ -649,6 +652,7 @@ func TestReconcileSessionBeads_PendingUnknownDoesNotWakeIdleLatchedSession(t *te
 		"sleep_policy_fingerprint": policy.Fingerprint,
 		"slept_at":                 env.clk.Time.Add(-2 * time.Minute).UTC().Format(time.RFC3339),
 		"wake_request":             "explicit",
+		"wake_requested_at":        env.clk.Time.Add(-3 * time.Minute).UTC().Format(time.RFC3339),
 	})
 	env.sp.PendingErrors["worker"] = errors.New("capturing pane: no tmux server running")
 

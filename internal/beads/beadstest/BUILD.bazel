@@ -11,6 +11,7 @@ go_library(
     name = "beadstest",
     srcs = [
         "atomic_close_conformance.go",
+        "conditional_labels_conformance.go",
         "conditional_writer_conformance.go",
         "conformance.go",
         "conformance_skips.go",
@@ -44,7 +45,6 @@ go_test(
     deps = [
         "//internal/beads",
         "//internal/testenv",
-        "//internal/testpolicy/waiverclock",
     ],
 )
 
@@ -56,6 +56,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

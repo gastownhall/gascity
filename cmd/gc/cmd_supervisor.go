@@ -1431,8 +1431,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	// Track managed cities via atomic-snapshot registry. API reads are
 	// lock-free (atomic pointer load); mutations go through citiesMu.
 	registry := newCityRegistry()
-	supEvPath := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
-	if supFR, supErr := newFileEventsRecorder(supEvPath, config.EventsConfig{}, stderr); supErr == nil {
+	if supFR, supErr := openSupervisorEventsRecorder(supervisor.RuntimeDir(), stderr); supErr == nil {
 		registry.SetSupervisorRecorder(supFR)
 		defer supFR.Close() //nolint:errcheck
 	}
@@ -1693,7 +1692,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 					fmt.Fprintf(stderr, "gc supervisor: reload: city '%s': state %T has no controller wake; not poked\n", v.Name, v.cs) //nolint:errcheck // best-effort stderr
 					continue
 				}
-				cs.wakeOf().Enqueue(routeReasonSupervisor, reconcilekey.Allocator()) // reload: re-plan each city
+				cs.wakeOf().Enqueue(wakeReasonSupervisor, reconcilekey.Allocator()) // reload: re-plan each city
 			}
 			// Per sd_notify(3) a reload ends with READY=1.
 			notifySdState(stderr, sdnotify.Ready)
@@ -2183,7 +2182,7 @@ func startOneCity(
 
 	// Latch the session reconciler before any init: a refused city must not
 	// start its bead store or open its event log.
-	wiring, wiringErr := newControllerWiring(cfg)
+	wiring, wiringErr := newControllerWiring(cfg, reconcilerModeLookupEnv, stderr)
 	if wiringErr != nil {
 		emitPendingCityCreateFailure(cr, path, cityName, "session_reconciler_refused", wiringErr, stderr)
 		recordInitFailure(cityName, wiringErr.Error())
@@ -2268,8 +2267,7 @@ func startOneCity(
 
 	rec := events.Discard
 	var eventProv events.Provider
-	evPath := filepath.Join(path, ".gc", "events.jsonl")
-	fr, frErr := newFileEventsRecorder(evPath, cfg.Events, stderr)
+	fr, frErr := openSupervisorCityEventsRecorder(path, cfg.Events, stderr)
 	if frErr == nil {
 		rec = fr
 		eventProv = fr
@@ -2288,15 +2286,13 @@ func startOneCity(
 	var cityRuntime *CityRuntime
 	if err := runPostPrepareStep("building_city_runtime", func() error {
 		var runtimeErr error
-		cityRuntime, runtimeErr = newCityRuntime(CityRuntimeParams{
+		cityRuntime, runtimeErr = newCityRuntime(wiring.runtimeParams(CityRuntimeParams{
 			CityPath:                path,
 			CityName:                cityName,
 			TomlPath:                tomlPath,
 			WatchTargets:            watchTargets,
 			ConfigRev:               configRev,
-			ConfigDirty:             wiring.configDirty,
 			Cfg:                     cfg,
-			ReconcilerMode:          wiring.mode,
 			SP:                      sp,
 			Publication:             publication,
 			BuildFn:                 supervisorBuildAgentsFn(path, cityName, stderr),
@@ -2306,10 +2302,6 @@ func startOneCity(
 			PoolSessions:            poolSessions,
 			PoolDeathHandlers:       poolDeathHandlers,
 			ForceStopShutdown:       forceShutdown,
-			ReloadReqCh:             wiring.reloadReqCh,
-			ConvergenceReqCh:        wiring.convergenceReqCh,
-			PokeCh:                  wiring.pokeCh,
-			ControlDispatcherCh:     wiring.controlDispatcherCh,
 			TranscriptMetaEnabled:   transcriptmeta.Enabled(),
 			OnStarted: func() {
 				cr.UpdateCallback(path, func(m *managedCity) {
@@ -2325,7 +2317,7 @@ func startOneCity(
 			LogPrefix: "gc supervisor",
 			Stdout:    stdout,
 			Stderr:    stderr,
-		})
+		}))
 		return runtimeErr
 	}); err != nil {
 		emitPendingCityCreateFailure(cr, path, cityName, "city_runtime_failed", err, stderr)
@@ -2378,6 +2370,7 @@ func startOneCity(
 
 	_ = runPostPrepareStep("starting_bead_event_watcher", func() error {
 		cs.startBeadEventWatcher(cityCtx)
+		cs.startAutocloseSweep(cityCtx)
 		cs.startMaintenanceLoop(cityCtx)
 		return nil
 	})
@@ -2817,6 +2810,12 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': beads health: %v\n", cityName, err) //nolint:errcheck
 		// Non-fatal.
 	}
+	// One-shot is_blocked repair after a bd upgrade (beads#7037). Best-effort:
+	// it warns and retries on the next start instead of failing this one.
+	_ = runStep("repairing_blocked_flags", func() error {
+		startRepairBlockedFlags(cityPath, cfg, stderr, fmt.Sprintf("gc supervisor: city '%s'", cityName))
+		return nil
+	})
 
 	// Resolve formula symlinks.
 	// System formulas/orders now arrive via the core bootstrap pack.

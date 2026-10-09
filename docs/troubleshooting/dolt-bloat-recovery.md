@@ -96,10 +96,63 @@ gc dolt compact --gc-only --only-db <database> --dry-run
 
 `--gc-only` refuses any database under an integrity-quarantine marker; resolve
 the underlying reason (see **Compact Quarantine Reasons** below) before
-reclaiming. Unlike the full `dolt gc --archive-level=1` procedure above,
+reclaiming. Unlike the offline `dolt gc --archive-level=1` procedure above,
 `--gc-only` runs against the live managed server and does not require stopping
 the city — though quiescing writers still makes the GC faster and more
 thorough.
+
+### A full GC canceled at the read timeout
+
+Running against the live managed server has one ceiling of its own. The
+listener's `read_timeout_millis` bounds any statement that produces no rows for
+that long, and `CALL DOLT_GC('--full')` produces none until it finishes, so a
+reclaim that outruns the ceiling is killed by the server and reported as:
+
+```
+compact: db=<database> ... DOLT_GC failed rc=1 duration=21s
+compact: db=<database> error on line 1 for query CALL DOLT_GC('--full'): Error 1105 (HY000): Error in SaveHashes call: SaveHashes, error calling getManyCompressed: context canceled
+compact: db=<database> the managed sql-server ended DOLT_GC after 15s at its listener.read_timeout_millis=15000 ceiling in <runtime>/packs/dolt/dolt-config.yaml — ...
+```
+
+The same kill can also read `connection was closed` or `row read wait bigger
+than connection timeout`. Nothing is wrong with the store. The compactor blames
+the ceiling only when the GC itself ran that long. A GC canceled sooner gets a
+line saying the timeout did not end it; look in the server log for a stop or
+restart instead. Without a readable server config the compactor cannot compare
+the two, so it names the ceiling as the most likely cause. Only the full GC gets
+this line; a failed bare `CALL DOLT_GC()` prints the server error without it.
+
+A failed post-flatten GC leaves a pending-GC marker that retries
+`DOLT_GC('--full')` on every later run. When the compactor blamed the ceiling,
+every retry hits the same ceiling until the ceiling moves; when it said the
+timeout did not end the GC, the marker still retries, but moving
+`read_timeout_millis` is not the remedy. `--gc-only` writes no marker, so rerun
+it after raising the ceiling. Raise the value in `city.toml` past the longest GC
+you have seen; the GC's run time in the compactor's line is the floor. Releases
+through v1.4.2 ship `15000`, the value in the example above; v1.5.0 and later
+default to `120000`, so `120000` is the right first value for a city still on
+`15000`. A city already at `120000` needs a larger number.
+
+```toml
+[dolt]
+read_timeout_millis = 120000
+```
+
+then `gc dolt restart` and retry. Every connection shares this ceiling, and it
+is also the server's only idle-connection reaper, so keep it under half of
+`write_timeout_millis` (default `300000`). To go past `150000`, raise
+`write_timeout_millis` with it, or raise it only for the reclaim and put it
+back afterward. The compactor also caps each call at
+`GC_DOLT_COMPACT_CALL_TIMEOUT_SECS` (default `1800`); a GC that outruns that
+fails with `rc=124` and no server error. A reclaim that needs longer than the
+live server can give it belongs offline: follow the **Recovery Procedure** above
+with `dolt gc --full --archive-level=1` as step 3, which no listener timeout
+bounds and which also rewrites `oldgen`.
+
+The tell that you are looking at this and not a real disconnect is the server
+log: the `client connection went away` line that precedes the failure carries
+`i/o timeout`, not `EOF`, and lands exactly `read_timeout_millis` after the
+connection opened.
 
 ## Compacting a city whose Dolt remote is uncredentialed
 

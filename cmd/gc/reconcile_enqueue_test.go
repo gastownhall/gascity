@@ -432,6 +432,15 @@ func assertWakeSignalsWired(t *testing.T, runtimes []*CityRuntime) {
 
 func TestSupervisorStartOneCityWiresControllerStateWakeSignals(t *testing.T) {
 	wired := captureWiredControllerStates(t)
+	launchSupervisorWireCity(t, "")
+	assertWakeSignalsWired(t, wired())
+}
+
+// launchSupervisorWireCity starts one city through the supervisor's
+// reconcileCities, with daemon appended to its [daemon] section, and stops it
+// when the test ends. It fails the test unless the city finished starting.
+func launchSupervisorWireCity(t *testing.T, daemon string) {
+	t.Helper()
 	t.Setenv("GC_HOME", t.TempDir())
 
 	cityPath := shortSocketTempDir(t, "gc-wire-sup-")
@@ -450,7 +459,7 @@ provider = "fake"
 
 [daemon]
 shutdown_timeout = "100ms"
-`
+` + daemon
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -477,5 +486,4 @@ shutdown_timeout = "100ms"
 	if !strings.Contains(stderr.String(), "Launching city") && !strings.Contains(stdout.String(), "Launching city") {
 		t.Fatalf("city never finished starting (stderr: %s)", stderr.String())
 	}
-	assertWakeSignalsWired(t, wired())
 }

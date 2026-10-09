@@ -147,6 +147,7 @@ func doSuspendCity(fs fsys.FS, cityPath string, suspend bool, jsonOut bool, stdo
 	// (ga-41g9gr).
 	rec := openCityRecorderAt(cityPath, stderr)
 	if suspend {
+		retireSuspendedScopesWithoutController(cityPath, nil, true, stderr)
 		rec.Record(events.Event{
 			Type:  events.CitySuspended,
 			Actor: eventActor(),

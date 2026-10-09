@@ -473,6 +473,81 @@ func TestEnsureCanonicalScopeConfigStateReapsManagedJSONL(t *testing.T) {
 	}
 }
 
+func TestEnsureCanonicalScopeConfigStatePreservesManagedCityAutoExportJSONL(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"id":"gc-1"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: gc\nexport.auto: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("ensureCanonicalScopeConfigState: %v", err)
+	}
+
+	if _, err := os.Stat(jsonlPath); err != nil {
+		t.Fatalf("issues.jsonl removed despite export.auto:true: %v", err)
+	}
+	configData, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(configData), "export.auto: true") {
+		t.Fatalf("canonicalization did not preserve export.auto:true:\n%s", configData)
+	}
+}
+
+// TestEnsureCanonicalScopeConfigStateKeepsJSONLWhenExportAutoUnreadable
+// verifies that the post-canonicalization cleanup fails closed: a config.yaml
+// that cannot be read back may hold the scope's explicit export.auto: true,
+// so the JSONL is left for the store-open reaper to judge. Canonicalization
+// keeps the trailing comment, which the line scanner cannot read past, so the
+// failed read-back must not be retried through it.
+func TestEnsureCanonicalScopeConfigStateKeepsJSONLWhenExportAutoUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"id":"gc-1"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("issue_prefix: gc\nexport.auto: true # keep JSONL for git\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Canonicalization's own read succeeds; ReadExportAuto's read-back fails.
+	fs := &configReadFaultFS{path: configPath, failCalls: map[int]bool{2: true}}
+
+	err := ensureCanonicalScopeConfigState(fs, dir, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("ensureCanonicalScopeConfigState: %v", err)
+	}
+	if fs.calls < 2 {
+		t.Fatalf("injected fault never reached ReadExportAuto (%d config reads)", fs.calls)
+	}
+
+	if _, err := os.Stat(jsonlPath); err != nil {
+		t.Fatalf("issues.jsonl removed although export.auto could not be read back: %v", err)
+	}
+}
+
 func TestProviderLifecycleProcessEnvProjectsResolvedGCBin(t *testing.T) {
 	cityPath := t.TempDir()
 	t.Setenv("GC_BIN", "/tmp/wrong-gc")
@@ -4484,6 +4559,7 @@ func TestGcBeadsBdProxiedExternalTranslatesExactRCFlags(t *testing.T) {
 		"BD_BIN="+bdPath,
 		"GC_BEADS_PROXY_EXTERNAL_HOST=db.example",
 		"GC_BEADS_PROXY_EXTERNAL_PORT=4406",
+		"GC_BEADS_PROXIED_IDLE_TIMEOUT=0",
 		"GC_DOLT=",
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -6602,6 +6678,11 @@ cmd="${1:-}"
     exit 0
     ;;
   migrate)
+    # The ready path may complete pending SCHEMA migrations; only the bare
+    # repo-id migration (no subcommand) is the contract this test pins.
+    if [ "${2:-}" = "schema" ]; then
+      exit 0
+    fi
     : > "$capture_dir/migrate.called"
     exit 0
     ;;
@@ -6730,6 +6811,11 @@ case "$cmd" in
     exit 0
     ;;
   migrate)
+    # The ready path may complete pending SCHEMA migrations; only the bare
+    # repo-id migration (no subcommand) is the contract this test pins.
+    if [ "${2:-}" = "schema" ]; then
+      exit 0
+    fi
     : > "$capture_dir/migrate.called"
     echo 'failed to compute repository ID: not a git repository' >&2
     exit 1
@@ -6865,6 +6951,11 @@ JSON
     exit 0
     ;;
   migrate)
+    # The ready path may complete pending SCHEMA migrations; only the bare
+    # repo-id migration (no subcommand) is the contract this test pins.
+    if [ "${2:-}" = "schema" ]; then
+      exit 0
+    fi
     : > "$capture_dir/migrate.called"
     exit 0
     ;;
@@ -7563,12 +7654,7 @@ esac
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(script, "init", cityPath, "gc", "hq")
-	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
-		"GC_CITY_PATH="+cityPath,
-		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)...)
-	out, err := cmd.CombinedOutput()
+	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
@@ -7596,13 +7682,36 @@ esac
 	}
 }
 
-func runGcBeadsBdHQInitForTest(t *testing.T, script, cityPath, binDir string) ([]byte, error) {
+// runGcBeadsBdHQInitForTest runs the provider script's init for the hub scope
+// ("gc"/"hq") with the stubbed tool directory first on PATH, the way the
+// metadata-only and forced-fallback lifecycle tests all do. extraEnv is
+// appended to the script's environment.
+func runGcBeadsBdHQInitForTest(t *testing.T, script, cityPath, binDir string, extraEnv ...string) ([]byte, error) {
 	t.Helper()
-	cmd := exec.Command(script, "init", cityPath, "gc", "hq")
-	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
+	return runGcBeadsBdInitForTest(t, script, cityPath, binDir, extraEnv, "gc", "hq")
+}
+
+// runGcBeadsBdInitForTest runs the provider script's init for cityPath with
+// initArgs (the prefix, then the optional database) and the stubbed tool
+// directory first on PATH. The init lock lives in a directory of the test's
+// own unless extraEnv names one, so no test waits on, or holds, a lock another
+// test run took. One shared exec site keeps the init tests inside the
+// subprocess census instead of each carrying its own.
+func runGcBeadsBdInitForTest(t *testing.T, script, cityPath, binDir string, extraEnv []string, initArgs ...string) ([]byte, error) {
+	t.Helper()
+	env := append(gcBeadsBdTestHomeEnv(t),
 		"GC_CITY_PATH="+cityPath,
 		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)...)
+	)
+	lockDirSet := false
+	for _, kv := range extraEnv {
+		lockDirSet = lockDirSet || strings.HasPrefix(kv, "GC_DOLT_INIT_LOCK_DIR=")
+	}
+	if !lockDirSet {
+		env = append(env, "GC_DOLT_INIT_LOCK_DIR="+t.TempDir())
+	}
+	cmd := exec.Command(script, append([]string{"init", cityPath}, initArgs...)...)
+	cmd.Env = sanitizedBaseEnv(append(env, extraEnv...)...)
 	return cmd.CombinedOutput()
 }
 
@@ -7745,8 +7854,23 @@ esac
 // but the running server has not cataloged it, so CREATE DATABASE IF NOT EXISTS
 // adopts it rather than creating it. Adoption must not be mistaken for
 // freshness — seeding a version witness there would bypass bd's explicit
-// cross-era migration guard, which must still fire.
+// cross-era migration guard, which must still fire. That holds whether the
+// caller names the database or leaves the script to resolve it from
+// metadata.json, as the provider does for a scope with no database configured.
 func TestGcBeadsBdInitDoesNotSeedVersionWitnessForAdoptedPreExistingDatabase(t *testing.T) {
+	t.Run("explicit database", func(t *testing.T) {
+		assertGcBeadsBdInitSeedsNoWitnessForAdoptedDatabase(t, "gc", "hq")
+	})
+	t.Run("database resolved from metadata", func(t *testing.T) {
+		assertGcBeadsBdInitSeedsNoWitnessForAdoptedDatabase(t, "gc")
+	})
+}
+
+// assertGcBeadsBdInitSeedsNoWitnessForAdoptedDatabase runs init with initArgs
+// over a pre-existing, uncataloged "hq" store and asserts that bd's
+// legacy-workspace guard fires with no version witness seeded.
+func assertGcBeadsBdInitSeedsNoWitnessForAdoptedDatabase(t *testing.T, initArgs ...string) {
+	t.Helper()
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -7858,7 +7982,7 @@ esac
 		t.Fatal(err)
 	}
 
-	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
+	out, err := runGcBeadsBdInitForTest(t, script, cityPath, binDir, nil, initArgs...)
 	if err == nil {
 		t.Fatalf("gc-beads-bd init should surface bd's legacy-workspace guard for an adopted pre-existing database:\n%s", out)
 	}
@@ -7959,12 +8083,7 @@ esac
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(script, "init", cityPath, "gc", "hq")
-	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
-		"GC_CITY_PATH="+cityPath,
-		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)...)
-	out, err := cmd.CombinedOutput()
+	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
@@ -7973,8 +8092,13 @@ esac
 	if err != nil {
 		t.Fatalf("read schema probe count: %v", err)
 	}
-	if got := strings.TrimSpace(string(data)); got != "3" {
-		t.Fatalf("schema probe count = %q, want 3", got)
+	// Probe 1 classifies the store and probes 2-3 are the visibility wait.
+	// Probe 4 is ensure_current_era_version_witness re-reading the schema
+	// state at the moment it decides whether to stamp: it checks that state
+	// itself rather than trusting the caller, because the interrupted-bootstrap
+	// heal that may run in between resets the working set.
+	if got := strings.TrimSpace(string(data)); got != "4" {
+		t.Fatalf("schema probe count = %q, want 4", got)
 	}
 }
 
@@ -8088,12 +8212,7 @@ esac
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(script, "init", cityPath, "gc", "hq")
-	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
-		"GC_CITY_PATH="+cityPath,
-		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)...)
-	out, err := cmd.CombinedOutput()
+	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
@@ -8121,7 +8240,16 @@ esac
 	}
 }
 
-func TestGcBeadsBdInitDropsMetadataBeforeRetryingInitAfterForcedFallback(t *testing.T) {
+// TestGcBeadsBdInitKeepsMetadataAndReseedsForcedOnRetryAfterForcedFallback pins
+// the retry sequence for a metadata-only scope whose forced init "succeeds"
+// but leaves the schema missing.
+//
+// bd >= 1.2 reads a .beads/dolt root with no metadata beside it as a pre-1.0
+// workspace ("legacy Dolt workspace detected") and refuses to init it, so the
+// retry must keep the canonical server-mode metadata in place and let the
+// re-exec's schema-missing branch re-seed with --force. Measured on the real
+// binary (TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind).
+func TestGcBeadsBdInitKeepsMetadataAndReseedsForcedOnRetryAfterForcedFallback(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -8225,12 +8353,7 @@ esac
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(script, "init", cityPath, "gc", "hq")
-	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
-		"GC_CITY_PATH="+cityPath,
-		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)...)
-	out, err := cmd.CombinedOutput()
+	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
@@ -8240,13 +8363,944 @@ esac
 		t.Fatalf("read init state: %v", err)
 	}
 	gotState := string(stateData)
-	for _, want := range []string{
-		"metadata=yes args=init --force --quiet --server -p gc --database hq",
-		"metadata=no args=init --quiet --server -p gc --database hq",
-	} {
-		if !strings.Contains(gotState, want) {
-			t.Fatalf("init state missing %q:\n%s", want, gotState)
+	// Both inits must be forced AND both must keep the metadata: two
+	// identical lines, not one. A Contains over the same string twice proved
+	// only that one forced init ran; the retry that used to drop
+	// metadata.json and re-init plainly would have passed it.
+	want := "metadata=yes args=init --force --quiet --server -p gc --database hq"
+	if got := strings.Count(gotState, want); got != 2 {
+		t.Fatalf("forced-with-metadata inits = %d, want 2:\n%s", got, gotState)
+	}
+	countData, err := os.ReadFile(initCountFile)
+	if err != nil {
+		t.Fatalf("read init count: %v", err)
+	}
+	if got := strings.TrimSpace(string(countData)); got != "2" {
+		t.Fatalf("bd init invocations = %s, want 2", got)
+	}
+}
+
+// TestGcBeadsBdInitRefusesToForceWhenSchemaProbeFailsForAnotherReason pins the
+// third state of the schema probe. With canonical metadata already beside the
+// store, the script decides between "schema present, normalize and exit" and
+// "schema missing, re-seed with --force" from one SELECT against the pinned
+// database. When that SELECT fails for a reason other than the table being
+// absent (here: the server not answering), nothing is known about the
+// database, and the only safe answer is to refuse: a forced init onto a live,
+// migrated database with bd's ordinary uncommitted counters in its working
+// set trips bd's dirty-table guard, which is how CI lost the fresh-city init
+// intermittently before this test existed.
+func TestGcBeadsBdInitRefusesToForceWhenSchemaProbeFailsForAnotherReason(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	materializeBuiltinPacksForTest(t, cityPath)
+	script := gcBeadsBdScriptPath(cityPath)
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
+
+	initArgsFile := filepath.Join(t.TempDir(), "bd-init-args")
+	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
+set -eu
+case "${1:-}" in
+  init)
+    printf '%%s\n' "$*" >> %q
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, initArgsFile))
+
+	probeCountFile := filepath.Join(t.TempDir(), "probe-count")
+	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+case "$query" in
+  'USE `+"`hq`"+`; SELECT 1 FROM config LIMIT 1')
+    count=0
+    if [ -f %q ]; then
+      count=$(cat %q)
+    fi
+    printf '%%s\n' "$((count + 1))" > %q
+    echo "error on line 1 for query USE hq: dial tcp 127.0.0.1:3307: connect: connection refused" >&2
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, probeCountFile, probeCountFile, probeCountFile))
+
+	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
+	if err == nil {
+		t.Fatalf("gc-beads-bd init succeeded although the schema probe never answered:\n%s", out)
+	}
+	if !strings.Contains(string(out), "refusing to force-reinitialize") {
+		t.Fatalf("expected a data-safety refusal, got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "connection refused") {
+		t.Fatalf("refusal must carry the probe's own error, got:\n%s", out)
+	}
+	if args, err := os.ReadFile(initArgsFile); err == nil {
+		t.Fatalf("bd init must not run when the schema state is unknown, ran with:\n%s", args)
+	}
+	count, err := os.ReadFile(probeCountFile)
+	if err != nil {
+		t.Fatalf("probe never ran: %v", err)
+	}
+	if got := strings.TrimSpace(string(count)); got != "3" {
+		t.Fatalf("probe attempts = %s, want 3 (retry an unknown answer before refusing)", got)
+	}
+}
+
+// gcBeadsBdHealTestStubs writes the bd and dolt stubs shared by the
+// interrupted-bootstrap tests. The dolt stub models a pinned "hq" database
+// whose working set is dirty (dolt_status holds rows) and whose issues table
+// holds issueRows rows, and logs every query to sqlLog; the bd stub logs its
+// arguments to bdLog, and to bd-init-lock-fd beside sqlLog when it inherited
+// file descriptor 8, the one init holds its init lock on. Marker files beside
+// sqlLog change the model:
+//
+//   - init-done: bd init has run (the bd stub creates it), so the config
+//     probe answers; until then it reports "table not found", as on a
+//     schema-less database.
+//   - init-fails: bd init fails.
+//   - reset-done: DOLT_RESET('--hard') has run (the dolt stub creates it), so
+//     the working set is clean.
+//   - status-dirty-once: only the first look at the working set finds it
+//     dirty, as when a concurrent initializer commits its migration step
+//     while this init waits for the lock.
+//   - dirty-config: the config table is among the dirty tables.
+//   - status-list-error: listing the dirty tables fails.
+//   - issues-absent: the issues table does not exist.
+//   - issues-probe-error: probing the issues table fails for another reason.
+//   - migrate-remote-refusal: `bd migrate` fails with bd's remote-migrate
+//     gate refusal (#4259).
+//   - migrate-remote-adopt: `bd migrate` fails with the same gate's refusal
+//     to migrate a clone whose remote is already migrated.
+//   - migrate-other-failure: `bd migrate` fails for another reason, with a
+//     message that mentions a remote and a migration.
+//   - migrate-applies: `bd migrate` succeeds and reports the two migrations
+//     it applied, as `bd migrate schema` does.
+//   - bd-version: what `bd version` prints; without it, it prints nothing.
+//   - probe-init-lock: when init writes the issue_prefix config row, after
+//     its migration step, the dolt stub tries to take the init lock
+//     exclusively and creates init-lock-free or init-lock-held.
+func gcBeadsBdHealTestStubs(t *testing.T, binDir, sqlLog, bdLog string, issueRows int) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
+	dir := filepath.Dir(sqlLog)
+	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
+set -eu
+dir=%q
+printf '%%s\n' "$*" >> %q
+if [ -e /dev/fd/8 ]; then printf '%%s\n' "$*" >> "$dir/bd-init-lock-fd"; fi
+case "${1:-}" in
+  version)
+    if [ -f "$dir/bd-version" ]; then cat "$dir/bd-version"; fi
+    ;;
+  init)
+    if [ -f "$dir/init-fails" ]; then
+      echo "Error: failed to initialize the database" >&2
+      exit 1
+    fi
+    : > "$dir/init-done"
+    ;;
+  migrate)
+    if [ -f "$dir/migrate-remote-refusal" ]; then
+      echo "Error: refusing to auto-apply 2 pending schema migrations to a remote-backed database (v60 -> v62): migrating clones independently forks the schema (#4259)" >&2
+      echo "    - You are the designated migrator (only ONE machine should be): migrate," >&2
+      exit 1
+    fi
+    if [ -f "$dir/migrate-remote-adopt" ]; then
+      echo "Error: refusing to migrate a remote-backed database (v60 -> v62): the remote is already migrated — adopt it instead of migrating here (#4259)" >&2
+      exit 1
+    fi
+    if [ -f "$dir/migrate-other-failure" ]; then
+      echo "Error: failed to fetch remote: migration lock held" >&2
+      exit 1
+    fi
+    if [ -f "$dir/migrate-applies" ]; then
+      echo "✓ Applied 2 schema migration(s); schema now at v62"
+    fi
+    ;;
+esac
+exit 0
+`, dir, bdLog))
+	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/bin/sh
+set -eu
+dir=%q
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+printf '%%s\n' "$query" >> %q
+table() { printf '+---+\n| c |\n+---+\n| %%s |\n+---+\n' "$1"; }
+case "$query" in
+  'USE `+"`hq`"+`; SELECT 1 FROM config LIMIT 1')
+    if [ -f "$dir/init-done" ]; then exit 0; fi
+    echo "error on line 1 for query SELECT 1 FROM config LIMIT 1: Error 1146 (HY000): table not found: config" >&2
+    exit 1
+    ;;
+  'USE `+"`hq`"+`; SELECT COUNT(*) FROM dolt_status')
+    if [ -f "$dir/reset-done" ]; then
+      table 0
+    elif [ -f "$dir/status-dirty-once" ] && [ -f "$dir/status-read" ]; then
+      table 0
+    else
+      : > "$dir/status-read"
+      table 2
+    fi
+    exit 0
+    ;;
+  'USE `+"`hq`"+`; SELECT table_name FROM dolt_status')
+    if [ -f "$dir/status-list-error" ]; then
+      echo "error on line 1 for query SELECT table_name FROM dolt_status: Error 1105 (HY000): connection reset by peer" >&2
+      exit 1
+    fi
+    if [ -f "$dir/dirty-config" ]; then
+      printf '+------------+\n| table_name |\n+------------+\n| config     |\n+------------+\n'
+    fi
+    exit 0
+    ;;
+  'USE `+"`hq`"+`; SELECT 1 FROM issues LIMIT 1')
+    if [ -f "$dir/issues-absent" ]; then
+      echo "error on line 1 for query SELECT 1 FROM issues LIMIT 1: Error 1146 (HY000): table not found: issues" >&2
+      exit 1
+    fi
+    if [ -f "$dir/issues-probe-error" ]; then
+      echo "error on line 1 for query SELECT 1 FROM issues LIMIT 1: Error 1105 (HY000): connection reset by peer" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  'USE `+"`hq`"+`; SELECT COUNT(*) FROM issues')
+    table %d
+    exit 0
+    ;;
+  "USE `+"`hq`"+`; CALL DOLT_RESET('--hard')")
+    : > "$dir/reset-done"
+    exit 0
+    ;;
+  *"VALUES ('issue_prefix', "*)
+    if [ -f "$dir/probe-init-lock" ]; then
+      if flock -n -x "${GC_DOLT_INIT_LOCK_DIR:?}/hq.lock" true; then
+        : > "$dir/init-lock-free"
+      else
+        : > "$dir/init-lock-held"
+      fi
+    fi
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, dir, sqlLog, issueRows))
+}
+
+// gcBeadsBdHealTest is one interrupted-bootstrap scenario: a city whose "hq"
+// database is modeled by gcBeadsBdHealTestStubs, and the logs those stubs
+// write.
+type gcBeadsBdHealTest struct {
+	cityPath, script, binDir, sqlLog, bdLog string
+}
+
+// newGcBeadsBdHealTest sets up an interrupted-bootstrap scenario. withMetadata
+// pre-seeds the canonical server-mode metadata.json, which routes init through
+// the metadata-present branch; without it init takes the fresh-scope path.
+// markers names gcBeadsBdHealTestStubs marker files to create up front.
+func newGcBeadsBdHealTest(t *testing.T, withMetadata bool, issueRows int, markers ...string) gcBeadsBdHealTest {
+	t.Helper()
+	h := gcBeadsBdHealTest{cityPath: t.TempDir()}
+	for _, d := range []string{".gc", ".beads"} {
+		if err := os.MkdirAll(filepath.Join(h.cityPath, d), 0o755); err != nil {
+			t.Fatal(err)
 		}
+	}
+	if withMetadata {
+		if err := os.WriteFile(filepath.Join(h.cityPath, ".beads", "metadata.json"),
+			[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	materializeBuiltinPacksForTest(t, h.cityPath)
+	h.script = gcBeadsBdScriptPath(h.cityPath)
+	h.binDir = filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(h.binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logDir := t.TempDir()
+	h.sqlLog = filepath.Join(logDir, "dolt-sql.log")
+	h.bdLog = filepath.Join(logDir, "bd-args.log")
+	gcBeadsBdHealTestStubs(t, h.binDir, h.sqlLog, h.bdLog, issueRows)
+	for _, m := range markers {
+		if err := os.WriteFile(filepath.Join(logDir, m), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return h
+}
+
+// runInit runs the provider script's init for the hub scope; extraEnv is
+// appended to the script's environment.
+func (h gcBeadsBdHealTest) runInit(t *testing.T, extraEnv ...string) ([]byte, error) {
+	t.Helper()
+	return runGcBeadsBdHQInitForTest(t, h.script, h.cityPath, h.binDir, extraEnv...)
+}
+
+// logs returns what the dolt and bd stubs logged, empty for a stub that never
+// ran.
+func (h gcBeadsBdHealTest) logs(t *testing.T) (sql, bdArgs string) {
+	t.Helper()
+	return readGcBeadsBdHealTestLog(t, h.sqlLog), readGcBeadsBdHealTestLog(t, h.bdLog)
+}
+
+// bdInitLockFDArgs returns the arguments of every bd invocation that inherited
+// init's init-lock descriptor (FD 8), empty when none did.
+func (h gcBeadsBdHealTest) bdInitLockFDArgs(t *testing.T) string {
+	t.Helper()
+	return readGcBeadsBdHealTestLog(t, filepath.Join(filepath.Dir(h.sqlLog), "bd-init-lock-fd"))
+}
+
+// readGcBeadsBdHealTestLog returns what a stub logged to path, empty for a log
+// the stub never wrote.
+func readGcBeadsBdHealTestLog(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
+}
+
+// requireFlockForTest skips a test that needs the script to take its init
+// lock: without the host's flock binary op_init takes none, and refuses to
+// reset an interrupted bootstrap or force a reinit at all. It returns the
+// host flock's path.
+func requireFlockForTest(t *testing.T) string {
+	t.Helper()
+	path, err := exec.LookPath("flock")
+	if err != nil {
+		t.Skip("flock not installed")
+	}
+	return path
+}
+
+// installMacOSFlockForTest puts a flock ahead of hostFlock on the script's
+// PATH that refuses a -w timeout of zero or less, as the macOS port
+// (discoteq/flock, `brew install flock`) does where util-linux reads -w 0 as
+// "do not wait", and runs hostFlock for everything else. A test that gives
+// init no wait budget then fails on every host, not only on macOS, when init
+// asks flock for a wait the macOS port refuses.
+func installMacOSFlockForTest(t *testing.T, binDir, hostFlock string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "flock"), fmt.Sprintf(`#!/bin/sh
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-w" ] && [ "$arg" -le 0 ] 2>/dev/null; then
+    echo "flock: timeout must be greater than 0, was $arg" >&2
+    exit 64
+  fi
+  prev="$arg"
+done
+exec %q "$@"
+`, hostFlock))
+}
+
+// failedOnHeldInitLock reports whether init gave up on database hq's init
+// lock because another initializer holds it: the lock error, and nothing
+// from flock itself, which is silent when it finds the lock held and
+// complains only when it refuses its arguments.
+func failedOnHeldInitLock(out []byte, err error) bool {
+	return err != nil &&
+		strings.Contains(string(out), "could not acquire init lock for database 'hq'") &&
+		!strings.Contains(string(out), "flock: ")
+}
+
+// holdGcBeadsBdInitLockForTest takes database db's init lock in lockDir the
+// way a concurrent initializer's op_init does, shared (syscall.LOCK_SH) or
+// exclusive (syscall.LOCK_EX), and holds it until the test ends.
+func holdGcBeadsBdInitLockForTest(t *testing.T, lockDir, db string, how int) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(lockDir, db+".lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	if err := syscall.Flock(int(f.Fd()), how|syscall.LOCK_NB); err != nil {
+		t.Fatalf("hold init lock: %v", err)
+	}
+}
+
+// TestGcBeadsBdInitHealsInterruptedBootstrapBeforeForcing pins the recovery
+// for a gc-created database whose first bd bootstrap died between a
+// migration's DDL and its commit: the working set is dirty, there are no
+// issues, and bd's own one-shot heal cannot arm because bd was not the
+// process that created the database. The script must discard the working
+// set (DOLT_RESET --hard) and only then run the forced init; without the
+// reset, bd's dirty-table guard refuses every later open (CI, 2026-09-02:
+// "pending schema migrations alter pre-existing dirty tables: comments,
+// issues" from migration 0049's ALTERs).
+func TestGcBeadsBdInitHealsInterruptedBootstrapBeforeForcing(t *testing.T) {
+	requireFlockForTest(t)
+	h := newGcBeadsBdHealTest(t, true, 0)
+
+	out, err := h.runInit(t)
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "interrupted bd bootstrap") {
+		t.Fatalf("expected the heal to announce itself, got:\n%s", out)
+	}
+	sql, bdArgs := h.logs(t)
+	if !strings.Contains(sql, "CALL DOLT_RESET('--hard')") {
+		t.Fatalf("expected DOLT_RESET('--hard') on the interrupted bootstrap, got:\n%s", sql)
+	}
+	if !strings.Contains(bdArgs, "init --force --quiet --server -p gc --database hq") {
+		t.Fatalf("expected a forced init after the reset, got:\n%s", bdArgs)
+	}
+	// Order: the reset must precede bd, or bd's guard fires on the dirty set.
+	// The bd stub logs to its own file, so compare against the reset's marker
+	// by re-reading the sql log after the init: any query bd would need comes
+	// after the reset line, and the init itself is the only bd invocation.
+	if strings.Count(bdArgs, "init ") != 1 {
+		t.Fatalf("expected exactly one bd init, got:\n%s", bdArgs)
+	}
+}
+
+// TestGcBeadsBdInitNeverResetsADatabaseWithIssues is the safety half of the
+// heal: the same dirty working set on a database that holds user rows is not
+// a bootstrap, and the script must leave it alone (no DOLT_RESET), forcing
+// the init as before and letting bd's guard speak.
+func TestGcBeadsBdInitNeverResetsADatabaseWithIssues(t *testing.T) {
+	// Without flock the forced init dies at its flock guard, and "no reset"
+	// would hold whatever the zero-issues check decided.
+	requireFlockForTest(t)
+	h := newGcBeadsBdHealTest(t, true, 3)
+
+	out, err := h.runInit(t)
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	}
+	sql, _ := h.logs(t)
+	if strings.Contains(sql, "DOLT_RESET") {
+		t.Fatalf("a database with issues must never be reset, got:\n%s\noutput:\n%s", sql, out)
+	}
+	if strings.Contains(string(out), "interrupted bd bootstrap") {
+		t.Fatalf("heal must not announce on a database with issues:\n%s", out)
+	}
+}
+
+// TestGcBeadsBdInitHealsOnlyAConfirmedInterruptedBootstrap pins what licenses
+// the reset beyond a dirty working set on a database with no issues: no dirty
+// config or metadata table, an issues table that is provably empty or provably
+// absent, and all of it still true once the exclusive init lock is held. A
+// probe that fails for any reason other than the one it asks about leaves the
+// database's contents unknown, and unknown never resets; nor does a working
+// set a concurrent initializer committed while this init waited for the lock.
+// dolt's own "table not found" answer for issues is the one positive row: it
+// proves there are no issues to lose.
+func TestGcBeadsBdInitHealsOnlyAConfirmedInterruptedBootstrap(t *testing.T) {
+	// Every row needs flock, not only the one that resets: without it init
+	// dies at a flock guard (the heal's or the forced init's) before any
+	// reset, and "no reset" would hold whatever the disqualifier decided.
+	requireFlockForTest(t)
+	for _, tc := range []struct {
+		name      string
+		marker    string
+		wantReset bool
+	}{
+		{"user config change pending", "dirty-config", false},
+		{"dirty tables unlistable", "status-list-error", false},
+		{"issues probe unanswered", "issues-probe-error", false},
+		{"concurrent initializer committed while waiting for the lock", "status-dirty-once", false},
+		{"issues table absent", "issues-absent", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newGcBeadsBdHealTest(t, true, 0, tc.marker)
+
+			out, err := h.runInit(t)
+			if err != nil {
+				t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+			}
+			sql, _ := h.logs(t)
+			reset := strings.Contains(sql, "DOLT_RESET")
+			announced := strings.Contains(string(out), "interrupted bd bootstrap")
+			if !tc.wantReset {
+				if reset || announced {
+					t.Fatalf("healed an unconfirmed bootstrap (reset=%v, announced=%v):\n%s\noutput:\n%s", reset, announced, sql, out)
+				}
+				return
+			}
+			if !reset || !announced {
+				t.Fatalf("expected an announced reset (reset=%v, announced=%v):\n%s\noutput:\n%s", reset, announced, sql, out)
+			}
+		})
+	}
+}
+
+// TestGcBeadsBdInitNeverHealsWhileAnotherInitializerHoldsTheLock pins the
+// exclusion half of the heal. A concurrent initializer between one migration
+// step's DDL and its commit shows exactly the signature the heal matches (a
+// dirty working set, no issues), so the reset only ever runs under the
+// database's init lock held exclusively. While another initializer holds that
+// lock, migrating (shared) or forcing a reinit (exclusive), init must give up
+// with the lock error instead of resetting the database or running bd against
+// it, on both paths the heal runs on: a present schema (the ready path) and a
+// missing one (before a forced reinit). Init gets no wait budget, under a
+// flock that refuses a zero wait the way the macOS port does.
+func TestGcBeadsBdInitNeverHealsWhileAnotherInitializerHoldsTheLock(t *testing.T) {
+	hostFlock := requireFlockForTest(t)
+	for _, tc := range []struct {
+		name    string
+		markers []string
+		how     int
+	}{
+		{"schema present, initializer migrating", []string{"init-done"}, syscall.LOCK_SH},
+		{"schema present, initializer forcing a reinit", []string{"init-done"}, syscall.LOCK_EX},
+		{"schema missing, initializer migrating", nil, syscall.LOCK_SH},
+		{"schema missing, initializer forcing a reinit", nil, syscall.LOCK_EX},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newGcBeadsBdHealTest(t, true, 0, tc.markers...)
+			installMacOSFlockForTest(t, h.binDir, hostFlock)
+			lockDir := t.TempDir()
+			holdGcBeadsBdInitLockForTest(t, lockDir, "hq", tc.how)
+
+			out, err := h.runInit(t, "GC_DOLT_INIT_LOCK_DIR="+lockDir, "GC_DOLT_INIT_LOCK_TIMEOUT_MS=0")
+			if !failedOnHeldInitLock(out, err) {
+				t.Fatalf("expected init to fail on the held init lock, got err=%v:\n%s", err, out)
+			}
+			sql, bdArgs := h.logs(t)
+			if strings.Contains(sql, "DOLT_RESET") {
+				t.Fatalf("reset a database while another initializer held its lock:\n%s", sql)
+			}
+			if strings.Contains(bdArgs, "migrate") || strings.Contains(bdArgs, "init ") {
+				t.Fatalf("ran bd against a database while another initializer held its lock:\n%s", bdArgs)
+			}
+		})
+	}
+}
+
+// TestGcBeadsBdInitMigrationStepsHoldTheInitLockShared pins the lock mode of
+// init's two migration steps, `bd migrate schema` on the ready path and the
+// plain `bd init`: each runs alongside another initializer's migration (both
+// hold the lock shared, so migrations never queue behind one another, as they
+// did not before the lock existed), and neither runs while another initializer
+// holds the lock exclusively to reset the database or force a reinit. Init
+// gets no wait budget, under a flock that refuses a zero wait the way the
+// macOS port does.
+func TestGcBeadsBdInitMigrationStepsHoldTheInitLockShared(t *testing.T) {
+	hostFlock := requireFlockForTest(t)
+	for _, tc := range []struct {
+		name         string
+		withMetadata bool
+		markers      []string
+		step         string
+		how          int
+	}{
+		{"migrate schema alongside a migrating initializer", true, []string{"init-done", "reset-done"}, "migrate schema", syscall.LOCK_SH},
+		{"migrate schema during an exclusive hold", true, []string{"init-done", "reset-done"}, "migrate schema", syscall.LOCK_EX},
+		{"plain init alongside a migrating initializer", false, []string{"reset-done"}, "init ", syscall.LOCK_SH},
+		{"plain init during an exclusive hold", false, []string{"reset-done"}, "init ", syscall.LOCK_EX},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newGcBeadsBdHealTest(t, tc.withMetadata, 0, tc.markers...)
+			installMacOSFlockForTest(t, h.binDir, hostFlock)
+			lockDir := t.TempDir()
+			holdGcBeadsBdInitLockForTest(t, lockDir, "hq", tc.how)
+
+			out, err := h.runInit(t, "GC_DOLT_INIT_LOCK_DIR="+lockDir, "GC_DOLT_INIT_LOCK_TIMEOUT_MS=0")
+			_, bdArgs := h.logs(t)
+			if tc.how == syscall.LOCK_SH {
+				if err != nil {
+					t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+				}
+				if !strings.Contains(bdArgs, tc.step) {
+					t.Fatalf("expected bd %s, got:\n%s", tc.step, bdArgs)
+				}
+				return
+			}
+			if !failedOnHeldInitLock(out, err) {
+				t.Fatalf("expected init to fail on the held init lock, got err=%v:\n%s", err, out)
+			}
+			if strings.Contains(bdArgs, tc.step) {
+				t.Fatalf("bd %s ran while another initializer held the lock exclusively:\n%s", tc.step, bdArgs)
+			}
+		})
+	}
+}
+
+// TestGcBeadsBdInitNeverHandsItsInitLockToBd pins that no bd command init runs
+// while it holds its init lock inherits the descriptor the lock is held on
+// (FD 8). A flock belongs to the open file, not to the process that took it,
+// so a bd that kept a copy, or anything that bd started, would hold the lock
+// for as long as it ran. Each row has init run bd while it holds the lock:
+// the version witness of a plain init (a shared hold), the witness after a
+// heal (the heal's exclusive hold), and the forensics a failed bd init
+// prints before init dies.
+func TestGcBeadsBdInitNeverHandsItsInitLockToBd(t *testing.T) {
+	requireFlockForTest(t)
+	for _, tc := range []struct {
+		name         string
+		withMetadata bool
+		markers      []string
+		wantErr      bool
+		// wantOut and wantBd are in init's output and bd's arguments once
+		// the row has reached the bd command it is about.
+		wantOut, wantBd string
+	}{
+		{"plain init's version witness", false, []string{"reset-done"}, false, "", "init --quiet --server"},
+		{"healed database's version witness", true, []string{"init-done"}, false, "interrupted bd bootstrap", "migrate schema"},
+		{"failed bd init's forensics", false, []string{"reset-done", "init-fails"}, true, "bd init forensics for database 'hq'", "init --quiet --server"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newGcBeadsBdHealTest(t, tc.withMetadata, 0, tc.markers...)
+
+			out, err := h.runInit(t)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("gc-beads-bd init err = %v, want error %v:\n%s", err, tc.wantErr, out)
+			}
+			_, bdArgs := h.logs(t)
+			if !strings.Contains(string(out), tc.wantOut) || !strings.Contains(bdArgs, tc.wantBd) || !strings.Contains(bdArgs, "version") {
+				t.Fatalf("expected init to run bd version and %q, printing %q; got bd args:\n%s\noutput:\n%s", tc.wantBd, tc.wantOut, bdArgs, out)
+			}
+			if held := h.bdInitLockFDArgs(t); held != "" {
+				t.Fatalf("bd inherited init's init-lock descriptor (FD 8) as:\n%s\noutput:\n%s", held, out)
+			}
+		})
+	}
+}
+
+// TestGcBeadsBdInitNamesAnUnopenableInitLock pins what init does when it
+// cannot open its database's init lock file, which every init takes where
+// flock is installed, the ready path included: it fails naming the lock file
+// and GC_DOLT_INIT_LOCK_DIR before running bd, instead of dying on the
+// shell's bare redirection error. In the field that is a lock directory or
+// file another OS user (or a sudo run) left behind, which the mode rows
+// reproduce; the other two rows fail the open for any user, root included,
+// so the guard is exercised whoever runs the test. The open fails before
+// flock is ever run, so a stub stands in for it.
+func TestGcBeadsBdInitNamesAnUnopenableInitLock(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// lockDir lays out base so that init cannot open the "hq" lock file
+		// in the directory it returns.
+		lockDir func(t *testing.T, base string) string
+		// modeBased rows rely on file modes, which root bypasses.
+		modeBased bool
+	}{
+		{"lock directory not writable", func(t *testing.T, base string) string {
+			if err := os.Chmod(base, 0o555); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(base, 0o755) })
+			return base
+		}, true},
+		{"lock file not writable", func(t *testing.T, base string) string {
+			if err := os.WriteFile(filepath.Join(base, "hq.lock"), nil, 0o444); err != nil {
+				t.Fatal(err)
+			}
+			return base
+		}, true},
+		{"lock directory cannot be created", func(t *testing.T, base string) string {
+			file := filepath.Join(base, "file")
+			if err := os.WriteFile(file, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Join(file, "locks")
+		}, false},
+		{"lock file is a directory", func(t *testing.T, base string) string {
+			if err := os.Mkdir(filepath.Join(base, "hq.lock"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return base
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.modeBased && os.Geteuid() == 0 {
+				t.Skip("root bypasses file modes")
+			}
+			h := newGcBeadsBdHealTest(t, true, 0, "init-done", "reset-done")
+			writeExecutable(t, filepath.Join(h.binDir, "flock"), "#!/bin/sh\nexit 0\n")
+			lockDir := tc.lockDir(t, t.TempDir())
+
+			out, err := h.runInit(t, "GC_DOLT_INIT_LOCK_DIR="+lockDir)
+			named := "could not open init lock for database 'hq' (" + filepath.Join(lockDir, "hq.lock") + ")"
+			if err == nil || !strings.Contains(string(out), named) || !strings.Contains(string(out), "set GC_DOLT_INIT_LOCK_DIR") {
+				t.Fatalf("expected init to fail naming its init lock and GC_DOLT_INIT_LOCK_DIR, got err=%v:\n%s", err, out)
+			}
+			if _, bdArgs := h.logs(t); strings.Contains(bdArgs, "migrate") {
+				t.Fatalf("ran bd migrate without its init lock:\n%s", bdArgs)
+			}
+		})
+	}
+}
+
+// TestGcBeadsBdInitKeepsItsDefaultInitLockPerOSUser pins where init's lock
+// lives when GC_DOLT_INIT_LOCK_DIR is unset: in a directory of this OS user's
+// own under $TMPDIR, so a lock directory or file another user (or a sudo run)
+// created under the same $TMPDIR never stops this user's init.
+func TestGcBeadsBdInitKeepsItsDefaultInitLockPerOSUser(t *testing.T) {
+	h := newGcBeadsBdHealTest(t, true, 0, "init-done", "reset-done")
+	writeExecutable(t, filepath.Join(h.binDir, "flock"), "#!/bin/sh\nexit 0\n")
+	tmp := t.TempDir()
+
+	out, err := h.runInit(t, "GC_DOLT_INIT_LOCK_DIR=", "TMPDIR="+tmp)
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	}
+	lockFile := filepath.Join(tmp, fmt.Sprintf("gc-beads-bd-init-locks-%d", os.Geteuid()), "hq.lock")
+	if _, err := os.Stat(lockFile); err != nil {
+		t.Fatalf("expected init's lock at %s: %v\noutput:\n%s", lockFile, err, out)
+	}
+}
+
+// TestGcBeadsBdInitWarnsOnlyOnBdsRemoteMigrateRefusal pins how the ready path
+// treats a failed `bd migrate schema`. bd's remote-migrate gate (#4259) is an
+// operator decision, not a broken bootstrap, so its refusals (to auto-apply
+// pending migrations, or to migrate a clone whose remote is already migrated
+// or has forked) are reported and init carries on; any other failure fails
+// init with bd's message, even one that happens to mention a remote and a
+// migration.
+func TestGcBeadsBdInitWarnsOnlyOnBdsRemoteMigrateRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		marker  string
+		wantErr bool
+		want    []string
+	}{
+		{
+			"remote-migrate refusal", "migrate-remote-refusal", false,
+			[]string{"were not applied (remote-backed scope", "refusing to auto-apply 2 pending schema migrations"},
+		},
+		{
+			"remote-migrate refusal of an already-migrated remote", "migrate-remote-adopt", false,
+			[]string{"were not applied (remote-backed scope", "refusing to migrate a remote-backed database"},
+		},
+		{
+			"other failure naming a remote and a migration", "migrate-other-failure", true,
+			[]string{"failed to complete bd schema migrations for database 'hq'", "failed to fetch remote: migration lock held"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newGcBeadsBdHealTest(t, true, 0, "init-done", "reset-done", tc.marker)
+
+			out, err := h.runInit(t)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("gc-beads-bd init err = %v, want error %v:\n%s", err, tc.wantErr, out)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(string(out), want) {
+					t.Fatalf("output missing %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// TestGcBeadsBdInitReportsWhatBdMigrateSchemaApplied pins that the ready
+// path's `bd migrate schema` is not silent when it succeeds. From bd 1.3.0 the
+// verb is also bd's consent to promote the schema of a database on a shared
+// server, which can lock out an older bd that uses the same database
+// (gastownhall/beads#5920), so what bd reports it applied reaches init's
+// output.
+func TestGcBeadsBdInitReportsWhatBdMigrateSchemaApplied(t *testing.T) {
+	h := newGcBeadsBdHealTest(t, true, 0, "init-done", "reset-done", "migrate-applies")
+
+	out, err := h.runInit(t)
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "Applied 2 schema migration(s); schema now at v62") {
+		t.Fatalf("init dropped what bd migrate schema reported it applied:\n%s", out)
+	}
+}
+
+// TestGcBeadsBdInitRunsMigrateSchemaOnlyOnABdThatHasIt pins the bd version
+// floor of the ready path's migration step. `bd migrate schema` arrived in bd
+// 1.0.5. An older bd's `migrate` has no subcommands and takes `schema` as an
+// ignored argument, so it would run the bare metadata migration instead, the
+// repo-id migration this path must not run
+// (TestGcBeadsBdInitUsesProjectIDHelperWithoutRepoIDMigration). A bd that
+// reports an older version therefore skips the step with a warning, and the
+// store open of its next write applies the pending migrations. Every other bd
+// runs it, including one whose version cannot be read. Each row heals the
+// database first, so the step starts under the heal's exclusive hold, and
+// init must drop that hold whichever way the step goes.
+func TestGcBeadsBdInitRunsMigrateSchemaOnlyOnABdThatHasIt(t *testing.T) {
+	requireFlockForTest(t)
+	for _, tc := range []struct {
+		name    string
+		version string
+		wantRun bool
+	}{
+		{"bd 1.0.4", "bd version 1.0.4 (ce242a879: HEAD@ce242a879678)", false},
+		{"v-prefixed bd 1.0.4", "bd version v1.0.4 (dev)", false},
+		{"bd 1.0.4 prerelease", "bd version 1.0.4-rc.1 (dev)", false},
+		{"pre-1.0 bd", "bd version 0.62.0 (dev)", false},
+		{"bd 1.0.5", "bd version 1.0.5 (dev)", true},
+		{"bd 1.0.10", "bd version 1.0.10 (dev)", true},
+		{"bd 1.1.0 prerelease", "bd version 1.1.0-rc.1 (dev)", true},
+		{"bd 1.3.1", "bd version 1.3.1 (c1c4b642a: HEAD@c1c4b642ac1c)", true},
+		{"unreadable version", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newGcBeadsBdHealTest(t, true, 0, "init-done", "probe-init-lock")
+			markers := filepath.Dir(h.sqlLog)
+			if tc.version != "" {
+				if err := os.WriteFile(filepath.Join(markers, "bd-version"), []byte(tc.version+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			out, err := h.runInit(t)
+			if err != nil {
+				t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+			}
+			sql, bdArgs := h.logs(t)
+			if !strings.Contains(sql, "CALL DOLT_RESET('--hard')") {
+				t.Fatalf("expected the heal to run before the migration step, got:\n%s", sql)
+			}
+			const skipped = "predates 'bd migrate schema'"
+			if tc.wantRun {
+				if !strings.Contains(bdArgs, "migrate schema --quiet") || strings.Contains(string(out), skipped) {
+					t.Fatalf("expected bd migrate schema to run, got bd args:\n%s\noutput:\n%s", bdArgs, out)
+				}
+			} else if strings.Contains(bdArgs, "migrate") || !strings.Contains(string(out), skipped) {
+				t.Fatalf("expected bd migrate to be skipped with a warning, got bd args:\n%s\noutput:\n%s", bdArgs, out)
+			}
+			if _, err := os.Stat(filepath.Join(markers, "init-lock-held")); err == nil {
+				t.Fatalf("init still held its init lock after the migration step:\n%s", out)
+			}
+			if _, err := os.Stat(filepath.Join(markers, "init-lock-free")); err != nil {
+				t.Fatalf("the issue_prefix write never probed the init lock: %v\noutput:\n%s", err, out)
+			}
+		})
+	}
+}
+
+// TestGcBeadsBdInitAdoptsAnExistingSchemaFromAFreshScope pins the fresh-scope
+// for a scope whose database is already initialized but which carries no
+// version witness: a re-cloned rig, or a second scope directory pointed at
+// a shared server. bd's plain init refuses that database ("already
+// initialized") and bd's server-branch guard refuses any bd command on a
+// witness-less server-mode scope, so the script must stamp the witness first,
+// then finish pending migrations and adopt, and never run bd init. The dolt
+// stub answers every probe as "schema present, schema_migrations present,
+// clean working set".
+func TestGcBeadsBdInitAdoptsAnExistingSchemaFromAFreshScope(t *testing.T) {
+	cityPath := t.TempDir()
+	for _, d := range []string{".gc", ".beads"} {
+		if err := os.MkdirAll(filepath.Join(cityPath, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Canonical server-mode metadata but NO .local_version witness: the
+	// shape gc leaves after normalizing a re-cloned rig (and what the
+	// fresh-scope path produces before its own adopt decision). No gc
+	// helper is on PATH here, so the metadata is written up front.
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	materializeBuiltinPacksForTest(t, cityPath)
+	script := gcBeadsBdScriptPath(cityPath)
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
+	bdLog := filepath.Join(t.TempDir(), "bd-args.log")
+	// The stub behaves like bd's server-branch legacy guard: any command
+	// other than `bd version` on a server-mode scope with no .local_version
+	// witness is refused. That is what makes the witness ordering testable.
+	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s\n' "$*" >> %q
+case "${1:-}" in
+  version) echo "bd version 1.2.2 (test)"; exit 0 ;;
+esac
+if [ ! -f "${BEADS_DIR:?}/.local_version" ]; then
+  echo "Error: legacy Dolt server workspace detected (stub: no .local_version witness)" >&2
+  exit 1
+fi
+exit 0
+`, bdLog))
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+case "$query" in
+  *'SELECT COUNT(*) FROM dolt_status'*)
+    printf '+---+\n| c |\n+---+\n| 0 |\n+---+\n'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`)
+
+	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	}
+	args, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("bd never ran: %v", err)
+	}
+	if strings.Contains(string(args), "init ") {
+		t.Fatalf("a fresh scope over an already-initialized database must adopt it, not run bd init (bd refuses that as \"already initialized\"); bd was invoked with:\n%s", args)
+	}
+	if !strings.Contains(string(args), "migrate schema") {
+		t.Fatalf("adopting an existing schema must finish its pending migrations; bd was invoked with:\n%s", args)
+	}
+	meta, err := os.ReadFile(filepath.Join(cityPath, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatalf("canonical metadata must be written on adopt: %v", err)
+	}
+	if !strings.Contains(string(meta), `"dolt_mode"`) || !strings.Contains(string(meta), `"server"`) {
+		t.Fatalf("metadata is not canonical server-mode:\n%s", meta)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", ".local_version")); err != nil {
+		t.Fatalf("adopting a current-era schema must stamp the version witness, or bd's server-branch guard refuses the scope: %v", err)
 	}
 }
 
@@ -11793,6 +12847,13 @@ YAML
 	printf '%s\n' "$*" > "` + bdInitLog + `"
 	exit 0
 	;;
+  migrate)
+	# The ready path completes pending schema migrations after adopting an
+	# initialized database; only the schema subcommand is expected here.
+	[ "${2:-}" = "schema" ] && exit 0
+	echo "unexpected bd command: $*" >&2
+	exit 64
+	;;
   *)
 	echo "unexpected bd command: $*" >&2
 	exit 64
@@ -11803,8 +12864,37 @@ esac
 		t.Fatal(err)
 	}
 
+	// The dolt stub must answer the readiness probe like a real fresh
+	// database: "table not found: config" until bd init has run. A stub that
+	// answers every query with success reads as an already-initialized
+	// database, which the fresh-scope path correctly ADOPTS instead of
+	// running the bd init this test is about.
 	fakeDolt := filepath.Join(binDir, "dolt")
-	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	fakeDoltScript := `#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+case "$query" in
+  *'SELECT 1 FROM config LIMIT 1')
+    if [ -f "` + bdInitLog + `" ]; then
+      exit 0
+    fi
+    echo "error on line 1 for query SELECT 1 FROM config LIMIT 1: Error 1146 (HY000): table not found: config" >&2
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(fakeDolt, []byte(fakeDoltScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -12819,6 +13909,7 @@ func TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary(t *testing.T) {
 				"BD_BIN="+bdPath,
 				"GC_BEADS_PROVIDER_OWNED=1",
 				"GC_BEADS_TRANSPORT="+tt.transport,
+				"GC_BEADS_PROXIED_IDLE_TIMEOUT=0",
 				"GC_BEADS_TARGET="+tt.target,
 			)
 			if out, err := cmd.CombinedOutput(); err != nil {
@@ -12878,6 +13969,7 @@ func TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary(t *testing.T) {
 				"GC_BEADS_PROVIDER_OWNED=1",
 				"GC_BEADS_TRANSPORT="+tt.transport,
 				"GC_BEADS_TARGET="+tt.target,
+				"GC_BEADS_PROXIED_IDLE_TIMEOUT=0",
 				"GC_BEADS_PROXY_EXTERNAL_HOST=upstream.example.invalid",
 				"GC_BEADS_PROXY_EXTERNAL_PORT=3306",
 				"GC_DOLT_HOST=upstream.example.invalid",
@@ -13041,7 +14133,7 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 	}
 	runLifecycleCommand := func(ctx context.Context, dir, home, transport, op string) error {
 		cmd := exec.CommandContext(ctx, script, op)
-		cmd.Env = sanitizedBaseEnv("HOME="+home, "GC_CITY_PATH="+dir, "BEADS_DIR="+filepath.Join(dir, ".beads"), "BD_BIN="+bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT="+transport, "GC_BEADS_TARGET=local")
+		cmd.Env = sanitizedBaseEnv("HOME="+home, "GC_CITY_PATH="+dir, "BEADS_DIR="+filepath.Join(dir, ".beads"), "BD_BIN="+bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT="+transport, "GC_BEADS_TARGET=local", "GC_BEADS_PROXIED_IDLE_TIMEOUT=0")
 		_, err := cmd.CombinedOutput()
 		return err
 	}
@@ -13064,7 +14156,7 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 			run := func(ctx context.Context, args ...string) []byte {
 				t.Helper()
 				cmd := exec.CommandContext(ctx, script, args...)
-				cmd.Env = sanitizedBaseEnv("HOME="+home, "GC_CITY_PATH="+dir, "BEADS_DIR="+filepath.Join(dir, ".beads"), "BD_BIN="+bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT="+transport, "GC_BEADS_TARGET=local")
+				cmd.Env = sanitizedBaseEnv("HOME="+home, "GC_CITY_PATH="+dir, "BEADS_DIR="+filepath.Join(dir, ".beads"), "BD_BIN="+bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT="+transport, "GC_BEADS_TARGET=local", "GC_BEADS_PROXIED_IDLE_TIMEOUT=0")
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("gc-beads-bd %v: %v\n%s", args, err, out)
 				} else {

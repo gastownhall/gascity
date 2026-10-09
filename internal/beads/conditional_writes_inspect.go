@@ -108,10 +108,12 @@ func (c *CachingStore) inspectConditionalWriteState() (probe, latch, reason stri
 // diagnostic surfaces (the status wire, doctor). It follows the same
 // resolve-target walk the write path uses, then reads — never writes — the
 // stamp and the capability memo. Inspecting costs no subprocesses; an
-// unexercised bd store legitimately reports Probe=unprobed.
+// unexercised bd store legitimately reports Probe=unprobed. A wrapper that
+// declares a mode source reports its source, as the write path resolves it.
 func InspectConditionalWrites(store Store) ConditionalWritesInspection {
 	if store != nil {
 		store = followConditionalWritesResolveTarget(store)
+		store, _ = conditionalWritesModeSource(store)
 	}
 	insp := ConditionalWritesInspection{
 		StoreKind: conditionalStoreKind(store),

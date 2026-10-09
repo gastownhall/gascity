@@ -141,6 +141,26 @@ func validateGraphApplyPlan(plan *GraphApplyPlan) error {
 	return nil
 }
 
+// GraphApplyTooLargeError reports a graph-apply plan whose batch
+// representation exceeds issueops.MaxApplyBatchItems. ApplyGraphPlan refuses
+// outright rather than chunking: the plan's atomicity is the whole reason this
+// route exists over a sequence of ordinary writes, and chunking would
+// silently trade it away one chunk at a time, exactly what this route must
+// never do.
+type GraphApplyTooLargeError struct {
+	// Items is the number of issueops.ApplyItem entries the plan expanded to:
+	// one create per node, one dep_add per edge, one dep_add per parent link,
+	// and one update per post-create assignment.
+	Items int
+	// Max is the cap the backend enforces (issueops.MaxApplyBatchItems).
+	Max int
+}
+
+// Error reports the plan's expanded item count against the cap.
+func (e *GraphApplyTooLargeError) Error() string {
+	return fmt.Sprintf("graph apply plan expands to %d items, which exceeds the %d-item batch cap; split the plan into smaller apply calls", e.Items, e.Max)
+}
+
 // ValidateGraphApplyResult checks that every requested node key resolved to a
 // concrete bead ID in the apply result.
 func ValidateGraphApplyResult(plan *GraphApplyPlan, result *GraphApplyResult) error {
