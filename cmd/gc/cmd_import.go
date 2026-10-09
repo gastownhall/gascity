@@ -158,7 +158,10 @@ entry using source plus optional version. Supported sources are:
 - local paths inside git worktrees at HEAD: promoted to a file:// repo source
   with the pack subpath and locked to the current commit
 - remote git repositories: cloned and locked; --version accepts a semver
-  constraint or sha:<commit>
+  constraint or sha:<commit>. Without --version, a source the city already
+  imports or locks keeps the constraint the city holds for it, so its
+  packs.lock entry does not move (a local path inside a git worktree is
+  still locked to its current commit)
 - packs published in a configured pack registry: a semver --version (or no
   --version) resolves against the registry's release entries, not git tags;
   the constraint is kept, the lock records the release version and commit,

@@ -127,6 +127,28 @@ build:fork-cache --remote_max_connections=4
 test:ci --flaky_test_attempts=1
 # A remote cache eviction fails the action rather than silently re-running it.
 test:ci --experimental_remote_cache_eviction_retries=0
+# Validation actions (nogo) run through an aspect, in parallel with tests,
+# instead of gating each test's start: a test waits for its link, not for
+# nogo on its package (~250 s on //cmd/gc:gc_test). The build still fails on
+# a nogo finding. A build-request option, not configuration: analysis is not
+# discarded and the compact exec log's spawn digests are unchanged
+# (bazel_key_parity_test.go classifies it non-key).
+test:ci --experimental_use_validation_aspect
+
+# --config=fresh: the nightly fresh-test-results lane (bazel-nightly.yml,
+# beads' precedent) appends this to every lane's cmd so a cached PASS is
+# never reused. worker-env (tools/rbe/worker-env) keys git and yq at major
+# version only, so a minor upgrade on the rbe-west workers moves neither the
+# pin nor any action key, and Bazel's test cache would never re-run a test
+# whose inputs and key are unchanged -- hiding a regression that minor
+# upgrade introduced behind every PR's and push's cached pass. Nightly
+# re-executes everything once a day instead. Like remote-exec, fork-cache and
+# ci, --nocache_test_results is result policy only (bazel_key_parity_test.go
+# classifies it transport-only), so a fresh run still hashes actions like
+# every other phase and still writes the shared cache from the workers that
+# ran it (--noremote_upload_local_results, build:remote-exec above, is
+# unaffected: this flag only stops a read, never a write).
+test:fresh --nocache_test_results
 
 # The tagged suites, as bazel.yml's lanes run them (byte-identical values:
 # --define and --test_timeout are key inputs). --test_timeout stays at or
@@ -148,6 +170,12 @@ test:integration --norun_validations
 # which scripts/bazel_integration_smoke_test.go keeps this filter equal to.
 test:integration-smoke --config=integration
 test:integration-smoke --test_filter=^(TestBdStoreConformance|TestBdStoreDeleteBatchOrphansExternalDependents|TestBdStoreMailWispInsert|TestPinnedBdStoreCommandRunnerReportsSilentFallback|TestPinnedBdStoreCommandRunnerUsesExactEnvironmentAndKeepsStdoutJSON|TestE2E_WorkspaceDefaults|TestE2E_Hook_WithWork|TestE2E_MultiAgent_PoolAndFixed|TestGastown_ControllerStartStop|TestGastown_PipelineHumanToWorker|TestGraphWorkflowSuccessPath|TestIntegrationEnvForIsolatesHome|TestIsolatedEnvRootsKeepGCOffTheRealHome|TestStandaloneBDEnvForDirIsolatesHome)$
+# The review-formula tests (review-formulas.yml: pushes to main, PRs
+# labelled needs-review-formulas, dispatches): scripts/test-integration-shard's
+# formula_tests, which scripts/bazel_integration_smoke_test.go keeps this
+# filter equal to.
+test:integration-review-formulas --config=integration
+test:integration-review-formulas --test_filter=^(TestAdoptPRFormulaCompileAndRun|TestPersonalWorkFormulaCompileAndRun|TestAdoptPRFormulaRetriesTransientReviewerStep|TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries|TestReviewLoopApprovesInIterationTwoWithBodyRetry|TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash)$
 
 # No --remote_cache_compression here: bazel.yml's lanes add it for fork-cache
 # while rbe-cache advertises zstd (tools/rbe/cache-zstd-probe.sh), so the

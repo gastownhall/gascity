@@ -20,6 +20,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	runtimepkg "github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
@@ -1298,7 +1299,10 @@ func startDescendantTestProcess(t *testing.T) *exec.Cmd {
 	t.Helper()
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHasDescendantWithNames$")
-	cmd.Env = append(os.Environ(), "GC_TMUX_DESCENDANT_HELPER=1")
+	// Without Bazel's test-runner variables: under sharding the helper would
+	// inherit this shard's filter, run no test and exit at once, leaving no
+	// descendant to find.
+	cmd.Env = append(bazeltest.HelperProcessEnv(os.Environ()), "GC_TMUX_DESCENDANT_HELPER=1")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start descendant helper: %v", err)
 	}

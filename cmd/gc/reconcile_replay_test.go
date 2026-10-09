@@ -406,9 +406,9 @@ func replay(t *testing.T, x replayExport) ([]replayDivergence, replaySummary) {
 		}
 		for _, it := range slices.Concat(rec.Admitted, rec.Deferred) {
 			sum.V2Intents++
-			tmpl := cmp.Or(it.Create.Template, info[it.Key.ID].Template)
-			if it.Create.Named != nil {
-				tmpl = it.Create.Named.Template
+			tmpl := cmp.Or(it.CreatePlan.Template, info[it.Key.ID].Template)
+			if it.CreatePlan.Named != nil {
+				tmpl = it.CreatePlan.Named.Template
 			}
 			c := cell(tmpl, v2Class(it.Kind))
 			c.v2++

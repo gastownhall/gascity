@@ -63,7 +63,7 @@ func newV2BenchCity(tb testing.TB, sessions, templates int) v2BenchCity {
 			continue
 		}
 		name := "s-" + id
-		attrs[name] = InventoryAttrs{DeadKnown: true, AttachedKnown: true, Identity: readIdentity("")}
+		attrs[name] = InventoryAttrs{DeadKnown: true, AttachedKnown: true, Identity: readIdentity(id)}
 		listed = append(listed, name)
 		if active++; active%2 == 1 {
 			city.Work = append(city.Work, beads.Bead{

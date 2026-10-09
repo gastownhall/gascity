@@ -57,9 +57,11 @@ type inflightEntry struct {
 }
 
 // inflightCensus is what the map reads of the census one pass counts: the
-// instance tokens its rows carry, on any leg.
+// instance tokens its rows carry, on any leg, and the configured named
+// identities its open canonical rows hold, by createIdentity.key.
 type inflightCensus struct {
 	Tokens map[string]bool
+	Named  map[string]bool
 }
 
 // clearRecord is one ambiguous create cleared by its token in the census, or
@@ -119,7 +121,7 @@ func (m *inflightMap) settle(s settlement) {
 	e, ok := m.creates[s.Token]
 	switch {
 	case !ok || e.Seq != s.Seq || e.Ambiguous:
-	case s.Ambiguous:
+	case s.Outcome == settledAmbiguous:
 		e.Ambiguous, e.SettledAt = true, s.At
 		m.creates[s.Token] = e
 	default:
@@ -127,15 +129,20 @@ func (m *inflightMap) settle(s settlement) {
 	}
 }
 
-// clearVisible clears every ambiguous create whose token c shows, and every
-// one the hard bound passed at now, in token order. A running effect stays.
+// clearVisible clears every ambiguous create whose token c shows, every named
+// one whose identity c shows an open canonical row for, and every one the
+// hard bound passed at now, in token order. A named identity has one open
+// row (the flock, C11), so its row stands for the create whatever token it
+// carries: a reopen keeps the row's own, AdoptLive re-stamps it, and a
+// create abandoned before its write leaves the row it found. A running
+// effect stays.
 func (m *inflightMap) clearVisible(c inflightCensus, now time.Time) []clearRecord {
 	var out []clearRecord
 	for _, e := range m.view().Entries {
 		if !e.Ambiguous {
 			continue
 		}
-		visible := c.Tokens[e.Token]
+		visible := c.Tokens[e.Token] || c.Named[e.Identity]
 		if !visible && now.Sub(e.SettledAt) < inflightHardBound {
 			continue
 		}
@@ -181,13 +188,30 @@ func (v inflightView) uncensusedCreates(c inflightCensus) int {
 	return n
 }
 
-// settlement is the create effect's report as the in-flight map applies it.
-// Only a create whose write may have landed is ambiguous. A named reopen
-// keeps the row's own token, which the census could never show, and its row
+// settlement is the create effect's report as the planner applies it,
+// carrying everything its in-flight entry and its backoff records need. Only
+// a create whose write may have landed is ambiguous. A named reopen keeps
+// the row's own token, which the census could never show, and its row
 // exists whether or not the reopen landed, so it clears at settlement like a
-// landed create. That relies on the CachingStore's dirty-row refresh: the
-// next census and the next create's live read under the identity flock see
-// the reopened row, so no second create or reopen follows.
+// landed create, and backs nothing off. That relies on the CachingStore's
+// dirty-row refresh: the next census and the next create's live read under
+// the identity flock see the reopened row, so no second create or reopen
+// follows. A landed create resets its identity's record, and one refused at
+// a stage backs it off with the stage as its cause under its ConfigRev
+// (AM-N8); a failure past the stages (failed worktree evidence) throttles
+// only the work item.
 func (s createSettlement) settlement() settlement {
-	return settlement{Kind: inflightCreate, Seq: s.Seq, Token: s.Token, Ambiguous: s.Ambiguous && s.RetargetRowID == "", At: s.At, Err: s.Err}
+	out := settlement{Kind: inflightCreate, Seq: s.Seq, Token: s.Token, Outcome: settledFailed, Cause: s.Stage, Facts: effectFacts{Work: s.Work}, Err: s.Err, At: s.At}
+	switch {
+	case s.Landed:
+		out.Outcome = settledLanded
+	case s.Ambiguous && s.RetargetRowID == "":
+		out.Outcome = settledAmbiguous
+	case s.Stage != "":
+		out.Outcome = settledRefused
+	}
+	if s.Landed || s.Stage != "" {
+		out.BackoffKey, out.Fingerprint = createBackoffKey(s.Identity), s.ConfigRev
+	}
+	return out
 }

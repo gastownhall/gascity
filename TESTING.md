@@ -47,7 +47,8 @@ are run; Bazel is the runner that enforces it.
 Narrow while iterating: `bazel test //internal/config:config_test`, or
 `bazel test //internal/beads/...` for a subtree;
 `--test_filter=TestName` selects tests inside a target. The CI lanes add
-`--config=ci` (result policy only, no action-key change) and the per-run
+`--config=ci` (result policy and scheduling only, no action-key change:
+tests start beside nogo rather than after it) and the per-run
 transport config. Passing `--config=acceptance` or `--config=integration`
 matters: they set the `gotags` define, the timeout and, for integration,
 `GC_FAST_UNIT=0`, exactly as the lanes do (`.bazelrc`).
@@ -102,6 +103,81 @@ come from pinned data deps, not the host: a go_test passes their
 `$(rootpath)`s in `GC_TEST_TOOL_PATHS` (prepended to `PATH` by
 `internal/testenv`), and Bazel-built helper binaries by `$(rootpath)` in an
 env var the test reads with `bazeltest.DataPath` instead of `go build`.
+
+### Nightly fresh test run
+
+`bazel-nightly.yml` passes `fresh-test-results: true` to every `bazel.yml`
+lane it runs, which appends `--config=fresh` (`.bazelrc`:
+`--nocache_test_results`) to each lane's `bazel test`. This exists because
+`tools/rbe/worker-env` keys `git` and `yq` at major version only: a minor
+upgrade of either tool on the rbe-west workers moves no action key, so a PR
+or push run reuses its cached `PASS` forever and a regression that upgrade
+introduced never shows up (the 2026-10-07 worker-env outage review). The
+nightly run re-executes every test once a day instead, exercising the real
+worker toolchain, exactly as beads' nightly does
+(`gastownhall/beads` `.bazelrc`'s `test:fresh`). It still writes the shared
+remote cache: `--nocache_test_results` only skips reading a cached result,
+and rbe-west's workers upload their own results regardless of this flag.
+Run the same thing locally with:
+
+```bash
+bazel test //... --config=fresh
+```
+
+### Merge queue
+
+The required-check workflows are merge-queue ready but the queue is off: it
+starts working only when a maintainer adds a `merge_queue` rule to the main
+ruleset. `bazel.yml`, `ci.yml` and `codeql.yml` run on
+`merge_group: [checks_requested]`, so every required check reports on a
+queue entry's merge-group commit: `Check` and `CI / required` (`ci.yml`),
+the four `Analyze (...)` (`codeql.yml`, which also feeds the ruleset's
+`code_scanning` rule), `bazel test (side-by-side)` and `BUILD files in sync`
+(`bazel.yml`). `scripts/ci_merge_queue_test.go` pins this:
+
+- **Same-repo trust.** A merge group has no `github.event.pull_request`, so
+  the `rbe` job takes the same-repo path (mode `remote`, no mint), whoever
+  queued the entry. Every expression in the three workflows that reads the
+  event is listed in the test with its `merge_group` value. A new one fails
+  the test until someone checks that value.
+- **The tested tree is the queue ref.** `fresh-merge` and the `rbe` job's
+  `base` step run on `pull_request` only, because the merge-group commit is
+  already the merge. The OpenAPI breaking-change gate compares the spec
+  against `merge_group.base_sha`, the commit the entry is queued onto (main
+  or the entry ahead of it). `ci.yml`'s path filter diffs `base_sha` to
+  `head_sha`, which is the entry's own change, as on a PR.
+- **Queue runs are never canceled.** `bazel.yml` and `ci.yml` key a merge
+  group's concurrency group on its own `gh-readonly-queue/*` ref, which is
+  unique per entry and base, with `cancel-in-progress` false. A PR's runs,
+  keyed on its number, never share a queue entry's group.
+- **The lanes match a PR's.** Unit, acceptance, integration-packages and
+  integration-smoke run, and a queue run reuses cached test results like
+  any other run. The `integration` lane can later be gated on `merge_group`
+  only (G3).
+
+**Recommended queue settings** (for 60-70 merges a day, with a peak of 7 an
+hour from 2026-10-05 to 10-07). A queue run costs about what a push run
+does, 6-10 minutes, so 4 parallel builds clear about 24 entries an hour:
+
+| Setting | Value | Why |
+|---|---|---|
+| Merge method | `SQUASH` | The ruleset allows merge and squash; `main` history is squash-shaped |
+| Grouping strategy | `ALLGREEN` | Every group's checks must pass; a red entry is ejected, not merged with the rest |
+| Build concurrency (`max_entries_to_build`) | 4 | About 3x the hourly peak. Each entry runs 4 remote lanes, so going higher mostly adds rbe-west load |
+| Group size (`max_entries_to_merge`) | 5 | Bursts merge together |
+| `min_entries_to_merge` / wait | 1 / 5 min | Never wait for a batch (the wait is inert at 1) |
+| Status check timeout (`check_response_timeout_minutes`) | 60 | A cold rbe-west scale-up plus a queued Windows job can pass 30 minutes; a timeout ejects the entry and rebuilds everything behind it |
+| Required checks | the ruleset's 7 contexts, unchanged | Classic branch protection keeps `CI / required`, which also reports on `merge_group` |
+
+Repository auto-merge is already on, so `gh pr merge --auto` queues a PR.
+After enabling the queue, watch the first day's `merge_group` run times, then
+adjust the build concurrency.
+
+**Security.** A queue run executes the queued commit's own workflows with
+CI secrets, including the rbe-west executor credentials. Queueing a fork PR
+is therefore the same trust decision as merging it. Review a fork PR's
+changes to `.github/**`, `.bazelrc`, `tools/**`, `MODULE.bazel` and BUILD
+files before you queue it.
 
 ### Measuring cache hits (BEP cache report)
 
@@ -370,9 +446,9 @@ change, that is drift, and it is loud (`tools/rbe/worker-env-drift`):
   hours, so drift usually opens the issue before CI meets it.
 - A change to the worker host (`tools/rbe/worker-env*`,
   `blacksmith-worker.sh`, `platforms/BUILD.bazel`) is measured on the
-  Blacksmith image in bazel.yml's `bazel / unit` lane, which the required
+  Blacksmith image in bazel.yml's `worker-host` job, which the required
   `bazel test (side-by-side)` gate fans in. If the PR's manifest is not
-  what that image measures, the lane fails.
+  what that image measures, the job fails.
 
 To re-pin, anyone with write access:
 
@@ -387,9 +463,9 @@ To re-pin, anyone with write access:
    the old pin don't schedule.
 3. Open the PR. Pool workers run the default branch's provisioning, so
    the new pin isn't reliably served before it merges, and every
-   bazel.yml lane skips the remote suite. The unit lane measures its own
-   Blacksmith host against the new manifest instead, and fails if they
-   differ.
+   bazel.yml lane skips the remote suite. The worker-host job measures
+   its own Blacksmith host against the new manifest instead, and fails
+   if they differ.
 4. Merge. The canary runs on the merge and closes the issues of
    superseded pins, which lifts the farm's cap. Don't close the drift
    issue before the re-pin lands.
@@ -405,7 +481,29 @@ re-pin.
 If an issue stays open for the current pin while hosts match again,
 close it by hand.
 
-## The outcome: protected PR feedback in under five minutes
+### Bumping the rbe-worker pin
+
+`.github/actions/rbe-worker/pin` names the `gastownhall/rbe-worker` commit
+the worker code pins (not to be confused with the worker-env manifest pin
+above). Bumping it is a one-line PR: change the 40-hex sha in `pin` to the
+new commit, open it, merge it.
+
+`bazel.yml`'s `worker-host` job measures the bump before it lands: it
+fetches the PR's pinned commit anonymously (no secret, `refs/heads/main`
+only), checks the fetched tree against this checkout's `tools/rbe` (S3-S5
+parity), and, because the pin moved, measures this Blacksmith host against
+it. H5 then walks every commit between the default branch's pin and the
+PR's: each one must be a GitHub-verified, signed commit, authored by
+`web-flow` (GitHub's merge-button identity), with an associated pull
+request merged into `rbe-worker`'s main. A direct push to `rbe-worker`
+main, however it's signed, fails this check: only a squash-merged PR
+reaches it. A rollback (a new pin that is not a descendant of the old one)
+warns instead of failing, so reverting a bad rbe-worker commit isn't
+blocked on rewriting its own history.
+
+The range check is dormant on a PR that doesn't move the pin: H5 has
+nothing to walk, and the parity/measure steps run anyway (every
+`worker-host` run fetches and diffs during S3-S5, pin-moved or not).
 
 The developer-visible service-level objective is p95 **under five minutes**
 from GitHub Actions PR-workflow creation until the required automated `CI`
@@ -887,7 +985,7 @@ all-source audit while staying outside untagged and Small debt.
 <!-- BEGIN CHECKED TEST RESOURCE LEDGER -->
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
-| Audit baseline | all tracked test source | fixed_sleep: 497 calls / 183 files (historical regex census: 447 / 157) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
+| Audit baseline | all tracked test source | fixed_sleep: 498 calls / 184 files (historical regex census: 447 / 157) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
 | Audit baseline | all tracked test source | listener_helper: 60 calls / 24 files | ga-cp3hwi | all-source listener-helper call/file totals cannot drift without an explicit checked policy update; ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption | P0.4c-listener-helper | 2026-10-31 |
 | Audit baseline | all tracked test source | subprocess: 745 calls / 221 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary: subprocess | ga-p9iuv.30 | the provider-owned script boundary proof is a checked Medium subprocess owner; the test executes the copied provider script only with a test-owned BD executable and verifies its lifecycle delegation without a host service | GC6011 | 2026-10-31 |
@@ -913,9 +1011,9 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `scripts` package `scripts_test` | TestRBEWorkerJSONIsolationOffMatchesPreO1: subprocess | ga-cp3hwi | the OSS worker rollback-config and fork-tier worker-config proof is a checked Medium subprocess owner; the one jq subprocess is confined to TestRBEWorkerJSONIsolationOffMatchesPreO1, which exists to render tools/rbe/blacksmith-worker.sh's own jq program for the OSS tier with isolation off, compared with the pre-O1 worker.json, and for the fork tier, compared with its golden: the program is jq, so only jq can prove the rollback renders the same config and the fork tier caches nothing | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestRBEWorkerScrubCAS: subprocess | ga-cp3hwi | the sticky-disk CAS scrub proof is a checked Medium subprocess owner; the one bash subprocess is confined to TestRBEWorkerScrubCAS, which exists to run tools/rbe/blacksmith-worker.sh's own scrub_cas function on a scratch store of odd names (quotes, spaces, a newline, a backslash) and bad blobs: the function is GNU find, xargs and sha256sum plumbing, so only bash can prove it deletes every bad file without aborting the worker | P0.4b | 2026-10-31 |
 | Small debt ratchet | `cmd/gc` untagged test source | cwd: 176 calls / 17 files (historical regex census: 284 / 43) | ga-cp3hwi | untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every cwd mutation | D5/D6 | 2026-10-31 |
-| Small debt ratchet | `cmd/gc` untagged test source | environment: 117 calls / 14 files (historical regex census: 4348 / 200) | ga-cp3hwi | untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every process-environment mutation | D5/D6/E6 | 2026-10-31 |
+| Small debt ratchet | `cmd/gc` untagged test source | environment: 119 calls / 16 files (historical regex census: 4348 / 200) | ga-cp3hwi | untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every process-environment mutation | D5/D6/E6 | 2026-10-31 |
 | Small debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 60 calls / 25 files (historical regex census: 75 / 25) | ga-cp3hwi | untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; each non-Medium marked caller retains an explicit process-suite migration owner | D5/D6/E6 | 2026-10-31 |
-| Small debt ratchet | all untagged test source | fixed_sleep: 319 calls / 122 files (historical regex census: 287 / 113) | ga-cp3hwi | untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace elapsed wall time with lifecycle signals | W1-W5 | 2026-10-31 |
+| Small debt ratchet | all untagged test source | fixed_sleep: 320 calls / 123 files (historical regex census: 287 / 113) | ga-cp3hwi | untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace elapsed wall time with lifecycle signals | W1-W5 | 2026-10-31 |
 | Small debt ratchet | all untagged test source | http_test_server: 318 calls / 66 files (historical regex census: 300 / 66) | ga-cp3hwi | untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-31 |
 | Small debt ratchet | all untagged test source | listener_helper: 39 calls / 13 files | ga-cp3hwi | untagged Small listener-helper call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace helper-backed listeners or declare exact isolated ownership | P0.4c-listener-helper | 2026-10-31 |
 | Small debt ratchet | all untagged test source | net_listen: 95 calls / 36 files (historical regex census: 92 / 34) | ga-cp3hwi | untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-31 |
@@ -925,9 +1023,9 @@ all-source audit while staying outside untagged and Small debt.
 | Small debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-cp3hwi | untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-31 |
 | Small debt ratchet | all untagged test source | tmux: 3 calls / 2 files (historical regex census: 1 / 1) | ga-cp3hwi | untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership | P0.4c-tmux | 2026-10-31 |
 | Source debt ratchet | `cmd/gc` untagged test source | cwd: 176 calls / 17 files (historical regex census: 98 / 13) | ga-cp3hwi | untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized cwd mutation | D5/D6 | 2026-10-31 |
-| Source debt ratchet | `cmd/gc` untagged test source | environment: 122 calls / 14 files (historical regex census: 3960 / 184) | ga-cp3hwi | untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized process-environment mutation | D5/D6/E6 | 2026-10-31 |
+| Source debt ratchet | `cmd/gc` untagged test source | environment: 124 calls / 16 files (historical regex census: 3960 / 184) | ga-cp3hwi | untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized process-environment mutation | D5/D6/E6 | 2026-10-31 |
 | Source debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 61 calls / 25 files (historical regex census: 78 / 27) | ga-cp3hwi | untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; the helper definition and every marked caller retain an explicit process-suite migration owner | D5/D6/E6 | 2026-10-31 |
-| Source debt ratchet | all untagged test source | fixed_sleep: 319 calls / 122 files (historical regex census: 295 / 114) | ga-cp3hwi | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-31 |
+| Source debt ratchet | all untagged test source | fixed_sleep: 320 calls / 123 files (historical regex census: 295 / 114) | ga-cp3hwi | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-31 |
 | Source debt ratchet | all untagged test source | http_test_server: 319 calls / 67 files (historical regex census: 255 / 56) | ga-cp3hwi | untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-31 |
 | Source debt ratchet | all untagged test source | listener_helper: 39 calls / 13 files | ga-cp3hwi | untagged listener-helper call/file totals cannot grow; reductions must lower this baseline; each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership | P0.4c-listener-helper | 2026-10-31 |
 | Source debt ratchet | all untagged test source | net_listen: 97 calls / 37 files (historical regex census: 92 / 34) | ga-cp3hwi | untagged stream-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its stream listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |

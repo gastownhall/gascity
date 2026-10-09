@@ -423,11 +423,19 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 		return found, errors.Join(scanErr, fmt.Errorf("tmux list running: %w", listErr))
 	}
 
+	// A session whose GC_SESSION_ID cannot be read may track any root, so the
+	// failure is returned with the results: a caller that reaps on IsTracked
+	// false must treat this scan's tracking as unknown. A session that ended
+	// after the listing tracks nothing.
 	tracked := make(map[string]string)
+	var metaErrs []error
 	for _, name := range running {
 		sessionID, err := p.GetMeta(name, "GC_SESSION_ID")
-		if err == nil && strings.TrimSpace(sessionID) != "" {
+		switch {
+		case err == nil && strings.TrimSpace(sessionID) != "":
 			tracked[sessionID] = name
+		case err != nil && !errors.Is(err, runtime.ErrSessionNotFound):
+			metaErrs = append(metaErrs, fmt.Errorf("tmux tracking: %w", err))
 		}
 	}
 	for i := range found {
@@ -436,7 +444,7 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 			found[i].ProviderName = name
 		}
 	}
-	return found, scanErr
+	return found, errors.Join(append([]error{scanErr}, metaErrs...)...)
 }
 
 // TerminateRuntime implements [runtime.ProcessTableScanner].
@@ -444,7 +452,7 @@ func (p *Provider) TerminateRuntime(r runtime.LiveRuntime) error {
 	if r.PID <= 1 {
 		return fmt.Errorf("tmux: invalid PID %d for session %s", r.PID, r.SessionID)
 	}
-	if err := proctable.KillByPID(r.PID); err != nil {
+	if err := proctable.KillByPIDIdentity(r.PID, r.StartIdentity); err != nil {
 		return fmt.Errorf("tmux: terminate runtime PID %d for session %s: %w", r.PID, r.SessionID, err)
 	}
 	return nil

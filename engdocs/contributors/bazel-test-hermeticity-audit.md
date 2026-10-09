@@ -52,7 +52,7 @@ These facts were measured with a probe `go_test` on rbe-west, instance
 | Class | Count | Packages / sites |
 |---|---|---|
 | (2) tagged `external` in this change | 4 targets | `test/integration`, `internal/testpolicy/resourcecensus`, `internal/testutil/providerledger`, `internal/beads/beadstest` |
-| (1) fixed on main since the audit | 2 | `test/acceptance` (`gc init` no longer clones, #7005); `test/integration` start-drift (prebuilt `//cmd/gc:gc_drift_*`) |
+| (1) fixed on main since the audit | 3 | `test/acceptance` (`gc init` no longer clones, #7005); `test/integration` start-drift (prebuilt `//cmd/gc:gc_drift_*`); `test/integration` dolt_config (no DNS; the package left the ledger) |
 | (1) fixed in this change | 4 fixes, 5 sites | 2030 credential expiry; 3 tzdata-dependent tests; the host-sshd test |
 | (1) open follow-ups | 17 | See [Class 1: open](#class-1-open) |
 | (3) fine, or covered by the image pin | ~10 groups | About 35 host-binary skip sites; about 25 uid-gated skips; about 300 data-only URLs; env-gated opt-in tests |
@@ -116,9 +116,21 @@ These facts were measured with a probe `go_test` on rbe-west, instance
    - Why it is a problem: the result depended on the network.
    - Decision: class 1, fixed on main: under Bazel the drift tests install
      the prebuilt `//cmd/gc:gc_drift_old`/`gc_drift_new` binaries from
-     runfiles. The package stays tagged `external` plus `requires-network`
-     (`dolt_config_test.go:48` resolves the worker's hostname) until a
-     network-less run of the integration tier proves the rest offline.
+     runfiles.
+7. **`test/integration` dolt_config** (`dolt_config_test.go`,
+   `TestDoltConfigWiringExternalHost`)
+   - What it did: resolved the worker's hostname through DNS
+     (`net.LookupHost(os.Hostname())`) to prove a Dolt server bound to
+     `0.0.0.0` answers beyond loopback.
+   - Decision: class 1, fixed. It now dials the host's own non-loopback
+     interface addresses, then `127.0.0.2` (Linux routes all of
+     `127.0.0.0/8` to loopback, so that address reaches a `0.0.0.0` socket
+     but not a `127.0.0.1` one). No DNS is involved. With that, the whole
+     integration tier (`--config=integration`, both go_tests) ran on the `oss`
+     tier with the test action's `network` property set to `off` (loopback
+     only, `tools/rbe/rbe-action-launch`), and the package left the ledger:
+     it is no longer tagged `external` or `requires-network`, so its results
+     are cached like every other test's.
 
 ### Class 2: tagged in this change
 
@@ -126,7 +138,8 @@ These four targets are listed in `test/bazel-hermeticity.toml` with reasons
 and evidence: `test/integration`, `internal/testpolicy/resourcecensus`,
 `internal/testutil/providerledger`, `internal/beads/beadstest`. The ledger is
 per package, so `tools/bazel/hermetic_tags.py` tags every `go_test` in a
-listed package (`test/integration` has two). Under `bazel test //...` with
+listed package (`test/integration` had two; it has since left the ledger,
+see item 7 above). Under `bazel test //...` with
 the default configuration, the integration targets compile only their
 untagged files. The tag therefore costs little there. It bites in the
 `--define=gotags=integration` invocation, which is where the network use

@@ -39,6 +39,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -1800,6 +1801,13 @@ func ensureManagedDoltPortForTest(cityDir string) (string, bool) {
 	if cityDir == "" {
 		return "", false
 	}
+	// A proxied-server scope (the fresh-city default) never publishes a
+	// managed Dolt port: bd reaches the store through its own proxy, so there
+	// is nothing to wait for. Polling for one here cost every bdDolt call on
+	// such a city 30 s and returned no port anyway.
+	if scopeUsesProxiedServerForTest(cityDir) {
+		return "", false
+	}
 	startOut, startErr := runGCDoltWithEnv(commandEnvForDir(cityDir, true), "", "start", cityDir)
 	if startErr != nil && !isGCStartAlreadyRunning(startOut) {
 		return "", false
@@ -1812,6 +1820,22 @@ func ensureManagedDoltPortForTest(cityDir string) (string, bool) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return "", false
+}
+
+// scopeUsesProxiedServerForTest reports whether scopeRoot's bd metadata binds
+// it to beads' proxied-server path, the mode in which no managed Dolt port
+// file or runtime state is ever written.
+func scopeUsesProxiedServerForTest(scopeRoot string) bool {
+	metadata := filepath.Join(scopeRoot, ".beads", "metadata.json")
+	mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, metadata)
+	if err != nil || !ok {
+		return false
+	}
+	backend, _, err := contract.ReadMetadataBackend(fsys.OSFS{}, metadata)
+	if err != nil {
+		return false
+	}
+	return contract.IsProxiedDoltMode(backend, mode)
 }
 
 func managedDoltTransportRetryable(out string) bool {

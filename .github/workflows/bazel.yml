@@ -1,6 +1,6 @@
 # Multi-lane Bazel CI (rbe-west plan W1). Target shape: every gascity build,
 # test, lint and codegen check is a Bazel target; each lane below is a thin
-# client (2 vCPU in mode remote) that checks out, merges the PR head
+# client (4-8 vCPU) that checks out, merges the PR head
 # onto the run's base commit (.github/actions/fresh-merge), attaches rbe-west
 # with .github/actions/setup-bazel (a byte copy of beads' composite: modes
 # remote, fork-ro, fork-rw, cache, local) and runs one bazel command with
@@ -56,6 +56,14 @@ name: bazel
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  # Merge queue (dormant until the main ruleset enables one; TESTING.md
+  # "Merge queue"): both required checks of this workflow must report on
+  # every queue entry's merge-group commit. A merge group is same-repo
+  # trust (only people who can merge can queue), so the rbe job takes mode
+  # remote; the queue ref is already the merge, so fresh-merge and the base
+  # step skip it, and the OpenAPI gate diffs against merge_group.base_sha.
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main]
   workflow_dispatch:
@@ -65,12 +73,20 @@ on:
         type: choice
         default: "on"
         options: ["on", "cache", "off"]
+      fresh-test-results:
+        description: "Re-execute every lane's tests (--config=fresh: no cached test results), as the nightly run does"
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       rbe:
         type: string
         required: false
         default: "on"
+      fresh-test-results:
+        type: boolean
+        required: false
+        default: false
     secrets:
       RBE_WEST_EXECUTOR:
         required: false
@@ -81,15 +97,19 @@ on:
       CODECOV_TOKEN:
         required: false
 
-# A PR's runs share one group and a newer one cancels the older. Every other
-# event (push to main, dispatch, call) gets its own group (the run id), so it
-# is never cancelled or queued behind another run: main runs save the runner
-# cache and report coverage. (A shared group without cancel-in-progress
-# would still replace a pending run with the next one.) The prefix is a
-# literal: under workflow_call github.workflow is the caller's name, and the
-# group would collide with the caller's own.
+# A PR's runs share one group and a newer one cancels the older. A merge
+# group keys on its own queue ref (refs/heads/gh-readonly-queue/main/pr-N-
+# <base sha>, unique per entry and base) and is never cancelled: cancelling
+# a queue run fails the entry's required checks and ejects it, and a PR's
+# own runs (keyed on its number) never share a queue entry's group. Every
+# other event (push to main, dispatch, call) gets its own group (the run
+# id), so it is never cancelled or queued behind another run: main runs save
+# the runner cache and report coverage. (A shared group without
+# cancel-in-progress would still replace a pending run with the next one.)
+# The prefix is a literal: under workflow_call github.workflow is the
+# caller's name, and the group would collide with the caller's own.
 concurrency:
-  group: bazel-yml-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  group: bazel-yml-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'merge_group' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -110,6 +130,9 @@ jobs:
       lanes: ${{ steps.lanes.outputs.lanes }}
       base-sha: ${{ steps.base.outputs.base-sha }}
     steps:
+      # merge_group: PULL_REQUEST and FORK are false (no
+      # github.event.pull_request on that event), so a queue run takes the
+      # same-repo path, mode remote (scripts/ci_merge_queue_test.go).
       - name: Decide remote execution
         id: decide
         env:
@@ -163,22 +186,37 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           MODE: ${{ steps.decide.outputs.mode }}
+          FRESH: ${{ inputs.fresh-test-results }}
         run: |
           set -euo pipefail
           case "$MODE" in remote|fork-ro|fork-rw|cache|local) ;; *) echo "::error::mode '$MODE'"; exit 1 ;; esac
-          unit='{"lane":"unit","cmd":"test --config=ci --keep_going //..."}'
-          acceptance='{"lane":"acceptance","cmd":"test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test //test/acceptance:acceptance_solo_tests"}'
+          # The nightly fresh-test-results run (bazel-nightly.yml) appends
+          # --config=fresh (.bazelrc: --nocache_test_results) to every
+          # lane's cmd: worker-env (tools/rbe/worker-env) keys git and yq
+          # at major version only, so a minor upgrade on the rbe-west
+          # workers moves no action key, and a regression it causes can
+          # hide behind every push's cached PASS forever otherwise
+          # (2026-10-07 worker-env outage review). FRESH is empty outside
+          # workflow_dispatch/workflow_call, which never ask for it.
+          # Built as a suffix rather than substituted into each lane's JSON:
+          # bash 3.2 (macOS's /bin/bash, which scripts/bazel_multilane_test.go
+          # runs this step with) keeps the backslash of an escaped brace in a
+          # ${var/pat/rep} replacement.
+          fresh=""
+          if [ "$FRESH" = "true" ]; then fresh=" --config=fresh"; fi
+          unit='{"lane":"unit","cmd":"test --config=ci --keep_going //...'"$fresh"'"}'
+          acceptance='{"lane":"acceptance","cmd":"test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test //test/acceptance:acceptance_solo_tests'"$fresh"'"}'
           # Evidence-only until G3: agent-flow tests depend on ambient
           # agent-template resolution (product-side fix, D13).
-          integration='{"lane":"integration","cmd":"test --config=ci --config=integration --keep_going //test/integration:integration_test","evidence-only":true}'
+          integration='{"lane":"integration","cmd":"test --config=ci --config=integration --keep_going //test/integration:integration_test'"$fresh"'","evidence-only":true}'
           # Gating. Every package's integration-tagged and GC_FAST_UNIT=0
           # tests outside //test/integration (scripts/test-integration-shard's
           # packages-* shards).
-          packages='{"lane":"integration-packages","cmd":"test --config=ci --config=integration --keep_going //test:integration_packages"}'
+          packages='{"lane":"integration-packages","cmd":"test --config=ci --config=integration --keep_going //test:integration_packages'"$fresh"'"}'
           # Gating. The integration suite's bdstore and REST smoke tests
           # (scripts/test-integration-shard bdstore_tests + rest_smoke_tests:
           # .bazelrc test:integration-smoke's --test_filter).
-          smoke='{"lane":"integration-smoke","cmd":"test --config=ci --config=integration-smoke --keep_going //test/integration:integration_test"}'
+          smoke='{"lane":"integration-smoke","cmd":"test --config=ci --config=integration-smoke --keep_going //test/integration:integration_test'"$fresh"'"}'
           # Every mode tests: the gate (the required check) fails a run that
           # started no lane. Acceptance and integration-packages run on the
           # fork pool too (mode fork-ro, instance oss-fork, loopback only):
@@ -249,12 +287,15 @@ jobs:
     # Every mode yields lanes; should the list ever be empty, an empty
     # matrix is an error, so the job is skipped instead and the gate fails.
     if: needs.rbe.outputs.lanes != '[]'
-    # Mode remote: the runner is only a Bazel client. Local modes (cache,
+    # Unit and acceptance get 8 vCPU, every other lane 4. Local modes (cache,
     # local) execute here, and so may fork-ro/fork-rw (a refused certificate
-    # falls back to the read-only cache), so they get 4 vCPU. Acceptance gets
-    # 4 vCPU in every mode: its client-side analysis (~1900 packages) took
-    # ~2 m of the lane on 2 vCPU.
-    runs-on: ${{ (needs.rbe.outputs.mode != 'remote' || matrix.lane == 'acceptance') && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}
+    # falls back to the read-only cache). In mode remote the runner is only a
+    # Bazel client, but its loading and analysis (go_deps fetches, gazelle,
+    # npm, Starlark) is CPU-bound and gates every action: analysis-only
+    # measurements per lane (ga-vnycm2.8, seeded runner cache) took 34-58 s
+    # on 2 vCPU, 23-34 s on 4 and 15-19 s on 8. Unit and acceptance are the
+    # critical lanes (ga-vnycm2.12).
+    runs-on: ${{ (matrix.lane == 'unit' || matrix.lane == 'acceptance') && 'blacksmith-8vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -277,11 +318,12 @@ jobs:
       # worker-env (tools/rbe/worker-env-drift): rbe-west's schedulers match
       # the worker-env pin exactly, and pool workers serve the default
       # branch's pin only. A change that moves the pin can't run remotely
-      # before it merges: the bazel run is skipped (pin-moved) and the unit
-      # lane measures this Blacksmith host against the new manifest instead,
-      # as it does for any change to the worker host (measure). A remote run
-      # on a pin with an open drift issue fails here rather than queueing for
-      # an hour (and before setup-bazel mints an rbe-fork certificate).
+      # before it merges: the bazel run is skipped (pin-moved) and the
+      # worker-host job measures this Blacksmith host against the new
+      # manifest instead, as it does for any change to the worker host
+      # (measure). A remote run on a pin with an open drift issue fails here
+      # rather than queueing for an hour (and before setup-bazel mints an
+      # rbe-fork certificate).
       - name: worker-env preflight
         id: worker-env
         env:
@@ -391,14 +433,17 @@ jobs:
       # The OpenAPI breaking-change gate (//cmd/openapi-breaking:
       # openapi-breaking_test, in the unit lane's //...) compares the tested
       # tree's internal/api/openapi.json with the spec of the commit the PR
-      # is merged onto (fresh-merge's base-sha). @openapi_base_spec
-      # (tools/bazel/rules/openapi_base_spec.bzl) reads the file this names
-      # from the client environment: no Bazel flag, so no other action key
-      # changes. Other events have no base; the spec compares with itself.
+      # is merged onto (fresh-merge's base-sha; for a merge group, the commit
+      # the entry is queued onto, merge_group.base_sha: main or the entry
+      # ahead of it, an ancestor of this fetch-depth 0 checkout).
+      # @openapi_base_spec (tools/bazel/rules/openapi_base_spec.bzl) reads
+      # the file this names from the client environment: no Bazel flag, so no
+      # other action key changes. Other events have no base; the spec
+      # compares with itself.
       - name: OpenAPI breaking-change base spec
-        if: github.event_name == 'pull_request' && matrix.lane == 'unit'
+        if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && matrix.lane == 'unit'
         env:
-          BASE_SHA: ${{ needs.rbe.outputs.base-sha }}
+          BASE_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || needs.rbe.outputs.base-sha }}
         run: |
           set -euo pipefail
           [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::base-sha is '$BASE_SHA'"; exit 1; }
@@ -577,18 +622,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bazel-ci-cache
-          key: bazel-repo-v3-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}
-
-      # Last, after every bazel run, and in one lane: provisioning installs
-      # the worker toolset, Go and dolt on this runner, which must not change
-      # what the client's own actions see. The PR's own blacksmith-worker.sh
-      # and manifest, on the Blacksmith image the pool runs: a manifest no
-      # worker would measure can't merge.
-      - name: Measure this Blacksmith host against the worker-env manifest
-        if: always() && matrix.lane == 'unit' && steps.worker-env.outputs.measure == 'true'
-        env:
-          WORKER_MODE: measure
-        run: tools/rbe/blacksmith-worker.sh
+          key: bazel-repo-v4-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}
 
   # Cross-phase test skipping, measured: one report over every lane's BEP file
   # (scripts/bazel-bep-summary.go, internal/testpolicy/bepsummary), one phase
@@ -806,24 +840,47 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      # worker-env: pool workers serve the default branch's pin only, so a
+      # change that moves the pin cannot execute remotely before it merges
+      # (the lanes' worker-env preflight skips their remote suite for the
+      # same reason). Without this, gazelle's actions queue on a pin no worker
+      # serves until timeout-minutes cancels the job. A plain pin comparison:
+      # no API call, so it costs nothing against the installation rate limit.
+      - name: worker-env pin
+        id: pin
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          MODE: ${{ needs.rbe.outputs.mode }}
+        run: |
+          git fetch --no-tags --filter=blob:none origin "refs/heads/$DEFAULT_BRANCH"
+          git show FETCH_HEAD:platforms/BUILD.bazel >"$RUNNER_TEMP/worker-env-base.bazel" 2>/dev/null ||
+            : >"$RUNNER_TEMP/worker-env-base.bazel"
+          pin=$(tools/rbe/worker-env-drift pin)
+          base=$(tools/rbe/worker-env-drift pin "$RUNNER_TEMP/worker-env-base.bazel")
+          remote=false
+          if [ "$MODE" = remote ] && [ "$pin" = "$base" ]; then remote=true; fi
+          echo "remote=$remote" >> "$GITHUB_OUTPUT"
+          echo "worker-env: this checkout pins $pin, the default branch $base; mode=$MODE remote=$remote"
+        shell: bash
       # Same env as the lane job's "Set up Bazel" step: with no env at all
       # this job ran gazelle and GoStdlib locally on every PR (64 sandboxed
-      # actions). Mode remote gets the executor and the mint certificate;
-      # every other mode gets the read-only fork cache instead, with no
-      # mint certificate, so BUILD files in sync never needs rbe-fork-mint.
+      # actions). Mode remote on the default branch's pin gets the executor
+      # and the mint certificate; every other case gets the read-only fork
+      # cache instead, with no mint certificate, so BUILD files in sync never
+      # needs rbe-fork-mint.
       - name: Set up Bazel
         uses: ./.github/actions/setup-bazel
         env:
-          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
-          RBE_TLS_CERT: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CERT || '' }}
-          RBE_TLS_KEY: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_KEY || '' }}
-          RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
-          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode != 'remote' && 'true' || '' }}
+          BAZEL_REMOTE_EXECUTOR: ${{ steps.pin.outputs.remote == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ steps.pin.outputs.remote == 'true' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ steps.pin.outputs.remote == 'true' && secrets.RBE_TLS_KEY || '' }}
+          RBE_INSTANCE: ${{ steps.pin.outputs.remote == 'true' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ steps.pin.outputs.remote != 'true' && 'true' || '' }}
       - name: Restore the LLVM archive
         uses: ./.github/actions/llvm-archive-cache
       - name: BUILD files are in sync (gazelle + repo tree)
         env:
-          BAZEL_SYNC_FLAGS: ${{ needs.rbe.outputs.mode == 'remote' && '--config=remote-exec' || '--config=fork-cache' }}
+          BAZEL_SYNC_FLAGS: ${{ steps.pin.outputs.remote == 'true' && '--config=remote-exec' || '--config=fork-cache' }}
         run: |
           make bazel-sync
           git diff --exit-code || {
@@ -832,15 +889,150 @@ jobs:
             exit 1
           }
 
+  # rbe-worker S3a (rbe-worker-repo-design.md §5.4): a secret-free job that
+  # measures a PR's effect on the worker host and, once a pin moves, checks
+  # that every commit in the bump range is signed (H5). Source is pinned
+  # unconditionally here: unlike the pool shims (S3b), this job never runs
+  # with farm secrets, so there is no in-tree fallback to cut over from.
+  worker-host:
+    name: rbe worker host
+    needs: rbe
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      issues: read # worker-env drift issues (tools/rbe/worker-env-drift)
+    outputs:
+      measure: ${{ steps.host.outputs.measure }}
+      pin-changed: ${{ steps.pins.outputs.pin-changed }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          filter: blob:none
+      - uses: ./.github/actions/fresh-merge
+        with:
+          base-sha: ${{ needs.rbe.outputs.base-sha }}
+
+      # The base this job diffs against: the merge queue's own base
+      # (merge_group.base_sha) or the PR's fresh-merge base-sha when either
+      # is known (the same commit the lane job's worker-env preflight diffs
+      # against, bazel.yml:444), else the default branch's current tip
+      # (push, schedule, workflow_dispatch). Reused below (git fetch leaves
+      # FETCH_HEAD, which the next git command can lose): capture its sha
+      # once, into base.sha, rather than re-fetching per step.
+      - name: Fetch the base commit
+        id: default-branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || needs.rbe.outputs.base-sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "$BASE_SHA" ]; then
+            [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::base-sha is '$BASE_SHA'"; exit 1; }
+            git fetch --no-tags --filter=blob:none origin "$BASE_SHA"
+            echo "sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+          else
+            git fetch --no-tags --filter=blob:none origin "refs/heads/$DEFAULT_BRANCH"
+            echo "sha=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Same preflight the lane job runs (its "worker-env preflight" step):
+      # measure=true when this change touches the worker host's inputs, or
+      # when the worker-env pin itself moves (the lane then skips the remote
+      # suite and measures instead; this job measures regardless of mode).
+      - name: Does this change move the worker host?
+        id: host
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ steps.default-branch.outputs.sha }}
+        run: |
+          git show "$BASE_SHA:platforms/BUILD.bazel" >"$RUNNER_TEMP/worker-env-base.bazel" 2>/dev/null ||
+            : >"$RUNNER_TEMP/worker-env-base.bazel"
+          git diff --name-only "$BASE_SHA" HEAD >"$RUNNER_TEMP/worker-env-changed"
+          tools/rbe/worker-env-drift preflight "$RUNNER_TEMP/worker-env-base.bazel" "$RUNNER_TEMP/worker-env-changed"
+
+      # Independent of the worker-env pin above: did this change move the
+      # rbe-worker pin (§5.2)? That is the only thing the H5 range check
+      # below gates on.
+      - name: Which rbe-worker pins moved?
+        id: pins
+        env:
+          BASE_SHA: ${{ steps.default-branch.outputs.sha }}
+        run: |
+          set -euo pipefail
+          old=$(git show "$BASE_SHA:.github/actions/rbe-worker/pin" 2>/dev/null | grep -E '^[0-9a-f]{40}$' || true)
+          new=$(grep -E '^[0-9a-f]{40}$' .github/actions/rbe-worker/pin)
+          changed=false
+          [ "$old" = "$new" ] || changed=true
+          echo "pin-changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "old=$old" >> "$GITHUB_OUTPUT"
+          echo "rbe-worker: pin $([ "$changed" = true ] && echo moved || echo unchanged) (default branch $old, this checkout $new)"
+
+      # S3-S5 only: every worker-host run fetches and checks parity, pin
+      # moved or not, so the host this job measures (below) is always the
+      # host the pool would serve once source flips to pinned, and so H5
+      # (below) always has the fetched tree's git history to walk the bump
+      # range when the pin did move. No secret reaches this step: the fetch
+      # is anonymous and verifies the pin before any checkout
+      # (.github/actions/rbe-worker/fetch.sh).
+      - name: Fetch the PR's pinned rbe-worker
+        id: rbe-worker
+        uses: ./.github/actions/rbe-worker
+        with:
+          source: pinned
+
+      # H5 (D12): every commit between the default branch's pin and this
+      # PR's pin must be a verified, signed, web-flow (GitHub merge-button)
+      # commit on gastownhall/rbe-worker with a pull request merged into
+      # main (.github/actions/rbe-worker/h5.sh). Dormant until a bump PR
+      # actually moves the pin.
+      - name: Every commit in the bump range is signed, merged and verified (H5)
+        if: steps.pins.outputs.pin-changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKER_REPO_DIR: ${{ steps.rbe-worker.outputs.dir }}
+          OLD_SHA: ${{ steps.pins.outputs.old }}
+          NEW_SHA: ${{ steps.rbe-worker.outputs.sha }}
+        run: .github/actions/rbe-worker/h5.sh "$WORKER_REPO_DIR/.." "$OLD_SHA" "$NEW_SHA"
+
+      # S3-S5 only: this checkout's tools/rbe and the fetched pin must agree,
+      # so the host this job measures is the host the pool would serve once
+      # source flips to pinned. git ls-tree mode+blob comparison: a rename or
+      # mode change shows up the same as content drift. Runs on every
+      # worker-host run (S3-S5), not just measure or pin-moved runs.
+      - name: In-tree and pinned trees are identical (S3-S5 only)
+        env:
+          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
+        run: |
+          set -euo pipefail
+          diff <(git ls-tree -r HEAD tools/rbe | awk -F'\t' '{sub("^tools/rbe/", "", $2)} $2 != "worker-env.txt" && $2 != "cache-zstd-probe.sh" {print $1 "\t" $2}') \
+               <(git -C "$RBE_WORKER_DIR/.." ls-tree -r HEAD worker | awk -F'\t' '{sub("^worker/", "", $2); print $1 "\t" $2}') \
+            || { echo "::error title=rbe-worker drift::in-tree tools/rbe and the pinned rbe-worker differ; S1/S2 parity broke"; exit 1; }
+
+      # §5.6, run against the PR's pinned rbe-worker once rbe-worker ships
+      # cmd/product-check (S2). Until then this step has nothing to run
+      # against and is intentionally absent; adding it is part of landing S2.
+
+      - name: Measure this Blacksmith host against the PR's manifest
+        if: steps.host.outputs.measure == 'true' || steps.pins.outputs.pin-changed == 'true'
+        env:
+          WORKER_MODE: measure
+          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
+          RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
+        run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
+
   # The required check "bazel test (side-by-side)" (main ruleset, branch
   # protection): the one job of that name. It passes only when the rbe job,
-  # every lane and sync-check succeeded. A run with an empty lane list
-  # tested nothing and fails, whatever the event (no mode yields one; this
-  # guards the required name against a future one). Lanes are never
-  # "skipped" into a pass: a skipped required check would count as passed.
+  # every lane, sync-check and worker-host succeeded. A run with an empty
+  # lane list tested nothing and fails, whatever the event (no mode yields
+  # one; this guards the required name against a future one). Lanes are
+  # never "skipped" into a pass: a skipped required check would count as
+  # passed.
   gate:
     name: bazel test (side-by-side)
-    needs: [rbe, lane, sync-check]
+    needs: [rbe, lane, sync-check, worker-host]
     if: always()
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
@@ -853,10 +1045,12 @@ jobs:
           RBE: ${{ needs.rbe.result }}
           LANES: ${{ needs.lane.result }}
           SYNC: ${{ needs.sync-check.result }}
+          WORKER_HOST: ${{ needs.worker-host.result }}
         run: |
-          echo "event=$EVENT mode=$MODE rbe=$RBE lanes=$LANES sync=$SYNC"
+          echo "event=$EVENT mode=$MODE rbe=$RBE lanes=$LANES sync=$SYNC worker-host=$WORKER_HOST"
           [ "$RBE" = success ] || exit 1
           [ "$SYNC" = success ] || exit 1
+          [ "$WORKER_HOST" = success ] || exit 1
           if [ -z "$LANE_LIST" ] || [ "$LANE_LIST" = '[]' ]; then
             echo "::error title=bazel ran no lanes::mode $MODE started no lane for this $EVENT run; nothing was tested"
             exit 1

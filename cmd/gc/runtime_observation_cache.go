@@ -715,10 +715,22 @@ func (s *ObservationSnapshot) Observation(name string, now time.Time, maxAge tim
 		f := obs.fact(kind)
 		*f = s.readFact(obs.Backend, *f, now, maxAge)
 	}
-	if obs.Listed.Value != ObsYes || obs.EnrichedAt.IsZero() || !obs.EnrichedAt.Equal(obs.Listed.ObservedAt) {
-		obs.Incarnation, obs.Owner, obs.OwnerState, obs.InstanceToken, obs.Identity = "", reconcilekey.Key{}, OwnerUnknown, "", runtimeIdentity{}
+	if !obs.enrichedWithListing() {
+		obs.Incarnation, obs.InstanceToken = "", ""
+		obs.forgetOwner()
 	}
 	return obs, true
+}
+
+// enrichedWithListing reports whether the pass that listed the name also
+// enriched it, so its owner and identity facts are that pass's.
+func (o *RuntimeObservation) enrichedWithListing() bool {
+	return o.Listed.Value == ObsYes && !o.EnrichedAt.IsZero() && o.EnrichedAt.Equal(o.Listed.ObservedAt)
+}
+
+// forgetOwner clears the owner fact and the identity read: unknown.
+func (o *RuntimeObservation) forgetOwner() {
+	o.Owner, o.OwnerState, o.Identity = reconcilekey.Key{}, OwnerUnknown, runtimeIdentity{}
 }
 
 // Get returns name's observation read at the cache's clock (Observation).

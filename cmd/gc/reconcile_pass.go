@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"runtime/debug"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -83,6 +84,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 		rec.Err = err.Error()
 		return passResult{}
 	}
+	p.clearAmbiguous(&w, now)
 	cfg := w.Env.Cfg
 	a, err := decideAllocation(allocInputs{
 		Now: now, Cfg: cfg, ConfigRev: w.Env.ConfigRev, EnvGen: w.Env.Gen, CityPath: e.CityPath, CityName: e.CityName,
@@ -120,24 +122,33 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	for _, ap := range a.Plans {
 		intents = append(intents, createIntent(cfg, w.Env.ConfigRev, ap))
 	}
+	var unregistered []intent
+	if p.effects != nil {
+		intents, unregistered = splitRegistered(intents, p.creates != nil)
+	}
 	res := admit(admitInput{
 		Now: now, Cfg: cfg, Bucket: p.bucket, FairSeed: p.fairSeed, InFlight: w.InFlight, BringUp: w.Census.BringUp(cfg),
 		Endpoints: w.Gates, Backoff: w.Backoff, Paused: w.Paused,
-		BootOpen: w.Boot.CachePrimed && w.Boot.InventoryComplete && w.Boot.RecordingSeen, // P2
+		BootOpen: w.Boot.open(), // P2
 	}, intents)
+	res.Deferred = append(res.Deferred, unregistered...)
 	// The planner state admission leaves is stored before any submit. A
 	// trace-only pass submits nothing, so it keeps no token debit, and no
 	// refill is a reason for a pass.
 	p.fairSeed = res.FairSeed
-	if v2EffectsReal {
+	if p.effects != nil {
 		p.bucket, next = res.Bucket, earliest(next, res.NextToken)
+		p.submit(&w, &a, res.Admitted)
 	}
 	rec.Admitted, rec.Deferred = res.Admitted, res.Deferred
 	rec.Rows = p.traceRows(w.Census, reasons, res)
 
 	p.out.relevant.Store(newRelevantSet(w.Demand))
 	p.out.summary.Store(newAllocSummary(now, &w, &a))
-	return passResult{Next: next, Counts: passCountsOf(res, w.InFlight)}
+	counts := passCountsOf(res, w.InFlight)
+	p.observeWorld(&w, a.Alerts, &counts)
+	p.observeIdentityHolds(&w, reasons)
+	return passResult{Next: next, Counts: counts}
 }
 
 // newAllocSummary is the summary a pass at now publishes for C8's steps. Any
@@ -159,6 +170,90 @@ func newAllocSummary(now time.Time, w *World, a *allocDecision) *allocSummary {
 	return s
 }
 
+// splitRegistered splits off the intents whose kind has no registered
+// effect yet, and the creates when no create runner is wired, deferred with
+// cause no-effect before admission, so they take no cap, no token and no
+// backoff: the row is traced and the arm stays visible until its effect
+// lands.
+func splitRegistered(intents []intent, creates bool) (registered, unregistered []intent) {
+	for _, it := range intents {
+		if !effectSpecs[it.Kind].runs() || (it.Kind == intentCreate && !creates) {
+			it.Cause = causeNoEffect
+			unregistered = append(unregistered, it)
+			continue
+		}
+		registered = append(registered, it)
+	}
+	return registered, unregistered
+}
+
+// submit hands each admitted intent's effect to the executor under a new
+// in-flight entry, recorded first so the next pass counts it; the creates'
+// inputs are built on the first admitted create. A create gets
+// its instance token minted here, into its plan and its entry, which is
+// keyed by it (S-8, P5). A submit the executor refuses (busy, or stopped)
+// runs and posts nothing, so its entry is settled here at once.
+func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
+	if len(admitted) == 0 {
+		return
+	}
+	pass := newEffectPass(w, a)
+	pass.Clock, pass.held.creates, pass.seam = p.clock, p.creates, p.seam
+	for _, it := range admitted {
+		e := inflightEntry{Kind: it.Kind, Key: it.Key, Endpoint: it.Endpoint}
+		if it.Kind == intentCreate {
+			if pass.held.create == nil {
+				pass.held.create = newCreatePass(w)
+			}
+			it.CreatePlan.Token = session.NewInstanceToken()
+			e = createInflightEntry(it, w.SessionsLeg)
+		}
+		seq := p.inflight.add(e)
+		if seq == 0 {
+			continue
+		}
+		it.CreatePlan.Seq = seq
+		if err := p.effects.submitIntent(pass, it, seq); err != nil {
+			p.inflight.settle(settlement{Key: it.Key, Kind: it.Kind, Seq: seq, Token: e.Token})
+		}
+	}
+}
+
+// createInflightEntry is an admitted create's in-flight entry: its token, identity
+// and endpoint, and the planning stand-in it reserves until the census shows
+// its row (inFlightCreates).
+func createInflightEntry(it intent, leg string) inflightEntry {
+	c := it.CreatePlan
+	e := inflightEntry{
+		Kind: it.Kind, Endpoint: it.Endpoint, Token: c.Token, Identity: c.identity().key(), Leg: leg,
+		Template: c.Template, QualifiedInstance: c.QualifiedInstance, Slot: c.Slot, WorkBeadID: c.WorkBeadID,
+	}
+	if c.Named != nil {
+		e.Template, e.SessionName = c.Named.Template, c.Named.SessionName
+	}
+	return e
+}
+
+// clearAmbiguous clears the ambiguous creates w's census shows, by token or,
+// for a named create, by an open canonical row of its identity, or whose
+// hard bound passed, alerting on each hard-bound clear (P5), and refreshes
+// w's in-flight view.
+func (p *planner) clearAmbiguous(w *World, now time.Time) {
+	c := inflightCensus{Tokens: make(map[string]bool), Named: make(map[string]bool)}
+	for _, row := range w.Census.Rows {
+		if row.InstanceToken != "" {
+			c.Tokens[row.InstanceToken] = true
+		}
+	}
+	for _, row := range w.Census.Canonical() {
+		if id := strings.TrimSpace(row.Info.ConfiguredNamedIdentity); id != "" && !row.Info.Closed {
+			c.Named[createIdentity{QualifiedInstance: id, Named: true}.key()] = true
+		}
+	}
+	p.alertCleared(p.inflight.clearVisible(c, now))
+	w.InFlight = p.inflight.view()
+}
+
 // decideRowSafe is decideRow with P6's panic isolation: a row that panics
 // holds, and is traced with reason panic.
 func (p *planner) decideRowSafe(w *World, a *allocDecision, k rowKey) (it intent, next time.Time) {
@@ -177,10 +272,11 @@ func createIntent(cfg *config.City, rev string, ap allocPlan) intent {
 	plan := createPlan{ID: ap.identity(), Named: ap.Named}
 	if ap.Named == nil {
 		plan = createPlanOf(ap.identity(), ap.Template, ap.Plan)
+		plan.WorkBeadID = ap.Request.WorkBeadID
 	}
 	plan.ConfigRev = rev
 	return intent{
-		Kind: intentCreate, Reason: "create-" + ap.Kind.String(), Create: plan, Floor: ap.Request.FloorGuarantee,
+		Kind: intentCreate, Reason: "create-" + ap.Kind.String(), CreatePlan: plan, Floor: ap.Request.FloorGuarantee,
 		Endpoint: rowEndpoint(cfg, session.Info{Template: ap.Template}),
 	}
 }

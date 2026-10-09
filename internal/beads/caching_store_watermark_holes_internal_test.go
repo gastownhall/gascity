@@ -1140,19 +1140,23 @@ func TestCachingStoreLateEventUnverifiableMarksDirty(t *testing.T) {
 }
 
 // TestCachingStoreRecentWriteVerifyWindowIsSixtySeconds pins the F3 window at
-// the contract's cache_lag_bound default: a conflicting late event is verified
-// against the backing just inside it and applied unverified just past it.
+// the contract's cache_lag_bound default: a conflicting late dependency-only
+// update, which the window governs, is verified against the backing just
+// inside it and not just past it. A field-changing bead.updated is verified
+// on either side (mc-03lk4).
 func TestCachingStoreRecentWriteVerifyWindowIsSixtySeconds(t *testing.T) {
 	t.Parallel()
 
 	const bound = 60 * time.Second
 	for _, tc := range []struct {
 		name     string
+		edges    bool
 		age      time.Duration
 		verified bool
 	}{
-		{"inside", bound - time.Second, true},
-		{"outside", bound + time.Second, false},
+		{"inside", true, bound - time.Second, true},
+		{"outside", true, bound + time.Second, false},
+		{"field update outside", false, bound + time.Second, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1163,6 +1167,9 @@ func TestCachingStoreRecentWriteVerifyWindowIsSixtySeconds(t *testing.T) {
 				t.Fatalf("Create: %v", err)
 			}
 			stale := eventPayload(t, row)
+			if tc.edges {
+				stale = json.RawMessage(fmt.Sprintf(`{"id":%q,"dependencies":[{"issue_id":%q,"depends_on_id":"gc-elsewhere","type":"blocks"}]}`, row.ID, row.ID))
+			}
 			title := "written"
 			if err := cache.Update(row.ID, UpdateOpts{Title: &title}); err != nil {
 				t.Fatalf("Update: %v", err)
@@ -1172,7 +1179,7 @@ func TestCachingStoreRecentWriteVerifyWindowIsSixtySeconds(t *testing.T) {
 			reads := backing.getCalls
 			cache.ApplyEvent("bead.updated", stale)
 			if verified := backing.getCalls > reads; verified != tc.verified {
-				t.Fatalf("event against a write %v old: verified=%v, want %v", tc.age, verified, tc.verified)
+				t.Fatalf("event (edges only %v) against a write %v old: verified=%v, want %v", tc.edges, tc.age, verified, tc.verified)
 			}
 		})
 	}

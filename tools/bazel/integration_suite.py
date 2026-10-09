@@ -15,8 +15,10 @@ shard's packages-* shards) differs from the unit lane only in packages that
 Every other package's go_test builds and behaves identically in both builds,
 so the unit lane already covers it. This script writes a test_suite naming
 every go_test in the (a) and (b) packages into a managed block of
-test/BUILD.bazel. //test/integration and the acceptance tiers have lanes of
-their own and are left out.
+test/BUILD.bazel, plus every test_suite there named *_integration_solo_tests
+(a package's long integration-build tests, each run alone in a target of its
+own, e.g. //cmd/gc:gc_integration_solo_tests). //test/integration and the
+acceptance tiers have lanes of their own and are left out.
 
 Run after gazelle (see `make bazel-sync`); the CI "BUILD files in sync" job
 fails when the result differs from what is committed, so a new
@@ -45,6 +47,7 @@ INTEGRATION_TAG_RE = re.compile(r"(?<![\w.])integration(?![\w.])")
 FAST_UNIT_GATE_RE = re.compile(
     r"^\s+(?:processgrouptest\.RequireRealProcessSignals|herdrtest\.RequireLive)\(", re.MULTILINE)
 GO_TEST_NAME_RE = re.compile(r'^go_test\(\n    name = "(?P<name>[^"]+)"', re.MULTILINE)
+SOLO_SUITE_NAME_RE = re.compile(r'^test_suite\(\n    name = "(?P<name>[^"]+_integration_solo_tests)"', re.MULTILINE)
 
 
 def build_constraint(src: str) -> str:
@@ -81,7 +84,8 @@ def suite_labels() -> list[str]:
         if "BUILD.bazel" not in files or not in_tier(pkg, files):
             continue
         with open(os.path.join(pkg, "BUILD.bazel"), encoding="utf-8") as f:
-            names = GO_TEST_NAME_RE.findall(f.read())
+            build = f.read()
+        names = GO_TEST_NAME_RE.findall(build) + SOLO_SUITE_NAME_RE.findall(build)
         labels.extend(f"//{pkg}:{name}" for name in names)
     return sorted(labels)
 

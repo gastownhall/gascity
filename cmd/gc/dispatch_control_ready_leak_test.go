@@ -65,44 +65,24 @@ func (s *closeCountingStore) Get(id string) (beads.Bead, error) {
 	return s.MemStore.Get(id)
 }
 
-// forceControlReadyCacheStale rewinds a scope's primed timestamp past the TTL so
-// the next controlReadyCachesFor call re-primes instead of reusing the entry --
-// no clock seam needed.
-func forceControlReadyCacheStale(t *testing.T, dir string) {
-	t.Helper()
-	controlReadyCacheRegistry.mu.Lock()
-	defer controlReadyCacheRegistry.mu.Unlock()
-	entry, ok := controlReadyCacheRegistry.byDir[dir]
-	if !ok {
-		t.Fatalf("forceControlReadyCacheStale: no cache entry for %q", dir)
-	}
-	entry.primedAt = entry.primedAt.Add(-2 * controlReadyCacheTTL)
-}
-
 // installControlReadyCacheSourcesFn swaps the source seam for the duration of a
-// test and drops the scope's registry entry on cleanup so the global registry
-// never leaks fixtures across tests.
-func installControlReadyCacheSourcesFn(t *testing.T, dir string, fn func(dir, cityPath string, cfg *config.City) (sources, owned []beads.Store, err error)) {
+// test.
+func installControlReadyCacheSourcesFn(t *testing.T, fn func(dir, cityPath string, cfg *config.City) (sources, owned []beads.Store, err error)) {
 	t.Helper()
 	prev := controlReadyCacheSourcesFn
 	controlReadyCacheSourcesFn = fn
-	t.Cleanup(func() {
-		controlReadyCacheSourcesFn = prev
-		controlReadyCacheRegistry.mu.Lock()
-		delete(controlReadyCacheRegistry.byDir, dir)
-		controlReadyCacheRegistry.mu.Unlock()
-	})
+	t.Cleanup(func() { controlReadyCacheSourcesFn = prev })
 }
 
 // TestControlReadyCachesForClosesOwnedSourcesPerPrime is the regression pin for
-// the WAL-starvation leak: every TTL-stale re-prime must release the scoped
+// the WAL-starvation leak: every per-scan prime must release the scoped
 // backing it opened, and the primed snapshot must keep answering afterward.
 func TestControlReadyCachesForClosesOwnedSourcesPerPrime(t *testing.T) {
 	dir := t.TempDir()
 
 	var mu sync.Mutex
 	var minted []*closeCountingStore
-	installControlReadyCacheSourcesFn(t, dir, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
+	installControlReadyCacheSourcesFn(t, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
 		f := newCloseCountingStore(t, true)
 		mu.Lock()
 		minted = append(minted, f)
@@ -117,7 +97,6 @@ func TestControlReadyCachesForClosesOwnedSourcesPerPrime(t *testing.T) {
 		if len(caches) != 1 {
 			t.Fatalf("prime %d: controlReadyCachesFor returned %d caches, want 1", i, len(caches))
 		}
-		forceControlReadyCacheStale(t, dir)
 	}
 
 	mu.Lock()
@@ -129,7 +108,7 @@ func TestControlReadyCachesForClosesOwnedSourcesPerPrime(t *testing.T) {
 	mu.Unlock()
 
 	if opens != primes {
-		t.Fatalf("opens = %d, want %d (each stale re-prime opens a fresh scoped store)", opens, primes)
+		t.Fatalf("opens = %d, want %d (each scan primes from a freshly opened scoped store)", opens, primes)
 	}
 	// The leak fix must bound live handles: opens minus closes is the count of
 	// still-open backings, and the fix closes each per prime, so it is 0 here and
@@ -154,7 +133,7 @@ func TestControlReadyCachesForNeverClosesSharedBindingLeg(t *testing.T) {
 	shared := newCloseCountingStore(t, false)
 	var mu sync.Mutex
 	var ownedMinted []*closeCountingStore
-	installControlReadyCacheSourcesFn(t, dir, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
+	installControlReadyCacheSourcesFn(t, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
 		owned := newCloseCountingStore(t, true)
 		mu.Lock()
 		ownedMinted = append(ownedMinted, owned)
@@ -168,7 +147,6 @@ func TestControlReadyCachesForNeverClosesSharedBindingLeg(t *testing.T) {
 		if got := controlReadyCachesFor(dir, dir, nil); len(got) != 2 {
 			t.Fatalf("prime %d: got %d caches, want 2 (scoped + binding legs)", i, len(got))
 		}
-		forceControlReadyCacheStale(t, dir)
 	}
 
 	if got := shared.closes(); got != 0 {
@@ -193,7 +171,7 @@ func TestControlReadyCachesForClosesOwnedSourcesOnPrimeFailure(t *testing.T) {
 	dir := t.TempDir()
 
 	failing := &primeFailingStore{closeCountingStore: newCloseCountingStore(t, false)}
-	installControlReadyCacheSourcesFn(t, dir, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
+	installControlReadyCacheSourcesFn(t, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
 		return []beads.Store{failing}, []beads.Store{failing}, nil
 	})
 

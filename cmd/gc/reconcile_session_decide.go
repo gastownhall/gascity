@@ -1,6 +1,7 @@
 package main
 
 import (
+	"maps"
 	"strings"
 	"time"
 
@@ -83,13 +84,37 @@ func earlierRequeue(a, b time.Duration) time.Duration {
 func decideRow(w *World, a *allocDecision, k rowKey) (it intent, next time.Time) {
 	r := &rowFacts{w: w, k: k, entry: a.Snapshot.Entries[k]}
 	r.row, r.found = w.Census.Rows[k]
-	for _, arm := range rowArms {
+	for i, arm := range rowArms {
 		if it, ok := arm.decide(r); ok {
+			if arm.name == "A6" && it.Kind != "" {
+				it.Patch = r.fold(it.Patch, rowArms[i+1:])
+			}
 			it.Key = k
 			return it, r.next
 		}
 	}
 	return intent{Key: k, Reason: decideNoAction}, r.next
+}
+
+// fold adds to an A6 item's patch the plain row writes that A6's later items
+// propose for the row in the same pass, so the row's heals and markers land in
+// one CAS and none waits a pass behind another (CONTRACT v5.8 §12.3, R5). A
+// key an earlier item writes keeps its value; a later fresh heal waits.
+func (r *rowFacts) fold(patch session.MetadataPatch, rest []rowArm) session.MetadataPatch {
+	patch = maps.Clone(patch)
+	for _, arm := range rest {
+		if arm.name != "A6" {
+			break
+		}
+		if it, ok := arm.decide(r); ok && it.Kind == intentRowHeal {
+			for key, value := range it.Patch {
+				if _, set := patch[key]; !set {
+					patch[key] = value
+				}
+			}
+		}
+	}
+	return patch
 }
 
 // rowFacts is what decideRow's arms read of one row, and the earliest
@@ -120,16 +145,26 @@ type rowArm struct {
 	decide func(r *rowFacts) (it intent, ok bool)
 }
 
-// rowArms is CONTRACT v5 §4's table in its order. Later PRs insert their
-// arms at their numbers: A3 rekey (C4c2), A4 the stop request (C6b2), A6's
-// other heals and markers (C5d), A7 row metadata (C7d), A8 the baseline
-// (C7c), and A10-A21 below A9.
+// rowArms is CONTRACT v5 §4's table in its order; an arm with several rows
+// (A6) takes one line per row. Later PRs insert their arms at their numbers:
+// A4 the stop request (C6b2), A7 row metadata (C7d), A8 the baseline (C7c),
+// A10-A18, A20's begin (C6a2) and A21.
 var rowArms = []rowArm{
 	{"A1", armNoRow},
 	{"A2", armKillFence},
+	{"A3", armIdentity},
 	{"A5", armUnknownState},
 	{"A6", armTimerHeals},
+	{"A6", armClaimClear},
+	{"A6", armCreatingHeal},
+	{"A6", armDeadRuntimeHeal},
+	{"A6", armAwakeHeal},
+	{"A6", armStabilityClear},
+	{"A6", armDetachedAt},
+	{"A6", armStrandedClear},
+	{"A6", armCurrentBead},
 	{"A9", armLivenessUnknown},
+	{"A19", armDrainVoidCancel},
 }
 
 // decideRow's other reasons.
@@ -181,7 +216,7 @@ func armTimerHeals(r *rowFacts) (intent, bool) {
 		return intent{}, false
 	}
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
-	return intent{Kind: intentRowHeal, Reason: decideTimerHeal, Basis: basis}, true
+	return intent{Kind: intentRowHeal, Reason: decideTimerHeal, Basis: basis, Patch: patch}, true
 }
 
 // armLivenessUnknown is A9: every arm below reads liveness and desire, so
@@ -202,7 +237,7 @@ func armLivenessUnknown(r *rowFacts) (intent, bool) {
 // idleness and claims, so they are the probing -fresh kinds; every other
 // reason is a plain row write. A20 (C6a, C6b1) proposes through it.
 func drainKind(reason string, signal bool) string {
-	fresh := reason == string(session.SleepReasonIdle) || reason == reasonNoWake || reason == idleRespawnDrainReason
+	fresh := reason == drainIdle || reason == reasonNoWake || reason == idleRespawnDrainReason
 	switch {
 	case signal && fresh:
 		return intentSignalFresh

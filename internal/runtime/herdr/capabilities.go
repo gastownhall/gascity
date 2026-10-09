@@ -49,7 +49,9 @@ func (p *Provider) waitForIdleOutcome(ctx context.Context, name string, timeout 
 	if ms < 1 {
 		ms = 1
 	}
-	_, err := p.c.run(ctx, "agent", "wait", herdrAgentName(name), "--until", "idle", "--timeout", strconv.Itoa(ms))
+	// A Claude pane that has finished a turn reports "done", not "idle";
+	// waiting for idle alone never returns for it.
+	_, err := p.c.run(ctx, "agent", "wait", herdrAgentName(name), "--until", "idle", "--until", "done", "--timeout", strconv.Itoa(ms))
 	switch {
 	case err == nil:
 		return idleWaitReached

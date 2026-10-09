@@ -29,11 +29,12 @@ const (
 )
 
 // setupBazelBeadsDigests: sha256 of beads' .github/actions/setup-bazel files
-// (beads main b8a9545c, #7174: R4's -Xmx4g client heap). A change here is a
-// change in beads first: copy all three files from beads and update these
+// (beads main b8a9545c, #7174: R4's -Xmx4g client heap; action.yml from beads
+// main 533f9529, #7379: MODULE.bazel in the runner cache key). A change here
+// is a change in beads first: copy the files from beads and update these
 // digests in the same PR.
 var setupBazelBeadsDigests = map[string]string{
-	"action.yml":         "9dba170b11c0c2acbde181715e9a801d95972c5f1a74aa5ffaa12f3a12ab886d",
+	"action.yml":         "a104b74c2d470ee77b0fb4c3a12c506fd9a8771a23521f96bd28a1bc574c0e5f",
 	"fork-credential.sh": "abd68bbacb42fa5c7a71d06aa652bcf0f2fbe870f00b13b51650fe95c3bef59e",
 	"write-bazelrc.sh":   "ffd2f3ebca5a449e12db342c143b9d082cd1d3d5ab7abc8fac84475d5ed56550",
 }
@@ -140,13 +141,30 @@ func TestBazelCIConfigSuiteConfigs(t *testing.T) {
 	for _, line := range []string{
 		"test:ci --flaky_test_attempts=1",
 		"test:ci --experimental_remote_cache_eviction_retries=0",
+		// Tests run beside nogo, not after it (bazel_key_parity_test.go
+		// classifies the flag non-key).
+		"test:ci --experimental_use_validation_aspect",
 	} {
 		if !strings.Contains(rc, "\n"+line+"\n") {
 			t.Errorf(".bazelrc lacks %q", line)
 		}
 	}
-	if strings.Contains(rc, "--nocache_test_results") {
-		t.Errorf(".bazelrc forces test re-execution with --nocache_test_results; lanes should reuse cached results")
+	// Every PR and push lane reuses cached results; only test:fresh (the
+	// nightly fresh-test-results run, bazel-nightly.yml) may force
+	// re-execution.
+	sawFresh := false
+	for _, o := range parseBazelRC(rc) {
+		if o.flag != "--nocache_test_results" {
+			continue
+		}
+		if o.command == "test" && o.config == "fresh" {
+			sawFresh = true
+			continue
+		}
+		t.Errorf(".bazelrc sets --nocache_test_results on %s:%s; only test:fresh may force re-execution, so every other lane reuses cached results", o.command, o.config)
+	}
+	if !sawFresh {
+		t.Errorf(".bazelrc has no test:fresh --nocache_test_results (the nightly fresh run's config)")
 	}
 }
 
@@ -232,18 +250,20 @@ func readMultiLaneWorkflow(t *testing.T) multiLaneWorkflow {
 func TestBazelMultiLaneWorkflowTriggersAndPermissions(t *testing.T) {
 	wf := readMultiLaneWorkflow(t)
 	// pull_request (never pull_request_target: fork code must not run with
-	// the base repository's token or secrets), pushes to main, dispatches
+	// the base repository's token or secrets), merge groups (the merge
+	// queue, scripts/ci_merge_queue_test.go), pushes to main, dispatches
 	// and calls.
 	on := slices.Sorted(maps.Keys(wf.On))
-	if want := []string{"pull_request", "push", "workflow_call", "workflow_dispatch"}; !reflect.DeepEqual(on, want) {
+	if want := []string{"merge_group", "pull_request", "push", "workflow_call", "workflow_dispatch"}; !reflect.DeepEqual(on, want) {
 		t.Errorf("%s on: %v, want exactly %v", bazelMultiLaneWorkflow, on, want)
 	}
-	// A PR's runs share a group and cancel each other; every other event has
-	// a group of its own (the run id): a push to main is never canceled, nor
+	// A PR's runs share a group and cancel each other; a merge group keys on
+	// its own queue ref and is never canceled; every other event has a
+	// group of its own (the run id): a push to main is never canceled, nor
 	// replaced while pending by the next push. The prefix is a literal
 	// (under workflow_call github.workflow is the caller's name).
 	wantConcurrency := map[string]string{
-		"group":              multiLaneConcurrencyPrefix + "${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}",
+		"group":              multiLaneConcurrencyPrefix + "${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'merge_group' && github.ref || github.run_id }}",
 		"cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
 	}
 	if !reflect.DeepEqual(wf.Concurrency, wantConcurrency) {
@@ -260,7 +280,10 @@ func TestBazelMultiLaneWorkflowTriggersAndPermissions(t *testing.T) {
 		"coverage":    {"contents": "read", "issues": "read"},
 		"sync-check":  readOnly,
 		"bep-summary": readOnly, // downloads this run's artifacts with the job token
-		"gate":        nil,      // the top-level contents: read
+		// rbe-worker S3a: secret-free (rbe-worker-repo-design.md §5.4, §6.3);
+		// issues: read for the same worker-env preflight the lane job runs.
+		"worker-host": {"contents": "read", "issues": "read"},
+		"gate":        nil, // the top-level contents: read
 	}
 	if len(wf.Jobs) != len(wantJobs) {
 		t.Errorf("%s has %d jobs, want %d (%v)", bazelMultiLaneWorkflow, len(wf.Jobs), len(wantJobs), wantJobs)
@@ -306,15 +329,17 @@ func readStepOutput(t *testing.T, path, name string) (string, bool) {
 	return value, found
 }
 
-// multiLaneLanes runs the rbe job's Lanes step for an event and a mode and
-// returns its raw lanes output (the string the lane job's if compares).
-func multiLaneLanes(t *testing.T, script, event, mode string) (string, error) {
+// multiLaneLanes runs the rbe job's Lanes step for an event, a mode and
+// fresh-test-results ("true" or "false") and returns its raw lanes output
+// (the string the lane job's if compares).
+func multiLaneLanes(t *testing.T, script, event, mode, fresh string) (string, error) {
 	t.Helper()
 	dir := t.TempDir()
 	output := filepath.Join(dir, "output")
 	out, err := runWorkflowStepScript(t, dir, script, map[string]string{
 		"EVENT":               event,
 		"MODE":                mode,
+		"FRESH":               fresh,
 		"GITHUB_OUTPUT":       output,
 		"GITHUB_STEP_SUMMARY": filepath.Join(dir, "summary"),
 	})
@@ -323,7 +348,7 @@ func multiLaneLanes(t *testing.T, script, event, mode string) (string, error) {
 	}
 	lanes, ok := readStepOutput(t, output, "lanes")
 	if !ok {
-		t.Fatalf("Lanes step (event %s, mode %s) wrote no lanes output:\n%s", event, mode, out)
+		t.Fatalf("Lanes step (event %s, mode %s, fresh %s) wrote no lanes output:\n%s", event, mode, fresh, out)
 	}
 	return lanes, nil
 }
@@ -334,7 +359,7 @@ func multiLaneLanes(t *testing.T, script, event, mode string) (string, error) {
 const multiLaneForkCertificates = 4
 
 var (
-	multiLaneEvents = []string{"pull_request", "push", "workflow_dispatch", "workflow_call", "schedule"}
+	multiLaneEvents = []string{"pull_request", "merge_group", "push", "workflow_dispatch", "workflow_call", "schedule"}
 	multiLaneModes  = []string{"remote", "fork-ro", "fork-rw", "cache", "local"}
 )
 
@@ -361,7 +386,11 @@ func wantMultiLanes(event, _ string) []string {
 func TestBazelMultiLaneLaneList(t *testing.T) {
 	wf := readMultiLaneWorkflow(t)
 	step := multiLaneRBEStep(t, wf, "lanes")
-	wantEnv := map[string]string{"EVENT": "${{ github.event_name }}", "MODE": "${{ steps.decide.outputs.mode }}"}
+	wantEnv := map[string]string{
+		"EVENT": "${{ github.event_name }}",
+		"MODE":  "${{ steps.decide.outputs.mode }}",
+		"FRESH": "${{ inputs.fresh-test-results }}",
+	}
 	if step.If != "" || !reflect.DeepEqual(step.Env, wantEnv) {
 		t.Errorf("Lanes step: if %q, env %v; want it unconditional with env %v", step.If, step.Env, wantEnv)
 	}
@@ -371,47 +400,53 @@ func TestBazelMultiLaneLaneList(t *testing.T) {
 
 	for _, event := range multiLaneEvents {
 		for _, mode := range multiLaneModes {
-			raw, err := multiLaneLanes(t, step.Run, event, mode)
-			if err != nil {
-				t.Errorf("Lanes step (event %s, mode %s) failed: %v\n%s", event, mode, err, raw)
-				continue
-			}
-			want := wantMultiLanes(event, mode)
-			var entries []map[string]any
-			if err := json.Unmarshal([]byte(raw), &entries); err != nil {
-				t.Errorf("event %s, mode %s: lanes %q is not a JSON array of objects: %v", event, mode, raw, err)
-				continue
-			}
-			got := []string{}
-			for _, entry := range entries {
-				name, _ := entry["lane"].(string)
-				got = append(got, name)
-				if cmd, _ := entry["cmd"].(string); cmd != multiLaneCommands[name] {
-					t.Errorf("event %s, mode %s: lane %s cmd %q, want %q", event, mode, name, cmd, multiLaneCommands[name])
+			for _, fresh := range []string{"false", "true"} {
+				raw, err := multiLaneLanes(t, step.Run, event, mode, fresh)
+				if err != nil {
+					t.Errorf("Lanes step (event %s, mode %s, fresh %s) failed: %v\n%s", event, mode, fresh, err, raw)
+					continue
 				}
-				// Evidence-only (exit 0 on failure) is integration's alone, until G3.
-				ev, set := entry["evidence-only"]
-				if (name == "integration") != (set && ev == true) {
-					t.Errorf("event %s, mode %s: lane %s evidence-only %v; want true on integration only", event, mode, name, ev)
+				want := wantMultiLanes(event, mode)
+				var entries []map[string]any
+				if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+					t.Errorf("event %s, mode %s, fresh %s: lanes %q is not a JSON array of objects: %v", event, mode, fresh, raw, err)
+					continue
 				}
-				for key := range entry {
-					if key != "lane" && key != "cmd" && key != "evidence-only" {
-						t.Errorf("event %s, mode %s: lane %s: unexpected matrix key %q", event, mode, name, key)
+				got := []string{}
+				for _, entry := range entries {
+					name, _ := entry["lane"].(string)
+					got = append(got, name)
+					wantCmd := multiLaneCommands[name]
+					if fresh == "true" {
+						wantCmd += " --config=fresh"
+					}
+					if cmd, _ := entry["cmd"].(string); cmd != wantCmd {
+						t.Errorf("event %s, mode %s, fresh %s: lane %s cmd %q, want %q", event, mode, fresh, name, cmd, wantCmd)
+					}
+					// Evidence-only (exit 0 on failure) is integration's alone, until G3.
+					ev, set := entry["evidence-only"]
+					if (name == "integration") != (set && ev == true) {
+						t.Errorf("event %s, mode %s, fresh %s: lane %s evidence-only %v; want true on integration only", event, mode, fresh, name, ev)
+					}
+					for key := range entry {
+						if key != "lane" && key != "cmd" && key != "evidence-only" {
+							t.Errorf("event %s, mode %s, fresh %s: lane %s: unexpected matrix key %q", event, mode, fresh, name, key)
+						}
 					}
 				}
-			}
-			if !reflect.DeepEqual(got, want) {
-				t.Errorf("event %s, mode %s: lanes %v, want %v", event, mode, got, want)
-			}
-			// The decide step reaches a fork mode on pull_request runs only.
-			if event == "pull_request" && strings.HasPrefix(mode, "fork-") && len(got) > multiLaneForkCertificates {
-				t.Errorf("event %s, mode %s: %d lanes; a fork run mints at most %d rbe-fork certificates", event, mode, len(got), multiLaneForkCertificates)
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("event %s, mode %s, fresh %s: lanes %v, want %v", event, mode, fresh, got, want)
+				}
+				// The decide step reaches a fork mode on pull_request runs only.
+				if event == "pull_request" && strings.HasPrefix(mode, "fork-") && len(got) > multiLaneForkCertificates {
+					t.Errorf("event %s, mode %s, fresh %s: %d lanes; a fork run mints at most %d rbe-fork certificates", event, mode, fresh, len(got), multiLaneForkCertificates)
+				}
 			}
 		}
 	}
 	// skip (rbe-west off) is gone: that is mode cache now, which tests.
 	for _, mode := range []string{"bogus", "skip"} {
-		if out, err := multiLaneLanes(t, step.Run, "pull_request", mode); err == nil {
+		if out, err := multiLaneLanes(t, step.Run, "pull_request", mode, "false"); err == nil {
 			t.Errorf("Lanes step accepted mode %s: %s", mode, out)
 		}
 	}
@@ -454,12 +489,12 @@ func TestBazelMultiLaneWorkflowShape(t *testing.T) {
 	if lane.Strategy.FailFast == nil || *lane.Strategy.FailFast {
 		t.Errorf("lane strategy: want fail-fast: false")
 	}
-	// Mode remote runs a 2 vCPU client, except acceptance: its client-side
-	// analysis (~1900 packages) took ~2 m of its lane on 2 vCPU. Every other
-	// mode executes here, or may (a fork lane's fallback to the read-only
-	// cache), so it gets 4 vCPU.
-	if want := "${{ (needs.rbe.outputs.mode != 'remote' || matrix.lane == 'acceptance') && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}"; lane.RunsOn != want {
-		t.Errorf("lane runs-on = %q, want %q (2 vCPU clients in mode remote, 4 vCPU otherwise and for acceptance)", lane.RunsOn, want)
+	// Unit and acceptance run on 8 vCPU, every other lane on 4: a remote
+	// lane's client-side loading and analysis is CPU-bound (ga-vnycm2.8:
+	// 23-34 s on 4 vCPU, 15-19 s on 8), and every other mode executes here,
+	// or may (a fork lane's fallback to the read-only cache).
+	if want := "${{ (matrix.lane == 'unit' || matrix.lane == 'acceptance') && 'blacksmith-8vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}"; lane.RunsOn != want {
+		t.Errorf("lane runs-on = %q, want %q", lane.RunsOn, want)
 	}
 
 	// Every checkout is full blobless history, then fresh-merge onto the rbe
@@ -504,23 +539,24 @@ func TestBazelMultiLaneWorkflowShape(t *testing.T) {
 }
 
 // multiLaneGateEvaluate returns the gate job's Evaluate script, after
-// checking it runs always() over rbe, lane and sync-check with the env the
-// cases below set.
+// checking it runs always() over rbe, lane, sync-check and worker-host (S3a)
+// with the env the cases below set.
 func multiLaneGateEvaluate(t *testing.T, wf multiLaneWorkflow) string {
 	t.Helper()
 	gate := wf.Jobs["gate"]
-	if gate.If != "always()" || !reflect.DeepEqual(gate.Needs, []any{"rbe", "lane", "sync-check"}) {
-		t.Errorf("gate: if %q, needs %v; want always() over rbe, lane, sync-check", gate.If, gate.Needs)
+	if gate.If != "always()" || !reflect.DeepEqual(gate.Needs, []any{"rbe", "lane", "sync-check", "worker-host"}) {
+		t.Errorf("gate: if %q, needs %v; want always() over rbe, lane, sync-check, worker-host", gate.If, gate.Needs)
 	}
 	for _, step := range gate.Steps {
 		if step.Name != "Evaluate" {
 			continue
 		}
 		for k, v := range map[string]string{
-			"LANE_LIST": "${{ needs.rbe.outputs.lanes }}",
-			"RBE":       "${{ needs.rbe.result }}",
-			"LANES":     "${{ needs.lane.result }}",
-			"SYNC":      "${{ needs.sync-check.result }}",
+			"LANE_LIST":   "${{ needs.rbe.outputs.lanes }}",
+			"RBE":         "${{ needs.rbe.result }}",
+			"LANES":       "${{ needs.lane.result }}",
+			"SYNC":        "${{ needs.sync-check.result }}",
+			"WORKER_HOST": "${{ needs.worker-host.result }}",
 		} {
 			if step.Env[k] != v {
 				t.Errorf("gate Evaluate env %s = %q, want %q", k, step.Env[k], v)
@@ -534,11 +570,11 @@ func multiLaneGateEvaluate(t *testing.T, wf multiLaneWorkflow) string {
 
 // multiLaneGatePasses runs the gate's Evaluate script for an event and mode
 // with job results and the rbe job's lane list.
-func multiLaneGatePasses(t *testing.T, script, event, mode, laneList, rbe, lanes, sync string) bool {
+func multiLaneGatePasses(t *testing.T, script, event, mode, laneList, rbe, lanes, sync, workerHost string) bool {
 	t.Helper()
 	_, err := runWorkflowStepScript(t, t.TempDir(), script, map[string]string{
 		"EVENT": event, "MODE": mode,
-		"LANE_LIST": laneList, "RBE": rbe, "LANES": lanes, "SYNC": sync,
+		"LANE_LIST": laneList, "RBE": rbe, "LANES": lanes, "SYNC": sync, "WORKER_HOST": workerHost,
 	})
 	return err == nil
 }
@@ -551,28 +587,30 @@ func TestBazelMultiLaneGate(t *testing.T) {
 	script := multiLaneGateEvaluate(t, wf)
 	someLanes := `[{"lane":"unit","cmd":"test --config=ci --keep_going //..."}]`
 	for _, c := range []struct {
-		event, mode, laneList, rbe, lanes, sync string
-		pass                                    bool
+		event, mode, laneList, rbe, lanes, sync, workerHost string
+		pass                                                bool
 	}{
-		{"pull_request", "remote", someLanes, "success", "success", "success", true},
-		{"pull_request", "cache", someLanes, "success", "success", "success", true},
-		{"push", "remote", someLanes, "success", "success", "success", true},
-		{"pull_request", "remote", someLanes, "success", "failure", "success", false},
-		{"pull_request", "remote", someLanes, "success", "cancelled", "success", false}, //nolint:misspell // GitHub Actions job result value
-		{"pull_request", "remote", someLanes, "success", "skipped", "success", false},
-		{"pull_request", "remote", someLanes, "success", "success", "failure", false},
-		{"pull_request", "remote", someLanes, "success", "success", "skipped", false},
-		{"pull_request", "remote", someLanes, "failure", "success", "success", false},
-		{"pull_request", "cache", "[]", "success", "skipped", "success", false},
-		{"push", "cache", "[]", "success", "skipped", "success", false},
-		{"workflow_dispatch", "cache", "[]", "success", "skipped", "success", false},
-		{"pull_request", "remote", "", "failure", "skipped", "success", false},
-		{"pull_request", "remote", "", "success", "skipped", "success", false},
-		{"push", "remote", "", "success", "success", "success", false},
+		{"pull_request", "remote", someLanes, "success", "success", "success", "success", true},
+		{"pull_request", "cache", someLanes, "success", "success", "success", "success", true},
+		{"push", "remote", someLanes, "success", "success", "success", "success", true},
+		{"pull_request", "remote", someLanes, "success", "failure", "success", "success", false},
+		{"pull_request", "remote", someLanes, "success", "cancelled", "success", "success", false}, //nolint:misspell // GitHub Actions job result value
+		{"pull_request", "remote", someLanes, "success", "skipped", "success", "success", false},
+		{"pull_request", "remote", someLanes, "success", "success", "failure", "success", false},
+		{"pull_request", "remote", someLanes, "success", "success", "skipped", "success", false},
+		{"pull_request", "remote", someLanes, "failure", "success", "success", "success", false},
+		{"pull_request", "remote", someLanes, "success", "success", "success", "failure", false},
+		{"pull_request", "remote", someLanes, "success", "success", "success", "skipped", false},
+		{"pull_request", "cache", "[]", "success", "skipped", "success", "success", false},
+		{"push", "cache", "[]", "success", "skipped", "success", "success", false},
+		{"workflow_dispatch", "cache", "[]", "success", "skipped", "success", "success", false},
+		{"pull_request", "remote", "", "failure", "skipped", "success", "success", false},
+		{"pull_request", "remote", "", "success", "skipped", "success", "success", false},
+		{"push", "remote", "", "success", "success", "success", "success", false},
 	} {
-		if got := multiLaneGatePasses(t, script, c.event, c.mode, c.laneList, c.rbe, c.lanes, c.sync); got != c.pass {
-			t.Errorf("gate (event %s, mode %s) with lane list %q, rbe %s, lanes %s, sync %s: pass %v, want %v",
-				c.event, c.mode, c.laneList, c.rbe, c.lanes, c.sync, got, c.pass)
+		if got := multiLaneGatePasses(t, script, c.event, c.mode, c.laneList, c.rbe, c.lanes, c.sync, c.workerHost); got != c.pass {
+			t.Errorf("gate (event %s, mode %s) with lane list %q, rbe %s, lanes %s, sync %s, worker-host %s: pass %v, want %v",
+				c.event, c.mode, c.laneList, c.rbe, c.lanes, c.sync, c.workerHost, got, c.pass)
 		}
 	}
 }
@@ -662,7 +700,7 @@ func TestBazelMultiLaneGateUnderRequiredNameRunsLanes(t *testing.T) {
 	lanesStep := multiLaneRBEStep(t, wf, "lanes")
 	for _, event := range multiLaneEvents {
 		for _, mode := range multiLaneModes {
-			raw, err := multiLaneLanes(t, lanesStep.Run, event, mode)
+			raw, err := multiLaneLanes(t, lanesStep.Run, event, mode, "false")
 			if err != nil {
 				t.Fatalf("Lanes step (event %s, mode %s) failed: %v\n%s", event, mode, err, raw)
 			}
@@ -677,16 +715,19 @@ func TestBazelMultiLaneGateUnderRequiredNameRunsLanes(t *testing.T) {
 			if !slices.Contains(lanes, "unit") || !slices.Contains(lanes, "acceptance") {
 				t.Errorf("event %s, mode %s: lanes %v; the required gate must fan in unit and acceptance", event, mode, lanes)
 			}
-			if !multiLaneGatePasses(t, script, event, mode, raw, "success", "success", "success") {
+			if !multiLaneGatePasses(t, script, event, mode, raw, "success", "success", "success", "success") {
 				t.Errorf("event %s, mode %s: the gate fails though every job succeeded", event, mode)
 			}
 			for _, bad := range []string{"failure", "skipped", "cancelled"} { //nolint:misspell // GitHub Actions job result value
-				if multiLaneGatePasses(t, script, event, mode, raw, "success", bad, "success") {
+				if multiLaneGatePasses(t, script, event, mode, raw, "success", bad, "success", "success") {
 					t.Errorf("event %s, mode %s: the gate passes with lanes %s", event, mode, bad)
 				}
 			}
-			if multiLaneGatePasses(t, script, event, mode, "[]", "success", "skipped", "success") {
+			if multiLaneGatePasses(t, script, event, mode, "[]", "success", "skipped", "success", "success") {
 				t.Errorf("event %s, mode %s: the gate passes a run with no lane", event, mode)
+			}
+			if multiLaneGatePasses(t, script, event, mode, raw, "success", "success", "success", "failure") {
+				t.Errorf("event %s, mode %s: the gate passes though worker-host failed", event, mode)
 			}
 		}
 	}
@@ -1039,6 +1080,97 @@ func TestCIAnalyticsStepsAreSafeAndBounded(t *testing.T) {
 		}
 		if got := job.Steps[idx].Env["CHECK_RUN_ID"]; got != "${{ job.check_run_id }}" {
 			t.Errorf("%s job CI analytics summary: CHECK_RUN_ID %q, want %q", jobName, got, "${{ job.check_run_id }}")
+		}
+	}
+}
+
+// TestBazelWorkerHostFetchAndParityAlwaysRun: during S3-S5, the worker-host
+// job fetches the PR's pinned rbe-worker and checks tree parity on every
+// run, pin-moved or not (fix 3); only the H5 range check and the measure
+// step stay gated. A permissive "accept either" if: would let this job
+// silently stop fetching once nobody notices a tightened measure-only
+// gate; pin the exact conditions instead.
+func TestBazelWorkerHostFetchAndParityAlwaysRun(t *testing.T) {
+	wf := readMultiLaneWorkflow(t)
+	job, ok := wf.Jobs["worker-host"]
+	if !ok {
+		t.Fatalf("%s: no worker-host job", bazelMultiLaneWorkflow)
+	}
+	byName := map[string]multiLaneStep{}
+	for _, s := range job.Steps {
+		byName[s.Name] = s
+	}
+
+	fetch, ok := byName["Fetch the PR's pinned rbe-worker"]
+	if !ok {
+		t.Fatalf("worker-host: no %q step", "Fetch the PR's pinned rbe-worker")
+	}
+	if fetch.If != "" {
+		t.Errorf("worker-host fetch step: if %q, want unconditional (runs on every worker-host run, S3-S5)", fetch.If)
+	}
+
+	parity, ok := byName["In-tree and pinned trees are identical (S3-S5 only)"]
+	if !ok {
+		t.Fatalf("worker-host: no %q step", "In-tree and pinned trees are identical (S3-S5 only)")
+	}
+	if parity.If != "" {
+		t.Errorf("worker-host parity step: if %q, want unconditional (runs on every worker-host run, S3-S5)", parity.If)
+	}
+
+	measure, ok := byName["Measure this Blacksmith host against the PR's manifest"]
+	if !ok {
+		t.Fatalf("worker-host: no %q step", "Measure this Blacksmith host against the PR's manifest")
+	}
+	wantMeasureIf := "steps.host.outputs.measure == 'true' || steps.pins.outputs.pin-changed == 'true'"
+	if measure.If != wantMeasureIf {
+		t.Errorf("worker-host measure step: if %q, want %q", measure.If, wantMeasureIf)
+	}
+	if measure.Env["RBE_WORKER_REVISION"] != "${{ steps.rbe-worker.outputs.sha }}" {
+		t.Errorf("worker-host measure step: RBE_WORKER_REVISION %q, want the fetched sha (pinned mode must log a real sha, not in-tree)", measure.Env["RBE_WORKER_REVISION"])
+	}
+
+	h5, ok := byName["Every commit in the bump range is signed, merged and verified (H5)"]
+	if !ok {
+		t.Fatalf("worker-host: no H5 step")
+	}
+	if h5.If != "steps.pins.outputs.pin-changed == 'true'" {
+		t.Errorf("worker-host H5 step: if %q, want gated on pin-changed only", h5.If)
+	}
+	if !strings.Contains(h5.Run, ".github/actions/rbe-worker/h5.sh") {
+		t.Errorf("worker-host H5 step: run %q, want it to call .github/actions/rbe-worker/h5.sh", h5.Run)
+	}
+	// S3 re-review: values pass through env:, not ${{ }} interpolated
+	// straight into run: (an attacker-controlled pin-range value spliced
+	// into the shell command line, rather than handed to it as an
+	// environment variable, is a shell-injection risk h5.sh's own args
+	// never needed to worry about until the workflow started doing this).
+	if strings.Contains(h5.Run, "${{") {
+		t.Errorf("worker-host H5 step: run %q contains ${{ }} interpolation; pass values through env: instead", h5.Run)
+	}
+	wantH5Env := map[string]string{
+		"WORKER_REPO_DIR": "${{ steps.rbe-worker.outputs.dir }}",
+		"OLD_SHA":         "${{ steps.pins.outputs.old }}",
+		"NEW_SHA":         "${{ steps.rbe-worker.outputs.sha }}",
+	}
+	for k, want := range wantH5Env {
+		if got := h5.Env[k]; got != want {
+			t.Errorf("worker-host H5 step: env[%s] = %q, want %q", k, got, want)
+		}
+	}
+}
+
+// TestBazelLaneHasNoOwnMeasureStep: fix 10, now that worker-host (fix 3)
+// measures this host on every pin bump: the lane job's own Blacksmith
+// measure step (bazel.yml §5.4's old location) is gone, not duplicated.
+func TestBazelLaneHasNoOwnMeasureStep(t *testing.T) {
+	wf := readMultiLaneWorkflow(t)
+	lane, ok := wf.Jobs["lane"]
+	if !ok {
+		t.Fatalf("%s: no lane job", bazelMultiLaneWorkflow)
+	}
+	for _, s := range lane.Steps {
+		if strings.Contains(s.Run, "blacksmith-worker.sh") {
+			t.Errorf("lane job step %q still runs blacksmith-worker.sh; worker-host (fix 3) now covers this measurement", s.Name)
 		}
 	}
 }

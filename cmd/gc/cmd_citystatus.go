@@ -427,8 +427,11 @@ func observeSessionTargetWithWarning(
 		err         error
 	}
 	done := make(chan observeResult, 1)
+	// Read the seam before spawning: a timed-out goroutine can outlive the
+	// caller, and with it a test's restore of the package var.
+	observe := observeSessionTargetForStatus
 	go func() {
-		obs, err := observeSessionTargetForStatus(cityPath, nil, sp, cfg, target.runtimeSessionName)
+		obs, err := observe(cityPath, nil, sp, cfg, target.runtimeSessionName)
 		done <- observeResult{observation: obs, err: err}
 	}()
 

@@ -116,12 +116,18 @@ func (p *Provider) RouteFor(name string) runtime.Route {
 	return runtime.Route{Backend: p.defaultBackend(), Known: seeded}
 }
 
+// Backend labels of the two legs, as [Provider.Backends] reports them.
+const (
+	DefaultBackendLabel = "default"
+	ACPBackendLabel     = "acp"
+)
+
 func (p *Provider) defaultBackend() runtime.Backend {
-	return runtime.Backend{Label: "default", Provider: p.defaultSP}
+	return runtime.Backend{Label: DefaultBackendLabel, Provider: p.defaultSP}
 }
 
 func (p *Provider) acpBackend() runtime.Backend {
-	return runtime.Backend{Label: "acp", Provider: p.acpSP}
+	return runtime.Backend{Label: ACPBackendLabel, Provider: p.acpSP}
 }
 
 func (p *Provider) route(name string) runtime.Provider {

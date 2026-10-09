@@ -565,7 +565,7 @@ func (p *decidePass) configSleepSuppressed(info session.Info, o rowObservation, 
 	eval := awakeSetToWakeEvals(map[string]AwakeDecision{info.SessionNameMetadata: d},
 		[]AwakeSessionBead{{ID: info.ID, SessionName: info.SessionNameMetadata}})[info.ID]
 	template := normalizedSessionTemplateInfo(info, p.cfg)
-	return !wakeDemandOverridesSleepSuppression(d, eval, policy, p.poolDesired, template, info.SleepIntent != "")
+	return !wakeDemandOverridesSleepSuppression(d, eval, policy, p.poolDesired, template, info.SleepIntent != "", explicitWakePendingInfo(info))
 }
 
 // classify is step 12 (CONTRACT §2.2): InDesired ∧ ShouldWake is Wake,
@@ -726,8 +726,8 @@ type runtimeNameState uint8
 
 const (
 	nameUnknown runtimeNameState = iota
-	// nameAbsent: listed No, or not listed by a fresh pass that can stand
-	// for absence (absent-unconfirmed).
+	// nameAbsent: not listed by a fresh pass that every backend listed
+	// completely and attested (readPresence's gone).
 	nameAbsent
 	// nameCorpse: listed, but its pane is not running. Legacy's IsRunning
 	// reads it as not running, so it frees a singleton's name.
@@ -743,34 +743,24 @@ type runtimeNameReading struct {
 	obs   RuntimeObservation
 }
 
-// readRuntimeName reads a runtime name from I3 by name, with P3-3's
-// presence rules (inventoryAbsence, listedObservation): a name a fresh pass
-// listed on an unprimed backend is present.
+// readRuntimeName reads a runtime name from I3 by name, in observeRow's
+// presence order (readPresence; POOL-052): a name a fresh pass listed on an
+// unprimed backend is present, and only a complete pass proves it absent.
 func readRuntimeName(snap *ObservationSnapshot, name string, now time.Time, maxAge time.Duration) runtimeNameReading {
 	name = strings.TrimSpace(name)
 	if name == "" || snap == nil {
 		return runtimeNameReading{state: nameUnknown}
 	}
-	listed, provable := inventoryAbsence(snap, now, maxAge)
-	r := runtimeNameReading{state: nameUnknown}
-	switch f := snap.Fact(name, FactListed, now, maxAge); {
-	case f.Value == ObsNo:
-		r.state = nameAbsent
-		return r
-	case f.Value == ObsYes:
-		r.obs, _ = snap.Observation(name, now, maxAge)
-	case listed[name]:
-		r.obs = listedObservation(snap, name, now, maxAge)
-	case provable:
-		r.state = nameAbsent
-		return r
-	default:
-		return r
-	}
+	listed, complete := inventoryAbsence(snap, now, maxAge)
+	obs, present, gone, _ := readPresence(snap, name, listed, complete, now, maxAge)
+	r := runtimeNameReading{state: nameUnknown, obs: obs}
 	switch {
-	case r.obs.Running.Value == ObsNo:
+	case gone:
+		r.state = nameAbsent
+	case !present:
+	case obs.Running.Value == ObsNo:
 		r.state = nameCorpse
-	case r.obs.ProcessAlive.Value == ObsNo:
+	case obs.ProcessAlive.Value == ObsNo:
 		r.state = nameZombie
 	default:
 		r.state = nameAlive

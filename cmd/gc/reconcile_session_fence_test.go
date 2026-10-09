@@ -26,6 +26,14 @@ func newFenceLeaf() *fenceLeaf {
 	return &fenceLeaf{Fake: runtime.NewFake(), LivenessErrors: map[string]error{}}
 }
 
+// LocalIdentitySidecar makes the leaf's identity readable, as acp's and
+// subprocess's are (readRuntimeIdentity).
+func (*fenceLeaf) LocalIdentitySidecar() bool { return true }
+
+// LivenessReadsFresh makes its liveness read fresh by construction, as
+// acp's and subprocess's are (freshReadable).
+func (*fenceLeaf) LivenessReadsFresh() bool { return true }
+
 func (l *fenceLeaf) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
 	if err := l.LivenessErrors[name]; err != nil {
 		return runtime.Liveness{}, err
@@ -49,6 +57,8 @@ func newTerminalLeaf() *terminalLeaf {
 func (l *terminalLeaf) ObserveLivenessWithError(name string, pn []string) (runtime.Liveness, error) {
 	return l.leaf.ObserveLivenessWithError(name, pn)
 }
+
+func (*terminalLeaf) LocalIdentitySidecar() bool { return true }
 
 func (l *terminalLeaf) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{CanAttachTTY: true, CanReportActivity: true}
@@ -153,12 +163,15 @@ func TestFenceReporterAttachErrorHolds(t *testing.T) {
 	}
 }
 
-// Kills: a destructive action on any token but a match (C0.8, §8.1): a
-// mismatch or foreign GC_SESSION_ID passing; an absent, unreadable or
-// unsupported token passing, attributable by name or not; a token read on
-// an unhardened leaf trusted; and a non-match that does not escalate (C8.3).
-func TestFenceTokenMatchOnlyPassesAndEscalates(t *testing.T) {
+// Kills: L2 passing on any verdict but Current (v5 F1, O2; INC-025): a stop
+// of a newer incarnation (NewerSelf) or of a stale one before its rekey
+// (StaleSelf), a foreign runtime, an empty or unread token, or a token read
+// on an unhardened leaf trusted; a legacy-adopted runtime carrying the row's
+// token refused (v5.2 M2); and a non-match that does not escalate (C8.3).
+func TestFenceTokenLegPassesOnlyOnCurrent(t *testing.T) {
 	poolName := PoolSessionName("worker", "p")
+	row := fenceRow("a", "tok-a")
+	row.Generation = "2"
 	cases := []struct {
 		name    string
 		row     session.Info
@@ -166,13 +179,18 @@ func TestFenceTokenMatchOnlyPassesAndEscalates(t *testing.T) {
 		metaErr error
 		want    string // "" = proceed
 	}{
-		{"match", fenceRow("a", "tok-a"), ours("a"), nil, ""},
-		{"token mismatch, own session id", fenceRow("a", "tok-a"), map[string]string{"GC_SESSION_ID": "a", "GC_INSTANCE_TOKEN": "tok-old"}, nil, fenceTokenMismatch},
-		{"foreign session id", fenceRow("a", "tok-a"), map[string]string{"GC_SESSION_ID": "z", "GC_INSTANCE_TOKEN": "tok-a"}, nil, fenceTokenMismatch},
-		{"absent, own session id", fenceRow("a", "tok-a"), map[string]string{"GC_SESSION_ID": "a"}, nil, fenceTokenAbsent},
-		{"absent, owned pool name", session.Info{ID: "p", Template: "worker", SessionName: poolName, SessionNameMetadata: poolName, InstanceToken: "tok-p"}, nil, nil, fenceTokenAbsent},
-		{"unsupported runtime metadata", fenceRow("a", "tok-a"), nil, runtime.ErrMetaUnsupported, fenceTokenUnverifiable},
-		{"unreadable", fenceRow("a", "tok-a"), nil, errors.New("tmux: server busy"), fenceTokenUnverifiable},
+		{"current", row, ours("a"), nil, ""},
+		{"the row's token under another session id", row, map[string]string{"GC_SESSION_ID": "z", "GC_INSTANCE_TOKEN": "tok-a"}, nil, ""},
+		{"legacy-adopted, no session id", row, map[string]string{"GC_INSTANCE_TOKEN": "tok-a"}, nil, ""},
+		{"foreign", row, map[string]string{"GC_SESSION_ID": "z", "GC_INSTANCE_TOKEN": "tok-z"}, nil, fenceTokenMismatch},
+		{"stale self", row, map[string]string{"GC_SESSION_ID": "a", "GC_RUNTIME_EPOCH": "2", "GC_INSTANCE_TOKEN": "tok-old"}, nil, fenceTokenMismatch},
+		{"newer self", row, map[string]string{"GC_SESSION_ID": "a", "GC_RUNTIME_EPOCH": "3", "GC_INSTANCE_TOKEN": "tok-new"}, nil, fenceTokenMismatch},
+		{"own session id, epoch unreadable", row, map[string]string{"GC_SESSION_ID": "a", "GC_INSTANCE_TOKEN": "tok-old"}, nil, fenceTokenMismatch},
+		{"no session id, another token", row, map[string]string{"GC_INSTANCE_TOKEN": "tok-z"}, nil, fenceTokenMismatch},
+		{"absent, own session id", row, map[string]string{"GC_SESSION_ID": "a"}, nil, fenceTokenAbsent},
+		{"ownerless, owned pool name", session.Info{ID: "p", Template: "worker", SessionName: poolName, SessionNameMetadata: poolName, InstanceToken: "tok-p"}, nil, nil, fenceTokenAbsent},
+		{"unsupported runtime metadata", row, nil, runtime.ErrMetaUnsupported, fenceTokenUnverifiable},
+		{"unreadable", row, nil, errors.New("tmux: server busy"), fenceTokenUnverifiable},
 	}
 	for _, c := range cases {
 		leaf := newFenceLeaf()
@@ -192,7 +210,7 @@ func TestFenceTokenMatchOnlyPassesAndEscalates(t *testing.T) {
 	// An unhardened leaf's matching token is statically unverifiable.
 	k8s := boolLeaf{runtime.NewFake()}
 	startRuntime(t, k8s.Provider.(*runtime.Fake), "rt_b", ours("b"))
-	if reason, escalate := tokenLeg(k8s, "rt_b", fenceRow("b", "tok-b")); reason != fenceTokenUnverifiable || !escalate {
+	if reason, escalate := tokenLeg(context.Background(), k8s, "rt_b", fenceRow("b", "tok-b")); reason != fenceTokenUnverifiable || !escalate {
 		t.Fatalf("unhardened leaf: %q escalate=%v, want token_unverifiable", reason, escalate)
 	}
 }
@@ -368,5 +386,31 @@ func TestPendingUnsupportedPassesUnknownHolds(t *testing.T) {
 	// A request that keeps L5 with no work reader fails closed.
 	if v := fenceDestructive(context.Background(), leaf, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull | legWork}, time.Now()); v.Proceed || v.Reason != fenceWorkUnknown {
 		t.Fatalf("no work reader: %+v, want work_unknown", v)
+	}
+}
+
+// Kills L2 reading identity off a runtime that is not present (v5 O2) and an
+// absent runtime confirmed as nothing to stop with L1 waived: with L1 waived,
+// a name never started, and one whose runtime is gone but whose sidecar
+// still carries the row's identity (acp's leftover sidecar, which reads
+// Current), both hold as unverifiable and stop nothing.
+func TestFenceL1WaivedAbsentRuntimeNeverProceeds(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		leftover bool
+	}{{"never started", false}, {"gone, sidecar left", true}} {
+		leaf := newFenceLeaf()
+		if tc.leftover {
+			startRuntime(t, leaf.Fake, "rt_a", ours("a"))
+			if err := leaf.Stop("rt_a"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		stops := leaf.CountCalls("Stop", "rt_a")
+		req := fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legsFull &^ legLiveness}
+		v, confirmed := stopFenced(context.Background(), leaf, req, time.Now())
+		if v.Proceed || v.Reason == fenceNothingToStop || v.Reason != fenceTokenUnverifiable || confirmed || leaf.CountCalls("Stop", "rt_a") != stops {
+			t.Errorf("%s: %+v confirmed=%v, want held as token_unverifiable, nothing stopped", tc.name, v, confirmed)
+		}
 	}
 }

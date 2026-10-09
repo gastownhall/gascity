@@ -66,9 +66,10 @@ type gatherEnv struct {
 // World is one pass's inputs (architecture §1.2), immutable once gathered:
 // every map is the pass's own or never mutated after publish.
 type World struct {
-	Now    time.Time
-	Env    *reconcileEnv
-	Census *sessionCensus
+	Now      time.Time
+	CityPath string // the runtime name locks' city (lockRuntimeName)
+	Env      *reconcileEnv
+	Census   *sessionCensus
 	// Mislabelled are the canonical rows with no template and no session
 	// name: beads labeled gc:session that are not sessions. Arm A1 makes
 	// each None with one trace (CONTRACT v5 AL1).
@@ -96,6 +97,17 @@ type World struct {
 	// ExecutionStalled are the execution backstop's drain requests by row
 	// ID, for arm A16 (C7b1).
 	ExecutionStalled map[string]executionStalledRequest
+	// LegStores are the census legs' stores by ref, which effects reach
+	// only as fenced writers (newEffectPass).
+	LegStores map[string]beads.Store
+	// InputAges are the inputs' ages at Now, for the pass record.
+	InputAges map[string]time.Duration
+	// SessionsStore and RigStores are the stores the census was planned
+	// over, which only creates reach (newCreatePass); SessionsLeg is the
+	// sessions leg's ref, which an ambiguous create's alert names.
+	SessionsStore beads.Store
+	RigStores     map[string]beads.Store
+	SessionsLeg   string
 }
 
 // gather builds the pass's World at now. It first drains the settlements
@@ -112,7 +124,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	w := World{Now: now, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused()}
+	w := World{Now: now, CityPath: e.CityPath, Env: env, InFlight: p.inflight.view(), Backoff: p.backoff.Snapshot(), Bucket: p.bucket, Paused: p.startsPaused()}
 	var st suspensionstate.State
 	if e.Suspension != nil {
 		st = e.Suspension()
@@ -141,6 +153,12 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if e.ReadyWaits != nil {
 		w.ReadyWaits = e.ReadyWaits()
 	}
+	w.SessionsStore, w.RigStores, w.SessionsLeg = store, rigs, legs[0].ref
+	w.LegStores = make(map[string]beads.Store, len(legs))
+	for _, l := range legs {
+		w.LegStores[l.ref] = l.store
+	}
+	w.InputAges = inputAges(now, w.LegStores, w.Obs, rec)
 	rows := w.Census.Canonical()
 	for _, row := range rows {
 		if strings.TrimSpace(row.Info.Template) == "" && strings.TrimSpace(row.Info.SessionNameMetadata) == "" {

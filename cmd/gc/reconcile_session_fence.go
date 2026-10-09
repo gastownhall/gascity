@@ -113,7 +113,18 @@ func fenceDestructive(ctx context.Context, sp runtime.Provider, req fenceRequest
 		}
 	}
 	if req.Legs&legToken != 0 {
-		if v.Reason, v.Escalate = tokenLeg(leaf, name, req.Row); v.Reason != "" {
+		// Liveness first (v5 O2): identity read off a runtime not present
+		// (acp's leftover sidecar) proves nothing, so with L1 waived L2 reads
+		// presence itself, and an absent runtime is unverifiable, never
+		// nothing to stop.
+		if v.Liveness == "" {
+			v.Liveness = leafLiveness(ctx, leaf, name)
+		}
+		if v.Liveness != fenceLivenessPresent {
+			v.Reason, v.Escalate = fenceTokenUnverifiable, true
+			return v
+		}
+		if v.Reason, v.Escalate = tokenLeg(ctx, leaf, name, req.Row); v.Reason != "" {
 			return v
 		}
 	}
@@ -245,32 +256,27 @@ func leafLiveness(ctx context.Context, leaf runtime.Provider, name string) strin
 	}
 }
 
-// tokenLeg is L2 (§8.1, C0.8): only a matching GC_INSTANCE_TOKEN passes. A
-// different non-empty token or a foreign GC_SESSION_ID is a mismatch, which
-// never passes. A token that is absent, unreadable or unsupported, or any
-// token on an unhardened leaf (statically unverifiable until its Appendix A
-// items land), defers and escalates (C8.3), attributable by name or not; the
-// named exceptions that accept attribution evaluate it themselves. It
-// returns the reason that holds the action, or "".
-func tokenLeg(leaf runtime.Provider, name string, row session.Info) (reason string, escalate bool) {
-	sid, sidErr := leaf.GetMeta(name, "GC_SESSION_ID")
-	if sid = strings.TrimSpace(sid); sidErr == nil && sid != "" && sid != row.ID {
-		return fenceTokenMismatch, false
-	}
-	token, err := leaf.GetMeta(name, "GC_INSTANCE_TOKEN")
-	token = strings.TrimSpace(token)
+// tokenLeg is L2 (§8.1, C0.8; v5 F1): it passes only on a Current verdict
+// (compareIdentity) from a fresh identity read (readRuntimeIdentity), so a
+// stale or newer incarnation of the row is never stopped as its own. Foreign
+// or a token that is not the row's is a mismatch, which never passes. An
+// unread or unsupported identity, an unhardened leaf (statically
+// unverifiable until its Appendix A items land), or no token defers and
+// escalates (C8.3), attributable by name or not; the named exceptions that
+// accept attribution evaluate it themselves. It returns the reason that
+// holds the action, or "".
+func tokenLeg(ctx context.Context, leaf runtime.Provider, name string, row session.Info) (reason string, escalate bool) {
+	rt := readRuntimeIdentity(ctx, leaf, name)
 	_, hardened := leaf.(runtime.LivenessObserverWithError)
-	switch {
-	case errors.Is(err, runtime.ErrSessionNotFound):
-		return fenceNothingToStop, false
-	case err == nil && token != "" && token != strings.TrimSpace(row.InstanceToken):
-		return fenceTokenMismatch, false
-	case err != nil || !hardened:
+	switch v := compareIdentity(row, rt); {
+	case !rt.Known || !hardened:
 		return fenceTokenUnverifiable, true
-	case token == "":
+	case v == identityCurrent:
+		return "", false
+	case v != identityForeign && strings.TrimSpace(rt.Token) == "":
 		return fenceTokenAbsent, true
 	}
-	return "", false
+	return fenceTokenMismatch, false
 }
 
 // attachLeg is L3 by the leaf's attach tier (§8.1). reporter: the error probe

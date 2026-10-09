@@ -114,3 +114,19 @@ func v2SessionRuntimeRefusal(cfg *config.City, reg *registry.Registry) (latchRef
 	}
 	return latchRefusal{feature, fmt.Sprintf("[session] provider = %q", name), parityPR}, true
 }
+
+// v2FloorWarnings lists, in config order, the agents with a min_active_sessions
+// floor whose template is not the control dispatcher, matched by suffix as
+// dispatch_control_ready does so core.control-dispatcher counts. Under v2 a
+// floor member that drains itself is stopped and restarted, not kept warm
+// (PAR-FLOORACK; CONTRACT v5 §12.2). It never refuses the latch.
+func v2FloorWarnings(cfg *config.City) []string {
+	var out []string
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if n := a.EffectiveMinActiveSessions(); n > 0 && !strings.HasSuffix(a.QualifiedName(), config.ControlDispatcherAgentName) {
+			out = append(out, fmt.Sprintf("agent %s sets min_active_sessions = %d: under v2 a floor member that drains itself is stopped and restarted, not kept warm, until PAR-FLOORACK", a.QualifiedName(), n))
+		}
+	}
+	return out
+}

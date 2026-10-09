@@ -190,7 +190,7 @@ register_toolchains("@llvm_toolchain//:all")
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(
     name = "go_sdk",
-    version = "1.26.6",
+    version = "1.26.9",
 )
 use_repo(go_sdk, "go_sdk")
 
@@ -201,6 +201,22 @@ use_repo(go_sdk, "go_sdk")
 go_sdk.nogo(
     includes = ["//:__subpackages__"],
     nogo = "//tools/nogo",
+)
+
+# gazelle compiles fetch_repo and gazelle, which every go_deps repository
+# runs, with `go build` in a repository rule before any go_deps fetch can
+# start (13-24 s of every CI lane's loading). This substitute serves those
+# reproducible binaries from the repository cache by pinned sha256 and builds
+# them from source on a miss (tools/bazel/rules/go_repository_tools.bzl).
+gazelle_non_module_deps = use_extension("@gazelle//internal/bzlmod:non_module_deps.bzl", "non_module_deps")
+
+go_repository_tools = use_repo_rule("//tools/bazel/rules:go_repository_tools.bzl", "go_repository_tools")
+
+go_repository_tools(name = "gazelle_go_repository_tools")
+
+override_repo(
+    gazelle_non_module_deps,
+    bazel_gazelle_go_repository_tools = "gazelle_go_repository_tools",
 )
 
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
@@ -408,6 +424,19 @@ http_archive(
     sha256 = "43a4e328e2d13ba1552d760aa68d2485c75c5621f309f6ff64ae895188345247",
     build_file_content = """
 exports_files(["oasdiff"])
+""",
+)
+
+# GoReleaser for //:goreleaser_check_test (`goreleaser check` over
+# .goreleaser.yml, formerly ci.yml's "Release config" job). release.yml runs
+# the latest v2 ("~> v2"); bump this pin with each GoReleaser v2 release so
+# the check sees the deprecations the release run will.
+http_archive(
+    name = "goreleaser_bin",
+    urls = ["https://github.com/goreleaser/goreleaser/releases/download/v2.18.2/goreleaser_Linux_x86_64.tar.gz"],
+    sha256 = "0a96edc9d9bc594e4a41cc4d59467c182062910ab24d9d1f6dd7b667d32606d3",
+    build_file_content = """
+exports_files(["goreleaser"])
 """,
 )
 

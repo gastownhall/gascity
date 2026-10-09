@@ -473,6 +473,81 @@ func TestEnsureCanonicalScopeConfigStateReapsManagedJSONL(t *testing.T) {
 	}
 }
 
+func TestEnsureCanonicalScopeConfigStatePreservesManagedCityAutoExportJSONL(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"id":"gc-1"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: gc\nexport.auto: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("ensureCanonicalScopeConfigState: %v", err)
+	}
+
+	if _, err := os.Stat(jsonlPath); err != nil {
+		t.Fatalf("issues.jsonl removed despite export.auto:true: %v", err)
+	}
+	configData, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(configData), "export.auto: true") {
+		t.Fatalf("canonicalization did not preserve export.auto:true:\n%s", configData)
+	}
+}
+
+// TestEnsureCanonicalScopeConfigStateKeepsJSONLWhenExportAutoUnreadable
+// verifies that the post-canonicalization cleanup fails closed: a config.yaml
+// that cannot be read back may hold the scope's explicit export.auto: true,
+// so the JSONL is left for the store-open reaper to judge. Canonicalization
+// keeps the trailing comment, which the line scanner cannot read past, so the
+// failed read-back must not be retried through it.
+func TestEnsureCanonicalScopeConfigStateKeepsJSONLWhenExportAutoUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"id":"gc-1"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("issue_prefix: gc\nexport.auto: true # keep JSONL for git\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Canonicalization's own read succeeds; ReadExportAuto's read-back fails.
+	fs := &configReadFaultFS{path: configPath, failCalls: map[int]bool{2: true}}
+
+	err := ensureCanonicalScopeConfigState(fs, dir, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("ensureCanonicalScopeConfigState: %v", err)
+	}
+	if fs.calls < 2 {
+		t.Fatalf("injected fault never reached ReadExportAuto (%d config reads)", fs.calls)
+	}
+
+	if _, err := os.Stat(jsonlPath); err != nil {
+		t.Fatalf("issues.jsonl removed although export.auto could not be read back: %v", err)
+	}
+}
+
 func TestProviderLifecycleProcessEnvProjectsResolvedGCBin(t *testing.T) {
 	cityPath := t.TempDir()
 	t.Setenv("GC_BIN", "/tmp/wrong-gc")

@@ -7,6 +7,28 @@ load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
 # -tags productmetrics_testhook.
 # gazelle:build_tags integration,productmetrics_testhook
 
+# gc_test's process-backed tests that run for 20 s or more in the integration
+# build (GC_FAST_UNIT=0; seconds measured 2026-10-08 under bazel on rbe-west,
+# --config=ci --config=integration --config=fresh, 12 shards). rules_go
+# assigns a go_test's tests to shards round-robin in source order, and
+# gc_test's ~12,000 tests shift on nearly every cmd/gc PR, so no shard_count
+# keeps these apart for long: two of them in one shard is how
+# integration-packages' gc_test shards #1 and #7 ran 110-128 s against ~40 s
+# for the rest (spec-speed S5). In the integration build gc_test skips them
+# and each runs alone in a target of its own (same binary, no extra compile),
+# which //test:integration_packages runs through :gc_integration_solo_tests.
+# The unit build keeps them in gc_test, where all but
+# TestPackCommandCobraHelpAndUnknownParity skip under GC_FAST_UNIT.
+# scripts/cmd_gc_shards_test.go reads this table.
+INTEGRATION_SOLO_TESTS = {
+    "gc_bd_runtime_custom_types_heal_test": "TestEnsureBdRuntimeCustomTypesHealsUpgradedNativeStore",  # 36 s
+    "gc_managed_beads_native_cli_test": "TestManagedBeadsNativeCLICompatibility",  # 32 s
+    "gc_managed_bd_rig_hard_kill_test": "TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind",  # 26 s
+    "gc_pack_command_cobra_parity_test": "TestPackCommandCobraHelpAndUnknownParity",  # 22 s
+    "gc_phase2_worker_core_transport_test": "TestPhase2WorkerCoreRealTransportProof",  # 58 s
+    "gc_provider_owned_real_init_test": "TestGcBeadsBdProviderOwnedRealInitIgnoresAncestorBeadsWorkspace",  # 29 s
+}
+
 go_library(
     name = "gc_lib",
     srcs = [
@@ -374,11 +396,24 @@ go_library(
         "provider_health_gate.go",
         "provider_op_process_unix.go",
         "provider_op_process_windows.go",
+        "provider_swap.go",
         "providers.go",
         "ready_federation.go",
         "reconcile_admit.go",
+        "reconcile_arms_drain.go",
+        "reconcile_arms_heals.go",
+        "reconcile_arms_identity.go",
         "reconcile_dirty.go",
+        "reconcile_effect_create.go",
+        "reconcile_effect_drain.go",
+        "reconcile_effect_heal.go",
+        "reconcile_effect_rekey.go",
+        "reconcile_effect_runtime.go",
+        "reconcile_effect_tx.go",
+        "reconcile_effect_write.go",
+        "reconcile_effects_registry.go",
         "reconcile_enqueue.go",
+        "reconcile_fenced_store.go",
         "reconcile_gather.go",
         "reconcile_gather_demand.go",
         "reconcile_identity.go",
@@ -387,6 +422,8 @@ go_library(
         "reconcile_latch.go",
         "reconcile_maintenance.go",
         "reconcile_mode.go",
+        "reconcile_observe_identity.go",
+        "reconcile_observe_v2.go",
         "reconcile_pass.go",
         "reconcile_pass_metrics.go",
         "reconcile_planner.go",
@@ -397,6 +434,7 @@ go_library(
         "reconcile_session_namelock.go",
         "reconcile_steps_nudges.go",
         "reconcile_steps_waits.go",
+        "reconcile_stop_request.go",
         "reconcile_tick.go",
         "reconcile_wake.go",
         "reconcile_wiring.go",
@@ -405,6 +443,7 @@ go_library(
         "residency_topology.go",
         "rig_add_options.go",
         "rig_beads.go",
+        "rig_include_imports.go",
         "rig_remote.go",
         "rig_scope_resolution.go",
         "root_argv.go",
@@ -801,6 +840,8 @@ go_test(
         "bd_testscript_test.go",
         "bd_wisp_tier_test.go",
         "bead_format_test.go",
+        "bead_policy_store_capability_test.go",
+        "bead_policy_store_claim_test.go",
         "bead_policy_store_conditional_test.go",
         "bead_policy_store_conformance_test.go",
         "bead_policy_store_graph_ready_test.go",
@@ -897,6 +938,7 @@ go_test(
         "claim_cross_store_test.go",
         "class_store_agreement_test.go",
         "class_store_cache_test.go",
+        "class_store_emit_claim_test.go",
         "class_store_emit_test.go",
         "class_store_test.go",
         "cli_class_stores_test.go",
@@ -952,6 +994,7 @@ go_test(
         "cmd_dolt_config_test.go",
         "cmd_dolt_state_test.go",
         "cmd_event_emit_test.go",
+        "cmd_events_bounded_test.go",
         "cmd_events_reemit_execution_test.go",
         "cmd_events_remote_test.go",
         "cmd_events_scope_test.go",
@@ -969,6 +1012,7 @@ go_test(
         "cmd_hook_claim_adoption_ownership_test.go",
         "cmd_hook_claim_budget_deferred_test.go",
         "cmd_hook_claim_claimed_at_test.go",
+        "cmd_hook_claim_collapsed_identity_test.go",
         "cmd_hook_claim_drain_pending_test.go",
         "cmd_hook_claim_hold_label_test.go",
         "cmd_hook_claim_metadata_test.go",
@@ -1018,6 +1062,7 @@ go_test(
         "cmd_perf_test.go",
         "cmd_prime_test.go",
         "cmd_prompt_test.go",
+        "cmd_ready_bd_status_inventory_test.go",
         "cmd_ready_test.go",
         "cmd_register_test.go",
         "cmd_registry_requests_test.go",
@@ -1100,6 +1145,7 @@ go_test(
         "context_inject_test.go",
         "continuation_nudge_test.go",
         "control_dispatch_graph_store_test.go",
+        "control_dispatch_unlaunchable_check_test.go",
         "control_dispatcher_scope_gap_event_test.go",
         "control_rig_graph_federation_test.go",
         "control_semantic_retry_test.go",
@@ -1128,9 +1174,11 @@ go_test(
         "demand_trace_test.go",
         "detached_orphan_lane_test.go",
         "detached_probe_test.go",
+        "dispatch_control_ready_freshness_test.go",
         "dispatch_control_ready_hold_label_test.go",
         "dispatch_control_ready_leak_test.go",
         "dispatch_control_ready_test.go",
+        "dispatch_control_ready_wal_test.go",
         "dispatch_ep8_recovery_hold_label_test.go",
         "dispatch_runtime_hold_label_test.go",
         "dispatch_runtime_quiet_retry_test.go",
@@ -1277,6 +1325,7 @@ go_test(
         "infra_class_migrate_edge_payload_test.go",
         "infra_class_migrate_equality_test.go",
         "infra_class_migrate_test.go",
+        "infra_class_recover_dep_batch_test.go",
         "infra_class_recover_test.go",
         "infra_class_recover_topology_test.go",
         "init_bd_version_floor_doc_test.go",
@@ -1322,6 +1371,7 @@ go_test(
         "nudge_honesty_test.go",
         "nudge_mail_sweep_test.go",
         "nudge_poller_city_stop_test.go",
+        "nudge_poller_env_test.go",
         "nudge_queue_bounded_maintenance_test.go",
         "nudge_store_ownership_test.go",
         "nudge_target_info_equiv_test.go",
@@ -1397,6 +1447,7 @@ go_test(
         "prime_unmanaged_hook_guard_test.go",
         "probe_template_test.go",
         "proc_environ_settled_test.go",
+        "process_sweep_incarnation_test.go",
         "productmetrics_child_env_test.go",
         "productmetrics_controls_process_test.go",
         "productmetrics_controls_process_testhook_test.go",
@@ -1419,30 +1470,55 @@ go_test(
         "provider_factory_e2c3_test.go",
         "provider_health_gate_test.go",
         "provider_store_resolution_test.go",
+        "provider_swap_test.go",
         "providers_cli_recorder_test.go",
         "providers_events_roles_test.go",
         "providers_events_rotation_test.go",
         "providers_test.go",
         "quality_gate_fallback_test.go",
         "reconcile_admit_test.go",
+        "reconcile_arms_drain_test.go",
+        "reconcile_arms_heals_test.go",
         "reconcile_dirty_test.go",
+        "reconcile_effect_create_test.go",
+        "reconcile_effect_heal_test.go",
+        "reconcile_effect_rekey_test.go",
+        "reconcile_effect_runtime_test.go",
+        "reconcile_effect_tx_test.go",
+        "reconcile_effect_write_test.go",
+        "reconcile_effects_lint_test.go",
+        "reconcile_effects_mode_test.go",
+        "reconcile_effects_test.go",
+        "reconcile_effects_wiring_test.go",
         "reconcile_enqueue_test.go",
+        "reconcile_fenced_store_test.go",
         "reconcile_gather_demand_test.go",
         "reconcile_gather_test.go",
+        "reconcile_identity_lint_test.go",
         "reconcile_identity_test.go",
         "reconcile_inflight_test.go",
         "reconcile_keys_test.go",
         "reconcile_latch_test.go",
         "reconcile_mode_test.go",
+        "reconcile_observe_identity_test.go",
+        "reconcile_observe_v2_test.go",
         "reconcile_pass_test.go",
         "reconcile_planner_test.go",
         "reconcile_ready_fanout_test.go",
         "reconcile_replay_test.go",
         "reconcile_session_decide_test.go",
+        "reconcile_session_differential_test.go",
         "reconcile_session_effects_test.go",
         "reconcile_session_fence_test.go",
+        "reconcile_session_namelock_test.go",
+        "reconcile_settle_test.go",
+        "reconcile_sim_invariants_test.go",
+        "reconcile_sim_scenarios_test.go",
+        "reconcile_sim_test.go",
         "reconcile_steps_pool_test.go",
         "reconcile_steps_test.go",
+        "reconcile_stop_keys_test.go",
+        "reconcile_stop_request_test.go",
         "reconcile_tick_test.go",
         "reconcile_wake_test.go",
         "refresh_desired_state_class_routing_test.go",
@@ -1461,6 +1537,7 @@ go_test(
         "rig_beads_test.go",
         "rig_chargolden_test.go",
         "rig_fresh_inherited_scope_test.go",
+        "rig_include_imports_test.go",
         "rig_inherited_endpoint_test.go",
         "rig_pool_scale_hook_4189_test.go",
         "rig_provision_boundary_import_test.go",
@@ -1504,12 +1581,14 @@ go_test(
         "session_demand_only_singleton_test.go",
         "session_diagnostics_wiring_test.go",
         "session_drain_ack_min_floor_test.go",
+        "session_drain_ack_rewake_regression_test.go",
         "session_drain_skip_log_test.go",
         "session_drainack_info_equiv_test.go",
         "session_event_pump_live_test.go",
         "session_event_pump_test.go",
         "session_identity_test.go",
         "session_idle_kill_wake_treadmill_test.go",
+        "session_idle_latched_named_holder_test.go",
         "session_idle_respawn_test.go",
         "session_index_test.go",
         "session_keys_test.go",
@@ -1565,6 +1644,7 @@ go_test(
         "session_reconciler_fresh_cycle_guard_test.go",
         "session_reconciler_idle_probe_named_test.go",
         "session_reconciler_inc003_test.go",
+        "session_reconciler_killed_seat_test.go",
         "session_reconciler_killsite_fold_test.go",
         "session_reconciler_named_collapse_test.go",
         "session_reconciler_observation_regression_test.go",
@@ -1587,6 +1667,7 @@ go_test(
         "session_rollback_pending_create_atomic_test.go",
         "session_scaffold_staging_test.go",
         "session_sleep_test.go",
+        "session_sleep_wake_override_test.go",
         "session_state_helpers_test.go",
         "session_target_test.go",
         "session_template_overrides_test.go",
@@ -1709,6 +1790,10 @@ go_test(
         "workflow_trace_rotation_test.go",
         "write_auth_boot_warning_test.go",
     ],
+    args = select({
+        "//:gotags_integration": ["-test.skip=^(%s)$$" % "|".join(INTEGRATION_SOLO_TESTS.values())],
+        "//conditions:default": [],
+    }),
     data = glob([
         "testdata/**",
         "*.go",
@@ -1755,7 +1840,7 @@ go_test(
         },
         "//conditions:default": {},
     }),
-    shard_count = 12,
+    shard_count = 15,
     deps = [
         "//:gascity",
         "//examples/bd",
@@ -1807,6 +1892,7 @@ go_test(
         "//internal/graphroute",
         "//internal/graphv2",
         "//internal/hooks",
+        "//internal/importsvc",
         "//internal/logutil",
         "//internal/mail",
         "//internal/mail/beadmail",
@@ -1828,6 +1914,7 @@ go_test(
         "//internal/productmetrics",
         "//internal/promptmeta",
         "//internal/reconcilekey",
+        "//internal/remotesource",
         "//internal/resilience",
         "//internal/rig",
         "//internal/rollout",
@@ -1910,6 +1997,24 @@ go_variant_test(
     args = ["-test.run=^(TestProductMetricsTaggedBinaryProcessContracts|TestProductMetricsTesthookEndpointAcceptsOnlyLoopbackHTTPS|TestProductMetricsTaggedRunnerReadsInjectionOnlyAtInvocation|TestProductMetricsTesthookCAReadIsBounded|TestProductMetricsTaggedProcessFixtureIsEnabled|TestProductMetricsTestOnlyCensusEscapeIsNarrow)$$"],
     gotags = ["productmetrics_testhook"],
     test = ":gc_test",
+)
+
+# INTEGRATION_SOLO_TESTS, each alone, in gc_test's integration build.
+# Manual: the unit lane's //... does not run them (gc_test runs them there);
+# tools/bazel/integration_suite.py lists :gc_integration_solo_tests in
+# //test:integration_packages.
+[go_variant_test(
+    name = name,
+    size = "large",
+    args = ["-test.run=^%s$$" % test],
+    tags = ["manual"],
+    test = ":gc_test",
+) for name, test in INTEGRATION_SOLO_TESTS.items()]
+
+test_suite(
+    name = "gc_integration_solo_tests",
+    tags = ["manual"],
+    tests = [":" + name for name in INTEGRATION_SOLO_TESTS],
 )
 
 # scripts/ci_critical_path_test.go pins gc_productmetrics_testhook_test.

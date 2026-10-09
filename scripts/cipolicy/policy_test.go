@@ -76,9 +76,9 @@ func assertTestCIPolicyRecipeLine(t *testing.T, what, want string) {
 func TestDisplayLabelsDoNotAffectPolicy(t *testing.T) {
 	docs := loadPolicyDocuments(t)
 	docs.ci["name"] = "Renamed workflow"
-	job(t, docs.ci, "preflight-acceptance")["name"] = "Renamed job"
-	step(t, job(t, docs.ci, "preflight-acceptance"), 2)["name"] = "Renamed step"
-	step(t, job(t, docs.ci, "preflight-static"), 2)["name"] = "GC_BEADS and test-integration-bdstore are display text only"
+	job(t, docs.ci, "pack-gate")["name"] = "Renamed job"
+	step(t, job(t, docs.ci, "pack-gate"), 3)["name"] = "Renamed step"
+	step(t, job(t, docs.ci, "credential-provider-windows"), 3)["name"] = "GC_BEADS and test-integration-bdstore are display text only"
 	docs.action["name"] = "Renamed action"
 	docs.action["description"] = "Renamed action description"
 	input(t, docs.action, "dolt-version")["description"] = "Renamed input description"
@@ -96,75 +96,75 @@ func TestExecutionShapeMutationsFailPolicy(t *testing.T) {
 		{
 			name: "needs",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "preflight-acceptance")["needs"] = []any{"changes"}
+				job(t, docs.ci, "pack-gate")["needs"] = []any{"changes"}
 			},
 		},
 		{
 			name: "if",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-rest-full")["if"] = "false"
+				job(t, docs.ci, "pack-gate")["if"] = "false"
 			},
 		},
 		{
 			name: "runner",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-rest-full")["runs-on"] = "ubuntu-latest"
+				job(t, docs.ci, "pack-gate")["runs-on"] = "ubuntu-latest"
 			},
 		},
 		{
 			name: "timeout",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-rest-full")["timeout-minutes"] = 60
+				job(t, docs.ci, "pack-gate")["timeout-minutes"] = 60
 			},
 		},
 		{
 			name: "environment",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-rest-full")["env"].(map[string]any)["DOLT_VERSION"] = "latest"
+				step(t, job(t, docs.ci, "pack-gate"), 4)["env"].(map[string]any)["GC_TEST_GASCITY_PACKS_REGISTRY"] = "latest"
 			},
 		},
 		{
 			name: "strategy",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-rest-full")["strategy"].(map[string]any)["fail-fast"] = true
+				job(t, docs.ci, "pack-gate")["strategy"] = map[string]any{"fail-fast": true}
 			},
 		},
 		{
 			name: "nested execution field named name",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				strategy := job(t, docs.ci, "integration-rest-full")["strategy"].(map[string]any)
-				matrix := strategy["matrix"].(map[string]any)
-				matrix["name"] = []any{"this is matrix data, not a display label"}
+				job(t, docs.ci, "pack-gate")["strategy"] = map[string]any{
+					"matrix": map[string]any{"name": []any{"this is matrix data, not a display label"}},
+				}
 			},
 		},
 		{
 			name: "uses",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				step(t, job(t, docs.ci, "preflight-acceptance"), 0)["uses"] = "actions/checkout@main"
+				step(t, job(t, docs.ci, "pack-gate"), 0)["uses"] = "actions/checkout@main"
 			},
 		},
 		{
 			name: "run",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				step(t, job(t, docs.ci, "preflight-acceptance"), 2)["run"] = "make test-acceptance-all"
+				step(t, job(t, docs.ci, "pack-gate"), 3)["run"] = "make test-acceptance-all"
 			},
 		},
 		{
 			name: "with",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				step(t, job(t, docs.ci, "integration-rest-full"), 1)["with"].(map[string]any)["install-claude-cli"] = "true"
+				step(t, job(t, docs.ci, "pack-gate"), 1)["with"].(map[string]any)["go-version-file"] = "go.work"
 			},
 		},
 		{
 			name: "shell",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				step(t, job(t, docs.ci, "preflight-acceptance"), 2)["shell"] = "bash {0}"
+				step(t, job(t, docs.ci, "pack-gate"), 3)["shell"] = "bash {0}"
 			},
 		},
 		{
 			name: "error behavior",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				step(t, job(t, docs.ci, "preflight-acceptance"), 2)["continue-on-error"] = true
+				step(t, job(t, docs.ci, "pack-gate"), 3)["continue-on-error"] = true
 			},
 		},
 	}
@@ -215,23 +215,23 @@ func TestTopologyAndProviderOwnershipMutationsFailPolicy(t *testing.T) {
 		{
 			name: "PR provider override",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "preflight-static")["env"] = map[string]any{"GC_BEADS": "sqlite"}
+				job(t, docs.ci, "credential-provider-windows")["env"] = map[string]any{"GC_BEADS": "sqlite"}
 			},
 		},
 		{
 			name: "wrapped duplicate proof",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				steps := job(t, docs.ci, "preflight-static")["steps"].([]any)
+				steps := job(t, docs.ci, "credential-provider-windows")["steps"].([]any)
 				steps = append(steps, map[string]any{
 					"run": "timeout 15m make test-integration-bdstore",
 				})
-				job(t, docs.ci, "preflight-static")["steps"] = steps
+				job(t, docs.ci, "credential-provider-windows")["steps"] = steps
 			},
 		},
 		{
 			name: "quoted duplicate proof",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				appendJobStep(t, job(t, docs.ci, "preflight-static"), map[string]any{
+				appendJobStep(t, job(t, docs.ci, "credential-provider-windows"), map[string]any{
 					"run": `make test-integration-"bdstore"`,
 				})
 			},
@@ -239,7 +239,7 @@ func TestTopologyAndProviderOwnershipMutationsFailPolicy(t *testing.T) {
 		{
 			name: "backslash-obfuscated duplicate proof",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				appendJobStep(t, job(t, docs.ci, "preflight-static"), map[string]any{
+				appendJobStep(t, job(t, docs.ci, "credential-provider-windows"), map[string]any{
 					"run": `make test-integration-bd\store`,
 				})
 			},
@@ -247,7 +247,7 @@ func TestTopologyAndProviderOwnershipMutationsFailPolicy(t *testing.T) {
 		{
 			name: "line-continuation duplicate proof",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				appendJobStep(t, job(t, docs.ci, "preflight-static"), map[string]any{
+				appendJobStep(t, job(t, docs.ci, "credential-provider-windows"), map[string]any{
 					"run": "make test-integration-\\\nbdstore",
 				})
 			},
@@ -624,10 +624,10 @@ func removeValue(t *testing.T, value any, remove string) []any {
 
 func TestPolicyErrorsIdentifyTheBrokenContract(t *testing.T) {
 	docs := loadPolicyDocuments(t)
-	job(t, docs.ci, "integration-rest-full")["runs-on"] = "ubuntu-latest"
+	job(t, docs.ci, "pack-gate")["runs-on"] = "ubuntu-latest"
 
 	err := validate(docs.ci, docs.nightly, docs.action)
-	if err == nil || !strings.Contains(err.Error(), "integration-rest-full") {
-		t.Fatalf("error = %v, want integration-rest-full context", err)
+	if err == nil || !strings.Contains(err.Error(), "pack-gate") {
+		t.Fatalf("error = %v, want pack-gate context", err)
 	}
 }
