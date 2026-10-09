@@ -1,5 +1,7 @@
 package sessionlog
 
+import "slices"
+
 // dagNode is a node in the conversation DAG.
 type dagNode struct {
 	uuid      string
@@ -34,7 +36,7 @@ type DagResult struct {
 //  3. Select active tip: most recent timestamp, tiebreaker longest branch
 //  4. Walk tip to root via parentUuid chain (following logicalParentUuid
 //     across compact boundaries)
-//  5. Collect all tool_result IDs from entire session
+//  5. Include parallel results attached to selected tool invocations
 //  6. Find orphaned tool_use blocks on active branch
 func BuildDag(entries []*Entry) *DagResult {
 	nodeMap := make(map[string]*dagNode)
@@ -64,6 +66,29 @@ func BuildDag(entries []*Entry) *DagResult {
 	for _, node := range nodeMap {
 		children := childrenMap[node.uuid]
 		if len(children) == 0 {
+			// A parallel result is an attachment to its invocation, not a new
+			// conversation tip that can displace later assistant tool calls.
+			parallelResult := false
+			if parent := nodeMap[node.parentID]; parent != nil && attachedToolResult(node.entry, parent.entry) {
+				for _, siblingID := range childrenMap[node.parentID] {
+					sibling := nodeMap[siblingID]
+					if sibling == nil || sibling.uuid == node.uuid || sibling.entry.Type != "assistant" {
+						continue
+					}
+					for _, block := range sibling.entry.ContentBlocks() {
+						if block.Type == "tool_use" {
+							parallelResult = true
+							break
+						}
+					}
+					if parallelResult {
+						break
+					}
+				}
+			}
+			if parallelResult {
+				continue
+			}
 			length := walkBranchLength(node.uuid, nodeMap)
 			tips = append(tips, tipInfo{node: node, length: length})
 		}
@@ -135,10 +160,32 @@ func BuildDag(entries []*Entry) *DagResult {
 		activeBranch[i], activeBranch[j] = activeBranch[j], activeBranch[i]
 	}
 
-	// Collect all tool_result IDs from entire session (not just active branch).
+	// Claude can attach each parallel result directly to its own tool call,
+	// making the earlier result a sibling of the later call's branch. Retain
+	// pure results tied to a selected invocation without importing other branch
+	// text. Merge at their recorded position while preserving branch order.
+	for _, entry := range entries {
+		if activeBranchUUIDs[entry.UUID] || !activeBranchUUIDs[entry.ParentUUID] {
+			continue
+		}
+		parent, node := nodeMap[entry.ParentUUID], nodeMap[entry.UUID]
+		if parent == nil || node == nil || node.entry != entry || node.lineIndex <= parent.lineIndex || !attachedToolResult(entry, parent.entry) {
+			continue
+		}
+		insertion := len(activeBranch)
+		for i, current := range activeBranch {
+			if nodeMap[current.UUID].lineIndex > node.lineIndex {
+				insertion = i
+				break
+			}
+		}
+		activeBranch = slices.Insert(activeBranch, insertion, entry)
+		activeBranchUUIDs[entry.UUID] = true
+	}
+	// Preserve cross-branch completion detection for runtimes such as Pi.
 	allToolResultIDs := collectAllToolResultIDs(entries)
 
-	// Find orphaned tool_use blocks on active branch.
+	// Find orphaned tool_use blocks in the selected conversation.
 	orphaned := findOrphanedToolUses(activeBranch, allToolResultIDs)
 
 	return &DagResult{
@@ -147,6 +194,34 @@ func BuildDag(entries []*Entry) *DagResult {
 		HasBranches:        len(tips) > 1,
 		CompactionCount:    compactionCount,
 	}
+}
+
+// attachedToolResult accepts only result records whose tool IDs belong to
+// their direct parent invocation. Mixed user text and unrelated branches cannot
+// be reintroduced into the selected conversation by a matching string alone.
+func attachedToolResult(entry, parent *Entry) bool {
+	if entry.Type != "user" && entry.Type != "result" && entry.Type != "tool_result" {
+		return false
+	}
+	calls := make(map[string]bool)
+	for _, block := range parent.ContentBlocks() {
+		if block.Type == "tool_use" && block.ID != "" {
+			calls[block.ID] = true
+		}
+	}
+	if len(calls) == 0 {
+		return false
+	}
+	blocks := entry.ContentBlocks()
+	if len(blocks) == 0 {
+		return entry.ToolUseID != "" && calls[entry.ToolUseID] && (entry.Type == "result" || entry.Type == "tool_result")
+	}
+	for _, block := range blocks {
+		if block.Type != "tool_result" || !calls[block.ToolUseID] {
+			return false
+		}
+	}
+	return true
 }
 
 // conversationTypes are message types that count toward branch length.
