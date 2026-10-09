@@ -710,7 +710,7 @@ func retireDuplicateConfiguredNamedSessionBeads(
 			b := openBeads[idx]
 			oldSessionName := strings.TrimSpace(b.Metadata["session_name"])
 			if oldSessionName != "" && oldSessionName != winnerSessionName &&
-				!stopRuntimeBeforeSessionBeadMutation(store, sp, cfg, b, "duplicate named session", stderr) {
+				!stopRuntimeBeforeSessionBeadMutation(cityPath, store, sp, cfg, b, "duplicate named session", stderr) {
 				continue
 			}
 			batch := session.RetireNamedSessionPatch(now, "duplicate-repair", identity)
@@ -805,7 +805,7 @@ func retireDuplicateConfiguredNamedSessionRows(
 			info := rows[idx].Info
 			oldSessionName := strings.TrimSpace(info.SessionNameMetadata)
 			if oldSessionName != "" && oldSessionName != winnerSessionName &&
-				!stopRuntimeBeforeSessionBeadMutationInfo(store, sp, cfg, info, "duplicate named session", stderr) {
+				!stopRuntimeBeforeSessionBeadMutationInfo(cityPath, store, sp, cfg, info, "duplicate named session", stderr) {
 				continue
 			}
 			batch := session.RetireNamedSessionPatch(now, "duplicate-repair", identity)
@@ -888,7 +888,7 @@ func retireRemovedConfiguredNamedSessionBead(
 	if store == nil {
 		return false
 	}
-	if !stopRuntimeBeforeSessionBeadMutation(store, sp, nil, b, "removed named session", stderr) {
+	if !stopRuntimeBeforeSessionBeadMutation(cityPath, store, sp, nil, b, "removed named session", stderr) {
 		return false
 	}
 	batch := session.RetireNamedSessionPatch(now, "removed-configured-named-session", namedSessionIdentity(b))
@@ -3188,6 +3188,7 @@ func closeFailedCreateBead(sessFront *session.Store, expected session.Info, now 
 //
 // Returns the number of beads reaped.
 func reapStaleSessionBeads(
+	cityPath string,
 	store beads.Store,
 	sp runtime.Provider,
 	dt *drainTracker,
@@ -3296,7 +3297,7 @@ func reapStaleSessionBeads(
 		// or on an API error), and closing releases the identity lease so a
 		// successor mints under a new name, leaving this box unaddressed. Hold
 		// the row; the next pass retries.
-		if !releaseBeadScopedPoolRuntime(info, sp, stderr) {
+		if !releaseBeadScopedPoolRuntimeLeased(cityPath, info, sp, stderr) {
 			continue
 		}
 		if closeBead(store, info, "stale-session", now.UTC(), stderr) {
@@ -3500,6 +3501,7 @@ func deadRuntimeBelongsToRow(info session.Info, name string, sp runtime.Provider
 // that name, and an absent server seen by the lane only sends the pass to a
 // fresh listing, whose own ServerAbsent the pre-boot reap needs.
 func cleanupDeadRuntimeSessionCorpses(
+	cityPath string,
 	store beads.Store,
 	_ map[string]beads.Store,
 	_ *config.City,
@@ -3586,60 +3588,80 @@ func cleanupDeadRuntimeSessionCorpses(
 			}
 			inv.corpses.confirms++
 		}
-		dead, err := deadChecker.IsDeadRuntimeSession(name)
+		// The dead check and the stop run under the name's flock: a start of
+		// the name (a recycled dead pane, a CLI start) excludes them, and a
+		// busy name is checked again next tick.
+		_, release, err := tryRuntimeLease(nil, cityPath, name, "", 0)
 		if err != nil {
-			fmt.Fprintf(stderr, "session reconciler: confirming dead runtime session %s: %v\n", name, err) //nolint:errcheck
-			continue
-		}
-		if !dead {
-			continue
-		}
-		// A dormant row has no start in flight, so its corpse is reaped without
-		// the incarnation fence; only a row claiming a live runtime can be
-		// mid-restart, and only that row is closed below.
-		claimsLive := sessionBeadClaimsLiveRuntime(info)
-		if claimsLive && !deadRuntimeBelongsToRow(info, name, sp, deadChecker, stderr) {
-			continue
-		}
-		if err := sp.Stop(name); err != nil {
-			if runtime.IsSessionGone(err) {
-				continue
+			if !errors.Is(err, session.ErrRuntimeLeaseBusy) {
+				fmt.Fprintf(stderr, "session reconciler: dead runtime session %s skipped: %v\n", name, err) //nolint:errcheck
 			}
-			fmt.Fprintf(stderr, "session reconciler: cleaning dead runtime session %s: %v\n", name, err) //nolint:errcheck
 			continue
 		}
-		fmt.Fprintf(stderr, "session reconciler: cleaned dead runtime session %s\n", name) //nolint:errcheck
-		// Close the bead so its `alias` metadata (and session_name) is
-		// released. Otherwise the slot stays claimed by a dead session
-		// and the next reconciler tick spawns a successor that fails
-		// EnsureAliasAvailable with ErrSessionAliasExists, accumulating
-		// asleep/runtime-missing ghosts on the same slot indefinitely
-		// (gastownhall/gascity#2437).
-		//
-		// closeBead now releases any in-progress work assigned to this
-		// session (via releaseWorkFromClosedSessionBead), so closing is
-		// safe even when the session has assigned work. A session whose
-		// runtime has been confirmed dead and stopped cannot be resumed,
-		// so releasing its work is the correct action.
-		//
-		// The outer `if store != nil` guard tolerates a nil store so the
-		// runtime-Stop side effect still runs in test contexts that do not
-		// wire a real store; closeBead is idempotent on already-closed beads.
-		//
-		// Only a row that claims the runtime it just lost is closed. A dormant
-		// row (asleep, drained, suspended, quarantined, archived) records no
-		// running incarnation: `gc session kill` stops the runtime and marks
-		// the row asleep precisely so a later wake can start a fresh one, and
-		// the dead pane is that sleep's leftover. Closing it would make the
-		// session impossible to wake. Reaping the pane above is still right: it
-		// frees the name for that wake.
-		if store != nil && claimsLive {
-			fmt.Fprintf(stderr, "session reconciler: closing session bead %s as dead-runtime (session %s, state %q)\n", info.ID, name, strings.TrimSpace(info.MetadataState)) //nolint:errcheck
-			closeBead(store, info, "dead-runtime", clk.Now().UTC(), stderr)
+		if cleanDeadRuntimeCorpse(store, info, name, sp, deadChecker, clk, stderr) {
+			cleaned++
 		}
-		cleaned++
+		release()
 	}
 	return cleaned
+}
+
+// cleanDeadRuntimeCorpse stops name's runtime when it is dead, and closes
+// info's row when the row claimed it, under the caller's flock on name. It
+// reports whether it cleaned.
+func cleanDeadRuntimeCorpse(store beads.Store, info session.Info, name string, sp runtime.Provider, deadChecker runtime.DeadRuntimeSessionChecker, clk clock.Clock, stderr io.Writer) bool {
+	dead, err := deadChecker.IsDeadRuntimeSession(name)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: confirming dead runtime session %s: %v\n", name, err) //nolint:errcheck
+		return false
+	}
+	if !dead {
+		return false
+	}
+	// A dormant row has no start in flight, so its corpse is reaped without
+	// the incarnation fence; only a row claiming a live runtime can be
+	// mid-restart, and only that row is closed below.
+	claimsLive := sessionBeadClaimsLiveRuntime(info)
+	if claimsLive && !deadRuntimeBelongsToRow(info, name, sp, deadChecker, stderr) {
+		return false
+	}
+	if err := sp.Stop(name); err != nil {
+		if runtime.IsSessionGone(err) {
+			return false
+		}
+		fmt.Fprintf(stderr, "session reconciler: cleaning dead runtime session %s: %v\n", name, err) //nolint:errcheck
+		return false
+	}
+	fmt.Fprintf(stderr, "session reconciler: cleaned dead runtime session %s\n", name) //nolint:errcheck
+	// Close the bead so its `alias` metadata (and session_name) is
+	// released. Otherwise the slot stays claimed by a dead session
+	// and the next reconciler tick spawns a successor that fails
+	// EnsureAliasAvailable with ErrSessionAliasExists, accumulating
+	// asleep/runtime-missing ghosts on the same slot indefinitely
+	// (gastownhall/gascity#2437).
+	//
+	// closeBead now releases any in-progress work assigned to this
+	// session (via releaseWorkFromClosedSessionBead), so closing is
+	// safe even when the session has assigned work. A session whose
+	// runtime has been confirmed dead and stopped cannot be resumed,
+	// so releasing its work is the correct action.
+	//
+	// The outer `if store != nil` guard tolerates a nil store so the
+	// runtime-Stop side effect still runs in test contexts that do not
+	// wire a real store; closeBead is idempotent on already-closed beads.
+	//
+	// Only a row that claims the runtime it just lost is closed. A dormant
+	// row (asleep, drained, suspended, quarantined, archived) records no
+	// running incarnation: `gc session kill` stops the runtime and marks
+	// the row asleep precisely so a later wake can start a fresh one, and
+	// the dead pane is that sleep's leftover. Closing it would make the
+	// session impossible to wake. Reaping the pane above is still right: it
+	// frees the name for that wake.
+	if store != nil && claimsLive {
+		fmt.Fprintf(stderr, "session reconciler: closing session bead %s as dead-runtime (session %s, state %q)\n", info.ID, name, strings.TrimSpace(info.MetadataState)) //nolint:errcheck
+		closeBead(store, info, "dead-runtime", clk.Now().UTC(), stderr)
+	}
+	return true
 }
 
 // reapRuntimesBoundToClosedBeads stops live runtime sessions whose
@@ -4084,6 +4106,7 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 }
 
 func stopRuntimeBeforeSessionBeadMutation(
+	cityPath string,
 	store beads.Store,
 	sp runtime.Provider,
 	cfg *config.City,
@@ -4101,7 +4124,7 @@ func stopRuntimeBeforeSessionBeadMutation(
 	if !sp.IsRunning(sessionName) {
 		return true
 	}
-	if err := workerKillSessionTargetWithConfig("", store, sp, cfg, sessionName); err != nil {
+	if err := controllerKillSessionRow(cityPath, store, sp, cfg, sessionInfoFromBead(b)); err != nil {
 		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): %v\n", reason, sessionName, b.ID, err) //nolint:errcheck
 		return false
 	}
@@ -4117,6 +4140,7 @@ func stopRuntimeBeforeSessionBeadMutation(
 // (SessionNameMetadata / ID) and drives the identical stop-and-verify sequence, so
 // it is byte-identical to the raw form. The raw form survives for the sync path.
 func stopRuntimeBeforeSessionBeadMutationInfo(
+	cityPath string,
 	store beads.Store,
 	sp runtime.Provider,
 	cfg *config.City,
@@ -4134,7 +4158,7 @@ func stopRuntimeBeforeSessionBeadMutationInfo(
 	if !sp.IsRunning(sessionName) {
 		return true
 	}
-	if err := workerKillSessionTargetWithConfig("", store, sp, cfg, sessionName); err != nil {
+	if err := controllerKillSessionRow(cityPath, store, sp, cfg, info); err != nil {
 		fmt.Fprintf(stderr, "session beads: stopping %s %q (bead %s): %v\n", reason, sessionName, info.ID, err) //nolint:errcheck
 		return false
 	}

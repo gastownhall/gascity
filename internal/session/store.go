@@ -796,6 +796,13 @@ func (s *Store) closeAtomically(closer beads.AtomicConditionalCloser, bead beads
 // Close: a writer that lands after the read, or between the Tx's two writes,
 // is still closed over, because nothing fences the write on that read.
 func (s *Store) CloseWithTerminalPatch(expected Info, patch MetadataPatch, commitMsg string, now time.Time) (bool, error) {
+	return s.CloseWithTerminalPatchUnder(expected, patch, commitMsg, now, nil)
+}
+
+// CloseWithTerminalPatchUnder is CloseWithTerminalPatch for a closer holding
+// held: every row it reads must also still record the lease, or it returns
+// ErrRuntimeLeaseLost with nothing written. A nil lease checks none.
+func (s *Store) CloseWithTerminalPatchUnder(expected Info, patch MetadataPatch, commitMsg string, now time.Time, held *RuntimeLease) (bool, error) {
 	id := expected.ID
 	bead, err := s.validatedBead(id)
 	if err != nil {
@@ -811,6 +818,9 @@ func (s *Store) CloseWithTerminalPatch(expected Info, patch MetadataPatch, commi
 		}
 		if !closePremiseHolds(expected, row) {
 			return fmt.Errorf("closing session %q: %w", id, ErrSessionCloseSuperseded)
+		}
+		if held != nil && !held.HoldsMeta(open.Metadata) {
+			return fmt.Errorf("closing session %q: %w", id, ErrRuntimeLeaseLost)
 		}
 		return nil
 	}
@@ -876,6 +886,13 @@ var errPendingCreateRollbackSuperseded = errors.New("pending create is no longer
 //     with closed false and nothing written. The caller then keeps its
 //     transaction.
 func (s *Store) RollbackPendingCreateAtomically(expected Info, closePatch, postClosePatch MetadataPatch) (closed, postClosed bool, err error) {
+	return s.RollbackPendingCreateAtomicallyUnder(expected, closePatch, postClosePatch, nil)
+}
+
+// RollbackPendingCreateAtomicallyUnder is RollbackPendingCreateAtomically for
+// a start holding held: a row that no longer records the lease is not rolled
+// back, as a superseded one is not. A nil lease checks none.
+func (s *Store) RollbackPendingCreateAtomicallyUnder(expected Info, closePatch, postClosePatch MetadataPatch, held *RuntimeLease) (closed, postClosed bool, err error) {
 	closer, ok := beads.AtomicConditionalCloserFor(s.store)
 	if !ok {
 		return false, false, beads.ErrConditionalWriteUnsupported
@@ -890,7 +907,7 @@ func (s *Store) RollbackPendingCreateAtomically(expected Info, closePatch, postC
 			return nil
 		}
 		closed, err = s.closeAtomically(closer, bead, closePatch, func(open beads.Bead) error {
-			if !lease.CanRollback(LeaseFromInfo(infoFromPersistedBead(open))) {
+			if !lease.CanRollback(LeaseFromInfo(infoFromPersistedBead(open))) || (held != nil && !held.HoldsMeta(open.Metadata)) {
 				return errPendingCreateRollbackSuperseded
 			}
 			return nil

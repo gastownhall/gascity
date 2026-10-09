@@ -3685,6 +3685,22 @@ func releaseBeadScopedPoolRuntime(info sessionpkg.Info, sp runtime.Provider, std
 	return true
 }
 
+// releaseBeadScopedPoolRuntimeLeased is releaseBeadScopedPoolRuntime for a
+// tick caller, which holds no start's lease: it stops under the name's flock,
+// and a busy name holds the row open for a later tick.
+func releaseBeadScopedPoolRuntimeLeased(cityPath string, info sessionpkg.Info, sp runtime.Provider, stderr io.Writer) bool {
+	if sp == nil || !isPoolManagedSessionInfo(info) || !infoOwnsPoolSessionName(info) {
+		return true
+	}
+	_, release, err := tryRuntimeLease(nil, cityPath, strings.TrimSpace(info.SessionNameMetadata), "", 0)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: holding pool session %s open: %v\n", info.ID, err) //nolint:errcheck
+		return false
+	}
+	defer release()
+	return releaseBeadScopedPoolRuntime(info, sp, stderr)
+}
+
 // staleAsyncStartRuntimeAttribution decides whether a stale async start may
 // stop the runtime under name. It takes attributePendingCreateRuntime's answer
 // from the same read pass with one override: a bead-scoped pool row whose
@@ -4531,8 +4547,10 @@ func stopTargetThroughWorkerBoundary(target stopTarget, store beads.Store, sp ru
 	if targetID == "" {
 		targetID = strings.TrimSpace(target.name)
 	}
+	// A stop sweep (`gc stop`, a rig restart) stops every session, and takes
+	// no runtime lease by design (the allowlist).
 	if cityStopSessionMarked(store, target.sessionID) {
-		if err := workerKillSessionTargetWithConfig("", store, sp, cfg, targetID); err != nil {
+		if err := workerKillSessionTargetCtx(sessionpkg.CitySweepContext(context.Background()), "", store, sp, cfg, targetID); err != nil {
 			return err
 		}
 		markCityStopSessionAsAsleep(sessionFrontDoor(store), target.sessionID, nil)
