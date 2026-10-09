@@ -34,7 +34,7 @@ const (
 // is a change in beads first: copy the files from beads and update these
 // digests in the same PR.
 var setupBazelBeadsDigests = map[string]string{
-	"action.yml":         "a104b74c2d470ee77b0fb4c3a12c506fd9a8771a23521f96bd28a1bc574c0e5f",
+	"action.yml":         "e3e8b2904de5153a9f8006ecd7058c11569c3e5311d2381f0c192843b760f559",
 	"fork-credential.sh": "abd68bbacb42fa5c7a71d06aa652bcf0f2fbe870f00b13b51650fe95c3bef59e",
 	"write-bazelrc.sh":   "ffd2f3ebca5a449e12db342c143b9d082cd1d3d5ab7abc8fac84475d5ed56550",
 }
