@@ -120,6 +120,44 @@ func (s faultStore) Update(id string, opts beads.UpdateOpts) error {
 	return s.Store.Update(id, opts)
 }
 
+// UpdateReporting is BdStore's one-call update that reports the row it wrote;
+// offering it here puts control processing on its production write path. It
+// counts as the one write it is.
+func (s faultStore) UpdateReporting(id string, opts beads.UpdateOpts) (beads.UpdatedRow, error) {
+	if err := s.f.beforeWrite("UpdateReporting " + id); err != nil {
+		return beads.UpdatedRow{}, err
+	}
+	return beads.UpdateAndReadBack(s.Store, id, opts)
+}
+
+// ChildrenOfAny and GetExactBatch offer BdStore's batched reads so the
+// faulted run takes production's read path too. Reads are never faulted.
+func (s faultStore) ChildrenOfAny(parentIDs []string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	return beads.ChildrenOfAny(s.Store, parentIDs, opts...)
+}
+
+func (s faultStore) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	found := make(map[string]beads.Bead, len(ids))
+	var unresolved []string
+	for _, id := range ids {
+		bead, err := s.Get(id)
+		if err != nil {
+			unresolved = append(unresolved, id)
+			continue
+		}
+		found[id] = bead
+	}
+	return found, unresolved, nil
+}
+
+func (s faultStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
+	batch, ok := beads.DepListBatchFor(s.Store)
+	if !ok {
+		return nil, beads.ErrDepListBatchUnsupported
+	}
+	return batch.DepListBatch(ids)
+}
+
 func (s faultStore) Close(id string) error {
 	if err := s.f.beforeWrite("Close " + id); err != nil {
 		return err

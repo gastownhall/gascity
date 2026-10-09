@@ -19,3 +19,22 @@ type ExactBatchGetter interface {
 var ErrExactBatchGetUnsupported = errors.New("exact batch get unsupported by this store")
 
 var _ ExactBatchGetter = (*BdStore)(nil)
+
+// PrefetchExact reads ids in one round trip when store has GetExactBatch and
+// returns the beads it answered exactly, keyed by id. It returns an empty map
+// for a store without the batch (or a single id), so a caller resolves every id
+// it does not find here with Get, in its own order and with Get's errors.
+func PrefetchExact(store Store, ids []string) (map[string]Bead, error) {
+	getter, ok := store.(ExactBatchGetter)
+	if !ok || len(ids) < 2 {
+		return map[string]Bead{}, nil
+	}
+	found, _, err := getter.GetExactBatch(ids)
+	if err != nil {
+		if errors.Is(err, ErrExactBatchGetUnsupported) {
+			return map[string]Bead{}, nil
+		}
+		return nil, err
+	}
+	return found, nil
+}

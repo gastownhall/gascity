@@ -479,20 +479,20 @@ func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix
 }
 
 func controlBdCommandRunnerForCity(cityPath string) beads.CommandRunner {
-	return bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
+	return countControlBdCalls(bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
 		env, err := bdRuntimeEnvWithError(cityPath)
 		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
 		applyControllerBdEnv(env)
 		return env, err
-	})
+	}))
 }
 
 func controlBdCommandRunnerForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandRunner {
-	return bdCommandRunnerWithManagedRetryErr(cityPath, func(_ string) (map[string]string, error) {
+	return countControlBdCalls(bdCommandRunnerWithManagedRetryErr(cityPath, func(_ string) (map[string]string, error) {
 		env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
 		applyControllerBdEnv(env)
 		return env, err
-	})
+	}))
 }
 
 func applyExportSuppressionEnv(env map[string]string) {

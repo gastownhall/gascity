@@ -474,6 +474,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			// control ga-fw2fm. The silent no-op now emits a separate
 			// `process-control ... skip reason=bead_not_open` line inside
 			// ProcessControl itself; see runtime.go.
+			callsBefore, started := snapshotControlBdCalls(), time.Now()
 			if err := controlDispatcherServe(cityPath, storePath, beadID, io.Discard, stderr, emits); err != nil {
 				if errors.Is(err, dispatch.ErrControlPending) {
 					pendingCount++
@@ -514,7 +515,8 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 				}
 				return result, fmt.Errorf("processing control bead %s: %w", beadID, err)
 			}
-			workflowTracef("serve processed bead=%s kind=%s", beadID, kind)
+			calls := snapshotControlBdCalls().since(callsBefore)
+			workflowTracef("serve processed bead=%s kind=%s bd_reads=%d bd_writes=%d dur=%s", beadID, kind, calls.reads, calls.writes, time.Since(started).Round(time.Millisecond))
 			result.processedAny = true
 			processedThisCycle = true
 		}
