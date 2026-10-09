@@ -3528,7 +3528,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// (session_key/continuation_reset_pending) stay unthreaded — neither has a
 			// same-tick Info reader whose verdict the residue changes — and self-heal on
 			// the next tick's store reload.
-			ok, commitBatch := recoverRunningPendingCreate(infoByID[id], tp, cfg, store, clk, trace)
+			ok, commitBatch := recoverRunningPendingCreate(cityPath, infoByID[id], tp, cfg, store, clk, trace)
 			if !ok {
 				fmt.Fprintf(stderr, "session reconciler: recovering pending create %s: metadata repair incomplete\n", name) //nolint:errcheck
 			}
@@ -7492,7 +7492,9 @@ func silentRebaselineSessionHashes(id string, sessFront *sessionpkg.Store, agent
 //
 // Returns (true, launchBatch) iff the agent was relaunched and hashes were
 // rebaselined (the caller folds launchBatch onto the typed snapshot and
-// `continue`s). Returns (false, fold) when the provider cannot relaunch,
+// `continue`s), and (true, nil) when another holder has the runtime lease (a
+// later tick decides again); any other lease failure is (false, nil), the
+// full-restart fallback. Returns (false, fold) when the provider cannot relaunch,
 // buildPreparedStart minted a speculative resume key (a warm relaunch would
 // --resume a key naming a conversation that was never created), the
 // prepare/precondition/relaunch step failed, or the rebaseline failed — the
@@ -7530,6 +7532,30 @@ func relaunchAgentForLaunchDrift(
 		// RelaunchProvider; fall through to the full restart. No side effects yet —
 		// no buildPreparedStart residue to fold.
 		return false, nil
+	}
+	// The relaunch starts the row's agent again: it runs under the runtime
+	// lease (I-LEASE), taken without waiting before the preparation's writes,
+	// and its provider call runs on the lease's Watch. A name another holder
+	// has defers it, writing nothing and skipping the full restart too: the
+	// next tick decides again. Any other lease failure falls back to the full
+	// restart (whose stop takes the lease itself), so drift is never stuck.
+	if leaseName := strings.TrimSpace(name); leaseName != "" && filepath.IsAbs(cityPath) {
+		lease, release, err := tryRuntimeLease(store, cityPath, leaseName, info.ID, sessionpkg.RuntimeLeaseTTLFor(cfg))
+		if err != nil {
+			if errors.Is(err, sessionpkg.ErrRuntimeLeaseBusy) {
+				fmt.Fprintf(stderr, "session reconciler: relaunch %s deferred: %v\n", name, err) //nolint:errcheck
+				return true, nil
+			}
+			fmt.Fprintf(stderr, "session reconciler: relaunch %s: %v; falling back to full restart\n", name, err) //nolint:errcheck
+			return false, nil
+		}
+		defer release()
+		if lease != nil && lease.Epoch() != 0 {
+			if watched, cancel, err := lease.Watch(ctx, startLeaseWatchEvery); err == nil {
+				defer cancel()
+				ctx = watched
+			}
+		}
 	}
 	// Capture whether the bead already tracked a resumable conversation BEFORE
 	// buildPreparedStart runs. An empty session_key means any key the preparation

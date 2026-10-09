@@ -75,6 +75,13 @@ const startCommitMaxAttempts = 3
 // require-mode store that cannot fence, and a store that reports
 // beads.ErrConditionalWriteUnsupported at call time, return an error.
 func (s *Store) CommitStartedIfCurrent(expected Info, patch MetadataPatch) (bool, error) {
+	return s.CommitStartedIfCurrentUnder(expected, patch, nil)
+}
+
+// CommitStartedIfCurrentUnder is CommitStartedIfCurrent for a start run under
+// lease: a re-read row that no longer records the lease is not current, so a
+// start whose lease was taken over commits nothing. A nil lease checks none.
+func (s *Store) CommitStartedIfCurrentUnder(expected Info, patch MetadataPatch, lease *RuntimeLease) (bool, error) {
 	writer, _, err := beads.ResolveConditionalWriter(s.store)
 	if err != nil {
 		return false, fmt.Errorf("committing start of session %q: %w", expected.ID, err)
@@ -87,7 +94,8 @@ func (s *Store) CommitStartedIfCurrent(expected Info, patch MetadataPatch) (bool
 			if err != nil {
 				return err
 			}
-			if LeaseFromInfo(expected).CommitVerdict(LeaseFromInfo(infoFromPersistedBead(bead))) != LeaseCommit {
+			if LeaseFromInfo(expected).CommitVerdict(LeaseFromInfo(infoFromPersistedBead(bead))) != LeaseCommit ||
+				(lease != nil && !lease.HoldsMeta(bead.Metadata)) {
 				return nil
 			}
 			if writer == nil || len(patch) == 0 {
@@ -165,38 +173,53 @@ func (s *Store) WithPendingCreateRollback(expected Info, fn func() error) (bool,
 // beads.ErrConditionalWriteUnsupported at call time, return an error rather
 // than falling back to an unconditional write.
 func (s *Store) ApplyPatchIfLifecycleUnchanged(expected Info, patch MetadataPatch) (bool, error) {
+	return s.applyPatchIfLifecycleUnchanged(expected, patch, nil, 1)
+}
+
+// ApplyPatchIfLifecycleUnchangedUnder is ApplyPatchIfLifecycleUnchanged for a
+// writer holding lease: the re-read row must also still record the lease, or
+// the patch is refused with (false, nil). The write is fenced at that read's
+// revision, so a takeover that lands after the read refuses it too; a fence
+// lost to another writer re-reads and checks again, up to three times, as the
+// start commit does. A nil lease checks none.
+func (s *Store) ApplyPatchIfLifecycleUnchangedUnder(expected Info, patch MetadataPatch, lease *RuntimeLease) (bool, error) {
+	return s.applyPatchIfLifecycleUnchanged(expected, patch, lease, startCommitMaxAttempts)
+}
+
+func (s *Store) applyPatchIfLifecycleUnchanged(expected Info, patch MetadataPatch, lease *RuntimeLease, attempts int) (bool, error) {
 	if len(patch) == 0 {
-		return false, nil
-	}
-	bead, err := s.validatedBead(expected.ID)
-	if err != nil {
-		return false, err
-	}
-	if bead.Status == "closed" {
-		return false, nil
-	}
-	if !sameLifecycleFacts(expected, infoFromPersistedBead(bead)) {
 		return false, nil
 	}
 	writer, _, err := beads.ResolveConditionalWriter(s.store)
 	if err != nil {
 		return false, fmt.Errorf("updating session %q: %w", expected.ID, err)
 	}
-	if writer == nil {
-		if err := s.ApplyPatch(expected.ID, patch); err != nil {
+	for attempt := 0; attempt < attempts; attempt++ {
+		bead, err := s.validatedBead(expected.ID)
+		if err != nil {
 			return false, err
 		}
-		return true, nil
+		if bead.Status == "closed" {
+			return false, nil
+		}
+		if !sameLifecycleFacts(expected, infoFromPersistedBead(bead)) || (lease != nil && !lease.HoldsMeta(bead.Metadata)) {
+			return false, nil
+		}
+		if writer == nil {
+			if err := s.ApplyPatch(expected.ID, patch); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		err = writer.UpdateIfMatch(expected.ID, bead.Revision, beads.UpdateOpts{Metadata: map[string]string(patch)})
+		switch {
+		case err == nil:
+			return true, nil
+		case !beads.IsPreconditionFailed(err):
+			return false, fmt.Errorf("updating session %q: %w", expected.ID, err)
+		}
 	}
-	err = writer.UpdateIfMatch(expected.ID, bead.Revision, beads.UpdateOpts{Metadata: map[string]string(patch)})
-	switch {
-	case err == nil:
-		return true, nil
-	case beads.IsPreconditionFailed(err):
-		return false, nil
-	default:
-		return false, fmt.Errorf("updating session %q: %w", expected.ID, err)
-	}
+	return false, nil
 }
 
 // UpdateMetadataFenced writes a patch decided from a fresh read of the row. It

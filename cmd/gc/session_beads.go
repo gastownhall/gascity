@@ -3786,7 +3786,8 @@ func reapRuntimesBoundToClosedBeads(
 			continue
 		}
 
-		stopped, err := stopStillBoundClosedRuntime(cityPath, name, liveID, sp, inv != nil)
+		owner, _ := sessionBeads.FindInfoBySessionName(name)
+		stopped, err := stopStillBoundClosedRuntimeLeased(store, cityPath, name, owner.ID, liveID, sp, inv != nil, stderr)
 		if !stopped {
 			continue
 		}
@@ -3817,13 +3818,41 @@ func reapRuntimesBoundToClosedBeads(
 // having runtime.StopForCleanup turn it into success. The unlock is deferred,
 // so a provider panic cannot leave the name locked.
 func stopStillBoundClosedRuntime(cityPath, name, liveID string, sp runtime.Provider, listed bool) (bool, error) {
-	unlock := runtimeNames.tryLock(cityPath, name)
-	if unlock == nil {
+	return stopStillBoundClosedRuntimeLeased(nil, cityPath, name, "", liveID, sp, listed, io.Discard)
+}
+
+// stopStillBoundClosedRuntimeLeased is stopStillBoundClosedRuntime under the
+// runtime lease (R-a): the in-process lock and the name's flock, plus the
+// record on ownerID, the open row that owns name now, if any, so a start of
+// that row on another host is excluded too. Another host's start with no open
+// row yet is not; the Stop's identity re-read and object kills bound it. A
+// record that cannot be taken for a reason other than busy falls back to the
+// flock alone.
+func stopStillBoundClosedRuntimeLeased(store beads.Store, cityPath, name, ownerID, liveID string, sp runtime.Provider, listed bool, stderr io.Writer) (bool, error) {
+	_, release, err := tryRuntimeLease(store, cityPath, name, ownerID, session.RuntimeLeaseTTL(0))
+	if err != nil && ownerID != "" && !errors.Is(err, session.ErrRuntimeLeaseBusy) {
+		// The owner row's record could not be taken for a reason other than
+		// busy (the store unreachable, the row closed): reap under the name's
+		// flock alone, logged, as a controller stop does.
+		fmt.Fprintf(stderr, "session reconciler: reaping runtime %q under its flock alone: %v\n", name, err) //nolint:errcheck
+		_, release, err = tryRuntimeLease(nil, cityPath, name, "", session.RuntimeLeaseTTL(0))
+	}
+	if err != nil {
+		if !errors.Is(err, session.ErrRuntimeLeaseBusy) {
+			fmt.Fprintf(stderr, "session reconciler: reaping runtime %q skipped: %v\n", name, err) //nolint:errcheck
+		}
 		return false, nil
 	}
-	defer unlock()
+	defer release()
 	if again, err := sp.GetMeta(name, "GC_SESSION_ID"); err != nil || strings.TrimSpace(again) != liveID {
 		return false, nil
+	}
+	// Decide again under the lease, on a fresh read: a row reopened since
+	// the sweep read it closed owns its runtime again.
+	if store != nil {
+		if b, err := beads.HandlesFor(store).Live.Get(liveID); err != nil || b.Status != "closed" {
+			return false, nil
+		}
 	}
 	if listed {
 		if names, _ := sp.ListRunning(name); !slices.Contains(names, name) {
