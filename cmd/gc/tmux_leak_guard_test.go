@@ -158,29 +158,27 @@ func reapTmuxLeakProcesses(procs []tmuxProcInfo) {
 	_ = reapDoltLeakPIDs(pids)
 }
 
-// sweepStaleTmuxTestServers reaps tmux servers left behind by prior or
-// sibling test runs that are already gone: a tmux process whose TMUX_TMPDIR
-// names a "<gct-…>/tmux" socket root that no longer exists on disk. A live
-// run's root exists for its whole lifetime (its alive-sentinel flock is held
-// inside it and the dir is only removed at that run's own teardown), so a
-// missing root is definitive proof the owning run ended — the server is
-// residue of the exact leak class this guard exists for (a crashed or
-// pre-guard run whose teardown removed the dir but never killed the server).
-// Roots that still exist — including this run's own — are never touched.
+// sweepStaleTmuxTestServers reaps only tmux processes whose TMUX_TMPDIR names
+// a missing per-run root contained by the configured private test parent. A
+// live run's root exists for its whole lifetime (its alive-sentinel flock is
+// held inside it and the dir is only removed at that run's own teardown), so
+// a missing root identifies a crashed or pre-guard run whose teardown
+// removed the directory but never killed the server. Roots that still exist —
+// including this run's own — are never touched.
 func sweepStaleTmuxTestServers(label string, out io.Writer) {
-	sweepStaleTmuxServers(label, out, isTmuxTestSocketRoot)
+	scopeRoot, err := tmuxtest.SocketParentRootFromEnv("")
+	if err != nil || scopeRoot == "" {
+		return
+	}
+	sweepStaleTmuxServers(label, out, func(root string) bool {
+		return isTmuxTestSocketRoot(root, scopeRoot)
+	})
 }
 
-// isTmuxTestSocketRoot reports whether root has the shape of a test run's
-// per-run tmux socket root, "<gct-<pid>-…>/tmux" — the shape every cmd/gc and
-// integration test binary gives its own. The startup sweep judges only servers
-// on roots of this shape.
-func isTmuxTestSocketRoot(root string) bool {
-	if root == "" || filepath.Base(root) != "tmux" {
-		return false
-	}
-	_, ok := pidFromPrefixedDirName(filepath.Base(filepath.Dir(root)), tmuxtest.SocketParentDirPrefix)
-	return ok
+// isTmuxTestSocketRoot reports whether root belongs to the explicit private
+// parent used by this test binary, including when the socket root is gone.
+func isTmuxTestSocketRoot(root, scopeRoot string) bool {
+	return tmuxtest.SocketRootWithinParent(scopeRoot, root)
 }
 
 // sweepStaleTmuxServers is sweepStaleTmuxTestServers with the ownership rule

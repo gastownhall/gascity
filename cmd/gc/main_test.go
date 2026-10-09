@@ -250,9 +250,9 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	tmuxSocketParentRoot := os.Getenv(testTmuxSocketParentRootEnv)
-	if tmuxSocketParentRoot == "" {
-		tmuxSocketParentRoot = "/tmp"
+	tmuxSocketParentRoot, err := tmuxtest.SocketParentRootFromEnv("/tmp")
+	if err != nil {
+		panic(fmt.Errorf("invalid tmux socket-parent scope: %w", err))
 	}
 	tmuxSocketRoot, tmuxSocketCleanupRoot, tmuxSentinel, err := cmdGCTmuxSocketRoot(testTempRoot, tmuxSocketParentRoot)
 	if err != nil {
@@ -262,10 +262,11 @@ func TestMain(m *testing.M) {
 	// testscript.Main below exits via os.Exit, which skips defers, so the
 	// normal path removes the tmux socket parent through cleanupTestingM. A
 	// setup panic before testscript.Main is reached still unwinds through
-	// defers, so cover that window here or it leaks /tmp/gct-<pid>-* until a
-	// later aged sweep. cmdGCTmuxSocketRoot returns an empty cleanup root when
-	// it fell back to a dir under TMPDIR (swept separately), so only the real
-	// /tmp parent is removed here.
+	// defers, so cover that window here or it leaks a gct-<pid>-* parent under
+	// the selected socket-parent root until a later scoped sweep. The helper
+	// returns an empty cleanup root when
+	// it fell back to a dir under TMPDIR (swept separately), so only the
+	// parent it actually created is removed here.
 	defer func() {
 		if tmuxSocketCleanupRoot != "" {
 			_ = os.RemoveAll(tmuxSocketCleanupRoot)

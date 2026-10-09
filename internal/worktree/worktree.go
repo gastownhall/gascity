@@ -245,6 +245,7 @@ func (s Spec) managed() bool {
 
 // Verify checks that the spec's path is the root of a worktree of the
 // spec's repository with the spec's branch checked out on an attached HEAD.
+// Managed worktrees must also retain the recorded base commit in HEAD's ancestry.
 // It never mutates anything. A missing path returns ErrWorktreeMissing;
 // any other failure describes the postcondition that does not hold.
 func Verify(spec Spec) (Report, error) {
@@ -264,6 +265,9 @@ func Verify(spec Spec) (Report, error) {
 	}
 	if err := verifyProvenance(spec, provenance); err != nil {
 		return rep, fmt.Errorf("verifying worktree %q provenance: %w", spec.Path, err)
+	}
+	if err := verifyBaseAncestry(spec.Path, provenance.BaseSHA, rep.Head); err != nil {
+		return rep, fmt.Errorf("verifying worktree %q: %w", spec.Path, err)
 	}
 	rep.Provenance = &provenance
 	return rep, nil
@@ -335,6 +339,8 @@ func verifyGitState(spec Spec) (Report, error) {
 //     clobbers or "repairs" state it did not create;
 //   - creation never detaches: a new branch is created from the verbatim
 //     local base, an existing branch is attached as-is;
+//   - a managed existing branch must contain the resolved base before
+//     planning or creation;
 //   - every postcondition is re-verified after creation, and a failure
 //     rolls back the created worktree and any created branch;
 //   - with Spec.DryRun, Ensure plans and validates but mutates nothing.
@@ -552,6 +558,18 @@ func isAncestor(workDir, ancestor, descendant string) (bool, error) {
 	return false, fmt.Errorf("git merge-base --is-ancestor: %s: %w", strings.TrimSpace(string(output)), err)
 }
 
+// verifyBaseAncestry checks the recorded input commit against the observed HEAD.
+func verifyBaseAncestry(workDir, baseSHA, head string) error {
+	containsBase, err := isAncestor(workDir, baseSHA, head)
+	if err != nil {
+		return fmt.Errorf("checking recorded base %s against HEAD %s: %w", baseSHA, head, err)
+	}
+	if !containsBase {
+		return fmt.Errorf("HEAD %s does not contain recorded base %s", head, baseSHA)
+	}
+	return nil
+}
+
 func resolveCreationState(spec Spec) (*git.Git, bool, string, error) {
 	repoGit := git.New(spec.RepoDir)
 	if !repoGit.IsRepo() {
@@ -575,6 +593,15 @@ func resolveCreationState(spec Spec) (*git.Git, bool, string, error) {
 	if spec.BaseSHA != "" && resolvedBase != spec.BaseSHA {
 		return nil, false, "", fmt.Errorf("ensuring worktree %q: base ref %q resolves to %s, want recorded base SHA %s",
 			spec.Path, spec.Base, resolvedBase, spec.BaseSHA)
+	}
+	if spec.managed() && branchExists {
+		head, err := repoGit.RevParseVerifyCommit("refs/heads/" + spec.Branch)
+		if err != nil {
+			return nil, false, "", fmt.Errorf("ensuring worktree %q: %w", spec.Path, err)
+		}
+		if err := verifyBaseAncestry(spec.RepoDir, resolvedBase, head); err != nil {
+			return nil, false, "", fmt.Errorf("ensuring worktree %q: %w", spec.Path, err)
+		}
 	}
 	return repoGit, branchExists, resolvedBase, nil
 }

@@ -238,28 +238,28 @@ func TestDiscoverTmuxProcessesWithSocketRootEnv_FindsDeletedSocketZombie(t *test
 	waitForPIDGone(t, pid)
 }
 
-// TestIsTmuxTestSocketRoot pins which socket roots the startup sweep owns:
-// only "<gct-<pid>-…>/tmux". The other real-tmux tests in this file keep their
-// fixtures on roots outside that shape, which is what stops a sibling suite's
-// sweep from reaping their servers mid-test.
+// TestIsTmuxTestSocketRoot pins that startup discovery accepts only per-run
+// socket roots beneath its explicit private parent. Same-prefix roots outside
+// that parent and the default tmux socket are not owned.
 func TestIsTmuxTestSocketRoot(t *testing.T) {
+	scope := t.TempDir()
 	for _, tc := range []struct {
 		name string
 		root string
 		want bool
 	}{
-		{"per-run root", "/tmp/gct-4242-abc/tmux", true},
+		{"per-run root", filepath.Join(scope, "gct-4242-abc", "tmux"), true},
 		{"empty", "", false},
-		{"not a tmux dir", "/tmp/gct-4242-abc/other", false},
-		{"parent without an owner pid", "/tmp/gct-abc/tmux", false},
-		{"parent without the shared prefix", "/tmp/other-4242-abc/tmux", false},
-		{"kill-pass fixture root", "/tmp/gct-guardcheck123", false},
-		{"deleted-socket fixture root", "/tmp/gct-guardzomb123", false},
-		{"boundary test fixture root", "/tmp/gct-sweeppar123/gone/tmux", false},
+		{"not a tmux dir", filepath.Join(scope, "gct-4242-abc", "other"), false},
+		{"parent without an owner pid", filepath.Join(scope, "gct-abc", "tmux"), false},
+		{"parent without the shared prefix", filepath.Join(scope, "other-4242-abc", "tmux"), false},
+		{"foreign same-prefix root", filepath.Join(t.TempDir(), "gct-4242-foreign", "tmux"), false},
+		{"default server root", filepath.Join(scope, "tmux-1000"), false},
+		{"boundary fixture root", filepath.Join(scope, "gct-sweeppar123", "gone", "tmux"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isTmuxTestSocketRoot(tc.root); got != tc.want {
-				t.Errorf("isTmuxTestSocketRoot(%q) = %v, want %v", tc.root, got, tc.want)
+			if got := isTmuxTestSocketRoot(tc.root, scope); got != tc.want {
+				t.Errorf("isTmuxTestSocketRoot(%q, %q) = %v, want %v", tc.root, scope, got, tc.want)
 			}
 		})
 	}
@@ -287,10 +287,9 @@ func TestSweepStaleTmuxTestServers_ReapsRootGoneKeepsRootPresent(t *testing.T) {
 		t.Fatalf("remove gone root: %v", err)
 	}
 
-	// A sibling test binary's startup sweep lands between fixture setup and
-	// this test's own sweep. A full gate starts dozens of cmd/gc binaries at
-	// once, so this is routine, not theoretical (ga-ok9ick): the fixture must
-	// still prove the decision boundary through this test's own sweep.
+	// The production startup sweep is constrained to the package TestMain's
+	// configured parent. These fixtures are outside that scope; the injected
+	// rule below exercises the reaper only against this test's own servers.
 	sweepStaleTmuxTestServers("sibling", io.Discard)
 
 	var out bytes.Buffer

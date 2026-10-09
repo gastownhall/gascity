@@ -14,15 +14,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
-// SocketParentDirPrefix is the shared prefix for the tmux Unix-socket parent
-// directories created by cmd/gc, internal/runtime/tmux, and test/integration
-// TestMains. All three use the same root ("/tmp", for macOS socket-path
-// length reasons -- see each call site) and prefix so a sweep triggered by
-// any one of them reaps orphans left by any of the others.
+// SocketParentDirPrefix names per-run tmux socket-parent directories.
 const SocketParentDirPrefix = "gct-"
+
+// SocketParentRootEnv names the optional private parent shared by test binaries.
+const SocketParentRootEnv = "GC_TEST_TMUX_SOCKET_PARENT_ROOT"
 
 // socketParentAliveSentinelName is a lock file inside each socket parent
 // dir. The creating process holds an exclusive flock on it for its
@@ -121,6 +121,66 @@ func pidFromPrefixedDirName(name, prefix string) (int, bool) {
 	return pid, true
 }
 
+// SocketParentRootFromEnv returns the configured private socket-parent root,
+// or defaultRoot when the environment variable is absent. A present but empty,
+// missing, non-private, or foreign-owned value is an error; it never widens to
+// a shared temporary directory.
+func SocketParentRootFromEnv(defaultRoot string) (string, error) {
+	raw, present := os.LookupEnv(SocketParentRootEnv)
+	if !present {
+		if defaultRoot == "" {
+			return "", nil
+		}
+		return pathutil.NormalizePathForCompare(defaultRoot), nil
+	}
+	if strings.TrimSpace(raw) == "" {
+		return "", fmt.Errorf("%s is set but empty", SocketParentRootEnv)
+	}
+	return canonicalOwnedSocketParentRoot(raw)
+}
+
+// SocketRootWithinParent reports whether socketRoot is a direct per-run tmux
+// root below parent, resolving symlinked ancestors even when socketRoot is gone.
+func SocketRootWithinParent(parent, socketRoot string) bool {
+	parent = pathutil.NormalizePathForCompare(parent)
+	socketRoot = pathutil.NormalizePathForCompare(socketRoot)
+	if parent == "" || socketRoot == "" || filepath.Base(socketRoot) != "tmux" || !pathutil.PathWithin(parent, socketRoot) {
+		return false
+	}
+	rel, err := filepath.Rel(parent, socketRoot)
+	if err != nil {
+		return false
+	}
+	parts := strings.Split(filepath.Clean(rel), string(filepath.Separator))
+	if len(parts) != 2 || parts[1] != "tmux" {
+		return false
+	}
+	pid, ok := pidFromPrefixedDirName(parts[0], SocketParentDirPrefix)
+	return ok && pid > 0
+}
+
+func canonicalOwnedSocketParentRoot(root string) (string, error) {
+	canonical := pathutil.NormalizePathForCompare(root)
+	if canonical == "" {
+		return "", fmt.Errorf("socket-parent root is empty")
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return "", fmt.Errorf("stat socket-parent root %q: %w", canonical, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("socket-parent root %q is not a directory", canonical)
+	}
+	if info.Mode().Perm() != 0o700 {
+		return "", fmt.Errorf("socket-parent root %q has mode %04o, want 0700", canonical, info.Mode().Perm())
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) != os.Geteuid() {
+		return "", fmt.Errorf("socket-parent root %q is not owned by effective uid %d", canonical, os.Geteuid())
+	}
+	return canonical, nil
+}
+
 // SweepOrphanPIDPrefixedDirs removes <root>/<prefix><PID>-<random> dirs
 // whose creator is gone. Best-effort; ignores errors. Ported from cmd/gc's
 // sweepOrphanPIDPrefixedDirs (test_orphan_sweep_test.go) so cmd/gc,
@@ -147,6 +207,12 @@ func SweepOrphanPIDPrefixedDirs(root, prefix string, diagnostics io.Writer) {
 	if diagnostics == nil {
 		diagnostics = io.Discard
 	}
+	ownedRoot, err := canonicalOwnedSocketParentRoot(root)
+	if err != nil {
+		_, _ = fmt.Fprintf(diagnostics, "tmuxtest: refusing orphan sweep outside a private owned root %q: %v\n", root, err)
+		return
+	}
+	root = ownedRoot
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return
@@ -386,16 +452,27 @@ func (r tmuxServerReaper) reapServerAtSocket(socketPath string, diagnostics io.W
 }
 
 // NewSocketParentDir sweeps orphaned sibling socket parent directories
-// under root (see SweepOrphanPIDPrefixedDirs), then creates and returns a
-// fresh one plus the *os.File holding its alive sentinel. The caller must
+// under a private mode-0700 root (see SweepOrphanPIDPrefixedDirs), then creates
+// and returns a fresh one plus the *os.File holding its alive sentinel. The caller must
 // keep the returned file referenced for as long as dir must stay protected
 // from a concurrent sibling's sweep -- the runtime finalizes unreachable
 // os.Files, which releases the flock. The sweep signals processes as well as
 // removing directories: any tmux server bound to a socket under an eligible
 // sibling dir is killed through that explicit socket, with a bounded wait and
 // an exact-PID SIGKILL fallback. Sweep removal and kill messages are written
-// to diagnostics.
+// to diagnostics. A shared legacy default such as /tmp may still be used for
+// creating this run's private child, but it is never swept; cross-run cleanup
+// requires an explicit private root from SocketParentRootFromEnv.
 func NewSocketParentDir(root string, diagnostics io.Writer) (dir string, sentinel *os.File, err error) {
+	root = pathutil.NormalizePathForCompare(root)
+	if root == "" {
+		return "", nil, fmt.Errorf("socket-parent root is empty")
+	}
+	if _, explicit := os.LookupEnv(SocketParentRootEnv); explicit {
+		if _, scopeErr := SocketParentRootFromEnv(""); scopeErr != nil {
+			return "", nil, fmt.Errorf("validating %s: %w", SocketParentRootEnv, scopeErr)
+		}
+	}
 	SweepOrphanPIDPrefixedDirs(root, SocketParentDirPrefix, diagnostics)
 	dir, err = os.MkdirTemp(root, PIDPrefixedTempPattern(SocketParentDirPrefix))
 	if err != nil {

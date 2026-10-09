@@ -122,13 +122,10 @@ func TestMain(m *testing.M) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Create the tmux socket root under /tmp rather than $TMPDIR.
-	// On macOS, $TMPDIR is ~80 chars (/private/var/folders/…/T/); nesting
-	// tmux sockets inside it pushes socket paths past macOS's 104-byte limit.
-	// /tmp is world-writable on macOS, Linux, and CI runners.
-	//
-	// NewSocketParentDir sweeps orphaned siblings left by a prior SIGKILL'd
-	// run before creating this run's own dir. tmuxSocketAliveSentinel must
+	// Create the tmux socket root beneath the configured private parent.
+	// Without GC_TEST_TMUX_SOCKET_PARENT_ROOT, /tmp remains the short-path
+	// creation fallback but is never swept. NewSocketParentDir holds a sentinel
+	// so concurrent runs sharing the explicit parent remain protected.
 	// stay referenced for the process lifetime: the runtime finalizes
 	// unreachable os.Files, which would close the descriptor and release
 	// the lock, letting a concurrent sibling's sweep reclaim this still-
@@ -136,7 +133,11 @@ func TestMain(m *testing.M) {
 	// skips defers, so those paths remove the parent explicitly below; the
 	// deferred removal here additionally covers a setup panic (which unwinds
 	// through defers) so it cannot leak the parent until a later aged sweep.
-	tmuxSocketParent, tmuxSentinel, tmuxParentErr := tmuxtest.NewSocketParentDir("/tmp", io.Discard)
+	socketParentRoot, scopeErr := tmuxtest.SocketParentRootFromEnv("/tmp")
+	if scopeErr != nil {
+		panic("integration: invalid tmux socket-parent scope: " + scopeErr.Error())
+	}
+	tmuxSocketParent, tmuxSentinel, tmuxParentErr := tmuxtest.NewSocketParentDir(socketParentRoot, io.Discard)
 	tmuxSocketAliveSentinel = tmuxSentinel
 	defer func() {
 		// Re-read tmuxSocketParent so the MkdirAll-failure path that clears it

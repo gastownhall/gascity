@@ -4,9 +4,10 @@
 // names with a "gctest-" prefix, tracks created sessions, and guarantees
 // cleanup even on test failures. Three layers prevent orphan sessions:
 //
-//  1. Pre-sweep (TestMain): kill all gctest-* socket servers from prior crashes.
+//  1. Pre-sweep (TestMain): discover only sockets under the explicit private
+//     test parent; without one, cleanup is limited to this run's socket root.
 //  2. Per-test (t.Cleanup): kill sessions created by this guard.
-//  3. Post-sweep (TestMain defer): final sweep after all tests complete.
+//  3. Post-sweep (TestMain defer): final sweep within the same owned scope.
 //
 // All operations use isolated tmux socket roots and named gctest-* sockets so
 // tests never interfere with the user's running tmux server.
@@ -23,6 +24,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // tmuxGuardCommandTimeout bounds every tmux client invocation this package
@@ -203,7 +206,14 @@ func killTmuxServerAtSocket(socketPath string) error {
 func listTestSocketPaths() []string {
 	activeRoot := strings.TrimSpace(os.Getenv(tmuxTmpEnv))
 	if activeRoot != "" {
-		activeRoot = filepath.Clean(activeRoot)
+		activeRoot = pathutil.NormalizePathForCompare(activeRoot)
+	}
+	scopeRoot, scopeErr := SocketParentRootFromEnv("")
+	if scopeErr != nil {
+		return nil
+	}
+	if scopeRoot != "" && !tmuxSocketRootWithinScope(scopeRoot, activeRoot) {
+		return nil
 	}
 	now := time.Now()
 	uid := strconv.Itoa(os.Getuid())
@@ -214,7 +224,12 @@ func listTestSocketPaths() []string {
 			continue
 		}
 		for _, socketPath := range entries {
-			if root == activeRoot || testSocketPathIsStale(socketPath, now) {
+			if pathutil.SamePath(root, activeRoot) {
+				sockets = append(sockets, socketPath)
+				continue
+			}
+			_, liveSibling := aliveSentinelHeld(filepath.Dir(root))
+			if !liveSibling && testSocketPathIsStale(socketPath, now) {
 				sockets = append(sockets, socketPath)
 			}
 		}
@@ -246,18 +261,51 @@ func tmuxSocketSearchRoots() []string {
 		roots = append(roots, root)
 	}
 
-	activeRoot := os.Getenv(tmuxTmpEnv)
+	activeRoot := strings.TrimSpace(os.Getenv(tmuxTmpEnv))
+	if activeRoot == "" {
+		return roots
+	}
+	scopeRoot, err := SocketParentRootFromEnv("")
+	if err != nil {
+		return roots
+	}
+	activeRoot = pathutil.NormalizePathForCompare(activeRoot)
+	if filepath.Base(activeRoot) != "tmux" {
+		return roots
+	}
+	if scopeRoot != "" && !tmuxSocketRootWithinScope(scopeRoot, activeRoot) {
+		return roots
+	}
 	addRoot(activeRoot)
+	if scopeRoot == "" {
+		return roots
+	}
 	for _, pattern := range tmuxSocketRootPatterns(activeRoot) {
 		matches, err := filepath.Glob(pattern)
 		if err != nil {
 			continue
 		}
 		for _, match := range matches {
-			addRoot(match)
+			if tmuxSocketRootWithinScope(scopeRoot, match) {
+				addRoot(pathutil.NormalizePathForCompare(match))
+			}
 		}
 	}
 	return roots
+}
+
+func tmuxSocketRootWithinScope(scopeRoot, socketRoot string) bool {
+	scopeRoot = pathutil.NormalizePathForCompare(scopeRoot)
+	socketRoot = pathutil.NormalizePathForCompare(socketRoot)
+	if scopeRoot == "" || socketRoot == "" || filepath.Base(socketRoot) != "tmux" || !pathutil.PathWithin(scopeRoot, socketRoot) {
+		return false
+	}
+	rel, err := filepath.Rel(scopeRoot, socketRoot)
+	if err != nil {
+		return false
+	}
+	parts := strings.Split(filepath.Clean(rel), string(filepath.Separator))
+	return (len(parts) == 2 || (len(parts) == 3 && parts[1] == "runtime")) && parts[len(parts)-1] == "tmux"
 }
 
 func tmuxSocketRootPatterns(activeRoot string) []string {

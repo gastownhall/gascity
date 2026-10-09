@@ -34,9 +34,9 @@ func TestSweepOrphanPIDPrefixedDirsKillsLiveTmuxServerBeforeRemoval(t *testing.T
 
 	// Unix domain socket paths are capped at ~108 bytes (sizeof sun_path).
 	// t.TempDir() embeds the full test name and is too long for that limit,
-	// so this uses a short root directly under /tmp -- the same pattern
-	// (and the same path-length reason) production's own
-	// NewSocketParentDir("/tmp", ...) call sites use.
+	// so this uses a short private root directly under /tmp. Production test
+	// binaries use GC_TEST_TMUX_SOCKET_PARENT_ROOT when configured and retain
+	// /tmp only as a creation-only legacy fallback.
 	root, err := os.MkdirTemp("/tmp", "tmuxtest-orphan-")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)
