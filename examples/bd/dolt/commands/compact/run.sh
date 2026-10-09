@@ -134,6 +134,13 @@
 #   GC_DOLT_COMPACT_ONLY_DBS              (optional) — comma-separated list of
 #                                         database names to compact. When set,
 #                                         all other databases are skipped.
+#   GC_DOLT_COMPACT_LOCK_ROOT             (default: /tmp/gc-dolt-compact-<uid>)
+#                                         — private directory holding the
+#                                         per-Dolt-server (host:port) lock
+#                                         that keeps two compactions of one
+#                                         server from overlapping. The lock
+#                                         serializes only compactors of one
+#                                         Unix user on one host.
 #   GC_DOLT_MANAGED_LOCAL                 (optional) — 1 for gc-managed local
 #                                         runtime validation; 0 allows explicit
 #                                         loopback host/port targets and skips
@@ -473,7 +480,13 @@ if compact_dolt_host_is_local "$lock_host"; then
   lock_host="127.0.0.1"
 fi
 lock_key=$(printf '%s-%s' "$lock_host" "$GC_DOLT_PORT" | tr -c 'A-Za-z0-9_.-' '-')
-lock_root="/tmp/gc-dolt-compact"
+# The lock root is private (0700), so it must be per user: a single shared
+# /tmp/gc-dolt-compact belongs to whichever user created it first and every
+# other user's compactor would fail on it forever. The default deliberately
+# ignores TMPDIR and XDG_RUNTIME_DIR, which differ between a supervisor-run
+# order and an interactive `gc dolt compact`, so every invocation by the same
+# user agrees on one lock root.
+lock_root="${GC_DOLT_COMPACT_LOCK_ROOT:-/tmp/gc-dolt-compact-$(id -u)}"
 old_umask=$(umask)
 umask 077
 mkdir -p "$lock_root" || {
@@ -483,7 +496,7 @@ mkdir -p "$lock_root" || {
 }
 umask "$old_umask"
 chmod 700 "$lock_root" 2>/dev/null || {
-  printf 'compact: unable to secure lock directory %s\n' "$lock_root" >&2
+  printf 'compact: unable to secure lock directory %s (owned by another user?); set GC_DOLT_COMPACT_LOCK_ROOT to a directory this user owns\n' "$lock_root" >&2
   exit 1
 }
 lock_path="$lock_root/${lock_key}.lock"

@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1489,6 +1490,90 @@ func TestCompactScriptSkipsBelowThresholdWithoutFlattening(t *testing.T) {
 	if strings.Contains(string(data), "DOLT_RESET") || strings.Contains(string(data), "DOLT_COMMIT") {
 		t.Fatalf("below-threshold compact must not flatten:\n%s", data)
 	}
+}
+
+// holdCompactEndpointLock takes the flock a concurrent compactor would hold
+// for the fixture's Dolt endpoint under lockRoot, until the test ends.
+func holdCompactEndpointLock(t *testing.T, lockRoot string, port int) {
+	t.Helper()
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("flock not installed; the compact script falls back to its lock directory")
+	}
+	if err := os.MkdirAll(lockRoot, 0o700); err != nil {
+		t.Fatalf("mkdir lock root: %v", err)
+	}
+	lockPath := filepath.Join(lockRoot, fmt.Sprintf("127.0.0.1-%d.lock", port))
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatalf("open lock file: %v", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		t.Fatalf("flock %s: %v", lockPath, err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+		_ = os.Remove(lockPath)
+	})
+}
+
+// The default lock root is per user. A shared /tmp/gc-dolt-compact is owned
+// (mode 0700) by whichever user created it first, and every other user's
+// compactor then failed with "unable to secure lock directory" on every run.
+func TestCompactScriptDefaultLockRootIsPerUser(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	holdCompactEndpointLock(t, fmt.Sprintf("/tmp/gc-dolt-compact-%d", os.Getuid()), fixture.port)
+
+	out, err := fixture.run(t, "below_threshold", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("compact failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "another compaction already running") {
+		t.Fatalf("compact must serialize on the per-user lock root /tmp/gc-dolt-compact-<uid>:\n%s", out)
+	}
+}
+
+func TestCompactScriptLockRootOverride(t *testing.T) {
+	t.Run("held lock under the override skips", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		lockRoot := filepath.Join(t.TempDir(), "locks")
+		holdCompactEndpointLock(t, lockRoot, fixture.port)
+
+		out, err := fixture.run(t, "below_threshold",
+			"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+			"GC_DOLT_COMPACT_LOCK_ROOT="+lockRoot,
+		)
+		if err != nil {
+			t.Fatalf("compact failed: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "another compaction already running") {
+			t.Fatalf("compact must take its lock under GC_DOLT_COMPACT_LOCK_ROOT:\n%s", out)
+		}
+	})
+
+	t.Run("fresh override is created private", func(t *testing.T) {
+		fixture := newCompactScriptFixture(t)
+		lockRoot := filepath.Join(t.TempDir(), "locks")
+
+		out, err := fixture.run(t, "below_threshold",
+			"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+			"GC_DOLT_COMPACT_LOCK_ROOT="+lockRoot,
+		)
+		if err != nil {
+			t.Fatalf("compact failed: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "below_threshold=500") {
+			t.Fatalf("compact should run with a free lock:\n%s", out)
+		}
+		info, err := os.Stat(lockRoot)
+		if err != nil {
+			t.Fatalf("stat lock root: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o700 {
+			t.Fatalf("lock root mode = %o, want 700", got)
+		}
+	})
 }
 
 func TestCompactScriptDefaultThresholdIs2000(t *testing.T) {
