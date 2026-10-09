@@ -46,9 +46,10 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 }
 
 // pruneAgentHomeWorktreeIfSafe removes the worktree at the closed session's
-// worker_dir, after applying the same safety gates as doctor's
-// NestedWorktreePruneCheck. Returns true when the removal actually
-// happened.
+// worker_dir, after applying doctor's NestedWorktreePruneCheck safety gates
+// minus its repo-global stash probe (refs/stash is shared across worktrees
+// and survives `git worktree remove`; ga-pyp2oh). Returns true when the
+// removal actually happened.
 //
 // The decision is mechanical, never role-coupled: any pool-managed agent
 // worktree that lives under the city's .gc/worktrees/ tree, is a git
