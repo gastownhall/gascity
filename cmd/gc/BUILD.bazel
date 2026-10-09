@@ -1977,6 +1977,7 @@ go_test(
         "@io_opentelemetry_go_otel//attribute",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
+        "@net_pgregory_rapid//:rapid",
         "@org_golang_x_mod//semver",
     ] + select({
         "@rules_go//go/platform:android": [
