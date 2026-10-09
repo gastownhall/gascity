@@ -159,8 +159,13 @@ func TestWatchdogWorkflow_CheckoutIsTrustedBaseOnlyOrAbsent(t *testing.T) {
 			}
 			with, _ := step["with"].(map[string]any)
 			ref, _ := with["ref"].(string)
-			if ref != "${{ github.event.pull_request.base.sha }}" {
-				t.Fatalf("job %q checkout must pin ref to the PR base SHA only, got ref=%q", jobName, ref)
+			// The base branch by name (its tip): trusted content that carries
+			// the current .github/actions this workflow, also read from the
+			// base branch tip, uses. pull_request.base.sha is the PR's merge
+			// base, which for a long-lived PR predates those actions and fails
+			// the job before the watchdog runs.
+			if ref != "${{ github.event.pull_request.base.ref }}" {
+				t.Fatalf("job %q checkout must pin ref to the PR base branch (pull_request.base.ref) only, got ref=%q", jobName, ref)
 			}
 			persist, hasPersist := with["persist-credentials"].(bool)
 			if !hasPersist || persist {
