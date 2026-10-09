@@ -849,24 +849,47 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      # worker-env: pool workers serve the default branch's pin only, so a
+      # change that moves the pin cannot execute remotely before it merges
+      # (the lanes' worker-env preflight skips their remote suite for the
+      # same reason). Without this, gazelle's actions queue on a pin no worker
+      # serves until timeout-minutes cancels the job. A plain pin comparison:
+      # no API call, so it costs nothing against the installation rate limit.
+      - name: worker-env pin
+        id: pin
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          MODE: ${{ needs.rbe.outputs.mode }}
+        run: |
+          git fetch --no-tags --filter=blob:none origin "refs/heads/$DEFAULT_BRANCH"
+          git show FETCH_HEAD:platforms/BUILD.bazel >"$RUNNER_TEMP/worker-env-base.bazel" 2>/dev/null ||
+            : >"$RUNNER_TEMP/worker-env-base.bazel"
+          pin=$(tools/rbe/worker-env-drift pin)
+          base=$(tools/rbe/worker-env-drift pin "$RUNNER_TEMP/worker-env-base.bazel")
+          remote=false
+          if [ "$MODE" = remote ] && [ "$pin" = "$base" ]; then remote=true; fi
+          echo "remote=$remote" >> "$GITHUB_OUTPUT"
+          echo "worker-env: this checkout pins $pin, the default branch $base; mode=$MODE remote=$remote"
+        shell: bash
       # Same env as the lane job's "Set up Bazel" step: with no env at all
       # this job ran gazelle and GoStdlib locally on every PR (64 sandboxed
-      # actions). Mode remote gets the executor and the mint certificate;
-      # every other mode gets the read-only fork cache instead, with no
-      # mint certificate, so BUILD files in sync never needs rbe-fork-mint.
+      # actions). Mode remote on the default branch's pin gets the executor
+      # and the mint certificate; every other case gets the read-only fork
+      # cache instead, with no mint certificate, so BUILD files in sync never
+      # needs rbe-fork-mint.
       - name: Set up Bazel
         uses: ./.github/actions/setup-bazel
         env:
-          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
-          RBE_TLS_CERT: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CERT || '' }}
-          RBE_TLS_KEY: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_KEY || '' }}
-          RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
-          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode != 'remote' && 'true' || '' }}
+          BAZEL_REMOTE_EXECUTOR: ${{ steps.pin.outputs.remote == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ steps.pin.outputs.remote == 'true' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ steps.pin.outputs.remote == 'true' && secrets.RBE_TLS_KEY || '' }}
+          RBE_INSTANCE: ${{ steps.pin.outputs.remote == 'true' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ steps.pin.outputs.remote != 'true' && 'true' || '' }}
       - name: Restore the LLVM archive
         uses: ./.github/actions/llvm-archive-cache
       - name: BUILD files are in sync (gazelle + repo tree)
         env:
-          BAZEL_SYNC_FLAGS: ${{ needs.rbe.outputs.mode == 'remote' && '--config=remote-exec' || '--config=fork-cache' }}
+          BAZEL_SYNC_FLAGS: ${{ steps.pin.outputs.remote == 'true' && '--config=remote-exec' || '--config=fork-cache' }}
         run: |
           make bazel-sync
           git diff --exit-code || {
