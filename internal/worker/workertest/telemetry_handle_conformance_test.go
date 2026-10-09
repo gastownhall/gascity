@@ -145,7 +145,7 @@ func runtimeHandleInvocationDatapoints(t *testing.T) int {
 	}
 
 	const sessionName = "runtime-only-telemetry-probe"
-	handle, err := factory.RuntimeHandle(sessionName, "claude", "tmux-cli", []string{"claude"})
+	handle, err := factory.RuntimeHandle(sessionName, "claude", "claude", "tmux-cli", []string{"claude"})
 	if err != nil {
 		t.Fatalf("RuntimeHandle: %v", err)
 	}

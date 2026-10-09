@@ -557,7 +557,7 @@ func TestFactoryRuntimeHandleUsesConfiguredProviderAndRecorder(t *testing.T) {
 		t.Fatalf("NewFactory: %v", err)
 	}
 
-	handle, err := factory.RuntimeHandle("legacy-runtime-name", "claude", "tmux-cli", processNames)
+	handle, err := factory.RuntimeHandle("legacy-runtime-name", "claude", "claude", "tmux-cli", processNames)
 	if err != nil {
 		t.Fatalf("RuntimeHandle: %v", err)
 	}

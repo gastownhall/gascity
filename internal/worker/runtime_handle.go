@@ -21,24 +21,26 @@ var ErrOperationUnsupported = errors.New("worker operation is unsupported")
 // RuntimeHandleConfig configures a worker handle for a legacy runtime-only
 // session target that has no bead-backed session identity.
 type RuntimeHandleConfig struct {
-	Provider     runtime.Provider
-	SessionName  string
-	ProviderName string
-	Transport    string
-	ProcessNames []string
-	Recorder     events.Recorder
+	Provider       runtime.Provider
+	SessionName    string
+	ProviderName   string
+	ProviderFamily string
+	Transport      string
+	ProcessNames   []string
+	Recorder       events.Recorder
 }
 
 // RuntimeHandle adapts a legacy runtime session name to the canonical worker
 // interface so higher layers do not bypass internal/worker for lifecycle or
 // pending interaction operations.
 type RuntimeHandle struct {
-	provider     runtime.Provider
-	sessionName  string
-	providerName string
-	transport    string
-	processNames []string
-	recorder     events.Recorder
+	provider       runtime.Provider
+	sessionName    string
+	providerName   string
+	providerFamily string
+	transport      string
+	processNames   []string
+	recorder       events.Recorder
 }
 
 var _ Handle = (*RuntimeHandle)(nil)
@@ -56,12 +58,13 @@ func NewRuntimeHandle(cfg RuntimeHandleConfig) (*RuntimeHandle, error) {
 		recorder = events.Discard
 	}
 	return &RuntimeHandle{
-		provider:     cfg.Provider,
-		sessionName:  strings.TrimSpace(cfg.SessionName),
-		providerName: strings.TrimSpace(cfg.ProviderName),
-		transport:    strings.TrimSpace(cfg.Transport),
-		processNames: append([]string(nil), cfg.ProcessNames...),
-		recorder:     recorder,
+		provider:       cfg.Provider,
+		sessionName:    strings.TrimSpace(cfg.SessionName),
+		providerName:   strings.TrimSpace(cfg.ProviderName),
+		providerFamily: strings.TrimSpace(cfg.ProviderFamily),
+		transport:      strings.TrimSpace(cfg.Transport),
+		processNames:   append([]string(nil), cfg.ProcessNames...),
+		recorder:       recorder,
 	}, nil
 }
 
@@ -444,7 +447,7 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 	// property of the runtime rather than a transient miss. Reporting it as a
 	// bare Delivered:false is how `gc session nudge` came to print an
 	// unqualified success line for a delivery path that is a no-op end to end.
-	if h.providerName != "claude" {
+	if h.providerFamily != "claude" {
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredProviderUnsupported}, nil
 	}
 	waiter, ok := h.provider.(runtime.IdleWaitProvider)

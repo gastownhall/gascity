@@ -6150,6 +6150,48 @@ func TestDeliverSessionNudgeWaitIdleBusyTargetQueuesWithoutBlocking(t *testing.T
 	}
 }
 
+func TestDeliverSessionNudgeWaitIdleBusyDerivedClaudeQueuesWithoutBlocking(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.SetActivity("sess-worker", time.Now())
+	base := "builtin:claude"
+
+	target := nudgeTarget{
+		cityPath: dir,
+		cfg: &config.City{Providers: map[string]config.ProviderSpec{
+			"claude-custom": {Base: &base},
+		}},
+		agent:       config.Agent{Name: "worker"},
+		resolved:    &config.ResolvedProvider{Name: "claude-custom", BuiltinAncestor: "claude"},
+		sessionName: "sess-worker",
+	}
+
+	prev := startNudgePoller
+	startNudgePoller = func(string, string, string) error { return nil }
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("deliver = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Queued nudge for worker") {
+		t.Fatalf("stdout = %q, want queued for claude-custom (claude family)", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "never reached an idle boundary") {
+		t.Fatalf("stdout = %q, want busy-target downgrade for claude-custom (claude family)", stdout.String())
+	}
+	for _, call := range fake.Calls {
+		if call.Method == "WaitForIdle" {
+			t.Fatalf("claude-custom busy target must not block in WaitForIdle; calls = %#v", fake.Calls)
+		}
+	}
+}
+
 func TestDeliverSessionNudgeWaitIdleIdleTargetNotShortCircuited(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -6180,6 +6222,43 @@ func TestDeliverSessionNudgeWaitIdleIdleTargetNotShortCircuited(t *testing.T) {
 	}
 	if !sawWait {
 		t.Fatalf("idle target should consult WaitForIdle (not short-circuited); calls = %#v", fake.Calls)
+	}
+}
+
+func TestDeliverSessionNudgeWaitIdleIdleDerivedClaudeDeliversLive(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.SetActivity("sess-worker", time.Now().Add(-time.Hour))
+	fake.WaitForIdleErrors["sess-worker"] = nil
+	base := "builtin:claude"
+
+	target := nudgeTarget{
+		cityPath: dir,
+		cfg: &config.City{Providers: map[string]config.ProviderSpec{
+			"claude-custom": {Base: &base},
+		}},
+		agent:       config.Agent{Name: "worker"},
+		resolved:    &config.ResolvedProvider{Name: "claude-custom", BuiltinAncestor: "claude"},
+		sessionName: "sess-worker",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("deliver = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	sawWait := false
+	sawNudge := false
+	for _, call := range fake.Calls {
+		sawWait = sawWait || call.Method == "WaitForIdle"
+		sawNudge = sawNudge || call.Method == "NudgeNow"
+	}
+	if !sawWait || !sawNudge {
+		t.Fatalf("claude-custom must use live wait-idle delivery; calls = %#v", fake.Calls)
 	}
 }
 

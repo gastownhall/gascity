@@ -2461,6 +2461,7 @@ func startPreparedStartCandidate(
 			cfg,
 			name,
 			name,
+			name,
 			"",
 			nil,
 		)

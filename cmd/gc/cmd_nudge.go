@@ -262,6 +262,19 @@ func (t nudgeTarget) providerName() string {
 	return ""
 }
 
+func (t nudgeTarget) providerFamily() string {
+	if t.resolved != nil {
+		if family := strings.TrimSpace(t.resolved.BuiltinAncestor); family != "" {
+			return family
+		}
+	}
+	name := t.providerName()
+	if t.cfg != nil {
+		return strings.TrimSpace(config.BuiltinFamily(name, t.cfg.Providers))
+	}
+	return name
+}
+
 type queuedNudgeOptions struct {
 	ID                string
 	SessionID         string
@@ -1189,7 +1202,7 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	// live in-process and non-claude returns immediately (see
 	// internal/worker/runtime_handle.go nudgeWaitIdle), so short-circuiting
 	// those would needlessly downgrade live delivery to queued. (gco-90ui)
-	if mode == nudgeDeliveryWaitIdle && target.sessionTransport() != "acp" && target.providerName() == "claude" {
+	if mode == nudgeDeliveryWaitIdle && target.sessionTransport() != "acp" && target.providerFamily() == "claude" {
 		if obs, obsErr := nudgeObserveTarget(target, sessStore, sp); obsErr == nil && obs.Running && nudgeObservationBusy(obs) {
 			return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, worker.NudgeUndeliveredNoIdleBoundary, stdout, stderr)
 		}
@@ -1394,6 +1407,7 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 			target.cfg,
 			target.sessionName,
 			strings.TrimSpace(target.providerName()),
+			strings.TrimSpace(target.providerFamily()),
 			strings.TrimSpace(target.sessionTransport()),
 			nil,
 		)
@@ -1414,6 +1428,7 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 		target.cfg,
 		target.sessionName,
 		strings.TrimSpace(target.providerName()),
+		strings.TrimSpace(target.providerFamily()),
 		strings.TrimSpace(target.sessionTransport()),
 		nil,
 	)

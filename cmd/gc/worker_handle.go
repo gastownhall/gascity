@@ -474,7 +474,7 @@ func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, sto
 	if liveProvider, err := sp.GetMeta(target, "GC_PROVIDER"); err == nil && strings.TrimSpace(liveProvider) != "" {
 		providerName = strings.TrimSpace(liveProvider)
 	}
-	return factory.RuntimeHandle(target, providerName, "", processNames)
+	return factory.RuntimeHandle(target, providerName, providerName, "", processNames)
 }
 
 func runtimeWorkerHandleWithConfig(
@@ -484,6 +484,7 @@ func runtimeWorkerHandleWithConfig(
 	cfg *config.City,
 	sessionName string,
 	providerName string,
+	providerFamily string,
 	transport string,
 	processNames []string,
 ) (worker.Handle, error) {
@@ -491,7 +492,7 @@ func runtimeWorkerHandleWithConfig(
 	if err != nil {
 		return nil, err
 	}
-	return factory.RuntimeHandle(sessionName, providerName, transport, processNames)
+	return factory.RuntimeHandle(sessionName, providerName, providerFamily, transport, processNames)
 }
 
 func workerKillSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
