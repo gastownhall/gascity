@@ -35,6 +35,11 @@ func (f *freshObserver) ObserveLivenessWithError(string, []string) (runtime.Live
 	return f.l, f.err
 }
 
+// ObserveLivenessSince is its error-bearing read, fresh for any since.
+func (f *freshObserver) ObserveLivenessSince(name string, pn []string, _ time.Time) (runtime.Liveness, error) {
+	return f.ObserveLivenessWithError(name, pn)
+}
+
 func (f *freshObserver) GetAllEnvironment(name string) (map[string]string, error) {
 	if f.env == nil {
 		return nil, fmt.Errorf("no environment for %q", name)
@@ -149,9 +154,9 @@ func TestCreatingRowWithoutClaimHealedToAsleep(t *testing.T) {
 
 // Kills a heal that overwrites a newer incarnation: a rekey (the token
 // alone) or a PreWake (token and generation) landing after the pass read the
-// row refuses the heal on the re-decided basis, and one landing between the
-// effect's read and its CAS refuses on the CAS. The row keeps the new
-// incarnation, still creating.
+// row refuses the heal on its premise, and one landing between the effect's
+// read and its CAS loses the CAS, then the next attempt's premise. The row
+// keeps the new incarnation, still creating.
 func TestCreatingHealFencedOnToken(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -159,9 +164,9 @@ func TestCreatingHealFencedOnToken(t *testing.T) {
 		between bool
 		cause   string
 	}{
-		{"rekey after the pass", map[string]string{"instance_token": "tok-rekeyed"}, false, causeRedecided},
-		{"prewake after the pass", map[string]string{"instance_token": "tok-4", "generation": "4"}, false, causeRedecided},
-		{"prewake before the CAS", map[string]string{"instance_token": "tok-4", "generation": "4"}, true, causeCAS},
+		{"rekey after the pass", map[string]string{"instance_token": "tok-rekeyed"}, false, causePremise},
+		{"prewake after the pass", map[string]string{"instance_token": "tok-4", "generation": "4"}, false, causePremise},
+		{"prewake before the CAS", map[string]string{"instance_token": "tok-4", "generation": "4"}, true, causePremise},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newHealCase(t, livenessGone, desireNone, "state", "creating")

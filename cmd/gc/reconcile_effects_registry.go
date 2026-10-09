@@ -69,6 +69,6 @@ var effectSpecs = map[string]effectSpec{
 	intentRollback:        {class: capProbing, bootGated: true},
 	intentRowMetadata:     {class: capRowWrites},
 	intentBaseline:        {class: capRowWrites},
-	intentRowHeal:         {class: capRowWrites, sections: rowWriteSections}, // A6
-	intentRowHealFresh:    {class: capProbing, body: rowHealFreshBody},       // A6
+	intentRowHeal:         {class: capRowWrites, sections: rowWriteSections},                        // A6
+	intentRowHealFresh:    {class: capProbing, needs: needs{Runtime: true}, sections: healSections}, // A6
 }

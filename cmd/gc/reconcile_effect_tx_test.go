@@ -332,8 +332,7 @@ func TestEffectSpecsCoverEveryKind(t *testing.T) {
 	}
 	slices.Sort(running)
 	for kind, spec := range effectSpecs {
-		legacy := kind == intentRowHealFresh // C5d's own locks until A2b moves it onto runTx
-		if spec.body != nil && (kind != intentCreate && !legacy || spec.needs != (needs{}) || len(spec.sections) > 0) {
+		if spec.body != nil && (kind != intentCreate || spec.needs != (needs{}) || len(spec.sections) > 0) {
 			t.Errorf("%s: only the create has a body, and a body declares no needs or sections", kind)
 		}
 	}
