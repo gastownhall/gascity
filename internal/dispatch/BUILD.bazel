@@ -43,6 +43,7 @@ go_test(
         "control_retry_test.go",
         "control_selfclose_test.go",
         "control_test.go",
+        "crash_injection_test.go",
         "drain_conditional_test.go",
         "drain_test.go",
         "fanout_membership_test.go",
