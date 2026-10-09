@@ -9,150 +9,21 @@ import (
 	"testing"
 )
 
-func TestChangedStaticTargetsScopeLintAndFormattingToTheDiff(t *testing.T) {
-	t.Run("Go build-input suffix contract", func(t *testing.T) {
-		want := []string{
-			".go", ".c", ".cc", ".cpp", ".cxx", ".m", ".h", ".hh", ".hpp", ".hxx",
-			".f", ".F", ".for", ".f90", ".s", ".S", ".sx", ".swig", ".swigcxx", ".syso",
-		}
-		selector := filepath.Join(repoRoot(t), "scripts", "ci-static-select")
-		code := `import runpy
-import sys
-
-module = runpy.run_path(sys.argv[1], run_name="ci_static_select_contract")
-want = frozenset(sys.argv[2:])
-got = module["GO_BUILD_INPUT_SUFFIXES"]
-classify = module["is_go_build_input"]
-if got != want:
-    raise SystemExit(f"build-input suffixes = {sorted(got)!r}, want {sorted(want)!r}")
-if not all(classify("pkg/input" + suffix) for suffix in want):
-    raise SystemExit("a required build-input suffix was not classified")
-if any(classify(path) for path in ("README.md", "pkg/input.go.bak", "pkg/header.H")):
-    raise SystemExit("a non-build input was classified")
-`
-		args := append([]string{"-c", code, selector}, want...)
-		cmd := testCommand("python3", args...)
-		cmd.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1")
-		if output, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("verify Go build-input suffix contract: %v\n%s", err, output)
-		}
-	})
-
+func TestChangedFormattingScopesToTheDiff(t *testing.T) {
 	t.Run("changed Go file", func(t *testing.T) {
 		fixture := newPRStaticScopeFixture(t, map[string]string{
 			"alpha/alpha.go":     "package alpha\n\nfunc Value() int { return 1 }\n",
 			"alpha/unchanged.go": "package alpha\n\nfunc Unchanged() {}\n",
 			"beta/beta.go":       "package beta\n\nfunc Value() int { return 1 }\n",
-			"consumer/consumer.go": `package consumer
-
-import "example.com/static-scope/alpha"
-
-func Value() int { return alpha.Value() }
-`,
-			"README.md": "baseline\n",
+			"README.md":          "baseline\n",
 		})
 		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha.go"), "package alpha\n\nfunc Value() int { return 2 }\n")
-
-		fixture.resetCalls(t)
-		if output, err := fixture.runMakeTarget("lint-changed"); err != nil {
-			t.Errorf("lint-changed failed for one changed Go file: %v\n%s", err, output)
-		}
-		fixture.requireCalls(t, []string{"run", "./alpha"})
-		fixture.requireGoCalls(t)
-
-		fixture.resetCalls(t)
-		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
-			t.Errorf("lint-affected failed for one changed Go file: %v\n%s", err, output)
-		}
-		fixture.requireSingleRunCallWithUnorderedTail(t, "./alpha", "./consumer")
-		fixture.requireGoCalls(t, []string{"vet", "./alpha", "./consumer"})
 
 		fixture.resetCalls(t)
 		if output, err := fixture.runMakeTarget("fmt-check-changed"); err != nil {
 			t.Errorf("fmt-check-changed failed for one changed Go file: %v\n%s", err, output)
 		}
 		fixture.requireCalls(t, []string{"fmt", "--diff", "--", "alpha/alpha.go"})
-		fixture.requireGoCalls(t)
-	})
-
-	t.Run("transitive and test-only reverse dependents", func(t *testing.T) {
-		fixture := newPRStaticScopeFixture(t, map[string]string{
-			"alpha/alpha.go": "package alpha\n\nfunc Value() int { return 1 }\n",
-			"middle/middle.go": `package middle
-
-import "example.com/static-scope/alpha"
-
-func Value() int { return alpha.Value() }
-`,
-			"consumer/consumer.go": `package consumer
-
-import "example.com/static-scope/middle"
-
-func Value() int { return middle.Value() }
-`,
-			"internaltest/internaltest.go": "package internaltest\n\nfunc Value() int { return 1 }\n",
-			"internaltest/internaltest_test.go": `package internaltest
-
-import (
-	"testing"
-
-	"example.com/static-scope/alpha"
-)
-
-func TestValue(t *testing.T) { _ = alpha.Value() }
-`,
-			"externaltest/externaltest.go": "package externaltest\n\nfunc Value() int { return 1 }\n",
-			"externaltest/externaltest_test.go": `package externaltest_test
-
-import (
-	"testing"
-
-	"example.com/static-scope/alpha"
-)
-
-func TestValue(t *testing.T) { _ = alpha.Value() }
-`,
-			"unrelated/unrelated.go": "package unrelated\n\nfunc Value() int { return 1 }\n",
-		})
-		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha.go"), "package alpha\n\nfunc Value() int { return 2 }\n")
-
-		fixture.resetCalls(t)
-		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
-			t.Errorf("lint-affected failed for reverse-dependent graph: %v\n%s", err, output)
-		}
-		fixture.requireSingleRunCallWithUnorderedTail(t,
-			"./alpha",
-			"./consumer",
-			"./externaltest",
-			"./internaltest",
-			"./middle",
-		)
-		fixture.requireGoCalls(t, []string{
-			"vet",
-			"./alpha",
-			"./consumer",
-			"./externaltest",
-			"./internaltest",
-			"./middle",
-		})
-	})
-
-	t.Run("broken package graph falls back to full lint", func(t *testing.T) {
-		fixture := newPRStaticScopeFixture(t, map[string]string{
-			"alpha/alpha.go": "package alpha\n\nfunc Value() int { return 1 }\n",
-			"broken/broken.go": `package broken
-
-import _ "example.com/static-scope/missing"
-`,
-		})
-		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha.go"), "package alpha\n\nfunc Value() int { return 2 }\n")
-
-		fixture.resetCalls(t)
-		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
-			t.Errorf("lint-affected did not fail closed for a broken package graph: %v\n%s", err, output)
-		}
-		fixture.requireCalls(t, []string{"run", "./..."})
-		fixture.requireGoCalls(t, []string{"vet", "./..."})
 	})
 
 	t.Run("deleted Go file", func(t *testing.T) {
@@ -165,41 +36,10 @@ import _ "example.com/static-scope/missing"
 		}
 
 		fixture.resetCalls(t)
-		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
-			t.Errorf("lint-affected failed for a deleted Go file: %v\n%s", err, output)
-		}
-		fixture.requireCalls(t, []string{"run", "./alpha"})
-		fixture.requireGoCalls(t, []string{"vet", "./alpha"})
-
-		fixture.resetCalls(t)
 		if output, err := fixture.runMakeTarget("fmt-check-changed"); err != nil {
 			t.Errorf("fmt-check-changed failed for a deleted Go file: %v\n%s", err, output)
 		}
 		fixture.requireNoCalls(t)
-	})
-
-	t.Run("deleted nested Go file beneath ancestor embed falls back to full", func(t *testing.T) {
-		fixture := newPRStaticScopeFixture(t, map[string]string{
-			"alpha/alpha.go": `package alpha
-
-import "embed"
-
-//go:embed child/**
-var Data embed.FS
-`,
-			"alpha/child/delete.go": "package child\n\nfunc Delete() {}\n",
-			"alpha/child/keep.go":   "package child\n\nfunc Keep() {}\n",
-		})
-		if err := os.Remove(filepath.Join(fixture.repoRoot, "alpha", "child", "delete.go")); err != nil {
-			t.Fatalf("delete nested embedded Go file: %v", err)
-		}
-
-		fixture.resetCalls(t)
-		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
-			t.Errorf("lint-affected did not fail closed for a deleted nested embedded Go file: %v\n%s", err, output)
-		}
-		fixture.requireCalls(t, []string{"run", "./..."})
-		fixture.requireGoCalls(t, []string{"vet", "./..."})
 	})
 
 	t.Run("cross-package rename with a spaced file name", func(t *testing.T) {
@@ -231,18 +71,10 @@ func Moved() int {
 		}
 
 		fixture.resetCalls(t)
-		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
-			t.Errorf("lint-affected failed for a cross-package rename: %v\n%s", err, output)
-		}
-		fixture.requireSingleRunCallWithUnorderedTail(t, "./newpkg", "./oldpkg")
-		fixture.requireGoCalls(t, []string{"vet", "./newpkg", "./oldpkg"})
-
-		fixture.resetCalls(t)
 		if output, err := fixture.runMakeTarget("fmt-check-changed"); err != nil {
 			t.Errorf("fmt-check-changed failed for a cross-package rename: %v\n%s", err, output)
 		}
 		fixture.requireCalls(t, []string{"fmt", "--diff", "--", "newpkg/moved file.go"})
-		fixture.requireGoCalls(t)
 	})
 
 	t.Run("newline in changed file name", func(t *testing.T) {
@@ -257,348 +89,19 @@ func Moved() int {
 			t.Errorf("fmt-check-changed failed for a newline-containing file name: %v\n%s", err, output)
 		}
 		fixture.requireCalls(t, []string{"fmt", "--diff", "--", name})
-		fixture.requireGoCalls(t)
 	})
 
-	t.Run("invalid ref falls back to full static checks", func(t *testing.T) {
+	t.Run("invalid ref falls back to full formatting", func(t *testing.T) {
 		fixture := newPRStaticScopeFixture(t, map[string]string{
 			"alpha/alpha.go": "package alpha\n\nfunc Value() int { return 1 }\n",
 		})
 		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha.go"), "package alpha\n\nfunc Value() int { return 2 }\n")
-
-		fixture.resetCalls(t)
-		if output, err := fixture.runMakeTargetWithRef("lint-affected", "refs/heads/missing-static-base"); err != nil {
-			t.Errorf("lint-affected did not fail closed for an invalid ref: %v\n%s", err, output)
-		}
-		fixture.requireCalls(t, []string{"run", "./..."})
-		fixture.requireGoCalls(t, []string{"vet", "./..."})
 
 		fixture.resetCalls(t)
 		if output, err := fixture.runMakeTargetWithRef("fmt-check-changed", "refs/heads/missing-static-base"); err != nil {
 			t.Errorf("fmt-check-changed did not fail closed for an invalid ref: %v\n%s", err, output)
 		}
 		fixture.requireCalls(t, []string{"fmt", "--diff", "./..."})
-		fixture.requireGoCalls(t)
-	})
-
-	t.Run("affected vet checks unchanged generated reverse dependent", func(t *testing.T) {
-		fixture := newPRStaticScopeFixture(t, map[string]string{
-			"alpha/alpha.go": `package alpha
-
-func Printf(string, ...any) {}
-`,
-			"consumer/generated.go": `// Code generated by static-scope fixture. DO NOT EDIT.
-
-package consumer
-
-import "example.com/static-scope/alpha"
-
-func Use() { alpha.Printf("%d", "not-an-int") }
-`,
-		})
-		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha.go"), `package alpha
-
-import "fmt"
-
-func Printf(format string, args ...any) { fmt.Printf(format, args...) }
-`)
-
-		fixture.resetCalls(t)
-		output, err := fixture.runMakeTargetWithGo("lint-affected", fixture.realGo)
-		if err == nil {
-			t.Fatalf("lint-affected passed despite a new vet diagnostic in an unchanged generated reverse dependent:\n%s", output)
-		}
-		for _, marker := range []string{"consumer/generated.go", "format %d"} {
-			if !strings.Contains(output, marker) {
-				t.Errorf("affected vet output missing %q:\n%s", marker, output)
-			}
-		}
-		fixture.requireSingleRunCallWithUnorderedTail(t, "./alpha", "./consumer")
-		fixture.requireGoCalls(t)
-	})
-
-	t.Run("assembly-only diff selects its package", func(t *testing.T) {
-		fixture := newPRStaticScopeFixture(t, map[string]string{
-			"alpha/alpha.go": "package alpha\n\nfunc Value()\n",
-			"alpha/value.s":  "#include \"textflag.h\"\n\nTEXT ·Value(SB), NOSPLIT, $0-0\n\tRET\n",
-		})
-		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "value.s"), "#include \"textflag.h\"\n\n// changed\nTEXT ·Value(SB), NOSPLIT, $0-0\n\tRET\n")
-
-		fixture.resetCalls(t)
-		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
-			t.Errorf("lint-affected failed for an assembly-only diff: %v\n%s", err, output)
-		}
-		fixture.requireCalls(t, []string{"run", "./alpha"})
-		fixture.requireGoCalls(t, []string{"vet", "./alpha"})
-	})
-
-	t.Run("native include fragment selects its package and reverse dependents", func(t *testing.T) {
-		fixture := newPRStaticScopeFixture(t, map[string]string{
-			"alpha/alpha.go": "package alpha\n\nfunc Value()\n",
-			"alpha/value.s":  "#include \"../shared/defs.inc\"\n\nTEXT ·Value(SB), $0-0\n\tRET\n",
-			"consumer/consumer.go": `package consumer
-
-import "example.com/static-scope/alpha"
-
-func Value() { alpha.Value() }
-`,
-			"unrelated/unrelated.go": "package unrelated\n",
-			"shared/defs.inc":        "#define VALUE 1\n",
-		})
-		writeTestFile(t, filepath.Join(fixture.repoRoot, "shared", "defs.inc"), "#define VALUE 2\n")
-
-		fixture.resetCalls(t)
-		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
-			t.Errorf("lint-affected failed for a native include fragment: %v\n%s", err, output)
-		}
-		fixture.requireSingleRunCallWithUnorderedTail(t, "./alpha", "./consumer")
-		fixture.requireGoCalls(t, []string{"vet", "./alpha", "./consumer"})
-	})
-
-	for _, testCase := range []struct {
-		name          string
-		sharedPackage bool
-		wantPackages  []string
-	}{
-		{
-			name:          "recognized shared native header beside a Go package",
-			sharedPackage: true,
-			wantPackages:  []string{"./alpha", "./consumer", "./shared"},
-		},
-		{
-			name:         "recognized package-less shared native header",
-			wantPackages: []string{"./alpha", "./consumer"},
-		},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			files := map[string]string{
-				"alpha/alpha.go": "package alpha\n\nfunc Value()\n",
-				"alpha/value.s":  "#include \"../shared/defs.h\"\n\nTEXT ·Value(SB), $0-0\n\tRET\n",
-				"consumer/consumer.go": `package consumer
-
-import "example.com/static-scope/alpha"
-
-func Value() { alpha.Value() }
-`,
-				"shared/defs.h":          "#define VALUE 1\n",
-				"unrelated/unrelated.go": "package unrelated\n",
-			}
-			if testCase.sharedPackage {
-				files["shared/shared.go"] = "package shared\n"
-			}
-			fixture := newPRStaticScopeFixture(t, files)
-			writeTestFile(t, filepath.Join(fixture.repoRoot, "shared", "defs.h"), "#define VALUE 2\n")
-
-			fixture.resetCalls(t)
-			if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
-				t.Errorf("lint-affected failed for a recognized shared native header: %v\n%s", err, output)
-			}
-			fixture.requireSingleRunCallWithUnorderedTail(t, testCase.wantPackages...)
-			fixture.requireGoCalls(t, append([]string{"vet"}, testCase.wantPackages...))
-		})
-	}
-
-	t.Run("embedded file diff selects its package", func(t *testing.T) {
-		fixture := newPRStaticScopeFixture(t, map[string]string{
-			"alpha/alpha.go": `package alpha
-
-import _ "embed"
-
-//go:embed data.txt
-var Data string
-`,
-			"alpha/data.txt": "before\n",
-		})
-		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "data.txt"), "after\n")
-
-		fixture.resetCalls(t)
-		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
-			t.Errorf("lint-affected failed for an embedded-file diff: %v\n%s", err, output)
-		}
-		fixture.requireCalls(t, []string{"run", "./alpha"})
-		fixture.requireGoCalls(t, []string{"vet", "./alpha"})
-	})
-
-	t.Run("package discovery requests read-only module mode", func(t *testing.T) {
-		fixture := newPRStaticScopeFixture(t, map[string]string{
-			"alpha/alpha.go": "package alpha\n\nfunc Value() int { return 1 }\n",
-		})
-		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha.go"), "package alpha\n\nfunc Value() int { return 2 }\n")
-
-		strictGo := filepath.Join(t.TempDir(), "go")
-		writeExecutable(t, strictGo, `#!/bin/sh
-set -eu
-: "${STATIC_SCOPE_GO_LOG:?}"
-: "${STATIC_SCOPE_REAL_GO:?}"
-if [ "${1-}" = "list" ]; then
-  readonly=0
-  for arg in "$@"; do
-    if [ "$arg" = "-mod=readonly" ]; then
-      readonly=1
-    fi
-  done
-  if [ "$readonly" -ne 1 ]; then
-    echo "go list did not request -mod=readonly" >&2
-    exit 97
-  fi
-  exec "$STATIC_SCOPE_REAL_GO" "$@"
-fi
-if [ "${1-}" = "vet" ]; then
-  printf 'CALL\000' >> "$STATIC_SCOPE_GO_LOG"
-  for arg in "$@"; do
-    printf 'ARG\000%s\000' "$arg" >> "$STATIC_SCOPE_GO_LOG"
-  done
-  printf 'END\000' >> "$STATIC_SCOPE_GO_LOG"
-  exit 0
-fi
-exec "$STATIC_SCOPE_REAL_GO" "$@"
-`)
-
-		fixture.resetCalls(t)
-		if output, err := fixture.runMakeTargetWithGo("lint-affected", strictGo); err != nil {
-			t.Errorf("lint-affected failed with a read-only go list guard: %v\n%s", err, output)
-		}
-		fixture.requireCalls(t, []string{"run", "./alpha"})
-		fixture.requireGoCalls(t, []string{"vet", "./alpha"})
-	})
-
-	for _, testPackage := range []struct {
-		name        string
-		packageName string
-		fileName    string
-		dataName    string
-	}{
-		{name: "internal test embed", packageName: "alpha", fileName: "alpha_internal_test.go", dataName: "internal.txt"},
-		{name: "external test embed", packageName: "alpha_test", fileName: "alpha_external_test.go", dataName: "external.txt"},
-	} {
-		t.Run(testPackage.name, func(t *testing.T) {
-			fixture := newPRStaticScopeFixture(t, map[string]string{
-				"alpha/alpha.go": "package alpha\n",
-				filepath.Join("alpha", testPackage.fileName): "package " + testPackage.packageName + `
-
-import _ "embed"
-
-//go:embed testdata/` + testPackage.dataName + `
-var data string
-`,
-				filepath.Join("alpha", "testdata", testPackage.dataName): "before\n",
-			})
-			writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "testdata", testPackage.dataName), "after\n")
-
-			fixture.resetCalls(t)
-			if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
-				t.Errorf("lint-affected failed for a %s diff: %v\n%s", testPackage.name, err, output)
-			}
-			fixture.requireCalls(t, []string{"run", "./alpha"})
-			fixture.requireGoCalls(t, []string{"vet", "./alpha"})
-		})
-	}
-
-	t.Run("embedded file selects every owning package", func(t *testing.T) {
-		fixture := newPRStaticScopeFixture(t, map[string]string{
-			"alpha/alpha.go": `package alpha
-
-import _ "embed"
-
-//go:embed child/data.txt
-var Data string
-`,
-			"alpha/child/child.go": `package child
-
-import _ "embed"
-
-//go:embed data.txt
-var Data string
-`,
-			"alpha/child/data.txt": "before\n",
-		})
-		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "child", "data.txt"), "after\n")
-
-		fixture.resetCalls(t)
-		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
-			t.Errorf("lint-affected failed for a multiply owned embedded file: %v\n%s", err, output)
-		}
-		fixture.requireSingleRunCallWithUnorderedTail(t, "./alpha", "./alpha/child")
-		fixture.requireGoCalls(t, []string{"vet", "./alpha", "./alpha/child"})
-	})
-
-	t.Run("deleted required embedded file falls back to full", func(t *testing.T) {
-		fixture := newPRStaticScopeFixture(t, map[string]string{
-			"alpha/alpha.go": `package alpha
-
-import _ "embed"
-
-//go:embed data.txt
-var Data string
-`,
-			"alpha/data.txt": "before\n",
-		})
-		if err := os.Remove(filepath.Join(fixture.repoRoot, "alpha", "data.txt")); err != nil {
-			t.Fatalf("delete embedded fixture: %v", err)
-		}
-
-		fixture.resetCalls(t)
-		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
-			t.Errorf("lint-affected did not fail closed for a missing embedded file: %v\n%s", err, output)
-		}
-		fixture.requireCalls(t, []string{"run", "./..."})
-		fixture.requireGoCalls(t, []string{"vet", "./..."})
-	})
-
-	t.Run("deleted embedded glob member falls back to full", func(t *testing.T) {
-		fixture := newPRStaticScopeFixture(t, map[string]string{
-			"alpha/alpha.go": `package alpha
-
-import "embed"
-
-//go:embed data/*.txt
-var Data embed.FS
-`,
-			"alpha/data/first.txt":  "first\n",
-			"alpha/data/second.txt": "second\n",
-		})
-		if err := os.Remove(filepath.Join(fixture.repoRoot, "alpha", "data", "first.txt")); err != nil {
-			t.Fatalf("delete embedded glob member: %v", err)
-		}
-
-		fixture.resetCalls(t)
-		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
-			t.Errorf("lint-affected did not fail closed for a deleted embed glob member: %v\n%s", err, output)
-		}
-		fixture.requireCalls(t, []string{"run", "./..."})
-		fixture.requireGoCalls(t, []string{"vet", "./..."})
-	})
-
-	t.Run("deleted recognized embedded glob member falls back before native shortcut", func(t *testing.T) {
-		fixture := newPRStaticScopeFixture(t, map[string]string{
-			"alpha/alpha.go": `package alpha
-
-import "embed"
-
-//go:embed data/*.h
-var Data embed.FS
-`,
-			"alpha/data/first.h":  "#define FIRST 1\n",
-			"alpha/data/second.h": "#define SECOND 2\n",
-			"consumer/consumer.go": `package consumer
-
-import "example.com/static-scope/alpha"
-
-var Data = alpha.Data
-`,
-			"native/native.go": "package native\n\nfunc Value()\n",
-			"native/value.s":   "TEXT ·Value(SB), $0-0\n\tRET\n",
-		})
-		if err := os.Remove(filepath.Join(fixture.repoRoot, "alpha", "data", "first.h")); err != nil {
-			t.Fatalf("delete recognized embedded glob member: %v", err)
-		}
-
-		fixture.resetCalls(t)
-		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
-			t.Errorf("lint-affected did not fail closed before the native shortcut: %v\n%s", err, output)
-		}
-		fixture.requireCalls(t, []string{"run", "./..."})
-		fixture.requireGoCalls(t, []string{"vet", "./..."})
 	})
 
 	t.Run("changed Go symlink is not formatted", func(t *testing.T) {
@@ -630,225 +133,97 @@ var Data = alpha.Data
 		writeTestFile(t, filepath.Join(fixture.repoRoot, "README.md"), "documentation only\n")
 
 		fixture.resetCalls(t)
-		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
-			t.Errorf("lint-affected failed for a non-Go diff: %v\n%s", err, output)
-		}
-		fixture.requireNoCalls(t)
-
-		fixture.resetCalls(t)
 		if output, err := fixture.runMakeTarget("fmt-check-changed"); err != nil {
 			t.Errorf("fmt-check-changed failed for a non-Go diff: %v\n%s", err, output)
 		}
 		fixture.requireNoCalls(t)
-
-		if err := os.Remove(filepath.Join(fixture.repoRoot, "README.md")); err != nil {
-			t.Fatalf("delete non-Go fixture: %v", err)
-		}
-		fixture.resetCalls(t)
-		if output, err := fixture.runMakeTarget("lint-affected"); err != nil {
-			t.Errorf("lint-affected failed for a deleted non-build, non-embedded file: %v\n%s", err, output)
-		}
-		fixture.requireNoCalls(t)
 	})
 }
 
-func TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge(t *testing.T) {
-	classifier := filepath.Join(repoRoot(t), "scripts", "ci-static-scope")
-	body, err := os.ReadFile(classifier)
-	if err != nil {
-		t.Fatalf("read executable static-scope classifier: %v", err)
-	}
-	info, err := os.Stat(classifier)
-	if err != nil {
-		t.Fatalf("stat executable static-scope classifier: %v", err)
-	}
-	if info.Mode().Perm()&0o111 == 0 {
-		t.Fatalf("static-scope classifier mode = %o, want executable", info.Mode().Perm())
-	}
-	for _, protected := range []string{
-		"go.mod",
-		"go.sum",
-		"go.work",
-		"go.work.sum",
-		".golangci.",
-		"Makefile",
-		".github/workflows/",
-		".github/actions/",
-		".githooks/",
-		"vendor/",
-		"scripts/cipolicy/",
-		"scripts/ci-static-scope",
-		"scripts/ci-static-select",
-	} {
-		if !strings.Contains(string(body), protected) {
-			t.Errorf("static-scope protected paths must explicitly include %q", protected)
-		}
-	}
-	for _, unsafeBase := range []string{"origin/main", "merge-base"} {
-		if strings.Contains(string(body), unsafeBase) {
-			t.Errorf("static-scope classifier uses %q instead of validating the exact synthetic-merge base parent", unsafeBase)
-		}
-	}
+// TestLintChangedBuildsNogoForChangedBazelPackages pins the pre-commit lint
+// gate: the Bazel packages of the changed Go files are built for nogo's
+// output group only, so the same analyzers CI runs gate the commit without
+// linking binaries.
+func TestLintChangedBuildsNogoForChangedBazelPackages(t *testing.T) {
+	nogoBuild := []string{"build", "--keep_going", "--output_groups=nogo_fix"}
 
-	t.Run("ordinary synthetic pull request merge", func(t *testing.T) {
-		fixture, baseSHA := newSyntheticPRStaticScopeFixture(t, "")
-		fixture.requireClassification(t, classifier, "pull_request", baseSHA, "changed")
-	})
-
-	t.Run("protected configuration paths", func(t *testing.T) {
-		for _, protectedPath := range []string{
-			"go.mod",
-			"go.sum",
-			".golangci.json",
-			".golangci.toml",
-			".golangci.yaml",
-			".golangci.yml",
-			".github/actions/static-scope/action.yml",
-			".github/workflows/ci.yml",
-			".githooks/pre-commit",
-			"Makefile",
-			"go.work",
-			"go.work.sum",
-			"scripts/cipolicy/policy.go",
-			"vendor/example.com/dependency/file.go",
-			"scripts/ci-static-scope",
-			"scripts/ci-static-select",
-		} {
-			t.Run(strings.ReplaceAll(protectedPath, "/", "_"), func(t *testing.T) {
-				fixture, baseSHA := newSyntheticPRStaticScopeFixture(t, protectedPath)
-				fixture.requireClassification(t, classifier, "pull_request", baseSHA, "full")
-			})
-		}
-	})
-
-	t.Run("deleted protected path", func(t *testing.T) {
-		fixture, baseSHA := newSyntheticPRStaticScopeFixtureWithMutation(t, map[string]string{
-			"alpha/alpha.go": "package alpha\n\nfunc Value() int { return 1 }\n",
-			".golangci.yml":  "version: '2'\n",
-		}, func(t *testing.T, root string) {
-			if err := os.Remove(filepath.Join(root, ".golangci.yml")); err != nil {
-				t.Fatalf("delete protected fixture: %v", err)
-			}
-		})
-		fixture.requireClassification(t, classifier, "pull_request", baseSHA, "full")
-	})
-
-	t.Run("missing and wrong base", func(t *testing.T) {
-		fixture, baseSHA := newSyntheticPRStaticScopeFixture(t, "")
-		fixture.requireClassification(t, classifier, "pull_request", "", "full")
-		fixture.requireClassification(t, classifier, "pull_request", strings.Repeat("0", 40), "full")
-		wrongBase := strings.TrimSpace(runGitFixtureCommands(t, fixture.repoRoot, fixture.commandEnv(), "git rev-parse HEAD^2"))
-		if wrongBase == baseSHA {
-			t.Fatalf("wrong-base fixture unexpectedly equals synthetic merge base %s", baseSHA)
-		}
-		fixture.requireClassification(t, classifier, "pull_request", wrongBase, "full")
-	})
-
-	t.Run("missing shallow history", func(t *testing.T) {
-		fixture, baseSHA := newSyntheticPRStaticScopeFixture(t, "")
-		cloneRoot := filepath.Join(t.TempDir(), "shallow")
-		cmd := testCommand("git", "clone", "-q", "--depth=1", "file://"+fixture.repoRoot, cloneRoot)
-		cmd.Dir = fixture.repoRoot
-		cmd.Env = fixture.commandEnv()
-		if output, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("clone shallow fixture: %v\n%s", err, output)
-		}
-		shallow := fixture
-		shallow.repoRoot = cloneRoot
-		shallow.requireClassification(t, classifier, "pull_request", baseSHA, "full")
-	})
-
-	t.Run("pull request without a synthetic merge", func(t *testing.T) {
+	t.Run("changed Go files select their packages", func(t *testing.T) {
 		fixture := newPRStaticScopeFixture(t, map[string]string{
-			"alpha/alpha.go": "package alpha\n\nfunc Value() int { return 1 }\n",
+			"BUILD.bazel":         "",
+			"root.go":             "package root\n",
+			"alpha/BUILD.bazel":   "",
+			"alpha/alpha.go":      "package alpha\n\nfunc Value() int { return 1 }\n",
+			"alpha/alpha_test.go": "package alpha\n",
+			"beta/BUILD.bazel":    "",
+			"beta/beta.go":        "package beta\n",
 		})
-		baseSHA := strings.TrimSpace(runGitFixtureCommands(t, fixture.repoRoot, fixture.commandEnv(), "git rev-parse HEAD"))
-		fixture.requireClassification(t, classifier, "pull_request", baseSHA, "full")
-	})
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha.go"), "package alpha\n\nfunc Value() int { return 2 }\n")
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha_test.go"), "package alpha\n\n// changed\n")
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "root.go"), "package root\n\n// changed\n")
 
-	t.Run("non-pull-request and unknown events", func(t *testing.T) {
-		fixture, baseSHA := newSyntheticPRStaticScopeFixture(t, "")
-		for _, event := range []string{"push", "workflow_dispatch", "schedule", "unknown", ""} {
-			t.Run(eventNameForTest(event), func(t *testing.T) {
-				fixture.requireClassification(t, classifier, event, baseSHA, "full")
-			})
+		fixture.resetCalls(t)
+		if output, err := fixture.runMakeTarget("lint-changed"); err != nil {
+			t.Fatalf("lint-changed failed: %v\n%s", err, output)
 		}
+		fixture.requireBazelCalls(t, append(slices.Clone(nogoBuild), "//:all", "//alpha:all"))
 	})
-}
 
-func newSyntheticPRStaticScopeFixture(t *testing.T, protectedPath string) (prStaticScopeFixture, string) {
-	t.Helper()
-	return newSyntheticPRStaticScopeFixtureWithMutation(t, map[string]string{
-		"alpha/alpha.go": "package alpha\n\nfunc Value() int { return 1 }\n",
-		"README.md":      "baseline\n",
-	}, func(t *testing.T, root string) {
-		t.Helper()
-		if protectedPath == "" {
-			writeTestFile(t, filepath.Join(root, "alpha", "alpha.go"), "package alpha\n\nfunc Value() int { return 2 }\n")
-		} else {
-			writeTestFile(t, filepath.Join(root, protectedPath), "name: static-scope fixture\n")
+	t.Run("testdata Go files are not Bazel packages", func(t *testing.T) {
+		fixture := newPRStaticScopeFixture(t, map[string]string{
+			"alpha/BUILD.bazel":          "",
+			"alpha/testdata/fixture.go":  "package fixture\n",
+			"alpha/testdata/sub/deep.go": "package sub\n",
+		})
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "testdata", "fixture.go"), "package fixture\n\n// changed\n")
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "testdata", "sub", "deep.go"), "package sub\n\n// changed\n")
+
+		fixture.resetCalls(t)
+		if output, err := fixture.runMakeTarget("lint-changed"); err != nil {
+			t.Fatalf("lint-changed failed: %v\n%s", err, output)
 		}
+		fixture.requireBazelCalls(t)
 	})
-}
 
-func newSyntheticPRStaticScopeFixtureWithMutation(
-	t *testing.T,
-	files map[string]string,
-	mutate func(*testing.T, string),
-) (prStaticScopeFixture, string) {
-	t.Helper()
-	fixture := newPRStaticScopeFixture(t, files)
-	baseSHA := strings.TrimSpace(runGitFixtureCommands(t, fixture.repoRoot, fixture.commandEnv(), "git rev-parse HEAD"))
-	runGitFixtureCommands(t, fixture.repoRoot, fixture.commandEnv(), "git checkout -qb feature")
-	mutate(t, fixture.repoRoot)
-	runGitFixtureCommands(t, fixture.repoRoot, fixture.commandEnv(),
-		"git add -A",
-		"git commit -qm feature",
-		"git checkout -q main",
-		"git merge -q --no-ff feature -m synthetic-merge",
-	)
-	return fixture, baseSHA
-}
+	t.Run("package without BUILD file fails closed", func(t *testing.T) {
+		fixture := newPRStaticScopeFixture(t, map[string]string{
+			"alpha/alpha.go": "package alpha\n",
+		})
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha.go"), "package alpha\n\n// changed\n")
 
-func (f prStaticScopeFixture) requireClassification(t *testing.T, classifier, event, baseSHA, want string) {
-	t.Helper()
-	driver := filepath.Join(t.TempDir(), "classify.mk")
-	writeTestFile(t, driver, `.PHONY: classify
-classify:
-	@"$(CLASSIFIER)"
-`)
-	cmd := makeCommand(
-		"--no-print-directory",
-		"-f", driver,
-		"CLASSIFIER="+classifier,
-		"classify",
-	)
-	cmd.Dir = f.repoRoot
-	cmd.Env = append(f.commandEnv(), "EVENT_NAME="+event, "PR_BASE_SHA="+baseSHA)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("classify event %q base %q: %v\n%s", event, baseSHA, err, output)
-	}
-	if got := strings.TrimSpace(string(output)); got != want {
-		t.Fatalf("classify event %q base %q = %q, want %q", event, baseSHA, got, want)
-	}
-}
+		fixture.resetCalls(t)
+		output, err := fixture.runMakeTarget("lint-changed")
+		if err == nil {
+			t.Fatalf("lint-changed succeeded for a package without BUILD.bazel:\n%s", output)
+		}
+		if !strings.Contains(output, "make bazel-sync") {
+			t.Errorf("lint-changed error does not point at make bazel-sync:\n%s", output)
+		}
+		fixture.requireBazelCalls(t)
+	})
 
-func eventNameForTest(event string) string {
-	if event == "" {
-		return "empty"
-	}
-	return event
+	t.Run("non-Go diff", func(t *testing.T) {
+		fixture := newPRStaticScopeFixture(t, map[string]string{
+			"alpha/BUILD.bazel": "",
+			"alpha/alpha.go":    "package alpha\n",
+			"README.md":         "baseline\n",
+		})
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "README.md"), "documentation only\n")
+
+		fixture.resetCalls(t)
+		if output, err := fixture.runMakeTarget("lint-changed"); err != nil {
+			t.Fatalf("lint-changed failed for a non-Go diff: %v\n%s", err, output)
+		}
+		fixture.requireBazelCalls(t)
+	})
 }
 
 type prStaticScopeFixture struct {
 	repoRoot           string
 	productionMakefile string
 	fakeLint           string
-	fakeGo             string
+	fakeBazel          string
 	lintLog            string
-	goLog              string
-	realGo             string
+	bazelLog           string
 	homeDir            string
 }
 
@@ -866,42 +241,19 @@ func newPRStaticScopeFixture(t *testing.T, files map[string]string) prStaticScop
 
 	toolDir := t.TempDir()
 	lintLog := filepath.Join(toolDir, "golangci.calls")
-	goLog := filepath.Join(toolDir, "go.calls")
+	bazelLog := filepath.Join(toolDir, "bazel.calls")
 	fakeLint := filepath.Join(toolDir, "golangci-lint")
-	writeExecutable(t, fakeLint, `#!/bin/sh
-set -eu
-: "${STATIC_SCOPE_LINT_LOG:?}"
-printf 'CALL\000' >> "$STATIC_SCOPE_LINT_LOG"
-for arg in "$@"; do
-  printf 'ARG\000%s\000' "$arg" >> "$STATIC_SCOPE_LINT_LOG"
-done
-printf 'END\000' >> "$STATIC_SCOPE_LINT_LOG"
-`)
-	realGo := "go"
-	fakeGo := filepath.Join(toolDir, "go")
-	writeExecutable(t, fakeGo, `#!/bin/sh
-set -eu
-: "${STATIC_SCOPE_GO_LOG:?}"
-: "${STATIC_SCOPE_REAL_GO:?}"
-if [ "${1-}" = "vet" ]; then
-  printf 'CALL\000' >> "$STATIC_SCOPE_GO_LOG"
-  for arg in "$@"; do
-    printf 'ARG\000%s\000' "$arg" >> "$STATIC_SCOPE_GO_LOG"
-  done
-  printf 'END\000' >> "$STATIC_SCOPE_GO_LOG"
-  exit 0
-fi
-exec "$STATIC_SCOPE_REAL_GO" "$@"
-`)
+	writeExecutable(t, fakeLint, framedCallRecorder("STATIC_SCOPE_LINT_LOG"))
+	fakeBazel := filepath.Join(toolDir, "bazel")
+	writeExecutable(t, fakeBazel, framedCallRecorder("STATIC_SCOPE_BAZEL_LOG"))
 
 	fixture := prStaticScopeFixture{
 		repoRoot:           repo,
 		productionMakefile: filepath.Join(repoRoot(t), "Makefile"),
 		fakeLint:           fakeLint,
-		fakeGo:             fakeGo,
+		fakeBazel:          fakeBazel,
 		lintLog:            lintLog,
-		goLog:              goLog,
-		realGo:             realGo,
+		bazelLog:           bazelLog,
 		homeDir:            t.TempDir(),
 	}
 	setupMakefile := filepath.Join(t.TempDir(), "git-init.mk")
@@ -921,24 +273,30 @@ init:
 	return fixture
 }
 
+// framedCallRecorder is a fake tool that appends each invocation's arguments,
+// NUL-framed, to the log file named by logEnv.
+func framedCallRecorder(logEnv string) string {
+	return `#!/bin/sh
+set -eu
+: "${` + logEnv + `:?}"
+printf 'CALL\000' >> "$` + logEnv + `"
+for arg in "$@"; do
+  printf 'ARG\000%s\000' "$arg" >> "$` + logEnv + `"
+done
+printf 'END\000' >> "$` + logEnv + `"
+`
+}
+
 func (f prStaticScopeFixture) runMakeTarget(target string) (string, error) {
-	return f.runMakeTargetWithOptions(target, "HEAD", f.fakeGo)
+	return f.runMakeTargetWithRef(target, "HEAD")
 }
 
 func (f prStaticScopeFixture) runMakeTargetWithRef(target, ref string) (string, error) {
-	return f.runMakeTargetWithOptions(target, ref, f.fakeGo)
-}
-
-func (f prStaticScopeFixture) runMakeTargetWithGo(target, goTool string) (string, error) {
-	return f.runMakeTargetWithOptions(target, "HEAD", goTool)
-}
-
-func (f prStaticScopeFixture) runMakeTargetWithOptions(target, ref, goTool string) (string, error) {
 	cmd := makeCommand(
 		"--no-print-directory",
 		"-f", f.productionMakefile,
 		"GOLANGCI_LINT="+f.fakeLint,
-		"CI_STATIC_GO="+goTool,
+		"NOGO_BAZEL="+f.fakeBazel,
 		"LINT_CHANGED_SCOPE=tracked",
 		"LINT_CHANGED_REF="+ref,
 		"LINT_FLAGS=",
@@ -961,11 +319,8 @@ func (f prStaticScopeFixture) commandEnv() []string {
 			// type-checking tests); the real go must resolve its own.
 			name == "GOROOT" ||
 			name == "STATIC_SCOPE_LINT_LOG" ||
-			name == "STATIC_SCOPE_GO_LOG" ||
-			name == "STATIC_SCOPE_REAL_GO" ||
+			name == "STATIC_SCOPE_BAZEL_LOG" ||
 			name == "SYS_USR_CGO_FALLBACK" ||
-			name == "EVENT_NAME" ||
-			name == "PR_BASE_SHA" ||
 			name == "GOFLAGS" ||
 			name == "GOENV" ||
 			name == "GOWORK" ||
@@ -979,8 +334,7 @@ func (f prStaticScopeFixture) commandEnv() []string {
 	return append(env,
 		"HOME="+f.homeDir,
 		"STATIC_SCOPE_LINT_LOG="+f.lintLog,
-		"STATIC_SCOPE_GO_LOG="+f.goLog,
-		"STATIC_SCOPE_REAL_GO="+f.realGo,
+		"STATIC_SCOPE_BAZEL_LOG="+f.bazelLog,
 		"SYS_USR_CGO_FALLBACK=0",
 		"GOFLAGS=-mod=readonly",
 		"GOENV=off",
@@ -993,7 +347,7 @@ func (f prStaticScopeFixture) commandEnv() []string {
 
 func (f prStaticScopeFixture) resetCalls(t *testing.T) {
 	t.Helper()
-	for label, path := range map[string]string{"golangci": f.lintLog, "go": f.goLog} {
+	for label, path := range map[string]string{"golangci": f.lintLog, "bazel": f.bazelLog} {
 		if err := os.WriteFile(path, nil, 0o644); err != nil {
 			t.Fatalf("reset fake %s log: %v", label, err)
 		}
@@ -1005,9 +359,9 @@ func (f prStaticScopeFixture) calls(t *testing.T) [][]string {
 	return readFramedCalls(t, f.lintLog, "golangci")
 }
 
-func (f prStaticScopeFixture) goCalls(t *testing.T) [][]string {
+func (f prStaticScopeFixture) bazelCalls(t *testing.T) [][]string {
 	t.Helper()
-	return readFramedCalls(t, f.goLog, "go")
+	return readFramedCalls(t, f.bazelLog, "bazel")
 }
 
 func readFramedCalls(t *testing.T, path, label string) [][]string {
@@ -1060,60 +414,31 @@ func readFramedCalls(t *testing.T, path, label string) [][]string {
 
 func (f prStaticScopeFixture) requireCalls(t *testing.T, want ...[]string) {
 	t.Helper()
-	got := f.calls(t)
+	requireFramedCalls(t, "golangci", f.calls(t), want)
+}
+
+func (f prStaticScopeFixture) requireBazelCalls(t *testing.T, want ...[]string) {
+	t.Helper()
+	requireFramedCalls(t, "bazel", f.bazelCalls(t), want)
+}
+
+func requireFramedCalls(t *testing.T, label string, got, want [][]string) {
+	t.Helper()
 	if len(got) != len(want) {
-		t.Errorf("golangci calls = %v, want %v", got, want)
+		t.Errorf("%s calls = %v, want %v", label, got, want)
 		return
 	}
 	for i := range want {
 		if !slices.Equal(got[i], want[i]) {
-			t.Errorf("golangci call %d = %v, want %v", i, got[i], want[i])
+			t.Errorf("%s call %d = %v, want %v", label, i, got[i], want[i])
 		}
 	}
 }
 
 func (f prStaticScopeFixture) requireNoCalls(t *testing.T) {
 	t.Helper()
-	if got := f.calls(t); len(got) != 0 {
-		t.Errorf("golangci calls = %v, want no-op", got)
-	}
-	if got := f.goCalls(t); len(got) != 0 {
-		t.Errorf("go calls = %v, want no-op", got)
-	}
-}
-
-func (f prStaticScopeFixture) requireGoCalls(t *testing.T, want ...[]string) {
-	t.Helper()
-	got := f.goCalls(t)
-	if len(got) != len(want) {
-		t.Errorf("go calls = %v, want %v", got, want)
-		return
-	}
-	for i := range want {
-		if !slices.Equal(got[i], want[i]) {
-			t.Errorf("go call %d = %v, want %v", i, got[i], want[i])
-		}
-	}
-}
-
-func (f prStaticScopeFixture) requireSingleRunCallWithUnorderedTail(t *testing.T, wantTail ...string) {
-	t.Helper()
-	got := f.calls(t)
-	if len(got) != 1 || len(got[0]) == 0 {
-		t.Errorf("golangci calls = %v, want one run call with %v", got, wantTail)
-		return
-	}
-	if got[0][0] != "run" {
-		t.Errorf("golangci call = %v, want leading argument %q", got[0], "run")
-		return
-	}
-	gotTail := slices.Clone(got[0][1:])
-	wantSorted := slices.Clone(wantTail)
-	slices.Sort(gotTail)
-	slices.Sort(wantSorted)
-	if !slices.Equal(gotTail, wantSorted) {
-		t.Errorf("golangci run arguments = %v, want %v", got[0][1:], wantTail)
-	}
+	f.requireCalls(t)
+	f.requireBazelCalls(t)
 }
 
 func runGitFixtureCommands(t *testing.T, repo string, env []string, commands ...string) string {

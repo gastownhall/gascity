@@ -20,6 +20,11 @@ const defaultMultiplexerProviderTimeout = 2 * time.Second
 // 503 instead of 200 followed by an immediate EOF.
 var ErrNoWatchers = errors.New("events: no city watchers could be attached")
 
+// ErrMuxWatcherFinished reports that MuxWatcher.Sync was called on a watcher
+// that was closed, or whose city watchers have all ended. Such a watcher can
+// no longer deliver events, so it refuses to attach more cities.
+var ErrMuxWatcherFinished = errors.New("events: mux watcher is closed or finished")
+
 // TaggedEvent is an Event annotated with the city that produced it.
 type TaggedEvent struct {
 	Event
@@ -261,6 +266,7 @@ func (m *Multiplexer) LatestCursor() (map[string]uint64, error) {
 // Watch returns a Watcher that merges events from all currently registered
 // city providers. Events are yielded in approximate time order. The cursor
 // is a map of city→seq positions (use ParseCursor/FormatCursor to persist).
+// Use MuxWatcher.Sync to attach or detach cities after Watch returns.
 //
 // Returns ErrNoWatchers when providers are registered but none of them
 // could attach a watcher — callers use this to fail fast with 503
@@ -269,18 +275,20 @@ func (m *Multiplexer) Watch(ctx context.Context, cursors map[string]uint64) (*Mu
 	providers := m.snapshot()
 	childCtx, cancel := context.WithCancel(ctx)
 	w := &MuxWatcher{
-		ctx:    childCtx,
-		cancel: cancel,
-		ch:     make(chan TaggedEvent, 16),
-		done:   make(chan struct{}),
+		ctx:     childCtx,
+		cancel:  cancel,
+		ch:      make(chan TaggedEvent, 16),
+		done:    make(chan struct{}),
+		timeout: m.providerOperationTimeout(),
+		cities:  make(map[string]*muxCity),
+		holds:   1, // keep ch open until the initial attach completes
 	}
 
-	var wg sync.WaitGroup
 	attached := 0
-	timeout := m.providerOperationTimeout()
-	attachResults, timedOut := collectWatchAttachResults(childCtx, providers, cursors, timeout)
+	start := func(city string, _ Provider) (uint64, error) { return cursors[city], nil }
+	attachResults, timedOut := collectWatchAttachResults(childCtx, providers, start, w.timeout)
 	for _, city := range timedOut {
-		log.Printf("events: mux watcher attach timed out for city %q after %s", city, timeout)
+		log.Printf("events: mux watcher attach timed out for city %q after %s", city, w.timeout)
 	}
 	for _, result := range attachResults {
 		if result.err != nil {
@@ -290,58 +298,39 @@ func (m *Multiplexer) Watch(ctx context.Context, cursors map[string]uint64) (*Mu
 			log.Printf("events: mux watcher attach failed for city %q: %v", result.city, result.err)
 			continue
 		}
-		// Defensive: a Provider returning (nil, nil) would panic the goroutine below on Next().
-		if result.watcher == nil {
-			log.Printf("events: mux watcher attach failed for city %q: nil watcher", result.city)
+		if err := w.startCity(result); err != nil {
+			log.Printf("events: mux watcher attach failed for city %q: %v", result.city, err)
 			continue
 		}
 		attached++
-		wg.Add(1)
-		go func(city string, watcher Watcher) {
-			defer wg.Done()
-			defer watcher.Close() //nolint:errcheck
-			for {
-				e, err := watcher.Next()
-				if err != nil {
-					return
-				}
-				te := TaggedEvent{Event: e, City: city}
-				select {
-				case w.ch <- te:
-				case <-ctx.Done():
-					return
-				case <-w.done:
-					return
-				}
-			}
-		}(result.city, result.watcher)
 	}
 
 	if len(providers) > 0 && attached == 0 {
 		cancel()
-		close(w.ch)
+		w.release()
 		return nil, ErrNoWatchers
 	}
-
-	// Close the channel when all watchers finish.
-	go func() {
-		wg.Wait()
-		close(w.ch)
-	}()
-
+	w.release()
 	return w, nil
 }
 
 type watchAttachResult struct {
 	city    string
+	seq     uint64 // the watcher resumes after this seq
+	ctx     context.Context
+	cancel  context.CancelFunc
 	watcher Watcher
 	err     error
 }
 
+// collectWatchAttachResults attaches a watcher to every provider in parallel,
+// each under its own child context of ctx so it can be detached on its own.
+// start picks the seq each watcher resumes after. Providers that do not answer
+// within timeout are reported by name; their late watchers are closed.
 func collectWatchAttachResults(
 	ctx context.Context,
 	providers map[string]Provider,
-	cursors map[string]uint64,
+	start func(city string, p Provider) (uint64, error),
 	timeout time.Duration,
 ) ([]watchAttachResult, []string) {
 	if len(providers) == 0 {
@@ -356,14 +345,34 @@ func collectWatchAttachResults(
 	for city, p := range providers {
 		pending[city] = struct{}{}
 		go func(city string, p Provider) {
-			watcher, err := p.Watch(ctx, cursors[city])
-			result := watchAttachResult{city: city, watcher: watcher, err: err}
+			cityCtx, cityCancel := context.WithCancel(ctx)
+			result := watchAttachResult{city: city, ctx: cityCtx, cancel: cityCancel}
+			seq, err := start(city, p)
+			if err != nil {
+				result.err = fmt.Errorf("resolving start cursor: %w", err)
+			} else {
+				result.seq = seq
+				result.watcher, result.err = p.Watch(cityCtx, seq)
+				// Defensive: a Provider returning (nil, nil) would panic the
+				// fan-in goroutine on Next().
+				if result.err == nil && result.watcher == nil {
+					result.err = errors.New("nil watcher")
+				}
+			}
+			if result.err != nil {
+				if result.watcher != nil {
+					_ = result.watcher.Close()
+					result.watcher = nil
+				}
+				cityCancel()
+			}
 			select {
 			case ch <- result:
 			case <-abandoned:
-				if watcher != nil {
-					_ = watcher.Close()
+				if result.watcher != nil {
+					_ = result.watcher.Close()
 				}
+				cityCancel()
 			}
 		}(city, p)
 	}
@@ -389,12 +398,179 @@ func collectWatchAttachResults(
 
 // MuxWatcher yields tagged events from multiple cities. It implements
 // a subset of Watcher but returns TaggedEvent instead of Event.
+//
+// The set of watched cities is not fixed: Sync attaches cities that appeared
+// after Watch and detaches cities that went away. Next reports that all
+// watchers finished once no city is attached and no Sync is in progress.
 type MuxWatcher struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	ch        chan TaggedEvent
 	done      chan struct{}
 	closeOnce sync.Once
+	timeout   time.Duration
+
+	mu       sync.Mutex
+	cities   map[string]*muxCity // attached cities by name
+	active   int                 // running fan-in goroutines
+	holds    int                 // in-progress attaches that keep ch open
+	finished bool                // ch is closed
+}
+
+// muxCity is one attached city's fan-in goroutine.
+type muxCity struct {
+	cancel context.CancelFunc
+}
+
+// startCity registers an attached city and starts its fan-in goroutine. It
+// takes ownership of result's watcher and context, releasing them when the
+// city cannot be started.
+func (w *MuxWatcher) startCity(result watchAttachResult) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var err error
+	switch {
+	case w.finished || w.isClosed():
+		err = ErrMuxWatcherFinished
+	case w.cities[result.city] != nil:
+		err = fmt.Errorf("city %q is already attached", result.city)
+	}
+	if err != nil {
+		_ = result.watcher.Close()
+		result.cancel()
+		return err
+	}
+	c := &muxCity{cancel: result.cancel}
+	w.cities[result.city] = c
+	w.active++
+	go w.pump(result.ctx, result.city, c, result.watcher)
+	return nil
+}
+
+// pump forwards one city's events into the merged channel until its watcher
+// ends, the city is detached, or the MuxWatcher is closed.
+func (w *MuxWatcher) pump(ctx context.Context, city string, c *muxCity, watcher Watcher) {
+	defer w.cityDone(city, c)
+	defer watcher.Close() //nolint:errcheck
+	for {
+		e, err := watcher.Next()
+		if err != nil {
+			if ctx.Err() == nil && !w.isClosed() {
+				log.Printf("events: mux watcher for city %q ended: %v", city, err)
+			}
+			return
+		}
+		select {
+		case w.ch <- TaggedEvent{Event: e, City: city}:
+		case <-ctx.Done():
+			return
+		case <-w.done:
+			return
+		}
+	}
+}
+
+func (w *MuxWatcher) cityDone(city string, c *muxCity) {
+	c.cancel()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.cities[city] == c {
+		delete(w.cities, city)
+	}
+	w.active--
+	w.finishIfIdleLocked()
+}
+
+// release drops an attach hold taken by Watch or Sync.
+func (w *MuxWatcher) release() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.holds--
+	w.finishIfIdleLocked()
+}
+
+// finishIfIdleLocked closes the merged channel once no fan-in goroutine is
+// running and no attach is in progress, so Next reports that all watchers
+// finished. PRECONDITION: w.mu is held.
+func (w *MuxWatcher) finishIfIdleLocked() {
+	if w.active == 0 && w.holds == 0 && !w.finished {
+		w.finished = true
+		close(w.ch)
+	}
+}
+
+func (w *MuxWatcher) isClosed() bool {
+	select {
+	case <-w.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// Cities returns the names of the currently attached cities, sorted.
+func (w *MuxWatcher) Cities() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	names := make([]string, 0, len(w.cities))
+	for name := range w.cities {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// Sync reconciles the watched cities with providers. Attached cities missing
+// from providers are detached: their watcher is closed and their goroutine
+// exits. Providers whose city is not attached — new cities, or cities whose
+// watcher ended — are attached, each resuming after the seq start returns for
+// it. Cities already attached are left alone.
+//
+// Sync returns the start seq of every city it attached. Cities that could not
+// be attached are reported in the joined error and stay detached, so a later
+// Sync retries them; the cities that did attach are unaffected. It returns
+// ErrMuxWatcherFinished, attaching nothing, when the watcher was closed or all
+// its city watchers had already ended.
+func (w *MuxWatcher) Sync(providers map[string]Provider, start func(city string, p Provider) (uint64, error)) (map[string]uint64, error) {
+	w.mu.Lock()
+	if w.finished || w.isClosed() {
+		w.mu.Unlock()
+		return nil, ErrMuxWatcherFinished
+	}
+	w.holds++
+	for city, c := range w.cities {
+		if _, ok := providers[city]; !ok {
+			delete(w.cities, city)
+			c.cancel()
+		}
+	}
+	missing := make(map[string]Provider)
+	for city, p := range providers {
+		if _, ok := w.cities[city]; !ok {
+			missing[city] = p
+		}
+	}
+	w.mu.Unlock()
+	defer w.release()
+
+	var errs []error
+	results, timedOut := collectWatchAttachResults(w.ctx, missing, start, w.timeout)
+	for _, city := range timedOut {
+		errs = append(errs, fmt.Errorf("%s: events watcher attach timed out after %s", city, w.timeout))
+	}
+	started := make(map[string]uint64, len(results))
+	for _, result := range results {
+		if result.err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", result.city, result.err))
+			continue
+		}
+		if err := w.startCity(result); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", result.city, err))
+			continue
+		}
+		started[result.city] = result.seq
+	}
+	return started, errors.Join(errs...)
 }
 
 // Next blocks until the next tagged event is available or the context

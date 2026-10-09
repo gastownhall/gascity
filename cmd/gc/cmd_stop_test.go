@@ -4,19 +4,25 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -85,7 +91,7 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	var controllerStdout, controllerStderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
+		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &controllerStdout, &controllerStderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -264,7 +270,7 @@ func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
 	var controllerStdout, controllerStderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
+		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &controllerStdout, &controllerStderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -340,7 +346,7 @@ func TestCmdStopForceEscalatesInProgressControllerStop(t *testing.T) {
 	var controllerStdout, controllerStderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
+		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &controllerStdout, &controllerStderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -900,15 +906,164 @@ func TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails(t *testin
 	if !strings.Contains(stderr.String(), "restored registration for 'invalid-supervisor-city'") {
 		t.Fatalf("stderr = %q, want registration rollback after managed-provider stop failure", stderr.String())
 	}
+	if probeControllerLockHeld(t, cityDir) {
+		t.Fatal("controller lock still held after failed gc stop restored the registration")
+	}
+}
+
+// After the supervisor stops a registered city's controller, gc stop must keep
+// the controller lock until the city's bead store is retired, so the
+// supervisor (or anything else) cannot bring a controller back up against it.
+func TestCmdStopSupervisorManagedCityHoldsControllerLockThroughProviderShutdown(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// aliveCalls is how many supervisorAliveHook calls see a live
+		// supervisor; later calls see it gone.
+		aliveCalls int
+	}{
+		{name: "supervisor stays up", aliveCalls: -1},
+		// The supervisor exiting after the unregister must not send gc stop
+		// down the standalone path, which would wait on the lock it holds.
+		{name: "supervisor exits after unregister", aliveCalls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetFlags(t)
+			cityDir := setupInvalidConfigManagedRuntime(t)
+			reg := registryAt(t, os.Getenv("GC_HOME"))
+			if err := reg.Register(cityDir, "invalid-supervisor-city"); err != nil {
+				t.Fatal(err)
+			}
+
+			var aliveCalls atomic.Int32
+			withSupervisorTestHooks(
+				t,
+				func(_, _ io.Writer) int { return 0 },
+				func(_, _ io.Writer) int { return 0 },
+				func() int {
+					n := aliveCalls.Add(1)
+					if tc.aliveCalls >= 0 && int(n) > tc.aliveCalls {
+						return 0
+					}
+					return 4242
+				},
+				func(string) (bool, string, bool) { return false, "", true },
+				20*time.Millisecond,
+				time.Millisecond,
+			)
+			var waited int
+			waitForSupervisorControllerStopHook = func(path string, _ time.Duration) error {
+				waited++
+				assertSameTestPath(t, path, cityDir)
+				return nil
+			}
+			var shutdowns int
+			heldDuringShutdown := false
+			overrideShutdownBeadsProviderForStop(t, func(path string) error {
+				shutdowns++
+				assertSameTestPath(t, path, cityDir)
+				heldDuringShutdown = probeControllerLockHeld(t, path)
+				return nil
+			})
+
+			var stdout, stderr lockedBuffer
+			code := cmdStop([]string{cityDir}, &stdout, &stderr, 0, false)
+			if code != 0 {
+				t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if waited != 1 {
+				t.Fatalf("supervisor controller-stop waits = %d, want 1", waited)
+			}
+			if shutdowns != 1 {
+				t.Fatalf("provider shutdown calls = %d, want 1", shutdowns)
+			}
+			if !heldDuringShutdown {
+				t.Fatal("controller lock was released before the supervisor-managed city's provider shutdown")
+			}
+			if probeControllerLockHeld(t, cityDir) {
+				t.Fatal("controller lock still held after gc stop returned")
+			}
+			entries, err := reg.List()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("registry after successful stop = %v, want committed removal", entries)
+			}
+		})
+	}
+}
+
+// If a controller grabs the lock between the supervisor-side stop wait and gc
+// stop claiming it, gc stop must not retire the bead store under that
+// controller, and must hand the registration back.
+func TestCmdStopSupervisorManagedCityFailsClosedWhenControllerRestartsBeforeClaim(t *testing.T) {
+	resetFlags(t)
+	cityDir := setupInvalidConfigManagedRuntime(t)
+	reg := registryAt(t, os.Getenv("GC_HOME"))
+	if err := reg.Register(cityDir, "invalid-supervisor-city"); err != nil {
+		t.Fatal(err)
+	}
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 4242 },
+		func(string) (bool, string, bool) { return false, "", true },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+	var restarted *os.File
+	t.Cleanup(func() {
+		if restarted != nil {
+			_ = restarted.Close()
+		}
+	})
+	waitForSupervisorControllerStopHook = func(path string, _ time.Duration) error {
+		lock, err := acquireControllerLock(path)
+		if err != nil {
+			return err
+		}
+		restarted = lock
+		return nil
+	}
+	var shutdowns int
+	overrideShutdownBeadsProviderForStop(t, func(string) error {
+		shutdowns++
+		return nil
+	})
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, 0, false)
+	if code != 1 {
+		t.Fatalf("cmdStop() = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if shutdowns != 0 {
+		t.Fatalf("provider shutdown calls = %d, want 0 while another controller holds the lock", shutdowns)
+	}
+	if !strings.Contains(stderr.String(), "a controller started for the city") {
+		t.Fatalf("stderr = %q, want controller-restart error", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "restored registration for 'invalid-supervisor-city'") {
+		t.Fatalf("stderr = %q, want registration rollback", stderr.String())
+	}
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("registry after fail-closed stop = %v, want original entry restored", entries)
+	}
 }
 
 func TestCmdStopInvalidConfigManagedRuntimeStopsAfterVerifiedShutdown(t *testing.T) {
 	resetFlags(t)
 	cityDir := setupInvalidConfigManagedRuntime(t)
 	var shutdowns int
+	heldDuringShutdown := false
 	overrideShutdownBeadsProviderForStop(t, func(path string) error {
 		shutdowns++
 		assertSameTestPath(t, path, cityDir)
+		heldDuringShutdown = probeControllerLockHeld(t, path)
 		return nil
 	})
 
@@ -926,6 +1081,12 @@ func TestCmdStopInvalidConfigManagedRuntimeStopsAfterVerifiedShutdown(t *testing
 	if shutdowns != 1 {
 		t.Fatalf("shutdown calls = %d, want 1", shutdowns)
 	}
+	if !heldDuringShutdown {
+		t.Fatal("controller lock was released between the absence probe and managed provider shutdown")
+	}
+	if probeControllerLockHeld(t, cityDir) {
+		t.Fatal("controller lock still held after gc stop returned")
+	}
 }
 
 func TestCmdStopInvalidConfigManagedRuntimeStopsStandaloneController(t *testing.T) {
@@ -933,9 +1094,11 @@ func TestCmdStopInvalidConfigManagedRuntimeStopsStandaloneController(t *testing.
 	cityDir := setupInvalidConfigManagedRuntime(t)
 	stopCommands := startAcknowledgingStandaloneController(t, cityDir)
 	var shutdowns int
+	heldDuringShutdown := false
 	overrideShutdownBeadsProviderForStop(t, func(path string) error {
 		shutdowns++
 		assertSameTestPath(t, path, cityDir)
+		heldDuringShutdown = probeControllerLockHeld(t, path)
 		return nil
 	})
 
@@ -958,6 +1121,12 @@ func TestCmdStopInvalidConfigManagedRuntimeStopsStandaloneController(t *testing.
 	}
 	if shutdowns != 1 {
 		t.Fatalf("shutdown calls = %d, want 1", shutdowns)
+	}
+	if !heldDuringShutdown {
+		t.Fatal("controller lock was released before managed provider shutdown")
+	}
+	if probeControllerLockHeld(t, cityDir) {
+		t.Fatal("controller lock still held after gc stop returned")
 	}
 	if !strings.Contains(stdout.String(), "Controller stopping...") {
 		t.Fatalf("stdout missing controller stop message: %q", stdout.String())
@@ -1399,7 +1568,7 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 	var controllerStdout, controllerStderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, filepath.Join(dir, "city.toml"), cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
+		runController(dir, nil, filepath.Join(dir, "city.toml"), cfg, "", buildFn, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &controllerStdout, &controllerStderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -1525,4 +1694,875 @@ func TestStopHelpDocumentsSupervisorUnregisterBehavior(t *testing.T) {
 	if !strings.Contains(long, "unregister") {
 		t.Fatalf("gc stop --help does not mention unregistering a supervisor-managed city; Long=%q", cmd.Long)
 	}
+}
+
+// probeControllerLockHeld reports whether some other owner holds the city's
+// controller lock right now, releasing the probe when it was free.
+func probeControllerLockHeld(t *testing.T, cityPath string) bool {
+	t.Helper()
+	lock, err := acquireControllerLock(cityPath)
+	switch {
+	case err == nil:
+		_ = lock.Close()
+		return false
+	case errors.Is(err, errControllerAlreadyRunning):
+		return true
+	default:
+		t.Errorf("probing controller lock: %v", err)
+		return false
+	}
+}
+
+func acknowledgedControllerStopCity(t *testing.T, name string) (string, *config.City) {
+	t.Helper()
+	cityDir := setupCity(t, name)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: name},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+	}
+	return cityDir, cfg
+}
+
+// A controller that acknowledged "stop" and exited leaves gc stop as the only
+// party entitled to the city until the bead store is retired. gc stop must
+// hold the controller lock through that shutdown and release it afterwards,
+// including when the shutdown fails.
+func TestCmdStopBodyHoldsControllerLockThroughProviderShutdown(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		shutdownErr error
+	}{
+		{name: "shutdown succeeds"},
+		{name: "shutdown fails", shutdownErr: errors.New("provider-stop-failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir, cfg := acknowledgedControllerStopCity(t, "ack-stop-ownership")
+			startAcknowledgingStandaloneController(t, cityDir)
+
+			var shutdowns int
+			heldDuringShutdown := false
+			overrideShutdownBeadsProviderForStop(t, func(path string) error {
+				shutdowns++
+				assertSameTestPath(t, path, cityDir)
+				heldDuringShutdown = probeControllerLockHeld(t, path)
+				return tc.shutdownErr
+			})
+
+			var stdout, stderr lockedBuffer
+			code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr)
+
+			if code != 0 {
+				t.Fatalf("cmdStopBody() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if shutdowns != 1 {
+				t.Fatalf("provider shutdown calls = %d, want 1", shutdowns)
+			}
+			if !heldDuringShutdown {
+				t.Fatal("controller lock was released before bead-store provider shutdown")
+			}
+			if probeControllerLockHeld(t, cityDir) {
+				t.Fatal("controller lock still held after gc stop returned")
+			}
+			if tc.shutdownErr != nil && !strings.Contains(stderr.String(), "provider-stop-failed") {
+				t.Fatalf("stderr = %q, want provider shutdown warning", stderr.String())
+			}
+		})
+	}
+}
+
+// Regression for the stop/restart race: a replacement controller (supervisor
+// restart, second gc start) spinning on the controller lock must not win it
+// while gc stop is retiring the bead store, and must win it once gc stop is
+// done.
+func TestCmdStopBodyReplacementControllerCannotAcquireLockDuringProviderShutdown(t *testing.T) {
+	cityDir, cfg := acknowledgedControllerStopCity(t, "ack-stop-race")
+	startAcknowledgingStandaloneController(t, cityDir)
+
+	shutdownEntered := make(chan struct{})
+	replacementAcquired := make(chan struct{})
+	var shutdownDone atomic.Bool
+	var acquiredBeforeShutdownDone atomic.Bool
+	stopReplacement := make(chan struct{})
+	replacementDone := make(chan struct{})
+	go func() {
+		defer close(replacementDone)
+		select {
+		case <-shutdownEntered:
+		case <-stopReplacement:
+			return
+		}
+		for {
+			lock, err := acquireControllerLock(cityDir)
+			if err == nil {
+				acquiredBeforeShutdownDone.Store(!shutdownDone.Load())
+				_ = lock.Close()
+				close(replacementAcquired)
+				return
+			}
+			if !errors.Is(err, errControllerAlreadyRunning) {
+				t.Errorf("replacement controller lock: %v", err)
+				return
+			}
+			select {
+			case <-stopReplacement:
+				return
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		close(stopReplacement)
+		<-replacementDone
+	})
+
+	overrideShutdownBeadsProviderForStop(t, func(string) error {
+		close(shutdownEntered)
+		// Give the replacement a real window to race the shutdown; on the
+		// unfixed stop path it wins the lock here immediately.
+		select {
+		case <-replacementAcquired:
+		case <-time.After(200 * time.Millisecond):
+		}
+		shutdownDone.Store(true)
+		return nil
+	})
+
+	var stdout, stderr lockedBuffer
+	code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdStopBody() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+
+	awaitClose(t, replacementAcquired, "replacement controller to acquire the lock after gc stop returned")
+	if acquiredBeforeShutdownDone.Load() {
+		t.Fatal("replacement controller acquired the controller lock while gc stop was retiring the bead store")
+	}
+}
+
+// Ownership is only handed out once no other owner holds the lock; a
+// controller that still (or again) holds it makes the wait fail closed with
+// nothing held, and the returned lock excludes every other acquirer until it
+// is closed.
+func TestAcquireStoppedControllerOwnership(t *testing.T) {
+	cityDir := setupCity(t, "stopped-controller-ownership")
+
+	other, err := acquireControllerLock(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireStoppedControllerOwnership(cityDir, 100*time.Millisecond)
+	if err == nil {
+		_ = lock.Close()
+		t.Fatal("acquireStoppedControllerOwnership succeeded while another owner held the controller lock")
+	}
+	if !strings.Contains(err.Error(), "timed out waiting") {
+		t.Fatalf("error = %v, want controller-stop timeout", err)
+	}
+	if lock != nil {
+		t.Fatal("acquireStoppedControllerOwnership returned a lock alongside an error")
+	}
+	_ = other.Close()
+
+	lock, err = acquireStoppedControllerOwnership(cityDir, time.Second)
+	if err != nil {
+		t.Fatalf("acquireStoppedControllerOwnership() error = %v", err)
+	}
+	if !probeControllerLockHeld(t, cityDir) {
+		_ = lock.Close()
+		t.Fatal("acquireStoppedControllerOwnership returned without holding the controller lock")
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if probeControllerLockHeld(t, cityDir) {
+		t.Fatal("controller lock still held after closing ownership")
+	}
+}
+
+// inventoryStopProvider is a runtime.Fake whose ListRunning answer and
+// per-session liveness observation can be made to fail, modeling a runtime
+// that gc stop cannot fully see.
+type inventoryStopProvider struct {
+	*runtime.Fake
+	mu sync.Mutex
+	// listErrs is consumed one entry per ListRunning call; a nil entry (or an
+	// exhausted slice) answers from the Fake.
+	listErrs    []error
+	listCalls   int
+	livenessErr map[string]error
+}
+
+func newInventoryStopProvider() *inventoryStopProvider {
+	return &inventoryStopProvider{Fake: runtime.NewFake(), livenessErr: map[string]error{}}
+}
+
+func (p *inventoryStopProvider) ListRunning(prefix string) ([]string, error) {
+	p.mu.Lock()
+	call := p.listCalls
+	p.listCalls++
+	var err error
+	if call < len(p.listErrs) {
+		err = p.listErrs[call]
+	}
+	p.mu.Unlock()
+	names, listErr := p.Fake.ListRunning(prefix)
+	if err == nil {
+		return names, listErr
+	}
+	if runtime.IsPartialListError(err) && !runtime.IsRuntimeServerAbsent(err) {
+		return names, err
+	}
+	return nil, err
+}
+
+func (p *inventoryStopProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	p.mu.Lock()
+	err := p.livenessErr[name]
+	p.mu.Unlock()
+	if err != nil {
+		return runtime.Liveness{}, err
+	}
+	return runtime.ObserveLiveness(p.Fake, name, processNames), nil
+}
+
+var _ runtime.LivenessObserverWithError = (*inventoryStopProvider)(nil)
+
+func startStopTestSessions(t *testing.T, sp runtime.Provider, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+			t.Fatalf("Start(%s): %v", name, err)
+		}
+	}
+}
+
+func assertStopNotConfirmed(t *testing.T, code int, stdout, stderr string) {
+	t.Helper()
+	if code != 1 {
+		t.Fatalf("stop code = %d, want fail-closed 1; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if strings.Contains(stdout, "City stopped.") {
+		t.Fatalf("stdout reported terminal success for an unverified stop: %q", stdout)
+	}
+	if !strings.Contains(stderr, "stop not confirmed") {
+		t.Fatalf("stderr = %q, want a stop-not-confirmed summary", stderr)
+	}
+}
+
+// TestDoStopFailsClosedOnPartialRuntimeInventory proves gc stop withholds
+// "City stopped." when a backend could not be listed, while still stopping
+// every session it positively observed.
+func TestDoStopFailsClosedOnPartialRuntimeInventory(t *testing.T) {
+	const sessionName = "partial-stop-session"
+	tests := []struct {
+		name      string
+		running   bool
+		wantStops int
+	}{
+		{name: "no positively observed names"},
+		{name: "positively observed names are still stopped", running: true, wantStops: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			healthy := runtime.NewFake()
+			if tt.running {
+				startStopTestSessions(t, healthy, sessionName)
+			}
+			sp := sessionhybrid.New(healthy, runtime.NewFailFake(), func(string) bool { return false })
+
+			var stdout, stderr bytes.Buffer
+			code := doStop([]string{sessionName}, sp, nil, nil, 0, events.Discard, &stdout, &stderr)
+
+			assertStopNotConfirmed(t, code, stdout.String(), stderr.String())
+			if !strings.Contains(stderr.String(), "listing sessions partially failed") {
+				t.Fatalf("stderr = %q, want the partial-listing detail", stderr.String())
+			}
+			if got := healthy.CountCalls("Stop", sessionName); got != tt.wantStops {
+				t.Fatalf("Stop calls = %d, want %d", got, tt.wantStops)
+			}
+			if healthy.IsRunning(sessionName) {
+				t.Fatalf("positively observed session %q is still running", sessionName)
+			}
+		})
+	}
+}
+
+// TestDoStopFailsClosedOnFailedRuntimeInventory proves a wholly failed
+// ListRunning is not read as "nothing is running": the target that its own
+// observation proved running is still stopped, but success is withheld.
+func TestDoStopFailsClosedOnFailedRuntimeInventory(t *testing.T) {
+	sp := newInventoryStopProvider()
+	startStopTestSessions(t, sp, "observed-worker")
+	sp.listErrs = []error{errors.New("runtime socket unreachable")}
+
+	var stdout, stderr bytes.Buffer
+	code := doStop([]string{"observed-worker"}, sp, nil, nil, 0, events.Discard, &stdout, &stderr)
+
+	assertStopNotConfirmed(t, code, stdout.String(), stderr.String())
+	if !strings.Contains(stderr.String(), "gc stop: listing sessions: runtime socket unreachable") {
+		t.Fatalf("stderr = %q, want the listing failure", stderr.String())
+	}
+	if sp.IsRunning("observed-worker") {
+		t.Fatal("session observed running by its own liveness check survived the stop")
+	}
+}
+
+// TestDoStopFailsClosedWhenSessionLivenessCheckFails proves a per-session
+// observation error is reported against that session and withholds success,
+// without contaminating a cleanly observed sibling. An unverifiable session is
+// still stopped when the runtime inventory positively witnessed it, and left
+// untouched otherwise.
+func TestDoStopFailsClosedWhenSessionLivenessCheckFails(t *testing.T) {
+	tests := []struct {
+		name      string
+		witnessed bool
+		wantStops int
+	}{
+		{name: "unwitnessed session is left untouched"},
+		{name: "inventory-witnessed session is still stopped", witnessed: true, wantStops: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sp := newInventoryStopProvider()
+			startStopTestSessions(t, sp, "healthy-worker")
+			if tt.witnessed {
+				startStopTestSessions(t, sp, "unverifiable-worker")
+			}
+			sp.livenessErr["unverifiable-worker"] = errors.New("liveness probe timed out")
+
+			var stdout, stderr bytes.Buffer
+			code := doStop([]string{"healthy-worker", "unverifiable-worker"}, sp, nil, nil, 0, events.Discard, &stdout, &stderr)
+
+			assertStopNotConfirmed(t, code, stdout.String(), stderr.String())
+			for _, want := range []string{"gc stop: observing session unverifiable-worker: liveness probe timed out", "could not verify that session(s) unverifiable-worker stopped"} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+				}
+			}
+			if strings.Contains(stderr.String(), "observing session healthy-worker") {
+				t.Fatalf("stderr = %q, attributed an observation failure to the cleanly observed sibling", stderr.String())
+			}
+			if sp.IsRunning("healthy-worker") {
+				t.Fatal("cleanly observed sibling survived the stop")
+			}
+			if got := sp.CountCalls("Stop", "unverifiable-worker"); got != tt.wantStops {
+				t.Fatalf("Stop calls for unverifiable-worker = %d, want %d", got, tt.wantStops)
+			}
+		})
+	}
+}
+
+// TestDoStopTreatsAbsentRuntimeServerAsEmptyInventory keeps a repeated stop
+// idempotent: a runtime server that is not running at all holds no sessions,
+// so its absence confirms the stop instead of failing it. This holds through a
+// composite provider too, as long as every failing backend is merely absent.
+func TestDoStopTreatsAbsentRuntimeServerAsEmptyInventory(t *testing.T) {
+	absent := func() error {
+		return &runtime.PartialListError{Err: errors.New("tmux server unreachable: no tmux server running"), ServerAbsent: true}
+	}
+	absentProvider := func() *inventoryStopProvider {
+		sp := newInventoryStopProvider()
+		sp.listErrs = []error{absent(), absent()}
+		return sp
+	}
+	tests := []struct {
+		name        string
+		provider    func() runtime.Provider
+		wantSuccess bool
+	}{
+		{
+			name:        "single absent server",
+			provider:    func() runtime.Provider { return absentProvider() },
+			wantSuccess: true,
+		},
+		{
+			name: "absent server beside a healthy backend",
+			provider: func() runtime.Provider {
+				return sessionhybrid.New(absentProvider(), runtime.NewFake(), func(string) bool { return false })
+			},
+			wantSuccess: true,
+		},
+		{
+			name: "absent server beside a failing backend",
+			provider: func() runtime.Provider {
+				return sessionhybrid.New(absentProvider(), runtime.NewFailFake(), func(string) bool { return false })
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := doStop([]string{"stopped-worker"}, tt.provider(), nil, nil, 0, events.Discard, &stdout, &stderr)
+			if !tt.wantSuccess {
+				assertStopNotConfirmed(t, code, stdout.String(), stderr.String())
+				return
+			}
+			if code != 0 || !strings.Contains(stdout.String(), "City stopped.") {
+				t.Fatalf("doStop = %d, want 0 with City stopped.; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if strings.Contains(stderr.String(), "listing sessions") {
+				t.Fatalf("stderr = %q, want no listing warning for an absent server", stderr.String())
+			}
+		})
+	}
+}
+
+// TestCmdStopBodyFailsClosedOnFailedOrphanInventory proves the orphan sweep's
+// own inventory counts too: sessions outside the config may still be running,
+// so success is withheld, while the remaining safe cleanup (server teardown,
+// bead-store shutdown) still runs.
+func TestCmdStopBodyFailsClosedOnFailedOrphanInventory(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "orphan-inventory-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+	}
+	writeStopLifecycleCityConfig(t, cityDir, cfg)
+
+	sp := &lifecycleOrderProvider{Fake: runtime.NewFake()}
+	var listCalls atomic.Int32
+	failingList := &orphanListFailingProvider{lifecycleOrderProvider: sp, calls: &listCalls}
+
+	shutdownCalled := false
+	overrideShutdownBeadsProviderForStop(t, func(string) error {
+		shutdownCalled = true
+		return nil
+	})
+	oldFactory := sessionProviderForStopCity
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return failingList, nil }
+
+	var stdout, stderr lockedBuffer
+	code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr)
+
+	assertStopNotConfirmed(t, code, stdout.String(), stderr.String())
+	if !strings.Contains(stderr.String(), "gc stop: listing sessions: orphan listing failed") {
+		t.Fatalf("stderr = %q, want the orphan listing failure", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "outside the configuration") {
+		t.Fatalf("stderr = %q, want the orphan-inventory summary", stderr.String())
+	}
+	sp.mu.Lock()
+	providerEvents := append([]string(nil), sp.events...)
+	sp.mu.Unlock()
+	if !containsString(providerEvents, "TeardownServer") {
+		t.Fatalf("provider events = %v, want server teardown to still run", providerEvents)
+	}
+	if !shutdownCalled {
+		t.Fatal("bead-store shutdown did not run after an unconfirmed stop")
+	}
+}
+
+// orphanListFailingProvider answers the first (target) ListRunning cleanly and
+// fails every later one, so only the orphan sweep's inventory fails.
+type orphanListFailingProvider struct {
+	*lifecycleOrderProvider
+	calls *atomic.Int32
+}
+
+func (p *orphanListFailingProvider) ListRunning(prefix string) ([]string, error) {
+	if p.calls.Add(1) > 1 {
+		p.mu.Lock()
+		p.events = append(p.events, "ListRunning")
+		p.mu.Unlock()
+		return nil, errors.New("orphan listing failed")
+	}
+	return p.lifecycleOrderProvider.ListRunning(prefix)
+}
+
+// TestCmdStopFailsClosedOnPartialRuntimeInventory is the command-boundary
+// proof: an unverified stop exits non-zero and never prints "City stopped.".
+func TestCmdStopFailsClosedOnPartialRuntimeInventory(t *testing.T) {
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+
+	cityDir := shortSocketTempDir(t, "gc-stop-city-")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "partial-stop-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "sleep 1"}},
+	}
+	writeStopLifecycleCityConfig(t, cityDir, cfg)
+	overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
+
+	healthy := runtime.NewFake()
+	startStopTestSessions(t, healthy, "orphan-worker")
+	sp := sessionhybrid.New(healthy, runtime.NewFailFake(), func(string) bool { return false })
+	oldFactory := sessionProviderForStopCity
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, 0, false)
+
+	assertStopNotConfirmed(t, code, stdout.String(), stderr.String())
+	if healthy.IsRunning("orphan-worker") {
+		t.Fatal("positively observed orphan survived the stop")
+	}
+}
+
+// stubAlreadyStoppedSeams installs the store-retired answer and records every
+// store open and provider stop the stop body attempts.
+func stubAlreadyStoppedSeams(t *testing.T, retired bool) (storeOpens, providerStops *int) {
+	t.Helper()
+	opens, stops := 0, 0
+	oldRetired, oldOpen, oldShutdown, oldProbe := stopCityStoreRetired, openCityStoreForStop, shutdownBeadsProviderForStop, sessionProviderForStopProbe
+	stopCityStoreRetired = func(string) bool { return retired }
+	openCityStoreForStop = func(cityPath string) (beads.Store, error) {
+		opens++
+		return oldOpen(cityPath)
+	}
+	shutdownBeadsProviderForStop = func(string) error {
+		stops++
+		return nil
+	}
+	// The probe lists through the same runtime the full flow stops through.
+	sessionProviderForStopProbe = func(cfg *config.City, cityPath string) (runtime.Provider, error) {
+		return sessionProviderForStopCity(cfg, cityPath)
+	}
+	t.Cleanup(func() {
+		stopCityStoreRetired, openCityStoreForStop, shutdownBeadsProviderForStop, sessionProviderForStopProbe = oldRetired, oldOpen, oldShutdown, oldProbe
+	})
+	return &opens, &stops
+}
+
+func alreadyStoppedTestCity(t *testing.T) (string, *config.City) {
+	t.Helper()
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+	cityDir := shortSocketTempDir(t, "gc-stopped-city-")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "stopped-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "sleep 1"}},
+	}
+	// The full flow opens the store from disk, so the file provider has to be
+	// on disk too: without a city.toml the store defaults to bd.
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return cityDir, cfg
+}
+
+// A stop of a city that is already stopped must not read the bead store: on a
+// provider-owned proxied store every read restarts the proxy and its Dolt
+// child, which is what made a repeated `gc stop` cost seconds and dozens of bd
+// forks.
+func TestCmdStopBodyAlreadyStoppedCityTouchesNoStore(t *testing.T) {
+	cityDir, cfg := alreadyStoppedTestCity(t)
+	storeOpens, providerStops := stubAlreadyStoppedSeams(t, true)
+
+	// The full session provider loads a session-bead snapshot from the store,
+	// so the already-stopped path must list through the probe alone.
+	fullProviders := 0
+	oldFactory := sessionProviderForStopCity
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
+		fullProviders++
+		return runtime.NewFake(), nil
+	}
+	sessionProviderForStopProbe = func(*config.City, string) (runtime.Provider, error) { return runtime.NewFake(), nil }
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdStopBodyWithoutSuccess(cityDir, cfg, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdStopBodyWithoutSuccess = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if fullProviders != 0 {
+		t.Errorf("stop of a stopped city built the snapshot-loading session provider %d time(s), want 0", fullProviders)
+	}
+	if *storeOpens != 0 {
+		t.Errorf("stop of a stopped city opened the bead store %d time(s), want 0", *storeOpens)
+	}
+	if *providerStops != 0 {
+		t.Errorf("stop of a stopped city stopped the bead store provider %d time(s), want 0", *providerStops)
+	}
+}
+
+// A partially stopped city — a session still running while the proxy has
+// retired — still gets the full stop: the session is stopped and the store is
+// read and then retired.
+func TestCmdStopBodyRunningSessionWithRetiredStoreStillStops(t *testing.T) {
+	cityDir, cfg := alreadyStoppedTestCity(t)
+	storeOpens, providerStops := stubAlreadyStoppedSeams(t, true)
+
+	sp := runtime.NewFake()
+	sessionName := lookupSessionNameOrLegacy(nil, loadedCityName(cfg, cityDir), cfg.Agents[0].QualifiedName(), cfg.Workspace.SessionTemplate)
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	oldFactory := sessionProviderForStopCity
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdStopBodyWithoutSuccess(cityDir, cfg, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdStopBodyWithoutSuccess = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if sp.IsRunning(sessionName) {
+		t.Errorf("session %s still running after stop", sessionName)
+	}
+	if *storeOpens != 1 || *providerStops != 1 {
+		t.Errorf("store opens = %d, provider stops = %d; want 1 and 1", *storeOpens, *providerStops)
+	}
+}
+
+// With nothing running but a store that is not provably retired (a live or
+// killed proxy, a stray Dolt child), the full flow still retires the store.
+func TestCmdStopBodyStoppedRuntimeWithLiveStoreRetiresStore(t *testing.T) {
+	cityDir, cfg := alreadyStoppedTestCity(t)
+	storeOpens, providerStops := stubAlreadyStoppedSeams(t, false)
+
+	oldFactory := sessionProviderForStopCity
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return runtime.NewFake(), nil }
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdStopBodyWithoutSuccess(cityDir, cfg, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdStopBodyWithoutSuccess = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if *storeOpens != 1 || *providerStops != 1 {
+		t.Errorf("store opens = %d, provider stops = %d; want 1 and 1", *storeOpens, *providerStops)
+	}
+}
+
+// A runtime the check cannot list completely proves nothing about what is
+// running, so a retired store does not let the stop skip the full flow.
+func TestCmdStopBodyPartialRuntimeInventoryWithRetiredStoreTakesFullFlow(t *testing.T) {
+	cityDir, cfg := alreadyStoppedTestCity(t)
+	storeOpens, providerStops := stubAlreadyStoppedSeams(t, true)
+
+	sessionProviderForStopProbe = func(*config.City, string) (runtime.Provider, error) {
+		return sessionhybrid.New(runtime.NewFake(), runtime.NewFailFake(), func(string) bool { return false }), nil
+	}
+	oldFactory := sessionProviderForStopCity
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return runtime.NewFake(), nil }
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdStopBodyWithoutSuccess(cityDir, cfg, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdStopBodyWithoutSuccess = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if *storeOpens != 1 || *providerStops != 1 {
+		t.Errorf("store opens = %d, provider stops = %d; want 1 and 1", *storeOpens, *providerStops)
+	}
+}
+
+// The already-stopped check stops the city's nudge pollers only once the
+// store is found retired and the runtime is found empty, and checks the store
+// again after they are gone. Any other city keeps its pollers for the full
+// flow, which stops them last, with the store; a poller that restarted the
+// proxy before it was stopped sends the stop down the full flow.
+func TestCityAlreadyStoppedForStopStopsPollersBetweenStoreChecks(t *testing.T) {
+	sessionRunning := func(t *testing.T) (runtime.Provider, error) {
+		sp := runtime.NewFake()
+		startStopTestSessions(t, sp, "worker")
+		return sp, nil
+	}
+	partialInventory := func(*testing.T) (runtime.Provider, error) {
+		return sessionhybrid.New(runtime.NewFake(), runtime.NewFailFake(), func(string) bool { return false }), nil
+	}
+	probeFails := func(*testing.T) (runtime.Provider, error) {
+		return nil, errors.New("building the session provider failed")
+	}
+	for _, tc := range []struct {
+		name    string
+		retired []bool // the answer to each successive store check
+		// probe builds the runtime the check lists; nil is an empty runtime.
+		probe func(*testing.T) (runtime.Provider, error)
+		// pollerAlive is whether the poller was alive at each store check.
+		pollerAlive []bool
+		wantStopped bool
+	}{
+		{name: "store not retired", retired: []bool{false}, pollerAlive: []bool{true}},
+		{name: "session still running", retired: []bool{true}, probe: sessionRunning, pollerAlive: []bool{true}},
+		{name: "runtime inventory incomplete", retired: []bool{true}, probe: partialInventory, pollerAlive: []bool{true}},
+		{name: "runtime probe failed", retired: []bool{true}, probe: probeFails, pollerAlive: []bool{true}},
+		{name: "store retired before and after the pollers stop", retired: []bool{true, true}, pollerAlive: []bool{true, false}, wantStopped: true},
+		{name: "proxy restarted before the pollers stopped", retired: []bool{true, false}, pollerAlive: []bool{true, false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir, cfg := alreadyStoppedTestCity(t)
+			stubAlreadyStoppedSeams(t, false)
+			sessionProviderForStopProbe = func(*config.City, string) (runtime.Provider, error) {
+				if tc.probe == nil {
+					return runtime.NewFake(), nil
+				}
+				return tc.probe(t)
+			}
+			poller := startPollerLikeProcess(t, cityDir, "session-id")
+			writeNudgePollerPIDFileForTest(t, cityDir, "sess-worker", "session-id", poller.Process.Pid)
+
+			var pollerAlive []bool
+			stopCityStoreRetired = func(string) bool {
+				pollerAlive = append(pollerAlive, pidutil.Alive(poller.Process.Pid))
+				return len(pollerAlive) <= len(tc.retired) && tc.retired[len(pollerAlive)-1]
+			}
+
+			if stopped, _ := cityAlreadyStoppedForStop(cfg, cityDir); stopped != tc.wantStopped {
+				t.Errorf("cityAlreadyStoppedForStop = %t, want %t", stopped, tc.wantStopped)
+			}
+			if !slices.Equal(pollerAlive, tc.pollerAlive) {
+				t.Errorf("poller alive at each store check = %v, want %v", pollerAlive, tc.pollerAlive)
+			}
+			if wantAlive := tc.pollerAlive[len(tc.pollerAlive)-1]; pidutil.Alive(poller.Process.Pid) != wantAlive {
+				t.Errorf("poller alive after the check = %t, want %t", !wantAlive, wantAlive)
+			}
+		})
+	}
+}
+
+func TestCityStoreRetiredForStop(t *testing.T) {
+	const (
+		proxiedMetadata = `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hq"}`
+		directMetadata  = `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`
+	)
+	bindScope := func(t *testing.T, city, scopeRoot, metadata string) {
+		t.Helper()
+		writeScopeBeadsMetadata(t, scopeRoot, metadata)
+		if err := persistProviderScopeOwnership(city, scopeRoot, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := markProviderScopeOwnershipReady(city, scopeRoot); err != nil {
+			t.Fatal(err)
+		}
+	}
+	newCity := func(t *testing.T, metadata string) string {
+		t.Helper()
+		city := t.TempDir()
+		if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"t\"\n[beads]\nprovider = \"bd\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		bindScope(t, city, city, metadata)
+		return city
+	}
+	// newCityWithRig is a retired proxied city with one rig bound by
+	// rigMetadata.
+	newCityWithRig := func(t *testing.T, rigMetadata string) (city, rig string) {
+		t.Helper()
+		city = t.TempDir()
+		rig = filepath.Join(city, "rigs", "r1")
+		if err := os.MkdirAll(rig, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		toml := "[workspace]\nname = \"t\"\n[beads]\nprovider = \"bd\"\n[[rigs]]\nname = \"r1\"\npath = \"rigs/r1\"\n"
+		if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(toml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		bindScope(t, city, city, proxiedMetadata)
+		bindScope(t, city, rig, rigMetadata)
+		return city, rig
+	}
+	// leaveProxyRecord leaves a proxy record in scopeRoot's proxy root. Any
+	// record at all — here one that does not decode — means the proxy did not
+	// exit cleanly, so bd's own stop has to run.
+	leaveProxyRecord := func(t *testing.T, scopeRoot string) {
+		t.Helper()
+		root := filepath.Join(scopeRoot, ".beads", "dolt")
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "proxy.pid"), []byte("not a record"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runningDolt := func(t *testing.T, argv ...string) {
+		t.Helper()
+		old := discoverDoltProcessesForStop
+		t.Cleanup(func() { discoverDoltProcessesForStop = old })
+		discoverDoltProcessesForStop = func() ([]DoltProcInfo, error) {
+			return []DoltProcInfo{{PID: 4242, Argv: append([]string{"dolt", "sql-server"}, argv...)}}, nil
+		}
+	}
+
+	t.Run("provider-owned proxied scope with no proxy record", func(t *testing.T) {
+		if !cityStoreRetiredForStop(newCity(t, proxiedMetadata)) {
+			t.Fatal("a cleanly retired proxied scope was not reported retired")
+		}
+	})
+	t.Run("proxy record left behind", func(t *testing.T) {
+		city := newCity(t, proxiedMetadata)
+		leaveProxyRecord(t, city)
+		if cityStoreRetiredForStop(city) {
+			t.Fatal("a scope with a proxy record was reported retired")
+		}
+	})
+	t.Run("scope bound in direct mode", func(t *testing.T) {
+		// A direct-mode scope has no proxy record to read, so "no record"
+		// proves nothing about whether its server is down.
+		if cityStoreRetiredForStop(newCity(t, directMetadata)) {
+			t.Fatal("a direct-mode scope was reported to have a retired proxy")
+		}
+	})
+	t.Run("Dolt server outside the proxy roots", func(t *testing.T) {
+		city := newCity(t, proxiedMetadata)
+		elsewhere := filepath.Join(t.TempDir(), ".beads", "dolt")
+		runningDolt(t, "--config", filepath.Join(elsewhere, "config.yaml"), "--data-dir", elsewhere)
+		if !cityStoreRetiredForStop(city) {
+			t.Fatal("another store's Dolt server kept this city's retired store from being reported retired")
+		}
+	})
+	t.Run("stray Dolt server configured under the proxy root", func(t *testing.T) {
+		city := newCity(t, proxiedMetadata)
+		runningDolt(t, "--config", filepath.Join(city, ".beads", "dolt", "config.yaml"))
+		if cityStoreRetiredForStop(city) {
+			t.Fatal("a scope with a Dolt server still running under its proxy root was reported retired")
+		}
+	})
+	t.Run("stray Dolt server with its data dir under the proxy root", func(t *testing.T) {
+		city := newCity(t, proxiedMetadata)
+		runningDolt(t, "--data-dir", filepath.Join(city, ".beads", "dolt"))
+		if cityStoreRetiredForStop(city) {
+			t.Fatal("a scope with a Dolt server still serving its proxy root was reported retired")
+		}
+	})
+	t.Run("gc-managed Dolt port published", func(t *testing.T) {
+		city := newCity(t, proxiedMetadata)
+		writeReachableProviderManagedDoltState(t, city)
+		if cityStoreRetiredForStop(city) {
+			t.Fatal("a city with a live gc-managed Dolt was reported retired")
+		}
+	})
+	t.Run("rig scope retired too", func(t *testing.T) {
+		city, _ := newCityWithRig(t, proxiedMetadata)
+		if !cityStoreRetiredForStop(city) {
+			t.Fatal("a city whose city and rig scopes are both retired was not reported retired")
+		}
+	})
+	t.Run("rig scope with a proxy record left behind", func(t *testing.T) {
+		city, rig := newCityWithRig(t, proxiedMetadata)
+		leaveProxyRecord(t, rig)
+		if cityStoreRetiredForStop(city) {
+			t.Fatal("a city whose rig scope has a proxy record was reported retired")
+		}
+	})
+	t.Run("rig scope bound in direct mode", func(t *testing.T) {
+		city, _ := newCityWithRig(t, directMetadata)
+		if cityStoreRetiredForStop(city) {
+			t.Fatal("a city whose rig scope is bound in direct mode was reported retired")
+		}
+	})
+	t.Run("file store", func(t *testing.T) {
+		city := t.TempDir()
+		if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"t\"\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if cityStoreRetiredForStop(city) {
+			t.Fatal("a file store city was reported to have a retired proxied store")
+		}
+	})
 }

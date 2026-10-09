@@ -1,35 +1,144 @@
 load("@rules_go//go:def.bzl", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+exports_files([
+    "check-generated-in-sync.sh",
+    "check-go-format.sh",
+    "check-goreleaser-config.sh",
+    "gc-session-docker",
+])
+
+# The repo's shell guards (formerly preflight-static steps), each with
+# exactly the inputs it reads.
+
+sh_test(
+    name = "check_gomod_replace_test",
+    srcs = ["check-gomod-replace.sh"],
+    args = ["$(rootpath //:go.mod)"],
+    data = ["//:go.mod"],
+)
+
+# Scans every non-test Go file (the guard skips _test.go, testdata/ and
+# vendor/ itself).
+sh_test(
+    name = "check_core_boundary_test",
+    srcs = ["check-core-boundary.sh"],
+    args = ["--declared-tree"],
+    data = [
+        "//:go.mod",
+        "//:repo_go_srcs",
+    ],
+)
+
+# Check #3 (pkg/eventexport imports nothing from internal/) reads the Bazel
+# dependency graph instead of `go list -deps`.
+genquery(
+    name = "eventexport_deps",
+    expression = "deps(//pkg/eventexport)",
+    scope = ["//pkg/eventexport"],
+)
+
+sh_test(
+    name = "check_eventexport_isolation_test",
+    srcs = ["check-eventexport-isolation.sh"],
+    args = [
+        "--deps-file",
+        "$(rootpath :eventexport_deps)",
+    ],
+    data = [
+        ":eventexport_deps",
+        "//cmd/gc:event_export.go",
+        "//internal/eventfeed:bazel_repo_srcs",
+        "//internal/supervisor:config.go",
+        "//pkg/eventexport:bazel_repo_srcs",
+    ],
+)
+
+# Measures the hermetic //cmd/gc. That link is cgo (Dolt's ICU regex), so
+# it is larger than the CGO_ENABLED=0 release-shaped build the script's
+# default cap is measured against: 207,034,352 bytes at 9fdc52d82c versus
+# 180,287,491 for the release shape. The cap keeps the same ~5.4% headroom.
+sh_test(
+    name = "check_native_dependency_surface_test",
+    srcs = ["check-native-dependency-surface.sh"],
+    args = [
+        "--gc-binary",
+        "$(rootpath //cmd/gc)",
+    ],
+    data = [
+        "//:go.sum",
+        "//cmd/gc",
+    ],
+    env = {"GC_NATIVE_DEP_MAX_BINARY_BYTES": "218000000"},
+)
 
 go_test(
     name = "scripts_test",
     srcs = [
+        "acceptance_failure_diagnostics_test.go",
         "acceptance_run_selection_test.go",
+        "acceptance_shards_test.go",
         "add_testenv_import_test.go",
+        "bazel_bep_summary_workflow_test.go",
+        "bazel_fork_cache_test.go",
+        "bazel_fresh_merge_test.go",
+        "bazel_go_repository_tools_test.go",
+        "bazel_hermetic_cc_test.go",
+        "bazel_hermetic_tags_test.go",
+        "bazel_integration_smoke_test.go",
+        "bazel_integration_suite_test.go",
+        "bazel_key_parity_test.go",
+        "bazel_multilane_test.go",
+        "bazel_no_flaky_retries_test.go",
+        "bazel_output_cache_test.go",
+        "bazel_repo_tree_test.go",
+        "bazel_test_tmp_bt_test.go",
+        "bd_contract_pins_test.go",
         "bd_version_pin_test.go",
         "build_provenance_test.go",
         "check_core_boundary_test.go",
+        "check_embedded_pins_test.go",
         "check_split_topology_rows_test.go",
         "ci_critical_path_test.go",
+        "ci_merge_queue_test.go",
         "ci_required_coverage_test.go",
+        "cmd_gc_shards_test.go",
+        "codeql_go_cache_test.go",
         "complexity_test.go",
         "complexity_workflow_test.go",
         "container_scan_fail_fast_test.go",
         "container_tool_security_test.go",
         "docker_session_protocol_test.go",
         "dolt_version_pin_test.go",
+        "gh_expr_test.go",
         "git_test_env_test.go",
         "githooks_beads_chain_test.go",
         "githooks_pre_push_stdin_test.go",
+        "githooks_pre_push_suite_test.go",
+        "githooks_pre_push_worker_env_test.go",
+        "go_module_fetch_test.go",
         "go_test_observable_test.go",
         "gomod_replace_guard_test.go",
         "harness_reap_test.go",
+        "integration_packages_shards_test.go",
+        "integration_shards_test.go",
         "lint_readonly_contract_test.go",
+        "makefile_bazel_primary_test.go",
         "makefile_cgo_test.go",
         "makefile_install_test.go",
         "native_doltlite_target_test.go",
+        "oasdiff_pin_test.go",
+        "openapi_breaking_gate_test.go",
         "pr_static_scope_contract_test.go",
         "precommit_contract_test.go",
         "push_ownership_guard_test.go",
+        "rbe_fork_pool_test.go",
+        "rbe_worker_env_drift_test.go",
+        "rbe_worker_env_test.go",
+        "rbe_worker_h5_test.go",
+        "rbe_worker_isolation_test.go",
+        "rbe_worker_pool_source_test.go",
+        "rbe_worker_shim_test.go",
         "rebase_resolve_lib_test.go",
         "release_binary_metadata_test.go",
         "residency_boundary_test.go",
@@ -49,18 +158,33 @@ go_test(
         "testenv_import_test.go",
         "tmpdir_default_test.go",
         "worker_inference_make_test.go",
+        "workflow_go_twins_test.go",
+        "workflow_pr_branch_filter_test.go",
     ],
     data = glob(
         ["**"],
         exclude = ["BUILD.bazel"],
     ) + [
+        "BUILD.bazel",
+        "//:.bazelrc",
+        "//:.bazelversion",
+        "//:MODULE.bazel",
         "//:Makefile",
         "//:go.mod",
         "//:repo_meta",
         "//:repo_source_tree",
+        "//cmd/gc:BUILD.bazel",
         "//contrib:all_files",
+        "//examples/gastown:BUILD.bazel",
+        "//internal/beads:BUILD.bazel",
+        "//platforms:BUILD.bazel",
         "//scripts/testdata/test-go-test-shard/env_required:pkg_files",
         "//scripts/testdata/test-go-test-shard/no_extra_env:pkg_files",
+        "//test:BUILD.bazel",
+        "//test/acceptance:BUILD.bazel",
+        "//test/integration:BUILD.bazel",
+        "//tools/bazel/rules:go_repository_tools.bzl",
+        "//tools/bazel/rules:openapi_base_spec.bzl",
     ],
     shard_count = 6,
     deps = [
@@ -77,6 +201,11 @@ go_test(
     ],
 )
 
+exports_files(
+    ["routed-test-rows.manifest"],
+    visibility = ["//visibility:public"],
+)
+
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(
@@ -85,6 +214,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

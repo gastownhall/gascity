@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -144,7 +145,7 @@ func newEscalationEnv(t *testing.T) *escalationEnv {
 	// from inside `go test`, and it is also what lets a test assert the poke.
 	// (Tests using this env therefore must not call t.Parallel.)
 	prevPoke := drainAckAsyncStopPokeController
-	drainAckAsyncStopPokeController = func(string) error {
+	drainAckAsyncStopPokeController = func(string, reconcilekey.Key) error {
 		env.poke.record()
 		return nil
 	}
@@ -486,6 +487,39 @@ func TestEscalationHonorsTheTokenFence(t *testing.T) {
 	}
 }
 
+// An empty token that came with a read error is not "cannot verify, proceed":
+// neither the escalation gate nor the force-terminate re-check may pass it, and
+// the ordinary stop the tick falls back to is fenced the same way.
+func TestEscalationDefersOnUnverifiableToken(t *testing.T) {
+	e := newEscalationEnv(t)
+	e.sp.GetMetaErrors[e.name] = map[string]error{
+		"GC_INSTANCE_TOKEN": fmt.Errorf("show-environment timed out: %w", runtime.ErrRuntimeUnavailable),
+	}
+
+	e.finalize()
+
+	if n := len(e.escalations()); n != 0 {
+		t.Errorf("escalations = %d, want 0 — escalated on an unreadable instance token", n)
+	}
+	if e.terminateCalls() != 0 {
+		t.Error("force-terminated a seat whose instance token could not be read")
+	}
+	if n := e.sp.CountCalls("Stop", e.name); n != 0 {
+		t.Errorf("Stop calls = %d, want 0 — the ordinary stop passed an unreadable token", n)
+	}
+	if got := e.out.String(); !strings.Contains(got, "token_unverifiable") {
+		t.Errorf("stderr = %q, want token_unverifiable diagnostic", got)
+	}
+
+	// The re-check immediately before the destructive act holds on its own.
+	if got := terminateDrainAckRuntimeByProcessTable(e.cityPath, e.sp, e.bead.ID, e.name, "tok-a", 0, e.now, e.out); got != "token_unverifiable" {
+		t.Fatalf("force-terminate outcome = %q, want token_unverifiable", got)
+	}
+	if e.terminateCalls() != 0 {
+		t.Error("force-terminate re-check passed an unreadable instance token")
+	}
+}
+
 // NEGATIVE CONTROL. The /proc scan is supervisor-wide, so a runtime that is not
 // positively attributed to THIS city must never be terminated — doing so would
 // SIGKILL a sibling city's healthy session.
@@ -743,7 +777,7 @@ func TestEscalationReportsNotHandledWhenTerminationCannotStart(t *testing.T) {
 
 	handled := escalateWedgedDrainAckStopPending(
 		e.cityPath, e.cfg, e.sp, e.store, nil, e.info(), e.name, nil,
-		tracker, e.clk, e.rec, e.out,
+		tracker, e.clk, e.rec, nil, e.out,
 	)
 	if handled {
 		t.Error("reported handled while a termination was already in flight; the caller would skip this row's ordinary stop entirely")
@@ -950,7 +984,7 @@ func TestEscalationQuietHoldRefusesBeforeTheAssignedWorkFanOut(t *testing.T) {
 
 	escalated := escalateWedgedDrainAckStopPending(
 		e.cityPath, e.cfg, e.sp, assignedWorkProbeStore{Store: e.store, probes: probes}, nil,
-		e.info(), e.name, nil, &asyncStartTracker{}, e.clk, e.rec, e.out,
+		e.info(), e.name, nil, &asyncStartTracker{}, e.clk, e.rec, nil, e.out,
 	)
 
 	if escalated {
@@ -977,7 +1011,7 @@ func TestEscalationHoldsWhenAnOperatorAttachesAfterTheOrdinaryStop(t *testing.T)
 
 	if !escalateWedgedDrainAckStopPending(
 		e.cityPath, e.cfg, e.sp, e.store, nil, e.info(), e.name, nil,
-		tracker, e.clk, e.rec, e.out,
+		tracker, e.clk, e.rec, nil, e.out,
 	) {
 		t.Fatal("the escalation was refused on the tick itself; the fixture does not reach the late hold")
 	}
@@ -994,5 +1028,25 @@ func TestEscalationHoldsWhenAnOperatorAttachesAfterTheOrdinaryStop(t *testing.T)
 	}
 	if !strings.Contains(evs[0].Message, "held_late") {
 		t.Errorf("outcome = %q, want held_late so the event stream distinguishes this from a failed kill", evs[0].Message)
+	}
+}
+
+// Invariant 5 — an attachment probe that cannot tell is not "detached". The
+// operator this hold protects is exactly the one a failing probe may hide, so
+// the force-terminate must not proceed on the error.
+func TestDrainAckEscalationQuietHoldHoldsOnAttachProbeError(t *testing.T) {
+	e := newEscalationEnv(t)
+	e.sp.AttachedErrors[e.name] = fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+
+	if hold, held := drainAckEscalationQuietHold(e.sp, e.name, e.now); !held || hold != "attach_unknown" {
+		t.Fatalf("drainAckEscalationQuietHold = (%q, %v), want (attach_unknown, true)", hold, held)
+	}
+	e.finalize()
+
+	if n := len(e.escalations()); n != 0 {
+		t.Errorf("escalations = %d, want 0 — an attach probe error was read as detached", n)
+	}
+	if e.terminateCalls() != 0 {
+		t.Error("force-terminated a pane whose attachment could not be read")
 	}
 }

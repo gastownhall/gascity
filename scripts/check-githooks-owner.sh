@@ -3,8 +3,8 @@
 #
 # The gates in .githooks cannot report their own absence: when another installer
 # claims core.hooksPath (beads points it at .beads/hooks), git stops invoking
-# them entirely and every commit looks clean while formatting, lint-changed, the
-# codegen+stage steps and make vet are all skipped. That is how spec-derived
+# them entirely and every commit looks clean while formatting, lint-changed (nogo
+# lint and vet) and the codegen+stage steps are all skipped. That is how spec-derived
 # drift reached the mainline. This check is the external detector; run it
 # with `make check-hooks`.
 set -euo pipefail
@@ -40,8 +40,8 @@ fi
 	echo "  core.hooksPath: ${configured:-<unset — git defaults to .git/hooks>}"
 	echo "  expected:       $expected"
 	echo
-	echo "Every gate in .githooks (staged-Go formatting, lint-changed, the OpenAPI"
-	echo "spec/client/schema codegen+stage steps, make vet, the push-time suite) is"
+	echo "Every gate in .githooks (staged-Go formatting, nogo lint-changed, the OpenAPI"
+	echo "spec/client/schema codegen+stage steps, the push-time suite) is"
 	echo "silently skipped while another directory owns core.hooksPath."
 	echo
 	echo "Fix it with:  make setup"

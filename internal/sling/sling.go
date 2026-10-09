@@ -117,6 +117,12 @@ type RouteRequest struct {
 	WorkDir  string            // rig directory for command execution
 	Env      map[string]string // extra env vars (GC_SLING_TARGET, etc.)
 	Force    bool              // allow best-effort routing when the bead is absent
+	// Store is the store that holds BeadID and that built-in routing must
+	// stamp. Nil means the router's own default store (the work store the
+	// sling was configured with). A formula wisp root is minted in the graph
+	// store (SlingDeps.graphStore), which on a city whose graph class is
+	// relocated to a [storage] binding is not the work store (#6054).
+	Store beads.Store
 }
 
 // SlingDeps bundles infrastructure dependencies for sling operations.
@@ -360,6 +366,35 @@ func (s *Sling) AttachFormula(_ context.Context, formulaName, beadID string, tar
 		ScopeKind:     opts.ScopeKind,
 		ScopeRef:      opts.ScopeRef,
 	}, s.deps, s.deps.Store)
+}
+
+// Dispatch is the one entry point `gc sling` and POST /v0/city/{c}/sling share
+// for an explicit target. It takes the caller's whole intent as SlingOpts (bead
+// or formula, --on, --no-formula, title, vars, scope and the routing flags)
+// and lets the domain decide what it means: a standalone formula launch, an
+// explicit or default-formula attachment, a plain route, or a convoy whose open
+// children are routed one by one. Keeping that decision here rather than in
+// each transport is what keeps the API from drifting from the CLI; the API
+// once skipped convoy expansion and dropped title and vars on the target's
+// default formula. querier is the store the bead or convoy is read from.
+func (s *Sling) Dispatch(ctx context.Context, opts SlingOpts, querier BeadChildQuerier) (SlingResult, error) {
+	if opts.IsFormula || opts.OnFormula != "" || (!opts.NoFormula && opts.Target.EffectiveDefaultSlingFormula() != "") {
+		// Formula paths attach per child (or treat a convoy as one graph.v2
+		// input), which DoSlingBatch handles directly.
+		return DoSlingBatch(opts, s.deps, querier)
+	}
+	return s.ExpandConvoy(ctx, opts.BeadOrFormula, opts.Target, RouteOpts{
+		Merge:      opts.Merge,
+		NoConvoy:   opts.NoConvoy,
+		Owned:      opts.Owned,
+		Reassign:   opts.Reassign,
+		Nudge:      opts.Nudge,
+		Force:      opts.Force,
+		SkipPoke:   opts.SkipPoke,
+		DryRun:     opts.DryRun,
+		InlineText: opts.InlineText,
+		NoFormula:  opts.NoFormula,
+	}, querier)
 }
 
 // ExpandConvoy expands a convoy and routes each open child.
@@ -1062,28 +1097,50 @@ func SlingFormulaTargetBranch(beadID string, deps SlingDeps, a config.Agent) str
 	return ""
 }
 
+// SlingMergeStrategy resolves the merge strategy to stamp on a routed bead.
+// Resolution order:
+//  1. the explicit --merge value the caller passed
+//  2. DefaultMergeStrategy recorded on the bead's rig in city.toml
+//  3. DefaultMergeStrategy recorded on the agent's rig in city.toml
+//
+// An empty result means nothing is stamped and consumers keep applying their
+// own implicit default. Rigs that deliver work through a pull request set
+// default_merge_strategy = "mr" so a bare `gc sling` records the shape the rig
+// actually uses instead of the one its consumers assume.
+func SlingMergeStrategy(explicit, beadID string, deps SlingDeps, a config.Agent) string {
+	if explicit := strings.TrimSpace(explicit); explicit != "" {
+		return explicit
+	}
+	return rigStoredValue(deps.Cfg, beadID, a, (*config.Rig).EffectiveDefaultMergeStrategy)
+}
+
 // rigStoredDefaultBranch returns the DefaultBranch recorded on the rig the
 // bead/agent belongs to, or empty string if no match has a stored value.
-// Bead lookup wins over agent lookup so cross-rig sling targets still pick
-// the right rig.
 func rigStoredDefaultBranch(cfg *config.City, beadID string, a config.Agent) string {
+	return rigStoredValue(cfg, beadID, a, (*config.Rig).EffectiveDefaultBranch)
+}
+
+// rigStoredValue returns pick applied to the rig the bead/agent belongs to, or
+// empty string if no match yields a value. Bead lookup wins over agent lookup
+// so cross-rig sling targets still pick the right rig.
+func rigStoredValue(cfg *config.City, beadID string, a config.Agent, pick func(*config.Rig) string) string {
 	if cfg == nil {
 		return ""
 	}
 	if beadID != "" {
 		if bp := BeadPrefixForCity(cfg, beadID); bp != "" && !IsHQPrefix(cfg, bp) {
 			if rig, ok := FindRigByPrefix(cfg, bp); ok {
-				if branch := rig.EffectiveDefaultBranch(); branch != "" {
-					return branch
+				if value := pick(&rig); value != "" {
+					return value
 				}
 			}
 		}
 	}
 	if rigName := rigNameForAgent(cfg, a); rigName != "" {
-		for _, r := range cfg.Rigs {
-			if r.Name == rigName {
-				if branch := r.EffectiveDefaultBranch(); branch != "" {
-					return branch
+		for i := range cfg.Rigs {
+			if cfg.Rigs[i].Name == rigName {
+				if value := pick(&cfg.Rigs[i]); value != "" {
+					return value
 				}
 			}
 		}
@@ -1638,6 +1695,15 @@ func mapsCloneWithout(in map[string]string, drop string) map[string]string {
 
 // ShouldPromoteWorkflowLaunchStatus reports whether a bead's status should
 // be promoted to in_progress when a workflow launches.
+//
+// It doubles as the single classifier for "not yet claimed by a worker": the
+// periodic wisp GC decides whether a stepless root was ever picked up by asking
+// this same question rather than testing its own status literals (see
+// steplessRootIsAbandoned in cmd/gc/wisp_gc.go). That shares the STATUS SET,
+// not a write path — the GC side reaches roots this function's caller never
+// promoted. Of the statuses below only "open" reaches the GC today, since its
+// candidate query (openWispGCRootCandidates) asks for exactly open and
+// in_progress; widening that query is what would put the rest in play.
 func ShouldPromoteWorkflowLaunchStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "", "open", "ready", "todo", "triage", "backlog":

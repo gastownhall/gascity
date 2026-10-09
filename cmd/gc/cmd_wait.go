@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -355,7 +356,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 			if err != nil {
 				return nil
 			}
-			return pokeController(resolvedCityPath)
+			return enqueueController(resolvedCityPath, reconcilekey.Session(sessionID))
 		},
 	})
 }
@@ -1115,6 +1116,27 @@ func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Ti
 }
 
 func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies waitDependencyReader, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
+	return prepareWaitWakeStateHooked(sessFront, dependencies, nudges, now, sessionBeads, waitWakeHooks{})
+}
+
+// waitWakeHooks are the v2 waits step's seams in prepareWaitWakeState; the
+// zero value is legacy's. clearHold clears a session's wait hold once its
+// waits end (nil: clearSessionWaitHoldIfIdle). pending sees each deps wait
+// left pending.
+type waitWakeHooks struct {
+	clearHold func(sessFront *sessionpkg.Store, sessionID string) error
+	pending   func(wait sessionpkg.WaitInfo)
+}
+
+func prepareWaitWakeStateHooked(sessFront *sessionpkg.Store, dependencies waitDependencyReader, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot, hooks waitWakeHooks) (map[string]bool, error) {
+	clearHold := hooks.clearHold
+	if clearHold == nil {
+		clearHold = clearSessionWaitHoldIfIdle
+	}
+	pending := hooks.pending
+	if pending == nil {
+		pending = func(sessionpkg.WaitInfo) {}
+	}
 	if sessionBeads == nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(sessFront.Store().Store)
@@ -1155,7 +1177,7 @@ func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies 
 			if err := sessFront.CancelWait(wait.ID, now, "continuation-stale"); err != nil {
 				return nil, err
 			}
-			if err := clearSessionWaitHoldIfIdle(sessFront, sessionID); err != nil {
+			if err := clearHold(sessFront, sessionID); err != nil {
 				return nil, err
 			}
 			continue
@@ -1174,7 +1196,7 @@ func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies 
 				if err := sessFront.ExpireWait(wait.ID, now); err != nil {
 					return nil, err
 				}
-				if err := clearSessionWaitHoldIfIdle(sessFront, sessionID); err != nil {
+				if err := clearHold(sessFront, sessionID); err != nil {
 					return nil, err
 				}
 				continue
@@ -1188,7 +1210,7 @@ func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies 
 				return nil, err
 			}
 			if done {
-				if err := clearSessionWaitHoldIfIdle(sessFront, sessionID); err != nil {
+				if err := clearHold(sessFront, sessionID); err != nil {
 					return nil, err
 				}
 				continue
@@ -1209,13 +1231,14 @@ func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies 
 				// declares a prefix its config does not — so a miss over that frame
 				// is not the proof this pass reaps a waiter on.
 				log.Printf("gc wait: wait %s: %v; retaining the wait for the next pass", wait.ID, depErr)
+				pending(wait)
 				continue
 			}
 			if errors.Is(depErr, beads.ErrNotFound) {
 				if err := sessFront.FailWait(wait.ID, now, depErr.Error()); err != nil {
 					return nil, err
 				}
-				if err := clearSessionWaitHoldIfIdle(sessFront, sessionID); err != nil {
+				if err := clearHold(sessFront, sessionID); err != nil {
 					return nil, err
 				}
 				continue
@@ -1227,7 +1250,9 @@ func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies 
 				return nil, err
 			}
 			readyWaitSet[sessionID] = true
+			continue
 		}
+		pending(wait)
 	}
 	return readyWaitSet, nil
 }
@@ -1405,31 +1430,11 @@ func cancelWaitsForSession(sessFront *sessionpkg.Store, sessionID string) error 
 	return err
 }
 
-func clearSessionWaitHold(sessFront *sessionpkg.Store, sessionID string) error {
-	if sessionID == "" {
-		return nil
-	}
-	batch := map[string]string{
-		"wait_hold":    "",
-		"sleep_intent": "",
-	}
-	if sessFront != nil {
-		if markers, err := sessFront.PersistedMarkers(sessionID); err == nil && markers.SleepReason == string(sessionpkg.SleepReasonWaitHold) {
-			batch["sleep_reason"] = ""
-		}
-	}
-	return sessFront.ApplyPatch(sessionID, batch)
-}
-
+// clearSessionWaitHoldIfIdle drops the wait hold once no wait is pending,
+// deciding as the v2 wait step does: only the wait's own intent and reason
+// go, never an operator's user-hold (CONTRACT v5.9 D8).
 func clearSessionWaitHoldIfIdle(sessFront *sessionpkg.Store, sessionID string) error {
-	hasWaits, err := hasNonTerminalWaits(sessFront, sessionID)
-	if err != nil {
-		return err
-	}
-	if hasWaits {
-		return nil
-	}
-	return clearSessionWaitHold(sessFront, sessionID)
+	return clearSessionWaitHoldWith(sessFront, sessionID, sessFront.UpdateMetadataFenced)
 }
 
 func hasNonTerminalWaits(sessFront *sessionpkg.Store, sessionID string) (bool, error) {

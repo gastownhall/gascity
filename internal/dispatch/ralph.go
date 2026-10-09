@@ -27,8 +27,10 @@ import (
 // is treated as a genuine failure. Infra re-runs do NOT burn a gc.attempt, so a
 // transport/store outage cannot exhaust a PR's ralph attempts and abort_scope a
 // green PR (maintainer-city incident: 3 attempts burned in one outage). The
-// bound guarantees a gate that can never run (a missing script, a perpetual
-// timeout) still terminates the workflow instead of pending forever. The
+// bound guarantees a gate that launches but never yields a verdict (a
+// perpetual timeout, exit 75 forever) still terminates the workflow instead of
+// pending forever; an unlaunchable script never reaches this budget and is
+// held open on the drift-pending lane instead (see runRalphCheck). The
 // counter is cloned into each next attempt, so this is the ralph loop's total
 // infra-retry budget; at a ~15s reconcile cadence it rides a multi-minute
 // outage.
@@ -82,7 +84,7 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	opts.tracef("ralph check-result bead=%s logical=%s attempt=%d outcome=%s exit=%s dur=%s truncated=%v stderr=%q stdout=%q",
 		bead.ID, logicalID, attempt, result.Outcome, formatGateExitCode(result.ExitCode), result.Duration, result.Truncated,
 		traceClipString(result.Stderr, traceCheckOutputCap), traceClipString(result.Stdout, traceCheckOutputCap))
-	if err := persistCheckResult(store, bead.ID, result); err != nil {
+	if err := persistCheckResult(store, bead, result); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: persisting check result: %w", bead.ID, err)
 	}
 
@@ -287,13 +289,31 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		// store/city root — exactly the base used when work_dir is empty, so
 		// it introduces no new trusted root and stays subject to
 		// ResolveConditionPath's containment checks. Only on a not-exist miss,
-		// so a check that does exist under the worktree keeps precedence; the
-		// original work_dir error is preserved when the fallback also misses.
-		if fallbackPath, fallbackErr := convergence.ResolveConditionPath(cityPath, storePath, checkPath); fallbackErr == nil {
+		// so a check that does exist under the worktree keeps precedence. The
+		// original work_dir error is preserved only when the fallback also
+		// misses; any other fallback error (not executable, containment
+		// refusal) describes the copy that would actually run, so it wins.
+		fallbackPath, fallbackErr := convergence.ResolveConditionPath(cityPath, storePath, checkPath)
+		switch {
+		case fallbackErr == nil:
 			scriptPath, err = fallbackPath, nil
+		case !errors.Is(fallbackErr, fs.ErrNotExist):
+			err = fallbackErr
 		}
 	}
 	if err != nil {
+		if convergence.IsConditionUnlaunchable(err) {
+			// The check cannot be launched: the script is missing, not a regular
+			// file, or not executable. No verdict exists and none will appear by
+			// re-running, so this must neither burn an attempt nor close the step.
+			// Hold the step OPEN on the drift-pending lane (dependents stay
+			// blocked, gc.control_pending_* explains it, control.stalled fires once
+			// after the budget); shipping or chmod-ing the script heals it on the
+			// next sweep (gastownhall/gascity#4239). A removed work_dir heals only
+			// when it is restored: RunCondition runs the check inside it, so a
+			// store-root copy found by the fallback above cannot start.
+			return convergence.GateResult{}, fmt.Errorf("%w: %s: resolving check path: %w (the step stays open until the check script can be launched)", ErrControlDriftPending, bead.ID, err)
+		}
 		return convergence.GateResult{}, fmt.Errorf("%s: resolving check path: %w", bead.ID, err)
 	}
 	if filepath.IsAbs(checkPath) && !pathWithinAny(scriptPath, trustedAbsRoots) {
@@ -545,20 +565,23 @@ func parsePositiveRalphTimeout(beadID, key, raw string) (time.Duration, error) {
 	return parsed, nil
 }
 
-func persistCheckResult(store beads.Store, beadID string, result convergence.GateResult) error {
-	batch := map[string]string{
-		beadmeta.OutcomeMetadataKey:    result.Outcome,
-		beadmeta.StdoutMetadataKey:     result.Stdout,
-		beadmeta.StderrMetadataKey:     result.Stderr,
-		beadmeta.DurationMsMetadataKey: strconv.FormatInt(result.Duration.Milliseconds(), 10),
-		beadmeta.TruncatedMetadataKey:  strconv.FormatBool(result.Truncated),
-	}
+// persistCheckResult records a launched check's result on its kind=check bead.
+// A launched check also proves any drift-pending wait (an unlaunchable script)
+// has healed, so the batch is seeded with controlCompletionMetadata, which
+// blanks whichever gc.control_pending_* keys the bead carries. That rides the
+// write every launched run already makes, so every later close is clean.
+func persistCheckResult(store beads.Store, bead beads.Bead, result convergence.GateResult) error {
+	batch := controlCompletionMetadata(bead, result.Outcome)
+	batch[beadmeta.StdoutMetadataKey] = result.Stdout
+	batch[beadmeta.StderrMetadataKey] = result.Stderr
+	batch[beadmeta.DurationMsMetadataKey] = strconv.FormatInt(result.Duration.Milliseconds(), 10)
+	batch[beadmeta.TruncatedMetadataKey] = strconv.FormatBool(result.Truncated)
 	if result.ExitCode != nil {
 		batch[beadmeta.ExitCodeMetadataKey] = strconv.Itoa(*result.ExitCode)
 	} else {
 		batch[beadmeta.ExitCodeMetadataKey] = ""
 	}
-	return store.SetMetadataBatch(beadID, batch)
+	return store.SetMetadataBatch(bead.ID, batch)
 }
 
 func appendRalphRetry(store beads.Store, logicalID string, prevSubject, prevCheck beads.Bead, nextAttempt int, opts ProcessOptions) (map[string]string, error) {
@@ -1355,6 +1378,13 @@ func clearRetryEphemera(meta map[string]string) {
 		beadmeta.ClosedByAttemptMetadataKey,
 		beadmeta.LastFailureClassMetadataKey,
 		beadmeta.RetrySessionRecycledMetadataKey,
+		// A pending budget and its one-shot stall latch belong to one bead's
+		// life; a clone that inherited them would never escalate its own
+		// pending wait (same rationale as clearControllerSpawnErrorMetadata).
+		beadmeta.ControlPendingReasonMetadataKey,
+		beadmeta.ControlPendingCountMetadataKey,
+		beadmeta.ControlPendingFirstSeenMetadataKey,
+		beadmeta.ControlPendingStalledMetadataKey,
 		"review.verdict",
 		"design_review.verdict",
 		"code_review.verdict",

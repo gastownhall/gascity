@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -30,6 +32,18 @@ type Provider struct {
 	cache    *StateCache
 	mu       sync.Mutex
 	workDirs map[string]string // session name → workDir (for CopyTo)
+
+	// livenessUnknown and livenessServerDead are set once
+	// ObserveLivenessWithError reports unknown or a confirmed-dead server,
+	// and cleared only when the cache answers again, so each episode logs
+	// once even while outcomes differ per session.
+	livenessUnknown    atomic.Bool
+	livenessServerDead atomic.Bool
+	// logf logs liveness episodes. Nil selects log.Printf.
+	logf func(format string, args ...any)
+	// unixListening reports whether a listener is bound to a unix socket
+	// path, for ServerConfirmedDead. Nil selects unixPathListening.
+	unixListening func(path string) (bool, error)
 }
 
 var instanceTokenReader = rand.Reader
@@ -44,7 +58,15 @@ var (
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
+	_ runtime.UnattendedSessionStopper      = (*Provider)(nil)
 	_ runtime.SessionRosterProvider         = (*Provider)(nil)
+	_ runtime.ListingAttestation            = (*Provider)(nil)
+	_ runtime.InventoryProvider             = (*Provider)(nil)
+	_ runtime.AttachmentObserverWithError   = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
+	_ runtime.ServerDeathConfirmer          = (*Provider)(nil)
+	_ runtime.SessionObjectKiller           = (*Provider)(nil)
+	_ runtime.FreshLivenessObserver         = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -71,6 +93,12 @@ func NewProviderWithConfig(cfg Config) *Provider {
 // and runtime readiness polling. Steps are conditional on Config fields;
 // an agent with no startup hints gets fire-and-forget.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if cfg.FreshOnly {
+		// Refuse a held name before any file is staged or pre_start runs.
+		if err := refuseHeldName(p.startOps(cfg, true), name); err != nil {
+			return err
+		}
+	}
 	var err error
 	cfg.Env, err = ensureInstanceToken(cfg.Env)
 	if err != nil {
@@ -252,7 +280,11 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 }
 
 // Stop destroys the named session and kills its entire process tree.
-// Returns nil if it doesn't exist (idempotent).
+// Returns nil if a responsive server reports no such session (idempotent).
+// A missing server is an uncertain inventory observation, not a certified
+// absence, so its error (wrapping ErrNoServer) reaches the caller; teardown
+// callers that only need the session gone absorb it through
+// runtime.StopForCleanup.
 // Invalidates the state cache after a successful stop so subsequent
 // IsRunning calls see the updated state immediately.
 func (p *Provider) Stop(name string) error {
@@ -263,7 +295,7 @@ func (p *Provider) Stop(name string) error {
 	// SIGTERMed mid-cleanup, leaving the agent alive and the bead un-closed.
 	// Excluding a caller that lives outside the pane is a harmless no-op.
 	err := p.tm.KillSessionWithProcessesExcluding(name, []string{strconv.Itoa(os.Getpid())})
-	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
+	if err != nil && errors.Is(err, ErrSessionNotFound) {
 		return nil // idempotent
 	}
 	if err == nil {
@@ -323,8 +355,29 @@ func (p *Provider) IsDeadRuntimeSession(name string) (bool, error) {
 }
 
 // IsAttached reports whether a user terminal is connected to the named session.
+//
+// Served from the same short-lived fleet snapshot as IsRunning (one
+// `tmux list-panes -a`), not a `display-message` fork per session: a reconcile
+// pass probes attachment for every session it tracks, so the per-session form
+// cost one tmux process per session per pass. A session missing from the
+// snapshot falls back to the direct read.
+//
+// Only this boolean read is served from the snapshot. [Provider.IsAttachedWithError],
+// the error-aware probe that destructive-action gates use, deliberately keeps
+// its direct per-session `display-message` so those gates never act on a
+// cached answer.
 func (p *Provider) IsAttached(name string) bool {
+	if attached, ok := p.cache.SessionAttached(name); ok {
+		return attached
+	}
 	return p.tm.IsSessionAttached(name)
+}
+
+// IsAttachedWithError reports whether a user terminal is connected to the
+// named session, separating "no client" from "could not tell". See
+// [Tmux.SessionAttachedWithError] for the error mapping.
+func (p *Provider) IsAttachedWithError(name string) (bool, error) {
+	return p.tm.SessionAttachedWithError(name)
 }
 
 // ProcessAlive reports whether the named session has a live agent
@@ -370,11 +423,19 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 		return found, errors.Join(scanErr, fmt.Errorf("tmux list running: %w", listErr))
 	}
 
+	// A session whose GC_SESSION_ID cannot be read may track any root, so the
+	// failure is returned with the results: a caller that reaps on IsTracked
+	// false must treat this scan's tracking as unknown. A session that ended
+	// after the listing tracks nothing.
 	tracked := make(map[string]string)
+	var metaErrs []error
 	for _, name := range running {
 		sessionID, err := p.GetMeta(name, "GC_SESSION_ID")
-		if err == nil && strings.TrimSpace(sessionID) != "" {
+		switch {
+		case err == nil && strings.TrimSpace(sessionID) != "":
 			tracked[sessionID] = name
+		case err != nil && !errors.Is(err, runtime.ErrSessionNotFound):
+			metaErrs = append(metaErrs, fmt.Errorf("tmux tracking: %w", err))
 		}
 	}
 	for i := range found {
@@ -383,7 +444,7 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 			found[i].ProviderName = name
 		}
 	}
-	return found, scanErr
+	return found, errors.Join(append([]error{scanErr}, metaErrs...)...)
 }
 
 // TerminateRuntime implements [runtime.ProcessTableScanner].
@@ -391,7 +452,7 @@ func (p *Provider) TerminateRuntime(r runtime.LiveRuntime) error {
 	if r.PID <= 1 {
 		return fmt.Errorf("tmux: invalid PID %d for session %s", r.PID, r.SessionID)
 	}
-	if err := proctable.KillByPID(r.PID); err != nil {
+	if err := proctable.KillByPIDIdentity(r.PID, r.StartIdentity); err != nil {
 		return fmt.Errorf("tmux: terminate runtime PID %d for session %s: %w", r.PID, r.SessionID, err)
 	}
 	return nil
@@ -426,6 +487,102 @@ func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.L
 	return runtime.Liveness{
 		Running: running,
 		Alive:   alive,
+	}
+}
+
+// ObserveLivenessWithError reports pane and agent-process presence like
+// ObserveLiveness, but answers "unknown" (an error wrapping
+// [runtime.ErrRuntimeUnavailable] and the refresh error) instead of "absent"
+// when the state cache cannot vouch for its snapshot. See
+// [classifyCacheObservation] for when it can. The bool paths (IsRunning,
+// ObserveLiveness) keep their staleTTL cliff unchanged.
+func (p *Provider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	if strings.TrimSpace(name) == "" {
+		return runtime.Liveness{}, nil
+	}
+	obs := p.cache.observe()
+	switch classifyCacheObservation(obs, name, p.cache.clock(), p.cache.staleTTL, p.tm.serverConfirmedDead) {
+	case cacheAnswerAbsent:
+		p.noteLivenessEpisode(livenessOutcomeServerDead, nil)
+		return runtime.Liveness{}, nil
+	case cacheAnswerUnknown:
+		p.noteLivenessEpisode(livenessOutcomeUnknown, obs.lastErr)
+		return runtime.Liveness{}, cacheUnknownError(name, obs.lastErr)
+	}
+	p.noteLivenessEpisode(livenessOutcomeAnswered, nil)
+	return p.snapshotLiveness(obs.state, name, processNames), nil
+}
+
+// cacheUnknownError is the "unknown" answer for name: an error wrapping
+// [runtime.ErrRuntimeUnavailable] and the refresh error.
+func cacheUnknownError(name string, lastErr error) error {
+	// The message omits the refresh error's text: tmux's "no tmux server
+	// running" and exec's "executable file not found" both match
+	// runtime.IsSessionGone, which would read "unknown" as "gone".
+	errs := []error{runtime.ErrRuntimeUnavailable}
+	if lastErr != nil {
+		errs = append(errs, lastErr)
+	}
+	return &quietCauseError{
+		msg:  fmt.Sprintf("observing tmux session %q: state cache cannot vouch for it: %v", name, runtime.ErrRuntimeUnavailable),
+		errs: errs,
+	}
+}
+
+// snapshotLiveness answers for name from one published snapshot: absent; a
+// corpse, with its session object id and creation time; or a running session
+// with both.
+func (p *Provider) snapshotLiveness(state runtimeStateSnapshot, name string, processNames []string) runtime.Liveness {
+	session, ok := state.Sessions[name]
+	if !ok {
+		return runtime.Liveness{}
+	}
+	if !session.Running {
+		return runtime.Liveness{Corpse: true, ObjectID: session.ID, ObjectCreated: session.Created}
+	}
+	processNames = nonEmptyProcessNames(processNames)
+	if len(processNames) == 0 {
+		processNames = p.sessionProcessNames(name)
+	}
+	if len(processNames) == 0 {
+		return runtime.Liveness{Running: true, Alive: true, ObjectID: session.ID, ObjectCreated: session.Created}
+	}
+	return runtime.Liveness{Running: true, Alive: state.processAlive(name, processNames), ObjectID: session.ID, ObjectCreated: session.Created}
+}
+
+// livenessOutcome is how one ObserveLivenessWithError call answered, for the
+// episode log.
+type livenessOutcome int
+
+const (
+	livenessOutcomeAnswered livenessOutcome = iota
+	livenessOutcomeUnknown
+	livenessOutcomeServerDead
+)
+
+// noteLivenessEpisode logs once on entering "unknown", once on entering
+// "server confirmed dead", and once when the cache answers again. A wedged
+// server now stops producing actions instead of false deaths, so the episode
+// must be visible without a line per probe.
+func (p *Provider) noteLivenessEpisode(outcome livenessOutcome, cause error) {
+	logf := p.logf
+	if logf == nil {
+		logf = log.Printf
+	}
+	switch outcome {
+	case livenessOutcomeUnknown:
+		if p.livenessUnknown.CompareAndSwap(false, true) {
+			logf("tmux liveness: reporting unknown for sessions the state cache cannot vouch for until a state refresh succeeds: %v", cause)
+		}
+	case livenessOutcomeServerDead:
+		if p.livenessServerDead.CompareAndSwap(false, true) {
+			logf("tmux liveness: server socket confirmed dead; reporting its sessions absent")
+		}
+	default:
+		wasUnknown := p.livenessUnknown.Swap(false)
+		if wasDead := p.livenessServerDead.Swap(false); wasUnknown || wasDead {
+			logf("tmux liveness: state cache answering again")
+		}
 	}
 }
 
@@ -610,18 +767,200 @@ func (p *Provider) SetMeta(name, key, value string) error {
 }
 
 // GetMeta retrieves a value from the named session's tmux environment.
-// Returns ("", nil) if the key is not set. Propagates session-not-found
-// and no-server errors so callers can distinguish "key absent" from
-// "session gone."
+// Returns ("", nil) only when the session answered that the key is not set.
+// A missing session wraps [runtime.ErrSessionNotFound]; any other failure
+// (no server, timeout, unparsable answer) wraps [runtime.ErrRuntimeUnavailable],
+// so a failed read is never mistaken for "unset".
 func (p *Provider) GetMeta(name, key string) (string, error) {
 	val, err := p.tm.GetEnvironment(name, key)
-	if err != nil {
-		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
-			return "", err
-		}
-		return "", nil // key not set
+	switch {
+	case err == nil:
+		return val, nil
+	case errors.Is(err, errEnvUnset):
+		return "", nil
+	case errors.Is(err, ErrSessionNotFound):
+		return "", fmt.Errorf("reading %s from session %q: %w: %w", key, name, runtime.ErrSessionNotFound, err)
+	default:
+		return "", fmt.Errorf("reading %s from session %q: %w: %w", key, name, runtime.ErrRuntimeUnavailable, err)
 	}
-	return val, nil
+}
+
+const unattendedSessionCensusFormat = "#{session_id}\t#{session_name}\t#{window_id}\t#{pane_id}\t#{session_attached}\t#{pane_in_mode}\t#{window_linked}"
+
+type unattendedSessionCensus struct {
+	sessionID       string
+	attachedClients int
+	copyModePanes   int
+	linkedWindows   map[string]struct{}
+	paneIdentities  map[string]struct{}
+	paneIDs         []string
+}
+
+// StopUnattendedSession stops the exact tmux session incarnation only after
+// proving that it is unattended. It closes only this provider's hidden client,
+// then carries the second census's stable session ID through process lookup and
+// kill so a replacement cannot be stopped by name after certification.
+func (p *Provider) StopUnattendedSession(name, expectedToken string) error {
+	if name == "" || strings.TrimSpace(name) != name {
+		return fmt.Errorf("stopping unattended tmux session: invalid session name %q", name)
+	}
+	if expectedToken == "" || strings.TrimSpace(expectedToken) != expectedToken {
+		return fmt.Errorf("stopping unattended tmux session %q: expected instance token is empty or malformed", name)
+	}
+
+	p.tm.CloseHiddenAttachClient(name)
+	before, err := p.unattendedSessionCensus(name)
+	if err != nil {
+		return err
+	}
+	actualToken, err := p.tm.GetEnvironment("="+name, "GC_INSTANCE_TOKEN")
+	if err != nil {
+		return fmt.Errorf("stopping unattended tmux session %q: reading exact instance token: %w", name, err)
+	}
+	if actualToken == "" || actualToken != expectedToken {
+		return fmt.Errorf("stopping unattended tmux session %q: instance token mismatch", name)
+	}
+	after, err := p.unattendedSessionCensus(name)
+	if err != nil {
+		return err
+	}
+	if before.sessionID != after.sessionID {
+		return fmt.Errorf("stopping unattended tmux session %q: session identity changed from %q to %q", name, before.sessionID, after.sessionID)
+	}
+	if !sameUnattendedPaneIdentities(before.paneIdentities, after.paneIdentities) {
+		return fmt.Errorf("stopping unattended tmux session %q: window/pane identity changed between censuses", name)
+	}
+	if before.attachedClients != 0 || after.attachedClients != 0 {
+		return fmt.Errorf("stopping unattended tmux session %q: attached clients observed before=%d after=%d", name, before.attachedClients, after.attachedClients)
+	}
+	if before.copyModePanes != 0 || after.copyModePanes != 0 {
+		return fmt.Errorf("stopping unattended tmux session %q: copy-mode panes observed before=%d after=%d", name, before.copyModePanes, after.copyModePanes)
+	}
+	if len(before.linkedWindows) != 0 || len(after.linkedWindows) != 0 {
+		return fmt.Errorf("stopping unattended tmux session %q: linked windows observed before=%d after=%d", name, len(before.linkedWindows), len(after.linkedWindows))
+	}
+	if err := p.tm.KillSessionWithCertifiedPaneProcessesExcluding(after.sessionID, after.paneIDs, []string{strconv.Itoa(os.Getpid())}); err != nil {
+		return fmt.Errorf("stopping unattended tmux session %q by certified ID %q: %w", name, after.sessionID, err)
+	}
+	p.cache.EvictSession(name)
+	return nil
+}
+
+func (p *Provider) unattendedSessionCensus(name string) (unattendedSessionCensus, error) {
+	out, err := p.tm.run("list-panes", "-s", "-t", "="+name, "-F", unattendedSessionCensusFormat)
+	if err != nil {
+		return unattendedSessionCensus{}, fmt.Errorf("stopping unattended tmux session %q: listing exact panes: %w", name, err)
+	}
+	return parseUnattendedSessionCensus(name, out)
+}
+
+func parseUnattendedSessionCensus(name, output string) (unattendedSessionCensus, error) {
+	census := unattendedSessionCensus{
+		linkedWindows:  make(map[string]struct{}),
+		paneIdentities: make(map[string]struct{}),
+	}
+	seenPanes := make(map[string]struct{})
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) == 1 && strings.TrimSpace(lines[0]) == "" {
+		return census, fmt.Errorf("stopping unattended tmux session %q: empty pane census", name)
+	}
+	for index, line := range lines {
+		if err := census.absorbRow(name, index, line, seenPanes); err != nil {
+			return census, err
+		}
+	}
+	return census, nil
+}
+
+// absorbRow folds one pane-census row into the census, returning the first
+// inconsistency that makes the census untrustworthy. index is the zero-based
+// row number: it names the row in error messages and anchors the session-wide
+// attachment count to the first row, which every later row must agree with.
+// seenPanes carries duplicate detection across rows.
+func (census *unattendedSessionCensus) absorbRow(name string, index int, line string, seenPanes map[string]struct{}) error {
+	fields := strings.Split(line, "\t")
+	if len(fields) != 7 {
+		return fmt.Errorf("stopping unattended tmux session %q: malformed pane census row %d", name, index+1)
+	}
+	sessionID, sessionName, windowID, paneID := fields[0], fields[1], fields[2], fields[3]
+	if !wellFormedTmuxID(sessionID, '$') || !wellFormedTmuxID(windowID, '@') || !wellFormedTmuxID(paneID, '%') {
+		return fmt.Errorf("stopping unattended tmux session %q: malformed identity in pane census row %d", name, index+1)
+	}
+	if sessionName != name {
+		return fmt.Errorf("stopping unattended tmux session %q: census row %d names session %q", name, index+1, sessionName)
+	}
+	if census.sessionID == "" {
+		census.sessionID = sessionID
+	} else if census.sessionID != sessionID {
+		return fmt.Errorf("stopping unattended tmux session %q: mixed session identities in pane census", name)
+	}
+	if _, duplicate := seenPanes[paneID]; duplicate {
+		return fmt.Errorf("stopping unattended tmux session %q: duplicate pane %q in census", name, paneID)
+	}
+	seenPanes[paneID] = struct{}{}
+	census.paneIdentities[windowID+"\t"+paneID] = struct{}{}
+	census.paneIDs = append(census.paneIDs, paneID)
+
+	attached, err := parseNonnegativeTmuxCount(fields[4])
+	if err != nil {
+		return fmt.Errorf("stopping unattended tmux session %q: malformed attachment count in pane census row %d", name, index+1)
+	}
+	if index == 0 {
+		census.attachedClients = attached
+	} else if census.attachedClients != attached {
+		return fmt.Errorf("stopping unattended tmux session %q: inconsistent attachment counts in pane census", name)
+	}
+	inMode, err := parseNonnegativeTmuxCount(fields[5])
+	if err != nil {
+		return fmt.Errorf("stopping unattended tmux session %q: malformed copy-mode count in pane census row %d", name, index+1)
+	}
+	if inMode > 0 {
+		census.copyModePanes++
+	}
+	linked, err := parseNonnegativeTmuxCount(fields[6])
+	if err != nil {
+		return fmt.Errorf("stopping unattended tmux session %q: malformed linked-window count in pane census row %d", name, index+1)
+	}
+	if linked > 0 {
+		census.linkedWindows[windowID] = struct{}{}
+	}
+	return nil
+}
+
+func sameUnattendedPaneIdentities(left, right map[string]struct{}) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for identity := range left {
+		if _, ok := right[identity]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func wellFormedTmuxID(value string, prefix byte) bool {
+	if len(value) < 2 || value[0] != prefix {
+		return false
+	}
+	for i := 1; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func parseNonnegativeTmuxCount(value string) (int, error) {
+	if value == "" {
+		return 0, fmt.Errorf("empty count")
+	}
+	for i := range value {
+		if value[i] < '0' || value[i] > '9' {
+			return 0, fmt.Errorf("non-decimal count %q", value)
+		}
+	}
+	return strconv.Atoi(value)
 }
 
 // RemoveMeta removes a key from the named session's tmux environment.
@@ -671,9 +1010,31 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	return matched, nil
 }
 
+// ListRunningComplete implements [runtime.ListingAttestation]. An error-free
+// ListRunning means the server answered list-sessions, which names every
+// session it holds (remain-on-exit corpses included); an absent server is
+// reported as a [runtime.PartialListError], never as an empty list.
+func (p *Provider) ListRunningComplete() bool { return true }
+
+// RuntimeInventory implements [runtime.InventoryProvider] with one
+// batched pane read. Delegates to [Tmux.listRuntimeInventory].
+func (p *Provider) RuntimeInventory(ctx context.Context) (map[string]runtime.InventoryEntry, error) {
+	return p.tm.listRuntimeInventory(ctx)
+}
+
 // GetLastActivity returns the time of the last I/O activity in the named
-// session. Delegates to [Tmux.GetSessionActivity].
+// session.
+//
+// The raw timestamp comes from the same fleet snapshot as IsRunning rather than
+// a `list-windows` fork per session, and the poke discount
+// ([Tmux.discountedActivity]) is applied to it exactly as
+// [Tmux.GetSessionActivity] would. The snapshot carries max(#{window_activity})
+// per session — NOT #{session_activity}, which does not advance on detached
+// pane I/O. A session missing from the snapshot falls back to the direct read.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
+	if activity, ok := p.cache.SessionActivity(name); ok {
+		return p.tm.discountedActivity(name, activity), nil
+	}
 	return p.tm.GetSessionActivity(name)
 }
 
@@ -782,30 +1143,42 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 }
 
 // Attach connects the user's terminal to the named tmux session.
-// It returns [runtime.ErrSessionNotFound] when the session is absent and
-// refuses to attach to tmux remain-on-exit dead panes with a tmux-specific
-// message-only error. Pane-state query failures fall through to tmux attach.
+// It returns [runtime.ErrSessionNotFound] when the session is absent,
+// including when a configured named socket is missing, so no server can be
+// listening on it; an ambiguous socket observation refuses with
+// [ErrServerDegraded] instead. It refuses to attach to tmux remain-on-exit
+// dead panes with a tmux-specific message-only error. Pane-state query
+// failures fall through to tmux attach.
 func (p *Provider) Attach(name string) error {
-	has, err := p.tm.HasSession(name)
+	witness, err := p.tm.captureAttachSocketWitness()
+	if errors.Is(err, errNamedSocketMissing) {
+		return fmt.Errorf("%w: %w: %s: tmux server not running (attach_witness reason=socket-missing)", runtime.ErrSessionNotFound, ErrSessionNotFound, name)
+	}
+	if err != nil {
+		return fmt.Errorf("checking tmux server before attach: %w", err)
+	}
+	has, err := p.tm.hasSessionForAttach(name)
 	if err != nil {
 		return fmt.Errorf("checking tmux session before attach: %w", err)
 	}
 	if !has {
+		if err := p.tm.verifyAttachSocketWitness(witness); err != nil {
+			return fmt.Errorf("checking tmux server before attach: %w", err)
+		}
 		return fmt.Errorf("%w: %w: %s", runtime.ErrSessionNotFound, ErrSessionNotFound, name)
 	}
-	dead, err := p.tm.IsPaneDead(name)
+	dead, err := p.tm.isPaneDeadForAttach(name)
 	if err == nil && dead {
 		return fmt.Errorf("refusing to attach to dead pane for session %q", name)
 	}
-	args := []string{"-u"}
-	if p.cfg.SocketName != "" {
-		args = append(args, "-L", p.cfg.SocketName)
-	}
-	args = append(args, "attach-session", "-t", name)
+	args := p.tm.attachCommandArgs(name, witness)
 	cmd := exec.Command("tmux", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	if err := p.tm.verifyAttachSocketWitness(witness); err != nil {
+		return fmt.Errorf("checking tmux server before attach: %w", err)
+	}
 	return cmd.Run()
 }
 
@@ -842,7 +1215,8 @@ type startOps interface {
 	waitForReady(ctx context.Context, name string, rc *RuntimeConfig, timeout time.Duration) error
 	hasSession(name string) (bool, error)
 	capturePane(name string, lines int) (string, error)
-	recordStartCrash(name, paneContent string) string
+	paneDeadInfo(name string) (status, signal string)
+	recordStartCrash(name, paneContent, status, signal string) string
 	recordUnconfirmedNudge(name, message string, cause error) string
 	sendKeys(name, text string) error
 	paneBusy(name string) (bool, error)
@@ -989,10 +1363,16 @@ func (o *tmuxStartOps) capturePane(name string, lines int) (string, error) {
 	return runtime.RedactSecrets(content, o.secrets), err
 }
 
+// paneDeadInfo returns the dead pane's exit status and terminating signal.
+func (o *tmuxStartOps) paneDeadInfo(name string) (status, signal string) {
+	return o.tm.PaneDeadInfo(name)
+}
+
 // recordStartCrash persists a per-session start-crash diagnostic so an
 // immediate start-crash leaves a durable on-disk artifact (the transient
 // start error is otherwise lost). It records the dead pane's exit status and
-// terminating signal alongside the captured pane output. Best-effort: a
+// terminating signal (read once by the caller, which also classifies them)
+// alongside the captured pane output. Best-effort: a
 // disabled capture (empty runtimeDir) or any I/O error returns "" without
 // affecting startup. Returns the artifact path when written.
 //
@@ -1001,12 +1381,11 @@ func (o *tmuxStartOps) capturePane(name string, lines int) (string, error) {
 // this is the copy that outlives the session, and a future caller reaching for
 // a durable crash record should not have to know which of its arguments were
 // pre-sanitized.
-func (o *tmuxStartOps) recordStartCrash(name, paneContent string) string {
+func (o *tmuxStartOps) recordStartCrash(name, paneContent, status, signal string) string {
 	if o.runtimeDir == "" {
 		return ""
 	}
 	paneContent = runtime.RedactSecrets(paneContent, o.secrets)
-	status, signal := o.tm.PaneDeadInfo(name)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "session: %s\n", name)
@@ -1189,7 +1568,7 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	stderr := newCommandOutputTail(setupCommandOutputLimit)
 	c.Stdout = mon.Writer(stdout)
 	c.Stderr = mon.Writer(stderr)
-	// Cooperative cancellation (execgrace.Apply): deadline expiry interrupts
+	// Cooperative cancellation (execgrace.Apply): deadline expiry sends SIGTERM to
 	// the command's process group first so shell rollback traps — e.g.
 	// worktree-setup.sh restoring content it staged aside — run before the
 	// forced kill. Go's default context-cancel is SIGKILL, which is
@@ -1323,24 +1702,34 @@ func startupDeadSessionError(ops startOps, name string) error {
 	} else {
 		pane = strings.TrimSpace(pane)
 	}
+	// Read the corpse's exit facts once: the durable record and the capacity
+	// classification below must describe the same observation.
+	status, signal := ops.paneDeadInfo(name)
 	// Persist a durable crash diagnostic (exit status + signal + pane output)
 	// so the immediate-exit reason survives the transient start error. Recorded
 	// even when the pane is empty, so an exit-before-render crash still leaves
 	// the exit status/signal on disk. Best-effort: "" when capture is disabled.
-	diagPath := ops.recordStartCrash(name, pane)
+	diagPath := ops.recordStartCrash(name, pane, status, signal)
+	var died error
 	switch {
 	case pane != "" && diagPath != "":
-		return fmt.Errorf("%w: session %q; diagnostic written to %s; last pane output:\n%s",
+		died = fmt.Errorf("%w: session %q; diagnostic written to %s; last pane output:\n%s",
 			runtime.ErrSessionDiedDuringStartup, name, diagPath, pane)
 	case pane != "":
-		return fmt.Errorf("%w: session %q; last pane output:\n%s",
+		died = fmt.Errorf("%w: session %q; last pane output:\n%s",
 			runtime.ErrSessionDiedDuringStartup, name, pane)
 	case diagPath != "":
-		return fmt.Errorf("%w: session %q; diagnostic written to %s",
+		died = fmt.Errorf("%w: session %q; diagnostic written to %s",
 			runtime.ErrSessionDiedDuringStartup, name, diagPath)
 	default:
-		return startupSessionDiedError(name)
+		died = startupSessionDiedError(name)
 	}
+	// A clean EX_TEMPFAIL exit is the launcher declaring the endpoint refused
+	// the start. Only the exit status classifies; the pane text never does.
+	if signal == "" && status == strconv.Itoa(runtime.ExitCodeTempFail) {
+		return &runtime.CapacityError{ExitCode: runtime.ExitCodeTempFail, Source: runtime.CapacitySourceExitStatus, Err: died}
+	}
+	return died
 }
 
 func startupSessionDiedError(name string) error {
@@ -1793,6 +2182,8 @@ func runPreStart(ctx context.Context, ops startOps, _ string, cfg runtime.Config
 //   - if ProcessNames are configured and the agent is dead (zombie), the
 //     zombie session is killed and recreated
 //
+// With cfg.FreshOnly there are no exceptions.
+//
 // maxInlinePromptLen is the threshold above which prompts are written to a
 // temp file and read back via $(cat ...) inside the tmux session. tmux
 // new-session passes the command through a fixed-size protocol buffer
@@ -1868,6 +2259,12 @@ func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 		return cleanupPromptFileOnError(promptFile, fmt.Errorf("creating session: %w", err))
 	}
 
+	// FreshOnly: the name was taken after Start's held-name check. Refuse it
+	// rather than recycle it, live or dead.
+	if cfg.FreshOnly {
+		return cleanupPromptFileOnError(promptFile, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name))
+	}
+
 	// Session exists but the pane is already dead (e.g. remain-on-exit corpse).
 	// Safe to recycle even when ProcessNames are unavailable.
 	if !ops.isSessionRunning(name) {
@@ -1897,6 +2294,20 @@ func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 	}
 	if err := recreateSessionAfterCleanup(ops, name, cfg.WorkDir, fullCommand, cfg.Env, promptFile); err != nil {
 		return cleanupPromptFileOnError(promptFile, fmt.Errorf("creating session after zombie cleanup: %w", err))
+	}
+	return nil
+}
+
+// refuseHeldName is the FreshOnly gate (CONTRACT v5 S1, LL6): a name tmux
+// already holds, live or dead, returns runtime.ErrSessionExists, and nothing
+// is killed. A failed probe fails closed.
+func refuseHeldName(ops startOps, name string) error {
+	held, err := ops.hasSession(name)
+	if err != nil {
+		return fmt.Errorf("checking session %q: %w", name, err)
+	}
+	if held {
+		return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
 	}
 	return nil
 }

@@ -413,6 +413,14 @@ func clearControllerSpawnErrorMetadata(metadata map[string]string) {
 	// later life (re-mint, reopen) and quarantine itself on its first refusal.
 	metadata[beadmeta.ControllerRetryFirstSeenMetadataKey] = ""
 	metadata[beadmeta.ControllerRetryCountMetadataKey] = ""
+	// The pending budget rides along for the same reason, plus one of its own:
+	// gc.control_pending_stalled is a one-shot latch, so a bead that carried it
+	// into a later life would never escalate a second, genuinely never-healing
+	// pending wait.
+	metadata[beadmeta.ControlPendingReasonMetadataKey] = ""
+	metadata[beadmeta.ControlPendingCountMetadataKey] = ""
+	metadata[beadmeta.ControlPendingFirstSeenMetadataKey] = ""
+	metadata[beadmeta.ControlPendingStalledMetadataKey] = ""
 }
 
 func isPartialAttemptAttachError(err error) bool {
@@ -506,6 +514,14 @@ var transientNeedles = []transientNeedle{
 	{needle: "too many connections", tier: TierAvailability},
 	{needle: "lock wait timeout", tier: TierAvailability},
 	{needle: "deadlock found", tier: TierAvailability},
+	// Dolt's own 1213/40001 text ("serialization failure: this transaction
+	// conflicts with a committed transaction from another client, try
+	// restarting transaction") shares the MySQL error number with "Deadlock
+	// found" but none of its words. It is the same lock contention, and it only
+	// reaches this classifier once the store layer's bounded write retry has
+	// already lost the race — so it is Tier A, never a hard quarantine.
+	{needle: "serialization failure", tier: TierAvailability},
+	{needle: "conflicts with a committed transaction", tier: TierAvailability},
 	{needle: "database is locked", tier: TierAvailability},
 	{needle: "database table is locked", tier: TierAvailability},
 	{needle: "sqlite_busy", tier: TierAvailability},

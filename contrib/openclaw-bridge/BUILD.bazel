@@ -1,0 +1,96 @@
+load("@aspect_rules_js//js:defs.bzl", "js_test")
+load("@npm_openclaw//:defs.bzl", "npm_link_all_packages")
+load("//tools/bazel/rules:pnpm_lock.bzl", "pnpm_lock_in_sync_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# The bridge's npm dependencies from pnpm-lock.yaml via @npm_openclaw
+# (MODULE.bazel). package-lock.json stays the source of truth for local
+# `npm ci`; the lockfiles_in_sync_test keeps the two equal.
+npm_link_all_packages(name = "node_modules")
+
+pnpm_lock_in_sync_test(
+    name = "lockfiles_in_sync_test",
+    manifests = [
+        "package.json",
+        "pnpm-workspace.yaml",
+    ],
+)
+
+exports_files([
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+])
+
+# `npm test` is `node --test`, which runs every test/*.test.mjs; each file is
+# one js_test under the rules_nodejs toolchain, gathered by the suite.
+_TESTS = [
+    "entrypoints",
+    "gc-client",
+    "inbound",
+    "openclaw-loader",
+]
+
+[
+    js_test(
+        name = "%s_test" % t.replace("-", "_"),
+        data = glob([
+            "*.mjs",
+            "lib/**",
+        ]) + [
+            "package.json",
+            ":node_modules",
+        ],
+        entry_point = "test/%s.test.mjs" % t,
+        node_options = ["--test"],
+    )
+    for t in _TESTS
+]
+
+test_suite(
+    name = "openclaw_bridge_test",
+    tests = [":%s_test" % t.replace("-", "_") for t in _TESTS],
+)
+
+filegroup(
+    name = "all_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "BUILD.bazel",
+            "node_modules/**",
+        ],
+    ),
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

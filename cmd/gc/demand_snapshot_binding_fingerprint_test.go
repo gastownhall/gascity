@@ -71,8 +71,8 @@ func TestDemandFingerprintTracksTheBindingTheProbeReads(t *testing.T) {
 	cr := bindingFingerprintRuntime(t, work, binding)
 	step := routedStepIn(t, binding, "routed graph step")
 
-	before := cr.readyDemandSnapshotFingerprint()
-	if stable := cr.readyDemandSnapshotFingerprint(); stable != before {
+	before := cr.readyDemandSnapshotFingerprint(nil)
+	if stable := cr.readyDemandSnapshotFingerprint(nil); stable != before {
 		t.Fatalf("fingerprint is not stable across reads: %q != %q", before, stable)
 	}
 
@@ -83,7 +83,7 @@ func TestDemandFingerprintTracksTheBindingTheProbeReads(t *testing.T) {
 		t.Fatalf("claiming the step: %v", err)
 	}
 
-	if after := cr.readyDemandSnapshotFingerprint(); after == before {
+	if after := cr.readyDemandSnapshotFingerprint(nil); after == before {
 		t.Fatal("the fingerprint did not change when a routed step was claimed in the binding; demand stays asserted for work already taken")
 	}
 }
@@ -98,10 +98,10 @@ func TestDemandFingerprintIgnoresAStoreTheProbeDoesNotRead(t *testing.T) {
 	cr := bindingFingerprintRuntime(t, work, binding)
 	routedStepIn(t, binding, "routed graph step")
 
-	before := cr.readyDemandSnapshotFingerprint()
+	before := cr.readyDemandSnapshotFingerprint(nil)
 	routedStepIn(t, unrelated, "work in a store nothing here reads")
 
-	if after := cr.readyDemandSnapshotFingerprint(); after != before {
+	if after := cr.readyDemandSnapshotFingerprint(nil); after != before {
 		t.Fatalf("fingerprint changed for a store outside the demand probe: %q -> %q", before, after)
 	}
 }
@@ -123,7 +123,7 @@ func TestDemandFingerprintReadsASingleStoreCityOnce(t *testing.T) {
 		stderr: io.Discard,
 	}
 
-	cr.readyDemandSnapshotFingerprint()
+	cr.readyDemandSnapshotFingerprint(nil)
 
 	if store.readyCalls != 1 {
 		t.Fatalf("ready reads = %d, want 1 (the sessions class is the work store here)", store.readyCalls)

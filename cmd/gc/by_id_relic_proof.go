@@ -92,6 +92,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -176,11 +177,19 @@ func censusRefusedCityBinding(cityPath string) map[storeref.StoreRef]bool {
 	if err != nil || cfg == nil || cfg.Storage == nil {
 		return nil
 	}
-	shape, binding := storageSplitShapeOf(cfg.EffectiveStorage())
+	storage := cfg.EffectiveStorage()
+	shape, binding := storageSplitShapeOf(storage)
 	if shape != storageSplitWhole {
 		// The only arrangement this build serves is also the only one a
 		// migration can have produced, so it is the only one whose binding can
 		// hold a preserved id.
+		return nil
+	}
+	// Native transport is checked here, against the city's own cfg, because
+	// the open below carries none: native_transport "off" keeps the census from
+	// opening a natively served binding, as it keeps the boot gate from
+	// serving one.
+	if nativeTransportBindingRefusal(binding, storebinding.ProviderID(storage.Bindings[binding].Provider), cfg) != nil {
 		return nil
 	}
 	if !refusedBindingIsAlreadyOnDisk(cityPath, cfg) {
@@ -190,7 +199,9 @@ func censusRefusedCityBinding(cityPath string) map[storeref.StoreRef]bool {
 	if err != nil {
 		return nil
 	}
-	routes, err := openStorageRoutes(plan, infraBindingTarget{Binding: binding})
+	// Unstamped (nil cfg): the census only reads, and a require refusal here
+	// would read as "cannot open the binding".
+	routes, err := openStorageRoutes(plan, infraBindingTarget{Binding: binding}, nil, "", nil)
 	if err != nil {
 		// "Cannot open the binding" — the one refusal that really does say the
 		// binding is unreadable. No proof, and the read falls through.

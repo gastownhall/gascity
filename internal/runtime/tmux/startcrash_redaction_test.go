@@ -52,7 +52,7 @@ func TestRecordStartCrashRedactsPaneSecrets(t *testing.T) {
 	tm.exec = &fakeExecutor{}
 	ops := newTmuxStartOps(tm, dir, 0, runtime.Config{Env: map[string]string{"ANTHROPIC_API_KEY": secret}}, true)
 
-	path := ops.recordStartCrash("gc-test-crash", "+ export ANTHROPIC_API_KEY="+secret+"\nboom\n")
+	path := ops.recordStartCrash("gc-test-crash", "+ export ANTHROPIC_API_KEY="+secret+"\nboom\n", "", "")
 	if path == "" {
 		t.Fatal("recordStartCrash returned no artifact path")
 	}
@@ -77,7 +77,7 @@ func TestRecordStartCrashWritesOwnerOnlyArtifact(t *testing.T) {
 	tm.exec = &fakeExecutor{}
 	ops := newTmuxStartOps(tm, dir, 0, runtime.Config{}, true)
 
-	path := ops.recordStartCrash("gc-test-crash", "boom\n")
+	path := ops.recordStartCrash("gc-test-crash", "boom\n", "", "")
 	if path == "" {
 		t.Fatal("recordStartCrash returned no artifact path")
 	}
@@ -118,7 +118,7 @@ func TestStartOpsCapturePaneJoinsWrappedLines(t *testing.T) {
 		t.Errorf("capture-pane args %q omit -J; wrapped credentials survive redaction", args)
 	}
 	// Control: the joined capture is still a capture of the right pane.
-	if !slices.Contains(args, "capture-pane") || !slices.Contains(args, "gc-test-crash") {
+	if !slices.Contains(args, "capture-pane") || !slices.Contains(args, "=gc-test-crash:") {
 		t.Errorf("capture-pane args %q lost the command or target", args)
 	}
 }

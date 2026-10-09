@@ -6,11 +6,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -36,6 +39,13 @@ unregisters it (equivalent to a following "gc unregister") — the city
 will not be found by name or auto-started again until it is re-registered
 with "gc register". Use "gc unregister" directly to remove a registration
 without stopping sessions.
+
+gc stop reports "City stopped." only when it could confirm that every
+session stopped. If it could not list the runtime's sessions completely,
+or could not check whether a session is still running, it names what it
+could not verify, still stops every session it did see, and exits
+non-zero; a supervisor registration is restored. Resolve the reported
+error and run gc stop again.
 
 Use --timeout=DURATION to cap the wall-clock time gc stop will spend
 before giving up; the default budgets configured session interrupt and
@@ -121,12 +131,23 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 	}
 
 	unregisteredFromSupervisor := false
-	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stopStdout, stderr, "gc stop", force, unregisterTx); handled {
+	handled, code, ownership := unregisterCityFromSupervisorForStop(cityPath, stopStdout, stderr, "gc stop", force, unregisterTx)
+	if ownership != nil {
+		// The supervisor stopped the controller; hold its lock until the bead
+		// store below is retired. It is released when this returns, before
+		// the caller commits or rolls back the unregister, so a restored
+		// registration never finds the lock still held by this stop.
+		defer ownership.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
+	}
+	if handled {
 		if code != 0 {
 			return stopCommandOutcome{code: code, cityPath: cityPath}
 		}
 		unregisteredFromSupervisor = true
-		if supervisorAliveHook() != 0 {
+		// Retained ownership proves the supervisor path ran; re-probing the
+		// supervisor could fall through to the standalone stop while this
+		// process still holds the lock that path waits on.
+		if ownership != nil || supervisorAliveHook() != 0 {
 			if !stopCityManagedBeadsProviderAfterSuccessfulStop(cityPath, stderr) {
 				return stopCommandOutcome{code: 1, cityPath: cityPath}
 			}
@@ -338,13 +359,17 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	stopResult := tryStopControllerWithForce(cityPath, stdout, force)
 	switch stopResult.outcome {
 	case controllerStopAcknowledged:
-		if err := waitForStandaloneControllerStop(cityPath, cfg.Daemon.ShutdownTimeoutDuration()+15*time.Second); err != nil {
+		ownership, err := acquireStoppedControllerOwnership(cityPath, cfg.Daemon.ShutdownTimeoutDuration()+15*time.Second)
+		if err != nil {
 			fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		defer ownership.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
 		// Controller handled the shutdown — still stop the bead store, and
 		// only after waiting for the controller to be gone: a live reader
-		// restarts a provider-owned proxy the moment it is retired.
+		// restarts a provider-owned proxy the moment it is retired. The
+		// controller lock stays held until this returns so a restarted or
+		// second controller cannot come up against a provider being retired.
 		if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 			fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
@@ -359,7 +384,18 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 		return 1
 	}
 
-	store, _ := openCityStoreAt(cityPath)
+	// A city that is already stopped has nothing for this stop to do, and on
+	// a provider-owned proxied store the rest of this flow is not free: the
+	// session provider's snapshot and every session lookup read the store,
+	// and each bd read restarts the scope's proxy and Dolt child, only for the
+	// final provider stop to retire them again. Answer from the runtime and
+	// the proxy records instead, without touching the store.
+	if stopped, sp := cityAlreadyStoppedForStop(cfg, cityPath); stopped {
+		teardownServerForStop(sp, stderr, "gc stop")
+		return 0
+	}
+
+	store, _ := openCityStoreForStop(cityPath)
 	// Every store consumer in this stop flow is session-class (sleep-reason marks,
 	// session-name lookups, session-runtime stop, orphan cleanup), so route the
 	// whole flow through the session coordination-class store for relocation-safety.
@@ -390,11 +426,7 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 			}
 		}
 	}
-	recorder := events.Discard
-	if fr, err := newFileEventsRecorder(
-		filepath.Join(cityPath, ".gc", "events.jsonl"), cfg.Events, stderr); err == nil {
-		recorder = fr
-	}
+	recorder := openCityRecorderAt(cityPath, stderr)
 
 	graceTimeout := cfg.Daemon.ShutdownTimeoutDuration()
 	if force {
@@ -405,8 +437,13 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	code := doStopWithoutSuccess(sessionNames, sp, cfg, sessStore, graceTimeout, recorder, stdout, stderr)
 
 	// Clean up orphan sessions (sessions with the city prefix that are
-	// not in the current config).
-	stopOrphans(sp, desired, cfg, sessionFrontDoor(sessStore), graceTimeout, recorder, stdout, stderr)
+	// not in the current config). An orphan sweep that could not see the
+	// whole runtime leaves the stop unconfirmed, but the remaining cleanup
+	// below still runs: it only retires things this stop owns.
+	if !stopOrphans(sp, desired, cfg, sessionFrontDoor(sessStore), graceTimeout, recorder, stdout, stderr) && code == 0 {
+		fmt.Fprintln(stderr, "gc stop: stop not confirmed: the runtime inventory was incomplete, so sessions outside the configuration may still be running; resolve the runtime error and run gc stop again") //nolint:errcheck // best-effort stderr
+		code = 1
+	}
 
 	teardownServerForStop(sp, stderr, "gc stop")
 
@@ -423,14 +460,137 @@ func cmdStopBodyWithoutSuccess(cityPath string, cfg *config.City, force bool, st
 	// would leave the city up with a live proxy every time.
 	//
 	// The call is re-runnable: `bd dolt stop` is idempotent on rc.2 (exit 0,
-	// stopped/verified true, with or without a live proxy), so a second
-	// `gc stop` finds nothing to do and still exits 0.
+	// stopped/verified true, with or without a live proxy). A second `gc stop`
+	// of a fully stopped proxied city does not get this far: it returns at
+	// cityAlreadyStoppedForStop above without reading the store.
 	if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal warning.
 	}
 
 	return code
+}
+
+// openCityStoreForStop opens the store the full stop flow reads sessions
+// from. A variable so tests can prove the already-stopped path never opens it.
+var openCityStoreForStop = openCityStoreAt
+
+// sessionProviderForStopProbe builds the session provider
+// cityAlreadyStoppedForStop lists the runtime through. A variable so tests can
+// substitute a fake runtime.
+var sessionProviderForStopProbe = newStopProbeSessionProvider
+
+// newStopProbeSessionProvider is the city's session provider without the
+// session-bead snapshot sessionProviderForStopCity loads to seed ACP routes.
+// Listing what is running needs no routes: the composite provider lists every
+// backend. Loading the snapshot would read the store, which is the one thing
+// the already-stopped check must not do.
+func newStopProbeSessionProvider(cfg *config.City, cityPath string) (runtime.Provider, error) {
+	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+	sp, err := newSessionProviderFromContext(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	return sp, nil
+}
+
+// cityAlreadyStoppedForStop reports whether the standalone stop flow, once it
+// has proven no controller serves the city, would find nothing to stop: the
+// bead store's backing service is already retired and no runtime session is
+// running. It reads only the proxy records, the process table and the runtime
+// inventory; it never opens the store or runs bd. When it answers true it also
+// returns the provider it listed through, for the runtime server teardown.
+//
+// It answers false whenever it cannot prove the city is stopped, so the full
+// flow still handles a partially stopped city: a live session, a live or
+// SIGKILLed proxy, a stray Dolt child, a gc-managed Dolt, a scope that is not
+// provider-owned proxied, or a runtime it could not list completely.
+//
+// The city's nudge pollers are stopped only once the store is found retired
+// and the runtime is found empty, and the store is checked again after they
+// are gone. A poller is a reader the city spawns: one that outlived the city
+// restarts the proxy the first check found retired, which the second check
+// catches. Any other city keeps its pollers for the full flow, which stops
+// them last, with the store, so a full stop that fails or times out does not
+// leave running sessions without their pollers.
+//
+// What this path does not do is mark session beads asleep with the city-stop
+// reason: that needs the store. A clean stop already marked them, so the only
+// beads left unmarked are those of a city whose controller died without
+// stopping, whose sessions are gone and whose proxy has since retired.
+func cityAlreadyStoppedForStop(cfg *config.City, cityPath string) (bool, runtime.Provider) {
+	if !stopCityStoreRetired(cityPath) {
+		return false, nil
+	}
+	sp, err := sessionProviderForStopProbe(cfg, cityPath)
+	if err != nil {
+		return false, nil
+	}
+	running, complete := listRunningForStop(sp, io.Discard)
+	if !complete || len(running) > 0 {
+		return false, nil
+	}
+	if err := stopCityNudgePollers(cityPath); err != nil {
+		return false, nil
+	}
+	if !stopCityStoreRetired(cityPath) {
+		return false, nil
+	}
+	return true, sp
+}
+
+// stopCityStoreRetired is a variable so stop-flow tests can model a retired
+// or a live store without a real bd proxy.
+var stopCityStoreRetired = cityStoreRetiredForStop
+
+// discoverDoltProcessesForStop lists the live Dolt servers
+// cityStoreRetiredForStop sweeps the proxy roots for. A variable so tests can
+// model a stray Dolt without starting one.
+var discoverDoltProcessesForStop = discoverDoltProcesses
+
+// cityStoreRetiredForStop reports whether every bead-store scope this city
+// would retire on stop is a provider-owned proxied scope whose proxy exited
+// cleanly (bd removes proxy.pid on an orderly exit), with no Dolt server left
+// running under any of their proxy roots: none whose --config or --data-dir
+// sits under one, the way doltProcRigOwner matches a Dolt to a rig. Any other
+// shape, or any read it cannot complete, answers false.
+func cityStoreRetiredForStop(cityPath string) bool {
+	if !cityUsesBdStoreContract(cityPath) {
+		return false
+	}
+	if currentResolvableManagedDoltPort(cityPath) != "" {
+		return false
+	}
+	scopes, err := providerOwnedLifecycleScopeRoots(cityPath, "stop")
+	if err != nil || len(scopes) == 0 {
+		return false
+	}
+	table := proxyendpoint.DefaultProcessTable()
+	proxyRoots := make([]resolverRig, 0, len(scopes))
+	for _, scopeRoot := range scopes {
+		owned, err := scopeProviderOwned(cityPath, scopeRoot)
+		if err != nil || !owned || !doctor.ProxiedStoreNotRunning(scopeRoot) {
+			return false
+		}
+		root, err := proxyendpoint.ProviderRoot(scopeRoot)
+		if err != nil {
+			return false
+		}
+		if proxyendpoint.Inspect(root, table).Verdict != proxyendpoint.VerdictNoRecord {
+			return false
+		}
+		proxyRoots = append(proxyRoots, resolverRig{Name: scopeRoot, Path: root})
+	}
+	procs, err := discoverDoltProcessesForStop()
+	if err != nil {
+		return false
+	}
+	for _, proc := range procs {
+		if _, underProxyRoot := doltProcRigOwner(proc, proxyRoots); underProxyRoot {
+			return false
+		}
+	}
+	return true
 }
 
 // teardownServerForStop terminates a provider's shared server after every
@@ -510,10 +670,15 @@ func stopCityManagedBeadsProvider(cityPath string) (bool, error) {
 var shutdownBeadsProviderForStop = shutdownBeadsProvider
 
 func stopManagedRuntimeWithoutConfig(cityPath string, cfgErr error, stdout, stderr io.Writer, force bool) (bool, int) {
-	controllerStopped, controllerErr := stopStandaloneControllerWithoutConfig(cityPath, stdout, force)
+	controllerStopped, ownership, controllerErr := stopStandaloneControllerWithoutConfig(cityPath, stdout, force)
 	if controllerErr != nil {
 		fmt.Fprintf(stderr, "gc stop: %v\n", controllerErr) //nolint:errcheck // best-effort stderr
 		return true, 1
+	}
+	if ownership != nil {
+		// Keep the controller lock through provider shutdown; see
+		// acquireStoppedControllerOwnership.
+		defer ownership.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
 	}
 	stopped, stopErr := stopCityManagedBeadsProvider(cityPath)
 	if stopErr != nil {
@@ -527,31 +692,37 @@ func stopManagedRuntimeWithoutConfig(cityPath string, cfgErr error, stdout, stde
 	return true, 0
 }
 
-func stopStandaloneControllerWithoutConfig(cityPath string, stdout io.Writer, force bool) (bool, error) {
+// stopStandaloneControllerWithoutConfig stops (or proves the absence of) a
+// standalone controller for a city whose config does not load. On success the
+// returned lock, when non-nil, is the held controller lock: the caller must
+// keep it through provider shutdown and then Close it.
+func stopStandaloneControllerWithoutConfig(cityPath string, stdout io.Writer, force bool) (bool, *os.File, error) {
 	stopResult := tryStopControllerWithForce(cityPath, stdout, force)
 	switch stopResult.outcome {
 	case controllerStopAcknowledged:
-		if err := waitForStandaloneControllerStop(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
-			return true, err
+		ownership, err := acquireStoppedControllerOwnership(cityPath, supervisorCityStopTimeout(cityPath))
+		if err != nil {
+			return true, nil, err
 		}
-		return true, nil
+		return true, ownership, nil
 	case controllerStopDefinitePreEntryUnavailable:
 		// No stop request entered a controller, so the lock probe may proceed.
 	case controllerStopMayHaveEntered, controllerStopOutcomeInvalid:
-		return true, stopResult.failClosedError()
+		return true, nil, stopResult.failClosedError()
 	default:
-		return true, stopResult.failClosedError()
+		return true, nil, stopResult.failClosedError()
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, ".gc")); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
+			return false, nil, nil
 		}
-		return false, fmt.Errorf("probing standalone controller runtime dir: %w", err)
+		return false, nil, fmt.Errorf("probing standalone controller runtime dir: %w", err)
 	}
-	if err := waitForStandaloneControllerStop(cityPath, 0); err != nil {
-		return false, err
+	ownership, err := acquireStoppedControllerOwnership(cityPath, 0)
+	if err != nil {
+		return false, nil, err
 	}
-	return false, nil
+	return false, ownership, nil
 }
 
 func warnInvalidConfigAfterSuccessfulStop(cityPath string, stderr io.Writer) {
@@ -570,18 +741,13 @@ func warnInvalidConfigStopSuccess(err error, stderr io.Writer) {
 // stopOrphans stops sessions that are not in the desired set. Used by gc stop
 // to clean up orphans after stopping config agents. With per-city socket
 // isolation, all sessions on the socket belong to this city.
+//
+// It reports whether its runtime inventory was complete. False means an
+// orphan may have been invisible to the sweep and may still be running.
 func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City, sessFront *session.Store,
 	timeout time.Duration, rec events.Recorder, stdout, stderr io.Writer,
-) {
-	running, err := sp.ListRunning("")
-	partialList := runtime.IsPartialListError(err)
-	if err != nil && !partialList {
-		fmt.Fprintf(stderr, "gc stop: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
-		return
-	}
-	if partialList {
-		fmt.Fprintf(stderr, "gc stop: listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
-	}
+) bool {
+	running, complete := listRunningForStop(sp, stderr)
 	var orphans []string
 	for _, name := range running {
 		if desired[name] {
@@ -590,6 +756,69 @@ func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City,
 		orphans = append(orphans, name)
 	}
 	gracefulStopAll(orphans, sp, timeout, rec, cfg, sessFront.Store(), stdout, stderr)
+	return complete
+}
+
+// listRunningForStop lists the provider's running sessions for gc stop and
+// reports whether the answer is a complete inventory. An incomplete answer
+// still returns every name the provider did observe, so the caller can stop
+// those, but it must not report the city as stopped: a backend it could not
+// see may still be running sessions.
+//
+// A runtime server that is not running at all is the one listing failure that
+// counts as complete. Sessions cannot outlive their server, so an absent server
+// holds none. This is what keeps a repeated gc stop idempotent after the first
+// stop tore the server down.
+func listRunningForStop(sp runtime.Provider, stderr io.Writer) ([]string, bool) {
+	names, err := sp.ListRunning("")
+	switch {
+	case err == nil:
+		return names, true
+	case listFailureIsOnlyServerAbsence(err):
+		return names, true
+	case runtime.IsPartialListError(err):
+		fmt.Fprintf(stderr, "gc stop: listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
+		return names, false
+	default:
+		fmt.Fprintf(stderr, "gc stop: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
+		return nil, false
+	}
+}
+
+// listFailureIsOnlyServerAbsence reports whether every backend failure behind
+// a ListRunning error is an absent runtime server.
+//
+// [runtime.IsRuntimeServerAbsent] deliberately does not unwrap, because a
+// composite provider joins its backends' errors and one absent backend says
+// nothing about its siblings. This walk keeps that guarantee by requiring
+// every joined failure to be an absence: a composite whose other backends all
+// answered (their names are in the result) and whose failing backends are all
+// absent has a complete inventory. Any other failure anywhere in the tree
+// makes the answer false.
+func listFailureIsOnlyServerAbsence(err error) bool {
+	if err == nil {
+		return false
+	}
+	if runtime.IsRuntimeServerAbsent(err) {
+		return true
+	}
+	switch wrapped := err.(type) { //nolint:errorlint // walks the error tree by hand: every branch of a join must be an absence, which errors.As cannot express
+	case interface{ Unwrap() []error }:
+		children := wrapped.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !listFailureIsOnlyServerAbsence(child) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		return listFailureIsOnlyServerAbsence(wrapped.Unwrap())
+	default:
+		return false
+	}
 }
 
 // tryStopController connects to the controller socket and sends "stop".
@@ -607,15 +836,63 @@ func tryStopControllerWithForce(cityPath string, stdout io.Writer, force bool) c
 	return result
 }
 
-func waitForStandaloneControllerStop(cityPath string, timeout time.Duration) error {
-	return waitForControllerStop(cityPath, timeout)
-}
-
 func waitForSupervisorControllerStop(cityPath string, timeout time.Duration) error {
 	return waitForControllerStop(cityPath, timeout)
 }
 
+// waitForControllerStop waits until no controller serves the city and then
+// releases the controller lock again. Use it only where nothing that needs
+// the controller to stay down follows; stop paths that go on to retire the
+// bead store use acquireStoppedControllerOwnership and hold the lock.
 func waitForControllerStop(cityPath string, timeout time.Duration) error {
+	lock, err := acquireStoppedControllerOwnership(cityPath, timeout)
+	if err != nil {
+		return err
+	}
+	lock.Close() //nolint:errcheck // best-effort probe cleanup
+	return nil
+}
+
+// claimStoppedControllerOwnership takes the controller lock once, right after
+// a wait has already proven the controller stopped, and returns it held (nil
+// when the city has no runtime dir, so no controller can have run there).
+// Losing the lock here means another controller started in between, so the
+// caller must not go on to retire the bead store underneath it.
+func claimStoppedControllerOwnership(cityPath string) (*os.File, error) {
+	if _, err := os.Stat(filepath.Join(cityPath, ".gc")); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("probing controller runtime dir: %w", err)
+	}
+	lock, err := acquireControllerLock(cityPath)
+	if errors.Is(err, errControllerAlreadyRunning) {
+		return nil, errors.New("a controller started for the city before stop could retire the bead store")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("claiming controller lock: %w", err)
+	}
+	return lock, nil
+}
+
+// acquireStoppedControllerOwnership waits until no controller answers on the
+// city's controller socket and the controller lock is free, then returns the
+// held lock. The caller owns the lock and must Close it on every path.
+//
+// Holding the lock is what makes "the controller is gone" stay true: both a
+// standalone controller (runController) and a supervisor-hosted city take this
+// lock before they serve, so while it is held neither a supervisor restart nor
+// a second `gc start` can bring a controller up against state the caller is
+// still tearing down (the bead-store provider in particular). The controller
+// being stopped released the lock itself as its last shutdown step, so holding
+// it here cannot block that controller's own shutdown.
+//
+// The lock is a non-blocking flock on a close-on-exec descriptor: it is
+// released by Close or process exit and is never inherited by provider
+// subprocesses. Callers must not call waitForControllerStop, ensureNoStandaloneController,
+// or anything else that probes acquireControllerLock while holding it — a
+// second flock on a separate descriptor conflicts even within this process.
+func acquireStoppedControllerOwnership(cityPath string, timeout time.Duration) (*os.File, error) {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
@@ -625,12 +902,11 @@ func waitForControllerStop(cityPath string, timeout time.Duration) error {
 		lock, err := acquireControllerLock(cityPath)
 		switch {
 		case err == nil && pid == 0:
-			lock.Close() //nolint:errcheck // best-effort probe cleanup
-			return nil
+			return lock, nil
 		case err == nil:
-			lock.Close() //nolint:errcheck // best-effort probe cleanup
+			lock.Close() //nolint:errcheck // a controller still answers; retry after it exits
 		case !errors.Is(err, errControllerAlreadyRunning):
-			return fmt.Errorf("probing controller: %w", err)
+			return nil, fmt.Errorf("probing controller: %w", err)
 		}
 		if time.Now().After(deadline) {
 			if pid != 0 {
@@ -638,9 +914,9 @@ func waitForControllerStop(cityPath string, timeout time.Duration) error {
 				if identity.PID == 0 {
 					identity.PID = pid
 				}
-				return controllerStopTimeoutError(identity, false)
+				return nil, controllerStopTimeoutError(identity, false)
 			}
-			return controllerStopTimeoutError(controllerIdentityReply{}, true)
+			return nil, controllerStopTimeoutError(controllerIdentityReply{}, true)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -680,36 +956,49 @@ func doStopWithoutSuccess(sessionNames []string, sp runtime.Provider, cfg *confi
 	rec events.Recorder, stdout, stderr io.Writer,
 ) int {
 	visible := map[string]bool{}
+	inventoryComplete := true
 	if sp != nil {
-		names, err := sp.ListRunning("")
-		partialList := runtime.IsPartialListError(err)
-		if err != nil && !partialList {
-			fmt.Fprintf(stderr, "gc stop: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
-			names = nil
-		}
-		if partialList {
-			fmt.Fprintf(stderr, "gc stop: listing sessions partially failed: %v\n", err) //nolint:errcheck // best-effort stderr
-		}
+		var names []string
+		names, inventoryComplete = listRunningForStop(sp, stderr)
 		for _, name := range names {
 			if name = strings.TrimSpace(name); name != "" {
 				visible[name] = true
 			}
 		}
 	}
-	var running []string
+	var running, unverified []string
 	for _, sn := range sessionNames {
 		sn = strings.TrimSpace(sn)
 		if sn == "" {
 			continue
 		}
-		if alive, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn); err == nil && alive {
+		alive, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn)
+		switch {
+		case err == nil && alive:
 			running = append(running, sn)
 			continue
+		case err != nil && !errors.Is(err, session.ErrSessionNotFound):
+			// The session's own observation failed, so it is unknown, not
+			// absent. Report it against its name and withhold success; it is
+			// still stopped below if the runtime inventory witnessed it.
+			fmt.Fprintf(stderr, "gc stop: observing session %s: %v\n", sn, err) //nolint:errcheck // best-effort stderr
+			if !slices.Contains(unverified, sn) {
+				unverified = append(unverified, sn)
+			}
 		}
 		if visible[sn] {
 			running = append(running, sn)
 		}
 	}
 	gracefulStopAll(running, sp, timeout, rec, cfg, beads.SessionStore{Store: store}, stdout, stderr)
+	if len(unverified) > 0 {
+		fmt.Fprintf(stderr, "gc stop: stop not confirmed: could not verify that session(s) %s stopped, so they may still be running; resolve the error above and run gc stop again\n", strings.Join(unverified, ", ")) //nolint:errcheck // best-effort stderr
+	}
+	if !inventoryComplete {
+		fmt.Fprintln(stderr, "gc stop: stop not confirmed: the runtime inventory was incomplete, so sessions it could not see may still be running; resolve the runtime error and run gc stop again") //nolint:errcheck // best-effort stderr
+	}
+	if len(unverified) > 0 || !inventoryComplete {
+		return 1
+	}
 	return 0
 }

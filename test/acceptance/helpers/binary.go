@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // BuildGC compiles the gc binary to dir and returns its path.
@@ -27,6 +29,16 @@ func BuildGC(dir string) string {
 	}
 
 	bin := filepath.Join(dir, "gc")
+	// Under bazel the pre-built gc binary ships in runfiles (declared as
+	// a data dep); use it instead of shelling out to `go build`.
+	for _, rf := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
+		if rf == "" {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(rf, "_main", "cmd", "gc", "gc_", "gc")); err == nil {
+			return filepath.Join(rf, "_main", "cmd", "gc", "gc_", "gc")
+		}
+	}
 	cmd := exec.Command("go", "build", "-o", bin, "./cmd/gc")
 	cmd.Dir = FindModuleRoot()
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
@@ -38,6 +50,9 @@ func BuildGC(dir string) string {
 
 // FindModuleRoot walks up from cwd to find go.mod.
 func FindModuleRoot() string {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		panic("acceptance: getting cwd: " + err.Error())
@@ -55,10 +70,26 @@ func FindModuleRoot() string {
 }
 
 // FindBD returns the path to the bd binary, or empty string if not found.
+//
+// GC_ACCEPTANCE_BD_BIN, when set, is the only candidate: a set override that
+// does not name a file yields "", never another bd, so a run that pinned a
+// bd version cannot silently test a different one.
 func FindBD() string {
 	if override := strings.TrimSpace(os.Getenv("GC_ACCEPTANCE_BD_BIN")); override != "" {
-		if bin, err := filepath.Abs(override); err == nil {
-			if info, statErr := os.Stat(bin); statErr == nil && !info.IsDir() {
+		if bin := resolveToolOverride(override); statBinary(bin) {
+			return bin
+		}
+		return ""
+	}
+	// Under bazel the pinned bd ships prebuilt in runfiles as a data dep
+	// (http_archive of the same release the go-test CI installs); prefer it
+	// over PATH so remote workers without a system bd run the bd shapes.
+	if bazeltest.IsBazel() {
+		for _, rf := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
+			if rf == "" {
+				continue
+			}
+			if bin := filepath.Join(rf, "+http_archive+bd_bin_v1_3_1", "bd"); statBinary(bin) {
 				return bin
 			}
 		}
@@ -70,11 +101,37 @@ func FindBD() string {
 	return p
 }
 
+// resolveToolOverride makes a tool path from the environment absolute. Under
+// bazel test a relative path is a $(rootpath ...) a BUILD target expanded,
+// relative to the main repository's runfiles directory rather than to the
+// package directory the test runs in; elsewhere it is relative to the
+// working directory.
+func resolveToolOverride(path string) string {
+	if !filepath.IsAbs(path) && bazeltest.IsBazel() {
+		if workspace := os.Getenv("TEST_WORKSPACE"); workspace != "" {
+			return filepath.Join(os.Getenv("TEST_SRCDIR"), workspace, filepath.FromSlash(path))
+		}
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return ""
+	}
+	return abs
+}
+
+func statBinary(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
 // RequireBD skips t if bd is not available.
 func RequireBD(t *testing.T) string {
 	t.Helper()
 	p := FindBD()
 	if p == "" {
+		if override := strings.TrimSpace(os.Getenv("GC_ACCEPTANCE_BD_BIN")); override != "" {
+			t.Fatalf("GC_ACCEPTANCE_BD_BIN=%s names no bd binary", override)
+		}
 		t.Skip("bd not available")
 	}
 	return p

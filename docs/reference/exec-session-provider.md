@@ -75,11 +75,40 @@ No shell invocation — the script is exec'd directly.
 | 0 | Success |
 | 1 | Failure (stderr contains error message) |
 | 2 | Unknown operation (treated as success — forward compatible) |
+| 75 | `start` only: temporary failure (`EX_TEMPFAIL`). The endpoint the agent launches against is at capacity or unavailable, so the start is retryable and not specific to this session. Gas City still tears the box down. On any other operation 75 is an ordinary failure. |
 
 Exit code 2 is the forward-compatibility mechanism. When Gas City adds new
 operations in the future, old scripts return exit 2 and the provider treats
 it as a no-op success. Scripts only need to implement the operations they
 care about.
+
+## Cancellation
+
+Each invocation runs in its own process group. When an operation is canceled
+(its timeout expires, or Gas City abandons the call), the script is stopped in
+two steps:
+
+| Step | Signal | Sent to | What the script should do |
+|------|--------|---------|---------------------------|
+| 1 | `SIGTERM` | the whole process group (the script and any foreground child) | Roll back anything this invocation created, then exit |
+| 2 | `SIGKILL` | the script, after a 2-second grace period | Nothing; it cannot be caught |
+
+A canceled call is reported as canceled whatever the script's exit code, so a
+`TERM` handler may exit with any status, including 2.
+
+Trap `TERM` (or `EXIT`, which bash also runs when `TERM` ends the script) to
+clean up. `SIGINT` is not sent: a script that traps only `INT` gets no chance
+to roll back. Keep the rollback inside the grace period; prefer one bounded
+step (for example `docker rm -f <id>`) over a graceful stop that waits out its
+own timeout.
+
+```bash
+created=$(my-backend create "$name")
+trap 'my-backend remove "$created"' EXIT   # runs on failure, on exit, and on SIGTERM
+trap 'exit 143' TERM                       # turn SIGTERM into an ordinary exit
+my-backend wait-ready "$created"
+trap - EXIT TERM                           # startup succeeded; keep the session
+```
 
 ## Operations
 

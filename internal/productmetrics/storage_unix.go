@@ -981,6 +981,11 @@ func (directory *unixStorageDirectory) readFileLeaseWithHooks(name string, maxim
 		requireCleanupSameDevice(parentMetadata, preOpen),
 		validatePrivateRegularFile(preOpen, path, directory.euid, false),
 	); err != nil {
+		if preOpen.nlink == 0 {
+			// The name resolved to an inode that lost its last link before
+			// stat read it: a concurrent replace or unlink, not a hard link.
+			err = errors.Join(errStorageRecordReplaced, err)
+		}
 		return nil, nil, storageMetadata{}, errors.Join(errStorageUnsafeRecordShape, err)
 	}
 	fileFD, err := openFileAtGated(directoryFD, name, unixFileReadFlags, 0, hooks)
@@ -990,6 +995,9 @@ func (directory *unixStorageDirectory) readFileLeaseWithHooks(name string, maxim
 	hooks.openedFile(path)
 	metadata, err := validateOpenedRegularFileGated(directoryFD, name, fileFD, path, directory.euid, false, hooks)
 	if err != nil {
+		if openedRecordReplaced(directoryFD, name, fileFD, path) {
+			err = errors.Join(errStorageRecordReplaced, err)
+		}
 		_ = unix.Close(fileFD)
 		return nil, nil, storageMetadata{}, err
 	}
@@ -1001,6 +1009,22 @@ func (directory *unixStorageDirectory) readFileLeaseWithHooks(name string, maxim
 	data, physicalReadBytes, err := readFDWithLimit(fileFD, maximumBytes, path, hooks)
 	metadata.physicalReadBytes = physicalReadBytes
 	return data, lease, metadata, err
+}
+
+// openedRecordReplaced reports whether fileFD, opened as name, is no longer
+// the record name resolves to: its inode has no links left, or name now
+// resolves to a different inode. Either proves a concurrent replace or unlink
+// after the open. It only classifies a read that already failed validation.
+func openedRecordReplaced(directoryFD int, name string, fileFD int, path string) bool {
+	opened, err := metadataForFD(fileFD, path, storageTestHooks{})
+	if err != nil {
+		return false
+	}
+	if opened.nlink == 0 {
+		return true
+	}
+	named, err := metadataAt(directoryFD, name, path, storageTestHooks{})
+	return err == nil && (named.dev != opened.dev || named.ino != opened.ino)
 }
 
 func openFileAtGated(directoryFD int, name string, flags int, mode uint32, hooks storageTestHooks) (int, error) {

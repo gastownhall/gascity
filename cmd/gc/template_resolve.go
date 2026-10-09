@@ -4,7 +4,9 @@
 //
 // One side effect lives here by necessity: managed Claude settings are
 // projected to .gc/settings.json via ensureClaudeSettingsArgs so that the
-// --settings path is on disk before runtime fingerprints are captured.
+// --settings path is on disk before runtime fingerprints are captured. A
+// readOnly resolution (agentBuildParams.readOnly) skips it, along with the
+// work-dir mkdir and skill snapshot writes.
 // This is the single chokepoint for Claude projection — installAgentSideEffects
 // skips the "claude" entry in its hook list to avoid duplicate work.
 //
@@ -186,7 +188,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 3: Expand dir template.
 	dirCtx := sessionSetupContextForAgent(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs)
-	workDir, err := resolveConfiguredWorkDir(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs)
+	resolveWorkDir := resolveConfiguredWorkDir
+	if p.readOnly {
+		resolveWorkDir = resolveConfiguredWorkDirPath
+	}
+	workDir, err := resolveWorkDir(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
@@ -223,7 +229,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			fmt.Fprintln(p.stderr, config.FormatUnhonoredOptionPin(qualifiedName, resolved.Name, pin)) //nolint:errcheck
 		}
 	}
-	sa, err := ensureClaudeSettingsArgs(p.fs, p.cityPath, providerFamily, p.stderr)
+	var sa string
+	if p.readOnly {
+		sa, err = claudeSettingsArgsReadOnly(p.fs, p.cityPath, providerFamily)
+	} else {
+		sa, err = ensureClaudeSettingsArgs(p.fs, p.cityPath, providerFamily, p.stderr)
+	}
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
@@ -377,6 +388,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if p.city != nil {
 		packDirs = p.city.PackDirsForRig(rigName)
 	}
+	// renderPrompt returns "" for an empty template path before it reads the
+	// context, so the default-branch probe — up to three git subprocesses when
+	// the rig records no default_branch — is only worth running when there is a
+	// prompt template to render.
+	defaultBranch := ""
+	if cfgAgent.PromptTemplate != "" {
+		defaultBranch = defaultBranchForRig(rigName, p.rigs, workDir)
+	}
 	topo := config.QueryTopology{}
 	if p.city != nil {
 		topo.Beads = p.city.Beads
@@ -400,7 +419,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		RigRoot:                 rigRoot,
 		WorkDir:                 workDir,
 		IssuePrefix:             findRigPrefix(rigName, p.rigs),
-		DefaultBranch:           defaultBranchForRig(rigName, p.rigs, workDir),
+		DefaultBranch:           defaultBranch,
 		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", cfgAgent.EffectiveAssignedInProgressQueryFor(topo), p.stderr),
 		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", cfgAgent.EffectiveAssignedReadyQueryFor(topo), p.stderr),
 		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", cfgAgent.EffectiveRoutedPoolQueryFor(topo), p.stderr),
@@ -421,14 +440,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// instruction costs a turn and duplicates the context it just received.
 	includePrimeInstruction := !hasHooks && prompt == ""
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, includePrimeInstruction, p.beaconTime)
-	switch {
-	case suppressStartupPrompt:
-		prompt = ""
-	case prompt != "":
-		prompt = beacon + "\n\n" + prompt
-	default:
-		prompt = beacon
-	}
+	prompt = composeStartupPrompt(beacon, prompt, suppressStartupPrompt)
 
 	// Step 9b: Append the assigned-skills appendix when the agent
 	// has a vendor sink, hasn't opted out, AND the runtime actually
@@ -619,7 +631,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 				// templateNameFor returns cfgAgent.PoolName for pool
 				// instances and qualifiedName for singletons.
 				materializeAgent := templateNameFor(cfgAgent, qualifiedName)
-				if sharedCatalog != nil {
+				switch {
+				case p.readOnly:
+					// No snapshot write: the start's resolution writes it.
+				case sharedCatalog != nil:
 					if snapshot, err := encodeSharedCatalogSnapshot(*sharedCatalog); err == nil {
 						if writeSkillSnapshotFile(workDir, materializeAgent, snapshot) == "" {
 							removeSkillSnapshotFile(workDir, materializeAgent)
@@ -627,7 +642,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 					} else {
 						removeSkillSnapshotFile(workDir, materializeAgent)
 					}
-				} else {
+				default:
 					removeSkillSnapshotFile(workDir, materializeAgent)
 				}
 				expandedPreStart = appendMaterializeSkillsPreStart(expandedPreStart, materializeAgent, workDir)
@@ -814,6 +829,21 @@ func appendKimiHookConfigArg(command string) string {
 	}
 	parts = append(parts, configArgs...)
 	return shellquote.Join(parts)
+}
+
+// composeStartupPrompt combines the session beacon with the rendered prompt
+// into the startup prompt a launch delivers: empty when the agent's startup
+// prompt is suppressed, the beacon alone when nothing rendered, and otherwise
+// the beacon, a blank line, and the rendered prompt.
+func composeStartupPrompt(beacon, prompt string, suppress bool) string {
+	switch {
+	case suppress:
+		return ""
+	case prompt != "":
+		return beacon + "\n\n" + prompt
+	default:
+		return beacon
+	}
 }
 
 func suppressStartupPromptForAgent(cfgAgent *config.Agent) bool {

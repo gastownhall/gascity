@@ -45,6 +45,8 @@ func humaSessionManagerError(err error) error {
 		return apierr.InvalidRequest.Msg("invalid: " + err.Error())
 	case errors.Is(err, session.ErrSessionAliasExists):
 		return apierr.SessionConflict.Msg("conflict: " + err.Error())
+	case errors.Is(err, session.ErrInvalidSessionTitle):
+		return apierr.InvalidRequest.Msg("invalid: " + err.Error())
 	case errors.Is(err, session.ErrInteractionUnsupported):
 		return apierr.NotImplemented.Msg("unsupported: " + err.Error())
 	case errors.Is(err, session.ErrPendingInteraction):
@@ -53,7 +55,7 @@ func humaSessionManagerError(err error) error {
 		return apierr.SessionConflict.Msg("no_pending: " + err.Error())
 	case errors.Is(err, session.ErrInteractionMismatch):
 		return apierr.SessionConflict.Msg("invalid_interaction: " + err.Error())
-	case errors.Is(err, session.ErrSessionClosed), errors.Is(err, session.ErrResumeRequired):
+	case errors.Is(err, session.ErrSessionClosed), errors.Is(err, session.ErrResumeRequired), errors.Is(err, session.ErrSessionKillPending):
 		return apierr.SessionConflict.Msg("conflict: " + err.Error())
 	case errors.Is(err, session.ErrSessionActive):
 		return apierr.SessionConflict.Msg("conflict: " + err.Error())

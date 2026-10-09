@@ -79,6 +79,7 @@ func infraEqualityFixture() beads.Bead {
 		NoHistory:    true,
 		DeferUntil:   &deferred,
 		IsBlocked:    &blocked,
+		CloseReason:  "superseded by the next lifecycle row",
 		Revision:     7,
 		ClaimFence:   3,
 		// Set so the exempt mutation below models the loss that actually
@@ -115,6 +116,10 @@ func beadCopyFieldMutations() map[string]func(beads.Bead) beads.Bead {
 		"NoHistory": func(b beads.Bead) beads.Bead { b.NoHistory = false; return b },
 		"DeferUntil": func(b beads.Bead) beads.Bead {
 			b.DeferUntil = nil
+			return b
+		},
+		"CloseReason": func(b beads.Bead) beads.Bead {
+			b.CloseReason = ""
 			return b
 		},
 		// Unlike every other entry, this mutation is not a LOSS — it is a value
