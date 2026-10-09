@@ -64,8 +64,13 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 			}
 		}
 		// The worker-env measure step runs the script too, without a worker.
-		if strings.Contains(step.Run, rbeWorkerScript) && step.Env["WORKER_MODE"] != "measure" {
+		// S3b: the step runs "$RBE_WORKER_DIR/blacksmith-worker.sh" (the
+		// cutover shim's fetch output), in-tree by default (D8).
+		if strings.Contains(step.Run, "blacksmith-worker.sh") && step.Env["WORKER_MODE"] != "measure" {
 			worker = true
+			if got, want := step.Env["RBE_WORKER_DIR"], "${{ steps.rbe-worker.outputs.dir }}"; got != want {
+				t.Errorf("worker step RBE_WORKER_DIR = %q, want %q", got, want)
+			}
 			// Default on; the repository variable RBE_ACTION_ISOLATION=0 is the
 			// rollback without a code change.
 			if got, want := step.Env["RBE_ACTION_ISOLATION"], "${{ vars.RBE_ACTION_ISOLATION || '1' }}"; got != want {

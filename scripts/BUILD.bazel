@@ -137,6 +137,7 @@ go_test(
         "rbe_worker_env_test.go",
         "rbe_worker_h5_test.go",
         "rbe_worker_isolation_test.go",
+        "rbe_worker_pool_source_test.go",
         "rbe_worker_shim_test.go",
         "rebase_resolve_lib_test.go",
         "release_binary_metadata_test.go",

@@ -154,7 +154,12 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 				t.Errorf("checkout must set persist-credentials: false, got %v", step.With["persist-credentials"])
 			}
 		}
-		if strings.TrimSpace(step.Run) != rbeWorkerScript || step.Env["WORKER_MODE"] == "measure" {
+		// S3b: the step runs "$RBE_WORKER_DIR/blacksmith-worker.sh" (the
+		// cutover shim's fetch output), in-tree by default (D8). Only this
+		// new form is accepted now: a workflow that still runs the old
+		// in-tree literal has not actually cut over to the shim.
+		run := strings.TrimSpace(step.Run)
+		if run != `"$RBE_WORKER_DIR/blacksmith-worker.sh"` || step.Env["WORKER_MODE"] == "measure" {
 			continue
 		}
 		worker = true
@@ -173,6 +178,9 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 			"POOL_MAX_MINUTES":     "${{ inputs.max_minutes }}",
 			"WORKER_NAME":          "gha-fork-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}",
 			"RBE_ACTION_ISOLATION": "1",
+			// S3b cutover shim (D8): the fetch step's outputs.
+			"RBE_WORKER_DIR":      "${{ steps.rbe-worker.outputs.dir }}",
+			"RBE_WORKER_REVISION": "${{ steps.rbe-worker.outputs.sha }}",
 			// zstd fetches only (blacksmith-worker.sh keeps uploads identity),
 			// off unless the repository variable says 1: merging changes
 			// nothing, and rollback is the variable.
@@ -196,8 +204,10 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	}
 
 	// No secret but the fork worker certificate (never the OSS worker's, which
-	// writes AC_OSS), and no repository variables but RBE_FORK_WIRE_ZSTD and
-	// RBE_FORK_WIRE_ZSTD_READ_URL (pinned above): none can turn isolation down.
+	// writes AC_OSS), and no repository variables but RBE_FORK_WIRE_ZSTD,
+	// RBE_FORK_WIRE_ZSTD_READ_URL (pinned above) and the S3b cutover switch
+	// RBE_WORKER_SOURCE_FORK (D8, once per fetch step): none can turn
+	// isolation down.
 	secrets := map[string]bool{}
 	for _, m := range regexp.MustCompile(`secrets\.([A-Za-z0-9_]+)`).FindAllStringSubmatch(text, -1) {
 		secrets[m[1]] = true
@@ -205,9 +215,10 @@ func TestRBEForkPoolWorkflow(t *testing.T) {
 	if got := rbeSortedKeys(secrets); strings.Join(got, ",") != "RBE_FORK_WORKER_TLS_CERT,RBE_FORK_WORKER_TLS_KEY" {
 		t.Errorf("%s uses secrets %v, want RBE_FORK_WORKER_TLS_CERT and RBE_FORK_WORKER_TLS_KEY only", rbeForkPoolWorkflow, got)
 	}
-	if n := strings.Count(text, "vars."); n != 2 || !strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD ") ||
-		!strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD_READ_URL ") {
-		t.Errorf("%s reads repository variables %d times; want vars.RBE_FORK_WIRE_ZSTD and vars.RBE_FORK_WIRE_ZSTD_READ_URL once each, nothing else", rbeForkPoolWorkflow, n)
+	wantSourceVar := strings.Count(text, "vars.RBE_WORKER_SOURCE_FORK ")
+	if n := strings.Count(text, "vars."); n != 2+wantSourceVar || !strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD ") ||
+		!strings.Contains(text, "vars.RBE_FORK_WIRE_ZSTD_READ_URL ") || wantSourceVar == 0 {
+		t.Errorf("%s reads repository variables %d times (source variable %d); want RBE_FORK_WIRE_ZSTD, RBE_FORK_WIRE_ZSTD_READ_URL once each, RBE_WORKER_SOURCE_FORK per fetch step, nothing else", rbeForkPoolWorkflow, n, wantSourceVar)
 	}
 }
 
