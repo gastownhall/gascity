@@ -29,11 +29,12 @@ const (
 )
 
 // setupBazelBeadsDigests: sha256 of beads' .github/actions/setup-bazel files
-// (beads main b8a9545c, #7174: R4's -Xmx4g client heap). A change here is a
-// change in beads first: copy all three files from beads and update these
+// (beads main b8a9545c, #7174: R4's -Xmx4g client heap; action.yml from beads
+// main 533f9529, #7379: MODULE.bazel in the runner cache key). A change here
+// is a change in beads first: copy the files from beads and update these
 // digests in the same PR.
 var setupBazelBeadsDigests = map[string]string{
-	"action.yml":         "9dba170b11c0c2acbde181715e9a801d95972c5f1a74aa5ffaa12f3a12ab886d",
+	"action.yml":         "a104b74c2d470ee77b0fb4c3a12c506fd9a8771a23521f96bd28a1bc574c0e5f",
 	"fork-credential.sh": "abd68bbacb42fa5c7a71d06aa652bcf0f2fbe870f00b13b51650fe95c3bef59e",
 	"write-bazelrc.sh":   "ffd2f3ebca5a449e12db342c143b9d082cd1d3d5ab7abc8fac84475d5ed56550",
 }
@@ -485,13 +486,12 @@ func TestBazelMultiLaneWorkflowShape(t *testing.T) {
 	if lane.Strategy.FailFast == nil || *lane.Strategy.FailFast {
 		t.Errorf("lane strategy: want fail-fast: false")
 	}
-	// Mode remote runs a 2 vCPU client, except acceptance and unit: their
-	// client-side loading and analysis is CPU-bound (acceptance ~1900
-	// packages took ~2 m on 2 vCPU; unit's //... ~3000 packages took
-	// 107-137 s). Every other mode executes here, or may (a fork lane's
-	// fallback to the read-only cache), so it gets 4 vCPU.
-	if want := "${{ (needs.rbe.outputs.mode != 'remote' || matrix.lane == 'acceptance' || matrix.lane == 'unit') && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}"; lane.RunsOn != want {
-		t.Errorf("lane runs-on = %q, want %q (2 vCPU clients in mode remote, 4 vCPU otherwise and for acceptance and unit)", lane.RunsOn, want)
+	// Every lane runs on 4 vCPU: a remote lane's client-side loading and
+	// analysis is CPU-bound and takes about 1.6x as long on 2 vCPU
+	// (ga-vnycm2.8), and every other mode executes here, or may (a fork
+	// lane's fallback to the read-only cache).
+	if want := "blacksmith-4vcpu-ubuntu-2404"; lane.RunsOn != want {
+		t.Errorf("lane runs-on = %q, want %q", lane.RunsOn, want)
 	}
 
 	// Every checkout is full blobless history, then fresh-merge onto the rbe
