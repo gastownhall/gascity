@@ -86,6 +86,10 @@ type ProcessOptions struct {
 	// that list the root's members reuse it instead of reading the root again;
 	// it is never carried across invocations.
 	gateRoot *beads.Bead
+
+	// view is this invocation's one read of the workflow root's members
+	// (rootView). ProcessControl gives every invocation a new, empty one.
+	view *rootView
 }
 
 // routeConfigCache memoizes a single attempt-route config load (and its error)
@@ -179,6 +183,7 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 	if opts.routeCfg == nil {
 		opts.routeCfg = &routeConfigCache{}
 	}
+	opts.view = &rootView{}
 	if bead.Status != "open" {
 		// A control bead that is not open — typically stuck at in_progress
 		// after a rogue `bd update --status in_progress` from a worker —
@@ -472,7 +477,7 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 			return ControlResult{}, ErrControlPending
 		}
 		remainingOpen, err := tracePhase(opts, bead.ID, "check-open-members", func() (bool, error) {
-			return hasOpenScopeMembers(store, rootID, scopeRef, bead.ID)
+			return hasOpenScopeMembersInView(store, rootID, scopeRef, opts, bead.ID)
 		})
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: checking scope completion: %w", bead.ID, err)
@@ -528,7 +533,7 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	}
 
 	remainingOpen, err := tracePhase(opts, bead.ID, "check-open-members", func() (bool, error) {
-		return hasOpenScopeMembers(store, rootID, scopeRef, bead.ID)
+		return hasOpenScopeMembersInView(store, rootID, scopeRef, opts, bead.ID)
 	})
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: checking scope completion: %w", bead.ID, err)
@@ -560,7 +565,7 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 
 func loadScopeSnapshotForControl(store beads.Store, rootID, scopeRef string, body, subject beads.Bead, controlID string, opts ProcessOptions) (scopeSnapshot, error) {
 	snapshot, err := tracePhase(opts, controlID, "load-snapshot", func() (scopeSnapshot, error) {
-		return loadScopeSnapshotWithBody(store, rootID, scopeRef, body)
+		return loadScopeSnapshotInView(store, rootID, scopeRef, body, opts)
 	})
 	if err != nil {
 		return scopeSnapshot{}, fmt.Errorf("%s: loading scope snapshot for %s: %w", controlID, scopeRef, err)
@@ -761,6 +766,36 @@ func hasOpenScopeMembers(store beads.Store, rootID, scopeRef string, ignoreIDs .
 		return false, err
 	}
 	return scopeSnapshot{members: members}.hasOpenScopeMembers(ignoreIDs...), nil
+}
+
+// hasOpenScopeMembersInView is hasOpenScopeMembers answered from the root's
+// members when the invocation already read them (rootView).
+func hasOpenScopeMembersInView(store beads.Store, rootID, scopeRef string, opts ProcessOptions, ignoreIDs ...string) (bool, error) {
+	all, ok := rootViewAll(opts, rootID)
+	if !ok {
+		return hasOpenScopeMembers(store, rootID, scopeRef, ignoreIDs...)
+	}
+	members := viewScopeMembers(all, rootID, scopeRef, false)
+	return scopeSnapshot{members: members}.hasOpenScopeMembers(ignoreIDs...), nil
+}
+
+// loadScopeSnapshotInView is loadScopeSnapshotWithBody answered from the
+// root's members when the invocation already read them (rootView). That set
+// is complete, so a scope abort needs no further read of it.
+func loadScopeSnapshotInView(store beads.Store, rootID, scopeRef string, body beads.Bead, opts ProcessOptions) (scopeSnapshot, error) {
+	all, ok := rootViewAll(opts, rootID)
+	if !ok {
+		return loadScopeSnapshotWithBody(store, rootID, scopeRef, body)
+	}
+	snapshot := scopeSnapshot{
+		rootID:      rootID,
+		scopeRef:    scopeRef,
+		members:     viewScopeMembers(all, rootID, scopeRef, true),
+		body:        body,
+		all:         mergeScopeSnapshotBeads(all, body),
+		allComplete: true,
+	}
+	return snapshot, nil
 }
 
 func (s scopeSnapshot) propagateScopeMemberMetadata(store beads.Store, bodyID string) error {
@@ -1021,7 +1056,7 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 		return ControlResult{}, fmt.Errorf("%s: missing gc.root_bead_id", bead.ID)
 	}
 
-	outcome, err := resolveFinalizeOutcome(store, bead)
+	outcome, err := resolveFinalizeOutcome(store, bead, opts)
 	if err != nil {
 		if errors.Is(err, errFinalizePending) {
 			return ControlResult{}, ErrControlPending
@@ -1058,7 +1093,7 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 		// PASS arm clears all three as it closes the parent
 		// (propagateSourceBeadTerminalMetadata) so a succeeded parent never
 		// carries the failure it superseded.
-		if err := annotateSourceBeadFailure(store, rootID, resolveFinalizeFailureDiagnostics(store, bead), opts); err != nil {
+		if err := annotateSourceBeadFailure(store, rootID, resolveFinalizeFailureDiagnostics(store, bead, opts), opts); err != nil {
 			return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: marking failed source bead: %w", rootID, err))
 		}
 	}
@@ -1613,7 +1648,16 @@ func resolveScopeBody(store beads.Store, rootID, scopeRef, traceID string, opts 
 	}
 	var lastErr error
 	for attempt := 1; attempt <= scopeBodyResolveAttempts; attempt++ {
-		bead, err := resolveScopeBodyOnce(store, rootID, scopeRef)
+		var bead beads.Bead
+		var err error
+		if all, ok := rootViewAll(opts, rootID); ok && attempt == 1 {
+			// The first look is answered from the root's members the
+			// invocation already read; the retries wait for a body that is not
+			// there yet, so they read live.
+			bead, err = resolveScopeBodyFromMembers(all, rootID, scopeRef)
+		} else {
+			bead, err = resolveScopeBodyOnce(store, rootID, scopeRef)
+		}
 		if err == nil {
 			opts.tracef("scope-check bead=%s resolve-body attempt=%d root=%s scope=%s result=ok body=%s", traceID, attempt, rootID, scopeRef, bead.ID)
 			return bead, nil
@@ -1641,6 +1685,13 @@ func resolveScopeBody(store beads.Store, rootID, scopeRef, traceID string, opts 
 	}
 	opts.tracef("scope-check bead=%s resolve-body attempts=%d root=%s scope=%s result=exhausted err=%v", traceID, scopeBodyResolveAttempts, rootID, scopeRef, lastErr)
 	return beads.Bead{}, lastErr
+}
+
+func resolveScopeBodyFromMembers(all []beads.Bead, rootID, scopeRef string) (beads.Bead, error) {
+	if bead, ok := viewScopeBody(all, rootID, scopeRef); ok {
+		return bead, nil
+	}
+	return beads.Bead{}, fmt.Errorf("%w: scope %q not found under root %s", errScopeBodyMissing, scopeRef, rootID)
 }
 
 func resolveScopeBodyOnce(store beads.Store, rootID, scopeRef string) (beads.Bead, error) {
@@ -1857,14 +1908,14 @@ func matchesScopeRef(bead beads.Bead, scopeRef string) bool {
 	return stepRef == scopeRef || strings.HasSuffix(stepRef, "."+scopeRef)
 }
 
-func resolveFinalizeOutcome(store beads.Store, finalizer beads.Bead) (string, error) {
+func resolveFinalizeOutcome(store beads.Store, finalizer beads.Bead, opts ProcessOptions) (string, error) {
 	outcome, err := resolveBlockedOutcome(store, finalizer.ID)
 	if err != nil {
 		return "", err
 	}
 	rootID := strings.TrimSpace(finalizer.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if outcome == beadmeta.OutcomePass && rootID != "" {
-		_, failed, err := terminalAbortScopeFailureMember(store, rootID, finalizer.ID)
+		_, failed, err := terminalAbortScopeFailureMember(store, rootID, finalizer.ID, opts)
 		if err != nil {
 			return "", err
 		}
@@ -1891,13 +1942,13 @@ func resolveFinalizeOutcome(store beads.Store, finalizer beads.Bead) (string, er
 //
 // The returned map always carries all three failure-stamp keys — see
 // failureStamp for why.
-func resolveFinalizeFailureDiagnostics(store beads.Store, finalizer beads.Bead) map[string]string {
+func resolveFinalizeFailureDiagnostics(store beads.Store, finalizer beads.Bead, opts ProcessOptions) map[string]string {
 	if blocker, ok := firstFailedFinalizeBlocker(store, finalizer); ok {
 		return failureStampFor(blocker)
 	}
 	rootID := strings.TrimSpace(finalizer.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID != "" {
-		if member, ok, err := terminalAbortScopeFailureMember(store, rootID, finalizer.ID); err == nil && ok {
+		if member, ok, err := terminalAbortScopeFailureMember(store, rootID, finalizer.ID, opts); err == nil && ok {
 			return failureStampFor(member)
 		}
 	}
@@ -1998,8 +2049,8 @@ func resolveBlockedOutcome(store beads.Store, beadID string) (string, error) {
 // terminalAbortScopeFailureMember returns the direct member whose terminal
 // gc.on_fail=abort_scope failure fails the whole workflow, so callers can both
 // decide the outcome and name the culprit in the domain parent's failure stamp.
-func terminalAbortScopeFailureMember(store beads.Store, rootID, finalizerID string) (beads.Bead, bool, error) {
-	all, err := beads.DirectMembers(store, rootID)
+func terminalAbortScopeFailureMember(store beads.Store, rootID, finalizerID string, opts ProcessOptions) (beads.Bead, bool, error) {
+	all, err := rootViewMembers(store, rootID, opts)
 	if err != nil {
 		return beads.Bead{}, false, err
 	}

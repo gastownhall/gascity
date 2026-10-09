@@ -73,8 +73,14 @@ func reconcileScopeForTerminalMember(store beads.Store, bead beads.Bead, opts Pr
 		closeBody = forceCloseScopeBody
 		ignoreIDs = []string{bead.ID}
 	}
-	loadSnapshot := func() (scopeSnapshot, error) {
-		snapshot, err := loadScopeSnapshotWithBody(store, rootID, scopeRef, body)
+	loadSnapshot := func(fromView bool) (scopeSnapshot, error) {
+		var snapshot scopeSnapshot
+		var err error
+		if fromView {
+			snapshot, err = loadScopeSnapshotInView(store, rootID, scopeRef, body, opts)
+		} else {
+			snapshot, err = loadScopeSnapshotWithBody(store, rootID, scopeRef, body)
+		}
 		if err != nil {
 			return scopeSnapshot{}, fmt.Errorf("%s: loading scope snapshot for %s: %w", bead.ID, scopeRef, err)
 		}
@@ -85,7 +91,10 @@ func reconcileScopeForTerminalMember(store beads.Store, bead beads.Bead, opts Pr
 	}
 
 	if beadOutcomeFailed(bead) {
-		snapshot, err := loadSnapshot()
+		// The abort writes skip outcomes onto the members it finds open, so it
+		// reads them live rather than from the invocation's root view: a
+		// member a worker closed since the view must not be stamped skipped.
+		snapshot, err := loadSnapshot(false)
 		if err != nil {
 			return ControlResult{}, err
 		}
@@ -96,7 +105,7 @@ func reconcileScopeForTerminalMember(store beads.Store, bead beads.Bead, opts Pr
 		return ControlResult{Processed: true, Action: "scope-fail", Skipped: skipped}, nil
 	}
 
-	remainingOpen, err := hasOpenScopeMembers(store, rootID, scopeRef, ignoreIDs...)
+	remainingOpen, err := hasOpenScopeMembersInView(store, rootID, scopeRef, opts, ignoreIDs...)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: checking scope completion: %w", bead.ID, err)
 	}
@@ -104,7 +113,10 @@ func reconcileScopeForTerminalMember(store beads.Store, bead beads.Bead, opts Pr
 		return ControlResult{}, nil
 	}
 
-	if state == scopeMemberClosed {
+	_, viewed := rootViewAll(opts, rootID)
+	if state == scopeMemberClosed && !viewed {
+		// Without a view the body was resolved by its own read; re-read it
+		// after the member reads. A view answered both from one read.
 		bodyAfter, err := store.Get(body.ID)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reloading scope body: %w", body.ID, err)
@@ -113,7 +125,10 @@ func reconcileScopeForTerminalMember(store beads.Store, bead beads.Bead, opts Pr
 			return ControlResult{}, nil
 		}
 	}
-	snapshot, err := loadSnapshot()
+	if state == scopeMemberClosed && viewed && body.Status == "closed" {
+		return ControlResult{}, nil
+	}
+	snapshot, err := loadSnapshot(true)
 	if err != nil {
 		return ControlResult{}, err
 	}
