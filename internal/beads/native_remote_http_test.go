@@ -127,9 +127,19 @@ func hermeticRemoteHTTPEnv(t *testing.T) {
 	t.Setenv(bdhttp.TokenCommandEnv, "")
 	t.Setenv("BEADS_CREDENTIALS_FILE", filepath.Join(home, "no-credentials"))
 	t.Setenv(nativeForceFallbackEnv, "")
+	t.Setenv(beadsHTTPCAFileEnv, "")
 	remoteHandshakeMu.Lock()
 	remoteHandshakeCache = map[string]remoteHandshakeEntry{}
 	remoteHandshakeMu.Unlock()
+	ambientCredentialMu.Lock()
+	ambientCredentialCache = map[string]ambientCredentialEntry{}
+	ambientCredentialMu.Unlock()
+	resetScopeCredentialCache()
+	resetCredentialEnvVault()
+	t.Cleanup(func() {
+		resetScopeCredentialCache()
+		resetCredentialEnvVault()
+	})
 }
 
 // noDoltPreflight is the production-shaped checker for the http leg with every

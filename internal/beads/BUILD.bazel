@@ -220,6 +220,7 @@ go_test(
         "query_seek_test.go",
         "ready_context_internal_test.go",
         "remote_backend_review_test.go",
+        "remote_scope_credential_refresh_test.go",
         "remote_scope_credential_test.go",
         "runview_lifecycle_test.go",
         "runview_roundtrip_test.go",

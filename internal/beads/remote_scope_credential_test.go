@@ -311,13 +311,13 @@ func TestPerCityCredentialRefreshRereadsTheSource(t *testing.T) {
 	server := newRemoteHTTPServer(t, fullRemoteCapabilities())
 	rotating := &rotatingAuthServer{inner: server}
 	routeRemoteOpensThrough(t, rotating)
+	// A command source: its token is cached between reads, so only the 401
+	// refresh can pick the rotated one up inside the cache interval.
+	_ = fakeCredentialClock(t)
 	city := remoteHTTPScope(t, server)
-	tokenFile := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(tokenFile, []byte("token-old"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	source, tokenFile, _ := tokenHelper(t, t.TempDir(), "token-old")
 	installRemoteCredentialLookup(t, map[string]RemoteCredentialConfig{
-		city: {Source: mustCredentialSource(t, "file:"+tokenFile), Scope: "[beads]", FromCity: true},
+		city: {Source: mustCredentialSource(t, source), Scope: "[beads]", FromCity: true},
 	})
 	native := openRemoteForTest(t, city, city)
 
@@ -364,6 +364,9 @@ func TestRemoteCredentialSubprocessEnvCarriesOnlyItsOwnScope(t *testing.T) {
 		}
 		if got := env["BEADS_HTTP_ALLOW_INSECURE"]; got != "" {
 			t.Errorf("BEADS_HTTP_ALLOW_INSECURE = %q, want blanked (no scope grant)", got)
+		}
+		if got, ok := env["BEADS_HTTP_CA_FILE"]; !ok || got != "" {
+			t.Errorf("BEADS_HTTP_CA_FILE = %q (set %v), want blanked (the sidecar's ca_file alone)", got, ok)
 		}
 	}
 	env := map[string]string{}

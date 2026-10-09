@@ -326,11 +326,24 @@ Set `beads_credential` on a `[[rigs]]` entry to give a rig its own token, or
 to attach it to a different server. The value says where the token lives, never
 the token itself: an inline token fails config load. `command:` runs the program
 without a shell and reads the token from its stdout. A relative `file:` path is
-resolved against the city directory. gc resolves the credential once per scope
-when it opens the scope. That token is then the only one used for the native
-store, the `wire_compat` handshake and the `bd` subprocess. The subprocess gets
-it in its own `BEADS_HTTP_TOKEN`, never on the command line. The ambient
-ladder is ignored for that scope.
+resolved against the city directory. That token is then the only one used for
+the native store, the `wire_compat` handshake and every `bd` subprocess of the
+scope, `gc bd` included. A subprocess gets it in its own `BEADS_HTTP_TOKEN`,
+never on the command line. The ambient ladder is ignored for that scope, and so
+is `BEADS_HTTP_CA_FILE`: the scope trusts the `ca_file` that `bd connect`
+recorded.
+
+gc picks up a rotated token without a restart. It re-reads an `env:` or
+`file:` source on every use. It reuses a `command:` token for up to a minute.
+After a 401 it re-reads any source at once, and every opener and subprocess of
+that scope then uses the new token.
+
+gc reads an `env:` variable from its own environment and then removes it, so no
+process gc starts inherits it. That covers agents, `bd` subprocesses and a `gc`
+that an agent runs. Prefer `file:` or `command:` when several cities share a
+supervisor, or when agents run `gc` or `bd` against the remote server
+themselves. A process started before gc loaded the city's config, such as an
+already running tmux server, keeps whatever it inherited.
 
 When the credential cannot be used, the scope is refused before any request is
 sent. The error has gate `remote_credential` and names the source, never the

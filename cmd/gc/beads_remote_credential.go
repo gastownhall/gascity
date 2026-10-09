@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
-	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/credsource"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -14,6 +14,12 @@ import (
 // and uses it as that scope's ONLY credential, for the native store, the
 // wire_compat handshake and the bd subprocess alike. A scope with none keeps
 // bd's ambient ladder (single city per server and process).
+//
+// An env:NAME source is read from gc's own environment and then moved out of
+// it (sequesterCityCredentialEnv), so no child process inherits NAME: gc
+// processes an agent runs cannot read it either. When cities share a
+// supervisor, or agents run gc against the remote store, prefer file: or
+// command:.
 
 // cityHTTPCredentials is the credential configuration one city load yields.
 type cityHTTPCredentials struct {
@@ -85,17 +91,15 @@ func cityRemoteCredentialLookup(cityPath, scopeRoot string) (beads.RemoteCredent
 // bdScopeCredentialEnv projects one bd runner's per-scope remote credential
 // into each child's env overrides (beads.RemoteCredentialSubprocessEnv): the
 // token travels in that child's environment only, never on argv, and never to
-// a child of another scope. One holder per scope directory the runner serves,
-// so the token is resolved once per scope, not once per command.
+// a child of another scope. Each child re-resolves its scope, and the token
+// comes from the scope's shared provider (refreshed per its source's policy),
+// so a rotated token reaches the next child.
 type bdScopeCredentialEnv struct {
 	cityPath string
-
-	mu      sync.Mutex
-	holders map[string]*beads.RemoteCredentialSubprocessEnv
 }
 
 func newBdScopeCredentialEnv(cityPath string) *bdScopeCredentialEnv {
-	return &bdScopeCredentialEnv{cityPath: cityPath, holders: map[string]*beads.RemoteCredentialSubprocessEnv{}}
+	return &bdScopeCredentialEnv{cityPath: cityPath}
 }
 
 // apply writes scopeRoot's credential env into env when the scope has a
@@ -104,13 +108,31 @@ func (b *bdScopeCredentialEnv) apply(env map[string]string, scopeRoot string) er
 	if b == nil || env == nil {
 		return nil
 	}
-	b.mu.Lock()
-	holder, ok := b.holders[scopeRoot]
-	if !ok {
-		holder = beads.NewRemoteCredentialSubprocessEnv(b.cityPath, scopeRoot)
-		b.holders[scopeRoot] = holder
-	}
-	b.mu.Unlock()
-	_, err := holder.Apply(context.Background(), env)
+	_, err := beads.NewRemoteCredentialSubprocessEnv(b.cityPath, scopeRoot).Apply(context.Background(), env)
 	return err
+}
+
+// cityCredentialEnvNames lists the variables a city's env: credential sources
+// name ([beads] credential and every rig's beads_credential).
+func cityCredentialEnvNames(creds cityHTTPCredentials) []string {
+	var names []string
+	add := func(c cityHTTPCredential) {
+		if c.ok && c.setting.Source.Kind == credsource.KindEnv {
+			names = append(names, c.setting.Source.Env)
+		}
+	}
+	add(creds.city)
+	for _, rig := range creds.byRoot {
+		add(rig)
+	}
+	return names
+}
+
+// sequesterCityCredentialEnv moves the variables cfg's env: credential sources
+// name out of the process environment (beads.SequesterRemoteCredentialEnv), so
+// no child gc spawns afterwards (agents, bd subprocesses, hooks) inherits a
+// token sourced from the supervisor's environment. The composition root calls
+// it as soon as a city's config is loaded, before the city spawns anything.
+func sequesterCityCredentialEnv(cityPath string, cfg *config.City) {
+	beads.SequesterRemoteCredentialEnv(cityCredentialEnvNames(cityHTTPCredentialsFromConfig(cityPath, cfg))...)
 }

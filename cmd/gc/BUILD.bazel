@@ -595,6 +595,7 @@ go_library(
         "//internal/beads",
         "//internal/beads/closeorder",
         "//internal/beads/contract",
+        "//internal/beads/credsource",
         "//internal/beads/exec",
         "//internal/beads/proxyendpoint",
         "//internal/bootstrap",

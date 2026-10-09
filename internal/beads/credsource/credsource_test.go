@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const secret = "s3cr3t-T0KEN-value"
@@ -143,5 +144,49 @@ func TestResolveErrorsAreTypedAndNameTheSourceWithoutTheValue(t *testing.T) {
 		if strings.Contains(err.Error(), secret) {
 			t.Errorf("error %q leaks the credential", err)
 		}
+	}
+}
+
+// TestResolveCommandRefusesOversizedOutput: a helper that prints more than the
+// output bound is refused, never truncated into a token, and the error does
+// not carry the output.
+func TestResolveCommandRefusesOversizedOutput(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "chatty.sh")
+	body := "#!/bin/sh\ni=0\nwhile [ $i -lt 2000 ]; do printf '" + secret + "%040d' $i; i=$((i+1)); done\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	src, err := Parse("command:" + script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = src.Resolve(context.Background(), ResolveOptions{Dir: dir})
+	if !errors.Is(err, ErrCommandFailed) || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("Resolve(oversized) error = %v, want ErrCommandFailed for output larger than the bound", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error %q leaks the output", err)
+	}
+}
+
+// TestResolveCommandDoesNotWaitOnAGrandchildHoldingStdout: a helper that
+// exits but leaves a background process holding its stdout open is bounded by
+// the command's WaitDelay, not by the grandchild's lifetime (or the 30 s
+// command timeout).
+func TestResolveCommandDoesNotWaitOnAGrandchildHoldingStdout(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "leaky.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho token\nsleep 60 &\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	src, err := Parse("command:" + script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, _ = src.Resolve(context.Background(), ResolveOptions{Dir: dir, CommandTimeout: 45 * time.Second})
+	if elapsed := time.Since(start); elapsed > 15*time.Second {
+		t.Fatalf("Resolve waited %v on a grandchild holding stdout, want it bounded by WaitDelay", elapsed)
 	}
 }

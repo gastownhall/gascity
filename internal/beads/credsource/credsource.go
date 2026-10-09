@@ -157,6 +157,15 @@ const DefaultCommandTimeout = 30 * time.Second
 // maxFileBytes bounds a credential file read.
 const maxFileBytes = 64 << 10
 
+// maxCommandOutputBytes bounds what a credential command's stdout may hold. A
+// helper that prints more is refused, never truncated into a token.
+const maxCommandOutputBytes = 64 << 10
+
+// commandWaitDelay bounds how long a credential command's I/O may outlive the
+// command itself (a helper that backgrounds a grandchild holding stdout open)
+// after it exits or is killed for the timeout.
+const commandWaitDelay = 2 * time.Second
+
 // ResolveOptions supplies the process seams a resolution reads through.
 type ResolveOptions struct {
 	// Getenv reads one variable for KindEnv. Nil uses os.Getenv.
@@ -243,12 +252,17 @@ func runCommand(parent context.Context, argv []string, opts ResolveOptions) (str
 	if opts.Environ != nil {
 		cmd.Env = opts.Environ()
 	}
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
+	stdout := &limitedBuffer{limit: maxCommandOutputBytes}
+	cmd.Stdout = stdout
 	// stderr is discarded: a helper may print secrets there, and this
 	// package never relays a credential source's output into an error.
 	cmd.Stderr = nil
-	if err := cmd.Run(); err != nil {
+	cmd.WaitDelay = commandWaitDelay
+	err := cmd.Run()
+	if stdout.overflow {
+		return "", fmt.Errorf("%w: output larger than %d bytes", ErrCommandFailed, maxCommandOutputBytes)
+	}
+	if err != nil {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("%w: %w", ErrCommandFailed, ctx.Err())
 		}
@@ -258,5 +272,26 @@ func runCommand(parent context.Context, argv []string, opts ResolveOptions) (str
 		}
 		return "", fmt.Errorf("%w: %w", ErrCommandFailed, err)
 	}
-	return stdout.String(), nil
+	return stdout.buf.String(), nil
+}
+
+// limitedBuffer keeps at most limit bytes and records an overflow. It keeps
+// accepting (and discarding) writes so the command is not killed by a broken
+// pipe before its exit status is known.
+type limitedBuffer struct {
+	buf      bytes.Buffer
+	limit    int
+	overflow bool
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if room := b.limit - b.buf.Len(); len(p) > room {
+		b.overflow = true
+		if room > 0 {
+			b.buf.Write(p[:room])
+		}
+		return len(p), nil
+	}
+	b.buf.Write(p)
+	return len(p), nil
 }

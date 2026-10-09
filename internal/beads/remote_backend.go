@@ -2,9 +2,13 @@ package beads
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -282,7 +286,7 @@ func remoteOpenPlanFor(ctx context.Context, cityPath, scopeRoot, activationRoot 
 	if ok {
 		plan.target = scoped.Target()
 		plan.options.Credential = scoped.Provider()
-		plan.credentialKey = "scope\x00" + scopeRoot + "\x00" + scoped.key()
+		plan.credentialKey = "scope\x00" + scoped.key()
 		return plan, nil
 	}
 	plan.target, plan.targetErr = bdhttp.LoadTarget(beadsDir)
@@ -292,15 +296,143 @@ func remoteOpenPlanFor(ctx context.Context, cityPath, scopeRoot, activationRoot 
 		// typed reason; there is nothing to resolve a credential for.
 		return plan, nil
 	}
+	if err := applyAmbientCAFile(&plan.target); err != nil {
+		// The bd CLI refuses the same value; the handshake reports it.
+		plan.targetErr = err
+		return plan, nil
+	}
 	if provided, isProvided := seam.Credential.(bdhttp.ProvidedCredential); isProvided && provided.Provider != nil {
 		plan.options.Credential = provided.Provider
 	} else {
-		plan.options.Credential = newResolvedAmbientCredential(ctx, plan.target.BaseURL)
+		plan.options.Credential = cachedAmbientCredential(ctx, beadsDir, plan.target.BaseURL)
 	}
 	if !plan.target.AllowInsecureCredential && ambientAllowInsecureCredential() {
 		plan.target.AllowInsecureCredential = true
 	}
 	return plan, nil
+}
+
+// applyAmbientCAFile carries BEADS_HTTP_CA_FILE onto an ambient-posture
+// target, exactly as the bd CLI (and so the BdStore bd child) applies it:
+// "host[:port]=path", applied only to the target it names, replacing the
+// sidecar's ca_file, and refused when it names a different file than the
+// sidecar for the same target. The explicit-credential door this open goes
+// through reads no CA env itself (it trusts Target.CAFile alone), so without
+// this the native store and the bd child of one ambient scope would trust
+// different roots. A scope with a per-scope credential does not read it: its
+// bd child gets BEADS_HTTP_CA_FILE blanked instead (SubprocessEnv), so both
+// trust the sidecar alone.
+func applyAmbientCAFile(target *bdhttp.Target) error {
+	raw := strings.TrimSpace(AmbientNativeDoltOpenEnv(beadsHTTPCAFileEnv))
+	if raw == "" || target == nil || target.BaseURL == nil {
+		return nil
+	}
+	pattern, path, ok := strings.Cut(raw, "=")
+	pattern, path = strings.TrimSpace(pattern), strings.TrimSpace(path)
+	switch {
+	case !ok || pattern == "" || path == "":
+		return fmt.Errorf("%s: want host[:port]=path", beadsHTTPCAFileEnv)
+	case !filepath.IsAbs(path):
+		return fmt.Errorf("%s: path %q must be absolute", beadsHTTPCAFileEnv, path)
+	case strings.HasSuffix(pattern, ":"):
+		return fmt.Errorf("%s: host pattern %q ends with \":\" and no port; want host, or host:port", beadsHTTPCAFileEnv, pattern)
+	}
+	matches, err := caPatternMatchesTarget(pattern, target.BaseURL)
+	if err != nil {
+		return fmt.Errorf("%s: %w", beadsHTTPCAFileEnv, err)
+	}
+	if !matches {
+		return nil
+	}
+	if sidecar := strings.TrimSpace(target.CAFile); sidecar != "" && !sameCAFilePath(sidecar, path) {
+		return fmt.Errorf("%s names %q for %s, but its sidecar ca_file names %q; remove one so the CA used is unambiguous",
+			beadsHTTPCAFileEnv, path, remoteOrigin(target.BaseURL), sidecar)
+	}
+	target.CAFile = path
+	return nil
+}
+
+// caPatternMatchesTarget is bd's host-scoped CA match: a pattern without a
+// port matches the host on any port, one with a port only that host:port
+// (the scheme's default port spelled out). Hosts compare case-insensitively
+// without a trailing dot; a non-ASCII host is refused rather than guessed at
+// (spell it in punycode).
+func caPatternMatchesTarget(pattern string, base *url.URL) (bool, error) {
+	host, port := pattern, ""
+	if h, p, err := net.SplitHostPort(pattern); err == nil {
+		host, port = h, p
+	}
+	host = strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(host, "["), "]"), ".")
+	targetHost := strings.TrimSuffix(base.Hostname(), ".")
+	for _, h := range []string{host, targetHost} {
+		for _, r := range h {
+			if r > 0x7e {
+				return false, fmt.Errorf("host %q is not ASCII; spell it in punycode", h)
+			}
+		}
+	}
+	if host == "" || !strings.EqualFold(host, targetHost) {
+		return false, nil
+	}
+	if port == "" {
+		return true, nil
+	}
+	_, targetPort, _ := net.SplitHostPort(remoteCredentialHostPort(base))
+	return port == targetPort, nil
+}
+
+// sameCAFilePath reports whether a and b name the same file.
+func sameCAFilePath(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	infoA, errA := os.Stat(a)
+	infoB, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(infoA, infoB)
+}
+
+// ambientCredentialMaxAge bounds how long one activation's resolved ambient
+// ladder answers for later opens of that activation, so a token command runs
+// once per interval rather than once per open. A 401 re-walks it at once
+// (resolvedAmbientCredential.Refresh), and a change to the ambient ladder's
+// variables starts a new entry.
+const ambientCredentialMaxAge = 60 * time.Second
+
+type ambientCredentialEntry struct {
+	fingerprint [sha256.Size]byte
+	credential  *resolvedAmbientCredential
+	at          time.Time
+}
+
+var (
+	ambientCredentialMu    sync.Mutex
+	ambientCredentialCache = map[string]ambientCredentialEntry{}
+)
+
+// cachedAmbientCredential returns the activation's resolved ambient ladder,
+// reusing one resolved within ambientCredentialMaxAge under the same ambient
+// variables. It is keyed by activation and server, the single-city posture's
+// own scope.
+func cachedAmbientCredential(ctx context.Context, beadsDir string, base *url.URL) *resolvedAmbientCredential {
+	key := beadsDir + "\x00" + base.Redacted()
+	h := sha256.New()
+	for _, name := range []string{bdhttp.TokenEnv, bdhttp.TokenCommandEnv, "BEADS_CREDENTIALS_FILE"} {
+		_, _ = h.Write([]byte(name + "=" + AmbientNativeDoltOpenEnv(name) + "\x00"))
+	}
+	var fingerprint [sha256.Size]byte
+	copy(fingerprint[:], h.Sum(nil))
+	now := remoteHandshakeNow()
+	ambientCredentialMu.Lock()
+	entry, ok := ambientCredentialCache[key]
+	ambientCredentialMu.Unlock()
+	if ok && entry.fingerprint == fingerprint && now.Sub(entry.at) < ambientCredentialMaxAge {
+		return entry.credential
+	}
+	credential := newResolvedAmbientCredential(ctx, base)
+	ambientCredentialMu.Lock()
+	ambientCredentialCache[key] = ambientCredentialEntry{fingerprint: fingerprint, credential: credential, at: now}
+	ambientCredentialMu.Unlock()
+	return credential
 }
 
 // ambientAllowInsecureCredential reads BEADS_HTTP_ALLOW_INSECURE as the bd CLI
@@ -319,12 +451,12 @@ func ambientAllowInsecureCredential() bool {
 func remoteWireHandshakeWith(scope string, plan remoteOpenPlan) (contract.PreflightWireHandshake, error) {
 	beadsDir := filepath.Join(scope, ".beads")
 	target, err := plan.target, plan.targetErr
-	if plan.beadsDir != beadsDir {
-		// The checker asked about a scope other than the planned activation;
-		// read its own sidecar (the plan's credential still applies).
-		target, err = bdhttp.LoadTarget(beadsDir)
-		if err == nil {
-			target.AllowInsecureCredential = plan.target.AllowInsecureCredential
+	if filepath.Clean(plan.beadsDir) != filepath.Clean(beadsDir) {
+		// The plan's credential and plaintext grant were decided for its own
+		// activation; never send them to a target read from another one.
+		return contract.PreflightWireHandshake{}, &contract.PreflightWireError{
+			Reason: contract.PreflightWireUnreachable,
+			Err:    fmt.Errorf("handshake asked for %s, but this open was planned for %s", beadsDir, plan.beadsDir),
 		}
 	}
 	if err == nil && target.BaseURL == nil {
@@ -337,7 +469,7 @@ func remoteWireHandshakeWith(scope string, plan remoteOpenPlan) (contract.Prefli
 		}
 		return contract.PreflightWireHandshake{}, &contract.PreflightWireError{Reason: reason, Err: err}
 	}
-	key := beadsDir + "\x00" + target.BaseURL.Redacted() + "\x00" + target.ExpectProjectID + "\x00" + plan.credentialKey
+	key := beadsDir + "\x00" + target.BaseURL.Redacted() + "\x00" + target.ExpectProjectID + "\x00" + target.CAFile + "\x00" + plan.credentialKey
 	remoteHandshakeMu.Lock()
 	entry, ok := remoteHandshakeCache[key]
 	remoteHandshakeMu.Unlock()

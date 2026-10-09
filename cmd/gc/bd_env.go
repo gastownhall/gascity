@@ -902,6 +902,7 @@ func cityCredentialProbe(cityPath string) (*hostedCredentialProbeEntry, error) {
 	}
 	selected := configSelectsHostedBeadsCredentialProvider(cfg)
 	entry := &hostedCredentialProbeEntry{selected: selected, http: cityHTTPCredentialsFromConfig(cityPath, cfg)}
+	beads.SequesterRemoteCredentialEnv(cityCredentialEnvNames(entry.http)...)
 	cacheable := true
 	for _, source := range prov.Sources {
 		stat, ok := statHostedCredentialProbeSource(source)

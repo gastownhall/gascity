@@ -1494,10 +1494,15 @@ type BeadsConfig struct {
 	// program, run without a shell, whose stdout is the token) or
 	// "file:<path>" (a relative path is resolved against the city
 	// directory). Never the token itself: any other value fails config load.
-	// It is resolved once per scope at open and is then the ONLY credential
-	// that scope's native store, wire_compat handshake and bd subprocesses
-	// use; the ambient BEADS_HTTP_TOKEN, BEADS_HTTP_TOKEN_COMMAND and
-	// credentials-file ladder are ignored. It authorizes the city scope and
+	// It is the ONLY credential that scope's native store, wire_compat
+	// handshake and bd subprocesses use; the ambient BEADS_HTTP_TOKEN,
+	// BEADS_HTTP_TOKEN_COMMAND and credentials-file ladder are ignored. An
+	// env or file source is re-read on every use, a command's token is
+	// reused for a minute, and a 401 re-reads any source at once. gc moves
+	// an env: variable out of its own environment, so no child process (an
+	// agent, a bd subprocess, a gc run by an agent) inherits it: prefer
+	// file: or command: when cities share a supervisor or agents run gc
+	// against the remote store. It authorizes the city scope and
 	// every rig on the same server (scheme, host and port) that sets no
 	// beads_credential of its own; gc refuses to send it to another server.
 	// Unset keeps the ambient ladder, which is keyed by host and port and is

@@ -775,6 +775,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 	applyFeatureFlags(cfg)
+	// Move any env: beads credential out of the environment before this city
+	// spawns a child (see sequesterCityCredentialEnv).
+	sequesterCityCredentialEnv(cityPath, cfg)
 	fatalWarnings, nonFatalWarnings := splitStrictConfigWarnings(prov.Warnings)
 	// Strict mode (default) promotes strict-eligible config warnings to errors.
 	if strictMode && len(fatalWarnings) > 0 {

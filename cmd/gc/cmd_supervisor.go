@@ -2170,6 +2170,10 @@ func startOneCity(
 		return
 	}
 	emitSupervisorLoadCityConfigWarnings(stderr, path, prov)
+	// A token an env: credential source reads must not reach this (or any
+	// other) city's children: move it out of the environment before the city
+	// spawns anything.
+	sequesterCityCredentialEnv(path, cfg)
 
 	// Use registered name as authoritative identity. city.toml may keep a
 	// different workspace.name because registration aliases are machine-local.

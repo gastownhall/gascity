@@ -7,9 +7,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	bdhttp "github.com/steveyegge/beads/backend/http"
 
@@ -19,13 +21,14 @@ import (
 // Per-city / per-rig credentials for a remote beads backend (DESIGN C3, G7).
 //
 // A city (or rig) may name its bearer's source in city.toml. When it does, that
-// source is resolved ONCE per scope at open and is then the only credential the
-// scope uses: the native store and the wire_compat handshake carry it as
-// bdhttp.Options.Credential (beads' explicit door: no ambient token, token
-// command, credentials file or BEADS_HTTP_ALLOW_INSECURE is read), and the bd
-// subprocess gets it scoped to that one child (RemoteCredentialSubprocessEnv).
-// Nothing is registered process-wide: two cities in one supervisor each hold
-// their own provider. With no per-scope credential configured, a scope keeps
+// source is the only credential the scope uses: the native store and the
+// wire_compat handshake carry it as bdhttp.Options.Credential (beads' explicit
+// door: no ambient token, token command, credentials file, CA env or
+// BEADS_HTTP_ALLOW_INSECURE is read), and the bd subprocess gets it scoped to
+// that one child (RemoteCredentialSubprocessEnv). One provider per scope holds
+// the token (scopeCredentialCache, keyed by scope, never by host): two cities
+// in one supervisor each hold their own, and a scope's opens and children
+// share one refresh policy. With no per-scope credential configured, a scope keeps
 // the ambient ladder, which is keyed by host and port and so only correct for
 // a single city per server and process.
 
@@ -143,6 +146,9 @@ type ScopeRemoteCredential struct {
 	config   RemoteCredentialConfig
 	target   bdhttp.Target
 	provider *sourceCredential
+	// cacheKey identifies the scope and the configuration the provider was
+	// resolved from (scopeCredentialCache).
+	cacheKey string
 }
 
 // Target is the scope's activation with the plaintext grant set from the
@@ -156,17 +162,16 @@ func (c *ScopeRemoteCredential) Provider() bdhttp.CredentialProvider { return c.
 // Source names the configured source, redacted.
 func (c *ScopeRemoteCredential) Source() string { return c.config.Source.String() }
 
-// key identifies the configuration this credential was resolved from.
-func (c *ScopeRemoteCredential) key() string {
-	return remoteCredentialConfigKey(c.config, c.target)
-}
+// key identifies the scope and the configuration this credential was resolved
+// from.
+func (c *ScopeRemoteCredential) key() string { return c.cacheKey }
 
 func remoteCredentialConfigKey(cfg RemoteCredentialConfig, target bdhttp.Target) string {
 	base := ""
 	if target.BaseURL != nil {
 		base = target.BaseURL.Redacted()
 	}
-	return fmt.Sprintf("%s\x00%t\x00%s\x00%s", cfg.Source.Key(), cfg.AllowInsecure, cfg.Dir, base)
+	return fmt.Sprintf("%s\x00%t\x00%s\x00%s\x00%s", cfg.Source.Key(), cfg.AllowInsecure, cfg.Dir, base, target.CAFile)
 }
 
 // Subprocess env keys of bd's own credential ladder.
@@ -174,13 +179,18 @@ const (
 	beadsHTTPTokenEnv         = "BEADS_HTTP_TOKEN"         // #nosec G101 -- env var name
 	beadsHTTPTokenCommandEnv  = "BEADS_HTTP_TOKEN_COMMAND" // #nosec G101 -- env var name
 	beadsHTTPAllowInsecureEnv = "BEADS_HTTP_ALLOW_INSECURE"
+	beadsHTTPCAFileEnv        = "BEADS_HTTP_CA_FILE"
 )
 
 // SubprocessEnv is the environment a bd child for this scope needs, and only
 // that child: its own token in bd's highest ladder rung (BEADS_HTTP_TOKEN,
 // scoped to the target's host:port), the token command rung blanked so an
-// ambient helper is never run, and the plaintext grant set from the scope's
-// configuration alone. The token never goes on argv.
+// ambient helper is never run, the plaintext grant set from the scope's
+// configuration alone, and BEADS_HTTP_CA_FILE blanked so the child trusts the
+// sidecar's ca_file alone, exactly as the native store's explicit door does.
+// The token never goes on argv. The token is the provider's current one: it
+// is re-read per the source's refresh policy (sourceCredential.current), so a
+// rotated token reaches the next child.
 func (c *ScopeRemoteCredential) SubprocessEnv(ctx context.Context) (map[string]string, error) {
 	token, err := c.provider.current(ctx)
 	if err != nil {
@@ -190,6 +200,7 @@ func (c *ScopeRemoteCredential) SubprocessEnv(ctx context.Context) (map[string]s
 		beadsHTTPTokenEnv:         remoteCredentialHostPort(c.target.BaseURL) + "=" + token,
 		beadsHTTPTokenCommandEnv:  "",
 		beadsHTTPAllowInsecureEnv: "",
+		beadsHTTPCAFileEnv:        "",
 	}
 	if c.config.AllowInsecure {
 		env[beadsHTTPAllowInsecureEnv] = "1"
@@ -222,29 +233,78 @@ func remoteCredentialHostPort(base *url.URL) string {
 //
 // The checks run before any request: the scope must be activated, a city
 // credential is sent only to the city's own server (scheme, host, port), and
-// plain http to a non-loopback host needs allow_insecure_credential.
+// plain http to a non-loopback host needs allow_insecure_credential. They run
+// again on every call; only the token is cached, per scope
+// (scopeCredentialCache), so the native opens and the bd children of one
+// scope share one provider: a token command runs once per refresh interval,
+// not once per open or per bd command, and a 401 refresh by any of them is
+// seen by all of them.
 func ResolveScopeRemoteCredential(ctx context.Context, cityPath, scopeRoot string) (*ScopeRemoteCredential, bool, error) {
-	return ResolveScopeRemoteCredentialCached(ctx, cityPath, scopeRoot, nil)
-}
-
-// ResolveScopeRemoteCredentialCached is ResolveScopeRemoteCredential that
-// reuses prev (and its resolved token) when the scope's configuration and
-// target are unchanged, so a long-lived runner does not re-run a token
-// command for every bd child. Every check except the token resolution runs
-// again on each call.
-func ResolveScopeRemoteCredentialCached(ctx context.Context, cityPath, scopeRoot string, prev *ScopeRemoteCredential) (*ScopeRemoteCredential, bool, error) {
 	cfg, target, ok, err := prepareScopeRemoteCredential(cityPath, scopeRoot)
 	if err != nil || !ok {
 		return nil, ok, err
 	}
-	if prev != nil && remoteCredentialConfigKey(cfg, target) == prev.key() {
-		return prev, true, nil
-	}
-	provider := &sourceCredential{source: cfg.Source, dir: cfg.Dir}
+	scope := scopeCredentialScope(cityPath, scopeRoot)
+	key := scope + "\x00" + remoteCredentialConfigKey(cfg, target)
+	provider := cachedScopeCredentialProvider(scope, key, cfg)
 	if _, err := provider.current(ctx); err != nil {
 		return nil, false, &RemoteCredentialError{ScopeRoot: scopeRoot, Scope: cfg.Scope, Source: cfg.Source.String(), Reason: RemoteCredentialReasonResolve, Err: err}
 	}
-	return &ScopeRemoteCredential{config: cfg, target: target, provider: provider}, true, nil
+	return &ScopeRemoteCredential{config: cfg, target: target, provider: provider, cacheKey: key}, true, nil
+}
+
+// scopeCredentialCache holds one provider per scope (city, scope root): the
+// token a scope's source last yielded, shared by that scope's native opens and
+// bd subprocess runners. It is keyed by scope, never by host, so two scopes on
+// one server never share an entry; a scope whose configuration or target
+// changes replaces its entry.
+var (
+	scopeCredentialCacheMu sync.Mutex
+	scopeCredentialCache   = map[string]scopeCredentialCacheEntry{}
+)
+
+type scopeCredentialCacheEntry struct {
+	key      string
+	provider *sourceCredential
+}
+
+func scopeCredentialScope(cityPath, scopeRoot string) string {
+	return filepath.Clean(cityPath) + "\x00" + filepath.Clean(scopeRoot)
+}
+
+func cachedScopeCredentialProvider(scope, key string, cfg RemoteCredentialConfig) *sourceCredential {
+	scopeCredentialCacheMu.Lock()
+	defer scopeCredentialCacheMu.Unlock()
+	if entry, ok := scopeCredentialCache[scope]; ok && entry.key == key {
+		return entry.provider
+	}
+	provider := &sourceCredential{source: cfg.Source, dir: cfg.Dir, maxAge: scopeCredentialMaxAge(cfg.Source)}
+	scopeCredentialCache[scope] = scopeCredentialCacheEntry{key: key, provider: provider}
+	return provider
+}
+
+// resetScopeCredentialCache drops every cached scope provider (tests).
+func resetScopeCredentialCache() {
+	scopeCredentialCacheMu.Lock()
+	scopeCredentialCache = map[string]scopeCredentialCacheEntry{}
+	scopeCredentialCacheMu.Unlock()
+}
+
+// scopeCommandCredentialMaxAge bounds how long a command source's token is
+// reused before the command runs again: a rotated token reaches the native
+// store and the bd children within it even when no request is refused. A
+// 401 re-runs it at once (sourceCredential.Refresh).
+var scopeCommandCredentialMaxAge = 60 * time.Second
+
+// scopeCredentialMaxAge is a source's refresh policy. An env or file source is
+// cheap to read, so it is re-read on every use (a rotated file is seen by the
+// next request and the next bd child); a command source is cached for
+// scopeCommandCredentialMaxAge.
+func scopeCredentialMaxAge(src credsource.Source) time.Duration {
+	if src.Kind == credsource.KindCommand {
+		return scopeCommandCredentialMaxAge
+	}
+	return 0
 }
 
 // prepareScopeRemoteCredential reads the scope's configured credential and
@@ -324,24 +384,33 @@ func remotePlaintextNonLoopback(base *url.URL) bool {
 }
 
 // sourceCredential is the bdhttp.CredentialProvider over one configured
-// source. It resolves on first use and caches the token for the life of the
-// store (or subprocess runner) holding it; after a 401 it re-reads the source
-// once (a rotated token). The token appears only in the Authorization header
-// and in the one bd child it is handed to.
+// source, shared by one scope's native stores and bd children
+// (scopeCredentialCache). It caches the token for maxAge (zero: the source is
+// re-read on every use) and, after a 401, re-reads the source at once (a
+// rotated token). A failed read is never cached and never falls back to the
+// previous token. The token appears only in the Authorization header and in
+// the bd children of its own scope.
 type sourceCredential struct {
 	source credsource.Source
 	dir    string
+	maxAge time.Duration
 
 	mu       sync.Mutex
 	resolved bool
 	token    string
+	at       time.Time
 }
+
+// sourceCredentialNow is the provider's clock (tests).
+var sourceCredentialNow = time.Now
 
 func (c *sourceCredential) resolve(ctx context.Context) (string, error) {
 	return c.source.Resolve(ctx, credsource.ResolveOptions{
 		// The process environment as the operator set it, never a Dolt
-		// open's in-flight projection.
-		Getenv:  AmbientNativeDoltOpenEnv,
+		// open's in-flight projection. An env: source is moved out of the
+		// process environment on first read (sequesterCredentialEnv), so no
+		// child gc spawns afterwards inherits it.
+		Getenv:  sequesterCredentialEnv,
 		Environ: ProcessEnvSnapshotExcludingNativeDoltOpen,
 		Dir:     c.dir,
 	})
@@ -350,14 +419,15 @@ func (c *sourceCredential) resolve(ctx context.Context) (string, error) {
 func (c *sourceCredential) current(ctx context.Context) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.resolved {
+	if c.resolved && c.maxAge > 0 && sourceCredentialNow().Sub(c.at) < c.maxAge {
 		return c.token, nil
 	}
 	token, err := c.resolve(ctx)
 	if err != nil {
+		c.resolved, c.token = false, ""
 		return "", err
 	}
-	c.token, c.resolved = token, true
+	c.token, c.resolved, c.at = token, true, sourceCredentialNow()
 	return token, nil
 }
 
@@ -372,33 +442,93 @@ func (c *sourceCredential) Authorize(ctx context.Context, req *http.Request) err
 }
 
 // Refresh implements the beads CredentialProvider contract: re-read the
-// source; retry only when it now yields a different token.
+// source now; retry only when it now yields a different token.
 func (c *sourceCredential) Refresh(ctx context.Context) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	token, err := c.resolve(ctx)
 	if err != nil {
+		c.resolved, c.token = false, ""
 		return false, err
 	}
 	changed := !c.resolved || token != c.token
-	c.token, c.resolved = token, true
+	c.token, c.resolved, c.at = token, true, sourceCredentialNow()
 	return changed, nil
 }
 
-// RemoteCredentialSubprocessEnv is the per-runner holder a bd subprocess
-// runner uses: it resolves the scope's credential once (on the first command)
-// and re-resolves only when the scope's configuration changes. A failed
-// resolution is not cached. It answers ok=false when the scope has no
-// per-scope credential, and the runner then leaves bd's ambient ladder alone.
+// credentialEnvVault holds the values of env: credential sources moved out of
+// the process environment (sequesterCredentialEnv). Names and values never
+// leave it except as a scope's resolved token.
+var (
+	credentialEnvVaultMu sync.Mutex
+	credentialEnvVault   = map[string]string{}
+)
+
+// SequesterRemoteCredentialEnv moves each named variable (the NAME of an
+// env:NAME credential source) out of the process environment into gc's
+// private vault, so no child process gc spawns from then on (agents, bd
+// subprocesses, hooks, any runtime provider that inherits os.Environ()) sees
+// it: in a supervisor running several cities, a token sourced from the
+// supervisor's environment must not reach another city's children, nor
+// this city's agents. The scope's own bd children still get the token, scoped
+// to their server, through BEADS_HTTP_TOKEN.
+//
+// The composition root calls it as soon as a city's config is read, before
+// that city spawns anything; resolving an env: source calls it too. A child
+// spawned before the first call (or a tmux server started before it) keeps
+// what it inherited, which is why file: or command: sources are preferred when
+// cities share a supervisor. Unset names are a no-op.
+func SequesterRemoteCredentialEnv(names ...string) {
+	for _, name := range names {
+		_ = sequesterCredentialEnv(name)
+	}
+}
+
+// sequesterCredentialEnv returns name's value, moving it out of the process
+// environment on first sight. A value re-exported later (an operator's, or a
+// test's) replaces the vaulted one and is moved out the same way. It reads
+// under the env mutex every Dolt open's projection holds.
+func sequesterCredentialEnv(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return ""
+	}
+	nativeDoltOpenEnvMu.Lock()
+	defer nativeDoltOpenEnvMu.Unlock()
+	credentialEnvVaultMu.Lock()
+	defer credentialEnvVaultMu.Unlock()
+	if value, ok := os.LookupEnv(name); ok {
+		_ = os.Unsetenv(name)
+		if value != "" {
+			credentialEnvVault[name] = value
+			return value
+		}
+		delete(credentialEnvVault, name)
+		return ""
+	}
+	return credentialEnvVault[name]
+}
+
+// resetCredentialEnvVault forgets every vaulted value (tests).
+func resetCredentialEnvVault() {
+	credentialEnvVaultMu.Lock()
+	credentialEnvVault = map[string]string{}
+	credentialEnvVaultMu.Unlock()
+}
+
+// RemoteCredentialSubprocessEnv projects one scope's credential into each bd
+// child a subprocess runner starts. Every Apply re-resolves the scope (config,
+// target and every pre-request check) and takes the token from the scope's
+// shared provider, under its refresh policy: a rotated file or env token
+// reaches the very next child, a command's within its cache interval, and a
+// 401 refresh by the scope's native store at once. A failed resolution stops
+// the child. It answers ok=false when the scope has no per-scope credential,
+// and the runner then leaves bd's ambient ladder alone.
 type RemoteCredentialSubprocessEnv struct {
 	cityPath  string
 	scopeRoot string
-
-	mu     sync.Mutex
-	cached *ScopeRemoteCredential
 }
 
-// NewRemoteCredentialSubprocessEnv builds the holder for one scope's runner.
+// NewRemoteCredentialSubprocessEnv builds the projector for one scope's runner.
 func NewRemoteCredentialSubprocessEnv(cityPath, scopeRoot string) *RemoteCredentialSubprocessEnv {
 	return &RemoteCredentialSubprocessEnv{cityPath: cityPath, scopeRoot: scopeRoot}
 }
@@ -409,21 +539,13 @@ func (h *RemoteCredentialSubprocessEnv) Apply(ctx context.Context, env map[strin
 	if h == nil || env == nil {
 		return false, nil
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	fresh, ok, err := ResolveScopeRemoteCredentialCached(ctx, h.cityPath, h.scopeRoot, h.cached)
-	if err != nil {
+	scoped, ok, err := ResolveScopeRemoteCredential(ctx, h.cityPath, h.scopeRoot)
+	if err != nil || !ok {
 		return false, err
 	}
-	if !ok {
-		h.cached = nil
-		return false, nil
-	}
-	h.cached = fresh
-	projected, err := fresh.SubprocessEnv(ctx)
+	projected, err := scoped.SubprocessEnv(ctx)
 	if err != nil {
-		h.cached = nil
-		return false, &RemoteCredentialError{ScopeRoot: h.scopeRoot, Scope: fresh.config.Scope, Source: fresh.Source(), Reason: RemoteCredentialReasonResolve, Err: err}
+		return false, &RemoteCredentialError{ScopeRoot: h.scopeRoot, Scope: scoped.config.Scope, Source: scoped.Source(), Reason: RemoteCredentialReasonResolve, Err: err}
 	}
 	for k, v := range projected {
 		env[k] = v
