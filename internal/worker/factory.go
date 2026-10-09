@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
@@ -32,6 +33,10 @@ type FactoryConfig struct {
 	// a keyed start is probed for stale resume-key failure. Nil preserves the
 	// session package production timer.
 	StaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter
+	// RuntimeLeaseTTL is the lifetime of the manager's runtime lease records,
+	// session.RuntimeLeaseTTL of the city's startup timeout. Zero uses the
+	// default startup timeout's.
+	RuntimeLeaseTTL time.Duration
 	// Pricing estimates per-invocation cost for telemetry. Nil falls back
 	// to the registry built from shipped defaults.
 	Pricing *pricing.Registry
@@ -64,12 +69,15 @@ type Factory struct {
 // NewFactory constructs a Factory backed by a session.Manager configured for
 // the caller's city/runtime context.
 func NewFactory(cfg FactoryConfig) (*Factory, error) {
-	opts := make([]sessionpkg.ManagerOption, 0, 3)
+	opts := make([]sessionpkg.ManagerOption, 0, 4)
 	if cfg.CityPath != "" || cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithCityPath(cfg.CityPath))
 	}
 	if cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithTransportResolver(cfg.ResolveTransport))
+	}
+	if cfg.RuntimeLeaseTTL > 0 {
+		opts = append(opts, sessionpkg.WithRuntimeLeaseTTL(cfg.RuntimeLeaseTTL))
 	}
 	if cfg.StaleKeyDetectionWaiter != nil {
 		opts = append(opts, sessionpkg.WithStaleKeyDetectionWaiter(cfg.StaleKeyDetectionWaiter))

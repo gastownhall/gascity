@@ -89,6 +89,7 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 		ResolveSessionRuntime:   workerSessionRuntimeResolverWithConfig(cityPath, cfg),
 		StaleKeyDetectionWaiter: waiter,
 		Pricing:                 cfg.PricingRegistry(),
+		RuntimeLeaseTTL:         session.RuntimeLeaseTTLFor(cfg),
 	})
 }
 

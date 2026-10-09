@@ -75,6 +75,7 @@ go_test(
         "operation_events_test.go",
         "provider_resume_test.go",
         "runtime_handle_reminder_test.go",
+        "runtime_lease_optout_test.go",
         "session_record_equiv_test.go",
         "sessionlog_adapter_test.go",
         "sessionlog_pagination_test.go",
