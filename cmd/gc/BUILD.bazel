@@ -1885,6 +1885,7 @@ go_test(
         "//internal/graphroute",
         "//internal/graphv2",
         "//internal/hooks",
+        "//internal/importsvc",
         "//internal/logutil",
         "//internal/mail",
         "//internal/mail/beadmail",

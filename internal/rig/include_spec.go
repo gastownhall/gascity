@@ -20,7 +20,7 @@ var includeBindingPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 
 // includeSpec is one parsed --include token.
 type includeSpec struct {
-	Token   string // trimmed raw token, for messages
+	Token   string // raw --include token, for messages
 	Binding string // explicit binding; "" derives it from Source
 	Source  string // pack source or pack name (canonicalized after resolveIncludeSpecs)
 }

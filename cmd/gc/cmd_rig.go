@@ -86,9 +86,13 @@ multiple packs for one rig. Each --include becomes a [rigs.imports.<binding>]
 entry in city.toml, resolved the way "gc import add --rig <rig>" resolves an
 import: a bundled pack is pinned to the version shipped with gc; any other
 remote source gets the version constraint gc import add would write (the
-newest registry release, else the newest semver tag, else the remote HEAD
-commit) plus a packs.lock entry; a local path is imported as given. If a
-version cannot be resolved, nothing is written.
+constraint the city already holds for that source, else the newest registry
+release, else the newest semver tag, else the remote HEAD commit) plus a
+packs.lock entry; a remote source with an embedded "#ref" and a local path
+are imported as given, with no packs.lock entry. If a version cannot be
+resolved, nothing is written. Imports do not honor a "#ref": the city fails
+to load until gc import install locks such a source, at a commit chosen
+without the ref; use gc import add --rig <rig> --version to pin a version.
 
 --include takes a pack source (local path or remote URL) or a pack name: a
 bundled pack ("gastown"), or a registry pack resolved from the cached

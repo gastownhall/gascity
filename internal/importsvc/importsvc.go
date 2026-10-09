@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -187,6 +188,46 @@ func (d Deps) defaultImportVersionForSource(cityRoot, source string) (string, er
 	return "sha:" + commit, nil
 }
 
+// cityImportConstraint returns the version constraint the city already holds
+// for source, so a version-less add joins the existing pin instead of moving
+// it (packs.lock has one entry per source, and packman merges every import's
+// constraint for it): the first non-empty version an existing import of the
+// same source declares, in synthetic-key order; else the default caret of the
+// packs.lock entry's version; else a "sha:" pin of the entry's commit when that
+// version is not semver. ok is false when the city neither declares nor locks
+// source.
+func cityImportConstraint(fs fsys.FS, cityRoot, source string) (string, bool, error) {
+	imports, err := CollectAllImports(fs, cityRoot)
+	if err != nil {
+		return "", false, err
+	}
+	var keys []string
+	for key, imp := range imports {
+		if imp.Source == source && imp.Version != "" {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) > 0 {
+		slices.Sort(keys)
+		return imports[keys[0]].Version, true, nil
+	}
+	lock, err := packman.ReadLockfile(fs, cityRoot)
+	if err != nil {
+		return "", false, err
+	}
+	locked, ok := lock.Packs[source]
+	if !ok {
+		return "", false, nil
+	}
+	if constraint, err := packman.DefaultConstraint(locked.Version); err == nil {
+		return constraint, true, nil
+	}
+	if locked.Commit == "" {
+		return "", false, nil
+	}
+	return "sha:" + locked.Commit, true, nil
+}
+
 // fenceSource applies the injected untrusted-source policy to source. It is the
 // service-boundary SSRF fence: the HTTP handler injects its host/file policy so
 // AddImportWith never drives a git probe at an internal target, even for a
@@ -200,14 +241,16 @@ func (d Deps) fenceSource(source string) error {
 
 // resolveImportVersion validates and resolves the version constraint for an add.
 // Git-backed sources reject a ref embedded in the URL and, when no constraint is
-// given, default to the resolved semver/HEAD; non-git path sources reject a
-// constraint outright. localHead marks a source promoted from a local git
-// worktree: absent an explicit constraint, it locks to the worktree's current
-// HEAD commit rather than the repo's latest semver tag, which may predate the
-// pack existing in the tree at all (gastownhall/gascity#3659). The returned
-// error already carries the transport-mapped sentinel (ErrInvalidSource or
-// ErrVersionResolveFailed).
-func (d Deps) resolveImportVersion(cityRoot, source, versionConstraint string, gitBacked, localHead bool) (string, error) {
+// given, default to the constraint the city already holds for the same source
+// (cityImportConstraint), else to the resolved semver/HEAD; non-git path
+// sources reject a constraint outright. localHead marks a source promoted from
+// a local git worktree: absent an explicit constraint, it locks to the
+// worktree's current HEAD commit rather than the repo's latest semver tag,
+// which may predate the pack existing in the tree at all
+// (gastownhall/gascity#3659). The returned error already carries the
+// transport-mapped sentinel (ErrInvalidSource, ErrVersionResolveFailed, or
+// ErrInstallFailed when the city's imports or packs.lock cannot be read).
+func (d Deps) resolveImportVersion(fs fsys.FS, cityRoot, source, versionConstraint string, gitBacked, localHead bool) (string, error) {
 	if !gitBacked {
 		if versionConstraint != "" {
 			return "", fmt.Errorf("%w: --version is only valid for git-backed imports", ErrInvalidSource)
@@ -227,6 +270,13 @@ func (d Deps) resolveImportVersion(cityRoot, source, versionConstraint string, g
 		}
 		return "sha:" + commit, nil
 	}
+	constraint, ok, err := cityImportConstraint(fs, cityRoot, source)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrInstallFailed, err)
+	}
+	if ok {
+		return constraint, nil
+	}
 	version, err := d.defaultImportVersionForSource(cityRoot, source)
 	if err != nil {
 		return "", fmt.Errorf("%w: %w", ErrVersionResolveFailed, err)
@@ -235,23 +285,25 @@ func (d Deps) resolveImportVersion(cityRoot, source, versionConstraint string, g
 }
 
 // ResolveRemoteDefaultVersion returns the version constraint AddImportWith
-// writes for a remote source added without --version: the newest registry
-// release's default constraint, else the newest semver tag's, else a "sha:"
-// pin of the remote HEAD. It applies the same source checks an add does (the
-// credential-in-URL refusal, the injected SourcePolicy, and the embedded-ref
-// refusal) so a caller that persists the result (gc rig add --include) stays in
-// step with gc import add. Errors wrap ErrInvalidSource or ErrVersionResolveFailed.
-func (d Deps) ResolveRemoteDefaultVersion(cityRoot, source string) (string, error) {
+// writes for a remote source added without --version: the constraint the city
+// at cityRoot already holds for the same source (a declared version, else the
+// packs.lock entry's), else the newest registry release's default constraint,
+// else the newest semver tag's, else a "sha:" pin of the remote HEAD. It
+// applies the same source checks an add does (the credential-in-URL refusal,
+// the injected SourcePolicy, and the embedded-ref refusal) so a caller that
+// persists the result (gc rig add --include) stays in step with gc import add.
+// Errors wrap ErrInvalidSource, ErrVersionResolveFailed, or ErrInstallFailed.
+func (d Deps) ResolveRemoteDefaultVersion(fs fsys.FS, cityRoot, source string) (string, error) {
 	if !isRemoteImportSource(source) {
 		return "", fmt.Errorf("%w: %q is not a remote import source", ErrInvalidSource, source)
 	}
-	if err := rejectSourceUserinfo(source); err != nil {
+	if err := RejectSourceUserinfo(source); err != nil {
 		return "", fmt.Errorf("%w: %w", ErrInvalidSource, err)
 	}
 	if err := d.fenceSource(source); err != nil {
 		return "", err
 	}
-	return d.resolveImportVersion(cityRoot, source, "", true, false)
+	return d.resolveImportVersion(fs, cityRoot, source, "", true, false)
 }
 
 // AddImport resolves source once and writes it as a durable [imports.<name>]
@@ -307,7 +359,7 @@ func AddImportWith(fs fsys.FS, cityPath, source, nameOverride, versionConstraint
 		}
 	}
 
-	version, err := deps.resolveImportVersion(cityPath, source, versionConstraint, gitBacked, localHead)
+	version, err := deps.resolveImportVersion(fs, cityPath, source, versionConstraint, gitBacked, localHead)
 	if err != nil {
 		return nil, err
 	}

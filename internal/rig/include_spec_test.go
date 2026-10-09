@@ -306,6 +306,60 @@ func TestProvisionRigPathCollisionWinsOverIncludeResolution(t *testing.T) {
 	}
 }
 
+// TestProvisionPrefixCollisionWinsOverIncludeResolution documents that the
+// prefix collision check runs before include resolution: a fresh add whose
+// prefix collides fails without reaching the network-capable resolver.
+func TestProvisionPrefixCollisionWinsOverIncludeResolution(t *testing.T) {
+	deps := stubDeps(t.TempDir())
+	deps.Cfg = &config.City{Rigs: []config.Rig{{Name: "other", Path: filepath.Join(t.TempDir(), "other"), Prefix: "rp"}}}
+	deps.ResolveIncludeImports = func(string, []config.BoundImport) ([]config.BoundImport, func() error, error) {
+		t.Error("ResolveIncludeImports ran before the prefix collision check")
+		return nil, nil, nil
+	}
+	_, _, err := Provision(deps, ProvisionRequest{
+		Name:     "r",
+		Path:     filepath.Join(t.TempDir(), "rig"),
+		Prefix:   "rp",
+		Includes: []string{"tools=https://example.com/p.git"},
+	})
+	if err == nil || !strings.Contains(err.Error(), `prefix "rp" collides with other`) {
+		t.Fatalf("Provision err = %v, want the prefix collision error", err)
+	}
+}
+
+// TestProvisionReAddIncludeWarningNamesTheTokens pins the re-add warning to
+// the --include tokens as given, so a binding that differs from the existing
+// rig's is visible next to the existing imports.
+func TestProvisionReAddIncludeWarningNamesTheTokens(t *testing.T) {
+	deps := stubDeps(t.TempDir())
+	rigPath := t.TempDir()
+	deps.Cfg = &config.City{Rigs: []config.Rig{{
+		Name:    "r",
+		Path:    rigPath,
+		Imports: map[string]config.Import{"tools": {Source: "https://example.com/p.git"}},
+	}}}
+	deps.ComposePacks = func(_ string, imports []config.BoundImport) ([]config.BoundImport, func() error, error) {
+		return imports, nil, nil
+	}
+	var warnings []string
+	deps.OnStep = func(step ProvisionStep) {
+		if step.Name == "include-ignored" {
+			warnings = append(warnings, step.Detail)
+		}
+	}
+	if _, _, err := Provision(deps, ProvisionRequest{
+		Name:     "r",
+		Path:     rigPath,
+		Includes: []string{" ops=https://example.com/p.git "},
+	}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	want := "--include flags [ops=https://example.com/p.git] ignored (existing imports: tools=https://example.com/p.git)"
+	if len(warnings) != 1 || !strings.Contains(warnings[0], want) {
+		t.Fatalf("include-ignored warnings = %q, want one containing %q", warnings, want)
+	}
+}
+
 func TestInheritExistingImportVersions(t *testing.T) {
 	rig := &config.Rig{Imports: map[string]config.Import{
 		"tools": {Source: "https://example.com/tools.git", Version: "^1.4"},

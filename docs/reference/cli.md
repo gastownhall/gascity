@@ -2114,7 +2114,10 @@ entry using source plus optional version. Supported sources are:
 - local paths inside git worktrees at HEAD: promoted to a file:// repo source
   with the pack subpath and locked to the current commit
 - remote git repositories: cloned and locked; --version accepts a semver
-  constraint or sha:&lt;commit&gt;
+  constraint or sha:&lt;commit&gt;. Without --version, a source the city already
+  imports or locks keeps the constraint the city holds for it, so its
+  packs.lock entry does not move (a local path inside a git worktree is
+  still locked to its current commit)
 - packs published in a configured pack registry: a semver --version (or no
   --version) resolves against the registry's release entries, not git tags;
   the constraint is kept, the lock records the release version and commit,
@@ -3637,9 +3640,13 @@ multiple packs for one rig. Each --include becomes a [rigs.imports.&lt;binding&g
 entry in city.toml, resolved the way "gc import add --rig &lt;rig&gt;" resolves an
 import: a bundled pack is pinned to the version shipped with gc; any other
 remote source gets the version constraint gc import add would write (the
-newest registry release, else the newest semver tag, else the remote HEAD
-commit) plus a packs.lock entry; a local path is imported as given. If a
-version cannot be resolved, nothing is written.
+constraint the city already holds for that source, else the newest registry
+release, else the newest semver tag, else the remote HEAD commit) plus a
+packs.lock entry; a remote source with an embedded "#ref" and a local path
+are imported as given, with no packs.lock entry. If a version cannot be
+resolved, nothing is written. Imports do not honor a "#ref": the city fails
+to load until gc import install locks such a source, at a commit chosen
+without the ref; use gc import add --rig &lt;rig&gt; --version to pin a version.
 
 --include takes a pack source (local path or remote URL) or a pack name: a
 bundled pack ("gastown"), or a registry pack resolved from the cached

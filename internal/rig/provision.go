@@ -92,9 +92,8 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 	if err != nil {
 		return config.Rig{}, result, err
 	}
-	includes = includeSpecSources(specs)
 
-	// Steps 5-9: detect re-add, resolve imports, derive the prefix, build the
+	// Steps 5-9: detect re-add, derive the prefix, resolve imports, build the
 	// next config, and validate it before any filesystem mutation.
 	plan, err := planRigMutation(deps, req, rigPath, resolvedDefaultBranch, specs)
 	if err != nil {
@@ -192,11 +191,11 @@ type rigMutationPlan struct {
 	commitRigImports      func() error
 }
 
-// planRigMutation runs steps 5-9: it detects a re-add, resolves the explicit
-// --include imports, derives and collision-checks the prefix, backfills a
-// default branch that forces a re-add write, builds the next config, and
-// validates the resulting rig set before any filesystem mutation. Its errors
-// are the byte-identical fatal texts the CLI prints.
+// planRigMutation runs steps 5-9: it detects a re-add, derives and
+// collision-checks the prefix, resolves the explicit --include imports,
+// backfills a default branch that forces a re-add write, builds the next
+// config, and validates the resulting rig set before any filesystem mutation.
+// Its errors are the byte-identical fatal texts the CLI prints.
 func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBranch string, specs []includeSpec) (rigMutationPlan, error) {
 	cfg := deps.Cfg
 	cityPath := deps.CityPath
@@ -209,14 +208,15 @@ func planRigMutation(deps Deps, req ProvisionRequest, rigPath, resolvedDefaultBr
 		return rigMutationPlan{}, err
 	}
 
-	// Step 6: bind and resolve the explicit rig imports (call #1).
-	explicitRigImports, commitRigImports, err := composeExplicitRigImports(deps, specs, reAdd, existingRig)
+	// Step 6: prefix resolution + collision checks. It runs before import
+	// resolution so a colliding prefix never reaches the network.
+	prefix, err := resolveRigPrefix(cfg, req, name, reAdd, existingRig)
 	if err != nil {
 		return rigMutationPlan{}, err
 	}
 
-	// Step 7: prefix resolution + collision checks.
-	prefix, err := resolveRigPrefix(cfg, req, name, reAdd, existingRig)
+	// Step 7: bind and resolve the explicit rig imports (call #1).
+	explicitRigImports, commitRigImports, err := composeExplicitRigImports(deps, specs, reAdd, existingRig)
 	if err != nil {
 		return rigMutationPlan{}, err
 	}
@@ -653,13 +653,14 @@ func writeRigTopology(deps Deps, plan rigMutationPlan, tomlPath string, snapshot
 		}
 	}
 
-	// Persist packs.lock and materialize bundled rig imports only after the city
-	// config write succeeds, so the lockfile honors the same "city.toml written
-	// last" contract: any earlier failure leaves packs.lock untouched, and a
-	// failure here rolls back through the snapshot (which now covers packs.lock).
+	// Persist packs.lock and materialize the locked rig imports only after the
+	// city config write succeeds, so the lockfile honors the same "city.toml
+	// written last" contract: any earlier failure leaves packs.lock untouched,
+	// and a failure here rolls back through the snapshot (which now covers
+	// packs.lock).
 	if plan.commitRigImports != nil {
 		if err := plan.commitRigImports(); err != nil {
-			return rollbackError(fs, snapshots, "installing bundled rig imports", err)
+			return rollbackError(fs, snapshots, "installing rig imports", err)
 		}
 	}
 	return nil

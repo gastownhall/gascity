@@ -167,11 +167,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gc import add`.** A non-bundled remote include used to be written with no
   version and no `packs.lock` entry, so `gc import check` reported a missing
   lock entry and the import floated. It now gets the constraint
-  `gc import add` would write (the newest registry release, else the newest
-  semver tag, else the remote HEAD commit) and a `packs.lock` entry in the same
-  add. That needs network access to the source; if resolution fails, the add
-  fails and `city.toml` and `packs.lock` are untouched. Bundled packs and local
-  paths are unchanged.
+  `gc import add` would write (the constraint the city already holds for that
+  source, else the newest registry release, else the newest semver tag, else
+  the remote HEAD commit) and a `packs.lock` entry in the same add. That needs
+  network access to the source; if resolution fails, the add fails and
+  `city.toml` and `packs.lock` are untouched. Only explicit `--include` flags
+  changed: bundled packs, local paths, sources with an embedded `#ref`, and the
+  imports a new rig gets from `[defaults.rig.imports]` or `default_rig_includes`
+  are written as before.
+
+- **`gc import add` without `--version` keeps the constraint the city already
+  holds for a source.** `packs.lock` has one entry per source, so adding a
+  source the city already imports (in any scope) or locks now writes the
+  existing import's constraint, else one matching the source's `packs.lock`
+  entry, instead of the newest release's, which could conflict with the
+  existing constraint or move the lock entry every importer shares. A local
+  path inside a git worktree is still locked to its current commit. Adding a
+  pack with `POST /v0/city/{cityName}/packs` and no `version` changes the
+  same way. Pass `--version` to choose another constraint.
 
 ### Fixed
 
