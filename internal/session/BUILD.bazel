@@ -89,6 +89,7 @@ go_test(
         "create_options_test.go",
         "create_test.go",
         "enrich_and_twins_test.go",
+        "fields_scan_test.go",
         "get_persisted_response_test.go",
         "hangbudget_test.go",
         "info_apply_patch_test.go",
@@ -169,7 +170,10 @@ go_test(
         "//cmd/gc:doctor_session_model.go",
         "//cmd/gc:session_beads.go",
         "//cmd/gc:session_reconcile.go",
+        "//internal/api:bazel_go_srcs",
         "//internal/api:handler_sessions.go",
+        "//internal/beadmeta:bazel_go_srcs",
+        "//internal/worker:bazel_go_srcs",
     ],
     embed = [":session"],
     deps = [
