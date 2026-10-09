@@ -117,7 +117,11 @@ go_test(
         exclude = ["BUILD.bazel"],
     ),
     embed = [":tmux"],
+    # ~590 tests, ~90 s on one worker in the integration build
+    # (//test:integration_packages); 3 shards keep each under 40 s.
+    shard_count = 3,
     deps = [
+        "//internal/bazeltest",
         "//internal/citylayout",
         "//internal/runtime",
         "//internal/runtime/acp",

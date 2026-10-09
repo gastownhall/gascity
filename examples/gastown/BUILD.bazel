@@ -43,7 +43,10 @@ go_test(
         },
         "//conditions:default": {},
     }),
-    shard_count = 2,
+    # The integration build (//test:integration_packages): one ~65 s test plus
+    # ~40 s of the rest. The guard scripts/integration_packages_shards_test.go
+    # keeps the tests in heavy_tests.txt apart.
+    shard_count = 4,
     deps = [
         "//examples/bd/dolt",
         "//internal/bazeltest",
@@ -70,6 +73,13 @@ exports_files(glob(
     ["**"],
     exclude = ["BUILD.bazel"],
 ))
+
+# The shard placement guard (scripts/integration_packages_shards_test.go)
+# reads gastown_test's srcs and shard_count.
+exports_files(
+    ["BUILD.bazel"],
+    visibility = ["//scripts:__pkg__"],
+)
 
 filegroup(
     name = "pack_files",
