@@ -6,7 +6,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"testing/synctest"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -58,70 +57,63 @@ func TestV2RoutedToNamespaceCheckWarnsOnShortBoundRoutes(t *testing.T) {
 	}
 }
 
-func TestV2RoutedToNamespaceCheckUsesTargetedRouteQueries(t *testing.T) {
-	cityDir := t.TempDir()
-	cfg := &config.City{
-		Agents: []config.Agent{{Name: "dog", BindingName: "gastown"}},
-	}
-	store := &routeQuerySpyStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{
-		{ID: "CITY-1", Title: "warrant", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "dog"}},
-	}, nil)}
+// TestV2RoutedToNamespaceCheckReadsEachStoreOnceWhateverTheRouteCount: the
+// check lists each store once and matches routes in memory, so its reads do
+// not grow with the city's bound routes (a 215-route city with four stores
+// paid 1,720 bd forks for one read per route per store). A store path shared
+// by two scopes is listed once and still reported for both.
+func TestV2RoutedToNamespaceCheckReadsEachStoreOnceWhateverTheRouteCount(t *testing.T) {
+	for _, routes := range []int{1, 250} {
+		t.Run(fmt.Sprintf("%d-routes", routes), func(t *testing.T) {
+			cityDir := t.TempDir()
+			rigDir := t.TempDir()
+			cfg := &config.City{
+				Rigs: []config.Rig{
+					{Name: "repo", Path: rigDir},
+					{Name: "alias", Path: rigDir},
+				},
+			}
+			for i := range routes {
+				cfg.Agents = append(cfg.Agents, config.Agent{Name: fmt.Sprintf("agent%03d", i), BindingName: "pack"})
+			}
+			stores := map[string]*routeQuerySpyStore{
+				cityDir: {Store: beads.NewMemStoreFrom(0, []beads.Bead{
+					{ID: "CITY-1", Title: "short", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "agent000"}},
+					{ID: "CITY-2", Title: "canonical", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "pack.agent000"}},
+					{ID: "CITY-3", Title: "closed", Type: "task", Status: "closed", Metadata: map[string]string{"gc.routed_to": "agent000"}},
+					{ID: "CITY-4", Title: "padded", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": " agent000"}},
+				}, nil)},
+				rigDir: {Store: beads.NewMemStoreFrom(0, []beads.Bead{
+					{ID: "RIG-1", Title: "short", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": fmt.Sprintf("agent%03d", routes-1)}},
+				}, nil)},
+			}
+			result := newV2RoutedToNamespaceCheck(cfg, cityDir, func(path string) (beads.Store, error) {
+				store, ok := stores[path]
+				if !ok {
+					return nil, fmt.Errorf("unexpected store path %q", path)
+				}
+				return store, nil
+			}).Run(&doctor.CheckContext{})
 
-	result := newV2RoutedToNamespaceCheck(cfg, cityDir, func(path string) (beads.Store, error) {
-		if path != cityDir {
-			return nil, fmt.Errorf("unexpected store path %q", path)
-		}
-		return store, nil
-	}).Run(&doctor.CheckContext{})
-
-	if result.Status != doctor.StatusWarning {
-		t.Fatalf("status = %v, want warning: %#v", result.Status, result)
-	}
-	if len(store.queries) == 0 {
-		t.Fatal("expected at least one route query")
-	}
-	for _, query := range store.queries {
-		if query.AllowScan {
-			t.Fatalf("query %+v used AllowScan; route namespace check should use targeted metadata lookups", query)
-		}
-		if got := query.Metadata["gc.routed_to"]; got == "" {
-			t.Fatalf("query %+v missing gc.routed_to metadata filter", query)
-		}
-	}
-}
-
-// TestV2RoutedToNamespaceCheckStopsQueryingAfterAFailedRoute: the scan ends
-// at the first failed route, so once one fails no further route query may
-// start. On a store that is down, each one would fork bd and run its recovery
-// only to have its answer discarded.
-func TestV2RoutedToNamespaceCheckStopsQueryingAfterAFailedRoute(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		cfg := &config.City{}
-		for i := range 12 {
-			cfg.Agents = append(cfg.Agents, config.Agent{Name: fmt.Sprintf("agent%02d", i), BindingName: "pack"})
-		}
-		store := &routeGateSpyStore{Store: beads.NewMemStore(), failRoute: "agent00", gate: make(chan struct{})}
-		check := newV2RoutedToNamespaceCheck(cfg, t.TempDir(), func(string) (beads.Store, error) {
-			return store, nil
+			if result.Status != doctor.StatusWarning {
+				t.Fatalf("status = %v, want warning: %#v", result.Status, result)
+			}
+			last := fmt.Sprintf("agent%03d", routes-1)
+			want := []string{
+				`city bead CITY-1 has gc.routed_to="agent000"; use "pack.agent000"`,
+				fmt.Sprintf(`rig alias bead RIG-1 has gc.routed_to=%q; use "pack.%s"`, last, last),
+				fmt.Sprintf(`rig repo bead RIG-1 has gc.routed_to=%q; use "pack.%s"`, last, last),
+			}
+			if got := strings.Join(result.Details, "\n"); got != strings.Join(want, "\n") {
+				t.Fatalf("details:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
+			}
+			for path, store := range stores {
+				if len(store.queries) != 1 {
+					t.Fatalf("store %s listed %d times for %d routes, want 1: %+v", path, len(store.queries), routes, store.queries)
+				}
+			}
 		})
-
-		done := make(chan *doctor.CheckResult)
-		go func() { done <- check.Run(&doctor.CheckContext{}) }()
-		// Every route query that will start has started: the first route's
-		// has failed and any others are held at the gate.
-		synctest.Wait()
-		close(store.gate)
-		result := <-done
-
-		if details := strings.Join(result.Details, "\n"); result.Status != doctor.StatusWarning ||
-			!strings.Contains(details, "city skipped: listing beads: store unreachable") {
-			t.Fatalf("result = %+v, want the city scope skipped with the first route's error", result)
-		}
-		if len(store.queried) > doctorStoreReadConcurrency {
-			t.Fatalf("queried %d of %d routes once the first had failed (%v), want at most the %d already in flight",
-				len(store.queried), len(cfg.Agents), store.queried, doctorStoreReadConcurrency)
-		}
-	})
+	}
 }
 
 func TestV2RoutedToNamespaceCheckAllowsCanonicalRoutes(t *testing.T) {
@@ -394,33 +386,13 @@ func (s routeSetMetadataErrorStore) SetMetadata(string, string, string) error {
 
 type routeQuerySpyStore struct {
 	beads.Store
+	mu      sync.Mutex
 	queries []beads.ListQuery
 }
 
 func (s *routeQuerySpyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	s.queries = append(s.queries, query)
-	return s.Store.List(query)
-}
-
-// routeGateSpyStore fails the query for failRoute at once, holds every other
-// route query until gate is closed, and records each route queried.
-type routeGateSpyStore struct {
-	beads.Store
-	failRoute string
-	gate      chan struct{}
-
-	mu      sync.Mutex
-	queried []string
-}
-
-func (s *routeGateSpyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	route := query.Metadata["gc.routed_to"]
 	s.mu.Lock()
-	s.queried = append(s.queried, route)
+	s.queries = append(s.queries, query)
 	s.mu.Unlock()
-	if route == s.failRoute {
-		return nil, errors.New("store unreachable")
-	}
-	<-s.gate
 	return s.Store.List(query)
 }

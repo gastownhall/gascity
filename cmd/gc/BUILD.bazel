@@ -258,7 +258,6 @@ go_library(
         "doctor_mcp_checks.go",
         "doctor_order_tracking_retention.go",
         "doctor_pack_runtimes.go",
-        "doctor_parallel.go",
         "doctor_pool_idle_routed_work_check.go",
         "doctor_prompt_delivery_budget.go",
         "doctor_provider_catalog.go",

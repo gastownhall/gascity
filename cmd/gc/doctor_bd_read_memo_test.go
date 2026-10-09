@@ -684,93 +684,40 @@ func TestWithBdReadMemoOnlyWrapsTheDoctoredCity(t *testing.T) {
 	}
 }
 
-func TestDoctorParallelMapKeepsItemOrder(t *testing.T) {
-	items := make([]int, 37)
-	for i := range items {
-		items[i] = i
-	}
-	var inFlight, peak atomic.Int64
-	got := doctorParallelMap(items, func(i int) int {
-		n := inFlight.Add(1)
-		for {
-			p := peak.Load()
-			if n <= p || peak.CompareAndSwap(p, n) {
-				break
+// TestDoctorRoutedToForksDoNotScaleWithRoutes drives v2-routed-to-namespace
+// and both hold-label-conventions checks through real BdStores over the
+// fixture bd: adding 200 bound routes to the city changes neither the report
+// nor the number of bd forks.
+func TestDoctorRoutedToForksDoNotScaleWithRoutes(t *testing.T) {
+	checks := func(fc *fixtureCity) func(func(string) (beads.Store, error)) []doctor.Check {
+		return func(factory func(string) (beads.Store, error)) []doctor.Check {
+			return []doctor.Check{
+				newV2RoutedToNamespaceCheck(fc.cfg, fc.cityPath, factory),
+				newHoldLabelConventionsCheck(fc.cityPath, "city", factory),
+				newHoldLabelConventionsCheck(fc.rigPath, "repo", factory),
 			}
 		}
-		inFlight.Add(-1)
-		return i * i
-	}, nil)
-	for i, v := range got {
-		if v != i*i {
-			t.Fatalf("result[%d] = %d, want %d", i, v, i*i)
+	}
+	run := func(extraRoutes int) (string, int64) {
+		fc := newFixtureCity(t, true)
+		for i := range extraRoutes {
+			fc.cfg.Agents = append(fc.cfg.Agents, config.Agent{Name: fmt.Sprintf("extra%03d", i), BindingName: "gastown"})
 		}
+		text, _ := fc.runDoctor(t, true, false, checks(fc))
+		return text, fc.calls()
 	}
-	if p := peak.Load(); p > doctorStoreReadConcurrency {
-		t.Fatalf("peak concurrency %d exceeds bound %d", p, doctorStoreReadConcurrency)
+	fewText, few := run(0)
+	manyText, many := run(200)
+	if manyText != fewText {
+		t.Fatalf("report changed with unmatched routes:\n--- 200 more ---\n%s\n--- base ---\n%s", manyText, fewText)
 	}
-	if len(doctorParallelMap([]int(nil), func(int) int { return 0 }, nil)) != 0 {
-		t.Fatal("empty input must give empty output")
+	if many != few {
+		t.Fatalf("bd forks = %d with 200 more routes, %d without; reads must not scale with routes", many, few)
 	}
-}
-
-// TestDoctorParallelMapRepanicsOnTheCallingGoroutine: a panic in fn reaches
-// the goroutine that called doctorParallelMap, where doctor's per-check fence
-// can recover it, and when several calls panic it is the lowest item's.
-func TestDoctorParallelMapRepanicsOnTheCallingGoroutine(t *testing.T) {
-	items := make([]int, doctorStoreReadConcurrency)
-	for i := range items {
-		items[i] = i
-	}
-	// Every call waits until all of them have started, so both panicking
-	// calls are in flight before either one can stop the scan.
-	var started sync.WaitGroup
-	started.Add(len(items))
-	recovered := func() (r any) {
-		defer func() { r = recover() }()
-		doctorParallelMap(items, func(i int) int {
-			started.Done()
-			started.Wait()
-			if i == 1 || i == len(items)-1 {
-				panic(fmt.Sprintf("read %d exploded", i))
-			}
-			return i
-		}, nil)
-		return nil
-	}()
-	if recovered != "read 1 exploded" {
-		t.Fatalf("the calling goroutine recovered %v, want the lowest item's panic", recovered)
-	}
-}
-
-// labelPanicStore panics on every label read, standing in for a bug deep in
-// one scope's store.
-type labelPanicStore struct{ beads.Store }
-
-func (labelPanicStore) ListByLabel(string, int, ...beads.QueryOpt) ([]beads.Bead, error) {
-	panic("label read exploded")
-}
-
-// TestDoctorParallelReadPanicFailsOnlyItsCheck: a panic in one of a check's
-// concurrent reads fails that check, as a panic in a serial read always did,
-// instead of crashing the doctor run with every check after it.
-func TestDoctorParallelReadPanicFailsOnlyItsCheck(t *testing.T) {
-	dir := t.TempDir()
-	d := &doctor.Doctor{}
-	d.Register(newHoldLabelConventionsCheck(dir, "city", func(string) (beads.Store, error) {
-		return labelPanicStore{beads.NewMemStore()}, nil
-	}))
-	d.Register(newHoldLabelConventionsCheck(dir, "repo", func(string) (beads.Store, error) {
-		return beads.NewMemStore(), nil
-	}))
-	report := d.RunCollect(&doctor.CheckContext{CityPath: dir}, false)
-	if len(report.Results) != 2 {
-		t.Fatalf("doctor reported %d results, want 2", len(report.Results))
-	}
-	if got := report.Results[0]; got.Status != doctor.StatusError || got.Message != "panic: label read exploded" {
-		t.Fatalf("panicking check = %+v, want its panic reported as its failure", got)
-	}
-	if got := report.Results[1]; got.Status != doctor.StatusOK {
-		t.Fatalf("check after the panic = %+v, want it run and passing", got)
+	// One listing per store, shared by all three checks. (A production work
+	// store's policy layer widens it to both tiers, adding one wisp query per
+	// store; the fixture's bare BdStore reads the issues tier.)
+	if few != 2 {
+		t.Fatalf("bd forks = %d, want 2 (one listing per store)", few)
 	}
 }

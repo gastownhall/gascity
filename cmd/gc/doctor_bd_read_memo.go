@@ -13,8 +13,9 @@ import (
 //
 // Doctor's store-backed checks each ask their own questions, and many of them
 // ask the same ones: every per-template session lookup lists the whole
-// gc:session class, every routed_to scan re-reads every wisp, and the session
-// and migration checks re-list the same open beads. On a bd-backed scope each
+// gc:session class, v2-routed-to-namespace and hold-label-conventions list the
+// same non-closed beads, and the session and migration checks re-list the same
+// open beads. On a bd-backed scope each
 // of those is two bd forks (the issues list plus the wisp query), and each bd
 // fork costs two git forks of its own, so a healthy one-rig city paid hundreds
 // of identical subprocesses per doctor run.
