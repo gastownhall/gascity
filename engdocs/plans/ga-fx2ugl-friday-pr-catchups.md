@@ -8,10 +8,10 @@ Prepare two existing PRs for the **2026-10-09 10:00Z** MPR reset
 catch-ups before reset. Both remain on the outage deny list until reset;
 changing that list or merging a PR belongs to the existing MPR/operator path.
 
-## Verified baseline and scopes
+## Initial intake baseline and scopes
 
 PM fetched main at `1cfa66847f7def9d45569fd02c5d657545e92a43` and both
-live PR heads. GitHub still reports their original heads; its mergeability
+live PR heads. At intake, GitHub reported their original heads; its mergeability
 response was `UNKNOWN`. Local `git merge-tree --write-tree --name-only`
 independently identified exactly these conflicts, without editing source.
 
@@ -66,3 +66,75 @@ reconcile with the mayor rather than overriding it. PM writes requirements
 and this plan; workers resolve and test code. Neither PM nor Codex pushes an
 original PR branch, opens a replacement PR, merges it, or reuses stale clearance.
 No installed external tracker skill was found; tracker import is a no-op.
+
+## Published-head CI investigation
+
+Updated **2026-10-09 05:07Z** following mayor order **gm-wisp-tzfxsr0**
+and ownership update **gm-wisp-hazis1o**.
+Both catch-ups received independent reviews and full local release gates.
+PR #3842 is published at `80a6ca8bf68c5d82ba36c29db7307e586774a508`
+with new clearance **55954193446**. PR #7334 is published and mergeable at
+`7e3e75149d58e7a6f8f157f4186d56e4855d7c3c`; mayor closed conflict audit
+**ga-ap88oi** after publication. Its clearance is now withheld because the
+published GitHub acceptance run failed `TestDashboard_PrintsSupervisorNotice`
+at `test/acceptance/dashboard_serve_test.go:32` after 15.71 seconds, reporting
+that the supervisor did not become ready.
+
+The existing condition tracker is **ga-01huv8**. Deploy bead **ga-p5lgoe**
+is open and unassigned, with a blocking dependency on that tracker and
+`gc.gate_verdict=HOLD`. Earlier local passes remain evidence for their tested
+tree; they do not resolve this later failure. The test is unchanged, but its
+child binary imports the changed proctable package, so causality remains open.
+
+Mayor-owned **ga-sa1gi4** is the single active investigation, P1, routed to the
+generic **gascity/codex** pool and claimed by **gm-wisp-yeesp4o**. Its
+`discovered-from` edge names the existing tracker. PM's concurrently prepared
+**ga-kdoc9o** was closed as superseded after live verification that the mayor's
+scope was already in progress; no second investigation was performed. The
+tracker remains a record; it is never dispatched. This is one specific
+delegated task while the Claude investigator is unavailable before 10:00Z,
+with no role or provider configuration change.
+
+The worker first examines the mayor's hypothesis: PID namespaces may make
+supervisor parent processes unreadable and expose the changed orphan-root
+selection during startup. This is a hypothesis, not a root-cause finding.
+The investigation must:
+
+1. Recover the immutable CI-tested merge tree and its matching base, and trace
+   the supervisor startup paths that could reach the changed behavior.
+2. Run the named acceptance test or a direct supervisor readiness probe under
+   a PID namespace on both trees, at least ten runs per ref, and ten runs per
+   ref on the host without the namespace. Record commands, binary identity,
+   UID, parent visibility, execution conditions and actual PASS/FAIL/SKIP
+   results. A refused setup or skipped body is an explicit environment gap;
+   a direct probe must state its differences from the failing acceptance body.
+3. Search main and unrelated PR acceptance runs from approximately September
+   25 through October 9 for the same test and readiness-failure signature.
+   Record real run/job links and SHAs; other failures or copies of this run
+   do not establish pre-existence.
+4. Hand a verifiable causal proof to mayor/deployer, or file exactly one
+   reproduction-backed fix bead after deduplication. That fix carries
+   `gc.fixes_tracker=ga-01huv8`, discovery edges to this investigation and the
+   tracker, pinned reproduction evidence, measurable acceptance criteria and
+   a narrow Build scope. Implementation is outside this investigation.
+
+The failing run is **37884958244**, attempt 1, job **113672834041**, acceptance
+shard 8 of 18. Its log records checkout
+`4df1b2dd94dd6b069903bd92cc89830d8d728bc9`, merging the published source into
+`42b11ccbd1b1beefedda115e654dd72c80d74778`; the workflow's subsequent
+fresh-merge step must also be verified. Evidence is retained under
+`/var/tmp/ga-p5lgoe-gate.anlvwra0`, including the CI log, ownership report,
+full import closure and reachability record. The investigation bead contains
+the complete evidence pointers and handoff requirements. Both the immutable
+CI tree and the worker's freshly materialized comparison trees must be named;
+a result from one tree is not automatically evidence about another.
+
+Passing paired runs alone leave this CI-only condition inconclusive. The
+worker reports uncertainty and missing conditions rather than inventing a
+proof or a speculative fix. Mayor/deployer own verified hold resolution and
+fresh gating; the worker does not retry GitHub CI, edit implementation, push
+the published branch, post clearance, merge, raise timeouts or reduce coverage.
+The gate blocker is repointed to an actual fix when one is filed, and the
+condition tracker closes only after its remedy lands. Runtime tracker
+**ga-q17kpi** and the PM plan-publication wait remain until confirmed main
+landing. No new duplicate gate, tracker or test/build pair is created.
