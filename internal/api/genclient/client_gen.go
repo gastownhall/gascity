@@ -3711,9 +3711,6 @@ type SessionCreateBody struct {
 	// ProjectId Opaque project context identifier.
 	ProjectId *string `json:"project_id,omitempty"`
 
-	// Resume Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued for the session's next run and expires after 24h.
-	Resume *bool `json:"resume,omitempty"`
-
 	// SessionName Deprecated: use alias.
 	SessionName *string `json:"session_name,omitempty"`
 
@@ -3780,7 +3777,7 @@ type SessionMessageInputBody struct {
 	// Message Message text to send.
 	Message string `json:"message"`
 
-	// Resume Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued for the session's next run and expires after 24h.
+	// Resume Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.
 	Resume *bool `json:"resume,omitempty"`
 }
 
@@ -3794,6 +3791,12 @@ type SessionMessageSucceededPayload struct {
 
 	// SessionId Session ID that received the message.
 	SessionId string `json:"session_id"`
+
+	// WillNotStartReason Why the controller will not start the session for a queued message, with the remedy.
+	WillNotStartReason *string `json:"will_not_start_reason,omitempty"`
+
+	// WillStart Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.
+	WillStart *bool `json:"will_start,omitempty"`
 }
 
 // SessionPatchBody defines model for SessionPatchBody.
@@ -4824,7 +4827,7 @@ type SessionSubmitInputBody struct {
 	// Message Message text to submit.
 	Message string `json:"message"`
 
-	// Resume Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued for the session's next run and expires after 24h.
+	// Resume Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.
 	Resume *bool `json:"resume,omitempty"`
 }
 
@@ -4841,6 +4844,12 @@ type SessionSubmitSucceededPayload struct {
 
 	// SessionId Session ID that received the submission.
 	SessionId string `json:"session_id"`
+
+	// WillNotStartReason Why the controller will not start the session for a queued message, with the remedy.
+	WillNotStartReason *string `json:"will_not_start_reason,omitempty"`
+
+	// WillStart Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.
+	WillStart *bool `json:"will_start,omitempty"`
 }
 
 // SessionTranscriptConversationResponse defines model for SessionTranscriptConversationResponse.

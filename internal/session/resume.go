@@ -19,6 +19,11 @@ const (
 	// ResumeOperator is an operator's own resume (Attach, `gc session
 	// submit`, an API request carrying resume: true). It consumes the hold.
 	ResumeOperator
+	// ResumeViaController is a background caller beside a controller (the
+	// API without resume: true): it never starts a dormant row itself, held
+	// or not. The message queues, and the caller records the wake for the
+	// controller (Store.RequestWakeUnlessHeld) and pokes it.
+	ResumeViaController
 )
 
 var (
@@ -43,6 +48,23 @@ const (
 	// starting, running or closed), so it needs no wake; nothing was written.
 	WakeNotDormant
 )
+
+// queueByPolicy reports whether policy may not start or resume b's row now:
+// under ResumeViaController any row whose runtime is not running (the API
+// never starts a runtime in the controller's process) or that is held (a
+// managed suspend whose runtime the controller has not stopped yet must not
+// take a send that flips it active); under ResumeIfUnheld a held one
+// (HoldVerdict).
+func (m *Manager) queueByPolicy(meta map[string]string, sessName string, policy ResumePolicy) bool {
+	running := m.sp.IsRunning(sessName)
+	switch policy {
+	case ResumeOperator:
+		return false
+	case ResumeViaController:
+		return !running || HoldVerdict(meta, running, m.now())
+	}
+	return HoldVerdict(meta, running, m.now())
+}
 
 // RequestWakeUnlessHeld records an explicit wake by CAS on an open asleep or
 // drained row that nothing holds (D8 rule 1). A row whose lifecycle refuses a

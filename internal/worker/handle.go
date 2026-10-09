@@ -153,6 +153,8 @@ type MessageRequest struct {
 // MessageResult reports whether a worker turn was queued or delivered now.
 type MessageResult struct {
 	Queued bool `json:"queued"`
+	// Deferred: the resume policy queued it (session.SubmitOutcome.Deferred).
+	Deferred bool `json:"-"`
 }
 
 // CreateMode controls how a worker session should be materialized.
@@ -186,6 +188,9 @@ type NudgeRequest struct {
 	Delivery NudgeDelivery   `json:"delivery,omitempty"`
 	Source   string          `json:"source,omitempty"`
 	Wake     NudgeWakePolicy `json:"wake,omitempty"`
+	// Resume is the resume policy a nudge that may wake runs under; the zero
+	// value never consumes a hold (CONTRACT v5.9 D8).
+	Resume sessionpkg.ResumePolicy `json:"-"`
 }
 
 // NudgeResult reports whether the requested live delivery actually happened.
@@ -216,8 +221,8 @@ const (
 	// resume (CONTRACT v5.9 D8), and nothing queued the nudge: the caller
 	// must queue it (a wait-idle nudge).
 	NudgeUndeliveredHeld NudgeUndeliveredReason = "session_held"
-	// NudgeQueuedHeld means the session is held and queued the nudge itself;
-	// the caller must not queue it again.
+	// NudgeQueuedHeld means the session is held, or (ResumeViaController) not
+	// running, and queued the nudge itself; the caller must not queue it again.
 	NudgeQueuedHeld NudgeUndeliveredReason = "session_held_queued"
 )
 

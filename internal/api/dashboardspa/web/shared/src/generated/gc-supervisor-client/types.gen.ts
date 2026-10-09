@@ -3226,10 +3226,6 @@ export type SessionCreateBody = {
      */
     project_id?: string;
     /**
-     * Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued for the session's next run and expires after 24h.
-     */
-    resume?: boolean;
-    /**
      * Deprecated: use alias.
      */
     session_name?: string;
@@ -3309,7 +3305,7 @@ export type SessionMessageInputBody = {
      */
     message: string;
     /**
-     * Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued for the session's next run and expires after 24h.
+     * Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.
      */
     resume?: boolean;
 };
@@ -3327,6 +3323,14 @@ export type SessionMessageSucceededPayload = {
      * Session ID that received the message.
      */
     session_id: string;
+    /**
+     * Why the controller will not start the session for a queued message, with the remedy.
+     */
+    will_not_start_reason?: string;
+    /**
+     * Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.
+     */
+    will_start?: boolean;
 };
 
 export type SessionPatchBody = {
@@ -4570,7 +4574,7 @@ export type SessionSubmitInputBody = {
      */
     message: string;
     /**
-     * Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued for the session's next run and expires after 24h.
+     * Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will.
      */
     resume?: boolean;
 };
@@ -4592,6 +4596,14 @@ export type SessionSubmitSucceededPayload = {
      * Session ID that received the submission.
      */
     session_id: string;
+    /**
+     * Why the controller will not start the session for a queued message, with the remedy.
+     */
+    will_not_start_reason?: string;
+    /**
+     * Present when the message was queued because the session is not running: whether the controller will start it to deliver the message. False means it will not (see will_not_start_reason); resend with resume: true to start it now.
+     */
+    will_start?: boolean;
 };
 
 export type SessionTranscriptConversationResponse = {

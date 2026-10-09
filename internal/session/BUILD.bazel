@@ -131,6 +131,7 @@ go_test(
         "productmetrics_child_env_test.go",
         "provider_resolution_test.go",
         "resolve_test.go",
+        "resume_controller_test.go",
         "resume_test.go",
         "sleep_reason_test.go",
         "startup_health_test.go",

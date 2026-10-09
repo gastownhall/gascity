@@ -538,7 +538,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	}
 	// Only an operator's own resume consumes an operator's hold (CONTRACT
 	// v5.9 D8 rule 1); any other caller queues instead.
-	if policy != ResumeOperator && HoldVerdict(b.Metadata, m.sp.IsRunning(sessName), m.now()) {
+	if m.queueByPolicy(b.Metadata, sessName, policy) {
 		return fmt.Errorf("%w: %s", ErrResumeHeld, id)
 	}
 	transport, transportVerified := m.transportForBead(b, sessName)
@@ -995,6 +995,7 @@ func (m *Manager) send(ctx context.Context, id, message, resumeCommand string, h
 			return err
 		}
 		outcome.Queued, err = m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, immediate, policy)
+		outcome.Deferred = outcome.Queued
 		return err
 	})
 	return outcome, err

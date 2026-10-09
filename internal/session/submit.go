@@ -55,6 +55,9 @@ type SubmissionCapabilities struct {
 // SubmitOutcome reports whether a submit was delivered now or queued.
 type SubmitOutcome struct {
 	Queued bool
+	// Deferred marks a queue the resume policy caused: the call may not start
+	// or resume the session (CONTRACT v5.9 D8 rule 1), so a controller should.
+	Deferred bool
 }
 
 // SubmissionCapabilitiesForMetadata derives runtime submit affordances from
@@ -100,8 +103,8 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 		if err != nil {
 			return err
 		}
-		if policy != ResumeOperator && HoldVerdict(b.Metadata, m.sp.IsRunning(sessName), m.now()) {
-			outcome.Queued = true
+		if m.queueByPolicy(b.Metadata, sessName, policy) {
+			outcome.Queued, outcome.Deferred = true, true
 			return m.enqueueDeferredSubmitLocked(b, sessName, message)
 		}
 		switch intent {
@@ -111,6 +114,7 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 			}
 			if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
 				outcome.Queued, err = m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true, policy)
+				outcome.Deferred = outcome.Queued
 				return err
 			}
 			if err := m.pendingInteractionLocked(sessName); err != nil {
@@ -151,6 +155,7 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 			}
 			resuming := State(b.Metadata["state"]) == StateSuspended || !running
 			outcome.Queued, err = m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, usesImmediateDefaultSubmit(b, resuming), policy)
+			outcome.Deferred = outcome.Queued
 			return err
 		}
 	})

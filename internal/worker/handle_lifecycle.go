@@ -315,7 +315,7 @@ func (h *SessionHandle) Message(ctx context.Context, req MessageRequest) (result
 	if err != nil {
 		return MessageResult{}, err
 	}
-	result = MessageResult{Queued: outcome.Queued}
+	result = MessageResult{Queued: outcome.Queued, Deferred: outcome.Deferred}
 	return result, nil
 }
 
@@ -365,7 +365,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
-		outcome, err := h.manager.Send(ctx, id, req.Text, resumeCommand, h.runtimeHints(), sessionpkg.ResumeIfUnheld)
+		outcome, err := h.manager.Send(ctx, id, req.Text, resumeCommand, h.runtimeHints(), req.Resume)
 		if err != nil {
 			return NudgeResult{}, err
 		}
@@ -380,7 +380,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
-		outcome, err := h.manager.SendImmediate(ctx, id, req.Text, resumeCommand, h.runtimeHints(), sessionpkg.ResumeIfUnheld)
+		outcome, err := h.manager.SendImmediate(ctx, id, req.Text, resumeCommand, h.runtimeHints(), req.Resume)
 		if err != nil {
 			return NudgeResult{}, err
 		}
@@ -395,7 +395,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			result = NudgeResult{Delivered: delivered}
 			return result, nil
 		}
-		delivered, err := h.manager.TryWaitIdleNudge(ctx, id, req.Source, req.Text, resumeCommand, h.runtimeHints(), sessionpkg.ResumeIfUnheld)
+		delivered, err := h.manager.TryWaitIdleNudge(ctx, id, req.Source, req.Text, resumeCommand, h.runtimeHints(), req.Resume)
 		if errors.Is(err, sessionpkg.ErrResumeHeld) {
 			// Not queued: the caller queues it and prints the held note.
 			return NudgeResult{Undelivered: NudgeUndeliveredHeld}, nil

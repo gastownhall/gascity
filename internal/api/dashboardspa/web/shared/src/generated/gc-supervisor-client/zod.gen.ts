@@ -1682,7 +1682,6 @@ export const zSessionCreateBody = z.object({
     name: z.string().optional(),
     options: z.record(z.string(), z.string()).optional(),
     project_id: z.string().optional(),
-    resume: z.boolean().optional(),
     session_name: z.string().optional(),
     title: z.string().optional()
 });
@@ -1756,7 +1755,9 @@ export const zSessionMessageInputBody = z.object({
 export const zSessionMessageSucceededPayload = z.object({
     queued: z.boolean(),
     request_id: z.string(),
-    session_id: z.string()
+    session_id: z.string(),
+    will_not_start_reason: z.string().optional(),
+    will_start: z.boolean().optional()
 });
 
 export const zSessionPatchBody = z.object({
@@ -2786,7 +2787,9 @@ export const zSessionSubmitSucceededPayload = z.object({
     intent: z.string(),
     queued: z.boolean(),
     request_id: z.string(),
-    session_id: z.string()
+    session_id: z.string(),
+    will_not_start_reason: z.string().optional(),
+    will_start: z.boolean().optional()
 });
 
 export const zSessionTranscriptConversationResponse = z.object({

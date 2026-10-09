@@ -252,10 +252,11 @@ func TestAttachResumesHeldRow(t *testing.T) {
 // interrupt_now on a live row with a heartbeat or unreadable held_until
 // passes the hold check (the runtime is running), and its hard restart, a
 // codex boundary timeout's or pi's, must not re-read the hold on the runtime
-// it just stopped. Kills a restart that refuses, which loses the session and
-// the message.
+// it just stopped, under IfUnheld or ViaController (N3: the API's own
+// interrupt). Kills a restart that refuses, which loses the session and the
+// message.
 func TestInterruptRestartKeepsHeartbeatHold(t *testing.T) {
-	for _, policy := range []ResumePolicy{ResumeIfUnheld} {
+	for _, policy := range []ResumePolicy{ResumeIfUnheld, ResumeViaController} {
 		for _, provider := range []string{"codex", "pi"} {
 			for _, until := range []string{"2099-01-01T00:00:00Z", "soon"} {
 				t.Run(fmt.Sprintf("%d/%s/%s", policy, provider, until), func(t *testing.T) {

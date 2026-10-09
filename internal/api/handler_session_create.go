@@ -33,9 +33,6 @@ type sessionCreateRequest struct {
 	// Stored in bead metadata for session-to-project association.
 	ProjectID string `json:"project_id,omitempty"`
 	Title     string `json:"title,omitempty"`
-	// Resume lets the initial message resume a held session (CONTRACT v5.9
-	// D8); without it the message queues on one.
-	Resume bool `json:"resume,omitempty"`
 }
 
 func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
@@ -415,7 +412,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 
 	// Deliver initial message if provided.
 	if msg := strings.TrimSpace(body.Message); msg != "" {
-		if _, sendErr := s.submitMessageToSession(r.Context(), store.Store, info.ID, msg, session.SubmitIntentDefault, body.Resume); sendErr != nil {
+		if _, sendErr := s.submitMessageToSession(r.Context(), store.Store, info.ID, msg, session.SubmitIntentDefault, false); sendErr != nil {
 			log.Printf("session %s: initial message delivery failed: %v", info.ID, sendErr)
 			rollbackErr := s.rollbackCreatedSession(store, info.ID)
 			s.idem.unreserve(idemKey)
