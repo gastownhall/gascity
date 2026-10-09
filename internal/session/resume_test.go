@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -35,10 +36,11 @@ func policyRow(extra map[string]string) map[string]string {
 }
 
 type policyEnv struct {
-	store beads.Store
-	sp    *runtime.Fake
-	mgr   *Manager
-	id    string
+	store    beads.Store
+	sp       *runtime.Fake
+	mgr      *Manager
+	id       string
+	cityPath string
 }
 
 func newPolicyEnv(t *testing.T, meta map[string]string, live bool) *policyEnv {
@@ -54,8 +56,25 @@ func newPolicyEnv(t *testing.T, meta map[string]string, live bool) *policyEnv {
 			t.Fatal(err)
 		}
 	}
-	mgr := NewManagerWithOptions(store, sp, WithClock(&clock.Fake{Time: resumeNow}), WithCityPath(t.TempDir()))
-	return &policyEnv{store: store, sp: sp, mgr: mgr, id: b.ID}
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sp, WithClock(&clock.Fake{Time: resumeNow}), WithCityPath(cityPath))
+	return &policyEnv{store: store, sp: sp, mgr: mgr, id: b.ID, cityPath: cityPath}
+}
+
+// queued is the messages waiting in the city's queue for the row.
+func (e *policyEnv) queued(t *testing.T) []string {
+	t.Helper()
+	state, err := nudgequeue.LoadState(e.cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msgs []string
+	for _, item := range state.Pending {
+		if item.SessionID == e.id {
+			msgs = append(msgs, item.Message)
+		}
+	}
+	return msgs
 }
 
 func (e *policyEnv) row(t *testing.T) map[string]string {
@@ -94,7 +113,8 @@ func TestBackgroundSendToHeldRowQueues(t *testing.T) {
 		{name: "stale wait-hold intent without the hold resumes", meta: map[string]string{"sleep_intent": "wait-hold"}},
 		{name: "idle drain on a live row is delivered live", meta: map[string]string{"state": string(StateActive), "slept_at": "", "sleep_intent": "idle-stop-pending"}, live: true},
 		{name: "heartbeat hold on a live row is delivered live", meta: map[string]string{"state": string(StateActive), "slept_at": "", "held_until": "2099-01-01T00:00:00Z"}, live: true},
-		{name: "unparseable timer is not a hold", meta: map[string]string{"held_until": "soon"}},
+		{name: "unparseable timer blocks the start", meta: map[string]string{"held_until": "soon"}, queued: true},
+		{name: "unparseable timer on a live row is delivered live", meta: map[string]string{"state": string(StateActive), "slept_at": "", "held_until": "soon"}, live: true},
 		{name: "creating, quarantined, runtime dead", meta: map[string]string{"state": string(StateCreating), "quarantined_until": "2099-01-01T00:00:00Z"}, queued: true},
 		{name: "operator resumes a held row", meta: map[string]string{"state": string(StateSuspended)}, policy: ResumeOperator},
 	} {
@@ -116,6 +136,9 @@ func TestBackgroundSendToHeldRowQueues(t *testing.T) {
 				}
 				if got := e.row(t); !maps.Equal(got, before) {
 					t.Fatalf("held row written:\n got %v\nwant %v", got, before)
+				}
+				if got := e.queued(t); len(got) != 1 || got[0] != "hello" {
+					t.Fatalf("queue = %q, want the message", got)
 				}
 				return
 			}
@@ -143,12 +166,16 @@ func TestWaitIdleNudgeToHeldRowIsUndelivered(t *testing.T) {
 // TestInterruptSubmitToHeldLiveRowQueues: a background interrupt_now on a
 // held row whose runtime is still live (a managed suspend the controller has
 // not acted on) queues before touching the runtime. Kills a policy check
-// that runs only after the interrupt's hard restart.
+// that runs only after the interrupt's hard restart, and a held branch that
+// reports queued without enqueueing (MA-2).
 func TestInterruptSubmitToHeldLiveRowQueues(t *testing.T) {
 	e := newPolicyEnv(t, policyRow(map[string]string{"state": string(StateSuspended), "sleep_intent": "user-hold", "provider": "pi"}), true)
 	out, err := e.mgr.Submit(context.Background(), e.id, "now", "pi --resume k", runtime.Config{}, SubmitIntentInterruptNow, ResumeIfUnheld)
 	if err != nil || !out.Queued {
 		t.Fatalf("Submit = %+v, %v; want queued", out, err)
+	}
+	if got := e.queued(t); len(got) != 1 || got[0] != "now" {
+		t.Fatalf("queue = %q, want the message", got)
 	}
 	if !e.sp.IsRunning(resumeName) || e.sp.CountCalls("Stop", resumeName) != 0 {
 		t.Fatal("the held row's live runtime was stopped")
@@ -165,10 +192,11 @@ func TestRequestWakeUnlessHeld(t *testing.T) {
 		meta map[string]string
 		want WakeRequestOutcome
 	}{
-		"unheld asleep": {want: WakeRecorded},
-		"drained":       {meta: map[string]string{"state": string(StateDrained)}, want: WakeRecorded},
-		"held":          {meta: map[string]string{"state": string(StateSuspended)}, want: WakeHeld},
-		"creating":      {meta: map[string]string{"state": string(StateCreating)}, want: WakeNotDormant},
+		"unheld asleep":     {want: WakeRecorded},
+		"drained":           {meta: map[string]string{"state": string(StateDrained)}, want: WakeRecorded},
+		"held":              {meta: map[string]string{"state": string(StateSuspended)}, want: WakeHeld},
+		"unparseable timer": {meta: map[string]string{"quarantined_until": "x"}, want: WakeHeld},
+		"creating":          {meta: map[string]string{"state": string(StateCreating)}, want: WakeNotDormant},
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := newPolicyEnv(t, policyRow(tc.meta), false)

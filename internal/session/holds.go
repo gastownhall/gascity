@@ -53,17 +53,23 @@ func Holds(meta map[string]string, now time.Time) HoldSet {
 	return h
 }
 
-// OperatorHeld reports a hold in force. An Unknown timer is not held, as
-// legacy reads it (the A review, finding A-7).
-func (h HoldSet) OperatorHeld() bool { return h.In != 0 }
+// SuppressesWake reports a hold that keeps the row out of the wake and
+// awake sets. An Unknown timer does not, as legacy reads it
+// (ARCH-RESTRUCTURE O6).
+func (h HoldSet) SuppressesWake() bool { return h.In != 0 }
+
+// BlocksConsume reports a hold that stops anything consuming one: a resume,
+// a background send's queue-or-start, a wake request. An Unknown timer
+// blocks, since an unreadable hold may be an operator's (ARCH-RESTRUCTURE O6).
+func (h HoldSet) BlocksConsume() bool { return h.In|h.Unknown != 0 }
 
 // HoldVerdict is CONTRACT v5.9 D8 7(a)'s one hold predicate, for resume,
-// wake requests, controller-routed sends and queued delivery: an operator's
-// hold in force, unless the row is not suspended and its runtime is running
-// (a working session; a heartbeat held_until keeps it up, not queued).
+// wake requests, controller-routed sends and queued delivery: a hold that
+// blocks a consume, unless the row is not suspended and its runtime is
+// running (a working session; a heartbeat held_until keeps it up, not queued).
 func HoldVerdict(meta map[string]string, runtimeRunning bool, now time.Time) bool {
 	h := Holds(meta, now)
-	return h.OperatorHeld() && (h.In&HoldSuspended != 0 || !runtimeRunning)
+	return h.BlocksConsume() && (h.In&HoldSuspended != 0 || !runtimeRunning)
 }
 
 // HoldVerdictInfo is HoldVerdict over a typed row.
