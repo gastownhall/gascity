@@ -34,8 +34,14 @@ func TestNudgeToHeldSessionQueues(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Nudge: %v", err)
 			}
-			if result.Delivered || result.Undelivered != NudgeUndeliveredHeld || sp.CountCalls("Start", "s-held") != 0 {
-				t.Fatalf("Nudge = %+v (starts %d); want queued on the held session", result, sp.CountCalls("Start", "s-held"))
+			// The session queues a sent nudge itself; a wait-idle nudge is
+			// left for the caller to queue.
+			want := NudgeQueuedHeld
+			if delivery == NudgeDeliveryWaitIdle {
+				want = NudgeUndeliveredHeld
+			}
+			if result.Delivered || result.Undelivered != want || sp.CountCalls("Start", "s-held") != 0 {
+				t.Fatalf("Nudge = %+v (starts %d); want %s on the held session", result, sp.CountCalls("Start", "s-held"), want)
 			}
 		})
 	}

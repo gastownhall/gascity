@@ -1233,9 +1233,9 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if result.Undelivered == worker.NudgeUndeliveredHeld && mode != nudgeDeliveryWaitIdle {
+	if result.Undelivered == worker.NudgeQueuedHeld {
 		// The session is held and queued the nudge itself (CONTRACT v5.9 D8);
-		// a held wait-idle nudge is queued below.
+		// a held wait-idle nudge (NudgeUndeliveredHeld) is queued below.
 		return writeQueuedSessionNudgeResult(target, mode, jsonOutput, result.Undelivered, stdout, stderr)
 	}
 	if mode == nudgeDeliveryWaitIdle && !result.Delivered {
@@ -1305,7 +1305,7 @@ func queueManagedSessionNudgeWake(target nudgeTarget, store beads.Store, message
 	}
 	var undelivered worker.NudgeUndeliveredReason
 	if outcome == session.WakeHeld {
-		undelivered = worker.NudgeUndeliveredHeld
+		undelivered = worker.NudgeQueuedHeld
 	} else if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: warning: poke failed: %v\n", err) //nolint:errcheck
 	}
@@ -1538,7 +1538,7 @@ func queuedNudgeDowngradeNote(target nudgeTarget, undelivered worker.NudgeUndeli
 		return fmt.Sprintf(" (live delivery is unsupported for %s; the queued dispatcher delivers it)", provider)
 	case worker.NudgeUndeliveredNoIdleBoundary:
 		return " (the session never reached an idle boundary; the queued dispatcher delivers it)"
-	case worker.NudgeUndeliveredHeld:
+	case worker.NudgeUndeliveredHeld, worker.NudgeQueuedHeld:
 		return " (the session is held by an operator or a wait; the nudge is delivered the next time the session runs, and expires after 24h)"
 	default:
 		return ""

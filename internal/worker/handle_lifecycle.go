@@ -414,7 +414,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 // sentNudgeResult: a held session queued the nudge rather than taking it.
 func sentNudgeResult(outcome sessionpkg.SubmitOutcome) NudgeResult {
 	if outcome.Queued {
-		return NudgeResult{Undelivered: NudgeUndeliveredHeld}
+		return NudgeResult{Undelivered: NudgeQueuedHeld}
 	}
 	return NudgeResult{Delivered: true}
 }
