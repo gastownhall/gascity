@@ -1283,7 +1283,7 @@ func TestAsyncStart_CapacityRefusalDefersDriftRollback(t *testing.T) {
 func TestCommitStartResult_ConvergedResultIgnoresCapacityArm(t *testing.T) {
 	e := newCapacityEnv(t, true, "s")
 	c := e.pendingCreate(t, "s", "e", nil)
-	prepared, err := prepareStartCandidateForCity(c, "", "", e.cfg, e.sp, e.store, e.clk, &e.log, nil, nil)
+	prepared, err := prepareStartCandidateForCity(c, "", "", e.cfg, e.sp, e.store, e.clk, &e.log, nil, dispatchOptionSources{})
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}

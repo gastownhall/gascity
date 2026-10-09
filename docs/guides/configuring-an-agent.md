@@ -131,8 +131,13 @@ agent-level `option_defaults`, so an agent's own `effort` is read from its
 `agent.toml`.
 
 A single step can override these for the session launched to run it: `opt_effort`
-or `opt_model` metadata on the step's bead applies to that launch only (see
-[per-dispatch provider options](/reference/specs/formula-spec-v2)).
+or `opt_model` metadata on the step's bead applies when that session launches (see
+[per-dispatch provider options](/reference/specs/formula-spec-v2)). The options
+are launch flags, so they stay with the session rather than the step: a warm
+session that runs a later step, or a pool slot that claims a different ready bead
+than the one it launched for, keeps the flags it launched with. Give steps that
+need different options their own agent or pool, or set the same options on every
+step that shares a pool or a `gc.continuation_group`.
 
 ## Axis 3 — Upstream (who serves the model)
 

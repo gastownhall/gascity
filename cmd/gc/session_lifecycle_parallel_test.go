@@ -800,7 +800,7 @@ func TestPrepareStartCandidateRepairsConcretePoolTemplateWorkDir(t *testing.T) {
 			SessionName:  sessionName,
 			WorkDir:      concreteWorkDir,
 		},
-	}, cityPath, "aot", cfg, nil, store, &clock.Fake{Time: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)}, io.Discard, nil, nil)
+	}, cityPath, "aot", cfg, nil, store, &clock.Fake{Time: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)}, io.Discard, nil, dispatchOptionSources{})
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
@@ -891,7 +891,7 @@ func TestPrepareStartCandidateRepairsConcretePoolTemplateWorkDir_SymlinkedCityPa
 			SessionName:  sessionName,
 			WorkDir:      concreteWorkDir,
 		},
-	}, cityPath, "aot", cfg, nil, store, &clock.Fake{Time: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)}, io.Discard, nil, nil)
+	}, cityPath, "aot", cfg, nil, store, &clock.Fake{Time: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)}, io.Discard, nil, dispatchOptionSources{})
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
@@ -967,7 +967,7 @@ func TestBuildPreparedStartRejectsConcretePoolTemplateWorkDir(t *testing.T) {
 		},
 	}, cityPath, cfg, store, func(startCandidate, *config.City) string {
 		return templateWorkDir
-	}, nil)
+	}, dispatchOptionSources{})
 	if err == nil {
 		t.Fatal("buildPreparedStartWithWorkDirResolver error = nil, want template work_dir rejection")
 	}
@@ -1370,7 +1370,7 @@ func TestPrepareStartCandidate_UsesAssignedWorkSnapshotForTaskWorkDir(t *testing
 		Agents: []config.Agent{
 			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
 		},
-	}, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, nil, newAssignedTaskWorkDirResolver("", []beads.Bead{task}), nil)
+	}, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, nil, newAssignedTaskWorkDirResolver("", []beads.Bead{task}), dispatchOptionSources{})
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
@@ -8353,7 +8353,7 @@ func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
 		info:  sessiontest.SeedBead(t, session),
 		tp:    TemplateParams{TemplateName: "worker", SessionName: sessionName},
 		order: 0,
-	}, ".", cfg.Workspace.Name, cfg, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, io.Discard, nil, nil)
+	}, ".", cfg.Workspace.Name, cfg, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, io.Discard, nil, dispatchOptionSources{})
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}
