@@ -7,7 +7,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,12 +15,12 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
-var leaseT0 = time.Date(2099, 10, 9, 12, 0, 0, 0, time.UTC) // in the future, so KeepAlive's real deadline never fires first
+var leaseT0 = time.Date(2099, 10, 9, 12, 0, 0, 0, time.UTC)
 
 const leaseTTL = 4 * time.Minute
 
-// openLeaseStore opens a SQLite store under dir in conditional_writes=require. Every
-// process that opens the same dir shares its rows and revisions.
+// openLeaseStore opens a SQLite store under dir in conditional_writes=require.
+// Every process that opens the same dir shares its rows and revisions.
 func openLeaseStore(t *testing.T, dir string) beads.Store {
 	t.Helper()
 	opened, err := beads.OpenSQLiteStore(dir)
@@ -44,12 +44,16 @@ type leaseFixture struct {
 
 func newLeaseFixture(t *testing.T) leaseFixture {
 	t.Helper()
-	store := openLeaseStore(t, t.TempDir())
+	return leaseFixtureOver(t, openLeaseStore(t, t.TempDir()))
+}
+
+func leaseFixtureOver(t *testing.T, store beads.Store) leaseFixture {
+	t.Helper()
 	created := seedPatchFenceSession(t, store, "s-lease")
 	return leaseFixture{store: store, front: NewStore(beads.SessionStore{Store: store}), id: created.ID}
 }
 
-// onHost runs the test as host until it ends.
+// onHost names the holders the test takes host, for diagnostics.
 func onHost(t *testing.T, host string) {
 	t.Helper()
 	prev := runtimeLeaseHostname
@@ -58,7 +62,11 @@ func onHost(t *testing.T, host string) {
 }
 
 func (f leaseFixture) req(city string, now time.Time) RuntimeLeaseRequest {
-	return RuntimeLeaseRequest{City: city, Name: "s-lease", ID: f.id, TTL: leaseTTL, Now: func() time.Time { return now }}
+	return f.reqTTL(city, now, leaseTTL)
+}
+
+func (f leaseFixture) reqTTL(city string, now time.Time, ttl time.Duration) RuntimeLeaseRequest {
+	return RuntimeLeaseRequest{City: city, Name: "s-lease", ID: f.id, TTL: ttl, now: func() time.Time { return now }}
 }
 
 func (f leaseFixture) meta(t *testing.T) map[string]string {
@@ -70,54 +78,86 @@ func (f leaseFixture) meta(t *testing.T) map[string]string {
 	return b.Metadata
 }
 
-func TestRuntimeLeaseTTLIsCapped(t *testing.T) {
-	if got := RuntimeLeaseTTL(3 * time.Minute); got != 4*time.Minute {
-		t.Errorf("RuntimeLeaseTTL(3m) = %v, want 4m", got)
+func (f leaseFixture) write(t *testing.T, patch MetadataPatch) {
+	t.Helper()
+	if err := f.front.ApplyPatch(f.id, patch); err != nil {
+		t.Fatal(err)
 	}
-	if got := RuntimeLeaseTTL(time.Hour); got != RuntimeLeaseMaxTTL {
-		t.Errorf("RuntimeLeaseTTL(1h) = %v, want the %v cap", got, RuntimeLeaseMaxTTL)
+}
+
+func TestRuntimeLeaseTTL(t *testing.T) {
+	for _, c := range []struct{ startup, want time.Duration }{{3 * time.Minute, 4 * time.Minute}, {time.Hour, time.Hour + time.Minute}} {
+		if got := RuntimeLeaseTTL(c.startup); got != c.want {
+			t.Errorf("RuntimeLeaseTTL(%v) = %v, want %v (no cap)", c.startup, got, c.want)
+		}
 	}
 }
 
 func TestRuntimeLeaseRecordFree(t *testing.T) {
 	now := leaseT0
-	at := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339) }
+	rec := func(expires time.Duration, ttl string, flock string) map[string]string {
+		return map[string]string{
+			RuntimeLeaseHolderKey: "host-b/7/n", RuntimeLeaseExpiresKey: now.Add(expires).Format(time.RFC3339),
+			RuntimeLeaseTTLKey: ttl, RuntimeLeaseFlockKey: flock,
+		}
+	}
 	for _, c := range []struct {
-		name string
-		meta map[string]string
-		want bool
+		name            string
+		meta            map[string]string
+		free, malformed bool
 	}{
-		{"never held", map[string]string{}, true},
-		{"released", map[string]string{RuntimeLeaseEpochKey: "4"}, true},
-		{"held on another host", map[string]string{RuntimeLeaseHolderKey: "host-b/7/n", RuntimeLeaseExpiresKey: at(time.Minute)}, false},
-		{"expired", map[string]string{RuntimeLeaseHolderKey: "host-b/7/n", RuntimeLeaseExpiresKey: at(0)}, true},
-		{"expiry unparseable", map[string]string{RuntimeLeaseHolderKey: "host-b/7/n", RuntimeLeaseExpiresKey: "soon"}, true},
-		{"expiry at the skew bound", map[string]string{RuntimeLeaseHolderKey: "host-b/7/n", RuntimeLeaseExpiresKey: at(RuntimeLeaseMaxTTL + RuntimeLeaseMargin)}, false},
-		{"expiry beyond this contender's own TTL", map[string]string{RuntimeLeaseHolderKey: "host-b/7/n", RuntimeLeaseExpiresKey: at(2 * leaseTTL)}, false},
-		{"expiry past the skew bound", map[string]string{RuntimeLeaseHolderKey: "host-b/7/n", RuntimeLeaseExpiresKey: at(RuntimeLeaseMaxTTL + RuntimeLeaseMargin + time.Second)}, true},
-		{"held on this host, flock free: dead", map[string]string{RuntimeLeaseHolderKey: "host-a/7/n", RuntimeLeaseExpiresKey: at(time.Minute)}, true},
-		{"host prefix is not the host", map[string]string{RuntimeLeaseHolderKey: "host-ab/7/n", RuntimeLeaseExpiresKey: at(time.Minute)}, false},
+		{"never held", map[string]string{}, true, false},
+		{"released", map[string]string{RuntimeLeaseEpochKey: "4"}, true, false},
+		{"held", rec(time.Minute, "240", "boot/1/2"), false, false},
+		{"held under the flock we hold: dead", rec(time.Minute, "240", "boot/1/9"), true, false},
+		{"held, no boot ID on either side", rec(time.Minute, "240", ""), false, false},
+		{"expired", rec(0, "240", "boot/1/2"), true, false},
+		{"expiry unparseable", map[string]string{RuntimeLeaseHolderKey: "h/1/n", RuntimeLeaseExpiresKey: "soon", RuntimeLeaseTTLKey: "240"}, true, true},
+		{"TTL missing", rec(time.Minute, "", "boot/1/2"), true, true},
+		{"TTL zero", rec(time.Minute, "0", "boot/1/2"), true, true},
+		{"expiry at its own TTL plus margin", rec(leaseTTL+RuntimeLeaseMargin, "240", ""), false, false},
+		{"expiry past its own TTL plus margin", rec(leaseTTL+RuntimeLeaseMargin+time.Second, "240", ""), true, true},
+		{"a longer-TTL holder than the contender", rec(50*time.Minute, "3600", ""), false, false},
+		{"a shorter-TTL holder than the contender", rec(30*time.Second, "60", ""), false, false},
 	} {
-		if got := parseRuntimeLease(c.meta).free(now, "host-a"); got != c.want {
-			t.Errorf("%s: free = %v, want %v", c.name, got, c.want)
+		free, malformed := parseRuntimeLease(c.meta).free(now, "boot/1/9")
+		if free != c.free || malformed != c.malformed {
+			t.Errorf("%s: free, malformed = %v, %v; want %v, %v", c.name, free, malformed, c.free, c.malformed)
+		}
+	}
+	if free, _ := parseRuntimeLease(rec(time.Minute, "240", "")).free(now, ""); free {
+		t.Error("a record and a contender both without a boot ID read as one flock")
+	}
+}
+
+func TestRuntimeLeaseHoldsMetaNeedsHolderAndEpoch(t *testing.T) {
+	l := &RuntimeLease{id: "s", holder: "h/1/a", epoch: 3}
+	for _, c := range []struct {
+		holder, epoch string
+		want          bool
+	}{{"h/1/a", "3", true}, {"h/1/a", "4", false}, {"h/1/b", "3", false}} {
+		if got := l.HoldsMeta(map[string]string{RuntimeLeaseHolderKey: c.holder, RuntimeLeaseEpochKey: c.epoch}); got != c.want {
+			t.Errorf("HoldsMeta(%s, %s) = %v, want %v", c.holder, c.epoch, got, c.want)
 		}
 	}
 }
 
-// TestRuntimeLeaseExcludesOnThisHostAndKeepsTheEpoch: a second holder on the
-// host is refused by the flock with the holder's diagnostic, release clears
-// the record but keeps the epoch, and the next acquire takes epoch+1.
-func TestRuntimeLeaseExcludesOnThisHostAndKeepsTheEpoch(t *testing.T) {
+// TestRuntimeLeaseExcludesSharersAndKeepsTheEpoch: a second holder of the
+// flock is refused with the holder's diagnostic, release clears the record
+// but keeps the epoch, and the next acquire takes epoch+1.
+func TestRuntimeLeaseExcludesSharersAndKeepsTheEpoch(t *testing.T) {
 	onHost(t, "host-a")
 	f, city := newLeaseFixture(t), t.TempDir()
 	first, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
 	if err != nil {
 		t.Fatalf("first TryRuntimeLease: %v", err)
 	}
-	if !first.Fenced() || first.Epoch() != 1 || !first.Expires().Equal(leaseT0.Add(leaseTTL)) {
+	if !first.Fenced() || first.Epoch() != 1 || !first.Expires().Equal(leaseT0.Add(leaseTTL)) || !first.SafeUntil().Equal(leaseT0.Add(leaseTTL-RuntimeLeaseSkewAllowance)) {
 		t.Fatalf("first lease fenced=%v epoch=%d expires=%v", first.Fenced(), first.Epoch(), first.Expires())
 	}
-	if m := f.meta(t); !strings.HasPrefix(m[RuntimeLeaseHolderKey], "host-a/") || m[RuntimeLeaseEpochKey] != "1" {
+	m := f.meta(t)
+	if !strings.HasPrefix(m[RuntimeLeaseHolderKey], "host-a/") || m[RuntimeLeaseEpochKey] != "1" || m[RuntimeLeaseTTLKey] != "240" ||
+		(runtimeLeaseBootID() != "" && m[RuntimeLeaseFlockKey] != runtimeLeaseFlockIdentity(first.lock)) {
 		t.Fatalf("record = %v", m)
 	}
 	_, err = TryRuntimeLease(f.front, f.req(city, leaseT0))
@@ -127,7 +167,7 @@ func TestRuntimeLeaseExcludesOnThisHostAndKeepsTheEpoch(t *testing.T) {
 	}
 	first.Release()
 	first.Release()
-	if m := f.meta(t); m[RuntimeLeaseHolderKey] != "" || m[RuntimeLeaseExpiresKey] != "" || m[RuntimeLeaseEpochKey] != "1" {
+	if m := f.meta(t); m[RuntimeLeaseHolderKey] != "" || m[RuntimeLeaseExpiresKey] != "" || m[RuntimeLeaseFlockKey] != "" || m[RuntimeLeaseEpochKey] != "1" {
 		t.Fatalf("released record = %v, want holder cleared and epoch kept", m)
 	}
 	second, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
@@ -138,7 +178,7 @@ func TestRuntimeLeaseExcludesOnThisHostAndKeepsTheEpoch(t *testing.T) {
 }
 
 // TestRuntimeLeaseNameFlockOnly: a lease with no row (the closed-row reaper)
-// still excludes every same-host holder of the name.
+// still excludes every holder of the name's flock.
 func TestRuntimeLeaseNameFlockOnly(t *testing.T) {
 	f, city := newLeaseFixture(t), t.TempDir()
 	reaper, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: city, Name: "s-lease"})
@@ -157,9 +197,68 @@ func TestRuntimeLeaseNameFlockOnly(t *testing.T) {
 	}
 }
 
-// TestRuntimeLeaseAcrossHosts: two hosts share only the store. The second
-// host is refused until the record expires, then takes epoch+1, and the first
-// holder's late write and release are refused by the epoch.
+// TestRuntimeLeaseRefusesBadRequests: a row lease needs a store, a positive
+// TTL, an open row, and the row's own runtime name.
+func TestRuntimeLeaseRefusesBadRequests(t *testing.T) {
+	f, city := newLeaseFixture(t), t.TempDir()
+	for _, c := range []struct {
+		name string
+		s    *Store
+		req  RuntimeLeaseRequest
+	}{
+		{"zero TTL", f.front, f.reqTTL(city, leaseT0, 0)},
+		{"negative TTL", f.front, f.reqTTL(city, leaseT0, -time.Second)},
+		{"no store", nil, f.req(city, leaseT0)},
+		{"another runtime's name", f.front, RuntimeLeaseRequest{City: city, Name: "s-other", ID: f.id, TTL: leaseTTL}},
+	} {
+		if _, err := TryRuntimeLease(c.s, c.req); err == nil || errors.Is(err, ErrRuntimeLeaseBusy) {
+			t.Errorf("%s: TryRuntimeLease = %v, want refused", c.name, err)
+		}
+	}
+	trimmed := f.req(city, leaseT0)
+	trimmed.Name = " s-lease "
+	l, err := TryRuntimeLease(f.front, trimmed)
+	if err != nil {
+		t.Fatalf("a padded name: %v", err)
+	}
+	l.Release()
+	if err := f.store.Close(f.id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := TryRuntimeLease(f.front, f.req(city, leaseT0)); !errors.Is(err, ErrRuntimeLeaseRowClosed) {
+		t.Fatalf("a closed row = %v, want ErrRuntimeLeaseRowClosed", err)
+	}
+}
+
+// TestRuntimeLeaseOnAClosedRow: a close clears the record, and a release
+// after the close writes nothing.
+func TestRuntimeLeaseOnAClosedRow(t *testing.T) {
+	f, city := newLeaseFixture(t), t.TempDir()
+	l, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := f.front.Get(f.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed, err := f.front.Close(expected, "drained", leaseT0); !closed || err != nil {
+		t.Fatalf("Close = %v, %v", closed, err)
+	}
+	if m := f.meta(t); m[RuntimeLeaseHolderKey] != "" || m[RuntimeLeaseEpochKey] != "1" {
+		t.Fatalf("closed row's record = %v, want the holder cleared", m)
+	}
+	f.write(t, MetadataPatch{RuntimeLeaseHolderKey: l.holder})
+	l.Release()
+	if m := f.meta(t); m[RuntimeLeaseHolderKey] != l.holder {
+		t.Fatalf("release wrote the closed row: %v", m)
+	}
+}
+
+// TestRuntimeLeaseAcrossHosts: holders that share only the store (separate
+// lock namespaces, the same hostname). The second is refused until the record
+// expires, then takes epoch+1; the first's late write and release are refused
+// by the epoch, and its Watch context ends as lost.
 func TestRuntimeLeaseAcrossHosts(t *testing.T) {
 	f := newLeaseFixture(t)
 	onHost(t, "host-b")
@@ -167,7 +266,10 @@ func TestRuntimeLeaseAcrossHosts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("host-b TryRuntimeLease: %v", err)
 	}
-	stalled, cancel := stale.KeepAlive(context.Background(), 10*time.Millisecond)
+	stalled, cancel, err := stale.Watch(context.Background(), 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer cancel()
 
 	onHost(t, "host-a")
@@ -189,14 +291,17 @@ func TestRuntimeLeaseAcrossHosts(t *testing.T) {
 	if wrote || !errors.Is(err, ErrRuntimeLeaseLost) {
 		t.Fatalf("stale holder's write = %v, %v; want refused as lost", wrote, err)
 	}
+	select {
+	case <-stalled.Done():
+		if !errors.Is(context.Cause(stalled), ErrRuntimeLeaseLost) {
+			t.Fatalf("Watch ended with %v, want ErrRuntimeLeaseLost", context.Cause(stalled))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Watch did not cancel the stale holder's call")
+	}
 	stale.Release()
 	if m := f.meta(t); m["state"] == "awake" || m[RuntimeLeaseEpochKey] != "2" || m[RuntimeLeaseHolderKey] != taker.holder {
 		t.Fatalf("record after the stale holder = %v, want host-a's epoch 2 untouched", m)
-	}
-	select {
-	case <-stalled.Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("KeepAlive did not cancel the stale holder's call")
 	}
 	wrote, err = taker.UpdateMetadataFenced(3, func(Info, PersistedResponse) MetadataPatch {
 		return MetadataPatch{"state": "awake"}
@@ -206,27 +311,94 @@ func TestRuntimeLeaseAcrossHosts(t *testing.T) {
 	}
 }
 
-// TestRuntimeLeaseTakesOverADeadHolderOnThisHost: a record whose holder is on
-// this host, with the flock free, is taken at once, before its expiry.
-func TestRuntimeLeaseTakesOverADeadHolderOnThisHost(t *testing.T) {
-	onHost(t, "host-a")
-	f := newLeaseFixture(t)
-	if err := f.front.ApplyPatch(f.id, MetadataPatch{
-		RuntimeLeaseHolderKey:  "host-a/99999/dead",
-		RuntimeLeaseEpochKey:   "6",
-		RuntimeLeaseExpiresKey: leaseT0.Add(time.Minute).Format(time.RFC3339),
-	}); err != nil {
+// TestRuntimeLeaseMismatchedTTLs: each record is judged by its own TTL, so a
+// short-TTL contender waits out a long-TTL holder, and a long-TTL contender
+// takes a short-TTL holder's record only at its expiry.
+func TestRuntimeLeaseMismatchedTTLs(t *testing.T) {
+	for _, c := range []struct {
+		name              string
+		holder, contender time.Duration
+		busyAt, freeAt    time.Duration
+	}{
+		{"long holder, short contender", time.Hour, time.Minute, 50 * time.Minute, time.Hour},
+		{"short holder, long contender", time.Minute, time.Hour, 50 * time.Second, time.Minute},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newLeaseFixture(t)
+			held, err := TryRuntimeLease(f.front, f.reqTTL(t.TempDir(), leaseT0, c.holder))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer held.Release()
+			city := t.TempDir()
+			if _, err := TryRuntimeLease(f.front, f.reqTTL(city, leaseT0.Add(c.busyAt), c.contender)); !errors.Is(err, ErrRuntimeLeaseBusy) {
+				t.Fatalf("contender before the holder's expiry = %v, want busy", err)
+			}
+			l, err := TryRuntimeLease(f.front, f.reqTTL(city, leaseT0.Add(c.freeAt), c.contender))
+			if err != nil {
+				t.Fatalf("contender at the holder's expiry: %v", err)
+			}
+			l.Release()
+		})
+	}
+}
+
+// TestRuntimeLeaseTakesOverADeadSharer: a record naming the flock the
+// contender now holds is taken at once; one naming another lock file, or no
+// flock identity, waits for its expiry.
+func TestRuntimeLeaseTakesOverADeadSharer(t *testing.T) {
+	if runtimeLeaseBootID() == "" {
+		t.Skip("no boot ID on this platform")
+	}
+	f, city := newLeaseFixture(t), t.TempDir()
+	probe, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: city, Name: "s-lease"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	l, err := TryRuntimeLease(f.front, f.req(t.TempDir(), leaseT0))
+	flock := runtimeLeaseFlockIdentity(probe.lock)
+	probe.Release()
+	dead := func(flock string) MetadataPatch {
+		return MetadataPatch{
+			RuntimeLeaseHolderKey: "host-a/99999/dead", RuntimeLeaseEpochKey: "6", RuntimeLeaseTTLKey: "240",
+			RuntimeLeaseExpiresKey: leaseT0.Add(time.Minute).Format(time.RFC3339), RuntimeLeaseFlockKey: flock,
+		}
+	}
+	f.write(t, dead(flock))
+	if _, err := TryRuntimeLease(f.front, f.req(t.TempDir(), leaseT0)); !errors.Is(err, ErrRuntimeLeaseBusy) {
+		t.Fatalf("a contender in another lock namespace = %v, want busy until expiry", err)
+	}
+	l, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
 	if err != nil || l.Epoch() != 7 {
 		t.Fatalf("takeover: %v, %v; want epoch 7", err, l)
 	}
 	l.Release()
+	f.write(t, dead(""))
+	if _, err := TryRuntimeLease(f.front, f.req(city, leaseT0)); !errors.Is(err, ErrRuntimeLeaseBusy) {
+		t.Fatalf("a record without a flock identity = %v, want busy until expiry", err)
+	}
 }
 
-// TestRuntimeLeaseWait: a waiter gets a lease released within its bound, and
-// a busy error once the bound passes.
+// TestRuntimeLeaseTakesAMalformedRecordLoudly: a malformed record is taken,
+// and the taking is logged.
+func TestRuntimeLeaseTakesAMalformedRecordLoudly(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+	f := newLeaseFixture(t)
+	f.write(t, MetadataPatch{RuntimeLeaseHolderKey: "host-b/1/n", RuntimeLeaseExpiresKey: leaseT0.Add(24 * time.Hour).Format(time.RFC3339), RuntimeLeaseTTLKey: "240"})
+	l, err := TryRuntimeLease(f.front, f.req(t.TempDir(), leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Release()
+	if !strings.Contains(buf.String(), "taking a malformed record") {
+		t.Fatalf("log = %q, want the malformed takeover named", buf.String())
+	}
+}
+
+// TestRuntimeLeaseWait: a waiter gets a lease released within its bound, a
+// busy error once the bound passes, and its ctx's error once ctx ends.
 func TestRuntimeLeaseWait(t *testing.T) {
 	f, city := newLeaseFixture(t), t.TempDir()
 	held, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
@@ -240,6 +412,12 @@ func TestRuntimeLeaseWait(t *testing.T) {
 	if waited := time.Since(start); waited > 2*time.Second {
 		t.Fatalf("Wait took %v past a 500ms bound", waited)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start = time.Now()
+	if _, err := WaitRuntimeLease(ctx, f.front, f.req(city, leaseT0), time.Minute); !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 2*time.Second {
+		t.Fatalf("Wait past its ctx = %v after %v, want the ctx's error promptly", err, time.Since(start))
+	}
 	time.AfterFunc(300*time.Millisecond, held.Release)
 	got, err := WaitRuntimeLease(context.Background(), f.front, f.req(city, leaseT0), 5*time.Second)
 	if err != nil || got.Epoch() != 2 {
@@ -248,16 +426,73 @@ func TestRuntimeLeaseWait(t *testing.T) {
 	got.Release()
 }
 
+// TestRuntimeLeaseWatch: Watch needs a positive interval, ends at SafeUntil
+// and at Release with their causes, and a failed read cancels nothing.
+func TestRuntimeLeaseWatch(t *testing.T) {
+	backing := openLeaseStore(t, t.TempDir())
+	store := &failingReadStore{rowWriteRecorder: &rowWriteRecorder{Store: backing}}
+	f := leaseFixtureOver(t, store)
+	l, err := TryRuntimeLease(f.front, f.reqTTL(t.TempDir(), leaseT0, RuntimeLeaseSkewAllowance+time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := l.Watch(context.Background(), 0); err == nil {
+		t.Fatal("Watch took a zero interval")
+	}
+	store.fail.Store(true)
+	expiring, cancel, err := l.Watch(context.Background(), 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	select {
+	case <-expiring.Done():
+		if !errors.Is(context.Cause(expiring), ErrRuntimeLeaseExpired) {
+			t.Fatalf("Watch ended with %v, want ErrRuntimeLeaseExpired (a failed read must cancel nothing)", context.Cause(expiring))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Watch outlived SafeUntil")
+	}
+	store.fail.Store(false)
+	held, cancelHeld, err := l.Watch(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancelHeld()
+	l.Release()
+	if !errors.Is(context.Cause(held), ErrRuntimeLeaseReleased) {
+		t.Fatalf("Watch after Release = %v, want ErrRuntimeLeaseReleased", context.Cause(held))
+	}
+}
+
+// failingReadStore fails every read while fail is set.
+type failingReadStore struct {
+	*rowWriteRecorder
+	fail atomic.Bool
+}
+
+func (s *failingReadStore) Get(id string) (beads.Bead, error) {
+	if s.fail.Load() {
+		return beads.Bead{}, errors.New("store unreachable")
+	}
+	return s.rowWriteRecorder.Get(id)
+}
+
 // noCASStore declares a stamped source but cannot write conditionally.
 type noCASStore struct{ beads.Store }
 
 func (s noCASStore) ConditionalWritesModeSource() beads.Store { return s.Store }
 
-func TestRuntimeLeaseWithoutConditionalWrites(t *testing.T) {
+// brokenCASStore fails every conditional write with a store error.
+type brokenCASStore struct{ *rowWriteRecorder }
+
+func (s brokenCASStore) UpdateIfMatch(string, int64, beads.UpdateOpts) error {
+	return errors.New("disk on fire")
+}
+
+func TestRuntimeLeaseStoreFailures(t *testing.T) {
 	t.Run("require refuses", func(t *testing.T) {
-		store := noCASStore{openLeaseStore(t, t.TempDir())}
-		created := seedPatchFenceSession(t, store, "s-lease")
-		f := leaseFixture{store: store, front: NewStore(beads.SessionStore{Store: store}), id: created.ID}
+		f := leaseFixtureOver(t, noCASStore{openLeaseStore(t, t.TempDir())})
 		city := t.TempDir()
 		if _, err := TryRuntimeLease(f.front, f.req(city, leaseT0)); !errors.Is(err, ErrRuntimeLeaseNoCAS) {
 			t.Fatalf("require without CAS = %v, want ErrRuntimeLeaseNoCAS", err)
@@ -268,25 +503,36 @@ func TestRuntimeLeaseWithoutConditionalWrites(t *testing.T) {
 		}
 		l.Release()
 	})
-	t.Run("off is best-effort and warns once", func(t *testing.T) {
+	t.Run("a failed write is an error, not busy", func(t *testing.T) {
+		f := leaseFixtureOver(t, brokenCASStore{&rowWriteRecorder{Store: openLeaseStore(t, t.TempDir())}})
+		city := t.TempDir()
+		if _, err := TryRuntimeLease(f.front, f.req(city, leaseT0)); err == nil || errors.Is(err, ErrRuntimeLeaseBusy) || !strings.Contains(err.Error(), "disk on fire") {
+			t.Fatalf("acquire over a failing store = %v, want its error", err)
+		}
+		l, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: city, Name: "s-lease"})
+		if err != nil {
+			t.Fatalf("the failed lease kept its flock: %v", err)
+		}
+		l.Release()
+	})
+	t.Run("off is best-effort and warns once per city", func(t *testing.T) {
 		var buf bytes.Buffer
 		prev := log.Writer()
 		log.SetOutput(&buf)
 		defer log.SetOutput(prev)
-		noCASWarning = sync.Once{}
-		store := beads.NewMemStore()
-		created := seedPatchFenceSession(t, store, "s-lease")
-		f := leaseFixture{store: store, front: NewStore(beads.SessionStore{Store: store}), id: created.ID}
-		city := t.TempDir()
-		for i := 1; i <= 2; i++ {
-			l, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+		f := leaseFixtureOver(t, beads.NewMemStore())
+		cities := []string{t.TempDir(), t.TempDir()}
+		for i := 1; i <= 4; i++ {
+			l, err := TryRuntimeLease(f.front, f.req(cities[i%2], leaseT0))
 			if err != nil || l.Fenced() || f.meta(t)[RuntimeLeaseEpochKey] != strconv.Itoa(i) {
 				t.Fatalf("off-mode lease %d: %v, %v, record %v", i, err, l, f.meta(t))
 			}
 			l.Release()
 		}
-		if n := strings.Count(buf.String(), "no conditional writes (conditional_writes is off)"); n != 1 {
-			t.Fatalf("warned %d times, want once: %q", n, buf.String())
+		for _, city := range cities {
+			if n := strings.Count(buf.String(), "city "+city+": the session store has no conditional writes (conditional_writes is off)"); n != 1 {
+				t.Fatalf("warned %d times for %s, want once: %q", n, city, buf.String())
+			}
 		}
 	})
 }
@@ -310,14 +556,12 @@ func (s *racingStore) Get(id string) (beads.Bead, error) {
 // TestRuntimeLeaseAcquireIsFencedAtTheReadRevision: an acquire that lands
 // between the read and the write wins; the lease re-reads and is refused.
 func TestRuntimeLeaseAcquireIsFencedAtTheReadRevision(t *testing.T) {
-	onHost(t, "host-a")
 	backing := openLeaseStore(t, t.TempDir())
 	created := seedPatchFenceSession(t, backing, "s-lease")
 	store := &racingStore{rowWriteRecorder: &rowWriteRecorder{Store: backing}}
 	store.race = func() {
 		if err := backing.SetMetadataBatch(created.ID, map[string]string{
-			RuntimeLeaseHolderKey:  "host-b/7/n",
-			RuntimeLeaseEpochKey:   "1",
+			RuntimeLeaseHolderKey: "host-b/7/n", RuntimeLeaseEpochKey: "1", RuntimeLeaseTTLKey: "240",
 			RuntimeLeaseExpiresKey: leaseT0.Add(time.Minute).Format(time.RFC3339),
 		}); err != nil {
 			t.Error(err)
@@ -332,39 +576,14 @@ func TestRuntimeLeaseAcquireIsFencedAtTheReadRevision(t *testing.T) {
 	}
 }
 
-// TestRuntimeLeaseKeepAliveEndsAtExpiry: a Call under the lease is canceled
-// once the record lapses, even if nobody has taken it yet.
-func TestRuntimeLeaseKeepAliveEndsAtExpiry(t *testing.T) {
-	f := newLeaseFixture(t)
-	l, err := TryRuntimeLease(f.front, RuntimeLeaseRequest{City: t.TempDir(), Name: "s-lease", ID: f.id, TTL: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Release()
-	ctx, cancel := l.KeepAlive(context.Background(), time.Hour)
-	defer cancel()
-	select {
-	case <-ctx.Done():
-		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			t.Fatalf("KeepAlive ended with %v, want its expiry deadline", ctx.Err())
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("KeepAlive outlived the record's expiry")
-	}
-}
-
 // TestRuntimeLeaseUnderTheSessionMutationLock: a caller holding the row's
-// session mutation lock (every Manager start path) can take the lease, and
-// the record's lifetime is capped.
+// session mutation lock (every Manager start path) can take the lease.
 func TestRuntimeLeaseUnderTheSessionMutationLock(t *testing.T) {
 	f := newLeaseFixture(t)
 	done := make(chan error, 1)
 	go func() {
 		done <- WithSessionMutationLock(f.id, func() error {
-			l, err := TryRuntimeLease(f.front, RuntimeLeaseRequest{City: t.TempDir(), Name: "s-lease", ID: f.id, TTL: time.Hour, Now: func() time.Time { return leaseT0 }})
-			if err == nil && !l.Expires().Equal(leaseT0.Add(RuntimeLeaseMaxTTL)) {
-				err = errors.New("expiry " + l.Expires().String() + " is not capped")
-			}
+			l, err := TryRuntimeLease(f.front, f.req(t.TempDir(), leaseT0))
 			l.Release()
 			return err
 		})
@@ -376,5 +595,40 @@ func TestRuntimeLeaseUnderTheSessionMutationLock(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("TryRuntimeLease deadlocked under the session mutation lock")
+	}
+}
+
+// TestRuntimeLeaseReadsPastTheCache: a takeover written by another process
+// reaches the backing store only; the lease's fresh reads still see it.
+func TestRuntimeLeaseReadsPastTheCache(t *testing.T) {
+	backing := openLeaseStore(t, t.TempDir())
+	created := seedPatchFenceSession(t, backing, "s-lease")
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cached := leaseFixture{store: backing, front: NewStore(beads.SessionStore{Store: cache}), id: created.ID}
+	stale, err := TryRuntimeLease(cached.front, cached.req(t.TempDir(), leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	watched, cancel, err := stale.Watch(context.Background(), 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	direct := leaseFixture{store: backing, front: NewStore(beads.SessionStore{Store: backing}), id: created.ID}
+	taker, err := TryRuntimeLease(direct.front, direct.req(t.TempDir(), leaseT0.Add(leaseTTL)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taker.Release()
+	select {
+	case <-watched.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Watch read a cached row and missed the takeover")
+	}
+	if _, err := stale.UpdateMetadataFenced(3, func(Info, PersistedResponse) MetadataPatch { return MetadataPatch{"state": "awake"} }); !errors.Is(err, ErrRuntimeLeaseLost) {
+		t.Fatalf("stale write through the cache = %v, want ErrRuntimeLeaseLost", err)
 	}
 }

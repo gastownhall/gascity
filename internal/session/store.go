@@ -650,7 +650,7 @@ func (s *Store) Close(expected Info, stateCode string, now time.Time) (bool, err
 	if err := premise(bead); err != nil {
 		return false, err
 	}
-	patch := ClosePatch(now, stateCode)
+	patch := withRuntimeLeaseCleared(bead.Metadata, ClosePatch(now, stateCode))
 	if closer, ok := beads.AtomicConditionalCloserFor(s.store); ok {
 		closed, err := s.closeAtomically(closer, bead, patch, premise)
 		if !beads.IsConditionalWriteUnsupported(err) {
@@ -804,6 +804,7 @@ func (s *Store) CloseWithTerminalPatch(expected Info, patch MetadataPatch, commi
 	if bead.Status == "closed" {
 		return false, nil
 	}
+	patch = withRuntimeLeaseCleared(bead.Metadata, patch)
 	guard := func(open beads.Bead) error {
 		row := infoFromPersistedBead(open)
 		if IsKillPendingInfo(row, now) {

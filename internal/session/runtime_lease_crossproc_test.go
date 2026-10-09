@@ -16,8 +16,8 @@ import (
 
 // The cross-process race harness (ARCH-RESTRUCTURE R6.4). The test binary
 // re-execs itself in a lease role: the processes share the SQLite store dir,
-// and the city dir too when they are on one host. A second host is simulated
-// by a separate city dir (its own lock namespace) and a replaced hostname.
+// and the city dir too when they share a flock. A second host is simulated
+// by a separate city dir (its own lock namespace) under the same hostname.
 // The role reports on stdout and waits for a line on stdin to proceed.
 
 const leaseRoleEnv = "GC_TEST_ROLE"
@@ -30,9 +30,6 @@ func TestRuntimeLeaseHelperProcess(t *testing.T) {
 	role := os.Getenv(leaseRoleEnv)
 	if role == "" {
 		return
-	}
-	if host := os.Getenv("GC_TEST_LEASE_HOST"); host != "" {
-		runtimeLeaseHostname = func() (string, error) { return host, nil }
 	}
 	store := openLeaseStore(t, os.Getenv("GC_TEST_LEASE_STORE"))
 	ttl, _ := time.ParseDuration(os.Getenv("GC_TEST_LEASE_TTL"))
@@ -111,13 +108,13 @@ func (h leaseHarness) try(city string) (*RuntimeLease, error) {
 
 // TestRuntimeLeaseCrossProcess runs real processes against one store.
 func TestRuntimeLeaseCrossProcess(t *testing.T) {
-	// start runs role as a process on host ("" is this host) in city's lock
-	// namespace, and waits for it to acquire.
-	start := func(t *testing.T, h leaseHarness, role, host, city string, ttl time.Duration) *leaseRole {
+	// start runs role as a process in city's lock namespace, and waits for it
+	// to acquire.
+	start := func(t *testing.T, h leaseHarness, role, city string, ttl time.Duration) *leaseRole {
 		t.Helper()
 		r := &leaseRole{lines: make(chan string, 8)}
 		r.cmd = exec.Command(os.Args[0], "-test.run=^TestRuntimeLeaseHelperProcess$", "-test.count=1")
-		r.cmd.Env = append(os.Environ(), leaseRoleEnv+"="+role, "GC_TEST_LEASE_HOST="+host,
+		r.cmd.Env = append(os.Environ(), leaseRoleEnv+"="+role,
 			"GC_TEST_LEASE_STORE="+h.storeDir, "GC_TEST_LEASE_CITY="+city, "GC_TEST_LEASE_ID="+h.f.id,
 			"GC_TEST_LEASE_TTL="+ttl.String())
 		out, err := r.cmd.StdoutPipe()
@@ -145,7 +142,7 @@ func TestRuntimeLeaseCrossProcess(t *testing.T) {
 	// releases.
 	t.Run("two processes on one host", func(t *testing.T) {
 		h, city := newLeaseHarness(t), t.TempDir()
-		holder := start(t, h, "hold", "", city, leaseTTL)
+		holder := start(t, h, "hold", city, leaseTTL)
 		if _, err := h.try(city); !errors.Is(err, ErrRuntimeLeaseBusy) || !strings.Contains(err.Error(), "on this host") {
 			t.Fatalf("contender while held = %v, want a local busy", err)
 		}
@@ -162,7 +159,7 @@ func TestRuntimeLeaseCrossProcess(t *testing.T) {
 	// record expires.
 	t.Run("crash releases on one host", func(t *testing.T) {
 		h, city := newLeaseHarness(t), t.TempDir()
-		start(t, h, "hold", "", city, leaseTTL).crash(t)
+		start(t, h, "hold", city, leaseTTL).crash(t)
 		if m := h.f.meta(t); m[RuntimeLeaseHolderKey] == "" {
 			t.Fatalf("the crashed holder's record is gone: %v", m)
 		}
@@ -173,34 +170,33 @@ func TestRuntimeLeaseCrossProcess(t *testing.T) {
 		l.Release()
 	})
 
-	// Hosts sharing only the store. A holder on host-b that crashes
-	// mid-start blocks host-a until its record expires; a holder that
-	// stalls past expiry has its late commit refused by the epoch.
+	// Holders sharing only the store, under one hostname. One that crashes
+	// mid-start blocks the other until its record expires; one that stalls
+	// past expiry has its late commit refused by the epoch.
 	for _, role := range []string{"hold", "stall"} {
 		t.Run("two hosts "+role, func(t *testing.T) {
 			h := newLeaseHarness(t)
-			onHost(t, "host-a")
 			cityA := t.TempDir()
-			other := start(t, h, role, "host-b", t.TempDir(), 2*time.Second)
+			other := start(t, h, role, t.TempDir(), 2*time.Second)
 			if _, err := h.try(cityA); !errors.Is(err, ErrRuntimeLeaseBusy) || strings.Contains(err.Error(), "on this host") {
-				t.Fatalf("host-a while host-b holds = %v, want busy on host-b's record", err)
+				t.Fatalf("while the other holds = %v, want busy on the other's record", err)
 			}
 			if role == "hold" {
 				other.crash(t)
 				if _, err := h.try(cityA); !errors.Is(err, ErrRuntimeLeaseBusy) {
-					t.Fatalf("host-a right after host-b's crash = %v, want busy until expiry", err)
+					t.Fatalf("right after the other's crash = %v, want busy until expiry", err)
 				}
 			}
-			l, err := WaitRuntimeLease(t.Context(), h.f.front, RuntimeLeaseRequest{City: cityA, Name: "s-lease", ID: h.f.id, TTL: leaseTTL}, 10*time.Second)
+			l, err := WaitRuntimeLease(t.Context(), h.f.front, RuntimeLeaseRequest{City: cityA, Name: "s-lease", ID: h.f.id, TTL: leaseTTL}, 30*time.Second)
 			if err != nil || l.Epoch() != 2 {
-				t.Fatalf("host-a after expiry: %v, %v", err, l)
+				t.Fatalf("after expiry: %v, %v", err, l)
 			}
 			defer l.Release()
 			if role == "stall" {
 				other.proceed(t)
 				other.expect(t, "commit lost=true")
 				if m := h.f.meta(t); m["state"] == "stale-commit" || m[RuntimeLeaseEpochKey] != "2" || m[RuntimeLeaseHolderKey] != l.holder {
-					t.Fatalf("row after the stale commit = %v, want host-a's lease and no commit", m)
+					t.Fatalf("row after the stale commit = %v, want the taker's lease and no commit", m)
 				}
 			}
 		})
