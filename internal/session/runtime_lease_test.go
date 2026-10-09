@@ -355,7 +355,7 @@ func TestRuntimeLeaseTakesOverADeadSharer(t *testing.T) {
 		t.Skip("no boot ID on this platform")
 	}
 	f, city := newLeaseFixture(t), t.TempDir()
-	probe, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: city, Name: "s-lease"})
+	probe, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,6 +371,12 @@ func TestRuntimeLeaseTakesOverADeadSharer(t *testing.T) {
 	if _, err := TryRuntimeLease(f.front, f.req(t.TempDir(), leaseT0)); !errors.Is(err, ErrRuntimeLeaseBusy) {
 		t.Fatalf("a contender in another lock namespace = %v, want busy until expiry", err)
 	}
+	// A flock-only holder (the reaper) in between leaves the proof intact.
+	reaper, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: city, Name: "s-lease"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reaper.Release()
 	l, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
 	if err != nil || l.Epoch() != 7 {
 		t.Fatalf("takeover: %v, %v; want epoch 7", err, l)
@@ -399,7 +405,8 @@ func TestRuntimeLeaseTakesOverADeadSharer(t *testing.T) {
 }
 
 // lockFileIdentity is the identity l's acquire recorded: the boot ID, the
-// lock file's device and inode as stat reports them, and l's token.
+// lock file's device and inode as stat reports them, and l's token, which a
+// record write rotated into the lock file.
 func lockFileIdentity(t *testing.T, l *RuntimeLease) string {
 	t.Helper()
 	fi, err := l.lock.Stat()
@@ -811,4 +818,89 @@ func (s *failingWriteStore) SetMetadataBatch(id string, kvs map[string]string) e
 		return errors.New("disk full")
 	}
 	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// TestRuntimeLeaseFailedAcquireKeepsTheProof: an acquire whose record write
+// fails restores the lock file's token, so a dead holder's record is still
+// taken over at once afterwards.
+func TestRuntimeLeaseFailedAcquireKeepsTheProof(t *testing.T) {
+	if runtimeLeaseBootID() == "" {
+		t.Skip("no boot ID on this platform")
+	}
+	store := &failingWriteStore{Store: beads.NewMemStore()}
+	f, city := leaseFixtureOver(t, store), t.TempDir()
+	dead, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	flock := lockFileIdentity(t, dead)
+	dead.Release()
+	f.write(t, MetadataPatch{
+		RuntimeLeaseHolderKey: "host-a/99999/dead", RuntimeLeaseEpochKey: "1", RuntimeLeaseTTLKey: "240",
+		RuntimeLeaseExpiresKey: leaseT0.Add(time.Minute).Format(time.RFC3339), RuntimeLeaseFlockKey: flock,
+	})
+	store.fail = true
+	if _, err := TryRuntimeLease(f.front, f.req(city, leaseT0)); err == nil || errors.Is(err, ErrRuntimeLeaseBusy) {
+		t.Fatalf("acquire over a failing write = %v, want the write's error", err)
+	}
+	store.fail = false
+	l, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil || l.Epoch() != 2 {
+		t.Fatalf("takeover after a failed acquire: %v, %v; want the dead holder taken over", err, l)
+	}
+	l.Release()
+}
+
+// TestRuntimeLeaseRecordTakenAfterAClone: a kernel cloned before a record
+// was taken still has the lock file's older token, so it reads the record's
+// holder as alive and waits, however its flock and boot ID look.
+func TestRuntimeLeaseRecordTakenAfterAClone(t *testing.T) {
+	if runtimeLeaseBootID() == "" {
+		t.Skip("no boot ID on this platform")
+	}
+	f, city := newLeaseFixture(t), t.TempDir()
+	before, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t0 := before.token
+	before.Release()
+	after, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := f.meta(t)
+	if after.token == t0 || record[RuntimeLeaseFlockKey] != lockFileIdentity(t, after) {
+		t.Fatalf("tokens %q then %q, record %q: want a fresh token recorded", t0, after.token, record[RuntimeLeaseFlockKey])
+	}
+	unlockRuntimeNameFile(after.lock) // the clone's kernel does not share the holder's flock
+	if err := os.WriteFile(after.lock.Name(), []byte("token "+t0+"\npid 1 (gc), since then\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := TryRuntimeLease(f.front, f.req(city, leaseT0)); !errors.Is(err, ErrRuntimeLeaseBusy) {
+		t.Fatalf("the clone's contender = %v, want busy until expiry", err)
+	}
+}
+
+// TestClearRuntimeLeaseForReopen: a generic reopen of a session bead clears
+// its record first, keeping the epoch; other beads are left alone.
+func TestClearRuntimeLeaseForReopen(t *testing.T) {
+	f := newLeaseFixture(t)
+	f.write(t, MetadataPatch{RuntimeLeaseHolderKey: "h/1/n", RuntimeLeaseEpochKey: "3", RuntimeLeaseTTLKey: "240"})
+	if err := ClearRuntimeLeaseForReopen(f.store, f.id); err != nil {
+		t.Fatal(err)
+	}
+	if m := f.meta(t); m[RuntimeLeaseHolderKey] != "" || m[RuntimeLeaseTTLKey] != "" || m[RuntimeLeaseEpochKey] != "3" {
+		t.Fatalf("record after the clear = %v", m)
+	}
+	other, err := f.store.Create(beads.Bead{Title: "task", Metadata: map[string]string{RuntimeLeaseHolderKey: "h/1/n"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ClearRuntimeLeaseForReopen(f.store, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := f.store.Get(other.ID); b.Metadata[RuntimeLeaseHolderKey] != "h/1/n" {
+		t.Fatalf("a non-session bead was touched: %v", b.Metadata)
+	}
 }

@@ -37,17 +37,19 @@ import (
 // its row closed has lost its lease (UpdateMetadataFenced, Watch), so no
 // close path needs to clear the record before it closes. An atomic close
 // clears it in the same write; a reopen clears it (SetStatusOpen,
-// RuntimeLeaseClearPatch), so a reopened row never hands its old holder back
-// its lease.
+// RuntimeLeaseClearPatch, ClearRuntimeLeaseForReopen before a generic
+// reopen), so a reopened row never hands its old holder back its lease.
 //
 // The record never renews (no revision churn), so its TTL covers a whole
 // start (RuntimeLeaseTTL), and is at least RuntimeLeaseMargin. A crashed
 // holder that shared the contender's flock is taken over at once: the record
 // names the flock (boot ID, lock file identity, and the random token its
 // holder wrote into the lock file) the contender now holds, so its holder is
-// dead. The token keeps a cloned kernel (a VM snapshot sharing the boot ID and
-// the disk) from reading a record taken after the clone as its own; a record
-// taken before the clone is indistinguishable, a stated residual. Any other crashed
+// dead. The token changes only when a record is written. It keeps a cloned
+// kernel (a VM snapshot sharing the boot ID and the disk) from reading a
+// record taken after the clone as its own. Cloning a host's memory (VM
+// snapshot restore or live clone) while it holds a lease is unsupported: the
+// clone duplicates the holder. Any other crashed
 // holder blocks until its expiry. Expiry compares wall clocks across hosts,
 // which must agree within RuntimeLeaseSkewAllowance; a holder's calls end by
 // SafeUntil. Without conditional writes the record is best-effort, only the
@@ -224,6 +226,7 @@ func TryRuntimeLease(s *Store, req RuntimeLeaseRequest) (*RuntimeLease, error) {
 	}
 	l.holder = host + "/" + strconv.Itoa(os.Getpid()) + "/" + runtimeLeaseNonce()
 	if err := l.acquireRecord(req.City, req.TTL); err != nil {
+		writeRuntimeLeaseLockBody(lock, prev, now()) // no record written: keep the previous token
 		unlockRuntimeNameFile(lock)
 		return nil, err
 	}
@@ -282,6 +285,7 @@ func (l *RuntimeLease) acquireRecord(city string, ttl time.Duration) error {
 				rec.holder, bead.Metadata[RuntimeLeaseExpiresKey], bead.Metadata[RuntimeLeaseTTLKey])
 		}
 		l.epoch, l.expires = rec.epoch+1, now.Add(ttl).UTC().Truncate(time.Second)
+		writeRuntimeLeaseLockBody(l.lock, l.token, now)
 		patch := map[string]string{
 			RuntimeLeaseHolderKey:  l.holder,
 			RuntimeLeaseEpochKey:   strconv.FormatInt(l.epoch, 10),
@@ -442,6 +446,18 @@ func (l *RuntimeLease) holdsRow(bead beads.Bead) bool {
 	return bead.Status != "closed" && l.HoldsMeta(bead.Metadata)
 }
 
+// ClearRuntimeLeaseForReopen clears the runtime lease record on session bead
+// id before a generic reopen (the bead API, the bd bridge) flips it open, as
+// SetStatusOpen's own clear does: a reopened row holds no lease. A bead that is
+// not a session, or holds no record, is left alone.
+func ClearRuntimeLeaseForReopen(store beads.Store, id string) error {
+	b, err := store.Get(id)
+	if err != nil || !IsSessionBeadOrRepairable(b) || strings.TrimSpace(b.Metadata[RuntimeLeaseHolderKey]) == "" {
+		return nil
+	}
+	return store.SetMetadataBatch(id, map[string]string(RuntimeLeaseClearPatch()))
+}
+
 // RuntimeLeaseClearPatch clears a record's holder, keeping its epoch. An
 // atomic close carries it, and every reopen writes it with the status flip.
 func RuntimeLeaseClearPatch() MetadataPatch {
@@ -567,11 +583,20 @@ func lockRuntimeNameFile(city, name string, now time.Time) (f *os.File, token, p
 	var b [16]byte
 	_, _ = rand.Read(b[:])
 	token = hex.EncodeToString(b[:])
+	writeRuntimeLeaseLockBody(f, prev, now)
+	return f, token, prev, nil
+}
+
+// writeRuntimeLeaseLockBody writes the lock file's body: the token a row
+// record names, and the holder for a contender's busy diagnostic. The token
+// changes only when a record is written (rotateLockToken), so a flock-only
+// holder (the reaper) or a failed acquire never destroys the proof that the
+// previous record's holder is dead.
+func writeRuntimeLeaseLockBody(f *os.File, token string, now time.Time) {
 	body := fmt.Sprintf("token %s\npid %d (%s), since %s\n", token, os.Getpid(), filepath.Base(os.Args[0]), now.UTC().Format(time.RFC3339))
 	if f.Truncate(0) == nil {
 		_, _ = f.WriteAt([]byte(body), 0)
 	}
-	return f, token, prev, nil
 }
 
 func unlockRuntimeNameFile(f *os.File) {
