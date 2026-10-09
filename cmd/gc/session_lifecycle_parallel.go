@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"path/filepath"
+	"reflect"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -950,6 +951,10 @@ func prepareStartCandidate(
 	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard, nil)
 }
 
+// errStartCandidateChanged reports a start the tick chose from a snapshot
+// the row has since left; the next tick decides again.
+var errStartCandidateChanged = errors.New("session changed since the tick's snapshot; start deferred")
+
 func prepareStartCandidateForCity(
 	candidate startCandidate,
 	cityPath string,
@@ -977,6 +982,15 @@ func prepareStartCandidateForCity(
 			current, persisted, err := sessFront.GetPersistedResponse(id)
 			if err != nil {
 				return err
+			}
+			// The tick chose this start from its snapshot. A row whose
+			// lifecycle facts moved since, that an operator's resume is
+			// starting (CONTRACT v5.9 D8 fence), or whose runtime came up
+			// since is not this tick's to start: PreWake would re-key it
+			// under that runtime.
+			if !reflect.DeepEqual(sessionpkg.LifecycleInputFromInfo(candidate.info), sessionpkg.LifecycleInputFromInfo(current)) ||
+				sessionpkg.ResumeFenceLive(persisted.Metadata, clk.Now()) || (sp != nil && sp.IsRunning(candidate.name())) {
+				return fmt.Errorf("%w: %s", errStartCandidateChanged, id)
 			}
 			// preWakeCommit persists its PreWakePatch through the front door and returns
 			// the batch; folding it onto the freshly re-read Info keeps the twin

@@ -1291,7 +1291,14 @@ func (m *Manager) suspend(id string, intent suspendIntent) error {
 		}
 		current := State(b.Metadata["state"])
 		if current == StateSuspended {
-			return nil // idempotent: already suspended
+			if intent != suspendIntentOperator || fenceExpired(b.Metadata, m.now()) {
+				return nil // idempotent: already suspended
+			}
+			// An operator's resume is starting this row (D8 fence): restamp
+			// the suspension so its consume refuses, as a fresh suspend would.
+			patch := ClearWakeRequestPatch()
+			patch["suspended_at"] = m.now().UTC().Format(time.RFC3339Nano)
+			return m.store.SetMetadataBatch(id, map[string]string(patch))
 		}
 		// failed-create is a create-rollback terminal state: the create never
 		// reached creation_complete, so there is no live turn to suspend — only

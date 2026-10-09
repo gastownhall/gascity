@@ -488,6 +488,17 @@ func reconcilerDrainAckMatchesSession(session beads.Bead, sp runtime.Provider, n
 // session-bead read is the generation (Info.Generation); everything else is
 // provider metadata (sp) and the caller-supplied name, shared verbatim with the
 // raw form — so it is byte-identical, pinned by the sessionGeneration oracle row.
+// holdDrainAckReleased reports whether a reconciler-owned drain ack whose
+// reason is an operator's hold (the sleep intent it drained for) has lost
+// that hold on the fresh row. A failed read keeps the ack.
+func holdDrainAckReleased(sessFront *sessions.Store, id, ackReason string) bool {
+	if ackReason != string(sessions.SleepReasonUserHold) && ackReason != string(sessions.SleepReasonWaitHold) {
+		return false
+	}
+	fresh, err := sessFront.Get(id)
+	return err == nil && strings.TrimSpace(fresh.SleepIntent) != ackReason
+}
+
 func reconcilerDrainAckMatchesSessionInfo(info sessions.Info, sp runtime.Provider, name string) (string, bool) {
 	if sp == nil || name == "" {
 		return "", false

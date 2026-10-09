@@ -2860,6 +2860,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 					ackReason, reconcilerOwnedAck := reconcilerDrainAckMatchesSessionInfo(infoByID[id], sp, name)
+					// An ack the reconciler minted for an operator's hold is stale
+					// once the fresh row no longer carries that hold: an operator
+					// resumed the session (CONTRACT v5.9 D8). Stopping it now would
+					// kill the session the operator just attached to.
+					if reconcilerOwnedAck && holdDrainAckReleased(sessFront, id, ackReason) {
+						_ = clearReconcilerDrainAckMetadata(sp, name)
+						_ = dops.clearDrain(name)
+						if dt != nil {
+							dt.remove(id)
+						}
+						continue
+					}
 					// gc-kkgak: a reconciler-owned drain ack is minted from the
 					// desired-state / assigned-work view. During a partial store
 					// query that view is unreliable, so defer the reconciler-owned

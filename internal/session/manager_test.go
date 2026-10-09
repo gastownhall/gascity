@@ -4179,6 +4179,19 @@ func TestGetInfersACPTransportFromStoredMCPMetadata(t *testing.T) {
 	}
 }
 
+// markOwnRuntime gives the fake runtime name the row's instance token, as a
+// concurrent resume of the same row would (D8 resumes only its own runtime).
+func markOwnRuntime(t *testing.T, store beads.Store, sp *runtime.Fake, id, name string) {
+	t.Helper()
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.SetMeta(name, "GC_INSTANCE_TOKEN", b.Metadata["instance_token"]); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSendConvergesWhenSessionAlreadyResumed(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -4194,6 +4207,7 @@ func TestSendConvergesWhenSessionAlreadyResumed(t *testing.T) {
 	if err := sp.Start(context.Background(), info.SessionName, runtime.Config{WorkDir: "/tmp"}); err != nil {
 		t.Fatalf("fake concurrent Start: %v", err)
 	}
+	markOwnRuntime(t, store, sp, info.ID, info.SessionName)
 
 	if _, err := mgr.Send(context.Background(), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"}, ResumeOperator); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -4272,6 +4286,7 @@ func TestSendDoesNotSuppressNonDuplicateResumeError(t *testing.T) {
 	if err := sp.Fake.Start(context.Background(), info.SessionName, runtime.Config{WorkDir: "/tmp"}); err != nil {
 		t.Fatalf("fake concurrent Start: %v", err)
 	}
+	markOwnRuntime(t, store, sp.Fake, info.ID, info.SessionName)
 	sp.startErr = errors.New("out of memory")
 
 	_, err = mgr.Send(context.Background(), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"}, ResumeOperator)

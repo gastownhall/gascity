@@ -541,19 +541,40 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if m.resumeHeld(b, policy) {
 		return fmt.Errorf("%w: %s", ErrResumeHeld, id)
 	}
+	// A dormant row is resumed behind the fence until one CAS consumes it
+	// (D8 rules 2-5), and only through its own runtime.
+	alive := m.sp.IsRunning(sessName)
+	var rc *resumeCall
+	if isDormantRow(b.Metadata) {
+		rc = newResumeCall(b.Metadata)
+		if alive {
+			if err := m.liveRuntimeOwned(id, sessName, b.Metadata["instance_token"]); err != nil {
+				return err
+			}
+		}
+	}
 	transport, transportVerified := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
-	if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
+	if State(b.Metadata["state"]) != StateSuspended && alive {
 		if b.Metadata["transport"] == "" && transportVerified {
 			m.persistTransport(id, b.Metadata["provider"], transport)
 		}
-		if err := m.confirmLiveSessionState(id, &b); err != nil {
+		if err := m.confirmLiveSessionState(id, &b, rc); err != nil || rc == nil {
 			return err
 		}
+		m.voidReconcilerDrainAck(sessName)
 		return nil
 	}
 	if resumeCommand == "" {
 		return fmt.Errorf("%w: %s", ErrResumeRequired, id)
+	}
+	if rc != nil && !alive {
+		if err := m.fence(id, rc); err != nil {
+			if unroute != nil {
+				unroute()
+			}
+			return err
+		}
 	}
 
 	cfg := hints
@@ -579,6 +600,9 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 			b.Metadata = make(map[string]string)
 		}
 		b.Metadata["instance_token"] = instanceToken
+		if rc != nil {
+			rc.facts["instance_token"] = instanceToken
+		}
 	}
 	cfg.Env = mergeEnv(cfg.Env, RuntimeEnvWithSessionContext(
 		infoFromPersistedBead(b),
@@ -666,11 +690,26 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if err := m.syncStoredMCPServers(id, &b, cfg.MCPServers); err != nil {
 		return fmt.Errorf("%w: %w", ErrStateSync, err)
 	}
-	if err := m.confirmLiveSessionState(id, &b); err != nil {
-		if started && !errors.Is(err, ErrStateSync) {
-			_ = m.sp.Stop(sessName)
+	own := rc
+	if own == nil {
+		own = &resumeCall{}
+	}
+	if started {
+		m.captureObject(own, sessName)
+	}
+	if err := m.confirmLiveSessionState(id, &b, rc); err != nil {
+		if started && errors.Is(err, ErrResumeSuperseded) {
+			if rc != nil && m.resumeConverged(id, rc) {
+				return nil
+			}
+			if stopErr := m.stopOwnRuntime(own, sessName, instanceToken); stopErr != nil {
+				return fmt.Errorf("%w (stopping the runtime it launched: %w)", err, stopErr)
+			}
 		}
 		return err
+	}
+	if rc != nil {
+		m.voidReconcilerDrainAck(sessName)
 	}
 	return nil
 }
@@ -778,33 +817,17 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	return nil
 }
 
-func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
+// confirmLiveSessionState records a live runtime: a resume (rc non-nil)
+// consumes the dormant row (D8 rule 4); any other row takes the plain
+// fenced confirmation.
+func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, rc *resumeCall) error {
 	if b == nil {
 		return nil
 	}
-	batch := make(map[string]string)
-	switch State(b.Metadata["state"]) {
-	case "", StateStartPending, StateCreating, StateAsleep, StateSuspended:
-		batch["state"] = string(StateActive)
-		batch["state_reason"] = "creation_complete"
+	if rc != nil {
+		return m.consume(id, rc)
 	}
-	if strings.TrimSpace(b.Metadata["pending_create_claim"]) != "" {
-		batch["pending_create_claim"] = ""
-		batch["pending_create_started_at"] = ""
-	}
-	if len(batch) == 0 {
-		return nil
-	}
-	if err := m.store.SetMetadataBatch(id, batch); err != nil {
-		return fmt.Errorf("%w: updating session state: %w", ErrStateSync, err)
-	}
-	if b.Metadata == nil {
-		b.Metadata = make(map[string]string)
-	}
-	for k, v := range batch {
-		b.Metadata[k] = v
-	}
-	return nil
+	return m.confirmStarted(id, b.Metadata)
 }
 
 func sleepWithContext(ctx context.Context, d time.Duration) error {
