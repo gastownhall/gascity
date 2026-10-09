@@ -7,10 +7,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/acp"
-	"github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/runtime/exec"
 	"github.com/gastownhall/gascity/internal/runtime/herdr"
-	"github.com/gastownhall/gascity/internal/runtime/hybrid"
 	"github.com/gastownhall/gascity/internal/runtime/k8s"
 	"github.com/gastownhall/gascity/internal/runtime/ssh"
 	"github.com/gastownhall/gascity/internal/runtime/subprocess"
@@ -271,6 +269,10 @@ func TestOwnsNameIdentityOnly(t *testing.T) {
 // not Known.
 //
 // Kills: a known leaf type made identity-readable without revisiting X3.
+//
+// auto and hybrid are absent: they are never leaves (ResolveBackend and
+// inventoryLeaves walk through them), and they forward the batched env read
+// to the routed leaf.
 func TestIdentityReadableLeaves(t *testing.T) {
 	for name, tc := range map[string]struct {
 		leaf runtime.Provider
@@ -279,10 +281,8 @@ func TestIdentityReadableLeaves(t *testing.T) {
 		"tmux":       {(*tmux.Provider)(nil), true},
 		"acp":        {(*acp.Provider)(nil), true},
 		"subprocess": {(*subprocess.Provider)(nil), true},
-		"auto":       {(*auto.Provider)(nil), false},
 		"exec":       {(*exec.Provider)(nil), false},
 		"herdr":      {(*herdr.Provider)(nil), false},
-		"hybrid":     {(*hybrid.Provider)(nil), false},
 		"k8s":        {(*k8s.Provider)(nil), false},
 		"ssh":        {(*ssh.Provider)(nil), false},
 		"t3bridge":   {(*t3bridge.Provider)(nil), false},

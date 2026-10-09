@@ -36,6 +36,11 @@ var (
 	_ runtime.ListingAttestation            = (*Provider)(nil)
 	_ runtime.Router                        = (*Provider)(nil)
 	_ runtime.ServerDeathConfirmer          = (*Provider)(nil)
+	_ runtime.DialogProvider                = (*Provider)(nil)
+	_ runtime.EnvironmentBatchProvider      = (*Provider)(nil)
+	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
+	_ runtime.SessionRosterProvider         = (*Provider)(nil)
+	_ runtime.SessionObjectKiller           = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -238,6 +243,60 @@ func (p *Provider) Respond(name string, response runtime.InteractionResponse) er
 		return ip.Respond(name, response)
 	}
 	return runtime.ErrInteractionUnsupported
+}
+
+// DismissKnownDialogs delegates to the routed backend when it can dismiss
+// startup dialogs.
+func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
+	if dp, ok := p.route(name).(runtime.DialogProvider); ok {
+		return dp.DismissKnownDialogs(ctx, name, timeout)
+	}
+	return runtime.ErrInteractionUnsupported
+}
+
+// GetAllEnvironment delegates to the routed backend when it has a batched
+// environment read.
+func (p *Provider) GetAllEnvironment(name string) (map[string]string, error) {
+	if ep, ok := p.route(name).(runtime.EnvironmentBatchProvider); ok {
+		return ep.GetAllEnvironment(name)
+	}
+	return nil, fmt.Errorf("%w: batched environment read of %q", runtime.ErrMetaUnsupported, name)
+}
+
+// ConfigureServer configures the server of every backend that has one.
+func (p *Provider) ConfigureServer() error {
+	return runtime.ConfigureServers(p.Backends())
+}
+
+// TeardownServer tears down the server of every backend that has one, so a
+// full stop through the composite still ends the local tmux server.
+func (p *Provider) TeardownServer() error {
+	return runtime.TeardownServers(p.Backends())
+}
+
+// SessionRoster merges the backends' rosters ([runtime.MergeSessionRosters]).
+func (p *Provider) SessionRoster() (map[string]runtime.SessionRosterEntry, error) {
+	return runtime.MergeSessionRosters(p, p.Backends())
+}
+
+// KillCorpseObject forwards to the routed backend when it kills session
+// objects by id (local tmux). The route is a pure function of the name, so no
+// other backend can host the object.
+func (p *Provider) KillCorpseObject(name, objectID, created string) (runtime.SessionObjectKillResult, error) {
+	killer, ok := p.route(name).(runtime.SessionObjectKiller)
+	if !ok {
+		return runtime.SessionObjectNotKilled, fmt.Errorf("%w: session %q", runtime.ErrSessionObjectKillUnsupported, name)
+	}
+	return killer.KillCorpseObject(name, objectID, created)
+}
+
+// KillZombieObject forwards like KillCorpseObject.
+func (p *Provider) KillZombieObject(name, objectID, created, panePID string) (runtime.SessionObjectKillResult, error) {
+	killer, ok := p.route(name).(runtime.SessionObjectKiller)
+	if !ok {
+		return runtime.SessionObjectNotKilled, fmt.Errorf("%w: session %q", runtime.ErrSessionObjectKillUnsupported, name)
+	}
+	return killer.KillZombieObject(name, objectID, created, panePID)
 }
 
 // SetMeta delegates to the routed backend.
