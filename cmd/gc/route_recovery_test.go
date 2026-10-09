@@ -414,9 +414,9 @@ func TestBackstopCountsRoutedWorkTheRuntimePlaneCannotSee(t *testing.T) {
 	}{
 		{
 			name: "unassigned routed work on a work leg",
-			leg:  planeLeg{label: "city"},
+			leg:  planeLeg{label: "city", runtimeUnreadable: true},
 			seed: routed("ga-off-plane", ""),
-			want: 1, because: "the tick's demand read refuses this leg, so nothing spawns for the bead",
+			want: 1, because: "a binding exists elsewhere, so the tick's demand read refuses this leg and nothing spawns for the bead",
 		},
 		{
 			name: "the same bead on the binding",
@@ -426,9 +426,20 @@ func TestBackstopCountsRoutedWorkTheRuntimePlaneCannotSee(t *testing.T) {
 		},
 		{
 			name: "a routed bead on a work leg that already has a holder",
-			leg:  planeLeg{label: "city"},
+			leg:  planeLeg{label: "city", runtimeUnreadable: true},
 			seed: routed("ga-held", "worker-1"),
 			want: 0, because: "an assigned bead needs no seat spawned for it",
+		},
+		{
+			// beads#7410: a city with no storage split at all has no binding
+			// anywhere, so the single-store degradation means the runtime
+			// plane reads the work leg too — this bead IS demanded normally,
+			// unlike the first case above where a binding elsewhere makes the
+			// work leg genuinely unreadable to the runtime plane.
+			name: "unassigned routed work on a work leg, city with no binding anywhere",
+			leg:  planeLeg{label: "city", runtimeUnreadable: false},
+			seed: routed("ga-single-store", ""),
+			want: 0, because: "no binding exists, so the runtime plane's single-store degradation reads this leg; the bead IS demanded",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
