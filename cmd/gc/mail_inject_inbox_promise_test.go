@@ -323,7 +323,7 @@ func TestFormatInjectOutputCollapsedAutoHandoffGroup(t *testing.T) {
 			},
 			wantGroup:    []string{"ah-b", "ah-d", "ah-e", "ah-a", "ah-c"},
 			wantOwnLines: []string{"o-3", "o-4"},
-			wantContains: []string{"You have 9 unread message(s).", "5 of these are archived on delivery"},
+			wantContains: []string{"You have 9 unread message(s).", "5 of these are archived on delivery", "2 more unread message(s) are not shown"},
 		},
 		{
 			name: "a body-bearing auto-handoff keeps its own line",

@@ -935,6 +935,9 @@ func formatInjectOutput(messages []mail.Message) string {
 	switch {
 	case anyArchived:
 		fmt.Fprintf(&sb, "%d of these are archived on delivery below and will not appear in 'gc mail inbox' afterward.\n\n", archivedCount)
+		if len(shown) < len(messages) {
+			fmt.Fprintf(&sb, "%d more unread message(s) are not shown here; 'gc mail inbox' lists them.\n\n", len(messages)-len(shown))
+		}
 	case len(shown) < len(messages):
 		fmt.Fprintf(&sb, "Showing the %d most recent message(s) here; run 'gc mail inbox' for the full list.\n\n", len(shown))
 	}
@@ -979,7 +982,7 @@ func formatInjectOutput(messages []mail.Message) string {
 		sb.WriteByte('\n')
 	}
 	if anyArchived {
-		sb.WriteString("\nRun 'gc mail read <id>' for full details. Archived messages above no longer appear in 'gc mail inbox'.\n")
+		sb.WriteString("\nRun 'gc mail read <id>' for full details, or 'gc mail inbox' for unread mail not archived above.\n")
 	} else {
 		sb.WriteString("\nRun 'gc mail read <id>' for full details, or 'gc mail inbox' to see all.\n")
 	}

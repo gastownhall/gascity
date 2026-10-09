@@ -525,6 +525,88 @@ func TestSessionStartAutoHandoffInjectionRendersBacklogAsOneLine(t *testing.T) {
 	}
 }
 
+// TestSessionStartAutoHandoffOmittedBodyBearingStayVisible: body-bearing
+// auto-handoffs each cost a window slot, so with more of them than
+// mailInjectMaxMessages some are left out of the SessionStart auto-handoff
+// block. Those must not be in the rendered-ID set (or the ordinary-mail block
+// would dedup them away too), must not be archived after delivery, and must
+// render in the read-only ordinary block without an archive claim.
+func TestSessionStartAutoHandoffOmittedBodyBearingStayVisible(t *testing.T) {
+	clearGCEnv(t)
+	store := beads.NewMemStore()
+	sessionInfo, err := store.Create(beads.Bead{
+		Title:  "gastown--worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"agent_name":   "worker",
+			"session_name": "gastown--worker",
+			"state":        "active",
+			"template":     "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	const total = mailInjectMaxMessages + 1
+	autoIDs := make([]string, 0, total)
+	for i := 0; i < total; i++ {
+		auto, ok := createHandoffMail(store, store, events.Discard, sessionInfo.ID, sessionInfo.ID,
+			[]string{"context cycle", fmt.Sprintf("continue step %d", i)}, "context cycle",
+			[]string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel}, io.Discard)
+		if !ok {
+			t.Fatal("createHandoffMail(auto) failed")
+		}
+		autoIDs = append(autoIDs, auto.ID)
+	}
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_SESSION_ID", sessionInfo.ID)
+
+	injection, ids, _ := sessionStartAutoHandoffInjectionWithStore(store, cityDir, io.Discard)
+	var omitted []string
+	for _, id := range autoIDs {
+		rendered := len(injectedLinesNaming(injection.text, id)) > 0
+		if ids[id] != rendered {
+			t.Errorf("auto-handoff %s: in rendered-ID set = %v, rendered = %v; want equal:\n%s", id, ids[id], rendered, injection.text)
+		}
+		if !rendered {
+			omitted = append(omitted, id)
+		}
+	}
+	if len(ids) != mailInjectMaxMessages || len(omitted) != total-mailInjectMaxMessages {
+		t.Fatalf("rendered %d / omitted %d of %d body-bearing auto-handoffs, want %d / %d:\n%s",
+			len(ids), len(omitted), total, mailInjectMaxMessages, total-mailInjectMaxMessages, injection.text)
+	}
+
+	if injection.afterDelivery == nil {
+		t.Fatal("afterDelivery = nil, want archive acknowledgement")
+	}
+	injection.afterDelivery()
+	for _, id := range omitted {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get omitted auto-handoff %s: %v", id, err)
+		}
+		if b.Status != "open" {
+			t.Errorf("omitted auto-handoff %s status = %q after delivery, want open", id, b.Status)
+		}
+	}
+
+	ordinaryBlock := primeUnreadMailInjectionWithProvider(ids, beadmail.New(store))
+	for _, id := range omitted {
+		if len(injectedLinesNaming(ordinaryBlock, id)) == 0 {
+			t.Errorf("omitted auto-handoff %s appears in neither SessionStart block:\n%s", id, ordinaryBlock)
+		}
+	}
+	if strings.Contains(ordinaryBlock, "archived on delivery") {
+		t.Errorf("read-only ordinary block says archived on delivery:\n%s", ordinaryBlock)
+	}
+}
+
 func TestDoPrimeScopesRigPackFragmentsByCurrentRig(t *testing.T) {
 	clearGCEnv(t)
 

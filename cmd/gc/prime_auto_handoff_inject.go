@@ -183,14 +183,18 @@ func sessionStartAutoHandoffInjectionWithStore(store beads.Store, cityPath strin
 	if len(messages) == 0 {
 		return primeHookContextInjection{}, nil, ordinaryMailProvider
 	}
-	ids := make(map[string]bool, len(messages))
-	for _, m := range messages {
+	// Archive the SAME messages that are rendered, and dedup only those
+	// against the ordinary-mail block: a body-bearing auto-handoff left out of
+	// the window falls through to that read-only block and stays unread.
+	shown := selectMailInjectWindow(messages).allShown()
+	ids := make(map[string]bool, len(shown))
+	for _, m := range shown {
 		ids[m.ID] = true
 	}
 	return primeHookContextInjection{
 		text: formatInjectOutput(messages),
 		afterDelivery: func() {
-			archiveInjectedAutoHandoffMessages(mp, selectMailInjectWindow(messages).allShown(), stderr)
+			archiveInjectedAutoHandoffMessages(mp, shown, stderr)
 		},
 	}, ids, ordinaryMailProvider
 }
