@@ -26,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/cobra"
@@ -311,16 +312,7 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 			if graphStore != store {
 				opts.MemberStores = []beads.Store{store} // residency:allow route-gated work-leg tail for the retry lane's cross-store required-artifact source read; same shape as the drain arm above
 			}
-			sp, err := dispatchControlSessionProvider()
-			if err != nil {
-				return err
-			}
-			opts.RecycleSession = func(subject beads.Bead) error {
-				if strings.TrimSpace(subject.Assignee) == "" {
-					return fmt.Errorf("subject %s missing assignee for pooled retry recycle", subject.ID)
-				}
-				return workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, subject.Assignee)
-			}
+			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, store, cfg)
 		case "retry", "ralph":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
 			// Same cross-store required-artifact source resolution as
@@ -328,16 +320,7 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 			if graphStore != store {
 				opts.MemberStores = []beads.Store{store} // residency:allow route-gated work-leg tail for the retry lane's cross-store required-artifact source read; same shape as the drain arm above
 			}
-			sp, err := dispatchControlSessionProvider()
-			if err != nil {
-				return err
-			}
-			opts.RecycleSession = func(subject beads.Bead) error {
-				if strings.TrimSpace(subject.Assignee) == "" {
-					return fmt.Errorf("subject %s missing assignee for pooled retry recycle", subject.ID)
-				}
-				return workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, subject.Assignee)
-			}
+			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, store, cfg)
 		}
 	}
 
@@ -371,6 +354,47 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 		fmt.Fprintln(stdout) //nolint:errcheck
 	}
 	return nil
+}
+
+// validateDispatchSessionProviderConfig checks, once when a control
+// dispatcher starts, that the city's session provider can be constructed, so a
+// broken [session] config fails the dispatcher at startup with a clear error
+// instead of surfacing only when a retry first recycles a session. It builds the
+// provider from config alone, without the session snapshot the recycle path
+// reads, so it costs no bd call.
+func validateDispatchSessionProviderConfig(cfg *config.City, cityPath string) error {
+	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+	sp, err := newSessionProviderFromContext(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("control dispatcher: session provider config is invalid (retry session recycling would fail): constructing session provider: %w", err)
+	}
+	if sp == nil {
+		return fmt.Errorf("control dispatcher: session provider config is invalid: no provider for %q", ctx.providerName)
+	}
+	return nil
+}
+
+// recycleDispatchSubjectSession returns the RecycleSession hook for a retry
+// lane control. Only a pooled transient retry recycles its subject's session,
+// so the session provider (two bd reads for its session snapshot) is built on
+// the first recycle rather than for every retry, ralph and retry-eval control
+// the dispatcher processes. A provider that cannot be built fails the recycle
+// that needs it, through ProcessControl's error return.
+func recycleDispatchSubjectSession(cityPath string, store beads.Store, cfg *config.City) func(beads.Bead) error {
+	var sp runtime.Provider
+	return func(subject beads.Bead) error {
+		if strings.TrimSpace(subject.Assignee) == "" {
+			return fmt.Errorf("subject %s missing assignee for pooled retry recycle", subject.ID)
+		}
+		if sp == nil {
+			provider, err := dispatchControlSessionProvider()
+			if err != nil {
+				return err
+			}
+			sp = provider
+		}
+		return workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, subject.Assignee)
+	}
 }
 
 // handleControlDispatchError resolves a failed ProcessControl call into the

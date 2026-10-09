@@ -322,6 +322,13 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
 		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
 	}
+	if isWorkflowServeControlDispatcherAgent(agentCfg) {
+		if err := validateDispatchSessionProviderConfig(cfg, cityPath); err != nil {
+			workflowTracef("serve start-error agent=%s err=%v", agentCfg.QualifiedName(), err)
+			fmt.Fprintf(stderr, "gc convoy control --serve: %v\n", err) //nolint:errcheck // the returned error is the outcome
+			return err
+		}
+	}
 	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
 	if !follow {
 		_, err := drainWorkflowServeWork(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
