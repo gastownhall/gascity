@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -164,6 +165,39 @@ func TestPrePushReplaysRefListToBeadsAndSuiteScan(t *testing.T) {
 	}
 	if got := f.read(t, f.makeRuns); !strings.Contains(got, "test-fast-parallel") {
 		t.Fatalf("push-time suite not reached (make invocations = %q); the Go-change scan lost its stdin", got)
+	}
+}
+
+func TestPrePushRunsSuiteForLargeGoDiff(t *testing.T) {
+	f := newPrePushFixture(t)
+	// Exceed a pipe buffer so an early-exiting grep cannot appear safe just
+	// because git managed to finish writing a small list before it exited.
+	for i := 0; i < 1024; i++ {
+		name := fmt.Sprintf("%04d-%s.go", i, strings.Repeat("x", 180))
+		if err := os.WriteFile(filepath.Join(f.repo, name), []byte("package fixture\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.git(t, "add", "-A")
+	f.git(t, "commit", "-q", "--no-verify", "-m", "large Go change")
+	head := f.gitOut(t, "rev-parse", "HEAD")
+	code, out := f.run(t, "refs/heads/main "+head+" refs/heads/main "+f.commitOld+"\n")
+	if code != 0 {
+		t.Fatalf("pre-push exit = %d, want 0\n%s", code, out)
+	}
+	if got := f.read(t, f.makeRuns); !strings.Contains(got, "test-fast-parallel") {
+		t.Fatalf("large Go diff skipped push-time suite: %q\n%s", got, out)
+	}
+}
+
+func TestPrePushFailsWhenGoDiffCannotBeRead(t *testing.T) {
+	f := newPrePushFixture(t)
+	code, out := f.run(t, "refs/heads/main "+f.commitNew+" refs/heads/main "+strings.Repeat("1", 40)+"\n")
+	if code == 0 {
+		t.Fatalf("unreadable Go diff reported a successful push\n%s", out)
+	}
+	if got := f.read(t, f.makeRuns); got != "" {
+		t.Fatalf("push-time suite ran despite an unreadable comparison: %q", got)
 	}
 }
 
