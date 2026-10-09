@@ -74,8 +74,11 @@ type releasedPoolAssignment struct {
 // tears the failed attempt's runtime down before its row may close, and
 // ensurePoolIdentityNotHeldByOpenRow refuses a successor while that row is open.
 func PoolSessionName(template, beadID string) string {
-	base := path.Base(template)
-	return agent.SanitizeQualifiedNameForSession(base) + "-" + beadID
+	return poolSessionStem(template) + "-" + beadID
+}
+
+func poolSessionStem(template string) string {
+	return agent.SanitizeQualifiedNameForSession(path.Base(template))
 }
 
 // poolIdentitySessionName returns the tmux-safe encoding of a pool instance's
