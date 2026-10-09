@@ -22,7 +22,7 @@
     },
     "verdict": {
       "enum": ["BREAKING", "ADDITIVE", "UNCLASSIFIED", "NONE"],
-      "description": "Overall classification of the change from a to b."
+      "description": "Overall classification of the change from a to b: the highest that applies, in precedence order BREAKING > UNCLASSIFIED > ADDITIVE > NONE."
     },
     "exit_code": {
       "enum": [0, 1, 2],
@@ -62,7 +62,7 @@
     },
     "moved_files": {
       "type": "array",
-      "description": "Pack-relative Markdown files whose digest changed, appeared, or disappeared, sorted.",
+      "description": "Pack-relative files whose digest changed, appeared, or disappeared, sorted, leaving out files added or removed together with the PROVIDES value they belong to. Non-empty means the verdict is at least UNCLASSIFIED.",
       "items": {
         "type": "string",
         "description": "One pack-relative file path."

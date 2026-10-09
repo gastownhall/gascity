@@ -20,16 +20,19 @@ computes each pack directory's capability manifest (see "gc pack capability")
 and compares the two. The six properties are PROVIDES, MANDATES, DEMANDS,
 USES, NORMS and OPAQUE.
 
-Verdicts and exit codes:
-  BREAKING      a commitment was removed or changed               exit 2
-  ADDITIVE      a commitment was added and none was removed       exit 0
-  UNCLASSIFIED  prose changed and no computable commitment did    exit 1
-  NONE          the manifests are identical                       exit 0
+Verdicts and exit codes, highest precedence first:
+  BREAKING      a commitment was removed or changed                     exit 2
+  UNCLASSIFIED  a file moved that no computable change accounts for     exit 1
+  ADDITIVE      a commitment was added and every moved file is new      exit 0
+                with an added provider
+  NONE          the manifests are identical                             exit 0
 
-PROVIDES and USES: removal is breaking, addition is additive. MANDATES and
-NORMS: any change is breaking. DEMANDS: addition is breaking, removal is
-additive. A moved OPAQUE digest alone is UNCLASSIFIED, never NONE: read the
-listed files.
+The verdict is the highest that applies: an addition never hides an
+unexplained moved file. PROVIDES and USES: removal is breaking, addition is
+additive. MANDATES and NORMS: any change is breaking. DEMANDS: addition is
+breaking, removal is additive. OPAQUE digests every file in the pack; a moved
+digest is UNCLASSIFIED, never NONE, unless the file was added or removed with
+the agent, command, formula or order it belongs to. Read the listed files.
 
 Errors (a missing directory, an unparseable TOML file) also exit 1; with
 --json they print an ok:false failure payload instead of a verdict.
@@ -57,12 +60,19 @@ func newPackCapabilityCmd(stdout, stderr io.Writer) *cobra.Command {
 The manifest is sorted, one "PROPERTY<TAB>value" line per entry, and depends
 only on the directory's contents:
 
-  PROVIDES  commands, agents and formulas the pack ships
+  PROVIDES  commands, agents, formulas and orders the pack ships, including
+            inline [[agent]] and [[commands]] in pack.toml
   MANDATES  claim and drain-ack commands its prose tells an agent to run
   DEMANDS   reserved gc.* metadata keys and versioned schema ids it requires
   USES      formula constructs it depends on (steps.check, steps.retry, ...)
-  NORMS     must/never/always/do-not lines in role prompts and template fragments
-  OPAQUE    a 12-hex SHA-256 prefix per Markdown file
+            and each file's requires.formula_compiler with its value
+  NORMS     must/never/always/do-not lines in role prompts and template
+            fragments (.md, .template.md and .md.tmpl)
+  OPAQUE    a 12-hex SHA-256 prefix per file, except .git
+
+A symlinked pack directory is resolved first. Inside the pack, a symlink to a
+regular file within the pack is read through; any other symlink is recorded
+by its target string and never followed.
 
 "gc pack diff" compares two manifests.`,
 		Example: `  gc pack capability internal/bootstrap/packs/core
@@ -169,14 +179,14 @@ func writePackDiffHuman(w io.Writer, a, b string, r packcap.Result) {
 		section(string(f.Verdict), f.Caption(), f.Values)
 	}
 	if len(r.MovedFiles) > 0 {
-		section(string(packcap.Unclassified), "prose files whose digest moved", r.MovedFiles)
+		section(string(packcap.Unclassified), "files whose digest moved", r.MovedFiles)
 	}
 	if len(r.Findings) > 0 || len(r.MovedFiles) > 0 {
 		fmt.Fprintln(w) //nolint:errcheck
 	}
 	switch r.Verdict {
 	case packcap.Unclassified:
-		fmt.Fprintf(w, "  VERDICT  %s: prose changed and nothing computable did\n", r.Verdict) //nolint:errcheck
+		fmt.Fprintf(w, "  VERDICT  %s: files moved that nothing computable accounts for\n", r.Verdict) //nolint:errcheck
 	case packcap.None:
 		fmt.Fprintf(w, "  VERDICT  %s: the manifests are identical\n", r.Verdict) //nolint:errcheck
 	default:
@@ -184,9 +194,9 @@ func writePackDiffHuman(w io.Writer, a, b string, r packcap.Result) {
 	}
 	if len(r.MovedFiles) > 0 && r.Verdict != packcap.Breaking {
 		fmt.Fprint(w, `
-  UNCLASSIFIED is not NONE. A prompt rewritten to give different judgment
-  with the same surface lands here, and nothing computable can tell which
-  kind of rewrite it was. Read the listed files.
+  UNCLASSIFIED is not NONE. A prompt or script rewritten to behave
+  differently with the same surface lands here, and nothing computable can
+  tell which kind of rewrite it was. Read the listed files.
 `) //nolint:errcheck
 	}
 }

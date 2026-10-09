@@ -3,19 +3,25 @@ package packcap
 import (
 	"sort"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 // Verdict classifies the difference between two manifests.
 type Verdict string
 
-// The four verdicts, from most to least severe.
+// The four verdicts, in order of precedence: BREAKING > UNCLASSIFIED >
+// ADDITIVE > NONE. The overall verdict is the highest that applies.
 const (
 	// Breaking means a commitment was removed or changed.
 	Breaking Verdict = "BREAKING"
-	// Additive means a commitment was added and none was removed.
-	Additive Verdict = "ADDITIVE"
-	// Unclassified means prose changed and no computable commitment did.
+	// Unclassified means a file moved that no computable change accounts
+	// for, and no commitment was removed or changed.
 	Unclassified Verdict = "UNCLASSIFIED"
+	// Additive means a commitment was added, none was removed or changed,
+	// and every moved file belongs to an added provider.
+	Additive Verdict = "ADDITIVE"
 	// None means the manifests are identical.
 	None Verdict = "NONE"
 )
@@ -76,8 +82,11 @@ type Result struct {
 	Verdict Verdict
 	// Findings are the computable changes, in property order.
 	Findings []Finding
-	// MovedFiles are the prose files whose OPAQUE digest differs, were
-	// added, or were removed, sorted.
+	// MovedFiles are the files whose OPAQUE digest differs, that were
+	// added, or that were removed, sorted, leaving out a file added with an
+	// added PROVIDES value or removed with a removed one (for example
+	// formulas/review.toml with formula:review). Any moved file makes the
+	// verdict at least UNCLASSIFIED.
 	MovedFiles []string
 }
 
@@ -126,8 +135,7 @@ func Diff(a, b Manifest) Result {
 		}
 	}
 
-	removed, added := setDiff(a.Values(Opaque), b.Values(Opaque))
-	r.MovedFiles = opaquePaths(append(removed, added...))
+	r.MovedFiles = movedFiles(a, b)
 
 	r.Verdict = None
 	for _, f := range r.Findings {
@@ -137,10 +145,87 @@ func Diff(a, b Manifest) Result {
 		}
 		r.Verdict = Additive
 	}
-	if r.Verdict == None && len(r.MovedFiles) > 0 {
+	if r.Verdict != Breaking && len(r.MovedFiles) > 0 {
 		r.Verdict = Unclassified
 	}
 	return r
+}
+
+// movedFiles returns the files whose OPAQUE digest moved that no added or
+// removed PROVIDES value accounts for. A file accounts for itself only when
+// it appears or disappears together with the provider it belongs to; a
+// changed file is never accounted for.
+func movedFiles(a, b Manifest) []string {
+	oldDigests, newDigests := opaqueByPath(a.Values(Opaque)), opaqueByPath(b.Values(Opaque))
+	removedProviders, addedProviders := setDiff(a.Values(Provides), b.Values(Provides))
+	accounted := func(path string, providers []string) bool {
+		owners := providerOwners(path)
+		for _, p := range providers {
+			for _, o := range owners {
+				if p == o {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	var out []string
+	for path, d := range oldDigests {
+		nd, ok := newDigests[path]
+		switch {
+		case !ok && accounted(path, removedProviders):
+		case !ok || nd != d:
+			out = append(out, path)
+		}
+	}
+	for path := range newDigests {
+		if _, ok := oldDigests[path]; !ok && !accounted(path, addedProviders) {
+			out = append(out, path)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// providerOwners returns the PROVIDES values a pack-relative file belongs to
+// by the loader's conventions: agents/<name>/..., roles/agents/<name>/...,
+// commands/<words...>/..., formulas/<name>.toml and orders/<name>.toml.
+func providerOwners(path string) []string {
+	parts := strings.Split(path, "/")
+	switch {
+	case len(parts) >= 3 && parts[0] == "agents":
+		return []string{"agent:" + parts[1]}
+	case len(parts) >= 4 && parts[0] == "roles" && parts[1] == "agents":
+		return []string{"agent:" + parts[2]}
+	case len(parts) >= 3 && parts[0] == "commands":
+		var out []string
+		for n := 1; n <= len(parts)-2; n++ {
+			out = append(out, "command:"+strings.Join(parts[1:1+n], " "))
+		}
+		return out
+	case len(parts) == 2 && parts[0] == "formulas":
+		if name, ok := formula.TrimTOMLFilename(parts[1]); ok && name != "" {
+			return []string{"formula:" + name}
+		}
+	case len(parts) == 2 && parts[0] == "orders":
+		if name, ok := orders.TrimFlatOrderFilename(parts[1]); ok && name != "" {
+			return []string{"order:" + name}
+		}
+	}
+	return nil
+}
+
+// opaqueByPath maps each OPAQUE value, "<path> <digest>", to its path and
+// digest.
+func opaqueByPath(values []string) map[string]string {
+	out := make(map[string]string, len(values))
+	for _, v := range values {
+		if i := strings.LastIndexByte(v, ' '); i >= 0 {
+			out[v[:i]] = v[i+1:]
+		}
+	}
+	return out
 }
 
 // setDiff returns the values only in a and the values only in b, sorted.
@@ -164,23 +249,4 @@ func setDiff(a, b []string) (onlyA, onlyB []string) {
 	sort.Strings(onlyA)
 	sort.Strings(onlyB)
 	return onlyA, onlyB
-}
-
-// opaquePaths returns the sorted, distinct file paths of OPAQUE values,
-// which have the form "<path> <digest>".
-func opaquePaths(values []string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, v := range values {
-		path := v
-		if i := strings.LastIndexByte(v, ' '); i >= 0 {
-			path = v[:i]
-		}
-		if !seen[path] {
-			seen[path] = true
-			out = append(out, path)
-		}
-	}
-	sort.Strings(out)
-	return out
 }

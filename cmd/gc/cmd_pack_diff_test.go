@@ -61,6 +61,11 @@ func TestPackDiffExitCodesAndJSON(t *testing.T) {
 		{"formula added", packDiffFilesWith(map[string]string{"formulas/review.toml": "formula = \"review\"\n"}), "ADDITIVE", 0},
 		{"prose reworded", packDiffFilesWith(map[string]string{"template-fragments/report.template.md": "Write a short report, with links.\n"}), "UNCLASSIFIED", 1},
 		{"command removed", packDiffFilesWith(nil, "commands/status/run.sh"), "BREAKING", 2},
+		{"prose reworded alongside an addition", packDiffFilesWith(map[string]string{
+			"formulas/review.toml":                  "formula = \"review\"\n",
+			"template-fragments/report.template.md": "Write a short report, with links.\n",
+		}), "UNCLASSIFIED", 1},
+		{"script changed", packDiffFilesWith(map[string]string{"commands/status/run.sh": "#!/bin/sh\necho changed\n"}), "UNCLASSIFIED", 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -104,6 +109,23 @@ func TestPackDiffBreakingNamesTheMandate(t *testing.T) {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("stdout lacks %q:\n%s", want, stdout.String())
 		}
+	}
+}
+
+// TestPackDiffSymlinkedPackRoot: a pack compared with a symlink to itself is
+// NONE.
+func TestPackDiffSymlinkedPackRoot(t *testing.T) {
+	pack := writePackDiffFixture(t, packDiffBaseFiles())
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(pack, link); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"pack", "diff", pack, link}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code = %d, want 0\n%s%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "VERDICT  NONE") {
+		t.Fatalf("stdout lacks VERDICT  NONE:\n%s", stdout.String())
 	}
 }
 

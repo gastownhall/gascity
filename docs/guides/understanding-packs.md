@@ -420,15 +420,22 @@ gc pack diff "$old/path/to/pack" path/to/pack
 | Verdict | Meaning | Exit |
 |---|---|---|
 | `BREAKING` | a commitment was removed or changed | 2 |
-| `ADDITIVE` | a commitment was added and none was removed | 0 |
-| `UNCLASSIFIED` | prompt prose changed and no computable commitment did | 1 |
+| `UNCLASSIFIED` | a file moved that no computable change accounts for | 1 |
+| `ADDITIVE` | a commitment was added, and every moved file is new with an added provider | 0 |
 | `NONE` | the two surfaces are identical | 0 |
 
-The surface covers the commands, agents and formulas a pack ships, the claim
+The verdict is the highest that applies, in the order of the table. An
+addition never hides an unexplained change: a new formula shipped alongside a
+reworded prompt is `UNCLASSIFIED`.
+
+The surface covers the commands, agents, formulas and orders a pack ships
+(including inline `[[agent]]` and `[[commands]]` in `pack.toml`), the claim
 commands its prompts tell agents to run, the reserved metadata it requires, the
-formula constructs it uses, and every *must*, *never* and *do not* line in its
-role prompts and template fragments. Read the files an `UNCLASSIFIED` verdict
-lists: a rewritten prompt can change an agent's judgment with the same surface.
+formula constructs and `formula_compiler` requirement it uses, every *must*,
+*never* and *do not* line in its role prompts and template fragments
+(`.md`, `.template.md` and `.md.tmpl`), and a digest of every file. Read the
+files an `UNCLASSIFIED` verdict lists: a rewritten prompt or script can change
+behavior with the same surface.
 `gc pack capability <dir>` prints one version's surface, and `--json` makes both
 commands scriptable.
 

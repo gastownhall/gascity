@@ -30,7 +30,7 @@
           },
           "value": {
             "type": "string",
-            "description": "Property value, for example command:status, gc hook --claim, or a pack-relative path and digest."
+            "description": "Property value, for example command:status, order:gate-sweep, gc hook --claim, or a pack-relative path and digest for any file in the pack."
           }
         },
         "additionalProperties": false
