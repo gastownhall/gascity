@@ -337,12 +337,15 @@ func ResolveConditionPath(envelope, base, conditionPath string) (string, error) 
 }
 
 // IsConditionUnlaunchable reports whether err, as returned by
-// ResolveConditionPath, means the declared condition passed every containment
-// check but names nothing that can be executed: the target is missing
-// (including a dangling symlink), is not a regular file, or is not executable.
-// These are repaired out of band (ship the script, chmod it) and never by
-// re-running. Containment refusals (traversal, symlink escape) and argument
-// errors are deliberately not unlaunchable.
+// ResolveConditionPath, means the declared condition names nothing that can be
+// executed: the target is missing (including a dangling symlink), is not a
+// regular file, or is not executable. These are repaired out of band (ship the
+// script, chmod it) and never by re-running. Containment refusals (traversal,
+// symlink escape) and argument errors are deliberately not unlaunchable, with
+// one exception: a dangling symlink whose absent target lies outside
+// containment still reports unlaunchable, because the post-resolution
+// containment check needs a resolved target and a dangling link has none. Once
+// that target exists, the same path is a containment refusal.
 func IsConditionUnlaunchable(err error) bool {
 	return errors.Is(err, fs.ErrNotExist) ||
 		errors.Is(err, ErrConditionNotRegular) ||

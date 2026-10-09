@@ -150,6 +150,42 @@ func TestResolveConditionPathContainmentRefusalsAreNotUnlaunchable(t *testing.T)
 	}
 }
 
+// TestResolveConditionPathDanglingSymlinkOutsideContainment pins the one
+// exception to the containment refusals: a symlink inside the envelope whose
+// absent target lies outside it reports unlaunchable, because the
+// post-resolution containment check needs a resolved target. Once the target
+// exists, the same path is a containment refusal (formula-spec-v2 §3.1).
+func TestResolveConditionPathDanglingSymlinkOutsideContainment(t *testing.T) {
+	root := t.TempDir()
+	city := filepath.Join(root, "city")
+	if err := os.MkdirAll(city, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	outside := filepath.Join(root, "outside.sh")
+	if err := os.Symlink(outside, filepath.Join(city, "escape.sh")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	_, err := ResolveConditionPath(city, city, "escape.sh")
+	if !errors.Is(err, fs.ErrNotExist) || !IsConditionUnlaunchable(err) {
+		t.Fatalf("ResolveConditionPath before the target exists = %v, want an unlaunchable not-exist error", err)
+	}
+
+	if err := os.WriteFile(outside, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err = ResolveConditionPath(city, city, "escape.sh")
+	if err == nil {
+		t.Fatal("ResolveConditionPath after the target exists = nil error, want a containment refusal")
+	}
+	if IsConditionUnlaunchable(err) {
+		t.Fatalf("IsConditionUnlaunchable(%v) = true, want false once the target exists", err)
+	}
+	if !strings.Contains(err.Error(), "symlink target outside containment") {
+		t.Fatalf("error %q, want the symlink containment refusal", err.Error())
+	}
+}
+
 // TestIsConditionUnlaunchableNil pins that the predicate is false for nil and
 // for errors that carry none of the unlaunchable sentinels.
 func TestIsConditionUnlaunchableNil(t *testing.T) {

@@ -790,12 +790,18 @@ normally. If the script is still unlaunchable when the stall budget elapses (15
 minutes by default), the orchestrator emits a single `control.stalled` event
 with `error_class = "pending"` and keeps waiting. It records no `order.failed`.
 A script that is missing because the step's working directory was removed, and
-that exists nowhere else, is held open the same way; restore the directory or
-ship the script under the city or store root.
+that exists nowhere else, is held open the same way. Restoring the directory
+heals it; shipping a copy under the city or store root does not. The script
+always runs inside the step's working directory, so a copy found elsewhere still
+cannot start there. A failed start is not held open: it spends an attempt each
+time, and the step closes failed once its attempts run out.
 
 A `check.path` refused on safety grounds is not in this lane: one that escapes
 the trusted roots, climbs out with `../`, or follows a symlink outside the city
-or store. Such a step is refused and closed failed.
+or store. Such a step is refused and closed failed. A symlink whose target does
+not exist yet is the exception: where it leads is checked only once the target
+exists, so until then it is held open as missing. Once the target appears, a
+target outside the city or store is refused.
 
 ### 3.2. Retry
 

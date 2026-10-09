@@ -309,7 +309,9 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 			// Hold the step OPEN on the drift-pending lane (dependents stay
 			// blocked, gc.control_pending_* explains it, control.stalled fires once
 			// after the budget); shipping or chmod-ing the script heals it on the
-			// next sweep (gastownhall/gascity#4239).
+			// next sweep (gastownhall/gascity#4239). A removed work_dir heals only
+			// when it is restored: RunCondition runs the check inside it, so a
+			// store-root copy found by the fallback above cannot start.
 			return convergence.GateResult{}, fmt.Errorf("%w: %s: resolving check path: %w (the step stays open until the check script can be launched)", ErrControlDriftPending, bead.ID, err)
 		}
 		return convergence.GateResult{}, fmt.Errorf("%s: resolving check path: %w", bead.ID, err)

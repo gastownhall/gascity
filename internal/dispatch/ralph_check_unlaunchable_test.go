@@ -392,6 +392,39 @@ func TestProcessRalphControlNonExecutableCheckRecoversAfterChmod(t *testing.T) {
 	}
 }
 
+// TestProcessRalphControlRemovedWorkDirStoreCopyIsNotHeld pins the limit of
+// the hold for a removed gc.work_dir (formula-spec-v2 §3.1): a copy of the
+// script shipped under the store root resolves through the #3008 fallback but
+// cannot start, because the check runs inside the removed directory. That
+// failed start is not held open: it spends the attempt and the step closes
+// failed.
+func TestProcessRalphControlRemovedWorkDirStoreCopyIsNotHeld(t *testing.T) {
+	t.Parallel()
+	cityPath := t.TempDir()
+	checkPath := ".gc/scripts/checks/verify.sh"
+	writeExecutableScript(t, filepath.Join(cityPath, checkPath), "#!/bin/sh\nexit 0\n")
+	store, control := newUnlaunchableCheckRalphControl(t, checkPath)
+	workDir := filepath.Join(cityPath, "worktrees", "removed")
+	if err := store.SetMetadata(control.ID, beadmeta.WorkDirMetadataKey, workDir); err != nil {
+		t.Fatalf("set work_dir: %v", err)
+	}
+
+	result, err := ProcessControl(store, mustGet(t, store, control.ID), ProcessOptions{CityPath: cityPath})
+	if err != nil {
+		t.Fatalf("ProcessControl error = %v, want the failed start graded, not held open", err)
+	}
+	if result.Action != "fail" {
+		t.Fatalf("result = %+v, want fail", result)
+	}
+	got := mustGet(t, store, control.ID)
+	if got.Status != "closed" || got.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+		t.Fatalf("control status=%q outcome=%q, want closed fail", got.Status, got.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	if log := got.Metadata[beadmeta.AttemptLogMetadataKey]; !strings.Contains(log, "chdir") {
+		t.Fatalf("gc.attempt_log = %q, want the failed start inside the removed work_dir", log)
+	}
+}
+
 // TestProcessRalphCheckUnlaunchableScriptStaysOpen covers the legacy
 // kind=check lane: a missing script holds the check and its logical bead open,
 // spends no infrastructure budget, and clones no next attempt.
