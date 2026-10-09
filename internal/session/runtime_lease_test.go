@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -157,7 +160,7 @@ func TestRuntimeLeaseExcludesSharersAndKeepsTheEpoch(t *testing.T) {
 	}
 	m := f.meta(t)
 	if !strings.HasPrefix(m[RuntimeLeaseHolderKey], "host-a/") || m[RuntimeLeaseEpochKey] != "1" || m[RuntimeLeaseTTLKey] != "240" ||
-		(runtimeLeaseBootID() != "" && m[RuntimeLeaseFlockKey] != runtimeLeaseFlockIdentity(first.lock)) {
+		(runtimeLeaseBootID() != "" && m[RuntimeLeaseFlockKey] != lockFileIdentity(t, first)) {
 		t.Fatalf("record = %v", m)
 	}
 	_, err = TryRuntimeLease(f.front, f.req(city, leaseT0))
@@ -207,6 +210,7 @@ func TestRuntimeLeaseRefusesBadRequests(t *testing.T) {
 		req  RuntimeLeaseRequest
 	}{
 		{"zero TTL", f.front, f.reqTTL(city, leaseT0, 0)},
+		{"TTL below the margin", f.front, f.reqTTL(city, leaseT0, RuntimeLeaseMargin-time.Second)},
 		{"negative TTL", f.front, f.reqTTL(city, leaseT0, -time.Second)},
 		{"no store", nil, f.req(city, leaseT0)},
 		{"another runtime's name", f.front, RuntimeLeaseRequest{City: city, Name: "s-other", ID: f.id, TTL: leaseTTL}},
@@ -355,7 +359,7 @@ func TestRuntimeLeaseTakesOverADeadSharer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	flock := runtimeLeaseFlockIdentity(probe.lock)
+	flock := lockFileIdentity(t, probe)
 	probe.Release()
 	dead := func(flock string) MetadataPatch {
 		return MetadataPatch{
@@ -371,11 +375,39 @@ func TestRuntimeLeaseTakesOverADeadSharer(t *testing.T) {
 	if err != nil || l.Epoch() != 7 {
 		t.Fatalf("takeover: %v, %v; want epoch 7", err, l)
 	}
+	flock = lockFileIdentity(t, l)
 	l.Release()
-	f.write(t, dead(""))
-	if _, err := TryRuntimeLease(f.front, f.req(city, leaseT0)); !errors.Is(err, ErrRuntimeLeaseBusy) {
-		t.Fatalf("a record without a flock identity = %v, want busy until expiry", err)
+	boot, rest, _ := strings.Cut(flock, "/")
+	dev, rest, _ := strings.Cut(rest, "/")
+	ino, token, _ := strings.Cut(rest, "/")
+	for _, c := range []struct{ name, flock string }{
+		{"no flock identity", ""},
+		{"our device and inode under another boot", "another-boot/" + rest},
+		{"another device", boot + "/1" + dev + "/" + ino + "/" + token},
+		{"another holder's token (a kernel cloned before it)", boot + "/" + dev + "/" + ino + "/0123"},
+		{"no token", boot + "/" + dev + "/" + ino + "/"},
+	} {
+		f.write(t, dead(c.flock))
+		// The lock file as an older binary leaves it: no token line.
+		if err := os.WriteFile(l.lock.Name(), []byte("pid 1 (gc), since then\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := TryRuntimeLease(f.front, f.req(city, leaseT0)); !errors.Is(err, ErrRuntimeLeaseBusy) {
+			t.Errorf("a record with %s = %v, want busy until expiry", c.name, err)
+		}
 	}
+}
+
+// lockFileIdentity is the identity l's acquire recorded: the boot ID, the
+// lock file's device and inode as stat reports them, and l's token.
+func lockFileIdentity(t *testing.T, l *RuntimeLease) string {
+	t.Helper()
+	fi, err := l.lock.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := fi.Sys().(*syscall.Stat_t)
+	return fmt.Sprintf("%s/%d/%d/%s", runtimeLeaseBootID(), st.Dev, st.Ino, l.token)
 }
 
 // TestRuntimeLeaseTakesAMalformedRecordLoudly: a malformed record is taken,
@@ -429,6 +461,7 @@ func TestRuntimeLeaseWait(t *testing.T) {
 // TestRuntimeLeaseWatch: Watch needs a positive interval, ends at SafeUntil
 // and at Release with their causes, and a failed read cancels nothing.
 func TestRuntimeLeaseWatch(t *testing.T) {
+	lowerRuntimeLeaseMinTTL(t)
 	backing := openLeaseStore(t, t.TempDir())
 	store := &failingReadStore{rowWriteRecorder: &rowWriteRecorder{Store: backing}}
 	f := leaseFixtureOver(t, store)
@@ -631,4 +664,151 @@ func TestRuntimeLeaseReadsPastTheCache(t *testing.T) {
 	if _, err := stale.UpdateMetadataFenced(3, func(Info, PersistedResponse) MetadataPatch { return MetadataPatch{"state": "awake"} }); !errors.Is(err, ErrRuntimeLeaseLost) {
 		t.Fatalf("stale write through the cache = %v, want ErrRuntimeLeaseLost", err)
 	}
+}
+
+// lowerRuntimeLeaseMinTTL lets the test take leases shorter than the margin.
+func lowerRuntimeLeaseMinTTL(t *testing.T) {
+	t.Helper()
+	prev := runtimeLeaseMinTTL
+	runtimeLeaseMinTTL = time.Second
+	t.Cleanup(func() { runtimeLeaseMinTTL = prev })
+}
+
+// closeHookStore runs hook once, at the next Close, before closing: a
+// contender acting between a close's metadata write and its status flip.
+type closeHookStore struct {
+	beads.Store
+	hook func()
+}
+
+func (s *closeHookStore) Close(id string) error {
+	if hook := s.hook; hook != nil {
+		s.hook = nil
+		hook()
+	}
+	return s.Store.Close(id)
+}
+
+// TestRuntimeLeaseAcrossANonAtomicClose: on a store with no atomic close the
+// lease is not freed before the row closes, a closed row is lost to its
+// holder, and a reopen hands it to nobody.
+func TestRuntimeLeaseAcrossANonAtomicClose(t *testing.T) {
+	store := &closeHookStore{Store: beads.NewMemStore()}
+	f := leaseFixtureOver(t, store)
+	held, err := TryRuntimeLease(f.front, f.req(t.TempDir(), leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	watched, cancel, err := held.Watch(context.Background(), 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	city := t.TempDir()
+	store.hook = func() {
+		if _, err := TryRuntimeLease(f.front, f.req(city, leaseT0)); !errors.Is(err, ErrRuntimeLeaseBusy) {
+			t.Errorf("a contender between the close's write and its status flip = %v, want busy", err)
+		}
+	}
+	expected, err := f.front.Get(f.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed, err := f.front.Close(expected, "drained", leaseT0); !closed || err != nil {
+		t.Fatalf("Close = %v, %v", closed, err)
+	}
+	if _, err := TryRuntimeLease(f.front, f.req(city, leaseT0)); !errors.Is(err, ErrRuntimeLeaseRowClosed) {
+		t.Fatalf("a contender after the close = %v, want ErrRuntimeLeaseRowClosed", err)
+	}
+	if _, err := held.UpdateMetadataFenced(3, func(Info, PersistedResponse) MetadataPatch { return MetadataPatch{"state": "awake"} }); !errors.Is(err, ErrRuntimeLeaseLost) {
+		t.Fatalf("the holder's write to its closed row = %v, want ErrRuntimeLeaseLost", err)
+	}
+	select {
+	case <-watched.Done():
+		if !errors.Is(context.Cause(watched), ErrRuntimeLeaseLost) {
+			t.Fatalf("Watch ended with %v, want ErrRuntimeLeaseLost", context.Cause(watched))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Watch kept a closed row's lease")
+	}
+	if err := f.front.SetStatusOpen(f.id); err != nil {
+		t.Fatal(err)
+	}
+	if m := f.meta(t); m[RuntimeLeaseHolderKey] != "" || m[RuntimeLeaseEpochKey] != "1" {
+		t.Fatalf("reopened row = %v, want no holder and epoch 1", m)
+	}
+	if _, err := held.UpdateMetadataFenced(3, func(Info, PersistedResponse) MetadataPatch { return MetadataPatch{"state": "awake"} }); !errors.Is(err, ErrRuntimeLeaseLost) {
+		t.Fatalf("the old holder's write after the reopen = %v, want ErrRuntimeLeaseLost", err)
+	}
+	l, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil || l.Epoch() != 2 {
+		t.Fatalf("a contender after the reopen: %v, %v", err, l)
+	}
+	l.Release()
+	held.Release()
+}
+
+// TestRuntimeLeaseAfterRelease: a released lease writes nothing, and Watch on
+// it is dead from the start.
+func TestRuntimeLeaseAfterRelease(t *testing.T) {
+	f := newLeaseFixture(t)
+	l, err := TryRuntimeLease(f.front, f.req(t.TempDir(), leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Release()
+	if wrote, err := l.UpdateMetadataFenced(3, func(Info, PersistedResponse) MetadataPatch { return MetadataPatch{"state": "awake"} }); wrote || !errors.Is(err, ErrRuntimeLeaseAfterRelease) {
+		t.Fatalf("write after release = %v, %v; want ErrRuntimeLeaseAfterRelease", wrote, err)
+	}
+	ctx, cancel, err := l.Watch(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	if !errors.Is(context.Cause(ctx), ErrRuntimeLeaseReleased) {
+		t.Fatalf("Watch after release = %v, want dead with ErrRuntimeLeaseReleased", context.Cause(ctx))
+	}
+}
+
+// TestRuntimeLeaseOnAMalformedName: a row whose name is not a valid session
+// name is still leased by its own name, so its cleanup is not blocked.
+func TestRuntimeLeaseOnAMalformedName(t *testing.T) {
+	store := openLeaseStore(t, t.TempDir())
+	created := seedPatchFenceSession(t, store, "bad name:1")
+	front := NewStore(beads.SessionStore{Store: store})
+	l, err := TryRuntimeLease(front, RuntimeLeaseRequest{City: t.TempDir(), Name: "bad name:1", ID: created.ID, TTL: leaseTTL})
+	if err != nil {
+		t.Fatalf("leasing a malformed-name row by its name: %v", err)
+	}
+	l.Release()
+}
+
+// TestFencedWriteReportsNothingWrittenOnError: a failed unconditional write
+// reports wrote=false.
+func TestFencedWriteReportsNothingWrittenOnError(t *testing.T) {
+	store := &failingWriteStore{Store: beads.NewMemStore()}
+	f := leaseFixtureOver(t, store)
+	l, err := TryRuntimeLease(f.front, f.req(t.TempDir(), leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Release()
+	store.fail = true
+	if wrote, err := l.UpdateMetadataFenced(3, func(Info, PersistedResponse) MetadataPatch { return MetadataPatch{"state": "awake"} }); wrote || err == nil {
+		t.Fatalf("failed write = %v, %v; want false and the error", wrote, err)
+	}
+	store.fail = false
+}
+
+// failingWriteStore fails metadata writes while fail is set.
+type failingWriteStore struct {
+	beads.Store
+	fail bool
+}
+
+func (s *failingWriteStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if s.fail {
+		return errors.New("disk full")
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
 }

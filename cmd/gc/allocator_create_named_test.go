@@ -172,6 +172,17 @@ func newNamedHarness(t *testing.T, cityPath string, edit func(*createEffectHost)
 
 // namedComparableRows reads every session row, open or closed, with the IDs,
 // timestamps and per-create random values blanked (P3-6b §4).
+// dropRuntimeLeaseClear drops the runtime lease record's cleared keys, which
+// every reopen writes since L1 (SESSION-RUNTIME-012) and the frozen copies
+// predate.
+func dropRuntimeLeaseClear(meta map[string]string) {
+	for k, v := range meta {
+		if strings.HasPrefix(k, "runtime_lease_") && v == "" {
+			delete(meta, k)
+		}
+	}
+}
+
 func namedComparableRows(t *testing.T, store beads.Store) []beads.Bead {
 	t.Helper()
 	rows, err := store.ListByLabel(sessionBeadLabel, 0, beads.IncludeClosed)
@@ -180,6 +191,7 @@ func namedComparableRows(t *testing.T, store beads.Store) []beads.Bead {
 	}
 	for i := range rows {
 		rows[i].ID, rows[i].CreatedAt, rows[i].UpdatedAt = "", time.Time{}, time.Time{}
+		dropRuntimeLeaseClear(rows[i].Metadata)
 		for _, key := range []string{"instance_token", "session_key", "synced_at", "pending_create_started_at", startupKickoffStartedAtKey} {
 			if rows[i].Metadata[key] != "" {
 				rows[i].Metadata[key] = "<" + key + ">"
@@ -1379,6 +1391,7 @@ func TestSyncSessionBeadsNamedArmMatchesPreRefactor(t *testing.T) {
 				sn := config.NamedSessionRuntimeName("test-city", cfg.Workspace, "mayor")
 				b, gotSN, ok := reopen(w.dir, store, cfg, "test-city", "mayor", sn, tc.state, namedEffectNow, startupKickoffReopenMetadata(tc.bound, namedEffectNow), &w.stderr)
 				b.CreatedAt, b.UpdatedAt = time.Time{}, time.Time{}
+				dropRuntimeLeaseClear(b.Metadata)
 				return w, b, gotSN, ok
 			}
 			before, bb, bsn, bok := run(reopenClosedConfiguredNamedSessionBeadPreRefactor)

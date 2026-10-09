@@ -33,6 +33,7 @@ func TestRuntimeLeaseHelperProcess(t *testing.T) {
 	}
 	store := openLeaseStore(t, os.Getenv("GC_TEST_LEASE_STORE"))
 	ttl, _ := time.ParseDuration(os.Getenv("GC_TEST_LEASE_TTL"))
+	runtimeLeaseMinTTL = time.Second
 	l, err := TryRuntimeLease(NewStore(beads.SessionStore{Store: store}), RuntimeLeaseRequest{
 		City: os.Getenv("GC_TEST_LEASE_CITY"), Name: "s-lease", ID: os.Getenv("GC_TEST_LEASE_ID"), TTL: ttl,
 	})

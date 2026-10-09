@@ -1557,6 +1557,7 @@ go_test(
         "runtime_inventory_lane_test.go",
         "runtime_inventory_ondeath_test.go",
         "runtime_inventory_view_test.go",
+        "runtime_lease_reopen_test.go",
         "runtime_observation_cache_test.go",
         "runtime_registry_test.go",
         "runtime_token_fence_test.go",
