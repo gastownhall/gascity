@@ -469,11 +469,16 @@ func TestRunManagedDoltScopeWatchdogUsage(t *testing.T) {
 func TestFinishManagedDoltScopeWatchdogTerminationReturnsOnError(t *testing.T) {
 	done := make(chan error)
 	var log bytes.Buffer
-	start := time.Now()
-	if code := finishManagedDoltScopeWatchdogTermination(done, errors.New("lock ownership unavailable"), &log, 4242); code != 1 {
-		t.Fatalf("exit = %d, want 1", code)
-	}
-	if time.Since(start) > time.Second {
+	result := make(chan int, 1)
+	go func() {
+		result <- finishManagedDoltScopeWatchdogTermination(done, errors.New("lock ownership unavailable"), &log, 4242)
+	}()
+	select {
+	case code := <-result:
+		if code != 1 {
+			t.Fatalf("exit = %d, want 1", code)
+		}
+	case <-time.After(2 * time.Second):
 		t.Fatal("termination error blocked waiting for a child that may never exit")
 	}
 	if got := log.String(); !strings.Contains(got, "lock ownership unavailable") || !strings.Contains(got, "4242") {

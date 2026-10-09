@@ -9,10 +9,13 @@ import (
 	"strings"
 )
 
-// managedDoltLsofLockHolders lists every process with lockPath open. Combined
-// with the caller's successful conflicting-flock probe, a sole open target is
-// the sole possible holder: an flock holder must retain an open descriptor.
-// Any lsof failure remains indeterminate and therefore fails closed.
+// managedDoltLsofLockHolders lists every process with lockPath open. The
+// listing is complete only for processes lsof can inspect (those running as
+// gc's uid, or every process when gc runs as root); -w suppresses the warning
+// for the rest. Combined with the caller's successful conflicting-flock probe,
+// a sole open target is then the sole possible holder: an flock holder must
+// retain an open descriptor. Any lsof failure remains indeterminate and
+// therefore fails closed.
 var managedDoltLsofLockHolders = func(lockPath string) ([]byte, error) {
 	return lsofOutput("-w", "-F0p", lockPath)
 }
@@ -20,7 +23,7 @@ var managedDoltLsofLockHolders = func(lockPath string) ([]byte, error) {
 // managedDoltLockHolderPIDs resolves flock ownership on Darwin through lsof.
 // Darwin has no /proc/locks, but lsof can enumerate every PID with the lock
 // file open. The generic gate has already proved the file is flock-held; it
-// permits SIGKILL only when this complete listing contains the target alone.
+// permits SIGKILL only when this listing contains the target alone.
 func managedDoltLockHolderPIDs(lockPath, _ string) ([]int, error) {
 	out, err := managedDoltLsofLockHolders(lockPath)
 	if err != nil {
