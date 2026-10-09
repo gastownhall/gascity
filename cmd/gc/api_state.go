@@ -78,10 +78,7 @@ type controllerState struct {
 	// reconcile from the next tick on, with no reload: any bd read restarts
 	// the rig's retired proxy.
 	suspendedRigs atomic.Pointer[map[string]bool]
-	// onDeathGate is the city runtime's on_death start interlock, set when
-	// its inventory lane starts; nil holds nothing.
-	onDeathGate atomic.Pointer[onDeathGate]
-	cfg         *config.City
+	cfg           *config.City
 	// rawCfg is the raw (pre-expansion, site-bound) config snapshot captured
 	// at the same generation as cfg. It is the basis the mutation gate uses
 	// (Editor.UpdateAgent → AgentOrigin), cached here so provenance reads
@@ -1819,14 +1816,6 @@ func (cs *controllerState) IsQuarantined(sessionName string) bool {
 	}
 	return ct.isQuarantined(sessionName, time.Now())
 }
-
-// OnDeathHookPending reports whether sessionName's on_death hook is queued
-// or running, so an API start must leave it to the reconciler.
-func (cs *controllerState) OnDeathHookPending(sessionName string) bool {
-	return cs.onDeathGate.Load().Pending(sessionName)
-}
-
-var _ api.OnDeathHookGate = (*controllerState)(nil)
 
 // ClearCrashHistory removes in-memory crash tracking for a session.
 func (cs *controllerState) ClearCrashHistory(sessionName string) {

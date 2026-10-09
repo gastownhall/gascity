@@ -39,7 +39,7 @@ var effectBannedMethods = []string{
 	"RollbackPendingCreateAtomically", "CloseWithMetadataIfMatch",
 	"Create", "Update", "Close", "Reopen", "CloseAll", "Delete", "Tx", "DepAdd", "DepRemove",
 	"CommitStartedIfCurrent",
-	"WakeSession", "CreateSession", "CreateSessionInfo", "SaveStartupHealthEpisode",
+	"WakeSession", "RequestWakeUnlessHeld", "CreateSession", "CreateSessionInfo", "SaveStartupHealthEpisode",
 	"CreateWait", "CancelWait", "CancelWaits", "ExpireWait", "FailWait", "CloseWaitFromNudge", "FailWaitFromNudge",
 	"MarkWaitReady", "MarkWaitReadyForRedelivery", "SetWaitNudgeID", "RetryClosedWait", "ReassignWaits",
 	"StopUnattendedSession", "StopForCleanup",
