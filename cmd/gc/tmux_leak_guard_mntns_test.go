@@ -22,15 +22,17 @@ import (
 // with TMUX_TMPDIR=root created inside that private /tmp. With removeRoot the
 // script deletes root after the server starts, leaving a live server whose
 // root is gone in its own namespace. It returns the server's PID and skips
-// when bwrap cannot build the namespace on this host.
+// when bwrap cannot build the namespace on this host. Every command runs
+// through runGCBeadsBdCommand, the package's one shared command construction,
+// so this file adds no call site to the subprocess census.
 func startTmuxServerInPrivateTmp(t *testing.T, root string, removeRoot bool) int {
 	t.Helper()
 	tmuxtest.RequireTmux(t)
 	if _, err := exec.LookPath("bwrap"); err != nil {
 		t.Skip("bwrap not installed; cannot build a private-/tmp mount namespace")
 	}
-	if out, err := exec.Command("bwrap", "--dev-bind", "/", "/", "--tmpfs", "/tmp", "--", "true").CombinedOutput(); err != nil {
-		t.Skipf("bwrap cannot create a mount namespace on this host: %v: %s", err, out)
+	if _, stderr, err := runGCBeadsBdCommand(t, os.Environ(), "bwrap", "--dev-bind", "/", "/", "--tmpfs", "/tmp", "--", "true"); err != nil {
+		t.Skipf("bwrap cannot create a mount namespace on this host: %v: %s", err, stderr)
 	}
 	remove := "0"
 	if removeRoot {
@@ -41,15 +43,12 @@ mkdir -p "$TMUX_TMPDIR"
 tmux -L mntns new-session -d -s victim 'sleep 120'
 tmux -L mntns display-message -p -t victim '#{pid}'
 if [ "$GC_TEST_REMOVE_ROOT" = 1 ]; then rm -rf "$TMUX_TMPDIR"; fi`
-	cmd := exec.Command("bwrap", "--dev-bind", "/", "/", "--tmpfs", "/tmp", "--", "sh", "-c", script)
-	cmd.Env = append(os.Environ(), "TMUX_TMPDIR="+root, "GC_TEST_REMOVE_ROOT="+remove)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	env := append(os.Environ(), "TMUX_TMPDIR="+root, "GC_TEST_REMOVE_ROOT="+remove)
+	out, stderr, err := runGCBeadsBdCommand(t, env, "bwrap", "--dev-bind", "/", "/", "--tmpfs", "/tmp", "--", "sh", "-c", script)
 	if err != nil {
-		t.Fatalf("start tmux server in a private /tmp: %v: %s", err, stderr.String())
+		t.Fatalf("start tmux server in a private /tmp: %v: %s", err, stderr)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	pid, err := strconv.Atoi(strings.TrimSpace(out))
 	if err != nil || pid <= 0 {
 		t.Fatalf("bad tmux server pid %q: %v", out, err)
 	}
@@ -115,9 +114,15 @@ func TestSocketRootGoneInOwnMountNamespace(t *testing.T) {
 		t.Skip("host has no /proc")
 	}
 	present := t.TempDir()
-	exited := exec.Command("true")
-	if err := exited.Run(); err != nil {
-		t.Fatalf("run true: %v", err)
+	// A shell that prints its own PID and exits: Run has reaped it by the time
+	// the PID comes back, so it names a process that is gone.
+	out, _, err := runGCBeadsBdCommand(t, os.Environ(), "sh", "-c", "echo $$")
+	if err != nil {
+		t.Fatalf("run sh: %v", err)
+	}
+	exitedPID, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil || exitedPID <= 0 {
+		t.Fatalf("bad exited pid %q: %v", out, err)
 	}
 	for _, tc := range []struct {
 		name string
@@ -128,7 +133,7 @@ func TestSocketRootGoneInOwnMountNamespace(t *testing.T) {
 		{"root present", os.Getpid(), present, false},
 		{"root missing", os.Getpid(), filepath.Join(present, "missing"), true},
 		{"relative root", os.Getpid(), "missing/tmux", false},
-		{"process gone", exited.Process.Pid, filepath.Join(present, "missing"), false},
+		{"process gone", exitedPID, filepath.Join(present, "missing"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := socketRootGoneInOwnMountNamespace(tc.pid, tc.root); got != tc.want {
