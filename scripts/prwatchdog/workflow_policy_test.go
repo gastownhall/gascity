@@ -170,6 +170,38 @@ func TestWatchdogWorkflow_CheckoutIsTrustedBaseOnlyOrAbsent(t *testing.T) {
 	}
 }
 
+// TestWatchdogWorkflow_RunsNoLocalActions keeps every step off repo-local
+// actions. Under pull_request_target GitHub reads this workflow from the
+// default branch's tip, but the checkout is the PR's recorded base SHA. That
+// SHA can be weeks older: a plain push to the head does not refresh it, a
+// pinned deploy/*-gate head never moves, and a stacked PR's base is another
+// branch. A `uses: ./...` step resolves against that older tree, so an action
+// added after the base fails the job before the watchdog runs ("Can't find
+// 'action.yml'").
+func TestWatchdogWorkflow_RunsNoLocalActions(t *testing.T) {
+	doc := loadWatchdogWorkflow(t)
+	jobs, _ := doc["jobs"].(map[string]any)
+	for jobName, raw := range jobs {
+		job, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		steps, ok := job["steps"].([]any)
+		if !ok {
+			continue
+		}
+		for i, rawStep := range steps {
+			step, ok := rawStep.(map[string]any)
+			if !ok {
+				continue
+			}
+			if uses, _ := step["uses"].(string); strings.HasPrefix(uses, "./") {
+				t.Errorf("job %q step %d uses local action %q; the PR's base SHA it would resolve against can predate it", jobName, i, uses)
+			}
+		}
+	}
+}
+
 func TestWatchdogWorkflow_InvokesTheWatchdogProgram(t *testing.T) {
 	doc := loadWatchdogWorkflow(t)
 	body, err := yaml.Marshal(doc)

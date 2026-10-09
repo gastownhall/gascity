@@ -48,6 +48,11 @@ var goModDownloadExemptWorkflows = map[string]string{
 	"review-formulas.yml": "Bazel fetches modules via go_deps",
 	// Installs gocyclo with `go install pkg@version`; never builds this module.
 	"complexity.yml": "go install of a pinned tool only",
+	// pull_request_target: GitHub reads it from the default branch's tip but
+	// it checks out the PR's recorded base SHA, which can predate the action
+	// (TestWatchdogWorkflow_RunsNoLocalActions in scripts/prwatchdog). The
+	// watchdog it runs imports only the standard library.
+	"pr-evidence-watchdog.yml": "checks out the PR's base SHA, which can predate the action; stdlib-only watchdog",
 	// Publishing jobs are not migrated: they keep actions/setup-go's own
 	// cache (its default), which restores GOMODCACHE from setup-go-* entries,
 	// so they never read the go-mod-download cache this action writes.

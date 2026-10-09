@@ -39,7 +39,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - uses: ./.github/actions/go-mod-download
+      # No `uses: ./...` step here, go-mod-download included: GitHub reads
+      # this workflow from the default branch's tip, but the checkout above is
+      # the PR's recorded base SHA, which can predate any local action
+      # (TestWatchdogWorkflow_RunsNoLocalActions). The watchdog imports only
+      # the standard library, so `go run` fetches no modules.
       - name: Observe required CI evidence for the PR head commit
         env:
           GH_TOKEN: ${{ github.token }}
