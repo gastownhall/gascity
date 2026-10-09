@@ -687,6 +687,36 @@ func closePremiseHolds(decided, open Info) bool {
 		decided.InstanceToken == open.InstanceToken
 }
 
+// CloseWithMetadataIfMatch reads id's row, asks decide for its terminal
+// patch, and closes the row with it in one atomic conditional close at the
+// read's revision: one attempt, no retry and no re-decide, so the caller
+// (the v2 effect transaction) owns every retry. A lost fence returns
+// (false, nil). decide returning false, or a row already closed, writes
+// nothing. Without an atomic conditional closer it returns
+// beads.ErrConditionalWriteUnsupported and writes nothing: there is no
+// two-write fallback.
+func (s *Store) CloseWithMetadataIfMatch(id string, decide func(Info, PersistedResponse) (MetadataPatch, bool)) (bool, error) {
+	closer, ok := beads.AtomicConditionalCloserFor(s.store)
+	if !ok {
+		return false, fmt.Errorf("closing session %q: %w", id, beads.ErrConditionalWriteUnsupported)
+	}
+	bead, err := s.validatedBead(id)
+	if err != nil || bead.Status == "closed" {
+		return false, err
+	}
+	patch, ok := decide(infoFromPersistedBead(bead), PersistedResponseFromBead(bead))
+	if !ok {
+		return false, nil
+	}
+	switch _, err = closer.CloseWithMetadataIfMatch(id, bead.Revision, map[string]string(patch)); {
+	case err == nil:
+		return true, nil
+	case beads.IsPreconditionFailed(err):
+		return false, nil
+	}
+	return false, fmt.Errorf("closing session %q: %w", id, err)
+}
+
 // closeAtomically runs Close's fenced single-write arm, starting from the
 // observed open row. The observed revision is passed through as-is, including
 // 0: whether a token is usable is the store's call (a fresh SQLite row fences

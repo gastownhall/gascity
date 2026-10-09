@@ -238,6 +238,9 @@ const (
 	// landed, open, creating, active or awake, and still carrying the token
 	// that write set; holds do not veto it.
 	premiseOwnToken
+	// premiseClose: a close section (txStep.Terminal). The default premise, and
+	// no kill fence; a row already closed is a no-op that ends the effect.
+	premiseClose
 )
 
 // section is one span of an effect under the row's session mutation lock,
@@ -319,14 +322,15 @@ type txFence struct {
 // otherwise a no-op with Cause. Without Done, the section's Call and the
 // next section run. Pass is what the section's Call takes.
 type txStep struct {
-	Write  session.MetadataPatch
-	Refuse string
-	Fail   string
-	Err    error
-	Done   bool
-	Cause  string
-	Facts  effectFacts
-	Pass   any
+	Write    session.MetadataPatch
+	Terminal session.MetadataPatch // a premiseClose section's close, with this terminal patch; never with Write
+	Refuse   string
+	Fail     string
+	Err      error
+	Done     bool
+	Cause    string
+	Facts    effectFacts
+	Pass     any
 }
 
 // effectFacts are what an effect learned or did besides its outcome, merged
@@ -352,6 +356,7 @@ const (
 	causeAroundRun = "around-run" // an around ran its effect twice
 	causeInjected  = "injected"   // a seam failed the effect (tests, staging)
 	causeCallError = "call-error" // the last section's provider call failed
+	causeStep      = "step"       // a verdict its section's rule forbids (a Terminal outside premiseClose, a Write in one)
 )
 
 // errInjected wraps a seam's error.
@@ -472,6 +477,9 @@ func (t *tx) run(ctx context.Context, sections []section) settlement {
 
 // section runs sec's attempts; end ends the effect with the settlement.
 func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) {
+	if sec.Premise == premiseClose {
+		return t.closeSection(ctx, sec)
+	}
 	for attempt := range cmp.Or(t.needs.Attempts, 3) {
 		t.c.attempt = attempt + 1
 		if s, ok := t.read(ctx, sec); !ok {
@@ -510,6 +518,57 @@ func (t *tx) section(ctx context.Context, sec section) (_ settlement, end bool) 
 			return t.done(step), step.Done
 		}
 		// The CAS lost to another writer: read again and decide again.
+	}
+	return refused(causeCAS), true
+}
+
+// closeSection runs a close section's attempts: each reads, decides, and
+// closes once at the read's revision (closeRow). A landed close ends the
+// effect, as a row already closed does (a no-op); a lost fence decides
+// again.
+func (t *tx) closeSection(ctx context.Context, sec section) (settlement, bool) {
+	for attempt := range cmp.Or(t.needs.Attempts, 3) {
+		t.c.attempt = attempt + 1
+		if s, ok := t.read(ctx, sec); !ok {
+			return s, true
+		}
+		var step txStep
+		var ended *settlement
+		read := false
+		closed, err := t.writer.closeRow(t.view.It.Key.ID, func(row session.Info, resp session.PersistedResponse) (session.MetadataPatch, bool) {
+			read = true
+			if step, ended = t.decide(ctx, sec, row, resp.Metadata); ended != nil || len(step.Terminal) == 0 {
+				return nil, false
+			}
+			return step.Terminal, true
+		})
+		switch {
+		case ended != nil:
+			return *ended, true
+		case errors.Is(err, beads.ErrRowRefreshFenced):
+			continue
+		case errors.Is(err, errNoConditionalWriter):
+			return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: err}, true
+		case err != nil:
+			return settlement{Outcome: settledFailed, Cause: causeWrite, Err: err}, true
+		case !read: // closed by another writer first
+			return t.done(txStep{Cause: "already-closed"}), true
+		case closed:
+			t.landed = true
+			t.facts.merge(step.Facts)
+			s := t.done(step)
+			if err := t.c.at(ctx, seamAfterWrite); err != nil {
+				s = injected(err)
+				s.Outcome = settledAmbiguous // the close landed
+			}
+			s.Closed = true
+			return s, true
+		case len(step.Terminal) == 0:
+			t.facts.merge(step.Facts)
+			t.pass = step.Pass
+			return t.done(step), step.Done
+		}
+		// The close lost its fence: read again and decide again.
 	}
 	return refused(causeCAS), true
 }
@@ -585,7 +644,11 @@ func (t *tx) decide(ctx context.Context, sec section, row session.Info, meta map
 		s = settlement{Outcome: settledRefused, Cause: step.Refuse, Err: step.Err}
 	case step.Fail != "":
 		s = settlement{Outcome: settledFailed, Cause: step.Fail, Err: step.Err}
-	case len(step.Write) == 0:
+	case len(step.Terminal) > 0 && sec.Premise != premiseClose, sec.Premise == premiseClose && len(step.Write) > 0:
+		s = settlement{Outcome: settledFailed, Cause: causeStep}
+	case sec.Premise == premiseClose && session.IsKillPendingInfo(row, t.view.Now):
+		s = refused(causePremise)
+	case len(step.Write) == 0 && len(step.Terminal) == 0:
 		return step, nil
 	default:
 		err := t.c.beginWrite(ctx)
@@ -618,7 +681,7 @@ func (t *tx) premise(rule premiseRule, row session.Info) bool {
 			return t.landed && row.InstanceToken == t.expect.InstanceToken
 		}
 		return false
-	case premiseDefault:
+	case premiseDefault, premiseClose:
 		return rowBasisOf(t.view.It.Key, row) == t.basis &&
 			reflect.DeepEqual(session.LifecycleInputFromInfo(row), session.LifecycleInputFromInfo(t.expect)) &&
 			(t.needs.Legs&legWork == 0 || t.sameAssignees(row))

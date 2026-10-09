@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -97,6 +98,24 @@ func newTxKit(t *testing.T) *txKit {
 	t.Helper()
 	m := beads.NewMemStoreFrom(0, []beads.Bead{poolRow("gc-1", "worker", 1, "asleep")}, nil)
 	return newTxKitOn(t, m, simBacking{m})
+}
+
+// exactBacking is a backing whose reads the cache serves exactly, with its
+// conditional writes (and atomic closer) resolved on the store it wraps.
+type exactBacking struct{ beads.Store }
+
+func (exactBacking) CachedReadExact() bool                         { return true }
+func (b exactBacking) ConditionalWritesResolveTarget() beads.Store { return b.Store }
+
+// newCloseTxKit is the kit over a backing with an atomic conditional closer,
+// for close sections.
+func newCloseTxKit(t *testing.T) *txKit {
+	t.Helper()
+	m := beads.NewAtomicCloseMemStore()
+	if _, err := m.Create(poolRow("gc-1", "worker", 1, "asleep")); err != nil {
+		t.Fatal(err)
+	}
+	return newTxKitOn(t, m, exactBacking{m})
 }
 
 func newTxKitOn(t *testing.T, m, backing beads.Store) *txKit {
@@ -340,7 +359,7 @@ func TestTxPremiseOwnToken(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, false},
-		{"a kill fence", func(k *txKit) {
+		{"a kill fence since the pass", func(k *txKit) {
 			if err := k.backing.SetMetadataBatch("gc-1", kill); err != nil {
 				t.Fatal(err)
 			}
@@ -1159,5 +1178,189 @@ func TestTxOnExitRunsEveryFinalizer(t *testing.T) {
 	}()
 	if r != "the effect" {
 		t.Fatalf("recovered %v, want the effect's own panic before any finalizer's", r)
+	}
+}
+
+// closeSec is a close section writing close_reason, then (when later is set)
+// a section that must never run after a landed close.
+func closeSec() section {
+	return section{Premise: premiseClose, Decide: func(txView) txStep {
+		return txStep{Terminal: session.MetadataPatch{"close_reason": "orphaned"}, Facts: effectFacts{Events: []events.Event{{Type: "closed"}}}}
+	}}
+}
+
+func (k *txKit) status() string {
+	k.t.Helper()
+	b, err := k.backing.Get(k.it.Key.ID)
+	if err != nil {
+		k.t.Fatal(err)
+	}
+	return b.Status
+}
+
+// Kills a close verb that closes over a wake or a kill fence, at a stale
+// revision, past its deadline or the executor's abandonment, through the
+// two-write fallback, or lets a later section write; and one that fails a
+// row already closed: each case below, against the conformance re-check's
+// §3.
+func TestTxCloseVerb(t *testing.T) {
+	ran := false
+	later := section{Premise: premiseOwnToken, Decide: func(v txView) txStep { ran = true; return mark("b")(v) }}
+	k := newCloseTxKit(t)
+	if s := k.run(context.Background(), effectSpec{sections: []section{closeSec(), later}}); s.Outcome != settledLanded || len(s.Facts.Events) != 1 || ran || k.status() != "closed" || k.meta("close_reason") != "orphaned" {
+		t.Fatalf("close: settlement %+v (later ran %t), row %s; want landed and closed, nothing after", s, ran, k.status())
+	}
+	if s := k.run(context.Background(), effectSpec{sections: []section{closeSec(), later}}); s.Outcome != settledNoop || ran {
+		t.Fatalf("already closed: settlement %+v (later ran %t), want a no-op that ends the effect", s, ran)
+	}
+	for _, c := range []struct {
+		name  string
+		setup func(k *txKit, cancel context.CancelCauseFunc, l *writeLatch)
+		cause string
+	}{
+		{"a wake after the pass", func(k *txKit, _ context.CancelCauseFunc, _ *writeLatch) { k.outside("wake_request", "api") }, causePremise},
+		{"a wake at the close's revision", func(k *txKit, _ context.CancelCauseFunc, _ *writeLatch) {
+			k.on(seamBeforeCAS, func() { k.outside("wake_request", "api") }) // loses the fence; the re-read sees it
+		}, causePremise},
+		{"a kill fence since the pass", func(k *txKit, _ context.CancelCauseFunc, _ *writeLatch) {
+			k.on(seamAfterReads, func() { _ = k.backing.SetMetadataBatch(k.it.Key.ID, session.KillPendingPatch(gatherNow)) })
+		}, causePremise},
+		{"past the deadline", func(k *txKit, cancel context.CancelCauseFunc, _ *writeLatch) {
+			k.on(seamBeforeCAS, func() { cancel(context.DeadlineExceeded) })
+		}, causeDeadline},
+		{"after the abandonment", func(k *txKit, _ context.CancelCauseFunc, l *writeLatch) { k.on(seamBeforeCAS, func() { l.abandon() }) }, causeDeadline},
+	} {
+		k := newCloseTxKit(t)
+		ctx, cancel := context.WithCancelCause(context.Background())
+		latch := new(writeLatch)
+		c.setup(k, cancel, latch)
+		if s := runTx(ctx, k.p, k.it, effectSpec{sections: []section{closeSec()}}, latch); s.Cause != c.cause || k.status() != "open" || k.meta("close_reason") != "" {
+			t.Fatalf("%s: settlement %+v, row %s; want refused or failed %q, the row open and untouched", c.name, s, k.status(), c.cause)
+		}
+		cancel(nil)
+	}
+	m := beads.NewAtomicCloseMemStore() // a kill fence the pass already saw: only the kill check refuses
+	fenced := poolRow("gc-1", "worker", 1, "asleep")
+	maps.Copy(fenced.Metadata, session.KillPendingPatch(gatherNow))
+	if _, err := m.Create(fenced); err != nil {
+		t.Fatal(err)
+	}
+	if k = newTxKitOn(t, m, exactBacking{m}); k.run(context.Background(), effectSpec{sections: []section{closeSec()}}).Cause != causePremise || k.status() != "open" {
+		t.Fatalf("a kill fence at the pass: row %s, want refused %q and the row open", k.status(), causePremise)
+	}
+	k = newTxKit(t) // a plain MemStore: no atomic closer
+	if s := k.run(context.Background(), effectSpec{sections: []section{closeSec()}}); s.Cause != causeNoWriter || k.status() != "open" || k.meta("close_reason") != "" {
+		t.Fatalf("no atomic closer: settlement %+v, row %s; want refused %q with no fallback write", s, k.status(), causeNoWriter)
+	}
+	k = newCloseTxKit(t)
+	misuse := section{Decide: func(txView) txStep { return txStep{Terminal: session.MetadataPatch{"close_reason": "x"}} }}
+	if s := k.run(context.Background(), effectSpec{sections: []section{misuse}}); s.Cause != causeStep || k.status() != "open" {
+		t.Fatalf("a close outside a close section: settlement %+v, want failed %q", s, causeStep)
+	}
+}
+
+// terminal is a close section closing with close_reason=orphaned.
+var terminal = section{Premise: premiseClose, Decide: func(txView) txStep {
+	return txStep{Terminal: session.MetadataPatch{"close_reason": "orphaned"}}
+}}
+
+// Kills a Write dropped in a close section (review pin N9): it fails step,
+// writing nothing, with no write begun.
+func TestTxCloseSectionFailsAWrite(t *testing.T) {
+	k := newCloseTxKit(t)
+	sec := section{Premise: premiseClose, Decide: func(txView) txStep { return txStep{Write: session.MetadataPatch{"note": "x"}} }}
+	latch := new(writeLatch)
+	if s := runTx(context.Background(), k.p, k.it, effectSpec{sections: []section{sec}}, latch); s.Cause != causeStep || latch.begun() || k.meta("note") != "" {
+		t.Fatalf("settlement %+v (latch begun %t), want failed %q", s, latch.begun(), causeStep)
+	}
+}
+
+// Kills the close's kill check read on the pass's row (review pin CV7): a
+// repeat kill on a row asleep and killed moves only fields the lifecycle
+// facts leave out, so only the fresh row's kill check refuses.
+func TestTxCloseRefusesARepeatKill(t *testing.T) {
+	m := beads.NewAtomicCloseMemStore()
+	if _, err := m.Create(poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "killed")); err != nil {
+		t.Fatal(err)
+	}
+	k := newTxKitOn(t, m, exactBacking{m})
+	k.on(seamAfterReads, func() { _ = m.SetMetadataBatch("gc-1", session.KillPendingPatch(gatherNow)) })
+	if s := k.run(context.Background(), effectSpec{sections: []section{terminal}}); s.Cause != causePremise || k.status() != "open" {
+		t.Fatalf("settlement %+v, row %s: closed over a repeat kill fence", s, k.status())
+	}
+}
+
+// racingCloseBacking lands a write through the cache while the close's
+// backing read is in flight, so RefreshRow answers ErrRowRefreshFenced once.
+type racingCloseBacking struct {
+	exactBacking
+	cache **beads.CachingStore
+	fired *bool
+}
+
+func (b racingCloseBacking) Get(id string) (beads.Bead, error) {
+	got, err := b.exactBacking.Get(id)
+	if id == "gc-1" && *b.cache != nil && !*b.fired {
+		*b.fired = true
+		_ = (*b.cache).SetMetadata(id, "note", "racing")
+	}
+	return got, err
+}
+
+// Kills a fenced refresh failing the close (review pin CV8), and a close
+// section reporting the wrong attempt: the close reads again and lands;
+// after a lost fence its seams report attempt 2.
+func TestTxCloseRetries(t *testing.T) {
+	m := beads.NewAtomicCloseMemStore()
+	if _, err := m.Create(poolRow("gc-1", "worker", 1, "asleep")); err != nil {
+		t.Fatal(err)
+	}
+	k := newTxKitOn(t, m, exactBacking{m})
+	var cache *beads.CachingStore
+	fired := false
+	cache = beads.NewCachingStoreForTest(racingCloseBacking{exactBacking: exactBacking{m}, cache: &cache, fired: &fired}, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fired = false
+	k.p.Writers[rowLeg] = fencedWriter{store: cache}
+	if s := k.run(context.Background(), effectSpec{sections: []section{terminal}}); !fired || k.status() != "closed" || s.Outcome != settledLanded {
+		t.Fatalf("raced %t: settlement %+v, row %s; want the retry to close", fired, s, k.status())
+	}
+	k = newCloseTxKit(t)
+	k.on(seamBeforeCAS, func() { k.outside("note", "x") }) // loses the first close's fence
+	if s := k.run(context.Background(), effectSpec{sections: []section{terminal}}); s.Outcome != settledLanded || k.attempts[len(k.attempts)-1] != 2 {
+		t.Fatalf("settlement %+v, attempts %v at seams %v; want the close landed on attempt 2", s, k.attempts, k.seen)
+	}
+}
+
+// Kills a close that around cannot tell apart (the conformance re-check),
+// and a landed close without its after-write seam (review pin SE5): Closed
+// marks only a close that landed, not an earlier write before a row already
+// closed; a fault injected after a landed close settles ambiguous, closed.
+func TestTxCloseLandedSignal(t *testing.T) {
+	stamp := section{Decide: mark("a")}
+	for _, c := range []struct {
+		name     string
+		closed   bool // another writer closed the row first
+		sections []section
+		want     bool
+	}{
+		{"close", false, []section{terminal}, true},
+		{"stamp, then close", false, []section{stamp, terminal}, true},
+		{"stamp, then already closed", true, []section{stamp, terminal}, false},
+	} {
+		k := newCloseTxKit(t)
+		if c.closed {
+			k.on(seamAfterWrite, func() { _ = k.backing.Close("gc-1") })
+		}
+		if s := k.run(context.Background(), effectSpec{sections: c.sections}); s.Closed != c.want || s.Outcome != settledLanded {
+			t.Fatalf("%s: settlement %+v, want landed with Closed %t", c.name, s, c.want)
+		}
+	}
+	k := newCloseTxKit(t)
+	k.fail = map[txSeam]error{seamAfterWrite: errors.New("staging fault")}
+	if s := k.run(context.Background(), effectSpec{sections: []section{terminal}}); s.Cause != causeInjected || s.Outcome != settledAmbiguous || !s.Closed || k.status() != "closed" {
+		t.Fatalf("settlement %+v, row %s; want ambiguous and closed, the fault injected", s, k.status())
 	}
 }

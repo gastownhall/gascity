@@ -36,7 +36,7 @@ var effectBannedMethods = []string{
 	"Sleep", "BeginDrainAckStopPending", "RequestRestart", "ResetConfigDrift", "SetWaitHold", "RecordCurrentBead",
 	"SetCurrentClaim", "SetStatusOpen", "RepairType", "RepairTypeBestEffort", "SetLocalString", "CloseWithoutReason",
 	"UpdateMetadataFenced", "ApplyPatchIfLifecycleUnchanged", "WithPendingCreateRollback", "CloseWithTerminalPatch",
-	"RollbackPendingCreateAtomically",
+	"RollbackPendingCreateAtomically", "CloseWithMetadataIfMatch",
 	"Create", "Update", "Close", "Reopen", "CloseAll", "Delete", "Tx", "DepAdd", "DepRemove",
 	"CommitStartedIfCurrent",
 	"WakeSession", "CreateSession", "CreateSessionInfo", "SaveStartupHealthEpisode",
@@ -97,7 +97,7 @@ var effectProviderAllowed = map[string][]string{
 // effect assembling its own mechanics again.
 var effectTxOnly = []string{
 	"lockRuntimeName", "WithSessionMutationLock", "withRowMutationLock", "runTx",
-	"casRow", "updateMetadataFenced", "updateRowFenced", "closePremise", "closeWithTerminalPatch", "rollbackPendingCreate",
+	"casRow", "closeRow", "updateMetadataFenced", "updateRowFenced", "closePremise", "closeWithTerminalPatch", "rollbackPendingCreate",
 	"UpdateIfMatch", "ResolveConditionalWriter",
 }
 
