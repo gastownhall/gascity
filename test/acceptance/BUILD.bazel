@@ -35,10 +35,10 @@ ACCEPTANCE_ENV = {
     "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_1//:bd) $(rootpath @dolt_bin_v2_2_0//:dolt-linux-amd64/bin/dolt)",
 }
 
-# Tests that each run past the lane's ~120 s shard budget on rbe-west, by
-# design: each waits out real Dolt lifecycle timers (proxy idle retirement,
-# a suspension quiescence window) or walks one long sequential shape. Each
-# runs alone in a target of its own (target name: top-level test), in
+# Tests that each run past about 100 s on rbe-west, by design: each waits out
+# a suspension quiescence window over a running city (about 100-130 s with
+# the shortened cadences the test configures; the defaults run nightly, see
+# NIGHTLY_TESTS) or walks one long sequential shape. Each runs alone in a target of its own (target name: top-level test), in
 # :acceptance_test's binary and environment, so the lane runs them side by
 # side instead of stacking one behind another in a shard. :acceptance_test
 # skips them. Manual, because only --config=acceptance compiles the
@@ -50,7 +50,6 @@ SOLO_TESTS = {
     "beads_topology_matrix_doctor_test": "TestBeadsInitTopologyMatrix",
     "beads_topology_matrix_native_lane_test": "TestBeadsInitTopologyMatrix",
     "beads_topology_matrix_test": "TestBeadsInitTopologyMatrix",
-    "proxied_idle_timeout_test": "TestProxiedIdleTimeoutReapAndTransparentRestart",
     "proxied_suspended_city_quiescence_test": "TestProxiedSuspensionIsQuiescenceSuspendedCity",
     "proxied_suspended_rig_quiescence_test": "TestProxiedSuspensionIsQuiescenceSuspendedRig",
 }
@@ -254,6 +253,35 @@ test_suite(
     name = "acceptance_solo_tests",
     tags = ["manual"],
     tests = [":" + name for name in SOLO_TESTS],
+)
+
+# The suspension-quiescence rows again, at the product's default controller
+# cadences over their original three-minute windows: the PR lane runs them
+# with the city's patrol interval and short-cadence orders shortened through
+# city.toml and a one-minute window, so only these catch a regression in a
+# default cadence. GC_ACCEPTANCE_LIFECYCLE_DEFAULTS selects the defaults
+# (test/acceptance/helpers.EnvLifecycleDefaults). Manual: bazel.yml's
+# acceptance lane names :acceptance_nightly_tests on the nightly schedule and
+# on dispatches only (bazel-nightly.yml). scripts/acceptance_run_selection_test.go
+# reads this table.
+NIGHTLY_TESTS = {
+    "proxied_suspended_city_quiescence_defaults_test": "TestProxiedSuspensionIsQuiescenceSuspendedCity",
+    "proxied_suspended_rig_quiescence_defaults_test": "TestProxiedSuspensionIsQuiescenceSuspendedRig",
+}
+
+[go_variant_test(
+    name = name,
+    size = "large",
+    args = ["-test.run=^%s$$" % test],
+    env = {"GC_ACCEPTANCE_LIFECYCLE_DEFAULTS": "1"},
+    tags = ["manual"],
+    test = ":acceptance_test",
+) for name, test in NIGHTLY_TESTS.items()]
+
+test_suite(
+    name = "acceptance_nightly_tests",
+    tags = ["manual"],
+    tests = [":" + name for name in NIGHTLY_TESTS],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

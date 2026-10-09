@@ -225,6 +225,18 @@ var multiLaneCommands = map[string]string{
 	"integration-smoke":    "test --config=ci --config=integration-smoke --keep_going //test/integration:integration_test",
 }
 
+// multiLaneAcceptanceNightlyTargets: on the nightly schedule and dispatches
+// the acceptance lane also runs the Dolt lifecycle rows at the product's
+// default cadences (test/acceptance/BUILD.bazel NIGHTLY_TESTS), which every
+// other run covers with shortened cadences only.
+const multiLaneAcceptanceNightlyTargets = "//test/acceptance:acceptance_nightly_tests"
+
+// multiLaneNightlyEvent reports whether event is one the nightly-only targets
+// run on: the schedule (bazel-nightly.yml's call inherits it) and dispatches.
+func multiLaneNightlyEvent(event string) bool {
+	return event == "schedule" || event == "workflow_dispatch"
+}
+
 const (
 	// The lane job starts only for a non-empty lane list (an empty matrix is
 	// an error) and takes its matrix from it whole.
@@ -413,6 +425,9 @@ func TestBazelMultiLaneLaneList(t *testing.T) {
 					name, _ := entry["lane"].(string)
 					got = append(got, name)
 					wantCmd := multiLaneCommands[name]
+					if name == "acceptance" && multiLaneNightlyEvent(event) {
+						wantCmd += " " + multiLaneAcceptanceNightlyTargets
+					}
 					if fresh == "true" {
 						wantCmd += " --config=fresh"
 					}

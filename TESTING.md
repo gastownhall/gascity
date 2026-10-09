@@ -1375,10 +1375,22 @@ In CI these rows run in Bazel's required acceptance lane
 gives `acceptance_test` the pinned `bd` and `dolt` (first on `PATH`, so every
 `dolt sql-server` the rows start is a loopback child of the test on the remote
 worker), `GC_ACCEPTANCE_TOPOLOGY_MATRIX=1` and
-`GC_REQUIRE_ACCEPTANCE_TOOLING=1`. The few rows that wait out minutes of real
-Dolt lifecycle (the topology matrix's M1 and M5 shapes, the proxied idle
-timeout, the two suspension-quiescence rows) are its `SOLO_TESTS`: each runs
-alone in a target of its own, and `acceptance_test` skips them.
+`GC_REQUIRE_ACCEPTANCE_TOOLING=1`. The few rows that run past about 100 s
+(the topology matrix's M1 and M5 shapes, the two suspension-quiescence rows)
+are its `SOLO_TESTS`: each runs alone in a target of its own, and
+`acceptance_test` skips them.
+
+The Dolt lifecycle rows wait on real timers, kept short through the product's
+own knobs rather than test hooks. The proxied idle timeout row sets
+`GC_BEADS_PROXIED_IDLE_TIMEOUT=5s`. The suspension-quiescence rows give their
+city a 2 s `[daemon] patrol_interval` and a 5 s interval for every city-level
+cooldown order due within three minutes (`[[orders.overrides]]`), and watch
+the suspended scopes for 65 s: past the one-minute fixed timers of the
+backstops that have no knob, so each still comes round at least once. Their
+default-cadence twins (`NIGHTLY_TESTS`, `GC_ACCEPTANCE_LIFECYCLE_DEFAULTS=1`:
+no overrides, the original three-minute window) run only in the nightly
+schedule's acceptance lane (`//test/acceptance:acceptance_nightly_tests`), so
+a regression in a default cadence fails the nightly run, not a PR.
 
 The same switch covers a row's own precondition. The lane runs
 `TestProxiedNativeLifecycle` and `TestProxiedNativeSafety` under

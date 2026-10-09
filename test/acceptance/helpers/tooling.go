@@ -21,7 +21,19 @@ const (
 	// test package because the shared harness has to be able to REMOVE it — a
 	// flag-off lane that an ambient export can turn on is not a lane.
 	EnvProxiedNative = "GC_BEADS_PROXIED_NATIVE"
+	// EnvLifecycleDefaults runs the Dolt lifecycle rows (suspension
+	// quiescence) at the product's default controller cadences over their
+	// original multi-minute windows, instead of the short cadences and
+	// windows the PR lane uses. Bazel's nightly targets set it, so a
+	// regression in a default cadence still fails a run.
+	EnvLifecycleDefaults = "GC_ACCEPTANCE_LIFECYCLE_DEFAULTS"
 )
+
+// LifecycleDefaults reports whether the run asked for the product's default
+// lifecycle cadences (EnvLifecycleDefaults).
+func LifecycleDefaults() bool {
+	return requireSwitchOn(EnvLifecycleDefaults)
+}
 
 // RequireTopologyMatrix skips unless the run opted in to the topology matrix.
 //

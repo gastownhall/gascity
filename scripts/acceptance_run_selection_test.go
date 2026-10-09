@@ -70,6 +70,76 @@ func TestBeadsTopologyRowsRunInTheBazelAcceptanceLane(t *testing.T) {
 		t.Fatal("SOLO_TESTS has no entries; the scan is broken")
 	}
 
+	declared := acceptanceATestFunctions(t, root)
+	for _, entry := range entries {
+		if !declared[entry[2]] {
+			t.Errorf("SOLO_TESTS %s names %s, which no acceptance_a file in test/acceptance declares: "+
+				"the target runs nothing", entry[1], entry[2])
+		}
+	}
+
+	workflow := readRepoFile(t, root, ".github/workflows/bazel.yml")
+	lane := regexp.MustCompile(`(?m)^\s*acceptance='(.*)'$`).FindStringSubmatch(workflow)
+	if lane == nil {
+		t.Fatal("bazel.yml defines no acceptance lane")
+	}
+	for _, target := range []string{"//test/acceptance:acceptance_test", "//test/acceptance:acceptance_solo_tests"} {
+		if !strings.Contains(lane[1], " "+target) {
+			t.Errorf("bazel.yml's acceptance lane does not run %s:\n%s", target, lane[1])
+		}
+	}
+}
+
+// TestLifecycleDefaultRowsRunNightly pins the nightly half of the Dolt
+// lifecycle rows. The PR lane runs the suspension-quiescence rows with the
+// city's controller cadences shortened through its config, so a regression in
+// a default cadence (a backstop that starts visiting a suspended scope once a
+// minute, say) shows only in their default-cadence twins: NIGHTLY_TESTS, run
+// with GC_ACCEPTANCE_LIFECYCLE_DEFAULTS by bazel.yml's acceptance lane on the
+// nightly schedule. This guard keeps those twins from becoming a green no-op:
+//
+//   - every NIGHTLY_TESTS entry names a top-level acceptance_a test;
+//   - the targets set GC_ACCEPTANCE_LIFECYCLE_DEFAULTS;
+//   - bazel.yml's acceptance lane names :acceptance_nightly_tests on the
+//     schedule (scripts/bazel_multilane_test.go pins the exact command).
+func TestLifecycleDefaultRowsRunNightly(t *testing.T) {
+	root := repoRoot(t)
+	build := readRepoFile(t, root, "test/acceptance/BUILD.bazel")
+
+	nightly := regexp.MustCompile(`(?ms)^NIGHTLY_TESTS = \{\n(.*?)^\}`).FindStringSubmatch(build)
+	if nightly == nil {
+		t.Fatal("test/acceptance/BUILD.bazel has no NIGHTLY_TESTS dict")
+	}
+	entries := regexp.MustCompile(`(?m)^    "([a-z0-9_]+_test)": "(Test[A-Za-z0-9_]+)",$`).FindAllStringSubmatch(nightly[1], -1)
+	if len(entries) == 0 {
+		t.Fatal("NIGHTLY_TESTS has no entries; the scan is broken")
+	}
+	declared := acceptanceATestFunctions(t, root)
+	for _, entry := range entries {
+		if !declared[entry[2]] {
+			t.Errorf("NIGHTLY_TESTS %s names %s, which no acceptance_a file in test/acceptance declares: "+
+				"the target runs nothing", entry[1], entry[2])
+		}
+	}
+
+	rule := regexp.MustCompile(`(?ms)^\[go_variant_test\(\n(.*?)^\) for name, test in NIGHTLY_TESTS\.items\(\)\]`).FindStringSubmatch(build)
+	if rule == nil {
+		t.Fatal("test/acceptance/BUILD.bazel builds no go_variant_test over NIGHTLY_TESTS")
+	}
+	if !strings.Contains(rule[1], `env = {"GC_ACCEPTANCE_LIFECYCLE_DEFAULTS": "1"},`) {
+		t.Errorf("the NIGHTLY_TESTS targets do not set GC_ACCEPTANCE_LIFECYCLE_DEFAULTS; they would rerun the shortened rows:\n%s", rule[1])
+	}
+
+	workflow := readRepoFile(t, root, ".github/workflows/bazel.yml")
+	if !strings.Contains(workflow, "//test/acceptance:acceptance_nightly_tests") {
+		t.Error("bazel.yml never runs //test/acceptance:acceptance_nightly_tests")
+	}
+}
+
+// acceptanceATestFunctions returns the top-level test functions the
+// acceptance_a files in test/acceptance declare.
+func acceptanceATestFunctions(t *testing.T, root string) map[string]bool {
+	t.Helper()
 	declared := map[string]bool{}
 	files, err := filepath.Glob(filepath.Join(root, "test", "acceptance", "*_test.go"))
 	if err != nil {
@@ -90,23 +160,7 @@ func TestBeadsTopologyRowsRunInTheBazelAcceptanceLane(t *testing.T) {
 	if len(declared) == 0 {
 		t.Fatal("no acceptance_a test functions found in test/acceptance; the scan is broken")
 	}
-	for _, entry := range entries {
-		if !declared[entry[2]] {
-			t.Errorf("SOLO_TESTS %s names %s, which no acceptance_a file in test/acceptance declares: "+
-				"the target runs nothing", entry[1], entry[2])
-		}
-	}
-
-	workflow := readRepoFile(t, root, ".github/workflows/bazel.yml")
-	lane := regexp.MustCompile(`(?m)^\s*acceptance='(.*)'$`).FindStringSubmatch(workflow)
-	if lane == nil {
-		t.Fatal("bazel.yml defines no acceptance lane")
-	}
-	for _, target := range []string{"//test/acceptance:acceptance_test", "//test/acceptance:acceptance_solo_tests"} {
-		if !strings.Contains(lane[1], " "+target) {
-			t.Errorf("bazel.yml's acceptance lane does not run %s:\n%s", target, lane[1])
-		}
-	}
+	return declared
 }
 
 func readRepoFile(t *testing.T, root, rel string) string {

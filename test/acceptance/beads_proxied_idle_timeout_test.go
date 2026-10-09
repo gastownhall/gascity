@@ -22,9 +22,12 @@ import (
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
-// idleTimeoutUnderTest is short so the test finishes; it is below config's
-// 1m floor, which only the environment override may cross.
-const idleTimeoutUnderTest = 20 * time.Second
+// idleTimeoutUnderTest is short so the test finishes in about a minute; it is
+// below config's 1m floor, which only the environment override may cross. bd's
+// idle watcher samples every quarter of it, floored at 1s, so 5s still leaves
+// the watcher several samples per window. No controller runs here, so nothing
+// but the test's own commands can hold a connection open.
+const idleTimeoutUnderTest = 5 * time.Second
 
 // idleRetireWait bounds one idle retirement: bd's sampled watcher exits T to
 // 1.5T after the last connection it saw, and then runs a shutdown GC before it

@@ -204,8 +204,14 @@ jobs:
           # ${var/pat/rep} replacement.
           fresh=""
           if [ "$FRESH" = "true" ]; then fresh=" --config=fresh"; fi
+          # The nightly schedule and dispatches also run the Dolt lifecycle
+          # rows at the product's default cadences over their original
+          # multi-minute windows (test/acceptance/BUILD.bazel NIGHTLY_TESTS);
+          # every other run covers them with the cadences shortened.
+          acceptance_nightly=""
+          case "$EVENT" in workflow_dispatch|schedule) acceptance_nightly=" //test/acceptance:acceptance_nightly_tests" ;; esac
           unit='{"lane":"unit","cmd":"test --config=ci --keep_going //...'"$fresh"'"}'
-          acceptance='{"lane":"acceptance","cmd":"test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test //test/acceptance:acceptance_solo_tests'"$fresh"'"}'
+          acceptance='{"lane":"acceptance","cmd":"test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test //test/acceptance:acceptance_solo_tests'"$acceptance_nightly$fresh"'"}'
           # Evidence-only until G3: agent-flow tests depend on ambient
           # agent-template resolution (product-side fix, D13).
           integration='{"lane":"integration","cmd":"test --config=ci --config=integration --keep_going //test/integration:integration_test'"$fresh"'","evidence-only":true}'
