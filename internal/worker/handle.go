@@ -213,7 +213,8 @@ const (
 	// but the session never reached the idle boundary within the wait window.
 	NudgeUndeliveredNoIdleBoundary NudgeUndeliveredReason = "no_idle_boundary"
 	// NudgeUndeliveredHeld means the session is held, which a nudge does not
-	// resume (CONTRACT v5.9 D8): the session queued the nudge itself.
+	// resume (CONTRACT v5.9 D8). The session queued the nudge itself, except
+	// a wait-idle nudge, which the caller queues.
 	NudgeUndeliveredHeld NudgeUndeliveredReason = "session_held"
 )
 

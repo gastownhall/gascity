@@ -153,13 +153,14 @@ func TestBackgroundSendToHeldRowQueues(t *testing.T) {
 }
 
 // TestWaitIdleNudgeToHeldRowIsUndelivered: a background wait-idle nudge to a
-// held row reports not delivered, without error or start, so its caller
-// queues it. Kills a held refusal surfacing as a nudge failure.
+// held row reports ErrResumeHeld, undelivered, without a start or a queue
+// entry, so its caller queues it and says the session is held. Kills a held
+// refusal reported as a plain miss (no held note) or as delivered.
 func TestWaitIdleNudgeToHeldRowIsUndelivered(t *testing.T) {
 	e := newPolicyEnv(t, policyRow(map[string]string{"state": string(StateSuspended)}), false)
 	delivered, err := e.mgr.TryWaitIdleNudge(context.Background(), e.id, "mail", "hello", "claude --resume k", runtime.Config{}, ResumeIfUnheld)
-	if err != nil || delivered || e.sp.CountCalls("Start", resumeName) != 0 {
-		t.Fatalf("TryWaitIdleNudge = %v, %v (starts %d); want undelivered, no error, no start", delivered, err, e.sp.CountCalls("Start", resumeName))
+	if !errors.Is(err, ErrResumeHeld) || delivered || e.sp.CountCalls("Start", resumeName) != 0 || len(e.queued(t)) != 0 {
+		t.Fatalf("TryWaitIdleNudge = %v, %v (starts %d, queue %q); want ErrResumeHeld, no start, nothing queued", delivered, err, e.sp.CountCalls("Start", resumeName), e.queued(t))
 	}
 }
 
@@ -244,5 +245,48 @@ func TestAttachResumesHeldRow(t *testing.T) {
 	}
 	if !e.sp.IsRunning(resumeName) || e.sp.CountCalls("Attach", resumeName) != 1 {
 		t.Fatal("Attach did not resume the held row")
+	}
+}
+
+// TestInterruptRestartKeepsHeartbeatHold is the re-review's N1: a background
+// interrupt_now on a live row with a heartbeat or unreadable held_until
+// passes the hold check (the runtime is running), and its hard restart, a
+// codex boundary timeout's or pi's, must not re-read the hold on the runtime
+// it just stopped. Kills a restart that refuses, which loses the session and
+// the message.
+func TestInterruptRestartKeepsHeartbeatHold(t *testing.T) {
+	for _, policy := range []ResumePolicy{ResumeIfUnheld} {
+		for _, provider := range []string{"codex", "pi"} {
+			for _, until := range []string{"2099-01-01T00:00:00Z", "soon"} {
+				t.Run(fmt.Sprintf("%d/%s/%s", policy, provider, until), func(t *testing.T) {
+					store := beads.NewMemStore()
+					sp := runtime.NewFake()
+					mgr := NewManagerWithOptions(store, sp)
+					info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: provider + " --session k", WorkDir: t.TempDir(), Provider: provider, ExtraMeta: map[string]string{"session_origin": "manual"}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := store.SetMetadata(info.ID, "held_until", until); err != nil {
+						t.Fatal(err)
+					}
+					sp.InterruptBoundaryErrors[info.SessionName] = fmt.Errorf("no turn_aborted marker yet")
+					hints := runtime.Config{WorkDir: info.WorkDir, Env: map[string]string{"PI_CODING_AGENT_SESSION_DIR": t.TempDir()}}
+					out, err := mgr.Submit(context.Background(), info.ID, "replace", BuildResumeCommand(info), hints, SubmitIntentInterruptNow, policy)
+					if err != nil || out.Queued {
+						t.Fatalf("Submit = %+v, %v; want delivered", out, err)
+					}
+					if sp.CountCalls("Stop", info.SessionName) == 0 || sp.CountCalls("Start", info.SessionName) == 0 || !sp.IsRunning(info.SessionName) {
+						t.Fatalf("calls = %#v, want the runtime stopped and restarted", sp.Calls)
+					}
+					var delivered bool
+					for _, call := range sp.Calls {
+						delivered = delivered || call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "replace"
+					}
+					if !delivered {
+						t.Fatal("the message was not delivered after the restart")
+					}
+				})
+			}
+		}
 	}
 }

@@ -2500,6 +2500,35 @@ func TestClearSessionWaitHoldKeepsOperatorHold(t *testing.T) {
 	}
 }
 
+// TestClearSessionWaitHoldReportsContention: a clear whose every CAS loses
+// returns a retryable error, not silent success; a clear with nothing to
+// write succeeds. Kills an exhausted clear reported as done.
+func TestClearSessionWaitHoldReportsContention(t *testing.T) {
+	for name, meta := range map[string]map[string]string{
+		"held":    {"wait_hold": "true", "sleep_intent": "wait-hold"},
+		"nothing": {"sleep_intent": "user-hold"},
+	} {
+		store := beads.NewMemStore()
+		b, err := store.Create(beads.Bead{Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: meta})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sessFront := sessionFrontDoor(store)
+		lose := func(id string, _ int, decide func(sessionpkg.Info, sessionpkg.PersistedResponse) sessionpkg.MetadataPatch) (bool, error) {
+			info, err := sessFront.Get(id)
+			if err != nil {
+				return false, err
+			}
+			decide(info, sessionpkg.PersistedResponse{})
+			return false, nil
+		}
+		err = clearSessionWaitHoldWith(sessFront, b.ID, lose)
+		if contended := errors.Is(err, errWaitHoldClearContended); contended != (name == "held") {
+			t.Errorf("%s: clear = %v, want contended %v", name, err, name == "held")
+		}
+	}
+}
+
 func TestClearSessionWaitHoldIfIdle_PropagatesWaitLoadError(t *testing.T) {
 	store := waitErrorStore{MemStore: beads.NewMemStore()}
 	sessionBead, err := store.Create(beads.Bead{

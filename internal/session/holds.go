@@ -56,6 +56,9 @@ func Holds(meta map[string]string, now time.Time) HoldSet {
 // SuppressesWake reports a hold that keeps the row out of the wake and
 // awake sets. An Unknown timer does not, as legacy reads it
 // (ARCH-RESTRUCTURE O6).
+//
+// TODO(R3/K-b): no caller yet; the awake-set and wake-suppression readers
+// move onto it when they migrate to the hold kernel.
 func (h HoldSet) SuppressesWake() bool { return h.In != 0 }
 
 // BlocksConsume reports a hold that stops anything consuming one: a resume,

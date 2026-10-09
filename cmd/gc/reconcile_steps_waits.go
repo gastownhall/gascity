@@ -86,6 +86,10 @@ func clearSessionWaitHoldFenced(sessFront *sessionpkg.Store, sessionID string) e
 	return clearSessionWaitHoldWith(sessFront, sessionID, (fencedWriter{store: sessFront.Store()}).updateMetadataFenced)
 }
 
+// errWaitHoldClearContended reports a wait-hold clear whose every CAS lost to
+// another writer; the hold still stands and the caller should retry.
+var errWaitHoldClearContended = errors.New("wait-hold clear lost to concurrent writes; retry")
+
 // clearSessionWaitHoldWith is the wait-hold clear over a fenced update verb:
 // fencedWriter's for v2 (never blind), the session store's for legacy.
 func clearSessionWaitHoldWith(sessFront *sessionpkg.Store, sessionID string, update func(string, int, func(sessionpkg.Info, sessionpkg.PersistedResponse) sessionpkg.MetadataPatch) (bool, error)) error {
@@ -93,7 +97,9 @@ func clearSessionWaitHoldWith(sessFront *sessionpkg.Store, sessionID string, upd
 		return nil
 	}
 	var waitsErr error
-	_, err := update(sessionID, waitHoldClearAttempts, func(row sessionpkg.Info, _ sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
+	var wanted bool
+	ok, err := update(sessionID, waitHoldClearAttempts, func(row sessionpkg.Info, _ sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
+		wanted = false
 		held, err := hasNonTerminalWaits(sessFront, sessionID)
 		if waitsErr = err; err != nil || held {
 			return nil
@@ -108,10 +114,14 @@ func clearSessionWaitHoldWith(sessFront *sessionpkg.Store, sessionID string, upd
 		if row.SleepReason == string(sessionpkg.SleepReasonWaitHold) {
 			patch["sleep_reason"] = ""
 		}
+		wanted = len(patch) > 0
 		return patch
 	})
-	if err != nil {
+	switch {
+	case err != nil:
 		err = fmt.Errorf("clearing wait hold on %s: %w", sessionID, err)
+	case wanted && !ok:
+		err = fmt.Errorf("%w: %s", errWaitHoldClearContended, sessionID)
 	}
 	return errors.Join(err, waitsErr)
 }

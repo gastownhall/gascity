@@ -559,11 +559,17 @@ func sleepUnheld(t *testing.T, store beads.Store, id string) {
 // TestDeliverSessionNudgeToHeldSessionQueuesWithoutWake is D8 rule 1
 // (CONTRACT v5.9): a background nudge never consumes an operator's hold. On
 // a suspended session it queues, starts no runtime, writes no wake request
-// and leaves the row suspended, managed controller or not. Kills a nudge
-// that resumes a held session, and a managed wake written over a hold.
+// and leaves the row suspended, managed controller or not, immediate or
+// wait-idle, and says the session is held. Kills a nudge that resumes a held
+// session, a managed wake written over a hold, and a held wait-idle nudge
+// queued without the held note (or not queued).
 func TestDeliverSessionNudgeToHeldSessionQueuesWithoutWake(t *testing.T) {
-	for _, managed := range []bool{false, true} {
-		t.Run(fmt.Sprintf("managed=%v", managed), func(t *testing.T) {
+	for _, tc := range []struct {
+		managed bool
+		mode    nudgeDeliveryMode
+	}{{false, nudgeDeliveryImmediate}, {true, nudgeDeliveryImmediate}, {false, nudgeDeliveryWaitIdle}, {true, nudgeDeliveryWaitIdle}} {
+		managed := tc.managed
+		t.Run(fmt.Sprintf("managed=%v/%s", managed, tc.mode), func(t *testing.T) {
 			t.Setenv("GC_BEADS", "file")
 			dir := t.TempDir()
 			store := openNudgeBeadStore(dir)
@@ -591,7 +597,7 @@ func TestDeliverSessionNudgeToHeldSessionQueuesWithoutWake(t *testing.T) {
 			startsBefore := fake.CountCalls("Start", info.SessionName)
 
 			var stdout, stderr bytes.Buffer
-			if code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryImmediate, false, &stdout, &stderr); code != 0 {
+			if code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", tc.mode, false, &stdout, &stderr); code != 0 {
 				t.Fatalf("deliverSessionNudgeWithWorker = %d, want 0; stderr: %s", code, stderr.String())
 			}
 			if !strings.Contains(stdout.String(), "Queued nudge for "+info.ID) || !strings.Contains(stdout.String(), "held by an operator") {

@@ -1233,8 +1233,9 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if result.Undelivered == worker.NudgeUndeliveredHeld {
-		// The session is held and queued the nudge itself (CONTRACT v5.9 D8).
+	if result.Undelivered == worker.NudgeUndeliveredHeld && mode != nudgeDeliveryWaitIdle {
+		// The session is held and queued the nudge itself (CONTRACT v5.9 D8);
+		// a held wait-idle nudge is queued below.
 		return writeQueuedSessionNudgeResult(target, mode, jsonOutput, result.Undelivered, stdout, stderr)
 	}
 	if mode == nudgeDeliveryWaitIdle && !result.Delivered {

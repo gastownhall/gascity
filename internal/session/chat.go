@@ -873,18 +873,10 @@ func normalizeWaitIdleNudgeSource(source string) string {
 	return source
 }
 
-// notDeliveredIfHeld: the wait-idle caller queues a nudge the policy holds.
-func notDeliveredIfHeld(err error) error {
-	if errors.Is(err, ErrResumeHeld) {
-		return nil
-	}
-	return err
-}
-
 func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads.Bead, source, sessName, message, resumeCommand string, hints runtime.Config, policy ResumePolicy) (bool, error) {
 	if transportFromMetadata(b) == "acp" {
 		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints, policy); err != nil {
-			return false, notDeliveredIfHeld(err)
+			return false, err
 		}
 		if err := m.nudgeSession(ctx, sessName, message, false); err != nil {
 			return false, err
@@ -892,7 +884,7 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads
 		return true, nil
 	}
 	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints, policy); err != nil {
-		return false, notDeliveredIfHeld(err)
+		return false, err
 	}
 	if providerKind(b) != "claude" {
 		return false, nil
@@ -1085,7 +1077,8 @@ func (m *Manager) SendImmediateLiveOnly(ctx context.Context, id, message string)
 // safe boundary. It resumes supported runtimes if needed, then reports whether
 // live delivery actually happened. Unsupported providers return (false, nil)
 // so higher layers can fall back to queue semantics without treating that as
-// an operational error.
+// an operational error. A held row the policy may not resume returns
+// ErrResumeHeld, queueing nothing, so the caller queues it and says why.
 func (m *Manager) TryWaitIdleNudge(ctx context.Context, id, source, message, resumeCommand string, hints runtime.Config, policy ResumePolicy) (bool, error) {
 	var delivered bool
 	err := withSessionMutationLock(id, func() error {

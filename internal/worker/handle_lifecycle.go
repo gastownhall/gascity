@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -395,6 +396,10 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 			return result, nil
 		}
 		delivered, err := h.manager.TryWaitIdleNudge(ctx, id, req.Source, req.Text, resumeCommand, h.runtimeHints(), sessionpkg.ResumeIfUnheld)
+		if errors.Is(err, sessionpkg.ErrResumeHeld) {
+			// Not queued: the caller queues it and prints the held note.
+			return NudgeResult{Undelivered: NudgeUndeliveredHeld}, nil
+		}
 		if err != nil {
 			return NudgeResult{}, err
 		}

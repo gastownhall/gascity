@@ -1570,6 +1570,18 @@ func TestSubmitInterruptNowHardRestartsAndTruncatesPiPendingTurn(t *testing.T) {
 }
 
 func TestSubmitInterruptNowRestoresPiSessionWhenTranscriptResetFails(t *testing.T) {
+	testPiRestoreAfterTranscriptResetFailure(t, ResumeOperator, "")
+}
+
+// TestPiRestoreKeepsHeartbeatHold is the re-review's N1 on the restore path:
+// a background interrupt_now to a live pi row with a heartbeat held_until
+// restores the runtime it stopped without re-reading the hold.
+func TestPiRestoreKeepsHeartbeatHold(t *testing.T) {
+	testPiRestoreAfterTranscriptResetFailure(t, ResumeIfUnheld, "2099-01-01T00:00:00Z")
+}
+
+func testPiRestoreAfterTranscriptResetFailure(t *testing.T, policy ResumePolicy, heldUntil string) {
+	t.Helper()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManagerWithOptions(store, sp)
@@ -1577,6 +1589,11 @@ func TestSubmitInterruptNowRestoresPiSessionWhenTranscriptResetFails(t *testing.
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "pi --session abc123", WorkDir: t.TempDir(), Provider: "pi", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
+	}
+	if heldUntil != "" {
+		if err := store.SetMetadata(info.ID, "held_until", heldUntil); err != nil {
+			t.Fatal(err)
+		}
 	}
 	sessionDir := t.TempDir()
 	piSessionPath := filepath.Join(sessionDir, "2026-05-11T00-00-00-000Z_abc123.jsonl")
@@ -1605,7 +1622,7 @@ func TestSubmitInterruptNowRestoresPiSessionWhenTranscriptResetFails(t *testing.
 			"PI_CODING_AGENT_SESSION_DIR": sessionDir,
 		},
 	}
-	_, err = mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), hints, SubmitIntentInterruptNow, ResumeOperator)
+	_, err = mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), hints, SubmitIntentInterruptNow, policy)
 	if err == nil {
 		t.Fatal("Submit(interrupt_now) error = nil, want transcript reset failure")
 	}

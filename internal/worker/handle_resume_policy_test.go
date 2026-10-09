@@ -14,7 +14,7 @@ import (
 // session. The session queues it and the result says why. Kills a nudge
 // that carries the operator's policy.
 func TestNudgeToHeldSessionQueues(t *testing.T) {
-	for _, delivery := range []NudgeDelivery{NudgeDeliveryDefault, NudgeDeliveryImmediate} {
+	for _, delivery := range []NudgeDelivery{NudgeDeliveryDefault, NudgeDeliveryImmediate, NudgeDeliveryWaitIdle} {
 		t.Run(string(delivery), func(t *testing.T) {
 			store := beads.NewMemStore()
 			sp := runtime.NewFake()
