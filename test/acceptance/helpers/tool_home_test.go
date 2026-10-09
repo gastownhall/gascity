@@ -2,7 +2,9 @@ package acceptancehelpers
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -237,7 +239,7 @@ func TestTopologyPathBdNeverSeesTheHostHome(t *testing.T) {
 	if found == "" {
 		t.Fatal("no bd on the topology PATH")
 	}
-	cmd := exec.Command(found, "list") //nolint:gosec // resolved test wrapper
+	cmd, _ := boundedToolCommand(t, acceptanceToolCommandTimeout, found, "list")
 	cmd.Env = env.List()
 	if env.Get("HOME") != canary {
 		t.Fatalf("the gc-side env should hold the (canary) host HOME from WithHostHome, got %q", env.Get("HOME"))
@@ -262,7 +264,7 @@ func TestEnvPathBdNeverSeesTheHostHome(t *testing.T) {
 	if found == "" || found == bd {
 		t.Fatalf("bd on the Env PATH = %q, want the tool-home wrapper around %s", found, bd)
 	}
-	cmd := exec.Command(found, "list") //nolint:gosec // resolved test wrapper
+	cmd, _ := boundedToolCommand(t, acceptanceToolCommandTimeout, found, "list")
 	cmd.Env = env.List()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bd via PATH: %v\n%s", err, out)
@@ -282,9 +284,9 @@ func TestToolHomeHonoursExplicitUserLevelLayers(t *testing.T) {
 		With("XDG_CONFIG_HOME", seeded).
 		With(bdSharedServerConfigEnv, "")
 
-	direct := exec.Command(bd, "list") //nolint:gosec // test stub
+	direct, _ := boundedToolCommand(t, acceptanceToolCommandTimeout, bd, "list")
 	direct.Env = env.ToolList()
-	viaPath := exec.Command(findInPath(env.Get("PATH"), "bd"), "list") //nolint:gosec // resolved test wrapper
+	viaPath, _ := boundedToolCommand(t, acceptanceToolCommandTimeout, findInPath(env.Get("PATH"), "bd"), "list")
 	viaPath.Env = env.List()
 	for _, cmd := range []*exec.Cmd{direct, viaPath} {
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -324,16 +326,18 @@ func TestRealBdProvisionLeavesTheHostHomeAlone(t *testing.T) {
 	}
 	env := newCanaryEnv(t)
 	env.With("PATH", doltDir+string(os.PathListSeparator)+env.Get("PATH"))
-
 	workspace := filepath.Join(t.TempDir(), "provision")
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	up := &ExternalDolt{Host: "127.0.0.1", Port: "1", Database: "canary_db"}
-	cmd := up.provisionCommand(env, realBD, workspace, "hosted")
+	cmd, ctx := up.provisionCommand(t, env, realBD, workspace, "hosted")
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
-	_ = cmd.Run() // nothing listens on port 1; only what bd touched on the way matters
+	_ = cmd.Run()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("bd provision exceeded %s:\n%s", acceptanceToolCommandTimeout, out.String())
+	}
 
 	if calls, err := os.ReadFile(doltLog); err == nil && strings.Contains(string(calls), canary) {
 		t.Errorf("bd ran dolt against the host home:\n%s\nbd output:\n%s", calls, out.String())
