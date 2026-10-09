@@ -12,7 +12,8 @@ import (
 // resolvedAmbientCredential is the beads http backend's own bearer ladder
 // (BEADS_HTTP_TOKEN, BEADS_HTTP_TOKEN_COMMAND, the credentials file),
 // resolved once for one remote open and then carried explicitly as that
-// open's OpenOptions.Credential.
+// open's bdhttp.Options.Credential (the single-city posture: a scope with no
+// per-city / per-rig credential configured).
 //
 // The ladder reads the process environment when it resolves. Every Dolt open
 // in this process projects its own environment while holding

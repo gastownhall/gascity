@@ -319,9 +319,10 @@ type StoreOpenOptions struct {
 	OpenNativeStore  func() (Store, error)
 
 	// OpenRemoteNativeStore overrides the native open for a scope whose
-	// metadata names a registered remote backend. Nil opens through the beads
-	// library's own dispatch with no projected environment, which is what
-	// every composition root wants; tests inject a fake here.
+	// metadata names a registered remote backend. Nil opens through beads'
+	// per-open door with the scope's resolved plan (target and credential)
+	// and no projected environment, which is what every composition root
+	// wants; tests inject a fake here.
 	OpenRemoteNativeStore func() (Store, error)
 
 	// OpenProxiedStore opens the split store for a proxied-server scope:

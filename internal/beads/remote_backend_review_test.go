@@ -128,7 +128,7 @@ func TestRemoteOpenAuthorizesProbeAndStoreWithTheConfiguredCredentialsFile(t *te
 }
 
 // TestRemoteOpenCarriesAnExplicitCredential: the store open receives the
-// credential this open resolved as OpenOptions.Credential (never the nil
+// credential this open resolved as bdhttp.Options.Credential (never the nil
 // "ambient, read whenever" default), beside the seam's own transport.
 func TestRemoteOpenCarriesAnExplicitCredential(t *testing.T) {
 	hermeticRemoteHTTPEnv(t)
@@ -137,21 +137,20 @@ func TestRemoteOpenCarriesAnExplicitCredential(t *testing.T) {
 	scope := remoteHTTPScope(t, server)
 	seam := nativeOpenOptions(filepath.Join(scope, ".beads"))
 
-	var seen []beadslib.OpenOptions
-	previous := remoteNativeOpenBestAvailable
-	remoteNativeOpenBestAvailable = func(ctx context.Context, beadsDir string, opts beadslib.OpenOptions) (beadslib.Storage, error) {
+	var seen []bdhttp.Options
+	previous := remoteNativeOpen
+	remoteNativeOpen = func(ctx context.Context, target bdhttp.Target, opts bdhttp.Options) (beadslib.Storage, error) {
 		seen = append(seen, opts)
-		return previous(ctx, beadsDir, opts)
+		return previous(ctx, target, opts)
 	}
-	t.Cleanup(func() { remoteNativeOpenBestAvailable = previous })
+	t.Cleanup(func() { remoteNativeOpen = previous })
 
 	openRemoteForTest(t, scope, "")
 	if len(seen) != 1 {
 		t.Fatalf("remote opens = %d, want 1", len(seen))
 	}
-	provided, ok := seen[0].Credential.(bdhttp.ProvidedCredential)
-	if !ok || provided.Provider == nil {
-		t.Fatalf("OpenOptions.Credential = %#v, want a resolved bdhttp.ProvidedCredential", seen[0].Credential)
+	if seen[0].Credential == nil {
+		t.Fatal("bdhttp.Options.Credential is nil, want the resolved ambient ladder")
 	}
 	if seen[0].HTTPClient != seam.HTTPClient {
 		t.Fatal("the store open did not take the seam's transport")

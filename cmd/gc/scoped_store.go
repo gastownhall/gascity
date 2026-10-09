@@ -28,6 +28,9 @@ func scopedBdStoreForCity(ctx context.Context, cityPath string) (*beads.BdStore,
 	if err != nil {
 		return nil, err
 	}
+	if err := newBdScopeCredentialEnv(cityPath).apply(env, cityPath); err != nil {
+		return nil, err
+	}
 	runner, err := beadsCommandRunnerWithContextForHostedCity(ctx, cityPath, env)
 	if err != nil {
 		return nil, err
@@ -42,6 +45,9 @@ func scopedBdStoreForRig(ctx context.Context, cityPath string, cfg *config.City,
 	}
 	env, err := bdRuntimeEnvForRigWithErrorRecoveryContext(ctx, cityPath, cfg, rigDir, false)
 	if err != nil {
+		return nil, err
+	}
+	if err := newBdScopeCredentialEnv(cityPath).apply(env, rigDir); err != nil {
 		return nil, err
 	}
 	runner, err := beadsCommandRunnerWithContextForHostedCity(ctx, cityPath, env)

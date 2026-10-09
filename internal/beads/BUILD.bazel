@@ -18,6 +18,7 @@ go_library(
     deps = [
         "//internal/beadmeta",
         "//internal/beads/contract",
+        "//internal/beads/credsource",
         "//internal/beads/proxyendpoint",
         "//internal/clock",
         "//internal/deps",
@@ -219,6 +220,7 @@ go_test(
         "query_seek_test.go",
         "ready_context_internal_test.go",
         "remote_backend_review_test.go",
+        "remote_scope_credential_test.go",
         "runview_lifecycle_test.go",
         "runview_roundtrip_test.go",
         "schema_cursor_drift_test.go",
@@ -281,6 +283,7 @@ go_test(
         "//internal/beadmeta",
         "//internal/beads/beadstest",
         "//internal/beads/contract",
+        "//internal/beads/credsource",
         "//internal/beads/proxyendpoint",
         "//internal/beads/proxyendpoint/proxyendpointtest",
         "//internal/beads/splittest",

@@ -260,7 +260,7 @@ func TestRemoteWireHandshakeIsCachedPerProcess(t *testing.T) {
 	server := newRemoteHTTPServer(t, fullRemoteCapabilities())
 	scope := remoteHTTPScope(t, server)
 	for i := 0; i < 3; i++ {
-		if _, err := remoteWireHandshake(scope); err != nil {
+		if err := remoteWireHandshake(scope); err != nil {
 			t.Fatalf("handshake %d: %v", i, err)
 		}
 	}
@@ -270,9 +270,20 @@ func TestRemoteWireHandshakeIsCachedPerProcess(t *testing.T) {
 	if err := os.Remove(bdhttp.TargetPath(filepath.Join(scope, ".beads"))); err != nil {
 		t.Fatal(err)
 	}
-	_, err := remoteWireHandshake(scope)
+	err := remoteWireHandshake(scope)
 	var wireErr *contract.PreflightWireError
 	if !errors.As(err, &wireErr) || wireErr.Reason != contract.PreflightWireNotConnected {
 		t.Fatalf("handshake without an activation = %v, want not_connected", err)
 	}
+}
+
+// remoteWireHandshake runs the cached handshake over the scope's own
+// single-city plan (no city, so no per-city credential).
+func remoteWireHandshake(scope string) error {
+	plan, err := remoteOpenPlanFor(context.Background(), "", scope, scope)
+	if err != nil {
+		return err
+	}
+	_, err = remoteWireHandshakeWith(scope, plan)
+	return err
 }

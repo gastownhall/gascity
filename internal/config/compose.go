@@ -872,6 +872,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if err := validateBeadsModes(root.Beads); err != nil {
 		return nil, nil, err
 	}
+	if err := validateRigBeadsCredentials(root.Rigs); err != nil {
+		return nil, nil, err
+	}
 
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading
@@ -1151,6 +1154,8 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		allowSchemaBehindMigrate := base.Beads.AllowSchemaBehindMigrate
 		proxiedIdleTimeout := base.Beads.ProxiedIdleTimeout
 		nativeTransport := base.Beads.NativeTransport
+		credential := base.Beads.Credential
+		allowInsecureCredential := base.Beads.AllowInsecureCredential
 		base.Beads = fragment.Beads
 		if !fragMeta.IsDefined("beads", "conditional_writes") {
 			base.Beads.ConditionalWrites = conditionalWrites
@@ -1166,6 +1171,15 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		}
 		if !fragMeta.IsDefined("beads", "native_transport") {
 			base.Beads.NativeTransport = nativeTransport
+		}
+		// A fragment that does not name the credential must not drop the
+		// city's: that would silently put the city back on the ambient
+		// credential ladder.
+		if !fragMeta.IsDefined("beads", "credential") {
+			base.Beads.Credential = credential
+		}
+		if !fragMeta.IsDefined("beads", "allow_insecure_credential") {
+			base.Beads.AllowInsecureCredential = allowInsecureCredential
 		}
 	}
 	if fragMeta.IsDefined("dolt") {
