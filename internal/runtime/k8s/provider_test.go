@@ -2109,17 +2109,20 @@ func TestProvider_RelaunchRespawnsAgentInWarmPod(t *testing.T) {
 	if respawn == nil {
 		t.Fatal("Relaunch did not issue tmux respawn-pane over execInPod")
 	}
-	body := respawn[len(respawn)-1] // sh -c <body>
+	body := respawn[2] // sh -c <body>
 	if !strings.Contains(body, "tmux respawn-pane -k -t main") {
 		t.Errorf("respawn body = %q, want it to respawn the 'main' session in place", body)
 	}
-	// The command is base64-shipped, not inlined verbatim.
+	if !strings.Contains(body, `CMD=$(printf '%s' "$@" | base64 -d)`) {
+		t.Errorf("respawn body = %q, want it to reconstruct its command from positional chunks", body)
+	}
+	// The command is base64-shipped in bounded positional chunks, not inlined.
 	wantB64 := base64.StdEncoding.EncodeToString([]byte("agent --resume"))
-	if !strings.Contains(body, wantB64) {
-		t.Errorf("respawn body = %q, want base64 %q of the agent command", body, wantB64)
+	if got := strings.Join(respawn[4:], ""); got != wantB64 {
+		t.Errorf("respawn chunks = %q, want base64 %q of the agent command", got, wantB64)
 	}
 	if strings.Contains(body, "agent --resume") {
-		t.Errorf("respawn body = %q leaked the raw command; it must be base64-shipped", body)
+		t.Errorf("respawn body = %q leaked the raw command; it must be passed separately", body)
 	}
 	// Warm reuse: no pod was created or deleted.
 	for _, c := range fake.calls {
@@ -2170,9 +2173,12 @@ func TestProvider_RelaunchSuWrapsForLinuxUsername(t *testing.T) {
 	if body == nil {
 		t.Fatal("no respawn-pane call")
 	}
-	last := body[len(body)-1]
-	if !strings.Contains(last, `su - dev -c`) {
-		t.Errorf("respawn body = %q, want it su-wrapped for the LINUX_USERNAME tmux socket", last)
+	script := body[2]
+	if !strings.Contains(script, "su - "+shellquote.Quote("dev")+" -c") {
+		t.Errorf("respawn body = %q, want it su-wrapped for the LINUX_USERNAME tmux socket", script)
+	}
+	if !strings.Contains(script, "CMD=$(base64 -d)") {
+		t.Errorf("respawn body = %q, want the static su script to decode stdin", script)
 	}
 }
 

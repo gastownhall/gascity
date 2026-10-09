@@ -381,7 +381,7 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 
 	// Respawn the agent in the warm "main" session.
 	if _, err := p.ops.execInPod(ctx, podName, "agent",
-		[]string{"sh", "-c", buildRespawnCommand(cfg)}, nil); err != nil {
+		buildRespawnCommand(cfg), nil); err != nil {
 		return fmt.Errorf("k8s relaunch %q: respawn-pane: %w", name, err)
 	}
 

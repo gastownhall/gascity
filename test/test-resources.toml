@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 745
-baseline_files = 221
+baseline_calls = 746
+baseline_files = 222
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -51,8 +51,8 @@ expires = "2026-10-31"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 497
-baseline_files = 147
+baseline_calls = 498
+baseline_files = 148
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -305,6 +305,17 @@ owner_bead = "ga-cp3hwi"
 invariant = "herdr live-server liveness regression is a checked Medium stream-listener owner"
 resource_owner = "the Unix stream listener is confined to TestServerAliveDetectsLiveServer and closed by test cleanup"
 migration_target = "P0.4c-listener"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "internal/runtime/k8s"
+package_name = "k8s"
+owner = "TestDynamicUserWrapperPreservesCommand"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "Kubernetes launch-command transport regression is a checked Medium subprocess owner"
+resource_owner = "the /bin/sh executions are confined to TestDynamicUserWrapperPreservesCommand; test-owned su and tmux scripts receive a private PATH and temporary files, so a real shell verifies the decoded command reaches tmux as one argument"
+migration_target = "P0.4b"
 expires = "2026-10-31"
 
 [[medium]]

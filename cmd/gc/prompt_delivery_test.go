@@ -155,6 +155,20 @@ func repeatToBytes(unit string, n int) string {
 func TestPromptDeliveryOversized(t *testing.T) {
 	arg := &config.ResolvedProvider{PromptMode: "arg"}
 
+	t.Run("K8s none mode routes the prompt through nudge", func(t *testing.T) {
+		prompt := "K8s none-mode startup prompt"
+		got, err := promptDelivery(prompt, false, &config.ResolvedProvider{PromptMode: "none"}, "wake", "k8s", nil)
+		if err != nil {
+			t.Fatalf("promptDelivery() unexpected error for K8s none mode: %v", err)
+		}
+		if got.PromptSuffix != "" || got.PromptFlag != "" {
+			t.Fatalf("K8s none mode carried argv prompt: suffix len=%d flag=%q", len(got.PromptSuffix), got.PromptFlag)
+		}
+		if !got.Delivered || got.Nudge != prependStartupPromptToNudge(prompt, "wake") {
+			t.Fatalf("K8s none mode = %+v, want startup prompt delivered through nudge", promptDeliveryResultLens(got))
+		}
+	})
+
 	t.Run("just under both thresholds preserves existing argv behavior", func(t *testing.T) {
 		prompt := repeatToBytes("a", maxPromptSuffixRawBytes-1)
 		quoted := shellquote.Quote(prompt)
@@ -328,6 +342,30 @@ func TestPromptDeliveryOversized(t *testing.T) {
 		}
 		if !got.Delivered || !got.OversizedFallback {
 			t.Errorf("promptDelivery() tmux oversized = %+v, want Delivered=true OversizedFallback=true", got)
+		}
+	})
+
+	t.Run("K8s arg and flag modes route oversized prompts through nudge", func(t *testing.T) {
+		prompt := repeatToBytes("k", maxPromptSuffixRawBytes)
+		for _, tc := range []struct {
+			name string
+			rp   *config.ResolvedProvider
+		}{
+			{name: "arg", rp: &config.ResolvedProvider{PromptMode: "arg"}},
+			{name: "flag", rp: &config.ResolvedProvider{PromptMode: "flag", PromptFlag: "--prompt"}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				got, err := promptDelivery(prompt, false, tc.rp, "wake", "k8s", nil)
+				if err != nil {
+					t.Fatalf("promptDelivery() unexpected error for K8s %s mode: %v", tc.name, err)
+				}
+				if got.PromptSuffix != "" || got.PromptFlag != "" {
+					t.Fatalf("K8s %s fallback carried argv prompt: suffix len=%d flag=%q", tc.name, len(got.PromptSuffix), got.PromptFlag)
+				}
+				if !got.Delivered || !got.OversizedFallback || got.Nudge != prependStartupPromptToNudge(prompt, "wake") {
+					t.Fatalf("K8s %s fallback = %+v, want delivered nudge fallback", tc.name, promptDeliveryResultLens(got))
+				}
+			})
 		}
 	})
 
