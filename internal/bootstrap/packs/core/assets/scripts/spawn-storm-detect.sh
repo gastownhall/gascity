@@ -41,7 +41,9 @@ fi
 
 # Step 1: Find beads that were recently reset to pool.
 # Look for open beads that have been updated (recovery resets them to open + unassigned).
-OPEN_BEADS=$(gc bd list --status=open --assignee="" --json --limit=0 2>/dev/null) || exit 0
+# --no-assignee is the filter bd applies; --assignee="" is no filter at all and
+# returns assigned beads too.
+OPEN_BEADS=$(gc bd list --status=open --no-assignee --json --limit=0 2>/dev/null) || exit 0
 if [ -z "$OPEN_BEADS" ] || [ "$OPEN_BEADS" = "[]" ]; then
     exit 0
 fi
@@ -51,8 +53,10 @@ COUNTS=$(cat "$LEDGER")
 
 # Step 3: For each open unassigned bead, check if it has rejection metadata
 # (indicates it was returned for rework or recovered by a work-health patrol).
+# An empty string is not a rejection: jq reads "" as not null, so a key left
+# set to "" would count on every sweep.
 STORMS=0
-RESET_IDS=$(echo "$OPEN_BEADS" | jq -r '.[] | select(.metadata.rejection_reason != null or .metadata.recovered != null) | .id' 2>/dev/null)
+RESET_IDS=$(echo "$OPEN_BEADS" | jq -r '.[] | select((.metadata.rejection_reason // "") != "" or (.metadata.recovered // "") != "") | .id' 2>/dev/null)
 while IFS= read -r bead_id; do
     [ -z "$bead_id" ] && continue
 
