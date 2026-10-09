@@ -48,7 +48,7 @@ func TestResumeVoidsSuspendedDrain(t *testing.T) {
 		t.Fatal(err)
 	}
 	k := rowKey{Leg: rowLeg, ID: b.ID}
-	w := &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, store)), LegStores: map[string]beads.Store{rowLeg: store}}
+	w := &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, store)), LegStores: map[string]beads.Store{rowLeg: store}, SessionsLeg: rowLeg}
 	a := &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{k: {Key: k, Liveness: livenessAlive, Desired: desireWake}}}}
 	it, _ := decideRow(w, a, k)
 	if it.Kind != intentDrainVoid || it.Reason != decideDrainVoid+drainSuspended {

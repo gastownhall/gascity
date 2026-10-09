@@ -55,7 +55,7 @@ func (f *rekeyFixture) pass(rt runtimeIdentity) (*effectPass, intent) {
 	c := readCensus(f.t, gatherNow, censusLegs(rowLeg, f.store))
 	k := rowKey{Leg: rowLeg, ID: f.id}
 	w := &World{
-		Now: gatherNow, Census: c, Mislabelled: map[rowKey]bool{}, CityPath: f.t.Name(),
+		Now: gatherNow, Census: c, Mislabelled: map[rowKey]bool{}, CityPath: f.t.Name(), SessionsLeg: rowLeg,
 		Observed:  map[rowKey]rowObservation{k: {Identity: rt}},
 		Env:       &reconcileEnv{SP: f.leaf},
 		LegStores: map[string]beads.Store{rowLeg: f.store},

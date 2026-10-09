@@ -673,3 +673,90 @@ func TestA6ItemsFoldIntoOneCAS(t *testing.T) {
 		t.Fatalf("decideRow = (%q, %v), want the timer heal's own patch carrying the stranded clear", it.Reason, it.Patch)
 	}
 }
+
+// Kills a census-only rig-leg row acted on (CONTRACT v5 AL1; §4 A6 item 4,
+// held for every arm): legacy reconciles only the sessions store, and a
+// shared rig store holds other cities' rows. Each row below takes its arm on
+// the sessions leg; on another leg it is None(census-only) and proposes
+// nothing, and an intent admitted while it was the sessions leg's re-decides
+// on the fresh row and refuses, leaving the row as it was.
+func TestNoArmActsOnACensusOnlyRow(t *testing.T) {
+	tracked := resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Effective: "5m", Capability: runtime.SessionSleepCapabilityFull}
+	alive := func(c *healCase) runtime.Provider {
+		return &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true}, env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": "tok-3"}}
+	}
+	for _, tc := range []struct {
+		name string
+		want string // the reason on the sessions leg
+		row  func(t *testing.T) *healCase
+	}{
+		{"A6 1 timer heal", decideTimerHeal, func(t *testing.T) *healCase {
+			return newHealCase(t, livenessGone, desireNone, "state", "asleep", "held_until", rowAt(-time.Minute), "sleep_reason", "user-hold")
+		}},
+		{"A6 2 claim clear", decideClaimClear, func(t *testing.T) *healCase {
+			return newHealCase(t, livenessAlive, desireKeep, "state", "active", "pending_create_claim", "true")
+		}},
+		{"A6 3 creating heal", decideCreatingHeal, func(t *testing.T) *healCase {
+			return newHealCase(t, livenessGone, desireNone, "state", "creating", "session_key", "k-1")
+		}},
+		{"A6 4 dead-runtime heal", decideDeadRuntimeHeal, func(t *testing.T) *healCase {
+			return newHealCase(t, livenessGone, desireSleep, "state", "active", "session_key", "k-1")
+		}},
+		{"A6 5 awake heal", decideAwakeHeal, func(t *testing.T) *healCase {
+			return ownRuntimeCase(t, "tok-3", "state", "asleep", "sleep_reason", "idle")
+		}},
+		{"A6 6 stability clear", decideStabilityClear, func(t *testing.T) *healCase {
+			return newHealCase(t, livenessAlive, desireKeep, "state", "active", "last_woke_at", rowAt(-time.Hour), "wake_attempts", "2")
+		}},
+		{"A6 7 detached-at stamp", decideDetachedAt, func(t *testing.T) *healCase {
+			c := newHealCase(t, livenessAlive, desireKeep, "state", "active")
+			c.w.SleepPolicies = map[string]resolvedSessionSleepPolicy{c.k.ID: tracked}
+			return c
+		}},
+		{"A6 7 detached-at clear", decideDetachedAt, func(t *testing.T) *healCase {
+			return newHealCase(t, livenessGone, desireDrain, "state", "active", "detached_at", rowAt(-time.Hour))
+		}},
+		{"A6 8 stranded clear", decideStrandedClear, func(t *testing.T) *healCase {
+			return newHealCase(t, livenessAlive, desireKeep, "state", "active", strandedEventEmittedKey, rowAt(-time.Hour))
+		}},
+		{"A6 9 current bead", decideCurrentBead, func(t *testing.T) *healCase {
+			c := newHealCase(t, livenessAlive, desireWake, "state", "active")
+			c.a.Snapshot.Entries[c.k].AssignedWork = &assignedWorkView{BeadID: "ga-7"}
+			return c
+		}},
+		{"A3 rekey", decideRekey, func(t *testing.T) *healCase {
+			c := newHealCase(t, livenessAlive, desireKeep, "state", "active")
+			c.w.Observed = map[rowKey]rowObservation{c.k: {Identity: runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "2", Token: "tok-old"}}}
+			return c
+		}},
+		{"A19 drain void", decideDrainVoid + drainSuspended, func(t *testing.T) *healCase {
+			return newHealCase(t, livenessAlive, desireWake, append([]string{"state", "active"}, intentAt(drainSuspended, "3")...)...)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := tc.row(t)
+			it := c.decide()
+			if it.Reason != tc.want || it.Kind == "" {
+				t.Fatalf("sessions leg: decideRow = (%q, %q), want %q", it.Kind, it.Reason, tc.want)
+			}
+			c.w.SessionsLeg = "rig:other"
+			if got := c.decide(); got.Kind != "" || got.Reason != reasonCensusOnly {
+				t.Fatalf("census-only: decideRow = (%q, %q, %v), want None(census-only)", got.Kind, got.Reason, got.Patch)
+			}
+			if it.Kind == intentRekey {
+				return // the rekey effect's re-decide is redecideRow too (reconcile_effect_rekey.go)
+			}
+			before := maps.Clone(c.meta(t))
+			sp := runtime.Provider(gone())
+			if c.a.Snapshot.Entries[c.k].Liveness == livenessAlive {
+				sp = alive(c)
+			}
+			w := *c.w
+			w.Env = &reconcileEnv{SP: sp}
+			s := runTx(context.Background(), newEffectPass(&w, c.a), it, effectSpecs[it.Kind], nil)
+			if s.Outcome != settledRefused || !maps.Equal(c.meta(t), before) {
+				t.Fatalf("admitted %q on a census-only row: settlement %+v, row %v, want refused and the row %v", it.Kind, s, c.meta(t), before)
+			}
+		})
+	}
+}
