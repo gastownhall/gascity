@@ -1304,7 +1304,14 @@ func (m *Manager) suspend(ctx context.Context, id string, intent suspendIntent) 
 		}
 		current := State(b.Metadata["state"])
 		if current == StateSuspended {
-			return nil // idempotent: already suspended
+			// Idempotent, except that an operator's suspend of a row left
+			// suspended without the user hold (by the shutdown sweep) writes
+			// the hold: a suspended state alone does not stop legacy's
+			// assigned-work wake.
+			if intent == suspendIntentOperator && strings.TrimSpace(b.Metadata["sleep_intent"]) != string(SleepReasonUserHold) {
+				return m.PersistedStore().OperatorSuspend(id, m.now(), nil)
+			}
+			return nil
 		}
 		// An operator's suspend stops the runtime under its lease, taken before
 		// any write; the city stop sweep takes none (it stops every runtime).
@@ -1381,18 +1388,22 @@ func (m *Manager) suspend(ctx context.Context, id string, intent suspendIntent) 
 
 		// Update state and suspension timestamp together so stores with a
 		// write-through cache preserve one coherent lifecycle transition. An
-		// operator's suspend supersedes any pending wake request (D7); the
-		// shutdown sweep leaves it for the next start.
+		// operator's suspend is OperatorSuspendPatch's one shape, fenced: the
+		// user hold keeps legacy's assigned-work wake and its heartbeat crash
+		// recovery from undoing it, and it supersedes any pending wake request
+		// (D7). The shutdown sweep holds nothing and leaves the wake for the
+		// next start.
 		patch := MetadataPatch{
 			"state":        string(StateSuspended),
-			"suspended_at": time.Now().UTC().Format(time.RFC3339),
+			"suspended_at": m.now().UTC().Format(time.RFC3339),
 			"slept_at":     "",
 			"sleep_reason": "",
 		}
 		if intent == suspendIntentOperator {
-			for k, v := range ClearWakeRequestPatch() {
-				patch[k] = v
+			if err := m.PersistedStore().OperatorSuspend(id, m.now(), patch); err != nil {
+				return fmt.Errorf("updating suspension state: %w", err)
 			}
+			return nil
 		}
 		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string(patch)}); err != nil {
 			return fmt.Errorf("updating suspension state: %w", err)

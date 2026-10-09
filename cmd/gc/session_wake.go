@@ -903,7 +903,7 @@ func completeDrain(info sessions.Info, sessFront *sessions.Store, ds *drainState
 	if sessFront == nil {
 		return
 	}
-	batch := sessions.CompleteDrainPatch(clk.Now(), ds.reason, info.WakeMode == "fresh")
+	batch := sessions.CompleteDrainPatch(info, clk.Now(), ds.reason)
 	_ = sessFront.ApplyPatch(info.ID, batch)
 }
 

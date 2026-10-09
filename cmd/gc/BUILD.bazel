@@ -1707,6 +1707,7 @@ go_test(
         "session_sleep_test.go",
         "session_sleep_wake_override_test.go",
         "session_state_helpers_test.go",
+        "session_suspend_sticks_test.go",
         "session_target_test.go",
         "session_template_overrides_test.go",
         "session_template_start_test.go",

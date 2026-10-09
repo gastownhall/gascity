@@ -173,6 +173,23 @@ func ClearWakeRequestPatch() MetadataPatch {
 	return MetadataPatch{"wake_request": "", "wake_requested_at": ""}
 }
 
+// IndefiniteHoldDuration is the "suspended indefinitely" held_until horizon:
+// 100 years is effectively forever without risking time arithmetic overflow.
+const IndefiniteHoldDuration = 100 * 365 * 24 * time.Hour
+
+// OperatorSuspendPatch is the one shape of an operator's suspend (`gc session
+// suspend`, managed or not, and POST /v0/session/{id}/suspend): an indefinite
+// held_until explained by sleep_intent=user-hold, state=suspended, and the
+// pending wake cleared as newer intent (D7). The intent is what tells the hold
+// from a `gc runtime heartbeat` keep-alive, which writes held_until alone.
+func OperatorSuspendPatch(now time.Time) MetadataPatch {
+	patch := ClearWakeRequestPatch()
+	patch["held_until"] = now.Add(IndefiniteHoldDuration).UTC().Format(time.RFC3339)
+	patch["sleep_intent"] = string(SleepReasonUserHold)
+	patch["state"] = string(StateSuspended)
+	return patch
+}
+
 // RequestWakePatch records a controller-owned one-shot create claim.
 func RequestWakePatch(reason string, now time.Time) MetadataPatch {
 	return MetadataPatch{
@@ -487,11 +504,19 @@ func AcknowledgeDrainPatch(now time.Time, freshWake bool) MetadataPatch {
 	return patch
 }
 
-// CompleteDrainPatch records a completed controller drain as ordinary asleep.
-func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPatch {
+// CompleteDrainPatch records info's completed controller drain as ordinary
+// asleep. An operator's suspend outlives the drain it began: the patch leaves
+// sleep_intent=user-hold in place rather than clearing it, so the indefinite
+// held_until never reads as a heartbeat hold that legacy's crash recovery
+// restarts through. Leaving the key unwritten, rather than rewriting it, never
+// revives a hold a wake cleared after info was read.
+func CompleteDrainPatch(info Info, now time.Time, reason string) MetadataPatch {
 	patch := SleepPatch(now, reason)
 	patch["state_reason"] = ""
-	if freshWake {
+	if strings.TrimSpace(info.SleepIntent) == string(SleepReasonUserHold) {
+		delete(patch, "sleep_intent")
+	}
+	if info.WakeMode == "fresh" {
 		patch["session_key"] = ""
 		applyFreshWakeConversationReset(patch)
 		patch["continuation_reset_pending"] = "true"

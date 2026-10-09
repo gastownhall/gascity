@@ -197,7 +197,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 		},
 		{
 			name:  "complete drain fresh mode",
-			patch: CompleteDrainPatch(now, "idle", true),
+			patch: CompleteDrainPatch(Info{WakeMode: "fresh"}, now, "idle"),
 			want: MetadataPatch{
 				"state":                      string(StateAsleep),
 				"state_reason":               "",
@@ -723,7 +723,7 @@ func TestDrainCompletionPatchesClearStopPendingReason(t *testing.T) {
 		patch MetadataPatch
 	}{
 		{name: "acknowledge", patch: AcknowledgeDrainPatch(now, false)},
-		{name: "complete", patch: CompleteDrainPatch(now, "idle", false)},
+		{name: "complete", patch: CompleteDrainPatch(Info{}, now, "idle")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

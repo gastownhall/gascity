@@ -410,6 +410,34 @@ func (s *Store) Sleep(id, reason string, now time.Time) error {
 	return s.ApplyPatch(id, SleepPatch(now, reason))
 }
 
+// OperatorSuspend writes an operator's suspend, OperatorSuspendPatch(now) plus
+// extra, decided from a fresh read of the row and fenced on its revision where
+// the store can (UpdateMetadataFenced). A row closed since the caller read it
+// is refused with an illegal-transition error and written nothing; a CAS lost
+// on every attempt writes nothing and returns an error to retry.
+func (s *Store) OperatorSuspend(id string, now time.Time, extra MetadataPatch) error {
+	closed := false
+	ok, err := s.UpdateMetadataFenced(id, 3, func(info Info, _ PersistedResponse) MetadataPatch {
+		if closed = info.Closed; closed {
+			return nil
+		}
+		patch := OperatorSuspendPatch(now)
+		for k, v := range extra {
+			patch[k] = v
+		}
+		return patch
+	})
+	switch {
+	case err != nil:
+		return err
+	case closed:
+		return &IllegalTransitionError{From: StateClosed, Command: CmdSuspend}
+	case !ok:
+		return fmt.Errorf("suspending session %q: lost to concurrent writes; retry", id)
+	}
+	return nil
+}
+
 // SetWaitHold sets or clears the wait-hold + sleep-intent markers. Replaces the
 // SetMetadataBatch(sessionID, {wait_hold, sleep_intent}) writes in cmd_wait.go.
 // When on is false both keys are cleared (empty-string write).
