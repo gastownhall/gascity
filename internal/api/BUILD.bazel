@@ -415,6 +415,7 @@ go_test(
         "session_create_demand_only_test.go",
         "session_frame_types_test.go",
         "session_get_read_test.go",
+        "session_key_guard_test.go",
         "session_materialization_guard_test.go",
         "session_model_phase0_interface_spec_test.go",
         "session_model_phase0_lifecycle_spec_test.go",

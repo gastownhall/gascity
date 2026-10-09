@@ -1383,7 +1383,7 @@ func conformanceResidenceSweep(t *testing.T, e splitEnv) {
 		Title:    "worker-1",
 		Type:     session.BeadType,
 		Labels:   []string{session.LabelSession},
-		Metadata: map[string]string{"session_id": "sess-1"},
+		Metadata: map[string]string{"test_session_id": "sess-1"},
 	}); err != nil {
 		t.Fatalf("create session bead: %v", err)
 	}

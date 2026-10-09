@@ -52,6 +52,7 @@ func (m *MemStore) closeWithMetadataIfMatch(id string, expectedRevision int64, m
 	if m.beads[i].Revision != expectedRevision {
 		return Bead{}, &PreconditionFailedError{ID: id, Expected: expectedRevision, Current: m.beads[i].Revision}
 	}
+	noteSessionKeys(m.beads[i], metadata)
 	if m.beads[i].Metadata == nil {
 		m.beads[i].Metadata = make(StringMap, len(metadata))
 	}

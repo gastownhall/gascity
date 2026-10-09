@@ -1313,6 +1313,7 @@ func (b optionalBool) ptr() *bool {
 
 // Create persists a new bead via bd create.
 func (s *BdStore) Create(b Bead) (Bead, error) {
+	noteSessionKeys(b, b.Metadata)
 	return s.CreateWithStorage(b, StorageDefault)
 }
 
@@ -1544,6 +1545,7 @@ func bdUpdateArgs(id string, opts UpdateOpts) []string {
 
 // Update modifies fields of an existing bead via bd update.
 func (s *BdStore) Update(id string, opts UpdateOpts) error {
+	noteSessionKeysByID(s.Get, id, opts.Metadata)
 	args := bdUpdateArgs(id, opts)
 	// No fields to update — no-op (bd errors on empty update).
 	if len(args) == 3 {
@@ -2059,6 +2061,7 @@ func beadSliceContains(items []Bead, id string) bool {
 
 // SetMetadata sets a key-value metadata pair on a bead via bd update.
 func (s *BdStore) SetMetadata(id, key, value string) error {
+	noteSessionKeysByID(s.Get, id, map[string]string{key: value})
 	err := s.runBDTransientWrite("update", "--json", id,
 		"--set-metadata", key+"="+value)
 	if err != nil {
@@ -2074,6 +2077,7 @@ func (s *BdStore) SetMetadata(id, key, value string) error {
 // sequential bd update calls. Note: not truly atomic for external stores,
 // but each individual call is idempotent.
 func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	noteSessionKeysByID(s.Get, id, kvs)
 	if len(kvs) == 0 {
 		return nil
 	}
@@ -2591,6 +2595,9 @@ func (s *BdStore) Ping() error {
 // back to per-id closes, the same shared reason is forwarded to every
 // fallback close.
 func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	for _, id := range ids {
+		noteSessionKeysByID(s.Get, id, metadata)
+	}
 	if len(ids) == 0 {
 		return 0, nil
 	}
