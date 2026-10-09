@@ -1048,22 +1048,11 @@ func TestBazelMultiLaneWorkerEnvPreflight(t *testing.T) {
 	if strings.Contains(pre.Run, "--depth") {
 		t.Errorf("lane preflight fetches with --depth into a full-history checkout:\n%s", pre.Run)
 	}
-	// The unit lane measures: it leads every non-empty lane list
-	// (TestBazelMultiLaneLaneList runs the Lanes step against wantMultiLanes).
-	for _, event := range multiLaneEvents {
-		for _, mode := range multiLaneModes {
-			if l := wantMultiLanes(event, mode); len(l) > 0 && l[0] != "unit" {
-				t.Errorf("event %s, mode %s: lanes %v start without unit, which measures the host", event, mode, l)
-			}
-		}
-	}
-	measAt, meas := findStep(lane, runs(rbeWorkerScript))
-	if meas == nil || meas.If != "always() && matrix.lane == 'unit' && steps.worker-env.outputs.measure == 'true'" ||
-		len(meas.Env) != 1 || meas.Env["WORKER_MODE"] != "measure" {
-		t.Fatalf("lane job: no unit-lane host measurement step (if measure, WORKER_MODE=measure): %+v", meas)
-	}
-	if measAt != len(lane.Steps)-1 {
-		t.Errorf("the host measurement is step %d of %d; it must be last, after every bazel command (its toolset install would re-key the client's actions)", measAt, len(lane.Steps))
+	// Fix 10: the lane job no longer measures its own Blacksmith host; the
+	// worker-host job does, on every run, now that fix 3 makes its fetch and
+	// parity steps unconditional during S3-S5.
+	if _, meas := findStep(lane, runs(rbeWorkerScript)); meas != nil {
+		t.Errorf("lane job still measures the host (%+v); worker-host covers this now (fix 10), once per run instead of once per lane", meas)
 	}
 
 	coverage := wf.Jobs["coverage"]

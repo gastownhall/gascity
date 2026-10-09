@@ -252,6 +252,8 @@ var mergeQueueEventExprs = map[string]string{
 	"bazel.yml jobs.coverage.steps[worker-env].env.DEFAULT_BRANCH":                         "main",
 	"bazel.yml jobs.sync-check.steps[pin].env.DEFAULT_BRANCH":                              "main",
 	"bazel.yml jobs.coverage.steps[ci-analytics].env.PR_HINT":                              "0",
+	"bazel.yml jobs.worker-host.steps[default-branch].env.DEFAULT_BRANCH":                  "main",
+	"bazel.yml jobs.worker-host.steps[default-branch].env.BASE_SHA":                        mergeQueueBaseSHA, // merge_group.base_sha (fix 12)
 	// ci.yml
 	"ci.yml concurrency.group":                               "ci-merge_group-" + mergeQueueRef,
 	"ci.yml concurrency.cancel-in-progress":                  "false",

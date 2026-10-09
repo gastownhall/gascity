@@ -446,9 +446,9 @@ change, that is drift, and it is loud (`tools/rbe/worker-env-drift`):
   hours, so drift usually opens the issue before CI meets it.
 - A change to the worker host (`tools/rbe/worker-env*`,
   `blacksmith-worker.sh`, `platforms/BUILD.bazel`) is measured on the
-  Blacksmith image in bazel.yml's `bazel / unit` lane, which the required
+  Blacksmith image in bazel.yml's `worker-host` job, which the required
   `bazel test (side-by-side)` gate fans in. If the PR's manifest is not
-  what that image measures, the lane fails.
+  what that image measures, the job fails.
 
 To re-pin, anyone with write access:
 
@@ -463,9 +463,9 @@ To re-pin, anyone with write access:
    the old pin don't schedule.
 3. Open the PR. Pool workers run the default branch's provisioning, so
    the new pin isn't reliably served before it merges, and every
-   bazel.yml lane skips the remote suite. The unit lane measures its own
-   Blacksmith host against the new manifest instead, and fails if they
-   differ.
+   bazel.yml lane skips the remote suite. The worker-host job measures
+   its own Blacksmith host against the new manifest instead, and fails
+   if they differ.
 4. Merge. The canary runs on the merge and closes the issues of
    superseded pins, which lifts the farm's cap. Don't close the drift
    issue before the re-pin lands.
@@ -481,7 +481,29 @@ re-pin.
 If an issue stays open for the current pin while hosts match again,
 close it by hand.
 
-## The outcome: protected PR feedback in under five minutes
+### Bumping the rbe-worker pin
+
+`.github/actions/rbe-worker/pin` names the `gastownhall/rbe-worker` commit
+the worker code pins (not to be confused with the worker-env manifest pin
+above). Bumping it is a one-line PR: change the 40-hex sha in `pin` to the
+new commit, open it, merge it.
+
+`bazel.yml`'s `worker-host` job measures the bump before it lands: it
+fetches the PR's pinned commit anonymously (no secret, `refs/heads/main`
+only), checks the fetched tree against this checkout's `tools/rbe` (S3-S5
+parity), and, because the pin moved, measures this Blacksmith host against
+it. H5 then walks every commit between the default branch's pin and the
+PR's: each one must be a GitHub-verified, signed commit, authored by
+`web-flow` (GitHub's merge-button identity), with an associated pull
+request merged into `rbe-worker`'s main. A direct push to `rbe-worker`
+main, however it's signed, fails this check: only a squash-merged PR
+reaches it. A rollback (a new pin that is not a descendant of the old one)
+warns instead of failing, so reverting a bad rbe-worker commit isn't
+blocked on rewriting its own history.
+
+The range check is dormant on a PR that doesn't move the pin: H5 has
+nothing to walk, and the parity/measure steps run anyway (every
+`worker-host` run fetches and diffs during S3-S5, pin-moved or not).
 
 The developer-visible service-level objective is p95 **under five minutes**
 from GitHub Actions PR-workflow creation until the required automated `CI`
