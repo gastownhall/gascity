@@ -429,9 +429,16 @@ type workflowServeDrainResult struct {
 func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) (workflowServeDrainResult, error) {
 	result := workflowServeDrainResult{}
 	idlePolls := 0
+	emits := newExecutionEmitDeferral(cityPath, storePath, stderr)
+	defer emits.flush()
 	for {
 		serveQuery := workflowServeWorkQuery(agentCfg, workQuery)
 		queue, err := workflowServeList(serveQuery, storePath, workEnv)
+		if err == nil {
+			// Project every processed root whose controls have stopped
+			// arriving; a root with a control in this queue waits for it.
+			emits.flushSettled(queue)
+		}
 		if err != nil {
 			workflowTracef("serve query-error agent=%s err=%v", agentCfg.QualifiedName(), err)
 			// Surface a killed/timed-out control work query on the event
@@ -467,7 +474,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			// control ga-fw2fm. The silent no-op now emits a separate
 			// `process-control ... skip reason=bead_not_open` line inside
 			// ProcessControl itself; see runtime.go.
-			if err := controlDispatcherServe(cityPath, storePath, beadID, io.Discard, stderr); err != nil {
+			if err := controlDispatcherServe(cityPath, storePath, beadID, io.Discard, stderr, emits); err != nil {
 				if errors.Is(err, dispatch.ErrControlPending) {
 					pendingCount++
 					// Same rule as the transient arm below: a pending bead

@@ -213,7 +213,7 @@ func TestRunControlDispatcherInStoreClosesScopeStoreOnError(t *testing.T) {
 	t.Cleanup(func() { openControlStoreForDispatch = prev })
 
 	var stdout, stderr bytes.Buffer
-	err := runControlDispatcherInStore(cityDir, cityDir, "ga-missing-control", &stdout, &stderr)
+	err := runControlDispatcherInStore(cityDir, cityDir, "ga-missing-control", &stdout, &stderr, nil)
 	if err == nil {
 		t.Fatalf("runControlDispatcherInStore: err = nil, want an error for a missing control bead (stderr=%q)", stderr.String())
 	}
@@ -261,7 +261,7 @@ func TestRunControlDispatcherInStoreClosesScopeStoreOnSuccess(t *testing.T) {
 	t.Cleanup(func() { openControlStoreForDispatch = prev })
 
 	var stdout, stderr bytes.Buffer
-	if err := runControlDispatcherInStore(cityDir, cityDir, control.ID, &stdout, &stderr); err != nil {
+	if err := runControlDispatcherInStore(cityDir, cityDir, control.ID, &stdout, &stderr, nil); err != nil {
 		t.Fatalf("runControlDispatcherInStore: %v (stderr=%q)", err, stderr.String())
 	}
 	// Assert the dispatch actually reached the processed branch. Without this

@@ -167,7 +167,7 @@ func TestDrainWorkflowServeWorkProcessesEachControlOnceAndSeesItsSuccessors(t *t
 
 	var processed []string
 	var scopeCheck beads.Bead
-	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer, _ *executionEmitDeferral) error {
 		processed = append(processed, beadID)
 		if len(processed) > 10 {
 			t.Fatalf("drain re-processed control beads %v: a closed control bead keeps being re-offered", processed)

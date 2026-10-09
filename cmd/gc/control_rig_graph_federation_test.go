@@ -437,9 +437,12 @@ func TestControlBeadLedgerResolvesTheGraphLegWithoutMovingTheWorkLeg(t *testing.
 		t.Fatalf("premise failed: the binding also holds %s, so the leg-order assertion below is vacuous", local.ID)
 	}
 
-	gotStore, gotBead, err := controlBeadLedger(cityPath, rigPath, cfg, rigStore, resident.ID)
+	gotStore, gotBead, federated, err := controlBeadLedger(cityPath, rigPath, cfg, rigStore, resident.ID)
 	if err != nil {
 		t.Fatalf("controlBeadLedger for a binding-resident id: %v", err)
+	}
+	if !federated {
+		t.Errorf("controlBeadLedger for a binding-resident id reported the scope leg, want the federated binding leg")
 	}
 	if gotBead.ID != resident.ID {
 		t.Errorf("resolved bead = %q, want %q", gotBead.ID, resident.ID)
@@ -459,9 +462,12 @@ func TestControlBeadLedgerResolvesTheGraphLegWithoutMovingTheWorkLeg(t *testing.
 		t.Errorf("the resolved graph leg wrote %s into the rig's own store, want the city graph binding", probe.ID)
 	}
 
-	gotStore, gotBead, err = controlBeadLedger(cityPath, rigPath, cfg, rigStore, local.ID)
+	gotStore, gotBead, federated, err = controlBeadLedger(cityPath, rigPath, cfg, rigStore, local.ID)
 	if err != nil {
 		t.Fatalf("controlBeadLedger for a rig-resident id: %v", err)
+	}
+	if federated {
+		t.Errorf("controlBeadLedger for a rig-resident id reported the federated binding leg, want the scope leg")
 	}
 	if gotStore != beads.Store(rigStore) {
 		t.Errorf("graph leg for a rig-resident id = %T, want the rig's own store; the scope store must stay the first leg", gotStore)
