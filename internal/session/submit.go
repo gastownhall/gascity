@@ -98,7 +98,7 @@ func (m *Manager) Submit(ctx context.Context, id, message, resumeCommand string,
 
 func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent, policy ResumePolicy) (SubmitOutcome, error) {
 	var outcome SubmitOutcome
-	err := withSessionMutationLock(id, func() error {
+	err := withSessionStartLock(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
@@ -180,11 +180,23 @@ func (m *Manager) supportsFollowUpLocked(b beads.Bead) bool {
 // interruptAndSubmitLocked runs after submit's policy check, so its sends
 // do not queue.
 func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, policy ResumePolicy) error {
+	// A row whose drain-ack stop is pending belongs to the controller's stop:
+	// no interrupt keys, no hard-restart stop (as ensureRunning refuses it).
+	if drainAckStopPendingMetadata(b.Metadata) {
+		return fmt.Errorf("%w: %s", ErrSessionStopping, id)
+	}
 	running := State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName)
 	if !running {
 		_, err := m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true, policy)
 		return err
 	}
+	// Every interrupt may end in a stop and a restart: take the runtime lease
+	// before sending anything, and carry it to the restart (D8D-5).
+	ctx, release, err := m.leaseForRestartLocked(ctx, id, sessName)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if requiresHardRestartInterrupt(b) {
 		piTranscriptPath, err := piPendingTurnPath(b, hints)
 		if err != nil {
@@ -233,7 +245,7 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 			return err
 		}
 	}
-	_, err := m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true, policy)
+	_, err = m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true, policy)
 	return err
 }
 

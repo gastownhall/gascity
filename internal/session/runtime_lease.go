@@ -220,11 +220,7 @@ func TryRuntimeLease(s *Store, req RuntimeLeaseRequest) (*RuntimeLease, error) {
 	if req.ID == "" {
 		return l, nil
 	}
-	host, err := runtimeLeaseHostname()
-	if err != nil {
-		host = "unknown"
-	}
-	l.holder = host + "/" + strconv.Itoa(os.Getpid()) + "/" + runtimeLeaseNonce()
+	l.holder = newRuntimeLeaseHolder()
 	if err := l.acquireRecord(req.City, req.TTL); err != nil {
 		writeRuntimeLeaseLockBody(lock, prev, now()) // no record written: keep the previous token
 		unlockRuntimeNameFile(lock)
@@ -532,7 +528,7 @@ func (r runtimeLeaseRecord) free(now time.Time, flock string) (free, malformed b
 // unknown, so no takeover is immediate.
 func runtimeLeaseFlockIdentity(f *os.File, token string) string {
 	boot := runtimeLeaseBootID()
-	if boot == "" || token == "" {
+	if boot == "" || f == nil || token == "" {
 		return ""
 	}
 	fi, err := f.Stat()
@@ -600,12 +596,20 @@ func writeRuntimeLeaseLockBody(f *os.File, token string, now time.Time) {
 }
 
 func unlockRuntimeNameFile(f *os.File) {
+	if f == nil {
+		return
+	}
 	syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // close releases it too
 	f.Close()                                   //nolint:errcheck // best-effort cleanup
 }
 
-func runtimeLeaseNonce() string {
+// newRuntimeLeaseHolder names one acquire: host/pid/nonce.
+func newRuntimeLeaseHolder() string {
+	host, err := runtimeLeaseHostname()
+	if err != nil {
+		host = "unknown"
+	}
 	var b [8]byte
 	_, _ = rand.Read(b[:])
-	return hex.EncodeToString(b[:])
+	return host + "/" + strconv.Itoa(os.Getpid()) + "/" + hex.EncodeToString(b[:])
 }

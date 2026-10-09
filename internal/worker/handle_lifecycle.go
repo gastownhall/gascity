@@ -129,7 +129,7 @@ func (h *SessionHandle) Stop(ctx context.Context) (err error) {
 	if id == "" {
 		return nil
 	}
-	err = h.manager.Suspend(id)
+	err = h.manager.SuspendContext(ctx, id)
 	return err
 }
 
@@ -164,7 +164,7 @@ func (h *SessionHandle) Kill(ctx context.Context) (err error) {
 	if id == "" {
 		return nil
 	}
-	err = h.manager.Kill(id)
+	err = h.manager.KillContext(ctx, id)
 	return err
 }
 

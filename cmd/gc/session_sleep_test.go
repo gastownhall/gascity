@@ -1328,7 +1328,7 @@ func TestAdvanceSessionDrainsWithSessions_UsesProvidedWakeEvaluations(t *testing
 		t.Fatalf("Start: %v", err)
 	}
 
-	advanceSessionDrainsWithSessionsTraced(
+	advanceSessionDrainsWithSessionsTraced("",
 		dt,
 		sp,
 		nil,

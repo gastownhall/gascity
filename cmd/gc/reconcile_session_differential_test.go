@@ -284,6 +284,13 @@ func newParityOutcome(all []beads.Bead, sp twinProvider, rec *memRecorder) parit
 			if parityRandom[k] && v != "" {
 				b.Metadata[k] = "<set>"
 			}
+			// The runtime lease record's epoch is a holder's bookkeeping
+			// (SESSION-RUNTIME-012): legacy's start takes one, and v2 takes
+			// its own per effect (PR B). A released record's cleared keys
+			// are too; a held one still differs, which is a leaked lease.
+			if strings.HasPrefix(k, "runtime_lease_") && (k == session.RuntimeLeaseEpochKey || v == "") {
+				delete(b.Metadata, k)
+			}
 		}
 		if slices.Contains(b.Labels, session.LabelSession) || b.Type == session.BeadType {
 			out.rows[b.ID] = b
