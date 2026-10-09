@@ -7475,14 +7475,14 @@ func TestExecutePreparedStartWave_RateLimitStartupDeathQuarantinesWithoutWakeFai
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
-			"session_name":         "test-agent",
-			"session_key":          "stale-key-abc",
-			"template":             "worker",
-			"state":                "active",
-			"last_woke_at":         clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
-			"wake_attempts":        "2",
-			"started_config_hash":  "keep-hash",
-			"continuation_command": "resume",
+			"session_name":              "test-agent",
+			"session_key":               "stale-key-abc",
+			"template":                  "worker",
+			"state":                     "active",
+			"last_woke_at":              clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
+			"wake_attempts":             "2",
+			"started_config_hash":       "keep-hash",
+			"test_continuation_command": "resume",
 		},
 	})
 	if err != nil {

@@ -121,6 +121,7 @@ func (m *MemStore) CompareAndSetMetadataKey(id, key, expected, next string) (boo
 	if m.beads[i].Metadata[key] != expected {
 		return false, nil
 	}
+	noteSessionKeys(m.beads[i], map[string]string{key: next})
 	if m.beads[i].Metadata == nil {
 		m.beads[i].Metadata = make(StringMap)
 	}
