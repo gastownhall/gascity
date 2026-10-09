@@ -151,8 +151,10 @@ func closeScopedControl(store beads.Store, controlID string, closeMetadata map[s
 	}
 	terminal := current
 	terminal.Status = "closed"
-	terminal.Metadata = make(map[string]string, len(current.Metadata)+len(closeMetadata))
-	maps.Copy(terminal.Metadata, current.Metadata)
+	terminal.Metadata = maps.Clone(current.Metadata)
+	if terminal.Metadata == nil {
+		terminal.Metadata = make(map[string]string, len(closeMetadata))
+	}
 	maps.Copy(terminal.Metadata, closeMetadata)
 
 	scopeResult, err := reconcileScopeForTerminalMember(store, terminal, opts, scopeMemberClosing)
