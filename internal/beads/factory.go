@@ -50,6 +50,10 @@ const (
 	// from the deprecated process-wide nativeForceFallbackGate even though
 	// both end in the same BdStore fallback.
 	nativeTransportOffGate = "native_transport_off"
+	// nativeTransportUnsetGate is the preflight gate recorded when an open
+	// that threaded no native_transport value meets a remote backend: it
+	// takes BdStore rather than inheriting auto's native requirement.
+	nativeTransportUnsetGate = "native_transport_unset"
 
 	// gcHookStampPrefix is the comment prefix gc embeds in every hook script
 	// it installs. Hooks bearing this stamp are gc's own event-forwarding
@@ -158,9 +162,14 @@ type NativeTransportMode string
 
 const (
 	// NativeTransportUnset is the zero value: "nobody threaded a value."
-	// decideNativeTransport treats it exactly like NativeTransportAuto, so an
-	// unthreaded open path behaves exactly like today's default and can never
-	// newly refuse native.
+	// decideNativeTransport treats it like NativeTransportAuto for a local
+	// backend, so an unthreaded open path behaves exactly like today's default
+	// and can never newly refuse native. For a REMOTE backend it is NOT auto:
+	// an unthreaded open (the control plane, a store path outside any city)
+	// never requires native, so it gets BdStore exactly as it did before gc
+	// could serve a remote scope natively. Only a caller that resolved the
+	// city's value and threaded auto opts a remote scope into the native
+	// requirement.
 	NativeTransportUnset NativeTransportMode = ""
 	// NativeTransportAuto is the default: native when preflight-eligible.
 	// For a remote backend native is REQUIRED (see decideNativeTransport).
@@ -188,7 +197,10 @@ type nativeTransportVerdict struct {
 //	off      any      BdStore (the bd CLI speaks to the backend itself)
 //	auto     remote   native REQUIRED: any failure is a terminal
 //	                  *HTTPNativeOpenRequiredError naming native_transport="off"
+//	unset    remote   BdStore (gate native_transport_unset): an unthreaded
+//	                  open never requires native
 //	auto     local    native when preflight-eligible, else BdStore
+//	unset    local    same as auto
 //
 // A remote scope never falls back to BdStore silently under auto: the
 // fallback would hide an outage and change the write semantics.
@@ -202,6 +214,12 @@ func decideNativeTransport(mode NativeTransportMode, remote bool) nativeTranspor
 		return nativeTransportVerdict{
 			Gate:   nativeTransportOffGate,
 			Reason: fmt.Sprintf("beads.native_transport=%q", string(NativeTransportOff)),
+		}
+	}
+	if remote && mode == NativeTransportUnset {
+		return nativeTransportVerdict{
+			Gate:   nativeTransportUnsetGate,
+			Reason: "beads.native_transport was not threaded into this open; only an explicit auto requires the native store for a remote backend",
 		}
 	}
 	return nativeTransportVerdict{AllowNative: true, RequireNative: remote}
@@ -234,16 +252,28 @@ type metadataBackendVerdict struct {
 	Backend string
 	Gate    string
 	Reason  string
+	// ActivationRoot is, on the remote route, the scope whose .beads holds the
+	// remote activation (metadata.json plus the per-user sidecar): the scope
+	// itself, or the city for a rig that inherits the city's backend.
+	ActivationRoot string
 }
 
 // decideMetadataBackend decides, from .beads/metadata.json ALONE, which route a
 // store open takes. It dials nothing.
 //
 //	metadata                         route
+//	none, city's names a remote one  remote    (a rig inheriting the city's backend)
 //	unreadable / no backend named    preflight (it reports the missing/unread gate)
 //	backend the native store serves  preflight (Dolt probes decide eligibility)
 //	registered remote backend        remote    (wire_compat decides; no Dolt probe)
 //	any other backend                BdStore   (gate metadata_backend, no probes)
+//
+// A rig scope with no metadata.json of its own has not chosen a backend: it
+// inherits its city's (the rule cmd/gc's scopeSkipsManagedDoltForInit applies
+// to dispatch). When the city's metadata names a registered remote backend the
+// rig is served by the city's remote activation, so it takes the remote route
+// against that activation rather than a Dolt preflight that can only fail and
+// land it on BdStore silently. cityPath may be empty (no city to inherit from).
 //
 // It runs before preflight and dials nothing, so a scope whose backend the
 // native store does not serve locally skips the Dolt endpoint, identity and
@@ -252,8 +282,11 @@ type metadataBackendVerdict struct {
 // native store does not serve this backend", not "every non-dolt backend is a
 // bd backend". A registered remote backend never reaches the BdStore arm under
 // native_transport=auto: decideNativeTransport makes it require native.
-func decideMetadataBackend(scopeRoot string) metadataBackendVerdict {
+func decideMetadataBackend(scopeRoot, cityPath string) metadataBackendVerdict {
 	metadataPath := filepath.Join(scopeRoot, ".beads", "metadata.json")
+	if cityBackend, ok := inheritedRemoteBackend(scopeRoot, cityPath); ok {
+		return metadataBackendVerdict{Route: metadataBackendRouteRemote, Backend: cityBackend, ActivationRoot: cityPath}
+	}
 	backend, named, err := contract.ReadMetadataBackend(fsys.OSFS{}, metadataPath)
 	backend = strings.TrimSpace(backend)
 	switch {
@@ -262,7 +295,7 @@ func decideMetadataBackend(scopeRoot string) metadataBackendVerdict {
 	case contract.NativeStoreServesBackend(backend):
 		return metadataBackendVerdict{Route: metadataBackendRoutePreflight, Backend: backend}
 	case contract.BackendIsRemote(backend):
-		return metadataBackendVerdict{Route: metadataBackendRouteRemote, Backend: backend}
+		return metadataBackendVerdict{Route: metadataBackendRouteRemote, Backend: backend, ActivationRoot: scopeRoot}
 	default:
 		return metadataBackendVerdict{
 			Route:   metadataBackendRouteBdStore,
@@ -315,9 +348,10 @@ type StoreOpenOptions struct {
 
 	// NativeTransport is the resolved beads.native_transport mode for this
 	// city, consulted by decideNativeTransport before preflight runs. The
-	// zero value (NativeTransportUnset) behaves exactly like
-	// NativeTransportAuto, so an unthreaded open path can never newly refuse
-	// native. Threaded by VALUE, not read from a live config pointer, so a
+	// zero value (NativeTransportUnset) behaves like NativeTransportAuto for a
+	// local backend, so an unthreaded open path can never newly refuse native;
+	// for a remote backend it takes BdStore and never requires native (see
+	// decideNativeTransport). Threaded by VALUE, not read from a live config pointer, so a
 	// config change after this open cannot flip a store this call already
 	// returned — composition-root callers resolve it once (per the design's
 	// boot-latch convention) and pass the snapshot in.
@@ -426,10 +460,11 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		return opts.openBdFallback(provider, diag)
 	}
 
-	// The metadata backend is classified from metadata.json alone, before
-	// anything that probes. It decides both the transport rule (a remote
-	// backend REQUIRES native under auto) and which route the open takes.
-	backendRoute := decideMetadataBackend(opts.ScopeRoot)
+	// The metadata backend is classified from metadata.json alone (the
+	// scope's, or for a rig with none of its own its city's), before anything
+	// that probes. It decides both the transport rule (a remote backend
+	// REQUIRES native under an explicit auto) and which route the open takes.
+	backendRoute := decideMetadataBackend(opts.ScopeRoot, opts.CityPath)
 	verdict := decideNativeTransport(opts.NativeTransport, backendRoute.Route == metadataBackendRouteRemote)
 	if !verdict.AllowNative {
 		diag := BeadsDiagnostic{
@@ -444,7 +479,7 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 	if verdict.RequireNative {
 		// The remote route. It never reaches persistedDoltModeRefusal or the
 		// Dolt preflight below, and it never reaches openBdFallback.
-		return opts.openRemoteNative(ctx, provider, backendRoute.Backend)
+		return opts.openRemoteNative(ctx, provider, backendRoute)
 	}
 
 	if !contract.ProviderUsesBDContract(provider) {

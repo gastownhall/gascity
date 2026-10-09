@@ -142,7 +142,7 @@ func TestDecideMetadataBackendTable(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := decideMetadataBackend(tc.scope).Route; got != tc.want {
+			if got := decideMetadataBackend(tc.scope, "").Route; got != tc.want {
 				t.Fatalf("route = %v, want %v", got, tc.want)
 			}
 		})

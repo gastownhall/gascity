@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	bdhttp "github.com/steveyegge/beads/backend/http"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // gc's native store over a REMOTE beads backend (DESIGN C2): a scope whose
@@ -94,28 +96,93 @@ func IsHTTPNativeOpenRequired(err error) bool {
 // fallback a local scope takes is not available over the wire.
 var ErrConditionalReleaseRemoteUnsupported = errors.New("conditional release unsupported on a remote backend")
 
-// ScopeUsesRemoteBackend reports whether the scope's metadata names a
+// inheritedRemoteBackend reports the city's registered remote backend for a
+// rig scope that has no metadata.json of its own. Only a missing file
+// inherits: metadata that exists but names nothing, or cannot be parsed, is
+// the scope's own and stays with the preflight that reports it.
+func inheritedRemoteBackend(scopeRoot, cityPath string) (string, bool) {
+	if strings.TrimSpace(cityPath) == "" || sameScopeRoot(scopeRoot, cityPath) {
+		return "", false
+	}
+	osfs := fsys.OSFS{}
+	if _, err := osfs.Stat(filepath.Join(scopeRoot, ".beads", "metadata.json")); !errors.Is(err, fs.ErrNotExist) {
+		return "", false
+	}
+	backend, named, err := contract.ReadMetadataBackend(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json"))
+	backend = strings.TrimSpace(backend)
+	if err != nil || !named || !contract.BackendIsRemote(backend) {
+		return "", false
+	}
+	return backend, true
+}
+
+// sameScopeRoot compares two scope roots after cleaning, resolving symlinks
+// where it can.
+func sameScopeRoot(a, b string) bool {
+	clean := func(p string) string {
+		p = filepath.Clean(p)
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			return resolved
+		}
+		return p
+	}
+	return clean(a) == clean(b)
+}
+
+// ScopeUsesRemoteBackend reports whether the scope's own metadata names a
 // registered remote backend. Raw-SQL and Dolt-only paths consult it to refuse
 // rather than shell out to a verb the remote backend does not serve.
 func ScopeUsesRemoteBackend(scopeRoot string) bool {
-	return decideMetadataBackend(scopeRoot).Route == metadataBackendRouteRemote
+	return decideMetadataBackend(scopeRoot, "").Route == metadataBackendRouteRemote
+}
+
+// RemoteBackendActivationRoot reports, for a scope served by a registered
+// remote backend, the scope whose .beads holds the remote activation: the
+// scope itself when its own metadata names the backend, or the city for a rig
+// with no metadata of its own whose city's does. The native open and the bd
+// CLI (native_transport = "off") both reach the store through it, so the two
+// lanes of one scope always talk to the same server.
+func RemoteBackendActivationRoot(scopeRoot, cityPath string) (string, bool) {
+	verdict := decideMetadataBackend(scopeRoot, cityPath)
+	if verdict.Route != metadataBackendRouteRemote {
+		return "", false
+	}
+	return verdict.ActivationRoot, true
 }
 
 // openRemoteNative is the remote route of OpenStoreAtForCity under
 // native_transport=auto. Every failure is terminal: there is no BdStore
 // fallback on this route.
-func (opts StoreOpenOptions) openRemoteNative(ctx context.Context, provider, backend string) (StoreOpenResult, error) {
+//
+// The per-open options (transport, user agent, credential) are resolved ONCE
+// here, and the wire_compat handshake and the store open both take them from
+// this one value, so the probe can never verify a server through one
+// transport while the store dials it through another. No process environment
+// is projected or withheld for the remote open, and the global env mutex is
+// never held across a network call: it is taken only to resolve the
+// credential (remoteOpenOptions), which reads the environment and dials
+// nothing.
+func (opts StoreOpenOptions) openRemoteNative(ctx context.Context, provider string, route metadataBackendVerdict) (StoreOpenResult, error) {
+	backend := route.Backend
 	refuse := func(gate, reason string) (StoreOpenResult, error) {
 		return StoreOpenResult{}, &HTTPNativeOpenRequiredError{ScopeRoot: opts.ScopeRoot, Backend: backend, Gate: gate, Reason: reason}
 	}
 	if !contract.ProviderUsesBDContract(provider) {
 		return refuse(string(contract.PreflightCheckProviderContract), fmt.Sprintf("provider %q does not use the bd contract", provider))
 	}
+	activationRoot := route.ActivationRoot
+	if activationRoot == "" {
+		activationRoot = opts.ScopeRoot
+	}
+	beadsDir := filepath.Join(activationRoot, ".beads")
+	openOpts := remoteOpenOptions(ctx, beadsDir)
 	checker := opts.PreflightChecker
 	if checker.WireHandshake == nil {
-		checker.WireHandshake = remoteWireHandshake
+		checker.WireHandshake = func(scope string) (contract.PreflightWireHandshake, error) {
+			return remoteWireHandshakeWith(scope, openOpts)
+		}
 	}
-	result, err := checker.Check(opts.ScopeRoot)
+	result, err := checker.Check(activationRoot)
 	if err != nil {
 		return refuse("preflight_unavailable", err.Error())
 	}
@@ -123,10 +190,10 @@ func (opts StoreOpenOptions) openRemoteNative(ctx context.Context, provider, bac
 		diag := diagnosticFromPreflight(result)
 		return refuse(diag.PreflightGate, diag.PreflightReason)
 	}
-	if scopeHasExecutableBdHooks(opts.ScopeRoot) {
+	if scopeHasExecutableBdHooks(activationRoot) {
 		return refuse(nativeHooksGate, "bd hooks are installed and the native store would not run them; remove .beads/hooks/on_create,on_update,on_close")
 	}
-	native, err := opts.openRemoteNativeStore(ctx)
+	native, err := opts.openRemoteNativeStore(ctx, activationRoot, openOpts)
 	if err != nil {
 		return refuse("native_open", err.Error())
 	}
@@ -156,20 +223,47 @@ var (
 	remoteHandshakeMu    sync.Mutex
 	remoteHandshakeCache = map[string]remoteHandshakeEntry{}
 	remoteHandshakeNow   = time.Now
-	// remoteHandshakeDial is the handshake dial. It takes the transport from
-	// the same per-open options the store open uses (nativeOpenOptions), so
-	// the probe and the store reach the server the same way. The per-city
-	// credential (G7) joins it there.
-	remoteHandshakeDial = func(ctx context.Context, beadsDir string, target bdhttp.Target) (*bdhttp.ServerSnapshot, error) {
-		return bdhttp.Handshake(ctx, target, bdhttp.Options{UserAgent: remoteUserAgent, HTTPClient: nativeOpenOptions(beadsDir).HTTPClient})
+	// remoteHandshakeDial is the handshake dial, over the per-open options the
+	// store open uses (remoteHandshakeOptions), so the probe and the store
+	// reach the server the same way.
+	remoteHandshakeDial = func(ctx context.Context, _ string, target bdhttp.Target, opts beadslib.OpenOptions) (*bdhttp.ServerSnapshot, error) {
+		return bdhttp.Handshake(ctx, target, remoteHandshakeOptions(opts))
 	}
 )
 
-// remoteWireHandshake reads the scope's remote activation and its server's
-// handshake, cached per process by (scope, server, pinned project). It dials
-// with the library's own credential ladder, the same one the store open uses,
-// so a probe can never verify a server the store then cannot reach.
+// remoteHandshakeOptions maps one open's per-open options onto the
+// handshake's: the same transport and user agent the store dials with.
+//
+// The credential is the one difference, and it is the linked library's: the
+// pinned beads (S6, 4e9d3dcba9) gives bdhttp.Handshake no per-call credential
+// seam, so the probe authorizes with the library's ambient ladder, read at
+// request time. The remote open projects and withholds no environment, so
+// that read sees the same ambient ladder (BEADS_CREDENTIALS_FILE included)
+// the store's credential was resolved from, and the store holds its resolved
+// credential explicitly (OpenOptions.Credential) for its lifetime. beads S6f
+// (43a9c73571) adds bdhttp.Options.Credential; once the pin moves there, the
+// probe takes the very same resolved credential with one line in the literal
+// below: Credential: opts.Credential.(bdhttp.ProvidedCredential).Provider
+// (the value remoteOpenOptions always sets when it resolved one).
+func remoteHandshakeOptions(opts beadslib.OpenOptions) bdhttp.Options {
+	userAgent := opts.UserAgent
+	if userAgent == "" {
+		userAgent = remoteUserAgent
+	}
+	return bdhttp.Options{UserAgent: userAgent, HTTPClient: opts.HTTPClient}
+}
+
+// remoteWireHandshake is remoteWireHandshakeWith over the scope's default
+// per-open options.
 func remoteWireHandshake(scope string) (contract.PreflightWireHandshake, error) {
+	return remoteWireHandshakeWith(scope, nativeOpenOptions(filepath.Join(scope, ".beads")))
+}
+
+// remoteWireHandshakeWith reads the scope's remote activation and its server's
+// handshake, cached per process by (scope, server, pinned project). It dials
+// through the same per-open options the store open uses, so a probe can never
+// verify a server the store then cannot reach.
+func remoteWireHandshakeWith(scope string, openOpts beadslib.OpenOptions) (contract.PreflightWireHandshake, error) {
 	beadsDir := filepath.Join(scope, ".beads")
 	target, err := bdhttp.LoadTarget(beadsDir)
 	if err != nil {
@@ -192,7 +286,7 @@ func remoteWireHandshake(scope string) (contract.PreflightWireHandshake, error) 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), remoteHandshakeTimeout)
 	defer cancel()
-	snapshot, err := remoteHandshakeDial(ctx, beadsDir, target)
+	snapshot, err := remoteHandshakeDial(ctx, beadsDir, target, openOpts)
 	if err != nil {
 		return contract.PreflightWireHandshake{}, &contract.PreflightWireError{Reason: classifyRemoteHandshakeError(err), Err: err}
 	}
@@ -234,10 +328,62 @@ func classifyRemoteHandshakeError(err error) contract.PreflightWireReason {
 // use OpenNativeStore: a composition root's native opener resolves a Dolt
 // environment (managed port, recovery, reconnect hook) that has no meaning for
 // a remote backend and could start a local Dolt server for nothing. The
-// library's dispatch reads the scope's own activation; gc projects nothing.
-func (opts StoreOpenOptions) openRemoteNativeStore(ctx context.Context) (Store, error) {
+// library's dispatch reads the activation; gc projects nothing.
+func (opts StoreOpenOptions) openRemoteNativeStore(ctx context.Context, activationRoot string, openOpts beadslib.OpenOptions) (Store, error) {
 	if opts.OpenRemoteNativeStore != nil {
 		return opts.OpenRemoteNativeStore()
 	}
-	return newNativeDoltStoreAt(ctx, opts.ScopeRoot, nil)
+	return openRemoteNativeDoltStore(ctx, activationRoot, openOpts)
+}
+
+// remoteNativeOpenBestAvailable is the library's per-open dispatch, held in a
+// variable so a test can observe the options the remote open hands it.
+var remoteNativeOpenBestAvailable = beadslib.OpenBestAvailableWith
+
+// openRemoteNativeDoltStore opens the native store over a remote activation
+// with the given per-open options. Unlike newNativeDoltStoreAt it projects no
+// environment and takes no env mutex: the remote backend reads its activation
+// from the workspace and its credential from openOpts, so nothing it needs
+// lives in the process environment gc would have to fence.
+func openRemoteNativeDoltStore(parent context.Context, activationRoot string, openOpts beadslib.OpenOptions) (*NativeDoltStore, error) {
+	ctx, cancel := nativeDoltOperationContext(parent)
+	defer cancel()
+	storage, err := remoteNativeOpenBestAvailable(ctx, filepath.Join(activationRoot, ".beads"), openOpts)
+	if err != nil {
+		return nil, err
+	}
+	prefix, err := nativeReadIssuePrefix(ctx, storage)
+	if err != nil {
+		_ = storage.Close()
+		return nil, fmt.Errorf("reading native issue prefix: %w", err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix)
+	store.localStrings = newLocalSidecar(filepath.Join(activationRoot, ".beads", "local-strings.json"))
+	return store, nil
+}
+
+// remoteOpenOptions resolves the per-open options for one remote open: the
+// nativeOpenOptions seam (transport, user agent, and the G7 per-city
+// credential when one is plugged in there), plus, when the seam supplies no
+// credential, the library's ambient bearer ladder RESOLVED NOW and carried
+// explicitly as OpenOptions.Credential. Resolving it once, under the env
+// mutex every Dolt open's environment projection holds, means the store
+// authorizes with the ambient ladder as the operator configured it, never
+// with a projection some concurrent Dolt open had installed (a Dolt open
+// withholds BEADS_CREDENTIALS_FILE while it runs). The mutex covers only the
+// resolution, which reads the environment and the credentials file (and runs
+// a configured token command); no network call happens under it.
+func remoteOpenOptions(ctx context.Context, beadsDir string) beadslib.OpenOptions {
+	opts := nativeOpenOptions(beadsDir)
+	if opts.Credential != nil {
+		return opts
+	}
+	target, err := bdhttp.LoadTarget(beadsDir)
+	if err != nil || target.BaseURL == nil {
+		// The handshake reports the missing or broken activation with its
+		// typed reason; there is nothing to resolve a credential for.
+		return opts
+	}
+	opts.Credential = bdhttp.ProvidedCredential{Provider: newResolvedAmbientCredential(ctx, target.BaseURL)}
+	return opts
 }

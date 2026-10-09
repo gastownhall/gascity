@@ -234,7 +234,7 @@ func (s *BdStore) bdReadyProjectionEnabled() (readyProjectionDoor, bool, error) 
 	// wire, and the `bd blocked` projection is a raw-path verb this store must
 	// not spend against a remote scope either. Readiness reads on such a scope
 	// take a live `bd ready`, which the remote backend serves through its role.
-	if ScopeUsesRemoteBackend(s.dir) {
+	if s.usesRemoteBackend() {
 		cause := fmt.Errorf("%w: the scope's remote backend serves neither bd sql nor the bd blocked projection", ErrReadyProjectionUnsupported)
 		s.disableReadyProjectionLocked(cause)
 		s.readyProjectionVersionErr = cause

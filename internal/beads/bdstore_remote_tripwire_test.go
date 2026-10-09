@@ -47,3 +47,22 @@ func TestBdStoreRemoteScopeNeverSpendsRawVerbs(t *testing.T) {
 		t.Fatalf("ReleaseIfCurrent on a remote scope without the verb = %v, want ErrConditionalReleaseRemoteUnsupported", err)
 	}
 }
+
+// TestBdStoreRigInheritingRemoteCityNeverSpendsRawVerbs: a rig with no
+// metadata of its own under a remote city is served by the city's remote
+// backend (RemoteBackendActivationRoot), so its BdStore refuses the same raw
+// paths once it knows its city (WithBdStoreCityPath).
+func TestBdStoreRigInheritingRemoteCityNeverSpendsRawVerbs(t *testing.T) {
+	registerFakeRemoteBackend(t)
+	city := writeRemoteTestScope(t, remoteMetadata())
+	rig := t.TempDir()
+	store := NewBdStore(rig, rawVerbTripwireRunner(t), WithBdStoreCityPath(city))
+
+	if _, err := store.enrichReadyProjectionForCache([]Bead{{ID: "gr-1", Status: "open", Type: "task"}}); !errors.Is(err, ErrReadyProjectionUnsupported) {
+		t.Fatalf("ready projection on an inheriting rig = %v, want ErrReadyProjectionUnsupported", err)
+	}
+	store.latchConditionalReleaseUnsupported()
+	if _, err := store.ReleaseIfCurrent("gr-1", "worker"); !errors.Is(err, ErrConditionalReleaseRemoteUnsupported) {
+		t.Fatalf("ReleaseIfCurrent on an inheriting rig = %v, want ErrConditionalReleaseRemoteUnsupported", err)
+	}
+}

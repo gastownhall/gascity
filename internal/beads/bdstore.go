@@ -432,6 +432,10 @@ type BdStore struct {
 	// what makes the SQL guard inert there. See bdsql_relocation.go.
 	relocatedClasses []RelocatedClass
 
+	// cityPath is the city this store's scope belongs to (WithBdStoreCityPath),
+	// consulted only to see whether the scope inherits a remote backend.
+	cityPath string
+
 	readyProjectionMu      sync.Mutex
 	readyProjectionChecked bool
 	readyProjectionEnabled bool
@@ -513,6 +517,26 @@ func WithBdStoreListSkipLabels(enabled bool) BdStoreOption {
 	return func(s *BdStore) {
 		s.listSkipLabelsEnabled = enabled
 	}
+}
+
+// WithBdStoreCityPath names the city a rig store belongs to, so the store can
+// tell when its rig inherits a REMOTE backend from the city (no metadata of
+// its own; see RemoteBackendActivationRoot) and refuse the raw-SQL and
+// blocked-projection paths there exactly as it does on a scope whose own
+// metadata names the remote backend. Without it only the scope's own
+// metadata is consulted.
+func WithBdStoreCityPath(cityPath string) BdStoreOption {
+	return func(s *BdStore) {
+		s.cityPath = cityPath
+	}
+}
+
+// usesRemoteBackend reports whether this store's scope is served by a
+// registered remote backend: its own metadata names one, or (with
+// WithBdStoreCityPath) it inherits one from its city.
+func (s *BdStore) usesRemoteBackend() bool {
+	_, remote := RemoteBackendActivationRoot(s.dir, s.cityPath)
+	return remote
 }
 
 // WithBdStoreRelocatedClasses declares the coordination classes this store's bd
@@ -1620,7 +1644,7 @@ func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 	// A remote backend serves no `bd sql`: the raw-SQL fallback below would
 	// shell out to a verb the server does not have (and, worse, could reach a
 	// stale local database). Refuse instead.
-	if ScopeUsesRemoteBackend(s.dir) {
+	if s.usesRemoteBackend() {
 		return false, fmt.Errorf("bd release-if-current: %w: the scope's remote backend serves no raw SQL, and this bd lacks the conditional release verb", ErrConditionalReleaseRemoteUnsupported)
 	}
 	// The raw-SQL fallback writes the row itself, so it also has to mint the

@@ -1032,6 +1032,13 @@ func scopeHasOwnConfigYAML(dir string) bool {
 // before legacy metadata parsing. Only all three non-empty fields authorize
 // this dispatch; absent fields remain ordinary legacy metadata and partial
 // fields fail closed.
+//
+// A backend the linked beads library registered as REMOTE is the second shape
+// of a store gc does not serve: `bd connect` and bdhttp.Attach write only the
+// backend selection into metadata.json and pin the server and project in the
+// per-user activation sidecar, so storage_endpoint and storage_database are
+// legitimately absent. The beads registry answers which names are remote
+// (contract.BackendIsRemote); nothing here names one.
 func scopeHasCompleteStorageBinding(path string) (bool, error) {
 	data, err := fsys.OSFS{}.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1039,6 +1046,13 @@ func scopeHasCompleteStorageBinding(path string) (bool, error) {
 	}
 	if err != nil {
 		return false, fmt.Errorf("read beads storage binding %s: %w", path, err)
+	}
+
+	var selection struct {
+		Backend string `json:"backend"`
+	}
+	if json.Unmarshal(data, &selection) == nil && contract.BackendIsRemote(selection.Backend) {
+		return true, nil
 	}
 
 	var presence struct {

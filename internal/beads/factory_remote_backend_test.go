@@ -114,7 +114,7 @@ func TestDecideMetadataBackendRoutingTable(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			scope := writeRemoteTestScope(t, tc.metadata)
-			got := decideMetadataBackend(scope)
+			got := decideMetadataBackend(scope, "")
 			if got.Route != tc.want {
 				t.Fatalf("route = %v, want %v", got.Route, tc.want)
 			}
@@ -129,7 +129,7 @@ func TestDecideMetadataBackendRoutingTable(t *testing.T) {
 	// An unregistered name is never remote, whatever it is called: the http
 	// backend's own name is remote only once a composition root registered it.
 	if !beadsbackend.IsRemote("http") {
-		if got := decideMetadataBackend(writeRemoteTestScope(t, `{"backend": "http"}`)).Route; got != metadataBackendRouteBdStore {
+		if got := decideMetadataBackend(writeRemoteTestScope(t, `{"backend": "http"}`), "").Route; got != metadataBackendRouteBdStore {
 			t.Fatalf("unregistered http backend route = %v, want BdStore", got)
 		}
 	}
@@ -144,8 +144,12 @@ func TestDecideNativeTransportTable(t *testing.T) {
 		{NativeTransportOff, true, false, false},
 		{NativeTransportOff, false, false, false},
 		{NativeTransportAuto, true, true, true},
-		{NativeTransportUnset, true, true, true},
+		// An unthreaded open never requires native for a remote backend: it
+		// takes BdStore, the way the control plane and store paths outside any
+		// city always have.
+		{NativeTransportUnset, true, false, false},
 		{NativeTransportAuto, false, true, false},
+		{NativeTransportUnset, false, true, false},
 	} {
 		got := decideNativeTransport(tc.mode, tc.remote)
 		if got.AllowNative != tc.allow || got.RequireNative != tc.requireNative {
@@ -226,6 +230,7 @@ func TestOpenStoreAtForCityRemoteAutoFailuresAreTerminal(t *testing.T) {
 			_, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 				ScopeRoot:        scope,
 				Provider:         provider,
+				NativeTransport:  NativeTransportAuto,
 				PreflightChecker: remotePreflightChecker(t, tc.snapshot, tc.handshakeErr),
 				OpenBdStore: func() (Store, error) {
 					t.Fatal("OpenBdStore called: a remote scope must never fall back silently under auto")
@@ -261,7 +266,8 @@ func TestOpenStoreAtForCityRemoteAutoFailuresAreTerminal(t *testing.T) {
 
 // TestOpenStoreAtForCityRemoteOffFallsBackToBdStore: off is the rollback
 // lever. The bd CLI speaks to the remote backend itself; nothing native is
-// attempted and no probe runs.
+// attempted and no probe runs. An unthreaded open (unset) lands in the same
+// place: only an explicit auto requires native.
 func TestOpenStoreAtForCityRemoteOffFallsBackToBdStore(t *testing.T) {
 	registerFakeRemoteBackend(t)
 	scope := writeRemoteTestScope(t, remoteMetadata())
@@ -273,6 +279,7 @@ func TestOpenStoreAtForCityRemoteOffFallsBackToBdStore(t *testing.T) {
 	}{
 		{"off", NativeTransportOff, "", nativeTransportOffGate},
 		{"force-fallback-alias", NativeTransportAuto, "1", nativeForceFallbackGate},
+		{"unset", NativeTransportUnset, "", nativeTransportUnsetGate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(nativeForceFallbackEnv, tc.force)

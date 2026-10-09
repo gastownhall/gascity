@@ -20,10 +20,15 @@ import (
 // RemoteWireRevisionMin and RemoteWireRevisionMax bound the server
 // wire_revision the linked beads http client speaks: its compiled
 // ClientMinWireRevision and ClientWireRevision (beads
-// internal/httpclient/wire/handshake.go, not exported). They are restated here
-// for the pinned beads version and must move with a pin bump that changes
-// either. An absent wire_revision decodes as 0 and is accepted, exactly as the
-// bd client accepts it.
+// internal/httpclient/wire/handshake.go). beads exports neither, so they
+// cannot be referenced from here; instead they are PINNED to the linked
+// client by behavior: internal/beads
+// TestRemoteWireRevisionRangeMatchesTheLinkedClient drives the real
+// bdhttp.Handshake against a server reporting RemoteWireRevisionMax (which
+// the client must accept) and RemoteWireRevisionMax+1 (which it must refuse
+// with its own skew error), so a beads pin bump that moves the client's
+// revision fails that test until these move with it. An absent wire_revision
+// decodes as 0 and is accepted, exactly as the bd client accepts it.
 const (
 	RemoteWireRevisionMin = 0
 	RemoteWireRevisionMax = 2
@@ -73,6 +78,14 @@ var remoteCapabilityRequirements = []RemoteCapabilityRequirement{
 	{Token: "dependencies.remove", Class: RemoteCapabilityRequired},
 	{Token: "dependencies.list", Class: RemoteCapabilityRequired},
 	{Token: "config.get", Class: RemoteCapabilityRequired},
+	// issues.related and stats.get are REQUIRED, not optional: gc has no
+	// fallback for either. issues.related answers DepList's dependents leg
+	// (dependentDeps), and stats.get is the native store's Ping
+	// (pingUpstreamRead), which the rig-accessibility and scope-readiness
+	// waits poll. Without them those calls fail with the client's
+	// capability refusal rather than degrading.
+	{Token: "issues.related", Class: RemoteCapabilityRequired},
+	{Token: "stats.get", Class: RemoteCapabilityRequired},
 	{Token: "issues.batchGet", Class: RemoteCapabilityOptional, Fallback: "per-id issues.get"},
 	{Token: "issues.count.scope", Class: RemoteCapabilityOptional, Fallback: "hydrating list count"},
 	{Token: "issues.batchApplyLarge", Class: RemoteCapabilityOptional, Fallback: "graph plans capped at the batch limit"},

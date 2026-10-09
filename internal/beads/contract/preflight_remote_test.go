@@ -239,3 +239,122 @@ func TestPreflightRemoteHandshakeFailureBlocks(t *testing.T) {
 		t.Fatalf("verdict = %s reason = %q dials = %d, want BLOCKED naming project_mismatch", result.Verdict, result.FallbackReason, *dials)
 	}
 }
+
+// TestRemoteCapabilityRequirementsPinnedToDesign pins the class requirement
+// table to DESIGN.md's (mc-http-switch, "Class requirement table"), plus the
+// two rows this slice proved REQUIRED because gc has no fallback for them
+// (issues.related: DepList's dependents leg; stats.get: Ping). Deleting a
+// required row, demoting it to optional, or slipping an unlisted row into
+// the table fails here, so the table can only move with the design.
+func TestRemoteCapabilityRequirementsPinnedToDesign(t *testing.T) {
+	want := map[string]RemoteCapabilityClass{
+		"issues.get":          RemoteCapabilityRequired,
+		"issues.list":         RemoteCapabilityRequired,
+		"issues.query":        RemoteCapabilityRequired,
+		"issues.count":        RemoteCapabilityRequired,
+		"issues.create":       RemoteCapabilityRequired,
+		"issues.update":       RemoteCapabilityRequired,
+		"issues.close":        RemoteCapabilityRequired,
+		"issues.reopen":       RemoteCapabilityRequired,
+		"issues.delete":       RemoteCapabilityRequired,
+		"issues.claim":        RemoteCapabilityRequired,
+		"issues.release":      RemoteCapabilityRequired,
+		"issues.casMetadata":  RemoteCapabilityRequired,
+		"issues.batchApply":   RemoteCapabilityRequired,
+		"issues.batchClose":   RemoteCapabilityRequired,
+		"ready.list":          RemoteCapabilityRequired,
+		"ready.count":         RemoteCapabilityRequired,
+		"dependencies.add":    RemoteCapabilityRequired,
+		"dependencies.remove": RemoteCapabilityRequired,
+		"dependencies.list":   RemoteCapabilityRequired,
+		"config.get":          RemoteCapabilityRequired,
+		"issues.related":      RemoteCapabilityRequired,
+		"stats.get":           RemoteCapabilityRequired,
+
+		"issues.batchGet":        RemoteCapabilityOptional,
+		"issues.count.scope":     RemoteCapabilityOptional,
+		"issues.batchApplyLarge": RemoteCapabilityOptional,
+		"issues.reclaim":         RemoteCapabilityOptional,
+	}
+	got := map[string]RemoteCapabilityRequirement{}
+	for _, row := range RemoteCapabilityRequirements() {
+		if _, dup := got[row.Token]; dup {
+			t.Errorf("token %q appears twice in the requirement table", row.Token)
+		}
+		got[row.Token] = row
+	}
+	for token, class := range want {
+		row, ok := got[token]
+		switch {
+		case !ok:
+			t.Errorf("design row %q (%s) is missing from the requirement table", token, class)
+		case row.Class != class:
+			t.Errorf("token %q is %s, design says %s", token, row.Class, class)
+		case row.Class == RemoteCapabilityOptional && strings.TrimSpace(row.Fallback) == "":
+			t.Errorf("optional token %q records no fallback", token)
+		}
+	}
+	for token := range got {
+		if _, ok := want[token]; !ok {
+			t.Errorf("token %q is in the requirement table but not in the design's", token)
+		}
+	}
+}
+
+// TestEvaluateWireCompatFailsEachMissingRequiredToken: every required row
+// FAILs wire_compat by name when the server does not advertise it, and every
+// optional row only WARNs. A row whose class the check ignored would pass
+// here no matter what the table said.
+func TestEvaluateWireCompatFailsEachMissingRequiredToken(t *testing.T) {
+	for _, row := range RemoteCapabilityRequirements() {
+		handshake := remoteTestHandshake()
+		handshake.Snapshot.Capabilities = remoteTestCapabilities(row.Token)
+		got := EvaluateWireCompat("examplehttp", "", handshake, nil)
+		want := PreflightCheckFail
+		if row.Class == RemoteCapabilityOptional {
+			want = PreflightCheckWarn
+		}
+		if got.State != want || !strings.Contains(got.Summary, row.Token) {
+			t.Errorf("missing %s token %q: state %s summary %q, want %s naming it", row.Class, row.Token, got.State, got.Summary, want)
+		}
+	}
+}
+
+// TestLoadMetadataStateAcceptsARegisteredRemoteBackend: the metadata shape
+// `bd connect` and bdhttp.Attach write (the backend selection alone, the
+// server pinned in the sidecar) parses once the linked beads library has the
+// backend registered as remote, and is refused by name while it is not. The
+// loader asks the registry; it names no backend.
+func TestLoadMetadataStateAcceptsARegisteredRemoteBackend(t *testing.T) {
+	const name = "gcloadfakeremote"
+	fs := fsys.NewFake()
+	fs.Files["/scope/.beads/metadata.json"] = []byte(`{"backend":"` + name + `","database":"beads"}`)
+
+	if _, _, err := LoadMetadataState(fs, "/scope/.beads/metadata.json"); !errors.Is(err, ErrUnknownBackend) {
+		t.Fatalf("unregistered remote backend: error = %v, want ErrUnknownBackend", err)
+	}
+
+	open := func(context.Context, string) (beadsbackend.DoltStorage, error) {
+		return nil, errors.New("opens nothing")
+	}
+	beadsbackend.Register(name, beadsbackend.Backend{Open: open, OpenReadOnly: open, WorkspaceIsBeadsDir: true, Remote: true})
+	t.Cleanup(func() { beadsbackend.Deregister(name) })
+
+	state, ok, err := LoadMetadataState(fs, "/scope/.beads/metadata.json")
+	if err != nil || !ok {
+		t.Fatalf("registered remote backend: LoadMetadataState = (%v, %v), want accepted", ok, err)
+	}
+	if state.Backend != name {
+		t.Fatalf("Backend = %q, want %q", state.Backend, name)
+	}
+
+	// A registered backend that is NOT remote is still refused: the loader's
+	// widening is for remote backends only.
+	const local = "gcloadfakelocal"
+	beadsbackend.Register(local, beadsbackend.Backend{Open: open, OpenReadOnly: open})
+	t.Cleanup(func() { beadsbackend.Deregister(local) })
+	fs.Files["/local/.beads/metadata.json"] = []byte(`{"backend":"` + local + `"}`)
+	if _, _, err := LoadMetadataState(fs, "/local/.beads/metadata.json"); !errors.Is(err, ErrUnknownBackend) {
+		t.Fatalf("registered non-remote backend: error = %v, want ErrUnknownBackend", err)
+	}
+}

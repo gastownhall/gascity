@@ -338,7 +338,7 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...str
 		rigDir,
 		withBdReadMemo(cityPath, bdCommandRunnerForRig(cityPath, cfg, rigDir)),
 		prefix,
-		bdStoreOptionsForConfig(cfg)...,
+		append(bdStoreOptionsForConfig(cfg), beads.WithBdStoreCityPath(cityPath))...,
 	)
 }
 
@@ -474,7 +474,7 @@ func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix
 		rigDir,
 		withBdReadMemo(cityPath, controlBdCommandRunnerForRig(cityPath, cfg, rigDir)),
 		prefix,
-		bdStoreOptionsForConfig(cfg)...,
+		append(bdStoreOptionsForConfig(cfg), beads.WithBdStoreCityPath(cityPath))...,
 	)
 }
 
@@ -1864,6 +1864,22 @@ func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath st
 		if explicitRig != nil {
 			env["GC_RIG"] = explicitRig.Name
 		}
+	}
+	// A rig served by a registered remote backend (the shape `bd connect` and
+	// bdhttp.Attach write, or no metadata of its own under a city that has
+	// that shape) is a store gc does not serve: bd reads the activation from
+	// BEADS_DIR and speaks to the server itself, so the rig gets the opaque
+	// projection with no Dolt environment and no managed-runtime recovery.
+	// BEADS_DIR names the activation the native store would open, so both
+	// lanes of one rig always reach the same server. This does not wait for
+	// the rig's own config.yaml to resolve authoritative: Attach can write
+	// metadata.json into a scope that has none.
+	if activationRoot, remote := beads.RemoteBackendActivationRoot(rigPath, cityPath); remote {
+		env["BEADS_DIR"] = filepath.Join(activationRoot, ".beads")
+		if _, err := applyCompleteNonDoltStorageBindingEnv(env, cityPath, activationRoot); err != nil {
+			return env, err
+		}
+		return env, nil
 	}
 	rigDoltlite := scopeBackendIsDoltlite(cityPath, rigPath)
 	cityDoltlite := scopeBackendIsDoltlite(cityPath, cityPath)

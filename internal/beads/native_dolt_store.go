@@ -1806,16 +1806,15 @@ func nativeIssuePatchFromUpdateOpts(opts UpdateOpts) (issueops.IssuePatch, error
 	return patch, nil
 }
 
-// applyUpdateInTx applies an Update against an open beadslib transaction. Its two
-// callers each need a transaction the facade's own per-operation one cannot be:
-// the multi-write Store.Tx path (nativeDoltTx.Update) coalesces several writes
-// into one commit, and updateLabelsIfMatch checks the row version in the same
-// transaction that writes the labels.
+// applyUpdateInTx applies an Update against an open beadslib transaction. Its
+// caller needs a transaction the facade's own per-operation one cannot be: the
+// multi-write Store.Tx path (nativeDoltTx.Update) coalesces several writes
+// into one commit. (A labeled UpdateIfMatch no longer comes here: it is a
+// fenced single-item batch, updateLabelsIfMatch, which every backend serves.)
 //
 // This route is not the unvalidated one. It skips the facade's patch validation
 // (metadata keys, title, priority) but enforces the close policy the facade
-// route waives — see the Update doc comment for the whole asymmetry. An
-// UpdateIfMatch that carries labels inherits it exactly as Store.Tx does.
+// route waives — see the Update doc comment for the whole asymmetry.
 func (s *NativeDoltStore) applyUpdateInTx(ctx context.Context, tx beadslib.Transaction, id string, opts UpdateOpts) error {
 	if opts.ParentID != nil {
 		if err := s.validateUpdateParent(ctx, tx, id, *opts.ParentID); err != nil {

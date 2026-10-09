@@ -233,6 +233,7 @@ func TestNativeStoreRemoteHTTPWireCompatFailureIsTerminal(t *testing.T) {
 	_, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
 		ScopeRoot:        scope,
 		Provider:         "bd",
+		NativeTransport:  NativeTransportAuto,
 		PreflightChecker: noDoltPreflight(t),
 		OpenBdStore: func() (Store, error) {
 			t.Fatal("OpenBdStore called for an http scope under auto")
