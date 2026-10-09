@@ -198,7 +198,7 @@ func bdByIDAnswerIsThePassthroughForEveryVerdict(cityPath string, ids []string) 
 		return false
 	}
 	for _, id := range ids {
-		if strings.TrimSpace(id) == "" || bdIDIsClassReserved(id) {
+		if strings.TrimSpace(id) == "" || bdIDIsClassReserved(id) { // residency:allow — a reserved id always takes the funnel (false is the safe answer); the prefix gates the skip and answers no residence
 			return false
 		}
 	}
@@ -488,38 +488,27 @@ func bindingGivesIDATwin(b storeref.ClassBinding, id string, manifest map[string
 // nothing (twinUndecided); the refused path reads that as no twin, as it always
 // has, and the skip reads it as "take the verdict".
 func bindingTwinVerdict(b storeref.ClassBinding, id string, manifest map[string]bool, manifestRead bool) byIDTwinVerdict {
-	if b.Leg.Store == nil {
-		return twinUndecided
-	}
-	_, err := b.Leg.Store.Get(id) // residency:allow — the per-id twin proof for a refused binding; resolves nothing
+	held, err := storeref.BindingHoldsID(b, id)
 	switch {
-	case err == nil:
-		return twinDeny
-	case !errors.Is(err, beads.ErrNotFound):
+	case errors.Is(err, storeref.ErrBindingHasNoStore):
+		return twinUndecided
+	case err != nil, held:
 		return twinDeny
 	case manifestRead:
 		if manifest[id] {
 			return twinDeny
 		}
 		return twinNone
-	case bindingHoldsAnyRelic(b):
+	case storeref.ProvenLegacyResidents(b):
+		// The city-wide fallback verdict: does the binding hold any id outside
+		// its reserved namespaces, closed rows and both tiers included. storeref
+		// asks the store's one-statement census when it has one and lists the
+		// binding only when it does not; a census that could not run proves
+		// nothing (false), exactly as the binding-keyed proof always answered.
 		return twinDeny
 	default:
 		return twinNone
 	}
-}
-
-// bindingHoldsAnyRelic is the city-wide fallback verdict: does the binding hold
-// any id outside its reserved namespaces, closed rows and both tiers included.
-// It asks the store's one-statement census when the store has one and lists the
-// binding only when it does not. A census that could not run proves nothing
-// (false), exactly as the binding-keyed proof always answered.
-func bindingHoldsAnyRelic(b storeref.ClassBinding) bool {
-	if census, ok := beads.NamespaceCensusFor(b.Leg.Store); ok {
-		has, err := census.HasResidentOutside(b.Prefixes)
-		return err == nil && has
-	}
-	return storeref.ProvenLegacyResidents(b) // residency:allow — censuses the binding this proof is about; resolves nothing
 }
 
 // migrationCopyManifest reads the copy manifest the infra migration recorded
