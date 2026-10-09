@@ -1430,33 +1430,11 @@ func cancelWaitsForSession(sessFront *sessionpkg.Store, sessionID string) error 
 	return err
 }
 
-func clearSessionWaitHold(sessFront *sessionpkg.Store, sessionID string) error {
-	if sessionID == "" {
-		return nil
-	}
-	batch := map[string]string{"wait_hold": ""}
-	if sessFront != nil {
-		if markers, err := sessFront.PersistedMarkers(sessionID); err == nil && markers.SleepReason == string(sessionpkg.SleepReasonWaitHold) {
-			batch["sleep_reason"] = ""
-		}
-		// Only the wait's own intent goes: an operator's user-hold, or any
-		// other intent, outlives the wait (CONTRACT v5.9 D8).
-		if info, err := sessFront.Get(sessionID); err == nil && info.SleepIntent == string(sessionpkg.SleepReasonWaitHold) {
-			batch["sleep_intent"] = ""
-		}
-	}
-	return sessFront.ApplyPatch(sessionID, batch)
-}
-
+// clearSessionWaitHoldIfIdle drops the wait hold once no wait is pending,
+// deciding as the v2 wait step does: only the wait's own intent and reason
+// go, never an operator's user-hold (CONTRACT v5.9 D8).
 func clearSessionWaitHoldIfIdle(sessFront *sessionpkg.Store, sessionID string) error {
-	hasWaits, err := hasNonTerminalWaits(sessFront, sessionID)
-	if err != nil {
-		return err
-	}
-	if hasWaits {
-		return nil
-	}
-	return clearSessionWaitHold(sessFront, sessionID)
+	return clearSessionWaitHoldWith(sessFront, sessionID, sessFront.UpdateMetadataFenced)
 }
 
 func hasNonTerminalWaits(sessFront *sessionpkg.Store, sessionID string) (bool, error) {

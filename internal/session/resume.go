@@ -2,10 +2,9 @@ package session
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // ResumePolicy says whether a Manager entry that can start a runtime may
@@ -22,79 +21,95 @@ const (
 	ResumeOperator
 )
 
-// ErrResumeHeld reports that the policy did not let the call resume a held
-// session. Nothing was started or written.
-var ErrResumeHeld = errors.New("session is held; not resumed")
+var (
+	// ErrResumeHeld reports that the policy did not let the call resume a
+	// held session. Nothing was started or written.
+	ErrResumeHeld = errors.New("session is held; not resumed")
+	// ErrWakeRequestContended reports a wake request whose CAS lost on every
+	// attempt; nothing was written. Retry.
+	ErrWakeRequestContended = errors.New("wake request lost to concurrent writes; retry")
+)
 
-// operatorSleepIntent reports whether meta's sleep_intent is an operator's
-// hold: user-hold, or wait-hold while the wait hold stands. Legacy's own
-// intents (idle-stop-pending) hold nothing: a send to a live session in its
-// idle drain is delivered live.
-func operatorSleepIntent(meta map[string]string) bool {
-	switch strings.TrimSpace(meta["sleep_intent"]) {
-	case string(SleepReasonUserHold):
-		return true
-	case string(SleepReasonWaitHold):
-		return strings.TrimSpace(meta["wait_hold"]) != ""
+// HoldVerdict is CONTRACT v5.9 D8 7(a)'s one hold predicate, for resume,
+// wake requests, controller-routed sends and queued delivery. A row is held
+// by an operator's intent: state=suspended, a future held_until or
+// quarantined_until (an unparseable one is not, as legacy reads it), a set
+// wait_hold, or sleep_intent=user-hold. Legacy's own intents
+// (idle-stop-pending) hold nothing. A row whose runtime is running and that
+// is not suspended is working, not held: a heartbeat held_until keeps a live
+// session up rather than queueing its sends.
+func HoldVerdict(meta map[string]string, runtimeRunning bool, now time.Time) bool {
+	suspended := State(strings.TrimSpace(meta["state"])) == StateSuspended
+	if !suspended && runtimeRunning {
+		return false
 	}
-	return false
-}
-
-// isDormantRow reports whether meta's row is one a resume consumes: asleep,
-// suspended, drained, or holding an operator's sleep intent.
-func isDormantRow(meta map[string]string) bool {
-	switch State(strings.TrimSpace(meta["state"])) {
-	case StateAsleep, StateSuspended, StateDrained:
-		return true
-	}
-	return operatorSleepIntent(meta)
-}
-
-// IsHeldForResume reports whether an operator's hold blocks a resume that is
-// not the operator's own (D8 rule 1): state=suspended, a future (or
-// unparseable) held_until or quarantined_until, a wait hold, or an
-// operator's sleep intent.
-func IsHeldForResume(meta map[string]string, now time.Time) bool {
-	if State(strings.TrimSpace(meta["state"])) == StateSuspended ||
-		strings.TrimSpace(meta["wait_hold"]) != "" || operatorSleepIntent(meta) {
+	if suspended || strings.TrimSpace(meta["wait_hold"]) != "" ||
+		strings.TrimSpace(meta["sleep_intent"]) == string(SleepReasonUserHold) {
 		return true
 	}
 	for _, key := range []string{"held_until", "quarantined_until"} {
-		if raw := strings.TrimSpace(meta[key]); raw != "" {
-			if until, err := time.Parse(time.RFC3339, raw); err != nil || until.After(now) {
-				return true
-			}
+		if until, err := time.Parse(time.RFC3339, strings.TrimSpace(meta[key])); err == nil && until.After(now) {
+			return true
 		}
 	}
 	return false
 }
 
-// resumeHeld reports whether policy may not resume b's row now: a dormant,
-// held row and a policy other than ResumeOperator.
-func (m *Manager) resumeHeld(b beads.Bead, policy ResumePolicy) bool {
-	return policy != ResumeOperator && isDormantRow(b.Metadata) && IsHeldForResume(b.Metadata, m.now())
+// HoldVerdictInfo is HoldVerdict over a typed row.
+func HoldVerdictInfo(info Info, runtimeRunning bool, now time.Time) bool {
+	return HoldVerdict(map[string]string{
+		"state": info.MetadataState, "held_until": info.HeldUntil, "quarantined_until": info.QuarantinedUntil,
+		"sleep_intent": info.SleepIntent, "wait_hold": info.WaitHold,
+	}, runtimeRunning, now)
 }
 
-// RequestWakeUnlessHeld records an explicit wake by CAS on an open, unheld
-// row and reports whether it did (D8 rule 1). A row whose lifecycle refuses
-// a wake returns *WakeConflictError, as WakeSession does.
-func (s *Store) RequestWakeUnlessHeld(id string, now time.Time) (bool, error) {
+// WakeRequestOutcome is what RequestWakeUnlessHeld did.
+type WakeRequestOutcome int
+
+const (
+	// WakeRecorded means an explicit wake was written.
+	WakeRecorded WakeRequestOutcome = iota + 1
+	// WakeHeld means an operator holds the row (HoldVerdict); nothing was
+	// written.
+	WakeHeld
+	// WakeNotDormant means the row is not asleep or drained (it is
+	// starting, running or closed), so it needs no wake; nothing was written.
+	WakeNotDormant
+)
+
+// RequestWakeUnlessHeld records an explicit wake by CAS on an open asleep or
+// drained row that nothing holds (D8 rule 1). A row whose lifecycle refuses a
+// wake returns *WakeConflictError, as WakeSession does; a CAS lost on every
+// attempt returns ErrWakeRequestContended.
+func (s *Store) RequestWakeUnlessHeld(id string, runtimeRunning bool, now time.Time) (WakeRequestOutcome, error) {
+	var outcome WakeRequestOutcome
 	var conflict error
 	ok, err := s.UpdateMetadataFenced(id, 3, func(info Info, persisted PersistedResponse) MetadataPatch {
 		input := LifecycleInputFromMetadata(persisted.Status, persisted.Metadata)
 		input.Now = now
-		conflict = nil
-		if state, refused := lifecycleWakeConflictState(ProjectLifecycle(input)); refused {
-			conflict = &WakeConflictError{SessionID: id, State: state}
+		conflict, outcome = nil, WakeNotDormant
+		state := State(strings.TrimSpace(persisted.Metadata["state"]))
+		if conflictState, refused := lifecycleWakeConflictState(ProjectLifecycle(input)); refused {
+			conflict = &WakeConflictError{SessionID: id, State: conflictState}
 			return nil
 		}
-		if info.Closed || IsHeldForResume(persisted.Metadata, now) {
+		switch {
+		case HoldVerdict(persisted.Metadata, runtimeRunning, now):
+			outcome = WakeHeld
+			return nil
+		case info.Closed || (state != StateAsleep && state != StateDrained):
 			return nil
 		}
+		outcome = WakeRecorded
 		return RequestExplicitWakePatch(string(WakeCauseExplicit), now)
 	})
-	if err != nil {
-		return false, err
+	switch {
+	case err != nil:
+		return 0, err
+	case conflict != nil:
+		return 0, conflict
+	case outcome == WakeRecorded && !ok:
+		return 0, fmt.Errorf("%w: %s", ErrWakeRequestContended, id)
 	}
-	return ok, conflict
+	return outcome, nil
 }

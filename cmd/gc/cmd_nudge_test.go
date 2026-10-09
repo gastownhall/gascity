@@ -511,6 +511,40 @@ func TestDeliverSessionNudgeWithProviderWaitIdleQueuesForCodex(t *testing.T) {
 	}
 }
 
+// TestSendMailNotifyToHeldSessionQueuesWithoutPoke: a mail notification to
+// a managed session an operator holds queues, records no wake and pokes no
+// controller. Kills a poke for a held row.
+func TestSendMailNotifyToHeldSessionQueuesWithoutPoke(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	prevManaged, prevPoke := nudgeCityUsesManagedReconciler, nudgePokeController
+	pokes := 0
+	nudgeCityUsesManagedReconciler = func(string) bool { return true }
+	nudgePokeController = func(string, reconcilekey.Key) error { pokes++; return nil }
+	t.Cleanup(func() { nudgeCityUsesManagedReconciler, nudgePokeController = prevManaged, prevPoke })
+	target := nudgeTarget{cityPath: dir, cfg: &config.City{Agents: []config.Agent{{Name: "worker", Provider: "claude"}}}, sessionID: info.ID, sessionName: info.SessionName, identity: "worker", agent: config.Agent{Name: "worker", Provider: "claude"}}
+	if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
+		t.Fatalf("sendMailNotifyWithWorker: %v", err)
+	}
+	got, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pokes != 0 || got.Metadata["wake_request"] != "" {
+		t.Fatalf("pokes = %d, wake_request = %q; want neither for a held session", pokes, got.Metadata["wake_request"])
+	}
+}
+
 // sleepUnheld turns a suspended row into one nothing holds: asleep, with no
 // suspension, so a background nudge may still wake it (CONTRACT v5.9 D8).
 func sleepUnheld(t *testing.T, store beads.Store, id string) {
@@ -560,8 +594,8 @@ func TestDeliverSessionNudgeToHeldSessionQueuesWithoutWake(t *testing.T) {
 			if code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryImmediate, false, &stdout, &stderr); code != 0 {
 				t.Fatalf("deliverSessionNudgeWithWorker = %d, want 0; stderr: %s", code, stderr.String())
 			}
-			if !strings.Contains(stdout.String(), "Queued nudge for "+info.ID) {
-				t.Fatalf("stdout = %q, want queued confirmation", stdout.String())
+			if !strings.Contains(stdout.String(), "Queued nudge for "+info.ID) || !strings.Contains(stdout.String(), "held by an operator") {
+				t.Fatalf("stdout = %q, want a queued confirmation that names the hold", stdout.String())
 			}
 			if n := fake.CountCalls("Start", info.SessionName); n != startsBefore {
 				t.Fatalf("Start calls = %d, want none on a held session", n-startsBefore)
@@ -2484,6 +2518,40 @@ func TestCmdNudgeStatusSurfacesDispatchSkips(t *testing.T) {
 	}
 	if !strings.Contains(textOut.String(), "not-running=3") || !strings.Contains(textOut.String(), "observe-error=1") {
 		t.Fatalf("text status missing skip-reason lines, got: %s", textOut.String())
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerSkipsHeldSession is CONTRACT v5.9 D8
+// 7(a) for queued delivery: a session an operator holds (here managed-
+// suspended with its runtime still up) gets no queued delivery; the item
+// stays queued. Kills a poller that ignores HoldVerdict.
+func TestTryDeliverQueuedNudgesByPollerSkipsHeldSession(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}, session.ResumeOperator); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := store.SetMetadataBatch(info.ID, map[string]string{"state": "suspended", "sleep_intent": "user-hold"}); err != nil {
+		t.Fatal(err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+	target := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, sessionID: info.ID, resolved: &config.ResolvedProvider{Name: "codex"}, sessionName: info.SessionName}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+	if err != nil || delivered || fake.CountCalls("Nudge", info.SessionName) != 0 {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller = %v, %v; want no delivery to a held session", delivered, err)
 	}
 }
 

@@ -83,11 +83,17 @@ func (l *externalReadsLane) readyWaitSet() map[string]bool {
 // sleep_reason while each still reads wait-hold, so an operator's hold that
 // replaced ours survives. Otherwise it writes nothing.
 func clearSessionWaitHoldFenced(sessFront *sessionpkg.Store, sessionID string) error {
+	return clearSessionWaitHoldWith(sessFront, sessionID, (fencedWriter{store: sessFront.Store()}).updateMetadataFenced)
+}
+
+// clearSessionWaitHoldWith is the wait-hold clear over a fenced update verb:
+// fencedWriter's for v2 (never blind), the session store's for legacy.
+func clearSessionWaitHoldWith(sessFront *sessionpkg.Store, sessionID string, update func(string, int, func(sessionpkg.Info, sessionpkg.PersistedResponse) sessionpkg.MetadataPatch) (bool, error)) error {
 	if sessionID == "" {
 		return nil
 	}
 	var waitsErr error
-	_, err := (fencedWriter{store: sessFront.Store()}).updateMetadataFenced(sessionID, waitHoldClearAttempts, func(row sessionpkg.Info, _ sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
+	_, err := update(sessionID, waitHoldClearAttempts, func(row sessionpkg.Info, _ sessionpkg.PersistedResponse) sessionpkg.MetadataPatch {
 		held, err := hasNonTerminalWaits(sessFront, sessionID)
 		if waitsErr = err; err != nil || held {
 			return nil

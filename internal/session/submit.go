@@ -100,7 +100,7 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 		if err != nil {
 			return err
 		}
-		if m.resumeHeld(b, policy) {
+		if policy != ResumeOperator && HoldVerdict(b.Metadata, m.sp.IsRunning(sessName), m.now()) {
 			outcome.Queued = true
 			return m.enqueueDeferredSubmitLocked(b, sessName, message)
 		}

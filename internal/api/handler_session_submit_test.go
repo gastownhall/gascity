@@ -217,3 +217,28 @@ func TestHandleSessionStopUsesSoftEscapeForCodex(t *testing.T) {
 		t.Fatalf("calls = %#v, did not want Interrupt for codex stop", fs.sp.Calls)
 	}
 }
+
+// TestHandleSessionMessageReportsQueued: POST /messages without resume: true
+// to a held session queues the message, and its result says so (queued).
+// Kills a result that reports a queued message as delivered.
+func TestHandleSessionMessageReportsQueued(t *testing.T) {
+	fs := newSessionFakeState(t)
+	h := newTestCityHandler(t, fs)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Held")
+	if err := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp).Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`)))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, rec.Body)
+	success, failure := waitForSessionMessageResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("message failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	if !success.Queued {
+		t.Fatal("queued = false for a message queued on a held session")
+	}
+}

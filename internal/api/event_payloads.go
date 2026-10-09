@@ -90,6 +90,7 @@ func (SessionCreateSucceededPayload) IsEventPayload() {}
 type SessionMessageSucceededPayload struct {
 	RequestID string `json:"request_id" doc:"Correlation ID from the 202 response."`
 	SessionID string `json:"session_id" doc:"Session ID that received the message."`
+	Queued    bool   `json:"queued" doc:"True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h."`
 }
 
 // IsEventPayload marks SessionMessageSucceededPayload as an events.Payload variant.

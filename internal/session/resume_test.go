@@ -2,12 +2,15 @@ package session
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"maps"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -90,6 +93,9 @@ func TestBackgroundSendToHeldRowQueues(t *testing.T) {
 		{name: "unheld asleep resumes", meta: nil},
 		{name: "stale wait-hold intent without the hold resumes", meta: map[string]string{"sleep_intent": "wait-hold"}},
 		{name: "idle drain on a live row is delivered live", meta: map[string]string{"state": string(StateActive), "slept_at": "", "sleep_intent": "idle-stop-pending"}, live: true},
+		{name: "heartbeat hold on a live row is delivered live", meta: map[string]string{"state": string(StateActive), "slept_at": "", "held_until": "2099-01-01T00:00:00Z"}, live: true},
+		{name: "unparseable timer is not a hold", meta: map[string]string{"held_until": "soon"}},
+		{name: "creating, quarantined, runtime dead", meta: map[string]string{"state": string(StateCreating), "quarantined_until": "2099-01-01T00:00:00Z"}, queued: true},
 		{name: "operator resumes a held row", meta: map[string]string{"state": string(StateSuspended)}, policy: ResumeOperator},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -150,27 +156,55 @@ func TestInterruptSubmitToHeldLiveRowQueues(t *testing.T) {
 }
 
 // TestRequestWakeUnlessHeld: a background wake records an explicit wake by
-// CAS on an unheld row and leaves a held one untouched. Kills a wake written
-// over an operator's hold.
+// CAS only on an asleep or drained row nothing holds; a held row and a row
+// that is starting or running are left untouched and say so, and a CAS lost
+// on every attempt is a retryable error. Kills a wake written over a hold,
+// one written to a creating row, and exhaustion read as success.
 func TestRequestWakeUnlessHeld(t *testing.T) {
 	for name, tc := range map[string]struct {
-		meta  map[string]string
-		woken bool
+		meta map[string]string
+		want WakeRequestOutcome
 	}{
-		"unheld": {woken: true},
-		"held":   {meta: map[string]string{"state": string(StateSuspended)}},
+		"unheld asleep": {want: WakeRecorded},
+		"drained":       {meta: map[string]string{"state": string(StateDrained)}, want: WakeRecorded},
+		"held":          {meta: map[string]string{"state": string(StateSuspended)}, want: WakeHeld},
+		"creating":      {meta: map[string]string{"state": string(StateCreating)}, want: WakeNotDormant},
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := newPolicyEnv(t, policyRow(tc.meta), false)
-			woken, err := NewStore(beads.SessionStore{Store: e.store}).RequestWakeUnlessHeld(e.id, resumeNow)
-			if err != nil || woken != tc.woken {
-				t.Fatalf("RequestWakeUnlessHeld = %v, %v; want %v", woken, err, tc.woken)
+			got, err := NewStore(beads.SessionStore{Store: e.store}).RequestWakeUnlessHeld(e.id, false, resumeNow)
+			if err != nil || got != tc.want {
+				t.Fatalf("RequestWakeUnlessHeld = %v, %v; want %v", got, err, tc.want)
 			}
-			if got := e.row(t)["wake_request"] != ""; got != tc.woken {
-				t.Fatalf("wake_request written = %v, want %v", got, tc.woken)
+			if written := e.row(t)["wake_request"] != ""; written != (tc.want == WakeRecorded) {
+				t.Fatalf("wake_request written = %v, want %v", written, tc.want == WakeRecorded)
 			}
 		})
 	}
+	t.Run("contended", func(t *testing.T) {
+		stamped := stampedMemStore(t, gate.Auto, beads.NewMemStore())
+		b, err := stamped.Create(beads.Bead{Title: "w", Type: BeadType, Labels: []string{LabelSession}, Metadata: policyRow(nil)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		loser := &wakeCASLoser{rowWriteRecorder: &rowWriteRecorder{Store: stamped}, backing: stamped}
+		if _, err := NewStore(beads.SessionStore{Store: loser}).RequestWakeUnlessHeld(b.ID, false, resumeNow); !errors.Is(err, ErrWakeRequestContended) {
+			t.Fatalf("RequestWakeUnlessHeld = %v, want ErrWakeRequestContended", err)
+		}
+	})
+}
+
+// wakeCASLoser makes every UpdateIfMatch lose to an unrelated write.
+type wakeCASLoser struct {
+	*rowWriteRecorder
+	backing beads.Store
+	n       int
+}
+
+func (c *wakeCASLoser) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	c.n++
+	_ = c.backing.SetMetadataBatch(id, map[string]string{"nudge_at": fmt.Sprint(c.n)})
+	return c.rowWriteRecorder.UpdateIfMatch(id, rev, opts)
 }
 
 // TestAttachResumesHeldRow: Attach is the operator's own resume, so a held

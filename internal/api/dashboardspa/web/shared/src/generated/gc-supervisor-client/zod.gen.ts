@@ -1754,6 +1754,7 @@ export const zSessionMessageInputBody = z.object({
 });
 
 export const zSessionMessageSucceededPayload = z.object({
+    queued: z.boolean(),
     request_id: z.string(),
     session_id: z.string()
 });

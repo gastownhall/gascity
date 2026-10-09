@@ -2487,8 +2487,8 @@ func TestClearSessionWaitHoldKeepsOperatorHold(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := clearSessionWaitHold(sessionFrontDoor(store), b.ID); err != nil {
-			t.Fatalf("clearSessionWaitHold: %v", err)
+		if err := clearSessionWaitHoldIfIdle(sessionFrontDoor(store), b.ID); err != nil {
+			t.Fatalf("clearSessionWaitHoldIfIdle: %v", err)
 		}
 		got, err := store.Get(b.ID)
 		if err != nil {

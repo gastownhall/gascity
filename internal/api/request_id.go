@@ -117,10 +117,11 @@ func (s *Server) emitSessionCreateFailed(requestID, errorCode, errorMessage stri
 }
 
 // emitSessionMessageSucceeded records a request.result.session.message event.
-func (s *Server) emitSessionMessageSucceeded(requestID, sessionID string) {
+func (s *Server) emitSessionMessageSucceeded(requestID, sessionID string, queued bool) {
 	s.emitAsyncResult(events.RequestResultSessionMessage, sessionID, SessionMessageSucceededPayload{
 		RequestID: requestID,
 		SessionID: sessionID,
+		Queued:    queued,
 	})
 }
 

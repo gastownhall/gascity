@@ -55,7 +55,7 @@ type sessionCreateBody struct {
 	Options           map[string]string `json:"options,omitempty" doc:"Provider/agent option overrides."`
 	ProjectID         string            `json:"project_id,omitempty" doc:"Opaque project context identifier."`
 	Title             string            `json:"title,omitempty" doc:"Session title."`
-	Resume            bool              `json:"resume,omitempty" doc:"Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued until the hold ends or an operator resumes the session."`
+	Resume            bool              `json:"resume,omitempty" doc:"Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued for the session's next run and expires after 24h."`
 }
 
 // SessionCreateInput is the Huma input for POST /v0/city/{cityName}/sessions.
@@ -159,7 +159,7 @@ type SessionSubmitInput struct {
 	Body           struct {
 		Message string               `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to submit."`
 		Intent  session.SubmitIntent `json:"intent,omitempty" enum:"default,follow_up,interrupt_now" doc:"Submit intent; empty defaults to \"default\"."`
-		Resume  bool                 `json:"resume,omitempty" doc:"Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued until the hold ends or an operator resumes the session."`
+		Resume  bool                 `json:"resume,omitempty" doc:"Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued for the session's next run and expires after 24h."`
 	}
 }
 
@@ -177,7 +177,7 @@ type SessionMessageInput struct {
 	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
 	Body           struct {
 		Message string `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to send."`
-		Resume  bool   `json:"resume,omitempty" doc:"Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued until the hold ends or an operator resumes the session."`
+		Resume  bool   `json:"resume,omitempty" doc:"Resume a held session (an operator's own message). Without it, a message to a session an operator or a wait holds is queued for the session's next run and expires after 24h."`
 	}
 }
 

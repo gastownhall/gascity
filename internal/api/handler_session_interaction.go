@@ -60,7 +60,7 @@ func (s *Server) handleSessionMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.sendUserMessageToSession(r.Context(), store.Store, id, body.Message, body.Resume); err != nil {
+	if _, err := s.sendUserMessageToSession(r.Context(), store.Store, id, body.Message, body.Resume); err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
 		return

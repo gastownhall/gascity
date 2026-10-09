@@ -813,6 +813,7 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 
 		type messageResult struct {
 			sessionID string
+			queued    bool
 			errorCode string
 			err       error
 		}
@@ -843,7 +844,8 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 				sendResult(messageResult{errorCode: "resolve_failed", err: err})
 				return
 			}
-			if err := s.sendUserMessageToSession(ctx, store.Store, id, message, resume); err != nil {
+			outcome, err := s.sendUserMessageToSession(ctx, store.Store, id, message, resume)
+			if err != nil {
 				code := "message_failed"
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 					code = "timeout"
@@ -851,7 +853,7 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 				sendResult(messageResult{sessionID: id, errorCode: code, err: err})
 				return
 			}
-			sendResult(messageResult{sessionID: id})
+			sendResult(messageResult{sessionID: id, queued: outcome.Queued})
 		}()
 
 		timer := time.NewTimer(sessionMessageAsyncTimeout)
@@ -863,7 +865,7 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 				s.emitSessionMessageFailed(reqID, result.errorCode, result.err.Error())
 				return
 			}
-			s.emitSessionMessageSucceeded(reqID, result.sessionID)
+			s.emitSessionMessageSucceeded(reqID, result.sessionID, result.queued)
 		case <-timer.C:
 			cancel()
 			select {
@@ -873,7 +875,7 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 					s.emitSessionMessageFailed(reqID, result.errorCode, result.err.Error())
 					return
 				}
-				s.emitSessionMessageSucceeded(reqID, result.sessionID)
+				s.emitSessionMessageSucceeded(reqID, result.sessionID, result.queued)
 				return
 			default:
 			}
