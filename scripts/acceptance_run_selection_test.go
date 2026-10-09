@@ -280,3 +280,90 @@ func TestProxiedAcceptanceRowsNeverSkipInRow(t *testing.T) {
 		}
 	}
 }
+
+// TestTopologyMatrixPhasesCoverEverySubtestOnce guards the split of
+// TestBeadsInitTopologyMatrix across several solo targets
+// (test/acceptance/BUILD.bazel TOPOLOGY_PHASES): each target narrows the
+// matrix to TOPOLOGY_SETUP_PHASES plus its own phases with a subtest
+// pattern, and Go's -test.run skips a subtest it does not match without a
+// word. So a subtest added to the matrix and to no target's phase list, or a
+// phase renamed in the test but not here, would quietly stop running. This
+// pins that every t.Run name in the matrix is a setup phase or belongs to
+// exactly one target, that every name listed is one the matrix declares, and
+// that every TOPOLOGY_PHASES target is a SOLO_TESTS entry for the matrix.
+func TestTopologyMatrixPhasesCoverEverySubtestOnce(t *testing.T) {
+	root := repoRoot(t)
+	build := readRepoFile(t, root, "test/acceptance/BUILD.bazel")
+	quoted := regexp.MustCompile(`"([a-z0-9-]+)"`)
+
+	setupBlock := regexp.MustCompile(`(?ms)^TOPOLOGY_SETUP_PHASES = \[\n(.*?)^\]`).FindStringSubmatch(build)
+	if setupBlock == nil {
+		t.Fatal("test/acceptance/BUILD.bazel has no TOPOLOGY_SETUP_PHASES list")
+	}
+	setup := map[string]bool{}
+	for _, m := range quoted.FindAllStringSubmatch(setupBlock[1], -1) {
+		setup[m[1]] = true
+	}
+
+	phasesBlock := regexp.MustCompile(`(?ms)^TOPOLOGY_PHASES = \{\n(.*?)^\}`).FindStringSubmatch(build)
+	if phasesBlock == nil {
+		t.Fatal("test/acceptance/BUILD.bazel has no TOPOLOGY_PHASES dict")
+	}
+	owner := map[string]string{}
+	var targets []string
+	for _, entry := range regexp.MustCompile(`(?ms)^    "([a-z0-9_]+_test)": \[(.*?)\],$`).FindAllStringSubmatch(phasesBlock[1], -1) {
+		targets = append(targets, entry[1])
+		for _, m := range quoted.FindAllStringSubmatch(entry[2], -1) {
+			if prev, ok := owner[m[1]]; ok {
+				t.Errorf("subtest %s is in both %s and %s; each runs in exactly one target", m[1], prev, entry[1])
+			}
+			if setup[m[1]] {
+				t.Errorf("subtest %s is a TOPOLOGY_SETUP_PHASES step (every target runs it) and also %s's phase", m[1], entry[1])
+			}
+			owner[m[1]] = entry[1]
+		}
+	}
+	if len(targets) < 2 {
+		t.Fatalf("TOPOLOGY_PHASES has %d targets; the scan is broken", len(targets))
+	}
+	solo := regexp.MustCompile(`(?ms)^SOLO_TESTS = \{\n(.*?)^\}`).FindStringSubmatch(build)
+	if solo == nil {
+		t.Fatal("test/acceptance/BUILD.bazel has no SOLO_TESTS dict")
+	}
+	for _, target := range targets {
+		if !strings.Contains(solo[1], `    "`+target+`": "TestBeadsInitTopologyMatrix",`) {
+			t.Errorf("TOPOLOGY_PHASES target %s is not a SOLO_TESTS entry for TestBeadsInitTopologyMatrix", target)
+		}
+	}
+
+	body := readRepoFile(t, root, "test/acceptance/beads_topology_matrix_test.go")
+	start := strings.Index(body, "func TestBeadsInitTopologyMatrix(t *testing.T) {")
+	if start < 0 {
+		t.Fatal("beads_topology_matrix_test.go declares no TestBeadsInitTopologyMatrix")
+	}
+	end := strings.Index(body[start:], "\n}\n")
+	if end < 0 {
+		t.Fatal("TestBeadsInitTopologyMatrix is not closed; the scan is broken")
+	}
+	declared := map[string]bool{}
+	for _, m := range regexp.MustCompile(`t\.Run\("([a-z0-9-]+)"`).FindAllStringSubmatch(body[start:start+end], -1) {
+		declared[m[1]] = true
+		if !setup[m[1]] && owner[m[1]] == "" {
+			t.Errorf("TestBeadsInitTopologyMatrix subtest %s is in no TOPOLOGY_PHASES target and no setup phase: "+
+				"no Bazel target runs it", m[1])
+		}
+	}
+	if len(declared) < 5 {
+		t.Fatalf("found %d t.Run names in TestBeadsInitTopologyMatrix; the scan is broken", len(declared))
+	}
+	for name := range setup {
+		if !declared[name] {
+			t.Errorf("TOPOLOGY_SETUP_PHASES names %s, which TestBeadsInitTopologyMatrix does not declare", name)
+		}
+	}
+	for name, target := range owner {
+		if !declared[name] {
+			t.Errorf("TOPOLOGY_PHASES %s names %s, which TestBeadsInitTopologyMatrix does not declare: the target runs less than it says", target, name)
+		}
+	}
+}

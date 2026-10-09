@@ -49,11 +49,13 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"SetLocalString":   nativeStoreMutation,
 	"Tx":               nativeStoreMutation,
 	"Delete":           nativeStoreMutation,
+	"DeleteBatch":      nativeStoreMutation,
 	"DepAdd":           nativeStoreMutation,
 	"DepRemove":        nativeStoreMutation,
 
 	// beads.Store, reads.
 	"Get":            nativeStoreRead,
+	"DepListBatch":   nativeStoreRead,
 	"List":           nativeStoreRead,
 	"ListOpen":       nativeStoreRead,
 	"Ready":          nativeStoreRead,
@@ -77,6 +79,8 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"CompareAndSetMetadataKey":    nativeStoreMutation,
 	"DeleteIfMatch":               nativeStoreMutation,
 	"ReleaseIfCurrent":            nativeStoreMutation,
+	"TransferIfCurrent":           nativeStoreMutation,
+	"Claim":                       nativeStoreMutation,
 	"UpdateIfMatch":               nativeStoreMutation,
 	"WaitForParentProjection":     nativeStoreRead,
 	"Count":                       nativeStoreRead,

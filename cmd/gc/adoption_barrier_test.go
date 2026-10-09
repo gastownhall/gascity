@@ -326,11 +326,20 @@ func (*stampFake) SupportsTransport(string) bool { return true }
 
 // tmuxStampFake is a stampFake whose metadata is a session environment, as
 // tmux's is: it is a runtime.EnvironmentBatchProvider. A plain stampFake is
-// a sidecar provider.
+// a sidecar provider. Its batched read returns the identity keys through
+// GetMeta, so an injected read failure fails it.
 type tmuxStampFake struct{ *stampFake }
 
-func (tmuxStampFake) GetAllEnvironment(string) (map[string]string, error) {
-	return nil, errors.New("tmuxStampFake: GetAllEnvironment is a marker only")
+func (f tmuxStampFake) GetAllEnvironment(name string) (map[string]string, error) {
+	env := make(map[string]string, len(identityEnvKeys))
+	for _, key := range identityEnvKeys {
+		v, err := f.GetMeta(name, key)
+		if err != nil {
+			return nil, err
+		}
+		env[key] = v
+	}
+	return env, nil
 }
 
 // meta reads key straight from the fake, past any injected failure.

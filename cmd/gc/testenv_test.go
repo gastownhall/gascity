@@ -203,6 +203,8 @@ func preserveTestControlEnv(key string) bool {
 		key == "GC_HERDR_LIVE_TESTS" ||
 		strings.HasPrefix(key, "GC_LIVE_") ||
 		strings.HasPrefix(key, "GC_SESSION_CHAOS_") ||
+		// The v2 simulator's seed knobs (GC_V2_SIM_SEED, GC_V2_SIM_SEEDS).
+		strings.HasPrefix(key, "GC_V2_SIM_") ||
 		strings.HasPrefix(key, "GC_TEST_")
 }
 

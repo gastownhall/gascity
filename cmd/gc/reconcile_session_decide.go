@@ -120,16 +120,25 @@ type rowArm struct {
 	decide func(r *rowFacts) (it intent, ok bool)
 }
 
-// rowArms is CONTRACT v5 §4's table in its order. Later PRs insert their
-// arms at their numbers: A3 rekey (C4c2), A4 the stop request (C6b2), A6's
-// other heals and markers (C5d), A7 row metadata (C7d), A8 the baseline
-// (C7c), and A10-A21 below A9.
+// rowArms is CONTRACT v5 §4's table in its order; an arm with several rows
+// (A6) takes one line per row. Later PRs insert their arms at their numbers:
+// A4 the stop request (C6b2), A7 row metadata (C7d), A8 the baseline (C7c),
+// A10-A18, A20's begin (C6a2) and A21.
 var rowArms = []rowArm{
 	{"A1", armNoRow},
 	{"A2", armKillFence},
+	{"A3", armIdentity},
 	{"A5", armUnknownState},
 	{"A6", armTimerHeals},
+	{"A6", armClaimClear},
+	{"A6", armCreatingHeal},
+	{"A6", armDeadNamedHeal},
+	{"A6", armCrashHeal},
+	{"A6", armAwakeHeal},
+	{"A6", armStrandedClear},
+	{"A6", armCurrentBead},
 	{"A9", armLivenessUnknown},
+	{"A19", armDrainVoidCancel},
 }
 
 // decideRow's other reasons.
@@ -181,7 +190,7 @@ func armTimerHeals(r *rowFacts) (intent, bool) {
 		return intent{}, false
 	}
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
-	return intent{Kind: intentRowHeal, Reason: decideTimerHeal, Basis: basis}, true
+	return intent{Kind: intentRowHeal, Reason: decideTimerHeal, Basis: basis, Patch: patch}, true
 }
 
 // armLivenessUnknown is A9: every arm below reads liveness and desire, so
@@ -202,7 +211,7 @@ func armLivenessUnknown(r *rowFacts) (intent, bool) {
 // idleness and claims, so they are the probing -fresh kinds; every other
 // reason is a plain row write. A20 (C6a, C6b1) proposes through it.
 func drainKind(reason string, signal bool) string {
-	fresh := reason == string(session.SleepReasonIdle) || reason == reasonNoWake || reason == idleRespawnDrainReason
+	fresh := reason == drainIdle || reason == reasonNoWake || reason == idleRespawnDrainReason
 	switch {
 	case signal && fresh:
 		return intentSignalFresh

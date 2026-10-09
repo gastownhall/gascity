@@ -83,6 +83,33 @@ func ownRuntime(v identityVerdict, row session.Info, rt runtimeIdentity) bool {
 	return v == identityStaleSelf && ok && epoch == generation
 }
 
+// adoptableIdentity is named AdoptLive's rule (v5 O2, LL5; the C4c1 review
+// ruling): a clean read with no session ID, which is Ownerless or the
+// legacy-adopted shape (a token and no GC_SESSION_ID, Unknown to every row
+// but its own), whose token the adoption captures. It never adopts Foreign,
+// an unread identity, or any other Unknown. The effect re-confirms presence
+// after its fresh read.
+func adoptableIdentity(rt runtimeIdentity) bool {
+	return rt.Known && strings.TrimSpace(rt.SessionID) == ""
+}
+
+// rekeyable is S4's guards on verdict v of row's runtime. StaleSelf is three
+// of them (compareIdentity): the row's session ID, a non-empty runtime token
+// (v5.1 B6), and the runtime's epoch at most the row's generation. The
+// fourth: the row holds no pending_create_claim, since a pending create's
+// runtime is resolved by S1 and C8.2(a), never re-keyed (X2). Arm A3 and the
+// rekey effect's fresh read both apply it.
+func rekeyable(v identityVerdict, row session.Info) bool {
+	return v == identityStaleSelf && !row.PendingCreateClaim
+}
+
+// rekeyStillHolds is the rekey effect's fresh check (v5 S4): rt, read after
+// the pass, is still rekeyable for row and carries token, the runtime token
+// the pass saw.
+func rekeyStillHolds(row session.Info, rt runtimeIdentity, token string) bool {
+	return rekeyable(compareIdentity(row, rt), row) && strings.TrimSpace(rt.Token) == strings.TrimSpace(token)
+}
+
 // identityEpochs parses the runtime's epoch and the row's generation.
 func identityEpochs(row session.Info, rt runtimeIdentity) (int, int, bool) {
 	epoch, err := strconv.Atoi(strings.TrimSpace(rt.Epoch))

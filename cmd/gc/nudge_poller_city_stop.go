@@ -23,7 +23,9 @@ import (
 //
 //   - stopCityNudgePollers terminates the city's live pollers. The city stop
 //     paths run it, through shutdownBeadsProvider, before they retire the
-//     store.
+//     store. A standalone stop that finds the store already retired and the
+//     runtime empty runs it from cityAlreadyStoppedForStop instead, then
+//     checks that the store is still retired.
 //   - nudgePollCityStopped lets a poller that still survives notice that its
 //     city is down and exit before its next store read.
 //

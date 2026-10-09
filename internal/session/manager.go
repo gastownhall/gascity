@@ -280,6 +280,10 @@ type Info struct {
 	// clearing last_woke_at, so a same-tick sleep/drain-ack falls back to this
 	// instead of collapsing straight to CreatedAt (#2574).
 	SleptAt string // slept_at (raw)
+	// SuspendedAt is the RAW suspended_at metadata (RFC3339 or empty), stamped
+	// by a suspend. The process-table orphan sweep reads it, after SleptAt, as
+	// the row's last stop.
+	SuspendedAt string // suspended_at (raw)
 	// AwakeStartedAt is the RAW awake_started_at metadata (RFC3339 or empty):
 	// the immutable start-of-awake-interval epoch that survives sleep/drain
 	// teardowns (unlike last_woke_at / pending_create_started_at, which are
@@ -387,6 +391,10 @@ type Info struct {
 	// (CurrentBeadIDKey). compute_awake_bridge maps it (trimmed) onto
 	// LifecycleInput.CurrentlyProcessingBeadID.
 	CurrentlyProcessingBeadID string // currently_processing_bead_id (raw)
+	// CurrentClaimBeadID is the RAW current_claim_bead_id metadata
+	// (beadmeta.CurrentClaimBeadIDMetadataKey): the work the session claimed
+	// for itself (SetCurrentClaim), which CurrentClaimBeadID reads live.
+	CurrentClaimBeadID string // current_claim_bead_id (raw)
 	// CoreHashBreakdown is the RAW core_hash_breakdown metadata (a JSON blob). The
 	// config-drift path feeds it verbatim to runtime.CoreFingerprintDriftFieldsFromJSON
 	// / LogCoreFingerprintDrift for the drift trace payload; the mirror keeps the
@@ -445,6 +453,11 @@ type Info struct {
 	// explicit-wake cause. Mirror keeps the raw value so a typed LifecycleInput can
 	// be populated from Info without touching the bead.
 	WakeRequest string // wake_request (raw)
+	// WakeRequestedAt is the RAW wake_requested_at metadata (RFC3339 or empty),
+	// stamped with wake_request. The reconciler compares it against SleptAt to
+	// tell a still-pending explicit wake from one an earlier awake interval
+	// already served (PreWakePatch clears the pair only at a start).
+	WakeRequestedAt string // wake_requested_at (raw)
 	// RestartRequested is the RAW restart_requested metadata, the §5.2 intra-tick
 	// restart marker compute_awake_bridge reads (trimmed == "true") to surface a
 	// pending restart on the awake scan. Under raw-refresh coexistence the mirror
@@ -1349,13 +1362,21 @@ func (m *Manager) suspend(id string, intent suspendIntent) error {
 		}
 
 		// Update state and suspension timestamp together so stores with a
-		// write-through cache preserve one coherent lifecycle transition.
-		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
+		// write-through cache preserve one coherent lifecycle transition. An
+		// operator's suspend supersedes any pending wake request (D7); the
+		// shutdown sweep leaves it for the next start.
+		patch := MetadataPatch{
 			"state":        string(StateSuspended),
 			"suspended_at": time.Now().UTC().Format(time.RFC3339),
 			"slept_at":     "",
 			"sleep_reason": "",
-		}}); err != nil {
+		}
+		if intent == suspendIntentOperator {
+			for k, v := range ClearWakeRequestPatch() {
+				patch[k] = v
+			}
+		}
+		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string(patch)}); err != nil {
 			return fmt.Errorf("updating suspension state: %w", err)
 		}
 

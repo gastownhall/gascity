@@ -4,6 +4,7 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 exports_files([
     "check-generated-in-sync.sh",
     "check-go-format.sh",
+    "check-goreleaser-config.sh",
     "gc-session-docker",
 ])
 
@@ -98,13 +99,17 @@ go_test(
         "check_embedded_pins_test.go",
         "check_split_topology_rows_test.go",
         "ci_critical_path_test.go",
+        "ci_merge_queue_test.go",
         "ci_required_coverage_test.go",
+        "cmd_gc_shards_test.go",
+        "codeql_go_cache_test.go",
         "complexity_test.go",
         "complexity_workflow_test.go",
         "container_scan_fail_fast_test.go",
         "container_tool_security_test.go",
         "docker_session_protocol_test.go",
         "dolt_version_pin_test.go",
+        "gh_expr_test.go",
         "git_test_env_test.go",
         "githooks_beads_chain_test.go",
         "githooks_pre_push_stdin_test.go",
@@ -148,6 +153,7 @@ go_test(
         "testenv_import_test.go",
         "tmpdir_default_test.go",
         "worker_inference_make_test.go",
+        "workflow_go_twins_test.go",
         "workflow_pr_branch_filter_test.go",
     ],
     data = glob(
@@ -168,6 +174,7 @@ go_test(
         "//platforms:BUILD.bazel",
         "//scripts/testdata/test-go-test-shard/env_required:pkg_files",
         "//scripts/testdata/test-go-test-shard/no_extra_env:pkg_files",
+        "//test:BUILD.bazel",
         "//test/acceptance:BUILD.bazel",
         "//test/integration:BUILD.bazel",
         "//tools/bazel/rules:openapi_base_spec.bzl",

@@ -43,6 +43,9 @@ var goModDownloadExemptWorkflows = map[string]string{
 	// Bazel fetches modules through gazelle's go_deps, not the go command
 	// in the job; setup-bazel already gives fetch_repo a "|" GOPROXY list.
 	"bazel.yml": "Bazel fetches modules via go_deps",
+	// Same: its one job is a Bazel run (setup-go only supplies the
+	// /usr/local/go that locally executed tests exec in mode cache).
+	"review-formulas.yml": "Bazel fetches modules via go_deps",
 	// Installs gocyclo with `go install pkg@version`; never builds this module.
 	"complexity.yml": "go install of a pinned tool only",
 	// Publishing jobs are not migrated: they keep actions/setup-go's own

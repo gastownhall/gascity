@@ -56,6 +56,14 @@ name: bazel
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  # Merge queue (dormant until the main ruleset enables one; TESTING.md
+  # "Merge queue"): both required checks of this workflow must report on
+  # every queue entry's merge-group commit. A merge group is same-repo
+  # trust (only people who can merge can queue), so the rbe job takes mode
+  # remote; the queue ref is already the merge, so fresh-merge and the base
+  # step skip it, and the OpenAPI gate diffs against merge_group.base_sha.
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main]
   workflow_dispatch:
@@ -65,12 +73,20 @@ on:
         type: choice
         default: "on"
         options: ["on", "cache", "off"]
+      fresh-test-results:
+        description: "Re-execute every lane's tests (--config=fresh: no cached test results), as the nightly run does"
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       rbe:
         type: string
         required: false
         default: "on"
+      fresh-test-results:
+        type: boolean
+        required: false
+        default: false
     secrets:
       RBE_WEST_EXECUTOR:
         required: false
@@ -81,15 +97,19 @@ on:
       CODECOV_TOKEN:
         required: false
 
-# A PR's runs share one group and a newer one cancels the older. Every other
-# event (push to main, dispatch, call) gets its own group (the run id), so it
-# is never cancelled or queued behind another run: main runs save the runner
-# cache and report coverage. (A shared group without cancel-in-progress
-# would still replace a pending run with the next one.) The prefix is a
-# literal: under workflow_call github.workflow is the caller's name, and the
-# group would collide with the caller's own.
+# A PR's runs share one group and a newer one cancels the older. A merge
+# group keys on its own queue ref (refs/heads/gh-readonly-queue/main/pr-N-
+# <base sha>, unique per entry and base) and is never cancelled: cancelling
+# a queue run fails the entry's required checks and ejects it, and a PR's
+# own runs (keyed on its number) never share a queue entry's group. Every
+# other event (push to main, dispatch, call) gets its own group (the run
+# id), so it is never cancelled or queued behind another run: main runs save
+# the runner cache and report coverage. (A shared group without
+# cancel-in-progress would still replace a pending run with the next one.)
+# The prefix is a literal: under workflow_call github.workflow is the
+# caller's name, and the group would collide with the caller's own.
 concurrency:
-  group: bazel-yml-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  group: bazel-yml-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'merge_group' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -110,6 +130,9 @@ jobs:
       lanes: ${{ steps.lanes.outputs.lanes }}
       base-sha: ${{ steps.base.outputs.base-sha }}
     steps:
+      # merge_group: PULL_REQUEST and FORK are false (no
+      # github.event.pull_request on that event), so a queue run takes the
+      # same-repo path, mode remote (scripts/ci_merge_queue_test.go).
       - name: Decide remote execution
         id: decide
         env:
@@ -163,22 +186,37 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           MODE: ${{ steps.decide.outputs.mode }}
+          FRESH: ${{ inputs.fresh-test-results }}
         run: |
           set -euo pipefail
           case "$MODE" in remote|fork-ro|fork-rw|cache|local) ;; *) echo "::error::mode '$MODE'"; exit 1 ;; esac
-          unit='{"lane":"unit","cmd":"test --config=ci --keep_going //..."}'
-          acceptance='{"lane":"acceptance","cmd":"test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test //test/acceptance:acceptance_solo_tests"}'
+          # The nightly fresh-test-results run (bazel-nightly.yml) appends
+          # --config=fresh (.bazelrc: --nocache_test_results) to every
+          # lane's cmd: worker-env (tools/rbe/worker-env) keys git and yq
+          # at major version only, so a minor upgrade on the rbe-west
+          # workers moves no action key, and a regression it causes can
+          # hide behind every push's cached PASS forever otherwise
+          # (2026-10-07 worker-env outage review). FRESH is empty outside
+          # workflow_dispatch/workflow_call, which never ask for it.
+          # Built as a suffix rather than substituted into each lane's JSON:
+          # bash 3.2 (macOS's /bin/bash, which scripts/bazel_multilane_test.go
+          # runs this step with) keeps the backslash of an escaped brace in a
+          # ${var/pat/rep} replacement.
+          fresh=""
+          if [ "$FRESH" = "true" ]; then fresh=" --config=fresh"; fi
+          unit='{"lane":"unit","cmd":"test --config=ci --keep_going //...'"$fresh"'"}'
+          acceptance='{"lane":"acceptance","cmd":"test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test //test/acceptance:acceptance_solo_tests'"$fresh"'"}'
           # Evidence-only until G3: agent-flow tests depend on ambient
           # agent-template resolution (product-side fix, D13).
-          integration='{"lane":"integration","cmd":"test --config=ci --config=integration --keep_going //test/integration:integration_test","evidence-only":true}'
+          integration='{"lane":"integration","cmd":"test --config=ci --config=integration --keep_going //test/integration:integration_test'"$fresh"'","evidence-only":true}'
           # Gating. Every package's integration-tagged and GC_FAST_UNIT=0
           # tests outside //test/integration (scripts/test-integration-shard's
           # packages-* shards).
-          packages='{"lane":"integration-packages","cmd":"test --config=ci --config=integration --keep_going //test:integration_packages"}'
+          packages='{"lane":"integration-packages","cmd":"test --config=ci --config=integration --keep_going //test:integration_packages'"$fresh"'"}'
           # Gating. The integration suite's bdstore and REST smoke tests
           # (scripts/test-integration-shard bdstore_tests + rest_smoke_tests:
           # .bazelrc test:integration-smoke's --test_filter).
-          smoke='{"lane":"integration-smoke","cmd":"test --config=ci --config=integration-smoke --keep_going //test/integration:integration_test"}'
+          smoke='{"lane":"integration-smoke","cmd":"test --config=ci --config=integration-smoke --keep_going //test/integration:integration_test'"$fresh"'"}'
           # Every mode tests: the gate (the required check) fails a run that
           # started no lane. Acceptance and integration-packages run on the
           # fork pool too (mode fork-ro, instance oss-fork, loopback only):
@@ -251,10 +289,12 @@ jobs:
     if: needs.rbe.outputs.lanes != '[]'
     # Mode remote: the runner is only a Bazel client. Local modes (cache,
     # local) execute here, and so may fork-ro/fork-rw (a refused certificate
-    # falls back to the read-only cache), so they get 4 vCPU. Acceptance gets
-    # 4 vCPU in every mode: its client-side analysis (~1900 packages) took
-    # ~2 m of the lane on 2 vCPU.
-    runs-on: ${{ (needs.rbe.outputs.mode != 'remote' || matrix.lane == 'acceptance') && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}
+    # falls back to the read-only cache), so they get 4 vCPU. Acceptance and
+    # unit get 4 vCPU in every mode: their client-side loading and analysis
+    # is CPU-bound (acceptance ~1900 packages took ~2 m on 2 vCPU; unit's
+    # //... is ~3000 packages, 107-137 s on 2 vCPU vs acceptance's 39-44 s
+    # on 4).
+    runs-on: ${{ (needs.rbe.outputs.mode != 'remote' || matrix.lane == 'acceptance' || matrix.lane == 'unit') && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -391,14 +431,17 @@ jobs:
       # The OpenAPI breaking-change gate (//cmd/openapi-breaking:
       # openapi-breaking_test, in the unit lane's //...) compares the tested
       # tree's internal/api/openapi.json with the spec of the commit the PR
-      # is merged onto (fresh-merge's base-sha). @openapi_base_spec
-      # (tools/bazel/rules/openapi_base_spec.bzl) reads the file this names
-      # from the client environment: no Bazel flag, so no other action key
-      # changes. Other events have no base; the spec compares with itself.
+      # is merged onto (fresh-merge's base-sha; for a merge group, the commit
+      # the entry is queued onto, merge_group.base_sha: main or the entry
+      # ahead of it, an ancestor of this fetch-depth 0 checkout).
+      # @openapi_base_spec (tools/bazel/rules/openapi_base_spec.bzl) reads
+      # the file this names from the client environment: no Bazel flag, so no
+      # other action key changes. Other events have no base; the spec
+      # compares with itself.
       - name: OpenAPI breaking-change base spec
-        if: github.event_name == 'pull_request' && matrix.lane == 'unit'
+        if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && matrix.lane == 'unit'
         env:
-          BASE_SHA: ${{ needs.rbe.outputs.base-sha }}
+          BASE_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || needs.rbe.outputs.base-sha }}
         run: |
           set -euo pipefail
           [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::base-sha is '$BASE_SHA'"; exit 1; }

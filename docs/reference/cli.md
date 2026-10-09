@@ -4107,7 +4107,7 @@ gc session
 |------------|-------------|
 | [gc session attach](#gc-session-attach) | Attach to (or resume) a chat session |
 | [gc session close](#gc-session-close) | Close a session permanently |
-| [gc session kill](#gc-session-kill) | Force-kill session runtime (reconciler restarts) |
+| [gc session kill](#gc-session-kill) | Force-kill session runtime |
 | [gc session list](#gc-session-list) | List chat sessions |
 | [gc session logs](#gc-session-logs) | Show session logs for a session |
 | [gc session new](#gc-session-new) | Create a new chat session from an agent template |
@@ -4162,6 +4162,13 @@ assignments, and work still point at the same session bead. If the provider has
 resume metadata, Gas City may attempt provider resume, but
 provider conversation continuity is not guaranteed; confirm it with the agent or
 provider after restart.
+
+An idle pool seat (no started work and no ready work) is replaced: the
+reconciler releases the routed work it had not started so another seat can
+pick it up, closes it, and the pool starts a fresh seat in its slot. A pool seat holding started or ready work
+restarts in place on its bead; while its started work is blocked, it holds its
+slot asleep. A task assigned directly to the seat with no route is kept, not
+released, and the seat holds its slot until that task is ready.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 

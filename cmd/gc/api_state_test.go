@@ -2046,6 +2046,10 @@ func TestControllerStateAppliesCacheReconcileBeadEventsToStores(t *testing.T) {
 
 	updated := created
 	updated.Status = "in_progress"
+	// The scan that emitted the snapshot read it from the backing.
+	if err := backing.Update(created.ID, beads.UpdateOpts{Status: &updated.Status}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
 	payload, err := json.Marshal(updated)
 	if err != nil {
 		t.Fatalf("marshal updated bead: %v", err)

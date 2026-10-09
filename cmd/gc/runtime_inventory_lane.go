@@ -181,6 +181,7 @@ type inventoryLaneStatus struct {
 	seq      uint64
 	result   string
 	duration time.Duration
+	v2Fields map[string]any // v2PassFields; never mutated
 }
 
 // inventoryIdentity is the last identity read of one name's incarnation.
@@ -255,6 +256,12 @@ func (l *runtimeInventoryLane) wake() {
 	case l.wakeCh <- struct{}{}:
 	default:
 	}
+}
+
+// v2PassFields are the v2 pass record's view of the lane's last pass: its
+// process probes and identity env reads, and the reads still owed (C2d).
+func (l *runtimeInventoryLane) v2PassFields() map[string]any {
+	return l.statusSnapshot().v2Fields
 }
 
 // statusSnapshot returns the last pass's status.
@@ -354,7 +361,10 @@ func (cr *CityRuntime) runInventoryPass(ctx context.Context, reason string) {
 	report.duration = finished.Sub(started)
 
 	lane.statusMu.Lock()
-	lane.status = inventoryLaneStatus{at: finished, reason: reason, ran: true, seq: report.seq, result: result, duration: report.duration}
+	lane.status = inventoryLaneStatus{at: finished, reason: reason, ran: true, seq: report.seq, result: result, duration: report.duration, v2Fields: map[string]any{
+		"process_probe_ms": report.processProbe.Milliseconds(), "process_probes": report.processProbes,
+		"env_reads": report.envReads, "env_read_backlog": report.envBacklog,
+	}}
 	lane.statusMu.Unlock()
 
 	if lane.traceDue(&report) {
@@ -1061,10 +1071,10 @@ func inventoryPassFields(r *inventoryPassReport) map[string]any {
 		"inventory_provider_gen":  r.providerGen,
 		"inventory_listing_ms":    r.listing.Milliseconds(),
 		"inventory_enrich_ms":     r.enrich.Milliseconds(),
-		"inventory_attribute_ms":  r.envRead.Milliseconds(),
+		"inventory_env_read_ms":   r.envRead.Milliseconds(),
 		"inventory_flips":         r.flips,
-		"inventory_attr_reads":    r.envReads,
-		"inventory_attr_pending":  r.envBacklog,
+		"inventory_env_reads":     r.envReads,
+		"inventory_env_backlog":   r.envBacklog,
 		"inventory_probes":        r.processProbes,
 		"inventory_probe_ms":      r.processProbe.Milliseconds(),
 		"inventory_enrich_errors": strings.Join(r.enrichErrors, "; "),

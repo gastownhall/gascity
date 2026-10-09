@@ -577,7 +577,9 @@ func (p *decidePass) planNamed() {
 }
 
 // namedGate returns why a named plan is refused, or "". It sets the plan's
-// AdoptLive from I3 by the AM-N6 table.
+// AdoptLive from I3 by the AM-N6 table, on the identity the lane read: an
+// alive runtime is adopted only by adoptableIdentity's rule, and any other
+// identity holds the name.
 func (p *decidePass) namedGate(ap allocPlan, spec namedSessionSpec) string {
 	plan := ap.Named
 	for _, r := range p.inFlight {
@@ -604,14 +606,15 @@ func (p *decidePass) namedGate(ap allocPlan, spec namedSessionSpec) string {
 	case nameAbsent, nameCorpse, nameZombie:
 		return ""
 	}
-	switch {
-	case r.obs.OwnerState == OwnerNone, r.obs.OwnerState == OwnerUnknown && r.obs.Incarnation == "":
+	// No row exists yet, so any session ID is Foreign (v5 O2).
+	switch rt := r.obs.Identity; {
+	case adoptableIdentity(rt):
 		plan.AdoptLive = true
 		return ""
-	case r.obs.OwnerState == OwnerUnknown:
-		return gateOwnerPending
+	case compareIdentity(session.Info{}, rt) == identityForeign:
+		return gateNameHeld + strings.TrimSpace(rt.SessionID)
 	}
-	return gateNameHeld + r.obs.Owner.SessionID
+	return gateOwnerPending
 }
 
 // selectNamedRow selects a configured named session's canonical row, when

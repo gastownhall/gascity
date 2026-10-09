@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -33,7 +34,10 @@ type allocFixture struct {
 	// further fresh facts, as a session key's probe write-back would.
 	activity map[string]time.Time
 	facts    map[string]map[FactKind]ObsFact
-	in       allocInputs
+	// own are the listed names whose identity observation resolves to the
+	// one census row of that name (Current), or reads Unknown.
+	own map[string]bool
+	in  allocInputs
 }
 
 func newAllocFixture(t *testing.T, cfg *config.City) *allocFixture {
@@ -66,14 +70,15 @@ func (f *allocFixture) rigLeg(rows ...beads.Bead) *allocFixture {
 }
 
 // alive lists runtime name as a running pane with attrs. Unless attrs set
-// an identity, the runtime's is read: a token, and attrs' owner as its
-// session ID.
+// an identity, the runtime's is read: attrs' owner's (readIdentity), or the
+// one census row named name's.
 func (f *allocFixture) alive(name string, attrs InventoryAttrs) *allocFixture {
 	attrs.DeadKnown = true
 	if !attrs.Identity.Known {
-		attrs.Identity = readIdentity("")
 		if attrs.OwnerState == OwnerSession {
-			attrs.Identity.SessionID = attrs.OwnerID
+			attrs.Identity = readIdentity(attrs.OwnerID)
+		} else {
+			f.ownIdentity(name)
 		}
 	}
 	f.attrs[name] = attrs
@@ -81,11 +86,29 @@ func (f *allocFixture) alive(name string, attrs InventoryAttrs) *allocFixture {
 	return f
 }
 
-// corpse lists runtime name as an exited pane.
+// corpse lists runtime name as an exited pane of the one census row so
+// named.
 func (f *allocFixture) corpse(name string) *allocFixture {
-	f.attrs[name] = InventoryAttrs{DeadKnown: true, AllPanesDead: true, AttachedKnown: true, Identity: readIdentity("")}
+	f.attrs[name] = InventoryAttrs{DeadKnown: true, AllPanesDead: true, AttachedKnown: true}
 	f.listed = append(f.listed, name)
+	f.ownIdentity(name)
 	return f
+}
+
+// unread leaves listed name's identity unread.
+func (f *allocFixture) unread(name string) *allocFixture {
+	delete(f.own, name)
+	a := f.attrs[name]
+	a.Identity = runtimeIdentity{}
+	f.attrs[name] = a
+	return f
+}
+
+func (f *allocFixture) ownIdentity(name string) {
+	if f.own == nil {
+		f.own = make(map[string]bool)
+	}
+	f.own[name] = true
 }
 
 // fact sets a fresh fact on a listed runtime name.
@@ -110,7 +133,19 @@ func (f *allocFixture) observation() *ObservationSnapshot {
 	if f.noInventory {
 		return cache.Snapshot()
 	}
-	snap := cache.publish(f.in.Now, f.attrs, completeBackend("tmux", f.listed...))
+	attrs := maps.Clone(f.attrs)
+	if len(f.own) > 0 {
+		c := f.census()
+		for name := range f.own {
+			a := attrs[name]
+			a.Identity = readIdentity("")
+			if rows := c.RowsNamed(name); len(rows) == 1 {
+				a.Identity = readIdentity(rows[0].ID)
+			}
+			attrs[name] = a
+		}
+	}
+	snap := cache.publish(f.in.Now, attrs, completeBackend("tmux", f.listed...))
 	if len(f.activity) == 0 && len(f.facts) == 0 {
 		return snap
 	}
@@ -177,9 +212,10 @@ func mustDecide(t *testing.T, in allocInputs) allocDecision {
 	return d
 }
 
-// sessionRow is an open session row.
+// sessionRow is an open session row. Its instance_token is rowToken(id)
+// unless meta sets one.
 func sessionRow(id string, meta ...string) beads.Bead {
-	m := make(map[string]string)
+	m := map[string]string{"instance_token": rowToken(id)}
 	for i := 0; i+1 < len(meta); i += 2 {
 		m[meta[i]] = meta[i+1]
 	}
@@ -737,9 +773,9 @@ func TestAllocator_UncertainAttachOnlyWakeKeeps(t *testing.T) {
 	// backend that reports attach but has not primed: their attach facts
 	// read unprimed. A stale attach can no longer reach an alive row: a pass
 	// that does not enrich a name leaves its identity unread (v5 O1).
-	attrs := map[string]InventoryAttrs{"s-gc-0": {DeadKnown: true, AttachedKnown: true, Attached: true, Identity: readIdentity("")}}
-	for _, n := range []string{"s-gc-1", "s-gc-2"} {
-		attrs[n] = InventoryAttrs{DeadKnown: true, AttachedKnown: true, Identity: readIdentity("")}
+	attrs := map[string]InventoryAttrs{"s-gc-0": {DeadKnown: true, AttachedKnown: true, Attached: true, Identity: readIdentity("gc-0")}}
+	for _, id := range []string{"gc-1", "gc-2"} {
+		attrs["s-"+id] = InventoryAttrs{DeadKnown: true, AttachedKnown: true, Identity: readIdentity(id)}
 	}
 	in := f.inputs()
 	in.Obs = newObserveCache().publish(in.Now, attrs, completeBackend("tmux", "s-gc-0"), unattestedBackend("exec", "s-gc-1", "s-gc-2"))
@@ -800,6 +836,31 @@ func TestAllocator_ConfigSleepSuppressionDeadUsesDetachedAtLiveNeedsActivity(t *
 		if !suppressed && e.Desired != desireWake {
 			t.Errorf("%s = %s/%s, want a wake", id, e.Desired, e.Reason)
 		}
+	}
+}
+
+// Kills: stage 6b dropping legacy's explicit-wake override
+// (wakeDemandOverridesSleepSuppression). A durable explicit wake request that
+// is still pending outranks the idle latch, whatever reason the awake set
+// labels the wake with; one requested before the row's last sleep was served
+// and leaves the latch in force.
+func TestAllocator_ConfigSleepSuppressionHonorsPendingExplicitWake(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "chat"}}}
+	latched := func(id, requestedAt string) beads.Bead {
+		return sessionRow(id, "template", "chat", "state", "asleep", "session_name", "s-"+id,
+			"manual_session", "true", "sleep_reason", "idle", "sleep_policy_fingerprint", "fp",
+			"slept_at", ago(10*time.Minute), "wake_request", "explicit", "wake_requested_at", requestedAt)
+	}
+	f := newAllocFixture(t, cfg).sessions(latched("gc-pending", ago(time.Minute)), latched("gc-served", ago(20*time.Minute)))
+	policy := resolvedSessionSleepPolicy{Effective: "1m", Duration: time.Minute, Fingerprint: "fp"}
+	f.in.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-pending": policy, "gc-served": policy}
+	d := f.decideSelecting("gc-pending", "gc-served")
+	if e := entryOf(t, d, "gc-pending"); e.Desired != desireWake {
+		t.Errorf("idle-latched row with a pending explicit wake = %s/%s, want a wake", e.Desired, e.Reason)
+	}
+	if e := entryOf(t, d, "gc-served"); e.Desired != desireSleep || e.Reason != reasonConfigSleep {
+		t.Errorf("idle-latched row whose explicit wake predates its sleep = %s/%s, want %s/%s",
+			e.Desired, e.Reason, desireSleep, reasonConfigSleep)
 	}
 }
 

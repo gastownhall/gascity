@@ -43,15 +43,21 @@ func observeRows(t *testing.T, named map[string]string) *sessionCensus {
 	t.Helper()
 	var rows []beads.Bead
 	for id, name := range named {
-		rows = append(rows, censusSession(id, map[string]string{"session_name": name, "state": "active"}))
+		rows = append(rows, censusSession(id, map[string]string{"session_name": name, "state": "active", "instance_token": rowToken(id)}))
 	}
 	return readCensus(t, censusNow, censusLegs("class:sessions", censusStore(rows...)))
 }
 
-// readIdentity is a clean identity read: a token, and sessionID when set.
+// readIdentity is a clean identity read of row sessionID's runtime: its ID
+// and rowToken, which the fixtures' rows carry, so it is Current to that
+// row and Foreign to the others. With no ID it is a token no row carries:
+// Unknown to every row.
 func readIdentity(sessionID string) runtimeIdentity {
-	return runtimeIdentity{Known: true, SessionID: sessionID, Token: "tok"}
+	return runtimeIdentity{Known: true, SessionID: sessionID, Token: rowToken(sessionID)}
 }
+
+// rowToken is the instance_token the fixtures give row id.
+func rowToken(id string) string { return "tok-" + id }
 
 func observed(t *testing.T, snap *ObservationSnapshot, c *sessionCensus, now time.Time, id string) rowObservation {
 	t.Helper()
@@ -67,7 +73,7 @@ func observed(t *testing.T, snap *ObservationSnapshot, c *sessionCensus, now tim
 // attached and leaves the row certain.
 func TestObserveUnsupportedAttachIsNotAttached(t *testing.T) {
 	c := observeRows(t, map[string]string{"gc-1": "s1"})
-	snap := newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s1": {Identity: readIdentity("")}}, completeBackend("acp", "s1"))
+	snap := newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s1": {Identity: readIdentity("gc-1")}}, completeBackend("acp", "s1"))
 	got := observed(t, snap, c, censusNow, "gc-1")
 	if got.Liveness != livenessAlive || got.Attached || got.Uncertain {
 		t.Fatalf("observation = %+v, want alive, not attached, certain", got)
@@ -82,7 +88,7 @@ func TestObserveUnsupportedAttachIsNotAttached(t *testing.T) {
 func TestObserveStaleAttachOnReporterIsUncertain(t *testing.T) {
 	c := observeRows(t, map[string]string{"gc-1": "s1"})
 	cache := newObserveCache()
-	snap := cache.publish(censusNow, map[string]InventoryAttrs{"s1": {AttachedKnown: true, Attached: false, Identity: readIdentity("")}}, completeBackend("tmux", "s1"))
+	snap := cache.publish(censusNow, map[string]InventoryAttrs{"s1": {AttachedKnown: true, Attached: false, Identity: readIdentity("gc-1")}}, completeBackend("tmux", "s1"))
 	if got := observed(t, snap, c, censusNow, "gc-1"); got.Liveness != livenessAlive || got.Attached || got.Uncertain {
 		t.Fatalf("fresh detach: %+v, want alive, detached, certain", got)
 	}
@@ -106,7 +112,7 @@ func TestObserveStaleAttachOnReporterIsUncertain(t *testing.T) {
 func TestObservePendingUnknownIsNotAnInput(t *testing.T) {
 	c := observeRows(t, map[string]string{"gc-1": "s1"})
 	cache := newObserveCache()
-	snap := cache.publish(censusNow, map[string]InventoryAttrs{"s1": {AttachedKnown: true, Identity: readIdentity("")}}, completeBackend("tmux", "s1"))
+	snap := cache.publish(censusNow, map[string]InventoryAttrs{"s1": {AttachedKnown: true, Identity: readIdentity("gc-1")}}, completeBackend("tmux", "s1"))
 	if got := observed(t, snap, c, censusNow, "gc-1"); got.Pending || got.Uncertain {
 		t.Fatalf("unknown pending: %+v, want not pending and certain", got)
 	}
@@ -124,7 +130,7 @@ func TestObservePendingUnknownIsNotAnInput(t *testing.T) {
 	}
 
 	cache = newObserveCache()
-	cache.publish(censusNow.Add(-time.Second), map[string]InventoryAttrs{"s1": {AttachedKnown: true, Identity: readIdentity("")}}, completeBackend("tmux", "s1"))
+	cache.publish(censusNow.Add(-time.Second), map[string]InventoryAttrs{"s1": {AttachedKnown: true, Identity: readIdentity("gc-1")}}, completeBackend("tmux", "s1"))
 	cache.publish(censusNow, nil, completeBackend("tmux"))
 	cache.Note("s1", FactPending, ObsYes, censusNow, SourceProbe, "")
 	if got := observed(t, cache.Snapshot(), c, censusNow, "gc-1"); got.Liveness != livenessGone || got.Pending {
@@ -137,9 +143,9 @@ func TestObservePendingUnknownIsNotAnInput(t *testing.T) {
 // restart), a dead pane read as alive (BEHAVIORS #7: a zombie is not alive),
 // and attach or pending read for a dead row (both facts are Yes in the
 // fixture). A listed, fresh runtime whose pane or process is dead is dead for
-// the row it is attributed to, or for the only row with its name; another
-// row's dead pane is occupied, and a shared name with no known owner stays
-// unknown, as does a corpse whose identity is unread or ownerless (v5 O1).
+// the row it is Current to (compareIdentity); another row's dead pane is
+// occupied, and one whose identity matches no row stays unknown, as does a
+// corpse whose identity is unread or ownerless (v5 O1).
 func TestObserveDeadPaneIsAStartCandidateNotUncertain(t *testing.T) {
 	deadPane := InventoryAttrs{DeadKnown: true, AllPanesDead: true, AttachedKnown: true, Attached: true, Identity: readIdentity("")}
 	owned := func(owner string) InventoryAttrs {
@@ -149,13 +155,16 @@ func TestObserveDeadPaneIsAStartCandidateNotUncertain(t *testing.T) {
 	}
 	unread := deadPane
 	unread.Identity = runtimeIdentity{}
+	legacy := deadPane // no session ID, the row's token (v5.2 M2)
+	legacy.Identity = runtimeIdentity{Known: true, Token: rowToken("gc-1")}
 	cases := []struct {
 		name  string
 		rows  map[string]string
 		attrs InventoryAttrs
 		want  map[string]rowLiveness
 	}{
-		{"unique-token-only", map[string]string{"gc-1": "s1"}, deadPane, map[string]rowLiveness{"gc-1": livenessDead}},
+		{"unique-legacy-adopted", map[string]string{"gc-1": "s1"}, legacy, map[string]rowLiveness{"gc-1": livenessDead}},
+		{"unique-token-only", map[string]string{"gc-1": "s1"}, deadPane, map[string]rowLiveness{"gc-1": livenessUnknown}},
 		{"unique-unread", map[string]string{"gc-1": "s1"}, unread, map[string]rowLiveness{"gc-1": livenessUnknown}},
 		{"unique-ownerless", map[string]string{"gc-1": "s1"}, InventoryAttrs{DeadKnown: true, AllPanesDead: true, Identity: runtimeIdentity{Known: true}}, map[string]rowLiveness{"gc-1": livenessUnknown}},
 		{"unique-owned-by-row", map[string]string{"gc-1": "s1"}, owned("gc-1"), map[string]rowLiveness{"gc-1": livenessDead}},
@@ -180,7 +189,7 @@ func TestObserveDeadPaneIsAStartCandidateNotUncertain(t *testing.T) {
 	// A live pane whose agent process a session key found dead is dead too.
 	c := observeRows(t, map[string]string{"gc-1": "s1"})
 	cache := newObserveCache()
-	cache.publish(censusNow, map[string]InventoryAttrs{"s1": {DeadKnown: true, AttachedKnown: true, Attached: true, Identity: readIdentity("")}}, completeBackend("tmux", "s1"))
+	cache.publish(censusNow, map[string]InventoryAttrs{"s1": {DeadKnown: true, AttachedKnown: true, Attached: true, Identity: readIdentity("gc-1")}}, completeBackend("tmux", "s1"))
 	cache.Note("s1", FactProcessAlive, ObsNo, censusNow, SourceProbe, "")
 	cache.Note("s1", FactPending, ObsYes, censusNow, SourceProbe, "")
 	if got := observed(t, cache.Snapshot(), c, censusNow, "gc-1"); got.Liveness != livenessDead || got.Uncertain || got.Attached || got.Pending {
@@ -215,7 +224,7 @@ func TestObserveLivenessPredicates(t *testing.T) {
 // another bead's, and unknown again once that pass is stale.
 func TestObserveListedOnUnprimedBackendIsPresent(t *testing.T) {
 	c := observeRows(t, map[string]string{"gc-1": "s1"})
-	snap := newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s1": {Identity: readIdentity("")}}, completeBackend("tmux"), unattestedBackend("exec", "s1"))
+	snap := newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s1": {Identity: readIdentity("gc-1")}}, completeBackend("tmux"), unattestedBackend("exec", "s1"))
 	if snap.Primed["exec"] {
 		t.Fatal("fixture: the unattested backend primed")
 	}
@@ -227,7 +236,7 @@ func TestObserveListedOnUnprimedBackendIsPresent(t *testing.T) {
 	}
 	// A partial listing has not primed either, but what it listed is there.
 	partial := BackendPass{Label: "exec", Outcome: OutcomePartial, Names: []string{"s1"}, Err: errors.New("one host unanswered")}
-	snap = newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s1": {Identity: readIdentity("")}}, completeBackend("tmux"), partial)
+	snap = newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s1": {Identity: readIdentity("gc-1")}}, completeBackend("tmux"), partial)
 	if snap.Primed["exec"] {
 		t.Fatal("fixture: the partial backend primed")
 	}
@@ -239,7 +248,7 @@ func TestObserveListedOnUnprimedBackendIsPresent(t *testing.T) {
 	if got := observed(t, snap, c, censusNow, "gc-1"); got.Liveness != livenessOccupied {
 		t.Fatalf("exec runtime owned by another bead: %+v, want occupied", got)
 	}
-	snap = newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s1": {DeadKnown: true, AllPanesDead: true, Identity: readIdentity("")}}, unattestedBackend("exec", "s1"))
+	snap = newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s1": {DeadKnown: true, AllPanesDead: true, Identity: readIdentity("gc-1")}}, unattestedBackend("exec", "s1"))
 	if got := observed(t, snap, c, censusNow, "gc-1"); got.Liveness != livenessDead {
 		t.Fatalf("dead exec runtime: %+v, want dead", got)
 	}
@@ -248,7 +257,7 @@ func TestObserveListedOnUnprimedBackendIsPresent(t *testing.T) {
 	// pane is stale, and an older pass's identity is not this incarnation's,
 	// so the row holds as unknown (v5 O1).
 	cache := newObserveCache()
-	cache.publish(censusNow.Add(-90*time.Second), map[string]InventoryAttrs{"s1": {DeadKnown: true, AllPanesDead: true, Identity: readIdentity("")}}, unattestedBackend("exec", "s1"))
+	cache.publish(censusNow.Add(-90*time.Second), map[string]InventoryAttrs{"s1": {DeadKnown: true, AllPanesDead: true, Identity: readIdentity("gc-1")}}, unattestedBackend("exec", "s1"))
 	snap = cache.publish(censusNow, nil, unattestedBackend("exec", "s1"))
 	if got := observed(t, snap, c, censusNow, "gc-1"); got.Liveness != livenessUnknown {
 		t.Fatalf("stale dead pane on exec: %+v, want unknown", got)
@@ -262,9 +271,9 @@ func TestObserveListedOnUnprimedBackendIsPresent(t *testing.T) {
 }
 
 // Kills: every row that shares a name read as alive (R-43). The runtime is
-// alive for its attributed owner and occupied for the other rows; with no
-// session ID, or a runtime whose identity is unread or ownerless, no row can
-// claim it, so all are uncertain rather than alive.
+// alive for its owner and occupied for the rows it is Foreign to; with no
+// session ID and no row's token, or a runtime whose identity is unread or
+// ownerless, no row can claim it, so all are uncertain rather than alive.
 func TestObserveSharedNameAttributesRuntimeToOwnerOnly(t *testing.T) {
 	c := observeRows(t, map[string]string{"gc-1": "w-2-pool", "gc-2": "w-2-pool", "gc-3": "w-2-pool"})
 	snap := newObserveCache().publish(censusNow,
@@ -291,14 +300,14 @@ func TestObserveSharedNameAttributesRuntimeToOwnerOnly(t *testing.T) {
 // is alive for the bead's canonical row rather than unknown.
 func TestObserveDuplicateCopyIsNotASharer(t *testing.T) {
 	row := func() beads.Bead {
-		return censusSession("gc-1", map[string]string{"session_name": "s1", "state": "active"})
+		return censusSession("gc-1", map[string]string{"session_name": "s1", "state": "active", "instance_token": rowToken("gc-1")})
 	}
 	c := readCensus(t, censusNow,
 		censusLegs("class:sessions", censusStore(row()), "city:mc", censusStore(row())))
 	if len(c.Rows) != 2 || len(c.RowsNamed("s1")) != 1 {
 		t.Fatalf("fixture: %d rows, %d named s1, want 2 rows of which one canonical", len(c.Rows), len(c.RowsNamed("s1")))
 	}
-	snap := newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s1": {Identity: readIdentity("")}}, completeBackend("tmux", "s1"))
+	snap := newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s1": {Identity: runtimeIdentity{Known: true, Token: rowToken("gc-1")}}}, completeBackend("tmux", "s1"))
 	if got := observed(t, snap, c, censusNow, "gc-1"); got.Liveness != livenessAlive || got.Uncertain {
 		t.Fatalf("runtime without a session ID: %+v, want alive and certain", got)
 	}
@@ -361,7 +370,7 @@ func TestPrunedNameStillGone(t *testing.T) {
 	c := observeRows(t, map[string]string{"gc-1": "s1", "gc-2": "never"})
 	cache := newObserveCache()
 	at := censusNow.Add(-12 * time.Second)
-	cache.publish(at, map[string]InventoryAttrs{"s1": {DeadKnown: true, Identity: readIdentity("")}}, completeBackend("tmux", "s1"))
+	cache.publish(at, map[string]InventoryAttrs{"s1": {DeadKnown: true, Identity: readIdentity("gc-1")}}, completeBackend("tmux", "s1"))
 	var snap *ObservationSnapshot
 	for i := 0; i < observationRetentionPasses+1; i++ {
 		at = at.Add(time.Second)
@@ -379,7 +388,9 @@ func TestPrunedNameStillGone(t *testing.T) {
 
 // Kills: an arm acting on a runtime before its identity is read (v5.1 O1).
 // A listed name with a live pane is unknown until a clean identity read, and
-// unknown again when that read failed or found no session ID and no token.
+// unknown again when that read failed, found no session ID and no token, or
+// read Unknown (C2d review: the row's ID with no token, or no ID with a token
+// that is not the row's).
 func TestListedUnreadIdentityIsUnknown(t *testing.T) {
 	c := observeRows(t, map[string]string{"gc-1": "s1"})
 	for _, tc := range []struct {
@@ -391,8 +402,9 @@ func TestListedUnreadIdentityIsUnknown(t *testing.T) {
 		{"unread", runtimeIdentity{}, livenessUnknown, observeReasonIdentity},
 		{"read-failed", runtimeIdentity{ReadAt: censusNow}, livenessUnknown, observeReasonIdentity},
 		{"ownerless", runtimeIdentity{Known: true, Epoch: "1"}, livenessUnknown, observeReasonOwnerless},
-		{"own-session", runtimeIdentity{Known: true, SessionID: "gc-1"}, livenessAlive, ""},
-		{"token-only", readIdentity(""), livenessAlive, ""},
+		{"own-session, no token", runtimeIdentity{Known: true, SessionID: "gc-1"}, livenessUnknown, observeReasonIdentityUnknown},
+		{"no session, another token", readIdentity(""), livenessUnknown, observeReasonIdentityUnknown},
+		{"current", readIdentity("gc-1"), livenessAlive, ""},
 		{"other-session", readIdentity("gc-9"), livenessOccupied, ""},
 	} {
 		snap := newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s1": {DeadKnown: true, Identity: tc.id}}, completeBackend("tmux", "s1"))
@@ -413,7 +425,7 @@ func TestCensusAndFreshReadAgreeOnCorpse(t *testing.T) {
 		return runtime.Liveness{Corpse: true, ObjectID: "$7"}, nil
 	}, "s1")
 	sp.inventory["s1"] = runtime.InventoryEntry{Incarnation: "s1:1", DeadKnown: true, AllPanesDead: true}
-	sp.env["s1"]["GC_SESSION_ID"] = "gc-1"
+	sp.env["s1"]["GC_SESSION_ID"], sp.env["s1"]["GC_INSTANCE_TOKEN"] = "gc-1", rowToken("gc-1")
 	cr := inventoryLaneTestRuntime(t, sp, nil)
 	c := observeRows(t, map[string]string{"gc-1": "s1"})
 	for pass := 1; pass <= observationRetentionPasses+1; pass++ {
@@ -467,5 +479,53 @@ func TestIdentityChangeFlipsObservation(t *testing.T) {
 	read.ProcessNames = []string{"codex"}
 	if flips := publish(read); flips != 1 {
 		t.Fatalf("process names changed: %d flips, want 1", flips)
+	}
+}
+
+// Kills: observeRow's owner test kept apart from compareIdentity (v5 O1,
+// O2): a Foreign runtime read as anything but occupied (an empty token, or
+// one that is not the row's, under another session ID), or the row's token
+// under another session ID read as occupied (v5.2 M2: a token match is
+// Current); and the row's own older or newer incarnation read as anything
+// but its own (A3 re-keys or holds it).
+func TestObserveRowForeignIsOccupied(t *testing.T) {
+	c := readCensus(t, censusNow, censusLegs("class:sessions", censusStore(censusSession("gc-1", map[string]string{
+		"session_name": "s1", "state": "active", "instance_token": rowToken("gc-1"), "generation": "2",
+	}))))
+	for _, tc := range []struct {
+		name string
+		id   runtimeIdentity
+		want rowLiveness
+	}{
+		{"foreign", readIdentity("gc-9"), livenessOccupied},
+		{"foreign, no token", runtimeIdentity{Known: true, SessionID: "gc-9"}, livenessOccupied},
+		{"the row's token under another session ID", runtimeIdentity{Known: true, SessionID: "gc-9", Token: rowToken("gc-1")}, livenessAlive},
+		{"stale self", runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "2", Token: "old"}, livenessAlive},
+		{"newer self", runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "3", Token: "new"}, livenessAlive},
+		{"own ID, epoch unreadable", runtimeIdentity{Known: true, SessionID: "gc-1", Token: "old"}, livenessUnknown},
+	} {
+		snap := newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s1": {DeadKnown: true, Identity: tc.id}}, completeBackend("tmux", "s1"))
+		got := observed(t, snap, c, censusNow, "gc-1")
+		if got.Liveness != tc.want || got.Identity.Token != tc.id.Token {
+			t.Errorf("%s: %+v, want %v carrying the identity read", tc.name, got, tc.want)
+		}
+	}
+}
+
+// Kills readRuntimeName reading presence in its own order (POOL-052, the C2d
+// review): a name a probe noted gone while the latest pass was partial is
+// unknown, as observeRow reads it, not absent; only a complete pass that
+// does not list it proves it absent.
+func TestReadRuntimeNameUsesObserveRowOrder(t *testing.T) {
+	cache := newObserveCache()
+	cache.publish(censusNow.Add(-time.Second), map[string]InventoryAttrs{"s1": {DeadKnown: true, Identity: readIdentity("gc-1")}}, completeBackend("tmux", "s1"))
+	cache.publish(censusNow, nil, BackendPass{Label: "tmux", Outcome: OutcomePartial, Attested: true, Err: errors.New("one socket unanswered")})
+	cache.Note("s1", FactListed, ObsNo, censusNow, SourceProbe, "")
+	if got := readRuntimeName(cache.Snapshot(), "s1", censusNow, observeMaxAge).state; got != nameUnknown {
+		t.Fatalf("noted gone under a partial pass: state %d, want unknown", got)
+	}
+	cache.publish(censusNow, nil, completeBackend("tmux"))
+	if got := readRuntimeName(cache.Snapshot(), "s1", censusNow, observeMaxAge).state; got != nameAbsent {
+		t.Fatalf("unlisted by a complete pass: state %d, want absent", got)
 	}
 }

@@ -38,13 +38,15 @@ var errV2Stopped = errors.New("v2 reconciler: stopped before ready")
 
 // plannerHost is the only way the planner reaches the city (F2). bindHost
 // fills gather's Env and Recording; only publishEnv calls snapshotEnv; a nil
-// bootCensus skips C11's check.
+// bootCensus skips C11's check, and a nil capabilities C0.7's.
 type plannerHost struct {
 	gather           gatherEnv
 	snapshotEnv      func() (*config.City, runtime.Provider, string)
 	setInventoryHook func(fn func(prev, next *ObservationSnapshot))
 	bootCensus       func() (v2SessionMigration, error)
+	capabilities     func() error
 	beginTrace       func(trigger string) *sessionReconcilerTraceCycle // off the controller goroutine
+	inventoryFields  func() map[string]any                             // the pass record's view of the inventory lane
 	safeTick         func(fn func(), trigger string) (panicked bool)
 	rec              events.Recorder
 	stderr           io.Writer
@@ -79,8 +81,11 @@ func newDefaultPlanner(stderr io.Writer) *plannerRuntime {
 		stderr = io.Discard
 	}
 	rt := &plannerRuntime{host: plannerHost{stderr: stderr}, softReload: v2SoftReloadUnavailable, ready: make(chan struct{})}
-	rt.exec = newEffectExecutor(func(rowKey, error) {}, stderr)
+	rt.exec = newEffectExecutor(func(s settlement) { rt.planner.settlements.post(s) }, stderr)
 	rt.planner = newPlanner(realPlannerClock{}, func() time.Duration { return rt.env.Load().patrol() }, rt.pass, newInflightMap(), rt.exec.stop, stderr)
+	if v2EffectsEnabled(reconcilerModeLookupEnv) {
+		rt.planner.effects = rt.exec
+	}
 	return rt
 }
 
@@ -109,6 +114,13 @@ func (rt *plannerRuntime) bindHost(h plannerHost) {
 		return nil
 	}
 	rt.host = h
+	rt.planner.rec = h.rec
+	rt.planner.emitRecord = rt.emitPassRecord
+	creates, err := newCreateEffects(createEffectHost{cityPath: h.gather.CityPath, cityName: h.gather.CityName, lookPath: h.gather.LookPath, stderr: h.stderr})
+	if err != nil {
+		fmt.Fprintf(h.stderr, "v2 planner: creates disabled: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+	rt.planner.creates = creates
 }
 
 // publishEnv publishes the host's config as the next generation unless the
@@ -130,12 +142,19 @@ func (rt *plannerRuntime) publishEnv() *reconcileEnv {
 	return e
 }
 
-// boot publishes env Gen 1, refuses enterprise-era session rows on a live
-// census (C11; a failed census is retried with backoff, as an error is not
-// an empty city), starts the planner, and returns once a pass has completed
-// with the boot gate open (CONTRACT v5 P2), or with ctx's error. It is
-// idempotent, so a startup retry after a panic resumes it (MAINT-005).
+// boot refuses stores that cannot fence (C0.7), publishes env Gen 1, refuses
+// enterprise-era session rows on a live census (C11; a failed census is
+// retried with backoff, as an error is not an empty city), starts the
+// planner, and returns once a pass has completed with the boot gate open
+// (CONTRACT v5 P2), or with ctx's error. It is idempotent, so a startup
+// retry after a panic resumes it (MAINT-005).
 func (rt *plannerRuntime) boot(ctx context.Context) error {
+	if rt.host.capabilities != nil {
+		if refusal := rt.host.capabilities(); refusal != nil {
+			rt.planner.alert(alertBootRefused, "", refusal.Error())
+			return refusal
+		}
+	}
 	if rt.env.Load() == nil {
 		rt.publishEnv()
 	}
@@ -147,6 +166,7 @@ func (rt *plannerRuntime) boot(ctx context.Context) error {
 		}
 		if err == nil {
 			if refusal := m.refusal(); refusal != nil {
+				rt.planner.alert(alertBootRefused, "", refusal.Error())
 				return refusal
 			}
 			rt.census.Store(true)
@@ -222,7 +242,7 @@ func (rt *plannerRuntime) pass(now time.Time) passResult {
 	if rec.Err != "" {
 		return res
 	}
-	if b := rt.planner.boot; b.CachePrimed && b.InventoryComplete && b.RecordingSeen {
+	if rt.planner.boot.open() {
 		rt.readyOnce.Do(func() { close(rt.ready) })
 	}
 	rt.traceRows(rec.Rows)
@@ -287,19 +307,15 @@ func (rt *plannerRuntime) bootState() string {
 	}
 }
 
-// passRecord is a maintenance tick's reconcile_pass record: what boot waits
-// on, the passes and their wakes, what admission let through and held back
-// (submitted by nothing while trace-only), and legacyEntries, the refused
-// legacy session entries, which must stay 0. OBS1 owns the published record.
+// passRecord is a maintenance tick's reconcile_pass record, a summary of
+// the planner's v2_pass record (emitPassRecord): what boot waits on, the
+// passes and their wakes, what admission let through and held back, and
+// legacyEntries, the refused legacy session entries, which must stay 0.
 func (rt *plannerRuntime) passRecord(now time.Time, legacyEntries int64) map[string]any {
 	m := rt.planner.metrics.snapshot(now)
-	deferred := make(map[string]uint64, len(m.Deferred))
-	for d, n := range m.Deferred {
-		deferred[d.Kind+"/"+d.Cause] = n
-	}
 	return map[string]any{
 		"boot": rt.bootState(), "legacy_session_entries": legacyEntries, "passes": m.Passes,
-		"wakes": m.Wakes, "admitted": m.Admitted, "deferred": deferred,
+		"wakes": m.Wakes, "admitted": m.Admitted, "deferred": deferralKeys(m.Deferred),
 	}
 }
 

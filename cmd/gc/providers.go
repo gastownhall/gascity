@@ -261,7 +261,7 @@ func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapsho
 }
 
 func newSessionProviderFromContext(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
-	return resolveSessionTransportProvider(ctx, sessionBeads)
+	return resolveSessionTransportProvider(ctx, sessionBeads, sessionLegs{})
 }
 
 func withSessionProviderConstructionContext(sp runtime.Provider, err error) (runtime.Provider, error) {
@@ -282,10 +282,18 @@ func withSessionProviderConstructionContext(sp runtime.Provider, err error) (run
 // stays unseeded. The controller reseeds it from each session snapshot
 // (seedACPRoutesFromSnapshot), and dynamically-created sessions are also routed
 // at start via the same auto.Provider (build_desired_state RouteACP).
-func resolveSessionTransportProvider(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
-	base, err := buildSessionProviderByName(ctx.cfg, ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
-	if err != nil {
-		return nil, err
+//
+// A provider swap passes the legs it carries (carriedSessionLegs): a non-nil
+// leg is used as is instead of being built, so the runtimes it serves stay
+// reachable.
+func resolveSessionTransportProvider(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot, carried sessionLegs) (runtime.Provider, error) {
+	base := carried.base
+	if base == nil {
+		var err error
+		base, err = buildSessionProviderByName(ctx.cfg, ctx.providerName, ctx.sc, ctx.cityName, ctx.cityPath)
+		if err != nil {
+			return nil, err
+		}
 	}
 	// If the city-level provider is not ACP but some agents need ACP, wrap in an
 	// auto provider that routes per-session.
@@ -298,7 +306,10 @@ func resolveSessionTransportProvider(ctx sessionProviderContext, sessionBeads *s
 	requireACPWrapper := len(acpRouteNames) > 0
 	needsACPWrapper := requireACPWrapper || (ctx.cfg != nil && hasACPProviderTargets(ctx.cfg))
 	if ctx.providerName != "acp" && needsACPWrapper {
-		acpSP, acpErr := buildSessionProviderByName(ctx.cfg, "acp", ctx.sc, ctx.cityName, ctx.cityPath)
+		acpSP, acpErr := carried.acp, error(nil)
+		if acpSP == nil {
+			acpSP, acpErr = buildSessionProviderByName(ctx.cfg, "acp", ctx.sc, ctx.cityName, ctx.cityPath)
+		}
 		if acpErr != nil {
 			if requireACPWrapper {
 				return nil, fmt.Errorf("acp provider: %w", acpErr)

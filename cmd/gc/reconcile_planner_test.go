@@ -64,6 +64,22 @@ func (c *fakePlannerClock) NewTimer(d time.Duration) plannerTimer {
 	return t
 }
 
+// WithDeadline cancels with cause DeadlineExceeded when the fake time
+// reaches t. It arms one timer of its own.
+func (c *fakePlannerClock) WithDeadline(parent context.Context, t time.Time) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancelCause(parent)
+	timer := c.NewTimer(t.Sub(c.Now()))
+	go func() {
+		defer timer.Stop()
+		select {
+		case <-timer.C():
+			cancel(context.DeadlineExceeded)
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, func() { cancel(context.Canceled) }
+}
+
 func (c *fakePlannerClock) Advance(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -172,7 +188,11 @@ type fakeInflight struct{ settled []settlement }
 
 func (f *fakeInflight) settle(s settlement) { f.settled = append(f.settled, s) }
 
+func (f *fakeInflight) add(inflightEntry) uint64 { return 0 }
+
 func (f *fakeInflight) view() inflightView { return inflightView{} }
+
+func (f *fakeInflight) clearVisible(inflightCensus, time.Time) []clearRecord { return nil }
 
 // plannerHarness runs a planner on a fake clock. Every pass reports its start
 // on passes, then runs the test's onPass if it has one.

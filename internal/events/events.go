@@ -432,6 +432,11 @@ const (
 	// the next episode fires independently. (ADR-0013 A1 M3a)
 	ProviderHealthGateAlert = "provider.health_gate_alert"
 
+	// ReconcilerAlert is the v2 session reconciler's operator alert: a
+	// condition that should never happen, or that needs an operator. The
+	// payload's "alert" names it (cmd/gc reconcile_observe_v2.go).
+	ReconcilerAlert = "reconciler.alert"
+
 	// Emergency events are dolt-independent escalation records written to
 	// .gc/emergency and mirrored into the city event log.
 	EmergencySignaled = "emergency.signaled"
@@ -543,9 +548,9 @@ var KnownEventTypes = []string{
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured,
-	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
-	// The event is emitted by the reconciler but its typed SSE payload is not
-	// yet registered in internal/api (the payload registration lives in a
+	// ProviderHealthGateAlert and ReconcilerAlert are intentionally omitted
+	// from KnownEventTypes. Each is emitted by the reconciler but its typed
+	// SSE payload is not yet registered in internal/api (the payload registration lives in a
 	// follow-up that adds the full SSE projection). Until then, subscribers
 	// receive it via the custom-event envelope.
 }

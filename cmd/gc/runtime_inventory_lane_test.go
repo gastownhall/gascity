@@ -674,7 +674,7 @@ func (p *probingInventoryProvider) ObserveLivenessWithError(name string, process
 func newProbingProvider(probe func(string, []string) (runtime.Liveness, error), names ...string) *probingInventoryProvider {
 	p := &probingInventoryProvider{scriptedInventoryProvider: newScriptedInventoryProvider(names...), probe: probe}
 	for _, n := range names {
-		p.env[n] = map[string]string{"GC_SESSION_ID": "id-" + n, "GC_INSTANCE_TOKEN": "tok", "GT_PROCESS_NAMES": "claude"}
+		p.env[n] = map[string]string{"GC_SESSION_ID": "id-" + n, "GC_INSTANCE_TOKEN": rowToken("id-" + n), "GT_PROCESS_NAMES": "claude"}
 	}
 	return p
 }
@@ -1756,7 +1756,7 @@ func TestConfirmedDeadServerMakesPreviouslyListedNameGone(t *testing.T) {
 	sp.listErr = nil
 	sp.names = []string{"s1"}
 	sp.inventory["s1"] = runtime.InventoryEntry{Incarnation: "s1:1", DeadKnown: true}
-	sp.env["s1"] = map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": "tok"}
+	sp.env["s1"] = map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": rowToken("gc-1")}
 	cr := inventoryLaneTestRuntime(t, sp, nil)
 	clk := &clock.Fake{Time: obsTestEpoch}
 	useInventoryClock(cr, clk)
