@@ -1,0 +1,47 @@
+# THROWAWAY prototype (ga-vnycm2.13), never merged: measures cold-client
+# analysis per lane with Bazel 9's remote repo contents cache against a
+# throwaway NativeLink on the runner. Touches neither rbe-west nor any secret.
+name: rrc-proto
+on:
+  push:
+    branches: [ci/bazel-rrc-proto]
+permissions:
+  contents: read
+jobs:
+  measure:
+    name: rrc-proto / ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: blacksmith-8vcpu-ubuntu-2404
+            lanes: unit acceptance
+          - runner: blacksmith-4vcpu-ubuntu-2404
+            lanes: integration-packages integration-smoke
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Setup Bazel (local mode, runner cache as in bazel.yml)
+        id: bazel
+        uses: ./.github/actions/setup-bazel
+      - name: Restore the LLVM archive
+        uses: ./.github/actions/llvm-archive-cache
+      - name: Measure
+        env:
+          RC: ${{ runner.temp }}/bazel-ci-secret/ci.bazelrc
+          LANES: ${{ matrix.lanes }}
+        run: |
+          echo "runner cache restored=${{ steps.bazel.outputs.cache-restored }} hit=${{ steps.bazel.outputs.cache-hit }}"
+          nproc; free -g | head -2
+          # shellcheck disable=SC2086
+          bash .github/rrc-proto/measure.sh $LANES
+      - name: Upload profiles
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: rrc-proto-${{ strategy.job-index }}
+          path: /tmp/rrc/runs
+          retention-days: 7
