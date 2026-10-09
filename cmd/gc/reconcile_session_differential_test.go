@@ -101,6 +101,10 @@ type parityEntry struct {
 // parityAccepted are CONTRACT v5 §12.2's items the fixtures show; the rest
 // come with the arms that own them (#6 with A3, #15-#17 with A21).
 var parityAccepted = map[string]parityEntry{
+	"§12.2#37 current-bead-lag": {
+		"CONTRACT v5 §12.2 #37 (A6; mc-d4atw)", "v2 stamps currently_processing_bead_id one pass after legacy: A6 decides on the pass's read and stamps only rows AL1 wants awake, so a row whose quarantine just cleared is stamped a pass later",
+		[]string{session.CurrentBeadIDKey},
+	},
 	"§12.2#3 R16": {
 		"CONTRACT v5 §12.2 #3 (ruling 4)", "a resume voids a suspended drain; legacy signals, stops and restarts the row",
 		append([]string{"slept_at"}, parityStartKeys...),
@@ -150,6 +154,8 @@ var parityUnported = map[string]parityEntry{
 	"A21 close":       {"C5c1 (#7314), C5c1b (#7330)", "legacy closes an unwanted dead row; v2 registers no close arm yet", []string{"status", "state", "close_reason", "closed_at"}},
 	"A21 stranded":    {"C5c1 (#7314)", "legacy stamps the stranded marker of a dead row with assigned work and records session.stranded; v2 registers no close arm yet", []string{"stranded_event_emitted_at"}},
 	"A7 identity":     {"C7d (mc-3lel1)", "legacy's session-bead sync converges a row's identity to its config: the agent label, the pool slot a canonical singleton drops, and an alias the pool does not manage (clearing it, and GC_ALIAS on the runtime); v2 registers no row-metadata arm yet", []string{"alias", "alias_history", "labels", "pool_slot", "agent_name"}},
+	"A20 idle-sleep":  {"C6a2, BEHAVIORS SESS-532", "legacy drains an idle row (its probe answers idle) and finishes the sleep: SleepPatch(idle) with the drain's sleep-policy fingerprint, the idle latch's input; v2 registers no drain-policy arm yet", []string{"sleep_intent", "sleep_reason", "slept_at", "drain_at", "detached_at"}},
+	"A20 drain-begin": {"C6a2 (A20 + D2)", "legacy begins a drain v2 does not: on a live row its quarantine keeps from waking (canceled again once its work vetoes it), on an unwanted row past the INC-003 grace, and on a managed suspend; v2 registers no drain-begin arm yet", []string{session.DrainIntentReasonKey, session.DrainIntentAtKey, session.DrainIntentIncarnationKey, "drain_at", "sleep_intent", "slept_at", "state_reason"}},
 	"A7 row-metadata": {"C7d", "legacy's session-bead sync stamps the row metadata of a row created or changed this tick; v2 registers no row-metadata arm yet", []string{"synced_at", "command", "work_dir"}},
 }
 
