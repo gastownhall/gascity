@@ -74,6 +74,40 @@ func TestPromptGCInvocationsSkipsProhibitedCommands(t *testing.T) {
 	}
 }
 
+// TestPromptGCInvocationsProhibitionScope pins how far a prohibition reaches:
+// to the end of its sentence (including one closed by emphasis, ".**"), and
+// never past a list item, heading, or table row. "don't" and "never" after a
+// subject ("you don't know") describe rather than forbid.
+func TestPromptGCInvocationsProhibitionScope(t *testing.T) {
+	prompt := strings.Join([]string{
+		"**Never look with `gc old one` or",
+		"`gc old two`.** Those `gc bd list` and `gc bd ready` hide wisps.",
+		"If you don't know where state lives, the answer is a `gc status`",
+		"command, and you never have to guess with `gc agent list`.",
+		"This is the one command — do not",
+		"substitute `gc old three`:",
+		"Never run these by hand",
+		"- `gc mail inbox`",
+		"Never edit below this heading",
+		"## Commands",
+		"Run `gc rig list` first",
+		"| `gc session list` | lists sessions |",
+	}, "\n")
+	got := promptGCInvocations(prompt)
+	want := [][]string{
+		{"bd", "list"},
+		{"bd", "ready"},
+		{"status"},
+		{"agent", "list"},
+		{"mail", "inbox"},
+		{"rig", "list"},
+		{"session", "list"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("promptGCInvocations =\n%q\nwant\n%q", got, want)
+	}
+}
+
 // TestPromptGCStockPromptsResolve guards the prompts gc ships: the default
 // init prompts and the bundled core pack must produce no prompt-gc-commands
 // finding against this gc's own command tree.

@@ -160,7 +160,10 @@ Pin the pack to a version whose prompts match your `gc`, or update the prompt.
 Run `gc <command> --help` to confirm what exists. An inline code span that
 follows "do not", "don't", "never", "must not", "should not", "avoid",
 "instead of", or "rather than" in the same sentence is skipped, since the
-prompt names that command to forbid it. Fenced code blocks are always checked.
+prompt names that command to forbid it. "Do not", "don't", and "never" count
+only as an instruction at the start of a sentence or clause, so "if you don't
+know" skips nothing. A list item, heading, or table row starts a new sentence.
+Fenced code blocks are always checked.
 A prohibition worded outside that list still produces a warning; ignore it.
 
 `import-version-pins --fix` writes the same constraint `gc import add` writes

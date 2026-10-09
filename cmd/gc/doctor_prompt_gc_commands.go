@@ -359,7 +359,9 @@ func lookupPromptGCFlag(cmd *cobra.Command, name string, short bool) *pflag.Flag
 // An inline code span that follows a prohibition cue in the same prose
 // sentence ("do not", "never", "avoid", "instead of", ...; see
 // promptGCProhibitionCue) is skipped: the prompt names that command to forbid
-// it. Fenced code blocks are always read.
+// it. A sentence ends at sentence punctuation, a blank line, or a fence, and
+// never spans a list item, heading, or table row. Fenced code blocks are
+// always read.
 func promptGCInvocations(prompt string) [][]string {
 	var out [][]string
 	inFence := false
@@ -385,16 +387,30 @@ func promptGCInvocations(prompt string) [][]string {
 			sentence.reset()
 			continue
 		}
+		block := promptGCBlockStart.FindString(trimmed)
+		if block != "" {
+			sentence.reset()
+		}
 		for _, span := range sentence.permittedCodeSpans(line) {
 			out = append(out, gcInvocationsInShell(span)...)
+		}
+		if strings.HasPrefix(block, "#") || strings.HasPrefix(block, "|") {
+			// A heading or table row is a unit of its own.
+			sentence.reset()
 		}
 	}
 	return out
 }
 
+// promptGCBlockStart matches the start of a Markdown line that begins a new
+// unit of prose: a list item, a heading, a table row, or a block quote.
+var promptGCBlockStart = regexp.MustCompile(`^(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|\||>)`)
+
 // promptGCProhibitionCue matches prose that forbids what follows it in the
-// sentence.
-var promptGCProhibitionCue = regexp.MustCompile(`(?i)\b(do not|don['’]t|never|must not|should not|avoid|instead of|rather than)\b`)
+// sentence. "do not", "don't" and "never" count only as an imperative: at the
+// start of the sentence or a clause (after punctuation or a conjunction), so
+// "if you don't know" and "you never have to" do not.
+var promptGCProhibitionCue = regexp.MustCompile(`(?i)\b(?:must not|should not|avoid|instead of|rather than)\b|(?:^[^\pL]*|[,:;(—–]\s*|\s-\s+|\b(?:and|or|but|so|then|please|also|just)\s+)(?:do not|don['’]t|never)\b`)
 
 // promptGCSentence tracks the prose of the sentence being read, which may
 // span lines of one paragraph, and whether it has reached a prohibition cue.
@@ -408,14 +424,22 @@ func (s *promptGCSentence) reset() {
 	s.forbidding = false
 }
 
-// note adds prose to the sentence. Sentence ends ('.', '!', '?' or ';'
-// followed by a space or the end of the line) start a new sentence.
+// note adds prose to the sentence. A sentence end ('.', '!', '?' or ';',
+// optionally closed by emphasis, quotes or brackets, then a space or the end
+// of the line) starts a new sentence.
 func (s *promptGCSentence) note(prose string) {
 	for i := 0; i < len(prose); i++ {
 		ch := prose[i]
-		if (ch == '.' || ch == '!' || ch == '?' || ch == ';') && (i+1 == len(prose) || prose[i+1] == ' ' || prose[i+1] == '\t') {
-			s.reset()
-			continue
+		if ch == '.' || ch == '!' || ch == '?' || ch == ';' {
+			j := i + 1
+			for j < len(prose) && strings.IndexByte("*_)]\"'", prose[j]) >= 0 {
+				j++
+			}
+			if j == len(prose) || prose[j] == ' ' || prose[j] == '\t' {
+				s.reset()
+				i = j - 1
+				continue
+			}
 		}
 		s.prose.WriteByte(ch)
 	}
