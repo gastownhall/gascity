@@ -17,9 +17,9 @@ jobs:
       matrix:
         include:
           - runner: blacksmith-8vcpu-ubuntu-2404
-            lanes: unit acceptance
+            lanes: unit
           - runner: blacksmith-4vcpu-ubuntu-2404
-            lanes: integration-packages integration-smoke
+            lanes: integration-smoke
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:

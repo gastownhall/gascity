@@ -74,25 +74,28 @@ PY
 )
 echo "runner -> rbe-west TCP connect RTT: ${MEASURED} ms" | tee -a $W/results.txt
 LPT=--loading_phase_threads=64
+# GCS plan (owner question): latency to Google from this runner, then reads
+# at those round trips. Bazel cannot use an HTTP (GCS) cache together with
+# gRPC remote execution, so this models the best case: gRPC framing at GCS
+# latency.
+python3 "$(dirname "$0")/latency.py" | tee -a $W/results.txt
+GCS404=$(grep '^gcs_404' $W/results.txt | sed -E 's/.*\(([0-9.]+),.*/\1/' | cut -d. -f1)
+BEST=$(grep '^GCS_EST_MS=' $W/results.txt | cut -d= -f2 | cut -d. -f1)
 for lane in "${lanes[@]}"; do
 	c=${cmd[$lane]}
 	# shellcheck disable=SC2086
 	{
-	run "$lane-base-9.2-asis" 9.2.0 base $c
-	run "$lane-base-9.3" 9.3.0 base $c
-	run "$lane-base-9.3-lpt64" 9.3.0 base $LPT $c
 	run "$lane-write-9.3" 9.3.0 write $LPT $c
 	setrtt "$MEASURED"
-	run "$lane-read-9.3-lpt64-rttM" 9.3.0 read $LPT $c
-	run "$lane-read-9.3-lpt64-rttM-2" 9.3.0 read $LPT $c
-	run "$lane-read-9.3-rttM-nolpt" 9.3.0 read $c
+	run "$lane-read-rbe-west-rtt${MEASURED}" 9.3.0 read $LPT $c
+	setrtt "$BEST"
+	run "$lane-read-gcp-best-region-rtt${BEST}" 9.3.0 read $LPT $c
+	setrtt "$GCS404"
+	run "$lane-read-gcs-us-bucket-rtt${GCS404}" 9.3.0 read $LPT $c
+	run "$lane-read-gcs-us-bucket-rtt${GCS404}-2" 9.3.0 read $LPT $c
+	run "$lane-read-gcs-us-bucket-rtt${GCS404}-lpt256" 9.3.0 read --loading_phase_threads=256 $c
 	setrtt 0
-	run "$lane-read-9.3-lpt64-rtt0" 9.3.0 read $LPT $c
-	setrtt 100
-	run "$lane-read-9.3-lpt64-rtt100" 9.3.0 read $LPT $c
-	setrtt "$MEASURED"
-	run "$lane-base-9.3-lpt64-2" 9.3.0 base $LPT $c
-	run "$lane-read-9.3-lpt64-rttM-3" 9.3.0 read $LPT $c
+	run "$lane-base-9.3-lpt64" 9.3.0 base $LPT $c
 	}
 done
 du -sh $W/cas $W/ac
