@@ -128,14 +128,14 @@ type IgnoredSentinelFlooredTable struct {
 	Floor int
 }
 
-// ignoredSentinelFlooredTables are in the library's probing order. events is
-// created by ignored/0019 and bd_events_journal/bd_events_seq by ignored/0022,
-// hence floors 18 and 21.
-var ignoredSentinelFlooredTables = []IgnoredSentinelFlooredTable{
-	{Table: "events", Floor: 18},
-	{Table: "bd_events_journal", Floor: 21},
-	{Table: "bd_events_seq", Floor: 21},
-}
+// ignoredSentinelFlooredTables are in the library's probing order. The
+// beads v1.3.1 release line floors events (ignored/0019) at 18 and
+// bd_events_journal/bd_events_seq (ignored/0022) at 21; beads main, which the
+// current pin follows, carries no sentinelFlooredTables at all, so the mirror
+// is empty and the probe reads no floored table. The mechanism stays so a pin
+// back onto a line that has them is a one-line data change, and the drift pin
+// (internal/beads TestIgnoredSentinelsMatchPinnedBeads) holds the two equal.
+var ignoredSentinelFlooredTables []IgnoredSentinelFlooredTable
 
 // IgnoredSentinelFlooredTables returns the ignored lane's floored sentinel
 // tables, copied so a caller cannot edit the library's facts.

@@ -24,9 +24,9 @@ FROM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad
 # tarball CI installs and may lag. The `grep Version = "${bd_version}"` below
 # fails the build if this drifts from the fetched source.
 ARG BD_VERSION=v1.3.1
-ARG BD_SOURCE_REF=c1c4b642ac1c08d8c828007a1c2f96e47e43ef7c
-ARG BD_SOURCE_SHA256=1c836ff4c4e021d0774d3fd0f972bc2d7bf552a8355fbf10a368199c93df1cc8
-ARG BD_BUILD=c1c4b642ac1
+ARG BD_SOURCE_REF=4e9d3dcba9f2204161bd73f47aedcd5592bf6ac6
+ARG BD_SOURCE_SHA256=9d8ad261083cc5bfb9db2162fe34391b03645fb588a57893df84d7c881374ca6
+ARG BD_BUILD=4e9d3dcba9f
 ARG BD_BRANCH=HEAD
 ARG GRPC_VERSION=1.83.2
 ARG THRIFT_VERSION=0.24.0

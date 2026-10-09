@@ -87,6 +87,7 @@ go_library(
         "bead_worktree_liveness.go",
         "bead_worktree_liveness_fallback.go",
         "bead_worktree_reaper.go",
+        "beads_backend_registry.go",
         "beads_blocked_repair.go",
         "beads_dir.go",
         "beads_preflight_checker.go",

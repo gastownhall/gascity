@@ -64,6 +64,13 @@ const (
 	PreflightCheckBDVersionHint PreflightCheckID = "bd_version_hint"
 	// PreflightCheckContractShape validates backend-specific metadata field shape.
 	PreflightCheckContractShape PreflightCheckID = "contract_shape"
+	// PreflightCheckWireCompat validates a REMOTE backend's server over its
+	// cached handshake: the wire revision is inside the linked client's range,
+	// the server owns the scope's project, and every capability the native
+	// store requires is advertised (RemoteCapabilityRequirements). It is
+	// evaluated only for a scope whose metadata names a registered remote
+	// backend; a local scope's check list does not carry it.
+	PreflightCheckWireCompat PreflightCheckID = "wire_compat"
 )
 
 // PreflightRepairPriority is the severity/ordering hint for one repair step.

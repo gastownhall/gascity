@@ -24,7 +24,7 @@ const nativeDoltStoreActor = "gascity"
 // each of its two passes, ga-3mv5d3's investigation included.
 
 var (
-	nativeDoltOpenBestAvailable = beadslib.OpenBestAvailable
+	nativeDoltOpenBestAvailable = openBestAvailableWithNativeOptions
 	nativeDoltOpenEnvMu         sync.Mutex
 	errNativeIssueMetadataParse = ErrMetadataParse
 )

@@ -162,9 +162,8 @@ const (
 	// unthreaded open path behaves exactly like today's default and can never
 	// newly refuse native.
 	NativeTransportUnset NativeTransportMode = ""
-	// NativeTransportAuto is the default: native when preflight-eligible
-	// (today's behavior). For a remote backend this will become "native is
-	// required" once G6 extends decideNativeTransport.
+	// NativeTransportAuto is the default: native when preflight-eligible.
+	// For a remote backend native is REQUIRED (see decideNativeTransport).
 	NativeTransportAuto NativeTransportMode = "auto"
 	// NativeTransportOff is the per-city kill switch: this city's stores
 	// never open natively, always BdStore (the bd CLI subprocess).
@@ -172,33 +171,40 @@ const (
 )
 
 // nativeTransportVerdict is decideNativeTransport's answer: whether a native
-// open may even be attempted, and if not, the diagnostic to report.
+// open may even be attempted, whether it is REQUIRED (no BdStore fallback),
+// and if it is refused, the diagnostic to report.
 type nativeTransportVerdict struct {
-	AllowNative bool
-	Gate        string
-	Reason      string
+	AllowNative   bool
+	RequireNative bool
+	Gate          string
+	Reason        string
 }
 
 // decideNativeTransport is the ONE seam that decides whether a store open for
 // this city may attempt native storage at all, evaluated before preflight
-// runs. It is where G6 adds the remote-backend rule: for a remote backend,
-// "auto" REQUIRES native, and a failed native open becomes a terminal typed
-// error (HTTPNativeOpenRequiredError) naming beads.native_transport="off" as
-// the escape hatch, rather than a silent BdStore fallback. Today it
-// implements only the off|auto switch; the remote branch does not exist yet.
+// runs.
+//
+//	mode     backend  verdict
+//	off      any      BdStore (the bd CLI speaks to the backend itself)
+//	auto     remote   native REQUIRED: any failure is a terminal
+//	                  *HTTPNativeOpenRequiredError naming native_transport="off"
+//	auto     local    native when preflight-eligible, else BdStore
+//
+// A remote scope never falls back to BdStore silently under auto: the
+// fallback would hide an outage and change the write semantics.
 //
 // Precedence: the caller checks the deprecated process-wide
 // GC_BEADS_FORCE_FALLBACK alias (forceNativeFallback) BEFORE calling this
 // function, and that env wins over every city's value — this function only
 // ever sees and decides the per-city value.
-func decideNativeTransport(mode NativeTransportMode) nativeTransportVerdict {
+func decideNativeTransport(mode NativeTransportMode, remote bool) nativeTransportVerdict {
 	if mode == NativeTransportOff {
 		return nativeTransportVerdict{
 			Gate:   nativeTransportOffGate,
 			Reason: fmt.Sprintf("beads.native_transport=%q", string(NativeTransportOff)),
 		}
 	}
-	return nativeTransportVerdict{AllowNative: true}
+	return nativeTransportVerdict{AllowNative: true, RequireNative: remote}
 }
 
 // metadataBackendRoute is decideMetadataBackend's answer: which path a store
@@ -206,58 +212,63 @@ func decideNativeTransport(mode NativeTransportMode) nativeTransportVerdict {
 type metadataBackendRoute int
 
 const (
-	// metadataBackendRoutePreflight runs the full native-store preflight
+	// metadataBackendRoutePreflight runs the full local native-store preflight
 	// (bd context, identity and schema probes). It is the route for a backend
-	// the native store serves, and for metadata that names no backend or
-	// cannot be read, whose diagnostics the preflight already owns.
+	// the native store serves locally, and for metadata that names no backend
+	// or cannot be read, whose diagnostics the preflight already owns.
 	metadataBackendRoutePreflight metadataBackendRoute = iota
+	// metadataBackendRouteRemote opens natively through the library's remote
+	// dispatch. It never takes a Dolt probe and never reaches BdStore under
+	// native_transport=auto.
+	metadataBackendRouteRemote
 	// metadataBackendRouteBdStore falls back to the bd CLI store without a
-	// single probe: the backend is outside the native store's set, so no bd
-	// context or database answer could make the scope native-eligible.
+	// single probe: the backend is neither served locally nor registered as
+	// remote, so no probe answer could make the scope native-eligible.
 	metadataBackendRouteBdStore
 )
 
-// metadataBackendVerdict carries the route and, for the BdStore route, the
-// diagnostic to report.
+// metadataBackendVerdict carries the route, the backend it was decided for
+// and, for the BdStore route, the diagnostic to report.
 type metadataBackendVerdict struct {
-	Route  metadataBackendRoute
-	Gate   string
-	Reason string
+	Route   metadataBackendRoute
+	Backend string
+	Gate    string
+	Reason  string
 }
 
-// decideMetadataBackend decides, from .beads/metadata.json ALONE, whether a
-// native open is worth probing for. It runs before preflight and dials
-// nothing, so a scope whose backend the native store does not serve skips the
-// Dolt endpoint, identity and schema probes (seconds against a local Dolt
-// port that may not even be listening) and reaches the BdStore fallback
-// directly.
-//
-// The table is explicit on purpose, and the default arm is "the native store
-// does not serve this backend", not "every non-dolt backend is a bd backend":
+// decideMetadataBackend decides, from .beads/metadata.json ALONE, which route a
+// store open takes. It dials nothing.
 //
 //	metadata                         route
 //	unreadable / no backend named    preflight (it reports the missing/unread gate)
-//	backend in the native set        preflight (probes decide eligibility)
-//	any other backend                BdStore, gate metadata_backend, no probes
+//	backend the native store serves  preflight (Dolt probes decide eligibility)
+//	registered remote backend        remote    (wire_compat decides; no Dolt probe)
+//	any other backend                BdStore   (gate metadata_backend, no probes)
 //
-// G6 seam: a remote (HTTP) backend is to be served natively through its own
-// opener and must NOT reach the BdStore arm — under native_transport=auto it
-// will require native. When G6 lands, a remote backend gets its own route and
-// arm here, ahead of the default, together with the matching rule in
-// decideNativeTransport; today it does not exist.
+// It runs before preflight and dials nothing, so a scope whose backend the
+// native store does not serve locally skips the Dolt endpoint, identity and
+// schema probes (seconds against a local Dolt port that may not even be
+// listening). The table is explicit on purpose, and the default arm is "the
+// native store does not serve this backend", not "every non-dolt backend is a
+// bd backend". A registered remote backend never reaches the BdStore arm under
+// native_transport=auto: decideNativeTransport makes it require native.
 func decideMetadataBackend(scopeRoot string) metadataBackendVerdict {
 	metadataPath := filepath.Join(scopeRoot, ".beads", "metadata.json")
 	backend, named, err := contract.ReadMetadataBackend(fsys.OSFS{}, metadataPath)
+	backend = strings.TrimSpace(backend)
 	switch {
 	case err != nil || !named:
 		return metadataBackendVerdict{Route: metadataBackendRoutePreflight}
 	case contract.NativeStoreServesBackend(backend):
-		return metadataBackendVerdict{Route: metadataBackendRoutePreflight}
+		return metadataBackendVerdict{Route: metadataBackendRoutePreflight, Backend: backend}
+	case contract.BackendIsRemote(backend):
+		return metadataBackendVerdict{Route: metadataBackendRouteRemote, Backend: backend}
 	default:
 		return metadataBackendVerdict{
-			Route:  metadataBackendRouteBdStore,
-			Gate:   string(contract.PreflightCheckMetadataBackend),
-			Reason: contract.UnsupportedMetadataBackendSummary(backend),
+			Route:   metadataBackendRouteBdStore,
+			Backend: backend,
+			Gate:    string(contract.PreflightCheckMetadataBackend),
+			Reason:  contract.UnsupportedMetadataBackendSummary(backend),
 		}
 	}
 }
@@ -273,6 +284,12 @@ type StoreOpenOptions struct {
 	OpenFileStore    func() (Store, error)
 	OpenExecStore    func() (Store, error)
 	OpenNativeStore  func() (Store, error)
+
+	// OpenRemoteNativeStore overrides the native open for a scope whose
+	// metadata names a registered remote backend. Nil opens through the beads
+	// library's own dispatch with no projected environment, which is what
+	// every composition root wants; tests inject a fake here.
+	OpenRemoteNativeStore func() (Store, error)
 
 	// OpenProxiedStore opens the split store for a proxied-server scope:
 	// reads on a native handle over bd's proxy data port, mutations on the bd
@@ -409,7 +426,12 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		return opts.openBdFallback(provider, diag)
 	}
 
-	if verdict := decideNativeTransport(opts.NativeTransport); !verdict.AllowNative {
+	// The metadata backend is classified from metadata.json alone, before
+	// anything that probes. It decides both the transport rule (a remote
+	// backend REQUIRES native under auto) and which route the open takes.
+	backendRoute := decideMetadataBackend(opts.ScopeRoot)
+	verdict := decideNativeTransport(opts.NativeTransport, backendRoute.Route == metadataBackendRouteRemote)
+	if !verdict.AllowNative {
 		diag := BeadsDiagnostic{
 			Store:               storeNameBdStore,
 			NativeStoreEligible: false,
@@ -418,6 +440,11 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		}
 		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
 		return opts.openBdFallback(provider, diag)
+	}
+	if verdict.RequireNative {
+		// The remote route. It never reaches persistedDoltModeRefusal or the
+		// Dolt preflight below, and it never reaches openBdFallback.
+		return opts.openRemoteNative(ctx, provider, backendRoute.Backend)
 	}
 
 	if !contract.ProviderUsesBDContract(provider) {
@@ -454,19 +481,18 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 		return opts.openBdFallback(provider, diag)
 	}
 
-	// The metadata backend is decided before anything that probes: a backend
-	// the native store does not serve goes straight to BdStore, and the reason
-	// is logged once here rather than after a preflight that dials for nothing.
-	// It runs AFTER the persisted-topology check above, which reads files only:
-	// that check keys on contract.IsDoltBackend's wider spelling ("bd", any
-	// case), and a proxied-server scope so spelled must keep reaching the
-	// proxied arm rather than being routed to BdStore here.
-	if verdict := decideMetadataBackend(opts.ScopeRoot); verdict.Route == metadataBackendRouteBdStore {
+	// A backend the native store does not serve goes straight to BdStore, and
+	// the reason is logged once here rather than after a preflight that dials
+	// for nothing. It runs AFTER the persisted-topology check above, which
+	// reads files only: that check keys on contract.IsDoltBackend's wider
+	// spelling ("bd", any case), and a proxied-server scope so spelled must
+	// keep reaching the proxied arm rather than being routed to BdStore here.
+	if backendRoute.Route == metadataBackendRouteBdStore {
 		diag := BeadsDiagnostic{
 			Store:               storeNameBdStore,
 			NativeStoreEligible: false,
-			PreflightGate:       verdict.Gate,
-			PreflightReason:     verdict.Reason,
+			PreflightGate:       backendRoute.Gate,
+			PreflightReason:     backendRoute.Reason,
 		}
 		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
 		return opts.openBdFallback(provider, diag)

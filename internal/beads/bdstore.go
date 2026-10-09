@@ -1617,6 +1617,12 @@ func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 		}
 		s.latchConditionalReleaseUnsupported()
 	}
+	// A remote backend serves no `bd sql`: the raw-SQL fallback below would
+	// shell out to a verb the server does not have (and, worse, could reach a
+	// stale local database). Refuse instead.
+	if ScopeUsesRemoteBackend(s.dir) {
+		return false, fmt.Errorf("bd release-if-current: %w: the scope's remote backend serves no raw SQL, and this bd lacks the conditional release verb", ErrConditionalReleaseRemoteUnsupported)
+	}
 	// The raw-SQL fallback writes the row itself, so it also has to mint the
 	// fresh revision bd's verb path mints for us: a release that left the
 	// pre-release token in place would keep a stale fence current.
