@@ -30,10 +30,12 @@ const (
 // code span) against this gc's command tree plus the city's pack commands.
 // It reports invocations naming a command, subcommand, or flag this gc does
 // not have, so a prompt written for a different gc or pack version is caught
-// before an agent follows it. Prose outside code is not read.
+// before an agent follows it. Prose outside code is read only to skip an
+// inline code span that follows a prohibition in its sentence ("Do not invent
+// `gc mail list`").
 //
-// The check is advisory: a prompt may quote a command it tells the agent not
-// to run, and only a reader can tell that apart from an instruction.
+// The check is advisory: the prohibition cues are a fixed word list, so a
+// prompt can still quote a command it forbids in a way the list misses.
 type promptGCCommandsDoctorCheck struct {
 	cityPath string
 	cfg      *config.City
@@ -353,10 +355,16 @@ func lookupPromptGCFlag(cmd *cobra.Command, name string, short bool) *pflag.Flag
 // span outside one. An invocation starts at a "gc" word in command position
 // (the start of the code, or after a shell operator, "$", or a command
 // prefix such as "sudo") and runs to the next shell operator or comment.
+//
+// An inline code span that follows a prohibition cue in the same prose
+// sentence ("do not", "never", "avoid", "instead of", ...; see
+// promptGCProhibitionCue) is skipped: the prompt names that command to forbid
+// it. Fenced code blocks are always read.
 func promptGCInvocations(prompt string) [][]string {
 	var out [][]string
 	inFence := false
 	fence := ""
+	var sentence promptGCSentence
 	for _, line := range strings.Split(prompt, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if marker := promptFenceMarker(trimmed); marker != "" {
@@ -366,17 +374,84 @@ func promptGCInvocations(prompt string) [][]string {
 			case strings.HasPrefix(trimmed, fence) && strings.TrimSpace(strings.TrimLeft(trimmed, fence[:1])) == "":
 				inFence = false
 			}
+			sentence.reset()
 			continue
 		}
 		if inFence {
 			out = append(out, gcInvocationsInShell(line)...)
 			continue
 		}
-		for _, span := range inlineCodeSpans(line) {
+		if trimmed == "" {
+			sentence.reset()
+			continue
+		}
+		for _, span := range sentence.permittedCodeSpans(line) {
 			out = append(out, gcInvocationsInShell(span)...)
 		}
 	}
 	return out
+}
+
+// promptGCProhibitionCue matches prose that forbids what follows it in the
+// sentence.
+var promptGCProhibitionCue = regexp.MustCompile(`(?i)\b(do not|don['’]t|never|must not|should not|avoid|instead of|rather than)\b`)
+
+// promptGCSentence tracks the prose of the sentence being read, which may
+// span lines of one paragraph, and whether it has reached a prohibition cue.
+type promptGCSentence struct {
+	prose      strings.Builder
+	forbidding bool
+}
+
+func (s *promptGCSentence) reset() {
+	s.prose.Reset()
+	s.forbidding = false
+}
+
+// note adds prose to the sentence. Sentence ends ('.', '!', '?' or ';'
+// followed by a space or the end of the line) start a new sentence.
+func (s *promptGCSentence) note(prose string) {
+	for i := 0; i < len(prose); i++ {
+		ch := prose[i]
+		if (ch == '.' || ch == '!' || ch == '?' || ch == ';') && (i+1 == len(prose) || prose[i+1] == ' ' || prose[i+1] == '\t') {
+			s.reset()
+			continue
+		}
+		s.prose.WriteByte(ch)
+	}
+	if !s.forbidding && promptGCProhibitionCue.MatchString(s.prose.String()) {
+		s.forbidding = true
+	}
+}
+
+// permittedCodeSpans returns the contents of the backtick code spans on line
+// that do not follow a prohibition cue in their sentence.
+func (s *promptGCSentence) permittedCodeSpans(line string) []string {
+	var spans []string
+	prev := 0
+	for i := 0; i < len(line); {
+		if line[i] != '`' {
+			i++
+			continue
+		}
+		open := i
+		for i < len(line) && line[i] == '`' {
+			i++
+		}
+		delim := line[open:i]
+		end := strings.Index(line[i:], delim)
+		if end < 0 {
+			break
+		}
+		s.note(line[prev:open])
+		if !s.forbidding {
+			spans = append(spans, line[i:i+end])
+		}
+		i += end + len(delim)
+		prev = i
+	}
+	s.note(line[prev:] + " ")
+	return spans
 }
 
 // promptFenceMarker returns the run of backticks or tildes opening a fenced
@@ -392,29 +467,6 @@ func promptFenceMarker(trimmed string) string {
 		}
 	}
 	return ""
-}
-
-// inlineCodeSpans returns the contents of the backtick code spans on line.
-func inlineCodeSpans(line string) []string {
-	var spans []string
-	for i := 0; i < len(line); {
-		if line[i] != '`' {
-			i++
-			continue
-		}
-		open := i
-		for i < len(line) && line[i] == '`' {
-			i++
-		}
-		delim := line[open:i]
-		end := strings.Index(line[i:], delim)
-		if end < 0 {
-			break
-		}
-		spans = append(spans, line[i:i+end])
-		i += end + len(delim)
-	}
-	return spans
 }
 
 // gcInvocationsInShell splits a line of shell into words and operators and

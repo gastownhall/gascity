@@ -2,12 +2,14 @@ package main
 
 import (
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/spf13/cobra"
@@ -38,6 +40,70 @@ func TestPromptGCInvocationsReadsOnlyCode(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("promptGCInvocations =\n%q\nwant\n%q", got, want)
+	}
+}
+
+func TestPromptGCInvocationsSkipsProhibitedCommands(t *testing.T) {
+	prompt := strings.Join([]string{
+		// The shipped mayor prompt's sentence, wrapped across two lines.
+		"Do not invent `gc mail list`, `gc city status`, etc. from them. For bead work",
+		"use `gc bd ready`, and never run",
+		"`gc agent claim` by hand.",
+		"Don't use `gc old one`; use `gc mail inbox`.",
+		"You must not call `gc old two`. Avoid `gc old three`!",
+		"Use `gc session list` instead of `gc old four`.",
+		"Prefer `gc rig list` rather than `gc old five`?",
+		"",
+		"Paragraphs reset: `gc status`.",
+		"```bash",
+		"# Do not run the line below.",
+		"gc agent claim",
+		"```",
+	}, "\n")
+	got := promptGCInvocations(prompt)
+	want := [][]string{
+		{"bd", "ready"},
+		{"mail", "inbox"},
+		{"session", "list"},
+		{"rig", "list"},
+		{"status"},
+		{"agent", "claim"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("promptGCInvocations =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestPromptGCStockPromptsResolve guards the prompts gc ships: the default
+// init prompts and the bundled core pack must produce no prompt-gc-commands
+// finding against this gc's own command tree.
+func TestPromptGCStockPromptsResolve(t *testing.T) {
+	root := newRootCmdWithOptions(io.Discard, io.Discard, rootCommandOptions{})
+	resolver := promptGCResolver{roots: []*cobra.Command{root}}
+	scanned := 0
+	for name, fsys := range map[string]fs.FS{"cmd/gc": defaultPrompts, "packs/core": core.PackFS} {
+		err := fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".md") {
+				return err
+			}
+			data, err := fs.ReadFile(fsys, path)
+			if err != nil {
+				return err
+			}
+			scanned++
+			for _, inv := range promptGCInvocations(string(data)) {
+				for _, f := range resolver.resolve(inv) {
+					t.Errorf("%s/%s: %s | %s | %s", name, path, f.Kind, f.Command, f.Reason)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walking %s: %v", name, err)
+		}
+	}
+	if scanned == 0 {
+		t.Fatal("scanned no stock prompt files")
 	}
 }
 

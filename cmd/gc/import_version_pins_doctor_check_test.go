@@ -6,7 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
@@ -31,7 +34,7 @@ func setupImportPinsCity(t *testing.T, packToml, cityToml, lock string) string {
 }
 
 func importPinsCheck(cityDir string, resolve func(string, string) (string, error)) *importVersionPinsDoctorCheck {
-	c := newImportVersionPinsDoctorCheck(cityDir)
+	c := newImportVersionPinsDoctorCheck(cityDir, 0)
 	c.resolveDefault = resolve
 	return c
 }
@@ -189,10 +192,126 @@ source = "`+pinsRefSource+`"
 		t.Fatalf("Run = %v %+v, want one unfixable unpinned import", res.Status, res.Payload)
 	}
 	before := readCityFile(t, cityDir, "pack.toml")
-	if err := check.Fix(&doctor.CheckContext{CityPath: cityDir}); err == nil || !strings.Contains(err.Error(), "pack:other") {
-		t.Fatalf("Fix error = %v, want a manual-edit error naming pack:other", err)
+	if err := check.Fix(&doctor.CheckContext{CityPath: cityDir}); err != nil {
+		t.Fatalf("Fix: %v, want nil (the verify re-run reports the #ref import)", err)
 	}
 	if readCityFile(t, cityDir, "pack.toml") != before {
 		t.Error("Fix rewrote an import with an embedded ref")
 	}
+}
+
+// TestImportVersionPinsFixPinsFixableAndLeavesEmbeddedRef: a Fix that writes
+// files must not also report failure, or the runner records FixError and
+// skips the verify re-run although the city changed. The #ref import stays
+// for the verify re-run to report with its manual-edit note.
+func TestImportVersionPinsFixPinsFixableAndLeavesEmbeddedRef(t *testing.T) {
+	cityDir := setupImportPinsCity(t, `[pack]
+name = "demo"
+schema = 2
+
+[imports.tools]
+source = "`+pinsToolsSource+`"
+
+[imports.other]
+source = "`+pinsRefSource+`"
+`, "[workspace]\nname = \"demo\"\n", "")
+	check := importPinsCheck(cityDir, func(_, source string) (string, error) {
+		if source != pinsToolsSource {
+			t.Fatalf("resolved %s; only the fixable import may resolve", source)
+		}
+		return "^1.4", nil
+	})
+	var out strings.Builder
+	if err := check.Fix(&doctor.CheckContext{CityPath: cityDir, Output: &out}); err != nil {
+		t.Fatalf("Fix: %v, want nil after pinning the fixable import", err)
+	}
+	if pack := readCityFile(t, cityDir, "pack.toml"); !strings.Contains(pack, `version = "^1.4"`) {
+		t.Errorf("pack.toml after fix:\n%s\nwant tools pinned to ^1.4", pack)
+	}
+	if !strings.Contains(out.String(), "pack:other") {
+		t.Errorf("fix output = %q, want the #ref import named for a manual edit", out.String())
+	}
+	res := check.Run(&doctor.CheckContext{CityPath: cityDir})
+	payload, ok := res.Payload.(importVersionPinsPayload)
+	if res.Status != doctor.StatusWarning || !ok || len(payload.Unpinned) != 1 || payload.Unpinned[0].Import != "pack:other" {
+		t.Fatalf("Run after Fix = %v %+v, want only pack:other still unpinned", res.Status, res.Payload)
+	}
+}
+
+// TestImportVersionPinsFixPinsBundledSourceToCanonicalPin: a floating
+// bundled import is served from the binary's embedded content at its
+// canonical pin. --fix writes that pin, the one gc init and the
+// builtin-pack-imports fix write, and never asks remote resolution, which
+// would move the import onto a registry release.
+func TestImportVersionPinsFixPinsBundledSourceToCanonicalPin(t *testing.T) {
+	src, ok := builtinpacks.CanonicalImportSource("core")
+	if !ok {
+		t.Fatal("no canonical core source")
+	}
+	cityDir := setupImportPinsCity(t, `[pack]
+name = "demo"
+schema = 2
+
+[imports.core]
+source = "`+src+`"
+`, "[workspace]\nname = \"demo\"\n", "")
+	check := importPinsCheck(cityDir, func(_, source string) (string, error) {
+		t.Errorf("resolved %s remotely; a bundled source pins to its canonical pin", source)
+		return "^1.4", nil
+	})
+	res := check.Run(&doctor.CheckContext{CityPath: cityDir})
+	if res.Status != doctor.StatusWarning || !strings.Contains(strings.Join(res.Details, "\n"), "bundled") {
+		t.Fatalf("Run = %v %v, want a warning that names the bundled pin", res.Status, res.Details)
+	}
+	if err := check.Fix(&doctor.CheckContext{CityPath: cityDir}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	want := config.BundledSourcePinnedVersion(src)
+	if pack := readCityFile(t, cityDir, "pack.toml"); !strings.Contains(pack, `version = "`+want+`"`) {
+		t.Errorf("pack.toml after fix:\n%s\nwant core pinned to %s", pack, want)
+	}
+	if res := check.Run(&doctor.CheckContext{CityPath: cityDir}); res.Status != doctor.StatusOK {
+		t.Errorf("Run after Fix: status = %v, details = %v, want OK", res.Status, res.Details)
+	}
+}
+
+// TestImportVersionPinsFixWritesNothingPastCheckTimeout: doctor abandons a
+// Fix that outlasts --check-timeout but lets it run on. A Fix whose
+// resolution outlasted that budget must not write afterwards, where it would
+// race the checks the runner moved on to.
+func TestImportVersionPinsFixWritesNothingPastCheckTimeout(t *testing.T) {
+	cityDir := setupImportPinsCity(t, pinsPackToml, pinsCityToml, pinsLock)
+	beforePack := readCityFile(t, cityDir, "pack.toml")
+	beforeCity := readCityFile(t, cityDir, "city.toml")
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	check := importPinsCheck(cityDir, func(string, string) (string, error) {
+		clock = clock.Add(40 * time.Second)
+		return "^1.4", nil
+	})
+	check.fixBudget = 60 * time.Second
+	check.now = func() time.Time { return clock }
+	err := check.Fix(&doctor.CheckContext{CityPath: cityDir})
+	if err == nil || !strings.Contains(err.Error(), "check timeout") {
+		t.Fatalf("Fix error = %v, want a check-timeout refusal", err)
+	}
+	if readCityFile(t, cityDir, "pack.toml") != beforePack || readCityFile(t, cityDir, "city.toml") != beforeCity {
+		t.Error("Fix wrote files after its resolution outlasted the check timeout")
+	}
+}
+
+func TestImportVersionPinsCheckGetsDoctorCheckTimeout(t *testing.T) {
+	cityDir := setupImportPinsCity(t, pinsPackToml, "[workspace]\nname = \"demo\"\n", "")
+	checks := buildDoctorChecks(cityDir, &config.City{Workspace: config.Workspace{Name: "demo"}}, nil, buildDoctorChecksOpts{
+		ControllerRunning: true, SkipCityDoltCheck: true, SkipManagedDoltCheck: true, SkipRigDoltChecks: true,
+		CheckTimeout: 7 * time.Second,
+	})
+	for _, c := range checks {
+		if pins, ok := c.(*importVersionPinsDoctorCheck); ok {
+			if pins.fixBudget != 7*time.Second {
+				t.Fatalf("fixBudget = %v, want the doctor check timeout", pins.fixBudget)
+			}
+			return
+		}
+	}
+	t.Fatalf("%s not registered", importVersionPinsCheckName)
 }

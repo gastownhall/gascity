@@ -203,6 +203,9 @@ type buildDoctorChecksOpts struct {
 	// CommandRoot is the running gc's command tree (see doctorOpts). Nil
 	// leaves prompt-gc-commands unregistered.
 	CommandRoot *cobra.Command
+	// CheckTimeout is doctor's per-check timeout, which a Fix that writes
+	// after slow network resolution (import-version-pins) stays within.
+	CheckTimeout time.Duration
 }
 
 // doctorOrderFiringCurrentLastRunFunc answers "when did this order last run"
@@ -338,7 +341,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	}
 	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
 		register(newBuiltinImportDoctorCheck(cityPath))
-		register(newImportVersionPinsDoctorCheck(cityPath))
+		register(newImportVersionPinsDoctorCheck(cityPath, opts.CheckTimeout))
 		register(newImportStateDoctorCheck(cityPath))
 		register(newNestedPackCommitsDoctorCheck(cityPath))
 		register(newGascityPackBindingDoctorCheck(cityPath))
@@ -694,6 +697,7 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 		RolloutFlags:            rolloutFlags,
 		RolloutResolveErr:       rolloutResolveErr,
 		CommandRoot:             opts.CommandRoot,
+		CheckTimeout:            opts.CheckTimeout,
 	})
 	selected, unmatched := doctor.SelectChecks(registered, splitDoctorCheckNames(opts.Checks))
 	if len(unmatched) > 0 {

@@ -157,13 +157,20 @@ unknown-subcommand | gc agent claim | "gc agent" has no subcommand "claim" | age
 
 Usually the prompt comes from a pack version written for a different `gc`.
 Pin the pack to a version whose prompts match your `gc`, or update the prompt.
-Run `gc <command> --help` to confirm what exists. A prompt that quotes a
-command in order to forbid it also produces this warning; ignore it.
+Run `gc <command> --help` to confirm what exists. An inline code span that
+follows "do not", "don't", "never", "must not", "should not", "avoid",
+"instead of", or "rather than" in the same sentence is skipped, since the
+prompt names that command to forbid it. Fenced code blocks are always checked.
+A prohibition worded outside that list still produces a warning; ignore it.
 
 `import-version-pins --fix` writes the same constraint `gc import add` writes
 for that source. For an import already in `packs.lock`, that constraint
-matches the locked entry, so the locked commit does not move. A source with an
-embedded `#ref` needs a manual edit: move the ref into `version`.
+matches the locked entry, so the locked commit does not move. A bundled
+builtin pack source gets the canonical pin of the running `gc`, the same pin
+`gc init` writes. A source with an embedded `#ref` needs a manual edit: move
+the ref into `version`. `--fix` still pins the other imports, and the check
+keeps warning about the `#ref` import until you edit it. If resolving versions
+outlasts `--check-timeout`, `--fix` writes nothing.
 
 For `nested-pack-commits`, declare the same version on both imports and run
 `gc import install`.
