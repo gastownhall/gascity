@@ -345,6 +345,17 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			[]string{"wake_request", "explicit", "wake_requested_at", ago(time.Minute)},
 			patchSite(func(session.Info) session.MetadataPatch { return session.KillPendingPatch(now) }),
 		},
+		"internal/session/resume_user_hold.go:Manager.consumeUserHold": {
+			[]string{"state", "suspended", "sleep_intent", "user-hold", "held_until", ago(-time.Hour), "suspended_at", ago(time.Minute), "provider", "claude"},
+			func(t *testing.T, meta []string) map[string]string {
+				m, _ := stampedMem(t, gate.Require)
+				id := fieldRow(t, m, meta...)
+				if err := session.NewManagerWithOptions(m, runtime.NewFake()).Attach(context.Background(), id, "claude", runtime.Config{}); err != nil {
+					t.Fatal(err)
+				}
+				return fieldBead(t, m, id).Metadata
+			},
+		},
 		"internal/session/manager.go:Manager.suspend": {
 			[]string{"state", "asleep", "wake_request", "explicit", "wake_requested_at", ago(time.Minute)},
 			func(t *testing.T, meta []string) map[string]string {

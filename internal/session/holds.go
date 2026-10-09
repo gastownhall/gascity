@@ -77,8 +77,15 @@ func HoldVerdict(meta map[string]string, runtimeRunning bool, now time.Time) boo
 
 // HoldVerdictInfo is HoldVerdict over a typed row.
 func HoldVerdictInfo(info Info, runtimeRunning bool, now time.Time) bool {
-	return HoldVerdict(map[string]string{
+	return HoldVerdict(holdMeta(info), runtimeRunning, now)
+}
+
+// HoldsInfo is Holds over a typed row.
+func HoldsInfo(info Info, now time.Time) HoldSet { return Holds(holdMeta(info), now) }
+
+func holdMeta(info Info) map[string]string {
+	return map[string]string{
 		"state": info.MetadataState, "held_until": info.HeldUntil, "quarantined_until": info.QuarantinedUntil,
 		"sleep_intent": info.SleepIntent, "wait_hold": info.WaitHold,
-	}, runtimeRunning, now)
+	}
 }

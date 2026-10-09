@@ -161,11 +161,14 @@ var (
 		"S2's adopt commit clears the wake request (D7)")
 	v2Accrual = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-7je1h",
 		"S3/S5 accrue a failed or dying start (SESS-537/538)")
-	opCreate     = op(srcManager, "Manager.createBeadOnly")
-	legacyCreate = legacy(srcBeads, "syncCreateMetadata")
-	waitHold     = v2("cmd/gc/reconcile_steps_waits.go", "clearSessionWaitHoldFenced")
-	sleepPolicy  = sites(legacy(srcSleep, "persistSleepPolicyMetadataInfo"))
-	leaseAcquire = legacy("internal/session/runtime_lease.go", "RuntimeLease.acquireRecord").pending("mc-x9ygp",
+	opCreate = op(srcManager, "Manager.createBeadOnly")
+	// opConsumeHold is an operator's resume consuming a user hold (#7424's
+	// interim D8 consume; D8 B's lease-fenced consume replaces it).
+	opConsumeHold = op("internal/session/resume_user_hold.go", "Manager.consumeUserHold")
+	legacyCreate  = legacy(srcBeads, "syncCreateMetadata")
+	waitHold      = v2("cmd/gc/reconcile_steps_waits.go", "clearSessionWaitHoldFenced")
+	sleepPolicy   = sites(legacy(srcSleep, "persistSleepPolicyMetadataInfo"))
+	leaseAcquire  = legacy("internal/session/runtime_lease.go", "RuntimeLease.acquireRecord").pending("mc-x9ygp",
 		"L1b's starters, legacy and v2, take the lease (until then nothing in a mode calls it)")
 )
 
@@ -271,11 +274,11 @@ var registry = slices.Concat([]Field{
 	{Key: "closed_at", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "ClosePatch"))},
 
 	// Operator intent.
-	{Key: "held_until", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_session.go", "managedSuspendPatch")), Clears: sites(v2(srcTransition, "ClearExpiredHoldPatch"))},
+	{Key: "held_until", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_session.go", "managedSuspendPatch")), Clears: sites(v2(srcTransition, "ClearExpiredHoldPatch"), opConsumeHold)},
 	{Key: "quarantined_until", Class: ClassOperatorIntent, Writers: sites(legacy(srcReconcile, "recordRateLimitQuarantine"), v2Accrual), Clears: sites(v2(srcHeals, "armStabilityClear"))},
-	{Key: "sleep_intent", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_session.go", "managedSuspendPatch"), legacy(srcSleep, "markIdleSleepPendingInfo")), Clears: sites(waitHold)},
+	{Key: "sleep_intent", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_session.go", "managedSuspendPatch"), legacy(srcSleep, "markIdleSleepPendingInfo")), Clears: sites(waitHold, opConsumeHold)},
 	{Key: "wait_hold", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_wait.go", "doSessionWait")), Clears: sites(waitHold)},
-	{Key: "suspended_at", Class: ClassOperatorIntent, Writers: sites(op(srcManager, "Manager.suspend"))},
+	{Key: "suspended_at", Class: ClassOperatorIntent, Writers: sites(op(srcManager, "Manager.suspend")), Clears: sites(opConsumeHold)},
 	{Key: "pin_awake", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_session_pin.go", "cmdSessionSetPin")), Readers: sites(v2("cmd/gc/allocator_decide.go", "decidePass.awake"))},
 	// template_overrides is a per-session setting the start reads and nothing
 	// clears, so it is operator intent, not a request.
