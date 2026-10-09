@@ -149,6 +149,7 @@
         "pages": [
           "index",
           "getting-started/installation",
+          "getting-started/upgrading",
           "getting-started/quickstart",
           "getting-started/dashboard",
           "getting-started/how-gas-city-works",

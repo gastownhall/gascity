@@ -1,0 +1,50 @@
+# rbe-ci-cost-latency-study.md recommendation 5: the evidence-only
+# //test/integration:integration_test lane and bazel.yml's coverage job
+# (bazel coverage //... -> Codecov flag bazel-unit) used to run on every
+# push to main. Neither gates a PR (integration is evidence-only until G3;
+# coverage is reporting only), so paying their wall time on every push
+# bought nothing. This workflow runs them once a day, off-peak UTC, plus
+# on demand.
+#
+# When integration becomes a required check, it will be gated in a merge
+# queue instead of moved back onto every push (follow-up; not built here).
+#
+# Keeps PR and push lanes on bazel.yml unchanged otherwise: unit,
+# acceptance, integration-packages and integration-smoke still run there.
+name: bazel nightly
+
+on:
+  schedule:
+    # 03:17 UTC: off-peak for both US and EU business hours, and ahead of
+    # nightly.yml's 06:00 UTC run so the two don't compete for the runner
+    # pool or the rbe-west worker pool.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bazel:
+    name: "bazel (nightly: integration + coverage)"
+    # A called workflow's jobs get at most the caller job's token
+    # permissions: bazel.yml's rbe job dispatches the worker pool (actions:
+    # write) and its lanes read worker-env drift issues (issues: read).
+    permissions:
+      contents: read
+      actions: write
+      issues: read
+    uses: ./.github/workflows/bazel.yml
+    with:
+      # Re-execute every lane instead of reusing a cached PASS: worker-env
+      # (tools/rbe/worker-env) keys git and yq at major version only, so a
+      # minor upgrade on the rbe-west workers moves no action key and a
+      # regression it causes can hide behind every push's cached result
+      # (2026-10-07 worker-env outage review). Beads' nightly does the same
+      # with --config=fresh (gastownhall/beads .bazelrc, bazel.yml). The
+      # lanes still write the shared remote cache (--nocache_test_results
+      # only skips reading a cached result; rbe-west's workers upload their
+      # own results regardless, .bazelrc build:remote-exec
+      # --noremote_upload_local_results).
+      fresh-test-results: true
+    secrets: inherit

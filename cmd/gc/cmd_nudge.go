@@ -1022,6 +1022,12 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		}
 		idleTicksSinceObserve = 0
 
+		// Observing reads the bead store, and on a stopped city that read
+		// restarts the bd and Dolt servers `gc stop` just retired (#6857).
+		if nudgePollCityStopped(target, sp) {
+			fmt.Fprintf(stderr, "gc nudge poll: city controller and session %q are not running; exiting and leaving queued nudges for the next start\n", target.sessionName) //nolint:errcheck
+			return 0
+		}
 		obs, err := nudgeObserveTarget(target, sessStore, sp)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck
@@ -2260,12 +2266,7 @@ func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 		if err != nil {
 			return err
 		}
-		cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
-		cmd.Env = os.Environ()
-		cmd.Stdout = io.Discard
-		cmd.Stderr = io.Discard
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		disableProductMetricsForChild(cmd)
+		cmd := newNudgePollerCommand(exe, os.Environ(), cityPath, sessionName, agentName)
 		if err := cmd.Start(); err != nil {
 			return err
 		}
@@ -2276,6 +2277,19 @@ func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 		}
 		return cmd.Process.Release()
 	})
+}
+
+// newNudgePollerCommand builds the detached poller child over environ, without
+// the spawning session's identity (nudgepoller.ChildEnv), so the poller
+// never reads as that session's leaked process.
+func newNudgePollerCommand(exe string, environ []string, cityPath, sessionName, agentName string) *exec.Cmd {
+	cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
+	cmd.Env = nudgepoller.ChildEnv(environ)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	disableProductMetricsForChild(cmd)
+	return cmd
 }
 
 func formatNudgeInjectOutput(items []queuedNudge) string {

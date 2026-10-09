@@ -102,7 +102,7 @@ func TestLatchReconcilerModeRefusesUnknownAndInadmissibleV2(t *testing.T) {
 		{raw: "v3", wantErr: "not a known value"},
 	} {
 		cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: tc.raw}}
-		mode, err := latchReconcilerMode(cfg)
+		mode, err := latchReconcilerMode(cfg, nil)
 		if tc.wantErr != "" {
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("latch(%q) err = %v, want %q", tc.raw, err, tc.wantErr)
@@ -116,6 +116,30 @@ func TestLatchReconcilerModeRefusesUnknownAndInadmissibleV2(t *testing.T) {
 		if mode != reconcilerLegacy {
 			t.Errorf("latch(%q) = %v, want legacy", tc.raw, mode)
 		}
+	}
+}
+
+// TestLatchRefusesV2WithIdentityBreaker pins C5's boot rule (START-800..806,
+// SESS-018..024): v2 defers the identity circuit breaker, so a v2 city that
+// turns it on refuses to start, with the reason in the latch error and in
+// doctor, rather than silently running without the protection. Legacy keeps
+// the breaker, and v2 without it is admitted.
+func TestLatchRefusesV2WithIdentityBreaker(t *testing.T) {
+	const want = `[daemon] session_reconciler = "v2" is refused: [daemon] session_circuit_breaker = true (the identity circuit breaker) is not available under v2 until PAR-BRK; remove those settings or run legacy`
+	cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: "v2", SessionCircuitBreaker: true}}
+	if _, err := latchReconcilerMode(cfg, overrideEnv("1")); err == nil || err.Error() != want {
+		t.Fatalf("latch(v2, breaker) err = %v, want %q", err, want)
+	}
+	if r := newSessionReconcilerDoctorCheck(cfg, overrideEnv("1")).Run(&doctor.CheckContext{}); r.Status != doctor.StatusError || !strings.Contains(r.Message, want) {
+		t.Errorf("doctor = %v %q, want an error naming %q", r.Status, r.Message, want)
+	}
+	cfg.Daemon.SessionReconciler = ""
+	if mode, err := latchReconcilerMode(cfg, overrideEnv("1")); err != nil || mode != reconcilerLegacy {
+		t.Errorf("latch(legacy, breaker) = %v, %v; want legacy, nil", mode, err)
+	}
+	cfg.Daemon.SessionReconciler, cfg.Daemon.SessionCircuitBreaker = "v2", false
+	if mode, err := latchReconcilerMode(cfg, overrideEnv("1")); err != nil || mode != reconcilerV2 {
+		t.Errorf("latch(v2, no breaker) = %v, %v; want v2, nil", mode, err)
 	}
 }
 
@@ -227,7 +251,7 @@ func TestDoctorSessionReconcilerCheck(t *testing.T) {
 		{raw: "v3", want: doctor.StatusError},
 	} {
 		cfg := &config.City{Daemon: config.DaemonConfig{SessionReconciler: tc.raw}}
-		r := newSessionReconcilerDoctorCheck(cfg).Run(&doctor.CheckContext{})
+		r := newSessionReconcilerDoctorCheck(cfg, nil).Run(&doctor.CheckContext{})
 		if r.Status != tc.want {
 			t.Errorf("session_reconciler = %q: status = %v (%s), want %v", tc.raw, r.Status, r.Message, tc.want)
 		}
@@ -362,20 +386,22 @@ func TestReconcileCitiesRefusesSessionReconcilerBeforeInit(t *testing.T) {
 
 // TestReloadSessionReconcilerDriftFollowsLatchedMode pins that the runtime's
 // drift tracker runs the mode its controller latched, not its zero value. No
-// controller latches v2 in this build, so the test hands the mode in directly.
+// production controller latches v2 in this build, so the test latches it with
+// the developer override.
 func TestReloadSessionReconcilerDriftFollowsLatchedMode(t *testing.T) {
 	cityPath := t.TempDir()
 	writeCityRuntimeConfig(t, filepath.Join(cityPath, "city.toml"), "fake")
 	cfg, rev := loadCityRuntimeControllerConfig(t, cityPath)
 	sp := runtime.NewFake()
-	cr := newTestCityRuntime(t, CityRuntimeParams{
-		CityPath:       cityPath,
-		CityName:       "test-city",
-		TomlPath:       filepath.Join(cityPath, "city.toml"),
-		ConfigRev:      rev,
-		Cfg:            cfg,
-		ReconcilerMode: reconcilerV2,
-		SP:             sp,
+	wiring := newTestV2Wiring(t, cfg, io.Discard)
+	t.Cleanup(wiring.v2.stop)
+	cr := newTestCityRuntime(t, wiring.runtimeParams(CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  filepath.Join(cityPath, "city.toml"),
+		ConfigRev: rev,
+		Cfg:       cfg,
+		SP:        sp,
 		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
 			return DesiredStateResult{State: map[string]TemplateParams{}}
 		},
@@ -383,7 +409,7 @@ func TestReloadSessionReconcilerDriftFollowsLatchedMode(t *testing.T) {
 		Rec:    events.Discard,
 		Stdout: io.Discard,
 		Stderr: io.Discard,
-	})
+	}))
 	got := cr.reconcilerDrift.observe(&config.City{})
 	if !strings.Contains(got, "on disk is legacy; this controller runs v2") {
 		t.Fatalf("drift warning for a legacy candidate = %q, want it measured against the latched v2", got)

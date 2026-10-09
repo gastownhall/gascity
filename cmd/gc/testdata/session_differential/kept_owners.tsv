@@ -1,0 +1,87 @@
+# The KEPT rows of reconciler-review p0/BEHAVIORS.md (sha256 a6f3ca74b202, 2026-10-08), by owner cell:
+# <the text after "→ **v5:** KEPT: ">\t<row IDs, comma-separated>. Regenerate when BEHAVIORS.md changes:
+#   for each table row, take the Owner cell's text after "KEPT:" up to the next "|", and group the IDs by it.
+pass record (R6)	SESS-001
+P6	SESS-002,SESS-582
+gather (R4)	SESS-003,SESS-004,SESS-005,SESS-006,SESS-007
+A6 timer heals + row write	SESS-009,SESS-010,SESS-531,SESS-533,SESS-534,SESS-535,SESS-536,SESS-539,SESS-540,SESS-701
+AL1 named-duplicate verdict	SESS-011,SESS-012
+S1 template resolution	SESS-026
+AL1 allocate	SESS-027,SESS-028,SESS-583,SESS-601,SESS-604,POOL-001,POOL-002,POOL-003,POOL-004,POOL-006,POOL-007,POOL-008,POOL-009,POOL-010,POOL-011,POOL-012,POOL-016,POOL-017,POOL-018,POOL-021,POOL-022,POOL-023,POOL-024,POOL-025,POOL-026,POOL-027,POOL-029,POOL-030,POOL-031,POOL-032,POOL-033,POOL-034,POOL-035,POOL-036,POOL-037,POOL-038,POOL-039,POOL-040,POOL-041,POOL-042,POOL-043,POOL-044,POOL-045,POOL-047,POOL-048,POOL-049,POOL-050,POOL-054,POOL-055,POOL-057,POOL-059,POOL-061,POOL-063,POOL-068,POOL-069,POOL-070,POOL-073,POOL-074,POOL-082,SESS-706,SESS-707,SESS-708,SESS-712,GUAR-009,GUAR-030,GUAR-031,GUAR-033,GUAR-044,INC-004,INC-011,INC-013,INC-017,INC-019,INC-036
+A4 + D3 stop verb, D4 finalizePatch	SESS-033,SESS-034,SESS-035,SESS-036,DRAIN-036,DRAIN-050,DRAIN-051,DRAIN-053,DRAIN-054,DRAIN-055,GUAR-005
+AL1 Keep on partial + P2 boot gate	SESS-037,SESS-073,SESS-079
+A5 unknown state	SESS-044,SESS-045,SESS-046,SESS-047
+A10 + C3 rollback	SESS-050,SESS-051,SESS-052,SESS-092,SESS-093,SESS-501,SESS-502,MAINT-034,GUAR-026,GUAR-028,INC-021
+AL1 (named-duplicate verdict)	SESS-054,SESS-055,SESS-064,SESS-721
+A12 / S5 classification and recycle	SESS-056,SESS-057
+A21 + C3 failed-create close	SESS-060,SESS-061,SESS-702
+A6 heal of a `creating` row without a claim to asleep, fenced on `instance_token` (lease branch removed)	SESS-062
+AL1 Drain + A20 + D2	SESS-074
+A21 + C3 close	SESS-080,SESS-081,SESS-082,SESS-083,SESS-623,SESS-624,SESS-625,SESS-626,SESS-722,GUAR-022,GUAR-038
+A12 / S5 classification and recycle (reset-stall via the recycle)	SESS-085,SESS-086,SESS-087,SESS-088,SESS-089,SESS-090,SESS-530
+A19/A20 + D2 policy table	SESS-532,SESS-616,SESS-617,SESS-618,SESS-619,SESS-621,DRAIN-022,DRAIN-501
+S3 abandon table + S6 #46	SESS-537,SESS-538,START-031,START-032,START-033,START-034,START-035,GUAR-025,GUAR-027,GUAR-039
+A14 config drift + D2/D3 (C7b)	SESS-550,SESS-552,SESS-553,SESS-554,SESS-555,SESS-556,SESS-557,SESS-558,SESS-559,SESS-560,SESS-561,SESS-562,SESS-565,SESS-566,SESS-568,GUAR-006
+A15 idle-timeout + D3 with the idle finalize (D4)	SESS-574,SESS-575,SESS-577,GUAR-036
+AL1 stage 6b	SESS-585,SESS-586,SESS-652
+P4 probe cap	SESS-587
+A17: C5b decides, else PAR-HB	SESS-602
+A6 stranded-marker clear on an alive row (CAS)	SESS-603
+A18 start gates + P4 admission	SESS-605,SESS-606,SESS-607,SESS-610,SESS-630,START-040,START-041,START-042,START-807,START-808,START-809,GUAR-034
+P4 admission + S1	SESS-611,SESS-631,START-002,START-003,START-007,START-009,START-036,GUAR-024
+A6 current-bead stamp on an alive Wake row (CAS)	SESS-613
+D2 idle-respawn row (A20)	SESS-614
+decideRow (Wake, alive) + row write	SESS-615
+A19 + D2 lenses	SESS-632,DRAIN-042,DRAIN-045,DRAIN-046,DRAIN-047
+S1 start (Launch, PreWake)	SESS-640,START-014,START-016,START-019,START-025,START-026,START-038,GUAR-002,GUAR-017
+S1 PreWake (the only incarnation bump)	SESS-641,START-012
+A19 idle-respawn void (D2)	DRAIN-044
+S5 start recycle covers it; session.reset_stalled not emitted (§12.2 row 10)	SESS-590,SESS-591,SESS-592
+F4 fresh L4 / AL1 stage 6b	SESS-650,SESS-651
+AL1; custom scale_check refused at the latch (PAR-SC), K1 source wired	POOL-005
+gather: K1 recording for bd/PG legs (R4)	POOL-013,POOL-014,POOL-062
+K1 demand-repairs step	POOL-019,POOL-020
+C1 create	POOL-051,GUAR-042,INC-018
+A6 named-session trigger clear (CAS)	POOL-056
+S1 route	POOL-064
+K1 store-identity source + AL1	POOL-065,MAINT-049
+AL1 allocate (stages 1-9)	POOL-066,POOL-067,POOL-072,POOL-075,POOL-076,POOL-077,POOL-078,POOL-079,POOL-080
+C1 create / C2 named reopen	SESS-709,SESS-710,SESS-711
+P1 planner + P3 executor	START-001,START-004,START-015,START-030
+S3 abandon table	START-022,START-028,START-029
+shutdown exception (F2)	START-060,START-061,START-062
+K1 nudges step (R1 exception 4)	NUDGE-001,NUDGE-002,NUDGE-003,NUDGE-004,NUDGE-010,NUDGE-011,NUDGE-012,NUDGE-020,NUDGE-021,INC-009
+A16 execution-stalled + D2	NUDGE-022
+maintenance nudge dispatch / K1 waits step	NUDGE-030,NUDGE-031,NUDGE-040,MAINT-014,GUAR-007,GUAR-008,INC-035
+boot (P2)	MAINT-001,MAINT-003,MAINT-004,MAINT-005,MAINT-012
+maintenance (non-session tick phase)	MAINT-002,MAINT-007,MAINT-008,MAINT-009,MAINT-011,MAINT-018,MAINT-019,MAINT-022,MAINT-026,MAINT-027,MAINT-028,MAINT-029,MAINT-032,MAINT-033,MAINT-035,MAINT-039,MAINT-040,MAINT-041,MAINT-043,MAINT-045,MAINT-046,MAINT-048,GUAR-051,GUAR-052
+boot adoption (R1 exception 2) + L5 stamps GC_SESSION_ID	MAINT-006
+P1 planner	MAINT-010,MAINT-038,MAINT-053
+maintenance reload + P7 swap pause	MAINT-013,MAINT-016,MAINT-023,MAINT-024,API-013,API-017,GUAR-014,GUAR-015,INC-033,INC-034
+inventory/provider events → P1 dirty	MAINT-015,API-018
+P1 dirty bit	MAINT-017,MAINT-021,MAINT-054
+P6 panic isolation	MAINT-020,INC-001
+gather + AL1	MAINT-030,MAINT-044,MAINT-050
+A21 + C3 dead-corpse close; corpse fence via O2	MAINT-031
+maintenance stale extmsg reap; re-pointing: PAR-RETIRE	MAINT-037
+K1 orphan-release step (R1 exception 4)	MAINT-047,INC-016
+A21 + C3 orphan close	MAINT-051
+K1 waits and nudges steps	MAINT-052,MAINT-055,GUAR-010
+P1 dirty (control-dispatch poke)	MAINT-056,API-014
+operator/API → planner dirty (P1)	API-001,API-002,API-004,API-005,API-006,API-007,API-008,API-009,API-010,API-011,API-012
+maintenance reload → P1 dirty	API-003
+operator/API (breaker not available under v2)	API-015
+maintenance convergence	API-016
+operator doctor --fix, outside the planner	API-019
+gather: census read once per pass	GUAR-001
+AL1 + operator (R1 exception 3)	GUAR-003,GUAR-020
+operator/API, outside the planner (R1 exception 3, F2)	GUAR-004,GUAR-012,GUAR-019,GUAR-021,GUAR-023,GUAR-029,GUAR-032,GUAR-040,GUAR-041,GUAR-043,GUAR-046,GUAR-047,GUAR-048,GUAR-049,GUAR-050,INC-022,INC-028,INC-029,INC-031
+AL1 Keep + P2 boot gate + A9	GUAR-011
+P6 shutdown	GUAR-013,INC-026
+test harness (§11)	GUAR-016
+O1/O3 + effects fresh probe (S1)	GUAR-045
+A20 + D2 (INC-003 grace)	INC-003
+P1 dirty filter	INC-006
+F3 C8.8 confirmed stop	INC-023
+row write (R2 re-decide in CAS)	INC-024
+A21 dead-corpse fence via O2	INC-025

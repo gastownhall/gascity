@@ -68,7 +68,7 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 	// page) the boundary, ascending; the extra row is the has-more signal.
 	scanFilter := filter
 	scanFilter.BeforeSeq = beforeSeq
-	evts, scanned, err := fetchEventPageAscending(ep, scanFilter, limit)
+	evts, scanned, err := fetchEventPageAscending(ctx, ep, scanFilter, limit, !filterIsEmpty(filter))
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
@@ -160,7 +160,15 @@ func parseEventBeforeSeq(cursor string) (uint64, error) {
 // (listWithInFlight) so a just-rotated segment living only in a .rotating-* file
 // is not skipped; the BeforeSeq predicate keeps rotation/archive handling inside
 // the one battle-tested sequential reader instead of a bespoke reverse reader.
-func fetchEventPageAscending(ep events.Provider, filter events.Filter, limit int) ([]events.Event, int, error) {
+//
+// That full scan holds EVERY matching event below the boundary only to keep
+// the last limit+1, and it ignores ctx: right after a rotation, every request
+// holds the whole retained history, also after its client has gone. A
+// provider that implements [events.HistoryTailProvider] (the file-backed log)
+// gives the same rows while holding at most limit+1 events, and stops when ctx
+// is done. countMatches asks it for the full scan's match count too, which is
+// the Total of a filtered read.
+func fetchEventPageAscending(ctx context.Context, ep events.Provider, filter events.Filter, limit int, countMatches bool) ([]events.Event, int, error) {
 	fetch := limit + 1
 	if tp, ok := ep.(events.TailProvider); ok {
 		tail, err := tp.ListTail(filter, fetch)
@@ -170,6 +178,9 @@ func fetchEventPageAscending(ep events.Provider, filter events.Filter, limit int
 		if len(tail) == fetch {
 			return tail, limit, nil
 		}
+	}
+	if hp, ok := ep.(events.HistoryTailProvider); ok {
+		return hp.ListHistoryTail(ctx, filter, fetch, countMatches)
 	}
 	all, err := listWithInFlight(ep, filter)
 	if err != nil {
@@ -356,6 +367,9 @@ func (s *Server) streamEvents(hctx huma.Context, input *EventStreamInput, send s
 		return
 	}
 	defer watcher.Close() //nolint:errcheck
+	// Keep the city's pending monitor running while this client watches, so
+	// session.pending / session.pending_cleared transitions reach the log.
+	defer s.acquirePendingMonitor()()
 	flushSSEHeaders(hctx)
 
 	keepalive := time.NewTicker(sseKeepalive)

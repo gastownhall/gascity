@@ -341,7 +341,7 @@ func TestStaleSnapshotDoesNotClobberFencedEventRow(t *testing.T) {
 	}
 
 	cache.mu.RLock()
-	staleStartSeq := cache.mutationSeq
+	staleStartSeq, staleStartScan := cache.mutationSeq, cache.scanGen
 	cache.mu.RUnlock()
 
 	// The event advances the row past staleStartSeq and installs the beadSeq
@@ -361,7 +361,7 @@ func TestStaleSnapshotDoesNotClobberFencedEventRow(t *testing.T) {
 	}
 
 	staleItem := Bead{ID: bead.ID, Title: "before-event", Status: "open", Type: "task"}
-	refreshed := cache.refreshCachedBeads(ListQuery{Status: "open"}, staleStartSeq, []Bead{staleItem})
+	refreshed := cache.refreshCachedBeads(ListQuery{Status: "open"}, staleStartSeq, staleStartScan, []Bead{staleItem})
 
 	cache.mu.RLock()
 	cachedTitle := cache.beads[bead.ID].Title

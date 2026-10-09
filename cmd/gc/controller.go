@@ -148,8 +148,7 @@ func startControllerSocket(
 	dirty *atomic.Bool,
 	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
-	pokeCh chan struct{},
-	controlDispatcherCh chan struct{},
+	wake *controllerWake,
 ) (net.Listener, error) {
 	if !hostingMode.known() {
 		return nil, fmt.Errorf("starting controller socket: invalid hosting mode %q", hostingMode)
@@ -170,7 +169,7 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+			go handleControllerConn(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, wake)
 		}
 	}()
 	return lis, nil
@@ -179,8 +178,9 @@ func startControllerSocket(
 // handleControllerConn reads from a connection and dispatches commands.
 // Supported commands: "stop" (shutdown), "stop-force" (shutdown without
 // interrupt grace), "ping" (legacy liveness check, returns numeric PID),
-// "identify" (typed process identity), and "converge:{json}" (convergence
-// commands routed to event loop).
+// "identify" (typed process identity), "converge:{json}" (convergence
+// commands routed to event loop), and "v2-pass" (the v2 planner's last pass,
+// for doctor).
 func handleControllerConn(
 	conn net.Conn,
 	cityPath string,
@@ -190,8 +190,7 @@ func handleControllerConn(
 	dirty *atomic.Bool,
 	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
-	pokeCh chan struct{},
-	controlDispatcherCh chan struct{},
+	wake *controllerWake,
 ) {
 	defer conn.Close()                                 //nolint:errcheck // best-effort cleanup
 	conn.SetDeadline(time.Now().Add(95 * time.Second)) //nolint:errcheck // symmetric read+write deadline; 5s margin over 30s enqueue + 60s reply
@@ -219,19 +218,18 @@ func handleControllerConn(
 			// non-blocking enqueue for event-driven wake, e.g. after sling
 			// assigns work or a session is drained. Key-less = allocator.
 			key, _ := parsePokeSocketCommand(line)
-			legacyEnqueue(pokeCh, controlDispatcherCh, key)
+			wake.Enqueue(wakeReasonSocket, key)
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case line == "reload":
 			if dirty != nil {
 				dirty.Store(true)
 			}
-			// Config reload re-plans the whole city: allocator.
-			legacyEnqueue(pokeCh, nil, reconcilekey.Allocator())
+			wake.WakeMaintenance()
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case strings.HasPrefix(line, "reload:"):
 			handleReloadSocketCmd(conn, line[len("reload:"):], reloadReqCh)
 		case line == "control-dispatcher":
-			legacyEnqueue(nil, controlDispatcherCh, reconcilekey.ControlDispatch())
+			wake.Enqueue(wakeReasonSocket, reconcilekey.ControlDispatch())
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case strings.HasPrefix(line, sessionCircuitResetCommandPrefix):
 			handleSessionCircuitResetSocketCmd(conn, cityPath, line[len(sessionCircuitResetCommandPrefix):])
@@ -239,14 +237,16 @@ func handleControllerConn(
 			handleConvergeSocketCmd(conn, line[len("converge:"):], convergenceReqCh)
 		case strings.HasPrefix(line, "trace-arm:"):
 			if handleTraceSocketCmd(conn, cityPath, "start", line[len("trace-arm:"):]) {
-				legacyEnqueue(pokeCh, nil, reconcilekey.Allocator()) // key-less: trace applies city-wide
+				wake.Enqueue(wakeReasonTrace, reconcilekey.Allocator()) // key-less: trace applies city-wide
 			}
 		case strings.HasPrefix(line, "trace-stop:"):
 			if handleTraceSocketCmd(conn, cityPath, "stop", line[len("trace-stop:"):]) {
-				legacyEnqueue(pokeCh, nil, reconcilekey.Allocator()) // key-less: trace applies city-wide
+				wake.Enqueue(wakeReasonTrace, reconcilekey.Allocator()) // key-less: trace applies city-wide
 			}
 		case line == "trace-status":
 			handleTraceStatusSocketCmd(conn, cityPath)
+		case line == v2PassCommand:
+			writeJSONLine(conn, wake.v2PassStatus(time.Now()))
 		}
 	}
 }
@@ -600,10 +600,11 @@ func probeControllerIdentity(cityPath string) controllerIdentityReply {
 	return controllerIdentityReply{PID: controllerAlive(cityPath)}
 }
 
-// debounceDelay is the coalesce window for filesystem events. Multiple
+// defaultConfigDebounce is the coalesce window for filesystem events. Multiple
 // events within this window (vim atomic saves, git checkouts) produce a
-// single dirty signal. Tests may override this for faster response.
-var debounceDelay = 200 * time.Millisecond
+// single dirty signal. Callers pass a different window to watchConfigTargets
+// (tests use a short one); a zero window selects this default.
+const defaultConfigDebounce = 200 * time.Millisecond
 
 // watchConfigTargets starts an fsnotify watcher on the given config paths and
 // sets dirty to true after a debounce window. Config source directories are
@@ -760,7 +761,10 @@ func isConventionDiscoveryDirName(base string) bool {
 	return false
 }
 
-func watchConfigTargets(targets []config.WatchTarget, dirty *atomic.Bool, pokeCh chan struct{}, stderr io.Writer) func() {
+func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duration, dirty *atomic.Bool, wake *controllerWake, stderr io.Writer) func() {
+	if debounceDelay <= 0 {
+		debounceDelay = defaultConfigDebounce
+	}
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: config watcher: %v (reload on tick only)\n", err) //nolint:errcheck // best-effort stderr
@@ -770,8 +774,7 @@ func watchConfigTargets(targets []config.WatchTarget, dirty *atomic.Bool, pokeCh
 
 	markDirty := func() {
 		dirty.Store(true)
-		// A config file changed: reload re-plans the city (allocator).
-		legacyEnqueue(pokeCh, nil, reconcilekey.Allocator())
+		wake.WakeMaintenance()
 	}
 
 	done := make(chan struct{})
@@ -1185,6 +1188,7 @@ func runningSessionSet(sp runtime.Provider, names []string) (map[string]bool, bo
 func controllerLoop(
 	ctx context.Context,
 	interval time.Duration, // overrides cfg patrol interval when non-zero (used by tests)
+	configDebounce time.Duration, // overrides the config-watch coalesce window when non-zero (used by tests)
 	cfg *config.City,
 	cityName string,
 	tomlPath string,
@@ -1220,6 +1224,7 @@ func controllerLoop(
 		cityName:            cityName,
 		tomlPath:            tomlPath,
 		watchTargets:        watchTargets,
+		configDebounce:      configDebounce,
 		cfg:                 loopCfg,
 		sp:                  sp,
 		buildFn:             buildFn,
@@ -1238,6 +1243,7 @@ func controllerLoop(
 		stdout:              stdout,
 		stderr:              stderr,
 	}
+	cr.initWake(nil)
 	cr.publishPoolDeathHandlers(poolDeathHandlers)
 	cr.setControllerState(cs)
 	cr.run(ctx)
@@ -1277,7 +1283,8 @@ func configReloadSummary(oldAgents, oldRigs, newAgents, newRigs int) string {
 // runController runs the persistent controller loop. It holds the controller
 // lock, opens a control socket, runs the reconciliation loop, and on shutdown
 // stops all agents. Returns an exit code. initialWatchTargets is the set of
-// paths to watch for config changes (from initial provenance).
+// paths to watch for config changes (from initial provenance); configDebounce
+// is their coalesce window, zero selecting defaultConfigDebounce.
 //
 // heldLock is the controller lock when the caller already took it (gc start
 // --foreground does, before it starts the bead-store provider); the caller
@@ -1296,6 +1303,7 @@ func runController(
 	poolSessions map[string]time.Duration,
 	poolDeathHandlers map[string]poolDeathInfo,
 	initialWatchTargets []config.WatchTarget,
+	configDebounce time.Duration,
 	rec events.Recorder,
 	eventProv events.Provider,
 	stdout, stderr io.Writer,
@@ -1322,21 +1330,15 @@ func runController(
 
 	// doStartStandalone already refused an inadmissible mode before any init;
 	// this latch is the one whose mode the runtime runs.
-	reconcilerMode, modeErr := latchReconcilerMode(cfg)
-	if modeErr != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", modeErr) //nolint:errcheck // best-effort stderr
+	wiring, wiringErr := newControllerWiring(cfg, reconcilerModeLookupEnv, stderr)
+	if wiringErr != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", wiringErr) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	convergenceReqCh := make(chan convergenceRequest, 16)
-	reloadReqCh := make(chan reloadRequest)
-	pokeCh := make(chan struct{}, 1)
-	controlDispatcherCh := make(chan struct{}, 1)
-	configDirty := &atomic.Bool{}
-
 	sockPath := controllerSocketPath(cityPath)
 	forceShutdown := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, wiring.configDirty, wiring.reloadReqCh, wiring.convergenceReqCh, wiring.wake)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1367,15 +1369,14 @@ func runController(
 	telemetry.RecordControllerLifecycle(context.Background(), "started")
 	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
 
-	cr, err := newCityRuntime(CityRuntimeParams{
+	cr, err := newCityRuntime(wiring.runtimeParams(CityRuntimeParams{
 		CityPath:                cityPath,
 		CityName:                cityName,
 		TomlPath:                tomlPath,
 		WatchTargets:            initialWatchTargets,
 		ConfigRev:               configRev,
-		ConfigDirty:             configDirty,
+		ConfigDebounce:          configDebounce,
 		Cfg:                     cfg,
-		ReconcilerMode:          reconcilerMode,
 		SP:                      sp,
 		Publication:             supervisor.PublicationConfig{},
 		BuildFn:                 buildFn,
@@ -1385,13 +1386,9 @@ func runController(
 		PoolSessions:            poolSessions,
 		PoolDeathHandlers:       poolDeathHandlers,
 		ForceStopShutdown:       forceShutdown,
-		ReloadReqCh:             reloadReqCh,
-		ConvergenceReqCh:        convergenceReqCh,
-		PokeCh:                  pokeCh,
-		ControlDispatcherCh:     controlDispatcherCh,
 		Stdout:                  stdout,
 		Stderr:                  stderr,
-	})
+	}))
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1414,8 +1411,8 @@ func runController(
 	// census would silently fall back to its leading (binding) store.
 	registerResidencyRoutes(cityPath, cr.storageRoutes, cr.cityBeadStore)
 	cs.ct = cr.crashTrack()
-	wireControllerWakeSignals(cs, pokeCh, controlDispatcherCh)
-	cs.configDirty = configDirty
+	wireControllerWakeSignals(cs, wiring.wake)
+	cs.configDirty = wiring.configDirty
 	cs.services = cr.svc
 	cs.emergencyCh = make(chan emergency.Record, 64)
 	cr.setControllerState(cs)
@@ -1435,6 +1432,7 @@ func runController(
 	}
 
 	cs.startBeadEventWatcher(ctx)
+	cs.startAutocloseSweep(ctx)
 	cs.startEmergencyEventRelay(ctx)
 	cs.startMaintenanceLoop(ctx)
 

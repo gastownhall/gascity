@@ -155,14 +155,14 @@ func openNativeStorageProxied(ctx context.Context, scopeRoot string, env map[str
 	}
 	defer restoreEnv()
 
-	storage, err := nativeDoltOpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
+	storage, err := openNativeDoltStorage(ctx, filepath.Join(scopeRoot, ".beads"))
 	if err != nil {
 		return nil, "", err
 	}
 	if !readPrefix {
 		return storage, "", nil
 	}
-	prefix, err := storage.GetConfig(ctx, nativeIssuePrefixConfigKey)
+	prefix, err := nativeReadIssuePrefix(ctx, storage)
 	if err != nil {
 		_ = storage.Close()
 		return nil, "", fmt.Errorf("reading native issue prefix: %w", err)

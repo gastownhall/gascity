@@ -102,7 +102,7 @@ func TestDoltliteHasResidentOutside(t *testing.T) {
 		},
 		{
 			name:     "a lookalike prefix is not the namespace",
-			issues:   []testDoltliteIssue{{ID: "gcgx-1", Title: "neighbour"}},
+			issues:   []testDoltliteIssue{{ID: "gcgx-1", Title: "neighbor"}},
 			prefixes: classPrefixes,
 			want:     true,
 			why:      "gcgx is its own namespace; only gcg and gcg-... are inside gcg",

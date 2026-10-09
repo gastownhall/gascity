@@ -1,0 +1,13 @@
+# GitHub users whose fork PRs get rbe-west's trusted OSS pool (tier rw:
+# instance oss, results cached in AC_OSS) instead of the fork pool (tier ro).
+# Read by rbe-west's rbe-fork-mint from the default branch only (a PR cannot
+# list itself). One numeric user id per line, the login as a comment: a
+# renamed account's old login can be registered by anyone, an id never
+# changes hands (gh api users/<login> --jq .id). Both the PR author and the
+# run's triggering actor must be listed, and the PR must come from the
+# author's own fork. Same people as .github/blacksmith-allowlist.txt and
+# beads' .github/bazel-farm-allowlist.txt.
+8082291 # julianknutsen
+91582 # quad341
+36544495 # sjarmak
+2568253 # csells

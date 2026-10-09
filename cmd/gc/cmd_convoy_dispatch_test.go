@@ -9382,6 +9382,170 @@ func TestWorkflowDeleteSweepsTheRelocatedTreeAndTheRetainedCopy(t *testing.T) {
 	}
 }
 
+// TestWorkflowDeleteSweepsTheEphemeralTierOfTheRelocatedTree is the #6129
+// regression: findWorkflowBeads' descendants query left ListQuery.TierMode at
+// its zero value, TierIssues, which filters out Ephemeral rows. On a split
+// city the sweep still finds the root through the class binding, but every
+// wisp-tier step under it — the shape orchestration steps actually run in —
+// was silently dropped from the member set. `gc workflow delete` closed the
+// root and reported success while the ephemeral steps stayed open, rootless,
+// still carrying gc.root_bead_id pointing at a workflow that is gone.
+func TestWorkflowDeleteSweepsTheEphemeralTierOfTheRelocatedTree(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	prevCityFlag := cityFlag
+	cityFlag = ""
+	t.Cleanup(func() { cityFlag = prevCityFlag })
+
+	binding := soleClassBindingStore(t, cityPath)
+	root, err := binding.Create(beads.Bead{
+		Title:  "the workflow root",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey: beadmeta.KindWorkflow,
+		},
+	})
+	if err != nil {
+		t.Fatalf("seeding the workflow root in the class binding: %v", err)
+	}
+
+	wisp := mintEphemeralInBinding(t, binding, beads.Bead{
+		Title:    "the ephemeral step",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWorkflowDelete(root.ID, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc workflow delete exited %d: %s%s", code, stdout.String(), stderr.String())
+	}
+
+	closedWisp, err := binding.Get(wisp.ID)
+	if err != nil {
+		t.Fatalf("reading the ephemeral descendant back from the binding: %v", err)
+	}
+	if closedWisp.Status != "closed" {
+		t.Errorf("the ephemeral descendant %s is %q after the sweep, want closed: the descendants query must read TierMode: TierBoth so a relocated binding's wisp-tier steps are not silently dropped from the workflow's member set", wisp.ID, closedWisp.Status)
+	}
+}
+
+// mintEphemeralInBinding creates b in the class binding's wisp tier and fails
+// the test if the binding cannot reach that tier.
+func mintEphemeralInBinding(t *testing.T, binding beads.Store, b beads.Bead) beads.Bead {
+	t.Helper()
+	creator, ok := binding.(beads.StorageCreateStore)
+	if !ok {
+		t.Fatalf("the class binding (%T) implements no StorageCreateStore, so this fixture cannot reach its ephemeral tier", binding)
+	}
+	minted, err := creator.CreateWithStorage(b, beads.StorageEphemeral)
+	if err != nil {
+		t.Fatalf("minting an ephemeral bead in the class binding: %v", err)
+	}
+	if !minted.Ephemeral {
+		t.Fatalf("minted bead %s has Ephemeral=false; this fixture is not exercising the wisp tier", minted.ID)
+	}
+	return minted
+}
+
+// TestFindWorkflowBeadsFromRootReadsTheEphemeralTierOfTheRelocatedTree is the
+// delete-source sibling of the #6129 regression: findWorkflowBeadsFromRoot's
+// descendants query left ListQuery.TierMode at TierIssues, so on a split city
+// the wisp-tier steps under a source workflow root in the class binding were
+// dropped from the set `gc convoy delete-source` closes.
+func TestFindWorkflowBeadsFromRootReadsTheEphemeralTierOfTheRelocatedTree(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	binding := soleClassBindingStore(t, cityPath)
+
+	root, err := binding.Create(beads.Bead{
+		Title:    "the source workflow root",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+	})
+	if err != nil {
+		t.Fatalf("seeding the workflow root in the class binding: %v", err)
+	}
+	wisp := mintEphemeralInBinding(t, binding, beads.Bead{
+		Title:    "the ephemeral step",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+
+	found, err := findWorkflowBeadsFromRoot(binding, root)
+	if err != nil {
+		t.Fatalf("findWorkflowBeadsFromRoot: %v", err)
+	}
+	for _, b := range found {
+		if b.ID == wisp.ID {
+			return
+		}
+	}
+	t.Fatalf("findWorkflowBeadsFromRoot missed ephemeral descendant %s; got %d beads: the descendants query must read TierMode: TierBoth through the live handle", wisp.ID, len(found))
+}
+
+// TestSourceWorkflowChildSourcesReadsTheEphemeralTierOfTheRelocatedTree pins
+// the nested-workflow leg of `gc convoy delete-source`: a child source stamped
+// with gc.source_bead_id that lives in the class binding's wisp tier (a nested
+// workflow started from a wisp step) must be followed, or the sweep stops at
+// the first level and leaves the nested workflow running.
+func TestSourceWorkflowChildSourcesReadsTheEphemeralTierOfTheRelocatedTree(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	binding := soleClassBindingStore(t, cityPath)
+
+	const sourceBeadID = "src-ephemeral-child-6129"
+	child := mintEphemeralInBinding(t, binding, beads.Bead{
+		Title:    "the ephemeral wisp step that launched a nested workflow",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.SourceBeadIDMetadataKey: sourceBeadID},
+	})
+
+	children, err := sourceWorkflowChildSources(binding, sourceBeadID, "", "", "")
+	if err != nil {
+		t.Fatalf("sourceWorkflowChildSources: %v", err)
+	}
+	for _, b := range children {
+		if b.ID == child.ID {
+			return
+		}
+	}
+	t.Fatalf("sourceWorkflowChildSources(%q) missed ephemeral child source %s; got %d beads: the child-source query must read TierMode: TierBoth through the live handle", sourceBeadID, child.ID, len(children))
+}
+
+// TestFindWorkflowBeadsDiscoversAnEphemeralRootByWorkflowID pins the
+// root-discovery leg of findWorkflowBeads: a workflow root addressed by its
+// logical gc.workflow_id that lives in the class binding's wisp tier must be
+// found, or `gc workflow delete <workflow-id>` reports nothing to delete while
+// the root and its steps stay open.
+func TestFindWorkflowBeadsDiscoversAnEphemeralRootByWorkflowID(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	binding := soleClassBindingStore(t, cityPath)
+
+	const workflowID = "wf-ephemeral-root-6129"
+	root := mintEphemeralInBinding(t, binding, beads.Bead{
+		Title:  "the ephemeral workflow root",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
+			beadmeta.WorkflowIDMetadataKey: workflowID,
+		},
+	})
+
+	found, err := findWorkflowBeads(binding, workflowID)
+	if err != nil {
+		t.Fatalf("findWorkflowBeads: %v", err)
+	}
+	for _, b := range found {
+		if b.ID == root.ID {
+			return
+		}
+	}
+	t.Fatalf("findWorkflowBeads(%q) missed ephemeral root %s; got %d beads: the root-discovery query must read TierMode: beads.FederatedReadTier", workflowID, root.ID, len(found))
+}
+
 // TestWorkflowDeleteRefusesToSweepPastABindingThatStandsRefused pins the arm
 // that separates a sweep from a read.
 //
@@ -10119,6 +10283,194 @@ func TestCloseWorkflowMatchesClosesTheBindingBeforeTheRetainedCopies(t *testing.
 	}
 	if current.Status != "closed" {
 		t.Errorf("the binding's live root is still %s; the sweep faulted on the retained copies before it reached the tree the city is running", current.Status)
+	}
+}
+
+// stampEveryIDStore batches CloseAll the way bd and the native Dolt store do: the
+// metadata lands on every id it is handed, closed or not, because the batch
+// makes no per-row status read. MemStore reads each status first and skips a
+// closed row, so a sweep tested against MemStore alone cannot tell a caller that
+// keeps its finished steps out of the batch from one that hands them over.
+type stampEveryIDStore struct {
+	beads.Store
+	closeAllCalls int
+}
+
+func (s *stampEveryIDStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	s.closeAllCalls++
+	for _, id := range ids {
+		if err := s.SetMetadataBatch(id, metadata); err != nil {
+			return 0, err
+		}
+	}
+	return s.Store.CloseAll(ids, metadata)
+}
+
+// seedWorkflowWithAFinishedStep seeds a workflow part way through its run: the
+// root and one step are open, and one step already finished with its own
+// outcome.
+func seedWorkflowWithAFinishedStep(t *testing.T, store beads.Store) (root, finished, pending beads.Bead) {
+	t.Helper()
+	root, err := store.Create(beads.Bead{Title: "the workflow root", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the root: %v", err)
+	}
+	finished, err = store.Create(beads.Bead{
+		Title: "a step that already passed",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+			beadmeta.OutcomeMetadataKey:    beadmeta.OutcomePass,
+			"close_reason":                 "the step's own reason",
+		},
+	})
+	if err != nil {
+		t.Fatalf("seeding the finished step: %v", err)
+	}
+	if err := store.Close(finished.ID); err != nil {
+		t.Fatalf("closing the finished step: %v", err)
+	}
+	if finished, err = store.Get(finished.ID); err != nil {
+		t.Fatalf("reading the finished step back: %v", err)
+	}
+	pending, err = store.Create(beads.Bead{
+		Title:    "a step that has not run",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+	if err != nil {
+		t.Fatalf("seeding the pending step: %v", err)
+	}
+	return root, finished, pending
+}
+
+// assertWorkflowBeadClosedWith reads a bead back and checks the outcome and
+// close reason it carries.
+func assertWorkflowBeadClosedWith(t *testing.T, store beads.Store, id, outcome, reason string) {
+	t.Helper()
+	got, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("reading %s back: %v", id, err)
+	}
+	if got.Status != "closed" {
+		t.Errorf("%s is %s, want closed", id, got.Status)
+	}
+	if got.Metadata[beadmeta.OutcomeMetadataKey] != outcome || got.Metadata["close_reason"] != reason {
+		t.Errorf("%s carries outcome %q and close_reason %q, want %q and %q",
+			id, got.Metadata[beadmeta.OutcomeMetadataKey], got.Metadata["close_reason"], outcome, reason)
+	}
+}
+
+// TestCloseWorkflowMatchesLeavesAFinishedStepsOutcomeAlone pins that the skip
+// sweep closes what is still open and nothing else. A workflow match is listed
+// with IncludeClosed, so it carries the steps that already finished, and a store
+// that stamps every id it is handed would rewrite a passed step to skipped.
+func TestCloseWorkflowMatchesLeavesAFinishedStepsOutcomeAlone(t *testing.T) {
+	store := &stampEveryIDStore{Store: beads.NewMemStore()}
+	root, finished, pending := seedWorkflowWithAFinishedStep(t, store)
+
+	closed, err := closeWorkflowMatches([]workflowStoreMatch{{
+		store: store,
+		beads: []beads.Bead{root, finished, pending},
+		label: "city",
+		path:  "/city",
+		role:  convoyViewMigrationSource,
+	}})
+	if err != nil {
+		t.Fatalf("closeWorkflowMatches: %v", err)
+	}
+	if closed != 2 {
+		t.Errorf("closed = %d, want the 2 beads that were still open", closed)
+	}
+	assertWorkflowBeadClosedWith(t, store, finished.ID, beadmeta.OutcomePass, "the step's own reason")
+	for _, id := range []string{root.ID, pending.ID} {
+		assertWorkflowBeadClosedWith(t, store, id, beadmeta.OutcomeSkipped, sourceworkflow.WorkflowSkippedCloseReason)
+	}
+}
+
+// TestCloseWorkflowMatchesWritesNothingToAFinishedWorkflow pins the empty
+// sweep: when every matched bead already finished there is nothing to close, so
+// no batch is sent and the verify pass alone confirms the workflow is closed.
+func TestCloseWorkflowMatchesWritesNothingToAFinishedWorkflow(t *testing.T) {
+	store := &stampEveryIDStore{Store: beads.NewMemStore()}
+	root, err := store.Create(beads.Bead{Title: "a finished workflow", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the root: %v", err)
+	}
+	if err := store.Close(root.ID); err != nil {
+		t.Fatalf("closing the root: %v", err)
+	}
+	if root, err = store.Get(root.ID); err != nil {
+		t.Fatalf("reading the root back: %v", err)
+	}
+
+	closed, err := closeWorkflowMatches([]workflowStoreMatch{{
+		store: store,
+		beads: []beads.Bead{root},
+		label: "city",
+		path:  "/city",
+		role:  convoyViewMigrationSource,
+	}})
+	if err != nil {
+		t.Fatalf("closeWorkflowMatches: %v", err)
+	}
+	if closed != 0 {
+		t.Errorf("closed = %d, want 0", closed)
+	}
+	if store.closeAllCalls != 0 {
+		t.Errorf("CloseAll ran %d times over a workflow with nothing open", store.closeAllCalls)
+	}
+}
+
+// TestApplySourceWorkflowMatchCleanupLeavesAFinishedStepsOutcomeAlone is the
+// delete-source half of TestCloseWorkflowMatchesLeavesAFinishedStepsOutcomeAlone.
+func TestApplySourceWorkflowMatchCleanupLeavesAFinishedStepsOutcomeAlone(t *testing.T) {
+	store := &stampEveryIDStore{Store: beads.NewMemStore()}
+	root, finished, pending := seedWorkflowWithAFinishedStep(t, store)
+
+	var stderr bytes.Buffer
+	closed, deleted, incomplete := applySourceWorkflowMatchCleanup(sourceWorkflowStoreMatch{
+		label: "city",
+		store: store,
+		roots: []beads.Bead{root},
+		beads: []beads.Bead{root, finished, pending},
+	}, false, &stderr)
+	if incomplete {
+		t.Fatalf("incomplete = true: %s", stderr.String())
+	}
+	if closed != 2 || deleted != 0 {
+		t.Errorf("closed, deleted = %d, %d, want 2, 0", closed, deleted)
+	}
+	assertWorkflowBeadClosedWith(t, store, finished.ID, beadmeta.OutcomePass, "the step's own reason")
+	for _, id := range []string{root.ID, pending.ID} {
+		assertWorkflowBeadClosedWith(t, store, id, beadmeta.OutcomeSkipped, sourceworkflow.WorkflowSkippedCloseReason)
+	}
+}
+
+// TestApplySourceWorkflowMatchCleanupDeletesTheFinishedStepsToo pins that the
+// close filter does not narrow the delete: --delete erases the whole match,
+// finished steps included.
+func TestApplySourceWorkflowMatchCleanupDeletesTheFinishedStepsToo(t *testing.T) {
+	store := &stampEveryIDStore{Store: beads.NewMemStore()}
+	root, finished, pending := seedWorkflowWithAFinishedStep(t, store)
+
+	var stderr bytes.Buffer
+	closed, deleted, incomplete := applySourceWorkflowMatchCleanup(sourceWorkflowStoreMatch{
+		label: "city",
+		store: store,
+		roots: []beads.Bead{root},
+		beads: []beads.Bead{root, finished, pending},
+	}, true, &stderr)
+	if incomplete {
+		t.Fatalf("incomplete = true: %s", stderr.String())
+	}
+	if closed != 2 || deleted != 3 {
+		t.Errorf("closed, deleted = %d, %d, want 2, 3", closed, deleted)
+	}
+	for _, id := range []string{root.ID, finished.ID, pending.ID} {
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Errorf("Get(%s) err = %v, want ErrNotFound", id, err)
+		}
 	}
 }
 

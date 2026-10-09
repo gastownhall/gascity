@@ -29,10 +29,15 @@ const KillPendingGrace = 5 * time.Minute
 // KillPendingPatch is the durable kill intent: SleepPatch(now, "killed") plus
 // the kill-pending state_reason. slept_at doubles as the fence timestamp, and
 // together with the state_reason it identifies this particular kill, so the
-// CLI clears or rolls back only its own fence.
+// CLI clears or rolls back only its own fence. The kill supersedes any pending
+// wake request (CONTRACT v5.7 D7), so the patch clears it too, and a failed
+// kill's rollback restores it.
 func KillPendingPatch(now time.Time) MetadataPatch {
 	patch := SleepPatch(now, string(SleepReasonKilled))
 	patch["state_reason"] = KillPendingReason
+	for k, v := range ClearWakeRequestPatch() {
+		patch[k] = v
+	}
 	return patch
 }
 

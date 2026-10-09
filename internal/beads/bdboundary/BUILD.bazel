@@ -1,0 +1,52 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+# TestNoBdExecOutsideBeads scans every .go file in the repository, so it
+# lives in its own small target: an edit anywhere re-runs this guard, not
+# all of //internal/beads:beads_test.
+go_test(
+    name = "bdboundary_test",
+    srcs = [
+        "boundary_test.go",
+        "testenv_import_test.go",
+    ],
+    data = [
+        "//:go.mod",
+        "//:repo_go_srcs",
+        "//:repo_go_test_srcs",
+    ],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

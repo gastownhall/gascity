@@ -111,7 +111,6 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 	// Engine-only (see above). CloseStore is also lifecycle: the storage
 	// routes stop the cache and close the engine once (storageRoutes.close).
 	"CloseStore":           nil,
-	"Claim":                nil,
 	"CreateWithForeignID":  nil,
 	"DepAddWithMetadata":   nil,
 	"HasResidentOutside":   nil,
@@ -120,6 +119,18 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 	"AdvanceSequenceFloor": nil,
 	"StoreHealthPath":      nil,
 	"ReadOnly":             nil,
+	// Engine-only (see above): the batch dep-edge read exists for
+	// `gc storage recover-stranded`, which opens the engine itself. A live
+	// cache answers per-anchor down-dep reads from memory, and the scope-skip
+	// dispatch path falls back to them when the assertion misses, so
+	// forwarding DepListBatch on every CachingStore would advertise a batch
+	// capability over backings (e.g. a cached bd store) that do not actually
+	// have it.
+	"DepListBatch": nil,
+	// A declaration about what a cache over the engine holds: the v2
+	// demand reads ask the cache's backing (demandLegCache), and a cache
+	// carrying it would advertise exactness over a bd backing.
+	"CachedReadExact": nil,
 }
 
 // TestControllerBindingCacheForwardsEveryEngineCapability holds the cache to
@@ -198,9 +209,9 @@ func TestControllerBindingWriteEmitsExactlyOnce(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	want := []string{
-		events.BeadCreated + "/" + cacheReconcileActor,
-		events.BeadUpdated + "/" + cacheReconcileActor,
-		events.BeadClosed + "/" + cacheReconcileActor,
+		events.BeadCreated + "/" + cacheLocalActor,
+		events.BeadUpdated + "/" + cacheLocalActor,
+		events.BeadClosed + "/" + cacheLocalActor,
 	}
 	if got := beadEventsFor(ep, created.ID); !reflect.DeepEqual(got, want) {
 		t.Fatalf("events for %s = %v, want %v", created.ID, got, want)
@@ -381,7 +392,7 @@ func TestSplitCityControllerBindingCacheComposition(t *testing.T) {
 	if w, r := cache.WriteRev(written.ID), obs.CacheRev(); w.Epoch != r.Epoch || w.Seq > r.Seq {
 		t.Fatalf("WriteRev %+v is not covered by the census CacheRev %+v", w, r)
 	}
-	if got, want := beadEventsFor(ep, written.ID), []string{events.BeadCreated + "/" + cacheReconcileActor}; !reflect.DeepEqual(got, want) {
+	if got, want := beadEventsFor(ep, written.ID), []string{events.BeadCreated + "/" + cacheLocalActor}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("events for the controller write = %v, want %v", got, want)
 	}
 

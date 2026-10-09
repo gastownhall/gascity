@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 )
 
 // TestProviderKind_PreferenceOrder exercises the metadata preference
@@ -1395,6 +1396,72 @@ func TestSubmitInterruptNowFallsBackToRestartOnInterruptBoundaryTimeoutForCodex(
 	}
 	if !sawBoundary || !sawStop || !sawNudge {
 		t.Fatalf("calls = %#v, want WaitForInterruptBoundary + Stop + NudgeNow via restart fallback", sp.Calls)
+	}
+}
+
+// TestSubmitInterruptNowRestartFallbackAbsorbsDownedServer pins the restart
+// fallback as a cleanup of the outgoing incarnation: replacement only needs
+// that session gone, so tmux's ErrNoServer answer from the fallback stop must
+// clear the way to restart and deliver the message rather than fail the submit.
+// The control below keeps a real stop failure fatal.
+func TestSubmitInterruptNowRestartFallbackAbsorbsDownedServer(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.InterruptBoundaryErrors[info.SessionName] = fmt.Errorf("no turn_aborted marker yet")
+	sp.StopErrors[info.SessionName] = fmt.Errorf("killing session %s: %w", info.SessionName, tmux.ErrNoServer)
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
+	if err != nil {
+		t.Fatalf("Submit(interrupt_now) with a downed server on the fallback stop: %v", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(interrupt_now) unexpectedly queued")
+	}
+
+	var sawStop, sawNudge bool
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == info.SessionName {
+			sawStop = true
+		}
+		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "replace the current turn" {
+			sawNudge = true
+		}
+	}
+	if !sawStop || !sawNudge {
+		t.Fatalf("calls = %#v, want Stop + NudgeNow via restart fallback", sp.Calls)
+	}
+}
+
+// TestSubmitInterruptNowRestartFallbackStopFailurePropagates is the control for
+// the absorption above: a stop failure that is not "the session is gone" may
+// leave the outgoing incarnation alive, so the replacement must not proceed.
+func TestSubmitInterruptNowRestartFallbackStopFailurePropagates(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.InterruptBoundaryErrors[info.SessionName] = fmt.Errorf("no turn_aborted marker yet")
+	stopErr := errors.New("permission denied")
+	sp.StopErrors[info.SessionName] = stopErr
+
+	_, err = mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
+	if !errors.Is(err, stopErr) {
+		t.Fatalf("Submit(interrupt_now) with a real fallback stop failure = %v, want %v", err, stopErr)
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "NudgeNow" && call.Name == info.SessionName {
+			t.Fatalf("calls = %#v, want no NudgeNow after a failed fallback stop", sp.Calls)
+		}
 	}
 }
 

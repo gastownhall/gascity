@@ -45,6 +45,18 @@ func resolvedConditionalWritesMode(cfg *config.City) gate.Mode {
 	return flags.BeadsConditionalWrites()
 }
 
+// resolvedNativeTransportMode is the store-open view of a city's
+// beads.native_transport, for threading into beads.StoreOpenOptions. A nil cfg
+// yields NativeTransportUnset, which every consumer treats as "auto". The
+// deprecated GC_BEADS_FORCE_FALLBACK alias is not resolved here: it is
+// process-wide, and each consumer checks it ahead of this per-city value.
+func resolvedNativeTransportMode(cfg *config.City) beads.NativeTransportMode {
+	if cfg == nil {
+		return beads.NativeTransportUnset
+	}
+	return beads.NativeTransportMode(cfg.Beads.NormalizedNativeTransport())
+}
+
 // lazyConditionalWritesDegradeEmitter builds the factory degrade callback for
 // open paths that have no live event provider in hand (the shared CLI open
 // helper and the control dispatcher). The recorder is constructed INSIDE the

@@ -91,7 +91,7 @@ func TestCollectOpenUnassignedRoutedWorkReadsTheBindingAloneOnASplitCity(t *test
 	seedRoutedOpenBead(t, binding, "gcg-routed-1")
 	seedRoutedOpenBead(t, ledger, "ga-routed-1")
 
-	got, _, refs, partial := collectOpenUnassignedRoutedWork(cityPath, cfg, binding, nil, nil, io.Discard, nil)
+	got, _, refs, partial := collectOpenUnassignedRoutedWork(cityPath, cfg, binding, nil, nil, io.Discard, nil, nil)
 	if partial {
 		t.Fatal("routed demand reported partial over healthy legs")
 	}
@@ -120,7 +120,7 @@ func TestCollectOpenUnassignedRoutedWorkReadsTheOnlyStoreOnASingleStoreCity(t *t
 	store := &routedDemandCountingStore{Store: backing}
 	seedRoutedOpenBead(t, store, "ga-routed-1")
 
-	got, _, _, partial := collectOpenUnassignedRoutedWork("", residencyTestConfig(), store, nil, nil, io.Discard, nil)
+	got, _, _, partial := collectOpenUnassignedRoutedWork("", residencyTestConfig(), store, nil, nil, io.Discard, nil, nil)
 	if partial {
 		t.Fatal("routed demand reported partial over a healthy single store")
 	}

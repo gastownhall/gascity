@@ -93,6 +93,7 @@ func TestBdStoreConformance(t *testing.T) {
 	// uses bd's ID format (prefix-XXXX), not gc-N sequential format.
 	beadstest.RunStoreTests(t, newStore)
 	beadstest.RunMetadataTests(t, newStore)
+	beadstest.RunCloseReasonTests(t, newStore)
 }
 
 // startSharedDoltServer starts one explicit Dolt SQL server for the test and
@@ -207,7 +208,7 @@ func TestBdStoreMailWispInsert(t *testing.T) {
 	runBDInit(t, env, wsDir, "mc", serverPort)
 	configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
 
-	store := beads.NewBdStore(wsDir, pinnedBdStoreCommandRunnerWithEnv(map[string]string{"HOME": parseEnvList(isolateBdHomeEnv(env))["HOME"]}))
+	store := beads.NewBdStore(wsDir, isolatedBdStoreCommandRunner(env))
 
 	// Create an ephemeral message bead — exercises bd create --ephemeral →
 	// Dolt SQL INSERT INTO wisps + INSERT INTO wisp_events.
@@ -253,11 +254,9 @@ func TestBdStoreMailWispInsert(t *testing.T) {
 // shared-server config.yaml before running the exact same
 // runBDInit/configureCustomTypes/pinnedBdStoreCommandRunnerWithEnv chain.
 //
-// newIsolatedToolEnv pins env's own HOME to the REAL passwd-db home (via
-// pinRealHomeEnv/integrationEnvFor), not to any test-scoped directory —
-// gc-start/gc-supervisor-start consumers need that real pin (see
-// pinRealHomeEnv's doc comment), so t.Setenv("HOME", ...) cannot reach it.
-// This test substitutes a controlled, worst-case stand-in for "whatever the
+// newIsolatedToolEnv sets env's own HOME explicitly (via isolateGCHomeEnv/
+// integrationEnvFor), so t.Setenv("HOME", ...) cannot reach it. This test
+// substitutes a controlled, worst-case stand-in for "whatever the
 // real invoking user's real home happens to contain" (on a fleet host that
 // runs a real shared bd/dolt server out of that real home — this one does —
 // that's a real shared-server config, not a hypothetical) so the
