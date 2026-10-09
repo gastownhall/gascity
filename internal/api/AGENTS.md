@@ -61,3 +61,10 @@ a sanctioned bypass of the worker boundary. Do not add others; see
   changes (a manual step, not a CI gate); use
   `npm run preview -- --host 127.0.0.1 --port <port>` from
   `internal/api/dashboardspa/web/frontend` after `make dashboard-build-npm`
+
+## Deferred creation baseline
+
+Persist the resolved provider defaults as the template command baseline before
+scheduling an agent session. Keep explicit per-session options in
+`template_overrides`; otherwise startup can mistake its own baseline for config
+drift or compare one session's overrides against the template.

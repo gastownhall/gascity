@@ -116,7 +116,10 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	workDirQualifiedName := createCtx.Identity
 	workDir = createCtx.WorkDir
 
-	launchCommand, err := config.BuildProviderLaunchCommandWithoutOptions(s.state.CityPath(), resolved, transport)
+	// Match the controller template baseline before deferred creation; a bare
+	// command would look like config drift if startup wins the metadata refresh.
+	// Explicit per-session options remain in template_overrides.
+	launchCommand, err := config.BuildProviderLaunchCommand(s.state.CityPath(), resolved, nil, transport)
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}

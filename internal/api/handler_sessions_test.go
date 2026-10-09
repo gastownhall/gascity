@@ -3899,7 +3899,7 @@ func newSessionFakeStateWithOptions(t *testing.T) *fakeState {
 	return fs
 }
 
-func TestHandleSessionCreateDoesNotApplyProviderDefaultsToAgentCommand(t *testing.T) {
+func TestHandleSessionCreatePersistsProviderDefaultsAsCommandBaseline(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
@@ -3925,11 +3925,11 @@ func TestHandleSessionCreateDoesNotApplyProviderDefaultsToAgentCommand(t *testin
 		t.Fatalf("get bead: %v", err)
 	}
 	cmd := b.Metadata["command"]
-	if strings.Contains(cmd, "--skip-permissions") {
-		t.Errorf("command %q should not contain provider default flags for deferred agent create", cmd)
+	if !strings.Contains(cmd, "--skip-permissions") {
+		t.Errorf("command %q missing provider defaults required by the controller startup drift check", cmd)
 	}
-	if strings.Contains(cmd, "--effort max") {
-		t.Errorf("command %q should not contain provider default effort=max for deferred agent create", cmd)
+	if !strings.Contains(cmd, "--effort max") {
+		t.Errorf("command %q missing default effort=max in the template baseline", cmd)
 	}
 }
 
@@ -3959,8 +3959,8 @@ func TestHandleSessionCreateStoresExplicitOverridesWithoutCommandRewrite(t *test
 		t.Fatalf("get bead: %v", err)
 	}
 	cmd := b.Metadata["command"]
-	if strings.Contains(cmd, "--skip-permissions") || strings.Contains(cmd, "--effort high") || strings.Contains(cmd, "--effort max") {
-		t.Errorf("command %q should not be rewritten from provider defaults or explicit overrides", cmd)
+	if !strings.Contains(cmd, "--skip-permissions") || !strings.Contains(cmd, "--effort max") || strings.Contains(cmd, "--effort high") {
+		t.Errorf("command %q must retain template defaults; explicit overrides belong in template_overrides", cmd)
 	}
 	ovr := b.Metadata["template_overrides"]
 	if ovr == "" {
@@ -4004,7 +4004,7 @@ func TestHandleSessionCreatePersistsExplicitOptionsInTemplateOverrides(t *testin
 		t.Fatalf("get bead: %v", err)
 	}
 	cmd := b.Metadata["command"]
-	if strings.Contains(cmd, "--permission-mode plan") || strings.Contains(cmd, "--skip-permissions") || strings.Contains(cmd, "--effort low") {
+	if strings.Contains(cmd, "--permission-mode plan") || !strings.Contains(cmd, "--skip-permissions") || !strings.Contains(cmd, "--effort max") || strings.Contains(cmd, "--effort low") {
 		t.Errorf("command %q should not be rewritten from explicit overrides", cmd)
 	}
 	ovr := b.Metadata["template_overrides"]
