@@ -135,6 +135,39 @@ The fix changes nothing and explains why when:
   The message names the file and key. Update the value to `gc.` and rerun, or
   rename the import by hand if the value is unrelated. Comments are ignored.
 
+## Pack and Prompt Drift Warnings
+
+Three advisory checks catch a city whose packs and prompts no longer match
+each other or the installed `gc`. Each reports a warning and never fails the
+run.
+
+| Check | Warns when | `--fix` |
+|---|---|---|
+| `prompt-gc-commands` | An agent prompt writes a `gc` command, subcommand, or flag that neither this `gc` nor the city's pack commands provide | No |
+| `import-version-pins` | A remote import declares no `version`, so the next install may lock it to a different commit | Yes |
+| `nested-pack-commits` | A pack nested inside another pack's directory in the same repository is locked at a different commit than its parent | No |
+
+`prompt-gc-commands` renders every agent's prompt and reads only commands
+written as code: fenced blocks and inline code spans. A warning names the
+command and the agents whose prompts use it:
+
+```
+unknown-subcommand | gc agent claim | "gc agent" has no subcommand "claim" | agents: work.run-operator
+```
+
+Usually the prompt comes from a pack version written for a different `gc`.
+Pin the pack to a version whose prompts match your `gc`, or update the prompt.
+Run `gc <command> --help` to confirm what exists. A prompt that quotes a
+command in order to forbid it also produces this warning; ignore it.
+
+`import-version-pins --fix` writes the same constraint `gc import add` writes
+for that source. For an import already in `packs.lock`, that constraint
+matches the locked entry, so the locked commit does not move. A source with an
+embedded `#ref` needs a manual edit: move the ref into `version`.
+
+For `nested-pack-commits`, declare the same version on both imports and run
+`gc import install`.
+
 ## "command not found" After Install
 
 If `gc` is installed but your shell cannot find it, the binary is not on your

@@ -47,7 +47,9 @@ prompt-delivery-budget
 mcp-config
 mcp-shared-target
 builtin-pack-imports
+import-version-pins
 packv2-import-state
+nested-pack-commits
 gascity-pack-binding
 jsonl-archive
 pack-credentials
