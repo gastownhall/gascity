@@ -151,9 +151,10 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	return passResult{Next: next, Counts: counts}
 }
 
-// newAllocSummary is the summary a pass at now publishes for C8's steps. Any
-// census leg error makes it partial, a hard one on a rig leg included
-// (Census.Partial counts only partial reads), so the release fails closed.
+// newAllocSummary is the summary a pass at now publishes for C8's steps. A
+// census that is not complete (a leg error, a hard one on a rig leg
+// included; Census.Partial counts only partial reads) makes it partial, so
+// the release fails closed.
 func newAllocSummary(now time.Time, w *World, a *allocDecision) *allocSummary {
 	v := w.Demand
 	s := &allocSummary{
@@ -161,8 +162,8 @@ func newAllocSummary(now time.Time, w *World, a *allocDecision) *allocSummary {
 		AssignedWork: v.AssignedWork, AssignedStores: v.AssignedStores, AssignedStoreRefs: v.AssignedStoreRefs,
 		ReadyAssigned: v.ReadyAssigned, ReadyRouted: a.ReadyRouted, ReadyRoutedRefs: a.ReadyRoutedRefs,
 	}
-	for _, l := range w.Census.Legs {
-		s.Partial = s.Partial || l.Err != nil
+	if _, ok := w.Census.complete(); !ok {
+		s.Partial = true
 	}
 	for _, row := range w.Census.Canonical() {
 		s.OpenSessions = append(s.OpenSessions, row.Info)

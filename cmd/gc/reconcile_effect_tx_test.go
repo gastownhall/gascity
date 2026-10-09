@@ -428,7 +428,7 @@ func TestTxReadsTheFenceLegs(t *testing.T) {
 	k.sp.SetPendingInteraction("s-gc-1", &runtime.PendingInteraction{RequestID: "r-1"})
 	k.it.Reason = "orphaned"
 	k.run(context.Background(), spec)
-	if f.Attach != fenceAttached || f.Pending != fencePending || !f.Idle || f.Work == nil || f.Work.Has || f.Work.Err != nil {
+	if f.Attach != fenceAttached || f.Pending != fencePending || !f.Idle || f.Work == nil || !f.Work.Free || f.Work.Err != nil {
 		t.Fatalf("fence %+v (work %+v), want attached, pending, idle, no work", f, f.Work)
 	}
 	if _, err := k.backing.Create(beads.Bead{Title: "task", Type: "task", Status: "open", Assignee: "gc-1"}); err != nil {
@@ -437,15 +437,15 @@ func TestTxReadsTheFenceLegs(t *testing.T) {
 	k.p.Runtime = legLeaf{recordingLeaf: k.leaf, last: gatherNow.Add(time.Minute)}
 	k.sp.SetPendingInteraction("s-gc-1", nil)
 	k.run(context.Background(), spec)
-	if f.Attach != "" || f.Pending != "" || f.Idle || !f.Work.Has {
+	if f.Attach != "" || f.Pending != "" || f.Idle || f.Work.Free {
 		t.Fatalf("fence %+v (work %+v), want detached, nothing pending, active since the pass, work found", f, f.Work)
 	}
 	k.p.reads.city = blindWriteRefusingStore{inner: failingList{k.cache}}
-	if k.run(context.Background(), spec); !f.Work.Has || f.Work.Err == nil {
+	if k.run(context.Background(), spec); f.Work.Free || f.Work.Err == nil {
 		t.Fatalf("failed work read: %+v, want work assumed, with its error", f.Work)
 	}
 	k.p.reads.city = nil
-	if k.run(context.Background(), spec); !f.Work.Has || !errors.Is(f.Work.Err, errNoReadStore) {
+	if k.run(context.Background(), spec); f.Work.Free || !errors.Is(f.Work.Err, errNoReadStore) {
 		t.Fatalf("no store: %+v, want work assumed", f.Work)
 	}
 	k.it.Reason = "idle"
@@ -1067,7 +1067,7 @@ func TestTxBoundedReadsFailClosed(t *testing.T) {
 	k.p.reads.city = blindWriteRefusingStore{inner: panickingList{k.cache}}
 	var w *txWork
 	k.run(context.Background(), effectSpec{needs: needs{Legs: legWork}, sections: []section{{Decide: func(v txView) txStep { w = v.Fence.Work; return txStep{} }}}})
-	if w == nil || !w.Has || w.Err == nil {
+	if w == nil || w.Free || w.Err == nil {
 		t.Fatalf("work %+v, want a panicking read counted as work", w)
 	}
 }

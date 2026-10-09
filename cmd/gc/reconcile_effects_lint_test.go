@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -11,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -332,5 +334,162 @@ func TestEffectLintBansMechanicsOutsideTheTransaction(t *testing.T) {
 	const writer = "package main\n\nfunc probe(s store) {\n\tw, _, _ := beads.ResolveConditionalWriter(s)\n\t_ = w.UpdateIfMatch(\"id\", 1, opts)\n}\n"
 	if got := lintEffectSource(t, "reconcile_effect_seeded.go", writer); len(got) != 2 {
 		t.Errorf("a conditional writer resolved in an effect file: %v, want both uses reported", got)
+	}
+}
+
+// sealedMints are the proof types (EFFECT-STRUCTURE §2.2, the seal): only
+// a fresh read mints a txRuntime, txFence or txWork, only the fence a
+// fenceVerdict, only a clean census read a completeCensus. A value of one is
+// built only in its minting file: no literal (an elided one in a slice or
+// map included), new, var, conversion or alias of one elsewhere. Each one's
+// zero value proves nothing (TestSealedZeroValuesProveNothing), and a typed
+// rule over field writes is B-b's analyzer's. Tests build them freely.
+var sealedMints = map[string]string{
+	"txRuntime":      "reconcile_effect_runtime.go",
+	"txFence":        "reconcile_effect_fence.go",
+	"txWork":         "reconcile_effect_fence.go",
+	"fenceVerdict":   "reconcile_session_fence.go",
+	"completeCensus": "allocator_census.go",
+}
+
+// sealedType is the sealed type e names, T or *T, or "".
+func sealedType(e ast.Expr) string {
+	if star, ok := e.(*ast.StarExpr); ok {
+		e = star.X
+	}
+	if paren, ok := e.(*ast.ParenExpr); ok {
+		return sealedType(paren.X)
+	}
+	if id, ok := e.(*ast.Ident); ok && sealedMints[id.Name] != "" {
+		return id.Name
+	}
+	return ""
+}
+
+// sealedLiterals returns one "file:line: type" per value of a sealed type
+// src, parsed as path, builds outside the type's minting file.
+func sealedLiterals(t *testing.T, path string, src any) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, src, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	var out []string
+	hit := func(n ast.Node, name string) {
+		if name != "" && sealedMints[name] != filepath.Base(path) {
+			out = append(out, fmt.Sprintf("%s: %s", fset.Position(n.Pos()), name))
+		}
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.CompositeLit:
+			if id, ok := n.Type.(*ast.Ident); ok {
+				hit(n, sealedType(id))
+			}
+			var key, elem ast.Expr // the elided key and element types
+			switch ty := n.Type.(type) {
+			case *ast.ArrayType:
+				elem = ty.Elt
+			case *ast.MapType:
+				key, elem = ty.Key, ty.Value
+			}
+			elided := func(e ast.Expr, name string) {
+				if u, ok := e.(*ast.UnaryExpr); ok {
+					e = u.X
+				}
+				if lit, ok := e.(*ast.CompositeLit); ok && lit.Type == nil && name != "" {
+					hit(lit, name)
+				}
+			}
+			for _, e := range n.Elts {
+				if kv, ok := e.(*ast.KeyValueExpr); ok {
+					elided(kv.Key, sealedType(key))
+					e = kv.Value
+				}
+				elided(e, sealedType(elem))
+			}
+		case *ast.CallExpr:
+			if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "new" && len(n.Args) == 1 {
+				hit(n, sealedType(n.Args[0]))
+			} else if len(n.Args) == 1 {
+				if _, ptr := n.Fun.(*ast.ParenExpr); ptr || sealedType(n.Fun) != "" {
+					hit(n, sealedType(n.Fun)) // a conversion to T or (*T)
+				}
+			}
+		case *ast.ValueSpec:
+			if _, ptr := n.Type.(*ast.StarExpr); !ptr && n.Type != nil {
+				hit(n, sealedType(n.Type))
+			}
+		case *ast.TypeSpec:
+			hit(n, sealedType(n.Type)) // an alias or a defined type over T
+		}
+		return true
+	})
+	return out
+}
+
+// Kills a proof minted outside its read: no non-test file of the package
+// builds a value of a sealed type except its minting file, and a seeded
+// fixture trips the seal on each bypass.
+func TestSealedProofsAreMintedOnlyByTheirReads(t *testing.T) {
+	const seeded = `package main
+
+type proof = txRuntime
+type proof2 txFence
+
+var zero txWork
+
+func mint(x other) {
+	_ = &txRuntime{Class: rtAlive}
+	_ = txFence{}
+	_ = new(txWork)
+	_ = []fenceVerdict{{Proceed: true}}
+	_ = map[string]*completeCensus{"a": {}}
+	_ = map[txWork]bool{{}: true}
+	_ = txRuntime(x)
+	_ = (*fenceVerdict)(nil)
+	var v fenceVerdict
+	_ = v
+}
+`
+	if got := sealedLiterals(t, "reconcile_effect_seeded.go", seeded); len(got) != 12 {
+		t.Fatalf("seeded mints: %d reported (%v), want all 12", len(got), got)
+	}
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		for _, hit := range sealedLiterals(t, f, nil) {
+			t.Errorf("%s: a proof minted outside its read", hit)
+		}
+	}
+}
+
+// Kills a sealed type whose zero value proves something, which a value
+// minted by declaration alone would then forge: the zero runtime read
+// proves nothing (Unsupported), the zero legs read none and hold, the zero
+// work read counts as work, the zero verdict holds, and the zero census
+// closes nothing.
+func TestSealedZeroValuesProveNothing(t *testing.T) {
+	var rt txRuntime
+	if rt.Class != rtUnsupported || rt.Alive() {
+		t.Errorf("zero txRuntime: class %d alive %t, want unsupported", rt.Class, rt.Alive())
+	}
+	if v := fenceDestructive(&rt, txFence{}, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legAttach}); v.Proceed {
+		t.Errorf("zero reads: %+v, want held", v)
+	}
+	if v := fenceDestructive(&txRuntime{Class: rtAlive, Same: true}, txFence{Work: &txWork{}}, fenceRequest{Row: fenceRow("a", "tok-a"), Legs: legAttach | legWork}); v.Proceed {
+		t.Errorf("zero legs and work: %+v, want held", v)
+	}
+	if v, confirmed := stopFenced(context.Background(), nil, fenceVerdict{}, nil, time.Now); v.Proceed || confirmed {
+		t.Errorf("zero verdict: %+v confirmed %t, want held", v, confirmed)
+	}
+	if (completeCensus{}).Closed(rowKey{Leg: "sessions", ID: "gc-1"}) {
+		t.Error("zero census closed a row")
 	}
 }

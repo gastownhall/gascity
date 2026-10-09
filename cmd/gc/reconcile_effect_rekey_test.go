@@ -91,7 +91,7 @@ func (f *rekeyFixture) stop() fenceVerdict {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	v, _ := stopFenced(context.Background(), f.leaf, fenceRequest{Row: row, Legs: legsFull}, time.Now())
+	v, _ := fenceRun(f.t, f.leaf, fenceRequest{Row: row, Legs: legsFull}, fenceOpts{stop: true})
 	return v
 }
 

@@ -211,11 +211,12 @@ func (s effectSpec) runs() bool { return s.body != nil || len(s.sections) > 0 }
 // needs are a kind's locks, fresh reads and CAS budget. Every read implies
 // the name lock, as does a Call.
 type needs struct {
-	NameLock bool      // held across every section
-	Runtime  bool      // the runtime read fresh each attempt
-	Legs     fenceLegs // legAttach (L3), legPending (L4) on the routed leaf; legWork (L5) live
-	Idle     bool      // the agent proved idle on the routed leaf
-	Attempts int       // CAS rounds per section, each deciding again; 0 is 3
+	NameLock  bool      // held across every section
+	Runtime   bool      // the runtime read fresh each attempt
+	Legs      fenceLegs // legAttach (L3), legPending (L4) on the routed leaf; legWork (L5) live
+	Idle      bool      // the agent proved idle on the routed leaf
+	Escalates bool      // a C8.5 escalation class: L3 escalates on a terminal-no-report leaf
+	Attempts  int       // CAS rounds per section, each deciding again; 0 is 3
 }
 
 func (s effectSpec) needsOf(w *World, it intent) needs {
@@ -313,6 +314,8 @@ type txView struct {
 // action, "" passes (attachLeg, boundedPending); Work is L5, read live.
 type txFence struct {
 	Attach, Pending string
+	AttachEscalate  bool      // L3 escalates (C8.5, on a terminal-no-report leaf)
+	Read            fenceLegs // the legs read: one not read holds (fenceDestructive)
 	Work            *txWork
 	Idle            bool // proved idle: WaitForIdle, then no activity since the pass
 }

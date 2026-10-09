@@ -369,3 +369,32 @@ func TestReadRuntimeCorpseThroughAuto(t *testing.T) {
 		t.Fatalf("corpse on the leaf, the other backend's read failing: class %d, want unknown", rt.Class)
 	}
 }
+
+// Kills a blank name read (review item 5), and a corpse on a second read
+// after a running first one standing without the hop check (review item
+// 6): a blank name refuses route-unknown; a runtime running at the first
+// read and a corpse at the second reads a corpse only while the other
+// backend runs nothing.
+func TestReadRuntimeBlankNameAndALateCorpse(t *testing.T) {
+	if _, cause := readRuntime(context.Background(), newSimProvider(), nil, "  ", gatherNow, time.Now); cause != causeRouteUnknown {
+		t.Fatalf("blank name: cause %q, want %q", cause, causeRouteUnknown)
+	}
+	for _, elsewhere := range []bool{false, true} {
+		sp := newSimProvider()
+		sp.put("s-1", "gc-1", "1", "tok")
+		leaf := &recordingLeaf{simProvider: sp}
+		leaf.during = func() {
+			if len(leaf.sinces) == 2 { // dies between the brackets
+				sp.rts["s-1"].corpse = true
+			}
+		}
+		other := newSimProvider()
+		if elsewhere {
+			other.put("s-1", "gc-1", "1", "tok")
+		}
+		rt, _ := readRuntime(context.Background(), fallThrough{recordingLeaf: leaf, other: other}, nil, "s-1", gatherNow, time.Now)
+		if want := map[bool]runtimeClass{false: rtCorpse, true: rtUnknown}[elsewhere]; rt.Class != want {
+			t.Errorf("running elsewhere %t: class %d, want %d", elsewhere, rt.Class, want)
+		}
+	}
+}
