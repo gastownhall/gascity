@@ -158,6 +158,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"anyio>=4.14.2",
 		"pillow>=12.3.0",
 		"urllib3>=2.8.0",
+		"fsspec>=2026.6.0",
 	} {
 		if !strings.Contains(input, want) {
 			t.Errorf("mcp-agent-mail input requirements missing security floor %q", want)
@@ -182,6 +183,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"pillow==12.3.0 \\",
 		"pyjwt==2.14.0 \\",
 		"urllib3==2.8.0 \\",
+		"fsspec==2026.6.0 \\",
 	} {
 		if !strings.Contains(lock, want) {
 			t.Errorf("mcp-agent-mail hashed lock missing patched dependency %q", want)
