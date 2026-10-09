@@ -1726,11 +1726,6 @@ func isFailedPartialMolecule(bead beads.Bead) bool {
 	return strings.TrimSpace(bead.Metadata[beadmeta.MoleculeFailedMetadataKey]) == "true"
 }
 
-// findLatestAttempt finds the most recent attempt/iteration child of a control
-// bead. It lists beads under the workflow root and, on empty result, walks the
-// control's blocks-dependencies; both feed latestAttemptFromCandidates, which
-// matches the durable gc.control_for lineage stamp (with a legacy ref-string
-// fallback for pre-S38 molecules) and returns the max gc.attempt.
 func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error) {
 	rootID := control.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID == "" {
@@ -1738,11 +1733,9 @@ func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error
 	}
 
 	all, err := beads.DirectMembers(store, rootID)
+	rootLatest := beads.Bead{}
 	if err == nil {
-		latest := latestAttemptFromCandidates(control, all)
-		if latest.ID != "" {
-			return latest, nil
-		}
+		rootLatest = latestAttemptFromCandidates(control, all)
 	}
 
 	latest, depErr := latestAttemptFromDependencies(store, control)
@@ -1750,10 +1743,13 @@ func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error
 		if err != nil {
 			return beads.Bead{}, fmt.Errorf("%w; dependency fallback: %w", err, depErr)
 		}
+		if rootLatest.ID != "" {
+			return rootLatest, nil
+		}
 		return beads.Bead{}, depErr
 	}
-	if latest.ID != "" {
-		return latest, nil
+	if combined := latestAttemptFromCandidates(control, []beads.Bead{rootLatest, latest}); combined.ID != "" {
+		return combined, nil
 	}
 	if err != nil {
 		return beads.Bead{}, err
