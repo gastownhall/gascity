@@ -30,39 +30,6 @@ var (
 	ErrWakeRequestContended = errors.New("wake request lost to concurrent writes; retry")
 )
 
-// HoldVerdict is CONTRACT v5.9 D8 7(a)'s one hold predicate, for resume,
-// wake requests, controller-routed sends and queued delivery. A row is held
-// by an operator's intent: state=suspended, a future held_until or
-// quarantined_until (an unparseable one is not, as legacy reads it), a set
-// wait_hold, or sleep_intent=user-hold. Legacy's own intents
-// (idle-stop-pending) hold nothing. A row whose runtime is running and that
-// is not suspended is working, not held: a heartbeat held_until keeps a live
-// session up rather than queueing its sends.
-func HoldVerdict(meta map[string]string, runtimeRunning bool, now time.Time) bool {
-	suspended := State(strings.TrimSpace(meta["state"])) == StateSuspended
-	if !suspended && runtimeRunning {
-		return false
-	}
-	if suspended || strings.TrimSpace(meta["wait_hold"]) != "" ||
-		strings.TrimSpace(meta["sleep_intent"]) == string(SleepReasonUserHold) {
-		return true
-	}
-	for _, key := range []string{"held_until", "quarantined_until"} {
-		if until, err := time.Parse(time.RFC3339, strings.TrimSpace(meta[key])); err == nil && until.After(now) {
-			return true
-		}
-	}
-	return false
-}
-
-// HoldVerdictInfo is HoldVerdict over a typed row.
-func HoldVerdictInfo(info Info, runtimeRunning bool, now time.Time) bool {
-	return HoldVerdict(map[string]string{
-		"state": info.MetadataState, "held_until": info.HeldUntil, "quarantined_until": info.QuarantinedUntil,
-		"sleep_intent": info.SleepIntent, "wait_hold": info.WaitHold,
-	}, runtimeRunning, now)
-}
-
 // WakeRequestOutcome is what RequestWakeUnlessHeld did.
 type WakeRequestOutcome int
 
