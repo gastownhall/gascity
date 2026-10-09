@@ -182,19 +182,6 @@ func TestControlDispatchSingleStoreUsesTheOneStore(t *testing.T) {
 	}
 }
 
-// resetControlReadyCache clears the per-dir readiness snapshot registry so a
-// test observes a fresh scan rather than one memoized inside controlReadyCacheTTL.
-func resetControlReadyCache(t *testing.T) {
-	t.Helper()
-	flush := func() {
-		controlReadyCacheRegistry.mu.Lock()
-		defer controlReadyCacheRegistry.mu.Unlock()
-		controlReadyCacheRegistry.byDir = make(map[string]*controlReadyCacheEntry)
-	}
-	flush()
-	t.Cleanup(flush)
-}
-
 // newRoutedControlBead writes a control bead routed to the control dispatcher,
 // so the readiness scan's route filter admits it.
 func newRoutedControlBead(t *testing.T, store beads.Store, rootID, route string) beads.Bead {
@@ -212,7 +199,6 @@ func newRoutedControlBead(t *testing.T, store beads.Store, rootID, route string)
 // comes from, for a control dispatcher whose scope directory is dir.
 func controlReadyScan(t *testing.T, dir string, agentCfg config.Agent, beadsCfg config.BeadsConfig) []string {
 	t.Helper()
-	resetControlReadyCache(t)
 	queue, handled, err := tryControlReadyFromCacheOrFallback(
 		workflowServeControlReadyQueryForBeads(agentCfg, beadsCfg), dir, nil)
 	if err != nil {

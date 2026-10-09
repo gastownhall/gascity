@@ -503,7 +503,7 @@ func TestControlReadySnapshotCachesTheBindingEngine(t *testing.T) {
 	dir := t.TempDir()
 	engine := openBindingEngineForTest(t)
 	leg := splitClassRoutes(engine).withCLIEmission(t.TempDir()).stores[coordclass.ClassGraph]
-	installControlReadyCacheSourcesFn(t, dir, func(string, string, *config.City) ([]beads.Store, []beads.Store, error) {
+	installControlReadyCacheSourcesFn(t, func(string, string, *config.City) ([]beads.Store, []beads.Store, error) {
 		return []beads.Store{leg}, nil, nil
 	})
 	caches := controlReadyCachesFor(dir, t.TempDir(), &config.City{})

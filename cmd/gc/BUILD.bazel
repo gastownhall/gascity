@@ -1171,6 +1171,7 @@ go_test(
         "demand_trace_test.go",
         "detached_orphan_lane_test.go",
         "detached_probe_test.go",
+        "dispatch_control_ready_freshness_test.go",
         "dispatch_control_ready_hold_label_test.go",
         "dispatch_control_ready_leak_test.go",
         "dispatch_control_ready_test.go",
