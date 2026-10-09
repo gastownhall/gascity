@@ -8,6 +8,13 @@ Gate base (`origin/main` resolved when evaluated): `b273ac7e6ac335e46bf3f3a7353b
 Materialized merge: `2b090bb9ff9c447c7e2ed97e5a1bb6504ffcac50`; tested tree: `4d70a7d03e2edc8c7c6abf482cde96d0c0b7d961`.
 Public issue: gastownhall/gascity#7208. The PR must say `Closes #7208`.
 
+> **Note:** This gate predates the later PR commits. `c638d600` removed the
+> unread-remainder count that criterion 2 describes (the block now states how
+> many shown messages are archived on delivery), and a follow-up commit stopped
+> the read-only SessionStart ordinary-mail block from labeling messages
+> archived on delivery. Neither was re-gated here; their evidence is the PR CI
+> on the final head.
+
 | # | Criterion | Result | Evidence |
 |---|---|---|---|
 | 1 | Review PASS present | PASS | ga-70qwum records PASS at the resolved reviewed source. Single-pass review; the second pass is disabled. No branch tip substituted. |

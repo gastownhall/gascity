@@ -249,6 +249,36 @@ func TestPrimeUnreadMailInjectionUsesProvidedProviderWithoutOpeningCity(t *testi
 	}
 }
 
+// The SessionStart ordinary-mail block is read-only, so an auto-handoff that
+// reaches it (the auto-handoff read failed or skipped it) must not be labeled
+// archived on delivery, and the block must keep its 'gc mail inbox' promise.
+func TestPrimeUnreadMailInjectionNeverClaimsArchiveOnDelivery(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_ALIAS", "mayor")
+	store := beads.NewMemStore()
+	provider := beadmail.New(store)
+	auto := createUnreadAutoHandoff(t, store)
+
+	got := primeUnreadMailInjectionWithProvider(nil, provider)
+
+	if len(injectedLinesNaming(got, auto.ID)) == 0 {
+		t.Fatalf("read-only block does not show auto-handoff %s:\n%s", auto.ID, got)
+	}
+	if strings.Contains(got, "archived on delivery") {
+		t.Errorf("read-only block says archived on delivery, but it never archives:\n%s", got)
+	}
+	if !strings.Contains(got, "to see all") {
+		t.Errorf("read-only block dropped the 'gc mail inbox' to see all wording:\n%s", got)
+	}
+	b, err := store.Get(auto.ID)
+	if err != nil {
+		t.Fatalf("Get auto-handoff: %v", err)
+	}
+	if b.Status != "open" {
+		t.Errorf("auto-handoff status = %q after read-only block, want open", b.Status)
+	}
+}
+
 // The ordinary-mail provider built beside the auto-handoff read must be the one
 // openCityMailProvider would build: [mail] provider from city.toml, overridden
 // by GC_MAIL.

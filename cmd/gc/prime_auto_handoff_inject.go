@@ -86,21 +86,26 @@ func primeUnreadMailInjection(skip map[string]bool) string {
 // primeUnreadMailInjectionWithProvider is primeUnreadMailInjection over a
 // caller-supplied ordinary-mail provider. SessionStart passes the provider it
 // already built over its open stores; nil opens the configured city provider.
+//
+// Because this block never archives, every message it renders is a copy with
+// ArchivedOnDelivery cleared: an auto-handoff that reaches it (the auto-handoff
+// read failed, so skip is nil, or the message is addressed to an identity
+// candidate outside the auto-handoff read's recipients) must not be labeled
+// "archived on delivery", and the block keeps its 'gc mail inbox' promise.
 func primeUnreadMailInjectionWithProvider(skip map[string]bool, mp mail.Provider) string {
 	messages := primeUnreadMailMessages(mp)
-	if len(skip) > 0 {
-		kept := make([]mail.Message, 0, len(messages))
-		for _, m := range messages {
-			if !skip[m.ID] {
-				kept = append(kept, m)
-			}
+	kept := make([]mail.Message, 0, len(messages))
+	for _, m := range messages {
+		if skip[m.ID] {
+			continue
 		}
-		messages = kept
+		m.ArchivedOnDelivery = false
+		kept = append(kept, m)
 	}
-	if len(messages) == 0 {
+	if len(kept) == 0 {
 		return ""
 	}
-	return formatInjectOutput(messages)
+	return formatInjectOutput(kept)
 }
 
 // primeUnreadMailMessages returns the current agent's unread ordinary mail via
