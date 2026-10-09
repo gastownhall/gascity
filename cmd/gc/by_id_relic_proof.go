@@ -36,32 +36,43 @@ package main
 // answered by the time the gate below is consulted, and a served city's
 // Topology.Refused is nil, so it resolves no plan, opens no engine and takes no
 // read — TestServedCityPaysNothingForTheRelicProof counts the plan resolutions
-// and requires zero. A refused city pays one engine open and one full list of
-// the binding, on the by-id path only. That city is already in the incident
-// state its own boot gate reported.
+// and requires zero. A refused city pays one engine open and one by-id Get of
+// the binding (plus, on a miss, one read of the copy manifest), on the by-id
+// path only. It used to pay a full closed-inclusive list of the binding: on the
+// measured city that was ~134k rows hydrated from a 2 GB database, ~20 s per
+// `gc bd show`, to answer a question about one id.
 //
-// The memo below makes that ONE read per city for the callers this door
+// The memo below makes that ONE read per (city, id) for the callers this door
 // actually has: one-shot cobra commands that resolve by-id sequentially. It is
-// not a single-flight — provenRelicRefsForCity releases the memo lock across
-// the census — so two concurrent by-id callers on the same refused city would
-// each take the read, and each would open its own handle on the binding root.
-// That is the second-handle hazard named below, and what rules it out today is
-// the absence of such a caller, not the memo. A parallel by-id caller has to
-// bring a single-flight (or a sync.Once entry) with it: ga-nzxob.
+// not a single-flight — provenTwinRefsForID releases the memo lock across the
+// read — so two concurrent by-id callers on the same refused city would each
+// take the read, and each would open its own handle on the binding root. That
+// is the second-handle hazard named below, and what rules it out today is the
+// absence of such a caller, not the memo. A parallel by-id caller has to bring
+// a single-flight (or a sync.Once entry) with it: ga-nzxob.
 //
 // # Who the denial reaches
 //
-// The proof is keyed by BINDING ref, not by id, so what turns Fatal is the
-// whole binding's residence probe: every non-reserved by-id read on this city's
-// CLI fallback path denies, including a fresh post-migration work bead and a
-// rig-shadowed id that can have no frozen twin at all. That breadth is a
-// deliberate choice rather than a forced one: the census enumerates closed
-// relics as well as open ones, so a per-id rule would have the population it
-// has to consult, and the corpus pins the binding-keyed breadth —
-// residency_conformance_test.go's T3k rows make ByID(ga-xyz) and ByID(ra-7)
-// Fatal too, not just the reserved-prefix ones. The operator cost is that one
-// proven relic takes the by-id door away for the city, not only for the ids
-// the migration preserved.
+// The proof is PER ID: a refused city's residence probe turns Fatal for an id
+// only when that id has a frozen twin, i.e. when the binding holds the id now,
+// or when the migration's copy manifest records delivering it (the binding's
+// own GC has since removed it, and the retained work-store copy is still the
+// pre-migration one). Every other non-reserved id falls through to the work
+// ledger exactly as on a refused city with no relics at all, because for that
+// id the work ledger IS the only copy: a bead minted in the work store after the
+// cutover, a rig-shadowed id, or one of the "stranded" infra beads the boot gate
+// itself reports as "intact in the work store".
+//
+// It used to be keyed by BINDING ref, so one proven relic took the by-id door
+// away for the whole city. That was a deliberate trade at the time ("a per-id
+// rule would have the population it has to consult"), and it is the trade the
+// measured city lost: its binding held ~790 relics while its boot gate refused
+// for 790 unrelated stranded wisps, so every plain `gc bd show <work-id>` exited
+// 1 before reaching bd, for a bead nothing had ever migrated. The ga-q8ick
+// guarantee is unchanged — the id that HAS a twin is still denied, with the same
+// sentinel and remedy — and the storeref corpus is unchanged too: its T3k rows
+// pin what a proven binding plans, and this file now only decides, per id,
+// whether to hand the planner that proof.
 //
 // # The absent case is the tolerant one
 //
@@ -86,7 +97,9 @@ package main
 // already there is proof-absent.
 
 import (
+	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -96,9 +109,9 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
-// byIDResidencyTopology is the topology the by-id door plans over: the city's
-// own residency topology, plus — on a REFUSED city only — the proof that the
-// binding it cannot serve still holds ids the migration preserved.
+// byIDResidencyTopology is the topology the by-id door plans over for id: the
+// city's own residency topology, plus — on a REFUSED city only — the proof that
+// the binding it cannot serve holds a frozen-twin hazard for THIS id.
 //
 // The refused city is re-derived rather than patched. A ClassBinding's two
 // relic bits have an implication between them that storeref.BuildBindings
@@ -106,12 +119,17 @@ import (
 // hand is how a plane ends up spelling a state no city can be in. Handing the
 // proof back through residencyBindingsFromRoutesWithProof means both bits and
 // the ref they are keyed by come from the one derivation.
-func byIDResidencyTopology(cityPath string, cfg *config.City, work beads.Store, rigs map[string]beads.Store) storeref.Topology {
+//
+// The topology is therefore id-specific on a refused city, which is no new
+// constraint: every caller plans it straight into Plan(ByID{ID: id}), and a
+// by-id plan is already id-specific (resolveByID refuses one executed for a
+// different id).
+func byIDResidencyTopology(cityPath string, cfg *config.City, work beads.Store, rigs map[string]beads.Store, id string) storeref.Topology {
 	topo := residencyTopologyForCity(cityPath, cfg, work, rigs)
 	if topo.Refused == nil || len(topo.Bindings) == 0 || cityPath == "" {
 		return topo
 	}
-	proven := provenRelicRefsForCity(cityPath)
+	proven := provenTwinRefsForID(cityPath, id)
 	if len(proven) == 0 {
 		return topo
 	}
@@ -122,9 +140,10 @@ func byIDResidencyTopology(cityPath string, cfg *config.City, work beads.Store, 
 	return assembleResidencyTopology(cfg, work, rigs, bindings, refused)
 }
 
-// provenRelicRefsForCity opens the binding this city is configured for, censuses
-// it, and returns the binding refs the census PROVED hold ids outside the
-// namespaces they declare.
+// provenTwinRefsForID opens the binding this city is configured for and
+// returns the binding refs PROVEN to give id a frozen twin in the work store:
+// the binding holds id now, or the migration's copy manifest records
+// delivering it there.
 //
 // It is called only for a city whose boot refused, which is also what makes
 // opening the binding here safe: the refusal is why nothing else in this
@@ -137,42 +156,49 @@ func byIDResidencyTopology(cityPath string, cfg *config.City, work beads.Store, 
 //
 // An empty result is "nothing proved", which every failure path also produces
 // and which the caller reads as no evidence.
-func provenRelicRefsForCity(cityPath string) map[storeref.StoreRef]bool {
+func provenTwinRefsForID(cityPath, id string) map[storeref.StoreRef]bool {
 	key := filepath.Clean(cityPath)
+	id = strings.TrimSpace(id)
 	provenRelicRefsMu.Lock()
 	if provenRelicRefsByCity == nil {
-		provenRelicRefsByCity = make(map[string]map[storeref.StoreRef]bool, 1)
+		provenRelicRefsByCity = make(map[string]map[string]map[storeref.StoreRef]bool, 1)
 	}
-	cached, ok := provenRelicRefsByCity[key]
+	cached, ok := provenRelicRefsByCity[key][id]
 	provenRelicRefsMu.Unlock()
 	if ok {
 		return cached
 	}
 
-	proven := censusRefusedCityBinding(cityPath)
+	proven := censusRefusedCityBindingFor(cityPath, id)
 
 	provenRelicRefsMu.Lock()
 	defer provenRelicRefsMu.Unlock()
 	if provenRelicRefsByCity == nil {
-		// resetProvenRelicRefs ran while this census was in flight. The answer
+		// resetProvenRelicRefs ran while this read was in flight. The answer
 		// is still right for this caller, so it is returned unmemoized rather
 		// than assigned into a nil map.
 		return proven
 	}
-	provenRelicRefsByCity[key] = proven
+	if provenRelicRefsByCity[key] == nil {
+		provenRelicRefsByCity[key] = make(map[string]map[storeref.StoreRef]bool, 1)
+	}
+	provenRelicRefsByCity[key][id] = proven
 	return proven
 }
 
-// censusRefusedCityBinding is the read itself: resolve this city's storage
-// plan, open the binding it names, and ask each derived binding whether it
-// still holds a relic.
+// censusRefusedCityBindingFor is the read itself: resolve this city's storage
+// plan, open the binding it names, and ask each derived binding whether id has
+// a twin there.
 //
 // Every early return is the same answer — no proof — and they are deliberately
 // silent. A refused city has already had its refusal printed once by the
 // one-shot gate, and the reasons a binding cannot be reopened here are the
 // reasons it was refused in the first place; reporting them again would put a
 // second copy of the same sentence on every by-id read of an unconverged city.
-func censusRefusedCityBinding(cityPath string) map[storeref.StoreRef]bool {
+func censusRefusedCityBindingFor(cityPath, id string) map[storeref.StoreRef]bool {
+	if id == "" {
+		return nil
+	}
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil || cfg == nil || cfg.Storage == nil {
 		return nil
@@ -209,14 +235,71 @@ func censusRefusedCityBinding(cityPath string) map[storeref.StoreRef]bool {
 	}
 	defer routes.close() //nolint:errcheck // a close failure cannot unsay what the census already read
 
+	delivered := migrationDeliveredID(cityPath, cfg)
 	bindings, _ := residencyBindingsFromRoutes(routes)
 	proven := make(map[storeref.StoreRef]bool, len(bindings))
 	for _, b := range bindings {
-		if storeref.ProvenLegacyResidents(b) { // residency:allow — censuses the binding this proof is about; resolves nothing
+		if bindingGivesIDATwin(b, id, delivered) {
 			proven[b.Leg.Ref] = true
 		}
 	}
 	return proven
+}
+
+// bindingGivesIDATwin reports whether the work store's copy of id is a frozen
+// pre-migration twin of a bead this binding owns.
+//
+// A binding that HOLDS id proves it outright: an id outside every reserved
+// namespace (the only kind that reaches a residence probe) can be in the
+// binding only because a migration or recover-stranded carried it across with
+// its id preserved, and neither deletes the source. A binding that no longer
+// holds id still owns it when the copy manifest says the migration delivered
+// it — the binding's own GC hard-deletes expired closed wisps and read mail,
+// and the work store keeps the pre-migration row forever.
+//
+// Only a completed read proves anything: a Get that fails for any reason other
+// than absence is proof-absent, the same tolerant unknown as the open above.
+func bindingGivesIDATwin(b storeref.ClassBinding, id string, delivered func(string) bool) bool {
+	if b.Leg.Store == nil {
+		return false
+	}
+	_, err := b.Leg.Store.Get(id) // residency:allow — the per-id twin proof for a refused binding; resolves nothing
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, beads.ErrNotFound):
+		return delivered(id)
+	default:
+		return false
+	}
+}
+
+// migrationDeliveredID answers "did the infra migration's equality stage prove
+// it copied this id into the binding" from the copy manifest the migration
+// recorded (infra.migrated.beads), the same evidence the boot gate's own
+// containment check classifies GC'd rows by. It is read at most once per call,
+// lazily, and only on a Get miss. A binding this build resolves no migration
+// target for, an absent manifest, or one that cannot be read, answers false:
+// nothing is proved.
+func migrationDeliveredID(cityPath string, cfg *config.City) func(string) bool {
+	var (
+		once     sync.Once
+		manifest map[string]bool
+	)
+	return func(id string) bool {
+		once.Do(func() {
+			target, configured, err := resolveInfraBindingTarget(cityPath, cfg)
+			if err != nil || !configured {
+				return
+			}
+			proven, recorded, err := readInfraCopyManifest(target)
+			if err != nil || !recorded {
+				return
+			}
+			manifest = proven
+		})
+		return manifest[id]
+	}
 }
 
 // refusedBindingIsAlreadyOnDisk reports whether this city's configured binding
@@ -303,8 +386,9 @@ func foreignBindingLocationExists(cityPath string, cfg *config.City) bool {
 }
 
 var (
-	provenRelicRefsMu     sync.Mutex
-	provenRelicRefsByCity map[string]map[storeref.StoreRef]bool
+	provenRelicRefsMu sync.Mutex
+	// provenRelicRefsByCity memoizes provenTwinRefsForID: city -> id -> refs.
+	provenRelicRefsByCity map[string]map[string]map[storeref.StoreRef]bool
 )
 
 // resetProvenRelicRefs drops the memo wholesale, alongside the routes and the

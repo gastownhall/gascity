@@ -67,7 +67,7 @@ import (
 // falls through to — so the refusal is surfaced there too, wrapped by
 // withProvenRelicRemedy with the move that clears it.
 func cliByIDOwner(cityPath, id string, work beads.Store) (storeref.Owner, error) {
-	return byIDOwnerForTopology(byIDResidencyTopology(cityPath, nil, work, nil), id, work)
+	return byIDOwnerForTopology(byIDResidencyTopology(cityPath, nil, work, nil, id), id, work)
 }
 
 // byIDOwnerForTopology is cliByIDOwner over a topology the caller already holds.
@@ -126,7 +126,7 @@ func byIDOwnerForTopology(topo storeref.Topology, id string, work beads.Store) (
 // byIDPlanForTopology, so the pin cannot drift from the executed path without
 // one of those two changing under both.
 func cliByIDPlan(cityPath, id string, work beads.Store) (storeref.ResolvedPlan, error) {
-	return byIDPlanForTopology(byIDResidencyTopology(cityPath, nil, work, nil), id)
+	return byIDPlanForTopology(byIDResidencyTopology(cityPath, nil, work, nil, id), id)
 }
 
 // byIDPlanForTopology is the ByID plan itself, the one line both the cityPath
@@ -192,7 +192,7 @@ func byIDBeadForTopology(topo storeref.Topology, id string) (beads.Bead, error) 
 // owns the id, with the row it already read; ok=false is "no binding answered,
 // run your own scan", and the caller then does exactly what it did before.
 func cliByIDBindingOwner(cityPath, id string) (storeref.Owner, bool, error) {
-	return byIDBindingOwnerForTopology(byIDResidencyTopology(cityPath, nil, newUnprobedWorkResidual(), nil), id)
+	return byIDBindingOwnerForTopology(byIDResidencyTopology(cityPath, nil, newUnprobedWorkResidual(), nil, id), id)
 }
 
 // byIDBindingOwnerForTopology is cliByIDBindingOwner over a topology the caller
@@ -233,7 +233,7 @@ func withProvenRelicRemedy(owner storeref.Owner, err error) (storeref.Owner, err
 	if err == nil || !errors.Is(err, storeref.ErrProvenRelicRefusal) {
 		return owner, err
 	}
-	return owner, fmt.Errorf("%w. Converge the configured [storage] split and this id resolves from the binding again; `gc doctor` reports what is outstanding", err)
+	return owner, fmt.Errorf("%w. This id was carried into the class binding, so the work store holds only its frozen pre-migration copy, which is not served. Converge the configured [storage] split and this id resolves from the binding again; `gc storage status` and `gc doctor` report what is outstanding", err)
 }
 
 // beadForOwner returns the row the owner names, reading it only when the
