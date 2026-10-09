@@ -19,6 +19,16 @@ func newRequestID() (string, error) {
 	return "req-" + hex.EncodeToString(b), nil
 }
 
+// newTurnID generates a unique identifier for a conversation turn.
+// Format: "turn-" + hex(16 random bytes) = "turn-" + 32 hex chars
+func newTurnID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generating turn ID: %w", err)
+	}
+	return "turn-" + hex.EncodeToString(b), nil
+}
+
 func (s *Server) currentCityEventCursor() (string, error) {
 	ep := s.state.EventProvider()
 	if ep == nil {
@@ -142,6 +152,45 @@ func (s *Server) emitSessionSubmitSucceeded(requestID, sessionID string, queued 
 // emitSessionSubmitFailed records a request.failed event for session.submit.
 func (s *Server) emitSessionSubmitFailed(requestID, errorCode, errorMessage string) {
 	s.emitRequestFailed(requestID, RequestOperationSessionSubmit, errorCode, errorMessage)
+}
+
+// emitTurnStarted records a turn.started event when a conversation turn begins.
+func (s *Server) emitTurnStarted(turnID, sessionID, clientMessageID, requestID string) {
+	s.emitAsyncResult(events.TurnStarted, sessionID, TurnStartedPayload{
+		TurnID:          turnID,
+		SessionID:       sessionID,
+		ClientMessageID: clientMessageID,
+		RequestID:       requestID,
+	})
+}
+
+// emitTurnCompleted records a turn.completed event when all provider responses are finalized.
+func (s *Server) emitTurnCompleted(turnID, sessionID string, entryCount int, durationMs int64) {
+	s.emitAsyncResult(events.TurnCompleted, sessionID, TurnCompletedPayload{
+		TurnID:     turnID,
+		SessionID:  sessionID,
+		EntryCount: entryCount,
+		DurationMs: durationMs,
+	})
+}
+
+// emitTurnFailed records a turn.failed event when a turn encounters an error.
+func (s *Server) emitTurnFailed(turnID, sessionID, errorCode, errorMessage string) {
+	s.emitAsyncResult(events.TurnFailed, sessionID, TurnFailedPayload{
+		TurnID:       turnID,
+		SessionID:    sessionID,
+		ErrorCode:    errorCode,
+		ErrorMessage: errorMessage,
+	})
+}
+
+// emitTurnCanceled records a turn.canceled event when a turn is intentionally stopped.
+func (s *Server) emitTurnCanceled(turnID, sessionID, reason string) {
+	s.emitAsyncResult(events.TurnCanceled, sessionID, TurnCanceledPayload{
+		TurnID:    turnID,
+		SessionID: sessionID,
+		Reason:    reason,
+	})
 }
 
 // emitRigCreateSucceeded records a request.result.rig.create event — the

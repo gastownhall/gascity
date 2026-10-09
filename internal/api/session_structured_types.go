@@ -83,17 +83,19 @@ type SessionStructuredDiagnostic struct {
 
 // SessionStructuredMessage is one provider-normalized transcript message.
 type SessionStructuredMessage struct {
-	ID          string                        `json:"id"`
-	Role        string                        `json:"role"`
-	Provider    string                        `json:"provider,omitempty"`
-	Timestamp   string                        `json:"timestamp,omitempty"`
-	Model       string                        `json:"model,omitempty"`
-	StopReason  string                        `json:"stop_reason,omitempty"`
-	Usage       *SessionStructuredUsage       `json:"usage,omitempty"`
-	UserPrompt  *SessionStructuredUserPrompt  `json:"user_prompt,omitempty"`
-	SystemEvent *SessionStructuredSystemEvent `json:"system_event,omitempty"`
-	Status      string                        `json:"status" enum:"unknown,final,partial,superseded"`
-	Blocks      []SessionStructuredBlock      `json:"blocks"`
+	ID              string                        `json:"id"`
+	ClientMessageID string                        `json:"client_message_id,omitempty"`
+	TurnID          string                        `json:"turn_id,omitempty"`
+	Role            string                        `json:"role"`
+	Provider        string                        `json:"provider,omitempty"`
+	Timestamp       string                        `json:"timestamp,omitempty"`
+	Model           string                        `json:"model,omitempty"`
+	StopReason      string                        `json:"stop_reason,omitempty"`
+	Usage           *SessionStructuredUsage       `json:"usage,omitempty"`
+	UserPrompt      *SessionStructuredUserPrompt  `json:"user_prompt,omitempty"`
+	SystemEvent     *SessionStructuredSystemEvent `json:"system_event,omitempty"`
+	Status          string                        `json:"status" enum:"unknown,final,partial,superseded"`
+	Blocks          []SessionStructuredBlock      `json:"blocks"`
 }
 
 // SessionStructuredSystemEvent carries provider-neutral system-event metadata
@@ -473,11 +475,13 @@ func historySnapshotStructuredMessages(snapshot *worker.HistorySnapshot, include
 func historyEntryToStructuredMessage(entry worker.HistoryEntry, includeThinking bool) SessionStructuredMessage {
 	role := sessionStructuredMessageRole(entry.Actor)
 	msg := SessionStructuredMessage{
-		ID:       entry.ID,
-		Role:     role,
-		Provider: entry.Provenance.Provider,
-		Status:   sessionStructuredMessageStatus(entry.Status),
-		Blocks:   make([]SessionStructuredBlock, 0, len(entry.Blocks)),
+		ID:              entry.ID,
+		ClientMessageID: entry.ClientMessageID,
+		TurnID:          entry.TurnID,
+		Role:            role,
+		Provider:        entry.Provenance.Provider,
+		Status:          sessionStructuredMessageStatus(entry.Status),
+		Blocks:          make([]SessionStructuredBlock, 0, len(entry.Blocks)),
 	}
 	switch role {
 	case string(worker.ActorAssistant):
