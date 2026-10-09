@@ -24,7 +24,7 @@ import (
 func init() {
 	simStepChecks = append(simStepChecks, (*sim).checkCaps, (*sim).checkStarts, (*sim).checkDestructive, (*sim).checkTokens, (*sim).checkDead)
 	simWriteChecks = append(simWriteChecks, (*sim).checkWrite)
-	simEffectChecks = append(simEffectChecks, (*sim).checkFinalized)
+	simEffectChecks = append(simEffectChecks, (*sim).checkFinalized, (*sim).checkCensusOnly)
 	simQuietChecks = append(simQuietChecks, (*sim).checkDwell)
 	simMutants = append(simMutants, []struct {
 		name, inv string
@@ -299,6 +299,16 @@ func (s *sim) checkFinalized(e *simEffect) func(settlement) {
 			s.failf("I16 I-STOP-5", "the stop effect on %v confirmed no live pane and left the request signaled", e.it.Key)
 		}
 	}
+}
+
+// checkCensusOnly is AL1 (census-only) on what the planner admits: no
+// effect runs for a row off the sessions leg, which gather gives no writer,
+// so checkWrite alone would not see the arm that proposed it.
+func (s *sim) checkCensusOnly(e *simEffect) func(settlement) {
+	if e.it.Kind != intentCreate && s.legOf(e.it.Key.Leg) != s.legs[0] {
+		s.failf("AL1 census-only", "v2 admitted %s for %v, a census-only row", e.it.Kind, e.it.Key)
+	}
+	return func(settlement) {}
 }
 
 // legOf is the leg whose cache the census reads as ref.

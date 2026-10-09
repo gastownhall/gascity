@@ -31,7 +31,7 @@ func admittedHeal(t *testing.T, census, writer beads.Store) (*effectPass, intent
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, census)), Mislabelled: map[rowKey]bool{}, SessionsLeg: rowLeg}
+	w := &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, census)), Mislabelled: map[rowKey]bool{}}
 	a := &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{}}}
 	it, _ := decideRow(w, a, rowKey{Leg: rowLeg, ID: b.ID})
 	if it.Kind != intentRowHeal || len(it.Patch) == 0 {
@@ -188,31 +188,27 @@ func TestRowWriteRedecidesAndRefusesDifferentIntent(t *testing.T) {
 	}
 }
 
-// Kills a row write that goes to one store whatever the row's leg (session
-// rows live in work stores too, #5187), and one that reaches a store the
-// pass holds no writer for: a row on a work-store leg is written through
-// that leg's writer, leaving the other leg's store alone, and a leg without a
-// writer is refused. The work leg is the pass's sessions leg here, as decideRow
-// proposes nothing for a census-only row.
+// Kills a row write that reaches a store other than its row's writer, and
+// one the pass holds no writer for: a sessions-leg row lands through the
+// sessions leg's writer, the one gather builds
+// (TestGatherBuildsOnlyTheSessionsLegsWriter), and without it is refused.
 func TestRowWriteUsesItsLegsWriter(t *testing.T) {
 	sessions, _ := stampedMem(t, gate.Require)
-	work, _ := stampedMem(t, gate.Require)
-	b, err := work.Create(sessionRow("heal", "template", "worker", "session_name", "s-heal", "state", "asleep", "generation", "3", "held_until", rowAt(-time.Minute)))
+	b, err := sessions.Create(sessionRow("heal", "template", "worker", "session_name", "s-heal", "state", "asleep", "generation", "3", "held_until", rowAt(-time.Minute)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	const workLeg = "rig:work"
-	w := &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, sessions, workLeg, work)), Mislabelled: map[rowKey]bool{}, SessionsLeg: workLeg}
-	w.LegStores = map[string]beads.Store{rowLeg: sessions, workLeg: work}
+	w := &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, sessions)), Mislabelled: map[rowKey]bool{}}
+	w.LegStores = map[string]beads.Store{rowLeg: sessions}
 	a := &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{}}}
-	it, _ := decideRow(w, a, rowKey{Leg: workLeg, ID: b.ID})
+	it, _ := decideRow(w, a, rowKey{Leg: rowLeg, ID: b.ID})
 	if s := runRowWrite(context.Background(), newEffectPass(w, a), it); s.Outcome != settledLanded {
-		t.Fatalf("settlement %+v, want the heal landed on the work store", s)
+		t.Fatalf("settlement %+v, want the heal landed on the sessions store", s)
 	}
-	if got := heldUntil(t, work, b.ID); got != "" {
-		t.Fatalf("work store held_until %q, want it cleared", got)
+	if got := heldUntil(t, sessions, b.ID); got != "" {
+		t.Fatalf("sessions store held_until %q, want it cleared", got)
 	}
-	delete(w.LegStores, workLeg)
+	w.LegStores = nil
 	if s := runRowWrite(context.Background(), newEffectPass(w, a), it); s.Outcome != settledRefused || s.Cause != causeNoWriter {
 		t.Fatalf("no writer for the leg: settlement %+v, want refused with cause %q", s, causeNoWriter)
 	}

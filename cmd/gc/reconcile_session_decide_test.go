@@ -21,7 +21,7 @@ func rowAt(d time.Duration) string { return gatherNow.Add(d).Format(time.RFC3339
 func rowWorld(t *testing.T, rows ...beads.Bead) (*World, *allocDecision) {
 	t.Helper()
 	c := readCensus(t, gatherNow, censusLegs(rowLeg, censusStore(rows...)))
-	w := &World{Now: gatherNow, Census: c, Mislabelled: make(map[rowKey]bool), SessionsLeg: rowLeg}
+	w := &World{Now: gatherNow, Census: c, Mislabelled: make(map[rowKey]bool)}
 	a := &allocDecision{Snapshot: &selectionSnapshot{Entries: make(map[rowKey]*selectionEntry)}}
 	for _, row := range c.Canonical() {
 		if row.Info.Template == "" && row.Info.SessionNameMetadata == "" {
@@ -33,6 +33,12 @@ func rowWorld(t *testing.T, rows ...beads.Bead) (*World, *allocDecision) {
 }
 
 func rowKeyOf(id string) rowKey { return rowKey{Leg: rowLeg, ID: id} }
+
+// withSessionsLeg makes ref w's sessions leg, ahead of its census's legs, so
+// a row on any of those legs reads census-only.
+func withSessionsLeg(w *World, ref string) {
+	w.Census.Legs = append([]censusLeg{{Ref: ref}}, w.Census.Legs...)
+}
 
 // killPending is a `gc session kill` fence stamped 10s before gatherNow.
 var killPending = []string{"state", "asleep", "state_reason", session.KillPendingReason, "sleep_reason", "killed", "slept_at", rowAt(-10 * time.Second)}
@@ -73,8 +79,9 @@ func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 		want     string
 		wantNext time.Time
 	}{
-		{name: "A1 census-only before A3 rekey and A6 heals", meta: expiredHold, identity: staleSelf, rigLeg: true, want: reasonCensusOnly},
 		{name: "A1 no row", noRow: true, want: decideNoRow},
+		{name: "A1 mislabelled before census-only (D-32's trace)", meta: append([]string{"template", "", "session_name", ""}, expiredHold...), rigLeg: true, want: decideMislabelled},
+		{name: "A1 census-only before A3 rekey and A6 heals", meta: expiredHold, identity: staleSelf, rigLeg: true, want: reasonCensusOnly},
 		{name: "A1 mislabelled before A2 kill fence", meta: append([]string{"template", "", "session_name", ""}, killPending...), want: decideMislabelled},
 		{name: "A2 kill fence before A6 heals", meta: append(append([]string{}, killPending...), expiredHold...), want: decideKillFence, wantNext: gatherNow.Add(session.KillPendingGrace - 10*time.Second)},
 		{name: "A2 kill fence before A9 liveness", meta: killPending, unknown: true, want: decideKillFence, wantNext: gatherNow.Add(session.KillPendingGrace - 10*time.Second)},
@@ -100,7 +107,7 @@ func TestDecideRowArmOrderMatchesLegacy(t *testing.T) {
 			k := rowKeyOf("gc-1")
 			w.Observed = map[rowKey]rowObservation{k: {Identity: tc.identity}}
 			if tc.rigLeg {
-				w.SessionsLeg = "rig:other"
+				withSessionsLeg(w, "rig:other")
 			}
 			if e := a.Snapshot.Entries[k]; e != nil && tc.unknown {
 				e.Liveness = livenessUnknown

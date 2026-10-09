@@ -206,7 +206,7 @@ func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
 				pass.held.create = newCreatePass(w)
 			}
 			it.CreatePlan.Token = session.NewInstanceToken()
-			e = createInflightEntry(it, w.SessionsLeg)
+			e = createInflightEntry(it, w.Census.sessionsLeg())
 		}
 		seq := p.inflight.add(e)
 		if seq == 0 {

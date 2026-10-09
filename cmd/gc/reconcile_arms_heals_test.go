@@ -67,7 +67,7 @@ func newHealCase(t *testing.T, liveness rowLiveness, desired desire, meta ...str
 		t.Fatal(err)
 	}
 	c := &healCase{store: store, k: rowKeyOf(b.ID)}
-	c.w = &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, store)), Mislabelled: map[rowKey]bool{}, CityPath: t.Name(), SessionsLeg: rowLeg}
+	c.w = &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, store)), Mislabelled: map[rowKey]bool{}, CityPath: t.Name()}
 	c.w.LegStores = map[string]beads.Store{rowLeg: store}
 	c.a = &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{
 		c.k: {Key: c.k, Liveness: liveness, Desired: desired},
@@ -261,7 +261,7 @@ func TestDeadRuntimeHealCoversEveryCommittedRowAL1DoesNotDrain(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newHealCase(t, tc.liveness, tc.desired, append([]string{"session_key", "k-1", "started_config_hash", "h"}, tc.meta...)...)
 			if tc.sessions != "" {
-				c.w.SessionsLeg = tc.sessions
+				withSessionsLeg(c.w, tc.sessions)
 			}
 			it := c.decide()
 			if got := it.Reason == decideDeadRuntimeHeal; got != tc.heal {
@@ -678,8 +678,9 @@ func TestA6ItemsFoldIntoOneCAS(t *testing.T) {
 // held for every arm): legacy reconciles only the sessions store, and a
 // shared rig store holds other cities' rows. Each row below takes its arm on
 // the sessions leg; on another leg it is None(census-only) and proposes
-// nothing, and an intent admitted while it was the sessions leg's re-decides
-// on the fresh row and refuses, leaving the row as it was.
+// nothing. An intent admitted while it was the sessions leg's finds no
+// writer for its leg, or, given one, re-decides on the fresh row and refuses;
+// either way the row is left as it was.
 func TestNoArmActsOnACensusOnlyRow(t *testing.T) {
 	tracked := resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Effective: "5m", Capability: runtime.SessionSleepCapabilityFull}
 	alive := func(c *healCase) runtime.Provider {
@@ -739,23 +740,28 @@ func TestNoArmActsOnACensusOnlyRow(t *testing.T) {
 			if it.Reason != tc.want || it.Kind == "" {
 				t.Fatalf("sessions leg: decideRow = (%q, %q), want %q", it.Kind, it.Reason, tc.want)
 			}
-			c.w.SessionsLeg = "rig:other"
+			withSessionsLeg(c.w, "rig:other")
 			if got := c.decide(); got.Kind != "" || got.Reason != reasonCensusOnly {
 				t.Fatalf("census-only: decideRow = (%q, %q, %v), want None(census-only)", got.Kind, got.Reason, got.Patch)
 			}
-			if it.Kind == intentRekey {
-				return // the rekey effect's re-decide is redecideRow too (reconcile_effect_rekey.go)
-			}
 			before := maps.Clone(c.meta(t))
-			sp := runtime.Provider(gone())
-			if c.a.Snapshot.Entries[c.k].Liveness == livenessAlive {
+			var sp runtime.Provider = gone()
+			switch {
+			case it.Kind == intentRekey:
+				sp = &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true}, env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_RUNTIME_EPOCH": "2", "GC_INSTANCE_TOKEN": "tok-old"}}
+			case c.a.Snapshot.Entries[c.k].Liveness == livenessAlive:
 				sp = alive(c)
 			}
-			w := *c.w
-			w.Env = &reconcileEnv{SP: sp}
-			s := runTx(context.Background(), newEffectPass(&w, c.a), it, effectSpecs[it.Kind], nil)
-			if s.Outcome != settledRefused || !maps.Equal(c.meta(t), before) {
-				t.Fatalf("admitted %q on a census-only row: settlement %+v, row %v, want refused and the row %v", it.Kind, s, c.meta(t), before)
+			// The pass's writer for the row's leg is a test's: gather builds
+			// the sessions leg's alone, and the effect refuses no-writer.
+			for leg, cause := range map[string]string{rowLeg: causeRedecided, "rig:other": causeNoWriter} {
+				w := *c.w
+				w.Env = &reconcileEnv{SP: sp}
+				w.LegStores = map[string]beads.Store{leg: c.store}
+				s := runTx(context.Background(), newEffectPass(&w, c.a), it, effectSpecs[it.Kind], nil)
+				if s.Outcome != settledRefused || s.Cause != cause || !maps.Equal(c.meta(t), before) {
+					t.Fatalf("admitted %q on a census-only row, writer on %s: settlement %+v, row %v, want refused %q and the row %v", it.Kind, leg, s, c.meta(t), cause, before)
+				}
 			}
 		})
 	}

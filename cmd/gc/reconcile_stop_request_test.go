@@ -246,7 +246,7 @@ func TestResidueVoidSurvivesSameGenerationResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	k := rowKey{Leg: rowLeg, ID: b.ID}
-	w := &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, store)), LegStores: map[string]beads.Store{rowLeg: store}, SessionsLeg: rowLeg}
+	w := &World{Now: gatherNow, Census: readCensus(t, gatherNow, censusLegs(rowLeg, store)), LegStores: map[string]beads.Store{rowLeg: store}}
 	a := &allocDecision{Snapshot: &selectionSnapshot{Entries: map[rowKey]*selectionEntry{k: {Key: k, Liveness: livenessAlive}}}}
 	it, _ := decideRow(w, a, k)
 	if s := runTx(context.Background(), newEffectPass(w, a), it, effectSpecs[it.Kind], nil); it.Reason != decideStopResidue || s.Outcome != settledLanded {

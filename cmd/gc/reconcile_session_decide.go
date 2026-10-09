@@ -150,8 +150,8 @@ type rowArm struct {
 // numbers: A4 the stop request (C6b2), A7 row metadata (C7d), A8 the baseline
 // (C7c), A10-A18, A20's begin (C6a2) and A21.
 var rowArms = []rowArm{
-	{"A1", armCensusOnly},
 	{"A1", armNoRow},
+	{"A1", armCensusOnly},
 	{"A2", armKillFence},
 	{"A3", armIdentity},
 	{"A5", armUnknownState},
@@ -174,14 +174,15 @@ const (
 	decideTimerHeal   = "timer-heal"
 )
 
-// armCensusOnly is A1's first row: a row on a leg other than the sessions
-// leg is AL1's None(census-only), ahead of every other arm (CONTRACT v5 §4 A6
-// item 4's rule, for every arm). Legacy reconciles only the sessions store,
+// armCensusOnly is A1's second row: a row on a leg other than the sessions
+// leg is AL1's None(census-only), ahead of every later arm (CONTRACT v5 §4 A6
+// item 4's rule, for every arm); a mislabelled one traces mislabelled first
+// (D-32). Legacy reconciles only the sessions store,
 // and a shared rig store holds other cities' rows, so no arm writes, rekeys,
 // drains or closes a row on another leg, and an effect admitted for one
 // re-decides on the fresh row and refuses.
 func armCensusOnly(r *rowFacts) (intent, bool) {
-	if r.k.Leg == r.w.SessionsLeg {
+	if r.k.Leg == r.w.Census.sessionsLeg() {
 		return intent{}, false
 	}
 	return intent{Reason: reasonCensusOnly}, true
