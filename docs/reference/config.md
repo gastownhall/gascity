@@ -39,6 +39,7 @@ City is the top-level configuration for a Gas City instance.
 | `chat_sessions` | ChatSessionsConfig |  |  | ChatSessions configures chat session behavior (auto-suspend). |
 | `session_sleep` | SessionSleepConfig |  |  | SessionSleep configures idle sleep policy defaults for managed sessions. |
 | `convergence` | ConvergenceConfig |  |  | Convergence configures convergence loop limits. |
+| `workflows` | WorkflowsConfig |  |  | Workflows configures how graph workflows treat step outcomes. |
 | `doctor` | DoctorConfig |  |  | Doctor configures gc doctor thresholds and policy toggles (worktree size warnings, nested-worktree auto-prune). |
 | `maintenance` | MaintenanceConfig |  |  | Maintenance configures periodic store-maintenance loops. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
@@ -1040,6 +1041,14 @@ WebhookVerify declares how an inbound delivery is authenticated.
 | `audience` | string |  |  |  |
 | `bearer_env` | string |  |  | BearerEnv optionally names an env var holding an additional per-source bearer token checked alongside the signature. |
 | `allowed_cidrs` | []string |  |  | AllowedCIDRs optionally restricts accepted source addresses (e.g. the GitHub webhook CIDR allowlist). |
+
+## WorkflowsConfig
+
+WorkflowsConfig holds graph-workflow outcome policy (the [workflows] table).
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `fail_halts` | boolean |  |  | FailHalts makes a step's terminal gc.outcome=fail binding on the rest of its workflow. A needs edge on a failed step halts the dependent (it closes skipped, naming the failed step, instead of running), and a workflow root cannot close pass while any step's terminal outcome is fail: it closes fail and names the step. For a retried step the terminal outcome is the last attempt's. Finalizers always run. Off by default, which keeps the behaviour where a later step runs past a failed one and finalize grades only its direct blockers and abort_scope members; turn it on once the formulas' correct refusals no longer stop the work after them. |
 
 ## Workspace
 

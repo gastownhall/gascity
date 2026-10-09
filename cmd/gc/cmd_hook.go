@@ -526,6 +526,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			JSON:               opts.JSON,
 			StrictDrainAck:     drainAckStrictConfig(cfg),
 			RuntimeActor:       strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
+			FailHalts:          cfg.FailHaltsEnabled(),
 		}
 		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}

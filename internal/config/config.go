@@ -285,6 +285,8 @@ type City struct {
 	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`
 	// Convergence configures convergence loop limits.
 	Convergence ConvergenceConfig `toml:"convergence,omitempty"`
+	// Workflows configures how graph workflows treat step outcomes.
+	Workflows WorkflowsConfig `toml:"workflows,omitempty"`
 	// Doctor configures gc doctor thresholds and policy toggles
 	// (worktree size warnings, nested-worktree auto-prune).
 	Doctor DoctorConfig `toml:"doctor,omitempty"`

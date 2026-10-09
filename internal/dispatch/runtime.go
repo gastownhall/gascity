@@ -190,6 +190,9 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 	if result, handled, err := closeOrphanedControl(store, bead, opts); handled || err != nil {
 		return result, err
 	}
+	if result, halted, err := haltControl(store, bead, opts); halted || err != nil {
+		return result, err
+	}
 
 	switch bead.Metadata[beadmeta.KindMetadataKey] {
 	case beadmeta.KindRetry:
@@ -991,7 +994,8 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 		return ControlResult{}, fmt.Errorf("%s: missing gc.root_bead_id", bead.ID)
 	}
 
-	outcome, err := resolveFinalizeOutcome(store, bead)
+	failHalts := opts.failHalts()
+	outcome, err := resolveFinalizeOutcome(store, bead, failHalts)
 	if err != nil {
 		if errors.Is(err, errFinalizePending) {
 			return ControlResult{}, ErrControlPending
@@ -1004,6 +1008,7 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	// request that spawned a rig-scope mol-adopt-pr-v2 workflow) don't accumulate
 	// as orphans. Failures intentionally leave parent sources open so a human
 	// can investigate via list - the bead IS the audit handle.
+	rootClose := map[string]string{beadmeta.OutcomeMetadataKey: outcome}
 	switch outcome {
 	case beadmeta.OutcomePass:
 		if err := preflightSourceBeadChain(store, rootID, opts); err != nil {
@@ -1029,8 +1034,17 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 		// PASS arm clears all three as it closes the parent
 		// (propagateSourceBeadTerminalMetadata) so a succeeded parent never
 		// carries the failure it superseded.
-		if err := annotateSourceBeadFailure(store, rootID, resolveFinalizeFailureDiagnostics(store, bead), opts); err != nil {
+		diagnostics := resolveFinalizeFailureDiagnostics(store, bead, failHalts)
+		if err := annotateSourceBeadFailure(store, rootID, diagnostics, opts); err != nil {
 			return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: marking failed source bead: %w", rootID, err))
+		}
+		// [workflows] fail_halts: name the failed step on the root too. Under
+		// the switch the root can fail over a step that is no blocker of the
+		// finalizer, so nothing else on the root would say why.
+		if failHalts {
+			for key, value := range diagnostics {
+				rootClose[key] = value
+			}
 		}
 	}
 	// Close the root BEFORE the finalize bead. If the root close fails and
@@ -1038,7 +1052,7 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	// next serve cycle will retry. Source-chain propagation is preflighted first
 	// so retryable scan failures keep the root live for singleton scans, but
 	// source beads are not mutated until the root is durably closed.
-	if err := setOutcomeAndClose(store, rootID, outcome); err != nil {
+	if err := updateMetadataAndClose(store, rootID, rootClose); err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			if closeErr := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeMissingRoot); closeErr != nil {
 				return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: closing orphaned finalizer (root %s missing): %w", bead.ID, rootID, closeErr))
@@ -1869,14 +1883,14 @@ func matchesScopeRef(bead beads.Bead, scopeRef string) bool {
 	return stepRef == scopeRef || strings.HasSuffix(stepRef, "."+scopeRef)
 }
 
-func resolveFinalizeOutcome(store beads.Store, finalizer beads.Bead) (string, error) {
+func resolveFinalizeOutcome(store beads.Store, finalizer beads.Bead, failHalts bool) (string, error) {
 	outcome, err := resolveBlockedOutcome(store, finalizer.ID)
 	if err != nil {
 		return "", err
 	}
 	rootID := strings.TrimSpace(finalizer.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if outcome == beadmeta.OutcomePass && rootID != "" {
-		_, failed, err := terminalAbortScopeFailureMember(store, rootID, finalizer.ID)
+		_, failed, err := terminalAbortScopeFailureMember(store, rootID, finalizer.ID, failHalts)
 		if err != nil {
 			return "", err
 		}
@@ -1903,13 +1917,13 @@ func resolveFinalizeOutcome(store beads.Store, finalizer beads.Bead) (string, er
 //
 // The returned map always carries all three failure-stamp keys — see
 // failureStamp for why.
-func resolveFinalizeFailureDiagnostics(store beads.Store, finalizer beads.Bead) map[string]string {
+func resolveFinalizeFailureDiagnostics(store beads.Store, finalizer beads.Bead, failHalts bool) map[string]string {
 	if blocker, ok := firstFailedFinalizeBlocker(store, finalizer); ok {
 		return failureStampFor(blocker)
 	}
 	rootID := strings.TrimSpace(finalizer.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID != "" {
-		if member, ok, err := terminalAbortScopeFailureMember(store, rootID, finalizer.ID); err == nil && ok {
+		if member, ok, err := terminalAbortScopeFailureMember(store, rootID, finalizer.ID, failHalts); err == nil && ok {
 			return failureStampFor(member)
 		}
 	}
@@ -2001,7 +2015,9 @@ func resolveBlockedOutcome(store beads.Store, beadID string) (string, error) {
 // terminalAbortScopeFailureMember returns the direct member whose terminal
 // gc.on_fail=abort_scope failure fails the whole workflow, so callers can both
 // decide the outcome and name the culprit in the domain parent's failure stamp.
-func terminalAbortScopeFailureMember(store beads.Store, rootID, finalizerID string) (beads.Bead, bool, error) {
+// With failHalts ([workflows] fail_halts) any member whose terminal outcome is
+// fail counts, abort_scope or not (terminalStepFailure).
+func terminalAbortScopeFailureMember(store beads.Store, rootID, finalizerID string, failHalts bool) (beads.Bead, bool, error) {
 	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return beads.Bead{}, false, err
@@ -2010,7 +2026,7 @@ func terminalAbortScopeFailureMember(store beads.Store, rootID, finalizerID stri
 		if candidate.ID == finalizerID {
 			continue
 		}
-		if terminalAbortScopeFailure(candidate) {
+		if terminalAbortScopeFailure(candidate) || (failHalts && terminalStepFailure(candidate)) {
 			return candidate, true, nil
 		}
 	}

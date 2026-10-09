@@ -1210,6 +1210,9 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	if fragMeta.IsDefined("convergence") {
 		base.Convergence = fragment.Convergence
 	}
+	if fragMeta.IsDefined("workflows") {
+		base.Workflows = fragment.Workflows
+	}
 	if fragMeta.IsDefined("maintenance") {
 		base.Maintenance = fragment.Maintenance
 	}
