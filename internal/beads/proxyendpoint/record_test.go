@@ -650,3 +650,23 @@ func quote(s string) string {
 	}
 	return string(out)
 }
+
+func TestSharesCityRoot(t *testing.T) {
+	city := t.TempDir()
+	rig := filepath.Join(city, "rigs", "r1")
+	if err := os.MkdirAll(filepath.Join(rig, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if SharesCityRoot(city, rig) {
+		t.Fatal("a rig on its own default root shares the city's")
+	}
+	if err := os.WriteFile(filepath.Join(rig, ".beads", MetadataFileName), []byte(`{"dolt_data_dir":"../../../.beads/dolt"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !SharesCityRoot(city, rig) {
+		t.Fatal("a rig whose dolt_data_dir is the city's does not share its root")
+	}
+	if SharesCityRoot(city, city) {
+		t.Fatal("the city shares its own root")
+	}
+}

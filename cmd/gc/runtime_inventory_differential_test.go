@@ -561,9 +561,9 @@ func runReapers(t *testing.T, st reaperState, w reaperEnv, inv *runtimeInventory
 	log := w.callLog()
 	from := len(log.recorded())
 	log.setPhase("corpse")
-	cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, dt, w, inv, clock.Real{}, io.Discard)
+	cleanupDeadRuntimeSessionCorpses("", store, nil, nil, snapshot, dt, w, inv, clock.Real{}, io.Discard)
 	log.setPhase("closed")
-	reapRuntimesBoundToClosedBeads(store, snapshot, dt, w, inv, io.Discard)
+	reapRuntimesBoundToClosedBeads(store, snapshot, dt, w, inv, "", io.Discard)
 	log.setPhase("")
 
 	eff := reaperEffects{closes: map[string]string{}, calls: log.recorded()[from:], source: inventorySourceLive, closedSource: inventorySourceLive}

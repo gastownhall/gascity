@@ -1214,7 +1214,7 @@ func TestQueueDrainAckAsyncStopTracksShutdownWait(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, tracker, nil, &stderr)
 
 	select {
 	case <-sp.stopStarted:
@@ -1255,14 +1255,16 @@ func TestQueueDrainAckAsyncStopDedupScopedToTracker(t *testing.T) {
 	var stderr synchronizedBuffer
 	firstTracker := &asyncStartTracker{}
 	secondTracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, first, &config.City{}, "gc-worker", "worker", "", nil, firstTracker, nil, &stderr)
+	// Two trackers are two cities' controllers: their runtime names are
+	// locked per city.
+	queueDrainAckAsyncStop("city-a", store, first, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, firstTracker, nil, &stderr)
 	select {
 	case <-first.stopStarted:
 	case <-time.After(time.Second):
 		t.Fatal("first async drain-ack stop did not start")
 	}
 
-	queueDrainAckAsyncStop("", store, second, &config.City{}, "gc-worker", "worker", "", nil, secondTracker, nil, &stderr)
+	queueDrainAckAsyncStop("city-b", store, second, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, secondTracker, nil, &stderr)
 	select {
 	case <-second.stopStarted:
 	case <-time.After(time.Second):
@@ -1288,7 +1290,7 @@ func TestQueueDrainAckAsyncStopRecoversStopPanic(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, tracker, nil, &stderr)
 
 	select {
 	case <-sp.stopStarted:
@@ -1333,7 +1335,7 @@ func TestQueueDrainAckAsyncStopPokesAfterSuccessfulStop(t *testing.T) {
 	}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1342,7 +1344,7 @@ func TestQueueDrainAckAsyncStopPokesAfterSuccessfulStop(t *testing.T) {
 	got, gotKey := pokeCalls, pokeKey
 	pokeMu.Unlock()
 	if got != 1 {
-		t.Fatalf("poke count = %d, want 1 after successful stop", got)
+		t.Fatalf("poke count = %d, want 1 after successful stop; stderr %q", got, stderr.String())
 	}
 	if want := reconcilekey.SessionRef("gc-worker", "worker"); gotKey != want {
 		t.Fatalf("poke key = %v, want %v", gotKey, want)
@@ -1373,7 +1375,7 @@ func TestQueueDrainAckAsyncStopDoesNotPokeOnHardError(t *testing.T) {
 	sp.StopErrors = map[string]error{"worker": errors.New("hard kill error")}
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1417,7 +1419,7 @@ func TestQueueDrainAckAsyncStopTokenFenceSkipsReusedName(t *testing.T) {
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
 	// We queued the stop for the OLD session (stale token).
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "stale-token", nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "stale-token", drainAckStopPendingForTest(t, store, "gc-worker", "worker", "stale-token"), nil, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1450,7 +1452,7 @@ func TestQueueDrainAckAsyncStopTokenFenceKillsMatchingSession(t *testing.T) {
 
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "live-token", nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "live-token", drainAckStopPendingForTest(t, store, "gc-worker", "worker", "live-token"), nil, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1491,7 +1493,7 @@ func TestQueueDrainAckAsyncStopConfirmsRuntimeDead(t *testing.T) {
 
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", []string{"claude"}, tracker, nil, &stderr)
+	queueDrainAckAsyncStop("", store, sp, &config.City{}, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), []string{"claude"}, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1522,7 +1524,7 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncDrainAckStopsBeforeStopSnapshot(
 		stdout:              ioDiscard{},
 		stderr:              ioDiscard{},
 	}
-	queueDrainAckAsyncStop("", store, sp, cr.cfg, "gc-worker", "worker", "", nil, &cr.asyncStops, nil, &synchronizedBuffer{})
+	queueDrainAckAsyncStop("", store, sp, cr.cfg, "gc-worker", "worker", "", drainAckStopPendingForTest(t, store, "gc-worker", "worker", ""), nil, &cr.asyncStops, nil, &synchronizedBuffer{})
 
 	select {
 	case <-sp.stopStarted:
@@ -1720,7 +1722,7 @@ func TestConfirmDrainAckRuntimeDeadTokenFenceStopsOnReplacement(t *testing.T) {
 	}
 
 	var stderr synchronizedBuffer
-	dead := confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "worker", "original-token", []string{"claude"}, &stderr, drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll)
+	dead := confirmDrainAckRuntimeDead(context.Background(), "", store, sp, &config.City{}, "", "worker", "original-token", []string{"claude"}, &stderr, drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll)
 	if !dead {
 		t.Fatal("confirm-dead must report the original target dead once a replacement owns the name")
 	}
@@ -1767,7 +1769,7 @@ func TestAsyncDrainAckStopSkipsOnUnverifiableToken(t *testing.T) {
 
 	var stderr synchronizedBuffer
 	tracker := &asyncStartTracker{}
-	queueDrainAckAsyncStop("", beads.NewMemStore(), sp, &config.City{}, "gc-worker", "worker", "live-token", nil, tracker, nil, &stderr)
+	queueDrainAckAsyncStop("", beads.NewMemStore(), sp, &config.City{}, "gc-worker", "worker", "live-token", "", nil, tracker, nil, &stderr)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop did not complete")
 	}
@@ -1797,7 +1799,7 @@ func TestAsyncDrainAckStopUnverifiableTokenLogsOncePerEpisode(t *testing.T) {
 	var stderr synchronizedBuffer
 	for range 3 {
 		tracker := &asyncStartTracker{}
-		queueDrainAckAsyncStop("", beads.NewMemStore(), sp, &config.City{}, "gc-worker", "worker", "live-token", nil, tracker, dt, &stderr)
+		queueDrainAckAsyncStop("", beads.NewMemStore(), sp, &config.City{}, "gc-worker", "worker", "live-token", "", nil, tracker, dt, &stderr)
 		if !tracker.wait(time.Second) {
 			t.Fatal("async drain-ack stop did not complete")
 		}
@@ -1848,7 +1850,7 @@ func TestConfirmDeadSkipsReKillOnUnverifiableToken(t *testing.T) {
 	var stderr synchronizedBuffer
 	// The fence answers before the first re-kill, so the deadline never
 	// elapses and the zero poll never sleeps.
-	if confirmDrainAckRuntimeDead("", beads.NewMemStore(), sp, &config.City{}, "worker", "original-token", nil, &stderr, time.Hour, 0) {
+	if confirmDrainAckRuntimeDead(context.Background(), "", beads.NewMemStore(), sp, &config.City{}, "", "worker", "original-token", nil, &stderr, time.Hour, 0) {
 		t.Fatal("confirm-dead reported the runtime dead on an unreadable instance token")
 	}
 	if sp.CountCalls("Stop", "worker") != 0 || !sp.IsRunning("worker") {
@@ -7049,6 +7051,8 @@ func TestReconcileSessionBeads_OrphanDrainLiveAssignedWorkStaysOpen(t *testing.T
 	_ = env.sp.Start(context.Background(), "orphan", runtime.Config{})
 	session := env.createSessionBead("orphan", "orphan")
 	env.markSessionActive(&session)
+	// Past the INC-003 wake grace, so the live assigned work is what keeps it.
+	env.setSessionMetadata(&session, map[string]string{"last_woke_at": env.clk.Now().Add(-wakeUndesiredGrace - time.Minute).UTC().Format(time.RFC3339)})
 
 	if _, err := env.store.Create(beads.Bead{
 		Title:    "claimed work",
@@ -7710,9 +7714,11 @@ func TestReconcileSessionBeads_FailedCreateNotDesiredClosed(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "polecat", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)}}}
 	session := env.createSessionBead("polecat", "polecat-ga-mg0")
-	session.Metadata["state"] = "failed-create"
-	session.Metadata["pool_managed"] = "true"
-	session.Metadata["pool_slot"] = "1"
+	env.setSessionMetadata(&session, map[string]string{
+		"state":        "failed-create",
+		"pool_managed": "true",
+		"pool_slot":    "1",
+	})
 
 	env.reconcile([]beads.Bead{session})
 
@@ -8004,6 +8010,46 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *te
 	b, _ := env.store.Get(session.ID)
 	if b.Status != "open" {
 		t.Fatalf("status = %q, want open", b.Status)
+	}
+}
+
+// A wake_request=explicit recorded while the session was already RUNNING is
+// satisfied the moment it is observed running; nothing else clears it
+// (PreWakePatch runs only at a start). It must not exempt the running session
+// from its idle sleep forever.
+func TestReconcileSessionBeads_StaleExplicitWakeOnRunningSessionStillIdleDrains(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		SessionSleep: config.SessionSleepConfig{InteractiveResume: "60s"},
+		Workspace:    config.Workspace{Name: "test-city"},
+		Agents:       []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	now := env.clk.Now().UTC()
+	env.setSessionMetadata(&session, map[string]string{
+		"last_woke_at": now.Add(-30 * time.Minute).Format(time.RFC3339),
+		"detached_at":  now.Add(-6 * time.Minute).Format(time.RFC3339),
+		// `gc session wake` on the already-running session, after its start.
+		"wake_request":      string(sessionpkg.WakeCauseExplicit),
+		"wake_requested_at": now.Add(-10 * time.Minute).Format(time.RFC3339),
+	})
+	env.addDesired("worker", "worker", true)
+	env.sp.WaitForIdleErrors["worker"] = nil
+	idleGate := make(chan struct{}) // see waitForIdleProbeReady godoc
+	env.sp.WaitForIdleGates["worker"] = idleGate
+
+	env.reconcile([]beads.Bead{session})
+	close(idleGate)
+	waitForIdleProbeReady(t, env.dt, session.ID)
+	env.reconcile([]beads.Bead{session})
+
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatal("a running session with a stale explicit wake request was never idle-drained")
+	}
+	if ds.reason != "idle" {
+		t.Fatalf("drain reason = %q, want idle", ds.reason)
 	}
 }
 
@@ -9639,6 +9685,136 @@ func TestReconcileSessionBeads_RollsBackPendingCreatePreservesConfiguredNamedSes
 	}
 	if got := b.Metadata[namedSessionMetadataKey]; got != "true" {
 		t.Errorf("configured_named_session = %q, want true (must survive)", got)
+	}
+}
+
+// TestReconcileSessionBeads_ConfiguredNamedSessionRetriesAfterTransientStartFailure
+// pins the retry the preservation above exists for (ga-vohht8). The failed
+// attempt is over when commitStartFailure preserves the row, so it must not
+// keep the attempt's in-flight start lease (last_woke_at): with the lease
+// left in place, pendingCreateStartInFlightInfo reports start_in_flight on
+// every tick until startup_timeout+7s has passed, and a session whose first
+// start lost a transient race (tmux's new-session preflight, for one) stays
+// down for over a minute while nothing is starting it.
+func TestReconcileSessionBeads_ConfiguredNamedSessionRetriesAfterTransientStartFailure(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "helper",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "helper", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "helper")
+	env.sp.StartErrors = map[string]error{sessionName: errors.New("tmux server degraded: refusing new-session to avoid socket clobber")}
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  sessionName,
+		TemplateName: "helper",
+	}
+
+	session := env.createSessionBead(sessionName, "helper")
+	env.setSessionMetadata(&session, map[string]string{
+		"session_name_explicit":      "true",
+		"pending_create_claim":       "true",
+		"state":                      "creating",
+		"continuation_epoch":         "1",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "helper",
+		namedSessionModeMetadata:     "always",
+	})
+
+	if woken := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, nil, nil); woken != 0 {
+		t.Fatalf("first tick woken = %d, want 0 (the start fails)", woken)
+	}
+	failed, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) after failed start: %v", session.ID, err)
+	}
+	if failed.Status != "open" || failed.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("after failed start: status=%q pending_create_claim=%q, want the configured row preserved open with its claim", failed.Status, failed.Metadata["pending_create_claim"])
+	}
+	if got := failed.Metadata["last_woke_at"]; got != "" {
+		t.Errorf("last_woke_at = %q after the start failed, want empty (the attempt is over; its in-flight lease must not outlive it)", got)
+	}
+
+	// The transient cause is gone by the next patrol tick.
+	delete(env.sp.StartErrors, sessionName)
+	env.clk.Advance(time.Second)
+
+	if woken := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{failed}, nil, nil); woken != 1 {
+		t.Fatalf("second tick woken = %d, want 1 (a preserved named session must be retried, not held as start_in_flight)\nstderr:\n%s", woken, env.stderr.String())
+	}
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q not running after the retry tick", sessionName)
+	}
+}
+
+// TestReconcileSessionBeads_ConfiguredNamedSessionStartFailureLoopQuarantines
+// pins the bound on those prompt retries: with no in-flight lease to wait
+// out, a start that keeps failing is retried each tick only until the
+// startup-health episode reaches defaultMaxWakeAttempts and quarantines the
+// name.
+func TestReconcileSessionBeads_ConfiguredNamedSessionStartFailureLoopQuarantines(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "helper",
+			StartCommand: "true",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "helper", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "helper")
+	env.sp.StartErrors = map[string]error{sessionName: errors.New("start failed")}
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "test-cmd",
+		SessionName:  sessionName,
+		TemplateName: "helper",
+	}
+
+	session := env.createSessionBead(sessionName, "helper")
+	env.setSessionMetadata(&session, map[string]string{
+		"session_name_explicit":      "true",
+		"pending_create_claim":       "true",
+		"state":                      "creating",
+		"continuation_epoch":         "1",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "helper",
+		namedSessionModeMetadata:     "always",
+	})
+
+	current := session
+	for tick := 0; tick < 2*defaultMaxWakeAttempts; tick++ {
+		if woken := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{current}, nil, nil); woken != 0 {
+			t.Fatalf("tick %d woken = %d, want 0 (every start fails)", tick, woken)
+		}
+		env.clk.Advance(time.Second)
+		var err error
+		if current, err = env.store.Get(session.ID); err != nil {
+			t.Fatalf("Get(%s) after tick %d: %v", session.ID, tick, err)
+		}
+		if current.Status != "open" {
+			t.Fatalf("status = %q after tick %d, want the configured row preserved open", current.Status, tick)
+		}
+	}
+
+	starts := 0
+	for _, call := range env.sp.Calls {
+		if call.Method == "Start" && call.Name == sessionName {
+			starts++
+		}
+	}
+	if starts != defaultMaxWakeAttempts {
+		t.Fatalf("start attempts = %d over %d ticks, want %d (retried each tick until the startup-health quarantine)", starts, 2*defaultMaxWakeAttempts, defaultMaxWakeAttempts)
+	}
+	episode, err := sessionFrontDoor(env.store).LoadStartupHealthEpisode(sessionName)
+	if err != nil {
+		t.Fatalf("LoadStartupHealthEpisode: %v", err)
+	}
+	if !env.clk.Now().Before(episode.QuarantinedUntil) {
+		t.Fatalf("episode QuarantinedUntil = %v at %v, want an active quarantine after %d consecutive failures", episode.QuarantinedUntil, env.clk.Now(), defaultMaxWakeAttempts)
 	}
 }
 
@@ -12522,13 +12698,18 @@ func TestReconcileSessionBeads_ResetStallEvictionRetriesAfterKillFailure(t *test
 
 	session := env.createSessionBead("worker", "worker")
 	committedAt := env.clk.Now().Add(-75 * time.Second).UTC().Format(time.RFC3339)
+	// The start is blocked (a quarantine), so no wake consumes the reset: the
+	// session stays wedged in reset-pending across ticks.
 	env.setSessionMetadata(&session, map[string]string{
 		"continuation_reset_pending":   "true",
 		sessionpkg.ResetCommittedAtKey: committedAt,
+		"quarantined_until":            env.clk.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 	})
 
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	tick := func() {
+		// Each tick reads the row afresh, as the controller does.
+		session = mustGetBead(t, env.store, session.ID)
 		reconcileSessionBeads(
 			context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
 			env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{"worker": 0}, false, nil, "test-city",
@@ -12569,7 +12750,7 @@ func TestReconcileSessionBeads_ResetStallEvictionRetriesAfterKillFailure(t *test
 			stopped = true
 		}
 	}
-	if !stopped {
+	if !stopped || env.sp.IsRunning("worker") {
 		t.Fatalf("expected the stale runtime to be stopped, calls: %#v", env.sp.SnapshotCalls())
 	}
 }

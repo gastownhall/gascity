@@ -10,8 +10,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
 
@@ -52,6 +52,23 @@ type sessionWakeDeps struct {
 	withdrawQueuedWaitNudges  func(string, []string) error
 	cityUsesManagedReconciler func(string) bool
 	pokeController            func(string, reconcilekey.Key) error
+	// rigStores opens the rig stores the will-not-start predicate reads for
+	// assigned work; nil reads the city store only.
+	rigStores func() map[string]beads.Store
+	// sp reads the sleep policy's capability for the predicate; nil never
+	// refuses on an idle latch.
+	sp runtime.Provider
+}
+
+// wakeVerdictProvider is the session provider the will-not-start predicate
+// reads the sleep policy's capability from; nil (no idle-latch refusal) when
+// it cannot be built.
+func wakeVerdictProvider() runtime.Provider {
+	sp, err := newSessionProvider()
+	if err != nil {
+		return nil
+	}
+	return sp
 }
 
 // cmdSessionWake is the CLI entry point for "gc session wake".
@@ -68,6 +85,7 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
 	return doSessionWake(args[0], stdout, stderr, asJSON, sessionWakeDeps{
+		sp:                        wakeVerdictProvider(),
 		store:                     store,
 		cfg:                       cfg,
 		cityPath:                  cityPath,
@@ -76,6 +94,9 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		withdrawQueuedWaitNudges:  withdrawQueuedWaitNudges,
 		cityUsesManagedReconciler: cityUsesManagedReconciler,
 		pokeController:            enqueueController,
+		rigStores: func() map[string]beads.Store {
+			return buildStandaloneRigStoresWithConfig(cfg, cityPath, io.Discard)
+		},
 	})
 }
 
@@ -138,12 +159,23 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 		}
 		fmt.Fprintf(stderr, "gc session wake: session %s has been in state %q since %s without completing its create; the wake request was recorded but cannot complete now. If its runtime is gone, use `gc session close` to release the slot.\n", id, res.Info.MetadataState, since) //nolint:errcheck
 		rejectStuck = true
-	// Same "wake recorded but cannot complete" shape as the createAbandoned arm
-	// above: the reconciler never acts on a suspended rig's sessions, so a
-	// wake here is otherwise silently swallowed with no error and no event.
-	case agent != nil:
-		if rigName, suspended := sessionWakeOwningRigSuspended(agent, deps.cfg, deps.cityPath); suspended {
-			fmt.Fprintf(stderr, "gc session wake: rig %q is suspended -- wake dropped; run `gc rig resume %s`\n", rigName, rigName) //nolint:errcheck
+	}
+	// Same "wake recorded but cannot complete" shape: the controller will not
+	// act on the wake. The one will-not-start predicate the API wake also uses
+	// says why, read on the row after the wake (and after the reset above).
+	if !rejectStuck {
+		rigStores := deps.rigStores
+		if rigStores == nil {
+			rigStores = func() map[string]beads.Store { return nil }
+		}
+		woken := res.Info
+		if info, err := sessFront.Get(id); err == nil {
+			woken = info
+		}
+		if why, _ := wakeWillNotStart(woken, wakeVerdictDeps{
+			cfg: deps.cfg, cityPath: deps.cityPath, sessFront: sessFront, sp: deps.sp, workStore: deps.store, rigStores: rigStores,
+		}, deps.now()); why != "" {
+			fmt.Fprintf(stderr, "gc session wake: wake recorded for session %s, but it will not start: %s\n", id, why) //nolint:errcheck
 			rejectStuck = true
 		}
 	}
@@ -199,34 +231,6 @@ func sessionWakeResolveAgentInfo(info session.Info, cfg *config.City) *config.Ag
 		template = info.Template
 	}
 	return findAgentByTemplate(cfg, template)
-}
-
-// sessionWakeOwningRigSuspended reports whether agent's configured rig
-// is effectively suspended (runtime override, else the rig's authored
-// suspended_on_start), returning the rig name for the caller's error
-// message. An agent with no configured rig (city-scoped) is never
-// blocked here.
-//
-// This is deliberately rig-only. The canonical superset predicate is
-// isAgentEffectivelySuspendedWith (cmd/gc/cmd_suspend.go), which also
-// covers city-level suspension and the per-agent `suspended` flag;
-// both gates resolve the owning rig through configuredRigName so they
-// cannot drift on rig-bound agents whose Dir is a filesystem path.
-// The narrower scope here keeps this wake-time message specific to the
-// one case that carries an actionable `gc rig resume` hint.
-func sessionWakeOwningRigSuspended(agent *config.Agent, cfg *config.City, cityPath string) (rigName string, suspended bool) {
-	rigName = configuredRigName(cityPath, agent, cfg.Rigs)
-	if rigName == "" {
-		return "", false
-	}
-	suspState := loadSuspensionStateBestEffort(cityPath)
-	for i := range cfg.Rigs {
-		if cfg.Rigs[i].Name != rigName {
-			continue
-		}
-		return rigName, suspensionstate.EffectiveRigSuspended(suspState, rigName, cfg.Rigs[i].EffectiveSuspendedOnStart())
-	}
-	return "", false
 }
 
 func sessionWakeRequestedCreateInfo(info session.Info) bool {

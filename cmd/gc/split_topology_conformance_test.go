@@ -187,7 +187,7 @@ func conformanceReadyFederation(t *testing.T, e splitEnv) {
 		t.Fatalf("HQ bead %s classifies as infrastructure; this leg is about the WORK class specifically", hqWork.ID)
 	}
 
-	found, stores, refs, partial := collectOpenUnassignedRoutedWork(e.cityPath, e.cfg, e.sessionsStore(), e.rigStores, nil, os.Stderr, nil)
+	found, stores, refs, partial := collectOpenUnassignedRoutedWork(e.cityPath, e.cfg, e.sessionsStore(), e.rigStores, nil, os.Stderr, nil, nil)
 	if partial {
 		t.Fatal("collectOpenUnassignedRoutedWork reported a partial scan; the demand read must be complete for this invariant to mean anything")
 	}
@@ -1383,7 +1383,7 @@ func conformanceResidenceSweep(t *testing.T, e splitEnv) {
 		Title:    "worker-1",
 		Type:     session.BeadType,
 		Labels:   []string{session.LabelSession},
-		Metadata: map[string]string{"session_id": "sess-1"},
+		Metadata: map[string]string{"test_session_id": "sess-1"},
 	}); err != nil {
 		t.Fatalf("create session bead: %v", err)
 	}

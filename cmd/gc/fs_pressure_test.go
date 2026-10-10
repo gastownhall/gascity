@@ -610,3 +610,33 @@ func TestCityRuntimeManualReloadBypassesFSPressureSkipUntilDemandRefresh(t *test
 		t.Fatalf("FS pressure skip events = %#v, want none for manual reload refresh tick", evts)
 	}
 }
+
+// Kills: the FS-pressure gate's p.completed = true dropped (a deliberately
+// skipped tick traced aborted), or its convergence drain dropped (a queued
+// CLI convergence command waits out the whole pressure episode). The skipped
+// tick replies to the queued command, records no phase after the gate, and
+// traces completed.
+func TestCityRuntimeTickFSPressureSkipCompletesAndDrainsConvergence(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, false, false)
+	withFakePressureFile(t, []byte(samplePressureHigh), nil)
+	t.Setenv(fsPressureThresholdEnv, "")
+	cr.convScopes = map[string]*convergenceScope{}
+	cr.convergenceReqCh = make(chan convergenceRequest, 1)
+	replyCh := make(chan convergenceReply, 1)
+	cr.convergenceReqCh <- convergenceRequest{Command: "stop", BeadID: "gc-missing", replyCh: replyCh}
+
+	runFixtureTick(cr, "patrol")
+
+	select {
+	case <-replyCh:
+	default:
+		t.Error("the FS-pressure-skipped tick did not drain the queued convergence request")
+	}
+	records := closeTrace(t, cr)
+	if ops := operationRecords(records); len(ops) != 0 {
+		t.Errorf("the FS-pressure-skipped tick ran phases past the gate: %v", ops)
+	}
+	if got := passCompletion(records, "tick"); got != TraceCompletionCompleted {
+		t.Errorf("FS-pressure-skipped tick trace completion = %q, want %q", got, TraceCompletionCompleted)
+	}
+}

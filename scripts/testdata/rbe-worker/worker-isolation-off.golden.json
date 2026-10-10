@@ -3,7 +3,7 @@
     {
       "name": "REMOTE_CAS",
       "grpc": {
-        "instance_name": "",
+        "instance_name": "oss",
         "endpoints": [
           {
             "address": "grpcs://rbe-west.example.invalid:443",
@@ -86,6 +86,11 @@
           "ISA": {
             "values": [
               "x86_64"
+            ]
+          },
+          "worker-env": {
+            "values": [
+              "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
             ]
           }
         }

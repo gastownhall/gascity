@@ -75,7 +75,8 @@ func TestReconcileSessionBeadsNamedSpecReappearsDuringLivenessErrorClearsDeferra
 		namedSessionIdentityMetadata: "worker",
 		namedSessionModeMetadata:     "always",
 		"state":                      "active",
-		"last_woke_at":               env.clk.Now().UTC().Format(time.RFC3339),
+		// Past the INC-003 wake grace, so the #3630 window is what defers.
+		"last_woke_at":               env.clk.Now().Add(-wakeUndesiredGrace - time.Minute).UTC().Format(time.RFC3339),
 		"session_key":                "resume-worker",
 		"started_config_hash":        "config-worker",
 		"continuation_reset_pending": "",

@@ -457,7 +457,7 @@ func retirePoolSlotAtDrainDeadline(
 		fmt.Fprintf(stderr, "session reconciler: stamping drain-deadline provenance on %s: %v\n", name, err) //nolint:errcheck
 		return nil, false
 	}
-	if !closeBead(store, info.ID, "drained", now, stderr) {
+	if !closeBead(store, info, "drained", now, stderr) {
 		if clearErr := sessionFrontDoor(store).ApplyPatch(info.ID, sessionpkg.MetadataPatch{drainFinalizeMetadataKey: ""}); clearErr != nil {
 			fmt.Fprintf(stderr, "session reconciler: clearing drain-deadline provenance after a refused close of %s: %v\n", name, clearErr) //nolint:errcheck
 		}
@@ -550,7 +550,7 @@ func poolSlotRuntimeStoppedForRetire(
 	if claimed {
 		return false, false
 	}
-	if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
+	if err := controllerKillSessionRow(cityPath, store, sp, cfg, info); err != nil && !runtime.IsSessionGone(err) {
 		fmt.Fprintf(stderr, "session reconciler: drain-deadline stop of %s: %v\n", name, err) //nolint:errcheck
 		return false, false
 	}

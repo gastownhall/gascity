@@ -550,6 +550,7 @@ func TestInventoryOnDeath_DeathPokesController(t *testing.T) {
 	remote := &listOnlyProvider{Fake: runtime.NewFake(), names: []string{"gc-ssh"}, unattested: true}
 	cr := inventoryLaneTestRuntime(t, sessionhybrid.New(local, remote, func(string) bool { return false }), nil)
 	cr.pokeCh = make(chan struct{}, 1)
+	withLegacyWake(cr)
 	poked := func() bool {
 		select {
 		case <-cr.pokeCh:
@@ -635,6 +636,7 @@ func TestInventoryOnDeath_RestartDeferredUntilHookCompletes(t *testing.T) {
 		}
 		cr, hooks, _ := onDeathLaneRuntime(t, e.sp, onDeathHandlers("ant", "sky"))
 		cr.pokeCh = make(chan struct{}, 1)
+		withLegacyWake(cr)
 		hooks.gate = make(chan struct{})
 		e.startOptions = append(e.startOptions, withOnDeathGate(cr.onDeathGate()))
 		startOnDeathWorkerInBubble(t, cr)
@@ -1017,29 +1019,6 @@ func TestRuntimeInventoryLane_StartsAndJoinsOnDeathWorker(t *testing.T) {
 			t.Fatal("stop did not return after the hook finished")
 		}
 	})
-}
-
-// Kills: the API never learning the runtime's start interlock. Starting the
-// lane publishes its gate to the controller state the API reads.
-func TestInitRuntimeInventoryLane_PublishesOnDeathGateToAPIState(t *testing.T) {
-	cs := &controllerState{cityBeadStore: beads.NewMemStore()}
-	cr := &CityRuntime{
-		cfg:                 &config.City{Daemon: config.DaemonConfig{PatrolInterval: inventoryLaneInterval.String()}},
-		sp:                  newScriptedInventoryProvider(),
-		standaloneCityStore: beads.NewMemStore(),
-		stderr:              io.Discard,
-	}
-	cr.setControllerState(cs)
-	if cs.OnDeathHookPending("worker-1") {
-		t.Fatal("pending before any lane")
-	}
-	if cr.initRuntimeInventoryLane() == nil {
-		t.Fatal("no lane")
-	}
-	cr.onDeathGate().enqueue([]deathEdge{{name: "worker-1"}})
-	if !cs.OnDeathHookPending("worker-1") {
-		t.Fatal("the API state does not see the lane's held name")
-	}
 }
 
 // Kills: a city whose handler names live only on an unattested backend

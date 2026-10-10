@@ -17,6 +17,7 @@ package acceptance_test
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -326,7 +327,7 @@ func TestBdBasicCRUD(t *testing.T) {
 		if err != nil {
 			// bd create --graph may not be available in all versions.
 			// If the command is unrecognized, skip rather than fail.
-			if strings.Contains(string(out), "unknown") || strings.Contains(string(out), "unrecognized") {
+			if strings.Contains(out, "unknown") || strings.Contains(out, "unrecognized") {
 				t.Skipf("bd create --graph not supported in this version: %s", out)
 			}
 			t.Fatalf("bd create --graph failed: %v\n%s", err, out)
@@ -629,7 +630,8 @@ func TestBdBasicCRUD(t *testing.T) {
 		out, err := runBD(t, dir, "ready", "--label=pool:mypool", "--unassigned", "--limit=1")
 		// bd returns exit 1 for "no results" which is acceptable.
 		if err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
 				// Acceptable: no ready work found (bead may need deps resolved).
 				return
 			}

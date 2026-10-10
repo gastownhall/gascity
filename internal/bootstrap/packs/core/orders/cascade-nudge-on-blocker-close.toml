@@ -6,7 +6,9 @@
 #
 # Triggers on bead.closed — the event the close transition actually emits
 # (a closed bead only emits bead.updated on a later metadata edit), so this
-# fires once, exactly on the transition that unblocks dependents.
+# fires on the transition that unblocks dependents. Delivery is at least once:
+# one close can reach the bus twice (from the closing process and from the
+# controller's cache), which the per-pair dedup absorbs.
 #
 # Resolving dependents and nudging is mechanical (dep lookup + session
 # nudge). No LLM judgment needed, so the controller runs it via exec.

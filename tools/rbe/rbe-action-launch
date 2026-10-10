@@ -12,9 +12,13 @@
 #       start if sudo is already gone. Check the egress filter and the action
 #       directory (from the working directory NativeLink set), claim it, take a
 #       free slot, hand the action's directories to the slot user, then exec
-#       unshare (new pid/mount/ipc[/net] namespaces).
-#   launch --ns <op> <slot> <rel> <timeout_s> <side_channel|-> <lock_fd> <n> <env...> <argv...>
-#       inner: pid 1 of those namespaces. Hides the worker's state, gives the
+#       unshare (new pid/mount/ipc[/net] namespaces; net with NETNS=1, or when
+#       the action asked for RBE_X_NETWORK=off).
+#   launch --ns <op> <slot> <rel> <timeout_s> <side_channel|-> <lock_fd> <host_net|-> <n> <env...> <argv...>
+#       inner: pid 1 of those namespaces. host_net (the outer's
+#       /proc/self/ns/net link): pid 1 checks it is in another network
+#       namespace and brings up its loopback; -: the host's (filtered)
+#       network. Hides the worker's state, gives the
 #       action private /tmp, /var/tmp, HOME, /dev/shm (and TMPFS_DIRS), with
 #       ROOT_RO=1 makes everything else read-only, with MASK_SOCKETS=1
 #       world-writable sockets on /run unreachable, runs it as the slot user
@@ -57,11 +61,29 @@ case ${1:-} in --ns | --parent) ;; *) first "$@" ;; esac
 : "${MAX_TIMEOUT_S:?}" "${BACKSTOP_S:?}" "${HOME_DIR:?}"
 NETNS=${NETNS:-0} SHM_SIZE=${SHM_SIZE:-8g} TMPFS_DIRS=${TMPFS_DIRS:-/run/lock /var/crash} ROOT_RO=${ROOT_RO:-0}
 MASK_SOCKETS=${MASK_SOCKETS:-0}
+[[ $NETNS == [01] ]] || die "NETNS must be 0 or 1"
 [[ $ROOT_RO == [01] ]] || die "ROOT_RO must be 0 or 1"
 [[ $MASK_SOCKETS == [01] ]] || die "MASK_SOCKETS must be 0 or 1"
 # RO_DIRS (a list of read-only directories) is gone: ROOT_RO=1 covers them all.
 [[ -z ${RO_DIRS:-} ]] || die "RO_DIRS is no longer supported: set ROOT_RO=1"
 EGRESS_CHAIN=${EGRESS_CHAIN:-inet filter rbe_action_out}
+
+# action_netns <RBE_X_NETWORK>: 1 if the action gets its own network
+# namespace with loopback only, 0 if it keeps this worker's network (behind
+# the slot egress filter). The value is the action's `network` platform
+# property (README "Per-action network"): off asks for loopback only; on, or
+# empty (NativeLink passes "" when the action has no such property), keeps
+# today's network. NETNS=1 (the fork tier, where it is the security
+# boundary) is loopback only whatever the action says, and its value is not
+# even read. Anything else fails: refused, never run on a guess.
+action_netns() {
+	if [[ $NETNS == 1 ]]; then echo 1 && return; fi
+	case $1 in
+	"" | on) echo 0 ;;
+	off) echo 1 ;;
+	*) return 1 ;;
+	esac
+}
 
 outer() {
 	[[ ${1:-} =~ ^[0-9]+$ && $1 == "$PPID" ]] || die "sudo (pid ${1:-?}) exited during setup"
@@ -105,16 +127,25 @@ outer() {
 	# Control values from additional_environment. The action can override them
 	# (its Command environment wins), so they are validated, and stripped from
 	# the environment the action gets.
-	local i e secs="" sc=- ms="" envs=() argv
+	local i e secs="" sc=- ms="" net="" net_set=0 netns envs=() argv
 	for ((i = 2; i <= n + 1; i++)); do
 		e=${!i}
 		case $e in
 		RBE_X_TIMEOUT_MS=*) ms=${e#*=} ;;
 		RBE_X_SIDE_CHANNEL=*) sc=${e#*=} ;;
+		RBE_X_NETWORK=*)
+			((!net_set)) || die "RBE_X_NETWORK given twice"
+			net=${e#*=} net_set=1
+			;;
 		*) envs+=("$e") ;;
 		esac
 	done
 	argv=("${@:n+2}")
+	# RBE_X_NETWORK: the action's own choice either way (its property, or its
+	# environment over it). It can only take network away: off is loopback
+	# only, on is this worker's default, and with NETNS=1 nothing it says
+	# gives it a network.
+	netns=$(action_netns "$net") || die "bad RBE_X_NETWORK (off, on or empty)"
 	# NativeLink passes the action's timeout, or its own max_action_timeout
 	# (BACKSTOP_S, where it kills the launcher) when the action has none. So
 	# exactly BACKSTOP_S * 1000 ms means "none" (MAX_TIMEOUT_S), also when an
@@ -178,12 +209,15 @@ outer() {
 	setpriv --pdeathsig KILL -- find "$work" "$op_dir/rbe/home" -xdev -type d -exec chown -h "$uid:$uid" {} + {lk}>&-
 	chmod 0700 "$work"
 
-	local ns=(--pid --fork --kill-child=KILL --mount --mount-proc --ipc)
-	if [[ $NETNS == 1 ]]; then ns+=(--net); fi
+	local ns=(--pid --fork --kill-child=KILL --mount --mount-proc --ipc) host_net=-
+	if [[ $netns == 1 ]]; then
+		ns+=(--net)
+		host_net=$(readlink /proc/self/ns/net)
+	fi
 	# pdeathsig: if NativeLink kills sudo (cancel, backstop timeout), unshare
 	# dies, and --kill-child takes pid 1 and with it the whole pid namespace.
 	exec setpriv --pdeathsig KILL -- unshare "${ns[@]}" -- \
-		"$SELF" --ns "$op" "$slot" "$rel" "$secs" "$sc" "$lk" "${#envs[@]}" "${envs[@]}" "${argv[@]}"
+		"$SELF" --ns "$op" "$slot" "$rel" "$secs" "$sc" "$lk" "$host_net" "${#envs[@]}" "${envs[@]}" "${argv[@]}"
 }
 
 # Everything back to the worker user, readable and removable, for upload and
@@ -199,12 +233,20 @@ fixup() {
 }
 
 inner() {
-	local op=$1 slot=$2 rel=$3 secs=$4 sc=$5 lk=$6
-	shift 6
+	local op=$1 slot=$2 rel=$3 secs=$4 sc=$5 lk=$6 host_net=$7
+	shift 7
 	uid=$((SLOT_UID0 + slot)) op_dir=$WORK_ROOT/$op
 	local stash=$RUN/stash/$slot
 	trap 'fixup; exit 125' ERR
-	if [[ $NETNS == 1 ]]; then ip link set lo up; fi
+	# Loopback only: in a network namespace that is not the host's (never
+	# the host's network by mistake, NETNS=1 above all), with lo up.
+	if [[ $host_net == - ]]; then
+		[[ $NETNS != 1 ]] || { echo "rbe-action: NETNS=1 but no network namespace" >&2; false; }
+	else
+		[[ $host_net =~ ^net:\[[0-9]+\]$ && $(readlink /proc/self/ns/net) != "$host_net" ]] ||
+			{ echo "rbe-action: not in a network namespace of its own" >&2; false; }
+		ip link set lo up
+	fi
 	# Only this action's directory stays visible under MASK_ROOT (the worker's
 	# CAS, its temp files and every other action are hidden).
 	[[ -d $stash ]] || mkdir -m 0700 "$stash"
@@ -261,10 +303,13 @@ inner() {
 	fi
 	# MASK_SOCKETS=1: connect() works on a read-only mount, so a world-writable
 	# socket on /run (a VM shutdown socket, snapd, uuidd, acpid, systemd's
-	# varlink services) would still let any action use it. Each one, but
-	# journald's (logging) and the system bus (polkit decides), gets /dev/null
-	# bound over it in this namespace only: connect() is refused, the host's
-	# socket stays as it is. One find walks /run and every mount on it but
+	# varlink services) would still let any action use it. Each one but
+	# journald's (logging) gets /dev/null bound over it in this namespace
+	# only: connect() is refused, the host's socket stays as it is. The
+	# system bus too: unix sockets ignore network namespaces, and
+	# systemd-resolved answers anyone on it (org.freedesktop.resolve1 resolves
+	# any record, a DNS tunnel out of a loopback-only action); nothing an
+	# action runs needs it. One find walks /run and every mount on it but
 	# the action's own, each with -xdev (a socket bind-mounted over a file is
 	# found as a start point only), names NUL-delimited; a hidden mount's path
 	# is gone or is what the action reaches. 2-3 ms per socket (mount).
@@ -275,7 +320,7 @@ inner() {
 			case $m in /run/*) if [[ -z ${own[$m]:-} ]]; then walk+=("$m"); fi ;; esac
 		done
 		while IFS= read -r -d '' s; do
-			case $s in /run/systemd/journal/* | /run/dbus/system_bus_socket) ;; *) socks[$s]=1 ;; esac
+			case $s in /run/systemd/journal/*) ;; *) socks[$s]=1 ;; esac
 		done < <(find "${walk[@]}" -xdev -type s -perm -o+w -print0 2>/dev/null)
 		# A socket gone meanwhile needs no mask; any other failure stops here.
 		for s in "${!socks[@]}"; do

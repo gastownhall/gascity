@@ -20,7 +20,7 @@ import (
 // reachability question this bead's acceptance criteria raised: whether
 // routed_ready()/assignee_ready() can ever actually run as a subprocess via
 // nextWorkflowServeBeads's raw shellWorkQueryWithEnv fallback, or whether
-// tryControlReadyFromCacheOrFallback always intercepts first. It proves the
+// tryControlReadyScan always intercepts first. It proves the
 // latter, so the string-level assertions above are defense-in-depth on
 // currently-dead code, not coverage of a live production path -- the real
 // enforcement for this query shape runs through evaluateControlReady /
@@ -61,7 +61,7 @@ func TestWorkflowServeControlReadyQueryRoutedReadyAppliesToAllRouteAliases(t *te
 
 // TestWorkflowServeControlReadyQueryShellFallbackUnreachable proves
 // nextWorkflowServeBeads's raw shell fallback (shellWorkQueryWithEnv) can
-// never execute a control-ready-shaped query. tryControlReadyFromCacheOrFallback
+// never execute a control-ready-shaped query. tryControlReadyScan
 // returns handled=false only when parseControlReadyQuery fails to recognize
 // the query (dispatch_control_ready.go), which happens only when its parsed
 // target is empty. workflowServeControlReadyQueryForBeads guarantees a

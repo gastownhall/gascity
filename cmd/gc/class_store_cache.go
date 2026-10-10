@@ -18,10 +18,10 @@ package main
 // is also the one layer that can see a bead engine's ready projection, which it
 // finds by type-asserting its backing, so any wrapper between the two turns the
 // projection off. Cache over engine, emitting through the cache's own onChange,
-// satisfies both. The rows carry the cache-reconcile actor, the one the work
-// ledger's cache stamps on the identical write on a city that relocates
-// nothing, so a split city's events poke, enqueue and fold exactly as a
-// single-store city's do.
+// satisfies both. The rows carry the cache actors (cache-local for a write,
+// cache-reconcile for what a scan infers), the ones the work ledger's cache
+// stamps on the identical write on a city that relocates nothing, so a split
+// city's events poke, enqueue and fold exactly as a single-store city's do.
 //
 // # Freshness
 //
@@ -75,7 +75,7 @@ import (
 // Routes that already emit (the one-shot funnel's) are returned untouched: a
 // cache over an emitter would emit twice and hide the engine's ready
 // projection. A store that is already a cache is left as it is.
-func (r *storageRoutes) withControllerCache(ctx context.Context, ep events.Provider) *storageRoutes {
+func (r *storageRoutes) withControllerCache(ctx context.Context, ep events.Provider, opts ...beads.CachingStoreOption) *storageRoutes {
 	if r == nil || len(r.stores) == 0 || r.emitCityPath != "" {
 		return r
 	}
@@ -89,7 +89,7 @@ func (r *storageRoutes) withControllerCache(ctx context.Context, ep events.Provi
 		}
 		wrapped, ok := cached[store]
 		if !ok {
-			wrapped = wrapWithCachingStore(ctx, store, ep, true, beads.WithEventIDPrefixes(r.namespacesServedBy(store)...))
+			wrapped = wrapWithCachingStore(ctx, store, ep, true, append([]beads.CachingStoreOption{beads.WithEventIDPrefixes(r.namespacesServedBy(store)...)}, opts...)...)
 			if wrapped == nil {
 				continue
 			}

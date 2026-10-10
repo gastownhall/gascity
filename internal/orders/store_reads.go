@@ -98,6 +98,15 @@ func (s *Store) RecentRunsAll(limit int) ([]OrderRun, error) {
 		Limit:         limit,
 		IncludeClosed: true,
 		Sort:          beads.SortCreatedDesc,
+		// Both tiers, stated rather than inherited. A policy-wrapped store
+		// rewrites TierIssues to TierBoth on the way in (cmd/gc
+		// expandPolicyReadTier), so production already reads both — but the
+		// backing limit only rides down when the backing set IS the query set,
+		// and TierIssues is one of the three predicates that disqualify it
+		// (internal/beads nativeListLimitPushdown). Left unstated, this read's
+		// whole reason for opting into the bounded limit silently evaporates the
+		// moment it runs over an unwrapped store.
+		TierMode: beads.TierBoth,
 		// Aggregate read: the rows fold into entries[order] = max(CreatedAt), so
 		// the backing's created-desc tie-break at the limit boundary is
 		// irrelevant. Opt into the bounded backing limit to keep the fetch off

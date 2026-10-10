@@ -14,7 +14,11 @@ BLACKSMITH_RUNNERS = {
     "runner_8vcpu": "blacksmith-8vcpu-ubuntu-2404",
     "runner_16vcpu": "blacksmith-16vcpu-ubuntu-2404",
     "runner_32vcpu": "blacksmith-32vcpu-ubuntu-2404",
-    "runner_macos": "blacksmith-12vcpu-macos-15",
+    "runner_macos": "blacksmith-6vcpu-macos-15",
+    # Windows Server 2025 (Blacksmith public beta): the only Windows jobs are
+    # the credential-provider process-tree tests (rbe-west has no Windows
+    # workers).
+    "runner_windows": "blacksmith-4vcpu-windows-2025",
 }
 
 GITHUB_RUNNERS = {
@@ -23,6 +27,7 @@ GITHUB_RUNNERS = {
     "runner_16vcpu": "ubuntu-latest",
     "runner_32vcpu": "ubuntu-latest",
     "runner_macos": "macos-15",
+    "runner_windows": "windows-latest",
 }
 
 
@@ -45,24 +50,16 @@ def select_runners(
     *,
     force_blacksmith: bool = False,
 ) -> tuple[bool, str, dict[str, str]]:
-    """Return whether to use Blacksmith, the reason, and runner labels."""
-    normalized_event = event_name.strip()
-    normalized_author = author.strip()
-    if force_blacksmith:
-        return True, "Blacksmith forced by workflow input", BLACKSMITH_RUNNERS
-    if normalized_event == "pull_request" and normalized_author.lower() in allowlist:
-        return True, "pull request author is in .github/blacksmith-allowlist.txt", BLACKSMITH_RUNNERS
-    if normalized_event != "pull_request":
-        return (
-            False,
-            f"Blacksmith is limited to approved pull requests; using GitHub-hosted runners for {normalized_event or '<unknown>'}",
-            GITHUB_RUNNERS,
-        )
-    return (
-        False,
-        f"author {normalized_author or '<unknown>'} is not on the Blacksmith allowlist; using GitHub-hosted runners",
-        GITHUB_RUNNERS,
-    )
+    """Return whether to use Blacksmith, the reason, and runner labels.
+
+    Blacksmith for every event and author: Blacksmith donates compute to this
+    OSS repository, and GitHub-hosted jobs queue behind the organisation's
+    concurrent-job cap (fork and push jobs waited p90 4-9 minutes on
+    2026-10-02/03, Blacksmith jobs 7-9 seconds). The arguments stay for the
+    callers and tests; the allowlist no longer selects runners.
+    """
+    del event_name, author, allowlist, force_blacksmith
+    return True, "Blacksmith for every event (OSS repository)", BLACKSMITH_RUNNERS
 
 
 def append_outputs(use_blacksmith: bool, reason: str, runners: dict[str, str]) -> None:

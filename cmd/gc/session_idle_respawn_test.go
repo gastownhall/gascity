@@ -190,7 +190,7 @@ func TestReconcileSessionBeads_IdleRespawnCancelsWhenActivityResumesBeforeAck(t 
 	}
 	sp.SetActivity(name, clk.Now().Add(time.Second))
 
-	advanceSessionDrainsWithSessionsTraced(
+	advanceSessionDrainsWithSessionsTraced("",
 		dt,
 		sp,
 		nil,

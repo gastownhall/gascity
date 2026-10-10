@@ -1,12 +1,13 @@
 package testutil
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
-	"testing"
 )
 
 // FailureArtifactDirEnv names the directory a failing test copies its Dolt and
@@ -27,6 +28,8 @@ var failureArtifactNames = map[string]bool{
 	"server.log":       true, // bd db-proxy-child stderr + the dolt sql-server it spawns
 	"proxy.log":        true, // bd proxy listener
 	"dolt.log":         true, // gc-managed dolt sql-server
+	"dolt-server.log":  true, // scope-local dolt sql-server under <scope>/.beads
+	"supervisor.log":   true, // gc supervisor and the city controllers it runs
 	"config.yaml":      true, // the config bd generated for its child
 	"dolt-config.yaml": true, // the config gc-beads-bd generated for the managed server
 	"metadata.json":    true, // dolt_mode / dolt_database the scope actually got
@@ -34,38 +37,77 @@ var failureArtifactNames = map[string]bool{
 
 // maxFailureArtifactBytes caps each copied file. A proxy child that retries
 // dolt init writes its whole usage block per attempt, so server.log reaches
-// hundreds of KB while only the first and last few lines carry the error.
+// hundreds of KB while only the first and last few lines carry the error;
+// a longer file keeps its first quarter and its last three quarters.
 const maxFailureArtifactBytes = 256 << 10
 
-// saveFailureDiagnostics copies the allowlisted diagnostics under dir into the
-// directory named by FailureArtifactDirEnv. It is best-effort by design: this
-// runs while a test is already failing, and a collection error must never
-// replace the real failure.
-func saveFailureDiagnostics(t *testing.T, dir string) {
+// truncatedArtifactMarker separates the head and tail of a capped copy.
+const truncatedArtifactMarker = "\n... [truncated by testutil: middle of file omitted] ...\n"
+
+// FailureReporter is the part of testing.TB that diagnostics collection reads.
+type FailureReporter interface {
+	Name() string
+	Failed() bool
+}
+
+// SaveFailureDiagnostics copies the allowlisted diagnostics under dir into
+// $GC_TEST_FAILURE_ARTIFACT_DIR/<test name>/<base of dir> when t has failed.
+// Call it from a t.Cleanup registered before the one that removes dir. It is
+// best-effort by design: this runs while a test is already failing, and a
+// collection error must never replace the real failure.
+func SaveFailureDiagnostics(t FailureReporter, dir string) {
 	if !t.Failed() {
 		return
 	}
+	SaveDiagnostics(t.Name(), dir)
+}
+
+// SaveDiagnostics copies the allowlisted diagnostics under dir into
+// $GC_TEST_FAILURE_ARTIFACT_DIR/<name>/<base of dir> unconditionally. It is
+// for state that outlives a single test, such as a TestMain's shared GC_HOME
+// after a failed run. A no-op when the variable is unset. Collection errors
+// are reported on stderr and never fail the caller.
+func SaveDiagnostics(name, dir string) {
+	if err := saveDiagnostics(name, dir); err != nil {
+		fmt.Fprintf(os.Stderr, "testutil: saving diagnostics for %s from %s: %v\n", name, dir, err)
+	}
+}
+
+// saveDiagnostics does SaveDiagnostics' work and returns every collection
+// error it met. A file that vanishes mid-walk is not an error.
+func saveDiagnostics(name, dir string) error {
 	dest := strings.TrimSpace(os.Getenv(FailureArtifactDirEnv))
 	if dest == "" {
-		return
+		return nil
 	}
-	dest = filepath.Join(dest, sanitizeArtifactPathSegment(t.Name()), filepath.Base(dir))
+	dest = filepath.Join(dest, sanitizeArtifactPathSegment(name), filepath.Base(dir))
 	if err := os.MkdirAll(dest, 0o755); err != nil {
-		return
+		return fmt.Errorf("creating artifact dir: %w", err)
 	}
-	writeFailureEnvSnapshot(dest, dir)
-
-	_ = filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || !failureArtifactNames[entry.Name()] {
-			return nil //nolint:nilerr // a walk error must not mask the test's own failure
-		}
-		rel, relErr := filepath.Rel(dir, path)
-		if relErr != nil {
+	errs := []error{writeFailureEnvSnapshot(dest, dir)}
+	walkErr := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			if path == dir {
+				return err
+			}
+			if !errors.Is(err, fs.ErrNotExist) {
+				errs = append(errs, err)
+			}
 			return nil
 		}
-		copyBoundedFile(path, filepath.Join(dest, sanitizeArtifactPathSegment(rel)))
+		if entry.IsDir() || !failureArtifactNames[entry.Name()] {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			errs = append(errs, err)
+			return nil
+		}
+		errs = append(errs, copyBoundedFile(path, filepath.Join(dest, sanitizeArtifactPathSegment(rel))))
 		return nil
 	})
+	errs = append(errs, walkErr)
+	return errors.Join(errs...)
 }
 
 // writeFailureEnvSnapshot records the environment the test projected into the
@@ -73,7 +115,7 @@ func saveFailureDiagnostics(t *testing.T, dir string) {
 // before it publishes a port — no dolt on PATH, an unset or unwritable HOME,
 // a TMPDIR the child cannot use — is visible here and nowhere else once the
 // temp dir is gone.
-func writeFailureEnvSnapshot(dest, dir string) {
+func writeFailureEnvSnapshot(dest, dir string) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "temp_root\t%s\n", dir)
 	for _, key := range []string{"HOME", "PATH", "TMPDIR", "USER", "LOGNAME", "DOLT_ROOT_PATH", "GC_BEADS", "GC_DOLT", "GC_CITY_PATH", "GC_FAST_UNIT"} {
@@ -84,21 +126,52 @@ func writeFailureEnvSnapshot(dest, dir string) {
 		}
 		fmt.Fprintf(&b, "%s\t%s\n", key, value)
 	}
-	_ = os.WriteFile(filepath.Join(dest, "env.txt"), []byte(b.String()), 0o644)
+	return os.WriteFile(filepath.Join(dest, "env.txt"), []byte(b.String()), 0o644)
 }
 
-func copyBoundedFile(src, dst string) {
+// copyBoundedFile copies src to dst, keeping the head and the tail of a file
+// larger than maxFailureArtifactBytes: a server's startup lines and its last
+// lines before it died are the ones a diagnosis needs. Both reads are bounded,
+// so a log that is still being written cannot grow the copy past the cap.
+func copyBoundedFile(src, dst string) (err error) {
 	in, err := os.Open(src) //nolint:gosec // G304: src comes from walking the test's own temp dir
 	if err != nil {
-		return
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
 	}
 	defer func() { _ = in.Close() }()
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
 	out, err := os.Create(dst) //nolint:gosec // G304: dst is under the workflow-provided artifact dir
 	if err != nil {
-		return
+		return err
 	}
-	defer func() { _ = out.Close() }()
-	_, _ = io.Copy(out, io.LimitReader(in, maxFailureArtifactBytes))
+	defer func() {
+		if closeErr := out.Close(); err == nil {
+			err = closeErr
+		}
+	}()
+	if info.Size() <= maxFailureArtifactBytes {
+		_, err = io.Copy(out, io.LimitReader(in, maxFailureArtifactBytes))
+		return err
+	}
+	const head = maxFailureArtifactBytes / 4
+	const tail = maxFailureArtifactBytes - head
+	if _, err := io.CopyN(out, in, head); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(out, truncatedArtifactMarker); err != nil {
+		return err
+	}
+	if _, err := in.Seek(-tail, io.SeekEnd); err != nil {
+		return err
+	}
+	_, err = io.Copy(out, io.LimitReader(in, tail))
+	return err
 }
 
 // sanitizeArtifactPathSegment flattens a relative path or test name into one

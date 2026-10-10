@@ -149,6 +149,15 @@ func (f *ownershipFixture) beginInFlightOrphanedDrain(t *testing.T, reason strin
 	f.env.dt.set(f.session.ID, ds)
 }
 
+// ageBeyondWakeGrace backdates the tick's snapshot of the worker's last wake past
+// wakeUndesiredGrace. The fixture wakes the worker on the frozen tick it then
+// drops demand on, which is the wake-vs-demand race the INC-003 grace defers; a
+// test whose subject is the orphaned drain begin ages the row first. Only the
+// snapshot is written, so the cache stays stale as the fixture requires.
+func (f *ownershipFixture) ageBeyondWakeGrace() {
+	f.session.Metadata["last_woke_at"] = f.env.clk.Now().Add(-wakeUndesiredGrace - time.Minute).UTC().Format(time.RFC3339)
+}
+
 // stopObservation reports whether the tick stopped or is stopping the worker,
 // and why.
 func (f *ownershipFixture) stopObservation(t *testing.T) (bool, string) {
@@ -240,7 +249,10 @@ func ownershipDeciders() []ownershipDecider {
 		{
 			name:         "orphaned drain begin (not-desired live arm)",
 			negativeStop: "drain:orphaned",
-			drive:        func(_ *testing.T, f *ownershipFixture) { notDesired(f) },
+			drive: func(_ *testing.T, f *ownershipFixture) {
+				f.ageBeyondWakeGrace()
+				notDesired(f)
+			},
 		},
 		{
 			name:         "orphaned drain in flight (tracked, not yet acked)",
@@ -319,6 +331,7 @@ func TestOwnershipVeto_LogsOnce(t *testing.T) {
 // publishing the ack that stops the worker.
 func TestOwnershipVeto_InFlightOrphanedDrainCanceledWhenClaimAppears(t *testing.T) {
 	f := newOwnershipFixture(t)
+	f.ageBeyondWakeGrace()
 	f.env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{f.session}, map[string]int{}, f.dops)
 	if ds := f.env.dt.get(f.session.ID); ds == nil || ds.reason != "orphaned" {
 		t.Fatalf("tick 1: drain = %+v, want an orphaned drain (test premise)", ds)

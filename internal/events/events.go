@@ -241,10 +241,23 @@ const (
 	// Emitted by the session reconciler's start-result commit path; the
 	// envelope's Subject carries the session name.
 	SessionColdStartTimeout = "session.cold_start_timeout"
-	ConvoyCreated           = "convoy.created"
-	ConvoyClosed            = "convoy.closed"
-	ControllerStarted       = "controller.started"
-	ControllerStopped       = "controller.stopped"
+	// SessionPending fires when a session gains a pending interaction (an
+	// approval prompt or question the session is blocked on) and
+	// SessionPendingCleared fires when that interaction goes away — answered,
+	// withdrawn, replaced by a different interaction, or the session left the
+	// set GET /v0/city/{cityName}/pending probes. Both carry the same
+	// session_id and request_id, and each fires on a transition, never once per
+	// detection poll. The API server's pending monitor emits them while at
+	// least one event stream is open for the city; see
+	// internal/api/pending_monitor.go for the detection cadence, the
+	// restart/resume contract, and why delivery is not exactly once across a
+	// restart.
+	SessionPending        = "session.pending"
+	SessionPendingCleared = "session.pending_cleared"
+	ConvoyCreated         = "convoy.created"
+	ConvoyClosed          = "convoy.closed"
+	ControllerStarted     = "controller.started"
+	ControllerStopped     = "controller.stopped"
 	// ControlStalled fires once per disposition whose bounded retry budget
 	// expires: a semantic refusal the control dispatcher then QUARANTINES
 	// (error_class "semantic"), or a drift-pending wait whose loudness horizon
@@ -419,6 +432,11 @@ const (
 	// the next episode fires independently. (ADR-0013 A1 M3a)
 	ProviderHealthGateAlert = "provider.health_gate_alert"
 
+	// ReconcilerAlert is the v2 session reconciler's operator alert: a
+	// condition that should never happen, or that needs an operator. The
+	// payload's "alert" names it (cmd/gc reconcile_observe_v2.go).
+	ReconcilerAlert = "reconciler.alert"
+
 	// Emergency events are dolt-independent escalation records written to
 	// .gc/emergency and mirrored into the city event log.
 	EmergencySignaled = "emergency.signaled"
@@ -434,6 +452,14 @@ const (
 	// lifecycle events under bead.*). Registered in stage 2 (S2-T11);
 	// emission is wired in stage 3 — nothing emits it yet.
 	BeadsConditionalWritesDegraded = "beads.conditional_writes.degraded"
+
+	// BeadsBlockedRecomputed fires when gc start runs bd's full is_blocked
+	// recompute over one bd-backed scope as a one-shot upgrade step: the
+	// first start under a bd version the scope has not been repaired with.
+	// beads migration 0059 over-sets is_blocked on stores upgraded from
+	// bd <= 1.3.0 (gastownhall/beads#7037), hiding ready work from `bd ready`
+	// and from gc's ready projection; the payload counts the rows corrected.
+	BeadsBlockedRecomputed = "beads.blocked.recomputed"
 
 	// Storage-class binding outcomes. Emitted once per controller boot by the
 	// storage gate, and once per run by `gc storage migrate`, for a city whose
@@ -482,6 +508,7 @@ var KnownEventTypes = []string{
 	SessionDrainFenceUnavailable,
 	SessionDemandClaimDivergence,
 	SessionColdStartTimeout,
+	SessionPending, SessionPendingCleared,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
@@ -517,13 +544,13 @@ var KnownEventTypes = []string{
 	StoreDiskWarn, StoreDiskCritical,
 	BackendCredentialResolved,
 	EmergencySignaled, EmergencyAcked,
-	BeadsConditionalWritesDegraded,
+	BeadsConditionalWritesDegraded, BeadsBlockedRecomputed,
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured,
-	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
-	// The event is emitted by the reconciler but its typed SSE payload is not
-	// yet registered in internal/api (the payload registration lives in a
+	// ProviderHealthGateAlert and ReconcilerAlert are intentionally omitted
+	// from KnownEventTypes. Each is emitted by the reconciler but its typed
+	// SSE payload is not yet registered in internal/api (the payload registration lives in a
 	// follow-up that adds the full SSE projection). Until then, subscribers
 	// receive it via the custom-event envelope.
 }

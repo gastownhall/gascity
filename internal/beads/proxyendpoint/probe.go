@@ -743,6 +743,25 @@ func readCursorsOver(ctx context.Context, connector driver.Connector) (CursorRep
 	if err := conn.PingContext(ctx); err != nil {
 		return report, err
 	}
+	return ReadCursorReportOverConn(ctx, conn)
+}
+
+// ReadCursorReportOverConn reads the database's real migration counters —
+// main lane, ignored lane, and the ignored lane's reality floor — over an
+// already-acquired, already-pinged *sql.Conn.
+//
+// It is readCursorsOver's body from "after the session is pinged" onward,
+// factored out so a caller that already holds a *sql.Conn through its own
+// connection-acquisition path (e.g. a pooled *sql.DB opened by
+// cmd/gc's managedDoltOpenDatabase family for the native-store preflight's
+// identity probe) can read the SAME cursors the proxied lane's admission gate
+// reads, without redialing or duplicating the cursor queries. It does not
+// ping or close conn; the caller owns both.
+func ReadCursorReportOverConn(ctx context.Context, conn *sql.Conn) (CursorReport, error) {
+	var (
+		report CursorReport
+		err    error
+	)
 	if report.Cursors.Main, report.Head, err = readMainCursorAndHead(ctx, conn); err != nil {
 		return report, err
 	}
