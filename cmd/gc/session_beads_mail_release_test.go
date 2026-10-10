@@ -94,6 +94,7 @@ func TestReleaseWorkFromClosedSessionBeadStillReleasesRealWork(t *testing.T) {
 		Title:    "HANDOFF: context filling",
 		Type:     "message",
 		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
 		Assignee: sessionBead.ID,
 	})
 	if err != nil {
@@ -103,6 +104,7 @@ func TestReleaseWorkFromClosedSessionBeadStillReleasesRealWork(t *testing.T) {
 	work, err := store.Create(beads.Bead{
 		Title:    "real work",
 		Status:   "in_progress",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
 		Assignee: sessionBead.ID,
 	})
 	if err != nil {
@@ -114,7 +116,7 @@ func TestReleaseWorkFromClosedSessionBeadStillReleasesRealWork(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", nil, store, nil), sessionBead, nil, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("worker"), store, nil), sessionBead, nil, &stderr)
 
 	gotMail, err := store.Get(mailBead.ID)
 	if err != nil {
@@ -160,7 +162,7 @@ func TestUnclaimWorkAssignedToRetiredSessionBeadLeavesMailBeadUntouched(t *testi
 		Title:    "HANDOFF: context filling",
 		Type:     "message",
 		Status:   "open",
-		Assignee: sessionBead.ID,
+		Metadata: map[string]string{"gc.routed_to": "worker"}, Assignee: sessionBead.ID,
 	})
 	if err != nil {
 		t.Fatalf("create mail bead: %v", err)
@@ -169,7 +171,7 @@ func TestUnclaimWorkAssignedToRetiredSessionBeadLeavesMailBeadUntouched(t *testi
 	work, err := store.Create(beads.Bead{
 		Title:    "real work",
 		Status:   "in_progress",
-		Assignee: sessionBead.ID,
+		Metadata: map[string]string{"gc.routed_to": "worker"}, Assignee: sessionBead.ID,
 	})
 	if err != nil {
 		t.Fatalf("create work bead: %v", err)
@@ -180,7 +182,7 @@ func TestUnclaimWorkAssignedToRetiredSessionBeadLeavesMailBeadUntouched(t *testi
 	}
 
 	var stderr bytes.Buffer
-	unclaimWorkAssignedToRetiredSessionBead(testWorkLegs("", nil, store, nil), store, sessionBead, "fallback/worker", &stderr)
+	unclaimWorkAssignedToRetiredSessionBead(testWorkLegs("", servingCity("worker"), store, nil), store, sessionBead, "fallback/worker", &stderr)
 
 	gotMail, err := store.Get(mailBead.ID)
 	if err != nil {

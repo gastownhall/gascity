@@ -79,7 +79,7 @@ func sessionOwnsLiveClaim(
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
-	rigStores map[string]beads.Store,
+	sw *SeatWork,
 	info sessionpkg.Info,
 ) (owns bool, claimID string, err error) {
 	if store == nil || strings.TrimSpace(info.ID) == "" {
@@ -99,8 +99,11 @@ func sessionOwnsLiveClaim(
 	// store, even once it is closed and the stamp lingers. The first leg that
 	// holds the bead answers for it — ids are unique, so its own state is final
 	// — and only NotFound moves on.
-	serving := servingRigStores(cfg, rigStores, buildSuspendedRigPathsForCity(cfg, cityPath))
-	owner, err := byIDOwnerRowForTopology(byIDResidencyTopology(cityPath, cfg, censusWorkLeg(cityPath, store), serving, claimID), claimID)
+	legs := sw.Legs()
+	if err := legs.unusable(); err != nil {
+		return true, claimID, fmt.Errorf("reading claimed bead %s: %w", claimID, err)
+	}
+	owner, err := byIDOwnerRowForTopology(byIDResidencyTopology(cityPath, cfg, legs.work, legs.rigs, claimID), claimID)
 	if errors.Is(err, beads.ErrNotFound) {
 		return false, claimID, nil
 	}
@@ -155,13 +158,13 @@ func liveClaimVeto(
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
-	rigStores map[string]beads.Store,
+	sw *SeatWork,
 	info sessionpkg.Info,
 	dt *drainTracker,
 	name, reason string,
 	stdout, stderr io.Writer,
 ) (vetoed bool, claimID string) {
-	owns, claimID, err := sessionOwnsLiveClaim(cityPath, cfg, store, rigStores, info)
+	owns, claimID, err := sessionOwnsLiveClaim(cityPath, cfg, store, sw, info)
 	if !owns {
 		if dt != nil {
 			dt.clearLiveClaimVeto(info.ID)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -52,7 +53,7 @@ func TestReleaseWorkFromClosedSessionBeadRestoresPoolRouteForUnroutedWork(t *tes
 	}
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", nil, store, nil), sessionBead, nil, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("gascity/gastown.polecat"), store, nil), sessionBead, nil, &stderr)
 
 	got, err := store.Get(work.ID)
 	if err != nil {
@@ -103,7 +104,7 @@ func TestReleaseWorkFromClosedSessionBeadRestoresRunTargetForWorkflowKind(t *tes
 	}
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", nil, store, nil), sessionBead, nil, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("graph/worker"), store, nil), sessionBead, nil, &stderr)
 
 	got, err := store.Get(work.ID)
 	if err != nil {
@@ -146,7 +147,7 @@ func TestReleaseWorkFromClosedSessionBeadLeavesExistingRouteUntouched(t *testing
 	}
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", nil, store, nil), sessionBead, nil, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("gascity/other-pool"), store, nil), sessionBead, nil, &stderr)
 
 	got, err := store.Get(work.ID)
 	if err != nil {
@@ -161,8 +162,9 @@ func TestReleaseWorkFromClosedSessionBeadLeavesExistingRouteUntouched(t *testing
 }
 
 // When the closing session bead carries no template/agent_name, there is no
-// route to recover — the work is still released, just without a restored route.
-func TestReleaseWorkFromClosedSessionBeadWithoutTemplateStillReleases(t *testing.T) {
+// route to recover: released, the work would be demanded by nothing and
+// claimable by no one, so it stays assigned (owner ruling O5).
+func TestReleaseWorkFromClosedSessionBeadWithoutTemplateKeepsUnroutableWork(t *testing.T) {
 	store := beads.NewMemStore()
 
 	sessionBead, err := store.Create(beads.Bead{
@@ -186,19 +188,16 @@ func TestReleaseWorkFromClosedSessionBeadWithoutTemplateStillReleases(t *testing
 	}
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", nil, store, nil), sessionBead, nil, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("worker"), store, nil), sessionBead, nil, &stderr)
 
 	got, err := store.Get(work.ID)
 	if err != nil {
 		t.Fatalf("get work bead: %v", err)
 	}
-	if got.Assignee != "" {
-		t.Fatalf("assignee = %q, want empty", got.Assignee)
+	if got.Assignee != sessionBead.ID || got.Status != work.Status {
+		t.Fatalf("work = %q/%q, want kept %s by %s: no lane would serve it", got.Status, got.Assignee, work.Status, sessionBead.ID)
 	}
-	if got.Status != "open" {
-		t.Fatalf("status = %q, want open", got.Status)
-	}
-	if got.Metadata[beadmeta.RoutedToMetadataKey] != "" {
-		t.Fatalf("gc.routed_to = %q, want empty (no template to recover a route from)", got.Metadata[beadmeta.RoutedToMetadataKey])
+	if !strings.Contains(stderr.String(), "no lane serves") {
+		t.Fatalf("stderr = %q, want the kept claim reported", stderr.String())
 	}
 }

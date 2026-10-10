@@ -45,6 +45,10 @@ type SeatWork struct {
 	// assignee.
 	ids map[string]bool
 
+	// alerts raises session.unserved_claims for a close this read refuses
+	// (work_release.go); nil alerts nothing.
+	alerts *unservedClaimAlerts
+
 	once sync.Once
 	read []seatWorkLeg
 }
@@ -103,6 +107,14 @@ func seatWorkFor(legs WorkLegs, scope workScope) *SeatWork {
 // work" must not answer.
 func (sw *SeatWork) fresh(scope workScope) *SeatWork {
 	return seatWorkFor(sw.Legs(), scope)
+}
+
+// unserved is sw's alerter; nil for a nil SeatWork.
+func (sw *SeatWork) unserved() *unservedClaimAlerts {
+	if sw == nil {
+		return nil
+	}
+	return sw.alerts
 }
 
 // Legs is the leg set sw reads. A nil SeatWork reads the zero WorkLegs,

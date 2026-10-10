@@ -183,6 +183,13 @@ const (
 	// drain-ack defect is spreading while this bound quietly absorbs it.
 	// See ga-rxhu2.
 	SessionPoolSlotRetiredAtDrainDeadline = "session.pool_slot_retired_at_drain_deadline"
+	// SessionUnservedClaims fires when a seat's close is refused because it
+	// holds claims no lane serves: an unserved route, or an expanded workflow
+	// root with no route of its own. Releasing them would leave work no one
+	// demands or can claim, so they stay assigned and the seat stays open
+	// (owner ruling O5). Emitted once per refusal episode: again only when the
+	// set of claims changes.
+	SessionUnservedClaims = "session.unserved_claims"
 	// SessionUnknownState fires when the reconciler observes a session bead
 	// whose metadata state it does not recognize. The reconciler skips such
 	// beads (forward-compatible rollback: an older reconciler ignores a newer
@@ -501,6 +508,7 @@ var KnownEventTypes = []string{
 	SessionDrainStopEscalated,
 	SessionStranded,
 	SessionPoolSlotRetiredAtDrainDeadline,
+	SessionUnservedClaims,
 	SessionUnknownState,
 	SessionWakeRefused,
 	SessionResetStalled,

@@ -365,14 +365,9 @@ func releaseOrphanedPoolAssignments(
 			}
 			continue
 		}
-		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
-			continue
-		}
-		allowsRelease, clearDetached := detachedProbeAllowsOrphanRelease(wb)
-		if !allowsRelease {
-			continue
-		}
-		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached) {
+		// The verb's route guard is the one this sweep's pre-filter lacks:
+		// an expanded workflow root's run_target is no lane (NEW-5).
+		if out := releaseListed([]seatWorkHit{{store: ownerStore, bead: wb}}, releaseDeadAssignee, releaseSeat{}, cfg, ReleaseOpts{}); len(out.Released) == 0 {
 			continue
 		}
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
@@ -441,24 +436,10 @@ func releaseConfirmedOrphanSessionWork(
 		return nil
 	}
 
-	var released []releasedPoolAssignment
+	var claims []seatWorkHit
+	var index []int
 	for i, wb := range assignedWorkBeads {
-		if wb.Status != "open" && wb.Status != "in_progress" {
-			continue
-		}
-		assignee := strings.TrimSpace(wb.Assignee)
-		if assignee == "" {
-			continue
-		}
-		if _, ok := identifiers[assignee]; !ok {
-			continue
-		}
-		template := routedToOrLegacyWorkflowTarget(wb)
-		if template == "" {
-			continue
-		}
-		agentCfg := findAgentByTemplate(cfg, template)
-		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() {
+		if _, ok := identifiers[strings.TrimSpace(wb.Assignee)]; !ok {
 			continue
 		}
 		ownerStore := assignedWorkOwnerStore(cfg, store, rigStores, assignedWorkStores, i, wb)
@@ -468,17 +449,18 @@ func releaseConfirmedOrphanSessionWork(
 			}
 			continue
 		}
-		if !liveWorkAssignmentStillReleasable(ownerStore, wb.ID, wb.Status, assignee) {
-			continue
+		claims = append(claims, seatWorkHit{store: ownerStore, bead: wb})
+		index = append(index, i)
+	}
+	var released []releasedPoolAssignment
+	out := releaseListed(claims, releaseOrphan, releaseSeatOfInfo(info), cfg, ReleaseOpts{})
+	for _, r := range out.Released {
+		for j, c := range claims {
+			if c.store == r.store && c.bead.ID == r.bead.ID {
+				released = append(released, releasedPoolAssignment{ID: r.bead.ID, Index: index[j]})
+				break
+			}
 		}
-		allowsRelease, clearDetached := detachedProbeAllowsOrphanRelease(wb)
-		if !allowsRelease {
-			continue
-		}
-		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached) {
-			continue
-		}
-		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
 	}
 	return released
 }

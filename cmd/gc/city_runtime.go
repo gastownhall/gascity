@@ -255,6 +255,11 @@ type CityRuntime struct {
 	// reload, like asyncStartLimiter.
 	capacityGuard *endpointCapacityGuard
 
+	// unservedAlerts raises session.unserved_claims once per refusal episode
+	// across ticks (work_release.go); built on first use by newSeatWork.
+	unservedAlerts     *unservedClaimAlerts
+	unservedAlertsOnce sync.Once
+
 	// liveSweepMemos carries the live model-usage sweep's per-session memo: the
 	// resolved transcript path, whether discovery definitively found nothing, and
 	// the sweep-interval floor. The worker factory is rebuilt per tick, so this
@@ -1328,7 +1333,7 @@ func (cr *CityRuntime) runTickPhases(p *tickPass, phases []tickPhase) bool {
 			continue
 		}
 		if phase.session && p.seatWork == nil {
-			p.seatWork = newSeatWork(cr.workLegs())
+			p.seatWork = cr.newSeatWork()
 		}
 		if phase.run(cr, p) {
 			return false
@@ -4038,7 +4043,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	if cr.legacySessionEntry("control_dispatcher_tick") {
 		return
 	}
-	sw := newSeatWork(cr.workLegs())
+	sw := cr.newSeatWork()
 	// The control-dispatcher tick threads one city store as two roles at once:
 	// the session-bead store the desired-state build creates and updates session
 	// beads through (sessions — the build-fn's leading store param flows into

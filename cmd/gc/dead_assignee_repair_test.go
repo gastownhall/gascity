@@ -57,7 +57,7 @@ func TestRepairStrandedPoolWorkerBead_ReopensAfterConfirmationWindow(t *testing.
 	session.Metadata[strandedEventEmittedKey] = now.Add(-strandedRepairConfirmGrace - time.Minute).Format(time.RFC3339)
 
 	var stderr bytes.Buffer
-	repaired := repairStrandedPoolWorkerBead(testSeatWork("", nil, store, nil), store, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr)
+	repaired := repairStrandedPoolWorkerBead(testSeatWork("", servingCity("worker"), store, nil), store, seedSessionInfo(session), &clock.Fake{Time: now}, &stderr)
 	if !repaired {
 		t.Fatalf("expected repair to close the session bead; stderr=%q", stderr.String())
 	}
@@ -83,7 +83,7 @@ func TestRepairStrandedPoolWorkerBead_DefersInsideConfirmationWindow(t *testing.
 	session.Metadata[strandedEventEmittedKey] = now.Format(time.RFC3339) // just observed
 
 	var stderr bytes.Buffer
-	if repairStrandedPoolWorkerBead(testSeatWork("", nil, store, nil), store, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr) {
+	if repairStrandedPoolWorkerBead(testSeatWork("", nil, store, nil), store, seedSessionInfo(session), &clock.Fake{Time: now}, &stderr) {
 		t.Fatalf("must not repair inside the confirmation window")
 	}
 	gotWork, _ := store.Get(work.ID)
@@ -119,7 +119,7 @@ func TestRepairStrandedPoolWorkerBead_DefersAndKeepsSessionOpenWhenUnassignFails
 	session.Metadata[strandedEventEmittedKey] = now.Add(-strandedRepairConfirmGrace - time.Minute).Format(time.RFC3339)
 
 	var stderr bytes.Buffer
-	if repairStrandedPoolWorkerBead(testSeatWork("", nil, store, nil), store, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr) {
+	if repairStrandedPoolWorkerBead(testSeatWork("", servingCity("worker"), store, nil), store, seedSessionInfo(session), &clock.Fake{Time: now}, &stderr) {
 		t.Fatal("repair must return false when an unassign does not land")
 	}
 	gotWork, _ := base.Get(work.ID)
@@ -143,7 +143,7 @@ func TestRepairStrandedPoolWorkerBead_DefersWithoutStrandedMarker(t *testing.T) 
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 
 	var stderr bytes.Buffer
-	if repairStrandedPoolWorkerBead(testSeatWork("", nil, store, nil), store, seedSessionInfo(session), "worker", &clock.Fake{Time: now}, &stderr) {
+	if repairStrandedPoolWorkerBead(testSeatWork("", nil, store, nil), store, seedSessionInfo(session), &clock.Fake{Time: now}, &stderr) {
 		t.Fatalf("must not repair without a stranded marker")
 	}
 	gotWork, _ := store.Get(work.ID)
@@ -321,7 +321,7 @@ func TestRepairStrandedPoolWorkerBead_ReleasesUnderTheStableAlias(t *testing.T) 
 	}
 
 	var stderr bytes.Buffer
-	if !repairStrandedPoolWorkerBead(testSeatWork("", cfg, store, nil), store, seedSessionInfo(seat), "worker", &clock.Fake{Time: now}, &stderr) {
+	if !repairStrandedPoolWorkerBead(testSeatWork("", cfg, store, nil), store, seedSessionInfo(seat), &clock.Fake{Time: now}, &stderr) {
 		t.Fatalf("repair did not close the seat; stderr=%q", stderr.String())
 	}
 	if got, _ := store.Get(claim.ID); got.Assignee != "" || got.Status != "open" {
