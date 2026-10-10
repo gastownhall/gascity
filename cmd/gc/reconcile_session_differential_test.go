@@ -394,10 +394,8 @@ type legacyWorld struct {
 	pokes    *atomic.Int64     // the async stops' completion pokes, when the timeline counts them
 }
 
-func newLegacyWorld(f parityFixture, cityPath string, rows []beads.Bead) *legacyWorld {
-	sessionCircuitBreakerMu.Lock()
-	sessionCircuitBreakerSingleton = newSessionCircuitBreaker(sessionCircuitBreakerConfig{})
-	sessionCircuitBreakerMu.Unlock()
+func newLegacyWorld(t testing.TB, f parityFixture, cityPath string, rows []beads.Bead) *legacyWorld {
+	setSessionCircuitBreakerForTest(t, newSessionCircuitBreaker(sessionCircuitBreakerConfig{}))
 	clk := &clock.Fake{Time: parityNow}
 	sim := &simProvider{Fake: runtime.NewFake(), rts: make(map[string]*simRuntime), changed: make(map[string]uint64), now: clk.Now}
 	f.place(sim)
@@ -585,7 +583,7 @@ func sameParityBead(a, b beads.Bead) bool {
 // metadata convergence that arm A7 (C7d) owns. The rows the build creates are
 // dropped; the copies' runs create their own.
 func (f parityFixture) converged(t *testing.T, cityPath string) []beads.Bead {
-	w := newLegacyWorld(f, cityPath, f.beads())
+	w := newLegacyWorld(t, f, cityPath, f.beads())
 	w.tick(t, false)
 	synced := map[string]beads.Bead{}
 	for _, b := range w.list(t) {
@@ -610,7 +608,7 @@ func (f parityFixture) converged(t *testing.T, cityPath string) []beads.Bead {
 // no provider verb.
 func legacyParity(t *testing.T, f parityFixture, cityPath string, rows []beads.Bead) parityOutcome {
 	t.Helper()
-	return newLegacyWorld(f, cityPath, cloneDiffBeads(rows)).settle(t, f.Name)
+	return newLegacyWorld(t, f, cityPath, cloneDiffBeads(rows)).settle(t, f.Name)
 }
 
 // settle runs legacy ticks until one changes no bead and calls no provider

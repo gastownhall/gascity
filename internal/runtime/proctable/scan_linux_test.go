@@ -741,8 +741,7 @@ func TestScanWithRootNeverReportsInfrastructureAsRoot(t *testing.T) {
 // the scan does: no for the tmux server, yes for the agent beneath it.
 func TestIsScanRootNeverReportsInfrastructureAsRoot(t *testing.T) {
 	root := t.TempDir()
-	restore := SetScanRootForTesting(root)
-	defer restore()
+	SetScanRootForTesting(t, root)
 	env := map[string]string{"GC_SESSION_ID": "hq-session"}
 	buildFakeProcUnder(t, root, 100, 1, "tmux: server", env)
 	buildFakeProcUnder(t, root, 101, 100, "claude", env)
@@ -884,8 +883,7 @@ func TestScanWithRootReportsChildOfUnreadableParentAsRoot(t *testing.T) {
 		child     = 402
 	)
 	root := t.TempDir()
-	restore := SetScanRootForTesting(root)
-	defer restore()
+	SetScanRootForTesting(t, root)
 	buildFakeProcUnder(t, root, parent, 1, "systemd", nil)
 	if err := os.Chmod(filepath.Join(root, strconv.Itoa(parent), "environ"), 0o000); err != nil {
 		t.Fatalf("chmod parent environ: %v", err)

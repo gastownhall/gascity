@@ -451,7 +451,7 @@ func runTimeline(t *testing.T, f timelineFixture, arms func([]rowArm) []rowArm, 
 		t.Fatal(err)
 	}
 	rows := f.converged(t, cityPath)
-	lw := newLegacyWorld(f.parityFixture, cityPath, cloneDiffBeads(rows))
+	lw := newLegacyWorld(t, f.parityFixture, cityPath, cloneDiffBeads(rows))
 	lw.cfg.Rigs = []config.Rig{{Name: simRigLeg, Path: rigPath}}
 	lw.rigs = map[string]beads.Store{simRigLeg: beads.NewMemStoreFrom(0, cloneDiffBeads(f.Rig), nil)}
 	lw.pokes = countDrainAckPokes(t, cityPath)

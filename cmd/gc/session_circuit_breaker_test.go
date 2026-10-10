@@ -934,9 +934,7 @@ func TestReconciler_CircuitOpenStatePersistsAcrossControllerRestart(t *testing.T
 		t.Fatal("persisted circuit restart history is empty")
 	}
 
-	sessionCircuitBreakerMu.Lock()
-	sessionCircuitBreakerSingleton = newSessionCircuitBreaker(sessionCircuitBreakerConfig{})
-	sessionCircuitBreakerMu.Unlock()
+	setSessionCircuitBreakerForTest(t, newSessionCircuitBreaker(sessionCircuitBreakerConfig{}))
 
 	env.stderr.Reset()
 	env.clk.Advance(time.Minute)
@@ -967,8 +965,7 @@ func TestReconciler_CircuitOpenBlocksSpawn(t *testing.T) {
 	if !cb.IsOpen(identity, base) {
 		t.Fatalf("precondition: breaker should be OPEN")
 	}
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 
 	// Register the named session as desired (and NOT running).
 	env.addDesired("session-a", "template-a", false)
@@ -997,8 +994,7 @@ func TestReconciler_CircuitClosedAllowsSpawn(t *testing.T) {
 	configureAlwaysNamedSession(env)
 
 	cb := breakerAt(30*time.Minute, 5)
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 
 	env.addDesired("session-a", "template-a", false)
 
@@ -1044,8 +1040,7 @@ func TestReconciler_CircuitDoesNotRecordRestartForDependencyBlockedNamedSession(
 		}},
 	}
 	cb := breakerAt(30*time.Minute, 5)
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 	env.addDesired("session-a", "template-a", false)
 	b := createCircuitTestNamedSession(t, env, "asleep")
 
@@ -1082,8 +1077,7 @@ func TestReconciler_CircuitDoesNotRecordRestartForWakeBudgetDeferredNamedSession
 		},
 	}
 	cb := breakerAt(30*time.Minute, 5)
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 	env.addDesired("session-a", "template-a", false)
 	env.addDesired("session-b", "template-b", false)
 	sessionA := createCircuitTestNamedSession(t, env, "asleep")
@@ -1116,8 +1110,7 @@ func TestReconciler_CircuitTripsThroughRepeatedWakeAttempts(t *testing.T) {
 	env.addDesired("session-a", "template-a", false)
 
 	cb := breakerAt(30*time.Minute, 5)
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 
 	const identity = "rig-a/session-a"
 	b := createCircuitTestNamedSession(t, env, "asleep")
@@ -1164,8 +1157,7 @@ func TestReconciler_CircuitStaysClosedWhenAssignedWorkStatusProgresses(t *testin
 	env.addDesired("session-a", "template-a", false)
 
 	cb := breakerAt(30*time.Minute, 5)
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 
 	const identity = "rig-a/session-a"
 	b := createCircuitTestNamedSession(t, env, "asleep")

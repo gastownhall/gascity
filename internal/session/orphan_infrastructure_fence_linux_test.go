@@ -99,7 +99,7 @@ func TestSameSessionRestartDoesNotReachManagedDoltWatchdog(t *testing.T) {
 	writeFakeProcess(t, root, doltPID, watchdogPID, []string{"dolt", "sql-server", "--config", "/city/.beads/dolt-config.yaml"}, env)
 	writeFakeProcess(t, root, proxyPID, 1, []string{"/usr/local/bin/bd", proctable.BDProxyChildVerb, "--root", "/city/.beads/proxy"}, env)
 	writeFakeProcess(t, root, agentPID, 1, []string{"claude", "--resume"}, env)
-	t.Cleanup(proctable.SetScanRootForTesting(root))
+	proctable.SetScanRootForTesting(t, root)
 
 	if err := mgr.Start(context.Background(), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, ResumeOperator); err != nil {
 		t.Fatalf("Start: %v", err)

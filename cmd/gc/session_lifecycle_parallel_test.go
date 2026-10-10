@@ -2933,7 +2933,7 @@ func TestExecutePlannedStartsTraced_CircuitTripDoesNotCommitPreWakeMetadata(t *t
 		MaxRestarts: 1,
 		ResetAfter:  20 * time.Minute,
 	})
-	defer setSessionCircuitBreakerForTest(cb)()
+	setSessionCircuitBreakerForTest(t, cb)
 	cb.RecordRestart(identity, clk.Now().Add(-time.Minute))
 	sp := newGatedStartProvider()
 	t.Cleanup(func() { sp.release("worker") })

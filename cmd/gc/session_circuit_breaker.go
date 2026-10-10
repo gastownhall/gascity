@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -863,19 +864,21 @@ func defaultSessionCircuitBreaker() *sessionCircuitBreaker {
 	return sessionCircuitBreakerSingleton
 }
 
-// setSessionCircuitBreakerForTest swaps the singleton, returning a cleanup
-// function that restores the previous value. Tests call this to inject a
-// fake-clocked breaker without touching production wiring.
-func setSessionCircuitBreakerForTest(b *sessionCircuitBreaker) func() {
+// setSessionCircuitBreakerForTest swaps the singleton for t, and restores the
+// previous one when t ends. Tests call this to inject a fake-clocked breaker
+// without touching production wiring; it is the only test write of the
+// singleton (the testrelax analyzer).
+func setSessionCircuitBreakerForTest(t testing.TB, b *sessionCircuitBreaker) {
+	t.Helper()
 	sessionCircuitBreakerMu.Lock()
 	prev := sessionCircuitBreakerSingleton
 	sessionCircuitBreakerSingleton = b
 	sessionCircuitBreakerMu.Unlock()
-	return func() {
+	t.Cleanup(func() {
 		sessionCircuitBreakerMu.Lock()
 		sessionCircuitBreakerSingleton = prev
 		sessionCircuitBreakerMu.Unlock()
-	}
+	})
 }
 
 // computeNamedSessionProgressSignatures returns a signature per named

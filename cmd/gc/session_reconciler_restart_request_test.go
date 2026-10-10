@@ -439,8 +439,7 @@ func TestReconcileSessionBeads_RestartRequestClearsCircuitBreakerForNextWake(t *
 	if !cb.IsOpen(identity, base.Add(time.Minute)) {
 		t.Fatalf("precondition: breaker should be OPEN for %q", identity)
 	}
-	restore := setSessionCircuitBreakerForTest(cb)
-	defer restore()
+	setSessionCircuitBreakerForTest(t, cb)
 
 	session := env.createSessionBead(sessionName)
 	env.setSessionMetadata(&session, map[string]string{

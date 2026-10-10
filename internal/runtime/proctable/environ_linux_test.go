@@ -20,8 +20,7 @@ func TestProcessEnvValueReadsScanRoot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "environ"), []byte(environ), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	restore := SetScanRootForTesting(root)
-	defer restore()
+	SetScanRootForTesting(t, root)
 
 	got, err := ProcessEnvValue(4242, "MARKER")
 	if err != nil || got != "/tmp/x.sock" {
@@ -47,8 +46,7 @@ func TestProcessEnvValueReportsUnreadableEnvironment(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "environ"), []byte("MARKER=/tmp/x.sock\x00"), 0o000); err != nil {
 		t.Fatal(err)
 	}
-	restore := SetScanRootForTesting(root)
-	defer restore()
+	SetScanRootForTesting(t, root)
 
 	got, err := ProcessEnvValue(4242, "MARKER")
 	if !errors.Is(err, fs.ErrPermission) || got != "" {

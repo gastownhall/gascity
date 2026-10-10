@@ -52,7 +52,7 @@ func TestSweepProcessTableOrphansLeavesManagedDoltWatchdogAlone(t *testing.T) {
 			root := t.TempDir()
 			writeFakeProcEntry(t, root, 4100, 1, "gc", tc.serverEnv)
 			writeFakeProcEntry(t, root, 4101, 4100, "dolt", tc.serverEnv)
-			t.Cleanup(proctable.SetScanRootForTesting(root))
+			proctable.SetScanRootForTesting(t, root)
 
 			sp := &procfsSweepScanner{Fake: runtime.NewFake()}
 			var stderr bytes.Buffer
@@ -148,7 +148,7 @@ func TestSweepProcessTableOrphansFencesCityInfrastructureByArgv(t *testing.T) {
 	writeFakeProcCmdline(t, root, 4200, "/opt/beads/bd-1.3.0", proxyendpoint.ChildVerb, "--root", cityPath+"/.beads/proxy")
 	writeFakeProcEntry(t, root, 4300, 1, "claude", sessionEnv)
 	writeFakeProcCmdline(t, root, 4300, "claude", "--resume")
-	t.Cleanup(proctable.SetScanRootForTesting(root))
+	proctable.SetScanRootForTesting(t, root)
 
 	sp := &procfsSweepScanner{Fake: runtime.NewFake()}
 	var stderr bytes.Buffer
@@ -191,7 +191,7 @@ func TestSweepProcessTableOrphansReportsFencedRootOncePerProcess(t *testing.T) {
 	writeFakeProcEntry(t, root, 4200, 1, "bd", sessionEnv)
 	writeFakeProcCmdline(t, root, 4200, "bd", proxyendpoint.ChildVerb, "--root", cityPath)
 	writeFakeProcStartTime(t, root, 4200, 1, "bd", 2000)
-	t.Cleanup(proctable.SetScanRootForTesting(root))
+	proctable.SetScanRootForTesting(t, root)
 	t.Cleanup(func() { fencedInfrastructureRoots.put(normalizePathForCompare(cityPath), nil) })
 
 	sweep := func() string {
