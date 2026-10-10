@@ -522,6 +522,7 @@ go_test(
         "//internal/session",
         "//internal/sessionlog",
         "//internal/shellquote",
+        "//internal/sling",
         "//internal/sourceworkflow",
         "//internal/ssrf",
         "//internal/storehealth",

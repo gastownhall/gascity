@@ -1492,6 +1492,7 @@ go_test(
         "pool_session_name_orphan_release_fanout_test.go",
         "pool_session_name_protected_wake_test.go",
         "pool_session_name_route_assignee_liveness_test.go",
+        "pool_session_name_routeaway_test.go",
         "pool_session_name_test.go",
         "pool_session_named_route_runtime_name_test.go",
         "pool_session_release_binding_owner_test.go",
