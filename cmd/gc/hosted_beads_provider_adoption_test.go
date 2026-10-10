@@ -32,19 +32,24 @@ func stubHostedBeadsCredentialExecutable(t *testing.T, executable string) string
 	return shellquote.Quote(absolute) + " internal beads-credential"
 }
 
-// TestHostedBeadsCredentialProviderProcess is re-executed by the credential
-// provider tests below. The subprocess records the exact request and returns a
-// protocol-valid credential without placing a bearer in process arguments or
-// environment.
-func TestHostedBeadsCredentialProviderProcess(_ *testing.T) {
-	marker := slices.Index(os.Args, hostedBeadsProviderTestMarker)
-	if marker < 0 {
+// maybeRunHostedBeadsCredentialProvider turns a re-executed cmd/gc test binary
+// into the credential provider the tests below configure. TestMain calls it
+// before any harness setup: the provider runs under credentialprovider's fixed
+// whole-process deadline, so the child must not pay for TestMain's temp-root
+// sweeps, fixture builds, and leak-guard teardown — under a saturated worker
+// that harness alone exceeded the deadline (ga-vnycm2.39). The minimal
+// provider environment drops arbitrary variables, so the dispatch keys on an
+// argv marker rather than an environment marker. The subprocess records the
+// exact request and returns a protocol-valid credential without placing a
+// bearer in process arguments or environment.
+func maybeRunHostedBeadsCredentialProvider() {
+	if len(os.Args) < 2 || os.Args[1] != hostedBeadsProviderTestMarker {
 		return
 	}
-	if len(os.Args) != marker+3 {
+	if len(os.Args) != 4 {
 		os.Exit(2)
 	}
-	requestPath, mode := os.Args[marker+1], os.Args[marker+2]
+	requestPath, mode := os.Args[2], os.Args[3]
 	request, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		os.Exit(3)
@@ -78,7 +83,7 @@ func TestHostedBeadsCredentialProviderProcess(_ *testing.T) {
 	if decoded.ForceRefresh {
 		token = "opaque-refreshed"
 	}
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
+	if err := json.NewEncoder(os.Stdout).Encode(map[string]any{
 		"version":              credentialprovider.ProtocolVersion,
 		"kind":                 "Credential",
 		"access_token":         token,
@@ -86,7 +91,9 @@ func TestHostedBeadsCredentialProviderProcess(_ *testing.T) {
 		"expires_at":           "2099-01-02T03:04:05Z",
 		"audience":             decoded.Audience,
 		"scopes":               decoded.RequiredScopes,
-	})
+	}); err != nil {
+		os.Exit(9)
+	}
 	os.Exit(0)
 }
 
@@ -94,8 +101,6 @@ func hostedBeadsProviderArgv(t *testing.T, requestPath, mode string) string {
 	t.Helper()
 	encoded, err := json.Marshal([]string{
 		os.Args[0],
-		"-test.run=^TestHostedBeadsCredentialProviderProcess$",
-		"--",
 		hostedBeadsProviderTestMarker,
 		requestPath,
 		mode,
