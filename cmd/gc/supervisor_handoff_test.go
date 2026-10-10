@@ -167,14 +167,9 @@ func stubSupervisorProcess(t *testing.T, wantPID int, exitAt func() time.Time) {
 // failed with "supervisor already running" (ga-96smfk.86).
 func TestStopSupervisorWithWaitWaitsForTheProcessToExit(t *testing.T) {
 	fakeStoppingSupervisor(t, 4242)
-	var exitAt atomic.Value
-	exitAt.Store(time.Now().Add(time.Hour))
-	stubSupervisorProcess(t, 4242, func() time.Time { return exitAt.Load().(time.Time) })
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		exitAt.Store(time.Now().Add(400 * time.Millisecond))
-	}()
 	start := time.Now()
+	exitAt := start.Add(500 * time.Millisecond)
+	stubSupervisorProcess(t, 4242, func() time.Time { return exitAt })
 	var stdout, stderr bytes.Buffer
 	if code := stopSupervisorWithWait(&stdout, &stderr, true, 10*time.Second); code != 0 {
 		t.Fatalf("stop --wait = %d; stderr=%q", code, stderr.String())
