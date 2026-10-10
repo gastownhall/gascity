@@ -39,6 +39,10 @@ type templateTarget struct {
 
 var errNamedSessionConflict = errors.New("configured named session conflict")
 
+// errNamedSessionSuspended reports a configured named session whose agent is
+// suspended, so the session must not be materialized on its behalf.
+var errNamedSessionSuspended = errors.New("configured named session suspended")
+
 func resolveConfiguredNamedSessionID(
 	cityPath string,
 	cfg *config.City,
@@ -63,6 +67,12 @@ func resolveConfiguredNamedSessionID(
 	}
 	if lookup.HasCanonical {
 		return lookup.Canonical.ID, true, nil
+	}
+	// A live session still resolves above so a running seat can be addressed,
+	// but nothing is reopened or created on behalf of a suspended agent: the
+	// operator parked it, and a mail or nudge wake must not un-park it.
+	if opts.materialize && spec.Agent != nil && spec.Agent.Suspended {
+		return "", true, fmt.Errorf("%w: agent %q for %q is suspended; resume it before waking", errNamedSessionSuspended, spec.Agent.QualifiedName(), identifier)
 	}
 	// When materializing, check for a closed bead with this identity and
 	// reopen it (preserves bead ID for reference continuity).
