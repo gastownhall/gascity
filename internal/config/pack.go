@@ -310,6 +310,14 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 					globals = cachedPackLocalGlobals(cache, impDir)
 					skills = filterSkillsByPackDir(skills, impDir)
 				}
+				var excludeWarnings []string
+				agents, namedSessions, excludeWarnings, err = filterImportedAgentsByName(
+					agents, namedSessions, imp.AgentsExclude,
+					fmt.Sprintf("rig %q import %q", rig.Name, bindingName))
+				if err != nil {
+					return err
+				}
+				cfg.LoadWarnings = appendUnique(cfg.LoadWarnings, excludeWarnings...)
 				cfg.LoadWarnings = appendUnique(cfg.LoadWarnings, warnings...)
 				if len(services) > 0 {
 					return fmt.Errorf("rig %q import %q: [[service]] is only allowed in city-scoped packs", rig.Name, bindingName)
@@ -766,6 +774,14 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 				webhooks = filterWebhooksBySourceDir(webhooks, impDir)
 				mcpTopoDirs = filterPackDirsByRoot(topoDirs, impDir)
 			}
+			var excludeWarnings []string
+			agents, namedSessions, excludeWarnings, err = filterImportedAgentsByName(
+				agents, namedSessions, imp.AgentsExclude,
+				fmt.Sprintf("city import %q", bindingName))
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			packWarnings = appendUnique(packWarnings, excludeWarnings...)
 
 			// Stamp binding name on all agents and named sessions.
 			// At the city level, ALL agents from an import get the city's
@@ -1398,6 +1414,14 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 			impSkills = filterSkillsByPackDir(impSkills, impDir)
 			impWebhooks = filterWebhooksBySourceDir(impWebhooks, impDir)
 		}
+		var excludeWarnings []string
+		impAgents, impNamedSessions, excludeWarnings, err = filterImportedAgentsByName(
+			impAgents, impNamedSessions, imp.AgentsExclude,
+			fmt.Sprintf("import %q", bindingName))
+		if err != nil {
+			return nil, nil, nil, nil, nil, nil, nil, nil, err
+		}
+		inheritedWarnings = appendUnique(inheritedWarnings, excludeWarnings...)
 
 		// Stamp binding name on all agents and named sessions from this import.
 		for i := range impAgents {
@@ -2551,6 +2575,54 @@ func filterNamedSessionsByScope(sessions []NamedSession, cityExpansion bool) []N
 		}
 	}
 	return result
+}
+
+// filterImportedAgentsByName applies an import edge's local-name selectors to
+// the already-loaded (and, when requested, transitive-filtered) result. The
+// returned slices are newly built so filtering cannot mutate a cached pack
+// result; callers can then stamp bindings and qualify dependencies normally.
+// Named sessions are coupled to their backing template, so a session whose
+// template's local component is excluded is removed as well.
+func filterImportedAgentsByName(agents []Agent, sessions []NamedSession, selectors []string, context string) ([]Agent, []NamedSession, []string, error) {
+	if len(selectors) == 0 {
+		return agents, sessions, nil, nil
+	}
+	excluded := make(map[string]struct{}, len(selectors))
+	for _, selector := range selectors {
+		if !validAgentName.MatchString(selector) {
+			return nil, nil, nil, fmt.Errorf("%s: agents_exclude entry %q must match [a-zA-Z0-9][a-zA-Z0-9_-]* (no spaces, slashes, or dots)", context, selector)
+		}
+		excluded[selector] = struct{}{}
+	}
+
+	found := make(map[string]struct{}, len(agents))
+	keptAgents := make([]Agent, 0, len(agents))
+	for _, agent := range agents {
+		if _, ok := excluded[agent.Name]; ok {
+			found[agent.Name] = struct{}{}
+			continue
+		}
+		keptAgents = append(keptAgents, agent)
+	}
+	var warnings []string
+	for _, selector := range selectors {
+		if _, ok := found[selector]; !ok {
+			warnings = append(warnings, fmt.Sprintf("%s: agents_exclude selector %q matched no imported agent", context, selector))
+		}
+	}
+
+	keptSessions := make([]NamedSession, 0, len(sessions))
+	for _, session := range sessions {
+		template := session.Template
+		if dot := strings.LastIndexByte(template, '.'); dot >= 0 {
+			template = template[dot+1:]
+		}
+		if _, ok := excluded[template]; ok {
+			continue
+		}
+		keptSessions = append(keptSessions, session)
+	}
+	return keptAgents, keptSessions, warnings, nil
 }
 
 func expandCityImportedAgentsForRigs(agents []Agent, rigs []Rig, bindingName string) []Agent {

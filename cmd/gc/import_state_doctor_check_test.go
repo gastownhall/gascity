@@ -619,6 +619,74 @@ source = ".gc/system/packs/gastown"
 	}
 }
 
+func TestRewriteLegacyPublicPackImportsPreservesImportOptions(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.gastown]
+source = ".gc/system/packs/gastown"
+version = "old"
+export = true
+transitive = false
+shadow = "silent"
+agents_exclude = ["worker"]
+`)
+
+	changed, err := rewriteLegacyPublicPackImportsFS(fsys.OSFS{}, cityDir, map[string]wave1PublicPackImportTarget{
+		"gastown": {
+			Binding: "gastown",
+			Import:  config.Import{Source: "https://packages.example/gastown.git", Version: "^1.2"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("rewriteLegacyPublicPackImportsFS: %v", err)
+	}
+	if !changed {
+		t.Fatal("rewriteLegacyPublicPackImportsFS reported no change, want pack.toml rewrite")
+	}
+	manifest, err := loadCityPackManifestFS(fsys.OSFS{}, cityDir)
+	if err != nil {
+		t.Fatalf("loadCityPackManifestFS: %v", err)
+	}
+	got := manifest.Imports["gastown"]
+	if got.Source != "https://packages.example/gastown.git" || got.Version != "^1.2" {
+		t.Fatalf("migrated import = %+v, want target source and version", got)
+	}
+	if !got.Export || got.Transitive == nil || *got.Transitive || got.Shadow != "silent" {
+		t.Fatalf("migrated import options = %+v, want export=true transitive=false shadow=silent", got)
+	}
+	if len(got.AgentsExclude) != 1 || got.AgentsExclude[0] != "worker" {
+		t.Fatalf("migrated AgentsExclude = %#v, want [worker]", got.AgentsExclude)
+	}
+}
+
+func TestSameImportComparesAllCompositionOptions(t *testing.T) {
+	base := config.Import{
+		Source:        "https://packages.example/gastown.git",
+		Version:       "^1.2",
+		Export:        true,
+		Transitive:    boolPtr(false),
+		Shadow:        "silent",
+		AgentsExclude: []string{"worker"},
+	}
+	if !sameImport(base, base) {
+		t.Fatal("sameImport should accept identical import options")
+	}
+	changed := base
+	changed.AgentsExclude = []string{"keeper"}
+	if sameImport(base, changed) {
+		t.Fatal("sameImport must distinguish AgentsExclude")
+	}
+	changed = base
+	changed.Export = false
+	if sameImport(base, changed) {
+		t.Fatal("sameImport must distinguish export")
+	}
+}
+
 // Regression for the ga-lurp5d follow-up review: the packv2 import-state
 // rewrite re-marshals pack.toml through the reduced cityPackManifest struct,
 // which would silently drop keys this gc binary does not recognize. A pack.toml
