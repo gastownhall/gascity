@@ -253,7 +253,10 @@ const (
 type section struct {
 	Premise premiseRule
 	// Decide decides on the attempt's fresh reads, under both locks, with no
-	// I/O; it runs once per attempt.
+	// I/O; it runs once per attempt. Every function stored here is a v2purity
+	// root:
+	//
+	//gc:pure
 	Decide func(v txView) txStep
 	probe  func(ctx context.Context, r effectReads, v txView) (any, error)
 	call   func(ctx context.Context, c txCaps, in any) (any, error)
@@ -264,7 +267,10 @@ type section struct {
 
 // probed is a section whose Probe, a bounded read under both locks after the
 // transaction's own reads (it sees the expected row), hands Decide its typed
-// result. A probe past fenceProbeTimeout answers errProbeExpired.
+// result. A probe past fenceProbeTimeout answers errProbeExpired. Every decide
+// passed here is a v2purity root, as a section's Decide is:
+//
+//gc:pure-param decide
 func probed[P any](probe func(context.Context, effectReads, txView) (P, error), decide func(txView, P, error) txStep) section {
 	return section{
 		probe: func(ctx context.Context, r effectReads, v txView) (any, error) { return probe(ctx, r, v) },

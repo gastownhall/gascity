@@ -4,8 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // rbe-worker shim tests (rbe-worker-repo-design.md §5.2, §9 S3a). The shim
@@ -19,6 +22,7 @@ const (
 	rbeWorkerActionDir   = ".github/actions/rbe-worker"
 	rbeWorkerFetchScript = rbeWorkerActionDir + "/fetch.sh"
 	rbeWorkerPinFile     = rbeWorkerActionDir + "/pin"
+	rbeWorkerWorkflow    = ".github/workflows/rbe-worker-pool.yml"
 )
 
 var fortyHexLine = regexp.MustCompile(`(?m)^[0-9a-f]{40}$`)
@@ -186,7 +190,7 @@ func rbeWorkerFetchCopy(t *testing.T, upstream, pinfile, pinContent string) stri
 	return copyPath
 }
 
-func rbeWorkerRunFetch(t *testing.T, script string, source string, args ...string) (stdout, stderr string, outputs map[string]string, err error) {
+func rbeWorkerRunFetch(t *testing.T, script string, args ...string) (stdout, stderr string, outputs map[string]string, err error) {
 	t.Helper()
 	runnerTemp := t.TempDir()
 	outFile := filepath.Join(t.TempDir(), "output")
@@ -208,9 +212,6 @@ func rbeWorkerRunFetch(t *testing.T, script string, source string, args ...strin
 		// for that, gated so a real CI invocation never sets it.
 		"RBE_WORKER_TEST_ALLOW_FILE=1",
 	)
-	if source != "" {
-		env = append(env, "SOURCE="+source)
-	}
 	stdout, stderr, err = runRBEScript(filepath.Dir(script), env, script, args...)
 	outputs = map[string]string{}
 	if raw, rerr := os.ReadFile(outFile); rerr == nil {
@@ -228,7 +229,7 @@ func rbeWorkerRunFetch(t *testing.T, script string, source string, args ...strin
 func TestRBEWorkerFetchAcceptsThePinnedMainCommit(t *testing.T) {
 	upstream, mainSHA, _ := rbeWorkerFixture(t)
 	script := rbeWorkerFetchCopy(t, upstream, "pin", mainSHA)
-	stdout, stderr, outputs, err := rbeWorkerRunFetch(t, script, "pinned", "pin")
+	stdout, stderr, outputs, err := rbeWorkerRunFetch(t, script, "pin")
 	if err != nil {
 		t.Fatalf("fetch of the pinned main commit failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 	}
@@ -246,7 +247,7 @@ func TestRBEWorkerFetchAcceptsThePinnedMainCommit(t *testing.T) {
 func TestRBEWorkerFetchRefusesOffMainCommit(t *testing.T) {
 	upstream, _, offMainSHA := rbeWorkerFixture(t)
 	script := rbeWorkerFetchCopy(t, upstream, "pin", offMainSHA)
-	stdout, _, outputs, err := rbeWorkerRunFetch(t, script, "pinned", "pin")
+	stdout, _, outputs, err := rbeWorkerRunFetch(t, script, "pin")
 	if err == nil {
 		t.Fatalf("fetch of an off-main commit succeeded; it must be refused")
 	}
@@ -272,7 +273,7 @@ func TestRBEWorkerFetchMalformedPin(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			script := rbeWorkerFetchCopy(t, upstream, "pin", pin)
-			stdout, _, _, err := rbeWorkerRunFetch(t, script, "pinned", "pin")
+			stdout, _, _, err := rbeWorkerRunFetch(t, script, "pin")
 			if err == nil {
 				t.Fatalf("malformed pin %q: fetch.sh exited 0, want 2", pin)
 			}
@@ -289,7 +290,7 @@ func TestRBEWorkerFetchMalformedPin(t *testing.T) {
 func TestRBEWorkerFetchVerifySkipsCheckout(t *testing.T) {
 	upstream, mainSHA, _ := rbeWorkerFixture(t)
 	script := rbeWorkerFetchCopy(t, upstream, "pin-client", mainSHA)
-	stdout, stderr, outputs, err := rbeWorkerRunFetch(t, script, "", "verify", "pin-client")
+	stdout, stderr, outputs, err := rbeWorkerRunFetch(t, script, "verify", "pin-client")
 	if err != nil {
 		t.Fatalf("verify of the pinned main commit failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 	}
@@ -332,7 +333,6 @@ func TestRBEWorkerFetchFileSchemeRequiresTestFlag(t *testing.T) {
 		"GITHUB_OUTPUT="+outFile,
 		"GITHUB_STEP_SUMMARY="+summaryFile,
 		"GITHUB_WORKSPACE="+runnerTemp,
-		"SOURCE=pinned",
 		"PATH="+bin+":"+os.Getenv("PATH"),
 		// Deliberately no RBE_WORKER_TEST_ALLOW_FILE=1 here.
 	)
@@ -426,7 +426,6 @@ func TestRBEWorkerFetchIgnoresAFilterDriverFromConfig(t *testing.T) {
 		"GITHUB_OUTPUT="+outFile,
 		"GITHUB_STEP_SUMMARY="+summaryFile,
 		"GITHUB_WORKSPACE="+runnerTemp,
-		"SOURCE=pinned",
 		"RBE_WORKER_TEST_ALLOW_FILE=1",
 		// Go's os/exec: a duplicate key's last value wins, so this
 		// overrides the real $HOME this test process inherited.
@@ -450,7 +449,7 @@ func TestRBEWorkerFetchIgnoresAFilterDriverFromConfig(t *testing.T) {
 func TestRBEWorkerFetchMalformedPinExitCode(t *testing.T) {
 	upstream, _, _ := rbeWorkerFixture(t)
 	script := rbeWorkerFetchCopy(t, upstream, "pin", "deadbeef")
-	_, _, _, err := rbeWorkerRunFetch(t, script, "pinned", "pin")
+	_, _, _, err := rbeWorkerRunFetch(t, script, "pin")
 	if got := exitCode(err); got != 2 {
 		t.Errorf("exit code = %d, want 2", got)
 	}
@@ -543,7 +542,7 @@ func TestRBEWorkerFetchRefusalMatrix(t *testing.T) {
 	for name, sha := range cases {
 		t.Run(name, func(t *testing.T) {
 			script := rbeWorkerFetchCopy(t, f.upstream, "pin", sha)
-			stdout, _, outputs, err := rbeWorkerRunFetch(t, script, "pinned", "pin")
+			stdout, _, outputs, err := rbeWorkerRunFetch(t, script, "pin")
 			if err == nil {
 				t.Fatalf("fetch of %s (%s) succeeded; it must be refused", name, sha)
 			}
@@ -624,7 +623,6 @@ git -C "$dir" fetch -q --no-tags "$upstream" "+refs/heads/*:refs/remotes/origin/
 		"GITHUB_STEP_SUMMARY="+summaryFile,
 		"GITHUB_WORKSPACE="+runnerTemp,
 		"RBE_WORKER_TEST_ALLOW_FILE=1",
-		"SOURCE=pinned",
 	)
 	stdout, _, _, err := rbeWorkerRunFetchEnv(t, script, env, "pin")
 	if err == nil {
@@ -713,7 +711,7 @@ func TestRBEWorkerFetchRefusesSymlinks(t *testing.T) {
 			}
 			mainSHA := strings.TrimSpace(readFile(t, root, "main.sha"))
 			script := rbeWorkerFetchCopy(t, upstream, "pin", mainSHA)
-			stdout, _, outputs, err := rbeWorkerRunFetch(t, script, "pinned", "pin")
+			stdout, _, outputs, err := rbeWorkerRunFetch(t, script, "pin")
 			if err == nil {
 				t.Fatalf("fetch of a %s symlink succeeded; it must be refused", variant)
 			}
@@ -724,5 +722,163 @@ func TestRBEWorkerFetchRefusesSymlinks(t *testing.T) {
 				t.Errorf("outputs = %v, want no dir/sha written for a refused commit", outputs)
 			}
 		})
+	}
+}
+
+// rbeWorkerFetchJobs: each workflow that runs rbe-worker code, and the jobs
+// that fetch it (one fetch step each).
+var rbeWorkerFetchJobs = map[string][]string{
+	rbeWorkerWorkflow:      {"await-drift", "report-drift", "worker"},
+	rbeForkPoolWorkflow:    {"await-drift", "report-drift", "worker"},
+	rbeWorkerEnvCanary:     {"measure", "report"},
+	bazelMultiLaneWorkflow: {"worker-host"},
+}
+
+// TestRBEWorkerAlwaysPinned: the worker code is gastownhall/rbe-worker at
+// ./pin and nothing else (S5 deleted gascity's in-tree copy, and with it the
+// S3-S5 cutover switch): every fetch step takes no input and no env (a
+// SOURCE env would reach fetch.sh as directly as an input), is id
+// rbe-worker (what every run step's RBE_WORKER_DIR reads), no workflow
+// reads an RBE_WORKER_SOURCE_* variable, the action declares no source
+// input and fetch.sh has no branch that returns this checkout's tools/rbe.
+func TestRBEWorkerAlwaysPinned(t *testing.T) {
+	root := repoRoot(t)
+	for path, wantJobs := range rbeWorkerFetchJobs {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			text := readFile(t, root, path)
+			if strings.Contains(text, "RBE_WORKER_SOURCE") {
+				t.Errorf("%s reads an RBE_WORKER_SOURCE_* variable; the worker code is always the pin", path)
+			}
+			var wf struct {
+				Jobs map[string]struct {
+					Steps []struct {
+						ID   string            `yaml:"id"`
+						Uses string            `yaml:"uses"`
+						With map[string]any    `yaml:"with"`
+						Env  map[string]string `yaml:"env"`
+					} `yaml:"steps"`
+				} `yaml:"jobs"`
+			}
+			if err := yaml.Unmarshal([]byte(text), &wf); err != nil {
+				t.Fatalf("parse %s: %v", path, err)
+			}
+			var found []string
+			for id, job := range wf.Jobs {
+				for _, step := range job.Steps {
+					if step.Uses != "./"+rbeWorkerActionDir {
+						continue
+					}
+					found = append(found, id)
+					if len(step.With) != 0 {
+						t.Errorf("%s job %s: fetch step with %v, want no inputs", path, id, step.With)
+					}
+					if len(step.Env) != 0 {
+						t.Errorf("%s job %s: fetch step env %v, want none", path, id, step.Env)
+					}
+					if step.ID != "rbe-worker" {
+						t.Errorf("%s job %s: fetch step id %q, want rbe-worker", path, id, step.ID)
+					}
+				}
+			}
+			sort.Strings(found)
+			if strings.Join(found, ",") != strings.Join(wantJobs, ",") {
+				t.Errorf("%s: fetch steps in jobs %v, want one each in %v", path, found, wantJobs)
+			}
+		})
+	}
+	action := readFile(t, root, rbeWorkerActionDir+"/action.yml")
+	if strings.Contains(action, "inputs:") || strings.Contains(action, "SOURCE") {
+		t.Errorf("%s/action.yml declares an input or passes SOURCE; it fetches ./pin and nothing else:\n%s", rbeWorkerActionDir, action)
+	}
+	code := codeLines(readFile(t, root, rbeWorkerFetchScript))
+	for _, banned := range []string{`\bSOURCE\b`, `in-tree`, `GITHUB_WORKSPACE`, `tools/rbe`} {
+		if regexp.MustCompile(banned).MatchString(code) {
+			t.Errorf("%s matches %q outside a comment; the in-tree cutover branch is gone", rbeWorkerFetchScript, banned)
+		}
+	}
+}
+
+// TestRBEWorkerPoolWorkflowIsolatesActions: the OSS pool's worker step runs
+// the pinned rbe-worker with action isolation on by default (the repository
+// variable RBE_ACTION_ISOLATION=0 is the rollback), the zstd switches off by
+// default, the OSS tier's defaults and its own certificate, from a checkout
+// that leaves no GITHUB_TOKEN in .git/config. (What isolation does is
+// rbe-worker's to test.)
+func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
+	root := repoRoot(t)
+	var wf struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Uses string            `yaml:"uses"`
+				With map[string]any    `yaml:"with"`
+				Env  map[string]string `yaml:"env"`
+				Run  string            `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal([]byte(readFile(t, root, rbeWorkerWorkflow)), &wf); err != nil {
+		t.Fatalf("parse %s: %v", rbeWorkerWorkflow, err)
+	}
+	job, ok := wf.Jobs["worker"]
+	if !ok {
+		t.Fatalf("%s: no worker job", rbeWorkerWorkflow)
+	}
+	var checkout, worker bool
+	for _, step := range job.Steps {
+		if strings.HasPrefix(step.Uses, "actions/checkout@") {
+			checkout = true
+			// Remote actions run on this runner: no GITHUB_TOKEN in .git/config.
+			if v, _ := step.With["persist-credentials"].(bool); v || step.With["persist-credentials"] == nil {
+				t.Errorf("checkout must set persist-credentials: false, got %v", step.With["persist-credentials"])
+			}
+		}
+		// The worker-env measure step runs the script too, without a worker.
+		if strings.Contains(step.Run, "blacksmith-worker.sh") && step.Env["WORKER_MODE"] != "measure" {
+			worker = true
+			// The fetched tree's script, never a path in this checkout.
+			if got, want := strings.TrimSpace(step.Run), `"$RBE_WORKER_DIR/blacksmith-worker.sh"`; got != want {
+				t.Errorf("worker step run = %q, want %q", got, want)
+			}
+			if got, want := step.Env["WORKER_MODE"], "pool"; got != want {
+				t.Errorf("worker step WORKER_MODE = %q, want %q", got, want)
+			}
+			if got, want := step.Env["RBE_WORKER_DIR"], "${{ steps.rbe-worker.outputs.dir }}"; got != want {
+				t.Errorf("worker step RBE_WORKER_DIR = %q, want %q", got, want)
+			}
+			if got, want := step.Env["RBE_WORKER_REVISION"], "${{ steps.rbe-worker.outputs.sha }}"; got != want {
+				t.Errorf("worker step RBE_WORKER_REVISION = %q, want %q", got, want)
+			}
+			// Default on; the repository variable RBE_ACTION_ISOLATION=0 is the
+			// rollback without a code change.
+			if got, want := step.Env["RBE_ACTION_ISOLATION"], "${{ vars.RBE_ACTION_ISOLATION || '1' }}"; got != want {
+				t.Errorf("worker step RBE_ACTION_ISOLATION = %q, want %q", got, want)
+			}
+			// canary: one run in RBE_ACTION_CANARY_EVERY tries isolation.
+			if got, want := step.Env["RBE_ACTION_CANARY_EVERY"], "${{ vars.RBE_ACTION_CANARY_EVERY || '4' }}"; got != want {
+				t.Errorf("worker step RBE_ACTION_CANARY_EVERY = %q, want %q", got, want)
+			}
+			// zstd fetches, off unless the repository variable says 1: merging
+			// changes nothing, and rollback is the variable.
+			if got, want := step.Env["RBE_WIRE_ZSTD"], "${{ vars.RBE_WIRE_ZSTD || '0' }}"; got != want {
+				t.Errorf("worker step RBE_WIRE_ZSTD = %q, want %q", got, want)
+			}
+			// The dedicated zread host; the worker refuses zstd without it.
+			if got, want := step.Env["RBE_WIRE_ZSTD_READ_URL"], "${{ vars.RBE_WIRE_ZSTD_READ_URL || '' }}"; got != want {
+				t.Errorf("worker step RBE_WIRE_ZSTD_READ_URL = %q, want %q", got, want)
+			}
+			// The OSS pool keeps the script's defaults (tier oss, :443) and its
+			// own certificate; the fork tier is rbe-fork-pool.yml's alone.
+			for _, k := range []string{"WORKER_TIER", "RBE_WEST_PORT"} {
+				if v, ok := step.Env[k]; ok {
+					t.Errorf("worker step sets %s=%q; the OSS pool runs the defaults", k, v)
+				}
+			}
+			if got, want := step.Env["RBE_WORKER_TLS_KEY"], "${{ secrets.RBE_WORKER_TLS_KEY }}"; got != want {
+				t.Errorf("worker step RBE_WORKER_TLS_KEY = %q, want %q", got, want)
+			}
+		}
+	}
+	if !checkout || !worker {
+		t.Fatalf("%s: checkout step found %v, worker step found %v", rbeWorkerWorkflow, checkout, worker)
 	}
 }

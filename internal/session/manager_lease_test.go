@@ -92,6 +92,19 @@ func (m managerLeaseFixture) start(ctx context.Context) error {
 	return m.mgr.Start(ctx, m.info.ID, BuildResumeCommand(m.info), runtime.Config{WorkDir: m.info.WorkDir}, ResumeOperator)
 }
 
+// releaseWithinTheWait releases l in 200ms and, for the rest of the test, has
+// an operator wait for a lease up to the package's hang budget: a release
+// ends the wait at once, so here the bound is only a hang detector. The
+// fixture's 600ms bound left a release about 200ms of slack (the wait's last
+// attempt comes a 200ms poll before its bound), and on a loaded disk the
+// record-clear commit a release makes before it drops the flock overran it
+// (ga-0wsm18).
+func releaseWithinTheWait(t *testing.T, l *RuntimeLease) {
+	t.Helper()
+	t.Cleanup(SetOperatorLeaseWaitForTest(goroutineHangBudget))
+	time.AfterFunc(200*time.Millisecond, l.Release)
+}
+
 // TestManagerStartRunsUnderTheRuntimeLease: the provider Start runs while the
 // row records the Manager's lease, which the start releases.
 func TestManagerStartRunsUnderTheRuntimeLease(t *testing.T) {
@@ -136,7 +149,7 @@ func TestManagerStartWaitsForTheRuntimeLease(t *testing.T) {
 	if len(m.sp.starts) != 0 {
 		t.Fatalf("provider Start ran under another holder's lease: %q", m.sp.starts)
 	}
-	time.AfterFunc(200*time.Millisecond, held.Release)
+	releaseWithinTheWait(t, held)
 	if err := m.start(context.Background()); err != nil {
 		t.Fatalf("Start over a lease released within the wait: %v", err)
 	}
@@ -181,7 +194,7 @@ func TestManagerKillTakesTheRuntimeLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	waited := m.hold(t)
-	time.AfterFunc(200*time.Millisecond, waited.Release)
+	releaseWithinTheWait(t, waited)
 	if err := m.mgr.Kill(m.info.ID); err != nil {
 		t.Fatalf("Kill over a lease released within the wait: %v", err)
 	}

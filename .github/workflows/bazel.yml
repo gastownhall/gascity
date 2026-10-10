@@ -222,9 +222,9 @@ jobs:
           case "$MODE" in remote|fork-ro|fork-rw|cache|local) ;; *) echo "::error::mode '$MODE'"; exit 1 ;; esac
           # The nightly fresh-test-results run (bazel-nightly.yml) appends
           # --config=fresh (.bazelrc: --nocache_test_results) to every
-          # lane's cmd: worker-env (tools/rbe/worker-env) keys git and yq
-          # at major version only, so a minor upgrade on the rbe-west
-          # workers moves no action key, and a regression it causes can
+          # lane's cmd: worker-env (rbe-worker's worker/worker-env) keys
+          # git and yq at major version only, so a minor upgrade on the
+          # rbe-west workers moves no action key, and a regression it causes can
           # hide behind every push's cached PASS forever otherwise
           # (2026-10-07 worker-env outage review). FRESH is empty outside
           # workflow_dispatch/workflow_call, which never ask for it.
@@ -434,7 +434,7 @@ jobs:
           fi
 
       # Integration tests drive tmux, lsof and ssh from the host, as
-      # on the remote workers (tools/rbe/worker-env pins their versions).
+      # on the remote workers (the worker-env manifest pins their versions).
       # Where this lane executes here instead, install them, or those tests
       # would skip ("tmux not installed") rather than run.
       - name: Host tools for locally run integration tests
@@ -1110,9 +1110,9 @@ jobs:
 
   # rbe-worker S3a (rbe-worker-repo-design.md §5.4): a secret-free job that
   # measures a PR's effect on the worker host and, once a pin moves, checks
-  # that every commit in the bump range is signed (H5). Source is pinned
-  # unconditionally here: unlike the pool shims (S3b), this job never runs
-  # with farm secrets, so there is no in-tree fallback to cut over from.
+  # that every commit in the bump range is signed (H5). The worker code lives
+  # in gastownhall/rbe-worker (S5 deleted gascity's in-tree copy); this job
+  # never runs with farm secrets.
   worker-host:
     name: rbe worker host
     needs: rbe
@@ -1120,7 +1120,7 @@ jobs:
     timeout-minutes: 25
     permissions:
       contents: read
-      issues: read # worker-env drift issues (tools/rbe/worker-env-drift)
+      issues: read # worker-env drift issues (tools/rbe/worker-env-drift preflight)
     outputs:
       measure: ${{ steps.host.outputs.measure }}
       pin-changed: ${{ steps.pins.outputs.pin-changed }}
@@ -1189,18 +1189,14 @@ jobs:
           echo "old=$old" >> "$GITHUB_OUTPUT"
           echo "rbe-worker: pin $([ "$changed" = true ] && echo moved || echo unchanged) (default branch $old, this checkout $new)"
 
-      # S3-S5 only: every worker-host run fetches and checks parity, pin
-      # moved or not, so the host this job measures (below) is always the
-      # host the pool would serve once source flips to pinned, and so H5
-      # (below) always has the fetched tree's git history to walk the bump
-      # range when the pin did move. No secret reaches this step: the fetch
-      # is anonymous and verifies the pin before any checkout
+      # Every worker-host run fetches, pin moved or not, so H5 (below)
+      # always has the fetched tree's git history to walk the bump range
+      # when the pin did move. No secret reaches this step: the fetch is
+      # anonymous and verifies the pin before any checkout
       # (.github/actions/rbe-worker/fetch.sh).
       - name: Fetch the PR's pinned rbe-worker
         id: rbe-worker
         uses: ./.github/actions/rbe-worker
-        with:
-          source: pinned
 
       # H5 (D12): every commit between the default branch's pin and this
       # PR's pin must be a verified, signed, web-flow (GitHub merge-button)
@@ -1216,31 +1212,36 @@ jobs:
           NEW_SHA: ${{ steps.rbe-worker.outputs.sha }}
         run: .github/actions/rbe-worker/h5.sh "$WORKER_REPO_DIR/.." "$OLD_SHA" "$NEW_SHA"
 
-      # S3-S5 only: this checkout's tools/rbe and the fetched pin must agree,
-      # so the host this job measures is the host the pool would serve once
-      # source flips to pinned. git ls-tree mode+blob comparison: a rename or
-      # mode change shows up the same as content drift. Runs on every
-      # worker-host run (S3-S5), not just measure or pin-moved runs.
-      - name: In-tree and pinned trees are identical (S3-S5 only)
-        env:
-          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
-        run: |
-          set -euo pipefail
-          diff <(git ls-tree -r HEAD tools/rbe | awk -F'\t' '{sub("^tools/rbe/", "", $2)} $2 != "worker-env.txt" && $2 != "cache-zstd-probe.sh" {print $1 "\t" $2}') \
-               <(git -C "$RBE_WORKER_DIR/.." ls-tree -r HEAD worker | awk -F'\t' '{sub("^worker/", "", $2); print $1 "\t" $2}') \
-            || { echo "::error title=rbe-worker drift::in-tree tools/rbe and the pinned rbe-worker differ; S1/S2 parity broke"; exit 1; }
-
-      # §5.6, run against the PR's pinned rbe-worker once rbe-worker ships
-      # cmd/product-check (S2). Until then this step has nothing to run
-      # against and is intentionally absent; adding it is part of landing S2.
-
       - name: Measure this Blacksmith host against the PR's manifest
+        id: measure
         if: steps.host.outputs.measure == 'true' || steps.pins.outputs.pin-changed == 'true'
         env:
           WORKER_MODE: measure
           RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
           RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
         run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
+
+      # §5.6: the pinned rbe-worker's cmd/product-check, worker items only,
+      # against this checkout (its manifest's package set is worker-env's
+      # measured list, its dolt line the worker's DOLT_VERSION, the
+      # .bazelrc test PATH the one worker-env measures, the platform pin the
+      # manifest's sha256). Stdlib-only and quick, so it runs on every run,
+      # whether or not the host moved: a .bazelrc or manifest change that
+      # breaks the contract fails here. It runs after H5 and the fetch
+      # succeeded (a non-empty dir is fetch.sh's last output, written only
+      # after every refusal check and the checkout), and also when the
+      # measurement itself failed, so a drifted host still reports the
+      # contract. No secret reaches these steps.
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        if: ${{ (success() || steps.measure.outcome == 'failure') && steps.rbe-worker.outputs.dir != '' }}
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Product contract against the pinned rbe-worker
+        if: ${{ (success() || steps.measure.outcome == 'failure') && steps.rbe-worker.outputs.dir != '' }}
+        env:
+          RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
+        run: cd "$RBE_WORKER_DIR/.." && go run ./cmd/product-check -product-root "$GITHUB_WORKSPACE" -skip-client
 
   # The required check "bazel test (side-by-side)" (main ruleset, branch
   # protection): the one job of that name. It passes only when the rbe job,

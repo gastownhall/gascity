@@ -207,6 +207,8 @@ type selection struct {
 
 // decideAllocation is the allocator's whole decision for one pass. It is
 // pure: identical inputs give identical outputs.
+//
+//gc:pure
 func decideAllocation(in allocInputs) (allocDecision, error) {
 	if in.Now.IsZero() {
 		return allocDecision{}, errDecideNoClock

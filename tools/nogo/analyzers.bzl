@@ -229,6 +229,7 @@ WRAPPED = [
     "//tools/nogo/analyzers/unconvert",
     "//tools/nogo/analyzers/unparam",
     "//tools/nogo/analyzers/unused",
+    "//tools/nogo/analyzers/v2purity",
 ]
 
 NOGO_ANALYZERS = (
