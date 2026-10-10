@@ -48,6 +48,7 @@ type ProfileBackend interface {
 	IdleSnapshotProvider
 	IdleWaitProvider
 	ImmediateNudgeProvider
+	InputClearProvider
 	InteractionProvider
 	InterruptBoundaryWaitProvider
 	InterruptedTurnResetProvider
@@ -72,7 +73,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	core, timed := profileProvider{b, profileCapabilities[p]}, sleepTrait{SessionSleepCapabilityTimedOnly}
 	switch p {
 	case ProfileTmux:
-		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}}
+		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}}
 	case ProfileACP:
 		return acpProfile{core, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}}
 	case ProfileSubprocess:
@@ -139,6 +140,7 @@ type (
 		IdleSnapshotProvider
 		IdleWaitProvider
 		ImmediateNudgeProvider
+		InputClearProvider
 		InteractionProvider
 		InterruptBoundaryWaitProvider
 		InterruptedTurnResetProvider

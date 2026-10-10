@@ -1,6 +1,8 @@
 package runtime_test
 
 import (
+	"context"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -41,6 +43,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"IdleSnapshotProvider":           reflect.TypeFor[runtime.IdleSnapshotProvider](),
 	"IdleWaitProvider":               reflect.TypeFor[runtime.IdleWaitProvider](),
 	"ImmediateNudgeProvider":         reflect.TypeFor[runtime.ImmediateNudgeProvider](),
+	"InputClearProvider":             reflect.TypeFor[runtime.InputClearProvider](),
 	"InteractionProvider":            reflect.TypeFor[runtime.InteractionProvider](),
 	"InterruptBoundaryWaitProvider":  reflect.TypeFor[runtime.InterruptBoundaryWaitProvider](),
 	"InterruptedTurnResetProvider":   reflect.TypeFor[runtime.InterruptedTurnResetProvider](),
@@ -235,4 +238,40 @@ func TestFullFakeAnswersFromItsState(t *testing.T) {
 	if _, err := broken.ObserveLivenessWithError("s", nil); err == nil {
 		t.Fatal("a broken fake's error-bearing read succeeded")
 	}
+}
+
+// A profiled tmux must preserve composer clearing, including its caller's
+// cancellation context and the backend's refusal to clear protected input.
+func TestTmuxProfileForwardsInputClear(t *testing.T) {
+	for _, result := range []error{nil, runtime.ErrInputClearSkipped} {
+		b := &profileInputClearSpy{FullFake: runtime.FullFake{Fake: runtime.NewFake()}, result: result}
+		p := runtime.NewFakeProfile(runtime.ProfileTmux, b)
+		clearer, ok := p.(runtime.InputClearProvider)
+		if !ok {
+			t.Fatal("tmux profile lacks InputClearProvider")
+		}
+		ctx := t.Context()
+		const window = 2 * time.Second
+		if err := clearer.ClearInput(ctx, "session", window); !errors.Is(err, result) {
+			t.Fatalf("ClearInput error = %v, want %v", err, result)
+		}
+		if b.calls != 1 || b.ctx != ctx || b.name != "session" || b.window != window {
+			t.Fatalf("ClearInput did not forward context, session and restore window: %+v", b)
+		}
+	}
+}
+
+type profileInputClearSpy struct {
+	runtime.FullFake
+	ctx    context.Context
+	name   string
+	window time.Duration
+	result error
+	calls  int
+}
+
+func (b *profileInputClearSpy) ClearInput(ctx context.Context, name string, window time.Duration) error {
+	b.ctx, b.name, b.window = ctx, name, window
+	b.calls++
+	return b.result
 }
