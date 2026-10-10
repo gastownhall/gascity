@@ -74,7 +74,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileTmux:
 		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}}
 	case ProfileACP:
-		return acpProfile{core, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}}
+		return acpProfile{core, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}}
 	case ProfileSubprocess:
 		return subprocessProfile{core, b, b, b, freshTrait{}, sidecarTrait{}, timed}
 	case ProfileHerdr:
@@ -157,10 +157,13 @@ type (
 	}
 	acpProfile struct {
 		Provider
+		IdleSnapshotProvider
+		IdleWaitProvider
 		InteractionProvider
 		ListingAttestation
 		LivenessObserverWithError
 		ProcessTableScanner
+		SessionEventProvider
 		freshTrait
 		sidecarTrait
 		sleepTrait
