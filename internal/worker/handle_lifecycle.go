@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // Start ensures the worker exists and its runtime is live.
@@ -535,7 +537,66 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if resumeCommand := strings.TrimSpace(h.session.Resume.ResumeCommand); resumeCommand != "" {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
+	if fresh, ok, err := h.freshCommandForStaleResumeKey(id, resumeInfo); err != nil {
+		return "", err
+	} else if ok {
+		return fresh, nil
+	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil
+}
+
+// resumeTranscriptProbe reports whether the keyed transcript a resume would
+// reattach to is on disk (present) and whether the provider's keyed transcript
+// can be probed at all (probeable). A package var so tests can model a missing
+// transcript without building provider-specific trees.
+var resumeTranscriptProbe = func(provider, workDir, sessionKey string) (present, probeable bool) {
+	return workertranscript.HasKeyedTranscript(DefaultSearchPaths(), provider, workDir, sessionKey)
+}
+
+// freshCommandForStaleResumeKey is the worker-handle twin of the reconciler's
+// pre-flight stale-resume guard (session_lifecycle_parallel.go). A resume is
+// about to reattach to resumeInfo.SessionKey; if the provider's keyed
+// transcript for that key is provably gone, the resume would exit at once
+// (claude: "No conversation found") and the pane would die, every wake, until
+// someone reset the seat by hand. wake_mode=fresh does not cover it:
+// a session killed rather than slept keeps its key with
+// continuation_reset_pending=true and reset_committed_at empty.
+//
+// Instead: clear the key on the bead (StaleResumeKeyResetPatch, the same reset
+// the reconciler applies) so the bead stops naming a conversation that no
+// longer exists, and launch fresh — with a newly minted key when the provider
+// takes a session-id flag, else with the bare command. Providers whose keyed
+// transcript cannot be probed are left alone.
+func (h *SessionHandle) freshCommandForStaleResumeKey(id string, resumeInfo sessionpkg.Info) (string, bool, error) {
+	key := strings.TrimSpace(resumeInfo.SessionKey)
+	if key == "" || (resumeInfo.ResumeFlag == "" && resumeInfo.ResumeCommand == "") {
+		return "", false, nil
+	}
+	provider := strings.TrimSpace(resumeInfo.ProviderKind)
+	if provider == "" {
+		provider = strings.TrimSpace(resumeInfo.Provider)
+	}
+	present, probeable := resumeTranscriptProbe(provider, resumeInfo.WorkDir, key)
+	if !probeable || present {
+		return "", false, nil
+	}
+	if err := h.manager.ClearStaleResumeKey(id); err != nil {
+		return "", false, fmt.Errorf("clearing stale resume key: %w", err)
+	}
+	log.Printf("session %s: keyed transcript for session_key %s is gone; cleared the key and starting fresh instead of resuming (provider=%s)", id, key, provider)
+	resumeInfo.SessionKey = ""
+	command := sessionpkg.BuildResumeCommand(resumeInfo)
+	if flag := strings.TrimSpace(h.session.Resume.SessionIDFlag); flag != "" {
+		newKey, err := sessionpkg.GenerateSessionKey()
+		if err != nil {
+			return "", false, fmt.Errorf("generating session key: %w", err)
+		}
+		if err := h.manager.PersistSessionKey(id, newKey); err != nil {
+			return "", false, err
+		}
+		command += " " + flag + " " + newKey
+	}
+	return command, true, nil
 }
 
 func firstProviderSessionStart(state sessionpkg.State, metadata map[string]string) bool {

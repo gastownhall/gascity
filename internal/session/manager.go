@@ -1488,6 +1488,34 @@ func (m *Manager) tearDownRuntimeForSuspend(sessName string) error {
 	return nil
 }
 
+// StaleResumeKeyResetPatch is the metadata patch that retires a session_key
+// whose keyed transcript is gone. A resume against it would hard-fail (claude
+// exits 1 on "No conversation found"), so the key, the started config hash
+// that makes the next launch a resume, and the priming markers that share that
+// hash's lifetime are all cleared, and the continuation is marked reset. It is
+// the one definition shared by the reconciler's pre-flight guard and the
+// worker handle's start path, so the two cannot drift.
+func StaleResumeKeyResetPatch() map[string]string {
+	return map[string]string{
+		"session_key":                 "",
+		"started_config_hash":         "",
+		"continuation_reset_pending":  "true",
+		PrimedAtMetadataKey:           "",
+		PrimingAttemptedAtMetadataKey: "",
+		PromptHashMetadataKey:         "",
+	}
+}
+
+// ClearStaleResumeKey applies StaleResumeKeyResetPatch to a session bead.
+func (m *Manager) ClearStaleResumeKey(id string) error {
+	return withSessionMutationLock(id, func() error {
+		if _, _, err := m.sessionBead(id); err != nil {
+			return err
+		}
+		return m.store.SetMetadataBatch(id, StaleResumeKeyResetPatch())
+	})
+}
+
 // RequestFreshRestart marks a session for a controller-owned fresh restart
 // without closing its bead or clearing resume metadata immediately.
 // RequestFreshRestart asks the controller to restart a session with fresh

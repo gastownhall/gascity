@@ -2630,16 +2630,9 @@ func providerCommandBaseName(rp *config.ResolvedProvider) string {
 // patch it applied so the caller can fold the same batch onto the typed twin —
 // every key is in Info.ApplyPatch's switch.
 func clearStaleResumeKeyMetadata(handle string, sessFront *sessionpkg.Store) map[string]string {
-	patch := map[string]string{
-		"session_key":                "",
-		"started_config_hash":        "",
-		"continuation_reset_pending": "true",
-		// Priming markers share started_config_hash's lifetime (S19 Stage 2):
-		// this stale-resume clear forces a first start, so they reset with it.
-		sessionpkg.PrimedAtMetadataKey:           "",
-		sessionpkg.PrimingAttemptedAtMetadataKey: "",
-		sessionpkg.PromptHashMetadataKey:         "",
-	}
+	// Priming markers share started_config_hash's lifetime (S19 Stage 2):
+	// this stale-resume clear forces a first start, so they reset with it.
+	patch := sessionpkg.StaleResumeKeyResetPatch()
 	if sessFront != nil && strings.TrimSpace(handle) != "" {
 		_ = sessFront.ApplyPatch(handle, patch)
 	}

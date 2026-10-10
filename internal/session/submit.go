@@ -143,6 +143,16 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 				if err := m.enqueueDeferredSubmitLocked(b, sessName, message); err != nil {
 					return err
 				}
+				// "About to bring up" only holds when something asks the
+				// controller to. A killed or drained wake_mode=fresh seat rests
+				// asleep with continuation_reset_pending=true and no other wake
+				// cause (the reset-pending awake arm skips Drained beads, and an
+				// on_demand seat has nothing else), so the queued message would
+				// wait forever. Record an explicit wake so the controller starts
+				// the replacement, commits the reset, and drains the queue.
+				if err := m.requestWakeForDeferredSubmitLocked(id, b); err != nil {
+					return err
+				}
 				outcome.Queued = true
 				return nil
 			}
@@ -786,4 +796,20 @@ func withSessionSubmitPollerPIDLock(pidPath string, fn func() error) error {
 	}
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
 	return fn()
+}
+
+// requestWakeForDeferredSubmitLocked records an explicit wake for a session
+// whose submit was deferred behind a pending conversation reset, unless the
+// controller already owns a start for it (a restart request, a pending create,
+// or an earlier wake request).
+func (m *Manager) requestWakeForDeferredSubmitLocked(id string, b beads.Bead) error {
+	if strings.TrimSpace(b.Metadata["restart_requested"]) != "" ||
+		strings.TrimSpace(b.Metadata["pending_create_claim"]) != "" ||
+		strings.TrimSpace(b.Metadata["wake_request"]) != "" {
+		return nil
+	}
+	if err := m.store.SetMetadataBatch(id, RequestExplicitWakePatch(string(WakeCauseExplicit), m.now())); err != nil {
+		return fmt.Errorf("requesting wake for deferred submit: %w", err)
+	}
+	return nil
 }

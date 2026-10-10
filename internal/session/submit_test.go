@@ -2109,6 +2109,47 @@ func TestSubmitDefaultDeferredResetPendingStampsEmptyEpochToSurviveRotation(t *t
 	if item.ContinuationEpoch != "" {
 		t.Fatalf("ContinuationEpoch = %q, want empty so the deferred submit survives the N->N+1 reset rotation", item.ContinuationEpoch)
 	}
+	// Nothing else will start an asleep seat, so the defer must ask for it.
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if b.Metadata["wake_request"] != string(WakeCauseExplicit) || b.Metadata["wake_requested_at"] == "" {
+		t.Fatalf("wake_request = %q at %q, want an explicit wake so the controller starts the replacement", b.Metadata["wake_request"], b.Metadata["wake_requested_at"])
+	}
+}
+
+// TestSubmitDefaultDeferredRestartRequestedLeavesWakeToController: a restart
+// request is already controller-owned, so the defer adds no wake request.
+func TestSubmitDefaultDeferredRestartRequestedLeavesWakeToController(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(t.TempDir()))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := sp.Stop(info.SessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := store.SetMetadataBatch(info.ID, map[string]string{"restart_requested": "true"}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+	outcome, err := mgr.Submit(context.Background(), info.ID, "after restart", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentDefault)
+	if err != nil {
+		t.Fatalf("Submit(default): %v", err)
+	}
+	if !outcome.Queued {
+		t.Fatal("Submit(default) should queue while a restart is requested")
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if b.Metadata["wake_request"] != "" {
+		t.Fatalf("wake_request = %q, want empty: the restart request already owns the start", b.Metadata["wake_request"])
+	}
 }
 
 // TestSubmitDefaultDeferredRestartRequestedKeepsCurrentEpoch guards the fix's

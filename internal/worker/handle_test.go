@@ -2390,6 +2390,9 @@ func TestSessionHandleStartResolvedUsesProvidedRuntime(t *testing.T) {
 }
 
 func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *testing.T) {
+	// The suspended conversation is live: model its transcript as present so
+	// the stale-resume guard leaves the resume alone.
+	stubResumeTranscriptProbe(t, true, true)
 	handle, _, sp, _ := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileClaudeTmuxCLI,
 		Template: "probe",

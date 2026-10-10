@@ -81,6 +81,7 @@ go_test(
         "sessionlog_adapter_test.go",
         "sessionlog_pagination_test.go",
         "start_command_equiv_test.go",
+        "start_command_stale_resume_test.go",
         "structured_tool_test.go",
         "structured_wire_test.go",
         "subagent_guard_adapter_test.go",
