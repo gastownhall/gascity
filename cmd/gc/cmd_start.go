@@ -928,9 +928,10 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	}
 
 	// Stage-1 skill materialization — runs for every eligible agent
-	// at its scope root before sessions spawn. Non-fatal: per-agent
-	// errors are logged inline by runStage1SkillMaterialization
-	// itself; it never returns a non-nil error to its caller.
+	// at its scope root before sessions spawn. Non-fatal: a sink it
+	// cannot reconcile is logged inline by runStage1SkillMaterialization
+	// and left as it was; the error it returns for those sinks repeats
+	// what it logged, so start ignores it.
 	_ = runStage1SkillMaterialization(cityPath, cfg, stderr)
 
 	// Stage-1 MCP projection is a hard gate because it mutates the provider's

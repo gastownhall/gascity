@@ -2904,9 +2904,10 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// filter), so a skill added/removed via a live config reload was
 	// advertised in the catalog and prompt appendix but never materialized
 	// into (or pruned from) the vendor sink until a full supervisor
-	// restart (#3459). Idempotent — a converged pass creates nothing new;
-	// per-agent errors are logged to stderr internally and never abort
-	// the reload.
+	// restart (#3459). Idempotent — a converged pass creates nothing new.
+	// A sink it cannot reconcile never aborts the reload: the pass logs it
+	// to stderr and returns it, and it becomes a reload warning so the
+	// caller sees the sink was left as it was.
 	//
 	// Match the start/supervisor invariant: validate skill collisions
 	// before materializing so a colliding live-reload config can't write
@@ -2916,8 +2917,10 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// warning rather than aborting the reload.
 	if err := checkSkillCollisions(nextCfg, cr.cityPath); err != nil {
 		appendWarning(fmt.Sprintf("skill collision; skipping materialization: %v", err))
-	} else {
-		_ = runStage1SkillMaterialization(cr.cityPath, nextCfg, cr.stderr)
+	} else if err := runStage1SkillMaterialization(cr.cityPath, nextCfg, cr.stderr); err != nil {
+		for _, sinkErr := range stage1UnreconciledSinks(err) {
+			appendWarning(sinkErr.Error())
+		}
 	}
 
 	message := fmt.Sprintf("Config reloaded: %s (rev %s)",

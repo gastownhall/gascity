@@ -147,7 +147,20 @@ this to the **union** of:
 The materializer enumerates all three and produces the union as the
 desired symlink set for each agent. City-pack entries and implicit-bootstrap
 entries are "shared catalog" (universal across agents of the matching
-vendor); the agent-local entries are only for that one agent.
+vendor); the agent-local entries come from that one agent's catalog.
+
+"Agent-local" names the source catalog, not who can see the skill. Agents
+with the same scope root and provider sink write one sink directory, so
+stage 1 materializes each sink once, with the union of its agents' desired
+sets, and every agent reading that sink sees every agent-local skill in it.
+The sink holds one link per name: an agent-local entry that overrides a
+shared entry replaces the shared version for every agent in the sink. Two
+sources for one name in the same class (two agents' agent-local skills, or
+two shared catalogs reaching one sink, as two rigs at one path can) cannot
+both be linked. The collision validator rejects the agent-local case at
+start. A shared clash is settled when an agent-local skill in the sink
+overrides that name; otherwise the pass reports the conflict and leaves
+that sink's existing links in place until it is resolved.
 
 User-declared third-party imports' `skills/` are **not** enumerated in
 v0.15.1 (per the non-goal). The mechanism to include them later is
@@ -430,8 +443,8 @@ This is a **startup validator** — a new check function in the config/doctor
 layer that runs at `gc start` and at every supervisor tick before
 materialization. The validator:
 
-- For each `(scope-root, vendor)` pair, groups agents that materialize
-  into it.
+- For each `(scope-root, sink directory)` pair, groups agents that
+  materialize into it.
 - For each group, builds the multi-map
   `agent-local-skill-name → [agent-names]`.
 - Emits a hard error for any key with more than one agent in its value
@@ -464,14 +477,18 @@ scope root:
   .claude/skills/           # materialized for claude agents
     gc-work/ -> ...
     plan/ -> ...
-  .agents/skills/           # materialized for codex agents
+  .agents/skills/           # materialized for codex and pi agents
     gc-work/ -> ...
     plan/ -> ...
 ```
 
-Each sink is filled only with its vendor's desired set. The collision
-validator is scoped per `(scope-root, vendor)` pair; agents on different
-vendors don't collide even if they share an agent-local skill name.
+Each sink holds the desired sets of every agent that writes it. A sink
+is a directory, not a vendor: providers that share a sink directory
+(`codex` and `pi` both use `.agents/skills`) share the sink at a scope
+root. The collision validator is scoped per `(scope-root, sink
+directory)` pair, so agents whose providers use different sink
+directories don't collide even if they share an agent-local skill name,
+and a `codex` agent and a `pi` agent at one scope root do.
 
 Acceptance tests cover at least:
 - Mixed-provider city with one agent per vendor.
@@ -504,11 +521,16 @@ first, materialize-skills runs last (immediately before the agent command).
 
 **Concurrency note.** Stage-1 materialization writes to scope-root sinks
 (`<city>/.claude/skills/`, `<rig>/.claude/skills/`). Stage-2 materialization
-writes to per-session-worktree sinks
-(`<rig>/.gc/worktrees/<rig>/polecat-N/.claude/skills/`). These paths are
-disjoint by construction, so the supervisor-tick materializer and a
-per-session PreStart never target the same sink. No cross-stage lock is
-required.
+writes to the session's work_dir sink, typically a per-session worktree
+(`<rig>/.gc/worktrees/<rig>/polecat-N/.claude/skills/`), and runs only
+when that work_dir is not the agent's own scope root. The two stages are
+not disjoint by construction: a work_dir that is another agent's scope
+root puts a stage-2 writer and that root's stage-1 pass on one sink, and
+two sessions sharing a work_dir put two stage-2 writers on one. Each
+writer reconciles the sink for its own agents only, so in both cases
+each prunes the other's agent-local links. Until stage 2 groups writers
+by sink as stage 1 does, a session work_dir should be neither another
+agent's scope root nor shared with another session.
 
 **Pool scale-up cost.** A pool scaling from 0 to N spawns N sessions, each
 running its own `gc internal materialize-skills` invocation in PreStart —
@@ -665,7 +687,8 @@ That is not part of this release.
 **Acceptance:**
 - `test/acceptance/skill_test.go` — extend with:
   - "city skill is materialized into every agent's sink (per-vendor)."
-  - "agent-local skill is only in that agent's sink."
+  - "agent-local skill reaches only the sink its agent writes; agents
+    sharing that sink see it too."
   - "adding a skill to the city catalog drains affected agents."
   - "removing a skill cleans up the symlink on next tick."
   - "renaming a skill (delete + add) cleans up old and creates new."

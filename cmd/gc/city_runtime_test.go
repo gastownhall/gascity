@@ -25,7 +25,9 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
+	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/resilience"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -5934,6 +5936,248 @@ func TestCityRuntimeReloadMaterializesNewlyAddedSkill(t *testing.T) {
 	}
 	if info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("%q is not a symlink", link)
+	}
+}
+
+// holdFeatureFlagsForTest restores the process-global feature flags when
+// t ends. loadCityRuntimeControllerConfig and an applied reload both apply
+// the loaded config's flags, which would otherwise leak into later tests.
+func holdFeatureFlagsForTest(t *testing.T) {
+	t.Helper()
+	formulatest.HoldV2ForTest(t)
+	prevGraphApply := molecule.IsGraphApplyEnabled()
+	t.Cleanup(func() { molecule.SetGraphApplyEnabled(prevGraphApply) })
+}
+
+// TestCityRuntimeReloadKeepsAgentLocalSkillInSharedSink is the live-reload
+// form of TestRunStage1SharedSinkKeepsAgentLocalSkill. mayor and deputy are
+// both city-scoped claude agents, so they share <city>/.claude/skills; only
+// mayor has an agent-local skill. The skill is in the sink before the
+// reload (mayor's own materialize-skills pass put it there), and an
+// applied reload, which runs stage-1 materialization for the whole city,
+// must keep it even though the sink's ownership manifest records the link
+// as gc-written and deputy does not want it. Ordinary ticks never run
+// stage-1, so an applied reload is the live path that reconciles the
+// shared sink.
+func TestCityRuntimeReloadKeepsAgentLocalSkillInSharedSink(t *testing.T) {
+	holdFeatureFlagsForTest(t)
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	deputy := "[[agent]]\nname = \"deputy\"\nscope = \"city\"\nprovider = \"claude\"\n\n"
+	writeSkillMaterializationTestConfig(t, tomlPath, deputy)
+	// A shared skill keeps deputy's pass from being skipped as empty; a
+	// live city's sink always has shared skills.
+	writeSkillSource(t, filepath.Join(cityPath, "skills", "plan"))
+	writeSkillSource(t, filepath.Join(cityPath, "agents", "mayor", "skills", "a-only"))
+
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+
+	var mayor *config.Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "mayor" && cfg.Agents[i].Dir == "" {
+			mayor = &cfg.Agents[i]
+			break
+		}
+	}
+	if mayor == nil {
+		t.Fatal("mayor agent missing from loaded config")
+	}
+	var seedOut, seedErr bytes.Buffer
+	if err := materializeSkillsIntoWorkdir(cfg, mayor, cityPath, cityPath, nil, &seedOut, &seedErr); err != nil {
+		t.Fatalf("seed mayor's sink: %v; stderr=%q", err, seedErr.String())
+	}
+	link := filepath.Join(cityPath, ".claude", "skills", "a-only")
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("precondition: a-only not in the sink before reload: %v; stdout=%q", err, seedOut.String())
+	}
+
+	sp := runtime.NewFake()
+	dirty := &atomic.Bool{}
+	pokeCh := make(chan struct{}, 8)
+	var stdout, stderr bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:     cityPath,
+		CityName:     "test-city",
+		TomlPath:     tomlPath,
+		WatchTargets: config.WatchTargets(nil, cfg, cityPath),
+		ConfigRev:    configRev,
+		ConfigDirty:  dirty,
+		Cfg:          cfg,
+		SP:           sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		PokeCh: pokeCh,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+
+	// A live-reloadable edit that moves the revision, so the reload takes
+	// the applied branch rather than the same-revision no-op.
+	writeSkillMaterializationTestConfig(t, tomlPath, deputy, "[orders]\nskip = [\"reaper\"]\n")
+
+	lastProviderName := "tmux"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceWatch)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reload outcome = %q, want %q; stderr=%q", reply.Outcome, reloadOutcomeApplied, stderr.String())
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Errorf("mayor's agent-local skill a-only removed by the reload: %v; stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+}
+
+// TestCityRuntimeReloadPrunesOneAgentsSkillInSharedSink: mayor and deputy
+// share <city>/.claude/skills and each has its own agent-local skill.
+// Both skills survive an applied reload. When deputy's skill is removed
+// from its skills directory, the next applied reload prunes deputy's link
+// and keeps mayor's: one pass per sink still cleans up after a single
+// agent's catalog.
+func TestCityRuntimeReloadPrunesOneAgentsSkillInSharedSink(t *testing.T) {
+	holdFeatureFlagsForTest(t)
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	deputy := "[[agent]]\nname = \"deputy\"\nscope = \"city\"\nprovider = \"claude\"\n\n"
+	writeSkillMaterializationTestConfig(t, tomlPath, deputy)
+	writeSkillSource(t, filepath.Join(cityPath, "skills", "plan"))
+	writeSkillSource(t, filepath.Join(cityPath, "agents", "mayor", "skills", "m-only"))
+	deputySkill := filepath.Join(cityPath, "agents", "deputy", "skills", "d-only")
+	writeSkillSource(t, deputySkill)
+
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+	sink := filepath.Join(cityPath, ".claude", "skills")
+	requireLinks := func(when string, present, absent []string) {
+		t.Helper()
+		for _, name := range present {
+			if _, err := os.Lstat(filepath.Join(sink, name)); err != nil {
+				t.Errorf("%s: %s missing from the shared sink: %v", when, name, err)
+			}
+		}
+		for _, name := range absent {
+			if _, err := os.Lstat(filepath.Join(sink, name)); !os.IsNotExist(err) {
+				t.Errorf("%s: %s still in the shared sink (lstat err=%v)", when, name, err)
+			}
+		}
+	}
+
+	var startErr bytes.Buffer
+	if err := runStage1SkillMaterialization(cityPath, cfg, &startErr); err != nil {
+		t.Fatalf("start pass: %v", err)
+	}
+	requireLinks("after the start pass", []string{"plan", "m-only", "d-only"}, nil)
+
+	sp := runtime.NewFake()
+	var stdout, stderr bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:     cityPath,
+		CityName:     "test-city",
+		TomlPath:     tomlPath,
+		WatchTargets: config.WatchTargets(nil, cfg, cityPath),
+		ConfigRev:    configRev,
+		ConfigDirty:  &atomic.Bool{},
+		Cfg:          cfg,
+		SP:           sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		PokeCh: make(chan struct{}, 8),
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+	reload := func(extra ...string) {
+		t.Helper()
+		writeSkillMaterializationTestConfig(t, tomlPath, append([]string{deputy}, extra...)...)
+		lastProviderName := "tmux"
+		reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceWatch)
+		if reply.Outcome != reloadOutcomeApplied {
+			t.Fatalf("reload outcome = %q, want %q; stderr=%q", reply.Outcome, reloadOutcomeApplied, stderr.String())
+		}
+	}
+
+	reload("[orders]\nskip = [\"reaper\"]\n")
+	requireLinks("after the first reload", []string{"plan", "m-only", "d-only"}, nil)
+
+	if err := os.RemoveAll(deputySkill); err != nil {
+		t.Fatal(err)
+	}
+	reload()
+	requireLinks("after deputy's skill was removed", []string{"plan", "m-only"}, []string{"d-only"})
+}
+
+// TestCityRuntimeReloadWarnsOfUnreconciledSkillSink: rigs fe and be share
+// one path, and each imports a pack bound as ops whose review skill lives
+// in a different directory. Both pass validation, so the reload applies,
+// but the rigs' claude agents write one sink that cannot link ops.review
+// from two sources, and stage 1 leaves it unreconciled. The reload reply
+// must say so, naming the sink, and not only the controller's stderr.
+func TestCityRuntimeReloadWarnsOfUnreconciledSkillSink(t *testing.T) {
+	holdFeatureFlagsForTest(t)
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	rigDir := filepath.Join(cityPath, "rigs", "shared")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, pack := range []string{"ops-a", "ops-b"} {
+		packDir := filepath.Join(cityPath, "assets", pack)
+		writeSkillSource(t, filepath.Join(packDir, "skills", "review"))
+		writeMaterializeTestCityFile(t, packDir, "pack.toml", "[pack]\nname = \"ops\"\nversion = \"0.1.0\"\nschema = 2\n")
+	}
+	writeMaterializeTestCityFile(t, filepath.Join(cityPath, ".gc"), "site.toml",
+		fmt.Sprintf("[[rig]]\nname = \"fe\"\npath = %q\n\n[[rig]]\nname = \"be\"\npath = %q\n", rigDir, rigDir))
+	rigs := "[[rigs]]\nname = \"fe\"\n\n[rigs.imports.ops]\nsource = \"./assets/ops-a\"\n\n" +
+		"[[rigs]]\nname = \"be\"\n\n[rigs.imports.ops]\nsource = \"./assets/ops-b\"\n\n"
+	writeSkillMaterializationTestConfig(t, tomlPath, rigs)
+
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+	sp := runtime.NewFake()
+	var stdout, stderr bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:     cityPath,
+		CityName:     "test-city",
+		TomlPath:     tomlPath,
+		WatchTargets: config.WatchTargets(nil, cfg, cityPath),
+		ConfigRev:    configRev,
+		ConfigDirty:  &atomic.Bool{},
+		Cfg:          cfg,
+		SP:           sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		PokeCh: make(chan struct{}, 8),
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+
+	writeSkillMaterializationTestConfig(t, tomlPath, rigs, "[orders]\nskip = [\"reaper\"]\n")
+	lastProviderName := "tmux"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceWatch)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reload outcome = %q, want %q; stderr=%q", reply.Outcome, reloadOutcomeApplied, stderr.String())
+	}
+	sink := filepath.Join(rigDir, ".claude", "skills")
+	found := false
+	for _, w := range reply.Warnings {
+		if strings.Contains(w, sink) && strings.Contains(w, `"ops.review"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("reload warnings %q do not name the unreconciled sink %s; stderr=%q", reply.Warnings, sink, stderr.String())
 	}
 }
 
