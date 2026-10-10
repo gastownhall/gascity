@@ -25,7 +25,29 @@ type resolvedSessionSleepPolicy struct {
 	Duration         time.Duration
 }
 
+// idleSleepProbeTimeout is the default WaitForIdle timeout of one idle proof,
+// and the floor of idleSleepProbeTimeoutFor.
 const idleSleepProbeTimeout = time.Second
+
+// idleSleepProbeTimeoutFor returns the WaitForIdle timeout for one idle proof
+// of name on sp. It reads the routed leaf's runtime.IdleProbeBudgetProvider
+// budget, because a runtime whose pane observations are remote round trips
+// cannot fit two of them into the 1s default, and a probe that times out fails
+// closed on every tick, so the session never drains. The budget is clamped to
+// [idleSleepProbeTimeout, fenceProbeTimeout]: the cap is the bound every other
+// effect-fence probe already has, so a pass never waits longer than it can
+// today. A leaf without a budget gets idleSleepProbeTimeout.
+func idleSleepProbeTimeoutFor(sp runtime.Provider, name string) time.Duration {
+	if sp == nil {
+		return idleSleepProbeTimeout
+	}
+	leaf, _, _ := runtime.ResolveBackend(sp, name)
+	bp, ok := leaf.(runtime.IdleProbeBudgetProvider)
+	if !ok {
+		return idleSleepProbeTimeout
+	}
+	return min(max(bp.IdleProbeBudget(), idleSleepProbeTimeout), fenceProbeTimeout)
+}
 
 func (p resolvedSessionSleepPolicy) enabled() bool {
 	return p.Effective != "" && p.Effective != config.SessionSleepOff
