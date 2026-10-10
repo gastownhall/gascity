@@ -336,6 +336,9 @@ type templateResolution struct {
 type templateResolver struct {
 	Resolve func(info session.Info) templateResolution
 	Install func(agent *config.Agent, tp TemplateParams)
+	// Retry asks for a new resolver on the next pass: this one's params
+	// failed to load the skill catalog, which legacy loads again each tick.
+	Retry bool
 }
 
 // newTemplateResolver resolves rows under bp, one env generation's build
@@ -368,7 +371,7 @@ func newTemplateResolver(bp *agentBuildParams) templateResolver {
 		return templateResolution{TP: tp, Agent: agent, Err: err}
 	}
 	install := func(agent *config.Agent, tp TemplateParams) { installAgentSideEffects(bp, agent, tp, bp.stderr) }
-	return templateResolver{Resolve: resolve, Install: install}
+	return templateResolver{Resolve: resolve, Install: install, Retry: bp.skillCatalogFailed}
 }
 
 // templateMemo is one generation's template resolutions (S-17). It is
@@ -414,10 +417,13 @@ type gatherMemo struct {
 }
 
 // refresh starts a new generation's memos when env is new, building its
-// template resolver at now, then resolves the templates of rows the memo
-// lacks and publishes a fresh memo holding the pass's rows' entries.
+// template resolver at now (again on a later pass when the resolver asks
+// to: its skill catalog failed to load), then resolves the templates of
+// rows the memo lacks or holds only an error for, and publishes a fresh
+// memo holding the pass's rows' entries.
 func (m *gatherMemo) refresh(e gatherEnv, env *reconcileEnv, now time.Time, rows []censusRow, mislabelled map[rowKey]bool) {
-	if m.sleep == nil || m.gen != env.Gen {
+	newGen := m.sleep == nil || m.gen != env.Gen
+	if newGen {
 		m.gen, m.sleep = env.Gen, make(map[sleepMemoKey]resolvedSessionSleepPolicy)
 		m.transport = make(map[string]string)
 		for i := range env.Cfg.Agents {
@@ -426,6 +432,8 @@ func (m *gatherMemo) refresh(e gatherEnv, env *reconcileEnv, now time.Time, rows
 				m.transport[a.QualifiedName()] = err.Error()
 			}
 		}
+	}
+	if newGen || m.resolver.Retry {
 		m.resolver = templateResolver{}
 		if e.Templates != nil {
 			m.resolver = e.Templates(env, now)
@@ -447,7 +455,7 @@ func (m *gatherMemo) refresh(e gatherEnv, env *reconcileEnv, now time.Time, rows
 			continue
 		}
 		r, ok := cur.entries[k]
-		if !ok {
+		if !ok || r.Err != nil { // an error is not kept: legacy resolves again each tick
 			missed = true
 			r = m.resolver.Resolve(row.Info)
 		}
