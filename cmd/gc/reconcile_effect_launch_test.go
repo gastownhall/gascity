@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/resilience"
@@ -149,6 +153,7 @@ func TestPreWakeRefusesWhatHoldsOrMovedSinceThePass(t *testing.T) {
 		{"rewoken since", nil, []string{"generation", "4"}, causePremise},
 		{"retokened since", nil, []string{"instance_token", "other"}, causePremise},
 		{"wake request since", nil, []string{"wake_request", "operator"}, causePremise},
+		{"kill fence at the pass", []string{"state_reason", session.KillPendingReason, "sleep_reason", string(session.SleepReasonKilled), "slept_at", gatherNow.Format(time.RFC3339)}, nil, causeHeld},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			k, _ := launchKit(t, "asleep", c.meta...)
@@ -218,7 +223,8 @@ func TestResumedStartWaitsStaleKeyDetectDelay(t *testing.T) {
 // Kills a death after the Start committed or taken as a plain error: a
 // runtime gone after a nil Start, and the provider's own died-during-startup
 // error, are each died during startup; ErrSessionExists over a dead runtime
-// refuses held-dead (C5a3 recycles).
+// refuses held-dead (C5a3 recycles); an unavailable runtime is deferred, and
+// any other error a start error.
 func TestLaunchDeathsAndHeldDeadNames(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -227,6 +233,8 @@ func TestLaunchDeathsAndHeldDeadNames(t *testing.T) {
 	}{
 		{"gone after a nil start", func(k *txKit) { k.on(seamAfterCall, func() {}); k.on(seamAfterCall, func() { k.mutate(nil) }) }, causeDiedDuringStartup},
 		{"the provider's died error", func(k *txKit) { k.sp.nextStart = runtime.ErrSessionDiedDuringStartup }, causeDiedDuringStartup},
+		{"runtime unavailable", func(k *txKit) { k.sp.nextStart = runtime.ErrRuntimeUnavailable }, causeStartDeferred},
+		{"another start error", func(k *txKit) { k.sp.nextStart = errors.New("boom") }, causeStartError},
 		{"a dead held name", func(k *txKit) {
 			k.on(seamBeforeCall, func() {})
 			k.on(seamBeforeCall, func() { k.runtimeAs("gc-1", "tok", func(r *simRuntime) { r.corpse = true }) })
@@ -439,14 +447,26 @@ func TestACPLaunchRoutesBeforeStart(t *testing.T) {
 	}
 }
 
-// Kills a launch commit that drops legacy's MCP keys, the #46 mirror's clear
-// or the episode's: the commit writes the snapshot and identity and zeroes
-// the mirror, and the Call after it clears the accrued episode.
+// Kills a launch commit that drops legacy's MCP keys, the runtime snapshot
+// file, the #46 mirror's clear or the episode's: the commit writes the
+// snapshot and identity and zeroes the mirror, the launch rewrites the
+// runtime's snapshot file (here, with no servers, removes it), and the Call
+// after it clears the accrued episode.
 func TestLaunchCommitCarriesMCPAndClearsStartupHealth(t *testing.T) {
 	k, _ := launchKit(t, "asleep", session.MCPServersSnapshotMetadataKey, "stale",
 		startupHealthActiveCountMetadataKey, "2", startupHealthActiveKindMetadataKey, "crash")
 	key := startupHealthEpisodeKey(k.p.World.Census.Rows[k.it.Key].Info, "s-gc-1")
 	if err := sessionFrontDoor(k.cache).SaveStartupHealthEpisode(session.StartupHealthEpisode{SessionName: key, ConsecutiveCount: 2}); err != nil {
+		t.Fatal(err)
+	}
+	row := k.p.World.Census.Rows[k.it.Key]
+	tp := TemplateParams{TemplateName: "worker", Env: map[string]string{"GC_CITY_PATH": k.p.World.CityPath}}
+	k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+	snapshot := citylayout.RuntimePath(k.p.World.CityPath, "session-mcp", "gc-1.json")
+	if err := os.MkdirAll(filepath.Dir(snapshot), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(snapshot, []byte(`[{"name":"stale"}]`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if s := k.runKind(); s.Outcome != settledLanded {
@@ -459,6 +479,9 @@ func TestLaunchCommitCarriesMCPAndClearsStartupHealth(t *testing.T) {
 	}
 	if ep, err := sessionFrontDoor(k.cache).LoadStartupHealthEpisode(key); err != nil || ep.ConsecutiveCount != 0 {
 		t.Fatalf("episode %+v (%v), want cleared", ep, err)
+	}
+	if _, err := os.Stat(snapshot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the runtime MCP snapshot file survived a launch with no MCP servers (%v)", err)
 	}
 }
 
@@ -494,5 +517,88 @@ func TestEndpointGateRefusalDoesNotBackOffRow(t *testing.T) {
 	p.backoffSettled(settlement{Key: k, Kind: intentStart, Outcome: settledRefused, Cause: causeEndpointGate, At: plannerT0})
 	if r, ok := p.backoff.Snapshot()[rowBackoffKey(k)]; ok {
 		t.Fatalf("row backoff %+v after an endpoint-gate refusal, want none", r)
+	}
+}
+
+// Kills a PreWake that trusts the verb section's read: a runtime that
+// appears under the name after the ticket is admitted refuses
+// runtime-present, writing no PreWake and starting nothing.
+func TestPreWakeRefusesARuntimeThatAppeared(t *testing.T) {
+	k, _ := launchKit(t, "asleep")
+	k.on(seamAfterCall, func() { k.runtimeAs("gc-2", "theirs", nil) })
+	if s := k.runKind(); s.Outcome != settledRefused || s.Cause != causeRuntimePresent {
+		t.Fatalf("settlement %+v, want refused %s", s, causeRuntimePresent)
+	}
+	if len(k.starts()) != 0 || k.meta("generation") != "3" {
+		t.Fatal("a refused PreWake wrote or started")
+	}
+}
+
+// Kills a ticket resolved with the wrong verdict: from a half-open breaker,
+// a landed launch closes it, a provider capacity error reopens it, and a
+// start that died before its commit leaves it half-open.
+func TestEndpointTicketVerdicts(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		hook  func(k *txKit)
+		state resilience.State
+		trips int
+	}{
+		{"landed", func(*txKit) {}, resilience.StateClosed, 1},
+		{"capacity", func(k *txKit) { k.sp.nextStart = fmt.Errorf("quota: %w", runtime.ErrProviderCapacity) }, resilience.StateOpen, 2},
+		{"died before the commit", func(k *txKit) { k.on(seamAfterCall, func() {}); k.on(seamAfterCall, func() { k.mutate(nil) }) }, resilience.StateHalfOpen, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			now := gatherNow
+			guard := newEndpointCapacityGuard(func() time.Time { return now })
+			k0 := endpointKey("provider:test-agent")
+			trip, _ := guard.Admit(k0, "outside", "outside")
+			trip.Resolve(verdictCapacity)
+			now = now.Add(guard.breaker(k0).Status().BackoffCap)
+			k, _ := launchKit(t, "asleep")
+			row := k.p.World.Census.Rows[k.it.Key]
+			tp := TemplateParams{TemplateName: "worker", ResolvedProvider: &config.ResolvedProvider{Name: "test-agent"}}
+			k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+			k.p.held.start.capacity = guard
+			c.hook(k)
+			s := k.runKind()
+			if st := guard.breaker(k0).Status(); st.State != c.state || st.Trips != c.trips {
+				t.Fatalf("settlement %+v, breaker %v trips %d; want %v trips %d", s, st.State, st.Trips, c.state, c.trips)
+			}
+		})
+	}
+}
+
+// Kills prepare run without the PreWake's transcript state (S-1): a key
+// whose transcript the PreWake found present resumes the conversation.
+func TestLaunchResumesAPresentTranscript(t *testing.T) {
+	stubTranscript(t, true)
+	k, leaf := launchKit(t, "asleep", "session_key", "k-1")
+	k.p.Clock.(*fakePlannerClock).auto = true // the stale-key wait
+	row := k.p.World.Census.Rows[k.it.Key]
+	tp := TemplateParams{
+		TemplateName: "worker", Command: "agent", WorkDir: t.TempDir(),
+		ResolvedProvider: &config.ResolvedProvider{Name: "claude", SessionIDFlag: "--session-id", ResumeFlag: "--resume", ResumeStyle: "flag"},
+	}
+	k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+	if s := k.runKind(); s.Outcome != settledLanded || len(leaf.cfgs) != 1 || !strings.Contains(leaf.cfgs[0].Command, "--resume k-1") {
+		t.Fatalf("settlement %+v, configs %+v; want one launch resuming k-1", s, leaf.cfgs)
+	}
+}
+
+// Kills a launch through an open endpoint breaker (SC N1): before its
+// backoff ends, the launch refuses endpoint-gate and starts nothing.
+func TestLaunchRefusedByAnOpenEndpoint(t *testing.T) {
+	guard := newEndpointCapacityGuard(func() time.Time { return gatherNow })
+	k0 := endpointKey("provider:test-agent")
+	trip, _ := guard.Admit(k0, "outside", "outside")
+	trip.Resolve(verdictCapacity)
+	k, _ := launchKit(t, "asleep")
+	row := k.p.World.Census.Rows[k.it.Key]
+	tp := TemplateParams{TemplateName: "worker", ResolvedProvider: &config.ResolvedProvider{Name: "test-agent"}}
+	k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+	k.p.held.start.capacity = guard
+	if s := k.runKind(); s.Outcome != settledRefused || s.Cause != causeEndpointGate || len(k.starts()) != 0 || k.meta("generation") != "3" {
+		t.Fatalf("settlement %+v, starts %d; want refused endpoint-gate, nothing written or started", s, len(k.starts()))
 	}
 }
