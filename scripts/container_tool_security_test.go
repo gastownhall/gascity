@@ -66,9 +66,9 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
-		bdSourceRef    = "c1c4b642ac1c08d8c828007a1c2f96e47e43ef7c"
-		bdSourceSHA256 = "1c836ff4c4e021d0774d3fd0f972bc2d7bf552a8355fbf10a368199c93df1cc8"
-		bdBuild        = "c1c4b642ac1"
+		bdSourceRef    = "6c1848a77e52839303ab16fdb02d2ad3fc5e4f1f"
+		bdSourceSHA256 = "252531e1987b511b5606d71cf9f690e429c8abb94bfd4296047bcf208483eca1"
+		bdBuild        = "6c1848a77e5"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.83.2"
 		thriftVersion  = "0.24.0"
@@ -81,16 +81,20 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	// cmd/bd/version.go` fails the build if those two name different releases.
 	// Assert it here rather than discovering it in a docker build CI may not run.
 	//
-	// The anchor is BD_CURRENT_VERSION, not BD_VERSION: BD_SOURCE_REF tracks
-	// BD_CURRENT_REF (TestBDVersionPins), so the version that source declares is
-	// BD_CURRENT_VERSION. deps.env BD_VERSION is a different role -- the
-	// published tarball CI installs -- and it legitimately lags whenever the
-	// current cell is pinned to a commit upstream never cut a release for, which
-	// is the normal state of a bleeding-edge cell. Tying this to BD_VERSION
-	// would forbid that lag and collapse two anchors the matrix keeps distinct.
-	bdVersion := env["BD_CURRENT_VERSION"]
+	// The anchor is BD_CURRENT_SOURCE_VERSION: the version the source at
+	// BD_CURRENT_REF declares. BD_SOURCE_REF tracks BD_CURRENT_REF
+	// (TestBDVersionPins), so that is the only string the grep can match. It
+	// is BD_CURRENT_VERSION whenever BD_CURRENT_REF is a release tag commit
+	// (TestBDVersionPins enforces that), and differs from it only while the
+	// pin is a beads main pseudo-version: main declares 1.3.0 while the
+	// archive cell is the v1.3.1 tarball, and anchoring on BD_CURRENT_VERSION
+	// there would pass this test and fail the docker build. deps.env BD_VERSION
+	// is a different role again -- the published tarball CI installs -- and
+	// it legitimately lags whenever the current cell is pinned to a commit
+	// upstream never cut a release for.
+	bdVersion := env["BD_CURRENT_SOURCE_VERSION"]
 	if bdVersion == "" {
-		t.Fatal("deps.env missing BD_CURRENT_VERSION")
+		t.Fatal("deps.env missing BD_CURRENT_SOURCE_VERSION")
 	}
 
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")

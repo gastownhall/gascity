@@ -176,6 +176,13 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]
 	overrides["GC_STORE_ROOT"] = target.ScopeRoot
 	overrides["GC_STORE_SCOPE"] = target.ScopeKind
 	overrides["GC_BEADS_PREFIX"] = target.Prefix
+	// A scope with a per-scope remote credential gets it the way every BdStore
+	// bd child does: BEADS_HTTP_TOKEN=host:port=token in this child's env only,
+	// the ambient token command blanked. Without it gc bd (and the show-watch
+	// runner, which reuses this env) would fall back to the machine-wide ladder.
+	if err := newBdScopeCredentialEnv(cityPath).apply(overrides, target.ScopeRoot); err != nil {
+		return nil, err
+	}
 	applyExportSuppressionEnv(overrides)
 	// bd may invoke gc again through its provider/lifecycle hooks. Pin those
 	// recursive calls to this exact executable rather than inheriting an

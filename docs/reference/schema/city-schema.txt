@@ -1113,6 +1113,15 @@
           "description": "NativeTransport selects whether this city's bead stores may open the\nnative Dolt store at all: \"off\" (this city's stores never open\nnatively; always BdStore, the bd CLI subprocess — logged once at boot)\nor \"auto\" (default: native when preflight-eligible, today's behavior).\nEmpty defaults to \"auto\". Any other value (including \"require\", which\nbelongs to conditional_writes/guarded_release, not this switch) fails\nconfig load. A running city keeps the stores it holds open on the value\nit read at boot until it restarts; every other open, by a gc command or\nfor a single tick, reads the current value.\nGC_BEADS_FORCE_FALLBACK remains a deprecated process-wide alias for\n\"off\" that overrides every city's value for one release.",
           "default": "auto"
         },
+        "credential": {
+          "type": "string",
+          "description": "Credential names where this city's bearer for a remote beads backend\n(a scope whose .beads/metadata.json selects the beads http backend)\nlives: \"env:NAME\" (one environment variable), \"command:\u003cargv\u003e\" (a\nprogram, run without a shell, whose stdout is the token) or\n\"file:\u003cpath\u003e\" (a relative path is resolved against the city\ndirectory). Never the token itself: any other value fails config load.\nIt is the ONLY credential that scope's native store, wire_compat\nhandshake and bd subprocesses use; the ambient BEADS_HTTP_TOKEN,\nBEADS_HTTP_TOKEN_COMMAND and credentials-file ladder are ignored. An\nenv or file source is re-read on every use, a command's token is\nreused for a minute, and a 401 re-reads any source at once. gc moves\nan env: variable out of its own environment, so no child process (an\nagent, a bd subprocess, a gc run by an agent) inherits it: prefer\nfile: or command: when cities share a supervisor or agents run gc\nagainst the remote store. It authorizes the city scope and\nevery rig on the same server (scheme, host and port) that sets no\nbeads_credential of its own; gc refuses to send it to another server.\nUnset keeps the ambient ladder, which is keyed by host and port and is\ntherefore only correct for a single city per server and process."
+        },
+        "allow_insecure_credential": {
+          "type": "boolean",
+          "description": "AllowInsecureCredential permits sending Credential over plain http to a\nnon-loopback server (normally behind a TLS-terminating proxy you\ntrust). Default false: such a scope is refused before any request.\nIt has no effect without credential (the ambient ladder keeps its own\nBEADS_HTTP_ALLOW_INSECURE / bd connect --allow-plaintext grant).",
+          "default": false
+        },
         "policies": {
           "additionalProperties": {
             "$ref": "#/$defs/BeadPolicyConfig"
@@ -2726,6 +2735,15 @@
         "beads_proxied_idle_timeout": {
           "type": "string",
           "description": "BeadsProxiedIdleTimeout overrides [beads] proxied_idle_timeout for this\nrig's bd-owned proxied scope. Go duration; \"0\" means never. Ignored, with\na warning, for a rig that shares the city's proxy root: one proxy serves\nevery scope on that root and carries the city's value."
+        },
+        "beads_credential": {
+          "type": "string",
+          "description": "BeadsCredential overrides [beads] credential for this rig's remote beads\nscope: \"env:NAME\", \"command:\u003cargv\u003e\" or \"file:\u003cpath\u003e\", never the token\nitself. Use it for a rig attached to a different server than the city,\nor with its own token."
+        },
+        "beads_allow_insecure_credential": {
+          "type": "boolean",
+          "description": "BeadsAllowInsecureCredential is [beads] allow_insecure_credential for\nthis rig's own beads_credential. Default false. It has no effect\nwithout beads_credential (a rig on the city's credential takes the\ncity's allow_insecure_credential).",
+          "default": false
         }
       },
       "additionalProperties": false,

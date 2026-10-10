@@ -673,6 +673,16 @@ type Rig struct {
 	// a warning, for a rig that shares the city's proxy root: one proxy serves
 	// every scope on that root and carries the city's value.
 	BeadsProxiedIdleTimeout *string `toml:"beads_proxied_idle_timeout,omitempty"`
+	// BeadsCredential overrides [beads] credential for this rig's remote beads
+	// scope: "env:NAME", "command:<argv>" or "file:<path>", never the token
+	// itself. Use it for a rig attached to a different server than the city,
+	// or with its own token.
+	BeadsCredential *string `toml:"beads_credential,omitempty"`
+	// BeadsAllowInsecureCredential is [beads] allow_insecure_credential for
+	// this rig's own beads_credential. Default false. It has no effect
+	// without beads_credential (a rig on the city's credential takes the
+	// city's allow_insecure_credential).
+	BeadsAllowInsecureCredential *bool `toml:"beads_allow_insecure_credential,omitempty" jsonschema:"default=false"`
 }
 
 // AgentOverride modifies a pack-stamped agent for a specific rig.
@@ -1478,6 +1488,32 @@ type BeadsConfig struct {
 	// GC_BEADS_FORCE_FALLBACK remains a deprecated process-wide alias for
 	// "off" that overrides every city's value for one release.
 	NativeTransport string `toml:"native_transport,omitempty" jsonschema:"default=auto,enum=auto,enum=off"`
+	// Credential names where this city's bearer for a remote beads backend
+	// (a scope whose .beads/metadata.json selects the beads http backend)
+	// lives: "env:NAME" (one environment variable), "command:<argv>" (a
+	// program, run without a shell, whose stdout is the token) or
+	// "file:<path>" (a relative path is resolved against the city
+	// directory). Never the token itself: any other value fails config load.
+	// It is the ONLY credential that scope's native store, wire_compat
+	// handshake and bd subprocesses use; the ambient BEADS_HTTP_TOKEN,
+	// BEADS_HTTP_TOKEN_COMMAND and credentials-file ladder are ignored. An
+	// env or file source is re-read on every use, a command's token is
+	// reused for a minute, and a 401 re-reads any source at once. gc moves
+	// an env: variable out of its own environment, so no child process (an
+	// agent, a bd subprocess, a gc run by an agent) inherits it: prefer
+	// file: or command: when cities share a supervisor or agents run gc
+	// against the remote store. It authorizes the city scope and
+	// every rig on the same server (scheme, host and port) that sets no
+	// beads_credential of its own; gc refuses to send it to another server.
+	// Unset keeps the ambient ladder, which is keyed by host and port and is
+	// therefore only correct for a single city per server and process.
+	Credential string `toml:"credential,omitempty"`
+	// AllowInsecureCredential permits sending Credential over plain http to a
+	// non-loopback server (normally behind a TLS-terminating proxy you
+	// trust). Default false: such a scope is refused before any request.
+	// It has no effect without credential (the ambient ladder keeps its own
+	// BEADS_HTTP_ALLOW_INSECURE / bd connect --allow-plaintext grant).
+	AllowInsecureCredential *bool `toml:"allow_insecure_credential,omitempty" jsonschema:"default=false"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -4932,6 +4968,9 @@ func Parse(data []byte) (*City, error) {
 	if err := validateBeadsModes(cfg.Beads); err != nil {
 		return nil, err
 	}
+	if err := validateRigBeadsCredentials(cfg.Rigs); err != nil {
+		return nil, err
+	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class
 	// completeness, binding resolution) are checked on the composed root in
 	// LoadWithIncludesOptions, because a fragment may supply either half.
@@ -4953,7 +4992,10 @@ func validateBeadsModes(b BeadsConfig) error {
 	if err := validateGuardedRelease(b.GuardedRelease); err != nil {
 		return err
 	}
-	return validateNativeTransport(b.NativeTransport)
+	if err := validateNativeTransport(b.NativeTransport); err != nil {
+		return err
+	}
+	return validateBeadsCredential(b)
 }
 
 // validateConditionalWrites rejects an out-of-enum beads.conditional_writes

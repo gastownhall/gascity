@@ -749,6 +749,38 @@ provider = "file"
 	}
 }
 
+// TestResolveConvoyStoreSurfacesRemoteNativeOpenFailure: a remote-backed rig
+// whose required native open failed is never dropped because another
+// candidate opened. An id living only there would otherwise resolve to a bare
+// not-found and hide the outage.
+func TestResolveConvoyStoreSurfacesRemoteNativeOpenFailure(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityStore := beads.NewMemStore()
+	cfg := &config.City{
+		Rigs: []config.Rig{{
+			Name:   "hello-world",
+			Path:   "/rigs/hello-world",
+			Prefix: "HW",
+		}},
+	}
+	rigOpenErr := &beads.HTTPNativeOpenRequiredError{ScopeRoot: "/rigs/hello-world", Backend: "http", Gate: "native_open", Reason: "dial tcp: connection refused"}
+	openStore := func(dir string) (beads.Store, error) {
+		switch dir {
+		case "/city":
+			return cityStore, nil
+		case "/rigs/hello-world":
+			return nil, rigOpenErr
+		default:
+			t.Fatalf("unexpected store dir %q", dir)
+			return nil, nil
+		}
+	}
+	_, err := resolveConvoyStore("HW-1", cfg, "/city", openStore)
+	if !beads.IsHTTPNativeOpenRequired(err) {
+		t.Fatalf("resolveConvoyStore() error = %v, want the rig's remote native open failure, not a not-found", err)
+	}
+}
+
 func TestResolveConvoyStoreFindsUnprefixedRigConvoy(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	cityStore := beads.NewMemStore()

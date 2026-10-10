@@ -20,13 +20,15 @@ ARG BASE_IMAGE=gc-agent-base:latest
 FROM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS bd-builder
 
 # BD_VERSION here is the version the source at BD_SOURCE_REF declares, i.e.
-# deps.env BD_CURRENT_VERSION -- not deps.env BD_VERSION, which is the published
-# tarball CI installs and may lag. The `grep Version = "${bd_version}"` below
-# fails the build if this drifts from the fetched source.
-ARG BD_VERSION=v1.3.1
-ARG BD_SOURCE_REF=c1c4b642ac1c08d8c828007a1c2f96e47e43ef7c
-ARG BD_SOURCE_SHA256=1c836ff4c4e021d0774d3fd0f972bc2d7bf552a8355fbf10a368199c93df1cc8
-ARG BD_BUILD=c1c4b642ac1
+# deps.env BD_CURRENT_SOURCE_VERSION -- not deps.env BD_VERSION, which is the
+# published tarball CI installs and may lag. The `grep Version = "${bd_version}"`
+# below fails the build if this drifts from the fetched source, and the bd built
+# here reports this version. While BD_SOURCE_REF is a beads main commit rather
+# than a release tag (see deps.env), that is main's declared 1.3.0, not v1.3.1.
+ARG BD_VERSION=v1.3.0
+ARG BD_SOURCE_REF=6c1848a77e52839303ab16fdb02d2ad3fc5e4f1f
+ARG BD_SOURCE_SHA256=252531e1987b511b5606d71cf9f690e429c8abb94bfd4296047bcf208483eca1
+ARG BD_BUILD=6c1848a77e5
 ARG BD_BRANCH=HEAD
 ARG GRPC_VERSION=1.83.2
 ARG THRIFT_VERSION=0.24.0

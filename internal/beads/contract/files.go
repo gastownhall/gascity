@@ -513,6 +513,16 @@ func ReadMetadataBackend(fs fsys.FS, path string) (string, bool, error) {
 // registers. An empty Backend is permitted — it is a registered name — and
 // downstream consumers that need a backend must check state.Backend != ""
 // themselves.
+//
+// A backend the linked beads library registered as REMOTE (BackendIsRemote:
+// the beads http backend, once gc's composition root registered it) is
+// accepted too, by asking that registry rather than naming it here. Its
+// metadata is the shape `bd connect` and bdhttp.Attach write: the backend
+// selection alone, with the server and project pinned in the per-user
+// activation sidecar beside it. gc never projects an environment for such a
+// scope or manages a runtime for it; every dispatch site classifies it as a
+// store gc does not serve (cmd/gc scopeHasCompleteStorageBinding) before it
+// would switch on the name.
 func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 	data, err := fs.ReadFile(path)
 	if err != nil {
@@ -535,7 +545,7 @@ func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 		}
 	}
 
-	if err := RecognizeBackend(state.Backend); err != nil {
+	if err := RecognizeBackend(state.Backend); err != nil && !BackendIsRemote(state.Backend) {
 		return MetadataState{}, false, &MetadataParseError{Path: abs, Reason: err.Error(), Err: err}
 	}
 

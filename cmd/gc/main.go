@@ -48,6 +48,9 @@ func mainExitCode(args []string, stdout, stderr io.Writer) int {
 	// A test-only cadence hook (internal/clock.BackstopSpeedupEnv) announces
 	// itself before anything else runs, active or ignored.
 	clock.AnnounceBackstopSpeedup(stderr)
+	// Before any store opens: register the remote beads backends this build
+	// links, so a scope whose metadata selects one opens natively.
+	registerBeadsBackends()
 	if handled, code := privateProductMetricsEntrypoint(args); handled {
 		return code
 	}

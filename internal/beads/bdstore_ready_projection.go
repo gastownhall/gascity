@@ -230,6 +230,16 @@ func (s *BdStore) bdReadyProjectionEnabled() (readyProjectionDoor, bool, error) 
 	// nevertheless opened embedded (isBdSQLUnsupportedInEmbeddedMode) had its
 	// `bd sql` proven refused by an earlier store, and switchToBlockedDoor
 	// recorded that on the shared guard so this rebuild does not re-spend it.
+	// A remote backend gets neither door: `bd sql` is not served over the
+	// wire, and the `bd blocked` projection is a raw-path verb this store must
+	// not spend against a remote scope either. Readiness reads on such a scope
+	// take a live `bd ready`, which the remote backend serves through its role.
+	if s.usesRemoteBackend() {
+		cause := fmt.Errorf("%w: the scope's remote backend serves neither bd sql nor the bd blocked projection", ErrReadyProjectionUnsupported)
+		s.disableReadyProjectionLocked(cause)
+		s.readyProjectionVersionErr = cause
+		return readyProjectionDoorSQL, false, fmt.Errorf("bd ready projection scope verdict: %w", cause)
+	}
 	door := readyProjectionDoorSQL
 	if s.readyProjectionBackendRefusal() != nil || s.readyProjectionBlockedDoorLatched() {
 		door = readyProjectionDoorBlocked

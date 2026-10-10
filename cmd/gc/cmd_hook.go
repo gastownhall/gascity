@@ -476,7 +476,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			os.Getenv("GC_SESSION_ID"), failureTemplate, command, err)
 	}
 	runner := func(command, _ string) (string, error) {
-		out, _, err := bestStoreWithWork(command, stores, stores[0], shellWorkQueryWithEnv)
+		out, _, err := bestStoreWithWork(command, stores, stores[0], hookWorkQueryRunner(cityPath))
 		emitQueryFailure(command, err)
 		return out, err
 	}
@@ -768,8 +768,17 @@ func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, store
 	if !proceed {
 		return 1
 	}
-	ops := classRoutedHookClaimOps(hookClaimOps{}, route)
-	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
+	// A leg whose work store is served by a remote beads backend claims
+	// through the lane its store open selects (native under auto, the bd CLI
+	// with the scope's credential under off); every local leg is unchanged.
+	// The class route wraps it, so its not-found escalation sees the remote
+	// leg's answer (hook_claim_remote.go).
+	remote := newHookClaimRemoteRouter(cityPath, stderr)
+	defer remote.Close()
+	ops := classRoutedHookClaimOps(remoteRoutedHookClaimOps(hookClaimOps{}, remote), route)
+	// The work query runs through hookWorkQueryRunner, so a remote leg's
+	// bd ready carries its scope's credential like the claim lanes do.
+	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, hookWorkQueryRunner(cityPath), emitFailure, stdout, stderr)
 }
 
 // claimHookWorkWithRunner is claimHookWork with the work-query runner and claim

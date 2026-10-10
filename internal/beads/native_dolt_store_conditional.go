@@ -295,45 +295,87 @@ func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts 
 	return s.conditionalWriteError(ctx, storage, id, expectedRevision, err)
 }
 
-// updateLabelsIfMatch is UpdateIfMatch for opts that carry labels: one
-// transaction checks the row version, then applies the row fields and the
-// label writes. Upstream label writes touch only the label and event tables
-// (wisp_labels and wisp_events for a wisp), which leave the row version where
-// it was, so the transaction also advances beadmeta.LabelRevisionMetadataKey
-// in the row's metadata. That issues-row (or wisps-row) change mints a fresh
-// row version, so a CAS read before this write fails afterwards.
+// updateLabelsIfMatch is UpdateIfMatch for opts that carry labels. Upstream
+// label writes touch only the label and event tables (wisp_labels and
+// wisp_events for a wisp), which leave the row version where it was, so the
+// write also advances beadmeta.LabelRevisionMetadataKey in the row's metadata.
+// That issues-row (or wisps-row) change mints a fresh row version, so a CAS
+// read before this write fails afterwards.
+//
+// It goes through the issueops roles every backend serves, never a raw
+// transaction: a remote backend has no RunInTransaction to offer. The row is
+// read through IssueReader to compute the next label revision, then the row
+// fields, the label edits and the revision bump land as ONE single-item batch
+// carrying ExpectedVersion. The role checks the version in the transaction
+// that writes, so a row that moved between the read and the write is refused
+// (ErrVersionMismatch) rather than overwritten; the read only seeds the
+// bookkeeping value. A read that already sees another version answers the
+// precondition failure without writing.
+//
+// The waivers match the transactional route this replaces: an assignee edit
+// is not fenced (ForceAssigneeTransfer when the assignee is set), and a status
+// that crosses into the done category still answers to close policy
+// (ForceClosePolicy stays false).
 //
 // The key is bookkeeping, not desired state: a caller comparing metadata for
 // convergence must ignore it, and nothing else reads it.
 func (s *NativeDoltStore) updateLabelsIfMatch(storage beadslib.Storage, id string, expectedRevision int64, opts UpdateOpts) error {
-	return retryOnNativeDoltSerializationConflict(func() error {
-		ctx, cancel := nativeDoltOperationContext(context.TODO())
-		defer cancel()
-		return storage.RunInTransaction(ctx, fmt.Sprintf("gc: fenced label update bead %s", id), func(tx beadslib.Transaction) error {
-			issue, err := tx.GetIssue(ctx, id)
-			if err != nil {
-				return nativeStoreError(id, err)
+	ctx, cancel := nativeDoltOperationContext(context.TODO())
+	defer cancel()
+	err := retryOnNativeDoltSerializationConflict(func() error {
+		reader, err := storage.IssueReader()
+		if err != nil {
+			return nativeStoreError(id, err)
+		}
+		issue, err := reader.Get(ctx, issueops.GetRequest{ID: id})
+		if err != nil {
+			return err
+		}
+		if issue == nil {
+			return fmt.Errorf("bead %q: %w", id, ErrNotFound)
+		}
+		if issue.RowVersion != expectedRevision {
+			return &PreconditionFailedError{
+				ID:       id,
+				Expected: expectedRevision,
+				Current:  issue.RowVersion,
+				Raw:      "native row-version mismatch",
 			}
-			if issue == nil {
-				return fmt.Errorf("bead %q: %w", id, ErrNotFound)
-			}
-			if issue.RowVersion != expectedRevision {
-				return &PreconditionFailedError{
-					ID:       id,
-					Expected: expectedRevision,
-					Current:  issue.RowVersion,
-					Raw:      "native row-version mismatch",
-				}
-			}
-			stamped := opts
-			stamped.Metadata = maps.Clone(opts.Metadata)
-			if stamped.Metadata == nil {
-				stamped.Metadata = make(map[string]string, 1)
-			}
-			stamped.Metadata[beadmeta.LabelRevisionMetadataKey] = nextConditionalLabelRevision(issue.Metadata)
-			return s.applyUpdateInTx(ctx, tx, id, stamped)
+		}
+		stamped := opts
+		stamped.Metadata = maps.Clone(opts.Metadata)
+		if stamped.Metadata == nil {
+			stamped.Metadata = make(map[string]string, 1)
+		}
+		stamped.Metadata[beadmeta.LabelRevisionMetadataKey] = nextConditionalLabelRevision(issue.Metadata)
+		patch, err := nativeIssuePatchFromUpdateOpts(stamped)
+		if err != nil {
+			return fmt.Errorf("conditional update %s: %w", id, err)
+		}
+		applier, err := storage.BatchApplier()
+		if err != nil {
+			return nativeStoreError(id, err)
+		}
+		_, err = applier.ApplyBatch(ctx, issueops.ApplyBatchRequest{
+			Actor: s.actor,
+			Items: []issueops.ApplyItem{{
+				Kind: issueops.ItemUpdate,
+				Update: &issueops.UpdateItem{
+					Target:                issueops.Ref{ID: id},
+					Patch:                 patch,
+					ExpectedVersion:       &expectedRevision,
+					ForceAssigneeTransfer: opts.Assignee != nil,
+				},
+			}},
+			Provenance: "gc: fenced label update " + id,
 		})
+		return err
 	})
+	var precondition *PreconditionFailedError
+	if errors.As(err, &precondition) {
+		return err
+	}
+	return s.conditionalWriteError(ctx, storage, id, expectedRevision, err)
 }
 
 // nextConditionalLabelRevision returns a beadmeta.LabelRevisionMetadataKey

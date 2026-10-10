@@ -752,6 +752,15 @@ func openConvoyStores(cfg *config.City, cityPath, beadID string, openStore func(
 	for _, dir := range convoyStoreCandidates(cfg, cityPath, beadID) {
 		store, err := openStore(dir)
 		if err != nil {
+			// A remote-backed candidate whose required native open failed is
+			// never "this candidate does not exist": its own metadata promises
+			// a backend that is unreachable right now. Dropping it because some
+			// other candidate opened would turn an id living only there into a
+			// bare not-found, hiding the outage. Read faults are refusals, not
+			// skips.
+			if beads.IsHTTPNativeOpenRequired(err) {
+				return nil, fmt.Errorf("opening convoy store at %s: %w", dir, err)
+			}
 			if firstErr == nil {
 				firstErr = err
 			}

@@ -261,6 +261,16 @@ go_deps.module_override(
     path = "github.com/steveyegge/beads",
 )
 
+# beads ships its own Bazel BUILD files (rules_go via its own MODULE.bazel),
+# whose apparent repo names (@rules_go and friends) are not visible from a
+# go_deps extension repository. Discard them and let gazelle regenerate the
+# module's BUILD files, as it did for releases that shipped none; the
+# migrations patch above then applies to the generated files.
+go_deps.gazelle_override(
+    build_file_generation = "clean",
+    path = "github.com/steveyegge/beads",
+)
+
 # protoc-gen-validate's validate package regenerates the checked-in
 # validate.pb.go with go_proto_library, both in gazelle's default proto mode
 # and in the module's own validate/BUILD, which pulls the C++ protoc and
@@ -327,6 +337,18 @@ go_deps.module(
     path = "github.com/oasdiff/yaml3",
     sum = "h1:bQx3WeLcUWy+RletIKwUIt4x3t8n2SxavmoclizMb8c=",
     version = "v0.0.0-20250309153720-d2182401db90",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/josharian/intern",
+    sum = "h1:vlS4z54oSdjm0bgjRigI+G1HpF+tI+9rE5LLzOg8HmY=",
+    version = "v1.0.0",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/mailru/easyjson",
+    sum = "h1:UGYAvKxe3sBsEDzO8ZeWOSlIQfWFlxbzLZe7hwFURr0=",
+    version = "v0.7.7",
 )
 go_deps.module(
     indirect = True,

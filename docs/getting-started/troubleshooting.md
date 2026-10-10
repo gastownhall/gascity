@@ -308,6 +308,57 @@ deprecated and applies to every city the process serves. With either one,
 that provider opens the native store. Turn native transport off only in cities
 that have no such binding, or remove the binding first.
 
+## Remote Beads Server: Wrong Token or `remote_credential` Refusal
+
+A scope attached to a remote `bd serve` (`bd connect`, backend `http`)
+authenticates with bd's ambient credential ladder by default:
+`BEADS_HTTP_TOKEN`, `BEADS_HTTP_TOKEN_COMMAND`, then
+`~/.config/beads/credentials [host:port]`. That ladder is keyed by server, so
+it only works for one city per server and per process. When two cities in one
+supervisor share a server, give each one its own credential in `city.toml`:
+
+```toml
+[beads]
+credential = "env:MYCITY_BEADS_TOKEN"   # or "command:<argv>" or "file:<path>"
+```
+
+Set `beads_credential` on a `[[rigs]]` entry to give a rig its own token, or
+to attach it to a different server. The value says where the token lives, never
+the token itself: an inline token fails config load. `command:` runs the program
+without a shell and reads the token from its stdout. A relative `file:` path is
+resolved against the city directory. That token is then the only one used for
+the native store, the `wire_compat` handshake and every `bd` subprocess of the
+scope, `gc bd` included. A subprocess gets it in its own `BEADS_HTTP_TOKEN`,
+never on the command line. The ambient ladder is ignored for that scope, and so
+is `BEADS_HTTP_CA_FILE`: the scope trusts the `ca_file` that `bd connect`
+recorded.
+
+gc picks up a rotated token without a restart. It re-reads an `env:` or
+`file:` source on every use. It reuses a `command:` token for up to a minute.
+After a 401 it re-reads any source at once, and every opener and subprocess of
+that scope then uses the new token.
+
+gc reads an `env:` variable from its own environment and then removes it, so no
+process gc starts inherits it. That covers agents, `bd` subprocesses and a `gc`
+that an agent runs. Prefer `file:` or `command:` when several cities share a
+supervisor, or when agents run `gc` or `bd` against the remote server
+themselves. A process started before gc loaded the city's config, such as an
+already running tmux server, keeps whatever it inherited.
+
+When the credential cannot be used, the scope is refused before any request is
+sent. The error has gate `remote_credential` and names the source, never the
+value. The causes are:
+
+- the source failed to resolve (an unset variable, an empty file, or a command
+  that failed);
+- a rig with no `beads_credential` of its own is attached to a different server
+  than the city;
+- the server is plain `http` on a host that is not loopback.
+
+Plain `http` is allowed only when you opt in for that scope with
+`allow_insecure_credential = true` (or `beads_allow_insecure_credential` on a
+rig). Do this only behind a TLS-terminating proxy you trust.
+
 ## Native Store Falls Back Because Dolt Is in Embedded Mode
 
 **Symptom:** `gc status` or `gc session list` is slower than expected, or

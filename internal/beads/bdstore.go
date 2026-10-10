@@ -432,6 +432,10 @@ type BdStore struct {
 	// what makes the SQL guard inert there. See bdsql_relocation.go.
 	relocatedClasses []RelocatedClass
 
+	// cityPath is the city this store's scope belongs to (WithBdStoreCityPath),
+	// consulted only to see whether the scope inherits a remote backend.
+	cityPath string
+
 	readyProjectionMu      sync.Mutex
 	readyProjectionChecked bool
 	readyProjectionEnabled bool
@@ -513,6 +517,26 @@ func WithBdStoreListSkipLabels(enabled bool) BdStoreOption {
 	return func(s *BdStore) {
 		s.listSkipLabelsEnabled = enabled
 	}
+}
+
+// WithBdStoreCityPath names the city a rig store belongs to, so the store can
+// tell when its rig inherits a REMOTE backend from the city (no metadata of
+// its own; see RemoteBackendActivationRoot) and refuse the raw-SQL and
+// blocked-projection paths there exactly as it does on a scope whose own
+// metadata names the remote backend. Without it only the scope's own
+// metadata is consulted.
+func WithBdStoreCityPath(cityPath string) BdStoreOption {
+	return func(s *BdStore) {
+		s.cityPath = cityPath
+	}
+}
+
+// usesRemoteBackend reports whether this store's scope is served by a
+// registered remote backend: its own metadata names one, or (with
+// WithBdStoreCityPath) it inherits one from its city.
+func (s *BdStore) usesRemoteBackend() bool {
+	_, remote := RemoteBackendActivationRoot(s.dir, s.cityPath)
+	return remote
 }
 
 // WithBdStoreRelocatedClasses declares the coordination classes this store's bd
@@ -1223,6 +1247,21 @@ func isBdBeadNotFound(err error) bool {
 	return true
 }
 
+// isBdClaimNotFound is Claim's not-found: bd saying the bead does not exist
+// (isBdBeadNotFound), and not a 404 from something in front of bd serve. bd
+// serve's own refusal carries the not_found code (and bd prints "Issue <id>
+// not found"); a gateway or proxy answering 404 for a path it does not route
+// reaches bd as a codeless "answered 404", whose text may well say "Not
+// Found". Read as ErrNotFound, that would send the hook's class route to the
+// graph store and skip the bead as absent everywhere.
+func isBdClaimNotFound(err error) bool {
+	if !isBdBeadNotFound(err) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return !strings.Contains(msg, " answered 404") || strings.Contains(msg, " answered 404 not_found")
+}
+
 // isBdOperationUnsupported reports whether err is bd telling us a backend
 // does not implement the attempted operation at all (e.g. the Postgres
 // backend's "IssueRelations" gap behind `bd dep list`, ga-7i7ts) as opposed
@@ -1617,6 +1656,12 @@ func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 		}
 		s.latchConditionalReleaseUnsupported()
 	}
+	// A remote backend serves no `bd sql`: the raw-SQL fallback below would
+	// shell out to a verb the server does not have (and, worse, could reach a
+	// stale local database). Refuse instead.
+	if s.usesRemoteBackend() {
+		return false, fmt.Errorf("bd release-if-current: %w: the scope's remote backend serves no raw SQL, and this bd lacks the conditional release verb", ErrConditionalReleaseRemoteUnsupported)
+	}
 	// The raw-SQL fallback writes the row itself, so it also has to mint the
 	// fresh revision bd's verb path mints for us: a release that left the
 	// pre-release token in place would keep a stale fence current.
@@ -1861,10 +1906,20 @@ func (s *BdStore) Claim(id string) (Bead, bool, error) {
 	out, err := s.runBDTransientWriteOutput("update", id, "--claim", "--json")
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
+		// First: a wisp the remote work store holds but its server cannot
+		// claim is a named refusal, never a conflict and never a not-found
+		// (see WispClaimRefusedError).
+		if isBdWispClaimRefusal(msg) || isBdWispClaimRefusal(err.Error()) {
+			return Bead{}, false, &WispClaimRefusedError{ID: id, ScopeRoot: s.dir, Detail: wispClaimRefusalText}
+		}
 		if isBdClaimConflictMessage(msg) || isBdClaimConflictMessage(err.Error()) {
 			return Bead{}, false, nil
 		}
-		if isBdNotFound(err) {
+		// Strict: a not-found here sends the hook's class route looking
+		// for the bead in another store, so only bd saying the BEAD is
+		// absent counts (isBdClaimNotFound), never an infrastructure
+		// "not found" or a gateway's 404.
+		if isBdClaimNotFound(err) {
 			return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, ErrNotFound)
 		}
 		if msg != "" {
