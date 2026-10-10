@@ -35,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clears the `is_blocked` flags migration 0059 set across relates-to,
   discovered-from and other non-blocking edges on any store that crossed it
   (beads#7037).
+- **The test suite's startup Dolt orphan sweep no longer deletes a live Dolt
+  data directory when its `lsof` scan fails.** A scan that hit its 30-second
+  deadline returned partial output with no error, so directories a running
+  Dolt server held open looked orphaned and were removed. The sweep now
+  refuses to delete anything when the scan times out, is killed by a signal,
+  exits with an unexpected status, or prints no output (#7138). This affects
+  only people running the gascity test suite; no `gc` command runs this sweep.
 
 ## [1.5.0] - 2026-10-05
 
