@@ -1602,8 +1602,18 @@ type blockingOrderDispatcher struct {
 	mu         sync.Mutex
 	drainCalls int
 	ctxErrs    []error
+	exits      []blockingDrainExit
 	release    chan struct{}
 	drained    chan struct{}
+}
+
+// blockingDrainExit records how one drain call ended: the deadline its
+// context carried, measured from drain entry, and the context error that
+// released it (nil when od.release released it instead).
+type blockingDrainExit struct {
+	hasDeadline   bool
+	deadlineAfter time.Duration
+	err           error
 }
 
 func newBlockingOrderDispatcher() *blockingOrderDispatcher {
@@ -1616,17 +1626,34 @@ func newBlockingOrderDispatcher() *blockingOrderDispatcher {
 func (b *blockingOrderDispatcher) dispatch(context.Context, string, time.Time) {}
 
 func (b *blockingOrderDispatcher) drain(ctx context.Context) bool {
+	entered := time.Now()
+	exit := blockingDrainExit{}
+	if deadline, ok := ctx.Deadline(); ok {
+		exit.hasDeadline = true
+		exit.deadlineAfter = deadline.Sub(entered)
+	}
 	b.mu.Lock()
 	b.drainCalls++
 	b.ctxErrs = append(b.ctxErrs, ctx.Err())
 	b.mu.Unlock()
 	b.drained <- struct{}{}
+	drained := false
 	select {
 	case <-b.release:
-		return true
+		drained = true
 	case <-ctx.Done():
-		return false
+		exit.err = ctx.Err()
 	}
+	b.mu.Lock()
+	b.exits = append(b.exits, exit)
+	b.mu.Unlock()
+	return drained
+}
+
+func (b *blockingOrderDispatcher) drainExits() []blockingDrainExit {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]blockingDrainExit(nil), b.exits...)
 }
 
 func (b *blockingOrderDispatcher) waitForDrainCalls(t *testing.T, want int) {
@@ -5343,14 +5370,48 @@ func TestCityRuntimeReloadDrainBoundedByTimeout(t *testing.T) {
 	start := time.Now()
 	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
 	elapsed := time.Since(start)
-	// elapsed is the subject under test (it proves reloadConfig actually
-	// bounds its wait on od.release rather than hanging on it forever), so
-	// this stays an explicit deadline rather than a hangBudget wait. The
-	// upper bound carries a generous tail to absorb CI scheduler jitter on
-	// top of the real reloadOrderDrainTimeout floor; the lower bound has no
-	// slop since contention only ever slows this down, never speeds it up.
-	if elapsed < reloadOrderDrainTimeout || elapsed > reloadOrderDrainTimeout+3*time.Second {
-		t.Fatalf("reload elapsed = %s, want bounded near %s", elapsed, reloadOrderDrainTimeout)
+	// The claim under test is that reload stops waiting on a dispatcher that
+	// never drains once reloadOrderDrainTimeout expires. That is proven by
+	// facts about the one drain call, not by the wall-clock length of the
+	// whole reloadConfig call (config read, order scan, watcher restart),
+	// which stretches arbitrarily under CPU contention without saying
+	// anything about the drain bound (ga-96smfk.64):
+	//   - reloadConfig returned while od.release is still open, so it did
+	//     not wait for the stuck work;
+	//   - the drain ctx carried a deadline no later than
+	//     reloadOrderDrainTimeout after drain entry, so the bound is the
+	//     reload budget, not something longer;
+	//   - that deadline is what released the drain (DeadlineExceeded), so
+	//     the bound actually fired rather than some other cancellation;
+	//   - the undrained dispatcher was retained for the shutdown drain and
+	//     replaced as the live dispatcher.
+	exits := od.drainExits()
+	if len(exits) != 1 {
+		t.Fatalf("drain calls completed = %d, want exactly 1", len(exits))
+	}
+	exit := exits[0]
+	if !exit.hasDeadline {
+		t.Fatal("reload drain ctx has no deadline, want it bounded by reloadOrderDrainTimeout")
+	}
+	if exit.deadlineAfter <= 0 || exit.deadlineAfter > reloadOrderDrainTimeout {
+		t.Fatalf("reload drain deadline = %s after drain entry, want within (0, %s]", exit.deadlineAfter, reloadOrderDrainTimeout)
+	}
+	if !errors.Is(exit.err, context.DeadlineExceeded) {
+		t.Fatalf("reload drain released by %v, want context.DeadlineExceeded from the drain bound", exit.err)
+	}
+	if len(cr.retiredOrderDispatchers) != 1 || cr.retiredOrderDispatchers[0] != orderDispatcher(od) {
+		t.Fatalf("retired order dispatchers = %#v, want the undrained dispatcher retained for shutdown", cr.retiredOrderDispatchers)
+	}
+	if cr.od == orderDispatcher(od) {
+		t.Fatal("reload kept the undrained dispatcher live, want it replaced")
+	}
+	// Contention only ever slows reload down, so the drain wait is a hard
+	// floor; the ceiling is only a hang detector.
+	if elapsed < reloadOrderDrainTimeout {
+		t.Fatalf("reload elapsed = %s, want at least the %s drain wait", elapsed, reloadOrderDrainTimeout)
+	}
+	if elapsed > hangBudget {
+		t.Fatalf("reload elapsed = %s, want it to return well inside the hang budget", elapsed)
 	}
 	close(od.release)
 }
