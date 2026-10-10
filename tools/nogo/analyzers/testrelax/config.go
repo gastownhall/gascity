@@ -15,7 +15,8 @@ var Analyzer = New(Config{Guards: guards, Vars: vars, Writers: writers, Env: env
 // tightens it (GuardSessionKeys, which init arms to panic).
 
 // guards are the guard setters. Each takes a testing.TB and restores on
-// t.Cleanup, so no init or TestMain can call it.
+// t.Cleanup, so an init or TestMain has no t to pass it; one that fakes a
+// testing.TB still can, and testrelax reports a call it reaches.
 var guards = map[string]string{
 	gascity + "internal/runtime/proctable.SetScanRootForTesting": "moves the process-table scan off the live /proc, which liveScanGuard refuses under go test so an orphan sweep cannot reap a host's real agents (#2839)",
 	gascity + "cmd/gc.setSessionCircuitBreakerForTest":           "replaces the session circuit breaker, which stops restarting a crash-looping session",

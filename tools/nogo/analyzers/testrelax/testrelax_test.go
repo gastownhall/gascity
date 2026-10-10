@@ -140,10 +140,10 @@ func TestTestRelaxIgnoresUnlistedSetters(t *testing.T) {
 	}
 }
 
-// TestTestRelaxWriteForms: taking a guarded variable's address, calling its
-// pointer-receiver method, or writing under it (a field, an element) is a
-// write; reading it, or calling a value-receiver method or a method through
-// a pointer it holds, is not.
+// TestTestRelaxWriteForms: taking a guarded variable's address, calling a
+// pointer-receiver method on it (the variable a value or itself a pointer, as
+// the session circuit breaker singleton is), or writing under it (a field, an
+// element) is a write; reading it, or calling a value-receiver method, is not.
 func TestTestRelaxWriteForms(t *testing.T) {
 	const src = `package p
 
@@ -155,6 +155,7 @@ func (f Flag) On() bool       { return f.on }
 type Box struct{ n int }
 
 func (b *Box) Bump() { b.n++ }
+func (b Box) N() int  { return b.n }
 
 var (
 	flag   Flag
@@ -180,10 +181,12 @@ func TestField() { cfg.n = 2 } // W5
 
 func TestElement() { limits["k"] = 1 } // W6
 
+func TestPointerMethod() { box.Bump() } // W7
+
 func TestReads() {
 	_ = flag.On()
 	_ = root
-	box.Bump()
+	_ = box.N()
 }
 `
 	vars := map[string]string{}
@@ -198,6 +201,7 @@ func TestReads() {
 		"W4": "TestMethodValue writes example.com/p.flag",
 		"W5": "TestField writes example.com/p.cfg",
 		"W6": "TestElement writes example.com/p.limits",
+		"W7": "TestPointerMethod writes example.com/p.box",
 	})
 }
 
@@ -233,9 +237,9 @@ func TestLeaks() { root = "/leak" } // A2
 }
 
 // TestTestRelaxEnv: setting a listed break-glass variable through a constant
-// key is reported in init, in a test, and in a test file's helper; t.Setenv,
-// an unlisted key, and production code are not; a test file that takes
-// os.Setenv as a value is.
+// key is reported in init, in a test, in a test file's helper, and in
+// production code; t.Setenv and an unlisted key are not; a test file that
+// takes os.Setenv as a value is.
 func TestTestRelaxEnv(t *testing.T) {
 	const osSrc = `package os
 
@@ -245,7 +249,7 @@ func Setenv(key, value string) error { return nil }
 
 import "os"
 
-func Configure() { _ = os.Setenv("GC_BREAK_GLASS", "1") }
+func Configure() { _ = os.Setenv("GC_BREAK_GLASS", "1") } // E5
 `
 	const testSrc = `package q
 
@@ -277,12 +281,13 @@ func TestValue() { set := os.Setenv; _ = set("GC_OTHER", "1") } // E4
 	for _, d := range diags {
 		got = append(got, fmt.Sprintf("%s:%d %s", d.File, d.Line, d.Message))
 	}
-	files := map[string]string{"q_test.go": testSrc}
+	files := map[string]string{"q.go": prodSrc, "q_test.go": testSrc}
 	want(t, got, files, map[string]string{
 		"E1": "init relaxes GC_BREAK_GLASS for every test in the package: it lets a caller past the glass",
-		"E2": "TestLeaks sets GC_BREAK_GLASS, which lets a caller past the glass, past the test that set it; set it with t.Setenv",
+		"E2": "TestLeaks sets GC_BREAK_GLASS, which lets a caller past the glass, for the rest of the process; a test sets it with t.Setenv",
 		"E3": "setGlass sets GC_BREAK_GLASS",
 		"E4": "a test takes os.Setenv as a value, so the keys it sets go unchecked",
+		"E5": "Configure sets GC_BREAK_GLASS",
 	})
 }
 

@@ -7,14 +7,14 @@
 // production path that lost what the guard checks (NEW2-7 hid L1b-3 M1 this
 // way). A test that needs one makes it itself, scoped to t: the guard setters
 // take a testing.TB and restore on t.Cleanup, a guarded variable is written
-// only by its setter or a reviewed production writer, and a test file sets a
-// break-glass variable only with t.Setenv.
+// only by its setter or a reviewed production writer, and only a test sets a
+// break-glass variable, with t.Setenv.
 //
 // Every relaxation is named by type: a setter by its types.Func full name, a
 // variable by its package path and name, an environment variable by the
 // constant value of os.Setenv's key. A write is an assignment, an increment,
-// an address taken (&v), or a pointer-receiver method of v (v.Store), to v or
-// to anything under it (v.f, v[i]). Reaching one counts through any chain of
+// an address taken (&v), or a pointer-receiver method of v (v.Store, and
+// p.M() for a pointer p), to v or to anything under it (v.f, v[i]). Reaching one counts through any chain of
 // package-level functions, in this package or an imported one (an object fact
 // carries it across packages), by a call or a function value alike.
 package testrelax
@@ -128,14 +128,12 @@ func run(pass *analysis.Pass, cfg Config) error {
 			if x.Op == token.AND {
 				targets = []ast.Expr{x.X}
 			}
-		case *ast.SelectorExpr: // v.M with a pointer receiver takes &v
+		case *ast.SelectorExpr: // v.M with a pointer receiver may change v, or what v points to
 			sel, ok := pass.TypesInfo.Selections[x]
 			if !ok || sel.Kind() != types.MethodVal {
 				break
 			}
-			_, ptrRecv := sel.Obj().Type().(*types.Signature).Recv().Type().(*types.Pointer)
-			_, ptrX := sel.Recv().Underlying().(*types.Pointer)
-			if ptrRecv && !ptrX {
+			if _, ptrRecv := sel.Obj().Type().(*types.Signature).Recv().Type().(*types.Pointer); ptrRecv {
 				targets = []ast.Expr{x.X}
 			}
 		}
@@ -292,22 +290,21 @@ func run(pass *analysis.Pass, cfg Config) error {
 		}
 	}
 	// Anywhere else, a guarded variable is written only by its setter or a
-	// reviewed writer, and a test file sets a break-glass variable only with
-	// t.Setenv.
+	// reviewed writer, and a break-glass variable is set only by a test, with
+	// t.Setenv: no production code sets one.
 	for _, b := range bodies {
 		if global[b.decl] {
 			continue
 		}
-		test := isTest(b.decl)
 		ast.Inspect(b.decl.Body, func(n ast.Node) bool {
 			if id, key := written(n); key != "" && !writer(b.fn) {
 				pass.Reportf(id.Pos(), "testrelax: %s writes %s, which %s; a test writes it through its setter, scoped to t, and production code only in a writer testrelax lists", b.fn.Name(), key, cfg.Vars[key])
 				return false
 			}
-			if call, ok := n.(*ast.CallExpr); ok && test {
+			if call, ok := n.(*ast.CallExpr); ok {
 				if name, ok := envSet(pass, call); ok {
 					if w, listed := cfg.Env[name]; listed {
-						pass.Reportf(call.Pos(), "testrelax: %s sets %s, which %s, past the test that set it; set it with t.Setenv, scoped to t", b.fn.Name(), name, w)
+						pass.Reportf(call.Pos(), "testrelax: %s sets %s, which %s, for the rest of the process; a test sets it with t.Setenv, scoped to t, and production code never", b.fn.Name(), name, w)
 					}
 				}
 			}
