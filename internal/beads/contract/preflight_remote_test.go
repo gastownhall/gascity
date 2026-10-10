@@ -275,6 +275,7 @@ func TestRemoteCapabilityRequirementsPinnedToDesign(t *testing.T) {
 		"issues.count.scope":     RemoteCapabilityOptional,
 		"issues.batchApplyLarge": RemoteCapabilityOptional,
 		"issues.reclaim":         RemoteCapabilityOptional,
+		"issues.update.claim":    RemoteCapabilityOptional,
 	}
 	got := map[string]RemoteCapabilityRequirement{}
 	for _, row := range RemoteCapabilityRequirements() {

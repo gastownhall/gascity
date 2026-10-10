@@ -90,6 +90,11 @@ var remoteCapabilityRequirements = []RemoteCapabilityRequirement{
 	{Token: "issues.count.scope", Class: RemoteCapabilityOptional, Fallback: "hydrating list count"},
 	{Token: "issues.batchApplyLarge", Class: RemoteCapabilityOptional, Fallback: "graph plans capped at the batch limit"},
 	{Token: "issues.reclaim", Class: RemoteCapabilityOptional, Fallback: "no lease reclaim"},
+	// issues.update.claim (S24): updateIssue accepts claim and resolves both
+	// planes. Without it the native store still claims issues through
+	// issues.claim; only a wisp claim on the work store is refused, by name
+	// (WispClaimRefusedError), and gc claims its wisps in the graph store.
+	{Token: "issues.update.claim", Class: RemoteCapabilityOptional, Fallback: "claims through issues.claim; a wisp claim on the work store is refused by name"},
 }
 
 // RemoteCapabilityRequirements returns a copy of the class requirement table.
@@ -286,21 +291,10 @@ func EvaluateWireCompat(backend, metadataProjectID string, handshake PreflightWi
 	case snap.ProjectID != expected:
 		return fail(fmt.Sprintf("server owns project %q, scope expects %q", snap.ProjectID, expected))
 	}
-	advertised := make(map[string]bool, len(snap.Capabilities))
-	for _, token := range snap.Capabilities {
-		advertised[strings.TrimSpace(token)] = true
-	}
-	var missingRequired, missingOptional []string
-	for _, row := range remoteCapabilityRequirements {
-		if advertised[row.Token] {
-			continue
-		}
-		switch row.Class {
-		case RemoteCapabilityRequired:
-			missingRequired = append(missingRequired, row.Token)
-		default:
-			missingOptional = append(missingOptional, fmt.Sprintf("%s (fallback: %s)", row.Token, row.Fallback))
-		}
+	missingRequired, missingOptionalRows := MissingRemoteCapabilities(snap.Capabilities)
+	var missingOptional []string
+	for _, row := range missingOptionalRows {
+		missingOptional = append(missingOptional, fmt.Sprintf("%s (fallback: %s)", row.Token, row.Fallback))
 	}
 	if len(missingRequired) > 0 {
 		return fail(fmt.Sprintf("server does not advertise required capabilities: %s", strings.Join(missingRequired, ", ")))
@@ -311,6 +305,29 @@ func EvaluateWireCompat(backend, metadataProjectID string, handshake PreflightWi
 	}
 	return NewPreflightCheckResult(PreflightCheckWireCompat, PreflightCheckPass,
 		fmt.Sprintf("server wire_revision %d, project %q, all required capabilities advertised", snap.WireRevision, snap.ProjectID), details)
+}
+
+// MissingRemoteCapabilities evaluates the class requirement table against the
+// tokens a server advertised: the REQUIRED tokens it lacks (any one refuses
+// the native store) and the OPTIONAL rows it lacks (each a recorded fallback).
+// wire_compat and the boot capability gate both read it, so the two can never
+// disagree about what a server is missing.
+func MissingRemoteCapabilities(capabilities []string) (missingRequired []string, missingOptional []RemoteCapabilityRequirement) {
+	advertised := make(map[string]bool, len(capabilities))
+	for _, token := range capabilities {
+		advertised[strings.TrimSpace(token)] = true
+	}
+	for _, row := range remoteCapabilityRequirements {
+		if advertised[row.Token] {
+			continue
+		}
+		if row.Class == RemoteCapabilityRequired {
+			missingRequired = append(missingRequired, row.Token)
+			continue
+		}
+		missingOptional = append(missingOptional, row)
+	}
+	return missingRequired, missingOptional
 }
 
 func remoteRepairSteps(checks []PreflightCheckResult) []PreflightRepairStep {

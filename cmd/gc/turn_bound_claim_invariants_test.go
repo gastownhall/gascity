@@ -19,6 +19,10 @@ import (
 //
 //   - cmd_hook_claim.go / claim_class_route.go: the fenced hook claim path
 //     (F-A/F-B/F-C run here, so a claim added here inherits the turn binding).
+//   - hook_claim_remote.go: the same fenced hook claim path for a leg whose
+//     work store is served by a remote beads backend; it only chooses the
+//     lane (native Claimer or bd CLI) for a claim cmd_hook_claim.go decided
+//     to make, inside the same ops value and fences.
 //   - cmd_bd_by_id.go: the `gc bd update <id> --claim` verb an agent runs for
 //     itself, in its own turn.
 //   - cmd_agent_script.go: the deterministic non-LLM executor, which claims and
@@ -49,6 +53,7 @@ import (
 var claimCASAllowedFiles = map[string]bool{
 	"cmd_hook_claim.go":    true,
 	"claim_class_route.go": true,
+	"hook_claim_remote.go": true,
 	"cmd_bd_by_id.go":      true,
 	"cmd_agent_script.go":  true,
 	"class_store_emit.go":  true,

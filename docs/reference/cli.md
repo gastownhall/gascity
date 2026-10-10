@@ -4739,11 +4739,43 @@ gc storage
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc storage connect](#gc-storage-connect) | Attach this city's (or a rig's) work store to an HTTP bd serve |
 | [gc storage migrate](#gc-storage-migrate) | Migrate this city's infrastructure classes onto their configured binding |
 | [gc storage preflight](#gc-storage-preflight) | Report what the migration would refuse, without migrating (read-only) |
 | [gc storage recover-stranded](#gc-storage-recover-stranded) | Copy stranded infrastructure beads from the work store into the converged binding |
 | [gc storage repair-sequence](#gc-storage-repair-sequence) | Inspect or raise a SQLite bead store's id-sequence floor |
 | [gc storage status](#gc-storage-status) | Report this city's storage-class layout (read-only) |
+
+## gc storage connect
+
+Attach the city's work store, or one rig's with --rig, to the bd serve at
+&lt;url&gt;, so gc and bd reach it over HTTP.
+
+The server is verified first: the handshake is sent with the scope's
+configured credential ([beads] credential, or the rig's beads_credential;
+bd's own credential ladder when none is configured), the project it owns is
+pinned (or checked against --project-id), and its capabilities are checked
+against the native store's requirement table (the wire_compat check the
+start-up gate runs). Only a server that passes is attached, through beads'
+own attach, which writes the backend selection into .beads/metadata.json and
+the per-user .beads/http_target.json sidecar.
+
+A scope that already holds a local workspace is switched only with
+--convert-workspace (bd connect --clear restores it); one attached to another
+server or project is re-pinned only with --retarget.
+
+```
+gc storage connect <url> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--allow-plaintext` | bool |  | allow a bearer over plain http to a non-loopback server (only without a configured credential; a configured one uses its allow_insecure_credential) |
+| `--ca-file` | string |  | absolute path of a PEM file that becomes this server's only trusted root |
+| `--convert-workspace` | bool |  | switch a scope that already holds a local workspace |
+| `--project-id` | string |  | require the server to own this project (default: pin the one it reports) |
+| `--retarget` | bool |  | re-pin a scope already attached to another server or project |
+| `--rig` | string |  | attach this rig's work store instead of the city's |
 
 ## gc storage migrate
 

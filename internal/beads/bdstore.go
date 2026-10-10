@@ -1891,6 +1891,12 @@ func (s *BdStore) Claim(id string) (Bead, bool, error) {
 	out, err := s.runBDTransientWriteOutput("update", id, "--claim", "--json")
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
+		// First: a wisp the remote work store holds but its server cannot
+		// claim is a named refusal, never a conflict and never a not-found
+		// (see WispClaimRefusedError).
+		if isBdWispClaimRefusal(msg) || isBdWispClaimRefusal(err.Error()) {
+			return Bead{}, false, &WispClaimRefusedError{ID: id, ScopeRoot: s.dir, Detail: wispClaimRefusalText}
+		}
 		if isBdClaimConflictMessage(msg) || isBdClaimConflictMessage(err.Error()) {
 			return Bead{}, false, nil
 		}

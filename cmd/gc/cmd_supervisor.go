@@ -2193,6 +2193,14 @@ func startOneCity(
 		return
 	}
 
+	// The boot capability gate: a remote beads scope whose server cannot
+	// serve the native store refuses this city before it starts its store.
+	if gateErr := remoteBeadsBootGate(context.Background(), path, cfg); gateErr != nil {
+		emitPendingCityCreateFailure(cr, path, cityName, "remote_capability_gate", gateErr, stderr)
+		recordInitFailure(cityName, gateErr.Error())
+		return
+	}
+
 	// Track initialization progress for the API.
 	cr.BatchUpdate(func(
 		_ map[string]*managedCity,
