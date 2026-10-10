@@ -1,9 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -411,4 +414,98 @@ func resolveDiscoveredPreExtraction(bp *agentBuildParams, cfg *config.City, cfgA
 		tp.Env["GC_SESSION_ORIGIN"] = "named"
 	}
 	return tp, nil
+}
+
+// Kills a resolution error memoized for the generation, and a resolver whose
+// skill catalog failed kept for it (legacy resolves and loads again each
+// tick): an errored row is resolved again on the next pass, and a resolver
+// that asks to be retried is built again.
+func TestGatherRetriesFailedResolutions(t *testing.T) {
+	f := newGatherFixture(t, poolRow("gc-1", "worker", 1, "active"))
+	builds, resolves := 0, 0
+	retry := false
+	f.env.Templates = func(*reconcileEnv, time.Time) templateResolver {
+		builds++
+		return templateResolver{Retry: retry, Resolve: func(info session.Info) templateResolution {
+			if resolves++; resolves == 1 {
+				return templateResolution{Err: errors.New("provider not in PATH")}
+			}
+			return templateResolution{TP: TemplateParams{SessionName: info.SessionNameMetadata}}
+		}}
+	}
+	f.gather(t)
+	w := f.gather(t)
+	res, ok := w.Templates.lookup(w.Census.Rows[rowKey{Leg: "city:test-city", ID: "gc-1"}].Info)
+	if !ok || res.Err != nil || resolves != 2 || builds != 1 {
+		t.Fatalf("after a failed resolution: entry %+v (ok %v), %d resolves, %d builds; want it resolved again by the same resolver", res, ok, resolves, builds)
+	}
+	retry = true
+	f.cur.Store(&reconcileEnv{Gen: 2, Cfg: f.cur.Load().Cfg, SP: f.sp})
+	f.gather(t)
+	retry = false
+	f.gather(t)
+	f.gather(t)
+	if builds != 3 {
+		t.Fatalf("resolver builds %d, want 3: the new generation's, its retry after the catalog failure, then kept", builds)
+	}
+	if newTemplateResolver(&agentBuildParams{}).Retry {
+		t.Fatal("a resolver whose catalogs loaded asks to be retried")
+	}
+	// A real load failure, of the city's catalog or a rig's, with no cached
+	// catalog to fall back on, asks for the retry.
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	broken := filepath.Join(file, "skills") // a stat under a file fails (ENOTDIR)
+	city := newTemplateCity(t)
+	city.cfg.PackSkillsDir = broken
+	if bp := city.params(); !bp.skillCatalogFailed || !newTemplateResolver(bp).Retry {
+		t.Fatalf("a failed city catalog: flagged %v; want the resolver retried", bp.skillCatalogFailed)
+	}
+	rig := newTemplateCity(t)
+	rig.cfg.RigPackSkills = map[string][]config.DiscoveredSkillCatalog{"r": {{SourceDir: broken, PackName: "p", BindingName: "p"}}}
+	if bp := rig.params(); len(bp.failedRigSkillCatalogs) == 0 || !newTemplateResolver(bp).Retry {
+		t.Fatalf("a failed rig catalog: failed %v; want the resolver retried", bp.failedRigSkillCatalogs)
+	}
+}
+
+// Kills a resolver that reads the sessions store for a row's own session bead
+// (I/O inside the pass), and a gather filter or resolver path keyed on the
+// raw template: a row whose template is known only through its common name
+// resolves to its pool, from a snapshot of itself, with no store read.
+func TestTemplateResolverResolvesFromTheRowAlone(t *testing.T) {
+	c := newTemplateCity(t)
+	info := c.row(t, map[string]string{"common_name": "polecat", "session_name": "polecat-3", "state": "asleep", "pool_slot": "3", "pool_managed": "true"})
+	counting := &countingReadStore{Store: c.store}
+	bp := newAgentBuildParams("test-city", c.cityPath, c.cfg, runtime.NewFake(), templatesNow, counting, io.Discard)
+	counting.reads = 0
+	got := newTemplateResolver(bp).Resolve(info)
+	if got.Err != nil || got.Agent == nil || got.Agent.QualifiedName() != "polecat" || counting.reads != 0 {
+		t.Fatalf("resolution %+v (agent %v, err %v) after %d store reads; want polecat from the row alone", got.TP, got.Agent, got.Err, counting.reads)
+	}
+	f := newGatherFixture(t, poolRow("gc-1", "", 1, "asleep", "common_name", "worker"))
+	resolved := 0
+	f.env.Templates = func(*reconcileEnv, time.Time) templateResolver {
+		return templateResolver{Resolve: func(session.Info) templateResolution { resolved++; return templateResolution{} }}
+	}
+	if f.gather(t); resolved != 1 {
+		t.Fatalf("gather resolved %d rows, want the row known by its common name", resolved)
+	}
+}
+
+// countingReadStore counts the store's reads.
+type countingReadStore struct {
+	beads.Store
+	reads int
+}
+
+func (s *countingReadStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.reads++
+	return s.Store.List(q)
+}
+
+func (s *countingReadStore) Get(id string) (beads.Bead, error) {
+	s.reads++
+	return s.Store.Get(id)
 }
