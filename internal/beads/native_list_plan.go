@@ -1,6 +1,10 @@
 package beads
 
 import (
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
 	"sync/atomic"
 
 	"github.com/steveyegge/beads/issueops"
@@ -9,13 +13,103 @@ import (
 // NativeListPlan returns the reader-role requests NativeDoltStore.List issues
 // for query, in the order it issues them. The store unions their rows by id and
 // ApplyListQuery then applies the whole query exactly, so a plan only decides
-// how many rows cross from the backend, never which rows the caller receives.
+// how many rows cross from the backend, never which rows the caller receives:
+// every predicate it pushes is exact or a superset of the query's.
+//
+// A plural Assignees set fans out into one request per distinct assignee, each
+// with that assignee pushed, up to nativeListAssigneeFanOutMax. The status and
+// type pushdowns are nativeListRequestFromListQuery's.
 //
 // It is a pure function of the query so a test can price a recorded List
 // without a server: each request costs one backend listing, and a request that
 // NativeListRequestKeyed reports as unkeyed reads the whole ledger.
 func NativeListPlan(query ListQuery) []issueops.ListRequest {
-	return []issueops.ListRequest{nativeListRequestFromListQuery(query)}
+	return nativeListPlan(query, true)
+}
+
+// nativeListAssigneeFanOutMax bounds the plural-assignee fan-out. No hook asks
+// for more than an identity's routes (id, alias, session name and alias
+// history); a larger set stays one request with the assignees applied Go-side.
+const nativeListAssigneeFanOutMax = 8
+
+// nativeListPlan is NativeListPlan with the type pushdown switchable, for a
+// store whose backend refused a pushed type.
+func nativeListPlan(query ListQuery, pushType bool) []issueops.ListRequest {
+	base := nativeListRequestFromListQuery(query, pushType)
+	assignees := nativeListFanOutAssignees(query)
+	if len(assignees) == 0 {
+		return []issueops.ListRequest{base}
+	}
+	plan := make([]issueops.ListRequest, 0, len(assignees))
+	for _, assignee := range assignees {
+		req := base
+		req.Assignee = assignee
+		plan = append(plan, req)
+	}
+	return plan
+}
+
+// nativeListFanOutAssignees returns the distinct assignees a plan fans out
+// over, or nil when the plural set cannot be pushed exactly. An empty entry
+// means "unassigned", which an Assignee predicate cannot say.
+func nativeListFanOutAssignees(query ListQuery) []string {
+	if query.Assignee != "" || len(query.Assignees) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(query.Assignees))
+	out := make([]string, 0, len(query.Assignees))
+	for _, assignee := range query.Assignees {
+		if assignee == "" {
+			return nil
+		}
+		if seen[assignee] {
+			continue
+		}
+		seen[assignee] = true
+		out = append(out, assignee)
+	}
+	if len(out) > nativeListAssigneeFanOutMax {
+		return nil
+	}
+	return out
+}
+
+// nativeListPushableStatus reports whether a gc status maps one-to-one onto a
+// bd status. mapBdStatus folds every other bd status into gc's "open".
+func nativeListPushableStatus(status string) bool {
+	return status == "in_progress" || status == "closed"
+}
+
+// nativeListInfraTypes are bd's default infra types. Naming one on a listing
+// routes it to the ephemeral plane alone (workapi.BuildListFilter), which
+// would drop durable rows of that type, so they are never pushed.
+var nativeListInfraTypes = map[string]bool{"agent": true, "role": true, "message": true}
+
+// nativeListPushableTypes is the type vocabulary a listing may push: the types
+// gc registers in every scope it provisions (RequiredCustomTypes), less bd's
+// infra types. A server that validates types knows every one of them; a scope
+// provisioned without them refuses the request, and NativeDoltStore.List
+// retries it without the type.
+var nativeListPushableTypes = func() map[string]bool {
+	out := make(map[string]bool, len(RequiredCustomTypes))
+	for _, t := range RequiredCustomTypes {
+		if !nativeListInfraTypes[t] {
+			out[t] = true
+		}
+	}
+	return out
+}()
+
+// nativeListPushableType reports whether a gc type may be pushed to the role.
+func nativeListPushableType(issueType string) bool {
+	return nativeListPushableTypes[issueType]
+}
+
+// nativeListTypeRefused reports whether err is the role refusing a pushed
+// type: the wire's validation problem, or the local filter builder's
+// unknown-type error, which carries no sentinel.
+func nativeListTypeRefused(err error) bool {
+	return errors.Is(err, issueops.ErrValidation) || strings.Contains(err.Error(), "invalid issue type")
 }
 
 // NativeListRequestKeyed reports whether req carries a predicate that narrows
@@ -138,5 +232,39 @@ func ListByMetadataQuery(filters map[string]string, limit int, opts ...QueryOpt)
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		AllowScan:     true,
 		TierMode:      TierModeFromOpts(opts),
+	}
+}
+
+// listLogger is the logger the list pushdown reports through.
+func (s *NativeDoltStore) listLogger() *slog.Logger {
+	if s.logger != nil {
+		return s.logger
+	}
+	return slog.Default()
+}
+
+// disableTypePushdown latches type pushdown off for this store after the
+// backend refused issueType, and warns once: the answers stay exact, but the
+// scope is missing gc's type vocabulary and every typed listing now reads
+// more rows than it needs.
+func (s *NativeDoltStore) disableTypePushdown(issueType string, err error) {
+	if !s.typePushdownOff.CompareAndSwap(false, true) {
+		return
+	}
+	s.listLogger().Warn("native bead store: backend refused a pushed issue type; listing without type pushdown for this store (register gc's custom types in this scope: gc doctor --fix)",
+		"prefix", s.idPrefix, "issue_type", issueType, "err", err)
+}
+
+// noteUnkeyedPlan is the whole-ledger tripwire: a plan request that carries no
+// narrowing predicate pages through every row, and is logged at debug with
+// the query that asked for it. ListRequestStats counts it.
+func (s *NativeDoltStore) noteUnkeyedPlan(query ListQuery, plan []issueops.ListRequest) {
+	for _, req := range plan {
+		if NativeListRequestKeyed(req) {
+			continue
+		}
+		s.listLogger().Debug("native bead store: list walks the whole ledger",
+			"prefix", s.idPrefix, "query", fmt.Sprintf("%+v", query))
+		return
 	}
 }

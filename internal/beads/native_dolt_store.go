@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -372,6 +373,15 @@ type NativeDoltStore struct {
 	// listCounters counts the backend listing requests List issues; see
 	// ListRequestCounter.
 	listCounters nativeListCounters
+
+	// typePushdownOff latches when the backend refused a pushed issue type:
+	// the scope was provisioned without gc's type vocabulary. Listings then
+	// filter type Go-side only, for the store's lifetime.
+	typePushdownOff atomic.Bool
+
+	// logger receives the list pushdown's diagnostics. Nil is slog.Default(),
+	// read at call time.
+	logger *slog.Logger
 
 	// poolStale marks a handle whose pooled connections point at a proxy
 	// generation that has already been replaced, so the next read must reconnect
