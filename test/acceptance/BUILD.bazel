@@ -62,6 +62,7 @@ SOLO_TESTS = {
     "doctor_proxied_backup_coverage_leaves_a_stopped_city_stopped_test": "TestDoctorProxiedBackupCoverageLeavesAStoppedCityStopped",
     "proxied_idle_timeout_test": "TestProxiedIdleTimeoutReapAndTransparentRestart",
     "proxied_native_lifecycle_test": "TestProxiedNativeLifecycle",
+    "proxied_native_safety_test": "TestProxiedNativeSafety",
     "proxied_suspended_city_quiescence_test": "TestProxiedSuspensionIsQuiescenceSuspendedCity",
     "proxied_suspended_rig_quiescence_test": "TestProxiedSuspensionIsQuiescenceSuspendedRig",
 }
