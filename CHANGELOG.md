@@ -36,6 +36,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discovered-from and other non-blocking edges on any store that crossed it
   (beads#7037).
 
+### Security
+
+- **Go toolchain 1.26.9 and `golang.org/x/net` v0.60.0.** Clears the
+  2026-10-08 Go advisories (GO-2026-6599 through GO-2026-6617) against
+  `net/http` (HTTP/1 and HTTP/2), `html/template`, `crypto/tls`,
+  `net/textproto`, `mime/multipart` and `os`. The `go.mod` floor, the Bazel
+  `go_sdk` and the `contrib/k8s` Go build images all move to 1.26.9; building
+  from source now needs Go 1.26.9 or newer (#7387).
+- **`gc-mcp-mail` image: `fsspec` 2026.6.0.** Fixes CVE-2026-104851 (HIGH,
+  arbitrary code execution via a crafted URL) in the transitive `fsspec`
+  dependency (#7388).
+
 ## [1.5.0] - 2026-10-05
 
 ### Upgrading Notes
