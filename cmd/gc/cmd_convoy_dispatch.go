@@ -2603,6 +2603,12 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 // closed convoys) for an entire second work cycle on a child it no longer
 // accurately describes as done.
 //
+// Only autoclosed convoys are reopened: status closed with close_reason
+// convoyAutocloseReason. Convoys closed by an operator, by land, or by
+// graphv2, tombstoned convoys, and owned convoys are left alone. A reopened
+// convoy has its close_reason cleared so a later reasonless close cannot be
+// mistaken for autoclose.
+//
 // This covers only the reopen-source path. It intentionally does not touch
 // `bd update --status open` or the REST `/bead/{id}/reopen` route, which can
 // reopen a tracked child the same way and remain exposed to the same staleness
@@ -2620,12 +2626,16 @@ func reopenTrackingConvoysForReopenedSource(store beads.Store, sourceID string, 
 	}
 	open := "open"
 	for _, convoy := range convoys {
-		if convoy.Type != "convoy" || !convoycore.IsTerminalStatus(convoy.Status) || hasLabel(convoy.Labels, "owned") {
+		if convoy.Type != "convoy" || convoy.Status != "closed" || hasLabel(convoy.Labels, "owned") ||
+			strings.TrimSpace(convoy.Metadata["close_reason"]) != convoyAutocloseReason {
 			continue
 		}
 		if err := store.Update(convoy.ID, beads.UpdateOpts{Status: &open}); err != nil {
 			_, _ = fmt.Fprintf(stderr, "warning: gc workflow reopen-source: reopening tracking convoy %s: %v\n", convoy.ID, err)
 			continue
+		}
+		if err := store.SetMetadata(convoy.ID, "close_reason", ""); err != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: gc workflow reopen-source: clearing close_reason on convoy %s: %v\n", convoy.ID, err)
 		}
 		_, _ = fmt.Fprintf(stdout, "result=reopened_tracking_convoy convoy_id=%s source_bead_id=%s\n", convoy.ID, sourceID)
 	}
