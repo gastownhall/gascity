@@ -528,7 +528,8 @@ func TestControllerStopsWorkWithoutTheTestOptOut(t *testing.T) {
 }
 
 // TestVerifiedStopDecidesAgainUnderTheLease: the drain's timeout kill spares
-// a row whose hold moved since the tick read it.
+// a row an operator suspended since the drain read it (an agent's heartbeat,
+// held_until alone, does not move the drain's basis).
 func TestVerifiedStopDecidesAgainUnderTheLease(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
@@ -536,7 +537,9 @@ func TestVerifiedStopDecidesAgainUnderTheLease(t *testing.T) {
 	b := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&b)
 	decided := sessionInfoFromBead(mustGetBead(t, env.store, b.ID))
-	env.setSessionMetadata(&b, map[string]string{"held_until": "2099-01-01T00:00:00Z"})
+	if err := sessionFrontDoor(env.store).OperatorSuspend(b.ID, env.clk.Now()); err != nil {
+		t.Fatal(err)
+	}
 	if err := verifiedStop(t.TempDir(), sessionpkg.Decide(decided, sessionpkg.FactsLegacyStopPending), env.store, env.sp, env.cfg); !errors.Is(err, sessionpkg.ErrKillPremiseMoved) || !env.sp.IsRunning("worker") {
 		t.Fatalf("verifiedStop of a moved row = %v (running %v), want ErrKillPremiseMoved", err, env.sp.IsRunning("worker"))
 	}
