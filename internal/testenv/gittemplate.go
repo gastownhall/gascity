@@ -70,11 +70,14 @@ func gitTemplateRoot() string {
 }
 
 // seedGitTemplate points GIT_TEMPLATE_DIR at the template, replacing any
-// ambient one, so every repo this test binary or its children create with git
-// init or git clone starts with maintenance.auto=false. It panics when the
-// template cannot be had, since a test run without it is the flaky run it
-// exists to prevent.
+// ambient one that is not already exactly the template, so every repo this test
+// binary or its children create with git init or git clone starts with
+// maintenance.auto=false. It panics when the template cannot be had, since a
+// test run without it is the flaky run it exists to prevent.
 func seedGitTemplate() {
+	if inheritsGitTemplate() {
+		return
+	}
 	dir, err := ensureGitTemplate(gitTemplateRoot())
 	if err != nil {
 		panic("testenv: " + err.Error())
@@ -82,6 +85,19 @@ func seedGitTemplate() {
 	if err := os.Setenv("GIT_TEMPLATE_DIR", dir); err != nil {
 		panic("testenv: pointing GIT_TEMPLATE_DIR at the git template " + dir + ": " + err.Error())
 	}
+}
+
+// inheritsGitTemplate reports whether GIT_TEMPLATE_DIR already names the
+// template: an absolute path to a directory that verifies as exactly what
+// gitTemplateEntries describes, as it does in a test binary that another one
+// re-execs after installing the template. That child keeps it and creates
+// nothing in its own temp dir, which tests that give the child a TMPDIR of its
+// own and then expect it empty depend on. Anything else, a relative path
+// included since git runs in the repo it is making, is an ambient template
+// like any other and is replaced.
+func inheritsGitTemplate() bool {
+	dir := os.Getenv("GIT_TEMPLATE_DIR")
+	return filepath.IsAbs(dir) && verifyGitTemplateEntries(dir) == nil
 }
 
 // ensureGitTemplate returns the template directory under root, writing it

@@ -216,6 +216,95 @@ func TestInitInstallsItsGitTemplateOverTheAmbientOne(t *testing.T) {
 	})
 }
 
+// TestInitKeepsTheGitTemplateItInherits verifies a test binary that another
+// test binary re-execs keeps the GIT_TEMPLATE_DIR it inherits, and so adds
+// nothing to the temp dir it was given, when that is the template init() writes.
+// Tests such as the sqlite SIGKILL-boundary ones start the child with a private
+// TMPDIR and fail on any entry in it. An inherited value that is not exactly
+// that template (a relative path, a template with a hook planted in it) is
+// replaced, like any other ambient one.
+func TestInitKeepsTheGitTemplateItInherits(t *testing.T) {
+	if os.Getenv("GC_TESTENV_CHILD") == "1" {
+		childReportsGitTemplateDir()
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("Executable: %v", err)
+	}
+	const test = "TestInitKeepsTheGitTemplateItInherits"
+
+	// installed returns a template made the way a parent test binary's init()
+	// makes it, under a root of its own.
+	installed := func(t *testing.T) string {
+		t.Helper()
+		root := t.TempDir()
+		template := reexecReportingGitTemplateDir(t, exe, test, "TEST_SRCDIR=bazel", "TMPDIR="+root)
+		assertIsGitTemplateIn(t, template, root)
+		if t.Failed() {
+			t.FailNow()
+		}
+		return template
+	}
+	// rerun starts the child with an empty temp dir of its own and inherited as
+	// its GIT_TEMPLATE_DIR, and returns that temp dir and what the child reports.
+	rerun := func(t *testing.T, inherited string) (root, reported string) {
+		t.Helper()
+		root = t.TempDir()
+		return root, reexecReportingGitTemplateDir(t, exe, test,
+			"TEST_SRCDIR=bazel", "TMPDIR="+root, "GIT_TEMPLATE_DIR="+inherited)
+	}
+
+	t.Run("the template init() writes is kept and its temp dir stays empty", func(t *testing.T) {
+		template := installed(t)
+		root, got := rerun(t, template)
+		if got != template {
+			t.Errorf("GIT_TEMPLATE_DIR=%q after init(), want the inherited %q", got, template)
+		}
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			t.Fatalf("ReadDir: %v", err)
+		}
+		for _, e := range entries {
+			t.Errorf("init() left %s in the temp dir it was given, want that empty", filepath.Join(root, e.Name()))
+		}
+	})
+
+	t.Run("a template with a hook planted in it is replaced", func(t *testing.T) {
+		template := installed(t)
+		planted := filepath.Join(template, "hooks", "pre-commit")
+		if err := os.WriteFile(planted, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("planting a hook: %v", err)
+		}
+		root, got := rerun(t, template)
+		if got == template {
+			t.Fatalf("init() kept the inherited GIT_TEMPLATE_DIR=%q, which has a hook planted in it", template)
+		}
+		assertIsGitTemplateIn(t, got, root)
+		if _, err := os.Stat(filepath.Join(got, "hooks", "pre-commit")); err == nil {
+			t.Errorf("the template init() chose, %s, carries the planted hook", got)
+		}
+	})
+
+	t.Run("a relative path to the template is replaced", func(t *testing.T) {
+		// Git runs in the repo it is making, not where the test binary
+		// started, so a relative GIT_TEMPLATE_DIR would not find the template.
+		template := installed(t)
+		wd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("Getwd: %v", err)
+		}
+		relative, err := filepath.Rel(wd, template)
+		if err != nil {
+			t.Fatalf("Rel(%q, %q): %v", wd, template, err)
+		}
+		root, got := rerun(t, relative)
+		if !filepath.IsAbs(got) {
+			t.Fatalf("init() kept the relative GIT_TEMPLATE_DIR=%q (reported %q)", relative, got)
+		}
+		assertIsGitTemplateIn(t, got, root)
+	})
+}
+
 // TestInitInstallsNoGitTemplateInTestscriptSubcommandMode verifies init()
 // leaves GIT_TEMPLATE_DIR alone, and creates no template, when the binary is
 // re-invoked under a non-`.test` name as a testscript subcommand: that process

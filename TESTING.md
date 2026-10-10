@@ -158,7 +158,7 @@ orders and pack scripts run, is the binary under test, and whenever an order
 they run fails. `test/acceptance/BUILD.bazel` sets both variables
 (`SOLO_ENV`); its `REALTIME_TESTS` run the same rows with neither, nightly.
 
-### Hermetic git template for test repos
+### Git auto-maintenance in test repos
 
 Git 2.55 starts `git maintenance run --auto` detached, in the background, after
 `commit`, `merge`, `am`, `fetch` and `pull`. In a test repo that process is
@@ -167,9 +167,9 @@ cleanup fails with `directory not empty` (ga-zoe1wr). So at test-binary init
 `internal/testenv` sets `GIT_TEMPLATE_DIR` to a template whose config holds
 `maintenance.auto = false`, and every repo the binary, or a child it spawns,
 creates with `git init` or `git clone` starts with auto-maintenance off. The
-variable replaces any ambient one and beats `init.templateDir`, so a
-developer's own template cannot bring the daemon back; only an explicit
-`--template` does.
+variable replaces any ambient one that is not already the template and beats
+`init.templateDir`, so a developer's own template cannot bring the daemon back;
+only an explicit `--template` does.
 
 The template is `gc-test-gittemplate-<uid>-<digest>` under `$TEST_TMPDIR` when
 Bazel sets it, else the temp dir, and holds the config, an empty `hooks/` and an
@@ -179,19 +179,26 @@ the template once, by atomic rename, and checks any existing one entry by entry,
 byte for byte, and on unix for owner and mode. A template that differs is never
 used: the test binary panics at init, naming the directory to remove.
 
+- A test binary that another one re-execs inherits `GIT_TEMPLATE_DIR`, and
+  keeps it when it is an absolute path that passes the same checks, so a child
+  started with a `TMPDIR` of its own creates nothing there. A test that expects
+  such a directory to stay empty relies on this.
 - A test that builds a child env from scratch, with an explicit `cmd.Env` list
   or `helpers.NewEnv` for acceptance tests, must carry `GIT_TEMPLATE_DIR` into
-  it, or the repos that child creates lose the guard. `internal/git`'s
-  `SanitizedEnv` and `HermeticEnv` keep it.
+  it, or the repos that child creates lose the guard, and a child that is a
+  test binary installs a template of its own in its temp dir.
+  `internal/git`'s `SanitizedEnv` and `HermeticEnv` keep it.
 - A testscript subcommand (the test binary re-invoked as `gc` or `bd`) is not
   seeded; the testscript owns that env.
 - To check that a test path spawns no auto-maintenance, make every check due
   and trace git: set `GIT_CONFIG_COUNT=1`,
   `GIT_CONFIG_KEY_0=maintenance.geometric-repack.auto` and
-  `GIT_CONFIG_VALUE_0=-1` (through the Makefile runners,
-  `EXTRA_TEST_ENV='GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=... GIT_CONFIG_VALUE_0=-1'`)
-  and point `GIT_TRACE` at a file. A trace line containing `maintenance run` is
-  a spawn.
+  `GIT_CONFIG_VALUE_0=-1` in the environment of a direct `go test`, and point
+  `GIT_TRACE` at a file. Each `built-in: git maintenance run` line is one spawn.
+  Naming these variables in `EXTRA_TEST_ENV` does not reach the test binaries
+  of `make test-fast-parallel`: the per-job `env -i` blocks in
+  `scripts/test-local-parallel` and `scripts/test-go-test-shard` forward only
+  their own allowlists.
 
 ### Merge queue
 

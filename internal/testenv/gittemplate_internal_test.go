@@ -277,3 +277,55 @@ func TestEnsureGitTemplateIsSafeUnderConcurrentCreation(t *testing.T) {
 		assertOnlyEntry(t, root, dirs[0])
 	}
 }
+
+// TestInheritsGitTemplateOnlyForTheTemplateByAbsolutePath pins when init()
+// keeps the GIT_TEMPLATE_DIR it was started with: only an absolute path to a
+// directory that verifies as the template. How verification refuses a changed
+// template is covered above, so the changed ones here are one of each kind.
+func TestInheritsGitTemplateOnlyForTheTemplateByAbsolutePath(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	cases := []struct {
+		name  string
+		value func(t *testing.T) string
+		want  bool
+	}{
+		{"unset", func(*testing.T) string { return "" }, false},
+		{"the template", func(t *testing.T) string {
+			_, dir := newTestTemplate(t)
+			return dir
+		}, true},
+		{"a relative path to the template", func(t *testing.T) string {
+			_, dir := newTestTemplate(t)
+			rel, err := filepath.Rel(wd, dir)
+			if err != nil {
+				t.Fatalf("Rel(%q, %q): %v", wd, dir, err)
+			}
+			return rel
+		}, false},
+		{"an empty directory", func(t *testing.T) string { return t.TempDir() }, false},
+		{"a path that is not there", func(t *testing.T) string { return filepath.Join(t.TempDir(), "gone") }, false},
+		{"a template with a hook planted in it", func(t *testing.T) string {
+			_, dir := newTestTemplate(t)
+			mustWrite(t, filepath.Join(dir, "hooks", "pre-commit"), "#!/bin/sh\nexit 0\n")
+			return dir
+		}, false},
+		{"a symlink to the template", func(t *testing.T) string {
+			_, dir := newTestTemplate(t)
+			link := filepath.Join(t.TempDir(), "link")
+			mustSymlink(t, dir, link)
+			return link
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			value := tc.value(t)
+			t.Setenv("GIT_TEMPLATE_DIR", value)
+			if got := inheritsGitTemplate(); got != tc.want {
+				t.Errorf("inheritsGitTemplate() with GIT_TEMPLATE_DIR=%q = %v, want %v", value, got, tc.want)
+			}
+		})
+	}
+}
