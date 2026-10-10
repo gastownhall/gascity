@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,7 +94,14 @@ func (m *Manager) Submit(ctx context.Context, id, message, resumeCommand string,
 	default:
 		return SubmitOutcome{}, fmt.Errorf("invalid submit intent %q", intent)
 	}
-	return m.submit(ctx, id, message, resumeCommand, hints, intent, policy)
+	outcome, err := m.submit(ctx, id, message, resumeCommand, hints, intent, policy)
+	if errors.Is(err, runtime.ErrNudgeDeliveredUnobserved) {
+		// The message reached the session; reporting failure would make the
+		// sender resend it and the session would receive it twice.
+		log.Printf("session: submit to %q delivered without observing busy state: %v", id, err)
+		return outcome, nil
+	}
+	return outcome, err
 }
 
 func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent, policy ResumePolicy) (SubmitOutcome, error) {

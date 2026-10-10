@@ -100,6 +100,12 @@ var ErrExecUnsupported = errors.New("runtime does not implement the exec op")
 // separate signals for separate call paths.
 var ErrRuntimeUnavailable = errors.New("runtime unavailable: liveness observation failed")
 
+// ErrNudgeDeliveredUnobserved reports that a nudge's submit reached the
+// session and the composer drained, so delivery is proven; only the busy-state
+// observation failed. Callers must report it as delivered and must not retry,
+// since a retry re-injects a message the session already received.
+var ErrNudgeDeliveredUnobserved = errors.New("nudge: submit Enter delivered and composer drained but busy state was never observed")
+
 // ErrRelaunchUnsupported reports that the underlying runtime cannot relaunch the
 // agent in a warm box (it is not a [RelaunchProvider], or is conjoined like
 // subprocess/acp/t3bridge). Composite/wrapping providers return it from their
