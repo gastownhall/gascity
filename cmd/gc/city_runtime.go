@@ -292,7 +292,7 @@ type CityRuntime struct {
 	activeReload        *reloadRequest
 	onStarted           func()
 	onStatus            func(string)
-	managedDoltHealth   func(string) error
+	managedDoltHealth   func(context.Context, string) error
 	managedDoltOwned    func(string) (bool, error)
 	managedDoltPort     func(string) string
 
@@ -402,7 +402,7 @@ type CityRuntimeParams struct {
 	ControlDispatcherCh chan struct{}           // may be nil; triggers control-dispatcher-only reconcile
 	OnStarted           func()                  // called after initial reconciliation succeeds
 	OnStatus            func(string)            // called when init status changes
-	ManagedDoltHealth   func(string) error
+	ManagedDoltHealth   func(context.Context, string) error
 	ManagedDoltOwned    func(string) (bool, error)
 	ManagedDoltPort     func(string) string
 	// TranscriptMetaEnabled opts this supervisor-owned city runtime into the
@@ -471,7 +471,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 
 	managedDoltHealth := p.ManagedDoltHealth
 	if managedDoltHealth == nil {
-		managedDoltHealth = healthBeadsProvider
+		managedDoltHealth = healthBeadsProviderForPreflight
 	}
 	managedDoltOwned := p.ManagedDoltOwned
 	if managedDoltOwned == nil {
@@ -487,7 +487,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		logPrefix = "gc start"
 	}
 
-	ensureManagedDoltPublishedForRuntime(p.CityPath, p.Stderr, logPrefix, managedDoltHealth, managedDoltOwned, managedDoltPort)
+	ensureManagedDoltPublishedForRuntime(p.CityPath, p.Stderr, logPrefix, backgroundManagedDoltHealth(managedDoltHealth), managedDoltOwned, managedDoltPort)
 
 	// Storage-class routing, resolved once and before any store below is opened
 	// for use. A city that authors no [storage] short-circuits inside the gate
@@ -1485,7 +1485,7 @@ func (cr *CityRuntime) tickFSPressureGate(p *tickPass) bool {
 
 func (cr *CityRuntime) tickManagedDoltPreflight(p *tickPass) bool {
 	phaseStart := time.Now()
-	cr.ensureManagedDoltPublishedForTick()
+	cr.ensureManagedDoltPublishedForTick(p.ctx)
 	p.recordPhase(TraceSiteControllerTickPhase, "managed_dolt_preflight", phaseStart, nil)
 	return p.ctx.Err() != nil
 }
@@ -1893,8 +1893,8 @@ func (cr *CityRuntime) startupReconcile(ctx context.Context) bool {
 	return p.completed
 }
 
-func (cr *CityRuntime) startupManagedDoltPreflight(_ *tickPass) bool {
-	cr.ensureManagedDoltPublishedForTick()
+func (cr *CityRuntime) startupManagedDoltPreflight(p *tickPass) bool {
+	cr.ensureManagedDoltPublishedForTick(p.ctx)
 	return false
 }
 
@@ -4050,7 +4050,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		return
 	}
 
-	cr.ensureManagedDoltPublishedForTick()
+	cr.ensureManagedDoltPublishedForTick(ctx)
 
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	tickTime := time.Now()
@@ -4147,12 +4147,30 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	cr.requestDeferredDrainFollowUpTick()
 }
 
-func (cr *CityRuntime) ensureManagedDoltPublishedForTick() {
+// healthBeadsProviderForPreflight is the default managed-Dolt health hook: the
+// provider health ladder (healthBeadsProvider), bound to ctx so the caller's
+// lifetime cancels it.
+func healthBeadsProviderForPreflight(ctx context.Context, cityPath string) error {
+	return healthBeadsProviderContext(ctx, cityPath, true)
+}
+
+// backgroundManagedDoltHealth adapts a context-aware health hook to the plain
+// signature ensureManagedDoltPublishedForRuntime takes, for the construction-
+// time preflight: no controller context exists yet, so it runs under
+// context.Background() as it always has.
+func backgroundManagedDoltHealth(health func(context.Context, string) error) func(string) error {
+	return func(cityPath string) error { return health(context.Background(), cityPath) }
+}
+
+// ensureManagedDoltPublishedForTick runs the managed-Dolt preflight for one
+// caller (the tick, the startup pass, the control dispatcher or the orders
+// lane). ctx is the caller's lifetime context; the health ladder runs under it.
+func (cr *CityRuntime) ensureManagedDoltPublishedForTick(ctx context.Context) {
 	cr.managedDoltPreflightMu.Lock()
 	defer cr.managedDoltPreflightMu.Unlock()
 	healthFn := cr.managedDoltHealth
 	if healthFn == nil {
-		healthFn = healthBeadsProvider
+		healthFn = healthBeadsProviderForPreflight
 	}
 	ownedFn := cr.managedDoltOwned
 	if ownedFn == nil {
@@ -4162,7 +4180,9 @@ func (cr *CityRuntime) ensureManagedDoltPublishedForTick() {
 	if portFn == nil {
 		portFn = currentResolvableManagedDoltPort
 	}
-	ensureManagedDoltPublishedForRuntime(cr.cityPath, cr.stderr, cr.logPrefix, healthFn, ownedFn, portFn)
+	ensureManagedDoltPublishedForRuntime(cr.cityPath, cr.stderr, cr.logPrefix, func(cityPath string) error {
+		return healthFn(ctx, cityPath)
+	}, ownedFn, portFn)
 }
 
 func ensureManagedDoltPublishedForRuntime(
