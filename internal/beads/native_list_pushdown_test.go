@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	beadslib "github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/issueops"
@@ -100,6 +101,11 @@ func TestNativeListPlanPushesEveryExactFilter(t *testing.T) {
 			want:  []planShape{{assignee: "worker"}},
 		},
 		{
+			name:  "rig was a bd default infra type until Jun 2026, so it stays client-side",
+			query: ListQuery{Type: "rig", Status: "open"},
+			want:  []planShape{{}},
+		},
+		{
 			name:  "a type gc does not register would be refused, so it stays client-side",
 			query: ListQuery{Type: "wisp", Status: "in_progress", Assignees: []string{"worker"}},
 			want:  []planShape{{assignee: "worker", status: "in_progress"}},
@@ -137,7 +143,7 @@ func TestNativeListPlanNeverPushesALimitOnAFanOut(t *testing.T) {
 }
 
 func TestNativeListPlanHooksNeverWalkTheLedger(t *testing.T) {
-	routes := []string{"mayor", "gc-1"}
+	routes := []string{"planner-a", "gc-1"}
 	for _, query := range []ListQuery{
 		{Type: "message", Status: "open", Assignees: routes, TierMode: TierBoth},
 		{Type: "molecule", Status: "in_progress", Assignees: routes, TierMode: TierBoth},
@@ -237,7 +243,211 @@ func TestNativeDoltStoreListRetriesWithoutARefusedType(t *testing.T) {
 			if n := strings.Count(logs.String(), "level=WARN"); n != 1 {
 				t.Fatalf("warned %d times, want once:\n%s", n, logs.String())
 			}
+			if stats := store.ListRequestStats(); stats.Requests != 3 || stats.Lists != 2 {
+				t.Fatalf("ListRequestStats = %+v, want 2 lists of 3 requests, the refused one counted", stats)
+			}
 		})
+	}
+}
+
+// A refused type whose type-less retry fails too is not evidence the scope
+// lacks gc's types: the refusal is returned, nothing latches, and the next
+// listing pushes the type again.
+func TestNativeDoltStoreListDoesNotLatchWhenTheRetryFails(t *testing.T) {
+	refusal := fmt.Errorf("listIssues: %w: issue_type", issueops.ErrValidation)
+	var sent []string
+	storage := &nativeDoltReaderSpy{
+		list: func(_ context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
+			sent = append(sent, req.IssueType)
+			if req.IssueType != "" {
+				return issueops.IssuePage{}, refusal
+			}
+			return issueops.IssuePage{}, errors.New("statement refused for an unrelated reason")
+		},
+	}
+	var logs bytes.Buffer
+	store := newNativeDoltStoreForTest(storage)
+	store.logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	for i := 0; i < 2; i++ {
+		if _, err := store.List(ListQuery{Type: "session", Status: "open"}); !errors.Is(err, issueops.ErrValidation) {
+			t.Fatalf("List #%d = %v, want the original refusal", i, err)
+		}
+	}
+	if store.typePushdownOff.Load() {
+		t.Fatal("a failed type-less retry latched type pushdown off")
+	}
+	if strings.Contains(logs.String(), "level=WARN") {
+		t.Fatalf("a failed type-less retry warned:\n%s", logs.String())
+	}
+	if !slices.Equal(sent, []string{"session", "", "session", ""}) {
+		t.Fatalf("sent types %q, want the push retried on each list", sent)
+	}
+}
+
+// infraSettingStorage answers the workspace-config role's types.infra read the
+// way a scope configures it, or fails it.
+type infraSettingStorage struct {
+	*nativeDoltReaderSpy
+	value string
+	err   error
+}
+
+func (s infraSettingStorage) WorkspaceConfig() (issueops.WorkspaceConfig, error) {
+	return infraSettingConfig{value: s.value, err: s.err}, nil
+}
+
+type infraSettingConfig struct {
+	value string
+	err   error
+}
+
+func (c infraSettingConfig) GetSetting(_ context.Context, req issueops.GetSettingRequest) (issueops.SettingResult, error) {
+	if c.err != nil {
+		return issueops.SettingResult{}, c.err
+	}
+	if req.Key != nativeTypesInfraConfigKey {
+		return issueops.SettingResult{Key: req.Key}, nil
+	}
+	return issueops.SettingResult{Key: req.Key, Value: c.value}, nil
+}
+
+func (infraSettingConfig) ListSettings(context.Context, issueops.ListSettingsRequest) (issueops.ListSettingsResult, error) {
+	panic("infraSettingConfig: ListSettings is not read by the list pushdown")
+}
+
+func (infraSettingConfig) SetSetting(context.Context, issueops.SetSettingRequest) (issueops.SetSettingResult, error) {
+	panic("infraSettingConfig: SetSetting is not written by the list pushdown")
+}
+
+func (infraSettingConfig) UnsetSetting(context.Context, issueops.UnsetSettingRequest) (issueops.UnsetSettingResult, error) {
+	panic("infraSettingConfig: UnsetSetting is not written by the list pushdown")
+}
+
+func TestNativeListPushableTypesFor(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		setting string
+		pushed  []string
+		kept    []string
+	}{
+		{name: "unset", setting: "", pushed: []string{"session", "molecule", "step"}, kept: []string{"agent", "rig", "role", "message"}},
+		{name: "a configured infra type", setting: "agent, session ,role", pushed: []string{"molecule", "step"}, kept: []string{"session", "agent", "role"}},
+		{name: "a setting that drops a historical default", setting: "molecule", pushed: []string{"session"}, kept: []string{"molecule", "agent", "rig", "role", "message"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := nativeListPushableTypesFor(tc.setting)
+			for _, typ := range tc.pushed {
+				if !got[typ] {
+					t.Errorf("%q is not pushable", typ)
+				}
+			}
+			for _, typ := range tc.kept {
+				if got[typ] {
+					t.Errorf("%q is pushable, want it client-side", typ)
+				}
+			}
+			for typ := range got {
+				if !slices.Contains(RequiredCustomTypes, typ) {
+					t.Errorf("%q is pushable but gc does not register it", typ)
+				}
+			}
+		})
+	}
+}
+
+// The store pushes a type only when its scope's types.infra setting says the
+// server reads it from the durable plane, and pushes none when it cannot tell.
+func TestNativeDoltStoreListPushesOnlyTypesTheScopeKeepsDurable(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		setting string
+		err     error
+		want    map[string]string
+	}{
+		{name: "a scope that makes session infra", setting: "agent,role,message,session", want: map[string]string{"session": "", "molecule": "molecule"}},
+		{name: "an unreadable setting", err: errors.New("config table unavailable"), want: map[string]string{"session": "", "molecule": ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sent []string
+			spy := &nativeDoltReaderSpy{
+				list: func(_ context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
+					sent = append(sent, req.IssueType)
+					return issueops.IssuePage{}, nil
+				},
+			}
+			storage := infraSettingStorage{nativeDoltReaderSpy: spy, value: tc.setting, err: tc.err}
+			store := newNativeDoltStoreWithStorage(storage, "native-test")
+			var logs bytes.Buffer
+			store.logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			store.loadListPushableTypes(context.Background())
+			for typ, wantSent := range tc.want {
+				sent = nil
+				if _, err := store.List(ListQuery{Type: typ, Status: "in_progress"}); err != nil {
+					t.Fatalf("List(%s): %v", typ, err)
+				}
+				if !slices.Equal(sent, []string{wantSent}) {
+					t.Errorf("List(%s) sent types %q, want %q", typ, sent, wantSent)
+				}
+			}
+			if warned := strings.Contains(logs.String(), "level=WARN"); warned != (tc.err != nil) {
+				t.Errorf("warned = %v, want %v:\n%s", warned, tc.err != nil, logs.String())
+			}
+		})
+	}
+}
+
+// A store built over a bare storage value has read no setting and pushes no
+// type.
+func TestNativeDoltStoreWithoutASettingPushesNoType(t *testing.T) {
+	var sent []string
+	store := newNativeDoltStoreWithStorage(&nativeDoltReaderSpy{
+		list: func(_ context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
+			sent = append(sent, req.IssueType)
+			return issueops.IssuePage{}, nil
+		},
+	}, "native-test")
+	if _, err := store.List(ListQuery{Type: "session", Status: "in_progress"}); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if !slices.Equal(sent, []string{""}) {
+		t.Fatalf("sent types %q, want none pushed", sent)
+	}
+}
+
+// closableReaderSpy is a reader spy a reconnect may retire: the store closes
+// the handle it replaces.
+type closableReaderSpy struct {
+	*nativeDoltReaderSpy
+}
+
+func (closableReaderSpy) Close() error { return nil }
+
+// A List retried by withReadRetry counts what its last attempt sent, not the
+// abandoned attempt's requests as well.
+func TestNativeDoltStoreListCountsOnlyItsLastAttempt(t *testing.T) {
+	dead := closableReaderSpy{&nativeDoltReaderSpy{
+		list: func(_ context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
+			if req.Assignee == "worker" {
+				return issueops.IssuePage{Items: []*issueops.IssueWithCounts{nativeIssueRowForTest("gc-1")}}, nil
+			}
+			return issueops.IssuePage{}, errors.New("[mysql] i/o timeout")
+		},
+	}}
+	healthy := closableReaderSpy{&nativeDoltReaderSpy{
+		list: func(context.Context, issueops.ListRequest) (issueops.IssuePage, error) {
+			return issueops.IssuePage{Items: []*issueops.IssueWithCounts{nativeIssueRowForTest("gc-1")}}, nil
+		},
+	}}
+	var reopens int32
+	store := storeWithReopen(dead, healthy, &reopens)
+	if _, err := store.List(ListQuery{Assignees: []string{"worker", "gc-9"}, TierMode: TierBoth}); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if reopens == 0 {
+		t.Fatal("the transient failure did not reconnect; the test exercises nothing")
+	}
+	if stats := store.ListRequestStats(); stats.Requests != 2 || stats.Rows != 2 || stats.Lists != 1 {
+		t.Fatalf("ListRequestStats = %+v, want 1 list of 2 requests returning 2 rows", stats)
 	}
 }
 
@@ -291,7 +501,9 @@ type filteringReader struct {
 	rows []*beadslib.Issue
 }
 
-var filteringReaderInfra = map[string]bool{"agent": true, "role": true, "message": true}
+// filteringReaderInfra is a server whose built-in infra default still carries
+// rig, as bd's did until Jun 2026.
+var filteringReaderInfra = map[string]bool{"agent": true, "rig": true, "role": true, "message": true}
 
 func (r filteringReader) list(_ context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
 	var page []*issueops.IssueWithCounts
@@ -318,13 +530,39 @@ func (r filteringReader) list(_ context.Context, req issueops.ListRequest) (issu
 		}
 		page = append(page, &issueops.IssueWithCounts{Issue: cloneNativeIssueForTest(issue)})
 	}
+	sort.SliceStable(page, func(i, j int) bool { return readerOrderLess(page[i].Issue, page[j].Issue, req) })
+	if req.Limit != nil && *req.Limit > 0 && len(page) > *req.Limit {
+		page = page[:*req.Limit]
+	}
 	return issueops.IssuePage{Items: page}, nil
+}
+
+// readerOrderLess is sqlbuild.OrderByForColumns as the oracle's order: no sort
+// key is (priority ASC, created_at DESC, id ASC); "created" is created_at DESC
+// (ASC when Reverse), ties by id ASC.
+func readerOrderLess(a, b *beadslib.Issue, req issueops.ListRequest) bool {
+	if req.SortBy == "created" {
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			if req.Reverse {
+				return a.CreatedAt.Before(b.CreatedAt)
+			}
+			return a.CreatedAt.After(b.CreatedAt)
+		}
+		return a.ID < b.ID
+	}
+	if a.Priority != b.Priority {
+		return a.Priority < b.Priority
+	}
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.After(b.CreatedAt)
+	}
+	return a.ID < b.ID
 }
 
 func randomPushdownFixture(rng *rand.Rand, n int) []*beadslib.Issue {
 	statuses := []beadslib.Status{beadslib.StatusOpen, beadslib.StatusInProgress, beadslib.StatusClosed, "deferred", "blocked", "hooked"}
-	types := []string{"message", "session", "molecule", "step", "wisp", "task", "agent"}
-	assignees := []string{"", "mayor", "gc-1", "worker", "gc-2"}
+	types := []string{"message", "session", "molecule", "step", "wisp", "task", "agent", "rig"}
+	assignees := []string{"", "planner-a", "gc-1", "worker", "gc-2"}
 	rows := make([]*beadslib.Issue, 0, n)
 	for i := 0; i < n; i++ {
 		issue := &beadslib.Issue{
@@ -335,6 +573,9 @@ func randomPushdownFixture(rng *rand.Rand, n int) []*beadslib.Issue {
 			Assignee:  assignees[rng.Intn(len(assignees))],
 			Ephemeral: rng.Intn(2) == 0,
 			Pinned:    rng.Intn(5) == 0,
+			Priority:  rng.Intn(4),
+			// A handful of instants, so created_at ties are common.
+			CreatedAt: time.Date(2026, 10, 1, 0, 0, rng.Intn(8), 0, time.UTC),
 		}
 		if issue.Status == beadslib.StatusClosed {
 			now := issue.CreatedAt
@@ -352,21 +593,31 @@ func randomPushdownQuery(rng *rand.Rand) ListQuery {
 	pick := func(options ...string) string { return options[rng.Intn(len(options))] }
 	q := ListQuery{
 		Status:        pick("", "", "open", "in_progress", "closed"),
-		Type:          pick("", "message", "session", "molecule", "step", "wisp", "agent"),
+		Type:          pick("", "message", "session", "molecule", "step", "wisp", "agent", "rig"),
 		IncludeClosed: rng.Intn(2) == 0,
 		TierMode:      TierMode(rng.Intn(3)),
 		AllowScan:     true,
 	}
 	switch rng.Intn(4) {
 	case 0:
-		q.Assignee = pick("mayor", "gc-1", "worker")
+		q.Assignee = pick("planner-a", "gc-1", "worker")
 	case 1:
 		n := 1 + rng.Intn(3)
 		for i := 0; i < n; i++ {
-			q.Assignees = append(q.Assignees, pick("mayor", "gc-1", "worker", "gc-2", ""))
+			q.Assignees = append(q.Assignees, pick("planner-a", "gc-1", "worker", "gc-2", ""))
 		}
 	case 2:
 		q.Label = "gc:session"
+	}
+	q.Sort = []SortOrder{SortDefault, SortDefault, SortCreatedAsc, SortCreatedDesc}[rng.Intn(4)]
+	if rng.Intn(2) == 0 {
+		q.Limit = 1 + rng.Intn(5)
+	}
+	if q.Sort != SortDefault && rng.Intn(3) == 0 {
+		q.SeekAfter = &SeekBoundary{
+			CreatedAt: time.Date(2026, 10, 1, 0, 0, rng.Intn(8), 0, time.UTC),
+			ID:        fmt.Sprintf("gc-%03d", rng.Intn(60)),
+		}
 	}
 	return q
 }
@@ -391,6 +642,12 @@ func TestNativeDoltStoreListPushdownAnswersTheUnpushedQuery(t *testing.T) {
 			bead.Revision = 0
 			all = append(all, bead)
 		}
+		// The unpushed answer is one unfiltered request's rows, in the order
+		// that request answers in, through ApplyListQuery.
+		defaultOrder := issueops.ListRequest{}
+		sort.SliceStable(all, func(i, j int) bool {
+			return readerOrderLess(issueForOrder(all[i]), issueForOrder(all[j]), defaultOrder)
+		})
 		for i := 0; i < 50; i++ {
 			query := randomPushdownQuery(rng)
 			got, err := store.List(query)
@@ -398,19 +655,35 @@ func TestNativeDoltStoreListPushdownAnswersTheUnpushedQuery(t *testing.T) {
 				t.Fatalf("List(%+v): %v", query, err)
 			}
 			want := ApplyListQuery(all, query)
-			if gotIDs, wantIDs := sortedBeadIDs(got), sortedBeadIDs(want); !slices.Equal(gotIDs, wantIDs) {
+			if gotIDs, wantIDs := beadIDsInOrder(got), beadIDsInOrder(want); !slices.Equal(gotIDs, wantIDs) {
 				t.Fatalf("List(%+v)\n got  %v\n want %v", query, gotIDs, wantIDs)
 			}
 		}
 	}
 }
 
+func issueForOrder(b Bead) *beadslib.Issue {
+	priority := 2
+	if b.Priority != nil {
+		priority = *b.Priority
+	}
+	return &beadslib.Issue{ID: b.ID, Priority: priority, CreatedAt: b.CreatedAt}
+}
+
+func beadIDsInOrder(items []Bead) []string {
+	ids := make([]string, 0, len(items))
+	for _, b := range items {
+		ids = append(ids, b.ID)
+	}
+	return ids
+}
+
 func TestNativeDoltStoreListKeepsAPinnedInProgressRow(t *testing.T) {
 	reader := filteringReader{rows: []*beadslib.Issue{
-		{ID: "gc-pinned", Title: "pinned", Status: beadslib.StatusInProgress, IssueType: "molecule", Assignee: "mayor", Pinned: true},
+		{ID: "gc-pinned", Title: "pinned", Status: beadslib.StatusInProgress, IssueType: "molecule", Assignee: "planner-a", Pinned: true},
 	}}
 	store := newNativeDoltStoreForTest(&nativeDoltReaderSpy{list: reader.list})
-	got, err := store.List(ListQuery{Type: "molecule", Status: "in_progress", Assignees: []string{"mayor", "gc-1"}, TierMode: TierBoth})
+	got, err := store.List(ListQuery{Type: "molecule", Status: "in_progress", Assignees: []string{"planner-a", "gc-1"}, TierMode: TierBoth})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}

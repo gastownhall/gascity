@@ -5,6 +5,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 func TestResolveActiveWispStep_NoStore(t *testing.T) {
@@ -432,5 +433,34 @@ func TestResolveActiveWispStepKeepsTheLegacyFallbackOnWork(t *testing.T) {
 	}
 	if b.ID != legacy.ID {
 		t.Errorf("got bead ID %q, want the work-store bead %q", b.ID, legacy.ID)
+	}
+}
+
+// Every bounded resolution listing over the agent's identity set states its
+// order, so the rows its limit keeps do not depend on a store's default
+// listing order — which the native store reaches by fanning the set out and
+// re-sorting the union, and a file store does not have.
+func TestWispStepResolutionListingsStateTheirOrder(t *testing.T) {
+	rec := beadstest.NewOpRecordingStore(beads.NewMemStore())
+	assignees := []string{"worker-a", "gc-1"}
+	if _, err := resolveActiveMolecule(rec, assignees); err != nil {
+		t.Fatalf("resolveActiveMolecule: %v", err)
+	}
+	_ = resolveMoleculeRootViaBridge(rec, rec, assignees)
+	if _, err := resolveBeadWithDescription(rec, assignees); err != nil {
+		t.Fatalf("resolveBeadWithDescription: %v", err)
+	}
+	bounded := 0
+	for _, op := range rec.Ops() {
+		if op.Kind != beadstest.OpList || op.Query.Limit <= 0 || len(op.Query.Assignees) < 2 {
+			continue
+		}
+		bounded++
+		if op.Query.Sort != beads.SortCreatedDesc {
+			t.Errorf("%s(%+v) cuts %d rows in the store's default order, want newest created first", op.Method, op.Query, op.Query.Limit)
+		}
+	}
+	if bounded != 4 {
+		t.Fatalf("recorded %d bounded listings, want the two molecule types, the bridge and the legacy fallback", bounded)
 	}
 }

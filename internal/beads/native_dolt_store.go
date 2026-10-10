@@ -374,6 +374,12 @@ type NativeDoltStore struct {
 	// ListRequestCounter.
 	listCounters nativeListCounters
 
+	// listPushableTypes is the issue types a listing of this scope may push,
+	// read from the scope's types.infra setting at open (loadListPushableTypes)
+	// and never written again. Nil pushes no type: a store whose setting could
+	// not be read, or one built directly over a storage value.
+	listPushableTypes map[string]bool
+
 	// typePushdownOff latches when the backend refused a pushed issue type:
 	// the scope was provisioned without gc's type vocabulary. Listings then
 	// filter type Go-side only, for the store's lifetime.
@@ -620,6 +626,7 @@ func newNativeDoltStoreAtWithCredentialCommand(parent context.Context, scopeRoot
 	for _, opt := range opts {
 		opt(store)
 	}
+	store.loadListPushableTypes(ctx)
 	return store, nil
 }
 
@@ -635,6 +642,7 @@ func newNativeDoltStoreAtWithoutAmbientEnv(parent context.Context, scopeRoot, cr
 	for _, opt := range opts {
 		opt(store)
 	}
+	store.loadListPushableTypes(ctx)
 	return store, nil
 }
 
@@ -728,6 +736,7 @@ func NewNativeDoltStoreOverStorageForTest(storage NativeStorage) *NativeDoltStor
 
 func newNativeDoltStoreForTest(storage beadslib.Storage, opts ...NativeDoltStoreOption) *NativeDoltStore {
 	store := newNativeDoltStoreWithStorage(storage, "native-test")
+	store.listPushableTypes = nativeListDefaultPushableTypes
 	for _, opt := range opts {
 		opt(store)
 	}

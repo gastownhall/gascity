@@ -126,6 +126,7 @@ func OpenNativeDoltStoreAtProxied(parent context.Context, scopeRoot string, env 
 	for _, opt := range opts {
 		opt(store)
 	}
+	store.loadListPushableTypes(ctx)
 	return store, nil
 }
 

@@ -47,6 +47,7 @@ go_test(
     embed = [":beadstest"],
     deps = [
         "//internal/beads",
+        "//internal/fsys",
         "//internal/testenv",
     ],
 )

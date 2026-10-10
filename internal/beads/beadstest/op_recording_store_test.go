@@ -1,10 +1,13 @@
 package beadstest
 
 import (
+	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func TestOpRecordingStoreRecordsReadsAndWrites(t *testing.T) {
@@ -88,6 +91,35 @@ func TestOpRecordingStoreRefusesACapabilityTheDelegateLacks(t *testing.T) {
 	}
 }
 
+func TestOpRecordingStoreForwardsReadyContextAndDepMetadata(t *testing.T) {
+	fileStore, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(t.TempDir(), "beads.json"))
+	if err != nil {
+		t.Fatalf("OpenFileStore: %v", err)
+	}
+	for _, delegate := range []beads.Store{beads.NewMemStore(), fileStore} {
+		rec := NewOpRecordingStore(delegate)
+		// The file store answers the capability's veto itself; the recorder
+		// passes it through, as the unwrapped store would.
+		if _, err := rec.ReadyContext(context.Background()); err != nil && !errors.Is(err, beads.ErrReadyContextUnsupported) {
+			t.Fatalf("ReadyContext over %T: %v", delegate, err)
+		}
+		if _, _, err := rec.DepMetadata("gc-1", "gc-2"); err != nil {
+			t.Fatalf("DepMetadata over %T: %v", delegate, err)
+		}
+		ops := rec.Ops()
+		if len(ops) != 2 || ops[0].Kind != OpReady || ops[1].Kind != OpDepMetadata {
+			t.Fatalf("ops over %T = %+v, want a Ready and a DepMetadata", delegate, ops)
+		}
+	}
+	rec := NewOpRecordingStore(storeWithoutCapabilities{beads.NewMemStore()})
+	if _, err := rec.ReadyContext(context.Background()); !errors.Is(err, beads.ErrReadyContextUnsupported) {
+		t.Fatalf("ReadyContext over a store without it = %v, want ErrReadyContextUnsupported", err)
+	}
+	if _, _, err := rec.DepMetadata("gc-1", "gc-2"); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("DepMetadata over a store without it = %v, want ErrUnsupported", err)
+	}
+}
+
 // storeWithoutCapabilities hides every optional capability of its store.
 type storeWithoutCapabilities struct{ beads.Store }
 
@@ -103,9 +135,10 @@ func TestWireModelPricesRecordedOps(t *testing.T) {
 		{Kind: OpGetLocalString},
 	}
 	cost := model.Price(1, ops)
-	// open 2 + Gets 2 + keyed list 1 + unkeyed list 20 pages + Update 1 + Close 2.
-	if cost.Requests != 28 {
-		t.Fatalf("Requests = %d, want 28 (%s)", cost.Requests, cost)
+	// open 2 + Get hit 2 (detail + edges) + Get miss 1 + keyed list 1 +
+	// unkeyed list 20 pages + Update 1 + Close 2.
+	if cost.Requests != 29 {
+		t.Fatalf("Requests = %d, want 29 (%s)", cost.Requests, cost)
 	}
 	if cost.Unkeyed != 1 || cost.GetMisses != 1 || cost.Writes != 2 || cost.Lists != 2 {
 		t.Fatalf("cost = %s, want 1 unkeyed, 1 miss, 2 writes, 2 lists", cost)

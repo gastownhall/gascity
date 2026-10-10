@@ -21,11 +21,11 @@ func TestEffectiveWorkQueryNoWorkBdInvocationBudget(t *testing.T) {
 	const ceiling = 11
 
 	logPath := filepath.Join(t.TempDir(), "bd-invocations.log")
-	a := Agent{Name: "mayor"}
+	a := Agent{Name: "planner-a"}
 	out := runEffectiveWorkQuery(t, a, map[string]string{
 		"GC_SESSION_ID":   "gc-session-1",
-		"GC_SESSION_NAME": "mayor",
-		"GC_ALIAS":        "mayor",
+		"GC_SESSION_NAME": "planner-a",
+		"GC_ALIAS":        "planner-a",
 		"BD_INVOCATIONS":  logPath,
 	}, `#!/bin/sh
 printf '%s\n' "$*" >> "$BD_INVOCATIONS"

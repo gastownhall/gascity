@@ -1,6 +1,7 @@
 package beadstest
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -30,6 +31,7 @@ const (
 	OpDepRemove                = "DepRemove"
 	OpDepList                  = "DepList"
 	OpDepListBatch             = "DepListBatch"
+	OpDepMetadata              = "DepMetadata"
 	OpUpdateIfMatch            = "UpdateIfMatch"
 	OpCloseIfMatch             = "CloseIfMatch"
 	OpCloseWithMetadataIfMatch = "CloseWithMetadataIfMatch"
@@ -65,8 +67,8 @@ func (o RecordedOp) NotFound() bool {
 // to count what one command asks of its ledger.
 //
 // It forwards the optional capabilities both the file and native stores
-// implement (the conditional-write family, ReleaseIfCurrent and DepListBatch)
-// and ListRequestCounter. A forwarded capability the delegate lacks answers an
+// implement (the conditional-write family, ReleaseIfCurrent, DepListBatch,
+// ReadyContext and DepMetadata) and ListRequestCounter. A forwarded capability the delegate lacks answers an
 // error wrapping errors.ErrUnsupported. Capabilities only the native store has
 // (Count, Claim, IDPrefix) are deliberately not forwarded, so a file-backed
 // fixture keeps the code paths it takes without the recorder.
@@ -186,6 +188,23 @@ func (r *OpRecordingStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error
 	return out, err
 }
 
+// ReadyContext forwards the context-aware ready read, recorded as a Ready. A
+// delegate without it answers beads.ErrReadyContextUnsupported, the veto the
+// capability's callers already handle.
+func (r *OpRecordingStore) ReadyContext(ctx context.Context, query ...beads.ReadyQuery) ([]beads.Bead, error) {
+	var (
+		out []beads.Bead
+		err error
+	)
+	if reader, ok := r.delegate.(beads.ContextReadyReader); ok {
+		out, err = reader.ReadyContext(ctx, query...)
+	} else {
+		err = fmt.Errorf("%T: %w", r.delegate, beads.ErrReadyContextUnsupported)
+	}
+	r.record(RecordedOp{Kind: OpReady, Method: "ReadyContext", Err: err})
+	return out, err
+}
+
 // Children implements beads.Store.
 func (r *OpRecordingStore) Children(parentID string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
 	out, err := r.delegate.Children(parentID, opts...)
@@ -283,6 +302,22 @@ func (r *OpRecordingStore) DepList(id, direction string) ([]beads.Dep, error) {
 	out, err := r.delegate.DepList(id, direction)
 	r.record(RecordedOp{Kind: OpDepList, ID: id, Err: err})
 	return out, err
+}
+
+// DepMetadata forwards the edge-payload read.
+func (r *OpRecordingStore) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	var (
+		payload string
+		carries bool
+		err     error
+	)
+	if reader, ok := r.delegate.(beads.DepMetadataReader); ok {
+		payload, carries, err = reader.DepMetadata(issueID, dependsOnID)
+	} else {
+		err = unsupported("DepMetadata", r.delegate)
+	}
+	r.record(RecordedOp{Kind: OpDepMetadata, ID: issueID, Err: err})
+	return payload, carries, err
 }
 
 func unsupported(capability string, delegate beads.Store) error {
@@ -391,4 +426,8 @@ func (r *OpRecordingStore) ListRequestStats() beads.ListRequestStats {
 	return beads.ListRequestStats{}
 }
 
-var _ beads.Store = (*OpRecordingStore)(nil)
+var (
+	_ beads.Store              = (*OpRecordingStore)(nil)
+	_ beads.ContextReadyReader = (*OpRecordingStore)(nil)
+	_ beads.DepMetadataReader  = (*OpRecordingStore)(nil)
+)

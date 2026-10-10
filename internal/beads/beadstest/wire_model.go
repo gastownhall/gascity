@@ -13,10 +13,20 @@ import (
 // narrowing predicate pages through the whole ledger.
 const ModelListPageRows = 200
 
+// nativeGetRequests is what NativeDoltStore.Get sends for a bead it finds: the
+// reader role's detail view, then readAnchorEdges for the stored edge rows.
+const nativeGetRequests = 2
+
+// nativeGetMissRequests is what a Get of a missing bead sends: the detail view
+// answers not-found and the edge read is never made.
+const nativeGetMissRequests = 1
+
 // WireModel prices recorded store operations as backend requests against a
 // remote ledger, so a test can bound what a command costs without a server.
 //
-// Each store open costs Handshake requests. Get costs 1. List costs one
+// Each store open costs Handshake requests. Get costs what the native store's
+// Get sends: the detail view and the bead's edge rows, 2 — or 1 for a miss,
+// which the detail view answers alone. List costs one
 // request per entry of beads.NativeListPlan, except that a request
 // beads.NativeListRequestKeyed reports as unkeyed walks the ledger and costs
 // ceil(LedgerRows / ModelListPageRows). Close costs 2 (a re-read plus the
@@ -47,7 +57,7 @@ type WireCost struct {
 	// Writes is the number of operations that write.
 	Writes int
 	// Other is the number of operations that are neither reads nor writes
-	// above (Ready, DepList, Ping and similar), each priced at 1.
+	// above (Ready, DepList, DepMetadata, Ping and similar), each priced at 1.
 	Other int
 	// Requests is the modeled total of backend requests.
 	Requests int
@@ -82,8 +92,10 @@ func (m WireModel) Price(opens int, ops []RecordedOp) WireCost {
 			cost.Gets++
 			if op.NotFound() {
 				cost.GetMisses++
+				cost.Requests += nativeGetMissRequests
+				continue
 			}
-			cost.Requests++
+			cost.Requests += nativeGetRequests
 		case OpList:
 			cost.Lists++
 			walked := false
