@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 func TestControllerScriptDeployProjectsOnlyExplicitCanonicalDoltTarget(t *testing.T) {
@@ -530,6 +532,9 @@ func lineIndexContaining(log, substring string) int {
 
 func controllerScriptPath(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return filepath.Join(root, "contrib", "session-scripts", "gc-controller-k8s")
+	}
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")

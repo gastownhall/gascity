@@ -92,11 +92,26 @@ type BeadClaimReleasedPayload struct {
 // IsEventPayload marks BeadClaimReleasedPayload as an events.Payload variant.
 func (BeadClaimReleasedPayload) IsEventPayload() {}
 
+// HookClaimReclaimedStalePayload is the typed payload for hook.claim.reclaimed_stale
+// events (ga-7rj87d). Emitted when a scoped `bd reclaim --id BeadID` recovers a
+// candidate from PreviousOwner's stale lease and the retried claim in the same
+// hook cycle wins it for NewAssignee.
+type HookClaimReclaimedStalePayload struct {
+	BeadID        string `json:"bead_id"`
+	PreviousOwner string `json:"previous_owner"`
+	NewAssignee   string `json:"new_assignee"`
+}
+
+// IsEventPayload marks HookClaimReclaimedStalePayload as an events.Payload variant.
+func (HookClaimReclaimedStalePayload) IsEventPayload() {}
+
 func init() {
 	RegisterPayload(BeadWorktreeReaped, BeadWorktreeReapedPayload{})
 	RegisterPayload(BeadWorktreeReapSkipped, BeadWorktreeReapSkippedPayload{})
 	RegisterPayload(BeadClaimRejected, BeadClaimRejectedPayload{})
 	RegisterPayload(BeadClaimReleased, BeadClaimReleasedPayload{})
+	RegisterPayload(HookClaimReclaimedStale, HookClaimReclaimedStalePayload{})
+	RegisterPayload(BeadsBlockedRecomputed, BlockedRecomputedPayload{})
 }
 
 // StoreDiskWarnPayload is the typed payload for gc.store.disk_warn events.
@@ -163,6 +178,16 @@ const (
 	// route-matching. The controller counted work the worker's own read did not
 	// serve; this is the agreement invariant breaking.
 	DemandClaimDivergence = "divergence"
+	// DemandClaimBlocked: the trigger row is still open, unassigned and
+	// route-matching, and the only thing marking it non-claimable is a blocking
+	// dependency — re-derived from the row's LIVE deps, not read off bd's
+	// denormalized is_blocked projection, which can lag a just-closed blocker and
+	// is absent from the payloads these reads actually return. No worker could
+	// have claimed the row, so it is NOT counted as a clean divergence (that
+	// metric must stay the agreement signal) — but it is not folded into benign
+	// either: a routed row the controller keeps counting while nobody can take it
+	// is worth seeing on its own.
+	DemandClaimBlocked = "blocked"
 	// DemandClaimUnknown: the classification read could not be made (no trigger
 	// recorded, or the row could not be read). Never counted as either.
 	DemandClaimUnknown = "unknown"
@@ -189,9 +214,9 @@ type SessionDemandClaimDivergencePayload struct {
 	// ("open"/"in_progress"/"closed"), "unreadable" when the classification read
 	// failed, or empty when there was no row to read.
 	TriggerStatusAtDrain string `json:"trigger_status_at_drain,omitempty"`
-	// Classification is the verdict: benign, divergence, or unknown. It is
-	// carried rather than left to be re-derived, because the divergence count IS
-	// the rollout metric for the agreement fix.
+	// Classification is the verdict: benign, divergence, blocked, or unknown. It
+	// is carried rather than left to be re-derived, because the divergence count
+	// IS the rollout metric for the agreement fix.
 	Classification string `json:"classification"`
 }
 
@@ -201,3 +226,20 @@ func (SessionDemandClaimDivergencePayload) IsEventPayload() {}
 func init() {
 	RegisterPayload(SessionDemandClaimDivergence, SessionDemandClaimDivergencePayload{})
 }
+
+// BlockedRecomputedPayload is the typed payload for beads.blocked.recomputed
+// events: gc start ran `bd recompute-blocked` over one scope because the scope
+// had not yet been repaired under the running bd version.
+type BlockedRecomputedPayload struct {
+	// Scope names the repaired scope: "city" or "rig/<name>".
+	Scope string `json:"scope"`
+	// RowsCorrected is bd's count of is_blocked values the recompute changed.
+	// Zero means the scope was already consistent.
+	RowsCorrected int `json:"rows_corrected"`
+	// BDVersion is the bd version that ran the recompute and is now recorded
+	// as the scope's repair marker.
+	BDVersion string `json:"bd_version"`
+}
+
+// IsEventPayload marks BlockedRecomputedPayload as an events.Payload variant.
+func (BlockedRecomputedPayload) IsEventPayload() {}

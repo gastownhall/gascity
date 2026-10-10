@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -155,11 +156,11 @@ func TestAssignedWorkSweepPlanFailsLoudOnARefusedCity(t *testing.T) {
 // The session-scoped plan: what reachableStoresForSessionInfo used to answer.
 // ---------------------------------------------------------------------------
 
-// A rig-bound session reads its own rig store and the binding, in that order —
-// byte-identical to the pre-S2 workAssignmentStores(rigStore, nil, binding). The
-// city work store must NOT appear: reachability is the agent's SCOPE, and the
-// resolver is told which work legs the scope has rather than deciding it.
-func TestSessionAssignedWorkPlanStaysRigScopedAndAddsTheBinding(t *testing.T) {
+// A rig-bound session reads the census leg set: the city work store, its rig,
+// then the binding. The agent's scope no longer narrows the gates' legs
+// (mc-3ixn3.16): rig agents claim city-store beads, and a gate that skipped
+// that store decided "no work" on a leg the cascade then released from.
+func TestSessionAssignedWorkPlanReadsTheCensusLegsForARigBoundSeat(t *testing.T) {
 	cfg, cityPath, infos := rigScopedWakeFixture(t)
 	binding := beads.NewMemStore()
 	seedSplitRoutes(t, cityPath, binding)
@@ -169,14 +170,13 @@ func TestSessionAssignedWorkPlanStaysRigScopedAndAddsTheBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("assignedWorkPlanForSessionInfo: %v", err)
 	}
-	if got := planStores(t, plan); !sameStores(got, rigStore, binding) {
-		t.Fatalf("session legs = %v, want [rig store, binding]", got)
+	if got := planStores(t, plan); !sameStores(got, cityStore, rigStore, binding) {
+		t.Fatalf("session legs = %v, want [city store, rig store, binding]", got)
 	}
 }
 
-// Control: the same session on a city that relocates nothing reads one leg. The
-// extra leg is a property of the SPLIT, not a general widening.
-func TestSessionAssignedWorkPlanStaysSingleLeggedOnASingleStoreCity(t *testing.T) {
+// Control: the same session on a city that relocates nothing reads no binding.
+func TestSessionAssignedWorkPlanAddsNoBindingOnASingleStoreCity(t *testing.T) {
 	cfg, cityPath, infos := rigScopedWakeFixture(t)
 	seedNoRoutes(t, cityPath)
 	rigStore, cityStore := beads.NewMemStore(), beads.NewMemStore()
@@ -185,8 +185,8 @@ func TestSessionAssignedWorkPlanStaysSingleLeggedOnASingleStoreCity(t *testing.T
 	if err != nil {
 		t.Fatalf("assignedWorkPlanForSessionInfo: %v", err)
 	}
-	if got := planStores(t, plan); !sameStores(got, rigStore) {
-		t.Fatalf("session legs = %v, want only the rig store", got)
+	if got := planStores(t, plan); !sameStores(got, cityStore, rigStore) {
+		t.Fatalf("session legs = %v, want [city store, rig store]", got)
 	}
 }
 
@@ -294,7 +294,7 @@ func TestOrphanReleaseSparesALiveHoldersBindingResidentClaim(t *testing.T) {
 	infos := sessionInfosFromBeads([]beads.Bead{sess})
 	released := releaseOrphanedPoolAssignments(
 		work, beads.SessionStore{Store: work}, cfg, cityPath, infos,
-		[]beads.Bead{claim}, []beads.Store{work}, []string{""}, nil,
+		[]beads.Bead{claim}, []beads.Store{work}, []string{""}, nil, nil, nil,
 	)
 	if len(released) != 0 {
 		t.Fatalf("released %v — a LIVE holder's claim was taken back on a leg the release path now reads; that is claim loss, not a strand", released)
@@ -518,6 +518,9 @@ func TestResidencyRegistrationHappensUnderTheControllerLock(t *testing.T) {
 
 func repoRootForResidency(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("cwd: %v", err)

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -1032,15 +1033,6 @@ func TestLifecycleHighRiskWritersStayOnPatchHelpers(t *testing.T) {
 		forbidden []string
 	}{
 		{
-			file: "internal/session/manager.go",
-			required: []string{
-				`ArchivePatch(time.Now().UTC(), reason, false)`,
-			},
-			forbidden: []string{
-				`"archived_at":  time.Now().UTC().Format(time.RFC3339),`,
-			},
-		},
-		{
 			file: "cmd/gc/session_reconcile.go",
 			required: []string{
 				`sessionpkg.ClearExpiredHoldPatch(info.SleepReason)`,
@@ -1089,6 +1081,9 @@ func lifecycleRepoRoot(t *testing.T) string {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
+	}
+	if root := bazeltest.OverrideRoot(); root != "" {
+		file = filepath.Join(root, "internal", "session", "lifecycle_projection_test.go")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 }

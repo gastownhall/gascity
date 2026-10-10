@@ -21,6 +21,7 @@ var (
 	_ runtime.Provider                = (*seamBackedProvider)(nil)
 	_ runtime.SleepCapabilityProvider = (*seamBackedProvider)(nil)
 	_ runtime.RelaunchProvider        = (*seamBackedProvider)(nil)
+	_ runtime.ListingAttestation      = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs a k8s provider served through the seams.
@@ -42,4 +43,10 @@ func (s *seamBackedProvider) SleepCapability(name string) runtime.SessionSleepCa
 // (respawn-pane via execInPod; B2, RelaunchProvider).
 func (s *seamBackedProvider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
 	return s.raw.Relaunch(ctx, name, cfg)
+}
+
+// ListRunningComplete passes the underlying provider's listing attestation
+// through; the seams route ListRunning to the same raw listing.
+func (s *seamBackedProvider) ListRunningComplete() bool {
+	return s.raw.ListRunningComplete()
 }

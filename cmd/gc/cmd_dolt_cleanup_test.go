@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -42,6 +41,10 @@ func TestCleanupReportJSONShape(t *testing.T) {
 		`"purge":{`,
 		`"reaped":{`,
 		`"summary":{`,
+		// ga-xkc9mo: protected rollup is additive to gc.dolt.cleanup.v1 and
+		// always present, zero-valued when nothing is protected.
+		`"protected_total":0`,
+		`"protected_by_kind":{}`,
 		`"errors":[]`,
 		`"skipped":[{"name":"testdb.invalid","reason":"invalid-identifier"}]`,
 	}
@@ -118,18 +121,19 @@ func TestRunDoltCleanupRejectsNegativeMaxOrphanDBs(t *testing.T) {
 
 func TestRunDoltCleanup_JSONOutputsResolvedPort(t *testing.T) {
 	fs := fsys.NewFake()
-	fs.Files["/city/.beads/dolt-server.port"] = []byte("28231\n")
 
 	rigs := []resolverRig{{Name: "hq", Path: "/city", HQ: true}}
 
 	var stdout, stderr bytes.Buffer
 	opts := cleanupOptions{
-		Flag:     "",
-		CityPort: 0,
-		Rigs:     rigs,
-		FS:       fs,
-		JSON:     true,
-		Probe:    false, // skip TCP probe in unit tests
+		Flag:        "",
+		CityPort:    0,
+		Rigs:        rigs,
+		FS:          fs,
+		CityPath:    "/city",
+		LiveResolve: fakeLiveResolve(),
+		JSON:        true,
+		Probe:       false, // skip TCP probe in unit tests
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -176,16 +180,17 @@ func TestRunDoltCleanup_HumanOutputShowsPortAndFallbackWarning(t *testing.T) {
 
 func TestRunDoltCleanup_FlagOverridesEverything(t *testing.T) {
 	fs := fsys.NewFake()
-	fs.Files["/city/.beads/dolt-server.port"] = []byte("28231\n")
 
 	var stdout, stderr bytes.Buffer
 	opts := cleanupOptions{
-		Flag:     "9999",
-		CityPort: 4242,
-		Rigs:     []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
-		FS:       fs,
-		JSON:     true,
-		Probe:    false,
+		Flag:        "9999",
+		CityPort:    4242,
+		Rigs:        []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
+		FS:          fs,
+		CityPath:    "/city",
+		LiveResolve: fakeLiveResolve(),
+		JSON:        true,
+		Probe:       false,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -362,36 +367,25 @@ func TestRunDoltCleanup_InvalidCityConfigPortIsFatal(t *testing.T) {
 	}
 }
 
-func TestRunDoltCleanup_BadRigPortFileIsFatal(t *testing.T) {
+func TestRunDoltCleanup_LiveResolutionErrorIsFatal(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
-		setup     func(*fsys.Fake)
+		resolve   func(string) (liveDoltPortResolution, error)
 		wantError string
 	}{
 		{
-			name:      "empty",
-			setup:     func(fs *fsys.Fake) { fs.Files["/city/.beads/dolt-server.port"] = []byte("\n") },
-			wantError: "empty",
+			name:      "ambiguous listeners",
+			resolve:   fakeLiveResolveError("ambiguous live dolt listeners for /city on ports [28231 29000]; pass --port to disambiguate"),
+			wantError: "ambiguous",
 		},
 		{
-			name:      "malformed",
-			setup:     func(fs *fsys.Fake) { fs.Files["/city/.beads/dolt-server.port"] = []byte("not-a-port\n") },
-			wantError: "invalid port",
-		},
-		{
-			name:      "out of range",
-			setup:     func(fs *fsys.Fake) { fs.Files["/city/.beads/dolt-server.port"] = []byte("70000\n") },
-			wantError: "65535",
-		},
-		{
-			name:      "unreadable",
-			setup:     func(fs *fsys.Fake) { fs.Errors["/city/.beads/dolt-server.port"] = os.ErrPermission },
-			wantError: "permission",
+			name:      "discovery failure",
+			resolve:   fakeLiveResolveError("discover dolt processes: ps exploded"),
+			wantError: "ps exploded",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := fsys.NewFake()
-			tc.setup(fs)
 			client := &fakeCleanupDoltClient{
 				databases: []string{"testdb_abc"},
 			}
@@ -399,11 +393,13 @@ func TestRunDoltCleanup_BadRigPortFileIsFatal(t *testing.T) {
 
 			var stdout, stderr bytes.Buffer
 			opts := cleanupOptions{
-				Rigs:       []resolverRig{{Name: "city", Path: "/city", HQ: true}},
-				FS:         fs,
-				JSON:       true,
-				Force:      true,
-				DoltClient: client,
+				Rigs:        []resolverRig{{Name: "city", Path: "/city", HQ: true}},
+				FS:          fs,
+				CityPath:    "/city",
+				LiveResolve: tc.resolve,
+				JSON:        true,
+				Force:       true,
+				DoltClient:  client,
 				DiscoverProcesses: func() ([]DoltProcInfo, error) {
 					return []DoltProcInfo{{PID: 4444, Argv: []string{"dolt", "sql-server", "--config", "/tmp/TestX/config.yaml"}}}, nil
 				},
@@ -415,7 +411,7 @@ func TestRunDoltCleanup_BadRigPortFileIsFatal(t *testing.T) {
 			}
 			code := runDoltCleanup(opts, &stdout, &stderr)
 			if code == 0 {
-				t.Fatalf("exit=0, want bad rig port file to fail closed\nstdout=%s\nstderr=%s", stdout.String(), stderr.String())
+				t.Fatalf("exit=0, want live resolution error to fail closed\nstdout=%s\nstderr=%s", stdout.String(), stderr.String())
 			}
 
 			var r CleanupReport
@@ -423,10 +419,10 @@ func TestRunDoltCleanup_BadRigPortFileIsFatal(t *testing.T) {
 				t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
 			}
 			if len(client.dropped) != 0 {
-				t.Fatalf("DropDatabase called after bad rig port file: %v", client.dropped)
+				t.Fatalf("DropDatabase called after live resolution error: %v", client.dropped)
 			}
 			if len(killed) != 0 {
-				t.Fatalf("KillProcess called after bad rig port file: %v", killed)
+				t.Fatalf("KillProcess called after live resolution error: %v", killed)
 			}
 			if r.Port.Resolved != 0 {
 				t.Fatalf("Port.Resolved = %d, want 0 for unresolved fatal port", r.Port.Resolved)
@@ -438,7 +434,7 @@ func TestRunDoltCleanup_BadRigPortFileIsFatal(t *testing.T) {
 				}
 			}
 			if !foundPortError {
-				t.Fatalf("Errors missing fatal rig port-file entry containing %q: %+v", tc.wantError, r.Errors)
+				t.Fatalf("Errors missing fatal live-resolution entry containing %q: %+v", tc.wantError, r.Errors)
 			}
 		})
 	}
@@ -638,7 +634,6 @@ func TestRunDoltCleanup_RigsProtectedFromRegistry(t *testing.T) {
 
 func TestRunDoltCleanup_DryRunReportsReapPlanWithoutKilling(t *testing.T) {
 	fs := fsys.NewFake()
-	fs.Files["/city/.beads/dolt-server.port"] = []byte("28231\n")
 
 	procs := []DoltProcInfo{
 		{PID: 1138290, Ports: []int{28231}, Argv: []string{"dolt", "sql-server"}},
@@ -712,9 +707,105 @@ func TestRunDoltCleanup_DryRunAllowsProcessTempRootTestConfig(t *testing.T) {
 	}
 }
 
+// protectedRollupProcs is the 100%-protected population shared by the
+// protected-rollup tests.
+func protectedRollupProcs() []DoltProcInfo {
+	return []DoltProcInfo{
+		// Active rig: LiveResolve (below) resolves the managed city dolt to
+		// port 28231 via fakeLiveResolve, which protectedDoltPortsForReap
+		// records as rigPortByPort[28231]="managed city dolt" independent of
+		// Argv. classifyDoltProcess matches on any port in p.Ports, so a bare
+		// argv with no --config still lands in the "active rig dolt server"
+		// branch. (TestRunDoltCleanup_DryRunReportsReapPlanWithoutKilling's
+		// PID 1138290 looks similar but has no LiveResolve wired, so it is
+		// actually protected via the "no --config path detected" fallback,
+		// not this branch — that test only asserts the flat PID list, so it
+		// never distinguishes the two.)
+		{PID: 501, Ports: []int{28231}, Argv: []string{"dolt", "sql-server"}},
+		// Container-managed bare server (ga-sm1cvj shape; see
+		// TestContainerDoltServerIsClassified in dolt_cleanup_reaper_test.go).
+		{PID: 502, Argv: []string{"dolt", "sql-server", "-H", "127.0.0.1"}, ContainerRuntime: "podman"},
+		// Non-allowlisted --config: protected, kill-manually reason.
+		{PID: 503, Argv: []string{"dolt", "sql-server", "--config", "/home/u/.dolt-real/config.yaml"}},
+		// Containerized active rig server: the rig-port match wins, so it
+		// stays in the active-rig baseline rather than container:docker.
+		{PID: 504, Ports: []int{28231}, Argv: []string{"dolt", "sql-server"}, ContainerRuntime: "docker"},
+	}
+}
+
+// protectedRollupOptions wires protectedRollupProcs with a live-resolved
+// managed city dolt on port 28231.
+func protectedRollupOptions(jsonOut bool) cleanupOptions {
+	procs := protectedRollupProcs()
+	return cleanupOptions{
+		Rigs:              []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
+		FS:                fsys.NewFake(),
+		JSON:              jsonOut,
+		HomeDir:           "/home/u",
+		LiveResolve:       fakeLiveResolve(),
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return procs, nil },
+	}
+}
+
+// TestRunDoltCleanup_ProtectedRollupByKind covers ga-xkc9mo: a 100%-protected
+// population (zero reap targets) must still surface in .summary instead of
+// collapsing into orphans:0. Four protected processes exercise the three
+// kinds the fix spec requires at minimum: active-rig, container:<runtime>,
+// and unreapable-config, derived from the existing Reason/ContainerRuntime
+// fields rather than a second classifier. A containerized active rig server
+// must still count as active-rig.
+func TestRunDoltCleanup_ProtectedRollupByKind(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	opts := protectedRollupOptions(true)
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+
+	if len(r.Reaped.Targets) != 0 {
+		t.Fatalf("Reaped.Targets = %v, want none (100%%-protected population)", r.Reaped.Targets)
+	}
+	if r.Summary.ProtectedTotal != 4 {
+		t.Errorf("Summary.ProtectedTotal = %d, want 4", r.Summary.ProtectedTotal)
+	}
+	if got, ok := r.Summary.ProtectedByKind["container:docker"]; ok {
+		t.Errorf("Summary.ProtectedByKind[\"container:docker\"] = %d, want absent (containerized active rig is active-rig)", got)
+	}
+	wantByKind := map[string]int{
+		"active-rig":        2,
+		"container:podman":  1,
+		"unreapable-config": 1,
+	}
+	if len(r.Summary.ProtectedByKind) != len(wantByKind) {
+		t.Fatalf("Summary.ProtectedByKind = %v, want %v", r.Summary.ProtectedByKind, wantByKind)
+	}
+	for kind, want := range wantByKind {
+		if got := r.Summary.ProtectedByKind[kind]; got != want {
+			t.Errorf("Summary.ProtectedByKind[%q] = %d, want %d (full: %v)", kind, got, want, r.Summary.ProtectedByKind)
+		}
+	}
+}
+
+// TestRunDoltCleanup_ProtectedRollupTextSummary pins the human summary line
+// to the same rollup the JSON report carries (ga-xkc9mo).
+func TestRunDoltCleanup_ProtectedRollupTextSummary(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runDoltCleanup(protectedRollupOptions(false), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	want := "protected: 4 [active-rig:2, container:podman:1, unreapable-config:1]"
+	if !strings.Contains(stdout.String(), want) {
+		t.Errorf("stdout missing %q\nstdout:\n%s", want, stdout.String())
+	}
+}
+
 func TestRunDoltCleanup_ForceKillsOrphans(t *testing.T) {
 	fs := fsys.NewFake()
-	fs.Files["/city/.beads/dolt-server.port"] = []byte("28231\n")
 
 	procs := []DoltProcInfo{
 		{PID: 1138290, Ports: []int{28231}, Argv: []string{"dolt", "sql-server"}, StartTimeTicks: 10},
@@ -888,18 +979,19 @@ func TestRunDoltCleanup_ForceCountsPostSIGTERMGoneAsReaped(t *testing.T) {
 
 func TestRunDoltCleanup_ForceRevalidatesPIDBeforeSIGTERM(t *testing.T) {
 	fs := fsys.NewFake()
-	fs.Files["/city/.beads/dolt-server.port"] = []byte("28231\n")
 
 	discoverCalls := 0
 	var signals []syscall.Signal
 
 	var stdout, stderr bytes.Buffer
 	opts := cleanupOptions{
-		Rigs:    []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
-		FS:      fs,
-		JSON:    true,
-		Force:   true,
-		HomeDir: "/home/u",
+		Rigs:        []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
+		FS:          fs,
+		CityPath:    "/city",
+		LiveResolve: fakeLiveResolve(),
+		JSON:        true,
+		Force:       true,
+		HomeDir:     "/home/u",
 		DiscoverProcesses: func() ([]DoltProcInfo, error) {
 			discoverCalls++
 			if discoverCalls == 1 {
@@ -1100,18 +1192,19 @@ func TestRunDoltCleanup_ForceSkipsSIGKILLWhenRevalidationDiscoverErrors(t *testi
 
 func TestRunDoltCleanup_ForceSkipsSIGKILLWhenProcessBecomesProtected(t *testing.T) {
 	fs := fsys.NewFake()
-	fs.Files["/city/.beads/dolt-server.port"] = []byte("28231\n")
 
 	discoverCalls := 0
 	var signals []syscall.Signal
 
 	var stdout, stderr bytes.Buffer
 	opts := cleanupOptions{
-		Rigs:    []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
-		FS:      fs,
-		JSON:    true,
-		Force:   true,
-		HomeDir: "/home/u",
+		Rigs:        []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
+		FS:          fs,
+		CityPath:    "/city",
+		LiveResolve: fakeLiveResolve(),
+		JSON:        true,
+		Force:       true,
+		HomeDir:     "/home/u",
 		DiscoverProcesses: func() ([]DoltProcInfo, error) {
 			discoverCalls++
 			proc := DoltProcInfo{

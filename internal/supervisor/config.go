@@ -19,6 +19,12 @@ func isTestBinary() bool {
 	if len(os.Args) == 0 {
 		return false
 	}
+	// Bazel test binaries drop the .test suffix but export TEST_SRCDIR and
+	// name the binary <target>_test; testscript re-invocations rename it
+	// (e.g. "gc"), so require both markers to avoid scrubbing the child.
+	if os.Getenv("TEST_SRCDIR") != "" && strings.HasSuffix(filepath.Base(os.Args[0]), "_test") {
+		return true
+	}
 	return strings.HasSuffix(os.Args[0], ".test") ||
 		strings.Contains(os.Args[0], ".test")
 }
@@ -143,7 +149,10 @@ func (s Section) PortOrDefault() int {
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
-// Defaults to 10s on empty or unparseable values.
+// Defaults to 10s on empty or unparseable values. Unlike the city's
+// config.DaemonConfig.PatrolIntervalDuration it is never divided by
+// clock.BackstopSpeedupEnv: the knob shortens city controller backstops
+// only.
 func (s Section) PatrolIntervalDuration() time.Duration {
 	if s.PatrolInterval == "" {
 		return 10 * time.Second

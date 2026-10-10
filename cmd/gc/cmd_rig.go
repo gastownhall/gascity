@@ -79,10 +79,20 @@ func newRigAddCmd(stdout, stderr io.Writer) *cobra.Command {
 
 Initializes beads database, installs agent hooks if configured,
 generates cross-rig routes, and appends the rig to city.toml.
-If the target directory doesn't exist, it is created. Use --include
-to apply a pack source that defines the rig's agent configuration;
-repeat the flag to compose multiple packs for one rig. The flag is
-compatibility sugar: gc rig add writes canonical rig imports.
+If the target directory doesn't exist, it is created.
+
+Use --include to import a pack into the rig; repeat the flag to compose
+multiple packs for one rig. Each --include becomes a [rigs.imports.<binding>]
+entry in city.toml, resolved the way "gc import add --rig <rig>" resolves an
+import: a bundled pack is pinned to the version shipped with gc; any other
+remote source gets the version constraint gc import add would write (the
+constraint the city already holds for that source, else the newest registry
+release, else the newest semver tag, else the remote HEAD commit) plus a
+packs.lock entry; a remote source with an embedded "#ref" and a local path
+are imported as given, with no packs.lock entry. If a version cannot be
+resolved, nothing is written. Imports do not honor a "#ref": the city fails
+to load until gc import install locks such a source, at a commit chosen
+without the ref; use gc import add --rig <rig> --version to pin a version.
 
 --include takes a pack source (local path or remote URL) or a pack name: a
 bundled pack ("gastown"), or a registry pack resolved from the cached
@@ -91,6 +101,12 @@ prefix or a "packs/<name>" token is never read as a registry name (a
 bundled pack still canonicalizes, so "./gastown" resolves to the bundled
 source), and an existing directory always wins over a registry pack of the
 same name.
+
+The binding defaults to the pack's name (its [packs] key or the source's last
+path segment). Write --include <binding>=<source> to choose it, for example
+--include gt=gastown. A binding is letters, digits, "-" and "_", starting with
+a letter or digit, and an explicit binding may not name a different pack than
+another --include. Prefix a path with "./" if its name itself contains "=".
 
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
@@ -115,6 +131,7 @@ check remains informational.`,
   gc rig add ./my-project --include gastown
   gc rig add ./my-project --include packs/planner --include packs/architect
   gc rig add ./my-project --include acme/planner
+  gc rig add ./my-project --include gc=https://github.com/gastownhall/gascity-packs/tree/main/gascity
   gc rig add ./my-project --include gastown --start-suspended
   gc rig add /path/to/existing --adopt`,
 		Args: cobra.ArbitraryArgs,
@@ -213,7 +230,7 @@ check remains informational.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringArrayVar(&includes, "include", nil, "pack source or pack name for rig agents (repeatable; writes canonical rig imports)")
+	cmd.Flags().StringArrayVar(&includes, "include", nil, "pack to import into the rig: a source, a pack name, or <binding>=<source> (repeatable)")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "rig name (default: directory basename, or git URL basename for --git-url)")
 	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix (default: derived from name)")
 	cmd.Flags().StringVar(&defaultBranchFlag, "default-branch", "", "mainline branch (default: auto-detect from a remote HEAD — origin preferred — or the current branch)")
@@ -334,8 +351,9 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		WriteRoutes: func(cp string, c *config.City) error {
 			return writeAllRigRoutes(collectRigRoutes(cp, c))
 		},
-		ProbeBranch:         func(p string) (string, string) { return git.New(p).ProbeDefaultBranchFrom() },
-		ResolveRegistryPack: cachedRegistryPackSource,
+		ResolveIncludeImports: resolveRigIncludeImports,
+		ProbeBranch:           func(p string) (string, string) { return git.New(p).ProbeDefaultBranchFrom() },
+		ResolveRegistryPack:   cachedRegistryPackSource,
 		NormalizeScopes: func(cp string, c *config.City) error {
 			return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
 		},
@@ -392,7 +410,7 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		},
 	}
 
-	r, _, err := rig.Provision(deps, rig.ProvisionRequest{
+	r, provisioned, err := rig.Provision(deps, rig.ProvisionRequest{
 		Name:               name,
 		Path:               rigPath,
 		Prefix:             prefixOverride,
@@ -404,7 +422,18 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
+		printCredentialHint(stderr, err)
 		return config.Rig{}, 1
+	}
+	if reloaded, loadErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); loadErr != nil {
+		fmt.Fprintf(stderr, "gc rig add: reload provider ownership after rig add: %v\n", loadErr) //nolint:errcheck // best-effort stderr
+		return config.Rig{}, 1
+	} else if ownershipErr := ensureFreshRigProviderOwnership(cityPath, reloaded); ownershipErr != nil {
+		fmt.Fprintf(stderr, "gc rig add: attach provider ownership after rig add: %v\n", ownershipErr) //nolint:errcheck // best-effort stderr
+		return config.Rig{}, 1
+	} else if !provisioned.Deferred {
+		// An adopted store may predate migration 0059's fix (beads#7037).
+		rigAddRepairBlockedFlags(cityPath, reloaded, r.Name, stderr)
 	}
 	return r, 0
 }
@@ -436,13 +465,24 @@ var (
 // regenerated or lost, and "gc import upgrade" treats it as unconstrained —
 // either path silently replaces the builtin the user asked for.
 func ensureBundledRigImportsInstalled(cityPath string, imports []config.BoundImport) ([]config.BoundImport, func() error, error) {
+	return composeRigImports(cityPath, imports, builtinpacks.IsSource)
+}
+
+// composeRigImports is the shared body of ensureBundledRigImportsInstalled
+// and resolveRigIncludeImports: it pins every version-less bundled import at
+// the canonical bundled version, resolves a lock for every import whose
+// source lockSource accepts (merged with the city's existing imports), and
+// returns a deferred commit that writes packs.lock and materializes the
+// locked imports. The commit is nil when no import is locked. The input slice
+// is not modified.
+func composeRigImports(cityPath string, imports []config.BoundImport, lockSource func(source string) bool) ([]config.BoundImport, func() error, error) {
 	pinned := append([]config.BoundImport(nil), imports...)
 	declared := make(map[string]config.Import)
 	for i := range pinned {
-		if !builtinpacks.IsSource(pinned[i].Import.Source) {
+		if !lockSource(pinned[i].Import.Source) {
 			continue
 		}
-		if strings.TrimSpace(pinned[i].Import.Version) == "" {
+		if builtinpacks.IsSource(pinned[i].Import.Source) && strings.TrimSpace(pinned[i].Import.Version) == "" {
 			pinned[i].Import.Version = bundledSourcePinnedVersion(pinned[i].Import.Source)
 		}
 		declared[pinned[i].Binding] = pinned[i].Import
@@ -1009,6 +1049,11 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "gc rig suspend: writing state: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	for _, r := range cfg.Rigs {
+		if r.Name == rigName {
+			retireSuspendedScopesWithoutController(cityPath, []string{resolveStoreScopeRoot(cityPath, r.Path)}, false, stderr)
+		}
+	}
 
 	fmt.Fprintf(stdout, "Suspended rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
 	return 0
@@ -1228,6 +1273,13 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 	cfg.Orders.Overrides = slices.DeleteFunc(cfg.Orders.Overrides,
 		func(o config.OrderOverride) bool { return o.Rig == rigName })
 
+	// Detach before changing city.toml. If its write fails, the configured rig
+	// still resolves through the durable path record and retrying removal can
+	// finish the config mutation without a dead ownership record.
+	if err := removeProviderScopeOwnershipRecord(cityPath, "rig:"+rigName); err != nil {
+		fmt.Fprintf(stderr, "gc rig remove: retiring provider scope ownership: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	// Write updated config.
 	if err := config.WriteCityAndRigSiteBindingsForEditRemovingRigs(fsys.OSFS{}, tomlPath, cfg, rigName); err != nil {
 		fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr

@@ -823,6 +823,11 @@ func TestIsSQLiteBusy(t *testing.T) {
 }
 
 func TestRetryOnBusy(t *testing.T) {
+	var slept []time.Duration
+	prevSleep := sqliteBusySleep
+	sqliteBusySleep = func(d time.Duration) { slept = append(slept, d) }
+	t.Cleanup(func() { sqliteBusySleep = prevSleep })
+
 	t.Run("succeeds_immediately", func(t *testing.T) {
 		calls := 0
 		err := retryOnBusy(func() error {
@@ -868,6 +873,29 @@ func TestRetryOnBusy(t *testing.T) {
 		if calls != 1+sqliteBusyRetryAttempts {
 			t.Fatalf("expected %d calls, got %d", 1+sqliteBusyRetryAttempts, calls)
 		}
+		if !errors.Is(err, ErrSQLiteBusyExhausted) || !errors.Is(err, busyErr) || err.Error() != busyErr.Error() {
+			t.Fatalf("exhausted busy error = %v, want ErrSQLiteBusyExhausted wrapping the driver's error with its message", err)
+		}
+	})
+
+	t.Run("backs_off_exponentially_with_bounded_jitter", func(t *testing.T) {
+		slept = nil
+		busyErr := errors.New("database is locked (517)")
+		_ = retryOnBusy(func() error { return busyErr })
+		if len(slept) != sqliteBusyRetryAttempts {
+			t.Fatalf("slept %d times, want %d", len(slept), sqliteBusyRetryAttempts)
+		}
+		var total time.Duration
+		for attempt, d := range slept {
+			ceiling := min(sqliteBusyRetryBaseDelay<<attempt, sqliteBusyRetryMaxDelay)
+			if d < ceiling/2 || d > ceiling {
+				t.Fatalf("retry %d slept %v, want within [%v, %v]", attempt, d, ceiling/2, ceiling)
+			}
+			total += d
+		}
+		if total > 5100*time.Millisecond {
+			t.Fatalf("total backoff %v exceeds the 5.1s budget", total)
+		}
 	})
 
 	t.Run("does_not_retry_non_busy_error", func(t *testing.T) {
@@ -881,6 +909,9 @@ func TestRetryOnBusy(t *testing.T) {
 		}
 		if calls != 1 {
 			t.Fatalf("expected 1 call, got %d", calls)
+		}
+		if errors.Is(err, ErrSQLiteBusyExhausted) {
+			t.Fatalf("non-busy error %v matched ErrSQLiteBusyExhausted", err)
 		}
 	})
 }

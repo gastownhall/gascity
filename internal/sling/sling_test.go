@@ -1054,6 +1054,26 @@ func TestCheckCrossRigSling(t *testing.T) {
 	})
 }
 
+// TestCheckCrossRigMessageStatesRefusalAndRemedy pins the exact wording of
+// the cross-rig refusal. The message must read as a refusal with a remedy,
+// not a bare noun phrase — see ga-pjqysm: the previous text ("cross-rig
+// routing — bead X (prefix Y) → agent Z (rig prefix W)") never said the
+// sling was refused, never said nothing was routed, and never mentioned
+// --force, so a blocked sling read as one more advisory line on stderr
+// instead of an explained failure.
+func TestCheckCrossRigMessageStatesRefusalAndRemedy(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "hello-world", Path: "/tmp/hw"}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "hello-world"}
+
+	got := CheckCrossRig("FE-123", a, cfg)
+	want := `gc sling: refusing cross-rig route: bead FE-123 (prefix "fe") does not belong to hello-world/polecat (rig prefix "hw"); nothing was routed. Re-file the bead in that rig, pick a city-scope target, or pass --force to override.`
+	if got != want {
+		t.Errorf("CheckCrossRig message =\n%q\nwant\n%q", got, want)
+	}
+}
+
 // --- DoSling integration tests (structured result) ---
 
 func TestDoSlingBeadToFixedAgent(t *testing.T) {
@@ -2345,6 +2365,57 @@ func TestDoSlingRefusesCrossStoreReassignBeforeClearingAssignee(t *testing.T) {
 	requireCrossStoreRouteError(t, err)
 	requireNoCrossStoreRouteMutation(t, deps.Store, bead.ID, "human@example.com")
 	requireOnlySeedBeads(t, deps.Store, 1)
+	if len(router.routed) != 0 {
+		t.Fatalf("router calls = %d, want 0", len(router.routed))
+	}
+}
+
+func TestDoSlingDryRunRefusesCrossStoreBeforeMutation(t *testing.T) {
+	opts, deps, router, bead := crossStoreSlingFixture(t, "")
+	opts.NoFormula = true
+	opts.DryRun = true
+
+	_, err := DoSling(opts, deps, deps.Store)
+
+	requireCrossStoreRouteError(t, err)
+	requireNoCrossStoreRouteMutation(t, deps.Store, bead.ID, "")
+	if len(router.routed) != 0 {
+		t.Fatalf("router calls = %d, want 0", len(router.routed))
+	}
+}
+
+func TestDoSlingBatchDryRunRefusesCrossStoreBeforeMutation(t *testing.T) {
+	deps, router, target := crossStoreSlingDeps(t)
+	store := deps.Store
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	children := []beads.Bead{}
+	for _, title := range []string{"one", "two"} {
+		child, createErr := store.Create(beads.Bead{Title: title, Type: "task", ParentID: convoy.ID, Status: "open"})
+		if createErr != nil {
+			t.Fatalf("create child %s: %v", title, createErr)
+		}
+		children = append(children, child)
+	}
+	opts := SlingOpts{
+		Target:        target,
+		BeadOrFormula: convoy.ID,
+		Force:         true,
+		DryRun:        true,
+		NoFormula:     true,
+	}
+
+	result, err := DoSlingBatch(opts, deps, store)
+
+	requireCrossStoreRouteError(t, err)
+	if result.Routed != 0 {
+		t.Fatalf("Routed = %d, want 0", result.Routed)
+	}
+	for _, child := range children {
+		requireNoCrossStoreRouteMutation(t, store, child.ID, "")
+	}
 	if len(router.routed) != 0 {
 		t.Fatalf("router calls = %d, want 0", len(router.routed))
 	}
@@ -5132,7 +5203,10 @@ func TestCheckBeadStateRoutedPoolSiblingPrefixIsCurrentlyOverMatched(t *testing.
 // target+"-" never matches it. The target+"-" anchor therefore only
 // fires for Dir-less pools. This is a lost fix, not a regression: the
 // pre-fix behavior for this shape is unchanged. Asserted so the gap is
-// visible until a session->pool ownership lookup replaces the prefix.
+// visible. Current claims are recorded under the session bead ID, which
+// assigneeIsOwnPoolSession resolves to the pool for rig-qualified pools too
+// (TestCheckBeadStateRoutedPoolClaimedBySessionBeadIDIsIdempotent); only this
+// legacy sanitized session_name spelling stays unmatched.
 func TestCheckBeadStateRoutedRigQualifiedPoolSessionIsNotMatched(t *testing.T) {
 	store := beads.NewMemStore()
 	a := config.Agent{
@@ -5160,5 +5234,113 @@ func TestCheckBeadStateRoutedRigQualifiedPoolSessionIsNotMatched(t *testing.T) {
 	}
 	if len(result.Warnings) == 0 {
 		t.Fatalf("expected the conflict warning for an unmatched pool-session claim, got none")
+	}
+}
+
+// createPoolSessionBead creates a session bead as the reconciler stamps it for
+// an unaliased pool worker (template = the pool's qualified name).
+func createPoolSessionBead(t *testing.T, store beads.Store, template, status string) beads.Bead {
+	t.Helper()
+	sb, err := store.Create(beads.Bead{
+		Title:    "pool session",
+		Type:     "session",
+		Status:   "open",
+		Labels:   []string{"gc:session"},
+		Metadata: map[string]string{"template": template, "pool_managed": "true"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session): %v", err)
+	}
+	if status == "closed" {
+		if err := store.Close(sb.ID); err != nil {
+			t.Fatalf("store.Close(session): %v", err)
+		}
+	}
+	return sb
+}
+
+// Since #6324 an unaliased pool worker claims under its session bead ID, which
+// carries no "<pool>-" prefix. A re-sling of a bead that such a worker already
+// claimed must still read as idempotent (the #4785 double-mint), for Dir-less
+// and rig-qualified pools alike; a claim by another pool's session, or by a
+// closed session, must still warn.
+func TestCheckBeadStateRoutedPoolClaimedBySessionBeadIDIsIdempotent(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		dir             string
+		sessionTemplate func(target string) string
+		sessionStatus   string
+		wantIdempotent  bool
+	}{
+		{name: "own pool session", sessionTemplate: func(target string) string { return target }, sessionStatus: "open", wantIdempotent: true},
+		{name: "own rig-qualified pool session", dir: "myrig", sessionTemplate: func(target string) string { return target }, sessionStatus: "open", wantIdempotent: true},
+		{name: "other pool session", sessionTemplate: func(string) string { return "novices" }, sessionStatus: "open", wantIdempotent: false},
+		{name: "closed own pool session", sessionTemplate: func(target string) string { return target }, sessionStatus: "closed", wantIdempotent: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			a := config.Agent{
+				Name:              "smiths",
+				Dir:               tc.dir,
+				MinActiveSessions: intPtr(1),
+				MaxActiveSessions: intPtr(4),
+			}
+			target := agentutil.RoutedToIdentity(&a)
+			sb := createPoolSessionBead(t, store, tc.sessionTemplate(target), tc.sessionStatus)
+			convoy, err := store.Create(beads.Bead{Title: "auto convoy", Type: "convoy", Status: "open"})
+			if err != nil {
+				t.Fatalf("store.Create(convoy): %v", err)
+			}
+			bead, err := store.Create(beads.Bead{
+				Title:    "pool work",
+				Type:     "task",
+				Status:   "in_progress",
+				Assignee: sb.ID,
+				Metadata: map[string]string{"gc.routed_to": target},
+			})
+			if err != nil {
+				t.Fatalf("store.Create(bead): %v", err)
+			}
+			if err := store.DepAdd(convoy.ID, bead.ID, "tracks"); err != nil {
+				t.Fatalf("store.DepAdd(tracks): %v", err)
+			}
+
+			result := CheckBeadState(store, bead.ID, a, SlingDeps{Store: store})
+
+			if result.Idempotent != tc.wantIdempotent {
+				t.Fatalf("Idempotent = %v, want %v (assignee %q, target %q); result %+v", result.Idempotent, tc.wantIdempotent, sb.ID, target, result)
+			}
+			if !tc.wantIdempotent && len(result.Warnings) == 0 {
+				t.Fatalf("expected a warning naming the conflicting assignee, got none")
+			}
+		})
+	}
+}
+
+// The undeliverable-hand-off warning shares the ownership predicate: a bead held
+// by one of the target pool's own sessions under its session bead ID is not
+// stranded, while one held by another pool's session is.
+func TestUndeliverableHandoffWarningRecognizesPoolSessionBeadID(t *testing.T) {
+	store := beads.NewMemStore()
+	a := config.Agent{Name: "smiths", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(4)}
+	target := agentutil.RoutedToIdentity(&a)
+	molErr := &MoleculeAttachedError{Label: "molecule", AttachmentID: "mol-1"}
+
+	own := createPoolSessionBead(t, store, target, "open")
+	held, err := store.Create(beads.Bead{Title: "held", Type: "task", Status: "in_progress", Assignee: own.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg, warn := undeliverableHandoffWarning(store, SlingDeps{Store: store}, held.ID, a, molErr); warn {
+		t.Fatalf("own pool session claim reported undeliverable: %s", msg)
+	}
+
+	other := createPoolSessionBead(t, store, "novices", "open")
+	foreign, err := store.Create(beads.Bead{Title: "foreign", Type: "task", Status: "in_progress", Assignee: other.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, warn := undeliverableHandoffWarning(store, SlingDeps{Store: store}, foreign.ID, a, molErr); !warn {
+		t.Fatalf("another pool's session claim was not reported undeliverable")
 	}
 }

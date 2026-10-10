@@ -171,8 +171,8 @@ func TestStopRuntimeBeforeSessionBeadMutationInfoMatchesRaw(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			b := wtickSessionBead("s-stop", tc.meta)
 			var rawErr, infoErr bytes.Buffer
-			raw := stopRuntimeBeforeSessionBeadMutation(nil, tc.sp, nil, b, "duplicate", &rawErr)
-			info := stopRuntimeBeforeSessionBeadMutationInfo(nil, tc.sp, nil, sessiontest.SeedBead(t, b), "duplicate", &infoErr)
+			raw := stopRuntimeBeforeSessionBeadMutation("", nil, tc.sp, nil, b, "duplicate", &rawErr)
+			info := stopRuntimeBeforeSessionBeadMutationInfo("", nil, tc.sp, nil, sessiontest.SeedBead(t, b), "duplicate", &infoErr)
 			if raw != info {
 				t.Fatalf("stop-runtime diverged: raw=%v info=%v", raw, info)
 			}

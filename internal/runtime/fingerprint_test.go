@@ -938,7 +938,7 @@ func TestIsLegacyOrMismatchedVersion(t *testing.T) {
 		{"empty stored (handled by separate gate, not legacy/mismatch)", "", false},
 		{"current version prefix", current, false},
 		{"v0 prefix (older mismatched version)", "v0:" + bareHex, true},
-		{"v6 prefix (future mismatched version)", "v6:" + bareHex, true},
+		{"v7 prefix (future mismatched version)", "v7:" + bareHex, true},
 		{"vX prefix (non-numeric, treated as legacy)", "vX:" + bareHex, true},
 		{"v01 prefix (different literal version, mismatch)", "v01:" + bareHex, true},
 		{"non-v prefix (e.g. xyz, treated as legacy)", "xyz:" + bareHex, true},

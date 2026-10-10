@@ -187,7 +187,7 @@ func conformanceReadyFederation(t *testing.T, e splitEnv) {
 		t.Fatalf("HQ bead %s classifies as infrastructure; this leg is about the WORK class specifically", hqWork.ID)
 	}
 
-	found, stores, refs, partial := collectOpenUnassignedRoutedWork(e.cityPath, e.cfg, e.sessionsStore(), e.rigStores, nil, os.Stderr)
+	found, stores, refs, partial := collectOpenUnassignedRoutedWork(e.cityPath, e.cfg, e.sessionsStore(), e.rigStores, nil, os.Stderr, nil, nil)
 	if partial {
 		t.Fatal("collectOpenUnassignedRoutedWork reported a partial scan; the demand read must be complete for this invariant to mean anything")
 	}
@@ -336,6 +336,8 @@ func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 		sessionInfosFromBeads([]beads.Bead{sess}),
 		got, stores, refs,
 		e.rigStores,
+		nil,
+		nil,
 	)
 	wantReleased := []string{dead.ID, hqDead.ID}
 	releasedIDs := make(map[string]bool, len(released))
@@ -1381,7 +1383,7 @@ func conformanceResidenceSweep(t *testing.T, e splitEnv) {
 		Title:    "worker-1",
 		Type:     session.BeadType,
 		Labels:   []string{session.LabelSession},
-		Metadata: map[string]string{"session_id": "sess-1"},
+		Metadata: map[string]string{"test_session_id": "sess-1"},
 	}); err != nil {
 		t.Fatalf("create session bead: %v", err)
 	}
@@ -1930,10 +1932,8 @@ func beadIDsOf(list []beads.Bead) []string {
 // executable FEDERATION CONTRACT written for this invariant: legs city → rigs
 // ascending → graph last, per-leg order whatever that leg's reader emits, dedupe
 // first-leg-wins, and — the load-bearing part — BOTH sides compared after
-// normalizing with beads.SortBeadsReadyOrder, because per-leg order is
-// deterministic but not canonical across leg kinds (a caching-wrapped work store
-// emits (priority, created_at, id); the canonical relocated binding emits
-// (created_at, id) with no priority term). So this runs the real API handler and
+// normalizing with beads.SortBeadsReadyOrder, because each leg is sorted but
+// their concatenation is not. So this runs the real API handler and
 // the real CLI reader over the SAME three stores and compares the two answers.
 //
 // The single-store row is not a formality: it is the byte-identity claim. There
@@ -2321,11 +2321,18 @@ func assertFederationServesWholeLeg(t *testing.T, surface, legName string, legID
 //
 // # What this asserts, and why on the argv predicates
 //
-// The two fates are decided before any store is touched, by two pure functions
-// of (config, argv): bdSQLRelocatedClassRefusal for `list` and
-// bdArgsNameClassOwnedBead for every other verb. So the coherence claim is
-// checkable exactly where it is decided, and the row runs on both topologies
-// without opening a binding. The end-to-end proofs through the real command —
+// Both fates are visible before any store is touched, from two pure functions
+// of (config, argv): bdSQLRelocatedClassRefusal DECIDES the `list` refusal, and
+// bdArgsAddressedClassIDs DETECTS that every other verb addresses a reserved
+// id. The second is a detection rather than a decision because a residence
+// probe, not the prefix, now decides whether the by-id door serves that id — a
+// clean binding miss falls through. So the equivalence this row asserts rests
+// on the fixture minting its root INTO the graph store (mintDurableGraphBead
+// below): addressing and diversion coincide only for a binding-resident root,
+// and a fixture whose root was not resident would make the row vacuous rather
+// than red. The coherence claim stays checkable from the argv predicates alone,
+// and the row runs on both topologies without opening a binding. The end-to-end
+// proofs through the real command —
 // real doBd, a bd stub that answers `[]` and exits 0 — are
 // TestGcBdProjectionsAgreeOnAClassTheyCannotSee for the refusing verbs and
 // TestGcBdDepTreeSplitsOnOwnershipNotOnServability for the answering one.
@@ -2407,11 +2414,11 @@ func conformanceProjectionCoherence(t *testing.T, e splitEnv) {
 
 	msg, listRefused := bdSQLRelocatedClassRefusal(e.cfg, listArgs)
 	_, readyRefused := bdSQLRelocatedClassRefusal(e.cfg, readyArgs)
-	_, depTreeRouted := bdArgsNameClassOwnedBead(depTreeArgs)
+	depTreeAddressed := len(bdArgsAddressedClassIDs(depTreeArgs)) > 0
 
-	if listRefused != depTreeRouted {
-		t.Fatalf("`gc bd list --metadata-field %s` refused = %v but `gc bd dep tree %s` was diverted from the work ledger = %v on the same molecule; two projections over the same data must not disagree about whether that ledger can answer for the class",
-			selector, listRefused, root.ID, depTreeRouted)
+	if listRefused != depTreeAddressed {
+		t.Fatalf("`gc bd list --metadata-field %s` refused = %v but `gc bd dep tree %s` addresses a reserved id = %v on the same molecule; two projections over the same data must not disagree about whether that ledger can answer for the class",
+			selector, listRefused, root.ID, depTreeAddressed)
 	}
 	if readyRefused != listRefused {
 		t.Fatalf("`gc bd ready --metadata-field %s` refused = %v but `gc bd list` with the same selector refused = %v; the two verbs take the same predicate and answer no-match the same way, so guarding one moves the silent empty rather than removing it",
@@ -2777,7 +2784,7 @@ func conformanceAssignedTierClaimsTheGraphStep(t *testing.T, e splitEnv, assigne
 	ops := classRoutedHookClaimOps(hookClaimOps{
 		Claim:             splitEnvStoreClaim(e.work),
 		EmitClaimRejected: func(string, string, string) {},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		StampWorkMeta: func(context.Context, string, []string, string, string, map[string]string) error {
 			return nil
 		},
@@ -2858,7 +2865,7 @@ func conformanceUnresolvableCandidateStillDoesNotStrandWork(t *testing.T, e spli
 	ops := classRoutedHookClaimOps(hookClaimOps{
 		Claim:             splitEnvStoreClaim(e.work),
 		EmitClaimRejected: func(string, string, string) {},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		StampWorkMeta: func(context.Context, string, []string, string, string, map[string]string) error {
 			return nil
 		},

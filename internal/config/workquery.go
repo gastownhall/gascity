@@ -232,7 +232,9 @@ func bdReadyPoolDemandShell(limitFlag string, topo QueryTopology) string {
 // It is scoped to workflow roots so gc.run_target remains an authoring hint
 // everywhere else. Callers must pass its output through
 // poolDemandMigrationFilterJQ so a stale divergent gc.run_target cannot remain
-// visible once a root carries gc.routed_to. This retirement-window fallback
+// visible once a root carries gc.routed_to, nor resurrect a root already
+// expanded into real child steps (gc.workflow_expanded, #5900). This
+// retirement-window fallback
 // requires jq in the default worker/reconciler environment; remove it with the
 // Go-side legacy candidates after the backfill completion tracked by ga-dhf44.
 func bdReadyPoolDemandMigrationShell(limitFlag string, topo QueryTopology) string {
@@ -240,7 +242,7 @@ func bdReadyPoolDemandMigrationShell(limitFlag string, topo QueryTopology) strin
 }
 
 func poolDemandMigrationFilterJQ(limit int) string {
-	filter := `[.[] | select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "")]`
+	filter := `[.[] | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.WorkflowExpandedMetadataKey) + ` != "true"))]`
 	if limit > 0 {
 		filter += ` | .[:` + strconv.Itoa(limit) + `]`
 	}
@@ -253,6 +255,35 @@ func bdQueryEphemeralStatusShell(status string) string {
 
 func bdQueryEphemeralStatusQuietShell(status string) string {
 	return bdQueryEphemeralStatusShell(status) + ` 2>/dev/null`
+}
+
+// ephemeralStatusSnapshotShell emits a memoized read of one ephemeral status
+// tier into shellVar, for the probes that filter it per identity.
+//
+// The scan itself is `bd query --limit=0` — unlimited, so a full-store
+// traversal — and it does not reference the identity the caller filters by:
+// the jq filters below select on `$id` AFTER the whole array is fetched. Both
+// probes are emitted INSIDE the `for id in ...` identity loops, so the same
+// identity-independent traversal ran once per identity, three times in the
+// standard tiers and up to six in the legacy control-dispatcher tiers, for a
+// result that cannot differ between them. On a store grown past a few seconds
+// per scan that is most of `gc hook`'s work-query budget (#5712).
+//
+// Reading it once and filtering the snapshot per identity is what the jq
+// filters were already written against. The read stays LAZY rather than being
+// hoisted to a prelude, which keeps two existing properties exactly: a tier
+// that serves a candidate and exits before reaching the probe still never
+// scans, and a query run with no identity set at all — the reconciler's
+// demand-detection form — still never enters the loop body, so it still never
+// scans.
+//
+// The trade is that identities 2 and 3 read the snapshot taken for identity 1
+// instead of a fresh one. That is the same trade ephemeralAssignedReadyProbeScript
+// already makes internally between its fast and slow filters, and a work query
+// is a point-in-time probe the caller re-runs regardless.
+func ephemeralStatusSnapshotShell(shellVar, status string) string {
+	return `[ -n "${` + shellVar + `_set:-}" ] || { ` + shellVar + `=$(` +
+		bdQueryEphemeralStatusQuietShell(status) + `); ` + shellVar + `_set=1; }; `
 }
 
 // ephemeralReadyBaseSelectorJQ composes the selector clauses shared by every
@@ -308,7 +339,7 @@ func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) s
 	}
 	filter := legacyEphemeralReadyFilterJQ(
 		`select((.assignee // "") == "")`+
-			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`")))`,
+			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`") and (`+jqMeta(beadmeta.WorkflowExpandedMetadataKey)+` != "true")))`,
 		limit,
 		true,
 	)
@@ -360,12 +391,22 @@ func preferExecutablePoolDemandScript() string {
 
 func routedReadyTierCommand(topo QueryTopology) string {
 	// The shared predicate stays order-free so the count-form does no wasted
-	// sorting; the worker first-row path asks the reader for the oldest
-	// candidates. The tier is widened past a single row (limit=20, not limit=1)
-	// so a self-blocked head (is_blocked / status==blocked) has Ready routed work
-	// behind it to fall through to instead of idle-exiting; the hook layer
-	// (filterUnreadyHookCandidates) strips the blocked head from the result.
-	return bdReadyPoolDemandShell("--sort oldest --limit=20", topo) + readyReaderStderrSink(topo.FederatedReady)
+	// sorting; the worker first-row path rides the reader's canonical
+	// (priority, created_at, id) default order — both readers default to it
+	// (bd ready's default --sort priority; the federated reader's merged
+	// beads.SortBeadsReadyOrder). An explicit --sort oldest here makes the
+	// claim window priority-blind: a routed P0 behind more than --limit older
+	// lower-priority rows is never served at all, so pool workers
+	// deterministically starve the highest-priority routed work (measured on a
+	// live 14-seat city, 2026-08-25: 13 P0 rows parked behind 34 older wave
+	// rows — the bounded window contained zero P0s until the older rows
+	// drained). FIFO fairness survives within a priority band via the
+	// created_at term. The tier stays widened past a single row (limit=20, not
+	// limit=1) so a self-blocked head (is_blocked / status==blocked) has Ready
+	// routed work behind it to fall through to instead of idle-exiting; the
+	// hook layer (filterUnreadyHookCandidates) strips the blocked head from
+	// the result.
+	return bdReadyPoolDemandShell("--limit=20", topo) + readyReaderStderrSink(topo.FederatedReady)
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
@@ -742,7 +783,8 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 	// through to bd show — skip straight to it. checkHold=false: the filter
 	// above already excludes held candidates before the `.[:1]` truncation, so
 	// the post-truncation nheld check here would always read zero.
-	return `r=$(` + bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	return ephemeralStatusSnapshotShell("in_progress_ephemeral", "in_progress") +
+		`r=$(printf "%s" "$in_progress_ephemeral" | ` +
 		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		inProgressBlockedByEnrichmentScript(false, false) +
@@ -752,8 +794,7 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string, topo QueryTopology) string {
 	_ = topo
 	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `]`
-	query := bdQueryEphemeralStatusQuietShell("in_progress")
-	return `gc_open_ephemeral_in_progress=$(` + query + `); ` +
+	return ephemeralStatusSnapshotShell("gc_open_ephemeral_in_progress", "in_progress") +
 		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:1]`) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false, false) +
@@ -787,7 +828,7 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 	}
 	fastFilter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
 	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(`select((.assignee // "") == $id)`, 1, false)
-	return `open_ephemeral=$(` + bdQueryEphemeralStatusQuietShell("open") + `); ` +
+	return ephemeralStatusSnapshotShell("open_ephemeral", "open") +
 		`r=$(printf "%s" "$open_ephemeral" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(fastFilter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`r=$(printf "%s" "$open_ephemeral" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(slowFilter) + ` 2>/dev/null); ` +
@@ -800,17 +841,49 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 		`fi; `
 }
 
+// namedSelfTargetAdmit is the origin-gate condition that lets a non-ephemeral
+// session continue to the routed (pool-demand) tier instead of short-circuiting.
+// It is true only when the session carries a claim alias (GC_ALIAS) and the probe
+// target ($1) is exactly that alias.
+//
+// The identities line up by construction: poolDemandTarget() (baked in as $1),
+// RoutedToIdentity() (the claim-match primary route target the hook checks), and
+// GC_ALIAS all resolve to the same raw QualifiedName() for a plain named session
+// (cfg.NamedSessions[i].QualifiedName() flows into GC_ALIAS alongside
+// GC_SESSION_ORIGIN=named). So admitting on this condition surfaces exactly the
+// work the session itself can claim — routed_to=<self>, assignee="" — and nothing
+// routed elsewhere. A named+pool hybrid probes its PoolName, which is != GC_ALIAS,
+// so it stays gated and cannot over-claim its pool's routed work; an empty alias
+// fails closed.
+//
+// Beyond the ephemeral|"" fall-through arm the condition deliberately ignores the
+// origin value: admission is keyed on claim identity, not on origin. Any
+// non-ephemeral session whose GC_ALIAS equals its probe target is admitted,
+// including a manual session an operator deliberately aliased as the queue
+// identity (`gc session new <agent> --alias <that identity>` forces
+// origin=manual). That is the same identity coincidence proved above, so the
+// admitted work stays exactly the work the claim path already accepts. It is NOT
+// a general widening to manual sessions: an unaliased one carries GC_ALIAS="" and
+// fails closed on the first test.
+const namedSelfTargetAdmit = `[ -n "$GC_ALIAS" ] && [ "$1" = "$GC_ALIAS" ]`
+
+// poolDemandOriginGateScript emits the plain origin gate. It is valid only at
+// `sh -c` script top level, where $1 is the probe target baked in after `--`.
 func poolDemandOriginGateScript() string {
 	return `case "$GC_SESSION_ORIGIN" in ` +
 		`ephemeral|"") ;; ` +
-		`*) exit 0 ;; ` +
+		`*) ` + namedSelfTargetAdmit + ` || exit 0 ;; ` +
 		`esac; `
 }
 
+// poolDemandOriginGateScriptWithGraphAnchorFallback emits the origin gate used by
+// the combined work query, which flushes a remembered assigned workflow anchor
+// before short-circuiting. Like the plain gate it is valid only at `sh -c` script
+// top level, where $1 is the probe target baked in after `--`.
 func poolDemandOriginGateScriptWithGraphAnchorFallback() string {
 	return `case "$GC_SESSION_ORIGIN" in ` +
 		`ephemeral|"") ;; ` +
-		`*) [ -z "$gc_assigned_workflow_anchor_json" ] || printf "%s" "$gc_assigned_workflow_anchor_json"; exit 0 ;; ` +
+		`*) ` + namedSelfTargetAdmit + ` || { [ -z "$gc_assigned_workflow_anchor_json" ] || printf "%s" "$gc_assigned_workflow_anchor_json"; exit 0; } ;; ` +
 		`esac; `
 }
 

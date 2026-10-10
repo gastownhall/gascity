@@ -408,9 +408,9 @@ func splitNonEmptyLines(raw []byte) [][]byte {
 }
 
 func truncate(b []byte) string {
-	const max = 300
-	if len(b) > max {
-		return string(b[:max]) + "..."
+	const maxLen = 300
+	if len(b) > maxLen {
+		return string(b[:maxLen]) + "..."
 	}
 	return string(b)
 }

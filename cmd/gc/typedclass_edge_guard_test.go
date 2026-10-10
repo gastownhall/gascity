@@ -307,11 +307,11 @@ func formatCodecCensusLiteral(needles []codecNeedle, got map[string]map[string]i
 }
 
 func TestTypedClassCodecCensusRatchet(t *testing.T) {
-	_, currentFile, _, ok := runtime.Caller(0)
+	_, _, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	repoRoot := filepath.Dir(filepath.Dir(filepath.Dir(currentFile))) // cmd/gc -> cmd -> repo root
+	repoRoot := gcRepoRootFromEnv() // cmd/gc -> cmd -> repo root
 
 	// Typo protection: every census key must be a policed needle.
 	needleSet := map[string]bool{}

@@ -2,6 +2,7 @@ package api
 
 import (
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -23,6 +24,8 @@ func (s *Server) workerFactory(store beads.Store) (*worker.Factory, error) {
 		ResolveTransport:      resolveTransport,
 		ResolveSessionRuntime: s.resolveWorkerSessionRuntimeWithMetadata,
 		Pricing:               cfg.PricingRegistry(),
+		ActivityMemo:          s.activityMemo,
+		RuntimeLeaseTTL:       session.RuntimeLeaseTTLFor(cfg),
 	})
 }
 

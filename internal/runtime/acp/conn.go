@@ -25,6 +25,7 @@ type sessionConn struct {
 	readDone chan struct{}      // closed after buffered stdout is dispatched
 	cancel   context.CancelFunc // cancels in-progress handshake (sentinel only, set by Start)
 	listener net.Listener       // control socket for cross-process ops
+	token    string             // the GC_INSTANCE_TOKEN Start seeded (empty for a sentinel)
 
 	mu             sync.Mutex
 	sessionID      string

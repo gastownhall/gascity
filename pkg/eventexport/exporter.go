@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -66,10 +69,12 @@ type Config struct {
 type Exporter struct {
 	cfg Config
 
-	mu      sync.Mutex
-	pending map[string][]Envelope // city -> unsent envelopes
-	high    map[string]uint64     // city -> highest processed seq (sent or dropped)
-	cursor  map[string]uint64     // city -> last durably-acked seq
+	mu        sync.Mutex
+	pending   map[string][]Envelope    // city -> unsent envelopes
+	high      map[string]uint64        // city -> highest processed seq (sent or dropped)
+	cursor    map[string]uint64        // city -> last durably-acked seq
+	retryAt   map[string]time.Time     // city -> earliest next POST after a failed flush
+	retryHold map[string]time.Duration // city -> current backoff step, doubled per consecutive failure
 }
 
 // New builds an Exporter, applying defaults.
@@ -90,10 +95,12 @@ func New(cfg Config) *Exporter {
 		cfg.Logf = func(string, ...any) {}
 	}
 	return &Exporter{
-		cfg:     cfg,
-		pending: map[string][]Envelope{},
-		high:    map[string]uint64{},
-		cursor:  map[string]uint64{},
+		cfg:       cfg,
+		pending:   map[string][]Envelope{},
+		high:      map[string]uint64{},
+		cursor:    map[string]uint64{},
+		retryAt:   map[string]time.Time{},
+		retryHold: map[string]time.Duration{},
 	}
 }
 
@@ -241,31 +248,93 @@ func (e *Exporter) flushAll(ctx context.Context) {
 }
 
 // flushCity ships one city's pending batch (if any) and, on success, advances
-// the cursor to the high-water of processed seqs — past dropped events too, so
-// filtered churn is never re-fetched.
+// the cursor: to the high-water of processed seqs when the whole buffer ships —
+// past dropped events too, so filtered churn is never re-fetched — or only to
+// the last shipped seq when the batch is capped at BatchMax, since the events
+// above it have not been delivered yet.
 func (e *Exporter) flushCity(ctx context.Context, city string) {
 	e.mu.Lock()
 	batch := e.pending[city]
 	high := e.high[city]
 	cur := e.cursor[city]
+	retryAt := e.retryAt[city]
 	e.mu.Unlock()
 
 	if high <= cur {
 		return // nothing new processed
 	}
+	if !retryAt.IsZero() && time.Now().Before(retryAt) {
+		return // sink asked us to wait; hold the cursor without re-POSTing
+	}
+	// Ship at most BatchMax per POST. BatchMax is a flush trigger on the ingest
+	// path, so a sink outage can leave far more than that pending; posting the
+	// whole buffer would turn every retry into one oversized burst. A capped
+	// batch advances the cursor only as far as the prefix we actually shipped —
+	// high covers events filtered out during projection, which is only sound
+	// once the buffer is fully drained.
+	adv := high
+	if len(batch) > e.cfg.BatchMax {
+		batch = batch[:e.cfg.BatchMax]
+		adv = batch[len(batch)-1].Seq
+	}
 	if len(batch) > 0 {
 		if err := e.post(ctx, city, batch); err != nil {
-			e.cfg.Logf("eventexport: post failed for %s (cursor held at %d): %v", city, cur, err)
-			return // hold cursor; retry next tick
+			// Caller-side cancellation is not sink pushback. Holding off on it
+			// would suppress Run's best-effort final drain, which runs on a fresh
+			// context but still passes through the hold gate above. Discriminate
+			// on the caller's context rather than the error chain: an http.Client
+			// timeout against a hung sink also reports context.DeadlineExceeded,
+			// and that is sink pushback — the case most in need of the hold.
+			if ctx.Err() != nil {
+				e.cfg.Logf("eventexport: post failed for %s (cursor held at %d): %v", city, cur, err)
+				return // hold cursor; the next flush retries immediately
+			}
+			// Held flushes return silently, so this one line is the only notice an
+			// operator gets for the whole backoff window — say when it ends, or a
+			// designed hold is indistinguishable from a stalled exporter.
+			hold := e.holdOff(city, err)
+			e.cfg.Logf("eventexport: post failed for %s (cursor held at %d): %v; next attempt in %s", city, cur, err, hold)
+			return // hold cursor; retry once the backoff deadline passes
 		}
 	}
 	e.mu.Lock()
 	// Only clear the envelopes we shipped; anything appended since stays.
 	e.pending[city] = e.pending[city][len(batch):]
-	if e.cursor[city] < high {
-		e.cursor[city] = high
+	if e.cursor[city] < adv {
+		e.cursor[city] = adv
 	}
+	delete(e.retryAt, city)
+	delete(e.retryHold, city)
 	e.mu.Unlock()
+}
+
+// maxHoldOff caps how long a failed flush may park a city's export, so a
+// malformed or hostile Retry-After cannot disable telemetry indefinitely.
+const maxHoldOff = 5 * time.Minute
+
+// holdOff sets the earliest next POST for city after a failed flush: the sink's
+// Retry-After when it sent a usable one, else a backoff that doubles per
+// consecutive failure starting at BatchInterval. Without this a rate-limited
+// sink is self-reinforcing — retrying at the ingest-path flush rate keeps the
+// caller over the limit, so the window never clears. It returns the hold it
+// chose so the caller can report the backoff window it just entered.
+func (e *Exporter) holdOff(city string, err error) time.Duration {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	hold := e.retryHold[city] * 2
+	if hold <= 0 {
+		hold = e.cfg.BatchInterval
+	}
+	var se *statusError
+	if errors.As(err, &se) && se.retryAfter > 0 {
+		hold = se.retryAfter
+	}
+	if hold > maxHoldOff {
+		hold = maxHoldOff
+	}
+	e.retryHold[city] = hold
+	e.retryAt[city] = time.Now().Add(hold)
+	return hold
 }
 
 func (e *Exporter) post(ctx context.Context, city string, batch []Envelope) error {
@@ -294,7 +363,53 @@ func (e *Exporter) post(ctx context.Context, city string, batch []Envelope) erro
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("endpoint returned %d", resp.StatusCode)
+		return &statusError{code: resp.StatusCode, retryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}
 	}
 	return nil
+}
+
+// statusError is a non-2xx response from the ingest endpoint, carrying the
+// sink's Retry-After (when it sent a usable one) so a rate-limited flush waits
+// as long as the sink asked rather than guessing.
+type statusError struct {
+	code       int
+	retryAfter time.Duration
+}
+
+func (e *statusError) Error() string { return fmt.Sprintf("endpoint returned %d", e.code) }
+
+// parseRetryAfter reads either RFC 9110 Retry-After form (delay-seconds or an
+// HTTP-date), returning 0 when the header is absent, unparsable, or already past.
+//
+// This is the third Retry-After parser in the repo, alongside cmd/gc's
+// parseRetryAfter (remote stream reconnect) and internal/api's
+// parseRigRetryAfter (rig-create wait client), which are maintained as
+// documented twins. Both of those deliberately ignore the HTTP-date form as
+// over-precise for a client backoff; honoring it here is intentional, because an
+// export sink refusing a batch is exactly the case where it can name an absolute
+// time it will be ready. pkg/ cannot import cmd/gc and each caller carries its
+// own bound, so unification waits for a fourth consumer.
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		// Clamp before the conversion, not after: seconds beyond maxHoldOff are
+		// capped anyway, and multiplying an unbounded value would wrap int64 into
+		// a positive sub-second hold that slips past holdOff's own bound.
+		if secs > int(maxHoldOff/time.Second) {
+			return maxHoldOff
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
 }

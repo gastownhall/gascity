@@ -154,3 +154,82 @@ func TestWatch_PassesThroughOptInLabels(t *testing.T) {
 		t.Fatalf("expected fail because the requested Mac run never appeared, got %+v", eval)
 	}
 }
+
+func TestWatch_RateLimitWaitsForResetThenRetries(t *testing.T) {
+	base := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	clock := &fakeClock{now: base}
+	sleeper := &fakeSleeper{clock: clock}
+	reset := base.Add(4 * time.Minute)
+	fetcher := &scriptedFetcher{responses: []fetchResponse{
+		{err: &RateLimitError{Reset: reset, Err: errors.New("API rate limit exceeded for installation")}},
+		{runs: passingRequiredRuns()},
+	}}
+
+	eval := Watch(context.Background(), fetcher, clock, sleeper, PollOptions{
+		HeadSHA:  testHeadSHA,
+		Deadline: ObservationDeadline,
+		Interval: 30 * time.Second,
+	})
+
+	if !eval.Pass {
+		t.Fatalf("expected a pass once the rate limit reset, got %+v", eval)
+	}
+	if len(fetcher.calls) != 2 {
+		t.Fatalf("expected one retry after the rate limit, got %d fetches", len(fetcher.calls))
+	}
+	if len(sleeper.calls) != 1 || sleeper.calls[0] != 4*time.Minute {
+		t.Fatalf("expected one sleep until the reset (4m), got %v", sleeper.calls)
+	}
+}
+
+func TestWatch_RateLimitShorterThanIntervalWaitsOneInterval(t *testing.T) {
+	base := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	clock := &fakeClock{now: base}
+	sleeper := &fakeSleeper{clock: clock}
+	fetcher := &scriptedFetcher{responses: []fetchResponse{
+		{err: &RateLimitError{Reset: base.Add(-time.Second), Err: errors.New("rate limited")}},
+		{runs: passingRequiredRuns()},
+	}}
+
+	Watch(context.Background(), fetcher, clock, sleeper, PollOptions{
+		HeadSHA:  testHeadSHA,
+		Deadline: ObservationDeadline,
+		Interval: 30 * time.Second,
+	})
+
+	if len(sleeper.calls) != 1 || sleeper.calls[0] != 30*time.Second {
+		t.Fatalf("expected a stale reset to wait one interval, got %v", sleeper.calls)
+	}
+}
+
+func TestWatch_RateLimitResettingPastDeadlineFailsClosed(t *testing.T) {
+	base := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	clock := &fakeClock{now: base}
+	sleeper := &fakeSleeper{clock: clock}
+	fetcher := &scriptedFetcher{responses: []fetchResponse{
+		{err: &RateLimitError{Reset: base.Add(ObservationDeadline + time.Minute), Err: errors.New("API rate limit exceeded for installation")}},
+	}}
+
+	eval := Watch(context.Background(), fetcher, clock, sleeper, PollOptions{
+		HeadSHA:  testHeadSHA,
+		Deadline: ObservationDeadline,
+		Interval: 30 * time.Second,
+	})
+
+	if eval.Pass || !eval.Terminal {
+		t.Fatalf("expected fail-closed when the reset is past the deadline, got %+v", eval)
+	}
+	if len(fetcher.calls) != 1 || len(sleeper.calls) != 0 {
+		t.Fatalf("expected no wait past the deadline, got %d fetches, sleeps %v", len(fetcher.calls), sleeper.calls)
+	}
+}
+
+// passingRequiredRuns is the minimal evidence set that evaluates to a pass:
+// Check and CI / required both concluded success on the head commit.
+func passingRequiredRuns() []CheckRun {
+	started := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	return []CheckRun{
+		{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: started},
+		{Name: CIRequiredName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: started},
+	}
+}

@@ -38,7 +38,7 @@ func TestDemandFingerprintIssuesZeroLedgerReadsOnASplitCity(t *testing.T) {
 	routedStepIn(t, binding, "routed graph step")
 	routedStepIn(t, ledger, "routed work-ledger bead")
 
-	cr.readyDemandSnapshotFingerprint()
+	cr.readyDemandSnapshotFingerprint(nil)
 
 	if ledger.readyCalls != 0 {
 		t.Fatalf("the demand cache check issued %d work-ledger Ready read(s), want 0 — at maintainer-city's ~5.4s RTT that is %v spent deciding whether to reuse a cache",
@@ -91,7 +91,7 @@ func TestCollectOpenUnassignedRoutedWorkReadsTheBindingAloneOnASplitCity(t *test
 	seedRoutedOpenBead(t, binding, "gcg-routed-1")
 	seedRoutedOpenBead(t, ledger, "ga-routed-1")
 
-	got, _, refs, partial := collectOpenUnassignedRoutedWork(cityPath, cfg, binding, nil, nil, io.Discard)
+	got, _, refs, partial := collectOpenUnassignedRoutedWork(cityPath, cfg, binding, nil, nil, io.Discard, nil, nil)
 	if partial {
 		t.Fatal("routed demand reported partial over healthy legs")
 	}
@@ -120,7 +120,7 @@ func TestCollectOpenUnassignedRoutedWorkReadsTheOnlyStoreOnASingleStoreCity(t *t
 	store := &routedDemandCountingStore{Store: backing}
 	seedRoutedOpenBead(t, store, "ga-routed-1")
 
-	got, _, _, partial := collectOpenUnassignedRoutedWork("", residencyTestConfig(), store, nil, nil, io.Discard)
+	got, _, _, partial := collectOpenUnassignedRoutedWork("", residencyTestConfig(), store, nil, nil, io.Discard, nil, nil)
 	if partial {
 		t.Fatal("routed demand reported partial over a healthy single store")
 	}

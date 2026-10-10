@@ -145,3 +145,21 @@ func TestInspectConditionalWritesUnstamped(t *testing.T) {
 		t.Errorf("nil store StoreKind = %q, want <nil>", insp.StoreKind)
 	}
 }
+
+// TestInspectConditionalWritesReportsAModeSourcedWrappersSource pins the status
+// view of the one-shot CLI's emitting class store: inspecting the wrapper
+// reports exactly what inspecting its stamped engine does, so a wrapper the
+// write path fences through never reads as unstamped.
+func TestInspectConditionalWritesReportsAModeSourcedWrappersSource(t *testing.T) {
+	for _, revision := range []bool{true, false} {
+		engine := openSQLiteLayoutForTest(t, revision, false)
+		if err := StampOpenedStore(engine, "SQLiteStore", gate.Auto, nil, nil); err != nil {
+			t.Fatalf("StampOpenedStore: %v", err)
+		}
+		_, _, _ = ResolveConditionalWriter(engine) // let the probe memo settle
+		want := InspectConditionalWrites(engine)
+		if got := InspectConditionalWrites(sourcedOver(engine)); got != want {
+			t.Errorf("revision=%v: inspecting the wrapper = %+v, want the engine's %+v", revision, got, want)
+		}
+	}
+}

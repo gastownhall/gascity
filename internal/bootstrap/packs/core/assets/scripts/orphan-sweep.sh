@@ -39,7 +39,7 @@ trap 'rm -f "$TMP" "$SESSION_TMP"' EXIT
 RIG_NAMES=""
 RIG_LIST=$(gc rig list --json 2>/dev/null) || RIG_LIST=""
 if [ -n "$RIG_LIST" ]; then
-    RIG_NAMES=$(echo "$RIG_LIST" | jq -r '.rigs[] | select(.hq == false) | .name' 2>/dev/null) || RIG_NAMES=""
+    RIG_NAMES=$(echo "$RIG_LIST" | jq -r '.rigs[] | select(.hq == false and (.suspended // false) == false) | .name' 2>/dev/null) || RIG_NAMES=""
 fi
 
 append_session_list() {
@@ -161,32 +161,33 @@ LIVE_SESSION_IDS=$(jq -r -s '
       if has($snake) and .[$snake] != null then .[$snake]
       elif has($pascal) and .[$pascal] != null then .[$pascal]
       else $default end;
-    .[] | .sessions[]?
-    | select(
-        (pick("closed"; "Closed"; false) == false)
-        and ((pick("state"; "State"; "") | ascii_downcase) != "closed")
-      )
-    | [
-        pick("id"; "ID"; null),
-        pick("session_name"; "SessionName"; null),
-        pick("alias"; "Alias"; null),
-        pick("agent_name"; "AgentName"; null),
-        pick("template"; "Template"; null),
-        pick("name"; "Name"; null)
-      ]
-    | .[]
-    | select(. != null and . != "")
+    [ .[] | .sessions[]?
+      | select(
+          (pick("closed"; "Closed"; false) == false)
+          and ((pick("state"; "State"; "") | ascii_downcase) != "closed")
+        )
+      | [
+          pick("id"; "ID"; null),
+          pick("session_name"; "SessionName"; null),
+          pick("alias"; "Alias"; null),
+          pick("agent_name"; "AgentName"; null),
+          pick("template"; "Template"; null),
+          pick("name"; "Name"; null)
+        ]
+      | .[]
+      | select(. != null and . != "")
+    ] | unique | .[]
 ' "$SESSION_TMP" 2>/dev/null) || exit 0
 
 agent_exists() {
     local candidate="$1"
-    [ -n "$candidate" ] && printf '%s\n' "$AGENTS" | grep -Fxq -- "$candidate"
+    [ -n "$candidate" ] && grep -Fxq -- "$candidate" <<<"$AGENTS"
 }
 
 live_session_match() {
     local candidate="$1"
     [ -n "$candidate" ] && [ -n "$LIVE_SESSION_IDS" ] \
-        && printf '%s\n' "$LIVE_SESSION_IDS" | grep -Fxq -- "$candidate"
+        && grep -Fxq -- "$candidate" <<<"$LIVE_SESSION_IDS"
 }
 
 CURRENT_BEAD_JSON=""
@@ -229,6 +230,36 @@ session_bead_candidates() {
     printf '%s\n' "$assignee" | grep -Eo '[[:alnum:]]+-wisp-[[:alnum:]][[:alnum:]-]*$' || true
 }
 
+# A pool seat's runtime name comes from CONFIG, not from a session:
+# poolRuntimeSessionName is SanitizeQualifiedNameForSession("<agent>[-<slot>]")
+# plus the "-pool" suffix (cmd/gc/session_name_lookup.go). That sanitizer
+# encodes "/" as "--" (rig-scope) and "." as "__" (pack-qualified city-scope),
+# so reconstructing seat names from $AGENTS recognizes both encodings without
+# guessing from the separator alone — an ephemeral session name carries a
+# per-session token ("...-gc-<token>") and never reconstructs this way, so it
+# still resets when it goes missing.
+assignee_is_configured_pool_seat() {
+    local name="$1"
+    case "$name" in
+        *-pool) ;;
+        *) return 1 ;;
+    esac
+    [ -n "$AGENTS" ] || return 1
+
+    local seat="${name%-pool}"
+    local slotless="${seat%-[0-9]*}"
+    local cfg_agent sanitized
+    while IFS= read -r cfg_agent; do
+        [ -z "$cfg_agent" ] && continue
+        sanitized="${cfg_agent//\//--}"
+        sanitized="${sanitized//./__}"
+        if [ "$sanitized" = "$seat" ] || [ "$sanitized" = "$slotless" ]; then
+            return 0
+        fi
+    done <<<"$AGENTS"
+    return 1
+}
+
 session_probe_failure_is_unverifiable() {
     local session_id="$1"
     local assignee="$2"
@@ -240,6 +271,10 @@ session_probe_failure_is_unverifiable() {
     # double dash, so this shape means the probe could not be performed,
     # not that the candidate resolved and came back dead.
     [[ "$session_id" == *--* ]] && return 0
+    # Same reasoning for a city-scope pool seat, whose name encodes "." as
+    # "__" and so carries no double dash. Recognizing only the double-dash
+    # form released live city-scope seats mid-work (ga-dei7xx).
+    assignee_is_configured_pool_seat "$session_id" && return 0
     return 1
 }
 

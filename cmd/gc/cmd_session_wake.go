@@ -9,6 +9,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -49,7 +51,24 @@ type sessionWakeDeps struct {
 	now                       func() time.Time
 	withdrawQueuedWaitNudges  func(string, []string) error
 	cityUsesManagedReconciler func(string) bool
-	pokeController            func(string) error
+	pokeController            func(string, reconcilekey.Key) error
+	// rigStores opens the rig stores the will-not-start predicate reads for
+	// assigned work; nil reads the city store only.
+	rigStores func() map[string]beads.Store
+	// sp reads the sleep policy's capability for the predicate; nil never
+	// refuses on an idle latch.
+	sp runtime.Provider
+}
+
+// wakeVerdictProvider is the session provider the will-not-start predicate
+// reads the sleep policy's capability from; nil (no idle-latch refusal) when
+// it cannot be built.
+func wakeVerdictProvider() runtime.Provider {
+	sp, err := newSessionProvider()
+	if err != nil {
+		return nil
+	}
+	return sp
 }
 
 // cmdSessionWake is the CLI entry point for "gc session wake".
@@ -66,6 +85,7 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
 	return doSessionWake(args[0], stdout, stderr, asJSON, sessionWakeDeps{
+		sp:                        wakeVerdictProvider(),
 		store:                     store,
 		cfg:                       cfg,
 		cityPath:                  cityPath,
@@ -73,7 +93,10 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		now:                       time.Now,
 		withdrawQueuedWaitNudges:  withdrawQueuedWaitNudges,
 		cityUsesManagedReconciler: cityUsesManagedReconciler,
-		pokeController:            pokeController,
+		pokeController:            enqueueController,
+		rigStores: func() map[string]beads.Store {
+			return buildStandaloneRigStoresWithConfig(cfg, cityPath, io.Discard)
+		},
 	})
 }
 
@@ -103,7 +126,8 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 		return 1
 	}
 	nudgeIDs := res.NudgeIDs
-	hasRunnableTemplate := sessionWakeHasRunnableTemplateInfo(res.Info, deps.cfg)
+	agent := sessionWakeResolveAgentInfo(res.Info, deps.cfg)
+	hasRunnableTemplate := deps.cfg == nil || agent != nil
 	startupTimeout := time.Duration(0)
 	if deps.cfg != nil {
 		startupTimeout = deps.cfg.Session.StartupTimeoutDuration()
@@ -136,12 +160,31 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 		fmt.Fprintf(stderr, "gc session wake: session %s has been in state %q since %s without completing its create; the wake request was recorded but cannot complete now. If its runtime is gone, use `gc session close` to release the slot.\n", id, res.Info.MetadataState, since) //nolint:errcheck
 		rejectStuck = true
 	}
+	// Same "wake recorded but cannot complete" shape: the controller will not
+	// act on the wake. The one will-not-start predicate the API wake also uses
+	// says why, read on the row after the wake (and after the reset above).
+	if !rejectStuck {
+		rigStores := deps.rigStores
+		if rigStores == nil {
+			rigStores = func() map[string]beads.Store { return nil }
+		}
+		woken := res.Info
+		if info, err := sessFront.Get(id); err == nil {
+			woken = info
+		}
+		if why, _ := wakeWillNotStart(woken, wakeVerdictDeps{
+			cfg: deps.cfg, cityPath: deps.cityPath, sessFront: sessFront, sp: deps.sp, workStore: deps.store, rigStores: rigStores,
+		}, deps.now()); why != "" {
+			fmt.Fprintf(stderr, "gc session wake: wake recorded for session %s, but it will not start: %s\n", id, why) //nolint:errcheck
+			rejectStuck = true
+		}
+	}
 	if deps.cityResolved {
 		if err := deps.withdrawQueuedWaitNudges(deps.cityPath, nudgeIDs); err != nil {
 			fmt.Fprintf(stderr, "gc session wake: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck
 		}
 		if deps.cityUsesManagedReconciler(deps.cityPath) {
-			if err := deps.pokeController(deps.cityPath); err != nil {
+			if err := deps.pokeController(deps.cityPath, reconcilekey.Session(id)); err != nil {
 				fmt.Fprintf(stderr, "gc session wake: warning: poke failed: %v\n", err) //nolint:errcheck
 			}
 		}
@@ -170,11 +213,24 @@ func sessionWakeHasRunnableTemplateInfo(info session.Info, cfg *config.City) boo
 	if cfg == nil {
 		return true
 	}
+	return sessionWakeResolveAgentInfo(info, cfg) != nil
+}
+
+// sessionWakeResolveAgentInfo resolves the config.Agent that owns this
+// session's template, the same lookup sessionWakeHasRunnableTemplateInfo
+// uses to decide runnability. Returns nil when cfg is nil or no agent
+// matches -- callers that also need "is there a runnable template"
+// should treat a nil cfg as runnable themselves, since this helper
+// can't distinguish "no cfg" from "no match" on its own.
+func sessionWakeResolveAgentInfo(info session.Info, cfg *config.City) *config.Agent {
+	if cfg == nil {
+		return nil
+	}
 	template := normalizedSessionTemplateInfo(info, cfg)
 	if template == "" {
 		template = info.Template
 	}
-	return findAgentByTemplate(cfg, template) != nil
+	return findAgentByTemplate(cfg, template)
 }
 
 func sessionWakeRequestedCreateInfo(info session.Info) bool {

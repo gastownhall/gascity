@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	beadslib "github.com/steveyegge/beads"
 )
 
 // closeBlockedErr is the verbatim shape the fleet produced 296,270 times across
@@ -118,6 +119,11 @@ func TestClassifyControllerErrorTiers(t *testing.T) {
 		{name: "dolt invalid connection timeout", err: errors.New("failed to check for dependency cycle: invalid connection: i/o timeout"), want: TierAvailability},
 		{name: "mysql lock timeout", err: errors.New("Error 1205 (HY000): lock wait timeout exceeded; try restarting transaction"), want: TierAvailability},
 		{name: "mysql deadlock", err: errors.New("Error 1213 (40001): Deadlock found when trying to get lock; try restarting transaction"), want: TierAvailability},
+		// Every live Dolt 1213/40001 message carries both serialization needles
+		// (doltSerializationFailureErr); one row per needle keeps each
+		// load-bearing on its own if Dolt rewords the other half.
+		{name: "dolt serialization envelope only", err: errors.New("Error 1213 (40001): serialization failure: write conflict on branch main, try restarting transaction"), want: TierAvailability},
+		{name: "dolt conflict detail only", err: errors.New("committing: this transaction conflicts with a committed transaction from another client"), want: TierAvailability},
 		{name: "sqlite locked", err: errors.New("listing sqlite ready beads: database is locked (5) (SQLITE_BUSY)"), want: TierAvailability},
 		{name: "sqlite table locked", err: errors.New("listing sqlite ready beads: database table is locked"), want: TierAvailability},
 		{name: "control work query sigterm", err: errors.New(`querying control work for fixture/core.control-dispatcher: running work query "bd ready": exit status 143: Terminated`), want: TierAvailability},
@@ -249,6 +255,88 @@ func TestRecordSemanticControlRetryStampsTheDeadlineOnce(t *testing.T) {
 	// explains itself to `bd show`.
 	if got := after.Metadata[beadmeta.ControllerErrorMetadataKey]; got != cause.Error() {
 		t.Fatalf("%s = %q, want the refusal text", beadmeta.ControllerErrorMetadataKey, got)
+	}
+}
+
+// TestRecordPendingControlRetryKeepsItsOwnBudget pins the reason the pending
+// disposition does not reuse the gc.controller_* keys. Sharing one anchor would
+// hand a later Tier-B refusal a deadline that a long pending wait had already
+// burned through, quarantining on its FIRST refusal — settling the root and
+// stranding the domain parent, which is the exact outcome the pending
+// classification exists to prevent.
+func TestRecordPendingControlRetryKeepsItsOwnBudget(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	bead := newSemanticControlBead(t, store)
+	budget := 15 * time.Minute
+	start := time.Date(2026, 8, 11, 8, 0, 0, 0, time.UTC)
+	pendingCause := errors.New(`rig "ghostrig" not found in city config`)
+
+	first, err := RecordPendingControlRetry(store, bead.ID, pendingCause, start, budget)
+	if err != nil {
+		t.Fatalf("first RecordPendingControlRetry: %v", err)
+	}
+	if first.Expired || first.Repeat || first.Attempts != 1 || !first.FirstSeen.Equal(start) {
+		t.Fatalf("first pending state = %#v, want Attempts=1 anchored at %s with no expiry or repeat", first, start)
+	}
+
+	repeat, err := RecordPendingControlRetry(store, bead.ID, pendingCause, start.Add(time.Minute), budget)
+	if err != nil {
+		t.Fatalf("repeat RecordPendingControlRetry: %v", err)
+	}
+	if !repeat.Repeat {
+		t.Fatal("verbatim pending repeat reported Repeat=false; it would keep resetting the serve loop's idle backoff")
+	}
+	if !repeat.FirstSeen.Equal(start) {
+		t.Fatalf("repeat.FirstSeen = %s, want the original anchor %s", repeat.FirstSeen, start)
+	}
+
+	expired, err := RecordPendingControlRetry(store, bead.ID, pendingCause, start.Add(budget+time.Second), budget)
+	if err != nil {
+		t.Fatalf("post-budget RecordPendingControlRetry: %v", err)
+	}
+	if !expired.Expired {
+		t.Fatalf("pending refusal at +%s inside a %s budget reported Expired=false", budget+time.Second, budget)
+	}
+
+	// Three pending sweeps spanning more than the whole budget wrote nothing
+	// the semantic tier reads.
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("get control bead: %v", err)
+	}
+	for _, key := range []string{
+		beadmeta.ControllerRetryFirstSeenMetadataKey,
+		beadmeta.ControllerRetryCountMetadataKey,
+		beadmeta.ControllerErrorMetadataKey,
+		beadmeta.ControllerErrorClassMetadataKey,
+		beadmeta.ControllerRetryableMetadataKey,
+	} {
+		if got := after.Metadata[key]; got != "" {
+			t.Fatalf("%s = %q after pending sweeps only, want empty — pending must not touch the Tier-B budget", key, got)
+		}
+	}
+	if got := after.Metadata[beadmeta.ControlPendingFirstSeenMetadataKey]; got != start.Format(time.RFC3339) {
+		t.Fatalf("%s = %q, want %q", beadmeta.ControlPendingFirstSeenMetadataKey, got, start.Format(time.RFC3339))
+	}
+	if got := after.Metadata[beadmeta.ControlPendingCountMetadataKey]; got != strconv.Itoa(expired.Attempts) {
+		t.Fatalf("%s = %q, want %q", beadmeta.ControlPendingCountMetadataKey, got, strconv.Itoa(expired.Attempts))
+	}
+	if got := after.Metadata[beadmeta.ControlPendingReasonMetadataKey]; got != pendingCause.Error() {
+		t.Fatalf("%s = %q, want the pending reason", beadmeta.ControlPendingReasonMetadataKey, got)
+	}
+
+	// The semantic budget the bead has never used is still whole.
+	semantic, err := RecordSemanticControlRetry(store, bead.ID, closeBlockedErr("pl-pujtf", "pl-mmneh"), start.Add(budget+time.Second), budget)
+	if err != nil {
+		t.Fatalf("RecordSemanticControlRetry after a long pending wait: %v", err)
+	}
+	if semantic.Expired {
+		t.Fatal("first semantic refusal reported Expired after a long pending wait; the pending anchor leaked into the Tier-B budget")
+	}
+	if !semantic.FirstSeen.Equal(start.Add(budget + time.Second)) {
+		t.Fatalf("semantic.FirstSeen = %s, want its own fresh anchor", semantic.FirstSeen)
 	}
 }
 
@@ -436,6 +524,13 @@ func TestClearControllerSpawnErrorMetadataClearsTheBudgetAnchor(t *testing.T) {
 		beadmeta.ControllerRetryableMetadataKey:      "true",
 		beadmeta.ControllerRetryFirstSeenMetadataKey: "2026-08-11T08:00:47Z",
 		beadmeta.ControllerRetryCountMetadataKey:     "6712",
+		// The pending budget rides along. gc.control_pending_stalled is a
+		// one-shot latch, so a bead carrying it into a later life would stay
+		// silent through a second never-healing pending wait.
+		beadmeta.ControlPendingReasonMetadataKey:    `rig "ghostrig" not found in city config`,
+		beadmeta.ControlPendingCountMetadataKey:     "412",
+		beadmeta.ControlPendingFirstSeenMetadataKey: "2026-08-11T08:00:47Z",
+		beadmeta.ControlPendingStalledMetadataKey:   "true",
 	}
 	clearControllerSpawnErrorMetadata(metadata)
 
@@ -445,9 +540,44 @@ func TestClearControllerSpawnErrorMetadataClearsTheBudgetAnchor(t *testing.T) {
 		beadmeta.ControllerRetryableMetadataKey,
 		beadmeta.ControllerRetryFirstSeenMetadataKey,
 		beadmeta.ControllerRetryCountMetadataKey,
+		beadmeta.ControlPendingReasonMetadataKey,
+		beadmeta.ControlPendingCountMetadataKey,
+		beadmeta.ControlPendingFirstSeenMetadataKey,
+		beadmeta.ControlPendingStalledMetadataKey,
 	} {
 		if got := metadata[key]; got != "" {
 			t.Fatalf("%s = %q after clearing, want empty", key, got)
 		}
+	}
+}
+
+// TestClassifyControllerErrorTreatsExhaustedMetadataMergeAsTransient pins the
+// contract between the native store's metadata merge and the controller: a
+// merge whose compare-and-swap lost to a concurrent writer on every attempt
+// (NativeDoltStore.SetMetadataBatch wraps *beads.CASRetriesExhaustedError
+// around beadslib.ErrVersionMismatch) is contention, so the control re-enters
+// instead of being failed with controller_error. The drain reservation retry
+// reads the same class.
+func TestClassifyControllerErrorTreatsExhaustedMetadataMergeAsTransient(t *testing.T) {
+	err := fmt.Errorf("%w: %w",
+		&beads.CASRetriesExhaustedError{ID: "gc-ctl", Key: "gc.attempt_log", Attempts: 3},
+		fmt.Errorf("%w: expected 7, got 8", beadslib.ErrVersionMismatch))
+	if !errors.Is(err, beadslib.ErrVersionMismatch) {
+		t.Fatalf("errors.Is(%v, ErrVersionMismatch) = false, want true", err)
+	}
+	if got := ClassifyControllerError(err); got != TierAvailability {
+		t.Fatalf("ClassifyControllerError(exhausted metadata merge) = %v, want %v", got, TierAvailability)
+	}
+	if !IsTransientControllerError(err) {
+		t.Fatal("IsTransientControllerError(exhausted metadata merge) = false, want true")
+	}
+	if !retryableDrainReservationError(err) {
+		t.Fatal("retryableDrainReservationError(exhausted metadata merge) = false, want true")
+	}
+	// Control: the bare mismatch, without the exhaustion type, is what the
+	// store returned before and is not transient — the wrapping is what
+	// carries the classification.
+	if got := ClassifyControllerError(fmt.Errorf("%w: expected 7, got 8", beadslib.ErrVersionMismatch)); got != TierNone {
+		t.Fatalf("ClassifyControllerError(bare version mismatch) = %v, want %v", got, TierNone)
 	}
 }

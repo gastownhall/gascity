@@ -597,13 +597,14 @@ func waitForReport(t *testing.T, cityDir, agentName string, timeout time.Duratio
 //
 // A pool member of an expanding pool has no public alias: the slot rebinds to a
 // fresh session whenever a holder dies, so it is bookkeeping rather than
-// identity, and the session's GC_AGENT / BEADS_ACTOR resolve to its runtime
-// session name instead. The report script keys its file on $GC_AGENT, so the
-// filename is the session name and the test cannot construct it in advance.
+// identity, and the session's GC_AGENT / BEADS_ACTOR resolve to its session
+// bead ID instead (the same identity gc hook --claim records claims under).
+// The report script keys its file on $GC_AGENT, so the filename is the session
+// bead ID and the test cannot construct it in advance.
 //
 // The slot is still stamped on the session bead as agent_name, so
 // `gc session list --json` is the stable channel that maps a slot the test DOES
-// know to the session name it does not. Discovery goes through the same CLI
+// know to the session bead ID it does not. Discovery goes through the same CLI
 // contract sessionAssigneeForTemplate already relies on, and the per-member wait
 // then reuses waitForReport so the container-provider fallback still applies.
 //
@@ -612,17 +613,17 @@ func waitForReport(t *testing.T, cityDir, agentName string, timeout time.Duratio
 func waitForPoolMemberReports(t *testing.T, cityDir, template string, slots []string, timeout time.Duration) map[string]*e2eReport {
 	t.Helper()
 
-	sessionNames := waitForPoolMemberSessionNames(t, cityDir, template, slots, timeout)
+	sessionIDs := waitForPoolMemberSessionIDs(t, cityDir, template, slots, timeout)
 	reports := make(map[string]*e2eReport, len(slots))
 	for _, slot := range slots {
-		reports[slot] = waitForReport(t, cityDir, sessionNames[slot], timeout)
+		reports[slot] = waitForReport(t, cityDir, sessionIDs[slot], timeout)
 	}
 	return reports
 }
 
-// waitForPoolMemberSessionNames maps each requested slot identity to the runtime
-// session name of the live session currently holding it.
-func waitForPoolMemberSessionNames(t *testing.T, cityDir, template string, slots []string, timeout time.Duration) map[string]string {
+// waitForPoolMemberSessionIDs maps each requested slot identity to the session
+// bead ID of the live session currently holding it.
+func waitForPoolMemberSessionIDs(t *testing.T, cityDir, template string, slots []string, timeout time.Duration) map[string]string {
 	t.Helper()
 
 	var resolved map[string]string
@@ -631,12 +632,12 @@ func waitForPoolMemberSessionNames(t *testing.T, cityDir, template string, slots
 		if err == nil {
 			var sessionList struct {
 				Sessions []struct {
-					Template    string `json:"template"`
-					Closed      bool   `json:"closed"`
-					State       string `json:"state"`
-					Alias       string `json:"alias"`
-					AgentName   string `json:"agent_name"`
-					SessionName string `json:"session_name"`
+					ID        string `json:"id"`
+					Template  string `json:"template"`
+					Closed    bool   `json:"closed"`
+					State     string `json:"state"`
+					Alias     string `json:"alias"`
+					AgentName string `json:"agent_name"`
 				} `json:"sessions"`
 			}
 			if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(out)), &sessionList); jsonErr == nil {
@@ -645,9 +646,9 @@ func waitForPoolMemberSessionNames(t *testing.T, cityDir, template string, slots
 					if s.Closed || strings.TrimSpace(s.Template) != template {
 						continue
 					}
-					name := strings.TrimSpace(s.SessionName)
+					id := strings.TrimSpace(s.ID)
 					slot := strings.TrimSpace(s.AgentName)
-					if name == "" || slot == "" {
+					if id == "" || slot == "" {
 						continue
 					}
 					// A rebinding slot must not be advertised as an alias. Fail
@@ -657,7 +658,7 @@ func waitForPoolMemberSessionNames(t *testing.T, cityDir, template string, slots
 					if alias := strings.TrimSpace(s.Alias); alias != "" {
 						t.Fatalf("pool member %q (template %q) advertises alias %q; expanding-pool slots must stay unaliased", slot, template, alias)
 					}
-					found[slot] = name
+					found[slot] = id
 				}
 				if haveAllSlots(found, slots) {
 					resolved = found
@@ -672,7 +673,7 @@ func waitForPoolMemberSessionNames(t *testing.T, cityDir, template string, slots
 	}
 
 	out, _ := gc(cityDir, "session", "list", "--json", "--template", template, "--state", "all")
-	t.Fatalf("timed out resolving session names for template %q slots %v within %s\nsessions:\n%s", template, slots, timeout, out)
+	t.Fatalf("timed out resolving session IDs for template %q slots %v within %s\nsessions:\n%s", template, slots, timeout, out)
 	return nil
 }
 

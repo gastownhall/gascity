@@ -3,6 +3,8 @@ package orders
 import (
 	"log"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 var runtimeHelpersLogf = log.Printf
@@ -25,6 +27,43 @@ func LastRunAcross(stores []*Store) LastRunFunc {
 			}
 			if last.After(latest) {
 				latest = last
+			}
+		}
+		return latest, nil
+	}
+}
+
+// LastRunFuncWithEventFallback wraps fn with an events.Provider fallback.
+// When fn returns a zero time (no tracking beads found — e.g. after a
+// wisp-compact prune), it queries the event bus for the most recent
+// order.fired event whose Subject matches the order's scoped name and
+// returns its timestamp. A nil ep disables the fallback and the wrapped
+// fn's result is returned unchanged. Event bus errors are non-fatal:
+// when the provider fails the zero time is returned so the order appears
+// unrun rather than permanently blocked.
+func LastRunFuncWithEventFallback(fn LastRunFunc, ep events.Provider) LastRunFunc {
+	if ep == nil {
+		return fn
+	}
+	return func(name string) (time.Time, error) {
+		last, err := fn(name)
+		if err != nil {
+			return time.Time{}, err
+		}
+		if !last.IsZero() {
+			return last, nil
+		}
+		evts, listErr := ep.List(events.Filter{
+			Type:    events.OrderFired,
+			Subject: name,
+		})
+		if listErr != nil {
+			return time.Time{}, nil
+		}
+		var latest time.Time
+		for _, e := range evts {
+			if e.Ts.After(latest) {
+				latest = e.Ts
 			}
 		}
 		return latest, nil
