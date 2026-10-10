@@ -2730,6 +2730,31 @@ esac
 	}
 }
 
+func TestEffectivePoolDemandQueryDoesNotCountStructuralLatches(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; count-form exercises a jq pipeline")
+	}
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	rows := `[
+{"id":"expanded","metadata":{"gc.kind":"workflow","gc.workflow_expanded":"true"}},
+{"id":"scope","metadata":{"gc.kind":"scope"}},
+{"id":"spec","metadata":{"gc.kind":"spec"}},
+{"id":"spaced","metadata":{"gc.kind":" workflow ","gc.workflow_expanded":" true "}},
+{"id":"root-only","metadata":{"gc.kind":"workflow"}},
+{"id":"worker"}
+]`
+	out := runShellWithFakeBd(t, a.EffectivePoolDemandQuery(), map[string]string{"DEMAND_ROWS": rows}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--metadata-field gc.routed_to=hello-world/worker"*) printf '%s\n' "$DEMAND_ROWS" ;;
+  *) printf '[]' ;;
+esac
+`)
+	if strings.TrimSpace(out) != "2" {
+		t.Fatalf("worker demand = %q, want 2 (worker and executable root-only workflow)", out)
+	}
+}
+
 func TestEffectivePoolDemandQueryCountsRunTargetOnlyRootDuringMigration(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available; count-form exercises a jq pipeline")

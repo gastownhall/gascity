@@ -423,13 +423,31 @@ func routedReadyTierCommand(topo QueryTopology) string {
 // form needed no new failure clause when the federated reader arrived — it is
 // the shape readyReaderFailurePropagation gives the worker-side tiers.
 func poolDemandCountShell(target string, topo QueryTopology) string {
+	countFilter := `(add // []) | unique_by(.id) | map(` + executableWorkflowTopologyJQ() + `) | length`
 	script := `target="$1"; ` +
 		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0", topo) + `) || exit $?; ` +
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", topo) + `) || exit $?; ` +
 		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
 		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, topo, false) + `); ` +
-		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s "(add // []) | unique_by(.id) | length"`
+		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | ` + shellquote.Join([]string{"jq", "-s", countFilter})
 	return shellquote.Join([]string{"sh", "-c", script, "--", target})
+}
+
+// Match the hook/controller gate even when scale_check runs the shell count
+// form. The topology vocabulary is shared; a never-expanded workflow root is
+// the compatibility exception because the root itself can be executable work.
+func executableWorkflowTopologyJQ() string {
+	kind := `(` + jqMeta(beadmeta.KindMetadataKey) + ` | gsub("^\\s+|\\s+$"; ""))`
+	expanded := `(` + jqMeta(beadmeta.WorkflowExpandedMetadataKey) + ` | gsub("^\\s+|\\s+$"; ""))`
+	clauses := make([]string, 0, len(beadmeta.WorkflowTopologyKinds))
+	for _, topologyKind := range beadmeta.WorkflowTopologyKinds {
+		clause := fmt.Sprintf(`%s != %q`, kind, topologyKind)
+		if topologyKind == beadmeta.KindWorkflow {
+			clause = `(` + clause + ` or ` + expanded + ` != "true")`
+		}
+		clauses = append(clauses, clause)
+	}
+	return `select(` + strings.Join(clauses, ` and `) + `)`
 }
 
 func (a *Agent) poolDemandTarget() string {
