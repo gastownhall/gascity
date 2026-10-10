@@ -2941,7 +2941,9 @@ func TestPackCommandCobraHelpAndUnknownParity(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
+		test := test
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			eager := runPackCommandProcess(t, cityPath, "eager", test.args...)
 			lazy := runPackCommandProcess(t, cityPath, "lazy", test.args...)
 			if eager.exitCode != test.wantExit || lazy.exitCode != test.wantExit {

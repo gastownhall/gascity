@@ -24,7 +24,7 @@ INTEGRATION_SOLO_TESTS = {
     "gc_bd_runtime_custom_types_heal_test": "TestEnsureBdRuntimeCustomTypesHealsUpgradedNativeStore",  # 23 s
     "gc_managed_beads_native_cli_test": "TestManagedBeadsNativeCLICompatibility",  # 32 s
     "gc_managed_bd_rig_hard_kill_test": "TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind",  # 26 s
-    "gc_pack_command_cobra_parity_test": "TestPackCommandCobraHelpAndUnknownParity",  # 22 s
+    "gc_pack_command_cobra_parity_test": "TestPackCommandCobraHelpAndUnknownParity",  # ~5 s parallel (was 22 s)
 }
 
 # Solo tests still too long to run whole: their subtests run in series, and
