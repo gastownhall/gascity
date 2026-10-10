@@ -455,6 +455,25 @@ func TestCurrentBeadStampedOnAliveWakeRow(t *testing.T) {
 	}
 }
 
+// Kills a row write that skips deciding again on the fresh row (the F2
+// review): wake_mode is a launch config key outside the premise, and moved
+// from resume to fresh since the pass, so the current-bead stamp the pass
+// decided (a fresh cycle not yet claimed) no longer holds on the fresh row.
+// The write refuses redecided, and the bead stays unrecorded.
+func TestRowHealDecidesAgainOnTheFreshRow(t *testing.T) {
+	c := newHealCase(t, livenessAlive, desireWake, "state", "active", "wake_mode", "resume")
+	c.a.Snapshot.Entries[c.k].AssignedWork = &assignedWorkView{BeadID: "ga-7", RequiresFreshCycle: true}
+	c.before = func() {
+		if err := c.store.SetMetadataBatch(c.k.ID, map[string]string{"wake_mode": "fresh"}); err != nil {
+			t.Error(err)
+		}
+	}
+	it, s := c.run(t, nil, nil)
+	if it.Reason != decideCurrentBead || s.Outcome != settledRefused || s.Cause != causeRedecided || c.meta(t)[session.CurrentBeadIDKey] != "" {
+		t.Fatalf("intent %q, settlement %+v, bead %q; want the stamp refused %q and no bead recorded", it.Reason, s, c.meta(t)[session.CurrentBeadIDKey], causeRedecided)
+	}
+}
+
 // Kills an orphan left forever (an asleep row whose own runtime came up
 // outside the controller): an asleep row whose runtime the inventory reads
 // alive with the row's token heals awake with legacy's patch, once the

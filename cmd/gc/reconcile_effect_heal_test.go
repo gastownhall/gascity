@@ -359,10 +359,10 @@ func TestFreshHealDecidesOnTheBackingRow(t *testing.T) {
 	}
 }
 
-// Kills the heal writing the pass's patch without deciding again on the
-// fresh row: a suspend (sleep_intent, which no lifecycle fact carries) or a
-// wait hold landing after the pass makes the row operator-dormant, so the
-// awake heal refuses redecided and the row stays asleep.
+// Kills the heal writing the pass's patch over a row an operator changed
+// since the pass: a suspend (sleep_intent) or a wait hold makes the row
+// operator-dormant. Both are operator intent keys, so since F2 the premise
+// refuses before the heal decides again, and the row stays asleep.
 func TestAwakeHealDecidesAgainOnTheFreshRow(t *testing.T) {
 	for _, kv := range [][]string{{"sleep_intent", "user-hold"}, {"wait_hold", "op"}} {
 		c := ownRuntimeCase(t, "tok-3", "state", "asleep", "sleep_reason", "idle")
@@ -375,8 +375,8 @@ func TestAwakeHealDecidesAgainOnTheFreshRow(t *testing.T) {
 			Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true},
 			env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": "tok-3"},
 		}
-		if _, s := c.run(t, own.tmux(), nil); s.Outcome != settledRefused || s.Cause != causeRedecided || c.meta(t)["state"] != "asleep" {
-			t.Fatalf("%s since the pass: settlement %+v, state %q, want refused %q", kv[0], s, c.meta(t)["state"], causeRedecided)
+		if _, s := c.run(t, own.tmux(), nil); s.Outcome != settledRefused || s.Cause != causePremise || c.meta(t)["state"] != "asleep" {
+			t.Fatalf("%s since the pass: settlement %+v, state %q, want refused %q", kv[0], s, c.meta(t)["state"], causePremise)
 		}
 	}
 }
@@ -396,10 +396,10 @@ func TestFreshHealLandsItsFoldedItemsInOneCAS(t *testing.T) {
 	}
 }
 
-// Kills a fold written from the pass's decision rather than decided again on
-// the fresh row (review pins): a detached_at marker cleared by another
-// writer before the effect is not written back stale, and one stamped since
-// the pass is cleared in the heal's one CAS.
+// Kills a fold written from the pass's decision (review pins), now on the
+// premise (F2): detached_at is a premise key, so a marker cleared or stamped
+// by another writer since the pass refuses the heal, writing nothing; the
+// next pass decides on the row as it is.
 func TestFreshHealDecidesItsFoldOnTheFreshRow(t *testing.T) {
 	for _, c := range []struct {
 		name          string
@@ -419,11 +419,11 @@ func TestFreshHealDecidesItsFoldOnTheFreshRow(t *testing.T) {
 			}
 		}
 		it, s := hc.run(t, gone().tmux(), nil)
-		if it.Kind != intentRowHealFresh || s.Outcome != settledLanded {
-			t.Fatalf("%s: intent (%q, %q), settlement %+v, want the fresh heal landed", c.name, it.Kind, it.Reason, s)
+		if it.Kind != intentRowHealFresh || s.Outcome != settledRefused || s.Cause != causePremise {
+			t.Fatalf("%s: intent (%q, %q), settlement %+v, want the fresh heal refused %q", c.name, it.Kind, it.Reason, s, causePremise)
 		}
-		if m := hc.meta(t); m["state"] != "asleep" || m["detached_at"] != "" || m["session_key"] != "" {
-			t.Fatalf("%s: row %v, want asleep, its continuation reset and no marker, in the one CAS", c.name, m)
+		if m := hc.meta(t); m["state"] != "active" || m["detached_at"] != c.write || m["session_key"] != "k-1" {
+			t.Fatalf("%s: row %v, want it as the other writer left it", c.name, m)
 		}
 	}
 }
