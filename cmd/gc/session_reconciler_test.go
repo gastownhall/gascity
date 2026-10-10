@@ -7234,6 +7234,76 @@ func TestReconcileSessionBeads_OrphanDrainLiveAssignedWorkStaysOpen(t *testing.T
 	}
 }
 
+// The orphan drain begin ends a live runtime, so it reads the seat's
+// RefuseScope live (O4, D2(d)): a claim made since the tick's read, or held
+// under a prior alias, keeps the orphan running.
+func TestReconcileSessionBeads_OrphanDrainReadsTheRefuseScopeLive(t *testing.T) {
+	for _, tc := range []struct {
+		name, assignee string
+		late           bool // claimed after the tick's read
+	}{
+		{name: "claimed since the tick's read", assignee: "orphan", late: true},
+		{name: "a prior alias", assignee: "morsov"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			env.cfg = &config.City{Agents: []config.Agent{{Name: "other"}}}
+			_ = env.sp.Start(context.Background(), "orphan", runtime.Config{})
+			session := env.createSessionBead("orphan", "orphan")
+			env.markSessionActive(&session)
+			env.setSessionMetadata(&session, map[string]string{
+				"alias_history": "morsov",
+				"last_woke_at":  env.clk.Now().Add(-wakeUndesiredGrace - time.Minute).UTC().Format(time.RFC3339),
+			})
+			sw := testSeatWork(env.city, env.cfg, env.store, nil)
+			claim := func() {
+				if _, err := env.store.Create(beads.Bead{Title: "claimed", Type: "task", Status: "open", Assignee: tc.assignee}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !tc.late {
+				claim()
+			}
+			// An earlier question loads the tick's read.
+			if _, err := sessionHasOpenAssignedWorkForReachableStore(sw, env.sessionInfo(session.ID)); err != nil {
+				t.Fatal(err)
+			}
+			if tc.late {
+				claim()
+			}
+			snap := newSessionBeadSnapshotFromReconcileRows(sessionpkg.ReconcileRowsFromBeads([]beads.Bead{session}))
+			reconcileSessionBeadsAtPathWithNamedDemand(context.Background(), env.city, snap.OpenForReconcile(), snap, env.desiredState,
+				configuredSessionNames(env.cfg, "", env.store), env.cfg, env.sp, env.store, sw, nil, nil, nil, nil, env.dt, nil,
+				map[string]int{}, nil, nil, false, nil, "", nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr)
+			if ds := env.dt.get(session.ID); ds != nil {
+				t.Fatalf("orphan drained over work under %q (%+v)", tc.assignee, ds)
+			}
+		})
+	}
+}
+
+// RefuseScope (O4) is the wide set, never a transient pool slot alias.
+func TestRefuseScopeDropsOnlyATransientSlotsAliases(t *testing.T) {
+	slotSeat := sessionpkg.Info{ID: "gc-1", SessionNameMetadata: "worker-gc-1", Template: "worker", Alias: "rig/worker-1", AliasHistory: []string{"rig/worker-0"}, PoolSlot: "1", PoolManaged: true}
+	named := slotSeat
+	named.Template, named.Alias, named.AliasHistory = "pooled", "nux", []string{"morsov"}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}, {Name: "pooled", Namepool: "names.txt"}}}
+	for _, tc := range []struct {
+		name string
+		info sessionpkg.Info
+		cfg  *config.City
+		want string
+	}{
+		{"a transient slot", slotSeat, cfg, "gc-1,worker-gc-1"},
+		{"a namepool seat", named, cfg, "gc-1,worker-gc-1,nux,morsov"},
+		{"an unresolved agent keeps its aliases", slotSeat, &config.City{}, "gc-1,worker-gc-1,rig/worker-1,rig/worker-0"},
+	} {
+		if got := strings.Join(refuseScope(tc.info, tc.cfg).scopeIDs(), ","); got != tc.want {
+			t.Errorf("%s: RefuseScope = %s, want %s", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestReconcileSessionBeads_OrphanDrainLogThrottled covers issue #855:
 // once a session is draining, the reconciler must not re-emit
 // "Draining session '...': orphaned" on every subsequent tick. The

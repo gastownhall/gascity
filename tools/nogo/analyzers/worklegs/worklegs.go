@@ -3,7 +3,9 @@
 // only from the city's work store, never a sessions store (mc-3ixn3.16,
 // NEW2-1). It reports, by type rather than by name:
 //   - a field set (a literal with fields, an assignment, an increment, an
-//     address taken) on a guarded type outside the file that defines it;
+//     address taken, through any chain of fields, indexes and derefs that
+//     passes a guarded field) on a guarded type outside the file that
+//     defines it, and any conversion to a guarded type there;
 //   - a reference to a mint function (a call, a function value, an alias)
 //     outside its reviewed sites, and a reviewed site that no longer mints;
 //   - a beads.WorkStore built from a beads.SessionStore, by literal or
@@ -102,14 +104,25 @@ func run(pass *analysis.Pass, cfg Config) error {
 			source = file
 		}
 		defining := name == cfg.DefiningFile
+		// fieldWrite reports a write through e that passes a guarded field:
+		// l.work, and l.plan.Legs[0].Leg.Store alike.
 		fieldWrite := func(e ast.Expr) {
-			sel, ok := ast.Unparen(e).(*ast.SelectorExpr)
-			if !ok || defining {
-				return
-			}
-			if v, ok := pass.TypesInfo.ObjectOf(sel.Sel).(*types.Var); ok {
-				if typ, ok := guarded[v]; ok {
-					pass.Reportf(sel.Pos(), "%s.%s set outside %s: mint it there", typ, v.Name(), cfg.DefiningFile)
+			for !defining {
+				switch x := ast.Unparen(e).(type) {
+				case *ast.SelectorExpr:
+					if v, ok := pass.TypesInfo.ObjectOf(x.Sel).(*types.Var); ok {
+						if typ, ok := guarded[v]; ok {
+							pass.Reportf(x.Sel.Pos(), "%s.%s set outside %s: mint it there", typ, v.Name(), cfg.DefiningFile)
+							return
+						}
+					}
+					e = x.X
+				case *ast.IndexExpr:
+					e = x.X
+				case *ast.StarExpr:
+					e = x.X
+				default:
+					return
 				}
 			}
 		}
@@ -135,8 +148,19 @@ func run(pass *analysis.Pass, cfg Config) error {
 					pass.Reportf(v.Pos(), "a work store built from a sessions store")
 				}
 			case *ast.CallExpr:
-				if tv, ok := pass.TypesInfo.Types[v.Fun]; ok && tv.IsType() && named(tv.Type, cfg.WorkStore) && len(v.Args) == 1 && fromSession(v.Args[0]) {
+				tv, ok := pass.TypesInfo.Types[v.Fun]
+				if !ok || !tv.IsType() {
+					break
+				}
+				if named(tv.Type, cfg.WorkStore) && len(v.Args) == 1 && fromSession(v.Args[0]) {
 					pass.Reportf(v.Pos(), "a work store converted from a sessions store")
+				}
+				target := tv.Type
+				if p, ok := types.Unalias(target).(*types.Pointer); ok {
+					target = p.Elem()
+				}
+				if !defining && isGuarded(target) {
+					pass.Reportf(v.Pos(), "a conversion to %s outside %s: mint it there", types.TypeString(types.Unalias(target), types.RelativeTo(pass.Pkg)), cfg.DefiningFile)
 				}
 			case *ast.AssignStmt:
 				for _, lhs := range v.Lhs {
@@ -182,11 +206,19 @@ func run(pass *analysis.Pass, cfg Config) error {
 	return nil
 }
 
-// checkScope reports every type but cfg.ScopeImpls that implements cfg.Scope.
+// checkScope reports every type but cfg.ScopeImpls, the package-level types
+// by those names, that implements cfg.Scope: a local type of the same name is
+// another type.
 func checkScope(pass *analysis.Pass, cfg Config) {
 	obj, ok := pass.Pkg.Scope().Lookup(cfg.Scope).(*types.TypeName)
 	if !ok {
 		return
+	}
+	impls := map[types.Object]bool{}
+	for _, name := range cfg.ScopeImpls {
+		if impl := pass.Pkg.Scope().Lookup(name); impl != nil {
+			impls[impl] = true
+		}
 	}
 	iface, ok := obj.Type().Underlying().(*types.Interface)
 	if !ok {
@@ -194,7 +226,7 @@ func checkScope(pass *analysis.Pass, cfg Config) {
 	}
 	for id, def := range pass.TypesInfo.Defs {
 		tn, ok := def.(*types.TypeName)
-		if !ok || tn == obj || slices.Contains(cfg.ScopeImpls, tn.Name()) {
+		if !ok || tn == obj || impls[tn] {
 			continue
 		}
 		if strings.HasSuffix(pass.Fset.Position(id.Pos()).Filename, "_test.go") {

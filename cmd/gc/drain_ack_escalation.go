@@ -68,18 +68,20 @@ package main
 //
 // # The identity set is the whole ballgame
 //
-// The assigned-work gate probes session.AssigneeIdentities, NOT the narrower
-// config-aware set (sessionAssignmentIdentifiersForConfigInfo). That set honors
-// a session's current stable alias ("nux") but drops a rebinding pool-slot alias
-// and every prior alias in alias_history; an agent that claimed work under one
-// of those holds it under an identifier the narrow set cannot see, so a narrow
-// probe would report "no assigned work" for a busy agent and authorize killing it.
+// The assigned-work gate probes the seat's RefuseScope (refuseScope, O4):
+// session.AssigneeIdentities, NOT the narrower config-aware set
+// (sessionAssignmentIdentifiersForConfigInfo). That set honors a session's
+// current stable alias ("nux") but drops every prior alias in alias_history;
+// an agent that claimed work under one holds it under an identifier the narrow
+// set cannot see, so a narrow probe would report "no assigned work" for a busy
+// agent and authorize killing it.
 //
-// The drain-ack CLOSE gate deliberately does NOT adopt this wide set. A
-// transient pool SLOT alias ("gascity/gc.run-operator-1") is a rebinding chair
-// rather than an owner, and no guard may honor one, or a rebind lets a fresh
-// session shield or inherit a dead session's claim (#4981/#5241, pinned by
-// TestAssignmentGuardsIgnoreTransientPoolSlotAliases). The two gates can differ
+// Neither gate honors a transient pool SLOT alias
+// ("gascity/gc.run-operator-1"): it is a rebinding chair rather than an owner,
+// and a rebind would let a fresh session shield or inherit a dead session's
+// claim (#4981/#5241, pinned by
+// TestAssignmentGuardsIgnoreTransientPoolSlotAliases). The drain-ack CLOSE
+// gate does NOT adopt the wide set either. The two gates can differ
 // because their errors are not symmetric: over-refusing a KILL leaves a row
 // wedged exactly as it is today, while over-honoring ownership at the CLOSE
 // keeps dead rows open forever. Erring wide belongs in front of the kill only.
@@ -167,9 +169,9 @@ const (
 //
 // Deliberately wider than sessionAssignmentIdentifiersForConfigInfo, which
 // honors only the current stable alias and therefore cannot see work claimed
-// under a rebinding pool-slot alias or a prior alias. Being a superset it can
-// only ever find MORE work, so it can only refuse more kills and more closes —
-// never authorize either.
+// under a prior alias. Being a superset it can only ever find MORE work, so it
+// can only refuse more kills and more closes — never authorize either.
+// refuseScope drops a transient slot seat's aliases from it (O4).
 func drainAckAssigneeIdentities(info sessionpkg.Info, cfg *config.City) []string {
 	configured := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
 	wide := sessionpkg.AssigneeIdentities(info)

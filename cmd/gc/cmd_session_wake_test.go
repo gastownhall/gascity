@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -890,5 +891,33 @@ func TestDoSessionWake_JudgesThePostWakeRow(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := doSessionWake(b.ID, &stdout, &stderr, false, deps); code != 0 || strings.Contains(stderr.String(), "drained pool seat") {
 		t.Fatalf("doSessionWake() = %d, stderr=%s; want the woken (asleep) seat not refused as drained", code, stderr.String())
+	}
+}
+
+// On a city whose sessions live on their own binding, the CLI wake's
+// will-not-start predicate reads assigned work from the work store: a claim
+// there overrides the idle latch, as in the API (B4).
+func TestDoSessionWakeReadsTheWorkStoreOnASplitCity(t *testing.T) {
+	work, binding := beads.NewMemStore(), beads.NewMemStore()
+	cityPath := t.TempDir()
+	seedCLIStorageRoutes(t, cityPath, splitRoutes(binding))
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", SleepAfterIdle: "1m"}}}
+	sp := runtime.NewFake()
+	info := session.Info{Template: "worker", SessionNameMetadata: "worker", SleepReason: "idle"}
+	seat, err := binding.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+		"template": "worker", "session_name": "worker", "state": "asleep", "sleep_reason": "idle",
+		"sleep_policy_fingerprint": resolveSessionSleepPolicyInfo(info, cfg, sp).Fingerprint,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := work.Create(beads.Bead{Title: "task", Type: "task", Status: "in_progress", Assignee: seat.ID}); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	if code := doSessionWake(seat.ID, &bytes.Buffer{}, &stderr, false, sessionWakeDeps{
+		store: work, cfg: cfg, cityPath: cityPath, sp: sp, now: time.Now,
+	}); code != 0 || strings.Contains(stderr.String(), "will not start") {
+		t.Fatalf("doSessionWake = %d, stderr %q; want the work store's claim to override the latch", code, stderr.String())
 	}
 }

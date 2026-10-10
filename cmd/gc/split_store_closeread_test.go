@@ -266,6 +266,12 @@ func TestCloseRead_WorkStoreRule(t *testing.T) {
 	if _, err := closeTimeLister(cached, true)(q); err != nil || cachedBacking.n() != before {
 		t.Fatalf("cached work store read its backing %d times (%v); want the cache only", cachedBacking.n()-before, err)
 	}
+	declined := q
+	declined.IncludeClosed = true // a query the cache does not serve
+	before = cachedBacking.n()
+	if _, err := closeTimeLister(cached, true)(declined); err != nil || cachedBacking.n() != before+1 {
+		t.Fatalf("a declined cached read listed the backing %d times (%v); want one live list", cachedBacking.n()-before, err)
+	}
 	bd := beads.NewBdStore(t.TempDir(), func(string, string, ...string) ([]byte, error) { return []byte("[]"), nil })
 	if list := closeTimeLister(bd, true); list != nil {
 		t.Fatal("an uncached bd work store got a lister: mc-3ixn3.19/.20 is a residual, not a live read")

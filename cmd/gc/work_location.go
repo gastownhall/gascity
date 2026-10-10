@@ -169,7 +169,19 @@ func (s ReleaseScope) except(preserve map[string]struct{}) ReleaseScope {
 	return ReleaseScope{ids: ids}
 }
 
-// refuseScope is info's RefuseScope: drainAckAssigneeIdentities.
+// refuseScope is info's RefuseScope (O4): every identity the seat may hold
+// work under, its alias and alias history included
+// (drainAckAssigneeIdentities), but never a transient pool slot alias. The
+// controller rebinds a slot to the next occupant, so slot-form work names a
+// chair, and honoring it would let one seat's claim keep another alive
+// (TestAssignmentGuardsIgnoreTransientPoolSlotAliases). A seat whose
+// configured agent hands out transient slots has no other alias; one whose
+// agent does not resolve keeps its aliases: wide, in front of a kill.
 func refuseScope(info sessionpkg.Info, cfg *config.City) RefuseScope {
+	if isPoolManagedSessionInfo(info) && strings.TrimSpace(info.PoolSlot) != "" {
+		if agent := findAgentByTemplate(cfg, normalizedSessionTemplateInfo(info, cfg)); agent != nil && usesTransientPoolSlotIdentity(agent) {
+			return RefuseScope{ids: sessionAssignmentIdentifiersForConfigInfo(info, cfg)}
+		}
+	}
 	return RefuseScope{ids: drainAckAssigneeIdentities(info, cfg)}
 }

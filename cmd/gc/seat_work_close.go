@@ -66,29 +66,35 @@ func lateSeatWork(legs WorkLegs, scope workScope, statuses []string, keep func(b
 
 // closeTimeLister reads one leg for the re-read:
 //   - the city work store from its event-fed cache when it has one (a
-//     controller's), which costs no I/O;
+//     controller's), which costs no I/O, and live when the cache declines
+//     the query, unless bd backs it;
 //   - any other local leg live: the SQLite binding, a native rig, and the
 //     uncached work store of a standalone controller or a one-shot pass;
-//   - a bd-backed leg from its cache, or not at all when it has none: the
-//     residual of mc-3ixn3.19/.20, where the tick's read stands alone.
+//   - a bd-backed leg from its cache, or not at all when it has none or the
+//     cache declines: the residual of mc-3ixn3.19/.20, where the tick's read
+//     stands alone.
 func closeTimeLister(store beads.Store, isWork bool) func(beads.ListQuery) ([]beads.Bead, error) {
 	type cachedLister interface {
 		CachedList(beads.ListQuery) ([]beads.Bead, bool)
 	}
 	cache, cached := storeLayer[cachedLister](store)
-	switch {
-	case cached && (isWork || storeBackedBy[*beads.BdStore](store)):
-		return func(q beads.ListQuery) ([]beads.Bead, error) {
-			items, _ := cache.CachedList(q)
-			return items, nil
-		}
-	case storeBackedBy[*beads.BdStore](store):
-		return nil
-	}
-	return func(q beads.ListQuery) ([]beads.Bead, error) {
+	bd := storeBackedBy[*beads.BdStore](store)
+	live := func(q beads.ListQuery) ([]beads.Bead, error) {
 		q.Live = true
 		return store.List(q)
 	}
+	switch {
+	case cached && (isWork || bd):
+		return func(q beads.ListQuery) ([]beads.Bead, error) {
+			if items, ok := cache.CachedList(q); ok || bd {
+				return items, nil
+			}
+			return live(q)
+		}
+	case bd:
+		return nil
+	}
+	return live
 }
 
 // storeLayer finds the first layer of store, through the class, policy and

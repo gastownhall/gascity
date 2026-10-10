@@ -4656,12 +4656,6 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				clearCompletedIdleProbe(target.info.ID, dt)
 			}
 			if reason == "idle" && dt.get(target.info.ID) == nil {
-				// An idle drain ends a live runtime: started work under any of
-				// the seat's identities, read live, keeps it (O4).
-				if started, err := sessionHasAssignedWorkInStoresForStatuses(sw, refuseScope(info, cfg), []string{"in_progress"}); err != nil || started {
-					fmt.Fprintf(stderr, "session reconciler: deferring idle drain for %s: started work held (%v)\n", name, err) //nolint:errcheck
-					continue
-				}
 				if intent != "idle-stop-pending" {
 					shouldBegin, observationErr := shouldBeginIdleDrainInfo(info, eval, dt, sp)
 					if observationErr != nil {

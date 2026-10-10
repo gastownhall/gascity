@@ -29,8 +29,9 @@ type cityWorkLeg struct{ store beads.Store }
 func cityWorkLegOf(w beads.WorkStore) cityWorkLeg { return cityWorkLeg{store: w.Store} }
 
 type WorkLegs struct {
-	work beads.Store
-	n    int
+	work  beads.Store
+	n     int
+	inner struct{ stores []beads.Store }
 }
 
 func workLegsFromCensus(w cityWorkLeg) WorkLegs { return WorkLegs{work: w.store} }
@@ -76,6 +77,20 @@ func fromWork(s beads.Store) beads.WorkStore { return beads.WorkStore{Store: s} 
 
 type wide struct{ RefuseScope } // I1
 
+func shadowed() { type RefuseScope struct{ ReleaseScope } } // I3
+
+type fakeLegs struct {
+	work  beads.Store
+	n     int
+	inner struct{ stores []beads.Store }
+}
+
+func converted2(s beads.Store) WorkLegs { return WorkLegs(fakeLegs{work: s}) } // C1
+
+func convertedPtr(f *fakeLegs) *WorkLegs { return (*WorkLegs)(f) } // C2
+
+func nestedSet(l *WorkLegs, s beads.Store) { l.inner.stores[0] = s } // N1
+
 type loose struct{} // I2
 
 func (loose) scopeIDs() []string { return nil }
@@ -115,6 +130,10 @@ func TestWorkLegsLint(t *testing.T) {
 		"S2": "a work store converted from a sessions store",
 		"I1": "wide implements workScope",
 		"I2": "loose implements workScope",
+		"I3": "RefuseScope implements workScope",
+		"C1": "a conversion to WorkLegs outside location.go",
+		"C2": "a conversion to WorkLegs outside location.go",
+		"N1": "WorkLegs.inner set outside location.go",
 		"":   "reviewed mint site gone (cityWorkLegOf) mints nothing",
 	}
 	for marker, msg := range want {

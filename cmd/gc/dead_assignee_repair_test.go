@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -298,10 +299,10 @@ func TestEmitDeadAssigneeReopenedEvents_NoOpOnEmpty(t *testing.T) {
 // The stranded repair releases under the seat's ReleaseScope: a claim held
 // under its stable namepool alias is released with the rest.
 func TestRepairStrandedPoolWorkerBead_ReleasesUnderTheStableAlias(t *testing.T) {
-	store := beads.NewMemStore()
+	mem := beads.NewMemStore()
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", NamepoolNames: []string{"ada"}, MaxActiveSessions: intPtr(2)}}}
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	seat, err := store.Create(beads.Bead{Title: "worker session", Type: sessionBeadType, Status: "open", Metadata: map[string]string{
+	seat, err := mem.Create(beads.Bead{Title: "worker session", Type: sessionBeadType, Status: "open", Metadata: map[string]string{
 		"session_name": "worker-1", "template": "worker", "alias": "ada", "pool_managed": "true", "pool_slot": "1",
 		strandedEventEmittedKey: now.Add(-strandedRepairConfirmGrace - time.Minute).Format(time.RFC3339),
 	}})
@@ -311,20 +312,43 @@ func TestRepairStrandedPoolWorkerBead_ReleasesUnderTheStableAlias(t *testing.T) 
 	if alias := stableAssignmentAliasForConfig(seat, cfg); alias != "ada" {
 		t.Fatalf("fixture alias = %q, want the stable namepool alias ada", alias)
 	}
-	claim, err := store.Create(beads.Bead{Title: "held under the alias", Type: "task", Assignee: "ada", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}})
+	claim, err := mem.Create(beads.Bead{Title: "held under the alias", Type: "task", Assignee: "ada", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	inProgress := "in_progress"
-	if err := store.Update(claim.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+	if err := mem.Update(claim.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
 		t.Fatal(err)
 	}
 
+	// The alias claim's release fails: the repair saw it, so it defers the
+	// close rather than retire a seat that still holds work.
+	failing := releaseFailsStore{Store: mem, id: claim.ID}
 	var stderr bytes.Buffer
-	if !repairStrandedPoolWorkerBead(testSeatWork("", cfg, store, nil), store, seedSessionInfo(seat), "worker", &clock.Fake{Time: now}, &stderr) {
+	if repairStrandedPoolWorkerBead(testSeatWork("", cfg, failing, nil), failing, seedSessionInfo(seat), "worker", &clock.Fake{Time: now}, &stderr) {
+		t.Fatalf("repair closed the seat over a failed release of its alias claim; stderr=%q", stderr.String())
+	}
+	if got, _ := mem.Get(seat.ID); got.Status == "closed" {
+		t.Fatal("seat closed over its alias claim")
+	}
+
+	if !repairStrandedPoolWorkerBead(testSeatWork("", cfg, mem, nil), mem, seedSessionInfo(seat), "worker", &clock.Fake{Time: now}, &stderr) {
 		t.Fatalf("repair did not close the seat; stderr=%q", stderr.String())
 	}
-	if got, _ := store.Get(claim.ID); got.Assignee != "" || got.Status != "open" {
+	if got, _ := mem.Get(claim.ID); got.Assignee != "" || got.Status != "open" {
 		t.Fatalf("alias claim = %q/%q, want released", got.Status, got.Assignee)
 	}
+}
+
+// releaseFailsStore fails every write to the bead id.
+type releaseFailsStore struct {
+	beads.Store
+	id string
+}
+
+func (s releaseFailsStore) Update(id string, opts beads.UpdateOpts) error {
+	if id == s.id {
+		return errors.New("release refused")
+	}
+	return s.Store.Update(id, opts)
 }
