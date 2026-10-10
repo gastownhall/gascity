@@ -5,15 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -481,6 +484,85 @@ func TestResolvedWorkerRuntimeWithConfigMergesWorkspaceEnv(t *testing.T) {
 	}
 }
 
+// TestResolvedWorkerRuntimeWithConfigExpandsConfigEnvLikeResolveTemplate is the
+// regression for gastownhall/gascity#6822. A session resumed from the CLI
+// (`gc session submit` / `gc session attach`) launches through this resolver
+// rather than resolveTemplate, and it used to hand the runtime the literal
+// config text: `CLAUDE_CONFIG_DIR = "$HOME/.claude-agents"` reached Claude Code
+// unexpanded, so it created a `$HOME` directory under the session work_dir and
+// asked for a fresh login. One city config must yield the same config-authored
+// env — workspace, provider, and agent layers — whether the reconciler or the
+// CLI starts the session.
+func TestResolvedWorkerRuntimeWithConfigExpandsConfigEnvLikeResolveTemplate(t *testing.T) {
+	cityDir := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityDir, "file")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Name: "city",
+			Env:  map[string]string{"WORKSPACE_CACHE_DIR": "$HOME/cache"},
+		},
+		Agents: []config.Agent{{
+			Name:     "worker",
+			Provider: "stub",
+			Env:      map[string]string{"AGENT_SCRATCH_DIR": "$HOME/scratch"},
+		}},
+		Providers: map[string]config.ProviderSpec{
+			"stub": {
+				Command:    "/bin/echo",
+				PromptMode: "none",
+				Env:        map[string]string{"CLAUDE_CONFIG_DIR": "$HOME/.claude-agents"},
+			},
+		},
+	}
+	want := map[string]string{
+		"WORKSPACE_CACHE_DIR": home + "/cache",
+		"AGENT_SCRATCH_DIR":   home + "/scratch",
+		"CLAUDE_CONFIG_DIR":   home + "/.claude-agents",
+	}
+
+	agentCfg := &cfg.Agents[0]
+	tp, err := resolveTemplate(&agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityDir,
+		workspace:  &cfg.Workspace,
+		providers:  cfg.Providers,
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}, agentCfg, agentCfg.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	resolved, err := resolvedWorkerRuntimeWithConfigAndMetadata(cityDir, cfg, session.Info{
+		Template: "worker",
+		WorkDir:  cityDir,
+	}, "", nil)
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfigAndMetadata: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfigAndMetadata() = nil")
+	}
+
+	for name, env := range map[string]map[string]string{
+		"resolveTemplate Env": tp.Env,
+		"resume SessionEnv":   resolved.SessionEnv,
+		"resume Hints.Env":    resolved.Hints.Env,
+	} {
+		for key, wantValue := range want {
+			if got := env[key]; got != wantValue {
+				t.Errorf("%s[%s] = %q, want %q", name, key, got, wantValue)
+			}
+		}
+	}
+}
+
 // TestResolvedWorkerSessionConfigWithConfigSeedsCityAnchorsOnCreatePath
 // covers the CLI session-create path (called by `gc session start` /
 // `gc session new` etc. through newWorkerSessionHandleForResolvedRuntimeWithConfig).
@@ -587,6 +669,50 @@ func TestResolvedWorkerSessionConfigWithConfigIncludesProviderAuthPassthrough(t 
 	}
 	if got := hintsEnv["GC_CITY"]; got != cityDir {
 		t.Errorf("Runtime.Hints.Env[GC_CITY] = %q, want %q", got, cityDir)
+	}
+}
+
+// TestResolvedWorkerSessionConfigWithConfigExpandsProviderEnv is the CLI
+// create-path companion to the gastownhall/gascity#6822 resume-path regression
+// above: the builder must return provider env $VAR-expanded, not as literal
+// config text.
+func TestResolvedWorkerSessionConfigWithConfigExpandsProviderEnv(t *testing.T) {
+	cityDir := t.TempDir()
+	gcDir := filepath.Join(cityDir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfg, err := resolvedWorkerSessionConfigWithConfig(
+		cityDir,
+		"",
+		"",
+		cityDir,
+		"worker",
+		"",
+		"worker",
+		"Worker",
+		"",
+		&config.ResolvedProvider{
+			Name: "claude",
+			Env:  map[string]string{"CLAUDE_CONFIG_DIR": "$HOME/.claude-agents"},
+		},
+		map[string]string{"session_origin": "test"},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("resolvedWorkerSessionConfigWithConfig: %v", err)
+	}
+	want := home + "/.claude-agents"
+	for name, env := range map[string]map[string]string{
+		"Runtime.SessionEnv": cfg.Runtime.SessionEnv,
+		"Runtime.Hints.Env":  cfg.Runtime.Hints.Env,
+	} {
+		if got := env["CLAUDE_CONFIG_DIR"]; got != want {
+			t.Errorf("%s[CLAUDE_CONFIG_DIR] = %q, want %q", name, got, want)
+		}
 	}
 }
 

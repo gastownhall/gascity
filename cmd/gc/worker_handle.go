@@ -366,7 +366,12 @@ func resolvedWorkerSessionConfigWithConfig(
 	// template_resolve.go: resolved.Env is config-authored, so a provider spec
 	// naming one of those keys would otherwise overwrite the empty value the
 	// passthrough pinned. This resolver never routes through ScrubTokenEnv.
-	sessionEnv := mergeEnv(providerProcessPassthroughEnv(), resolved.Env, processenv.ControllerOnlyEnvOverlay())
+	//
+	// resolved.Env is $VAR-expanded here exactly as resolveTemplate and
+	// resolvedWorkerSessionEnvWithConfig expand it: a config value such as
+	// "$HOME/.claude-agents" must never reach a session as literal text
+	// (gastownhall/gascity#6822).
+	sessionEnv := mergeEnv(providerProcessPassthroughEnv(), expandEnvMap(resolved.Env), processenv.ControllerOnlyEnvOverlay())
 	if strings.TrimSpace(cityPath) != "" {
 		sessionEnv = mergeEnv(sessionEnv, cityIdentityAnchorsForCity(cityPath))
 	}
