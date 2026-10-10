@@ -21,9 +21,10 @@ import (
 // The recorded operations are priced by beadstest.WireModel: what the same
 // command would cost against a remote ledger of hookBudgetLedgerRows rows,
 // where a listing whose plan carries no narrowing predicate pages through the
-// whole ledger. Each scenario asserts a ceiling on that total and on the store
-// opens and on the listings that walk the whole ledger. The ceilings are
-// ratchets: each slice of the design lowers them.
+// whole ledger. Each scenario asserts that no listing walks the whole ledger,
+// so its cost does not grow with the ledger, and a ceiling on that total and
+// on the store opens. The ceilings are ratchets: each slice of the design
+// lowers them.
 //
 // `gc hook --claim` issues no store operation before its work query, which is a
 // generated script of `bd` invocations; its budget is
@@ -189,13 +190,11 @@ func recordHookCommand(t *testing.T, fn func(stdout, stderr io.Writer) int) hook
 	return run
 }
 
-// hookBudgetCeiling bounds one scenario. Requests is the modeled wire total at
-// hookBudgetLedgerRows, Opens bounds store opens and Unkeyed bounds listing
-// requests that walk the whole ledger.
+// hookBudgetCeiling bounds one scenario. Requests is the modeled wire total,
+// which no longer depends on the ledger size; Opens bounds store opens.
 type hookBudgetCeiling struct {
 	Requests int
 	Opens    int
-	Unkeyed  int
 }
 
 type hookBudgetScenario struct {
@@ -234,19 +233,19 @@ func hookBudgetScenarios() []hookBudgetScenario {
 	oneMail := func(t *testing.T, f hookBudgetFixture) { f.sendMail(t, "human", hookBudgetIdentity, "status please") }
 	handoff := func(t *testing.T, f hookBudgetFixture) { f.autoHandoff(t) }
 	return []hookBudgetScenario{
-		{name: "mail check --inject/empty", seed: none, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 52, Opens: 2, Unkeyed: 2}},
-		{name: "mail check --inject/one mail", seed: oneMail, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 53, Opens: 2, Unkeyed: 2}, wantStdout: "status please"},
-		{name: "mail check --inject/auto-handoff", seed: handoff, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 57, Opens: 2, Unkeyed: 2}, wantStdout: "context cycle"},
-		{name: "nudge drain --inject/empty", seed: none, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 84, Opens: 1, Unkeyed: 4}},
-		{name: "nudge drain --inject/empty with usage stdin", seed: none, run: nudgeDrainInjectWithUsage, ceiling: hookBudgetCeiling{Requests: 89, Opens: 2, Unkeyed: 4}},
-		{name: "nudge drain --inject/active step", seed: func(t *testing.T, f hookBudgetFixture) { f.activeStep(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 28, Opens: 2, Unkeyed: 1}, wantStdout: "inspect"},
-		{name: "nudge drain --inject/one nudge", seed: func(t *testing.T, f hookBudgetFixture) { f.queueNudge(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 99, Opens: 5, Unkeyed: 4}, wantStdout: "review queued work"},
-		{name: "prime --hook/fresh", seed: none, run: primeHook, ceiling: hookBudgetCeiling{Requests: 184, Opens: 3, Unkeyed: 8}},
-		{name: "prime --hook/auto-handoff", seed: handoff, run: primeHook, ceiling: hookBudgetCeiling{Requests: 189, Opens: 3, Unkeyed: 8}, wantStdout: "context cycle"},
-		{name: "handoff --auto", seed: none, ceiling: hookBudgetCeiling{Requests: 6, Opens: 1, Unkeyed: 0}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
+		{name: "mail check --inject/empty", seed: none, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 16, Opens: 2}},
+		{name: "mail check --inject/one mail", seed: oneMail, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 17, Opens: 2}, wantStdout: "status please"},
+		{name: "mail check --inject/auto-handoff", seed: handoff, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 21, Opens: 2}, wantStdout: "context cycle"},
+		{name: "nudge drain --inject/empty", seed: none, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 12, Opens: 1}},
+		{name: "nudge drain --inject/empty with usage stdin", seed: none, run: nudgeDrainInjectWithUsage, ceiling: hookBudgetCeiling{Requests: 17, Opens: 2}},
+		{name: "nudge drain --inject/active step", seed: func(t *testing.T, f hookBudgetFixture) { f.activeStep(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 10, Opens: 2}, wantStdout: "inspect"},
+		{name: "nudge drain --inject/one nudge", seed: func(t *testing.T, f hookBudgetFixture) { f.queueNudge(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 27, Opens: 5}, wantStdout: "review queued work"},
+		{name: "prime --hook/fresh", seed: none, run: primeHook, ceiling: hookBudgetCeiling{Requests: 39, Opens: 3}},
+		{name: "prime --hook/auto-handoff", seed: handoff, run: primeHook, ceiling: hookBudgetCeiling{Requests: 44, Opens: 3}, wantStdout: "context cycle"},
+		{name: "handoff --auto", seed: none, ceiling: hookBudgetCeiling{Requests: 6, Opens: 1}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
 			return cmdHandoffWithForce([]string{"context cycle"}, "", true, "", false, stdout, stderr)
 		}},
-		{name: "mail send human", seed: none, ceiling: hookBudgetCeiling{Requests: 31, Opens: 2, Unkeyed: 1}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
+		{name: "mail send human", seed: none, ceiling: hookBudgetCeiling{Requests: 12, Opens: 2}, run: func(_ *testing.T, _ hookBudgetFixture, stdout, stderr io.Writer) int {
 			return cmdMailSend([]string{"human"}, false, false, "", "", "done", "work finished", stdout, stderr)
 		}},
 	}
@@ -254,6 +253,7 @@ func hookBudgetScenarios() []hookBudgetScenario {
 
 func TestHookRequestBudget(t *testing.T) {
 	model := beadstest.WireModel{Handshake: hookBudgetHandshake, LedgerRows: hookBudgetLedgerRows}
+	biggerLedger := beadstest.WireModel{Handshake: hookBudgetHandshake, LedgerRows: 10 * hookBudgetLedgerRows}
 	for _, sc := range hookBudgetScenarios() {
 		t.Run(sc.name, func(t *testing.T) {
 			f := newHookBudgetFixture(t)
@@ -267,8 +267,12 @@ func TestHookRequestBudget(t *testing.T) {
 			}
 			cost := model.Price(run.opens, run.ops)
 			t.Logf("%s", cost)
-			if cost.Unkeyed > sc.ceiling.Unkeyed {
-				t.Errorf("%d listing requests walk the whole ledger, ceiling %d", cost.Unkeyed, sc.ceiling.Unkeyed)
+			if cost.Unkeyed != 0 {
+				t.Errorf("%d listing requests walk the whole ledger, want none", cost.Unkeyed)
+			}
+			if bigger := biggerLedger.Price(run.opens, run.ops); bigger.Requests != cost.Requests {
+				t.Errorf("modeled requests grow with the ledger: %d at %d rows, %d at %d rows",
+					cost.Requests, model.LedgerRows, bigger.Requests, biggerLedger.LedgerRows)
 			}
 			if cost.Opens > sc.ceiling.Opens {
 				t.Errorf("opened %d stores, ceiling %d", cost.Opens, sc.ceiling.Opens)

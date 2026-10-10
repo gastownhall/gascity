@@ -37,11 +37,10 @@ import (
 // unregistered one turns both the write and the scan into "invalid issue
 // type". A native-store city never noticed because its SQL path does not
 // validate.
-var RequiredCustomTypes = []string{
-	"molecule", "convoy", "message", "event", "gate",
-	"merge-request", "agent", "role", "rig", "session", "spec",
-	"convergence", "step", "startup-health-episode",
-}
+//
+// The list itself lives in internal/beads, beside the native store's typed
+// list pushdown that relies on every scope carrying it.
+var RequiredCustomTypes = beads.RequiredCustomTypes
 
 // CustomTypesCheck verifies that all required Gas City custom bead
 // types are registered in a bd store's types.custom config.
