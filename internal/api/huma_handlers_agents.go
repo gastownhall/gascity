@@ -56,6 +56,21 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	// so a cached response never pays for the graph-store list.
 	graphWork := s.graphActiveWorkBySession()
 
+	// Session-class beads, read once per request for the SAME reason /status
+	// reads them: a pool instance's runtime session name is not always the
+	// canonical agentSessionName. poolRuntimeSessionName (cmd/gc) deliberately
+	// steps a pool slot aside onto "<name>-pool" whenever the slot's agent is
+	// also a configured named session's template, so on a city where every
+	// pool agent also holds a [[named_session]] reservation EVERY pool session
+	// runs under the suffixed name. Asking IsRunning about the canonical name
+	// then misses all of them and the agent list reports a live fleet as
+	// stopped. Computed after the cache-hit return, like graphWork above.
+	//
+	// An unavailable session store yields an empty snapshot, which makes
+	// statusRuntimeSessionName fall back to the canonical name — i.e. exactly
+	// the pre-fix behavior, never an error on the agent list.
+	sessionSnapshot := s.statusSessionSnapshot(ctx)
+
 	// Optional batch extensions: providers whose per-session attribute reads
 	// are otherwise expensive (e.g. one subprocess fork per call, per agent)
 	// can implement these to collapse the hot loop below to O(1) execs
@@ -102,7 +117,11 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				continue
 			}
 
-			sessionName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
+			// Resolve the ACTUAL runtime session name through the same helper
+			// /status uses, so a stepped-aside "<name>-pool" session is found.
+			// It falls back to the canonical name when no session bead claims
+			// this identity, and when sibling pool candidates are ambiguous.
+			sessionName := statusRuntimeSessionName(cityName, sessTmpl, ea.qualifiedName, a.QualifiedName(), sessionSnapshot)
 			// Liveness stays on IsRunning: it is already a cached,
 			// fleet-wide read that excludes pane_dead corpses, whereas
 			// roster membership comes from list-sessions, which still
@@ -259,20 +278,21 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 
 // humaHandleAgent is the Huma-typed handler for
 // GET /v0/city/{cityName}/agent/{base} (unqualified form).
-func (s *Server) humaHandleAgent(_ context.Context, input *AgentGetInput) (*IndexOutput[agentResponse], error) {
-	return s.agentByName(input.Name)
+func (s *Server) humaHandleAgent(ctx context.Context, input *AgentGetInput) (*IndexOutput[agentResponse], error) {
+	return s.agentByName(ctx, input.Name)
 }
 
 // humaHandleAgentQualified is the Huma-typed handler for
 // GET /v0/city/{cityName}/agent/{dir}/{base} (qualified form).
-func (s *Server) humaHandleAgentQualified(_ context.Context, input *AgentGetQualifiedInput) (*IndexOutput[agentResponse], error) {
-	return s.agentByName(input.QualifiedName())
+func (s *Server) humaHandleAgentQualified(ctx context.Context, input *AgentGetQualifiedInput) (*IndexOutput[agentResponse], error) {
+	return s.agentByName(ctx, input.QualifiedName())
 }
 
 // agentByName is the shared agent-get implementation. Both the qualified
 // and unqualified routes normalize to a single "name" string before
-// dispatching here.
-func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
+// dispatching here. ctx bounds the session-bead read that resolves the
+// runtime session name (see humaHandleAgentList).
+func (s *Server) agentByName(ctx context.Context, name string) (*IndexOutput[agentResponse], error) {
 	if name == "" {
 		return nil, apierr.InvalidRequest.Msg("agent name required")
 	}
@@ -286,7 +306,11 @@ func (s *Server) agentByName(name string) (*IndexOutput[agentResponse], error) {
 		return nil, apierr.AgentNotFound.Msg("agent " + name + " not found")
 	}
 
-	sessionName := agentSessionName(cityName, name, cfg.Workspace.SessionTemplate)
+	// Same resolution as the agent list: a pool instance's runtime session is
+	// stepped aside onto "<name>-pool" when its agent also reserves a named
+	// session, so the canonical name alone reads a live agent as stopped.
+	// Falls back to the canonical name when nothing claims the identity.
+	sessionName := statusRuntimeSessionName(cityName, cfg.Workspace.SessionTemplate, name, agentCfg.QualifiedName(), s.statusSessionSnapshot(ctx))
 	running := sp.IsRunning(sessionName)
 	// Fold active graph-resident (wisp) work into the running signal so a
 	// graph-working agent reports running even when its named provider session

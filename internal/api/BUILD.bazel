@@ -301,6 +301,7 @@ go_test(
         "handler_agent_output_test.go",
         "handler_agents_configured_test.go",
         "handler_agents_graph_work_test.go",
+        "handler_agents_pool_session_name_test.go",
         "handler_agents_test.go",
         "handler_beads_bounded_test.go",
         "handler_beads_graph_enum_test.go",
