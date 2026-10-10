@@ -1760,6 +1760,11 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 		w("  The wisp root bead (not the formula name) is routed to the agent.")
 		w("")
 	} else {
+		// routeOnly mirrors BeadCheckResult.RouteOnly as the live run applies
+		// it: the target already claims the bead and only its route is stale,
+		// so the sling re-routes without attaching a formula. --force skips
+		// the check and --reassign clears the claim; both attach as usual.
+		routeOnly := false
 		if opts.InlineText {
 			w("Work:")
 			w("  Would create new task bead with title=" + fmt.Sprintf("%q", opts.BeadOrFormula))
@@ -1777,6 +1782,14 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 				w("  Without --force, sling would skip routing (exit 0).")
 				w("")
 			}
+			if check.RouteOnly && !opts.Force && !opts.Reassign {
+				routeOnly = true
+				w("Re-route only:")
+				w("  Bead " + opts.BeadOrFormula + " is assigned to " + a.QualifiedName() + " but routed elsewhere.")
+				w("  Sling would re-stamp the route without attaching a formula onto")
+				w("  the claimed work (--force attaches it; --reassign clears the claim).")
+				w("")
+			}
 		}
 
 		// Inline-text previews skip the molecule pre-check: the bead
@@ -1791,7 +1804,8 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 		if opts.InlineText {
 			previewBeadID = "<new-bead-id>"
 		}
-		if opts.OnFormula != "" {
+		// A route-only bead gets no formula section: the live run attaches none.
+		if !routeOnly && opts.OnFormula != "" {
 			preCheckConclusive := true
 			if preCheck {
 				rc, conclusive := dryRunReportBlockingMolecule(opts, deps, querier, opts.OnFormula, stderr)
@@ -1815,7 +1829,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 				w("  Pre-check: " + opts.BeadOrFormula + preCheckClaim(opts, opts.OnFormula))
 			}
 			w("")
-		} else if !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
+		} else if !routeOnly && !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
 			defaultFormula := a.EffectiveDefaultSlingFormula()
 			// Report-only pre-check: unlike explicit --on, an implicit
 			// default formula no longer hard-fails on a pre-existing
@@ -1872,7 +1886,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			// see the design-intent comment on the finalize() call in
 			// slingFormula (internal/sling/sling_core.go, citing #2848 and
 			// TestOnFormulaAttachesAndRoutes) -- so this must not fire there.
-			if dryRunFormulaAttachIsGraphV2(opts, deps, a) {
+			if !routeOnly && dryRunFormulaAttachIsGraphV2(opts, deps, a) {
 				w("  A wisp/workflow root is also cooked and routed to the agent.")
 			}
 		}
@@ -1938,7 +1952,10 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 	// Cross-rig section — show when container bead prefix doesn't match agent's rig.
 	printCrossRigSection(w, b.ID, a, deps.Cfg)
 
-	// Children list.
+	// Children list. routeOnly holds the open children the target already
+	// claims but that are routed elsewhere: the live batch re-routes them
+	// without attaching a formula (BeadCheckResult.RouteOnly), unless --force.
+	routeOnly := make(map[string]bool)
 	w(fmt.Sprintf("  Children (%d total, %d open):", len(children), len(open)))
 	for _, c := range children {
 		clabel := sling.FormatBeadLabel(c.ID, c.Title)
@@ -1946,9 +1963,13 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 			check := sling.CheckBeadStateWithOptions(querier, c.ID, a, deps, sling.BeadCheckOptions{
 				NoConvoy: opts.NoConvoy,
 			})
-			if check.Idempotent {
+			switch {
+			case check.Idempotent:
 				w("    " + clabel + " (open) → already routed (skip)")
-			} else {
+			case check.RouteOnly && !opts.Force:
+				routeOnly[c.ID] = true
+				w("    " + clabel + " (open) → would re-route only (claimed by target; no wisp)")
+			default:
 				suffix := " → would route"
 				if opts.OnFormula != "" || (!opts.NoFormula && a.EffectiveDefaultSlingFormula() != "") {
 					suffix = " → would route + attach wisp"
@@ -1966,6 +1987,9 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 		w("Attach formula (per open child):")
 		w("  Would run:")
 		for _, c := range open {
+			if routeOnly[c.ID] {
+				continue
+			}
 			w("    gc formula cook " + opts.OnFormula + " --attach " + c.ID)
 		}
 		w("")
@@ -1974,6 +1998,9 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 		w("  Formula: " + a.EffectiveDefaultSlingFormula())
 		w("  Would run:")
 		for _, c := range open {
+			if routeOnly[c.ID] {
+				continue
+			}
 			w("    gc formula cook " + a.EffectiveDefaultSlingFormula() + " --attach " + c.ID)
 		}
 		w("")

@@ -5344,3 +5344,262 @@ func TestUndeliverableHandoffWarningRecognizesPoolSessionBeadID(t *testing.T) {
 		t.Fatalf("another pool's session claim was not reported undeliverable")
 	}
 }
+
+// assignedSingleSessionBead seeds an open bead inside a live convoy, assigned
+// to "mayor" and carrying routedTo as gc.routed_to (unset when empty), so the
+// only thing deciding idempotency is the route.
+func assignedSingleSessionBead(t *testing.T, routedTo string) (*beads.MemStore, string) {
+	t.Helper()
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	metadata := map[string]string{}
+	if routedTo != "" {
+		metadata["gc.routed_to"] = routedTo
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "assigned work",
+		Type:     "task",
+		Status:   "open",
+		ParentID: convoy.ID,
+		Assignee: "mayor",
+		Metadata: metadata,
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	return store, bead.ID
+}
+
+// TestCheckBeadStateSingleSessionAssignedButRoutedElsewhereIsNotIdempotent
+// covers a bead handed to a single-session agent by assignee while
+// gc.routed_to still names another target. Skipping it as idempotent leaves
+// the route pointing at the old target, so the agent's routed work query never
+// finds it; the sling must re-route.
+func TestCheckBeadStateSingleSessionAssignedButRoutedElsewhereIsNotIdempotent(t *testing.T) {
+	store, beadID := assignedSingleSessionBead(t, "reviewers")
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	result := CheckBeadState(store, beadID, a, SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false for a bead assigned to the target but routed elsewhere, got %+v", result)
+	}
+	want := fmt.Sprintf("bead %s was assigned to %q but routed to %q; re-routing", beadID, "mayor", "reviewers")
+	found := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, want) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected warning containing %q, got %v", want, result.Warnings)
+	}
+}
+
+func TestCheckBeadStateSingleSessionAssignedAndRoutedIsIdempotent(t *testing.T) {
+	store, beadID := assignedSingleSessionBead(t, "mayor")
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	result := CheckBeadState(store, beadID, a, SlingDeps{Store: store})
+
+	if !result.Idempotent {
+		t.Fatalf("expected Idempotent=true for a bead assigned and routed to the target, got %+v", result)
+	}
+	if len(result.Warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", result.Warnings)
+	}
+}
+
+func TestCheckBeadStateSingleSessionAssignedUnroutedIsIdempotent(t *testing.T) {
+	store, beadID := assignedSingleSessionBead(t, "")
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	result := CheckBeadState(store, beadID, a, SlingDeps{Store: store})
+
+	if !result.Idempotent {
+		t.Fatalf("expected Idempotent=true for an unrouted bead assigned to the target, got %+v", result)
+	}
+	if len(result.Warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", result.Warnings)
+	}
+}
+
+// TestDoSlingReroutesClaimedBeadWithoutAttachingFormula covers the re-route of
+// a bead the target already claims while gc.routed_to names another target,
+// on a formula-backed target. The sling must re-stamp the route but must not
+// attach the default formula onto the claimed work: that is the claim guard the
+// idempotent path applies (SkippedForClaim), and the re-route must keep it.
+func TestDoSlingReroutesClaimedBeadWithoutAttachingFormula(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("code-review")}
+
+	store, beadID := assignedSingleSessionBead(t, "reviewers")
+	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = store
+
+	result, err := DoSling(testOpts(a, beadID), deps, store)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false (the route must be re-stamped), got %+v", result)
+	}
+	if result.Method != "bead" || result.WispRootID != "" {
+		t.Fatalf("Method = %q, WispRootID = %q; want a plain re-route (\"bead\", no wisp) onto claimed work", result.Method, result.WispRootID)
+	}
+	hasMolecule, err := HasMoleculeChildren(store, beadID, store)
+	if err != nil {
+		t.Fatalf("HasMoleculeChildren: %v", err)
+	}
+	if hasMolecule {
+		t.Fatalf("a molecule was attached to %s, which the target already claims", beadID)
+	}
+	if len(runner.calls) != 1 || !strings.Contains(runner.calls[0], beadID) {
+		t.Fatalf("runner calls = %q, want one routing call for %s", runner.calls, beadID)
+	}
+
+	var rerouted, skipped bool
+	for _, w := range result.BeadWarnings {
+		if strings.Contains(w, "re-routing") {
+			rerouted = true
+		}
+		if strings.Contains(w, "--on code-review was skipped") {
+			skipped = true
+		}
+	}
+	if !rerouted || !skipped {
+		t.Fatalf("BeadWarnings = %v, want the re-routing warning and the skipped-formula warning", result.BeadWarnings)
+	}
+}
+
+// TestDoSlingBatchReroutesClaimedChildWithoutAttachingFormula is the batch
+// form of TestDoSlingReroutesClaimedBeadWithoutAttachingFormula: a child the
+// target already claims, routed elsewhere, is re-routed without a formula.
+func TestDoSlingBatchReroutesClaimedChildWithoutAttachingFormula(t *testing.T) {
+	runner := newFakeRunner()
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	store := deps.Store
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:    "child",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "mayor",
+		Metadata: map[string]string{"gc.routed_to": "reviewers"},
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, child.ID, "tracks"); err != nil {
+		t.Fatalf("track child: %v", err)
+	}
+
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("code-review")}
+	result, err := DoSlingBatch(SlingOpts{Target: a, BeadOrFormula: convoy.ID}, deps, store)
+	if err != nil {
+		t.Fatalf("DoSlingBatch: %v", err)
+	}
+	if result.Routed != 1 || result.IdempotentCt != 0 {
+		t.Fatalf("Routed = %d, IdempotentCt = %d; want the claimed child re-routed", result.Routed, result.IdempotentCt)
+	}
+	if len(result.Children) != 1 || result.Children[0].WispRootID != "" || result.Children[0].WorkflowID != "" {
+		t.Fatalf("children = %#v, want %s routed with no formula attached", result.Children, child.ID)
+	}
+	hasMolecule, err := HasMoleculeChildren(store, child.ID, store)
+	if err != nil {
+		t.Fatalf("HasMoleculeChildren: %v", err)
+	}
+	if hasMolecule {
+		t.Fatalf("a molecule was attached to %s, which the target already claims", child.ID)
+	}
+}
+
+// TestDoSlingReassignClaimedBeadRoutedElsewhereAttachesFormula covers --reassign
+// on a bead the target already claims while gc.routed_to names another target.
+// --reassign clears the claim, so the bead is no longer claimed work and the
+// re-route-only path must not apply: the default formula attaches as on any
+// unclaimed bead, and no warning says the bead is still claimed.
+func TestDoSlingReassignClaimedBeadRoutedElsewhereAttachesFormula(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("code-review")}
+
+	store, beadID := assignedSingleSessionBead(t, "reviewers")
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = store
+
+	opts := testOpts(a, beadID)
+	opts.Reassign = true
+	result, err := DoSling(opts, deps, store)
+	if err != nil {
+		t.Fatalf("DoSling --reassign: %v", err)
+	}
+	if result.Method == "bead" {
+		t.Fatalf("Method = %q; --reassign cleared the claim, so the default formula must attach", result.Method)
+	}
+	hasMolecule, err := HasMoleculeChildren(store, beadID, store)
+	if err != nil {
+		t.Fatalf("HasMoleculeChildren: %v", err)
+	}
+	if !hasMolecule {
+		t.Fatalf("no molecule attached to %s after --reassign cleared its claim", beadID)
+	}
+	for _, w := range result.BeadWarnings {
+		if strings.Contains(w, "was skipped") {
+			t.Fatalf("BeadWarnings = %v; no skipped-formula warning after --reassign cleared the claim", result.BeadWarnings)
+		}
+	}
+	got, err := store.Get(beadID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", beadID, err)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("Assignee = %q, want empty after --reassign", got.Assignee)
+	}
+}
+
+// TestDoSlingDryRunReroutesClaimedBeadReportsBeadMethod checks that the dry run
+// for a bead the target claims but that is routed elsewhere reports the method
+// the live run uses: a plain re-route ("bead"), not a formula attach.
+func TestDoSlingDryRunReroutesClaimedBeadReportsBeadMethod(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	store, beadID := assignedSingleSessionBead(t, "reviewers")
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = store
+
+	opts := testOpts(a, beadID)
+	opts.OnFormula = "code-review"
+	opts.DryRun = true
+	result, err := DoSling(opts, deps, store)
+	if err != nil {
+		t.Fatalf("DoSling --dry-run: %v", err)
+	}
+	if !result.DryRun || result.Method != "bead" {
+		t.Fatalf("DryRun = %v, Method = %q; want a dry run reporting the live re-route method \"bead\"", result.DryRun, result.Method)
+	}
+
+	// --reassign clears the claim in the live run, so its dry run keeps the
+	// formula method.
+	opts.Reassign = true
+	result, err = DoSling(opts, deps, store)
+	if err != nil {
+		t.Fatalf("DoSling --dry-run --reassign: %v", err)
+	}
+	if result.Method != "on-formula" {
+		t.Fatalf("Method = %q with --reassign; want \"on-formula\"", result.Method)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("dry run executed commands: %v", runner.calls)
+	}
+}

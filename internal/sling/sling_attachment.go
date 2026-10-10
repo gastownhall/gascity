@@ -675,7 +675,19 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 
 	if !isMulti {
 		if b.Assignee == target {
-			return resolveConvoyRecovery(q, b, deps, opts, beadID)
+			// gc.routed_to names some other target here (an equal one returned
+			// above). An assignee alone does not route the bead: the agent's
+			// work query reads gc.routed_to, so skipping as idempotent would
+			// strand the bead on the old route. Only an unrouted bead is
+			// already where this sling would put it.
+			routedTo := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey])
+			if routedTo == "" {
+				return resolveConvoyRecovery(q, b, deps, opts, beadID)
+			}
+			return BeadCheckResult{
+				RouteOnly: true,
+				Warnings:  []string{fmt.Sprintf("warning: bead %s was assigned to %q but routed to %q; re-routing", beadID, target, routedTo)},
+			}
 		}
 		return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
 	}

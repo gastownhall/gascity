@@ -211,6 +211,10 @@ type SlingResult struct {
 	Idempotent  bool   // true if bead was already routed (skipped)
 	DryRun      bool   // true if this was a dry-run (no mutations)
 
+	// routeOnly makes DoSling take the plain-bead route (see
+	// BeadCheckResult.RouteOnly).
+	routeOnly bool
+
 	// Structured warnings (callers decide how to display).
 	AgentSuspended bool     // target agent is suspended
 	SuspendedRig   string   // non-empty: name of the target's rig, which is suspended
@@ -1734,7 +1738,11 @@ func PromoteWorkflowLaunchBead(store beads.Store, beadID string) error {
 // BeadCheckResult holds the result of pre-flight bead state checks.
 type BeadCheckResult struct {
 	Idempotent bool
-	Warnings   []string
+	// RouteOnly is set when the target already claims the bead but
+	// gc.routed_to names another target: the sling re-stamps the route and
+	// must not attach a formula onto the claimed work.
+	RouteOnly bool
+	Warnings  []string
 }
 
 // BeadCheckOptions configures pre-flight bead state checks for a route.
