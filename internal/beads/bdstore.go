@@ -607,6 +607,11 @@ func (s *BdStore) ListSkipLabelsEnabled() bool {
 	return s != nil && s.listSkipLabelsEnabled
 }
 
+// StatusListOmitsDeferred reports that a status-filtered List omits bd
+// "deferred" rows, because bd filters on its own status vocabulary before
+// Gas City normalizes deferred to open.
+func (s *BdStore) StatusListOmitsDeferred() bool { return true }
+
 // Init initializes a beads database via bd init --server. This is an admin
 // operation on BdStore directly, not part of the Store interface (MemStore/
 // FileStore don't need it). If host is non-empty, --server-host (and

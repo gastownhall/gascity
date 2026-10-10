@@ -47,6 +47,7 @@ var (
 	_ RowWitness                       = (*ProxiedStore)(nil)
 	_ StorageCreateStore               = (*ProxiedStore)(nil)
 	_ conditionalWritesModeCarrier     = (*ProxiedStore)(nil)
+	_ deferredOmittingLister           = (*ProxiedStore)(nil)
 	_ listDependencyCompletenessStore  = (*ProxiedStore)(nil)
 	_ readyProjectionEnrichmentStore   = (*ProxiedStore)(nil)
 	_ interface{ IDPrefix() string }   = (*ProxiedStore)(nil)
@@ -178,6 +179,15 @@ func (s *ProxiedStore) SawRows() bool {
 func (s *ProxiedStore) listIncludesCompleteDependencies() bool {
 	completeness, ok := s.readLeaf().(listDependencyCompletenessStore)
 	return ok && completeness.listIncludesCompleteDependencies()
+}
+
+// StatusListOmitsDeferred is CachingStore's deferred-row discovery interface.
+// Whether a status-filtered List omits bd "deferred" rows is a property of the
+// leaf that produced the rows: the native leaf returns them, the bd leaf does
+// not. So it follows the read leaf.
+func (s *ProxiedStore) StatusListOmitsDeferred() bool {
+	lister, ok := s.readLeaf().(deferredOmittingLister)
+	return ok && lister.StatusListOmitsDeferred()
 }
 
 // enrichReadyProjectionForCache is the second, and it is the one whose loss is
