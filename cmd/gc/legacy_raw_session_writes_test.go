@@ -42,14 +42,37 @@ var rawSessionWriteVerbs = map[string]rawWriteVerb{
 // rawWriteKeyVerbs take one key, not a patch.
 var rawWriteKeyVerbs = []string{"SetMarker", "SetMetadata", "setMeta", "setMetadataValue"}
 
-// rawWriteFenced are the fenced primitives: they write only on a fresh read
-// that matched, at its revision. The verb a body forwards its patch to is the
-// fallback for a store without conditional writes, the documented residual.
+// rawWriteFenced are the fenced primitives, by file and function: they write
+// only on a fresh read that matched, at its revision. The verb a body
+// forwards its patch to is the fallback for a store without conditional
+// writes: the documented residual, whose window is the read to the write
+// plus, where the fresh read is through the cache (commitIf for
+// ApplyPatchIfLifecycleUnchanged, applyPatchIfClosed), the cache's lag.
 var rawWriteFenced = map[string]string{
-	"commitIf":                    "Store.Commit's and ApplyPatchIfLifecycleUnchanged's loop",
-	"CommitStartedIfCurrentUnder": "the start commit (v5 S2)",
-	"applyPatchIfClosed":          "writes only a row still closed",
+	"internal/session/store.go:commitIf":                    "Store.Commit's and ApplyPatchIfLifecycleUnchanged's loop",
+	"internal/session/store.go:CommitStartedIfCurrentUnder": "the start commit (v5 S2)",
+	"internal/session/store.go:applyPatchIfClosed":          "writes only a row still closed",
+	"internal/session/store.go:CloseWithTerminalPatchUnder": "the terminal close: guarded on its read (closePremiseHolds), atomic where the store can close conditionally (R8b's CommitClose)",
 }
+
+// rawWriteNotSession are writes the scan's name match counts that do not
+// write a session row, by file and function.
+var rawWriteNotSession = map[string]string{
+	"cmd/gc/autoclose_fence.go:autocloseCloseIfStill":                      "close_reason on the work bead autoclose closes",
+	"cmd/gc/molecule_autoclose.go:closeMoleculeWithReason":                 "close_reason on a molecule bead",
+	"cmd/gc/cmd_convoy_dispatch.go:reopenTrackingConvoysForReopenedSource": "close_reason cleared on a reopened convoy bead",
+	"cmd/gc/convergence_store.go:CloseBead":                                "close_reason on a convergence bead",
+	"internal/api/huma_handlers_beads.go:humaHandleBeadClose":              "close_reason on the bead the API closes (two writes)",
+	"internal/session/wait_store.go:CloseWaitFromNudge":                    "a wait bead's terminal state",
+	"internal/session/wait_store.go:ExpireWait":                            "a wait bead's terminal state",
+	"internal/session/wait_store.go:FailWaitFromNudge":                     "a wait bead's terminal state",
+	"internal/session/wait_store.go:FailWait":                              "a wait bead's terminal state",
+	"internal/session/wait_store.go:MarkWaitReady":                         "a wait bead's ready state",
+}
+
+// forwardWraps are the calls that pass their one argument on unchanged: a
+// copy (maps.Clone) or a conversion to the patch types.
+var forwardWraps = []string{"Clone", "MetadataPatch"}
 
 // rawWriteScanDirs are the legacy and operator packages the ratchet scans.
 var rawWriteScanDirs = []string{"cmd/gc", "internal/session", "internal/api"}
@@ -63,7 +86,9 @@ var rawWriteScanDirs = []string{"cmd/gc", "internal/session", "internal/api"}
 // forwarding write is not
 // counted, its callers' writes are; an unlisted wrapper fails. The count may
 // only fall: a new raw premise write fails, and a removed one must lower the
-// baseline.
+// baseline. It matches by name, so it misses the generic writes that reach a
+// session row through beads.Store directly; its number is not a C9 gate until
+// it counts at F1's write chokepoint (mc-8s63i).
 func TestLegacyRawSessionWrites(t *testing.T) {
 	root := repoRootForLint(t)
 	files := map[string]*ast.File{}
@@ -93,8 +118,12 @@ func TestLegacyRawSessionWrites(t *testing.T) {
 			if !ok || fn.Body == nil {
 				continue
 			}
+			site := rel + ":" + fn.Name.Name
 			_, listed := rawSessionWriteVerbs[fn.Name.Name]
-			_, fenced := rawWriteFenced[fn.Name.Name]
+			_, fenced := rawWriteFenced[site]
+			if _, ok := rawWriteNotSession[site]; ok {
+				continue
+			}
 			params := paramNames(fn)
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
@@ -106,7 +135,7 @@ func TestLegacyRawSessionWrites(t *testing.T) {
 				if !isVerb || len(call.Args) <= verb.patch {
 					return true // not a row write: Info.ApplyPatch folds a snapshot
 				}
-				if id, ok := ast.Unparen(call.Args[verb.patch]).(*ast.Ident); ok && params[id.Name] {
+				if forwardsParam(call.Args[verb.patch], params) {
 					if !listed && !fenced {
 						t.Errorf("%s: %s forwards its caller's patch to %s: list it in rawSessionWriteVerbs", rel, fn.Name.Name, name)
 					}
@@ -162,6 +191,25 @@ func calleeName(fun ast.Expr) string {
 		return fn.Sel.Name
 	}
 	return ""
+}
+
+// forwardsParam reports whether arg is one of params, passed on as is or
+// through forwardWraps (maps.Clone(map[string]string(patch))).
+func forwardsParam(arg ast.Expr, params map[string]bool) bool {
+	for {
+		switch v := ast.Unparen(arg).(type) {
+		case *ast.Ident:
+			return params[v.Name]
+		case *ast.CallExpr:
+			_, conversion := v.Fun.(*ast.MapType)
+			if len(v.Args) != 1 || !conversion && !slices.Contains(forwardWraps, calleeName(v.Fun)) {
+				return false
+			}
+			arg = v.Args[0]
+		default:
+			return false
+		}
+	}
 }
 
 // paramNames are fn's parameter names.

@@ -517,6 +517,38 @@ func reconcilerDrainAckMatchesSession(session beads.Bead, sp runtime.Provider, n
 	return reason, true
 }
 
+// drainAckOwner is whose decision a runtime's drain ack is, as its source
+// metadata says.
+type drainAckOwner uint8
+
+const (
+	// drainAckOwnerUnknown: the source could not be read. Defer: neither
+	// void the drain nor clear its ack.
+	drainAckOwnerUnknown drainAckOwner = iota
+	// drainAckOwnerAgent: any source but the controller's (the agent's own
+	// `gc runtime drain-ack`, or a bare ack). Decided on the row as it is.
+	drainAckOwnerAgent
+	// drainAckOwnerController: the controller's own ack, which its drain's
+	// basis decides.
+	drainAckOwnerController
+)
+
+// drainAckOwnerOf reads name's drain-ack source. Without a provider there is
+// no controller ack.
+func drainAckOwnerOf(sp runtime.Provider, name string) drainAckOwner {
+	if sp == nil || name == "" {
+		return drainAckOwnerAgent
+	}
+	source, err := sp.GetMeta(name, reconcilerDrainAckSourceKey)
+	switch {
+	case err != nil:
+		return drainAckOwnerUnknown
+	case source == reconcilerDrainAckSourceValue:
+		return drainAckOwnerController
+	}
+	return drainAckOwnerAgent
+}
+
 // reconcilerDrainAckMatchesSessionInfo is the session.Info sibling of
 // reconcilerDrainAckMatchesSession for the reconciler forward pass. The only
 // session-bead read is the generation (Info.Generation); everything else is
@@ -850,14 +882,16 @@ func advanceSessionDrainsWithSessionsTraced(
 		if clk.Now().After(ds.deadline) {
 			// Drain timed out — force stop, on the drain's basis.
 			if err := verifiedStop(cityPath, ds.basis, store, sp, cfg); err != nil {
-				if errors.Is(err, errTokenMismatch) || errors.Is(err, sessions.ErrKillPremiseMoved) {
+				if owner := drainAckOwnerOf(sp, name); owner != drainAckOwnerUnknown &&
+					(errors.Is(err, errTokenMismatch) || errors.Is(err, sessions.ErrKillPremiseMoved)) {
 					// Session was re-woken by a different incarnation, or the
 					// row left the basis the drain began on (a resume, a
 					// suspend, a request). This drain is stale — cancel it.
 					// Only the controller's own ack goes with it; an agent's
-					// ack is the agent's decision.
+					// ack is the agent's decision. An ack whose source cannot
+					// be read keeps the drain for the next tick.
 					dt.clearIdleProbe(id)
-					if _, owned := reconcilerDrainAckMatchesSessionInfo(info, sp, name); ds.ackSet && owned {
+					if ds.ackSet && owner == drainAckOwnerController {
 						_ = clearReconcilerDrainAckMetadata(sp, name)
 					}
 					dt.remove(id)

@@ -196,6 +196,9 @@ func (s *Store) applyPatchIfLifecycleUnchanged(expected Info, patch MetadataPatc
 // commitIf writes patch to row id while holds accepts read's read of it
 // (and, with lease, the read still records the lease), fenced at that read's
 // revision; a fence lost to another writer re-reads, up to attempts times.
+// Without conditional writes the write is unfenced: its window runs from the
+// read to the write, plus the cache's lag when read goes through the cache
+// (ApplyPatchIfLifecycleUnchanged; Commit reads live).
 func (s *Store) commitIf(id string, patch MetadataPatch, lease *RuntimeLease, attempts int, read func(string) (beads.Bead, error), holds func(beads.Bead) bool) (CommitResult, error) {
 	if len(patch) == 0 {
 		return 0, nil // nothing to write

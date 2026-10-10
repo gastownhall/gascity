@@ -218,11 +218,18 @@ func markDrainAckStopPending(act legacyAct, info sessionpkg.Info, dops drainOps,
 		name = info.ID
 	}
 	// The controller's drain basis decides only the controller's own ack. An
-	// agent's ack is the agent's decision, made on the row as it is now.
+	// agent's ack is the agent's decision, made on the row as it is now. An
+	// ack whose source cannot be read defers: no mark, no void, no clear.
 	d, tracked := sessionpkg.Decide(info, sessionpkg.FactsLegacyStopPending), false
-	if _, owned := reconcilerDrainAckMatchesSessionInfo(info, act.sp, name); owned && dt != nil {
-		if ds := dt.get(info.ID); ds != nil {
-			d, tracked = ds.basis, true
+	switch drainAckOwnerOf(act.sp, name) {
+	case drainAckOwnerUnknown:
+		fmt.Fprintf(act.stderr, "session reconciler: marking drain-ack stop-pending %s deferred: its ack's source is unreadable\n", name) //nolint:errcheck
+		return info, sessionpkg.Decided{}, false
+	case drainAckOwnerController:
+		if dt != nil {
+			if ds := dt.get(info.ID); ds != nil {
+				d, tracked = ds.basis, true
+			}
 		}
 	}
 	now := clk.Now().UTC()

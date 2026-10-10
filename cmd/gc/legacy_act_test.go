@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -429,5 +430,35 @@ func TestIdleRespawnOverAnIdleStopPendingIntentKeepsItsBasis(t *testing.T) {
 	}
 	if holds, err := sessFront.Holds(dt.get(info.ID).basis); err != nil || !holds {
 		t.Fatalf("the respawn's basis (sleep_intent %q) does not hold after the tick's clear: %v", dt.get(info.ID).basis.Info().SleepIntent, err)
+	}
+}
+
+// TestUnreadableAckSourceDefers: an ack whose source cannot be read is
+// neither the agent's nor the controller's. Over a consumed hold, the mark
+// and the timeout both defer: the row is not marked stop-pending, the drain
+// stays tracked, the ack stays set, and nothing is stopped.
+func TestUnreadableAckSourceDefers(t *testing.T) {
+	for _, path := range []string{"mark", "timeout"} {
+		t.Run(path, func(t *testing.T) {
+			env, snapshot, work, dops := heldDrainAckFixture(t, true)
+			operatorResume(t, env, snapshot.ID)
+			env.sp.GetMetaErrors["worker"] = map[string]error{reconcilerDrainAckSourceKey: errors.New("tmux: no server")}
+			if path == "mark" {
+				reconcileDrainAckTick(env, mustGetBead(t, env.store, snapshot.ID), work, dops)
+			} else {
+				env.clk.Advance(2 * time.Minute) // past the drain's deadline
+				advanceSessionDrainsWithSessionsTraced("", env.dt, env.sp, env.store, func(id string) (sessionpkg.Info, bool) {
+					return env.sessionInfo(id), id == snapshot.ID
+				}, map[string]wakeEvaluation{}, env.cfg, env.clk, nil)
+			}
+			assertNotStopPending(t, env, snapshot.ID)
+			if env.dt.get(snapshot.ID) == nil {
+				t.Fatal("the drain was dropped on an unreadable ack source")
+			}
+			delete(env.sp.GetMetaErrors, "worker")
+			if ack, _ := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); ack != "1" {
+				t.Fatal("the ack was cleared on an unreadable source")
+			}
+		})
 	}
 }
