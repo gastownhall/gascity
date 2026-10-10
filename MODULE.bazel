@@ -13,7 +13,7 @@ bazel_dep(name = "gazelle", version = "0.53.0")
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(
     name = "go_sdk",
-    version = "1.26.6",
+    version = "1.26.9",
 )
 use_repo(go_sdk, "go_sdk")
 
