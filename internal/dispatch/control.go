@@ -1024,6 +1024,8 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 	}
 	var fanoutSteps []formula.RecipeStep
 	var fanoutDeps []formula.RecipeDep
+	var fanoutControls []formula.RecipeStep
+	fanoutControlByStep := make(map[string]string)
 	var nestedSeedSteps []formula.RecipeStep
 	var nestedSeedDeps []formula.RecipeDep
 
@@ -1142,6 +1144,8 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 			if fanoutStep, fanoutDep, ok := buildAttemptRecipeFanoutControl(childStep, child.OnComplete); ok {
 				fanoutSteps = append(fanoutSteps, fanoutStep)
 				fanoutDeps = append(fanoutDeps, fanoutDep)
+				fanoutControls = append(fanoutControls, fanoutStep)
+				fanoutControlByStep[childStep.ID] = fanoutStep.ID
 			}
 			// No parent-child dep to the iteration scope — it creates a
 			// deadlock (scope waits for children, children wait for scope).
@@ -1160,7 +1164,15 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		}
 	}
 
-	applyAttemptRecipeScopeChecks(recipe)
+	// Fanout convergence gates downstream work in the re-spawned attempt
+	// recipe exactly as it does at compile time: point every dep on an
+	// on_complete child at its <child>-fanout control before the scope-check
+	// pass, so a sibling that needs the child waits for the fanout children
+	// instead of racing them. The fanout controls themselves are appended
+	// after this rewrite and the scope-check pass, so their own
+	// fanout→source edge is never rewritten into a self-block.
+	formula.RewriteRecipeDepsToControls(recipe.Deps, recipe.Steps, fanoutControls, fanoutControlByStep)
+	applyAttemptRecipeScopeChecks(recipe, fanoutControlByStep)
 	recipe.Steps = append(recipe.Steps, fanoutSteps...)
 	recipe.Deps = append(recipe.Deps, fanoutDeps...)
 	// Nested-control seed steps are appended after the outer scope-check pass so
@@ -1267,7 +1279,12 @@ func buildAttemptRecipeFanoutControl(source formula.RecipeStep, onComplete *form
 // its subject step, and deps that waited on the subject are rewritten to
 // wait on the scope-check instead — except the one edge that would leave a
 // node blocked by the control that closes it (formula.RewriteRecipeDepsToControls).
-func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {
+//
+// fanoutControlByStep maps an on_complete subject step ID to its minted
+// <subject>-fanout control. When present, the scope-check also blocks on that
+// fanout control so scope finalization waits for the spawned children, exactly
+// as the compile path's scopeCheckNeeds does.
+func applyAttemptRecipeScopeChecks(recipe *formula.Recipe, fanoutControlByStep map[string]string) {
 	if recipe == nil || len(recipe.Steps) == 0 {
 		return
 	}
@@ -1312,6 +1329,13 @@ func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {
 			DependsOnID: step.ID,
 			Type:        "blocks",
 		})
+		if fanoutID := fanoutControlByStep[step.ID]; fanoutID != "" {
+			controlDeps = append(controlDeps, formula.RecipeDep{
+				StepID:      controlID,
+				DependsOnID: fanoutID,
+				Type:        "blocks",
+			})
+		}
 	}
 
 	if len(controls) == 0 {

@@ -933,6 +933,13 @@ each element of a collection in its output. The compiler marks such steps
 `fanout`) carrying `gc.for_each`, `gc.bond`, the fan-out mode
 (`parallel` | `sequential`), and any bond variable bindings.
 
+The `<step>-fanout` control converges the spawned children: it blocks on the
+source step and closes only after the fan-out work completes. Every downstream
+`needs` / `depends_on` reference to the source is rewritten to the fan-out
+control (for a scoped source, its minted `<step>-scope-check` also blocks on
+the fan-out control), so downstream work waits for the spawned children instead
+of racing them.
+
 | Key | Purpose |
 |---|---|
 | `for_each` | Path to the iterable collection in step output; must start with `output.` |

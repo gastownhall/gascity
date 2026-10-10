@@ -25,6 +25,8 @@ func ApplyFragmentGraphControls(f *Formula) {
 func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 	scopeControlByStep := make(map[string]string)
 	scopeControlByID := make(map[string]*Step)
+	fanoutControlByStep := make(map[string]string)
+	fanoutControlByID := make(map[string]*Step)
 	controls := make([]*Step, 0)
 	allSteps := collectGraphSteps(f.Steps)
 
@@ -63,13 +65,16 @@ func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 		if controlMetadata[beadmeta.ScopeRefMetadataKey] != "" {
 			controlMetadata[beadmeta.ScopeRoleMetadataKey] = beadmeta.ScopeRoleControl
 		}
-		controls = append(controls, &Step{
+		control := &Step{
 			ID:       step.ID + "-fanout",
 			Title:    "Expand fanout for " + step.Title,
 			Type:     "task",
 			Needs:    []string{step.ID},
 			Metadata: controlMetadata,
-		})
+		}
+		fanoutControlByStep[step.ID] = control.ID
+		fanoutControlByID[control.ID] = control
+		controls = append(controls, control)
 	}
 
 	for _, step := range allSteps {
@@ -93,13 +98,28 @@ func applyGraphControls(f *Formula, includeWorkflowFinalize bool) {
 			ID:       controlID,
 			Title:    "Finalize scope for " + step.Title,
 			Type:     "task",
-			Needs:    []string{step.ID},
+			Needs:    scopeCheckNeeds(step.ID, fanoutControlByStep),
 			Metadata: controlMetadata,
 		}
 		scopeControlByID[controlID] = control
 		controls = append(controls, control)
 	}
 
+	// Fanout convergence gates downstream work: point every reference to an
+	// on_complete source at its minted <source>-fanout control, so a step that
+	// needs the source waits for the spawned children to converge instead of
+	// racing them. This rewrite runs BEFORE the scope-check rewrite so a scoped
+	// on_complete source gates its downstream refs directly on the fanout
+	// control; the source's minted scope-check also blocks on the fanout
+	// control (scopeCheckNeeds above), keeping scope finalization ordered
+	// behind the children as well.
+	//
+	// The fanout control is not a self-closing kind (beadmeta.ControlClosesNode
+	// returns false), so rewriteGraphRefs leaves no cycle guard for it; safety
+	// here is structural: both the fanout and scope-check controls are minted
+	// into the pending `controls` slice and appended to f.Steps only after this
+	// rewrite, so their own Needs edges are never visited.
+	rewriteGraphStepRefs(f.Steps, fanoutControlByStep, fanoutControlByID)
 	rewriteGraphStepRefs(f.Steps, scopeControlByStep, scopeControlByID)
 
 	f.Steps = append(f.Steps, controls...)
@@ -136,6 +156,19 @@ func needsScopeCheck(step *Step) bool {
 		return false
 	}
 	return !beadmeta.IsScopeCheckExemptKind(step.Metadata[beadmeta.KindMetadataKey])
+}
+
+// scopeCheckNeeds returns the blockers for a source's minted scope-check: the
+// source itself, plus its <source>-fanout control when the source carries
+// OnComplete. A scoped on_complete source must not finalize its scope until
+// the fanout children have converged, so the scope latch waits on the fanout
+// control as well as the source close.
+func scopeCheckNeeds(stepID string, fanoutControlByStep map[string]string) []string {
+	needs := []string{stepID}
+	if fanoutID := fanoutControlByStep[stepID]; fanoutID != "" {
+		needs = append(needs, fanoutID)
+	}
+	return needs
 }
 
 // rewriteGraphRefs points every reference at the control that finalizes the
