@@ -16,6 +16,7 @@ import (
 
 	gcapi "github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/doltpool"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -83,7 +84,18 @@ func newEnsureProjectIDCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			rec, closeRecorder := openProjectIdentityEventRecorder(cityPath, stderr)
 			defer closeRecorder()
-			report, err := ensureManagedDoltProjectIDWithRecorder(metadataPath, host, port, user, database, cityPath, rec)
+			target := contract.DoltConnectionTarget{
+				Host: host, Port: port, User: user, Database: database,
+			}
+			if strings.TrimSpace(port) == "" {
+				var err error
+				target, err = resolveProviderOwnedProjectIdentityTarget(metadataPath, cityPath, database, user)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc dolt-state ensure-project-id: %v\n", err) //nolint:errcheck
+					return errExit
+				}
+			}
+			report, err := ensureManagedDoltProjectIDAtTarget(metadataPath, target, cityPath, rec)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state ensure-project-id: %v\n", err) //nolint:errcheck
 				return errExit
@@ -105,7 +117,6 @@ func newEnsureProjectIDCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&cityPath, "city", "", "city root (required for event emission)")
 	_ = cmd.MarkFlagRequired("city")
 	_ = cmd.MarkFlagRequired("metadata")
-	_ = cmd.MarkFlagRequired("port")
 	_ = cmd.MarkFlagRequired("database")
 	return cmd
 }
@@ -122,6 +133,12 @@ func openProjectIdentityEventRecorder(cityPath string, stderr io.Writer) (events
 }
 
 func ensureManagedDoltProjectIDWithRecorder(metadataPath, host, port, user, database string, cityPath string, rec events.Recorder) (managedDoltProjectIDReport, error) {
+	return ensureManagedDoltProjectIDAtTarget(metadataPath, contract.DoltConnectionTarget{
+		Host: host, Port: port, User: user, Database: database,
+	}, cityPath, rec)
+}
+
+func ensureManagedDoltProjectIDAtTarget(metadataPath string, target contract.DoltConnectionTarget, cityPath string, rec events.Recorder) (managedDoltProjectIDReport, error) {
 	metadataPath = strings.TrimSpace(metadataPath)
 	if metadataPath == "" {
 		return managedDoltProjectIDReport{}, fmt.Errorf("missing metadata path")
@@ -130,7 +147,12 @@ func ensureManagedDoltProjectIDWithRecorder(metadataPath, host, port, user, data
 	if err != nil {
 		return managedDoltProjectIDReport{}, err
 	}
-	database = strings.TrimSpace(database)
+	target.Database = strings.TrimSpace(target.Database)
+	target.Socket = strings.TrimSpace(target.Socket)
+	target.Host = strings.TrimSpace(target.Host)
+	target.Port = strings.TrimSpace(target.Port)
+	target.User = strings.TrimSpace(target.User)
+	database := target.Database
 	if database == "" {
 		return managedDoltProjectIDReport{}, fmt.Errorf("missing database")
 	}
@@ -148,7 +170,12 @@ func ensureManagedDoltProjectIDWithRecorder(metadataPath, host, port, user, data
 	metadataOK := metadataProjectID != ""
 
 	// Pooled handle owned by internal/doltpool; do not Close.
-	db, err := managedDoltOpenDatabase(host, port, user, database)
+	var db *sql.DB
+	if target.Socket != "" {
+		db, err = managedDoltOpenDatabaseSocket(target.Socket, target.User, database)
+	} else {
+		db, err = managedDoltOpenDatabase(target.Host, target.Port, target.User, database)
+	}
 	if err != nil {
 		return managedDoltProjectIDReport{}, err
 	}
@@ -169,6 +196,51 @@ func ensureManagedDoltProjectIDWithRecorder(metadataPath, host, port, user, data
 		return seedDatabaseProjectID(ctx, db, projectID)
 	}
 	return applyReconcileDecision(ctx, fs, scopeRoot, metadataPath, decision, cityPath, rec, seedL3)
+}
+
+func resolveProviderOwnedProjectIdentityTarget(metadataPath, cityPath, database, user string) (contract.DoltConnectionTarget, error) {
+	return resolveProviderOwnedProjectIdentityTargetWithProcessTable(metadataPath, cityPath, database, user, proxyendpoint.DefaultProcessTable())
+}
+
+func resolveProviderOwnedProjectIdentityTargetWithProcessTable(metadataPath, cityPath, database, user string, processTable proxyendpoint.ProcessTable) (contract.DoltConnectionTarget, error) {
+	scopeRoot, err := scopeRootFromMetadataPath(metadataPath)
+	if err != nil {
+		return contract.DoltConnectionTarget{}, err
+	}
+	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, scopeRoot)
+	if err != nil {
+		return contract.DoltConnectionTarget{}, fmt.Errorf("resolve provider-owned Dolt binding: %w", err)
+	}
+	if strings.EqualFold(strings.TrimSpace(target.DoltMode), "proxied-server") && target.Socket == "" && target.Port == "" {
+		target, err = resolveLocalProxiedProjectIdentityTarget(scopeRoot, target, processTable)
+		if err != nil {
+			return contract.DoltConnectionTarget{}, err
+		}
+	}
+	if target.Socket == "" && target.Port == "" {
+		return contract.DoltConnectionTarget{}, fmt.Errorf("provider-owned Dolt binding for %s has no SQL endpoint", scopeRoot)
+	}
+	target.Database = strings.TrimSpace(database)
+	if strings.TrimSpace(user) != "" {
+		target.User = strings.TrimSpace(user)
+	}
+	return target, nil
+}
+
+func resolveLocalProxiedProjectIdentityTarget(scopeRoot string, target contract.DoltConnectionTarget, processTable proxyendpoint.ProcessTable) (contract.DoltConnectionTarget, error) {
+	root, err := proxyendpoint.ProviderRoot(scopeRoot)
+	if err != nil {
+		return contract.DoltConnectionTarget{}, fmt.Errorf("resolve provider-owned proxy root for %s: %w", scopeRoot, err)
+	}
+	endpoint := proxyendpoint.Inspect(root, processTable)
+	if !endpoint.Verdict.Live() {
+		return contract.DoltConnectionTarget{}, fmt.Errorf("provider-owned proxy endpoint %s is not live (%s): %w", root, endpoint.Verdict, endpoint.Err)
+	}
+	target.Host = proxyendpoint.Host
+	target.Port = strconv.Itoa(endpoint.Record.Port)
+	target.Socket = ""
+	target.External = false
+	return target, nil
 }
 
 func managedDoltProjectIDFields(report managedDoltProjectIDReport) []string {

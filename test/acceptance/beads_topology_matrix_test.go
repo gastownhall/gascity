@@ -18,12 +18,21 @@
 package acceptance_test
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
+	"net"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
+	"github.com/gastownhall/gascity/internal/fsys"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
+	"github.com/go-sql-driver/mysql"
 )
 
 func TestBeadsInitTopologyMatrix(t *testing.T) {
@@ -46,6 +55,9 @@ func TestBeadsInitTopologyMatrix(t *testing.T) {
 			t.Run("init-shape", func(t *testing.T) {
 				helpers.AssertScopeShape(t, cityRoot, cityRoot, topo.City, topo.Name+" city")
 				helpers.AssertJournalState(t, cityRoot, "city", topo.City, topo.Name+" city")
+				if topo.Name == "M1-proxied-local" {
+					assertProjectIdentityConverged(t, cityRoot, run.Env)
+				}
 			})
 		} else {
 			// A deferred shape has no store until `gc start` makes one, so
@@ -151,6 +163,73 @@ func TestBeadsInitTopologyMatrix(t *testing.T) {
 			assertStopRetiresTheScope(t, run, rigDir)
 		})
 	})
+}
+
+// assertProjectIdentityConverged proves the real provider-owned M1 init wrote
+// one project identity to the canonical file, bd metadata, and its live Dolt
+// database. The proxy root and generation come from the same contract gc uses.
+func assertProjectIdentityConverged(t *testing.T, scopeRoot string, env *helpers.Env) {
+	t.Helper()
+	// ProviderRoot follows bd's process-environment contract. Match the
+	// environment that initialized this topology so host BEADS_* overrides
+	// cannot redirect the assertion to a different proxy root.
+	for _, key := range []string{
+		proxyendpoint.RootPathEnv,
+		proxyendpoint.DoltDataDirEnv,
+		proxyendpoint.SharedServerModeEnv,
+		proxyendpoint.SharedServerDirEnv,
+	} {
+		t.Setenv(key, env.Get(key))
+	}
+	identityPath := contract.ProjectIdentityPath(scopeRoot)
+	if _, err := os.Stat(identityPath); err != nil {
+		t.Fatalf("canonical project identity file %s: %v", identityPath, err)
+	}
+	identityID, identityOK, err := contract.ReadProjectIdentity(fsys.OSFS{}, scopeRoot)
+	if err != nil || !identityOK {
+		t.Fatalf("read canonical project identity: present=%v err=%v", identityOK, err)
+	}
+	metadataID := readScopeProjectID(t, scopeRoot)
+	if metadataID == "" || metadataID != identityID {
+		t.Fatalf("project identity metadata=%q canonical=%q, want one non-empty id", metadataID, identityID)
+	}
+
+	databaseName := readScopeDoltDatabase(t, scopeRoot)
+	if databaseName == "" {
+		t.Fatal("provider-owned metadata has no Dolt database name")
+	}
+	root, err := proxyendpoint.ProviderRoot(scopeRoot)
+	if err != nil {
+		t.Fatalf("resolve M1 proxy root: %v", err)
+	}
+	endpoint := proxyendpoint.Inspect(root, proxyendpoint.DefaultProcessTable())
+	if !endpoint.Verdict.Live() {
+		t.Fatalf("M1 proxy endpoint %s is not live: %s (%v)", root, endpoint.Verdict, endpoint.Err)
+	}
+	dsnConfig := mysql.Config{
+		User:                 "root",
+		Net:                  "tcp",
+		Addr:                 net.JoinHostPort(proxyendpoint.Host, strconv.Itoa(endpoint.Record.Port)),
+		DBName:               databaseName,
+		AllowNativePasswords: true,
+		Timeout:              10 * time.Second,
+		ReadTimeout:          10 * time.Second,
+	}
+	dsn := dsnConfig.FormatDSN()
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("open M1 Dolt identity reader: %v", err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var databaseID string
+	if err := db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE `key` = '_project_id'").Scan(&databaseID); err != nil {
+		t.Fatalf("read M1 database project identity: %v", err)
+	}
+	if databaseID != identityID {
+		t.Fatalf("project identity database=%q metadata=%q canonical=%q, want all three to agree", databaseID, metadataID, identityID)
+	}
 }
 
 // runStorelessShape is the list a front door that creates no bead store can

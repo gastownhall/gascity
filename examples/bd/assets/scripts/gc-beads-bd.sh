@@ -772,14 +772,29 @@ ensure_project_identity() {
     if [ -z "$dolt_database" ]; then
         return 0
     fi
-    host=$(connect_host)
-    "$gc_bin" dolt-state ensure-project-id \
-        --city "$GC_CITY_PATH" \
-        --metadata "$meta_file" \
-        --host "$host" \
-        --port "$DOLT_PORT" \
-        --user "$DOLT_USER" \
-        --database "$dolt_database" >/dev/null \
+    set -- --city "$GC_CITY_PATH" --metadata "$meta_file"
+    if [ "${GC_BEADS_PROVIDER_OWNED:-}" != "1" ] || {
+        [ "${GC_BEADS_TRANSPORT:-}" = "direct" ] &&
+            [ "${GC_BEADS_TARGET:-}" = "external" ] && [ -n "$DOLT_PORT" ];
+    }; then
+        # Managed init already resolved DOLT_PORT from gc's runtime layout,
+        # and direct/external TCP init has the endpoint bd just used. Keep
+        # forwarding those explicit endpoints. Provider-owned local and
+        # socket-backed init resolve from the binding bd persisted.
+        if [ "${GC_BEADS_PROVIDER_OWNED:-}" = "1" ] &&
+            [ "${GC_BEADS_TRANSPORT:-}" = "direct" ] &&
+            [ "${GC_BEADS_TARGET:-}" = "external" ]; then
+            # Reuse the exact host bd received at init. connect_host folds
+            # loopback IPv6 into IPv4 for gc-managed local servers, but an
+            # external binding may be IPv6-only.
+            host="${GC_DOLT_HOST:-$DOLT_HOST}"
+        else
+            host=$(connect_host)
+        fi
+        set -- "$@" --host "$host" --port "$DOLT_PORT"
+    fi
+    set -- "$@" --user "$DOLT_USER" --database "$dolt_database"
+    "$gc_bin" dolt-state ensure-project-id "$@" >/dev/null \
         || die "failed to ensure project identity for $dir"
 }
 
@@ -4718,10 +4733,19 @@ op_provider_owned_init() {
         anchored=true
     fi
     GC_BEADS_PROVIDER_INIT=1 run_provider_owned_bd "$dir" "$@" || status=$?
-    if [ "$status" -ne 0 ] && [ "$anchored" = true ]; then
-        release_fresh_beads_dir_anchor "$dir"
+    if [ "$status" -ne 0 ]; then
+        if [ "$anchored" = true ]; then
+            release_fresh_beads_dir_anchor "$dir"
+        fi
+        return "$status"
     fi
-    return "$status"
+    # The normal managed path allocates DOLT_PORT after provider-owned dispatch.
+    # Preserve only a direct external TCP endpoint here; local and socket
+    # bindings are resolved from the endpoint bd persisted during init.
+    if [ "${GC_BEADS_TRANSPORT:-}" = "direct" ] && [ "${GC_BEADS_TARGET:-}" = "external" ]; then
+        DOLT_PORT="${GC_DOLT_PORT:-$DOLT_PORT}"
+    fi
+    ensure_project_identity "$dir"
 }
 
 # anchor_fresh_beads_dir makes BEADS_DIR authoritative for a scope bd has not
