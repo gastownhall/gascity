@@ -30,21 +30,27 @@ The spec is the full reference. A brief summary of the surfaces:
   `PATCH /v0/city/{cityName}` (suspend or resume).
 - **Health & readiness.** `GET /health`, `GET /v0/readiness`,
   `GET /v0/provider-readiness`.
-- **Agents.** `GET/POST/DELETE` under `/v0/city/{cityName}/agents`
-  plus SSE `/v0/city/{cityName}/agent/{base}/output/stream`.
+- **Agents.** `GET/POST` under `/v0/city/{cityName}/agents`, plus
+  `GET/PATCH/DELETE` on `/v0/city/{cityName}/agent/{base}` and SSE
+  `/v0/city/{cityName}/agent/{base}/output/stream`.
 - **Beads (work units).** CRUD under `/v0/city/{cityName}/beads`,
   query + hook operations, dependencies, labels.
 - **Sessions.** CRUD under `/v0/city/{cityName}/sessions`, submit,
   prompt, resume, interaction response, transcript, SSE stream.
-- **External messaging.** Under `/v0/city/{cityName}/extmsg/`:
-  `POST adapters` registers a client's callback URL for a
-  provider/account, `POST inbound` delivers a turn to the routed
-  agent, and `POST outbound` publishes an agent's reply to the
-  client's callback. `bind`, `unbind`, and `bindings` manage routing;
-  `groups` and `participants` manage shared conversations with several
-  agents; `transcript` lists a conversation's history. See
-  [Connect an external client](/guides/connected-clients) for a
-  working end-to-end integration.
+- **External messaging.** `POST /v0/city/{cityName}/extmsg/adapters`
+  registers a client's callback URL for a provider/account,
+  `POST /v0/city/{cityName}/extmsg/inbound` delivers a turn to the
+  routed agent, and `POST /v0/city/{cityName}/extmsg/outbound`
+  publishes an agent's reply to the client's callback.
+  `POST /v0/city/{cityName}/extmsg/bind`,
+  `POST /v0/city/{cityName}/extmsg/unbind`, and
+  `GET /v0/city/{cityName}/extmsg/bindings` manage routing;
+  `/v0/city/{cityName}/extmsg/groups` and
+  `/v0/city/{cityName}/extmsg/participants` manage shared
+  conversations with several agents;
+  `GET /v0/city/{cityName}/extmsg/transcript` lists a conversation's
+  history. See [Connect an external client](/guides/connected-clients)
+  for a working end-to-end integration.
 - **Mail, convoys, orders, formulas.** Messaging and orchestration
   surfaces; see the spec for per-operation shapes.
 - **Events.** `GET /v0/events` + `GET /v0/events/stream` at

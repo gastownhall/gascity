@@ -44,10 +44,11 @@ func TestConnectedClientsGuideIsInGuidesNavigation(t *testing.T) {
 	t.Fatalf("docs.json navigation is missing the Guides group")
 }
 
-// TestAPIDocsCiteOnlySpecPaths fails when a docs page cites an API path, or a
-// method on a path, that the published OpenAPI spec does not define. A client
-// written from such a page fails on its first call (#6820).
-func TestAPIDocsCiteOnlySpecPaths(t *testing.T) {
+// TestConnectedClientsAndAPIReferenceCiteOnlySpecPaths fails when the
+// connected-clients guide or the API reference cites an API path, or a method
+// on a path, that the published OpenAPI spec does not define. A client written
+// from such a page fails on its first call (#6820).
+func TestConnectedClientsAndAPIReferenceCiteOnlySpecPaths(t *testing.T) {
 	root := repoRoot()
 	spec := loadSpecOperations(t, filepath.Join(root, "docs", "reference", "schema", "openapi.json"))
 
