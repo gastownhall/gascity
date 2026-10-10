@@ -314,10 +314,7 @@ func poolSlotRetireHasAssignedWork(
 	rigStores map[string]beads.Store,
 	info sessionpkg.Info,
 ) (bool, error) {
-	identifiers := poolSlotRetireAssigneeIdentities(info, cfg)
-	return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
-		return sessionHasOpenAssignedWorkInStoreByIdentifiersForCloseGate(s, identifiers)
-	})
+	return seatHasWorkForCloseGate(cityPath, cfg, store, rigStores, info, poolSlotRetireAssigneeIdentities(info, cfg))
 }
 
 // retirePoolSlotAtDrainDeadline force-retires a pool-managed seat whose drain

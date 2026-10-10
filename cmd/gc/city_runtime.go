@@ -1319,9 +1319,18 @@ var legacyTickPhases = []tickPhase{
 // runTickPhases runs phases in order and reports whether the pass reached its
 // end. A session phase is skipped when legacySessionEntry refuses it.
 func (cr *CityRuntime) runTickPhases(p *tickPass, phases []tickPhase) bool {
+	uninstall, indexed := func() {}, false
+	defer func() { uninstall() }()
 	for _, phase := range phases {
 		if phase.session && cr.legacySessionEntry(phase.name) {
 			continue
+		}
+		if phase.session && !indexed {
+			// The session phases share one seat work index per tick (seat_work.go),
+			// installed at the first, after the config reload, so it reads this
+			// tick's legs. A nested pass finds it installed and keeps it.
+			indexed = true
+			uninstall = installSeatWorkIndex(cr.cityPath, cr.cfg, cr.sessionsBeadStore().Store, cr.rigBeadStores()) // residency:allow — handed to assignedWorkSweepPlan, which plans the legs
 		}
 		if phase.run(cr, p) {
 			return false
